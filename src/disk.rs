@@ -198,6 +198,43 @@ impl DiskController {
         (clean_stem, clean_ext)
     }
 
+    /// Helper: Simple DOS wildcard matching (? and *)
+    fn matches_pattern(filename: &str, pattern: &str) -> bool {
+        // Simple implementation: * matches everything, ? matches any char
+        // Real DOS parsing is complex, but for *.* this suffices.
+        // We will assume the pattern is normalized to 8.3 (no dots) by the caller
+        // OR we handle the dot separation. 
+        
+        // For simplicity in this step, let's implement a basic glob check.
+        // If pattern is "*.*", return true.
+        if pattern == "*.*" { return true; }
+        
+        // If pattern is complex, we need regex-like matching.
+        // Let's do a basic check:
+        // 1. Split filename and pattern by '.'
+        let (f_name, f_ext) = filename.split_once('.').unwrap_or((filename, ""));
+        let (p_name, p_ext) = pattern.split_once('.').unwrap_or((pattern, ""));
+
+        let match_part = |f: &str, p: &str| -> bool {
+            if p == "*" { return true; }
+            let mut f_chars = f.chars();
+            let mut p_chars = p.chars();
+            loop {
+                match (f_chars.next(), p_chars.next()) {
+                    (None, None) => return true,
+                    (Some(_), None) => return false, // Filename longer than pattern
+                    (None, Some(pc)) => return pc == '*', // Pattern longer, ok if *
+                    (Some(fc), Some(pc)) => {
+                        if pc == '*' { return true; }
+                        if pc != '?' && pc.to_ascii_uppercase() != fc.to_ascii_uppercase() { return false; }
+                    }
+                }
+            }
+        };
+
+        match_part(f_name, p_name) && match_part(f_ext, p_ext)
+    }
+
     // INT 21h, AH=4E/4F: Find First / Find Next
     // Added 'search_attr' parameter to handle Volume Labels
     pub fn find_directory_entry(&self, search_pattern: &str, search_index: usize, search_attr: u16) -> Result<DosDirEntry, u8> {
@@ -236,6 +273,19 @@ impl DiskController {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
+
+                let is_dir = metadata.is_dir();
+                let mut file_attr = if is_dir { 0x10 } else { 0x20 };
+                if metadata.permissions().readonly() { file_attr |= 0x01; }
+
+                // DOS Logic: If file has Hidden/System/Dir attributes, 
+                // but Search Attribute DOES NOT, skip the file.
+                // (Volume Labels are handled separately above)
+                let restricted_bits = 0x02 | 0x04 | 0x10; // Hidden, System, Dir
+                if (file_attr & restricted_bits) & !search_attr != 0 {
+                    // File is "more special" than what we asked for. Skip it.
+                    continue;
+                }
 
                 // 8.3 Normalization
                 let (stem, ext) = Self::to_short_name(&original_name);
@@ -279,6 +329,11 @@ impl DiskController {
                     }
                 };
 
+                // Only add to list if it matches the requested DOS pattern
+                if !Self::matches_pattern(&final_name, search_pattern) {
+                    continue;
+                }
+                
                 // Date/Time Conversion 
                 let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
                 let datetime: DateTime<Local> = sys_time.into();

@@ -21,6 +21,44 @@ fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
     String::from_utf8_lossy(&chars).to_string()
 }
 
+// Helper: Reconstruct "NAME.EXT" from the DTA's fixed-width 11-byte template
+fn read_dta_template(bus: &Bus, dta_phys: usize) -> String {
+    let mut name = String::new();
+    let mut ext = String::new();
+
+    // Read Name (Offsets 1-8)
+    for i in 0..8 {
+        let c = bus.read_8(dta_phys + 1 + i);
+        // DOS uses 0x20 (Space) for padding. 0x3F is '?'.
+        if c > 0x20 { 
+            name.push(c as char); 
+        } else if c == b'?' {
+            name.push('?');
+        }
+    }
+
+    // Read Extension (Offsets 9-11)
+    for i in 0..3 {
+        let c = bus.read_8(dta_phys + 9 + i);
+        if c > 0x20 { 
+            ext.push(c as char); 
+        } else if c == b'?' {
+            ext.push('?');
+        }
+    }
+
+    // Handle "????????.???" case (Equivalent to *.*)
+    if name.chars().all(|c| c == '?') && ext.chars().all(|c| c == '?') {
+        return "*.*".to_string();
+    }
+
+    if ext.is_empty() {
+        name
+    } else {
+        format!("{}.{}", name, ext)
+    }
+}
+
 // Interrupt handler
 pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     match vector {
@@ -978,8 +1016,6 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                 // AH=4Eh: Find First File
                 // AH=4Fh: Find Next File
-                // AH=4Eh: Find First File
-                // AH=4Fh: Find Next File
                 0x4E | 0x4F => {
                     let dta_seg = cpu.bus.dta_segment;
                     let dta_off = cpu.bus.dta_offset;
@@ -991,52 +1027,77 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     const OFFSET_ATTR_SEARCH: usize = 12; // Where DOS remembers what we are looking for
                     const OFFSET_INDEX: usize = 13; // Where DOS remembers how far we got
 
-                    // Determine Index & Search Attribute
-                    let (index, search_attr) = if ah == 0x4E {
-                        cpu.bus
-                            .log_string("[DEBUG] FindFirst (AH=4E) - Resetting Index to 0");
-                        // FindFirst: Start at 0, Read Attribute from CX
-                        (0, cpu.cx)
+                    // Determine Index, Attribute, and Pattern
+                    let (index, search_attr, raw_pattern) = if ah == 0x4E {
+                        // FindFirst: Read Pattern from DS:DX
+                        let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+                        let pattern = read_asciiz_string(&cpu.bus, name_addr);
+                        println!("[DEBUG] FindFirst Pattern: {}", pattern);
+                        (0, cpu.cx, pattern)
                     } else {
-                        // FindNext: Read Index AND Attribute from DTA
-                        let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
+                        // FindNext: Read Index & Attr from DTA
+                        let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize; 
                         let attr = cpu.bus.read_8(dta_phys + OFFSET_ATTR_SEARCH) as u16;
-                        cpu.bus.log_string(&format!(
-                            "[DEBUG] FindNext (AH=4F) - Read Index {} from DTA@{:#05X}",
-                            idx,
-                            dta_phys + OFFSET_INDEX
-                        ));
-                        (idx, attr)
+                        // Reconstruct the pattern from the DTA template (offsets 1-11) 
+                        let pattern = read_dta_template(&cpu.bus, dta_phys);
+                        println!("[DEBUG] FindNext Index: {}, Attr: {:02X}, Pattern: {}", idx, attr, pattern);
+                        (idx, attr, pattern)
+                        //(idx, attr, "*.*".to_string()) // DOS ignores pattern on FindNext
                     };
 
-                    match cpu.bus.disk.find_directory_entry("*.*", index, search_attr) {
+                    //Sanitize Pattern: Strip "C:\" or Path Separators
+                    // If pattern is "C:\*.*", we want "*.*"
+                    // If pattern is "\*.*", we want "*.*"
+                    let search_pattern = if let Some(idx) = raw_pattern.rfind('\\') {
+                        raw_pattern[idx+1..].to_string()
+                    } else if let Some(idx) = raw_pattern.rfind(':') {
+                        raw_pattern[idx+1..].to_string()
+                    } else {
+                        raw_pattern
+                    };
+
+                    match cpu.bus.disk.find_directory_entry(&search_pattern, index, search_attr) {
                         Ok(entry) => {
                             cpu.bus.log_string(&format!(
                                 "[DEBUG] -> Disk returned: {}",
                                 entry.filename
                             ));
 
-                            // Setup DTA for FindFirst (AH=4E)
-                            if ah == 0x4E {
-                                // Drive 3 (C:), and a generic search template
-                                cpu.bus.write_8(dta_phys + 0, 3);
-                                // for i in 1..12 {
-                                //     cpu.bus.write_8(dta_phys + i as usize, b'?');
-                                // }
 
-                                // Persist the search attribute for FindNext
-                                cpu.bus
-                                    .write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
+                            // Setup DTA Header
+                            // Write this for BOTH calls to ensure D.COM sees a valid drive byte.
+                            cpu.bus.write_8(dta_phys + 0, 3); // Drive C:
+                            // Persist Search Attribute (Offset 12)
+                            cpu.bus.write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
+
+                            // Update Index (Our internal tracker at 13-14)
+                            cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
+
+                            // Update Index
+                            cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
+
+                            // Write Unique Position/Cluster ID to offsets 15-20 (6 bytes)
+                            // We construct a 32-bit unique ID from the index to ensure it changes every time.
+                            // DOS uses this to find the next entry.
+                            let unique_id = (index as u32).wrapping_add(0x12345678);
+                            
+                            // Write search_pattern into dta_phys + 1..11 for reference
+                            let pattern_bytes = search_pattern.as_bytes();
+                            let pattern_len = std::cmp::min(pattern_bytes.len(), 11);
+                            for i in 0..pattern_len {
+                                cpu.bus.write_8(dta_phys + 1 + i, pattern_bytes[i]);
+                            }
+                            // Pad remaining bytes with 0
+                            for i in pattern_len..11 {
+                                cpu.bus.write_8(dta_phys + 1 + i, 0);
                             }
 
-                            // Update Index (Critical for the loop to progress)
-                            cpu.bus
-                                .write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
-
-                            // Add a fake unique cluster ID
-                            let unique_id = (index as u16).wrapping_add(0x1234); 
-                            cpu.bus.write_16(dta_phys + 15, unique_id); 
-                            cpu.bus.write_16(dta_phys + 17, unique_id.wrapping_mul(2));
+                            // Write bytes 15-16
+                            cpu.bus.write_16(dta_phys + 15, (unique_id & 0xFFFF) as u16);
+                            // Write bytes 17-18
+                            cpu.bus.write_16(dta_phys + 17, (unique_id >> 16) as u16);
+                            // Write bytes 19-20 (Padding/Extra precision)
+                            cpu.bus.write_16(dta_phys + 19, (index as u16).wrapping_mul(3));
 
                             // File Attributes (Offset 21)
                             let mut attr = if entry.is_dir { 0x10 } else { 0x20 };
@@ -1045,7 +1106,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             }
                             cpu.bus.write_8(dta_phys + 21, attr);
 
-                            // Time/Date (Stubbed to valid DOS dates)
+                            // Time/Date
                             cpu.bus.write_16(dta_phys + 22, entry.dos_time); 
                             cpu.bus.write_16(dta_phys + 24, entry.dos_date);
 
