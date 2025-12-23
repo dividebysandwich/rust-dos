@@ -1,5 +1,5 @@
 use crate::video::print_string;
-use crate::Cpu;
+use crate::cpu::Cpu;
 
 // The "DIR" Implementation
 pub fn run_dir_command(cpu: &mut Cpu) {

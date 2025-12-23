@@ -206,6 +206,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     // CF is the last bit shifted out
                     let last_out = (val >> (16 - count)) & 1;
                     cpu.set_flag(FLAG_CF, last_out != 0);
+                    cpu.update_pf(result);
                 }
             }
             // 8-bit
@@ -219,6 +220,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     cpu.set_flag(FLAG_SF, (result & 0x80) != 0);
                     let last_out = (val >> (8 - count)) & 1;
                     cpu.set_flag(FLAG_CF, last_out != 0);
+                    cpu.update_pf(result as u16);
                 }
             }
         }
@@ -239,6 +241,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                                                                    // CF is the last bit shifted out
                     let last_out = (val >> (count - 1)) & 1;
                     cpu.set_flag(FLAG_CF, last_out != 0);
+                    cpu.update_pf(result);
                 }
             } else {
                 let val = cpu.get_reg8(reg);
@@ -250,6 +253,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     cpu.set_flag(FLAG_SF, (result & 0x80) != 0);
                     let last_out = (val >> (count - 1)) & 1;
                     cpu.set_flag(FLAG_CF, last_out != 0);
+                    cpu.update_pf(result as u16);
                 }
             }
         }
@@ -274,6 +278,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     // Check the bit that was shifted out
                     let last_out = (val_u >> (count - 1)) & 1;
                     cpu.set_flag(FLAG_CF, last_out != 0);
+                    cpu.update_pf(result as u16);
                 }
             } else {
                 let val = cpu.get_reg8(reg) as i8; // Cast to signed
@@ -288,6 +293,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     let val_u = val as u8;
                     let last_out = (val_u >> (count - 1)) & 1;
                     cpu.set_flag(FLAG_CF, last_out != 0);
+                    cpu.update_pf(result as u16);
                 }
             }
         }
@@ -330,6 +336,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (res & 0x80) != 0);
                 cpu.set_flag(FLAG_OF, false);
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(res as u16);
+
             } else {
                 // --- 16-BIT AND ---
                 let dest = if instr.op0_kind() == OpKind::Register {
@@ -366,6 +374,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (res & 0x8000) != 0);
                 cpu.set_flag(FLAG_OF, false);
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(res as u16);
+
             }
         }
 
@@ -403,6 +413,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (res & 0x80) != 0);
                 cpu.set_flag(FLAG_OF, false);
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(res as u16);
+
             } else {
                 // 16-BIT
                 let dest = if instr.op0_kind() == OpKind::Register {
@@ -437,6 +449,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (res & 0x8000) != 0);
                 cpu.set_flag(FLAG_OF, false);
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(res as u16);
+
             }
         }
 
@@ -474,6 +488,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (res & 0x80) != 0);
                 cpu.set_flag(FLAG_OF, false);
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(res as u16);
             } else {
                 // 16-BIT
                 let dest = if instr.op0_kind() == OpKind::Register {
@@ -508,6 +523,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (res & 0x8000) != 0);
                 cpu.set_flag(FLAG_OF, false);
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(res as u16);
             }
         }
 
@@ -945,7 +961,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_OF, result == 0x8000); // Overflow 32767 -> -32768
                 cpu.set_flag(FLAG_AF, (val & 0x0F) + 1 > 0x0F);
             }
-            // PF (Parity) omitted for brevity, but rarely used by LZEXE
+            cpu.update_pf(result);
         }
 
         // Decrement (DEC r/m)
@@ -1031,6 +1047,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             // Parity Flag (Even parity in the LEAST SIGNIFICANT BYTE only)
             // Note: x86 always calculates PF on the low 8 bits, even for 16/32-bit ops.
             cpu.set_flag(FLAG_PF, (result as u8).count_ones() % 2 == 0);
+
+            cpu.update_pf(result);
         }
 
         // Stack Operations
@@ -1178,6 +1196,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (result & 0x80) != 0);
                 cpu.set_flag(FLAG_OF, false); // AND/TEST clears OF/CF
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(result as u16);
             } else {
                 let val1 = if instr.op0_kind() == OpKind::Register {
                     cpu.get_reg16(instr.op0_register())
@@ -1201,6 +1220,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 cpu.set_flag(FLAG_SF, (result & 0x8000) != 0);
                 cpu.set_flag(FLAG_OF, false);
                 cpu.set_flag(FLAG_CF, false);
+                cpu.update_pf(result as u16);
             }
         }
 
@@ -1815,8 +1835,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
 
             // Handle Divide by Zero
             if src_val == 0 {
-                println!("[CPU] Divide by Zero Exception!");
-                // Ideally trigger INT 0 here. For now, we return to avoid panic.
+                handle_interrupt(cpu, 0x00);
                 return;
             }
 
@@ -1830,7 +1849,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 let remainder = dividend % divisor;
 
                 if quotient > 0xFF {
-                    println!("[CPU] DIV Overflow (8-bit)");
+                    handle_interrupt(cpu, 0x00);
+                    return;
                 } else {
                     cpu.set_reg8(Register::AL, quotient as u8);
                     cpu.set_reg8(Register::AH, remainder as u8);
@@ -1846,7 +1866,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 let remainder = dividend % divisor;
 
                 if quotient > 0xFFFF {
-                    println!("[CPU] DIV Overflow (16-bit)");
+                    handle_interrupt(cpu, 0x00);
+                    return;
                 } else {
                     cpu.set_reg16(Register::AX, quotient as u16);
                     cpu.set_reg16(Register::DX, remainder as u16);
@@ -2063,6 +2084,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             // DAS updates SF, ZF, PF, but leaves OF undefined.
             cpu.set_flag(FLAG_ZF, al == 0);
             cpu.set_flag(FLAG_SF, (al & 0x80) != 0);
+            cpu.update_pf(al as u16);
         }
 
         // XCHG: Exchange two operands

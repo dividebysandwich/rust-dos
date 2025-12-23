@@ -4,7 +4,7 @@ use crate::audio::play_sdl_beep;
 use crate::command::{run_dir_command, run_type_command};
 use crate::cpu::{Cpu, CpuState};
 use crate::video::{print_char, print_string, VideoMode};
-use crate::Bus;
+use crate::bus::Bus;
 
 
 // Helper to read a string from memory (DS:DX) until 0x00 (ASCIIZ)

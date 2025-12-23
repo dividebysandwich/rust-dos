@@ -3,8 +3,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use crate::bus;
-
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
 pub const FIRST_USER_HANDLE: u16 = 5;
 

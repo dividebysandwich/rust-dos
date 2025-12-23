@@ -2,7 +2,7 @@ use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
 use crate::bus::Bus;
 use crate::cpu_instr::calculate_addr;
-use crate::get_shell_code;
+use crate::shell::get_shell_code;
 
 // Constants for Flag Bits
 pub const FLAG_CF: u16 = 0x0001; // Carry
@@ -66,6 +66,14 @@ impl Cpu {
             flags: 0x0002, // Default Flag State, Bit 1 is always set
             state: CpuState::Running,
         }
+    }
+
+    // Update Parity Flag based on result
+    pub fn update_pf(&mut self, result: u16) {
+        let low_byte = (result & 0xFF) as u8;
+        let ones = low_byte.count_ones();
+        // Even parity means an even number of 1s (e.g., 0, 2, 4, 8)
+        self.set_flag(FLAG_PF, (ones % 2) == 0);
     }
 
     // Helper to get a flag state
@@ -248,6 +256,8 @@ impl Cpu {
         self.set_flag(FLAG_ZF, result == 0);
         self.set_flag(FLAG_SF, (result & 0x8000) != 0); // High bit set?
 
+        self.update_pf(result);
+
         // Overflow (Signed): if operands have same sign, but result has diff sign
         let op1_sign = (dest & 0x8000) != 0;
         let op2_sign = (src & 0x8000) != 0;
@@ -265,6 +275,8 @@ impl Cpu {
         self.set_flag(FLAG_CF, borrow); // In SUB, CF acts as Borrow
         self.set_flag(FLAG_ZF, result == 0);
         self.set_flag(FLAG_SF, (result & 0x8000) != 0);
+
+        self.update_pf(result);
 
         // Overflow (Signed): operands diff sign, result diff sign from dest
         let op1_sign = (dest & 0x8000) != 0;
@@ -284,6 +296,8 @@ impl Cpu {
         self.set_flag(FLAG_ZF, result == 0);
         self.set_flag(FLAG_SF, (result & 0x80) != 0); // Check Bit 7
 
+        self.update_pf(result as u16);
+
         // 8-bit overflow (signed)
         let op1_sign = (dest & 0x80) != 0;
         let op2_sign = (src & 0x80) != 0;
@@ -300,6 +314,8 @@ impl Cpu {
         self.set_flag(FLAG_CF, carry);
         self.set_flag(FLAG_ZF, result == 0);
         self.set_flag(FLAG_SF, (result & 0x80) != 0);
+
+        self.update_pf(result as u16);
 
         // 8-bit overflow (signed)
         let op1_sign = (dest & 0x80) != 0;
@@ -324,6 +340,8 @@ impl Cpu {
         // Flags
         self.set_flag(FLAG_ZF, result == 0);
         self.set_flag(FLAG_SF, (result & 0x80) != 0);
+
+        self.update_pf(result as u16);
 
         // Carry (Borrow) happens if the result wrapped (result_wide > 0xFF)
         self.set_flag(FLAG_CF, result_wide > 0xFF);
@@ -352,6 +370,8 @@ impl Cpu {
 
         self.set_flag(FLAG_ZF, result == 0);
         self.set_flag(FLAG_SF, (result & 0x8000) != 0);
+
+        self.update_pf(result);
 
         // Carry flag if we wrapped past 0
         self.set_flag(FLAG_CF, result_wide > 0xFFFF);
