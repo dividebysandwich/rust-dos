@@ -159,32 +159,36 @@ impl DiskController {
 
     // INT 21h, AH=4E/4F: Find First / Find Next
     // This helper scans the HOST directory and returns the Nth entry found.
-    pub fn find_directory_entry(&self, search_pattern: &str, search_index: usize) -> Result<DosDirEntry, u8> {
-        // Note: For simple emulation, we ignore 'search_pattern' (like *.COM) and return everything.
-        // Implementing glob matching here would be the next step for accuracy.
-        
-        let paths = fs::read_dir(".").map_err(|_| 0x03)?; // 0x03 = Path Not Found
+    pub fn find_directory_entry(&self, _search_pattern: &str, search_index: usize) -> Result<DosDirEntry, u8> {
+        let paths = fs::read_dir(".").map_err(|_| 0x03)?; 
         
         let mut current_idx = 0;
+        let mut found_count = 0; // Count only valid DOS files
 
         for entry in paths {
             if let Ok(entry) = entry {
-                // If we reached the index requested by the DTA state...
-                if current_idx == search_index {
-                    let metadata = entry.metadata().map_err(|_| 0x05)?; // Access Denied
-                    let filename = entry.file_name().to_string_lossy().into_owned();
+                let filename = entry.file_name().to_string_lossy().into_owned();
+
+                // Skip dotfiles (Linux/Mac hidden files)
+                if filename.starts_with('.') {
+                    continue; 
+                }
+
+                // If this is the file we want (based on valid count, not raw iterator index)
+                if found_count == search_index {
+                    let metadata = entry.metadata().map_err(|_| 0x05)?;
                     
                     return Ok(DosDirEntry {
-                        filename: filename.to_uppercase(), // DOS is uppercase
+                        filename: filename.to_uppercase(),
                         size: metadata.len() as u32,
                         is_dir: metadata.is_dir(),
                         is_readonly: metadata.permissions().readonly(),
                     });
                 }
-                current_idx += 1;
+                found_count += 1;
             }
         }
 
-        Err(0x12) // Error 18: No More Files
+        Err(0x12) // No More Files
     }
 }

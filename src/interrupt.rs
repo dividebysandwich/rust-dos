@@ -905,16 +905,15 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     let dta_off = cpu.bus.dta_offset;
                     let dta_phys = cpu.get_physical_addr(dta_seg, dta_off);
 
-                    // Determine Search Index
-                    // FindFirst (4E) starts at 0. FindNext (4F) reads state from DTA.
+                    // 2. Determine Search Index
                     let index = if ah == 0x4E {
                         0
                     } else {
+                        // Offset 0 of DTA is reserved; we use it to store our search index
                         cpu.bus.read_16(dta_phys) as usize
                     };
 
-                    // Ask Disk Controller for File Info
-                    // Note: We ignore the search pattern (DS:DX) for simplicity and list everything.
+                    // 3. Ask Disk Controller for File Info
                     match cpu.bus.disk.find_directory_entry("*.*", index) {
                         Ok(entry) => {
                             // --- Write to DOS DTA ---
@@ -926,27 +925,38 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             let attr = if entry.is_dir { 0x10 } else { 0x20 };
                             cpu.bus.write_8(dta_phys + 21, attr);
 
-                            // Offset 22/24: Time/Date (Fake zeros)
-                            cpu.bus.write_16(dta_phys + 22, 0x0000);
-                            cpu.bus.write_16(dta_phys + 24, 0x0000);
+                            // Offset 22/24: Time/Date (Fake 12:00 PM, 2023-01-01)
+                            cpu.bus.write_16(dta_phys + 22, 0x6000); 
+                            cpu.bus.write_16(dta_phys + 24, 0x5621); 
 
                             // Offset 26: File Size
                             cpu.bus.write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
                             cpu.bus.write_16(dta_phys + 28, (entry.size >> 16) as u16);
 
                             // Offset 30: Filename (ASCIIZ, Max 13 bytes)
-                            let name_bytes = entry.filename.as_bytes();
-                            for (i, &b) in name_bytes.iter().take(12).enumerate() {
+                            let mut name_str = entry.filename.clone();
+                            
+                            // FIX: Strict truncation to prevent DTA Buffer Overflow
+                            // Real DOS would convert "longfilename.txt" to "LONGFI~1.TXT"
+                            // We just chop it off to prevent crashing the guest.
+                            if name_str.len() > 12 {
+                                name_str.truncate(12); 
+                            }
+                            
+                            let name_bytes = name_str.as_bytes();
+                            
+                            for (i, &b) in name_bytes.iter().enumerate() {
                                 cpu.bus.write_8(dta_phys + 30 + i as usize, b);
                             }
+                            // Write Null Terminator immediately after the name
                             cpu.bus.write_8(dta_phys + 30 + name_bytes.len() as usize, 0x00);
 
                             cpu.set_reg16(Register::AX, 0); // Success code
-                            cpu.set_flag(FLAG_CF, false);
+                            cpu.set_flag(crate::cpu::FLAG_CF, false);
                         },
                         Err(code) => {
                             cpu.set_reg16(Register::AX, code as u16);
-                            cpu.set_flag(FLAG_CF, true);
+                            cpu.set_flag(crate::cpu::FLAG_CF, true);
                         }
                     }
                 }
@@ -954,7 +964,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // AH = 00h: Terminate Program (Legacy Method)
                 // Functionally identical to AH=4Ch for our purposes
                 0x00 => {
-                    cpu.bus.log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
+                    cpu.bus.log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).\n");
                     cpu.state = CpuState::RebootShell;
                 }
 
