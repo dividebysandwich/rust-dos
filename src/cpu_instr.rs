@@ -21,12 +21,9 @@ fn is_8bit_reg(reg: Register) -> bool {
     )
 }
 
-// Helper to calculate effective address for Memory operands
-pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
-    let base = instr.memory_base();
-    // Get the Segment Base
-    // Default to DS, unless there is a segment override prefix.
-    let segment = match instr.segment_prefix() {
+// Helper: Determine which segment register to use
+fn get_segment(cpu: &Cpu, instr: &Instruction) -> u16 {
+    match instr.segment_prefix() {
         Register::ES => cpu.es,
         Register::CS => cpu.cs,
         Register::SS => cpu.ss,
@@ -34,23 +31,27 @@ pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
         Register::FS => 0,
         Register::GS => 0,
         _ => {
-            // No override. Determine default based on Base Register.
+            // Default rules: BP/SP use SS, others use DS
+            let base = instr.memory_base();
             if base == Register::BP || base == Register::SP || base == Register::EBP || base == Register::ESP {
-                cpu.ss // Stack Segment default
+                cpu.ss
             } else {
-                cpu.ds // Data Segment default
+                cpu.ds
             }
         }
-    };
+    }
+}
 
-    // Calculate Base Value
-    let base_val = if base != Register::None {
-        cpu.get_reg16(base) as u32
+// Helper: Calculate ONLY the Offset (Effective Address)
+pub fn get_effective_addr(cpu: &Cpu, instr: &Instruction) -> u16 {
+    // Get Base
+    let base = if instr.memory_base() != Register::None {
+        cpu.get_reg16(instr.memory_base()) as u32
     } else {
         0
     };
 
-    // Calculate Index Value
+    // Get Index * Scale
     let index = if instr.memory_index() != Register::None {
         let val = cpu.get_reg16(instr.memory_index()) as u32;
         let scale = instr.memory_index_scale() as u32;
@@ -62,12 +63,15 @@ pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
     // Displacement
     let displacement = instr.memory_displacement32();
 
-    // Calculate Effective Address (Offset)
-    // Wrap at 16-bit boundary for Real Mode
-    let offset = (base_val.wrapping_add(index).wrapping_add(displacement)) & 0xFFFF;
+    // Wrap at 16-bit
+    (base.wrapping_add(index).wrapping_add(displacement)) as u16
+}
 
-    // Physical Address
-    cpu.get_physical_addr(segment, offset as u16)
+// Helper: Calculate Full Physical Address (Segment:Offset -> Linear)
+pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
+    let segment = get_segment(cpu, instr);
+    let offset = get_effective_addr(cpu, instr);
+    cpu.get_physical_addr(segment, offset)
 }
 
 fn get_string_src_segment(instr: &Instruction, cpu: &Cpu) -> u16 {
@@ -1090,12 +1094,14 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             // NEAR RET: Pop IP
             cpu.ip = cpu.pop();
         }
+
         // LEA Reg, Mem: Load Effective Address
         Mnemonic::Lea => {
             let reg = instr.op0_register();
-            let addr = calculate_addr(&cpu, &instr); // Use your existing helper
-            cpu.set_reg16(reg, addr as u16);
+            let offset = get_effective_addr(cpu, instr);
+            cpu.set_reg16(reg, offset as u16);
         }
+
         // TEST: Logical Compare (AND but discard result)
         Mnemonic::Test => {
             // Determine size
@@ -1379,6 +1385,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                         cpu.get_reg16(instr.op1_register())
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
+                    } else if instr.op1_kind() == OpKind::Immediate8 {
+                        instr.immediate8() as u16
                     } else {
                         instr.immediate16()
                     };
@@ -1408,6 +1416,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                         cpu.get_reg16(instr.op1_register())
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
+                    } else if instr.op1_kind() == OpKind::Immediate8 {
+                        instr.immediate8() as u16
                     } else {
                         instr.immediate16()
                     };
@@ -1451,6 +1461,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                         cpu.get_reg16(instr.op1_register())
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
+                    } else if instr.op1_kind() == OpKind::Immediate8 {
+                        instr.immediate8() as u16
                     } else {
                         instr.immediate16()
                     };
@@ -1480,6 +1492,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                         cpu.get_reg16(instr.op1_register())
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
+                    } else if instr.op1_kind() == OpKind::Immediate8 {
+                        instr.immediate8() as u16
                     } else {
                         instr.immediate16()
                     };
@@ -1907,6 +1921,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                         cpu.get_reg16(instr.op1_register())
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
+                    } else if instr.op1_kind() == OpKind::Immediate8 {
+                        instr.immediate8() as u16
                     } else {
                         instr.immediate16()
                     };

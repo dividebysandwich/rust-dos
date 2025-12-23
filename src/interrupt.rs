@@ -941,17 +941,20 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     
                     // Determine Index & Search Attribute
                     let (index, search_attr) = if ah == 0x4E {
+                        cpu.bus.log_string("[DEBUG] FindFirst (AH=4E) - Resetting Index to 0");
                         // FindFirst: Start at 0, Read Attribute from CX
                         (0, cpu.cx)
                     } else {
                         // FindNext: Read Index AND Attribute from DTA
                         let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
                         let attr = cpu.bus.read_8(dta_phys + OFFSET_ATTR_SEARCH) as u16;
+                        cpu.bus.log_string(&format!("[DEBUG] FindNext (AH=4F) - Read Index {} from DTA@{:#05X}", idx, dta_phys + OFFSET_INDEX));
                         (idx, attr)
                     };
 
                     match cpu.bus.disk.find_directory_entry("*.*", index, search_attr) {
                         Ok(entry) => {
+                            cpu.bus.log_string(&format!("[DEBUG] -> Disk returned: {}", entry.filename));
                             // Populate DTA
                             if ah == 0x4E {
                                 // Initialize DTA: Drive 3 (C:), Template '?'
@@ -964,6 +967,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                             // Update Index for next call
                             cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
+                            cpu.bus.log_string(&format!("[DEBUG] -> Wrote Next Index {} to DTA@{:#05X}", (index+1), dta_phys + OFFSET_INDEX));
 
                             // File Attributes (Offset 21)
                             let mut attr = if entry.is_dir { 0x10 } else { 0x20 };
@@ -996,6 +1000,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             cpu.set_flag(crate::cpu::FLAG_CF, false);
                         },
                         Err(code) => {
+                            cpu.bus.log_string("[DEBUG] -> Disk returned Error (End of List)");
                             cpu.set_reg16(Register::AX, code as u16);
                             cpu.set_flag(crate::cpu::FLAG_CF, true);
                         }
