@@ -3,6 +3,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::bus;
+
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
 pub const FIRST_USER_HANDLE: u16 = 5;
 
@@ -166,7 +168,7 @@ impl DiskController {
 
     // INT 21h, AH=4E/4F: Find First / Find Next
     // Added 'search_attr' parameter to handle Volume Labels
-    pub fn find_directory_entry(&self, _search_pattern: &str, search_index: usize, search_attr: u16) -> Result<DosDirEntry, u8> {
+    pub fn find_directory_entry(&self, search_pattern: &str, search_index: usize, search_attr: u16) -> Result<DosDirEntry, u8> {
         
         // CHECK FOR VOLUME LABEL REQUEST (Bit 3)
         // DOS behavior: If Bit 3 is set, strictly look for volume label.
@@ -186,6 +188,8 @@ impl DiskController {
             }
         }
 
+        println!("[DISK] Searching for Index {} in '.' (Pattern: {})", search_index, search_pattern);
+
         // NORMAL SEARCH (Host Filesystem)
         let paths = fs::read_dir(".").map_err(|_| 0x03)?; 
         
@@ -195,12 +199,16 @@ impl DiskController {
             if let Ok(entry) = entry {
                 let filename = entry.file_name().to_string_lossy().into_owned();
 
+                println!("[DISK] Scanned: '{}' ... ", filename);
+
                 // Skip hidden/dotfiles
                 if filename.starts_with('.') {
+                    println!("Skipped (Dotfile)");
                     continue; 
                 }
 
                 if found_count == search_index {
+                    println!("MATCH! Returning this file.");
                     let metadata = entry.metadata().map_err(|_| 0x05)?;
                     
                     return Ok(DosDirEntry {
@@ -210,10 +218,12 @@ impl DiskController {
                         is_readonly: metadata.permissions().readonly(),
                     });
                 }
+                println!("Ignored (Index {} != {})", found_count, search_index);
                 found_count += 1;
             }
         }
 
+        println!("[DISK] End of Directory. Total files found: {}", found_count);
         Err(0x12) // No More Files
     }
 }

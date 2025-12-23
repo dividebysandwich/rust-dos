@@ -2,7 +2,7 @@ use iced_x86::Register;
 
 use crate::audio::play_sdl_beep;
 use crate::command::{run_dir_command, run_type_command};
-use crate::cpu::{Cpu, CpuState, FLAG_CF};
+use crate::cpu::{Cpu, CpuState};
 use crate::video::{print_char, print_string, VideoMode};
 use crate::Bus;
 
@@ -25,6 +25,15 @@ fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
 // Interrupt handler
 pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     match vector {
+        // INT 00h: Divide by Zero Exception
+        0x00 => {
+            cpu.bus.log_string("[CPU] EXCEPTION: Divide by Zero (INT 0). Terminating Program.");
+            print_string(cpu, "\r\nDivide overflow\r\n");
+            
+            // In a real CPU, this jumps to the handler in the IVT. We just go back to the shell
+            cpu.state = crate::cpu::CpuState::RebootShell;
+        }
+
         // INT 10h: Video Services (BIOS)
         0x10 => {
             let ah = cpu.get_ah();
@@ -919,98 +928,74 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                 // AH=4Eh: Find First File
                 // AH=4Fh: Find Next File
+                // AH=4Eh: Find First File
+                // AH=4Fh: Find Next File
                 0x4E | 0x4F => {
                     let dta_seg = cpu.bus.dta_segment;
                     let dta_off = cpu.bus.dta_offset;
                     let dta_phys = cpu.get_physical_addr(dta_seg, dta_off);
 
-                    // Standard DOS DTA Offsets
-                    const OFFSET_DRIVE: usize = 0;
-                    const OFFSET_TEMPLATE: usize = 1; // 11 bytes
-                    const OFFSET_INDEX: usize = 13;   // 2 bytes (Entry Index)
-                    const OFFSET_ATTR: usize = 21;
-                    const OFFSET_TIME: usize = 22;
-                    const OFFSET_DATE: usize = 24;
-                    const OFFSET_SIZE: usize = 26;
-                    const OFFSET_NAME: usize = 30;
-
-                    // Determine Search Index
-                    let index = if ah == 0x4E {
-                        0
+                    // DTA Layout Constants
+                    const OFFSET_ATTR_SEARCH: usize = 12; // Where DOS remembers what we are looking for
+                    const OFFSET_INDEX: usize = 13;       // Where DOS remembers how far we got
+                    
+                    // Determine Index & Search Attribute
+                    let (index, search_attr) = if ah == 0x4E {
+                        // FindFirst: Start at 0, Read Attribute from CX
+                        (0, cpu.cx)
                     } else {
-                        // Read Index from the standard DOS location (Offset 13)
-                        cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize
+                        // FindNext: Read Index AND Attribute from DTA
+                        let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
+                        let attr = cpu.bus.read_8(dta_phys + OFFSET_ATTR_SEARCH) as u16;
+                        (idx, attr)
                     };
-
-                    cpu.bus.log_string(format!("[DEBUG] FindFile AH={:02X} Index={} DTA_Phys={:05X}", ah, index, dta_phys).as_str());
-
-                    // Ask Disk Controller
-                    // We assume search_attr is passed in CX for FindFirst, or we just default to all.
-                    // For finding "d.com" volume label logic, we rely on disk.rs handling the 0x08 flag.
-                    let search_attr = cpu.cx;
 
                     match cpu.bus.disk.find_directory_entry("*.*", index, search_attr) {
                         Ok(entry) => {
-                            cpu.bus.log_string(format!("[DEBUG] -> Found: {}", entry.filename).as_str());
-                            // --- Populate DTA ---
-
+                            // Populate DTA
                             if ah == 0x4E {
-                                // Initialize DTA for FindFirst
-                                // Drive: 3 = C: (Fixes "drive -C:a" corruption)
-                                cpu.bus.write_8(dta_phys + OFFSET_DRIVE, 3);
-                                
-                                // Template: "???????????" (Matches all)
+                                // Initialize DTA: Drive 3 (C:), Template '?'
+                                cpu.bus.write_8(dta_phys + 0, 3); 
                                 for i in 1..12 { cpu.bus.write_8(dta_phys + i as usize, b'?'); }
-
-                                // Search Attr (Offset 12)
-                                cpu.bus.write_8(dta_phys + 12, search_attr as u8);
+                                
+                                // Save the search attribute so FindNext works
+                                cpu.bus.write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
                             }
 
-                            // Update Index for next call (Offset 13)
+                            // Update Index for next call
                             cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
 
-                            // File Attribute (Offset 21)
+                            // File Attributes (Offset 21)
                             let mut attr = if entry.is_dir { 0x10 } else { 0x20 };
                             if entry.filename == "RUSTDOS" { attr = 0x08; }
-                            cpu.bus.write_8(dta_phys + OFFSET_ATTR, attr);
+                            cpu.bus.write_8(dta_phys + 21, attr);
 
-                            // Time/Date (Offset 22/24) - Jan 1, 2000, 12:00
-                            cpu.bus.write_16(dta_phys + OFFSET_TIME, 0x6000); 
-                            cpu.bus.write_16(dta_phys + OFFSET_DATE, 0x2821); 
+                            // Time/Date (Offset 22/24)
+                            cpu.bus.write_16(dta_phys + 22, 0x6000); 
+                            cpu.bus.write_16(dta_phys + 24, 0x2821); 
 
-                            // File Size (Offset 26)
-                            cpu.bus.write_16(dta_phys + OFFSET_SIZE, (entry.size & 0xFFFF) as u16);
-                            cpu.bus.write_16(dta_phys + OFFSET_SIZE + 2, (entry.size >> 16) as u16);
+                            // Size (Offset 26)
+                            cpu.bus.write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
+                            cpu.bus.write_16(dta_phys + 28, (entry.size >> 16) as u16);
 
-                            // Filename (Offset 30) - ASCIIZ, max 13 chars
+                            // Filename (Offset 30) - 13 bytes max
                             let name_bytes = entry.filename.as_bytes();
                             let len = std::cmp::min(name_bytes.len(), 12);
-                            
-                            // Write name
-                            for i in 0..len {
-                                cpu.bus.write_8(dta_phys + OFFSET_NAME + i as usize, name_bytes[i]);
-                            }
-                            // Null Terminate
-                            cpu.bus.write_8(dta_phys + OFFSET_NAME + len as usize, 0x00);
-                            
-                            // Zero-fill remaining bytes (critical for d.com display buffer)
-                            for i in (len + 1)..13 {
-                                cpu.bus.write_8(dta_phys + OFFSET_NAME + i as usize, 0x00);
-                            }
 
-                            // [DEBUG] Dump the DTA filename area to see exactly what d.com sees
-                            cpu.bus.log_string("[DEBUG] DTA Filename Dump: ");
-                            for i in 0..13 {
-                                let b = cpu.bus.read_8(dta_phys + 30 + i as usize);
-                                cpu.bus.log_string(&format!("{:02X} ", b));
+                            for i in 0..len {
+                                cpu.bus.write_8(dta_phys + 30 + i as usize, name_bytes[i]);
                             }
-                            cpu.bus.log_string("\n");
+                            cpu.bus.write_8(dta_phys + 30 + len as usize, 0x00);
+                            
+                            // Zero-pad rest of filename buffer
+                            for i in (len + 1)..13 {
+                                cpu.bus.write_8(dta_phys + 30 + i as usize, 0x00);
+                            }
 
                             cpu.set_reg16(Register::AX, 0); // Success
                             cpu.set_flag(crate::cpu::FLAG_CF, false);
                         },
                         Err(code) => {
-                            cpu.bus.log_string("[DEBUG] -> Not Found / End of List");
                             cpu.set_reg16(Register::AX, code as u16);
                             cpu.set_flag(crate::cpu::FLAG_CF, true);
                         }

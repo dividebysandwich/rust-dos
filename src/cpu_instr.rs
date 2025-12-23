@@ -567,6 +567,101 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             }
         }
 
+        // CMPSB: Compare Byte at [DS:SI] with [ES:DI]
+        // Flags set by (DS:SI - ES:DI)
+        Mnemonic::Cmpsb => {
+            let has_rep = instr.has_rep_prefix() || instr.has_repe_prefix();
+            let has_repne = instr.has_repne_prefix();
+
+            loop {
+                // Check Loop Counter
+                if (has_rep || has_repne) && cpu.cx == 0 {
+                    break;
+                }
+
+                // Calculate Addresses
+                let src_seg = get_string_src_segment(&instr, &cpu); // DS usually
+                let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
+                let dest_addr = cpu.get_physical_addr(cpu.es, cpu.di); // Always ES
+
+                // Read Values
+                let val_src = cpu.bus.read_8(src_addr);
+                let val_dest = cpu.bus.read_8(dest_addr);
+
+                // Perform Compare (Src - Dest) -> Set Flags
+                // Note: Intel manual says CMPS subtracts Dest FROM Src (Src - Dest)
+                // Wait, actually it's (DS:SI) - (ES:DI).
+                cpu.alu_sub_8(val_src, val_dest);
+
+                // Update Indices
+                if cpu.dflag() {
+                    cpu.si = cpu.si.wrapping_sub(1);
+                    cpu.di = cpu.di.wrapping_sub(1);
+                } else {
+                    cpu.si = cpu.si.wrapping_add(1);
+                    cpu.di = cpu.di.wrapping_add(1);
+                }
+
+                // Handle Repetition
+                if has_rep || has_repne {
+                    cpu.cx = cpu.cx.wrapping_sub(1);
+                    
+                    // REPE/REPZ: Stop if Not Equal (ZF=0)
+                    if has_rep && !cpu.get_flag(FLAG_ZF) {
+                        break;
+                    }
+                    // REPNE/REPNZ: Stop if Equal (ZF=1)
+                    if has_repne && cpu.get_flag(FLAG_ZF) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // CMPSW: Compare Word at [DS:SI] with [ES:DI]
+        Mnemonic::Cmpsw => {
+            let has_rep = instr.has_rep_prefix() || instr.has_repe_prefix();
+            let has_repne = instr.has_repne_prefix();
+
+            loop {
+                if (has_rep || has_repne) && cpu.cx == 0 {
+                    break;
+                }
+
+                let src_seg = get_string_src_segment(&instr, &cpu);
+                let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
+                let dest_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+
+                let val_src_low = cpu.bus.read_8(src_addr) as u16;
+                let val_src_high = cpu.bus.read_8(src_addr + 1) as u16;
+                let val_src = (val_src_high << 8) | val_src_low;
+
+                let val_dest_low = cpu.bus.read_8(dest_addr) as u16;
+                let val_dest_high = cpu.bus.read_8(dest_addr + 1) as u16;
+                let val_dest = (val_dest_high << 8) | val_dest_low;
+
+                cpu.alu_sub_16(val_src, val_dest);
+
+                if cpu.dflag() {
+                    cpu.si = cpu.si.wrapping_sub(2);
+                    cpu.di = cpu.di.wrapping_sub(2);
+                } else {
+                    cpu.si = cpu.si.wrapping_add(2);
+                    cpu.di = cpu.di.wrapping_add(2);
+                }
+
+                if has_rep || has_repne {
+                    cpu.cx = cpu.cx.wrapping_sub(1);
+                    if has_rep && !cpu.get_flag(FLAG_ZF) { break; }
+                    if has_repne && cpu.get_flag(FLAG_ZF) { break; }
+                } else {
+                    break;
+                }
+            }
+        }
+
         // Jump if Equal (JE)
         Mnemonic::Je => {
             if cpu.zflag() {
@@ -1582,6 +1677,133 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             }
         }
 
+        // DIV r/m8   -> AX / Source      = AL (Quotient), AH (Remainder)
+        // DIV r/m16  -> DX:AX / Source   = AX (Quotient), DX (Remainder)
+        Mnemonic::Div => {
+            // Determine size
+            let is_8bit = match instr.op0_kind() {
+                OpKind::Register => is_8bit_reg(instr.op0_register()),
+                OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+                _ => false,
+            };
+
+            // Read Divisor (Source)
+            let src_val = if instr.op0_kind() == OpKind::Register {
+                let reg = instr.op0_register();
+                if is_8bit { cpu.get_reg8(reg) as u32 } else { cpu.get_reg16(reg) as u32 }
+            } else {
+                let addr = calculate_addr(&cpu, &instr);
+                if is_8bit {
+                    cpu.bus.read_8(addr) as u32
+                } else {
+                    cpu.bus.read_16(addr) as u32
+                }
+            };
+
+            // Handle Divide by Zero
+            if src_val == 0 {
+                println!("[CPU] Divide by Zero Exception!");
+                // Ideally trigger INT 0 here. For now, we return to avoid panic.
+                return;
+            }
+
+            // Perform Division
+            if is_8bit {
+                // AX / Source8 = AL (Quotient), AH (Remainder)
+                let dividend = cpu.get_reg16(Register::AX);
+                let divisor = src_val as u16;
+                
+                let quotient = dividend / divisor;
+                let remainder = dividend % divisor;
+
+                if quotient > 0xFF {
+                    println!("[CPU] DIV Overflow (8-bit)");
+                } else {
+                    cpu.set_reg8(Register::AL, quotient as u8);
+                    cpu.set_reg8(Register::AH, remainder as u8);
+                }
+            } else {
+                // DX:AX / Source16 = AX (Quotient), DX (Remainder)
+                let dx = cpu.get_reg16(Register::DX) as u32;
+                let ax = cpu.get_reg16(Register::AX) as u32;
+                let dividend = (dx << 16) | ax;
+                let divisor = src_val;
+
+                let quotient = dividend / divisor;
+                let remainder = dividend % divisor;
+
+                if quotient > 0xFFFF {
+                    println!("[CPU] DIV Overflow (16-bit)");
+                } else {
+                    cpu.set_reg16(Register::AX, quotient as u16);
+                    cpu.set_reg16(Register::DX, remainder as u16);
+                }
+            }
+        }
+
+        // IDIV (Signed)
+        Mnemonic::Idiv => {
+            // Determine size
+            let is_8bit = match instr.op0_kind() {
+                OpKind::Register => is_8bit_reg(instr.op0_register()),
+                OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+                _ => false,
+            };
+
+            // Read Divisor
+            let src_val = if instr.op0_kind() == OpKind::Register {
+                let reg = instr.op0_register();
+                if is_8bit { cpu.get_reg8(reg) as i32 } else { cpu.get_reg16(reg) as i32 }
+            } else {
+                let addr = calculate_addr(&cpu, &instr);
+                if is_8bit {
+                    cpu.bus.read_8(addr) as i8 as i32
+                } else {
+                    cpu.bus.read_16(addr) as i16 as i32
+                }
+            };
+
+            // Check for Divide by Zero
+            if src_val == 0 {
+                handle_interrupt(cpu, 0x00);
+                return;
+            }
+
+            if is_8bit {
+                let dividend = cpu.get_reg16(Register::AX) as i16;
+                let divisor = src_val as i16;
+
+                // Rust panics on overflow (Min / -1), so we wrap or check
+                let quotient = dividend.checked_div(divisor).unwrap_or(0);
+                let remainder = dividend.checked_rem(divisor).unwrap_or(0);
+
+                if quotient > 127 || quotient < -128 {
+                    handle_interrupt(cpu, 0x00); // Quotient too large
+                } else {
+                    cpu.set_reg8(Register::AL, quotient as u8);
+                    cpu.set_reg8(Register::AH, remainder as u8);
+                }
+            } else {
+                let dx = cpu.get_reg16(Register::DX) as i32;
+                let ax = cpu.get_reg16(Register::AX) as i32;
+                // Combine DX:AX
+                // Note: We cast u16 -> i16 first to preserve sign bits if needed, 
+                // but actually DX:AX is treated as one 32-bit block.
+                let dividend = ((dx as u32) << 16 | (ax as u32)) as i32;
+                let divisor = src_val;
+
+                let quotient = dividend.checked_div(divisor).unwrap_or(0);
+                let remainder = dividend.checked_rem(divisor).unwrap_or(0);
+
+                if quotient > 32767 || quotient < -32768 {
+                    handle_interrupt(cpu, 0x00); // Quotient too large
+                } else {
+                    cpu.set_reg16(Register::AX, quotient as u16);
+                    cpu.set_reg16(Register::DX, remainder as u16);
+                }
+            }
+        }
+
         // MUL: Unsigned Multiply (Always Single Operand)
         Mnemonic::Mul => {
             // Determine Size & Source Val (Same as IMUL logic)
@@ -1801,6 +2023,86 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     cpu.set_reg8(reg, val1 as u8);
                 } else {
                     cpu.set_reg16(reg, val1);
+                }
+            }
+        }
+
+        Mnemonic::Rcr => {
+            // Determine Size and Read Value
+            let is_8bit = match instr.op0_kind() {
+                OpKind::Register => is_8bit_reg(instr.op0_register()),
+                OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+                _ => false,
+            };
+
+            let (mut val, addr_opt) = if instr.op0_kind() == OpKind::Register {
+                let reg = instr.op0_register();
+                let v = if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) };
+                (v, None)
+            } else {
+                let addr = calculate_addr(&cpu, &instr);
+                let v = if is_8bit { 
+                    cpu.bus.read_8(addr) as u16 
+                } else { 
+                    cpu.bus.read_16(addr) 
+                };
+                (v, Some(addr))
+            };
+
+            // Get Count
+            let count = if instr.op1_kind() == OpKind::Immediate8 {
+                instr.immediate8() as u8
+            } else if instr.op1_kind() == OpKind::Register {
+                cpu.get_reg8(instr.op1_register()) // CL
+            } else { 
+                1 
+            };
+            
+            let effective_count = count & 0x1F;
+
+            // Perform Rotate
+            if effective_count > 0 {
+                for _ in 0..effective_count {
+                    let old_cf = if cpu.get_flag(FLAG_CF) { 1 } else { 0 };
+                    
+                    if is_8bit {
+                        let v = val as u8;
+                        let new_cf = v & 1; // LSB becomes Carry
+                        // Carry moves to MSB (Bit 7), shift rest right
+                        let new_val = (v >> 1) | (old_cf << 7); 
+                        
+                        val = new_val as u16;
+                        cpu.set_flag(FLAG_CF, new_cf != 0);
+                    } else {
+                        let v = val;
+                        let new_cf = v & 1;
+                        // Carry moves to MSB (Bit 15)
+                        let new_val = (v >> 1) | ((old_cf as u16) << 15);
+                        
+                        val = new_val;
+                        cpu.set_flag(FLAG_CF, new_cf != 0);
+                    }
+                }
+
+                // OF is defined only for count == 1. 
+                // For RCR, OF = (Old MSB) XOR (New MSB).
+                // But simplified: OF is set if the sign bit changes.
+                // We'll skip precise OF emulation for now as it's rarely used for RCR.
+            }
+
+            // Write Back
+            if let Some(addr) = addr_opt {
+                if is_8bit {
+                    cpu.bus.write_8(addr, val as u8);
+                } else {
+                    cpu.bus.write_16(addr, val);
+                }
+            } else {
+                let reg = instr.op0_register();
+                if is_8bit {
+                    cpu.set_reg8(reg, val as u8);
+                } else {
+                    cpu.set_reg16(reg, val);
                 }
             }
         }
