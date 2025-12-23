@@ -1,6 +1,5 @@
 // tests/alu_tests.rs
 use rust_dos::cpu::{Cpu, FLAG_ZF, FLAG_SF, FLAG_CF, FLAG_OF, FLAG_PF};
-use rust_dos::bus::Bus;
 
 #[test]
 fn test_alu_add_8() {

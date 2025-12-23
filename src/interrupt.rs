@@ -1,11 +1,10 @@
 use iced_x86::Register;
 
 use crate::audio::play_sdl_beep;
+use crate::bus::Bus;
 use crate::command::{run_dir_command, run_type_command};
 use crate::cpu::{Cpu, CpuState};
 use crate::video::{print_char, print_string, VideoMode};
-use crate::bus::Bus;
-
 
 // Helper to read a string from memory (DS:DX) until 0x00 (ASCIIZ)
 fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
@@ -27,9 +26,10 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     match vector {
         // INT 00h: Divide by Zero Exception
         0x00 => {
-            cpu.bus.log_string("[CPU] EXCEPTION: Divide by Zero (INT 0). Terminating Program.");
-            print_string(cpu, "\r\nDivide overflow\r\n");
-            
+            cpu.bus
+                .log_string("[CPU] EXCEPTION: Divide by Zero (INT 0). Terminating Program.");
+            print_string(cpu, "Divide overflow\r\n");
+
             // In a real CPU, this jumps to the handler in the IVT. We just go back to the shell
             cpu.state = crate::cpu::CpuState::RebootShell;
         }
@@ -44,8 +44,8 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                     // Fill Text VRAM (B8000) with "Space" (0x20) + "Gray on Black" (0x07)
                     for i in (0..4000).step_by(2) {
-                        cpu.bus.write_8(0xB8000 + i, 0x20);     
-                        cpu.bus.write_8(0xB8000 + i + 1, 0x07); 
+                        cpu.bus.write_8(0xB8000 + i, 0x20);
+                        cpu.bus.write_8(0xB8000 + i + 1, 0x07);
                     }
 
                     match mode {
@@ -56,22 +56,27 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             cpu.bus.video_mode = VideoMode::Text40x25;
                         }
                         0x01 => {
-                             cpu.bus.log_string("[BIOS] Switch to Text Mode (40x25Color)");
-                             cpu.bus.video_mode = VideoMode::Text40x25Color;
+                            cpu.bus
+                                .log_string("[BIOS] Switch to Text Mode (40x25Color)");
+                            cpu.bus.video_mode = VideoMode::Text40x25Color;
                         }
                         0x02 => {
                             cpu.bus.log_string("[BIOS] Switch to Text Mode (80x25)");
                             cpu.bus.video_mode = VideoMode::Text80x25;
                         }
                         0x03 => {
-                            cpu.bus.log_string("[BIOS] Switch to Text Mode (80x25 Color)");
+                            cpu.bus
+                                .log_string("[BIOS] Switch to Text Mode (80x25 Color)");
                             cpu.bus.video_mode = VideoMode::Text80x25Color;
                         }
                         0x13 => {
-                            cpu.bus.log_string("[BIOS] Switch to Graphics Mode (320x200)");
+                            cpu.bus
+                                .log_string("[BIOS] Switch to Graphics Mode (320x200)");
                             cpu.bus.video_mode = VideoMode::Graphics320x200;
                         }
-                        _ => cpu.bus.log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
+                        _ => cpu
+                            .bus
+                            .log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
                     }
                 }
 
@@ -92,30 +97,46 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         cpu.bus.write_8(cursor_addr, col);
                         cpu.bus.write_8(cursor_addr + 1, row);
                     }
-                    
-                    // Note: If you implement a blinking hardware cursor in your 
+
+                    // Note: If you implement a blinking hardware cursor in your
                     // render loop later, you should read coordinates from 0x0450.
                 }
-                
+
                 // AH = 03h: Get Cursor Position (Complimentary to 02h)
                 // Entry: BH = Page Number
                 // Return: DH = Row, DL = Column, CX = Cursor Mode (Scanlines)
                 0x03 => {
                     let page = cpu.get_reg8(Register::BH) as usize;
-                    
+
                     if page < 8 {
                         let cursor_addr = 0x450 + (page * 2);
                         let col = cpu.bus.read_8(cursor_addr);
                         let row = cpu.bus.read_8(cursor_addr + 1);
-                        
+
                         cpu.set_reg8(Register::DL, col);
                         cpu.set_reg8(Register::DH, row);
-                        
+
                         // Cursor Mode: Default to a standard underscore (Scanlines 6-7)
                         // CH = Start Scanline, CL = End Scanline
-                        cpu.cx = 0x0607; 
+                        cpu.cx = 0x0607;
                     }
                 }
+
+                // TODO: Verify
+                0x04 => {
+                    // AH = 04h: Read Light Pen Position (Not Implemented)
+                    // Return: CX = Column, DX = Row
+                    cpu.cx = 0;
+                    cpu.dx = 0;
+                }
+
+                // AH = 05h: Set active page
+                // TODO: Verify
+                0x05 => {
+                    let page = cpu.get_reg8(Register::AL);
+                    cpu.bus.log_string(&format!("[BIOS] Set Active Page to {}", page));
+                }
+
 
                 // AH = 06h: Scroll Up Window (or Clear)
                 // AL = Lines to scroll (0 = Clear Window)
@@ -132,7 +153,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                     // Basic bounds check (assuming 80 columns)
                     let max_cols = 80;
-                    
+
                     // Case 1: Clear Window (AL = 0)
                     // This is the most common usage.
                     if lines == 0 {
@@ -151,15 +172,15 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             for c in col_start..=col_end {
                                 let dest_offset = (r * max_cols + c) * 2;
                                 let src_offset = ((r + lines as usize) * max_cols + c) * 2;
-                                
+
                                 let char_code = cpu.bus.read_8(0xB8000 + src_offset);
                                 let char_attr = cpu.bus.read_8(0xB8000 + src_offset + 1);
-                                
+
                                 cpu.bus.write_8(0xB8000 + dest_offset, char_code);
                                 cpu.bus.write_8(0xB8000 + dest_offset + 1, char_attr);
                             }
                         }
-                        
+
                         // Clear the bottom 'lines' rows
                         for r in (row_end - lines as usize + 1)..=row_end {
                             for c in col_start..=col_end {
@@ -204,19 +225,19 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         // We must copy BACKWARDS (Bottom -> Top)
                         // Dest: Row r
                         // Source: Row r - lines
-                        
+
                         // Safety check to prevent underflow if lines > window height
                         let effective_start = row_start + lines as usize;
-                        
+
                         if effective_start <= row_end {
                             for r in (effective_start..=row_end).rev() {
                                 for c in col_start..=col_end {
                                     let dest_offset = (r * max_cols + c) * 2;
                                     let src_offset = ((r - lines as usize) * max_cols + c) * 2;
-                                    
+
                                     let char_code = cpu.bus.read_8(0xB8000 + src_offset);
                                     let char_attr = cpu.bus.read_8(0xB8000 + src_offset + 1);
-                                    
+
                                     cpu.bus.write_8(0xB8000 + dest_offset, char_code);
                                     cpu.bus.write_8(0xB8000 + dest_offset + 1, char_attr);
                                 }
@@ -226,12 +247,12 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         // Clear the Top 'lines' rows
                         // Limit loop to row_end to handle massive scrolls
                         let clear_limit = std::cmp::min(row_start + lines as usize, row_end + 1);
-                        
+
                         for r in row_start..clear_limit {
                             for c in col_start..=col_end {
                                 let offset = (r * max_cols + c) * 2;
                                 let phys_addr = 0xB8000 + offset;
-                                cpu.bus.write_8(phys_addr, 0x20); 
+                                cpu.bus.write_8(phys_addr, 0x20);
                                 cpu.bus.write_8(phys_addr + 1, attr);
                             }
                         }
@@ -244,45 +265,51 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // BL = Color (Graphics Mode only, ignored in Text Mode)
                 0x0E => {
                     let char_code = cpu.get_reg8(Register::AL);
-                    
+
                     // Get Current Cursor Position (BDA 0x0450)
                     // We assume Page 0 for simplicity.
                     let cursor_addr = 0x0450;
                     let mut col = cpu.bus.read_8(cursor_addr);
                     let mut row = cpu.bus.read_8(cursor_addr + 1);
-                    
+
                     let max_cols = 80;
                     let max_rows = 25;
 
                     match char_code {
-                        0x07 => { // BEL (Bell) -> Beep
+                        0x07 => {
+                            // BEL (Bell) -> Beep
                             play_sdl_beep(&mut cpu.bus);
                         }
-                        0x0D => { // CR (Carriage Return) -> Reset Column
+                        0x0D => {
+                            // CR (Carriage Return) -> Reset Column
                             col = 0;
                         }
-                        0x0A => { // LF (Line Feed) -> Next Row
+                        0x0A => {
+                            // LF (Line Feed) -> Next Row
                             row += 1;
                         }
-                        0x08 => { // BS (Backspace) -> Previous Column
+                        0x08 => {
+                            // BS (Backspace) -> Previous Column
                             if col > 0 {
                                 col -= 1;
                             }
                             // Calculate the position we just moved back to
                             let vram_offset = (row as usize * max_cols + col as usize) * 2;
-                                
+
                             // Overwrite with Space (0x20) and default attribute (0x07)
-                            cpu.bus.write_8(0xB8000 + vram_offset, 0x20); 
+                            cpu.bus.write_8(0xB8000 + vram_offset, 0x20);
                             cpu.bus.write_8(0xB8000 + vram_offset + 1, 0x07);
                         }
-                        _ => { // Visible Character
+                        _ => {
+                            // Visible Character
                             // Write Char + Attribute to VRAM
                             let vram_offset = (row as usize * max_cols + col as usize) * 2;
                             if vram_offset < 4000 {
                                 cpu.bus.write_8(0xB8000 + vram_offset, char_code);
-                                cpu.bus.write_8(0xB8000 + vram_offset + 1, 0x07); // Light Gray
+                                cpu.bus.write_8(0xB8000 + vram_offset + 1, 0x07);
+                                // Light Gray
                             }
-                            
+
                             col += 1;
 
                             // Handle Line Wrap
@@ -301,10 +328,10 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             for c in 0..max_cols {
                                 let src_offset = (r * max_cols + c) * 2;
                                 let dest_offset = ((r - 1) * max_cols + c) * 2;
-                                
+
                                 let val = cpu.bus.read_8(0xB8000 + src_offset);
                                 let attr = cpu.bus.read_8(0xB8000 + src_offset + 1);
-                                
+
                                 cpu.bus.write_8(0xB8000 + dest_offset, val);
                                 cpu.bus.write_8(0xB8000 + dest_offset + 1, attr);
                             }
@@ -313,8 +340,9 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         // Clear the Bottom Row (Row 24)
                         let last_row_start = ((max_rows - 1) * max_cols) * 2;
                         for i in (0..160).step_by(2) {
-                            cpu.bus.write_8(0xB8000 + last_row_start + i, 0x20);     // Space
-                            cpu.bus.write_8(0xB8000 + last_row_start + i + 1, 0x07); // Attribute
+                            cpu.bus.write_8(0xB8000 + last_row_start + i, 0x20); // Space
+                            cpu.bus.write_8(0xB8000 + last_row_start + i + 1, 0x07);
+                            // Attribute
                         }
 
                         // Reset Row to the last line
@@ -335,36 +363,38 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         VideoMode::Text40x25 => {
                             cpu.bus.log_string("[BIOS] Reported Video Mode: 0x00");
                             cpu.set_reg8(Register::AL, 0x00); // Current Mode 0
-                            cpu.set_reg8(Register::AH, 40);   // 40 Columns
-                            cpu.set_reg8(Register::BH, 0);    // Page 0
+                            cpu.set_reg8(Register::AH, 40); // 40 Columns
+                            cpu.set_reg8(Register::BH, 0); // Page 0
                         }
                         VideoMode::Text40x25Color => {
                             cpu.bus.log_string("[BIOS] Reported Video Mode: 0x01");
                             cpu.set_reg8(Register::AL, 0x01); // Current Mode 1
-                            cpu.set_reg8(Register::AH, 40);   // 40 Columns
-                            cpu.set_reg8(Register::BH, 0);    // Page 0
+                            cpu.set_reg8(Register::AH, 40); // 40 Columns
+                            cpu.set_reg8(Register::BH, 0); // Page 0
                         }
                         VideoMode::Text80x25 => {
                             cpu.bus.log_string("[BIOS] Reported Video Mode: 0x02");
                             cpu.set_reg8(Register::AL, 0x02); // Current Mode 2
-                            cpu.set_reg8(Register::AH, 80);   // 80 Columns
-                            cpu.set_reg8(Register::BH, 0);    // Page 0
+                            cpu.set_reg8(Register::AH, 80); // 80 Columns
+                            cpu.set_reg8(Register::BH, 0); // Page 0
                         }
                         VideoMode::Text80x25Color => {
                             cpu.bus.log_string("[BIOS] Reported Video Mode: 0x03");
                             cpu.set_reg8(Register::AL, 0x03); // Current Mode 3
-                            cpu.set_reg8(Register::AH, 80);   // 80 Columns
-                            cpu.set_reg8(Register::BH, 0);    // Page 0
+                            cpu.set_reg8(Register::AH, 80); // 80 Columns
+                            cpu.set_reg8(Register::BH, 0); // Page 0
                         }
                         VideoMode::Graphics320x200 => {
                             cpu.bus.log_string("[BIOS] Reported Video Mode: 0x13");
                             cpu.set_reg8(Register::AL, 0x13); // Current Mode 13h
-                            cpu.set_reg8(Register::AH, 40);   // 40 Columns (technically)
-                            cpu.set_reg8(Register::BH, 0);    // Page 0
+                            cpu.set_reg8(Register::AH, 40); // 40 Columns (technically)
+                            cpu.set_reg8(Register::BH, 0); // Page 0
                         }
                     }
                 }
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),
+                _ => cpu
+                    .bus
+                    .log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),
             }
         }
 
@@ -383,7 +413,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
         // INT 12h: Get Memory Size
         0x12 => {
             // Returns AX = Continuous memory size in KB
-            cpu.ax = 640; 
+            cpu.ax = 640;
         }
 
         // INT 15h: System Services
@@ -395,7 +425,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 0x88 => {
                     // Report 16MB of XMS (plenty for most DOS games)
                     // 16MB - 1MB (Base) = 15MB = 15360 KB
-                    cpu.ax = 15360; 
+                    cpu.ax = 15360;
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
 
@@ -405,14 +435,16 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     let high = cpu.cx as u64;
                     let low = cpu.dx as u64;
                     let micros = (high << 16) | low;
-                    
+
                     // We can actually sleep here to throttle the emulator
                     std::thread::sleep(std::time::Duration::from_micros(micros));
-                    
+
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
-                
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 15h AH={:02X}", ah)),
+
+                _ => cpu
+                    .bus
+                    .log_string(&format!("[BIOS] Unhandled INT 15h AH={:02X}", ah)),
             }
         }
 
@@ -429,7 +461,9 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         cpu.ip = cpu.ip.wrapping_sub(2);
                     }
                 }
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
+                _ => cpu
+                    .bus
+                    .log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
             }
         }
 
@@ -443,28 +477,28 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 0x00 => {
                     // Calculate elapsed time in milliseconds
                     let elapsed_ms = cpu.bus.start_time.elapsed().as_millis();
-                    
+
                     // Convert to DOS Ticks (18.2065 ticks per second)
                     // Formula: ms * 18.2 / 1000
                     // We use integer math: (ms * 182) / 10000 roughly equals ms * 0.0182
                     let ticks = (elapsed_ms as u64 * 182) / 10000;
-                    
+
                     // Set Registers
                     // DOS clock wraps at 24 hours (1,573,040 ticks).
                     // We just let it grow since games usually only care about the delta.
-                    
-                    cpu.cx = (ticks >> 16) as u16;     // High Word
-                    cpu.dx = (ticks & 0xFFFF) as u16;  // Low Word
-                    cpu.set_reg8(Register::AL, 0);     // Midnight Flag (Clear)
+
+                    cpu.cx = (ticks >> 16) as u16; // High Word
+                    cpu.dx = (ticks & 0xFFFF) as u16; // Low Word
+                    cpu.set_reg8(Register::AL, 0); // Midnight Flag (Clear)
                 }
-                
+
                 // AH = 02h: Get Real-Time Clock Time (CMOS)
                 // Returns: CH=Hours, CL=Minutes, DH=Seconds (In BCD)
                 0x02 => {
                     // Simple stub: Return 00:00:00 to prevent crashes
                     // If you want real time, you need to use chrono and convert to BCD
                     cpu.cx = 0;
-                    cpu.dx = 0; 
+                    cpu.dx = 0;
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
 
@@ -477,7 +511,9 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
 
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 1A AH={:02X}", ah)),
+                _ => cpu
+                    .bus
+                    .log_string(&format!("[BIOS] Unhandled INT 1A AH={:02X}", ah)),
             }
         }
 
@@ -515,8 +551,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 raw_cmd, clean_cmd
             ));
 
-            print_char(&mut cpu.bus, 0x0D);
-            print_char(&mut cpu.bus, 0x0A);
+            print_string(cpu, "\r\n");
 
             // Split "TYPE FILE.TXT" into "TYPE" and "FILE.TXT"
             let (command, args) = match clean_cmd.split_once(' ') {
@@ -536,7 +571,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 cpu.set_reg8(Register::CL, 0x00); // Upper Left Col
                 cpu.set_reg8(Register::DH, 0x18); // Lower Right Row (24)
                 cpu.set_reg8(Register::DL, 0x4F); // Lower Right Col (79)
-                
+
                 // Call INT 10h Handler Directly
                 handle_interrupt(cpu, 0x10);
 
@@ -550,8 +585,11 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     run_type_command(cpu, args);
                 }
             } else if command.eq_ignore_ascii_case("EXIT") {
-                cpu.bus.log_string("[SHELL] Exiting Emulator via command...");
+                cpu.bus
+                    .log_string("[SHELL] Exiting Emulator via command...");
                 std::process::exit(0);
+            } else if command.is_empty() {
+                // No command entered, just ignore
             } else {
                 // Try to run as executable
                 let filename = command.to_string();
@@ -575,11 +613,11 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     }
                 }
 
-                print_string(cpu, "\r\nBad command or file name.");
+                print_string(cpu, "Bad command or file name.\r\n");
             }
 
             // Always return to prompt
-            print_string(cpu, "\r\nC:\\>");
+            print_string(cpu, "C:\\>");
         }
 
         // INT 21h: DOS Kernel API
@@ -624,17 +662,17 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     //cpu.set_reg8(Register::AL, drive);
                     //TODO: Implement multiple drives
                     cpu.set_reg8(Register::AL, 2);
-                }         
+                }
 
                 // AH=1Ah: Set Disk Transfer Area (DTA) Address
                 0x1A => {
                     let ds = cpu.ds; // Segment
                     let dx = cpu.get_reg16(Register::DX); // Offset
-                            
+
                     cpu.bus.dta_segment = ds;
-                    cpu.bus.dta_offset = dx;                            
+                    cpu.bus.dta_offset = dx;
                     // println!("[DOS] Set DTA to {:04X}:{:04X}", ds, dx);
-                } 
+                }
 
                 // AH = 25h: Set Interrupt Vector
                 // Entry: AL = Interrupt Number
@@ -644,20 +682,23 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     let int_num = cpu.get_al() as usize;
                     let new_off = cpu.dx;
                     let new_seg = cpu.ds;
-                    
+
                     // The IVT is located at 0x00000 in RAM.
                     // Each entry is 4 bytes: Offset (2 bytes), Segment (2 bytes).
                     let phys_addr = int_num * 4;
-                    
+
                     // Write Offset (Little Endian)
                     cpu.bus.write_8(phys_addr, (new_off & 0xFF) as u8);
                     cpu.bus.write_8(phys_addr + 1, (new_off >> 8) as u8);
-                    
+
                     // Write Segment (Little Endian)
                     cpu.bus.write_8(phys_addr + 2, (new_seg & 0xFF) as u8);
                     cpu.bus.write_8(phys_addr + 3, (new_seg >> 8) as u8);
-                    
-                    cpu.bus.log_string(&format!("[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}", int_num, new_seg, new_off));
+
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}",
+                        int_num, new_seg, new_off
+                    ));
                 }
 
                 // AH=2Fh: Get DTA Address
@@ -687,12 +728,12 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 0x35 => {
                     let int_num = cpu.get_al() as usize;
                     let phys_addr = int_num * 4;
-                    
+
                     // Read Offset
                     let off_low = cpu.bus.read_8(phys_addr) as u16;
                     let off_high = cpu.bus.read_8(phys_addr + 1) as u16;
                     cpu.bx = (off_high << 8) | off_low;
-                    
+
                     // Read Segment
                     let seg_low = cpu.bus.read_8(phys_addr + 2) as u16;
                     let seg_high = cpu.bus.read_8(phys_addr + 3) as u16;
@@ -701,24 +742,24 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                 // AH=36h: Get Disk Free Space
                 0x36 => {
-                    let dl = cpu.get_reg8(Register::DL); 
+                    let dl = cpu.get_reg8(Register::DL);
                     match cpu.bus.disk.get_disk_free_space(dl) {
                         Ok((sectors, available, bytes_per_sec, total)) => {
                             cpu.set_reg16(Register::AX, sectors);
-                            
+
                             // Cap clusters to 20,000 (approx 80MB) to prevent overflow in old apps
                             // 0xFFFF clusters * 4KB = 256MB might break string formatting
-                            cpu.set_reg16(Register::BX, std::cmp::min(available, 20000)); 
-                            
+                            cpu.set_reg16(Register::BX, std::cmp::min(available, 20000));
+
                             cpu.set_reg16(Register::CX, bytes_per_sec);
                             cpu.set_reg16(Register::DX, std::cmp::min(total, 20000));
-                        },
+                        }
                         Err(_) => {
-                            cpu.set_reg16(Register::AX, 0xFFFF); 
+                            cpu.set_reg16(Register::AX, 0xFFFF);
                         }
                     }
                 }
-                
+
                 // AH = 3Dh: Open File
                 0x3D => {
                     let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
@@ -769,7 +810,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             }
                         }
                         cpu.ax = read_count as u16;
-                        cpu.set_flag(crate::cpu::FLAG_CF, false); 
+                        cpu.set_flag(crate::cpu::FLAG_CF, false);
                     } else {
                         // Disk Read
                         // We assume bus.disk.read_file returns Result<Vec<u8>, u16>
@@ -860,7 +901,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     let al = cpu.get_reg8(Register::AL);
                     // AL=00 (Get), AL=01 (Set)
                     // DS:DX = Filename (ASCIIZ)
-                            
+
                     // TODO: Read filename from DS:DX and get/set attributes
                     // For now, assume success/archive to prevent crashing
                     if al == 0x00 {
@@ -875,21 +916,21 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // AH=47h: Get Current Directory
                 0x47 => {
                     let _dl = cpu.get_reg8(Register::DL);
-                    // Drive 0=Default, 1=A, ... 3=C. 
+                    // Drive 0=Default, 1=A, ... 3=C.
                     // Note: DOS AH=47 takes 0=Default, but we only simulate C: (drive 3 or default)
                     // We assume any query is valid for now.
-                    
+
                     let ds = cpu.ds;
                     let si = cpu.get_reg16(Register::SI);
                     let addr = cpu.get_physical_addr(ds, si);
-                    
+
                     // Clear 64-byte buffer first
                     for i in 0..64 {
                         cpu.bus.write_8(addr + i, 0x00);
                     }
-                    
+
                     // Return success (Root directory "")
-                    cpu.set_reg16(Register::AX, 0x0100); 
+                    cpu.set_reg16(Register::AX, 0x0100);
                     cpu.set_flag(crate::cpu::FLAG_CF, false);
                 }
 
@@ -899,7 +940,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // Return: CF set on error, AX = error code
                 0x4A => {
                     let requested_size = cpu.get_reg16(Register::BX);
-                    
+
                     // We simulate 640KB of Conventional Memory (0xA000 paragraphs)
                     // The program is loaded at 0x1000 (PSP).
                     // Available size = 0xA000 - 0x1000 = 0x9000 paragraphs.
@@ -916,13 +957,14 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     } else {
                         // Success
                         cpu.bus.log_string("[DEBUG] -> Approved.");
-                        cpu.set_flag(crate::cpu::FLAG_CF, false); 
+                        cpu.set_flag(crate::cpu::FLAG_CF, false);
                     }
                 }
 
                 // AH = 4Ch: Terminate Program
                 0x4C => {
-                    cpu.bus.log_string("[DOS] Program Terminated (INT 21h, 4Ch).");
+                    cpu.bus
+                        .log_string("[DOS] Program Terminated (INT 21h, 4Ch).");
                     cpu.state = CpuState::RebootShell;
                 }
 
@@ -939,70 +981,97 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                     // DTA Layout Constants
                     const OFFSET_ATTR_SEARCH: usize = 12; // Where DOS remembers what we are looking for
-                    const OFFSET_INDEX: usize = 13;       // Where DOS remembers how far we got
-                    
+                    const OFFSET_INDEX: usize = 13; // Where DOS remembers how far we got
+
                     // Determine Index & Search Attribute
                     let (index, search_attr) = if ah == 0x4E {
-                        cpu.bus.log_string("[DEBUG] FindFirst (AH=4E) - Resetting Index to 0");
+                        cpu.bus
+                            .log_string("[DEBUG] FindFirst (AH=4E) - Resetting Index to 0");
                         // FindFirst: Start at 0, Read Attribute from CX
                         (0, cpu.cx)
                     } else {
                         // FindNext: Read Index AND Attribute from DTA
                         let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
                         let attr = cpu.bus.read_8(dta_phys + OFFSET_ATTR_SEARCH) as u16;
-                        cpu.bus.log_string(&format!("[DEBUG] FindNext (AH=4F) - Read Index {} from DTA@{:#05X}", idx, dta_phys + OFFSET_INDEX));
+                        cpu.bus.log_string(&format!(
+                            "[DEBUG] FindNext (AH=4F) - Read Index {} from DTA@{:#05X}",
+                            idx,
+                            dta_phys + OFFSET_INDEX
+                        ));
                         (idx, attr)
                     };
 
                     match cpu.bus.disk.find_directory_entry("*.*", index, search_attr) {
                         Ok(entry) => {
-                            cpu.bus.log_string(&format!("[DEBUG] -> Disk returned: {}", entry.filename));
-                            // Populate DTA
+                            cpu.bus.log_string(&format!(
+                                "[DEBUG] -> Disk returned: {}",
+                                entry.filename
+                            ));
+
+                            // Setup DTA for FindFirst (AH=4E)
                             if ah == 0x4E {
-                                // Initialize DTA: Drive 3 (C:), Template '?'
-                                cpu.bus.write_8(dta_phys + 0, 3); 
-                                for i in 1..12 { cpu.bus.write_8(dta_phys + i as usize, b'?'); }
-                                
-                                // Save the search attribute so FindNext works
-                                cpu.bus.write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
+                                // Drive 3 (C:), and a generic search template
+                                cpu.bus.write_8(dta_phys + 0, 3);
+                                // for i in 1..12 {
+                                //     cpu.bus.write_8(dta_phys + i as usize, b'?');
+                                // }
+
+                                // Persist the search attribute for FindNext
+                                cpu.bus
+                                    .write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
                             }
 
-                            // Update Index for next call
-                            cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
-                            cpu.bus.log_string(&format!("[DEBUG] -> Wrote Next Index {} to DTA@{:#05X}", (index+1), dta_phys + OFFSET_INDEX));
+                            // Update Index (Critical for the loop to progress)
+                            cpu.bus
+                                .write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
+
+                            // Add a fake unique cluster ID
+                            let unique_id = (index as u16).wrapping_add(0x1234); 
+                            cpu.bus.write_16(dta_phys + 15, unique_id); 
+                            cpu.bus.write_16(dta_phys + 17, unique_id.wrapping_mul(2));
 
                             // File Attributes (Offset 21)
                             let mut attr = if entry.is_dir { 0x10 } else { 0x20 };
-                            if entry.filename == "RUSTDOS" { attr = 0x08; }
+                            if entry.filename == "RUSTDOS" {
+                                attr = 0x08;
+                            }
                             cpu.bus.write_8(dta_phys + 21, attr);
 
-                            // Time/Date (Offset 22/24)
-                            cpu.bus.write_16(dta_phys + 22, 0x6000); 
-                            cpu.bus.write_16(dta_phys + 24, 0x2821); 
+                            // Time/Date (Stubbed to valid DOS dates)
+                            cpu.bus.write_16(dta_phys + 22, entry.dos_time); 
+                            cpu.bus.write_16(dta_phys + 24, entry.dos_date);
 
-                            // Size (Offset 26)
-                            cpu.bus.write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
+                            // File Size (Offset 26)
+                            cpu.bus
+                                .write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
                             cpu.bus.write_16(dta_phys + 28, (entry.size >> 16) as u16);
 
-                            // Filename (Offset 30) - 13 bytes max
+                            // Filename (Offset 30)
+                            let name_start = dta_phys + 30;
+                            // Explicitly zero out the entire 13-byte buffer first.
+                            for i in 0..13 {
+                                cpu.bus.write_8(name_start + i, 0x00);
+                            }
+
+                            // Write the new filename
                             let name_bytes = entry.filename.as_bytes();
-                            let len = std::cmp::min(name_bytes.len(), 12);
+                            let len = std::cmp::min(name_bytes.len(), 12); // Max 12 chars (8.3)
 
                             for i in 0..len {
-                                cpu.bus.write_8(dta_phys + 30 + i as usize, name_bytes[i]);
+                                cpu.bus.write_8(name_start + i, name_bytes[i]);
                             }
-                            cpu.bus.write_8(dta_phys + 30 + len as usize, 0x00);
-                            
-                            // Zero-pad rest of filename buffer
-                            for i in (len + 1)..13 {
-                                cpu.bus.write_8(dta_phys + 30 + i as usize, 0x00);
-                            }
+                            // Null terminator is already there because we zeroed the buffer.
 
-                            cpu.set_reg16(Register::AX, 0); // Success
+                            let verify_char = cpu.bus.read_8(name_start) as char;
+                            cpu.bus.log_string(&format!("[DEBUG] Wrote '{}' to DTA. Verification read of first char: '{}'", entry.filename, verify_char));
+
+                            // Success
+                            cpu.set_reg16(Register::AX, 0);
                             cpu.set_flag(crate::cpu::FLAG_CF, false);
-                        },
+                        }
                         Err(code) => {
-                            cpu.bus.log_string("[DEBUG] -> Disk returned Error (End of List)");
+                            cpu.bus
+                                .log_string("[DEBUG] -> Disk returned Error (End of List)");
                             cpu.set_reg16(Register::AX, code as u16);
                             cpu.set_flag(crate::cpu::FLAG_CF, true);
                         }
@@ -1012,11 +1081,15 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // AH = 00h: Terminate Program (Legacy Method)
                 // Functionally identical to AH=4Ch for our purposes
                 0x00 => {
-                    cpu.bus.log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
+                    cpu.bus
+                        .log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
                     cpu.state = CpuState::RebootShell;
                 }
 
-                _ => cpu.bus.log_string(&format!("[DOS] Unhandled Call Int 0x21 AH={:02X}", cpu.get_ah())),
+                _ => cpu.bus.log_string(&format!(
+                    "[DOS] Unhandled Call Int 0x21 AH={:02X}",
+                    cpu.get_ah()
+                )),
             }
         }
 
@@ -1032,19 +1105,24 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 0x0000 => {
                     // Return 0 in AX to say "No Mouse Installed"
                     // (0xFFFF = "Mouse Installed")
-                    cpu.ax = 0x0000; 
+                    cpu.ax = 0x0000;
                     cpu.bx = 0; // Number of buttons
                 }
-                _ => cpu.bus.log_string(&format!("[MOUSE] Unhandled Call Int 0x33 AX={:04X}", ax)),
+                _ => cpu
+                    .bus
+                    .log_string(&format!("[MOUSE] Unhandled Call Int 0x33 AX={:04X}", ax)),
             }
         }
 
         0x4C => {
-            cpu.bus.log_string("[DOS] Program Exited. Rebooting Shell...");
+            cpu.bus
+                .log_string("[DOS] Program Exited. Rebooting Shell...");
             cpu.state = CpuState::RebootShell;
         }
 
         // Catch-all
-        _ => cpu.bus.log_string(&format!("[CPU] Unhandled Interrupt Vector {:02X}", vector)),
+        _ => cpu
+            .bus
+            .log_string(&format!("[CPU] Unhandled Interrupt Vector {:02X}", vector)),
     }
 }

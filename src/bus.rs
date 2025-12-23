@@ -87,6 +87,10 @@ impl Bus {
     }
 
     pub fn read_8(&self, addr: usize) -> u8 {
+        if addr >= 0x116F2 && addr < 0x116F2 + 12 {
+             println!("[MEM WATCH] CPU reading DTA Filename @ {:05X}. Value: {:02X} ({})", 
+                      addr, self.ram[addr], self.ram[addr] as char);
+        }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             self.vram_graphics[addr - ADDR_VGA_GRAPHICS]
         } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
@@ -120,12 +124,13 @@ impl Bus {
     }
 
     // Write a 16-bit value to memory (Little Endian)
-    pub fn write_16(&mut self, addr: usize, value: u16) {
-        self.write_8(addr, (value & 0xFF) as u8);        // Low Byte
-        self.write_8(addr + 1, (value >> 8) as u8);      // High Byte
+    pub fn write_16(&mut self, addr: usize, value: u16) -> bool {
+        let d1 = self.write_8(addr, (value & 0xFF) as u8);          // Low byte
+        let d2 = self.write_8(addr + 1, (value >> 8) as u8);  // High byte
+        d1 || d2
     }
     
-    // Optional: read_16 helper if you don't have it yet
+    // read_16 helper
     pub fn read_16(&self, addr: usize) -> u16 {
         let low = self.read_8(addr) as u16;
         let high = self.read_8(addr + 1) as u16;

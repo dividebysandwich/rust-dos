@@ -7,3 +7,4 @@ edition = "2024"
 iced-x86 = "1.21.0"
 sdl2 = { version = "0.38" }
 font8x8 = "0.3.1"
+chrono = "0.4"

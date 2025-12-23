@@ -19,7 +19,6 @@ pub fn run_dir_command(cpu: &mut Cpu) {
             }
         }
     }
-    print_string(cpu, "\r\n");
 }
 
 pub fn run_type_command(cpu: &mut Cpu, filename: &str) {

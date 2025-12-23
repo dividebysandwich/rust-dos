@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use chrono::{DateTime, Local, Datelike, Timelike};
 
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
 pub const FIRST_USER_HANDLE: u16 = 5;
@@ -12,6 +13,8 @@ pub struct DosDirEntry {
     pub size: u32,
     pub is_dir: bool,
     pub is_readonly: bool,
+    pub dos_time: u16,
+    pub dos_date: u16,
 }
 
 pub struct DiskController {
@@ -158,70 +161,157 @@ impl DiskController {
     // INT 21h, AH=47h: Get Current Directory
     // Returns the path string relative to root, e.g., "GAMES\DOOM"
     // For now, we assume root (""), so we return an empty string.
-    pub fn get_current_directory(&self, _drive: u8) -> Result<String, u8> {
-        // In a real emulator, map this to an internal "CWD" state variable.
-        // For 'd.com', returning empty string (root) is sufficient.
-        Ok(String::new()) 
+    fn to_short_name(filename: &str) -> (String, String) {
+        let filename = filename.to_uppercase();
+        
+        // Split into Stem and Extension
+        // If file starts with "." (e.g. .gitignore), treat whole thing as extension or invalid
+        // Standard logic: rsplit_once finds the LAST dot.
+        let (stem, ext) = match filename.rsplit_once('.') {
+            Some((s, e)) => (s, e),
+            None => (filename.as_str(), ""),
+        };
+
+        // Filter invalid chars from Stem (Keep A-Z, 0-9, _, -, etc)
+        // DOS invalid chars: . " / \ [ ] : | < > + = ; , space
+        let mut clean_stem: String = stem.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "!@#$%^&()-_'{}`~".contains(*c))
+            .collect();
+        
+        // Filter invalid chars from Ext
+        let mut clean_ext: String = ext.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+
+        // 1. Truncate Extension to 3 chars immediately
+        if clean_ext.len() > 3 { clean_ext.truncate(3); }
+
+        // 2. Truncate Stem to 8 chars (Base assumption, will shrink if collision)
+        if clean_stem.len() > 8 { clean_stem.truncate(8); }
+
+        // Edge case: If stem is empty (e.g. ".gitignore"), mapping is tricky.
+        // Usually becomes "GITIGNOR" with empty ext, or "NONAME".
+        if clean_stem.is_empty() {
+            clean_stem = "NONAME".to_string();
+        }
+
+        (clean_stem, clean_ext)
     }
 
     // INT 21h, AH=4E/4F: Find First / Find Next
     // Added 'search_attr' parameter to handle Volume Labels
     pub fn find_directory_entry(&self, search_pattern: &str, search_index: usize, search_attr: u16) -> Result<DosDirEntry, u8> {
         
-        // CHECK FOR VOLUME LABEL REQUEST (Bit 3)
-        // DOS behavior: If Bit 3 is set, strictly look for volume label.
+        // Handle Volume Label
         if (search_attr & 0x08) != 0 {
             if search_index == 0 {
                 return Ok(DosDirEntry {
-                    filename: "RUSTDOS".to_string(), // Fake Volume Label
+                    filename: "RUSTDOS".to_string(),
                     size: 0,
                     is_dir: false,
                     is_readonly: false,
-                    // We must ensure the attribute has 0x08 set
-                    // We return a special flag or handle it in interrupt.rs
-                    // Here we just identify it.
+                    dos_time: 0x0000, 
+                    dos_date: 0x5021,
                 });
             } else {
-                return Err(0x12); // No more files (only 1 label exists)
+                return Err(0x12);
             }
         }
 
-        println!("[DISK] Searching for Index {} in '.' (Pattern: {})", search_index, search_pattern);
-
-        // NORMAL SEARCH (Host Filesystem)
-        let paths = fs::read_dir(".").map_err(|_| 0x03)?; 
+        // Build Virtual File List (Stateless -> Stateful)
+        let paths = fs::read_dir(".").map_err(|_| 0x03)?;
         
-        let mut found_count = 0;
+        // Key: "STEM.EXT", Value: Collision Count
+        let mut generated_names: HashMap<String, usize> = HashMap::new();
+        let mut valid_entries: Vec<DosDirEntry> = Vec::new();
 
         for entry in paths {
             if let Ok(entry) = entry {
-                let filename = entry.file_name().to_string_lossy().into_owned();
+                let original_name = entry.file_name().to_string_lossy().into_owned();
 
-                println!("[DISK] Scanned: '{}' ... ", filename);
+                // Skip dotfiles (Hidden in Unix, not standard in DOS unless explicitly mapped)
+                if original_name.starts_with('.') { continue; }
 
-                // Skip hidden/dotfiles
-                if filename.starts_with('.') {
-                    println!("Skipped (Dotfile)");
-                    continue; 
-                }
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
 
-                if found_count == search_index {
-                    println!("MATCH! Returning this file.");
-                    let metadata = entry.metadata().map_err(|_| 0x05)?;
+                // 8.3 Normalization
+                let (stem, ext) = Self::to_short_name(&original_name);
+                
+                // Construct the "Base" 8.3 name to check for collisions
+                // Note: We use the full dot format for the key, even if ext is empty, just for uniqueness checks.
+                // But generally key = stem is enough if ext is empty.
+                let base_key = if ext.is_empty() { stem.clone() } else { format!("{}.{}", stem, ext) };
+                
+                let count = *generated_names.get(&base_key).unwrap_or(&0);
+                
+                let final_name = if count == 0 {
+                    // No collision yet. Use the normalized name as-is.
+                    generated_names.insert(base_key, 1);
                     
-                    return Ok(DosDirEntry {
-                        filename: filename.to_uppercase(),
-                        size: metadata.len() as u32,
-                        is_dir: metadata.is_dir(),
-                        is_readonly: metadata.permissions().readonly(),
-                    });
-                }
-                println!("Ignored (Index {} != {})", found_count, search_index);
-                found_count += 1;
+                    if ext.is_empty() {
+                        stem // No dot
+                    } else {
+                        format!("{}.{}", stem, ext)
+                    }
+                } else {
+                    // Collision detected! Generate ~N name.
+                    generated_names.insert(base_key.clone(), count + 1);
+                    
+                    // Generate Tilde Suffix
+                    let suffix = format!("~{}", count); // e.g., "~1" or "~12"
+                    
+                    // We must ensure (Stem + Suffix).len() <= 8
+                    let available_len = 8usize.saturating_sub(suffix.len());
+                    
+                    let short_stem = if stem.len() > available_len {
+                        &stem[0..available_len]
+                    } else {
+                        &stem
+                    };
+                    
+                    if ext.is_empty() {
+                        format!("{}{}", short_stem, suffix) // "FILE~1" (No dot)
+                    } else {
+                        format!("{}{}.{}", short_stem, suffix, ext) // "FILE~1.TXT"
+                    }
+                };
+
+                // Date/Time Conversion 
+                let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
+                let datetime: DateTime<Local> = sys_time.into();
+
+                let dos_time = ((datetime.hour() as u16) << 11)
+                             | ((datetime.minute() as u16) << 5)
+                             | ((datetime.second() as u16) / 2);
+
+                let year = datetime.year();
+                let dos_date = if year < 1980 { 0x0021 } else {
+                    (((year - 1980) as u16) << 9)
+                    | ((datetime.month() as u16) << 5)
+                    | (datetime.day() as u16)
+                };
+
+                valid_entries.push(DosDirEntry {
+                    filename: final_name,
+                    size: metadata.len() as u32,
+                    is_dir: metadata.is_dir(),
+                    is_readonly: metadata.permissions().readonly(),
+                    dos_time,
+                    dos_date,
+                });
             }
         }
 
-        println!("[DISK] End of Directory. Total files found: {}", found_count);
-        Err(0x12) // No More Files
+        // Return Requested Index
+        if search_index < valid_entries.len() {
+            let entry = valid_entries.remove(search_index);
+            // println!("[DISK] Index {}: {} ({})", search_index, entry.filename, if entry.is_dir { "DIR" } else { "FILE" });
+            Ok(entry)
+        } else {
+            Err(0x12) // No More Files
+        }
     }
 }

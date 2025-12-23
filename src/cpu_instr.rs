@@ -2463,6 +2463,11 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             // Do nothing
         }
 
+        // Mnemonic::Hlt => {
+        //     cpu.halted = true;
+        //     cpu.bus.log_string("[CPU] HLT encountered. CPU halted.");
+        // }
+
         _ => {
             cpu.bus.log_string(&format!("[CPU] Unhandled Instruction: {}", instr));
         }
