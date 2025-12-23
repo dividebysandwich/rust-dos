@@ -22,6 +22,8 @@ pub struct Bus {
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
     pub audio_phase: f32,    // Track wave position to prevent clicking
     pub log_file: Option<std::fs::File>,
+    pub dta_segment: u16,
+    pub dta_offset: u16,
 }
 
 impl Bus {
@@ -43,6 +45,8 @@ impl Bus {
             pit_write_msb: false,
             audio_phase: 0.0,
             log_file: None,
+            dta_segment: 0x1000,
+            dta_offset: 0x0000,
         }
     }
 

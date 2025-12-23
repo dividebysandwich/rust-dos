@@ -1,16 +1,25 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write}; // Added Seek and SeekFrom
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
-// We start assigning new file handles at 5.
 pub const FIRST_USER_HANDLE: u16 = 5;
+
+/// Helper struct to transfer directory search results back to the CPU
+pub struct DosDirEntry {
+    pub filename: String,
+    pub size: u32,
+    pub is_dir: bool,
+    pub is_readonly: bool,
+}
 
 pub struct DiskController {
     // Map DOS Handle (u16) -> Rust File Object
     open_files: HashMap<u16, File>,
     next_handle: u16,
+    // We assume 'C:' corresponds to the host current working directory
+    current_drive: u8, 
 }
 
 impl DiskController {
@@ -18,19 +27,20 @@ impl DiskController {
         Self {
             open_files: HashMap::new(),
             next_handle: FIRST_USER_HANDLE,
+            current_drive: 2, // Default to C:
         }
     }
 
+    // ========================================================================
+    // FILE I/O OPERATIONS (Existing)
+    // ========================================================================
+
     // INT 21h, AH=3Dh: Open File
-    // Returns: Result<Handle, ErrorCode>
     pub fn open_file(&mut self, filename: &str, mode: u8) -> Result<u16, u8> {
         let path = Path::new(filename);
-
-        // DOS Mode (AL & 0x03): 0=Read, 1=Write, 2=Read/Write
-        // IMPORTANT: 3Dh does NOT create files. That is 3Ch.
-        // We must return Error 02 (File Not Found) if it doesn't exist.
-        
         let mut options = OpenOptions::new();
+        
+        // DOS Mode (AL & 0x03): 0=Read, 1=Write, 2=Read/Write
         match mode & 0x03 {
             0 => { options.read(true); },
             1 => { options.write(true); },
@@ -52,29 +62,22 @@ impl DiskController {
 
     // INT 21h, AH=3Eh: Close File
     pub fn close_file(&mut self, handle: u16) -> bool {
-        if self.open_files.remove(&handle).is_some() {
-            // println!("[DISK] Closed Handle {}", handle);
-            true
-        } else {
-            false
-        }
+        self.open_files.remove(&handle).is_some()
     }
 
     // INT 21h, AH=3Fh: Read from File
-    // Changed signature to return Vec<u8> to simplify the CPU logic
     pub fn read_file(&mut self, handle: u16, count: usize) -> Result<Vec<u8>, u16> {
         if let Some(file) = self.open_files.get_mut(&handle) {
-            let mut buffer = vec![0u8; count]; // Allocate buffer
+            let mut buffer = vec![0u8; count];
             match file.read(&mut buffer) {
                 Ok(bytes_read) => {
-                    // Truncate vector to the actual number of bytes read (handle EOF)
                     buffer.truncate(bytes_read);
                     Ok(buffer)
                 },
-                Err(_) => Err(0x05), // Error 05: Access Denied
+                Err(_) => Err(0x05), // Access Denied
             }
         } else {
-            Err(0x06) // Error 06: Invalid Handle
+            Err(0x06) // Invalid Handle
         }
     }
 
@@ -90,23 +93,98 @@ impl DiskController {
         }
     }
 
-    // INT 21h, AH=42h: LSEEK (Move File Pointer)
-    // Returns: New absolute position in file
+    // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
         if let Some(file) = self.open_files.get_mut(&handle) {
             let seek_from = match origin {
-                0 => SeekFrom::Start(offset as u64), // Offset from Beginning
-                1 => SeekFrom::Current(offset),      // Offset from Current Position
-                2 => SeekFrom::End(offset),          // Offset from End of File
-                _ => return Err(0x01),               // Error 01: Invalid Function
+                0 => SeekFrom::Start(offset as u64),
+                1 => SeekFrom::Current(offset),
+                2 => SeekFrom::End(offset),
+                _ => return Err(0x01),
             };
-
             match file.seek(seek_from) {
                 Ok(new_pos) => Ok(new_pos),
-                Err(_) => Err(0x19), // Error 19: Seek Error
+                Err(_) => Err(0x19), // Seek Error
             }
         } else {
-            Err(0x06) // Error 06: Invalid Handle
+            Err(0x06)
         }
+    }
+
+    // ========================================================================
+    // FILESYSTEM METADATA & SEARCH (New Helpers)
+    // ========================================================================
+
+    // INT 21h, AH=19h: Get Current Default Drive
+    pub fn get_current_drive(&self) -> u8 {
+        self.current_drive
+    }
+
+    // INT 21h, AH=36h: Get Disk Free Space
+    // Returns: (Sectors/Cluster, Available Clusters, Bytes/Sector, Total Clusters)
+    pub fn get_disk_free_space(&self, drive: u8) -> Result<(u16, u16, u16, u16), u16> {
+        // If drive is 0 (Default) or 2 (C:), we return fake stats.
+        // Otherwise, invalid drive.
+        if drive == 0 || drive == 2 {
+            // Fake 2GB drive
+            Ok((8, 0xFFFF, 512, 0xFFFF)) 
+        } else {
+            Err(0x0F) // Invalid Drive
+        }
+    }
+
+    // INT 21h, AH=43h: Get File Attributes
+    // Returns: Attribute Byte (0x20 = Archive, 0x10 = Subdir, etc.)
+    pub fn get_file_attribute(&self, filename: &str) -> Result<u16, u8> {
+        let path = Path::new(filename);
+        if path.exists() {
+            if path.is_dir() {
+                Ok(0x10) // Directory
+            } else {
+                Ok(0x20) // Archive (Standard File)
+            }
+        } else {
+            Err(0x02) // File Not Found
+        }
+    }
+
+    // INT 21h, AH=47h: Get Current Directory
+    // Returns the path string relative to root, e.g., "GAMES\DOOM"
+    // For now, we assume root (""), so we return an empty string.
+    pub fn get_current_directory(&self, _drive: u8) -> Result<String, u8> {
+        // In a real emulator, map this to an internal "CWD" state variable.
+        // For 'd.com', returning empty string (root) is sufficient.
+        Ok(String::new()) 
+    }
+
+    // INT 21h, AH=4E/4F: Find First / Find Next
+    // This helper scans the HOST directory and returns the Nth entry found.
+    pub fn find_directory_entry(&self, search_pattern: &str, search_index: usize) -> Result<DosDirEntry, u8> {
+        // Note: For simple emulation, we ignore 'search_pattern' (like *.COM) and return everything.
+        // Implementing glob matching here would be the next step for accuracy.
+        
+        let paths = fs::read_dir(".").map_err(|_| 0x03)?; // 0x03 = Path Not Found
+        
+        let mut current_idx = 0;
+
+        for entry in paths {
+            if let Ok(entry) = entry {
+                // If we reached the index requested by the DTA state...
+                if current_idx == search_index {
+                    let metadata = entry.metadata().map_err(|_| 0x05)?; // Access Denied
+                    let filename = entry.file_name().to_string_lossy().into_owned();
+                    
+                    return Ok(DosDirEntry {
+                        filename: filename.to_uppercase(), // DOS is uppercase
+                        size: metadata.len() as u32,
+                        is_dir: metadata.is_dir(),
+                        is_readonly: metadata.permissions().readonly(),
+                    });
+                }
+                current_idx += 1;
+            }
+        }
+
+        Err(0x12) // Error 18: No More Files
     }
 }

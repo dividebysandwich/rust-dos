@@ -1994,6 +1994,10 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             }
         }
 
+        Mnemonic::Nop => {
+            // Do nothing
+        }
+
         _ => {
             cpu.bus.log_string(&format!("[CPU] Unhandled Instruction: {}\n", instr));
         }

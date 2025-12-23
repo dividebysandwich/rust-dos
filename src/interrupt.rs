@@ -2,9 +2,10 @@ use iced_x86::Register;
 
 use crate::audio::play_sdl_beep;
 use crate::command::{run_dir_command, run_type_command};
-use crate::cpu::{Cpu, CpuState};
+use crate::cpu::{Cpu, CpuState, FLAG_CF};
 use crate::video::{print_char, print_string, VideoMode};
 use crate::Bus;
+
 
 // Helper to read a string from memory (DS:DX) until 0x00 (ASCIIZ)
 fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
@@ -608,6 +609,22 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     }
                 }
 
+                // AH=19h: Get Current Default Drive
+                0x19 => {
+                    let drive = cpu.bus.disk.get_current_drive();
+                    cpu.set_reg8(Register::AL, drive);
+                }         
+
+                // AH=1Ah: Set Disk Transfer Area (DTA) Address
+                0x1A => {
+                    let ds = cpu.ds; // Segment
+                    let dx = cpu.get_reg16(Register::DX); // Offset
+                            
+                    cpu.bus.dta_segment = ds;
+                    cpu.bus.dta_offset = dx;                            
+                    // println!("[DOS] Set DTA to {:04X}:{:04X}", ds, dx);
+                } 
+
                 // AH = 25h: Set Interrupt Vector
                 // Entry: AL = Interrupt Number
                 //        DS:DX = Address of new handler
@@ -630,6 +647,13 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.bus.write_8(phys_addr + 3, (new_seg >> 8) as u8);
                     
                     cpu.bus.log_string(&format!("[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}", int_num, new_seg, new_off));
+                }
+
+                // AH=2Fh: Get DTA Address
+                0x2F => {
+                    // Return the stored DTA address in ES:BX
+                    cpu.es = cpu.bus.dta_segment;
+                    cpu.set_reg16(Register::BX, cpu.bus.dta_offset);
                 }
 
                 // AH = 30h: Get DOS Version
@@ -664,6 +688,21 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.es = (seg_high << 8) | seg_low;
                 }
 
+                // AH=36h: Get Disk Free Space
+                0x36 => {
+                    let dl = cpu.get_reg8(Register::DL); // Drive Number
+                    match cpu.bus.disk.get_disk_free_space(dl) {
+                        Ok((sectors_per_cluster, available, bytes_per_sector, total)) => {
+                            cpu.set_reg16(Register::AX, sectors_per_cluster);
+                            cpu.set_reg16(Register::BX, available);
+                            cpu.set_reg16(Register::CX, bytes_per_sector);
+                            cpu.set_reg16(Register::DX, total);
+                        },
+                        Err(_) => {
+                            cpu.set_reg16(Register::AX, 0xFFFF); // Error indication
+                        }
+                    }
+                }
                 // AH = 3Dh: Open File
                 0x3D => {
                     let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
@@ -800,6 +839,46 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     }
                 }
 
+                // AH=43h: Get/Set File Attributes
+                0x43 => {
+                    let al = cpu.get_reg8(Register::AL);
+                    // AL=00 (Get), AL=01 (Set)
+                    // DS:DX = Filename (ASCIIZ)
+                            
+                    // TODO: Read filename from DS:DX and get/set attributes
+                    // For now, assume success/archive to prevent crashing
+                    if al == 0x00 {
+                        cpu.set_reg16(Register::CX, 0x20); // Attribute: Archive
+                        cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
+                    } else {
+                        // Set attributes (Ignored)
+                        cpu.set_flag(crate::cpu::FLAG_CF, false);
+                    }
+                }
+
+                // AH=47h: Get Current Directory
+                0x47 => {
+                    let dl = cpu.get_reg8(Register::DL);
+                    if let Ok(path) = cpu.bus.disk.get_current_directory(dl) {
+                        let ds = cpu.ds;
+                        let si = cpu.get_reg16(Register::SI);
+                        let mut addr = cpu.get_physical_addr(ds, si);
+                        
+                        // Write path to DS:SI
+                        for byte in path.bytes() {
+                            cpu.bus.write_8(addr, byte);
+                            addr += 1;
+                        }
+                        cpu.bus.write_8(addr, 0x00); // Null terminator
+                        
+                        cpu.set_reg16(Register::AX, 0x0100); // Success
+                        cpu.set_flag(FLAG_CF, false);
+                    } else {
+                        cpu.set_reg16(Register::AX, 0x0F); // Invalid Drive
+                        cpu.set_flag(FLAG_CF, true);
+                    }
+                }
+
                 // AH = 4Ah: Resize Memory Block (SETBLOCK)
                 // Entry: ES = Segment of block to modify
                 //        BX = New size in paragraphs (16 bytes)
@@ -815,8 +894,63 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // AH = 4Ch: Terminate Program
                 0x4C => {
                     cpu.bus.log_string("[DOS] Program Terminated (INT 21h, 4Ch).");
-                    std::process::exit(0);
+                    cpu.state = CpuState::RebootShell;
                 }
+
+                // AH=4Eh: Find First File
+                // AH=4Fh: Find Next File
+                0x4E | 0x4F => {
+                    // 1. Locate DTA
+                    let dta_seg = cpu.bus.dta_segment;
+                    let dta_off = cpu.bus.dta_offset;
+                    let dta_phys = cpu.get_physical_addr(dta_seg, dta_off);
+
+                    // Determine Search Index
+                    // FindFirst (4E) starts at 0. FindNext (4F) reads state from DTA.
+                    let index = if ah == 0x4E {
+                        0
+                    } else {
+                        cpu.bus.read_16(dta_phys) as usize
+                    };
+
+                    // Ask Disk Controller for File Info
+                    // Note: We ignore the search pattern (DS:DX) for simplicity and list everything.
+                    match cpu.bus.disk.find_directory_entry("*.*", index) {
+                        Ok(entry) => {
+                            // --- Write to DOS DTA ---
+                            
+                            // Offset 0: Update Index for next call
+                            cpu.bus.write_16(dta_phys, (index + 1) as u16);
+
+                            // Offset 21: Attribute
+                            let attr = if entry.is_dir { 0x10 } else { 0x20 };
+                            cpu.bus.write_8(dta_phys + 21, attr);
+
+                            // Offset 22/24: Time/Date (Fake zeros)
+                            cpu.bus.write_16(dta_phys + 22, 0x0000);
+                            cpu.bus.write_16(dta_phys + 24, 0x0000);
+
+                            // Offset 26: File Size
+                            cpu.bus.write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
+                            cpu.bus.write_16(dta_phys + 28, (entry.size >> 16) as u16);
+
+                            // Offset 30: Filename (ASCIIZ, Max 13 bytes)
+                            let name_bytes = entry.filename.as_bytes();
+                            for (i, &b) in name_bytes.iter().take(12).enumerate() {
+                                cpu.bus.write_8(dta_phys + 30 + i as usize, b);
+                            }
+                            cpu.bus.write_8(dta_phys + 30 + name_bytes.len() as usize, 0x00);
+
+                            cpu.set_reg16(Register::AX, 0); // Success code
+                            cpu.set_flag(FLAG_CF, false);
+                        },
+                        Err(code) => {
+                            cpu.set_reg16(Register::AX, code as u16);
+                            cpu.set_flag(FLAG_CF, true);
+                        }
+                    }
+                }
+
                 // AH = 00h: Terminate Program (Legacy Method)
                 // Functionally identical to AH=4Ch for our purposes
                 0x00 => {
