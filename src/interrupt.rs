@@ -355,7 +355,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         }
                     }
                 }
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}\n", cpu.get_ah())),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),
             }
         }
 
@@ -403,7 +403,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
                 
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 15h AH={:02X}\n", ah)),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 15h AH={:02X}", ah)),
             }
         }
 
@@ -420,7 +420,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         cpu.ip = cpu.ip.wrapping_sub(2);
                     }
                 }
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}\n", ah)),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
             }
         }
 
@@ -468,7 +468,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
 
-                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 1A AH={:02X}\n", ah)),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 1A AH={:02X}", ah)),
             }
         }
 
@@ -502,7 +502,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
             let clean_cmd: String = clean_chars.into_iter().collect();
 
             cpu.bus.log_string(&format!(
-                "[SHELL DEBUG] Raw: {:?} | Cleaned: {:?}\n",
+                "[SHELL DEBUG] Raw: {:?} | Cleaned: {:?}",
                 raw_cmd, clean_cmd
             ));
 
@@ -541,7 +541,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     run_type_command(cpu, args);
                 }
             } else if command.eq_ignore_ascii_case("EXIT") {
-                cpu.bus.log_string("[SHELL] Exiting Emulator via command...\n");
+                cpu.bus.log_string("[SHELL] Exiting Emulator via command...");
                 std::process::exit(0);
             } else {
                 // Try to run as executable
@@ -611,8 +611,10 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                 // AH=19h: Get Current Default Drive
                 0x19 => {
-                    let drive = cpu.bus.disk.get_current_drive();
-                    cpu.set_reg8(Register::AL, drive);
+                    //let drive = cpu.bus.disk.get_current_drive();
+                    //cpu.set_reg8(Register::AL, drive);
+                    //TODO: Implement multiple drives
+                    cpu.set_reg8(Register::AL, 2);
                 }         
 
                 // AH=1Ah: Set Disk Transfer Area (DTA) Address
@@ -690,19 +692,24 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                 // AH=36h: Get Disk Free Space
                 0x36 => {
-                    let dl = cpu.get_reg8(Register::DL); // Drive Number
+                    let dl = cpu.get_reg8(Register::DL); 
                     match cpu.bus.disk.get_disk_free_space(dl) {
-                        Ok((sectors_per_cluster, available, bytes_per_sector, total)) => {
-                            cpu.set_reg16(Register::AX, sectors_per_cluster);
-                            cpu.set_reg16(Register::BX, available);
-                            cpu.set_reg16(Register::CX, bytes_per_sector);
-                            cpu.set_reg16(Register::DX, total);
+                        Ok((sectors, available, bytes_per_sec, total)) => {
+                            cpu.set_reg16(Register::AX, sectors);
+                            
+                            // Cap clusters to 20,000 (approx 80MB) to prevent overflow in old apps
+                            // 0xFFFF clusters * 4KB = 256MB might break string formatting
+                            cpu.set_reg16(Register::BX, std::cmp::min(available, 20000)); 
+                            
+                            cpu.set_reg16(Register::CX, bytes_per_sec);
+                            cpu.set_reg16(Register::DX, std::cmp::min(total, 20000));
                         },
                         Err(_) => {
-                            cpu.set_reg16(Register::AX, 0xFFFF); // Error indication
+                            cpu.set_reg16(Register::AX, 0xFFFF); 
                         }
                     }
                 }
+                
                 // AH = 3Dh: Open File
                 0x3D => {
                     let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
@@ -858,25 +865,23 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                 // AH=47h: Get Current Directory
                 0x47 => {
-                    let dl = cpu.get_reg8(Register::DL);
-                    if let Ok(path) = cpu.bus.disk.get_current_directory(dl) {
-                        let ds = cpu.ds;
-                        let si = cpu.get_reg16(Register::SI);
-                        let mut addr = cpu.get_physical_addr(ds, si);
-                        
-                        // Write path to DS:SI
-                        for byte in path.bytes() {
-                            cpu.bus.write_8(addr, byte);
-                            addr += 1;
-                        }
-                        cpu.bus.write_8(addr, 0x00); // Null terminator
-                        
-                        cpu.set_reg16(Register::AX, 0x0100); // Success
-                        cpu.set_flag(FLAG_CF, false);
-                    } else {
-                        cpu.set_reg16(Register::AX, 0x0F); // Invalid Drive
-                        cpu.set_flag(FLAG_CF, true);
+                    let _dl = cpu.get_reg8(Register::DL);
+                    // Drive 0=Default, 1=A, ... 3=C. 
+                    // Note: DOS AH=47 takes 0=Default, but we only simulate C: (drive 3 or default)
+                    // We assume any query is valid for now.
+                    
+                    let ds = cpu.ds;
+                    let si = cpu.get_reg16(Register::SI);
+                    let addr = cpu.get_physical_addr(ds, si);
+                    
+                    // Clear 64-byte buffer first
+                    for i in 0..64 {
+                        cpu.bus.write_8(addr + i, 0x00);
                     }
+                    
+                    // Return success (Root directory "")
+                    cpu.set_reg16(Register::AX, 0x0100); 
+                    cpu.set_flag(crate::cpu::FLAG_CF, false);
                 }
 
                 // AH = 4Ah: Resize Memory Block (SETBLOCK)
@@ -884,11 +889,26 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 //        BX = New size in paragraphs (16 bytes)
                 // Return: CF set on error, AX = error code
                 0x4A => {
-                    // In a real OS, we would check the heap manager.
-                    // Since we give the program the entire 640KB RAM array, 
-                    // we always pretend this succeeds.
-                    // If BX is impossibly large, we could fail, but for now: Success.
-                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                    let requested_size = cpu.get_reg16(Register::BX);
+                    
+                    // We simulate 640KB of Conventional Memory (0xA000 paragraphs)
+                    // The program is loaded at 0x1000 (PSP).
+                    // Available size = 0xA000 - 0x1000 = 0x9000 paragraphs.
+                    let max_available = 0x9000;
+
+                    cpu.bus.log_string(format!("[DEBUG] INT 21,4A Resize Mem: Requested {:04X} paras. Max Available: {:04X}", requested_size, max_available).as_str());
+
+                    if requested_size > max_available {
+                        // Protocol: If request is too big, FAIL and return max available in BX
+                        cpu.bus.log_string("[DEBUG] -> Denied. Returning max size.");
+                        cpu.set_reg16(Register::BX, max_available);
+                        cpu.set_reg16(Register::AX, 0x0008); // Error: Insufficient Memory
+                        cpu.set_flag(crate::cpu::FLAG_CF, true); // Set Carry Flag (Error)
+                    } else {
+                        // Success
+                        cpu.bus.log_string("[DEBUG] -> Approved.");
+                        cpu.set_flag(crate::cpu::FLAG_CF, false); 
+                    }
                 }
 
                 // AH = 4Ch: Terminate Program
@@ -900,61 +920,97 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // AH=4Eh: Find First File
                 // AH=4Fh: Find Next File
                 0x4E | 0x4F => {
-                    // 1. Locate DTA
                     let dta_seg = cpu.bus.dta_segment;
                     let dta_off = cpu.bus.dta_offset;
                     let dta_phys = cpu.get_physical_addr(dta_seg, dta_off);
 
-                    // 2. Determine Search Index
+                    // Standard DOS DTA Offsets
+                    const OFFSET_DRIVE: usize = 0;
+                    const OFFSET_TEMPLATE: usize = 1; // 11 bytes
+                    const OFFSET_INDEX: usize = 13;   // 2 bytes (Entry Index)
+                    const OFFSET_ATTR: usize = 21;
+                    const OFFSET_TIME: usize = 22;
+                    const OFFSET_DATE: usize = 24;
+                    const OFFSET_SIZE: usize = 26;
+                    const OFFSET_NAME: usize = 30;
+
+                    // Determine Search Index
                     let index = if ah == 0x4E {
                         0
                     } else {
-                        // Offset 0 of DTA is reserved; we use it to store our search index
-                        cpu.bus.read_16(dta_phys) as usize
+                        // Read Index from the standard DOS location (Offset 13)
+                        cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize
                     };
 
-                    // 3. Ask Disk Controller for File Info
-                    match cpu.bus.disk.find_directory_entry("*.*", index) {
+                    cpu.bus.log_string(format!("[DEBUG] FindFile AH={:02X} Index={} DTA_Phys={:05X}", ah, index, dta_phys).as_str());
+
+                    // Ask Disk Controller
+                    // We assume search_attr is passed in CX for FindFirst, or we just default to all.
+                    // For finding "d.com" volume label logic, we rely on disk.rs handling the 0x08 flag.
+                    let search_attr = cpu.cx;
+
+                    match cpu.bus.disk.find_directory_entry("*.*", index, search_attr) {
                         Ok(entry) => {
-                            // --- Write to DOS DTA ---
-                            
-                            // Offset 0: Update Index for next call
-                            cpu.bus.write_16(dta_phys, (index + 1) as u16);
+                            cpu.bus.log_string(format!("[DEBUG] -> Found: {}", entry.filename).as_str());
+                            // --- Populate DTA ---
 
-                            // Offset 21: Attribute
-                            let attr = if entry.is_dir { 0x10 } else { 0x20 };
-                            cpu.bus.write_8(dta_phys + 21, attr);
+                            if ah == 0x4E {
+                                // Initialize DTA for FindFirst
+                                // Drive: 3 = C: (Fixes "drive -C:a" corruption)
+                                cpu.bus.write_8(dta_phys + OFFSET_DRIVE, 3);
+                                
+                                // Template: "???????????" (Matches all)
+                                for i in 1..12 { cpu.bus.write_8(dta_phys + i as usize, b'?'); }
 
-                            // Offset 22/24: Time/Date (Fake 12:00 PM, 2023-01-01)
-                            cpu.bus.write_16(dta_phys + 22, 0x6000); 
-                            cpu.bus.write_16(dta_phys + 24, 0x5621); 
-
-                            // Offset 26: File Size
-                            cpu.bus.write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
-                            cpu.bus.write_16(dta_phys + 28, (entry.size >> 16) as u16);
-
-                            // Offset 30: Filename (ASCIIZ, Max 13 bytes)
-                            let mut name_str = entry.filename.clone();
-                            
-                            // FIX: Strict truncation to prevent DTA Buffer Overflow
-                            // Real DOS would convert "longfilename.txt" to "LONGFI~1.TXT"
-                            // We just chop it off to prevent crashing the guest.
-                            if name_str.len() > 12 {
-                                name_str.truncate(12); 
+                                // Search Attr (Offset 12)
+                                cpu.bus.write_8(dta_phys + 12, search_attr as u8);
                             }
-                            
-                            let name_bytes = name_str.as_bytes();
-                            
-                            for (i, &b) in name_bytes.iter().enumerate() {
-                                cpu.bus.write_8(dta_phys + 30 + i as usize, b);
-                            }
-                            // Write Null Terminator immediately after the name
-                            cpu.bus.write_8(dta_phys + 30 + name_bytes.len() as usize, 0x00);
 
-                            cpu.set_reg16(Register::AX, 0); // Success code
+                            // Update Index for next call (Offset 13)
+                            cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
+
+                            // File Attribute (Offset 21)
+                            let mut attr = if entry.is_dir { 0x10 } else { 0x20 };
+                            if entry.filename == "RUSTDOS" { attr = 0x08; }
+                            cpu.bus.write_8(dta_phys + OFFSET_ATTR, attr);
+
+                            // Time/Date (Offset 22/24) - Jan 1, 2000, 12:00
+                            cpu.bus.write_16(dta_phys + OFFSET_TIME, 0x6000); 
+                            cpu.bus.write_16(dta_phys + OFFSET_DATE, 0x2821); 
+
+                            // File Size (Offset 26)
+                            cpu.bus.write_16(dta_phys + OFFSET_SIZE, (entry.size & 0xFFFF) as u16);
+                            cpu.bus.write_16(dta_phys + OFFSET_SIZE + 2, (entry.size >> 16) as u16);
+
+                            // Filename (Offset 30) - ASCIIZ, max 13 chars
+                            let name_bytes = entry.filename.as_bytes();
+                            let len = std::cmp::min(name_bytes.len(), 12);
+                            
+                            // Write name
+                            for i in 0..len {
+                                cpu.bus.write_8(dta_phys + OFFSET_NAME + i as usize, name_bytes[i]);
+                            }
+                            // Null Terminate
+                            cpu.bus.write_8(dta_phys + OFFSET_NAME + len as usize, 0x00);
+                            
+                            // Zero-fill remaining bytes (critical for d.com display buffer)
+                            for i in (len + 1)..13 {
+                                cpu.bus.write_8(dta_phys + OFFSET_NAME + i as usize, 0x00);
+                            }
+
+                            // [DEBUG] Dump the DTA filename area to see exactly what d.com sees
+                            cpu.bus.log_string("[DEBUG] DTA Filename Dump: ");
+                            for i in 0..13 {
+                                let b = cpu.bus.read_8(dta_phys + 30 + i as usize);
+                                cpu.bus.log_string(&format!("{:02X} ", b));
+                            }
+                            cpu.bus.log_string("\n");
+
+                            cpu.set_reg16(Register::AX, 0); // Success
                             cpu.set_flag(crate::cpu::FLAG_CF, false);
                         },
                         Err(code) => {
+                            cpu.bus.log_string("[DEBUG] -> Not Found / End of List");
                             cpu.set_reg16(Register::AX, code as u16);
                             cpu.set_flag(crate::cpu::FLAG_CF, true);
                         }
@@ -964,11 +1020,11 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 // AH = 00h: Terminate Program (Legacy Method)
                 // Functionally identical to AH=4Ch for our purposes
                 0x00 => {
-                    cpu.bus.log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).\n");
+                    cpu.bus.log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
                     cpu.state = CpuState::RebootShell;
                 }
 
-                _ => cpu.bus.log_string(&format!("[DOS] Unhandled Call Int 0x21 AH={:02X}\n", cpu.get_ah())),
+                _ => cpu.bus.log_string(&format!("[DOS] Unhandled Call Int 0x21 AH={:02X}", cpu.get_ah())),
             }
         }
 
@@ -987,7 +1043,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.ax = 0x0000; 
                     cpu.bx = 0; // Number of buttons
                 }
-                _ => cpu.bus.log_string(&format!("[MOUSE] Unhandled Call Int 0x33 AX={:04X}\n", ax)),
+                _ => cpu.bus.log_string(&format!("[MOUSE] Unhandled Call Int 0x33 AX={:04X}", ax)),
             }
         }
 
@@ -997,6 +1053,6 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
         }
 
         // Catch-all
-        _ => cpu.bus.log_string(&format!("[CPU] Unhandled Interrupt Vector {:02X}\n", vector)),
+        _ => cpu.bus.log_string(&format!("[CPU] Unhandled Interrupt Vector {:02X}", vector)),
     }
 }

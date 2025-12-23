@@ -417,7 +417,7 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         self.flags = 0x0002; // Reset Flags
         self.state = CpuState::Running;
 
-        self.bus.log_string("[SYSTEM] Shell Loaded. Ready.\n");
+        self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }
 
     // Helper to read a u16 from a byte slice (Little Endian)
@@ -452,7 +452,7 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
             None => return false,
         };
 
-        self.bus.log_string(&format!("[DOS] Loading {} ({} bytes)\n", filename, bytes.len()));
+        self.bus.log_string(&format!("[DOS] Loading {} ({} bytes)", filename, bytes.len()));
 
         // Check for EXE Signature ("MZ")
         if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
@@ -519,10 +519,10 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         // Offset 0x81: Command Tail (CR only)
         self.bus.write_8(psp_phys + 0x81, 0x0D);
 
-        self.bus.log_string(&format!("[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}\n", 
+        self.bus.log_string(&format!("[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}", 
             self.bus.read_8(psp_phys + 6), psp_phys + 6));
 
-        self.bus.log_string(&format!("[DOS] Loaded COM file at {:04X}:{:04X}\n", self.cs, self.ip));
+        self.bus.log_string(&format!("[DOS] Loaded COM file at {:04X}:{:04X}", self.cs, self.ip));
         true
     }
 
@@ -632,7 +632,7 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         self.bus.write_8(psp_phys + 0x81, 0x0D);
 
         self.bus.log_string(&format!(
-            "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}\n",
+            "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}",
             self.cs, self.ip
         ));
         true

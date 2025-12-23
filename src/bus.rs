@@ -28,7 +28,7 @@ pub struct Bus {
 
 impl Bus {
     pub fn new() -> Self {
-        Self {
+        let mut bus = Self {
             ram: vec![0; 1024 * 1024],
             vram_graphics: vec![0; SIZE_GRAPHICS],
             vram_text: vec![0; SIZE_TEXT],
@@ -47,7 +47,19 @@ impl Bus {
             log_file: None,
             dta_segment: 0x1000,
             dta_offset: 0x0000,
-        }
+        };
+        // BIOS Data Area (BDA) Initialization
+        // 0x0449: Current Video Mode (03 = 80x25 Color)
+        bus.write_8(0x0449, 0x03);
+        // 0x044A: Number of Columns (80 = 0x50)
+        bus.write_16(0x044A, 80);
+        // 0x044E: Video Page Size (4096 bytes approx, usually 0x1000)
+        bus.write_16(0x044E, 0x1000);
+        // 0x0462: Active Page (0)
+        bus.write_8(0x0462, 0);
+        // 0x0463: CRT Controller Base Address (0x3D4 for Color)
+        bus.write_16(0x0463, 0x03D4);
+        bus
     }
 
     // Helper: Scroll the text screen up by 1 line
@@ -86,6 +98,15 @@ impl Bus {
 
     // Returns true if a write occurred to the *active* video memory
     pub fn write_8(&mut self, addr: usize, value: u8) -> bool {
+        if addr >= 0xB8000 && addr < 0xB8FA0 && (addr % 2 == 0) {
+            if value >= 0x20 && value <= 0x7E { // Printable chars only
+                let offset = (addr - 0xB8000) / 2;
+                let row = offset / 80;
+                let col = offset % 80;
+                self.log_string(&format!("[VIDEO] '{}' @ {},{}", value as char, col, row));
+            }
+        }
+
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             self.vram_graphics[addr - ADDR_VGA_GRAPHICS] = value;
             self.video_mode == VideoMode::Graphics320x200 // Dirty only if active
@@ -186,7 +207,7 @@ impl Bus {
                     .expect("Failed to open trace.log"),
             );
         }
-        write!(self.log_file.as_mut().unwrap(), "{}", s).expect("Failed to write to trace.log");
-        print!("{}", s);
+        writeln!(self.log_file.as_mut().unwrap(), "{}", s).expect("Failed to write to trace.log");
+        println!("{}", s);
     }
 }

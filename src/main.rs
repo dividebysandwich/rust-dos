@@ -226,7 +226,7 @@ fn main() -> Result<(), String> {
                     // (Assuming you want the same format as print_debug_trace)
                     let instr_text = format!("{}", instr);
                     let log_line = format!(
-                        "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}\n",
+                        "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}",
                         cpu.cs, cpu.ip,
                         cpu.get_reg16(iced_x86::Register::AX),
                         cpu.get_reg16(iced_x86::Register::BX),

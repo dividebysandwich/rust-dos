@@ -121,13 +121,19 @@ impl DiskController {
     }
 
     // INT 21h, AH=36h: Get Disk Free Space
-    // Returns: (Sectors/Cluster, Available Clusters, Bytes/Sector, Total Clusters)
+    // Input DL: 0=Default, 1=A, 2=B, 3=C, ...
     pub fn get_disk_free_space(&self, drive: u8) -> Result<(u16, u16, u16, u16), u16> {
-        // If drive is 0 (Default) or 2 (C:), we return fake stats.
-        // Otherwise, invalid drive.
-        if drive == 0 || drive == 2 {
-            // Fake 2GB drive
-            Ok((8, 0xFFFF, 512, 0xFFFF)) 
+        // DOS AH=36h uses 1-based indexing for explicit drives (1=A, 2=B, 3=C)
+        // 0 means "Default Drive".
+        // We simulate only Drive C, so we accept:
+        //  0 (Default)
+        //  3 (Explicit C:)
+        //  2 (Sometimes used as 0-indexed C by internal APIs, safe to keep)
+        
+        if drive == 0 || drive == 3 || drive == 2 {
+             // Fake 80MB drive safe for old apps
+             // (8 sectors/cluster * 512 bytes * 20000 clusters = ~80 MB)
+            Ok((8, 20000, 512, 20000)) 
         } else {
             Err(0x0F) // Invalid Drive
         }
@@ -135,6 +141,7 @@ impl DiskController {
 
     // INT 21h, AH=43h: Get File Attributes
     // Returns: Attribute Byte (0x20 = Archive, 0x10 = Subdir, etc.)
+    #[allow(dead_code)]
     pub fn get_file_attribute(&self, filename: &str) -> Result<u16, u8> {
         let path = Path::new(filename);
         if path.exists() {
@@ -158,23 +165,41 @@ impl DiskController {
     }
 
     // INT 21h, AH=4E/4F: Find First / Find Next
-    // This helper scans the HOST directory and returns the Nth entry found.
-    pub fn find_directory_entry(&self, _search_pattern: &str, search_index: usize) -> Result<DosDirEntry, u8> {
+    // Added 'search_attr' parameter to handle Volume Labels
+    pub fn find_directory_entry(&self, _search_pattern: &str, search_index: usize, search_attr: u16) -> Result<DosDirEntry, u8> {
+        
+        // CHECK FOR VOLUME LABEL REQUEST (Bit 3)
+        // DOS behavior: If Bit 3 is set, strictly look for volume label.
+        if (search_attr & 0x08) != 0 {
+            if search_index == 0 {
+                return Ok(DosDirEntry {
+                    filename: "RUSTDOS".to_string(), // Fake Volume Label
+                    size: 0,
+                    is_dir: false,
+                    is_readonly: false,
+                    // We must ensure the attribute has 0x08 set
+                    // We return a special flag or handle it in interrupt.rs
+                    // Here we just identify it.
+                });
+            } else {
+                return Err(0x12); // No more files (only 1 label exists)
+            }
+        }
+
+        // NORMAL SEARCH (Host Filesystem)
         let paths = fs::read_dir(".").map_err(|_| 0x03)?; 
         
-        let mut current_idx = 0;
-        let mut found_count = 0; // Count only valid DOS files
+        let mut found_count = 0;
 
         for entry in paths {
             if let Ok(entry) = entry {
                 let filename = entry.file_name().to_string_lossy().into_owned();
 
-                // Skip dotfiles (Linux/Mac hidden files)
+                // Skip hidden/dotfiles
                 if filename.starts_with('.') {
                     continue; 
                 }
 
-                // If this is the file we want (based on valid count, not raw iterator index)
                 if found_count == search_index {
                     let metadata = entry.metadata().map_err(|_| 0x05)?;
                     

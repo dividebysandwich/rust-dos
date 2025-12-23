@@ -610,7 +610,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                             let high = cpu.bus.read_8(addr + 1) as u16;
                             cpu.ip = (high << 8) | low;
                         }
-                        _ => cpu.bus.log_string(&format!("[CPU] Unhandled JMP rm16 op: {:?}\n", instr.op0_kind())),
+                        _ => cpu.bus.log_string(&format!("[CPU] Unhandled JMP rm16 op: {:?}", instr.op0_kind())),
                     }
                 }
                 
@@ -652,7 +652,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     }
                 }
 
-                _ => cpu.bus.log_string(&format!("[CPU] Unhandled JMP Code: {:?}\n", instr.code())),
+                _ => cpu.bus.log_string(&format!("[CPU] Unhandled JMP Code: {:?}", instr.code())),
             }
         }
 
@@ -1999,7 +1999,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
         }
 
         _ => {
-            cpu.bus.log_string(&format!("[CPU] Unhandled Instruction: {}\n", instr));
+            cpu.bus.log_string(&format!("[CPU] Unhandled Instruction: {}", instr));
         }
     }
 }
