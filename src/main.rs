@@ -21,6 +21,10 @@ mod video;
 fn main() -> Result<(), String> {
     let mut debug_mode = true;
 
+    let mut cursor_visible = true;
+    let mut last_blink = std::time::Instant::now();
+    let blink_interval = Duration::from_millis(500);
+
     // SDL2 Setup
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -196,10 +200,69 @@ fn main() -> Result<(), String> {
         // Update Audio
         pump_audio(&mut cpu.bus);
 
+        // Update Cursor Blink
+        if last_blink.elapsed() >= blink_interval {
+            cursor_visible = !cursor_visible;
+            last_blink = std::time::Instant::now();
+        }
+
         // Render Frame
         // Note: We redraw every frame here for simplicity, even if VRAM isn't dirty
-        texture.with_lock(None, |buffer: &mut [u8], _: usize| {
+        texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
+            // Draw the base screen (text characters)
             video::render_screen(buffer, &cpu.bus);
+
+            // Draw the Cursor (Overlay)
+            // TODO: Make this work across video modes
+            
+            // Read Cursor Position from BDA
+            let cursor_col = cpu.bus.read_8(0x0450) as usize;
+            let cursor_row = cpu.bus.read_8(0x0451) as usize;
+            
+            // Read Cursor Shape from BDA
+            let cursor_shape = cpu.bus.read_16(0x0460);
+            let start_scan = (cursor_shape >> 8) as u8;
+            let end_scan = (cursor_shape & 0xFF) as u8;
+
+            // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
+            let is_hidden = (start_scan & 0x20) != 0;
+
+            if cursor_visible && !is_hidden && cursor_col < 80 && cursor_row < 25 {
+                let cell_width = 8;
+                let cell_height = 16;
+                
+                // Calculate screen coordinates
+                let start_x = cursor_col * cell_width;
+                let start_y = cursor_row * cell_height;
+
+                // Sanitize scanlines to prevent buffer overflows
+                let scan_start = (start_scan & 0x1F).min(15) as usize; // Mask out visibility bit
+                let scan_end = end_scan.min(15) as usize;
+
+                // Draw the cursor lines
+                // Note: DOS cursors can wrap (start > end), effectively drawing two blocks.
+                // For simplicity, we implement the standard range logic here.
+                if scan_start <= scan_end {
+                    for y_off in scan_start..=scan_end {
+                        for x_off in 0..cell_width {
+                            let draw_x = start_x + x_off;
+                            let draw_y = start_y + y_off;
+
+                            // Calculate buffer index (RGB24 = 3 bytes per pixel)
+                            let offset = (draw_y * (video::SCREEN_WIDTH as usize) + draw_x) * 3;
+                            
+                            if offset + 2 < buffer.len() {
+                                // Draw Cursor Color (Usually bright light gray or white)
+                                // We use 0xDD to allow the text behind to remain slightly distinct 
+                                // if we implemented XOR, but for a solid block, we just overwrite.
+                                buffer[offset] = 0xDD;     // R
+                                buffer[offset + 1] = 0xDD; // G
+                                buffer[offset + 2] = 0xDD; // B
+                            }
+                        }
+                    }
+                }
+            }
         })?;
         canvas.copy(&texture, None, None)?;
         canvas.present();

@@ -430,6 +430,10 @@ impl Cpu {
         self.bus.write_8(0x0450, 0x00); // Col
         self.bus.write_8(0x0451, 0x00); // Row
 
+        // This is the standard DOS "Underscore" cursor.
+        // High Byte (0x06) = Start Scanline, Low Byte (0x07) = End Scanline
+        self.bus.write_16(0x0460, 0x0D0E);
+
         // Copy bytes
         for (i, byte) in shell_code.iter().enumerate() {
             self.bus.ram[start_addr + i] = *byte;

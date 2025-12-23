@@ -80,6 +80,15 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     }
                 }
 
+                //AH = 01h: Set Cursor Type (Shape/Visibility)
+                // CH = Start Scanline (Bit 5 = 1 means invisible)
+                // CL = End Scanline
+                0x01 => {
+                    let cx = cpu.cx;
+                    // Store in BIOS Data Area 0x0460
+                    cpu.bus.write_16(0x0460, cx);
+                }
+
                 // AH = 02h: Set Cursor Position
                 // Entry: BH = Page Number (0-7)
                 //        DH = Row
@@ -116,9 +125,8 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         cpu.set_reg8(Register::DL, col);
                         cpu.set_reg8(Register::DH, row);
 
-                        // Cursor Mode: Default to a standard underscore (Scanlines 6-7)
-                        // CH = Start Scanline, CL = End Scanline
-                        cpu.cx = 0x0607;
+                        // Read cursor shape from BDA 0x0460
+                        cpu.cx = cpu.bus.read_16(0x0460);
                     }
                 }
 
