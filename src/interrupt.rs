@@ -42,26 +42,26 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         // Mode 00 & 01: 40x25 Text (BW/Color)
                         // We map this to 80x25 to prevent crash, though it will look wide.
                         0x00 => {
-                            println!("[BIOS] Switch to Text Mode (40x25)");
+                            cpu.bus.log_string("[BIOS] Switch to Text Mode (40x25)");
                             cpu.bus.video_mode = VideoMode::Text40x25;
                         }
                         0x01 => {
-                             println!("[BIOS] Switch to Text Mode (40x25Color)");
+                             cpu.bus.log_string("[BIOS] Switch to Text Mode (40x25Color)");
                              cpu.bus.video_mode = VideoMode::Text40x25Color;
                         }
                         0x02 => {
-                            println!("[BIOS] Switch to Text Mode (80x25)");
+                            cpu.bus.log_string("[BIOS] Switch to Text Mode (80x25)");
                             cpu.bus.video_mode = VideoMode::Text80x25;
                         }
                         0x03 => {
-                            println!("[BIOS] Switch to Text Mode (80x25 Color)");
+                            cpu.bus.log_string("[BIOS] Switch to Text Mode (80x25 Color)");
                             cpu.bus.video_mode = VideoMode::Text80x25Color;
                         }
                         0x13 => {
-                            println!("[BIOS] Switch to Graphics Mode (320x200)");
+                            cpu.bus.log_string("[BIOS] Switch to Graphics Mode (320x200)");
                             cpu.bus.video_mode = VideoMode::Graphics320x200;
                         }
-                        _ => println!("[BIOS] Unsupported Video Mode {:02X}", mode),
+                        _ => cpu.bus.log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
                     }
                 }
 
@@ -323,38 +323,38 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 0x0F => {
                     match cpu.bus.video_mode {
                         VideoMode::Text40x25 => {
-                            println!("[BIOS] Reported Video Mode: 0x00");
+                            cpu.bus.log_string("[BIOS] Reported Video Mode: 0x00");
                             cpu.set_reg8(Register::AL, 0x00); // Current Mode 0
                             cpu.set_reg8(Register::AH, 40);   // 40 Columns
                             cpu.set_reg8(Register::BH, 0);    // Page 0
                         }
                         VideoMode::Text40x25Color => {
-                            println!("[BIOS] Reported Video Mode: 0x01");
+                            cpu.bus.log_string("[BIOS] Reported Video Mode: 0x01");
                             cpu.set_reg8(Register::AL, 0x01); // Current Mode 1
                             cpu.set_reg8(Register::AH, 40);   // 40 Columns
                             cpu.set_reg8(Register::BH, 0);    // Page 0
                         }
                         VideoMode::Text80x25 => {
-                            println!("[BIOS] Reported Video Mode: 0x02");
+                            cpu.bus.log_string("[BIOS] Reported Video Mode: 0x02");
                             cpu.set_reg8(Register::AL, 0x02); // Current Mode 2
                             cpu.set_reg8(Register::AH, 80);   // 80 Columns
                             cpu.set_reg8(Register::BH, 0);    // Page 0
                         }
                         VideoMode::Text80x25Color => {
-                            println!("[BIOS] Reported Video Mode: 0x03");
+                            cpu.bus.log_string("[BIOS] Reported Video Mode: 0x03");
                             cpu.set_reg8(Register::AL, 0x03); // Current Mode 3
                             cpu.set_reg8(Register::AH, 80);   // 80 Columns
                             cpu.set_reg8(Register::BH, 0);    // Page 0
                         }
                         VideoMode::Graphics320x200 => {
-                            println!("[BIOS] Reported Video Mode: 0x13");
+                            cpu.bus.log_string("[BIOS] Reported Video Mode: 0x13");
                             cpu.set_reg8(Register::AL, 0x13); // Current Mode 13h
                             cpu.set_reg8(Register::AH, 40);   // 40 Columns (technically)
                             cpu.set_reg8(Register::BH, 0);    // Page 0
                         }
                     }
                 }
-                _ => println!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah()),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}\n", cpu.get_ah())),
             }
         }
 
@@ -402,7 +402,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
                 
-                _ => println!("[BIOS] Unhandled INT 15h AH={:02X}", ah),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 15h AH={:02X}\n", ah)),
             }
         }
 
@@ -419,7 +419,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                         cpu.ip = cpu.ip.wrapping_sub(2);
                     }
                 }
-                _ => println!("[BIOS] Unhandled INT 16h AH={:02X}", ah),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}\n", ah)),
             }
         }
 
@@ -467,7 +467,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.set_flag(crate::cpu::FLAG_CF, false); // Success
                 }
 
-                _ => println!("[BIOS] Unhandled INT 1A AH={:02X}", ah),
+                _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 1A AH={:02X}\n", ah)),
             }
         }
 
@@ -500,10 +500,10 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
             }
             let clean_cmd: String = clean_chars.into_iter().collect();
 
-            println!(
-                "[SHELL DEBUG] Raw: {:?} | Cleaned: {:?}",
+            cpu.bus.log_string(&format!(
+                "[SHELL DEBUG] Raw: {:?} | Cleaned: {:?}\n",
                 raw_cmd, clean_cmd
-            );
+            ));
 
             print_char(&mut cpu.bus, 0x0D);
             print_char(&mut cpu.bus, 0x0A);
@@ -540,7 +540,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     run_type_command(cpu, args);
                 }
             } else if command.eq_ignore_ascii_case("EXIT") {
-                println!("[SHELL] Exiting Emulator via command...");
+                cpu.bus.log_string("[SHELL] Exiting Emulator via command...\n");
                 std::process::exit(0);
             } else {
                 // Try to run as executable
@@ -629,7 +629,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.bus.write_8(phys_addr + 2, (new_seg & 0xFF) as u8);
                     cpu.bus.write_8(phys_addr + 3, (new_seg >> 8) as u8);
                     
-                    // println!("[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}", int_num, new_seg, new_off);
+                    cpu.bus.log_string(&format!("[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}", int_num, new_seg, new_off));
                 }
 
                 // AH = 30h: Get DOS Version
@@ -643,7 +643,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.bx = 0xFF00;
                     cpu.cx = 0x0000;
 
-                    println!("[DOS] Reported DOS Version 5.0");
+                    cpu.bus.log_string("[DOS] Reported DOS Version 5.0");
                 }
 
                 // AH = 35h: Get Interrupt Vector
@@ -814,18 +814,22 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 
                 // AH = 4Ch: Terminate Program
                 0x4C => {
-                    println!("[DOS] Program Terminated (INT 21h, 4Ch).");
+                    cpu.bus.log_string("[DOS] Program Terminated (INT 21h, 4Ch).");
                     std::process::exit(0);
                 }
                 // AH = 00h: Terminate Program (Legacy Method)
                 // Functionally identical to AH=4Ch for our purposes
                 0x00 => {
-                    println!("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
+                    cpu.bus.log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
                     cpu.state = CpuState::RebootShell;
                 }
 
-                _ => println!("[DOS] Unhandled Call AH={:02X}", cpu.get_ah()),
+                _ => cpu.bus.log_string(&format!("[DOS] Unhandled Call Int 0x21 AH={:02X}\n", cpu.get_ah())),
             }
+        }
+
+        0x28 => {
+            // Idle interrupt
         }
 
         // INT 33h: Mouse Services
@@ -839,16 +843,16 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     cpu.ax = 0x0000; 
                     cpu.bx = 0; // Number of buttons
                 }
-                _ => println!("[MOUSE] Unhandled Call AX={:04X}", ax),
+                _ => cpu.bus.log_string(&format!("[MOUSE] Unhandled Call Int 0x33 AX={:04X}\n", ax)),
             }
         }
 
         0x4C => {
-            println!("[DOS] Program Exited. Rebooting Shell...");
+            cpu.bus.log_string("[DOS] Program Exited. Rebooting Shell...");
             cpu.state = CpuState::RebootShell;
         }
 
         // Catch-all
-        _ => println!("[CPU] Unhandled Interrupt Vector {:02X}", vector),
+        _ => cpu.bus.log_string(&format!("[CPU] Unhandled Interrupt Vector {:02X}\n", vector)),
     }
 }

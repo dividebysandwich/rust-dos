@@ -1,6 +1,6 @@
-use iced_x86::{Instruction, MemorySize, Mnemonic, OpKind, Register};
+use iced_x86::{Instruction, MemorySize, Mnemonic, OpKind, Register, Code};
 
-use crate::cpu::{Cpu, FLAG_AF, FLAG_CF, FLAG_OF, FLAG_SF, FLAG_ZF};
+use crate::cpu::{Cpu, FLAG_AF, FLAG_CF, FLAG_OF, FLAG_SF, FLAG_ZF, FLAG_PF};
 use crate::interrupt::handle_interrupt;
 
 // ========================================================================
@@ -22,7 +22,7 @@ fn is_8bit_reg(reg: Register) -> bool {
 }
 
 // Helper to calculate effective address for Memory operands
-fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
+pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
     // Get the Segment Base
     // Default to DS, unless there is a segment override prefix.
     let segment = match instr.segment_prefix() {
@@ -588,33 +588,71 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             }
         }
 
+        Mnemonic::Jns => {
+            // Jump if SF is NOT set (false)
+            if !cpu.get_flag(FLAG_SF) {
+                cpu.ip = instr.near_branch16() as u16;
+            }
+        }
+
         // Unconditional Jump
         Mnemonic::Jmp => {
-            match instr.op0_kind() {
-                // JMP Reg (e.g., JMP BX)
-                OpKind::Register => {
-                    cpu.ip = cpu.get_reg16(instr.op0_register());
+            match instr.code() {
+                // NEAR JUMPS (IP only)
+                Code::Jmp_rm16 => {
+                    match instr.op0_kind() {
+                        OpKind::Register => {
+                            cpu.ip = cpu.get_reg16(instr.op0_register());
+                        }
+                        OpKind::Memory => {
+                            let addr = calculate_addr(cpu, instr);
+                            let low = cpu.bus.read_8(addr) as u16;
+                            let high = cpu.bus.read_8(addr + 1) as u16;
+                            cpu.ip = (high << 8) | low;
+                        }
+                        _ => cpu.bus.log_string(&format!("[CPU] Unhandled JMP rm16 op: {:?}\n", instr.op0_kind())),
+                    }
                 }
-                // JMP [Mem] (e.g., JMP [BX]) - Near Indirect
-                OpKind::Memory => {
-                    let addr = calculate_addr(cpu, instr);
-                    let low = cpu.bus.read_8(addr) as u16;
-                    let high = cpu.bus.read_8(addr + 1) as u16;
-                    cpu.ip = (high << 8) | low;
-                }
-                // JMP Imm (e.g., JMP 0x1234) - Direct / Relative
-                OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
+                
+                Code::Jmp_rel8_16 | Code::Jmp_rel16 => {
                     cpu.ip = instr.near_branch16() as u16;
                 }
-                // JMP Far (e.g. JMP 1234:5678)
-                OpKind::FarBranch16 => {
-                    cpu.cs = instr.far_branch16();
-                    cpu.ip = instr.near_branch16() as u16;
+
+                // FAR JUMPS (CS:IP)
+                // INDIRECT: JMP DWORD PTR [MEM]
+                Code::Jmp_m1616 => {
+                    if instr.op0_kind() == OpKind::Memory {
+                        let addr = calculate_addr(cpu, instr);
+                        
+                        // Memory Layout: Offset (IP) first, then Segment (CS)
+                        let ip_low = cpu.bus.read_8(addr) as u16;
+                        let ip_high = cpu.bus.read_8(addr + 1) as u16;
+                        let new_ip = (ip_high << 8) | ip_low;
+
+                        let cs_low = cpu.bus.read_8(addr + 2) as u16;
+                        let cs_high = cpu.bus.read_8(addr + 3) as u16;
+                        let new_cs = (cs_high << 8) | cs_low;
+
+                        cpu.cs = new_cs;
+                        cpu.ip = new_ip;
+
+                        cpu.bus.log_string(&format!("[DEBUG] JMP FAR Indirect -> CS:{:04X} IP:{:04X}", new_cs, new_ip));
+                    }
                 }
-                // Fallback for short jumps which are simple offsets
-                _ => {
-                    cpu.ip = instr.near_branch16() as u16;
+
+                // DIRECT: JMP 1234:5678
+                Code::Jmp_ptr1616 => {
+                    if instr.op0_kind() == OpKind::FarBranch16 {
+                        let new_cs = instr.near_branch16() as u16;
+                        let new_ip = instr.far_branch16();
+                        
+                        cpu.cs = new_cs;
+                        cpu.ip = new_ip;
+                        cpu.bus.log_string(&format!("[DEBUG] JMP FAR Direct -> CS:{:04X} IP:{:04X}", cpu.cs, cpu.ip));
+                    }
                 }
+
+                _ => cpu.bus.log_string(&format!("[CPU] Unhandled JMP Code: {:?}\n", instr.code())),
             }
         }
 
@@ -800,32 +838,32 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
 
         // Decrement (DEC r/m)
         Mnemonic::Dec => {
-            // Determine Operand Size
-            let is_8bit = match instr.op0_kind() {
-                OpKind::Register => is_8bit_reg(instr.op0_register()),
-                OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
-                _ => false,
-            };
-
-            // Read Source
-            let (val, addr_opt) = if instr.op0_kind() == OpKind::Register {
-                let reg = instr.op0_register();
-                let v = if is_8bit {
-                    cpu.get_reg8(reg) as u16
-                } else {
-                    cpu.get_reg16(reg)
-                };
-                (v, None)
-            } else {
-                let addr = calculate_addr(&cpu, &instr);
-                let v = if is_8bit {
-                    cpu.bus.read_8(addr) as u16
-                } else {
-                    let low = cpu.bus.read_8(addr) as u16;
-                    let high = cpu.bus.read_8(addr + 1) as u16;
-                    (high << 8) | low
-                };
-                (v, Some(addr))
+            // Determine Operand Size & Read Value
+            let (val, addr_opt, is_8bit) = match instr.op0_kind() {
+                OpKind::Register => {
+                    let reg = instr.op0_register();
+                    // iced_x86 helper to check register size
+                    let is8 = reg.is_gpr8(); 
+                    let v = if is8 {
+                        cpu.get_reg8(reg) as u16
+                    } else {
+                        cpu.get_reg16(reg)
+                    };
+                    (v, None, is8)
+                }
+                OpKind::Memory => {
+                    let addr = calculate_addr(&cpu, &instr);
+                    let is8 = instr.memory_size() == MemorySize::UInt8;
+                    let v = if is8 {
+                        cpu.bus.read_8(addr) as u16
+                    } else {
+                        let low = cpu.bus.read_8(addr) as u16;
+                        let high = cpu.bus.read_8(addr + 1) as u16;
+                        (high << 8) | low
+                    };
+                    (v, Some(addr), is8)
+                }
+                _ => return, // Should not happen for DEC
             };
 
             // Perform Decrement
@@ -852,27 +890,35 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 }
             }
 
-            // Update Flags (Preserve CF)
-            // OF: Set if sign bit changes from 1 to 0 (e.g. 0x80 -> 0x7F)
-            cpu.set_flag(
-                FLAG_ZF,
-                if is_8bit {
-                    (result & 0xFF) == 0
-                } else {
-                    result == 0
-                },
-            );
+            // Update Flags (DEC updates OF, SF, ZF, AF, PF. Preserves CF)
+            
+            // Zero Flag
+            cpu.set_flag(FLAG_ZF, if is_8bit { (result & 0xFF) == 0 } else { result == 0 });
 
-            if is_8bit {
-                let r8 = result as u8;
-                cpu.set_flag(FLAG_SF, (r8 & 0x80) != 0);
-                cpu.set_flag(FLAG_OF, r8 == 0x7F); // Overflow -128 -> 127
-                cpu.set_flag(FLAG_AF, (val & 0x0F) == 0); // Borrow from bit 4
-            } else {
-                cpu.set_flag(FLAG_SF, (result & 0x8000) != 0);
-                cpu.set_flag(FLAG_OF, result == 0x7FFF); // Overflow -32768 -> 32767
-                cpu.set_flag(FLAG_AF, (val & 0x0F) == 0);
-            }
+            // Sign Flag (Bit 7 for 8-bit, Bit 15 for 16-bit)
+            cpu.set_flag(FLAG_SF, if is_8bit { 
+                (result & 0x80) != 0 
+            } else { 
+                (result & 0x8000) != 0 
+            });
+
+            // Overflow Flag
+            // Set if we wrap from Most Negative to Most Positive
+            // 8-bit: 0x80 (-128) -> 0x7F (+127)
+            // 16-bit: 0x8000 (-32768) -> 0x7FFF (+32767)
+            cpu.set_flag(FLAG_OF, if is_8bit { 
+                (result & 0xFF) == 0x7F 
+            } else { 
+                result == 0x7FFF 
+            });
+
+            // Auxiliary Flag (Borrow from lower nibble)
+            // If the lower nibble was 0, subtracting 1 causes a borrow.
+            cpu.set_flag(FLAG_AF, (val & 0x0F) == 0x00);
+
+            // Parity Flag (Even parity in the LEAST SIGNIFICANT BYTE only)
+            // Note: x86 always calculates PF on the low 8 bits, even for 16/32-bit ops.
+            cpu.set_flag(FLAG_PF, (result as u8).count_ones() % 2 == 0);
         }
 
         // Stack Operations
@@ -890,7 +936,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 let high = cpu.bus.read_8(addr + 1) as u16;
                 (high << 8) | low
             } else {
-                println!("[CPU] Warning: Pushing 0 for unknown OpKind");
+                cpu.bus.log_string("[CPU] Warning: Pushing 0 for unknown OpKind");
                 0
             };
             cpu.push(val);
@@ -1759,6 +1805,74 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             }
         }
 
+        Mnemonic::Rcl => {
+            // Read Operand
+            let (mut val, addr_opt, is_8bit) = Cpu::read_op0(cpu, instr);
+            
+            // Get Rotate Count
+            let count = if instr.op1_kind() == OpKind::Immediate8 {
+                instr.immediate8() as u8
+            } else if instr.op1_kind() == OpKind::Register {
+                cpu.get_reg8(instr.op1_register())
+            } else {
+                1
+            };
+
+            // Optimization: Modulo 31 (standard for 286+)
+            let effective_count = count & 0x1F; 
+
+            if effective_count > 0 {
+                for _ in 0..effective_count {
+                    let old_cf = if cpu.get_flag(FLAG_CF) { 1 } else { 0 };
+                    
+                    if is_8bit {
+                        let v = val as u8;
+                        let new_cf = (v >> 7) & 1;
+                        let new_val = (v << 1) | old_cf;
+                        
+                        val = new_val as u16;
+                        cpu.set_flag(FLAG_CF, new_cf != 0);
+                    } else {
+                        let v = val;
+                        let new_cf = (v >> 15) & 1;
+                        let new_val = (v << 1) | (old_cf as u16);
+                        
+                        val = new_val;
+                        cpu.set_flag(FLAG_CF, new_cf != 0);
+                    }
+                }
+
+                // OF is defined only for count == 1
+                // For Left Rotates: OF = CF XOR (MSB of result)
+                if effective_count == 1 {
+                    let msb = if is_8bit {
+                        ((val >> 7) & 1) as u16 // FIXED: Cast to u16
+                    } else {
+                        (val >> 15) & 1         // Already u16
+                    };
+                    
+                    let cf = if cpu.get_flag(FLAG_CF) { 1 } else { 0 };
+                    cpu.set_flag(FLAG_OF, (msb ^ cf) != 0);
+                }
+            }
+
+            // Write Back
+            if let Some(addr) = addr_opt {
+                if is_8bit {
+                    cpu.bus.write_8(addr, val as u8);
+                } else {
+                    cpu.bus.write_16(addr, val);
+                }
+            } else {
+                let reg = instr.op0_register();
+                if is_8bit {
+                    cpu.set_reg8(reg, val as u8);
+                } else {
+                    cpu.set_reg16(reg, val);
+                }
+            }
+        }
+
         // POPA: Pop All General Registers (186+)
         Mnemonic::Popa => {
             let di = cpu.pop();
@@ -1881,7 +1995,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
         }
 
         _ => {
-            println!("[CPU] Unhandled Instruction: {}", instr);
+            cpu.bus.log_string(&format!("[CPU] Unhandled Instruction: {}\n", instr));
         }
     }
 }

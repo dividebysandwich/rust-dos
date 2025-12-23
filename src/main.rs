@@ -3,6 +3,7 @@ use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 use std::time::Duration;
+use std::io::Write;
 
 use crate::audio::pump_audio;
 use crate::bus::Bus;
@@ -16,7 +17,6 @@ mod cpu_instr;
 mod disk;
 mod interrupt;
 mod video;
-
 
 /// A Tiny "OS" written in Machine Code. Reads keys into a buffer at offset 0x0200
 /// On Enter, calls INT 20h (Our Rust Shell). Handles backspace visually and in buffer
@@ -80,9 +80,9 @@ fn get_shell_code() -> Vec<u8> {
     ]
 }
 
-
 fn main() -> Result<(), String> {
     let mut debug_mode = true;
+
     // SDL2 Setup
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
@@ -133,7 +133,7 @@ fn main() -> Result<(), String> {
                     let ascii = match keycode {
                         Keycode::F1 => {
                             debug_mode = !debug_mode;
-                            println!("[DEBUG] Tracing: {}", if debug_mode { "ON" } else { "OFF" });
+                            cpu.bus.log_string(&format!("[DEBUG] Tracing: {}", if debug_mode { "ON" } else { "OFF" }));
                             0
                         }
                         Keycode::A => b'a',
@@ -193,8 +193,10 @@ fn main() -> Result<(), String> {
 
             // Handle "IP = 0" as an explicit exit (Standard COM behavior)
             // If the program jumps to the start of the segment, it wants to exit.
-            if cpu.ip == 0x0000 {
-                println!("[DOS] Program jumped to offset 0000h. Exiting to Shell.");
+            if cpu.ip == 0x0000 && cpu.cs == 0x1000 {
+                cpu.bus.log_string("[DOS] Program jumped to offset 0000h. Exiting to Shell.");
+                // Flush log on exit so we don't lose tail data
+                let _ = cpu.bus.log_file.as_mut().unwrap().flush();
                 cpu.load_shell(); 
                 cpu.state = CpuState::Running;
                 video::print_string(&mut cpu, "\r\nC:\\>");
@@ -216,8 +218,26 @@ fn main() -> Result<(), String> {
             let instr = decoder.decode();
 
             if debug_mode {
-                if (instr.mnemonic() != Mnemonic::Int) && (instr.immediate8() != 0x16) {
-                    cpu.print_debug_trace(&instr);
+                // Filter out the 'Wait for Key' interrupt loop to save disk space
+                if !((instr.mnemonic() == Mnemonic::Int && instr.immediate8() == 0x16) ||
+                     (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E)) 
+                {
+                    // Format the instruction string manually since we can't capture stdout
+                    // (Assuming you want the same format as print_debug_trace)
+                    let instr_text = format!("{}", instr);
+                    let log_line = format!(
+                        "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}\n",
+                        cpu.cs, cpu.ip,
+                        cpu.get_reg16(iced_x86::Register::AX),
+                        cpu.get_reg16(iced_x86::Register::BX),
+                        cpu.get_reg16(iced_x86::Register::CX),
+                        cpu.get_reg16(iced_x86::Register::DX),
+                        cpu.sp,
+                        instr_text
+                    );
+                    
+                    // Write to file, ignore errors to keep emulation fast
+                    let _ = cpu.bus.log_string(&log_line);
                 }
             }
 

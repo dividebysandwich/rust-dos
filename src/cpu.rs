@@ -1,6 +1,7 @@
-use iced_x86::Register;
+use iced_x86::{Register, Instruction, OpKind, MemorySize};
 
 use crate::bus::Bus;
+use crate::cpu_instr::calculate_addr;
 use crate::get_shell_code;
 
 // Constants for Flag Bits
@@ -104,6 +105,45 @@ impl Cpu {
         phys_addr & 0xFFFFF
     }
 
+    /// Helper to read the first operand (Destination).
+/// Returns: (Value, Optional Memory Address, Is 8-bit?)
+/// If address is Some, you should write the result back to that address.
+/// If address is None, you should write the result back to the register.
+pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool) {
+    match instr.op0_kind() {
+        // Handle Register Operand
+        OpKind::Register => {
+            let reg = instr.op0_register();
+            // Use iced_x86 built-in check or your own helper
+            let is_8bit = reg.is_gpr8(); 
+            
+            let val = if is_8bit {
+                cpu.get_reg8(reg) as u16
+            } else {
+                cpu.get_reg16(reg)
+            };
+            
+            (val, None, is_8bit)
+        }
+        
+        // Handle Memory Operand
+        OpKind::Memory => {
+            let addr = calculate_addr(cpu, instr);
+            let is_8bit = instr.memory_size() == MemorySize::UInt8;
+            
+            let val = if is_8bit {
+                cpu.bus.read_8(addr) as u16
+            } else {
+                cpu.bus.read_16(addr) // Uses the new helper above
+            };
+            
+            (val, Some(addr), is_8bit)
+        }
+        
+        // Fallback (Should not happen for R/W ops like ADD/RCL)
+        _ => (0, None, false),
+    }
+}
     // Extract High byte (AH)
     pub fn get_ah(&self) -> u8 {
         (self.ax >> 8) as u8
@@ -377,7 +417,7 @@ impl Cpu {
         self.flags = 0x0002; // Reset Flags
         self.state = CpuState::Running;
 
-        println!("[SYSTEM] Shell Loaded. Ready.");
+        self.bus.log_string("[SYSTEM] Shell Loaded. Ready.\n");
     }
 
     // Helper to read a u16 from a byte slice (Little Endian)
@@ -412,7 +452,7 @@ impl Cpu {
             None => return false,
         };
 
-        println!("[DOS] Loading {} ({} bytes)", filename, bytes.len());
+        self.bus.log_string(&format!("[DOS] Loading {} ({} bytes)\n", filename, bytes.len()));
 
         // Check for EXE Signature ("MZ")
         if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
@@ -479,17 +519,17 @@ impl Cpu {
         // Offset 0x81: Command Tail (CR only)
         self.bus.write_8(psp_phys + 0x81, 0x0D);
 
-        println!("[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}", 
-            self.bus.read_8(psp_phys + 6), psp_phys + 6);
+        self.bus.log_string(&format!("[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}\n", 
+            self.bus.read_8(psp_phys + 6), psp_phys + 6));
 
-        println!("[DOS] Loaded COM file at {:04X}:{:04X}", self.cs, self.ip);
+        self.bus.log_string(&format!("[DOS] Loaded COM file at {:04X}:{:04X}\n", self.cs, self.ip));
         true
     }
 
     // EXE loader
     pub fn load_exe(&mut self, bytes: &[u8]) -> bool {
         if bytes.len() < 0x20 || &bytes[0..2] != b"MZ" {
-            println!("[DOS] Invalid EXE: Missing MZ header");
+            self.bus.log_string("[DOS] Invalid EXE: Missing MZ header");
             return false;
         }
 
@@ -515,7 +555,7 @@ impl Cpu {
         // Load Binary
         // Safety check: ensure header doesn't point past EOF
         if header_size > bytes.len() {
-            println!("[DOS] Invalid EXE: Header larger than file");
+            self.bus.log_string("[DOS] Invalid EXE: Header larger than file");
             return false;
         }
 
@@ -591,17 +631,11 @@ impl Cpu {
         // Offset 0x81: Command Tail (CR character)
         self.bus.write_8(psp_phys + 0x81, 0x0D);
 
-        println!(
-            "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}",
+        self.bus.log_string(&format!(
+            "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}\n",
             self.cs, self.ip
-        );
+        ));
         true
     }
 
-    pub fn print_debug_trace(&self, instruction: &iced_x86::Instruction) {
-        println!(
-            "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}",
-            self.cs, self.ip, self.ax, self.bx, self.cx, self.dx, self.sp, instruction
-        );
-    }
 }

@@ -21,6 +21,7 @@ pub struct Bus {
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
     pub audio_phase: f32,    // Track wave position to prevent clicking
+    pub log_file: Option<std::fs::File>,
 }
 
 impl Bus {
@@ -41,6 +42,7 @@ impl Bus {
             pit_mode: 0,
             pit_write_msb: false,
             audio_phase: 0.0,
+            log_file: None,
         }
     }
 
@@ -90,6 +92,19 @@ impl Bus {
             self.ram[addr] = value;
             false
         }
+    }
+
+    // Write a 16-bit value to memory (Little Endian)
+    pub fn write_16(&mut self, addr: usize, value: u16) {
+        self.write_8(addr, (value & 0xFF) as u8);        // Low Byte
+        self.write_8(addr + 1, (value >> 8) as u8);      // High Byte
+    }
+    
+    // Optional: read_16 helper if you don't have it yet
+    pub fn read_16(&self, addr: usize) -> u16 {
+        let low = self.read_8(addr) as u16;
+        let high = self.read_8(addr + 1) as u16;
+        (high << 8) | low
     }
 
     // Write to an I/O Port
@@ -152,5 +167,22 @@ impl Bus {
             }
             _ => 0xFF, // Default open bus
         }
+    }
+
+    pub fn log_string(&mut self, s: &str) {
+        use std::io::Write;
+        use std::fs::OpenOptions;
+
+        if self.log_file.is_none() {
+            self.log_file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open("trace.log")
+                    .expect("Failed to open trace.log"),
+            );
+        }
+        write!(self.log_file.as_mut().unwrap(), "{}", s).expect("Failed to write to trace.log");
+        print!("{}", s);
     }
 }
