@@ -23,6 +23,7 @@ fn is_8bit_reg(reg: Register) -> bool {
 
 // Helper to calculate effective address for Memory operands
 pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
+    let base = instr.memory_base();
     // Get the Segment Base
     // Default to DS, unless there is a segment override prefix.
     let segment = match instr.segment_prefix() {
@@ -32,17 +33,24 @@ pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
         Register::DS => cpu.ds,
         Register::FS => 0,
         Register::GS => 0,
-        _ => cpu.ds, // Default to DS for data operations
+        _ => {
+            // No override. Determine default based on Base Register.
+            if base == Register::BP || base == Register::SP || base == Register::EBP || base == Register::ESP {
+                cpu.ss // Stack Segment default
+            } else {
+                cpu.ds // Data Segment default
+            }
+        }
     };
 
-    // Get Base Register Value
-    let base = if instr.memory_base() != Register::None {
-        cpu.get_reg16(instr.memory_base()) as u32
+    // Calculate Base Value
+    let base_val = if base != Register::None {
+        cpu.get_reg16(base) as u32
     } else {
         0
     };
 
-    // Get Index Register Value * Scale
+    // Calculate Index Value
     let index = if instr.memory_index() != Register::None {
         let val = cpu.get_reg16(instr.memory_index()) as u32;
         let scale = instr.memory_index_scale() as u32;
@@ -51,15 +59,14 @@ pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
         0
     };
 
-    // Get Displacement (The critical fix for [0x0006])
-    // We treat everything as u32 to handle the wrap-around math cleanly
+    // Displacement
     let displacement = instr.memory_displacement32();
 
-    // Calculate Offset with 16-bit wrap-around
-    // (Base + Index + Disp) & 0xFFFF
-    let offset = (base.wrapping_add(index).wrapping_add(displacement)) & 0xFFFF;
+    // Calculate Effective Address (Offset)
+    // Wrap at 16-bit boundary for Real Mode
+    let offset = (base_val.wrapping_add(index).wrapping_add(displacement)) & 0xFFFF;
 
-    // Convert Segment:Offset to Physical Address (usize)
+    // Physical Address
     cpu.get_physical_addr(segment, offset as u16)
 }
 
