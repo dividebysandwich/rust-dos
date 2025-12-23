@@ -935,6 +935,8 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                     let dta_off = cpu.bus.dta_offset;
                     let dta_phys = cpu.get_physical_addr(dta_seg, dta_off);
 
+                    cpu.bus.log_string(&format!("[DEBUG] INT 21h, {:02X} FindFirst/Next called. DTA at {:04X}:{:04X} (Phys {:#05X})", ah, dta_seg, dta_off, dta_phys));
+
                     // DTA Layout Constants
                     const OFFSET_ATTR_SEARCH: usize = 12; // Where DOS remembers what we are looking for
                     const OFFSET_INDEX: usize = 13;       // Where DOS remembers how far we got

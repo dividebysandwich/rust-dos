@@ -1,4 +1,4 @@
-use iced_x86::{Register, Instruction, OpKind, MemorySize};
+use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
 use crate::bus::Bus;
 use crate::cpu_instr::calculate_addr;
@@ -106,44 +106,61 @@ impl Cpu {
     }
 
     /// Helper to read the first operand (Destination).
-/// Returns: (Value, Optional Memory Address, Is 8-bit?)
-/// If address is Some, you should write the result back to that address.
-/// If address is None, you should write the result back to the register.
-pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool) {
-    match instr.op0_kind() {
-        // Handle Register Operand
-        OpKind::Register => {
-            let reg = instr.op0_register();
-            // Use iced_x86 built-in check or your own helper
-            let is_8bit = reg.is_gpr8(); 
-            
-            let val = if is_8bit {
-                cpu.get_reg8(reg) as u16
-            } else {
-                cpu.get_reg16(reg)
-            };
-            
-            (val, None, is_8bit)
+    /// Returns: (Value, Optional Memory Address, Is 8-bit?)
+    /// If address is Some, you should write the result back to that address.
+    /// If address is None, you should write the result back to the register.
+    pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool) {
+        match instr.op0_kind() {
+            // Handle Register Operand
+            OpKind::Register => {
+                let reg = instr.op0_register();
+                // Use iced_x86 built-in check or your own helper
+                let is_8bit = reg.is_gpr8();
+
+                let val = if is_8bit {
+                    cpu.get_reg8(reg) as u16
+                } else {
+                    cpu.get_reg16(reg)
+                };
+
+                (val, None, is_8bit)
+            }
+
+            // Handle Memory Operand
+            OpKind::Memory => {
+                let addr = calculate_addr(cpu, instr);
+                let is_8bit = instr.memory_size() == MemorySize::UInt8;
+
+                let val = if is_8bit {
+                    cpu.bus.read_8(addr) as u16
+                } else {
+                    cpu.bus.read_16(addr) // Uses the new helper above
+                };
+
+                (val, Some(addr), is_8bit)
+            }
+
+            // Fallback (Should not happen for R/W ops like ADD/RCL)
+            _ => (0, None, false),
         }
-        
-        // Handle Memory Operand
-        OpKind::Memory => {
-            let addr = calculate_addr(cpu, instr);
-            let is_8bit = instr.memory_size() == MemorySize::UInt8;
-            
-            let val = if is_8bit {
-                cpu.bus.read_8(addr) as u16
-            } else {
-                cpu.bus.read_16(addr) // Uses the new helper above
-            };
-            
-            (val, Some(addr), is_8bit)
-        }
-        
-        // Fallback (Should not happen for R/W ops like ADD/RCL)
-        _ => (0, None, false),
     }
-}
+
+    pub fn get_segment_value(&self, seg: Register) -> u16 {
+        match seg {
+            Register::ES => self.es,
+            Register::CS => self.cs,
+            Register::SS => self.ss,
+            Register::DS => self.ds,
+            // FS and GS are rarely used in standard Real Mode DOS,
+            // but returning 0 is safe for now.
+            Register::FS => 0,
+            Register::GS => 0,
+            // Fallback: If for some reason a non-segment register is passed,
+            // default to DS (Data Segment)
+            _ => self.ds,
+        }
+    }
+
     // Extract High byte (AH)
     pub fn get_ah(&self) -> u8 {
         (self.ax >> 8) as u8
@@ -392,7 +409,7 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         // Reset Cursor Position (Col=0, Row=0) at Physical Address 0x0450
         self.bus.write_8(0x0450, 0x00); // Col
         self.bus.write_8(0x0451, 0x00); // Row
-        
+
         // Copy bytes
         for (i, byte) in shell_code.iter().enumerate() {
             self.bus.ram[start_addr + i] = *byte;
@@ -452,7 +469,11 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
             None => return false,
         };
 
-        self.bus.log_string(&format!("[DOS] Loading {} ({} bytes)", filename, bytes.len()));
+        self.bus.log_string(&format!(
+            "[DOS] Loading {} ({} bytes)",
+            filename,
+            bytes.len()
+        ));
 
         // Check for EXE Signature ("MZ")
         if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
@@ -474,7 +495,7 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
                 self.bus.ram[phys_start_seg + i] = 0;
             }
         }
-        
+
         // Load the file data at offset 0x100
         let phys_code_start = self.get_physical_addr(load_segment, start_offset);
         for (i, b) in bytes.iter().enumerate() {
@@ -488,12 +509,12 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         self.ds = load_segment;
         self.es = load_segment;
         self.ss = load_segment; // Stack is in the same segment
-        self.ip = 0x100;        // Entry Point
-        self.sp = 0xFFFE;       // End of segment (64KB - 2)
+        self.ip = 0x100; // Entry Point
+        self.sp = 0xFFFE; // End of segment (64KB - 2)
 
         // Setup PSP (Program Segment Prefix) at CS:0000
         let psp_phys = self.get_physical_addr(load_segment, 0);
-        
+
         // Offset 0x00: INT 20h (Exit Program)
         self.bus.write_8(psp_phys, 0xCD);
         self.bus.write_8(psp_phys + 1, 0x20);
@@ -519,10 +540,16 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         // Offset 0x81: Command Tail (CR only)
         self.bus.write_8(psp_phys + 0x81, 0x0D);
 
-        self.bus.log_string(&format!("[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}", 
-            self.bus.read_8(psp_phys + 6), psp_phys + 6));
+        self.bus.log_string(&format!(
+            "[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}",
+            self.bus.read_8(psp_phys + 6),
+            psp_phys + 6
+        ));
 
-        self.bus.log_string(&format!("[DOS] Loaded COM file at {:04X}:{:04X}", self.cs, self.ip));
+        self.bus.log_string(&format!(
+            "[DOS] Loaded COM file at {:04X}:{:04X}",
+            self.cs, self.ip
+        ));
         true
     }
 
@@ -555,7 +582,8 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         // Load Binary
         // Safety check: ensure header doesn't point past EOF
         if header_size > bytes.len() {
-            self.bus.log_string("[DOS] Invalid EXE: Header larger than file");
+            self.bus
+                .log_string("[DOS] Invalid EXE: Header larger than file");
             return false;
         }
 
@@ -576,28 +604,28 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         if reloc_count > 0 && reloc_table_offset + (reloc_count * 4) <= bytes.len() {
             for i in 0..reloc_count {
                 let offset_idx = reloc_table_offset + (i * 4);
-                
+
                 // Read the relocation entry (Target Offset, Target Segment)
-                let rel_offset = u16::from_le_bytes([bytes[offset_idx], bytes[offset_idx+1]]);
-                let rel_seg = u16::from_le_bytes([bytes[offset_idx+2], bytes[offset_idx+3]]);
-                
+                let rel_offset = u16::from_le_bytes([bytes[offset_idx], bytes[offset_idx + 1]]);
+                let rel_seg = u16::from_le_bytes([bytes[offset_idx + 2], bytes[offset_idx + 3]]);
+
                 // Calculate physical address of the value we need to patch
                 // The target segment in the table is relative to the Image Start
                 let target_seg = relocation_base_segment.wrapping_add(rel_seg);
                 let phys_addr = self.get_physical_addr(target_seg, rel_offset);
-                
+
                 if phys_addr + 2 <= self.bus.ram.len() {
                     // Read the existing 16-bit value
                     let val_low = self.bus.ram[phys_addr] as u16;
-                    let val_high = self.bus.ram[phys_addr+1] as u16;
+                    let val_high = self.bus.ram[phys_addr + 1] as u16;
                     let mut val = (val_high << 8) | val_low;
-                    
+
                     // PATCH: Add the actual start segment to the value
                     val = val.wrapping_add(relocation_base_segment);
-                    
+
                     // Write it back
                     self.bus.ram[phys_addr] = (val & 0xFF) as u8;
-                    self.bus.ram[phys_addr+1] = (val >> 8) as u8;
+                    self.bus.ram[phys_addr + 1] = (val >> 8) as u8;
                 }
             }
         }
@@ -637,5 +665,4 @@ pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool
         ));
         true
     }
-
 }

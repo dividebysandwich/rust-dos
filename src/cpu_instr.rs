@@ -345,6 +345,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     cpu.get_reg16(instr.op1_register())
                 } else if instr.op1_kind() == OpKind::Immediate16 {
                     instr.immediate16()
+                } else if instr.op1_kind() == OpKind::Immediate8 {
+                    instr.immediate8() as i8 as i16 as u16 // Sign-extend
                 } else {
                     instr.immediate8to16() as u16
                 };
@@ -416,6 +418,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     cpu.get_reg16(instr.op1_register())
                 } else if instr.op1_kind() == OpKind::Immediate16 {
                     instr.immediate16()
+                } else if instr.op1_kind() == OpKind::Immediate8 {
+                    instr.immediate8() as i8 as i16 as u16 // Sign-extend
                 } else {
                     instr.immediate8to16() as u16
                 };
@@ -485,6 +489,8 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     cpu.get_reg16(instr.op1_register())
                 } else if instr.op1_kind() == OpKind::Immediate16 {
                     instr.immediate16()
+                } else if instr.op1_kind() == OpKind::Immediate8 {
+                    instr.immediate8() as i8 as i16 as u16 // Sign-extend
                 } else {
                     instr.immediate8to16() as u16
                 };
@@ -564,7 +570,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 } else if instr.op1_kind() == OpKind::Immediate8to16 {
                     instr.immediate8to16() as u16
                 } else if instr.op1_kind() == OpKind::Immediate8 {
-                    instr.immediate8() as u16
+                    instr.immediate8() as i8 as i16 as u16 // Sign-extend
                 } else if instr.op1_kind() == OpKind::Memory {
                     let addr = calculate_addr(cpu, instr);
                     let low = cpu.bus.read_8(addr) as u16;
@@ -1029,35 +1035,76 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
 
         // Stack Operations
         Mnemonic::Push => {
+            // Resolve Operand Value
             let val = if instr.op0_kind() == OpKind::Register {
-                // This handles AX, BX... AND CS, DS, ES, SS automatically
                 cpu.get_reg16(instr.op0_register())
             } else if instr.op0_kind() == OpKind::Immediate8 {
                 instr.immediate8() as i8 as i16 as u16 // Sign extend
             } else if instr.op0_kind() == OpKind::Immediate16 {
                 instr.immediate16()
             } else if instr.op0_kind() == OpKind::Memory {
-                let addr = calculate_addr(cpu, instr);
-                let low = cpu.bus.read_8(addr) as u16;
-                let high = cpu.bus.read_8(addr + 1) as u16;
+                // Handle Memory Read Wrap
+                let segment = match instr.segment_prefix() {
+                    Register::None => if instr.memory_base() == Register::BP { cpu.ss } else { cpu.ds },
+                    _ => cpu.get_segment_value(instr.segment_prefix()) // You might need a helper here or match logic
+                };
+                
+                // Manual offset calculation to ensure we can wrap +1
+                // Simplification: We assume get_effective_addr exists as discussed.
+                let offset = get_effective_addr(cpu, instr);
+                
+                let low_addr = cpu.get_physical_addr(segment, offset);
+                let high_addr = cpu.get_physical_addr(segment, offset.wrapping_add(1));
+                
+                let low = cpu.bus.read_8(low_addr) as u16;
+                let high = cpu.bus.read_8(high_addr) as u16;
                 (high << 8) | low
             } else {
                 cpu.bus.log_string("[CPU] Warning: Pushing 0 for unknown OpKind");
                 0
             };
-            cpu.push(val);
+
+            // Push logic (Decrement SP, Write)
+            cpu.sp = cpu.sp.wrapping_sub(2);
+            
+            // Stack Write Wrap
+            let sp_low = cpu.get_physical_addr(cpu.ss, cpu.sp);
+            let sp_high = cpu.get_physical_addr(cpu.ss, cpu.sp.wrapping_add(1));
+            
+            cpu.bus.write_8(sp_low, (val & 0xFF) as u8);
+            cpu.bus.write_8(sp_high, (val >> 8) as u8);
         }
 
         Mnemonic::Pop => {
-            let val = cpu.pop();
+            // Pop logic (Read, Increment SP)
+            // Stack Read Wrap
+            let sp_low = cpu.get_physical_addr(cpu.ss, cpu.sp);
+            let sp_high = cpu.get_physical_addr(cpu.ss, cpu.sp.wrapping_add(1));
             
+            let low = cpu.bus.read_8(sp_low) as u16;
+            let high = cpu.bus.read_8(sp_high) as u16;
+            let val = (high << 8) | low;
+
+            cpu.sp = cpu.sp.wrapping_add(2);
+
+            // Write to Destination
             if instr.op0_kind() == OpKind::Register {
-                // This handles AX, BX... AND CS, DS, ES, SS automatically
                 cpu.set_reg16(instr.op0_register(), val);
             } else if instr.op0_kind() == OpKind::Memory {
-                let addr = calculate_addr(cpu, instr);
-                cpu.bus.write_8(addr, (val & 0xFF) as u8);
-                cpu.bus.write_8(addr + 1, (val >> 8) as u8);
+                // Memory Write Wrap
+                // Re-calculate segment/offset logic same as Push
+                let segment = match instr.segment_prefix() {
+                    Register::None => if instr.memory_base() == Register::BP { cpu.ss } else { cpu.ds },
+                    _ => cpu.get_segment_value(instr.segment_prefix())
+                };
+
+                let offset = get_effective_addr(cpu, instr);
+                
+                let low_addr = cpu.get_physical_addr(segment, offset);
+                let high_addr = cpu.get_physical_addr(segment, offset.wrapping_add(1));
+                
+                cpu.bus.write_8(low_addr, (val & 0xFF) as u8);
+                cpu.bus.write_8(high_addr, (val >> 8) as u8);
             }
         }
 
@@ -1172,10 +1219,16 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
         // LODSW: Load Word from [DS:SI] into AX, update SI
         Mnemonic::Lodsw => {
             let seg = get_string_src_segment(&instr, &cpu);
-            let addr = cpu.get_physical_addr(seg, cpu.si);
-            let low = cpu.bus.read_8(addr) as u16;
-            let high = cpu.bus.read_8(addr + 1) as u16;
+            
+            // Calculate Low/High addresses separately
+            let low_addr = cpu.get_physical_addr(seg, cpu.si);
+            let high_addr = cpu.get_physical_addr(seg, cpu.si.wrapping_add(1));
+            
+            let low = cpu.bus.read_8(low_addr) as u16;
+            let high = cpu.bus.read_8(high_addr) as u16;
+            
             cpu.ax = (high << 8) | low;
+
             if cpu.dflag() {
                 cpu.si = cpu.si.wrapping_sub(2);
             } else {
@@ -1211,13 +1264,14 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Stosw => {
             let has_rep = instr.has_rep_prefix();
             loop {
-                if has_rep && cpu.cx == 0 {
-                    break;
-                }
+                if has_rep && cpu.cx == 0 { break; }
 
-                let addr = cpu.get_physical_addr(cpu.es, cpu.di);
-                cpu.bus.write_8(addr, cpu.get_al()); // Low
-                cpu.bus.write_8(addr + 1, cpu.get_ah()); // High
+                // Calculate Low/High addresses separately
+                let low_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+                let high_addr = cpu.get_physical_addr(cpu.es, cpu.di.wrapping_add(1));
+
+                cpu.bus.write_8(low_addr, cpu.get_al());      // Low
+                cpu.bus.write_8(high_addr, cpu.get_ah());     // High
 
                 if cpu.dflag() {
                     cpu.di = cpu.di.wrapping_sub(2);
@@ -1271,21 +1325,24 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
         // MOVSW: Move Word [DS:SI] -> [ES:DI], update SI, DI
         Mnemonic::Movsw => {
             let has_rep = instr.has_rep_prefix();
-
             loop {
-                if has_rep && cpu.cx == 0 {
-                    break;
-                }
+                if has_rep && cpu.cx == 0 { break; }
 
                 let src_seg = get_string_src_segment(&instr, &cpu);
-                let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
-                let dest_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+                
+                // Wrap Source Address
+                let src_low = cpu.get_physical_addr(src_seg, cpu.si);
+                let src_high = cpu.get_physical_addr(src_seg, cpu.si.wrapping_add(1));
+                
+                // Wrap Dest Address
+                let dest_low = cpu.get_physical_addr(cpu.es, cpu.di);
+                let dest_high = cpu.get_physical_addr(cpu.es, cpu.di.wrapping_add(1));
 
-                let low = cpu.bus.read_8(src_addr);
-                let high = cpu.bus.read_8(src_addr + 1);
+                let val_low = cpu.bus.read_8(src_low);
+                let val_high = cpu.bus.read_8(src_high);
 
-                cpu.bus.write_8(dest_addr, low);
-                cpu.bus.write_8(dest_addr + 1, high);
+                cpu.bus.write_8(dest_low, val_low);
+                cpu.bus.write_8(dest_high, val_high);
 
                 if cpu.dflag() {
                     cpu.si = cpu.si.wrapping_sub(2);
@@ -1386,7 +1443,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
                     } else if instr.op1_kind() == OpKind::Immediate8 {
-                        instr.immediate8() as u16
+                        instr.immediate8() as i8 as i16 as u16 // Sign-extend
                     } else {
                         instr.immediate16()
                     };
@@ -1417,7 +1474,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
                     } else if instr.op1_kind() == OpKind::Immediate8 {
-                        instr.immediate8() as u16
+                        instr.immediate8() as i8 as i16 as u16 // Sign-extend
                     } else {
                         instr.immediate16()
                     };
@@ -1462,7 +1519,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
                     } else if instr.op1_kind() == OpKind::Immediate8 {
-                        instr.immediate8() as u16
+                        instr.immediate8() as i8 as i16 as u16
                     } else {
                         instr.immediate16()
                     };
@@ -1493,7 +1550,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     } else if instr.op1_kind() == OpKind::Immediate8to16 {
                         instr.immediate8to16() as u16
                     } else if instr.op1_kind() == OpKind::Immediate8 {
-                        instr.immediate8() as u16
+                        instr.immediate8() as i8 as i16 as u16
                     } else {
                         instr.immediate16()
                     };
@@ -1668,30 +1725,65 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                     cpu.set_flag(FLAG_OF, !fits);
                 }
             }
-            // Handle 2-Operand IMUL (IMUL Dest, Src) - 186/386+ feature
-            else if instr.op_count() == 2 {
-                // Similar logic to ADD/SUB but for multiplication
-                // Note: 2-operand IMUL truncates the result to fit the destination size
-                // and does NOT affect DX.
+            // Handle Multi-Operand IMUL (IMUL Dest, Src) or (IMUL Dest, Src, Imm)
+            else {
+                // Determine Destination Register (always Op0)
                 let dest_reg = instr.op0_register();
-                let dest_val = cpu.get_reg16(dest_reg) as i16 as i32;
-
-                let src_val = if instr.op1_kind() == OpKind::Register {
-                    cpu.get_reg16(instr.op1_register()) as i16 as i32
-                } else if instr.op1_kind() == OpKind::Immediate16 {
-                    instr.immediate16() as i16 as i32
-                } else if instr.op1_kind() == OpKind::Memory {
-                    let addr = calculate_addr(&cpu, &instr);
-                    let low = cpu.bus.read_8(addr) as u16;
-                    let high = cpu.bus.read_8(addr + 1) as u16;
-                    ((high << 8) | low) as i16 as i32
+                
+                // Determine First Source Value (Op1 is Reg or Mem)
+                // Note: In 2-op form, Dest is also the first source.
+                // But iced-x86 normalizes 2-op `IMUL A, B` into `IMUL A, A, B` structure conceptually often,
+                // or we handle it manually.
+                
+                let val1 = if instr.op_count() == 2 {
+                    // 2-Operand Form: IMUL Dest, Src -> Dest = Dest * Src
+                    // Value 1 is the current value of Dest
+                     cpu.get_reg16(dest_reg) as i16 as i32
                 } else {
-                    0
+                    // 3-Operand Form: IMUL Dest, Src1, Src2 -> Dest = Src1 * Src2
+                    // Value 1 is Op1 (Reg or Mem)
+                    if instr.op1_kind() == OpKind::Register {
+                        cpu.get_reg16(instr.op1_register()) as i16 as i32
+                    } else {
+                        let addr = calculate_addr(&cpu, &instr);
+                        cpu.bus.read_16(addr) as i16 as i32
+                    }
                 };
 
-                let res = dest_val * src_val;
+                // Determine Second Source Value (The Multiplier)
+                let val2 = if instr.op_count() == 2 {
+                    // 2-Operand: Op1 is the source (Reg/Mem/Imm)
+                    if instr.op1_kind() == OpKind::Register {
+                        cpu.get_reg16(instr.op1_register()) as i16 as i32
+                    } else if instr.op1_kind() == OpKind::Memory {
+                         let addr = calculate_addr(&cpu, &instr);
+                         cpu.bus.read_16(addr) as i16 as i32
+                    } else if instr.op1_kind() == OpKind::Immediate8 {
+                        instr.immediate8() as i8 as i16 as i32 // Sign Extend!
+                    } else if instr.op1_kind() == OpKind::Immediate8to16 {
+                        instr.immediate8to16() as i16 as i32
+                    } else {
+                        instr.immediate16() as i16 as i32
+                    }
+                } else {
+                    // 3-Operand: Op2 is always the Immediate
+                    // Note: We use the STANDARD accessors. There is no "_2nd" suffix.
+                    if instr.op2_kind() == OpKind::Immediate8 {
+                        instr.immediate8() as i8 as i16 as i32 // Sign Extend!
+                    } else if instr.op2_kind() == OpKind::Immediate8to16 {
+                        instr.immediate8to16() as i16 as i32
+                    } else {
+                        instr.immediate16() as i16 as i32
+                    }
+                };
+
+                // Perform Multiplication
+                let res = val1 * val2;
+
+                // Write Result (Truncated to 16-bit)
                 cpu.set_reg16(dest_reg, res as u16);
 
+                // Set Flags (CF/OF set if result overflows 16 bits)
                 let fits = res == (res as i16 as i32);
                 cpu.set_flag(FLAG_CF, !fits);
                 cpu.set_flag(FLAG_OF, !fits);
@@ -2218,10 +2310,36 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
             cpu.cx = cx;
             cpu.ax = ax;
         }
+        // PUSHA: Push All General Registers (186+)
+        // Order: AX, CX, DX, BX, Original SP, BP, SI, DI
+        Mnemonic::Pusha => {
+            let original_sp = cpu.get_reg16(Register::SP);
+            
+            cpu.push(cpu.get_reg16(Register::AX));
+            cpu.push(cpu.get_reg16(Register::CX));
+            cpu.push(cpu.get_reg16(Register::DX));
+            cpu.push(cpu.get_reg16(Register::BX));
+            cpu.push(original_sp);
+            cpu.push(cpu.get_reg16(Register::BP));
+            cpu.push(cpu.get_reg16(Register::SI));
+            cpu.push(cpu.get_reg16(Register::DI));
+        }
 
         // WAIT: Wait for FPU (Treat as NOP for now)
         Mnemonic::Wait => {
             // Do nothing.
+        }
+
+        // CBW: Convert Byte to Word (Sign-extend AL into AX)
+        Mnemonic::Cbw => {
+            let al = cpu.get_al() as i8;
+            cpu.ax = al as i16 as u16;
+        }
+
+        // CWD: Convert Word to Doubleword (Sign-extend AX into DX:AX)
+        Mnemonic::Cwd => {
+            let ax = cpu.ax as i16;
+            cpu.dx = if ax < 0 { 0xFFFF } else { 0x0000 };
         }
 
         // Flag Manipulation

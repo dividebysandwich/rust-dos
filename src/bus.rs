@@ -103,7 +103,7 @@ impl Bus {
                 let offset = (addr - 0xB8000) / 2;
                 let row = offset / 80;
                 let col = offset % 80;
-                self.log_string(&format!("[VIDEO] '{}' @ {},{}", value as char, col, row));
+                //self.log_string(&format!("[VIDEO] '{}' @ {},{}", value as char, col, row));
             }
         }
 
