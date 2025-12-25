@@ -21,6 +21,44 @@ fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
     String::from_utf8_lossy(&chars).to_string()
 }
 
+/// Converts a filename pattern (e.g., "*.*", "FILE.TXT") to DOS FCB format (11 bytes).
+fn pattern_to_fcb(pattern: &str) -> [u8; 11] {
+    let mut fcb = [b' '; 11];
+    let upper = pattern.to_uppercase();
+    
+    // Split into Name and Extension
+    let (name, ext) = match upper.rsplit_once('.') {
+        Some((n, e)) => (n, e),
+        None => (upper.as_str(), ""),
+    };
+
+    // Process Name (first 8 bytes)
+    for (i, byte) in name.bytes().enumerate() {
+        if i >= 8 { break; }
+        if byte == b'*' {
+            // Fill remaining name chars with '?'
+            for j in i..8 { fcb[j] = b'?'; }
+            break;
+        } else {
+            fcb[i] = byte;
+        }
+    }
+
+    // Process Extension (last 3 bytes)
+    for (i, byte) in ext.bytes().enumerate() {
+        if i >= 3 { break; }
+        if byte == b'*' {
+             // Fill remaining ext chars with '?'
+            for j in i..3 { fcb[8 + j] = b'?'; }
+            break;
+        } else {
+            fcb[8 + i] = byte;
+        }
+    }
+
+    fcb
+}
+
 // Helper: Reconstruct "NAME.EXT" from the DTA's fixed-width 11-byte template
 fn read_dta_template(bus: &Bus, dta_phys: usize) -> String {
     let mut name = String::new();
@@ -1070,28 +1108,30 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                             // Persist Search Attribute (Offset 12)
                             cpu.bus.write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
 
-                            // Update Index (Our internal tracker at 13-14)
-                            cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
-
                             // Update Index
                             cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
 
-                            // Write Unique Position/Cluster ID to offsets 15-20 (6 bytes)
-                            // We construct a 32-bit unique ID from the index to ensure it changes every time.
-                            // DOS uses this to find the next entry.
-                            let unique_id = (index as u32).wrapping_add(0x12345678);
-                            
                             // Write search_pattern into dta_phys + 1..11 for reference
                             let pattern_bytes = search_pattern.as_bytes();
                             let pattern_len = std::cmp::min(pattern_bytes.len(), 11);
-                            for i in 0..pattern_len {
-                                cpu.bus.write_8(dta_phys + 1 + i, pattern_bytes[i]);
+//                            for i in 0..pattern_len {
+//                                cpu.bus.write_8(dta_phys + 1 + i, pattern_bytes[i]);
+//                            }
+                            let fcb_bytes = pattern_to_fcb(&search_pattern);
+                            for i in 0..11 {
+                                cpu.bus.write_8(dta_phys + 1 + i, fcb_bytes[i]);
                             }
                             // Pad remaining bytes with 0
                             for i in pattern_len..11 {
                                 cpu.bus.write_8(dta_phys + 1 + i, 0);
                             }
 
+
+//                            for i in 0..6 { cpu.bus.write_8(dta_phys + 15 + i, 0); }
+                            // Write Unique Position/Cluster ID to offsets 15-20 (6 bytes)
+                            // We construct a 32-bit unique ID from the index to ensure it changes every time.
+                            // DOS uses this to find the next entry.
+                            let unique_id = (index as u32).wrapping_add(0x12345678);
                             // Write bytes 15-16
                             cpu.bus.write_16(dta_phys + 15, (unique_id & 0xFFFF) as u16);
                             // Write bytes 17-18
