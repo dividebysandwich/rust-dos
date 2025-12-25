@@ -2,7 +2,7 @@ use iced_x86::Register;
 
 use crate::audio::play_sdl_beep;
 use crate::bus::Bus;
-use crate::command::{run_dir_command, run_type_command};
+use crate::command::{run_dir_command, run_type_command, run_ver_command};
 use crate::cpu::{Cpu, CpuState};
 use crate::video::{print_char, print_string, VideoMode};
 
@@ -672,6 +672,8 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
                 cpu.bus
                     .log_string("[SHELL] Exiting Emulator via command...");
                 std::process::exit(0);
+            } else if command.eq_ignore_ascii_case("VER") || command.eq_ignore_ascii_case("VERSION") {
+                run_ver_command(cpu);
             } else if command.is_empty() {
                 // No command entered, just ignore
             } else {

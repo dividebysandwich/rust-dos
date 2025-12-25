@@ -21,6 +21,11 @@ pub fn run_dir_command(cpu: &mut Cpu) {
     }
 }
 
+pub fn run_ver_command(cpu: &mut Cpu) {
+    let version = env!("CARGO_PKG_VERSION");
+    print_string(cpu, format!("Rust-DOS v{}\r\n", version).as_str());
+}
+
 pub fn run_type_command(cpu: &mut Cpu, filename: &str) {
     let target_lower = filename.to_lowercase();
     let mut found_path = None;
