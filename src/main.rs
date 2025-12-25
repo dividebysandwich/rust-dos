@@ -14,7 +14,7 @@ mod command;
 mod cpu;
 mod cpu_instr;
 mod disk;
-mod interrupt;
+mod interrupts;
 mod shell;
 mod video;
 

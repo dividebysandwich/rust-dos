@@ -2,7 +2,7 @@ use iced_x86::Register;
 
 use crate::bus::Bus;
 use crate::cpu::Cpu;
-use crate::interrupt;
+use crate::interrupts;
 
 pub const SCREEN_WIDTH: u32 = 640;
 pub const SCREEN_HEIGHT: u32 = 400;
@@ -228,8 +228,7 @@ pub fn print_string(cpu: &mut Cpu, msg: &str) {
         cpu.set_reg8(Register::BL, 0x07); // Color (Gray)
 
         // Invoke the Interrupt Handler directly
-        // Make sure `interrupt` module is imported: use crate::interrupt;
-        interrupt::handle_interrupt(cpu, 0x10);
+        interrupts::handle_interrupt(cpu, 0x10);
     }
     
     // cpu.set_reg16(Register::AX, saved_ax);

@@ -1,7 +1,7 @@
 use iced_x86::{Instruction, MemorySize, Mnemonic, OpKind, Register, Code};
 
 use crate::cpu::{Cpu, FLAG_AF, FLAG_CF, FLAG_OF, FLAG_SF, FLAG_ZF, FLAG_PF};
-use crate::interrupt::handle_interrupt;
+use crate::interrupts;
 
 // ========================================================================
 // Helper Functions
@@ -101,7 +101,7 @@ fn get_shift_count(instr: &Instruction, cpu: &Cpu) -> u32 {
 pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
     match instr.mnemonic() {
         Mnemonic::Int => {
-            handle_interrupt(&mut cpu, instr.immediate8());
+            interrupts::handle_interrupt(&mut cpu, instr.immediate8());
         }
 
         Mnemonic::Mov => {
@@ -1835,7 +1835,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
 
             // Handle Divide by Zero
             if src_val == 0 {
-                handle_interrupt(cpu, 0x00);
+                interrupts::handle_interrupt(cpu, 0x00);
                 return;
             }
 
@@ -1849,7 +1849,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 let remainder = dividend % divisor;
 
                 if quotient > 0xFF {
-                    handle_interrupt(cpu, 0x00);
+                    interrupts::handle_interrupt(cpu, 0x00);
                     return;
                 } else {
                     cpu.set_reg8(Register::AL, quotient as u8);
@@ -1866,7 +1866,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 let remainder = dividend % divisor;
 
                 if quotient > 0xFFFF {
-                    handle_interrupt(cpu, 0x00);
+                    interrupts::handle_interrupt(cpu, 0x00);
                     return;
                 } else {
                     cpu.set_reg16(Register::AX, quotient as u16);
@@ -1899,7 +1899,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
 
             // Check for Divide by Zero
             if src_val == 0 {
-                handle_interrupt(cpu, 0x00);
+                interrupts::handle_interrupt(cpu, 0x00);
                 return;
             }
 
@@ -1912,7 +1912,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 let remainder = dividend.checked_rem(divisor).unwrap_or(0);
 
                 if quotient > 127 || quotient < -128 {
-                    handle_interrupt(cpu, 0x00); // Quotient too large
+                    interrupts::handle_interrupt(cpu, 0x00); // Quotient too large
                 } else {
                     cpu.set_reg8(Register::AL, quotient as u8);
                     cpu.set_reg8(Register::AH, remainder as u8);
@@ -1930,7 +1930,7 @@ pub fn execute_instruction(mut cpu: &mut Cpu, instr: &Instruction) {
                 let remainder = dividend.checked_rem(divisor).unwrap_or(0);
 
                 if quotient > 32767 || quotient < -32768 {
-                    handle_interrupt(cpu, 0x00); // Quotient too large
+                    interrupts::handle_interrupt(cpu, 0x00); // Quotient too large
                 } else {
                     cpu.set_reg16(Register::AX, quotient as u16);
                     cpu.set_reg16(Register::DX, remainder as u16);
