@@ -1,9 +1,7 @@
-use iced_x86::Register;
 use crate::cpu::{Cpu, CpuState};
-use crate::command::{run_dir_command, run_type_command, run_ver_command};
+use crate::command::CommandDispatcher;
 use crate::video::{print_string};
 use super::utils::read_asciiz_string;
-use super::int10; // For CLS
 
 pub fn handle(cpu: &mut Cpu) {
     // Check if called by User Program (CS != 0)
@@ -37,44 +35,25 @@ pub fn handle(cpu: &mut Cpu) {
         None => (clean_cmd.as_str(), ""),
     };
 
-    if command.eq_ignore_ascii_case("DIR") {
-        run_dir_command(cpu);
-    } else if command.eq_ignore_ascii_case("CLS") {
-        // Invoke BIOS Scroll Up via int10 handler directly
-        cpu.set_reg8(Register::AH, 0x06);
-        cpu.set_reg8(Register::AL, 0x00);
-        cpu.set_reg8(Register::BH, 0x07);
-        cpu.set_reg8(Register::CH, 0x00);
-        cpu.set_reg8(Register::CL, 0x00);
-        cpu.set_reg8(Register::DH, 0x18);
-        cpu.set_reg8(Register::DL, 0x4F);
-        
-        int10::handle(cpu);
-
-        cpu.bus.write_8(0x450, 0x00); // Col
-        cpu.bus.write_8(0x451, 0x00); // Row
-    } else if command.eq_ignore_ascii_case("TYPE") {
-        if args.is_empty() {
-            print_string(cpu, "Required parameter missing\r\n");
-        } else {
-            run_type_command(cpu, args);
-        }
-    } else if command.eq_ignore_ascii_case("EXIT") {
-        cpu.bus.log_string("[SHELL] Exiting Emulator...");
-        std::process::exit(0);
-    } else if command.eq_ignore_ascii_case("VER") || command.eq_ignore_ascii_case("VERSION") {
-        run_ver_command(cpu);
+    let dispatcher = CommandDispatcher::new(); 
+    
+    if dispatcher.dispatch(cpu, command, args) {
+        // Build-in command was found and executed
     } else if command.is_empty() {
-        // Do nothing
+        // Ignore empty
     } else {
+        // Not a command? Try to load as Executable (.COM/.EXE)
         let filename = command.to_string();
-        if !filename.contains('.') {
-            if cpu.load_executable(&format!("{}.com", command)) { return; }
-            if cpu.load_executable(&format!("{}.exe", command)) { return; }
+        let loaded = if !filename.contains('.') {
+             cpu.load_executable(&format!("{}.com", command)) 
+             || cpu.load_executable(&format!("{}.exe", command))
         } else {
-            if cpu.load_executable(&filename) { return; }
+             cpu.load_executable(&filename)
+        };
+
+        if !loaded {
+            print_string(cpu, "Bad command or file name.\r\n");
         }
-        print_string(cpu, "Bad command or file name.\r\n");
     }
 
     print_string(cpu, "C:\\>");

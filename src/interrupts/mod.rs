@@ -1,5 +1,4 @@
 use crate::cpu::{Cpu, CpuState};
-use crate::video::print_string;
 
 pub mod int00;
 pub mod int10;

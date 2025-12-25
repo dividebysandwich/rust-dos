@@ -1,6 +1,6 @@
 use iced_x86::Register;
 use crate::cpu::Cpu;
-use crate::video::{VideoMode, print_string};
+use crate::video::VideoMode;
 use crate::audio::play_sdl_beep;
 
 pub fn handle(cpu: &mut Cpu) {

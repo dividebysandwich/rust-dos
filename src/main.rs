@@ -208,7 +208,7 @@ fn main() -> Result<(), String> {
 
         // Render Frame
         // Note: We redraw every frame here for simplicity, even if VRAM isn't dirty
-        texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
+        texture.with_lock(None, |buffer: &mut [u8], _pitch: usize| {
             // Draw the base screen (text characters)
             video::render_screen(buffer, &cpu.bus);
 
