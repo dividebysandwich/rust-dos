@@ -90,6 +90,37 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 07h: Scroll Down
         0x07 => scroll_window(cpu, false),
 
+        // AH = 09h: Write Character and Attribute at Cursor Position
+        // AL = Char, BH = Page, BL = Attribute, CX = Count
+        0x09 => {
+            let char_code = cpu.get_al();
+            let page = cpu.get_reg8(Register::BH) as usize;
+            let attr = cpu.get_reg8(Register::BL);
+            let count = cpu.cx as usize;
+
+            if page == 0 {
+                let cursor_addr = 0x0450;
+                let col = cpu.bus.read_8(cursor_addr) as usize;
+                let row = cpu.bus.read_8(cursor_addr + 1) as usize;
+                
+                // Does NOT advance cursor, just repeats char CX times
+                for i in 0..count {
+                    let offset = ((row * 80 + col + i) * 2) as usize;
+                    if offset < 4000 {
+                        cpu.bus.write_8(0xB8000 + offset, char_code);
+                        cpu.bus.write_8(0xB8000 + offset + 1, attr);
+                    }
+                }
+            }
+        }
+
+        // AH = 0Bh: Set Color Palette
+        0x0B => {
+            // BH = 00h: Set Background/Border Color (BL = Color)
+            // BH = 01h: Set Palette (BL = Palette ID)
+            // TODO: CGA games might rely on this
+        }
+
         // AH = 0Eh: Teletype Output
         0x0E => {
             let char_code = cpu.get_reg8(Register::AL);
@@ -166,6 +197,80 @@ pub fn handle(cpu: &mut Cpu) {
                 }
             }
             cpu.set_reg8(Register::BH, 0); // Page 0
+        }
+
+        // AH = 11h: Character Generator
+        0x11 => {
+            // AL=00 (Load User Font), AL=30 (Get Font Info)
+            // TODO: Implement
+        }
+
+        // AH = 12h: Alternate Function Select
+        // BL = 10h: Get Configuration (EGA/VGA)
+        0x12 => {
+            let bl = cpu.get_reg8(Register::BL);
+            if bl == 0x10 {
+                cpu.set_reg8(Register::BH, 0); // Color Mode
+                cpu.set_reg8(Register::BL, 3); // 256KB Video Memory
+                cpu.cx = 0; // Feature bits
+            }
+        }
+
+        // AH = 1Bh: Get Video State Information
+        // ES:DI points to 64-byte buffer
+        0x1B => {
+            let es = cpu.es;
+            let di = cpu.di;
+            let addr = cpu.get_physical_addr(es, di);
+
+            // Write static table (Simulate VGA)
+            // Offset 0: Static Functionality Table (Ptr) - 0:0 for now
+            // TODO: Implement full table
+
+            cpu.bus.write_8(addr, 0x00); 
+            // Often AL=1B on return implies supported.
+            cpu.set_reg8(Register::AL, 0x1B); 
+        }
+
+        // TODO: Check if this makes sense here
+        0x4F => {
+            // AH=EFh: Extended Video Function (VESA BIOS Extensions)
+            let al = cpu.get_reg8(Register::AL);
+            match al {
+                0x00 => {
+                    // AL=00h: Return VBE Controller Info
+                    let es = cpu.es;
+                    let di = cpu.di;
+                    let addr = cpu.get_physical_addr(es, di);
+                    let vbe_signature = b"VESA";
+                    for i in 0..4 {
+                        cpu.bus.write_8(addr + i, vbe_signature[i]);
+                    }
+                    // TODO:Other fields zero for now
+                    cpu.set_reg8(Register::AL, 0x4F); // Function supported
+                    cpu.set_reg8(Register::AH, 0x00); // Function successful
+                }
+                0x01 => {
+                    // AL=01h: Return VBE Mode Info
+                    let es = cpu.es;
+                    let di = cpu.di;
+                    let addr = cpu.get_physical_addr(es, di);
+                    // For simplicity, only implement mode 0x101 (640x480x256)
+                    let mode_number: u16 = 0x101;
+                    cpu.bus.write_16(addr, mode_number);
+                    // TODO: Other fields zero for now
+                    cpu.set_reg8(Register::AL, 0x4F); // Function supported
+                    cpu.set_reg8(Register::AH, 0x00); // Function successful
+                }
+                _ => {
+                    cpu.set_reg8(Register::AL, 0x4F); // Function supported
+                    cpu.set_reg8(Register::AH, 0x01); // Function failed
+                }
+            }
+        }
+
+        0x5f => {
+            // Non-standard function used by some games
         }
 
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),

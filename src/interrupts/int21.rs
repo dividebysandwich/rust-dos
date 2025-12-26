@@ -87,6 +87,20 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.log_string("[DOS] Reported DOS Version 5.0");
         }
 
+        // AH = 33h: Get/Set Ctrl-Break Check
+        0x33 => {
+            let al = cpu.get_al();
+            if al == 0x00 { // Get
+                cpu.set_reg8(Register::DL, 0); // 0 = Off
+            } else if al == 0x01 { // Set
+                // Ignore setting, just return
+            } else if al == 0x06 { // Get MS-DOS Version (True version)
+                cpu.set_reg16(Register::BX, 0x3205); // 5.50
+                cpu.set_reg8(Register::DL, 0); // Revision 0
+                cpu.set_reg8(Register::DH, 0); // DOS in HMA?
+            }
+        }
+
         // AH = 35h: Get Interrupt Vector
         0x35 => {
             let int_num = cpu.get_al() as usize;
@@ -242,6 +256,38 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
+        // AH = 44h: IOCTL (I/O Control)
+        0x44 => {
+            let al = cpu.get_al();
+            let bx = cpu.bx; // Handle
+
+            match al {
+                // Get Device Information
+                0x00 => {
+                    // Bit 7=1 (Char Dev), Bit 6=0 (EOF), Bit 0=1 (Console Input)
+                    // For STDIN(0), STDOUT(1), STDERR(2), return 0x80D3 or similar.
+                    if bx <= 2 {
+                        cpu.dx = 0x80D3; 
+                    } else {
+                        // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive #
+                        cpu.dx = 0x0002; // Drive C
+                    }
+                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                }
+                // Check if Block Device is Removable
+                0x08 => {
+                    // AX=0 (Removable), AX=1 (Fixed)
+                    cpu.ax = 1; // Fixed drive
+                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                }
+                _ => {
+                    // Stub other subfunctions as success
+                    cpu.ax = 0; 
+                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                }
+            }
+        }
+
         // AH=47h: Get Current Directory
         0x47 => {
             let ds = cpu.ds;
@@ -252,6 +298,29 @@ pub fn handle(cpu: &mut Cpu) {
             }
             cpu.set_reg16(Register::AX, 0x0100);
             cpu.set_flag(crate::cpu::FLAG_CF, false);
+        }
+
+        // AH = 48h: Allocate Memory
+        // BX = Number of Paragraphs (16 bytes) requested
+        // Return: AX = Segment, or CF=1 + AX=Error, BX=Max Available
+        0x48 => {
+            let requested_paras = cpu.bx;
+            
+            // Very simple allocator stub:
+            // We pretend there is a heap at 0x2000 (after the loaded COM/EXE at 0x1000).
+            // TODO: Actual memory manager struct.
+            
+            // Check if request is obviously bad (> 640KB)
+            if requested_paras > 0xA000 {
+                cpu.ax = 0x0008; // Insufficient memory
+                cpu.bx = 0x9000; // Say we have ~576KB free
+                cpu.set_flag(crate::cpu::FLAG_CF, true);
+            } else {
+                // Return a hardcoded free segment.
+                // TODO: FIXME! Consecutive calls will return the SAME address in this stub.
+                cpu.ax = 0x2000; 
+                cpu.set_flag(crate::cpu::FLAG_CF, false);
+            }
         }
 
         // AH = 4Ah: Resize Memory Block

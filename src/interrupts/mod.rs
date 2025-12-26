@@ -24,7 +24,12 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
         0x20 => int20::handle(cpu),
         0x21 => int21::handle(cpu),
         0x28 => { /* Idle Interrupt - Do nothing */ },
+        0x2A => { /* DOS Timer Tick - Do nothing for now */ },
         0x33 => int33::handle(cpu),
+        0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F => {
+             /* FPU Vector - IRET */ 
+             // TODO: Implement FPU
+        }
         0x4C => {
             cpu.bus.log_string("[DOS] Program Exited. Rebooting Shell...");
             cpu.state = CpuState::RebootShell;

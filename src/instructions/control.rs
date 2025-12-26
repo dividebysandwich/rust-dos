@@ -159,7 +159,7 @@ fn jcxz(cpu: &mut Cpu, instr: &Instruction) {
     }
 }
 
-fn iret(cpu: &mut Cpu, instr: &Instruction) {
+fn iret(cpu: &mut Cpu, _instr: &Instruction) {
     // Pop IP, then CS, then Flags
     // Note: 16-bit mode pops 16-bit IP/CS/Flags
     // TODO: check instr.op_size() for 32-bit mode
