@@ -1,8 +1,8 @@
 use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
 use crate::bus::Bus;
-use crate::cpu_instr::calculate_addr;
 use crate::shell::get_shell_code;
+use crate::instructions::utils::calculate_addr;
 
 // Constants for Flag Bits
 pub const FLAG_CF: u16 = 0x0001; // Carry

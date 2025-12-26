@@ -1,5 +1,5 @@
 use rust_dos::cpu::{Cpu, FLAG_ZF, FLAG_CF, FLAG_SF};
-use rust_dos::cpu_instr::execute_instruction;
+use rust_dos::instructions::execute_instruction;
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 fn run_code(cpu: &mut Cpu, code: &[u8]) {

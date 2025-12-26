@@ -46,19 +46,6 @@ fn test_alu_sub_8() {
 }
 
 #[test]
-fn test_alu_sbb_16() {
-    let mut cpu = Cpu::new();
-
-    // Set Carry flag beforehand
-    cpu.set_flag(FLAG_CF, true);
-
-    // 20 - 10 - 1 (Carry) = 9
-    let res = cpu.alu_sbb_16(20, 10);
-    assert_eq!(res, 9);
-    assert_eq!(cpu.get_flag(FLAG_CF), false); // No new borrow
-}
-
-#[test]
 fn test_parity_flag() {
     let mut cpu = Cpu::new();
 

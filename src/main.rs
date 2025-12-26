@@ -12,7 +12,7 @@ mod audio;
 mod bus;
 mod command;
 mod cpu;
-mod cpu_instr;
+mod instructions;
 mod disk;
 mod interrupts;
 mod shell;
@@ -193,7 +193,7 @@ fn main() -> Result<(), String> {
                 break; // Break inner execution batch
             }
 
-            cpu_instr::execute_instruction(&mut cpu, &instr);
+            instructions::execute_instruction(&mut cpu, &instr);
         }
 
 

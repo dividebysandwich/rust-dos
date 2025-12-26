@@ -1,7 +1,7 @@
 pub mod audio;
 pub mod bus;
 pub mod command;
-pub mod cpu_instr;
+pub mod instructions;
 pub mod cpu;
 pub mod disk;
 pub mod interrupts;
