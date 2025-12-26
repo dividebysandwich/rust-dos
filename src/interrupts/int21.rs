@@ -26,6 +26,57 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_reg8(Register::AL, char_byte);
         }
 
+        // AH = 06h: Direct Console I/O
+        0x06 => {
+            let dl = cpu.get_reg8(Register::DL);
+
+            if dl == 0xFF {
+                // --- INPUT (Non-Blocking) ---
+                // Check if a key is in the buffer
+                if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
+                    // Key Available: Return ASCII and Clear Zero Flag
+                    let ascii = (key_code & 0xFF) as u8;
+                    
+                    // Handle Extended Keys (First byte is 0x00) logic if necessary, 
+                    // but for now we just return the low byte.
+                    cpu.set_reg8(Register::AL, ascii);
+                    cpu.set_zflag(false); 
+                } else {
+                    // No Key: Return 0 and Set Zero Flag
+                    cpu.set_reg8(Register::AL, 0x00);
+                    cpu.set_zflag(true);
+                }
+            } else {
+                // --- OUTPUT ---
+                // Write character in DL to screen
+                if dl == 0x07 {
+                     play_sdl_beep(&mut cpu.bus);
+                } else {
+                     print_char(&mut cpu.bus, dl);
+                }
+                // AL is officially undefined on output, but we leave it alone.
+            }
+        }
+
+        // AH = 07h: Direct Console Input Without Echo
+        0x07 => {
+            if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
+                let ascii = (key_code & 0xFF) as u8;
+                cpu.set_reg8(Register::AL, ascii);
+            } else {
+                // Retry logic
+                // Calculate Physical Address of the Stack Pointer (SS:SP)
+                let sp = cpu.sp;
+                let ss = cpu.ss;
+                let phys_sp = (ss as usize * 16) + sp as usize; // TODO: Check phys addr calc
+
+                let saved_ip = cpu.bus.read_16(phys_sp & 0xFFFFF);
+
+                // Substract 4 and make the CPU re-execute the trap instruction after returning.
+                cpu.bus.write_16(phys_sp & 0xFFFFF, saved_ip.wrapping_sub(4));
+            }
+        }
+
         // AH = 09h: Print String (Ends in '$')
         0x09 => {
             let mut offset = cpu.dx;
@@ -39,6 +90,26 @@ pub fn handle(cpu: &mut Cpu) {
                     print_char(&mut cpu.bus, char_byte);
                 }
                 offset += 1;
+            }
+        }
+
+        // AH = 0Ch: Clear Keyboard Buffer and Invoke Keyboard Function
+        // AL = Function to execute after clearing (1, 6, 7, 8, 0xA)
+        0x0C => {
+            let next_fn = cpu.get_al();
+            
+            cpu.bus.keyboard_buffer.clear();
+
+            match next_fn {
+                0x01 | 0x06 | 0x07 | 0x08 | 0x0A => {
+                    // Set AH to the next function and recurse
+                    cpu.set_reg8(Register::AH, next_fn);
+                    handle(cpu); 
+                }
+                _ => {
+                    // If AL is 0 or invalid, just return after clearing
+                    cpu.set_reg8(Register::AL, 0); 
+                }
             }
         }
 
@@ -342,6 +413,20 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
+        // AH = 49h: Free Memory Block
+        // ES = Segment of the block to be freed
+        0x49 => {
+            let segment_to_free = cpu.es;
+            
+            // TODO: Replace this stub by actually marking the memory block in the MCB chain as free.
+            
+            cpu.bus.log_string(&format!("[DOS] Freeing Memory Block at {:04X}", segment_to_free));
+
+            // Return Success
+            cpu.set_flag(crate::cpu::FLAG_CF, false);
+            cpu.ax = 0; 
+        }
+        
         // AH = 4Ah: Resize Memory Block
         0x4A => {
             let requested_size = cpu.get_reg16(Register::BX);

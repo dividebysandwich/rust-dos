@@ -176,6 +176,25 @@ impl Bus {
     // Write to an I/O Port
     pub fn io_write(&mut self, port: u16, value: u8) {
         match port {
+            // PIC (Programmable Interrupt Controller) 0x20 / 0x21
+            // We ignore initialization words (ICWs) but acknowledge EOI (0x20).
+            0x20 => {
+                self.log_string("[PIC] EOI Received");
+                // Command Register. 0x20 = End of Interrupt (EOI).
+                // log_string("[PIC] Command received");
+            }
+            0x21 => {
+                self.log_string(&format!("[PIC] IMR Set to {:02X}", value));
+                // Data Register (IMR - Interrupt Mask Register).
+                // TODO: Ignoring this for now as we don't simulate real hardware IRQs yet.
+            }
+
+            // PIT Channel 0 (System Timer) 0x40
+            // Used by BIOS to update time. Games might reprogram it to speed up time.
+            0x40 => {
+                // Similar to 0x42 logic, we just toggle MSB/LSB write.
+            }
+
             // PIT Channel 2 Data (Port 0x42) ---
             // This sets the frequency.
             // Frequency = 1,193,182 Hz / Divisor
@@ -212,10 +231,10 @@ impl Bus {
 
             _ => {
                 // Unhandled port write
-                println!(
+                self.log_string(&format!(
                     "[Unhandled IO Write] Port: {:04X}, Value: {:02X}",
                     port, value
-                );
+                ));
             }
         }
     }
