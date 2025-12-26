@@ -1,9 +1,10 @@
 pub mod audio;
 pub mod bus;
 pub mod command;
-pub mod instructions;
 pub mod cpu;
 pub mod disk;
+pub mod keyboard;
+pub mod instructions;
 pub mod interrupts;
 pub mod shell;
 pub mod video;

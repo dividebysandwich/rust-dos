@@ -13,8 +13,9 @@ mod audio;
 mod bus;
 mod command;
 mod cpu;
-mod instructions;
 mod disk;
+mod keyboard;
+mod instructions;
 mod interrupts;
 mod shell;
 mod video;
@@ -67,62 +68,22 @@ fn main() -> Result<(), String> {
                 Event::Quit { .. } => break 'running,
                 Event::KeyDown {
                     keycode: Some(keycode),
+                    keymod,
                     ..
                 } => {
-                    // Convert SDL Keycode to ASCII
-                    // This is a VERY simplified mapping
-                    let ascii = match keycode {
-                        Keycode::F1 => {
-                            debug_mode = !debug_mode;
-                            cpu.bus.log_string(&format!("[DEBUG] Tracing: {}", if debug_mode { "ON" } else { "OFF" }));
-                            0
-                        }
-                        Keycode::A => b'a',
-                        Keycode::B => b'b',
-                        Keycode::C => b'c',
-                        Keycode::D => b'd',
-                        Keycode::E => b'e',
-                        Keycode::F => b'f',
-                        Keycode::G => b'g',
-                        Keycode::H => b'h',
-                        Keycode::I => b'i',
-                        Keycode::J => b'j',
-                        Keycode::K => b'k',
-                        Keycode::L => b'l',
-                        Keycode::M => b'm',
-                        Keycode::N => b'n',
-                        Keycode::O => b'o',
-                        Keycode::P => b'p',
-                        Keycode::Q => b'q',
-                        Keycode::R => b'r',
-                        Keycode::S => b's',
-                        Keycode::T => b't',
-                        Keycode::U => b'u',
-                        Keycode::V => b'v',
-                        Keycode::W => b'w',
-                        Keycode::X => b'x',
-                        Keycode::Y => b'y',
-                        Keycode::Z => b'z',
-                        Keycode::Space => b' ',
-                        Keycode::Return => 0x0D,
-                        Keycode::Backspace => 0x08,
-                        Keycode::Period => b'.',
-                        Keycode::Kp0 | Keycode::Num0 => b'0',
-                        Keycode::Kp1 | Keycode::Num1 => b'1',
-                        Keycode::Kp2 | Keycode::Num2 => b'2',
-                        Keycode::Kp3 | Keycode::Num3 => b'3',
-                        Keycode::Kp4 | Keycode::Num4 => b'4',
-                        Keycode::Kp5 | Keycode::Num5 => b'5',
-                        Keycode::Kp6 | Keycode::Num6 => b'6',
-                        Keycode::Kp7 | Keycode::Num7 => b'7',
-                        Keycode::Kp8 | Keycode::Num8 => b'8',
-                        Keycode::Kp9 | Keycode::Num9 => b'9',
-                        _ => 0,
-                    };
 
-                    if ascii != 0 {
-                        // Push to CPU Keyboard Buffer (Scan=0 for simplicity)
-                        cpu.bus.keyboard_buffer.push_back(ascii as u16);
+                    println!("Key Down: {:?}", keycode);
+
+                    // Debug Toggle (F12 reserved for Emulator)
+                    if keycode == Keycode::F12 {
+                        debug_mode = !debug_mode;
+                        cpu.bus.log_string(&format!("[DEBUG] Tracing: {}", if debug_mode { "ON" } else { "OFF" }));
+                        continue;
+                    }
+
+                    // Map Key to PC Scancode/ASCII
+                    if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
+                        cpu.bus.keyboard_buffer.push_back(code);
                     }
                 }
                 _ => {}
@@ -254,6 +215,22 @@ fn main() -> Result<(), String> {
                     
                         // Write to file, ignore errors to keep emulation fast
                         let _ = cpu.bus.log_string(&log_line);
+
+                        if instr.mnemonic() == Mnemonic::Int {
+                            let vector = instr.immediate8();
+                            // Read IVT (Vector * 4) to find where this points
+                            let ivt_addr = (vector as usize) * 4;
+                            let target_cs = cpu.bus.read_16(ivt_addr + 2);
+                            let target_ip = cpu.bus.read_16(ivt_addr);
+
+                            if target_cs == 0xF000 {
+                                let log = format!(
+                                    "[CPU-DEBUG] Hooked INT {:02X} detected -> Points to F000:{:04X}", 
+                                    vector, target_ip
+                                );
+                                cpu.bus.log_string(&log);
+                            }
+                        }
                     }
                 }
             }
