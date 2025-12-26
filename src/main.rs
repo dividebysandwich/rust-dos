@@ -78,6 +78,19 @@ fn main() -> Result<(), String> {
                     keymod,
                     ..
                 } => {
+                    
+                    // Update BDA Shift Flags (0x0417)
+                    // This lets INT 16h AH=02 report modifier state correctly
+                    let mut flags = cpu.bus.read_8(0x0417);
+                    match keycode {
+                        Keycode::RShift => flags |= 0x01,
+                        Keycode::LShift => flags |= 0x02,
+                        Keycode::LCtrl | Keycode::RCtrl => flags |= 0x04,
+                        Keycode::LAlt | Keycode::RAlt => flags |= 0x08,
+                        Keycode::CapsLock => flags ^= 0x40, // Toggle on press
+                        _ => {}
+                    }
+                    cpu.bus.write_8(0x0417, flags);
 
                     // Recorder Toggle
                     if keycode == Keycode::PrintScreen {
@@ -97,6 +110,23 @@ fn main() -> Result<(), String> {
                         cpu.bus.keyboard_buffer.push_back(code);
                     }
                 }
+                // KeyUp only matters for modifiers                
+                Event::KeyUp { 
+                    keycode: Some(keycode), 
+                    .. 
+                } => {
+                    // Update BDA Shift Flags (Clear bits)
+                    let mut flags = cpu.bus.read_8(0x0417);
+                    match keycode {
+                        Keycode::RShift => flags &= !0x01,
+                        Keycode::LShift => flags &= !0x02,
+                        Keycode::LCtrl | Keycode::RCtrl => flags &= !0x04,
+                        Keycode::LAlt | Keycode::RAlt => flags &= !0x08,
+                        _ => {}
+                    }
+                    cpu.bus.write_8(0x0417, flags);
+                }
+
                 _ => {}
             }
         }
@@ -104,6 +134,7 @@ fn main() -> Result<(), String> {
         // Execute instructions
         for _ in 0..30_000 {
 
+            let prev_ip = cpu.ip;
 
             // --- HANDLE PENDING COMMANDS (Outside Interrupts) ---
             if let Some(cmd) = cpu.pending_command.take() {
@@ -252,6 +283,11 @@ fn main() -> Result<(), String> {
                 cpu.state = CpuState::Running;
                 shell::show_prompt(&mut cpu);
                 break; // Break inner execution batch
+            }
+
+            // Yield if we are in a tight loop
+            if cpu.ip == prev_ip {
+               std::thread::yield_now(); 
             }
 
             instructions::execute_instruction(&mut cpu, &instr);

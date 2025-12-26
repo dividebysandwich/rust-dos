@@ -1,5 +1,8 @@
 use crate::cpu::Cpu;
 
+// BDA Address for Keyboard Shift Flags
+const BDA_SHIFT_FLAGS: usize = 0x0417;
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     match ah {
@@ -42,6 +45,35 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.ax = key_code; // Preview key (do not remove)
             } else {
                 cpu.set_flag(crate::cpu::FLAG_ZF, true); // No key
+            }
+        }
+
+        // AH = 02h: Get Shift Status
+        // Returns AL = Shift Flag Byte (from BDA 0x0417)
+        // Bit 0: Right Shift
+        // Bit 1: Left Shift
+        // Bit 2: Ctrl
+        // Bit 3: Alt
+        // Bit 4: Scroll Lock
+        // Bit 5: Num Lock
+        // Bit 6: Caps Lock
+        // Bit 7: Insert
+        0x02 => {
+            let status = cpu.bus.read_8(BDA_SHIFT_FLAGS);
+            cpu.set_reg8(iced_x86::Register::AL, status);
+        }
+
+        // AH = 05h: Store Key (Push to Buffer)
+        // CX = Key (CH=Scan, CL=Ascii)
+        // Returns AL=0 (Success), AL=1 (Buffer Full)
+        0x05 => {
+            let key = cpu.cx;
+            // Cap buffer at 16 keys to emulate BIOS buffer size limit
+            if cpu.bus.keyboard_buffer.len() < 16 {
+                cpu.bus.keyboard_buffer.push_back(key);
+                cpu.set_reg8(iced_x86::Register::AL, 0); // Success
+            } else {
+                cpu.set_reg8(iced_x86::Register::AL, 1); // Full
             }
         }
 
