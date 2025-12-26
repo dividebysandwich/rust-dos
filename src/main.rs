@@ -212,8 +212,18 @@ fn main() -> Result<(), String> {
                 // Run the HLE handler directly
                 crate::interrupts::handle_hle(&mut cpu, vector);
 
-                // Skip past the 3 bytes (FE 38 XX) + executing the following IRET (CF)
-                cpu.ip = old_ip.wrapping_add(3);
+
+                // Do not call real IRET, just simulate it
+                cpu.ip = cpu.pop();
+                cpu.cs = cpu.pop();
+
+                // POP the flags to clear the stack, but ignore the value
+                // We want to keep the Flags set by the Rust HLE Handler (like Carry Flag).
+                let _popped_flags = cpu.pop();
+
+                // Ensure reserved bits (1, 3, 5, 15) are set correctly, 
+                // but preserve the Condition Codes (CF, ZF, etc) from the HLE handler.
+                cpu.flags = (cpu.flags & 0x0FD5) | 0x0002;
         
                 continue; // Done for this cycle
             }
