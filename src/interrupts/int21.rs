@@ -1,4 +1,6 @@
 use iced_x86::Register;
+use chrono::{Local, Timelike};
+
 use crate::cpu::{Cpu, CpuState};
 use crate::video::{print_char};
 use crate::audio::play_sdl_beep;
@@ -70,6 +72,23 @@ pub fn handle(cpu: &mut Cpu) {
                 "[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}",
                 int_num, new_seg, new_off
             ));
+        }
+
+        // AH = 2Ch: Get System Time
+        // Returns: CH=Hour, CL=Minute, DH=Second, DL=1/100s
+        0x2C => {
+            let now = Local::now();
+            
+            let hour = now.hour() as u8;
+            let minute = now.minute() as u8;
+            let second = now.second() as u8;
+            // chrono stores nanoseconds. 10,000,000 nanos = 1/100th second.
+            let hundredths = (now.nanosecond() / 10_000_000) as u8;
+
+            cpu.set_reg8(Register::CH, hour);
+            cpu.set_reg8(Register::CL, minute);
+            cpu.set_reg8(Register::DH, second);
+            cpu.set_reg8(Register::DL, hundredths);
         }
 
         // AH=2Fh: Get DTA Address
