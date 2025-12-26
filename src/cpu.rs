@@ -18,6 +18,16 @@ pub const FLAG_IF: u16 = 0x0200; // Interrupt Enable
 pub const FLAG_DF: u16 = 0x0400; // Direction
 pub const FLAG_OF: u16 = 0x0800; // Overflow
 
+// Constants for FPU Status Word Condition Codes
+pub const FPU_C0: u16 = 0x0100;
+pub const FPU_C1: u16 = 0x0200;
+pub const FPU_C2: u16 = 0x0400; // Partial Remainder / NaN
+pub const FPU_C3: u16 = 0x4000; // Zero Flag equivalent
+
+// FPU Tag Word Values
+pub const FPU_TAG_EMPTY: u8 = 1;
+pub const FPU_TAG_VALID: u8 = 0;
+
 pub struct Cpu {
     // General Purpose
     pub ax: u16,
@@ -43,6 +53,9 @@ pub struct Cpu {
     // FPU State
     pub fpu_stack: [f64; 8],
     pub fpu_top: usize,
+    pub fpu_status: u16,
+    pub fpu_control: u16,
+    pub fpu_tags: [u8; 8],
 }
 
 #[derive(PartialEq)]
@@ -75,6 +88,9 @@ impl Cpu {
             pending_command: None,
             fpu_stack: [0.0; 8],
             fpu_top: 0,
+            fpu_status: 0,
+            fpu_control: 0x037F, // Default Control Word
+            fpu_tags: [FPU_TAG_EMPTY; 8],
         }
     }
 
@@ -432,15 +448,20 @@ impl Cpu {
     // Push value to FPU Stack
     pub fn fpu_push(&mut self, val: f64) {
         // Decrement top pointer (wrapping)
-        self.fpu_top = self.fpu_top.wrapping_sub(1) & 7;
+        self.fpu_top = (self.fpu_top.wrapping_sub(1)) % 8;
+        // Write Value
         self.fpu_stack[self.fpu_top] = val;
+        // Mark as VALID
+        self.fpu_tags[self.fpu_top] = FPU_TAG_VALID;
     }
 
     // Pop value from FPU Stack
     pub fn fpu_pop(&mut self) -> f64 {
         let val = self.fpu_stack[self.fpu_top];
+        // Mark current top as EMPTY before moving on
+        self.fpu_tags[self.fpu_top] = FPU_TAG_EMPTY;
         // Increment top pointer (wrapping)
-        self.fpu_top = (self.fpu_top + 1) & 7;
+        self.fpu_top = (self.fpu_top + 1) % 8;
         val
     }
 
@@ -454,6 +475,11 @@ impl Cpu {
     pub fn fpu_set(&mut self, index: usize, val: f64) {
         let actual_idx = (self.fpu_top + index) & 7;
         self.fpu_stack[actual_idx] = val;
+    }
+
+    // Get physical index for ST(i)
+    pub fn fpu_get_phys_index(&self, i: usize) -> usize {
+        (self.fpu_top + i) % 8
     }
 
     fn install_bios_traps(&mut self) {

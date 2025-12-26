@@ -31,9 +31,43 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         }
 
         // --- FPU ---
-        Mnemonic::Fld | Mnemonic::Fild | Mnemonic::Fistp | 
-        Mnemonic::Fdiv | Mnemonic::Fsubp | Mnemonic::Fninit | 
-        Mnemonic::Fnclex | Mnemonic::Fldcw | Mnemonic::Fstp => {
+        // --- Math & Arithmetic ---
+        Mnemonic::Fadd | Mnemonic::Faddp | Mnemonic::Fiadd |
+        Mnemonic::Fsub | Mnemonic::Fsubp | Mnemonic::Fsubr | Mnemonic::Fsubrp |
+        Mnemonic::Fisub | Mnemonic::Fisubr |
+        Mnemonic::Fmul | Mnemonic::Fmulp | Mnemonic::Fimul |
+        Mnemonic::Fdiv | Mnemonic::Fdivp | Mnemonic::Fdivr | Mnemonic::Fdivrp |
+        Mnemonic::Fidiv | Mnemonic::Fidivr |
+        Mnemonic::Fsqrt | Mnemonic::Fscale | Mnemonic::Fprem | Mnemonic::Fprem1 |
+        Mnemonic::Frndint | Mnemonic::Fxtract | Mnemonic::Fabs | Mnemonic::Fchs |
+        Mnemonic::F2xm1 | Mnemonic::Fyl2x | Mnemonic::Fyl2xp1 |
+
+        // --- Transcendental ---
+        Mnemonic::Fsin | Mnemonic::Fcos | Mnemonic::Fsincos |
+        Mnemonic::Fptan | Mnemonic::Fpatan |
+
+        // --- Data Transfer ---
+        Mnemonic::Fld | Mnemonic::Fst | Mnemonic::Fstp |
+        Mnemonic::Fild | Mnemonic::Fist | Mnemonic::Fistp | Mnemonic::Fisttp |
+        Mnemonic::Fbld | Mnemonic::Fbstp |
+        Mnemonic::Fxch | Mnemonic::Fld1 | Mnemonic::Fldz | 
+        Mnemonic::Fldpi | Mnemonic::Fldl2e | Mnemonic::Fldl2t | 
+        Mnemonic::Fldlg2 | Mnemonic::Fldln2 |
+        
+        // --- Comparison ---
+        Mnemonic::Fcom | Mnemonic::Fcomp | Mnemonic::Fcompp |
+        Mnemonic::Ficom | Mnemonic::Ficomp |
+        Mnemonic::Ftst | Mnemonic::Fxam |
+        Mnemonic::Fcomi | Mnemonic::Fcomip | Mnemonic::Fucomi | Mnemonic::Fucomip |
+
+        // --- Control & State ---
+        Mnemonic::Finit | Mnemonic::Fninit |
+        Mnemonic::Fldcw | Mnemonic::Fstcw | Mnemonic::Fnstcw |
+        Mnemonic::Fstsw | Mnemonic::Fnstsw |
+        Mnemonic::Fclex | Mnemonic::Fnclex |
+        Mnemonic::Fsave | Mnemonic::Fnsave | Mnemonic::Frstor |
+        Mnemonic::Fstenv | Mnemonic::Fnstenv | Mnemonic::Fldenv |
+        Mnemonic::Fnop | Mnemonic::Ffree => {
             fpu::handle(cpu, instr);
         }
 

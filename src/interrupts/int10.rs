@@ -135,11 +135,43 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
-        // AH = 0Bh: Set Color Palette
+        // AH = 0Bh: Set Color Palette / Background Color
+        // BH = 00h: Set Background/Border Color
+        //      BL = Color Value (0-15 for Border, 0-31 for CGA Background)
+        // BH = 01h: Set Palette (CGA 320x200 Mode 4/5 only)
+        //      BL = Palette ID (0 or 1)
         0x0B => {
-            // BH = 00h: Set Background/Border Color (BL = Color)
-            // BH = 01h: Set Palette (BL = Palette ID)
-            // TODO: CGA games might rely on this
+            let bh = cpu.get_reg8(Register::BH);
+            let bl = cpu.get_reg8(Register::BL);
+
+            // Update BIOS Data Area (BDA) at 0x0466.
+            // This byte mirrors the CGA Color Select Register (Port 0x3D9).
+            let mut current_3d9 = cpu.bus.read_8(0x0466);
+
+            if bh == 0x00 {
+                // Set Background / Border Color
+                // Bits 0-3 represent the border/background color.
+                // Bit 4 is Intensity (sometimes part of background in some modes).
+                
+                // Clear lower 5 bits and set new color
+                current_3d9 = (current_3d9 & 0xE0) | (bl & 0x1F);
+                cpu.bus.write_8(0x0466, current_3d9);
+                
+                // TODO: Renderer needs to actually read 0x0466 to
+                // draw the border or change the background color of transparent pixels.
+            } else if bh == 0x01 {
+                // Set CGA Palette
+                // Bit 5 controls the active palette in Mode 4.
+                // 0 = Palette 0 (Ugly Green/Red/Brown)
+                // 1 = Palette 1 (Even uglier Cyan/Magenta/White)
+                
+                if (bl & 0x01) != 0 {
+                    current_3d9 |= 0x20; // Set Bit 5
+                } else {
+                    current_3d9 &= !0x20; // Clear Bit 5
+                }
+                cpu.bus.write_8(0x0466, current_3d9);
+            }
         }
 
         // AH = 0Eh: Teletype Output
@@ -273,6 +305,48 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_reg8(Register::AH, 0x01); // Function failed
                 }
             }
+        }
+
+        // AH = 0Ch: Write Graphics Pixel
+        // AL = Color Value
+        // BH = Page Number (Ignored in Mode 13h)
+        // CX = Column (X)
+        // DX = Row (Y)
+        0x0C => {
+            let color = cpu.get_al();
+            let x = cpu.get_reg16(Register::CX) as usize;
+            let y = cpu.get_reg16(Register::DX) as usize;
+
+            // Mode 13h Dimensions
+            let width = 320;
+            let height = 200;
+
+            if x < width && y < height {
+                // Calculate Linear Address for Mode 13h (0xA0000 base)
+                let offset = 0xA0000 + (y * width + x);
+                cpu.bus.write_8(offset, color);
+            }
+        }
+
+        // AH = 0Dh: Read Graphics Pixel
+        // BH = Page Number (Ignored in Mode 13h)
+        // CX = Column (X)
+        // DX = Row (Y)
+        // Returns: AL = Color Value
+        0x0D => {
+            let x = cpu.get_reg16(Register::CX) as usize;
+            let y = cpu.get_reg16(Register::DX) as usize;
+            let width = 320;
+            let height = 200;
+
+            let color = if x < width && y < height {
+                let offset = 0xA0000 + (y * width + x);
+                cpu.bus.read_8(offset)
+            } else {
+                0 // Return black if out of bounds
+            };
+
+            cpu.set_reg8(Register::AL, color);
         }
 
         0xEF => {

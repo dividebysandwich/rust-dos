@@ -167,8 +167,10 @@ impl Bus {
 
     // Write a 16-bit value to memory (Little Endian)
     pub fn write_16(&mut self, addr: usize, value: u16) -> bool {
-        let d1 = self.write_8(addr, (value & 0xFF) as u8);          // Low byte
-        let d2 = self.write_8(addr + 1, (value >> 8) as u8);  // High byte
+        // Low byte
+        let d1 = self.write_8(addr, (value & 0xFF) as u8);
+        // High byte
+        let d2 = self.write_8(addr + 1, (value >> 8) as u8);
         d1 || d2
     }
     
@@ -194,6 +196,11 @@ impl Bus {
         let low = self.read_32(addr) as u64;
         let high = self.read_32(addr + 4) as u64;
         (high << 32) | low
+    }
+
+    pub fn write_64(&mut self, addr: usize, value: u64) {
+        self.write_32(addr, (value & 0xFFFFFFFF) as u32);
+        self.write_32(addr + 4, (value >> 32) as u32);
     }
 
     // Write to an I/O Port
@@ -231,7 +238,7 @@ impl Bus {
                 }
             }
 
-            // PIT Channel 2 Data (Port 0x42) ---
+            // PIT Channel 2 Data (Port 0x42)
             // This sets the frequency.
             // Frequency = 1,193,182 Hz / Divisor
             0x42 => {
