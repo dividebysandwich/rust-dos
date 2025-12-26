@@ -415,6 +415,28 @@ impl Cpu {
         self.dx = (self.dx & 0xFF00) | (value as u16);
     }
 
+    fn install_bios_traps(&mut self) {
+        let mut phys_addr = 0xF1000; 
+        let hle_vectors = vec![0x10, 0x11, 0x12, 0x15, 0x16, 0x1A, 0x20, 0x21, 0x2F, 0x33];
+
+        for vec in hle_vectors {
+            let ivt_offset = (vec as usize) * 4;
+            let handler_offset = (phys_addr & 0xFFFF) as u16;
+            
+            // Point IVT to F000:Offset
+            self.bus.write_16(ivt_offset, handler_offset);     // IP
+            self.bus.write_16(ivt_offset + 2, 0xF000);         // CS
+
+            // Ensure the Trap Instruction exists (FE 38 XX CF)
+            self.bus.write_8(phys_addr, 0xFE);
+            self.bus.write_8(phys_addr + 1, 0x38);
+            self.bus.write_8(phys_addr + 2, vec);
+            self.bus.write_8(phys_addr + 3, 0xCF); 
+
+            phys_addr += 4;
+        }
+    }
+
     pub fn load_shell(&mut self) {
         // Get the Code
         let shell_code = get_shell_code();
@@ -432,27 +454,7 @@ impl Cpu {
         }
 
         // Re-install the HLE Interrupt Vectors
-        // We must do this because the previous program might have hooked interrupts 
-        let mut phys_addr = 0xF1000; 
-        let hle_vectors = vec![0x10, 0x11, 0x12, 0x15, 0x16, 0x1A, 0x20, 0x21, 0x33];
-
-        for vec in hle_vectors {
-            let ivt_offset = (vec as usize) * 4;
-            let handler_offset = (phys_addr & 0xFFFF) as u16;
-            
-            // Point IVT to F000:Offset
-            self.bus.write_16(ivt_offset, handler_offset);     // IP
-            self.bus.write_16(ivt_offset + 2, 0xF000);         // CS
-
-            // Ensure the Trap Instruction exists (FE 38 XX CF)
-            // (Bus::new wrote this, but it's safe to ensure it's there)
-            self.bus.write_8(phys_addr, 0xFE);
-            self.bus.write_8(phys_addr + 1, 0x38);
-            self.bus.write_8(phys_addr + 2, vec);
-            self.bus.write_8(phys_addr + 3, 0xCF); 
-
-            phys_addr += 4;
-        }
+        self.install_bios_traps();
 
         // DOS "Underscore" cursor
         // High Byte (0x06) = Start Scanline, Low Byte (0x07) = End Scanline
@@ -544,6 +546,10 @@ impl Cpu {
             }
         }
 
+        // Re-install the HLE Interrupt Vectors
+        self.install_bios_traps();
+
+
         // Load the file data at offset 0x100
         let phys_code_start = self.get_physical_addr(load_segment, start_offset);
         for (i, b) in bytes.iter().enumerate() {
@@ -620,9 +626,12 @@ impl Cpu {
         let reloc_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
 
         // Clear RAM
-        for i in 0..self.bus.ram.len() {
+        for i in 0x500..self.bus.ram.len() {
             self.bus.ram[i] = 0;
         }
+
+        // Re-install the HLE Interrupt Vectors
+        self.install_bios_traps();
 
         let load_segment: u16 = 0x1000;
         let relocation_base_segment = load_segment + 0x10;
