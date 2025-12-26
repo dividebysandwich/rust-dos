@@ -39,9 +39,14 @@ pub struct Cpu {
     pub flags: u16,
     pub state: CpuState,
     pub pending_command:Option<String>,
+
+    // FPU State
+    pub fpu_stack: [f64; 8],
+    pub fpu_top: usize,
 }
 
 #[derive(PartialEq)]
+#[allow(dead_code)]
 pub enum CpuState {
     Running,
     Halted,
@@ -68,6 +73,8 @@ impl Cpu {
             flags: 0x0002, // Default Flag State, Bit 1 is always set
             state: CpuState::Running,
             pending_command: None,
+            fpu_stack: [0.0; 8],
+            fpu_top: 0,
         }
     }
 
@@ -93,6 +100,7 @@ impl Cpu {
         }
     }
 
+    #[allow(dead_code)]
     pub fn zflag(&self) -> bool {
         self.get_flag(FLAG_ZF)
     }
@@ -120,6 +128,7 @@ impl Cpu {
     /// Returns: (Value, Optional Memory Address, Is 8-bit?)
     /// If address is Some, you should write the result back to that address.
     /// If address is None, you should write the result back to the register.
+    #[allow(dead_code)]
     pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool) {
         match instr.op0_kind() {
             // Handle Register Operand
@@ -156,6 +165,7 @@ impl Cpu {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_segment_value(&self, seg: Register) -> u16 {
         match seg {
             Register::ES => self.es,
@@ -331,6 +341,7 @@ impl Cpu {
     }
 
     // SBB 8-bit Helper
+    #[allow(dead_code)]
     pub fn alu_sbb_8(&mut self, dest: u8, src: u8) -> u8 {
         let carry_in = if self.get_flag(FLAG_CF) { 1 } else { 0 };
 
@@ -362,6 +373,7 @@ impl Cpu {
     }
 
     // SBB 16-bit Helper
+    #[allow(dead_code)]
     pub fn alu_sbb_16(&mut self, dest: u16, src: u16) -> u16 {
         let carry_in = if self.get_flag(FLAG_CF) { 1 } else { 0 };
 
@@ -413,6 +425,35 @@ impl Cpu {
     #[allow(dead_code)]
     pub fn set_dl(&mut self, value: u8) {
         self.dx = (self.dx & 0xFF00) | (value as u16);
+    }
+
+    // ============== FPU Operations =================
+
+    // Push value to FPU Stack
+    pub fn fpu_push(&mut self, val: f64) {
+        // Decrement top pointer (wrapping)
+        self.fpu_top = self.fpu_top.wrapping_sub(1) & 7;
+        self.fpu_stack[self.fpu_top] = val;
+    }
+
+    // Pop value from FPU Stack
+    pub fn fpu_pop(&mut self) -> f64 {
+        let val = self.fpu_stack[self.fpu_top];
+        // Increment top pointer (wrapping)
+        self.fpu_top = (self.fpu_top + 1) & 7;
+        val
+    }
+
+    // Access ST(i) relative to Top
+    pub fn fpu_get(&self, index: usize) -> f64 {
+        let actual_idx = (self.fpu_top + index) & 7;
+        self.fpu_stack[actual_idx]
+    }
+    
+    // Set ST(i) relative to Top
+    pub fn fpu_set(&mut self, index: usize, val: f64) {
+        let actual_idx = (self.fpu_top + index) & 7;
+        self.fpu_stack[actual_idx] = val;
     }
 
     fn install_bios_traps(&mut self) {

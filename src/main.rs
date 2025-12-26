@@ -179,7 +179,6 @@ fn main() -> Result<(), String> {
             if b0 == 0xFE && b1 == 0x38 {
                 let vector = cpu.bus.read_8(cpu.get_physical_addr(cpu.cs, cpu.ip + 2));
         
-                let old_ip = cpu.ip;
                 // Run the HLE handler directly
                 crate::interrupts::handle_hle(&mut cpu, vector);
 

@@ -8,6 +8,7 @@ use chrono::{DateTime, Local, Datelike, Timelike};
 pub const FIRST_USER_HANDLE: u16 = 5;
 
 /// Helper struct to transfer directory search results back to the CPU
+#[allow(dead_code)]
 pub struct DosDirEntry {
     pub filename: String,
     pub size: u32,
@@ -119,6 +120,7 @@ impl DiskController {
     // ========================================================================
 
     // INT 21h, AH=19h: Get Current Default Drive
+    #[allow(dead_code)]
     pub fn get_current_drive(&self) -> u8 {
         self.current_drive
     }

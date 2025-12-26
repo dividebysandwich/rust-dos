@@ -31,7 +31,9 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         }
 
         // --- FPU ---
-        Mnemonic::Fninit | Mnemonic::Fnclex | Mnemonic::Fldcw => {
+        Mnemonic::Fld | Mnemonic::Fild | Mnemonic::Fistp | 
+        Mnemonic::Fdiv | Mnemonic::Fsubp | Mnemonic::Fninit | 
+        Mnemonic::Fnclex | Mnemonic::Fldcw | Mnemonic::Fstp => {
             fpu::handle(cpu, instr);
         }
 

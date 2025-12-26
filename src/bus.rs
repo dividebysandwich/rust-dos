@@ -179,6 +179,23 @@ impl Bus {
         (high << 8) | low
     }
 
+    pub fn read_32(&self, addr: usize) -> u32 {
+        let low = self.read_16(addr) as u32;
+        let high = self.read_16(addr + 2) as u32;
+        (high << 16) | low
+    }
+    
+    pub fn write_32(&mut self, addr: usize, value: u32) {
+        self.write_16(addr, (value & 0xFFFF) as u16);
+        self.write_16(addr + 2, (value >> 16) as u16);
+    }
+    
+    pub fn read_64(&self, addr: usize) -> u64 {
+        let low = self.read_32(addr) as u64;
+        let high = self.read_32(addr + 4) as u64;
+        (high << 32) | low
+    }
+
     // Write to an I/O Port
     pub fn io_write(&mut self, port: u16, value: u8) {
         match port {

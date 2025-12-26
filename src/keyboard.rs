@@ -5,8 +5,8 @@ use sdl2::keyboard::Mod;
 /// Scancode is the high byte, ASCII is the low byte.
 pub fn map_sdl_to_pc(keycode: Keycode, keymod: Mod) -> Option<u16> {
     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-    let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
-    let alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
+    let _ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
+    let _alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
 
     // Construct u16 from (Scan, Ascii)
     let k = |scan: u8, ascii: u8| Some(((scan as u16) << 8) | (ascii as u16));

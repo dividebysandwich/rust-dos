@@ -58,13 +58,3 @@ pub fn calculate_addr(cpu: &Cpu, instr: &Instruction) -> usize {
     cpu.get_physical_addr(segment, offset)
 }
 
-pub fn get_string_src_segment(instr: &Instruction, cpu: &Cpu) -> u16 {
-    match instr.segment_prefix() {
-        Register::CS => cpu.cs,
-        Register::ES => cpu.es,
-        Register::SS => cpu.ss,
-        Register::DS => cpu.ds,
-        _ => cpu.ds, // Default behavior
-    }
-}
-
