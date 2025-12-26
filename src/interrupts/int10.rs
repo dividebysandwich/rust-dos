@@ -10,9 +10,33 @@ pub fn handle(cpu: &mut Cpu) {
         0x00 => {
             let mode = cpu.get_al();
             
-            // Clear Screen using our helper (Lines=0 means clear)
-            scroll_area(cpu, true, 0, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
-            
+            // Clear Screen
+            match mode {
+                // Text Modes: Clear with Spaces and Attribute 0x07
+                0x00..=0x03 => {
+                    scroll_area(cpu, true, 0, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
+                }
+                // CGA Graphics Modes (4, 5, 6): Zero out 16KB of B8000 Memory
+                0x04..=0x06 => {
+                    for i in 0..16384 {
+                        if i < cpu.bus.vram_text.len() {
+                            cpu.bus.vram_text[i] = 0x00;
+                        }
+                    }
+                }
+                // VGA Graphics Mode (13h): Zero out 64KB of A0000 Memory
+                0x13 => {
+                    for i in 0..cpu.bus.vram_graphics.len() {
+                        cpu.bus.vram_graphics[i] = 0x00;
+                    }
+                }
+                // Fallback / Stubbed modes
+                _ => {
+                    // Optional: Clear text ram just in case
+                     scroll_area(cpu, true, 0, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
+                }
+            }
+
             // Reset Cursor
             set_cursor(cpu, 0, 0, 0);
 
@@ -537,10 +561,21 @@ fn get_cursor(cpu: &Cpu, page: u8) -> (u8, u8) {
 
 /// Writes a character and attribute to VRAM (Text Mode)
 fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
-    let offset = (row as usize * 80 + col as usize) * 2;
-    if offset < 4000 {
-        cpu.bus.write_8(ADDR_VGA_TEXT + offset, char_code);
-        cpu.bus.write_8(ADDR_VGA_TEXT + offset + 1, attr);
+    match cpu.bus.video_mode {
+        // Standard Text Modes
+        VideoMode::Text80x25 | VideoMode::Text80x25Color | 
+        VideoMode::Text40x25 | VideoMode::Text40x25Color => {
+            let cols = if cpu.bus.video_mode == VideoMode::Text40x25 || 
+                          cpu.bus.video_mode == VideoMode::Text40x25Color { 40 } else { 80 };
+            
+            let offset = (row as usize * cols + col as usize) * 2;
+            if offset < cpu.bus.vram_text.len() {
+                cpu.bus.write_8(ADDR_VGA_TEXT + offset, char_code);
+                cpu.bus.write_8(ADDR_VGA_TEXT + offset + 1, attr);
+            }
+        }
+        // TODO: Graphics Mode font rendering
+        _ => {}
     }
 }
 
@@ -549,14 +584,38 @@ fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
 fn scroll_area(cpu: &mut Cpu, up: bool, lines: u8, attr: u8, 
                row_start: u8, col_start: u8, row_end: u8, col_end: u8) {
     
+    // Check for Graphics Mode Clearing
+    let is_graphics = matches!(cpu.bus.video_mode, 
+        VideoMode::Cga320x200 | VideoMode::Cga320x200Color | VideoMode::Cga640x200 | VideoMode::Graphics320x200
+    );
+
+    // If we are in graphics mode and asked to "Clear Screen" (lines = 0),
+    // just zero out the VRAM.
+    if is_graphics && lines == 0 {
+        // Determine which VRAM buffer to clear
+        if cpu.bus.video_mode == VideoMode::Graphics320x200 {
+             for i in 0..cpu.bus.vram_graphics.len() { cpu.bus.vram_graphics[i] = 0; }
+        } else {
+             // CGA Modes use the text buffer range
+             for i in 0..16384 { // 16KB CGA Memory
+                 if i < cpu.bus.vram_text.len() { cpu.bus.vram_text[i] = 0; }
+             }
+        }
+        return;
+    }
+
+    // Safety Clamps for Text Mode Logic
+    let max_cols = if cpu.bus.video_mode == VideoMode::Text40x25 || 
+                      cpu.bus.video_mode == VideoMode::Text40x25Color { 40 } else { 80 };
+    
     // Safety Clamps
     let r_start = row_start as usize;
     let r_end = (row_end as usize).min(MAX_ROWS as usize - 1);
     let c_start = col_start as usize;
-    let c_end = (col_end as usize).min(MAX_COLS as usize - 1);
+    let c_end = (col_end as usize).min(max_cols - 1);
     let count = lines as usize;
 
-    // Clear Window (Lines = 0)
+    // Standard Text Mode Clear/Scroll Logic
     if count == 0 {
         for r in r_start..=r_end {
             for c in c_start..=c_end {
@@ -572,7 +631,10 @@ fn scroll_area(cpu: &mut Cpu, up: bool, lines: u8, attr: u8,
             for c in c_start..=c_end {
                 let src_r = r + count;
                 // Read from Source
-                let src_offset = (src_r * 80 + c) * 2;
+                let src_offset = (src_r * max_cols + c) * 2;
+                
+                // Read directly from bus to handle scrolling
+                // Use read_8 directly because there's no read_char_at
                 let val = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset);
                 let at = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset + 1);
                 
@@ -595,7 +657,7 @@ fn scroll_area(cpu: &mut Cpu, up: bool, lines: u8, attr: u8,
             for r in (effective_start..=r_end).rev() {
                 for c in c_start..=c_end {
                     let src_r = r - count;
-                    let src_offset = (src_r * 80 + c) * 2;
+                    let src_offset = (src_r * max_cols + c) * 2;
                     let val = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset);
                     let at = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset + 1);
                     
