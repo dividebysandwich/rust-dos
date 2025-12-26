@@ -346,3 +346,4 @@ fn scroll_window(cpu: &mut Cpu, up: bool) {
         }
     }
 }
+

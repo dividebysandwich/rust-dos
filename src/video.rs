@@ -1,8 +1,5 @@
-use iced_x86::Register;
-
 use crate::bus::Bus;
 use crate::cpu::Cpu;
-use crate::interrupts;
 
 pub const SCREEN_WIDTH: u32 = 640;
 pub const SCREEN_HEIGHT: u32 = 400;
@@ -214,22 +211,9 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
     }
 }
 
-// Use the BIOS Teletype function to print strings.
-// This ensures the cursor position (BDA 0x0450) is updated automatically.
 pub fn print_string(cpu: &mut Cpu, msg: &str) {
-    // Save registers if calling during debugging
-    // let saved_ax = cpu.get_reg16(Register::AX);
-    
+    let bus = &mut cpu.bus;
     for b in msg.bytes() {
-        // Setup AH=0E (Teletype) and AL=Char
-        cpu.set_reg8(Register::AH, 0x0E);
-        cpu.set_reg8(Register::AL, b);
-        cpu.set_reg8(Register::BH, 0x00); // Page 0
-        cpu.set_reg8(Register::BL, 0x07); // Color (Gray)
-
-        // Invoke the Interrupt Handler directly
-        interrupts::handle_interrupt(cpu, 0x10);
+        print_char(bus, b);
     }
-    
-    // cpu.set_reg16(Register::AX, saved_ax);
 }

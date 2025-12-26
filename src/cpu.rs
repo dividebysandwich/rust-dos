@@ -38,11 +38,13 @@ pub struct Cpu {
     pub bus: Bus,
     pub flags: u16,
     pub state: CpuState,
+    pub pending_command:Option<String>,
 }
 
 #[derive(PartialEq)]
 pub enum CpuState {
     Running,
+    Halted,
     RebootShell,
 }
 
@@ -65,6 +67,7 @@ impl Cpu {
             bus: Bus::new(),
             flags: 0x0002, // Default Flag State, Bit 1 is always set
             state: CpuState::Running,
+            pending_command: None,
         }
     }
 
@@ -420,17 +423,42 @@ impl Cpu {
         // We use 0x100 because .COM files (and our shell) expect to run there.
         let start_addr = 0x100;
 
-        // Optional: Zero out the first 64KB of RAM to prevent "Ghost" code
-        // from previous programs interfering.
-        for i in 0..0xFFFF {
+        // Clear RAM
+        // 0x0000-0x03FF is the IVT. 
+        // 0x0400-0x04FF is the BIOS Data Area (BDA).
+        // If we zero those, the system dies.
+        for i in 0x0500..0xFFFF {
             self.bus.ram[i] = 0;
+        }
+
+        // Re-install the HLE Interrupt Vectors
+        // We must do this because the previous program might have hooked interrupts 
+        let mut phys_addr = 0xF1000; 
+        let hle_vectors = vec![0x10, 0x11, 0x12, 0x15, 0x16, 0x1A, 0x20, 0x21, 0x33];
+
+        for vec in hle_vectors {
+            let ivt_offset = (vec as usize) * 4;
+            let handler_offset = (phys_addr & 0xFFFF) as u16;
+            
+            // Point IVT to F000:Offset
+            self.bus.write_16(ivt_offset, handler_offset);     // IP
+            self.bus.write_16(ivt_offset + 2, 0xF000);         // CS
+
+            // Ensure the Trap Instruction exists (FE 38 XX CF)
+            // (Bus::new wrote this, but it's safe to ensure it's there)
+            self.bus.write_8(phys_addr, 0xFE);
+            self.bus.write_8(phys_addr + 1, 0x38);
+            self.bus.write_8(phys_addr + 2, vec);
+            self.bus.write_8(phys_addr + 3, 0xCF); 
+
+            phys_addr += 4;
         }
 
         // Reset Cursor Position (Col=0, Row=0) at Physical Address 0x0450
         self.bus.write_8(0x0450, 0x00); // Col
         self.bus.write_8(0x0451, 0x00); // Row
 
-        // This is the standard DOS "Underscore" cursor.
+        // DOS "Underscore" cursor
         // High Byte (0x06) = Start Scanline, Low Byte (0x07) = End Scanline
         self.bus.write_16(0x0460, 0x0D0E);
 

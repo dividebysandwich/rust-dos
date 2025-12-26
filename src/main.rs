@@ -7,6 +7,7 @@ use std::io::Write;
 
 use crate::audio::pump_audio;
 use crate::cpu::{Cpu, CpuState};
+use crate::command::CommandDispatcher;
 
 mod audio;
 mod bus;
@@ -59,7 +60,7 @@ fn main() -> Result<(), String> {
     // Load Shell Code into Memory
     cpu.load_shell();
 
-    video::print_string(&mut cpu, "C:\\>");
+    shell::show_prompt(&mut cpu);
 
     // Main Loop
     'running: loop {
@@ -133,6 +134,51 @@ fn main() -> Result<(), String> {
         // Execute instructions
         for _ in 0..30_000 {
 
+
+            // --- HANDLE PENDING COMMANDS (Outside Interrupts) ---
+            if let Some(cmd) = cpu.pending_command.take() {
+                // We have a command from the shell!
+                cpu.bus.log_string(&format!("[MAIN] Processing Command: {}", cmd));
+                
+                let (command, args) = match cmd.split_once(' ') {
+                    Some((c, a)) => (c, a.trim()),
+                    None => (cmd.as_str(), ""),
+                };
+
+                let dispatcher = CommandDispatcher::new();
+                
+                // Dispatch logic
+                if dispatcher.dispatch(&mut cpu, command, args) {
+                     // Built-in command executed. CPU continues shell loop.
+                } else {
+                     // Load Program
+                     let filename = command.to_string();
+                     let loaded = if !filename.contains('.') {
+                          cpu.load_executable(&format!("{}.com", command)) 
+                          || cpu.load_executable(&format!("{}.exe", command))
+                     } else {
+                          cpu.load_executable(&filename)
+                     };
+
+                     if !loaded {
+                         crate::video::print_string(&mut cpu, "Bad command or file name.\r\n");
+                     }
+                     // If loaded, load_executable() reset CS:IP. 
+                     // The CPU will naturally start executing the new program next cycle.
+                }
+                
+                // Skip the rest of this cycle to ensure clean state
+                continue; 
+            }
+
+            // --- HANDLE STATE CHANGES ---
+            if cpu.state == CpuState::RebootShell {
+                cpu.load_shell();
+                cpu.state = CpuState::Running;
+                // No print needed here, shell handles prompt
+                break; // Break inner loop to refresh SDL
+            }
+
             // Handle "IP = 0" as an explicit exit (Standard COM behavior)
             // If the program jumps to the start of the segment, it wants to exit.
             if cpu.ip == 0x0000 && cpu.cs == 0x1000 {
@@ -141,11 +187,15 @@ fn main() -> Result<(), String> {
                 let _ = cpu.bus.log_file.as_mut().unwrap().flush();
                 cpu.load_shell(); 
                 cpu.state = CpuState::Running;
-                video::print_string(&mut cpu, "\r\nC:\\>");
+                shell::show_prompt(&mut cpu);
                 break;
             }
 
+            // Current instruction
             let phys_ip = cpu.get_physical_addr(cpu.cs, cpu.ip);
+            // Look ahead one instruction
+            let b0 = cpu.bus.read_8(phys_ip);
+            let b1 = cpu.bus.read_8(cpu.get_physical_addr(cpu.cs, cpu.ip + 1));
             let bytes = &cpu.bus.ram[phys_ip..];
 
             // If we are about to execute 00 00, stop immediately.
@@ -156,30 +206,47 @@ fn main() -> Result<(), String> {
                 // );
             }
 
+            // Check for "BOP" (BIOS Operation) -> FE 38 XX
+            if b0 == 0xFE && b1 == 0x38 {
+                let vector = cpu.bus.read_8(cpu.get_physical_addr(cpu.cs, cpu.ip + 2));
+        
+                let old_ip = cpu.ip;
+                // Run the HLE handler directly
+                crate::interrupts::handle_hle(&mut cpu, vector);
+
+                // Skip past the 3 bytes (FE 38 XX) + executing the following IRET (CF)
+                cpu.ip = old_ip.wrapping_add(3);
+        
+                continue; // Done for this cycle
+            }
+
             let mut decoder = Decoder::with_ip(16, bytes, cpu.ip as u64, DecoderOptions::NONE);
             let instr = decoder.decode();
 
             if debug_mode {
                 // Filter out the 'Wait for Key' interrupt loop to save disk space
                 if !((instr.mnemonic() == Mnemonic::Int && instr.immediate8() == 0x16) ||
-                     (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E)) 
+                     (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E))
                 {
-                    // Format the instruction string manually since we can't capture stdout
-                    // (Assuming you want the same format as print_debug_trace)
-                    let instr_text = format!("{}", instr);
-                    let log_line = format!(
-                        "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}",
-                        cpu.cs, cpu.ip,
-                        cpu.get_reg16(iced_x86::Register::AX),
-                        cpu.get_reg16(iced_x86::Register::BX),
-                        cpu.get_reg16(iced_x86::Register::CX),
-                        cpu.get_reg16(iced_x86::Register::DX),
-                        cpu.sp,
-                        instr_text
-                    );
+                    // Skip BIOS area noise
+                    if cpu.cs < 0xF000 {
+                        // Format the instruction string manually since we can't capture stdout
+                        // (Assuming you want the same format as print_debug_trace)
+                        let instr_text = format!("{}", instr);
+                        let log_line = format!(
+                            "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}",
+                            cpu.cs, cpu.ip,
+                            cpu.get_reg16(iced_x86::Register::AX),
+                            cpu.get_reg16(iced_x86::Register::BX),
+                            cpu.get_reg16(iced_x86::Register::CX),
+                            cpu.get_reg16(iced_x86::Register::DX),
+                            cpu.sp,
+                            instr_text
+                        );
                     
-                    // Write to file, ignore errors to keep emulation fast
-                    let _ = cpu.bus.log_string(&log_line);
+                        // Write to file, ignore errors to keep emulation fast
+                        let _ = cpu.bus.log_string(&log_line);
+                    }
                 }
             }
 
@@ -189,7 +256,7 @@ fn main() -> Result<(), String> {
             if cpu.state == CpuState::RebootShell {
                 cpu.load_shell(); // Reloads assembly into RAM, resets IP/SP
                 cpu.state = CpuState::Running;
-                video::print_string(&mut cpu, "\r\nC:\\>");
+                shell::show_prompt(&mut cpu);
                 break; // Break inner execution batch
             }
 

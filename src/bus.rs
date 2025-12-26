@@ -1,6 +1,8 @@
 use sdl2::audio::AudioQueue;
 use std::collections::VecDeque;
 use std::time::Instant;
+use std::io::{BufWriter, Write};
+use std::fs::{File, OpenOptions};
 
 use crate::disk::DiskController;
 use crate::video::{VideoMode, ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT};
@@ -21,9 +23,9 @@ pub struct Bus {
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
     pub audio_phase: f32,    // Track wave position to prevent clicking
-    pub log_file: Option<std::fs::File>,
     pub dta_segment: u16,
     pub dta_offset: u16,
+    pub log_file: Option<BufWriter<File>>,
 }
 
 impl Bus {
@@ -59,7 +61,41 @@ impl Bus {
         bus.write_8(0x0462, 0);
         // 0x0463: CRT Controller Base Address (0x3D4 for Color)
         bus.write_16(0x0463, 0x03D4);
+
+
+        // Install HLE traps
+        
+        bus.install_hle_trap(0x10, 0xF1000); // Video
+        bus.install_hle_trap(0x11, 0xF1004); // Equipment
+        bus.install_hle_trap(0x12, 0xF1008); // Memory
+        bus.install_hle_trap(0x15, 0xF100C); // System
+        bus.install_hle_trap(0x16, 0xF1010); // Keyboard
+        bus.install_hle_trap(0x1A, 0xF1014); // Time
+        bus.install_hle_trap(0x20, 0xF1018); // Terminate
+        bus.install_hle_trap(0x21, 0xF101C); // DOS
+        bus.install_hle_trap(0x2F, 0xF1020); // Shell Command
+        bus.install_hle_trap(0x33, 0xF1024); // Mouse
+
         bus
+    }
+
+    /// Installs a Magic Trap (FE 38 <Vector> CF) at the given Physical Address
+    /// and updates the IVT to point to it.
+    fn install_hle_trap(&mut self, vector: u8, phys_addr: usize) {
+        // Update IVT (0000:Vector*4)
+        let ivt_offset = (vector as usize) * 4;
+        let handler_offset = (phys_addr & 0xFFFF) as u16; // Offset part of F000:Offset
+
+        self.write_16(ivt_offset, handler_offset); // IP
+        self.write_16(ivt_offset + 2, 0xF000);     // CS
+
+        // Write Trap Code
+        self.write_8(phys_addr, 0xFE);     // BOP
+        self.write_8(phys_addr + 1, 0x38); // Magic
+        self.write_8(phys_addr + 2, vector); // The Vector ID
+        self.write_8(phys_addr + 3, 0xCF); // IRET
+        
+        println!("[INIT] Installed Trap for INT {:02X} at F000:{:04X}", vector, handler_offset);
     }
 
     // Helper: Scroll the text screen up by 1 line
@@ -200,19 +236,20 @@ impl Bus {
     }
 
     pub fn log_string(&mut self, s: &str) {
-        use std::io::Write;
-        use std::fs::OpenOptions;
-
         if self.log_file.is_none() {
-            self.log_file = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open("trace.log")
-                    .expect("Failed to open trace.log"),
-            );
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open("trace.log")
+                .expect("Failed to open trace.log");
+            self.log_file = Some(BufWriter::new(file));
         }
-        writeln!(self.log_file.as_mut().unwrap(), "{}", s).expect("Failed to write to trace.log");
+
         println!("{}", s);
+        if let Some(writer) = &mut self.log_file {
+            let _ = writeln!(writer, "{}", s);
+            // Do NOT flush here. Let the OS handle it for speed.
+        }
     }
 }
