@@ -1,6 +1,6 @@
 # Rust-DOS
 
-<img width="643" height="401" alt="image" src="https://github.com/user-attachments/assets/a1ace79f-56f8-43f5-a95e-fc3f2e2156fd" />
+<img width="640" height="400" alt="image" src="https://img.playspoon.com/989pt4.gif" />
 
 ## Introduction
 
