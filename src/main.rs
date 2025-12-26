@@ -9,6 +9,7 @@ use crate::audio::pump_audio;
 use crate::cpu::{Cpu, CpuState};
 use crate::command::CommandDispatcher;
 use crate::recorder::ScreenRecorder;
+use crate::video::VideoMode;
 
 mod audio;
 mod bus;
@@ -273,51 +274,60 @@ fn main() -> Result<(), String> {
             video::render_screen(buffer, &cpu.bus);
 
             // Draw the Cursor (Overlay)
-            // TODO: Make this work across video modes
-            
-            // Read Cursor Position from BDA
-            let cursor_col = cpu.bus.read_8(0x0450) as usize;
-            let cursor_row = cpu.bus.read_8(0x0451) as usize;
-            
-            // Read Cursor Shape from BDA
-            let cursor_shape = cpu.bus.read_16(0x0460);
-            let start_scan = (cursor_shape >> 8) as u8;
-            let end_scan = (cursor_shape & 0xFF) as u8;
-
-            // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
-            let is_hidden = (start_scan & 0x20) != 0;
-
-            if cursor_visible && !is_hidden && cursor_col < 80 && cursor_row < 25 {
-                let cell_width = 8;
-                let cell_height = 16;
+            // Only draw the hardware cursor in Text Modes!
+            let current_mode = cpu.bus.video_mode;
+            let is_text_mode = matches!(
+                current_mode, 
+                VideoMode::Text80x25 | VideoMode::Text80x25Color | 
+                VideoMode::Text40x25 | VideoMode::Text40x25Color
+            );
+            if is_text_mode {
+                // Read Cursor Position from BDA
+                let cursor_col = cpu.bus.read_8(0x0450) as usize;
+                let cursor_row = cpu.bus.read_8(0x0451) as usize;
                 
-                // Calculate screen coordinates
-                let start_x = cursor_col * cell_width;
-                let start_y = cursor_row * cell_height;
+                // Read Cursor Shape from BDA
+                let cursor_shape = cpu.bus.read_16(0x0460);
+                let start_scan = (cursor_shape >> 8) as u8;
+                let end_scan = (cursor_shape & 0xFF) as u8;
 
-                // Sanitize scanlines to prevent buffer overflows
-                let scan_start = (start_scan & 0x1F).min(15) as usize; // Mask out visibility bit
-                let scan_end = end_scan.min(15) as usize;
+                // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
+                let is_hidden = (start_scan & 0x20) != 0;
 
-                // Draw the cursor lines
-                // Note: DOS cursors can wrap (start > end), effectively drawing two blocks.
-                // For simplicity, we implement the standard range logic here.
-                if scan_start <= scan_end {
-                    for y_off in scan_start..=scan_end {
-                        for x_off in 0..cell_width {
-                            let draw_x = start_x + x_off;
-                            let draw_y = start_y + y_off;
+                // Determine Cell Width based on Mode
+                // 40-col modes have 16px wide characters (scaled 2x)
+                let (cell_width, max_cols) = match current_mode {
+                    VideoMode::Text40x25 | VideoMode::Text40x25Color => (16, 40),
+                    _ => (8, 80),
+                };
 
-                            // Calculate buffer index (RGB24 = 3 bytes per pixel)
-                            let offset = (draw_y * (video::SCREEN_WIDTH as usize) + draw_x) * 3;
-                            
-                            if offset + 2 < buffer.len() {
-                                // Draw Cursor Color (Usually bright light gray or white)
-                                // We use 0xDD to allow the text behind to remain slightly distinct 
-                                // if we implemented XOR, but for a solid block, we just overwrite.
-                                buffer[offset] = 0xDD;     // R
-                                buffer[offset + 1] = 0xDD; // G
-                                buffer[offset + 2] = 0xDD; // B
+                if cursor_visible && !is_hidden && cursor_col < max_cols && cursor_row < 25 {
+                    let cell_height = 16;
+            
+                    // Calculate screen coordinates
+                    let start_x = cursor_col * cell_width;
+                    let start_y = cursor_row * cell_height;
+
+                    // Clamp scanlines
+                    let scan_start = (start_scan & 0x1F).min(15) as usize; 
+                    let scan_end = end_scan.min(15) as usize;
+
+                    if scan_start <= scan_end {
+                        for y_off in scan_start..=scan_end {
+                            for x_off in 0..cell_width {
+                                let draw_x = start_x + x_off;
+                                let draw_y = start_y + y_off;
+
+                                // Safety Check
+                                let idx = (draw_y * video::SCREEN_WIDTH as usize + draw_x) * 3;
+                                if idx + 2 < buffer.len() {
+                                    // Draw Cursor (Invert or Solid Block)
+                                    // Using a distinct color (e.g., pure white or slightly transparent look)
+                                    // TODO: Check if simple overwrite is good enough
+                                    buffer[idx] = 0xDD;     
+                                    buffer[idx + 1] = 0xDD; 
+                                    buffer[idx + 2] = 0xDD; 
+                                }
                             }
                         }
                     }

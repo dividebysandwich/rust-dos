@@ -33,12 +33,36 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.bus.log_string("[BIOS] Switch to Text Mode (80x25 Color)");
                     cpu.bus.video_mode = VideoMode::Text80x25Color;
                 }
+                0x04 => {
+                    cpu.bus.log_string("[BIOS] Switch to CGA Graphics Mode (320x200 Color)");
+                    cpu.bus.video_mode = VideoMode::Cga320x200Color;
+                }
+                0x06 => {
+                    cpu.bus.log_string("[BIOS] Switch to CGA Graphics Mode (640x200)");
+                    cpu.bus.video_mode = VideoMode::Cga640x200;
+                }
+                // TODO: EGA/VGA Modes 
+                0x0D | 0x0E | 0x10 | 0x12 => {
+                     cpu.bus.log_string(&format!("[BIOS] Switch to EGA/VGA Mode {:02X} (NOT IMPLEMENTED)", mode));
+                     // We default to Text80x25 internally so the emulator doesn't crash.
+                     // TODO: Proper EGA with Planar Memory emulation.
+                     cpu.bus.video_mode = VideoMode::Text80x25; 
+                }
                 0x13 => {
                     cpu.bus.log_string("[BIOS] Switch to Graphics Mode (320x200)");
                     cpu.bus.video_mode = VideoMode::Graphics320x200;
                 }
                 _ => cpu.bus.log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
             }
+
+            cpu.bus.write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
+            cpu.bus.write_8(0x0462, 0); // Update BDA Active Page to 0
+            let cols: u16 = match mode {
+                0x00 | 0x01 | 0x04 | 0x05 => 40,
+                0x13 => 40, // Mode 13h uses 40 columns text
+                _ => 80,
+            };
+            cpu.bus.write_16(0x044A, cols);
         }
 
         // AH = 01h: Set Cursor Type
@@ -220,21 +244,38 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 0Fh: Get Video Mode
         0x0F => {
-             match cpu.bus.video_mode {
-                VideoMode::Text40x25 | VideoMode::Text40x25Color => {
-                    cpu.set_reg8(Register::AL, 0x01); // Mode 1
-                    cpu.set_reg8(Register::AH, 40);
-                }
-                VideoMode::Text80x25 | VideoMode::Text80x25Color => {
-                    cpu.set_reg8(Register::AL, 0x03); // Mode 3
-                    cpu.set_reg8(Register::AH, 80);
-                }
-                VideoMode::Graphics320x200 => {
-                    cpu.set_reg8(Register::AL, 0x13); // Mode 13h
-                    cpu.set_reg8(Register::AH, 40);
-                }
-            }
-            cpu.set_reg8(Register::BH, 0); // Page 0
+            // Probably safer to use current state from BDA
+            let mode = cpu.bus.read_8(0x0449);
+            let cols = cpu.bus.read_16(0x044A) as u8;
+            let page = cpu.bus.read_8(0x0462);
+             
+            cpu.set_reg8(Register::AL, mode); 
+            cpu.set_reg8(Register::AH, cols);
+            cpu.set_reg8(Register::BH, page);
+
+            //  match cpu.bus.video_mode {
+            //     VideoMode::Text40x25 | VideoMode::Text40x25Color => {
+            //         cpu.set_reg8(Register::AL, 0x01); // Mode 1
+            //         cpu.set_reg8(Register::AH, 40);
+            //     }
+            //     VideoMode::Text80x25 | VideoMode::Text80x25Color => {
+            //         cpu.set_reg8(Register::AL, 0x03); // Mode 3
+            //         cpu.set_reg8(Register::AH, 80);
+            //     }
+            //     VideoMode::Cga320x200 | VideoMode::Cga320x200Color => {
+            //         cpu.set_reg8(Register::AL, 0x04); // Mode 4
+            //         cpu.set_reg8(Register::AH, 40);
+            //     }
+            //     VideoMode::Cga640x200 => {
+            //         cpu.set_reg8(Register::AL, 0x06); // Mode 6
+            //         cpu.set_reg8(Register::AH, 80);
+            //     }
+            //     VideoMode::Graphics320x200 => {
+            //         cpu.set_reg8(Register::AL, 0x13); // Mode 13h
+            //         cpu.set_reg8(Register::AH, 40);
+            //     }
+            // }
+            // cpu.set_reg8(Register::BH, 0); // Page 0
         }
 
         // AH = 11h: Character Generator
@@ -251,6 +292,111 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.set_reg8(Register::BH, 0); // Color Mode
                 cpu.set_reg8(Register::BL, 3); // 256KB Video Memory
                 cpu.cx = 0; // Feature bits
+            }
+        }
+
+        // AH = 13h: Write String
+        // AL = Write Mode (0-3)
+        // BH = Page Number
+        // BL = Attribute (only if AL bit 1 is 0)
+        // CX = Length of string
+        // DX = Row (DH) / Column (DL)
+        // ES:BP = Pointer to string
+        0x13 => {
+            let mode = cpu.get_al();
+            let count = cpu.cx; // CX is loop count
+            let page = cpu.get_reg8(Register::BH);
+            let attr = cpu.get_reg8(Register::BL);
+            let start_row = cpu.get_reg8(Register::DH);
+            let start_col = cpu.get_reg8(Register::DL);
+            
+            // Pointers
+            let es = cpu.es;
+            let bp = cpu.bp;
+
+            // Decode Mode bits
+            // Bit 0: Update cursor? (0=No, 1=Yes)
+            // Bit 1: String contains attributes? (0=No, 1=Yes)
+            let update_cursor = (mode & 0x01) != 0;
+            let use_string_attr = (mode & 0x02) != 0;
+
+            // Current simulation position (Start where user asked)
+            let mut curr_col = start_col;
+            let mut curr_row = start_row;
+
+            for i in 0..count {
+                // Fetch Data from Memory
+                // If Mode 2/3, string is [Char, Attr, Char, Attr...]
+                // If Mode 0/1, string is [Char, Char...] and we use BL for Attr
+                let (char_code, char_attr) = if use_string_attr {
+                    let offset = i.wrapping_mul(2);
+                    let c = cpu.bus.read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset)));
+                    let a = cpu.bus.read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset) + 1));
+                    (c, a)
+                } else {
+                    let offset = i;
+                    let c = cpu.bus.read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset)));
+                    (c, attr)
+                };
+
+                // BIOS AH=13h treats characters as Teletype (AH=0Eh), meaning
+                // it processes CR, LF, BS, and Bell.
+                match char_code {
+                    0x0D => { // Carriage Return
+                        curr_col = 0;
+                    }
+                    0x0A => { // Line Feed
+                        curr_row += 1;
+                    }
+                    0x08 => { // Backspace
+                        if curr_col > 0 { 
+                            curr_col -= 1;
+                            // Visual erase (Space + Light Gray)
+                            // Note: We ignore Page for write_char_at in this simple impl
+                            write_char_at(cpu, curr_col, curr_row, 0x20, 0x07);
+                        }
+                    }
+                    0x07 => { // Bell
+                        play_sdl_beep(&mut cpu.bus);
+                    }
+                    _ => { // Printable Character
+                        write_char_at(cpu, curr_col, curr_row, char_code, char_attr);
+                        curr_col += 1;
+                    }
+                }
+
+                // Handle Line Wrapping
+                if curr_col >= MAX_COLS {
+                    curr_col = 0;
+                    curr_row += 1;
+                }
+
+                // Handle Scrolling
+                if curr_row >= MAX_ROWS {
+                    // Scroll active area up
+                    scroll_area(cpu, true, 1, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
+                    curr_row = MAX_ROWS - 1;
+                }
+            }
+
+            // If mode bit 0 is set, the actual BIOS cursor position has to be updated
+            if update_cursor {
+                set_cursor(cpu, curr_col, curr_row, page);
+            }
+        }
+
+        // AH = 1Ah: Video Display Combination (VGA/MCGA) for detection
+        0x1A => {
+            let al = cpu.get_al();
+            if al == 0x00 {
+                // Get Display Combination Code
+                // BL = Active Display (08 = VGA w/ Color Analog)
+                // BH = Inactive Display (00 = None)
+                cpu.set_reg8(Register::AL, 0x1A); // Function Supported
+                cpu.set_reg8(Register::BL, 0x08); 
+                cpu.set_reg8(Register::BH, 0x00);
+            } else {
+                cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH=1Ah with AL != 00h"));
             }
         }
 
@@ -353,7 +499,7 @@ pub fn handle(cpu: &mut Cpu) {
             // Hercules Graphics Card Functions
         }
         0x5F => {
-            // Non-standard function used by some games
+            // Not sure what this is used for
         }
 
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),

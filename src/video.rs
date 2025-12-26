@@ -8,7 +8,7 @@ pub const SCREEN_HEIGHT: u32 = 400;
 pub const ADDR_VGA_GRAPHICS: usize = 0xA0000;
 pub const ADDR_VGA_TEXT: usize = 0xB8000;
 pub const SIZE_GRAPHICS: usize = 64000; // 320 * 200
-pub const SIZE_TEXT: usize = 4000; // 80 * 25 * 2 bytes
+pub const SIZE_TEXT: usize = 32 * 1024; // 32kB to cover CGA modes too
 pub const BDA_CURSOR_POS: usize = 0x0450; // Base for Page 0. Page n = 0x450 + n*2
 pub const BDA_CURSOR_MODE: usize = 0x0460;
 pub const MAX_COLS: u8 = 80;
@@ -23,12 +23,18 @@ pub enum VideoMode {
     Text40x25Color = 0x01,
     Text80x25 = 0x02,
     Text80x25Color = 0x03,
+    Cga320x200Color = 0x04,
+    #[allow(dead_code)]
+    Cga320x200 = 0x05, // I can't be bothered and just treat it as Color too
+    Cga640x200 = 0x06,
     Graphics320x200 = 0x13,
 }
 
 pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
     match bus.video_mode {
         VideoMode::Graphics320x200 => render_graphics_mode(canvas, &bus.vram_graphics),
+        VideoMode::Cga320x200Color | VideoMode::Cga320x200 => render_cga_mode4(canvas, &bus.vram_text, &bus),
+        VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vram_text),
         VideoMode::Text80x25 => render_text_mode_80x25(canvas, &bus.vram_text),
         VideoMode::Text80x25Color => render_text_mode_80x25(canvas, &bus.vram_text),
         VideoMode::Text40x25 => render_text_mode_40x25(canvas, &bus.vram_text),
@@ -53,6 +59,98 @@ pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8]) {
                     canvas[idx] = rgb.0;
                     canvas[idx + 1] = rgb.1;
                     canvas[idx + 2] = rgb.2;
+                }
+            }
+        }
+    }
+}
+
+// CGA Mode 4/5 (320x200 4 color)
+// Memory is interleaved: Even rows at 0x0000, Odd rows at 0x2000
+fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+    // Read Palette from BDA (0x0466)
+    // Bit 5 = Palette ID (0=Red/Green/Brown, 1=Cyan/Magenta/White)
+    // Bit 0-3 = Background Color (Index in VGA Palette)
+    let cga_reg = bus.read_8(0x0466);
+    let bg_color_idx = cga_reg & 0x0F;
+    let palette_id = (cga_reg & 0x20) != 0; 
+    let bg_rgb = vga_palette(bg_color_idx);
+
+    // Hardcoded CGA Palette Tristesse
+    let pal0 = [bg_rgb, vga_palette(2), vga_palette(4), vga_palette(6)]; // Green, Red, Brown
+    let pal1 = [bg_rgb, vga_palette(3), vga_palette(5), vga_palette(7)]; // Cyan, Magenta, White
+    
+    let current_pal = if palette_id { pal1 } else { pal0 };
+
+    for y in 0..200 {
+        // Determine memory offset based on interleave
+        let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
+        let line_offset = bank_offset + ((y / 2) * 80);
+
+        for byte_idx in 0..80 {
+            let offset = line_offset + byte_idx;
+            if offset >= vram.len() { continue; }
+            
+            let byte = vram[offset];
+
+            // 4 pixels per byte (2 bits each)
+            for p in 0..4 {
+                // High bits are leftmost pixel
+                let shift = 6 - (p * 2);
+                let color_idx = (byte >> shift) & 0x03;
+                let rgb = current_pal[color_idx as usize];
+
+                let x = (byte_idx * 4) + p;
+                
+                // Scale 2x2
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let target_x = x * 2 + dx;
+                        let target_y = y * 2 + dy;
+                        let idx = (target_y * SCREEN_WIDTH as usize + target_x) * 3;
+                        if idx + 2 < canvas.len() {
+                            canvas[idx] = rgb.0;
+                            canvas[idx+1] = rgb.1;
+                            canvas[idx+2] = rgb.2;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// CGA Mode 6 (640x200 2 color - Black & White)
+fn render_cga_mode6(canvas: &mut [u8], vram: &[u8]) {
+    let fg = (255, 255, 255);
+    let bg = (0, 0, 0);
+
+    for y in 0..200 {
+        let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
+        let line_offset = bank_offset + ((y / 2) * 80);
+
+        for byte_idx in 0..80 {
+            let offset = line_offset + byte_idx;
+            if offset >= vram.len() { continue; }
+            let byte = vram[offset];
+
+            // 8 pixels per byte (1 bit each)
+            for p in 0..8 {
+                let shift = 7 - p;
+                let on = (byte >> shift) & 0x01 == 1;
+                let rgb = if on { fg } else { bg };
+                
+                let x = (byte_idx * 8) + p;
+                
+                // Scale 1x horizontal, 2x vertical (to get 640x400)
+                for dy in 0..2 {
+                    let target_y = y * 2 + dy;
+                    let idx = (target_y * SCREEN_WIDTH as usize + x) * 3;
+                    if idx + 2 < canvas.len() {
+                        canvas[idx] = rgb.0;
+                        canvas[idx+1] = rgb.1;
+                        canvas[idx+2] = rgb.2;
+                    }
                 }
             }
         }

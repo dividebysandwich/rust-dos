@@ -144,22 +144,32 @@ impl Bus {
 
     // Returns true if a write occurred to the *active* video memory
     pub fn write_8(&mut self, addr: usize, value: u8) -> bool {
-        if addr >= 0xB8000 && addr < 0xB8FA0 && (addr % 2 == 0) {
+        //if addr >= 0xB8000 && addr < 0xB8FA0 && (addr % 2 == 0) {
             // if value >= 0x20 && value <= 0x7E { // Printable chars only
             //     let offset = (addr - 0xB8000) / 2;
             //     let row = offset / 80;
             //     let col = offset % 80;
             //     self.log_string(&format!("[VIDEO] '{}' @ {},{}", value as char, col, row));
             // }
-        }
+        //}
 
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             self.vram_graphics[addr - ADDR_VGA_GRAPHICS] = value;
-            self.video_mode == VideoMode::Graphics320x200 // Dirty only if active
-        } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
+            self.video_mode == VideoMode::Graphics320x200
+        } 
+        else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
             self.vram_text[addr - ADDR_VGA_TEXT] = value;
-            self.video_mode == VideoMode::Text80x25 // Dirty only if active
-        } else {
+            
+            // Check if current mode uses this memory
+            match self.video_mode {
+                VideoMode::Text80x25 | VideoMode::Text80x25Color |
+                VideoMode::Text40x25 | VideoMode::Text40x25Color |
+                VideoMode::Cga320x200 | VideoMode::Cga320x200Color |
+                VideoMode::Cga640x200 => true, // Dirty!
+                _ => false,
+            }
+        } 
+        else {
             self.ram[addr] = value;
             false
         }
