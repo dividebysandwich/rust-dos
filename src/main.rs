@@ -183,10 +183,6 @@ fn main() -> Result<(), String> {
                 // Run the HLE handler directly
                 crate::interrupts::handle_hle(&mut cpu, vector);
 
-                if debug_mode {
-                     cpu.bus.log_string("[DEBUG] HLE Handler Returned. Restoring IP/CS/Flags.");
-                }
-
                 // Do not call real IRET, just simulate it
                 cpu.ip = cpu.pop();
                 cpu.cs = cpu.pop();

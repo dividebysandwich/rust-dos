@@ -22,6 +22,9 @@ pub struct Bus {
     pub pit_divisor: u16,    // Current Frequency Divisor
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
+    pub pit0_divisor: u16,
+    pub pit0_write_msb: bool,
+    pub pic_mask: u8,
     pub audio_phase: f32,    // Track wave position to prevent clicking
     pub dta_segment: u16,
     pub dta_offset: u16,
@@ -45,6 +48,9 @@ impl Bus {
             pit_divisor: 0xFFFF,
             pit_mode: 0,
             pit_write_msb: false,
+            pit0_divisor: 0xFFFF,
+            pit0_write_msb: false,
+            pic_mask: 0x00,
             audio_phase: 0.0,
             log_file: None,
             dta_segment: 0x1000,
@@ -185,14 +191,27 @@ impl Bus {
             }
             0x21 => {
                 self.log_string(&format!("[PIC] IMR Set to {:02X}", value));
-                // Data Register (IMR - Interrupt Mask Register).
-                // TODO: Ignoring this for now as we don't simulate real hardware IRQs yet.
+                self.pic_mask = value;
             }
 
-            // PIT Channel 0 (System Timer) 0x40
-            // Used by BIOS to update time. Games might reprogram it to speed up time.
+            // Port 0x40: Channel 0 Data (System Timer)
+            // Controls the system tick rate (IRQ 0).
+            // Default is 18.2 Hz (Divisor 65535).
             0x40 => {
-                // Similar to 0x42 logic, we just toggle MSB/LSB write.
+                if !self.pit0_write_msb {
+                    // Write LSB
+                    self.pit0_divisor = (self.pit0_divisor & 0xFF00) | (value as u16);
+                    self.pit0_write_msb = true; // Next write is MSB
+                } else {
+                    // Write MSB
+                    self.pit0_divisor = (self.pit0_divisor & 0x00FF) | ((value as u16) << 8);
+                    self.pit0_write_msb = false; // Reset to LSB
+                    
+                    if self.pit0_divisor > 0 {
+                        let hz = 1_193_182 / self.pit0_divisor as u32;
+                        self.log_string(&format!("[PIT] Channel 0 Frequency set to {} Hz", hz));
+                    }
+                }
             }
 
             // PIT Channel 2 Data (Port 0x42) ---
