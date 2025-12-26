@@ -87,19 +87,11 @@ pub fn get_shell_code() -> Vec<u8> {
 }
 
 pub fn show_prompt(cpu: &mut Cpu) {
-    use iced_x86::Register;
 
-    // INT 10h AH=03h — Get cursor position
-    cpu.set_reg8(Register::AH, 0x03);
-    cpu.set_reg8(Register::BH, 0);
-    crate::interrupts::handle_interrupt(cpu, 0x10);
-
-    let col = cpu.get_reg8(Register::DL);
-
-    // If not at column 0, move to next line
-    if col != 0 {
-        video::print_string(cpu, "\r\n");
-    }
+    // let col = cpu.bus.read_8(0x0450);
+    // if col != 0 {
+    //     video::print_string(cpu, "\r\n");
+    // }
 
     video::print_string(cpu, "C:\\>");
 }

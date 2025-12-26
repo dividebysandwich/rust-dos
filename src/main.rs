@@ -60,8 +60,6 @@ fn main() -> Result<(), String> {
     // Load Shell Code into Memory
     cpu.load_shell();
 
-    shell::show_prompt(&mut cpu);
-
     // Main Loop
     'running: loop {
         for event in event_pump.poll_iter() {

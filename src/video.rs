@@ -9,6 +9,10 @@ pub const ADDR_VGA_GRAPHICS: usize = 0xA0000;
 pub const ADDR_VGA_TEXT: usize = 0xB8000;
 pub const SIZE_GRAPHICS: usize = 64000; // 320 * 200
 pub const SIZE_TEXT: usize = 4000; // 80 * 25 * 2 bytes
+pub const BDA_CURSOR_POS: usize = 0x0450; // Base for Page 0. Page n = 0x450 + n*2
+pub const BDA_CURSOR_MODE: usize = 0x0460;
+pub const MAX_COLS: u8 = 80;
+pub const MAX_ROWS: u8 = 25;
 
 static FONT_8X16: &[u8] = include_bytes!("assets/IBM_VGA_8x16.bin");
 static FONT_8X8: &[u8] = include_bytes!("assets/IBM_VGA_8x8.bin");
@@ -211,9 +215,80 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
     }
 }
 
-pub fn print_string(cpu: &mut Cpu, msg: &str) {
-    let bus = &mut cpu.bus;
-    for b in msg.bytes() {
-        print_char(bus, b);
+pub fn print_string(cpu: &mut Cpu, s: &str) {
+    let mut col = cpu.bus.cursor_x;
+    let mut row = cpu.bus.cursor_y;
+    let max_cols = 80;
+    let max_rows = 25;
+
+    for c in s.chars() {
+        match c {
+            '\r' => {
+                col = 0;
+            }
+            '\n' => {
+                row += 1;
+            }
+            '\x08' => { // Backspace
+                if col > 0 {
+                    col -= 1;
+                    // Visual Erase (Space + Light Gray)
+                    let offset = (row * max_cols + col) * 2;
+                    if offset < SIZE_TEXT {
+                        cpu.bus.vram_text[offset] = 0x20;
+                        cpu.bus.vram_text[offset + 1] = 0x07;
+                    }
+                }
+            }
+            _ => { // Printable Character
+                let offset = (row * max_cols + col) * 2;
+                if offset < SIZE_TEXT {
+                    cpu.bus.vram_text[offset] = c as u8;
+                    cpu.bus.vram_text[offset + 1] = 0x07; // Attribute: Light Gray
+                }
+                col += 1;
+            }
+        }
+
+        // Handle Wrapping
+        if col >= max_cols {
+            col = 0;
+            row += 1;
+        }
+
+        // Handle Scrolling
+        if row >= max_rows {
+            // Scroll Up Logic (Direct Memory Move)
+            let row_size = max_cols * 2;
+            let screen_size = max_rows * row_size;
+
+            // Shift everything up by one row
+            // We can't use `copy_within` easily on Vec<u8> across overlapping ranges in simple rust 
+            // without unsafe or a temp buffer, but a simple loop works fine for 4KB.
+            for i in 0..(screen_size - row_size) {
+                cpu.bus.vram_text[i] = cpu.bus.vram_text[i + row_size];
+            }
+
+            // Clear bottom row
+            for i in (screen_size - row_size)..screen_size {
+                if i % 2 == 0 {
+                    cpu.bus.vram_text[i] = 0x20; // Space
+                } else {
+                    cpu.bus.vram_text[i] = 0x07; // Color
+                }
+            }
+            
+            row = max_rows - 1;
+        }
     }
+
+    // Update Internal Bus State
+    cpu.bus.cursor_x = col;
+    cpu.bus.cursor_y = row;
+
+    // Update BIOS Data Area (BDA)
+    // The Assembly Shell reads [0x0450] to know where to print the next prompt.
+    // If we don't update this, the shell will print over our output.
+    cpu.bus.write_8(0x0450, col as u8);
+    cpu.bus.write_8(0x0451, row as u8);
 }
