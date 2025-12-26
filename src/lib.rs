@@ -6,5 +6,6 @@ pub mod disk;
 pub mod keyboard;
 pub mod instructions;
 pub mod interrupts;
+pub mod recorder;
 pub mod shell;
 pub mod video;

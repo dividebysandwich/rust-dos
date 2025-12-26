@@ -8,6 +8,7 @@ use std::io::Write;
 use crate::audio::pump_audio;
 use crate::cpu::{Cpu, CpuState};
 use crate::command::CommandDispatcher;
+use crate::recorder::ScreenRecorder;
 
 mod audio;
 mod bus;
@@ -17,6 +18,7 @@ mod disk;
 mod keyboard;
 mod instructions;
 mod interrupts;
+mod recorder;
 mod shell;
 mod video;
 
@@ -26,6 +28,10 @@ fn main() -> Result<(), String> {
     let mut cursor_visible = true;
     let mut last_blink = std::time::Instant::now();
     let blink_interval = Duration::from_millis(500);
+
+    // Initialize Recorder
+    // TODO: Make configurable
+    let mut recorder = ScreenRecorder::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT, 15);
 
     // SDL2 Setup
     let sdl_context = sdl2::init()?;
@@ -72,7 +78,11 @@ fn main() -> Result<(), String> {
                     ..
                 } => {
 
-                    println!("Key Down: {:?}", keycode);
+                    // Recorder Toggle
+                    if keycode == Keycode::PrintScreen {
+                        recorder.toggle();
+                        continue;
+                    }
 
                     // Debug Toggle (F12 reserved for Emulator)
                     if keycode == Keycode::F12 {
@@ -315,6 +325,35 @@ fn main() -> Result<(), String> {
                     }
                 }
             }
+
+            // Send Frame to Recorder before drawing recording indicator
+            recorder.capture(buffer);
+
+
+            // Draw Recording Indicator
+            if recorder.is_active() {
+                let radius = 5;
+                let center_x = video::SCREEN_WIDTH as usize - 15;
+                let center_y = 15;
+                
+                for y in (center_y - radius)..=(center_y + radius) {
+                    for x in (center_x - radius)..=(center_x + radius) {
+                        let dx = x as isize - center_x as isize;
+                        let dy = y as isize - center_y as isize;
+                        if dx*dx + dy*dy <= (radius*radius) as isize {
+                            let idx = (y * video::SCREEN_WIDTH as usize + x) * 3;
+                            if idx + 2 < buffer.len() {
+                                buffer[idx] = 0xFF;   // R
+                                buffer[idx+1] = 0x00; // G
+                                buffer[idx+2] = 0x00; // B
+                            }
+                        }
+                    }
+                }
+            }
+
+
+
         })?;
         canvas.copy(&texture, None, None)?;
         canvas.present();
