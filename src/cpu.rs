@@ -454,10 +454,6 @@ impl Cpu {
             phys_addr += 4;
         }
 
-        // Reset Cursor Position (Col=0, Row=0) at Physical Address 0x0450
-        self.bus.write_8(0x0450, 0x00); // Col
-        self.bus.write_8(0x0451, 0x00); // Row
-
         // DOS "Underscore" cursor
         // High Byte (0x06) = Start Scanline, Low Byte (0x07) = End Scanline
         self.bus.write_16(0x0460, 0x0D0E);
