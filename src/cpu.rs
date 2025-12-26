@@ -277,7 +277,7 @@ impl Cpu {
         }
     }
 
-    // A helper to perform ADD and update all relevant flags
+    // ADD 16 bit
     pub fn alu_add_16(&mut self, dest: u16, src: u16) -> u16 {
         let (result, carry) = dest.overflowing_add(src);
 
@@ -297,7 +297,7 @@ impl Cpu {
         result
     }
 
-    // A helper for SUB (and CMP)
+    // SUB (and CMP) 16 bit
     pub fn alu_sub_16(&mut self, dest: u16, src: u16) -> u16 {
         let (result, borrow) = dest.overflowing_sub(src);
 
@@ -317,7 +317,7 @@ impl Cpu {
         result
     }
 
-    // Helper for 8-bit SUB/CMP
+    // SUB/CMP 8-bit 
     pub fn alu_sub_8(&mut self, dest: u8, src: u8) -> u8 {
         let (result, borrow) = dest.overflowing_sub(src);
 
@@ -337,6 +337,7 @@ impl Cpu {
         result
     }
 
+    // ADD 8-bit
     pub fn alu_add_8(&mut self, dest: u8, src: u8) -> u8 {
         let (result, carry) = dest.overflowing_add(src);
 
@@ -356,7 +357,7 @@ impl Cpu {
         result
     }
 
-    // SBB 8-bit Helper
+    // SBB 8-bit
     #[allow(dead_code)]
     pub fn alu_sbb_8(&mut self, dest: u8, src: u8) -> u8 {
         let carry_in = if self.get_flag(FLAG_CF) { 1 } else { 0 };
@@ -388,7 +389,7 @@ impl Cpu {
         result
     }
 
-    // SBB 16-bit Helper
+    // SBB 16-bit
     #[allow(dead_code)]
     pub fn alu_sbb_16(&mut self, dest: u16, src: u16) -> u16 {
         let carry_in = if self.get_flag(FLAG_CF) { 1 } else { 0 };
@@ -412,6 +413,58 @@ impl Cpu {
         let res_sign = (result & 0x8000) != 0;
         let overflow = (op1_sign != op2_sign) && (op1_sign != res_sign);
         self.set_flag(FLAG_OF, overflow);
+
+        result
+    }
+
+    // ADC 8-bit
+    pub fn alu_adc_8(&mut self, dest: u8, src: u8) -> u8 {
+        let cf_in = if self.get_flag(FLAG_CF) { 1 } else { 0 };
+        
+        // Use u16 to capture the carry out
+        let res_wide = (dest as u16) + (src as u16) + (cf_in as u16);
+        let result = res_wide as u8;
+
+        self.set_flag(FLAG_CF, res_wide > 0xFF);
+        self.set_flag(FLAG_ZF, result == 0);
+        self.set_flag(FLAG_SF, (result & 0x80) != 0);
+        self.update_pf(result as u16);
+
+        // Overflow (Signed)
+        let op1_sign = (dest & 0x80) != 0;
+        let op2_sign = (src & 0x80) != 0;
+        let res_sign = (result & 0x80) != 0;
+        // Overflow happens if adding two numbers of same sign results in different sign
+        self.set_flag(FLAG_OF, (op1_sign == op2_sign) && (res_sign != op1_sign));
+
+        // AF: (op1 ^ op2 ^ result) & 0x10
+        // This detects if a carry occurred from bit 3 to bit 4
+        self.set_flag(FLAG_AF, ((dest ^ src ^ result) & 0x10) != 0);
+
+        result
+    }
+
+    // ADC 16-bit
+    pub fn alu_adc_16(&mut self, dest: u16, src: u16) -> u16 {
+        let cf_in = if self.get_flag(FLAG_CF) { 1 } else { 0 };
+
+        // Use u32 to capture carry out
+        let res_wide = (dest as u32) + (src as u32) + (cf_in as u32);
+        let result = res_wide as u16;
+
+        self.set_flag(FLAG_CF, res_wide > 0xFFFF);
+        self.set_flag(FLAG_ZF, result == 0);
+        self.set_flag(FLAG_SF, (result & 0x8000) != 0);
+        self.update_pf(result);
+
+        // Overflow (Signed)
+        let op1_sign = (dest & 0x8000) != 0;
+        let op2_sign = (src & 0x8000) != 0;
+        let res_sign = (result & 0x8000) != 0;
+        self.set_flag(FLAG_OF, (op1_sign == op2_sign) && (res_sign != op1_sign));
+
+        // AF: Carry from bit 3 to 4
+        self.set_flag(FLAG_AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
     }

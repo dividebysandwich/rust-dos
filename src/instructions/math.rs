@@ -100,44 +100,11 @@ fn adc(cpu: &mut Cpu, instr: &Instruction) {
 
     let (dest, addr) = get_op0_val(cpu, instr, is_8bit);
     let src = get_op1_val(cpu, instr, is_8bit);
-    let cf = if cpu.get_flag(FLAG_CF) { 1 } else { 0 };
 
     let res = if is_8bit {
-        let d = dest as u8;
-        let s = src as u8;
-        let (res_temp, carry1) = d.overflowing_add(s);
-        let (res, carry2) = res_temp.overflowing_add(cf as u8);
-
-        cpu.set_flag(FLAG_CF, carry1 || carry2);
-        cpu.set_flag(FLAG_ZF, res == 0);
-        cpu.set_flag(FLAG_SF, (res & 0x80) != 0);
-        
-        let sign_dest = (d & 0x80) != 0;
-        let sign_src = (s & 0x80) != 0;
-        let sign_res = (res & 0x80) != 0;
-        cpu.set_flag(FLAG_OF, (sign_dest == sign_src) && (sign_dest != sign_res));
-        
-        // AF Logic (Carry from bit 3 to 4)
-        cpu.set_flag(FLAG_AF, ((d & 0xF) + (s & 0xF) + (cf as u8)) > 0xF);
-        cpu.update_pf(res as u16);
-        res as u16
+        cpu.alu_adc_8(dest as u8, src as u8) as u16
     } else {
-        let (res_temp, carry1) = dest.overflowing_add(src);
-        let (res, carry2) = res_temp.overflowing_add(cf);
-
-        cpu.set_flag(FLAG_CF, carry1 || carry2);
-        cpu.set_flag(FLAG_ZF, res == 0);
-        cpu.set_flag(FLAG_SF, (res & 0x8000) != 0);
-
-        let sign_dest = (dest & 0x8000) != 0;
-        let sign_src = (src & 0x8000) != 0;
-        let sign_res = (res & 0x8000) != 0;
-        cpu.set_flag(FLAG_OF, (sign_dest == sign_src) && (sign_dest != sign_res));
-        
-        // AF Logic (Carry from bit 3 to 4)
-        cpu.set_flag(FLAG_AF, ((dest & 0xF) + (src & 0xF) + cf) > 0xF);
-        cpu.update_pf(res);
-        res
+        cpu.alu_adc_16(dest, src)
     };
 
     write_back(cpu, instr, res, addr, is_8bit);
@@ -171,48 +138,11 @@ fn sbb(cpu: &mut Cpu, instr: &Instruction) {
 
     let (dest, addr) = get_op0_val(cpu, instr, is_8bit);
     let src = get_op1_val(cpu, instr, is_8bit);
-    let cf = if cpu.get_flag(FLAG_CF) { 1 } else { 0 };
 
     let res = if is_8bit {
-        let (res_temp, borrow1) = (dest as u8).overflowing_sub(src as u8);
-        let (res, borrow2) = res_temp.overflowing_sub(cf as u8);
-
-        cpu.set_flag(FLAG_CF, borrow1 || borrow2);
-        cpu.set_flag(FLAG_ZF, res == 0);
-        cpu.set_flag(FLAG_SF, (res & 0x80) != 0);
-        
-        let sign_dest = (dest & 0x80) != 0;
-        let sign_src = (src & 0x80) != 0;
-        let sign_res = (res & 0x80) != 0;
-        cpu.set_flag(FLAG_OF, (sign_dest != sign_src) && (sign_dest != sign_res));
-        
-        // AF Logic (Borrow from bit 3 to 4)
-        let val1 = (dest & 0xF) as i16;
-        let val2 = (src & 0xF) as i16;
-        cpu.set_flag(FLAG_AF, (val1 - val2 - (cf as i16)) < 0);
-
-        cpu.update_pf(res as u16);
-        res as u16
+        cpu.alu_sbb_8(dest as u8, src as u8) as u16
     } else {
-        let (res_temp, borrow1) = dest.overflowing_sub(src);
-        let (res, borrow2) = res_temp.overflowing_sub(cf);
-
-        cpu.set_flag(FLAG_CF, borrow1 || borrow2);
-        cpu.set_flag(FLAG_ZF, res == 0);
-        cpu.set_flag(FLAG_SF, (res & 0x8000) != 0);
-
-        let sign_dest = (dest & 0x8000) != 0;
-        let sign_src = (src & 0x8000) != 0;
-        let sign_res = (res & 0x8000) != 0;
-        cpu.set_flag(FLAG_OF, (sign_dest != sign_src) && (sign_dest != sign_res));
-        
-        // AF Logic
-        let val1 = (dest & 0xF) as i16;
-        let val2 = (src & 0xF) as i16;
-        cpu.set_flag(FLAG_AF, (val1 - val2 - (cf as i16)) < 0);
-
-        cpu.update_pf(res);
-        res
+        cpu.alu_sbb_16(dest, src)
     };
 
     write_back(cpu, instr, res, addr, is_8bit);
@@ -242,15 +172,19 @@ fn inc(cpu: &mut Cpu, instr: &Instruction) {
     };
 
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
-    let res = val.wrapping_add(1);
-
+    
+    // INC does NOT update CF. We must preserve it.
+    let old_cf = cpu.get_flag(FLAG_CF);
+    
+    // We can reuse the ADD logic, but restore CF afterwards.
+    let res = if is_8bit {
+        cpu.alu_add_8(val as u8, 1) as u16
+    } else {
+        cpu.alu_add_16(val, 1)
+    };
+    
+    cpu.set_flag(FLAG_CF, old_cf); // Restore CF
     write_back(cpu, instr, res, addr, is_8bit);
-
-    cpu.set_flag(FLAG_ZF, if is_8bit { (res as u8) == 0 } else { res == 0 });
-    cpu.set_flag(FLAG_SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_flag(FLAG_OF, if is_8bit { (res as u8) == 0x80 } else { res == 0x8000 });
-    cpu.set_flag(FLAG_AF, (val & 0x0F) + 1 > 0x0F);
-    cpu.update_pf(res);
 }
 
 fn dec(cpu: &mut Cpu, instr: &Instruction) {
@@ -261,15 +195,18 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
     };
 
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
-    let res = val.wrapping_sub(1);
-
+    
+    // DEC does NOT update CF. Preserve it.
+    let old_cf = cpu.get_flag(FLAG_CF);
+    
+    let res = if is_8bit {
+        cpu.alu_sub_8(val as u8, 1) as u16
+    } else {
+        cpu.alu_sub_16(val, 1)
+    };
+    
+    cpu.set_flag(FLAG_CF, old_cf); // Restore CF
     write_back(cpu, instr, res, addr, is_8bit);
-
-    cpu.set_flag(FLAG_ZF, if is_8bit { (res as u8) == 0 } else { res == 0 });
-    cpu.set_flag(FLAG_SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_flag(FLAG_OF, if is_8bit { (res as u8) == 0x7F } else { res == 0x7FFF });
-    cpu.set_flag(FLAG_AF, (val & 0x0F) == 0x00);
-    cpu.update_pf(res);
 }
 
 fn neg(cpu: &mut Cpu, instr: &Instruction) {
@@ -287,8 +224,11 @@ fn neg(cpu: &mut Cpu, instr: &Instruction) {
     } else {
         cpu.alu_sub_16(0, val)
     };
-
-    cpu.set_flag(FLAG_CF, val != 0);
+    
+    // Fix up CF: NEG 0 clears CF, otherwise sets it.
+    // alu_sub logic sets CF (Borrow) if 0 < val, which is true for all val != 0.
+    // So alu_sub handles NEG CF correctly automagically
+    
     write_back(cpu, instr, res, addr, is_8bit);
 }
 
