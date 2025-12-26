@@ -275,7 +275,10 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
-        0x5f => {
+        0xEF => {
+            // Hercules Graphics Card Functions
+        }
+        0x5F => {
             // Non-standard function used by some games
         }
 

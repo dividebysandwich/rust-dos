@@ -23,7 +23,7 @@ mod shell;
 mod video;
 
 fn main() -> Result<(), String> {
-    let mut debug_mode = true;
+    let mut debug_mode = false;
 
     let mut cursor_visible = true;
     let mut last_blink = std::time::Instant::now();
