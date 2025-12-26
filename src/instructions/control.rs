@@ -37,6 +37,8 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Jp => if cpu.get_flag(FLAG_PF) { branch(cpu, instr) },
         Mnemonic::Jnp => if !cpu.get_flag(FLAG_PF) { branch(cpu, instr) },
 
+        Mnemonic::Iret => iret(cpu, instr),
+
         _ => {}
     }
 }
@@ -155,4 +157,17 @@ fn jcxz(cpu: &mut Cpu, instr: &Instruction) {
     if cpu.cx == 0 {
         cpu.ip = instr.near_branch16() as u16;
     }
+}
+
+fn iret(cpu: &mut Cpu, instr: &Instruction) {
+    // Pop IP, then CS, then Flags
+    // Note: 16-bit mode pops 16-bit IP/CS/Flags
+    // TODO: check instr.op_size() for 32-bit mode
+    
+    cpu.ip = cpu.pop();
+    cpu.cs = cpu.pop();
+    let flags = cpu.pop();
+    
+    // Restore flags (preserving reserved bits)
+    cpu.flags = (flags & 0x0FD5) | 0x0002;
 }

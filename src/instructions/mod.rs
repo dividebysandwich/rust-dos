@@ -2,6 +2,7 @@ use iced_x86::{Instruction, Mnemonic};
 use crate::cpu::Cpu;
 
 pub mod utils;
+pub mod fpu;
 pub mod math;
 pub mod logic;
 pub mod control;
@@ -16,7 +17,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Lds | Mnemonic::Les |
         Mnemonic::Push | Mnemonic::Pop | Mnemonic::Pusha | Mnemonic::Popa | 
         Mnemonic::Pushf | Mnemonic::Popf |
-        Mnemonic::In | Mnemonic::Out | Mnemonic::Cbw | Mnemonic::Cwd => {
+        Mnemonic::In | Mnemonic::Out | Mnemonic::Cbw | Mnemonic::Cwd |
+        Mnemonic::Xlatb | Mnemonic::Lahf | Mnemonic::Sahf => {
             transfer::handle(cpu, instr);
         }
 
@@ -24,8 +26,13 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Add | Mnemonic::Sub | Mnemonic::Adc | Mnemonic::Sbb |
         Mnemonic::Inc | Mnemonic::Dec | Mnemonic::Neg |
         Mnemonic::Mul | Mnemonic::Imul | Mnemonic::Div | Mnemonic::Idiv |
-        Mnemonic::Cmp | Mnemonic::Aaa | Mnemonic::Das => {
+        Mnemonic::Cmp | Mnemonic::Aaa | Mnemonic::Das | Mnemonic::Daa=> {
             math::handle(cpu, instr);
+        }
+
+        // --- FPU ---
+        Mnemonic::Fninit | Mnemonic::Fnclex | Mnemonic::Fldcw => {
+            fpu::handle(cpu, instr);
         }
 
         // --- Logic / Bitwise ---
@@ -40,7 +47,7 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Loop | Mnemonic::Je | Mnemonic::Jne | Mnemonic::Jcxz |
         Mnemonic::Jb | Mnemonic::Jbe | Mnemonic::Ja | Mnemonic::Jae |
         Mnemonic::Jl | Mnemonic::Jle | Mnemonic::Jg | Mnemonic::Jge |
-        Mnemonic::Jo | Mnemonic::Js | Mnemonic::Jns => {
+        Mnemonic::Jo | Mnemonic::Js | Mnemonic::Jns | Mnemonic::Iret=> {
             control::handle(cpu, instr);
         }
 
@@ -53,8 +60,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
 
         // --- System / Misc ---
         Mnemonic::Int | Mnemonic::Nop | Mnemonic::Wait | Mnemonic::Hlt | 
-        Mnemonic::Stc | Mnemonic::Clc |Mnemonic::Std | Mnemonic::Cld | 
-        Mnemonic::Cli | Mnemonic::Sti => { 
+        Mnemonic::Stc | Mnemonic::Clc | Mnemonic::Std | Mnemonic::Cld | 
+        Mnemonic::Cli | Mnemonic::Sti | Mnemonic::Cmc=> { 
             misc::handle(cpu, instr);
         }
 

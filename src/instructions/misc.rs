@@ -12,6 +12,10 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Clc => cpu.set_flag(FLAG_CF, false),
         Mnemonic::Std => cpu.set_dflag(true),
         Mnemonic::Cld => cpu.set_dflag(false),
+        Mnemonic::Cmc => {
+            let cf = cpu.get_flag(FLAG_CF);
+            cpu.set_flag(FLAG_CF, !cf);
+        }
         Mnemonic::Sti => { /* Enable Interrupts */ },
         Mnemonic::Cli => { /* Disable Interrupts */ },
         Mnemonic::Wait => { /* Wait for Interrupt */ },

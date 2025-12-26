@@ -28,6 +28,10 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Cbw => cbw(cpu),
         Mnemonic::Cwd => cwd(cpu),
 
+        Mnemonic::Xlatb => xlatb(cpu),
+        Mnemonic::Lahf => lahf(cpu),
+        Mnemonic::Sahf => sahf(cpu),
+        
         _ => {}
     }
 }
@@ -288,4 +292,32 @@ fn cbw(cpu: &mut Cpu) {
 fn cwd(cpu: &mut Cpu) {
     let ax = cpu.ax as i16;
     cpu.dx = if ax < 0 { 0xFFFF } else { 0x0000 };
+}
+
+fn xlatb(cpu: &mut Cpu) {
+    // AL = Byte at [DS:BX + AL]
+    let bx = cpu.bx;
+    let al = cpu.get_al() as u16;
+    let offset = bx.wrapping_add(al);
+    let addr = cpu.get_physical_addr(cpu.ds, offset);
+    
+    let val = cpu.bus.read_8(addr);
+    cpu.set_reg8(iced_x86::Register::AL, val);
+}
+
+fn lahf(cpu: &mut Cpu) {
+    // Load Status Flags into AH
+    // Bit 7 (SF), 6 (ZF), 5 (0), 4 (AF), 3 (0), 2 (PF), 1 (1), 0 (CF)
+    let flags = cpu.flags;
+    let ah = (flags & 0xD5) | 0x02; // Keep bits 7,6,4,2,0. Force bit 1 to 1.
+    cpu.set_reg8(iced_x86::Register::AH, ah as u8);
+}
+
+fn sahf(cpu: &mut Cpu) {
+    // Store AH into Status Flags
+    let ah = cpu.get_ah() as u16;
+    // Mask: 1101 0101 (0xD5). Update SF, ZF, AF, PF, CF.
+    // Preserve other flags (OF, DF, IF, TF)
+    let current_flags = cpu.flags;
+    cpu.flags = (current_flags & 0xFF2A) | (ah & 0xD5) | 0x02;
 }

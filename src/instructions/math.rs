@@ -19,6 +19,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Idiv => idiv(cpu, instr),
         Mnemonic::Aaa => aaa(cpu),
         Mnemonic::Das => das(cpu),
+        Mnemonic::Daa => daa(cpu),
         _ => {}
     }
 }
@@ -138,7 +139,7 @@ fn adc(cpu: &mut Cpu, instr: &Instruction) {
         cpu.update_pf(res);
         res
     };
-    
+
     write_back(cpu, instr, res, addr, is_8bit);
 }
 
@@ -526,4 +527,34 @@ fn das(cpu: &mut Cpu) {
     cpu.set_flag(FLAG_ZF, al == 0);
     cpu.set_flag(FLAG_SF, (al & 0x80) != 0);
     cpu.update_pf(al as u16);
+}
+
+fn daa(cpu: &mut Cpu) {
+    let mut al = cpu.get_al();
+    let mut cf = cpu.get_flag(FLAG_CF);
+    let af = cpu.get_flag(FLAG_AF);
+
+    // If lower nibble is invalid BCD (>9) or AF is set
+    if (al & 0x0F) > 9 || af {
+        al = al.wrapping_add(6);
+        cpu.set_flag(FLAG_AF, true);
+    } else {
+        cpu.set_flag(FLAG_AF, false);
+    }
+
+    // If upper nibble is invalid BCD (>9) or CF was set
+    // The check AL > 0x9F detects if the previous addition plus the correction caused an overflow
+    if al > 0x9F || cf {
+        al = al.wrapping_add(0x60);
+        cf = true;
+    }
+
+    cpu.set_reg8(Register::AL, al);
+    cpu.set_flag(FLAG_CF, cf);
+    
+    // Updates SF, ZF, PF based on result
+    cpu.set_flag(FLAG_ZF, al == 0);
+    cpu.set_flag(FLAG_SF, (al & 0x80) != 0);
+    cpu.update_pf(al as u16);
+    // OF is undefined
 }
