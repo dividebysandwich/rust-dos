@@ -441,6 +441,7 @@ impl Cpu {
         let res_sign = (result & 0x8000) != 0;
         let overflow = (op1_sign == op2_sign) && (res_sign != op1_sign);
         self.set_cpu_flag(CpuFlags::OF, overflow);
+        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
     }
@@ -461,6 +462,7 @@ impl Cpu {
         let res_sign = (result & 0x8000) != 0;
         let overflow = (op1_sign != op2_sign) && (res_sign != op1_sign);
         self.set_cpu_flag(CpuFlags::OF, overflow);
+        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
     }
@@ -481,6 +483,7 @@ impl Cpu {
         let res_sign = (result & 0x80) != 0;
         let overflow = (op1_sign != op2_sign) && (res_sign != op1_sign);
         self.set_cpu_flag(CpuFlags::OF, overflow);
+        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
     }
@@ -501,6 +504,7 @@ impl Cpu {
         let res_sign = (result & 0x80) != 0;
         let overflow = (op1_sign == op2_sign) && (res_sign != op1_sign);
         self.set_cpu_flag(CpuFlags::OF, overflow);
+        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
     }
@@ -533,6 +537,7 @@ impl Cpu {
         let res_sign = (result & 0x80) != 0;
         let overflow = (op1_sign != op2_sign) && (op1_sign != res_sign);
         self.set_cpu_flag(CpuFlags::OF, overflow);
+        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
     }
@@ -561,6 +566,7 @@ impl Cpu {
         let res_sign = (result & 0x8000) != 0;
         let overflow = (op1_sign != op2_sign) && (op1_sign != res_sign);
         self.set_cpu_flag(CpuFlags::OF, overflow);
+        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
     }
