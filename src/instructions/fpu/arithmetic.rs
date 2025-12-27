@@ -390,7 +390,7 @@ pub fn fprem(cpu: &mut Cpu) {
         let q1 = (quotient & 2) != 0;
         let q2 = (quotient & 4) != 0;
 
-        cpu.fpu_flags.remove(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3);
+        cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3, false);
         if q1 { cpu.set_fpu_flag(FpuFlags::C0, true); }
         if q0 { cpu.set_fpu_flag(FpuFlags::C1, true); }
         if q2 { cpu.set_fpu_flag(FpuFlags::C3, true); }
@@ -415,7 +415,7 @@ pub fn fprem1(cpu: &mut Cpu) {
         let q1 = (quotient & 2) != 0;
         let q2 = (quotient & 4) != 0;
 
-        cpu.fpu_flags.remove(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3);
+        cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3, false);
         if q1 { cpu.set_fpu_flag(FpuFlags::C0, true); }
         if q0 { cpu.set_fpu_flag(FpuFlags::C1, true); }
         if q2 { cpu.set_fpu_flag(FpuFlags::C3, true); }

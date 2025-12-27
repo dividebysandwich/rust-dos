@@ -31,7 +31,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
             // 8086 Reserved: 1111_0000_0000_0010 (0xF002) are usually stuck/reserved
             // Simple mask: Preserve current reserved bits, write writable ones.
             // For simplicity in emulator: Write all, force bit 1 always ON.
-            cpu.flags = CpuFlags::from_bits_truncate((flags & 0x0FD5) | 0x0002);
+            cpu.set_cpu_flags(CpuFlags::from_bits_truncate(flags));
         }
 
         // HLT: Halt Processor

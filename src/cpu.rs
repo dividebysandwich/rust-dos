@@ -28,10 +28,29 @@ bitflags! {
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct FpuFlags: u16 {
+        // Condition Codes
         const C0 = 0x0100;
         const C1 = 0x0200;
         const C2 = 0x0400; // Bit 10
         const C3 = 0x4000; // Bit 14
+
+        // Exception Flags (Bits 0-5)
+        const IE = 0x0001; // Invalid Operation
+        const DE = 0x0002; // Denormalized Operand
+        const ZE = 0x0004; // Zero Divide
+        const OE = 0x0008; // Overflow
+        const UE = 0x0010; // Underflow
+        const PE = 0x0020; // Precision
+        
+        // Status Bits
+        const SF = 0x0040; // Stack Fault
+        const ES = 0x0080; // Error Summary Status
+        const B  = 0x8000; // Busy bit
+
+        // A helper group for FNCLEX
+        const EXCEPTIONS = Self::IE.bits() | Self::DE.bits() | Self::ZE.bits() | 
+                           Self::OE.bits() | Self::UE.bits() | Self::PE.bits() | 
+                           Self::SF.bits() | Self::ES.bits() | Self::B.bits();
     }
 }
 
@@ -54,14 +73,14 @@ pub struct Cpu {
     pub ip: u16,
 
     pub bus: Bus,
-    pub flags: CpuFlags,
+    flags: CpuFlags,
     pub state: CpuState,
     pub pending_command:Option<String>,
 
     // FPU State
     pub fpu_stack: [f64; 8],
     pub fpu_top: usize,
-    pub fpu_flags: FpuFlags,
+    fpu_flags: FpuFlags,
     pub fpu_control: u16,
     pub fpu_tags: [u8; 8],
 
@@ -198,6 +217,22 @@ impl Cpu {
         }
     }
 
+    // Allows overwriting the flags register with a new bitflags struct
+    pub fn set_cpu_flags(&mut self, new_flags: CpuFlags) {
+        let raw_bits = new_flags.bits();
+        
+        // 0x0FD5 masks only the valid 8086 flags:
+        // (CF, PF, AF, ZF, SF, TF, IF, DF, OF)
+        // Then we OR with 0x0002 to ensure Bit 1 is always 1.
+        let sanitized_bits = (raw_bits & 0x0FD5) | 0x0002;
+        
+        self.flags = CpuFlags::from_bits_truncate(sanitized_bits);
+    }
+
+    pub fn get_cpu_flags(&self) -> CpuFlags {
+        self.flags
+    }
+
     pub fn set_fpu_flag(&mut self, flag: FpuFlags, value: bool) {
         if value {
             self.fpu_flags.insert(flag);
@@ -208,6 +243,20 @@ impl Cpu {
 
     pub fn get_fpu_flag(&self, flag: FpuFlags) -> bool {
         self.fpu_flags.contains(flag)
+    }
+
+    pub fn set_fpu_flags(&mut self, new_flags: FpuFlags) {
+        let bits = new_flags.bits();
+    
+        // Bits 11, 12, 13 are the TOP pointer (0-7)
+        self.fpu_top = ((bits >> 11) & 0x07) as usize;
+    
+        // Store the flags
+        self.fpu_flags = new_flags;
+    }
+
+    pub fn get_fpu_flags(&self) -> FpuFlags {
+        self.fpu_flags
     }
 
     #[allow(dead_code)]

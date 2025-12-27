@@ -224,12 +224,12 @@ fn popa(cpu: &mut Cpu) {
 }
 
 fn pushf(cpu: &mut Cpu) {
-    cpu.push(cpu.flags.bits());
+    cpu.push(cpu.get_cpu_flags().bits());
 }
 
 fn popf(cpu: &mut Cpu) {
     let val = cpu.pop();
-    cpu.flags = CpuFlags::from_bits_truncate((val & 0x0FD5) | 0x0002);
+    cpu.set_cpu_flags(CpuFlags::from_bits_truncate(val));
 }
 
 fn lea(cpu: &mut Cpu, instr: &Instruction) {

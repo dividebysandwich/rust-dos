@@ -220,9 +220,10 @@ fn main() -> Result<(), String> {
 
                 let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
                 let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
-                let mut clean_flags = CpuFlags::from_bits_truncate(cpu.pop());
-                clean_flags.remove(CpuFlags::DF);
-                cpu.flags = clean_flags;
+                let flags_to_restore = CpuFlags::from_bits_truncate(cpu.pop());
+                
+                cpu.set_cpu_flags(flags_to_restore);
+                cpu.set_cpu_flag(CpuFlags::DF, false);
                 cpu.set_cpu_flag(CpuFlags::CF, hle_cf);
                 cpu.set_cpu_flag(CpuFlags::ZF, hle_zf);
         

@@ -9,7 +9,7 @@ fn fpu_compare(cpu: &mut Cpu, val: f64) {
     let st0 = cpu.fpu_get(0);
 
     // Clear Condition Codes C0, C2, C3 (Bits 8, 10, 14)
-    cpu.fpu_flags.remove(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3);
+    cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, false);
 
     if st0 > val {
         // ST(0) > Source: C3=0, C2=0, C0=0 (All cleared)
@@ -21,7 +21,7 @@ fn fpu_compare(cpu: &mut Cpu, val: f64) {
         cpu.set_fpu_flag(FpuFlags::C3, true);
     } else {
         // Unordered (NaN): C3=1, C2=1, C0=1
-        cpu.fpu_flags.insert(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C0);
+        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C0, true);
     }
 }
 
@@ -68,15 +68,15 @@ pub fn fxam(cpu: &mut Cpu) {
     // Check Tag First
     if cpu.fpu_tags[cpu.fpu_top] == crate::cpu::FPU_TAG_EMPTY {
         // C3=1, C2=0, C0=1 (Empty)
-        cpu.fpu_flags.remove(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0);
-        cpu.fpu_flags.insert(FpuFlags::C3 | FpuFlags::C0);
+        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0, false);
+        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C0, true);
         return;
     }
     
     let st0 = cpu.fpu_get(0);
     
     // Clear all condition codes first
-    cpu.fpu_flags.remove(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0);
+    cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0, false);
 
     // Check Sign (C1)
     if st0.is_sign_negative() {
@@ -89,9 +89,9 @@ pub fn fxam(cpu: &mut Cpu) {
     } else if st0 == 0.0 || st0 == -0.0 {
         cpu.set_fpu_flag(FpuFlags::C3, true);
     } else if st0.is_infinite() {
-        cpu.fpu_flags.insert(FpuFlags::C2 | FpuFlags::C0);
+        cpu.set_fpu_flag(FpuFlags::C2 | FpuFlags::C0, true);
     } else if st0.is_subnormal() { 
-        cpu.fpu_flags.insert(FpuFlags::C3 | FpuFlags::C2);
+        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2, true);
     } else {
         // Normal Finite
         cpu.set_fpu_flag(FpuFlags::C2, true);

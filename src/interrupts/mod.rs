@@ -28,7 +28,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     }
 
     // Push State (Simulate Hardware)
-    cpu.push(cpu.flags.bits());
+    cpu.push(cpu.get_cpu_flags().bits());
     cpu.push(cpu.cs);
     cpu.push(cpu.ip);
 

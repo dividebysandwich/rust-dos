@@ -8,8 +8,7 @@ pub fn fninit(cpu: &mut Cpu) {
     // Clear stack for debug clarity
     cpu.fpu_stack = [0.0; 8];
     // Reset FPU status registers here.
-    cpu.fpu_flags = FpuFlags::empty();
-    cpu.fpu_top = 0;
+    cpu.set_fpu_flags(FpuFlags::empty());
     // Clear stack
     for i in 0..8 {
         cpu.fpu_tags[i] = FPU_TAG_EMPTY;
@@ -18,10 +17,9 @@ pub fn fninit(cpu: &mut Cpu) {
 
 // FNCLEX: Clear FPU Exceptions
 pub fn fnclex(cpu: &mut Cpu) {
-    // Exceptions are in the low byte (bits 0-7)
-    // We clear them by masking out those specific bits
-    let current_bits = cpu.fpu_flags.bits();
-    cpu.fpu_flags = FpuFlags::from_bits_truncate(current_bits & !0x00FF); 
+    // This clears IE, DE, ZE, OE, UE, PE, SF, ES, and the Busy bit.
+    // It leaves the TOP pointer and Condition Codes (C0-C3) untouched.
+    cpu.set_fpu_flag(FpuFlags::EXCEPTIONS, false);
 }
 
 // FLDCW: Load Control Word from Memory
@@ -41,19 +39,20 @@ pub fn fnstcw(cpu: &mut Cpu, instr: &Instruction) {
 // FNSTSW: Store FPU Status Word (No Wait)
 // Usually: FNSTSW AX  or  FNSTSW [mem]
 pub fn fnstsw(cpu: &mut Cpu, instr: &Instruction) {
-    let flag_bits = cpu.fpu_flags.bits();
+    let flags = cpu.get_fpu_flags();
     
     // FPU Top is usually stored in bits 11-13 of the Status Word.
     // But we store it separately in our CPU struct, so we need to combine them.
-    let full_status = flag_bits | ((cpu.fpu_top as u16 & 0x07) << 11);
+    let mut raw_bits = flags.bits();
+    raw_bits = (raw_bits & !0x3800) | ((cpu.fpu_top as u16 & 0x07) << 11);
 
     if instr.op0_kind() == OpKind::Register {
         if instr.op0_register() == Register::AX {
-            cpu.ax = full_status;
+            cpu.ax = raw_bits;
         }
     } else if instr.op0_kind() == OpKind::Memory {
         let addr = calculate_addr(cpu, instr);
-        cpu.bus.write_16(addr, full_status);
+        cpu.bus.write_16(addr, raw_bits);
     }
 }
 
