@@ -170,13 +170,14 @@ fn scas(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
         let acc = cpu.get_al();
         let mem = cpu.bus.read_8(dst_addr);
         
-        let zf_before = cpu.get_cpu_flag(CpuFlags::ZF);
+        cpu.bus.log_string(&format!("[SCAS-DEBUG] Comparing AL:{:02X} with Mem:{:02X} at DI:{:04X}", acc, mem, cpu.di));
+
+//        let zf_before = cpu.get_cpu_flag(CpuFlags::ZF);
         cpu.alu_sub_8(acc, mem);
         let zf_after = cpu.get_cpu_flag(CpuFlags::ZF);
 
-        if zf_before == zf_after && acc != mem {
-             cpu.bus.log_string(&format!("[ALU-BUG] SCASB failed to update ZF! AL={:02X} Mem={:02X}", acc, mem));
-        }
+        cpu.bus.log_string(&format!("[SCAS-DEBUG] Resulting ZF is now: {}", zf_after));
+
     } else {
         let acc = cpu.ax;
         let mem = cpu.bus.read_16(dst_addr);

@@ -3,6 +3,7 @@ pub mod bus;
 pub mod command;
 pub mod cpu;
 pub mod disk;
+pub mod f80;
 pub mod keyboard;
 pub mod instructions;
 pub mod interrupts;

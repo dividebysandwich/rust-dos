@@ -1,6 +1,7 @@
 use iced_x86::{Instruction, MemorySize, OpKind, Register, Mnemonic};
 use bitflags::bitflags;
 
+use crate::f80::F80;
 use crate::bus::Bus;
 use crate::shell::get_shell_code;
 use crate::instructions::utils::calculate_addr;
@@ -78,7 +79,7 @@ pub struct Cpu {
     pub pending_command:Option<String>,
 
     // FPU State
-    pub fpu_stack: [f64; 8],
+    pub fpu_stack: [F80; 8],
     pub fpu_top: usize,
     fpu_flags: FpuFlags,
     pub fpu_control: u16,
@@ -117,7 +118,7 @@ impl Cpu {
             flags: CpuFlags::from_bits_truncate(0x0002), // Default Flag State, Bit 1 is always set
             state: CpuState::Running,
             pending_command: None,
-            fpu_stack: [0.0; 8],
+            fpu_stack: [F80::new(); 8],
             fpu_top: 0,
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),
             fpu_control: 0x037F, // Default Control Word
@@ -210,10 +211,14 @@ impl Cpu {
 
     // Helper to set/clear a flag
     pub fn set_cpu_flag(&mut self, mask: CpuFlags, value: bool) {
+        // if mask == CpuFlags::ZF {
+        //     // Log every single time the Zero Flag changes
+        //     self.bus.log_string(&format!("[ZF-WATCH] ZF set to {} at {:04X}:{:04X}", value, self.cs, self.ip));
+        // }
         if value {
-            self.flags |= mask;
+            self.flags.insert(mask);
         } else {
-            self.flags &= !mask;
+            self.flags.remove(mask);
         }
     }
 
@@ -241,6 +246,7 @@ impl Cpu {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_fpu_flag(&self, flag: FpuFlags) -> bool {
         self.fpu_flags.contains(flag)
     }
@@ -293,7 +299,6 @@ impl Cpu {
             // Handle Register Operand
             OpKind::Register => {
                 let reg = instr.op0_register();
-                // Use iced_x86 built-in check or your own helper
                 let is_8bit = reg.is_gpr8();
 
                 let val = if is_8bit {
@@ -641,7 +646,7 @@ impl Cpu {
     // ============== FPU Operations =================
 
     // Push value to FPU Stack
-    pub fn fpu_push(&mut self, val: f64) {
+    pub fn fpu_push(&mut self, val: F80) {
         // Decrement top pointer (wrapping)
         self.fpu_top = (self.fpu_top.wrapping_sub(1)) % 8;
         // Write Value
@@ -651,7 +656,7 @@ impl Cpu {
     }
 
     // Pop value from FPU Stack
-    pub fn fpu_pop(&mut self) -> f64 {
+    pub fn fpu_pop(&mut self) -> F80 {
         let val = self.fpu_stack[self.fpu_top];
         // Mark current top as EMPTY before moving on
         self.fpu_tags[self.fpu_top] = FPU_TAG_EMPTY;
@@ -661,13 +666,13 @@ impl Cpu {
     }
 
     // Access ST(i) relative to Top
-    pub fn fpu_get(&self, index: usize) -> f64 {
+    pub fn fpu_get(&self, index: usize) -> F80 {
         let actual_idx = (self.fpu_top + index) & 7;
         self.fpu_stack[actual_idx]
     }
     
     // Set ST(i) relative to Top
-    pub fn fpu_set(&mut self, index: usize, val: f64) {
+    pub fn fpu_set(&mut self, index: usize, val: F80) {
         let actual_idx = (self.fpu_top + index) & 7;
         self.fpu_stack[actual_idx] = val;
     }
@@ -675,6 +680,24 @@ impl Cpu {
     // Get physical index for ST(i)
     pub fn fpu_get_phys_index(&self, i: usize) -> usize {
         (self.fpu_top + i) % 8
+    }
+
+    pub fn load_int_to_f80(&self, addr: usize, size: MemorySize) -> F80 {
+        let (val, neg) = match size {
+            MemorySize::Int16 => {
+                let v = self.bus.read_16(addr) as i16;
+                (v.abs() as u128, v < 0)
+            }
+            MemorySize::Int32 => {
+                let v = self.bus.read_32(addr) as i32;
+                (v.abs() as u128, v < 0)
+            }
+            _ => (0, false),
+        };
+
+        let mut f = F80::new();
+        f.st = F80::encode_from_u128(val, neg);
+        f
     }
 
     fn install_bios_traps(&mut self) {

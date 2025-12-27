@@ -1,12 +1,13 @@
 use iced_x86::{Instruction, OpKind, Register};
 use crate::cpu::{Cpu, FPU_TAG_EMPTY, FpuFlags};
+use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
 
 pub fn fninit(cpu: &mut Cpu) {
     // Initialize FPU
     cpu.fpu_top = 0;
     // Clear stack for debug clarity
-    cpu.fpu_stack = [0.0; 8];
+    cpu.fpu_stack = [F80::new(); 8];
     // Reset FPU status registers here.
     cpu.set_fpu_flags(FpuFlags::empty());
     // Clear stack

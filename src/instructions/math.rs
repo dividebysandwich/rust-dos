@@ -174,17 +174,22 @@ fn inc(cpu: &mut Cpu, instr: &Instruction) {
 
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
     
-    // INC does NOT update CF. We must preserve it.
-    let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
-    
-    // We can reuse the ADD logic, but restore CF afterwards.
     let res = if is_8bit {
-        cpu.alu_add_8(val as u8, 1) as u16
+        let r = (val as u8).wrapping_add(1);
+        cpu.set_cpu_flag(CpuFlags::ZF, r == 0);
+        cpu.set_cpu_flag(CpuFlags::SF, (r & 0x80) != 0);
+        cpu.set_cpu_flag(CpuFlags::OF, val == 0x7F);
+        cpu.update_pf(r as u16);
+        r as u16
     } else {
-        cpu.alu_add_16(val, 1)
+        let r = val.wrapping_add(1);
+        cpu.set_cpu_flag(CpuFlags::ZF, r == 0);
+        cpu.set_cpu_flag(CpuFlags::SF, (r & 0x8000) != 0);
+        cpu.set_cpu_flag(CpuFlags::OF, val == 0x7FFF);
+        cpu.update_pf(r);
+        r
     };
     
-    cpu.set_cpu_flag(CpuFlags::CF, old_cf); // Restore CF
     write_back(cpu, instr, res, addr, is_8bit);
 }
 
@@ -197,16 +202,27 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
 
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
     
-    // DEC does NOT update CF. Preserve it.
-    let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
-    
     let res = if is_8bit {
-        cpu.alu_sub_8(val as u8, 1) as u16
+        let v = val as u8;
+        let r = v.wrapping_sub(1);
+        
+        cpu.set_cpu_flag(CpuFlags::ZF, r == 0);
+        cpu.set_cpu_flag(CpuFlags::SF, (r & 0x80) != 0);
+        cpu.set_cpu_flag(CpuFlags::OF, v == 0x80);
+        cpu.set_cpu_flag(CpuFlags::AF, (v & 0x0F) == 0);
+        cpu.update_pf(r as u16);
+        r as u16
     } else {
-        cpu.alu_sub_16(val, 1)
+        let r = val.wrapping_sub(1);
+        cpu.set_cpu_flag(CpuFlags::ZF, r == 0);
+        cpu.set_cpu_flag(CpuFlags::SF, (r & 0x8000) != 0);
+        cpu.set_cpu_flag(CpuFlags::OF, val == 0x8000);
+        cpu.set_cpu_flag(CpuFlags::AF, (val & 0x0F) == 0);
+        
+        cpu.update_pf(r);
+        r
     };
     
-    cpu.set_cpu_flag(CpuFlags::CF, old_cf); // Restore CF
     write_back(cpu, instr, res, addr, is_8bit);
 }
 

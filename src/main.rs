@@ -16,6 +16,7 @@ mod bus;
 mod command;
 mod cpu;
 mod disk;
+mod f80;
 mod keyboard;
 mod instructions;
 mod interrupts;
