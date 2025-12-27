@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, OpKind, Register};
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, FPU_TAG_EMPTY};
 use crate::instructions::utils::calculate_addr;
 
 pub fn fninit(cpu: &mut Cpu) {
@@ -8,8 +8,12 @@ pub fn fninit(cpu: &mut Cpu) {
     // Clear stack for debug clarity
     cpu.fpu_stack = [0.0; 8];
     // TODO reset FPU status registers here.
-    cpu.fpu_status = 0;
-    cpu.fpu_control = 0x037F;
+    cpu.fpu_status = 0x0000;
+    cpu.fpu_top = 0;
+    // Clear stack
+    for i in 0..8 {
+        cpu.fpu_tags[i] = FPU_TAG_EMPTY;
+    }
 }
 
 // FNCLEX: Clear FPU Exceptions

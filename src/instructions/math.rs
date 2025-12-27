@@ -18,6 +18,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Div => div(cpu, instr),
         Mnemonic::Idiv => idiv(cpu, instr),
         Mnemonic::Aaa => aaa(cpu),
+        Mnemonic::Aam => aam(cpu, instr),
         Mnemonic::Das => das(cpu),
         Mnemonic::Daa => daa(cpu),
         _ => {}
@@ -440,6 +441,38 @@ fn aaa(cpu: &mut Cpu) {
         cpu.set_flag(FLAG_CF, false);
         cpu.set_reg8(Register::AL, al & 0x0F);
     }
+}
+
+// AAM: ASCII Adjust AX After Multiply
+// Converts binary value in AL into two unpacked BCD digits.
+pub fn aam(cpu: &mut Cpu, instr: &Instruction) {
+    let mut al = cpu.get_al();
+    
+    // The base is usually 10 (0x0A), but encoded as an immediate.
+    // If no immediate is present (rare/implicit), default to 10.
+    let base = if instr.op_count() > 0 && instr.op0_kind() == OpKind::Immediate8 {
+        instr.immediate8()
+    } else {
+        10
+    };
+
+    if base == 0 {
+        // Division by zero exception (INT 0)
+        crate::interrupts::handle_interrupt(cpu, 0x00);
+        return;
+    }
+
+    let ah = al / base;
+    al = al % base;
+
+    cpu.set_reg8(Register::AH, ah);
+    cpu.set_reg8(Register::AL, al);
+
+    // Flags are set based on the result in AL
+    cpu.set_flag(FLAG_SF, (al & 0x80) != 0);
+    cpu.set_flag(FLAG_ZF, al == 0);
+    cpu.update_pf(al as u16);
+    // CF, OF, AF are undefined
 }
 
 fn das(cpu: &mut Cpu) {

@@ -41,6 +41,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // Store Float
         Mnemonic::Fst => data::fst(cpu, instr),
         Mnemonic::Fstp => data::fstp(cpu, instr),
+        Mnemonic::Fbstp => data::fbstp(cpu, instr),
         
         // Exchange
         Mnemonic::Fxch => data::fxch(cpu, instr),

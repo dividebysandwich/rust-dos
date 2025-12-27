@@ -12,6 +12,9 @@ pub mod misc;
 
 pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
     match instr.mnemonic() {
+
+        // Source: https://tizee.github.io/x86_ref_book_web/
+
         // --- Data Transfer ---
         Mnemonic::Mov | Mnemonic::Xchg | Mnemonic::Lea | 
         Mnemonic::Lds | Mnemonic::Les |
@@ -24,9 +27,9 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
 
         // --- Math / Arithmetic ---
         Mnemonic::Add | Mnemonic::Sub | Mnemonic::Adc | Mnemonic::Sbb |
-        Mnemonic::Inc | Mnemonic::Dec | Mnemonic::Neg |
+        Mnemonic::Inc | Mnemonic::Dec | Mnemonic::Neg | Mnemonic::Aam |
         Mnemonic::Mul | Mnemonic::Imul | Mnemonic::Div | Mnemonic::Idiv |
-        Mnemonic::Cmp | Mnemonic::Aaa | Mnemonic::Das | Mnemonic::Daa=> {
+        Mnemonic::Cmp | Mnemonic::Aaa | Mnemonic::Das | Mnemonic::Daa => {
             math::handle(cpu, instr);
         }
 

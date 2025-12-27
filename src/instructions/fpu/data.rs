@@ -2,49 +2,71 @@ use iced_x86::{Instruction, OpKind, MemorySize, Register};
 use crate::cpu::Cpu;
 use crate::instructions::utils::calculate_addr;
 
-// Convert x87 80-bit float to Rust f64
-fn convert_f80_to_f64(mantissa: u64, sign_exp: u16) -> f64 {
+pub fn convert_f80_to_f64(mantissa: u64, sign_exp: u16) -> f64 {
     let sign = (sign_exp >> 15) & 1;
     let exp80 = sign_exp & 0x7FFF;
-
-    // Handle Zero (Exp=0, Mantissa=0)
+    
+    // Zero
     if exp80 == 0 && mantissa == 0 {
         return if sign == 1 { -0.0 } else { 0.0 };
     }
 
-    // Handle Infinity / NaN (Exp=Max)
+    // Infinity / NaN
     if exp80 == 0x7FFF {
-        // If mantissa (excluding integer bit) is 0, it's Infinity
-        if (mantissa & 0x7FFF_FFFF_FFFF_FFFF) == 0 {
+        if (mantissa & 0x7FFFFFFFFFFFFFFF) == 0 {
             return if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY };
-        } else {
-            return f64::NAN;
         }
+        return f64::NAN;
     }
 
     // Normal Numbers
-    // Re-bias the exponent: 
-    // 80-bit bias is 16383. 64-bit bias is 1023.
-    let exp64 = (exp80 as i32) - 16383 + 1023;
+    let exp64_signed = (exp80 as i32) - 16383 + 1023;
 
-    // Check for overflow/underflow
-    if exp64 >= 2047 {
+    if exp64_signed <= 0 {
+        // Subnormal or Zero
+        return if sign == 1 { -0.0 } else { 0.0 };
+    }
+    if exp64_signed >= 0x7FF {
         return if sign == 1 { f64::NEG_INFINITY } else { f64::INFINITY };
     }
-    if exp64 <= 0 {
-        // Subnormal or underflow to zero
-        return 0.0; 
+
+    // Mantissa
+    // Discard Integer Bit (63), take next 52 bits (62..11)
+    let mantissa64 = (mantissa >> 11) & 0xFFFFFFFFFFFFF;
+    
+    let bits = ((sign as u64) << 63) | ((exp64_signed as u64) << 52) | mantissa64;
+    f64::from_bits(bits)
+}
+
+pub fn convert_f64_to_f80(val: f64) -> (u64, u16) {
+    let bits = val.to_bits();
+    let sign = (bits >> 63) as u16;
+    let exp64 = ((bits >> 52) & 0x7FF) as i16;
+    let mantissa64 = bits & 0xFFFFFFFFFFFFF;
+
+    // Zero / Denormal (Treat denormal as zero for simplicity)
+    if exp64 == 0 {
+        return (0, sign << 15);
     }
 
-    // Adjust Mantissa
-    // 80-bit has an explicit integer bit at bit 63 (always 1 for normal numbers).
-    // 64-bit has an implicit integer bit (assumed 1).
-    // So we discard bit 63, and keep the next 52 bits (62 down to 11).
-    let mantissa64 = (mantissa >> 11) & 0x000F_FFFF_FFFF_FFFF;
+    // Infinity / NaN
+    if exp64 == 0x7FF {
+        // x87 Infinity/NaN has Integer Bit=1 (0x8000...)
+        let mantissa80 = (1u64 << 63) | (mantissa64 << 11);
+        return (mantissa80, (sign << 15) | 0x7FFF);
+    }
 
-    // Avengers Assemble f64
-    let bits = ((sign as u64) << 63) | ((exp64 as u64) << 52) | mantissa64;
-    f64::from_bits(bits)
+    // Normal Number
+    // Rebias: 1023 -> 16383
+    let exp80 = (exp64 - 1023 + 16383) as u16;
+    
+    // Mantissa:
+    // f64 (52 bits) -> f80 (64 bits).
+    // Shift left 11 positions.
+    // Set Explicit Integer Bit 63 (which is implicit in f64).
+    let mantissa80 = (1u64 << 63) | (mantissa64 << 11);
+
+    (mantissa80, (sign << 15) | exp80)
 }
 
 // FLD: Load Floating Point Value
@@ -126,7 +148,7 @@ pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
             cpu.bus.write_32(addr, (v & 0xFFFFFFFF) as u32);
             cpu.bus.write_32(addr + 4, (v >> 32) as u32);
         }
-        _ => {}
+        _ => { cpu.bus.log_string(&format!("[FPU] FISTP Unsupported memory size: {:?}", instr.memory_size())); }
     }
 }
 
@@ -142,11 +164,65 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
             }
             MemorySize::Float64 => {
                 let bits = val.to_bits();
-                cpu.bus.write_32(addr, (bits & 0xFFFFFFFF) as u32);
-                cpu.bus.write_32(addr + 4, (bits >> 32) as u32);
+                cpu.bus.write_64(addr, bits);
+                // cpu.bus.write_32(addr, (bits & 0xFFFFFFFF) as u32);
+                // cpu.bus.write_32(addr + 4, (bits >> 32) as u32);
             }
-            _ => {}
+            MemorySize::Float80 => {
+                //let val = cpu.fpu_pop();
+                let (m, se) = convert_f64_to_f80(val);
+                println!("[FPU] FSTP80: Val={} -> Mantissa={:X}, SignExp={:X}", val, m, se);
+                cpu.bus.write_64(addr, m);
+                cpu.bus.write_16(addr + 8, se);
+            }
+            _ => { cpu.bus.log_string(&format!("[FPU] FSTP Unsupported memory size: {:?}", instr.memory_size())); }
         }
+    }
+}
+
+// FBSTP: Store BCD Integer and Pop
+pub fn fbstp(cpu: &mut Cpu, instr: &Instruction) {
+    let val = cpu.fpu_pop();
+    let addr = calculate_addr(cpu, instr);
+
+    // Handle Sign
+    let is_neg = val.is_sign_negative();
+    let abs_val = val.abs();
+
+    // Round to u64
+    let int_val = (abs_val.round()) as u64;
+
+    // Check limits (18 decimal digits approx 10^18)
+    if int_val >= std::u64::MAX / 10 {
+        // Overflow / Indefinite
+        // Write "Indefinite" BCD pattern? Or just saturate.
+        // For now, let's saturate or just panic log.
+        cpu.bus.log_string("[FPU] FBSTP Overflow");
+        return; 
+    }
+
+    // Create 10-byte BCD array
+    // Bytes 0-8: 18 digits (2 digits per byte)
+    // Byte 9: Sign bit (0x80 if negative, 0x00 if positive)
+    let mut bcd_bytes = [0u8; 10];
+    
+    let mut temp = int_val;
+    for i in 0..9 {
+        let digit_low = temp % 10;
+        temp /= 10;
+        let digit_high = temp % 10;
+        temp /= 10;
+        
+        bcd_bytes[i] = (digit_high as u8) << 4 | (digit_low as u8);
+    }
+
+    if is_neg {
+        bcd_bytes[9] = 0x80;
+    }
+
+    // Write to Memory
+    for i in 0..10 {
+        cpu.bus.write_8(addr + i, bcd_bytes[i]);
     }
 }
 
@@ -164,7 +240,12 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
                 let bits = st0.to_bits();
                 cpu.bus.write_64(addr, bits);
             }
-            _ => {}
+            MemorySize::Float80 => {
+                let (m, se) = convert_f64_to_f80(st0);
+                cpu.bus.write_64(addr, m);
+                cpu.bus.write_16(addr + 8, se);
+            }
+            _ => { cpu.bus.log_string(&format!("[FPU] FST Unsupported memory size: {:?}", instr.memory_size())); }
         }
     }
 }
@@ -202,7 +283,7 @@ pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
     match instr.memory_size() {
         iced_x86::MemorySize::Int16 => { cpu.bus.write_16(addr, (i_val as i16) as u16); },
         iced_x86::MemorySize::Int32 => { cpu.bus.write_32(addr, (i_val as i32) as u32); },
-        _ => {}
+        _ => { cpu.bus.log_string(&format!("[FPU] FIST Unsupported memory size: {:?}", instr.memory_size())); }
     }
 }
 

@@ -34,7 +34,7 @@ pub fn fsincos(cpu: &mut Cpu) {
 pub fn fptan(cpu: &mut Cpu) {
     let st0 = cpu.fpu_get(0);
     cpu.fpu_set(0, st0.tan());
-    cpu.fpu_push(1.0);
+    cpu.fpu_push(1.0); // Partial tangent requirement!
     cpu.fpu_status &= !FPU_C2; // Clear C2
 }
 

@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, OpKind, MemorySize, Register};
-use crate::cpu::{Cpu, FPU_C0, FPU_C1, FPU_C3};
+use crate::cpu::{Cpu, FPU_C0, FPU_C1, FPU_C2, FPU_C3};
 use crate::instructions::utils::calculate_addr;
 
 // FIADD: Add Integer
@@ -434,6 +434,7 @@ pub fn frndint(cpu: &mut Cpu) {
         _ => st0,
     };
     cpu.fpu_set(0, result);
+    cpu.fpu_status &= !FPU_C2; // Clear C2
 }
 
 // FABS: Absolute Value
@@ -488,21 +489,35 @@ pub fn fscale(cpu: &mut Cpu) {
 // Separates ST(0) into exponent and significand.
 // ST(0) becomes Exponent (unbiased), Push Significand.
 pub fn fxtract(cpu: &mut Cpu) {
-    let st0 = cpu.fpu_get(0);
-    
-    // Deconstruct float
-    // Note: Rust doesn't have frexp in std easily, doing manually
-    if st0 == 0.0 {
-        // Zero handling: Exp = -inf, Sig = 0.0
-        cpu.fpu_set(0, f64::NEG_INFINITY);
-        cpu.fpu_push(0.0);
-    } else {
-        let exp = st0.abs().log2().floor();
-        let sig = st0 / 2.0_f64.powf(exp);
-        
-        cpu.fpu_set(0, exp);
-        cpu.fpu_push(sig);
+    let val = cpu.fpu_get(0);
+
+    // Handle Zero case: ST(0) = 0.0, Push -Infinity
+    if val == 0.0 {
+        cpu.fpu_set(0, 0.0);
+        cpu.fpu_push(f64::NEG_INFINITY);
+        // TODO: Should set Zero Divide exception flag here
+        return;
     }
+
+    let bits = val.to_bits();
+    // Extract raw exponent (11 bits)
+    let exp_raw = ((bits >> 52) & 0x7FF) as i32;
+    // Unbias exponent (f64 bias is 1023)
+    let true_exp = exp_raw - 1023;
+
+    // Create Significand:
+    // Keep original Sign bit (63)
+    // Clear Exponent bits (62-52)
+    // Set Exponent to 1023 (Bias) to make the float value 1.xxxxx
+    // Keep Mantissa bits (51-0)
+    let sig_bits = (bits & 0x800F_FFFF_FFFF_FFFF) | (1023 << 52);
+    let sig = f64::from_bits(sig_bits);
+
+    // Step 1: Replace ST(0) with Significand
+    cpu.fpu_set(0, sig);
+
+    // Step 2: Push Exponent as a new float
+    cpu.fpu_push(true_exp as f64);
 }
 
 // F2XM1: 2^x - 1

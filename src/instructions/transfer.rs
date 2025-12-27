@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, Mnemonic, OpKind, Register, MemorySize};
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, FLAG_CF, FLAG_PF, FLAG_AF, FLAG_ZF, FLAG_SF};
 use super::utils::{calculate_addr, get_effective_addr, is_8bit_reg};
 
 pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
@@ -305,19 +305,30 @@ fn xlatb(cpu: &mut Cpu) {
     cpu.set_reg8(iced_x86::Register::AL, val);
 }
 
-fn lahf(cpu: &mut Cpu) {
-    // Load Status Flags into AH
-    // Bit 7 (SF), 6 (ZF), 5 (0), 4 (AF), 3 (0), 2 (PF), 1 (1), 0 (CF)
-    let flags = cpu.flags;
-    let ah = (flags & 0xD5) | 0x02; // Keep bits 7,6,4,2,0. Force bit 1 to 1.
-    cpu.set_reg8(iced_x86::Register::AH, ah as u8);
+// LAHF: Load Flags into AH
+// Transfers SF, ZF, AF, PF, CF into bits 7, 6, 4, 2, 0 of AH.
+// Bits 1, 3, 5 are reserved (usually 1, 0, 0 or similar, but 1,0,1 is common 8086).
+pub fn lahf(cpu: &mut Cpu) {
+    let mut ah: u8 = 0;
+    if cpu.get_flag(FLAG_SF) { ah |= 0x80; }
+    if cpu.get_flag(FLAG_ZF) { ah |= 0x40; }
+    if cpu.get_flag(FLAG_AF) { ah |= 0x10; }
+    if cpu.get_flag(FLAG_PF) { ah |= 0x04; }
+    if cpu.get_flag(FLAG_CF) { ah |= 0x01; }
+    
+    // Set reserved bits (Bit 1=1 is standard for 8086)
+    ah |= 0x02; 
+    
+    cpu.set_reg8(Register::AH, ah);
 }
 
-fn sahf(cpu: &mut Cpu) {
-    // Store AH into Status Flags
-    let ah = cpu.get_ah() as u16;
-    // Mask: 1101 0101 (0xD5). Update SF, ZF, AF, PF, CF.
-    // Preserve other flags (OF, DF, IF, TF)
-    let current_flags = cpu.flags;
-    cpu.flags = (current_flags & 0xFF2A) | (ah & 0xD5) | 0x02;
+// SAHF: Store AH into Flags
+// Transfers bits 7, 6, 4, 2, 0 of AH to SF, ZF, AF, PF, CF respectively.
+pub fn sahf(cpu: &mut Cpu) {
+    let ah = cpu.get_ah();
+    cpu.set_flag(FLAG_SF, (ah & 0x80) != 0);
+    cpu.set_flag(FLAG_ZF, (ah & 0x40) != 0);
+    cpu.set_flag(FLAG_AF, (ah & 0x10) != 0);
+    cpu.set_flag(FLAG_PF, (ah & 0x04) != 0);
+    cpu.set_flag(FLAG_CF, (ah & 0x01) != 0);
 }
