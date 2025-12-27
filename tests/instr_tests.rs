@@ -1,4 +1,4 @@
-use rust_dos::cpu::{Cpu, FLAG_ZF, FLAG_CF, FLAG_SF};
+use rust_dos::cpu::{Cpu, CpuFlags};
 use rust_dos::instructions::execute_instruction;
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
@@ -86,8 +86,8 @@ fn test_inc_dec_flags() {
     run_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 0xFF);
-    assert_eq!(cpu.get_flag(FLAG_ZF), false); 
-    assert_eq!(cpu.get_flag(FLAG_SF), true); // 0xFF is -1 signed
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false); 
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::SF), true); // 0xFF is -1 signed
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn test_imul_16bit() {
     // but as a signed 16-bit number it is negative, overflow flags checks 
     // depend on if the result fits in the lower half strictly.
     // 32768 does NOT fit in a signed i16 (max 32767). 
-    assert_eq!(cpu.get_flag(FLAG_CF), true); 
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true); 
 }
 
 #[test]

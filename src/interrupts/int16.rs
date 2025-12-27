@@ -1,4 +1,4 @@
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, CpuFlags};
 
 // BDA Address for Keyboard Shift Flags
 const BDA_SHIFT_FLAGS: usize = 0x0417;
@@ -41,10 +41,10 @@ pub fn handle(cpu: &mut Cpu) {
         // Returns: ZF=1 if no key, ZF=0 if key waiting (and AX=Key)
         0x01 | 0x11 => {
             if let Some(&key_code) = cpu.bus.keyboard_buffer.front() {
-                cpu.set_flag(crate::cpu::FLAG_ZF, false); // Key available
+                cpu.set_cpu_flag(CpuFlags::ZF, false); // Key available
                 cpu.ax = key_code; // Preview key (do not remove)
             } else {
-                cpu.set_flag(crate::cpu::FLAG_ZF, true); // No key
+                cpu.set_cpu_flag(CpuFlags::ZF, true); // No key
             }
         }
 

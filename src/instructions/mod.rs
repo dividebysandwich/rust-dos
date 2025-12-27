@@ -86,7 +86,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Loop | Mnemonic::Je | Mnemonic::Jne | Mnemonic::Jcxz |
         Mnemonic::Jb | Mnemonic::Jbe | Mnemonic::Ja | Mnemonic::Jae |
         Mnemonic::Jl | Mnemonic::Jle | Mnemonic::Jg | Mnemonic::Jge |
-        Mnemonic::Jo | Mnemonic::Js | Mnemonic::Jns | Mnemonic::Iret=> {
+        Mnemonic::Jo | Mnemonic::Js | Mnemonic::Jns | Mnemonic::Loopne | 
+        Mnemonic::Loope => {
             control::handle(cpu, instr);
         }
 
@@ -100,7 +101,9 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         // --- System / Misc ---
         Mnemonic::Int | Mnemonic::Nop | Mnemonic::Wait | Mnemonic::Hlt | 
         Mnemonic::Stc | Mnemonic::Clc | Mnemonic::Std | Mnemonic::Cld | 
-        Mnemonic::Cli | Mnemonic::Sti | Mnemonic::Cmc=> { 
+        Mnemonic::Cli | Mnemonic::Sti | Mnemonic::Cmc | Mnemonic::Into |
+        Mnemonic::Iret | Mnemonic::Leave | Mnemonic::Enter
+        => { 
             misc::handle(cpu, instr);
         }
 

@@ -1,7 +1,7 @@
 use iced_x86::Register;
 use chrono::{Local, Timelike};
 
-use crate::cpu::{Cpu, CpuState};
+use crate::cpu::{Cpu, CpuState, CpuFlags};
 use crate::video::{print_char};
 use crate::audio::play_sdl_beep;
 use super::utils::{read_asciiz_string, read_dta_template, pattern_to_fcb};
@@ -265,7 +265,7 @@ pub fn handle(cpu: &mut Cpu) {
                     }
                 }
                 cpu.ax = read_count as u16;
-                cpu.set_flag(crate::cpu::FLAG_CF, false);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 match cpu.bus.disk.read_file(handle, count) {
                     Ok(bytes) => {
@@ -274,11 +274,11 @@ pub fn handle(cpu: &mut Cpu) {
                             buf_addr += 1;
                         }
                         cpu.ax = bytes.len() as u16;
-                        cpu.set_flag(crate::cpu::FLAG_CF, false);
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(e) => {
                         cpu.ax = e;
-                        cpu.set_flag(crate::cpu::FLAG_CF, true);
+                        cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
                 }
             }
@@ -326,11 +326,11 @@ pub fn handle(cpu: &mut Cpu) {
                 Ok(new_pos) => {
                     cpu.dx = ((new_pos >> 16) & 0xFFFF) as u16;
                     cpu.ax = (new_pos & 0xFFFF) as u16;
-                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(e) => {
                     cpu.ax = e;
-                    cpu.set_flag(crate::cpu::FLAG_CF, true);
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
             }
         }
@@ -340,9 +340,9 @@ pub fn handle(cpu: &mut Cpu) {
             let al = cpu.get_reg8(Register::AL);
             if al == 0x00 {
                 cpu.set_reg16(Register::CX, 0x20); // Archive
-                cpu.set_flag(crate::cpu::FLAG_CF, false);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
-                cpu.set_flag(crate::cpu::FLAG_CF, false);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
             }
         }
 
@@ -362,18 +362,18 @@ pub fn handle(cpu: &mut Cpu) {
                         // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive #
                         cpu.dx = 0x0002; // Drive C
                     }
-                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 // Check if Block Device is Removable
                 0x08 => {
                     // AX=0 (Removable), AX=1 (Fixed)
                     cpu.ax = 1; // Fixed drive
-                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 _ => {
                     // Stub other subfunctions as success
                     cpu.ax = 0; 
-                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
             }
         }
@@ -387,7 +387,7 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.bus.write_8(addr + i, 0x00);
             }
             cpu.set_reg16(Register::AX, 0x0100);
-            cpu.set_flag(crate::cpu::FLAG_CF, false);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
         // AH = 48h: Allocate Memory
@@ -404,12 +404,12 @@ pub fn handle(cpu: &mut Cpu) {
             if requested_paras > 0xA000 {
                 cpu.ax = 0x0008; // Insufficient memory
                 cpu.bx = 0x9000; // Say we have ~576KB free
-                cpu.set_flag(crate::cpu::FLAG_CF, true);
+                cpu.set_cpu_flag(CpuFlags::CF, true);
             } else {
                 // Return a hardcoded free segment.
                 // TODO: FIXME! Consecutive calls will return the SAME address in this stub.
                 cpu.ax = 0x2000; 
-                cpu.set_flag(crate::cpu::FLAG_CF, false);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
             }
         }
 
@@ -423,7 +423,7 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.log_string(&format!("[DOS] Freeing Memory Block at {:04X}", segment_to_free));
 
             // Return Success
-            cpu.set_flag(crate::cpu::FLAG_CF, false);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
             cpu.ax = 0; 
         }
         
@@ -437,9 +437,9 @@ pub fn handle(cpu: &mut Cpu) {
             if requested_size > max_available {
                 cpu.set_reg16(Register::BX, max_available);
                 cpu.set_reg16(Register::AX, 0x0008);
-                cpu.set_flag(crate::cpu::FLAG_CF, true);
+                cpu.set_cpu_flag(CpuFlags::CF, true);
             } else {
-                cpu.set_flag(crate::cpu::FLAG_CF, false);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
             }
         }
 
@@ -514,11 +514,11 @@ pub fn handle(cpu: &mut Cpu) {
                     }
 
                     cpu.set_reg16(Register::AX, 0);
-                    cpu.set_flag(crate::cpu::FLAG_CF, false);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
                     cpu.set_reg16(Register::AX, code as u16);
-                    cpu.set_flag(crate::cpu::FLAG_CF, true);
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
             }
         }

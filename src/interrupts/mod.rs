@@ -1,4 +1,4 @@
-use crate::cpu::{Cpu, CpuState, FLAG_IF, FLAG_TF};
+use crate::cpu::{Cpu, CpuState, CpuFlags};
 
 pub mod int00;
 pub mod int10;
@@ -28,7 +28,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     }
 
     // Push State (Simulate Hardware)
-    cpu.push(cpu.flags);
+    cpu.push(cpu.flags.bits());
     cpu.push(cpu.cs);
     cpu.push(cpu.ip);
 
@@ -37,8 +37,8 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     cpu.ip = new_ip;
     
     // Disable Interrupts
-    cpu.set_flag(FLAG_IF, false);
-    cpu.set_flag(FLAG_TF, false);
+    cpu.set_cpu_flag(CpuFlags::IF, false);
+    cpu.set_cpu_flag(CpuFlags::TF, false);
 }
 
 pub fn handle_hle(cpu: &mut Cpu, vector: u8) {

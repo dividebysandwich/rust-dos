@@ -575,7 +575,7 @@ fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
             }
         }
         // TODO: Graphics Mode font rendering
-        _ => {}
+        _ => { cpu.bus.log_string("[BIOS] write_char_at called in unsupported video mode"); }
     }
 }
 

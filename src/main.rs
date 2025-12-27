@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::io::Write;
 
 use crate::audio::pump_audio;
-use crate::cpu::{Cpu, CpuState};
+use crate::cpu::{Cpu, CpuState, CpuFlags};
 use crate::command::CommandDispatcher;
 use crate::recorder::ScreenRecorder;
 use crate::video::VideoMode;
@@ -218,13 +218,13 @@ fn main() -> Result<(), String> {
                 cpu.ip = cpu.pop();
                 cpu.cs = cpu.pop();
 
-                // POP the flags to clear the stack, but ignore the value
-                // We want to keep the Flags set by the Rust HLE Handler (like Carry Flag).
-                let _popped_flags = cpu.pop();
-
-                // Ensure reserved bits (1, 3, 5, 15) are set correctly, 
-                // but preserve the Condition Codes (CF, ZF, etc) from the HLE handler.
-                cpu.flags = (cpu.flags & 0x0FD5) | 0x0002;
+                let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
+                let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
+                let mut clean_flags = CpuFlags::from_bits_truncate(cpu.pop());
+                clean_flags.remove(CpuFlags::DF);
+                cpu.flags = clean_flags;
+                cpu.set_cpu_flag(CpuFlags::CF, hle_cf);
+                cpu.set_cpu_flag(CpuFlags::ZF, hle_zf);
         
                 continue; // Done for this cycle
             }
@@ -290,7 +290,36 @@ fn main() -> Result<(), String> {
                std::thread::yield_now(); 
             }
 
+            cpu.trace_qb_conversion(&instr);
+            
+            // Make it so
             instructions::execute_instruction(&mut cpu, &instr);
+
+            // REMOVEME: QB REP SCASB Debugging
+            if instr.has_rep_prefix() || instr.has_repne_prefix() {
+                match instr.mnemonic() {
+                    Mnemonic::Scasb | Mnemonic::Scasw => {
+                        // Read the instruction that is about to execute NEXT
+                        let next_phys = cpu.get_physical_addr(cpu.cs, cpu.ip);
+                        let next_opcode = cpu.bus.read_8(next_phys);
+
+                        // Capture flags relevant to conditional jumps
+                        let zf = cpu.get_cpu_flag(CpuFlags::ZF);
+                        let cf = cpu.get_cpu_flag(CpuFlags::CF);
+                        let sf = cpu.get_cpu_flag(CpuFlags::SF);
+                        let df = cpu.get_cpu_flag(CpuFlags::DF); 
+
+                        cpu.bus.log_string(&format!(
+                            "[QB-TRACE] Post-REP {:?} Finished. Next Opcode=[{:02X}] @ {:04X}:{:04X} | Flags: ZF={} SF={} CF={} DF={} DI={:04X}", 
+                            instr.mnemonic(), next_opcode, cpu.cs, cpu.ip, zf, sf, cf, df, cpu.di
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
+
+
         }
 
 

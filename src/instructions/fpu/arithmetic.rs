@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, OpKind, MemorySize, Register};
-use crate::cpu::{Cpu, FPU_C0, FPU_C1, FPU_C2, FPU_C3};
+use crate::cpu::{Cpu, FpuFlags};
 use crate::instructions::utils::calculate_addr;
 
 // FIADD: Add Integer
@@ -390,10 +390,10 @@ pub fn fprem(cpu: &mut Cpu) {
         let q1 = (quotient & 2) != 0;
         let q2 = (quotient & 4) != 0;
 
-        cpu.fpu_status &= !0x4700; // Clear C0-C3
-        if q2 { cpu.fpu_status |= FPU_C0; }
-        if q0 { cpu.fpu_status |= FPU_C1; }
-        if q1 { cpu.fpu_status |= FPU_C3; }
+        cpu.fpu_flags.remove(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3);
+        if q1 { cpu.set_fpu_flag(FpuFlags::C0, true); }
+        if q0 { cpu.set_fpu_flag(FpuFlags::C1, true); }
+        if q2 { cpu.set_fpu_flag(FpuFlags::C3, true); }
         // C2 cleared -> Complete
     }
 }
@@ -415,10 +415,10 @@ pub fn fprem1(cpu: &mut Cpu) {
         let q1 = (quotient & 2) != 0;
         let q2 = (quotient & 4) != 0;
 
-        cpu.fpu_status &= !0x4700;
-        if q2 { cpu.fpu_status |= FPU_C0; }
-        if q0 { cpu.fpu_status |= FPU_C1; }
-        if q1 { cpu.fpu_status |= FPU_C3; }
+        cpu.fpu_flags.remove(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3);
+        if q1 { cpu.set_fpu_flag(FpuFlags::C0, true); }
+        if q0 { cpu.set_fpu_flag(FpuFlags::C1, true); }
+        if q2 { cpu.set_fpu_flag(FpuFlags::C3, true); }
     }
 }
 
@@ -434,27 +434,24 @@ pub fn frndint(cpu: &mut Cpu) {
         _ => st0,
     };
     cpu.fpu_set(0, result);
-    cpu.fpu_status &= !FPU_C2; // Clear C2
+    cpu.set_fpu_flag(FpuFlags::C2, false); // Clear C2
 }
 
 // FABS: Absolute Value
 pub fn fabs(cpu: &mut Cpu) {
     let st0 = cpu.fpu_get(0);
     cpu.fpu_set(0, st0.abs());
-    cpu.fpu_status &= !FPU_C1; // Clear C1 (Sign)
+    cpu.set_fpu_flag(FpuFlags::C1, false); // Clear C1 (Sign)
 }
 
 // FCHS: Change Sign
 pub fn fchs(cpu: &mut Cpu) {
     let st0 = cpu.fpu_get(0);
-    cpu.fpu_set(0, -st0);
+    let res = -st0;
+    cpu.fpu_set(0, res);
     
     // Update C1 (Sign)
-    if (-st0).is_sign_negative() {
-        cpu.fpu_status |= FPU_C1;
-    } else {
-        cpu.fpu_status &= !FPU_C1;
-    }
+    cpu.set_fpu_flag(FpuFlags::C1, res.is_sign_negative());
 }
 
 // FSQRT: Square Root

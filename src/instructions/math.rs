@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
-use crate::cpu::{Cpu, FLAG_ZF, FLAG_SF, FLAG_OF, FLAG_CF, FLAG_AF};
+use crate::cpu::{Cpu, CpuFlags};
 use crate::interrupts;
 use super::utils::{calculate_addr, is_8bit_reg};
 
@@ -21,7 +21,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Aam => aam(cpu, instr),
         Mnemonic::Das => das(cpu),
         Mnemonic::Daa => daa(cpu),
-        _ => {}
+        _ => { cpu.bus.log_string(&format!("[MATH] Unsupported instruction: {:?}", instr.mnemonic())); }
     }
 }
 
@@ -175,7 +175,7 @@ fn inc(cpu: &mut Cpu, instr: &Instruction) {
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
     
     // INC does NOT update CF. We must preserve it.
-    let old_cf = cpu.get_flag(FLAG_CF);
+    let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
     
     // We can reuse the ADD logic, but restore CF afterwards.
     let res = if is_8bit {
@@ -184,7 +184,7 @@ fn inc(cpu: &mut Cpu, instr: &Instruction) {
         cpu.alu_add_16(val, 1)
     };
     
-    cpu.set_flag(FLAG_CF, old_cf); // Restore CF
+    cpu.set_cpu_flag(CpuFlags::CF, old_cf); // Restore CF
     write_back(cpu, instr, res, addr, is_8bit);
 }
 
@@ -198,7 +198,7 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
     
     // DEC does NOT update CF. Preserve it.
-    let old_cf = cpu.get_flag(FLAG_CF);
+    let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
     
     let res = if is_8bit {
         cpu.alu_sub_8(val as u8, 1) as u16
@@ -206,7 +206,7 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
         cpu.alu_sub_16(val, 1)
     };
     
-    cpu.set_flag(FLAG_CF, old_cf); // Restore CF
+    cpu.set_cpu_flag(CpuFlags::CF, old_cf); // Restore CF
     write_back(cpu, instr, res, addr, is_8bit);
 }
 
@@ -248,8 +248,8 @@ fn mul(cpu: &mut Cpu, instr: &Instruction) {
         cpu.ax = res;
 
         let overflow = (res & 0xFF00) != 0;
-        cpu.set_flag(FLAG_CF, overflow);
-        cpu.set_flag(FLAG_OF, overflow);
+        cpu.set_cpu_flag(CpuFlags::CF, overflow);
+        cpu.set_cpu_flag(CpuFlags::OF, overflow);
     } else {
         let ax = cpu.ax as u32;
         let res = ax * (src as u32);
@@ -257,8 +257,8 @@ fn mul(cpu: &mut Cpu, instr: &Instruction) {
         cpu.dx = (res >> 16) as u16;
 
         let overflow = (res & 0xFFFF0000) != 0;
-        cpu.set_flag(FLAG_CF, overflow);
-        cpu.set_flag(FLAG_OF, overflow);
+        cpu.set_cpu_flag(CpuFlags::CF, overflow);
+        cpu.set_cpu_flag(CpuFlags::OF, overflow);
     }
 }
 
@@ -280,8 +280,8 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
             cpu.ax = res as u16;
 
             let fits = res == (res as i8 as i16);
-            cpu.set_flag(FLAG_CF, !fits);
-            cpu.set_flag(FLAG_OF, !fits);
+            cpu.set_cpu_flag(CpuFlags::CF, !fits);
+            cpu.set_cpu_flag(CpuFlags::OF, !fits);
         } else {
             let ax = cpu.ax as i16 as i32;
             let s = src as i16 as i32;
@@ -290,8 +290,8 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
             cpu.dx = (res >> 16) as u16;
 
             let fits = res == (res as i16 as i32);
-            cpu.set_flag(FLAG_CF, !fits);
-            cpu.set_flag(FLAG_OF, !fits);
+            cpu.set_cpu_flag(CpuFlags::CF, !fits);
+            cpu.set_cpu_flag(CpuFlags::OF, !fits);
         }
     } 
     // Multi-Operand Forms
@@ -320,8 +320,8 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
         cpu.set_reg16(dest_reg, res as u16);
 
         let fits = res == (res as i16 as i32);
-        cpu.set_flag(FLAG_CF, !fits);
-        cpu.set_flag(FLAG_OF, !fits);
+        cpu.set_cpu_flag(CpuFlags::CF, !fits);
+        cpu.set_cpu_flag(CpuFlags::OF, !fits);
     }
 }
 
@@ -425,7 +425,7 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
 
 fn aaa(cpu: &mut Cpu) {
     let al = cpu.get_al();
-    let af = cpu.get_flag(FLAG_AF);
+    let af = cpu.get_cpu_flag(CpuFlags::AF);
 
     if (al & 0x0F) > 9 || af {
         let new_al = al.wrapping_add(6);
@@ -434,11 +434,11 @@ fn aaa(cpu: &mut Cpu) {
         let ah = cpu.get_ah();
         cpu.set_reg8(Register::AH, ah.wrapping_add(1));
 
-        cpu.set_flag(FLAG_AF, true);
-        cpu.set_flag(FLAG_CF, true);
+        cpu.set_cpu_flag(CpuFlags::AF, true);
+        cpu.set_cpu_flag(CpuFlags::CF, true);
     } else {
-        cpu.set_flag(FLAG_AF, false);
-        cpu.set_flag(FLAG_CF, false);
+        cpu.set_cpu_flag(CpuFlags::AF, false);
+        cpu.set_cpu_flag(CpuFlags::CF, false);
         cpu.set_reg8(Register::AL, al & 0x0F);
     }
 }
@@ -469,24 +469,24 @@ pub fn aam(cpu: &mut Cpu, instr: &Instruction) {
     cpu.set_reg8(Register::AL, al);
 
     // Flags are set based on the result in AL
-    cpu.set_flag(FLAG_SF, (al & 0x80) != 0);
-    cpu.set_flag(FLAG_ZF, al == 0);
+    cpu.set_cpu_flag(CpuFlags::SF, (al & 0x80) != 0);
+    cpu.set_cpu_flag(CpuFlags::ZF, al == 0);
     cpu.update_pf(al as u16);
     // CF, OF, AF are undefined
 }
 
 fn das(cpu: &mut Cpu) {
     let mut al = cpu.get_al();
-    let old_cf = cpu.get_flag(FLAG_CF);
-    let old_af = cpu.get_flag(FLAG_AF);
+    let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
+    let old_af = cpu.get_cpu_flag(CpuFlags::AF);
     let mut new_cf = false;
 
     if (al & 0x0F) > 9 || old_af {
         al = al.wrapping_sub(6);
-        cpu.set_flag(FLAG_AF, true);
+        cpu.set_cpu_flag(CpuFlags::AF, true);
         new_cf = old_cf || (al > 0x99); 
     } else {
-        cpu.set_flag(FLAG_AF, false);
+        cpu.set_cpu_flag(CpuFlags::AF, false);
     }
 
     if al > 0x9F || old_cf {
@@ -495,24 +495,24 @@ fn das(cpu: &mut Cpu) {
     }
 
     cpu.set_reg8(Register::AL, al);
-    cpu.set_flag(FLAG_CF, new_cf);
+    cpu.set_cpu_flag(CpuFlags::CF, new_cf);
     
-    cpu.set_flag(FLAG_ZF, al == 0);
-    cpu.set_flag(FLAG_SF, (al & 0x80) != 0);
+    cpu.set_cpu_flag(CpuFlags::ZF, al == 0);
+    cpu.set_cpu_flag(CpuFlags::SF, (al & 0x80) != 0);
     cpu.update_pf(al as u16);
 }
 
 fn daa(cpu: &mut Cpu) {
     let mut al = cpu.get_al();
-    let mut cf = cpu.get_flag(FLAG_CF);
-    let af = cpu.get_flag(FLAG_AF);
+    let mut cf = cpu.get_cpu_flag(CpuFlags::CF);
+    let af = cpu.get_cpu_flag(CpuFlags::AF);
 
     // If lower nibble is invalid BCD (>9) or AF is set
     if (al & 0x0F) > 9 || af {
         al = al.wrapping_add(6);
-        cpu.set_flag(FLAG_AF, true);
+        cpu.set_cpu_flag(CpuFlags::AF, true);
     } else {
-        cpu.set_flag(FLAG_AF, false);
+        cpu.set_cpu_flag(CpuFlags::AF, false);
     }
 
     // If upper nibble is invalid BCD (>9) or CF was set
@@ -523,11 +523,11 @@ fn daa(cpu: &mut Cpu) {
     }
 
     cpu.set_reg8(Register::AL, al);
-    cpu.set_flag(FLAG_CF, cf);
+    cpu.set_cpu_flag(CpuFlags::CF, cf);
     
     // Updates SF, ZF, PF based on result
-    cpu.set_flag(FLAG_ZF, al == 0);
-    cpu.set_flag(FLAG_SF, (al & 0x80) != 0);
+    cpu.set_cpu_flag(CpuFlags::ZF, al == 0);
+    cpu.set_cpu_flag(CpuFlags::SF, (al & 0x80) != 0);
     cpu.update_pf(al as u16);
     // OF is undefined
 }

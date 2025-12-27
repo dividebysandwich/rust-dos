@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, Mnemonic, OpKind, Register, MemorySize};
-use crate::cpu::{Cpu, FLAG_CF, FLAG_PF, FLAG_AF, FLAG_ZF, FLAG_SF};
+use crate::cpu::{Cpu, CpuFlags};
 use super::utils::{calculate_addr, get_effective_addr, is_8bit_reg};
 
 pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
@@ -32,7 +32,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Lahf => lahf(cpu),
         Mnemonic::Sahf => sahf(cpu),
         
-        _ => {}
+        _ => { cpu.bus.log_string(&format!("[TRANSFER] Unsupported instruction: {:?}", instr.mnemonic())); }
     }
 }
 
@@ -224,12 +224,12 @@ fn popa(cpu: &mut Cpu) {
 }
 
 fn pushf(cpu: &mut Cpu) {
-    cpu.push(cpu.flags);
+    cpu.push(cpu.flags.bits());
 }
 
 fn popf(cpu: &mut Cpu) {
     let val = cpu.pop();
-    cpu.flags = (val & 0x0FD5) | 0x0002;
+    cpu.flags = CpuFlags::from_bits_truncate((val & 0x0FD5) | 0x0002);
 }
 
 fn lea(cpu: &mut Cpu, instr: &Instruction) {
@@ -310,11 +310,11 @@ fn xlatb(cpu: &mut Cpu) {
 // Bits 1, 3, 5 are reserved (usually 1, 0, 0 or similar, but 1,0,1 is common 8086).
 pub fn lahf(cpu: &mut Cpu) {
     let mut ah: u8 = 0;
-    if cpu.get_flag(FLAG_SF) { ah |= 0x80; }
-    if cpu.get_flag(FLAG_ZF) { ah |= 0x40; }
-    if cpu.get_flag(FLAG_AF) { ah |= 0x10; }
-    if cpu.get_flag(FLAG_PF) { ah |= 0x04; }
-    if cpu.get_flag(FLAG_CF) { ah |= 0x01; }
+    if cpu.get_cpu_flag(CpuFlags::SF) { ah |= 0x80; }
+    if cpu.get_cpu_flag(CpuFlags::ZF) { ah |= 0x40; }
+    if cpu.get_cpu_flag(CpuFlags::AF) { ah |= 0x10; }
+    if cpu.get_cpu_flag(CpuFlags::PF) { ah |= 0x04; }
+    if cpu.get_cpu_flag(CpuFlags::CF) { ah |= 0x01; }
     
     // Set reserved bits (Bit 1=1 is standard for 8086)
     ah |= 0x02; 
@@ -326,9 +326,9 @@ pub fn lahf(cpu: &mut Cpu) {
 // Transfers bits 7, 6, 4, 2, 0 of AH to SF, ZF, AF, PF, CF respectively.
 pub fn sahf(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
-    cpu.set_flag(FLAG_SF, (ah & 0x80) != 0);
-    cpu.set_flag(FLAG_ZF, (ah & 0x40) != 0);
-    cpu.set_flag(FLAG_AF, (ah & 0x10) != 0);
-    cpu.set_flag(FLAG_PF, (ah & 0x04) != 0);
-    cpu.set_flag(FLAG_CF, (ah & 0x01) != 0);
+    cpu.set_cpu_flag(CpuFlags::SF, (ah & 0x80) != 0);
+    cpu.set_cpu_flag(CpuFlags::ZF, (ah & 0x40) != 0);
+    cpu.set_cpu_flag(CpuFlags::AF, (ah & 0x10) != 0);
+    cpu.set_cpu_flag(CpuFlags::PF, (ah & 0x04) != 0);
+    cpu.set_cpu_flag(CpuFlags::CF, (ah & 0x01) != 0);
 }

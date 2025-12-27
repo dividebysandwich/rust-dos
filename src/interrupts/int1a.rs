@@ -1,5 +1,5 @@
 use iced_x86::Register;
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, CpuFlags};
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
@@ -13,11 +13,11 @@ pub fn handle(cpu: &mut Cpu) {
         }
         0x02 => { // Get Real-Time
             cpu.cx = 0; cpu.dx = 0;
-            cpu.set_flag(crate::cpu::FLAG_CF, false);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
         }
         0x04 => { // Get Date
             cpu.cx = 0x2000; cpu.dx = 0x0101;
-            cpu.set_flag(crate::cpu::FLAG_CF, false);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
         }
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 1A AH={:02X}", ah)),
     }

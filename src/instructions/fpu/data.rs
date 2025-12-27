@@ -157,6 +157,10 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
     let val = cpu.fpu_pop();
     if instr.op0_kind() == OpKind::Memory {
         let addr = calculate_addr(cpu, instr);
+        
+        // REMOVEME - QB Float debugging
+        cpu.last_fstp_addr = addr;
+
         match instr.memory_size() {
             MemorySize::Float32 => {
                 let bits = (val as f32).to_bits();

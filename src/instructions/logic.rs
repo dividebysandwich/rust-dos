@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize};
-use crate::cpu::{Cpu, FLAG_ZF, FLAG_SF, FLAG_OF, FLAG_CF};
+use crate::cpu::{Cpu, CpuFlags};
 use super::utils::{calculate_addr, is_8bit_reg};
 
 pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
@@ -16,7 +16,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Rcr => rotate_op(cpu, instr, Mnemonic::Rcr),
         Mnemonic::Rol => rotate_op(cpu, instr, Mnemonic::Rol),
         Mnemonic::Ror => rotate_op(cpu, instr, Mnemonic::Ror),
-        _ => {}
+        _ => { cpu.bus.log_string(&format!("[LOGIC] Unsupported instruction: {:?}", instr.mnemonic())); }
     }
 }
 
@@ -76,10 +76,10 @@ where F: Fn(u16, u16) -> u16 {
     }
 
     // Update Flags
-    cpu.set_flag(FLAG_ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
-    cpu.set_flag(FLAG_SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_flag(FLAG_OF, false);
-    cpu.set_flag(FLAG_CF, false);
+    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
+    cpu.set_cpu_flag(CpuFlags::SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
+    cpu.set_cpu_flag(CpuFlags::OF, false);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
     cpu.update_pf(res);
 }
 
@@ -116,10 +116,10 @@ fn test(cpu: &mut Cpu, instr: &Instruction) {
     let res = dest & src;
 
     // Flags Only
-    cpu.set_flag(FLAG_ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
-    cpu.set_flag(FLAG_SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_flag(FLAG_OF, false);
-    cpu.set_flag(FLAG_CF, false);
+    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
+    cpu.set_cpu_flag(CpuFlags::SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
+    cpu.set_cpu_flag(CpuFlags::OF, false);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
     cpu.update_pf(res);
 }
 
@@ -233,9 +233,9 @@ fn shift_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
     }
 
     // Flags
-    cpu.set_flag(FLAG_ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
-    cpu.set_flag(FLAG_SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_flag(FLAG_CF, last_out != 0);
+    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
+    cpu.set_cpu_flag(CpuFlags::SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
+    cpu.set_cpu_flag(CpuFlags::CF, last_out != 0);
     cpu.update_pf(res);
     
     // OF is only defined for count == 1
@@ -270,7 +270,7 @@ fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
     let msb_mask = 1 << (width - 1);
 
     for _ in 0..effective_count {
-        let old_cf = if cpu.get_flag(FLAG_CF) { 1 } else { 0 };
+        let old_cf = if cpu.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
         let new_cf;
 
         match mnemonic {
@@ -304,7 +304,7 @@ fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
         // Mask value to correct size
         if is_8bit { val &= 0xFF; }
 
-        cpu.set_flag(FLAG_CF, new_cf != 0);
+        cpu.set_cpu_flag(CpuFlags::CF, new_cf != 0);
     }
 
     // Write Back
@@ -318,18 +318,18 @@ fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
     // OF Logic for Count == 1
     if effective_count == 1 {
         let msb = if is_8bit { (val >> 7) & 1 } else { (val >> 15) & 1 };
-        let cf = if cpu.get_flag(FLAG_CF) { 1 } else { 0 };
+        let cf = if cpu.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
         
         match mnemonic {
-            Mnemonic::Rcl | Mnemonic::Rol => cpu.set_flag(FLAG_OF, (msb ^ cf) != 0),
+            Mnemonic::Rcl | Mnemonic::Rol => cpu.set_cpu_flag(CpuFlags::OF, (msb ^ cf) != 0),
             Mnemonic::Rcr | Mnemonic::Ror => {
                 // OF = MSB ^ (Bit next to MSB) -> effectively (MSB ^ New MSB) logic varies slightly by manual
                 // Simplified: OF set if sign bit changed
                 // (This is a simplification, exact x86 XORs top two bits)
                 let msb_prev = if is_8bit { (val >> 6) & 1 } else { (val >> 14) & 1 }; // Approximate
-                cpu.set_flag(FLAG_OF, (msb ^ msb_prev) != 0); 
+                cpu.set_cpu_flag(CpuFlags::OF, (msb ^ msb_prev) != 0); 
             }
-            _ => {}
+            _ => { cpu.bus.log_string(&format!("[LOGIC] Unsupported rotate mnemonic for OF calculation: {:?}", mnemonic)); }
         }
     }
 }

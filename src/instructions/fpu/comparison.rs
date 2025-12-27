@@ -1,6 +1,6 @@
 use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
 
-use crate::cpu::{Cpu, FLAG_CF, FLAG_PF, FLAG_ZF, FPU_C0, FPU_C1, FPU_C2, FPU_C3};
+use crate::cpu::{Cpu, FpuFlags, CpuFlags};
 use crate::instructions::utils::calculate_addr;
 
 // Performs the FPU comparison and sets Status Word flags
@@ -9,20 +9,19 @@ fn fpu_compare(cpu: &mut Cpu, val: f64) {
     let st0 = cpu.fpu_get(0);
 
     // Clear Condition Codes C0, C2, C3 (Bits 8, 10, 14)
-    // Mask = 0x4500
-    cpu.fpu_status &= !0x4500;
+    cpu.fpu_flags.remove(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3);
 
     if st0 > val {
         // ST(0) > Source: C3=0, C2=0, C0=0 (All cleared)
     } else if st0 < val {
         // ST(0) < Source: C0=1
-        cpu.fpu_status |= FPU_C0;
+        cpu.set_fpu_flag(FpuFlags::C0, true);
     } else if st0 == val {
         // ST(0) == Source: C3=1
-        cpu.fpu_status |= FPU_C3;
+        cpu.set_fpu_flag(FpuFlags::C3, true);
     } else {
         // Unordered (NaN): C3=1, C2=1, C0=1
-        cpu.fpu_status |= FPU_C3 | FPU_C2 | FPU_C0; // 0x4500
+        cpu.fpu_flags.insert(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C0);
     }
 }
 
@@ -69,51 +68,34 @@ pub fn fxam(cpu: &mut Cpu) {
     // Check Tag First
     if cpu.fpu_tags[cpu.fpu_top] == crate::cpu::FPU_TAG_EMPTY {
         // C3=1, C2=0, C0=1 (Empty)
-        cpu.fpu_status &= !0x4700;
-        cpu.fpu_status |= 0x4100;
+        cpu.fpu_flags.remove(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0);
+        cpu.fpu_flags.insert(FpuFlags::C3 | FpuFlags::C0);
         return;
     }
     
     let st0 = cpu.fpu_get(0);
-    let mut c0 = 0;
-    let mut c2 = 0;
-    let mut c3 = 0;
-    let mut c1 = 0; // Sign
+    
+    // Clear all condition codes first
+    cpu.fpu_flags.remove(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0);
 
-    // Check Sign
+    // Check Sign (C1)
     if st0.is_sign_negative() {
-        c1 = 1;
+        cpu.set_fpu_flag(FpuFlags::C1, true);
     }
 
     // Categorize
     if st0.is_nan() {
-        // NaN: C3=0, C2=0, C0=1
-        c0 = 1;
+        cpu.set_fpu_flag(FpuFlags::C0, true);
     } else if st0 == 0.0 || st0 == -0.0 {
-        // Zero: C3=1, C2=0, C0=0
-        c3 = 1;
+        cpu.set_fpu_flag(FpuFlags::C3, true);
     } else if st0.is_infinite() {
-        // Infinity: C3=0, C2=1, C0=1
-        c2 = 1;
-        c0 = 1;
+        cpu.fpu_flags.insert(FpuFlags::C2 | FpuFlags::C0);
     } else if st0.is_subnormal() { 
-        // Denormal: C3=1, C2=1, C0=0
-        c3 = 1;
-        c2 = 1;
+        cpu.fpu_flags.insert(FpuFlags::C3 | FpuFlags::C2);
     } else {
-        // Normal Finite: C3=0, C2=1, C0=0
-        c2 = 1;
+        // Normal Finite
+        cpu.set_fpu_flag(FpuFlags::C2, true);
     }
-
-    // Update Status Word
-    // C0 is Bit 8, C1 is Bit 9, C2 is Bit 10, C3 is Bit 14
-    let mask = 0x4700; // Clear C3, C2, C1, C0
-    cpu.fpu_status &= !mask;
-
-    if c0 == 1 { cpu.fpu_status |= FPU_C0; } // Bit 8
-    if c1 == 1 { cpu.fpu_status |= FPU_C1; } // Bit 9
-    if c2 == 1 { cpu.fpu_status |= FPU_C2; } // Bit 10
-    if c3 == 1 { cpu.fpu_status |= FPU_C3; } // Bit 14
 }
 
 // FTST: Test ST(0) against 0.0
@@ -163,13 +145,13 @@ pub fn fcomi_variants(cpu: &mut Cpu, instr: &Instruction) {
         zf = true; pf = false; cf = false;
     }
     
-    cpu.set_flag(FLAG_ZF, zf);
-    cpu.set_flag(FLAG_PF, pf);
-    cpu.set_flag(FLAG_CF, cf);
-    
+    cpu.set_cpu_flag(CpuFlags::ZF, zf);
+    cpu.set_cpu_flag(CpuFlags::PF, pf);
+    cpu.set_cpu_flag(CpuFlags::CF, cf);
+
     // Pop if P-variant
     match instr.mnemonic() {
         iced_x86::Mnemonic::Fcomip | iced_x86::Mnemonic::Fucomip => { cpu.fpu_pop();},
-        _ => {}
+        _ => { cpu.bus.log_string(&format!("[FPU] Unsupported FCOMI/FUCOMI instruction: {:?}", instr.mnemonic())); }
     }
 }

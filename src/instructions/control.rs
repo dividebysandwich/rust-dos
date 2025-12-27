@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, Mnemonic, Code, OpKind};
-use crate::cpu::{Cpu, FLAG_ZF, FLAG_SF, FLAG_CF, FLAG_OF, FLAG_PF};
+use crate::cpu::{Cpu, CpuFlags};
 use super::utils::calculate_addr;
 
 pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
@@ -17,29 +17,27 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Jcxz | Mnemonic::Jecxz => jcxz(cpu, instr),
 
         // Conditional Jumps
-        Mnemonic::Je => if cpu.get_flag(FLAG_ZF) { branch(cpu, instr) },
-        Mnemonic::Jne => if !cpu.get_flag(FLAG_ZF) { branch(cpu, instr) },
+        Mnemonic::Je => if cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
+        Mnemonic::Jne => if !cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
         
-        Mnemonic::Jb => if cpu.get_flag(FLAG_CF) { branch(cpu, instr) },
-        Mnemonic::Jbe => if cpu.get_flag(FLAG_CF) || cpu.get_flag(FLAG_ZF) { branch(cpu, instr) },
-        Mnemonic::Ja => if !cpu.get_flag(FLAG_CF) && !cpu.get_flag(FLAG_ZF) { branch(cpu, instr) },
-        Mnemonic::Jae => if !cpu.get_flag(FLAG_CF) { branch(cpu, instr) },
+        Mnemonic::Jb => if cpu.get_cpu_flag(CpuFlags::CF) { branch(cpu, instr) },
+        Mnemonic::Jbe => if cpu.get_cpu_flag(CpuFlags::CF) || cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
+        Mnemonic::Ja => if !cpu.get_cpu_flag(CpuFlags::CF) && !cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
+        Mnemonic::Jae => if !cpu.get_cpu_flag(CpuFlags::CF) { branch(cpu, instr) },
 
-        Mnemonic::Jl => if cpu.get_flag(FLAG_SF) != cpu.get_flag(FLAG_OF) { branch(cpu, instr) },
-        Mnemonic::Jle => if cpu.get_flag(FLAG_ZF) || (cpu.get_flag(FLAG_SF) != cpu.get_flag(FLAG_OF)) { branch(cpu, instr) },
-        Mnemonic::Jg => if !cpu.get_flag(FLAG_ZF) && (cpu.get_flag(FLAG_SF) == cpu.get_flag(FLAG_OF)) { branch(cpu, instr) },
-        Mnemonic::Jge => if cpu.get_flag(FLAG_SF) == cpu.get_flag(FLAG_OF) { branch(cpu, instr) },
+        Mnemonic::Jl => if cpu.get_cpu_flag(CpuFlags::SF) != cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
+        Mnemonic::Jle => if cpu.get_cpu_flag(CpuFlags::ZF) || (cpu.get_cpu_flag(CpuFlags::SF) != cpu.get_cpu_flag(CpuFlags::OF)) { branch(cpu, instr) },
+        Mnemonic::Jg => if !cpu.get_cpu_flag(CpuFlags::ZF) && (cpu.get_cpu_flag(CpuFlags::SF) == cpu.get_cpu_flag(CpuFlags::OF)) { branch(cpu, instr) },
+        Mnemonic::Jge => if cpu.get_cpu_flag(CpuFlags::SF) == cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
 
-        Mnemonic::Js => if cpu.get_flag(FLAG_SF) { branch(cpu, instr) },
-        Mnemonic::Jns => if !cpu.get_flag(FLAG_SF) { branch(cpu, instr) },
-        Mnemonic::Jo => if cpu.get_flag(FLAG_OF) { branch(cpu, instr) },
-        Mnemonic::Jno => if !cpu.get_flag(FLAG_OF) { branch(cpu, instr) },
-        Mnemonic::Jp => if cpu.get_flag(FLAG_PF) { branch(cpu, instr) },
-        Mnemonic::Jnp => if !cpu.get_flag(FLAG_PF) { branch(cpu, instr) },
+        Mnemonic::Js => if cpu.get_cpu_flag(CpuFlags::SF) { branch(cpu, instr) },
+        Mnemonic::Jns => if !cpu.get_cpu_flag(CpuFlags::SF) { branch(cpu, instr) },
+        Mnemonic::Jo => if cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
+        Mnemonic::Jno => if !cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
+        Mnemonic::Jp => if cpu.get_cpu_flag(CpuFlags::PF) { branch(cpu, instr) },
+        Mnemonic::Jnp => if !cpu.get_cpu_flag(CpuFlags::PF) { branch(cpu, instr) },
 
-        Mnemonic::Iret => iret(cpu, instr),
-
-        _ => {}
+        _ => { cpu.bus.log_string(&format!("[CONTROL] Unsupported instruction: {:?}", instr.mnemonic()));}
     }
 }
 
@@ -79,7 +77,7 @@ fn jmp(cpu: &mut Cpu, instr: &Instruction) {
             cpu.ip = new_ip;
             cpu.cs = new_cs;
         }
-        _ => {}
+        _ => {cpu.bus.log_string(&format!("[CONTROL] Unsupported JMP instruction: {:?}", instr.code())); }
     }
 }
 
@@ -113,7 +111,7 @@ fn call(cpu: &mut Cpu, instr: &Instruction) {
             cpu.ip = new_ip;
             cpu.cs = new_cs;
         }
-        _ => {}
+        _ => {cpu.bus.log_string(&format!("[CONTROL] Unsupported CALL instruction: {:?}", instr.code()));}
     }
 }
 
@@ -141,14 +139,14 @@ fn loop_op(cpu: &mut Cpu, instr: &Instruction) {
 
 fn loope(cpu: &mut Cpu, instr: &Instruction) {
     cpu.cx = cpu.cx.wrapping_sub(1);
-    if cpu.cx != 0 && cpu.get_flag(FLAG_ZF) {
+    if cpu.cx != 0 && cpu.get_cpu_flag(CpuFlags::ZF) {
         cpu.ip = instr.near_branch16() as u16;
     }
 }
 
 fn loopne(cpu: &mut Cpu, instr: &Instruction) {
     cpu.cx = cpu.cx.wrapping_sub(1);
-    if cpu.cx != 0 && !cpu.get_flag(FLAG_ZF) {
+    if cpu.cx != 0 && !cpu.get_cpu_flag(CpuFlags::ZF) {
         cpu.ip = instr.near_branch16() as u16;
     }
 }
@@ -157,17 +155,4 @@ fn jcxz(cpu: &mut Cpu, instr: &Instruction) {
     if cpu.cx == 0 {
         cpu.ip = instr.near_branch16() as u16;
     }
-}
-
-fn iret(cpu: &mut Cpu, _instr: &Instruction) {
-    // Pop IP, then CS, then Flags
-    // Note: 16-bit mode pops 16-bit IP/CS/Flags
-    // TODO: check instr.op_size() for 32-bit mode
-    
-    cpu.ip = cpu.pop();
-    cpu.cs = cpu.pop();
-    let flags = cpu.pop();
-    
-    // Restore flags (preserving reserved bits)
-    cpu.flags = (flags & 0x0FD5) | 0x0002;
 }
