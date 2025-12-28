@@ -18,6 +18,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Div => div(cpu, instr),
         Mnemonic::Idiv => idiv(cpu, instr),
         Mnemonic::Aaa => aaa(cpu),
+        Mnemonic::Aas => aas(cpu),
         Mnemonic::Aam => aam(cpu, instr),
         Mnemonic::Das => das(cpu),
         Mnemonic::Daa => daa(cpu),
@@ -201,6 +202,14 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
     };
 
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
+
+    // REMOVEME
+    if cpu.debug_qb_print && instr.op0_register() == Register::CX {
+        cpu.bus.log_string(&format!(
+            "[DEC-DEBUG] Decrementing CX: val={:04X}, is_8bit={}", 
+            val, is_8bit
+        ));
+    }
     
     let res = if is_8bit {
         let v = val as u8;
@@ -224,6 +233,15 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
     };
     
     write_back(cpu, instr, res, addr, is_8bit);
+
+    // REMOVEME
+    if cpu.debug_qb_print {
+        cpu.bus.log_string(&format!(
+            "[DEC-DEBUG] Result: {:04X}, ZF={}", 
+            res, res == 0
+        ));
+    }
+
 }
 
 fn neg(cpu: &mut Cpu, instr: &Instruction) {
@@ -546,4 +564,20 @@ fn daa(cpu: &mut Cpu) {
     cpu.set_cpu_flag(CpuFlags::SF, (al & 0x80) != 0);
     cpu.update_pf(al as u16);
     // OF is undefined
+}
+
+pub fn aas(cpu: &mut Cpu) {
+    // If lower nibble > 9 or AF is set
+    if (cpu.get_al() & 0x0F) > 9 || cpu.get_cpu_flag(CpuFlags::AF) {
+        let al = cpu.get_al().wrapping_sub(6);
+        cpu.set_reg8(Register::AL, al & 0x0F);
+        let ah = (cpu.ax >> 8) as u8;
+        cpu.ax = ((ah.wrapping_sub(1) as u16) << 8) | (cpu.get_al() as u16);
+        cpu.set_cpu_flag(CpuFlags::CF, true);
+        cpu.set_cpu_flag(CpuFlags::AF, true);
+    } else {
+        cpu.set_reg8(Register::AL, cpu.get_al() & 0x0F);
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+        cpu.set_cpu_flag(CpuFlags::AF, false);
+    }
 }

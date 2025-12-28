@@ -15,17 +15,12 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
     let has_repne = instr.has_repne_prefix();
 
     // Non-REP: Execute once and return
-    if !is_string || (!has_rep && !has_repne) {
+    if !has_rep && !has_repne {
         execute_once(cpu, instr);
         return;
     }
 
-    // REP check: If CX is 0 initially, do nothing
-    if cpu.cx == 0 {
-        return;
-    }
-
-    loop {
+    while cpu.cx != 0 {
         // Execute the instruction (Updates DI/SI and Flags)
         execute_once(cpu, instr);
 
@@ -47,11 +42,6 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
                 }
             }
             _ => {} // MOVS, STOS, LODS do not check flags for termination
-        }
-
-        // Check termination based on CX
-        if cpu.cx == 0 {
-            break;
         }
     }
 }

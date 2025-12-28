@@ -177,7 +177,14 @@ fn main() -> Result<(), String> {
             if cpu.state == CpuState::RebootShell {
                 cpu.load_shell();
                 cpu.state = CpuState::Running;
-                // No print needed here, shell handles prompt
+
+                //TODO: Replace this hack with a proper fix
+                //Add a newline to make sure the prompt starts on a new line.
+                let col = cpu.bus.read_8(0x0450);
+                if col != 0 {
+                    video::print_string(&mut cpu, "\r\n");
+                }
+
                 break; // Break inner loop to refresh SDL
             }
 
@@ -234,7 +241,7 @@ fn main() -> Result<(), String> {
             let mut decoder = Decoder::with_ip(16, bytes, cpu.ip as u64, DecoderOptions::NONE);
             let instr = decoder.decode();
 
-            if debug_mode {
+            if debug_mode || cpu.debug_qb_print {
                 // Filter out the 'Wait for Key' interrupt loop to save disk space
                 if !((instr.mnemonic() == Mnemonic::Int && instr.immediate8() == 0x16) ||
                      (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E))
@@ -277,6 +284,8 @@ fn main() -> Result<(), String> {
                 }
             }
 
+            cpu.trace_qb_conversion(&instr);
+
             cpu.ip = instr.next_ip() as u16;
 
             // Check State
@@ -291,8 +300,6 @@ fn main() -> Result<(), String> {
             if cpu.ip == prev_ip {
                std::thread::yield_now(); 
             }
-
-            cpu.trace_qb_conversion(&instr);
             
             // Make it so
             instructions::execute_instruction(&mut cpu, &instr);

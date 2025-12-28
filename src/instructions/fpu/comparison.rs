@@ -1,109 +1,130 @@
 use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
 
-use crate::cpu::{Cpu, FpuFlags, CpuFlags};
-use crate::f80::F80;
+use crate::cpu::{Cpu, FpuFlags, CpuFlags, FPU_TAG_EMPTY};
 use crate::instructions::utils::calculate_addr;
 
 // Performs the FPU comparison and sets Status Word flags
 // Used by FCOM, FCOMP, FCOMPP
-fn fpu_compare(cpu: &mut Cpu, val: F80) {
-    let st0 = cpu.fpu_get(0);
-
-    // Clear Condition Codes C0, C2, C3 (Bits 8, 10, 14)
+fn fpu_compare_values(cpu: &mut Cpu, lhs: f64, rhs: f64) {
+    // Clear C0, C2, C3
     cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, false);
 
-    if st0.is_nan() || val.is_nan() {
-        // Unordered (NaN): C3=1, C2=1, C0=1
-        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C0, true);
-    } else if st0.get() == val.get() {
-        // ST(0) == Source: C3=1
+    if lhs.is_nan() || rhs.is_nan() {
+        // Unordered: C3=1, C2=1, C0=1
+        cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, true);
+    } else if lhs == rhs {
+        // Equal: C3=1
         cpu.set_fpu_flag(FpuFlags::C3, true);
-    } else {
-        // Since F80 is a custom struct, we use get_f64() for the magnitude check.
-        // TODO: implement F80::less_than.
-        let a = st0.get_f64();
-        let b = val.get_f64();
-
-        if a < b {
-            // ST(0) < Source: C0=1
-            cpu.set_fpu_flag(FpuFlags::C0, true);
-        }
-        // else: ST(0) > Source: C3=0, C2=0, C0=0 (Already cleared)
+    } else if lhs < rhs {
+        // Less Than: C0=1
+        cpu.set_fpu_flag(FpuFlags::C0, true);
     }
+    // Greater Than: All flags 0
 }
 
 pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
-    // Determine the value to compare against as an F80
-    let val = if instr.mnemonic() == Mnemonic::Fcompp {
-        cpu.fpu_get(1)
+    // 2. LOGIC: Determine LHS and RHS
+    let (lhs, rhs) = if instr.mnemonic() == Mnemonic::Fcompp {
+        // FCOMPP is always ST(0) vs ST(1)
+        (cpu.fpu_get(0).get_f64(), cpu.fpu_get(1).get_f64())
     } else {
         match instr.op0_kind() {
             OpKind::Memory => {
+                // Memory Comparison is ALWAYS ST(0) vs Memory
+                let val_0 = cpu.fpu_get(0).get_f64();
                 let addr = calculate_addr(cpu, instr);
-                let mut f = F80::new();
-                match instr.memory_size() {
-                    MemorySize::Float32 => {
-                        f.set_f64(f32::from_bits(cpu.bus.read_32(addr)) as f64);
-                    }
-                    MemorySize::Float64 => {
-                        f.set_f64(f64::from_bits(cpu.bus.read_64(addr)));
-                    }
-                    _ => f.set_real_indefinite(),
-                }
-                f
+                let val_op = match instr.memory_size() {
+                    MemorySize::Float32 => f32::from_bits(cpu.bus.read_32(addr)) as f64,
+                    MemorySize::Float64 => f64::from_bits(cpu.bus.read_64(addr)),
+                    _ => f64::NAN, 
+                };
+                (val_0, val_op)
             }
             OpKind::Register => {
-                let idx = instr.op0_register().number() - Register::ST0.number();
-                cpu.fpu_get(idx as usize)
+                // DETECT REVERSE COMPARE (0xDC opcodes)
+                // D8: FCOM ST(i)       -> Op0=ST0 (implied), Op1=STi
+                // DC: FCOM ST(i), ST0  -> Op0=STi, Op1=ST0
+                
+                if instr.op1_register() == Register::ST0 {
+                    // This is the DC variant: Compare ST(i) vs ST(0)
+                    let idx = instr.op0_register().number() - Register::ST0.number();
+                    let val_i = cpu.fpu_get(idx as usize).get_f64(); // LHS
+                    let val_0 = cpu.fpu_get(0).get_f64();            // RHS
+                    (val_i, val_0)
+                } else {
+                    // This is the D8 variant: Compare ST(0) vs ST(i)
+                    // Note: Depending on decoder settings, op0 might be ST0 or STi.
+                    // But standard logic is: LHS=ST0, RHS=Operand.
+                    let idx = instr.op0_register().number() - Register::ST0.number();
+                    let val_0 = cpu.fpu_get(0).get_f64();            // LHS
+                    let val_i = cpu.fpu_get(idx as usize).get_f64(); // RHS
+                    (val_0, val_i)
+                }
             }
-            _ => cpu.fpu_get(1), // Default implicit ST(1)
+            _ => {
+                // Implicit Default (FCOM without operands) -> ST(0) vs ST(1)
+                (cpu.fpu_get(0).get_f64(), cpu.fpu_get(1).get_f64())
+            }
         }
     };
 
-    // Perform Comparison
-    fpu_compare(cpu, val);
+    fpu_compare_values(cpu, lhs, rhs);
 
     // Handle Pops
     match instr.mnemonic() {
-        Mnemonic::Fcomp => {
-            cpu.fpu_pop(); // Pop 1
-        }
-        Mnemonic::Fcompp => {
-            cpu.fpu_pop(); // Pop 1
-            cpu.fpu_pop(); // Pop 2
-        }
-        _ => {} // FCOM pops nothing
+        Mnemonic::Fcomp => { cpu.fpu_pop(); },
+        Mnemonic::Fcompp => { cpu.fpu_pop(); cpu.fpu_pop(); },
+        _ => {}
+    }
+}
+
+pub fn ficom_variants(cpu: &mut Cpu, instr: &Instruction) {
+    let st0 = cpu.fpu_get(0).get_f64();
+    let addr = calculate_addr(cpu, instr);
+    
+    // Explicitly handle Integer loading to avoid "F80::new()" garbage
+    let val = match instr.memory_size() {
+        MemorySize::Int16 => (cpu.bus.read_16(addr) as i16) as f64,
+        MemorySize::Int32 => (cpu.bus.read_32(addr) as i32) as f64,
+        _ => 0.0,
+    };
+    
+    fpu_compare_values(cpu, st0, val);
+    
+    if instr.mnemonic() == Mnemonic::Ficomp {
+        cpu.fpu_pop();
     }
 }
 
 // FXAM: Examine ST(0)
 pub fn fxam(cpu: &mut Cpu) {
-    // Check Tag First
-    if cpu.fpu_tags[cpu.fpu_top] == crate::cpu::FPU_TAG_EMPTY {
-        // C3=1, C2=0, C1=0/1(Sign), C0=1 (Empty)
-        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0, false);
-        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C0, true);
-        return;
-    }
-    
-    let st0 = cpu.fpu_get(0);
-    
-    // Clear all condition codes first
+    // Clear C0, C1, C2, C3
     cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0, false);
 
-    // Check Sign (C1)
+    let tag = cpu.fpu_tags[cpu.fpu_top as usize];
+    let st0 = cpu.fpu_stack[cpu.fpu_top as usize]; // Access raw stack to avoid fpu_get logic
+
+    // Set C1 to the Sign Bit
     if st0.get_sign() {
         cpu.set_fpu_flag(FpuFlags::C1, true);
     }
 
-    // Categorize
-    if st0.is_nan() {
+    // Categorize based on Tag and Bits
+    // Empty:    C3=1, C2=0, C0=1
+    // Zero:     C3=1, C2=0, C0=0
+    // Normal:   C3=0, C2=1, C0=0
+    // Infinity: C3=0, C2=1, C0=1
+    // NaN:      C3=0, C2=0, C0=1
+    if tag == FPU_TAG_EMPTY {
+        cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C0, true);
+    } else if st0.is_nan() {
         cpu.set_fpu_flag(FpuFlags::C0, true);
     } else if st0.is_zero() {
         cpu.set_fpu_flag(FpuFlags::C3, true);
     } else if st0.is_infinite() {
         cpu.set_fpu_flag(FpuFlags::C2 | FpuFlags::C0, true);
-    } else if st0.is_denormal() { 
+    } else if st0.is_denormal() {
+        // Denormal: C3=1, C2=1, C0=0
         cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2, true);
     } else {
         // Normal Finite
@@ -113,19 +134,9 @@ pub fn fxam(cpu: &mut Cpu) {
 
 // FTST: Test ST(0) against 0.0
 pub fn ftst(cpu: &mut Cpu) {
-    fpu_compare(cpu, F80::new());
-}
-
-// FICOM/FICOMP: Integer Compare
-pub fn ficom_variants(cpu: &mut Cpu, instr: &Instruction) {
-    let addr = calculate_addr(cpu, instr);
-    let val = cpu.load_int_to_f80(addr, instr.memory_size());
-    
-    fpu_compare(cpu, val);
-    
-    if instr.mnemonic() == iced_x86::Mnemonic::Ficomp {
-        cpu.fpu_pop();
-    }
+    let st0 = cpu.fpu_get(0).get_f64();
+    // Compare ST(0) vs 0.0
+    fpu_compare_values(cpu, st0, 0.0);
 }
 
 // FCOMI/FUCOMI... (Pentium Pro+)

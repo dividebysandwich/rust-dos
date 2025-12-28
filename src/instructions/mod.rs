@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, Mnemonic};
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, CpuFlags};
 
 pub mod utils;
 pub mod fpu;
@@ -11,6 +11,8 @@ pub mod string;
 pub mod misc;
 
 pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
+    let zf_before = cpu.get_cpu_flag(CpuFlags::ZF);
+    
     match instr.mnemonic() {
 
         // Source: https://tizee.github.io/x86_ref_book_web/
@@ -29,7 +31,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Add | Mnemonic::Sub | Mnemonic::Adc | Mnemonic::Sbb |
         Mnemonic::Inc | Mnemonic::Dec | Mnemonic::Neg | Mnemonic::Aam |
         Mnemonic::Mul | Mnemonic::Imul | Mnemonic::Div | Mnemonic::Idiv |
-        Mnemonic::Cmp | Mnemonic::Aaa | Mnemonic::Das | Mnemonic::Daa => {
+        Mnemonic::Cmp | Mnemonic::Aaa | Mnemonic::Das | Mnemonic::Daa |
+        Mnemonic::Aas => {
             math::handle(cpu, instr);
         }
 
@@ -110,5 +113,13 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         _ => {
             cpu.bus.log_string(&format!("[CPU] Unhandled: {}", instr));
         }
+    }
+
+    let zf_after = cpu.get_cpu_flag(CpuFlags::ZF);
+    if cpu.debug_qb_print && zf_before != zf_after {
+        cpu.bus.log_string(&format!(
+            "[ZF-CHANGED] {:?} changed ZF from {} to {} at {:04X}:{:04X}",
+            instr.mnemonic(), zf_before, zf_after, cpu.cs, cpu.ip.wrapping_sub(instr.len() as u16)
+        ));
     }
 }

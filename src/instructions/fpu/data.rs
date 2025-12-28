@@ -46,39 +46,42 @@ pub fn fild(cpu: &mut Cpu, instr: &Instruction) {
     cpu.fpu_push(f);
 }
 
+fn x87_round(f_val: f64, rc: u16) -> f64 {
+    match rc {
+        0 => {
+            // Round to nearest, ties to even
+            let floor_val = f_val.floor();
+            let diff = f_val - floor_val;
+            if diff < 0.5 {
+                floor_val
+            } else if diff > 0.5 {
+                floor_val + 1.0
+            } else {
+                // Tie: round to even
+                if floor_val % 2.0 == 0.0 { floor_val } else { floor_val + 1.0 }
+            }
+        },
+        1 => f_val.floor(), // Round Down
+        2 => f_val.ceil(),  // Round Up
+        3 => f_val.trunc(), // Truncate
+        _ => unreachable!(),
+    }
+}
+
 // FISTP: Store Integer and Pop
 pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
     let val = cpu.fpu_pop();
     let addr = calculate_addr(cpu, instr);
     
-    // Convert to f64 for rounding logic
-    let f_val = val.get_f64();
-    
-    // Extract Rounding Control (RC) - Bits 10 and 11
+    // Use the custom rounding logic
     let rc = (cpu.fpu_control >> 10) & 0x03;
-    
-    let i_val = match rc {
-        0 => f_val.round(), // 00: Round to Nearest
-        1 => f_val.floor(), // 01: Round Down
-        2 => f_val.ceil(),  // 10: Round Up
-        3 => f_val.trunc(), // 11: Round Toward Zero
-        _ => f_val,
-    };
+    let rounded = x87_round(val.get_f64(), rc);
 
     match instr.memory_size() {
-        MemorySize::Int16 => {
-            cpu.bus.write_16(addr, (i_val as i16) as u16);
-        }
-        MemorySize::Int32 => {
-            cpu.bus.write_32(addr, (i_val as i32) as u32);
-        }
-        MemorySize::Int64 => {
-            let v = i_val as i64 as u64;
-            cpu.bus.write_64(addr, v);
-        }
-        _ => { 
-            cpu.bus.log_string(&format!("[FPU] FISTP Unsupported memory size: {:?}", instr.memory_size())); 
-        }
+        MemorySize::Int16 => { cpu.bus.write_16(addr, rounded as i16 as u16); },
+        MemorySize::Int32 => { cpu.bus.write_32(addr, rounded as i32 as u32); },
+        MemorySize::Int64 => { cpu.bus.write_64(addr, rounded as i64 as u64); },
+        _ => {}
     }
 }
 
@@ -224,17 +227,12 @@ pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
     let val = cpu.fpu_get(0);
     let addr = calculate_addr(cpu, instr);
     
-    // Use f64 as an intermediary for rounding control logic
-    let f_val = val.get_f64();
+    // Extract Rounding Control (RC) - Bits 10 and 11
     let rc = (cpu.fpu_control >> 10) & 0x03;
     
-    let i_val = match rc {
-        0 => f_val.round(),
-        1 => f_val.floor(),
-        2 => f_val.ceil(),
-        3 => f_val.trunc(),
-        _ => f_val,
-    };
+    // Use the x87-compliant rounding helper
+    let f_val = val.get_f64();
+    let i_val = x87_round(f_val, rc);
     
     match instr.memory_size() {
         MemorySize::Int16 => {

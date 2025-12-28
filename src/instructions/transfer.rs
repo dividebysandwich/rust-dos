@@ -326,13 +326,12 @@ pub fn lahf(cpu: &mut Cpu) {
 // Transfers bits 7, 6, 4, 2, 0 of AH to SF, ZF, AF, PF, CF respectively.
 pub fn sahf(cpu: &mut Cpu) {
 
-    let ah = (cpu.ax >> 8) as u8;
+    let ah = cpu.get_ah();
     let old_zf = cpu.get_cpu_flag(CpuFlags::ZF);
     
     // Bit 6 of AH goes to ZF
     let new_zf = (ah & 0x40) != 0;
 
-    let ah = cpu.get_ah();
     cpu.set_cpu_flag(CpuFlags::SF, (ah & 0x80) != 0);
     cpu.set_cpu_flag(CpuFlags::ZF, (ah & 0x40) != 0);
     cpu.set_cpu_flag(CpuFlags::AF, (ah & 0x10) != 0);

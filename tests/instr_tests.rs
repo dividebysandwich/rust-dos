@@ -1,4 +1,5 @@
 use rust_dos::cpu::{Cpu, CpuFlags};
+use rust_dos::f80::F80;
 use rust_dos::instructions::execute_instruction;
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
@@ -37,7 +38,7 @@ fn run_code(cpu: &mut Cpu, code: &[u8]) {
         // Advance IP (Fetch Step)
         // The CPU advances IP *before* executing. 
         // If the execution is a JUMP, it will overwrite this value.
-        cpu.ip = cpu.ip.wrapping_add(instr.len() as u16);
+        cpu.ip = instr.next_ip() as u16;
 
         // Execute
         execute_instruction(cpu, &instr);
@@ -188,3 +189,215 @@ fn test_call_ret() {
     
     assert_eq!(cpu.sp, 0xFFFE); // Stack should be balanced
 }
+
+#[test]
+fn test_repe_scasb_backwards_mismatch() {
+    let mut cpu = Cpu::new();
+    cpu.es = 0x1000;
+    cpu.di = 0x0004; // Point to the end of a buffer
+    cpu.cx = 0x0005; 
+    cpu.set_reg8(iced_x86::Register::AL, 0x30); // Scanning for '0'
+    cpu.set_dflag(true); // Backwards!
+
+    // Buffer at 1000:0000 -> [ '8', '0', '0', '0', '0' ]
+    let phys = cpu.get_physical_addr(0x1000, 0x0000);
+    cpu.bus.write_8(phys, b'8'); 
+    cpu.bus.write_8(phys + 1, b'0');
+    cpu.bus.write_8(phys + 2, b'0');
+    cpu.bus.write_8(phys + 3, b'0');
+    cpu.bus.write_8(phys + 4, b'0');
+
+    // F3 AE : REPE SCASB
+    // Should skip the four '0's and stop at '8'
+    let code = [0xF3, 0xAE];
+    run_code(&mut cpu, &code);
+
+    // On hardware, after mismatch:
+    // 1. DI points to one byte BEFORE the '8' (because it decrements after the match)
+    // 2. ZF is cleared (0) because '8' != '0'
+    // 3. CX should be 0 because it processed all bytes or stopped at the first non-zero
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false);
+    let comparison: u16 = 0x0000;
+    assert_eq!(cpu.di, comparison.wrapping_sub(1)); // Stopped at index 0, then decremented
+}
+
+#[test]
+fn test_qb_trim_logic() {
+    let mut cpu = Cpu::new();
+    // 1. Set AL to '0' (0x30), DI points to '8' (0x38)
+    // 2. SCASB (AL vs [DI]) -> Should set ZF=0
+    // 3. JZ ... (Should NOT jump)
+    
+    cpu.es = 0x1000;
+    cpu.di = 0x0000;
+    cpu.set_reg8(iced_x86::Register::AL, 0x30);
+    cpu.bus.write_8(cpu.get_physical_addr(0x1000, 0), 0x38); // The '8'
+
+    // AE (SCASB), 74 02 (JZ +2), B0 FF (MOV AL, FF)
+    let code = [0xAE, 0x74, 0x02, 0xB0, 0xFF];
+    run_code(&mut cpu, &code);
+
+    // If ZF was correctly 0, the jump was not taken. AL should be 0xFF.
+    assert_eq!(cpu.get_al(), 0xFF, "The trim logic took a jump it shouldn't have!");
+}
+
+#[test]
+fn test_sbb_immediate_check() {
+    let mut cpu = Cpu::new();
+    // 1C 05  -> SBB AL, 5
+    // 90     -> NOP
+    let code = [0x1C, 0x05, 0x90];
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+    cpu.set_reg8(iced_x86::Register::AL, 10);
+    
+    run_code(&mut cpu, &code);
+
+    // If IP logic is right, AL = 5.
+    // If IP logic is wrong and it read the NOP (0x90), AL = 10 - 0x90 = 0x80.
+    assert_eq!(cpu.get_al(), 5, "SBB AL, imm8 read the wrong immediate value!");
+}
+
+#[test]
+fn test_alu_sbb_comprehensive() {
+    let mut cpu = Cpu::new();
+
+    // --- 1. Basic Borrow Ripple (The 0x0100 - 1 Case) ---
+    // Low Byte: 0x00 - 0x01 = 0xFF (CF=1)
+    let res_low = cpu.alu_sub_8(0x00, 0x01);
+    assert_eq!(res_low, 0xFF);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+
+    // High Byte: 0x01 - 0x00 - (CF=1) = 0x00 (CF=0, ZF=1)
+    let res_high = cpu.alu_sbb_8(0x01, 0x00);
+    assert_eq!(res_high, 0x00, "High byte of 0x0100 - 1 should be 0");
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "ZF should be set for high byte");
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false, "Borrow should be consumed");
+
+    // --- 2. The "Max Borrow" Case (0x0000 - 1) ---
+    // 0x0000 - 0x0001 = 0xFFFF
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+    let res16 = cpu.alu_sbb_16(0x0000, 0x0001);
+    assert_eq!(res16, 0xFFFF);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true, "Borrow from bit 3 to 4 should set AF");
+
+    // --- 3. Zero Flag Stability ---
+    // 0x80 - 0x7F - (CF=1) = 0
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    let res8 = cpu.alu_sbb_8(0x80, 0x7F);
+    assert_eq!(res8, 0);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false);
+
+    // --- 4. Subbing with Carry-In causing a wrap ---
+    // 0x00 - 0x00 - (CF=1) = 0xFF (CF=1)
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    let res8_wrap = cpu.alu_sbb_8(0x00, 0x00);
+    assert_eq!(res8_wrap, 0xFF);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+}
+
+#[test]
+fn test_rcl_preserves_zf() {
+    let mut cpu = Cpu::new();
+    
+    // 1. CMP AL, AL (Sets ZF=1)
+    // 2. MOV AL, 0xFE
+    // 3. RCL AL, 1  (Result is non-zero, but ZF must remain 1)
+    let code = [
+        0x3C, 0x00,       // CMP AL, 0 (Sets ZF=1 if AL was 0)
+        0xB0, 0xFE,       // MOV AL, 0xFE
+        0xD0, 0xD0        // RCL AL, 1
+    ];
+    
+    cpu.set_reg8(iced_x86::Register::AL, 0);
+    run_code(&mut cpu, &code);
+
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "RCL destroyed the Zero Flag!");
+}
+
+#[test]
+fn test_adc_af_flag() {
+    let mut cpu = Cpu::new();
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+
+    // 0x07 + 0x08 + CF(1) = 0x10
+    // Binary: 0111 + 1000 + 1 = 10000
+    // There is a carry out of bit 3 into bit 4. AF must be 1.
+    let code = [
+        0xB0, 0x07,       // MOV AL, 7
+        0x14, 0x08        // ADC AL, 8
+    ];
+
+    run_code(&mut cpu, &code);
+
+    assert_eq!(cpu.get_al(), 0x10);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true);
+}
+
+#[test]
+fn test_das_instruction() {
+    let mut cpu = Cpu::new();
+
+    // Case 1: 0x9A -> 0x94 (Standard adjustment)
+    // AL = 0x9A, DAS -> AL = 0x94
+    cpu.set_reg8(iced_x86::Register::AL, 0x9A);
+    cpu.set_cpu_flag(CpuFlags::AF, false);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+    
+    let code = [0x2F]; // DAS
+    run_code(&mut cpu, &code);
+    assert_eq!(cpu.get_al(), 0x94, "DAS failed to adjust 0x9A to 0x94");
+
+    // Case 2: Multi-digit borrow (Crucial for the '08' bug)
+    // AL = 0x05, SUB AL, 0x06 (Result 0xFF, CF=1, AF=1)
+    // DAS should turn 0xFF into 0x99 (representing -1 in BCD)
+    cpu.set_reg8(iced_x86::Register::AL, 0x05);
+    let code_sub_das = [0x2C, 0x06, 0x2F]; // SUB AL, 6; DAS
+    run_code(&mut cpu, &code_sub_das);
+    
+    assert_eq!(cpu.get_al(), 0x99, "DAS failed to adjust subtraction result to BCD 99");
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true, "DAS should maintain/set CF for borrows");
+}
+
+#[test]
+fn test_aas_instruction() {
+    let mut cpu = Cpu::new();
+
+    // 0x08 - 0x09 = 0xFF. AAS should adjust this.
+    // AL = 0xFF -> AL = 0x09, AH = AH - 1, CF=1, AF=1
+    cpu.ax = 0x0108; // AH=1, AL=8
+    let code = [0x2C, 0x09, 0x3F]; // SUB AL, 9; AAS
+    run_code(&mut cpu, &code);
+
+    assert_eq!(cpu.get_al(), 0x09);
+    assert_eq!(cpu.ax >> 8, 0x00, "AAS failed to decrement AH on borrow");
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+}
+
+#[test]
+fn test_fpu_comparison_flags() {
+    let mut cpu = Cpu::new();
+    
+    // Compare 8.0 (ST0) with 10.0 (Mem)
+    // Should result in ST0 < Source: C3=0, C2=0, C0=1
+    // SAHF should then set: ZF=0, PF=0, CF=1
+    
+    let mut f8 = F80::new(); f8.set_f64(8.0);
+    cpu.fpu_push(f8);
+    
+    let mut f10 = F80::new(); f10.set_f64(10.0);
+    let addr = 0x2000;
+    let bytes = f10.get_bytes(); // Assuming TBYTE
+    for i in 0..10 { cpu.bus.write_8(addr + i, bytes[i]); }
+
+    // D8 1E 00 20: FCOMP TBYTE PTR [2000]
+    // 9E: SAHF
+    let code = [0xD8, 0x1E, 0x00, 0x20, 0x9E];
+    run_code(&mut cpu, &code);
+
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true, "Carry should be set (8 < 10)");
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false, "Zero should be clear (8 != 10)");
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::PF), false, "Parity should be clear (Not Unordered)");
+}
+

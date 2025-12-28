@@ -8,6 +8,7 @@ pub fn fninit(cpu: &mut Cpu) {
     cpu.fpu_top = 0;
     // Clear stack for debug clarity
     cpu.fpu_stack = [F80::new(); 8];
+    cpu.fpu_control = 0x037F;
     // Reset FPU status registers here.
     cpu.set_fpu_flags(FpuFlags::empty());
     // Clear stack

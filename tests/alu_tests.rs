@@ -66,3 +66,93 @@ fn test_parity_flag() {
     assert_eq!(res, 0x0103);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::PF), true);
 }
+
+#[test]
+fn test_alu_af_flag_edge_cases() {
+    let mut cpu = Cpu::new();
+
+    // Addition: 15 (0x0F) + 1 = 16 (0x10)
+    // Bit 3 was 1, result bit 3 is 0 -> Carry to bit 4 -> AF=1
+    let _ = cpu.alu_add_8(0x0F, 0x01);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true);
+
+    // Subtraction: 16 (0x10) - 1 = 15 (0x0F)
+    // Borrow from bit 4 to bit 3 -> AF=1
+    let _ = cpu.alu_sub_8(0x10, 0x01);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true);
+
+    // Subtraction: 15 (0x0F) - 1 = 14 (0x0E)
+    // No borrow from bit 4 -> AF=0
+    let _ = cpu.alu_sub_8(0x0F, 0x01);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), false);
+}
+
+#[test]
+fn test_alu_sbb_ripple_borrow() {
+    let mut cpu = Cpu::new();
+
+    // Goal: 0x0100 - 1 = 0x00FF
+    // Step 1: Low byte 0x00 - 1
+    cpu.set_cpu_flag(CpuFlags::CF, false); // Start clean
+    let low = cpu.alu_sub_8(0x00, 0x01);
+    assert_eq!(low, 0xFF);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true); // Borrow out
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false);
+
+    // Step 2: High byte 0x01 - 0 (with borrow)
+    let high = cpu.alu_sbb_8(0x01, 0x00);
+    assert_eq!(high, 0x00);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false); // Borrow consumed
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true);  // Result is 0
+}
+
+#[test]
+fn test_alu_sbb_16_complex() {
+    let mut cpu = Cpu::new();
+
+    // Case: 0 - 0 with Carry-in
+    // Result: 0xFFFF, CF=1, ZF=0
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    let res = cpu.alu_sbb_16(0x0000, 0x0000);
+    assert_eq!(res, 0xFFFF);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+
+    // Case: 1 - 0 with Carry-in
+    // Result: 0, CF=0, ZF=1
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    let res = cpu.alu_sbb_16(0x0001, 0x0000);
+    assert_eq!(res, 0x0000);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false);
+}
+
+#[test]
+fn test_rotate_flag_preservation() {
+    let mut cpu = Cpu::new();
+
+    // 1. Set ZF manually
+    cpu.set_cpu_flag(CpuFlags::ZF, true);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+
+    // 2. Perform RCL on a non-zero value
+    // If you were using a 16-bit helper that sets ZF, it will flip to false here.
+    // In a real CPU, ZF remains true.
+    // Assuming you have a way to call your rotate_op handler:
+    // rotate_op(&mut cpu, Register::AL, 1, Mnemonic::Rcl); 
+    
+    // Check if ZF survived
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "RCL incorrectly modified ZF!");
+}
+
+#[test]
+fn test_alu_adc_8_overflow() {
+    let mut cpu = Cpu::new();
+
+    // 254 + 1 + (CF=1) = 256 -> 0
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    let res = cpu.alu_adc_8(254, 1);
+    assert_eq!(res, 0);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true);
+    assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
+}

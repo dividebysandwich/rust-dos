@@ -88,6 +88,7 @@ pub struct Cpu {
     // REMOVEME: FLOAT DEBUGGING
     pub debug_qb_print: bool,
     pub last_fstp_addr: usize,
+    pub debug_qb_conversion: bool,
 }
 
 #[derive(PartialEq)]
@@ -125,75 +126,74 @@ impl Cpu {
             fpu_tags: [FPU_TAG_EMPTY; 8],
             debug_qb_print: true,
             last_fstp_addr: 0,
+            debug_qb_conversion: false,
         }
     }
 
     // REMOVEME: Debugging QuickBASIC Float Conversion Issues
     pub fn trace_qb_conversion(&mut self, instr: &Instruction) {
-        if !self.debug_qb_print { return; }
+    if !self.debug_qb_print { return; }
 
-        match instr.mnemonic() {
-            Mnemonic::Fstp => {
-                if instr.memory_size() == MemorySize::Float80 {
-                    let addr = calculate_addr(self, instr);
-                    self.last_fstp_addr = addr; // Remember where we wrote it
-                    let m = self.bus.read_64(addr);
-                    let se = self.bus.read_16(addr + 8);
-                    self.bus.log_string(format!("\n[QB-TRACE] FSTP TBYTE at {:05X}", addr).as_str());
-                    self.bus.log_string(format!("           Raw: {:04X} {:016X}", se, m).as_str());
-                }
-            }
-            Mnemonic::Lodsw => {
-                let segment = self.ds; 
-                let addr = self.get_physical_addr(segment, self.si);
-                if (addr as isize - self.last_fstp_addr as isize).abs() < 20 {
-                    let val = self.bus.read_16(addr);
-                    self.bus.log_string(format!("[QB-TRACE] LODSW [{:05X}] -> AX={:04X}", addr, val).as_str());
-                }
-            }
-            Mnemonic::Rcr | Mnemonic::Shr => {
-                match instr.op0_register() {
-                    Register::DX | Register::BP | Register::SI | Register::DI | Register::BX => {
-                        let cf = self.get_cpu_flag(CpuFlags::CF);
-                        self.bus.log_string(format!("[QB-TRACE] {:?} {:?} (Val={:04X}, CF={})", 
-                            instr.mnemonic(), instr.op0_register(), self.get_reg16(instr.op0_register()), if cf {1} else {0}).as_str());
-                    }
-                    _ => {}
-                }
-            }
+    // TRACK ZF CHANGES: If ZF changes without an obvious reason, we need to know
+    let zf = self.get_cpu_flag(CpuFlags::ZF);
 
-            Mnemonic::Stosb => {
-                let val = self.get_al();
-                let addr = self.get_physical_addr(self.es, self.di);
-                let ch = if val >= 32 && val <= 126 { val as char } else { '.' };
-                self.bus.log_string(format!("[QB-TRACE] STOSB [{:05X}] <- {:02X} ('{}') (Writing Digit)", addr, val, ch).as_str());
-            }
-
-            Mnemonic::Scasb => {
-                let val = self.get_al();
-                let addr = self.get_physical_addr(self.es, self.di);
-                let mem_val = self.bus.read_8(addr);
-                let zf_before = self.get_cpu_flag(CpuFlags::ZF);
-                
-                self.bus.log_string(format!("[QB-TRACE] SCASB [{:05X}] AL={:02X} vs Mem={:02X} | CX={:04X} | ZF-Pre={}", 
-                    addr, val, mem_val, self.cx, zf_before).as_str());
-            }
-
-            Mnemonic::Daa => {
-                self.bus.log_string(format!("[QB-TRACE] DAA (AX Before: {:04X})", self.ax).as_str());
-            }
-
-            Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne => {
-                let zf = self.get_cpu_flag(CpuFlags::ZF);
-                let df = self.get_cpu_flag(CpuFlags::DF);
-                self.bus.log_string(format!(
-                    "[QB-TRACE] {:?} CX={:04X} ZF={} DF={} DI={:04X}", 
-                    instr.mnemonic(), self.cx, zf, df, self.di
-                ).as_str());
-            }
-
-            _ => {}
+    match instr.mnemonic() {
+        // Track the Decision Points
+        Mnemonic::Je | Mnemonic::Jne => {
+            // This is where the "08" vs "8" decision is actually made!
+            self.bus.log_string(format!("[QB-TRACE] {:?} taken? (ZF={}) at {:04X}:{:04X}", 
+                instr.mnemonic(), zf, self.cs, self.ip).as_str());
         }
+
+        // Monitor Sahf (The FPU->CPU Bridge)
+        Mnemonic::Sahf => {
+            let ah = (self.ax >> 8) as u8;
+            self.bus.log_string(format!("[QB-TRACE] SAHF: AH={:02X} (Bit6/ZF={})", 
+                ah, (ah >> 6) & 1).as_str());
+        }
+
+        // Enhanced Scasb (Watch the DI/CX result)
+        Mnemonic::Scasb => {
+            let val = self.get_al();
+            let addr = self.get_physical_addr(self.es, self.di);
+            let mem_val = self.bus.read_8(addr);
+            self.bus.log_string(format!("[QB-TRACE] SCASB [{:05X}] AL={:02X} vs Mem={:02X} | CX={:04X} | DI={:04X} | ZF={}", 
+                addr, val, mem_val, self.cx, self.di, zf).as_str());
+        }
+
+        // Monitor Pointer Adjustment
+        Mnemonic::Inc | Mnemonic::Dec => {
+            let reg = instr.op0_register();
+            if reg == Register::DI || reg == Register::SI || reg == Register::CX {
+                 self.bus.log_string(format!("[QB-TRACE] {:?} {:?} -> {:04X} (ZF={})", 
+                    instr.mnemonic(), reg, self.get_reg16(reg), zf).as_str());
+            }
+        }
+
+        // Keep existing trackers
+        Mnemonic::Fstp if instr.memory_size() == MemorySize::Float80 => {
+            let addr = calculate_addr(self, instr);
+            self.last_fstp_addr = addr;
+            let m = self.bus.read_64(addr);
+            let se = self.bus.read_16(addr + 8);
+            self.bus.log_string(format!("\n[QB-TRACE] FSTP TBYTE at {:05X} Raw: {:04X} {:016X}", addr, se, m).as_str());
+        }
+
+        Mnemonic::Stosb => {
+            let val = self.get_al();
+            let addr = self.get_physical_addr(self.es, self.di);
+            let ch = if val >= 32 && val <= 126 { val as char } else { '.' };
+            self.bus.log_string(format!("[QB-TRACE] STOSB [{:05X}] <- {:02X} ('{}') DI={:04X}", addr, val, ch, self.di).as_str());
+        }
+
+        Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne => {
+            self.bus.log_string(format!(
+                "[QB-TRACE] {:?} CX={:04X} ZF={} DI={:04X}", 
+                instr.mnemonic(), self.cx, zf, self.di
+            ).as_str());
+        }
+        _ => {}
+    }
     }
 
     // Update Parity Flag based on result
@@ -211,10 +211,21 @@ impl Cpu {
 
     // Helper to set/clear a flag
     pub fn set_cpu_flag(&mut self, mask: CpuFlags, value: bool) {
-        // if mask == CpuFlags::ZF {
-        //     // Log every single time the Zero Flag changes
-        //     self.bus.log_string(&format!("[ZF-WATCH] ZF set to {} at {:04X}:{:04X}", value, self.cs, self.ip));
+
+        // REMOVEME: ZF ALERT
+        // if self.debug_qb_conversion && mask.contains(CpuFlags::ZF) {
+        //     let old_zf = self.flags.contains(CpuFlags::ZF);
+        
+        //     // ALARM only when ZF changes from FALSE -> TRUE
+        //     if !old_zf && value == true {
+        //         let instr_str = self.get_instruction_at_ip();
+        //         self.bus.log_string(&format!(
+        //             "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}", 
+        //             self.cx, instr_str
+        //         ));
+        //     }
         // }
+
         if value {
             self.flags.insert(mask);
         } else {
@@ -224,6 +235,19 @@ impl Cpu {
 
     // Allows overwriting the flags register with a new bitflags struct
     pub fn set_cpu_flags(&mut self, new_flags: CpuFlags) {
+
+        // REMOVEME: ZF ALERT
+        // let old_zf = self.flags.contains(CpuFlags::ZF);
+        // let new_zf = new_flags.contains(CpuFlags::ZF);
+        // if self.debug_qb_conversion && !old_zf && new_zf {
+        //     let instr_str = self.get_instruction_at_ip();
+        //     self.bus.log_string(&format!(
+        //         "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}", 
+        //         self.cx, instr_str
+        //     ));
+        // }
+        
+
         let raw_bits = new_flags.bits();
         
         // 0x0FD5 masks only the valid 8086 flags:
@@ -252,10 +276,11 @@ impl Cpu {
     }
 
     pub fn set_fpu_flags(&mut self, new_flags: FpuFlags) {
-        let bits = new_flags.bits();
-    
-        // Bits 11, 12, 13 are the TOP pointer (0-7)
-        self.fpu_top = ((bits >> 11) & 0x07) as usize;
+
+        // Removed top pointer extraction, as we store it separately.
+        //        let bits = new_flags.bits();
+        //        // Bits 11, 12, 13 are the TOP pointer (0-7)
+        //        self.fpu_top = ((bits >> 11) & 0x07) as usize;
     
         // Store the flags
         self.fpu_flags = new_flags;
@@ -510,7 +535,6 @@ impl Cpu {
     }
 
     // SBB 8-bit
-    #[allow(dead_code)]
     pub fn alu_sbb_8(&mut self, dest: u8, src: u8) -> u8 {
         let carry_in = if self.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
 
@@ -529,21 +553,18 @@ impl Cpu {
         // Carry (Borrow) happens if the result wrapped (result_wide > 0xFF)
         self.set_cpu_flag(CpuFlags::CF, result_wide > 0xFF);
 
-        // Overflow (Signed)
-        // (Dest_Sign != Src_Sign) AND (Dest_Sign != Result_Sign)
-        // Note: For SBB, this is an approximation that covers 99% of cases.
-        let op1_sign = (dest & 0x80) != 0;
-        let op2_sign = (src & 0x80) != 0;
+        // Overflow for subtraction: (dest_sign != src_sign) && (dest_sign != result_sign)
         let res_sign = (result & 0x80) != 0;
-        let overflow = (op1_sign != op2_sign) && (op1_sign != res_sign);
-        self.set_cpu_flag(CpuFlags::OF, overflow);
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
+        let src_sign = (src & 0x80) != 0;
+        let dest_sign = (dest & 0x80) != 0;
+
+        self.set_cpu_flag(CpuFlags::OF, (dest_sign != src_sign) && (dest_sign != res_sign));
+        self.set_cpu_flag(CpuFlags::AF, (dest & 0x0F) < ((src & 0x0F) + carry_in));
 
         result
     }
 
     // SBB 16-bit
-    #[allow(dead_code)]
     pub fn alu_sbb_16(&mut self, dest: u16, src: u16) -> u16 {
         let carry_in = if self.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
 
@@ -561,11 +582,12 @@ impl Cpu {
         // Carry flag if we wrapped past 0
         self.set_cpu_flag(CpuFlags::CF, result_wide > 0xFFFF);
 
-        let op1_sign = (dest & 0x8000) != 0;
-        let op2_sign = (src & 0x8000) != 0;
-        let res_sign = (result & 0x8000) != 0;
-        let overflow = (op1_sign != op2_sign) && (op1_sign != res_sign);
-        self.set_cpu_flag(CpuFlags::OF, overflow);
+        // Set OF if the sign of the destination was different from the source,
+        // AND the sign of the result is different from the destination.
+        let dest_s = (dest & 0x8000) != 0;
+        let src_s = (src & 0x8000) != 0;
+        let res_s = (result & 0x8000) != 0;
+        self.set_cpu_flag(CpuFlags::OF, (dest_s != src_s) && (res_s != dest_s));
         self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
 
         result
@@ -654,27 +676,32 @@ impl Cpu {
     // Push value to FPU Stack
     pub fn fpu_push(&mut self, val: F80) {
         // Decrement top pointer (wrapping)
-        self.fpu_top = (self.fpu_top.wrapping_sub(1)) % 8;
+        self.fpu_top = (self.fpu_top.wrapping_sub(1)) & 7;
         // Write Value
-        self.fpu_stack[self.fpu_top] = val;
+        self.fpu_stack[self.fpu_top as usize] = val;
         // Mark as VALID
-        self.fpu_tags[self.fpu_top] = FPU_TAG_VALID;
+        self.fpu_tags[self.fpu_top as usize] = FPU_TAG_VALID;
     }
 
     // Pop value from FPU Stack
     pub fn fpu_pop(&mut self) -> F80 {
-        let val = self.fpu_stack[self.fpu_top];
+        let val = self.fpu_stack[self.fpu_top as usize];
         // Mark current top as EMPTY before moving on
-        self.fpu_tags[self.fpu_top] = FPU_TAG_EMPTY;
+        self.fpu_tags[self.fpu_top as usize] = FPU_TAG_EMPTY;
         // Increment top pointer (wrapping)
-        self.fpu_top = (self.fpu_top + 1) % 8;
+        self.fpu_top = (self.fpu_top + 1) & 7;
         val
     }
 
     // Access ST(i) relative to Top
     pub fn fpu_get(&self, index: usize) -> F80 {
-        let actual_idx = (self.fpu_top + index) & 7;
-        self.fpu_stack[actual_idx]
+        let actual_idx = (self.fpu_top.wrapping_add(index)) & 7;
+        if self.fpu_tags[actual_idx as usize] == crate::cpu::FPU_TAG_EMPTY {
+            let mut ind = F80::new();
+            ind.set_real_indefinite();
+            return ind;
+        }
+        self.fpu_stack[actual_idx as usize]
     }
     
     // Set ST(i) relative to Top
@@ -685,7 +712,7 @@ impl Cpu {
 
     // Get physical index for ST(i)
     pub fn fpu_get_phys_index(&self, i: usize) -> usize {
-        (self.fpu_top + i) % 8
+        (self.fpu_top + i) & 7
     }
 
     pub fn load_int_to_f80(&self, addr: usize, size: MemorySize) -> F80 {
@@ -1011,6 +1038,7 @@ impl Cpu {
             "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}",
             self.cs, self.ip
         ));
+        self.debug_qb_conversion = true;
         true
     }
 }
