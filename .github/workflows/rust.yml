@@ -76,7 +76,10 @@ jobs:
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install sdl2
+        run: |
+          brew install sdl2
+          echo "LIBRARY_PATH=$(brew --prefix)/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$(brew --prefix)/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
@@ -108,9 +111,7 @@ jobs:
 
       - name: Run bundle (macOS)
         if: runner.os == 'macOS'
-        run: |
-           export LIBRARY_PATH=$(brew --prefix)/lib
-           cargo bundle --release --target $TARGET
+        run: cargo bundle --release --target $TARGET
 
       - name: Install zip
         if: runner.os == 'Windows'
