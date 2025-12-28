@@ -69,12 +69,31 @@ jobs:
             ~/.cargo/registry
             ./target
           key: build-cargo-registry-${{ matrix.TARGET }}-${{ steps.cargo-hash.outputs.hash }}
-      - name: List
-        run: find ./
-
-      - name: Install dependencies
+      
+      - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libsdl2-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sdl2
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          # Download SDL2 development libraries for Visual C++
+          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
+          unzip -q SDL2-devel-VC.zip
+          
+          # Rename for easier handling
+          mv SDL2-2.30.0 SDL2
+          
+          # Set Environment variables so the Rust Linker finds .lib files
+          echo "LIB=$PWD/SDL2/lib/x64" >> $GITHUB_ENV
+          echo "INCLUDE=$PWD/SDL2/include" >> $GITHUB_ENV
+          
+          # Copy the DLL to the root so we can zip it with the binary later
+          cp SDL2/lib/x64/SDL2.dll .
 
       - name: Install rust target
         run: rustup target add $TARGET
@@ -95,9 +114,6 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install zip
         
-      - name: List target
-        run: find ./target
-        
       - name: Compress
         run: |
           mkdir -p ./artifacts
@@ -111,7 +127,7 @@ jobs:
               EXEC=$NAME.exe
               mv ./target/$TARGET/release/$EXEC ./$EXEC
               # Use 'zip' for Windows
-              zip ./artifacts/$NAME-$TARGET-$TAG.zip $EXEC README.md LICENSE
+              zip ./artifacts/$NAME-$TARGET-$TAG.zip $EXEC SDL2.dll README.md LICENSE
           
           elif [[ $OS =~ ^macos.*$ ]]; then
               APP_DIR="./target/$TARGET/release/bundle/osx"
@@ -170,6 +186,17 @@ jobs:
             ./target
           key: msi-cargo-registry-${{ hashFiles('Cargo.lock') }}
 
+      - name: Install SDL2 (Windows)
+        run: |
+          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
+          unzip -q SDL2-devel-VC.zip
+          mv SDL2-2.30.0 SDL2
+          echo "LIB=$PWD/SDL2/lib/x64" >> $GITHUB_ENV
+          echo "INCLUDE=$PWD/SDL2/include" >> $GITHUB_ENV
+          
+          # For cargo-wix, we usually need the DLL to be available to link/run
+          cp SDL2/lib/x64/SDL2.dll .
+
       - name: Install cargo-wix
         run: cargo install cargo-wix
 
@@ -179,7 +206,7 @@ jobs:
             echo "Wix configuration not found, initializing defaults..."
             cargo wix init
           fi
-          cargo wix
+          cargo wix --nocapture
 
       - name: Archive MSI
         uses: actions/upload-artifact@v4
