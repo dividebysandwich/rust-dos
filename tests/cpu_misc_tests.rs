@@ -1,5 +1,4 @@
 use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
-use iced_x86::Register;
 mod testrunners;
 use testrunners::run_cpu_code;
 

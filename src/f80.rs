@@ -198,12 +198,22 @@ impl F80 {
         let mut a_man = self.get_mantissa() as u128;
         let mut b_man = b.get_mantissa() as u128;
 
+        // Clamp the shift amount. 
+        // Shifting a u128 by >= 128 causes a Rust panic.
         if a_exp > b_exp {
             let shift = (a_exp - b_exp) as u32;
-            b_man >>= shift;
+            if shift >= 128 {
+                b_man = 0; // Underflow: b is negligible compared to a
+            } else {
+                b_man >>= shift;
+            }
         } else if b_exp > a_exp {
             let shift = (b_exp - a_exp) as u32;
-            a_man >>= shift;
+            if shift >= 128 {
+                a_man = 0; // Underflow: a is negligible compared to b
+            } else {
+                a_man >>= shift;
+            }
             a_exp = b_exp;
         }
 
@@ -251,12 +261,21 @@ impl F80 {
         let mut a_man = self.get_mantissa() as u128;
         let mut b_man = b.get_mantissa() as u128;
 
+        // Clamp the shift amount.
         if a_exp > b_exp {
             let shift = (a_exp - b_exp) as u32;
-            b_man >>= shift;
+            if shift >= 128 {
+                b_man = 0;
+            } else {
+                b_man >>= shift;
+            }
         } else if b_exp > a_exp {
             let shift = (b_exp - a_exp) as u32;
-            a_man >>= shift;
+            if shift >= 128 {
+                a_man = 0;
+            } else {
+                a_man >>= shift;
+            }
             a_exp = b_exp;
         }
 
