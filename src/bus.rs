@@ -29,6 +29,15 @@ pub struct Bus {
     pub dta_segment: u16,
     pub dta_offset: u16,
     pub log_file: Option<BufWriter<File>>,
+
+    // VGA State
+    pub vga_sequencer_index: u8,
+    pub vga_graphics_index: u8,
+    pub vga_crtc_index: u8,
+    pub vga_dac_write_index: u8,
+    pub vga_dac_read_index: u8,
+    pub vga_dac_step: u8,        // 0=Red, 1=Green, 2=Blue
+    pub vga_palette: Vec<u8>,    // Stores R,G,B triples (256 * 3 = 768 bytes)
 }
 
 impl Bus {
@@ -55,6 +64,13 @@ impl Bus {
             log_file: None,
             dta_segment: 0x1000,
             dta_offset: 0x0000,
+            vga_sequencer_index: 0,
+            vga_graphics_index: 0,
+            vga_crtc_index: 0,
+            vga_dac_write_index: 0,
+            vga_dac_read_index: 0,
+            vga_dac_step: 0,
+            vga_palette: vec![0; 256 * 3],
         };
         // BIOS Data Area (BDA) Initialization
         // 0x0449: Current Video Mode (03 = 80x25 Color)
@@ -293,6 +309,51 @@ impl Bus {
                 self.speaker_on = enabled;
             }
 
+            // --- VGA SEQUENCER (0x3C4 / 0x3C5) ---
+            0x3C4 => {
+                self.vga_sequencer_index = value;
+            }
+            0x3C5 => {
+                // TODO: handle Plane Masks here.
+                self.log_string(&format!("[VGA] Sequencer Write Index {:02X} = {:02X}", self.vga_sequencer_index, value));
+            }
+
+            // --- VGA GRAPHICS CONTROLLER (0x3CE / 0x3CF) ---
+            0x3CE => {
+                self.vga_graphics_index = value;
+            }
+            0x3CF => {
+                // TODO: Implement Read Maps, Bit Masks, etc.
+            }
+
+            // --- VGA CRTC (0x3D4 / 0x3D5) ---
+            0x3D4 => {
+                self.vga_crtc_index = value;
+            }
+            0x3D5 => {
+                // TODO: CRT Controller Data (Horizontal total, Cursor location, etc.)
+            }
+
+            // --- VGA DAC / PALETTE (0x3C8 / 0x3C9) ---
+            0x3C8 => {
+                self.vga_dac_write_index = value;
+                self.vga_dac_step = 0; // Reset to Red
+            }
+            0x3C9 => {
+                // VGA colors are 6-bit (0-63).
+                // Stored sequentially: [r0, g0, b0, r1, g1, b1...]
+                let index = (self.vga_dac_write_index as usize) * 3 + (self.vga_dac_step as usize);
+                if index < self.vga_palette.len() {
+                    self.vga_palette[index] = value & 0x3F;
+                }
+
+                self.vga_dac_step += 1;
+                if self.vga_dac_step == 3 {
+                    self.vga_dac_step = 0;
+                    self.vga_dac_write_index = self.vga_dac_write_index.wrapping_add(1);
+                }
+            }
+
             _ => {
                 // Unhandled port write
                 self.log_string(&format!(
@@ -324,6 +385,13 @@ impl Bus {
                 let phase = (self.start_time.elapsed().as_millis() / 16) % 2; 
                 if phase == 0 { 0x00 } else { 0x09 } // Toggle bits 0 and 3
             }
+
+            // VGA Sequencer Data
+            0x3C5 => 0, // TODO: Implement
+            
+            // VGA Graphics Data
+            0x3CF => 0, // TODO: Implement
+
             _ => 0xFF, // Default open bus
         }
     }
