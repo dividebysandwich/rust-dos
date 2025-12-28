@@ -1,5 +1,9 @@
 [package]
 name = "rust-dos"
+description = "An x86 DOS emulator written in Rust"
+authors = ["dividebysandwich"]
+repository = "https://github.com/dividebysandwich/rust-dos"
+license = "GPL-2.0-or-later"
 version = "0.1.0"
 edition = "2024"
 
