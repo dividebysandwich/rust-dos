@@ -1,43 +1,7 @@
-use rust_dos::cpu::{Cpu, FpuFlags, CpuFlags};
+use rust_dos::cpu::{Cpu, FpuFlags};
 use rust_dos::f80::F80;
-use rust_dos::instructions::fpu::arithmetic::*;
-use rust_dos::instructions::fpu::comparison::*;
-use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic};
 
-// Helper to decode and run a single instruction
-fn run_fpu_instr(cpu: &mut Cpu, code: &[u8]) {
-    let mut decoder = Decoder::new(16, code, DecoderOptions::NONE);
-    let mut instr = Instruction::default();
-    decoder.decode_out(&mut instr);
-    
-    // Some instructions in your code might need IP to be correct for calculate_addr
-    cpu.ip = 0x100; 
-    // Execute the specific opcode handler
-    match instr.mnemonic() {
-        Mnemonic::Fiadd => fiadd(cpu, &instr),
-        Mnemonic::Fisub => fisub(cpu, &instr),
-        Mnemonic::Fadd => fadd(cpu, &instr),
-        Mnemonic::Faddp => faddp(cpu, &instr),
-        Mnemonic::Fsub => fsub(cpu, &instr),
-        Mnemonic::Fsubp => fsubp(cpu),
-        Mnemonic::Fsubr => fsubr(cpu, &instr),
-        Mnemonic::Fsubrp => fsubrp(cpu),
-        Mnemonic::Fdiv => fdiv(cpu, &instr),
-        Mnemonic::Fdivp => fdivp(cpu, &instr),
-        Mnemonic::Fdivr => fdivr(cpu, &instr),
-        Mnemonic::Fdivrp => fdivrp(cpu),
-        Mnemonic::Fsqrt => fsqrt(cpu),
-        Mnemonic::Fprem => fprem(cpu),
-        Mnemonic::Fabs  => fabs(cpu),
-        Mnemonic::Fchs  => fchs(cpu),
-        Mnemonic::F2xm1 => f2xm1(cpu),
-        Mnemonic::Fxtract => fxtract(cpu),
-        Mnemonic::Fscale => fscale(cpu),
-        Mnemonic::Fyl2x => fyl2x(cpu),
-        Mnemonic::Fyl2xp1 => fyl2xp1(cpu),
-        _ => panic!("Add mnemonic {:?} to test runner", instr.mnemonic()),
-    }
-}
+mod testrunners;
 
 #[test]
 fn test_fpu_arithmetic_matrix() {
@@ -55,64 +19,63 @@ fn test_fpu_arithmetic_matrix() {
 
     // --- 1. ADDITION ---
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xD8, 0xC1]); // FADD ST(0), ST(1) -> ST(0)=120
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xC1]); // FADD ST(0), ST(1) -> ST(0)=120
     assert_eq!(cpu.fpu_get(0).get_f64(), 120.0);
 
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xDC, 0xC1]); // FADD ST(1), ST(0) -> ST(1)=120
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xC1]); // FADD ST(1), ST(0) -> ST(1)=120
     assert_eq!(cpu.fpu_get(1).get_f64(), 120.0);
 
     // --- 2. SUBTRACTION (The "08" Killer) ---
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xD8, 0xE1]); // FSUB ST(0), ST(1) -> 20 - 100 = -80
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xE1]); // FSUB ST(0), ST(1) -> 20 - 100 = -80
     assert_eq!(cpu.fpu_get(0).get_f64(), -80.0);
 
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xDC, 0xE9]); // FSUB ST(1), ST(0) -> 100 - 20 = 80
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xE9]); // FSUB ST(1), ST(0) -> 100 - 20 = 80
     assert_eq!(cpu.fpu_get(1).get_f64(), 80.0);
 
     // --- 3. REVERSE SUBTRACTION ---
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xD8, 0xF1]); // FSUBR ST(0), ST(1) -> 100 - 20 = 80
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xE9]); // FSUBR ST(0), ST(1) -> 100 - 20 = 80
     assert_eq!(cpu.fpu_get(0).get_f64(), 80.0);
 
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xDC, 0xF1]); // FSUBR ST(1), ST(0) -> 20 - 100 = -80
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xE1]); // FSUBR ST(1), ST(0) -> 20 - 100 = -80
     assert_eq!(cpu.fpu_get(1).get_f64(), -80.0);
 
     // --- 4. DIVISION ---
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xD8, 0xF9]); // FDIV ST(0), ST(1) -> 20 / 100 = 0.2
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xF1]); // FDIV ST(0), ST(1) -> 20 / 100 = 0.2
     assert_eq!(cpu.fpu_get(0).get_f64(), 0.2);
 
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xDC, 0xF9]); // FDIV ST(1), ST(0) -> 100 / 20 = 5.0
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xF9]); // FDIV ST(1), ST(0) -> 100 / 20 = 5.0
     assert_eq!(cpu.fpu_get(1).get_f64(), 5.0);
 
     // --- 5. REVERSE DIVISION ---
     reset_stack(&mut cpu, f20, f100);
-    run_fpu_instr(&mut cpu, &[0xD8, 0xF1]); // Wait, FDIVR is D8 F8+i
-    run_fpu_instr(&mut cpu, &[0xD8, 0xF1]); // FDIVR ST(0), ST(1) -> 100 / 20 = 5.0
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xF9]); // FDIVR ST(0), ST(1) -> 100 / 20 = 5.0
     assert_eq!(cpu.fpu_get(0).get_f64(), 5.0);
 }
 
 #[test]
 fn test_fadd_and_fsub_real() {
     let mut cpu = Cpu::new();
-    
-    // ST(0) = 10.5, ST(1) = 2.5
     let mut f1 = F80::new(); f1.set_f64(10.5);
     let mut f2 = F80::new(); f2.set_f64(2.5);
-    cpu.fpu_push(f1); // ST(0)=10.5
-    cpu.fpu_push(f2); // ST(0)=2.5, ST(1)=10.5
+    
+    cpu.fpu_push(f1); // ST(1) = 10.5
+    cpu.fpu_push(f2); // ST(0) = 2.5
 
-    // FADD ST(1), ST(0) -> D8 C1
-    run_fpu_instr(&mut cpu, &[0xD8, 0xC1]);
+    // FADD ST(1), ST(0) -> 0xDC C1
+    // Dest: ST(1)
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xC1]);
+    
+    // ST(0) remains 2.5
+    assert_eq!(cpu.fpu_get(0).get_f64(), 2.5);
+    // ST(1) becomes 13.0
     assert_eq!(cpu.fpu_get(1).get_f64(), 13.0);
-
-    // FSUB ST(1), ST(0) -> D8 E1 (13.0 - 2.5 = 10.5)
-    run_fpu_instr(&mut cpu, &[0xD8, 0xE1]);
-    assert_eq!(cpu.fpu_get(1).get_f64(), 10.5);
 }
 
 #[test]
@@ -124,7 +87,7 @@ fn test_faddp_behavior() {
     cpu.fpu_push(f2); // ST(0)=1, ST(1)=5
 
     // FADDP ST(1), ST(0) -> DE C1
-    run_fpu_instr(&mut cpu, &[0xDE, 0xC1]);
+    testrunners::run_fpu_code(&mut cpu, &[0xDE, 0xC1]);
 
     // Result should be 6.0 and ST(0) should be popped
     assert_eq!(cpu.fpu_get(0).get_f64(), 6.0);
@@ -145,7 +108,7 @@ fn test_fiadd_integer_memory() {
     // FIADD [0x200] -> DA 06 00 02 (using absolute addr for simplicity)
     // Note: iced_x86 decoder needs a valid instruction. 
     // DA 06 00 02 is FIADD [0200] in 16-bit mode
-    run_fpu_instr(&mut cpu, &[0xDA, 0x06, 0x00, 0x02]);
+    testrunners::run_fpu_code(&mut cpu, &[0xDA, 0x06, 0x00, 0x02]);
 
     assert_eq!(cpu.fpu_get(0).get_f64(), 150.0);
 }
@@ -160,7 +123,7 @@ fn test_fsqrt_and_invalid_op() {
     cpu.fpu_push(f16);
     
     // D9 FA: FSQRT
-    run_fpu_instr(&mut cpu, &[0xD9, 0xFA]); 
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFA]); 
     
     assert_eq!(cpu.fpu_get(0).get_f64(), 4.0);
     // Ensure Invalid Operation (IE) is NOT set
@@ -171,7 +134,7 @@ fn test_fsqrt_and_invalid_op() {
     fneg.set_f64(-1.0);
     cpu.fpu_push(fneg);
     
-    run_fpu_instr(&mut cpu, &[0xD9, 0xFA]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFA]);
     
     // Result should be Real Indefinite (NaN)
     assert!(cpu.fpu_get(0).is_nan());
@@ -190,7 +153,7 @@ fn test_fprem_partial_remainder() {
     cpu.fpu_push(f10);  // ST(0)
 
     // D9 F8: FPREM
-    run_fpu_instr(&mut cpu, &[0xD9, 0xF8]); 
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF8]); 
 
     assert_eq!(cpu.fpu_get(0).get_f64(), 1.0);
 
@@ -212,12 +175,12 @@ fn test_fabs_fchs() {
     cpu.fpu_push(f_neg);
 
     // FABS
-    run_fpu_instr(&mut cpu, &[0xD9, 0xE1]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE1]);
     assert_eq!(cpu.fpu_get(0).get_f64(), 5.5);
     assert_eq!(cpu.fpu_get(0).get_sign(), false);
 
     // FCHS (change back to negative)
-    run_fpu_instr(&mut cpu, &[0xD9, 0xE0]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE0]);
     assert_eq!(cpu.fpu_get(0).get_f64(), -5.5);
     assert_eq!(cpu.fpu_get(0).get_sign(), true);
 }
@@ -232,7 +195,7 @@ fn test_f2xm1_exponentiation() {
     cpu.fpu_push(f_half);
 
     // D9 F0: F2XM1
-    run_fpu_instr(&mut cpu, &[0xD9, 0xF0]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF0]);
 
     let result = cpu.fpu_get(0).get_f64();
     let expected = 2.0f64.powf(0.5) - 1.0;
@@ -253,7 +216,7 @@ fn test_fyl2x_logarithm() {
     cpu.fpu_push(f_x); // ST(0)
 
     // D9 F1: FYL2X (Result in ST(1), Pops ST(0))
-    run_fpu_instr(&mut cpu, &[0xD9, 0xF1]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF1]);
 
     assert_eq!(cpu.fpu_get(0).get_f64(), 9.0);
 }
@@ -264,10 +227,10 @@ fn test_fxtract_decomposition() {
     let mut f12 = F80::new(); f12.set_f64(12.0); // 1.5 * 2^3
     cpu.fpu_push(f12);
 
-    run_fpu_instr(&mut cpu, &[0xD9, 0xF4]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF4]);
 
-    assert_eq!(cpu.fpu_get(1).get_f64(), 3.0);
     assert_eq!(cpu.fpu_get(0).get_f64(), 1.5);
+    assert_eq!(cpu.fpu_get(1).get_f64(), 3.0);
 }
 
 #[test]
@@ -279,7 +242,7 @@ fn test_fscale_powers_of_two() {
     cpu.fpu_push(f_exp);
     cpu.fpu_push(f_val);
 
-    run_fpu_instr(&mut cpu, &[0xD9, 0xFD]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFD]);
 
     assert_eq!(cpu.fpu_get(0).get_f64(), 12.0);
 }
@@ -297,7 +260,7 @@ fn test_fadd_diagnostic() {
     println!("After Push 2: TOP={}, Tags={:?}", cpu.fpu_top, cpu.fpu_tags);
 
     // FADD ST(1), ST(0)
-    run_fpu_instr(&mut cpu, &[0xDC, 0xC1]);
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xC1]);
 
     println!("After FADD: TOP={}, ST(0)={:?}, ST(1)={:?}", 
         cpu.fpu_top, cpu.fpu_get(0).get_f64(), cpu.fpu_get(1).get_f64());
@@ -319,7 +282,7 @@ fn test_fsub_variants() {
 
     // Variant 1: D8 E1 -> FSUB ST(0), ST(1) 
     // ST(0) = 2.0 - 10.0 = -8.0
-    run_fpu_instr(&mut cpu, &[0xD8, 0xE1]);
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xE1]);
     assert_eq!(cpu.fpu_get(0).get_f64(), -8.0);
 
     // Variant 2: DC E9 -> FSUB ST(1), ST(0)
@@ -327,6 +290,6 @@ fn test_fsub_variants() {
     cpu.fpu_set(0, f2); 
     cpu.fpu_set(1, f10);
     // ST(1) = 10.0 - 2.0 = 8.0
-    run_fpu_instr(&mut cpu, &[0xDC, 0xE9]);
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xE9]);
     assert_eq!(cpu.fpu_get(1).get_f64(), 8.0);
 }

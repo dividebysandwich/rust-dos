@@ -23,7 +23,6 @@ fn fpu_compare_values(cpu: &mut Cpu, lhs: f64, rhs: f64) {
 }
 
 pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
-    // 2. LOGIC: Determine LHS and RHS
     let (lhs, rhs) = if instr.mnemonic() == Mnemonic::Fcompp {
         // FCOMPP is always ST(0) vs ST(1)
         (cpu.fpu_get(0).get_f64(), cpu.fpu_get(1).get_f64())
@@ -41,28 +40,50 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
                 (val_0, val_op)
             }
             OpKind::Register => {
-                // DETECT REVERSE COMPARE (0xDC opcodes)
-                // D8: FCOM ST(i)       -> Op0=ST0 (implied), Op1=STi
-                // DC: FCOM ST(i), ST0  -> Op0=STi, Op1=ST0
-                
-                if instr.op1_register() == Register::ST0 {
-                    // This is the DC variant: Compare ST(i) vs ST(0)
-                    let idx = instr.op0_register().number() - Register::ST0.number();
-                    let val_i = cpu.fpu_get(idx as usize).get_f64(); // LHS
-                    let val_0 = cpu.fpu_get(0).get_f64();            // RHS
-                    (val_i, val_0)
+                // Read raw opcode from memory
+                // iced_x86 apparently has a bug with D8 vs DC ambiguity
+                let cs_base = (cpu.cs as u32) << 4;
+                let instr_addr = (cpu.ip as u32).wrapping_sub(instr.len() as u32);
+                let phys_addr = cs_base.wrapping_add(instr_addr) & 0xFFFFF;
+                let opcode_byte = cpu.bus.read_8(phys_addr as usize);
+
+                // Identify the operand register index (i)
+                // iced_x86 might say "FCOM ST0, ST1" or "FCOM ST1, ST0"
+                // We need the register that is NOT ST0 to find 'i'.
+                let reg_op0 = instr.op0_register();
+                let reg_op1 = instr.op1_register();
+
+                let idx = if reg_op0 != Register::ST0 && reg_op0 != Register::None {
+                    reg_op0.number() - Register::ST0.number()
+                } else if reg_op1 != Register::ST0 && reg_op1 != Register::None {
+                    reg_op1.number() - Register::ST0.number()
                 } else {
-                    // This is the D8 variant: Compare ST(0) vs ST(i)
-                    // Note: Depending on decoder settings, op0 might be ST0 or STi.
-                    // But standard logic is: LHS=ST0, RHS=Operand.
-                    let idx = instr.op0_register().number() - Register::ST0.number();
-                    let val_0 = cpu.fpu_get(0).get_f64();            // LHS
-                    let val_i = cpu.fpu_get(idx as usize).get_f64(); // RHS
-                    (val_0, val_i)
+                    1 // Default to ST(1) if parsing fails or implicit
+                };
+
+                let val_i = cpu.fpu_get(idx as usize).get_f64();
+                let val_0 = cpu.fpu_get(0).get_f64();
+
+                // Determine direction
+                // If memory has 0xDC, it's Reverse.
+                // If memory is 0x00 (Unit Test environment), fallback to checking operands.
+                let is_reverse = if opcode_byte == 0xDC {
+                    true
+                } else if opcode_byte == 0xD8 {
+                    false
+                } else {
+                    // Fallback for Unit Tests that don't write to RAM:
+                    // If op1 is ST0, iced_x86 usually implies Reverse syntax "FCOM STi, ST0"
+                    instr.op1_register() == Register::ST0
+                };
+
+                if is_reverse {
+                    (val_i, val_0) // ST(i) vs ST(0)
+                } else {
+                    (val_0, val_i) // ST(0) vs ST(i)
                 }
             }
             _ => {
-                // Implicit Default (FCOM without operands) -> ST(0) vs ST(1)
                 (cpu.fpu_get(0).get_f64(), cpu.fpu_get(1).get_f64())
             }
         }
@@ -70,7 +91,6 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
 
     fpu_compare_values(cpu, lhs, rhs);
 
-    // Handle Pops
     match instr.mnemonic() {
         Mnemonic::Fcomp => { cpu.fpu_pop(); },
         Mnemonic::Fcompp => { cpu.fpu_pop(); cpu.fpu_pop(); },
@@ -81,16 +101,12 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
 pub fn ficom_variants(cpu: &mut Cpu, instr: &Instruction) {
     let st0 = cpu.fpu_get(0).get_f64();
     let addr = calculate_addr(cpu, instr);
-    
-    // Explicitly handle Integer loading to avoid "F80::new()" garbage
     let val = match instr.memory_size() {
         MemorySize::Int16 => (cpu.bus.read_16(addr) as i16) as f64,
         MemorySize::Int32 => (cpu.bus.read_32(addr) as i32) as f64,
         _ => 0.0,
     };
-    
     fpu_compare_values(cpu, st0, val);
-    
     if instr.mnemonic() == Mnemonic::Ficomp {
         cpu.fpu_pop();
     }

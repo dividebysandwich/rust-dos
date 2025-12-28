@@ -159,15 +159,7 @@ fn scas(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
     if size == 1 {
         let acc = cpu.get_al();
         let mem = cpu.bus.read_8(dst_addr);
-        
-        cpu.bus.log_string(&format!("[SCAS-DEBUG] Comparing AL:{:02X} with Mem:{:02X} at DI:{:04X}", acc, mem, cpu.di));
-
-//        let zf_before = cpu.get_cpu_flag(CpuFlags::ZF);
         cpu.alu_sub_8(acc, mem);
-        let zf_after = cpu.get_cpu_flag(CpuFlags::ZF);
-
-        cpu.bus.log_string(&format!("[SCAS-DEBUG] Resulting ZF is now: {}", zf_after));
-
     } else {
         let acc = cpu.ax;
         let mem = cpu.bus.read_16(dst_addr);

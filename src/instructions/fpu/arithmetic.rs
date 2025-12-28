@@ -434,17 +434,32 @@ pub fn fsqrt(cpu: &mut Cpu) {
 pub fn fxtract(cpu: &mut Cpu) {
     let val = cpu.fpu_get(0);
     let f_val = val.get_f64();
+    
+    // Handle Zero case
     if f_val == 0.0 {
-        cpu.fpu_set(0, F80::new());
-        let mut neg_inf = F80::new(); neg_inf.set_f64(f64::NEG_INFINITY);
-        cpu.fpu_push(neg_inf);
+        // ST(0) = -Infinity
+        let mut neg_inf = F80::new(); 
+        neg_inf.set_f64(f64::NEG_INFINITY);
+        cpu.fpu_set(0, neg_inf);
+        
+        // Push 0.0
+        let mut zero = F80::new(); 
+        zero.set_f64(0.0);
+        cpu.fpu_push(zero);
         return;
     }
+
     let exp = (val.get_exponent() as i32) - 16383;
-    let mut sig = val; sig.set_exponent(16383);
-    cpu.fpu_set(0, sig);
-    let mut f_exp = F80::new(); f_exp.set_f64(exp as f64);
-    cpu.fpu_push(f_exp);
+    let mut sig = val; 
+    sig.set_exponent(16383); // Normalize significand to 1.xx
+
+    // ST(0) becomes Exponent
+    let mut f_exp = F80::new(); 
+    f_exp.set_f64(exp as f64);
+    cpu.fpu_set(0, f_exp);
+
+    // Push Significand (New ST(0))
+    cpu.fpu_push(sig);
 }
 
 // F2XM1: 2^x - 1

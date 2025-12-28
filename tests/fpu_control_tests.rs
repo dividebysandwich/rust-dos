@@ -1,24 +1,6 @@
 use rust_dos::cpu::{Cpu, FpuFlags, FPU_TAG_EMPTY, FPU_TAG_VALID};
-use rust_dos::instructions::fpu::control::*;
-use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic};
 
-// Helper to run control instructions
-fn run_control_instr(cpu: &mut Cpu, code: &[u8]) {
-    let mut decoder = Decoder::new(16, code, DecoderOptions::NONE);
-    let mut instr = Instruction::default();
-    decoder.decode_out(&mut instr);
-    cpu.ip = 0x100;
-
-    match instr.mnemonic() {
-        Mnemonic::Fninit => fninit(cpu),
-        Mnemonic::Fnclex => fnclex(cpu),
-        Mnemonic::Fldcw => fldcw(cpu, &instr),
-        Mnemonic::Fnstcw => fnstcw(cpu, &instr),
-        Mnemonic::Fnstsw => fnstsw(cpu, &instr),
-        Mnemonic::Ffree => ffree(cpu, &instr),
-        _ => panic!("Unhandled mnemonic in control test: {:?}", instr.mnemonic()),
-    }
-}
+mod testrunners;
 
 #[test]
 fn test_fninit_defaults() {
@@ -32,7 +14,7 @@ fn test_fninit_defaults() {
     cpu.fpu_tags[7] = FPU_TAG_VALID;
 
     // DB E3: FNINIT
-    run_control_instr(&mut cpu, &[0xDB, 0xE3]);
+    testrunners::run_cpu_code(&mut cpu, &[0xDB, 0xE3]);
 
     // Verify Defaults
     assert_eq!(cpu.fpu_top, 0, "FNINIT should reset TOP to 0");
@@ -53,7 +35,7 @@ fn test_fnclex_clears_exceptions() {
     cpu.set_fpu_flags(FpuFlags::C0 | FpuFlags::C3 | FpuFlags::PE | FpuFlags::ZE | FpuFlags::IE);
     
     // DB E2: FNCLEX
-    run_control_instr(&mut cpu, &[0xDB, 0xE2]);
+    testrunners::run_cpu_code(&mut cpu, &[0xDB, 0xE2]);
 
     let flags = cpu.get_fpu_flags();
     
@@ -77,7 +59,7 @@ fn test_fnstsw_ax_status_word_bridge() {
     cpu.set_fpu_flags(FpuFlags::C3 | FpuFlags::C0);
 
     // DF E0: FNSTSW AX
-    run_control_instr(&mut cpu, &[0xDF, 0xE0]);
+    testrunners::run_cpu_code(&mut cpu, &[0xDF, 0xE0]);
 
     let sw = cpu.ax;
 
@@ -107,7 +89,7 @@ fn test_fnstsw_memory() {
     // Write 0x0000 to memory first to ensure we actually wrote to it
     cpu.bus.write_16(0x200, 0x0000);
 
-    run_control_instr(&mut cpu, &[0xDD, 0x3E, 0x00, 0x02]);
+    testrunners::run_cpu_code(&mut cpu, &[0xDD, 0x3E, 0x00, 0x02]);
 
     let val = cpu.bus.read_16(0x200);
     
@@ -125,7 +107,7 @@ fn test_control_word_store_load() {
     cpu.fpu_control = new_cw;
 
     // D9 3E 00 02: FNSTCW [0200]
-    run_control_instr(&mut cpu, &[0xD9, 0x3E, 0x00, 0x02]);
+    testrunners::run_cpu_code(&mut cpu, &[0xD9, 0x3E, 0x00, 0x02]);
     assert_eq!(cpu.bus.read_16(0x200), new_cw);
 
     // Now modify memory and load it back
@@ -133,7 +115,7 @@ fn test_control_word_store_load() {
     cpu.bus.write_16(0x200, load_cw);
 
     // D9 2E 00 02: FLDCW [0200]
-    run_control_instr(&mut cpu, &[0xD9, 0x2E, 0x00, 0x02]);
+    testrunners::run_cpu_code(&mut cpu, &[0xD9, 0x2E, 0x00, 0x02]);
 
     assert_eq!(cpu.fpu_control, load_cw);
 }
@@ -154,7 +136,7 @@ fn test_ffree_tag_management() {
 
     // DD C0: FFREE ST(0)
     // iced_x86 might map DD C0 to FFREE ST(0)
-    run_control_instr(&mut cpu, &[0xDD, 0xC0]);
+    testrunners::run_cpu_code(&mut cpu, &[0xDD, 0xC0]);
     
     // ST(0) (Phys 0) should be empty
     assert_eq!(cpu.fpu_tags[0], FPU_TAG_EMPTY);

@@ -338,6 +338,4 @@ pub fn sahf(cpu: &mut Cpu) {
     cpu.set_cpu_flag(CpuFlags::PF, (ah & 0x04) != 0);
     cpu.set_cpu_flag(CpuFlags::CF, (ah & 0x01) != 0);
     
-    // REMOVEME
-    cpu.bus.log_string(&format!("[SAHF] AH:{:02X} (Bit6={}) | ZF: {} -> {}", ah, (ah & 0x40) >> 6, old_zf, new_zf));
 }

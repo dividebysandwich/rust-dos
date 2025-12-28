@@ -124,7 +124,7 @@ impl Cpu {
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),
             fpu_control: 0x037F, // Default Control Word
             fpu_tags: [FPU_TAG_EMPTY; 8],
-            debug_qb_print: true,
+            debug_qb_print: false,
             last_fstp_addr: 0,
             debug_qb_conversion: false,
         }
@@ -132,68 +132,68 @@ impl Cpu {
 
     // REMOVEME: Debugging QuickBASIC Float Conversion Issues
     pub fn trace_qb_conversion(&mut self, instr: &Instruction) {
-    if !self.debug_qb_print { return; }
+        if !self.debug_qb_print { return; }
 
-    // TRACK ZF CHANGES: If ZF changes without an obvious reason, we need to know
-    let zf = self.get_cpu_flag(CpuFlags::ZF);
+        // TRACK ZF CHANGES: If ZF changes without an obvious reason, we need to know
+        let zf = self.get_cpu_flag(CpuFlags::ZF);
 
-    match instr.mnemonic() {
-        // Track the Decision Points
-        Mnemonic::Je | Mnemonic::Jne => {
-            // This is where the "08" vs "8" decision is actually made!
-            self.bus.log_string(format!("[QB-TRACE] {:?} taken? (ZF={}) at {:04X}:{:04X}", 
-                instr.mnemonic(), zf, self.cs, self.ip).as_str());
-        }
-
-        // Monitor Sahf (The FPU->CPU Bridge)
-        Mnemonic::Sahf => {
-            let ah = (self.ax >> 8) as u8;
-            self.bus.log_string(format!("[QB-TRACE] SAHF: AH={:02X} (Bit6/ZF={})", 
-                ah, (ah >> 6) & 1).as_str());
-        }
-
-        // Enhanced Scasb (Watch the DI/CX result)
-        Mnemonic::Scasb => {
-            let val = self.get_al();
-            let addr = self.get_physical_addr(self.es, self.di);
-            let mem_val = self.bus.read_8(addr);
-            self.bus.log_string(format!("[QB-TRACE] SCASB [{:05X}] AL={:02X} vs Mem={:02X} | CX={:04X} | DI={:04X} | ZF={}", 
-                addr, val, mem_val, self.cx, self.di, zf).as_str());
-        }
-
-        // Monitor Pointer Adjustment
-        Mnemonic::Inc | Mnemonic::Dec => {
-            let reg = instr.op0_register();
-            if reg == Register::DI || reg == Register::SI || reg == Register::CX {
-                 self.bus.log_string(format!("[QB-TRACE] {:?} {:?} -> {:04X} (ZF={})", 
-                    instr.mnemonic(), reg, self.get_reg16(reg), zf).as_str());
+        match instr.mnemonic() {
+            // Track the Decision Points
+            Mnemonic::Je | Mnemonic::Jne => {
+                // This is where the "08" vs "8" decision is actually made!
+                self.bus.log_string(format!("[QB-TRACE] {:?} taken? (ZF={}) at {:04X}:{:04X}", 
+                    instr.mnemonic(), zf, self.cs, self.ip).as_str());
             }
-        }
 
-        // Keep existing trackers
-        Mnemonic::Fstp if instr.memory_size() == MemorySize::Float80 => {
-            let addr = calculate_addr(self, instr);
-            self.last_fstp_addr = addr;
-            let m = self.bus.read_64(addr);
-            let se = self.bus.read_16(addr + 8);
-            self.bus.log_string(format!("\n[QB-TRACE] FSTP TBYTE at {:05X} Raw: {:04X} {:016X}", addr, se, m).as_str());
-        }
+            // Monitor Sahf (The FPU->CPU Bridge)
+            Mnemonic::Sahf => {
+                let ah = (self.ax >> 8) as u8;
+                self.bus.log_string(format!("[QB-TRACE] SAHF: AH={:02X} (Bit6/ZF={})", 
+                    ah, (ah >> 6) & 1).as_str());
+            }
 
-        Mnemonic::Stosb => {
-            let val = self.get_al();
-            let addr = self.get_physical_addr(self.es, self.di);
-            let ch = if val >= 32 && val <= 126 { val as char } else { '.' };
-            self.bus.log_string(format!("[QB-TRACE] STOSB [{:05X}] <- {:02X} ('{}') DI={:04X}", addr, val, ch, self.di).as_str());
-        }
+            // Enhanced Scasb (Watch the DI/CX result)
+            Mnemonic::Scasb => {
+                let val = self.get_al();
+                let addr = self.get_physical_addr(self.es, self.di);
+                let mem_val = self.bus.read_8(addr);
+                self.bus.log_string(format!("[QB-TRACE] SCASB [{:05X}] AL={:02X} vs Mem={:02X} | CX={:04X} | DI={:04X} | ZF={}", 
+                    addr, val, mem_val, self.cx, self.di, zf).as_str());
+            }
 
-        Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne => {
-            self.bus.log_string(format!(
-                "[QB-TRACE] {:?} CX={:04X} ZF={} DI={:04X}", 
-                instr.mnemonic(), self.cx, zf, self.di
-            ).as_str());
+            // Monitor Pointer Adjustment
+            Mnemonic::Inc | Mnemonic::Dec => {
+                let reg = instr.op0_register();
+                if reg == Register::DI || reg == Register::SI || reg == Register::CX {
+                    self.bus.log_string(format!("[QB-TRACE] {:?} {:?} -> {:04X} (ZF={})", 
+                        instr.mnemonic(), reg, self.get_reg16(reg), zf).as_str());
+                }
+            }
+
+            // Keep existing trackers
+            Mnemonic::Fstp if instr.memory_size() == MemorySize::Float80 => {
+                let addr = calculate_addr(self, instr);
+                self.last_fstp_addr = addr;
+                let m = self.bus.read_64(addr);
+                let se = self.bus.read_16(addr + 8);
+                self.bus.log_string(format!("\n[QB-TRACE] FSTP TBYTE at {:05X} Raw: {:04X} {:016X}", addr, se, m).as_str());
+            }
+
+            Mnemonic::Stosb => {
+                let val = self.get_al();
+                let addr = self.get_physical_addr(self.es, self.di);
+                let ch = if val >= 32 && val <= 126 { val as char } else { '.' };
+                self.bus.log_string(format!("[QB-TRACE] STOSB [{:05X}] <- {:02X} ('{}') DI={:04X}", addr, val, ch, self.di).as_str());
+            }
+
+            Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne => {
+                self.bus.log_string(format!(
+                    "[QB-TRACE] {:?} CX={:04X} ZF={} DI={:04X}", 
+                    instr.mnemonic(), self.cx, zf, self.di
+                ).as_str());
+            }
+            _ => {}
         }
-        _ => {}
-    }
     }
 
     // Update Parity Flag based on result
@@ -1038,7 +1038,10 @@ impl Cpu {
             "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}",
             self.cs, self.ip
         ));
-        self.debug_qb_conversion = true;
+
+        // Enable to do detailed debugging of exe programs
+        //self.debug_qb_conversion = true;
+
         true
     }
 }

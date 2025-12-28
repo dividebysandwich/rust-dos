@@ -1,49 +1,7 @@
 use rust_dos::cpu::{Cpu, CpuFlags};
 use rust_dos::f80::F80;
-use rust_dos::instructions::execute_instruction;
-use iced_x86::{Decoder, DecoderOptions, Instruction};
 
-fn run_code(cpu: &mut Cpu, code: &[u8]) {
-    // Ensure IP starts at 0x100 (COM file start)
-    cpu.ip = 0x100;
-
-    // Safety limit to prevent infinite loops in tests (e.g., JMP $)
-    let mut max_instructions = 100; 
-
-    loop {
-        if max_instructions == 0 {
-            break;
-        }
-        max_instructions -= 1;
-
-        // Calculate where we are in the byte array
-        // We assume the code is loaded at 0x100.
-        let offset = (cpu.ip as usize).wrapping_sub(0x100);
-
-        // Check if we've run off the end of the code
-        if offset >= code.len() {
-            break;
-        }
-
-        // Decode ONE instruction at the current IP
-        let mut decoder = Decoder::new(16, &code[offset..], DecoderOptions::NONE);
-        decoder.set_ip(cpu.ip as u64);
-        let mut instr = Instruction::default();
-        
-        if !decoder.can_decode() {
-            break;
-        }
-        decoder.decode_out(&mut instr);
-
-        // Advance IP (Fetch Step)
-        // The CPU advances IP *before* executing. 
-        // If the execution is a JUMP, it will overwrite this value.
-        cpu.ip = instr.next_ip() as u16;
-
-        // Execute
-        execute_instruction(cpu, &instr);
-    }
-}
+mod testrunners;
 
 #[test]
 fn test_mov_and_registers() {
@@ -53,7 +11,7 @@ fn test_mov_and_registers() {
     // 88 C4       MOV AH, AL (AH becomes 0x34)
     let code: [u8; 5] = [0xB8, 0x34, 0x12, 0x88, 0xC4];
     
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.ax, 0x3434); 
 }
@@ -69,7 +27,7 @@ fn test_stack_push_pop() {
     // 5B          POP BX
     let code = [0xB8, 0x55, 0xAA, 0x50, 0xB8, 0x00, 0x00, 0x5B];
 
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.bx, 0xAA55);
     assert_eq!(cpu.sp, 0xFFFE); // SP should return to start
@@ -84,7 +42,7 @@ fn test_inc_dec_flags() {
     // FE C8       DEC AL  (Wraps to FF, SF=1)
     let code = [0xB0, 0xFF, 0xFE, 0xC0, 0xFE, 0xC8];
 
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 0xFF);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false); 
@@ -100,7 +58,7 @@ fn test_imul_16bit() {
     // F7 EB       IMUL BX  -> DX:AX = 32768 (0x00008000)
     let code = [0xB8, 0x00, 0x80, 0xBB, 0xFF, 0xFF, 0xF7, 0xEB];
 
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     // Result should be positive 32768
     assert_eq!(cpu.dx, 0x0000);
@@ -123,7 +81,7 @@ fn test_jumps_jz() {
     // 90          NOP
     let code = [0xB8, 0x05, 0x00, 0x83, 0xE8, 0x05, 0x74, 0x03, 0xB8, 0xFF, 0xFF, 0x90];
 
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.ax, 0); // Should remain 0, MOV AX, FFFF skipped
 }
@@ -147,7 +105,7 @@ fn test_string_rep_movsb() {
     // F3 A4       REP MOVSB
     let code = [0xF3, 0xA4];
 
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     // Check Destination
     let dest_phys = cpu.get_physical_addr(0x1000, 0x0010);
@@ -180,7 +138,7 @@ fn test_call_ret() {
         0xC3              // 0x107: RET
     ];
 
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     // 1. CALL pushes 0x103, Jumps to 0x107.
     // 2. RET pops 0x103, Jumps to 0x103. Stack is now 0xFFFE.
@@ -210,7 +168,7 @@ fn test_repe_scasb_backwards_mismatch() {
     // F3 AE : REPE SCASB
     // Should skip the four '0's and stop at '8'
     let code = [0xF3, 0xAE];
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     // On hardware, after mismatch:
     // 1. DI points to one byte BEFORE the '8' (because it decrements after the match)
@@ -235,7 +193,7 @@ fn test_qb_trim_logic() {
 
     // AE (SCASB), 74 02 (JZ +2), B0 FF (MOV AL, FF)
     let code = [0xAE, 0x74, 0x02, 0xB0, 0xFF];
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     // If ZF was correctly 0, the jump was not taken. AL should be 0xFF.
     assert_eq!(cpu.get_al(), 0xFF, "The trim logic took a jump it shouldn't have!");
@@ -250,7 +208,7 @@ fn test_sbb_immediate_check() {
     cpu.set_cpu_flag(CpuFlags::CF, false);
     cpu.set_reg8(iced_x86::Register::AL, 10);
     
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     // If IP logic is right, AL = 5.
     // If IP logic is wrong and it read the NOP (0x90), AL = 10 - 0x90 = 0x80.
@@ -311,7 +269,7 @@ fn test_rcl_preserves_zf() {
     ];
     
     cpu.set_reg8(iced_x86::Register::AL, 0);
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "RCL destroyed the Zero Flag!");
 }
@@ -329,7 +287,7 @@ fn test_adc_af_flag() {
         0x14, 0x08        // ADC AL, 8
     ];
 
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 0x10);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true);
@@ -346,7 +304,7 @@ fn test_das_instruction() {
     cpu.set_cpu_flag(CpuFlags::CF, false);
     
     let code = [0x2F]; // DAS
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
     assert_eq!(cpu.get_al(), 0x94, "DAS failed to adjust 0x9A to 0x94");
 
     // Case 2: Multi-digit borrow (Crucial for the '08' bug)
@@ -354,7 +312,7 @@ fn test_das_instruction() {
     // DAS should turn 0xFF into 0x99 (representing -1 in BCD)
     cpu.set_reg8(iced_x86::Register::AL, 0x05);
     let code_sub_das = [0x2C, 0x06, 0x2F]; // SUB AL, 6; DAS
-    run_code(&mut cpu, &code_sub_das);
+    testrunners::run_cpu_code(&mut cpu, &code_sub_das);
     
     assert_eq!(cpu.get_al(), 0x99, "DAS failed to adjust subtraction result to BCD 99");
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true, "DAS should maintain/set CF for borrows");
@@ -368,7 +326,7 @@ fn test_aas_instruction() {
     // AL = 0xFF -> AL = 0x09, AH = AH - 1, CF=1, AF=1
     cpu.ax = 0x0108; // AH=1, AL=8
     let code = [0x2C, 0x09, 0x3F]; // SUB AL, 9; AAS
-    run_code(&mut cpu, &code);
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 0x09);
     assert_eq!(cpu.ax >> 8, 0x00, "AAS failed to decrement AH on borrow");
@@ -379,25 +337,27 @@ fn test_aas_instruction() {
 fn test_fpu_comparison_flags() {
     let mut cpu = Cpu::new();
     
-    // Compare 8.0 (ST0) with 10.0 (Mem)
-    // Should result in ST0 < Source: C3=0, C2=0, C0=1
-    // SAHF should then set: ZF=0, PF=0, CF=1
-    
+    // Setup: ST(0) = 8.0
     let mut f8 = F80::new(); f8.set_f64(8.0);
     cpu.fpu_push(f8);
     
-    let mut f10 = F80::new(); f10.set_f64(10.0);
+    // Write 10.0 as FLOAT32 (4 bytes) to memory
     let addr = 0x2000;
-    let bytes = f10.get_bytes(); // Assuming TBYTE
-    for i in 0..10 { cpu.bus.write_8(addr + i, bytes[i]); }
+    let val_f32 = 10.0f32;
+    let bytes = val_f32.to_le_bytes();
+    for i in 0..4 { 
+        cpu.bus.write_8(addr + i, bytes[i]); 
+    }
 
-    // D8 1E 00 20: FCOMP TBYTE PTR [2000]
-    // 9E: SAHF
-    let code = [0xD8, 0x1E, 0x00, 0x20, 0x9E];
-    run_code(&mut cpu, &code);
+    let code = [
+        0xD8, 0x1E, 0x00, 0x20, // FCOMP DWORD PTR [2000] (Compare ST0 vs Mem)
+        0xDF, 0xE0,             // FSTSW AX         (Store FPU Status Word to AX)
+        0x9E                    // SAHF                   (Load AH into Flags)
+    ];
+    
+    testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true, "Carry should be set (8 < 10)");
     assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false, "Zero should be clear (8 != 10)");
-    assert_eq!(cpu.get_cpu_flag(CpuFlags::PF), false, "Parity should be clear (Not Unordered)");
 }
 

@@ -304,31 +304,6 @@ fn main() -> Result<(), String> {
             // Make it so
             instructions::execute_instruction(&mut cpu, &instr);
 
-            // REMOVEME: QB REP SCASB Debugging
-            if instr.has_rep_prefix() || instr.has_repne_prefix() {
-                match instr.mnemonic() {
-                    Mnemonic::Scasb | Mnemonic::Scasw => {
-                        // Read the instruction that is about to execute NEXT
-                        let next_phys = cpu.get_physical_addr(cpu.cs, cpu.ip);
-                        let next_opcode = cpu.bus.read_8(next_phys);
-
-                        // Capture flags relevant to conditional jumps
-                        let zf = cpu.get_cpu_flag(CpuFlags::ZF);
-                        let cf = cpu.get_cpu_flag(CpuFlags::CF);
-                        let sf = cpu.get_cpu_flag(CpuFlags::SF);
-                        let df = cpu.get_cpu_flag(CpuFlags::DF); 
-
-                        cpu.bus.log_string(&format!(
-                            "[QB-TRACE] Post-REP {:?} Finished. Next Opcode=[{:02X}] @ {:04X}:{:04X} | Flags: ZF={} SF={} CF={} DF={} DI={:04X}", 
-                            instr.mnemonic(), next_opcode, cpu.cs, cpu.ip, zf, sf, cf, df, cpu.di
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-
-
-
         }
 
 

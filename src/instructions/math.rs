@@ -203,14 +203,6 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
 
     let (val, addr) = get_op0_val(cpu, instr, is_8bit);
 
-    // REMOVEME
-    if cpu.debug_qb_print && instr.op0_register() == Register::CX {
-        cpu.bus.log_string(&format!(
-            "[DEC-DEBUG] Decrementing CX: val={:04X}, is_8bit={}", 
-            val, is_8bit
-        ));
-    }
-    
     let res = if is_8bit {
         let v = val as u8;
         let r = v.wrapping_sub(1);
@@ -233,15 +225,6 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
     };
     
     write_back(cpu, instr, res, addr, is_8bit);
-
-    // REMOVEME
-    if cpu.debug_qb_print {
-        cpu.bus.log_string(&format!(
-            "[DEC-DEBUG] Result: {:04X}, ZF={}", 
-            res, res == 0
-        ));
-    }
-
 }
 
 fn neg(cpu: &mut Cpu, instr: &Instruction) {
