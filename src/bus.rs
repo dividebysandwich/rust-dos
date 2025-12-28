@@ -101,7 +101,6 @@ impl Bus {
         self.write_8(phys_addr + 2, vector); // The Vector ID
         self.write_8(phys_addr + 3, 0xCF); // IRET
         
-        println!("[INIT] Installed Trap for INT {:02X} at F000:{:04X}", vector, handler_offset);
     }
 
     // Helper: Scroll the text screen up by 1 line

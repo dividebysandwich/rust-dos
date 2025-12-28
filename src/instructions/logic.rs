@@ -158,12 +158,11 @@ fn not(cpu: &mut Cpu, instr: &Instruction) {
 
 /// Helper to get shift count from Op1 or CL
 fn get_shift_count(cpu: &Cpu, instr: &Instruction) -> u32 {
-    if instr.op1_kind() == OpKind::Immediate8 {
-        instr.immediate8() as u32
-    } else if instr.op1_kind() == OpKind::Register {
-        cpu.get_reg8(instr.op1_register()) as u32
-    } else {
-        1
+    // x86 shifts/rotates usually have the count in Op1
+    match instr.op1_kind() {
+        OpKind::Immediate8 => instr.immediate8() as u32,
+        OpKind::Register => cpu.get_reg8(instr.op1_register()) as u32,
+        _ => 1, // Fallback for single-operand decodings
     }
 }
 
@@ -175,54 +174,46 @@ fn shift_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
         _ => false,
     };
 
-    // Read Dest
     let (val, addr_opt) = if instr.op0_kind() == OpKind::Register {
         let reg = instr.op0_register();
-        let v = if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) };
-        (v, None)
+        (if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) }, None)
     } else {
         let addr = calculate_addr(cpu, instr);
-        let v = if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) };
-        (v, Some(addr))
+        (if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) }, Some(addr))
     };
 
-    let count = get_shift_count(cpu, instr);
-    // Mask count (x86 masks shift count to 5 bits i.e. 0-31)
-    let effective_count = count & 0x1F;
+    let count = get_shift_count(cpu, instr) & 0x1F;
+    if count == 0 { return; }
 
-    if effective_count == 0 { return; }
+    let bit_width = if is_8bit { 8 } else { 16 };
+    let mut res = val;
+    let mut last_out = false;
 
-    let (res, last_out) = match mnemonic {
-        Mnemonic::Shl | Mnemonic::Sal => {
-            let res = val.wrapping_shl(effective_count);
-            // CF is the last bit shifted out
-            let bit_pos = if is_8bit { 8 } else { 16 };
-            let last_out = if effective_count <= bit_pos {
-                (val >> (bit_pos - effective_count)) & 1
-            } else { 0 };
-            (res, last_out)
-        },
-        Mnemonic::Shr => {
-            let res = val.wrapping_shr(effective_count);
-            let last_out = (val >> (effective_count - 1)) & 1;
-            (res, last_out)
-        },
-        Mnemonic::Sar => {
-            let res = if is_8bit {
-                (val as i8).wrapping_shr(effective_count) as u16
-            } else {
-                (val as i16).wrapping_shr(effective_count) as u16
-            };
-            // CF logic for SAR: Copy sign bit if shifting, or last bit out
-            let last_out = if is_8bit {
-                ((val as u8 >> (effective_count - 1)) & 1) as u16
-            } else {
-                (val >> (effective_count - 1)) & 1
-            };
-            (res, last_out as u16)
-        },
-        _ => (val, 0),
-    };
+    for _ in 0..count {
+        match mnemonic {
+            Mnemonic::Shl | Mnemonic::Sal => {
+                last_out = (res & (1 << (bit_width - 1))) != 0;
+                res <<= 1;
+            },
+            Mnemonic::Shr => {
+                last_out = (res & 1) != 0;
+                res >>= 1;
+            },
+            Mnemonic::Sar => {
+                last_out = (res & 1) != 0;
+                let msb_mask = 1 << (bit_width - 1);
+                let msb = res & msb_mask;
+                res = (res >> 1) | msb; // Sign extension
+            },
+            _ => {
+                // If we hit this, the dispatcher sent a mnemonic we aren't handling
+                println!("[DEBUG] shift_op got unexpected mnemonic: {:?}", mnemonic);
+                return;
+            }
+        }
+    }
+
+    if is_8bit { res &= 0xFF; }
 
     // Write Back
     if let Some(addr) = addr_opt {
@@ -233,16 +224,12 @@ fn shift_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
     }
 
     // Flags
-    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
+    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res as u8) == 0 } else { res == 0 });
     cpu.set_cpu_flag(CpuFlags::SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_cpu_flag(CpuFlags::CF, last_out != 0);
+    cpu.set_cpu_flag(CpuFlags::CF, last_out);
     cpu.update_pf(res);
-    
-    // OF is only defined for count == 1
-    // Simplification: Not fully implementing OF for shifts here as it varies per instruction
 }
 
-/// RCL, RCR, ROL, ROR
 fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
@@ -252,84 +239,51 @@ fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
 
     let (mut val, addr_opt) = if instr.op0_kind() == OpKind::Register {
         let reg = instr.op0_register();
-        let v = if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) };
-        (v, None)
+        (if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) }, None)
     } else {
         let addr = calculate_addr(cpu, instr);
-        let v = if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) };
-        (v, Some(addr))
+        (if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) }, Some(addr))
     };
 
-    let count = get_shift_count(cpu, instr);
-    let effective_count = count & 0x1F;
+    let count = get_shift_count(cpu, instr) & 0x1F;
+    if count == 0 { return; }
 
-    if effective_count == 0 { return; }
-
-    // Bits width
     let width = if is_8bit { 8 } else { 16 };
-    let msb_mask = 1 << (width - 1);
 
-    for _ in 0..effective_count {
-        let old_cf = if cpu.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
-        let new_cf;
-
+    for _ in 0..count {
+        let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
+        let msb_mask = 1 << (width - 1);
+        
         match mnemonic {
-            Mnemonic::Rcl => {
-                // Rotate Left through Carry: CF <- MSB, LSB <- Old CF
-                let msb = (val & msb_mask) != 0;
-                new_cf = if msb { 1 } else { 0 };
-                val = (val << 1) | old_cf;
-            },
-            Mnemonic::Rcr => {
-                // Rotate Right through Carry: CF <- LSB, MSB <- Old CF
-                let lsb = (val & 1) != 0;
-                new_cf = if lsb { 1 } else { 0 };
-                val = (val >> 1) | (old_cf << (width - 1));
-            },
             Mnemonic::Rol => {
-                // Rotate Left: CF <- MSB, LSB <- MSB
                 let msb = (val & msb_mask) != 0;
-                new_cf = if msb { 1 } else { 0 };
-                val = (val << 1) | new_cf;
+                val = (val << 1) | (if msb { 1 } else { 0 });
+                cpu.set_cpu_flag(CpuFlags::CF, msb);
             },
             Mnemonic::Ror => {
-                // Rotate Right: CF <- LSB, MSB <- LSB
                 let lsb = (val & 1) != 0;
-                new_cf = if lsb { 1 } else { 0 };
-                val = (val >> 1) | (new_cf << (width - 1));
+                val = (val >> 1) | (if lsb { msb_mask } else { 0 });
+                cpu.set_cpu_flag(CpuFlags::CF, lsb);
             },
-            _ => { new_cf = 0; }
+            Mnemonic::Rcl => {
+                let msb = (val & msb_mask) != 0;
+                val = (val << 1) | (if old_cf { 1 } else { 0 });
+                cpu.set_cpu_flag(CpuFlags::CF, msb);
+            },
+            Mnemonic::Rcr => {
+                let lsb = (val & 1) != 0;
+                val = (val >> 1) | (if old_cf { msb_mask } else { 0 });
+                cpu.set_cpu_flag(CpuFlags::CF, lsb);
+            },
+            _ => unreachable!(),
         }
-        
-        // Mask value to correct size
         if is_8bit { val &= 0xFF; }
-
-        cpu.set_cpu_flag(CpuFlags::CF, new_cf != 0);
     }
 
-    // Write Back
     if let Some(addr) = addr_opt {
         if is_8bit { cpu.bus.write_8(addr, val as u8); } else { cpu.bus.write_16(addr, val); }
     } else {
         let reg = instr.op0_register();
         if is_8bit { cpu.set_reg8(reg, val as u8); } else { cpu.set_reg16(reg, val); }
-    }
-
-    // OF Logic for Count == 1
-    if effective_count == 1 {
-        let msb = if is_8bit { (val >> 7) & 1 } else { (val >> 15) & 1 };
-        let cf = if cpu.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
-        
-        match mnemonic {
-            Mnemonic::Rcl | Mnemonic::Rol => cpu.set_cpu_flag(CpuFlags::OF, (msb ^ cf) != 0),
-            Mnemonic::Rcr | Mnemonic::Ror => {
-                // OF = MSB ^ (Bit next to MSB) -> effectively (MSB ^ New MSB) logic varies slightly by manual
-                // Simplified: OF set if sign bit changed
-                // (This is a simplification, exact x86 XORs top two bits)
-                let msb_prev = if is_8bit { (val >> 6) & 1 } else { (val >> 14) & 1 }; // Approximate
-                cpu.set_cpu_flag(CpuFlags::OF, (msb ^ msb_prev) != 0); 
-            }
-            _ => { cpu.bus.log_string(&format!("[LOGIC] Unsupported rotate mnemonic for OF calculation: {:?}", mnemonic)); }
-        }
     }
 }
