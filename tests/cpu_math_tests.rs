@@ -245,3 +245,30 @@ fn test_math_cmp_16bit_signed_overflow() {
     assert!(cpu.get_cpu_flag(CpuFlags::CF), "16-bit 3 - 4 causes unsigned borrow (CF=1)");
     assert!(!cpu.get_cpu_flag(CpuFlags::OF), "16-bit 3 - 4 does NOT overflow (OF should be 0)");
 }
+
+#[test]
+fn test_add_r16_imm8_sign_extension_extended_ascii() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: 
+    // AX = 0x00C4 (Extended ASCII '─', 196)
+    // ADD AX, -1 (0xFF) -> Should be 0x00C3
+    //
+    // Opcode 83 C0 FF -> ADD AX, -1
+    // This instruction uses OpKind::Immediate8to16.
+    
+    cpu.set_reg16(iced_x86::Register::AX, 0x00C4);
+    
+    // 83 C0 FF
+    testrunners::run_cpu_code(&mut cpu, &[0x83, 0xC0, 0xFF]);
+    
+    // Correct: 196 + (-1) = 195 (0x00C3)
+    // Buggy (Zero Ext): 196 + 255 = 451 (0x01C3) -> "Shifted" value!
+    assert_eq!(cpu.get_reg16(iced_x86::Register::AX), 0x00C3, 
+        "ADD AX, -1 failed! Likely treated -1 as 255. Result shifted by +256.");
+        
+    // Check Flags
+    // 196 - 1 = 195. 
+    // SF=0 (Positive). ZF=0. CF=1 (Because 0xC4 + 0xFFFF wrapped).
+    assert!(!cpu.get_cpu_flag(CpuFlags::SF)); 
+}
