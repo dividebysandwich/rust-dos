@@ -88,7 +88,6 @@ pub struct Cpu {
     // REMOVEME: FLOAT DEBUGGING
     pub debug_qb_print: bool,
     pub last_fstp_addr: usize,
-    pub debug_qb_conversion: bool,
 }
 
 #[derive(PartialEq)]
@@ -126,7 +125,6 @@ impl Cpu {
             fpu_tags: [FPU_TAG_EMPTY; 8],
             debug_qb_print: false,
             last_fstp_addr: 0,
-            debug_qb_conversion: false,
         }
     }
 

@@ -1,6 +1,5 @@
-use rust_dos::cpu::{Cpu, FpuFlags, CpuFlags};
+use rust_dos::cpu::{Cpu, FpuFlags};
 use rust_dos::f80::F80;
-use iced_x86::{Decoder, DecoderOptions};
 
 mod testrunners;
 

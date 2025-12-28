@@ -2,15 +2,6 @@ use iced_x86::{Instruction, Mnemonic, Register};
 use crate::cpu::{Cpu, CpuFlags};
 
 pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
-    let is_string = matches!(
-        instr.mnemonic(),
-        Mnemonic::Movsb | Mnemonic::Movsw |
-        Mnemonic::Stosb | Mnemonic::Stosw |
-        Mnemonic::Lodsb | Mnemonic::Lodsw |
-        Mnemonic::Cmpsb | Mnemonic::Cmpsw |
-        Mnemonic::Scasb | Mnemonic::Scasw
-    );
-
     let has_rep = instr.has_rep_prefix();
     let has_repne = instr.has_repne_prefix();
 

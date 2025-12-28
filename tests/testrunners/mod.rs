@@ -1,6 +1,7 @@
 use rust_dos::cpu::Cpu;
 use iced_x86::{Decoder, DecoderOptions};
 
+#[allow(dead_code)]
 pub fn run_cpu_code(cpu: &mut Cpu, code: &[u8]) {
     // 1. Write code to emulated memory (Crucial for FPU/Memory ops)
     let cs_base = (cpu.cs as u32) << 4;
@@ -41,7 +42,7 @@ pub fn run_cpu_code(cpu: &mut Cpu, code: &[u8]) {
     }
 }
 
-// Helper to decode and run a single instruction
+#[allow(dead_code)]
 pub fn run_fpu_code(cpu: &mut Cpu, code: &[u8]) {
     // Write the code to the CPU's memory at CS:IP
     // This is required because fcom_variants read the raw opcode byte
