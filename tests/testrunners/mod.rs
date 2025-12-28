@@ -1,9 +1,8 @@
 use rust_dos::cpu::Cpu;
-use iced_x86::{Decoder, DecoderOptions};
+use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 
 #[allow(dead_code)]
 pub fn run_cpu_code(cpu: &mut Cpu, code: &[u8]) {
-    // 1. Write code to emulated memory (Crucial for FPU/Memory ops)
     let cs_base = (cpu.cs as u32) << 4;
     let start_ip = cpu.ip as u32;
 
@@ -12,33 +11,30 @@ pub fn run_cpu_code(cpu: &mut Cpu, code: &[u8]) {
         cpu.bus.write_8(phys_addr as usize, byte);
     }
 
-    // 2. Execution Loop
-    // We limit execution to prevent infinite loops in tests
     let mut instructions_left = 100;
 
     loop {
         if instructions_left == 0 { break; }
         instructions_left -= 1;
 
-        // Calculate offset into the code buffer based on current IP
         let current_offset = (cpu.ip as u32).wrapping_sub(start_ip) as usize;
+        if current_offset >= code.len() { break; }
 
-        // Stop if IP is outside the provided code buffer
-        if current_offset >= code.len() {
-            break;
-        }
-
-        // Decode exactly ONE instruction at the current IP
         let mut decoder = Decoder::new(16, &code[current_offset..], DecoderOptions::NONE);
         decoder.set_ip(cpu.ip as u64);
         
         let instr = decoder.decode();
         
-        // Update IP to the next instruction (Default behavior)
+        // Update IP to point to next instruction
         cpu.ip = instr.next_ip() as u16;
 
-        // Execute (This might change IP if it's a Jump)
+        // Execute the instruction
         rust_dos::instructions::execute_instruction(cpu, &instr);
+
+        // Check for HLT *after* execution so the CPU state updates
+        if instr.mnemonic() == Mnemonic::Hlt {
+            break;
+        }
     }
 }
 

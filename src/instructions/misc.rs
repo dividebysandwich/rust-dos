@@ -55,7 +55,14 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // Op1: Nesting Level (0-31)
         Mnemonic::Enter => {
             let size = instr.immediate16();
-            let level = instr.immediate8() & 0x1F; // Level is modulo 32
+            //let level = instr.immediate8() & 0x1F; // Level is modulo 32
+
+            // Explicitly read the level byte from memory to avoid decoding ambiguity.
+            // ENTER is 4 bytes: [Opcode, SizeLO, SizeHI, Level]
+            // cpu.ip points to the NEXT instruction, so back up 1 byte to find Level.
+            // (Instruction is 4 bytes long. Level is at offset 3)
+            let level_addr = (cpu.cs as u32 * 16 + cpu.ip as u32).wrapping_sub(1);
+            let level = cpu.bus.read_8(level_addr as usize) & 0x1F;
 
             // Push Caller's BP
             cpu.push(cpu.bp);

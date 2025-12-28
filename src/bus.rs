@@ -128,10 +128,10 @@ impl Bus {
     }
 
     pub fn read_8(&self, addr: usize) -> u8 {
-        if addr >= 0x116F2 && addr < 0x116F2 + 12 {
-             println!("[MEM WATCH] CPU reading DTA Filename @ {:05X}. Value: {:02X} ({})", 
-                      addr, self.ram[addr], self.ram[addr] as char);
-        }
+        // if addr >= 0x116F2 && addr < 0x116F2 + 12 {
+        //      println!("[MEM WATCH] CPU reading DTA Filename @ {:05X}. Value: {:02X} ({})", 
+        //               addr, self.ram[addr], self.ram[addr] as char);
+        // }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             self.vram_graphics[addr - ADDR_VGA_GRAPHICS]
         } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
