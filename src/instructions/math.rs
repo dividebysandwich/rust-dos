@@ -326,8 +326,12 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
             get_op1_val(cpu, instr, false) as i16 as i32
         } else {
             // 3-Op: Src2 is immediate
-            if instr.op2_kind() == OpKind::Immediate8 {
+            let op2_kind = instr.op2_kind();
+            if op2_kind == OpKind::Immediate8 {
                 instr.immediate8() as i8 as i16 as i32
+            } else if op2_kind == OpKind::Immediate8to16 {
+                // This is the critical missing case for Opcode 6B
+                instr.immediate8to16() as i16 as i32
             } else {
                 instr.immediate16() as i16 as i32
             }

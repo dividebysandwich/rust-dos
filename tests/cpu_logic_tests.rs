@@ -141,3 +141,123 @@ fn test_test_instr_must_clear_carry_overflow() {
     assert!(!cpu.get_cpu_flag(CpuFlags::OF), "TEST instruction failed to clear Overflow Flag");
 }
 
+#[test]
+fn test_logic_imm8_sign_extension() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: Align AX to even number using AND with -2 (0xFE).
+    // Opcode: 83 E0 FE -> AND AX, imm8
+    //
+    // Correct (Sign Extended): 
+    //   Imm8 0xFE (-2) -> 0xFFFE.
+    //   0x1235 & 0xFFFE = 0x1234. (Upper byte preserved).
+    //
+    // Buggy (Zero Extended):
+    //   Imm8 0xFE (254) -> 0x00FE.
+    //   0x1235 & 0x00FE = 0x0034. (Upper byte DESTROYED).
+
+    cpu.set_reg16(iced_x86::Register::AX, 0x1235);
+
+    // 83 E0 FE -> AND AX, -2
+    testrunners::run_cpu_code(&mut cpu, &[0x83, 0xE0, 0xFE]);
+
+    assert_eq!(cpu.get_reg16(iced_x86::Register::AX), 0x1234, 
+        "AND AX, imm8 failed sign extension! Upper byte was destroyed.");
+}
+
+#[test]
+fn test_rep_cx_zero_does_nothing() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: REP STOSW with CX = 0.
+    // Should NOT write to memory. Should NOT decrement DI.
+    // If implemented as a do-while loop, it will write once.
+
+    cpu.set_reg16(iced_x86::Register::CX, 0);
+    cpu.set_reg16(iced_x86::Register::DI, 0x1000);
+    cpu.set_reg16(iced_x86::Register::AX, 0xDEAD);
+    cpu.set_reg16(iced_x86::Register::ES, 0x0000);
+
+    // Write "Safe" value to memory
+    cpu.bus.write_16(0x1000, 0x0000);
+
+    // F3 AB -> REP STOSW
+    testrunners::run_cpu_code(&mut cpu, &[0xF3, 0xAB]);
+
+    assert_eq!(cpu.bus.read_16(0x1000), 0x0000, "REP STOSW executed even though CX was 0!");
+    assert_eq!(cpu.get_reg16(iced_x86::Register::DI), 0x1000, "DI should not change if CX is 0");
+}
+
+#[test]
+fn test_aad_logic() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: AAD converts unpacked BCD in AH:AL into binary in AL.
+    // AL = AL + (AH * base). AH = 0.
+    // Standard base is 10 (0x0A).
+    
+    // AH = 0x02, AL = 0x05.
+    // Result should be 2 * 10 + 5 = 25 (0x19).
+    cpu.set_reg16(iced_x86::Register::AX, 0x0205);
+
+    // D5 0A -> AAD 10
+    testrunners::run_cpu_code(&mut cpu, &[0xD5, 0x0A]);
+
+    assert_eq!(cpu.get_reg16(iced_x86::Register::AX), 0x0019, "AAD failed to convert BCD!");
+    assert!(!cpu.get_cpu_flag(CpuFlags::ZF));
+    assert!(!cpu.get_cpu_flag(CpuFlags::SF));
+    
+    // Test Flags (Zero result)
+    // AH=0, AL=0 -> Result 0
+    cpu.set_reg16(iced_x86::Register::AX, 0x0000);
+    testrunners::run_cpu_code(&mut cpu, &[0xD5, 0x0A]);
+    assert_eq!(cpu.get_reg16(iced_x86::Register::AX), 0x0000);
+    assert!(cpu.get_cpu_flag(CpuFlags::ZF), "AAD failed to set ZF");
+}
+
+#[test]
+fn test_xlat_segment_override() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: XLAT with Segment Override (ES:).
+    // Instruction: 26 D7 -> XLAT ES:[BX]
+    // Default (DS:[BX]): 0xDD
+    // Override (ES:[BX]): 0xEE
+    
+    cpu.set_reg16(iced_x86::Register::BX, 0x0100);
+    cpu.set_reg16(iced_x86::Register::DS, 0x1000);
+    cpu.set_reg16(iced_x86::Register::ES, 0x2000);
+    cpu.set_reg8(iced_x86::Register::AL, 0x02); // Index 2
+
+    // Setup Memory
+    // DS:[BX+AL] -> 0x10000 + 0x100 + 2 = 0x10102
+    cpu.bus.write_8(0x10102, 0xDD);
+    // ES:[BX+AL] -> 0x20000 + 0x100 + 2 = 0x20102
+    cpu.bus.write_8(0x20102, 0xEE);
+
+    // 26 D7 -> XLAT ES:[BX]
+    testrunners::run_cpu_code(&mut cpu, &[0x26, 0xD7]);
+
+    assert_eq!(cpu.get_reg8(iced_x86::Register::AL), 0xEE, 
+        "XLAT ignored Segment Override (read from DS instead of ES)");
+}
+
+#[test]
+fn test_imul_3_op_sign_extension() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: IMUL AX, BX, -5
+    // Opcode: 6B C3 FB
+    // BX = 2.
+    // Calculation: 2 * -5 = -10 (0xFFF6).
+    //
+    // If sign extension fails: 2 * 251 = 502 (0x01F6).
+    
+    cpu.set_reg16(iced_x86::Register::BX, 2);
+    
+    testrunners::run_cpu_code(&mut cpu, &[0x6B, 0xC3, 0xFB]);
+    
+    assert_eq!(cpu.get_reg16(iced_x86::Register::AX), 0xFFF6, 
+        "IMUL 3-operand failed sign extension on immediate!");
+}
+

@@ -28,7 +28,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Cbw => cbw(cpu),
         Mnemonic::Cwd => cwd(cpu, instr),
 
-        Mnemonic::Xlatb => xlatb(cpu),
+        Mnemonic::Xlatb => xlatb(cpu, instr),
         Mnemonic::Lahf => lahf(cpu),
         Mnemonic::Sahf => sahf(cpu),
         
@@ -301,15 +301,27 @@ fn cwd(cpu: &mut Cpu, instr: &Instruction) {
     }
 }
 
-fn xlatb(cpu: &mut Cpu) {
-    // AL = Byte at [DS:BX + AL]
-    let bx = cpu.bx;
-    let al = cpu.get_al() as u16;
-    let offset = bx.wrapping_add(al);
-    let addr = cpu.get_physical_addr(cpu.ds, offset);
+fn xlatb(cpu: &mut Cpu, instr: &Instruction) {
+    let al = cpu.get_al();
+    let bx = cpu.get_reg16(Register::BX);
+
+    // [CRITICAL FIX] Check for Segment Override Prefix
+    // XLAT defaults to DS:[BX+AL], but can be overridden (e.g., ES:[BX+AL])
+    let segment = if instr.segment_prefix() != Register::None {
+        cpu.get_reg16(instr.segment_prefix())
+    } else {
+        cpu.ds 
+    };
+
+    // Calculate Offset: BX + AL (Zero Extended)
+    let offset = bx.wrapping_add(al as u16);
     
-    let val = cpu.bus.read_8(addr);
-    cpu.set_reg8(iced_x86::Register::AL, val);
+    // Read from memory
+    let phys_addr = cpu.get_physical_addr(segment, offset);
+    let val = cpu.bus.read_8(phys_addr);
+    
+    // Write back to AL
+    cpu.set_reg8(Register::AL, val);
 }
 
 // LAHF: Load Flags into AH

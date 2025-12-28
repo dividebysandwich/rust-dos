@@ -1,4 +1,4 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize};
+use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
 use crate::cpu::{Cpu, CpuFlags};
 use super::utils::{calculate_addr, is_8bit_reg};
 
@@ -16,6 +16,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Rcr => rotate_op(cpu, instr, Mnemonic::Rcr),
         Mnemonic::Rol => rotate_op(cpu, instr, Mnemonic::Rol),
         Mnemonic::Ror => rotate_op(cpu, instr, Mnemonic::Ror),
+        Mnemonic::Aad => aad(cpu, instr),
         _ => { cpu.bus.log_string(&format!("[LOGIC] Unsupported instruction: {:?}", instr.mnemonic())); }
     }
 }
@@ -286,4 +287,25 @@ fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
         let reg = instr.op0_register();
         if is_8bit { cpu.set_reg8(reg, val as u8); } else { cpu.set_reg16(reg, val); }
     }
+}
+
+fn aad(cpu: &mut Cpu, instr: &Instruction) {
+    // Determine base (usually 10)
+    let base = if instr.op_count() > 0 && instr.op0_kind() == OpKind::Immediate8 {
+        instr.immediate8()
+    } else {
+        10
+    };
+    
+    let al = cpu.get_al();
+    let ah = cpu.get_ah();
+    
+    let res = (al as u16).wrapping_add((ah as u16).wrapping_mul(base as u16));
+    
+    cpu.set_reg8(Register::AL, (res & 0xFF) as u8);
+    cpu.set_reg8(Register::AH, 0);
+    
+    cpu.set_cpu_flag(CpuFlags::SF, (res & 0x80) != 0);
+    cpu.set_cpu_flag(CpuFlags::ZF, (res & 0xFF) == 0);
+    cpu.update_pf(res);
 }

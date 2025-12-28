@@ -67,14 +67,23 @@ pub struct Cpu {
 
     // For future 32-bit instructions
     pub eax: u32,
+    #[allow(dead_code)]
     pub ebx: u32,
+    #[allow(dead_code)]
     pub ecx: u32,
+    #[allow(dead_code)]
     pub edx: u32,
+    #[allow(dead_code)]
     pub edi: u32,
+    #[allow(dead_code)]
     pub esi: u32,
+    #[allow(dead_code)]
     pub ebp: u32,
+    #[allow(dead_code)]
     pub esp: u32,
+    #[allow(dead_code)]
     pub eip: u32,
+    #[allow(dead_code)]
     pub eflags: u32,
 
     // Pointers & Segments
@@ -446,6 +455,7 @@ impl Cpu {
             Register::ES => self.es = value,
             Register::DS => self.ds = value,
             Register::SS => self.ss = value,
+            Register::CS => self.cs = value,
 
             _ => panic!("Unimplemented register write: {:?}", reg),
         }

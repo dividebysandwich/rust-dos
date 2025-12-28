@@ -226,3 +226,30 @@ fn test_string_rep_stosw_direction() {
     assert_eq!(cpu.get_reg16(iced_x86::Register::CX), 0, "CX should be 0 after REP");
     assert_eq!(cpu.get_reg16(iced_x86::Register::DI), 0x1006, "DI should increment by 2 * 3 = 6");
 }
+
+#[test]
+fn test_lods_segment_override() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: Load String Byte (LODSB) with Segment Override.
+    // Instruction: 2E AC -> LODSB CS:[SI]
+    // 
+    // Default: DS:[SI] (0x1000:0x0010) -> Contains 0xDD (Data)
+    // Override: CS:[SI] (0x2000:0x0010) -> Contains 0xCC (Code)
+
+    // Setup Segments
+    cpu.set_reg16(iced_x86::Register::DS, 0x1000);
+    cpu.set_reg16(iced_x86::Register::CS, 0x2000);
+    cpu.set_reg16(iced_x86::Register::SI, 0x0010);
+
+    // Setup Memory
+    cpu.bus.write_8(0x10010, 0xDD); // Data Segment Value
+    cpu.bus.write_8(0x20010, 0xCC); // Code Segment Value
+
+    // Execute: CS: LODSB
+    // Opcode: 2E (CS Prefix), AC (LODSB)
+    testrunners::run_cpu_code(&mut cpu, &[0x2E, 0xAC]);
+
+    assert_eq!(cpu.get_reg8(iced_x86::Register::AL), 0xCC, 
+        "LODSB ignored the CS: Segment Override! Read from DS (0xDD) instead of CS (0xCC).");
+}

@@ -266,9 +266,21 @@ impl Bus {
             // PIT Command Register (Port 0x43)
             0x43 => {
                 self.pit_mode = value;
-                // If writing to Channel 2 (Bits 7-6 = 10), reset the LSB/MSB toggle
-                if (value & 0xC0) == 0x80 {
-                    self.pit_write_msb = false;
+                
+                // Extract the Channel bits (7-6)
+                // 00 = Channel 0, 01 = Channel 1, 10 = Channel 2
+                let channel = (value >> 6) & 0x03;
+                
+                // If the command is for the Counter (not Read-Back), reset the flip-flop.
+                // We check Access bits (5-4) to ensure it's not a Latch command (00).
+                let access = (value >> 4) & 0x03;
+                
+                if access != 0 {
+                    match channel {
+                        0 => self.pit0_write_msb = false, // Reset Channel 0 LSB/MSB
+                        2 => self.pit_write_msb = false,  // Reset Channel 2 LSB/MSB
+                        _ => {}
+                    }
                 }
             }
 
@@ -301,6 +313,16 @@ impl Bus {
                     val |= 0x03;
                 }
                 val
+            }
+
+            // CGA Status Register (Input Status #1)
+            // Bit 0: Display Enable (0 = Active/No Snow, 1 = Retrace/Border)
+            // Bit 3: Vertical Retrace (1 = Active)
+            0x3DA => {
+                // Toggle bit 0 and 3 based on a pseudo-timer or random to simulate raster beam
+                // TODO: Improve with real timing
+                let phase = (self.start_time.elapsed().as_millis() / 16) % 2; 
+                if phase == 0 { 0x00 } else { 0x09 } // Toggle bits 0 and 3
             }
             _ => 0xFF, // Default open bus
         }

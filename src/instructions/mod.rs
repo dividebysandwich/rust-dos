@@ -81,7 +81,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         // --- Logic / Bitwise ---
         Mnemonic::And | Mnemonic::Or | Mnemonic::Xor | Mnemonic::Not | Mnemonic::Test |
         Mnemonic::Shl | Mnemonic::Shr | Mnemonic::Sal | Mnemonic::Sar |
-        Mnemonic::Rol | Mnemonic::Ror | Mnemonic::Rcl | Mnemonic::Rcr => {
+        Mnemonic::Rol | Mnemonic::Ror | Mnemonic::Rcl | Mnemonic::Rcr |
+        Mnemonic::Aad=> {
             logic::handle(cpu, instr);
         }
 
