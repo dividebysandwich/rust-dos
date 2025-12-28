@@ -57,8 +57,10 @@ fn test_shifts_shl_shr_sar() {
 
     // SAR Test: 0xFE (-2) >> 1 should be 0xFF (-1)
     cpu.set_reg8(iced_x86::Register::BL, 0xFE);
-    // D0 F8 is SAR BL, 1
-    testrunners::run_cpu_code(&mut cpu, &[0xD0, 0xF8]);
+    
+    // D0 FB is SAR BL, 1
+    testrunners::run_cpu_code(&mut cpu, &[0xD0, 0xFB]);
+    
     assert_eq!(cpu.get_reg8(iced_x86::Register::BL), 0xFF, "SAR 0xFE by 1 failed");
 }
 
@@ -74,8 +76,10 @@ fn test_rotates_rol_ror_rcl_rcr() {
     // RCR Test: 0x01 rotated right through Carry (CF=1) = 0x80 (CF=1)
     cpu.set_reg8(iced_x86::Register::CL, 0x01);
     cpu.set_cpu_flag(CpuFlags::CF, true);
-    // D0 D1 is RCR CL, 1
-    testrunners::run_cpu_code(&mut cpu, &[0xD0, 0xD1]);
+    
+    // D0 D9 is RCR CL, 1
+    testrunners::run_cpu_code(&mut cpu, &[0xD0, 0xD9]);
+    
     assert_eq!(cpu.get_reg8(iced_x86::Register::CL), 0x80, "RCR 0x01 with CF=1 failed");
 }
 
@@ -96,12 +100,16 @@ fn test_logic_memory_operands() {
 fn test_rotates_rcr_only() {
     let mut cpu = Cpu::new();
     // Clear all registers
-    cpu.ax = 0; cpu.bx = 0; cpu.cx = 0; cpu.dx = 0;
+    cpu.set_reg16(iced_x86::Register::AX, 0);
+    cpu.set_reg16(iced_x86::Register::BX, 0);
+    cpu.set_reg16(iced_x86::Register::CX, 0);
+    cpu.set_reg16(iced_x86::Register::DX, 0);
     
     cpu.set_reg8(iced_x86::Register::CL, 0x01);
     cpu.set_cpu_flag(CpuFlags::CF, true);
     
-    testrunners::run_cpu_code(&mut cpu, &[0xD0, 0xD1]); // RCR CL, 1
+    // D0 D9 is RCR CL, 1
+    testrunners::run_cpu_code(&mut cpu, &[0xD0, 0xD9]); 
     
     let cl_val = cpu.get_reg8(iced_x86::Register::CL);
     let al_val = cpu.get_reg8(iced_x86::Register::AL);
