@@ -136,10 +136,6 @@ fn test_rotate_flag_preservation() {
     cpu.set_cpu_flag(CpuFlags::CF, false);
 
     // 2. Perform RCL on a non-zero value
-    // If you were using a 16-bit helper that sets ZF, it will flip to false here.
-    // In a real CPU, ZF remains true.
-    // Assuming you have a way to call your rotate_op handler:
-    // rotate_op(&mut cpu, Register::AL, 1, Mnemonic::Rcl); 
     
     // Check if ZF survived
     assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "RCL incorrectly modified ZF!");

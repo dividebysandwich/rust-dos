@@ -85,7 +85,7 @@ fn test_loop_instructions() {
         0xB9, 0x05, 0x00, 
         0xB0, 0x00, 
         0xFE, 0xC0, 
-        0xE2, 0xFC  // Changed FD to FC to hit 0x105 accurately
+        0xE2, 0xFC
     ];
     run_cpu_code(&mut cpu, &code);
 
@@ -133,8 +133,7 @@ fn test_loop_instruction() {
 fn test_jump_signed_overflow_logic() {
     let mut cpu = Cpu::new();
 
-    // Setup a specific scenario:
-    // We want to simulate a Signed Overflow where the result LOOKS positive (SF=0)
+    // Simulate a Signed Overflow where the result LOOKS positive (SF=0)
     // but is actually negative (due to OF=1).
     //
     // Example: -128 (0x80) - 1 (0x01) = +127 (0x7F).
@@ -142,16 +141,10 @@ fn test_jump_signed_overflow_logic() {
     //
     // A correct "Jump Less" (JL) checks (SF != OF).
     // Here: (0 != 1) is TRUE. It SHOULD jump.
-    //
-    // If your emulator incorrectly checks only SF, it will NOT jump.
     
     cpu.set_cpu_flag(CpuFlags::SF, false);
     cpu.set_cpu_flag(CpuFlags::OF, true);
     
-    // 7C 00 -> JL +0 (Jump Less). 
-    // If taken, IP moves +2 (inst size) + 0 = +2.
-    // If NOT taken, IP moves +2. 
-    // Wait, jump offset 0 is useless for testing. Let's jump +5.
     // 7C 05 -> JL +5
     
     cpu.ip = 0x100;

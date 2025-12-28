@@ -261,3 +261,76 @@ fn test_imul_3_op_sign_extension() {
         "IMUL 3-operand failed sign extension on immediate!");
 }
 
+#[test]
+fn test_rcl_9bit_rotation() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: Rotate Through Carry (RCL) behaves like a 9-bit rotate for 8-bit registers.
+    // The ring is: [CF] <- [7...0] <- [CF]
+    
+    // Setup:
+    // AL = 0xFF (1111 1111)
+    // CF = 0
+    // Rotate Left by 1.
+    // New CF should be the old MSB (1).
+    // New AL should be (0xFF << 1) | Old_CF = 0xFE (1111 1110).
+    
+    cpu.set_reg8(iced_x86::Register::AL, 0xFF);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+
+    // D0 D0 -> RCL AL, 1
+    testrunners::run_cpu_code(&mut cpu, &[0xD0, 0xD0]);
+
+    assert_eq!(cpu.get_reg8(iced_x86::Register::AL), 0xFE);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "RCL failed to rotate MSB into CF");
+
+    // NOW, the tricky part: Rotate by 9.
+    // A 9-bit rotate on a 9-bit ring (8 bits + CF) should be a No-Op (Identity).
+    
+    cpu.set_reg8(iced_x86::Register::AL, 0x55); // 0101 0101
+    cpu.set_cpu_flag(CpuFlags::CF, true);       // 1
+    
+    // C0 D0 09 -> RCL AL, 9
+    testrunners::run_cpu_code(&mut cpu, &[0xC0, 0xD0, 0x09]);
+
+    assert_eq!(cpu.get_reg8(iced_x86::Register::AL), 0x55, "RCL 9-bit identity failed");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "RCL 9-bit identity failed to preserve CF");
+}
+
+#[test]
+fn test_shl_overshift_behavior() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: Shift Left by 16 or more.
+    // On 8086, the CPU does NOT mask the count. It literally shifts 16 times.
+    // Result should be 0.
+
+    cpu.set_reg16(iced_x86::Register::AX, 0xFFFF);
+
+    // C1 E0 10 -> SHL AX, 16
+    testrunners::run_cpu_code(&mut cpu, &[0xC1, 0xE0, 0x10]);
+
+    assert_eq!(cpu.get_reg16(iced_x86::Register::AX), 0x0000, 
+        "SHL AX, 16 failed! (Expected 0, likely got wrapped result)");
+}
+
+#[test]
+fn test_pushf_popf_preserves_direction() {
+    let mut cpu = Cpu::new();
+
+    cpu.set_cpu_flag(CpuFlags::DF, true); // Set Direction Flag (Down)
+    cpu.set_cpu_flag(CpuFlags::CF, true); // Set Carry Flag
+
+    // 9C -> PUSHF
+    testrunners::run_cpu_code(&mut cpu, &[0x9C]);
+    
+    // Corrupt Flags
+    cpu.set_cpu_flag(CpuFlags::DF, false);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+
+    // 9D -> POPF
+    testrunners::run_cpu_code(&mut cpu, &[0x9D]);
+
+    assert!(cpu.get_cpu_flag(CpuFlags::DF), "POPF failed to restore Direction Flag!");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "POPF failed to restore Carry Flag!");
+}
