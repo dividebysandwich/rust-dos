@@ -106,3 +106,59 @@ fn test_jcxz_behavior() {
 
     assert_eq!(cpu.get_al(), 1);
 }
+
+
+#[test]
+fn test_loop_instruction() {
+    let mut cpu = Cpu::new();
+    
+    // Scenario: LOOP decrements CX and jumps if CX != 0.
+    // Loop 5 times.
+    cpu.set_reg16(iced_x86::Register::CX, 5);
+    
+    // E2 FE -> LOOP -2 (Jump back to self)
+    // The test runner will execute this instruction repeatedly until 
+    // CX becomes 0 and the loop condition fails (IP moves to next instruction).
+    
+    cpu.ip = 0x100;
+    testrunners::run_cpu_code(&mut cpu, &[0xE2, 0xFE]); 
+    
+    // The loop runs to completion in one go.
+    assert_eq!(cpu.get_reg16(iced_x86::Register::CX), 0);
+    // IP should have advanced past the 2-byte instruction
+    assert_eq!(cpu.ip, 0x102); 
+}
+
+#[test]
+fn test_jump_signed_overflow_logic() {
+    let mut cpu = Cpu::new();
+
+    // Setup a specific scenario:
+    // We want to simulate a Signed Overflow where the result LOOKS positive (SF=0)
+    // but is actually negative (due to OF=1).
+    //
+    // Example: -128 (0x80) - 1 (0x01) = +127 (0x7F).
+    // SF=0 (Positive result bit), OF=1 (Overflow), ZF=0.
+    //
+    // A correct "Jump Less" (JL) checks (SF != OF).
+    // Here: (0 != 1) is TRUE. It SHOULD jump.
+    //
+    // If your emulator incorrectly checks only SF, it will NOT jump.
+    
+    cpu.set_cpu_flag(CpuFlags::SF, false);
+    cpu.set_cpu_flag(CpuFlags::OF, true);
+    
+    // 7C 00 -> JL +0 (Jump Less). 
+    // If taken, IP moves +2 (inst size) + 0 = +2.
+    // If NOT taken, IP moves +2. 
+    // Wait, jump offset 0 is useless for testing. Let's jump +5.
+    // 7C 05 -> JL +5
+    
+    cpu.ip = 0x100;
+    run_cpu_code(&mut cpu, &[0x7C, 0x05]);
+    
+    // If Jump Taken: IP = 0x100 + 2 (size) + 5 = 0x107
+    // If Jump Not Taken: IP = 0x100 + 2 = 0x102
+    assert_eq!(cpu.ip, 0x107, "JL failed to respect Overflow Flag (SF=0, OF=1)");
+}
+

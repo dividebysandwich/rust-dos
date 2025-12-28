@@ -139,3 +139,109 @@ fn test_math_bcd_adjustments() {
     assert_eq!(cpu.get_reg8(Register::AL), 0x09);
     assert_eq!(cpu.get_reg8(Register::AH), 0x01);
 }
+
+
+#[test]
+fn test_inc_dec_must_preserve_carry_flag() {
+    let mut cpu = Cpu::new();
+
+    // Scenario: A loop that relies on a Carry from an ADD being preserved 
+    // across the loop counter decrement.
+    
+    // 1. Set Carry Flag to TRUE
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    cpu.set_reg16(Register::AX, 10);
+
+    // 2. Execute DEC AX (48)
+    // DEC should set ZF/SF/OF/PF, but MUST PRESERVE CF.
+    run_cpu_code(&mut cpu, &[0x48]);
+
+    assert_eq!(cpu.ax, 9);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "DEC instruction illegally cleared the Carry Flag!");
+
+    // 3. Execute INC AX (40)
+    // INC should also PRESERVE CF.
+    run_cpu_code(&mut cpu, &[0x40]);
+    
+    assert_eq!(cpu.ax, 10);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "INC instruction illegally cleared the Carry Flag!");
+}
+
+#[test]
+fn test_cmp_memory_16bit_width() {
+    let mut cpu = Cpu::new();
+    let addr = 0x200;
+
+    // SCENARIO: 
+    // Register AX = 0x0100 (256)
+    // Memory   = 0x0100 (256)
+    //
+    // Correct 16-bit CMP: 0x0100 - 0x0100 = 0 (ZF=1)
+    // Buggy 8-bit Read:   0x0100 - 0x00   = 0x0100 (ZF=0)
+    //
+    // If the emulator treats 'CMP AX, [addr]' as an 8-bit memory read (reading only 0x00),
+    // the comparison will fail.
+    
+    cpu.set_reg16(Register::AX, 0x0100);
+    
+    // Write 0x0100 to memory (Little Endian: 00 01)
+    cpu.bus.write_16(addr, 0x0100); 
+
+    // 3B 06 00 02  -> CMP AX, [0x0200]
+    run_cpu_code(&mut cpu, &[0x3B, 0x06, 0x00, 0x02]);
+
+    assert!(cpu.get_cpu_flag(CpuFlags::ZF), "CMP 16-bit Memory read incorrect (ZF should be 1)");
+}
+
+#[test]
+fn test_math_cmp_signed_overflow() {
+    let mut cpu = Cpu::new();
+
+    // Check proper setting of OF vs CF
+    //
+    // Case 1: 3 - 4 = -1
+    // Unsigned: Borrow/Carry IS generated (3 < 4). CF=1.
+    // Signed:   3 - 4 = -1. This FITS in 8-bit (-128 to 127). NO Overflow. OF=0.
+    // BUG: If code uses CF for OF, OF will be 1 (Wrong).
+    cpu.set_reg8(Register::AL, 3);
+    cpu.set_reg8(Register::BL, 4);
+    // 38 D8 -> CMP AL, BL
+    run_cpu_code(&mut cpu, &[0x38, 0xD8]);
+    
+    assert!(cpu.get_cpu_flag(CpuFlags::SF), "3 - 4 should be negative (SF=1)");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "3 - 4 causes unsigned borrow (CF=1)");
+    assert!(!cpu.get_cpu_flag(CpuFlags::OF), "3 - 4 does NOT overflow signed 8-bit (OF should be 0)");
+
+    // Case 2: -128 - 1 = -129
+    // Unsigned: 0x80 - 0x01 = 0x7F. No Borrow. CF=0.
+    // Signed:   -129 is outside range [-128, 127]. Overflow! OF=1.
+    // BUG: If code uses CF for OF, OF will be 0 (Wrong).
+    cpu.set_reg8(Register::AL, 0x80); // -128
+    cpu.set_reg8(Register::BL, 1);
+    // 38 D8 -> CMP AL, BL
+    run_cpu_code(&mut cpu, &[0x38, 0xD8]);
+
+    assert!(!cpu.get_cpu_flag(CpuFlags::SF), "Result 127 is positive (SF=0)");
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "0x80 - 0x01 does not borrow (CF=0)");
+    assert!(cpu.get_cpu_flag(CpuFlags::OF), "-128 - 1 overflows signed 8-bit (OF should be 1)");
+}
+
+#[test]
+fn test_math_cmp_16bit_signed_overflow() {
+    let mut cpu = Cpu::new();
+
+    // 16-bit comparison
+    // Case: 3 - 4 = -1 (0xFFFF)
+    // Correct Flags: SF=1 (Negative), CF=1 (Borrow), OF=0 (No Signed Overflow)
+    // Buggy Logic:   If code uses u16::overflowing_sub, it returns true (CF), causing OF=1.
+    
+    cpu.set_reg16(Register::AX, 3);
+    cpu.set_reg16(Register::BX, 4);
+    
+    // 39 D8 -> CMP AX, BX (16-bit)
+    run_cpu_code(&mut cpu, &[0x39, 0xD8]);
+    
+    assert!(cpu.get_cpu_flag(CpuFlags::SF), "16-bit 3 - 4 should be negative (SF=1)");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF), "16-bit 3 - 4 causes unsigned borrow (CF=1)");
+    assert!(!cpu.get_cpu_flag(CpuFlags::OF), "16-bit 3 - 4 does NOT overflow (OF should be 0)");
+}

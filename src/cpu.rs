@@ -64,6 +64,19 @@ pub struct Cpu {
     pub dx: u16,
     pub di: u16,
     pub si: u16,
+
+    // For future 32-bit instructions
+    pub eax: u32,
+    pub ebx: u32,
+    pub ecx: u32,
+    pub edx: u32,
+    pub edi: u32,
+    pub esi: u32,
+    pub ebp: u32,
+    pub esp: u32,
+    pub eip: u32,
+    pub eflags: u32,
+
     // Pointers & Segments
     pub bp: u16,
     pub sp: u16,
@@ -113,6 +126,16 @@ impl Cpu {
             ds: 0,
             es: 0,
             ss: 0,
+            eip: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            edi: 0,
+            esi: 0,
+            ebp: 0,
+            esp: 0,
+            eflags: 0,
             ip: 0x100,
             bus: Bus::new(),
             flags: CpuFlags::from_bits_truncate(0x0002), // Default Flag State, Bit 1 is always set

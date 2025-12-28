@@ -1,4 +1,5 @@
 use rust_dos::cpu::{Cpu, CpuFlags};
+use iced_x86::Register;
 
 mod testrunners;
 
@@ -117,3 +118,26 @@ fn test_rotates_rcr_only() {
     println!("[DEBUG] AL: {}, CL: {}", al_val, cl_val);
     assert_eq!(cl_val, 0x80);
 }
+
+
+#[test]
+fn test_test_instr_must_clear_carry_overflow() {
+    let mut cpu = Cpu::new();
+
+    // Scenario: Graphics code often checks bits with TEST, then branches.
+    // TEST must force CF and OF to zero.
+
+    // 1. Set flags to Dirty state (TRUE)
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    cpu.set_cpu_flag(CpuFlags::OF, true);
+    cpu.set_reg8(Register::AL, 0xFF);
+
+    // 2. TEST AL, 0x80 (A8 80)
+    // Should set SF=1, ZF=0. MUST CLEAR CF and OF.
+    testrunners::run_cpu_code(&mut cpu, &[0xA8, 0x80]);
+
+    assert!(cpu.get_cpu_flag(CpuFlags::SF)); // Result is negative
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "TEST instruction failed to clear Carry Flag");
+    assert!(!cpu.get_cpu_flag(CpuFlags::OF), "TEST instruction failed to clear Overflow Flag");
+}
+

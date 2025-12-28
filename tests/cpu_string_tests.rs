@@ -180,3 +180,49 @@ fn test_repe_cmpsb_mismatch() {
     assert_eq!(cpu.di, 14);
     assert!(!cpu.get_cpu_flag(CpuFlags::ZF)); // Mismatch
 }
+
+
+#[test]
+fn test_string_std_stosb_decrement() {
+    let mut cpu = Cpu::new();
+
+    // Scenario 2: STOSB with Direction Flag SET (Decrement)
+    // Writing backwards from 0x2000.
+    
+    cpu.set_cpu_flag(CpuFlags::DF, true); // Decrement
+    cpu.set_reg8(iced_x86::Register::AL, 0xFF);
+    cpu.set_reg16(iced_x86::Register::DI, 0x2000);
+    
+    // AA -> STOSB (Once)
+    testrunners::run_cpu_code(&mut cpu, &[0xAA]);
+    
+    assert_eq!(cpu.bus.read_8(0x2000), 0xFF);
+    
+    // 0x2000 - 1 = 0x1FFF
+    assert_eq!(cpu.get_reg16(iced_x86::Register::DI), 0x1FFF, "DI should decrement by 1");
+}
+
+#[test]
+fn test_string_rep_stosw_direction() {
+    let mut cpu = Cpu::new();
+
+    // Scenario 1: REP STOSW with Direction Flag CLEAR (Increment)
+    // We want to write 0xABCD to memory locations 0x1000, 0x1002, 0x1004.
+    
+    cpu.set_cpu_flag(CpuFlags::DF, false); // Increment
+    cpu.set_reg16(iced_x86::Register::CX, 3);    // Count = 3
+    cpu.set_reg16(iced_x86::Register::AX, 0xABCD);
+    cpu.set_reg16(iced_x86::Register::DI, 0x1000); // Dest Index
+    
+    // F3 AB -> REP STOSW
+    testrunners::run_cpu_code(&mut cpu, &[0xF3, 0xAB]);
+
+    // Check memory
+    assert_eq!(cpu.bus.read_16(0x1000), 0xABCD);
+    assert_eq!(cpu.bus.read_16(0x1002), 0xABCD);
+    assert_eq!(cpu.bus.read_16(0x1004), 0xABCD);
+    
+    // Check Registers
+    assert_eq!(cpu.get_reg16(iced_x86::Register::CX), 0, "CX should be 0 after REP");
+    assert_eq!(cpu.get_reg16(iced_x86::Register::DI), 0x1006, "DI should increment by 2 * 3 = 6");
+}

@@ -26,7 +26,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
 
         // Conversion
         Mnemonic::Cbw => cbw(cpu),
-        Mnemonic::Cwd => cwd(cpu),
+        Mnemonic::Cwd => cwd(cpu, instr),
 
         Mnemonic::Xlatb => xlatb(cpu),
         Mnemonic::Lahf => lahf(cpu),
@@ -289,9 +289,16 @@ fn cbw(cpu: &mut Cpu) {
     cpu.ax = al as i16 as u16;
 }
 
-fn cwd(cpu: &mut Cpu) {
-    let ax = cpu.ax as i16;
-    cpu.dx = if ax < 0 { 0xFFFF } else { 0x0000 };
+fn cwd(cpu: &mut Cpu, instr: &Instruction) {
+    if instr.op0_kind() == OpKind::Register && instr.op0_register() == Register::EAX {
+        // CDQ (386+): EAX -> EDX:EAX (Not strictly needed for 8086, but good to have)
+        let eax = cpu.eax as i32;
+        cpu.edx = (eax >> 31) as u32;
+    } else {
+        // CWD (8086): AX -> DX:AX
+        let ax = cpu.ax as i16;
+        cpu.dx = if ax < 0 { 0xFFFF } else { 0x0000 };
+    }
 }
 
 fn xlatb(cpu: &mut Cpu) {

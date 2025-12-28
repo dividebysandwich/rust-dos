@@ -25,3 +25,27 @@ fn test_fpu_to_cpu_flags_bridge() {
     testrunners::run_cpu_code(&mut cpu, &[0x9E]);
     assert!(cpu.get_cpu_flag(CpuFlags::ZF), "CPU ZF should be set after SAHF");
 }
+
+#[test]
+fn test_cwd_idiv_chain() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: -100 / 2 = -50
+    // AX = -100 (0xFF9C)
+    // We execute CWD. This MUST set DX to 0xFFFF (Sign extension).
+    // If DX stays 0, the dividend becomes 0x0000FF9C (65436), and result is huge/positive.
+    
+    cpu.ax = 0xFF9C; // -100
+    cpu.dx = 0x0000; // Reset DX to ensure CWD actually changes it
+    
+    // 99 -> CWD
+    testrunners::run_cpu_code(&mut cpu, &[0x99]);
+    
+    assert_eq!(cpu.dx, 0xFFFF, "CWD failed to sign extend AX into DX");
+
+    // B9 02 00 -> MOV CX, 2
+    // F7 F9    -> IDIV CX
+    testrunners::run_cpu_code(&mut cpu, &[0xB9, 0x02, 0x00, 0xF7, 0xF9]);
+
+    assert_eq!(cpu.ax as i16, -50, "IDIV failed (likely due to bad CWD setup)");
+}
