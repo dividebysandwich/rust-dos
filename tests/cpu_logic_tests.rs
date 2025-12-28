@@ -334,3 +334,27 @@ fn test_pushf_popf_preserves_direction() {
     assert!(cpu.get_cpu_flag(CpuFlags::DF), "POPF failed to restore Direction Flag!");
     assert!(cpu.get_cpu_flag(CpuFlags::CF), "POPF failed to restore Carry Flag!");
 }
+
+#[test]
+fn test_lea_ignores_segment_base() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: LEA AX, [BX+SI]
+    // DS = 0x1000 (Base 0x10000)
+    // BX = 0x0010
+    // SI = 0x0001
+    //
+    // Correct Result: 0x0010 + 0x0001 = 0x0011
+    
+    cpu.set_reg16(iced_x86::Register::DS, 0x0100);
+    cpu.set_reg16(iced_x86::Register::BX, 0x0010);
+    cpu.set_reg16(iced_x86::Register::SI, 0x0001);
+
+    // 8D 00 -> LEA AX, [BX+SI] (Simplified opcode for test runner logic)
+    // Note: We need the full instruction bytes for LEA AX, [BX+SI]
+    // Opcode: 8D 00 (ModRM: 00 000 000 -> [BX+SI])
+    testrunners::run_cpu_code(&mut cpu, &[0x8D, 0x00]);
+
+    assert_eq!(cpu.get_reg16(iced_x86::Register::AX), 0x0011, 
+        "LEA instruction incorrectly included Segment Base in calculation!");
+}

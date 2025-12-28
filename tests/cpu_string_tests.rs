@@ -253,3 +253,26 @@ fn test_lods_segment_override() {
     assert_eq!(cpu.get_reg8(iced_x86::Register::AL), 0xCC, 
         "LODSB ignored the CS: Segment Override! Read from DS (0xDD) instead of CS (0xCC).");
 }
+
+#[test]
+fn test_loop_zf_interaction() {
+    let mut cpu = Cpu::new();
+
+    // SCENARIO: LOOPE (Loop while Equal).
+    // Should loop if CX != 0 AND ZF == 1.
+    // If ZF becomes 0, it should fall through immediately.
+    
+    cpu.set_reg16(iced_x86::Register::CX, 5);
+    cpu.set_cpu_flag(CpuFlags::ZF, false); // ZF=0 (Not Equal)
+
+    // E1 FE -> LOOPE -2 (Jump back to self)
+    // Should NOT jump because ZF is 0.
+    
+    cpu.ip = 0x100;
+    testrunners::run_cpu_code(&mut cpu, &[0xE1, 0xFE]);
+
+    // Should have executed ONCE, seen ZF=0, and continued.
+    // CX should decrement once (standard behavior for LOOPx instructions: dec then check).
+    assert_eq!(cpu.get_reg16(iced_x86::Register::CX), 4, "LOOPE should decrement CX once");
+    assert_eq!(cpu.ip, 0x102, "LOOPE should NOT take branch if ZF=0");
+}
