@@ -108,7 +108,9 @@ jobs:
 
       - name: Run bundle (macOS)
         if: runner.os == 'macOS'
-        run: cargo bundle --release --target $TARGET
+        run: |
+           export LIBRARY_PATH=$(brew --prefix)/lib
+           cargo bundle --release --target $TARGET
 
       - name: Install zip
         if: runner.os == 'Windows'
