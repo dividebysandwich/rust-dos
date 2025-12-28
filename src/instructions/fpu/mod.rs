@@ -82,9 +82,9 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
 
         // Subtraction
         Mnemonic::Fsub => arithmetic::fsub(cpu, instr),
-        Mnemonic::Fsubp => arithmetic::fsubp(cpu),
+        Mnemonic::Fsubp => arithmetic::fsubp(cpu, instr),
         Mnemonic::Fsubr => arithmetic::fsubr(cpu, instr),
-        Mnemonic::Fsubrp => arithmetic::fsubrp(cpu),
+        Mnemonic::Fsubrp => arithmetic::fsubrp(cpu, instr),
         Mnemonic::Fisub => arithmetic::fisub(cpu, instr),
         Mnemonic::Fisubr => arithmetic::fisubr(cpu, instr),
 
@@ -97,7 +97,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Fdiv => arithmetic::fdiv(cpu, instr),
         Mnemonic::Fdivp => arithmetic::fdivp(cpu, instr),
         Mnemonic::Fdivr => arithmetic::fdivr(cpu, instr),
-        Mnemonic::Fdivrp => arithmetic::fdivrp(cpu),
+        Mnemonic::Fdivrp => arithmetic::fdivrp(cpu, instr),
         Mnemonic::Fidiv => arithmetic::fidiv(cpu, instr),
         Mnemonic::Fidivr => arithmetic::fidivr(cpu, instr),
 

@@ -294,3 +294,45 @@ fn test_fsub_variants() {
     assert_eq!(cpu.fpu_get(1).get_f64(), 8.0);
 }
 
+fn push_val(cpu: &mut Cpu, val: f64) {
+    let mut f = F80::new();
+    f.set_f64(val);
+    cpu.fpu_push(f);
+}
+
+#[test]
+fn test_fsubp_st2_st0() {
+    let mut cpu = Cpu::new();
+    // Setup: ST(0)=1.0, ST(1)=10.0, ST(2)=100.0
+    push_val(&mut cpu, 100.0);
+    push_val(&mut cpu, 10.0);
+    push_val(&mut cpu, 1.0);
+
+    // DE EA: FSUBP ST(2), ST(0)
+    // ST(2) = ST(2) - ST(0) -> 100.0 - 1.0 = 99.0
+    // Pop ST(0)
+    // New Stack: ST(0)=10.0, ST(1)=99.0
+    testrunners::run_fpu_code(&mut cpu, &[0xDE, 0xEA]);
+
+    assert_eq!(cpu.fpu_get(0).get_f64(), 10.0, "ST(1) should become ST(0)");
+    assert_eq!(cpu.fpu_get(1).get_f64(), 99.0, "ST(2) should have been modified and become ST(1)");
+}
+
+#[test]
+fn test_trigonometry() {
+    let mut cpu = Cpu::new();
+    
+    // FSIN of PI/2
+    push_val(&mut cpu, std::f64::consts::FRAC_PI_2);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFE]); // FSIN
+    let val = cpu.fpu_get(0).get_f64();
+    assert!((val - 1.0).abs() < 0.0001);
+
+    // FPTAN of PI/4 (tan = 1.0)
+    // Should result in ST(0)=1.0, ST(1)=1.0 (It pushes 1.0 after calc)
+    push_val(&mut cpu, std::f64::consts::FRAC_PI_4);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xF2]); // FPTAN
+    
+    assert!((cpu.fpu_get(0).get_f64() - 1.0).abs() < 0.0001); // The pushed 1.0
+    assert!((cpu.fpu_get(1).get_f64() - 1.0).abs() < 0.0001); // The result tan(pi/4)
+}

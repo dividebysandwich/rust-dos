@@ -3,6 +3,16 @@ use crate::cpu::{Cpu, FpuFlags};
 use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
 
+// Get the destination index for Pop instructions (e.g., FADDP ST(i), ST(0))
+fn get_pop_dst_index(instr: &Instruction) -> usize {
+    let reg = instr.op0_register();
+    if reg == Register::None || reg == Register::ST1 {
+        1
+    } else {
+        (reg.number() - Register::ST0.number()) as usize
+    }
+}
+
 // FIADD: Add Integer
 // ST(0) = ST(0) + [mem_int]
 pub fn fiadd(cpu: &mut Cpu, instr: &Instruction) {
@@ -138,12 +148,14 @@ pub fn fsub(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 // FSUBP: Subtract and Pop
-// ST(1) = ST(1) - ST(0); Pop ST(0)
-pub fn fsubp(cpu: &mut Cpu) {
+// ST(i) = ST(i) - ST(0); Pop ST(0)
+pub fn fsubp(cpu: &mut Cpu, instr: &Instruction) {
+    let idx = get_pop_dst_index(instr);
+    
     let st0 = cpu.fpu_get(0);
-    let mut st1 = cpu.fpu_get(1);
-    st1.sub(st0);
-    cpu.fpu_set(1, st1);
+    let mut sti = cpu.fpu_get(idx);
+    sti.sub(st0);
+    cpu.fpu_set(idx, sti);
     cpu.fpu_pop();
 }
 
@@ -172,12 +184,14 @@ pub fn fsubr(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 // FSUBRP: Reverse Subtract and Pop
-// ST(1) = ST(0) - ST(1); Pop ST(0)
-pub fn fsubrp(cpu: &mut Cpu) {
+// ST(i) = ST(0) - ST(i); Pop ST(0)
+pub fn fsubrp(cpu: &mut Cpu, instr: &Instruction) {
+    let idx = get_pop_dst_index(instr);
+
     let mut st0 = cpu.fpu_get(0);
-    let st1 = cpu.fpu_get(1);
-    st0.sub(st1);
-    cpu.fpu_set(1, st0);
+    let sti = cpu.fpu_get(idx);
+    st0.sub(sti); // Result is in st0 (local var)
+    cpu.fpu_set(idx, st0); // Write result to ST(i)
     cpu.fpu_pop();
 }
 
@@ -297,20 +311,22 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 // FDIVRP: Reverse Divide and Pop
-// ST(1) = ST(0) / ST(1); Pop ST(0)
-pub fn fdivrp(cpu: &mut Cpu) {
-    let st0 = cpu.fpu_get(0);
-    let mut st1 = cpu.fpu_get(1);
-    
-    let st1_f = st1.get_f64();
-    if st1_f != 0.0 {
-        st1.set_f64(st0.get_f64() / st1_f);
+// ST(i) = ST(0) / ST(i); Pop ST(0)
+pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) { // Added instr argument
+    let idx = get_pop_dst_index(instr);
+
+    let st0_val = cpu.fpu_get(0).get_f64();
+    let mut sti = cpu.fpu_get(idx);
+    let sti_val = sti.get_f64();
+
+    if sti_val != 0.0 {
+        sti.set_f64(st0_val / sti_val);
     } else {
-        st1.set_real_indefinite();
+        sti.set_real_indefinite(); // Zero divide
         cpu.set_fpu_flag(FpuFlags::ZE, true);
     }
     
-    cpu.fpu_set(1, st1);
+    cpu.fpu_set(idx, sti);
     cpu.fpu_pop();
 }
 
