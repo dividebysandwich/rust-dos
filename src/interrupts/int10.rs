@@ -533,12 +533,12 @@ pub fn handle(cpu: &mut Cpu) {
 /// Sets the cursor position in BOTH BDA and Internal State
 fn set_cursor(cpu: &mut Cpu, col: u8, row: u8, page: u8) {
     if page < 8 {
-        // 1. Update BDA (The Source of Truth for BIOS)
+        // Update BDA (The Source of Truth for BIOS)
         let addr = BDA_CURSOR_POS + (page as usize * 2);
         cpu.bus.write_8(addr, col);
         cpu.bus.write_8(addr + 1, row);
 
-        // 2. Update Internal State (If Active Page)
+        // Update Internal State (If Active Page)
         // This fixes the desync where renderer looked at old internal state
         if page == 0 {
             cpu.bus.cursor_x = col as usize;

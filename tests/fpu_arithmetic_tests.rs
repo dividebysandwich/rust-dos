@@ -293,3 +293,4 @@ fn test_fsub_variants() {
     testrunners::run_fpu_code(&mut cpu, &[0xDC, 0xE9]);
     assert_eq!(cpu.fpu_get(1).get_f64(), 8.0);
 }
+

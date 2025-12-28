@@ -73,7 +73,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Fclex | Mnemonic::Fnclex |
         Mnemonic::Fsave | Mnemonic::Fnsave | Mnemonic::Frstor |
         Mnemonic::Fstenv | Mnemonic::Fnstenv | Mnemonic::Fldenv |
-        Mnemonic::Fnop | Mnemonic::Ffree => {
+        Mnemonic::Fnop | Mnemonic::Ffree | Mnemonic::Fincstp | 
+        Mnemonic::Fdecstp => {
             fpu::handle(cpu, instr);
         }
 

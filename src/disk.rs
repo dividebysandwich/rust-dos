@@ -185,10 +185,10 @@ impl DiskController {
             .filter(|c| c.is_ascii_alphanumeric())
             .collect();
 
-        // 1. Truncate Extension to 3 chars immediately
+        // Truncate Extension to 3 chars immediately
         if clean_ext.len() > 3 { clean_ext.truncate(3); }
 
-        // 2. Truncate Stem to 8 chars (Base assumption, will shrink if collision)
+        // Truncate Stem to 8 chars (Base assumption, will shrink if collision)
         if clean_stem.len() > 8 { clean_stem.truncate(8); }
 
         // Edge case: If stem is empty (e.g. ".gitignore"), mapping is tricky.
@@ -211,9 +211,7 @@ impl DiskController {
         // If pattern is "*.*", return true.
         if pattern == "*.*" { return true; }
         
-        // If pattern is complex, we need regex-like matching.
-        // Let's do a basic check:
-        // 1. Split filename and pattern by '.'
+        // Split filename and pattern by '.'
         let (f_name, f_ext) = filename.split_once('.').unwrap_or((filename, ""));
         let (p_name, p_ext) = pattern.split_once('.').unwrap_or((pattern, ""));
 

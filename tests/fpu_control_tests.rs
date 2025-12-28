@@ -144,3 +144,66 @@ fn test_ffree_tag_management() {
     // ST(1) (Phys 1) should still be valid
     assert_eq!(cpu.fpu_tags[1], FPU_TAG_VALID);
 }
+#[test]
+fn test_stack_pointer_manipulation() {
+    let mut cpu = Cpu::new();
+    cpu.fpu_top = 0;
+    
+    // D9 F7: FINCSTP (Increment TOP)
+    // 0 -> 1 (Does not change tags or values, just the pointer)
+    testrunners::run_cpu_code(&mut cpu, &[0xD9, 0xF7]);
+    assert_eq!(cpu.fpu_top, 1);
+
+    // D9 F6: FDECSTP (Decrement TOP)
+    // 1 -> 0
+    testrunners::run_cpu_code(&mut cpu, &[0xD9, 0xF6]);
+    assert_eq!(cpu.fpu_top, 0);
+
+    // Wrap around check: 0 -> 7
+    testrunners::run_cpu_code(&mut cpu, &[0xD9, 0xF6]);
+    assert_eq!(cpu.fpu_top, 7);
+}
+
+#[test]
+fn test_fsave_frstor_full_cycle() {
+    let mut cpu = Cpu::new();
+    
+    // 1. Setup a unique "Dirty" State
+    cpu.fpu_control = 0x1234; // Non-default Control Word
+    cpu.set_fpu_flags(FpuFlags::C2 | FpuFlags::ZE); // Non-default Status
+    cpu.fpu_top = 3;
+    
+    // Set a value at Physical Register 3.
+    // Since TOP=3, this would be ST(0). 
+    // We modify the physical array directly to ensure raw state preservation.
+    let mut val = rust_dos::f80::F80::new();
+    val.set_f64(123.456);
+    cpu.fpu_stack[3] = val; // CORRECTION: Use fpu_stack
+    cpu.fpu_tags[3] = FPU_TAG_VALID;
+
+    // 2. Execute FSAVE [1000] (9B DD 36 00 10)
+    // FSAVE writes state to memory and then runs FNINIT
+    testrunners::run_cpu_code(&mut cpu, &[0x9B, 0xDD, 0x36, 0x00, 0x10]);
+
+    // Verify FPU was reset by FSAVE (FNINIT behavior)
+    assert_eq!(cpu.fpu_top, 0);
+    assert_eq!(cpu.fpu_control, 0x037F);
+    assert_eq!(cpu.fpu_tags[3], FPU_TAG_EMPTY); 
+    
+    // 3. Scramble the state to prove FRSTOR actually overwrites it
+    cpu.fpu_control = 0xFFFF;
+    cpu.fpu_stack[3].set_f64(0.0); // CORRECTION: Use fpu_stack
+
+    // 4. Execute FRSTOR [1000] (DD 26 00 10)
+    testrunners::run_cpu_code(&mut cpu, &[0xDD, 0x26, 0x00, 0x10]);
+
+    // 5. Verify Restoration
+    assert_eq!(cpu.fpu_control, 0x1234, "Control Word not restored");
+    assert_eq!(cpu.fpu_top, 3, "TOP ptr not restored");
+    assert!(cpu.get_fpu_flags().contains(FpuFlags::C2), "Status Flags not restored");
+    
+    // Verify the value came back
+    let restored_val = cpu.fpu_stack[3].get_f64(); // CORRECTION: Use fpu_stack
+    assert!((restored_val - 123.456).abs() < 0.001, "Register value lost during Save/Restore");
+    assert_eq!(cpu.fpu_tags[3], FPU_TAG_VALID, "Tag Word not restored correctly");
+}

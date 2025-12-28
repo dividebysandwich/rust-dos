@@ -22,6 +22,11 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Fstcw | Mnemonic::Fnstcw => control::fnstcw(cpu, instr),
         
         Mnemonic::Fstsw | Mnemonic::Fnstsw => control::fnstsw(cpu, instr),
+
+        Mnemonic::Fsave | Mnemonic::Fnsave => control::fnsave(cpu, instr),
+        Mnemonic::Frstor => control::frstor(cpu, instr),
+        Mnemonic::Fincstp => control::fincstp(cpu),
+        Mnemonic::Fdecstp => control::fdecstp(cpu),
         
         // No-ops or Wait in HLE
         Mnemonic::Fnop => {}, 

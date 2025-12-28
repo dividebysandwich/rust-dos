@@ -162,18 +162,29 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
 
 // FXCH: Exchange Register Contents
 pub fn fxch(cpu: &mut Cpu, instr: &Instruction) {
-    let dst_reg = instr.op0_register();
-    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 {
-        1
-    } else {
-        (dst_reg.number() - Register::ST0.number()) as usize
-    };
+    let mut idx: usize = 1; // Default to ST(1) if implicit
+
+    // Scan operands to find the one that isn't ST(0)
+    for i in 0..instr.op_count() {
+        let reg = instr.op_register(i);
+        // Check if register is in range ST(1)..ST(7)
+        if reg >= Register::ST1 && reg <= Register::ST7 {
+            idx = (reg.number() - Register::ST0.number()) as usize;
+            break;
+        }
+    }
+
+    // Optimization: Swapping ST(0) with ST(0) is a NOP
+    if idx == 0 { return; }
 
     let st0 = cpu.fpu_get(0);
     let sti = cpu.fpu_get(idx);
     
     cpu.fpu_set(0, sti);
     cpu.fpu_set(idx, st0);
+    
+    // C1 is usually cleared by FXCH on modern processors
+    cpu.set_fpu_flag(crate::cpu::FpuFlags::C1, false);
 }
 
 // FLD1: Push +1.0
