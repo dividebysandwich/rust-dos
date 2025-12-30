@@ -8,7 +8,9 @@ pub fn get_shell_code() -> Vec<u8> {
         // ----------------------------------------------------
         // BOOTLOADER: Initialize Segments
         // ----------------------------------------------------
-        0x31, 0xC0, // XOR AX, AX
+        // We are loaded at CS=0x1000, IP=0x0000.
+        // Set DS=ES=SS=CS=0x1000 so we don't clobber IVT at 0x0000.
+        0x8C, 0xC8, // MOV AX, CS (Copy CS to AX)
         0x8E, 0xD8, // MOV DS, AX
         0x8E, 0xC0, // MOV ES, AX
         0x8E, 0xD0, // MOV SS, AX
@@ -40,6 +42,7 @@ pub fn get_shell_code() -> Vec<u8> {
         0xEB, 0xF5, // JMP PRINT_LOOP (-11 bytes)
         // Label: PRINT_DONE
         // 4. Print ">"
+        0xB4, 0x0E, // MOV AH, 0Eh (SafeGuard: ensure AH is 0E)
         0xB0, 0x3E, 0xCD, 0x10, // MOV AL, '>', INT 10h
         // Reset Buffer Pointer
         0xBE, 0x00, 0x02, // MOV SI, 0x0200 (Buffer Start)
@@ -87,7 +90,7 @@ pub fn get_shell_code() -> Vec<u8> {
         // ----------------------------------------------------
         // RESET LOOP
         // ----------------------------------------------------
-        0xEB, 0x94, // JMP PROMPT_START (-108 bytes)
+        0xEB, 0x92, // JMP PROMPT_START (-110 bytes)
     ]
 }
 

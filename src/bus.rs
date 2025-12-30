@@ -81,8 +81,8 @@ impl Bus {
         bus.write_16(0x044A, 80);
         // 0x044E: Video Page Size (4096 bytes approx, usually 0x1000)
         bus.write_16(0x044E, 0x1000);
-        // 0x0460: Cursor Shape (Start Line 6, End Line 7 for CGA)
-        bus.write_16(0x0460, 0x0607);
+        // 0x0460: Cursor Shape (Start Line 13, End Line 14 for VGA)
+        bus.write_16(0x0460, 0x0D0E);
         // 0x0462: Active Page (0)
         bus.write_8(0x0462, 0);
         // 0x0463: CRT Controller Base Address (0x3D4 for Color)
