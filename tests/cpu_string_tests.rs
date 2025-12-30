@@ -5,7 +5,7 @@ use testrunners::run_cpu_code;
 
 #[test]
 fn test_rep_movsb_forward() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Setup Pointers
     cpu.ds = 0x1000;
@@ -39,7 +39,7 @@ fn test_rep_movsb_forward() {
 
 #[test]
 fn test_rep_stosw_backward() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     cpu.es = 0x1000;
     cpu.di = 0x0008; // Start at offset 8
@@ -72,7 +72,7 @@ fn test_rep_stosw_backward() {
 
 #[test]
 fn test_lodsb_no_rep() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     cpu.ds = 0x1000;
     cpu.si = 0x0005;
@@ -91,7 +91,7 @@ fn test_lodsb_no_rep() {
 
 #[test]
 fn test_repne_scasb_match_found() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     cpu.es = 0x1000;
     cpu.di = 0x0000;
@@ -127,7 +127,7 @@ fn test_repne_scasb_match_found() {
 
 #[test]
 fn test_repne_scasb_no_match() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.es = 0x1000;
     cpu.di = 0x0000;
     cpu.cx = 5;
@@ -144,7 +144,7 @@ fn test_repne_scasb_no_match() {
 
 #[test]
 fn test_repe_cmpsb_mismatch() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     cpu.ds = 0x1000; cpu.si = 0;
     cpu.es = 0x1000; cpu.di = 10;
@@ -184,7 +184,7 @@ fn test_repe_cmpsb_mismatch() {
 
 #[test]
 fn test_string_std_stosb_decrement() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Scenario 2: STOSB with Direction Flag SET (Decrement)
     // Writing backwards from 0x2000.
@@ -204,7 +204,7 @@ fn test_string_std_stosb_decrement() {
 
 #[test]
 fn test_string_rep_stosw_direction() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Scenario 1: REP STOSW with Direction Flag CLEAR (Increment)
     // We want to write 0xABCD to memory locations 0x1000, 0x1002, 0x1004.
@@ -229,7 +229,7 @@ fn test_string_rep_stosw_direction() {
 
 #[test]
 fn test_lods_segment_override() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Load String Byte (LODSB) with Segment Override.
     // Instruction: 2E AC -> LODSB CS:[SI]
@@ -256,7 +256,7 @@ fn test_lods_segment_override() {
 
 #[test]
 fn test_loop_zf_interaction() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: LOOPE (Loop while Equal).
     // Should loop if CX != 0 AND ZF == 1.

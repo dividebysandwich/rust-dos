@@ -1,11 +1,11 @@
 use sdl2::audio::AudioQueue;
 use std::collections::VecDeque;
-use std::time::Instant;
-use std::io::{BufWriter, Write};
 use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::time::Instant;
 
 use crate::disk::DiskController;
-use crate::video::{VideoMode, ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT};
+use crate::video::{ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
 
 pub struct Bus {
     pub ram: Vec<u8>,           // 1MB System RAM
@@ -25,7 +25,7 @@ pub struct Bus {
     pub pit0_divisor: u16,
     pub pit0_write_msb: bool,
     pub pic_mask: u8,
-    pub audio_phase: f32,    // Track wave position to prevent clicking
+    pub audio_phase: f32, // Track wave position to prevent clicking
     pub dta_segment: u16,
     pub dta_offset: u16,
     pub log_file: Option<BufWriter<File>>,
@@ -36,18 +36,20 @@ pub struct Bus {
     pub vga_crtc_index: u8,
     pub vga_dac_write_index: u8,
     pub vga_dac_read_index: u8,
-    pub vga_dac_step: u8,        // 0=Red, 1=Green, 2=Blue
-    pub vga_palette: Vec<u8>,    // Stores R,G,B triples (256 * 3 = 768 bytes)
+    pub vga_dac_step: u8,     // 0=Red, 1=Green, 2=Blue
+    pub vga_palette: Vec<u8>, // Stores R,G,B triples (256 * 3 = 768 bytes)
 }
 
+use std::path::PathBuf;
+
 impl Bus {
-    pub fn new() -> Self {
+    pub fn new(root_path: PathBuf) -> Self {
         let mut bus = Self {
             ram: vec![0; 1024 * 1024],
             vram_graphics: vec![0; SIZE_GRAPHICS],
             vram_text: vec![0; SIZE_TEXT],
             video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
-            disk: DiskController::new(),
+            disk: DiskController::new(root_path),
             keyboard_buffer: VecDeque::new(),
             cursor_x: 0,
             cursor_y: 0,
@@ -79,14 +81,15 @@ impl Bus {
         bus.write_16(0x044A, 80);
         // 0x044E: Video Page Size (4096 bytes approx, usually 0x1000)
         bus.write_16(0x044E, 0x1000);
+        // 0x0460: Cursor Shape (Start Line 6, End Line 7 for CGA)
+        bus.write_16(0x0460, 0x0607);
         // 0x0462: Active Page (0)
         bus.write_8(0x0462, 0);
         // 0x0463: CRT Controller Base Address (0x3D4 for Color)
         bus.write_16(0x0463, 0x03D4);
 
-
         // Install HLE traps
-        
+
         bus.install_hle_trap(0x10, 0xF1000); // Video
         bus.install_hle_trap(0x11, 0xF1004); // Equipment
         bus.install_hle_trap(0x12, 0xF1008); // Memory
@@ -109,14 +112,13 @@ impl Bus {
         let handler_offset = (phys_addr & 0xFFFF) as u16; // Offset part of F000:Offset
 
         self.write_16(ivt_offset, handler_offset); // IP
-        self.write_16(ivt_offset + 2, 0xF000);     // CS
+        self.write_16(ivt_offset + 2, 0xF000); // CS
 
         // Write Trap Code
-        self.write_8(phys_addr, 0xFE);     // BOP
+        self.write_8(phys_addr, 0xFE); // BOP
         self.write_8(phys_addr + 1, 0x38); // Magic
         self.write_8(phys_addr + 2, vector); // The Vector ID
         self.write_8(phys_addr + 3, 0xCF); // IRET
-        
     }
 
     // Helper: Scroll the text screen up by 1 line
@@ -145,7 +147,7 @@ impl Bus {
 
     pub fn read_8(&self, addr: usize) -> u8 {
         // if addr >= 0x116F2 && addr < 0x116F2 + 12 {
-        //      println!("[MEM WATCH] CPU reading DTA Filename @ {:05X}. Value: {:02X} ({})", 
+        //      println!("[MEM WATCH] CPU reading DTA Filename @ {:05X}. Value: {:02X} ({})",
         //               addr, self.ram[addr], self.ram[addr] as char);
         // }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
@@ -160,31 +162,32 @@ impl Bus {
     // Returns true if a write occurred to the *active* video memory
     pub fn write_8(&mut self, addr: usize, value: u8) -> bool {
         //if addr >= 0xB8000 && addr < 0xB8FA0 && (addr % 2 == 0) {
-            // if value >= 0x20 && value <= 0x7E { // Printable chars only
-            //     let offset = (addr - 0xB8000) / 2;
-            //     let row = offset / 80;
-            //     let col = offset % 80;
-            //     self.log_string(&format!("[VIDEO] '{}' @ {},{}", value as char, col, row));
-            // }
+        // if value >= 0x20 && value <= 0x7E { // Printable chars only
+        //     let offset = (addr - 0xB8000) / 2;
+        //     let row = offset / 80;
+        //     let col = offset % 80;
+        //     self.log_string(&format!("[VIDEO] '{}' @ {},{}", value as char, col, row));
+        // }
         //}
 
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             self.vram_graphics[addr - ADDR_VGA_GRAPHICS] = value;
             self.video_mode == VideoMode::Graphics320x200
-        } 
-        else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
+        } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
             self.vram_text[addr - ADDR_VGA_TEXT] = value;
-            
+
             // Check if current mode uses this memory
             match self.video_mode {
-                VideoMode::Text80x25 | VideoMode::Text80x25Color |
-                VideoMode::Text40x25 | VideoMode::Text40x25Color |
-                VideoMode::Cga320x200 | VideoMode::Cga320x200Color |
-                VideoMode::Cga640x200 => true, // Dirty!
+                VideoMode::Text80x25
+                | VideoMode::Text80x25Color
+                | VideoMode::Text40x25
+                | VideoMode::Text40x25Color
+                | VideoMode::Cga320x200
+                | VideoMode::Cga320x200Color
+                | VideoMode::Cga640x200 => true, // Dirty!
                 _ => false,
             }
-        } 
-        else {
+        } else {
             self.ram[addr] = value;
             false
         }
@@ -198,7 +201,7 @@ impl Bus {
         let d2 = self.write_8(addr + 1, (value >> 8) as u8);
         d1 || d2
     }
-    
+
     // read_16 helper
     pub fn read_16(&self, addr: usize) -> u16 {
         let low = self.read_8(addr) as u16;
@@ -211,12 +214,12 @@ impl Bus {
         let high = self.read_16(addr + 2) as u32;
         (high << 16) | low
     }
-    
+
     pub fn write_32(&mut self, addr: usize, value: u32) {
         self.write_16(addr, (value & 0xFFFF) as u16);
         self.write_16(addr + 2, (value >> 16) as u16);
     }
-    
+
     pub fn read_64(&self, addr: usize) -> u64 {
         let low = self.read_32(addr) as u64;
         let high = self.read_32(addr + 4) as u64;
@@ -255,7 +258,7 @@ impl Bus {
                     // Write MSB
                     self.pit0_divisor = (self.pit0_divisor & 0x00FF) | ((value as u16) << 8);
                     self.pit0_write_msb = false; // Reset to LSB
-                    
+
                     if self.pit0_divisor > 0 {
                         let hz = 1_193_182 / self.pit0_divisor as u32;
                         self.log_string(&format!("[PIT] Channel 0 Frequency set to {} Hz", hz));
@@ -275,22 +278,22 @@ impl Bus {
                     // Write MSB
                     self.pit_divisor = (self.pit_divisor & 0x00FF) | ((value as u16) << 8);
                     self.pit_write_msb = false; // Reset to LSB
-                                                // println!("[PIT] Frequency Divisor Set to: {}", self.pit_divisor);
+                    // println!("[PIT] Frequency Divisor Set to: {}", self.pit_divisor);
                 }
             }
 
             // PIT Command Register (Port 0x43)
             0x43 => {
                 self.pit_mode = value;
-                
+
                 // Extract the Channel bits (7-6)
                 // 00 = Channel 0, 01 = Channel 1, 10 = Channel 2
                 let channel = (value >> 6) & 0x03;
-                
+
                 // If the command is for the Counter (not Read-Back), reset the flip-flop.
                 // We check Access bits (5-4) to ensure it's not a Latch command (00).
                 let access = (value >> 4) & 0x03;
-                
+
                 if access != 0 {
                     match channel {
                         0 => self.pit0_write_msb = false, // Reset Channel 0 LSB/MSB
@@ -315,7 +318,10 @@ impl Bus {
             }
             0x3C5 => {
                 // TODO: handle Plane Masks here.
-                self.log_string(&format!("[VGA] Sequencer Write Index {:02X} = {:02X}", self.vga_sequencer_index, value));
+                self.log_string(&format!(
+                    "[VGA] Sequencer Write Index {:02X} = {:02X}",
+                    self.vga_sequencer_index, value
+                ));
             }
 
             // --- VGA GRAPHICS CONTROLLER (0x3CE / 0x3CF) ---
@@ -382,13 +388,13 @@ impl Bus {
             0x3DA => {
                 // Toggle bit 0 and 3 based on a pseudo-timer or random to simulate raster beam
                 // TODO: Improve with real timing
-                let phase = (self.start_time.elapsed().as_millis() / 16) % 2; 
+                let phase = (self.start_time.elapsed().as_millis() / 16) % 2;
                 if phase == 0 { 0x00 } else { 0x09 } // Toggle bits 0 and 3
             }
 
             // VGA Sequencer Data
             0x3C5 => 0, // TODO: Implement
-            
+
             // VGA Graphics Data
             0x3CF => 0, // TODO: Implement
 

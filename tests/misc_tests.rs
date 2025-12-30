@@ -5,7 +5,7 @@ use testrunners::run_cpu_code;
 
 #[test]
 fn test_cmp_r16_imm8_sign_extension() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Compare AX (0) with -5 (0xFB).
     // Opcode: 83 F8 FB -> CMP AX, -5
@@ -27,7 +27,7 @@ fn test_cmp_r16_imm8_sign_extension() {
 
 #[test]
 fn test_xchg_functionality() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Swap AX and BX.
     // Graphics routines use this to sort coordinates.
@@ -46,7 +46,7 @@ fn test_xchg_functionality() {
 
 #[test]
 fn test_xchg_memory() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
 
     // SCENARIO: Swap Register and Memory.
@@ -63,7 +63,7 @@ fn test_xchg_memory() {
 
 #[test]
 fn test_bp_access_uses_ss_default() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Setup Segments pointing to different memory areas
     cpu.set_reg16(Register::DS, 0x1000); // Data Segment base: 0x10000
@@ -91,7 +91,7 @@ fn test_bp_access_uses_ss_default() {
 
 #[test]
 fn test_lea_loads_offset_only() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     cpu.set_reg16(Register::DS, 0x5000);
     cpu.set_reg16(Register::BX, 0x1000);
@@ -108,7 +108,7 @@ fn test_lea_loads_offset_only() {
 
 #[test]
 fn test_pusha_popa_order() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Setup specific values in ALL general registers
     cpu.set_reg16(Register::AX, 0xAAAA);
@@ -147,7 +147,7 @@ fn test_pusha_popa_order() {
 
 #[test]
 fn test_ret_imm16_cleans_stack() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Pascal calling convention.
     // 1. Caller pushes args.
@@ -177,7 +177,7 @@ fn test_ret_imm16_cleans_stack() {
 
 #[test]
 fn test_xlat_translation() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Text mode often uses lookup tables to map characters.
     // XLAT: AL = [DS:BX + AL]
@@ -199,7 +199,7 @@ fn test_xlat_translation() {
 
 #[test]
 fn test_stos_uses_es_segment() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: STOSW writes AX to [ES:DI].
     // If it incorrectly uses DS, graphics will fail.

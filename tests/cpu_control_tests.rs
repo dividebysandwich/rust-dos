@@ -4,7 +4,7 @@ use testrunners::run_cpu_code;
 
 #[test]
 fn test_unconditional_jmp_near_and_far() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. JMP Short (Relative)
     // EB 05 -> JMP +5 (Target: 0x107)
@@ -16,7 +16,7 @@ fn test_unconditional_jmp_near_and_far() {
 
     // 2. JMP Far Direct (ptr16:16)
     // EA 00 10 00 20 -> JMP 2000:1000
-    let mut cpu_far = Cpu::new();
+    let mut cpu_far = Cpu::new(std::path::PathBuf::from("."));
     let code_far = [0xEA, 0x00, 0x10, 0x00, 0x20];
     run_cpu_code(&mut cpu_far, &code_far);
     assert_eq!(cpu_far.ip, 0x1000);
@@ -25,7 +25,7 @@ fn test_unconditional_jmp_near_and_far() {
 
 #[test]
 fn test_call_and_ret() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.ip = 0x100;
     cpu.sp = 0xFFFE;
     cpu.ss = 0x0000; // Ensure stack segment is zeroed for test simplicity
@@ -49,7 +49,7 @@ fn test_call_and_ret() {
 
 #[test]
 fn test_conditional_jumps_logic() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.ip = 0x100;
     
     // 31 C0    (2 bytes) -> XOR AX, AX (ZF=1)
@@ -70,7 +70,7 @@ fn test_conditional_jumps_logic() {
 
 #[test]
 fn test_loop_instructions() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.ip = 0x100;
     
     // B9 05 00 (3 bytes) -> MOV CX, 5
@@ -95,7 +95,7 @@ fn test_loop_instructions() {
 
 #[test]
 fn test_jcxz_behavior() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // B9 00 00 -> MOV CX, 0
     // E3 02    -> JCXZ +2
@@ -110,7 +110,7 @@ fn test_jcxz_behavior() {
 
 #[test]
 fn test_loop_instruction() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Scenario: LOOP decrements CX and jumps if CX != 0.
     // Loop 5 times.
@@ -131,7 +131,7 @@ fn test_loop_instruction() {
 
 #[test]
 fn test_jump_signed_overflow_logic() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Simulate a Signed Overflow where the result LOOKS positive (SF=0)
     // but is actually negative (due to OF=1).

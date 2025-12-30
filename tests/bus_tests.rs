@@ -3,7 +3,7 @@ use rust_dos::video::{ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT};
 
 #[test]
 fn test_ram_access() {
-    let mut bus = Bus::new();
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
     
     // Write to generic RAM (e.g., address 0x1000)
     bus.write_8(0x1000, 0xAA);
@@ -16,7 +16,7 @@ fn test_ram_access() {
 
 #[test]
 fn test_vram_mapping() {
-    let mut bus = Bus::new();
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
     
     // 1. Test Text Mode VRAM (0xB8000)
     let text_addr = ADDR_VGA_TEXT; // 0xB8000
@@ -41,7 +41,7 @@ fn test_vram_mapping() {
 
 #[test]
 fn test_little_endian_read_write() {
-    let mut bus = Bus::new();
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
     let addr = 0x2000;
 
     // Write 32-bit value: 0x12345678
@@ -59,7 +59,7 @@ fn test_little_endian_read_write() {
 
 #[test]
 fn test_pit_channel_2_latch_logic() {
-    let mut bus = Bus::new();
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
     
     // PIT Channel 2 (Speaker) uses port 0x42
     // It has a MSB/LSB flip-flop.
@@ -85,7 +85,7 @@ fn test_pit_channel_2_latch_logic() {
 
 #[test]
 fn test_pit_channel_0_reset_bug() {
-    let mut bus = Bus::new();
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
     
     // --------------------------------------------------------
     // This test targets the bug in IO Port 0x43 (Command Reg).
@@ -128,7 +128,7 @@ fn test_pit_channel_0_reset_bug() {
 
 #[test]
 fn test_speaker_io_port_61() {
-    let mut bus = Bus::new();
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
     
     // Port 0x61 controls speaker.
     // Bit 0: Gate 2

@@ -1,8 +1,8 @@
-use std::fs;
-use chrono::{DateTime, Local};
-use std::collections::HashMap;
 use crate::cpu::Cpu;
 use crate::video::print_string;
+use chrono::{DateTime, Local};
+use std::collections::HashMap;
+use std::fs;
 
 pub trait ShellCommand {
     /// `args` contains everything after the command name (e.g., "FILE.TXT" for "TYPE FILE.TXT")
@@ -26,6 +26,8 @@ impl CommandDispatcher {
         dispatcher.register("TYPE", Box::new(TypeCommand));
         dispatcher.register("CLS", Box::new(ClsCommand));
         dispatcher.register("EXIT", Box::new(ExitCommand));
+        dispatcher.register("CD", Box::new(CdCommand));
+        dispatcher.register("CHDIR", Box::new(CdCommand));
 
         dispatcher
     }
@@ -58,11 +60,18 @@ impl ShellCommand for DirCommand {
         let mut dir_count = 0;
         let mut total_bytes = 0;
 
-        if let Ok(entries) = fs::read_dir(".") {
+        // Use DiskController to resolve "." to the actual host directory
+        let host_dir = cpu
+            .bus
+            .disk
+            .resolve_path(".")
+            .unwrap_or(std::path::PathBuf::from("."));
+
+        if let Ok(entries) = fs::read_dir(host_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let metadata = path.metadata().ok();
-                
+
                 // Get Date/Time
                 // DOS uses local time. We convert SystemTime -> DateTime<Local>
                 let timestamp: DateTime<Local> = metadata
@@ -93,23 +102,28 @@ impl ShellCommand for DirCommand {
 
                 // Print Line: DATE  TIME  <DIR>|SIZE  NAME
                 // {:<22} left-aligns the date, {:>14} right-aligns size
-                let line = format!(
-                    "{}  {:>14} {}\r\n", 
-                    date_str, size_str, name_str
-                );
+                let line = format!("{}  {:>14} {}\r\n", date_str, size_str, name_str);
                 print_string(cpu, &line);
             }
         }
 
         // Summary Footer
-        print_string(cpu, &format!(
-            "{:>16} File(s) {:>14} bytes\r\n", 
-            file_count, format_size(total_bytes)
-        ));
-        print_string(cpu, &format!(
-            "{:>16} Dir(s)  {:>14} bytes free\r\n", 
-            dir_count, "0" // We don't really track free space on host yet
-        )); 
+        print_string(
+            cpu,
+            &format!(
+                "{:>16} File(s) {:>14} bytes\r\n",
+                file_count,
+                format_size(total_bytes)
+            ),
+        );
+        print_string(
+            cpu,
+            &format!(
+                "{:>16} Dir(s)  {:>14} bytes free\r\n",
+                dir_count,
+                "0" // We don't really track free space on host yet
+            ),
+        );
     }
 }
 
@@ -148,7 +162,15 @@ impl ShellCommand for TypeCommand {
         let mut found_path = None;
 
         // Case-insensitive search
-        if let Ok(entries) = std::fs::read_dir(".") {
+        // Case-insensitive search in current directory
+        // Use DiskController to resolve "."
+        let host_dir = cpu
+            .bus
+            .disk
+            .resolve_path(".")
+            .unwrap_or(std::path::PathBuf::from("."));
+
+        if let Ok(entries) = std::fs::read_dir(host_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Some(name) = path.file_name() {
@@ -185,14 +207,33 @@ impl ShellCommand for ClsCommand {
             cpu.bus.write_8(0xB8000 + i + 1, 0x07);
         }
         // Reset Cursor (BDA 0x0450)
-        cpu.bus.write_16(0x0450, 0x0000); 
+        cpu.bus.write_16(0x0450, 0x0000);
     }
 }
 
 struct ExitCommand;
 impl ShellCommand for ExitCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
-        cpu.bus.log_string("[SHELL] Exiting Emulator via command...");
+        cpu.bus
+            .log_string("[SHELL] Exiting Emulator via command...");
         std::process::exit(0);
+    }
+}
+
+struct CdCommand;
+impl ShellCommand for CdCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let path = args.trim();
+        if path.is_empty() {
+            // Print current directory
+            let cwd = cpu.bus.disk.get_current_directory();
+            print_string(cpu, &format!("C:\\{}\r\n", cwd));
+        } else {
+            if cpu.bus.disk.set_current_directory(path) {
+                // Success (silent)
+            } else {
+                print_string(cpu, "Invalid directory\r\n");
+            }
+        }
     }
 }

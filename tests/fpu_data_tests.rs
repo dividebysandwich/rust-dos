@@ -11,7 +11,7 @@ fn assert_top_f64(cpu: &Cpu, expected: f64) {
 
 #[test]
 fn test_fld_fstp_float32() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
     
     // Write 123.456 (f32) to memory
@@ -36,7 +36,7 @@ fn test_fld_fstp_float32() {
 
 #[test]
 fn test_fld_fstp_float64() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
 
     // Write double precision PI
@@ -58,7 +58,7 @@ fn test_fld_fstp_float64() {
 
 #[test]
 fn test_fld_fstp_float80() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
 
     // Manually construct an 80-bit value (e.g., 1.0)
@@ -91,7 +91,7 @@ fn test_fld_fstp_float80() {
 
 #[test]
 fn test_integer_rounding_modes() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
     
     // Load 1.6 onto stack
@@ -117,7 +117,7 @@ fn test_integer_rounding_modes() {
 
 #[test]
 fn test_constants_loading() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // D9 E8: FLD1
     run_cpu_code(&mut cpu, &[0xD9, 0xE8]);
@@ -133,7 +133,7 @@ fn test_constants_loading() {
 
 #[test]
 fn test_fxch_swap() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Push 1.0, then 2.0
     let mut f1 = F80::new(); f1.set_f64(1.0);
@@ -154,7 +154,7 @@ fn test_fxch_swap() {
 
 #[test]
 fn test_fild_integer_load() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
 
     // Write -500 (Int16) to memory
@@ -169,7 +169,7 @@ fn test_fild_integer_load() {
 
 #[test]
 fn test_fbstp_bcd_store() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
 
     // Load 123.0 onto stack

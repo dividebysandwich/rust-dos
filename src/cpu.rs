@@ -1,10 +1,10 @@
-use iced_x86::{Instruction, MemorySize, OpKind, Register, Mnemonic};
 use bitflags::bitflags;
+use iced_x86::{Instruction, MemorySize, Mnemonic, OpKind, Register};
 
-use crate::f80::F80;
 use crate::bus::Bus;
-use crate::shell::get_shell_code;
+use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
+use crate::shell::get_shell_code;
 
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;
@@ -42,19 +42,18 @@ bitflags! {
         const OE = 0x0008; // Overflow
         const UE = 0x0010; // Underflow
         const PE = 0x0020; // Precision
-        
+
         // Status Bits
         const SF = 0x0040; // Stack Fault
         const ES = 0x0080; // Error Summary Status
         const B  = 0x8000; // Busy bit
 
         // A helper group for FNCLEX
-        const EXCEPTIONS = Self::IE.bits() | Self::DE.bits() | Self::ZE.bits() | 
-                           Self::OE.bits() | Self::UE.bits() | Self::PE.bits() | 
+        const EXCEPTIONS = Self::IE.bits() | Self::DE.bits() | Self::ZE.bits() |
+                           Self::OE.bits() | Self::UE.bits() | Self::PE.bits() |
                            Self::SF.bits() | Self::ES.bits() | Self::B.bits();
     }
 }
-
 
 pub struct Cpu {
     // General Purpose
@@ -98,7 +97,7 @@ pub struct Cpu {
     pub bus: Bus,
     flags: CpuFlags,
     pub state: CpuState,
-    pub pending_command:Option<String>,
+    pub pending_command: Option<String>,
 
     // FPU State
     pub fpu_stack: [F80; 8],
@@ -120,8 +119,10 @@ pub enum CpuState {
     RebootShell,
 }
 
+use std::path::PathBuf;
+
 impl Cpu {
-    pub fn new() -> Self {
+    pub fn new(root_path: PathBuf) -> Self {
         Self {
             ax: 0,
             bx: 0,
@@ -146,7 +147,7 @@ impl Cpu {
             esp: 0,
             eflags: 0,
             ip: 0x100,
-            bus: Bus::new(),
+            bus: Bus::new(root_path),
             flags: CpuFlags::from_bits_truncate(0x0002), // Default Flag State, Bit 1 is always set
             state: CpuState::Running,
             pending_command: None,
@@ -162,7 +163,9 @@ impl Cpu {
 
     // REMOVEME: Debugging QuickBASIC Float Conversion Issues
     pub fn trace_qb_conversion(&mut self, instr: &Instruction) {
-        if !self.debug_qb_print { return; }
+        if !self.debug_qb_print {
+            return;
+        }
 
         // TRACK ZF CHANGES: If ZF changes without an obvious reason, we need to know
         let zf = self.get_cpu_flag(CpuFlags::ZF);
@@ -171,15 +174,24 @@ impl Cpu {
             // Track the Decision Points
             Mnemonic::Je | Mnemonic::Jne => {
                 // This is where the "08" vs "8" decision is actually made!
-                self.bus.log_string(format!("[QB-TRACE] {:?} taken? (ZF={}) at {:04X}:{:04X}", 
-                    instr.mnemonic(), zf, self.cs, self.ip).as_str());
+                self.bus.log_string(
+                    format!(
+                        "[QB-TRACE] {:?} taken? (ZF={}) at {:04X}:{:04X}",
+                        instr.mnemonic(),
+                        zf,
+                        self.cs,
+                        self.ip
+                    )
+                    .as_str(),
+                );
             }
 
             // Monitor Sahf (The FPU->CPU Bridge)
             Mnemonic::Sahf => {
                 let ah = (self.ax >> 8) as u8;
-                self.bus.log_string(format!("[QB-TRACE] SAHF: AH={:02X} (Bit6/ZF={})", 
-                    ah, (ah >> 6) & 1).as_str());
+                self.bus.log_string(
+                    format!("[QB-TRACE] SAHF: AH={:02X} (Bit6/ZF={})", ah, (ah >> 6) & 1).as_str(),
+                );
             }
 
             // Enhanced Scasb (Watch the DI/CX result)
@@ -195,8 +207,16 @@ impl Cpu {
             Mnemonic::Inc | Mnemonic::Dec => {
                 let reg = instr.op0_register();
                 if reg == Register::DI || reg == Register::SI || reg == Register::CX {
-                    self.bus.log_string(format!("[QB-TRACE] {:?} {:?} -> {:04X} (ZF={})", 
-                        instr.mnemonic(), reg, self.get_reg16(reg), zf).as_str());
+                    self.bus.log_string(
+                        format!(
+                            "[QB-TRACE] {:?} {:?} -> {:04X} (ZF={})",
+                            instr.mnemonic(),
+                            reg,
+                            self.get_reg16(reg),
+                            zf
+                        )
+                        .as_str(),
+                    );
                 }
             }
 
@@ -206,21 +226,43 @@ impl Cpu {
                 self.last_fstp_addr = addr;
                 let m = self.bus.read_64(addr);
                 let se = self.bus.read_16(addr + 8);
-                self.bus.log_string(format!("\n[QB-TRACE] FSTP TBYTE at {:05X} Raw: {:04X} {:016X}", addr, se, m).as_str());
+                self.bus.log_string(
+                    format!(
+                        "\n[QB-TRACE] FSTP TBYTE at {:05X} Raw: {:04X} {:016X}",
+                        addr, se, m
+                    )
+                    .as_str(),
+                );
             }
 
             Mnemonic::Stosb => {
                 let val = self.get_al();
                 let addr = self.get_physical_addr(self.es, self.di);
-                let ch = if val >= 32 && val <= 126 { val as char } else { '.' };
-                self.bus.log_string(format!("[QB-TRACE] STOSB [{:05X}] <- {:02X} ('{}') DI={:04X}", addr, val, ch, self.di).as_str());
+                let ch = if val >= 32 && val <= 126 {
+                    val as char
+                } else {
+                    '.'
+                };
+                self.bus.log_string(
+                    format!(
+                        "[QB-TRACE] STOSB [{:05X}] <- {:02X} ('{}') DI={:04X}",
+                        addr, val, ch, self.di
+                    )
+                    .as_str(),
+                );
             }
 
             Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne => {
-                self.bus.log_string(format!(
-                    "[QB-TRACE] {:?} CX={:04X} ZF={} DI={:04X}", 
-                    instr.mnemonic(), self.cx, zf, self.di
-                ).as_str());
+                self.bus.log_string(
+                    format!(
+                        "[QB-TRACE] {:?} CX={:04X} ZF={} DI={:04X}",
+                        instr.mnemonic(),
+                        self.cx,
+                        zf,
+                        self.di
+                    )
+                    .as_str(),
+                );
             }
             _ => {}
         }
@@ -241,16 +283,15 @@ impl Cpu {
 
     // Helper to set/clear a flag
     pub fn set_cpu_flag(&mut self, mask: CpuFlags, value: bool) {
-
         // REMOVEME: ZF ALERT
         // if self.debug_qb_conversion && mask.contains(CpuFlags::ZF) {
         //     let old_zf = self.flags.contains(CpuFlags::ZF);
-        
+
         //     // ALARM only when ZF changes from FALSE -> TRUE
         //     if !old_zf && value == true {
         //         let instr_str = self.get_instruction_at_ip();
         //         self.bus.log_string(&format!(
-        //             "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}", 
+        //             "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}",
         //             self.cx, instr_str
         //         ));
         //     }
@@ -265,26 +306,24 @@ impl Cpu {
 
     // Allows overwriting the flags register with a new bitflags struct
     pub fn set_cpu_flags(&mut self, new_flags: CpuFlags) {
-
         // REMOVEME: ZF ALERT
         // let old_zf = self.flags.contains(CpuFlags::ZF);
         // let new_zf = new_flags.contains(CpuFlags::ZF);
         // if self.debug_qb_conversion && !old_zf && new_zf {
         //     let instr_str = self.get_instruction_at_ip();
         //     self.bus.log_string(&format!(
-        //         "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}", 
+        //         "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}",
         //         self.cx, instr_str
         //     ));
         // }
-        
 
         let raw_bits = new_flags.bits();
-        
+
         // 0x0FD5 masks only the valid 8086 flags:
         // (CF, PF, AF, ZF, SF, TF, IF, DF, OF)
         // Then we OR with 0x0002 to ensure Bit 1 is always 1.
         let sanitized_bits = (raw_bits & 0x0FD5) | 0x0002;
-        
+
         self.flags = CpuFlags::from_bits_truncate(sanitized_bits);
     }
 
@@ -306,12 +345,11 @@ impl Cpu {
     }
 
     pub fn set_fpu_flags(&mut self, new_flags: FpuFlags) {
-
         // Removed top pointer extraction, as we store it separately.
         //        let bits = new_flags.bits();
         //        // Bits 11, 12, 13 are the TOP pointer (0-7)
         //        self.fpu_top = ((bits >> 11) & 0x07) as usize;
-    
+
         // Store the flags
         self.fpu_flags = new_flags;
     }
@@ -523,7 +561,7 @@ impl Cpu {
         result
     }
 
-    // SUB/CMP 8-bit 
+    // SUB/CMP 8-bit
     pub fn alu_sub_8(&mut self, dest: u8, src: u8) -> u8 {
         let (result, borrow) = dest.overflowing_sub(src);
 
@@ -567,7 +605,11 @@ impl Cpu {
 
     // SBB 8-bit
     pub fn alu_sbb_8(&mut self, dest: u8, src: u8) -> u8 {
-        let carry_in = if self.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
+        let carry_in = if self.get_cpu_flag(CpuFlags::CF) {
+            1
+        } else {
+            0
+        };
 
         // We perform the math using u16 to easily detect borrows
         let result_wide = (dest as u16)
@@ -589,7 +631,10 @@ impl Cpu {
         let src_sign = (src & 0x80) != 0;
         let dest_sign = (dest & 0x80) != 0;
 
-        self.set_cpu_flag(CpuFlags::OF, (dest_sign != src_sign) && (dest_sign != res_sign));
+        self.set_cpu_flag(
+            CpuFlags::OF,
+            (dest_sign != src_sign) && (dest_sign != res_sign),
+        );
         self.set_cpu_flag(CpuFlags::AF, (dest & 0x0F) < ((src & 0x0F) + carry_in));
 
         result
@@ -597,7 +642,11 @@ impl Cpu {
 
     // SBB 16-bit
     pub fn alu_sbb_16(&mut self, dest: u16, src: u16) -> u16 {
-        let carry_in = if self.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
+        let carry_in = if self.get_cpu_flag(CpuFlags::CF) {
+            1
+        } else {
+            0
+        };
 
         // Use u32 to capture borrows
         let result_wide = (dest as u32)
@@ -626,8 +675,12 @@ impl Cpu {
 
     // ADC 8-bit
     pub fn alu_adc_8(&mut self, dest: u8, src: u8) -> u8 {
-        let cf_in = if self.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
-        
+        let cf_in = if self.get_cpu_flag(CpuFlags::CF) {
+            1
+        } else {
+            0
+        };
+
         // Use u16 to capture the carry out
         let res_wide = (dest as u16) + (src as u16) + (cf_in as u16);
         let result = res_wide as u8;
@@ -642,7 +695,10 @@ impl Cpu {
         let op2_sign = (src & 0x80) != 0;
         let res_sign = (result & 0x80) != 0;
         // Overflow happens if adding two numbers of same sign results in different sign
-        self.set_cpu_flag(CpuFlags::OF, (op1_sign == op2_sign) && (res_sign != op1_sign));
+        self.set_cpu_flag(
+            CpuFlags::OF,
+            (op1_sign == op2_sign) && (res_sign != op1_sign),
+        );
 
         // AF: (op1 ^ op2 ^ result) & 0x10
         // This detects if a carry occurred from bit 3 to bit 4
@@ -652,7 +708,11 @@ impl Cpu {
 
     // ADC 16-bit
     pub fn alu_adc_16(&mut self, dest: u16, src: u16) -> u16 {
-        let cf_in = if self.get_cpu_flag(CpuFlags::CF) { 1 } else { 0 };
+        let cf_in = if self.get_cpu_flag(CpuFlags::CF) {
+            1
+        } else {
+            0
+        };
 
         // Use u32 to capture carry out
         let res_wide = (dest as u32) + (src as u32) + (cf_in as u32);
@@ -667,7 +727,10 @@ impl Cpu {
         let op1_sign = (dest & 0x8000) != 0;
         let op2_sign = (src & 0x8000) != 0;
         let res_sign = (result & 0x8000) != 0;
-        self.set_cpu_flag(CpuFlags::OF, (op1_sign == op2_sign) && (res_sign != op1_sign));
+        self.set_cpu_flag(
+            CpuFlags::OF,
+            (op1_sign == op2_sign) && (res_sign != op1_sign),
+        );
 
         // AF: Carry from bit 3 to 4
         self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
@@ -734,7 +797,7 @@ impl Cpu {
         }
         self.fpu_stack[actual_idx as usize]
     }
-    
+
     // Set ST(i) relative to Top
     pub fn fpu_set(&mut self, index: usize, val: F80) {
         let actual_idx = (self.fpu_top + index) & 7;
@@ -765,22 +828,22 @@ impl Cpu {
     }
 
     fn install_bios_traps(&mut self) {
-        let mut phys_addr = 0xF1000; 
+        let mut phys_addr = 0xF1000;
         let hle_vectors = vec![0x10, 0x11, 0x12, 0x15, 0x16, 0x1A, 0x20, 0x21, 0x2F, 0x33];
 
         for vec in hle_vectors {
             let ivt_offset = (vec as usize) * 4;
             let handler_offset = (phys_addr & 0xFFFF) as u16;
-            
+
             // Point IVT to F000:Offset
-            self.bus.write_16(ivt_offset, handler_offset);     // IP
-            self.bus.write_16(ivt_offset + 2, 0xF000);         // CS
+            self.bus.write_16(ivt_offset, handler_offset); // IP
+            self.bus.write_16(ivt_offset + 2, 0xF000); // CS
 
             // Ensure the Trap Instruction exists (FE 38 XX CF)
             self.bus.write_8(phys_addr, 0xFE);
             self.bus.write_8(phys_addr + 1, 0x38);
             self.bus.write_8(phys_addr + 2, vec);
-            self.bus.write_8(phys_addr + 3, 0xCF); 
+            self.bus.write_8(phys_addr + 3, 0xCF);
 
             phys_addr += 4;
         }
@@ -795,7 +858,7 @@ impl Cpu {
         let start_addr = 0x100;
 
         // Clear RAM
-        // 0x0000-0x03FF is the IVT. 
+        // 0x0000-0x03FF is the IVT.
         // 0x0400-0x04FF is the BIOS Data Area (BDA).
         // If we zero those, the system dies.
         for i in 0x0500..0xFFFF {
@@ -897,7 +960,6 @@ impl Cpu {
 
         // Re-install the HLE Interrupt Vectors
         self.install_bios_traps();
-
 
         // Load the file data at offset 0x100
         let phys_code_start = self.get_physical_addr(load_segment, start_offset);

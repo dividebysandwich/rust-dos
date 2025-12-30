@@ -20,7 +20,7 @@ fn assert_f64_eq(val: f64, expected: f64, message: &str) {
 
 #[test]
 fn test_fsin_sine_wave() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Test sin(PI/2) = 1.0
     push_val(&mut cpu, FRAC_PI_2);
@@ -39,7 +39,7 @@ fn test_fsin_sine_wave() {
 
 #[test]
 fn test_fcos_cosine_wave() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Test cos(0) = 1.0
     push_val(&mut cpu, 0.0);
@@ -57,7 +57,7 @@ fn test_fcos_cosine_wave() {
 
 #[test]
 fn test_fsincos_simultaneous() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Compute sin and cos of PI/4 (both should be ~0.7071)
     // Stack: Top -> PI/4
@@ -82,7 +82,7 @@ fn test_fsincos_simultaneous() {
 
 #[test]
 fn test_fptan_partial_tangent() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // tan(PI/4) = 1.0
     push_val(&mut cpu, FRAC_PI_4);
@@ -100,7 +100,7 @@ fn test_fptan_partial_tangent() {
 
 #[test]
 fn test_fpatan_arctangent_coordinate() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // FPATAN calculates atan2(Y, X) = atan2(ST(1), ST(0))
     // Let's compute angle of (1, 1) which is PI/4 (45 degrees)
@@ -123,7 +123,7 @@ fn test_fpatan_arctangent_coordinate() {
 
 #[test]
 fn test_fpatan_negative_coordinates() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // atan2(-1.0, -1.0) should be -3*PI/4 (-135 degrees)
     push_val(&mut cpu, -1.0); // Y

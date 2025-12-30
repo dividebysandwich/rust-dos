@@ -4,7 +4,7 @@ mod testrunners;
 
 #[test]
 fn test_fninit_defaults() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Dirty the state first
     cpu.fpu_top = 3;
@@ -29,7 +29,7 @@ fn test_fninit_defaults() {
 
 #[test]
 fn test_fnclex_clears_exceptions() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Set Condition Codes (should stay) and Exceptions (should clear)
     cpu.set_fpu_flags(FpuFlags::C0 | FpuFlags::C3 | FpuFlags::PE | FpuFlags::ZE | FpuFlags::IE);
@@ -51,7 +51,7 @@ fn test_fnclex_clears_exceptions() {
 
 #[test]
 fn test_fnstsw_ax_status_word_bridge() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Scenario: TOP=5, C3=1 (Eq), C0=1 (Carry/Less)
     // This simulates a comparison result that needs to move to CPU flags
@@ -81,7 +81,7 @@ fn test_fnstsw_ax_status_word_bridge() {
 
 #[test]
 fn test_fnstsw_memory() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.fpu_top = 2;
     cpu.set_fpu_flags(FpuFlags::C2); // Bit 10
 
@@ -100,7 +100,7 @@ fn test_fnstsw_memory() {
 
 #[test]
 fn test_control_word_store_load() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Set a weird control word manually: Round Down (0x0400), Single Precision (0x0000)
     let new_cw: u16 = 0x0400 | 0x0300 | 0x003F; // + Mask all exceptions
@@ -122,7 +122,7 @@ fn test_control_word_store_load() {
 
 #[test]
 fn test_ffree_tag_management() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Initialize standard stack
     cpu.fpu_top = 0;
@@ -146,7 +146,7 @@ fn test_ffree_tag_management() {
 }
 #[test]
 fn test_stack_pointer_manipulation() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.fpu_top = 0;
     
     // D9 F7: FINCSTP (Increment TOP)
@@ -166,7 +166,7 @@ fn test_stack_pointer_manipulation() {
 
 #[test]
 fn test_fsave_frstor_full_cycle() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // 1. Setup a unique "Dirty" State
     cpu.fpu_control = 0x1234; // Non-default Control Word

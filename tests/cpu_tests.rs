@@ -6,7 +6,7 @@ use testrunners::run_cpu_code;
 
 #[test]
 fn test_register_mapping_8_vs_16() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Write 16-bit, Read 8-bit
     cpu.set_reg16(Register::AX, 0xABCD);
@@ -23,7 +23,7 @@ fn test_register_mapping_8_vs_16() {
 
 #[test]
 fn test_physical_address_wrapping_20bit() {
-    let cpu = Cpu::new();
+    let cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Segment: FFFF, Offset: 0010
     // Linear: FFFF0 + 0010 = 100000
@@ -38,7 +38,7 @@ fn test_physical_address_wrapping_20bit() {
 
 #[test]
 fn test_alu_add_flags_16bit() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Simple Add
     cpu.alu_add_16(10, 20);
@@ -71,7 +71,7 @@ fn test_alu_add_flags_16bit() {
 
 #[test]
 fn test_alu_sub_flags_8bit() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Simple Sub
     let res = cpu.alu_sub_8(10, 3);
@@ -93,7 +93,7 @@ fn test_alu_sub_flags_8bit() {
 
 #[test]
 fn test_alu_adc_carry_in() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Set CF = 1
     cpu.set_cpu_flag(CpuFlags::CF, true);
@@ -108,7 +108,7 @@ fn test_alu_adc_carry_in() {
 
 #[test]
 fn test_parity_flag_logic() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Parity is calculated on the LOW byte only, even for 16-bit ops.
     // Even number of bits set = Parity Flag TRUE.
@@ -134,7 +134,7 @@ fn test_parity_flag_logic() {
 
 #[test]
 fn test_fpu_stack_rotation() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     use rust_dos::f80::F80;
 
     // FPU stack is a ring buffer of 8 elements.
@@ -163,7 +163,7 @@ fn test_fpu_stack_rotation() {
 
 #[test]
 fn test_segment_override_prefix() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: 
     // Default Access: MOV AX, [BX]      -> Reads from DS:[BX]

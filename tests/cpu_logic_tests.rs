@@ -5,7 +5,7 @@ mod testrunners;
 
 #[test]
 fn test_logic_and_or_xor() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // AND: 0x0F0F & 0xFF00 = 0x0F00 (ZF=0, SF=0)
     cpu.set_reg16(iced_x86::Register::AX, 0x0F0F);
@@ -33,7 +33,7 @@ fn test_logic_and_or_xor() {
 
 #[test]
 fn test_logic_not_test() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // NOT: ~0x00FF = 0xFF00 (Flags should not change)
     cpu.set_reg16(iced_x86::Register::AX, 0x00FF);
@@ -54,7 +54,7 @@ fn test_logic_not_test() {
 
 #[test]
 fn test_shifts_shl_shr_sar() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SAR Test: 0xFE (-2) >> 1 should be 0xFF (-1)
     cpu.set_reg8(iced_x86::Register::BL, 0xFE);
@@ -67,7 +67,7 @@ fn test_shifts_shl_shr_sar() {
 
 #[test]
 fn test_rotates_rol_ror_rcl_rcr() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // ROL Test: 0x8001 rotated left 1 = 0x0003 (CF=1)
     cpu.set_reg16(iced_x86::Register::AX, 0x8001);
@@ -86,7 +86,7 @@ fn test_rotates_rol_ror_rcl_rcr() {
 
 #[test]
 fn test_logic_memory_operands() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;
     cpu.bus.write_16(addr, 0xAAAA);
     
@@ -99,7 +99,7 @@ fn test_logic_memory_operands() {
 
 #[test]
 fn test_rotates_rcr_only() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     // Clear all registers
     cpu.set_reg16(iced_x86::Register::AX, 0);
     cpu.set_reg16(iced_x86::Register::BX, 0);
@@ -122,7 +122,7 @@ fn test_rotates_rcr_only() {
 
 #[test]
 fn test_test_instr_must_clear_carry_overflow() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Scenario: Graphics code often checks bits with TEST, then branches.
     // TEST must force CF and OF to zero.
@@ -143,7 +143,7 @@ fn test_test_instr_must_clear_carry_overflow() {
 
 #[test]
 fn test_logic_imm8_sign_extension() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Align AX to even number using AND with -2 (0xFE).
     // Opcode: 83 E0 FE -> AND AX, imm8
@@ -167,7 +167,7 @@ fn test_logic_imm8_sign_extension() {
 
 #[test]
 fn test_rep_cx_zero_does_nothing() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: REP STOSW with CX = 0.
     // Should NOT write to memory. Should NOT decrement DI.
@@ -190,7 +190,7 @@ fn test_rep_cx_zero_does_nothing() {
 
 #[test]
 fn test_aad_logic() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: AAD converts unpacked BCD in AH:AL into binary in AL.
     // AL = AL + (AH * base). AH = 0.
@@ -217,7 +217,7 @@ fn test_aad_logic() {
 
 #[test]
 fn test_xlat_segment_override() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: XLAT with Segment Override (ES:).
     // Instruction: 26 D7 -> XLAT ES:[BX]
@@ -244,7 +244,7 @@ fn test_xlat_segment_override() {
 
 #[test]
 fn test_imul_3_op_sign_extension() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: IMUL AX, BX, -5
     // Opcode: 6B C3 FB
@@ -263,7 +263,7 @@ fn test_imul_3_op_sign_extension() {
 
 #[test]
 fn test_rcl_9bit_rotation() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Rotate Through Carry (RCL) behaves like a 9-bit rotate for 8-bit registers.
     // The ring is: [CF] <- [7...0] <- [CF]
@@ -299,7 +299,7 @@ fn test_rcl_9bit_rotation() {
 
 #[test]
 fn test_shl_overshift_behavior() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: Shift Left by 16 or more.
     // On 8086, the CPU does NOT mask the count. It literally shifts 16 times.
@@ -316,7 +316,7 @@ fn test_shl_overshift_behavior() {
 
 #[test]
 fn test_pushf_popf_preserves_direction() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     cpu.set_cpu_flag(CpuFlags::DF, true); // Set Direction Flag (Down)
     cpu.set_cpu_flag(CpuFlags::CF, true); // Set Carry Flag
@@ -337,7 +337,7 @@ fn test_pushf_popf_preserves_direction() {
 
 #[test]
 fn test_lea_ignores_segment_base() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: LEA AX, [BX+SI]
     // DS = 0x1000 (Base 0x10000)

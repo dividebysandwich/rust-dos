@@ -30,6 +30,10 @@ mod video;
 struct Args {
     #[arg(short, long, default_value_t = 1)]
     scale: u32,
+
+    /// Root directory for Drive C:
+    #[arg(short, long, default_value = ".")]
+    dir: String,
 }
 
 fn main() -> Result<(), String> {
@@ -79,7 +83,8 @@ fn main() -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
 
-    let mut cpu = Cpu::new();
+    let root_path = std::path::PathBuf::from(&args.dir);
+    let mut cpu = Cpu::new(root_path);
     cpu.bus.audio_device = Some(audio_device);
     let mut event_pump = sdl_context.event_pump()?;
 

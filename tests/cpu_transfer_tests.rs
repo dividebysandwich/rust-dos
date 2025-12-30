@@ -5,7 +5,7 @@ mod testrunners;
 
 #[test]
 fn test_fpu_to_cpu_flags_bridge() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Compare 10.0 and 10.0 (Should set ZF)
     let mut f10 = F80::new(); f10.set_f64(10.0);
@@ -28,7 +28,7 @@ fn test_fpu_to_cpu_flags_bridge() {
 
 #[test]
 fn test_cwd_idiv_chain() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: -100 / 2 = -50
     // AX = -100 (0xFF9C)

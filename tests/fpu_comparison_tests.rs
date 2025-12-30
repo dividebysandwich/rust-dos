@@ -12,7 +12,7 @@ fn push_val(cpu: &mut Cpu, val: f64) {
 
 #[test]
 fn test_fcompp_stack_cleanup() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let initial_top = cpu.fpu_top;
     
     cpu.fpu_push(F80::new());
@@ -27,7 +27,7 @@ fn test_fcompp_stack_cleanup() {
 
 #[test]
 fn test_fcom_reverse_opcode_dc() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Scenario: ST(0)=8.0, ST(1)=10.0
     push_val(&mut cpu, 10.0); // ST(1)
@@ -45,7 +45,7 @@ fn test_fcom_reverse_opcode_dc() {
 
 #[test]
 fn test_fcom_standard_register() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Scenario: ST(0)=10.0, ST(1)=8.0
     push_val(&mut cpu, 8.0);  // ST(1)
@@ -62,7 +62,7 @@ fn test_fcom_standard_register() {
 
 #[test]
 fn test_fcom_memory_float32() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     push_val(&mut cpu, 5.0); // ST(0)
 
     // Write 10.0f32 to memory at 0x1000
@@ -80,7 +80,7 @@ fn test_fcom_memory_float32() {
 
 #[test]
 fn test_fcom_memory_float64() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     push_val(&mut cpu, 20.0); // ST(0)
 
     // Write 20.0f64 to memory at 0x1000
@@ -98,7 +98,7 @@ fn test_fcom_memory_float64() {
 
 #[test]
 fn test_ficom_integer_memory() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     push_val(&mut cpu, 100.0); // ST(0)
 
     // Write 50 (Int16) to memory
@@ -115,7 +115,7 @@ fn test_ficom_integer_memory() {
 
 #[test]
 fn test_ftst_compare_zero() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Case 1: Positive
     push_val(&mut cpu, 123.4);
@@ -137,7 +137,7 @@ fn test_ftst_compare_zero() {
 
 #[test]
 fn test_fcomp_single_pop() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     push_val(&mut cpu, 1.0);
     push_val(&mut cpu, 2.0); // ST(0)
 
@@ -153,7 +153,7 @@ fn test_fcomp_single_pop() {
 
 #[test]
 fn test_nan_unordered_compare() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Create a NaN
     let mut nan = F80::new();

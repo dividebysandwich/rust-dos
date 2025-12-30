@@ -5,7 +5,7 @@ mod testrunners;
 
 #[test]
 fn test_fpu_arithmetic_matrix() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Setup: ST(1) = 100.0, ST(0) = 20.0
     let mut f100 = F80::new(); f100.set_f64(100.0);
@@ -61,7 +61,7 @@ fn test_fpu_arithmetic_matrix() {
 
 #[test]
 fn test_fadd_and_fsub_real() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f1 = F80::new(); f1.set_f64(10.5);
     let mut f2 = F80::new(); f2.set_f64(2.5);
     
@@ -80,7 +80,7 @@ fn test_fadd_and_fsub_real() {
 
 #[test]
 fn test_faddp_behavior() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f1 = F80::new(); f1.set_f64(5.0);
     let mut f2 = F80::new(); f2.set_f64(1.0);
     cpu.fpu_push(f1);
@@ -97,7 +97,7 @@ fn test_faddp_behavior() {
 
 #[test]
 fn test_fiadd_integer_memory() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f0 = F80::new(); f0.set_f64(100.0);
     cpu.fpu_push(f0);
 
@@ -115,7 +115,7 @@ fn test_fiadd_integer_memory() {
 
 #[test]
 fn test_fsqrt_and_invalid_op() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // 1. Valid Case: sqrt(16.0) = 4.0
     let mut f16 = F80::new(); 
@@ -144,7 +144,7 @@ fn test_fsqrt_and_invalid_op() {
 
 #[test]
 fn test_fprem_partial_remainder() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // 10.0 / 3.0 -> remainder 1.0 (Quotient = 3)
     let mut f3 = F80::new(); f3.set_f64(3.0);
@@ -170,7 +170,7 @@ fn test_fprem_partial_remainder() {
 
 #[test]
 fn test_fabs_fchs() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f_neg = F80::new(); f_neg.set_f64(-5.5);
     cpu.fpu_push(f_neg);
 
@@ -187,7 +187,7 @@ fn test_fabs_fchs() {
 
 #[test]
 fn test_f2xm1_exponentiation() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Test 2^0.5 - 1
     // 0.5 is within the required range (-1.0 to 1.0) for F2XM1
@@ -206,7 +206,7 @@ fn test_f2xm1_exponentiation() {
 
 #[test]
 fn test_fyl2x_logarithm() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Calculate 3 * log2(8) = 3 * 3 = 9
     let mut f_y = F80::new(); f_y.set_f64(3.0);
@@ -223,7 +223,7 @@ fn test_fyl2x_logarithm() {
 
 #[test]
 fn test_fxtract_decomposition() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f12 = F80::new(); f12.set_f64(12.0); // 1.5 * 2^3
     cpu.fpu_push(f12);
 
@@ -235,7 +235,7 @@ fn test_fxtract_decomposition() {
 
 #[test]
 fn test_fscale_powers_of_two() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f_exp = F80::new(); f_exp.set_f64(2.0);
     let mut f_val = F80::new(); f_val.set_f64(3.0);
     
@@ -249,7 +249,7 @@ fn test_fscale_powers_of_two() {
 
 #[test]
 fn test_fadd_diagnostic() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f1 = F80::new(); f1.set_f64(10.5);
     let mut f2 = F80::new(); f2.set_f64(2.5);
     
@@ -274,7 +274,7 @@ fn test_fadd_diagnostic() {
 
 #[test]
 fn test_fsub_variants() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let mut f10 = F80::new(); f10.set_f64(10.0);
     let mut f2 = F80::new(); f2.set_f64(2.0);
     cpu.fpu_push(f10); // ST(1)
@@ -302,7 +302,7 @@ fn push_val(cpu: &mut Cpu, val: f64) {
 
 #[test]
 fn test_fsubp_st2_st0() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     // Setup: ST(0)=1.0, ST(1)=10.0, ST(2)=100.0
     push_val(&mut cpu, 100.0);
     push_val(&mut cpu, 10.0);
@@ -320,7 +320,7 @@ fn test_fsubp_st2_st0() {
 
 #[test]
 fn test_trigonometry() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // FSIN of PI/2
     push_val(&mut cpu, std::f64::consts::FRAC_PI_2);

@@ -5,7 +5,7 @@ use testrunners::run_cpu_code;
 
 #[test]
 fn test_math_add_sub_adc_sbb() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. ADD: 10 + 20 = 30
     cpu.set_reg16(Register::AX, 10);
@@ -33,7 +33,7 @@ fn test_math_add_sub_adc_sbb() {
 
 #[test]
 fn test_math_mul_div() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // MUL (Unsigned): 200 * 10 = 2000 (0x07D0)
     cpu.set_reg8(Register::AL, 200);
@@ -54,7 +54,7 @@ fn test_math_mul_div() {
 
 #[test]
 fn test_math_imul_idiv() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // IMUL (Signed): -5 * 10 = -50 (0xFFCE)
     cpu.set_reg8(Register::AL, 0xFB); // -5
@@ -74,7 +74,7 @@ fn test_math_imul_idiv() {
 
 #[test]
 fn test_math_inc_dec_neg_cmp() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // INC: 0xFFFF -> 0 (ZF=1, CF should NOT be affected)
     cpu.ax = 0xFFFF;
@@ -102,7 +102,7 @@ fn test_math_inc_dec_neg_cmp() {
 
 #[test]
 fn test_math_bcd_adjustments() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // DAA: AL=0x35, ADD AL, 0x39 (res=0x6E). DAA should adjust to 0x74.
     cpu.set_reg8(Register::AL, 0x35);
@@ -143,7 +143,7 @@ fn test_math_bcd_adjustments() {
 
 #[test]
 fn test_inc_dec_must_preserve_carry_flag() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Scenario: A loop that relies on a Carry from an ADD being preserved 
     // across the loop counter decrement.
@@ -169,7 +169,7 @@ fn test_inc_dec_must_preserve_carry_flag() {
 
 #[test]
 fn test_cmp_memory_16bit_width() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x200;
 
     // SCENARIO: 
@@ -195,7 +195,7 @@ fn test_cmp_memory_16bit_width() {
 
 #[test]
 fn test_math_cmp_signed_overflow() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Check proper setting of OF vs CF
     //
@@ -228,7 +228,7 @@ fn test_math_cmp_signed_overflow() {
 
 #[test]
 fn test_math_cmp_16bit_signed_overflow() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 16-bit comparison
     // Case: 3 - 4 = -1 (0xFFFF)
@@ -248,7 +248,7 @@ fn test_math_cmp_16bit_signed_overflow() {
 
 #[test]
 fn test_add_r16_imm8_sign_extension_extended_ascii() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // SCENARIO: 
     // AX = 0x00C4 (Extended ASCII '─', 196)

@@ -3,7 +3,7 @@ use rust_dos::cpu::{Cpu, CpuFlags};
 
 #[test]
 fn test_alu_add_8() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Simple Add: 10 + 20 = 30
     let res = cpu.alu_add_8(10, 20);
@@ -20,7 +20,7 @@ fn test_alu_add_8() {
 
 #[test]
 fn test_alu_add_16_overflow() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Signed Overflow: 32767 (0x7FFF) + 1 = -32768 (0x8000)
     let res = cpu.alu_add_16(0x7FFF, 1);
@@ -31,7 +31,7 @@ fn test_alu_add_16_overflow() {
 
 #[test]
 fn test_alu_sub_8() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 10 - 5 = 5
     let res = cpu.alu_sub_8(10, 5);
@@ -47,7 +47,7 @@ fn test_alu_sub_8() {
 
 #[test]
 fn test_parity_flag() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Result: 0x03 (binary 0000 0011) -> 2 bits set -> Even -> PF=1
     let res = cpu.alu_add_8(1, 2); 
@@ -69,7 +69,7 @@ fn test_parity_flag() {
 
 #[test]
 fn test_alu_af_flag_edge_cases() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Addition: 15 (0x0F) + 1 = 16 (0x10)
     // Bit 3 was 1, result bit 3 is 0 -> Carry to bit 4 -> AF=1
@@ -89,7 +89,7 @@ fn test_alu_af_flag_edge_cases() {
 
 #[test]
 fn test_alu_sbb_ripple_borrow() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Goal: 0x0100 - 1 = 0x00FF
     // Step 1: Low byte 0x00 - 1
@@ -108,7 +108,7 @@ fn test_alu_sbb_ripple_borrow() {
 
 #[test]
 fn test_alu_sbb_16_complex() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Case: 0 - 0 with Carry-in
     // Result: 0xFFFF, CF=1, ZF=0
@@ -129,7 +129,7 @@ fn test_alu_sbb_16_complex() {
 
 #[test]
 fn test_rotate_flag_preservation() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Set ZF manually
     cpu.set_cpu_flag(CpuFlags::ZF, true);
@@ -143,7 +143,7 @@ fn test_rotate_flag_preservation() {
 
 #[test]
 fn test_alu_adc_8_overflow() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 254 + 1 + (CF=1) = 256 -> 0
     cpu.set_cpu_flag(CpuFlags::CF, true);

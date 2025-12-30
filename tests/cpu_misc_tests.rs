@@ -4,7 +4,7 @@ use testrunners::run_cpu_code;
 
 #[test]
 fn test_flags_operations() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // STC: Set Carry
     // F9
@@ -31,7 +31,7 @@ fn test_flags_operations() {
 
 #[test]
 fn test_hlt_state() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     // F4: HLT
     run_cpu_code(&mut cpu, &[0xF4]);
     assert!(matches!(cpu.state, CpuState::Halted));
@@ -39,7 +39,7 @@ fn test_hlt_state() {
 
 #[test]
 fn test_int_and_iret() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.ip = 0x100;
     cpu.sp = 0xFFFE;
     cpu.cs = 0x0000;
@@ -76,7 +76,7 @@ fn test_int_and_iret() {
 
 #[test]
 fn test_into_overflow() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.sp = 0xFFFE;
     cpu.ss = 0x0000;
     
@@ -98,7 +98,7 @@ fn test_into_overflow() {
 
 #[test]
 fn test_enter_leave_stack_frames() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.sp = 0xFFFE;
     cpu.bp = 0xAAAA;
     cpu.ss = 0x0000; // Important for get_physical_addr
@@ -123,7 +123,7 @@ fn test_enter_leave_stack_frames() {
 
 #[test]
 fn test_enter_nested_level() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.sp = 0xFFFE;
     cpu.bp = 0x8000;
     cpu.ss = 0x0000;

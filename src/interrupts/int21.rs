@@ -1,17 +1,18 @@
-use iced_x86::Register;
 use chrono::{Local, Timelike};
+use iced_x86::Register;
 
-use crate::cpu::{Cpu, CpuState, CpuFlags};
-use crate::video::{print_char};
+use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
-use super::utils::{read_asciiz_string, read_dta_template, pattern_to_fcb};
+use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::video::print_char;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     match ah {
         // AH = 00h: Terminate Program (Legacy Method)
         0x00 => {
-            cpu.bus.log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
+            cpu.bus
+                .log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
             cpu.state = CpuState::RebootShell;
         }
 
@@ -36,11 +37,11 @@ pub fn handle(cpu: &mut Cpu) {
                 if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
                     // Key Available: Return ASCII and Clear Zero Flag
                     let ascii = (key_code & 0xFF) as u8;
-                    
-                    // Handle Extended Keys (First byte is 0x00) logic if necessary, 
+
+                    // Handle Extended Keys (First byte is 0x00) logic if necessary,
                     // but for now we just return the low byte.
                     cpu.set_reg8(Register::AL, ascii);
-                    cpu.set_zflag(false); 
+                    cpu.set_zflag(false);
                 } else {
                     // No Key: Return 0 and Set Zero Flag
                     cpu.set_reg8(Register::AL, 0x00);
@@ -50,9 +51,9 @@ pub fn handle(cpu: &mut Cpu) {
                 // --- OUTPUT ---
                 // Write character in DL to screen
                 if dl == 0x07 {
-                     play_sdl_beep(&mut cpu.bus);
+                    play_sdl_beep(&mut cpu.bus);
                 } else {
-                     print_char(&mut cpu.bus, dl);
+                    print_char(&mut cpu.bus, dl);
                 }
                 // AL is officially undefined on output, but we leave it alone.
             }
@@ -73,7 +74,8 @@ pub fn handle(cpu: &mut Cpu) {
                 let saved_ip = cpu.bus.read_16(phys_sp & 0xFFFFF);
 
                 // Substract 4 and make the CPU re-execute the trap instruction after returning.
-                cpu.bus.write_16(phys_sp & 0xFFFFF, saved_ip.wrapping_sub(4));
+                cpu.bus
+                    .write_16(phys_sp & 0xFFFFF, saved_ip.wrapping_sub(4));
             }
         }
 
@@ -82,7 +84,9 @@ pub fn handle(cpu: &mut Cpu) {
             let mut offset = cpu.dx;
             loop {
                 let char_byte = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds, offset));
-                if char_byte == b'$' { break; }
+                if char_byte == b'$' {
+                    break;
+                }
 
                 if char_byte == 0x07 {
                     play_sdl_beep(&mut cpu.bus);
@@ -97,25 +101,26 @@ pub fn handle(cpu: &mut Cpu) {
         // AL = Function to execute after clearing (1, 6, 7, 8, 0xA)
         0x0C => {
             let next_fn = cpu.get_al();
-            
+
             cpu.bus.keyboard_buffer.clear();
 
             match next_fn {
                 0x01 | 0x06 | 0x07 | 0x08 | 0x0A => {
                     // Set AH to the next function and recurse
                     cpu.set_reg8(Register::AH, next_fn);
-                    handle(cpu); 
+                    handle(cpu);
                 }
                 _ => {
                     // If AL is 0 or invalid, just return after clearing
-                    cpu.set_reg8(Register::AL, 0); 
+                    cpu.set_reg8(Register::AL, 0);
                 }
             }
         }
 
         // AH=19h: Get Current Default Drive
         0x19 => {
-            // TODO: Implement multiple drives. Currently hardcoded to C: (2)
+            // Return Default Drive (0=A, 1=B, 2=C)
+            // We simulate C: as default.
             cpu.set_reg8(Register::AL, 2);
         }
 
@@ -149,7 +154,7 @@ pub fn handle(cpu: &mut Cpu) {
         // Returns: CH=Hour, CL=Minute, DH=Second, DL=1/100s
         0x2C => {
             let now = Local::now();
-            
+
             let hour = now.hour() as u8;
             let minute = now.minute() as u8;
             let second = now.second() as u8;
@@ -180,11 +185,13 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 33h: Get/Set Ctrl-Break Check
         0x33 => {
             let al = cpu.get_al();
-            if al == 0x00 { // Get
+            if al == 0x00 {
+                // Get
                 cpu.set_reg8(Register::DL, 0); // 0 = Off
             } else if al == 0x01 { // Set
                 // Ignore setting, just return
-            } else if al == 0x06 { // Get MS-DOS Version (True version)
+            } else if al == 0x06 {
+                // Get MS-DOS Version (True version)
                 cpu.set_reg16(Register::BX, 0x3205); // 5.50
                 cpu.set_reg8(Register::DL, 0); // Revision 0
                 cpu.set_reg8(Register::DH, 0); // DOS in HMA?
@@ -222,7 +229,51 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
-        // AH = 3Dh: Open File
+        // AH=39h: Create Directory (MKDIR)
+        0x39 => {
+            // TODO: Implement MKDIR
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+            cpu.ax = 0x03; // Path not found (stub)
+        }
+
+        // AH=3Ah: Remove Directory (RMDIR)
+        0x3A => {
+            // TODO: Implement RMDIR
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+            cpu.ax = 0x03;
+        }
+
+        // AH=3Bh: Set Current Directory (CHDIR)
+        0x3B => {
+            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let path = read_asciiz_string(&cpu.bus, addr);
+            if cpu.bus.disk.set_current_directory(&path) {
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else {
+                cpu.set_cpu_flag(CpuFlags::CF, true);
+                cpu.ax = 0x03; // Path not found
+            }
+        }
+
+        // AH=3Ch: Create File
+        0x3C => {
+            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let filename = read_asciiz_string(&cpu.bus, addr);
+            // Attributes in CX are ignored for now (TODO)
+            match cpu.bus.disk.open_file(&filename, 0x02) {
+                // 0x02 = Read/Write + Create
+                Ok(handle) => {
+                    cpu.ax = handle;
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                }
+                Err(code) => {
+                    cpu.ax = code as u16;
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                }
+            }
+        }
+
+        // AH=3Dh: Open File
         0x3D => {
             let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, addr);
@@ -357,7 +408,7 @@ pub fn handle(cpu: &mut Cpu) {
                     // Bit 7=1 (Char Dev), Bit 6=0 (EOF), Bit 0=1 (Console Input)
                     // For STDIN(0), STDOUT(1), STDERR(2), return 0x80D3 or similar.
                     if bx <= 2 {
-                        cpu.dx = 0x80D3; 
+                        cpu.dx = 0x80D3;
                     } else {
                         // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive #
                         cpu.dx = 0x0002; // Drive C
@@ -372,7 +423,7 @@ pub fn handle(cpu: &mut Cpu) {
                 }
                 _ => {
                     // Stub other subfunctions as success
-                    cpu.ax = 0; 
+                    cpu.ax = 0;
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
             }
@@ -383,10 +434,16 @@ pub fn handle(cpu: &mut Cpu) {
             let ds = cpu.ds;
             let si = cpu.get_reg16(Register::SI);
             let addr = cpu.get_physical_addr(ds, si);
-            for i in 0..64 {
-                cpu.bus.write_8(addr + i, 0x00);
+            let cwd = cpu.bus.disk.get_current_directory();
+
+            // Write string to DS:SI
+            let bytes = cwd.as_bytes();
+            for (i, &b) in bytes.iter().enumerate() {
+                cpu.bus.write_8(addr + i, b);
             }
-            cpu.set_reg16(Register::AX, 0x0100);
+            cpu.bus.write_8(addr + bytes.len(), 0x00); // Null Terminator
+
+            cpu.set_reg16(Register::AX, 0x0100); // Success
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
@@ -395,11 +452,11 @@ pub fn handle(cpu: &mut Cpu) {
         // Return: AX = Segment, or CF=1 + AX=Error, BX=Max Available
         0x48 => {
             let requested_paras = cpu.bx;
-            
+
             // Very simple allocator stub:
             // We pretend there is a heap at 0x2000 (after the loaded COM/EXE at 0x1000).
             // TODO: Actual memory manager struct.
-            
+
             // Check if request is obviously bad (> 640KB)
             if requested_paras > 0xA000 {
                 cpu.ax = 0x0008; // Insufficient memory
@@ -408,7 +465,7 @@ pub fn handle(cpu: &mut Cpu) {
             } else {
                 // Return a hardcoded free segment.
                 // TODO: FIXME! Consecutive calls will return the SAME address in this stub.
-                cpu.ax = 0x2000; 
+                cpu.ax = 0x2000;
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             }
         }
@@ -417,22 +474,28 @@ pub fn handle(cpu: &mut Cpu) {
         // ES = Segment of the block to be freed
         0x49 => {
             let segment_to_free = cpu.es;
-            
+
             // TODO: Replace this stub by actually marking the memory block in the MCB chain as free.
-            
-            cpu.bus.log_string(&format!("[DOS] Freeing Memory Block at {:04X}", segment_to_free));
+
+            cpu.bus.log_string(&format!(
+                "[DOS] Freeing Memory Block at {:04X}",
+                segment_to_free
+            ));
 
             // Return Success
             cpu.set_cpu_flag(CpuFlags::CF, false);
-            cpu.ax = 0; 
+            cpu.ax = 0;
         }
-        
+
         // AH = 4Ah: Resize Memory Block
         0x4A => {
             let requested_size = cpu.get_reg16(Register::BX);
             let max_available = 0x9000; // Simulated available paragraphs
 
-            cpu.bus.log_string(&format!("[DEBUG] INT 21,4A Resize: Req {:04X}, Max {:04X}", requested_size, max_available));
+            cpu.bus.log_string(&format!(
+                "[DEBUG] INT 21,4A Resize: Req {:04X}, Max {:04X}",
+                requested_size, max_available
+            ));
 
             if requested_size > max_available {
                 cpu.set_reg16(Register::BX, max_available);
@@ -445,7 +508,8 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 4Ch: Terminate Program
         0x4C => {
-            cpu.bus.log_string("[DOS] Program Terminated (INT 21h, 4Ch).");
+            cpu.bus
+                .log_string("[DOS] Program Terminated (INT 21h, 4Ch).");
             cpu.state = CpuState::RebootShell;
         }
 
@@ -469,19 +533,21 @@ pub fn handle(cpu: &mut Cpu) {
                 (idx, attr, pattern)
             };
 
-            let search_pattern = if let Some(idx) = raw_pattern.rfind('\\') {
-                raw_pattern[idx+1..].to_string()
-            } else if let Some(idx) = raw_pattern.rfind(':') {
-                raw_pattern[idx+1..].to_string()
-            } else {
-                raw_pattern
-            };
+            // Pass the full raw pattern to DiskController.
+            // It will handle splitting path and pattern.
+            let search_pattern = raw_pattern;
 
-            match cpu.bus.disk.find_directory_entry(&search_pattern, index, search_attr) {
+            match cpu
+                .bus
+                .disk
+                .find_directory_entry(&search_pattern, index, search_attr)
+            {
                 Ok(entry) => {
                     cpu.bus.write_8(dta_phys + 0, 3); // Drive C:
-                    cpu.bus.write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
-                    cpu.bus.write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
+                    cpu.bus
+                        .write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
+                    cpu.bus
+                        .write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
 
                     let fcb_bytes = pattern_to_fcb(&search_pattern);
                     for i in 0..11 {
@@ -492,21 +558,27 @@ pub fn handle(cpu: &mut Cpu) {
                     let unique_id = (index as u32).wrapping_add(0x12345678);
                     cpu.bus.write_16(dta_phys + 15, (unique_id & 0xFFFF) as u16);
                     cpu.bus.write_16(dta_phys + 17, (unique_id >> 16) as u16);
-                    cpu.bus.write_16(dta_phys + 19, (index as u16).wrapping_mul(3));
+                    cpu.bus
+                        .write_16(dta_phys + 19, (index as u16).wrapping_mul(3));
 
                     // File Attributes
                     let mut attr = if entry.is_dir { 0x10 } else { 0x20 };
-                    if entry.filename == "RUSTDOS" { attr = 0x08; }
+                    if entry.filename == "RUSTDOS" {
+                        attr = 0x08;
+                    }
                     cpu.bus.write_8(dta_phys + 21, attr);
 
                     cpu.bus.write_16(dta_phys + 22, entry.dos_time);
                     cpu.bus.write_16(dta_phys + 24, entry.dos_date);
-                    cpu.bus.write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
+                    cpu.bus
+                        .write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
                     cpu.bus.write_16(dta_phys + 28, (entry.size >> 16) as u16);
 
                     // Filename at Offset 30
                     let name_start = dta_phys + 30;
-                    for i in 0..13 { cpu.bus.write_8(name_start + i, 0x00); }
+                    for i in 0..13 {
+                        cpu.bus.write_8(name_start + i, 0x00);
+                    }
                     let name_bytes = entry.filename.as_bytes();
                     let len = std::cmp::min(name_bytes.len(), 12);
                     for i in 0..len {
@@ -523,6 +595,8 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
-        _ => cpu.bus.log_string(&format!("[DOS] Unhandled Call Int 0x21 AH={:02X}", ah)),
+        _ => cpu
+            .bus
+            .log_string(&format!("[DOS] Unhandled Call Int 0x21 AH={:02X}", ah)),
     }
 }

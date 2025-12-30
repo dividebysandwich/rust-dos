@@ -5,7 +5,7 @@ mod testrunners;
 
 #[test]
 fn test_mov_and_registers() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // B8 34 12    MOV AX, 0x1234
     // 88 C4       MOV AH, AL (AH becomes 0x34)
@@ -18,7 +18,7 @@ fn test_mov_and_registers() {
 
 #[test]
 fn test_stack_push_pop() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.sp = 0xFFFE; // Initialize stack pointer
 
     // B8 55 AA    MOV AX, 0xAA55
@@ -35,7 +35,7 @@ fn test_stack_push_pop() {
 
 #[test]
 fn test_inc_dec_flags() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // B0 FF       MOV AL, 0xFF
     // FE C0       INC AL  (Wraps to 0, ZF=1)
@@ -51,7 +51,7 @@ fn test_inc_dec_flags() {
 
 #[test]
 fn test_imul_16bit() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // B8 00 80    MOV AX, 0x8000 (-32768)
     // BB FF FF    MOV BX, 0xFFFF (-1)
@@ -72,7 +72,7 @@ fn test_imul_16bit() {
 
 #[test]
 fn test_jumps_jz() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // B8 05 00    MOV AX, 5
     // 83 E8 05    SUB AX, 5  (ZF=1)
@@ -88,7 +88,7 @@ fn test_jumps_jz() {
 
 #[test]
 fn test_string_rep_movsb() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.si = 0x0000;
     cpu.di = 0x0010;
     cpu.cx = 0x0003; // Copy 3 bytes
@@ -121,7 +121,7 @@ fn test_string_rep_movsb() {
 
 #[test]
 fn test_call_ret() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.sp = 0xFFFE;
 
     // Layout:
@@ -150,7 +150,7 @@ fn test_call_ret() {
 
 #[test]
 fn test_repe_scasb_backwards_mismatch() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.es = 0x1000;
     cpu.di = 0x0004; // Point to the end of a buffer
     cpu.cx = 0x0005; 
@@ -181,7 +181,7 @@ fn test_repe_scasb_backwards_mismatch() {
 
 #[test]
 fn test_qb_trim_logic() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     // 1. Set AL to '0' (0x30), DI points to '8' (0x38)
     // 2. SCASB (AL vs [DI]) -> Should set ZF=0
     // 3. JZ ... (Should NOT jump)
@@ -201,7 +201,7 @@ fn test_qb_trim_logic() {
 
 #[test]
 fn test_sbb_immediate_check() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     // 1C 05  -> SBB AL, 5
     // 90     -> NOP
     let code = [0x1C, 0x05, 0x90];
@@ -217,7 +217,7 @@ fn test_sbb_immediate_check() {
 
 #[test]
 fn test_alu_sbb_comprehensive() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // --- 1. Basic Borrow Ripple (The 0x0100 - 1 Case) ---
     // Low Byte: 0x00 - 0x01 = 0xFF (CF=1)
@@ -257,7 +257,7 @@ fn test_alu_sbb_comprehensive() {
 
 #[test]
 fn test_rcl_preserves_zf() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // 1. CMP AL, AL (Sets ZF=1)
     // 2. MOV AL, 0xFE
@@ -276,7 +276,7 @@ fn test_rcl_preserves_zf() {
 
 #[test]
 fn test_adc_af_flag() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.set_cpu_flag(CpuFlags::CF, true);
 
     // 0x07 + 0x08 + CF(1) = 0x10
@@ -295,7 +295,7 @@ fn test_adc_af_flag() {
 
 #[test]
 fn test_das_instruction() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // Case 1: 0x9A -> 0x94 (Standard adjustment)
     // AL = 0x9A, DAS -> AL = 0x94
@@ -320,7 +320,7 @@ fn test_das_instruction() {
 
 #[test]
 fn test_aas_instruction() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 0x08 - 0x09 = 0xFF. AAS should adjust this.
     // AL = 0xFF -> AL = 0x09, AH = AH - 1, CF=1, AF=1
@@ -335,7 +335,7 @@ fn test_aas_instruction() {
 
 #[test]
 fn test_fpu_comparison_flags() {
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Setup: ST(0) = 8.0
     let mut f8 = F80::new(); f8.set_f64(8.0);
