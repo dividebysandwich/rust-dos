@@ -1,13 +1,14 @@
+use clap::Parser;
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
-use std::time::Duration;
 use std::io::Write;
+use std::time::Duration;
 
 use crate::audio::pump_audio;
-use crate::cpu::{Cpu, CpuState, CpuFlags};
 use crate::command::CommandDispatcher;
+use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::recorder::ScreenRecorder;
 use crate::video::VideoMode;
 
@@ -17,14 +18,22 @@ mod command;
 mod cpu;
 mod disk;
 mod f80;
-mod keyboard;
 mod instructions;
 mod interrupts;
+mod keyboard;
 mod recorder;
 mod shell;
 mod video;
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value_t = 1)]
+    scale: u32,
+}
+
 fn main() -> Result<(), String> {
+    let args = Args::parse();
     let mut debug_mode = false;
 
     let mut cursor_visible = true;
@@ -50,7 +59,11 @@ fn main() -> Result<(), String> {
     audio_device.resume();
 
     let window = video_subsystem
-        .window("Rust DOS Emulator", video::SCREEN_WIDTH, video::SCREEN_HEIGHT)
+        .window(
+            "Rust DOS Emulator",
+            video::SCREEN_WIDTH * args.scale,
+            video::SCREEN_HEIGHT * args.scale,
+        )
         .position_centered()
         .build()
         .map_err(|e| e.to_string())?;
@@ -59,7 +72,11 @@ fn main() -> Result<(), String> {
     let texture_creator = canvas.texture_creator();
     // Texture is always 640x400 RGB
     let mut texture = texture_creator
-        .create_texture_streaming(PixelFormatEnum::RGB24, video::SCREEN_WIDTH, video::SCREEN_HEIGHT)
+        .create_texture_streaming(
+            PixelFormatEnum::RGB24,
+            video::SCREEN_WIDTH,
+            video::SCREEN_HEIGHT,
+        )
         .map_err(|e| e.to_string())?;
 
     let mut cpu = Cpu::new();
@@ -79,7 +96,6 @@ fn main() -> Result<(), String> {
                     keymod,
                     ..
                 } => {
-                    
                     // Update BDA Shift Flags (0x0417)
                     // This lets INT 16h AH=02 report modifier state correctly
                     let mut flags = cpu.bus.read_8(0x0417);
@@ -102,7 +118,10 @@ fn main() -> Result<(), String> {
                     // Debug Toggle (F12 reserved for Emulator)
                     if keycode == Keycode::F12 {
                         debug_mode = !debug_mode;
-                        cpu.bus.log_string(&format!("[DEBUG] Tracing: {}", if debug_mode { "ON" } else { "OFF" }));
+                        cpu.bus.log_string(&format!(
+                            "[DEBUG] Tracing: {}",
+                            if debug_mode { "ON" } else { "OFF" }
+                        ));
                         continue;
                     }
 
@@ -111,10 +130,10 @@ fn main() -> Result<(), String> {
                         cpu.bus.keyboard_buffer.push_back(code);
                     }
                 }
-                // KeyUp only matters for modifiers                
-                Event::KeyUp { 
-                    keycode: Some(keycode), 
-                    .. 
+                // KeyUp only matters for modifiers
+                Event::KeyUp {
+                    keycode: Some(keycode),
+                    ..
                 } => {
                     // Update BDA Shift Flags (Clear bits)
                     let mut flags = cpu.bus.read_8(0x0417);
@@ -134,43 +153,43 @@ fn main() -> Result<(), String> {
 
         // Execute instructions
         for _ in 0..30_000 {
-
             let prev_ip = cpu.ip;
 
             // --- HANDLE PENDING COMMANDS (Outside Interrupts) ---
             if let Some(cmd) = cpu.pending_command.take() {
                 // We have a command from the shell!
-                cpu.bus.log_string(&format!("[MAIN] Processing Command: {}", cmd));
-                
+                cpu.bus
+                    .log_string(&format!("[MAIN] Processing Command: {}", cmd));
+
                 let (command, args) = match cmd.split_once(' ') {
                     Some((c, a)) => (c, a.trim()),
                     None => (cmd.as_str(), ""),
                 };
 
                 let dispatcher = CommandDispatcher::new();
-                
+
                 // Dispatch logic
                 if dispatcher.dispatch(&mut cpu, command, args) {
-                     // Built-in command executed. CPU continues shell loop.
+                    // Built-in command executed. CPU continues shell loop.
                 } else {
-                     // Load Program
-                     let filename = command.to_string();
-                     let loaded = if !filename.contains('.') {
-                          cpu.load_executable(&format!("{}.com", command)) 
-                          || cpu.load_executable(&format!("{}.exe", command))
-                     } else {
-                          cpu.load_executable(&filename)
-                     };
+                    // Load Program
+                    let filename = command.to_string();
+                    let loaded = if !filename.contains('.') {
+                        cpu.load_executable(&format!("{}.com", command))
+                            || cpu.load_executable(&format!("{}.exe", command))
+                    } else {
+                        cpu.load_executable(&filename)
+                    };
 
-                     if !loaded {
-                         crate::video::print_string(&mut cpu, "Bad command or file name.\r\n");
-                     }
-                     // If loaded, load_executable() reset CS:IP. 
-                     // The CPU will naturally start executing the new program next cycle.
+                    if !loaded {
+                        crate::video::print_string(&mut cpu, "Bad command or file name.\r\n");
+                    }
+                    // If loaded, load_executable() reset CS:IP.
+                    // The CPU will naturally start executing the new program next cycle.
                 }
-                
+
                 // Skip the rest of this cycle to ensure clean state
-                continue; 
+                continue;
             }
 
             // --- HANDLE STATE CHANGES ---
@@ -191,10 +210,11 @@ fn main() -> Result<(), String> {
             // Handle "IP = 0" as an explicit exit (Standard COM behavior)
             // If the program jumps to the start of the segment, it wants to exit.
             if cpu.ip == 0x0000 && cpu.cs == 0x1000 {
-                cpu.bus.log_string("[DOS] Program jumped to offset 0000h. Exiting to Shell.");
+                cpu.bus
+                    .log_string("[DOS] Program jumped to offset 0000h. Exiting to Shell.");
                 // Flush log on exit so we don't lose tail data
                 let _ = cpu.bus.log_file.as_mut().unwrap().flush();
-                cpu.load_shell(); 
+                cpu.load_shell();
                 cpu.state = CpuState::Running;
                 shell::show_prompt(&mut cpu);
                 break;
@@ -218,7 +238,7 @@ fn main() -> Result<(), String> {
             // Check for "BOP" (BIOS Operation) -> FE 38 XX
             if b0 == 0xFE && b1 == 0x38 {
                 let vector = cpu.bus.read_8(cpu.get_physical_addr(cpu.cs, cpu.ip + 2));
-        
+
                 // Run the HLE handler directly
                 crate::interrupts::handle_hle(&mut cpu, vector);
 
@@ -229,12 +249,12 @@ fn main() -> Result<(), String> {
                 let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
                 let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
                 let flags_to_restore = CpuFlags::from_bits_truncate(cpu.pop());
-                
+
                 cpu.set_cpu_flags(flags_to_restore);
                 cpu.set_cpu_flag(CpuFlags::DF, false);
                 cpu.set_cpu_flag(CpuFlags::CF, hle_cf);
                 cpu.set_cpu_flag(CpuFlags::ZF, hle_zf);
-        
+
                 continue; // Done for this cycle
             }
 
@@ -243,8 +263,8 @@ fn main() -> Result<(), String> {
 
             if debug_mode || cpu.debug_qb_print {
                 // Filter out the 'Wait for Key' interrupt loop to save disk space
-                if !((instr.mnemonic() == Mnemonic::Int && instr.immediate8() == 0x16) ||
-                     (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E))
+                if !((instr.mnemonic() == Mnemonic::Int && instr.immediate8() == 0x16)
+                    || (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E))
                 {
                     // Skip BIOS area noise
                     if cpu.cs < 0xF000 {
@@ -253,7 +273,8 @@ fn main() -> Result<(), String> {
                         let instr_text = format!("{}", instr);
                         let log_line = format!(
                             "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}",
-                            cpu.cs, cpu.ip,
+                            cpu.cs,
+                            cpu.ip,
                             cpu.get_reg16(iced_x86::Register::AX),
                             cpu.get_reg16(iced_x86::Register::BX),
                             cpu.get_reg16(iced_x86::Register::CX),
@@ -261,7 +282,7 @@ fn main() -> Result<(), String> {
                             cpu.sp,
                             instr_text
                         );
-                    
+
                         // Write to file, ignore errors to keep emulation fast
                         let _ = cpu.bus.log_string(&log_line);
 
@@ -274,7 +295,7 @@ fn main() -> Result<(), String> {
 
                             if target_cs == 0xF000 {
                                 let log = format!(
-                                    "[CPU-DEBUG] Hooked INT {:02X} detected -> Points to F000:{:04X}", 
+                                    "[CPU-DEBUG] Hooked INT {:02X} detected -> Points to F000:{:04X}",
                                     vector, target_ip
                                 );
                                 cpu.bus.log_string(&log);
@@ -298,14 +319,12 @@ fn main() -> Result<(), String> {
 
             // Yield if we are in a tight loop
             if cpu.ip == prev_ip {
-               std::thread::yield_now(); 
+                std::thread::yield_now();
             }
-            
+
             // Make it so
             instructions::execute_instruction(&mut cpu, &instr);
-
         }
-
 
         // Update Audio
         pump_audio(&mut cpu.bus);
@@ -326,15 +345,17 @@ fn main() -> Result<(), String> {
             // Only draw the hardware cursor in Text Modes!
             let current_mode = cpu.bus.video_mode;
             let is_text_mode = matches!(
-                current_mode, 
-                VideoMode::Text80x25 | VideoMode::Text80x25Color | 
-                VideoMode::Text40x25 | VideoMode::Text40x25Color
+                current_mode,
+                VideoMode::Text80x25
+                    | VideoMode::Text80x25Color
+                    | VideoMode::Text40x25
+                    | VideoMode::Text40x25Color
             );
             if is_text_mode {
                 // Read Cursor Position from BDA
                 let cursor_col = cpu.bus.read_8(0x0450) as usize;
                 let cursor_row = cpu.bus.read_8(0x0451) as usize;
-                
+
                 // Read Cursor Shape from BDA
                 let cursor_shape = cpu.bus.read_16(0x0460);
                 let start_scan = (cursor_shape >> 8) as u8;
@@ -352,13 +373,13 @@ fn main() -> Result<(), String> {
 
                 if cursor_visible && !is_hidden && cursor_col < max_cols && cursor_row < 25 {
                     let cell_height = 16;
-            
+
                     // Calculate screen coordinates
                     let start_x = cursor_col * cell_width;
                     let start_y = cursor_row * cell_height;
 
                     // Clamp scanlines
-                    let scan_start = (start_scan & 0x1F).min(15) as usize; 
+                    let scan_start = (start_scan & 0x1F).min(15) as usize;
                     let scan_end = end_scan.min(15) as usize;
 
                     if scan_start <= scan_end {
@@ -373,9 +394,9 @@ fn main() -> Result<(), String> {
                                     // Draw Cursor (Invert or Solid Block)
                                     // Using a distinct color (e.g., pure white or slightly transparent look)
                                     // TODO: Check if simple overwrite is good enough
-                                    buffer[idx] = 0xDD;     
-                                    buffer[idx + 1] = 0xDD; 
-                                    buffer[idx + 2] = 0xDD; 
+                                    buffer[idx] = 0xDD;
+                                    buffer[idx + 1] = 0xDD;
+                                    buffer[idx + 2] = 0xDD;
                                 }
                             }
                         }
@@ -386,31 +407,27 @@ fn main() -> Result<(), String> {
             // Send Frame to Recorder before drawing recording indicator
             recorder.capture(buffer);
 
-
             // Draw Recording Indicator
             if recorder.is_active() {
                 let radius = 5;
                 let center_x = video::SCREEN_WIDTH as usize - 15;
                 let center_y = 15;
-                
+
                 for y in (center_y - radius)..=(center_y + radius) {
                     for x in (center_x - radius)..=(center_x + radius) {
                         let dx = x as isize - center_x as isize;
                         let dy = y as isize - center_y as isize;
-                        if dx*dx + dy*dy <= (radius*radius) as isize {
+                        if dx * dx + dy * dy <= (radius * radius) as isize {
                             let idx = (y * video::SCREEN_WIDTH as usize + x) * 3;
                             if idx + 2 < buffer.len() {
-                                buffer[idx] = 0xFF;   // R
-                                buffer[idx+1] = 0x00; // G
-                                buffer[idx+2] = 0x00; // B
+                                buffer[idx] = 0xFF; // R
+                                buffer[idx + 1] = 0x00; // G
+                                buffer[idx + 2] = 0x00; // B
                             }
                         }
                     }
                 }
             }
-
-
-
         })?;
         canvas.copy(&texture, None, None)?;
         canvas.present();
