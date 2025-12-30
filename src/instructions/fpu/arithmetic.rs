@@ -1,7 +1,7 @@
-use iced_x86::{Instruction, OpKind, MemorySize, Register};
 use crate::cpu::{Cpu, FpuFlags};
 use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
+use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
 // Get the destination index for Pop instructions (e.g., FADDP ST(i), ST(0))
 fn get_pop_dst_index(instr: &Instruction) -> usize {
@@ -113,8 +113,11 @@ pub fn fadd(cpu: &mut Cpu, instr: &Instruction) {
 // FADDP: Add and Pop
 pub fn faddp(cpu: &mut Cpu, instr: &Instruction) {
     let dst_reg = instr.op0_register();
-    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 { 1 } 
-              else { (dst_reg.number() - Register::ST0.number()) as usize };
+    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 {
+        1
+    } else {
+        (dst_reg.number() - Register::ST0.number()) as usize
+    };
 
     let mut sti = cpu.fpu_get(idx);
     let st0 = cpu.fpu_get(0);
@@ -151,7 +154,7 @@ pub fn fsub(cpu: &mut Cpu, instr: &Instruction) {
 // ST(i) = ST(i) - ST(0); Pop ST(0)
 pub fn fsubp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
-    
+
     let st0 = cpu.fpu_get(0);
     let mut sti = cpu.fpu_get(idx);
     sti.sub(st0);
@@ -221,8 +224,11 @@ pub fn fmul(cpu: &mut Cpu, instr: &Instruction) {
 // FMULP: Multiply and Pop
 pub fn fmulp(cpu: &mut Cpu, instr: &Instruction) {
     let dst_reg = instr.op0_register();
-    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 { 1 } 
-              else { (dst_reg.number() - Register::ST0.number()) as usize };
+    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 {
+        1
+    } else {
+        (dst_reg.number() - Register::ST0.number()) as usize
+    };
     let mut sti = cpu.fpu_get(idx);
     let st0 = cpu.fpu_get(0);
     sti.set_f64(sti.get_f64() * st0.get_f64());
@@ -242,7 +248,11 @@ pub fn fdiv(cpu: &mut Cpu, instr: &Instruction) {
         }
         let mut st0 = cpu.fpu_get(0);
         let div_f = divisor.get_f64();
-        if div_f != 0.0 { st0.set_f64(st0.get_f64() / div_f); } else { st0.set_real_indefinite(); }
+        if div_f != 0.0 {
+            st0.set_f64(st0.get_f64() / div_f);
+        } else {
+            st0.set_real_indefinite();
+        }
         cpu.fpu_set(0, st0);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
@@ -250,7 +260,11 @@ pub fn fdiv(cpu: &mut Cpu, instr: &Instruction) {
         let mut dst = cpu.fpu_get(dst_idx);
         let src = cpu.fpu_get(src_idx);
         let src_f = src.get_f64();
-        if src_f != 0.0 { dst.set_f64(dst.get_f64() / src_f); } else { dst.set_real_indefinite(); }
+        if src_f != 0.0 {
+            dst.set_f64(dst.get_f64() / src_f);
+        } else {
+            dst.set_real_indefinite();
+        }
         cpu.fpu_set(dst_idx, dst);
     }
 }
@@ -258,11 +272,18 @@ pub fn fdiv(cpu: &mut Cpu, instr: &Instruction) {
 // FDIVP: Divide and Pop
 pub fn fdivp(cpu: &mut Cpu, instr: &Instruction) {
     let dst_reg = instr.op0_register();
-    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 { 1 } 
-              else { (dst_reg.number() - Register::ST0.number()) as usize };
+    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 {
+        1
+    } else {
+        (dst_reg.number() - Register::ST0.number()) as usize
+    };
     let mut sti = cpu.fpu_get(idx);
     let st0 = cpu.fpu_get(0).get_f64();
-    if st0 != 0.0 { sti.set_f64(sti.get_f64() / st0); } else { sti.set_real_indefinite(); }
+    if st0 != 0.0 {
+        sti.set_f64(sti.get_f64() / st0);
+    } else {
+        sti.set_real_indefinite();
+    }
     cpu.fpu_set(idx, sti);
     cpu.fpu_pop();
 }
@@ -278,10 +299,10 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
             MemorySize::Float64 => mem_val.set_f64(f64::from_bits(cpu.bus.read_64(addr))),
             _ => mem_val.set_f64(1.0),
         }
-        
+
         let mut st0 = cpu.fpu_get(0);
         let st0_f = st0.get_f64();
-        
+
         if st0_f != 0.0 {
             st0.set_f64(mem_val.get_f64() / st0_f);
         } else {
@@ -292,10 +313,10 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-        
+
         let mut dst = cpu.fpu_get(dst_idx);
         let src = cpu.fpu_get(src_idx);
-        
+
         // FDIVR ST(0), ST(i) -> ST(0) = ST(i) / ST(0)
         // FDIVR ST(i), ST(0) -> ST(i) = ST(0) / ST(i)
         // In both cases, we divide the "Source" by the "Destination"
@@ -312,7 +333,7 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
 
 // FDIVRP: Reverse Divide and Pop
 // ST(i) = ST(0) / ST(i); Pop ST(0)
-pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) { // Added instr argument
+pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
 
     let st0_val = cpu.fpu_get(0).get_f64();
@@ -325,39 +346,77 @@ pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) { // Added instr argument
         sti.set_real_indefinite(); // Zero divide
         cpu.set_fpu_flag(FpuFlags::ZE, true);
     }
-    
+
     cpu.fpu_set(idx, sti);
     cpu.fpu_pop();
 }
 
 // --- ADVANCED ARITHMETIC ---
 
-
 pub fn fprem_internal(cpu: &mut Cpu, ieee: bool) {
-    let st0 = cpu.fpu_get(0).get_f64();
-    let st1 = cpu.fpu_get(1).get_f64();
+    let st0_obj = cpu.fpu_get(0);
+    let st1_obj = cpu.fpu_get(1);
 
-    if st1 == 0.0 {
+    let st0 = st0_obj.get_f64();
+    let st1 = st1_obj.get_f64();
+
+    if st1 == 0.0 || st0.is_infinite() {
         cpu.set_fpu_flag(FpuFlags::IE, true);
         let mut nan = F80::new();
-        nan.set_f64(f64::NAN);
+        nan.set_real_indefinite();
         cpu.fpu_set(0, nan);
         return;
     }
 
-    let quotient_f = st0 / st1;
-    let q_int = if ieee { quotient_f.round() as i64 } else { quotient_f.trunc() as i64 };
-    let remainder = st0 - (q_int as f64 * st1);
-    
+    // FPREM spec allows partial reduction if exponent difference is large.
+    // However, to avoid complexity and precision issues with large quotients in manual reduction,
+    // we perform a "complete" reduction immediately using the underlying f64 remainder.
+    // This is compliant as long as we clear C2 (indicating completion).
+
+    let (remainder, q_bits) = if ieee {
+        // FPREM1: Round to nearest
+        let quotient = st0 / st1;
+        let q_rnd = quotient.round();
+        let rem = st0 - q_rnd * st1;
+        (rem, q_rnd as i64)
+    } else {
+        // FPREM: Round toward zero (Truncate)
+        // Use f64 standard remainder (%) which is truncating
+        let rem = st0 % st1;
+
+        // Calculate quotient bits (Q2, Q1, Q0) without full quotient overflow
+        // Q = trunc(ST0 / ST1). We need Q % 8.
+        // Q % 8 = trunc( (ST0 % (8 * ST1)) / ST1 )
+        let st0_abs = st0.abs();
+        let st1_abs = st1.abs();
+        let st0_mod8 = st0_abs % (8.0 * st1_abs);
+        let q_mod8 = (st0_mod8 / st1_abs).trunc() as i64;
+
+        let sign_diff = st0.is_sign_negative() ^ st1.is_sign_negative();
+        let q_final = if sign_diff { -q_mod8 } else { q_mod8 };
+
+        (rem, q_final)
+    };
+
     let mut res = F80::new();
     res.set_f64(remainder);
     cpu.fpu_set(0, res);
 
-    let q = q_int.abs();
-    cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3, false);
-    if (q & 4) != 0 { cpu.set_fpu_flag(FpuFlags::C0, true); }
-    if (q & 1) != 0 { cpu.set_fpu_flag(FpuFlags::C1, true); }
-    if (q & 2) != 0 { cpu.set_fpu_flag(FpuFlags::C3, true); }
+    cpu.set_fpu_flag(
+        FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3,
+        false,
+    );
+
+    // Set C0, C3, C1 from Q2, Q1, Q0
+    if (q_bits & 4) != 0 {
+        cpu.set_fpu_flag(FpuFlags::C0, true);
+    }
+    if (q_bits & 1) != 0 {
+        cpu.set_fpu_flag(FpuFlags::C1, true);
+    }
+    if (q_bits & 2) != 0 {
+        cpu.set_fpu_flag(FpuFlags::C3, true);
+    }
 }
 
 // FPREM: Partial Remainder (Rounding toward Zero)
@@ -425,7 +484,7 @@ pub fn fsqrt(cpu: &mut Cpu) {
     if st0.is_zero() {
         // Result is already zero, just preserve the sign (usually +0.0 or -0.0)
         cpu.fpu_set(0, st0);
-        cpu.set_fpu_flag(FpuFlags::C1, false); 
+        cpu.set_fpu_flag(FpuFlags::C1, false);
         return;
     }
 
@@ -436,8 +495,8 @@ pub fn fsqrt(cpu: &mut Cpu) {
         cpu.set_fpu_flag(FpuFlags::C1, false); // No rounding-up occurred (simplified)
     } else {
         // Case: Negative number (Invalid Operation)
-        cpu.set_fpu_flag(FpuFlags::IE, true);  // Set Invalid Operation bit
-        
+        cpu.set_fpu_flag(FpuFlags::IE, true); // Set Invalid Operation bit
+
         // Return "Real Indefinite" (The special NaN for FPU errors)
         st0.set_real_indefinite();
         cpu.fpu_set(0, st0);
@@ -450,27 +509,27 @@ pub fn fsqrt(cpu: &mut Cpu) {
 pub fn fxtract(cpu: &mut Cpu) {
     let val = cpu.fpu_get(0);
     let f_val = val.get_f64();
-    
+
     // Handle Zero case
     if f_val == 0.0 {
         // ST(0) = -Infinity
-        let mut neg_inf = F80::new(); 
+        let mut neg_inf = F80::new();
         neg_inf.set_f64(f64::NEG_INFINITY);
         cpu.fpu_set(0, neg_inf);
-        
+
         // Push 0.0
-        let mut zero = F80::new(); 
+        let mut zero = F80::new();
         zero.set_f64(0.0);
         cpu.fpu_push(zero);
         return;
     }
 
     let exp = (val.get_exponent() as i32) - 16383;
-    let mut sig = val; 
+    let mut sig = val;
     sig.set_exponent(16383); // Normalize significand to 1.xx
 
     // ST(0) becomes Exponent
-    let mut f_exp = F80::new(); 
+    let mut f_exp = F80::new();
     f_exp.set_f64(exp as f64);
     cpu.fpu_set(0, f_exp);
 
@@ -490,7 +549,11 @@ pub fn f2xm1(cpu: &mut Cpu) {
 pub fn fyl2x(cpu: &mut Cpu) {
     let x = cpu.fpu_get(0).get_f64();
     let mut y = cpu.fpu_get(1);
-    if x > 0.0 { y.set_f64(y.get_f64() * x.log2()); } else { y.set_QNaN(); }
+    if x > 0.0 {
+        y.set_f64(y.get_f64() * x.log2());
+    } else {
+        y.set_QNaN();
+    }
     cpu.fpu_set(1, y);
     cpu.fpu_pop();
 }

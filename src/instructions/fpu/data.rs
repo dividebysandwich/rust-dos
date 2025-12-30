@@ -1,14 +1,14 @@
-use iced_x86::{Instruction, OpKind, MemorySize, Register};
 use crate::cpu::Cpu;
 use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
+use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
 // FLD: Load Floating Point Value
 pub fn fld(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
         let addr = calculate_addr(cpu, instr);
         let mut f = F80::new();
-        
+
         match instr.memory_size() {
             MemorySize::Float32 => {
                 let bits = cpu.bus.read_32(addr);
@@ -27,7 +27,10 @@ pub fn fld(cpu: &mut Cpu, instr: &Instruction) {
                 f.set_bytes(&bytes);
             }
             _ => {
-                cpu.bus.log_string(&format!("[FPU] FLD Unsupported memory size: {:?}", instr.memory_size()));
+                cpu.bus.log_string(&format!(
+                    "[FPU] FLD Unsupported memory size: {:?}",
+                    instr.memory_size()
+                ));
             }
         };
         cpu.fpu_push(f);
@@ -58,9 +61,13 @@ fn x87_round(f_val: f64, rc: u16) -> f64 {
                 floor_val + 1.0
             } else {
                 // Tie: round to even
-                if floor_val % 2.0 == 0.0 { floor_val } else { floor_val + 1.0 }
+                if floor_val % 2.0 == 0.0 {
+                    floor_val
+                } else {
+                    floor_val + 1.0
+                }
             }
-        },
+        }
         1 => f_val.floor(), // Round Down
         2 => f_val.ceil(),  // Round Up
         3 => f_val.trunc(), // Truncate
@@ -72,24 +79,30 @@ fn x87_round(f_val: f64, rc: u16) -> f64 {
 pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
     let val = cpu.fpu_pop();
     let addr = calculate_addr(cpu, instr);
-    
+
     // Use the custom rounding logic
     let rc = (cpu.fpu_control >> 10) & 0x03;
     let rounded = x87_round(val.get_f64(), rc);
 
     match instr.memory_size() {
-        MemorySize::Int16 => { cpu.bus.write_16(addr, rounded as i16 as u16); },
-        MemorySize::Int32 => { cpu.bus.write_32(addr, rounded as i32 as u32); },
-        MemorySize::Int64 => { cpu.bus.write_64(addr, rounded as i64 as u64); },
+        MemorySize::Int16 => {
+            cpu.bus.write_16(addr, rounded as i16 as u16);
+        }
+        MemorySize::Int32 => {
+            cpu.bus.write_32(addr, rounded as i32 as u32);
+        }
+        MemorySize::Int64 => {
+            cpu.bus.write_64(addr, rounded as i64 as u64);
+        }
         _ => {}
     }
 }
 
 // FSTP: Store Float and Pop
+// FSTP: Store Float and Pop
 pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
-    let val: F80 = cpu.fpu_pop();
-    
     if instr.op0_kind() == OpKind::Memory {
+        let val: F80 = cpu.fpu_pop();
         let addr = calculate_addr(cpu, instr);
         cpu.last_fstp_addr = addr;
 
@@ -108,12 +121,20 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
                     cpu.bus.write_8(addr + i as usize, bytes[i]);
                 }
             }
-            _ => { cpu.bus.log_string(&format!("[FPU] FSTP Unsupported memory size: {:?}", instr.memory_size())); }
+            _ => {
+                cpu.bus.log_string(&format!(
+                    "[FPU] FSTP Unsupported memory size: {:?}",
+                    instr.memory_size()
+                ));
+            }
         }
     } else if instr.op0_kind() == OpKind::Register {
         // FSTP ST(i)
+        // Store ST(0) to ST(i), THEN pop.
+        let val = cpu.fpu_get(0);
         let idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         cpu.fpu_set(idx, val);
+        cpu.fpu_pop();
     }
 }
 
@@ -133,7 +154,7 @@ pub fn fbstp(cpu: &mut Cpu, instr: &Instruction) {
 // FST: Store Real (No POP)
 pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
     let st0: F80 = cpu.fpu_get(0);
-    
+
     if instr.op0_kind() == OpKind::Memory {
         let addr = calculate_addr(cpu, instr);
         match instr.memory_size() {
@@ -151,7 +172,12 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
                     cpu.bus.write_8(addr + i as usize, bytes[i]);
                 }
             }
-            _ => { cpu.bus.log_string(&format!("[FPU] FST Unsupported memory size: {:?}", instr.memory_size())); }
+            _ => {
+                cpu.bus.log_string(&format!(
+                    "[FPU] FST Unsupported memory size: {:?}",
+                    instr.memory_size()
+                ));
+            }
         }
     } else if instr.op0_kind() == OpKind::Register {
         // FST ST(i)
@@ -175,14 +201,16 @@ pub fn fxch(cpu: &mut Cpu, instr: &Instruction) {
     }
 
     // Optimization: Swapping ST(0) with ST(0) is a NOP
-    if idx == 0 { return; }
+    if idx == 0 {
+        return;
+    }
 
     let st0 = cpu.fpu_get(0);
     let sti = cpu.fpu_get(idx);
-    
+
     cpu.fpu_set(0, sti);
     cpu.fpu_set(idx, st0);
-    
+
     // C1 is usually cleared by FXCH on modern processors
     cpu.set_fpu_flag(crate::cpu::FpuFlags::C1, false);
 }
@@ -192,7 +220,7 @@ pub fn fld1(cpu: &mut Cpu) {
     let mut f = F80::new();
     // 1.0 in F80: Sign=0, Exp=0x3FFF (16383 bias), Mantissa=0x8000000000000000
     f.set_exponent(16383);
-    f.set_mantissa(1u64 << 63); 
+    f.set_mantissa(1u64 << 63);
     cpu.fpu_push(f);
 }
 
@@ -232,28 +260,30 @@ pub fn fldln2(cpu: &mut Cpu) {
     cpu.fpu_push(f);
 }
 
-
 // FIST: Store Integer (No Pop)
 pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
     let val = cpu.fpu_get(0);
     let addr = calculate_addr(cpu, instr);
-    
+
     // Extract Rounding Control (RC) - Bits 10 and 11
     let rc = (cpu.fpu_control >> 10) & 0x03;
-    
+
     // Use the x87-compliant rounding helper
     let f_val = val.get_f64();
     let i_val = x87_round(f_val, rc);
-    
+
     match instr.memory_size() {
         MemorySize::Int16 => {
             cpu.bus.write_16(addr, i_val as i16 as u16);
-        },
+        }
         MemorySize::Int32 => {
             cpu.bus.write_32(addr, i_val as i32 as u32);
-        },
+        }
         _ => {
-            cpu.bus.log_string(&format!("[FPU] FIST Unsupported memory size: {:?}", instr.memory_size()));
+            cpu.bus.log_string(&format!(
+                "[FPU] FIST Unsupported memory size: {:?}",
+                instr.memory_size()
+            ));
         }
     }
 }

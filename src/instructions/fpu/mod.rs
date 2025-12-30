@@ -1,5 +1,5 @@
-use iced_x86::{Instruction, Mnemonic};
 use crate::cpu::Cpu;
+use iced_x86::{Instruction, Mnemonic};
 
 pub mod arithmetic;
 pub mod comparison;
@@ -9,27 +9,25 @@ pub mod transcendental;
 
 pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
     match instr.mnemonic() {
-
         // Source: https://linasm.sourceforge.net/docs/instructions/fpu.php
 
         // CONTROL & STATE
         // ---------------
-
         Mnemonic::Fninit | Mnemonic::Finit => control::fninit(cpu),
         Mnemonic::Fnclex | Mnemonic::Fclex => control::fnclex(cpu),
-        
+
         Mnemonic::Fldcw => control::fldcw(cpu, instr),
         Mnemonic::Fstcw | Mnemonic::Fnstcw => control::fnstcw(cpu, instr),
-        
+
         Mnemonic::Fstsw | Mnemonic::Fnstsw => control::fnstsw(cpu, instr),
 
         Mnemonic::Fsave | Mnemonic::Fnsave => control::fnsave(cpu, instr),
         Mnemonic::Frstor => control::frstor(cpu, instr),
         Mnemonic::Fincstp => control::fincstp(cpu),
         Mnemonic::Fdecstp => control::fdecstp(cpu),
-        
+
         // No-ops or Wait in HLE
-        Mnemonic::Fnop => {}, 
+        Mnemonic::Fnop => {}
         Mnemonic::Ffree => control::ffree(cpu, instr),
 
         // DATA TRANSFER
@@ -37,20 +35,20 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
 
         // Load Float
         Mnemonic::Fld => data::fld(cpu, instr),
-        
+
         // Load/Store Integer
         Mnemonic::Fild => data::fild(cpu, instr),
         Mnemonic::Fist => data::fist(cpu, instr),
         Mnemonic::Fistp => data::fistp(cpu, instr),
-        
+
         // Store Float
         Mnemonic::Fst => data::fst(cpu, instr),
         Mnemonic::Fstp => data::fstp(cpu, instr),
         Mnemonic::Fbstp => data::fbstp(cpu, instr),
-        
+
         // Exchange
         Mnemonic::Fxch => data::fxch(cpu, instr),
-        
+
         // Constants
         Mnemonic::Fld1 => data::fld1(cpu),
         Mnemonic::Fldz => data::fldz(cpu),
@@ -59,7 +57,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Fldl2t => data::fldl2t(cpu),
         Mnemonic::Fldlg2 => data::fldlg2(cpu),
         Mnemonic::Fldln2 => data::fldln2(cpu),
-        
+
         // Conditional Move (Pentium Pro+)
         // Mnemonic::Fcmovb | Mnemonic::Fcmove | ... => data::fcmov(cpu, instr),
         // Don't know if we'll ever get there...
@@ -104,7 +102,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // Remainders
         Mnemonic::Fprem => arithmetic::fprem(cpu),
         Mnemonic::Fprem1 => arithmetic::fprem1(cpu),
-        
+
         // Advanced Math
         Mnemonic::F2xm1 => arithmetic::f2xm1(cpu),
         Mnemonic::Fyl2x => arithmetic::fyl2x(cpu),
@@ -114,24 +112,26 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // ----------
 
         // Float Compare
-        Mnemonic::Fcom | Mnemonic::Fcomp | Mnemonic::Fcompp => comparison::fcom_variants(cpu, instr),
-        
+        Mnemonic::Fcom | Mnemonic::Fcomp | Mnemonic::Fcompp => {
+            comparison::fcom_variants(cpu, instr)
+        }
+
         // Integer Compare
         Mnemonic::Ficom | Mnemonic::Ficomp => comparison::ficom_variants(cpu, instr),
-        
+
         // Test against 0.0
         Mnemonic::Ftst => comparison::ftst(cpu),
-        
+
         // Examine
         Mnemonic::Fxam => comparison::fxam(cpu),
 
         // Modern Compare (Pentium Pro+) sets EFLAGS directly
-        Mnemonic::Fcomi | Mnemonic::Fcomip | 
-        Mnemonic::Fucomi | Mnemonic::Fucomip => comparison::fcomi_variants(cpu, instr),
+        Mnemonic::Fcomi | Mnemonic::Fcomip | Mnemonic::Fucomi | Mnemonic::Fucomip => {
+            comparison::fcomi_variants(cpu, instr)
+        }
 
         // TRANSCENDENTAL
         // --------------
-
         Mnemonic::Fsin => transcendental::fsin(cpu),
         Mnemonic::Fcos => transcendental::fcos(cpu),
         Mnemonic::Fsincos => transcendental::fsincos(cpu),
@@ -139,7 +139,10 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Fpatan => transcendental::fpatan(cpu),
 
         _ => {
-            cpu.bus.log_string(&format!("[FPU] Unhandled instruction: {:?}", instr.mnemonic()));
+            cpu.bus.log_string(&format!(
+                "[FPU] Unhandled instruction: {:?}",
+                instr.mnemonic()
+            ));
         }
     }
 }
