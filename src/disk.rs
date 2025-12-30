@@ -358,6 +358,7 @@ impl DiskController {
             return true;
         }
 
+        // Split filename and pattern by '.'
         let (f_name, f_ext) = filename.split_once('.').unwrap_or((filename, ""));
         let (p_name, p_ext) = pattern.split_once('.').unwrap_or((pattern, ""));
 
@@ -370,13 +371,24 @@ impl DiskController {
             loop {
                 match (f_chars.next(), p_chars.next()) {
                     (None, None) => return true,
-                    (Some(_), None) => return false,
-                    (None, Some(pc)) => return pc == '*',
+                    (Some(_), None) => return false, // Filename longer than pattern
+                    (None, Some(pc)) => {
+                        if pc == '*' {
+                            return true;
+                        }
+                        if pc == '?' {
+                            continue;
+                        } // Treat ? as match for "empty" (padding)
+                        return false;
+                    }
                     (Some(fc), Some(pc)) => {
                         if pc == '*' {
                             return true;
                         }
-                        if pc != '?' && pc.to_ascii_uppercase() != fc.to_ascii_uppercase() {
+                        if pc == '?' {
+                            continue;
+                        }
+                        if pc.to_ascii_uppercase() != fc.to_ascii_uppercase() {
                             return false;
                         }
                     }
@@ -396,7 +408,7 @@ impl DiskController {
         search_attr: u16,
     ) -> Result<DosDirEntry, u8> {
         // Handle Volume Label request
-        if (search_attr & 0x08) != 0 && search_spec.contains("*.*") {
+        if (search_attr & 0x08) != 0 {
             if search_index == 0 {
                 return Ok(DosDirEntry {
                     filename: "RUSTDOS".to_string(),
@@ -411,22 +423,27 @@ impl DiskController {
             }
         }
 
-        // Split Spec into Directory and Pattern
-        let spec_path = Path::new(search_spec);
-        let pattern = spec_path.file_name().unwrap_or_default().to_string_lossy();
-        let parent_dir = spec_path
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+        // Split Spec into Directory and Pattern manually (Path::new is platform specific)
+        // Find the last separator (\, /, or :)
+        let (parent_dir, pattern) =
+            if let Some(idx) = search_spec.rfind(|c| c == '\\' || c == '/' || c == ':') {
+                let (dir, pat) = search_spec.split_at(idx + 1);
+                // If the separator was ':', keep it in the dir part?
+                // e.g. "C:file" -> "C:", "file".
+                // e.g. "C:\file" -> "C:\", "file"
+                // Yes, split_at includes separator in the first part (index is exclusive? No)
+                // split_at(idx+1): first part [0..idx+1], second [idx+1..]
+                // So "C:\foo" (idx=2 for \), split_at(3) -> "C:\", "foo". Correct.
+                (dir, pat)
+            } else {
+                ("", search_spec)
+            };
 
         // If parent_dir is empty, it implies current directory
         let search_dir_str = if parent_dir.is_empty() {
-            // Logic handled by resolve_path helper naturally or empty
-            // But wait, resolve_path handles "." correctly if we are in subdir?
-            // Yes, resolve_path assumes relative to current_dir.
             "."
         } else {
-            &parent_dir
+            parent_dir
         };
 
         let host_dir = self.resolve_path(search_dir_str).ok_or(0x03)?;

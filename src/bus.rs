@@ -37,6 +37,7 @@ pub struct Bus {
 
     // VGA State
     pub vga: crate::video::vga::VgaCard,
+    pub search_handles: std::collections::HashMap<u32, String>,
 }
 
 use std::path::PathBuf;
@@ -64,6 +65,7 @@ impl Bus {
             dta_segment: 0x1000,
             dta_offset: 0x0000,
             vga: crate::video::vga::VgaCard::new(),
+            search_handles: std::collections::HashMap::new(),
         };
         // BIOS Data Area (BDA) Initialization
         // 0x0449: Current Video Mode (03 = 80x25 Color)

@@ -16,6 +16,73 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.state = CpuState::RebootShell;
         }
 
+        // AH=11h (Find First FCB) / AH=12h (Find Next FCB)
+        0x11 | 0x12 => {
+            let dta_current = cpu.bus.dta_segment;
+            let dta_off = cpu.bus.dta_offset;
+            let dta_phys = cpu.get_physical_addr(dta_current, dta_off);
+
+            let fcb_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+
+            let (index, pattern) = if ah == 0x11 {
+                let p = read_dta_template(&cpu.bus, fcb_addr); // Reusing helper
+                (0, p)
+            } else {
+                // Read index from FCB reserved area (Offset 0x0C)
+                let idx = cpu.bus.read_16(fcb_addr + 0x0C) as usize;
+
+                let p = read_dta_template(&cpu.bus, fcb_addr);
+                (idx, p)
+            };
+
+            cpu.bus.log_string(&format!(
+                "[DOS] FCB Find{:02X}: Pattern='{}' Index={}",
+                ah, pattern, index
+            ));
+
+            let search_attr = 0x10; // Directory + Archive + ReadOnly (Implicit for FCB?)
+
+            match cpu
+                .bus
+                .disk
+                .find_directory_entry(&pattern, index, search_attr)
+            {
+                Ok(entry) => {
+                    // Success: AL=00
+                    cpu.set_reg8(Register::AL, 0x00);
+
+                    // Write Result to DTA (Not DS:DX? Or implicitly DTA?)
+                    // "The DTA is filled with..."
+                    // Ensure we write to DTA, not back to DS:DX (unless they are same).
+
+                    cpu.bus.write_8(dta_phys + 0, 1); // Drive A: (Simulated) or 0? 
+                    // Valid drive for C: is 3? No, FCB: 0=Default, 1=A, 3=C.
+                    // Let's write 0 (Default) or 3.
+                    cpu.bus.write_8(dta_phys + 0, 3);
+
+                    // Write Filename to DTA+1 (11 bytes)
+                    let fcb_bytes = pattern_to_fcb(&entry.filename);
+                    for i in 0..11 {
+                        cpu.bus.write_8(dta_phys + 1 + i, fcb_bytes[i]);
+                    }
+
+                    // Store Index for Next Call at Input FCB Reserved Area (Offset 0x0C)
+                    // This allows FindNext to know where to resume, even if DTA != Input FCB
+                    cpu.bus.write_16(fcb_addr + 0x0C, (index + 1) as u16);
+
+                    // Fill other stats?
+                    // FCB: 16h=Time, 14h=Date, 10h=Size
+                    cpu.bus.write_16(dta_phys + 0x16, entry.dos_time);
+                    cpu.bus.write_16(dta_phys + 0x14, entry.dos_date);
+                    cpu.bus.write_32(dta_phys + 0x10, entry.size);
+                }
+                Err(_) => {
+                    // Failure: AL=FFh
+                    cpu.set_reg8(Register::AL, 0xFF);
+                }
+            }
+        }
+
         // AH = 02h: Output Character (DL = Char)
         0x02 => {
             let char_byte = cpu.get_dl();
@@ -130,6 +197,8 @@ pub fn handle(cpu: &mut Cpu) {
             let dx = cpu.get_reg16(Register::DX);
             cpu.bus.dta_segment = ds;
             cpu.bus.dta_offset = dx;
+            cpu.bus
+                .log_string(&format!("[DOS] Set DTA to {:04X}:{:04X}", ds, dx));
         }
 
         // AH = 25h: Set Interrupt Vector
@@ -354,6 +423,9 @@ pub fn handle(cpu: &mut Cpu) {
                     }
                 }
                 let s = String::from_utf8_lossy(&data);
+                // Log what is being printed to stdout
+                cpu.bus.log_string(&format!("[STDOUT] {}", s.trim()));
+
                 let visual_s = s.replace('\x07', "");
                 crate::video::print_string(cpu, &visual_s);
                 cpu.ax = count as u16;
@@ -522,15 +594,38 @@ pub fn handle(cpu: &mut Cpu) {
             const OFFSET_ATTR_SEARCH: usize = 12;
             const OFFSET_INDEX: usize = 13;
 
-            let (index, search_attr, raw_pattern) = if ah == 0x4E {
+            let (index, search_attr, raw_pattern, search_id) = if ah == 0x4E {
                 let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
                 let pattern = read_asciiz_string(&cpu.bus, name_addr);
-                (0, cpu.cx, pattern)
+                // Create a new Search ID
+                let sid = (cpu.bus.start_time.elapsed().as_nanos() & 0xFFFFFFFF) as u32;
+                (0, cpu.cx, pattern, sid)
             } else {
                 let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
                 let attr = cpu.bus.read_8(dta_phys + OFFSET_ATTR_SEARCH) as u16;
-                let pattern = read_dta_template(&cpu.bus, dta_phys);
-                (idx, attr, pattern)
+                // Read Search ID
+                let sid_lo = cpu.bus.read_16(dta_phys + 15) as u32;
+                let sid_hi = cpu.bus.read_16(dta_phys + 17) as u32;
+                let sid = (sid_hi << 16) | sid_lo;
+
+                let filename_pattern = read_dta_template(&cpu.bus, dta_phys);
+
+                // Retrieve Directory from Bus
+                let dir_prefix = cpu
+                    .bus
+                    .search_handles
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_default();
+
+                // Construct full pattern
+                let full_pattern = if dir_prefix.is_empty() {
+                    filename_pattern
+                } else {
+                    format!("{}\\{}", dir_prefix, filename_pattern)
+                };
+
+                (idx, attr, full_pattern, sid)
             };
 
             // Pass the full raw pattern to DiskController.
@@ -543,21 +638,61 @@ pub fn handle(cpu: &mut Cpu) {
                 .find_directory_entry(&search_pattern, index, search_attr)
             {
                 Ok(entry) => {
+                    cpu.bus.log_string(&format!(
+                        "[DOS] FindFirst/Next Found: '{}' (Index {})",
+                        entry.filename, index
+                    ));
                     cpu.bus.write_8(dta_phys + 0, 3); // Drive C:
                     cpu.bus
                         .write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
                     cpu.bus
                         .write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
 
-                    let fcb_bytes = pattern_to_fcb(&search_pattern);
-                    for i in 0..11 {
-                        cpu.bus.write_8(dta_phys + 1 + i, fcb_bytes[i]);
+                    // Only write Search Pattern to DTA on FindFirst (AH=4E)
+                    // FindNext must NOT overwrite the pattern it uses for searching!
+                    if ah == 0x4E {
+                        // Extract filename part from search_pattern (which is raw path for 4E)
+                        let filename_part = if let Some(idx) =
+                            search_pattern.rfind(|c| c == '\\' || c == '/' || c == ':')
+                        {
+                            &search_pattern[idx + 1..]
+                        } else {
+                            &search_pattern
+                        };
+
+                        let fcb_bytes = pattern_to_fcb(filename_part);
+                        for i in 0..11 {
+                            cpu.bus.write_8(dta_phys + 1 + i, fcb_bytes[i]);
+                        }
                     }
 
-                    // Unique ID generation for FindNext tracking
-                    let unique_id = (index as u32).wrapping_add(0x12345678);
+                    // Unique ID / Search Handle generation for FindNext tracking
+                    // We store the Search ID in bytes 15-18 (4 bytes)
+                    let unique_id = search_id;
                     cpu.bus.write_16(dta_phys + 15, (unique_id & 0xFFFF) as u16);
                     cpu.bus.write_16(dta_phys + 17, (unique_id >> 16) as u16);
+
+                    // Store Directory Context if FindFirst (AH=4E)
+                    if ah == 0x4E {
+                        // Extract Directory part from search_pattern (original raw pattern for 4E)
+                        // disk.rs logic: split at last separator
+                        let dir_part = if let Some(idx) =
+                            search_pattern.rfind(|c| c == '\\' || c == '/' || c == ':')
+                        {
+                            if idx == 0 {
+                                "\\"
+                            } else {
+                                &search_pattern[..idx]
+                            }
+                        } else {
+                            ""
+                        }
+                        .to_string();
+
+                        if !dir_part.is_empty() {
+                            cpu.bus.search_handles.insert(unique_id, dir_part);
+                        }
+                    }
                     cpu.bus
                         .write_16(dta_phys + 19, (index as u16).wrapping_mul(3));
 
@@ -589,6 +724,10 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
+                    cpu.bus.log_string(&format!(
+                        "[DOS] FindFirst/Next Failed: Pattern='{}' Index={} Error={:02X}",
+                        search_pattern, index, code
+                    ));
                     cpu.set_reg16(Register::AX, code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
