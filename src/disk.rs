@@ -51,56 +51,31 @@ impl DiskController {
 
     /// Resolves a DOS path (e.g., "GAMES\DOOM.EXE" or "..\FILE.TXT")
     /// to a Host Path, ensuring it stays within `root_path`.
-    /// Returns None if the path escapes the root (security).
+    /// Handles case-insensitivity and short filenames (8.3).
     pub fn resolve_path(&self, dos_path: &str) -> Option<PathBuf> {
         // 1. Normalize Separators and Uppercase
-        let path_str = dos_path.replace('/', "\\"); // DOS uses backslash
+        let path_str = dos_path.replace('/', "\\");
 
         // 2. Handle Drive Letter (Strip "C:")
         let clean_path = if path_str.len() >= 2 && &path_str[1..2] == ":" {
             if path_str.to_ascii_uppercase().starts_with("C:") {
                 &path_str[2..]
             } else {
-                // We only support C: for now
                 return None;
             }
         } else {
             &path_str
         };
 
-        // 3. Construct effective path (Is it absolute or relative?)
         let is_absolute = clean_path.starts_with('\\');
 
-        let mut full_path = self.root_path.clone();
+        // Build a list of logical components to traverse
+        let mut components: Vec<&str> = Vec::new();
 
-        // If relative, append current_dir first
         if !is_absolute && !self.current_dir.is_empty() {
             for part in self.current_dir.split('\\') {
                 if !part.is_empty() {
-                    full_path.push(part);
-                }
-            }
-        }
-
-        // Process components
-        for part in clean_path.split('\\') {
-            if part == "." || part.is_empty() {
-                continue;
-            }
-            if part == ".." {
-                full_path.pop();
-            } else {
-                full_path.push(part);
-            }
-        }
-
-        // 4. Security Check
-        let mut stack = Vec::new();
-
-        if !is_absolute {
-            for part in self.current_dir.split('\\') {
-                if !part.is_empty() {
-                    stack.push(part);
+                    components.push(part);
                 }
             }
         }
@@ -110,22 +85,99 @@ impl DiskController {
                 continue;
             }
             if part == ".." {
-                stack.pop();
+                components.pop();
             } else {
-                stack.push(part);
+                components.push(part);
             }
         }
 
-        let mut safe_path = self.root_path.clone();
-        for part in stack {
-            safe_path.push(part);
+        // Traverse and Resolve to Host Paths
+        let mut full_path = self.root_path.clone();
+
+        for part in components {
+            // Security Check: If we pop below root, it's invalid?
+            // ".." handling above prevents growing stack incorrectly,
+            // but we must ensure we don't traverse out.
+            // Since we rebuild from root, ".." popping from vector works.
+
+            let actual_name = self.find_host_child(&full_path, part);
+            full_path.push(actual_name);
         }
 
-        if safe_path.starts_with(&self.root_path) {
-            Some(safe_path)
+        // Final Security Check
+        if full_path.starts_with(&self.root_path) {
+            Some(full_path)
         } else {
             None
         }
+    }
+
+    /// Helper to find a child in a directory matching DOS semantics
+    /// (Case-Insensitive OR Short Filename match)
+    fn find_host_child(&self, dir: &Path, target: &str) -> String {
+        // Read directory and sort for deterministic short names
+        let mut entries: Vec<String> = Vec::new();
+        if let Ok(read_dir) = fs::read_dir(dir) {
+            for entry in read_dir.flatten() {
+                entries.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+        entries.sort(); // Ensure ~1 order is consistent
+
+        let target_upper = target.to_ascii_uppercase();
+        let mut generated_counts: HashMap<String, usize> = HashMap::new();
+
+        for name in entries {
+            if name.starts_with('.') {
+                continue;
+            }
+
+            // 1. Exact/Case-Insensitive Match
+            if name.eq_ignore_ascii_case(target) {
+                return name;
+            }
+
+            // 2. Short Name Match
+            // Generate Short Name for this entry
+            let (stem, ext) = Self::to_short_name(&name);
+            let base_key = if ext.is_empty() {
+                stem.clone()
+            } else {
+                format!("{}.{}", stem, ext)
+            };
+
+            let count = *generated_counts.get(&base_key).unwrap_or(&0);
+            let final_short_name = if count == 0 {
+                generated_counts.insert(base_key, 1);
+                if ext.is_empty() {
+                    stem
+                } else {
+                    format!("{}.{}", stem, ext)
+                }
+            } else {
+                generated_counts.insert(base_key, count + 1);
+                let suffix = format!("~{}", count);
+                let available_len = 8usize.saturating_sub(suffix.len());
+                let short_stem = if stem.len() > available_len {
+                    &stem[0..available_len]
+                } else {
+                    &stem
+                };
+
+                if ext.is_empty() {
+                    format!("{}{}", short_stem, suffix)
+                } else {
+                    format!("{}{}.{}", short_stem, suffix, ext)
+                }
+            };
+
+            if final_short_name == target_upper {
+                return name; // Found the host file corresponding to the short name
+            }
+        }
+
+        // Not found? Return target as uppercase (default for creation)
+        target.to_ascii_uppercase()
     }
 
     // ========================================================================
@@ -379,7 +431,9 @@ impl DiskController {
 
         let host_dir = self.resolve_path(search_dir_str).ok_or(0x03)?;
 
-        let paths = fs::read_dir(&host_dir).map_err(|_| 0x03)?;
+        let read_dir = fs::read_dir(&host_dir).map_err(|_| 0x03)?;
+        let mut all_entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+        all_entries.sort_by_key(|dir_entry| dir_entry.file_name());
 
         let mut generated_names: HashMap<String, usize> = HashMap::new();
         let mut valid_entries: Vec<DosDirEntry> = Vec::new();
@@ -416,90 +470,88 @@ impl DiskController {
             }
         }
 
-        for entry in paths {
-            if let Ok(entry) = entry {
-                let original_name = entry.file_name().to_string_lossy().into_owned();
+        for entry in all_entries {
+            let original_name = entry.file_name().to_string_lossy().into_owned();
 
-                if original_name.starts_with('.') {
-                    continue;
-                }
+            if original_name.starts_with('.') {
+                continue;
+            }
 
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
 
-                let is_dir = metadata.is_dir();
-                let mut file_attr = if is_dir { 0x10 } else { 0x20 };
-                if metadata.permissions().readonly() {
-                    file_attr |= 0x01;
-                }
+            let is_dir = metadata.is_dir();
+            let mut file_attr = if is_dir { 0x10 } else { 0x20 };
+            if metadata.permissions().readonly() {
+                file_attr |= 0x01;
+            }
 
-                let restricted_bits = 0x02 | 0x04 | 0x10;
-                if (file_attr & restricted_bits) & !search_attr != 0 {
-                    continue;
-                }
+            let restricted_bits = 0x02 | 0x04 | 0x10;
+            if (file_attr & restricted_bits) & !search_attr != 0 {
+                continue;
+            }
 
-                let (stem, ext) = Self::to_short_name(&original_name);
-                let base_key = if ext.is_empty() {
-                    stem.clone()
+            let (stem, ext) = Self::to_short_name(&original_name);
+            let base_key = if ext.is_empty() {
+                stem.clone()
+            } else {
+                format!("{}.{}", stem, ext)
+            };
+
+            let count = *generated_names.get(&base_key).unwrap_or(&0);
+
+            let final_name = if count == 0 {
+                generated_names.insert(base_key, 1);
+                if ext.is_empty() {
+                    stem
                 } else {
                     format!("{}.{}", stem, ext)
-                };
-
-                let count = *generated_names.get(&base_key).unwrap_or(&0);
-
-                let final_name = if count == 0 {
-                    generated_names.insert(base_key, 1);
-                    if ext.is_empty() {
-                        stem
-                    } else {
-                        format!("{}.{}", stem, ext)
-                    }
-                } else {
-                    generated_names.insert(base_key.clone(), count + 1);
-                    let suffix = format!("~{}", count);
-                    let available_len = 8usize.saturating_sub(suffix.len());
-                    let short_stem = if stem.len() > available_len {
-                        &stem[0..available_len]
-                    } else {
-                        &stem
-                    };
-
-                    if ext.is_empty() {
-                        format!("{}{}", short_stem, suffix)
-                    } else {
-                        format!("{}{}.{}", short_stem, suffix, ext)
-                    }
-                };
-
-                if !Self::matches_pattern(&final_name, &pattern) {
-                    continue;
                 }
-
-                let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
-                let datetime: DateTime<Local> = sys_time.into();
-                let dos_time = ((datetime.hour() as u16) << 11)
-                    | ((datetime.minute() as u16) << 5)
-                    | ((datetime.second() as u16) / 2);
-                let year = datetime.year();
-                let dos_date = if year < 1980 {
-                    0x0021
+            } else {
+                generated_names.insert(base_key.clone(), count + 1);
+                let suffix = format!("~{}", count);
+                let available_len = 8usize.saturating_sub(suffix.len());
+                let short_stem = if stem.len() > available_len {
+                    &stem[0..available_len]
                 } else {
-                    (((year - 1980) as u16) << 9)
-                        | ((datetime.month() as u16) << 5)
-                        | (datetime.day() as u16)
+                    &stem
                 };
 
-                valid_entries.push(DosDirEntry {
-                    filename: final_name,
-                    size: metadata.len() as u32,
-                    is_dir: metadata.is_dir(),
-                    is_readonly: metadata.permissions().readonly(),
-                    dos_time,
-                    dos_date,
-                });
+                if ext.is_empty() {
+                    format!("{}{}", short_stem, suffix)
+                } else {
+                    format!("{}{}.{}", short_stem, suffix, ext)
+                }
+            };
+
+            if !Self::matches_pattern(&final_name, &pattern) {
+                continue;
             }
+
+            let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
+            let datetime: DateTime<Local> = sys_time.into();
+            let dos_time = ((datetime.hour() as u16) << 11)
+                | ((datetime.minute() as u16) << 5)
+                | ((datetime.second() as u16) / 2);
+            let year = datetime.year();
+            let dos_date = if year < 1980 {
+                0x0021
+            } else {
+                (((year - 1980) as u16) << 9)
+                    | ((datetime.month() as u16) << 5)
+                    | (datetime.day() as u16)
+            };
+
+            valid_entries.push(DosDirEntry {
+                filename: final_name,
+                size: metadata.len() as u32,
+                is_dir: metadata.is_dir(),
+                is_readonly: metadata.permissions().readonly(),
+                dos_time,
+                dos_date,
+            });
         }
 
         if search_index < valid_entries.len() {
