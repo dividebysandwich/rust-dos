@@ -7,11 +7,16 @@ use std::time::Instant;
 use crate::disk::DiskController;
 use crate::video::{ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
 
+pub trait Device {
+    fn ports(&self) -> Vec<u16>;
+    fn io_read(&mut self, port: u16) -> u8;
+    fn io_write(&mut self, port: u16, value: u8);
+    fn step(&mut self) {}
+}
+
 pub struct Bus {
-    pub ram: Vec<u8>,           // 1MB System RAM
-    pub vram_graphics: Vec<u8>, // 0xA0000
-    pub vram_text: Vec<u8>,     // 0xB8000
-    pub video_mode: VideoMode,  // Current State
+    pub ram: Vec<u8>,          // 1MB System RAM
+    pub video_mode: VideoMode, // Current State
     pub disk: DiskController,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
     pub cursor_x: usize,
@@ -31,13 +36,7 @@ pub struct Bus {
     pub log_file: Option<BufWriter<File>>,
 
     // VGA State
-    pub vga_sequencer_index: u8,
-    pub vga_graphics_index: u8,
-    pub vga_crtc_index: u8,
-    pub vga_dac_write_index: u8,
-    pub vga_dac_read_index: u8,
-    pub vga_dac_step: u8,     // 0=Red, 1=Green, 2=Blue
-    pub vga_palette: Vec<u8>, // Stores R,G,B triples (256 * 3 = 768 bytes)
+    pub vga: crate::video::vga::VgaCard,
 }
 
 use std::path::PathBuf;
@@ -46,8 +45,6 @@ impl Bus {
     pub fn new(root_path: PathBuf) -> Self {
         let mut bus = Self {
             ram: vec![0; 1024 * 1024],
-            vram_graphics: vec![0; SIZE_GRAPHICS],
-            vram_text: vec![0; SIZE_TEXT],
             video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
             disk: DiskController::new(root_path),
             keyboard_buffer: VecDeque::new(),
@@ -66,13 +63,7 @@ impl Bus {
             log_file: None,
             dta_segment: 0x1000,
             dta_offset: 0x0000,
-            vga_sequencer_index: 0,
-            vga_graphics_index: 0,
-            vga_crtc_index: 0,
-            vga_dac_write_index: 0,
-            vga_dac_read_index: 0,
-            vga_dac_step: 0,
-            vga_palette: vec![0; 256 * 3],
+            vga: crate::video::vga::VgaCard::new(),
         };
         // BIOS Data Area (BDA) Initialization
         // 0x0449: Current Video Mode (03 = 80x25 Color)
@@ -87,6 +78,24 @@ impl Bus {
         bus.write_8(0x0462, 0);
         // 0x0463: CRT Controller Base Address (0x3D4 for Color)
         bus.write_16(0x0463, 0x03D4);
+
+        // 0x0410: Equipment List. Bits 4-5 = 10 (80x25 Color)
+        // Bit 0 = Floppy. 0x21 (Floppy + Color)
+        bus.write_16(0x0410, 0x0021);
+
+        // 0x0484: Rows on Screen (minus 1). 24
+        bus.write_8(0x0484, 24);
+
+        // 0x0487: EGA/VGA Info. Bits 5-6 = 11 (256KB Video RAM).
+        // 0x60 = 01100000
+        bus.write_8(0x0487, 0x60);
+
+        // Video BIOS Signature at C000:0000
+        bus.ram[0xC0000] = 0x55;
+        bus.ram[0xC0001] = 0xAA;
+        bus.ram[0xC0002] = 0x40; // 32KB (64 * 512 bytes)
+        // Optional: "IBM VGA" string
+        // bus.write_string(0xC001E, "IBM VGA");
 
         // Install HLE traps
 
@@ -130,17 +139,17 @@ impl Bus {
 
         // Move memory back
         for i in 0..(screen_size - row_size) {
-            self.vram_text[i] = self.vram_text[i + row_size];
+            self.vga.vram_text[i] = self.vga.vram_text[i + row_size];
         }
 
         // Clear bottom row
         for i in (screen_size - row_size)..screen_size {
             if i % 2 == 0 {
-                self.vram_text[i] = 0x20;
+                self.vga.vram_text[i] = 0x20;
             }
             // Space
             else {
-                self.vram_text[i] = 0x07;
+                self.vga.vram_text[i] = 0x07;
             } // Light Gray
         }
     }
@@ -151,9 +160,9 @@ impl Bus {
         //               addr, self.ram[addr], self.ram[addr] as char);
         // }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
-            self.vram_graphics[addr - ADDR_VGA_GRAPHICS]
+            self.vga.vram_graphics[addr - ADDR_VGA_GRAPHICS]
         } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
-            self.vram_text[addr - ADDR_VGA_TEXT]
+            self.vga.vram_text[addr - ADDR_VGA_TEXT]
         } else {
             self.ram[addr]
         }
@@ -171,10 +180,10 @@ impl Bus {
         //}
 
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
-            self.vram_graphics[addr - ADDR_VGA_GRAPHICS] = value;
+            self.vga.write_graphics(addr - ADDR_VGA_GRAPHICS, value);
             self.video_mode == VideoMode::Graphics320x200
         } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
-            self.vram_text[addr - ADDR_VGA_TEXT] = value;
+            self.vga.vram_text[addr - ADDR_VGA_TEXT] = value;
 
             // Check if current mode uses this memory
             match self.video_mode {
@@ -312,66 +321,34 @@ impl Bus {
                 self.speaker_on = enabled;
             }
 
-            // --- VGA SEQUENCER (0x3C4 / 0x3C5) ---
-            0x3C4 => {
-                self.vga_sequencer_index = value;
-            }
-            0x3C5 => {
-                // TODO: handle Plane Masks here.
-                self.log_string(&format!(
-                    "[VGA] Sequencer Write Index {:02X} = {:02X}",
-                    self.vga_sequencer_index, value
-                ));
-            }
-
-            // --- VGA GRAPHICS CONTROLLER (0x3CE / 0x3CF) ---
-            0x3CE => {
-                self.vga_graphics_index = value;
-            }
-            0x3CF => {
-                // TODO: Implement Read Maps, Bit Masks, etc.
-            }
-
-            // --- VGA CRTC (0x3D4 / 0x3D5) ---
-            0x3D4 => {
-                self.vga_crtc_index = value;
-            }
-            0x3D5 => {
-                // TODO: CRT Controller Data (Horizontal total, Cursor location, etc.)
-            }
-
-            // --- VGA DAC / PALETTE (0x3C8 / 0x3C9) ---
-            0x3C8 => {
-                self.vga_dac_write_index = value;
-                self.vga_dac_step = 0; // Reset to Red
-            }
-            0x3C9 => {
-                // VGA colors are 6-bit (0-63).
-                // Stored sequentially: [r0, g0, b0, r1, g1, b1...]
-                let index = (self.vga_dac_write_index as usize) * 3 + (self.vga_dac_step as usize);
-                if index < self.vga_palette.len() {
-                    self.vga_palette[index] = value & 0x3F;
-                }
-
-                self.vga_dac_step += 1;
-                if self.vga_dac_step == 3 {
-                    self.vga_dac_step = 0;
-                    self.vga_dac_write_index = self.vga_dac_write_index.wrapping_add(1);
-                }
-            }
-
+            // Dispatch to Devices
+            // TODO: Use a proper map lookup
             _ => {
-                // Unhandled port write
-                self.log_string(&format!(
-                    "[Unhandled IO Write] Port: {:04X}, Value: {:02X}",
-                    port, value
-                ));
+                if self.vga.ports().contains(&port) {
+                    self.vga.io_write(port, value);
+
+                    // Check if video mode changed
+                    if let Some(new_mode) = self.vga.check_video_mode() {
+                        if self.video_mode != new_mode && new_mode == VideoMode::Graphics320x200 {
+                            self.log_string("[VGA] Switch to Graphics320x200 detected via IO");
+                            self.video_mode = new_mode;
+                            // Clear VRAM?
+                            // memset(&mut self.vram_graphics, 0);
+                        }
+                    }
+                } else {
+                    // Unhandled port write
+                    self.log_string(&format!(
+                        "[Unhandled IO Write] Port: {:04X}, Value: {:02X}",
+                        port, value
+                    ));
+                }
             }
         }
     }
 
     // Read from an I/O Port
-    pub fn io_read(&self, port: u16) -> u8 {
+    pub fn io_read(&mut self, port: u16) -> u8 {
         match port {
             // Read PPI Port B (Speaker State)
             0x61 => {
@@ -382,23 +359,13 @@ impl Bus {
                 val
             }
 
-            // CGA Status Register (Input Status #1)
-            // Bit 0: Display Enable (0 = Active/No Snow, 1 = Retrace/Border)
-            // Bit 3: Vertical Retrace (1 = Active)
-            0x3DA => {
-                // Toggle bit 0 and 3 based on a pseudo-timer or random to simulate raster beam
-                // TODO: Improve with real timing
-                let phase = (self.start_time.elapsed().as_millis() / 16) % 2;
-                if phase == 0 { 0x00 } else { 0x09 } // Toggle bits 0 and 3
+            _ => {
+                if self.vga.ports().contains(&port) {
+                    self.vga.io_read(port)
+                } else {
+                    0xFF // Default open bus
+                }
             }
-
-            // VGA Sequencer Data
-            0x3C5 => 0, // TODO: Implement
-
-            // VGA Graphics Data
-            0x3CF => 0, // TODO: Implement
-
-            _ => 0xFF, // Default open bus
         }
     }
 
@@ -416,7 +383,23 @@ impl Bus {
         println!("{}", s);
         if let Some(writer) = &mut self.log_file {
             let _ = writeln!(writer, "{}", s);
-            // Do NOT flush here. Let the OS handle it for speed.
+        }
+    }
+
+    pub fn log_trace(&mut self, s: &str) {
+        if self.log_file.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open("trace.log")
+                .expect("Failed to open trace.log");
+            self.log_file = Some(BufWriter::new(file));
+        }
+
+        // NO PRINTLN
+        if let Some(writer) = &mut self.log_file {
+            let _ = writeln!(writer, "{}", s);
         }
     }
 }

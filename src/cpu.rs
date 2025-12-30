@@ -1,5 +1,6 @@
 use bitflags::bitflags;
-use iced_x86::{Instruction, MemorySize, Mnemonic, OpKind, Register};
+use iced_x86::{Decoder, DecoderOptions, Instruction, MemorySize, Mnemonic, OpKind, Register};
+use std::collections::VecDeque;
 
 use crate::bus::Bus;
 use crate::f80::F80;
@@ -109,9 +110,12 @@ pub struct Cpu {
     // REMOVEME: FLOAT DEBUGGING
     pub debug_qb_print: bool,
     pub last_fstp_addr: usize,
+
+    // Execution Trace
+    pub trace_log: VecDeque<String>,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 #[allow(dead_code)]
 pub enum CpuState {
     Running,
@@ -158,7 +162,65 @@ impl Cpu {
             fpu_tags: [FPU_TAG_EMPTY; 8],
             debug_qb_print: false,
             last_fstp_addr: 0,
+            trace_log: VecDeque::new(),
         }
+    }
+
+    pub fn step(&mut self) {
+        if self.state != CpuState::Running {
+            return;
+        }
+
+        let phys_ip = self.get_physical_addr(self.cs, self.ip);
+        // Ensure we can read at least a few bytes
+        if phys_ip >= self.bus.ram.len() {
+            return;
+        }
+
+        // Peek next bytes (simplified)
+        let b0 = self.bus.read_8(phys_ip);
+        let b1 = self
+            .bus
+            .read_8(self.get_physical_addr(self.cs, self.ip.wrapping_add(1)));
+
+        // Check for "BOP" (BIOS Operation) -> FE 38 XX
+        if b0 == 0xFE && b1 == 0x38 {
+            let vector = self
+                .bus
+                .read_8(self.get_physical_addr(self.cs, self.ip.wrapping_add(2)));
+
+            // Run the HLE handler
+            crate::interrupts::handle_hle(self, vector);
+
+            // Simulate IRET
+            self.ip = self.pop();
+            self.cs = self.pop();
+
+            let hle_cf = self.get_cpu_flag(CpuFlags::CF);
+            let hle_zf = self.get_cpu_flag(CpuFlags::ZF);
+            let flags_to_restore = CpuFlags::from_bits_truncate(self.pop());
+
+            self.set_cpu_flags(flags_to_restore);
+            self.set_cpu_flag(CpuFlags::DF, false);
+            self.set_cpu_flag(CpuFlags::CF, hle_cf);
+            self.set_cpu_flag(CpuFlags::ZF, hle_zf);
+            return;
+        }
+
+        // Decode
+        // We slice safe
+        let bytes = &self.bus.ram[phys_ip..];
+        let mut decoder = Decoder::with_ip(16, bytes, self.ip as u64, DecoderOptions::NONE);
+        let instr = decoder.decode();
+
+        let disasm = format!("{:04X}:{:04X} {}", self.cs, self.ip, instr);
+        self.bus.log_trace(&disasm);
+
+        // Update IP
+        self.ip = instr.next_ip() as u16;
+
+        // Execute
+        crate::instructions::execute_instruction(self, &instr);
     }
 
     // REMOVEME: Debugging QuickBASIC Float Conversion Issues

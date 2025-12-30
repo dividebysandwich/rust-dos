@@ -1,7 +1,7 @@
-use iced_x86::Register;
-use crate::cpu::Cpu;
-use crate::video::{VideoMode, ADDR_VGA_TEXT, BDA_CURSOR_POS, BDA_CURSOR_MODE, MAX_COLS, MAX_ROWS};
 use crate::audio::play_sdl_beep;
+use crate::cpu::Cpu;
+use crate::video::{ADDR_VGA_TEXT, BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, MAX_ROWS, VideoMode};
+use iced_x86::Register;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
@@ -9,7 +9,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 00h: Set Video Mode
         0x00 => {
             let mode = cpu.get_al();
-            
+
             // Clear Screen
             match mode {
                 // Text Modes: Clear with Spaces and Attribute 0x07
@@ -19,21 +19,21 @@ pub fn handle(cpu: &mut Cpu) {
                 // CGA Graphics Modes (4, 5, 6): Zero out 16KB of B8000 Memory
                 0x04..=0x06 => {
                     for i in 0..16384 {
-                        if i < cpu.bus.vram_text.len() {
-                            cpu.bus.vram_text[i] = 0x00;
+                        if i < cpu.bus.vga.vram_text.len() {
+                            cpu.bus.vga.vram_text[i] = 0x00;
                         }
                     }
                 }
                 // VGA Graphics Mode (13h): Zero out 64KB of A0000 Memory
                 0x13 => {
-                    for i in 0..cpu.bus.vram_graphics.len() {
-                        cpu.bus.vram_graphics[i] = 0x00;
+                    for i in 0..cpu.bus.vga.vram_graphics.len() {
+                        cpu.bus.vga.vram_graphics[i] = 0x00;
                     }
                 }
                 // Fallback / Stubbed modes
                 _ => {
                     // Optional: Clear text ram just in case
-                     scroll_area(cpu, true, 0, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
+                    scroll_area(cpu, true, 0, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
                 }
             }
 
@@ -46,7 +46,8 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.bus.video_mode = VideoMode::Text40x25;
                 }
                 0x01 => {
-                    cpu.bus.log_string("[BIOS] Switch to Text Mode (40x25Color)");
+                    cpu.bus
+                        .log_string("[BIOS] Switch to Text Mode (40x25Color)");
                     cpu.bus.video_mode = VideoMode::Text40x25Color;
                 }
                 0x02 => {
@@ -54,29 +55,39 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.bus.video_mode = VideoMode::Text80x25;
                 }
                 0x03 => {
-                    cpu.bus.log_string("[BIOS] Switch to Text Mode (80x25 Color)");
+                    cpu.bus
+                        .log_string("[BIOS] Switch to Text Mode (80x25 Color)");
                     cpu.bus.video_mode = VideoMode::Text80x25Color;
                 }
                 0x04 => {
-                    cpu.bus.log_string("[BIOS] Switch to CGA Graphics Mode (320x200 Color)");
+                    cpu.bus
+                        .log_string("[BIOS] Switch to CGA Graphics Mode (320x200 Color)");
                     cpu.bus.video_mode = VideoMode::Cga320x200Color;
                 }
                 0x06 => {
-                    cpu.bus.log_string("[BIOS] Switch to CGA Graphics Mode (640x200)");
+                    cpu.bus
+                        .log_string("[BIOS] Switch to CGA Graphics Mode (640x200)");
                     cpu.bus.video_mode = VideoMode::Cga640x200;
                 }
-                // TODO: EGA/VGA Modes 
+                // TODO: EGA/VGA Modes
                 0x0D | 0x0E | 0x10 | 0x12 => {
-                     cpu.bus.log_string(&format!("[BIOS] Switch to EGA/VGA Mode {:02X} (NOT IMPLEMENTED)", mode));
-                     // We default to Text80x25 internally so the emulator doesn't crash.
-                     // TODO: Proper EGA with Planar Memory emulation.
-                     cpu.bus.video_mode = VideoMode::Text80x25; 
+                    cpu.bus.log_string(&format!(
+                        "[BIOS] Switch to EGA/VGA Mode {:02X} (NOT IMPLEMENTED)",
+                        mode
+                    ));
+                    // We default to Text80x25 internally so the emulator doesn't crash.
+                    // TODO: Proper EGA with Planar Memory emulation.
+                    cpu.bus.video_mode = VideoMode::Text80x25;
                 }
                 0x13 => {
-                    cpu.bus.log_string("[BIOS] Switch to Graphics Mode (320x200)");
+                    cpu.bus
+                        .log_string("[BIOS] Switch to Graphics Mode (320x200)");
                     cpu.bus.video_mode = VideoMode::Graphics320x200;
+                    cpu.bus.vga.set_video_mode(VideoMode::Graphics320x200);
                 }
-                _ => cpu.bus.log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
+                _ => cpu
+                    .bus
+                    .log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
             }
 
             cpu.bus.write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
@@ -133,7 +144,8 @@ pub fn handle(cpu: &mut Cpu) {
         0x05 => {
             let page = cpu.get_reg8(Register::AL);
             cpu.bus.write_8(0x0462, page); // Update BDA Active Page
-            cpu.bus.log_string(&format!("[BIOS] Set Active Page to {}", page));
+            cpu.bus
+                .log_string(&format!("[BIOS] Set Active Page to {}", page));
         }
 
         // AH = 06h: Scroll Up
@@ -144,8 +156,10 @@ pub fn handle(cpu: &mut Cpu) {
             let col_start = cpu.get_reg8(Register::CL);
             let row_end = cpu.get_reg8(Register::DH);
             let col_end = cpu.get_reg8(Register::DL);
-            
-            scroll_area(cpu, true, lines, attr, row_start, col_start, row_end, col_end);
+
+            scroll_area(
+                cpu, true, lines, attr, row_start, col_start, row_end, col_end,
+            );
         }
 
         // AH = 07h: Scroll Down
@@ -156,8 +170,10 @@ pub fn handle(cpu: &mut Cpu) {
             let col_start = cpu.get_reg8(Register::CL);
             let row_end = cpu.get_reg8(Register::DH);
             let col_end = cpu.get_reg8(Register::DL);
-            
-            scroll_area(cpu, false, lines, attr, row_start, col_start, row_end, col_end);
+
+            scroll_area(
+                cpu, false, lines, attr, row_start, col_start, row_end, col_end,
+            );
         }
 
         // AH = 09h: Write Character and Attribute at Cursor Position
@@ -169,14 +185,14 @@ pub fn handle(cpu: &mut Cpu) {
             let count = cpu.cx as usize;
 
             let (col, row) = get_cursor(cpu, page);
-            
+
             // Repeat char count times (without moving cursor)
             for i in 0..count {
                 // Determine VRAM offset
                 // Note: DOS wraps to next line visually for this function, but doesn't scroll
                 let temp_col = (col as usize + i) % MAX_COLS as usize;
                 let temp_row = (row as usize) + (col as usize + i) / MAX_COLS as usize;
-                
+
                 if temp_row < MAX_ROWS as usize {
                     write_char_at(cpu, temp_col as u8, temp_row as u8, char_code, attr);
                 }
@@ -200,11 +216,11 @@ pub fn handle(cpu: &mut Cpu) {
                 // Set Background / Border Color
                 // Bits 0-3 represent the border/background color.
                 // Bit 4 is Intensity (sometimes part of background in some modes).
-                
+
                 // Clear lower 5 bits and set new color
                 current_3d9 = (current_3d9 & 0xE0) | (bl & 0x1F);
                 cpu.bus.write_8(0x0466, current_3d9);
-                
+
                 // TODO: Renderer needs to actually read 0x0466 to
                 // draw the border or change the background color of transparent pixels.
             } else if bh == 0x01 {
@@ -212,7 +228,7 @@ pub fn handle(cpu: &mut Cpu) {
                 // Bit 5 controls the active palette in Mode 4.
                 // 0 = Palette 0 (Ugly Green/Red/Brown)
                 // 1 = Palette 1 (Even uglier Cyan/Magenta/White)
-                
+
                 if (bl & 0x01) != 0 {
                     current_3d9 |= 0x20; // Set Bit 5
                 } else {
@@ -230,20 +246,24 @@ pub fn handle(cpu: &mut Cpu) {
 
             match char_code {
                 0x07 => play_sdl_beep(&mut cpu.bus), // Bell
-                0x08 => { // Backspace
-                    if col > 0 { 
-                        col -= 1; 
+                0x08 => {
+                    // Backspace
+                    if col > 0 {
+                        col -= 1;
                         // Visual erase
                         write_char_at(cpu, col, row, 0x20, 0x07);
                     }
                 }
-                0x0D => { // CR
+                0x0D => {
+                    // CR
                     col = 0;
                 }
-                0x0A => { // LF
+                0x0A => {
+                    // LF
                     row += 1;
                 }
-                _ => { // Printable
+                _ => {
+                    // Printable
                     write_char_at(cpu, col, row, char_code, 0x07);
                     col += 1;
                 }
@@ -272,8 +292,8 @@ pub fn handle(cpu: &mut Cpu) {
             let mode = cpu.bus.read_8(0x0449);
             let cols = cpu.bus.read_16(0x044A) as u8;
             let page = cpu.bus.read_8(0x0462);
-             
-            cpu.set_reg8(Register::AL, mode); 
+
+            cpu.set_reg8(Register::AL, mode);
             cpu.set_reg8(Register::AH, cols);
             cpu.set_reg8(Register::BH, page);
 
@@ -304,8 +324,34 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 11h: Character Generator
         0x11 => {
-            // AL=00 (Load User Font), AL=30 (Get Font Info)
-            // TODO: Implement
+            let al = cpu.get_al();
+            match al {
+                0x30 => {
+                    // Get Font Information
+                    // Returns pointer to font definition
+                    // BH = Font Pointer Type
+                    // 0 = Int 1Fh (8x8)
+                    // 1 = Int 43h (8x8 part 2)
+                    // 2 = 8x14
+                    // 3 = 8x8 (lo)
+                    // 4 = 8x8 (hi)
+                    // 5 = 9x14
+                    // 6 = 8x16 (VGA)
+                    // 7 = 9x16 (VGA)
+
+                    // We default to returning the 8x16 VGA font location for now
+                    cpu.cx = 16; // Bytes per character (Height)
+                    cpu.set_reg8(Register::DL, 24); // Rows - 1
+
+                    // Standard location for 8x16 font: F000:FA6E
+                    cpu.es = 0xF000;
+                    cpu.bp = 0xFA6E;
+                }
+                _ => {
+                    cpu.bus
+                        .log_string(&format!("[BIOS] Unhandled INT 10h AH=11h AL={:02X}", al));
+                }
+            }
         }
 
         // AH = 12h: Alternate Function Select
@@ -333,7 +379,7 @@ pub fn handle(cpu: &mut Cpu) {
             let attr = cpu.get_reg8(Register::BL);
             let start_row = cpu.get_reg8(Register::DH);
             let start_col = cpu.get_reg8(Register::DL);
-            
+
             // Pointers
             let es = cpu.es;
             let bp = cpu.bp;
@@ -354,36 +400,47 @@ pub fn handle(cpu: &mut Cpu) {
                 // If Mode 0/1, string is [Char, Char...] and we use BL for Attr
                 let (char_code, char_attr) = if use_string_attr {
                     let offset = i.wrapping_mul(2);
-                    let c = cpu.bus.read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset)));
-                    let a = cpu.bus.read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset) + 1));
+                    let c = cpu
+                        .bus
+                        .read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset)));
+                    let a = cpu
+                        .bus
+                        .read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset) + 1));
                     (c, a)
                 } else {
                     let offset = i;
-                    let c = cpu.bus.read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset)));
+                    let c = cpu
+                        .bus
+                        .read_8(cpu.get_physical_addr(es, bp.wrapping_add(offset)));
                     (c, attr)
                 };
 
                 // BIOS AH=13h treats characters as Teletype (AH=0Eh), meaning
                 // it processes CR, LF, BS, and Bell.
                 match char_code {
-                    0x0D => { // Carriage Return
+                    0x0D => {
+                        // Carriage Return
                         curr_col = 0;
                     }
-                    0x0A => { // Line Feed
+                    0x0A => {
+                        // Line Feed
                         curr_row += 1;
                     }
-                    0x08 => { // Backspace
-                        if curr_col > 0 { 
+                    0x08 => {
+                        // Backspace
+                        if curr_col > 0 {
                             curr_col -= 1;
                             // Visual erase (Space + Light Gray)
                             // Note: We ignore Page for write_char_at in this simple impl
                             write_char_at(cpu, curr_col, curr_row, 0x20, 0x07);
                         }
                     }
-                    0x07 => { // Bell
+                    0x07 => {
+                        // Bell
                         play_sdl_beep(&mut cpu.bus);
                     }
-                    _ => { // Printable Character
+                    _ => {
+                        // Printable Character
                         write_char_at(cpu, curr_col, curr_row, char_code, char_attr);
                         curr_col += 1;
                     }
@@ -417,10 +474,11 @@ pub fn handle(cpu: &mut Cpu) {
                 // BL = Active Display (08 = VGA w/ Color Analog)
                 // BH = Inactive Display (00 = None)
                 cpu.set_reg8(Register::AL, 0x1A); // Function Supported
-                cpu.set_reg8(Register::BL, 0x08); 
+                cpu.set_reg8(Register::BL, 0x08);
                 cpu.set_reg8(Register::BH, 0x00);
             } else {
-                cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH=1Ah with AL != 00h"));
+                cpu.bus
+                    .log_string(&format!("[BIOS] Unhandled INT 10h AH=1Ah with AL != 00h"));
             }
         }
 
@@ -431,13 +489,39 @@ pub fn handle(cpu: &mut Cpu) {
             let di = cpu.di;
             let addr = cpu.get_physical_addr(es, di);
 
-            // Write static table (Simulate VGA)
-            // Offset 0: Static Functionality Table (Ptr) - 0:0 for now
-            // TODO: Implement full table
+            // Clear buffer (64 bytes)
+            for i in 0..64 {
+                cpu.bus.write_8(addr + i, 0);
+            }
 
-            cpu.bus.write_8(addr, 0x00); 
-            // Often AL=1B on return implies supported.
-            cpu.set_reg8(Register::AL, 0x1B); 
+            // Populate Fields
+            // 00: Static Func Table (0:0 for now)
+
+            // 04: Video Mode
+            let mode = match cpu.bus.video_mode {
+                VideoMode::Text80x25 => 3,
+                VideoMode::Graphics320x200 => 0x13,
+                _ => 3,
+            };
+            cpu.bus.write_8(addr + 4, mode);
+
+            // 05: Columns (80)
+            cpu.bus.write_16(addr + 5, 80);
+
+            // 07: Regen Buffer Length (32KB for VGA Text? B8000-BFFFF)
+            cpu.bus.write_16(addr + 7, 0x8000);
+
+            // 09: Regen Buffer Start (Segment?) or Offset?
+            // "Start address of regen buffer". Usually an offset into segment?
+            // Or segment?
+            // RBIL says "WORD start address of regen buffer in segment".
+            // B800h? No. "offset in segment". Usually 0.
+            cpu.bus.write_16(addr + 9, 0);
+
+            // 2D: Index of active 64k block? (0)
+
+            // Return Success
+            cpu.set_reg8(Register::AL, 0x1B);
         }
 
         // TODO: Check if this makes sense here
@@ -526,7 +610,9 @@ pub fn handle(cpu: &mut Cpu) {
             // Not sure what this is used for
         }
 
-        _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),
+        _ => cpu
+            .bus
+            .log_string(&format!("[BIOS] Unhandled INT 10h AH={:02X}", cpu.get_ah())),
     }
 }
 
@@ -563,30 +649,51 @@ fn get_cursor(cpu: &Cpu, page: u8) -> (u8, u8) {
 fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
     match cpu.bus.video_mode {
         // Standard Text Modes
-        VideoMode::Text80x25 | VideoMode::Text80x25Color | 
-        VideoMode::Text40x25 | VideoMode::Text40x25Color => {
-            let cols = if cpu.bus.video_mode == VideoMode::Text40x25 || 
-                          cpu.bus.video_mode == VideoMode::Text40x25Color { 40 } else { 80 };
-            
+        VideoMode::Text80x25
+        | VideoMode::Text80x25Color
+        | VideoMode::Text40x25
+        | VideoMode::Text40x25Color => {
+            let cols = if cpu.bus.video_mode == VideoMode::Text40x25
+                || cpu.bus.video_mode == VideoMode::Text40x25Color
+            {
+                40
+            } else {
+                80
+            };
+
             let offset = (row as usize * cols + col as usize) * 2;
-            if offset < cpu.bus.vram_text.len() {
+            if offset < cpu.bus.vga.vram_text.len() {
                 cpu.bus.write_8(ADDR_VGA_TEXT + offset, char_code);
                 cpu.bus.write_8(ADDR_VGA_TEXT + offset + 1, attr);
             }
         }
         // TODO: Graphics Mode font rendering
-        _ => { cpu.bus.log_string("[BIOS] write_char_at called in unsupported video mode"); }
+        _ => {
+            cpu.bus
+                .log_string("[BIOS] write_char_at called in unsupported video mode");
+        }
     }
 }
 
 /// Generic Scroll Function (Handles AH=06, AH=07, AH=00, AH=0E)
 /// lines=0 means "Clear Window"
-fn scroll_area(cpu: &mut Cpu, up: bool, lines: u8, attr: u8, 
-               row_start: u8, col_start: u8, row_end: u8, col_end: u8) {
-    
+fn scroll_area(
+    cpu: &mut Cpu,
+    up: bool,
+    lines: u8,
+    attr: u8,
+    row_start: u8,
+    col_start: u8,
+    row_end: u8,
+    col_end: u8,
+) {
     // Check for Graphics Mode Clearing
-    let is_graphics = matches!(cpu.bus.video_mode, 
-        VideoMode::Cga320x200 | VideoMode::Cga320x200Color | VideoMode::Cga640x200 | VideoMode::Graphics320x200
+    let is_graphics = matches!(
+        cpu.bus.video_mode,
+        VideoMode::Cga320x200
+            | VideoMode::Cga320x200Color
+            | VideoMode::Cga640x200
+            | VideoMode::Graphics320x200
     );
 
     // If we are in graphics mode and asked to "Clear Screen" (lines = 0),
@@ -594,20 +701,30 @@ fn scroll_area(cpu: &mut Cpu, up: bool, lines: u8, attr: u8,
     if is_graphics && lines == 0 {
         // Determine which VRAM buffer to clear
         if cpu.bus.video_mode == VideoMode::Graphics320x200 {
-             for i in 0..cpu.bus.vram_graphics.len() { cpu.bus.vram_graphics[i] = 0; }
+            for i in 0..cpu.bus.vga.vram_graphics.len() {
+                cpu.bus.vga.vram_graphics[i] = 0;
+            }
         } else {
-             // CGA Modes use the text buffer range
-             for i in 0..16384 { // 16KB CGA Memory
-                 if i < cpu.bus.vram_text.len() { cpu.bus.vram_text[i] = 0; }
-             }
+            // CGA Modes use the text buffer range
+            for i in 0..16384 {
+                // 16KB CGA Memory
+                if i < cpu.bus.vga.vram_text.len() {
+                    cpu.bus.vga.vram_text[i] = 0;
+                }
+            }
         }
         return;
     }
 
     // Safety Clamps for Text Mode Logic
-    let max_cols = if cpu.bus.video_mode == VideoMode::Text40x25 || 
-                      cpu.bus.video_mode == VideoMode::Text40x25Color { 40 } else { 80 };
-    
+    let max_cols = if cpu.bus.video_mode == VideoMode::Text40x25
+        || cpu.bus.video_mode == VideoMode::Text40x25Color
+    {
+        40
+    } else {
+        80
+    };
+
     // Safety Clamps
     let r_start = row_start as usize;
     let r_end = (row_end as usize).min(MAX_ROWS as usize - 1);
@@ -632,12 +749,12 @@ fn scroll_area(cpu: &mut Cpu, up: bool, lines: u8, attr: u8,
                 let src_r = r + count;
                 // Read from Source
                 let src_offset = (src_r * max_cols + c) * 2;
-                
+
                 // Read directly from bus to handle scrolling
                 // Use read_8 directly because there's no read_char_at
                 let val = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset);
                 let at = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset + 1);
-                
+
                 // Write to Dest
                 write_char_at(cpu, c as u8, r as u8, val, at);
             }
@@ -660,7 +777,7 @@ fn scroll_area(cpu: &mut Cpu, up: bool, lines: u8, attr: u8,
                     let src_offset = (src_r * max_cols + c) * 2;
                     let val = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset);
                     let at = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset + 1);
-                    
+
                     write_char_at(cpu, c as u8, r as u8, val, at);
                 }
             }
