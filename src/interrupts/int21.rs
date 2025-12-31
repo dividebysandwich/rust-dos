@@ -500,7 +500,6 @@ pub fn handle(cpu: &mut Cpu) {
                 }
             }
         }
-
         // AH=47h: Get Current Directory
         0x47 => {
             let ds = cpu.ds;
@@ -513,8 +512,13 @@ pub fn handle(cpu: &mut Cpu) {
             for (i, &b) in bytes.iter().enumerate() {
                 cpu.bus.write_8(addr + i, b);
             }
-            cpu.bus.write_8(addr + bytes.len(), 0x00); // Null Terminator
+            // Null Terminate
+            cpu.bus.write_8(addr + bytes.len(), 0x00);
 
+            // Zero out the rest of the 64-byte buffer for safety
+            for i in (bytes.len() + 1)..64 {
+                cpu.bus.write_8(addr + i, 0x00);
+            }
             cpu.set_reg16(Register::AX, 0x0100); // Success
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
@@ -596,7 +600,50 @@ pub fn handle(cpu: &mut Cpu) {
 
             let (index, search_attr, raw_pattern, search_id) = if ah == 0x4E {
                 let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
-                let pattern = read_asciiz_string(&cpu.bus, name_addr);
+                let mut pattern = read_asciiz_string(&cpu.bus, name_addr);
+
+                // Heuristic Fix for d.com (and potentially others):
+                // If the search pattern ends with the Current Directory name followed by a wildcard
+                // (e.g. "C:\TEXT.*" or "C:\TEXT.???") WITHOUT a path separator, it implies
+                // the program intended to search the CONTENTS, but concatenated CWD + wildcard blindly.
+                // We detect this and insert the missing separator (e.g. "C:\TEXT\*.*").
+                let cwd = cpu.bus.disk.get_current_directory();
+                if !cwd.is_empty() {
+                    let pattern_upper = pattern.to_uppercase();
+                    let cwd_upper = cwd.to_uppercase();
+
+                    // Check for common malformed patterns
+                    // Check for "TEXT.*"
+                    let suffix_dot_star = format!("{}.*", cwd_upper);
+                    // Check for "TEXT.???"
+                    let suffix_dot_ques = format!("{}.???", cwd_upper);
+
+                    if pattern_upper.ends_with(&suffix_dot_star) {
+                        // Replace "TEXT.*" with "TEXT\*.*"
+                        // We assume .* was intended as *.* because we are fixing a directory listing
+                        let broken_len = suffix_dot_star.len();
+                        let new_len = pattern.len() - broken_len;
+                        pattern.truncate(new_len);
+                        pattern.push_str(&cwd); // Original case CWD? Or upper? Disk is case insensitive. taking from bus is safe.
+                        pattern.push_str("\\*.*");
+                        cpu.bus.log_string(&format!(
+                            "[DOS] Heuristic Pattern Fix: Rewrote to '{}'",
+                            pattern
+                        ));
+                    } else if pattern_upper.ends_with(&suffix_dot_ques) {
+                        // Replace "TEXT.???" with "TEXT\*.*"
+                        let broken_len = suffix_dot_ques.len();
+                        let new_len = pattern.len() - broken_len;
+                        pattern.truncate(new_len);
+                        pattern.push_str(&cwd);
+                        pattern.push_str("\\*.*");
+                        cpu.bus.log_string(&format!(
+                            "[DOS] Heuristic Pattern Fix: Rewrote to '{}'",
+                            pattern
+                        ));
+                    }
+                }
+
                 // Create a new Search ID
                 let sid = (cpu.bus.start_time.elapsed().as_nanos() & 0xFFFFFFFF) as u32;
                 (0, cpu.cx, pattern, sid)
