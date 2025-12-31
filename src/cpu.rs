@@ -971,25 +971,13 @@ impl Cpu {
 
     pub fn load_executable(&mut self, filename: &str) -> bool {
         // Find and Read the File
-        let target_lower = filename.to_lowercase();
-        let mut file_bytes = None;
+        let resolved_path = self.bus.disk.resolve_path(filename);
 
-        if let Ok(entries) = std::fs::read_dir(".") {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name() {
-                    if name.to_string_lossy().to_lowercase() == target_lower {
-                        if let Ok(bytes) = std::fs::read(path) {
-                            file_bytes = Some(bytes);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let bytes = match file_bytes {
-            Some(b) => b,
+        let bytes = match resolved_path {
+            Some(path) => match std::fs::read(path) {
+                Ok(b) => b,
+                Err(_) => return false,
+            },
             None => return false,
         };
 
