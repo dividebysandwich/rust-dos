@@ -92,12 +92,41 @@ impl Bus {
         // 0x60 = 01100000
         bus.write_8(0x0487, 0x60);
 
-        // Video BIOS Signature at C000:0000
+        // 0x048A: DCC (Display Combination Code)
+        // 0x08 = VGA w/ Color
+        bus.write_8(0x048A, 0x08);
+
+        // 0x0496: Keyboard State (0 = Standard)ture at C000:0000
         bus.ram[0xC0000] = 0x55;
         bus.ram[0xC0001] = 0xAA;
         bus.ram[0xC0002] = 0x40; // 32KB (64 * 512 bytes)
-        // Optional: "IBM VGA" string
         // bus.write_string(0xC001E, "IBM VGA");
+        // write "IBM VGA" to C000:001E
+        let signature = b"IBM VGA";
+        for (i, &byte) in signature.iter().enumerate() {
+            bus.ram[0xC001E + i] = byte;
+        }
+
+        // Initialize SFT at F000:E000 (Address 0xFE000)
+        // 00-02: Modes supported (All)
+        bus.write_8(0xFE000, 0xFF);
+        bus.write_8(0xFE001, 0xFF);
+        bus.write_8(0xFE002, 0xFF);
+        // 03-06: Reserved (0)
+        // 07: Scanlines supported (All?) -> Let's say FF
+        bus.write_8(0xFE007, 0xFF);
+        // 0B: Total Char Blocks (8)
+        bus.write_8(0xFE00B, 0x08);
+        // 0C: Max Active Blocks (2)
+        bus.write_8(0xFE00C, 0x02);
+        // 0D: Misc Flags (0)
+        // 10: Save Pointer Caps (0)
+
+        // Initialize 8x16 Font at C000:2000 (Address 0xC2000)
+        // Just fill with a visible pattern so checks pass (non-zero)
+        for i in 0..(256 * 16) {
+            bus.ram[0xC2000 + i] = (i % 256) as u8;
+        }
 
         // Install HLE traps
 

@@ -5,6 +5,15 @@ use iced_x86::Register;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    cpu.bus.log_string(&format!(
+        "[BIOS] INT 10h Called. AH={:02X}, AL={:02X}, BX={:04X}, CX={:04X}, DX={:04X}",
+        ah,
+        cpu.get_al(),
+        cpu.bx,
+        cpu.cx,
+        cpu.dx
+    ));
+
     match ah {
         // AH = 00h: Set Video Mode
         0x00 => {
@@ -322,6 +331,69 @@ pub fn handle(cpu: &mut Cpu) {
             // cpu.set_reg8(Register::BH, 0); // Page 0
         }
 
+        // AH = 10h: Palette / Color Registers
+        0x10 => {
+            let al = cpu.get_al();
+            matches!(al, 0x00 | 0x01 | 0x02 | 0x07 | 0x10 | 0x13); // Suppress unused warning hack? No.
+            match al {
+                0x00 => {
+                    // Set Single Palette Register
+                    // BL = Palette Register (0-15)
+                    // BH = Color Value
+                    let reg = (cpu.bx & 0xFF) as u8 & 0x0F;
+                    let val = (cpu.bx >> 8) as u8;
+                    cpu.bus.vga.attribute_regs[reg as usize] = val;
+                }
+                0x01 => {
+                    // Set Overscan (Border) Color
+                    let val = (cpu.bx >> 8) as u8; // BH
+                    cpu.bus.vga.attribute_regs[0x11] = val;
+                }
+                0x02 => {
+                    // Set All Palette Registers + Overscan
+                    // ES:DX points to 17 byte table (0-15 + Overscan)
+                    let es = cpu.es;
+                    let dx = cpu.dx;
+                    let addr = cpu.get_physical_addr(es, dx);
+
+                    for i in 0..16 {
+                        let val = cpu.bus.read_8(addr + i);
+                        cpu.bus.vga.attribute_regs[i as usize] = val;
+                    }
+                    let border = cpu.bus.read_8(addr + 16);
+                    cpu.bus.vga.attribute_regs[0x11] = border;
+                }
+                0x07 => {
+                    // Read Individual Palette Register
+                    // BL = Register
+                    // Return: BH = Value
+                    let reg = (cpu.bx & 0xFF) as u8 & 0x0F;
+                    let val = cpu.bus.vga.attribute_regs[reg as usize];
+                    cpu.set_reg8(Register::BH, val);
+                }
+                0x10 => {
+                    // Set Individual DAC Register
+                    // BX = Register
+                    // DH = Red, CH = Green, CL = Blue
+                    let idx = cpu.bx;
+                    let r = (cpu.dx >> 8) as u8; // DH
+                    let g = (cpu.cx >> 8) as u8; // CH
+                    let b = (cpu.cx & 0xFF) as u8; // CL
+
+                    let base = (idx as usize) * 3;
+                    if base + 2 < cpu.bus.vga.palette.len() {
+                        cpu.bus.vga.palette[base] = r;
+                        cpu.bus.vga.palette[base + 1] = g;
+                        cpu.bus.vga.palette[base + 2] = b;
+                    }
+                }
+                _ => {
+                    cpu.bus
+                        .log_string(&format!("[BIOS] Unhandled INT 10h AH=10 AL={:02X}", al));
+                }
+            }
+        }
+
         // AH = 11h: Character Generator
         0x11 => {
             let al = cpu.get_al();
@@ -343,9 +415,9 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.cx = 16; // Bytes per character (Height)
                     cpu.set_reg8(Register::DL, 24); // Rows - 1
 
-                    // Standard location for 8x16 font: F000:FA6E
-                    cpu.es = 0xF000;
-                    cpu.bp = 0xFA6E;
+                    // Standard location for 8x16 font: F000:FA6E (Relocated to C000:2000 to avoid overflow)
+                    cpu.es = 0xC000;
+                    cpu.bp = 0x2000;
                 }
                 _ => {
                     cpu.bus
@@ -495,7 +567,11 @@ pub fn handle(cpu: &mut Cpu) {
             }
 
             // Populate Fields
-            // 00: Static Func Table (0:0 for now)
+
+            // 00: Static Func Table. We point to F000:E000 (Dummy)
+            // Storing Offset (E000) then Segment (F000)
+            cpu.bus.write_16(addr, 0xE000);
+            cpu.bus.write_16(addr + 2, 0xF000);
 
             // 04: Video Mode
             let mode = match cpu.bus.video_mode {
@@ -509,16 +585,53 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.write_16(addr + 5, 80);
 
             // 07: Regen Buffer Length (32KB for VGA Text? B8000-BFFFF)
+            // In Mode 13h, this should technically be 64KB?
+            // The caller is likely in Text Mode when querying.
             cpu.bus.write_16(addr + 7, 0x8000);
 
-            // 09: Regen Buffer Start (Segment?) or Offset?
-            // "Start address of regen buffer". Usually an offset into segment?
-            // Or segment?
-            // RBIL says "WORD start address of regen buffer in segment".
-            // B800h? No. "offset in segment". Usually 0.
+            // 09: Regen Buffer Start Offset (0)
             cpu.bus.write_16(addr + 9, 0);
 
-            // 2D: Index of active 64k block? (0)
+            // 0B: Cursor Pos (Page 0)
+            let (col, row) = get_cursor(cpu, 0);
+            cpu.bus
+                .write_16(addr + 0x0B, (row as u16) << 8 | (col as u16));
+
+            // 1B: Cursor Type
+            cpu.bus.write_16(addr + 0x1B, 0x0607);
+
+            // 1D: Active Page
+            cpu.bus.write_8(addr + 0x1D, 0);
+
+            // 1E: CRT Port
+            cpu.bus.write_16(addr + 0x1E, 0x3D4);
+
+            // 22: Rows on Screen (25)
+            cpu.bus.write_8(addr + 0x22, 25);
+
+            // 23: Char Height (16)
+            cpu.bus.write_16(addr + 0x23, 16);
+
+            // 25: Active Display Combination Code (DCC)
+            // 08 = VGA w/ Color Analog
+            cpu.bus.write_8(addr + 0x25, 0x08);
+
+            // 26: Alternate DCC (00 = None)
+            cpu.bus.write_8(addr + 0x26, 0x00);
+
+            // 27: Colors supported (Word)
+            cpu.bus.write_16(addr + 0x27, 16);
+
+            // 29: Max Pages
+            cpu.bus.write_8(addr + 0x29, 8);
+
+            // 2A: Scan Lines (0=200, 1=350, 2=400, 3=480)
+            // VGA Text is 400. Mode 13h is 200.
+            let scan_code = if mode == 0x13 { 0 } else { 2 };
+            cpu.bus.write_8(addr + 0x2A, scan_code);
+
+            // 31: Video Mem (3=256K)
+            cpu.bus.write_8(addr + 0x31, 3);
 
             // Return Success
             cpu.set_reg8(Register::AL, 0x1B);
