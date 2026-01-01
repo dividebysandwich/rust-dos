@@ -1,6 +1,6 @@
-use crate::cpu::{Cpu, CpuState, CpuFlags};
-
+use crate::cpu::{Cpu, CpuFlags, CpuState};
 pub mod int00;
+pub mod int08;
 pub mod int10;
 pub mod int11;
 pub mod int12;
@@ -13,7 +13,6 @@ pub mod int2f;
 pub mod int33;
 pub mod utils;
 
-
 /// Called when the CPU encounters "INT XX" instruction.
 /// This simulates the REAL hardware sequence: Push Flags/CS/IP -> Jump to IVT.
 pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
@@ -23,7 +22,8 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     let new_cs = cpu.bus.read_16(ivt_addr + 2);
 
     if new_cs == 0 && new_ip == 0 {
-        cpu.bus.log_string(&format!("[CPU] Null Interrupt {:02X}", vector));
+        cpu.bus
+            .log_string(&format!("[CPU] Null Interrupt {:02X}", vector));
         return;
     }
 
@@ -35,7 +35,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     // Jump
     cpu.cs = new_cs;
     cpu.ip = new_ip;
-    
+
     // Disable Interrupts
     cpu.set_cpu_flag(CpuFlags::IF, false);
     cpu.set_cpu_flag(CpuFlags::TF, false);
@@ -44,6 +44,7 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
 pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
     match vector {
         0x00 => int00::handle(cpu),
+        0x08 => int08::handle(cpu),
         0x10 => int10::handle(cpu),
         0x11 => int11::handle(cpu),
         0x12 => int12::handle(cpu),
@@ -52,20 +53,36 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         0x1A => int1a::handle(cpu),
         0x20 => int20::handle(cpu),
         0x21 => int21::handle(cpu),
-        0x28 => { /* Idle Interrupt - Do nothing */ },
-        0x2A => { /* DOS Timer Tick - Do nothing for now */ },
+        0x28 => { /* Idle Interrupt - Do nothing */ }
+        0x2A => { /* DOS Timer Tick - Do nothing for now */ }
+        0x13 => {
+            cpu.bus.log_string("[BIOS] Unhandled INT 13h (Disk)");
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+        }
+        0x14 => {
+            cpu.bus.log_string("[BIOS] Unhandled INT 14h (Serial)");
+            cpu.set_reg8(iced_x86::Register::AH, 0x80);
+        } // Time out
+        0x17 => {
+            cpu.bus.log_string("[BIOS] Unhandled INT 17h (Printer)");
+            cpu.set_reg8(iced_x86::Register::AH, 0x29);
+        } // IO Error, Selected, Out of Paper
         0x2F => int2f::handle(cpu),
         0x33 => int33::handle(cpu),
         0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F => {
-             /* FPU Vector - IRET */ 
-             // TODO: Implement FPU
+            /* FPU Vector - IRET */
+            // TODO: Implement FPU
         }
         0x4C => {
-            cpu.bus.log_string("[DOS] Program Exited. Rebooting Shell...");
+            cpu.bus
+                .log_string("[DOS] Program Exited. Rebooting Shell...");
             cpu.state = CpuState::RebootShell;
         }
         _ => {
-            cpu.bus.log_string(&format!("[CPU] Unhandled HLE Interrupt Vector {:02X}", vector));
+            cpu.bus.log_string(&format!(
+                "[CPU] Unhandled HLE Interrupt Vector {:02X}",
+                vector
+            ));
         }
     }
 }

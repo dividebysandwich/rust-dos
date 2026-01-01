@@ -143,7 +143,7 @@ impl VgaCard {
 
         None
     }
-    
+
     pub fn read_graphics(&self, offset: usize) -> u8 {
         // Mode 13h Check (Chain 4)
         let seq_mem_mode = self.sequencer_regs[0x04];
@@ -285,10 +285,11 @@ impl VgaCard {
 impl Device for VgaCard {
     fn ports(&self) -> Vec<u16> {
         vec![
-            0x3C0, 0x3C1, // Attribute Controller
-            0x3C2, 0x3CC, // Misc Output
+            0x3C2, // Misc Output (Write) / Input Status 0 (Read)
+            0x3C3, // Video Enable
             0x3C4, 0x3C5, // Sequencer
             0x3CE, 0x3CF, // Graphics
+            0x3CC, // Misc Output Read
             0x3D4, 0x3D5, // CRTC
             0x3C8, 0x3C9, // DAC
             0x3DA, // Status

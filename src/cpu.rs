@@ -116,6 +116,7 @@ pub struct Cpu {
     // Execution Trace
     pub trace_log: VecDeque<String>,
     pub process_stack: Vec<ProcessContext>,
+    pub last_timer_tick: u128,
 }
 
 #[derive(PartialEq, Debug)]
@@ -189,6 +190,7 @@ impl Cpu {
             current_psp: 0, // Will be set by loader
             heap_pointer: 0x2000,
             process_stack: Vec::new(),
+            last_timer_tick: 0,
         }
     }
 
@@ -251,6 +253,35 @@ impl Cpu {
 
     pub fn step(&mut self) {
         if self.state != CpuState::Running {
+            return;
+        }
+
+        // Timer Check (Approx 18.2 Hz -> ~55ms)
+        let now = self.bus.start_time.elapsed().as_millis();
+        if now - self.last_timer_tick >= 55 {
+            self.last_timer_tick = now;
+
+            // println!("[DEBUG] Injecting INT 08h");
+
+            // Inject INT 08h (Timer)
+            let ivt_offset = 0x08 * 4;
+            let handler_ip = self.bus.read_16(ivt_offset as usize);
+            let handler_cs = self.bus.read_16((ivt_offset + 2) as usize);
+
+            // Push Flags, CS, IP
+            self.push(self.flags.bits());
+            self.push(self.cs);
+            self.push(self.ip);
+
+            // Jump to Handler
+            self.ip = handler_ip;
+            self.cs = handler_cs;
+
+            // Disable Interrupts (IF=0) and Trap Flag (TF=0)
+            self.set_cpu_flag(CpuFlags::IF, false);
+            self.set_cpu_flag(CpuFlags::TF, false);
+
+            // We changed CS:IP, so we should return to fetch from new location
             return;
         }
 
@@ -974,7 +1005,9 @@ impl Cpu {
 
     fn install_bios_traps(&mut self) {
         let mut phys_addr = 0xF1000;
-        let hle_vectors = vec![0x10, 0x11, 0x12, 0x15, 0x16, 0x1A, 0x20, 0x21, 0x2F, 0x33];
+        let hle_vectors = vec![
+            0x08, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33,
+        ];
 
         for vec in hle_vectors {
             let ivt_offset = (vec as usize) * 4;
