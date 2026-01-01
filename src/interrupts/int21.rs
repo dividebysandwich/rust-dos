@@ -449,7 +449,6 @@ pub fn handle(cpu: &mut Cpu) {
                 let load_segment = cpu.heap_pointer;
 
                 if cpu.load_executable(&filename, Some(load_segment)) {
-
                     let psp_phys = cpu.get_physical_addr(load_segment, 0);
 
                     // Write Environment Block
@@ -530,6 +529,43 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bx = 0xFF00; // OEM ID
             cpu.cx = 0x0000; // Serial
             cpu.bus.log_string("[DOS] Reported DOS Version 5.0");
+        }
+
+        // AH = 31h: Terminate and Stay Resident
+        0x31 => {
+            let return_code = cpu.get_al();
+            let paras_to_keep = cpu.get_reg16(Register::DX);
+            let tsr_psp = cpu.current_psp;
+
+            cpu.bus.log_string(&format!(
+                "[DOS] TSR Terminate (AH=31h) Code={:02X} Paras={:04X} PSP={:04X}",
+                return_code, paras_to_keep, tsr_psp
+            ));
+
+            // Calculate where the resident block ends
+            let resident_end = tsr_psp.wrapping_add(paras_to_keep);
+
+            if cpu.restore_process_context() {
+                cpu.bus.log_string(&format!(
+                    "[DOS] TSR: Returning to Parent. Resident End={:04X}",
+                    resident_end
+                ));
+
+                // TSR Logic: Ensure the heap pointer respects the resident memory.
+                // If the parent's heap pointer is "behind" the resident block, bump it forward.
+                if cpu.heap_pointer < resident_end {
+                    cpu.bus.log_string(&format!(
+                        "[DOS] TSR: Bumping Heap Pointer from {:04X} to {:04X}",
+                        cpu.heap_pointer, resident_end
+                    ));
+                    cpu.heap_pointer = resident_end;
+                }
+
+                cpu.ax = return_code as u16; // Set return code (AL)
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else {
+                cpu.state = CpuState::RebootShell;
+            }
         }
 
         // AH = 33h: Get/Set Ctrl-Break Check
