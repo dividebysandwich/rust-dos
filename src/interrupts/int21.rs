@@ -13,7 +13,13 @@ pub fn handle(cpu: &mut Cpu) {
         0x00 => {
             cpu.bus
                 .log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
-            cpu.state = CpuState::RebootShell;
+
+            if cpu.restore_process_context() {
+                cpu.bus
+                    .log_string("[DOS] AH=00: Returning to Parent Process");
+            } else {
+                cpu.state = CpuState::RebootShell;
+            }
         }
 
         // AH=11h (Find First FCB) / AH=12h (Find Next FCB)
@@ -201,6 +207,62 @@ pub fn handle(cpu: &mut Cpu) {
                 .log_string(&format!("[DOS] Set DTA to {:04X}:{:04X}", ds, dx));
         }
 
+        // AH = 29h: Parse Filename
+        0x29 => {
+            // DS:SI = Pointer to string
+            // ES:DI = Pointer to FCB
+            // AL = Bit mask (0x01=Leading separators, 0x02=Drive ID, 0x04=Ext, 0x08=Name)
+            // For now we just do a basic implementation that reads the string and writes FCB
+
+            let si = cpu.get_reg16(Register::SI);
+            let str_addr = cpu.get_physical_addr(cpu.ds, si);
+            let raw_str = read_asciiz_string(&cpu.bus, str_addr);
+
+            // Extract first token (space separated)
+            let token = raw_str.split_whitespace().next().unwrap_or("");
+
+            if token.is_empty() {
+                cpu.set_reg8(Register::AL, 0xFF); // Invalid
+            } else {
+                let fcb = pattern_to_fcb(token);
+                let di = cpu.get_reg16(Register::DI);
+                let fcb_addr = cpu.get_physical_addr(cpu.es, di);
+
+                // Drive byte (0 = default) - Simplified
+                // If token string starts with "C:", "A:", etc we could parse it.
+                // pattern_to_fcb just handles name.ext.
+
+                // Check drive
+                let drive = if token.len() > 1 && token.chars().nth(1) == Some(':') {
+                    let d = token.chars().next().unwrap().to_ascii_uppercase();
+                    if d >= 'A' && d <= 'Z' {
+                        (d as u8) - b'A' + 1
+                    } else {
+                        0
+                    }
+                } else {
+                    0 // No change / Default
+                };
+
+                cpu.bus.write_8(fcb_addr, drive);
+
+                for i in 0..11 {
+                    cpu.bus.write_8(fcb_addr + 1 + i, fcb[i]);
+                }
+
+                cpu.set_reg8(Register::AL, 0x01); // No wildcards? Or 00? 
+                // AL=1 if wildcard
+                if token.contains('*') || token.contains('?') {
+                    cpu.set_reg8(Register::AL, 0x01);
+                } else {
+                    cpu.set_reg8(Register::AL, 0x00);
+                }
+
+                let new_si = si.wrapping_add(token.len() as u16);
+                cpu.set_reg16(Register::SI, new_si);
+            }
+        }
+
         // AH = 25h: Set Interrupt Vector
         0x25 => {
             let int_num = cpu.get_al() as usize;
@@ -217,6 +279,225 @@ pub fn handle(cpu: &mut Cpu) {
                 "[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}",
                 int_num, new_seg, new_off
             ));
+        }
+
+        // AH = 4Bh: Load and Execute Program (EXEC)
+        0x4B => {
+            let mode = cpu.get_al();
+            let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let filename = read_asciiz_string(&cpu.bus, name_addr);
+
+            cpu.bus.log_string(&format!(
+                "[DOS] EXEC AH=4B Name='{}' AL={:02X}",
+                filename, mode
+            ));
+
+            if mode == 0x00 {
+                // Load and Execute
+                // ES:BX points to Parameter Block
+                // Offset 00: Segment of environment (word)
+                // Offset 02: Pointer to command line (dword) -> Write to PSP 80h
+                // Offset 06: Pointer to FCB 1 (dword) -> Write to PSP 5Ch
+                // Offset 0A: Pointer to FCB 2 (dword) -> Write to PSP 6Ch
+
+                let param_block = cpu.bx; // Offset in ES
+                let param_seg = cpu.es;
+                let param_phys = cpu.get_physical_addr(param_seg, param_block);
+
+                // Read Environment Segment
+                let env_seg = cpu.bus.read_16(param_phys);
+
+                // Read Command Line Pointer
+                let cmd_off = cpu.bus.read_16(param_phys + 2);
+                let cmd_seg = cpu.bus.read_16(param_phys + 4);
+
+                cpu.bus.log_string(&format!(
+                    "[DEBUG] EXEC ParamBlock: Env={:04X} Cmd={:04X}:{:04X}",
+                    env_seg, cmd_seg, cmd_off
+                ));
+
+                // Read Enviroment Block
+                // If EnvSeg is 0, we should inherit from parent (which means reading *current* PSP's env).
+                // If non-zero, read until double-null.
+
+                let actual_env_seg = if env_seg == 0 {
+                    // Inherit from current PSP
+                    // PSP Offset 0x2C contains the env segment
+                    let current_psp = cpu.current_psp;
+                    if current_psp == 0 {
+                        // Startup case: No parent. Use 0.
+                        0
+                    } else {
+                        let env_ptr = cpu.get_physical_addr(current_psp, 0x2C);
+                        cpu.bus.read_16(env_ptr)
+                    }
+                } else {
+                    env_seg
+                };
+
+                let mut env_block = Vec::new();
+
+                if actual_env_seg != 0 {
+                    let mut env_phys = cpu.get_physical_addr(actual_env_seg, 0);
+                    loop {
+                        let b = cpu.bus.read_8(env_phys);
+                        env_block.push(b);
+                        env_phys += 1;
+
+                        // Check for Double Null termination
+                        if env_block.len() >= 2 {
+                            let last = env_block[env_block.len() - 1];
+                            let prev = env_block[env_block.len() - 2];
+                            if last == 0 && prev == 0 {
+                                break;
+                            }
+                        }
+                        // Safety cap
+                        if env_block.len() > 32768 {
+                            break;
+                        }
+                    }
+                } else {
+                    // Start from scratch if 0 (Top level process)
+                    let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0\0";
+                    for &b in default_env {
+                        env_block.push(b);
+                    }
+                }
+
+                // Read Command Line Content BEFORE we nuke RAM
+                let cmd_phys = cpu.get_physical_addr(cmd_seg, cmd_off);
+                let mut cmd_tail = Vec::new();
+
+                // Command tail format: [LEN][String...][CR]
+                let len = cpu.bus.read_8(cmd_phys);
+                for i in 0..len {
+                    cmd_tail.push(cpu.bus.read_8(cmd_phys + 1 + i as usize));
+                }
+
+                let cmd_str = String::from_utf8_lossy(&cmd_tail);
+                cpu.bus
+                    .log_string(&format!("[DEBUG] EXEC CmdLine: '{}'", cmd_str));
+
+                // Log Env Block content (first 64 bytes)
+                let mut env_preview = String::new();
+                for i in 0..std::cmp::min(env_block.len(), 128) {
+                    let b = env_block[i];
+                    if b >= 32 && b <= 126 {
+                        env_preview.push(b as char);
+                    } else if b == 0 {
+                        env_preview.push_str("\\0");
+                    } else {
+                        env_preview.push('.');
+                    }
+                }
+                cpu.bus
+                    .log_string(&format!("[DEBUG] EXEC Env Content: {}", env_preview));
+
+                // DOS 3.0+ Program Name Appending
+                // After the double-null (00 00), we append:
+                // 1. A word count (0x0001)
+                // 2. The full path of the executable program (AsciiZ)
+                // This allows the program to find its own directory (e.g., to load nc.mnu).
+                if env_block.len() < 2
+                    || env_block[env_block.len() - 1] != 0
+                    || env_block[env_block.len() - 2] != 0
+                {
+                    env_block.push(0);
+                    if env_block.len() == 1 || env_block[env_block.len() - 2] != 0 {
+                        env_block.push(0);
+                    }
+                }
+
+                // Append Word Count 0x0001 (Little Endian: 01 00)
+                env_block.push(0x01);
+                env_block.push(0x00);
+
+                // Append Filename (FullPath)
+                // Using `filename` from function arg which logs show is fully qualified (C:\NC3\NCMAIN.EXE)
+                for b in filename.bytes() {
+                    env_block.push(b);
+                }
+                env_block.push(0x00); // Null terminator for filename
+
+                // DEBUG LOG: Verify what we appended
+                let mut dbg_tail = String::new();
+                // Last 50 bytes or so
+                let start_chk = if env_block.len() > 60 {
+                    env_block.len() - 60
+                } else {
+                    0
+                };
+                for i in start_chk..env_block.len() {
+                    let b = env_block[i];
+                    if b >= 32 && b <= 126 {
+                        dbg_tail.push(b as char);
+                    } else if b == 0 {
+                        dbg_tail.push_str("\\0");
+                    } else {
+                        dbg_tail.push_str(&format!("\\x{:02X}", b));
+                    }
+                }
+                cpu.bus
+                    .log_string(&format!("[DEBUG] Env Tail: {}", dbg_tail));
+
+                // Call Load Executable with Nested Execution Logic
+                cpu.save_process_context();
+
+                // Allocate memory for new process using heap_pointer
+                // Align to next paragraph if needed (heap_pointer is already paragraph)
+                let load_segment = cpu.heap_pointer;
+
+                if cpu.load_executable(&filename, Some(load_segment)) {
+
+                    let psp_phys = cpu.get_physical_addr(load_segment, 0);
+
+                    // Write Environment Block
+                    let env_seg = cpu.heap_pointer;
+                    let env_paras = (env_block.len() + 15) / 16;
+                    // Increment heap
+                    cpu.heap_pointer += env_paras as u16 + 1; // +1 safety
+
+                    let env_phys_dest = cpu.get_physical_addr(env_seg, 0);
+                    for (i, &b) in env_block.iter().enumerate() {
+                        cpu.bus.write_8(env_phys_dest + i, b);
+                    }
+
+                    // Now load program at *new* heap pointer
+                    let new_env_seg = 0x0C00;
+                    let new_env_phys = cpu.get_physical_addr(new_env_seg, 0);
+                    for (i, &b) in env_block.iter().enumerate() {
+                        cpu.bus.write_8(new_env_phys + i, b);
+                    }
+
+                    // Update PSP offset 0x2C (Environment Segment)
+                    cpu.bus.write_16(psp_phys + 0x2C, new_env_seg);
+
+                    // Update PSP offset 0x16 (Parent PSP Segment)
+                    let parent_psp = cpu.current_psp;
+                    cpu.bus.write_16(psp_phys + 0x16, parent_psp);
+
+                    // Write Command Tail to 80h
+                    cpu.bus.write_8(psp_phys + 0x80, cmd_tail.len() as u8);
+                    for (i, &b) in cmd_tail.iter().enumerate() {
+                        cpu.bus.write_8(psp_phys + 0x81 + i, b);
+                    }
+                    // Ensure CR at end
+                    cpu.bus.write_8(psp_phys + 0x81 + cmd_tail.len(), 0x0D);
+
+                    // We do NOT set CF=0 because we don't return to the caller yet!
+                    // The caller is suspended.
+                } else {
+                    // Fail
+                    cpu.restore_process_context(); // Restore parent immediately
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    cpu.set_reg16(Register::AX, 0x02); // File not found
+                }
+            } else {
+                cpu.bus.log_string("[DOS] EXEC Unsupported Mode");
+                cpu.set_cpu_flag(CpuFlags::CF, true);
+                cpu.set_reg16(Register::AX, 0x01); // Invalid function
+            }
         }
 
         // AH = 2Ch: Get System Time
@@ -348,14 +629,25 @@ pub fn handle(cpu: &mut Cpu) {
             let filename = read_asciiz_string(&cpu.bus, addr);
             let mode = cpu.get_al();
 
+            cpu.bus.log_string(&format!(
+                "[DEBUG] Open File: '{}' Mode={:02X}",
+                filename, mode
+            ));
+
             match cpu.bus.disk.open_file(&filename, mode) {
                 Ok(handle) => {
                     cpu.ax = handle;
+                    cpu.bus
+                        .log_string(&format!("[DEBUG] Open Success, Handle={:04X}", handle));
                     // In real CPU, clear CF here
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
                     cpu.ax = code as u16;
                     // In real CPU, set CF here
+                    cpu.bus
+                        .log_string(&format!("[DEBUG] Open Failed, Error={:04X}", code));
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
             }
         }
@@ -371,6 +663,11 @@ pub fn handle(cpu: &mut Cpu) {
             let handle = cpu.bx;
             let count = cpu.cx as usize;
             let mut buf_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+
+            cpu.bus.log_string(&format!(
+                "[DEBUG] Read File Handle {:04X}, Count {:04X}",
+                handle, count
+            ));
 
             if handle == 0 {
                 // STDIN
@@ -397,6 +694,8 @@ pub fn handle(cpu: &mut Cpu) {
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(e) => {
+                        cpu.bus
+                            .log_string(&format!("[DEBUG] Read Failed, Error={:04X}", e));
                         cpu.ax = e;
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
@@ -409,6 +708,11 @@ pub fn handle(cpu: &mut Cpu) {
             let handle = cpu.bx;
             let count = cpu.cx as usize;
             let buf_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+
+            cpu.bus.log_string(&format!(
+                "[DEBUG] Write File Handle {:04X}, Count {:04X}",
+                handle, count
+            ));
 
             let mut data = Vec::with_capacity(count);
             for i in 0..count {
@@ -432,7 +736,10 @@ pub fn handle(cpu: &mut Cpu) {
             } else {
                 match &mut cpu.bus.disk.write_file(handle, &data) {
                     Ok(written) => cpu.ax = *written,
-                    Err(_) => cpu.ax = 0,
+                    Err(_) => {
+                        cpu.bus.log_string("[DEBUG] Write Failed");
+                        cpu.ax = 0
+                    }
                 }
             }
         }
@@ -474,18 +781,33 @@ pub fn handle(cpu: &mut Cpu) {
             let al = cpu.get_al();
             let bx = cpu.bx; // Handle
 
+            cpu.bus.log_string(&format!(
+                "[DOS] IOCTL AH=44h AL={:02X} Handle={:04X}",
+                al, bx
+            ));
+
             match al {
                 // Get Device Information
                 0x00 => {
                     // Bit 7=1 (Char Dev), Bit 6=0 (EOF), Bit 0=1 (Console Input)
                     // For STDIN(0), STDOUT(1), STDERR(2), return 0x80D3 or similar.
                     if bx <= 2 {
+                        // 1000 0000 1101 0011 = 80D3
+                        // Bit 7: Char device
+                        // Bit 6: EOF (0) - meaningful for files?
+                        // Bit 5: Raw (Binary) mode? (0=Cooked, 1=Raw)
+                        // Bit 4: Special?
+                        // Bit 3: Clock?
+                        // Bit 2: NUL?
+                        // Bit 1: Stdout
+                        // Bit 0: Stdin
                         cpu.dx = 0x80D3;
                     } else {
                         // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive #
                         cpu.dx = 0x0002; // Drive C
                     }
                     cpu.set_cpu_flag(CpuFlags::CF, false);
+                    // cpu.bus.log_string(&format!("[DOS] IOCTL Get Device Info -> {:04X}", cpu.dx));
                 }
                 // Check if Block Device is Removable
                 0x08 => {
@@ -502,10 +824,14 @@ pub fn handle(cpu: &mut Cpu) {
         }
         // AH=47h: Get Current Directory
         0x47 => {
+            let dl = cpu.get_dl(); // Drive (0=Default, 1=A, ...)
             let ds = cpu.ds;
             let si = cpu.get_reg16(Register::SI);
             let addr = cpu.get_physical_addr(ds, si);
             let cwd = cpu.bus.disk.get_current_directory();
+
+            cpu.bus
+                .log_string(&format!("[DOS] Get CWD (AH=47h) Drive={} -> {}", dl, cwd));
 
             // Write string to DS:SI
             let bytes = cwd.as_bytes();
@@ -528,21 +854,29 @@ pub fn handle(cpu: &mut Cpu) {
         // Return: AX = Segment, or CF=1 + AX=Error, BX=Max Available
         0x48 => {
             let requested_paras = cpu.bx;
-
-            // Very simple allocator stub:
-            // We pretend there is a heap at 0x2000 (after the loaded COM/EXE at 0x1000).
-            // TODO: Actual memory manager struct.
-
-            // Check if request is obviously bad (> 640KB)
-            if requested_paras > 0xA000 {
-                cpu.ax = 0x0008; // Insufficient memory
-                cpu.bx = 0x9000; // Say we have ~576KB free
-                cpu.set_cpu_flag(CpuFlags::CF, true);
+            let available_paras = if cpu.heap_pointer < 0xA000 {
+                0xA000 - cpu.heap_pointer
             } else {
-                // Return a hardcoded free segment.
-                // TODO: FIXME! Consecutive calls will return the SAME address in this stub.
-                cpu.ax = 0x2000;
+                0
+            };
+
+            cpu.bus.log_string(&format!(
+                "[DEBUG] Alloc Mem: Request {:04X} paras. Heap at {:04X}, Avail {:04X}",
+                requested_paras, cpu.heap_pointer, available_paras
+            ));
+
+            if requested_paras > available_paras {
+                cpu.ax = 0x0008; // Insufficient memory
+                cpu.bx = available_paras;
+                cpu.set_cpu_flag(CpuFlags::CF, true);
+                cpu.bus
+                    .log_string("[DEBUG] Alloc Failed: Insufficient Memory");
+            } else {
+                cpu.ax = cpu.heap_pointer;
+                cpu.heap_pointer += requested_paras;
                 cpu.set_cpu_flag(CpuFlags::CF, false);
+                cpu.bus
+                    .log_string(&format!("[DEBUG] Alloc Success: {:04X}", cpu.ax));
             }
         }
 
@@ -584,9 +918,26 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 4Ch: Terminate Program
         0x4C => {
-            cpu.bus
-                .log_string("[DOS] Program Terminated (INT 21h, 4Ch).");
-            cpu.state = CpuState::RebootShell;
+            let exit_code = cpu.get_al();
+            cpu.bus.log_string(&format!(
+                "[DOS] Program Terminated (INT 21h, 4Ch). ExitCode={:02X}",
+                exit_code
+            ));
+
+            // Try to restore parent process
+            if cpu.restore_process_context() {
+                cpu.bus.log_string("[DOS] Returning to Parent Process");
+                // TODO: Set Return Code in Parent's AX?
+                // DOS convention: AL = Return Code.
+                // Since we restored the parent context, we should probably update AL in the restored context.
+                // But `restore_process_context` already overwrote registers from stack.
+                // We should update AX *after* restore.
+                cpu.ax = exit_code as u16;
+                // Clear CF to indicate success? Usually EXEC returns with Carry Clear.
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else {
+                cpu.state = CpuState::RebootShell;
+            }
         }
 
         // AH=4Eh (Find First) / AH=4Fh (Find Next)
@@ -608,6 +959,7 @@ pub fn handle(cpu: &mut Cpu) {
                 // the program intended to search the CONTENTS, but concatenated CWD + wildcard blindly.
                 // We detect this and insert the missing separator (e.g. "C:\TEXT\*.*").
                 let cwd = cpu.bus.disk.get_current_directory();
+
                 if !cwd.is_empty() {
                     let pattern_upper = pattern.to_uppercase();
                     let cwd_upper = cwd.to_uppercase();
@@ -781,8 +1133,9 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
-        _ => cpu
-            .bus
-            .log_string(&format!("[DOS] Unhandled Call Int 0x21 AH={:02X}", ah)),
+        _ => {
+            cpu.bus
+                .log_string(&format!("[DOS] Unhandled INT 21h AH={:02X}", ah));
+        }
     }
 }

@@ -99,6 +99,8 @@ pub struct Cpu {
     flags: CpuFlags,
     pub state: CpuState,
     pub pending_command: Option<String>,
+    pub current_psp: u16,
+    pub heap_pointer: u16,
 
     // FPU State
     pub fpu_stack: [F80; 8],
@@ -113,6 +115,7 @@ pub struct Cpu {
 
     // Execution Trace
     pub trace_log: VecDeque<String>,
+    pub process_stack: Vec<ProcessContext>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -121,6 +124,26 @@ pub enum CpuState {
     Running,
     Halted,
     RebootShell,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessContext {
+    pub ax: u16,
+    pub bx: u16,
+    pub cx: u16,
+    pub dx: u16,
+    pub si: u16,
+    pub di: u16,
+    pub bp: u16,
+    pub sp: u16,
+    pub cs: u16,
+    pub ds: u16,
+    pub es: u16,
+    pub ss: u16,
+    pub ip: u16,
+    pub flags: CpuFlags,
+    pub psp: u16,
+    pub heap_pointer: u16,
 }
 
 use std::path::PathBuf;
@@ -163,8 +186,59 @@ impl Cpu {
             debug_qb_print: false,
             last_fstp_addr: 0,
             trace_log: VecDeque::new(),
+            current_psp: 0, // Will be set by loader
+            heap_pointer: 0x2000,
+            process_stack: Vec::new(),
         }
     }
+
+    pub fn save_process_context(&mut self) {
+        let context = ProcessContext {
+            ax: self.ax,
+            bx: self.bx,
+            cx: self.cx,
+            dx: self.dx,
+            si: self.si,
+            di: self.di,
+            bp: self.bp,
+            sp: self.sp,
+            cs: self.cs,
+            ds: self.ds,
+            es: self.es,
+            ss: self.ss,
+            ip: self.ip,
+            flags: self.flags,
+            psp: self.current_psp,
+            heap_pointer: self.heap_pointer,
+        };
+        self.process_stack.push(context);
+    }
+
+    pub fn restore_process_context(&mut self) -> bool {
+        if let Some(context) = self.process_stack.pop() {
+            self.ax = context.ax;
+            self.bx = context.bx;
+            self.cx = context.cx;
+            self.dx = context.dx;
+            self.si = context.si;
+            self.di = context.di;
+            self.bp = context.bp;
+            self.sp = context.sp;
+            self.cs = context.cs;
+            self.ds = context.ds;
+            self.es = context.es;
+            self.ss = context.ss;
+            self.ip = context.ip;
+            self.flags = context.flags;
+            self.current_psp = context.psp;
+            self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
+            true
+        } else {
+            false
+        }
+    }
+
+    // ... step ...
 
     pub fn step(&mut self) {
         if self.state != CpuState::Running {
@@ -969,7 +1043,7 @@ impl Cpu {
         (high << 8) | low
     }
 
-    pub fn load_executable(&mut self, filename: &str) -> bool {
+    pub fn load_executable(&mut self, filename: &str, segment: Option<u16>) -> bool {
         // Find and Read the File
         let resolved_path = self.bus.disk.resolve_path(filename);
 
@@ -989,15 +1063,15 @@ impl Cpu {
 
         // Check for EXE Signature ("MZ")
         if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
-            return self.load_exe(&bytes);
+            return self.load_exe(&bytes, segment);
         } else {
-            return self.load_com(&bytes);
+            return self.load_com(&bytes, segment);
         }
     }
 
     // COM loader
-    fn load_com(&mut self, bytes: &[u8]) -> bool {
-        let load_segment = 0x1000;
+    fn load_com(&mut self, bytes: &[u8], segment: Option<u16>) -> bool {
+        let load_segment = segment.unwrap_or(0x1000);
         let start_offset = 0x100; // COM files always start at 100h
 
         // Clear 64KB of RAM segment for safety (simulating clean load)
@@ -1055,21 +1129,41 @@ impl Cpu {
         // Offset 0x81: Command Tail (CR only)
         self.bus.write_8(psp_phys + 0x81, 0x0D);
 
+        // --- ENVIRONMENT SETUP ---
+        // Create a default environment block if none exists (usually for first program)
+        // Segment 0x0C00
+        let env_seg = 0x0C00;
+        let env_phys = self.get_physical_addr(env_seg, 0);
+
+        // Simple Default Env: "PATH=C:\" \0 "COMSPEC=COMMAND.COM" \0 \0
+        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0\0";
+        for (i, &b) in default_env.iter().enumerate() {
+            self.bus.write_8(env_phys + i, b);
+        }
+
+        // Point PSP to this environment
+        self.bus.write_16(psp_phys + 0x2C, env_seg);
+        self.current_psp = load_segment;
+
         self.bus.log_string(&format!(
-            "[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}",
+            "[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}. Env at {:04X}",
             self.bus.read_8(psp_phys + 6),
-            psp_phys + 6
+            psp_phys + 6,
+            env_seg
         ));
 
         self.bus.log_string(&format!(
             "[DOS] Loaded COM file at {:04X}:{:04X}",
             self.cs, self.ip
         ));
+        // Simple heuristic: COM files own the 64KB segment.
+        // Heap starts after that.
+        self.heap_pointer = load_segment + 0x1000;
         true
     }
 
     // EXE loader
-    pub fn load_exe(&mut self, bytes: &[u8]) -> bool {
+    pub fn load_exe(&mut self, bytes: &[u8], segment: Option<u16>) -> bool {
         if bytes.len() < 0x20 || &bytes[0..2] != b"MZ" {
             self.bus.log_string("[DOS] Invalid EXE: Missing MZ header");
             return false;
@@ -1086,15 +1180,17 @@ impl Cpu {
         let reloc_table_offset = u16::from_le_bytes([bytes[24], bytes[25]]) as usize;
         let reloc_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
 
-        // Clear RAM
-        for i in 0x500..self.bus.ram.len() {
-            self.bus.ram[i] = 0;
+        // Clear RAM (Only if starting fresh at 0x1000, probably shouldn't blindly wipe if nested)
+        if segment.is_none() {
+            for i in 0x500..self.bus.ram.len() {
+                self.bus.ram[i] = 0;
+            }
         }
 
         // Re-install the HLE Interrupt Vectors
         self.install_bios_traps();
 
-        let load_segment: u16 = 0x1000;
+        let load_segment: u16 = segment.unwrap_or(0x1000);
         let relocation_base_segment = load_segment + 0x10;
 
         // Load Binary
@@ -1177,10 +1273,31 @@ impl Cpu {
         // Offset 0x81: Command Tail (CR character)
         self.bus.write_8(psp_phys + 0x81, 0x0D);
 
+        // Create a default environment block
+        let env_seg = 0x0C00;
+        let env_phys = self.get_physical_addr(env_seg, 0);
+        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0\0";
+        for (i, &b) in default_env.iter().enumerate() {
+            self.bus.write_8(env_phys + i, b);
+        }
+
+        self.bus.write_16(psp_phys + 0x2C, env_seg);
+        self.current_psp = load_segment;
+
         self.bus.log_string(&format!(
             "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}",
             self.cs, self.ip
         ));
+
+        // Calculate heap pointer (First free paragraph after image)
+        // relocation_base_segment is where image starts.
+        // Image length is bytes.len() - header_size
+        let image_len = bytes.len() - header_size;
+        let image_paras = (image_len + 15) / 16;
+        self.heap_pointer = relocation_base_segment + image_paras as u16 + 1;
+
+        self.bus
+            .log_string(&format!("[DEBUG] Heap starts at {:04X}", self.heap_pointer));
 
         // Enable to do detailed debugging of exe programs
         //self.debug_qb_conversion = true;

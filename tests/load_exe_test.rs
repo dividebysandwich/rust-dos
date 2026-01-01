@@ -24,7 +24,7 @@ fn test_load_executable_in_subdirectory() {
     let mut cpu = Cpu::new(root_path.clone());
 
     // Verify file is NOT found initially (since we are in root)
-    let loaded = cpu.load_executable("TEST.COM");
+    let loaded = cpu.load_executable("TEST.COM", None);
     assert!(!loaded, "Should not find TEST.COM in root");
 
     // Change directory to "SUB"
@@ -35,7 +35,7 @@ fn test_load_executable_in_subdirectory() {
     assert_eq!(cpu.bus.disk.get_current_directory(), "SUB");
 
     // Try to load "TEST.COM" again - should succeed now
-    let loaded_now = cpu.load_executable("TEST.COM");
+    let loaded_now = cpu.load_executable("TEST.COM", None);
     assert!(loaded_now, "Should find TEST.COM in SUB");
 
     // Verify it loaded as a COM file

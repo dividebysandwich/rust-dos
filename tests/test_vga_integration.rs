@@ -7,7 +7,7 @@ fn test_vga_initialization() {
     let root_path = PathBuf::from(".");
     let mut cpu = Cpu::new(root_path);
 
-    let loaded = cpu.load_executable("TEST13.EXE") || cpu.load_executable("test13.exe");
+    let loaded = cpu.load_executable("TEST13.EXE", None) || cpu.load_executable("test13.exe", None);
 
     if !loaded {
         println!("TEST13.EXE not found in current directory. Skipping integration test.");

@@ -180,10 +180,10 @@ fn main() -> Result<(), String> {
                     // Load Program
                     let filename = command.to_string();
                     let loaded = if !filename.contains('.') {
-                        cpu.load_executable(&format!("{}.com", command))
-                            || cpu.load_executable(&format!("{}.exe", command))
+                        cpu.load_executable(&format!("{}.com", command), None)
+                            || cpu.load_executable(&format!("{}.exe", command), None)
                     } else {
-                        cpu.load_executable(&filename)
+                        cpu.load_executable(&filename, None)
                     };
 
                     if !loaded {

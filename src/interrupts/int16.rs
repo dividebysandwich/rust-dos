@@ -11,16 +11,17 @@ pub fn handle(cpu: &mut Cpu) {
         0x00 | 0x10 => {
             if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
                 // Key found: Return in AX
+                cpu.bus
+                    .log_string(&format!("[BIOS] INT 16h Read Key: {:04X}", key_code));
                 cpu.ax = key_code;
             } else {
                 // Buffer empty: BLOCK.
-                // We need to rewind the execution to retry 'INT 16h'.
-                // Since we are in an HLE Trap, the specific 'INT 16h' caller address 
+                // Since we are in an HLE Trap, the specific 'INT 16h' caller address
                 // is sitting on the top of the Stack (pushed by the CPU before jumping to the trap).
-                
+
                 // Stack Layout: [IP, CS, Flags] (Top down)
                 // We need to modify the IP at [SS:SP].
-                
+
                 let sp = cpu.sp;
                 let ss = cpu.ss;
                 let stack_addr = cpu.get_physical_addr(ss, sp);
@@ -78,7 +79,8 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         _ => {
-            cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah));
+            cpu.bus
+                .log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah));
         }
     }
 }

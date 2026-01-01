@@ -107,6 +107,10 @@ pub fn handle(cpu: &mut Cpu) {
                 _ => 80,
             };
             cpu.bus.write_16(0x044A, cols);
+
+            // Update BDA 0x0484 (Rows on Screen minus 1)
+            let rows: u8 = 24; // 25 rows - 1
+            cpu.bus.write_8(0x0484, rows);
         }
 
         // AH = 01h: Set Cursor Type
@@ -183,6 +187,17 @@ pub fn handle(cpu: &mut Cpu) {
             scroll_area(
                 cpu, false, lines, attr, row_start, col_start, row_end, col_end,
             );
+        }
+
+        // AH = 08h: Read Character and Attribute at Cursor Position
+        // BH = Page Number
+        // Returns: AH = Attribute, AL = Character
+        0x08 => {
+            let page = cpu.get_reg8(Register::BH);
+            let (col, row) = get_cursor(cpu, page);
+            let (char_code, attr) = read_char_at(cpu, col, row, page);
+            cpu.set_reg8(Register::AH, attr);
+            cpu.set_reg8(Register::AL, char_code);
         }
 
         // AH = 09h: Write Character and Attribute at Cursor Position
@@ -785,6 +800,34 @@ fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
             cpu.bus
                 .log_string("[BIOS] write_char_at called in unsupported video mode");
         }
+    }
+}
+
+/// Reads a character and attribute from VRAM (Text Mode)
+fn read_char_at(cpu: &Cpu, col: u8, row: u8, _page: u8) -> (u8, u8) {
+    match cpu.bus.video_mode {
+        VideoMode::Text80x25
+        | VideoMode::Text80x25Color
+        | VideoMode::Text40x25
+        | VideoMode::Text40x25Color => {
+            let cols = if cpu.bus.video_mode == VideoMode::Text40x25
+                || cpu.bus.video_mode == VideoMode::Text40x25Color
+            {
+                40
+            } else {
+                80
+            };
+
+            let offset = (row as usize * cols + col as usize) * 2;
+            if offset < cpu.bus.vga.vram_text.len() {
+                let char_code = cpu.bus.read_8(ADDR_VGA_TEXT + offset);
+                let attr = cpu.bus.read_8(ADDR_VGA_TEXT + offset + 1);
+                (char_code, attr)
+            } else {
+                (0, 0)
+            }
+        }
+        _ => (0, 0),
     }
 }
 
