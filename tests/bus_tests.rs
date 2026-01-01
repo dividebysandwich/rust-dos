@@ -32,15 +32,14 @@ fn test_vram_mapping() {
 
     // Test Graphics Mode VRAM (0xA0000)
     let graph_addr = ADDR_VGA_GRAPHICS; // 0xA0000
-    // Set Mode 13h so write_8 works
+    // Set Mode 13h so write_8 works. We must use the helper to set Registers (Chain 4, etc.)
+    bus.vga
+        .set_video_mode(rust_dos::video::VideoMode::Graphics320x200);
     bus.video_mode = rust_dos::video::VideoMode::Graphics320x200;
-    // We also need to set Chain 4 bit in sequencer if we want write_8 to work?
-    // Bus::write_8 creates a catch-22 if logic relies on Registers being set, but test doesn't set them.
-    // Bus::write_8: if in range, calls vga.write_graphics.
-    // VgaCard::write_graphics: Checks Chain 4 bit. If 0 (default), it does Linear Write?
-    // Let's check VgaCard implementation from Step 341.
-    // If chain4 is false (default 0), it does `self.vram_graphics[offset] = value;`
-    // So default 0 writes work.
+
+    // Bus::write_8 checks vga.ports() to decide where to route IO, but here we do MEM write.
+    // MEM write goes to vga.write_graphics.
+    // write_graphics checks Chain4 bit. set_video_mode sets it.
 
     bus.write_8(graph_addr, 0xFF);
 

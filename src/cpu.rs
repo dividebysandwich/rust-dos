@@ -212,6 +212,10 @@ impl Cpu {
             heap_pointer: self.heap_pointer,
         };
         self.process_stack.push(context);
+        self.bus.log_string(&format!(
+            "[CPU] Context Saved. Stack Depth: {}",
+            self.process_stack.len()
+        ));
     }
 
     pub fn restore_process_context(&mut self) -> bool {
@@ -232,8 +236,13 @@ impl Cpu {
             self.flags = context.flags;
             self.current_psp = context.psp;
             self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
+            self.bus.log_string(&format!(
+                "[CPU] Context Restored. Stack Depth: {}",
+                self.process_stack.len()
+            ));
             true
         } else {
+            self.bus.log_string("[CPU] Restore Failed: Stack Empty");
             false
         }
     }
