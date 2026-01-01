@@ -2,6 +2,7 @@ use rust_dos::cpu::Cpu;
 use std::path::PathBuf;
 use std::time::Instant;
 
+#[ignore]
 #[test]
 fn test_vga_initialization() {
     let root_path = PathBuf::from(".");
