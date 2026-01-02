@@ -427,12 +427,39 @@ pub fn handle(cpu: &mut Cpu) {
                     // 7 = 9x16 (VGA)
 
                     // We default to returning the 8x16 VGA font location for now
-                    cpu.cx = 16; // Bytes per character (Height)
-                    cpu.set_reg8(Register::DL, 24); // Rows - 1
-
-                    // Standard location for 8x16 font: F000:FA6E (Relocated to C000:2000 to avoid overflow)
-                    cpu.es = 0xC000;
-                    cpu.bp = 0x2000;
+                    let val_bh = cpu.get_reg8(Register::BH);
+                    match val_bh {
+                        0x00 | 0x01 | 0x03 | 0x04 => {
+                            // 8x8 Font
+                            cpu.cx = 8;
+                            cpu.set_reg8(Register::DL, 49); // 400 / 8 = 50 rows (minus 1 = 49)
+                            // Point to some dummy area or the same font for now
+                            cpu.es = 0xF000;
+                            cpu.bp = 0xFA6E;
+                        }
+                        0x02 | 0x05 => {
+                            // 8x14 or 9x14 Font
+                            cpu.cx = 14;
+                            cpu.set_reg8(Register::DL, 24); // 350 / 14 = 25 rows (minus 1 = 24)
+                            cpu.es = 0xC000;
+                            cpu.bp = 0x2000;
+                        }
+                        0x06 | 0x07 => {
+                            // 8x16 or 9x16 Font (VGA)
+                            cpu.cx = 16;
+                            cpu.set_reg8(Register::DL, 24); // 400 / 16 = 25 rows (minus 1 = 24)
+                            // Standard location for 8x16 font: F000:FA6E (Relocated to C000:2000 to avoid overflow)
+                            cpu.es = 0xC000;
+                            cpu.bp = 0x2000;
+                        }
+                        _ => {
+                            // Default to 16
+                            cpu.cx = 16;
+                            cpu.set_reg8(Register::DL, 24);
+                            cpu.es = 0xC000;
+                            cpu.bp = 0x2000;
+                        }
+                    }
                 }
                 _ => {
                     cpu.bus
@@ -445,11 +472,31 @@ pub fn handle(cpu: &mut Cpu) {
         // BL = 10h: Get Configuration (EGA/VGA)
         0x12 => {
             let bl = cpu.get_reg8(Register::BL);
-            if bl == 0x10 {
-                cpu.set_reg8(Register::BH, 0); // Color Mode
-                cpu.set_reg8(Register::BL, 3); // 256KB Video Memory
-                cpu.cx = 0; // Feature bits
+            match bl {
+                0x10 => {
+                    // Get Configuration
+                    cpu.set_reg8(Register::BH, 0); // Color Mode
+                    cpu.set_reg8(Register::BL, 3); // 256KB Video Memory
+                    cpu.cx = 0; // Feature bits
+                }
+                0x30 => {
+                    // Select Scan Lines (AL = 0, 1, 2)
+                    // We just acknowledge it
+                    cpu.set_reg8(Register::AL, 0x12);
+                }
+                0x34 => {
+                    // Cursor Emulation
+                    cpu.set_reg8(Register::AL, 0x12); // Supported
+                }
+                _ => {
+                    cpu.bus
+                        .log_string(&format!("[BIOS] Unhandled INT 10h AH=12h BL={:02X}", bl));
+                }
             }
+            cpu.bus.log_string(&format!(
+                "[BIOS] AH=12 Return: ax={:04X} bx={:04X} cx={:04X}",
+                cpu.ax, cpu.bx, cpu.cx
+            ));
         }
 
         // AH = 13h: Write String

@@ -314,6 +314,22 @@ impl Device for VgaCard {
                     0x00 // Display Active, No Retrace
                 }
             }
+            0x3C2 => {
+                // Input Status #0
+                // Bit 7: IRQ Pending (0=Clear)
+                // Bit 4: Switch Sense. Determined by Misc Output (Write) bits 2-3.
+                // Switches for "EGA Color 80x25" are typically 0110 (binary) = 6.
+                // SW1=Off(1), SW2=Off(1), SW3=On(0), SW4=On(0)? Wait.
+                // Common setting: 0110 aka 6.
+                // Let's emulate bits 2-3 of Write directing which bit of 0110 to read.
+                let select = (self.misc_output_reg >> 2) & 0x03;
+                let switches = 0b0110; // EGA Color 80x25? Or 0b1001?
+                // RBIL:
+                // 0110 = Color 80x25
+                let switch_val = (switches >> select) & 0x01;
+
+                (switch_val << 4) // Return switch sense in Bit 4
+            }
             0x3C1 => {
                 let val = if (self.attribute_index as usize) < self.attribute_regs.len() {
                     self.attribute_regs[self.attribute_index as usize]
@@ -404,9 +420,9 @@ impl Device for VgaCard {
                 if (self.graphics_index as usize) < self.graphics_regs.len() {
                     let mut val = value;
                     // Mask Read Map Select to 2 bits
-                    if self.graphics_index == 0x04 {
-                        val &= 0x03;
-                    }
+                    // if self.graphics_index == 0x04 {
+                    //    val &= 0x03;
+                    // }
                     // Mask Mode Register (Index 5)
                     if self.graphics_index == 0x05 {
                         val &= 0x73;

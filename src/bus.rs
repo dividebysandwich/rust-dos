@@ -357,6 +357,11 @@ impl Bus {
             _ => {
                 if self.vga.ports().contains(&port) {
                     self.vga.io_write(port, value);
+                    // Log manual VGA writes
+                    self.log_string(&format!(
+                        "[VGA-IO] Write Port {:04X} Value {:02X}",
+                        port, value
+                    ));
 
                     // Check if video mode changed
                     if let Some(new_mode) = self.vga.check_video_mode() {
