@@ -1,5 +1,5 @@
-use iced_x86::{Instruction, Mnemonic, Register};
 use crate::cpu::{Cpu, CpuFlags};
+use iced_x86::{Instruction, Mnemonic, Register};
 
 pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
     let has_rep = instr.has_rep_prefix();
@@ -21,8 +21,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // Check termination based on Flags (ZF)
         let zf = cpu.get_cpu_flag(CpuFlags::ZF);
         match instr.mnemonic() {
-            Mnemonic::Cmpsb | Mnemonic::Cmpsw |
-            Mnemonic::Scasb | Mnemonic::Scasw => {
+            Mnemonic::Cmpsb | Mnemonic::Cmpsw | Mnemonic::Scasb | Mnemonic::Scasw => {
                 // REPE/REPZ (F3): Loop while Equal (ZF=1). Stop if Not Equal (ZF=0).
                 if has_rep && !zf {
                     break;
@@ -49,10 +48,15 @@ fn execute_once(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Cmpsw => cmps(cpu, instr, 2),
         Mnemonic::Scasb => scas(cpu, instr, 1),
         Mnemonic::Scasw => scas(cpu, instr, 2),
+        Mnemonic::Outsb => outs(cpu, instr, 1),
+        Mnemonic::Outsw => outs(cpu, instr, 2),
+        Mnemonic::Insb => ins(cpu, instr, 1),
+        Mnemonic::Insw => ins(cpu, instr, 2),
         _ => {
-            cpu.bus.log_string(
-                &format!("[STRING] Unsupported instruction: {:?}", instr.mnemonic())
-            );
+            cpu.bus.log_string(&format!(
+                "[STRING] Unsupported instruction: {:?}",
+                instr.mnemonic()
+            ));
         }
     }
 }
@@ -81,7 +85,6 @@ fn update_indices(cpu: &mut Cpu, size: u16, update_si: bool, update_di: bool) {
         cpu.di = cpu.di.wrapping_add(delta);
     }
 }
-
 
 fn movs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
     let src_seg = get_string_src_segment(instr, cpu);
@@ -155,6 +158,41 @@ fn scas(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
         let acc = cpu.ax;
         let mem = cpu.bus.read_16(dst_addr);
         cpu.alu_sub_16(acc, mem);
+    }
+
+    update_indices(cpu, size, false, true);
+}
+
+fn outs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
+    let src_seg = get_string_src_segment(instr, cpu);
+    let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
+    let port = cpu.dx;
+
+    if size == 1 {
+        let val = cpu.bus.read_8(src_addr);
+        cpu.bus.io_write(port, val);
+    } else {
+        let val = cpu.bus.read_16(src_addr);
+        // 16-bit I/O: Low byte to Port, High byte to Port+1
+        cpu.bus.io_write(port, (val & 0xFF) as u8);
+        cpu.bus.io_write(port.wrapping_add(1), (val >> 8) as u8);
+    }
+
+    update_indices(cpu, size, true, false);
+}
+
+fn ins(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
+    let dst_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+    let port = cpu.dx;
+
+    if size == 1 {
+        let val = cpu.bus.io_read(port);
+        cpu.bus.write_8(dst_addr, val);
+    } else {
+        let low = cpu.bus.io_read(port);
+        let high = cpu.bus.io_read(port.wrapping_add(1));
+        let val = (low as u16) | ((high as u16) << 8);
+        cpu.bus.write_16(dst_addr, val);
     }
 
     update_indices(cpu, size, false, true);

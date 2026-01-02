@@ -657,14 +657,14 @@ impl Cpu {
     // Set 16-bit Register
     pub fn set_reg16(&mut self, reg: Register, value: u16) {
         match reg {
-            Register::AX => self.ax = value,
-            Register::BX => self.bx = value,
-            Register::CX => self.cx = value,
-            Register::DX => self.dx = value,
-            Register::SI => self.si = value,
-            Register::DI => self.di = value,
-            Register::BP => self.bp = value,
-            Register::SP => self.sp = value,
+            Register::AX | Register::EAX => self.ax = value,
+            Register::BX | Register::EBX => self.bx = value,
+            Register::CX | Register::ECX => self.cx = value,
+            Register::DX | Register::EDX => self.dx = value,
+            Register::SI | Register::ESI => self.si = value,
+            Register::DI | Register::EDI => self.di = value,
+            Register::BP | Register::EBP => self.bp = value,
+            Register::SP | Register::ESP => self.sp = value,
 
             Register::ES => self.es = value,
             Register::DS => self.ds = value,
@@ -678,14 +678,14 @@ impl Cpu {
     // Get 16-bit Register
     pub fn get_reg16(&self, reg: Register) -> u16 {
         match reg {
-            Register::AX => self.ax,
-            Register::BX => self.bx,
-            Register::CX => self.cx,
-            Register::DX => self.dx,
-            Register::SI => self.si,
-            Register::DI => self.di,
-            Register::BP => self.bp,
-            Register::SP => self.sp,
+            Register::AX | Register::EAX => self.ax,
+            Register::BX | Register::EBX => self.bx,
+            Register::CX | Register::ECX => self.cx,
+            Register::DX | Register::EDX => self.dx,
+            Register::SI | Register::ESI => self.si,
+            Register::DI | Register::EDI => self.di,
+            Register::BP | Register::EBP => self.bp,
+            Register::SP | Register::ESP => self.sp,
 
             Register::ES => self.es,
             Register::DS => self.ds,

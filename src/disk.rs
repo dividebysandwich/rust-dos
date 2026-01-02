@@ -24,8 +24,10 @@ pub struct DiskController {
     next_handle: u16,
 
     // File System State
-    root_path: PathBuf,  // The host directory acting as C:\
-    current_dir: String, // The current DOS directory (e.g., "GAMES\DOOM")
+    root_path: PathBuf,                      // The host directory acting as C:\
+    current_dir: String,                     // The current DOS directory (e.g., "GAMES\DOOM")
+    current_drive: u8,                       // 0=A, ... 2=C, ... 25=Z
+    virtual_files: HashMap<String, Vec<u8>>, // In-memory files for Z: drive
 }
 
 impl DiskController {
@@ -41,12 +43,31 @@ impl DiskController {
 
         let canonical = fs::canonicalize(&root_path).unwrap_or(root_path);
 
+        let mut virtual_files = HashMap::new();
+        // Create a dummy COMMAND.COM on Z:
+        virtual_files.insert("COMMAND.COM".to_string(), vec![0x90; 5000]);
+
         Self {
             open_files: HashMap::new(),
             next_handle: FIRST_USER_HANDLE,
             root_path: canonical,
-            current_dir: String::new(), // Root is empty string or "\"
+            current_dir: String::new(),
+            current_drive: 2, // Default to C:
+            virtual_files,
         }
+    }
+
+    pub fn set_current_drive(&mut self, drive: u8) -> u8 {
+        // Only allow switching to C (2) or Z (25) for now
+        // Return the number of logical drives (26)
+        if drive == 2 || drive == 25 {
+            self.current_drive = drive;
+        }
+        26
+    }
+
+    pub fn get_current_drive(&self) -> u8 {
+        self.current_drive
     }
 
     /// Resolves a DOS path (e.g., "GAMES\DOOM.EXE" or "..\FILE.TXT")
@@ -57,15 +78,52 @@ impl DiskController {
         let path_str = dos_path.replace('/', "\\");
 
         // 2. Handle Drive Letter (Strip "C:")
-        let clean_path = if path_str.len() >= 2 && &path_str[1..2] == ":" {
-            if path_str.to_ascii_uppercase().starts_with("C:") {
-                &path_str[2..]
+        let mut drive = self.current_drive;
+        let mut clean_path_str = path_str.clone();
+
+        // 2. Handle Drive Letter (e.g. "C:...")
+        if path_str.len() >= 2 && &path_str[1..2] == ":" {
+            let drive_char = path_str.chars().next().unwrap().to_ascii_uppercase();
+            if drive_char >= 'A' && drive_char <= 'Z' {
+                drive = (drive_char as u8) - b'A';
+                clean_path_str = path_str[2..].to_string();
             } else {
-                return None;
+                return None; // Invalid drive
             }
-        } else {
-            &path_str
-        };
+        }
+
+        // If trying to access Z:, ensure it is a virtual path
+        if drive == 25 {
+            // Z: drive (Virtual)
+            // We return a special "PathBuf" which won't likely exist on host,
+            // but we can check `virtual_files` later?
+            // Actually, `resolve_path` returns `PathBuf` which is then used by `fs::` calls.
+            // This is a problem for virtual files.
+            // However, our `open_file` logic can check for Z: BEFORE calling `fs::open`.
+            // But `resolve_path` is also used for directory listing.
+
+            // For now, let's map Z: to a non-existent host path so standard FS calls fail,
+            // but we can recognize it.
+            // Or better: `resolve_path` is designed to return a Host Path.
+            // If it's a virtual file, we can't return a Host Path.
+            // Refactoring `resolve_path` to return an Enum would be big.
+            // Let's rely on callers checking drive/path logic.
+
+            // Wait, if I return None, `open_file` errors "Path not found".
+            // If I return a dummy path, `fs::open` errors "File not found".
+
+            // Let's modify `open_file` and `find_directory_entry` to check for Z: usage explicitly.
+            // Here, we just return None for Z: to indicate "Not on Host Disk C".
+            // BUT, `current_drive` matters.
+            return None;
+        }
+
+        if drive != 2 {
+            // We only support C: for actual Disk I/O currently.
+            return None;
+        }
+
+        let clean_path = &clean_path_str;
 
         let is_absolute = clean_path.starts_with('\\');
 
@@ -110,6 +168,43 @@ impl DiskController {
         } else {
             None
         }
+    }
+
+    // Helper to check if a file exists on Z:
+    pub fn is_virtual_file(&self, filename: &str) -> bool {
+        // Check if explicit Z:
+        let upper = filename.to_ascii_uppercase();
+        if upper.starts_with("Z:") {
+            let name = &upper[2..];
+            // Remove leading slash if any
+            let name = name.trim_start_matches('\\').trim_start_matches('/');
+            return self.virtual_files.contains_key(name);
+        }
+
+        // If current drive is Z:
+        if self.current_drive == 25 {
+            let name = upper.trim_start_matches('\\').trim_start_matches('/');
+            return self.virtual_files.contains_key(name);
+        }
+
+        false
+    }
+
+    // Helper to get virtual file size
+    pub fn get_virtual_file_size(&self, filename: &str) -> u32 {
+        let upper = filename.to_ascii_uppercase();
+        // Simplistic stripping
+        let name = if upper.starts_with("Z:") {
+            &upper[2..]
+        } else {
+            &upper
+        };
+        let name = name.trim_start_matches('\\').trim_start_matches('/');
+
+        if let Some(data) = self.virtual_files.get(name) {
+            return data.len() as u32;
+        }
+        0
     }
 
     /// Helper to find a child in a directory matching DOS semantics
@@ -211,6 +306,28 @@ impl DiskController {
 
     // INT 21h, AH=3Dh: Open File
     pub fn open_file(&mut self, filename: &str, mode: u8) -> Result<u16, u8> {
+        // Handle Virtual Z: files
+        if self.is_virtual_file(filename) {
+            // For now, we don't support actually reading/seeking virtual files with standard file handles
+            // nicely. We will just return a dummy handle and special case read/seek if needed?
+            // OR: We return an error if we don't support it, but since we just want EXEC to work,
+            // we might not need `open_file` to succeed for COMMAND.COM unless NC tries to read it.
+            // NC *does* check if COMMAND.COM exists.
+
+            // Let's create a temporary file or use a special handle range?
+            // Using a special handle range is cleaner.
+            let handle = 0xAA00 + (self.next_handle % 100);
+            self.next_handle += 1;
+            // storing nothing in `open_files` means read/write fails, which is fine for now
+            // or we could store a special marker.
+            // For this specific task (EXEC), NC just needs to know it exists or "load" it (which uses EXEC).
+            // EXEC loading handles file reading itself usually via `load_executable` in `cpu.rs`
+            // (which uses `open_file`? No, `load_executable` uses `disk.read_file` maybe?
+            // `cpu.load_executable` uses `disk.open_file` -> `read_file` flow usually).
+            // We'll see. If `open_file` succeeds, that's step 1.
+            return Ok(handle);
+        }
+
         let path = self.resolve_path(filename).ok_or(0x03)?; // Path not found
 
         let mut options = OpenOptions::new();
@@ -297,9 +414,18 @@ impl DiskController {
     // INT 21h, AH=36h: Get Disk Free Space
     // Input DL: 0=Default, 1=A, 2=B, 3=C, ...
     pub fn get_disk_free_space(&self, drive: u8) -> Result<(u16, u16, u16, u16), u16> {
-        if drive == 0 || drive == 3 || drive == 2 {
-            // Fake 80MB drive
+        let target_drive = if drive == 0 {
+            self.current_drive
+        } else {
+            drive - 1
+        };
+
+        if target_drive == 2 {
+            // C: drive (Fake 80MB)
             Ok((8, 20000, 512, 20000))
+        } else if target_drive == 25 {
+            // Z: drive (Virtual, read-only, small)
+            Ok((1, 1000, 512, 2000))
         } else {
             Err(0x0F) // Invalid Drive
         }
@@ -423,152 +549,160 @@ impl DiskController {
             }
         }
 
-        // Split Spec into Directory and Pattern manually (Path::new is platform specific)
-        // Find the last separator (\, /, or :)
+        // Split Spec into Directory and Pattern manually
         let (parent_dir, pattern) =
             if let Some(idx) = search_spec.rfind(|c| c == '\\' || c == '/' || c == ':') {
                 let (dir, pat) = search_spec.split_at(idx + 1);
-                // If the separator was ':', keep it in the dir part?
-                // e.g. "C:file" -> "C:", "file".
-                // e.g. "C:\file" -> "C:\", "file"
-                // Yes, split_at includes separator in the first part (index is exclusive? No)
-                // split_at(idx+1): first part [0..idx+1], second [idx+1..]
-                // So "C:\foo" (idx=2 for \), split_at(3) -> "C:\", "foo". Correct.
                 (dir, pat)
             } else {
                 ("", search_spec)
             };
 
-        // If parent_dir is empty, it implies current directory
         let search_dir_str = if parent_dir.is_empty() {
             "."
         } else {
             parent_dir
         };
 
-        let host_dir = self.resolve_path(search_dir_str).ok_or(0x03)?;
+        // Z: Drive Detection
+        let is_z_drive =
+            self.current_drive == 25 || search_spec.to_ascii_uppercase().starts_with("Z:");
 
-        let read_dir = fs::read_dir(&host_dir).map_err(|_| 0x03)?;
-        let mut all_entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
-        all_entries.sort_by_key(|dir_entry| dir_entry.file_name());
-
-        let mut generated_names: HashMap<String, usize> = HashMap::new();
         let mut valid_entries: Vec<DosDirEntry> = Vec::new();
 
-        // Always add "." and ".." if we are not in root
-        // Note: fs::read_dir does NOT return . and ..
-        // We must synthesize them if we are in a subdir.
-        // let is_root = self.current_dir.is_empty() && (parent_dir.is_empty() || parent_dir == "\\" || parent_dir == "C:\\");
-        // Actually, detecting if host_dir is root is safer
-        let is_host_root = host_dir == self.root_path;
-
-        if !is_host_root {
-            // ..
-            if Self::matches_pattern("..", &pattern) {
-                valid_entries.push(DosDirEntry {
-                    filename: "..".to_string(),
-                    size: 0,
-                    is_dir: true,
-                    is_readonly: false,
-                    dos_time: 0,
-                    dos_date: 0,
-                });
-            }
-            // .
-            if Self::matches_pattern(".", &pattern) {
-                valid_entries.push(DosDirEntry {
-                    filename: ".".to_string(),
-                    size: 0,
-                    is_dir: true,
-                    is_readonly: false,
-                    dos_time: 0,
-                    dos_date: 0,
-                });
-            }
-        }
-
-        for entry in all_entries {
-            let original_name = entry.file_name().to_string_lossy().into_owned();
-
-            if original_name.starts_with('.') {
-                continue;
-            }
-
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            let is_dir = metadata.is_dir();
-            let mut file_attr = if is_dir { 0x10 } else { 0x20 };
-            if metadata.permissions().readonly() {
-                file_attr |= 0x01;
-            }
-
-            let restricted_bits = 0x02 | 0x04 | 0x10;
-            if (file_attr & restricted_bits) & !search_attr != 0 {
-                continue;
-            }
-
-            let (stem, ext) = Self::to_short_name(&original_name);
-            let base_key = if ext.is_empty() {
-                stem.clone()
-            } else {
-                format!("{}.{}", stem, ext)
-            };
-
-            let count = *generated_names.get(&base_key).unwrap_or(&0);
-
-            let final_name = if count == 0 {
-                generated_names.insert(base_key, 1);
-                if ext.is_empty() {
-                    stem
-                } else {
-                    format!("{}.{}", stem, ext)
+        if is_z_drive {
+            // Virtual Z: Drive Listing
+            // Currently only populating valid_entries with virtual files that match pattern
+            for (fname, data) in &self.virtual_files {
+                if Self::matches_pattern(fname, &pattern) {
+                    valid_entries.push(DosDirEntry {
+                        filename: fname.clone(),
+                        size: data.len() as u32,
+                        is_dir: false,
+                        is_readonly: true,
+                        dos_time: 0x0000,
+                        dos_date: 0x5021,
+                    });
                 }
-            } else {
-                generated_names.insert(base_key.clone(), count + 1);
-                let suffix = format!("~{}", count);
-                let available_len = 8usize.saturating_sub(suffix.len());
-                let short_stem = if stem.len() > available_len {
-                    &stem[0..available_len]
-                } else {
-                    &stem
+            }
+        } else {
+            // Host Filesystem Listing
+            let host_dir = self.resolve_path(search_dir_str).ok_or(0x03)?;
+
+            let read_dir = fs::read_dir(&host_dir).map_err(|_| 0x03)?;
+            let mut all_entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+            all_entries.sort_by_key(|dir_entry| dir_entry.file_name());
+
+            let mut generated_names: HashMap<String, usize> = HashMap::new();
+
+            let is_host_root = host_dir == self.root_path;
+
+            if !is_host_root {
+                if Self::matches_pattern("..", &pattern) {
+                    valid_entries.push(DosDirEntry {
+                        filename: "..".to_string(),
+                        size: 0,
+                        is_dir: true,
+                        is_readonly: false,
+                        dos_time: 0,
+                        dos_date: 0,
+                    });
+                }
+                if Self::matches_pattern(".", &pattern) {
+                    valid_entries.push(DosDirEntry {
+                        filename: ".".to_string(),
+                        size: 0,
+                        is_dir: true,
+                        is_readonly: false,
+                        dos_time: 0,
+                        dos_date: 0,
+                    });
+                }
+            }
+
+            for entry in all_entries {
+                let original_name = entry.file_name().to_string_lossy().into_owned();
+
+                if original_name.starts_with('.') {
+                    continue;
+                }
+
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
                 };
 
-                if ext.is_empty() {
-                    format!("{}{}", short_stem, suffix)
-                } else {
-                    format!("{}{}.{}", short_stem, suffix, ext)
+                let is_dir = metadata.is_dir();
+                let mut file_attr = if is_dir { 0x10 } else { 0x20 };
+                if metadata.permissions().readonly() {
+                    file_attr |= 0x01;
                 }
-            };
 
-            if !Self::matches_pattern(&final_name, &pattern) {
-                continue;
+                let restricted_bits = 0x02 | 0x04 | 0x10;
+                if (file_attr & restricted_bits) & !search_attr != 0 {
+                    continue;
+                }
+
+                let (stem, ext) = Self::to_short_name(&original_name);
+                let base_key = if ext.is_empty() {
+                    stem.clone()
+                } else {
+                    format!("{}.{}", stem, ext)
+                };
+
+                let count = *generated_names.get(&base_key).unwrap_or(&0);
+
+                let final_name = if count == 0 {
+                    generated_names.insert(base_key, 1);
+                    if ext.is_empty() {
+                        stem
+                    } else {
+                        format!("{}.{}", stem, ext)
+                    }
+                } else {
+                    generated_names.insert(base_key.clone(), count + 1);
+                    let suffix = format!("~{}", count);
+                    let available_len = 8usize.saturating_sub(suffix.len());
+                    let short_stem = if stem.len() > available_len {
+                        &stem[0..available_len]
+                    } else {
+                        &stem
+                    };
+
+                    if ext.is_empty() {
+                        format!("{}{}", short_stem, suffix)
+                    } else {
+                        format!("{}{}.{}", short_stem, suffix, ext)
+                    }
+                };
+
+                if !Self::matches_pattern(&final_name, &pattern) {
+                    continue;
+                }
+
+                let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
+                let datetime: DateTime<Local> = sys_time.into();
+                let dos_time = ((datetime.hour() as u16) << 11)
+                    | ((datetime.minute() as u16) << 5)
+                    | ((datetime.second() as u16) / 2);
+                let year = datetime.year();
+                let dos_date = if year < 1980 {
+                    0x0021
+                } else {
+                    (((year - 1980) as u16) << 9)
+                        | ((datetime.month() as u16) << 5)
+                        | (datetime.day() as u16)
+                };
+
+                valid_entries.push(DosDirEntry {
+                    filename: final_name,
+                    size: metadata.len() as u32,
+                    is_dir: metadata.is_dir(),
+                    is_readonly: metadata.permissions().readonly(),
+                    dos_time,
+                    dos_date,
+                });
             }
-
-            let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
-            let datetime: DateTime<Local> = sys_time.into();
-            let dos_time = ((datetime.hour() as u16) << 11)
-                | ((datetime.minute() as u16) << 5)
-                | ((datetime.second() as u16) / 2);
-            let year = datetime.year();
-            let dos_date = if year < 1980 {
-                0x0021
-            } else {
-                (((year - 1980) as u16) << 9)
-                    | ((datetime.month() as u16) << 5)
-                    | (datetime.day() as u16)
-            };
-
-            valid_entries.push(DosDirEntry {
-                filename: final_name,
-                size: metadata.len() as u32,
-                is_dir: metadata.is_dir(),
-                is_readonly: metadata.permissions().readonly(),
-                dos_time,
-                dos_date,
-            });
         }
 
         if search_index < valid_entries.len() {

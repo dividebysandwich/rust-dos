@@ -22,8 +22,8 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     let new_cs = cpu.bus.read_16(ivt_addr + 2);
 
     if new_cs == 0 && new_ip == 0 {
-        cpu.bus
-            .log_string(&format!("[CPU] Null Interrupt {:02X}", vector));
+        //        cpu.bus
+        //            .log_string(&format!("[CPU] Null Interrupt {:02X}", vector));
         return;
     }
 

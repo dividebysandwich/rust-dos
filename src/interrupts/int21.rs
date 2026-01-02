@@ -9,6 +9,14 @@ use crate::video::print_char;
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     match ah {
+        // AH = 0Eh: Select Default Drive
+        0x0E => {
+            let drive = cpu.get_dl();
+            // set_current_drive returns total logical drives (26)
+            let logical_drives = cpu.bus.disk.set_current_drive(drive);
+            cpu.set_reg8(Register::AL, logical_drives);
+        }
+
         // AH = 00h: Terminate Program (Legacy Method)
         0x00 => {
             cpu.bus
@@ -193,8 +201,8 @@ pub fn handle(cpu: &mut Cpu) {
         // AH=19h: Get Current Default Drive
         0x19 => {
             // Return Default Drive (0=A, 1=B, 2=C)
-            // We simulate C: as default.
-            cpu.set_reg8(Register::AL, 2);
+            let drive = cpu.bus.disk.get_current_drive();
+            cpu.set_reg8(Register::AL, drive);
         }
 
         // AH=1Ah: Set Disk Transfer Area (DTA) Address
@@ -441,14 +449,62 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.bus
                     .log_string(&format!("[DEBUG] Env Tail: {}", dbg_tail));
 
-                // Call Load Executable with Nested Execution Logic
-                cpu.save_process_context();
+                // Check for COMMAND.COM interception
+                let upper_name = filename.to_ascii_uppercase();
+                let (target_filename, target_cmd_tail_bytes) =
+                    if upper_name.ends_with("COMMAND.COM") {
+                        // Check for /C (execute string)
+                        // cmd_str is derived from cmd_tail (which includes length byte at 0? No, cmd_tail is vec of bytes)
+                        // In previous code:
+                        // let len = cpu.bus.read_8(cmd_phys);
+                        // for i in 0..len { cmd_tail.push(...) }
+                        // So cmd_tail is just the string bytes (no len, no CR).
+
+                        let full_cmd = String::from_utf8_lossy(&cmd_tail).to_string();
+                        let trimmed = full_cmd.trim_start();
+
+                        if trimmed.to_ascii_uppercase().starts_with("/C") {
+                            // Extract program and args
+                            // Format: /C program args
+                            let after_c = trimmed[2..].trim_start();
+                            // Get program name (up to first space)
+                            let mut parts = after_c.splitn(2, char::is_whitespace);
+                            let prog = parts.next().unwrap_or("");
+                            let args = parts.next().unwrap_or("");
+
+                            // Construct new command tail for the target program
+                            // Standard DOS command tail: [LEN] [SPACE] [ARGS] [CR]
+
+                            let mut new_tail = Vec::new();
+
+                            if !args.is_empty() {
+                                new_tail.push(b' ');
+                                for b in args.bytes() {
+                                    new_tail.push(b);
+                                }
+                            }
+                            // Note: CR is added later by the write logic (cpu.bus.write_8(..., 0x0D))
+
+                            cpu.bus.log_string(&format!(
+                                "[DOS] Intercepted COMMAND.COM /C. Target='{}', Args='{}'",
+                                prog, args
+                            ));
+
+                            (prog.to_string(), new_tail)
+                        } else {
+                            // Not /C? Just run COMMAND.COM (which is dummy)
+                            // It will load the dummy Z:\COMMAND.COM which is NOPs.
+                            (filename.clone(), cmd_tail.clone())
+                        }
+                    } else {
+                        (filename.clone(), cmd_tail.clone())
+                    };
 
                 // Allocate memory for new process using heap_pointer
                 // Align to next paragraph if needed (heap_pointer is already paragraph)
                 let load_segment = cpu.heap_pointer;
 
-                if cpu.load_executable(&filename, Some(load_segment)) {
+                if cpu.load_executable(&target_filename, Some(load_segment)) {
                     let psp_phys = cpu.get_physical_addr(load_segment, 0);
 
                     // Write Environment Block
@@ -477,12 +533,15 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.bus.write_16(psp_phys + 0x16, parent_psp);
 
                     // Write Command Tail to 80h
-                    cpu.bus.write_8(psp_phys + 0x80, cmd_tail.len() as u8);
-                    for (i, &b) in cmd_tail.iter().enumerate() {
+                    // target_cmd_tail_bytes does NOT include CR, logic below adds it.
+                    cpu.bus
+                        .write_8(psp_phys + 0x80, target_cmd_tail_bytes.len() as u8);
+                    for (i, &b) in target_cmd_tail_bytes.iter().enumerate() {
                         cpu.bus.write_8(psp_phys + 0x81 + i, b);
                     }
                     // Ensure CR at end
-                    cpu.bus.write_8(psp_phys + 0x81 + cmd_tail.len(), 0x0D);
+                    cpu.bus
+                        .write_8(psp_phys + 0x81 + target_cmd_tail_bytes.len(), 0x0D);
 
                     // We do NOT set CF=0 because we don't return to the caller yet!
                     // The caller is suspended.

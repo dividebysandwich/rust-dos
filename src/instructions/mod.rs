@@ -99,7 +99,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         // --- Strings ---
         Mnemonic::Movsb | Mnemonic::Movsw | Mnemonic::Stosb | Mnemonic::Stosw |
         Mnemonic::Lodsb | Mnemonic::Lodsw | Mnemonic::Cmpsb | Mnemonic::Cmpsw |
-        Mnemonic::Scasb | Mnemonic::Scasw => {
+        Mnemonic::Scasb | Mnemonic::Scasw |
+        Mnemonic::Outsb | Mnemonic::Outsw | Mnemonic::Insb | Mnemonic::Insw => {
             string::handle(cpu, instr);
         }
 
