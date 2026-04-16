@@ -180,8 +180,72 @@ fn main() -> Result<(), String> {
             }
         }
 
+        // DEBUG: every ~30k-instruction batch, sample the current CS:IP so we
+        // can tell which code region a program is spinning in when the screen
+        // goes unresponsive. Logged ~once per second (SDL caps us at 60 fps).
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static FRAME_SAMPLE: AtomicU32 = AtomicU32::new(0);
+            let n = FRAME_SAMPLE.fetch_add(1, Ordering::Relaxed);
+            if n % 120 == 0 && cpu.cs < 0xF000 {
+                let phys_code = cpu.get_physical_addr(cpu.cs, cpu.ip);
+                let mut code_bytes = String::new();
+                for i in 0..16 {
+                    code_bytes.push_str(&format!("{:02X} ", cpu.bus.read_8(phys_code + i)));
+                }
+                // Also dump 12 bytes from DS:SI (likely palette-source buffer
+                // in programs stuck in a fade loop) and 16 bytes from
+                // BDA tick counter so we can see whether time is progressing.
+                let phys_dssi = cpu.get_physical_addr(cpu.ds, cpu.si);
+                let mut ds_si = String::new();
+                for i in 0..12 {
+                    ds_si.push_str(&format!("{:02X} ", cpu.bus.read_8(phys_dssi + i)));
+                }
+                let ticks_lo = cpu.bus.read_16(0x046C);
+                let ticks_hi = cpu.bus.read_16(0x046E);
+                cpu.bus.log_string(&format!(
+                    "[SAMPLE] CS:IP={:04X}:{:04X} DS={:04X} SS={:04X} AX={:04X} BX={:04X} CX={:04X} DX={:04X} SI={:04X} BP={:04X} SP={:04X} ticks={:04X}{:04X}",
+                    cpu.cs, cpu.ip, cpu.ds, cpu.ss, cpu.ax, cpu.bx, cpu.cx, cpu.dx, cpu.si, cpu.bp, cpu.sp,
+                    ticks_hi, ticks_lo
+                ));
+                cpu.bus.log_string(&format!(
+                    "         code@CS:IP:  {}", code_bytes.trim()
+                ));
+                cpu.bus.log_string(&format!(
+                    "         data@DS:SI:  {}", ds_si.trim()
+                ));
+            }
+        }
+
         // Execute instructions
         for _ in 0..30_000 {
+            // Inject INT 08h (system timer IRQ0) at the BIOS standard ~18.2 Hz.
+            // Without this, the BDA tick counter at 0x046C never advances and
+            // programs that use INT 21h AH=2Ch or directly poll the BDA tick
+            // count to gate fades, animations, or delays wait forever.
+            // (Cpu::step has an equivalent injection for the test harness, but
+            //  the real emulator loop dispatches instructions inline and so
+            //  needs its own copy.)
+            if cpu.get_cpu_flag(CpuFlags::IF) {
+                let now = cpu.bus.start_time.elapsed().as_millis();
+                if now.wrapping_sub(cpu.last_timer_tick) >= 55 {
+                    cpu.last_timer_tick = now;
+                    let ivt = 0x08usize * 4;
+                    let handler_ip = cpu.bus.read_16(ivt);
+                    let handler_cs = cpu.bus.read_16(ivt + 2);
+                    if handler_cs != 0 || handler_ip != 0 {
+                        cpu.push(cpu.get_cpu_flags().bits());
+                        cpu.push(cpu.cs);
+                        cpu.push(cpu.ip);
+                        cpu.cs = handler_cs;
+                        cpu.ip = handler_ip;
+                        cpu.set_cpu_flag(CpuFlags::IF, false);
+                        cpu.set_cpu_flag(CpuFlags::TF, false);
+                        continue; // refetch from the new CS:IP
+                    }
+                }
+            }
+
             let prev_ip = cpu.ip;
 
             // --- HANDLE PENDING COMMANDS (Outside Interrupts) ---
