@@ -180,7 +180,7 @@ impl Cpu {
             eflags: 0,
             ip: 0x100,
             bus: Bus::new(root_path),
-            flags: CpuFlags::from_bits_truncate(0x0002), // Default Flag State, Bit 1 is always set
+            flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
             pending_command: None,
             fpu_stack: [F80::new(); 8],
@@ -1092,7 +1092,7 @@ impl Cpu {
         self.si = 0;
         self.di = 0;
 
-        self.flags = CpuFlags::from_bits_truncate(0x0002); // Reset Flags
+        self.flags = CpuFlags::from_bits_truncate(0x0202); // Reset Flags (IF=1)
         self.state = CpuState::Running;
 
         // No program is running yet: every paragraph of conventional memory

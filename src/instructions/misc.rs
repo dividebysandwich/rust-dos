@@ -103,8 +103,8 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
             let cf = cpu.get_cpu_flag(CpuFlags::CF);
             cpu.set_cpu_flag(CpuFlags::CF, !cf);
         }
-        Mnemonic::Sti => { /* Enable Interrupts */ },
-        Mnemonic::Cli => { /* Disable Interrupts */ },
+        Mnemonic::Sti => cpu.set_cpu_flag(CpuFlags::IF, true),
+        Mnemonic::Cli => cpu.set_cpu_flag(CpuFlags::IF, false),
         Mnemonic::Wait => { /* Wait for Interrupt */ },
         Mnemonic::Nop => { /* No Operation */ },
         
