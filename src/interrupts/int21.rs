@@ -167,6 +167,26 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
+        // AH = 01h: Read Character from Standard Input With Echo
+        // Blocks until a key is available. Returns AL = ASCII, echoes to STDOUT.
+        // If AL == 0 on return, the next call will return the scan code for
+        // extended keys (arrows/function keys). We simplify and just return
+        // the ASCII byte from our keyboard buffer entry.
+        0x01 => {
+            if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
+                let ascii = (key_code & 0xFF) as u8;
+                cpu.set_reg8(Register::AL, ascii);
+                if ascii != 0 {
+                    print_char(&mut cpu.bus, ascii);
+                }
+            } else {
+                // Block by rewinding IP so the BOP trap re-fires next cycle.
+                let phys_sp = ((cpu.ss as usize) * 16 + cpu.sp as usize) & 0xFFFFF;
+                let saved_ip = cpu.bus.read_16(phys_sp);
+                cpu.bus.write_16(phys_sp, saved_ip.wrapping_sub(4));
+            }
+        }
+
         // AH = 07h: Direct Console Input Without Echo
         0x07 => {
             if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
@@ -184,6 +204,29 @@ pub fn handle(cpu: &mut Cpu) {
                 // Substract 4 and make the CPU re-execute the trap instruction after returning.
                 cpu.bus
                     .write_16(phys_sp & 0xFFFFF, saved_ip.wrapping_sub(4));
+            }
+        }
+
+        // AH = 08h: Direct Console Input Without Echo (checks Ctrl-Break).
+        // Functionally identical to AH=07h for us; we don't model Ctrl-Break.
+        0x08 => {
+            if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
+                let ascii = (key_code & 0xFF) as u8;
+                cpu.set_reg8(Register::AL, ascii);
+            } else {
+                let phys_sp = ((cpu.ss as usize) * 16 + cpu.sp as usize) & 0xFFFFF;
+                let saved_ip = cpu.bus.read_16(phys_sp);
+                cpu.bus.write_16(phys_sp, saved_ip.wrapping_sub(4));
+            }
+        }
+
+        // AH = 0Bh: Check Standard Input Status
+        // Returns AL = 0xFF if a character is ready, 0x00 if not.
+        0x0B => {
+            if cpu.bus.keyboard_buffer.is_empty() {
+                cpu.set_reg8(Register::AL, 0x00);
+            } else {
+                cpu.set_reg8(Register::AL, 0xFF);
             }
         }
 
