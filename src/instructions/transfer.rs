@@ -167,17 +167,27 @@ fn xchg(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 fn push(cpu: &mut Cpu, instr: &Instruction) {
-    let val = if instr.op0_kind() == OpKind::Register {
-        cpu.get_reg16(instr.op0_register())
-    } else if instr.op0_kind() == OpKind::Immediate8 {
-        instr.immediate8() as i8 as i16 as u16
-    } else if instr.op0_kind() == OpKind::Immediate16 {
-        instr.immediate16()
-    } else if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        cpu.bus.read_16(addr)
-    } else {
-        0
+    let val = match instr.op0_kind() {
+        OpKind::Register => cpu.get_reg16(instr.op0_register()),
+        // `PUSH imm8` (opcode 6A) is encoded with the operand sign-extended
+        // to 16 bits on 8086/286+. iced reports this as Immediate8to16, not
+        // plain Immediate8 — missing this case made every `PUSH 0x0A`-style
+        // call push zero, crashing callees that read the arg (e.g. VGAME's
+        // itoa called with base=10 would see base=0 and DIV/0).
+        OpKind::Immediate8 => instr.immediate8() as i8 as i16 as u16,
+        OpKind::Immediate8to16 => instr.immediate8to16() as u16,
+        OpKind::Immediate16 => instr.immediate16(),
+        OpKind::Memory => {
+            let addr = calculate_addr(cpu, instr);
+            cpu.bus.read_16(addr)
+        }
+        _ => {
+            cpu.bus.log_string(&format!(
+                "[PUSH] unhandled op kind {:?} at {:04X}:{:04X}",
+                instr.op0_kind(), cpu.cs, cpu.ip.wrapping_sub(instr.len() as u16)
+            ));
+            0
+        }
     };
     cpu.push(val);
 }

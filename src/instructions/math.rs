@@ -357,19 +357,90 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
 
     if src == 0 {
         let ip = cpu.ip.wrapping_sub(instr.len() as u16);
+        // Dump 48 bytes before and 16 bytes at the DIV so we can see the
+        // code that set up the divisor register.
+        let phys = cpu.get_physical_addr(cpu.cs, ip);
+        let start = phys.saturating_sub(48);
+        let mut prev = String::new();
+        for i in start..phys {
+            if i < cpu.bus.ram.len() {
+                prev.push_str(&format!("{:02X} ", cpu.bus.ram[i]));
+            }
+        }
+        let mut here = String::new();
+        for i in 0..16 {
+            let a = phys.wrapping_add(i);
+            if a < cpu.bus.ram.len() {
+                here.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            }
+        }
         cpu.bus.log_string(&format!(
-            "[DIV/0] at {:04X}:{:04X} {:?} is_8bit={} AX={:04X} DX={:04X} BX={:04X} CX={:04X} SI={:04X} DI={:04X} DS={:04X}",
-            cpu.cs, ip, instr, is_8bit,
-            cpu.ax, cpu.dx, cpu.bx, cpu.cx, cpu.si, cpu.di, cpu.ds
+            "[DIV/0] at {:04X}:{:04X} is_8bit={} AX={:04X} DX={:04X} BX={:04X} CX={:04X} SI={:04X} DI={:04X} BP={:04X} DS={:04X} ES={:04X}",
+            cpu.cs, ip, is_8bit,
+            cpu.ax, cpu.dx, cpu.bx, cpu.cx, cpu.si, cpu.di, cpu.bp, cpu.ds, cpu.es
         ));
+        cpu.bus.log_string(&format!("[DIV/0]   prev 48 bytes: {}", prev.trim()));
+        cpu.bus.log_string(&format!("[DIV/0]   at CS:IP (16): {}", here.trim()));
+
+        // Dump 32 bytes of the current stack so we can see the caller's
+        // return address (and the preceding frame's return address). This
+        // shows who called ITOA with CX=0.
+        let ss_base = (cpu.ss as usize) * 16;
+        let sp = cpu.sp as usize;
+        let mut stack_bytes = String::new();
+        for i in 0..32 {
+            let a = ss_base + sp + i;
+            if a < cpu.bus.ram.len() {
+                stack_bytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            }
+        }
+        cpu.bus.log_string(&format!(
+            "[DIV/0]   stack@SS:SP ({:04X}:{:04X}): {}",
+            cpu.ss, cpu.sp, stack_bytes.trim()
+        ));
+
+        // Also dump the frame around BP in case this is a standard
+        // PUSH BP / MOV BP, SP callee — caller IP/CS typically at [BP+2]
+        // (near) or [BP+2..BP+4] (far).
+        let bp_addr = ss_base + cpu.bp as usize;
+        let mut frame_bytes = String::new();
+        for i in 0..16 {
+            let a = bp_addr + i;
+            if a < cpu.bus.ram.len() {
+                frame_bytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            }
+        }
+        cpu.bus.log_string(&format!(
+            "[DIV/0]   frame@SS:BP ({:04X}:{:04X}): {}",
+            cpu.ss, cpu.bp, frame_bytes.trim()
+        ));
+
+        // If the frame layout is PUSH BP / MOV BP, SP (so [BP] = saved BP,
+        // [BP+2] = return IP), dump code around the caller's return site.
+        // This reveals who called the trapping routine and what they set
+        // up before the CALL.
+        let caller_ip = cpu.bus.read_16(bp_addr + 2);
+        let caller_phys = cpu.get_physical_addr(cpu.cs, caller_ip);
+        let caller_start = caller_phys.saturating_sub(32);
+        let mut caller_bytes = String::new();
+        for i in caller_start..caller_phys + 16 {
+            if i < cpu.bus.ram.len() {
+                caller_bytes.push_str(&format!("{:02X} ", cpu.bus.ram[i]));
+            }
+        }
+        cpu.bus.log_string(&format!(
+            "[DIV/0]   caller @ {:04X}:{:04X} (ret site; -32..+16): {}",
+            cpu.cs, caller_ip, caller_bytes.trim()
+        ));
+
         interrupts::handle_interrupt(cpu, 0x00);
         return;
     }
 
     if is_8bit {
         let dividend = cpu.ax;
-        let divisor = src; 
-        
+        let divisor = src;
+
         let quotient = dividend / divisor;
         let remainder = dividend % divisor;
 
