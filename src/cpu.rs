@@ -1222,9 +1222,11 @@ impl Cpu {
         let reloc_table_offset = u16::from_le_bytes([bytes[24], bytes[25]]) as usize;
         let reloc_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
 
-        // Clear RAM (Only if starting fresh at 0x1000, probably shouldn't blindly wipe if nested)
+        // Clear Conventional Memory (Only if starting fresh at 0x1000, probably shouldn't blindly wipe if nested)
+        // Stop at 0xA0000 to preserve VGA VRAM, BIOS ROM signature, font tables, and
+        // Static Functionality Table set up in Bus::new().
         if segment.is_none() {
-            for i in 0x500..self.bus.ram.len() {
+            for i in 0x500..0xA0000 {
                 self.bus.ram[i] = 0;
             }
         }

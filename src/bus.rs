@@ -92,6 +92,16 @@ impl Bus {
         // 0x60 = 01100000
         bus.write_8(0x0487, 0x60);
 
+        // 0x0488: VGA Feature Switches & Misc (bits 3-0 = EGA config switches)
+        // 0x09 is a common VGA config (1001b).
+        bus.write_8(0x0488, 0x09);
+
+        // 0x0489: VGA Misc Flags
+        //   Bit 0 = cursor emulation enabled (standard on VGA)
+        //   Bits 6-5 = 01 (400 scan-line mode)
+        // 0x21 = 00100001
+        bus.write_8(0x0489, 0x21);
+
         // 0x048A: DCC (Display Combination Code)
         // 0x08 = VGA w/ Color
         bus.write_8(0x048A, 0x08);
