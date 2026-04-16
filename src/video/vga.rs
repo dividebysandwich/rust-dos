@@ -185,12 +185,6 @@ impl VgaCard {
         let misc = self.misc_output_reg;
         let is_color = (misc & 0x01) != 0;
 
-        // REMOVEME
-        println!(
-            "[VGA CHECK] Misc={:02X} Seq04={:02X} Gfx05={:02X}",
-            misc, seq_mem_mode, gfx_mode
-        );
-
         if is_color && is_256_color && chain4 {
             return Some(super::VideoMode::Graphics320x200);
         }

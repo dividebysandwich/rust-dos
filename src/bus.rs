@@ -382,19 +382,22 @@ impl Bus {
             _ => {
                 if self.vga.ports().contains(&port) {
                     self.vga.io_write(port, value);
-                    // Log manual VGA writes
-                    self.log_string(&format!(
-                        "[VGA-IO] Write Port {:04X} Value {:02X}",
-                        port, value
-                    ));
+                    // Suppress the per-write log for DAC ports (0x3C6..0x3C9):
+                    // a full 256-color palette update is 1024 writes, which
+                    // buries everything else in the trace. Still log the less
+                    // frequent mode / register writes.
+                    if !matches!(port, 0x3C6..=0x3C9) {
+                        self.log_string(&format!(
+                            "[VGA-IO] Write Port {:04X} Value {:02X}",
+                            port, value
+                        ));
+                    }
 
                     // Check if video mode changed
                     if let Some(new_mode) = self.vga.check_video_mode() {
                         if self.video_mode != new_mode && new_mode == VideoMode::Graphics320x200 {
                             self.log_string("[VGA] Switch to Graphics320x200 detected via IO");
                             self.video_mode = new_mode;
-                            // Clear VRAM?
-                            // memset(&mut self.vram_graphics, 0);
                         }
                     }
                 } else {

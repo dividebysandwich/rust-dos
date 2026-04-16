@@ -38,3 +38,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Gravis Ultrasound
 * 640x480x16
 * VESA modes
+
+## Keyboard shortcuts
+
+F12: Debug mode
+PrintScreen: Toggle screen recording to a video file

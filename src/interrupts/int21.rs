@@ -953,6 +953,22 @@ pub fn handle(cpu: &mut Cpu) {
             } else {
                 match cpu.bus.disk.read_file(handle, count) {
                     Ok(bytes) => {
+                        // Log a peek of what was read so we can tell whether
+                        // a program that's about to splat the buffer to DAC /
+                        // VRAM is actually seeing real file contents.
+                        let preview_len = bytes.len().min(8);
+                        let mut preview = String::new();
+                        for i in 0..preview_len {
+                            preview.push_str(&format!("{:02X} ", bytes[i]));
+                        }
+                        cpu.bus.log_string(&format!(
+                            "[DEBUG] Read Handle {:04X}: returned {} bytes (first {}: {})",
+                            handle,
+                            bytes.len(),
+                            preview_len,
+                            preview.trim()
+                        ));
+
                         for b in &bytes {
                             cpu.bus.write_8(buf_addr, *b);
                             buf_addr += 1;
