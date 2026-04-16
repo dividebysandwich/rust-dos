@@ -630,47 +630,45 @@ pub fn handle(cpu: &mut Cpu) {
                 0x20 | 0x22 | 0x23 | 0x24 => {}
                 0x30 => {
                     // Get Font Information
-                    // Returns pointer to font definition
-                    // BH = Font Pointer Type
-                    // 0 = Int 1Fh (8x8)
-                    // 1 = Int 43h (8x8 part 2)
-                    // 2 = 8x14
-                    // 3 = 8x8 (lo)
-                    // 4 = 8x8 (hi)
-                    // 5 = 9x14
-                    // 6 = 8x16 (VGA)
-                    // 7 = 9x16 (VGA)
-
-                    // We default to returning the 8x16 VGA font location for now
+                    // Returns:
+                    //   ES:BP -> pointer to the requested font (selected by BH)
+                    //   CX    = character height in scan lines (for that font)
+                    //   DL    = CURRENT character rows on screen - 1
+                    //           (NOT a property of the queried font — programs
+                    //           like Norton Commander use DL as the authoritative
+                    //           row count for the current mode. Returning the
+                    //           queried font's implied row count here would make
+                    //           NC draw its UI scaled to 50 rows even in 80x25.)
+                    //
+                    // BH = 0: Int 1Fh pointer (8x8)
+                    //      1: Int 43h pointer (8x8 first half)
+                    //      2: ROM 8x14 font
+                    //      3: ROM 8x8 font (lo)
+                    //      4: ROM 8x8 font (hi)
+                    //      5: ROM 9x14 alternate font
+                    //      6: ROM 8x16 font (VGA)
+                    //      7: ROM 9x16 alternate font (VGA)
                     let val_bh = cpu.get_reg8(Register::BH);
+                    let current_rows_minus_1 = cpu.bus.read_8(0x0484);
+                    cpu.set_reg8(Register::DL, current_rows_minus_1);
                     match val_bh {
                         0x00 | 0x01 | 0x03 | 0x04 => {
-                            // 8x8 Font
                             cpu.cx = 8;
-                            cpu.set_reg8(Register::DL, 49); // 400 / 8 = 50 rows (minus 1 = 49)
-                            // Point to some dummy area or the same font for now
                             cpu.es = 0xF000;
                             cpu.bp = 0xFA6E;
                         }
                         0x02 | 0x05 => {
-                            // 8x14 or 9x14 Font
                             cpu.cx = 14;
-                            cpu.set_reg8(Register::DL, 24); // 350 / 14 = 25 rows (minus 1 = 24)
                             cpu.es = 0xC000;
                             cpu.bp = 0x2000;
                         }
                         0x06 | 0x07 => {
-                            // 8x16 or 9x16 Font (VGA)
                             cpu.cx = 16;
-                            cpu.set_reg8(Register::DL, 24); // 400 / 16 = 25 rows (minus 1 = 24)
-                            // Standard location for 8x16 font: F000:FA6E (Relocated to C000:2000 to avoid overflow)
                             cpu.es = 0xC000;
                             cpu.bp = 0x2000;
                         }
                         _ => {
-                            // Default to 16
                             cpu.cx = 16;
-                            cpu.set_reg8(Register::DL, 24);
                             cpu.es = 0xC000;
                             cpu.bp = 0x2000;
                         }
