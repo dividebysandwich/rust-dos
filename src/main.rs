@@ -403,6 +403,20 @@ fn main() -> Result<(), String> {
                     "[TRIPWIRE] Entered IVT region CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} AX={:04X} BX={:04X} CX={:04X} DX={:04X}",
                     cpu.cs, cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.ax, cpu.bx, cpu.cx, cpu.dx
                 ));
+                // Dump 64 bytes of stack so we can see remaining return
+                // addresses (anything the RETF left unconsumed).
+                let ss_base = (cpu.ss as usize) * 16;
+                let mut sbytes = String::new();
+                for i in 0..64 {
+                    let a = ss_base + cpu.sp as usize + i;
+                    if a < cpu.bus.ram.len() {
+                        sbytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+                    }
+                }
+                cpu.bus.log_string(&format!(
+                    "[TRIPWIRE] stack@SS:SP ({:04X}:{:04X}): {}",
+                    cpu.ss, cpu.sp, sbytes.trim()
+                ));
                 let _ = cpu.bus.log_file.as_mut().unwrap().flush();
                 cpu.state = CpuState::RebootShell;
                 break;

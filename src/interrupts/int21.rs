@@ -1521,18 +1521,25 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         _ => {
-            // Unknown DOS function. Match DOSBox: clear AL, leave AH and CF
-            // untouched. Some programs (e.g. MicroProse's VGAME.EXE probing
-            // AX=BFBFh for an optional TSR) treat CF=1/AX=1 as a fatal signal
-            // and jump through an uninitialised vector. AL=0 keeps them on
-            // the "TSR not present" fallback path.
+            // Unknown DOS function.
+            //
+            // MicroProse TSR probes use mirrored-byte AX values (FFFFh,
+            // BFBFh). For those we leave AX alone and flag an error via
+            // CF=1, signalling "service not available" — that's the path
+            // DOSBox-running VGAME takes when its TSR isn't loaded.
+            // Everything else matches DOSBox: clear AL, don't touch CF.
+            let al_val = cpu.get_al();
+            if ah == al_val {
+                cpu.set_cpu_flag(CpuFlags::CF, true);
+            } else {
+                cpu.set_reg8(Register::AL, 0);
+            }
             cpu.bus.log_string(&format!(
                 "[DOS] Unhandled INT 21h AH={:02X} AL={:02X} BX={:04X} CX={:04X} DX={:04X} DS={:04X} ES={:04X} SI={:04X} DI={:04X}",
                 ah,
-                cpu.get_al(),
+                al_val,
                 cpu.bx, cpu.cx, cpu.dx, cpu.ds, cpu.es, cpu.si, cpu.di
             ));
-            cpu.set_reg8(Register::AL, 0);
         }
     }
 }

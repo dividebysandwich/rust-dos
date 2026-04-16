@@ -123,10 +123,37 @@ fn ret(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 fn retf(cpu: &mut Cpu, instr: &Instruction) {
+    let caller_cs = cpu.cs;
+    let caller_ip = cpu.ip.wrapping_sub(instr.len() as u16);
     cpu.ip = cpu.pop();
     cpu.cs = cpu.pop();
     if instr.op0_kind() == OpKind::Immediate16 {
         cpu.sp = cpu.sp.wrapping_add(instr.immediate16());
+    }
+    if cpu.cs == 0 && cpu.ip < 0x100 {
+        cpu.bus.log_string(&format!(
+            "[RETF-BAD] from {:04X}:{:04X} -> {:04X}:{:04X} SS:SP={:04X}:{:04X}",
+            caller_cs, caller_ip, cpu.cs, cpu.ip, cpu.ss, cpu.sp
+        ));
+        // Dump the function containing the RETF: 80 bytes before and 16 at
+        // the RETF site so we can see the prologue, loop body, epilogue.
+        let phys = cpu.get_physical_addr(caller_cs, caller_ip);
+        let start = phys.saturating_sub(80);
+        let mut pre = String::new();
+        for i in start..phys {
+            if i < cpu.bus.ram.len() {
+                pre.push_str(&format!("{:02X} ", cpu.bus.ram[i]));
+            }
+        }
+        let mut here = String::new();
+        for i in 0..16 {
+            let a = phys.wrapping_add(i);
+            if a < cpu.bus.ram.len() {
+                here.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            }
+        }
+        cpu.bus.log_string(&format!("[RETF-BAD] fn -80 bytes: {}", pre.trim()));
+        cpu.bus.log_string(&format!("[RETF-BAD] fn @RETF: {}", here.trim()));
     }
 }
 
