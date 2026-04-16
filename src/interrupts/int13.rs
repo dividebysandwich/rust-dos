@@ -13,66 +13,88 @@
 use crate::cpu::{Cpu, CpuFlags};
 use iced_x86::Register;
 
+/// A drive number is considered valid if it matches one of the ranges a real
+/// BIOS would respond to: 0x00..0x03 for floppies (A: through D:) or
+/// 0x80..0x83 for hard disks. Anything outside those ranges must produce an
+/// error — some copy-protection / disk-swap programs (e.g. F117's DSWAP.EXE)
+/// explicitly probe with DL=0xFF to detect where the BIOS rejects them, and
+/// if we lie and report success they end up constructing garbage drive paths
+/// like "@:\vgame.exe" from the bogus DL.
+fn is_valid_drive(dl: u8) -> bool {
+    dl < 0x04 || (0x80..=0x83).contains(&dl)
+}
+
+/// Standard INT 13h error return: CF=1, AH = status code.
+/// Status 0x01 = "bad command" and covers most of the failure paths we care
+/// about. Status 0xAA = "drive not ready" is more appropriate when the drive
+/// number is invalid (so callers know to try a different drive).
+fn return_error(cpu: &mut Cpu, status: u8) {
+    cpu.set_reg8(Register::AH, status);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+}
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     let al = cpu.get_al();
     let dl = cpu.get_dl();
 
     match ah {
-        // AH=00h Reset Disk System — always succeed.
+        // AH=00h Reset Disk System — always succeed, even for invalid drives
+        // (real BIOS resets the whole controller, not a specific drive).
         0x00 => {
-            cpu.set_reg8(Register::AH, 0); // status = 0 (no error)
+            cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
         // AH=01h Get Status of Last Operation.
-        //   Returns AL = last status byte (0 = success).
         0x01 => {
             cpu.set_reg8(Register::AL, 0);
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
-        // AH=02h Read Sector(s).
-        //   AL = count of sectors
-        //   CH = track, CL = sector (bits 0-5) + high track bits (6-7)
-        //   DH = head, DL = drive
-        //   ES:BX -> buffer
-        // We report success and do NOT modify the buffer — enough to pass
-        // simple "is the disk present" checks but not content-verifying
-        // copy protection.
+        // AH=02h Read Sector(s). We don't actually back any media, so we
+        // report success for valid drive numbers with an unchanged buffer
+        // (enough for presence checks), and an error for everything else.
         0x02 => {
             cpu.bus.log_string(&format!(
                 "[BIOS] INT 13h Read Sectors: DL={:02X} count={} (stubbed)",
                 dl, al
             ));
+            if !is_valid_drive(dl) {
+                return_error(cpu, 0xAA); // drive not ready
+                return;
+            }
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
-        // AH=03h Write Sector(s). Silently ignore — we don't back any media.
+        // AH=03h Write Sector(s). Silently ignore for valid drives.
         0x03 => {
+            if !is_valid_drive(dl) {
+                return_error(cpu, 0xAA);
+                return;
+            }
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
-        // AH=04h Verify Sector(s). Always succeed.
+        // AH=04h Verify Sector(s).
         0x04 => {
+            if !is_valid_drive(dl) {
+                return_error(cpu, 0xAA);
+                return;
+            }
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
         // AH=08h Get Drive Parameters.
-        //   Returns:
-        //     CH = low 8 bits of max cylinder
-        //     CL = bits 0-5 max sector, bits 6-7 high 2 bits of max cyl
-        //     DH = max head
-        //     DL = number of drives of this type
-        //     BL = drive type (floppy: 01=360K, 02=1.2M, 03=720K, 04=1.44M)
-        //     ES:DI -> Disk Parameter Table (we leave it alone)
-        // Report a standard 1.44M floppy geometry (C:H:S = 79:1:18) for
-        // floppies, or a plausible hard disk (C:H:S = 1023:15:63) for HDDs.
         0x08 => {
+            if !is_valid_drive(dl) {
+                return_error(cpu, 0x01);
+                return;
+            }
             if dl < 0x80 {
                 // Floppy: 1.44M (2 heads, 18 sectors, 80 cylinders)
                 cpu.set_reg8(Register::CH, 79);
@@ -83,9 +105,9 @@ pub fn handle(cpu: &mut Cpu) {
             } else {
                 // Hard disk
                 cpu.set_reg8(Register::CH, 0xFF);
-                cpu.set_reg8(Register::CL, 0x3F | 0xC0); // max sec 63, top cyl bits
+                cpu.set_reg8(Register::CL, 0x3F | 0xC0);
                 cpu.set_reg8(Register::DH, 15);
-                cpu.set_reg8(Register::DL, 1); // one HDD
+                cpu.set_reg8(Register::DL, 1);
                 cpu.set_reg8(Register::BL, 0);
             }
             cpu.set_reg8(Register::AH, 0);
@@ -93,16 +115,26 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH=15h Get Disk Type.
-        //   Returns AH = 01 for floppy without change-line, 02 for floppy with
-        //   change-line, 03 for hard disk, 00 for no such drive.
+        //   AH = 00 for no drive, 01 for floppy w/o change-line,
+        //   02 for floppy w/ change-line, 03 for hard disk.
         0x15 => {
-            let kind = if dl < 0x80 { 0x02 } else { 0x03 };
+            let kind = if !is_valid_drive(dl) {
+                0
+            } else if dl < 0x80 {
+                0x02
+            } else {
+                0x03
+            };
             cpu.set_reg8(Register::AH, kind);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
-        // AH=16h Detect Disk Change. Returns AH=0 (no change).
+        // AH=16h Detect Disk Change. Returns AH=0 (no change) for valid drives.
         0x16 => {
+            if !is_valid_drive(dl) {
+                return_error(cpu, 0x01);
+                return;
+            }
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
@@ -112,8 +144,7 @@ pub fn handle(cpu: &mut Cpu) {
                 "[BIOS] Unhandled INT 13h AH={:02X} AL={:02X} DL={:02X}",
                 ah, al, dl
             ));
-            cpu.set_cpu_flag(CpuFlags::CF, true);
-            cpu.set_reg8(Register::AH, 0x01); // invalid function
+            return_error(cpu, 0x01);
         }
     }
 }
