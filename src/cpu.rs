@@ -1136,6 +1136,87 @@ impl Cpu {
         }
     }
 
+    /// INT 21h AH=4Bh AL=03h — Load Overlay.
+    ///
+    /// Loads an EXE file's image (minus the MZ header) into a caller-specified
+    /// memory block and applies relocations using a caller-supplied relocation
+    /// factor. Does NOT create a PSP, does NOT change CS:IP or SS:SP, and does
+    /// NOT start the overlay running — control returns to the caller, which
+    /// will typically `CALL` or `JMP` into the overlay. Accepts .COM files too
+    /// (no header, no relocations — just a raw copy into the overlay segment).
+    ///
+    /// `load_segment` = the segment at which the image bytes begin.
+    /// `reloc_factor` = value added to every relocated 16-bit target.
+    pub fn load_overlay(&mut self, filename: &str, load_segment: u16, reloc_factor: u16) -> bool {
+        let resolved = self.bus.disk.resolve_path(filename);
+        let bytes = match resolved.and_then(|p| std::fs::read(p).ok()) {
+            Some(b) => b,
+            None => {
+                self.bus
+                    .log_string(&format!("[DOS] Overlay: cannot read '{}'", filename));
+                return false;
+            }
+        };
+
+        self.bus.log_string(&format!(
+            "[DOS] Overlay load '{}' ({} bytes) -> seg {:04X} reloc_factor {:04X}",
+            filename,
+            bytes.len(),
+            load_segment,
+            reloc_factor
+        ));
+
+        // COM-style overlay (no MZ header, no relocations)
+        if bytes.len() < 0x1C || &bytes[0..2] != b"MZ" {
+            let phys = self.get_physical_addr(load_segment, 0);
+            for (i, &b) in bytes.iter().enumerate() {
+                if phys + i < self.bus.ram.len() {
+                    self.bus.ram[phys + i] = b;
+                }
+            }
+            return true;
+        }
+
+        // EXE overlay
+        let header_paras = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        let header_size = header_paras * 16;
+        if header_size > bytes.len() {
+            self.bus
+                .log_string("[DOS] Overlay: header larger than file");
+            return false;
+        }
+        let reloc_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+        let reloc_offset = u16::from_le_bytes([bytes[24], bytes[25]]) as usize;
+
+        // Copy image bytes directly at load_segment:0000 — no PSP, no offset.
+        let image_phys = self.get_physical_addr(load_segment, 0);
+        let image_data = &bytes[header_size..];
+        for (i, &b) in image_data.iter().enumerate() {
+            if image_phys + i < self.bus.ram.len() {
+                self.bus.ram[image_phys + i] = b;
+            }
+        }
+
+        // Apply relocations: each entry is (offset, segment); the 16-bit word
+        // at (load_segment + segment):offset gets `reloc_factor` added to it.
+        if reloc_count > 0 && reloc_offset + reloc_count * 4 <= bytes.len() {
+            for i in 0..reloc_count {
+                let e = reloc_offset + i * 4;
+                let rel_offset = u16::from_le_bytes([bytes[e], bytes[e + 1]]);
+                let rel_seg = u16::from_le_bytes([bytes[e + 2], bytes[e + 3]]);
+
+                let target_seg = load_segment.wrapping_add(rel_seg);
+                let phys = self.get_physical_addr(target_seg, rel_offset);
+                if phys + 2 <= self.bus.ram.len() {
+                    let cur = self.bus.read_16(phys);
+                    self.bus.write_16(phys, cur.wrapping_add(reloc_factor));
+                }
+            }
+        }
+
+        true
+    }
+
     // COM loader
     fn load_com(&mut self, bytes: &[u8], segment: Option<u16>) -> bool {
         let load_segment = segment.unwrap_or(0x1000);

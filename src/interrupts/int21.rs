@@ -630,8 +630,32 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.set_reg16(Register::AX, 0x02); // File not found
                 }
+            } else if mode == 0x03 {
+                // AL=03h: Load Overlay. Loads an EXE (or raw binary) into
+                // caller-provided memory and applies relocations, without
+                // changing CS:IP or starting execution. Used by installers and
+                // games that page-in optional modules at runtime.
+                //
+                // Parameter block pointed to by ES:BX:
+                //   +0 (word): load segment for the overlay image
+                //   +2 (word): relocation factor added to relocation targets
+                let param_block = cpu.bx;
+                let param_seg = cpu.es;
+                let param_phys = cpu.get_physical_addr(param_seg, param_block);
+                let overlay_seg = cpu.bus.read_16(param_phys);
+                let reloc_factor = cpu.bus.read_16(param_phys + 2);
+
+                if cpu.load_overlay(&filename, overlay_seg, reloc_factor) {
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                } else {
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    cpu.set_reg16(Register::AX, 0x02); // File not found
+                }
             } else {
-                cpu.bus.log_string("[DOS] EXEC Unsupported Mode");
+                cpu.bus.log_string(&format!(
+                    "[DOS] EXEC Unsupported Mode AL={:02X}",
+                    mode
+                ));
                 cpu.set_cpu_flag(CpuFlags::CF, true);
                 cpu.set_reg16(Register::AX, 0x01); // Invalid function
             }
