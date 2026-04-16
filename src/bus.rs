@@ -388,6 +388,17 @@ impl Bus {
 
             // Dispatch to Devices
             // TODO: Use a proper map lookup
+            // Ports we intentionally ignore — writes are harmless but other-
+            // wise spam the log. Programs blindly touch these as leftovers
+            // from CGA/EGA-era code even when they're really talking to VGA.
+            0x3D8 | 0x3D9 => {
+                // CGA Mode Control / Color Select. Real VGA ignores writes
+                // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
+            }
+            0xA0 | 0xA1 => {
+                // Slave PIC — we don't model cascaded IRQs.
+            }
+
             _ => {
                 if self.vga.ports().contains(&port) {
                     self.vga.io_write(port, value);

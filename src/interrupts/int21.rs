@@ -365,6 +365,29 @@ pub fn handle(cpu: &mut Cpu) {
             let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, name_addr);
 
+            // --- Stub out copy-protection / disk-swap helpers ---
+            // MicroProse games (F-117, F-19, Gunship, Covert Action) call a
+            // tiny companion DSWAP.EXE to verify the installation disk via
+            // INT 13h sector reads. Since our emulator doesn't back those
+            // reads with a real disk image, the verification always fails
+            // and the game hangs on an "insert disk" prompt. The game will
+            // happily proceed to load vgame.exe (or whatever overlay) on its
+            // own afterwards if DSWAP returns success, so short-circuit the
+            // EXEC with a synthetic exit code 0 without actually loading
+            // the program.
+            let upper = filename.to_ascii_uppercase();
+            let short = upper.rsplit(&['\\', '/', ':'][..]).next().unwrap_or("");
+            if mode == 0x00 && short == "DSWAP.EXE" {
+                cpu.bus.log_string(&format!(
+                    "[DOS] EXEC: short-circuiting DSWAP.EXE ({}), faking success",
+                    filename
+                ));
+                cpu.last_child_exit = 0x0000;
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+                cpu.set_reg16(Register::AX, 0x0000);
+                return;
+            }
+
             cpu.bus.log_string(&format!(
                 "[DOS] EXEC AH=4B Name='{}' AL={:02X}",
                 filename, mode
