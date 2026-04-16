@@ -356,6 +356,12 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
     let src = get_op0_val(cpu, instr, is_8bit).0;
 
     if src == 0 {
+        let ip = cpu.ip.wrapping_sub(instr.len() as u16);
+        cpu.bus.log_string(&format!(
+            "[DIV/0] at {:04X}:{:04X} {:?} is_8bit={} AX={:04X} DX={:04X} BX={:04X} CX={:04X} SI={:04X} DI={:04X} DS={:04X}",
+            cpu.cs, ip, instr, is_8bit,
+            cpu.ax, cpu.dx, cpu.bx, cpu.cx, cpu.si, cpu.di, cpu.ds
+        ));
         interrupts::handle_interrupt(cpu, 0x00);
         return;
     }
@@ -401,6 +407,12 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
     let src = get_op0_val(cpu, instr, is_8bit).0;
 
     if src == 0 {
+        let ip = cpu.ip.wrapping_sub(instr.len() as u16);
+        cpu.bus.log_string(&format!(
+            "[IDIV/0] at {:04X}:{:04X} {:?} is_8bit={} AX={:04X} DX={:04X} BX={:04X} CX={:04X} SI={:04X} DI={:04X} DS={:04X}",
+            cpu.cs, ip, instr, is_8bit,
+            cpu.ax, cpu.dx, cpu.bx, cpu.cx, cpu.si, cpu.di, cpu.ds
+        ));
         interrupts::handle_interrupt(cpu, 0x00);
         return;
     }

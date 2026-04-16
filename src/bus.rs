@@ -42,6 +42,13 @@ pub struct Bus {
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
     pub pit0_divisor: u16,
     pub pit0_write_msb: bool,
+    /// Toggle for alternating LSB/MSB when reading port 0x40 in 2-byte mode.
+    pub pit0_read_msb: bool,
+    /// Value latched into the read buffer by a `latch counter` command on
+    /// port 0x43. When `pit0_latched_active` is true, reads of port 0x40
+    /// return this value instead of the live count until both bytes are read.
+    pub pit0_latched: u16,
+    pub pit0_latched_active: bool,
     pub pic_mask: u8,
     pub audio_phase: f32, // Track wave position to prevent clicking
     pub dta_segment: u16,
@@ -77,6 +84,9 @@ impl Bus {
             pit_write_msb: false,
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
+            pit0_read_msb: false,
+            pit0_latched: 0,
+            pit0_latched_active: false,
             pic_mask: 0x00,
             audio_phase: 0.0,
             log_file: None,
@@ -383,11 +393,18 @@ impl Bus {
                 // 00 = Channel 0, 01 = Channel 1, 10 = Channel 2
                 let channel = (value >> 6) & 0x03;
 
-                // If the command is for the Counter (not Read-Back), reset the flip-flop.
-                // We check Access bits (5-4) to ensure it's not a Latch command (00).
+                // Access bits (5-4): 00 = latch count value command.
                 let access = (value >> 4) & 0x03;
 
-                if access != 0 {
+                if access == 0 {
+                    // Latch counter command: freeze the current count into
+                    // the read buffer so LSB/MSB reads stay consistent.
+                    if channel == 0 {
+                        self.pit0_latched = self.pit0_current_count();
+                        self.pit0_latched_active = true;
+                        self.pit0_read_msb = false;
+                    }
+                } else {
                     match channel {
                         0 => self.pit0_write_msb = false, // Reset Channel 0 LSB/MSB
                         2 => self.pit_write_msb = false,  // Reset Channel 2 LSB/MSB
@@ -450,9 +467,50 @@ impl Bus {
         }
     }
 
+    /// Compute the current PIT channel 0 count (0..=divisor-1). Real hardware
+    /// counts DOWN from `divisor` toward 0 at 1.193182 MHz, then reloads.
+    /// Programs time short intervals by latching two reads and subtracting —
+    /// if we always returned 0xFF, the two reads would be identical, elapsed
+    /// would evaluate to zero, and the next `DIV elapsed` would crash.
+    fn pit0_current_count(&self) -> u16 {
+        let divisor = if self.pit0_divisor == 0 {
+            0x10000u32
+        } else {
+            self.pit0_divisor as u32
+        };
+        let micros = self.start_time.elapsed().as_micros() as u64;
+        // ticks = micros * 1_193_182 / 1_000_000, done without overflow.
+        let ticks = micros.wrapping_mul(1_193_182) / 1_000_000;
+        let rem = (ticks % divisor as u64) as u32;
+        ((divisor - 1 - rem) & 0xFFFF) as u16
+    }
+
     // Read from an I/O Port
     pub fn io_read(&mut self, port: u16) -> u8 {
         match port {
+            // Port 0x40 — PIT channel 0 (system timer) data. The counter
+            // decrements at 1.193 MHz. Programs that need sub-tick timing
+            // (MicroProse's VGAME computes 1/elapsed_time, which faults if
+            // elapsed == 0) issue a latch command and read LSB then MSB.
+            0x40 => {
+                let val = if self.pit0_latched_active {
+                    self.pit0_latched
+                } else {
+                    self.pit0_current_count()
+                };
+                let byte = if !self.pit0_read_msb {
+                    self.pit0_read_msb = true;
+                    (val & 0xFF) as u8
+                } else {
+                    self.pit0_read_msb = false;
+                    if self.pit0_latched_active {
+                        self.pit0_latched_active = false;
+                    }
+                    (val >> 8) as u8
+                };
+                byte
+            }
+
             // Port 0x60 — Keyboard data port. Real hardware latches the
             // last-received scan code here; programs either read this from
             // their INT 09h ISR after IRQ1 fires, or poll it directly.
