@@ -472,17 +472,13 @@ impl Device for VgaCard {
                 // println!("[VGA] Read Attr {:02X} -> {:02X}", self.attribute_index, val);
                 val
             }
-            0x3CC => {
-                println!("[VGA] Read Misc Output: {:02X}", self.misc_output_reg);
-                self.misc_output_reg
-            }
+            0x3CC => self.misc_output_reg,
             0x3C5 => {
                 let val = if (self.sequencer_index as usize) < self.sequencer_regs.len() {
                     self.sequencer_regs[self.sequencer_index as usize]
                 } else {
                     0
                 };
-                println!("[VGA] Read Seq {:02X} -> {:02X}", self.sequencer_index, val);
                 val
             }
             0x3CF => {
@@ -491,7 +487,6 @@ impl Device for VgaCard {
                 } else {
                     0
                 };
-                println!("[VGA] Read Gfx {:02X} -> {:02X}", self.graphics_index, val);
                 val
             }
             0x3D5 => {
@@ -500,7 +495,6 @@ impl Device for VgaCard {
                 } else {
                     0
                 };
-                println!("[VGA] Read CRTC {:02X} -> {:02X}", self.crtc_index, val);
                 val
             }
             0x3C6 => self.dac_mask,
@@ -520,10 +514,7 @@ impl Device for VgaCard {
                 }
                 val
             }
-            _ => {
-                println!("[VGA] Read Unhandled {:04X}", port);
-                0xFF
-            }
+            _ => 0xFF,
         }
     }
 
@@ -546,7 +537,6 @@ impl Device for VgaCard {
             }
             0x3C2 => {
                 self.misc_output_reg = value;
-                println!("[VGA] Write Misc Output: {:02X}", value);
             }
             0x3C4 => self.sequencer_index = value,
             0x3C5 => {
@@ -586,7 +576,6 @@ impl Device for VgaCard {
             0x3D5 => {
                 if (self.crtc_index as usize) < self.crtc_regs.len() {
                     self.crtc_regs[self.crtc_index as usize] = value;
-                    println!("[VGA] CRTC Reg {:02X} = {:02X}", self.crtc_index, value);
                 }
             }
             0x3C6 => {

@@ -366,28 +366,51 @@ pub fn handle(cpu: &mut Cpu) {
             let filename = read_asciiz_string(&cpu.bus, name_addr);
 
             // --- Stub out copy-protection / disk-swap helpers ---
-            // MicroProse games (F-117, F-19, Gunship, Covert Action) call a
-            // tiny companion DSWAP.EXE to verify the installation disk via
-            // INT 13h sector reads. Since our emulator doesn't back those
-            // reads with a real disk image, the verification always fails
-            // and the game hangs on an "insert disk" prompt.
+            // MicroProse games (F-117, F-19, Gunship, Covert Action) ship two
+            // runtime helpers that we can't satisfy without the original
+            // install disks:
             //
-            // Short-circuit the EXEC with an exit code of 1 (the code real
-            // DSWAP returns when the disk IS present). F117.COM then tests
-            // AL != 0 to decide whether to continue to the next EXEC (e.g.
-            // START.EXE or VGAME.EXE) or bail out; returning 0 here made
-            // it take the cleanup-and-quit branch.
+            //   DSWAP.EXE  — verifies the install disk via INT 13h sector
+            //                reads. Without a real disk image the check
+            //                always fails and hangs on "insert disk".
+            //
+            //   PLAYER.EXE — animates title / cutscene screens. Its stream
+            //                decoder does a runtime integrity check on a
+            //                buffer that's supposed to be filled by the
+            //                copy-protection path; when the data is zero
+            //                (our case) it loops forever looking for its
+            //                terminator word.
+            //
+            // Both are non-essential for gameplay. Short-circuit them with
+            // the exit code the parent expects. F117.COM tests `AL != 0` after
+            // DSWAP, so we return 1 there; it doesn't inspect PLAYER's exit
+            // code at all so 0 is fine.
             let upper = filename.to_ascii_uppercase();
             let short = upper.rsplit(&['\\', '/', ':'][..]).next().unwrap_or("");
-            if mode == 0x00 && short == "DSWAP.EXE" {
-                cpu.bus.log_string(&format!(
-                    "[DOS] EXEC: short-circuiting DSWAP.EXE ({}), faking success (exit=01)",
-                    filename
-                ));
-                cpu.last_child_exit = 0x0001;
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-                cpu.set_reg16(Register::AX, 0x0000);
-                return;
+            if mode == 0x00 {
+                match short {
+                    "DSWAP.EXE" => {
+                        cpu.bus.log_string(&format!(
+                            "[DOS] EXEC: short-circuiting DSWAP.EXE ({}), exit=01",
+                            filename
+                        ));
+                        cpu.last_child_exit = 0x0001;
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                        cpu.set_reg16(Register::AX, 0x0000);
+                        return;
+                    }
+                    "PLAYER.EXE" => {
+                        cpu.bus.log_string(&format!(
+                            "[DOS] EXEC: short-circuiting PLAYER.EXE ({}), exit=00",
+                            filename
+                        ));
+                        cpu.last_child_exit = 0x0000;
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                        cpu.set_reg16(Register::AX, 0x0000);
+                        return;
+                    }
+                    _ => {}
+                }
             }
 
             cpu.bus.log_string(&format!(
@@ -1498,8 +1521,19 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         _ => {
-            cpu.bus
-                .log_string(&format!("[DOS] Unhandled INT 21h AH={:02X}", ah));
+            // Unknown DOS function. Return the standard "invalid function"
+            // error (CF=1, AX=1) so well-behaved programs know to take their
+            // fallback path instead of reading stale/uninitialised registers
+            // as if the call had succeeded. Log register state so we can
+            // recognise custom / vendor extensions that show up in the wild.
+            cpu.bus.log_string(&format!(
+                "[DOS] Unhandled INT 21h AH={:02X} AL={:02X} BX={:04X} CX={:04X} DX={:04X} DS={:04X} ES={:04X} SI={:04X} DI={:04X}",
+                ah,
+                cpu.get_al(),
+                cpu.bx, cpu.cx, cpu.dx, cpu.ds, cpu.es, cpu.si, cpu.di
+            ));
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+            cpu.set_reg16(Register::AX, 0x0001);
         }
     }
 }

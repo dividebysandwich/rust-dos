@@ -1219,6 +1219,7 @@ impl Cpu {
 
     // COM loader
     fn load_com(&mut self, bytes: &[u8], segment: Option<u16>) -> bool {
+        let is_nested = segment.is_some();
         let load_segment = segment.unwrap_or(0x1000);
         let start_offset = 0x100; // COM files always start at 100h
 
@@ -1230,8 +1231,16 @@ impl Cpu {
             }
         }
 
-        // Re-install the HLE Interrupt Vectors
-        self.install_bios_traps();
+        // Re-install the HLE Interrupt Vectors — but ONLY for the top-level
+        // load. A nested EXEC (segment.is_some()) must preserve the parent's
+        // IVT: any TSR / overlay that installed an INT 21h (or other) hook
+        // expects its handler to remain live while the child runs. Clobbering
+        // the IVT here was breaking F-117's VGAME.EXE, which calls
+        // `INT 21h AX=BFBFh` expecting an MPS-specific handler MISC.EXE had
+        // registered during the boot-time overlay load.
+        if !is_nested {
+            self.install_bios_traps();
+        }
 
         // Load the file data at offset 0x100
         let phys_code_start = self.get_physical_addr(load_segment, start_offset);
@@ -1339,8 +1348,12 @@ impl Cpu {
             }
         }
 
-        // Re-install the HLE Interrupt Vectors
-        self.install_bios_traps();
+        // Re-install the HLE Interrupt Vectors — only for the top-level load.
+        // See the same guard in load_com for the reason: nested EXECs must
+        // preserve the parent's IVT so TSR / overlay-installed hooks survive.
+        if segment.is_none() {
+            self.install_bios_traps();
+        }
 
         let load_segment: u16 = segment.unwrap_or(0x1000);
         let relocation_base_segment = load_segment + 0x10;

@@ -208,29 +208,34 @@ fn main() -> Result<(), String> {
             if n % 120 == 0 && cpu.cs < 0xF000 {
                 let phys_code = cpu.get_physical_addr(cpu.cs, cpu.ip);
                 let mut code_bytes = String::new();
-                for i in 0..16 {
+                for i in 0..24 {
                     code_bytes.push_str(&format!("{:02X} ", cpu.bus.read_8(phys_code + i)));
                 }
-                // Also dump 12 bytes from DS:SI (likely palette-source buffer
-                // in programs stuck in a fade loop) and 16 bytes from
-                // BDA tick counter so we can see whether time is progressing.
                 let phys_dssi = cpu.get_physical_addr(cpu.ds, cpu.si);
                 let mut ds_si = String::new();
                 for i in 0..12 {
                     ds_si.push_str(&format!("{:02X} ", cpu.bus.read_8(phys_dssi + i)));
                 }
+                let phys_esdi = cpu.get_physical_addr(cpu.es, cpu.di);
+                let mut es_di = String::new();
+                for i in 0..12 {
+                    es_di.push_str(&format!("{:02X} ", cpu.bus.read_8(phys_esdi + i)));
+                }
                 let ticks_lo = cpu.bus.read_16(0x046C);
                 let ticks_hi = cpu.bus.read_16(0x046E);
                 cpu.bus.log_string(&format!(
-                    "[SAMPLE] CS:IP={:04X}:{:04X} DS={:04X} SS={:04X} AX={:04X} BX={:04X} CX={:04X} DX={:04X} SI={:04X} BP={:04X} SP={:04X} ticks={:04X}{:04X}",
-                    cpu.cs, cpu.ip, cpu.ds, cpu.ss, cpu.ax, cpu.bx, cpu.cx, cpu.dx, cpu.si, cpu.bp, cpu.sp,
-                    ticks_hi, ticks_lo
+                    "[SAMPLE] CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS={:04X} AX={:04X} BX={:04X} CX={:04X} DX={:04X} SI={:04X} DI={:04X} BP={:04X} SP={:04X} flags={:04X} ticks={:04X}{:04X} pic_mask={:02X}",
+                    cpu.cs, cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.ax, cpu.bx, cpu.cx, cpu.dx, cpu.si, cpu.di, cpu.bp, cpu.sp,
+                    cpu.get_cpu_flags().bits(), ticks_hi, ticks_lo, cpu.bus.pic_mask
                 ));
                 cpu.bus.log_string(&format!(
                     "         code@CS:IP:  {}", code_bytes.trim()
                 ));
                 cpu.bus.log_string(&format!(
                     "         data@DS:SI:  {}", ds_si.trim()
+                ));
+                cpu.bus.log_string(&format!(
+                    "         data@ES:DI:  {}", es_di.trim()
                 ));
             }
         }
