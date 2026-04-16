@@ -245,6 +245,32 @@ fn main() -> Result<(), String> {
             (cpu.bus.pic_mask & 0x01) == 0 && now_ms.wrapping_sub(cpu.last_timer_tick) >= 55;
         let mut timer_fired = false;
 
+        // Hoist the iced_x86 decoder and instruction buffer OUT of the inner
+        // loop. Creating a fresh `Decoder::with_ip` every instruction did not
+        // allocate heap, but it re-initialized a ~256-byte struct 30 000 times
+        // per frame, and re-creating the `Instruction` via `decode()` by
+        // value forced a stack copy each iteration. Reusing a single decoder
+        // and calling `decode_out(&mut instr)` avoids both.
+        //
+        // SAFETY: we build an overlapping read-only view of `cpu.bus.ram`
+        // that outlives the subsequent mutable borrows (execute_instruction
+        // can write to ram via bus.write_8). This is sound in our setup
+        // because:
+        //   1. `cpu.bus.ram` is a `Vec<u8>` of fixed 1 MiB capacity that is
+        //      never resized after `Bus::new()`, so the pointer stays valid.
+        //   2. Emulation is single-threaded, so no concurrent access occurs.
+        //   3. Reads go through the decoder's slice; writes go through
+        //      `bus.write_8`. The operations are strictly sequential inside
+        //      this loop, never overlapping, and `u8` has no alignment or
+        //      niche requirements that would be violated by aliasing.
+        //   4. Self-modifying code (LZEXE decompressors, etc.) works because
+        //      the decoder reads the ram bytes *at decode time* — writes
+        //      performed on prior iterations are visible on the next decode.
+        let (ram_ptr, ram_len) = (cpu.bus.ram.as_ptr(), cpu.bus.ram.len());
+        let ram_slice: &'static [u8] = unsafe { std::slice::from_raw_parts(ram_ptr, ram_len) };
+        let mut decoder = Decoder::with_ip(16, ram_slice, 0, DecoderOptions::NONE);
+        let mut instr = iced_x86::Instruction::default();
+
         // Execute instructions
         for _ in 0..30_000 {
             // Deliver pending hardware IRQs at the start of each instruction
@@ -359,24 +385,16 @@ fn main() -> Result<(), String> {
                 break;
             }
 
-            // Current instruction
+            // Current instruction. Direct indexing into ram — no VGA range
+            // check needed for code fetch, code segments are always below
+            // 0xA0000 in our loaded programs.
             let phys_ip = cpu.get_physical_addr(cpu.cs, cpu.ip);
-            // Look ahead one instruction
-            let b0 = cpu.bus.read_8(phys_ip);
-            let b1 = cpu.bus.read_8(cpu.get_physical_addr(cpu.cs, cpu.ip + 1));
-            let bytes = &cpu.bus.ram[phys_ip..];
-
-            // If we are about to execute 00 00, stop immediately.
-            if bytes.len() >= 2 && bytes[0] == 0x00 && bytes[1] == 0x00 {
-                // panic!(
-                //     "[CRITICAL] CPU hit 00 00 (Empty RAM) at {:04X}:{:04X}",
-                //     cpu.cs, cpu.ip
-                // );
-            }
+            let b0 = ram_slice[phys_ip];
+            let b1 = ram_slice[phys_ip + 1];
 
             // Check for "BOP" (BIOS Operation) -> FE 38 XX
             if b0 == 0xFE && b1 == 0x38 {
-                let vector = cpu.bus.read_8(cpu.get_physical_addr(cpu.cs, cpu.ip + 2));
+                let vector = ram_slice[phys_ip + 2];
 
                 // Run the HLE handler directly
                 crate::interrupts::handle_hle(&mut cpu, vector);
@@ -397,8 +415,13 @@ fn main() -> Result<(), String> {
                 continue; // Done for this cycle
             }
 
-            let mut decoder = Decoder::with_ip(16, bytes, cpu.ip as u64, DecoderOptions::NONE);
-            let instr = decoder.decode();
+            // Decode the next instruction using the reused decoder and
+            // instruction buffer. set_position + set_ip puts iced's state
+            // back at the current CS:IP; decode_out writes into `instr`
+            // without producing a new value.
+            decoder.set_position(phys_ip).unwrap();
+            decoder.set_ip(cpu.ip as u64);
+            decoder.decode_out(&mut instr);
 
             if debug_mode || cpu.debug_qb_print {
                 // Filter out the 'Wait for Key' interrupt loop to save disk space

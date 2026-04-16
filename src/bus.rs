@@ -219,58 +219,71 @@ impl Bus {
         }
     }
 
+    #[inline(always)]
     pub fn read_8(&self, addr: usize) -> u8 {
-        if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
-            // Route through VGA so chain-4, odd/even, and Read Map Select work
-            // correctly. read_graphics also latches planes, needed for planar
-            // read-modify-write sequences.
-            self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS)
-        } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
-            self.vga.vram_text[addr - ADDR_VGA_TEXT]
-        } else {
-            self.ram[addr]
+        // Fast path — the vast majority of memory accesses (code fetch,
+        // stack, program data) land below 0xA0000 and don't need the VGA
+        // range checks. One comparison covers them.
+        if addr < ADDR_VGA_GRAPHICS {
+            // SAFETY: ram is a fixed 1 MiB buffer; addr < 0xA0000 is in range.
+            return unsafe { *self.ram.get_unchecked(addr) };
         }
+        if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
+            // Route through VGA so chain-4, odd/even, and Read Map Select
+            // work correctly. read_graphics also latches planes, needed
+            // for planar read-modify-write sequences.
+            return self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
+        }
+        if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
+            return self.vga.vram_text[addr - ADDR_VGA_TEXT];
+        }
+        self.ram[addr]
     }
 
     // Returns true if a write occurred to the *active* video memory
+    #[inline(always)]
     pub fn write_8(&mut self, addr: usize, value: u8) -> bool {
-        //if addr >= 0xB8000 && addr < 0xB8FA0 && (addr % 2 == 0) {
-        // if value >= 0x20 && value <= 0x7E { // Printable chars only
-        //     let offset = (addr - 0xB8000) / 2;
-        //     let row = offset / 80;
-        //     let col = offset % 80;
-        //     self.log_string(&format!("[VIDEO] '{}' @ {},{}", value as char, col, row));
-        // }
-        //}
-
-        if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
+        // Fast path — conventional memory writes are the overwhelming
+        // majority. One comparison routes them to the ram Vec, skipping
+        // both VGA range checks.
+        if addr < ADDR_VGA_GRAPHICS {
+            // SAFETY: ram is a fixed 1 MiB buffer; addr < 0xA0000 is in range.
+            unsafe {
+                *self.ram.get_unchecked_mut(addr) = value;
+            }
+            return false;
+        }
+        if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             self.vga.write_graphics(addr - ADDR_VGA_GRAPHICS, value);
-            matches!(
+            return matches!(
                 self.video_mode,
                 VideoMode::Graphics320x200
                     | VideoMode::Ega320x200
                     | VideoMode::Ega640x200
                     | VideoMode::Ega640x350
                     | VideoMode::Vga640x480
-            )
-        } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
+            );
+        }
+        if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
             self.vga.vram_text[addr - ADDR_VGA_TEXT] = value;
 
             // Check if current mode uses this memory
-            match self.video_mode {
+            return matches!(
+                self.video_mode,
                 VideoMode::Text80x25
-                | VideoMode::Text80x25Color
-                | VideoMode::Text40x25
-                | VideoMode::Text40x25Color
-                | VideoMode::Cga320x200
-                | VideoMode::Cga320x200Color
-                | VideoMode::Cga640x200 => true, // Dirty!
-                _ => false,
-            }
-        } else {
-            self.ram[addr] = value;
-            false
+                    | VideoMode::Text80x25Color
+                    | VideoMode::Text40x25
+                    | VideoMode::Text40x25Color
+                    | VideoMode::Cga320x200
+                    | VideoMode::Cga320x200Color
+                    | VideoMode::Cga640x200
+            );
         }
+
+        // ROM / reserved area (0xC0000..0x100000 on a real PC). Still backed
+        // by our Vec<u8> so BIOS-ROM writes from initialization work.
+        self.ram[addr] = value;
+        false
     }
 
     // Write a 16-bit value to memory (Little Endian)
