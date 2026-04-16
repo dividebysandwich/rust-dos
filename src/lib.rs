@@ -7,6 +7,7 @@ pub mod f80;
 pub mod keyboard;
 pub mod instructions;
 pub mod interrupts;
+pub mod mcb;
 pub mod mouse;
 pub mod recorder;
 pub mod shell;

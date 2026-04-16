@@ -22,6 +22,7 @@ mod f80;
 mod instructions;
 mod interrupts;
 mod keyboard;
+mod mcb;
 mod mouse;
 mod recorder;
 mod shell;

@@ -675,17 +675,43 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH=39h: Create Directory (MKDIR)
+        // DS:DX -> ASCIZ directory name
         0x39 => {
-            // TODO: Implement MKDIR
-            cpu.set_cpu_flag(CpuFlags::CF, true);
-            cpu.ax = 0x03; // Path not found (stub)
+            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let path = read_asciiz_string(&cpu.bus, addr);
+            match cpu.bus.disk.create_directory(&path) {
+                Ok(()) => {
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    cpu.bus
+                        .log_string(&format!("[DOS] MKDIR '{}' -> OK", path));
+                }
+                Err(code) => {
+                    cpu.ax = code as u16;
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    cpu.bus
+                        .log_string(&format!("[DOS] MKDIR '{}' -> Err {:02X}", path, code));
+                }
+            }
         }
 
         // AH=3Ah: Remove Directory (RMDIR)
+        // DS:DX -> ASCIZ directory name
         0x3A => {
-            // TODO: Implement RMDIR
-            cpu.set_cpu_flag(CpuFlags::CF, true);
-            cpu.ax = 0x03;
+            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let path = read_asciiz_string(&cpu.bus, addr);
+            match cpu.bus.disk.remove_directory(&path) {
+                Ok(()) => {
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    cpu.bus
+                        .log_string(&format!("[DOS] RMDIR '{}' -> OK", path));
+                }
+                Err(code) => {
+                    cpu.ax = code as u16;
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    cpu.bus
+                        .log_string(&format!("[DOS] RMDIR '{}' -> Err {:02X}", path, code));
+                }
+            }
         }
 
         // AH=3Bh: Set Current Directory (CHDIR)
@@ -861,13 +887,40 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH=43h: Get/Set File Attributes
+        // AL=00: Get attributes for file at DS:DX -> CX
+        // AL=01: Set attributes (CX = new attributes)
+        // Attribute bits: 0x01=R/O, 0x02=Hidden, 0x04=System, 0x10=Directory, 0x20=Archive
         0x43 => {
             let al = cpu.get_reg8(Register::AL);
-            if al == 0x00 {
-                cpu.set_reg16(Register::CX, 0x20); // Archive
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-            } else {
-                cpu.set_cpu_flag(CpuFlags::CF, false);
+            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let filename = read_asciiz_string(&cpu.bus, addr);
+            match al {
+                0x00 => match cpu.bus.disk.get_file_attribute(&filename) {
+                    Ok(attr) => {
+                        cpu.set_reg16(Register::CX, attr);
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                    }
+                    Err(code) => {
+                        cpu.ax = code as u16;
+                        cpu.set_cpu_flag(CpuFlags::CF, true);
+                    }
+                },
+                0x01 => {
+                    let new_attr = cpu.cx;
+                    match cpu.bus.disk.set_file_attribute(&filename, new_attr) {
+                        Ok(()) => {
+                            cpu.set_cpu_flag(CpuFlags::CF, false);
+                        }
+                        Err(code) => {
+                            cpu.ax = code as u16;
+                            cpu.set_cpu_flag(CpuFlags::CF, true);
+                        }
+                    }
+                }
+                _ => {
+                    cpu.ax = 0x01; // invalid function
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                }
             }
         }
 
@@ -944,74 +997,94 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
-        // AH = 48h: Allocate Memory
-        // BX = Number of Paragraphs (16 bytes) requested
-        // Return: AX = Segment, or CF=1 + AX=Error, BX=Max Available
+        // AH = 48h: Allocate Memory (MCB chain, first-fit)
+        //   BX = paragraphs requested
+        //   Return on success: AX = segment of first usable paragraph,
+        //     CF = 0. BX is unchanged.
+        //   Return on failure: AX = 0008 (insufficient memory), BX = size of
+        //     largest available block, CF = 1.
         0x48 => {
-            let requested_paras = cpu.bx;
-            let available_paras = if cpu.heap_pointer < 0xA000 {
-                0xA000 - cpu.heap_pointer
+            let requested = cpu.bx;
+            let owner = if cpu.current_psp != 0 {
+                cpu.current_psp
             } else {
-                0
+                // Before any program is running (shell), give blocks an
+                // "owner" equal to the allocating segment so they aren't
+                // confused with free blocks.
+                0x0008
             };
-
-            cpu.bus.log_string(&format!(
-                "[DEBUG] Alloc Mem: Request {:04X} paras. Heap at {:04X}, Avail {:04X}",
-                requested_paras, cpu.heap_pointer, available_paras
-            ));
-
-            if requested_paras > available_paras {
-                cpu.ax = 0x0008; // Insufficient memory
-                cpu.bx = available_paras;
-                cpu.set_cpu_flag(CpuFlags::CF, true);
-                cpu.bus
-                    .log_string("[DEBUG] Alloc Failed: Insufficient Memory");
-            } else {
-                cpu.ax = cpu.heap_pointer;
-                cpu.heap_pointer += requested_paras;
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-                cpu.bus
-                    .log_string(&format!("[DEBUG] Alloc Success: {:04X}", cpu.ax));
+            match crate::mcb::alloc(&mut cpu.bus, owner, requested) {
+                Ok(segment) => {
+                    cpu.ax = segment;
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Alloc {:04X} paras -> {:04X}",
+                        requested, segment
+                    ));
+                }
+                Err(max_free) => {
+                    cpu.ax = crate::mcb::ERR_INSUFFICIENT as u16;
+                    cpu.bx = max_free;
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Alloc {:04X} paras failed (max free {:04X})",
+                        requested, max_free
+                    ));
+                }
             }
         }
 
         // AH = 49h: Free Memory Block
-        // ES = Segment of the block to be freed
+        //   ES = segment returned by AH=48h
         0x49 => {
             let segment_to_free = cpu.es;
-
-            // TODO: Replace this stub by actually marking the memory block in the MCB chain as free.
-
-            cpu.bus.log_string(&format!(
-                "[DOS] Freeing Memory Block at {:04X}",
-                segment_to_free
-            ));
-
-            // Return Success
-            cpu.set_cpu_flag(CpuFlags::CF, false);
-            cpu.ax = 0;
+            match crate::mcb::free(&mut cpu.bus, segment_to_free) {
+                Ok(()) => {
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    cpu.ax = 0;
+                    cpu.bus
+                        .log_string(&format!("[DOS] Free {:04X} -> OK", segment_to_free));
+                }
+                Err(code) => {
+                    cpu.ax = code as u16;
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Free {:04X} -> Err {:02X}",
+                        segment_to_free, code
+                    ));
+                }
+            }
         }
 
         // AH = 4Ah: Resize Memory Block
+        //   ES = segment to resize, BX = new size in paragraphs
+        //   On failure: AX = 0008, BX = largest size the block could be grown to.
         0x4A => {
+            let segment = cpu.es;
             let requested_size = cpu.get_reg16(Register::BX);
-            let max_available = 0x9000; // Simulated available paragraphs
-
-            cpu.bus.log_string(&format!(
-                "[DEBUG] INT 21,4A Resize: Req {:04X}, Max {:04X}",
-                requested_size, max_available
-            ));
-
-            if requested_size > max_available {
-                cpu.set_reg16(Register::BX, max_available);
-                cpu.set_reg16(Register::AX, 0x0008);
-                cpu.set_cpu_flag(CpuFlags::CF, true);
-            } else {
-                cpu.set_cpu_flag(CpuFlags::CF, false);
+            match crate::mcb::resize(&mut cpu.bus, segment, requested_size) {
+                Ok(()) => {
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Resize {:04X} -> {:04X} paras",
+                        segment, requested_size
+                    ));
+                }
+                Err(max) => {
+                    cpu.set_reg16(Register::BX, max);
+                    cpu.set_reg16(Register::AX, crate::mcb::ERR_INSUFFICIENT as u16);
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Resize {:04X} to {:04X} paras failed (max {:04X})",
+                        segment, requested_size, max
+                    ));
+                }
             }
         }
 
         // AH = 4Ch: Terminate Program
+        // AL = exit code. Record for AH=4Dh (Get Return Code) and free any
+        // MCBs owned by the terminating PSP.
         0x4C => {
             let exit_code = cpu.get_al();
             cpu.bus.log_string(&format!(
@@ -1019,20 +1092,29 @@ pub fn handle(cpu: &mut Cpu) {
                 exit_code
             ));
 
+            // Record for parent to retrieve. High byte = termination type 0 (normal).
+            cpu.last_child_exit = exit_code as u16;
+
+            // Free any memory owned by the exiting PSP.
+            crate::mcb::free_owned_by(&mut cpu.bus, cpu.current_psp);
+
             // Try to restore parent process
             if cpu.restore_process_context() {
                 cpu.bus.log_string("[DOS] Returning to Parent Process");
-                // TODO: Set Return Code in Parent's AX?
-                // DOS convention: AL = Return Code.
-                // Since we restored the parent context, we should probably update AL in the restored context.
-                // But `restore_process_context` already overwrote registers from stack.
-                // We should update AX *after* restore.
                 cpu.ax = exit_code as u16;
-                // Clear CF to indicate success? Usually EXEC returns with Carry Clear.
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 cpu.state = CpuState::RebootShell;
             }
+        }
+
+        // AH = 4Dh: Get Return Code of child process (ERRORLEVEL)
+        //   AL = exit code, AH = termination type (0=normal, 1=Ctrl-C, 2=crit, 3=TSR)
+        // Subsequent calls return zero until the next child terminates.
+        0x4D => {
+            cpu.ax = cpu.last_child_exit;
+            cpu.last_child_exit = 0;
+            cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
         // AH=4Eh (Find First) / AH=4Fh (Find Next)

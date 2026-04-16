@@ -101,6 +101,10 @@ pub struct Cpu {
     pub pending_command: Option<String>,
     pub current_psp: u16,
     pub heap_pointer: u16,
+    /// Exit code (AL) and termination type (AH) of the most recently terminated
+    /// child process. Read-and-clear by INT 21h AH=4Dh. Termination type:
+    /// 0 = normal (INT 21 AH=4C), 1 = Ctrl-C, 2 = critical error, 3 = TSR.
+    pub last_child_exit: u16,
 
     // FPU State
     pub fpu_stack: [F80; 8],
@@ -189,6 +193,7 @@ impl Cpu {
             trace_log: VecDeque::new(),
             current_psp: 0, // Will be set by loader
             heap_pointer: 0x2000,
+            last_child_exit: 0,
             process_stack: Vec::new(),
             last_timer_tick: 0,
         }
@@ -1074,6 +1079,10 @@ impl Cpu {
         self.flags = CpuFlags::from_bits_truncate(0x0002); // Reset Flags
         self.state = CpuState::Running;
 
+        // No program is running yet: every paragraph of conventional memory
+        // is available for allocation.
+        crate::mcb::init_empty(&mut self.bus);
+
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }
 
@@ -1198,9 +1207,9 @@ impl Cpu {
             "[DOS] Loaded COM file at {:04X}:{:04X}",
             self.cs, self.ip
         ));
-        // Simple heuristic: COM files own the 64KB segment.
-        // Heap starts after that.
+        // COM files are allocated the full 64KB segment by DOS convention.
         self.heap_pointer = load_segment + 0x1000;
+        crate::mcb::init_for_program(&mut self.bus, load_segment, 0x1000);
         true
     }
 
@@ -1215,6 +1224,8 @@ impl Cpu {
         let header_paragraphs = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
         let header_size = header_paragraphs * 16;
 
+        let min_alloc = u16::from_le_bytes([bytes[10], bytes[11]]);
+        let max_alloc = u16::from_le_bytes([bytes[12], bytes[13]]);
         let init_ss = u16::from_le_bytes([bytes[14], bytes[15]]);
         let init_sp = u16::from_le_bytes([bytes[16], bytes[17]]);
         let init_ip = u16::from_le_bytes([bytes[20], bytes[21]]);
@@ -1333,12 +1344,36 @@ impl Cpu {
             self.cs, self.ip
         ));
 
-        // Calculate heap pointer (First free paragraph after image)
-        // relocation_base_segment is where image starts.
-        // Image length is bytes.len() - header_size
+        // Build the MCB chain for the program. Real DOS gives the program
+        // min(max_alloc, available-memory) paragraphs at load time, where
+        // max_alloc is the EXE header's maximum-paragraphs field (commonly
+        // 0xFFFF, meaning "all available"). The program may then shrink its
+        // block via AH=4A to release memory for children. We must include
+        // min_alloc in the block so uninitialized data / stack don't overlap
+        // the next MCB header.
         let image_len = bytes.len() - header_size;
-        let image_paras = (image_len + 15) / 16;
-        self.heap_pointer = relocation_base_segment + image_paras as u16 + 1;
+        let image_paras = ((image_len + 15) / 16) as u16;
+        // 0x10 paragraphs PSP + image + BSS / heap / stack up to max_alloc.
+        let min_program_paras = 0x10 + image_paras + min_alloc;
+        // Available conventional paragraphs from load_segment to 0xA000.
+        let available = 0xA000u16.saturating_sub(load_segment);
+        // Reserve one paragraph at the top for the trailing free-block MCB if
+        // we won't consume everything.
+        let desired = if max_alloc == 0 {
+            min_program_paras
+        } else {
+            min_program_paras.saturating_add(max_alloc - min_alloc.min(max_alloc))
+        };
+        let program_paras = if desired >= available {
+            // Program would use up the whole arena — leave exactly one
+            // paragraph so the free tail-block has a valid header. If we
+            // can't even afford that, just give everything.
+            available.saturating_sub(1).max(min_program_paras)
+        } else {
+            desired.max(min_program_paras)
+        };
+        self.heap_pointer = load_segment + program_paras + 1;
+        crate::mcb::init_for_program(&mut self.bus, load_segment, program_paras);
 
         self.bus
             .log_string(&format!("[DEBUG] Heap starts at {:04X}", self.heap_pointer));

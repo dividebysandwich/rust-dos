@@ -436,15 +436,114 @@ impl DiskController {
     #[allow(dead_code)]
     pub fn get_file_attribute(&self, filename: &str) -> Result<u16, u8> {
         let path = self.resolve_path(filename).ok_or(0x03)?;
-        if path.exists() {
-            if path.is_dir() {
-                Ok(0x10) // Directory
-            } else {
-                Ok(0x20) // Archive (Standard File)
-            }
-        } else {
-            Err(0x02) // File Not Found
+        if !path.exists() {
+            return Err(0x02); // File Not Found
         }
+
+        let mut attr: u16 = 0;
+        if path.is_dir() {
+            attr |= 0x10; // Directory
+        } else {
+            attr |= 0x20; // Archive (standard file)
+        }
+        // Reflect host read-only state into DOS R/O bit. On Unix, read-only means
+        // no user-write permission. On Windows, the readonly flag.
+        if let Ok(meta) = fs::metadata(&path) {
+            if meta.permissions().readonly() {
+                attr |= 0x01;
+            }
+        }
+        Ok(attr)
+    }
+
+    /// DOS AH=43h AL=01: Set file attributes. We honor just the R/O bit because
+    /// the host filesystem generally doesn't have direct analogs for DOS's
+    /// Hidden/System bits. Directory and Volume Label bits cannot be set via
+    /// this call on real DOS either.
+    pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
+        let path = self.resolve_path(filename).ok_or(0x03)?;
+        if !path.exists() {
+            return Err(0x02);
+        }
+        if let Ok(meta) = fs::metadata(&path) {
+            let mut perms = meta.permissions();
+            let want_ro = (attr & 0x01) != 0;
+            if perms.readonly() != want_ro {
+                perms.set_readonly(want_ro);
+                // Ignore permission-set errors on systems where it's not supported.
+                let _ = fs::set_permissions(&path, perms);
+            }
+        }
+        Ok(())
+    }
+
+    /// DOS AH=39h: Create a directory at the given DOS path.
+    pub fn create_directory(&self, path: &str) -> Result<(), u8> {
+        // resolve_path walks any existing leaf, but MKDIR needs to create a new
+        // leaf — so resolve the parent, then append the final component.
+        let normalized = path.replace('/', "\\");
+        let (parent_dos, leaf) = match normalized.rsplit_once('\\') {
+            Some((p, l)) => (p, l),
+            None => ("", normalized.as_str()),
+        };
+        if leaf.is_empty() {
+            return Err(0x03); // Path not found / invalid
+        }
+        // Resolve parent. Empty parent means current directory.
+        let parent_path = if parent_dos.is_empty() {
+            // current dir
+            self.resolve_path(".").ok_or(0x03)?
+        } else {
+            self.resolve_path(parent_dos).ok_or(0x03)?
+        };
+        if !parent_path.is_dir() {
+            return Err(0x03);
+        }
+        // Case-insensitive: MKDIR "Foo" should collide with existing "FOO".
+        if let Some(existing) = self.find_existing_child(&parent_path, leaf) {
+            let full = parent_path.join(existing);
+            if full.exists() {
+                return Err(0x05); // Access denied / already exists
+            }
+        }
+        let target = parent_path.join(leaf.to_uppercase());
+        fs::create_dir(&target).map_err(|_| 0x05)
+    }
+
+    /// DOS AH=3Ah: Remove an empty directory.
+    pub fn remove_directory(&self, path: &str) -> Result<(), u8> {
+        let host_path = self.resolve_path(path).ok_or(0x03)?;
+        if !host_path.exists() {
+            return Err(0x03);
+        }
+        if !host_path.is_dir() {
+            return Err(0x03);
+        }
+        // DOS error 0x10 = "attempt to remove current directory".
+        if let Ok(rel) = host_path.strip_prefix(&self.root_path) {
+            let dos_form = rel.to_string_lossy().replace('/', "\\");
+            if dos_form.eq_ignore_ascii_case(&self.current_dir) {
+                return Err(0x10);
+            }
+        }
+        fs::remove_dir(&host_path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => 0x03,
+            _ => 0x05, // Access denied (e.g. not empty)
+        })
+    }
+
+    /// Case-insensitive lookup of a child by name in a host directory.
+    fn find_existing_child(&self, parent: &Path, name: &str) -> Option<std::ffi::OsString> {
+        let upper = name.to_uppercase();
+        if let Ok(entries) = fs::read_dir(parent) {
+            for e in entries.flatten() {
+                let fname = e.file_name();
+                if fname.to_string_lossy().to_uppercase() == upper {
+                    return Some(fname);
+                }
+            }
+        }
+        None
     }
 
     // Returns the path string relative to root, e.g., "GAMES\DOOM"
