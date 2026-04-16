@@ -4,7 +4,7 @@ use crate::cpu::Cpu;
 pub mod vga;
 
 pub const SCREEN_WIDTH: u32 = 640;
-pub const SCREEN_HEIGHT: u32 = 480;
+pub const SCREEN_HEIGHT: u32 = 400;
 
 // Memory Map Addresses
 pub const ADDR_VGA_GRAPHICS: usize = 0xA0000;
@@ -64,9 +64,9 @@ impl VideoMode {
 }
 
 pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
-    // Canvas is SCREEN_WIDTH x SCREEN_HEIGHT = 640x480. Modes shorter than 480
-    // leave a black bar below the rendered image; clear everything first so the
-    // bar is black rather than showing the previous frame.
+    // Modes shorter than the canvas leave a black bar below the rendered
+    // image; clear everything first so the bar is black rather than showing
+    // the previous frame.
     for b in canvas.iter_mut() {
         *b = 0;
     }
@@ -82,10 +82,15 @@ pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
         VideoMode::Text40x25 | VideoMode::Text40x25Color => {
             render_text_mode_40x25(canvas, &bus.vga.vram_text, bus)
         }
+        // Mode 0Dh (320x200): 2x horizontal, 2x vertical -> 640x400 exactly.
         VideoMode::Ega320x200 => render_planar(canvas, &bus.vga.vram_graphics, bus, 320, 200, 2, 2),
+        // Mode 0Eh (640x200): 2x vertical -> 640x400 exactly.
         VideoMode::Ega640x200 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 200, 1, 2),
+        // Mode 10h (640x350): native. Leaves a 50-line black band at the bottom.
         VideoMode::Ega640x350 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 350, 1, 1),
-        VideoMode::Vga640x480 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 480, 1, 1),
+        // Mode 12h (640x480): we only have 400 lines of canvas. Compress via
+        // nearest-neighbour sampling to fit, keeping the full 640 width.
+        VideoMode::Vga640x480 => render_planar_fit(canvas, &bus.vga.vram_graphics, bus, 640, 480),
     }
 }
 
@@ -103,41 +108,12 @@ fn render_planar(
     scale_x: usize,
     scale_y: usize,
 ) {
+    let high_bits = attribute_color_high_bits(bus);
     let bytes_per_row = width / 8;
-    // Mode Control bit 7 (P54S): when set, bits 4-5 of the DAC index come
-    // from Color Select register bits 0-1. When clear (default), they come
-    // from Color Select bits 2-3.
-    let mode_ctrl = bus.vga.attribute_regs[0x10];
-    let color_select = bus.vga.attribute_regs[0x14];
-    let p54_from_cs_low = (mode_ctrl & 0x80) != 0;
-    let high_bits = if p54_from_cs_low {
-        (color_select & 0x03) << 4
-    } else {
-        (color_select & 0x0C) << 4
-    };
 
     for y in 0..height {
         for x in 0..width {
-            let byte_offset = y * bytes_per_row + (x / 8);
-            let bit_pos = 7 - (x % 8) as u8;
-
-            let mut pixel_idx: u8 = 0;
-            for plane in 0..4 {
-                let idx = plane * 65536 + byte_offset;
-                if idx < vram.len() {
-                    let bit = (vram[idx] >> bit_pos) & 1;
-                    pixel_idx |= bit << plane;
-                }
-            }
-
-            // Attribute Controller Palette: 4-bit pixel -> 6-bit internal color
-            let attr = bus.vga.attribute_regs[pixel_idx as usize & 0x0F] & 0x3F;
-            // Combine with high bits from Color Select to form 8-bit DAC index.
-            // Keep low 4 bits of attr; either bits 4-5 come from attr or from CS
-            // depending on P54S, so we mask those off and OR in high_bits.
-            let dac_idx = (attr & 0x0F) | high_bits;
-
-            let rgb = bus.vga.get_rgb(dac_idx & bus.vga.dac_mask);
+            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, x, y, high_bits);
 
             for dy in 0..scale_y {
                 for dx in 0..scale_x {
@@ -153,6 +129,61 @@ fn render_planar(
             }
         }
     }
+}
+
+/// Planar renderer for modes taller than SCREEN_HEIGHT (currently only
+/// mode 12h, which is 640x480 vs our 640x400 viewport). Uses nearest-neighbour
+/// sampling on the Y axis so all 480 source lines are represented.
+fn render_planar_fit(canvas: &mut [u8], vram: &[u8], bus: &Bus, width: usize, height: usize) {
+    let high_bits = attribute_color_high_bits(bus);
+    let bytes_per_row = width / 8;
+
+    for ty in 0..SCREEN_HEIGHT as usize {
+        let sy = (ty as u64 * height as u64 / SCREEN_HEIGHT as u64) as usize;
+        for tx in 0..SCREEN_WIDTH as usize {
+            let sx = (tx as u64 * width as u64 / SCREEN_WIDTH as u64) as usize;
+            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, sx, sy, high_bits);
+            let idx = (ty * SCREEN_WIDTH as usize + tx) * 3;
+            canvas[idx] = rgb.0;
+            canvas[idx + 1] = rgb.1;
+            canvas[idx + 2] = rgb.2;
+        }
+    }
+}
+
+/// Derive the upper 2 bits of the 8-bit DAC index from the attribute
+/// controller's Mode Control (P54S) and Color Select registers.
+fn attribute_color_high_bits(bus: &Bus) -> u8 {
+    let mode_ctrl = bus.vga.attribute_regs[0x10];
+    let color_select = bus.vga.attribute_regs[0x14];
+    if (mode_ctrl & 0x80) != 0 {
+        (color_select & 0x03) << 4
+    } else {
+        (color_select & 0x0C) << 4
+    }
+}
+
+fn planar_pixel_rgb(
+    bus: &Bus,
+    vram: &[u8],
+    bytes_per_row: usize,
+    x: usize,
+    y: usize,
+    high_bits: u8,
+) -> (u8, u8, u8) {
+    let byte_offset = y * bytes_per_row + (x / 8);
+    let bit_pos = 7 - (x % 8) as u8;
+    let mut pixel_idx: u8 = 0;
+    for plane in 0..4 {
+        let idx = plane * 65536 + byte_offset;
+        if idx < vram.len() {
+            let bit = (vram[idx] >> bit_pos) & 1;
+            pixel_idx |= bit << plane;
+        }
+    }
+    let attr = bus.vga.attribute_regs[pixel_idx as usize & 0x0F] & 0x3F;
+    let dac_idx = (attr & 0x0F) | high_bits;
+    bus.vga.get_rgb(dac_idx & bus.vga.dac_mask)
 }
 
 // Emulate Mode 13h (320x200) -> Scaled to 640x400
@@ -301,34 +332,48 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8]) {
 // Emulate Text Mode (80x25) using authentic 8x16 Font
 // No scaling needed for height (16px * 25 rows = 400px)
 pub fn render_text_mode_80x25(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
-    for row in 0..25 {
+    // Programs like Norton Commander switch to 80x50 by loading the 8x8 font
+    // (INT 10h AH=11h AL=12h). The row count and character cell height live in
+    // BDA 0x0484 / 0x0485; honour them so all rows the program wrote are drawn.
+    let rows = bus.read_8(0x0484) as usize + 1;
+    let char_height = bus.read_16(0x0485) as usize;
+    let (font, font_height): (&[u8], usize) = match char_height {
+        0..=10 => (FONT_8X8, 8),
+        _ => (FONT_8X16, 16),
+    };
+
+    for row in 0..rows {
         for col in 0..80 {
             let offset = (row * 80 + col) * 2;
-            let char_code = vram[offset] as usize; // Direct index into CP437
+            if offset + 1 >= vram.len() {
+                continue;
+            }
+            let char_code = vram[offset] as usize;
             let attr = vram[offset + 1];
 
             let fg = bus.vga.get_rgb(attr & 0x0F);
             let bg = bus.vga.get_rgb((attr >> 4) & 0x0F);
 
-            // Calculate start index in the font array
-            // Each character is 16 bytes long in the 8x16 font
-            let glyph_start = char_code * 16;
+            let glyph_start = char_code * font_height;
+            if glyph_start + font_height > font.len() {
+                continue;
+            }
 
-            // Draw 8x16 Block
-            for y in 0..16 {
-                // Get the byte for this row of the character
-                let glyph_row = FONT_8X16[glyph_start + y];
-
+            for y in 0..font_height {
+                let glyph_row = font[glyph_start + y];
                 for x in 0..8 {
-                    // Check bit (most significant bit is left-most pixel)
                     let on = (glyph_row >> (7 - x)) & 1 == 1;
                     let color = if on { fg } else { bg };
 
                     let screen_x = (col * 8) + x;
-                    let screen_y = (row * 16) + y;
-
+                    let screen_y = (row * font_height) + y;
+                    if screen_y >= SCREEN_HEIGHT as usize {
+                        continue;
+                    }
                     let idx = (screen_y * SCREEN_WIDTH as usize + screen_x) * 3;
-
+                    if idx + 2 >= canvas.len() {
+                        continue;
+                    }
                     canvas[idx] = color.0;
                     canvas[idx + 1] = color.1;
                     canvas[idx + 2] = color.2;
@@ -420,10 +465,12 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
         bus.cursor_y += 1;
     }
 
-    // Handle Scrolling
-    if bus.cursor_y >= 25 {
+    // Handle Scrolling, using the row count from BDA so 80x43 / 80x50 modes
+    // get proper scroll behaviour rather than being clamped to 25.
+    let rows = bus.read_8(0x0484) as usize + 1;
+    if bus.cursor_y >= rows {
         bus.scroll_up();
-        bus.cursor_y = 24;
+        bus.cursor_y = rows - 1;
     }
 }
 
@@ -431,7 +478,7 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
     let mut col = cpu.bus.cursor_x;
     let mut row = cpu.bus.cursor_y;
     let max_cols = 80;
-    let max_rows = 25;
+    let max_rows = cpu.bus.read_8(0x0484) as usize + 1;
 
     for c in s.chars() {
         match c {

@@ -399,17 +399,26 @@ fn main() -> Result<(), String> {
                     VideoMode::Text40x25 | VideoMode::Text40x25Color => (16, 40),
                     _ => (8, 80),
                 };
+                // Cell height and visible rows come from BDA so 80x43 / 80x50
+                // modes draw the cursor at the correct Y when programs like
+                // Norton Commander load the 8x8 font.
+                let cell_height = cpu.bus.read_16(0x0485) as usize;
+                let cell_height = if cell_height == 0 { 16 } else { cell_height };
+                let total_rows = cpu.bus.read_8(0x0484) as usize + 1;
 
-                if cursor_visible && !is_hidden && cursor_col < max_cols && cursor_row < 25 {
-                    let cell_height = 16;
-
+                if cursor_visible
+                    && !is_hidden
+                    && cursor_col < max_cols
+                    && cursor_row < total_rows
+                {
                     // Calculate screen coordinates
                     let start_x = cursor_col * cell_width;
                     let start_y = cursor_row * cell_height;
 
-                    // Clamp scanlines
-                    let scan_start = (start_scan & 0x1F).min(15) as usize;
-                    let scan_end = end_scan.min(15) as usize;
+                    // Clamp scanlines to the active cell height - 1.
+                    let max_scan = cell_height.saturating_sub(1) as u8;
+                    let scan_start = (start_scan & 0x1F).min(max_scan) as usize;
+                    let scan_end = end_scan.min(max_scan) as usize;
 
                     if scan_start <= scan_end {
                         for y_off in scan_start..=scan_end {

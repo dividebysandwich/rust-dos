@@ -1,7 +1,15 @@
 use crate::audio::play_sdl_beep;
 use crate::cpu::Cpu;
-use crate::video::{ADDR_VGA_TEXT, BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, MAX_ROWS, VideoMode};
+use crate::video::{ADDR_VGA_TEXT, BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode};
 use iced_x86::Register;
+
+/// Current number of text rows on the screen, read from BDA 0x0484.
+/// Programs that load an 8x8 or 8x14 font via INT 10h AH=11h AL=12h change
+/// this value to 43 or 50 rows; hard-coding 25 would make the renderer and
+/// scroll logic ignore everything below the first 25 rows.
+fn active_rows(cpu: &Cpu) -> u8 {
+    cpu.bus.read_8(0x0484).wrapping_add(1).max(1)
+}
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
@@ -20,10 +28,11 @@ pub fn handle(cpu: &mut Cpu) {
             let mode = cpu.get_al();
 
             // Clear Screen
+            let rows_max = active_rows(cpu).saturating_sub(1);
             match mode {
                 // Text Modes: Clear with Spaces and Attribute 0x07
                 0x00..=0x03 => {
-                    scroll_area(cpu, true, 0, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
+                    scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
                 }
                 // CGA Graphics Modes (4, 5, 6): Zero out 16KB of B8000 Memory
                 0x04..=0x06 => {
@@ -45,7 +54,7 @@ pub fn handle(cpu: &mut Cpu) {
                 // Fallback / Stubbed modes
                 _ => {
                     // Optional: Clear text ram just in case
-                    scroll_area(cpu, true, 0, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
+                    scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
                 }
             }
 
@@ -125,9 +134,24 @@ pub fn handle(cpu: &mut Cpu) {
             };
             cpu.bus.write_16(0x044A, cols);
 
-            // Update BDA 0x0484 (Rows on Screen minus 1)
-            let rows: u8 = 24; // 25 rows - 1
+            // Update BDA 0x0484 (Rows on Screen minus 1) and 0x0485 (char height).
+            // Mode set always resets the cell size to the mode's default.
+            let (rows, char_height): (u8, u16) = match mode {
+                // Text modes: 25 rows, VGA 8x16 font is the default.
+                0x00..=0x03 => (24, 16),
+                // CGA 40-col graphics counts as 25 rows.
+                0x04 | 0x05 => (24, 8),
+                // CGA 640x200 2-color.
+                0x06 => (24, 8),
+                // EGA/VGA planar modes and 13h: treat as 25-row equivalents.
+                0x0D | 0x0E => (24, 8),
+                0x10 => (24, 14),
+                0x12 => (29, 16), // 30 rows at 640x480
+                0x13 => (24, 8),
+                _ => (24, 16),
+            };
             cpu.bus.write_8(0x0484, rows);
+            cpu.bus.write_16(0x0485, char_height);
         }
 
         // AH = 01h: Set Cursor Type
@@ -234,7 +258,7 @@ pub fn handle(cpu: &mut Cpu) {
                 let temp_col = (col as usize + i) % MAX_COLS as usize;
                 let temp_row = (row as usize) + (col as usize + i) / MAX_COLS as usize;
 
-                if temp_row < MAX_ROWS as usize {
+                if temp_row < active_rows(cpu) as usize {
                     write_char_at(cpu, temp_col as u8, temp_row as u8, char_code, attr);
                 }
             }
@@ -317,10 +341,11 @@ pub fn handle(cpu: &mut Cpu) {
             }
 
             // Handle Scrolling
-            if row >= MAX_ROWS {
+            let rows = active_rows(cpu);
+            if row >= rows {
                 // Scroll entire screen up by 1 line
-                scroll_area(cpu, true, 1, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
-                row = MAX_ROWS - 1;
+                scroll_area(cpu, true, 1, 0x07, 0, 0, rows - 1, MAX_COLS - 1);
+                row = rows - 1;
             }
 
             // Update Cursor (Sync BDA and Internal)
@@ -572,6 +597,37 @@ pub fn handle(cpu: &mut Cpu) {
         0x11 => {
             let al = cpu.get_al();
             match al {
+                // AL=10h/11h/12h/14h: Load ROM font and reprogram the CRTC /
+                // BDA for the new character height. The "programmed" variants
+                // (10-14h) change the displayed row count; the "not programmed"
+                // variants (20-24h) just load the font glyphs. We don't maintain
+                // a mutable font RAM so there's nothing to copy; we just update
+                // the BDA fields the renderer reads.
+                //
+                // AL=11h: 8x14 font (EGA)  -> 25 rows on 350-line display
+                // AL=12h: 8x8 font        -> 43 rows on EGA (350) or 50 rows on VGA (400)
+                // AL=14h: 8x16 font (VGA) -> 25 rows on 400-line display
+                0x11 | 0x12 | 0x14 => {
+                    let (rows_minus_one, char_height) = match al {
+                        0x11 => (24u8, 14u16),
+                        0x12 => (49u8, 8u16), // assume VGA 400-line display
+                        0x14 => (24u8, 16u16),
+                        _ => unreachable!(),
+                    };
+                    cpu.bus.write_8(0x0484, rows_minus_one);
+                    cpu.bus.write_16(0x0485, char_height);
+                    cpu.bus.log_string(&format!(
+                        "[BIOS] INT 10h AH=11h AL={:02X}: font loaded, rows={} height={}",
+                        al,
+                        rows_minus_one as u16 + 1,
+                        char_height
+                    ));
+                }
+                // AL=20h/22h/23h/24h: load font without reprogramming the CRTC.
+                // We have nothing to do here (font glyphs come from constant tables)
+                // but we need to acknowledge the call so software doesn't think
+                // the BIOS is broken.
+                0x20 | 0x22 | 0x23 | 0x24 => {}
                 0x30 => {
                     // Get Font Information
                     // Returns pointer to font definition
@@ -746,10 +802,11 @@ pub fn handle(cpu: &mut Cpu) {
                 }
 
                 // Handle Scrolling
-                if curr_row >= MAX_ROWS {
+                let rows = active_rows(cpu);
+                if curr_row >= rows {
                     // Scroll active area up
-                    scroll_area(cpu, true, 1, 0x07, 0, 0, MAX_ROWS - 1, MAX_COLS - 1);
-                    curr_row = MAX_ROWS - 1;
+                    scroll_area(cpu, true, 1, 0x07, 0, 0, rows - 1, MAX_COLS - 1);
+                    curr_row = rows - 1;
                 }
             }
 
@@ -1087,9 +1144,10 @@ fn scroll_area(
         80
     };
 
-    // Safety Clamps
+    // Safety Clamps. Use the BDA row count so scrolling respects 80x43/50.
+    let rows = active_rows(cpu) as usize;
     let r_start = row_start as usize;
-    let r_end = (row_end as usize).min(MAX_ROWS as usize - 1);
+    let r_end = (row_end as usize).min(rows.saturating_sub(1));
     let c_start = col_start as usize;
     let c_end = (col_end as usize).min(max_cols - 1);
     let count = lines as usize;

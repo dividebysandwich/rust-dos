@@ -1051,6 +1051,22 @@ impl Cpu {
         // Re-install the HLE Interrupt Vectors
         self.install_bios_traps();
 
+        // Reset text-mode BDA fields so state from a previous program (e.g.
+        // Norton Commander's 80x50 configuration) doesn't leak into the shell
+        // and cause the renderer to draw more rows than the shell expects.
+        self.bus.write_8(0x0449, 0x03); // Mode 3 (80x25 color text)
+        self.bus.write_16(0x044A, 80); // 80 columns
+        self.bus.write_8(0x0462, 0); // Active page 0
+        self.bus.write_8(0x0450, 0); // Cursor col
+        self.bus.write_8(0x0451, 0); // Cursor row
+        self.bus.write_8(0x0484, 24); // 25 rows
+        self.bus.write_16(0x0485, 16); // 8x16 font cell
+        self.bus.video_mode = crate::video::VideoMode::Text80x25Color;
+        // Clear text VRAM so we don't show leftover text from the last program.
+        for byte in self.bus.vga.vram_text.iter_mut() {
+            *byte = 0;
+        }
+
         // DOS "Underscore" cursor
         // High Byte (0x06) = Start Scanline, Low Byte (0x07) = End Scanline
         self.bus.write_16(0x0460, 0x0D0E);

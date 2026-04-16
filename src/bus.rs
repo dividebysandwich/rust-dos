@@ -89,8 +89,10 @@ impl Bus {
         // Bit 0 = Floppy. 0x21 (Floppy + Color)
         bus.write_16(0x0410, 0x0021);
 
-        // 0x0484: Rows on Screen (minus 1). 24
+        // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
         bus.write_8(0x0484, 24);
+        // 0x0485: Character height in scan lines. 16 = VGA 8x16 default.
+        bus.write_16(0x0485, 16);
 
         // 0x0487: EGA/VGA Info. Bits 5-6 = 11 (256KB Video RAM).
         // 0x60 = 01100000
@@ -177,25 +179,23 @@ impl Bus {
 
     // Helper: Scroll the text screen up by 1 line
     pub fn scroll_up(&mut self) {
-        // Row 1 becomes Row 0, etc.
-        // Each row is 160 bytes (80 chars * 2 bytes)
-        let row_size = 160;
-        let screen_size = 25 * row_size;
+        // Read the current row count from BDA so 80x43 / 80x50 modes scroll
+        // their whole visible area, not just the first 25 rows.
+        let rows = self.read_8(0x0484) as usize + 1;
+        let row_size = 160; // 80 chars * 2 bytes
+        let screen_size = rows * row_size;
+        if screen_size > self.vga.vram_text.len() {
+            return;
+        }
 
         // Move memory back
         for i in 0..(screen_size - row_size) {
             self.vga.vram_text[i] = self.vga.vram_text[i + row_size];
         }
 
-        // Clear bottom row
+        // Clear bottom row with space + light-gray attribute pairs.
         for i in (screen_size - row_size)..screen_size {
-            if i % 2 == 0 {
-                self.vga.vram_text[i] = 0x20;
-            }
-            // Space
-            else {
-                self.vga.vram_text[i] = 0x07;
-            } // Light Gray
+            self.vga.vram_text[i] = if i % 2 == 0 { 0x20 } else { 0x07 };
         }
     }
 
