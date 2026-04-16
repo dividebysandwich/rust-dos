@@ -297,8 +297,83 @@ impl VgaCard {
         }
     }
 
+    /// Load the 64-color EGA palette into DAC entries 0..63 for the 16-color
+    /// planar modes. Each EGA color byte has the form rgbRGB (lower-case = 2/3
+    /// intensity, upper-case = full intensity), and this is what attribute
+    /// palette registers reference in standard EGA/VGA modes.
+    fn load_ega_palette(&mut self) {
+        for c in 0usize..64 {
+            let secondary_r = ((c >> 5) & 1) as u8 * 0x15;
+            let secondary_g = ((c >> 4) & 1) as u8 * 0x15;
+            let secondary_b = ((c >> 3) & 1) as u8 * 0x15;
+            let primary_r = ((c >> 2) & 1) as u8 * 0x2A;
+            let primary_g = ((c >> 1) & 1) as u8 * 0x2A;
+            let primary_b = (c & 1) as u8 * 0x2A;
+            self.palette[c * 3] = primary_r + secondary_r;
+            self.palette[c * 3 + 1] = primary_g + secondary_g;
+            self.palette[c * 3 + 2] = primary_b + secondary_b;
+        }
+    }
+
+    /// Apply the attribute-controller defaults for 16-color planar modes:
+    /// the 16 palette registers point into the 64-color EGA palette, with
+    /// the historic quirk that entry 6 remaps to brown (0x14) and the
+    /// "bright" colors 8..15 use secondary + primary bits (0x38..0x3F).
+    fn load_ega_attribute_defaults(&mut self) {
+        const EGA_DEFAULTS: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
+            0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+        ];
+        for (i, &v) in EGA_DEFAULTS.iter().enumerate() {
+            self.attribute_regs[i] = v;
+        }
+        self.attribute_regs[0x10] = 0x01; // Mode Control: graphics, 6-bit indices
+        self.attribute_regs[0x11] = 0x00; // Overscan
+        self.attribute_regs[0x12] = 0x0F; // Color Plane Enable (all 4 planes)
+        self.attribute_regs[0x13] = 0x00; // Horizontal Pixel Panning
+        self.attribute_regs[0x14] = 0x00; // Color Select
+    }
+
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         match mode {
+            super::VideoMode::Ega320x200
+            | super::VideoMode::Ega640x200
+            | super::VideoMode::Ega640x350
+            | super::VideoMode::Vga640x480 => {
+                // Misc Output: pick CRT timing roughly matching the mode.
+                self.misc_output_reg = match mode {
+                    super::VideoMode::Vga640x480 => 0xE3,
+                    super::VideoMode::Ega640x350 => 0xA7,
+                    _ => 0x63,
+                };
+
+                // Sequencer: planar layout (no chain-4, no odd/even).
+                self.sequencer_regs[0] = 0x03;
+                self.sequencer_regs[1] = 0x01;
+                self.sequencer_regs[2] = 0x0F; // Map Mask = all planes writable
+                self.sequencer_regs[3] = 0x00;
+                self.sequencer_regs[4] = 0x06; // Extended memory + sequential
+
+                // Graphics Controller: write mode 0, 4-plane.
+                self.graphics_regs[0] = 0x00; // Set/Reset
+                self.graphics_regs[1] = 0x00; // Enable Set/Reset
+                self.graphics_regs[2] = 0x00; // Color Compare
+                self.graphics_regs[3] = 0x00; // Data Rotate
+                self.graphics_regs[4] = 0x00; // Read Map Select
+                self.graphics_regs[5] = 0x00; // Mode Register (write mode 0)
+                self.graphics_regs[6] = 0x05; // Graphics mode, map A0000
+                self.graphics_regs[7] = 0x0F; // Color Don't Care
+                self.graphics_regs[8] = 0xFF; // Bit Mask
+
+                self.load_ega_palette();
+                self.load_ega_attribute_defaults();
+                self.dac_mask = 0xFF;
+
+                // Clear graphics VRAM so we don't see stale pixels.
+                for b in self.vram_graphics.iter_mut() {
+                    *b = 0;
+                }
+            }
             super::VideoMode::Graphics320x200 => {
                 // Initialize Registers for Mode 13h
 

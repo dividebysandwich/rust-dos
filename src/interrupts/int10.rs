@@ -33,8 +33,11 @@ pub fn handle(cpu: &mut Cpu) {
                         }
                     }
                 }
-                // VGA Graphics Mode (13h): Zero out 64KB of A0000 Memory
-                0x13 => {
+                // VGA Graphics Mode (13h) or planar EGA/VGA modes: clear the
+                // entire 256KB planar VRAM. set_video_mode also zeros it but
+                // we do it here so mode setting is consistent with other mode
+                // clears above.
+                0x0D | 0x0E | 0x10 | 0x12 | 0x13 => {
                     for i in 0..cpu.bus.vga.vram_graphics.len() {
                         cpu.bus.vga.vram_graphics[i] = 0x00;
                     }
@@ -78,15 +81,29 @@ pub fn handle(cpu: &mut Cpu) {
                         .log_string("[BIOS] Switch to CGA Graphics Mode (640x200)");
                     cpu.bus.video_mode = VideoMode::Cga640x200;
                 }
-                // TODO: EGA/VGA Modes
-                0x0D | 0x0E | 0x10 | 0x12 => {
-                    cpu.bus.log_string(&format!(
-                        "[BIOS] Switch to EGA/VGA Mode {:02X} (NOT IMPLEMENTED)",
-                        mode
-                    ));
-                    // We default to Text80x25 internally so the emulator doesn't crash.
-                    // TODO: Proper EGA with Planar Memory emulation.
-                    cpu.bus.video_mode = VideoMode::Text80x25;
+                0x0D => {
+                    cpu.bus
+                        .log_string("[BIOS] Switch to EGA Graphics Mode (320x200 16-color)");
+                    cpu.bus.video_mode = VideoMode::Ega320x200;
+                    cpu.bus.vga.set_video_mode(VideoMode::Ega320x200);
+                }
+                0x0E => {
+                    cpu.bus
+                        .log_string("[BIOS] Switch to EGA Graphics Mode (640x200 16-color)");
+                    cpu.bus.video_mode = VideoMode::Ega640x200;
+                    cpu.bus.vga.set_video_mode(VideoMode::Ega640x200);
+                }
+                0x10 => {
+                    cpu.bus
+                        .log_string("[BIOS] Switch to EGA Graphics Mode (640x350 16-color)");
+                    cpu.bus.video_mode = VideoMode::Ega640x350;
+                    cpu.bus.vga.set_video_mode(VideoMode::Ega640x350);
+                }
+                0x12 => {
+                    cpu.bus
+                        .log_string("[BIOS] Switch to VGA Graphics Mode (640x480 16-color)");
+                    cpu.bus.video_mode = VideoMode::Vga640x480;
+                    cpu.bus.vga.set_video_mode(VideoMode::Vga640x480);
                 }
                 0x13 => {
                     cpu.bus

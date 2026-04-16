@@ -4,12 +4,12 @@ use crate::cpu::Cpu;
 pub mod vga;
 
 pub const SCREEN_WIDTH: u32 = 640;
-pub const SCREEN_HEIGHT: u32 = 400;
+pub const SCREEN_HEIGHT: u32 = 480;
 
 // Memory Map Addresses
 pub const ADDR_VGA_GRAPHICS: usize = 0xA0000;
 pub const ADDR_VGA_TEXT: usize = 0xB8000;
-pub const SIZE_GRAPHICS: usize = 64000; // 320 * 200
+pub const SIZE_GRAPHICS: usize = 0x10000; // 64KB A0000..AFFFF window (covers modes 13h, 12h, etc.)
 pub const SIZE_TEXT: usize = 32 * 1024; // 32kB to cover CGA modes too
 pub const BDA_CURSOR_POS: usize = 0x0450; // Base for Page 0. Page n = 0x450 + n*2
 pub const BDA_CURSOR_MODE: usize = 0x0460;
@@ -29,20 +29,129 @@ pub enum VideoMode {
     #[allow(dead_code)]
     Cga320x200 = 0x05, // I can't be bothered and just treat it as Color too
     Cga640x200 = 0x06,
+    Ega320x200 = 0x0D,  // EGA planar, 16 colors
+    Ega640x200 = 0x0E,  // EGA planar, 16 colors
+    Ega640x350 = 0x10,  // EGA planar, 16 colors
+    Vga640x480 = 0x12,  // VGA planar, 16 colors
     Graphics320x200 = 0x13,
 }
 
+impl VideoMode {
+    pub fn is_planar(self) -> bool {
+        matches!(
+            self,
+            VideoMode::Ega320x200
+                | VideoMode::Ega640x200
+                | VideoMode::Ega640x350
+                | VideoMode::Vga640x480
+        )
+    }
+
+    /// Dimensions for each mode in pixels (width, height).
+    pub fn dimensions(self) -> (usize, usize) {
+        match self {
+            VideoMode::Text40x25 | VideoMode::Text40x25Color => (320, 200),
+            VideoMode::Text80x25 | VideoMode::Text80x25Color => (640, 400),
+            VideoMode::Cga320x200Color | VideoMode::Cga320x200 => (320, 200),
+            VideoMode::Cga640x200 => (640, 200),
+            VideoMode::Ega320x200 => (320, 200),
+            VideoMode::Ega640x200 => (640, 200),
+            VideoMode::Ega640x350 => (640, 350),
+            VideoMode::Vga640x480 => (640, 480),
+            VideoMode::Graphics320x200 => (320, 200),
+        }
+    }
+}
+
 pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
+    // Canvas is SCREEN_WIDTH x SCREEN_HEIGHT = 640x480. Modes shorter than 480
+    // leave a black bar below the rendered image; clear everything first so the
+    // bar is black rather than showing the previous frame.
+    for b in canvas.iter_mut() {
+        *b = 0;
+    }
     match bus.video_mode {
         VideoMode::Graphics320x200 => render_graphics_mode(canvas, &bus.vga.vram_graphics, bus),
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => {
-            render_cga_mode4(canvas, &bus.vga.vram_text, &bus)
+            render_cga_mode4(canvas, &bus.vga.vram_text, bus)
         }
         VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vga.vram_text),
-        VideoMode::Text80x25 => render_text_mode_80x25(canvas, &bus.vga.vram_text, bus),
-        VideoMode::Text80x25Color => render_text_mode_80x25(canvas, &bus.vga.vram_text, bus),
-        VideoMode::Text40x25 => render_text_mode_40x25(canvas, &bus.vga.vram_text, bus),
-        VideoMode::Text40x25Color => render_text_mode_40x25(canvas, &bus.vga.vram_text, bus),
+        VideoMode::Text80x25 | VideoMode::Text80x25Color => {
+            render_text_mode_80x25(canvas, &bus.vga.vram_text, bus)
+        }
+        VideoMode::Text40x25 | VideoMode::Text40x25Color => {
+            render_text_mode_40x25(canvas, &bus.vga.vram_text, bus)
+        }
+        VideoMode::Ega320x200 => render_planar(canvas, &bus.vga.vram_graphics, bus, 320, 200, 2, 2),
+        VideoMode::Ega640x200 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 200, 1, 2),
+        VideoMode::Ega640x350 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 350, 1, 1),
+        VideoMode::Vga640x480 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 480, 1, 1),
+    }
+}
+
+/// Generic renderer for planar 16-color VGA/EGA modes (0Dh, 0Eh, 10h, 12h).
+///
+/// Reads pixels out of the 4-plane memory layout and runs each 4-bit pixel
+/// through the Attribute Controller palette, then the DAC. scale_x/scale_y
+/// let us upscale lower-res modes so they fill the standard 640x400 viewport.
+fn render_planar(
+    canvas: &mut [u8],
+    vram: &[u8],
+    bus: &Bus,
+    width: usize,
+    height: usize,
+    scale_x: usize,
+    scale_y: usize,
+) {
+    let bytes_per_row = width / 8;
+    // Mode Control bit 7 (P54S): when set, bits 4-5 of the DAC index come
+    // from Color Select register bits 0-1. When clear (default), they come
+    // from Color Select bits 2-3.
+    let mode_ctrl = bus.vga.attribute_regs[0x10];
+    let color_select = bus.vga.attribute_regs[0x14];
+    let p54_from_cs_low = (mode_ctrl & 0x80) != 0;
+    let high_bits = if p54_from_cs_low {
+        (color_select & 0x03) << 4
+    } else {
+        (color_select & 0x0C) << 4
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            let byte_offset = y * bytes_per_row + (x / 8);
+            let bit_pos = 7 - (x % 8) as u8;
+
+            let mut pixel_idx: u8 = 0;
+            for plane in 0..4 {
+                let idx = plane * 65536 + byte_offset;
+                if idx < vram.len() {
+                    let bit = (vram[idx] >> bit_pos) & 1;
+                    pixel_idx |= bit << plane;
+                }
+            }
+
+            // Attribute Controller Palette: 4-bit pixel -> 6-bit internal color
+            let attr = bus.vga.attribute_regs[pixel_idx as usize & 0x0F] & 0x3F;
+            // Combine with high bits from Color Select to form 8-bit DAC index.
+            // Keep low 4 bits of attr; either bits 4-5 come from attr or from CS
+            // depending on P54S, so we mask those off and OR in high_bits.
+            let dac_idx = (attr & 0x0F) | high_bits;
+
+            let rgb = bus.vga.get_rgb(dac_idx & bus.vga.dac_mask);
+
+            for dy in 0..scale_y {
+                for dx in 0..scale_x {
+                    let tx = x * scale_x + dx;
+                    let ty = y * scale_y + dy;
+                    if tx < SCREEN_WIDTH as usize && ty < SCREEN_HEIGHT as usize {
+                        let idx = (ty * SCREEN_WIDTH as usize + tx) * 3;
+                        canvas[idx] = rgb.0;
+                        canvas[idx + 1] = rgb.1;
+                        canvas[idx + 2] = rgb.2;
+                    }
+                }
+            }
+        }
     }
 }
 

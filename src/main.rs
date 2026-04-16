@@ -2,6 +2,7 @@ use clap::Parser;
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
+use sdl2::mouse::MouseButton;
 use sdl2::pixels::PixelFormatEnum;
 use std::io::Write;
 use std::time::Duration;
@@ -21,6 +22,7 @@ mod f80;
 mod instructions;
 mod interrupts;
 mod keyboard;
+mod mouse;
 mod recorder;
 mod shell;
 mod video;
@@ -150,6 +152,27 @@ fn main() -> Result<(), String> {
                         _ => {}
                     }
                     cpu.bus.write_8(0x0417, flags);
+                }
+
+                Event::MouseMotion { x, y, .. } => {
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, args.scale);
+                    cpu.bus.mouse.set_position(vx, vy);
+                }
+
+                Event::MouseButtonDown { mouse_btn, x, y, .. } => {
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, args.scale);
+                    cpu.bus.mouse.set_position(vx, vy);
+                    if let Some(btn) = sdl_button_to_index(mouse_btn) {
+                        cpu.bus.mouse.button_down(btn);
+                    }
+                }
+
+                Event::MouseButtonUp { mouse_btn, x, y, .. } => {
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, args.scale);
+                    cpu.bus.mouse.set_position(vx, vy);
+                    if let Some(btn) = sdl_button_to_index(mouse_btn) {
+                        cpu.bus.mouse.button_up(btn);
+                    }
                 }
 
                 _ => {}
@@ -409,6 +432,20 @@ fn main() -> Result<(), String> {
                 }
             }
 
+            // Draw Mouse Cursor (software overlay) when visible and installed.
+            // The driver stores the cursor in virtual coords; map those to
+            // screen pixels using the current video mode's dimensions.
+            if cpu.bus.mouse.installed && cpu.bus.mouse.hide_counter <= 0 {
+                let (mode_w, mode_h) = cpu.bus.video_mode.dimensions();
+                let virt_w = if mode_w < 640 { 640 } else { mode_w };
+                let virt_h = mode_h;
+                let sx = (cpu.bus.mouse.x as i64 * video::SCREEN_WIDTH as i64 / virt_w as i64)
+                    as i32;
+                let sy = (cpu.bus.mouse.y as i64 * video::SCREEN_HEIGHT as i64 / virt_h as i64)
+                    as i32;
+                draw_default_mouse_cursor(buffer, sx, sy);
+            }
+
             // Send Frame to Recorder before drawing recording indicator
             recorder.capture(buffer);
 
@@ -441,4 +478,85 @@ fn main() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Convert host window coordinates (in pixels, at window `scale`) into the
+/// driver's virtual coordinate system for the current video mode. Most DOS
+/// mouse drivers use a fixed virtual X range of 0..639 regardless of the
+/// actual horizontal resolution; Y follows the mode's pixel height.
+fn host_to_virtual_mouse(cpu: &Cpu, host_x: i32, host_y: i32, scale: u32) -> (i32, i32) {
+    let (mode_w, mode_h) = cpu.bus.video_mode.dimensions();
+    let scale = scale.max(1) as i32;
+    // Undo the window scale. The textured output is SCREEN_WIDTH x SCREEN_HEIGHT.
+    let px = (host_x / scale).clamp(0, video::SCREEN_WIDTH as i32 - 1);
+    let py = (host_y / scale).clamp(0, video::SCREEN_HEIGHT as i32 - 1);
+
+    // Virtual X axis: 640 wide for 320-wide modes too (standard DOS convention).
+    let virt_w = if mode_w < 640 { 640 } else { mode_w as i32 };
+    let virt_h = mode_h as i32;
+
+    let vx = (px as i64 * virt_w as i64 / video::SCREEN_WIDTH as i64) as i32;
+    let vy = (py as i64 * virt_h as i64 / video::SCREEN_HEIGHT as i64) as i32;
+    (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
+}
+
+fn sdl_button_to_index(button: MouseButton) -> Option<usize> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Right => Some(1),
+        MouseButton::Middle => Some(2),
+        _ => None,
+    }
+}
+
+/// Classic Microsoft-style arrow cursor as a 16x16 bitmap. 1 = white pixel,
+/// 2 = black outline, 0 = transparent. Hotspot is (0,0).
+const CURSOR_ARROW: [[u8; 16]; 16] = [
+    [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [2,1,2,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [2,1,1,2,0,0,0,0,0,0,0,0,0,0,0,0],
+    [2,1,1,1,2,0,0,0,0,0,0,0,0,0,0,0],
+    [2,1,1,1,1,2,0,0,0,0,0,0,0,0,0,0],
+    [2,1,1,1,1,1,2,0,0,0,0,0,0,0,0,0],
+    [2,1,1,1,1,1,1,2,0,0,0,0,0,0,0,0],
+    [2,1,1,1,1,1,1,1,2,0,0,0,0,0,0,0],
+    [2,1,1,1,1,1,2,2,2,2,0,0,0,0,0,0],
+    [2,1,1,2,1,1,2,0,0,0,0,0,0,0,0,0],
+    [2,1,2,0,2,1,1,2,0,0,0,0,0,0,0,0],
+    [2,2,0,0,2,1,1,2,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,2,1,1,2,0,0,0,0,0,0,0],
+    [0,0,0,0,0,2,1,1,2,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0],
+];
+
+fn draw_default_mouse_cursor(buffer: &mut [u8], origin_x: i32, origin_y: i32) {
+    for (row_idx, row) in CURSOR_ARROW.iter().enumerate() {
+        for (col_idx, &cell) in row.iter().enumerate() {
+            if cell == 0 {
+                continue;
+            }
+            let x = origin_x + col_idx as i32;
+            let y = origin_y + row_idx as i32;
+            if x < 0
+                || y < 0
+                || x >= video::SCREEN_WIDTH as i32
+                || y >= video::SCREEN_HEIGHT as i32
+            {
+                continue;
+            }
+            let idx = (y as usize * video::SCREEN_WIDTH as usize + x as usize) * 3;
+            if idx + 2 >= buffer.len() {
+                continue;
+            }
+            let (r, g, b) = if cell == 1 {
+                (0xFF, 0xFF, 0xFF)
+            } else {
+                (0x00, 0x00, 0x00)
+            };
+            buffer[idx] = r;
+            buffer[idx + 1] = g;
+            buffer[idx + 2] = b;
+        }
+    }
 }

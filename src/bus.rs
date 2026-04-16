@@ -38,6 +38,9 @@ pub struct Bus {
     // VGA State
     pub vga: crate::video::vga::VgaCard,
     pub search_handles: std::collections::HashMap<u32, String>,
+
+    // Mouse State (INT 33h)
+    pub mouse: crate::mouse::MouseState,
 }
 
 use std::path::PathBuf;
@@ -66,6 +69,7 @@ impl Bus {
             dta_offset: 0x0000,
             vga: crate::video::vga::VgaCard::new(),
             search_handles: std::collections::HashMap::new(),
+            mouse: crate::mouse::MouseState::new(),
         };
         // BIOS Data Area (BDA) Initialization
         // 0x0449: Current Video Mode (03 = 80x25 Color)
@@ -196,12 +200,11 @@ impl Bus {
     }
 
     pub fn read_8(&self, addr: usize) -> u8 {
-        // if addr >= 0x116F2 && addr < 0x116F2 + 12 {
-        //      println!("[MEM WATCH] CPU reading DTA Filename @ {:05X}. Value: {:02X} ({})",
-        //               addr, self.ram[addr], self.ram[addr] as char);
-        // }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
-            self.vga.vram_graphics[addr - ADDR_VGA_GRAPHICS]
+            // Route through VGA so chain-4, odd/even, and Read Map Select work
+            // correctly. read_graphics also latches planes, needed for planar
+            // read-modify-write sequences.
+            self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS)
         } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
             self.vga.vram_text[addr - ADDR_VGA_TEXT]
         } else {
@@ -222,7 +225,14 @@ impl Bus {
 
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             self.vga.write_graphics(addr - ADDR_VGA_GRAPHICS, value);
-            self.video_mode == VideoMode::Graphics320x200
+            matches!(
+                self.video_mode,
+                VideoMode::Graphics320x200
+                    | VideoMode::Ega320x200
+                    | VideoMode::Ega640x200
+                    | VideoMode::Ega640x350
+                    | VideoMode::Vga640x480
+            )
         } else if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
             self.vga.vram_text[addr - ADDR_VGA_TEXT] = value;
 
