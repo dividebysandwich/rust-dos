@@ -157,6 +157,11 @@ impl Bus {
         bus.install_hle_trap(0x2F, 0xF1020); // Shell Command
         bus.install_hle_trap(0x33, 0xF1024); // Mouse
 
+        // Build a baseline MCB chain — one large free block covering
+        // conventional memory. load_shell / load_exe rebuild as needed, but we
+        // still want mcb::alloc to work for tests and any early allocation.
+        crate::mcb::init_empty(&mut bus);
+
         bus
     }
 

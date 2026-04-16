@@ -6,6 +6,33 @@ use crate::audio::play_sdl_beep;
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::video::print_char;
 
+/// Allocate the largest available free MCB for a child process about to be
+/// loaded via EXEC, and return its first usable paragraph (the new PSP seg).
+/// The MCB owner is temporarily set to the placeholder 0xFFFF and must be
+/// patched to the child's PSP by the caller once load_executable sets it.
+/// Returns None if no free memory could be allocated.
+fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
+    // Walk the chain to find the largest free block.
+    let chain = crate::mcb::walk(&cpu.bus);
+    let largest = chain
+        .iter()
+        .filter(|(_, m)| m.is_free())
+        .map(|(_, m)| m.size)
+        .max()
+        .unwrap_or(0);
+
+    if largest == 0 {
+        return None;
+    }
+
+    // Grab the whole block — DOS convention is "give the child everything;
+    // the child's own startup will AH=4A down to what it needs".
+    match crate::mcb::alloc(&mut cpu.bus, 0xFFFF, largest) {
+        Ok(seg) => Some(seg),
+        Err(_) => None,
+    }
+}
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     match ah {
@@ -500,54 +527,106 @@ pub fn handle(cpu: &mut Cpu) {
                         (filename.clone(), cmd_tail.clone())
                     };
 
-                // Allocate memory for new process using heap_pointer
-                // Align to next paragraph if needed (heap_pointer is already paragraph)
-                let load_segment = cpu.heap_pointer;
+                // Save the parent's full context (registers, SS:SP, CS:IP of
+                // the instruction right after the INT 21 that got us here, PSP,
+                // heap pointer). When the child calls AH=4Ch, the AH=4Ch
+                // handler pops this context back, restoring the parent's stack
+                // so the BOP trap's IRET-pop finds the parent's saved flags/CS/IP.
+                cpu.save_process_context();
+
+                let parent_psp_before = cpu.current_psp;
+                // Allocate the largest free MCB for the child. DOS gives the
+                // child all available conventional memory; it will shrink via
+                // AH=4A in its own startup if it wants to spawn nested children.
+                let load_segment = match find_child_load_segment(cpu) {
+                    Some(seg) => seg,
+                    None => {
+                        cpu.restore_process_context();
+                        cpu.set_cpu_flag(CpuFlags::CF, true);
+                        cpu.set_reg16(Register::AX, 0x08); // Insufficient memory
+                        cpu.bus
+                            .log_string("[DOS] EXEC: no free memory for child");
+                        return;
+                    }
+                };
 
                 if cpu.load_executable(&target_filename, Some(load_segment)) {
+                    // Patch the MCB we allocated above with placeholder owner
+                    // 0xFFFF so it reflects the child's real PSP segment.
+                    let mcb_seg = load_segment.wrapping_sub(1);
+                    let m = crate::mcb::read_mcb(&cpu.bus, mcb_seg);
+                    crate::mcb::write_mcb(
+                        &mut cpu.bus,
+                        mcb_seg,
+                        &crate::mcb::Mcb {
+                            signature: m.signature,
+                            owner: load_segment,
+                            size: m.size,
+                        },
+                    );
+
                     let psp_phys = cpu.get_physical_addr(load_segment, 0);
 
-                    // Write Environment Block
-                    let env_seg = cpu.heap_pointer;
-                    let env_paras = (env_block.len() + 15) / 16;
-                    // Increment heap
-                    cpu.heap_pointer += env_paras as u16 + 1; // +1 safety
-
-                    let env_phys_dest = cpu.get_physical_addr(env_seg, 0);
-                    for (i, &b) in env_block.iter().enumerate() {
-                        cpu.bus.write_8(env_phys_dest + i, b);
-                    }
-
-                    // Now load program at *new* heap pointer
+                    // Write the environment block to its own segment. Using
+                    // heap_pointer is wrong after load_executable (it now
+                    // points into the child's MCB arena); use the block just
+                    // below the child's PSP or the fixed 0x0C00 slot.
                     let new_env_seg = 0x0C00;
                     let new_env_phys = cpu.get_physical_addr(new_env_seg, 0);
                     for (i, &b) in env_block.iter().enumerate() {
                         cpu.bus.write_8(new_env_phys + i, b);
                     }
+                    // Clear a terminator beyond the block
+                    cpu.bus.write_8(new_env_phys + env_block.len(), 0);
 
                     // Update PSP offset 0x2C (Environment Segment)
                     cpu.bus.write_16(psp_phys + 0x2C, new_env_seg);
 
                     // Update PSP offset 0x16 (Parent PSP Segment)
-                    let parent_psp = cpu.current_psp;
-                    cpu.bus.write_16(psp_phys + 0x16, parent_psp);
+                    cpu.bus.write_16(psp_phys + 0x16, parent_psp_before);
 
-                    // Write Command Tail to 80h
-                    // target_cmd_tail_bytes does NOT include CR, logic below adds it.
+                    // Write Command Tail to PSP+0x80
                     cpu.bus
                         .write_8(psp_phys + 0x80, target_cmd_tail_bytes.len() as u8);
                     for (i, &b) in target_cmd_tail_bytes.iter().enumerate() {
                         cpu.bus.write_8(psp_phys + 0x81 + i, b);
                     }
-                    // Ensure CR at end
                     cpu.bus
                         .write_8(psp_phys + 0x81 + target_cmd_tail_bytes.len(), 0x0D);
 
-                    // We do NOT set CF=0 because we don't return to the caller yet!
-                    // The caller is suspended.
+                    // Set up the child's register state per DOS convention.
+                    // AX = 0 typically (we don't validate FCBs). DS/ES already
+                    // point to the PSP from load_executable.
+                    cpu.ax = 0;
+                    cpu.bx = 0;
+                    cpu.cx = 0;
+                    cpu.dx = 0;
+                    cpu.si = 0;
+                    cpu.di = 0;
+                    cpu.bp = 0;
+
+                    // Our BOP trap runs an implicit IRET-style pop after this
+                    // handler returns: it pops IP, CS, flags from SS:SP. Since
+                    // load_executable just switched SS:SP to the child's own
+                    // stack, push the child's entry CS:IP plus sane flags so
+                    // the pop lands us at the child's entry point rather than
+                    // popping zeros off the bottom of its stack.
+                    let entry_ip = cpu.ip;
+                    let entry_cs = cpu.cs;
+                    let entry_flags: u16 = 0x0202; // IF=1, reserved bit 1 always set
+                    cpu.push(entry_flags);
+                    cpu.push(entry_cs);
+                    cpu.push(entry_ip);
+
+                    cpu.bus.log_string(&format!(
+                        "[DOS] EXEC transferred to child at {:04X}:{:04X}, parent PSP={:04X}",
+                        entry_cs, entry_ip, parent_psp_before
+                    ));
                 } else {
-                    // Fail
-                    cpu.restore_process_context(); // Restore parent immediately
+                    // Load failed — release the MCB we allocated, pop the
+                    // context we just saved, and return an error to the parent.
+                    let _ = crate::mcb::free(&mut cpu.bus, load_segment);
+                    cpu.restore_process_context();
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.set_reg16(Register::AX, 0x02); // File not found
                 }

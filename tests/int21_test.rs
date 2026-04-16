@@ -138,14 +138,13 @@ fn test_int21_ah4b_exec() {
         "CF should be clear on success"
     );
 
-    // Verify CS:IP reset (COM file)
-    assert_eq!(cpu.cs, 0x2000);
+    // Verify CS:IP reset (COM file). The exact segment is whatever the MCB
+    // allocator handed out for the child; just confirm the offset and that
+    // DS/CS agree (the PSP lives at CS:0000 for a COM file).
     assert_eq!(cpu.ip, 0x100);
-
-    // Verify PSP Command Tail
-    // PSP is at DS:0000 (after load)
     let psp_seg = cpu.ds;
-    assert_eq!(psp_seg, 0x2000);
+    assert_eq!(psp_seg, cpu.cs, "DS should equal CS for a COM child");
+    assert!(psp_seg >= 0x1000, "PSP segment should be in conventional memory");
 
     let psp_phys = cpu.get_physical_addr(psp_seg, 0x80);
     let tail_len = cpu.bus.read_8(psp_phys);

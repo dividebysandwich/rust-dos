@@ -1360,36 +1360,51 @@ impl Cpu {
             self.cs, self.ip
         ));
 
-        // Build the MCB chain for the program. Real DOS gives the program
-        // min(max_alloc, available-memory) paragraphs at load time, where
-        // max_alloc is the EXE header's maximum-paragraphs field (commonly
-        // 0xFFFF, meaning "all available"). The program may then shrink its
-        // block via AH=4A to release memory for children. We must include
-        // min_alloc in the block so uninitialized data / stack don't overlap
-        // the next MCB header.
+        // Determine the child's memory block size. Two paths:
+        //
+        //  * Fresh boot (segment == None): rebuild the MCB chain from scratch
+        //    giving the program min(max_alloc, available) paragraphs per the
+        //    MZ header, then init a trailing free block.
+        //
+        //  * Nested EXEC (segment == Some): the caller has already allocated
+        //    an MCB for us via mcb::alloc. We simply read its size and leave
+        //    the chain alone so the parent's allocations stay intact.
         let image_len = bytes.len() - header_size;
         let image_paras = ((image_len + 15) / 16) as u16;
-        // 0x10 paragraphs PSP + image + BSS / heap / stack up to max_alloc.
         let min_program_paras = 0x10 + image_paras + min_alloc;
-        // Available conventional paragraphs from load_segment to 0xA000.
-        let available = 0xA000u16.saturating_sub(load_segment);
-        // Reserve one paragraph at the top for the trailing free-block MCB if
-        // we won't consume everything.
-        let desired = if max_alloc == 0 {
-            min_program_paras
+
+        let program_paras = if segment.is_none() {
+            let available = 0xA000u16.saturating_sub(load_segment);
+            let desired = if max_alloc == 0 {
+                min_program_paras
+            } else {
+                min_program_paras.saturating_add(max_alloc - min_alloc.min(max_alloc))
+            };
+            let paras = if desired >= available {
+                available.saturating_sub(1).max(min_program_paras)
+            } else {
+                desired.max(min_program_paras)
+            };
+            crate::mcb::init_for_program(&mut self.bus, load_segment, paras);
+            paras
         } else {
-            min_program_paras.saturating_add(max_alloc - min_alloc.min(max_alloc))
-        };
-        let program_paras = if desired >= available {
-            // Program would use up the whole arena — leave exactly one
-            // paragraph so the free tail-block has a valid header. If we
-            // can't even afford that, just give everything.
-            available.saturating_sub(1).max(min_program_paras)
-        } else {
-            desired.max(min_program_paras)
+            // The caller allocated an MCB for us; trust its size.
+            let mcb = crate::mcb::read_mcb(&self.bus, load_segment.wrapping_sub(1));
+            if !mcb.is_valid() {
+                self.bus
+                    .log_string("[DOS] Nested load_exe: MCB at load_segment-1 is invalid");
+                return false;
+            }
+            if mcb.size < min_program_paras {
+                self.bus.log_string(&format!(
+                    "[DOS] Nested load_exe: MCB size {:04X} < required {:04X}",
+                    mcb.size, min_program_paras
+                ));
+                return false;
+            }
+            mcb.size
         };
         self.heap_pointer = load_segment + program_paras + 1;
-        crate::mcb::init_for_program(&mut self.bus, load_segment, program_paras);
 
         self.bus
             .log_string(&format!("[DEBUG] Heap starts at {:04X}", self.heap_pointer));
