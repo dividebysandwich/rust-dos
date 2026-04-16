@@ -370,19 +370,21 @@ pub fn handle(cpu: &mut Cpu) {
             // tiny companion DSWAP.EXE to verify the installation disk via
             // INT 13h sector reads. Since our emulator doesn't back those
             // reads with a real disk image, the verification always fails
-            // and the game hangs on an "insert disk" prompt. The game will
-            // happily proceed to load vgame.exe (or whatever overlay) on its
-            // own afterwards if DSWAP returns success, so short-circuit the
-            // EXEC with a synthetic exit code 0 without actually loading
-            // the program.
+            // and the game hangs on an "insert disk" prompt.
+            //
+            // Short-circuit the EXEC with an exit code of 1 (the code real
+            // DSWAP returns when the disk IS present). F117.COM then tests
+            // AL != 0 to decide whether to continue to the next EXEC (e.g.
+            // START.EXE or VGAME.EXE) or bail out; returning 0 here made
+            // it take the cleanup-and-quit branch.
             let upper = filename.to_ascii_uppercase();
             let short = upper.rsplit(&['\\', '/', ':'][..]).next().unwrap_or("");
             if mode == 0x00 && short == "DSWAP.EXE" {
                 cpu.bus.log_string(&format!(
-                    "[DOS] EXEC: short-circuiting DSWAP.EXE ({}), faking success",
+                    "[DOS] EXEC: short-circuiting DSWAP.EXE ({}), faking success (exit=01)",
                     filename
                 ));
-                cpu.last_child_exit = 0x0000;
+                cpu.last_child_exit = 0x0001;
                 cpu.set_cpu_flag(CpuFlags::CF, false);
                 cpu.set_reg16(Register::AX, 0x0000);
                 return;
