@@ -235,34 +235,40 @@ fn main() -> Result<(), String> {
             }
         }
 
+        // Sample the host clock ONCE per 30k-instruction batch rather than on
+        // every iteration. `Instant::elapsed()` is cheap on Linux (vDSO) but
+        // even cheap syscalls at 30 000 × 60fps = 1.8M calls/s add up. Losing
+        // at most one batch of timing resolution (~16ms worst-case) is well
+        // within the 55ms PIT tick budget.
+        let now_ms = cpu.bus.start_time.elapsed().as_millis();
+        let timer_due =
+            (cpu.bus.pic_mask & 0x01) == 0 && now_ms.wrapping_sub(cpu.last_timer_tick) >= 55;
+        let mut timer_fired = false;
+
         // Execute instructions
         for _ in 0..30_000 {
-            // Inject INT 08h (system timer IRQ0) at the BIOS standard ~18.2 Hz.
-            // Without this, the BDA tick counter at 0x046C never advances and
-            // programs that use INT 21h AH=2Ch or directly poll the BDA tick
-            // count to gate fades, animations, or delays wait forever.
-            // (Cpu::step has an equivalent injection for the test harness, but
-            //  the real emulator loop dispatches instructions inline and so
-            //  needs its own copy.)
+            // Deliver pending hardware IRQs at the start of each instruction
+            // as a CPU would, but only when the program has IF=1 (interrupts
+            // enabled) and the PIC IMR allows the line. Missing the exact
+            // instruction boundary doesn't matter — any iteration where IF
+            // is high will catch the pending IRQ.
             if cpu.get_cpu_flag(CpuFlags::IF) {
-                // IRQ 0 (timer) — gated by PIC IMR bit 0.
-                if (cpu.bus.pic_mask & 0x01) == 0 {
-                    let now = cpu.bus.start_time.elapsed().as_millis();
-                    if now.wrapping_sub(cpu.last_timer_tick) >= 55 {
-                        cpu.last_timer_tick = now;
-                        let ivt = 0x08usize * 4;
-                        let handler_ip = cpu.bus.read_16(ivt);
-                        let handler_cs = cpu.bus.read_16(ivt + 2);
-                        if handler_cs != 0 || handler_ip != 0 {
-                            cpu.push(cpu.get_cpu_flags().bits());
-                            cpu.push(cpu.cs);
-                            cpu.push(cpu.ip);
-                            cpu.cs = handler_cs;
-                            cpu.ip = handler_ip;
-                            cpu.set_cpu_flag(CpuFlags::IF, false);
-                            cpu.set_cpu_flag(CpuFlags::TF, false);
-                            continue;
-                        }
+                // IRQ 0 (timer) at 18.2 Hz — fires at most once per batch.
+                if timer_due && !timer_fired {
+                    let ivt = 0x08usize * 4;
+                    let handler_ip = cpu.bus.read_16(ivt);
+                    let handler_cs = cpu.bus.read_16(ivt + 2);
+                    if handler_cs != 0 || handler_ip != 0 {
+                        cpu.last_timer_tick = now_ms;
+                        timer_fired = true;
+                        cpu.push(cpu.get_cpu_flags().bits());
+                        cpu.push(cpu.cs);
+                        cpu.push(cpu.ip);
+                        cpu.cs = handler_cs;
+                        cpu.ip = handler_ip;
+                        cpu.set_cpu_flag(CpuFlags::IF, false);
+                        cpu.set_cpu_flag(CpuFlags::TF, false);
+                        continue;
                     }
                 }
 

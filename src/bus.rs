@@ -8,7 +8,13 @@ use crate::disk::DiskController;
 use crate::video::{ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
 
 pub trait Device {
-    fn ports(&self) -> Vec<u16>;
+    /// Return the set of I/O ports this device owns.
+    ///
+    /// Must return a `'static` slice rather than a freshly-allocated `Vec`,
+    /// because the bus dispatcher calls this on *every* IO read/write and a
+    /// heap allocation per port access would dominate the runtime of any
+    /// program doing heavy VGA register work (palette writes, status polls).
+    fn ports(&self) -> &'static [u16];
     fn io_read(&mut self, port: u16) -> u8;
     fn io_write(&mut self, port: u16, value: u8);
     fn step(&mut self) {}

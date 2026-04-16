@@ -413,8 +413,10 @@ impl VgaCard {
 }
 
 impl Device for VgaCard {
-    fn ports(&self) -> Vec<u16> {
-        vec![
+    fn ports(&self) -> &'static [u16] {
+        // Static slice so the bus can check port ownership without allocating
+        // a Vec on every I/O (palette updates do >1000 port writes each).
+        const PORTS: &[u16] = &[
             0x3C2, // Misc Output (Write) / Input Status 0 (Read)
             0x3C3, // Video Enable
             0x3C4, 0x3C5, // Sequencer
@@ -423,7 +425,8 @@ impl Device for VgaCard {
             0x3D4, 0x3D5, // CRTC
             0x3C6, 0x3C7, 0x3C8, 0x3C9, // DAC
             0x3DA, // Status
-        ]
+        ];
+        PORTS
     }
 
     fn io_read(&mut self, port: u16) -> u8 {
