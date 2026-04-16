@@ -461,7 +461,7 @@ impl Device for VgaCard {
                 // 0110 = Color 80x25
                 let switch_val = (switches >> select) & 0x01;
 
-                (switch_val << 4) // Return switch sense in Bit 4
+                switch_val << 4 // Return switch sense in Bit 4
             }
             0x3C1 => {
                 let val = if (self.attribute_index as usize) < self.attribute_regs.len() {

@@ -29,6 +29,16 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
         return;
     }
 
+    // Flag suspicious IVT targets: segment 0 outside the shell's code region,
+    // or any jump into the IVT itself. These almost always mean a corrupted
+    // IVT entry or a bad FAR indirection landed on an IVT byte.
+    if (new_cs == 0 && new_ip < 0x100) || new_cs == 0xFFFF {
+        cpu.bus.log_string(&format!(
+            "[CPU] Suspicious INT {:02X} vector at IVT[{:02X}]={:04X}:{:04X} from CS:IP={:04X}:{:04X}",
+            vector, vector, new_cs, new_ip, cpu.cs, cpu.ip
+        ));
+    }
+
     // Push State (Simulate Hardware)
     cpu.push(cpu.get_cpu_flags().bits());
     cpu.push(cpu.cs);

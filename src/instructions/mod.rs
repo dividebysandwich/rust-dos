@@ -114,7 +114,21 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
         }
 
         _ => {
-            cpu.bus.log_string(&format!("[CPU] Unhandled: {}", instr));
+            let cs = cpu.cs;
+            let ip = cpu.ip.wrapping_sub(instr.len() as u16);
+            let phys = cpu.get_physical_addr(cs, ip);
+            let mut bytes = String::new();
+            for i in 0..16 {
+                let a = phys.wrapping_add(i);
+                if a < cpu.bus.ram.len() {
+                    bytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+                }
+            }
+            cpu.bus.log_string(&format!(
+                "[CPU] Unhandled: {} at {:04X}:{:04X} bytes={} AX={:04X} BX={:04X} CX={:04X} DX={:04X} SI={:04X} DI={:04X} BP={:04X} SP={:04X} DS={:04X} ES={:04X} SS={:04X}",
+                instr, cs, ip, bytes.trim(),
+                cpu.ax, cpu.bx, cpu.cx, cpu.dx, cpu.si, cpu.di, cpu.bp, cpu.sp, cpu.ds, cpu.es, cpu.ss
+            ));
         }
     }
 

@@ -1139,10 +1139,10 @@ pub fn handle(cpu: &mut Cpu) {
             let al = cpu.get_al();
             let bx = cpu.bx; // Handle
 
-            cpu.bus.log_string(&format!(
-                "[DOS] IOCTL AH=44h AL={:02X} Handle={:04X}",
-                al, bx
-            ));
+            // cpu.bus.log_string(&format!(
+            //     "[DOS] IOCTL AH=44h AL={:02X} Handle={:04X}",
+            //     al, bx
+            // ));
 
             match al {
                 // Get Device Information
@@ -1521,19 +1521,18 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         _ => {
-            // Unknown DOS function. Return the standard "invalid function"
-            // error (CF=1, AX=1) so well-behaved programs know to take their
-            // fallback path instead of reading stale/uninitialised registers
-            // as if the call had succeeded. Log register state so we can
-            // recognise custom / vendor extensions that show up in the wild.
+            // Unknown DOS function. Match DOSBox: clear AL, leave AH and CF
+            // untouched. Some programs (e.g. MicroProse's VGAME.EXE probing
+            // AX=BFBFh for an optional TSR) treat CF=1/AX=1 as a fatal signal
+            // and jump through an uninitialised vector. AL=0 keeps them on
+            // the "TSR not present" fallback path.
             cpu.bus.log_string(&format!(
                 "[DOS] Unhandled INT 21h AH={:02X} AL={:02X} BX={:04X} CX={:04X} DX={:04X} DS={:04X} ES={:04X} SI={:04X} DI={:04X}",
                 ah,
                 cpu.get_al(),
                 cpu.bx, cpu.cx, cpu.dx, cpu.ds, cpu.es, cpu.si, cpu.di
             ));
-            cpu.set_cpu_flag(CpuFlags::CF, true);
-            cpu.set_reg16(Register::AX, 0x0001);
+            cpu.set_reg8(Register::AL, 0);
         }
     }
 }

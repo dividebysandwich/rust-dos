@@ -63,10 +63,10 @@ fn jmp(cpu: &mut Cpu, instr: &Instruction) {
         }
 
         // JMP ptr16:16 (Far Direct) -> JMP SEG:OFF
-        // iced_x86: far_branch16 = Segment, near_branch16 = Offset
+        // iced_x86: far_branch16() = offset, far_branch_selector() = segment.
         Code::Jmp_ptr1616 => {
             cpu.ip = instr.far_branch16();
-            cpu.cs = instr.near_branch16() as u16;
+            cpu.cs = instr.far_branch_selector();
         }
 
         // JMP m16:16 (Far Indirect) -> JMP DWORD PTR [BX]
@@ -100,7 +100,7 @@ fn call(cpu: &mut Cpu, instr: &Instruction) {
             cpu.push(cpu.cs);
             cpu.push(cpu.ip);
             cpu.ip = instr.far_branch16();
-            cpu.cs = instr.near_branch16() as u16;
+            cpu.cs = instr.far_branch_selector();
         }
         Code::Call_m1616 => {
             let addr = calculate_addr(cpu, instr);

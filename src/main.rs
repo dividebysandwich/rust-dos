@@ -394,6 +394,20 @@ fn main() -> Result<(), String> {
             // check needed for code fetch, code segments are always below
             // 0xA0000 in our loaded programs.
             let phys_ip = cpu.get_physical_addr(cpu.cs, cpu.ip);
+
+            // Tripwire: arriving in the IVT / BIOS data area with an
+            // application context (DS not 0, not the shell at CS=0) almost
+            // always means a corrupted FAR pointer landed us here.
+            if cpu.cs == 0 && cpu.ip < 0x100 && cpu.ds != 0 && cpu.ds != 0x1000 {
+                cpu.bus.log_string(&format!(
+                    "[TRIPWIRE] Entered IVT region CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} AX={:04X} BX={:04X} CX={:04X} DX={:04X}",
+                    cpu.cs, cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.ax, cpu.bx, cpu.cx, cpu.dx
+                ));
+                let _ = cpu.bus.log_file.as_mut().unwrap().flush();
+                cpu.state = CpuState::RebootShell;
+                break;
+            }
+
             let b0 = ram_slice[phys_ip];
             let b1 = ram_slice[phys_ip + 1];
 
