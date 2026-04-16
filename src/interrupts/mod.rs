@@ -4,6 +4,7 @@ pub mod int08;
 pub mod int10;
 pub mod int11;
 pub mod int12;
+pub mod int13;
 pub mod int15;
 pub mod int16;
 pub mod int1a;
@@ -55,10 +56,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         0x21 => int21::handle(cpu),
         0x28 => { /* Idle Interrupt - Do nothing */ }
         0x2A => { /* DOS Timer Tick - Do nothing for now */ }
-        0x13 => {
-            cpu.bus.log_string("[BIOS] Unhandled INT 13h (Disk)");
-            cpu.set_cpu_flag(CpuFlags::CF, true);
-        }
+        0x13 => int13::handle(cpu),
         0x14 => {
             cpu.bus.log_string("[BIOS] Unhandled INT 14h (Serial)");
             cpu.set_reg8(iced_x86::Register::AH, 0x80);
