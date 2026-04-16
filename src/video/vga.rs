@@ -11,6 +11,8 @@ pub struct VgaCard {
     pub dac_write_index: u8,
     pub dac_read_index: u8,
     pub dac_step: u8,
+    pub dac_state: u8,     // 0 = write mode, 3 = read mode (readable via 0x3C7)
+    pub dac_mask: u8,      // PEL (pixel) mask register, port 0x3C6 (default 0xFF)
     pub misc_output_reg: u8,
     pub retrace_counter: u8,
     pub palette: Vec<u8>, // 256 * 3
@@ -86,6 +88,8 @@ impl VgaCard {
             dac_write_index: 0,
             dac_read_index: 0,
             dac_step: 0,
+            dac_state: 0,
+            dac_mask: 0xFF,
             misc_output_reg: 0x67, // Text Mode (Color + RAM Enable)
             retrace_counter: 0,
             palette,
@@ -291,7 +295,7 @@ impl Device for VgaCard {
             0x3CE, 0x3CF, // Graphics
             0x3CC, // Misc Output Read
             0x3D4, 0x3D5, // CRTC
-            0x3C8, 0x3C9, // DAC
+            0x3C6, 0x3C7, 0x3C8, 0x3C9, // DAC
             0x3DA, // Status
         ]
     }
@@ -370,6 +374,23 @@ impl Device for VgaCard {
                 println!("[VGA] Read CRTC {:02X} -> {:02X}", self.crtc_index, val);
                 val
             }
+            0x3C6 => self.dac_mask,
+            0x3C7 => self.dac_state,
+            0x3C8 => self.dac_write_index,
+            0x3C9 => {
+                let index = (self.dac_read_index as usize) * 3 + (self.dac_step as usize);
+                let val = if index < self.palette.len() {
+                    self.palette[index]
+                } else {
+                    0
+                };
+                self.dac_step += 1;
+                if self.dac_step == 3 {
+                    self.dac_step = 0;
+                    self.dac_read_index = self.dac_read_index.wrapping_add(1);
+                }
+                val
+            }
             _ => {
                 println!("[VGA] Read Unhandled {:04X}", port);
                 0xFF
@@ -439,9 +460,19 @@ impl Device for VgaCard {
                     println!("[VGA] CRTC Reg {:02X} = {:02X}", self.crtc_index, value);
                 }
             }
+            0x3C6 => {
+                self.dac_mask = value;
+            }
+            0x3C7 => {
+                // Set DAC Read Index. Subsequent reads from 0x3C9 return R,G,B triplets.
+                self.dac_read_index = value;
+                self.dac_step = 0;
+                self.dac_state = 3; // Read mode
+            }
             0x3C8 => {
                 self.dac_write_index = value;
                 self.dac_step = 0;
+                self.dac_state = 0; // Write mode
             }
             0x3C9 => {
                 let index = (self.dac_write_index as usize) * 3 + (self.dac_step as usize);

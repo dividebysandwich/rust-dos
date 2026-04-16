@@ -349,7 +349,6 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 10h: Palette / Color Registers
         0x10 => {
             let al = cpu.get_al();
-            matches!(al, 0x00 | 0x01 | 0x02 | 0x07 | 0x10 | 0x13); // Suppress unused warning hack? No.
             match al {
                 0x00 => {
                     // Set Single Palette Register
@@ -378,6 +377,18 @@ pub fn handle(cpu: &mut Cpu) {
                     let border = cpu.bus.read_8(addr + 16);
                     cpu.bus.vga.attribute_regs[0x11] = border;
                 }
+                0x03 => {
+                    // Toggle Blinking / Background Intensity
+                    // BL = 0 -> Intensity (bit 7 of attribute = intense background)
+                    // BL = 1 -> Blinking
+                    let bl = cpu.get_reg8(Register::BL);
+                    let mode = cpu.bus.vga.attribute_regs[0x10];
+                    if bl == 0 {
+                        cpu.bus.vga.attribute_regs[0x10] = mode & !0x08;
+                    } else {
+                        cpu.bus.vga.attribute_regs[0x10] = mode | 0x08;
+                    }
+                }
                 0x07 => {
                     // Read Individual Palette Register
                     // BL = Register
@@ -386,20 +397,151 @@ pub fn handle(cpu: &mut Cpu) {
                     let val = cpu.bus.vga.attribute_regs[reg as usize];
                     cpu.set_reg8(Register::BH, val);
                 }
+                0x08 => {
+                    // Read Overscan Color -> BH
+                    let val = cpu.bus.vga.attribute_regs[0x11];
+                    cpu.set_reg8(Register::BH, val);
+                }
+                0x09 => {
+                    // Read All Palette Registers + Overscan
+                    // ES:DX -> 17-byte buffer (16 palette + overscan)
+                    let es = cpu.es;
+                    let dx = cpu.dx;
+                    let addr = cpu.get_physical_addr(es, dx);
+                    for i in 0..16 {
+                        let val = cpu.bus.vga.attribute_regs[i];
+                        cpu.bus.write_8(addr + i, val);
+                    }
+                    let border = cpu.bus.vga.attribute_regs[0x11];
+                    cpu.bus.write_8(addr + 16, border);
+                }
                 0x10 => {
                     // Set Individual DAC Register
-                    // BX = Register
-                    // DH = Red, CH = Green, CL = Blue
-                    let idx = cpu.bx;
-                    let r = (cpu.dx >> 8) as u8; // DH
-                    let g = (cpu.cx >> 8) as u8; // CH
-                    let b = (cpu.cx & 0xFF) as u8; // CL
+                    // BX = Register (0-255)
+                    // DH = Red, CH = Green, CL = Blue (each 6-bit, 0-63)
+                    let idx = (cpu.bx & 0xFF) as usize;
+                    let r = (cpu.dx >> 8) as u8 & 0x3F; // DH
+                    let g = (cpu.cx >> 8) as u8 & 0x3F; // CH
+                    let b = (cpu.cx & 0xFF) as u8 & 0x3F; // CL
 
-                    let base = (idx as usize) * 3;
+                    let base = idx * 3;
                     if base + 2 < cpu.bus.vga.palette.len() {
                         cpu.bus.vga.palette[base] = r;
                         cpu.bus.vga.palette[base + 1] = g;
                         cpu.bus.vga.palette[base + 2] = b;
+                    }
+                }
+                0x12 => {
+                    // Set Block of DAC Registers
+                    // BX = Starting register, CX = Count
+                    // ES:DX -> table of (R,G,B) triplets (6-bit values each)
+                    let start = (cpu.bx & 0xFF) as usize;
+                    let count = cpu.cx as usize;
+                    let es = cpu.es;
+                    let dx = cpu.dx;
+                    let addr = cpu.get_physical_addr(es, dx);
+
+                    for i in 0..count {
+                        let base = (start + i) * 3;
+                        if base + 2 >= cpu.bus.vga.palette.len() {
+                            break;
+                        }
+                        let src = addr + i * 3;
+                        cpu.bus.vga.palette[base] = cpu.bus.read_8(src) & 0x3F;
+                        cpu.bus.vga.palette[base + 1] = cpu.bus.read_8(src + 1) & 0x3F;
+                        cpu.bus.vga.palette[base + 2] = cpu.bus.read_8(src + 2) & 0x3F;
+                    }
+                }
+                0x13 => {
+                    // Select Color Page
+                    // BL = 0: Set Paging Mode (BH bit 0 selects 16 pages of 16 / 4 pages of 64)
+                    // BL = 1: Set Page Number (BH = page)
+                    let bl = cpu.get_reg8(Register::BL);
+                    let bh = cpu.get_reg8(Register::BH);
+                    if bl == 0 {
+                        // Bit 7 of Mode Control Register (attr 0x10) = paging mode
+                        let mode = cpu.bus.vga.attribute_regs[0x10];
+                        cpu.bus.vga.attribute_regs[0x10] = (mode & !0x80) | ((bh & 1) << 7);
+                    } else {
+                        cpu.bus.vga.attribute_regs[0x14] = bh;
+                    }
+                }
+                0x15 => {
+                    // Read Individual DAC Register
+                    // BX = Register
+                    // Return: DH=Red, CH=Green, CL=Blue
+                    let idx = (cpu.bx & 0xFF) as usize;
+                    let base = idx * 3;
+                    if base + 2 < cpu.bus.vga.palette.len() {
+                        let r = cpu.bus.vga.palette[base];
+                        let g = cpu.bus.vga.palette[base + 1];
+                        let b = cpu.bus.vga.palette[base + 2];
+                        cpu.set_reg8(Register::DH, r);
+                        cpu.set_reg8(Register::CH, g);
+                        cpu.set_reg8(Register::CL, b);
+                    }
+                }
+                0x17 => {
+                    // Read Block of DAC Registers
+                    // BX = Starting register, CX = Count
+                    // ES:DX -> buffer to receive (R,G,B) triplets
+                    let start = (cpu.bx & 0xFF) as usize;
+                    let count = cpu.cx as usize;
+                    let es = cpu.es;
+                    let dx = cpu.dx;
+                    let addr = cpu.get_physical_addr(es, dx);
+
+                    for i in 0..count {
+                        let base = (start + i) * 3;
+                        if base + 2 >= cpu.bus.vga.palette.len() {
+                            break;
+                        }
+                        let r = cpu.bus.vga.palette[base];
+                        let g = cpu.bus.vga.palette[base + 1];
+                        let b = cpu.bus.vga.palette[base + 2];
+                        let dst = addr + i * 3;
+                        cpu.bus.write_8(dst, r);
+                        cpu.bus.write_8(dst + 1, g);
+                        cpu.bus.write_8(dst + 2, b);
+                    }
+                }
+                0x18 => {
+                    // Set PEL Mask
+                    // BL = Mask
+                    cpu.bus.vga.dac_mask = cpu.get_reg8(Register::BL);
+                }
+                0x19 => {
+                    // Read PEL Mask -> BL
+                    let mask = cpu.bus.vga.dac_mask;
+                    cpu.set_reg8(Register::BL, mask);
+                }
+                0x1A => {
+                    // Read Color Page State
+                    // Returns: BH = current page, BL = paging mode (0=4x64, 1=16x16)
+                    let mode = cpu.bus.vga.attribute_regs[0x10];
+                    let page = cpu.bus.vga.attribute_regs[0x14];
+                    cpu.set_reg8(Register::BH, page);
+                    cpu.set_reg8(Register::BL, (mode >> 7) & 1);
+                }
+                0x1B => {
+                    // Perform Gray-Scale Summing
+                    // BX = starting register, CX = count
+                    let start = (cpu.bx & 0xFF) as usize;
+                    let count = cpu.cx as usize;
+
+                    for i in 0..count {
+                        let base = (start + i) * 3;
+                        if base + 2 >= cpu.bus.vga.palette.len() {
+                            break;
+                        }
+                        let r = cpu.bus.vga.palette[base] as u32;
+                        let g = cpu.bus.vga.palette[base + 1] as u32;
+                        let b = cpu.bus.vga.palette[base + 2] as u32;
+                        // NTSC-style luminance formula scaled into 6-bit range
+                        let gray = ((r * 30 + g * 59 + b * 11) / 100).min(63) as u8;
+                        cpu.bus.vga.palette[base] = gray;
+                        cpu.bus.vga.palette[base + 1] = gray;
+                        cpu.bus.vga.palette[base + 2] = gray;
                     }
                 }
                 _ => {

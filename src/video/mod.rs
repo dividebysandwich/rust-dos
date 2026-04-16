@@ -63,7 +63,8 @@ pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
             } else {
                 0
             };
-            let rgb = bus.vga.get_rgb(color_idx);
+            // VGA hardware ANDs pixel through the PEL mask register before DAC lookup.
+            let rgb = bus.vga.get_rgb(color_idx & bus.vga.dac_mask);
 
             // Scale 2x horizontally and 2x vertically
             for dy in 0..2 {
