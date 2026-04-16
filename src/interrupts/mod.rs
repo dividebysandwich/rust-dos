@@ -1,6 +1,7 @@
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 pub mod int00;
 pub mod int08;
+pub mod int09;
 pub mod int10;
 pub mod int11;
 pub mod int12;
@@ -46,6 +47,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
     match vector {
         0x00 => int00::handle(cpu),
         0x08 => int08::handle(cpu),
+        0x09 => int09::handle(cpu),
         0x10 => int10::handle(cpu),
         0x11 => int11::handle(cpu),
         0x12 => int12::handle(cpu),

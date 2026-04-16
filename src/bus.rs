@@ -19,6 +19,13 @@ pub struct Bus {
     pub video_mode: VideoMode, // Current State
     pub disk: DiskController,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
+    /// Last scan code delivered to port 0x60. Real hardware latches the byte
+    /// there until the CPU reads it. High bit set = key release.
+    pub last_scan_code: u8,
+    /// True while a key-scan IRQ1 (INT 09h) is pending delivery. Set by the
+    /// SDL event handler on key-down/key-up, cleared by the emulator loop
+    /// once the INT 09h ISR has been invoked.
+    pub irq1_pending: bool,
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub start_time: Instant, // System timer
@@ -52,6 +59,8 @@ impl Bus {
             video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
             disk: DiskController::new(root_path),
             keyboard_buffer: VecDeque::new(),
+            last_scan_code: 0,
+            irq1_pending: false,
             cursor_x: 0,
             cursor_y: 0,
             start_time: Instant::now(),
@@ -414,6 +423,23 @@ impl Bus {
     // Read from an I/O Port
     pub fn io_read(&mut self, port: u16) -> u8 {
         match port {
+            // Port 0x60 — Keyboard data port. Real hardware latches the
+            // last-received scan code here; programs either read this from
+            // their INT 09h ISR after IRQ1 fires, or poll it directly.
+            0x60 => self.last_scan_code,
+
+            // Port 0x64 — Keyboard controller status (8042).
+            //   Bit 0 = output buffer full (1 = scan code ready to read)
+            //   Bit 1 = input buffer full (we never have commands pending)
+            // We report "output ready" whenever a key event is pending.
+            0x64 => {
+                if self.irq1_pending {
+                    0x01
+                } else {
+                    0x00
+                }
+            }
+
             // Read PPI Port B (Speaker State)
             0x61 => {
                 let mut val = 0;

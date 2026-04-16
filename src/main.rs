@@ -133,14 +133,20 @@ fn main() -> Result<(), String> {
                         continue;
                     }
 
-                    // Map Key to PC Scancode/ASCII
+                    // Map Key to PC Scancode/ASCII. High byte = scancode,
+                    // low byte = ASCII. Keep pushing to the INT 16h buffer
+                    // for BIOS-based input, and ALSO latch the raw scan code
+                    // at port 0x60 + raise IRQ1 so games that poll the port
+                    // or install a custom INT 09h ISR see the event.
                     if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
                         cpu.bus.keyboard_buffer.push_back(code);
+                        cpu.bus.last_scan_code = (code >> 8) as u8;
+                        cpu.bus.irq1_pending = true;
                     }
                 }
-                // KeyUp only matters for modifiers
                 Event::KeyUp {
                     keycode: Some(keycode),
+                    keymod,
                     ..
                 } => {
                     // Update BDA Shift Flags (Clear bits)
@@ -153,6 +159,18 @@ fn main() -> Result<(), String> {
                         _ => {}
                     }
                     cpu.bus.write_8(0x0417, flags);
+
+                    // Deliver release scan code (scancode | 0x80) to port 0x60
+                    // and fire IRQ1. Games that track held keys (arrow-key
+                    // movement, etc.) need these to know when the key stops
+                    // being pressed.
+                    if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
+                        let sc = (code >> 8) as u8;
+                        if sc != 0 {
+                            cpu.bus.last_scan_code = sc | 0x80;
+                            cpu.bus.irq1_pending = true;
+                        }
+                    }
                 }
 
                 Event::MouseMotion { x, y, .. } => {
@@ -227,10 +245,32 @@ fn main() -> Result<(), String> {
             //  the real emulator loop dispatches instructions inline and so
             //  needs its own copy.)
             if cpu.get_cpu_flag(CpuFlags::IF) {
-                let now = cpu.bus.start_time.elapsed().as_millis();
-                if now.wrapping_sub(cpu.last_timer_tick) >= 55 {
-                    cpu.last_timer_tick = now;
-                    let ivt = 0x08usize * 4;
+                // IRQ 0 (timer) — gated by PIC IMR bit 0.
+                if (cpu.bus.pic_mask & 0x01) == 0 {
+                    let now = cpu.bus.start_time.elapsed().as_millis();
+                    if now.wrapping_sub(cpu.last_timer_tick) >= 55 {
+                        cpu.last_timer_tick = now;
+                        let ivt = 0x08usize * 4;
+                        let handler_ip = cpu.bus.read_16(ivt);
+                        let handler_cs = cpu.bus.read_16(ivt + 2);
+                        if handler_cs != 0 || handler_ip != 0 {
+                            cpu.push(cpu.get_cpu_flags().bits());
+                            cpu.push(cpu.cs);
+                            cpu.push(cpu.ip);
+                            cpu.cs = handler_cs;
+                            cpu.ip = handler_ip;
+                            cpu.set_cpu_flag(CpuFlags::IF, false);
+                            cpu.set_cpu_flag(CpuFlags::TF, false);
+                            continue;
+                        }
+                    }
+                }
+
+                // IRQ 1 (keyboard) — gated by PIC IMR bit 1. Fired once per
+                // key event so custom INT 09h ISRs see the scan code.
+                if cpu.bus.irq1_pending && (cpu.bus.pic_mask & 0x02) == 0 {
+                    cpu.bus.irq1_pending = false;
+                    let ivt = 0x09usize * 4;
                     let handler_ip = cpu.bus.read_16(ivt);
                     let handler_cs = cpu.bus.read_16(ivt + 2);
                     if handler_cs != 0 || handler_ip != 0 {
@@ -241,7 +281,7 @@ fn main() -> Result<(), String> {
                         cpu.ip = handler_ip;
                         cpu.set_cpu_flag(CpuFlags::IF, false);
                         cpu.set_cpu_flag(CpuFlags::TF, false);
-                        continue; // refetch from the new CS:IP
+                        continue;
                     }
                 }
             }
