@@ -389,6 +389,66 @@ impl DiskController {
         }
     }
 
+    /// DOS INT 21h AH=3Ch semantics: open the named file for read/write,
+    /// creating it if missing, and truncating its contents if it exists.
+    pub fn create_or_truncate(&mut self, filename: &str) -> Result<u16, u8> {
+        if self.is_virtual_file(filename) {
+            return Err(0x05);
+        }
+        // If the file already exists, resolve_path finds it. Otherwise fall
+        // back to `root_path / current_dir / <bare-filename>` so we create
+        // it in the current DOS working directory.
+        let path = match self.resolve_path(filename) {
+            Some(p) => p,
+            None => {
+                let mut p = self.root_path.clone();
+                for part in self.current_dir.split('\\') {
+                    if !part.is_empty() {
+                        p.push(part);
+                    }
+                }
+                // Use only the basename, discarding any `DRIVE:` or path
+                // separators the caller supplied.
+                let bare = filename
+                    .rsplit(&['\\', '/', ':'][..])
+                    .next()
+                    .unwrap_or(filename);
+                p.push(bare);
+                p
+            }
+        };
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+        {
+            Ok(f) => {
+                let handle = self.next_handle;
+                self.next_handle += 1;
+                self.open_files.insert(handle, f);
+                Ok(handle)
+            }
+            Err(_) => Err(0x05),
+        }
+    }
+
+    /// DOS INT 21h AH=40h with CX=0: truncate the file at its current seek
+    /// position. MS-DOS leveraged this as a "shrink/extend" primitive;
+    /// MicroProse games use it when rewriting small config files (regn.3dg
+    /// theatre selection, roster, etc.).
+    pub fn truncate_file(&mut self, handle: u16) -> Result<(), u8> {
+        if let Some(file) = self.open_files.get_mut(&handle) {
+            match file.stream_position() {
+                Ok(pos) => file.set_len(pos).map_err(|_| 0x05),
+                Err(_) => Err(0x05),
+            }
+        } else {
+            Err(0x06)
+        }
+    }
+
     // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
         if let Some(file) = self.open_files.get_mut(&handle) {

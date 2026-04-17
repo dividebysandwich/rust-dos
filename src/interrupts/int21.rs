@@ -937,14 +937,26 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH=3Ch: Create File
+        //
+        // DOS semantics: CREATE-OR-TRUNCATE. If the file already exists it
+        // is zeroed; if not, it is created. Our mode-2 Open preserves
+        // existing content, so we need the dedicated create-truncate path
+        // here — otherwise programs that rewrite small files (e.g.
+        // START.EXE persisting a theatre pick to regn.3dg) would leave
+        // stale data mixed with the new contents.
         0x3C => {
             let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, addr);
             // Attributes in CX are ignored for now (TODO)
-            match cpu.bus.disk.open_file(&filename, 0x02) {
-                // 0x02 = Read/Write + Create
+            match cpu.bus.disk.create_or_truncate(&filename) {
                 Ok(handle) => {
                     cpu.ax = handle;
+                    cpu.bus.last_opened_handle = handle;
+                    cpu.bus.last_opened_filename = filename.clone();
+                    cpu.bus.log_string(&format!(
+                        "[DEBUG] Create File: '{}' -> Handle={:04X}",
+                        filename, handle
+                    ));
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
@@ -1053,6 +1065,12 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH = 40h: Write to File (or Stdout)
+        //
+        // DOS semantics: if CX == 0 this is NOT a zero-byte write — it's a
+        // "truncate the file at the current seek position" operation. MS-DOS
+        // programs (including MicroProse's START.EXE when re-creating
+        // regn.3dg for theatre selection) rely on it. Missing this step was
+        // wiping user-placed data files down to 0 bytes on first run.
         0x40 => {
             let handle = cpu.bx;
             let count = cpu.cx as usize;
@@ -1062,6 +1080,20 @@ pub fn handle(cpu: &mut Cpu) {
                 "[DEBUG] Write File Handle {:04X}, Count {:04X}",
                 handle, count
             ));
+
+            if count == 0 && handle != 1 && handle != 2 {
+                match cpu.bus.disk.truncate_file(handle) {
+                    Ok(()) => {
+                        cpu.ax = 0;
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                    }
+                    Err(code) => {
+                        cpu.ax = code as u16;
+                        cpu.set_cpu_flag(CpuFlags::CF, true);
+                    }
+                }
+                return;
+            }
 
             let mut data = Vec::with_capacity(count);
             for i in 0..count {
@@ -1556,7 +1588,7 @@ pub fn handle(cpu: &mut Cpu) {
                 if seg != 0 && !name.is_empty() {
                     if let Some(path) = cpu.bus.disk.resolve_path(&name) {
                         match std::fs::read(&path) {
-                            Ok(bytes) => {
+                            Ok(bytes) if !bytes.is_empty() => {
                                 let phys = (seg as usize) * 16;
                                 let end = (phys + bytes.len()).min(cpu.bus.ram.len());
                                 let copy_len = end - phys;
@@ -1570,6 +1602,15 @@ pub fn handle(cpu: &mut Cpu) {
                                 cpu.set_reg16(Register::AX, 0);
                                 cpu.set_cpu_flag(CpuFlags::CF, false);
                                 return;
+                            }
+                            Ok(_) => {
+                                // File exists but is empty — treat as
+                                // failure so the caller can error out
+                                // rather than parse zeros as valid data.
+                                cpu.bus.log_string(&format!(
+                                    "[MPS-TSR] '{}' is empty; reporting failure",
+                                    name
+                                ));
                             }
                             Err(e) => {
                                 cpu.bus.log_string(&format!(
