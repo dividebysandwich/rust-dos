@@ -27,6 +27,7 @@ mod keyboard;
 mod mcb;
 mod mouse;
 mod recorder;
+mod sb;
 mod shell;
 mod video;
 
@@ -345,6 +346,35 @@ fn main() -> Result<(), String> {
                         cpu.set_cpu_flag(CpuFlags::IF, false);
                         cpu.set_cpu_flag(CpuFlags::TF, false);
                         continue;
+                    }
+                }
+
+                // IRQ 5 (Sound Blaster) — gated by PIC IMR bit 5. Raised by
+                // DMA terminal count or the DSP force-IRQ opcodes. The ISR
+                // acks it by reading port 0x22E, which clears irq_pending
+                // via Bus::io_read. EOI to the PIC happens through the
+                // existing port 0x20 write-through.
+                if cpu.bus.sb.irq_pending && (cpu.bus.pic_mask & 0x20) == 0 {
+                    // Don't clear the flag here — the driver must ack via
+                    // 0x22E. This matches real hardware and keeps the ISR
+                    // path identical to DOSBox's SB implementation.
+                    let ivt = 0x0Dusize * 4; // IRQ 5 → INT 0Dh (0x08 + 5)
+                    let handler_ip = cpu.bus.read_16(ivt);
+                    let handler_cs = cpu.bus.read_16(ivt + 2);
+                    if handler_cs != 0 || handler_ip != 0 {
+                        cpu.push(cpu.get_cpu_flags().bits());
+                        cpu.push(cpu.cs);
+                        cpu.push(cpu.ip);
+                        cpu.cs = handler_cs;
+                        cpu.ip = handler_ip;
+                        cpu.set_cpu_flag(CpuFlags::IF, false);
+                        cpu.set_cpu_flag(CpuFlags::TF, false);
+                        continue;
+                    } else {
+                        // No handler installed — drop the IRQ rather than
+                        // spinning on it. A properly configured SB driver
+                        // always installs its ISR before unmasking IRQ 5.
+                        cpu.bus.sb.irq_pending = false;
                     }
                 }
             }

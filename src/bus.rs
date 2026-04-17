@@ -65,6 +65,12 @@ pub struct Bus {
     // AdLib / OPL2 FM synthesizer (ports 0x388/0x389)
     pub adlib: crate::adlib::AdLib,
 
+    // Sound Blaster 2.0 (ports 0x220..0x22F) + 8237 DMA channel 1.
+    // Kept side-by-side with the bus so the audio pump can pull PCM
+    // bytes straight out of ram using the DMA channel's address/page.
+    pub sb: crate::sb::SoundBlaster,
+    pub dma_ch1: crate::sb::Dma8237Ch1,
+
     /// Per-4KB-page generation counter covering the full 1 MiB address space
     /// (256 pages). Bumped on every write inside the Bus write helpers. The
     /// decoded-instruction cache stores the gen at decode time and invalidates
@@ -107,6 +113,8 @@ impl Bus {
             search_handles: std::collections::HashMap::new(),
             mouse: crate::mouse::MouseState::new(),
             adlib: crate::adlib::AdLib::new(),
+            sb: crate::sb::SoundBlaster::new(),
+            dma_ch1: crate::sb::Dma8237Ch1::default(),
             page_gen: [0; 256],
         };
         // BIOS Data Area (BDA) Initialization
@@ -450,12 +458,40 @@ impl Bus {
 
             // AdLib / OPL2 (YM3812). Port 0x388 selects the register,
             // 0x389 writes data into the previously selected register.
-            0x388 => {
+            // Sound Blaster also exposes OPL2 at 0x228/0x229 (mono FM)
+            // and mirrors it at 0x220/0x221 (SB 1.x legacy).
+            0x388 | 0x228 | 0x220 => {
                 self.adlib.write_register_select(value);
             }
-            0x389 => {
+            0x389 | 0x229 | 0x221 => {
                 self.adlib.write_register_data(value);
             }
+
+            // --- Sound Blaster DSP (base 0x220) ---
+            // 0x226 Reset: write 1 then 0 triggers DSP ready (0xAA).
+            0x226 => { self.sb.write_reset(value); }
+            // 0x22C Write Command/Data. Buffer-status reads from same port.
+            0x22C => { self.sb.write_command(value); }
+            // 0x224/0x225 Mixer (SB Pro). We accept writes but stay SB 2.0
+            // identified at DSP level — some drivers probe the mixer
+            // before checking the DSP version.
+            0x224 => { self.sb.mixer_index_write(value); }
+            0x225 => { self.sb.mixer_data_write(value); }
+
+            // --- 8237 DMA controller — only channel 1 matters for SB 8-bit. ---
+            0x02 => { self.dma_ch1.write_addr(value); }
+            0x03 => { self.dma_ch1.write_count(value); }
+            0x0A => { self.dma_ch1.write_single_mask(value); }
+            0x0B => { self.dma_ch1.write_mode(value); }
+            0x0C => { self.dma_ch1.clear_flipflop(); }
+            0x0D => { self.dma_ch1.master_reset(); }
+            // Other channels (0, 2, 3) — writes are harmless and we
+            // don't model them. Swallow so the unhandled-port log stays
+            // quiet when games initialize the full controller.
+            0x00 | 0x01 | 0x04..=0x09 | 0x0E | 0x0F => {}
+            // DMA page registers. Channel 1 lives at port 0x83.
+            0x83 => { self.dma_ch1.write_page(value); }
+            0x80..=0x82 | 0x84..=0x8F => {}
 
             // Dispatch to Devices
             // TODO: Use a proper map lookup
@@ -567,8 +603,26 @@ impl Bus {
             // AdLib status register (port 0x388). Bit 7 = IRQ, bit 6 = timer1
             // expired, bit 5 = timer2 expired. Games poll this to detect the
             // card by arming timer1 and checking that the bits flip in time.
-            0x388 => self.adlib.read_status(),
-            0x389 => 0xFF,
+            // Mirrored onto the SB's FM ports for AdLib-on-SB detection.
+            0x388 | 0x228 | 0x220 => self.adlib.read_status(),
+            0x389 | 0x229 | 0x221 => 0xFF,
+
+            // --- Sound Blaster DSP reads ---
+            // 0x22A: Read Data — drains the DSP response FIFO.
+            0x22A => self.sb.read_data(),
+            // 0x22C: Write-buffer status — bit 7 set = DSP busy. Always ready.
+            0x22C => self.sb.read_write_status(),
+            // 0x22E: Read-buffer status + IRQ acknowledge.
+            0x22E => self.sb.read_buffer_status(),
+            // Mixer data read-back at 0x225.
+            0x225 => self.sb.mixer_data_read(),
+
+            // --- 8237 DMA controller reads (channel 1) ---
+            0x02 => self.dma_ch1.read_addr(),
+            0x03 => self.dma_ch1.read_count(),
+            0x83 => self.dma_ch1.read_page(),
+            // Other DMA regs return open bus; keep quiet.
+            0x00 | 0x01 | 0x04..=0x0F | 0x80..=0x82 | 0x84..=0x8F => 0xFF,
 
             // Read PPI Port B (Speaker State)
             0x61 => {

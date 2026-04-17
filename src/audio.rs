@@ -55,10 +55,26 @@ pub fn pump_audio(bus: &mut Bus) {
         let frequency = BASE_FREQ / divisor as f32;
         let phase_step = frequency / SAMPLE_RATE;
 
-        // Generate Audio — mix PC speaker square wave + AdLib FM.
-        // AdLib sums 9 channels each in roughly [-1, 1]. Scale to roughly
-        // match PC speaker loudness and clamp to i16 after mixing.
+        // Generate Audio — mix PC speaker square wave + AdLib FM + Sound
+        // Blaster 8-bit PCM. AdLib sums 9 channels each in roughly [-1, 1];
+        // scale to roughly match PC speaker loudness and clamp to i16 after
+        // mixing. The SB PCM path pulls one byte from DMA memory whenever
+        // its phase accumulator overflows — see `SoundBlaster::advance_one`.
         const ADLIB_GAIN: f32 = 1400.0;
+        const SB_PCM_GAIN: f32 = 0.75;
+
+        // Split the borrows up front. The SB PCM path needs a &[u8] view of
+        // ram plus &mut references to sb and dma_ch1 on every sample; the
+        // AdLib path needs &mut adlib. Taking them here keeps the hot
+        // inner loop free of repeated field-access borrow checks.
+        let ram_ptr = bus.ram.as_ptr();
+        let ram_len = bus.ram.len();
+        // SAFETY: single-threaded emulator; ram is a fixed 1 MiB Vec that
+        // outlives this function. The bus mutable borrows we take next
+        // don't resize or drop it. Same guarantee as the decoder slice in
+        // main.rs.
+        let ram_view: &[u8] = unsafe { std::slice::from_raw_parts(ram_ptr, ram_len) };
+
         for _ in 0..needed {
             let speaker = if bus.speaker_on && frequency > 20.0 {
                 bus.audio_phase += phase_step;
@@ -71,7 +87,14 @@ pub fn pump_audio(bus: &mut Bus) {
             };
 
             let adlib = (bus.adlib.render_sample() * ADLIB_GAIN) as i32;
-            let mixed = (speaker as i32 + adlib).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let sb_sample = bus.sb.advance_one(ram_view, &mut bus.dma_ch1, SAMPLE_RATE as u32);
+            let sb = if bus.sb.speaker_on {
+                (sb_sample as f32 * SB_PCM_GAIN) as i32
+            } else {
+                0
+            };
+            let mixed =
+                (speaker as i32 + adlib + sb).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             buffer.push(mixed);
         }
 

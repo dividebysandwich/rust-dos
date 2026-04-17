@@ -11,5 +11,6 @@ pub mod interrupts;
 pub mod mcb;
 pub mod mouse;
 pub mod recorder;
+pub mod sb;
 pub mod shell;
 pub mod video;

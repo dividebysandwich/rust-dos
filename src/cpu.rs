@@ -1335,7 +1335,10 @@ impl Cpu {
         let env_phys = self.get_physical_addr(env_seg, 0);
 
         // Simple Default Env: "PATH=C:\" \0 "COMSPEC=COMMAND.COM" \0 \0
-        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0\0";
+        // BLASTER advertises the SB resource map to drivers at autodetect
+        // time: A220 base I/O, I5 IRQ, D1 DMA, T3 = SB 2.0. Matches what
+        // SET BLASTER in AUTOEXEC.BAT would publish on a real PC.
+        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0BLASTER=A220 I5 D1 T3\0\0";
         for (i, &b) in default_env.iter().enumerate() {
             self.bus.write_8(env_phys + i, b);
         }
@@ -1483,7 +1486,10 @@ impl Cpu {
         // Create a default environment block
         let env_seg = 0x0C00;
         let env_phys = self.get_physical_addr(env_seg, 0);
-        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0\0";
+        // BLASTER advertises the SB resource map to drivers at autodetect
+        // time: A220 base I/O, I5 IRQ, D1 DMA, T3 = SB 2.0. Matches what
+        // SET BLASTER in AUTOEXEC.BAT would publish on a real PC.
+        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0BLASTER=A220 I5 D1 T3\0\0";
         for (i, &b) in default_env.iter().enumerate() {
             self.bus.write_8(env_phys + i, b);
         }
