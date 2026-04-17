@@ -365,6 +365,22 @@ pub fn handle(cpu: &mut Cpu) {
             let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, name_addr);
 
+            // Early bail-out on empty filename. Some programs (e.g.
+            // VGAME.EXE during its exit-cleanup path) accidentally call
+            // EXEC with DS:DX pointing at uninitialised memory. Returning
+            // the "file not found" error (CF=1, AX=2) here prevents the
+            // context save/restore from going through and bringing down
+            // the parent frame with it.
+            if filename.is_empty() {
+                cpu.bus.log_string(&format!(
+                    "[DOS] EXEC rejected: empty filename, DS:DX={:04X}:{:04X} AL={:02X} caller CS:IP={:04X}:{:04X}",
+                    cpu.ds, cpu.dx, mode, cpu.cs, cpu.ip
+                ));
+                cpu.set_cpu_flag(CpuFlags::CF, true);
+                cpu.set_reg16(Register::AX, 0x0002); // file not found
+                return;
+            }
+
             // --- Stub out copy-protection / disk-swap helpers ---
             // MicroProse games (F-117, F-19, Gunship, Covert Action) ship two
             // runtime helpers that we can't satisfy without the original
@@ -952,6 +968,8 @@ pub fn handle(cpu: &mut Cpu) {
             match cpu.bus.disk.open_file(&filename, mode) {
                 Ok(handle) => {
                     cpu.ax = handle;
+                    cpu.bus.last_opened_handle = handle;
+                    cpu.bus.last_opened_filename = filename.clone();
                     cpu.bus
                         .log_string(&format!("[DEBUG] Open Success, Handle={:04X}", handle));
                     // In real CPU, clear CF here
@@ -1226,6 +1244,7 @@ pub fn handle(cpu: &mut Cpu) {
             match crate::mcb::alloc(&mut cpu.bus, owner, requested) {
                 Ok(segment) => {
                     cpu.ax = segment;
+                    cpu.bus.last_alloc_segment = segment;
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     cpu.bus.log_string(&format!(
                         "[DOS] Alloc {:04X} paras -> {:04X}",
@@ -1521,15 +1540,47 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         _ => {
-            // Unknown DOS function.
-            //
-            // MicroProse TSR probes use mirrored-byte AX values (FFFFh,
-            // BFBFh). For those we leave AX alone and flag an error via
-            // CF=1, signalling "service not available" — that's the path
-            // DOSBox-running VGAME takes when its TSR isn't loaded.
-            // Everything else matches DOSBox: clear AL, don't touch CF.
             let al_val = cpu.get_al();
-            if ah == al_val {
+
+            // MicroProse MPS-Engine TSR calls: AX=FFFFh and AX=BFBFh are
+            // "load this file into the last-allocated buffer" requests. In
+            // a genuine install, DSWAP.EXE is the TSR that services them;
+            // we short-circuit DSWAP, so emulate the effect directly by
+            // reading the most recently opened file into the most recently
+            // allocated segment starting at offset 0. Without this, the
+            // .3dx parser runs on an empty buffer, reads garbage counts,
+            // and corrupts its caller's stack.
+            if ah == al_val && (ah == 0xFF || ah == 0xBF) {
+                let seg = cpu.bus.last_alloc_segment;
+                let name = cpu.bus.last_opened_filename.clone();
+                if seg != 0 && !name.is_empty() {
+                    if let Some(path) = cpu.bus.disk.resolve_path(&name) {
+                        match std::fs::read(&path) {
+                            Ok(bytes) => {
+                                let phys = (seg as usize) * 16;
+                                let end = (phys + bytes.len()).min(cpu.bus.ram.len());
+                                let copy_len = end - phys;
+                                cpu.bus.ram[phys..phys + copy_len]
+                                    .copy_from_slice(&bytes[..copy_len]);
+                                cpu.bus.log_string(&format!(
+                                    "[MPS-TSR] AX={:04X} loaded '{}' ({} bytes) -> {:04X}:0000",
+                                    (ah as u16) << 8 | al_val as u16,
+                                    name, copy_len, seg
+                                ));
+                                cpu.set_reg16(Register::AX, 0);
+                                cpu.set_cpu_flag(CpuFlags::CF, false);
+                                return;
+                            }
+                            Err(e) => {
+                                cpu.bus.log_string(&format!(
+                                    "[MPS-TSR] read error on '{}': {}",
+                                    name, e
+                                ));
+                            }
+                        }
+                    }
+                }
+                // Fall back: behave as "TSR not present" — CF=1, AX unchanged.
                 cpu.set_cpu_flag(CpuFlags::CF, true);
             } else {
                 cpu.set_reg8(Register::AL, 0);

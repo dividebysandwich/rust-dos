@@ -395,6 +395,24 @@ fn main() -> Result<(), String> {
             // 0xA0000 in our loaded programs.
             let phys_ip = cpu.get_physical_addr(cpu.cs, cpu.ip);
 
+            // Log every entry into the suspect parser at CS=0x3462 so we
+            // can see DS/ES/SS set-up by the caller.
+            if cpu.cs == 0x3462 && cpu.ip < 0x200 {
+                // Throttle: log only when IP is exactly a function entry
+                // point — the leading `55 8B EC` (PUSH BP / MOV BP, SP).
+                let phys = cpu.get_physical_addr(cpu.cs, cpu.ip);
+                if phys + 2 < cpu.bus.ram.len()
+                    && cpu.bus.ram[phys] == 0x55
+                    && cpu.bus.ram[phys + 1] == 0x8B
+                    && cpu.bus.ram[phys + 2] == 0xEC
+                {
+                    cpu.bus.log_string(&format!(
+                        "[3462-ENTRY] IP={:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} BP={:04X}",
+                        cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.bp
+                    ));
+                }
+            }
+
             // Tripwire: arriving in the IVT / BIOS data area with an
             // application context (DS not 0, not the shell at CS=0) almost
             // always means a corrupted FAR pointer landed us here.
