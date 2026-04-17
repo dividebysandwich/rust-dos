@@ -113,6 +113,14 @@ pub struct VgaCard {
     pub attribute_regs: [u8; 21],  // 0-0xF: Palette, 0x10-0x14: Control
     pub attribute_flip_flop: bool, // false = Address, true = Data
 
+    /// Display-latched Start Address (byte offset after byte/word scaling).
+    /// Real CRTCs sample the Start Address register at vertical retrace,
+    /// not on every write — so games that page-flip rapidly mid-frame don't
+    /// produce tearing. The renderer reads this value; `latch_start_address`
+    /// copies `crtc_regs[0x0C]/[0x0D]` here when the game polls the retrace
+    /// status bit (port 0x3DA bit 3 active), matching hardware semantics.
+    pub latched_start_addr: usize,
+
     /// Set whenever VRAM, palette, or any VGA state that would change the
     /// rendered image is touched. The main loop uses this to skip the
     /// 640x400x3 render pass on frames where nothing moved.
@@ -154,6 +162,7 @@ impl VgaCard {
             attribute_index: 0,
             attribute_regs: [0; 21],
             attribute_flip_flop: false,
+            latched_start_addr: 0,
             dirty: true,
         }
     }
@@ -202,7 +211,13 @@ impl VgaCard {
         // Mode 13h Check (Chain 4)
         let seq_mem_mode = self.sequencer_regs[0x04];
         let chain4 = (seq_mem_mode & 0x08) != 0;
-        let odd_even = (seq_mem_mode & 0x02) != 0;
+        // Sequencer Memory Mode bit 2 is "Odd/Even Disable": 1 = sequential
+        // (the standard setup for graphics modes), 0 = odd/even mapping
+        // (text modes). Bit 1 is Extended Memory — a totally different thing.
+        // Our earlier code checked bit 1, which silently put mode 0Dh into
+        // odd/even mode (because 256 KB VRAM is enabled) and halved every
+        // plane offset, tiling each drawn scanline horizontally.
+        let odd_even = (seq_mem_mode & 0x04) == 0;
 
         // Latch Loading & Offset Calculation
         let plane_offset = if chain4 {
@@ -248,7 +263,13 @@ impl VgaCard {
     pub fn write_graphics(&mut self, offset: usize, value: u8) {
         let seq_mem_mode = self.sequencer_regs[0x04];
         let chain4 = (seq_mem_mode & 0x08) != 0;
-        let odd_even = (seq_mem_mode & 0x02) != 0;
+        // Sequencer Memory Mode bit 2 is "Odd/Even Disable": 1 = sequential
+        // (the standard setup for graphics modes), 0 = odd/even mapping
+        // (text modes). Bit 1 is Extended Memory — a totally different thing.
+        // Our earlier code checked bit 1, which silently put mode 0Dh into
+        // odd/even mode (because 256 KB VRAM is enabled) and halved every
+        // plane offset, tiling each drawn scanline horizontally.
+        let odd_even = (seq_mem_mode & 0x04) == 0;
 
         let plane_offset = if chain4 {
             offset >> 2
@@ -378,6 +399,23 @@ impl VgaCard {
         self.attribute_regs[0x14] = 0x00; // Color Select
     }
 
+    /// Snapshot CRTC Start Address High/Low into the display-latched byte
+    /// offset. Games overwhelmingly write Start Address as a direct byte
+    /// offset (matching what they use for ES:DI when drawing the page),
+    /// regardless of the CRTC 0x17 word/byte mode bit — real hardware's
+    /// word-mode scaling is a subtle address-bit permutation that most
+    /// DOS games didn't know or care about. Treat it as a plain byte
+    /// offset so game page-flipping works with byte-mode semantics.
+    pub fn latch_start_address(&mut self) {
+        let hi = self.crtc_regs[0x0C] as usize;
+        let lo = self.crtc_regs[0x0D] as usize;
+        let new_addr = (hi << 8) | lo;
+        if new_addr != self.latched_start_addr {
+            self.latched_start_addr = new_addr;
+            self.dirty = true;
+        }
+    }
+
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         self.dirty = true;
         match mode {
@@ -409,6 +447,29 @@ impl VgaCard {
                 self.graphics_regs[6] = 0x05; // Graphics mode, map A0000
                 self.graphics_regs[7] = 0x0F; // Color Don't Care
                 self.graphics_regs[8] = 0xFF; // Bit Mask
+
+                // CRTC defaults. The real IBM EGA/VGA BIOS loads a full
+                // 25-register table when setting mode 0Dh, but only a few
+                // actually affect our emulation. The critical ones:
+                //   0x13 = Offset (words-per-row, 0x14 = 40-byte stride)
+                //   0x17 = Mode Control (0xA3 = word addressing, which is
+                //          what games assume when they page-flip via
+                //          Start Address High)
+                //   0x09 = Max Scan Line (0x41 = double-scan on 200-line modes)
+                self.crtc_regs[0x09] = match mode {
+                    super::VideoMode::Ega320x200 | super::VideoMode::Ega640x200 => 0x41,
+                    _ => 0x00,
+                };
+                self.crtc_regs[0x0C] = 0x00; // Start Address High
+                self.crtc_regs[0x0D] = 0x00; // Start Address Low
+                self.crtc_regs[0x13] = match mode {
+                    super::VideoMode::Ega320x200 => 0x14,
+                    super::VideoMode::Ega640x200
+                    | super::VideoMode::Ega640x350
+                    | super::VideoMode::Vga640x480 => 0x28,
+                    _ => 0x14,
+                };
+                self.crtc_regs[0x17] = 0xA3;
 
                 self.load_ega_palette();
                 self.load_ega_attribute_defaults();
@@ -502,6 +563,11 @@ impl Device for VgaCard {
 
                 // Toggle active/retrace every 8 reads to simulate timing
                 if (self.retrace_counter & 8) != 0 {
+                    // Entering retrace — real CRTCs latch Start Address here,
+                    // then hold it stable for the whole frame. Mirror that:
+                    // games can write CRTC 0x0C/0x0D arbitrarily many times
+                    // before the next vretrace and only the last value sticks.
+                    self.latch_start_address();
                     0x09 // Retrace Active (Bit 3) + Display Disabled (Bit 0)
                 } else {
                     0x00 // Display Active, No Retrace
@@ -646,7 +712,14 @@ impl Device for VgaCard {
             0x3D5 => {
                 if (self.crtc_index as usize) < self.crtc_regs.len() {
                     self.crtc_regs[self.crtc_index as usize] = value;
-                    self.dirty = true;
+                    // Start Address registers (0x0C/0x0D) update a pending
+                    // value that the CRTC only picks up at vretrace.
+                    // Writing them does NOT trigger a re-render — that
+                    // would cause flicker when games rapid-flip buffers
+                    // mid-frame. The retrace read in `io_read` latches.
+                    if self.crtc_index != 0x0C && self.crtc_index != 0x0D {
+                        self.dirty = true;
+                    }
                 }
             }
             0x3C6 => {

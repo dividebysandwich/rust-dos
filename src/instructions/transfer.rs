@@ -272,11 +272,14 @@ fn port_in(cpu: &mut Cpu, instr: &Instruction) {
     } else {
         instr.immediate8() as u16
     };
-    let val = cpu.bus.io_read(port);
     if is_8bit_reg(instr.op0_register()) {
+        let val = cpu.bus.io_read(port);
         cpu.set_reg8(instr.op0_register(), val);
     } else {
-        cpu.set_reg16(instr.op0_register(), val as u16);
+        // 16-bit IN: low byte from port, high byte from port+1.
+        let lo = cpu.bus.io_read(port) as u16;
+        let hi = cpu.bus.io_read(port.wrapping_add(1)) as u16;
+        cpu.set_reg16(instr.op0_register(), lo | (hi << 8));
     }
 }
 
@@ -286,12 +289,17 @@ fn port_out(cpu: &mut Cpu, instr: &Instruction) {
     } else {
         instr.immediate8() as u16
     };
-    let val = if is_8bit_reg(instr.op1_register()) {
-        cpu.get_reg8(instr.op1_register())
+    if is_8bit_reg(instr.op1_register()) {
+        let val = cpu.get_reg8(instr.op1_register());
+        cpu.bus.io_write(port, val);
     } else {
-        cpu.get_al() 
-    };
-    cpu.bus.io_write(port, val);
+        // 16-bit OUT: low byte to port, high byte to port+1. EGA code
+        // relies on this to program Graphics/Sequencer index+data in
+        // a single instruction (e.g. OUT DX, AX with DX=0x3CE).
+        let val = cpu.get_reg16(instr.op1_register());
+        cpu.bus.io_write(port, (val & 0xFF) as u8);
+        cpu.bus.io_write(port.wrapping_add(1), (val >> 8) as u8);
+    }
 }
 
 fn cbw(cpu: &mut Cpu) {

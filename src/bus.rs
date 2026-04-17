@@ -38,6 +38,7 @@ pub struct Bus {
     pub audio_device: Option<AudioQueue<i16>>,
     pub speaker_on: bool,    // Is the speaker playing?
     pub pit_divisor: u16,    // Current Frequency Divisor
+    pub pit_read_msb: bool,  // Channel 2 read LSB/MSB toggle
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
     pub pit0_divisor: u16,
@@ -99,6 +100,7 @@ impl Bus {
             pit_divisor: 0xFFFF,
             pit_mode: 0,
             pit_write_msb: false,
+            pit_read_msb: false,
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
             pit0_read_msb: false,
@@ -517,12 +519,16 @@ impl Bus {
                     // a full 256-color palette update is 1024 writes, which
                     // buries everything else in the trace. Still log the less
                     // frequent mode / register writes.
-                    // if !matches!(port, 0x3C6..=0x3C9) {
-                    //     self.log_string(&format!(
-                    //         "[VGA-IO] Write Port {:04X} Value {:02X}",
-                    //         port, value
-                    //     ));
-                    // }
+                    // Log throttling: palette (3C6..3C9) and graphics
+                    // index/data (3CE/3CF) churn so much during EGA drawing
+                    // that they drown everything else. Log the rarer
+                    // mode/register ports.
+                    if !matches!(port, 0x3C6..=0x3C9 | 0x3CE | 0x3CF) {
+                        self.log_string(&format!(
+                            "[VGA-IO] Write Port {:04X} Value {:02X}",
+                            port, value
+                        ));
+                    }
 
                     // Check if video mode changed
                     if let Some(new_mode) = self.vga.check_video_mode() {
@@ -585,6 +591,32 @@ impl Bus {
                     (val >> 8) as u8
                 };
                 byte
+            }
+
+            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Some games
+            // read this port as a cheap free-running counter for tight
+            // timing loops ("wait until count < threshold"), independent of
+            // whether they ever use the speaker. Returning a constant would
+            // hang those loops, so we synthesize the current count from the
+            // active divisor and elapsed time, matching real hardware's
+            // 1.193 MHz tick rate.
+            0x42 => {
+                let divisor = if self.pit_divisor == 0 {
+                    0x10000u32
+                } else {
+                    self.pit_divisor as u32
+                };
+                let micros = self.start_time.elapsed().as_micros() as u64;
+                let ticks = micros.wrapping_mul(1_193_182) / 1_000_000;
+                let rem = (ticks % divisor as u64) as u32;
+                let count = ((divisor - 1 - rem) & 0xFFFF) as u16;
+                if !self.pit_read_msb {
+                    self.pit_read_msb = true;
+                    (count & 0xFF) as u8
+                } else {
+                    self.pit_read_msb = false;
+                    (count >> 8) as u8
+                }
             }
 
             // Port 0x60 — Keyboard data port. Real hardware latches the

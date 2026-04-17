@@ -108,12 +108,16 @@ fn render_planar(
     scale_x: usize,
     scale_y: usize,
 ) {
-    let high_bits = attribute_color_high_bits(bus);
-    let bytes_per_row = width / 8;
+    let mix = palette_mix(bus);
+    // CRTC Offset (index 0x13) holds bytes-per-scanline / 2 (i.e. words
+    // per row). Fall back to width/8 if the game never touched it.
+    let offset_reg = bus.vga.crtc_regs[0x13] as usize;
+    let bytes_per_row = if offset_reg != 0 { offset_reg * 2 } else { width / 8 };
+    let base = planar_base_offset(bus);
 
     for y in 0..height {
         for x in 0..width {
-            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, x, y, high_bits);
+            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, x, y, base, &mix);
 
             for dy in 0..scale_y {
                 for dx in 0..scale_x {
@@ -135,14 +139,16 @@ fn render_planar(
 /// mode 12h, which is 640x480 vs our 640x400 viewport). Uses nearest-neighbour
 /// sampling on the Y axis so all 480 source lines are represented.
 fn render_planar_fit(canvas: &mut [u8], vram: &[u8], bus: &Bus, width: usize, height: usize) {
-    let high_bits = attribute_color_high_bits(bus);
-    let bytes_per_row = width / 8;
+    let mix = palette_mix(bus);
+    let offset_reg = bus.vga.crtc_regs[0x13] as usize;
+    let bytes_per_row = if offset_reg != 0 { offset_reg * 2 } else { width / 8 };
+    let base = planar_base_offset(bus);
 
     for ty in 0..SCREEN_HEIGHT as usize {
         let sy = (ty as u64 * height as u64 / SCREEN_HEIGHT as u64) as usize;
         for tx in 0..SCREEN_WIDTH as usize {
             let sx = (tx as u64 * width as u64 / SCREEN_WIDTH as u64) as usize;
-            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, sx, sy, high_bits);
+            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, sx, sy, base, &mix);
             let idx = (ty * SCREEN_WIDTH as usize + tx) * 3;
             canvas[idx] = rgb.0;
             canvas[idx + 1] = rgb.1;
@@ -151,15 +157,29 @@ fn render_planar_fit(canvas: &mut [u8], vram: &[u8], bus: &Bus, width: usize, he
     }
 }
 
-/// Derive the upper 2 bits of the 8-bit DAC index from the attribute
-/// controller's Mode Control (P54S) and Color Select registers.
-fn attribute_color_high_bits(bus: &Bus) -> u8 {
-    let mode_ctrl = bus.vga.attribute_regs[0x10];
-    let color_select = bus.vga.attribute_regs[0x14];
-    if (mode_ctrl & 0x80) != 0 {
-        (color_select & 0x03) << 4
-    } else {
-        (color_select & 0x0C) << 4
+/// Byte offset into each plane where the display controller begins scanning.
+/// We read the value the CRTC latched at the last vertical retrace rather
+/// than the raw register — games that page-flip mid-frame expect the
+/// display to ignore pending writes and only update at vretrace.
+fn planar_base_offset(bus: &Bus) -> usize {
+    bus.vga.latched_start_addr
+}
+
+/// Precomputed DAC mapping selector. The attribute palette register holds
+/// six bits (P5..P0). The DAC receives an 8-bit index assembled from the
+/// attribute register, the Mode Control P54S bit, and the Color Select
+/// register. Two rules, depending on P54S:
+///   P54S=0: dac = (attr & 0x3F)           | ((color_select & 0x0C) << 4)
+///   P54S=1: dac = (attr & 0x0F)           | ((color_select & 0x0F) << 4)
+struct PaletteMix {
+    p54s: bool,
+    color_select: u8,
+}
+
+fn palette_mix(bus: &Bus) -> PaletteMix {
+    PaletteMix {
+        p54s: (bus.vga.attribute_regs[0x10] & 0x80) != 0,
+        color_select: bus.vga.attribute_regs[0x14],
     }
 }
 
@@ -169,9 +189,12 @@ fn planar_pixel_rgb(
     bytes_per_row: usize,
     x: usize,
     y: usize,
-    high_bits: u8,
+    base: usize,
+    mix: &PaletteMix,
 ) -> (u8, u8, u8) {
-    let byte_offset = y * bytes_per_row + (x / 8);
+    // Plane space wraps at 64 KiB; games with smaller back buffers rely on
+    // that so page flips near the top of VRAM don't walk into garbage.
+    let byte_offset = (base + y * bytes_per_row + (x / 8)) & 0xFFFF;
     let bit_pos = 7 - (x % 8) as u8;
     let mut pixel_idx: u8 = 0;
     for plane in 0..4 {
@@ -182,7 +205,11 @@ fn planar_pixel_rgb(
         }
     }
     let attr = bus.vga.attribute_regs[pixel_idx as usize & 0x0F] & 0x3F;
-    let dac_idx = (attr & 0x0F) | high_bits;
+    let dac_idx = if mix.p54s {
+        (attr & 0x0F) | ((mix.color_select & 0x0F) << 4)
+    } else {
+        attr | ((mix.color_select & 0x0C) << 4)
+    };
     bus.vga.get_rgb(dac_idx & bus.vga.dac_mask)
 }
 
