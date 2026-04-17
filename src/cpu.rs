@@ -103,6 +103,10 @@ pub struct Cpu {
     /// had typed them at the prompt. Drained by main loop while the shell is
     /// idle (no child program on the process_stack and CS still in shell-land).
     pub batch_queue: VecDeque<String>,
+    /// COMMAND.COM "ECHO" state. When false, batch lines run silently (no
+    /// prompt+line echo before dispatch). Toggled by the ECHO ON / ECHO OFF
+    /// built-in. Defaults to true; persists across batches like real DOS.
+    pub batch_echo: bool,
     pub current_psp: u16,
     pub heap_pointer: u16,
     /// Exit code (AL) and termination type (AH) of the most recently terminated
@@ -188,6 +192,7 @@ impl Cpu {
             state: CpuState::Running,
             pending_command: None,
             batch_queue: VecDeque::new(),
+            batch_echo: true,
             fpu_stack: [F80::new(); 8],
             fpu_top: 0,
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),

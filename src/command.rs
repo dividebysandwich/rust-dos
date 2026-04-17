@@ -28,6 +28,7 @@ impl CommandDispatcher {
         dispatcher.register("EXIT", Box::new(ExitCommand));
         dispatcher.register("CD", Box::new(CdCommand));
         dispatcher.register("CHDIR", Box::new(CdCommand));
+        dispatcher.register("ECHO", Box::new(EchoCommand));
 
         dispatcher
     }
@@ -217,6 +218,23 @@ impl ShellCommand for ExitCommand {
         cpu.bus
             .log_string("[SHELL] Exiting Emulator via command...");
         std::process::exit(0);
+    }
+}
+
+struct EchoCommand;
+impl ShellCommand for EchoCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            let state = if cpu.batch_echo { "on" } else { "off" };
+            print_string(cpu, &format!("ECHO is {}\r\n", state));
+            return;
+        }
+        match trimmed.to_ascii_uppercase().as_str() {
+            "ON" => cpu.batch_echo = true,
+            "OFF" => cpu.batch_echo = false,
+            _ => print_string(cpu, &format!("{}\r\n", args)),
+        }
     }
 }
 

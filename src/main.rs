@@ -364,13 +364,15 @@ fn main() -> Result<(), String> {
                 && cpu.process_stack.is_empty()
             {
                 let raw = cpu.batch_queue.pop_front().unwrap();
-                let (line, echo) = if let Some(stripped) = raw.strip_prefix('@') {
+                let (line, line_echo) = if let Some(stripped) = raw.strip_prefix('@') {
                     (stripped.trim().to_string(), false)
                 } else {
                     (raw, true)
                 };
                 if !line.is_empty() {
-                    if echo {
+                    // Per-line @ suppresses the echo for that line only;
+                    // ECHO OFF (cpu.batch_echo) suppresses all subsequent lines.
+                    if line_echo && cpu.batch_echo {
                         shell::show_prompt(&mut cpu);
                         crate::video::print_string(&mut cpu, &format!("{}\r\n", line));
                     }
