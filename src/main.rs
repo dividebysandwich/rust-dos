@@ -416,21 +416,60 @@ fn main() -> Result<(), String> {
             // 0xA0000 in our loaded programs.
             let phys_ip = cpu.get_physical_addr(cpu.cs, cpu.ip);
 
-            // Log every entry into the suspect parser at CS=0x3462 so we
-            // can see DS/ES/SS set-up by the caller.
-            if cpu.cs == 0x3462 && cpu.ip < 0x200 {
-                // Throttle: log only when IP is exactly a function entry
-                // point — the leading `55 8B EC` (PUSH BP / MOV BP, SP).
+            // Log every entry into the .3dx parser. The function's load
+            // segment varies by run, so match by its distinctive prologue
+            // (`PUSH BP; MOV BP, SP; PUSH DI; PUSH SI; MOV DX,[BP+6]; MOV
+            // ES,DX; MOV BX,011Ah`) instead of a hardcoded CS.
+            if cpu.ip < 0x200 {
                 let phys = cpu.get_physical_addr(cpu.cs, cpu.ip);
-                if phys + 2 < cpu.bus.ram.len()
-                    && cpu.bus.ram[phys] == 0x55
-                    && cpu.bus.ram[phys + 1] == 0x8B
-                    && cpu.bus.ram[phys + 2] == 0xEC
+                let pattern: [u8; 13] = [
+                    0x55, 0x8B, 0xEC, 0x57, 0x56, 0x8B, 0x56, 0x06, 0x8E,
+                    0xC2, 0xBB, 0x1A, 0x01,
+                ];
+                if phys + pattern.len() <= cpu.bus.ram.len()
+                    && cpu.bus.ram[phys..phys + pattern.len()] == pattern
                 {
+                    // Stack layout immediately after CALL FAR: [SP] = return
+                    // IP, [SP+2] = return CS, [SP+4] = first arg. Peek them
+                    // so we can find the caller.
+                    let ss_base = (cpu.ss as usize) * 16;
+                    let sp = cpu.sp as usize;
+                    let ret_ip = u16::from_le_bytes([
+                        cpu.bus.ram[ss_base + sp],
+                        cpu.bus.ram[ss_base + sp + 1],
+                    ]);
+                    let ret_cs = u16::from_le_bytes([
+                        cpu.bus.ram[ss_base + sp + 2],
+                        cpu.bus.ram[ss_base + sp + 3],
+                    ]);
+                    let arg0 = u16::from_le_bytes([
+                        cpu.bus.ram[ss_base + sp + 4],
+                        cpu.bus.ram[ss_base + sp + 5],
+                    ]);
                     cpu.bus.log_string(&format!(
-                        "[3462-ENTRY] IP={:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} BP={:04X}",
-                        cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.bp
+                        "[PARSER-ENTRY] CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} BP={:04X} ret={:04X}:{:04X} arg0={:04X}",
+                        cpu.cs, cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.bp,
+                        ret_cs, ret_ip, arg0
                     ));
+
+                    // Dump 16 bytes of caller code right before the return
+                    // site on the FIRST call of each parser-call group so
+                    // we can decode the arg-load instruction.
+                    if ret_ip == 0x0046 {
+                        let caller_start = cpu
+                            .get_physical_addr(ret_cs, ret_ip.wrapping_sub(16));
+                        let mut caller = String::new();
+                        for i in 0..16 {
+                            let a = caller_start + i;
+                            if a < cpu.bus.ram.len() {
+                                caller.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+                            }
+                        }
+                        cpu.bus.log_string(&format!(
+                            "[PARSER-ENTRY]   caller code @ {:04X}:{:04X} (-16..ret): {}",
+                            ret_cs, ret_ip, caller.trim()
+                        ));
+                    }
                 }
             }
 

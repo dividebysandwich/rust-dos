@@ -23,15 +23,24 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // IRET: Interrupt Return
         // Pops IP, CS, and Flags from the stack.
         Mnemonic::Iret => {
+            let caller_cs = cpu.cs;
+            let caller_ip = cpu.ip.wrapping_sub(instr.len() as u16);
             cpu.ip = cpu.pop();
             cpu.cs = cpu.pop();
             let flags = cpu.pop();
-    
+
             // Restore flags (preserving reserved bits 1, 3, 5, 15)
             // 8086 Reserved: 1111_0000_0000_0010 (0xF002) are usually stuck/reserved
             // Simple mask: Preserve current reserved bits, write writable ones.
             // For simplicity in emulator: Write all, force bit 1 always ON.
             cpu.set_cpu_flags(CpuFlags::from_bits_truncate(flags));
+
+            if cpu.cs == 0 && cpu.ip < 0x100 {
+                cpu.bus.log_string(&format!(
+                    "[IRET-BAD] from {:04X}:{:04X} -> {:04X}:{:04X} flags={:04X} SS:SP={:04X}:{:04X}",
+                    caller_cs, caller_ip, cpu.cs, cpu.ip, flags, cpu.ss, cpu.sp
+                ));
+            }
         }
 
         // HLT: Halt Processor
