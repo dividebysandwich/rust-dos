@@ -96,6 +96,11 @@ fn main() -> Result<(), String> {
     // Load Shell Code into Memory
     cpu.load_shell();
 
+    // If an AUTOEXEC.BAT exists in the C: root, queue its commands so the
+    // first shell prompt is preceded by the same automatic startup sequence
+    // a real PC would run. Each line runs as if typed at the prompt.
+    cpu.queue_batch_file("\\AUTOEXEC.BAT");
+
     // Decoded-instruction cache. 64K direct-mapped slots (~3.5 MB) — comfortably
     // large for any DOS program's hot working set, and small enough to fit in
     // modern L2/L3. See `instr_cache.rs` for the SMC-invalidation scheme.
@@ -346,6 +351,33 @@ fn main() -> Result<(), String> {
 
             let prev_ip = cpu.ip;
 
+            // --- INJECT NEXT BATCH LINE ---
+            // If we're idle in shell-land (no child program on the stack and CS
+            // still in the shell segment) and there are batch lines pending,
+            // pop one and feed it through the same path the shell uses for a
+            // typed command. We echo the line at a synthesized prompt so the
+            // user sees what's running, MS-DOS style. A leading '@' suppresses
+            // the echo.
+            if cpu.pending_command.is_none()
+                && !cpu.batch_queue.is_empty()
+                && cpu.cs == 0
+                && cpu.process_stack.is_empty()
+            {
+                let raw = cpu.batch_queue.pop_front().unwrap();
+                let (line, echo) = if let Some(stripped) = raw.strip_prefix('@') {
+                    (stripped.trim().to_string(), false)
+                } else {
+                    (raw, true)
+                };
+                if !line.is_empty() {
+                    if echo {
+                        shell::show_prompt(&mut cpu);
+                        crate::video::print_string(&mut cpu, &format!("{}\r\n", line));
+                    }
+                    cpu.pending_command = Some(line);
+                }
+            }
+
             // --- HANDLE PENDING COMMANDS (Outside Interrupts) ---
             if let Some(cmd) = cpu.pending_command.take() {
                 // We have a command from the shell!
@@ -363,11 +395,16 @@ fn main() -> Result<(), String> {
                 if dispatcher.dispatch(&mut cpu, command, args) {
                     // Built-in command executed. CPU continues shell loop.
                 } else {
-                    // Load Program
+                    // Load Program. With no extension we probe .com, .exe,
+                    // then .bat — matching DOS's COMMAND.COM precedence.
                     let filename = command.to_string();
-                    let loaded = if !filename.contains('.') {
+                    let lower = filename.to_lowercase();
+                    let loaded = if lower.ends_with(".bat") {
+                        cpu.queue_batch_file(&filename)
+                    } else if !filename.contains('.') {
                         cpu.load_executable(&format!("{}.com", command), None)
                             || cpu.load_executable(&format!("{}.exe", command), None)
+                            || cpu.queue_batch_file(&format!("{}.bat", command))
                     } else {
                         cpu.load_executable(&filename, None)
                     };
@@ -407,7 +444,12 @@ fn main() -> Result<(), String> {
                 let _ = cpu.bus.log_file.as_mut().unwrap().flush();
                 cpu.load_shell();
                 cpu.state = CpuState::Running;
-                shell::show_prompt(&mut cpu);
+                // Skip the courtesy prompt while a batch is still feeding
+                // commands — the batch injector prints its own prompt+echo
+                // for each line, so a stray "C:\>" here would double up.
+                if cpu.batch_queue.is_empty() {
+                    shell::show_prompt(&mut cpu);
+                }
                 break;
             }
 
@@ -474,6 +516,32 @@ fn main() -> Result<(), String> {
                             "[PARSER-ENTRY]   caller code @ {:04X}:{:04X} (-16..ret): {}",
                             ret_cs, ret_ip, caller.trim()
                         ));
+                    }
+
+                    // Safety hatch: the parser reads its loop count from
+                    // ES:[0x22] where ES is the segment passed as arg0. If
+                    // arg0 is zero, ES ends up at the IVT and the loop
+                    // count becomes the high word of IVT[8]'s segment —
+                    // in our emulator 0xF000 — which makes the loop run
+                    // 61K times and trash DS (== SS in this build).
+                    //
+                    // On a real DOS install this path is guarded by the
+                    // MicroProse TSR (the same one that would service our
+                    // AX=FFFFh / BFBFh probes); without it, VGAME calls the
+                    // parser with a zeroed control pointer during its
+                    // init-loop teardown. Fake an immediate RETF instead
+                    // of letting the parser run wild.
+                    if arg0 == 0 {
+                        cpu.bus.log_string(&format!(
+                            "[PARSER-SKIP] arg0=0 — short-circuiting to RETF at {:04X}:{:04X} ret={:04X}:{:04X}",
+                            cpu.cs, cpu.ip, ret_cs, ret_ip
+                        ));
+                        // Simulate RETF: pop IP, pop CS from current SP.
+                        let popped_ip = cpu.pop();
+                        let popped_cs = cpu.pop();
+                        cpu.ip = popped_ip;
+                        cpu.cs = popped_cs;
+                        continue;
                     }
                 }
             }
@@ -597,7 +665,9 @@ fn main() -> Result<(), String> {
             if cpu.state == CpuState::RebootShell {
                 cpu.load_shell(); // Reloads assembly into RAM, resets IP/SP
                 cpu.state = CpuState::Running;
-                shell::show_prompt(&mut cpu);
+                if cpu.batch_queue.is_empty() {
+                    shell::show_prompt(&mut cpu);
+                }
                 break; // Break inner execution batch
             }
 

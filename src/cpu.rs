@@ -99,6 +99,10 @@ pub struct Cpu {
     flags: CpuFlags,
     pub state: CpuState,
     pub pending_command: Option<String>,
+    /// Pending batch-file command lines waiting to be dispatched as if the user
+    /// had typed them at the prompt. Drained by main loop while the shell is
+    /// idle (no child program on the process_stack and CS still in shell-land).
+    pub batch_queue: VecDeque<String>,
     pub current_psp: u16,
     pub heap_pointer: u16,
     /// Exit code (AL) and termination type (AH) of the most recently terminated
@@ -183,6 +187,7 @@ impl Cpu {
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
             pending_command: None,
+            batch_queue: VecDeque::new(),
             fpu_stack: [F80::new(); 8],
             fpu_top: 0,
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),
@@ -1109,6 +1114,37 @@ impl Cpu {
         let low = data[offset] as u16;
         let high = data[offset + 1] as u16;
         (high << 8) | low
+    }
+
+    /// Read a .BAT file from the virtual disk and append its commands to
+    /// `batch_queue`. Blank lines and `REM` comments are stripped. Returns
+    /// false if the file can't be located or read.
+    pub fn queue_batch_file(&mut self, filename: &str) -> bool {
+        let path = match self.bus.disk.resolve_path(filename) {
+            Some(p) if p.is_file() => p,
+            _ => return false,
+        };
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        self.bus.log_string(&format!(
+            "[BATCH] Queueing {} ({} bytes)",
+            filename,
+            contents.len()
+        ));
+        for raw_line in contents.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let upper = line.to_ascii_uppercase();
+            if upper == "REM" || upper.starts_with("REM ") || upper.starts_with("REM\t") {
+                continue;
+            }
+            self.batch_queue.push_back(line.to_string());
+        }
+        true
     }
 
     pub fn load_executable(&mut self, filename: &str, segment: Option<u16>) -> bool {
