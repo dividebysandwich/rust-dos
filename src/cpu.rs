@@ -1066,6 +1066,7 @@ impl Cpu {
         for byte in self.bus.vga.vram_text.iter_mut() {
             *byte = 0;
         }
+        self.bus.vga.dirty = true;
 
         // DOS "Underscore" cursor
         // High Byte (0x06) = Start Scanline, Low Byte (0x07) = End Scanline

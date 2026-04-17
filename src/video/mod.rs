@@ -448,6 +448,7 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
                 // Visually clear the character
                 let offset = (bus.cursor_y * 80 + bus.cursor_x) * 2;
                 bus.vga.vram_text[offset] = 0x20; // Space
+                bus.vga.dirty = true;
             }
         }
         _ => {
@@ -456,6 +457,7 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
             bus.vga.vram_text[offset] = ascii;
             bus.vga.vram_text[offset + 1] = 0x07; // Light Gray Attribute
             bus.cursor_x += 1;
+            bus.vga.dirty = true;
         }
     }
 
@@ -552,4 +554,6 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
     // If we don't update this, the shell will print over our output.
     cpu.bus.write_8(0x0450, col as u8);
     cpu.bus.write_8(0x0451, row as u8);
+
+    cpu.bus.vga.dirty = true;
 }

@@ -20,6 +20,7 @@ mod command;
 mod cpu;
 mod disk;
 mod f80;
+mod instr_cache;
 mod instructions;
 mod interrupts;
 mod keyboard;
@@ -94,6 +95,20 @@ fn main() -> Result<(), String> {
 
     // Load Shell Code into Memory
     cpu.load_shell();
+
+    // Decoded-instruction cache. 64K direct-mapped slots (~3.5 MB) — comfortably
+    // large for any DOS program's hot working set, and small enough to fit in
+    // modern L2/L3. See `instr_cache.rs` for the SMC-invalidation scheme.
+    let mut instr_cache = instr_cache::InstrCache::new(16);
+
+    // Cached render target. We re-render the full VGA surface only when
+    // `cpu.bus.vga.dirty` is set — everything else (cursor blink, mouse
+    // cursor, recording indicator) is overlaid on top of this buffer each
+    // frame. For a program that isn't actively touching VRAM, the per-SDL-
+    // frame cost drops from "640×400×3 zero fill + per-pixel palette/planar
+    // lookup" to "one memcpy of the cached buffer + a tiny overlay pass".
+    let mut cached_frame: Vec<u8> =
+        vec![0u8; (video::SCREEN_WIDTH * video::SCREEN_HEIGHT * 3) as usize];
 
     // Main Loop
     'running: loop {
@@ -277,8 +292,13 @@ fn main() -> Result<(), String> {
         let mut decoder = Decoder::with_ip(16, ram_slice, 0, DecoderOptions::NONE);
         let mut instr = iced_x86::Instruction::default();
 
-        // Execute instructions
-        for _ in 0..30_000 {
+        // Execute instructions. The batch size is much larger than the legacy
+        // 30k because the decoded-instruction cache makes each fetch cheap
+        // enough that we can afford to execute many more x86 instructions per
+        // 16 ms frame — without this, the emulator idled the host CPU while
+        // still running at <2 MIPS. The outer SDL loop still caps wall-clock
+        // pacing via thread::sleep, so this is an upper bound, not a target.
+        for _ in 0..500_000 {
             // Deliver pending hardware IRQs at the start of each instruction
             // as a CPU would, but only when the program has IF=1 (interrupts
             // enabled) and the PIC IMR allows the line. Missing the exact
@@ -467,13 +487,19 @@ fn main() -> Result<(), String> {
                 continue; // Done for this cycle
             }
 
-            // Decode the next instruction using the reused decoder and
-            // instruction buffer. set_position + set_ip puts iced's state
-            // back at the current CS:IP; decode_out writes into `instr`
-            // without producing a new value.
-            decoder.set_position(phys_ip).unwrap();
-            decoder.set_ip(cpu.ip as u64);
-            decoder.decode_out(&mut instr);
+            // Decode via the decoded-instruction cache. On a hit (the common
+            // case inside hot loops) we skip iced's decode path entirely and
+            // copy the stored Instruction into our local buffer. On a miss we
+            // fall back to the reused decoder and insert the result.
+            let page_gen = cpu.bus.page_gen[(phys_ip >> 12) & 0xFF];
+            if let Some(cached) = instr_cache.lookup(phys_ip, cpu.cs, cpu.ip, page_gen) {
+                instr = cached;
+            } else {
+                decoder.set_position(phys_ip).unwrap();
+                decoder.set_ip(cpu.ip as u64);
+                decoder.decode_out(&mut instr);
+                instr_cache.insert(phys_ip, cpu.cs, cpu.ip, page_gen, instr);
+            }
 
             if debug_mode || cpu.debug_qb_print {
                 // Filter out the 'Wait for Key' interrupt loop to save disk space
@@ -549,11 +575,21 @@ fn main() -> Result<(), String> {
             last_blink = std::time::Instant::now();
         }
 
-        // Render Frame
-        // Note: We redraw every frame here for simplicity, even if VRAM isn't dirty
+        // Render Frame. The expensive part (the 640×400×3 pixel fill driven by
+        // palette/planar lookups inside `render_screen`) only happens when the
+        // VGA state changed since last frame. On "clean" frames we reuse
+        // `cached_frame` and just overlay the cursor/mouse/recording pip.
+        if cpu.bus.vga.dirty {
+            video::render_screen(&mut cached_frame, &cpu.bus);
+            cpu.bus.vga.dirty = false;
+        }
+
         texture.with_lock(None, |buffer: &mut [u8], _pitch: usize| {
-            // Draw the base screen (text characters)
-            video::render_screen(buffer, &cpu.bus);
+            // Copy the cached render into the texture. This is a single
+            // ~768 KiB memcpy — cheap on any modern machine — and leaves us a
+            // clean canvas for the per-frame overlays (cursor/mouse/recorder
+            // indicator) without re-running the VGA renderer.
+            buffer.copy_from_slice(&cached_frame);
 
             // Draw the Cursor (Overlay)
             // Only draw the hardware cursor in Text Modes!

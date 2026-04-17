@@ -112,6 +112,11 @@ pub struct VgaCard {
     pub attribute_index: u8,
     pub attribute_regs: [u8; 21],  // 0-0xF: Palette, 0x10-0x14: Control
     pub attribute_flip_flop: bool, // false = Address, true = Data
+
+    /// Set whenever VRAM, palette, or any VGA state that would change the
+    /// rendered image is touched. The main loop uses this to skip the
+    /// 640x400x3 render pass on frames where nothing moved.
+    pub dirty: bool,
 }
 
 impl VgaCard {
@@ -149,6 +154,7 @@ impl VgaCard {
             attribute_index: 0,
             attribute_regs: [0; 21],
             attribute_flip_flop: false,
+            dirty: true,
         }
     }
 
@@ -289,6 +295,7 @@ impl VgaCard {
                 }
             }
         }
+        self.dirty = true;
     }
 
     /// Load the 64-color EGA palette into DAC entries 0..63 for the 16-color
@@ -329,6 +336,7 @@ impl VgaCard {
     }
 
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
+        self.dirty = true;
         match mode {
             super::VideoMode::Ega320x200
             | super::VideoMode::Ega640x200
@@ -531,12 +539,14 @@ impl Device for VgaCard {
                     if (self.attribute_index as usize) < self.attribute_regs.len() {
                         self.attribute_regs[self.attribute_index as usize] = value;
                         // println!("[VGA] Attr Reg {:02X} = {:02X}", self.attribute_index, value);
+                        self.dirty = true;
                     }
                     self.attribute_flip_flop = false; // Switch back to Address
                 }
             }
             0x3C2 => {
                 self.misc_output_reg = value;
+                self.dirty = true;
             }
             0x3C4 => self.sequencer_index = value,
             0x3C5 => {
@@ -553,6 +563,7 @@ impl Device for VgaCard {
 
                     self.sequencer_regs[self.sequencer_index as usize] = val;
                     // println!("[VGA] Seq Reg {:02X} = {:02X}", self.sequencer_index, val);
+                    self.dirty = true;
                 }
             }
             0x3CE => self.graphics_index = value,
@@ -570,16 +581,19 @@ impl Device for VgaCard {
 
                     self.graphics_regs[self.graphics_index as usize] = val;
                     // println!("[VGA] Gfx Reg {:02X} = {:02X}", self.graphics_index, val);
+                    self.dirty = true;
                 }
             }
             0x3D4 => self.crtc_index = value,
             0x3D5 => {
                 if (self.crtc_index as usize) < self.crtc_regs.len() {
                     self.crtc_regs[self.crtc_index as usize] = value;
+                    self.dirty = true;
                 }
             }
             0x3C6 => {
                 self.dac_mask = value;
+                self.dirty = true;
             }
             0x3C7 => {
                 // Set DAC Read Index. Subsequent reads from 0x3C9 return R,G,B triplets.
@@ -596,6 +610,7 @@ impl Device for VgaCard {
                 let index = (self.dac_write_index as usize) * 3 + (self.dac_step as usize);
                 if index < self.palette.len() {
                     self.palette[index] = value & 0x3F;
+                    self.dirty = true;
                 }
                 self.dac_step += 1;
                 if self.dac_step == 3 {

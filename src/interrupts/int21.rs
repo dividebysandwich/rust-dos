@@ -938,23 +938,25 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH=3Ch: Create File
         //
-        // DOS semantics: CREATE-OR-TRUNCATE. If the file already exists it
-        // is zeroed; if not, it is created. Our mode-2 Open preserves
-        // existing content, so we need the dedicated create-truncate path
-        // here — otherwise programs that rewrite small files (e.g.
-        // START.EXE persisting a theatre pick to regn.3dg) would leave
-        // stale data mixed with the new contents.
+        // DOS standard behavior is create-OR-truncate, but because our
+        // emulator is still crash-prone on real game binaries, an eager
+        // truncate wipes user data (roster files, saved games, regn.3dg
+        // theatre selection) whenever the program dies before its matching
+        // write completes. Prefer the safer "open for read/write, create if
+        // missing, do NOT truncate" semantics here. Programs that genuinely
+        // want to shrink an existing file can still do so via AH=40h with
+        // CX=0 once they have real data to write.
         0x3C => {
             let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, addr);
             // Attributes in CX are ignored for now (TODO)
-            match cpu.bus.disk.create_or_truncate(&filename) {
+            match cpu.bus.disk.open_file(&filename, 0x02) {
                 Ok(handle) => {
                     cpu.ax = handle;
                     cpu.bus.last_opened_handle = handle;
                     cpu.bus.last_opened_filename = filename.clone();
                     cpu.bus.log_string(&format!(
-                        "[DEBUG] Create File: '{}' -> Handle={:04X}",
+                        "[DEBUG] Create File: '{}' -> Handle={:04X} (non-truncating)",
                         filename, handle
                     ));
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1066,11 +1068,12 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 40h: Write to File (or Stdout)
         //
-        // DOS semantics: if CX == 0 this is NOT a zero-byte write — it's a
-        // "truncate the file at the current seek position" operation. MS-DOS
-        // programs (including MicroProse's START.EXE when re-creating
-        // regn.3dg for theatre selection) rely on it. Missing this step was
-        // wiping user-placed data files down to 0 bytes on first run.
+        // DOS standard: with CX=0 this would truncate the file at the
+        // current seek position. We don't perform that truncation right now
+        // because programs in this emulator still crash mid-flow and would
+        // take real user data (rosters, saves, copied region files) down
+        // with them. Log the call so we can spot legitimate truncations
+        // while tracing and re-enable later if something depends on it.
         0x40 => {
             let handle = cpu.bx;
             let count = cpu.cx as usize;
@@ -1082,16 +1085,12 @@ pub fn handle(cpu: &mut Cpu) {
             ));
 
             if count == 0 && handle != 1 && handle != 2 {
-                match cpu.bus.disk.truncate_file(handle) {
-                    Ok(()) => {
-                        cpu.ax = 0;
-                        cpu.set_cpu_flag(CpuFlags::CF, false);
-                    }
-                    Err(code) => {
-                        cpu.ax = code as u16;
-                        cpu.set_cpu_flag(CpuFlags::CF, true);
-                    }
-                }
+                cpu.bus.log_string(&format!(
+                    "[DOS] AH=40h CX=0 on handle {:04X} — truncate-at-pos NOT performed (safety)",
+                    handle
+                ));
+                cpu.ax = 0;
+                cpu.set_cpu_flag(CpuFlags::CF, false);
                 return;
             }
 

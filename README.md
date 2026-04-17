@@ -21,11 +21,11 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * FPU emulation
 * Interrupt handlers
 
-## What doesn't work
+## What partially works
 
-* Programs using OVLs
-* sub-processes (like launching another program from within Norton Commander)
+* AdLib sound
 * VGA graphics
+* Programs using OVLs
 * TSRs
 
 ## What's not implemented yet

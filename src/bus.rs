@@ -72,6 +72,14 @@ pub struct Bus {
 
     // AdLib / OPL2 FM synthesizer (ports 0x388/0x389)
     pub adlib: crate::adlib::AdLib,
+
+    /// Per-4KB-page generation counter covering the full 1 MiB address space
+    /// (256 pages). Bumped on every write inside the Bus write helpers. The
+    /// decoded-instruction cache stores the gen at decode time and invalidates
+    /// a cached entry when the gen for its page has changed — this is how we
+    /// stay correct in the face of self-modifying code (LZEXE, packers, etc.)
+    /// without paying the cost of verifying cached bytes on every fetch.
+    pub page_gen: [u32; 256],
 }
 
 use std::path::PathBuf;
@@ -110,6 +118,7 @@ impl Bus {
             search_handles: std::collections::HashMap::new(),
             mouse: crate::mouse::MouseState::new(),
             adlib: crate::adlib::AdLib::new(),
+            page_gen: [0; 256],
         };
         // BIOS Data Area (BDA) Initialization
         // 0x0449: Current Video Mode (03 = 80x25 Color)
@@ -242,6 +251,7 @@ impl Bus {
         for i in (screen_size - row_size)..screen_size {
             self.vga.vram_text[i] = if i % 2 == 0 { 0x20 } else { 0x07 };
         }
+        self.vga.dirty = true;
     }
 
     #[inline(always)]
@@ -275,10 +285,19 @@ impl Bus {
             // SAFETY: ram is a fixed 1 MiB buffer; addr < 0xA0000 is in range.
             unsafe {
                 *self.ram.get_unchecked_mut(addr) = value;
+                // Bump generation for this page so the decoded-instruction
+                // cache invalidates any cached decodes that fell in it.
+                let page = (addr >> 12) & 0xFF;
+                let g = self.page_gen.get_unchecked_mut(page);
+                *g = g.wrapping_add(1);
             }
             return false;
         }
         if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
+            // write_graphics already sets vga.dirty unconditionally. The
+            // Return value only matters to callers that care whether the
+            // write hit the active display plane, but rendering is gated
+            // off vga.dirty directly, so we simplify here.
             self.vga.write_graphics(addr - ADDR_VGA_GRAPHICS, value);
             return matches!(
                 self.video_mode,
@@ -291,6 +310,7 @@ impl Bus {
         }
         if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
             self.vga.vram_text[addr - ADDR_VGA_TEXT] = value;
+            self.vga.dirty = true;
 
             // Check if current mode uses this memory
             return matches!(
@@ -308,6 +328,8 @@ impl Bus {
         // ROM / reserved area (0xC0000..0x100000 on a real PC). Still backed
         // by our Vec<u8> so BIOS-ROM writes from initialization work.
         self.ram[addr] = value;
+        let page = (addr >> 12) & 0xFF;
+        self.page_gen[page] = self.page_gen[page].wrapping_add(1);
         false
     }
 
@@ -478,6 +500,7 @@ impl Bus {
                         if self.video_mode != new_mode && new_mode == VideoMode::Graphics320x200 {
                             self.log_string("[VGA] Switch to Graphics320x200 detected via IO");
                             self.video_mode = new_mode;
+                            self.vga.dirty = true;
                         }
                     }
                 } else {
