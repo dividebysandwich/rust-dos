@@ -250,7 +250,6 @@ impl VgaCard {
         let chain4 = (seq_mem_mode & 0x08) != 0;
         let odd_even = (seq_mem_mode & 0x02) != 0;
 
-        // Planar Offset
         let plane_offset = if chain4 {
             offset >> 2
         } else if odd_even {
@@ -259,39 +258,83 @@ impl VgaCard {
             offset
         };
 
-        // Determine planes to write
         let mut planes_to_write = if chain4 {
-            1 << (offset & 3)
+            1u8 << (offset & 3)
         } else {
             self.sequencer_regs[0x02] & 0x0F
         };
 
-        // Apply Odd/Even Plane Masking
         if odd_even && !chain4 {
             if (offset & 1) == 0 {
-                // Even Address: Planes 0 & 2
-                planes_to_write &= 0x05; // 0101
+                planes_to_write &= 0x05;
             } else {
-                // Odd Address: Planes 1 & 3
-                planes_to_write &= 0x0A; // 1010
+                planes_to_write &= 0x0A;
             }
         }
 
-        // Bit Mask (Graphics Reg 8)
+        let mode_reg = self.graphics_regs[0x05];
+        let write_mode = mode_reg & 0x03;
+        let set_reset = self.graphics_regs[0x00] & 0x0F;
+        let enable_sr = self.graphics_regs[0x01] & 0x0F;
+        let data_rotate = self.graphics_regs[0x03];
+        let rotate_count = data_rotate & 0x07;
+        let logical_op = (data_rotate >> 3) & 0x03;
         let bit_mask = self.graphics_regs[0x08];
         let latches = self.latches.get();
 
-        // Basic Write Mode 0 Implementation
+        let apply_op = |data: u8, latch: u8| -> u8 {
+            match logical_op {
+                1 => data & latch,
+                2 => data | latch,
+                3 => data ^ latch,
+                _ => data,
+            }
+        };
+
+        let mut per_plane = [0u8; 4];
+        match write_mode {
+            0 => {
+                let rotated = value.rotate_right(rotate_count as u32);
+                for p in 0..4 {
+                    let data = if (enable_sr >> p) & 1 == 1 {
+                        if (set_reset >> p) & 1 == 1 { 0xFF } else { 0x00 }
+                    } else {
+                        rotated
+                    };
+                    let after = apply_op(data, latches[p]);
+                    per_plane[p] = (after & bit_mask) | (latches[p] & !bit_mask);
+                }
+            }
+            1 => {
+                for p in 0..4 {
+                    per_plane[p] = latches[p];
+                }
+            }
+            2 => {
+                for p in 0..4 {
+                    let data = if (value >> p) & 1 == 1 { 0xFF } else { 0x00 };
+                    let after = apply_op(data, latches[p]);
+                    per_plane[p] = (after & bit_mask) | (latches[p] & !bit_mask);
+                }
+            }
+            _ => {
+                // Write Mode 3: rotated CPU data is AND'd with bit mask to
+                // produce the effective mask; set/reset supplies the value.
+                let rotated = value.rotate_right(rotate_count as u32);
+                let effective_mask = rotated & bit_mask;
+                for p in 0..4 {
+                    let data = if (set_reset >> p) & 1 == 1 { 0xFF } else { 0x00 };
+                    let after = apply_op(data, latches[p]);
+                    per_plane[p] = (after & effective_mask) | (latches[p] & !effective_mask);
+                }
+            }
+        }
+
         for p in 0..4 {
             if (planes_to_write & (1 << p)) != 0 {
-                // Combine CPU data with Latch data using Bit Mask
-                // Result = (CPU & Mask) | (Latch & ~Mask)
-                let latch_val = latches[p];
-                let val_to_write = (value & bit_mask) | (latch_val & !bit_mask);
-
                 let idx = (p * 65536) + plane_offset;
                 if idx < self.vram_graphics.len() {
-                    self.vram_graphics[idx] = val_to_write;
+                    self.vram_graphics[idx] = per_plane[p];
                 }
             }
         }
@@ -430,15 +473,24 @@ impl Device for VgaCard {
             0x3C4, 0x3C5, // Sequencer
             0x3CE, 0x3CF, // Graphics
             0x3CC, // Misc Output Read
-            0x3D4, 0x3D5, // CRTC
+            0x3D4, 0x3D5, // CRTC (color addressing, MISC bit 0 = 1)
+            0x3B4, 0x3B5, // CRTC (mono addressing, MISC bit 0 = 0)
             0x3C6, 0x3C7, 0x3C8, 0x3C9, // DAC
-            0x3DA, // Status
+            0x3DA, // Status (color)
+            0x3BA, // Status (mono) — alias used for retrace polling and detection
         ];
         PORTS
     }
 
     fn io_read(&mut self, port: u16) -> u8 {
-        // println!("[VGA] Read Port {:04X}", port);
+        // Mono-CRTC aliases: 3B4/3B5 == 3D4/3D5 and 3BA == 3DA. Games probe
+        // these for monitor type detection; transparently redirect.
+        let port = match port {
+            0x3B4 => 0x3D4,
+            0x3B5 => 0x3D5,
+            0x3BA => 0x3DA,
+            other => other,
+        };
         match port {
             0x3DA => {
                 // Input Status #1
@@ -527,6 +579,12 @@ impl Device for VgaCard {
     }
 
     fn io_write(&mut self, port: u16, value: u8) {
+        let port = match port {
+            0x3B4 => 0x3D4,
+            0x3B5 => 0x3D5,
+            0x3BA => 0x3DA,
+            other => other,
+        };
         match port {
             0x3C0 => {
                 if !self.attribute_flip_flop {

@@ -505,6 +505,10 @@ impl Bus {
             0xA0 | 0xA1 => {
                 // Slave PIC — we don't model cascaded IRQs.
             }
+            0x0201 => {
+                // Game port (joystick). Writes reset the one-shot timers.
+                // No joystick emulated, so the write is a no-op.
+            }
 
             _ => {
                 if self.vga.ports().contains(&port) {
@@ -513,12 +517,12 @@ impl Bus {
                     // a full 256-color palette update is 1024 writes, which
                     // buries everything else in the trace. Still log the less
                     // frequent mode / register writes.
-                    if !matches!(port, 0x3C6..=0x3C9) {
-                        self.log_string(&format!(
-                            "[VGA-IO] Write Port {:04X} Value {:02X}",
-                            port, value
-                        ));
-                    }
+                    // if !matches!(port, 0x3C6..=0x3C9) {
+                    //     self.log_string(&format!(
+                    //         "[VGA-IO] Write Port {:04X} Value {:02X}",
+                    //         port, value
+                    //     ));
+                    // }
 
                     // Check if video mode changed
                     if let Some(new_mode) = self.vga.check_video_mode() {

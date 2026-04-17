@@ -88,10 +88,11 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
 
         // --- Control Flow ---
         Mnemonic::Jmp | Mnemonic::Call | Mnemonic::Ret | Mnemonic::Retf |
-        Mnemonic::Loop | Mnemonic::Je | Mnemonic::Jne | Mnemonic::Jcxz |
+        Mnemonic::Loop | Mnemonic::Je | Mnemonic::Jne | Mnemonic::Jcxz | Mnemonic::Jecxz |
         Mnemonic::Jb | Mnemonic::Jbe | Mnemonic::Ja | Mnemonic::Jae |
         Mnemonic::Jl | Mnemonic::Jle | Mnemonic::Jg | Mnemonic::Jge |
-        Mnemonic::Jo | Mnemonic::Js | Mnemonic::Jns | Mnemonic::Loopne | 
+        Mnemonic::Jo | Mnemonic::Jno | Mnemonic::Js | Mnemonic::Jns |
+        Mnemonic::Jp | Mnemonic::Jnp | Mnemonic::Loopne |
         Mnemonic::Loope => {
             control::handle(cpu, instr);
         }
