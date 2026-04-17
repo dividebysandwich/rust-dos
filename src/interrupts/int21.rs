@@ -365,22 +365,6 @@ pub fn handle(cpu: &mut Cpu) {
             let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, name_addr);
 
-            // Early bail-out on empty filename. Some programs (e.g.
-            // VGAME.EXE during its exit-cleanup path) accidentally call
-            // EXEC with DS:DX pointing at uninitialised memory. Returning
-            // the "file not found" error (CF=1, AX=2) here prevents the
-            // context save/restore from going through and bringing down
-            // the parent frame with it.
-            if filename.is_empty() {
-                cpu.bus.log_string(&format!(
-                    "[DOS] EXEC rejected: empty filename, DS:DX={:04X}:{:04X} AL={:02X} caller CS:IP={:04X}:{:04X}",
-                    cpu.ds, cpu.dx, mode, cpu.cs, cpu.ip
-                ));
-                cpu.set_cpu_flag(CpuFlags::CF, true);
-                cpu.set_reg16(Register::AX, 0x0002); // file not found
-                return;
-            }
-
             // --- Stub out copy-protection / disk-swap helpers ---
             // MicroProse games (F-117, F-19, Gunship, Covert Action) ship two
             // runtime helpers that we can't satisfy without the original
@@ -953,8 +937,6 @@ pub fn handle(cpu: &mut Cpu) {
             match cpu.bus.disk.open_file(&filename, 0x02) {
                 Ok(handle) => {
                     cpu.ax = handle;
-                    cpu.bus.last_opened_handle = handle;
-                    cpu.bus.last_opened_filename = filename.clone();
                     cpu.bus.log_string(&format!(
                         "[DEBUG] Create File: '{}' -> Handle={:04X} (non-truncating)",
                         filename, handle
@@ -982,8 +964,6 @@ pub fn handle(cpu: &mut Cpu) {
             match cpu.bus.disk.open_file(&filename, mode) {
                 Ok(handle) => {
                     cpu.ax = handle;
-                    cpu.bus.last_opened_handle = handle;
-                    cpu.bus.last_opened_filename = filename.clone();
                     cpu.bus
                         .log_string(&format!("[DEBUG] Open Success, Handle={:04X}", handle));
                     // In real CPU, clear CF here
@@ -1275,7 +1255,6 @@ pub fn handle(cpu: &mut Cpu) {
             match crate::mcb::alloc(&mut cpu.bus, owner, requested) {
                 Ok(segment) => {
                     cpu.ax = segment;
-                    cpu.bus.last_alloc_segment = segment;
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     cpu.bus.log_string(&format!(
                         "[DOS] Alloc {:04X} paras -> {:04X}",
@@ -1571,60 +1550,15 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         _ => {
+            // Match DOSBox's default behaviour for unknown INT 21h
+            // functions: clear AL, leave AH and CF alone. This keeps
+            // callers on the "function not supported" fallback path
+            // (including MicroProse's mirror-AX TSR probes, AX=FFFFh /
+            // BFBFh). Don't pretend to load files here — that convinces
+            // the game its TSR serviced the call and it stops doing the
+            // plain INT 21h AH=3Fh reads DOSBox-running VGAME relies on.
             let al_val = cpu.get_al();
-
-            // MicroProse MPS-Engine TSR calls: AX=FFFFh and AX=BFBFh are
-            // "load this file into the last-allocated buffer" requests. In
-            // a genuine install, DSWAP.EXE is the TSR that services them;
-            // we short-circuit DSWAP, so emulate the effect directly by
-            // reading the most recently opened file into the most recently
-            // allocated segment starting at offset 0. Without this, the
-            // .3dx parser runs on an empty buffer, reads garbage counts,
-            // and corrupts its caller's stack.
-            if ah == al_val && (ah == 0xFF || ah == 0xBF) {
-                let seg = cpu.bus.last_alloc_segment;
-                let name = cpu.bus.last_opened_filename.clone();
-                if seg != 0 && !name.is_empty() {
-                    if let Some(path) = cpu.bus.disk.resolve_path(&name) {
-                        match std::fs::read(&path) {
-                            Ok(bytes) if !bytes.is_empty() => {
-                                let phys = (seg as usize) * 16;
-                                let end = (phys + bytes.len()).min(cpu.bus.ram.len());
-                                let copy_len = end - phys;
-                                cpu.bus.ram[phys..phys + copy_len]
-                                    .copy_from_slice(&bytes[..copy_len]);
-                                cpu.bus.log_string(&format!(
-                                    "[MPS-TSR] AX={:04X} loaded '{}' ({} bytes) -> {:04X}:0000",
-                                    (ah as u16) << 8 | al_val as u16,
-                                    name, copy_len, seg
-                                ));
-                                cpu.set_reg16(Register::AX, 0);
-                                cpu.set_cpu_flag(CpuFlags::CF, false);
-                                return;
-                            }
-                            Ok(_) => {
-                                // File exists but is empty — treat as
-                                // failure so the caller can error out
-                                // rather than parse zeros as valid data.
-                                cpu.bus.log_string(&format!(
-                                    "[MPS-TSR] '{}' is empty; reporting failure",
-                                    name
-                                ));
-                            }
-                            Err(e) => {
-                                cpu.bus.log_string(&format!(
-                                    "[MPS-TSR] read error on '{}': {}",
-                                    name, e
-                                ));
-                            }
-                        }
-                    }
-                }
-                // Fall back: behave as "TSR not present" — CF=1, AX unchanged.
-                cpu.set_cpu_flag(CpuFlags::CF, true);
-            } else {
-                cpu.set_reg8(Register::AL, 0);
-            }
+            cpu.set_reg8(Register::AL, 0);
             cpu.bus.log_string(&format!(
                 "[DOS] Unhandled INT 21h AH={:02X} AL={:02X} BX={:04X} CX={:04X} DX={:04X} DS={:04X} ES={:04X} SI={:04X} DI={:04X}",
                 ah,

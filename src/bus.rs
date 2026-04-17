@@ -54,14 +54,6 @@ pub struct Bus {
     pub dta_segment: u16,
     pub dta_offset: u16,
     pub log_file: Option<BufWriter<File>>,
-    /// Segment returned by the most recent INT 21h AH=48h allocation. The
-    /// MicroProse TSR stub (INT 21h AX=FFFFh / AX=BFBFh) treats "the last
-    /// alloc" as the destination for its file loads.
-    pub last_alloc_segment: u16,
-    /// Most recent file handle returned by INT 21h AH=3Dh.
-    pub last_opened_handle: u16,
-    /// Name of the most recently opened file, for TSR-emulated reads.
-    pub last_opened_filename: String,
 
     // VGA State
     pub vga: crate::video::vga::VgaCard,
@@ -109,9 +101,6 @@ impl Bus {
             pic_mask: 0x00,
             audio_phase: 0.0,
             log_file: None,
-            last_alloc_segment: 0,
-            last_opened_handle: 0xFFFF,
-            last_opened_filename: String::new(),
             dta_segment: 0x1000,
             dta_offset: 0x0000,
             vga: crate::video::vga::VgaCard::new(),
