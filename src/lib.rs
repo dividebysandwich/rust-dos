@@ -1,3 +1,4 @@
+pub mod adlib;
 pub mod audio;
 pub mod bus;
 pub mod command;

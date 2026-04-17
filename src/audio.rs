@@ -55,26 +55,24 @@ pub fn pump_audio(bus: &mut Bus) {
         let frequency = BASE_FREQ / divisor as f32;
         let phase_step = frequency / SAMPLE_RATE;
 
-        // Generate Audio
+        // Generate Audio — mix PC speaker square wave + AdLib FM.
+        // AdLib sums 9 channels each in roughly [-1, 1]. Scale to roughly
+        // match PC speaker loudness and clamp to i16 after mixing.
+        const ADLIB_GAIN: f32 = 1400.0;
         for _ in 0..needed {
-            // Filter out low frequencies (< 20Hz)
-            let sample = if bus.speaker_on && frequency > 20.0 {
-                
-                // Advance Phase
+            let speaker = if bus.speaker_on && frequency > 20.0 {
                 bus.audio_phase += phase_step;
-                
-                // Wrap Phase (Normalized 0.0 to 1.0)
                 if bus.audio_phase >= 1.0 {
                     bus.audio_phase -= 1.0;
                 }
-
-                // Square Wave
                 if bus.audio_phase < 0.5 { VOLUME } else { -VOLUME }
             } else {
-                0 // Silence
+                0
             };
-            
-            buffer.push(sample);
+
+            let adlib = (bus.adlib.render_sample() * ADLIB_GAIN) as i32;
+            let mixed = (speaker as i32 + adlib).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            buffer.push(mixed);
         }
 
         if let Err(e) = device.queue_audio(&buffer) {

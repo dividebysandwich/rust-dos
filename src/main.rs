@@ -13,6 +13,7 @@ use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::recorder::ScreenRecorder;
 use crate::video::VideoMode;
 
+mod adlib;
 mod audio;
 mod bus;
 mod command;

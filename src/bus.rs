@@ -69,6 +69,9 @@ pub struct Bus {
 
     // Mouse State (INT 33h)
     pub mouse: crate::mouse::MouseState,
+
+    // AdLib / OPL2 FM synthesizer (ports 0x388/0x389)
+    pub adlib: crate::adlib::AdLib,
 }
 
 use std::path::PathBuf;
@@ -106,6 +109,7 @@ impl Bus {
             vga: crate::video::vga::VgaCard::new(),
             search_handles: std::collections::HashMap::new(),
             mouse: crate::mouse::MouseState::new(),
+            adlib: crate::adlib::AdLib::new(),
         };
         // BIOS Data Area (BDA) Initialization
         // 0x0449: Current Video Mode (03 = 80x25 Color)
@@ -433,6 +437,15 @@ impl Bus {
                 self.speaker_on = enabled;
             }
 
+            // AdLib / OPL2 (YM3812). Port 0x388 selects the register,
+            // 0x389 writes data into the previously selected register.
+            0x388 => {
+                self.adlib.write_register_select(value);
+            }
+            0x389 => {
+                self.adlib.write_register_data(value);
+            }
+
             // Dispatch to Devices
             // TODO: Use a proper map lookup
             // Ports we intentionally ignore — writes are harmless but other-
@@ -538,6 +551,12 @@ impl Bus {
                     0x00
                 }
             }
+
+            // AdLib status register (port 0x388). Bit 7 = IRQ, bit 6 = timer1
+            // expired, bit 5 = timer2 expired. Games poll this to detect the
+            // card by arming timer1 and checking that the bits flip in time.
+            0x388 => self.adlib.read_status(),
+            0x389 => 0xFF,
 
             // Read PPI Port B (Speaker State)
             0x61 => {
