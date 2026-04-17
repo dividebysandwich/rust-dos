@@ -39,12 +39,31 @@ pub struct MouseState {
     /// Accumulated deltas in mickeys, read-and-clear via AH=0Bh.
     pub mickey_x: i16,
     pub mickey_y: i16,
+    /// Fractional-mickey accumulators. We emit mickeys at a non-integer
+    /// ratio to virtual-pixel delta (2/3 horizontal, 4/3 vertical) so
+    /// Carrier Command's internal cursor integrator moves 1:1 with the
+    /// host mouse. The remainder from each integer division is kept here
+    /// so small sub-pixel motions accumulate instead of being lost.
+    pub mickey_accum_x: i32,
+    pub mickey_accum_y: i32,
 
-    /// User-installed event callback (AH=0Ch). Not invoked yet; stored so that
-    /// programs that check back for the address don't see a reset to zero.
+    /// User-installed event callback (AH=0Ch). Invoked by the main loop
+    /// when any event bit in `pending_callback_events` also appears in
+    /// `callback_mask` and the callback vector is non-null.
     pub callback_mask: u16,
     pub callback_cs: u16,
     pub callback_ip: u16,
+    /// Event bits that have fired since we last dispatched to the user
+    /// callback. Bit layout matches the AX=000C mask convention:
+    ///   bit 0 = motion, bit 1 = L-press, bit 2 = L-release,
+    ///   bit 3 = R-press, bit 4 = R-release,
+    ///   bit 5 = M-press, bit 6 = M-release.
+    pub pending_callback_events: u16,
+    /// Snapshot of the mickey delta passed to the last callback. Used so
+    /// motion events can pass the accumulated mickey count without
+    /// destroying the AH=0Bh counter's independent accumulator.
+    pub last_callback_mickey_x: i16,
+    pub last_callback_mickey_y: i16,
 }
 
 impl MouseState {
@@ -67,9 +86,14 @@ impl MouseState {
             release_y: [0; 3],
             mickey_x: 0,
             mickey_y: 0,
+            mickey_accum_x: 0,
+            mickey_accum_y: 0,
             callback_mask: 0,
             callback_cs: 0,
             callback_ip: 0,
+            pending_callback_events: 0,
+            last_callback_mickey_x: 0,
+            last_callback_mickey_y: 0,
         }
     }
 
@@ -92,19 +116,49 @@ impl MouseState {
         self.release_y = [0; 3];
         self.mickey_x = 0;
         self.mickey_y = 0;
+        self.mickey_accum_x = 0;
+        self.mickey_accum_y = 0;
         self.callback_mask = 0;
         self.callback_cs = 0;
         self.callback_ip = 0;
+        self.pending_callback_events = 0;
+        self.last_callback_mickey_x = 0;
+        self.last_callback_mickey_y = 0;
     }
 
-    /// Move the cursor, clamped to the clipping window. Accumulates mickey
-    /// deltas (1 mickey == 1/8 screen pixel on real hardware; we use 1:1
-    /// which is good enough for most games that care about mickeys).
+    /// Move the cursor, clamped to the clipping window, and accumulate
+    /// AH=0Bh mickey deltas. Empirical Carrier Command testing shows its
+    /// integrator applies a ~1.5× gain horizontally and ~0.75× vertically
+    /// to the mickey stream before advancing its cursor — a 2:1 vertical-
+    /// to-horizontal ratio consistent with the standard Microsoft mouse
+    /// sensitivity. To cancel that so the in-game cursor tracks the host
+    /// mouse 1:1, we emit mickeys at 2/3 the horizontal delta and 4/3
+    /// the vertical delta. Remainders accumulate in mickey_accum_* so
+    /// slow motions aren't lost to integer truncation.
     pub fn set_position(&mut self, x: i32, y: i32) {
         let new_x = x.clamp(self.min_x, self.max_x);
         let new_y = y.clamp(self.min_y, self.max_y);
-        self.mickey_x = self.mickey_x.wrapping_add((new_x - self.x) as i16);
-        self.mickey_y = self.mickey_y.wrapping_add((new_y - self.y) as i16);
+        let dx = new_x - self.x;
+        let dy = new_y - self.y;
+
+        self.mickey_accum_x += dx * 2;
+        self.mickey_accum_y += dy * 4;
+        let emit_x = self.mickey_accum_x / 3;
+        let emit_y = self.mickey_accum_y / 3;
+        self.mickey_accum_x -= emit_x * 3;
+        self.mickey_accum_y -= emit_y * 3;
+
+        self.mickey_x = self.mickey_x.wrapping_add(
+            emit_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        );
+        self.mickey_y = self.mickey_y.wrapping_add(
+            emit_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        );
+
+        if dx != 0 || dy != 0 {
+            self.pending_callback_events |= 0x01; // motion
+        }
+
         self.x = new_x;
         self.y = new_y;
     }
@@ -119,6 +173,8 @@ impl MouseState {
         self.press_count[button] = self.press_count[button].wrapping_add(1);
         self.press_x[button] = self.x;
         self.press_y[button] = self.y;
+        // Event-mask bits: L-press=1<<1, R-press=1<<3, M-press=1<<5.
+        self.pending_callback_events |= 1u16 << (1 + 2 * button as u16);
     }
 
     /// Record a button-up event at the current cursor position.
@@ -131,5 +187,7 @@ impl MouseState {
         self.release_count[button] = self.release_count[button].wrapping_add(1);
         self.release_x[button] = self.x;
         self.release_y[button] = self.y;
+        // Event-mask bits: L-release=1<<2, R-release=1<<4, M-release=1<<6.
+        self.pending_callback_events |= 1u16 << (2 + 2 * button as u16);
     }
 }

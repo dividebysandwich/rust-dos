@@ -354,6 +354,49 @@ fn main() -> Result<(), String> {
                 // acks it by reading port 0x22E, which clears irq_pending
                 // via Bus::io_read. EOI to the PIC happens through the
                 // existing port 0x20 write-through.
+                // Mouse event callback — INT 33h AX=000C registers a far
+                // pointer that the "driver" should invoke on the events
+                // in its mask. Carrier Command (and most Microsoft-mouse
+                // compatible games) expect button presses to arrive this
+                // way rather than via polling AH=03 or AH=05. Fire when
+                // any pending event bit matches the registered mask and
+                // a callback is actually installed.
+                let pending = cpu.bus.mouse.pending_callback_events;
+                let fire = pending & cpu.bus.mouse.callback_mask;
+                if fire != 0
+                    && (cpu.bus.mouse.callback_cs != 0 || cpu.bus.mouse.callback_ip != 0)
+                {
+                    // Snapshot and consume the bits we're about to handle.
+                    cpu.bus.mouse.pending_callback_events &= !fire;
+                    let dx = cpu.bus.mouse.mickey_x - cpu.bus.mouse.last_callback_mickey_x;
+                    let dy = cpu.bus.mouse.mickey_y - cpu.bus.mouse.last_callback_mickey_y;
+                    cpu.bus.mouse.last_callback_mickey_x = cpu.bus.mouse.mickey_x;
+                    cpu.bus.mouse.last_callback_mickey_y = cpu.bus.mouse.mickey_y;
+                    let handler_cs = cpu.bus.mouse.callback_cs;
+                    let handler_ip = cpu.bus.mouse.callback_ip;
+                    let state_ax = fire;
+                    let state_bx = cpu.bus.mouse.buttons as u16;
+                    let state_cx = cpu.bus.mouse.x as u16;
+                    let state_dx = cpu.bus.mouse.y as u16;
+                    let state_si = dx as u16;
+                    let state_di = dy as u16;
+
+                    cpu.push(cpu.get_cpu_flags().bits());
+                    cpu.push(cpu.cs);
+                    cpu.push(cpu.ip);
+                    cpu.cs = handler_cs;
+                    cpu.ip = handler_ip;
+                    cpu.ax = state_ax;
+                    cpu.bx = state_bx;
+                    cpu.cx = state_cx;
+                    cpu.dx = state_dx;
+                    cpu.si = state_si;
+                    cpu.di = state_di;
+                    cpu.set_cpu_flag(CpuFlags::IF, false);
+                    cpu.set_cpu_flag(CpuFlags::TF, false);
+                    continue;
+                }
+
                 if cpu.bus.sb.irq_pending && (cpu.bus.pic_mask & 0x20) == 0 {
                     // Don't clear the flag here — the driver must ack via
                     // 0x22E. This matches real hardware and keeps the ISR

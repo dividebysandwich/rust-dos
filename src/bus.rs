@@ -35,6 +35,18 @@ pub struct Bus {
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub start_time: Instant, // System timer
+    /// Joystick port (0x0201) polling counter. Real hardware: a write to
+    /// 0x0201 charges 4 RC one-shots; reads return each bit high until
+    /// the timer expires, with the expiry time proportional to axis
+    /// resistance. Games sample the joystick by writing 0x0201 then
+    /// reading it in a tight loop until each bit goes low — the loop
+    /// count tells them the position. We count reads since the last
+    /// arm-write and trip each bit when the count passes a mouse-derived
+    /// threshold. A read-count is used instead of elapsed time because
+    /// the emulator runs much faster than 4.77 MHz, which would make a
+    /// real-time threshold (e.g. 24–1124 µs) show the stick permanently
+    /// pegged. Carrier Command uses this as its primary cursor input.
+    pub joystick_read_count: u32,
     pub audio_device: Option<AudioQueue<i16>>,
     pub speaker_on: bool,    // Is the speaker playing?
     pub pit_divisor: u16,    // Current Frequency Divisor
@@ -95,6 +107,7 @@ impl Bus {
             cursor_x: 0,
             cursor_y: 0,
             start_time: Instant::now(),
+            joystick_read_count: 0,
             audio_device: None,
             speaker_on: false,
             pit_divisor: 0xFFFF,
@@ -508,8 +521,9 @@ impl Bus {
                 // Slave PIC — we don't model cascaded IRQs.
             }
             0x0201 => {
-                // Game port (joystick). Writes reset the one-shot timers.
-                // No joystick emulated, so the write is a no-op.
+                // Game port write: arm the one-shot timers. Reset the
+                // read counter so the next read-loop starts fresh.
+                self.joystick_read_count = 0;
             }
 
             _ => {
@@ -523,12 +537,12 @@ impl Bus {
                     // index/data (3CE/3CF) churn so much during EGA drawing
                     // that they drown everything else. Log the rarer
                     // mode/register ports.
-                    if !matches!(port, 0x3C6..=0x3C9 | 0x3CE | 0x3CF) {
-                        self.log_string(&format!(
-                            "[VGA-IO] Write Port {:04X} Value {:02X}",
-                            port, value
-                        ));
-                    }
+                    // if !matches!(port, 0x3C6..=0x3C9 | 0x3CE | 0x3CF) {
+                    //     self.log_string(&format!(
+                    //         "[VGA-IO] Write Port {:04X} Value {:02X}",
+                    //         port, value
+                    //     ));
+                    // }
 
                     // Check if video mode changed
                     if let Some(new_mode) = self.vga.check_video_mode() {
@@ -591,6 +605,50 @@ impl Bus {
                     (val >> 8) as u8
                 };
                 byte
+            }
+
+            // Port 0x0201 — game port (joystick). Reads return four axis
+            // bits (one-shot timers, high until they trip) and four button
+            // bits (low when pressed). Trip time on real hardware is
+            //   t = 24.2 µs + 0.011 µs × R   (R in ohms, max 100 kΩ)
+            // → ~24 µs at minimum, ~1124 µs at maximum.
+            // We map mouse X/Y across the visible window to the full axis
+            // range so games like Carrier Command (which use the joystick
+            // as their primary cursor input) follow the host pointer.
+            // Mouse buttons map to joystick A buttons 1 and 2.
+            0x0201 => {
+                // Map mouse position to per-axis read-loop iteration count.
+                // On a 4.77 MHz PC, `IN AL, DX` takes ~2.5 µs, so the axis
+                // trips after ~10 reads at minimum resistance and ~450 reads
+                // at maximum. Matching that range makes games compute the
+                // stick position correctly regardless of emulator speed.
+                let virt_w = 640i64;
+                let virt_h = 200i64;
+                let mx = (self.mouse.x.clamp(0, virt_w as i32 - 1)) as i64;
+                let my = (self.mouse.y.clamp(0, virt_h as i32 - 1)) as i64;
+                let trip_x = (10 + (440 * mx) / (virt_w - 1)) as u32;
+                let trip_y = (10 + (440 * my) / (virt_h - 1)) as u32;
+                let count = self.joystick_read_count;
+                self.joystick_read_count = count.saturating_add(1);
+
+                // Buttons: bit clear = pressed (active-low on real HW).
+                let mut value: u8 = 0xF0;
+                if (self.mouse.buttons & crate::mouse::BUTTON_LEFT) != 0 {
+                    value &= !0x10;
+                }
+                if (self.mouse.buttons & crate::mouse::BUTTON_RIGHT) != 0 {
+                    value &= !0x20;
+                }
+                // Joystick A axes still timing out → bits 0 and 1 high.
+                if count < trip_x {
+                    value |= 0x01;
+                }
+                if count < trip_y {
+                    value |= 0x02;
+                }
+                // Joystick B axes left as "tripped" (low) so games that
+                // probe both sticks don't read phantom motion.
+                value
             }
 
             // Port 0x42 — PIT channel 2 (PC speaker tone) data. Some games
