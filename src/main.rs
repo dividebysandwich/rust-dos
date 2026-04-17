@@ -446,10 +446,15 @@ fn main() -> Result<(), String> {
                         cpu.bus.ram[ss_base + sp + 4],
                         cpu.bus.ram[ss_base + sp + 5],
                     ]);
+                    // The caller loads a far pointer from DS:0xE548 —
+                    // dump it so we can see when/why it goes to zero.
+                    let farptr_addr = cpu.get_physical_addr(cpu.ds, 0xE548);
+                    let fp_off = cpu.bus.read_16(farptr_addr);
+                    let fp_seg = cpu.bus.read_16(farptr_addr + 2);
                     cpu.bus.log_string(&format!(
-                        "[PARSER-ENTRY] CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} BP={:04X} ret={:04X}:{:04X} arg0={:04X}",
+                        "[PARSER-ENTRY] CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} BP={:04X} ret={:04X}:{:04X} arg0={:04X} [DS:E548]={:04X}:{:04X}",
                         cpu.cs, cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.bp,
-                        ret_cs, ret_ip, arg0
+                        ret_cs, ret_ip, arg0, fp_seg, fp_off
                     ));
 
                     // Dump 16 bytes of caller code right before the return
