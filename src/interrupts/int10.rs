@@ -402,11 +402,13 @@ pub fn handle(cpu: &mut Cpu) {
                     let reg = (cpu.bx & 0xFF) as u8 & 0x0F;
                     let val = (cpu.bx >> 8) as u8;
                     cpu.bus.vga.attribute_regs[reg as usize] = val;
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 0x01 => {
                     // Set Overscan (Border) Color
                     let val = (cpu.bx >> 8) as u8; // BH
                     cpu.bus.vga.attribute_regs[0x11] = val;
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 0x02 => {
                     // Set All Palette Registers + Overscan
@@ -421,6 +423,7 @@ pub fn handle(cpu: &mut Cpu) {
                     }
                     let border = cpu.bus.read_8(addr + 16);
                     cpu.bus.vga.attribute_regs[0x11] = border;
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 0x03 => {
                     // Toggle Blinking / Background Intensity
@@ -433,6 +436,7 @@ pub fn handle(cpu: &mut Cpu) {
                     } else {
                         cpu.bus.vga.attribute_regs[0x10] = mode | 0x08;
                     }
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 0x07 => {
                     // Read Individual Palette Register
@@ -474,6 +478,7 @@ pub fn handle(cpu: &mut Cpu) {
                         cpu.bus.vga.palette[base] = r;
                         cpu.bus.vga.palette[base + 1] = g;
                         cpu.bus.vga.palette[base + 2] = b;
+                        cpu.bus.vga.mark_dirty_full();
                     }
                 }
                 0x12 => {
@@ -496,6 +501,7 @@ pub fn handle(cpu: &mut Cpu) {
                         cpu.bus.vga.palette[base + 1] = cpu.bus.read_8(src + 1) & 0x3F;
                         cpu.bus.vga.palette[base + 2] = cpu.bus.read_8(src + 2) & 0x3F;
                     }
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 0x13 => {
                     // Select Color Page
@@ -510,6 +516,7 @@ pub fn handle(cpu: &mut Cpu) {
                     } else {
                         cpu.bus.vga.attribute_regs[0x14] = bh;
                     }
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 0x15 => {
                     // Read Individual DAC Register
@@ -554,6 +561,7 @@ pub fn handle(cpu: &mut Cpu) {
                     // Set PEL Mask
                     // BL = Mask
                     cpu.bus.vga.dac_mask = cpu.get_reg8(Register::BL);
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 0x19 => {
                     // Read PEL Mask -> BL
@@ -588,6 +596,7 @@ pub fn handle(cpu: &mut Cpu) {
                         cpu.bus.vga.palette[base + 1] = gray;
                         cpu.bus.vga.palette[base + 2] = gray;
                     }
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 _ => {
                     cpu.bus
