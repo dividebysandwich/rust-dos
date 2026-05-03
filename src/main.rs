@@ -682,7 +682,7 @@ fn main() -> Result<(), String> {
         // `cached_frame` and just overlay the cursor/mouse/recording pip.
         if cpu.bus.vga.dirty {
             video::render_screen(&mut cached_frame, &cpu.bus);
-            cpu.bus.vga.dirty = false;
+            cpu.bus.vga.clear_dirty();
         }
 
         texture.with_lock(None, |buffer: &mut [u8], _pitch: usize| {

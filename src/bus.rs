@@ -5,7 +5,7 @@ use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use crate::disk::DiskController;
-use crate::video::{ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
+use crate::video::{self, ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
 
 pub trait Device {
     /// Return the set of I/O ports this device owns.
@@ -263,7 +263,8 @@ impl Bus {
         for i in (screen_size - row_size)..screen_size {
             self.vga.vram_text[i] = if i % 2 == 0 { 0x20 } else { 0x07 };
         }
-        self.vga.dirty = true;
+        // Scroll moves every visible row, so widen to the full screen.
+        self.vga.mark_dirty_full();
     }
 
     #[inline(always)]
@@ -321,8 +322,36 @@ impl Bus {
             );
         }
         if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
-            self.vga.vram_text[addr - ADDR_VGA_TEXT] = value;
-            self.vga.dirty = true;
+            let text_off = addr - ADDR_VGA_TEXT;
+            self.vga.vram_text[text_off] = value;
+
+            // Narrow the dirty range to just the affected character row when
+            // we're in a text mode. Cell height comes from BDA 0x485 (set by
+            // INT 10h font swaps); 80x50 mode loads the 8-pixel font and
+            // reduces this to 8. CGA graphics modes (4/5/6) also live in
+            // this VRAM but their byte-to-scanline mapping is interleaved,
+            // so we conservatively repaint everything for those.
+            match self.video_mode {
+                VideoMode::Text80x25 | VideoMode::Text80x25Color => {
+                    let cell_h = self.read_8(0x0485) as usize;
+                    let cell_h = if cell_h == 0 { 16 } else { cell_h };
+                    let row = text_off / 160;
+                    let y0 = (row * cell_h) as u32;
+                    let y1 = ((row + 1) * cell_h) as u32;
+                    let h = video::SCREEN_HEIGHT;
+                    self.vga.mark_dirty_rows(y0.min(h), y1.min(h));
+                }
+                VideoMode::Text40x25 | VideoMode::Text40x25Color => {
+                    // 40-col modes use the 8x8 font scaled 2x = 16 screen
+                    // rows per text row, irrespective of the BDA value.
+                    let row = text_off / 80;
+                    let y0 = (row * 16) as u32;
+                    let y1 = ((row + 1) * 16) as u32;
+                    let h = video::SCREEN_HEIGHT;
+                    self.vga.mark_dirty_rows(y0.min(h), y1.min(h));
+                }
+                _ => self.vga.mark_dirty_full(),
+            }
 
             // Check if current mode uses this memory
             return matches!(
@@ -549,7 +578,7 @@ impl Bus {
                         if self.video_mode != new_mode && new_mode == VideoMode::Graphics320x200 {
                             self.log_string("[VGA] Switch to Graphics320x200 detected via IO");
                             self.video_mode = new_mode;
-                            self.vga.dirty = true;
+                            self.vga.mark_dirty_full();
                         }
                     }
                 } else {

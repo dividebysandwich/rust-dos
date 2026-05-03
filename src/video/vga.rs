@@ -125,6 +125,17 @@ pub struct VgaCard {
     /// rendered image is touched. The main loop uses this to skip the
     /// 640x400x3 render pass on frames where nothing moved.
     pub dirty: bool,
+
+    /// Inclusive lower / exclusive upper screen-row bounds of the region
+    /// that needs re-rendering this frame (0..SCREEN_HEIGHT). When
+    /// `dirty_y_min >= dirty_y_max` the dirty region is empty. Sites that
+    /// can't easily compute an affected row range (palette writes, mode
+    /// changes, planar VRAM writes) widen this to the full screen via
+    /// `mark_dirty_full`. The text-VRAM path in `Bus::write_8` narrows it
+    /// to the single character row that was touched, which is what makes
+    /// shell scrolling and incremental terminal output cheap.
+    pub dirty_y_min: u32,
+    pub dirty_y_max: u32,
 }
 
 impl VgaCard {
@@ -164,7 +175,45 @@ impl VgaCard {
             attribute_flip_flop: false,
             latched_start_addr: 0,
             dirty: true,
+            dirty_y_min: 0,
+            dirty_y_max: crate::video::SCREEN_HEIGHT,
         }
+    }
+
+    /// Mark the entire screen as needing re-rendering. Use for state changes
+    /// (palette, mode, attribute regs, latched start address) where computing
+    /// an affected row range would be more work than just repainting.
+    #[inline]
+    pub fn mark_dirty_full(&mut self) {
+        self.dirty = true;
+        self.dirty_y_min = 0;
+        self.dirty_y_max = crate::video::SCREEN_HEIGHT;
+    }
+
+    /// Widen the dirty range to include `[y_start, y_end)` (screen rows).
+    /// Caller is responsible for clipping to SCREEN_HEIGHT.
+    #[inline]
+    pub fn mark_dirty_rows(&mut self, y_start: u32, y_end: u32) {
+        if y_end <= y_start {
+            return;
+        }
+        self.dirty = true;
+        if self.dirty_y_min > y_start {
+            self.dirty_y_min = y_start;
+        }
+        if self.dirty_y_max < y_end {
+            self.dirty_y_max = y_end;
+        }
+    }
+
+    /// Reset after rendering. The empty range encodes "nothing dirty" as
+    /// `dirty_y_min == SCREEN_HEIGHT, dirty_y_max == 0` so the next
+    /// `mark_dirty_rows` widens correctly from a clean slate.
+    #[inline]
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
+        self.dirty_y_min = crate::video::SCREEN_HEIGHT;
+        self.dirty_y_max = 0;
     }
 
     pub fn get_rgb(&self, index: u8) -> (u8, u8, u8) {
@@ -359,7 +408,7 @@ impl VgaCard {
                 }
             }
         }
-        self.dirty = true;
+        self.mark_dirty_full();
     }
 
     /// Load the 64-color EGA palette into DAC entries 0..63 for the 16-color
@@ -412,12 +461,12 @@ impl VgaCard {
         let new_addr = (hi << 8) | lo;
         if new_addr != self.latched_start_addr {
             self.latched_start_addr = new_addr;
-            self.dirty = true;
+            self.mark_dirty_full();
         }
     }
 
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
-        self.dirty = true;
+        self.mark_dirty_full();
         match mode {
             super::VideoMode::Ega320x200
             | super::VideoMode::Ega640x200
@@ -663,14 +712,14 @@ impl Device for VgaCard {
                     if (self.attribute_index as usize) < self.attribute_regs.len() {
                         self.attribute_regs[self.attribute_index as usize] = value;
                         // println!("[VGA] Attr Reg {:02X} = {:02X}", self.attribute_index, value);
-                        self.dirty = true;
+                        self.mark_dirty_full();
                     }
                     self.attribute_flip_flop = false; // Switch back to Address
                 }
             }
             0x3C2 => {
                 self.misc_output_reg = value;
-                self.dirty = true;
+                self.mark_dirty_full();
             }
             0x3C4 => self.sequencer_index = value,
             0x3C5 => {
@@ -687,7 +736,7 @@ impl Device for VgaCard {
 
                     self.sequencer_regs[self.sequencer_index as usize] = val;
                     // println!("[VGA] Seq Reg {:02X} = {:02X}", self.sequencer_index, val);
-                    self.dirty = true;
+                    self.mark_dirty_full();
                 }
             }
             0x3CE => self.graphics_index = value,
@@ -705,7 +754,7 @@ impl Device for VgaCard {
 
                     self.graphics_regs[self.graphics_index as usize] = val;
                     // println!("[VGA] Gfx Reg {:02X} = {:02X}", self.graphics_index, val);
-                    self.dirty = true;
+                    self.mark_dirty_full();
                 }
             }
             0x3D4 => self.crtc_index = value,
@@ -718,13 +767,13 @@ impl Device for VgaCard {
                     // would cause flicker when games rapid-flip buffers
                     // mid-frame. The retrace read in `io_read` latches.
                     if self.crtc_index != 0x0C && self.crtc_index != 0x0D {
-                        self.dirty = true;
+                        self.mark_dirty_full();
                     }
                 }
             }
             0x3C6 => {
                 self.dac_mask = value;
-                self.dirty = true;
+                self.mark_dirty_full();
             }
             0x3C7 => {
                 // Set DAC Read Index. Subsequent reads from 0x3C9 return R,G,B triplets.
@@ -741,7 +790,7 @@ impl Device for VgaCard {
                 let index = (self.dac_write_index as usize) * 3 + (self.dac_step as usize);
                 if index < self.palette.len() {
                     self.palette[index] = value & 0x3F;
-                    self.dirty = true;
+                    self.mark_dirty_full();
                 }
                 self.dac_step += 1;
                 if self.dac_step == 3 {

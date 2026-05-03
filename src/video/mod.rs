@@ -64,23 +64,40 @@ impl VideoMode {
 }
 
 pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
-    // Modes shorter than the canvas leave a black bar below the rendered
-    // image; clear everything first so the bar is black rather than showing
-    // the previous frame.
-    for b in canvas.iter_mut() {
+    // Re-render only the rows the VGA has marked dirty since the last call.
+    // For the common case of a shell prompt blinking or one line of output,
+    // this is one or two character rows out of 25 — orders of magnitude less
+    // work than re-rendering the whole 640x400 surface.
+    let y_min = bus.vga.dirty_y_min.min(SCREEN_HEIGHT) as usize;
+    let y_max = bus.vga.dirty_y_max.min(SCREEN_HEIGHT) as usize;
+    if y_min >= y_max {
+        return;
+    }
+
+    // Black-fill just the dirty band. Renderers either fully cover this band
+    // (mode 13h, 0Eh, 12h, text) or leave a sub-row gap that we want to
+    // appear black (e.g. mode 10h's 50-line bottom gutter when that gutter
+    // happens to be in the dirty range).
+    let row_bytes = SCREEN_WIDTH as usize * 3;
+    let band_start = y_min * row_bytes;
+    let band_end = y_max * row_bytes;
+    for b in &mut canvas[band_start..band_end] {
         *b = 0;
     }
+
     match bus.video_mode {
         VideoMode::Graphics320x200 => render_graphics_mode(canvas, &bus.vga.vram_graphics, bus),
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => {
             render_cga_mode4(canvas, &bus.vga.vram_text, bus)
         }
         VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vga.vram_text),
+        // Text renderers honour the dirty row band so a single-line shell
+        // update only repaints those 16 scanlines instead of the full 80x25.
         VideoMode::Text80x25 | VideoMode::Text80x25Color => {
-            render_text_mode_80x25(canvas, &bus.vga.vram_text, bus)
+            render_text_mode_80x25(canvas, &bus.vga.vram_text, bus, y_min, y_max)
         }
         VideoMode::Text40x25 | VideoMode::Text40x25Color => {
-            render_text_mode_40x25(canvas, &bus.vga.vram_text, bus)
+            render_text_mode_40x25(canvas, &bus.vga.vram_text, bus, y_min, y_max)
         }
         // Mode 0Dh (320x200): 2x horizontal, 2x vertical -> 640x400 exactly.
         VideoMode::Ega320x200 => render_planar(canvas, &bus.vga.vram_graphics, bus, 320, 200, 2, 2),
@@ -358,7 +375,7 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8]) {
 
 // Emulate Text Mode (80x25) using authentic 8x16 Font
 // No scaling needed for height (16px * 25 rows = 400px)
-pub fn render_text_mode_80x25(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+pub fn render_text_mode_80x25(canvas: &mut [u8], vram: &[u8], bus: &Bus, y_min: usize, y_max: usize) {
     // Programs like Norton Commander switch to 80x50 by loading the 8x8 font
     // (INT 10h AH=11h AL=12h). The row count and character cell height live in
     // BDA 0x0484 / 0x0485; honour them so all rows the program wrote are drawn.
@@ -369,7 +386,15 @@ pub fn render_text_mode_80x25(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
         _ => (FONT_8X16, 16),
     };
 
-    for row in 0..rows {
+    // Skip text rows that fall entirely outside the dirty band. We round
+    // outward — a row whose first pixel is < y_max and whose last pixel is
+    // >= y_min still has visible bytes inside the band.
+    let row_first = y_min / font_height;
+    let row_last = (y_max + font_height - 1) / font_height;
+    let row_lo = row_first.min(rows);
+    let row_hi = row_last.min(rows);
+
+    for row in row_lo..row_hi {
         for col in 0..80 {
             let offset = (row * 80 + col) * 2;
             if offset + 1 >= vram.len() {
@@ -411,9 +436,11 @@ pub fn render_text_mode_80x25(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
 }
 
 // Emulate Text Mode (40x25) using authentic 8x8 Font
-// Scaled 2x width, 2x height
-fn render_text_mode_40x25(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
-    for row in 0..25 {
+// Scaled 2x width, 2x height (8 source rows * 2 = 16 screen rows per text row)
+fn render_text_mode_40x25(canvas: &mut [u8], vram: &[u8], bus: &Bus, y_min: usize, y_max: usize) {
+    let row_lo = (y_min / 16).min(25);
+    let row_hi = ((y_max + 15) / 16).min(25);
+    for row in row_lo..row_hi {
         for col in 0..40 {
             let offset = (row * 40 + col) * 2;
             if offset + 1 >= vram.len() {
