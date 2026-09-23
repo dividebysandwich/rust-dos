@@ -78,6 +78,13 @@ fn router(state: AppState) -> Router {
         .route("/api/disasm", get(disasm))
         .route("/api/breakpoints", get(bp_list).post(bp_add).delete(bp_remove))
         .route("/api/ivt", get(ivt))
+        .route("/api/gdt", get(gdt))
+        .route("/api/ldt", get(ldt))
+        .route("/api/idt", get(idt))
+        .route("/api/tss", get(tss))
+        .route("/api/pagewalk", get(pagewalk))
+        .route("/api/xms", get(xms))
+        .route("/api/exceptions", get(exceptions))
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
         .route("/ws/screen", get(ws_screen))
@@ -435,12 +442,16 @@ async fn mem_get(State(s): State<AppState>, Query(q): Query<MemQuery>) -> ApiRes
 }
 
 /// Classic DEBUG-style dump. Rows are labelled SEG:OFF when the request used
-/// a segmented address, otherwise with the 5-digit linear address.
-fn hexdump(base: usize, segoff: Option<(u16, u16)>, data: &[u8]) -> String {
+/// a segmented address (with a 32-bit offset past FFFFh), otherwise with the
+/// address.
+fn hexdump(base: usize, segoff: Option<(u16, u32)>, data: &[u8]) -> String {
     let mut out = String::new();
+    let wide = segoff.is_some_and(|(_, off)| off as usize + data.len() > 0x10000);
     for (i, chunk) in data.chunks(16).enumerate() {
         let label = match segoff {
-            Some((seg, off)) => format!("{:04X}:{:04X}", seg, off.wrapping_add((i * 16) as u16)),
+            Some((seg, off)) if wide => format!("{:04X}:{:08X}", seg, off.wrapping_add((i * 16) as u32)),
+            Some((seg, off)) => format!("{:04X}:{:04X}", seg, (off as usize + i * 16) as u16),
+            None if base + data.len() > 0x10_0000 => format!("{:08X}", base + i * 16),
             None => format!("{:05X}", base + i * 16),
         };
         let hex: Vec<String> = chunk.iter().map(|b| format!("{:02X}", b)).collect();
@@ -507,11 +518,32 @@ async fn bp_list(State(s): State<AppState>) -> ApiResult {
 #[derive(Deserialize)]
 struct BpBody {
     addr: Option<String>,
+    /// An exception vector (hex, or a number) or "any".
+    exception: Option<Value>,
+    mode_switch: Option<bool>,
+}
+
+/// The vectors an `exception` breakpoint names, as a mask.
+fn exception_mask(v: &Value) -> Result<u32, ApiError> {
+    let vector = match v {
+        Value::String(s) if s.eq_ignore_ascii_case("any") => return Ok(u32::MAX),
+        Value::String(s) => super::parse_hex(s).map_err(bad)?,
+        Value::Number(n) => n.as_u64().ok_or_else(|| bad("exception: not a vector number"))? as u32,
+        _ => return Err(bad("exception: a vector number or \"any\"")),
+    };
+    if vector >= 32 {
+        return Err(bad("exception vectors are 0 to 1F"));
+    }
+    Ok(1 << vector)
 }
 
 async fn bp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: BpBody = from_value(parse_body(&body)?)?;
-    let addr = b.addr.ok_or_else(|| bad("missing 'addr'"))?;
+    if b.exception.is_some() || b.mode_switch.is_some() {
+        let exceptions = b.exception.as_ref().map(exception_mask).transpose()?;
+        return s.call_json(Cmd::BreakOn { exceptions, mode_switch: b.mode_switch }, DEFAULT_TIMEOUT).await;
+    }
+    let addr = b.addr.ok_or_else(|| bad("missing 'addr' (or 'exception' / 'mode_switch')"))?;
     s.call_json(Cmd::AddBreakpoint(addr), DEFAULT_TIMEOUT).await
 }
 
@@ -522,6 +554,39 @@ async fn bp_remove(State(s): State<AppState>, Query(q): Query<BpBody>, body: Byt
 
 async fn ivt(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Ivt, DEFAULT_TIMEOUT).await
+}
+
+async fn gdt(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Gdt, DEFAULT_TIMEOUT).await
+}
+
+async fn ldt(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Ldt, DEFAULT_TIMEOUT).await
+}
+
+async fn idt(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Idt, DEFAULT_TIMEOUT).await
+}
+
+async fn tss(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Tss, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+struct AddrQuery {
+    addr: String,
+}
+
+async fn pagewalk(State(s): State<AppState>, Query(q): Query<AddrQuery>) -> ApiResult {
+    s.call_json(Cmd::PageWalk(q.addr), DEFAULT_TIMEOUT).await
+}
+
+async fn xms(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Xms, DEFAULT_TIMEOUT).await
+}
+
+async fn exceptions(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Exceptions, DEFAULT_TIMEOUT).await
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +787,19 @@ EXECUTION CONTROL
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64")
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)
-  GET  /api/ivt              interrupt vector table
+                  also {"exception":"0D"} or {"exception":"any"}: pause in the handler
+                  after the CPU raises it; {"mode_switch":true}: pause after CR0.PE changes
+  GET  /api/ivt              interrupt vector table (real mode)
+  Addresses: SEG:OFF (in protected mode SEL:OFF32 through the GDT/LDT; register
+  names like CS:EIP, DS:ESI), lin:ADDR (through the page tables), phys:ADDR or ADDR.
+
+PROTECTED MODE
+  GET  /api/gdt  /api/ldt    descriptors, decoded
+  GET  /api/idt              interrupt, trap and task gates
+  GET  /api/tss              the current TSS (stacks, CR3, registers, I/O map)
+  GET  /api/pagewalk?addr=lin:00401000   page directory/table entries and flags
+  GET  /api/exceptions       the last 64 exceptions (vector, error code, CS:EIP, CR2)
+  GET  /api/xms              XMS handles, A20 and the HMA
 
 DRIVES
   GET    /api/drive                                list drives, types and paths

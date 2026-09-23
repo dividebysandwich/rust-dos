@@ -1212,8 +1212,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 data.push(cpu.bus.read_8(buf_addr + i));
             }
 
-            if handle == 1 || handle == 2 {
-                // STDOUT/STDERR
+            let console = cpu.bus.disk.handle_device(handle) == Some(crate::disk::CharDevice::Con);
+            if handle == 1 || handle == 2 || console {
+                // STDOUT/STDERR, or CON opened by name
                 for &byte in &data {
                     if byte == 0x07 {
                         play_sdl_beep(&mut cpu.bus);
@@ -1316,7 +1317,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 0x00 => {
                     // Bit 7=1 (Char Dev), Bit 6=0 (EOF), Bit 0=1 (Console Input)
                     // For STDIN(0), STDOUT(1), STDERR(2), return 0x80D3 or similar.
-                    if bx <= 2 {
+                    let device = cpu.bus.disk.handle_device(bx);
+                    if device == Some(crate::disk::CharDevice::Nul) {
+                        // Character device, NUL.
+                        cpu.set_dx(0x8084);
+                    } else if bx <= 2 || device == Some(crate::disk::CharDevice::Con) {
                         // 1000 0000 1101 0011 = 80D3
                         // Bit 7: Char device
                         // Bit 6: EOF (0) - meaningful for files?

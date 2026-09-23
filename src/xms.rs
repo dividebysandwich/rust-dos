@@ -59,6 +59,20 @@ impl Xms {
         Self::default()
     }
 
+    /// The allocated handles: (handle, base address, size in KB, lock
+    /// count), for debuggers.
+    pub fn handles(&self) -> Vec<(u16, u32, u32, u8)> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| b.map(|b| (i as u16 + 1, b.base, b.size_kb, b.locks)))
+            .collect()
+    }
+
+    pub fn hma_allocated(&self) -> bool {
+        self.hma_allocated
+    }
+
     fn block(&self, handle: u16) -> Option<&Block> {
         self.blocks.get((handle as usize).wrapping_sub(1))?.as_ref()
     }

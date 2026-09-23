@@ -191,6 +191,9 @@ pub struct Cpu {
     null_interrupts: [u64; 4],
     /// Switches between real and protected mode (CR0.PE changes).
     pub mode_switches: u64,
+    /// Exceptions raised since start, and the most recent ones.
+    pub exceptions: u64,
+    pub exception_log: VecDeque<fault::ExceptionRecord>,
     /// Set by BIOS services that wait for input (INT 16h with an empty
     /// keyboard buffer). The main loop then skips ahead to the next timer
     /// event instead of spinning through the retry loop, like it does for HLT.
@@ -291,6 +294,8 @@ impl Cpu {
             executed: 0,
             null_interrupts: [0; 4],
             mode_switches: 0,
+            exceptions: 0,
+            exception_log: VecDeque::with_capacity(fault::EXCEPTION_LOG_LEN),
             idle: false,
         }
     }

@@ -452,3 +452,29 @@ fn the_shell_starts_in_real_mode_with_extended_memory_free() {
     xms_call(&mut cpu, 0x08);
     assert_eq!(cpu.ax(), 15 * 1024 - 64);
 }
+
+#[test]
+fn device_names_open_devices_not_files() {
+    let dir = scratch("devices", &[]);
+    let mut cpu = Cpu::new(dir.clone());
+    for name in ["NUL", "C:\\SUB\\nul.txt", "PRN"] {
+        set_dsdx_string(&mut cpu, name);
+        int21(&mut cpu, 0x3C00);
+        assert!(!cf(&cpu), "{}", name);
+        let handle = cpu.ax();
+        // Writes vanish, reads find nothing, and the handle is a device.
+        cpu.set_bx(handle);
+        cpu.set_cx(4);
+        int21(&mut cpu, 0x4000);
+        assert_eq!(cpu.ax(), 4);
+        cpu.set_bx(handle);
+        int21(&mut cpu, 0x3F00);
+        assert_eq!(cpu.ax(), 0);
+        cpu.set_bx(handle);
+        int21(&mut cpu, 0x4400);
+        assert!(cpu.dx() & 0x80 != 0, "character device");
+        cpu.set_bx(handle);
+        int21(&mut cpu, 0x3E00);
+    }
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no files created");
+}

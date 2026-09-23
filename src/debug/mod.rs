@@ -7,6 +7,7 @@
 //! replies, broadcast channels, and a shared frame snapshot.
 
 pub mod keys;
+pub mod pm;
 pub mod server;
 pub mod trace;
 
@@ -28,6 +29,7 @@ use crate::keyboard;
 use crate::mount::{display_host_path, parse_drive_letter, parse_kind};
 use crate::video::{self, VideoMode};
 use keys::PcKey;
+pub use pm::{parse_addr, parse_hex};
 use trace::{TraceEntry, TraceRing};
 
 const LOG_RING_CAPACITY: usize = 5000;
@@ -68,7 +70,7 @@ pub enum Reply {
     Json(Value),
     Frame(Vec<u8>),
     Trace(Vec<TraceEntry>),
-    Bytes { addr: usize, segoff: Option<(u16, u16)>, data: Vec<u8> },
+    Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
 }
 
@@ -121,7 +123,17 @@ pub enum Cmd {
     ListBreakpoints,
     AddBreakpoint(String),
     RemoveBreakpoint(Option<String>),
+    /// Pause after the CPU raises one of these exceptions (bit n = vector
+    /// n), or switches between real and protected mode.
+    BreakOn { exceptions: Option<u32>, mode_switch: Option<bool> },
     Ivt,
+    Gdt,
+    Ldt,
+    Idt,
+    Tss,
+    PageWalk(String),
+    Xms,
+    Exceptions,
     Drives,
     Mount {
         drive: String,
@@ -323,6 +335,8 @@ enum PauseReason {
     Request,
     Breakpoint,
     Step,
+    Exception,
+    ModeSwitch,
 }
 
 pub struct DebugHub {
@@ -338,6 +352,12 @@ pub struct DebugHub {
     skip_bp_once: bool,
     pause_hit: Option<PauseReason>,
     pause_waiters: Vec<oneshot::Sender<Reply>>,
+    /// Exceptions (bit n = vector n) and mode switches to pause after, and
+    /// the counts of them last seen.
+    break_exceptions: u32,
+    break_mode_switch: bool,
+    seen_exceptions: u64,
+    seen_mode_switches: u64,
 
     trace: TraceRing,
     trace_enabled: bool,
@@ -408,6 +428,10 @@ impl DebugHub {
             skip_bp_once: false,
             pause_hit: None,
             pause_waiters: Vec::new(),
+            break_exceptions: 0,
+            break_mode_switch: false,
+            seen_exceptions: 0,
+            seen_mode_switches: 0,
             trace: TraceRing::new(trace_capacity),
             trace_enabled: false,
             trace_stream_max: 1000,
@@ -515,12 +539,29 @@ impl DebugHub {
             || self.step_budget.is_some()
             || self.temp_breakpoint.is_some()
             || !self.breakpoints.is_empty()
+            || self.break_exceptions != 0
+            || self.break_mode_switch
     }
 
     /// Per-instruction hook, called just before an instruction at `phys_ip`
     /// executes. Returns true if execution must stop (the hub is now paused).
     #[inline]
     fn check_before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
+        if cpu.exceptions != self.seen_exceptions {
+            self.seen_exceptions = cpu.exceptions;
+            let hit = cpu.exception_log.back().is_some_and(|e| e.vector < 32 && self.break_exceptions & (1 << e.vector) != 0);
+            if hit {
+                self.enter_pause(PauseReason::Exception);
+                return true;
+            }
+        }
+        if cpu.mode_switches != self.seen_mode_switches {
+            self.seen_mode_switches = cpu.mode_switches;
+            if self.break_mode_switch {
+                self.enter_pause(PauseReason::ModeSwitch);
+                return true;
+            }
+        }
         if !self.skip_bp_once
             && (self.temp_breakpoint == Some(phys_ip) || self.breakpoints.contains(&phys_ip))
         {
@@ -565,7 +606,7 @@ impl DebugHub {
                 fs: cpu.fs(),
                 gs: cpu.gs(),
                 eflags: cpu.get_cpu_flags().bits(),
-                code32: false,
+                code32: cpu.seg_cache(crate::cpu::Seg::CS).attr & crate::cpu::ATTR_DB != 0,
                 bytes,
                 len: len as u8,
             });
@@ -582,9 +623,18 @@ impl DebugHub {
                 PauseReason::Request => "request",
                 PauseReason::Breakpoint => "breakpoint",
                 PauseReason::Step => "step",
+                PauseReason::Exception => "exception",
+                PauseReason::ModeSwitch => "mode_switch",
             };
-            self.emit(json!({"type": "paused", "reason": reason_str, "icount": cpu.executed, "registers": regs}));
-            let reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
+            let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
+            if reason == PauseReason::Exception
+                && let Some(e) = pm::exceptions_json(cpu)["recent"].as_array().and_then(|a| a.last().cloned())
+            {
+                reply["exception"] = e;
+            }
+            let mut event = reply.clone();
+            event["type"] = "paused".into();
+            self.emit(event);
             for w in self.pause_waiters.drain(..) {
                 let _ = w.send(Reply::Json(reply.clone()));
             }
@@ -819,8 +869,8 @@ impl DebugHub {
             }
             Cmd::Resume { until } => {
                 if let Some(a) = until {
-                    match parse_addr(cpu, &a) {
-                        Ok((phys, _)) => self.temp_breakpoint = Some(phys),
+                    match parse_addr(cpu, &a).and_then(breakpoint_phys) {
+                        Ok(phys) => self.temp_breakpoint = Some(phys),
                         Err(e) => {
                             let _ = req.reply.send(Reply::bad(e));
                             return;
@@ -859,27 +909,40 @@ impl DebugHub {
                 Err(e) => Reply::bad(e),
             },
             Cmd::ReadMem { addr, len } => match parse_addr(cpu, &addr) {
-                Ok((phys, segoff)) => {
-                    let len = len.min(cpu.bus.ram().len().saturating_sub(phys));
-                    let data = (phys..phys + len).map(|a| cpu.bus.peek_8(a)).collect();
-                    Reply::Bytes { addr: phys, segoff, data }
+                Ok(a) => {
+                    let len = match a.lin {
+                        Some(_) => len,
+                        None => len.min(cpu.bus.ram().len().saturating_sub(a.phys.unwrap_or(0))),
+                    };
+                    let data = a.read(cpu, len);
+                    Reply::Bytes { addr: a.lin.map_or(a.phys.unwrap_or(0), |l| l as usize), segoff: a.segoff, data }
                 }
                 Err(e) => Reply::bad(e),
             },
             Cmd::WriteMem { addr, data } => match parse_addr(cpu, &addr) {
-                Ok((phys, _)) if phys + data.len() <= cpu.bus.ram().len() => {
-                    for (i, b) in data.iter().enumerate() {
-                        cpu.bus.write_8(phys + i, *b);
+                Ok(a) => {
+                    let targets: Option<Vec<usize>> = (0..data.len()).map(|i| a.byte(cpu, i)).collect();
+                    match targets {
+                        Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len()) => {
+                            for (p, b) in t.iter().zip(&data) {
+                                cpu.bus.write_8(*p, *b);
+                            }
+                            Reply::Json(json!({
+                                "ok": true,
+                                "addr": format!("{:05X}", a.phys.unwrap_or(0)),
+                                "written": data.len(),
+                            }))
+                        }
+                        Some(_) => Reply::bad("write extends past end of memory"),
+                        None => Reply::bad("write reaches an unmapped page"),
                     }
-                    Reply::Json(json!({"ok": true, "addr": format!("{:05X}", phys), "written": data.len()}))
                 }
-                Ok(_) => Reply::bad("write extends past end of memory"),
                 Err(e) => Reply::bad(e),
             },
             Cmd::Disasm { addr, count } => self.disasm(cpu, addr, count),
             Cmd::ListBreakpoints => Reply::Json(self.breakpoints_json()),
-            Cmd::AddBreakpoint(a) => match parse_addr(cpu, &a) {
-                Ok((phys, _)) => {
+            Cmd::AddBreakpoint(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
+                Ok(phys) => {
                     self.breakpoints.insert(phys);
                     Reply::Json(self.breakpoints_json())
                 }
@@ -888,10 +951,12 @@ impl DebugHub {
             Cmd::RemoveBreakpoint(a) => match a {
                 None => {
                     self.breakpoints.clear();
+                    self.break_exceptions = 0;
+                    self.break_mode_switch = false;
                     Reply::Json(self.breakpoints_json())
                 }
-                Some(a) => match parse_addr(cpu, &a) {
-                    Ok((phys, _)) => {
+                Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
+                    Ok(phys) => {
                         if self.breakpoints.remove(&phys) {
                             Reply::Json(self.breakpoints_json())
                         } else {
@@ -901,7 +966,28 @@ impl DebugHub {
                     Err(e) => Reply::bad(e),
                 },
             },
+            Cmd::BreakOn { exceptions, mode_switch } => {
+                if let Some(mask) = exceptions {
+                    self.break_exceptions |= mask;
+                }
+                if let Some(m) = mode_switch {
+                    self.break_mode_switch = m;
+                }
+                self.seen_exceptions = cpu.exceptions;
+                self.seen_mode_switches = cpu.mode_switches;
+                Reply::Json(self.breakpoints_json())
+            }
             Cmd::Ivt => Reply::Json(ivt_json(cpu)),
+            Cmd::Gdt => Reply::Json(pm::table_json(cpu, false, 1024)),
+            Cmd::Ldt => Reply::Json(pm::table_json(cpu, true, 1024)),
+            Cmd::Idt => Reply::Json(pm::idt_json(cpu)),
+            Cmd::Tss => Reply::Json(pm::tss_json(cpu)),
+            Cmd::PageWalk(addr) => match parse_addr(cpu, &addr) {
+                Ok(a) => Reply::Json(pm::pagewalk_json(cpu, a.lin.unwrap_or(a.phys.unwrap_or(0) as u32))),
+                Err(e) => Reply::bad(e),
+            },
+            Cmd::Xms => Reply::Json(pm::xms_json(cpu)),
+            Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
             Cmd::Drives => Reply::Json(drives_json(cpu)),
             Cmd::Mount { drive, path, kind, label, read_only } => {
                 match mount_drive(cpu, &drive, &path, kind.as_deref(), label, read_only) {
@@ -938,7 +1024,12 @@ impl DebugHub {
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
             "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
-            "cs_ip": format!("{:04X}:{:04X}", cpu.cs(), cpu.ip()),
+            "cs_ip": if cpu.eip() > 0xFFFF {
+                format!("{:04X}:{:08X}", cpu.cs(), cpu.eip())
+            } else {
+                format!("{:04X}:{:04X}", cpu.cs(), cpu.ip())
+            },
+            "cpu_mode": pm::mode_name(cpu),
             "cpu_state": format!("{:?}", cpu.state),
             "shell_idle": shell_idle(cpu),
             "process_depth": cpu.process_stack.len(),
@@ -1015,40 +1106,41 @@ impl DebugHub {
     }
 
     fn disasm(&self, cpu: &Cpu, addr: Option<String>, count: usize) -> Reply {
-        let (phys, segoff) = match addr {
-            Some(a) => match parse_addr(cpu, &a) {
-                Ok(v) => v,
-                Err(e) => return Reply::bad(e),
-            },
-            None => (cpu.get_physical_addr(cpu.cs(), cpu.ip()), Some((cpu.cs(), cpu.ip()))),
+        let addr = addr.unwrap_or_else(|| "CS:EIP".to_string());
+        let start = match parse_addr(cpu, &addr) {
+            Ok(a) => a,
+            Err(e) => return Reply::bad(e),
         };
-        let (seg, mut off) = segoff.unwrap_or(((phys >> 4) as u16, (phys & 0xF) as u16));
-        let base = (seg as usize) << 4;
-        let cur = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        let code32 = start.segoff.is_some_and(|(sel, _)| pm::code32(cpu, sel));
+        let cur = cpu.peek_translate(cpu.seg_cache(crate::cpu::Seg::CS).base.wrapping_add(cpu.eip())).map(|p| p as usize);
         let mut lines = Vec::new();
+        let mut at = 0usize;
         for _ in 0..count.min(1000) {
-            let p = (base + off as usize) & 0xFFFFF;
-            let bytes: Vec<u8> = (0..15).map(|i| cpu.bus.peek_8((p + i) & 0xFFFFF)).collect();
+            let p = start.byte(cpu, at);
+            let bytes: Vec<u8> = (0..15)
+                .map(|i| start.byte(cpu, at + i).map_or(0xFF, |a| cpu.bus.peek_8(a)))
+                .collect();
             let (len, text) = if bytes[0] == 0xFE && bytes[1] == 0x38 {
                 (3, format!("HLE INT {:02X}h", bytes[2]))
+            } else if bytes[0] == 0xFE && bytes[1] == 0x39 {
+                (3, format!("HLE service {:02X}h", bytes[2]))
             } else {
-                trace::disasm_one(&bytes, off as u32, false)
+                let ip = start.segoff.map_or(at as u32, |(_, off)| off.wrapping_add(at as u32));
+                trace::disasm_one(&bytes, ip, code32)
             };
-            let marker = match (p == cur, self.breakpoints.contains(&p)) {
+            let marker = match (p.is_some() && p == cur, p.is_some_and(|p| self.breakpoints.contains(&p))) {
                 (true, true) => "=>*",
                 (true, false) => "=> ",
                 (false, true) => "  *",
                 _ => "   ",
             };
-            lines.push(format!(
-                "{} {:04X}:{:04X}  {:<20} {}",
-                marker,
-                seg,
-                off,
-                trace::hex_bytes(&bytes[..len]),
-                text
-            ));
-            off = off.wrapping_add(len as u16);
+            let label = match start.segoff {
+                Some((sel, off)) if code32 || off > 0xFFFF => format!("{:04X}:{:08X}", sel, off.wrapping_add(at as u32)),
+                Some((sel, off)) => format!("{:04X}:{:04X}", sel, (off as usize + at) as u16),
+                None => format!("{:08X}", start.lin.map_or(start.phys.unwrap_or(0) + at, |l| l as usize + at)),
+            };
+            lines.push(format!("{} {}  {:<20} {}", marker, label, trace::hex_bytes(&bytes[..len]), text));
+            at += len;
         }
         Reply::Json(json!({"lines": lines}))
     }
@@ -1056,7 +1148,13 @@ impl DebugHub {
     fn breakpoints_json(&self) -> Value {
         let mut v: Vec<_> = self.breakpoints.iter().copied().collect();
         v.sort();
-        json!({"breakpoints": v.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>()})
+        let exceptions: Vec<String> =
+            (0..32).filter(|i| self.break_exceptions & (1 << i) != 0).map(|i| format!("{:02X}", i)).collect();
+        json!({
+            "breakpoints": v.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
+            "exceptions": exceptions,
+            "mode_switch": self.break_mode_switch,
+        })
     }
 }
 
@@ -1094,52 +1192,14 @@ fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
 // ---------------------------------------------------------------------------
 
 /// Parse a hex number with optional `0x` prefix / `h` suffix.
-pub fn parse_hex(s: &str) -> Result<u32, String> {
-    let t = s.trim();
-    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
-    let t = t.strip_suffix('h').or_else(|| t.strip_suffix('H')).unwrap_or(t);
-    u32::from_str_radix(t, 16).map_err(|_| format!("invalid hex number '{}'", s))
+/// Where a breakpoint at an address goes: its physical address.
+fn breakpoint_phys(a: pm::DebugAddr) -> Result<usize, String> {
+    a.phys.ok_or_else(|| "address is on an unmapped page".to_string())
 }
 
-fn reg16(cpu: &Cpu, name: &str) -> Option<u16> {
-    Some(match name.to_ascii_lowercase().as_str() {
-        "ax" => cpu.ax(),
-        "bx" => cpu.bx(),
-        "cx" => cpu.cx(),
-        "dx" => cpu.dx(),
-        "si" => cpu.si(),
-        "di" => cpu.di(),
-        "bp" => cpu.bp(),
-        "sp" => cpu.sp(),
-        "cs" => cpu.cs(),
-        "ds" => cpu.ds(),
-        "es" => cpu.es(),
-        "ss" => cpu.ss(),
-        "ip" => cpu.ip(),
-        _ => return None,
-    })
-}
-
-/// Parse an address: `SEG:OFF` (hex numbers or register names, e.g.
-/// `CS:IP`, `DS:SI`, `B800:0`) or a hex linear address (`0x12345`, `B8000`).
-/// Returns the physical address and, when given, the segment:offset pair.
-pub fn parse_addr(cpu: &Cpu, s: &str) -> Result<(usize, Option<(u16, u16)>), String> {
-    let part = |p: &str| -> Result<u16, String> {
-        match reg16(cpu, p.trim()) {
-            Some(v) => Ok(v),
-            None => parse_hex(p).and_then(|v| u16::try_from(v).map_err(|_| format!("'{}' exceeds 16 bits", p))),
-        }
-    };
-    if let Some((seg, off)) = s.split_once(':') {
-        let (seg, off) = (part(seg)?, part(off)?);
-        Ok((cpu.get_physical_addr(seg, off), Some((seg, off))))
-    } else {
-        let v = parse_hex(s)? as usize;
-        if v > 0xFFFFF {
-            return Err(format!("address {:X} beyond 1 MiB", v));
-        }
-        Ok((v, None))
-    }
+/// 16-bit registers and segment registers `set_regs` accepts.
+fn reg16(name: &str) -> bool {
+    matches!(name, "ax" | "bx" | "cx" | "dx" | "si" | "di" | "bp" | "sp" | "cs" | "ds" | "es" | "ss" | "ip")
 }
 
 pub fn regs_json(cpu: &Cpu) -> Value {
@@ -1172,6 +1232,7 @@ pub fn regs_json(cpu: &Cpu) -> Value {
         "flags": h(flags.bits() as u16), "eflags": h32(flags.bits()),
         "flags_set": names,
         "cr0": h32(cpu.cr0),
+        "system": pm::system_regs(cpu),
     })
 }
 
@@ -1189,7 +1250,7 @@ fn set_regs(cpu: &mut Cpu, map: &Map<String, Value>) -> Result<(), String> {
             key.as_str(),
             "eax" | "ebx" | "ecx" | "edx" | "esi" | "edi" | "ebp" | "esp" | "eip" | "eflags"
         );
-        if !wide && !matches!(key.as_str(), "flags" | "fs" | "gs") && reg16(cpu, &key).is_none() {
+        if !wide && !matches!(key.as_str(), "flags" | "fs" | "gs") && !reg16(&key) {
             return Err(format!("unknown register '{}'", k));
         }
         if !wide && val > 0xFFFF {

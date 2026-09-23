@@ -86,6 +86,49 @@ impl Fault {
     }
 }
 
+/// An exception the CPU raised, as kept in `Cpu::exception_log`.
+#[derive(Clone, Copy, Debug)]
+pub struct ExceptionRecord {
+    pub vector: u8,
+    pub error: Option<u32>,
+    /// Where it happened: the faulting instruction for faults.
+    pub cs: u16,
+    pub eip: u32,
+    /// CR2 when it happened: the address of a page fault.
+    pub cr2: u32,
+    pub protected: bool,
+    /// `Cpu::executed` when it happened.
+    pub icount: u64,
+}
+
+/// Exceptions kept in `Cpu::exception_log`.
+pub const EXCEPTION_LOG_LEN: usize = 64;
+/// Exceptions written to the emulator log; later ones are only counted.
+const EXCEPTIONS_LOGGED: u64 = 200;
+
+/// Mnemonic of an exception vector, as in #GP.
+pub fn exception_name(vector: u8) -> &'static str {
+    match vector {
+        0 => "#DE",
+        1 => "#DB",
+        2 => "NMI",
+        3 => "#BP",
+        4 => "#OF",
+        5 => "#BR",
+        6 => "#UD",
+        7 => "#NM",
+        8 => "#DF",
+        10 => "#TS",
+        11 => "#NP",
+        12 => "#SS",
+        13 => "#GP",
+        14 => "#PF",
+        16 => "#MF",
+        17 => "#AC",
+        _ => "#??",
+    }
+}
+
 /// Room for the values an interrupt or far call pushes: at most GS, FS, DS,
 /// ES, SS, ESP, EFLAGS, CS, EIP and an error code, or the 31 parameters a
 /// call gate copies plus SS, ESP, CS and EIP.
@@ -368,6 +411,7 @@ impl Cpu {
     /// contributory or page fault), and a shutdown when the double fault
     /// can't be delivered either.
     pub fn raise(&mut self, fault: Fault) {
+        self.note_exception(fault);
         let mut current = fault;
         for _ in 0..8 {
             let (eip, esp) = (self.eip, self.esp());
@@ -386,6 +430,40 @@ impl Cpu {
             }
         }
         self.shutdown();
+    }
+
+    /// Keep a record of an exception for debuggers, and log the first ones.
+    fn note_exception(&mut self, fault: Fault) {
+        self.exceptions += 1;
+        let record = ExceptionRecord {
+            vector: fault.vector,
+            error: fault.error,
+            cs: self.cs(),
+            eip: self.eip,
+            cr2: self.cr2,
+            protected: self.pe(),
+            icount: self.executed,
+        };
+        if self.exception_log.len() == EXCEPTION_LOG_LEN {
+            self.exception_log.pop_front();
+        }
+        self.exception_log.push_back(record);
+        if self.exceptions <= EXCEPTIONS_LOGGED {
+            let error = match (fault.error, self.pe()) {
+                (Some(e), true) => format!("({:04X})", e),
+                _ => String::new(),
+            };
+            let cr2 = if fault.vector == 14 { format!(" CR2={:08X}", self.cr2) } else { String::new() };
+            self.bus.log_string(&format!(
+                "[CPU] {}{} at {:04X}:{:08X}{}{}",
+                exception_name(fault.vector),
+                error,
+                record.cs,
+                record.eip,
+                cr2,
+                if self.exceptions == EXCEPTIONS_LOGGED { " (further exceptions not logged)" } else { "" }
+            ));
+        }
     }
 
     /// The error code an exception pushes: in protected mode only.

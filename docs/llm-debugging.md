@@ -168,15 +168,51 @@ The same call mounts other drives. Add `"type"` (`floppy`, `hdd` or `cdrom`),
 `DELETE /api/drive/D` unmounts a drive, and `GET /api/drive` lists them. At
 the DOS prompt, the `MOUNT` command does the same.
 
+### Protected-mode programs (DOS extenders)
+
+Programs built with DOS/4GW, DOS/32A, PMODE or Borland's RTM switch the CPU
+to protected mode. `/api/status` shows `cpu_mode` (`real`, `protected` or
+`v86`), and `/api/registers` adds a `system` object: CPL, CR2, CR3, the
+GDTR, IDTR, LDTR and TR, and every segment register's base, limit and
+access rights.
+
+- **Extenders switch modes constantly.** DOS/4GW goes back to real mode
+  for every DOS or BIOS call and for hardware interrupts it reflects, so a
+  paused program in real mode inside the extender is normal. A crash back
+  to DOS shows as `shell_idle: true` or a text mode.
+- **Exceptions:** `GET /api/exceptions` lists the last 64 (vector, error
+  code, `CS:EIP`, CR2 for page faults). Page faults (`#PF`, vector 0E) are
+  normal under DOS/4GW, whose virtual memory manager loads pages on demand.
+  The log also has a line for each of the first 200 exceptions
+  (`?grep=%23GP`; `#` must be written `%23` in a URL).
+- **Break on an exception:** `POST /api/breakpoints {"exception":"0D"}`
+  (or `"any"`) pauses at the first instruction of the handler after the CPU
+  raises it; the pause reply includes the exception. `{"mode_switch":true}`
+  pauses after each switch between real and protected mode.
+- **Tables:** `/api/gdt`, `/api/ldt` and `/api/idt` decode descriptors and
+  gates; `/api/tss` shows the ring stacks and saved registers;
+  `/api/pagewalk?addr=lin:00401000` shows the page directory and table
+  entries; `/api/xms` lists XMS handles (where extenders put their memory).
+- **Disassembly and traces** use the code segment's size (16 or 32-bit), and
+  the trace records it per instruction.
+
 ## 5. Addresses
 
 Addresses are always hex, as in DEBUG.COM:
 
-- `SEG:OFF` with numbers: `B800:0000`, `1000:10B`.
-- `SEG:OFF` with register names: `CS:IP`, `DS:SI`, `ES:DI`, `SS:SP`.
-- Linear addresses: `0x12345` or `B8000`.
+- `SEG:OFF` with numbers: `B800:0000`, `1000:10B`. In protected mode the
+  first part is a selector, looked up in the GDT or LDT, and the offset can
+  be 32 bits: `0268:100CA541`.
+- `SEG:OFF` with register names: `CS:IP`, `DS:SI`, `ES:DI`, `SS:SP`, or the
+  32-bit ones: `CS:EIP`, `DS:ESI`. A segment register name uses that
+  register's current base.
+- `lin:ADDR`: a linear address, translated through the page tables when
+  paging is on.
+- `phys:ADDR`, or just `ADDR`: a physical address (`B8000`, `0x12345`).
 
-A decimal-looking number like `100` means 0x100.
+A decimal-looking number like `100` means 0x100. Breakpoints are kept by
+physical address, so a breakpoint on a paged address follows the page the
+address mapped to when it was set.
 
 ## 6. Pitfalls
 

@@ -137,12 +137,38 @@ impl Drive {
 }
 
 struct OpenFile {
-    /// None for Z: virtual files, which have no backing file.
+    /// None for Z: virtual files, which have no backing file, and devices.
     file: Option<File>,
+    /// A character device opened by name (NUL, CON, PRN...).
+    device: Option<CharDevice>,
     drive: u8,
     /// PSP of the process that opened the file. DOS closes a process's files
     /// when it terminates.
     owner: u16,
+}
+
+/// A DOS character device a program opened by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharDevice {
+    /// NUL, and the printer and serial ports, which nothing is attached
+    /// to: reads find nothing, writes vanish.
+    Nul,
+    /// CON: writes go to the screen.
+    Con,
+}
+
+/// The character device a file name names. DOS finds devices by name in
+/// any directory, with any extension: "C:\GAME\NUL.TXT" is NUL.
+pub fn char_device(filename: &str) -> Option<CharDevice> {
+    let last = filename.rsplit(['\\', '/', ':']).next()?;
+    let stem = last.split('.').next()?.trim().to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" => Some(CharDevice::Con),
+        "NUL" | "PRN" | "AUX" | "LPT1" | "LPT2" | "LPT3" | "COM1" | "COM2" | "COM3" | "COM4" | "CLOCK$" => {
+            Some(CharDevice::Nul)
+        }
+        _ => None,
+    }
 }
 
 /// Helper struct to transfer directory search results back to the CPU
@@ -332,6 +358,11 @@ impl DiskController {
     /// Drive a file handle was opened on (Z: for virtual handles).
     pub fn handle_drive(&self, handle: u16) -> Option<u8> {
         self.open_files.get(&handle).map(|f| f.drive)
+    }
+
+    /// The character device an open handle refers to, if any.
+    pub fn handle_device(&self, handle: u16) -> Option<CharDevice> {
+        self.open_files.get(&handle).and_then(|f| f.device)
     }
 
     pub fn set_current_drive(&mut self, drive: u8) -> u8 {
@@ -616,6 +647,16 @@ impl DiskController {
 
     // INT 21h, AH=3Dh: Open File. `owner` is the PSP of the calling process.
     pub fn open_file(&mut self, filename: &str, mode: u8, owner: u16) -> Result<u16, u8> {
+        // Devices open by name, whatever the directory; there's no file to
+        // create.
+        if let Some(device) = char_device(filename) {
+            let handle = self.free_handle()?;
+            self.open_files.insert(
+                handle,
+                OpenFile { file: None, device: Some(device), drive: self.current_drive, owner },
+            );
+            return Ok(handle);
+        }
         // Handle Virtual Z: files
         if self.is_virtual_file(filename) {
             // Virtual files only need to "exist" so programs like NC find
@@ -626,6 +667,7 @@ impl DiskController {
                 handle,
                 OpenFile {
                     file: None,
+                    device: None,
                     drive: DRIVE_Z,
                     owner,
                 },
@@ -667,6 +709,7 @@ impl DiskController {
                     handle,
                     OpenFile {
                         file: Some(file),
+                        device: None,
                         drive,
                         owner,
                     },
@@ -680,6 +723,9 @@ impl DiskController {
     // INT 21h, AH=3Ch: Create File. Opens read/write, creating the file if
     // missing but never truncating (see int21.rs for why).
     pub fn create_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
+        if char_device(filename).is_some() {
+            return self.open_file(filename, 0x02, owner);
+        }
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
@@ -688,7 +734,7 @@ impl DiskController {
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
     pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
-        if self.resolve_path(filename).is_some_and(|p| p.exists()) {
+        if char_device(filename).is_none() && self.resolve_path(filename).is_some_and(|p| p.exists()) {
             return Err(0x50); // File exists
         }
         self.create_file(filename, owner)
@@ -757,6 +803,7 @@ impl DiskController {
         };
         let copy = OpenFile {
             file,
+            device: open.device,
             drive: open.drive,
             owner: open.owner,
         };
@@ -807,6 +854,9 @@ impl DiskController {
     // INT 21h, AH=3Fh: Read from File
     pub fn read_file(&mut self, handle: u16, count: usize) -> Result<Vec<u8>, u16> {
         if let Some(open) = self.open_files.get_mut(&handle) {
+            if open.device.is_some() {
+                return Ok(Vec::new());
+            }
             let file = open.file.as_mut().ok_or(0x05u16)?;
             let mut buffer = vec![0u8; count];
             match file.read(&mut buffer) {
@@ -824,6 +874,9 @@ impl DiskController {
     // INT 21h, AH=40h: Write to File
     pub fn write_file(&mut self, handle: u16, data: &[u8]) -> Result<u16, u8> {
         if let Some(open) = self.open_files.get_mut(&handle) {
+            if open.device.is_some() {
+                return Ok(data.len() as u16);
+            }
             let file = open.file.as_mut().ok_or(0x05u8)?;
             match file.write(data) {
                 Ok(bytes_written) => Ok(bytes_written as u16),
@@ -837,6 +890,9 @@ impl DiskController {
     // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
         if let Some(open) = self.open_files.get_mut(&handle) {
+            if open.device.is_some() {
+                return Ok(0);
+            }
             let file = open.file.as_mut().ok_or(0x05u16)?;
             let seek_from = match origin {
                 0 => SeekFrom::Start(offset as u64),
