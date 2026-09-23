@@ -18,6 +18,7 @@ mod audio;
 mod bus;
 mod command;
 mod cpu;
+mod debug;
 mod disk;
 mod f80;
 mod instr_cache;
@@ -40,6 +41,16 @@ struct Args {
     /// Root directory for Drive C:
     #[arg(short, long, default_value = ".")]
     dir: String,
+
+    /// Start the HTTP/WebSocket debug server (local-only, unauthenticated).
+    /// Optionally takes the listen address.
+    #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
+    debug_server: Option<std::net::SocketAddr>,
+
+    /// Instruction trace ring buffer capacity (entries, ~64 bytes each).
+    /// Allocated only once tracing is enabled via the debug server.
+    #[arg(long, default_value_t = 1_000_000)]
+    trace_capacity: usize,
 }
 
 fn main() -> Result<(), String> {
@@ -92,6 +103,10 @@ fn main() -> Result<(), String> {
     let root_path = std::path::PathBuf::from(&args.dir);
     let mut cpu = Cpu::new(root_path);
     cpu.bus.audio_device = Some(audio_device);
+    let mut dbg = match args.debug_server {
+        Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity)?,
+        None => debug::DebugHub::disabled(),
+    };
     let mut event_pump = sdl_context.event_pump()?;
 
     // Load Shell Code into Memory
@@ -161,9 +176,7 @@ fn main() -> Result<(), String> {
                     // at port 0x60 + raise IRQ1 so games that poll the port
                     // or install a custom INT 09h ISR see the event.
                     if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
-                        cpu.bus.keyboard_buffer.push_back(code);
-                        cpu.bus.last_scan_code = (code >> 8) as u8;
-                        cpu.bus.irq1_pending = true;
+                        keyboard::deliver_key_down(&mut cpu.bus, code);
                     }
                 }
                 Event::KeyUp {
@@ -187,11 +200,7 @@ fn main() -> Result<(), String> {
                     // movement, etc.) need these to know when the key stops
                     // being pressed.
                     if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
-                        let sc = (code >> 8) as u8;
-                        if sc != 0 {
-                            cpu.bus.last_scan_code = sc | 0x80;
-                            cpu.bus.irq1_pending = true;
-                        }
+                        keyboard::deliver_key_up(&mut cpu.bus, (code >> 8) as u8);
                     }
                 }
 
@@ -219,6 +228,9 @@ fn main() -> Result<(), String> {
                 _ => {}
             }
         }
+
+        // Remote debug requests and queued remote input.
+        dbg.poll(&mut cpu);
 
         // DEBUG: every ~30k-instruction batch, sample the current CS:IP so we
         // can tell which code region a program is spinning in when the screen
@@ -298,13 +310,18 @@ fn main() -> Result<(), String> {
         let mut decoder = Decoder::with_ip(16, ram_slice, 0, DecoderOptions::NONE);
         let mut instr = iced_x86::Instruction::default();
 
+        // Per-instruction debug hook (breakpoints / stepping / tracing) is
+        // only consulted when something actually needs it.
+        let dbg_hot = dbg.begin_batch(&cpu);
+        let batch_len = if dbg.paused { 0 } else { 500_000 };
+
         // Execute instructions. The batch size is much larger than the legacy
         // 30k because the decoded-instruction cache makes each fetch cheap
         // enough that we can afford to execute many more x86 instructions per
         // 16 ms frame — without this, the emulator idled the host CPU while
         // still running at <2 MIPS. The outer SDL loop still caps wall-clock
         // pacing via thread::sleep, so this is an upper bound, not a target.
-        for _ in 0..500_000 {
+        for _ in 0..batch_len {
             // Deliver pending hardware IRQs at the start of each instruction
             // as a CPU would, but only when the program has IF=1 (interrupts
             // enabled) and the PIC IMR allows the line. Missing the exact
@@ -560,6 +577,11 @@ fn main() -> Result<(), String> {
                 break;
             }
 
+            if dbg_hot && dbg.before_exec(&cpu, phys_ip, ram_slice) {
+                break;
+            }
+            dbg.icount += 1;
+
             let b0 = ram_slice[phys_ip];
             let b1 = ram_slice[phys_ip + 1];
 
@@ -666,6 +688,8 @@ fn main() -> Result<(), String> {
             // Make it so
             instructions::execute_instruction(&mut cpu, &instr);
         }
+
+        dbg.end_batch(&cpu);
 
         // Update Audio
         pump_audio(&mut cpu.bus);
@@ -778,8 +802,10 @@ fn main() -> Result<(), String> {
                 draw_default_mouse_cursor(buffer, sx, sy);
             }
 
-            // Send Frame to Recorder before drawing recording indicator
+            // Send Frame to Recorder / debug clients before drawing the
+            // recording indicator
             recorder.capture(buffer);
+            dbg.capture_frame(buffer);
 
             // Draw Recording Indicator
             if recorder.is_active() {

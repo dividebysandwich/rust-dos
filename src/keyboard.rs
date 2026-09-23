@@ -1,6 +1,34 @@
 use sdl2::keyboard::Keycode;
 use sdl2::keyboard::Mod;
 
+use crate::bus::Bus;
+
+/// Deliver a key press: queue `(scan << 8) | ascii` for BIOS INT 16h readers,
+/// and latch the scan code at port 0x60 + raise IRQ1 for programs that poll
+/// the port or install their own INT 09h ISR.
+pub fn deliver_key_down(bus: &mut Bus, code: u16) {
+    bus.keyboard_buffer.push_back(code);
+    bus.last_scan_code = (code >> 8) as u8;
+    bus.irq1_pending = true;
+}
+
+/// Deliver a key release (scan code | 0x80) to port 0x60 and raise IRQ1.
+/// Games that track held keys need these to know when a key stops being
+/// pressed.
+pub fn deliver_key_up(bus: &mut Bus, scan: u8) {
+    if scan != 0 {
+        bus.last_scan_code = scan | 0x80;
+        bus.irq1_pending = true;
+    }
+}
+
+/// Deliver a scan code without touching the INT 16h buffer (modifier keys
+/// like Shift produce make/break codes but no buffered keystroke).
+pub fn deliver_scan_only(bus: &mut Bus, scan: u8) {
+    bus.last_scan_code = scan;
+    bus.irq1_pending = true;
+}
+
 /// Returns a tuple of (Scancode, ASCII) for a given SDL Keycode.
 /// Scancode is the high byte, ASCII is the low byte.
 pub fn map_sdl_to_pc(keycode: Keycode, keymod: Mod) -> Option<u16> {

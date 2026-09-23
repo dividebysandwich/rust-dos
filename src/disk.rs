@@ -57,6 +57,26 @@ impl DiskController {
         }
     }
 
+    /// Host directory currently backing drive C:.
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    /// Remount drive C: onto a different host directory at runtime. All open
+    /// file handles are closed and the current directory resets to the root,
+    /// since neither would be meaningful on the new tree.
+    pub fn set_root(&mut self, path: &Path) -> Result<PathBuf, String> {
+        if !path.is_dir() {
+            return Err(format!("{} is not a directory", path.display()));
+        }
+        let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        self.open_files.clear();
+        self.next_handle = FIRST_USER_HANDLE;
+        self.current_dir = String::new();
+        self.root_path = canonical.clone();
+        Ok(canonical)
+    }
+
     pub fn set_current_drive(&mut self, drive: u8) -> u8 {
         // Only allow switching to C (2) or Z (25) for now
         // Return the number of logical drives (26)

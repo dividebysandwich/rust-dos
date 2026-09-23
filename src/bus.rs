@@ -91,6 +91,13 @@ pub struct Bus {
     /// stay correct in the face of self-modifying code (LZEXE, packers, etc.)
     /// without paying the cost of verifying cached bytes on every fetch.
     pub page_gen: [u32; 256],
+
+    /// Optional observer for every `log_string` line. Installed by the debug
+    /// server so log output can be streamed to remote clients.
+    pub log_hook: Option<Box<dyn FnMut(&str)>>,
+    /// Optional observer for every block of mixed audio samples produced by
+    /// `pump_audio` (44.1 kHz mono i16). Used by the debug audio stream.
+    pub audio_hook: Option<Box<dyn FnMut(&[i16])>>,
 }
 
 use std::path::PathBuf;
@@ -131,6 +138,8 @@ impl Bus {
             sb: crate::sb::SoundBlaster::new(),
             dma_ch1: crate::sb::Dma8237Ch1::default(),
             page_gen: [0; 256],
+            log_hook: None,
+            audio_hook: None,
         };
         // BIOS Data Area (BDA) Initialization
         // 0x0449: Current Video Mode (03 = 80x25 Color)
@@ -286,6 +295,22 @@ impl Bus {
             return self.vga.vram_text[addr - ADDR_VGA_TEXT];
         }
         self.ram[addr]
+    }
+
+    /// Side-effect-free byte read for debuggers. Same mapping as `read_8`,
+    /// but VGA plane latches are restored afterwards so inspecting video
+    /// memory can't disturb a program's read-modify-write sequences.
+    pub fn peek_8(&self, addr: usize) -> u8 {
+        if addr >= self.ram.len() {
+            return 0xFF;
+        }
+        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
+            let saved = self.vga.latches.get();
+            let v = self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
+            self.vga.latches.set(saved);
+            return v;
+        }
+        self.read_8(addr)
     }
 
     // Returns true if a write occurred to the *active* video memory
@@ -780,6 +805,9 @@ impl Bus {
         println!("{}", s);
         if let Some(writer) = &mut self.log_file {
             let _ = writeln!(writer, "{}", s);
+        }
+        if let Some(hook) = &mut self.log_hook {
+            hook(s);
         }
     }
 

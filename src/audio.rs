@@ -101,5 +101,8 @@ pub fn pump_audio(bus: &mut Bus) {
         if let Err(e) = device.queue_audio(&buffer) {
             eprintln!("[AUDIO] Queue error: {}", e);
         }
+        if let Some(hook) = &mut bus.audio_hook {
+            hook(&buffer);
+        }
     }
 }
