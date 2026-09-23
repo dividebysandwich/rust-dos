@@ -109,6 +109,15 @@ impl MouseState {
         (range(self.max_x, w), range(self.max_y, h))
     }
 
+    /// Forget the program's event handler (AX=000Ch), whose code is gone
+    /// once the shell is back.
+    pub fn remove_callback(&mut self) {
+        self.callback_mask = 0;
+        self.callback_cs = 0;
+        self.callback_ip = 0;
+        self.pending_callback_events = 0;
+    }
+
     /// Reset state to "just installed" defaults and return number of buttons.
     pub fn reset(&mut self, screen_w: i32, screen_h: i32) {
         self.installed = true;

@@ -184,7 +184,7 @@ fn scan_lines_and_display_start() {
     assert_eq!(int10(&mut cpu, 0x4F06, 0x0000, 1024, 0), 0x004F);
     assert_eq!((cpu.bx(), cpu.cx(), cpu.dx()), (1024, 1024, 4096));
     assert_eq!(int10(&mut cpu, 0x4F06, 0x0003, 0, 0), 0x004F);
-    assert_eq!(cpu.bx(), 8736, "4 MB over 480 lines, in whole pixels");
+    assert_eq!(cpu.bx(), 8736, "4 MB over 480 lines, in steps of 8 bytes");
     assert_eq!(int10(&mut cpu, 0x4F06, 0x0000, 20000, 0), 0x024F);
 
     // The display start takes effect at the next retrace.
@@ -256,4 +256,22 @@ fn the_mouse_spans_the_vesa_screen() {
     cpu.set_ax(0);
     rust_dos::interrupts::int33::handle(&mut cpu);
     assert_eq!((cpu.bus.mouse.max_x, cpu.bus.mouse.max_y), (799, 599));
+}
+
+#[test]
+fn the_shell_takes_back_vesa_and_the_mouse_handler() {
+    let mut cpu = machine();
+    set_mode(&mut cpu, 0x101);
+    // INT 33h AX=000Ch: event handler 2000:0000 for all events.
+    cpu.set_ax(0x000C);
+    cpu.set_cx(0x7F);
+    cpu.set_es(0x2000);
+    cpu.set_dx(0);
+    rust_dos::interrupts::int33::handle(&mut cpu);
+    assert_eq!(cpu.bus.mouse.callback_cs, 0x2000);
+
+    cpu.load_shell();
+    assert_eq!(cpu.bus.video_mode, VideoMode::Text80x25Color);
+    assert!(cpu.bus.vbe.mode.is_none());
+    assert_eq!((cpu.bus.mouse.callback_cs, cpu.bus.mouse.callback_mask), (0, 0));
 }
