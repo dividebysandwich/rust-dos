@@ -144,6 +144,9 @@ pub struct Bus {
     /// it was last read, and how often the output device ran dry.
     pub audio_peak: u16,
     pub audio_underruns: u64,
+    /// Writes logged so far to each port nothing emulates: a program
+    /// polling for hardware that isn't there would flood the log.
+    unhandled_writes: Vec<u8>,
 
     /// Generation counter for every block of RAM (`GEN_SHIFT`). Bumped on
     /// every write inside the Bus write helpers. The decoded-instruction
@@ -223,6 +226,7 @@ impl Bus {
             irq_levels: 0,
             audio_peak: 0,
             audio_underruns: 0,
+            unhandled_writes: vec![0; 0x10000],
             page_gen: vec![0; ram_len >> GEN_SHIFT],
             log_hook: None,
             audio_hook: None,
@@ -1313,11 +1317,17 @@ impl Bus {
                         }
                     }
                 } else {
-                    // Unhandled port write
-                    self.log_string(&format!(
-                        "[Unhandled IO Write] Port: {:04X}, Value: {:02X}",
-                        port, value
-                    ));
+                    // Unhandled port write: log the first few to each port.
+                    const LOGGED: u8 = 8;
+                    let count = &mut self.unhandled_writes[port as usize];
+                    if *count < LOGGED {
+                        *count += 1;
+                        let more = if *count == LOGGED { " (not logging more)" } else { "" };
+                        self.log_string(&format!(
+                            "[Unhandled IO Write] Port: {:04X}, Value: {:02X}{}",
+                            port, value, more
+                        ));
+                    }
                 }
             }
         }
