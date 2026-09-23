@@ -49,6 +49,70 @@ pub fn normalize_label(label: &str) -> String {
     label.trim().to_ascii_uppercase().chars().take(11).collect()
 }
 
+/// Whether DOS allows `c` in a file name.
+fn dos_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "!#$%&'()-@^_`{}~".contains(c)
+}
+
+/// Whether `name` already is a DOS 8.3 name, in any case.
+fn is_short_name(name: &str) -> bool {
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    !stem.is_empty()
+        && stem.len() <= 8
+        && ext.len() <= 3
+        && !name.ends_with('.')
+        && stem.chars().chain(ext.chars()).all(dos_name_char)
+}
+
+/// The DOS names of the entries of a directory, given in the order that
+/// numbers them, as DOSBox and Windows make them: names that are 8.3
+/// already are only uppercased; the others lose their spaces and other
+/// characters DOS doesn't allow, and become the start of the name with a
+/// number, `~N`, counted per prefix: "Day Of The Tentacle.BIN" and ".cue"
+/// are DAYOFT~1.BIN and DAYOFT~2.CUE.
+pub(crate) fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+    let mut used = std::collections::HashSet::new();
+    let mut result = vec![String::new(); names.len()];
+    // 8.3 names come first, so that no generated name takes one.
+    let mut long = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let upper = name.as_ref().to_ascii_uppercase();
+        if is_short_name(&upper) && used.insert(upper.clone()) {
+            result[i] = upper;
+        } else {
+            long.push(i);
+        }
+    }
+    let mut counters: HashMap<String, u32> = HashMap::new();
+    for i in long {
+        let upper = names[i].as_ref().to_ascii_uppercase();
+        let (stem, ext) = match upper.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() => (stem, ext),
+            _ => (upper.as_str(), ""),
+        };
+        let mut stem: String = stem.chars().filter(|&c| dos_name_char(c)).collect();
+        if stem.is_empty() {
+            stem = "NONAME".to_string();
+        }
+        let ext: String = ext.chars().filter(|&c| dos_name_char(c)).take(3).collect();
+        let counter = counters.entry(stem.chars().take(6).collect()).or_insert(0);
+        loop {
+            *counter += 1;
+            let suffix = format!("~{}", counter);
+            let keep = stem.len().min(8 - suffix.len());
+            let mut name = format!("{}{}", &stem[..keep], suffix);
+            if !ext.is_empty() {
+                name = format!("{}.{}", name, ext);
+            }
+            if used.insert(name.clone()) {
+                result[i] = name;
+                break;
+            }
+        }
+    }
+    result
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriveKind {
     Floppy,
@@ -492,6 +556,12 @@ impl DiskController {
     }
 
     fn resolve_on(&self, drive_num: u8, rest: &str) -> Option<PathBuf> {
+        self.resolve_names_on(drive_num, rest).map(|(path, _)| path)
+    }
+
+    /// The host path of `rest` on a host drive, and its DOS path from the
+    /// root in short names (e.g. "GAMES\DAYOFT~1").
+    fn resolve_names_on(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String)> {
         let drive = self.drive(drive_num)?;
         // Z: files are served from memory; callers check `is_virtual_file`.
         if drive.kind == DriveKind::Virtual {
@@ -501,14 +571,16 @@ impl DiskController {
         // Traverse and Resolve to Host Paths. ".." handling in
         // logical_components can't climb above the root.
         let mut full_path = drive.root.clone();
+        let mut dos_path: Vec<String> = Vec::new();
         for part in Self::logical_components(drive, rest) {
-            let actual_name = self.find_host_child(&full_path, part);
-            full_path.push(actual_name);
+            let (host_name, dos_name) = self.find_host_child(&full_path, part);
+            full_path.push(host_name);
+            dos_path.push(dos_name);
         }
 
         // Final Security Check
         if full_path.starts_with(&drive.root) {
-            Some(full_path)
+            Some((full_path, dos_path.join("\\")))
         } else {
             None
         }
@@ -593,72 +665,33 @@ impl DiskController {
         }
     }
 
-    /// Helper to find a child in a directory matching DOS semantics
-    /// (Case-Insensitive OR Short Filename match)
-    fn find_host_child(&self, dir: &Path, target: &str) -> String {
-        // Read directory and sort for deterministic short names
-        let mut entries: Vec<String> = Vec::new();
-        if let Ok(read_dir) = fs::read_dir(dir) {
-            for entry in read_dir.flatten() {
-                entries.push(entry.file_name().to_string_lossy().to_string());
-            }
-        }
-        entries.sort(); // Ensure ~1 order is consistent
+    /// The entries of a host directory with their DOS names (see
+    /// `short_names`), in sorted order. Hidden (dot) files are left out.
+    fn host_entries(dir: &Path) -> Vec<(String, String)> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        names.sort_by_key(|name| name.to_ascii_uppercase());
+        let short = short_names(&names);
+        names.into_iter().zip(short).collect()
+    }
 
+    /// The host name and the DOS name of the entry of `dir` that a DOS path
+    /// component names: its long name in any case, or its short name. A
+    /// name that matches nothing comes back uppercased, for creating it.
+    fn find_host_child(&self, dir: &Path, target: &str) -> (String, String) {
         let target_upper = target.to_ascii_uppercase();
-        let mut generated_counts: HashMap<String, usize> = HashMap::new();
-
-        for name in entries {
-            if name.starts_with('.') {
-                continue;
-            }
-
-            // 1. Exact/Case-Insensitive Match
-            if name.eq_ignore_ascii_case(target) {
-                return name;
-            }
-
-            // 2. Short Name Match
-            // Generate Short Name for this entry
-            let (stem, ext) = Self::to_short_name(&name);
-            let base_key = if ext.is_empty() {
-                stem.clone()
-            } else {
-                format!("{}.{}", stem, ext)
-            };
-
-            let count = *generated_counts.get(&base_key).unwrap_or(&0);
-            let final_short_name = if count == 0 {
-                generated_counts.insert(base_key, 1);
-                if ext.is_empty() {
-                    stem
-                } else {
-                    format!("{}.{}", stem, ext)
-                }
-            } else {
-                generated_counts.insert(base_key, count + 1);
-                let suffix = format!("~{}", count);
-                let available_len = 8usize.saturating_sub(suffix.len());
-                let short_stem = if stem.len() > available_len {
-                    &stem[0..available_len]
-                } else {
-                    &stem
-                };
-
-                if ext.is_empty() {
-                    format!("{}{}", short_stem, suffix)
-                } else {
-                    format!("{}{}.{}", short_stem, suffix, ext)
-                }
-            };
-
-            if final_short_name == target_upper {
-                return name; // Found the host file corresponding to the short name
-            }
-        }
-
-        // Not found? Return target as uppercase (default for creation)
-        target.to_ascii_uppercase()
+        let entries = Self::host_entries(dir);
+        entries
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(target))
+            .or_else(|| entries.iter().find(|(_, short)| *short == target_upper))
+            .cloned()
+            .unwrap_or((target_upper.clone(), target_upper))
     }
 
     // ========================================================================
@@ -686,20 +719,17 @@ impl DiskController {
             return true;
         }
 
-        // Resolve the new path to check existence
-        if let Some(host_path) = self.resolve_on(drive_num, rest) {
-            if host_path.is_dir() {
-                // Store the DOS representation (relative to root)
-                if let Ok(suffix) = host_path.strip_prefix(&drive.root) {
-                    let dos_dir = suffix.to_string_lossy().replace('/', "\\");
-                    if let Some(d) = self.drives[drive_num as usize].as_mut() {
-                        d.current_dir = dos_dir;
-                    }
-                    return true;
+        // Resolve the new path to check existence, and keep it in short
+        // names, as programs see it.
+        match self.resolve_names_on(drive_num, rest) {
+            Some((host_path, dos_dir)) if host_path.is_dir() => {
+                if let Some(d) = self.drives[drive_num as usize].as_mut() {
+                    d.current_dir = dos_dir;
                 }
+                true
             }
+            _ => false,
         }
-        false
     }
 
     /// Current directory of the current drive, without drive or leading "\".
@@ -1188,22 +1218,16 @@ impl DiskController {
 
     /// DOS AH=3Ah: Remove an empty directory.
     pub fn remove_directory(&self, path: &str) -> Result<(), u8> {
-        let (drive_num, host_path) = self.locate(path).ok_or(0x03)?;
-        if !host_path.exists() {
-            return Err(0x03);
-        }
+        let normalized = path.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
+        let (host_path, dos_form) = self.resolve_names_on(drive_num, rest).ok_or(0x03)?;
         if !host_path.is_dir() {
             return Err(0x03);
         }
         self.check_writable(drive_num)?;
         // DOS error 0x10 = "attempt to remove current directory".
-        if let Some(drive) = self.drive(drive_num) {
-            if let Ok(rel) = host_path.strip_prefix(&drive.root) {
-                let dos_form = rel.to_string_lossy().replace('/', "\\");
-                if dos_form.eq_ignore_ascii_case(&drive.current_dir) {
-                    return Err(0x10);
-                }
-            }
+        if self.drive(drive_num).is_some_and(|d| dos_form.eq_ignore_ascii_case(&d.current_dir)) {
+            return Err(0x10);
         }
         fs::remove_dir(&host_path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
@@ -1223,37 +1247,6 @@ impl DiskController {
             }
         }
         None
-    }
-
-    // Returns the path string relative to root, e.g., "GAMES\DOOM"
-    fn to_short_name(filename: &str) -> (String, String) {
-        let filename = filename.to_uppercase();
-
-        let (stem, ext) = match filename.rsplit_once('.') {
-            Some((s, e)) => (s, e),
-            None => (filename.as_str(), ""),
-        };
-
-        // Filter invalid chars
-        let mut clean_stem: String = stem
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || "!@#$%^&()-_'{}`~".contains(*c))
-            .collect();
-
-        let mut clean_ext: String = ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-
-        if clean_ext.len() > 3 {
-            clean_ext.truncate(3);
-        }
-        if clean_stem.len() > 8 {
-            clean_stem.truncate(8);
-        }
-
-        if clean_stem.is_empty() {
-            clean_stem = "NONAME".to_string();
-        }
-
-        (clean_stem, clean_ext)
     }
 
     /// Helper: Simple DOS wildcard matching (? and *)
@@ -1413,12 +1406,9 @@ impl DiskController {
         // Host Filesystem Listing
         let host_dir = self.resolve_on(drive_num, search_dir_str).ok_or(0x03)?;
 
-        let read_dir = fs::read_dir(&host_dir).map_err(|_| 0x03)?;
-        let mut all_entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
-        all_entries.sort_by_key(|dir_entry| dir_entry.file_name());
-
-        let mut generated_names: HashMap<String, usize> = HashMap::new();
-
+        if !host_dir.is_dir() {
+            return Err(0x03);
+        }
         let is_host_root = host_dir == drive.root;
         let media_ro = !drive.writable();
 
@@ -1426,16 +1416,9 @@ impl DiskController {
             valid_entries.extend(Self::dot_entries(pattern));
         }
 
-        for entry in all_entries {
-            let original_name = entry.file_name().to_string_lossy().into_owned();
-
-            if original_name.starts_with('.') {
+        for (original_name, final_name) in Self::host_entries(&host_dir) {
+            let Ok(metadata) = fs::metadata(host_dir.join(&original_name)) else {
                 continue;
-            }
-
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
             };
 
             let is_dir = metadata.is_dir();
@@ -1448,39 +1431,6 @@ impl DiskController {
             if (file_attr as u16 & restricted_bits) & !search_attr != 0 {
                 continue;
             }
-
-            let (stem, ext) = Self::to_short_name(&original_name);
-            let base_key = if ext.is_empty() {
-                stem.clone()
-            } else {
-                format!("{}.{}", stem, ext)
-            };
-
-            let count = *generated_names.get(&base_key).unwrap_or(&0);
-
-            let final_name = if count == 0 {
-                generated_names.insert(base_key, 1);
-                if ext.is_empty() {
-                    stem
-                } else {
-                    format!("{}.{}", stem, ext)
-                }
-            } else {
-                generated_names.insert(base_key.clone(), count + 1);
-                let suffix = format!("~{}", count);
-                let available_len = 8usize.saturating_sub(suffix.len());
-                let short_stem = if stem.len() > available_len {
-                    &stem[0..available_len]
-                } else {
-                    &stem
-                };
-
-                if ext.is_empty() {
-                    format!("{}{}", short_stem, suffix)
-                } else {
-                    format!("{}{}.{}", short_stem, suffix, ext)
-                }
-            };
 
             if !Self::matches_pattern(&final_name, pattern) {
                 continue;
@@ -1544,6 +1494,52 @@ mod tests {
         assert_eq!(parse_drive_prefix("\u{FFFD}:X"), (None, "\u{FFFD}:X"));
         assert_eq!(parse_drive_prefix("é"), (None, "é"));
         assert_eq!(parse_drive_prefix(""), (None, ""));
+    }
+
+    #[test]
+    fn long_names_get_dosbox_short_names() {
+        let names = [
+            "Day Of The Tentacle.BIN",
+            "Day Of The Tentacle.cue",
+            "readme.txt",
+            "Cargo.toml",
+            "two.dots.txt",
+            "ABCDEF~1.TXT",
+            "abcdefghij.txt",
+        ];
+        assert_eq!(
+            short_names(&names),
+            [
+                "DAYOFT~1.BIN",
+                "DAYOFT~2.CUE",
+                "README.TXT",
+                "CARGO~1.TOM",
+                "TWODOT~1.TXT",
+                "ABCDEF~1.TXT",
+                "ABCDEF~2.TXT",
+            ]
+        );
+    }
+
+    #[test]
+    fn host_files_are_found_by_long_and_short_name() {
+        let base = scratch("short_names");
+        fs::create_dir_all(base.join("CD")).unwrap();
+        fs::write(base.join("CD/Day Of The Tentacle.BIN"), b"bin").unwrap();
+        fs::write(base.join("CD/Day Of The Tentacle.cue"), b"cue").unwrap();
+        let disk = DiskController::new(base.clone());
+
+        let cue = disk.resolve_path(r"C:\CD\DAYOFT~2.CUE").unwrap();
+        assert!(cue.ends_with("CD/Day Of The Tentacle.cue"));
+        let bin = disk.resolve_path(r"\cd\day of the tentacle.bin").unwrap();
+        assert!(bin.ends_with("CD/Day Of The Tentacle.BIN"));
+        let names: Vec<String> = disk
+            .list_directory(r"C:\CD\*.*", 0)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.filename)
+            .collect();
+        assert_eq!(names, ["..", ".", "DAYOFT~1.BIN", "DAYOFT~2.CUE"]);
     }
 
     #[test]

@@ -147,6 +147,12 @@ A:                                        switch to drive A:
 Relative `MOUNT` paths are relative to the emulator's working directory.
 Each drive keeps its own current directory, as in DOS.
 
+Host files and directories whose names aren't valid 8.3 names get short
+names the way DOSBox and Windows make them: the start of the name and a
+number, counted in sorted order per directory. `Day Of The Tentacle.BIN`
+and `Day Of The Tentacle.cue` are `DAYOFT~1.BIN` and `DAYOFT~2.CUE`. Both the
+long and the short name open the file.
+
 | Type | Behaves like |
 |---|---|
 | `hdd` (default) | A fixed disk. BIOS unit 80h and up. |

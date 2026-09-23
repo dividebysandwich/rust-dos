@@ -28,15 +28,14 @@ fn test_root_dir_search() {
 fn test_specific_file_search_in_root() {
     let bus = Bus::new(PathBuf::from("."));
 
-    // Cargo.toml -> CARGO.TOM (8.3 truncation)
-    // We must search for the 8.3 name if we act like DOS.
-    // Or does DOS strictly match long names? This emulator seems to strictly use generated short names.
-    let result = bus.disk.find_directory_entry("CARGO.TOM", 0, 0x3F);
+    // Cargo.toml isn't an 8.3 name: DOS sees it by its short name,
+    // CARGO~N.TOM, numbered among the other CARGO* files.
+    let result = bus.disk.find_directory_entry("CARGO~?.TOM", 0, 0x3F);
 
     match result {
         Ok(_) => {}
         Err(e) => panic!(
-            "Should find CARGO.TOM in root, but got error code: 0x{:02X}",
+            "Should find CARGO~?.TOM in root, but got error code: 0x{:02X}",
             e
         ),
     }

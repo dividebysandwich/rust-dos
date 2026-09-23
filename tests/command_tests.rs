@@ -168,7 +168,7 @@ fn dir_lists_any_drive() {
     assert_eq!(lines[0], " Volume in drive D is DATA");
     assert_eq!(lines[1], " Directory of D:\\SUB");
     assert!(
-        lines[3].starts_with("LONGFILE TXT              1 "),
+        lines[3].starts_with("LONGFI~1 TXT              1 "),
         "{}",
         lines[3]
     );
