@@ -6,6 +6,7 @@ pub fn handle(cpu: &mut Cpu) {
     // This simply signals the main loop to reload the shell.
 
     cpu.bus.log_string("[INT20] Program Terminated.");
+    cpu.bus.disk.close_process_files(cpu.current_psp);
 
     if cpu.restore_process_context() {
         cpu.bus.log_string("[INT20] Returning to Parent Process");

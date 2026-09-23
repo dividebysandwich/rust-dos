@@ -5,7 +5,7 @@ use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
 use crate::bus::{DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
 use crate::cpu::{Cpu, CpuFlags, CpuState};
-use crate::disk::{DriveKind, drive_letter, parse_drive_prefix};
+use crate::disk::{DriveKind, FIRST_USER_HANDLE, drive_letter, parse_drive_prefix};
 use crate::video::print_char;
 
 /// Allocate the largest available free MCB for a child process about to be
@@ -59,6 +59,7 @@ pub fn handle(cpu: &mut Cpu) {
         0x00 => {
             cpu.bus
                 .log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
+            cpu.bus.disk.close_process_files(cpu.current_psp);
 
             if cpu.restore_process_context() {
                 cpu.bus
@@ -1001,7 +1002,7 @@ pub fn handle(cpu: &mut Cpu) {
             let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, addr);
             // Attributes in CX are ignored for now (TODO)
-            match cpu.bus.disk.create_file(&filename) {
+            match cpu.bus.disk.create_file(&filename, cpu.current_psp) {
                 Ok(handle) => {
                     cpu.ax = handle;
                     cpu.bus.log_string(&format!(
@@ -1028,7 +1029,7 @@ pub fn handle(cpu: &mut Cpu) {
                 filename, mode
             ));
 
-            match cpu.bus.disk.open_file(&filename, mode) {
+            match cpu.bus.disk.open_file(&filename, mode, cpu.current_psp) {
                 Ok(handle) => {
                     cpu.ax = handle;
                     cpu.bus
@@ -1049,7 +1050,14 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 3Eh: Close File
         0x3E => {
             let handle = cpu.bx;
-            cpu.bus.disk.close_file(handle);
+            // The standard devices (handles 0-4) are not in the file table;
+            // closing them always succeeds.
+            if handle < FIRST_USER_HANDLE || cpu.bus.disk.close_file(handle) {
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else {
+                cpu.ax = 0x06; // Invalid handle
+                cpu.set_cpu_flag(CpuFlags::CF, true);
+            }
         }
 
         // AH = 3Fh: Read from File (or Stdin)
@@ -1447,8 +1455,9 @@ pub fn handle(cpu: &mut Cpu) {
             // Record for parent to retrieve. High byte = termination type 0 (normal).
             cpu.last_child_exit = exit_code as u16;
 
-            // Free any memory owned by the exiting PSP.
+            // Free any memory and close the files owned by the exiting PSP.
             crate::mcb::free_owned_by(&mut cpu.bus, cpu.current_psp);
+            cpu.bus.disk.close_process_files(cpu.current_psp);
 
             // Try to restore parent process
             if cpu.restore_process_context() {

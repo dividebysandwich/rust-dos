@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
 pub const FIRST_USER_HANDLE: u16 = 5;
+/// A job file table has at most 255 slots (0xFF marks an unused one).
+const HANDLE_LIMIT: u16 = 0xFF;
 
 // Drive numbers are 0-based (0=A:, 2=C:, 25=Z:).
 pub const DRIVE_C: u8 = 2;
@@ -15,9 +17,6 @@ pub const LASTDRIVE: u8 = 26;
 
 /// Volume label used when a mount doesn't specify one.
 pub const DEFAULT_LABEL: &str = "RUSTDOS";
-
-/// Handles for Z: virtual files live in their own range with no backing file.
-const VIRTUAL_HANDLE_BASE: u16 = 0xAA00;
 
 /// Usable data clusters on a 1.44 MB floppy with 512-byte clusters.
 const FLOPPY_CLUSTERS: u16 = 2847;
@@ -138,8 +137,12 @@ impl Drive {
 }
 
 struct OpenFile {
-    file: File,
+    /// None for Z: virtual files, which have no backing file.
+    file: Option<File>,
     drive: u8,
+    /// PSP of the process that opened the file. DOS closes a process's files
+    /// when it terminates.
+    owner: u16,
 }
 
 /// Helper struct to transfer directory search results back to the CPU
@@ -158,7 +161,6 @@ pub struct DosDirEntry {
 pub struct DiskController {
     // Map DOS Handle (u16) -> Rust File Object
     open_files: HashMap<u16, OpenFile>,
-    next_handle: u16,
 
     // File System State
     drives: [Option<Drive>; 26],
@@ -203,7 +205,6 @@ impl DiskController {
 
         Self {
             open_files: HashMap::new(),
-            next_handle: FIRST_USER_HANDLE,
             drives,
             current_drive: DRIVE_C, // Default to C:
             virtual_files,
@@ -330,13 +331,7 @@ impl DiskController {
 
     /// Drive a file handle was opened on (Z: for virtual handles).
     pub fn handle_drive(&self, handle: u16) -> Option<u8> {
-        if let Some(f) = self.open_files.get(&handle) {
-            return Some(f.drive);
-        }
-        if (VIRTUAL_HANDLE_BASE..VIRTUAL_HANDLE_BASE + 100).contains(&handle) {
-            return Some(DRIVE_Z);
-        }
-        None
+        self.open_files.get(&handle).map(|f| f.drive)
     }
 
     pub fn set_current_drive(&mut self, drive: u8) -> u8 {
@@ -594,15 +589,31 @@ impl DiskController {
         }
     }
 
-    // INT 21h, AH=3Dh: Open File
-    pub fn open_file(&mut self, filename: &str, mode: u8) -> Result<u16, u8> {
+    /// Lowest unused handle, like DOS taking the first free job file table
+    /// slot. Programs expect small numbers: the Microsoft C runtime rejects
+    /// handles at or above its 20-entry file table.
+    fn free_handle(&self) -> Result<u16, u8> {
+        (FIRST_USER_HANDLE..HANDLE_LIMIT)
+            .find(|h| !self.open_files.contains_key(h))
+            .ok_or(0x04) // Too many open files
+    }
+
+    // INT 21h, AH=3Dh: Open File. `owner` is the PSP of the calling process.
+    pub fn open_file(&mut self, filename: &str, mode: u8, owner: u16) -> Result<u16, u8> {
         // Handle Virtual Z: files
         if self.is_virtual_file(filename) {
             // Virtual files only need to "exist" so programs like NC find
-            // COMMAND.COM; EXEC loads them itself. Nothing is stored in
-            // `open_files`, so reads on the handle fail, which is fine.
-            let handle = VIRTUAL_HANDLE_BASE + (self.next_handle % 100);
-            self.next_handle += 1;
+            // COMMAND.COM; EXEC loads them itself. They have no backing
+            // file, so reads on the handle fail, which is fine.
+            let handle = self.free_handle()?;
+            self.open_files.insert(
+                handle,
+                OpenFile {
+                    file: None,
+                    drive: DRIVE_Z,
+                    owner,
+                },
+            );
             return Ok(handle);
         }
 
@@ -633,11 +644,17 @@ impl DiskController {
             _ => return Err(0x0C),
         }
 
+        let handle = self.free_handle()?;
         match options.open(path) {
             Ok(file) => {
-                let handle = self.next_handle;
-                self.next_handle += 1;
-                self.open_files.insert(handle, OpenFile { file, drive });
+                self.open_files.insert(
+                    handle,
+                    OpenFile {
+                        file: Some(file),
+                        drive,
+                        owner,
+                    },
+                );
                 Ok(handle)
             }
             Err(_) => Err(0x02),
@@ -646,11 +663,11 @@ impl DiskController {
 
     // INT 21h, AH=3Ch: Create File. Opens read/write, creating the file if
     // missing but never truncating (see int21.rs for why).
-    pub fn create_file(&mut self, filename: &str) -> Result<u16, u8> {
+    pub fn create_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
-        self.open_file(filename, 0x02)
+        self.open_file(filename, 0x02, owner)
     }
 
     // INT 21h, AH=3Eh: Close File
@@ -658,11 +675,22 @@ impl DiskController {
         self.open_files.remove(&handle).is_some()
     }
 
+    /// Close the files a terminating process opened, as DOS does on exit.
+    pub fn close_process_files(&mut self, owner: u16) {
+        self.open_files.retain(|_, f| f.owner != owner);
+    }
+
+    /// Close every open file, for when the shell is reloaded.
+    pub fn close_all_files(&mut self) {
+        self.open_files.clear();
+    }
+
     // INT 21h, AH=3Fh: Read from File
     pub fn read_file(&mut self, handle: u16, count: usize) -> Result<Vec<u8>, u16> {
         if let Some(open) = self.open_files.get_mut(&handle) {
+            let file = open.file.as_mut().ok_or(0x05u16)?;
             let mut buffer = vec![0u8; count];
-            match open.file.read(&mut buffer) {
+            match file.read(&mut buffer) {
                 Ok(bytes_read) => {
                     buffer.truncate(bytes_read);
                     Ok(buffer)
@@ -677,7 +705,8 @@ impl DiskController {
     // INT 21h, AH=40h: Write to File
     pub fn write_file(&mut self, handle: u16, data: &[u8]) -> Result<u16, u8> {
         if let Some(open) = self.open_files.get_mut(&handle) {
-            match open.file.write(data) {
+            let file = open.file.as_mut().ok_or(0x05u8)?;
+            match file.write(data) {
                 Ok(bytes_written) => Ok(bytes_written as u16),
                 Err(_) => Err(0x05),
             }
@@ -689,13 +718,14 @@ impl DiskController {
     // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
         if let Some(open) = self.open_files.get_mut(&handle) {
+            let file = open.file.as_mut().ok_or(0x05u16)?;
             let seek_from = match origin {
                 0 => SeekFrom::Start(offset as u64),
                 1 => SeekFrom::Current(offset),
                 2 => SeekFrom::End(offset),
                 _ => return Err(0x01),
             };
-            match open.file.seek(seek_from) {
+            match file.seek(seek_from) {
                 Ok(new_pos) => Ok(new_pos),
                 Err(_) => Err(0x19),
             }
@@ -1178,6 +1208,9 @@ impl DiskController {
 mod tests {
     use super::*;
 
+    /// PSP that owns the files the tests open.
+    const PSP: u16 = 0x1000;
+
     /// A fresh scratch directory under target/ for one test.
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from("target/test_disk_unit").join(name);
@@ -1275,15 +1308,15 @@ mod tests {
         let mut disk = DiskController::new(base.join("c"));
         disk.mount(3, &base.join("cd"), cdrom(), false).unwrap();
 
-        assert_eq!(disk.create_file("D:\\NEW.TXT"), Err(0x05));
-        assert_eq!(disk.open_file("D:\\DATA.DAT", 1), Err(0x05));
+        assert_eq!(disk.create_file("D:\\NEW.TXT", PSP), Err(0x05));
+        assert_eq!(disk.open_file("D:\\DATA.DAT", 1, PSP), Err(0x05));
         assert_eq!(disk.create_directory("D:\\X"), Err(0x05));
         assert_eq!(disk.remove_directory("D:\\SUB"), Err(0x05));
         assert_eq!(disk.set_file_attribute("D:\\DATA.DAT", 0), Err(0x05));
         assert_eq!(disk.get_file_attribute("D:\\DATA.DAT"), Ok(0x21));
 
         // Mode 2 is downgraded: reads work, writes fail.
-        let h = disk.open_file("D:\\DATA.DAT", 2).unwrap();
+        let h = disk.open_file("D:\\DATA.DAT", 2, PSP).unwrap();
         assert_eq!(disk.read_file(h, 7).unwrap(), b"cd data");
         assert_eq!(disk.write_file(h, b"x"), Err(0x05));
         assert!(!base.join("cd/NEW.TXT").exists());
@@ -1303,8 +1336,8 @@ mod tests {
         let mut disk = DiskController::new(base.join("c"));
         disk.mount(3, &base.join("d"), MountOptions::default(), false)
             .unwrap();
-        let hc = disk.open_file("C:\\F.TXT", 0).unwrap();
-        let hd = disk.open_file("D:\\F.TXT", 0).unwrap();
+        let hc = disk.open_file("C:\\F.TXT", 0, PSP).unwrap();
+        let hd = disk.open_file("D:\\F.TXT", 0, PSP).unwrap();
         assert_eq!(disk.handle_drive(hd), Some(3));
 
         disk.mount(DRIVE_C, &base.join("c2"), MountOptions::default(), true)
@@ -1316,6 +1349,28 @@ mod tests {
         disk.unmount(3).unwrap();
         assert!(disk.read_file(hd, 1).is_err());
         assert_eq!(disk.get_current_drive(), DRIVE_C);
+    }
+
+    #[test]
+    fn handles_are_reused_and_closed_with_their_process() {
+        let base = scratch("handle_reuse");
+        fs::write(base.join("F.TXT"), b"1").unwrap();
+        let mut disk = DiskController::new(base);
+        let child = 0x2000;
+        let parent_h = disk.open_file("F.TXT", 0, PSP).unwrap();
+        assert_eq!(parent_h, FIRST_USER_HANDLE);
+        let a = disk.open_file("F.TXT", 0, child).unwrap();
+        let b = disk.open_file("F.TXT", 0, child).unwrap();
+        assert!(disk.close_file(a));
+        assert!(!disk.close_file(a));
+        assert_eq!(disk.open_file("F.TXT", 0, child), Ok(a));
+
+        disk.close_process_files(child);
+        assert!(disk.read_file(a, 1).is_err());
+        assert!(disk.read_file(b, 1).is_err());
+        assert_eq!(disk.read_file(parent_h, 1).unwrap(), b"1");
+        assert_eq!(disk.open_file("Z:\\COMMAND.COM", 0, child), Ok(a));
+        assert_eq!(disk.handle_drive(a), Some(DRIVE_Z));
     }
 
     #[test]

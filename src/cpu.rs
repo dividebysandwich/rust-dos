@@ -1115,8 +1115,9 @@ impl Cpu {
         self.bus.reset_timers();
 
         // No program is running yet: every paragraph of conventional memory
-        // is available for allocation.
+        // is available for allocation, and no file is open.
         crate::mcb::init_empty(&mut self.bus);
+        self.bus.disk.close_all_files();
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }
