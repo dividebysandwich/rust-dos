@@ -51,6 +51,9 @@ impl Slot {
 pub struct InstrCache {
     slots: Box<[Slot]>,
     mask: usize,
+    /// Lookups served from the cache, and lookups that had to decode.
+    pub hits: u64,
+    pub misses: u64,
 }
 
 impl InstrCache {
@@ -60,7 +63,12 @@ impl InstrCache {
     pub fn new(capacity_log2: u32) -> Self {
         let n = 1usize << capacity_log2;
         let slots = vec![Slot::empty(); n].into_boxed_slice();
-        Self { slots, mask: n - 1 }
+        Self {
+            slots,
+            mask: n - 1,
+            hits: 0,
+            misses: 0,
+        }
     }
 
     #[inline(always)]
@@ -93,6 +101,9 @@ impl InstrCache {
             slot.cs = cs;
             slot.ip = ip;
             slot.page_gen = page_gen;
+            self.misses += 1;
+        } else {
+            self.hits += 1;
         }
         &slot.instr
     }

@@ -62,6 +62,7 @@ fn router(state: AppState) -> Router {
         .route("/", get(help))
         .route("/api", get(help))
         .route("/api/status", get(status))
+        .route("/api/stats", get(stats))
         .route("/api/screenshot", get(screenshot))
         .route("/api/screen/text", get(screen_text))
         .route("/api/trace", get(trace_get).post(trace_post))
@@ -168,6 +169,10 @@ async fn help() -> Response {
 
 async fn status(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Status, DEFAULT_TIMEOUT).await
+}
+
+async fn stats(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Stats, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -683,6 +688,7 @@ or a linear address ("0x12345", "B8000").
 
 STATUS / SCREEN
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed
+  GET  /api/stats                          execution speed (MIPS) and decode-cache hit rate, per ~1 s
   GET  /api/screenshot[?format=png|raw]    composited 640x400 frame (raw = RGB24 bytes)
   GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode)
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines

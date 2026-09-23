@@ -191,6 +191,11 @@ A decimal-looking number like `100` means 0x100.
   while paused. Pausing, stepping and tracing don't change when a program
   sees its timer interrupts (`HLE INT 08h` or its own handler) in
   instruction terms, but a timer interrupt can arrive between any two steps.
+- **Measuring speed.** `/api/stats` reports `mips` (host speed while
+  executing guest code), `emulated_mips` (guest instructions per wall-clock
+  second) and the decode-cache hit rate, averaged over about a second. Use a
+  release build and a CPU-bound scene, such as the Stunts intro, when
+  comparing emulator changes.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
   16 ms). Use `icount` for exact ordering.
 - **Ring buffer size.** The trace ring holds 1,000,000 instructions by

@@ -101,6 +101,7 @@ pub struct TraceQuery {
 
 pub enum Cmd {
     Status,
+    Stats,
     Screenshot,
     ScreenText,
     TraceQuery(TraceQuery),
@@ -357,6 +358,36 @@ pub struct DebugHub {
     frames: u64,
     fps: f64,
     fps_mark: (Instant, u64),
+    stats: ExecStats,
+}
+
+/// Execution speed, measured over windows of about a second of wall time.
+struct ExecStats {
+    window_start: Instant,
+    /// Instructions executed and time spent executing them in the current window.
+    executed: u64,
+    exec_time: Duration,
+    cache_mark: (u64, u64),
+    /// Results of the last complete window.
+    mips: f64,
+    emulated_mips: f64,
+    cache_hit_rate: f64,
+    total_executed: u64,
+}
+
+impl ExecStats {
+    fn new() -> Self {
+        Self {
+            window_start: Instant::now(),
+            executed: 0,
+            exec_time: Duration::ZERO,
+            cache_mark: (0, 0),
+            mips: 0.0,
+            emulated_mips: 0.0,
+            cache_hit_rate: 0.0,
+            total_executed: 0,
+        }
+    }
 }
 
 impl DebugHub {
@@ -392,6 +423,7 @@ impl DebugHub {
             frames: 0,
             fps: 0.0,
             fps_mark: (Instant::now(), 0),
+            stats: ExecStats::new(),
         }
     }
 
@@ -570,6 +602,43 @@ impl DebugHub {
         }
     }
 
+    /// Account for one execution batch: `executed` instructions (not counting
+    /// time skipped while halted) took `exec_time` of host time. `cache_hits`
+    /// and `cache_misses` are the decode cache's running totals.
+    pub fn record_batch(&mut self, executed: u64, exec_time: Duration, cache_hits: u64, cache_misses: u64) {
+        let st = &mut self.stats;
+        st.executed += executed;
+        st.exec_time += exec_time;
+        st.total_executed += executed;
+        let wall = st.window_start.elapsed();
+        if wall >= Duration::from_secs(1) {
+            let exec_secs = st.exec_time.as_secs_f64();
+            st.mips = if exec_secs > 0.0 { st.executed as f64 / exec_secs / 1e6 } else { 0.0 };
+            st.emulated_mips = st.executed as f64 / wall.as_secs_f64() / 1e6;
+            let hits = cache_hits - st.cache_mark.0;
+            let misses = cache_misses - st.cache_mark.1;
+            st.cache_hit_rate = if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 };
+            st.cache_mark = (cache_hits, cache_misses);
+            st.executed = 0;
+            st.exec_time = Duration::ZERO;
+            st.window_start = Instant::now();
+        }
+    }
+
+    fn stats_json(&self) -> Value {
+        let st = &self.stats;
+        json!({
+            // Host speed while executing guest code, excluding idle skips,
+            // rendering and frame pacing.
+            "mips": (st.mips * 100.0).round() / 100.0,
+            // Guest instructions per wall-clock second, as the program sees it.
+            "emulated_mips": (st.emulated_mips * 100.0).round() / 100.0,
+            "decode_cache_hit_rate": (st.cache_hit_rate * 10000.0).round() / 10000.0,
+            "instructions": st.total_executed,
+            "fps": (self.fps * 10.0).round() / 10.0,
+        })
+    }
+
     /// Whether `capture_frame` wants to see the composited frame this frame.
     pub fn wants_frame(&self) -> bool {
         !self.frame_waiters.is_empty()
@@ -687,6 +756,7 @@ impl DebugHub {
     fn handle(&mut self, cpu: &mut Cpu, req: Request) {
         let reply = match req.cmd {
             Cmd::Status => Reply::Json(self.status(cpu)),
+            Cmd::Stats => Reply::Json(self.stats_json()),
             Cmd::Screenshot => {
                 // Answered by the next capture_frame call.
                 self.frame_waiters.push(req.reply);

@@ -595,6 +595,7 @@ fn main() -> Result<(), String> {
         let exec_time = batch_start.elapsed();
         let stalled = cpu.bus.clock.stalled - batch_stalled;
         let executed = cpu.bus.clock.icount - batch_icount - idle_instructions - stalled;
+        dbg.record_batch(executed, exec_time, instr_cache.hits, instr_cache.misses);
 
         // Update Audio
         pump_audio(&mut cpu.bus);
