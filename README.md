@@ -82,6 +82,8 @@ D:
     default, runs as fast as the host keeps up with in real time. Use a
     number such as `3000` for old games that run too fast. `--cycles`
     overrides it.
+  * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU)
+    or `386`.
 * **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.

@@ -67,6 +67,8 @@ pub struct Config {
     pub scale: Option<u32>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
+    /// Emulated processor (`cpu`).
+    pub cpu: Option<crate::cpu::CpuModel>,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -138,6 +140,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "cycles" => match CpuSpeed::parse(value) {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
+                        },
+                        "cpu" => match value.to_ascii_lowercase().as_str() {
+                            "386" => config.cpu = Some(crate::cpu::CpuModel::I386),
+                            "486" => config.cpu = Some(crate::cpu::CpuModel::I486),
+                            _ => warn(format!("invalid cpu '{}' (386 or 486)", value)),
                         },
                         _ => warn(format!("unknown setting '{}'", key)),
                     }
@@ -376,6 +383,15 @@ mod tests {
         assert_eq!(config.warnings.len(), 9, "{}", joined);
         assert_eq!(config.drive(3).unwrap().path, Path::new("/two"));
         assert_eq!(config.scale, None);
+    }
+
+    #[test]
+    fn cpu_model() {
+        let config = parse("[emulator]\ncpu=386\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, Some(crate::cpu::CpuModel::I386));
+        let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, None);
+        assert!(config.warnings[0].contains("invalid cpu '8086'"));
     }
 
     #[test]

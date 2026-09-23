@@ -20,6 +20,8 @@
 # host keeps up with in real time. Lower it for old games that run too
 # fast. --cycles overrides it.
 #cycles=max
+# Processor: 486 (the default, a 486DX with FPU) or 386.
+#cpu=486
 
 [drives]
 # Mount host directories as DOS drives A: to Y:

@@ -105,6 +105,9 @@ fn main() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let mut cpu = create_cpu(&args, &config);
+    if let Some(model) = config.cpu {
+        cpu.model = model;
+    }
     cpu.bus.audio_device = Some(audio_device);
     let mut dbg = match args.debug_server {
         Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity)?,
