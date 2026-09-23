@@ -3,6 +3,7 @@
 //! XMS handles and the exception log. Everything here only reads: nothing
 //! faults, sets accessed bits or fills the TLB.
 
+use rust_dos::video::vbe::Vbe;
 use serde_json::{Value, json};
 
 use crate::cpu::fault::exception_name;
@@ -164,7 +165,7 @@ pub fn parse_addr(cpu: &Cpu, s: &str) -> Result<DebugAddr, String> {
 
 fn physical(cpu: &Cpu, s: &str) -> Result<DebugAddr, String> {
     let v = parse_hex(s)? as usize;
-    if v >= cpu.bus.ram().len() {
+    if v >= cpu.bus.ram().len() && Vbe::lfb_offset(v, 1).is_none() {
         return Err(format!("address {:X} beyond the end of RAM ({:X})", v, cpu.bus.ram().len()));
     }
     Ok(DebugAddr { phys: Some(v), lin: None, segoff: None })

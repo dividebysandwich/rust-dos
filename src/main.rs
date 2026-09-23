@@ -382,7 +382,7 @@ fn main() -> Result<(), String> {
         // The driver stores the cursor in virtual coords; map those to
         // screen pixels over the same virtual extent the host pointer spans.
         if cpu.bus.mouse.installed && cpu.bus.mouse.hide_counter <= 0 {
-            let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
+            let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.display_size());
             let sx = (cpu.bus.mouse.x as i64 * width as i64 / virt_w as i64) as i32;
             let sy = (cpu.bus.mouse.y as i64 * height as i64 / virt_h as i64) as i32;
             draw_default_mouse_cursor(&mut screen, sx, sy);
@@ -611,7 +611,7 @@ fn host_to_virtual_mouse(cpu: &Cpu, frame: &video::Frame, x: i32, y: i32) -> (i3
     let px = x.clamp(0, w - 1);
     let py = y.clamp(0, h - 1);
 
-    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
+    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.display_size());
 
     let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
     let vy = (py as i64 * virt_h as i64 / h as i64) as i32;

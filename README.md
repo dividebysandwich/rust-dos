@@ -32,12 +32,17 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   appears on drive X:, where `ULTRADIR` points, so games need no Ultrasound
   installation
 * CGA graphics
+* VGA graphics: text, CGA, EGA and VGA modes, and the "mode X" variants
+  games program into the registers, with the display timing (retrace,
+  display enable) in emulated time
+* VESA VBE 2.0: 256-color, 15/16-bit and 32-bit modes from 320x200 to
+  1024x768 with 4 MB of video memory, bank switching and a linear frame
+  buffer. The window and screenshots take the mode's size
 * FPU emulation
 * Interrupt handlers
 
 ## What partially works
 
-* VGA graphics
 * Programs using OVLs
 * TSRs
 
@@ -46,8 +51,6 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Mounting floppy and hard disk images
 * EMS
 * GUS MAX / Interwave codec, and SB emulation on the GUS (SBOS, MegaEm)
-* 640x480x16
-* VESA modes
 
 ## Configuration
 

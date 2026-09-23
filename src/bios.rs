@@ -20,6 +20,8 @@ pub const SERVICE_TIMER_TICK: u8 = 0x08;
 /// The strategy and interrupt entries of the CD-ROM driver (MSCDEX).
 pub const SERVICE_CD_STRATEGY: u8 = 0x15;
 pub const SERVICE_CD_INTERRUPT: u8 = 0x16;
+/// The VESA window function (WinFuncPtr).
+pub const SERVICE_VBE_WINDOW: u8 = 0x17;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.
@@ -115,6 +117,8 @@ pub fn install(bus: &mut Bus) {
         bus.write_16(vector * 4, entry as u16);
         bus.write_16(vector * 4 + 2, (entry >> 16) as u16);
     }
+    // The video BIOS's VESA data.
+    crate::interrupts::vbe::install_rom(bus);
 }
 
 /// Put the default vectors back, except those pointing into `keep`

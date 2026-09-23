@@ -102,8 +102,7 @@ impl MouseState {
     /// cursor range when the program set a larger one (AX=0007h/0008h), as
     /// games that halve the coordinates do. Ranges of 2048 and up are left
     /// alone; they stand for relative movement rather than a screen.
-    pub fn virtual_extent(&self, mode: crate::video::VideoMode) -> (i32, i32) {
-        let (w, h) = mode.dimensions();
+    pub fn virtual_extent(&self, (w, h): (usize, usize)) -> (i32, i32) {
         let w = if w < 640 { 640 } else { w as i32 };
         let h = h as i32;
         let range = |max: i32, size: i32| if max < 2048 { size.max(max + 1) } else { size };

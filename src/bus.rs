@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
+use crate::video::vbe::Vbe;
 use crate::video::{self, ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
 
 /// ROM table of media descriptor bytes, one per drive letter. INT 21h
@@ -112,6 +113,8 @@ pub struct Bus {
 
     // VGA State
     pub vga: crate::video::vga::VgaCard,
+    /// The Super VGA side of the card: VESA modes and their memory.
+    pub vbe: crate::video::vbe::Vbe,
     pub search_handles: std::collections::HashMap<u32, String>,
 
     // Mouse State (INT 33h)
@@ -221,6 +224,7 @@ impl Bus {
             dta_segment: 0x1000,
             dta_offset: 0x0000,
             vga: crate::video::vga::VgaCard::new(),
+            vbe: crate::video::vbe::Vbe::new(),
             search_handles: std::collections::HashMap::new(),
             mouse: crate::mouse::MouseState::new(),
             opl: crate::opl::Opl::new(true),
@@ -631,6 +635,10 @@ impl Bus {
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
         if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS && addr >= ADDR_VGA_GRAPHICS {
+            // VESA modes: the window onto the bank of video memory.
+            if self.video_mode == VideoMode::Vesa {
+                return self.vbe.vram[self.vbe.window_offset(addr - ADDR_VGA_GRAPHICS)];
+            }
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
             // for planar read-modify-write sequences.
@@ -641,6 +649,9 @@ impl Bus {
         }
         if addr < self.ram.len() {
             return self.ram[addr];
+        }
+        if let Some(offset) = Vbe::lfb_offset(addr, 1) {
+            return self.vbe.vram[offset];
         }
         if addr >= 0xFFFE_0000 {
             // The top 128 KB of the address space mirror the BIOS ROM area
@@ -656,9 +667,9 @@ impl Bus {
     /// memory can't disturb a program's read-modify-write sequences.
     pub fn peek_8(&self, addr: usize) -> u8 {
         if addr >= self.ram.len() {
-            return 0xFF;
+            return self.read_8_mapped(addr);
         }
-        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
+        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
             self.vga.latches.set(saved);
@@ -684,6 +695,11 @@ impl Bus {
             return false;
         }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
+            if self.video_mode == VideoMode::Vesa {
+                let offset = self.vbe.window_offset(addr - ADDR_VGA_GRAPHICS);
+                self.write_vram(offset, &[value]);
+                return true;
+            }
             // write_graphics already sets vga.dirty unconditionally. The
             // Return value only matters to callers that care whether the
             // write hit the active display plane, but rendering is gated
@@ -750,8 +766,25 @@ impl Bus {
             self.ram[addr] = value;
             let page = addr >> GEN_SHIFT;
             self.page_gen[page] = self.page_gen[page].wrapping_add(1);
+            return false;
+        }
+        if let Some(offset) = Vbe::lfb_offset(addr, 1) {
+            self.write_vram(offset, &[value]);
+            return true;
         }
         false
+    }
+
+    /// Write VESA video memory, marking the rows of the picture it shows
+    /// in for repainting.
+    #[inline]
+    fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
+        self.vbe.vram[offset..offset + bytes.len()].copy_from_slice(bytes);
+        if self.video_mode == VideoMode::Vesa {
+            if let Some((first, last)) = self.vbe.frame_rows(offset, bytes.len()) {
+                self.vga.mark_dirty_rows(first, last);
+            }
+        }
     }
 
     // Write a 16-bit value to memory (Little Endian)
@@ -770,6 +803,10 @@ impl Bus {
                 *g = g.wrapping_add(1);
             }
             return false;
+        }
+        if let Some(offset) = Vbe::lfb_offset(addr, 2) {
+            self.write_vram(offset, &value.to_le_bytes());
+            return true;
         }
         // Low byte
         let d1 = self.write_8(addr, (value & 0xFF) as u8);
@@ -790,6 +827,9 @@ impl Bus {
                 ])
             };
         }
+        if let Some(offset) = Vbe::lfb_offset(addr, 2) {
+            return u16::from_le_bytes([self.vbe.vram[offset], self.vbe.vram[offset + 1]]);
+        }
         let low = self.read_8(addr) as u16;
         let high = self.read_8(addr + 1) as u16;
         (high << 8) | low
@@ -808,6 +848,10 @@ impl Bus {
                 ])
             };
         }
+        if let Some(offset) = Vbe::lfb_offset(addr, 4) {
+            let v = &self.vbe.vram[offset..offset + 4];
+            return u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
+        }
         let low = self.read_16(addr) as u32;
         let high = self.read_16(addr + 2) as u32;
         (high << 16) | low
@@ -820,6 +864,10 @@ impl Bus {
             self.page_gen[addr >> GEN_SHIFT] = self.page_gen[addr >> GEN_SHIFT].wrapping_add(1);
             let last = (addr + 3) >> GEN_SHIFT;
             self.page_gen[last] = self.page_gen[last].wrapping_add(1);
+            return;
+        }
+        if let Some(offset) = Vbe::lfb_offset(addr, 4) {
+            self.write_vram(offset, &value.to_le_bytes());
             return;
         }
         self.write_16(addr, (value & 0xFFFF) as u16);
@@ -1461,6 +1509,9 @@ impl Bus {
                 self.joystick_read_count = 0;
             }
 
+            // Super VGA CRTC registers, past the VGA's 00h-18h.
+            0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 => self.ext_crtc_write(self.vga.crtc_index, value),
+
             _ => {
                 if self.vga.ports().contains(&port) {
                     // A retrace nobody watched may have passed since the
@@ -1470,6 +1521,9 @@ impl Bus {
                         self.sync_display();
                     }
                     self.vga.io_write(port, value);
+                    if matches!(port, 0x3D5 | 0x3B5) && matches!(self.vga.crtc_index, 0x0C | 0x0D) {
+                        self.update_vbe_start();
+                    }
                     // Suppress the per-write log for DAC ports (0x3C6..0x3C9):
                     // a full 256-color palette update is 1024 writes, which
                     // buries everything else in the trace. Still log the less
@@ -1486,7 +1540,8 @@ impl Bus {
                     // }
 
                     // Check if video mode changed
-                    if let Some(new_mode) = self.vga.check_video_mode() {
+                    // (A VESA mode is a 256-color mode to these registers.)
+                    if let Some(new_mode) = self.vga.check_video_mode().filter(|_| self.video_mode != VideoMode::Vesa) {
                         if self.video_mode != new_mode && new_mode == VideoMode::Graphics320x200 {
                             self.log_string("[VGA] Switch to Graphics320x200 detected via IO");
                             self.video_mode = new_mode;
@@ -1677,6 +1732,7 @@ impl Bus {
 
             // VGA Input Status 1: retrace and display enable.
             0x3DA | 0x3BA => self.input_status_1(),
+            0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 => self.ext_crtc_read(self.vga.crtc_index),
 
             _ => {
                 if self.vga.ports().contains(&port) {
@@ -1695,6 +1751,52 @@ impl Bus {
         let now = self.clock.now_ns();
         if self.vga.retrace_began(now) {
             self.vga.latch_start_address();
+            if self.vbe.latched_start != self.vbe.start {
+                self.vbe.latched_start = self.vbe.start;
+                self.vga.mark_dirty_full();
+            }
+        }
+    }
+
+    /// Write a Super VGA CRTC register (index 19h and up). Like an S3
+    /// card, 6Ah is the bank of the window at A0000h and 69h the high
+    /// bits of the display start; the VBE protected-mode interface uses
+    /// them.
+    fn ext_crtc_write(&mut self, index: u8, value: u8) {
+        match index {
+            0x69 => {
+                self.vbe.start_high = value;
+                self.update_vbe_start();
+            }
+            0x6A => self.vbe.bank = (value & 0x3F) as u32,
+            _ => {}
+        }
+    }
+
+    fn ext_crtc_read(&self, index: u8) -> u8 {
+        match index {
+            0x69 => self.vbe.start_high,
+            0x6A => self.vbe.bank as u8,
+            _ => 0,
+        }
+    }
+
+    /// In a VESA mode the Start Address registers and CRTC 69h give the
+    /// display start in doublewords.
+    fn update_vbe_start(&mut self) {
+        if self.video_mode == VideoMode::Vesa {
+            let crtc = &self.vga.crtc_regs;
+            let dwords = (self.vbe.start_high as u32) << 16 | (crtc[0x0C] as u32) << 8 | crtc[0x0D] as u32;
+            self.vbe.start = dwords * 4;
+        }
+    }
+
+    /// The size of the screen in the mode's own pixels: the VESA mode's
+    /// size, or what the standard mode has.
+    pub fn display_size(&self) -> (usize, usize) {
+        match (self.video_mode, self.vbe.mode) {
+            (VideoMode::Vesa, Some(mode)) => (mode.width as usize, mode.height as usize),
+            (mode, _) => mode.dimensions(),
         }
     }
 

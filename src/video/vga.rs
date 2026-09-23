@@ -102,6 +102,8 @@ pub struct VgaCard {
     pub dac_step: u8,
     pub dac_state: u8,     // 0 = write mode, 3 = read mode (readable via 0x3C7)
     pub dac_mask: u8,      // PEL (pixel) mask register, port 0x3C6 (default 0xFF)
+    /// The DAC takes 8 bits per color instead of 6 (VBE function 08h).
+    pub dac_8bit: bool,
     pub misc_output_reg: u8,
     pub palette: Vec<u8>, // 256 * 3
     pub vram_graphics: Vec<u8>,
@@ -130,7 +132,7 @@ pub struct VgaCard {
     good_timing: CrtTiming,
     /// A timing that overrides the registers, for modes whose registers
     /// the VGA doesn't model (VESA).
-    pub fixed_timing: Option<CrtTiming>,
+    fixed_timing: Option<CrtTiming>,
     /// Vertical retraces counted so far, to notice when another began.
     retraces: u64,
     /// The timing changed: restart the retrace count.
@@ -167,6 +169,7 @@ impl VgaCard {
             dac_step: 0,
             dac_state: 0,
             dac_mask: 0xFF,
+            dac_8bit: false,
             misc_output_reg: 0,
             palette: VGA_DEFAULT_PALETTE.to_vec(),
             vram_graphics: vec![0; 256 * 1024], // 256KB (4 Planes x 64KB)
@@ -229,15 +232,20 @@ impl VgaCard {
     pub fn get_rgb(&self, index: u8) -> (u8, u8, u8) {
         let base = (index as usize) * 3;
         if base + 2 < self.palette.len() {
-            let r = self.palette[base] << 2; // Convert 6-bit (0-63) to 8-bit (0-255) roughly
-            let g = self.palette[base + 1] << 2;
-            let b = self.palette[base + 2] << 2;
-            // Accurate scaling: (val * 255) / 63
-            // But simple shift << 2 is (val * 4) -> range 0-252. Good enough.
+            // A 6-bit DAC's values (0-63) shifted to 8 bits: 0-252.
+            let shift = if self.dac_8bit { 0 } else { 2 };
+            let r = self.palette[base] << shift;
+            let g = self.palette[base + 1] << shift;
+            let b = self.palette[base + 2] << shift;
             (r, g, b)
         } else {
             (0, 0, 0)
         }
+    }
+
+    /// The bits of a DAC color value the DAC keeps.
+    pub fn dac_value_mask(&self) -> u8 {
+        if self.dac_8bit { 0xFF } else { 0x3F }
     }
 
     /// The mode the registers were programmed for when that differs from
@@ -504,16 +512,22 @@ impl VgaCard {
         self.fixed_timing = None;
         self.timing_cache = None;
         self.dac_mask = 0xFF;
+        self.dac_8bit = false;
         if mode.is_planar() {
             self.load_ega_palette();
-            // Clear graphics VRAM so we don't see stale pixels.
-            self.vram_graphics.fill(0);
         } else {
             // The standard 256-color palette; its first 16 entries are the
             // text and CGA colors. Programs that customize only part of the
             // palette rely on sensible defaults for the rest.
             self.palette.copy_from_slice(&VGA_DEFAULT_PALETTE);
         }
+    }
+
+    /// Give the display a timing the registers don't describe (a VESA
+    /// mode's), or with None go back to the registers'.
+    pub fn set_fixed_timing(&mut self, timing: Option<CrtTiming>) {
+        self.fixed_timing = timing;
+        self.timing_cache = None;
     }
 
     /// Invalidate the display timing after a register it depends on changed.
@@ -783,7 +797,7 @@ impl Device for VgaCard {
             0x3C9 => {
                 let index = (self.dac_write_index as usize) * 3 + (self.dac_step as usize);
                 if index < self.palette.len() {
-                    self.palette[index] = value & 0x3F;
+                    self.palette[index] = value & self.dac_value_mask();
                     self.mark_dirty_full();
                 }
                 self.dac_step += 1;

@@ -11,105 +11,117 @@ fn active_rows(cpu: &Cpu) -> u8 {
     cpu.bus.read_8(0x0484).wrapping_add(1).max(1)
 }
 
+/// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
+/// contents of video memory). This also leaves a VESA mode.
+pub fn set_mode(cpu: &mut Cpu, al: u8) {
+    let keep = al & 0x80 != 0;
+    let mode = al & 0x7F;
+    cpu.bus.vbe.reset();
+
+    // Clear Screen, unless AL bit 7 asks to keep video memory.
+    let rows_max = active_rows(cpu).saturating_sub(1);
+    match mode {
+        _ if keep => {}
+        // Text Modes: Clear with Spaces and Attribute 0x07
+        0x00..=0x03 => {
+            scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
+        }
+        // CGA Graphics Modes (4, 5, 6): Zero out 16KB of B8000 Memory
+        0x04..=0x06 => {
+            for i in 0..16384 {
+                if i < cpu.bus.vga.vram_text.len() {
+                    cpu.bus.vga.vram_text[i] = 0x00;
+                }
+            }
+            cpu.bus.vga.mark_dirty_full();
+        }
+        // VGA Graphics Mode (13h) or planar EGA/VGA modes: clear the
+        // entire 256KB planar VRAM. set_video_mode also zeros it but
+        // we do it here so mode setting is consistent with other mode
+        // clears above.
+        0x0D | 0x0E | 0x10 | 0x12 | 0x13 => {
+            for i in 0..cpu.bus.vga.vram_graphics.len() {
+                cpu.bus.vga.vram_graphics[i] = 0x00;
+            }
+            cpu.bus.vga.mark_dirty_full();
+        }
+        // Fallback / Stubbed modes
+        _ => {
+            // Optional: Clear text ram just in case
+            scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
+        }
+    }
+
+    // Reset Cursor
+    set_cursor(cpu, 0, 0, 0);
+
+    let new_mode = match mode {
+        0x00 => Some((VideoMode::Text40x25, "Text Mode (40x25)")),
+        0x01 => Some((VideoMode::Text40x25Color, "Text Mode (40x25 Color)")),
+        0x02 => Some((VideoMode::Text80x25, "Text Mode (80x25)")),
+        0x03 => Some((VideoMode::Text80x25Color, "Text Mode (80x25 Color)")),
+        0x04 => Some((VideoMode::Cga320x200Color, "CGA Graphics Mode (320x200 Color)")),
+        0x05 => Some((VideoMode::Cga320x200, "CGA Graphics Mode (320x200)")),
+        0x06 => Some((VideoMode::Cga640x200, "CGA Graphics Mode (640x200)")),
+        0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
+        0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
+        0x10 => Some((VideoMode::Ega640x350, "EGA Graphics Mode (640x350 16-color)")),
+        0x12 => Some((VideoMode::Vga640x480, "VGA Graphics Mode (640x480 16-color)")),
+        0x13 => Some((VideoMode::Graphics320x200, "Graphics Mode (320x200)")),
+        _ => None,
+    };
+    match new_mode {
+        Some((new_mode, name)) => {
+            cpu.bus.log_string(&format!("[BIOS] Switch to {}", name));
+            cpu.bus.video_mode = new_mode;
+            cpu.bus.vga.set_video_mode(new_mode);
+        }
+        None => {
+            cpu.bus.log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode));
+            // Out of a VESA mode, at least into one there is.
+            if cpu.bus.video_mode == VideoMode::Vesa {
+                cpu.bus.video_mode = VideoMode::Text80x25Color;
+                cpu.bus.vga.set_video_mode(VideoMode::Text80x25Color);
+            }
+        }
+    }
+
+    cpu.bus.vga.mark_dirty_full();
+    cpu.bus.write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
+    cpu.bus.write_8(0x0462, 0); // Update BDA Active Page to 0
+    let cols: u16 = match mode {
+        0x00 | 0x01 | 0x04 | 0x05 => 40,
+        0x13 => 40, // Mode 13h uses 40 columns text
+        _ => 80,
+    };
+    cpu.bus.write_16(0x044A, cols);
+
+    // Update BDA 0x0484 (Rows on Screen minus 1) and 0x0485 (char height).
+    // Mode set always resets the cell size to the mode's default.
+    let (rows, char_height): (u8, u16) = match mode {
+        // Text modes: 25 rows, VGA 8x16 font is the default.
+        0x00..=0x03 => (24, 16),
+        // CGA 40-col graphics counts as 25 rows.
+        0x04 | 0x05 => (24, 8),
+        // CGA 640x200 2-color.
+        0x06 => (24, 8),
+        // EGA/VGA planar modes and 13h: treat as 25-row equivalents.
+        0x0D | 0x0E => (24, 8),
+        0x10 => (24, 14),
+        0x12 => (29, 16), // 30 rows at 640x480
+        0x13 => (24, 8),
+        _ => (24, 16),
+    };
+    cpu.bus.write_8(0x0484, rows);
+    cpu.bus.write_16(0x0485, char_height);
+}
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
 
     match ah {
         // AH = 00h: Set Video Mode
-        0x00 => {
-            let mode = cpu.get_al();
-
-            // Clear Screen
-            let rows_max = active_rows(cpu).saturating_sub(1);
-            match mode {
-                // Text Modes: Clear with Spaces and Attribute 0x07
-                0x00..=0x03 => {
-                    scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
-                }
-                // CGA Graphics Modes (4, 5, 6): Zero out 16KB of B8000 Memory
-                0x04..=0x06 => {
-                    for i in 0..16384 {
-                        if i < cpu.bus.vga.vram_text.len() {
-                            cpu.bus.vga.vram_text[i] = 0x00;
-                        }
-                    }
-                    cpu.bus.vga.mark_dirty_full();
-                }
-                // VGA Graphics Mode (13h) or planar EGA/VGA modes: clear the
-                // entire 256KB planar VRAM. set_video_mode also zeros it but
-                // we do it here so mode setting is consistent with other mode
-                // clears above.
-                0x0D | 0x0E | 0x10 | 0x12 | 0x13 => {
-                    for i in 0..cpu.bus.vga.vram_graphics.len() {
-                        cpu.bus.vga.vram_graphics[i] = 0x00;
-                    }
-                    cpu.bus.vga.mark_dirty_full();
-                }
-                // Fallback / Stubbed modes
-                _ => {
-                    // Optional: Clear text ram just in case
-                    scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
-                }
-            }
-
-            // Reset Cursor
-            set_cursor(cpu, 0, 0, 0);
-
-            let new_mode = match mode {
-                0x00 => Some((VideoMode::Text40x25, "Text Mode (40x25)")),
-                0x01 => Some((VideoMode::Text40x25Color, "Text Mode (40x25 Color)")),
-                0x02 => Some((VideoMode::Text80x25, "Text Mode (80x25)")),
-                0x03 => Some((VideoMode::Text80x25Color, "Text Mode (80x25 Color)")),
-                0x04 => Some((VideoMode::Cga320x200Color, "CGA Graphics Mode (320x200 Color)")),
-                0x05 => Some((VideoMode::Cga320x200, "CGA Graphics Mode (320x200)")),
-                0x06 => Some((VideoMode::Cga640x200, "CGA Graphics Mode (640x200)")),
-                0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
-                0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
-                0x10 => Some((VideoMode::Ega640x350, "EGA Graphics Mode (640x350 16-color)")),
-                0x12 => Some((VideoMode::Vga640x480, "VGA Graphics Mode (640x480 16-color)")),
-                0x13 => Some((VideoMode::Graphics320x200, "Graphics Mode (320x200)")),
-                _ => None,
-            };
-            match new_mode {
-                Some((new_mode, name)) => {
-                    cpu.bus.log_string(&format!("[BIOS] Switch to {}", name));
-                    cpu.bus.video_mode = new_mode;
-                    cpu.bus.vga.set_video_mode(new_mode);
-                }
-                None => cpu
-                    .bus
-                    .log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
-            }
-
-            cpu.bus.vga.mark_dirty_full();
-            cpu.bus.write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
-            cpu.bus.write_8(0x0462, 0); // Update BDA Active Page to 0
-            let cols: u16 = match mode {
-                0x00 | 0x01 | 0x04 | 0x05 => 40,
-                0x13 => 40, // Mode 13h uses 40 columns text
-                _ => 80,
-            };
-            cpu.bus.write_16(0x044A, cols);
-
-            // Update BDA 0x0484 (Rows on Screen minus 1) and 0x0485 (char height).
-            // Mode set always resets the cell size to the mode's default.
-            let (rows, char_height): (u8, u16) = match mode {
-                // Text modes: 25 rows, VGA 8x16 font is the default.
-                0x00..=0x03 => (24, 16),
-                // CGA 40-col graphics counts as 25 rows.
-                0x04 | 0x05 => (24, 8),
-                // CGA 640x200 2-color.
-                0x06 => (24, 8),
-                // EGA/VGA planar modes and 13h: treat as 25-row equivalents.
-                0x0D | 0x0E => (24, 8),
-                0x10 => (24, 14),
-                0x12 => (29, 16), // 30 rows at 640x480
-                0x13 => (24, 8),
-                _ => (24, 16),
-            };
-            cpu.bus.write_8(0x0484, rows);
-            cpu.bus.write_16(0x0485, char_height);
-        }
+        0x00 => set_mode(cpu, cpu.get_al()),
 
         // AH = 01h: Set Cursor Type
         0x01 => {
@@ -421,9 +433,10 @@ pub fn handle(cpu: &mut Cpu) {
                     // BX = Register (0-255)
                     // DH = Red, CH = Green, CL = Blue (each 6-bit, 0-63)
                     let idx = (cpu.bx() & 0xFF) as usize;
-                    let r = (cpu.dx() >> 8) as u8 & 0x3F; // DH
-                    let g = (cpu.cx() >> 8) as u8 & 0x3F; // CH
-                    let b = (cpu.cx() & 0xFF) as u8 & 0x3F; // CL
+                    let mask = cpu.bus.vga.dac_value_mask();
+                    let r = (cpu.dx() >> 8) as u8 & mask; // DH
+                    let g = (cpu.cx() >> 8) as u8 & mask; // CH
+                    let b = (cpu.cx() & 0xFF) as u8 & mask; // CL
 
                     let base = idx * 3;
                     if base + 2 < cpu.bus.vga.palette.len() {
@@ -443,15 +456,16 @@ pub fn handle(cpu: &mut Cpu) {
                     let dx = cpu.dx();
                     let addr = cpu.get_physical_addr(es, dx);
 
+                    let mask = cpu.bus.vga.dac_value_mask();
                     for i in 0..count {
                         let base = (start + i) * 3;
                         if base + 2 >= cpu.bus.vga.palette.len() {
                             break;
                         }
                         let src = addr + i * 3;
-                        cpu.bus.vga.palette[base] = cpu.bus.read_8(src) & 0x3F;
-                        cpu.bus.vga.palette[base + 1] = cpu.bus.read_8(src + 1) & 0x3F;
-                        cpu.bus.vga.palette[base + 2] = cpu.bus.read_8(src + 2) & 0x3F;
+                        cpu.bus.vga.palette[base] = cpu.bus.read_8(src) & mask;
+                        cpu.bus.vga.palette[base + 1] = cpu.bus.read_8(src + 1) & mask;
+                        cpu.bus.vga.palette[base + 2] = cpu.bus.read_8(src + 2) & mask;
                     }
                     cpu.bus.vga.mark_dirty_full();
                 }
@@ -873,42 +887,8 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_reg8(Register::AL, 0x1B);
         }
 
-        // TODO: Check if this makes sense here
-        0x4F => {
-            // AH=EFh: Extended Video Function (VESA BIOS Extensions)
-            let al = cpu.get_reg8(Register::AL);
-            match al {
-                0x00 => {
-                    // AL=00h: Return VBE Controller Info
-                    let es = cpu.es();
-                    let di = cpu.di();
-                    let addr = cpu.get_physical_addr(es, di);
-                    let vbe_signature = b"VESA";
-                    for i in 0..4 {
-                        cpu.bus.write_8(addr + i, vbe_signature[i]);
-                    }
-                    // TODO:Other fields zero for now
-                    cpu.set_reg8(Register::AL, 0x4F); // Function supported
-                    cpu.set_reg8(Register::AH, 0x00); // Function successful
-                }
-                0x01 => {
-                    // AL=01h: Return VBE Mode Info
-                    let es = cpu.es();
-                    let di = cpu.di();
-                    let addr = cpu.get_physical_addr(es, di);
-                    // For simplicity, only implement mode 0x101 (640x480x256)
-                    let mode_number: u16 = 0x101;
-                    cpu.bus.write_16(addr, mode_number);
-                    // TODO: Other fields zero for now
-                    cpu.set_reg8(Register::AL, 0x4F); // Function supported
-                    cpu.set_reg8(Register::AH, 0x00); // Function successful
-                }
-                _ => {
-                    cpu.set_reg8(Register::AL, 0x4F); // Function supported
-                    cpu.set_reg8(Register::AH, 0x01); // Function failed
-                }
-            }
-        }
+        // AH = 4Fh: VESA BIOS Extensions
+        0x4F => super::vbe::handle(cpu),
 
         // AH = 0Ch: Write Graphics Pixel
         // AL = Color Value

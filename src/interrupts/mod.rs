@@ -15,6 +15,7 @@ pub mod int21;
 pub mod int2f;
 pub mod int33;
 pub mod mscdex;
+pub mod vbe;
 pub mod utils;
 
 /// Return from an HLE handler as its IRET would. Service interrupts hand
@@ -50,6 +51,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_POST => crate::bios::post(cpu),
         crate::bios::SERVICE_CD_STRATEGY => mscdex::strategy(cpu),
         crate::bios::SERVICE_CD_INTERRUPT => mscdex::interrupt(cpu),
+        crate::bios::SERVICE_VBE_WINDOW => vbe::window_call(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service

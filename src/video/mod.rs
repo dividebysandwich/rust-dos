@@ -3,6 +3,7 @@ use crate::cpu::Cpu;
 
 pub mod crt;
 pub mod modes;
+pub mod vbe;
 pub mod vga;
 
 pub const SCREEN_WIDTH: u32 = 640;
@@ -36,6 +37,9 @@ pub enum VideoMode {
     Ega640x350 = 0x10,  // EGA planar, 16 colors
     Vga640x480 = 0x12,  // VGA planar, 16 colors
     Graphics320x200 = 0x13,
+    /// A VESA mode: which one, and its size, are in `Bus::vbe`. Never
+    /// written to the BIOS data area.
+    Vesa = 0xFF,
 }
 
 impl VideoMode {
@@ -61,6 +65,8 @@ impl VideoMode {
             VideoMode::Ega640x350 => (640, 350),
             VideoMode::Vga640x480 => (640, 480),
             VideoMode::Graphics320x200 => (320, 200),
+            // The mode's size is in `Bus::vbe`; see `Bus::display_size`.
+            VideoMode::Vesa => (640, 480),
         }
     }
 }
@@ -105,6 +111,7 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
             let rows = if rows < 300 { rows * 2 } else { rows };
             (width as u32, rows as u32)
         }
+        VideoMode::Vesa => bus.vbe.frame_size().unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT)),
         _ => (SCREEN_WIDTH, SCREEN_HEIGHT),
     }
 }
@@ -147,6 +154,58 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         // registers give them.
         VideoMode::Ega320x200 | VideoMode::Ega640x200 | VideoMode::Ega640x350 | VideoMode::Vga640x480 => {
             render_planar(canvas, width, &bus.vga.vram_graphics, bus)
+        }
+        VideoMode::Vesa => render_vbe(canvas, width, y_min, y_max, bus),
+    }
+}
+
+/// VESA modes: rows of pixels in linear video memory from the display
+/// start on, 8-bit through the DAC, or direct color.
+fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bus: &Bus) {
+    let vbe = &bus.vbe;
+    let Some(mode) = vbe.mode else {
+        return;
+    };
+    let colors: Vec<(u8, u8, u8)> = (0..=255u8).map(|i| bus.vga.get_rgb(i & bus.vga.dac_mask)).collect();
+    let vram = &vbe.vram;
+    let wrap = vbe::VRAM_SIZE - 1;
+    let pixel = |off: usize| -> (u8, u8, u8) {
+        let byte = |i: usize| vram[(off + i) & wrap];
+        let word = || byte(0) as u16 | (byte(1) as u16) << 8;
+        let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
+        match mode.bpp {
+            8 => colors[byte(0) as usize],
+            15 => {
+                let v = word();
+                (five(v >> 10 & 31), five(v >> 5 & 31), five(v & 31))
+            }
+            16 => {
+                let v = word();
+                let g = v >> 5 & 63;
+                (five(v >> 11), ((g << 2) | (g >> 4)) as u8, five(v & 31))
+            }
+            _ => (byte(2), byte(1), byte(0)),
+        }
+    };
+    let scale = vbe.scale() as usize;
+    let bytes = mode.bytes_per_pixel();
+    let row_bytes = canvas_w * 3;
+    for fy in y_min..y_max.min(mode.height as usize * scale) {
+        let dst = fy * row_bytes;
+        // Doubled rows copy the one above.
+        if fy % scale != 0 && fy > y_min {
+            canvas.copy_within(dst - row_bytes..dst, dst);
+            continue;
+        }
+        let row = vbe.latched_start as usize + fy / scale * vbe.pitch as usize;
+        for x in 0..mode.width as usize {
+            let rgb = pixel(row + x * bytes);
+            for dx in 0..scale {
+                let i = dst + (x * scale + dx) * 3;
+                canvas[i] = rgb.0;
+                canvas[i + 1] = rgb.1;
+                canvas[i + 2] = rgb.2;
+            }
         }
     }
 }

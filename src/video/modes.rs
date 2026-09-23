@@ -136,6 +136,7 @@ pub fn mode_regs(mode: VideoMode) -> &'static VgaModeRegs {
         VideoMode::Ega640x200 => &EGA_640,
         VideoMode::Ega640x350 => &EGA_350,
         VideoMode::Vga640x480 => &VGA_480,
-        VideoMode::Graphics320x200 => &VGA_256,
+        // VESA modes are 256-color modes to the VGA's registers.
+        VideoMode::Graphics320x200 | VideoMode::Vesa => &VGA_256,
     }
 }

@@ -60,7 +60,11 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   that flips pages flickers or shows half-drawn frames. `video.crt` is the
   display timing the VGA registers describe (refresh rate, total and
   displayed scanlines): port 3DAh reports retrace and display enable from
-  it in emulated time, and the Start Address is latched at each retrace.
+  it in emulated time, and the Start Address is latched at each retrace. In
+  a VESA mode (`video.name` is `Vesa`), `video.vbe` shows the VBE mode
+  number, size and bits per pixel, the bank of the window at A0000h, the
+  bytes per scan line, the displayed start offset and the DAC width; the
+  log has a `Switch to VESA mode` line for each mode set.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the

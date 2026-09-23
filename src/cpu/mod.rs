@@ -688,6 +688,7 @@ impl Cpu {
         // that exits in mode X or with its own palette doesn't leave the
         // shell in a 60 Hz mode or odd colors.
         self.bus.vga.set_video_mode(crate::video::VideoMode::Text80x25Color);
+        self.bus.vbe.reset();
         // Clear text VRAM so we don't show leftover text from the last program.
         for byte in self.bus.vga.vram_text.iter_mut() {
             *byte = 0;

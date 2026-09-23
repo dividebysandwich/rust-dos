@@ -27,6 +27,7 @@ use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
 use crate::mount::{display_host_path, parse_drive_letter, parse_kind};
+use crate::video::vbe::Vbe;
 use crate::video::{self, VideoMode};
 use keys::PcKey;
 pub use pm::{parse_addr, parse_hex};
@@ -913,9 +914,13 @@ impl DebugHub {
             },
             Cmd::ReadMem { addr, len } => match parse_addr(cpu, &addr) {
                 Ok(a) => {
-                    let len = match a.lin {
-                        Some(_) => len,
-                        None => len.min(cpu.bus.ram().len().saturating_sub(a.phys.unwrap_or(0))),
+                    let len = match (a.lin, a.phys) {
+                        (Some(_), _) => len,
+                        // The linear frame buffer, up to its end.
+                        (None, Some(p)) if Vbe::lfb_offset(p, 1).is_some() => {
+                            len.min(video::vbe::LFB_BASE + video::vbe::VRAM_SIZE - p)
+                        }
+                        (None, p) => len.min(cpu.bus.ram().len().saturating_sub(p.unwrap_or(0))),
                     };
                     let data = a.read(cpu, len);
                     Reply::Bytes { addr: a.lin.map_or(a.phys.unwrap_or(0), |l| l as usize), segoff: a.segoff, data }
@@ -926,7 +931,7 @@ impl DebugHub {
                 Ok(a) => {
                     let targets: Option<Vec<usize>> = (0..data.len()).map(|i| a.byte(cpu, i)).collect();
                     match targets {
-                        Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len()) => {
+                        Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || Vbe::lfb_offset(p, 1).is_some()) => {
                             for (p, b) in t.iter().zip(&data) {
                                 cpu.bus.write_8(*p, *b);
                             }
@@ -1023,7 +1028,7 @@ impl DebugHub {
     }
 
     fn status(&self, cpu: &Cpu) -> Value {
-        let (w, h) = cpu.bus.video_mode.dimensions();
+        let (w, h) = cpu.bus.display_size();
         let (frame_w, frame_h) = video::frame_size(&cpu.bus);
         let crtc = &cpu.bus.vga.crtc_regs;
         let timing = cpu.bus.vga.peek_timing();
@@ -1060,6 +1065,16 @@ impl DebugHub {
                     "crtc_underline": format!("{:02X}", crtc[0x14]),
                     "crtc_mode_control": format!("{:02X}", crtc[0x17]),
                 },
+                // The VESA mode, when one is set.
+                "vbe": cpu.bus.vbe.mode.filter(|_| cpu.bus.video_mode == VideoMode::Vesa).map(|mode| json!({
+                    "mode": format!("{:03X}", mode.number),
+                    "width": mode.width, "height": mode.height, "bpp": mode.bpp,
+                    "lfb": cpu.bus.vbe.lfb,
+                    "bank": cpu.bus.vbe.bank,
+                    "pitch": cpu.bus.vbe.pitch,
+                    "display_start": format!("{:X}", cpu.bus.vbe.latched_start),
+                    "dac_bits": if cpu.bus.vga.dac_8bit { 8 } else { 6 },
+                })),
                 // The display timing programs see through port 3DAh.
                 "crt": {
                     "hz": (timing.hz() * 100.0).round() / 100.0,
@@ -1226,7 +1241,7 @@ fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
     let (w, h) = (w as i32, h as i32);
     let px = x.clamp(0, w - 1);
     let py = y.clamp(0, h - 1);
-    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
+    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.display_size());
     let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
     let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
