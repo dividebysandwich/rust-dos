@@ -272,3 +272,32 @@ fn test_add_r16_imm8_sign_extension_extended_ascii() {
     // SF=0 (Positive). ZF=0. CF=1 (Because 0xC4 + 0xFFFF wrapped).
     assert!(!cpu.get_cpu_flag(CpuFlags::SF)); 
 }
+#[test]
+fn test_divide_error_returns_to_faulting_instruction() {
+    // Like a 286 or later, INT 0 pushes the address of the faulting DIV,
+    // prefixes included, so the handler can inspect it and skip it.
+    for (setup, code) in [
+        // 26 F7 37 -> DIV word ptr es:[bx], with a zero divisor
+        ((0x0000u16, 0x04D2u16, 0x0000u16), [0x26, 0xF7, 0x37].as_slice()),
+        // F7 FB -> IDIV BX, 0x100000 / 1 overflows
+        ((0x0010, 0x0000, 0x0001), [0xF7, 0xFB].as_slice()),
+    ] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.write_16(0x0000, 0x0000); // INT 0 handler at 2000:0000
+        cpu.bus.write_16(0x0002, 0x2000);
+        cpu.cs = 0x1000;
+        cpu.ip = 0x0100;
+        cpu.ss = 0x3000;
+        cpu.sp = 0x0100;
+        cpu.es = 0x4000;
+        cpu.bus.write_16(0x40000, 0);
+        (cpu.dx, cpu.ax, cpu.bx) = setup;
+
+        run_cpu_code(&mut cpu, code);
+
+        assert_eq!((cpu.cs, cpu.ip), (0x2000, 0x0000));
+        let stack = 0x30000 + cpu.sp as usize;
+        assert_eq!(cpu.bus.read_16(stack), 0x0100, "return IP");
+        assert_eq!(cpu.bus.read_16(stack + 2), 0x1000, "return CS");
+    }
+}

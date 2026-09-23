@@ -346,6 +346,15 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
     }
 }
 
+/// Raise a divide error (INT 0). As on a 286 and later, the pushed return
+/// address is the faulting instruction's own, not the next one: handlers such
+/// as F-117A's compare it against the DIV's address and skip the instruction
+/// themselves. `cpu.ip` already points past the instruction when it executes.
+fn divide_error(cpu: &mut Cpu, instr: &Instruction) {
+    cpu.ip = cpu.ip.wrapping_sub(instr.len() as u16);
+    interrupts::handle_interrupt(cpu, 0x00);
+}
+
 fn div(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
@@ -433,7 +442,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
             cpu.cs, caller_ip, caller_bytes.trim()
         ));
 
-        interrupts::handle_interrupt(cpu, 0x00);
+        divide_error(cpu, instr);
         return;
     }
 
@@ -445,7 +454,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         let remainder = dividend % divisor;
 
         if quotient > 0xFF {
-            interrupts::handle_interrupt(cpu, 0x00);
+            divide_error(cpu, instr);
         } else {
             cpu.set_reg8(Register::AL, quotient as u8);
             cpu.set_reg8(Register::AH, remainder as u8);
@@ -460,7 +469,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         let remainder = dividend % divisor;
 
         if quotient > 0xFFFF {
-            interrupts::handle_interrupt(cpu, 0x00);
+            divide_error(cpu, instr);
         } else {
             cpu.ax = quotient as u16;
             cpu.dx = remainder as u16;
@@ -484,7 +493,7 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
             cpu.cs, ip, instr, is_8bit,
             cpu.ax, cpu.dx, cpu.bx, cpu.cx, cpu.si, cpu.di, cpu.ds
         ));
-        interrupts::handle_interrupt(cpu, 0x00);
+        divide_error(cpu, instr);
         return;
     }
 
@@ -493,7 +502,7 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
         let divisor = src as u8 as i8 as i16;
 
         if dividend == i16::MIN && divisor == -1 {
-            interrupts::handle_interrupt(cpu, 0x00);
+            divide_error(cpu, instr);
             return;
         }
 
@@ -501,7 +510,7 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
         let remainder = dividend % divisor;
 
         if quotient > 127 || quotient < -128 {
-            interrupts::handle_interrupt(cpu, 0x00);
+            divide_error(cpu, instr);
         } else {
             cpu.set_reg8(Register::AL, quotient as u8);
             cpu.set_reg8(Register::AH, remainder as u8);
@@ -511,7 +520,7 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
         let divisor = src as i16 as i32;
 
         if dividend == i32::MIN && divisor == -1 {
-            interrupts::handle_interrupt(cpu, 0x00);
+            divide_error(cpu, instr);
             return;
         }
 
@@ -519,7 +528,7 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
         let remainder = dividend % divisor;
 
         if quotient > 32767 || quotient < -32768 {
-            interrupts::handle_interrupt(cpu, 0x00);
+            divide_error(cpu, instr);
         } else {
             cpu.ax = quotient as u16;
             cpu.dx = remainder as u16;
@@ -562,7 +571,7 @@ pub fn aam(cpu: &mut Cpu, instr: &Instruction) {
 
     if base == 0 {
         // Division by zero exception (INT 0)
-        crate::interrupts::handle_interrupt(cpu, 0x00);
+        divide_error(cpu, instr);
         return;
     }
 
