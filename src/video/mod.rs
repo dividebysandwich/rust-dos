@@ -131,10 +131,16 @@ fn render_planar(
     let offset_reg = bus.vga.crtc_regs[0x13] as usize;
     let bytes_per_row = if offset_reg != 0 { offset_reg * 2 } else { width / 8 };
     let base = planar_base_offset(bus);
+    let split = bus.vga.split_row();
+
+    let pan = bus.vga.pixel_panning();
+    let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
 
     for y in 0..height {
+        // Rows past the split screen's start show VRAM from address 0.
+        let (row_base, row, pan) = if y >= split { (0, y - split, split_pan) } else { (base, y, pan) };
         for x in 0..width {
-            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, x, y, base, &mix);
+            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, x + pan, row, row_base, &mix);
 
             for dy in 0..scale_y {
                 for dx in 0..scale_x {
@@ -160,12 +166,14 @@ fn render_planar_fit(canvas: &mut [u8], vram: &[u8], bus: &Bus, width: usize, he
     let offset_reg = bus.vga.crtc_regs[0x13] as usize;
     let bytes_per_row = if offset_reg != 0 { offset_reg * 2 } else { width / 8 };
     let base = planar_base_offset(bus);
+    let split = bus.vga.split_row();
 
     for ty in 0..SCREEN_HEIGHT as usize {
         let sy = (ty as u64 * height as u64 / SCREEN_HEIGHT as u64) as usize;
+        let (row_base, row) = if sy >= split { (0, sy - split) } else { (base, sy) };
         for tx in 0..SCREEN_WIDTH as usize {
             let sx = (tx as u64 * width as u64 / SCREEN_WIDTH as u64) as usize;
-            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, sx, sy, base, &mix);
+            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, sx, row, row_base, &mix);
             let idx = (ty * SCREEN_WIDTH as usize + tx) * 3;
             canvas[idx] = rgb.0;
             canvas[idx + 1] = rgb.1;
@@ -242,11 +250,17 @@ pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
         0 => 80,
         words => words as usize * 2,
     };
+    // Rows past the split screen's start show VRAM from address 0, and
+    // unpanned when the Attribute Mode Control register says so.
+    let split = bus.vga.split_row();
+    let pan = bus.vga.pixel_panning();
+    let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
     for y in 0..200 {
-        let row = start + y * stride;
+        let (row, pan) = if y >= split { ((y - split) * stride, split_pan) } else { (start + y * stride, pan) };
         for x in 0..320 {
-            let plane = x & 3;
-            let offset = (row + (x >> 2)) & 0xFFFF;
+            let px = x + pan;
+            let plane = px & 3;
+            let offset = (row + (px >> 2)) & 0xFFFF;
             let final_index = (plane * 65536) + offset;
 
             let color_idx = if final_index < vram.len() {

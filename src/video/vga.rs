@@ -152,13 +152,20 @@ impl VgaCard {
         graphics_regs[5] = 0x10; // Mode: Odd/Even (10)
         graphics_regs[6] = 0x0E; // Misc: Memory Map B8000 (10), Text Mode (0)
 
+        // Line Compare at its maximum (3FFh, spread over three registers):
+        // no split screen.
+        let mut crtc_regs = [0u8; 25];
+        crtc_regs[0x07] = 0x10;
+        crtc_regs[0x09] = 0x40;
+        crtc_regs[0x18] = 0xFF;
+
         Self {
             sequencer_index: 0,
             sequencer_regs,
             graphics_index: 0,
             graphics_regs,
             crtc_index: 0,
-            crtc_regs: [0; 25],
+            crtc_regs,
             dac_write_index: 0,
             dac_read_index: 0,
             dac_step: 0,
@@ -465,9 +472,44 @@ impl VgaCard {
         }
     }
 
+    /// The first of the `rows` a mode displays that the split screen shows:
+    /// past the scanline in the CRTC Line Compare register, the display
+    /// starts again from address 0, as games do for a status bar below a
+    /// scrolling playfield. Each row is `(Max Scan Line & 1Fh) + 1`
+    /// scanlines, twice that when bit 7 doubles them.
+    pub fn split_row(&self) -> usize {
+        let crtc = &self.crtc_regs;
+        let line_compare = crtc[0x18] as usize
+            | (crtc[0x07] as usize & 0x10) << 4
+            | (crtc[0x09] as usize & 0x40) << 3;
+        let mut scanlines = (crtc[0x09] as usize & 0x1F) + 1;
+        if crtc[0x09] & 0x80 != 0 {
+            scanlines *= 2;
+        }
+        line_compare / scanlines + 1
+    }
+
+    /// Pixels the display is shifted left by (Attribute register 13h, Horizontal
+    /// PEL Panning): in 256-color modes in steps of half a pixel, of which
+    /// only whole pixels show.
+    pub fn pixel_panning(&self) -> usize {
+        let value = self.attribute_regs[0x13] as usize & 0x0F;
+        if self.attribute_regs[0x10] & 0x40 != 0 {
+            (value & 0x07) >> 1
+        } else if value < 8 {
+            value
+        } else {
+            0
+        }
+    }
+
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         self.mark_dirty_full();
         self.latched_start_addr = 0;
+        // No split screen (Line Compare 3FFh).
+        self.crtc_regs[0x07] |= 0x10;
+        self.crtc_regs[0x09] |= 0x40;
+        self.crtc_regs[0x18] = 0xFF;
         match mode {
             super::VideoMode::Ega320x200
             | super::VideoMode::Ega640x200
@@ -508,7 +550,7 @@ impl VgaCard {
                 //   0x09 = Max Scan Line (0x41 = double-scan on 200-line modes)
                 self.crtc_regs[0x09] = match mode {
                     super::VideoMode::Ega320x200 | super::VideoMode::Ega640x200 => 0x41,
-                    _ => 0x00,
+                    _ => 0x40,
                 };
                 self.crtc_regs[0x0C] = 0x00; // Start Address High
                 self.crtc_regs[0x0D] = 0x00; // Start Address Low
@@ -556,6 +598,7 @@ impl VgaCard {
 
                 // CRTC: display from the start of VRAM, 80 bytes per row
                 // in each plane.
+                self.crtc_regs[0x09] = 0x41; // Max Scan Line: rows of 2 scanlines
                 self.crtc_regs[0x0C] = 0x00; // Start Address High
                 self.crtc_regs[0x0D] = 0x00; // Start Address Low
                 self.crtc_regs[0x13] = 0x28; // Offset
