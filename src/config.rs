@@ -17,10 +17,16 @@ pub const FILE_NAME: &str = "rust-dos.conf";
 /// Written to the default location on first start.
 pub const TEMPLATE: &str = include_str!("../rust-dos.conf.example");
 
+/// The per-user directory for rust-dos's files, e.g. `~/.config/rust-dos`
+/// on Linux.
+pub fn user_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("rust-dos"))
+}
+
 /// Per-user default: `<config dir>/rust-dos/rust-dos.conf`, e.g.
 /// `~/.config/rust-dos/rust-dos.conf` on Linux.
 pub fn default_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("rust-dos").join(FILE_NAME))
+    user_dir().map(|d| d.join(FILE_NAME))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

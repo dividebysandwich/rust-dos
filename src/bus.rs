@@ -1,7 +1,5 @@
 use sdl2::audio::AudioQueue;
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
@@ -109,7 +107,8 @@ pub struct Bus {
     pub audio_phase: f32, // Track wave position to prevent clicking
     pub dta_segment: u16,
     pub dta_offset: u16,
-    pub log_file: Option<BufWriter<File>>,
+    /// The log file `log_string` writes to, if the emulator opened one.
+    pub log_file: Option<crate::log::LogFile>,
 
     // VGA State
     pub vga: crate::video::vga::VgaCard,
@@ -1633,30 +1632,21 @@ impl Bus {
         }
     }
 
+    /// Write a line to the log file and the debug server's log.
     pub fn log_string(&mut self, s: &str) {
-        if self.log_file.is_none() {
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open("trace.log")
-                .expect("Failed to open trace.log");
-            self.log_file = Some(BufWriter::new(file));
-        }
-
-        println!("{}", s);
-        if let Some(writer) = &mut self.log_file {
-            let _ = writeln!(writer, "{}", s);
+        if let Some(log) = &mut self.log_file {
+            log.write_line(s);
         }
         if let Some(hook) = &mut self.log_hook {
             hook(s);
         }
     }
 
-    /// Write buffered log lines to trace.log now, so they survive an abort.
+    /// Write buffered log lines to the log file now, so they survive an
+    /// abort.
     pub fn flush_log(&mut self) {
-        if let Some(writer) = &mut self.log_file {
-            let _ = writer.flush();
+        if let Some(log) = &mut self.log_file {
+            log.flush();
         }
     }
 }

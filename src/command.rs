@@ -255,6 +255,7 @@ impl ShellCommand for ExitCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
         cpu.bus
             .log_string("[SHELL] Exiting Emulator via command...");
+        cpu.bus.flush_log();
         std::process::exit(0);
     }
 }

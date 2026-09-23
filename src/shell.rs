@@ -134,8 +134,6 @@ pub fn handle_command_bop(cpu: &mut Cpu) {
 
     // Queue for Main Loop
     if !clean_cmd.is_empty() {
-        cpu.bus
-            .log_string(&format!("[SHELL] Queuing Command: {}", clean_cmd));
         cpu.pending_command = Some(clean_cmd);
     }
 }

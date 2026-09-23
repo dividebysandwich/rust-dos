@@ -28,8 +28,9 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 - **Port conflict:** if port 8086 is in use, the emulator exits at startup
   with a `cannot bind` error. Kill the old instance (`kill $(pgrep -x rust-dos)`)
   or pass `--debug-server 127.0.0.1:<port>`.
-- **Output:** stdout and `trace.log` get the full emulator log, which can
-  grow very large. Read the log through `/api/log` instead.
+- **Output:** the emulator log doesn't go to stdout. It goes to
+  `rust-dos.log` in the per-user config directory, replaced on every start.
+  Read it through `/api/log` instead, which can filter it.
 
 All examples below use `H=localhost:8086` and `J='-H content-type:application/json'`.
 

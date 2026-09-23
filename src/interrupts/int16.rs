@@ -11,8 +11,6 @@ pub fn handle(cpu: &mut Cpu) {
         0x00 | 0x10 => {
             if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
                 // Key found: Return in AX
-                cpu.bus
-                    .log_string(&format!("[BIOS] INT 16h Read Key: {:04X}", key_code));
                 cpu.set_ax(key_code);
             } else {
                 // Buffer empty: wait in the BIOS for a keystroke.

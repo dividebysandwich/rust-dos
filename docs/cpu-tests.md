@@ -138,8 +138,8 @@ this setup:
   disabled, so POPF, IRET or STI setting IF can't let an interrupt in.
 - **A20:** open. The 386EX the suite comes from has no A20 gate, so
   addresses above 1 MB don't wrap.
-- **Emulator log:** lines are collected for the failure details. They don't
-  reach `trace.log`, and stdout is silenced during the run.
+- **Emulator log:** lines are collected for the failure details. The
+  harness opens no log file, so they aren't written anywhere else.
 - **Machines:** each file runs on a fresh `Cpu`, so results don't depend on
   thread scheduling.
 

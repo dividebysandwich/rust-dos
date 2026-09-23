@@ -57,12 +57,8 @@ impl Machine {
         // The suite was captured on a 386EX.
         cpu.model = CpuModel::I386;
 
-        // The emulator logs to stdout and ./trace.log. Keep the trace file
-        // out of the working directory; the lines are collected by the
-        // hook so failures can show them.
-        if let Ok(sink) = std::fs::File::create(if cfg!(windows) { "NUL" } else { "/dev/null" }) {
-            cpu.bus.log_file = Some(std::io::BufWriter::new(sink));
-        }
+        // The emulator's log lines are collected by the hook so failures
+        // can show them.
         let log = Rc::new(RefCell::new(Vec::new()));
         let hook_log = log.clone();
         cpu.bus.log_hook = Some(Box::new(move |line: &str| {

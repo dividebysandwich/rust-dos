@@ -13,6 +13,7 @@ pub mod gus;
 pub mod instr_cache;
 pub mod kbc;
 pub mod keyboard;
+pub mod log;
 pub mod instructions;
 pub mod interrupts;
 pub mod mcb;

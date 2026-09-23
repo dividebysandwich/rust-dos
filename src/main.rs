@@ -169,16 +169,6 @@ fn main() -> Result<(), String> {
                         continue;
                     }
 
-                    // Debug Toggle (F12 reserved for Emulator)
-                    if keycode == Keycode::F12 {
-                        dbg.legacy_trace = !dbg.legacy_trace;
-                        cpu.bus.log_string(&format!(
-                            "[DEBUG] Tracing: {}",
-                            if dbg.legacy_trace { "ON" } else { "OFF" }
-                        ));
-                        continue;
-                    }
-
                     // Map Key to PC Scancode/ASCII. High byte = scancode,
                     // low byte = ASCII. Keep pushing to the INT 16h buffer
                     // for BIOS-based input, and ALSO latch the raw scan code
@@ -280,6 +270,7 @@ fn main() -> Result<(), String> {
 
         // Update Audio
         pump_audio(&mut cpu.bus);
+        cpu.bus.flush_log();
 
         // Update Cursor Blink
         if last_blink.elapsed() >= blink_interval {
@@ -462,29 +453,44 @@ fn apply_sound_config(cpu: &mut cpu::Cpu, sound: &config::SoundConfig) {
     if soundfont {
         match &sound.soundfont {
             Some(path) => match cpu.bus.mpu.load_soundfont(path) {
-                Ok(()) => eprintln!("[CONFIG] General MIDI with SoundFont {}", path.display()),
-                Err(e) => eprintln!("[CONFIG] Warning: soundfont: {}", e),
+                Ok(()) => cpu
+                    .bus
+                    .log_string(&format!("[CONFIG] General MIDI with SoundFont {}", path.display())),
+                Err(e) => config_warning(cpu, &format!("soundfont: {}", e)),
             },
-            None => eprintln!("[CONFIG] Warning: midisynth=soundfont needs a soundfont setting"),
+            None => config_warning(cpu, "midisynth=soundfont needs a soundfont setting"),
         }
     } else if sound.midisynth != MidiSynth::None {
         let ultradir = &sound.gus.ultradir;
         match rust_dos::gus::patch::PatchBank::from_dos_dir(&cpu.bus.disk, ultradir) {
             Ok((bank, dir)) => {
-                eprintln!("[CONFIG] General MIDI with the Ultrasound patches in {}", dir.display());
+                cpu.bus.log_string(&format!(
+                    "[CONFIG] General MIDI with the Ultrasound patches in {}",
+                    dir.display()
+                ));
                 cpu.bus.mpu.load_gus_patches(bank);
             }
             Err(e) if sound.midisynth == MidiSynth::Gus => {
-                eprintln!("[CONFIG] Warning: midisynth=gus: {}", e)
+                config_warning(cpu, &format!("midisynth=gus: {}", e))
             }
-            Err(e) => eprintln!("[CONFIG] No General MIDI synthesizer (no soundfont, and {})", e),
+            Err(e) => cpu.bus.log_string(&format!(
+                "[CONFIG] No General MIDI synthesizer (no soundfont, and {})",
+                e
+            )),
         }
     }
 }
 
+/// A configuration problem: shown on the terminal and written to the log.
+fn config_warning(cpu: &mut Cpu, msg: &str) {
+    eprintln!("[CONFIG] Warning: {}", msg);
+    cpu.bus.log_string(&format!("[CONFIG] Warning: {}", msg));
+}
+
 /// Find and parse the configuration file (see config.rs for the lookup
 /// order). Problems in the file are reported but never stop the emulator;
-/// only a missing `--config` file does.
+/// only a missing `--config` file does. The file used goes to the log once
+/// there is one (see `create_cpu`).
 fn load_config(args: &Args) -> Result<config::Config, String> {
     if args.no_config {
         return Ok(config::Config::default());
@@ -496,9 +502,10 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
         config::default_path(),
         dirs::home_dir().as_deref(),
     )?;
-    if let Some(path) = &config.source {
-        let action = if config.created { "Created default" } else { "Using" };
-        eprintln!("[CONFIG] {} configuration file {}", action, path.display());
+    if config.created
+        && let Some(path) = &config.source
+    {
+        eprintln!("[CONFIG] Created default configuration file {}", path.display());
     }
     for warning in &config.warnings {
         eprintln!("[CONFIG] Warning: {}", warning);
@@ -507,7 +514,8 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
 }
 
 /// Build the CPU with drive C: from `-d`, the config file or the working
-/// directory (in that order), then mount the config's other drives.
+/// directory (in that order), then mount the config's other drives. Opens
+/// the log file.
 fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
     use crate::disk::{DRIVE_C, drive_letter};
 
@@ -540,6 +548,7 @@ fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
 
     let memory_mb = config.memsize.unwrap_or(rust_dos::bus::DEFAULT_MEMORY_MB);
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
+    cpu.bus.log_file = open_log_file();
     if let Some(spec) = c_spec {
         // Remount C: to apply the config's drive type, label and -ro
         if let Err(e) = cpu.bus.mount_drive(DRIVE_C, &root_path, spec.opts.clone(), true) {
@@ -552,10 +561,28 @@ fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
         }
     }
 
+    if let Some(path) = &config.source {
+        let action = if config.created { "Created default" } else { "Using" };
+        cpu.bus
+            .log_string(&format!("[CONFIG] {} configuration file {}", action, path.display()));
+    }
     for warning in &warnings {
         cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
     }
     cpu
+}
+
+/// Create the log file in the per-user configuration directory, replacing
+/// the previous run's. The emulator runs without one if that fails.
+fn open_log_file() -> Option<rust_dos::log::LogFile> {
+    let path = rust_dos::log::default_path()?;
+    match rust_dos::log::LogFile::create(&path) {
+        Ok(log) => Some(log),
+        Err(e) => {
+            eprintln!("Warning: cannot create the log file {}: {}", path.display(), e);
+            None
+        }
+    }
 }
 
 /// Convert host window coordinates (in pixels, at window `scale`) into the

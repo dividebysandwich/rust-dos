@@ -377,9 +377,6 @@ pub struct DebugHub {
     fps: f64,
     fps_mark: (Instant, u64),
     stats: ExecStats,
-
-    /// Log every instruction to trace.log (F12), the old-style trace.
-    pub legacy_trace: bool,
 }
 
 /// Execution speed, measured over windows of about a second of wall time.
@@ -448,7 +445,6 @@ impl DebugHub {
             fps: 0.0,
             fps_mark: (Instant::now(), 0),
             stats: ExecStats::new(),
-            legacy_trace: false,
         }
     }
 
@@ -536,7 +532,6 @@ impl DebugHub {
             self.batch_t_us = cpu.bus.start_time.elapsed().as_micros() as u64;
         }
         self.tracing_now
-            || self.legacy_trace
             || self.step_budget.is_some()
             || self.temp_breakpoint.is_some()
             || !self.breakpoints.is_empty()
@@ -1437,54 +1432,6 @@ fn mount_drive(
 impl crate::exec::ExecHook for DebugHub {
     #[inline]
     fn before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
-        if self.legacy_trace {
-            log_legacy_trace(cpu, phys_ip, ram);
-        }
         self.check_before_exec(cpu, phys_ip, ram)
-    }
-}
-
-/// The F12 trace: one trace.log line per instruction outside the BIOS,
-/// skipping the shell's wait-for-key loop.
-fn log_legacy_trace(cpu: &Cpu, phys_ip: usize, ram: &[u8]) {
-    use iced_x86::{Decoder, DecoderOptions, Mnemonic};
-
-    if cpu.cs() >= 0xF000 || phys_ip >= ram.len() {
-        return;
-    }
-    let mut decoder = Decoder::with_ip(16, &ram[phys_ip..], cpu.ip() as u64, DecoderOptions::NONE);
-    let instr = decoder.decode();
-    if (instr.mnemonic() == Mnemonic::Int && instr.immediate8() == 0x16)
-        || (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E)
-    {
-        return;
-    }
-    let mut lines = vec![format!(
-        "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}",
-        cpu.cs(),
-        cpu.ip(),
-        cpu.ax(),
-        cpu.bx(),
-        cpu.cx(),
-        cpu.dx(),
-        cpu.sp(),
-        instr
-    )];
-    if instr.mnemonic() == Mnemonic::Int {
-        let vector = instr.immediate8() as usize;
-        let target_ip = cpu.bus.read_16(vector * 4);
-        let target_cs = cpu.bus.read_16(vector * 4 + 2);
-        if target_cs == 0xF000 {
-            lines.push(format!(
-                "[CPU-DEBUG] Hooked INT {:02X} detected -> Points to F000:{:04X}",
-                vector, target_ip
-            ));
-        }
-    }
-    // The hook only gets `&Cpu`; the bus logger needs `&mut`. Log through
-    // the trace.log-only path the old loop used: stdout plus the log hook
-    // are not worth a per-instruction borrow dance.
-    for line in lines {
-        println!("{}", line);
     }
 }

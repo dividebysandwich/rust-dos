@@ -170,11 +170,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 fcb_drive - 1
             };
 
-            cpu.bus.log_string(&format!(
-                "[DOS] FCB Find{:02X}: Drive={} Pattern='{}' Index={}",
-                ah, fcb_drive, name, index
-            ));
-
             let result = if cpu.bus.disk.is_mounted(drive) {
                 let pattern = format!("{}:{}", drive_letter(drive), name);
                 cpu.bus
@@ -220,6 +215,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
                 Err(_) => {
                     // Failure: AL=FFh
+                    cpu.bus.log_string(&format!(
+                        "[DOS] FCB Find{:02X} Failed: Drive={} Pattern='{}' Index={}",
+                        ah, fcb_drive, name, index
+                    ));
                     cpu.set_reg8(Register::AL, 0xFF);
                 }
             }
@@ -394,8 +393,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let dx = cpu.get_reg16(Register::DX);
             cpu.bus.dta_segment = ds;
             cpu.bus.dta_offset = dx;
-            cpu.bus
-                .log_string(&format!("[DOS] Set DTA to {:04X}:{:04X}", ds, dx));
         }
 
         // AH = 29h: Parse Filename
@@ -465,11 +462,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.bus.write_8(phys_addr + 1, (new_off >> 8) as u8);
             cpu.bus.write_8(phys_addr + 2, (new_seg & 0xFF) as u8);
             cpu.bus.write_8(phys_addr + 3, (new_seg >> 8) as u8);
-
-            cpu.bus.log_string(&format!(
-                "[DOS] Hooked Interrupt {:02X} to {:04X}:{:04X}",
-                int_num, new_seg, new_off
-            ));
         }
 
         // AH = 4Bh: Load and Execute Program (EXEC)
@@ -550,11 +542,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let cmd_off = cpu.bus.read_16(param_phys + 2);
                 let cmd_seg = cpu.bus.read_16(param_phys + 4);
 
-                cpu.bus.log_string(&format!(
-                    "[DEBUG] EXEC ParamBlock: Env={:04X} Cmd={:04X}:{:04X}",
-                    env_seg, cmd_seg, cmd_off
-                ));
-
                 // Read Enviroment Block
                 // If EnvSeg is 0, we should inherit from parent (which means reading *current* PSP's env).
                 // If non-zero, read until double-null.
@@ -617,21 +604,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let cmd_str = String::from_utf8_lossy(&cmd_tail);
                 cpu.bus
                     .log_string(&format!("[DEBUG] EXEC CmdLine: '{}'", cmd_str));
-
-                // Log Env Block content (first 64 bytes)
-                let mut env_preview = String::new();
-                for i in 0..std::cmp::min(env_block.len(), 128) {
-                    let b = env_block[i];
-                    if b >= 32 && b <= 126 {
-                        env_preview.push(b as char);
-                    } else if b == 0 {
-                        env_preview.push_str("\\0");
-                    } else {
-                        env_preview.push('.');
-                    }
-                }
-                cpu.bus
-                    .log_string(&format!("[DEBUG] EXEC Env Content: {}", env_preview));
 
                 // The environment ends with a double NUL; the program path
                 // goes after it (below, once the program is known).
@@ -911,7 +883,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_reg8(Register::AH, 0); // Minor: .00
             cpu.set_bx(0xFF00); // OEM ID
             cpu.set_cx(0x0000); // Serial
-            cpu.bus.log_string("[DOS] Reported DOS Version 5.0");
         }
 
         // AH = 50h: Set current PSP to BX
@@ -1030,11 +1001,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let path = read_asciiz_string(&cpu.bus, addr);
             match cpu.bus.disk.create_directory(&path) {
-                Ok(()) => {
-                    cpu.set_cpu_flag(CpuFlags::CF, false);
-                    cpu.bus
-                        .log_string(&format!("[DOS] MKDIR '{}' -> OK", path));
-                }
+                Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(code) => {
                     cpu.set_ax(code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
@@ -1050,11 +1017,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let path = read_asciiz_string(&cpu.bus, addr);
             match cpu.bus.disk.remove_directory(&path) {
-                Ok(()) => {
-                    cpu.set_cpu_flag(CpuFlags::CF, false);
-                    cpu.bus
-                        .log_string(&format!("[DOS] RMDIR '{}' -> OK", path));
-                }
+                Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(code) => {
                     cpu.set_ax(code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
@@ -1093,13 +1056,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             match cpu.bus.disk.create_file(&filename, cpu.current_psp) {
                 Ok(handle) => {
                     cpu.set_ax(handle);
-                    cpu.bus.log_string(&format!(
-                        "[DEBUG] Create File: '{}' -> Handle={:04X} (non-truncating)",
-                        filename, handle
-                    ));
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Create File '{}' Failed, Error={:02X}",
+                        filename, code
+                    ));
                     cpu.set_ax(code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
@@ -1112,24 +1075,19 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let filename = read_asciiz_string(&cpu.bus, addr);
             let mode = cpu.get_al();
 
-            cpu.bus.log_string(&format!(
-                "[DEBUG] Open File: '{}' Mode={:02X}",
-                filename, mode
-            ));
-
             match cpu.bus.disk.open_file(&filename, mode, cpu.current_psp) {
                 Ok(handle) => {
                     cpu.set_ax(handle);
-                    cpu.bus
-                        .log_string(&format!("[DEBUG] Open Success, Handle={:04X}", handle));
                     // In real CPU, clear CF here
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
                     cpu.set_ax(code as u16);
                     // In real CPU, set CF here
-                    cpu.bus
-                        .log_string(&format!("[DEBUG] Open Failed, Error={:04X}", code));
+                    cpu.bus.log_string(&format!(
+                        "[DOS] Open File '{}' Mode={:02X} Failed, Error={:04X}",
+                        filename, mode, code
+                    ));
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
             }
@@ -1154,11 +1112,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let count = cpu.cx() as usize;
             let mut buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
-            cpu.bus.log_string(&format!(
-                "[DEBUG] Read File Handle {:04X}, Count {:04X}",
-                handle, count
-            ));
-
             if handle == 0 {
                 // STDIN
                 let mut read_count = 0;
@@ -1176,22 +1129,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             } else {
                 match cpu.bus.disk.read_file(handle, count) {
                     Ok(bytes) => {
-                        // Log a peek of what was read so we can tell whether
-                        // a program that's about to splat the buffer to DAC /
-                        // VRAM is actually seeing real file contents.
-                        let preview_len = bytes.len().min(8);
-                        let mut preview = String::new();
-                        for i in 0..preview_len {
-                            preview.push_str(&format!("{:02X} ", bytes[i]));
-                        }
-                        cpu.bus.log_string(&format!(
-                            "[DEBUG] Read Handle {:04X}: returned {} bytes (first {}: {})",
-                            handle,
-                            bytes.len(),
-                            preview_len,
-                            preview.trim()
-                        ));
-
                         for b in &bytes {
                             cpu.bus.write_8(buf_addr, *b);
                             buf_addr += 1;
@@ -1200,8 +1137,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(e) => {
-                        cpu.bus
-                            .log_string(&format!("[DEBUG] Read Failed, Error={:04X}", e));
+                        cpu.bus.log_string(&format!(
+                            "[DOS] Read Handle {:04X} Failed, Error={:04X}",
+                            handle, e
+                        ));
                         cpu.set_ax(e);
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
@@ -1221,11 +1160,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let handle = cpu.bx();
             let count = cpu.cx() as usize;
             let buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-
-            cpu.bus.log_string(&format!(
-                "[DEBUG] Write File Handle {:04X}, Count {:04X}",
-                handle, count
-            ));
 
             if count == 0 && handle != 1 && handle != 2 {
                 cpu.bus.log_string(&format!(
@@ -1251,9 +1185,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                 }
                 let s = String::from_utf8_lossy(&data);
-                // Log what is being printed to stdout
-                cpu.bus.log_string(&format!("[STDOUT] {}", s.trim()));
-
                 let visual_s = s.replace('\x07', "");
                 crate::video::print_string(cpu, &visual_s);
                 cpu.set_ax(count as u16);
@@ -1265,7 +1196,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                     Err(code) => {
                         // e.g. 05h on a file opened read-only (CD-ROM)
-                        cpu.bus.log_string("[DEBUG] Write Failed");
+                        cpu.bus.log_string(&format!(
+                            "[DOS] Write Handle {:04X} Failed, Error={:02X}",
+                            handle, code
+                        ));
                         cpu.set_ax(code as u16);
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
@@ -1431,9 +1365,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return;
             };
 
-            cpu.bus
-                .log_string(&format!("[DOS] Get CWD (AH=47h) Drive={} -> {}", dl, cwd));
-
             // Write string to DS:SI
             let bytes = cwd.as_bytes();
             for (i, &b) in bytes.iter().enumerate() {
@@ -1471,10 +1402,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 Ok(segment) => {
                     cpu.set_ax(segment);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
-                    cpu.bus.log_string(&format!(
-                        "[DOS] Alloc {:04X} paras -> {:04X}",
-                        requested, segment
-                    ));
                 }
                 Err(max_free) => {
                     cpu.set_ax(crate::mcb::ERR_INSUFFICIENT as u16);
@@ -1496,8 +1423,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 Ok(()) => {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     cpu.set_ax(0);
-                    cpu.bus
-                        .log_string(&format!("[DOS] Free {:04X} -> OK", segment_to_free));
                 }
                 Err(code) => {
                     cpu.set_ax(code as u16);
@@ -1517,13 +1442,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let segment = cpu.es();
             let requested_size = cpu.get_reg16(Register::BX);
             match crate::mcb::resize(&mut cpu.bus, segment, requested_size) {
-                Ok(()) => {
-                    cpu.set_cpu_flag(CpuFlags::CF, false);
-                    cpu.bus.log_string(&format!(
-                        "[DOS] Resize {:04X} -> {:04X} paras",
-                        segment, requested_size
-                    ));
-                }
+                Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(max) => {
                     cpu.set_reg16(Register::BX, max);
                     cpu.set_reg16(Register::AX, crate::mcb::ERR_INSUFFICIENT as u16);
@@ -1681,10 +1600,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 .find_directory_entry(&search_pattern, index, search_attr)
             {
                 Ok(entry) => {
-                    cpu.bus.log_string(&format!(
-                        "[DOS] FindFirst/Next Found: '{}' (Index {})",
-                        entry.filename, index
-                    ));
                     // Drive the search runs on (1 = A:)
                     let search_drive = parse_drive_prefix(&search_pattern)
                         .0

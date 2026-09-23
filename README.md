@@ -144,9 +144,16 @@ Each drive keeps its own current directory, as in DOS.
 
 `-ro` makes any drive read-only.
 
+## Log file
+
+rust-dos logs what it does to `rust-dos.log` in the per-user configuration
+directory (see the table above): the programs it loads and runs, DOS and
+BIOS functions and I/O ports it doesn't emulate, failed file operations, CPU
+exceptions and configuration warnings. Attach this file to bug reports. It
+is replaced on every start and stops growing at 64 MB.
+
 ## Keyboard shortcuts
 
-F12: Debug mode
 PrintScreen: Toggle screen recording to a video file
 
 ## Debug & remote-control server

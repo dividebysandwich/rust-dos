@@ -13,14 +13,6 @@ fn active_rows(cpu: &Cpu) -> u8 {
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
-    cpu.bus.log_string(&format!(
-        "[BIOS] INT 10h Called. AH={:02X}, AL={:02X}, BX={:04X}, CX={:04X}, DX={:04X}",
-        ah,
-        cpu.get_al(),
-        cpu.bx(),
-        cpu.cx(),
-        cpu.dx()
-    ));
 
     match ah {
         // AH = 00h: Set Video Mode
@@ -201,8 +193,6 @@ pub fn handle(cpu: &mut Cpu) {
         0x05 => {
             let page = cpu.get_reg8(Register::AL);
             cpu.bus.write_8(0x0462, page); // Update BDA Active Page
-            cpu.bus
-                .log_string(&format!("[BIOS] Set Active Page to {}", page));
         }
 
         // AH = 06h: Scroll Up
@@ -718,10 +708,6 @@ pub fn handle(cpu: &mut Cpu) {
                         .log_string(&format!("[BIOS] Unhandled INT 10h AH=12h BL={:02X}", bl));
                 }
             }
-            cpu.bus.log_string(&format!(
-                "[BIOS] AH=12 Return: ax={:04X} bx={:04X} cx={:04X}",
-                cpu.ax(), cpu.bx(), cpu.cx()
-            ));
         }
 
         // AH = 13h: Write String

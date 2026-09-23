@@ -574,69 +574,6 @@ fn run_file(m: &mut Machine, path: &Path, name: &OpcodeName, cfg: &Config) -> Fi
     r
 }
 
-/// Silences stdout at the file descriptor level while the emulator runs:
-/// it prints every log line, and the report would drown in them. (With
-/// libtest's output capture, i.e. without --nocapture, prints go to the
-/// capture buffer instead and this has no effect.)
-#[cfg(unix)]
-mod quiet {
-    use std::io::Write;
-    use std::os::fd::AsRawFd;
-
-    unsafe extern "C" {
-        fn dup(fd: i32) -> i32;
-        fn dup2(src: i32, dst: i32) -> i32;
-        fn close(fd: i32) -> i32;
-    }
-
-    pub struct Stdout {
-        saved: i32,
-    }
-
-    impl Stdout {
-        pub fn silence() -> Option<Self> {
-            let _ = std::io::stdout().flush();
-            let null = std::fs::OpenOptions::new()
-                .write(true)
-                .open("/dev/null")
-                .ok()?;
-            // SAFETY: plain descriptor calls on fd 1 and descriptors we own.
-            unsafe {
-                let saved = dup(1);
-                if saved < 0 {
-                    return None;
-                }
-                if dup2(null.as_raw_fd(), 1) < 0 {
-                    close(saved);
-                    return None;
-                }
-                Some(Self { saved })
-            }
-        }
-    }
-
-    impl Drop for Stdout {
-        fn drop(&mut self) {
-            let _ = std::io::stdout().flush();
-            // SAFETY: `saved` is the descriptor dup'ed in `silence`.
-            unsafe {
-                dup2(self.saved, 1);
-                close(self.saved);
-            }
-        }
-    }
-}
-
-#[cfg(not(unix))]
-mod quiet {
-    pub struct Stdout;
-    impl Stdout {
-        pub fn silence() -> Option<Self> {
-            None
-        }
-    }
-}
-
 fn pct(n: u64, d: u64) -> String {
     if d == 0 {
         "-".to_string()
@@ -830,7 +767,6 @@ fn sst386_real_mode() {
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let slots: Vec<Mutex<Option<FileResult>>> = files.iter().map(|_| Mutex::new(None)).collect();
-    let silence = quiet::Stdout::silence();
     let worker_panic = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
@@ -863,7 +799,6 @@ fn sst386_real_mode() {
             .map(machine::panic_message)
             .next()
     });
-    drop(silence);
     std::panic::set_hook(default_hook);
     if let Some(msg) = worker_panic {
         panic!("a harness worker panicked outside a test: {msg}");
