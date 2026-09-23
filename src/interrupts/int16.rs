@@ -15,29 +15,8 @@ pub fn handle(cpu: &mut Cpu) {
                     .log_string(&format!("[BIOS] INT 16h Read Key: {:04X}", key_code));
                 cpu.set_ax(key_code);
             } else {
-                // Buffer empty: BLOCK.
-                // Since we are in an HLE Trap, the specific 'INT 16h' caller address
-                // is sitting on the top of the Stack (pushed by the CPU before jumping to the trap).
-
-                // Stack Layout: [IP, CS, Flags] (Top down)
-                // We need to modify the IP at [SS:SP].
-
-                let sp = cpu.sp();
-                let ss = cpu.ss();
-                let stack_addr = cpu.get_physical_addr(ss, sp);
-
-                // Read the return IP from the stack
-                let ret_ip = cpu.bus.read_16(stack_addr);
-
-                // Subtract 2 bytes (Size of 'INT 16h' instruction: CD 16)
-                // This ensures that when we 'IRET' later, we land back on the INT 16 instruction.
-                let retry_ip = ret_ip.wrapping_sub(2);
-
-                // Write it back to the stack
-                cpu.bus.write_16(stack_addr, retry_ip);
-
-                // Nothing to do until a key or timer interrupt arrives.
-                cpu.idle = true;
+                // Buffer empty: wait in the BIOS for a keystroke.
+                cpu.hle_wait();
             }
         }
 

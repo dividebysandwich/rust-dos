@@ -198,6 +198,9 @@ pub struct Cpu {
     /// keyboard buffer). The main loop then skips ahead to the next timer
     /// event instead of spinning through the retry loop, like it does for HLT.
     pub idle: bool,
+    /// Set by a BIOS or DOS service that has to wait (for a keystroke): the
+    /// service trap runs again instead of returning to the caller.
+    pub hle_retry: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -294,6 +297,7 @@ impl Cpu {
             exceptions: 0,
             exception_log: VecDeque::with_capacity(fault::EXCEPTION_LOG_LEN),
             idle: false,
+            hle_retry: false,
         }
     }
 
@@ -322,6 +326,16 @@ impl Cpu {
                 self.eip()
             ));
         }
+    }
+
+    /// A BIOS or DOS service can't finish yet (no keystroke): run it again
+    /// when the CPU gets back to it, after the interrupts that could bring
+    /// what it waits for. The caller's return frame stays on the stack, so
+    /// this works however the service was called (INT, or a far call with
+    /// the flags pushed, as DOS extenders and TSRs chain interrupts).
+    pub fn hle_wait(&mut self) {
+        self.hle_retry = true;
+        self.idle = true;
     }
 
     /// PSP segment for programs started from the shell: right above the

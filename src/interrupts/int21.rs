@@ -299,10 +299,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     print_char(&mut cpu.bus, ascii);
                 }
             } else {
-                // Block by rewinding IP so the BOP trap re-fires next cycle.
-                let phys_sp = ((cpu.ss() as usize) * 16 + cpu.sp() as usize) & 0xFFFFF;
-                let saved_ip = cpu.bus.read_16(phys_sp);
-                cpu.bus.write_16(phys_sp, saved_ip.wrapping_sub(4));
+                cpu.hle_wait();
             }
         }
 
@@ -312,17 +309,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let ascii = (key_code & 0xFF) as u8;
                 cpu.set_reg8(Register::AL, ascii);
             } else {
-                // Retry logic
-                // Calculate Physical Address of the Stack Pointer (SS:SP)
-                let sp = cpu.sp();
-                let ss = cpu.ss();
-                let phys_sp = (ss as usize * 16) + sp as usize; // TODO: Check phys addr calc
-
-                let saved_ip = cpu.bus.read_16(phys_sp & 0xFFFFF);
-
-                // Substract 4 and make the CPU re-execute the trap instruction after returning.
-                cpu.bus
-                    .write_16(phys_sp & 0xFFFFF, saved_ip.wrapping_sub(4));
+                cpu.hle_wait();
             }
         }
 
@@ -333,9 +320,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let ascii = (key_code & 0xFF) as u8;
                 cpu.set_reg8(Register::AL, ascii);
             } else {
-                let phys_sp = ((cpu.ss() as usize) * 16 + cpu.sp() as usize) & 0xFFFFF;
-                let saved_ip = cpu.bus.read_16(phys_sp);
-                cpu.bus.write_16(phys_sp, saved_ip.wrapping_sub(4));
+                cpu.hle_wait();
             }
         }
 

@@ -427,7 +427,15 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     match ram[phys_ip + 1] {
         0x38 => {
             crate::interrupts::handle_hle(cpu, vector);
-            crate::interrupts::return_from_hle(cpu, vector);
+            if cpu.hle_retry {
+                // Stay on the trap, with interrupts on as the BIOS's own
+                // wait loops have them; the caller's flags come back with
+                // its return frame.
+                cpu.hle_retry = false;
+                cpu.set_cpu_flag(CpuFlags::IF, true);
+            } else {
+                crate::interrupts::return_from_hle(cpu, vector);
+            }
         }
         0x39 => {
             cpu.set_ip(cpu.ip().wrapping_add(3));
