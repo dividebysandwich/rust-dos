@@ -1,5 +1,5 @@
 use bitflags::bitflags;
-use iced_x86::{Decoder, DecoderOptions, MemorySize, Register};
+use iced_x86::{Decoder, DecoderOptions, MemorySize};
 use std::collections::VecDeque;
 
 use crate::bus::Bus;
@@ -7,7 +7,7 @@ use crate::f80::F80;
 use crate::shell::get_shell_code;
 
 mod regs;
-pub use regs::{AR_DATA_RW, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, Seg, SegCache};
+pub use regs::{Seg, SegCache};
 
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;

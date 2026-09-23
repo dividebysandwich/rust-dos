@@ -1,4 +1,4 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
+use iced_x86::{Instruction, Mnemonic, OpKind, Register};
 use crate::cpu::{Cpu, CpuFlags};
 use super::utils::{calculate_addr, is_8bit_reg};
 
@@ -27,7 +27,7 @@ where F: Fn(u16, u16) -> u16 {
     // Determine operand size based on Destination (Op0)
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -88,7 +88,7 @@ where F: Fn(u16, u16) -> u16 {
 fn test(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -128,7 +128,7 @@ fn test(cpu: &mut Cpu, instr: &Instruction) {
 fn not(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -171,7 +171,7 @@ fn get_shift_count(cpu: &Cpu, instr: &Instruction) -> u32 {
 fn shift_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -234,7 +234,7 @@ fn shift_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
 fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 

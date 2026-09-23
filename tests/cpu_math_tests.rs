@@ -304,3 +304,37 @@ fn test_divide_error_returns_to_faulting_instruction() {
         assert_eq!(cpu.bus.read_16(stack + 2), 0x1000, "return CS");
     }
 }
+
+#[test]
+fn signed_byte_memory_operands_are_8_bit() {
+    // iced gives NEG/SAR/IMUL/IDIV byte operands the size Int8 rather than
+    // UInt8; they must still operate on one byte.
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.set_bx(0x2000);
+    cpu.bus.write_8(0x2001, 0x77);
+
+    // F6 1F -> NEG byte [bx]
+    cpu.bus.write_8(0x2000, 0x05);
+    run_cpu_code(&mut cpu, &[0xF6, 0x1F]);
+    assert_eq!(cpu.bus.read_8(0x2000), 0xFB);
+
+    // D0 3F -> SAR byte [bx], 1
+    cpu.bus.write_8(0x2000, 0x80);
+    run_cpu_code(&mut cpu, &[0xD0, 0x3F]);
+    assert_eq!(cpu.bus.read_8(0x2000), 0xC0);
+
+    // F6 2F -> IMUL byte [bx]: AX = AL * m8 = -2 * 3
+    cpu.set_ax(0x00FE);
+    cpu.bus.write_8(0x2000, 0x03);
+    run_cpu_code(&mut cpu, &[0xF6, 0x2F]);
+    assert_eq!(cpu.ax(), 0xFFFA);
+
+    // F6 3F -> IDIV byte [bx]: -7 / 2 = -3 remainder -1
+    cpu.set_ax(0xFFF9);
+    cpu.bus.write_8(0x2000, 0x02);
+    run_cpu_code(&mut cpu, &[0xF6, 0x3F]);
+    assert_eq!(cpu.get_al(), 0xFD);
+    assert_eq!(cpu.get_ah(), 0xFF);
+
+    assert_eq!(cpu.bus.read_8(0x2001), 0x77, "the byte after the operand is untouched");
+}

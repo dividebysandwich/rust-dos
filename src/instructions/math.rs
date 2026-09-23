@@ -1,4 +1,4 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
+use iced_x86::{Instruction, Mnemonic, OpKind, Register};
 use crate::cpu::{Cpu, CpuFlags};
 use crate::interrupts;
 use super::utils::{calculate_addr, is_8bit_reg};
@@ -77,7 +77,7 @@ fn write_back(cpu: &mut Cpu, instr: &Instruction, res: u16, addr: Option<usize>,
 fn add(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
     
@@ -96,7 +96,7 @@ fn add(cpu: &mut Cpu, instr: &Instruction) {
 fn adc(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -115,7 +115,7 @@ fn adc(cpu: &mut Cpu, instr: &Instruction) {
 fn sub(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -134,7 +134,7 @@ fn sub(cpu: &mut Cpu, instr: &Instruction) {
 fn sbb(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -153,7 +153,7 @@ fn sbb(cpu: &mut Cpu, instr: &Instruction) {
 fn cmp(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
     let (dest, _) = get_op0_val(cpu, instr, is_8bit);
@@ -169,7 +169,7 @@ fn cmp(cpu: &mut Cpu, instr: &Instruction) {
 fn inc(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -197,7 +197,7 @@ fn inc(cpu: &mut Cpu, instr: &Instruction) {
 fn dec(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -230,7 +230,7 @@ fn dec(cpu: &mut Cpu, instr: &Instruction) {
 fn neg(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -253,7 +253,7 @@ fn neg(cpu: &mut Cpu, instr: &Instruction) {
 fn mul(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -284,7 +284,7 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op_count() == 1 {
         let is_8bit = match instr.op0_kind() {
             OpKind::Register => is_8bit_reg(instr.op0_register()),
-            OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+            OpKind::Memory => instr.memory_size().size() == 1,
             _ => false,
         };
 
@@ -358,7 +358,7 @@ fn divide_error(cpu: &mut Cpu, instr: &Instruction) {
 fn div(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 
@@ -480,7 +480,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
 fn idiv(cpu: &mut Cpu, instr: &Instruction) {
     let is_8bit = match instr.op0_kind() {
         OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size() == MemorySize::UInt8,
+        OpKind::Memory => instr.memory_size().size() == 1,
         _ => false,
     };
 

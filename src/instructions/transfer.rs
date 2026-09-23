@@ -1,4 +1,4 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, Register, MemorySize};
+use iced_x86::{Instruction, Mnemonic, OpKind, Register};
 use crate::cpu::{Cpu, CpuFlags};
 use super::utils::{calculate_addr, get_effective_addr, is_8bit_reg};
 
@@ -62,7 +62,7 @@ fn mov(cpu: &mut Cpu, instr: &Instruction) {
             is_8bit_reg(instr.op1_register())
         } else {
             // If immediate, trust the memory size hint from the instruction
-            instr.memory_size() == MemorySize::UInt8
+            instr.memory_size().size() == 1
         };
 
         if is_8bit_dest {
@@ -128,7 +128,7 @@ fn xchg(cpu: &mut Cpu, instr: &Instruction) {
     } else if op1 == OpKind::Register {
         is_8bit_reg(instr.op1_register())
     } else {
-        instr.memory_size() == MemorySize::UInt8
+        instr.memory_size().size() == 1
     };
 
     // Read Operand 0
