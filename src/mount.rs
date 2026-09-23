@@ -7,7 +7,8 @@
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions};
 use std::path::{Path, PathBuf};
 
-pub const MOUNT_USAGE: &str = "Usage: MOUNT [drive path [floppy|hdd|cdrom] [-label NAME] [-ro]]\r\n       MOUNT -u drive\r\n";
+pub const MOUNT_USAGE: &str =
+    "Usage: MOUNT [drive path [floppy|hdd|cdrom] [-label NAME] [-ro]]\r\n       MOUNT -u drive\r\n";
 
 /// A parsed request to mount `path` as `drive`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,8 +118,8 @@ pub fn parse_mount_spec(
         match token.to_ascii_lowercase().as_str() {
             "-t" => {
                 let value = iter.next().ok_or("-t needs a drive type")?;
-                opts.kind = parse_kind(value)
-                    .ok_or_else(|| format!("Unknown drive type '{}'", value))?;
+                opts.kind =
+                    parse_kind(value).ok_or_else(|| format!("Unknown drive type '{}'", value))?;
             }
             "-label" => {
                 let value = iter.next().ok_or("-label needs a name")?;
@@ -126,8 +127,8 @@ pub fn parse_mount_spec(
             }
             "-ro" => opts.read_only = true,
             other => {
-                opts.kind = parse_kind(other)
-                    .ok_or_else(|| format!("Unknown option '{}'", token))?;
+                opts.kind =
+                    parse_kind(other).ok_or_else(|| format!("Unknown option '{}'", token))?;
             }
         }
     }
@@ -198,11 +199,20 @@ mod tests {
         let home = Path::new("/home/u");
         let base = Path::new("/cfg");
         assert_eq!(expand_host_path("~", base, Some(home)), home);
-        assert_eq!(expand_host_path("~/dos", base, Some(home)), home.join("dos"));
-        assert_eq!(expand_host_path("games", base, Some(home)), base.join("games"));
+        assert_eq!(
+            expand_host_path("~/dos", base, Some(home)),
+            home.join("dos")
+        );
+        assert_eq!(
+            expand_host_path("games", base, Some(home)),
+            base.join("games")
+        );
         assert_eq!(expand_host_path("~/x", base, None), base.join("~/x"));
         #[cfg(unix)]
-        assert_eq!(expand_host_path("/abs", base, Some(home)), Path::new("/abs"));
+        assert_eq!(
+            expand_host_path("/abs", base, Some(home)),
+            Path::new("/abs")
+        );
     }
 
     #[test]
@@ -229,7 +239,10 @@ mod tests {
     fn mount_commands() {
         let cwd = Path::new("/w");
         assert_eq!(parse_mount_command("", cwd, None), Ok(MountCmd::List));
-        assert_eq!(parse_mount_command("-u d:", cwd, None), Ok(MountCmd::Unmount(3)));
+        assert_eq!(
+            parse_mount_command("-u d:", cwd, None),
+            Ok(MountCmd::Unmount(3))
+        );
         assert!(parse_mount_command("-u", cwd, None).is_err());
         assert!(parse_mount_command("dd x", cwd, None).is_err());
         match parse_mount_command(r#"e "my dir" floppy"#, cwd, None).unwrap() {

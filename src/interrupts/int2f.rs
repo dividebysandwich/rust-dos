@@ -59,10 +59,8 @@ fn mscdex(cpu: &mut Cpu, function: u8) {
         // Send device driver request: CX = drive, ES:BX -> request header
         0x10 => device_request(cpu),
         _ => {
-            cpu.bus.log_string(&format!(
-                "[MSCDEX] Unhandled INT 2Fh AX={:04X}",
-                cpu.ax
-            ));
+            cpu.bus
+                .log_string(&format!("[MSCDEX] Unhandled INT 2Fh AX={:04X}", cpu.ax));
         }
     }
 }

@@ -71,7 +71,10 @@ fn mount_lists_mounts_and_unmounts() {
 
     let out = run(
         &mut cpu,
-        &format!("MOUNT a {} floppy -label disk1", base.join("floppy").display()),
+        &format!(
+            "MOUNT a {} floppy -label disk1",
+            base.join("floppy").display()
+        ),
     );
     assert!(out.starts_with("Drive A: is mounted as floppy"), "{}", out);
     assert_eq!(cpu.bus.disk.drive_kind(0), Some(DriveKind::Floppy));
@@ -88,12 +91,22 @@ fn mount_lists_mounts_and_unmounts() {
 
     // Long host paths wrap at 80 columns, so compare the unwrapped text.
     let listing = run(&mut cpu, "MOUNT").replace('\n', "");
-    let floppy = format!("A:    floppy  DISK1       {}", base.join("floppy").display());
+    let floppy = format!(
+        "A:    floppy  DISK1       {}",
+        base.join("floppy").display()
+    );
     assert!(listing.contains(&floppy), "{}", listing);
-    let cd = format!("D:    cdrom   RUSTDOS     {} (read-only)", base.join("cd").display());
+    let cd = format!(
+        "D:    cdrom   RUSTDOS     {} (read-only)",
+        base.join("cd").display()
+    );
     assert!(listing.contains(&cd), "{}", listing);
     assert!(listing.contains("C:    hdd     RUSTDOS"), "{}", listing);
-    assert!(listing.ends_with("Z:    virtual RUSTDOS     (built-in)"), "{}", listing);
+    assert!(
+        listing.ends_with("Z:    virtual RUSTDOS     (built-in)"),
+        "{}",
+        listing
+    );
 
     assert_eq!(run(&mut cpu, "MOUNT -u a"), "Drive A: has been unmounted");
     assert!(!cpu.bus.disk.is_mounted(0));
@@ -105,8 +118,15 @@ fn mount_lists_mounts_and_unmounts() {
     assert!(out.starts_with("Missing host directory"), "{}", out);
     let out = run(&mut cpu, &format!("MOUNT e {} iso", base.display()));
     assert!(out.starts_with("Unknown option 'iso'"), "{}", out);
-    let out = run(&mut cpu, &format!("MOUNT e {}", base.join("nope").display()));
-    assert!(out.replace('\n', "").ends_with("is not a directory"), "{}", out);
+    let out = run(
+        &mut cpu,
+        &format!("MOUNT e {}", base.join("nope").display()),
+    );
+    assert!(
+        out.replace('\n', "").ends_with("is not a directory"),
+        "{}",
+        out
+    );
 }
 
 #[test]
@@ -139,14 +159,24 @@ fn dir_lists_any_drive() {
         label: Some("DATA".to_string()),
         read_only: false,
     };
-    cpu.bus.mount_drive(3, &base.join("d"), opts, false).unwrap();
+    cpu.bus
+        .mount_drive(3, &base.join("d"), opts, false)
+        .unwrap();
 
     let out = run(&mut cpu, "DIR D:\\SUB\\*.TXT");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], " Volume in drive D is DATA");
     assert_eq!(lines[1], " Directory of D:\\SUB");
-    assert!(lines[3].starts_with("LONGFILE TXT              1 "), "{}", lines[3]);
-    assert!(lines[4].starts_with("README   TXT              5 "), "{}", lines[4]);
+    assert!(
+        lines[3].starts_with("LONGFILE TXT              1 "),
+        "{}",
+        lines[3]
+    );
+    assert!(
+        lines[4].starts_with("README   TXT              5 "),
+        "{}",
+        lines[4]
+    );
     assert_eq!(lines[5].trim(), "2 file(s)              6 bytes");
     // Two 512-byte clusters used on an empty 1.44 MB floppy + the SUB dir
     assert_eq!(lines[6].trim(), "1,454,592 bytes free");
@@ -178,7 +208,11 @@ fn type_reads_drive_qualified_paths() {
 #[test]
 fn autoexec_lines_queue_before_autoexec_bat() {
     let base = scratch("autoexec", &["c"]);
-    fs::write(base.join("c/AUTOEXEC.BAT"), "@ECHO OFF\r\nREM setup\r\n\r\nGAME\r\n").unwrap();
+    fs::write(
+        base.join("c/AUTOEXEC.BAT"),
+        "@ECHO OFF\r\nREM setup\r\n\r\nGAME\r\n",
+    )
+    .unwrap();
     let mut cpu = Cpu::new(base.join("c"));
     cpu.bus.disk.set_current_drive(25); // AUTOEXEC.BAT is found on C: regardless
 

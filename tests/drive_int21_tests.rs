@@ -129,10 +129,20 @@ fn free_space_allocation_info_and_dpb() {
     let base = scratch("space", &["c", "a", "cd"]);
     let mut cpu = Cpu::new(base.join("c"));
     cpu.bus
-        .mount_drive(DRIVE_A, &base.join("a"), opts(DriveKind::Floppy, None), false)
+        .mount_drive(
+            DRIVE_A,
+            &base.join("a"),
+            opts(DriveKind::Floppy, None),
+            false,
+        )
         .unwrap();
     cpu.bus
-        .mount_drive(DRIVE_D, &base.join("cd"), opts(DriveKind::CdRom, None), false)
+        .mount_drive(
+            DRIVE_D,
+            &base.join("cd"),
+            opts(DriveKind::CdRom, None),
+            false,
+        )
         .unwrap();
 
     cpu.set_reg8(Register::DL, 1); // A:
@@ -189,10 +199,20 @@ fn ioctl_reports_drive_types() {
     fs::write(base.join("cd/DATA.DAT"), b"x").unwrap();
     let mut cpu = Cpu::new(base.join("c"));
     cpu.bus
-        .mount_drive(DRIVE_A, &base.join("a"), opts(DriveKind::Floppy, None), false)
+        .mount_drive(
+            DRIVE_A,
+            &base.join("a"),
+            opts(DriveKind::Floppy, None),
+            false,
+        )
         .unwrap();
     cpu.bus
-        .mount_drive(DRIVE_D, &base.join("cd"), opts(DriveKind::CdRom, None), false)
+        .mount_drive(
+            DRIVE_D,
+            &base.join("cd"),
+            opts(DriveKind::CdRom, None),
+            false,
+        )
         .unwrap();
 
     let removable = |cpu: &mut Cpu, bl: u8| {
@@ -234,7 +254,12 @@ fn read_only_drives_reject_writes() {
     fs::write(base.join("cd/DATA.DAT"), b"cd").unwrap();
     let mut cpu = Cpu::new(base.join("c"));
     cpu.bus
-        .mount_drive(DRIVE_D, &base.join("cd"), opts(DriveKind::CdRom, None), false)
+        .mount_drive(
+            DRIVE_D,
+            &base.join("cd"),
+            opts(DriveKind::CdRom, None),
+            false,
+        )
         .unwrap();
     let ro = MountOptions {
         read_only: true,
@@ -335,7 +360,12 @@ fn volume_labels_are_per_drive() {
     fs::write(base.join("c/RUSTDOS"), b"not a label").unwrap();
     let mut cpu = Cpu::new(base.join("c"));
     cpu.bus
-        .mount_drive(DRIVE_A, &base.join("a"), opts(DriveKind::Floppy, Some("mydisk")), false)
+        .mount_drive(
+            DRIVE_A,
+            &base.join("a"),
+            opts(DriveKind::Floppy, Some("mydisk")),
+            false,
+        )
         .unwrap();
     set_dta(&mut cpu);
 
@@ -361,7 +391,12 @@ fn fcb_search_honors_drive_byte_and_extended_fcbs() {
     fs::write(base.join("a/GAME.EXE"), b"x").unwrap();
     let mut cpu = Cpu::new(base.join("c"));
     cpu.bus
-        .mount_drive(DRIVE_A, &base.join("a"), opts(DriveKind::Floppy, Some("DISK1")), false)
+        .mount_drive(
+            DRIVE_A,
+            &base.join("a"),
+            opts(DriveKind::Floppy, Some("DISK1")),
+            false,
+        )
         .unwrap();
     set_dta(&mut cpu);
 

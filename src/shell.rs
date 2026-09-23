@@ -11,6 +11,7 @@ pub const SHELL_COMMAND_BOP: u8 = 0xFF;
 /// A Tiny "OS" written in Machine Code. Reads keys into a buffer at offset 0x0200
 /// On Enter, hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
 /// Handles backspace visually and in buffer
+#[rustfmt::skip] // keep one instruction per line
 pub fn get_shell_code() -> Vec<u8> {
     vec![
         // ----------------------------------------------------

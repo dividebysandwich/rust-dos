@@ -33,15 +33,13 @@ pub enum ConfigSource {
 pub enum Located {
     Found(PathBuf, ConfigSource),
     /// Nothing found; `default` is where a template should be written.
-    NotFound { default: Option<PathBuf> },
+    NotFound {
+        default: Option<PathBuf>,
+    },
 }
 
 /// Find the config file to use. An explicitly requested file must exist.
-pub fn locate(
-    cli: Option<&Path>,
-    cwd: &Path,
-    default: Option<PathBuf>,
-) -> Result<Located, String> {
+pub fn locate(cli: Option<&Path>, cwd: &Path, default: Option<PathBuf>) -> Result<Located, String> {
     if let Some(path) = cli {
         let path = cwd.join(path);
         if path.is_file() {
@@ -151,7 +149,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                 match tokenize(value).and_then(|t| parse_mount_spec(drive, &t, base_dir, home)) {
                     Ok(spec) => {
                         if config.drive(drive).is_some() {
-                            warn(format!("drive {}: defined twice, using the last one", letter));
+                            warn(format!(
+                                "drive {}: defined twice, using the last one",
+                                letter
+                            ));
                             config.drives.retain(|s| s.drive != drive);
                         }
                         config.drives.push(spec);
@@ -267,13 +268,23 @@ mod tests {
         fs::write(cwd.join(FILE_NAME), "").unwrap();
         assert_eq!(
             locate(None, &cwd, Some(default.clone())),
-            Ok(Located::Found(cwd.join(FILE_NAME), ConfigSource::WorkingDir))
+            Ok(Located::Found(
+                cwd.join(FILE_NAME),
+                ConfigSource::WorkingDir
+            ))
         );
 
         // Relative --config paths are taken from the working directory
         assert_eq!(
-            locate(Some(Path::new("../custom.conf")), &cwd, Some(default.clone())),
-            Ok(Located::Found(cwd.join("../custom.conf"), ConfigSource::CommandLine))
+            locate(
+                Some(Path::new("../custom.conf")),
+                &cwd,
+                Some(default.clone())
+            ),
+            Ok(Located::Found(
+                cwd.join("../custom.conf"),
+                ConfigSource::CommandLine
+            ))
         );
         assert!(locate(Some(Path::new("missing.conf")), &cwd, Some(default)).is_err());
     }
@@ -346,7 +357,12 @@ mod tests {
             "line 11: expected key=value",
             "line 12: unknown section [sound]",
         ] {
-            assert!(joined.contains(expected), "missing '{}' in:\n{}", expected, joined);
+            assert!(
+                joined.contains(expected),
+                "missing '{}' in:\n{}",
+                expected,
+                joined
+            );
         }
         assert_eq!(config.warnings.len(), 9, "{}", joined);
         assert_eq!(config.drive(3).unwrap().path, Path::new("/two"));

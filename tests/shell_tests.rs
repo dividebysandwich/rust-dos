@@ -68,7 +68,10 @@ fn shell_code_branches_land_on_instructions() {
     assert_eq!(last.near_branch_target(), PROMPT_START);
     let (_, trap) = &decoded[decoded.len() - 2];
     assert!(trap.is_none());
-    assert_eq!(get_shell_code()[(*last_ip - SHELL_BASE) as usize - 1], SHELL_COMMAND_BOP);
+    assert_eq!(
+        get_shell_code()[(*last_ip - SHELL_BASE) as usize - 1],
+        SHELL_COMMAND_BOP
+    );
 
     // The return address pushed for the trap is that JMP.
     let mov_ax = decoded

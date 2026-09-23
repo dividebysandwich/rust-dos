@@ -92,9 +92,15 @@ impl ShellCommand for DirCommand {
 
         let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
         if label.is_empty() {
-            print_string(cpu, &format!(" Volume in drive {} has no label\r\n", letter));
+            print_string(
+                cpu,
+                &format!(" Volume in drive {} has no label\r\n", letter),
+            );
         } else {
-            print_string(cpu, &format!(" Volume in drive {} is {}\r\n", letter, label));
+            print_string(
+                cpu,
+                &format!(" Volume in drive {} is {}\r\n", letter, label),
+            );
         }
         let directory = cpu.bus.disk.qualify_directory(&spec).unwrap_or_default();
         print_string(cpu, &format!(" Directory of {}\r\n\r\n", directory));
@@ -270,9 +276,7 @@ impl ShellCommand for CdCommand {
         if rest.is_empty() {
             let drive = drive_spec.unwrap_or(cpu.bus.disk.get_current_drive());
             match cpu.bus.disk.get_current_directory_of(drive) {
-                Some(cwd) => {
-                    print_string(cpu, &format!("{}:\\{}\r\n", drive_letter(drive), cwd))
-                }
+                Some(cwd) => print_string(cpu, &format!("{}:\\{}\r\n", drive_letter(drive), cwd)),
                 None => print_string(cpu, "Invalid drive specification\r\n"),
             }
         } else if !cpu.bus.disk.set_current_directory(path) {
@@ -315,7 +319,10 @@ impl ShellCommand for MountCommand {
             }
             Ok(MountCmd::Mount(spec)) => {
                 let kind = spec.opts.kind;
-                match cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, false) {
+                match cpu
+                    .bus
+                    .mount_drive(spec.drive, &spec.path, spec.opts, false)
+                {
                     Ok(root) => {
                         let msg = format!(
                             "Drive {}: is mounted as {} {}\r\n",

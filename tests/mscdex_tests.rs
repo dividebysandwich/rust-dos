@@ -50,8 +50,12 @@ fn mscdex_reports_mounted_cd_drives() {
     cpu.bus
         .mount_drive(3, &base.join("d"), MountOptions::default(), false)
         .unwrap();
-    cpu.bus.mount_drive(4, &base.join("cd1"), cdrom(), false).unwrap();
-    cpu.bus.mount_drive(6, &base.join("cd2"), cdrom(), false).unwrap();
+    cpu.bus
+        .mount_drive(4, &base.join("cd1"), cdrom(), false)
+        .unwrap();
+    cpu.bus
+        .mount_drive(6, &base.join("cd2"), cdrom(), false)
+        .unwrap();
 
     int2f(&mut cpu, 0x1500, 0, 0);
     assert_eq!((cpu.bx, cpu.cx), (2, 4));
@@ -75,7 +79,9 @@ fn mscdex_reports_mounted_cd_drives() {
 fn device_requests_answer_ioctl_queries() {
     let base = scratch("ioctl", &["c", "cd"]);
     let mut cpu = Cpu::new(base.join("c"));
-    cpu.bus.mount_drive(3, &base.join("cd"), cdrom(), false).unwrap();
+    cpu.bus
+        .mount_drive(3, &base.join("cd"), cdrom(), false)
+        .unwrap();
 
     let header = 0x30000; // 3000:0000
     let buffer = 0x31000; // 3100:0000
