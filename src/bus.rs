@@ -4,8 +4,16 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 
-use crate::disk::DiskController;
+use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
 use crate::video::{self, ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
+
+/// ROM table of media descriptor bytes, one per drive letter. INT 21h
+/// AH=1Bh/1Ch return a far pointer (F000:E900+drive) into it.
+pub const MEDIA_ID_TABLE: usize = 0xFE900;
+/// ROM table of DOS Drive Parameter Blocks for INT 21h AH=1Fh/32h, one
+/// `DPB_SIZE` slot per drive letter.
+pub const DPB_TABLE: usize = 0xFEA00;
+pub const DPB_SIZE: usize = 0x40;
 
 pub trait Device {
     /// Return the set of I/O ports this device owns.
@@ -232,7 +240,111 @@ impl Bus {
         // still want mcb::alloc to work for tests and any early allocation.
         crate::mcb::init_empty(&mut bus);
 
+        // Equipment word, hard disk count and DPBs reflect the drives C:/Z:.
+        bus.sync_drive_bda();
+
         bus
+    }
+
+    /// Mount a host directory as a DOS drive and refresh the BIOS view of
+    /// the drive set. See `DiskController::mount`.
+    pub fn mount_drive(
+        &mut self,
+        drive: u8,
+        path: &std::path::Path,
+        opts: MountOptions,
+        replace: bool,
+    ) -> Result<std::path::PathBuf, String> {
+        let result = self.disk.mount(drive, path, opts, replace);
+        self.sync_drive_bda();
+        result
+    }
+
+    /// Unmount a DOS drive and refresh the BIOS view of the drive set.
+    pub fn unmount_drive(&mut self, drive: u8) -> Result<(), String> {
+        let result = self.disk.unmount(drive);
+        self.sync_drive_bda();
+        result
+    }
+
+    /// Mirror the mounted drives into the BIOS data area and the ROM tables
+    /// DOS hands out pointers to. Must run whenever the drive set changes.
+    pub fn sync_drive_bda(&mut self) {
+        // Equipment word: bit 0 = floppy present, bits 6-7 = floppy count - 1.
+        // Only A: and B: are BIOS floppy units. Other bits are left alone.
+        let floppies = (0..2)
+            .filter(|&d| self.disk.drive_kind(d) == Some(DriveKind::Floppy))
+            .count() as u16;
+        let mut equipment = self.read_16(0x0410) & !0x00C1;
+        if floppies > 0 {
+            equipment |= 0x0001 | ((floppies - 1) << 6);
+        }
+        self.write_16(0x0410, equipment);
+
+        // 0x0475: number of fixed disks (INT 13h units 80h+).
+        let hard_disks = self.disk.drives_of_kind(DriveKind::HardDisk).len();
+        self.write_8(0x0475, hard_disks.min(0xFF) as u8);
+
+        // CD-ROMs are redirector drives and have no DPB.
+        let with_dpb: Vec<(u8, DriveKind)> = (0..LASTDRIVE)
+            .filter_map(|d| self.disk.drive_kind(d).map(|k| (d, k)))
+            .filter(|&(_, k)| k != DriveKind::CdRom)
+            .collect();
+        for drive in 0..LASTDRIVE {
+            let media = self.disk.drive_kind(drive).map_or(0, |k| k.media_descriptor());
+            self.write_8(MEDIA_ID_TABLE + drive as usize, media);
+            let base = DPB_TABLE + drive as usize * DPB_SIZE;
+            for i in 0..DPB_SIZE {
+                self.write_8(base + i, 0);
+            }
+        }
+        for (i, &(drive, kind)) in with_dpb.iter().enumerate() {
+            let next = with_dpb.get(i + 1).map(|&(d, _)| d);
+            self.write_dpb(drive, kind, next);
+        }
+    }
+
+    /// Fill in a DOS 4+ style Drive Parameter Block with a plausible FAT
+    /// layout for the drive's reported geometry.
+    fn write_dpb(&mut self, drive: u8, kind: DriveKind, next: Option<u8>) {
+        let (spc, bps, total) = kind.geometry();
+        let base = DPB_TABLE + drive as usize * DPB_SIZE;
+        let (root_entries, sectors_per_fat): (u16, u16) = match kind {
+            DriveKind::Floppy => (224, 9),
+            _ => (512, ((total as u32 + 2) * 2).div_ceil(bps as u32) as u16),
+        };
+        let reserved: u16 = 1;
+        let fat_count: u16 = 2;
+        let first_dir_sector = reserved + fat_count * sectors_per_fat;
+        let root_sectors = (root_entries as u32 * 32).div_ceil(bps as u32) as u16;
+
+        self.write_8(base, drive); // 00: drive number (0=A)
+        self.write_8(base + 0x01, drive); // 01: unit within driver
+        self.write_16(base + 0x02, bps); // 02: bytes per sector
+        self.write_8(base + 0x04, (spc - 1) as u8); // 04: sectors per cluster - 1
+        self.write_8(base + 0x05, spc.trailing_zeros() as u8); // 05: cluster shift
+        self.write_16(base + 0x06, reserved); // 06: reserved sectors
+        self.write_8(base + 0x08, fat_count as u8); // 08: number of FATs
+        self.write_16(base + 0x09, root_entries); // 09: root directory entries
+        self.write_16(base + 0x0B, first_dir_sector + root_sectors); // 0B: first data sector
+        self.write_16(base + 0x0D, total.saturating_add(1)); // 0D: highest cluster
+        self.write_16(base + 0x0F, sectors_per_fat); // 0F: sectors per FAT
+        self.write_16(base + 0x11, first_dir_sector); // 11: first directory sector
+        self.write_8(base + 0x17, kind.media_descriptor()); // 17: media ID
+        self.write_8(base + 0x18, 0x00); // 18: disk accessed
+        // 19: far pointer to the next DPB, FFFF:FFFF ends the chain
+        match next {
+            Some(n) => {
+                self.write_16(base + 0x19, (DPB_TABLE + n as usize * DPB_SIZE - 0xF0000) as u16);
+                self.write_16(base + 0x1B, 0xF000);
+            }
+            None => {
+                self.write_16(base + 0x19, 0xFFFF);
+                self.write_16(base + 0x1B, 0xFFFF);
+            }
+        }
+        self.write_16(base + 0x1D, 2); // 1D: cluster to start free search
+        self.write_16(base + 0x1F, 0xFFFF); // 1F: free clusters unknown
     }
 
     /// Installs a Magic Trap (FE 38 <Vector> CF) at the given Physical Address

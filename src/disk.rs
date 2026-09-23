@@ -7,6 +7,141 @@ use std::path::{Path, PathBuf};
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
 pub const FIRST_USER_HANDLE: u16 = 5;
 
+// Drive numbers are 0-based (0=A:, 2=C:, 25=Z:).
+pub const DRIVE_C: u8 = 2;
+pub const DRIVE_Z: u8 = 25;
+/// Number of drive letters reported to programs (LASTDRIVE=Z).
+pub const LASTDRIVE: u8 = 26;
+
+/// Volume label used when a mount doesn't specify one.
+pub const DEFAULT_LABEL: &str = "RUSTDOS";
+
+/// Handles for Z: virtual files live in their own range with no backing file.
+const VIRTUAL_HANDLE_BASE: u16 = 0xAA00;
+
+/// Usable data clusters on a 1.44 MB floppy with 512-byte clusters.
+const FLOPPY_CLUSTERS: u16 = 2847;
+
+pub fn drive_letter(drive: u8) -> char {
+    (b'A' + drive) as char
+}
+
+/// Split an optional leading "X:" off a DOS path. Works on bytes so that a
+/// lossily-decoded non-ASCII first character can never cause a panic.
+pub fn parse_drive_prefix(path: &str) -> (Option<u8>, &str) {
+    let b = path.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        (Some(b[0].to_ascii_uppercase() - b'A'), &path[2..])
+    } else {
+        (None, path)
+    }
+}
+
+/// DOS volume labels are at most 11 uppercase characters.
+pub fn normalize_label(label: &str) -> String {
+    label.trim().to_ascii_uppercase().chars().take(11).collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriveKind {
+    Floppy,
+    HardDisk,
+    CdRom,
+    /// The built-in Z: drive holding in-memory files.
+    Virtual,
+}
+
+impl DriveKind {
+    pub fn is_removable(self) -> bool {
+        matches!(self, DriveKind::Floppy | DriveKind::CdRom)
+    }
+
+    /// Media descriptor byte as found in the FAT / DPB.
+    pub fn media_descriptor(self) -> u8 {
+        match self {
+            DriveKind::Floppy => 0xF0, // 3.5" 1.44 MB
+            _ => 0xF8,                 // fixed disk
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DriveKind::Floppy => "floppy",
+            DriveKind::HardDisk => "hdd",
+            DriveKind::CdRom => "cdrom",
+            DriveKind::Virtual => "virtual",
+        }
+    }
+
+    /// (sectors per cluster, bytes per sector, total clusters) as reported by
+    /// INT 21h AH=1Ch/36h. Hard disks keep the long-standing fake 80 MB and
+    /// CD-ROMs report what MSCDEX-style redirectors typically do.
+    pub fn geometry(self) -> (u16, u16, u16) {
+        match self {
+            DriveKind::Floppy => (1, 512, FLOPPY_CLUSTERS),
+            DriveKind::HardDisk => (8, 512, 20000),
+            DriveKind::CdRom => (1, 2048, 0xFFFF),
+            DriveKind::Virtual => (1, 512, 2000),
+        }
+    }
+}
+
+/// How a host directory is presented to DOS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountOptions {
+    pub kind: DriveKind,
+    pub label: Option<String>,
+    pub read_only: bool,
+}
+
+impl Default for MountOptions {
+    fn default() -> Self {
+        Self {
+            kind: DriveKind::HardDisk,
+            label: None,
+            read_only: false,
+        }
+    }
+}
+
+/// Public snapshot of a mounted drive.
+#[derive(Clone, Debug)]
+pub struct DriveInfo {
+    pub drive: u8,
+    pub kind: DriveKind,
+    /// Host directory; `None` for the virtual Z: drive.
+    pub root: Option<PathBuf>,
+    pub label: String,
+    /// True for CD-ROMs, `-ro` mounts and Z:.
+    pub read_only: bool,
+    pub current_dir: String,
+}
+
+impl DriveInfo {
+    pub fn letter(&self) -> char {
+        drive_letter(self.drive)
+    }
+}
+
+struct Drive {
+    kind: DriveKind,
+    root: PathBuf,       // Host directory acting as X:\ (empty for Z:)
+    current_dir: String, // DOS directory relative to root (e.g., "GAMES\DOOM")
+    label: String,
+    read_only: bool,
+}
+
+impl Drive {
+    fn writable(&self) -> bool {
+        !self.read_only
+    }
+}
+
+struct OpenFile {
+    file: File,
+    drive: u8,
+}
+
 /// Helper struct to transfer directory search results back to the CPU
 #[allow(dead_code)]
 pub struct DosDirEntry {
@@ -16,21 +151,24 @@ pub struct DosDirEntry {
     pub is_readonly: bool,
     pub dos_time: u16,
     pub dos_date: u16,
+    /// DOS attribute byte (0x01 R/O, 0x08 label, 0x10 dir, 0x20 archive).
+    pub attr: u8,
 }
 
 pub struct DiskController {
     // Map DOS Handle (u16) -> Rust File Object
-    open_files: HashMap<u16, File>,
+    open_files: HashMap<u16, OpenFile>,
     next_handle: u16,
 
     // File System State
-    root_path: PathBuf,                      // The host directory acting as C:\
-    current_dir: String,                     // The current DOS directory (e.g., "GAMES\DOOM")
+    drives: [Option<Drive>; 26],
     current_drive: u8,                       // 0=A, ... 2=C, ... 25=Z
     virtual_files: HashMap<String, Vec<u8>>, // In-memory files for Z: drive
 }
 
 impl DiskController {
+    /// Creates the controller with C: backed by `root_path` and the virtual
+    /// Z: drive. C: and Z: are always present; everything else is mounted.
     pub fn new(root_path: PathBuf) -> Self {
         // Ensure root path exists
         if !root_path.exists() {
@@ -47,184 +185,301 @@ impl DiskController {
         // Create a dummy COMMAND.COM on Z:
         virtual_files.insert("COMMAND.COM".to_string(), vec![0x90; 5000]);
 
+        let mut drives: [Option<Drive>; 26] = std::array::from_fn(|_| None);
+        drives[DRIVE_C as usize] = Some(Drive {
+            kind: DriveKind::HardDisk,
+            root: canonical,
+            current_dir: String::new(),
+            label: DEFAULT_LABEL.to_string(),
+            read_only: false,
+        });
+        drives[DRIVE_Z as usize] = Some(Drive {
+            kind: DriveKind::Virtual,
+            root: PathBuf::new(),
+            current_dir: String::new(),
+            label: DEFAULT_LABEL.to_string(),
+            read_only: true,
+        });
+
         Self {
             open_files: HashMap::new(),
             next_handle: FIRST_USER_HANDLE,
-            root_path: canonical,
-            current_dir: String::new(),
-            current_drive: 2, // Default to C:
+            drives,
+            current_drive: DRIVE_C, // Default to C:
             virtual_files,
         }
     }
 
+    // ========================================================================
+    // MOUNTS
+    // ========================================================================
+
     /// Host directory currently backing drive C:.
     pub fn root_path(&self) -> &Path {
-        &self.root_path
+        self.drives[DRIVE_C as usize]
+            .as_ref()
+            .map(|d| d.root.as_path())
+            .unwrap_or(Path::new(""))
     }
 
-    /// Remount drive C: onto a different host directory at runtime. All open
-    /// file handles are closed and the current directory resets to the root,
-    /// since neither would be meaningful on the new tree.
+    /// Remount drive C: onto a different host directory at runtime, keeping
+    /// its type and label. Files open on C: are closed; other drives are
+    /// unaffected.
     pub fn set_root(&mut self, path: &Path) -> Result<PathBuf, String> {
+        let opts = self
+            .drive(DRIVE_C)
+            .map(|d| MountOptions {
+                kind: d.kind,
+                label: Some(d.label.clone()),
+                read_only: d.read_only,
+            })
+            .unwrap_or_default();
+        self.mount(DRIVE_C, path, opts, true)
+    }
+
+    /// Mount a host directory as `drive`. Unless `replace` is set, the drive
+    /// must not already be mounted. Replacing closes the files open on it.
+    pub fn mount(
+        &mut self,
+        drive: u8,
+        path: &Path,
+        opts: MountOptions,
+        replace: bool,
+    ) -> Result<PathBuf, String> {
+        if drive >= LASTDRIVE {
+            return Err("Invalid drive letter".to_string());
+        }
+        let letter = drive_letter(drive);
+        if drive == DRIVE_Z || opts.kind == DriveKind::Virtual {
+            return Err(format!("Drive {}: is reserved", letter));
+        }
+        if self.is_mounted(drive) && !replace {
+            return Err(format!("Drive {}: is already mounted", letter));
+        }
         if !path.is_dir() {
             return Err(format!("{} is not a directory", path.display()));
         }
         let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
-        self.open_files.clear();
-        self.next_handle = FIRST_USER_HANDLE;
-        self.current_dir = String::new();
-        self.root_path = canonical.clone();
+
+        self.close_drive_files(drive);
+        self.drives[drive as usize] = Some(Drive {
+            kind: opts.kind,
+            root: canonical.clone(),
+            current_dir: String::new(),
+            label: opts
+                .label
+                .as_deref()
+                .map(normalize_label)
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| DEFAULT_LABEL.to_string()),
+            read_only: opts.read_only || opts.kind == DriveKind::CdRom,
+        });
         Ok(canonical)
     }
 
+    /// Unmount `drive`, closing its open files. C: and Z: cannot be removed.
+    /// If it was the current drive, C: becomes current.
+    pub fn unmount(&mut self, drive: u8) -> Result<(), String> {
+        if drive >= LASTDRIVE || !self.is_mounted(drive) {
+            return Err("Drive not mounted".to_string());
+        }
+        if drive == DRIVE_C || drive == DRIVE_Z {
+            return Err(format!(
+                "Drive {}: cannot be unmounted",
+                drive_letter(drive)
+            ));
+        }
+        self.close_drive_files(drive);
+        self.drives[drive as usize] = None;
+        if self.current_drive == drive {
+            self.current_drive = DRIVE_C;
+        }
+        Ok(())
+    }
+
+    fn close_drive_files(&mut self, drive: u8) {
+        self.open_files.retain(|_, f| f.drive != drive);
+    }
+
+    fn drive(&self, drive: u8) -> Option<&Drive> {
+        self.drives.get(drive as usize).and_then(|d| d.as_ref())
+    }
+
+    pub fn is_mounted(&self, drive: u8) -> bool {
+        self.drive(drive).is_some()
+    }
+
+    pub fn drive_kind(&self, drive: u8) -> Option<DriveKind> {
+        self.drive(drive).map(|d| d.kind)
+    }
+
+    pub fn is_writable(&self, drive: u8) -> bool {
+        self.drive(drive).is_some_and(|d| d.writable())
+    }
+
+    pub fn volume_label(&self, drive: u8) -> Option<String> {
+        self.drive(drive).map(|d| d.label.clone())
+    }
+
+    pub fn drive_info(&self, drive: u8) -> Option<DriveInfo> {
+        self.drive(drive).map(|d| DriveInfo {
+            drive,
+            kind: d.kind,
+            root: (d.kind != DriveKind::Virtual).then(|| d.root.clone()),
+            label: d.label.clone(),
+            read_only: !d.writable(),
+            current_dir: d.current_dir.to_ascii_uppercase(),
+        })
+    }
+
+    pub fn mounted_drives(&self) -> Vec<DriveInfo> {
+        (0..LASTDRIVE).filter_map(|d| self.drive_info(d)).collect()
+    }
+
+    /// Mounted drives of the given kind, in drive-letter order.
+    pub fn drives_of_kind(&self, kind: DriveKind) -> Vec<u8> {
+        (0..LASTDRIVE)
+            .filter(|&d| self.drive_kind(d) == Some(kind))
+            .collect()
+    }
+
+    /// Drive a file handle was opened on (Z: for virtual handles).
+    pub fn handle_drive(&self, handle: u16) -> Option<u8> {
+        if let Some(f) = self.open_files.get(&handle) {
+            return Some(f.drive);
+        }
+        if (VIRTUAL_HANDLE_BASE..VIRTUAL_HANDLE_BASE + 100).contains(&handle) {
+            return Some(DRIVE_Z);
+        }
+        None
+    }
+
     pub fn set_current_drive(&mut self, drive: u8) -> u8 {
-        // Only allow switching to C (2) or Z (25) for now
-        // Return the number of logical drives (26)
-        if drive == 2 || drive == 25 {
+        // Only switch to drives that exist; always report LASTDRIVE.
+        if self.is_mounted(drive) {
             self.current_drive = drive;
         }
-        26
+        LASTDRIVE
     }
 
     pub fn get_current_drive(&self) -> u8 {
         self.current_drive
     }
 
-    /// Resolves a DOS path (e.g., "GAMES\DOOM.EXE" or "..\FILE.TXT")
-    /// to a Host Path, ensuring it stays within `root_path`.
-    /// Handles case-insensitivity and short filenames (8.3).
-    pub fn resolve_path(&self, dos_path: &str) -> Option<PathBuf> {
-        // 1. Normalize Separators and Uppercase
-        let path_str = dos_path.replace('/', "\\");
+    // ========================================================================
+    // PATH RESOLUTION
+    // ========================================================================
 
-        // 2. Handle Drive Letter (Strip "C:")
-        let mut drive = self.current_drive;
-        let mut clean_path_str = path_str.clone();
-
-        // 2. Handle Drive Letter (e.g. "C:...")
-        if path_str.len() >= 2 && &path_str[1..2] == ":" {
-            let drive_char = path_str.chars().next().unwrap().to_ascii_uppercase();
-            if drive_char >= 'A' && drive_char <= 'Z' {
-                drive = (drive_char as u8) - b'A';
-                clean_path_str = path_str[2..].to_string();
-            } else {
-                return None; // Invalid drive
-            }
-        }
-
-        // If trying to access Z:, ensure it is a virtual path
-        if drive == 25 {
-            // Z: drive (Virtual)
-            // We return a special "PathBuf" which won't likely exist on host,
-            // but we can check `virtual_files` later?
-            // Actually, `resolve_path` returns `PathBuf` which is then used by `fs::` calls.
-            // This is a problem for virtual files.
-            // However, our `open_file` logic can check for Z: BEFORE calling `fs::open`.
-            // But `resolve_path` is also used for directory listing.
-
-            // For now, let's map Z: to a non-existent host path so standard FS calls fail,
-            // but we can recognize it.
-            // Or better: `resolve_path` is designed to return a Host Path.
-            // If it's a virtual file, we can't return a Host Path.
-            // Refactoring `resolve_path` to return an Enum would be big.
-            // Let's rely on callers checking drive/path logic.
-
-            // Wait, if I return None, `open_file` errors "Path not found".
-            // If I return a dummy path, `fs::open` errors "File not found".
-
-            // Let's modify `open_file` and `find_directory_entry` to check for Z: usage explicitly.
-            // Here, we just return None for Z: to indicate "Not on Host Disk C".
-            // BUT, `current_drive` matters.
-            return None;
-        }
-
-        if drive != 2 {
-            // We only support C: for actual Disk I/O currently.
-            return None;
-        }
-
-        let clean_path = &clean_path_str;
-
-        let is_absolute = clean_path.starts_with('\\');
-
-        // Build a list of logical components to traverse
-        let mut components: Vec<&str> = Vec::new();
-
-        if !is_absolute && !self.current_dir.is_empty() {
-            for part in self.current_dir.split('\\') {
-                if !part.is_empty() {
-                    components.push(part);
+    /// Split a DOS path into (drive, remainder), defaulting to the current
+    /// drive. Returns None for a malformed drive specifier such as "@:".
+    fn split_drive<'a>(&self, path: &'a str) -> Option<(u8, &'a str)> {
+        match parse_drive_prefix(path) {
+            (Some(d), rest) => Some((d, rest)),
+            (None, rest) => {
+                if rest.as_bytes().get(1) == Some(&b':') {
+                    None
+                } else {
+                    Some((self.current_drive, rest))
                 }
             }
         }
+    }
 
-        for part in clean_path.split('\\') {
-            if part == "." || part.is_empty() {
-                continue;
-            }
-            if part == ".." {
-                components.pop();
-            } else {
-                components.push(part);
+    /// Logical path components of `rest` on `drive`, applying the drive's
+    /// current directory for relative paths and folding "." / "..".
+    fn logical_components<'a>(drive: &'a Drive, rest: &'a str) -> Vec<&'a str> {
+        let mut components: Vec<&str> = Vec::new();
+        if !rest.starts_with('\\') {
+            components.extend(drive.current_dir.split('\\').filter(|p| !p.is_empty()));
+        }
+        for part in rest.split('\\') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    components.pop();
+                }
+                _ => components.push(part),
             }
         }
+        components
+    }
 
-        // Traverse and Resolve to Host Paths
-        let mut full_path = self.root_path.clone();
+    /// Resolves a DOS path (e.g., "GAMES\DOOM.EXE", "..\FILE.TXT" or
+    /// "D:\DATA") to a Host Path, ensuring it stays within the drive's root.
+    /// Handles case-insensitivity and short filenames (8.3).
+    pub fn resolve_path(&self, dos_path: &str) -> Option<PathBuf> {
+        self.locate(dos_path).map(|(_, path)| path)
+    }
 
-        for part in components {
-            // Security Check: If we pop below root, it's invalid?
-            // ".." handling above prevents growing stack incorrectly,
-            // but we must ensure we don't traverse out.
-            // Since we rebuild from root, ".." popping from vector works.
+    /// Like `resolve_path`, but also returns the drive the path is on.
+    fn locate(&self, dos_path: &str) -> Option<(u8, PathBuf)> {
+        let path_str = dos_path.replace('/', "\\");
+        let (drive, rest) = self.split_drive(&path_str)?;
+        self.resolve_on(drive, rest).map(|p| (drive, p))
+    }
 
+    fn resolve_on(&self, drive_num: u8, rest: &str) -> Option<PathBuf> {
+        let drive = self.drive(drive_num)?;
+        // Z: files are served from memory; callers check `is_virtual_file`.
+        if drive.kind == DriveKind::Virtual {
+            return None;
+        }
+
+        // Traverse and Resolve to Host Paths. ".." handling in
+        // logical_components can't climb above the root.
+        let mut full_path = drive.root.clone();
+        for part in Self::logical_components(drive, rest) {
             let actual_name = self.find_host_child(&full_path, part);
             full_path.push(actual_name);
         }
 
         // Final Security Check
-        if full_path.starts_with(&self.root_path) {
+        if full_path.starts_with(&drive.root) {
             Some(full_path)
         } else {
             None
         }
     }
 
+    /// Fully qualified DOS directory for the directory part of a search spec,
+    /// e.g. "*.EXE" on C: in GAMES -> "C:\GAMES", "D:SUB\*.*" -> "D:\SUB".
+    /// Purely logical; the directory need not exist.
+    pub fn qualify_directory(&self, spec: &str) -> Option<String> {
+        let normalized = spec.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized)?;
+        let drive = self.drive(drive_num)?;
+        let dir_part = match rest.rfind('\\') {
+            Some(0) => "\\",
+            Some(i) => &rest[..i],
+            None => "",
+        };
+        let components = Self::logical_components(drive, dir_part);
+        Some(format!(
+            "{}:\\{}",
+            drive_letter(drive_num),
+            components.join("\\").to_ascii_uppercase()
+        ))
+    }
+
     // Helper to check if a file exists on Z:
     pub fn is_virtual_file(&self, filename: &str) -> bool {
-        // Check if explicit Z:
-        let upper = filename.to_ascii_uppercase();
-        if upper.starts_with("Z:") {
-            let name = &upper[2..];
-            // Remove leading slash if any
-            let name = name.trim_start_matches('\\').trim_start_matches('/');
-            return self.virtual_files.contains_key(name);
-        }
+        self.virtual_file_name(filename)
+            .is_some_and(|name| self.virtual_files.contains_key(&name))
+    }
 
-        // If current drive is Z:
-        if self.current_drive == 25 {
-            let name = upper.trim_start_matches('\\').trim_start_matches('/');
-            return self.virtual_files.contains_key(name);
-        }
-
-        false
+    /// Z:-relative name of `filename` if it refers to the Z: drive.
+    fn virtual_file_name(&self, filename: &str) -> Option<String> {
+        let normalized = filename.replace('/', "\\");
+        let (drive, rest) = self.split_drive(&normalized)?;
+        (drive == DRIVE_Z).then(|| rest.trim_start_matches('\\').to_ascii_uppercase())
     }
 
     // Helper to get virtual file size
     pub fn get_virtual_file_size(&self, filename: &str) -> u32 {
-        let upper = filename.to_ascii_uppercase();
-        // Simplistic stripping
-        let name = if upper.starts_with("Z:") {
-            &upper[2..]
-        } else {
-            &upper
-        };
-        let name = name.trim_start_matches('\\').trim_start_matches('/');
-
-        if let Some(data) = self.virtual_files.get(name) {
-            return data.len() as u32;
-        }
-        0
+        self.virtual_file_name(filename)
+            .and_then(|name| self.virtual_files.get(&name))
+            .map(|data| data.len() as u32)
+            .unwrap_or(0)
     }
 
     /// Helper to find a child in a directory matching DOS semantics
@@ -299,16 +554,30 @@ impl DiskController {
     // DIR OPERATIONS
     // ========================================================================
 
+    /// DOS CHDIR: changes the current directory of the drive named in `path`
+    /// (or of the current drive) without switching drives.
     pub fn set_current_directory(&mut self, path: &str) -> bool {
-        // Resolve the new path to check existence
-        if let Some(host_path) = self.resolve_path(path) {
-            if host_path.exists() && host_path.is_dir() {
-                // Update self.current_dir
-                // We need to store the DOS representation (relative to root)
+        let normalized = path.replace('/', "\\");
+        let Some((drive_num, rest)) = self.split_drive(&normalized) else {
+            return false;
+        };
+        let Some(drive) = self.drive(drive_num) else {
+            return false;
+        };
+        if drive.kind == DriveKind::Virtual {
+            // Z: is a flat directory: only its root exists.
+            return Self::logical_components(drive, rest).is_empty();
+        }
 
-                // One way: strip root_path from host_path
-                if let Ok(suffix) = host_path.strip_prefix(&self.root_path) {
-                    self.current_dir = suffix.to_string_lossy().replace('/', "\\");
+        // Resolve the new path to check existence
+        if let Some(host_path) = self.resolve_on(drive_num, rest) {
+            if host_path.is_dir() {
+                // Store the DOS representation (relative to root)
+                if let Ok(suffix) = host_path.strip_prefix(&drive.root) {
+                    let dos_dir = suffix.to_string_lossy().replace('/', "\\");
+                    if let Some(d) = self.drives[drive_num as usize].as_mut() {
+                        d.current_dir = dos_dir;
+                    }
                     return true;
                 }
             }
@@ -316,39 +585,44 @@ impl DiskController {
         false
     }
 
+    /// Current directory of the current drive, without drive or leading "\".
     pub fn get_current_directory(&self) -> String {
-        self.current_dir.to_ascii_uppercase()
+        self.get_current_directory_of(self.current_drive)
+            .unwrap_or_default()
+    }
+
+    /// Current directory of `drive`, or None if it isn't mounted.
+    pub fn get_current_directory_of(&self, drive: u8) -> Option<String> {
+        self.drive(drive)
+            .map(|d| d.current_dir.to_ascii_uppercase())
     }
 
     // ========================================================================
     // FILE I/O OPERATIONS
     // ========================================================================
 
+    fn check_writable(&self, drive: u8) -> Result<(), u8> {
+        match self.drive(drive) {
+            None => Err(0x03),
+            Some(d) if !d.writable() => Err(0x05), // Access denied
+            Some(_) => Ok(()),
+        }
+    }
+
     // INT 21h, AH=3Dh: Open File
     pub fn open_file(&mut self, filename: &str, mode: u8) -> Result<u16, u8> {
         // Handle Virtual Z: files
         if self.is_virtual_file(filename) {
-            // For now, we don't support actually reading/seeking virtual files with standard file handles
-            // nicely. We will just return a dummy handle and special case read/seek if needed?
-            // OR: We return an error if we don't support it, but since we just want EXEC to work,
-            // we might not need `open_file` to succeed for COMMAND.COM unless NC tries to read it.
-            // NC *does* check if COMMAND.COM exists.
-
-            // Let's create a temporary file or use a special handle range?
-            // Using a special handle range is cleaner.
-            let handle = 0xAA00 + (self.next_handle % 100);
+            // Virtual files only need to "exist" so programs like NC find
+            // COMMAND.COM; EXEC loads them itself. Nothing is stored in
+            // `open_files`, so reads on the handle fail, which is fine.
+            let handle = VIRTUAL_HANDLE_BASE + (self.next_handle % 100);
             self.next_handle += 1;
-            // storing nothing in `open_files` means read/write fails, which is fine for now
-            // or we could store a special marker.
-            // For this specific task (EXEC), NC just needs to know it exists or "load" it (which uses EXEC).
-            // EXEC loading handles file reading itself usually via `load_executable` in `cpu.rs`
-            // (which uses `open_file`? No, `load_executable` uses `disk.read_file` maybe?
-            // `cpu.load_executable` uses `disk.open_file` -> `read_file` flow usually).
-            // We'll see. If `open_file` succeeds, that's step 1.
             return Ok(handle);
         }
 
-        let path = self.resolve_path(filename).ok_or(0x03)?; // Path not found
+        let (drive, path) = self.locate(filename).ok_or(0x03)?; // Path not found
+        let writable = self.is_writable(drive);
 
         let mut options = OpenOptions::new();
         match mode & 0x03 {
@@ -356,24 +630,42 @@ impl DiskController {
                 options.read(true);
             }
             1 => {
+                if !writable {
+                    return Err(0x05);
+                }
                 options.write(true).create(true).truncate(false);
             } // logic tweak for safety
             2 => {
-                options.read(true).write(true).create(true);
+                // Read/write opens on read-only media (CD-ROM) are quietly
+                // downgraded to read-only, as MSCDEX does; lots of CD games
+                // open their data files R/W without ever writing.
+                if writable {
+                    options.read(true).write(true).create(true);
+                } else {
+                    options.read(true);
+                }
             }
             _ => return Err(0x0C),
         }
 
         match options.open(path) {
-            Ok(f) => {
+            Ok(file) => {
                 let handle = self.next_handle;
                 self.next_handle += 1;
-                self.open_files.insert(handle, f);
-                // println!("[DISK] Opened '{}' as Handle {}", filename, handle);
+                self.open_files.insert(handle, OpenFile { file, drive });
                 Ok(handle)
             }
             Err(_) => Err(0x02),
         }
+    }
+
+    // INT 21h, AH=3Ch: Create File. Opens read/write, creating the file if
+    // missing but never truncating (see int21.rs for why).
+    pub fn create_file(&mut self, filename: &str) -> Result<u16, u8> {
+        let normalized = filename.replace('/', "\\");
+        let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
+        self.check_writable(drive)?;
+        self.open_file(filename, 0x02)
     }
 
     // INT 21h, AH=3Eh: Close File
@@ -383,9 +675,9 @@ impl DiskController {
 
     // INT 21h, AH=3Fh: Read from File
     pub fn read_file(&mut self, handle: u16, count: usize) -> Result<Vec<u8>, u16> {
-        if let Some(file) = self.open_files.get_mut(&handle) {
+        if let Some(open) = self.open_files.get_mut(&handle) {
             let mut buffer = vec![0u8; count];
-            match file.read(&mut buffer) {
+            match open.file.read(&mut buffer) {
                 Ok(bytes_read) => {
                     buffer.truncate(bytes_read);
                     Ok(buffer)
@@ -399,8 +691,8 @@ impl DiskController {
 
     // INT 21h, AH=40h: Write to File
     pub fn write_file(&mut self, handle: u16, data: &[u8]) -> Result<u16, u8> {
-        if let Some(file) = self.open_files.get_mut(&handle) {
-            match file.write(data) {
+        if let Some(open) = self.open_files.get_mut(&handle) {
+            match open.file.write(data) {
                 Ok(bytes_written) => Ok(bytes_written as u16),
                 Err(_) => Err(0x05),
             }
@@ -411,14 +703,14 @@ impl DiskController {
 
     // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
-        if let Some(file) = self.open_files.get_mut(&handle) {
+        if let Some(open) = self.open_files.get_mut(&handle) {
             let seek_from = match origin {
                 0 => SeekFrom::Start(offset as u64),
                 1 => SeekFrom::Current(offset),
                 2 => SeekFrom::End(offset),
                 _ => return Err(0x01),
             };
-            match file.seek(seek_from) {
+            match open.file.seek(seek_from) {
                 Ok(new_pos) => Ok(new_pos),
                 Err(_) => Err(0x19),
             }
@@ -431,8 +723,15 @@ impl DiskController {
     // FILESYSTEM METADATA & SEARCH
     // ========================================================================
 
+    /// Allocation geometry of `drive` (0-based): (sectors per cluster, bytes
+    /// per sector, total clusters).
+    pub fn drive_geometry(&self, drive: u8) -> Option<(u16, u16, u16)> {
+        self.drive_kind(drive).map(DriveKind::geometry)
+    }
+
     // INT 21h, AH=36h: Get Disk Free Space
     // Input DL: 0=Default, 1=A, 2=B, 3=C, ...
+    // Returns (sectors per cluster, free clusters, bytes per sector, total clusters)
     pub fn get_disk_free_space(&self, drive: u8) -> Result<(u16, u16, u16, u16), u16> {
         let target_drive = if drive == 0 {
             self.current_drive
@@ -440,22 +739,63 @@ impl DiskController {
             drive - 1
         };
 
-        if target_drive == 2 {
-            // C: drive (Fake 80MB)
-            Ok((8, 20000, 512, 20000))
-        } else if target_drive == 25 {
-            // Z: drive (Virtual, read-only, small)
-            Ok((1, 1000, 512, 2000))
-        } else {
-            Err(0x0F) // Invalid Drive
+        let d = self.drive(target_drive).ok_or(0x0Fu16)?; // Invalid Drive
+        let (spc, bps, total) = d.kind.geometry();
+        let free = match d.kind {
+            // Floppies report real usage so programs can tell whether a save
+            // will fit; hard disks keep reporting an empty fake 80 MB.
+            DriveKind::Floppy => {
+                let cluster_bytes = spc as u64 * bps as u64;
+                let used = Self::used_clusters(&d.root, cluster_bytes, total as u64);
+                total - used.min(total as u64) as u16
+            }
+            DriveKind::HardDisk => total,
+            DriveKind::CdRom => 0,
+            DriveKind::Virtual => 1000,
+        };
+        Ok((spc, free, bps, total))
+    }
+
+    /// Clusters occupied by the tree under `root` (one per directory plus
+    /// each file rounded up). Stops counting once `cap` is reached so that
+    /// mounting a huge directory as a floppy stays cheap. Symlinks are not
+    /// followed.
+    fn used_clusters(root: &Path, cluster_bytes: u64, cap: u64) -> u64 {
+        let mut used = 0u64;
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(read_dir) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read_dir.flatten() {
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    used += 1;
+                    pending.push(entry.path());
+                } else if meta.is_file() {
+                    used += meta.len().div_ceil(cluster_bytes);
+                }
+                if used >= cap {
+                    return cap;
+                }
+            }
         }
+        used
     }
 
     // INT 21h, AH=43h: Get File Attributes
     // Returns: Attribute Byte (0x20 = Archive, 0x10 = Subdir, etc.)
     #[allow(dead_code)]
     pub fn get_file_attribute(&self, filename: &str) -> Result<u16, u8> {
-        let path = self.resolve_path(filename).ok_or(0x03)?;
+        if self.is_virtual_file(filename) {
+            return Ok(0x21); // Archive + R/O
+        }
+        let (drive, path) = self.locate(filename).ok_or(0x03)?;
         if !path.exists() {
             return Err(0x02); // File Not Found
         }
@@ -467,11 +807,11 @@ impl DiskController {
             attr |= 0x20; // Archive (standard file)
         }
         // Reflect host read-only state into DOS R/O bit. On Unix, read-only means
-        // no user-write permission. On Windows, the readonly flag.
-        if let Ok(meta) = fs::metadata(&path) {
-            if meta.permissions().readonly() {
-                attr |= 0x01;
-            }
+        // no user-write permission. On Windows, the readonly flag. Everything
+        // on read-only media is R/O too.
+        let host_ro = fs::metadata(&path).is_ok_and(|m| m.permissions().readonly());
+        if host_ro || !self.is_writable(drive) {
+            attr |= 0x01;
         }
         Ok(attr)
     }
@@ -481,10 +821,11 @@ impl DiskController {
     /// Hidden/System bits. Directory and Volume Label bits cannot be set via
     /// this call on real DOS either.
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
-        let path = self.resolve_path(filename).ok_or(0x03)?;
+        let (drive, path) = self.locate(filename).ok_or(0x03)?;
         if !path.exists() {
             return Err(0x02);
         }
+        self.check_writable(drive)?;
         if let Ok(meta) = fs::metadata(&path) {
             let mut perms = meta.permissions();
             let want_ro = (attr & 0x01) != 0;
@@ -499,23 +840,21 @@ impl DiskController {
 
     /// DOS AH=39h: Create a directory at the given DOS path.
     pub fn create_directory(&self, path: &str) -> Result<(), u8> {
+        let normalized = path.replace('/', "\\");
+        let (drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
+        self.check_writable(drive)?;
+
         // resolve_path walks any existing leaf, but MKDIR needs to create a new
         // leaf — so resolve the parent, then append the final component.
-        let normalized = path.replace('/', "\\");
-        let (parent_dos, leaf) = match normalized.rsplit_once('\\') {
+        let (parent_dos, leaf) = match rest.rsplit_once('\\') {
+            Some(("", l)) => ("\\", l),
             Some((p, l)) => (p, l),
-            None => ("", normalized.as_str()),
+            None => (".", rest), // current directory of that drive
         };
         if leaf.is_empty() {
             return Err(0x03); // Path not found / invalid
         }
-        // Resolve parent. Empty parent means current directory.
-        let parent_path = if parent_dos.is_empty() {
-            // current dir
-            self.resolve_path(".").ok_or(0x03)?
-        } else {
-            self.resolve_path(parent_dos).ok_or(0x03)?
-        };
+        let parent_path = self.resolve_on(drive, parent_dos).ok_or(0x03)?;
         if !parent_path.is_dir() {
             return Err(0x03);
         }
@@ -532,18 +871,21 @@ impl DiskController {
 
     /// DOS AH=3Ah: Remove an empty directory.
     pub fn remove_directory(&self, path: &str) -> Result<(), u8> {
-        let host_path = self.resolve_path(path).ok_or(0x03)?;
+        let (drive_num, host_path) = self.locate(path).ok_or(0x03)?;
         if !host_path.exists() {
             return Err(0x03);
         }
         if !host_path.is_dir() {
             return Err(0x03);
         }
+        self.check_writable(drive_num)?;
         // DOS error 0x10 = "attempt to remove current directory".
-        if let Ok(rel) = host_path.strip_prefix(&self.root_path) {
-            let dos_form = rel.to_string_lossy().replace('/', "\\");
-            if dos_form.eq_ignore_ascii_case(&self.current_dir) {
-                return Err(0x10);
+        if let Some(drive) = self.drive(drive_num) {
+            if let Ok(rel) = host_path.strip_prefix(&drive.root) {
+                let dos_form = rel.to_string_lossy().replace('/', "\\");
+                if dos_form.eq_ignore_ascii_case(&drive.current_dir) {
+                    return Err(0x10);
+                }
             }
         }
         fs::remove_dir(&host_path).map_err(|e| match e.kind() {
@@ -644,6 +986,25 @@ impl DiskController {
         match_part(f_name, p_name) && match_part(f_ext, p_ext)
     }
 
+    /// A volume label as FindFirst reports it: labels longer than 8
+    /// characters get a dot after the 8th, like a filename.
+    fn label_entry(label: &str) -> DosDirEntry {
+        let filename = if label.len() > 8 {
+            format!("{}.{}", &label[..8], &label[8..])
+        } else {
+            label.to_string()
+        };
+        DosDirEntry {
+            filename,
+            size: 0,
+            is_dir: false,
+            is_readonly: false,
+            dos_time: 0x0000,
+            dos_date: 0x5021,
+            attr: 0x08,
+        }
+    }
+
     // INT 21h, AH=4E/4F: Find First / Find Next
     // search_spec contains the path AND the pattern e.g. "C:\GAMES\*.EXE" or "*.EXE"
     pub fn find_directory_entry(
@@ -652,182 +1013,375 @@ impl DiskController {
         search_index: usize,
         search_attr: u16,
     ) -> Result<DosDirEntry, u8> {
+        self.list_directory(search_spec, search_attr)?
+            .into_iter()
+            .nth(search_index)
+            .ok_or(0x12)
+    }
+
+    /// All entries matching a search spec, in the order FindFirst/FindNext
+    /// return them. Directory listings (DIR) use this directly.
+    pub fn list_directory(
+        &self,
+        search_spec: &str,
+        search_attr: u16,
+    ) -> Result<Vec<DosDirEntry>, u8> {
+        let normalized = search_spec.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
+        let drive = self.drive(drive_num).ok_or(0x03)?;
+
         // Handle Volume Label request
         if (search_attr & 0x08) != 0 {
-            if search_index == 0 {
-                return Ok(DosDirEntry {
-                    filename: "RUSTDOS".to_string(),
-                    size: 0,
-                    is_dir: false,
-                    is_readonly: false,
-                    dos_time: 0x0000,
-                    dos_date: 0x5021,
-                });
-            } else {
-                return Err(0x12);
-            }
+            return Ok(vec![Self::label_entry(&drive.label)]);
         }
 
-        // Split Spec into Directory and Pattern manually
-        let (parent_dir, pattern) =
-            if let Some(idx) = search_spec.rfind(|c| c == '\\' || c == '/' || c == ':') {
-                let (dir, pat) = search_spec.split_at(idx + 1);
-                (dir, pat)
-            } else {
-                ("", search_spec)
-            };
-
+        // Split Spec into Directory and Pattern
+        let (parent_dir, pattern) = match rest.rfind('\\') {
+            Some(idx) => rest.split_at(idx + 1),
+            None => ("", rest),
+        };
         let search_dir_str = if parent_dir.is_empty() {
             "."
         } else {
             parent_dir
         };
 
-        // Z: Drive Detection
-        let is_z_drive =
-            self.current_drive == 25 || search_spec.to_ascii_uppercase().starts_with("Z:");
-
         let mut valid_entries: Vec<DosDirEntry> = Vec::new();
 
-        if is_z_drive {
-            // Virtual Z: Drive Listing
-            // Currently only populating valid_entries with virtual files that match pattern
-            for (fname, data) in &self.virtual_files {
-                if Self::matches_pattern(fname, &pattern) {
+        if drive.kind == DriveKind::Virtual {
+            // Virtual Z: Drive Listing: a single flat directory
+            if !Self::logical_components(drive, search_dir_str).is_empty() {
+                return Err(0x03);
+            }
+            let mut names: Vec<&String> = self.virtual_files.keys().collect();
+            names.sort();
+            for fname in names {
+                if Self::matches_pattern(fname, pattern) {
                     valid_entries.push(DosDirEntry {
                         filename: fname.clone(),
-                        size: data.len() as u32,
+                        size: self.virtual_files[fname].len() as u32,
                         is_dir: false,
                         is_readonly: true,
                         dos_time: 0x0000,
                         dos_date: 0x5021,
+                        attr: 0x21,
                     });
                 }
             }
-        } else {
-            // Host Filesystem Listing
-            let host_dir = self.resolve_path(search_dir_str).ok_or(0x03)?;
+            return Ok(valid_entries);
+        }
 
-            let read_dir = fs::read_dir(&host_dir).map_err(|_| 0x03)?;
-            let mut all_entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
-            all_entries.sort_by_key(|dir_entry| dir_entry.file_name());
+        // Host Filesystem Listing
+        let host_dir = self.resolve_on(drive_num, search_dir_str).ok_or(0x03)?;
 
-            let mut generated_names: HashMap<String, usize> = HashMap::new();
+        let read_dir = fs::read_dir(&host_dir).map_err(|_| 0x03)?;
+        let mut all_entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+        all_entries.sort_by_key(|dir_entry| dir_entry.file_name());
 
-            let is_host_root = host_dir == self.root_path;
+        let mut generated_names: HashMap<String, usize> = HashMap::new();
 
-            if !is_host_root {
-                if Self::matches_pattern("..", &pattern) {
+        let is_host_root = host_dir == drive.root;
+        let media_ro = !drive.writable();
+
+        if !is_host_root {
+            for dot in ["..", "."] {
+                if Self::matches_pattern(dot, pattern) {
                     valid_entries.push(DosDirEntry {
-                        filename: "..".to_string(),
+                        filename: dot.to_string(),
                         size: 0,
                         is_dir: true,
                         is_readonly: false,
                         dos_time: 0,
                         dos_date: 0,
-                    });
-                }
-                if Self::matches_pattern(".", &pattern) {
-                    valid_entries.push(DosDirEntry {
-                        filename: ".".to_string(),
-                        size: 0,
-                        is_dir: true,
-                        is_readonly: false,
-                        dos_time: 0,
-                        dos_date: 0,
+                        attr: 0x10,
                     });
                 }
             }
+        }
 
-            for entry in all_entries {
-                let original_name = entry.file_name().to_string_lossy().into_owned();
+        for entry in all_entries {
+            let original_name = entry.file_name().to_string_lossy().into_owned();
 
-                if original_name.starts_with('.') {
-                    continue;
-                }
+            if original_name.starts_with('.') {
+                continue;
+            }
 
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
 
-                let is_dir = metadata.is_dir();
-                let mut file_attr = if is_dir { 0x10 } else { 0x20 };
-                if metadata.permissions().readonly() {
-                    file_attr |= 0x01;
-                }
+            let is_dir = metadata.is_dir();
+            let is_readonly = media_ro || metadata.permissions().readonly();
+            let mut file_attr: u8 = if is_dir { 0x10 } else { 0x20 };
+            if is_readonly {
+                file_attr |= 0x01;
+            }
 
-                let restricted_bits = 0x02 | 0x04 | 0x10;
-                if (file_attr & restricted_bits) & !search_attr != 0 {
-                    continue;
-                }
+            let restricted_bits = 0x02 | 0x04 | 0x10;
+            if (file_attr as u16 & restricted_bits) & !search_attr != 0 {
+                continue;
+            }
 
-                let (stem, ext) = Self::to_short_name(&original_name);
-                let base_key = if ext.is_empty() {
-                    stem.clone()
+            let (stem, ext) = Self::to_short_name(&original_name);
+            let base_key = if ext.is_empty() {
+                stem.clone()
+            } else {
+                format!("{}.{}", stem, ext)
+            };
+
+            let count = *generated_names.get(&base_key).unwrap_or(&0);
+
+            let final_name = if count == 0 {
+                generated_names.insert(base_key, 1);
+                if ext.is_empty() {
+                    stem
                 } else {
                     format!("{}.{}", stem, ext)
-                };
-
-                let count = *generated_names.get(&base_key).unwrap_or(&0);
-
-                let final_name = if count == 0 {
-                    generated_names.insert(base_key, 1);
-                    if ext.is_empty() {
-                        stem
-                    } else {
-                        format!("{}.{}", stem, ext)
-                    }
-                } else {
-                    generated_names.insert(base_key.clone(), count + 1);
-                    let suffix = format!("~{}", count);
-                    let available_len = 8usize.saturating_sub(suffix.len());
-                    let short_stem = if stem.len() > available_len {
-                        &stem[0..available_len]
-                    } else {
-                        &stem
-                    };
-
-                    if ext.is_empty() {
-                        format!("{}{}", short_stem, suffix)
-                    } else {
-                        format!("{}{}.{}", short_stem, suffix, ext)
-                    }
-                };
-
-                if !Self::matches_pattern(&final_name, &pattern) {
-                    continue;
                 }
-
-                let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
-                let datetime: DateTime<Local> = sys_time.into();
-                let dos_time = ((datetime.hour() as u16) << 11)
-                    | ((datetime.minute() as u16) << 5)
-                    | ((datetime.second() as u16) / 2);
-                let year = datetime.year();
-                let dos_date = if year < 1980 {
-                    0x0021
+            } else {
+                generated_names.insert(base_key.clone(), count + 1);
+                let suffix = format!("~{}", count);
+                let available_len = 8usize.saturating_sub(suffix.len());
+                let short_stem = if stem.len() > available_len {
+                    &stem[0..available_len]
                 } else {
-                    (((year - 1980) as u16) << 9)
-                        | ((datetime.month() as u16) << 5)
-                        | (datetime.day() as u16)
+                    &stem
                 };
 
-                valid_entries.push(DosDirEntry {
-                    filename: final_name,
-                    size: metadata.len() as u32,
-                    is_dir: metadata.is_dir(),
-                    is_readonly: metadata.permissions().readonly(),
-                    dos_time,
-                    dos_date,
-                });
+                if ext.is_empty() {
+                    format!("{}{}", short_stem, suffix)
+                } else {
+                    format!("{}{}.{}", short_stem, suffix, ext)
+                }
+            };
+
+            if !Self::matches_pattern(&final_name, pattern) {
+                continue;
             }
+
+            let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
+            let datetime: DateTime<Local> = sys_time.into();
+            let dos_time = ((datetime.hour() as u16) << 11)
+                | ((datetime.minute() as u16) << 5)
+                | ((datetime.second() as u16) / 2);
+            let year = datetime.year();
+            let dos_date = if year < 1980 {
+                0x0021
+            } else {
+                (((year - 1980) as u16) << 9)
+                    | ((datetime.month() as u16) << 5)
+                    | (datetime.day() as u16)
+            };
+
+            valid_entries.push(DosDirEntry {
+                filename: final_name,
+                size: metadata.len() as u32,
+                is_dir,
+                is_readonly,
+                dos_time,
+                dos_date,
+                attr: file_attr,
+            });
         }
 
-        if search_index < valid_entries.len() {
-            Ok(valid_entries.remove(search_index))
-        } else {
-            Err(0x12)
+        Ok(valid_entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh scratch directory under target/ for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from("target/test_disk_unit").join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cdrom() -> MountOptions {
+        MountOptions {
+            kind: DriveKind::CdRom,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn parse_drive_prefix_handles_letters_and_non_ascii() {
+        assert_eq!(parse_drive_prefix("d:\\X"), (Some(3), "\\X"));
+        assert_eq!(parse_drive_prefix("FILE.TXT"), (None, "FILE.TXT"));
+        assert_eq!(parse_drive_prefix("\u{FFFD}:X"), (None, "\u{FFFD}:X"));
+        assert_eq!(parse_drive_prefix("é"), (None, "é"));
+        assert_eq!(parse_drive_prefix(""), (None, ""));
+    }
+
+    #[test]
+    fn each_drive_has_its_own_current_directory() {
+        let base = scratch("cwd");
+        fs::create_dir_all(base.join("c/GAMES")).unwrap();
+        fs::create_dir_all(base.join("d/DATA")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        disk.mount(3, &base.join("d"), MountOptions::default(), false)
+            .unwrap();
+
+        assert!(disk.set_current_directory("GAMES"));
+        assert!(disk.set_current_directory("D:\\DATA"));
+        assert_eq!(disk.get_current_drive(), DRIVE_C);
+        assert_eq!(disk.get_current_directory(), "GAMES");
+        assert_eq!(disk.get_current_directory_of(3).unwrap(), "DATA");
+
+        fs::write(base.join("d/DATA/f.txt"), b"x").unwrap();
+        let resolved = disk.resolve_path("D:F.TXT").unwrap();
+        assert!(resolved.ends_with("DATA/f.txt"));
+        assert_eq!(
+            disk.qualify_directory("D:*.*").as_deref(),
+            Some("D:\\DATA")
+        );
+        assert_eq!(disk.qualify_directory("\\*.*").as_deref(), Some("C:\\"));
+    }
+
+    #[test]
+    fn unmounted_and_reserved_drives() {
+        let base = scratch("reserved");
+        let mut disk = DiskController::new(base.clone());
+        assert!(disk.resolve_path("E:\\X").is_none());
+        assert_eq!(disk.set_current_drive(4), LASTDRIVE);
+        assert_eq!(disk.get_current_drive(), DRIVE_C);
+        assert!(disk.mount(DRIVE_Z, &base, MountOptions::default(), true).is_err());
+        assert!(disk.unmount(DRIVE_C).is_err());
+        assert!(disk.unmount(DRIVE_Z).is_err());
+        assert!(disk.unmount(4).is_err());
+        assert!(disk.mount(3, &base.join("missing"), MountOptions::default(), false).is_err());
+    }
+
+    #[test]
+    fn mkdir_with_drive_prefix_lands_on_that_drive() {
+        let base = scratch("mkdir");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir_all(base.join("d")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        disk.mount(3, &base.join("d"), MountOptions::default(), false)
+            .unwrap();
+
+        disk.create_directory("D:NEWDIR").unwrap();
+        disk.create_directory("D:\\ROOTDIR").unwrap();
+        assert!(base.join("d/NEWDIR").is_dir());
+        assert!(base.join("d/ROOTDIR").is_dir());
+        assert!(!base.join("c/D:NEWDIR").exists());
+
+        // Error 0x10 only applies to the target drive's current directory.
+        assert!(disk.set_current_directory("D:\\NEWDIR"));
+        assert_eq!(disk.remove_directory("D:\\NEWDIR"), Err(0x10));
+        fs::create_dir_all(base.join("c/NEWDIR")).unwrap();
+        assert_eq!(disk.remove_directory("C:\\NEWDIR"), Ok(()));
+    }
+
+    #[test]
+    fn read_only_media_rejects_writes() {
+        let base = scratch("readonly");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir_all(base.join("cd/SUB")).unwrap();
+        fs::write(base.join("cd/DATA.DAT"), b"cd data").unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        disk.mount(3, &base.join("cd"), cdrom(), false).unwrap();
+
+        assert_eq!(disk.create_file("D:\\NEW.TXT"), Err(0x05));
+        assert_eq!(disk.open_file("D:\\DATA.DAT", 1), Err(0x05));
+        assert_eq!(disk.create_directory("D:\\X"), Err(0x05));
+        assert_eq!(disk.remove_directory("D:\\SUB"), Err(0x05));
+        assert_eq!(disk.set_file_attribute("D:\\DATA.DAT", 0), Err(0x05));
+        assert_eq!(disk.get_file_attribute("D:\\DATA.DAT"), Ok(0x21));
+
+        // Mode 2 is downgraded: reads work, writes fail.
+        let h = disk.open_file("D:\\DATA.DAT", 2).unwrap();
+        assert_eq!(disk.read_file(h, 7).unwrap(), b"cd data");
+        assert_eq!(disk.write_file(h, b"x"), Err(0x05));
+        assert!(!base.join("cd/NEW.TXT").exists());
+        assert_eq!(fs::read(base.join("cd/DATA.DAT")).unwrap(), b"cd data");
+
+        let entries = disk.list_directory("D:\\*.*", 0x10).unwrap();
+        assert!(entries.iter().all(|e| e.attr & 0x01 != 0));
+    }
+
+    #[test]
+    fn unmount_and_remount_close_only_their_own_files() {
+        let base = scratch("handles");
+        for d in ["c", "c2", "d"] {
+            fs::create_dir_all(base.join(d)).unwrap();
+            fs::write(base.join(d).join("F.TXT"), b"1").unwrap();
+        }
+        let mut disk = DiskController::new(base.join("c"));
+        disk.mount(3, &base.join("d"), MountOptions::default(), false)
+            .unwrap();
+        let hc = disk.open_file("C:\\F.TXT", 0).unwrap();
+        let hd = disk.open_file("D:\\F.TXT", 0).unwrap();
+        assert_eq!(disk.handle_drive(hd), Some(3));
+
+        disk.set_root(&base.join("c2")).unwrap();
+        assert!(disk.read_file(hc, 1).is_err());
+        assert!(disk.read_file(hd, 1).is_ok());
+
+        disk.set_current_drive(3);
+        disk.unmount(3).unwrap();
+        assert!(disk.read_file(hd, 1).is_err());
+        assert_eq!(disk.get_current_drive(), DRIVE_C);
+    }
+
+    #[test]
+    fn floppy_free_space_tracks_usage() {
+        let base = scratch("floppy");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir_all(base.join("a")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        let floppy = MountOptions {
+            kind: DriveKind::Floppy,
+            ..Default::default()
+        };
+        disk.mount(0, &base.join("a"), floppy, false).unwrap();
+
+        let (_, empty_free, _, total) = disk.get_disk_free_space(1).unwrap();
+        assert_eq!(empty_free, total);
+        fs::write(base.join("a/SAVE.DAT"), vec![0u8; 1024]).unwrap();
+        let (spc, free, bps, _) = disk.get_disk_free_space(1).unwrap();
+        assert_eq!((spc, bps), (1, 512));
+        assert_eq!(free, total - 2);
+        assert_eq!(disk.get_disk_free_space(5), Err(0x0F));
+    }
+
+    #[test]
+    fn volume_label_comes_from_the_searched_drive() {
+        let base = scratch("label");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir_all(base.join("d")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        let opts = MountOptions {
+            kind: DriveKind::CdRom,
+            label: Some("gamecd_disk1".to_string()),
+            read_only: false,
+        };
+        disk.mount(3, &base.join("d"), opts, false).unwrap();
+
+        let c = disk.find_directory_entry("*.*", 0, 0x08).unwrap();
+        assert_eq!((c.filename.as_str(), c.attr), ("RUSTDOS", 0x08));
+        let d = disk.find_directory_entry("D:\\*.*", 0, 0x08).unwrap();
+        assert_eq!(d.filename, "GAMECD_D.ISK");
+        assert_eq!(disk.volume_label(3).unwrap(), "GAMECD_DISK");
+    }
+
+    #[test]
+    fn z_drive_is_only_used_when_named() {
+        let base = scratch("zdrive");
+        fs::write(base.join("HOST.TXT"), b"x").unwrap();
+        let mut disk = DiskController::new(base.clone());
+        disk.set_current_drive(DRIVE_Z);
+        assert!(disk.is_virtual_file("COMMAND.COM"));
+        assert!(!disk.is_virtual_file("C:\\COMMAND.COM"));
+        let host = disk.list_directory("C:\\*.*", 0x10).unwrap();
+        assert!(host.iter().any(|e| e.filename == "HOST.TXT"));
+        let z = disk.list_directory("*.*", 0x10).unwrap();
+        assert_eq!(z.len(), 1);
+        assert_eq!(z[0].filename, "COMMAND.COM");
     }
 }

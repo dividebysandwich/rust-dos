@@ -3,7 +3,9 @@ use iced_x86::Register;
 
 use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
+use crate::bus::{DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
 use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::disk::{DriveKind, drive_letter, parse_drive_prefix};
 use crate::video::print_char;
 
 /// Allocate the largest available free MCB for a child process about to be
@@ -30,6 +32,15 @@ fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
     match crate::mcb::alloc(&mut cpu.bus, 0xFFFF, largest) {
         Ok(seg) => Some(seg),
         Err(_) => None,
+    }
+}
+
+/// 0-based drive for a DOS drive code where 0 = default, 1 = A:, ...
+fn dos_drive_number(cpu: &Cpu, code: u8) -> u8 {
+    if code == 0 {
+        cpu.bus.disk.get_current_drive()
+    } else {
+        code - 1
     }
 }
 
@@ -63,64 +74,119 @@ pub fn handle(cpu: &mut Cpu) {
             let dta_off = cpu.bus.dta_offset;
             let dta_phys = cpu.get_physical_addr(dta_current, dta_off);
 
-            let fcb_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let input_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
 
-            let (index, pattern) = if ah == 0x11 {
-                let p = read_dta_template(&cpu.bus, fcb_addr); // Reusing helper
-                (0, p)
+            // Extended FCB: FFh marker, search attribute at +6 and the normal
+            // FCB at +7. Volume label searches (attr 08h) come this way.
+            let extended = cpu.bus.read_8(input_addr) == 0xFF;
+            let (fcb_addr, search_attr) = if extended {
+                (input_addr + 7, cpu.bus.read_8(input_addr + 6) as u16)
+            } else {
+                (input_addr, 0x10) // Directory + Archive + ReadOnly (Implicit for FCB?)
+            };
+
+            let index = if ah == 0x11 {
+                0
             } else {
                 // Read index from FCB reserved area (Offset 0x0C)
-                let idx = cpu.bus.read_16(fcb_addr + 0x0C) as usize;
+                cpu.bus.read_16(fcb_addr + 0x0C) as usize
+            };
+            let name = read_dta_template(&cpu.bus, fcb_addr);
 
-                let p = read_dta_template(&cpu.bus, fcb_addr);
-                (idx, p)
+            // FCB drive byte: 0 = default, 1 = A:, ...
+            let fcb_drive = cpu.bus.read_8(fcb_addr);
+            let drive = if fcb_drive == 0 {
+                cpu.bus.disk.get_current_drive()
+            } else {
+                fcb_drive - 1
             };
 
             cpu.bus.log_string(&format!(
-                "[DOS] FCB Find{:02X}: Pattern='{}' Index={}",
-                ah, pattern, index
+                "[DOS] FCB Find{:02X}: Drive={} Pattern='{}' Index={}",
+                ah, fcb_drive, name, index
             ));
 
-            let search_attr = 0x10; // Directory + Archive + ReadOnly (Implicit for FCB?)
+            let result = if cpu.bus.disk.is_mounted(drive) {
+                let pattern = format!("{}:{}", drive_letter(drive), name);
+                cpu.bus
+                    .disk
+                    .find_directory_entry(&pattern, index, search_attr)
+            } else {
+                Err(0x0F)
+            };
 
-            match cpu
-                .bus
-                .disk
-                .find_directory_entry(&pattern, index, search_attr)
-            {
+            match result {
                 Ok(entry) => {
                     // Success: AL=00
                     cpu.set_reg8(Register::AL, 0x00);
 
-                    // Write Result to DTA (Not DS:DX? Or implicitly DTA?)
-                    // "The DTA is filled with..."
-                    // Ensure we write to DTA, not back to DS:DX (unless they are same).
+                    // The result goes to the DTA, as an extended FCB if the
+                    // request was one.
+                    let out = if extended {
+                        cpu.bus.write_8(dta_phys, 0xFF);
+                        for i in 1..6 {
+                            cpu.bus.write_8(dta_phys + i, 0);
+                        }
+                        cpu.bus.write_8(dta_phys + 6, entry.attr);
+                        dta_phys + 7
+                    } else {
+                        dta_phys
+                    };
 
-                    cpu.bus.write_8(dta_phys + 0, 1); // Drive A: (Simulated) or 0? 
-                    // Valid drive for C: is 3? No, FCB: 0=Default, 1=A, 3=C.
-                    // Let's write 0 (Default) or 3.
-                    cpu.bus.write_8(dta_phys + 0, 3);
-
-                    // Write Filename to DTA+1 (11 bytes)
+                    // Drive (1 = A:), then the 11-byte name
+                    cpu.bus.write_8(out, drive + 1);
                     let fcb_bytes = pattern_to_fcb(&entry.filename);
                     for i in 0..11 {
-                        cpu.bus.write_8(dta_phys + 1 + i, fcb_bytes[i]);
+                        cpu.bus.write_8(out + 1 + i, fcb_bytes[i]);
                     }
 
                     // Store Index for Next Call at Input FCB Reserved Area (Offset 0x0C)
                     // This allows FindNext to know where to resume, even if DTA != Input FCB
                     cpu.bus.write_16(fcb_addr + 0x0C, (index + 1) as u16);
 
-                    // Fill other stats?
                     // FCB: 16h=Time, 14h=Date, 10h=Size
-                    cpu.bus.write_16(dta_phys + 0x16, entry.dos_time);
-                    cpu.bus.write_16(dta_phys + 0x14, entry.dos_date);
-                    cpu.bus.write_32(dta_phys + 0x10, entry.size);
+                    cpu.bus.write_16(out + 0x16, entry.dos_time);
+                    cpu.bus.write_16(out + 0x14, entry.dos_date);
+                    cpu.bus.write_32(out + 0x10, entry.size);
                 }
                 Err(_) => {
                     // Failure: AL=FFh
                     cpu.set_reg8(Register::AL, 0xFF);
                 }
+            }
+        }
+
+        // AH=1Bh: Allocation info for the default drive; AH=1Ch: for drive DL
+        // (0=default, 1=A). Returns AL=sectors per cluster, CX=bytes per
+        // sector, DX=total clusters and DS:BX -> media ID byte.
+        0x1B | 0x1C => {
+            let dl = if ah == 0x1B { 0 } else { cpu.get_dl() };
+            let drive = dos_drive_number(cpu, dl);
+            match cpu.bus.disk.drive_geometry(drive) {
+                Some((spc, bps, total)) => {
+                    cpu.set_reg8(Register::AL, spc as u8);
+                    cpu.cx = bps;
+                    cpu.dx = total;
+                    cpu.ds = 0xF000;
+                    cpu.bx = (MEDIA_ID_TABLE - 0xF0000 + drive as usize) as u16;
+                }
+                None => cpu.set_reg8(Register::AL, 0xFF), // Invalid drive
+            }
+        }
+
+        // AH=1Fh: DPB of the default drive; AH=32h: DPB of drive DL
+        // (0=default, 1=A). DS:BX -> DPB with AL=00h, or AL=FFh for invalid
+        // drives and CD-ROMs (redirector drives have no DPB).
+        0x1F | 0x32 => {
+            let dl = if ah == 0x1F { 0 } else { cpu.get_dl() };
+            let drive = dos_drive_number(cpu, dl);
+            match cpu.bus.disk.drive_kind(drive) {
+                Some(kind) if kind != DriveKind::CdRom => {
+                    cpu.set_reg8(Register::AL, 0x00);
+                    cpu.ds = 0xF000;
+                    cpu.bx = (DPB_TABLE - 0xF0000 + drive as usize * DPB_SIZE) as u16;
+                }
+                _ => cpu.set_reg8(Register::AL, 0xFF),
             }
         }
 
@@ -292,6 +358,7 @@ pub fn handle(cpu: &mut Cpu) {
             // AL = Bit mask (0x01=Leading separators, 0x02=Drive ID, 0x04=Ext, 0x08=Name)
             // For now we just do a basic implementation that reads the string and writes FCB
 
+            let flags = cpu.get_al();
             let si = cpu.get_reg16(Register::SI);
             let str_addr = cpu.get_physical_addr(cpu.ds, si);
             let raw_str = read_asciiz_string(&cpu.bus, str_addr);
@@ -302,35 +369,34 @@ pub fn handle(cpu: &mut Cpu) {
             if token.is_empty() {
                 cpu.set_reg8(Register::AL, 0xFF); // Invalid
             } else {
-                let fcb = pattern_to_fcb(token);
+                let (drive_spec, name) = parse_drive_prefix(token);
+                let fcb = pattern_to_fcb(name);
                 let di = cpu.get_reg16(Register::DI);
                 let fcb_addr = cpu.get_physical_addr(cpu.es, di);
 
-                // Drive byte (0 = default) - Simplified
-                // If token string starts with "C:", "A:", etc we could parse it.
-                // pattern_to_fcb just handles name.ext.
-
-                // Check drive
-                let drive = if token.len() > 1 && token.chars().nth(1) == Some(':') {
-                    let d = token.chars().next().unwrap().to_ascii_uppercase();
-                    if d >= 'A' && d <= 'Z' {
-                        (d as u8) - b'A' + 1
-                    } else {
-                        0
+                // Drive byte: 1 = A:, ... when the string names one. Without a
+                // drive it becomes 0 (default) unless AL bit 1 says to leave
+                // the existing byte alone.
+                let mut invalid_drive = false;
+                match drive_spec {
+                    Some(d) => {
+                        invalid_drive = !cpu.bus.disk.is_mounted(d);
+                        cpu.bus.write_8(fcb_addr, d + 1);
                     }
-                } else {
-                    0 // No change / Default
-                };
-
-                cpu.bus.write_8(fcb_addr, drive);
+                    None if flags & 0x02 == 0 => {
+                        cpu.bus.write_8(fcb_addr, 0);
+                    }
+                    None => {}
+                }
 
                 for i in 0..11 {
                     cpu.bus.write_8(fcb_addr + 1 + i, fcb[i]);
                 }
 
-                cpu.set_reg8(Register::AL, 0x01); // No wildcards? Or 00? 
-                // AL=1 if wildcard
-                if token.contains('*') || token.contains('?') {
+                // AL=FF invalid drive, 01 if wildcards, else 00
+                if invalid_drive {
+                    cpu.set_reg8(Register::AL, 0xFF);
+                } else if name.contains('*') || name.contains('?') {
                     cpu.set_reg8(Register::AL, 0x01);
                 } else {
                     cpu.set_reg8(Register::AL, 0x00);
@@ -856,11 +922,12 @@ pub fn handle(cpu: &mut Cpu) {
             let dl = cpu.get_reg8(Register::DL);
             match cpu.bus.disk.get_disk_free_space(dl) {
                 Ok((sectors, available, bytes_per_sec, total)) => {
+                    // Values per drive type come from DiskController and
+                    // stay small enough for 16-bit free-space math.
                     cpu.set_reg16(Register::AX, sectors);
-                    // Cap clusters to prevent overflow in old apps
-                    cpu.set_reg16(Register::BX, std::cmp::min(available, 20000));
+                    cpu.set_reg16(Register::BX, available);
                     cpu.set_reg16(Register::CX, bytes_per_sec);
-                    cpu.set_reg16(Register::DX, std::cmp::min(total, 20000));
+                    cpu.set_reg16(Register::DX, total);
                 }
                 Err(_) => {
                     cpu.set_reg16(Register::AX, 0xFFFF);
@@ -934,7 +1001,7 @@ pub fn handle(cpu: &mut Cpu) {
             let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
             let filename = read_asciiz_string(&cpu.bus, addr);
             // Attributes in CX are ignored for now (TODO)
-            match cpu.bus.disk.open_file(&filename, 0x02) {
+            match cpu.bus.disk.create_file(&filename) {
                 Ok(handle) => {
                     cpu.ax = handle;
                     cpu.bus.log_string(&format!(
@@ -1094,11 +1161,16 @@ pub fn handle(cpu: &mut Cpu) {
                 crate::video::print_string(cpu, &visual_s);
                 cpu.ax = count as u16;
             } else {
-                match &mut cpu.bus.disk.write_file(handle, &data) {
-                    Ok(written) => cpu.ax = *written,
-                    Err(_) => {
+                match cpu.bus.disk.write_file(handle, &data) {
+                    Ok(written) => {
+                        cpu.ax = written;
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                    }
+                    Err(code) => {
+                        // e.g. 05h on a file opened read-only (CD-ROM)
                         cpu.bus.log_string("[DEBUG] Write Failed");
-                        cpu.ax = 0
+                        cpu.ax = code as u16;
+                        cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
                 }
             }
@@ -1190,17 +1262,53 @@ pub fn handle(cpu: &mut Cpu) {
                         // Bit 0: Stdin
                         cpu.dx = 0x80D3;
                     } else {
-                        // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive #
-                        cpu.dx = 0x0002; // Drive C
+                        // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive # (0=A)
+                        let drive = cpu
+                            .bus
+                            .disk
+                            .handle_drive(bx)
+                            .unwrap_or(cpu.bus.disk.get_current_drive());
+                        cpu.dx = drive as u16;
                     }
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     // cpu.bus.log_string(&format!("[DOS] IOCTL Get Device Info -> {:04X}", cpu.dx));
                 }
-                // Check if Block Device is Removable
+                // Check if Block Device is Removable (BL = drive, 0=default)
                 0x08 => {
-                    // AX=0 (Removable), AX=1 (Fixed)
-                    cpu.ax = 1; // Fixed drive
-                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    let drive = dos_drive_number(cpu, cpu.get_reg8(Register::BL));
+                    match cpu.bus.disk.drive_kind(drive) {
+                        None => {
+                            cpu.ax = 0x0F; // Invalid drive
+                            cpu.set_cpu_flag(CpuFlags::CF, true);
+                        }
+                        Some(DriveKind::CdRom) => {
+                            // Redirector drives don't support this call
+                            cpu.ax = 0x01;
+                            cpu.set_cpu_flag(CpuFlags::CF, true);
+                        }
+                        Some(kind) => {
+                            // AX=0 (Removable), AX=1 (Fixed)
+                            cpu.ax = if kind.is_removable() { 0 } else { 1 };
+                            cpu.set_cpu_flag(CpuFlags::CF, false);
+                        }
+                    }
+                }
+                // Check if Block Device is Remote (BL = drive, 0=default).
+                // Bit 12 of DX marks a remote (redirected) drive, which is how
+                // programs recognise MSCDEX CD-ROM drives. Local drives get
+                // the same attribute bits DOSBox reports.
+                0x09 => {
+                    let drive = dos_drive_number(cpu, cpu.get_reg8(Register::BL));
+                    match cpu.bus.disk.drive_kind(drive) {
+                        None => {
+                            cpu.ax = 0x0F;
+                            cpu.set_cpu_flag(CpuFlags::CF, true);
+                        }
+                        Some(kind) => {
+                            cpu.dx = if kind == DriveKind::CdRom { 0x1000 } else { 0x0802 };
+                            cpu.set_cpu_flag(CpuFlags::CF, false);
+                        }
+                    }
                 }
                 _ => {
                     // Stub other subfunctions as success
@@ -1215,7 +1323,12 @@ pub fn handle(cpu: &mut Cpu) {
             let ds = cpu.ds;
             let si = cpu.get_reg16(Register::SI);
             let addr = cpu.get_physical_addr(ds, si);
-            let cwd = cpu.bus.disk.get_current_directory();
+            let drive = dos_drive_number(cpu, dl);
+            let Some(cwd) = cpu.bus.disk.get_current_directory_of(drive) else {
+                cpu.ax = 0x0F; // Invalid drive
+                cpu.set_cpu_flag(CpuFlags::CF, true);
+                return;
+            };
 
             cpu.bus
                 .log_string(&format!("[DOS] Get CWD (AH=47h) Drive={} -> {}", dl, cwd));
@@ -1374,7 +1487,15 @@ pub fn handle(cpu: &mut Cpu) {
                 // (e.g. "C:\TEXT.*" or "C:\TEXT.???") WITHOUT a path separator, it implies
                 // the program intended to search the CONTENTS, but concatenated CWD + wildcard blindly.
                 // We detect this and insert the missing separator (e.g. "C:\TEXT\*.*").
-                let cwd = cpu.bus.disk.get_current_directory();
+                // The CWD is that of the drive the pattern names.
+                let spec_drive = parse_drive_prefix(&pattern)
+                    .0
+                    .unwrap_or(cpu.bus.disk.get_current_drive());
+                let cwd = cpu
+                    .bus
+                    .disk
+                    .get_current_directory_of(spec_drive)
+                    .unwrap_or_default();
 
                 if !cwd.is_empty() {
                     let pattern_upper = pattern.to_uppercase();
@@ -1433,9 +1554,13 @@ pub fn handle(cpu: &mut Cpu) {
                     .cloned()
                     .unwrap_or_default();
 
-                // Construct full pattern
+                // Construct full pattern. FindFirst stores a fully qualified
+                // directory ("D:\\SUB" or "D:\\"), so later drive or directory
+                // changes don't redirect the search.
                 let full_pattern = if dir_prefix.is_empty() {
                     filename_pattern
+                } else if dir_prefix.ends_with('\\') {
+                    format!("{}{}", dir_prefix, filename_pattern)
                 } else {
                     format!("{}\\{}", dir_prefix, filename_pattern)
                 };
@@ -1457,7 +1582,11 @@ pub fn handle(cpu: &mut Cpu) {
                         "[DOS] FindFirst/Next Found: '{}' (Index {})",
                         entry.filename, index
                     ));
-                    cpu.bus.write_8(dta_phys + 0, 3); // Drive C:
+                    // Drive the search runs on (1 = A:)
+                    let search_drive = parse_drive_prefix(&search_pattern)
+                        .0
+                        .unwrap_or(cpu.bus.disk.get_current_drive());
+                    cpu.bus.write_8(dta_phys + 0, search_drive + 1);
                     cpu.bus
                         .write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
                     cpu.bus
@@ -1487,36 +1616,18 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.bus.write_16(dta_phys + 15, (unique_id & 0xFFFF) as u16);
                     cpu.bus.write_16(dta_phys + 17, (unique_id >> 16) as u16);
 
-                    // Store Directory Context if FindFirst (AH=4E)
+                    // Store Directory Context if FindFirst (AH=4E), fully
+                    // qualified with drive and current directory.
                     if ah == 0x4E {
-                        // Extract Directory part from search_pattern (original raw pattern for 4E)
-                        // disk.rs logic: split at last separator
-                        let dir_part = if let Some(idx) =
-                            search_pattern.rfind(|c| c == '\\' || c == '/' || c == ':')
-                        {
-                            if idx == 0 {
-                                "\\"
-                            } else {
-                                &search_pattern[..idx]
-                            }
-                        } else {
-                            ""
-                        }
-                        .to_string();
-
-                        if !dir_part.is_empty() {
-                            cpu.bus.search_handles.insert(unique_id, dir_part);
+                        if let Some(dir) = cpu.bus.disk.qualify_directory(&search_pattern) {
+                            cpu.bus.search_handles.insert(unique_id, dir);
                         }
                     }
                     cpu.bus
                         .write_16(dta_phys + 19, (index as u16).wrapping_mul(3));
 
                     // File Attributes
-                    let mut attr = if entry.is_dir { 0x10 } else { 0x20 };
-                    if entry.filename == "RUSTDOS" {
-                        attr = 0x08;
-                    }
-                    cpu.bus.write_8(dta_phys + 21, attr);
+                    cpu.bus.write_8(dta_phys + 21, entry.attr);
 
                     cpu.bus.write_16(dta_phys + 22, entry.dos_time);
                     cpu.bus.write_16(dta_phys + 24, entry.dos_date);

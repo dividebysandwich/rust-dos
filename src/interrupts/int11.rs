@@ -1,9 +1,7 @@
 use crate::cpu::Cpu;
 
 pub fn handle(cpu: &mut Cpu) {
-    // 80x25 Color, No FPU, Floppy
-    // Bits 4-5: 10 (80x25 Color)
-    // Bit 1: 0 (No FPU)
-    // Bit 0: 1 (Floppy)
-    cpu.ax = 0b0000_0000_0010_0001;
+    // Equipment list lives in the BDA (0x0410): 80x25 color plus whatever
+    // floppies are mounted (see Bus::sync_drive_bda). Programs may patch it.
+    cpu.ax = cpu.bus.read_16(0x0410);
 }
