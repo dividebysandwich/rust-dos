@@ -41,7 +41,7 @@ pub fn handle(cpu: &mut Cpu) {
                             cpu.bus.vga.vram_text[i] = 0x00;
                         }
                     }
-                    cpu.bus.vga.dirty = true;
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 // VGA Graphics Mode (13h) or planar EGA/VGA modes: clear the
                 // entire 256KB planar VRAM. set_video_mode also zeros it but
@@ -51,7 +51,7 @@ pub fn handle(cpu: &mut Cpu) {
                     for i in 0..cpu.bus.vga.vram_graphics.len() {
                         cpu.bus.vga.vram_graphics[i] = 0x00;
                     }
-                    cpu.bus.vga.dirty = true;
+                    cpu.bus.vga.mark_dirty_full();
                 }
                 // Fallback / Stubbed modes
                 _ => {
@@ -127,7 +127,7 @@ pub fn handle(cpu: &mut Cpu) {
                     .log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
             }
 
-            cpu.bus.vga.dirty = true;
+            cpu.bus.vga.mark_dirty_full();
             cpu.bus.write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
             cpu.bus.write_8(0x0462, 0); // Update BDA Active Page to 0
             let cols: u16 = match mode {
@@ -1142,7 +1142,7 @@ fn scroll_area(
                 }
             }
         }
-        cpu.bus.vga.dirty = true;
+        cpu.bus.vga.mark_dirty_full();
         return;
     }
 

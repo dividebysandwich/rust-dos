@@ -502,7 +502,7 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
                 // Visually clear the character
                 let offset = (bus.cursor_y * 80 + bus.cursor_x) * 2;
                 bus.vga.vram_text[offset] = 0x20; // Space
-                bus.vga.dirty = true;
+                bus.mark_text_dirty(offset, offset + 2);
             }
         }
         _ => {
@@ -511,7 +511,7 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
             bus.vga.vram_text[offset] = ascii;
             bus.vga.vram_text[offset + 1] = 0x07; // Light Gray Attribute
             bus.cursor_x += 1;
-            bus.vga.dirty = true;
+            bus.mark_text_dirty(offset, offset + 2);
         }
     }
 
@@ -535,6 +535,15 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
     let mut row = cpu.bus.cursor_y;
     let max_cols = 80;
     let max_rows = cpu.bus.read_8(0x0484) as usize + 1;
+    // Text VRAM range written directly below, for the dirty-rect renderer
+    let mut touched: Option<(usize, usize)> = None;
+    let mut scrolled = false;
+    let mut touch = |offset: usize| {
+        touched = Some(match touched {
+            Some((lo, hi)) => (lo.min(offset), hi.max(offset + 2)),
+            None => (offset, offset + 2),
+        });
+    };
 
     for c in s.chars() {
         match c {
@@ -553,6 +562,7 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
                     if offset < SIZE_TEXT {
                         cpu.bus.vga.vram_text[offset] = 0x20;
                         cpu.bus.vga.vram_text[offset + 1] = 0x07;
+                        touch(offset);
                     }
                 }
             }
@@ -562,6 +572,7 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
                 if offset < SIZE_TEXT {
                     cpu.bus.vga.vram_text[offset] = c as u8;
                     cpu.bus.vga.vram_text[offset + 1] = 0x07; // Attribute: Light Gray
+                    touch(offset);
                 }
                 col += 1;
             }
@@ -596,6 +607,7 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
             }
 
             row = max_rows - 1;
+            scrolled = true;
         }
     }
 
@@ -609,5 +621,9 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
     cpu.bus.write_8(0x0450, col as u8);
     cpu.bus.write_8(0x0451, row as u8);
 
-    cpu.bus.vga.dirty = true;
+    if scrolled {
+        cpu.bus.vga.mark_dirty_full();
+    } else if let Some((start, end)) = touched {
+        cpu.bus.mark_text_dirty(start, end);
+    }
 }

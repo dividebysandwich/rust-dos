@@ -364,6 +364,32 @@ impl Bus {
         self.write_8(phys_addr + 3, 0xCF); // IRET
     }
 
+    /// Mark the text VRAM byte range `[start, end)` for re-rendering. Code
+    /// that writes `vga.vram_text` directly instead of through `write_8`
+    /// must call this (or `vga.mark_dirty_full`), or the dirty-rect renderer
+    /// never repaints the change. Same row math as the `write_8` text path.
+    pub fn mark_text_dirty(&mut self, start: usize, end: usize) {
+        if end <= start {
+            return;
+        }
+        let (row_bytes, cell_h) = match self.video_mode {
+            VideoMode::Text80x25 | VideoMode::Text80x25Color => {
+                let cell_h = self.read_8(0x0485) as usize;
+                (160, if cell_h == 0 { 16 } else { cell_h })
+            }
+            // 8x8 font scaled 2x, irrespective of the BDA value
+            VideoMode::Text40x25 | VideoMode::Text40x25Color => (80, 16),
+            _ => {
+                self.vga.mark_dirty_full();
+                return;
+            }
+        };
+        let h = video::SCREEN_HEIGHT;
+        let y0 = ((start / row_bytes) * cell_h) as u32;
+        let y1 = ((end - 1) / row_bytes + 1) as u32 * cell_h as u32;
+        self.vga.mark_dirty_rows(y0.min(h), y1.min(h));
+    }
+
     // Helper: Scroll the text screen up by 1 line
     pub fn scroll_up(&mut self) {
         // Read the current row count from BDA so 80x43 / 80x50 modes scroll
