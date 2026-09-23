@@ -83,6 +83,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             /* FPU Vector - IRET */
             // TODO: Implement FPU
         }
+        crate::shell::SHELL_COMMAND_BOP => crate::shell::handle_command_bop(cpu),
         0x4C => {
             cpu.bus
                 .log_string("[DOS] Program Exited. Rebooting Shell...");

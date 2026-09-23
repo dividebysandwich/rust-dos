@@ -40,6 +40,9 @@ impl TraceEntry {
     pub fn disasm(&self) -> (usize, String) {
         let bytes = self.code_bytes();
         if bytes.len() >= 3 && bytes[0] == 0xFE && bytes[1] == 0x38 {
+            if bytes[2] == crate::shell::SHELL_COMMAND_BOP {
+                return (3, "HLE shell command".to_string());
+            }
             return (3, format!("HLE INT {:02X}h (AX={:04X})", bytes[2], self.ax));
         }
         disasm_one(bytes, self.ip)

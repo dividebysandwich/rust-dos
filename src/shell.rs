@@ -1,15 +1,23 @@
 use crate::cpu::Cpu;
+use crate::disk::{DiskController, drive_letter};
+use crate::interrupts::utils::read_asciiz_string;
 use crate::video;
 
+/// Private BOP vector the shell uses to hand a typed line to the emulator.
+/// It is only ever executed inline from the shell code (never via the IVT),
+/// so it can't collide with a real INT FFh or with the INT 2Fh multiplexer.
+pub const SHELL_COMMAND_BOP: u8 = 0xFF;
+
 /// A Tiny "OS" written in Machine Code. Reads keys into a buffer at offset 0x0200
-/// On Enter, calls INT 20h (Our Rust Shell). Handles backspace visually and in buffer
+/// On Enter, hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
+/// Handles backspace visually and in buffer
 pub fn get_shell_code() -> Vec<u8> {
     vec![
         // ----------------------------------------------------
         // BOOTLOADER: Initialize Segments
         // ----------------------------------------------------
-        // We are loaded at CS=0x1000, IP=0x0000.
-        // Set DS=ES=SS=CS=0x1000 so we don't clobber IVT at 0x0000.
+        // We are loaded at CS=0x0000, IP=0x0100 (see Cpu::load_shell).
+        // Set DS=ES=SS=CS so buffers and stack live in the shell segment.
         0x8C, 0xC8, // MOV AX, CS (Copy CS to AX)
         0x8E, 0xD8, // MOV DS, AX
         0x8E, 0xC0, // MOV ES, AX
@@ -18,10 +26,11 @@ pub fn get_shell_code() -> Vec<u8> {
         // ----------------------------------------------------
         // SHELL LOOP START
         // ----------------------------------------------------
-        // Label: PROMPT_START
-        // 1. Print "C:\"
-        0xB4, 0x0E, // MOV AH, 0Eh
-        0xB0, 0x43, 0xCD, 0x10, // MOV AL, 'C', INT 10h
+        // Label: PROMPT_START (0x010B)
+        // 1. Print the current drive and ":\"
+        0xB4, 0x19, 0xCD, 0x21, // MOV AH, 19h, INT 21h (AL = drive, 0=A)
+        0x04, 0x41, // ADD AL, 'A'
+        0xB4, 0x0E, 0xCD, 0x10, // MOV AH, 0Eh, INT 10h
         0xB0, 0x3A, 0xCD, 0x10, // MOV AL, ':', INT 10h
         0xB0, 0x5C, 0xCD, 0x10, // MOV AL, '\', INT 10h
         // 2. Get Current Directory (INT 21h, AH=47h)
@@ -86,12 +95,56 @@ pub fn get_shell_code() -> Vec<u8> {
         0xB4, 0x0E, 0xB0, 0x0D, 0xCD, 0x10, // CR
         0xB0, 0x0A, 0xCD, 0x10, // LF
         0xBA, 0x00, 0x02, // MOV DX, 0x0200
-        0xFE, 0x38, 0x2F, // INT 2Fh (Execute)
+        // The trap returns like an IRET, so build the frame an INT would:
+        // FLAGS, CS, then the address of the JMP below.
+        0x9C, // PUSHF
+        0x0E, // PUSH CS
+        0xB8, 0x82, 0x01, // MOV AX, 0x0182
+        0x50, // PUSH AX
+        0xFE, 0x38, SHELL_COMMAND_BOP, // Hand the line to the Rust shell
         // ----------------------------------------------------
         // RESET LOOP
         // ----------------------------------------------------
-        0xEB, 0x92, // JMP PROMPT_START (-110 bytes)
+        0xEB, 0x87, // 0x0182: JMP PROMPT_START (-121 bytes)
     ]
+}
+
+/// SHELL_COMMAND_BOP handler: queue the ASCIIZ line at DS:DX for the main
+/// loop to dispatch.
+pub fn handle_command_bop(cpu: &mut Cpu) {
+    // Safety: Clear buffer so we don't repeat commands
+    cpu.bus.keyboard_buffer.clear();
+
+    // Read Command from DS:DX (set by the shell code)
+    let phys_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+    let raw_cmd = read_asciiz_string(&cpu.bus, phys_addr);
+
+    // Clean String
+    let mut clean_chars = Vec::new();
+    for c in raw_cmd.chars() {
+        if c == '\x08' {
+            clean_chars.pop();
+        } else if c.is_ascii_graphic() || c == ' ' {
+            clean_chars.push(c);
+        }
+    }
+    let clean_cmd: String = clean_chars.into_iter().collect();
+
+    // Queue for Main Loop
+    if !clean_cmd.is_empty() {
+        cpu.bus
+            .log_string(&format!("[SHELL] Queuing Command: {}", clean_cmd));
+        cpu.pending_command = Some(clean_cmd);
+    }
+}
+
+/// The DOS prompt for the current drive and directory, e.g. "D:\GAMES>".
+pub fn prompt_string(disk: &DiskController) -> String {
+    format!(
+        "{}:\\{}>",
+        drive_letter(disk.get_current_drive()),
+        disk.get_current_directory()
+    )
 }
 
 pub fn show_prompt(cpu: &mut Cpu) {
@@ -100,10 +153,6 @@ pub fn show_prompt(cpu: &mut Cpu) {
     //     video::print_string(cpu, "\r\n");
     // }
 
-    let cwd = cpu.bus.disk.get_current_directory();
-    if cwd.is_empty() {
-        video::print_string(cpu, "C:\\>");
-    } else {
-        video::print_string(cpu, &format!("C:\\{}>", cwd));
-    }
+    let prompt = prompt_string(&cpu.bus.disk);
+    video::print_string(cpu, &prompt);
 }

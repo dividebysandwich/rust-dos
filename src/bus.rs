@@ -232,7 +232,7 @@ impl Bus {
         bus.install_hle_trap(0x1A, 0xF1014); // Time
         bus.install_hle_trap(0x20, 0xF1018); // Terminate
         bus.install_hle_trap(0x21, 0xF101C); // DOS
-        bus.install_hle_trap(0x2F, 0xF1020); // Shell Command
+        bus.install_hle_trap(0x2F, 0xF1020); // Multiplex (MSCDEX)
         bus.install_hle_trap(0x33, 0xF1024); // Mouse
 
         // Build a baseline MCB chain — one large free block covering
