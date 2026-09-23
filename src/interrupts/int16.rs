@@ -73,7 +73,7 @@ pub fn handle(cpu: &mut Cpu) {
         0x05 => {
             let key = cpu.cx();
             // Cap buffer at 16 keys to emulate BIOS buffer size limit
-            if cpu.bus.keyboard_buffer.len() < 16 {
+            if cpu.bus.keyboard_buffer.len() < crate::keyboard::BIOS_BUFFER_KEYS {
                 cpu.bus.keyboard_buffer.push_back(key);
                 cpu.set_reg8(iced_x86::Register::AL, 0); // Success
             } else {

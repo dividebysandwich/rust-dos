@@ -239,3 +239,13 @@ fn int_15h_block_move_copies_to_extended_memory() {
     let copied: Vec<u8> = (0..24).map(|i| cpu.bus.read_8(0x20_0000 + i)).collect();
     assert_eq!(&copied, b"hello, extended memory!!");
 }
+
+#[test]
+fn bios_keyboard_buffer_holds_15_keys() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    // A game with its own keyboard handler never reads the BIOS buffer.
+    for _ in 0..100 {
+        rust_dos::keyboard::deliver_key_down(&mut bus, 0x1E61, false);
+    }
+    assert_eq!(bus.keyboard_buffer.len(), 15);
+}

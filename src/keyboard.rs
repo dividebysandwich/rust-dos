@@ -3,6 +3,9 @@ use sdl2::keyboard::Mod;
 
 use crate::bus::Bus;
 
+/// Keystrokes the BIOS keyboard buffer at 40:1E holds.
+pub const BIOS_BUFFER_KEYS: usize = 15;
+
 /// Send a key's make or break code to the keyboard controller, with the E0
 /// prefix of the extended keys.
 fn send_scan(bus: &mut Bus, scan: u8, extended: bool) {
@@ -18,7 +21,11 @@ fn send_scan(bus: &mut Bus, scan: u8, extended: bool) {
 /// and send the make code to the keyboard controller for programs that read
 /// port 60h or install their own INT 09h ISR.
 pub fn deliver_key_down(bus: &mut Bus, code: u16, extended: bool) {
-    bus.keyboard_buffer.push_back(code);
+    // The BIOS buffer holds 15 keystrokes; when it's full (a program that
+    // reads the keyboard itself never empties it) new ones are dropped.
+    if bus.keyboard_buffer.len() < BIOS_BUFFER_KEYS {
+        bus.keyboard_buffer.push_back(code);
+    }
     send_scan(bus, (code >> 8) as u8, extended);
 }
 

@@ -1061,6 +1061,10 @@ impl DebugHub {
                 "x": cpu.bus.mouse.x, "y": cpu.bus.mouse.y,
                 "buttons": cpu.bus.mouse.buttons,
                 "visible": cpu.bus.mouse.hide_counter <= 0,
+                "event_handler": format!(
+                    "{:04X}:{:04X} mask {:04X}",
+                    cpu.bus.mouse.callback_cs, cpu.bus.mouse.callback_ip, cpu.bus.mouse.callback_mask
+                ),
             },
         })
     }
