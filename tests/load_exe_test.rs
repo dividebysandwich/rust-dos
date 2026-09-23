@@ -46,3 +46,21 @@ fn test_load_executable_in_subdirectory() {
     // Cleanup
     fs::remove_dir_all(&root_path).unwrap();
 }
+
+#[test]
+fn programs_and_batch_files_load_from_drives_held_in_memory() {
+    let root_path = PathBuf::from("target/test_load_exe_memory");
+    let _ = fs::remove_dir_all(&root_path);
+    fs::create_dir_all(&root_path).unwrap();
+    let mut cpu = Cpu::new(root_path);
+
+    let mut files = rust_dos::memfs::MemFs::new();
+    files.insert("BIN\\HELLO.COM", vec![0xB4, 0x4C, 0xCD, 0x21]);
+    files.insert("GO.BAT", b"hello\r\n".to_vec());
+    cpu.bus.disk.mount_memory(24, files, "MEMORY").unwrap();
+
+    assert!(cpu.load_executable("Y:\\BIN\\HELLO.COM", None));
+    assert_eq!(cpu.bus.read_8(cpu.cs() as usize * 16 + 0x100), 0xB4);
+    assert!(cpu.queue_batch_file("Y:\\GO.BAT"));
+    assert_eq!(cpu.batch_queue.back().map(String::as_str), Some("hello"));
+}

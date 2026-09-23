@@ -743,18 +743,20 @@ impl Cpu {
         (high << 8) | low
     }
 
+    /// The contents of a program or batch file, on any drive: a host
+    /// directory, a CD image or a drive held in memory.
+    fn read_program_file(&self, filename: &str) -> Option<crate::memfs::Bytes> {
+        self.bus.disk.file_data(filename)?.read().ok()
+    }
+
     /// Read a .BAT file from the virtual disk and append its commands to
     /// `batch_queue`. Blank lines and `REM` comments are stripped. Returns
     /// false if the file can't be located or read.
     pub fn queue_batch_file(&mut self, filename: &str) -> bool {
-        let path = match self.bus.disk.resolve_path(filename) {
-            Some(p) if p.is_file() => p,
-            _ => return false,
+        let Some(bytes) = self.read_program_file(filename) else {
+            return false;
         };
-        let contents = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
+        let contents = String::from_utf8_lossy(&bytes);
         self.bus.log_string(&format!(
             "[BATCH] Queueing {} ({} bytes)",
             filename,
@@ -785,15 +787,8 @@ impl Cpu {
     }
 
     pub fn load_executable(&mut self, filename: &str, segment: Option<u16>) -> bool {
-        // Find and Read the File
-        let resolved_path = self.bus.disk.resolve_path(filename);
-
-        let bytes = match resolved_path {
-            Some(path) => match std::fs::read(path) {
-                Ok(b) => b,
-                Err(_) => return false,
-            },
-            None => return false,
+        let Some(bytes) = self.read_program_file(filename) else {
+            return false;
         };
 
         self.bus.log_string(&format!(
@@ -902,8 +897,7 @@ impl Cpu {
     /// `load_segment` = the segment at which the image bytes begin.
     /// `reloc_factor` = value added to every relocated 16-bit target.
     pub fn load_overlay(&mut self, filename: &str, load_segment: u16, reloc_factor: u16) -> bool {
-        let resolved = self.bus.disk.resolve_path(filename);
-        let bytes = match resolved.and_then(|p| std::fs::read(p).ok()) {
+        let bytes = match self.read_program_file(filename) {
             Some(b) => b,
             None => {
                 self.bus
