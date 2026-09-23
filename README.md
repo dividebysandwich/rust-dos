@@ -18,6 +18,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Basic disk operations
 * Passthrough filesystem
 * Mounting host directories as floppy, hard disk and CD-ROM drives
+* Mounting CD images (CUE sheets with BIN or WAV tracks, ISO, BIN and IMG)
+  as CD-ROM drives, including DOSBox's `IMGMOUNT` command
 * Configuration file with startup commands
 * Environment variables (`SET`, `PATH`)
 * XMS 3.0 extended memory and the A20 gate
@@ -41,7 +43,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## What's not implemented yet
 
-* Mounting disk images
+* Mounting floppy and hard disk images
 * EMS
 * GUS MAX / Interwave codec, and SB emulation on the GUS (SBOS, MegaEm)
 * 640x480x16
@@ -120,6 +122,7 @@ D:
     `none`. The built-in patches play even without the Ultrasound
     (`gus=false`) unless `gusdrive` is `none`.
 * **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
+  * PATH is a directory or a CD image (see [Drives](#drives)).
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.
   * `-d/--dir` overrides C:. Without either, C: is the current working
@@ -140,12 +143,23 @@ the prompt:
 MOUNT                                     list drives
 MOUNT A ~/dos/floppy floppy               mount a host directory
 MOUNT D ~/dos/cd -t cdrom -label GAMECD   same, with -t for the type
+MOUNT D ~/dos/game.cue                    mount a CD image
+IMGMOUNT D C:\GAME\CD\GAME.CUE -t cdrom   the same, as DOSBox writes it
 MOUNT -u A                                unmount
 A:                                        switch to drive A:
 ```
 
 Relative `MOUNT` paths are relative to the emulator's working directory.
 Each drive keeps its own current directory, as in DOS.
+
+A CD image always makes a read-only CD-ROM drive, labelled with the disc's
+volume name unless `-label` says otherwise. It can be a CUE sheet (with
+BINARY, MOTOROLA or 16-bit stereo 44.1 kHz WAVE files, any number of tracks
+and gaps) or a bare image of an ISO 9660 data track in 2048, 2336 or
+2352-byte sectors (`.iso`, `.bin`, `.img`). `IMGMOUNT` takes DOSBox's
+syntax, so the batch files made for DOSBox work unchanged: it looks for the
+image by its DOS path first (`C:\GAME\CD\GAME.CUE`) and then as a host
+path. Programs run from the image as from any other drive.
 
 Host files and directories whose names aren't valid 8.3 names get short
 names the way DOSBox and Windows make them: the start of the name and a

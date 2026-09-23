@@ -1,6 +1,8 @@
 use crate::cpu::Cpu;
 use crate::disk::{DriveKind, drive_letter, parse_drive_prefix};
-use crate::mount::{MOUNT_USAGE, MountCmd, display_host_path, parse_mount_command};
+use crate::mount::{
+    IMGMOUNT_USAGE, MOUNT_USAGE, MountCmd, MountSpec, display_host_path, parse_imgmount_command, parse_mount_command,
+};
 use crate::video::print_string;
 use std::collections::HashMap;
 
@@ -30,6 +32,7 @@ impl CommandDispatcher {
         dispatcher.register("CHDIR", Box::new(CdCommand));
         dispatcher.register("ECHO", Box::new(EchoCommand));
         dispatcher.register("MOUNT", Box::new(MountCommand));
+        dispatcher.register("IMGMOUNT", Box::new(ImgMountCommand));
         dispatcher.register("SET", Box::new(SetCommand));
         dispatcher.register("PATH", Box::new(PathCommand));
 
@@ -335,7 +338,7 @@ impl ShellCommand for CdCommand {
 }
 
 /// MOUNT                          list drives
-/// MOUNT d path [type] [options]  mount a host directory
+/// MOUNT d path [type] [options]  mount a host directory or a CD image
 /// MOUNT -u d                     unmount
 struct MountCommand;
 impl ShellCommand for MountCommand {
@@ -344,10 +347,10 @@ impl ShellCommand for MountCommand {
         let home = dirs::home_dir();
         match parse_mount_command(args, &cwd, home.as_deref()) {
             Ok(MountCmd::List) => {
-                print_string(cpu, "Drive Type    Label       Host directory\r\n");
+                print_string(cpu, "Drive Type    Label       Host path\r\n");
                 for info in cpu.bus.disk.mounted_drives() {
-                    let host = match &info.root {
-                        Some(root) => display_host_path(root),
+                    let host = match info.root.as_ref().or(info.image.as_ref()) {
+                        Some(path) => display_host_path(path),
                         None => "(built-in)".to_string(),
                     };
                     let access = if info.read_only && info.kind != DriveKind::Virtual {
@@ -366,35 +369,59 @@ impl ShellCommand for MountCommand {
                     print_string(cpu, &line);
                 }
             }
-            Ok(MountCmd::Mount(spec)) => {
-                let kind = spec.opts.kind;
-                match cpu
-                    .bus
-                    .mount_drive(spec.drive, &spec.path, spec.opts, false)
-                {
-                    Ok(root) => {
-                        let msg = format!(
-                            "Drive {}: is mounted as {} {}\r\n",
-                            drive_letter(spec.drive),
-                            kind.name(),
-                            display_host_path(&root)
-                        );
-                        print_string(cpu, &msg);
-                    }
-                    Err(e) => print_string(cpu, &format!("{}\r\n", e)),
-                }
-            }
-            Ok(MountCmd::Unmount(drive)) => match cpu.bus.unmount_drive(drive) {
-                Ok(()) => print_string(
-                    cpu,
-                    &format!("Drive {}: has been unmounted\r\n", drive_letter(drive)),
-                ),
-                Err(e) => print_string(cpu, &format!("{}\r\n", e)),
-            },
+            Ok(MountCmd::Mount(spec)) => mount(cpu, spec),
+            Ok(MountCmd::Unmount(drive)) => unmount(cpu, drive),
             Err(e) => {
                 print_string(cpu, &format!("{}\r\n", e));
                 print_string(cpu, MOUNT_USAGE);
             }
         }
+    }
+}
+
+/// IMGMOUNT d image [-t cdrom|iso] [-label NAME]   mount a CD image
+/// IMGMOUNT -u d                                  unmount
+///
+/// DOSBox's command, for the batch files made for it. The image is found
+/// by its DOS path first.
+struct ImgMountCommand;
+impl ShellCommand for ImgMountCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let home = dirs::home_dir();
+        let disk = &cpu.bus.disk;
+        let locate = |path: &str| disk.resolve_path(path).filter(|p| p.is_file());
+        match parse_imgmount_command(args, &locate, &cwd, home.as_deref()) {
+            Ok(MountCmd::Mount(spec)) => mount(cpu, spec),
+            Ok(MountCmd::Unmount(drive)) => unmount(cpu, drive),
+            Ok(MountCmd::List) => {}
+            Err(e) => {
+                print_string(cpu, &format!("{}\r\n", e));
+                print_string(cpu, IMGMOUNT_USAGE);
+            }
+        }
+    }
+}
+
+fn mount(cpu: &mut Cpu, spec: MountSpec) {
+    match cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, false) {
+        Ok(path) => {
+            let kind = cpu.bus.disk.drive_kind(spec.drive).map_or("", DriveKind::name);
+            let msg = format!(
+                "Drive {}: is mounted as {} {}\r\n",
+                drive_letter(spec.drive),
+                kind,
+                display_host_path(&path)
+            );
+            print_string(cpu, &msg);
+        }
+        Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+    }
+}
+
+fn unmount(cpu: &mut Cpu, drive: u8) {
+    match cpu.bus.unmount_drive(drive) {
+        Ok(()) => print_string(cpu, &format!("Drive {}: has been unmounted\r\n", drive_letter(drive))),
+        Err(e) => print_string(cpu, &format!("{}\r\n", e)),
     }
 }

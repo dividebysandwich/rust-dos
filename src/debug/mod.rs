@@ -1389,7 +1389,8 @@ fn drives_json(cpu: &Cpu) -> Value {
         .map(|info| {
             let entry = json!({
                 "type": info.kind.name(),
-                "path": info.root.as_deref().map(display_host_path),
+                "path": info.root.as_ref().or(info.image.as_ref()).map(|p| display_host_path(p)),
+                "image": info.image.is_some(),
                 "label": info.label,
                 "read_only": info.read_only,
                 "current_dir": info.current_dir,
@@ -1421,10 +1422,12 @@ fn mount_drive(
         None => None,
     };
     let explicit = kind.is_some() || label.is_some() || read_only;
+    let path = PathBuf::from(path);
     let opts = match cpu.bus.disk.drive_info(drive) {
+        // A CD image brings its own label.
         Some(info) if !explicit => MountOptions {
             kind: info.kind,
-            label: Some(info.label),
+            label: (!path.is_file() && info.image.is_none()).then_some(info.label),
             read_only: info.read_only,
         },
         _ => MountOptions {
@@ -1433,7 +1436,7 @@ fn mount_drive(
             read_only,
         },
     };
-    cpu.bus.mount_drive(drive, &PathBuf::from(path), opts, true)
+    cpu.bus.mount_drive(drive, &path, opts, true)
 }
 
 impl crate::exec::ExecHook for DebugHub {

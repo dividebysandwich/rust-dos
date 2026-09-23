@@ -572,7 +572,7 @@ mod tests {
             7=/tmp\n\
             D=/one\n\
             D=/two\n\
-            E=/x iso\n\
+            E=/x zip\n\
             nonsense\n\
             [joystick]\n\
             ignored=1\n";
@@ -585,7 +585,7 @@ mod tests {
             "line 6: drive Z: is reserved",
             "line 7: invalid drive letter '7'",
             "line 9: drive D: defined twice",
-            "line 10: drive E: Unknown option 'iso'",
+            "line 10: drive E: Unknown option 'zip'",
             "line 11: expected key=value",
             "line 12: unknown section [joystick]",
         ] {

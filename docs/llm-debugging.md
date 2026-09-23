@@ -185,8 +185,10 @@ this at the shell prompt, not while a program is running.
 The same call mounts other drives. Add `"type"` (`floppy`, `hdd` or `cdrom`),
 `"label"` or `"read_only":true`, for example
 `PUT /api/drive/D {"path":"/abs/cd","type":"cdrom","label":"GAMECD"}`.
-`DELETE /api/drive/D` unmounts a drive, and `GET /api/drive` lists them. At
-the DOS prompt, the `MOUNT` command does the same.
+A path to a CD image (`.cue`, `.iso`, `.bin`, `.img`) mounts the image as a
+CD-ROM drive; `GET /api/drive` then shows `"image":true` and the image's
+path. `DELETE /api/drive/D` unmounts a drive, and `GET /api/drive` lists
+them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 
 ### Protected-mode programs (DOS extenders)
 

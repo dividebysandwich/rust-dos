@@ -1,14 +1,20 @@
 //! Parsing of drive mount specifications, shared by the `MOUNT` shell
-//! command and the `[drives]` section of the config file.
+//! command and the `[drives]` section of the config file, and of the
+//! DOSBox-style `IMGMOUNT` command.
 //!
 //! A mount spec is `<host path> [type] [-t type] [-label NAME] [-ro]` where
-//! type is `floppy`, `hdd` (alias `dir`) or `cdrom`.
+//! type is `floppy`, `hdd` (alias `dir`) or `cdrom` (alias `iso`). The path
+//! is a directory, or a CD image (.cue, .iso, .bin, .img), which always
+//! makes a CD-ROM drive.
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions};
 use std::path::{Path, PathBuf};
 
 pub const MOUNT_USAGE: &str =
     "Usage: MOUNT [drive path [floppy|hdd|cdrom] [-label NAME] [-ro]]\r\n       MOUNT -u drive\r\n";
+
+pub const IMGMOUNT_USAGE: &str =
+    "Usage: IMGMOUNT drive image [-t cdrom|iso] [-label NAME]\r\n       IMGMOUNT -u drive\r\n";
 
 /// A parsed request to mount `path` as `drive`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +71,7 @@ pub fn parse_kind(s: &str) -> Option<DriveKind> {
     match s.to_ascii_lowercase().as_str() {
         "floppy" => Some(DriveKind::Floppy),
         "hdd" | "dir" => Some(DriveKind::HardDisk),
-        "cdrom" => Some(DriveKind::CdRom),
+        "cdrom" | "iso" => Some(DriveKind::CdRom),
         _ => None,
     }
 }
@@ -110,7 +116,7 @@ pub fn parse_mount_spec(
     }
     let (raw_path, options) = tokens
         .split_first()
-        .ok_or_else(|| "Missing host directory".to_string())?;
+        .ok_or_else(|| "Missing host directory or CD image".to_string())?;
 
     let mut opts = MountOptions::default();
     let mut iter = options.iter();
@@ -160,6 +166,60 @@ pub fn parse_mount_command(
     let drive =
         parse_drive_letter(first).ok_or_else(|| format!("Invalid drive letter '{}'", first))?;
     parse_mount_spec(drive, &tokens[1..], cwd, home).map(MountCmd::Mount)
+}
+
+/// Parse the arguments of an `IMGMOUNT` command, DOSBox's command for disk
+/// images: `IMGMOUNT d image [-t cdrom|iso] [-fs iso] [-label NAME]`. Only
+/// CD images can be mounted. `locate` finds the image by its DOS path
+/// (as DOSBox batch files name it, "C:\GAME\CD\GAME.CUE"); a host path
+/// relative to `cwd` is the fallback.
+pub fn parse_imgmount_command(
+    args: &str,
+    locate: &dyn Fn(&str) -> Option<PathBuf>,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Result<MountCmd, String> {
+    let tokens = tokenize(args)?;
+    let Some(first) = tokens.first() else {
+        return Err("IMGMOUNT needs a drive and an image".to_string());
+    };
+    if first.eq_ignore_ascii_case("-u") {
+        return match tokens.get(1).and_then(|t| parse_drive_letter(t)) {
+            Some(drive) if tokens.len() == 2 => Ok(MountCmd::Unmount(drive)),
+            _ => Err("IMGMOUNT -u needs a drive letter".to_string()),
+        };
+    }
+    let drive =
+        parse_drive_letter(first).ok_or_else(|| format!("Invalid drive letter '{}'", first))?;
+    if drive == DRIVE_Z {
+        return Err("Drive Z: is reserved".to_string());
+    }
+    let mut opts = MountOptions { kind: DriveKind::CdRom, read_only: true, ..Default::default() };
+    let mut image = None;
+    let mut iter = tokens[1..].iter();
+    while let Some(token) = iter.next() {
+        match token.to_ascii_lowercase().as_str() {
+            "-t" => {
+                let value = iter.next().ok_or("-t needs a type")?;
+                if !matches!(value.to_ascii_lowercase().as_str(), "cdrom" | "iso") {
+                    return Err("Only CD-ROM images are supported".to_string());
+                }
+            }
+            "-fs" => {
+                let value = iter.next().ok_or("-fs needs a file system")?;
+                if !value.eq_ignore_ascii_case("iso") {
+                    return Err("Only CD-ROM images are supported".to_string());
+                }
+            }
+            "-label" => opts.label = Some(iter.next().ok_or("-label needs a name")?.clone()),
+            "-ro" => {}
+            other if other.starts_with('-') => return Err(format!("Unknown option '{}'", token)),
+            _ if image.is_some() => return Err("Only one image at a time can be mounted".to_string()),
+            _ => image = Some(locate(token).unwrap_or_else(|| expand_host_path(token, cwd, home))),
+        }
+    }
+    let path = image.ok_or_else(|| "Missing image".to_string())?;
+    Ok(MountCmd::Mount(MountSpec { drive, path, opts }))
 }
 
 /// Host path for display, without Windows' `\\?\` verbatim prefix that
@@ -230,7 +290,9 @@ mod tests {
         assert_eq!(spec.opts.kind, DriveKind::HardDisk);
 
         assert!(parse_mount_spec(3, &[], base, None).is_err());
-        assert!(parse_mount_spec(3, &toks("x iso"), base, None).is_err());
+        assert!(parse_mount_spec(3, &toks("x zip"), base, None).is_err());
+        let spec = parse_mount_spec(3, &toks("game.cue iso"), base, None).unwrap();
+        assert_eq!(spec.opts.kind, DriveKind::CdRom);
         assert!(parse_mount_spec(3, &toks("x -t"), base, None).is_err());
         assert!(parse_mount_spec(25, &toks("x"), base, None).is_err());
     }
@@ -253,6 +315,32 @@ mod tests {
             }
             other => panic!("{:?}", other),
         }
+    }
+
+    #[test]
+    fn imgmount_commands() {
+        let cwd = Path::new("/w");
+        let locate = |p: &str| (p == r"C:\DOTT\CD\DAYOFT~2.CUE").then(|| PathBuf::from("/games/dott/cd/x.cue"));
+        match parse_imgmount_command(r"d C:\DOTT\CD\DAYOFT~2.CUE -t cdrom", &locate, cwd, None).unwrap() {
+            MountCmd::Mount(spec) => {
+                assert_eq!(spec.drive, 3);
+                assert_eq!(spec.path, Path::new("/games/dott/cd/x.cue"));
+                assert_eq!(spec.opts.kind, DriveKind::CdRom);
+            }
+            other => panic!("{:?}", other),
+        }
+        match parse_imgmount_command("e game.iso -fs iso -label GAME", &locate, cwd, None).unwrap() {
+            MountCmd::Mount(spec) => {
+                assert_eq!(spec.path, cwd.join("game.iso"));
+                assert_eq!(spec.opts.label.as_deref(), Some("GAME"));
+            }
+            other => panic!("{:?}", other),
+        }
+        assert_eq!(parse_imgmount_command("-u d", &locate, cwd, None), Ok(MountCmd::Unmount(3)));
+        assert!(parse_imgmount_command("d disk.img -t hdd", &locate, cwd, None).is_err());
+        assert!(parse_imgmount_command("d a.cue b.cue", &locate, cwd, None).is_err());
+        assert!(parse_imgmount_command("d", &locate, cwd, None).is_err());
+        assert!(parse_imgmount_command("", &locate, cwd, None).is_err());
     }
 
     #[test]

@@ -116,14 +116,14 @@ fn mount_lists_mounts_and_unmounts() {
 
     let out = run(&mut cpu, "MOUNT e");
     assert!(out.starts_with("Missing host directory"), "{}", out);
-    let out = run(&mut cpu, &format!("MOUNT e {} iso", base.display()));
-    assert!(out.starts_with("Unknown option 'iso'"), "{}", out);
+    let out = run(&mut cpu, &format!("MOUNT e {} zip", base.display()));
+    assert!(out.starts_with("Unknown option 'zip'"), "{}", out);
     let out = run(
         &mut cpu,
         &format!("MOUNT e {}", base.join("nope").display()),
     );
     assert!(
-        out.replace('\n', "").ends_with("is not a directory"),
+        out.replace('\n', "").ends_with("is not a directory or a CD image"),
         "{}",
         out
     );

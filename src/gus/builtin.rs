@@ -58,16 +58,23 @@ fn with_patch_dir(ini: &[u8], patch_dir: &str) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::gus::patch::PatchBank;
+    use crate::memfs::Node;
 
     #[test]
     fn the_ini_points_at_the_drive() {
         let fs = drive('X');
-        let ini = String::from_utf8(fs.file("ULTRASND\\ULTRASND.INI").unwrap().to_vec()).unwrap();
+        let Some(Node::Bytes(ini)) = fs.file("ULTRASND\\ULTRASND.INI") else {
+            panic!("no ULTRASND.INI");
+        };
+        let ini = String::from_utf8(ini.to_vec()).unwrap();
         assert_eq!(PatchBank::patch_dir(&ini).as_deref(), Some("X:\\ULTRASND\\MIDI\\"));
         assert!(!ini.to_ascii_uppercase().contains("C:\\ULTRASND"));
         assert!(ini.contains("PatchDir=X:\\ULTRASND\\MIDI\\\r\n0=acpiano\r\n"));
         assert!(fs.is_dir("ULTRASND\\MIDI"));
-        assert_eq!(fs.file("ULTRASND\\MIDI\\ACPIANO.PAT").map(|d| d.len()), file("MIDI\\ACPIANO.PAT").map(<[u8]>::len));
+        assert_eq!(
+            fs.file("ULTRASND\\MIDI\\ACPIANO.PAT").map(Node::len),
+            file("MIDI\\ACPIANO.PAT").map(|d| d.len() as u64)
+        );
     }
 
     #[test]

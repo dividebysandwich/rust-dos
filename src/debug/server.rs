@@ -814,8 +814,10 @@ DRIVES
   GET    /api/drive                                list drives, types and paths
   PUT    /api/drive/D {"path":"/home/me/dos/cd","type":"cdrom","label":"GAMECD"}
                    mount or replace a drive; type floppy|hdd|cdrom, optional
-                   "read_only":true. Replacing closes that drive's open files;
-                   with no options a remount keeps the drive's type and label.
+                   "read_only":true. The path is a directory or a CD image
+                   (.cue, .iso, .bin, .img), which makes a CD-ROM drive.
+                   Replacing closes that drive's open files; with no options
+                   a remount keeps the drive's type and label.
   DELETE /api/drive/D                              unmount (not C: or Z:)
 
 WEBSOCKETS
