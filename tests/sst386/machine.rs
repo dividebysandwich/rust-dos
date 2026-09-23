@@ -104,9 +104,10 @@ impl Machine {
         cpu.bus.clock.deadline = u64::MAX;
         // Mask every IRQ at the PIC so POPF/IRET/STI setting IF can't let
         // one in.
-        cpu.bus.pic_mask = 0xFF;
-        cpu.bus.pic_irr = 0;
-        cpu.bus.pic_isr = 0;
+        cpu.bus.pic = rust_dos::pic::Pic::new();
+        cpu.bus.pic.master.imr = 0xFF;
+        // The 386EX the suite comes from has no A20 gate.
+        cpu.bus.a20 = true;
 
         // A0000-AFFFF is VGA memory. In chain-4 mode with all planes
         // enabled, write mode 0, no set/reset, rotate or logical op and a

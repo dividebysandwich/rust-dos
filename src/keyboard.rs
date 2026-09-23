@@ -3,30 +3,72 @@ use sdl2::keyboard::Mod;
 
 use crate::bus::Bus;
 
-/// Deliver a key press: queue `(scan << 8) | ascii` for BIOS INT 16h readers,
-/// and latch the scan code at port 0x60 + raise IRQ1 for programs that poll
-/// the port or install their own INT 09h ISR.
-pub fn deliver_key_down(bus: &mut Bus, code: u16) {
-    bus.keyboard_buffer.push_back(code);
-    bus.last_scan_code = (code >> 8) as u8;
-    bus.irq1_pending = true;
+/// Send a key's make or break code to the keyboard controller, with the E0
+/// prefix of the extended keys.
+fn send_scan(bus: &mut Bus, scan: u8, extended: bool) {
+    if extended {
+        bus.kbc.push_scancodes(&[0xE0, scan]);
+    } else {
+        bus.kbc.push_scancodes(&[scan]);
+    }
+    bus.sync_keyboard_irq();
 }
 
-/// Deliver a key release (scan code | 0x80) to port 0x60 and raise IRQ1.
-/// Games that track held keys need these to know when a key stops being
-/// pressed.
-pub fn deliver_key_up(bus: &mut Bus, scan: u8) {
+/// Deliver a key press: queue `(scan << 8) | ascii` for BIOS INT 16h readers,
+/// and send the make code to the keyboard controller for programs that read
+/// port 60h or install their own INT 09h ISR.
+pub fn deliver_key_down(bus: &mut Bus, code: u16, extended: bool) {
+    bus.keyboard_buffer.push_back(code);
+    send_scan(bus, (code >> 8) as u8, extended);
+}
+
+/// Deliver a key release: the break code (scan code | 80h). Games that track
+/// held keys (arrow-key movement, etc.) need these to know when the key
+/// stops being pressed.
+pub fn deliver_key_up(bus: &mut Bus, scan: u8, extended: bool) {
     if scan != 0 {
-        bus.last_scan_code = scan | 0x80;
-        bus.irq1_pending = true;
+        send_scan(bus, scan | 0x80, extended);
     }
 }
 
-/// Deliver a scan code without touching the INT 16h buffer (modifier keys
+/// Deliver a make code without touching the INT 16h buffer (modifier keys
 /// like Shift produce make/break codes but no buffered keystroke).
-pub fn deliver_scan_only(bus: &mut Bus, scan: u8) {
-    bus.last_scan_code = scan;
-    bus.irq1_pending = true;
+pub fn deliver_scan_only(bus: &mut Bus, scan: u8, extended: bool) {
+    send_scan(bus, scan, extended);
+}
+
+/// Extended keys, which send an E0 prefix: the grey cursor block, keypad
+/// Enter and /, right Ctrl and right Alt.
+pub fn is_extended(keycode: Keycode) -> bool {
+    matches!(
+        keycode,
+        Keycode::Up
+            | Keycode::Down
+            | Keycode::Left
+            | Keycode::Right
+            | Keycode::Home
+            | Keycode::End
+            | Keycode::PageUp
+            | Keycode::PageDown
+            | Keycode::Insert
+            | Keycode::Delete
+            | Keycode::KpEnter
+            | Keycode::KpDivide
+            | Keycode::RCtrl
+            | Keycode::RAlt
+    )
+}
+
+/// Scan code of a modifier key, which has no INT 16h keystroke.
+pub fn modifier_scan(keycode: Keycode) -> Option<u8> {
+    match keycode {
+        Keycode::LShift => Some(0x2A),
+        Keycode::RShift => Some(0x36),
+        Keycode::LCtrl | Keycode::RCtrl => Some(0x1D),
+        Keycode::LAlt | Keycode::RAlt => Some(0x38),
+        Keycode::CapsLock => Some(0x3A),
+        _ => None,
+    }
 }
 
 /// Returns a tuple of (Scancode, ASCII) for a given SDL Keycode.

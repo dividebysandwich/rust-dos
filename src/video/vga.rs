@@ -585,6 +585,7 @@ impl Device for VgaCard {
         // Static slice so the bus can check port ownership without allocating
         // a Vec on every I/O (palette updates do >1000 port writes each).
         const PORTS: &[u16] = &[
+            0x3C0, 0x3C1, // Attribute Controller
             0x3C2, // Misc Output (Write) / Input Status 0 (Read)
             0x3C3, // Video Enable
             0x3C4, 0x3C5, // Sequencer

@@ -192,7 +192,17 @@ pub struct ProcessContext {
 use std::path::PathBuf;
 
 impl Cpu {
+    /// A CPU on a machine with the default amount of RAM.
     pub fn new(root_path: PathBuf) -> Self {
+        Self::with_bus(Bus::new(root_path))
+    }
+
+    /// A CPU on a machine with `memory_mb` MB of RAM.
+    pub fn with_memory(root_path: PathBuf, memory_mb: usize) -> Self {
+        Self::with_bus(Bus::with_memory(root_path, memory_mb))
+    }
+
+    fn with_bus(bus: Bus) -> Self {
         Self {
             gpr: [0; 8],
             eip: 0x100,
@@ -204,7 +214,7 @@ impl Cpu {
             dr: [0; 8],
             gdtr: DescTable { base: 0, limit: 0xFFFF },
             idtr: DescTable { base: 0, limit: 0x3FF },
-            bus: Bus::new(root_path),
+            bus,
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
             pending_command: None,
@@ -422,9 +432,10 @@ impl Cpu {
 
     // Calculate Physical Address from Segment:Offset
     pub fn get_physical_addr(&self, segment: u16, offset: u16) -> usize {
-        let phys_addr = (segment as usize * 16) + offset as usize;
-        // MASK TO 20 BITS to emulate 8086 wrap-around
-        phys_addr & 0xFFFFF
+        let addr = ((segment as usize) << 4) + offset as usize;
+        // Without the A20 gate, FFFF:0010 and up wrap to the bottom of
+        // memory as on an 8086.
+        if self.bus.a20 { addr } else { addr & !0x0010_0000 }
     }
 
     /// Extract Low byte of DX (DL)
@@ -500,41 +511,12 @@ impl Cpu {
         f
     }
 
-    /// Point the HLE vectors back at the emulator's handlers, except those
-    /// hooked by a resident TSR.
+    /// Put the BIOS's interrupt vectors back, except those hooked by a
+    /// resident TSR.
     fn install_bios_traps(&mut self) {
-        let mut phys_addr = 0xF1000;
-        // Keep new vectors at the end: programs may have remembered the
-        // addresses of the older traps.
-        let hle_vectors = vec![
-            0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33,
-            0x00, 0x06,
-        ];
         let resident =
             (crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16;
-
-        for vec in hle_vectors {
-            let ivt_offset = (vec as usize) * 4;
-            let handler_offset = (phys_addr & 0xFFFF) as u16;
-
-            // Point IVT to F000:Offset
-            let target = self.get_physical_addr(
-                self.bus.read_16(ivt_offset + 2),
-                self.bus.read_16(ivt_offset),
-            );
-            if !resident.contains(&target) {
-                self.bus.write_16(ivt_offset, handler_offset); // IP
-                self.bus.write_16(ivt_offset + 2, 0xF000); // CS
-            }
-
-            // Ensure the Trap Instruction exists (FE 38 XX CF)
-            self.bus.write_8(phys_addr, 0xFE);
-            self.bus.write_8(phys_addr + 1, 0x38);
-            self.bus.write_8(phys_addr + 2, vec);
-            self.bus.write_8(phys_addr + 3, 0xCF);
-
-            phys_addr += 4;
-        }
+        crate::bios::restore_ivt(&mut self.bus, resident);
     }
 
     pub fn load_shell(&mut self) {

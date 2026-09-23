@@ -105,7 +105,7 @@ prefixes) and the totals.
 | Reason | Why |
 |---|---|
 | revoked | Its hash is in `revocation_list.txt`. |
-| address beyond emulated RAM | A byte of its initial or final memory is at or above `bus.ram().len()` (1 MiB today). This is about 20% of the suite, because random segments reach the HMA. These tests start running once RAM grows. |
+| address beyond emulated RAM | A byte of its initial or final memory is at or above `bus.ram().len()`. With the default 16 MB, none are. |
 | tripwire | The exec loop's IVT tripwire (CS=0, IP<100h, DS not 0) fired and asked for a shell reload. |
 | service trap at CS:IP | The instruction under test starts with FE 38 or FE 39, the emulator's service traps (BOPs). Reaching one later in a test counts as a failure, because the real CPU would have halted first. |
 | file `FE.7` | FE /7 is the BOP encoding. The suite has no such file today. |
@@ -127,6 +127,8 @@ this setup:
   reads back.
 - **Interrupts:** all IRQs are masked at the PIC and the timer deadline is
   disabled, so POPF, IRET or STI setting IF can't let an interrupt in.
+- **A20:** open. The 386EX the suite comes from has no A20 gate, so
+  addresses above 1 MB don't wrap.
 - **Emulator log:** lines are collected for the failure details. They don't
   reach `trace.log`, and stdout is silenced during the run.
 - **Machines:** each file runs on a fresh `Cpu`, so results don't depend on
@@ -146,14 +148,13 @@ When the CPU changes (EFLAGS setter, CR0 accessor, larger RAM, a different
 
 ## Current results
 
-With the emulator's CPU rewritten for the 386, 1,406,114 of the 1,406,124
-tests that run pass (99.999%); 343,575 are skipped because they reach
-beyond 1 MiB of RAM. The 10 failures:
+With the emulator's CPU rewritten for the 386, 1,749,683 of the 1,749,699
+tests pass (one revoked test is skipped). The 16 failures:
 
 - **REP STOS/MOVS writing over their own code** (4): the 386 has already
   fetched the next instructions into its prefetch queue, so it runs the
   bytes that were there before. The emulator decodes from memory.
-- **IDIV byte** (4) and **AAM 0** (2): results that look like 386
+- **IDIV byte** (9) and **AAM 0** (3): results that look like 386
   microcode quirks for rare operand combinations.
 
 Hardware behaviour the emulator reproduces because the suite showed it:

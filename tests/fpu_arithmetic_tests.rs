@@ -101,14 +101,12 @@ fn test_fiadd_integer_memory() {
     let mut f0 = F80::new(); f0.set_f64(100.0);
     cpu.fpu_push(f0);
 
-    // Setup memory: [0x200] = 50 (Int16)
-    let addr = 0x200;
-    cpu.bus.write_16(addr, 50);
+    // Setup memory: [0x2000] = 50 (Int32)
+    let addr = 0x2000;
+    cpu.bus.write_32(addr, 50);
 
-    // FIADD [0x200] -> DA 06 00 02 (using absolute addr for simplicity)
-    // Note: iced_x86 decoder needs a valid instruction. 
-    // DA 06 00 02 is FIADD [0200] in 16-bit mode
-    testrunners::run_fpu_code(&mut cpu, &[0xDA, 0x06, 0x00, 0x02]);
+    // DA 06 00 20 is FIADD dword [2000] in 16-bit mode
+    testrunners::run_fpu_code(&mut cpu, &[0xDA, 0x06, 0x00, 0x20]);
 
     assert_eq!(cpu.fpu_get(0).get_f64(), 150.0);
 }

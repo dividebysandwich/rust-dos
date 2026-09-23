@@ -167,15 +167,15 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
     // Deliver at the start of an instruction as a CPU would, when the PIC
     // lets the line through: not masked in the IMR and not blocked by an
     // interrupt still in service.
-    if let Some(line) = cpu.bus.pic_pending_irq() {
-        let vector = 0x08 + line;
+    if let Some(irq) = cpu.bus.pic_pending_irq() {
+        let vector = cpu.bus.pic.vector(irq);
         let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
         if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
             // No handler installed — drop the IRQ rather than spinning on it.
-            cpu.bus.pic_drop(line);
+            cpu.bus.pic_drop(irq);
             return true;
         }
-        cpu.bus.pic_acknowledge(line);
+        cpu.bus.pic_acknowledge(irq);
         let (eip, esp) = (cpu.eip(), cpu.esp());
         if let Err(fault) = cpu.deliver_interrupt(vector, IntSource::External) {
             cpu.set_eip(eip);
@@ -321,13 +321,25 @@ fn instruction(
 
     // Decode via the decoded-instruction cache. On a hit (the common case
     // inside hot loops) iced's decoder is skipped entirely.
-    let page_gen = cpu.bus.page_gen[(phys_ip >> 12) & 0xFF];
-    let decoder = &mut fetch.decoder;
-    let instr = fetch.cache.get_or_decode(phys_ip, cs.selector, eip, page_gen, |slot| {
-        decoder.set_position(phys_ip).unwrap();
-        decoder.set_ip(eip as u64);
-        decoder.decode_out(slot);
-    });
+    let slow;
+    let instr = if phys_ip + 16 <= fetch.ram.len() {
+        let page_gen = cpu.bus.page_gen[phys_ip >> 12];
+        let decoder = &mut fetch.decoder;
+        fetch.cache.get_or_decode(phys_ip, cs.selector, eip, page_gen, |slot| {
+            decoder.set_position(phys_ip).unwrap();
+            decoder.set_ip(eip as u64);
+            decoder.decode_out(slot);
+        })
+    } else {
+        // At the end of RAM or past it: fetch through the bus.
+        let mut bytes = [0u8; 16];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            let lin = cs.base.wrapping_add(eip).wrapping_add(i as u32);
+            *byte = cpu.bus.read_8(cpu.translate(lin) as usize);
+        }
+        slow = Decoder::with_ip(16, &bytes, eip as u64, DecoderOptions::NONE).decode();
+        &slow
+    };
 
     let next_eip = eip.wrapping_add(instr.len() as u32);
     if next_eip - 1 > cs.limit {
@@ -348,6 +360,13 @@ fn instruction(
     }
     cpu.bus.clock.icount += 1;
 
+    if cpu.bus.reset_requested {
+        // The keyboard controller or port 92h pulsed the reset line.
+        cpu.bus.reset_requested = false;
+        cpu.bus.log_string("[CPU] Reset requested");
+        cpu.reset();
+    }
+
     if cpu.state == CpuState::Halted && cpu.bus.clock.deadline != u64::MAX {
         // HLT: nothing runs until the next interrupt, so skip ahead to the
         // next timer event. With nothing scheduled (a CPU stepped outside a
@@ -365,7 +384,7 @@ fn instruction(
 ///   interrupt vector table; returns with a simulated IRET.
 /// * `FE 39 vv`: an inline service vv; execution continues after it.
 fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    if cpu.cr0 & CR0_PE != 0 || ram[phys_ip] != 0xFE {
+    if cpu.cr0 & CR0_PE != 0 || phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
         return false;
     }
     let vector = ram[phys_ip + 2];

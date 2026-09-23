@@ -1,12 +1,56 @@
 use crate::cpu::{Cpu, CpuFlags};
 use iced_x86::Register;
 
+/// Extended memory above 1 MB, in KB.
+fn extended_kb(cpu: &Cpu) -> usize {
+    (cpu.bus.ram().len() >> 10).saturating_sub(1024)
+}
+
+/// Report success (CF clear, AH 0).
+fn ok(cpu: &mut Cpu) {
+    cpu.set_reg8(Register::AH, 0);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+}
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    let al = cpu.get_al();
     match ah {
+        // A20 gate: disable, enable, query, and which methods exist
+        // (keyboard controller and port 92h).
+        0x24 => match al {
+            0x00 | 0x01 => {
+                cpu.bus.a20 = al == 0x01;
+                ok(cpu);
+            }
+            0x02 => {
+                let a20 = cpu.bus.a20 as u8;
+                ok(cpu);
+                cpu.set_reg8(Register::AL, a20);
+            }
+            0x03 => {
+                ok(cpu);
+                cpu.set_bx(0x0003);
+            }
+            _ => unsupported(cpu),
+        },
+        // Extended memory size in KB (at most 64 MB - 1 KB).
         0x88 => {
-            // Extended Memory (16MB total -> 15MB extended)
-            cpu.set_ax(15360);
+            let kb = extended_kb(cpu).min(0xFFFF) as u16;
+            cpu.set_ax(kb);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+        0x87 => block_move(cpu),
+        // AX=E801h: memory between 1 and 16 MB in KB (AX, CX), and above
+        // 16 MB in 64 KB blocks (BX, DX).
+        0xE8 if al == 0x01 => {
+            let kb = extended_kb(cpu);
+            let below_16m = kb.min(15 * 1024) as u16;
+            let above_16m = (kb.saturating_sub(15 * 1024) / 64) as u16;
+            cpu.set_ax(below_16m);
+            cpu.set_cx(below_16m);
+            cpu.set_bx(above_16m);
+            cpu.set_dx(above_16m);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
         0x86 => {
@@ -31,8 +75,8 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.write_8(phys_addr + 3, 0x01);
             // Byte 4: BIOS Revision (0)
             cpu.bus.write_8(phys_addr + 4, 0x00);
-            // Byte 5: Feature Info 1 (0)
-            cpu.bus.write_8(phys_addr + 5, 0x00);
+            // Byte 5: Feature Info 1: RTC, second 8259
+            cpu.bus.write_8(phys_addr + 5, 0x60);
             // Byte 6-9: Reserved/Features
             cpu.bus.write_8(phys_addr + 6, 0x00);
             cpu.bus.write_8(phys_addr + 7, 0x00);
@@ -42,8 +86,32 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
-        _ => cpu
-            .bus
-            .log_string(&format!("[BIOS] Unhandled INT 15h AH={:02X}", ah)),
+        _ => unsupported(cpu),
     }
+}
+
+/// Unknown function: CF set, AH=86h ("not supported"), as a BIOS answers.
+fn unsupported(cpu: &mut Cpu) {
+    cpu.bus.log_string(&format!("[BIOS] Unhandled INT 15h AX={:04X}", cpu.ax()));
+    cpu.set_reg8(Register::AH, 0x86);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+}
+
+/// AH=87h: copy CX words between two physical addresses described by the
+/// source and destination descriptors of the GDT at ES:SI.
+fn block_move(cpu: &mut Cpu) {
+    let gdt = cpu.get_physical_addr(cpu.es(), cpu.si());
+    let base = |cpu: &Cpu, desc: usize| -> usize {
+        let b = |i| cpu.bus.read_8(desc + i) as usize;
+        b(2) | b(3) << 8 | b(4) << 16 | b(7) << 24
+    };
+    let source = base(cpu, gdt + 0x10);
+    let dest = base(cpu, gdt + 0x18);
+    let len = cpu.cx() as usize * 2;
+    for i in 0..len {
+        let byte = cpu.bus.read_8(source + i);
+        cpu.bus.write_8(dest + i, byte);
+    }
+    ok(cpu);
+    cpu.set_cpu_flag(CpuFlags::ZF, true);
 }

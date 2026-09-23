@@ -1,0 +1,240 @@
+//! The AT platform: memory above 1 MB and the A20 gate, the cascaded PICs,
+//! the 8042 keyboard controller, CMOS, CPU reset, and INT 15h.
+
+use iced_x86::Register;
+use rust_dos::bus::Bus;
+use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
+use rust_dos::interrupts::int15;
+use std::path::PathBuf;
+
+mod testrunners;
+use testrunners::run_cpu_code;
+
+fn cpu() -> Cpu {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.set_ss(0);
+    cpu.set_sp(0x8000);
+    cpu
+}
+
+#[test]
+fn a20_gate_decides_whether_addresses_wrap_at_1mb() {
+    let mut cpu = cpu();
+    cpu.bus.write_8(0x0000_0010, 0x11);
+    cpu.bus.write_8(0x0010_0010, 0x22);
+    cpu.set_es(0xFFFF);
+    cpu.set_bx(0x0020);
+    // 26 8A 07 -> MOV AL, ES:[BX] (FFFF:0020 = 10_0010h)
+    let code = [0x26, 0x8A, 0x07];
+
+    cpu.bus.a20 = false;
+    run_cpu_code(&mut cpu, &code);
+    assert_eq!(cpu.get_al(), 0x11, "A20 off: wraps to 0000:0010");
+
+    cpu.set_ip(0x100);
+    cpu.bus.a20 = true;
+    run_cpu_code(&mut cpu, &code);
+    assert_eq!(cpu.get_al(), 0x22, "A20 on: the HMA");
+}
+
+#[test]
+fn a20_through_port_92h_and_the_keyboard_controller() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    bus.io_write(0x92, 0x02);
+    assert!(bus.a20);
+    assert_eq!(bus.io_read(0x92) & 0x02, 0x02);
+    bus.io_write(0x92, 0x00);
+    assert!(!bus.a20);
+
+    // 8042: D1h writes the output port; bit 1 is A20, bit 0 must stay set.
+    bus.io_write(0x64, 0xD1);
+    bus.io_write(0x60, 0xDF);
+    assert!(bus.a20);
+    assert!(!bus.reset_requested);
+    // D0h reads it back.
+    bus.io_write(0x64, 0xD0);
+    assert_eq!(bus.io_read(0x60), 0xDF);
+    bus.io_write(0x64, 0xDD);
+    assert!(!bus.a20);
+}
+
+#[test]
+fn memory_above_1mb_and_past_the_end_of_ram() {
+    let mut bus = Bus::with_memory(PathBuf::from("."), 4);
+    bus.write_32(0x0030_0000, 0xDEAD_BEEF);
+    assert_eq!(bus.read_32(0x0030_0000), 0xDEAD_BEEF);
+    // Nothing past the end of RAM: reads float high, writes vanish.
+    bus.write_8(0x0040_0000, 0x12);
+    assert_eq!(bus.read_8(0x0040_0000), 0xFF);
+    // The top of the address space mirrors the BIOS ROM.
+    assert_eq!(bus.read_8(0xFFFF_FFFE), 0xFC, "model byte");
+}
+
+#[test]
+fn pic_initialization_sets_the_vector_base() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    // Remap the master to 20h, as some protected-mode programs do.
+    bus.io_write(0x20, 0x11); // ICW1: ICW4 follows, cascade
+    bus.io_write(0x21, 0x20); // ICW2: vector base
+    bus.io_write(0x21, 0x04); // ICW3: slave on IRQ 2
+    bus.io_write(0x21, 0x01); // ICW4: 8086 mode
+    assert_eq!(bus.io_read(0x21), 0x00, "initialization clears the mask");
+    bus.pic.raise(0);
+    assert_eq!(bus.pic_pending_irq(), Some(0));
+    assert_eq!(bus.pic_acknowledge(0), 0x20);
+}
+
+#[test]
+fn slave_pic_delivers_through_the_cascade() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    bus.io_write(0xA1, 0x00); // unmask the slave
+    bus.pic.raise(10);
+    assert_eq!(bus.pic_pending_irq(), Some(10));
+    assert_eq!(bus.pic_acknowledge(10), 0x72);
+    // In service on both chips until both get an EOI.
+    bus.io_write(0x20, 0x0B);
+    bus.io_write(0xA0, 0x0B);
+    assert_eq!(bus.io_read(0x20), 0x04);
+    assert_eq!(bus.io_read(0xA0), 0x04);
+    bus.pic.raise(10);
+    assert_eq!(bus.pic_pending_irq(), None);
+    bus.io_write(0xA0, 0x20);
+    bus.io_write(0x20, 0x20);
+    assert_eq!(bus.pic_pending_irq(), Some(10));
+}
+
+#[test]
+fn keyboard_controller_queues_every_scan_code_byte() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    // Right arrow pressed and released: E0 4D, E0 CD.
+    rust_dos::keyboard::deliver_key_down(&mut bus, 0x4D00, true);
+    rust_dos::keyboard::deliver_key_up(&mut bus, 0x4D, true);
+
+    let mut bytes = Vec::new();
+    while bus.io_read(0x64) & 0x01 != 0 {
+        // One IRQ 1 per byte.
+        assert_eq!(bus.pic_pending_irq(), Some(1));
+        bus.pic_acknowledge(1);
+        bytes.push(bus.io_read(0x60));
+        bus.io_write(0x20, 0x20);
+    }
+    assert_eq!(bytes, [0xE0, 0x4D, 0xE0, 0xCD]);
+    assert_eq!(bus.pic_pending_irq(), None);
+}
+
+#[test]
+fn keyboard_acknowledges_commands() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    bus.io_write(0x60, 0xED); // set LEDs
+    assert_eq!(bus.io_read(0x60), 0xFA);
+    bus.io_write(0x60, 0x02);
+    assert_eq!(bus.io_read(0x60), 0xFA);
+    bus.io_write(0x64, 0xAA); // controller self test
+    assert_eq!(bus.io_read(0x60), 0x55);
+}
+
+#[test]
+fn cmos_reports_memory_and_keeps_the_shutdown_byte() {
+    let mut bus = Bus::with_memory(PathBuf::from("."), 8);
+    let read = |bus: &mut Bus, index: u8| {
+        bus.io_write(0x70, index);
+        bus.io_read(0x71)
+    };
+    let ext_kb = read(&mut bus, 0x17) as u16 | (read(&mut bus, 0x18) as u16) << 8;
+    assert_eq!(ext_kb, 7 * 1024);
+    assert_eq!(read(&mut bus, 0x15), 0x80, "640 KB base memory");
+    bus.io_write(0x70, 0x0F);
+    bus.io_write(0x71, 0x0A);
+    assert_eq!(read(&mut bus, 0x0F), 0x0A);
+    // The clock ticks in BCD.
+    assert!(read(&mut bus, 0x00) & 0x0F <= 9);
+}
+
+#[test]
+fn reset_with_shutdown_code_0ah_resumes_through_40_67() {
+    let mut cpu = cpu();
+    cpu.bus.io_write(0x70, 0x0F);
+    cpu.bus.io_write(0x71, 0x0A);
+    cpu.bus.write_16(0x0467, 0x0200);
+    cpu.bus.write_16(0x0469, 0x3000);
+    // B0 FE -> MOV AL, FEh ; E6 64 -> OUT 64h, AL (pulse the reset line)
+    run_cpu_code(&mut cpu, &[0xB0, 0xFE, 0xE6, 0x64]);
+    assert_eq!((cpu.cs(), cpu.ip()), (0xF000, 0xFFF0), "reset vector");
+    cpu.step(); // the BIOS reset entry
+    assert_eq!((cpu.cs(), cpu.ip()), (0x3000, 0x0200));
+    assert_eq!(cpu.state, CpuState::Running);
+}
+
+#[test]
+fn reset_without_shutdown_code_ends_the_program() {
+    let mut cpu = cpu();
+    // B0 01 -> MOV AL, 1 ; E6 92 -> OUT 92h, AL (fast reset)
+    run_cpu_code(&mut cpu, &[0xB0, 0x01, 0xE6, 0x92]);
+    cpu.step();
+    assert_eq!(cpu.state, CpuState::RebootShell);
+}
+
+#[test]
+fn bios_timer_calls_int_1ch() {
+    let mut cpu = cpu();
+    // An INT 1Ch hook that counts in 0000:0600.
+    // FF 06 00 06 -> INC WORD [0600] ; CF -> IRET
+    cpu.bus.load_bytes(0x0700, &[0xFF, 0x06, 0x00, 0x06, 0xCF]);
+    cpu.bus.write_16(0x1C * 4, 0x0700);
+    cpu.bus.write_16(0x1C * 4 + 2, 0x0000);
+    cpu.set_cpu_flag(CpuFlags::IF, true);
+    cpu.bus.load_bytes(0x100, &[0xEB, 0xFE]); // JMP $
+    cpu.bus.pic.raise(0);
+    for _ in 0..20 {
+        cpu.step();
+    }
+    assert_eq!(cpu.bus.read_16(0x0600), 1);
+    assert_eq!(cpu.bus.read_16(0x046C), 1, "BIOS tick count");
+    assert_eq!(cpu.bus.pic.master.isr, 0, "EOI sent");
+    assert_eq!(cpu.ip(), 0x100, "back in the program");
+}
+
+#[test]
+fn int_15h_a20_and_memory_functions() {
+    let mut cpu = cpu();
+    cpu.set_ax(0x2401);
+    int15::handle(&mut cpu);
+    assert!(cpu.bus.a20 && !cpu.get_cpu_flag(CpuFlags::CF));
+    cpu.set_ax(0x2402);
+    int15::handle(&mut cpu);
+    assert_eq!(cpu.get_al(), 1);
+
+    cpu.set_reg8(Register::AH, 0x88);
+    int15::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 15 * 1024);
+
+    cpu.set_ax(0xE801);
+    int15::handle(&mut cpu);
+    assert_eq!((cpu.ax(), cpu.bx()), (15 * 1024, 0));
+
+    // Unknown functions fail the way a BIOS does.
+    cpu.set_ax(0xBFDE);
+    int15::handle(&mut cpu);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.get_ah(), 0x86);
+}
+
+#[test]
+fn int_15h_block_move_copies_to_extended_memory() {
+    let mut cpu = cpu();
+    cpu.bus.load_bytes(0x5000, b"hello, extended memory!!");
+    // GDT at 0000:4000: source descriptor at +10h, destination at +18h.
+    let gdt = 0x4000;
+    let desc = |base: u32| {
+        [0xFF, 0xFF, base as u8, (base >> 8) as u8, (base >> 16) as u8, 0x93, 0x00, (base >> 24) as u8]
+    };
+    cpu.bus.load_bytes(gdt + 0x10, &desc(0x5000));
+    cpu.bus.load_bytes(gdt + 0x18, &desc(0x20_0000));
+    cpu.set_es(0);
+    cpu.set_si(gdt as u16);
+    cpu.set_cx(12);
+    cpu.set_reg8(Register::AH, 0x87);
+    int15::handle(&mut cpu);
+    let copied: Vec<u8> = (0..24).map(|i| cpu.bus.read_8(0x20_0000 + i)).collect();
+    assert_eq!(&copied, b"hello, extended memory!!");
+}

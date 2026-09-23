@@ -1,7 +1,16 @@
 use crate::cpu::Cpu;
 
+/// The HLE trap: count the tick and acknowledge the interrupt.
 pub fn handle(cpu: &mut Cpu) {
-    // cpu.bus.log_string("[INT08] Timer Tick");
+    tick(cpu);
+    // End of interrupt, as the BIOS handler does. Programs that hook INT 08h
+    // and chain here rely on it.
+    cpu.bus.io_write(0x20, 0x20);
+}
+
+/// Count a timer tick in the BIOS data area. The ROM timer handler calls
+/// this, then INT 1Ch, then acknowledges the interrupt.
+pub fn tick(cpu: &mut Cpu) {
     // Increment System Timer Count (0040:006C)
     // 32-bit value at 0x046C
     let mut ticks = cpu.bus.read_16(0x046C) as u32;
@@ -22,14 +31,4 @@ pub fn handle(cpu: &mut Cpu) {
     cpu.bus.write_16(0x046C, (ticks & 0xFFFF) as u16);
     cpu.bus.write_16(0x046E, (ticks >> 16) as u16);
 
-    // Chain to User Timer Interrupt (INT 1Ch)
-    // Since we are in HLE, we can just "Call" the vector.
-    // However, INT 1Ch is usually dummy (IRET) unless hooked.
-    // We'll emulate the behavior: Explicitly run the handler logic for 1Ch.
-    // But since we are inside `handle_hle`, we can't easily recurse cleanly without
-    // potentially messing up the stack IF we did a real CPU loop.
-
-    // End of interrupt, as the BIOS handler does. Programs that hook INT 08h
-    // and chain here rely on it.
-    cpu.bus.io_write(0x20, 0x20);
 }

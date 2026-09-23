@@ -84,6 +84,8 @@ D:
     overrides it.
   * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU)
     or `386`.
+  * `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
+    first megabyte is extended memory for DOS extenders and XMS.
 * **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.

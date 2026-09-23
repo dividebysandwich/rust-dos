@@ -43,10 +43,14 @@ pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
 /// Inline emulator services (`FE 39 vv`), which ROM code calls in the middle
 /// of a routine and which return by continuing with the next instruction.
 pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
-    cpu.bus.log_string(&format!(
-        "[CPU] Unknown inline emulator service {:02X}",
-        service
-    ));
+    match service {
+        crate::bios::SERVICE_TIMER_TICK => int08::tick(cpu),
+        crate::bios::SERVICE_POST => crate::bios::post(cpu),
+        _ => cpu.bus.log_string(&format!(
+            "[CPU] Unknown inline emulator service {:02X}",
+            service
+        )),
+    }
 }
 
 pub fn handle_hle(cpu: &mut Cpu, vector: u8) {

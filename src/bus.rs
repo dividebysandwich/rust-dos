@@ -31,18 +31,30 @@ pub trait Device {
     fn step(&mut self) {}
 }
 
+/// RAM when the configuration doesn't say.
+pub const DEFAULT_MEMORY_MB: usize = 16;
+
 pub struct Bus {
-    ram: Vec<u8>,              // 1MB System RAM
+    ram: Vec<u8>, // System RAM, allocated once
     pub video_mode: VideoMode, // Current State
     pub disk: DiskController,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
-    /// Last scan code delivered to port 0x60. Real hardware latches the byte
-    /// there until the CPU reads it. High bit set = key release.
-    pub last_scan_code: u8,
-    /// True while a key-scan IRQ1 (INT 09h) is pending delivery. Set by the
-    /// SDL event handler on key-down/key-up, cleared by the emulator loop
-    /// once the INT 09h ISR has been invoked.
-    pub irq1_pending: bool,
+    /// The 8042 keyboard controller (ports 60h/64h): scan codes for
+    /// programs that read the keyboard themselves, the A20 gate and the
+    /// CPU reset line.
+    pub kbc: crate::kbc::Kbc,
+    /// The A20 gate: when false, address line 20 is forced to 0 and
+    /// addresses wrap at 1 MB as on an 8086.
+    pub a20: bool,
+    /// Something asked for a CPU reset (8042 or port 92h); the execution
+    /// loop carries it out.
+    pub reset_requested: bool,
+    pub cmos: crate::cmos::Cmos,
+    /// Last POST code written to port 80h (or 190h, test ROMs).
+    pub post_code: u8,
+    /// Port 61h bit 4, the DRAM refresh request, toggles on every read;
+    /// delay loops count the toggles.
+    refresh_toggle: bool,
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub start_time: Instant, // System timer
@@ -82,15 +94,8 @@ pub struct Bus {
     pub pit0: crate::timer::Pit0,
     /// Emulated time, advanced by the main loop.
     pub clock: crate::timer::Clock,
-    pub pic_mask: u8,
-    /// 8259 interrupt request register for edge-triggered lines (IRQ 0).
-    /// IRQ 1 and IRQ 5 requests live in `irq1_pending` and `sb.irq_pending`.
-    pub pic_irr: u8,
-    /// 8259 in-service register: interrupts delivered but not yet
-    /// acknowledged with an EOI. They block lines of equal or lower priority.
-    pub pic_isr: u8,
-    /// OCW3 read register select: port 0x20 reads return ISR instead of IRR.
-    pub pic_read_isr: bool,
+    /// The two 8259 interrupt controllers.
+    pub pic: crate::pic::Pic,
     pub audio_phase: f32, // Track wave position to prevent clicking
     pub dta_segment: u16,
     pub dta_offset: u16,
@@ -112,13 +117,13 @@ pub struct Bus {
     pub sb: crate::sb::SoundBlaster,
     pub dma_ch1: crate::sb::Dma8237Ch1,
 
-    /// Per-4KB-page generation counter covering the full 1 MiB address space
-    /// (256 pages). Bumped on every write inside the Bus write helpers. The
-    /// decoded-instruction cache stores the gen at decode time and invalidates
-    /// a cached entry when the gen for its page has changed — this is how we
-    /// stay correct in the face of self-modifying code (LZEXE, packers, etc.)
-    /// without paying the cost of verifying cached bytes on every fetch.
-    pub page_gen: [u32; 256],
+    /// Per-4KB-page generation counter for every page of RAM. Bumped on every
+    /// write inside the Bus write helpers. The decoded-instruction cache
+    /// stores the gen at decode time and invalidates a cached entry when the
+    /// gen for its page has changed — this is how we stay correct in the
+    /// face of self-modifying code (LZEXE, packers, etc.) without paying the
+    /// cost of verifying cached bytes on every fetch.
+    pub page_gen: Vec<u32>,
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.
@@ -131,14 +136,25 @@ pub struct Bus {
 use std::path::PathBuf;
 
 impl Bus {
+    /// A machine with the default 16 MB of RAM.
     pub fn new(root_path: PathBuf) -> Self {
+        Self::with_memory(root_path, DEFAULT_MEMORY_MB)
+    }
+
+    /// A machine with `memory_mb` MB of RAM (at least 2).
+    pub fn with_memory(root_path: PathBuf, memory_mb: usize) -> Self {
+        let ram_len = memory_mb.max(2) << 20;
         let mut bus = Self {
-            ram: vec![0; 1024 * 1024],
+            ram: vec![0; ram_len],
             video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
             disk: DiskController::new(root_path),
             keyboard_buffer: VecDeque::new(),
-            last_scan_code: 0,
-            irq1_pending: false,
+            kbc: crate::kbc::Kbc::new(),
+            a20: false,
+            reset_requested: false,
+            cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
+            post_code: 0,
+            refresh_toggle: false,
             cursor_x: 0,
             cursor_y: 0,
             start_time: Instant::now(),
@@ -157,10 +173,7 @@ impl Bus {
             pit0_latched_active: false,
             pit0: crate::timer::Pit0::new(),
             clock: crate::timer::Clock::new(crate::timer::CpuSpeed::Max.initial_cycles()),
-            pic_mask: 0x00,
-            pic_irr: 0,
-            pic_isr: 0,
-            pic_read_isr: false,
+            pic: crate::pic::Pic::new(),
             audio_phase: 0.0,
             log_file: None,
             dta_segment: 0x1000,
@@ -171,7 +184,7 @@ impl Bus {
             adlib: crate::adlib::AdLib::new(),
             sb: crate::sb::SoundBlaster::new(),
             dma_ch1: crate::sb::Dma8237Ch1::default(),
-            page_gen: [0; 256],
+            page_gen: vec![0; ram_len >> 12],
             log_hook: None,
             audio_hook: None,
         };
@@ -248,18 +261,8 @@ impl Bus {
             bus.ram[0xC2000 + i] = (i % 256) as u8;
         }
 
-        // Install HLE traps
-
-        bus.install_hle_trap(0x10, 0xF1000); // Video
-        bus.install_hle_trap(0x11, 0xF1004); // Equipment
-        bus.install_hle_trap(0x12, 0xF1008); // Memory
-        bus.install_hle_trap(0x15, 0xF100C); // System
-        bus.install_hle_trap(0x16, 0xF1010); // Keyboard
-        bus.install_hle_trap(0x1A, 0xF1014); // Time
-        bus.install_hle_trap(0x20, 0xF1018); // Terminate
-        bus.install_hle_trap(0x21, 0xF101C); // DOS
-        bus.install_hle_trap(0x2F, 0xF1020); // Multiplex (MSCDEX)
-        bus.install_hle_trap(0x33, 0xF1024); // Mouse
+        // BIOS ROM code and the interrupt vector table.
+        crate::bios::install(&mut bus);
         crate::mouse::install_callback_stub(&mut bus);
 
         // Build a baseline MCB chain — one large free block covering
@@ -413,21 +416,6 @@ impl Bus {
 
     /// Installs a Magic Trap (FE 38 <Vector> CF) at the given Physical Address
     /// and updates the IVT to point to it.
-    fn install_hle_trap(&mut self, vector: u8, phys_addr: usize) {
-        // Update IVT (0000:Vector*4)
-        let ivt_offset = (vector as usize) * 4;
-        let handler_offset = (phys_addr & 0xFFFF) as u16; // Offset part of F000:Offset
-
-        self.write_16(ivt_offset, handler_offset); // IP
-        self.write_16(ivt_offset + 2, 0xF000); // CS
-
-        // Write Trap Code
-        self.write_8(phys_addr, 0xFE); // BOP
-        self.write_8(phys_addr + 1, 0x38); // Magic
-        self.write_8(phys_addr + 2, vector); // The Vector ID
-        self.write_8(phys_addr + 3, 0xCF); // IRET
-    }
-
     /// Mark the text VRAM byte range `[start, end)` for re-rendering. Code
     /// that writes `vga.vram_text` directly instead of through `write_8`
     /// must call this (or `vga.mark_dirty_full`), or the dirty-rect renderer
@@ -511,21 +499,33 @@ impl Bus {
     /// Invalidate cached decodes of the pages covering `start..end`.
     fn bump_page_gens(&mut self, start: usize, end: usize) {
         for page in (start >> 12)..=((end - 1) >> 12) {
-            let g = &mut self.page_gen[page & 0xFF];
+            let g = &mut self.page_gen[page];
             *g = g.wrapping_add(1);
         }
+    }
+
+    /// True for `len` bytes at `addr` that are plain RAM: conventional
+    /// memory below the video window, or extended memory above 1 MB.
+    #[inline(always)]
+    fn is_plain_ram(&self, addr: usize, len: usize) -> bool {
+        addr + len <= ADDR_VGA_GRAPHICS || (addr >= 0x10_0000 && addr + len <= self.ram.len())
     }
 
     #[inline(always)]
     pub fn read_8(&self, addr: usize) -> u8 {
         // Fast path — the vast majority of memory accesses (code fetch,
-        // stack, program data) land below 0xA0000 and don't need the VGA
-        // range checks. One comparison covers them.
-        if addr < ADDR_VGA_GRAPHICS {
-            // SAFETY: ram is a fixed 1 MiB buffer; addr < 0xA0000 is in range.
+        // stack, program data) are plain RAM and don't need the VGA range
+        // checks.
+        if self.is_plain_ram(addr, 1) {
+            // SAFETY: is_plain_ram checked that addr is within ram.
             return unsafe { *self.ram.get_unchecked(addr) };
         }
-        if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
+        self.read_8_mapped(addr)
+    }
+
+    /// Reads of the video memory, the ROM area and past the end of RAM.
+    fn read_8_mapped(&self, addr: usize) -> u8 {
+        if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS && addr >= ADDR_VGA_GRAPHICS {
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
             // for planar read-modify-write sequences.
@@ -534,7 +534,15 @@ impl Bus {
         if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
             return self.vga.vram_text[addr - ADDR_VGA_TEXT];
         }
-        self.ram[addr]
+        if addr < self.ram.len() {
+            return self.ram[addr];
+        }
+        if addr >= 0xFFFF_0000 {
+            // The top 64 KB of the address space mirror the BIOS ROM, where
+            // a 386 fetches its first instruction after reset.
+            return self.ram[0xF0000 + (addr & 0xFFFF)];
+        }
+        0xFF // nothing there: open bus
     }
 
     /// Side-effect-free byte read for debuggers. Same mapping as `read_8`,
@@ -556,22 +564,20 @@ impl Bus {
     // Returns true if a write occurred to the *active* video memory
     #[inline(always)]
     pub fn write_8(&mut self, addr: usize, value: u8) -> bool {
-        // Fast path — conventional memory writes are the overwhelming
-        // majority. One comparison routes them to the ram Vec, skipping
-        // both VGA range checks.
-        if addr < ADDR_VGA_GRAPHICS {
-            // SAFETY: ram is a fixed 1 MiB buffer; addr < 0xA0000 is in range.
+        // Fast path — plain RAM writes are the overwhelming majority.
+        if self.is_plain_ram(addr, 1) {
+            // SAFETY: is_plain_ram checked that addr is within ram, and
+            // page_gen has an entry for every page of ram.
             unsafe {
                 *self.ram.get_unchecked_mut(addr) = value;
                 // Bump generation for this page so the decoded-instruction
                 // cache invalidates any cached decodes that fell in it.
-                let page = (addr >> 12) & 0xFF;
-                let g = self.page_gen.get_unchecked_mut(page);
+                let g = self.page_gen.get_unchecked_mut(addr >> 12);
                 *g = g.wrapping_add(1);
             }
             return false;
         }
-        if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
+        if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             // write_graphics already sets vga.dirty unconditionally. The
             // Return value only matters to callers that care whether the
             // write hit the active display plane, but rendering is gated
@@ -633,25 +639,28 @@ impl Bus {
 
         // ROM / reserved area (0xC0000..0x100000 on a real PC). Still backed
         // by our Vec<u8> so BIOS-ROM writes from initialization work.
-        self.ram[addr] = value;
-        let page = (addr >> 12) & 0xFF;
-        self.page_gen[page] = self.page_gen[page].wrapping_add(1);
+        // Writes past the end of RAM go nowhere.
+        if addr < self.ram.len() {
+            self.ram[addr] = value;
+            let page = addr >> 12;
+            self.page_gen[page] = self.page_gen[page].wrapping_add(1);
+        }
         false
     }
 
     // Write a 16-bit value to memory (Little Endian)
     #[inline(always)]
     pub fn write_16(&mut self, addr: usize, value: u16) -> bool {
-        // Fast path: both bytes in conventional memory, as in write_8.
-        if addr + 1 < ADDR_VGA_GRAPHICS {
-            // SAFETY: ram is a fixed 1 MiB buffer; addr + 1 < 0xA0000.
+        // Fast path: both bytes in plain RAM, as in write_8.
+        if self.is_plain_ram(addr, 2) {
+            // SAFETY: is_plain_ram checked both bytes are within ram.
             unsafe {
                 *self.ram.get_unchecked_mut(addr) = value as u8;
                 *self.ram.get_unchecked_mut(addr + 1) = (value >> 8) as u8;
                 // Both bytes' pages: the word may straddle a page boundary.
-                let g = self.page_gen.get_unchecked_mut((addr >> 12) & 0xFF);
+                let g = self.page_gen.get_unchecked_mut(addr >> 12);
                 *g = g.wrapping_add(1);
-                let g = self.page_gen.get_unchecked_mut(((addr + 1) >> 12) & 0xFF);
+                let g = self.page_gen.get_unchecked_mut((addr + 1) >> 12);
                 *g = g.wrapping_add(1);
             }
             return false;
@@ -666,8 +675,8 @@ impl Bus {
     // read_16 helper
     #[inline(always)]
     pub fn read_16(&self, addr: usize) -> u16 {
-        if addr + 1 < ADDR_VGA_GRAPHICS {
-            // SAFETY: ram is a fixed 1 MiB buffer; addr + 1 < 0xA0000.
+        if self.is_plain_ram(addr, 2) {
+            // SAFETY: is_plain_ram checked both bytes are within ram.
             return unsafe {
                 u16::from_le_bytes([
                     *self.ram.get_unchecked(addr),
@@ -680,13 +689,33 @@ impl Bus {
         (high << 8) | low
     }
 
+    #[inline(always)]
     pub fn read_32(&self, addr: usize) -> u32 {
+        if self.is_plain_ram(addr, 4) {
+            // SAFETY: is_plain_ram checked all four bytes are within ram.
+            return unsafe {
+                u32::from_le_bytes([
+                    *self.ram.get_unchecked(addr),
+                    *self.ram.get_unchecked(addr + 1),
+                    *self.ram.get_unchecked(addr + 2),
+                    *self.ram.get_unchecked(addr + 3),
+                ])
+            };
+        }
         let low = self.read_16(addr) as u32;
         let high = self.read_16(addr + 2) as u32;
         (high << 16) | low
     }
 
+    #[inline(always)]
     pub fn write_32(&mut self, addr: usize, value: u32) {
+        if self.is_plain_ram(addr, 4) {
+            self.ram[addr..addr + 4].copy_from_slice(&value.to_le_bytes());
+            self.page_gen[addr >> 12] = self.page_gen[addr >> 12].wrapping_add(1);
+            let last = (addr + 3) >> 12;
+            self.page_gen[last] = self.page_gen[last].wrapping_add(1);
+            return;
+        }
         self.write_16(addr, (value & 0xFFFF) as u16);
         self.write_16(addr + 2, (value >> 16) as u16);
     }
@@ -700,6 +729,12 @@ impl Bus {
     pub fn write_64(&mut self, addr: usize, value: u64) {
         self.write_32(addr, (value & 0xFFFFFFFF) as u32);
         self.write_32(addr + 4, (value >> 32) as u32);
+    }
+
+    /// PIT channel 2's output: a square wave at the programmed frequency.
+    fn pit2_output(&self) -> bool {
+        let divisor = if self.pit_divisor == 0 { 0x10000u64 } else { self.pit_divisor as u64 };
+        self.clock.now_ticks() % divisor < divisor / 2
     }
 
     /// Start an execution batch that runs until instruction `end`.
@@ -719,7 +754,7 @@ impl Bus {
     /// `clock.deadline`.
     pub fn service_timers(&mut self) {
         if self.pit0.advance(self.clock.now_ticks()) {
-            self.pic_irr |= 0x01;
+            self.pic.raise(0);
         }
         self.clock.schedule(self.pit0.next_event());
     }
@@ -736,82 +771,92 @@ impl Bus {
         self.pit0_read_msb = false;
         self.pit0_access = 3;
         self.pit0_latched_active = false;
-        self.pic_mask = 0;
-        self.pic_irr = 0;
-        self.pic_isr = 0;
-        self.pic_read_isr = false;
+        self.pic = crate::pic::Pic::new();
         self.clock.schedule(self.pit0.next_event());
     }
 
-    /// Requested lines: edge-triggered IRQ 0 plus the level sources.
-    fn pic_requests(&self) -> u8 {
-        self.pic_irr | ((self.irq1_pending as u8) << 1) | ((self.sb.irq_pending as u8) << 5)
+    /// Level-triggered request lines (bit n = IRQ n): the Sound Blaster
+    /// holds its line until the driver acknowledges at port 22Eh.
+    #[inline(always)]
+    fn irq_levels(&self) -> u16 {
+        (self.sb.irq_pending as u16) << 5
     }
 
-    /// The IRQ line the PIC would deliver now: requested, not masked, and not
-    /// blocked by an interrupt of equal or higher priority still in service.
+    /// The IRQ (0-15) the PICs would deliver now: requested, not masked,
+    /// and not blocked by an interrupt of equal or higher priority still in
+    /// service.
     #[inline(always)]
     pub fn pic_pending_irq(&self) -> Option<u8> {
-        let requests = self.pic_requests() & !self.pic_mask;
-        if requests == 0 {
-            return None;
-        }
-        let line = requests.trailing_zeros() as u8;
-        if self.pic_isr != 0 && self.pic_isr.trailing_zeros() as u8 <= line {
-            return None;
-        }
-        Some(line)
+        self.pic.pending(self.irq_levels())
     }
 
-    /// The CPU took interrupt `line`: it is in service until an EOI.
-    pub fn pic_acknowledge(&mut self, line: u8) {
-        self.pic_isr |= 1 << line;
-        match line {
-            0 => self.pic_irr &= !0x01,
-            1 => self.irq1_pending = false,
-            // The Sound Blaster holds IRQ 5 until the driver acknowledges it
-            // by reading port 0x22E.
-            _ => {}
+    /// The CPU takes interrupt `irq`: it is in service until an EOI.
+    /// Returns its vector.
+    pub fn pic_acknowledge(&mut self, irq: u8) -> u8 {
+        self.pic.acknowledge(irq)
+    }
+
+    /// Discard a request for `irq`, for lines with no handler installed.
+    pub fn pic_drop(&mut self, irq: u8) {
+        self.pic.lower(irq);
+        if irq == 5 {
+            self.sb.irq_pending = false;
         }
     }
 
-    /// Discard a request for `line`, for lines with no handler installed.
-    pub fn pic_drop(&mut self, line: u8) {
-        match line {
-            0 => self.pic_irr &= !0x01,
-            1 => self.irq1_pending = false,
-            5 => self.sb.irq_pending = false,
-            _ => {}
+    /// Raise IRQ 1 if a byte just entered the keyboard controller's output
+    /// buffer.
+    pub fn sync_keyboard_irq(&mut self) {
+        if self.kbc.take_irq() {
+            self.pic.raise(1);
         }
+    }
+
+    /// Carry out what a keyboard controller or port 92h write asked for.
+    fn apply_kbc_effects(&mut self, effects: crate::kbc::Effects) {
+        if let Some(a20) = effects.a20 {
+            self.a20 = a20;
+        }
+        if effects.reset {
+            self.reset_requested = true;
+        }
+        self.sync_keyboard_irq();
     }
 
     // Write to an I/O Port
     pub fn io_write(&mut self, port: u16, value: u8) {
         self.clock.stall(crate::timer::IO_WRITE_NS);
         match port {
-            // PIC (Programmable Interrupt Controller) 0x20 / 0x21.
-            // Initialization words (ICWs) are ignored.
-            0x20 => {
-                if value & 0x18 == 0x08 {
-                    // OCW3: select the register port 0x20 reads return.
-                    if value & 0x02 != 0 {
-                        self.pic_read_isr = value & 0x01 != 0;
-                    }
-                } else if value & 0x10 == 0 {
-                    // OCW2: end of interrupt.
-                    match value >> 5 {
-                        // Non-specific: the highest priority line in service.
-                        0b001 | 0b101 => self.pic_isr &= self.pic_isr.wrapping_sub(1),
-                        // Specific: the line in bits 0-2.
-                        0b011 | 0b111 => self.pic_isr &= !(1 << (value & 0x07)),
-                        _ => {}
-                    }
+            // The two 8259 interrupt controllers.
+            0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.write(port, value),
+
+            // 8042 keyboard controller: data and command ports.
+            0x60 => {
+                let effects = self.kbc.write_data(value);
+                self.apply_kbc_effects(effects);
+            }
+            0x64 => {
+                let effects = self.kbc.write_command(value);
+                self.apply_kbc_effects(effects);
+            }
+
+            // CMOS RAM / real-time clock.
+            0x70 => self.cmos.write_index(value),
+            0x71 => self.cmos.write_data(value),
+
+            // System control port A: bit 1 is the "fast A20" gate, bit 0
+            // resets the CPU.
+            0x92 => {
+                self.a20 = value & 0x02 != 0;
+                if value & 0x01 != 0 {
+                    self.reset_requested = true;
                 }
             }
-            0x21 => {
-                self.log_string(&format!("[PIC] IMR Set to {:02X}", value));
-                self.pic_mask = value;
-            }
+
+            // POST code ports (80h on a PC, 190h for test ROMs).
+            0x80 | 0x190 => self.post_code = value,
+            // Delay port, and the coprocessor's busy latch.
+            0xED | 0xF0 | 0xF1 => {}
 
             // Port 0x40: Channel 0 Data (System Timer)
             // Controls the system tick rate (IRQ 0).
@@ -953,7 +998,7 @@ impl Bus {
             0x00 | 0x01 | 0x04..=0x09 | 0x0E | 0x0F => {}
             // DMA page registers. Channel 1 lives at port 0x83.
             0x83 => { self.dma_ch1.write_page(value); }
-            0x80..=0x82 | 0x84..=0x8F => {}
+            0x81 | 0x82 | 0x84..=0x8F => {}
 
             // Dispatch to Devices
             // TODO: Use a proper map lookup
@@ -963,9 +1008,6 @@ impl Bus {
             0x3D8 | 0x3D9 => {
                 // CGA Mode Control / Color Select. Real VGA ignores writes
                 // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
-            }
-            0xA0 | 0xA1 => {
-                // Slave PIC — we don't model cascaded IRQs.
             }
             0x0201 => {
                 // Game port write: arm the one-shot timers. Reset the
@@ -1017,14 +1059,7 @@ impl Bus {
             // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
             // 0x21 the interrupt mask. Programs read-modify-write the mask
             // to unmask their IRQ without disturbing the others.
-            0x20 => {
-                if self.pic_read_isr {
-                    self.pic_isr
-                } else {
-                    self.pic_requests()
-                }
-            }
-            0x21 => self.pic_mask,
+            0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.read(port, self.irq_levels()),
 
             // Port 0x40 — PIT channel 0 (system timer) data. The counter
             // decrements at 1.193 MHz of emulated time. Programs that need
@@ -1130,19 +1165,18 @@ impl Bus {
             // Port 0x60 — Keyboard data port. Real hardware latches the
             // last-received scan code here; programs either read this from
             // their INT 09h ISR after IRQ1 fires, or poll it directly.
-            0x60 => self.last_scan_code,
+            0x60 => {
+                let value = self.kbc.read_data();
+                // The next queued byte, if any, moved into the buffer.
+                self.sync_keyboard_irq();
+                value
+            }
 
             // Port 0x64 — Keyboard controller status (8042).
-            //   Bit 0 = output buffer full (1 = scan code ready to read)
-            //   Bit 1 = input buffer full (we never have commands pending)
-            // We report "output ready" whenever a key event is pending.
-            0x64 => {
-                if self.irq1_pending {
-                    0x01
-                } else {
-                    0x00
-                }
-            }
+            0x64 => self.kbc.read_status(),
+
+            0x71 => self.cmos.read_data(),
+            0x92 => (self.a20 as u8) << 1,
 
             // AdLib status register (port 0x388). Bit 7 = IRQ, bit 6 = timer1
             // expired, bit 5 = timer2 expired. Games poll this to detect the
@@ -1168,11 +1202,19 @@ impl Bus {
             // Other DMA regs return open bus; keep quiet.
             0x00 | 0x01 | 0x04..=0x0F | 0x80..=0x82 | 0x84..=0x8F => 0xFF,
 
-            // Read PPI Port B (Speaker State)
+            // Read PPI Port B: speaker gate and data, the DRAM refresh
+            // request (bit 4, toggles), and the PIT channel 2 output (bit 5).
             0x61 => {
                 let mut val = 0;
                 if self.speaker_on {
                     val |= 0x03;
+                }
+                self.refresh_toggle = !self.refresh_toggle;
+                if self.refresh_toggle {
+                    val |= 0x10;
+                }
+                if self.pit2_output() {
+                    val |= 0x20;
                 }
                 val
             }

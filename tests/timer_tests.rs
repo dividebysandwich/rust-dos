@@ -29,8 +29,8 @@ fn run_timer(bus: &mut Bus, instructions: u64) -> Vec<u64> {
             break;
         }
         bus.service_timers();
-        if bus.pic_irr & 0x01 != 0 {
-            bus.pic_irr &= !0x01;
+        if bus.pic.master.irr & 0x01 != 0 {
+            bus.pic.master.irr &= !0x01;
             edges.push(bus.clock.icount);
         }
     }
@@ -166,8 +166,8 @@ fn port_accesses_take_bus_time() {
 #[test]
 fn pic_blocks_lower_priority_until_eoi() {
     let mut bus = bus_at(1000);
-    bus.pic_irr |= 0x01;
-    bus.irq1_pending = true;
+    bus.pic.raise(0);
+    bus.pic.raise(1);
 
     assert_eq!(bus.pic_pending_irq(), Some(0));
     bus.pic_acknowledge(0);
@@ -180,14 +180,14 @@ fn pic_blocks_lower_priority_until_eoi() {
     );
 
     bus.io_write(0x20, 0x20); // non-specific EOI
-    assert_eq!(bus.pic_isr, 0);
+    assert_eq!(bus.pic.master.isr, 0);
     assert_eq!(bus.pic_pending_irq(), Some(1));
 }
 
 #[test]
 fn pic_honours_the_mask_and_reads_it_back() {
     let mut bus = bus_at(1000);
-    bus.pic_irr |= 0x01;
+    bus.pic.raise(0);
     bus.io_write(0x21, 0x01);
     assert_eq!(bus.pic_pending_irq(), None);
     assert_eq!(bus.io_read(0x21), 0x01);
@@ -199,7 +199,7 @@ fn pic_honours_the_mask_and_reads_it_back() {
 #[test]
 fn pic_ocw3_selects_the_in_service_register() {
     let mut bus = bus_at(1000);
-    bus.pic_irr |= 0x01;
+    bus.pic.raise(0);
     bus.pic_acknowledge(0);
     bus.io_write(0x20, 0x0B); // OCW3: read ISR
     assert_eq!(bus.io_read(0x20), 0x01);
@@ -212,10 +212,10 @@ fn pic_ocw3_selects_the_in_service_register() {
 #[test]
 fn bios_timer_handler_sends_eoi() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.bus.pic_irr |= 0x01;
+    cpu.bus.pic.raise(0);
     cpu.bus.pic_acknowledge(0);
     rust_dos::interrupts::handle_hle(&mut cpu, 0x08);
-    assert_eq!(cpu.bus.pic_isr, 0);
+    assert_eq!(cpu.bus.pic.master.isr, 0);
     assert_eq!(cpu.bus.read_16(0x046C), 1);
 }
 
@@ -251,7 +251,7 @@ fn shell_reload_resets_timer_and_pic() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     program_pit0(&mut cpu.bus, 0x34, 0x1F0E);
     cpu.bus.io_write(0x21, 0xFF);
-    cpu.bus.pic_irr |= 0x01;
+    cpu.bus.pic.raise(0);
     cpu.bus.pic_acknowledge(0);
 
     cpu.bus.clock.icount += 5_000_000;
@@ -262,7 +262,7 @@ fn shell_reload_resets_timer_and_pic() {
     let now = cpu.bus.clock.now_ticks();
     assert_eq!(cpu.bus.pit0.next_event(), Some(now + 0x10000));
     assert_eq!(
-        (cpu.bus.pic_mask, cpu.bus.pic_isr, cpu.bus.pic_irr),
+        (cpu.bus.pic.master.imr, cpu.bus.pic.master.isr, cpu.bus.pic.master.irr),
         (0, 0, 0)
     );
 }
@@ -373,5 +373,5 @@ fn sound_blaster_irq_stays_raised_until_the_driver_acks_it() {
     bus.io_read(0x22E); // ISR acknowledges the card...
     bus.io_write(0x20, 0x20); // ...and the PIC
     assert_eq!(bus.pic_pending_irq(), None);
-    assert_eq!(bus.pic_isr, 0);
+    assert_eq!(bus.pic.master.isr, 0);
 }

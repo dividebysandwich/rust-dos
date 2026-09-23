@@ -148,18 +148,19 @@ fn test_speaker_io_port_61() {
     // Port 0x61 controls speaker.
     // Bit 0: Gate 2
     // Bit 1: Data
-    // Both must be 1 for speaker_on to be true.
+    // Both must be 1 for speaker_on to be true. (Bits 4 and 5 are the
+    // refresh toggle and the PIT channel 2 output.)
 
     // 1. Write 0x00 (Both off)
     bus.io_write(0x61, 0x00);
     assert_eq!(bus.speaker_on, false);
-    assert_eq!(bus.io_read(0x61), 0x00);
+    assert_eq!(bus.io_read(0x61) & 0x03, 0x00);
 
     // 2. Write 0x03 (Both on)
     bus.io_write(0x61, 0x03);
     assert_eq!(bus.speaker_on, true);
     // Reading 0x61 should reflect the state (masked)
-    assert_eq!(bus.io_read(0x61) & 0x03, 0x03);
+    assert_eq!(bus.io_read(0x61) & 0x03 & 0x03, 0x03);
 
     // 3. Write 0x02 (Bit 0 off)
     bus.io_write(0x61, 0x02);

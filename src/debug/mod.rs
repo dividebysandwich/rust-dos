@@ -241,7 +241,7 @@ fn expand_input(ev: &InputEvent, out: &mut Vec<LowInput>) -> Result<(), String> 
                 (Some(name), _) => keys::lookup(name).ok_or_else(|| {
                     format!("unknown key '{}'; valid keys: {}", name, keys::names().join(", "))
                 })?,
-                (None, Some(sc)) => PcKey { scan: *sc, ascii: ascii.unwrap_or(0), shifted: ascii.unwrap_or(0), modifier: 0 },
+                (None, Some(sc)) => PcKey { scan: *sc, ascii: ascii.unwrap_or(0), shifted: ascii.unwrap_or(0), modifier: 0, extended: false },
                 (None, None) => return Err("key event needs 'key' or 'scancode'".into()),
             };
             let ch = match ascii {
@@ -706,11 +706,10 @@ impl DebugHub {
         while let Some(ev) = self.input.front() {
             match ev {
                 LowInput::KeyDown { .. } | LowInput::KeyUp { .. } => {
-                    // Port 0x60 latches one scan code. Wait for the previous
-                    // IRQ1 to be taken before delivering the next one, but
-                    // don't stall forever on programs that mask IRQ1 and
-                    // poll the port instead.
-                    if cpu.bus.irq1_pending && self.key_stall_frames < 2 {
+                    // Let the program catch up with the keyboard controller's
+                    // queue before adding more, but don't stall forever on
+                    // programs that never read the port.
+                    if cpu.bus.kbc.pending() > 0 && self.key_stall_frames < 2 {
                         self.key_stall_frames += 1;
                         return;
                     }
@@ -1066,16 +1065,16 @@ fn apply_key(cpu: &mut Cpu, key: PcKey, ascii: u8, down: bool) {
         let mut flags = cpu.bus.read_8(0x0417);
         if down {
             flags |= key.modifier;
-            keyboard::deliver_scan_only(&mut cpu.bus, key.scan);
+            keyboard::deliver_scan_only(&mut cpu.bus, key.scan, key.extended);
         } else {
             flags &= !key.modifier;
-            keyboard::deliver_key_up(&mut cpu.bus, key.scan);
+            keyboard::deliver_key_up(&mut cpu.bus, key.scan, key.extended);
         }
         cpu.bus.write_8(0x0417, flags);
     } else if down {
-        keyboard::deliver_key_down(&mut cpu.bus, ((key.scan as u16) << 8) | ascii as u16);
+        keyboard::deliver_key_down(&mut cpu.bus, ((key.scan as u16) << 8) | ascii as u16, key.extended);
     } else {
-        keyboard::deliver_key_up(&mut cpu.bus, key.scan);
+        keyboard::deliver_key_up(&mut cpu.bus, key.scan, key.extended);
     }
 }
 

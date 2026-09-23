@@ -22,6 +22,9 @@
 #cycles=max
 # Processor: 486 (the default, a 486DX with FPU) or 386.
 #cpu=486
+# RAM in MB, 2 to 64. Memory above the first megabyte is extended memory
+# for DOS extenders and XMS.
+#memsize=16
 
 [drives]
 # Mount host directories as DOS drives A: to Y:

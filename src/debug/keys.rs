@@ -3,13 +3,16 @@
 //! typed into the SDL window.
 
 /// A PC key: set-1 scan code, unshifted/shifted ASCII, and — for modifier
-/// keys — the BIOS shift-flag bit it controls at 0040:0017.
+/// keys — the BIOS shift-flag bit it controls at 0040:0017. Extended keys
+/// (the grey cursor block, right Ctrl/Alt, keypad Enter and /) send an E0
+/// prefix before their scan code.
 #[derive(Clone, Copy, Debug)]
 pub struct PcKey {
     pub scan: u8,
     pub ascii: u8,
     pub shifted: u8,
     pub modifier: u8,
+    pub extended: bool,
 }
 
 pub const MOD_RSHIFT: u8 = 0x01;
@@ -18,11 +21,21 @@ pub const MOD_CTRL: u8 = 0x04;
 pub const MOD_ALT: u8 = 0x08;
 
 const fn k(scan: u8, ascii: u8, shifted: u8) -> PcKey {
-    PcKey { scan, ascii, shifted, modifier: 0 }
+    PcKey { scan, ascii, shifted, modifier: 0, extended: false }
+}
+
+/// An extended key.
+const fn x(scan: u8, ascii: u8) -> PcKey {
+    PcKey { scan, ascii, shifted: ascii, modifier: 0, extended: true }
 }
 
 const fn m(scan: u8, modifier: u8) -> PcKey {
-    PcKey { scan, ascii: 0, shifted: 0, modifier }
+    PcKey { scan, ascii: 0, shifted: 0, modifier, extended: false }
+}
+
+/// An extended modifier (right Ctrl, right Alt).
+const fn mx(scan: u8, modifier: u8) -> PcKey {
+    PcKey { scan, ascii: 0, shifted: 0, modifier, extended: true }
 }
 
 /// (name, key). Names are matched case-insensitively.
@@ -93,16 +106,16 @@ const KEYS: &[(&str, PcKey)] = &[
     ("f10", k(0x44, 0, 0)),
     ("f11", k(0x85, 0, 0)),
     ("f12", k(0x86, 0, 0)),
-    ("up", k(0x48, 0, 0)),
-    ("down", k(0x50, 0, 0)),
-    ("left", k(0x4B, 0, 0)),
-    ("right", k(0x4D, 0, 0)),
-    ("home", k(0x47, 0, 0)),
-    ("end", k(0x4F, 0, 0)),
-    ("pageup", k(0x49, 0, 0)),
-    ("pagedown", k(0x51, 0, 0)),
-    ("insert", k(0x52, 0, 0)),
-    ("delete", k(0x53, 0, 0)),
+    ("up", x(0x48, 0)),
+    ("down", x(0x50, 0)),
+    ("left", x(0x4B, 0)),
+    ("right", x(0x4D, 0)),
+    ("home", x(0x47, 0)),
+    ("end", x(0x4F, 0)),
+    ("pageup", x(0x49, 0)),
+    ("pagedown", x(0x51, 0)),
+    ("insert", x(0x52, 0)),
+    ("delete", x(0x53, 0)),
     ("kp0", k(0x52, b'0', b'0')),
     ("kp1", k(0x4F, b'1', b'1')),
     ("kp2", k(0x50, b'2', b'2')),
@@ -117,17 +130,17 @@ const KEYS: &[(&str, PcKey)] = &[
     ("kpplus", k(0x4E, b'+', b'+')),
     ("kpminus", k(0x4A, b'-', b'-')),
     ("kpmultiply", k(0x37, b'*', b'*')),
-    ("kpdivide", k(0x35, b'/', b'/')),
-    ("kpenter", k(0x1C, 0x0D, 0x0D)),
+    ("kpdivide", x(0x35, b'/')),
+    ("kpenter", x(0x1C, 0x0D)),
     ("lshift", m(0x2A, MOD_LSHIFT)),
     ("shift", m(0x2A, MOD_LSHIFT)),
     ("rshift", m(0x36, MOD_RSHIFT)),
     ("ctrl", m(0x1D, MOD_CTRL)),
     ("lctrl", m(0x1D, MOD_CTRL)),
-    ("rctrl", m(0x1D, MOD_CTRL)),
+    ("rctrl", mx(0x1D, MOD_CTRL)),
     ("alt", m(0x38, MOD_ALT)),
     ("lalt", m(0x38, MOD_ALT)),
-    ("ralt", m(0x38, MOD_ALT)),
+    ("ralt", mx(0x38, MOD_ALT)),
 ];
 
 pub fn lookup(name: &str) -> Option<PcKey> {

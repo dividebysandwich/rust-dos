@@ -183,8 +183,11 @@ fn main() -> Result<(), String> {
                     // for BIOS-based input, and ALSO latch the raw scan code
                     // at port 0x60 + raise IRQ1 so games that poll the port
                     // or install a custom INT 09h ISR see the event.
-                    if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
-                        keyboard::deliver_key_down(&mut cpu.bus, code);
+                    let extended = keyboard::is_extended(keycode);
+                    if let Some(scan) = keyboard::modifier_scan(keycode) {
+                        keyboard::deliver_scan_only(&mut cpu.bus, scan, extended);
+                    } else if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
+                        keyboard::deliver_key_down(&mut cpu.bus, code, extended);
                     }
                 }
                 Event::KeyUp {
@@ -207,8 +210,11 @@ fn main() -> Result<(), String> {
                     // and fire IRQ1. Games that track held keys (arrow-key
                     // movement, etc.) need these to know when the key stops
                     // being pressed.
-                    if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
-                        keyboard::deliver_key_up(&mut cpu.bus, (code >> 8) as u8);
+                    let extended = keyboard::is_extended(keycode);
+                    if let Some(scan) = keyboard::modifier_scan(keycode) {
+                        keyboard::deliver_key_up(&mut cpu.bus, scan, extended);
+                    } else if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
+                        keyboard::deliver_key_up(&mut cpu.bus, (code >> 8) as u8, extended);
                     }
                 }
 
@@ -479,7 +485,8 @@ fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
         (None, None) => std::path::PathBuf::from("."),
     };
 
-    let mut cpu = Cpu::new(root_path.clone());
+    let memory_mb = config.memsize.unwrap_or(rust_dos::bus::DEFAULT_MEMORY_MB);
+    let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
     if let Some(spec) = c_spec {
         // Remount C: to apply the config's drive type, label and -ro
         if let Err(e) = cpu.bus.mount_drive(DRIVE_C, &root_path, spec.opts.clone(), true) {

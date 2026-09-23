@@ -69,6 +69,8 @@ pub struct Config {
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
     pub cpu: Option<crate::cpu::CpuModel>,
+    /// RAM in MB (`memsize`).
+    pub memsize: Option<usize>,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -140,6 +142,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "cycles" => match CpuSpeed::parse(value) {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
+                        },
+                        "memsize" => match value.parse::<usize>() {
+                            Ok(mb) if (2..=64).contains(&mb) => config.memsize = Some(mb),
+                            _ => warn(format!("invalid memsize '{}' (2 to 64 MB)", value)),
                         },
                         "cpu" => match value.to_ascii_lowercase().as_str() {
                             "386" => config.cpu = Some(crate::cpu::CpuModel::I386),
@@ -383,6 +389,15 @@ mod tests {
         assert_eq!(config.warnings.len(), 9, "{}", joined);
         assert_eq!(config.drive(3).unwrap().path, Path::new("/two"));
         assert_eq!(config.scale, None);
+    }
+
+    #[test]
+    fn memsize_range() {
+        let config = parse("[emulator]\nmemsize=32\n", Path::new("/cfg"), None);
+        assert_eq!(config.memsize, Some(32));
+        let config = parse("[emulator]\nmemsize=128\n", Path::new("/cfg"), None);
+        assert_eq!(config.memsize, None);
+        assert!(config.warnings[0].contains("invalid memsize '128'"));
     }
 
     #[test]

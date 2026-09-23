@@ -26,8 +26,6 @@ pub struct MemRef {
     pub size: u8,
 }
 
-/// Physical address lines: 20 while there is 1 MB of RAM and no A20 gate.
-const PHYS_MASK: u32 = 0xF_FFFF;
 
 /// The fault a segment limit violation raises: #SS for the stack segment,
 /// #GP for the others.
@@ -37,10 +35,11 @@ fn limit_fault(seg: Seg) -> Fault {
 }
 
 impl Cpu {
-    /// Physical address of a linear address.
+    /// Physical address of a linear address. With the A20 gate closed,
+    /// address line 20 is held at 0 and addresses wrap at 1 MB.
     #[inline(always)]
     pub fn translate(&self, lin: u32) -> u32 {
-        lin & PHYS_MASK
+        if self.bus.a20 { lin } else { lin & !0x0010_0000 }
     }
 
     /// Linear address of an access of `size` bytes at `seg:off`, checked

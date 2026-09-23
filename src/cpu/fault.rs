@@ -128,14 +128,37 @@ impl Cpu {
         self.shutdown();
     }
 
-    /// Triple fault: the processor stops. An AT's chipset turns that into a
-    /// reset; we end the program and go back to the shell.
+    /// Triple fault: the processor stops, and an AT's chipset turns that
+    /// into a reset.
     pub fn shutdown(&mut self) {
         self.bus.log_string(&format!(
             "[CPU] Shutdown (triple fault) at {:04X}:{:08X}",
             self.cs(),
             self.eip()
         ));
-        self.state = super::CpuState::RebootShell;
+        self.reset();
+    }
+
+    /// The processor's state after a reset: real mode, interrupts off,
+    /// executing the BIOS reset entry at F000:FFF0, which decides from the
+    /// CMOS shutdown code whether to resume a program or start over.
+    pub fn reset(&mut self) {
+        self.gpr = [0; 8];
+        // DX holds the processor signature: family and stepping.
+        self.gpr[super::regs::EDX] = match self.model {
+            super::CpuModel::I386 => 0x0303,
+            super::CpuModel::I486 => 0x0402,
+        };
+        self.flags = CpuFlags::R1;
+        self.cr0 = super::CR0_ET;
+        self.cr2 = 0;
+        self.cr3 = 0;
+        self.gdtr = super::DescTable { base: 0, limit: 0xFFFF };
+        self.idtr = super::DescTable { base: 0, limit: 0x3FF };
+        self.seg = [super::SegCache::real(0); 6];
+        self.seg[Seg::CS as usize] = super::SegCache::real(0xF000);
+        self.eip = 0xFFF0;
+        self.irq_shadow = false;
+        self.state = super::CpuState::Running;
     }
 }

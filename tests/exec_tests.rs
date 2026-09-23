@@ -27,7 +27,7 @@ fn cpu_with_code(code: &[u8], interrupts: bool) -> Cpu {
 }
 
 fn raise_irq0(cpu: &mut Cpu) {
-    cpu.bus.pic_irr |= 0x01;
+    cpu.bus.pic.raise(0);
 }
 
 #[test]
