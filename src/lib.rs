@@ -9,6 +9,7 @@ pub mod keyboard;
 pub mod instructions;
 pub mod interrupts;
 pub mod mcb;
+pub mod mount;
 pub mod mouse;
 pub mod recorder;
 pub mod sb;

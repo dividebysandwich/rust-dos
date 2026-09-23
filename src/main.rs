@@ -26,6 +26,7 @@ mod instructions;
 mod interrupts;
 mod keyboard;
 mod mcb;
+mod mount;
 mod mouse;
 mod recorder;
 mod sb;

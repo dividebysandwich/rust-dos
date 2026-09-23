@@ -1,6 +1,7 @@
 use crate::cpu::Cpu;
+use crate::disk::{DriveKind, drive_letter, parse_drive_prefix};
+use crate::mount::{MOUNT_USAGE, MountCmd, display_host_path, parse_mount_command};
 use crate::video::print_string;
-use chrono::{DateTime, Local};
 use std::collections::HashMap;
 use std::fs;
 
@@ -29,6 +30,7 @@ impl CommandDispatcher {
         dispatcher.register("CD", Box::new(CdCommand));
         dispatcher.register("CHDIR", Box::new(CdCommand));
         dispatcher.register("ECHO", Box::new(EchoCommand));
+        dispatcher.register("MOUNT", Box::new(MountCommand));
 
         dispatcher
     }
@@ -40,6 +42,15 @@ impl CommandDispatcher {
 
     /// Returns true if the command was found and executed, false otherwise.
     pub fn dispatch(&self, cpu: &mut Cpu, command: &str, args: &str) -> bool {
+        // "D:" switches the current drive
+        if let (Some(drive), "") = parse_drive_prefix(command) {
+            if cpu.bus.disk.is_mounted(drive) {
+                cpu.bus.disk.set_current_drive(drive);
+            } else {
+                print_string(cpu, "Invalid drive specification\r\n");
+            }
+            return true;
+        }
         if let Some(cmd) = self.registry.get(&command.to_uppercase()) {
             cmd.execute(cpu, args);
             true
@@ -53,79 +64,113 @@ impl CommandDispatcher {
 
 struct DirCommand;
 impl ShellCommand for DirCommand {
-    fn execute(&self, cpu: &mut Cpu, _args: &str) {
-        print_string(cpu, " Volume in drive C has no label.\r\n");
-        print_string(cpu, " Directory of C:\\\r\n\r\n");
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        // DIR [d:][path][pattern]; switches like /W or /P are ignored.
+        let arg = args
+            .split_whitespace()
+            .find(|a| !a.starts_with('/'))
+            .unwrap_or("");
+        let (drive_spec, rest) = parse_drive_prefix(arg);
+        let drive = drive_spec.unwrap_or(cpu.bus.disk.get_current_drive());
+        if !cpu.bus.disk.is_mounted(drive) {
+            print_string(cpu, "Invalid drive specification\r\n");
+            return;
+        }
+
+        // A bare drive or directory lists everything in it.
+        let letter = drive_letter(drive);
+        let is_dir = rest.is_empty()
+            || rest.ends_with('\\')
+            || cpu.bus.disk.resolve_path(arg).is_some_and(|p| p.is_dir());
+        let spec = if rest.is_empty() {
+            format!("{}:*.*", letter)
+        } else if is_dir {
+            format!("{}:{}\\*.*", letter, rest.trim_end_matches('\\'))
+        } else {
+            format!("{}:{}", letter, rest)
+        };
+
+        let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
+        if label.is_empty() {
+            print_string(cpu, &format!(" Volume in drive {} has no label\r\n", letter));
+        } else {
+            print_string(cpu, &format!(" Volume in drive {} is {}\r\n", letter, label));
+        }
+        let directory = cpu.bus.disk.qualify_directory(&spec).unwrap_or_default();
+        print_string(cpu, &format!(" Directory of {}\r\n\r\n", directory));
+
+        // Directories + hidden + system
+        let entries = match cpu.bus.disk.list_directory(&spec, 0x16) {
+            Ok(entries) if !entries.is_empty() => entries,
+            _ => {
+                print_string(cpu, "File not found\r\n");
+                return;
+            }
+        };
 
         let mut file_count = 0;
-        let mut dir_count = 0;
-        let mut total_bytes = 0;
-
-        // Use DiskController to resolve "." to the actual host directory
-        let host_dir = cpu
-            .bus
-            .disk
-            .resolve_path(".")
-            .unwrap_or(std::path::PathBuf::from("."));
-
-        if let Ok(entries) = fs::read_dir(host_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let metadata = path.metadata().ok();
-
-                // Get Date/Time
-                // DOS uses local time. We convert SystemTime -> DateTime<Local>
-                let timestamp: DateTime<Local> = metadata
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| t.into())
-                    .unwrap_or_else(|| Local::now());
-
-                let date_str = timestamp.format("%m/%d/%Y  %I:%M %p").to_string();
-
-                // Get File Size or <DIR> tag
-                let size_str = if path.is_dir() {
-                    dir_count += 1;
-                    "<DIR>     ".to_string() // Padding for alignment
-                } else {
-                    file_count += 1;
-                    let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-                    total_bytes += size;
-                    // Format size with simple commas (optional, but looks "real")
-                    format_size(size)
-                };
-
-                // Get Filename
-                let name_str = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy())
-                    .unwrap_or_default();
-
-                // Print Line: DATE  TIME  <DIR>|SIZE  NAME
-                // {:<22} left-aligns the date, {:>14} right-aligns size
-                let line = format!("{}  {:>14} {}\r\n", date_str, size_str, name_str);
-                print_string(cpu, &line);
-            }
+        let mut total_bytes = 0u64;
+        for entry in &entries {
+            let (stem, ext) = match entry.filename.split_once('.') {
+                Some((s, e)) if !s.is_empty() => (s, e),
+                _ => (entry.filename.as_str(), ""),
+            };
+            // MS-DOS puts <DIR> at the left of the size column
+            let size_str = if entry.is_dir {
+                format!("{:<14}", "<DIR>")
+            } else {
+                file_count += 1;
+                total_bytes += entry.size as u64;
+                format_size(entry.size as u64)
+            };
+            let timestamp = if entry.dos_date == 0 {
+                String::new()
+            } else {
+                format_dos_timestamp(entry.dos_date, entry.dos_time)
+            };
+            let line = format!("{:<8} {:<3} {:>14} {}", stem, ext, size_str, timestamp);
+            let line = format!("{}\r\n", line.trim_end());
+            print_string(cpu, &line);
         }
 
         // Summary Footer
+        let free_bytes = cpu
+            .bus
+            .disk
+            .get_disk_free_space(drive + 1)
+            .map(|(spc, free, bps, _)| spc as u64 * free as u64 * bps as u64)
+            .unwrap_or(0);
         print_string(
             cpu,
             &format!(
-                "{:>16} File(s) {:>14} bytes\r\n",
+                "{:>9} file(s) {:>14} bytes\r\n{:>24} bytes free\r\n",
                 file_count,
-                format_size(total_bytes)
-            ),
-        );
-        print_string(
-            cpu,
-            &format!(
-                "{:>16} Dir(s)  {:>14} bytes free\r\n",
-                dir_count,
-                "0" // We don't really track free space on host yet
+                format_size(total_bytes),
+                format_size(free_bytes)
             ),
         );
     }
+}
+
+/// "MM-DD-YY  HH:MMa" from packed DOS date and time words.
+fn format_dos_timestamp(date: u16, time: u16) -> String {
+    let (year, month, day) = (1980 + (date >> 9), (date >> 5) & 0x0F, date & 0x1F);
+    let (hour, minute) = (time >> 11, (time >> 5) & 0x3F);
+    let (hour12, suffix) = match hour {
+        0 => (12, 'a'),
+        1..=11 => (hour, 'a'),
+        12 => (12, 'p'),
+        _ => (hour - 12, 'p'),
+    };
+    format!(
+        "{:02}-{:02}-{:02}  {:>2}:{:02}{}",
+        month,
+        day,
+        year % 100,
+        hour12,
+        minute,
+        suffix
+    )
 }
 
 /// Format u64 as string with commas (e.g. 1,024)
@@ -154,46 +199,24 @@ impl ShellCommand for VerCommand {
 struct TypeCommand;
 impl ShellCommand for TypeCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
-        if args.trim().is_empty() {
+        let target = args.trim();
+        if target.is_empty() {
             print_string(cpu, "Required parameter missing\r\n");
             return;
         }
 
-        let target_lower = args.trim().to_lowercase();
-        let mut found_path = None;
-
-        // Case-insensitive search
-        // Case-insensitive search in current directory
-        // Use DiskController to resolve "."
-        let host_dir = cpu
-            .bus
-            .disk
-            .resolve_path(".")
-            .unwrap_or(std::path::PathBuf::from("."));
-
-        if let Ok(entries) = std::fs::read_dir(host_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name() {
-                    if name.to_string_lossy().to_lowercase() == target_lower {
-                        found_path = Some(path);
-                        break;
-                    }
-                }
-            }
-        }
-
-        match found_path {
-            Some(path) => match std::fs::read_to_string(path) {
-                Ok(contents) => {
+        match cpu.bus.disk.resolve_path(target) {
+            Some(path) if path.is_file() => match fs::read(path) {
+                Ok(bytes) => {
                     // DOS formatting: \n -> \r\n
+                    let contents = String::from_utf8_lossy(&bytes);
                     let dos_text = contents.replace('\n', "\r\n").replace("\r\r\n", "\r\n");
                     print_string(cpu, &dos_text);
                     print_string(cpu, "\r\n");
                 }
                 Err(_) => print_string(cpu, "Error reading file\r\n"),
             },
-            None => print_string(cpu, "File not found\r\n"),
+            _ => print_string(cpu, "File not found\r\n"),
         }
     }
 }
@@ -242,15 +265,79 @@ struct CdCommand;
 impl ShellCommand for CdCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
         let path = args.trim();
-        if path.is_empty() {
-            // Print current directory
-            let cwd = cpu.bus.disk.get_current_directory();
-            print_string(cpu, &format!("C:\\{}\r\n", cwd));
-        } else {
-            if cpu.bus.disk.set_current_directory(path) {
-                // Success (silent)
-            } else {
-                print_string(cpu, "Invalid directory\r\n");
+        // "CD" and "CD D:" print the current directory of that drive
+        let (drive_spec, rest) = parse_drive_prefix(path);
+        if rest.is_empty() {
+            let drive = drive_spec.unwrap_or(cpu.bus.disk.get_current_drive());
+            match cpu.bus.disk.get_current_directory_of(drive) {
+                Some(cwd) => {
+                    print_string(cpu, &format!("{}:\\{}\r\n", drive_letter(drive), cwd))
+                }
+                None => print_string(cpu, "Invalid drive specification\r\n"),
+            }
+        } else if !cpu.bus.disk.set_current_directory(path) {
+            print_string(cpu, "Invalid directory\r\n");
+        }
+    }
+}
+
+/// MOUNT                          list drives
+/// MOUNT d path [type] [options]  mount a host directory
+/// MOUNT -u d                     unmount
+struct MountCommand;
+impl ShellCommand for MountCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let home = dirs::home_dir();
+        match parse_mount_command(args, &cwd, home.as_deref()) {
+            Ok(MountCmd::List) => {
+                print_string(cpu, "Drive Type    Label       Host directory\r\n");
+                for info in cpu.bus.disk.mounted_drives() {
+                    let host = match &info.root {
+                        Some(root) => display_host_path(root),
+                        None => "(built-in)".to_string(),
+                    };
+                    let access = if info.read_only && info.kind != DriveKind::Virtual {
+                        " (read-only)"
+                    } else {
+                        ""
+                    };
+                    let line = format!(
+                        "{}:    {:<7} {:<11} {}{}\r\n",
+                        info.letter(),
+                        info.kind.name(),
+                        info.label,
+                        host,
+                        access
+                    );
+                    print_string(cpu, &line);
+                }
+            }
+            Ok(MountCmd::Mount(spec)) => {
+                let kind = spec.opts.kind;
+                match cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, false) {
+                    Ok(root) => {
+                        let msg = format!(
+                            "Drive {}: is mounted as {} {}\r\n",
+                            drive_letter(spec.drive),
+                            kind.name(),
+                            display_host_path(&root)
+                        );
+                        print_string(cpu, &msg);
+                    }
+                    Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+                }
+            }
+            Ok(MountCmd::Unmount(drive)) => match cpu.bus.unmount_drive(drive) {
+                Ok(()) => print_string(
+                    cpu,
+                    &format!("Drive {}: has been unmounted\r\n", drive_letter(drive)),
+                ),
+                Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+            },
+            Err(e) => {
+                print_string(cpu, &format!("{}\r\n", e));
+                print_string(cpu, MOUNT_USAGE);
             }
         }
     }
