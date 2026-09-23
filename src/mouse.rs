@@ -97,6 +97,19 @@ impl MouseState {
         }
     }
 
+    /// Size of the virtual screen the host pointer spans: 640 wide in the
+    /// 320-pixel modes like the Microsoft driver, the mode's height, or the
+    /// cursor range when the program set a larger one (AX=0007h/0008h), as
+    /// games that halve the coordinates do. Ranges of 2048 and up are left
+    /// alone; they stand for relative movement rather than a screen.
+    pub fn virtual_extent(&self, mode: crate::video::VideoMode) -> (i32, i32) {
+        let (w, h) = mode.dimensions();
+        let w = if w < 640 { 640 } else { w as i32 };
+        let h = h as i32;
+        let range = |max: i32, size: i32| if max < 2048 { size.max(max + 1) } else { size };
+        (range(self.max_x, w), range(self.max_y, h))
+    }
+
     /// Reset state to "just installed" defaults and return number of buttons.
     pub fn reset(&mut self, screen_w: i32, screen_h: i32) {
         self.installed = true;
@@ -190,4 +203,95 @@ impl MouseState {
         // Event-mask bits: L-release=1<<2, R-release=1<<4, M-release=1<<6.
         self.pending_callback_events |= 1u16 << (2 + 2 * button as u16);
     }
+}
+
+/// ROM trampoline (F000:F200) that runs the INT 33h AX=000Ch event handler
+/// the way a mouse driver's IRQ handler does: save the registers, load the
+/// event registers, CALL FAR the handler (which returns with RETF), restore
+/// the registers and IRET to the interrupted code.
+pub const CALLBACK_STUB: usize = 0xFF200;
+/// The stub's data: AX, BX, CX, DX, SI, DI for the handler, the handler's
+/// far address, then a busy byte the stub clears when the handler returns.
+const CALLBACK_DATA: usize = 0xFF240;
+const CALLBACK_BUSY: usize = CALLBACK_DATA + 0x10;
+
+/// Write the event handler trampoline into the ROM area.
+pub fn install_callback_stub(bus: &mut crate::bus::Bus) {
+    let d = (CALLBACK_DATA - 0xF0000) as u16;
+    let [b0, b1] = d.to_le_bytes();
+    let at = |off: u16| (d + off).to_le_bytes();
+    let mut code = vec![0x1E, 0x06, 0x55, 0x57, 0x56, 0x52, 0x51, 0x53, 0x50]; // push ds..ax
+    code.extend([0x2E, 0xA1, b0, b1]); // mov ax,cs:[d]
+    for (modrm, off) in [(0x1E, 2), (0x0E, 4), (0x16, 6), (0x36, 8), (0x3E, 10)] {
+        code.extend([0x2E, 0x8B, modrm]); // mov bx/cx/dx/si/di,cs:[d+off]
+        code.extend(at(off));
+    }
+    code.extend([0x2E, 0xFF, 0x1E]); // call far cs:[d+12]
+    code.extend(at(12));
+    code.extend([0x58, 0x5B, 0x59, 0x5A, 0x5E, 0x5F, 0x5D, 0x07, 0x1F]); // pop ax..ds
+    code.extend([0x2E, 0xC6, 0x06]); // mov byte cs:[busy],0
+    code.extend(at(0x10));
+    code.extend([0x00, 0xCF]); // iret
+    for (i, b) in code.into_iter().enumerate() {
+        bus.write_8(CALLBACK_STUB + i, b);
+    }
+    clear_callback_busy(bus);
+}
+
+/// True while the event handler runs; events stay pending until it returns.
+pub fn callback_busy(bus: &crate::bus::Bus) -> bool {
+    bus.read_8(CALLBACK_BUSY) != 0
+}
+
+/// Forget a handler call that never returned, e.g. after a driver reset.
+pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
+    bus.write_8(CALLBACK_BUSY, 0);
+}
+
+/// Mouse event callback: INT 33h AX=000C registers a far pointer that the
+/// "driver" invokes on the events in its mask. Many Microsoft-mouse
+/// compatible games expect button presses to arrive this way rather than
+/// via polling AH=03 or AH=05. When an event in the mask is pending, a
+/// handler is installed and not still running, enter the ROM stub like the
+/// driver's IRQ handler: it saves the registers and CALL FARs the handler,
+/// which returns with RETF. The caller checks IF first. Returns true when
+/// the handler was entered.
+pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
+    let busy = callback_busy(&cpu.bus);
+    let mouse = &mut cpu.bus.mouse;
+    let fire = mouse.pending_callback_events & mouse.callback_mask;
+    if fire == 0 || (mouse.callback_cs == 0 && mouse.callback_ip == 0) || busy {
+        return false;
+    }
+    // Snapshot and consume the bits we're about to handle.
+    mouse.pending_callback_events &= !fire;
+    let dx = mouse.mickey_x - mouse.last_callback_mickey_x;
+    let dy = mouse.mickey_y - mouse.last_callback_mickey_y;
+    mouse.last_callback_mickey_x = mouse.mickey_x;
+    mouse.last_callback_mickey_y = mouse.mickey_y;
+    let regs = [
+        fire,
+        mouse.buttons as u16,
+        mouse.x as u16,
+        mouse.y as u16,
+        dx as u16,
+        dy as u16,
+    ];
+    let (handler_cs, handler_ip) = (mouse.callback_cs, mouse.callback_ip);
+
+    for (i, r) in regs.into_iter().enumerate() {
+        cpu.bus.write_16(CALLBACK_DATA + i * 2, r);
+    }
+    cpu.bus.write_16(CALLBACK_DATA + 12, handler_ip);
+    cpu.bus.write_16(CALLBACK_DATA + 14, handler_cs);
+    cpu.bus.write_8(CALLBACK_BUSY, 1);
+
+    cpu.push(cpu.get_cpu_flags().bits());
+    cpu.push(cpu.cs);
+    cpu.push(cpu.ip);
+    cpu.cs = 0xF000;
+    cpu.ip = (CALLBACK_STUB - 0xF0000) as u16;
+    cpu.set_cpu_flag(crate::cpu::CpuFlags::IF, false);
+    cpu.set_cpu_flag(crate::cpu::CpuFlags::TF, false);
+    true
 }

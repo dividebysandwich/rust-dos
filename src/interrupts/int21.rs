@@ -3,7 +3,7 @@ use iced_x86::Register;
 
 use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
-use crate::bus::{DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
+use crate::bus::{DOS_LIST_OF_LISTS, DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{DriveKind, FIRST_USER_HANDLE, drive_letter, parse_drive_prefix};
 use crate::video::print_char;
@@ -851,6 +851,22 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.log_string("[DOS] Reported DOS Version 5.0");
         }
 
+        // AH = 50h: Set current PSP to BX
+        0x50 => {
+            cpu.current_psp = cpu.bx;
+        }
+
+        // AH = 51h / 62h: Get current PSP into BX
+        0x51 | 0x62 => {
+            cpu.bx = cpu.current_psp;
+        }
+
+        // AH = 52h: Get List of Lists. ES:BX -> SYSVARS, first MCB at ES:[BX-2]
+        0x52 => {
+            cpu.es = 0xF000;
+            cpu.bx = (DOS_LIST_OF_LISTS - 0xF0000) as u16;
+        }
+
         // AH = 31h: Terminate and Stay Resident
         0x31 => {
             let return_code = cpu.get_al();
@@ -884,8 +900,11 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.ax = return_code as u16; // Set return code (AL)
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
+                // Started from the shell: stay resident under the next programs.
+                cpu.keep_resident(tsr_psp, paras_to_keep);
                 cpu.state = CpuState::RebootShell;
             }
+            cpu.last_child_exit = 0x0300 | return_code as u16;
         }
 
         // AH = 33h: Get/Set Ctrl-Break Check

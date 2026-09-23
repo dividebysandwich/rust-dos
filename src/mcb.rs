@@ -139,6 +139,49 @@ pub fn init_empty(bus: &mut Bus) {
     );
 }
 
+/// Free everything from the MCB at `seg` up: `seg` becomes one free 'Z'
+/// block reaching the end of conventional memory. Blocks below `seg` (the
+/// resident TSRs) are kept, and free blocks directly below it merge into the
+/// new free block. Returns the MCB segment of that trailing free block,
+/// which is below `seg` when the TSRs have freed their memory, or None when
+/// the chain is corrupt and doesn't reach `seg`.
+pub fn release_from(bus: &mut Bus, seg: u16) -> Option<u16> {
+    if seg <= FIRST_MCB_SEG {
+        init_empty(bus);
+        return Some(FIRST_MCB_SEG);
+    }
+    let chain = walk(bus);
+    let &(below, m) = chain.iter().take_while(|(s, _)| *s < seg).last()?;
+    let below_end = below as u32 + 1 + m.size as u32;
+    let free_from = if below_end == seg as u32 && seg < END_OF_CONVENTIONAL {
+        write_mcb(
+            bus,
+            below,
+            &Mcb {
+                signature: MCB_M,
+                ..m
+            },
+        );
+        seg
+    } else if m.is_free() && below_end > seg as u32 {
+        // Already free across `seg`, e.g. a TSR that released itself.
+        below
+    } else {
+        return None;
+    };
+    write_mcb(
+        bus,
+        free_from,
+        &Mcb {
+            signature: MCB_Z,
+            owner: FREE_OWNER,
+            size: END_OF_CONVENTIONAL - free_from - 1,
+        },
+    );
+    coalesce_all(bus);
+    walk(bus).last().map(|&(s, _)| s)
+}
+
 /// Build a fresh MCB chain consisting of one allocated block (the program)
 /// followed by one free block covering the rest of conventional memory.
 ///

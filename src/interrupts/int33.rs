@@ -24,6 +24,7 @@ pub fn handle(cpu: &mut Cpu) {
             // Returns: AX = FFFFh if installed, 0000h if not. BX = button count.
             let (w, h) = virtual_screen_dims(cpu.bus.video_mode);
             cpu.bus.mouse.reset(w, h);
+            crate::mouse::clear_callback_busy(&mut cpu.bus);
             cpu.ax = 0xFFFF;
             cpu.bx = 3; // 3-button mouse
         }
@@ -124,11 +125,12 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         0x000C => {
-            // Set event handler. CX = event mask, ES:DX = far pointer to ISR.
-            // We store but do not invoke callbacks (most DOS games poll instead).
+            // Set event handler. CX = event mask, ES:DX = far pointer to a
+            // handler the main loop CALL FARs on those events.
             cpu.bus.mouse.callback_mask = cpu.cx;
             cpu.bus.mouse.callback_cs = cpu.es;
             cpu.bus.mouse.callback_ip = cpu.dx;
+            crate::mouse::clear_callback_busy(&mut cpu.bus);
         }
 
         0x000F => {

@@ -383,46 +383,8 @@ fn main() -> Result<(), String> {
                     continue;
                 }
 
-                // Mouse event callback — INT 33h AX=000C registers a far
-                // pointer that the "driver" should invoke on the events
-                // in its mask. Carrier Command (and most Microsoft-mouse
-                // compatible games) expect button presses to arrive this
-                // way rather than via polling AH=03 or AH=05. Fire when
-                // any pending event bit matches the registered mask and
-                // a callback is actually installed.
-                let pending = cpu.bus.mouse.pending_callback_events;
-                let fire = pending & cpu.bus.mouse.callback_mask;
-                if fire != 0
-                    && (cpu.bus.mouse.callback_cs != 0 || cpu.bus.mouse.callback_ip != 0)
-                {
-                    // Snapshot and consume the bits we're about to handle.
-                    cpu.bus.mouse.pending_callback_events &= !fire;
-                    let dx = cpu.bus.mouse.mickey_x - cpu.bus.mouse.last_callback_mickey_x;
-                    let dy = cpu.bus.mouse.mickey_y - cpu.bus.mouse.last_callback_mickey_y;
-                    cpu.bus.mouse.last_callback_mickey_x = cpu.bus.mouse.mickey_x;
-                    cpu.bus.mouse.last_callback_mickey_y = cpu.bus.mouse.mickey_y;
-                    let handler_cs = cpu.bus.mouse.callback_cs;
-                    let handler_ip = cpu.bus.mouse.callback_ip;
-                    let state_ax = fire;
-                    let state_bx = cpu.bus.mouse.buttons as u16;
-                    let state_cx = cpu.bus.mouse.x as u16;
-                    let state_dx = cpu.bus.mouse.y as u16;
-                    let state_si = dx as u16;
-                    let state_di = dy as u16;
-
-                    cpu.push(cpu.get_cpu_flags().bits());
-                    cpu.push(cpu.cs);
-                    cpu.push(cpu.ip);
-                    cpu.cs = handler_cs;
-                    cpu.ip = handler_ip;
-                    cpu.ax = state_ax;
-                    cpu.bx = state_bx;
-                    cpu.cx = state_cx;
-                    cpu.dx = state_dx;
-                    cpu.si = state_si;
-                    cpu.di = state_di;
-                    cpu.set_cpu_flag(CpuFlags::IF, false);
-                    cpu.set_cpu_flag(CpuFlags::TF, false);
+                // Mouse event handler installed with INT 33h AX=000C.
+                if mouse::deliver_callback(&mut cpu) {
                     continue;
                 }
             }
@@ -518,7 +480,7 @@ fn main() -> Result<(), String> {
 
             // Handle "IP = 0" as an explicit exit (Standard COM behavior)
             // If the program jumps to the start of the segment, it wants to exit.
-            if cpu.ip == 0x0000 && cpu.cs == 0x1000 {
+            if cpu.ip == 0x0000 && cpu.cs == cpu.transient_segment() {
                 cpu.bus
                     .log_string("[DOS] Program jumped to offset 0000h. Exiting to Shell.");
                 // Flush log on exit so we don't lose tail data
@@ -542,7 +504,7 @@ fn main() -> Result<(), String> {
             // Tripwire: arriving in the IVT / BIOS data area with an
             // application context (DS not 0, not the shell at CS=0) almost
             // always means a corrupted FAR pointer landed us here.
-            if cpu.cs == 0 && cpu.ip < 0x100 && cpu.ds != 0 && cpu.ds != 0x1000 {
+            if cpu.cs == 0 && cpu.ip < 0x100 && cpu.ds != 0 && cpu.ds != cpu.transient_segment() {
                 cpu.bus.log_string(&format!(
                     "[TRIPWIRE] Entered IVT region CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} AX={:04X} BX={:04X} CX={:04X} DX={:04X}",
                     cpu.cs, cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.ax, cpu.bx, cpu.cx, cpu.dx
@@ -779,15 +741,13 @@ fn main() -> Result<(), String> {
 
             // Draw Mouse Cursor (software overlay) when visible and installed.
             // The driver stores the cursor in virtual coords; map those to
-            // screen pixels using the current video mode's dimensions.
+            // screen pixels over the same virtual extent the host pointer spans.
             if cpu.bus.mouse.installed && cpu.bus.mouse.hide_counter <= 0 {
-                let (mode_w, mode_h) = cpu.bus.video_mode.dimensions();
-                let virt_w = if mode_w < 640 { 640 } else { mode_w };
-                let virt_h = mode_h;
-                let sx = (cpu.bus.mouse.x as i64 * video::SCREEN_WIDTH as i64 / virt_w as i64)
-                    as i32;
-                let sy = (cpu.bus.mouse.y as i64 * video::SCREEN_HEIGHT as i64 / virt_h as i64)
-                    as i32;
+                let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
+                let sx =
+                    (cpu.bus.mouse.x as i64 * video::SCREEN_WIDTH as i64 / virt_w as i64) as i32;
+                let sy =
+                    (cpu.bus.mouse.y as i64 * video::SCREEN_HEIGHT as i64 / virt_h as i64) as i32;
                 draw_default_mouse_cursor(buffer, sx, sy);
             }
 
@@ -907,19 +867,14 @@ fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
 }
 
 /// Convert host window coordinates (in pixels, at window `scale`) into the
-/// driver's virtual coordinate system for the current video mode. Most DOS
-/// mouse drivers use a fixed virtual X range of 0..639 regardless of the
-/// actual horizontal resolution; Y follows the mode's pixel height.
+/// driver's virtual coordinate system (see `MouseState::virtual_extent`).
 fn host_to_virtual_mouse(cpu: &Cpu, host_x: i32, host_y: i32, scale: u32) -> (i32, i32) {
-    let (mode_w, mode_h) = cpu.bus.video_mode.dimensions();
     let scale = scale.max(1) as i32;
     // Undo the window scale. The textured output is SCREEN_WIDTH x SCREEN_HEIGHT.
     let px = (host_x / scale).clamp(0, video::SCREEN_WIDTH as i32 - 1);
     let py = (host_y / scale).clamp(0, video::SCREEN_HEIGHT as i32 - 1);
 
-    // Virtual X axis: 640 wide for 320-wide modes too (standard DOS convention).
-    let virt_w = if mode_w < 640 { 640 } else { mode_w as i32 };
-    let virt_h = mode_h as i32;
+    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
 
     let vx = (px as i64 * virt_w as i64 / video::SCREEN_WIDTH as i64) as i32;
     let vy = (py as i64 * virt_h as i64 / video::SCREEN_HEIGHT as i64) as i32;

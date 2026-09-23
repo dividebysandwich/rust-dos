@@ -14,6 +14,9 @@ pub const MEDIA_ID_TABLE: usize = 0xFE900;
 /// `DPB_SIZE` slot per drive letter.
 pub const DPB_TABLE: usize = 0xFEA00;
 pub const DPB_SIZE: usize = 0x40;
+/// ROM copy of the DOS List of Lists (SYSVARS) that INT 21h AH=52h points
+/// ES:BX at. The word just below it holds the first MCB segment.
+pub const DOS_LIST_OF_LISTS: usize = 0xFF110;
 
 pub trait Device {
     /// Return the set of I/O ports this device owns.
@@ -257,6 +260,7 @@ impl Bus {
         bus.install_hle_trap(0x21, 0xF101C); // DOS
         bus.install_hle_trap(0x2F, 0xF1020); // Multiplex (MSCDEX)
         bus.install_hle_trap(0x33, 0xF1024); // Mouse
+        crate::mouse::install_callback_stub(&mut bus);
 
         // Build a baseline MCB chain — one large free block covering
         // conventional memory. load_shell / load_exe rebuild as needed, but we
@@ -325,6 +329,43 @@ impl Bus {
             let next = with_dpb.get(i + 1).map(|&(d, _)| d);
             self.write_dpb(drive, kind, next);
         }
+        self.write_list_of_lists(&with_dpb);
+    }
+
+    /// Fill in the DOS 5 List of Lists for INT 21h AH=52h. Programs mostly
+    /// read the first MCB segment at offset -2 to walk the memory chain.
+    /// Structures the emulator doesn't keep in DOS memory (SFTs, CDS, disk
+    /// buffers, CLOCK$/CON drivers) are left as null pointers.
+    fn write_list_of_lists(&mut self, with_dpb: &[(u8, DriveKind)]) {
+        let base = DOS_LIST_OF_LISTS;
+        for i in 0..0x50 {
+            self.write_8(base + i, 0);
+        }
+        self.write_16(base - 2, crate::mcb::FIRST_MCB_SEG); // -2: first MCB
+        // 00: far pointer to the first DPB
+        match with_dpb.first() {
+            Some(&(d, _)) => {
+                self.write_16(base, (DPB_TABLE + d as usize * DPB_SIZE - 0xF0000) as u16);
+                self.write_16(base + 0x02, 0xF000);
+            }
+            None => self.write_32(base, 0xFFFF_FFFF),
+        }
+        let max_sector = with_dpb.iter().map(|&(_, k)| k.geometry().1).max();
+        self.write_16(base + 0x10, max_sector.unwrap_or(512)); // 10: max bytes per sector
+        self.write_8(base + 0x20, with_dpb.len() as u8); // 20: block devices
+        self.write_8(base + 0x21, LASTDRIVE); // 21: LASTDRIVE
+        // 22: NUL device header, the last driver in the chain
+        let nul = base + 0x22;
+        self.write_32(nul, 0xFFFF_FFFF); // next driver
+        self.write_16(nul + 0x04, 0x8004); // character device, NUL
+        let retf = (base + 0x50 - 0xF0000) as u16;
+        self.write_16(nul + 0x06, retf); // strategy entry
+        self.write_16(nul + 0x08, retf); // interrupt entry
+        for (i, &b) in b"NUL     ".iter().enumerate() {
+            self.write_8(nul + 0x0A + i, b);
+        }
+        self.write_8(base + 0x43, 3); // 43: boot drive C:
+        self.write_8(base + 0x50, 0xCB); // RETF for the NUL driver entries, past the table
     }
 
     /// Fill in a DOS 4+ style Drive Parameter Block with a plausible FAT

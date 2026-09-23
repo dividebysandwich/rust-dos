@@ -109,6 +109,10 @@ pub struct Cpu {
     pub batch_echo: bool,
     pub current_psp: u16,
     pub heap_pointer: u16,
+    /// MCB segment where memory above the TSRs kept resident from the shell
+    /// begins; `FIRST_MCB_SEG` when there are none. Programs started from
+    /// the shell load right above it.
+    pub resident_end: u16,
     /// Exit code (AL) and termination type (AH) of the most recently terminated
     /// child process. Read-and-clear by INT 21h AH=4Dh. Termination type:
     /// 0 = normal (INT 21 AH=4C), 1 = Ctrl-C, 2 = critical error, 3 = TSR.
@@ -207,11 +211,45 @@ impl Cpu {
             trace_log: VecDeque::new(),
             current_psp: 0, // Will be set by loader
             heap_pointer: 0x2000,
+            resident_end: crate::mcb::FIRST_MCB_SEG,
             last_child_exit: 0,
             process_stack: Vec::new(),
             last_timer_tick: 0,
             idle: false,
         }
+    }
+
+    /// PSP segment for programs started from the shell: right above the
+    /// resident TSRs.
+    pub fn transient_segment(&self) -> u16 {
+        self.resident_end + 1
+    }
+
+    /// INT 21h AH=31h from a program started by the shell: shrink its PSP
+    /// block to `paras` and keep it, plus any other block it owns, resident
+    /// under the programs started afterwards.
+    pub fn keep_resident(&mut self, psp: u16, paras: u16) {
+        // DOS keeps at least the 6 paragraphs of the PSP itself.
+        let _ = crate::mcb::resize(&mut self.bus, psp, paras.max(6));
+        let chain = crate::mcb::walk(&self.bus);
+        let end = chain
+            .iter()
+            .rev()
+            .find(|(_, m)| !m.is_free())
+            .map_or(self.resident_end, |&(s, m)| {
+                s.saturating_add(1).saturating_add(m.size)
+            });
+        if end >= crate::mcb::END_OF_CONVENTIONAL {
+            self.bus
+                .log_string("[DOS] TSR: no memory left above it, not keeping it resident");
+            return;
+        }
+        self.resident_end = end;
+        self.bus.log_string(&format!(
+            "[DOS] TSR: resident up to {:04X}, programs now load at {:04X}",
+            end,
+            self.transient_segment()
+        ));
     }
 
     pub fn save_process_context(&mut self) {
@@ -1012,19 +1050,29 @@ impl Cpu {
         f
     }
 
+    /// Point the HLE vectors back at the emulator's handlers, except those
+    /// hooked by a resident TSR.
     fn install_bios_traps(&mut self) {
         let mut phys_addr = 0xF1000;
         let hle_vectors = vec![
             0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33,
         ];
+        let resident =
+            (crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16;
 
         for vec in hle_vectors {
             let ivt_offset = (vec as usize) * 4;
             let handler_offset = (phys_addr & 0xFFFF) as u16;
 
             // Point IVT to F000:Offset
-            self.bus.write_16(ivt_offset, handler_offset); // IP
-            self.bus.write_16(ivt_offset + 2, 0xF000); // CS
+            let target = self.get_physical_addr(
+                self.bus.read_16(ivt_offset + 2),
+                self.bus.read_16(ivt_offset),
+            );
+            if !resident.contains(&target) {
+                self.bus.write_16(ivt_offset, handler_offset); // IP
+                self.bus.write_16(ivt_offset + 2, 0xF000); // CS
+            }
 
             // Ensure the Trap Instruction exists (FE 38 XX CF)
             self.bus.write_8(phys_addr, 0xFE);
@@ -1047,9 +1095,22 @@ impl Cpu {
         // Clear RAM
         // 0x0000-0x03FF is the IVT.
         // 0x0400-0x04FF is the BIOS Data Area (BDA).
-        // If we zero those, the system dies.
-        for i in 0x0500..0xFFFF {
+        // If we zero those, the system dies. The first MCB and resident TSRs
+        // sit above.
+        for i in 0x0500..crate::mcb::FIRST_MCB_SEG as usize * 16 {
             self.bus.ram[i] = 0;
+        }
+
+        // No program is running: every paragraph above the resident TSRs is
+        // available for allocation.
+        match crate::mcb::release_from(&mut self.bus, self.resident_end) {
+            Some(end) => self.resident_end = end,
+            None => {
+                self.bus
+                    .log_string("[DOS] MCB chain corrupt, dropping resident programs");
+                crate::mcb::init_empty(&mut self.bus);
+                self.resident_end = crate::mcb::FIRST_MCB_SEG;
+            }
         }
 
         // Re-install the HLE Interrupt Vectors
@@ -1102,9 +1163,6 @@ impl Cpu {
         self.idle = false;
         self.bus.reset_timers();
 
-        // No program is running yet: every paragraph of conventional memory
-        // is available for allocation, and no file is open.
-        crate::mcb::init_empty(&mut self.bus);
         self.bus.disk.close_all_files();
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
@@ -1269,7 +1327,7 @@ impl Cpu {
     // COM loader
     fn load_com(&mut self, bytes: &[u8], segment: Option<u16>) -> bool {
         let is_nested = segment.is_some();
-        let load_segment = segment.unwrap_or(0x1000);
+        let load_segment = segment.unwrap_or(self.transient_segment());
         let start_offset = 0x100; // COM files always start at 100h
 
         // Clear 64KB of RAM segment for safety (simulating clean load)
@@ -1391,11 +1449,12 @@ impl Cpu {
         let reloc_table_offset = u16::from_le_bytes([bytes[24], bytes[25]]) as usize;
         let reloc_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
 
-        // Clear Conventional Memory (Only if starting fresh at 0x1000, probably shouldn't blindly wipe if nested)
+        // Clear Conventional Memory (Only if starting fresh from the shell, probably shouldn't blindly wipe if nested)
         // Stop at 0xA0000 to preserve VGA VRAM, BIOS ROM signature, font tables, and
-        // Static Functionality Table set up in Bus::new().
+        // Static Functionality Table set up in Bus::new(). Resident TSRs survive.
         if segment.is_none() {
-            for i in 0x500..0xA0000 {
+            let first_mcb = crate::mcb::FIRST_MCB_SEG as usize * 16;
+            for i in (0x500..first_mcb).chain(self.resident_end as usize * 16..0xA0000) {
                 self.bus.ram[i] = 0;
             }
         }
@@ -1407,7 +1466,7 @@ impl Cpu {
             self.install_bios_traps();
         }
 
-        let load_segment: u16 = segment.unwrap_or(0x1000);
+        let load_segment: u16 = segment.unwrap_or(self.transient_segment());
         let relocation_base_segment = load_segment + 0x10;
 
         // Load Binary

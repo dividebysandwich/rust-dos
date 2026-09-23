@@ -994,11 +994,9 @@ fn apply_key(cpu: &mut Cpu, key: PcKey, ascii: u8, down: bool) {
 /// Map 640x400 screenshot pixels into the mouse driver's virtual coordinate
 /// system (same convention as the SDL path in main.rs).
 fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
-    let (mode_w, mode_h) = cpu.bus.video_mode.dimensions();
     let px = x.clamp(0, video::SCREEN_WIDTH as i32 - 1);
     let py = y.clamp(0, video::SCREEN_HEIGHT as i32 - 1);
-    let virt_w = if mode_w < 640 { 640 } else { mode_w as i32 };
-    let virt_h = mode_h as i32;
+    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
     let vx = (px as i64 * virt_w as i64 / video::SCREEN_WIDTH as i64) as i32;
     let vy = (py as i64 * virt_h as i64 / video::SCREEN_HEIGHT as i64) as i32;
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
