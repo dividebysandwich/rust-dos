@@ -16,36 +16,35 @@ const PF_PROTECTION: u32 = 0x1;
 const PF_WRITE: u32 = 0x2;
 const PF_USER: u32 = 0x4;
 
-/// TLB entry flags: user access allowed, writes allowed (both from the
-/// page directory and table entries), and the page is dirty already.
-const TLB_USER: u8 = 0x1;
-const TLB_WRITE: u8 = 0x2;
-const TLB_DIRTY: u8 = 0x4;
-
 const TLB_ENTRIES: usize = 1024;
 
+/// A translation, valid for reads when `read_tag` is the linear page number
+/// + 1, and for writes when `write_tag` is: a page that may not be written,
+/// or whose dirty bit isn't set yet, has a write tag of 0, so writes to it
+/// walk the page tables.
 #[derive(Clone, Copy)]
 struct TlbEntry {
-    /// Linear page number + 1; 0 for an empty entry.
-    tag: u32,
+    read_tag: u32,
+    write_tag: u32,
     /// Physical address of the page.
     phys: u32,
-    flags: u8,
 }
 
-const EMPTY: TlbEntry = TlbEntry { tag: 0, phys: 0, flags: 0 };
+const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0 };
 
 /// Translations the CPU has walked the page tables for, direct-mapped by
-/// linear page number. Like the hardware's, it is only flushed by a CR3
-/// load, a change of CR0.PG, INVLPG and task switches, so a program must
-/// flush it after changing page tables, as on a real 386.
+/// linear page number, in two sets: for accesses at privilege level 3,
+/// which the pages' user bits restrict, and for the others. Like the
+/// hardware's, it is only flushed by a CR3 load, a change of CR0.PG or WP,
+/// INVLPG and task switches, so a program must flush it after changing
+/// page tables, as on a real 386.
 pub struct Tlb {
     entries: Box<[TlbEntry]>,
 }
 
 impl Default for Tlb {
     fn default() -> Self {
-        Self { entries: vec![EMPTY; TLB_ENTRIES].into_boxed_slice() }
+        Self { entries: vec![EMPTY; 2 * TLB_ENTRIES].into_boxed_slice() }
     }
 }
 
@@ -54,13 +53,20 @@ impl Tlb {
         self.entries.fill(EMPTY);
     }
 
-    /// Drop the translation of the page holding `lin` (INVLPG).
+    /// Drop the translations of the page holding `lin` (INVLPG).
     pub fn flush_page(&mut self, lin: u32) {
         let page = lin >> 12;
-        let e = &mut self.entries[page as usize % TLB_ENTRIES];
-        if e.tag == page + 1 {
-            *e = EMPTY;
+        for set in 0..2 {
+            let e = &mut self.entries[set * TLB_ENTRIES + page as usize % TLB_ENTRIES];
+            if e.read_tag == page + 1 {
+                *e = EMPTY;
+            }
         }
+    }
+
+    #[inline(always)]
+    fn slot(page: u32, user: bool) -> usize {
+        (user as usize) * TLB_ENTRIES + page as usize % TLB_ENTRIES
     }
 }
 
@@ -81,21 +87,22 @@ impl Cpu {
             return Ok(self.translate(lin));
         }
         let page = lin >> 12;
-        let e = self.tlb.entries[page as usize % TLB_ENTRIES];
-        if e.tag == page + 1 && self.tlb_allows(e.flags, write, user) && (!write || e.flags & TLB_DIRTY != 0) {
+        let e = self.tlb.entries[Tlb::slot(page, user)];
+        let tag = if write { e.write_tag } else { e.read_tag };
+        if tag == page + 1 {
             return Ok(self.translate(e.phys | (lin & 0xFFF)));
         }
         self.walk(lin, write, user)
     }
 
-    /// Whether a TLB entry's permissions allow an access. Supervisor code
-    /// may write read-only pages, unless CR0.WP (486) says otherwise.
+    /// Whether the page tables allow an access. Supervisor code may write
+    /// read-only pages, unless CR0.WP (486) says otherwise.
     #[inline(always)]
-    fn tlb_allows(&self, flags: u8, write: bool, user: bool) -> bool {
-        if user && flags & TLB_USER == 0 {
+    fn allows(&self, user_ok: bool, write_ok: bool, write: bool, user: bool) -> bool {
+        if user && !user_ok {
             return false;
         }
-        !write || flags & TLB_WRITE != 0 || (!user && !self.write_protect())
+        !write || write_ok || (!user && !self.write_protect())
     }
 
     fn write_protect(&self) -> bool {
@@ -116,14 +123,9 @@ impl Cpu {
         if pte & PTE_P == 0 {
             return Err(self.page_fault(lin, error));
         }
-        let mut flags = 0;
-        if pde & pte & PTE_US != 0 {
-            flags |= TLB_USER;
-        }
-        if pde & pte & PTE_RW != 0 {
-            flags |= TLB_WRITE;
-        }
-        if !self.tlb_allows(flags, write, user) {
+        let user_ok = pde & pte & PTE_US != 0;
+        let write_ok = pde & pte & PTE_RW != 0;
+        if !self.allows(user_ok, write_ok, write, user) {
             error |= PF_PROTECTION;
             return Err(self.page_fault(lin, error));
         }
@@ -134,12 +136,13 @@ impl Cpu {
         if new_pte != pte {
             self.bus.write_32(pte_addr, new_pte);
         }
-        if new_pte & PTE_D != 0 {
-            flags |= TLB_DIRTY;
-        }
         let page = lin >> 12;
         let phys = pte & 0xFFFF_F000;
-        self.tlb.entries[page as usize % TLB_ENTRIES] = TlbEntry { tag: page + 1, phys, flags };
+        // Writes go through the TLB only once the page is dirty, so the
+        // first write to it still sets the bit.
+        let writable = new_pte & PTE_D != 0 && self.allows(user_ok, write_ok, true, user);
+        self.tlb.entries[Tlb::slot(page, user)] =
+            TlbEntry { read_tag: page + 1, write_tag: if writable { page + 1 } else { 0 }, phys };
         Ok(self.translate(phys | (lin & 0xFFF)))
     }
 
