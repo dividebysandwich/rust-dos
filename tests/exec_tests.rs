@@ -77,3 +77,61 @@ fn com_program_returning_to_psp_offset_0_terminates() {
     }
     assert_eq!(cpu.state, CpuState::RebootShell);
 }
+
+/// Run from CS:IP until the next HLT.
+fn run_to_hlt(cpu: &mut Cpu) {
+    for _ in 0..1000 {
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.bus.read_8(at) == 0xF4 {
+            return;
+        }
+        cpu.step();
+    }
+    panic!("no HLT reached");
+}
+
+#[test]
+fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
+    let parent = [
+        0xB8, 0x01, 0x4B, // MOV AX,4B01h
+        0xBB, 0x00, 0x02, // MOV BX,0200h
+        0xBA, 0x00, 0x03, // MOV DX,0300h
+        0xCD, 0x21, // INT 21h
+        0xF4, // 010B: HLT, after loading
+        0xF4, // 010C: HLT, the debugger's terminate handler
+    ];
+    let child = [0xB8, 0x07, 0x4C, 0xCD, 0x21]; // MOV AX,4C07h; INT 21h
+    let dir = scratch("exec_load", &[("PARENT.COM", &parent), ("CHILD.COM", &child)]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x202, 0x0280); // command tail
+    cpu.bus.write_16(base + 0x204, psp);
+    cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(base + 0x300, b"CHILD.COM\0");
+    let parent_sp = cpu.sp();
+
+    run_to_hlt(&mut cpu);
+    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (psp, 0x010B, parent_sp));
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    let child_psp = cpu.current_psp;
+    assert_ne!(child_psp, psp, "the child's PSP is current");
+    let word = |cpu: &Cpu, off: usize| cpu.bus.read_16(base + 0x200 + off);
+    let (sp, ss, ip, cs) = (word(&cpu, 0x0E), word(&cpu, 0x10), word(&cpu, 0x12), word(&cpu, 0x14));
+    assert_eq!((cs, ip), (child_psp, 0x0100));
+    assert_eq!(cpu.bus.read_16(ss as usize * 16 + sp as usize), 0, "initial AX on the stack");
+
+    // The debugger takes over termination and runs the child.
+    let child_base = child_psp as usize * 16;
+    cpu.bus.write_16(child_base + 0x0A, 0x010C);
+    cpu.bus.write_16(child_base + 0x0C, psp);
+    cpu.set_cs(cs);
+    cpu.set_ip(ip);
+    cpu.set_ss(ss);
+    cpu.set_sp(sp + 2);
+    run_to_hlt(&mut cpu);
+    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (psp, 0x010C, parent_sp));
+    assert_eq!(cpu.current_psp, psp);
+    assert_eq!(cpu.last_child_exit, 7);
+}

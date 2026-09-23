@@ -129,7 +129,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 .log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
             cpu.bus.disk.close_process_files(cpu.current_psp);
 
-            if cpu.restore_process_context() {
+            if cpu.return_to_parent() {
                 cpu.bus
                     .log_string("[DOS] AH=00: Returning to Parent Process");
             } else {
@@ -531,9 +531,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 filename, mode
             ));
 
-            if mode == 0x00 {
-                // Load and Execute
-                // ES:BX points to Parameter Block
+            if mode == 0x00 || mode == 0x01 {
+                // Load and Execute (AL=00h), or load for a debugger to run
+                // (AL=01h). ES:BX points to Parameter Block
                 // Offset 00: Segment of environment (word)
                 // Offset 02: Pointer to command line (dword) -> Write to PSP 80h
                 // Offset 06: Pointer to FCB 1 (dword) -> Write to PSP 5Ch
@@ -723,6 +723,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // handler pops this context back, restoring the parent's stack
                 // so the BOP trap's IRET-pop finds the parent's saved flags/CS/IP.
                 cpu.save_process_context();
+                // The child returns where the parent's INT 21h would.
+                let frame = cpu.get_physical_addr(cpu.ss(), cpu.sp());
+                let return_address = (cpu.bus.read_16(frame), cpu.bus.read_16(frame + 2));
 
                 let parent_psp_before = cpu.current_psp;
                 // Allocate the largest free MCB for the child. DOS gives the
@@ -774,6 +777,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
                     // Update PSP offset 0x16 (Parent PSP Segment)
                     cpu.bus.write_16(psp_phys + 0x16, parent_psp_before);
+                    // Terminate address (INT 22h).
+                    cpu.bus.write_16(psp_phys + 0x0A, return_address.0);
+                    cpu.bus.write_16(psp_phys + 0x0C, return_address.1);
 
                     // Write Command Tail to PSP+0x80
                     cpu.bus
@@ -783,6 +789,30 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                     cpu.bus
                         .write_8(psp_phys + 0x81 + target_cmd_tail_bytes.len(), 0x0D);
+
+                    if mode == 0x01 {
+                        // Hand the child's entry point and stack, with the
+                        // initial AX on it, to the debugger in the parameter
+                        // block, and go back to it with the child's PSP
+                        // current. The parent's context stays saved for when
+                        // the child terminates.
+                        let (entry, stack) = ((cpu.cs(), cpu.ip()), (cpu.ss(), cpu.sp().wrapping_sub(2)));
+                        cpu.bus.write_16(cpu.get_physical_addr(stack.0, stack.1), 0);
+                        cpu.bus.write_16(param_phys + 0x0E, stack.1);
+                        cpu.bus.write_16(param_phys + 0x10, stack.0);
+                        cpu.bus.write_16(param_phys + 0x12, entry.1);
+                        cpu.bus.write_16(param_phys + 0x14, entry.0);
+                        let parent = cpu.process_stack.last().expect("context saved above").regs.clone();
+                        let heap_pointer = cpu.heap_pointer;
+                        cpu.restore(&parent);
+                        cpu.heap_pointer = heap_pointer;
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                        cpu.bus.log_string(&format!(
+                            "[DOS] EXEC loaded child PSP {:04X}, entry {:04X}:{:04X}",
+                            load_segment, entry.0, entry.1
+                        ));
+                        return;
+                    }
 
                     // Set up the child's register state per DOS convention.
                     // AX = 0 typically (we don't validate FCBs). DS/ES already
@@ -914,7 +944,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // Calculate where the resident block ends
             let resident_end = tsr_psp.wrapping_add(paras_to_keep);
 
-            if cpu.restore_process_context() {
+            if cpu.return_to_parent() {
                 cpu.bus.log_string(&format!(
                     "[DOS] TSR: Returning to Parent. Resident End={:04X}",
                     resident_end
@@ -1518,7 +1548,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.bus.disk.close_process_files(cpu.current_psp);
 
             // Try to restore parent process
-            if cpu.restore_process_context() {
+            if cpu.return_to_parent() {
                 cpu.bus.log_string("[DOS] Returning to Parent Process");
                 cpu.set_ax(exit_code as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);

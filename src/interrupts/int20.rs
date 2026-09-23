@@ -8,7 +8,7 @@ pub fn handle(cpu: &mut Cpu) {
     cpu.bus.log_string("[INT20] Program Terminated.");
     cpu.bus.disk.close_process_files(cpu.current_psp);
 
-    if cpu.restore_process_context() {
+    if cpu.return_to_parent() {
         cpu.bus.log_string("[INT20] Returning to Parent Process");
     } else {
         cpu.bus.log_string("[INT20] No Parent. Rebooting Shell...");

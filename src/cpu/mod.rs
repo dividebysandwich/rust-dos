@@ -412,6 +412,24 @@ impl Cpu {
         ));
     }
 
+    /// End the current process: back to the parent's context, returning
+    /// through the terminate address in the process's PSP (0Ah), which
+    /// EXEC set to the parent's return address and debuggers change. The
+    /// parent's stack holds the interrupt frame the return pops.
+    pub fn return_to_parent(&mut self) -> bool {
+        let psp = self.current_psp as usize * 16;
+        let terminate = (self.bus.read_16(psp + 0x0A), self.bus.read_16(psp + 0x0C));
+        if !self.restore_process_context() {
+            return false;
+        }
+        if terminate != (0, 0) {
+            let frame = self.get_physical_addr(self.ss(), self.sp());
+            self.bus.write_16(frame, terminate.0);
+            self.bus.write_16(frame + 2, terminate.1);
+        }
+        true
+    }
+
     pub fn restore_process_context(&mut self) -> bool {
         if let Some(context) = self.process_stack.pop() {
             self.restore(&context.regs);
