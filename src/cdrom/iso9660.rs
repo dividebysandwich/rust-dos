@@ -35,7 +35,7 @@ fn le32(b: &[u8], at: usize) -> u32 {
 }
 
 /// The Primary Volume Descriptor of the disc.
-fn primary_descriptor(image: &CdImage) -> Result<Box<[u8; DATA_SECTOR]>, String> {
+pub fn primary_descriptor(image: &CdImage) -> Result<Box<[u8; DATA_SECTOR]>, String> {
     let track = image.data_track().ok_or("no data track")?;
     let mut sector = Box::new([0u8; DATA_SECTOR]);
     for lba in track.start + FIRST_DESCRIPTOR..track.end {
@@ -127,7 +127,8 @@ fn root(descriptor: &[u8; DATA_SECTOR]) -> Extent {
 /// Read the file system of a disc's data track.
 pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
     let descriptor = primary_descriptor(image)?;
-    let label = String::from_utf8_lossy(&descriptor[40..72]).trim().to_string();
+    // Padded with spaces, or on some discs with NULs.
+    let label = String::from_utf8_lossy(&descriptor[40..72]).trim_matches([' ', '\0']).to_string();
     let mut files = MemFs::new();
     let mut visited = HashSet::new();
     let mut pending = vec![(String::new(), root(&descriptor), 0)];

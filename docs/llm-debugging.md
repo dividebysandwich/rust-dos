@@ -66,7 +66,10 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
   MPU-401 (`soundfont`, `gus` or `none`), with its active voices and any
-  patches it couldn't load.
+  patches it couldn't load. `cd` shows the CD audio a CD image drive plays
+  through MSCDEX: the drive, `playing`, `paused` or `stopped`, the track
+  and the position (MM:SS:FF), or null when nothing was played; the log
+  has a `[MSCDEX] Play audio` line for each Play request.
 - **Gravis Ultrasound:** the built-in Gravis patch set is on the
   read-only drive X: in `X:\ULTRASND`, where `ULTRADIR` points, so a game
   needs no copy of the Ultrasound software on C:. `/api/gus` shows the IRQ

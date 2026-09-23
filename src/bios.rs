@@ -17,6 +17,9 @@ const TRAP_BASE: u16 = 0x1000;
 /// Inline emulator services (`FE 39 nn`) used by the ROM code.
 pub const SERVICE_XMS: u8 = 0x01;
 pub const SERVICE_TIMER_TICK: u8 = 0x08;
+/// The strategy and interrupt entries of the CD-ROM driver (MSCDEX).
+pub const SERVICE_CD_STRATEGY: u8 = 0x15;
+pub const SERVICE_CD_INTERRUPT: u8 = 0x16;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.

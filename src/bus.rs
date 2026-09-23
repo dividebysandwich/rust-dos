@@ -132,6 +132,10 @@ pub struct Bus {
     gus_line: Option<u8>,
     /// The drive with the built-in Ultrasound software, if any.
     ultrasnd_drive: Option<u8>,
+    /// The CD drive playing audio tracks, for MSCDEX.
+    pub cdaudio: crate::cdrom::audio::CdPlayer,
+    /// What MSCDEX keeps between calls.
+    pub mscdex: crate::interrupts::mscdex::MscdexState,
     /// Mixed output (44.1 kHz stereo, interleaved) rendered up to
     /// `audio_frames` frames of emulated time, waiting for `pump_audio`.
     pub audio_out: VecDeque<i16>,
@@ -226,6 +230,8 @@ impl Bus {
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
             gus_line: None,
             ultrasnd_drive: None,
+            cdaudio: crate::cdrom::audio::CdPlayer::new(),
+            mscdex: Default::default(),
             audio_out: VecDeque::new(),
             audio_frames: 0,
             sb_phase: 0.0,
@@ -338,6 +344,11 @@ impl Bus {
         replace: bool,
     ) -> Result<std::path::PathBuf, String> {
         let result = self.disk.mount(drive, path, opts, replace);
+        if result.is_ok() {
+            // Another disc: whatever played stops, and MSCDEX says so.
+            self.cdaudio.stop_drive(drive);
+            self.mscdex.disc_changed(drive);
+        }
         self.sync_drive_bda();
         result
     }
@@ -367,6 +378,7 @@ impl Bus {
     /// Unmount a DOS drive and refresh the BIOS view of the drive set.
     pub fn unmount_drive(&mut self, drive: u8) -> Result<(), String> {
         let result = self.disk.unmount(drive);
+        self.cdaudio.stop_drive(drive);
         self.sync_drive_bda();
         result
     }
@@ -438,6 +450,8 @@ impl Bus {
         let retf = (base + 0x50 - 0xF0000) as u16;
         self.write_16(nul + 0x06, retf); // strategy entry
         self.write_16(nul + 0x08, retf); // interrupt entry
+        // The CD-ROM driver follows NUL when there are CD drives.
+        crate::interrupts::mscdex::install_device(self, nul);
         for (i, &b) in b"NUL     ".iter().enumerate() {
             self.write_8(nul + 0x0A + i, b);
         }
@@ -970,6 +984,8 @@ impl Bus {
         // After a long pause (a debugger stop, a slow host) start afresh
         // rather than render seconds of catch-up.
         if target.saturating_sub(self.audio_frames) > rate / 2 {
+            // A CD plays on meanwhile.
+            self.cdaudio.skip(target - rate / 2 - self.audio_frames);
             self.audio_frames = target - rate / 2;
         }
         let frames = target.saturating_sub(self.audio_frames) as usize;
@@ -982,6 +998,7 @@ impl Bus {
         let speaker_step = crate::timer::PIT_HZ as f32 / divisor / rate as f32;
         let speaker = self.speaker_on && speaker_step * rate as f32 > 20.0;
         let ((vl, vr), (fl, fr)) = self.sb.as_ref().map_or(((1.0, 1.0), (1.0, 1.0)), |sb| sb.volumes());
+        let (cl, cr) = self.sb.as_ref().map_or((1.0, 1.0), |sb| sb.cd_volume());
         let (sb_on, sb_step, dac) = match &self.sb {
             Some(sb) => (
                 sb.speaker_on || sb.config.model == crate::sb::SbModel::Sb16,
@@ -1030,6 +1047,9 @@ impl Bus {
             let (ml, mr) = self.mpu.render();
             l += ml;
             r += mr;
+            let (cdl, cdr) = self.cdaudio.render();
+            l += cdl * cl;
+            r += cdr * cr;
             if let Some(gus) = &mut self.gus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 l += gl * GUS_GAIN;
@@ -1088,6 +1108,7 @@ impl Bus {
         self.configure_sound(config, opl3);
         self.dma = crate::dma::Dma::new();
         self.mpu.reset();
+        self.cdaudio.reset();
         self.sb_frame = (0, 0);
         let hooked = self.gus.as_ref().and_then(|gus| gus.irq()).is_some_and(|irq| {
             let vector = if irq < 8 { 0x08 + irq as usize } else { 0x70 + irq as usize - 8 };

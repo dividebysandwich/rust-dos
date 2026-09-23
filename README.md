@@ -171,7 +171,7 @@ long and the short name open the file.
 |---|---|
 | `hdd` (default) | A fixed disk. BIOS unit 80h and up. |
 | `floppy` | A removable 1.44 MB disk whose free space reflects its files. On A: and B: it is also a BIOS floppy drive (equipment word, INT 13h units 0-1). |
-| `cdrom` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. Only the directory's files are available: no raw sector reads or CD audio. |
+| `cdrom` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. From a CD image it is a whole disc: raw and cooked sector reads, the volume descriptors, the table of contents, and audio tracks that play through the Sound Blaster mixer's CD volume. From a directory, only its files are available. |
 
 `-ro` makes any drive read-only.
 

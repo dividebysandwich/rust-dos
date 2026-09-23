@@ -111,6 +111,10 @@ const VOICE_L: u8 = 0x32;
 const VOICE_R: u8 = 0x33;
 const FM_L: u8 = 0x34;
 const FM_R: u8 = 0x35;
+const CD_L: u8 = 0x36;
+const CD_R: u8 = 0x37;
+/// The SB Pro's CD volume, a nibble per side.
+const PRO_CD: u8 = 0x28;
 
 pub struct SoundBlaster {
     pub config: SbConfig,
@@ -203,13 +207,14 @@ impl SoundBlaster {
 
     fn reset_mixer(&mut self) {
         self.mixer = [0; 256];
-        for reg in [MASTER_L, MASTER_R, VOICE_L, VOICE_R, FM_L, FM_R] {
+        for reg in [MASTER_L, MASTER_R, VOICE_L, VOICE_R, FM_L, FM_R, CD_L, CD_R] {
             self.mixer[reg as usize] = 0xC0;
         }
-        // SB Pro view: master, voice and FM at the same levels.
+        // SB Pro view: master, voice, FM and CD at the same levels.
         self.mixer[0x22] = 0xCC;
         self.mixer[0x04] = 0xCC;
         self.mixer[0x26] = 0xCC;
+        self.mixer[PRO_CD as usize] = 0xCC;
     }
 
     /// Volume of the digital audio and of FM, as (left, right) gains
@@ -224,6 +229,16 @@ impl SoundBlaster {
             (level(VOICE_L) * ml, level(VOICE_R) * mr),
             (level(FM_L) * ml, level(FM_R) * mr),
         )
+    }
+
+    /// Volume of CD audio as (left, right) gains including the master
+    /// volume.
+    pub fn cd_volume(&self) -> (f32, f32) {
+        if self.config.model == SbModel::Sb2 {
+            return (1.0, 1.0);
+        }
+        let level = |reg: u8| (self.mixer[reg as usize] >> 3) as f32 / 31.0;
+        (level(CD_L) * level(MASTER_L), level(CD_R) * level(MASTER_R))
     }
 
     /// DMA channel of a transfer.
@@ -378,12 +393,13 @@ impl SoundBlaster {
         match reg {
             0x00 => self.reset_mixer(),
             // SB Pro registers: a nibble per side, mirrored into the SB16's.
-            0x04 | 0x22 | 0x26 => {
+            0x04 | 0x22 | 0x26 | PRO_CD => {
                 self.mixer[reg as usize] = value;
                 let (l, r) = match reg {
                     0x04 => (VOICE_L, VOICE_R),
                     0x22 => (MASTER_L, MASTER_R),
-                    _ => (FM_L, FM_R),
+                    0x26 => (FM_L, FM_R),
+                    _ => (CD_L, CD_R),
                 };
                 self.mixer[l as usize] = (value & 0xF0) | 0x08;
                 self.mixer[r as usize] = (value << 4) | 0x08;

@@ -1078,6 +1078,16 @@ impl DebugHub {
                 "midi_synth": cpu.bus.mpu.synth_name(),
                 "midi_voices": cpu.bus.mpu.gus_synth().map(|s| s.active_voices()),
                 "missing_patches": cpu.bus.mpu.gus_synth().map(|s| s.missing_patches()),
+                // CD audio from an image drive (MSCDEX Play Audio).
+                "cd": cpu.bus.cdaudio.drive().map(|drive| {
+                    let (m, s, f) = rust_dos::cdrom::lba_to_msf(cpu.bus.cdaudio.position());
+                    json!({
+                        "drive": drive_letter(drive).to_string(),
+                        "state": format!("{:?}", cpu.bus.cdaudio.state()).to_ascii_lowercase(),
+                        "track": cpu.bus.cdaudio.track(),
+                        "position": format!("{:02}:{:02}:{:02}", m, s, f),
+                    })
+                }),
             },
             "mouse": {
                 "installed": cpu.bus.mouse.installed,
