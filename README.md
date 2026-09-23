@@ -24,7 +24,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
   as DOS/4GW (Descent, Heretic)
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
-  General MIDI through the MPU-401 with a SoundFont
+  General MIDI through the MPU-401 with a SoundFont or the Gravis patches
+* Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
+  both digital audio and music (games load the patches from `ULTRADIR`)
 * CGA graphics
 * FPU emulation
 * Interrupt handlers
@@ -39,7 +41,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 * Mounting disk images
 * EMS
-* Gravis Ultrasound
+* GUS MAX / Interwave codec, and SB emulation on the GUS (SBOS, MegaEm)
 * 640x480x16
 * VESA modes
 
@@ -96,7 +98,18 @@ D:
     `BLASTER` environment variable follows them.
   * `opl` is the FM synthesizer: `opl3` (the default) or `opl2`.
   * `soundfont` is a General MIDI SoundFont (`.sf2`) for music programs
-    send to the MPU-401 at 330h. Without it the MPU-401 is silent.
+    send to the MPU-401 at 330h.
+  * `gus` installs the Gravis Ultrasound: `true` (the default) or `false`.
+    `gusbase` (hex: 210, 220, 240, 250 or 260), `gusirq` and `gusdma` set
+    its resources; the defaults are 240, 5 and 3. `ultradir` is the DOS
+    directory of the Ultrasound software and patches (default
+    `C:\ULTRASND`). The `ULTRASND` and `ULTRADIR` environment variables
+    follow them; drivers that program the card's IRQ and DMA latches
+    themselves get what they ask for.
+  * `midisynth` picks what plays the MPU-401's General MIDI: `auto` (the
+    default: the SoundFont if `soundfont` is set, else the Ultrasound
+    patches listed in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, or
+    `none`.
 * **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.

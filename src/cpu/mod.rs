@@ -238,14 +238,17 @@ pub struct ProcessContext {
 
 use std::path::PathBuf;
 
-/// The environment at startup. BLASTER advertises the Sound Blaster's
-/// resources as SET BLASTER in AUTOEXEC.BAT would (the configuration can
-/// change the card).
+/// The environment at startup. BLASTER, ULTRASND and ULTRADIR advertise
+/// the sound cards' resources as SET lines in AUTOEXEC.BAT would (the
+/// configuration can change the cards).
 fn default_environment() -> Vec<(String, String)> {
+    let gus = crate::gus::GusConfig::default();
     vec![
         ("PATH".to_string(), "C:\\".to_string()),
         ("COMSPEC".to_string(), "Z:\\COMMAND.COM".to_string()),
         ("BLASTER".to_string(), crate::sb::SbConfig::default().blaster()),
+        ("ULTRASND".to_string(), gus.ultrasnd()),
+        ("ULTRADIR".to_string(), gus.ultradir),
     ]
 }
 

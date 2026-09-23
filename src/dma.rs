@@ -235,6 +235,61 @@ impl Dma {
         (moved, tc)
     }
 
+    /// Write `data` to memory on channel `ch`, as a device doing a "device
+    /// to memory" transfer does. Returns the number of bytes moved, whether
+    /// the channel reached terminal count, and the memory written, which
+    /// the caller must treat as modified.
+    pub fn transfer_write(
+        &mut self,
+        ch: usize,
+        ram: &mut [u8],
+        data: &[u8],
+    ) -> (usize, bool, Option<std::ops::Range<usize>>) {
+        let words = ch >= 4;
+        let unit = if words { 2 } else { 1 };
+        let mut moved = 0;
+        let mut tc = false;
+        let mut span: Option<std::ops::Range<usize>> = None;
+        while moved + unit <= data.len() {
+            let c = self.channel_mut(ch);
+            if c.masked {
+                break;
+            }
+            let addr = if words {
+                ((c.page as usize & 0xFE) << 16) | ((c.cur_addr as usize) << 1)
+            } else {
+                ((c.page as usize) << 16) | c.cur_addr as usize
+            };
+            for i in 0..unit {
+                if let Some(byte) = ram.get_mut(addr + i) {
+                    *byte = data[moved + i];
+                    span = Some(match span {
+                        Some(s) => s.start.min(addr + i)..s.end.max(addr + i + 1),
+                        None => addr + i..addr + i + 1,
+                    });
+                }
+            }
+            moved += unit;
+            c.cur_addr = if c.decrement() { c.cur_addr.wrapping_sub(1) } else { c.cur_addr.wrapping_add(1) };
+            let (count, underflow) = c.cur_count.overflowing_sub(1);
+            c.cur_count = count;
+            if underflow {
+                tc = true;
+                if c.auto_init() {
+                    c.cur_addr = c.base_addr;
+                    c.cur_count = c.base_count;
+                } else {
+                    c.masked = true;
+                }
+                self.ctrl[ch / 4].tc |= 1 << (ch % 4);
+                if !self.channel(ch).auto_init() {
+                    break;
+                }
+            }
+        }
+        (moved, tc, span)
+    }
+
     /// Advance channel `ch` by `units` transfers without moving data, as a
     /// device writing to memory we don't model (a sound card recording
     /// silence) would.

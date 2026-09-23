@@ -944,6 +944,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // Calculate where the resident block ends
             let resident_end = tsr_psp.wrapping_add(paras_to_keep);
 
+            if !cpu.process_stack.is_empty() {
+                // The program keeps DX paragraphs (at least its PSP); the
+                // rest of its block goes back to the parent, which loaded
+                // it (a game loading its sound driver, for one).
+                let _ = crate::mcb::resize(&mut cpu.bus, tsr_psp, paras_to_keep.max(6));
+            }
             if cpu.return_to_parent() {
                 cpu.bus.log_string(&format!(
                     "[DOS] TSR: Returning to Parent. Resident End={:04X}",

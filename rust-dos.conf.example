@@ -39,8 +39,21 @@
 # FM synthesizer: opl3 (as on an SB Pro 2 or SB16) or opl2 (AdLib, SB 2.0).
 #opl=opl3
 # A General MIDI SoundFont (.sf2) for music sent to the MPU-401 at 330h.
-# Without one, the MPU-401 is there but plays nothing.
 #soundfont=~/soundfonts/GeneralUser.sf2
+# The Gravis Ultrasound: true (the default) or false. Programs learn its
+# settings from the ULTRASND and ULTRADIR environment variables, which
+# follow these.
+#gus=true
+# Base port (hex: 210, 220, 240, 250 or 260), IRQ and DMA channel.
+#gusbase=240
+#gusirq=5
+#gusdma=3
+# The DOS directory with the Ultrasound software and its MIDI patches.
+#ultradir=C:\ULTRASND
+# What plays General MIDI sent to the MPU-401: auto (the SoundFont if one
+# is set, else the Ultrasound patches in ultradir), soundfont, gus, or
+# none.
+#midisynth=auto
 
 [drives]
 # Mount host directories as DOS drives A: to Y:

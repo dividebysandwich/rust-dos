@@ -134,6 +134,7 @@ pub enum Cmd {
     PageWalk(String),
     Xms,
     Exceptions,
+    Gus,
     Drives,
     Mount {
         drive: String,
@@ -991,6 +992,10 @@ impl DebugHub {
                 Err(e) => Reply::bad(e),
             },
             Cmd::Xms => Reply::Json(pm::xms_json(cpu)),
+            Cmd::Gus => Reply::Json(match &cpu.bus.gus {
+                Some(gus) => gus.snapshot(),
+                None => serde_json::json!({ "installed": false }),
+            }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
             Cmd::Drives => Reply::Json(drives_json(cpu)),
             Cmd::Mount { drive, path, kind, label, read_only } => {
@@ -1067,6 +1072,10 @@ impl DebugHub {
                 "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.size() / 4),
                 "sound_blaster": cpu.bus.sb.as_ref().map(|sb| sb.config.blaster()),
                 "opl3": cpu.bus.opl.is_opl3(),
+                "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
+                "midi_synth": cpu.bus.mpu.synth_name(),
+                "midi_voices": cpu.bus.mpu.gus_synth().map(|s| s.active_voices()),
+                "missing_patches": cpu.bus.mpu.gus_synth().map(|s| s.missing_patches()),
             },
             "mouse": {
                 "installed": cpu.bus.mouse.installed,

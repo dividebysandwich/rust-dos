@@ -72,7 +72,7 @@ pub struct Config {
     /// RAM in MB (`memsize`).
     pub memsize: Option<usize>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
-    /// and a SoundFont for the MPU-401.
+    /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
@@ -98,6 +98,16 @@ enum Section {
     Unknown,
 }
 
+/// The synthesizer that plays the MPU-401's General MIDI (`midisynth`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiSynth {
+    /// The SoundFont if one is set, else the Ultrasound patches.
+    Auto,
+    SoundFont,
+    Gus,
+    None,
+}
+
 /// The `[sound]` section.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SoundConfig {
@@ -107,11 +117,21 @@ pub struct SoundConfig {
     /// OPL3 (as on an SB Pro 2 or SB16) rather than OPL2.
     pub opl3: bool,
     pub soundfont: Option<PathBuf>,
+    /// The Gravis Ultrasound; `enabled` says whether there is one.
+    pub gus: crate::gus::GusConfig,
+    pub midisynth: MidiSynth,
 }
 
 impl Default for SoundConfig {
     fn default() -> Self {
-        Self { sb: crate::sb::SbConfig::default(), sb_installed: true, opl3: true, soundfont: None }
+        Self {
+            sb: crate::sb::SbConfig::default(),
+            sb_installed: true,
+            opl3: true,
+            soundfont: None,
+            gus: crate::gus::GusConfig::default(),
+            midisynth: MidiSynth::Auto,
+        }
     }
 }
 
@@ -119,6 +139,37 @@ impl SoundConfig {
     /// The Sound Blaster to install, if any.
     pub fn card(&self) -> Option<crate::sb::SbConfig> {
         self.sb_installed.then_some(self.sb)
+    }
+
+    /// The Gravis Ultrasound to install, if any.
+    pub fn ultrasound(&self) -> Option<crate::gus::GusConfig> {
+        self.gus.enabled.then(|| self.gus.clone())
+    }
+
+    /// Problems between settings, once the section is read: an Ultrasound
+    /// on the Sound Blaster's ports is left out; shared IRQs and DMA
+    /// channels only work while programs use one card at a time.
+    fn check(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let Some(sb) = self.card() else { return warnings };
+        if !self.gus.enabled {
+            return warnings;
+        }
+        if self.gus.base == sb.base {
+            warnings.push(format!(
+                "[sound]: gusbase {:X} is the Sound Blaster's base port; there is no Ultrasound",
+                self.gus.base
+            ));
+            self.gus.enabled = false;
+            return warnings;
+        }
+        if self.gus.irq == sb.irq {
+            warnings.push(format!("[sound]: the Ultrasound and the Sound Blaster share IRQ {}", sb.irq));
+        }
+        if self.gus.dma == sb.dma8 || (sb.model == crate::sb::SbModel::Sb16 && self.gus.dma == sb.dma16) {
+            warnings.push(format!("[sound]: the Ultrasound and the Sound Blaster share DMA {}", self.gus.dma));
+        }
+        warnings
     }
 
     fn set(&mut self, key: &str, value: &str, base_dir: &Path, home: Option<&Path>) -> Result<(), String> {
@@ -166,6 +217,49 @@ impl SoundConfig {
                     _ => base_dir.join(value),
                 };
                 self.soundfont = Some(path);
+            }
+            "gus" => {
+                self.gus.enabled = match value.to_ascii_lowercase().as_str() {
+                    "true" | "on" | "yes" | "1" => true,
+                    "false" | "off" | "no" | "0" => false,
+                    _ => return Err(format!("invalid gus '{}' (true or false)", value)),
+                }
+            }
+            "gusbase" => {
+                // 230h would put 3X0h-3X7h on the MPU-401 at 330h.
+                self.gus.base = u16::from_str_radix(value.trim_start_matches("0x"), 16)
+                    .ok()
+                    .filter(|b| matches!(b, 0x210 | 0x220 | 0x240 | 0x250 | 0x260))
+                    .ok_or_else(|| format!("invalid gusbase '{}' (210, 220, 240, 250 or 260, hex)", value))?;
+            }
+            "gusirq" => {
+                self.gus.irq = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|i| matches!(i, 2 | 3 | 5 | 7 | 11 | 12 | 15))
+                    .ok_or_else(|| format!("invalid gusirq '{}' (2, 3, 5, 7, 11, 12 or 15)", value))?;
+            }
+            "gusdma" => {
+                self.gus.dma = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|d| matches!(d, 1 | 3 | 5 | 6 | 7))
+                    .ok_or_else(|| format!("invalid gusdma '{}' (1, 3, 5, 6 or 7)", value))?;
+            }
+            "ultradir" => {
+                if value.is_empty() {
+                    return Err("ultradir is empty".to_string());
+                }
+                self.gus.ultradir = value.to_string();
+            }
+            "midisynth" => {
+                self.midisynth = match value.to_ascii_lowercase().as_str() {
+                    "auto" => MidiSynth::Auto,
+                    "soundfont" => MidiSynth::SoundFont,
+                    "gus" => MidiSynth::Gus,
+                    "none" => MidiSynth::None,
+                    _ => return Err(format!("invalid midisynth '{}' (auto, soundfont, gus or none)", value)),
+                }
             }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
@@ -269,6 +363,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             }
         }
     }
+    warnings.extend(config.sound.check());
     config.warnings = warnings;
     config
 }
@@ -481,7 +576,7 @@ mod tests {
     #[test]
     fn sound_section() {
         let config = parse(
-            "[sound]\nsbtype=sbpro2\nsbbase=240\nirq=5\ndma=3\nopl=opl2\nsoundfont=gm.sf2\n",
+            "[sound]\nsbtype=sbpro2\nsbbase=240\nirq=5\ndma=3\nopl=opl2\nsoundfont=gm.sf2\ngus=false\n",
             Path::new("/cfg"),
             None,
         );
@@ -495,6 +590,42 @@ mod tests {
         let config = parse("[sound]\nsbtype=none\nirq=4\n", Path::new("/cfg"), None);
         assert_eq!(config.sound.card(), None);
         assert!(config.warnings[0].contains("invalid irq '4'"));
+    }
+
+    #[test]
+    fn ultrasound_settings() {
+        let config = parse(
+            "[sound]\ngusbase=260\ngusirq=11\ngusdma=6\nultradir=D:\\GUS\nmidisynth=gus\n",
+            Path::new("/cfg"),
+            None,
+        );
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let gus = config.sound.ultrasound().unwrap();
+        assert_eq!((gus.base, gus.irq, gus.dma, gus.ultradir.as_str()), (0x260, 11, 6, "D:\\GUS"));
+        assert_eq!(gus.ultrasnd(), "260,6,6,11,11");
+        assert_eq!(config.sound.midisynth, MidiSynth::Gus);
+
+        let config = parse("[sound]\ngus=off\n", Path::new("/cfg"), None);
+        assert_eq!(config.sound.ultrasound(), None);
+
+        let config = parse("[sound]\ngusbase=230\ngusirq=4\ngusdma=2\nmidisynth=mt32\n", Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 4, "{:?}", config.warnings);
+        assert_eq!(config.sound.ultrasound(), Some(crate::gus::GusConfig::default()));
+    }
+
+    #[test]
+    fn ultrasound_conflicts_with_the_sound_blaster() {
+        let config = parse("[sound]\ngusbase=220\n", Path::new("/cfg"), None);
+        assert_eq!(config.sound.ultrasound(), None);
+        assert!(config.warnings[0].contains("gusbase 220"), "{:?}", config.warnings);
+
+        let config = parse("[sound]\ngusirq=7\ngusdma=1\n", Path::new("/cfg"), None);
+        assert!(config.sound.ultrasound().is_some());
+        assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+
+        // Without a Sound Blaster, 220h is free.
+        let config = parse("[sound]\nsbtype=none\ngusbase=220\n", Path::new("/cfg"), None);
+        assert_eq!(config.sound.ultrasound().map(|g| g.base), Some(0x220));
     }
 
     #[test]
@@ -534,6 +665,7 @@ mod tests {
         assert!(config.autoexec.is_empty());
         assert_eq!(config.scale, None);
         assert_eq!(config.cycles, None);
+        assert_eq!(config.sound, SoundConfig::default());
     }
 
     #[test]

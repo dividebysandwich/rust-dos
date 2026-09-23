@@ -647,6 +647,13 @@ impl DiskController {
 
     // INT 21h, AH=3Dh: Open File. `owner` is the PSP of the calling process.
     pub fn open_file(&mut self, filename: &str, mode: u8, owner: u16) -> Result<u16, u8> {
+        self.open_or_create(filename, mode, owner, false)
+    }
+
+    /// Open `filename` with access `mode`; `create` makes a missing file,
+    /// as the create calls do. Opening alone never creates one: programs
+    /// probe for files by opening them read/write.
+    fn open_or_create(&mut self, filename: &str, mode: u8, owner: u16, create: bool) -> Result<u16, u8> {
         // Devices open by name, whatever the directory; there's no file to
         // create.
         if let Some(device) = char_device(filename) {
@@ -691,14 +698,14 @@ impl DiskController {
                 if !writable {
                     return Err(0x05);
                 }
-                options.write(true).create(true).truncate(false);
-            } // logic tweak for safety
+                options.write(true).create(create).truncate(false);
+            }
             2 => {
                 // Read/write opens on read-only media (CD-ROM) are quietly
                 // downgraded to read-only, as MSCDEX does; lots of CD games
                 // open their data files R/W without ever writing.
                 if writable {
-                    options.read(true).write(true).create(true);
+                    options.read(true).write(true).create(create);
                 } else {
                     options.read(true);
                 }
@@ -733,7 +740,7 @@ impl DiskController {
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
-        self.open_file(filename, 0x02, owner)
+        self.open_or_create(filename, 0x02, owner, true)
     }
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
@@ -1503,6 +1510,19 @@ mod tests {
 
         let entries = disk.list_directory("D:\\*.*", 0x10).unwrap();
         assert!(entries.iter().all(|e| e.attr & 0x01 != 0));
+    }
+
+    #[test]
+    fn opening_a_missing_file_does_not_create_it() {
+        let base = scratch("open_missing");
+        fs::create_dir_all(base.join("c")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        for mode in [0, 1, 2] {
+            assert_eq!(disk.open_file("C:\\PROBE.PAT", mode, PSP), Err(0x02));
+        }
+        assert!(!base.join("c/PROBE.PAT").exists());
+        assert!(disk.create_file("C:\\PROBE.PAT", PSP).is_ok());
+        assert!(base.join("c/PROBE.PAT").exists());
     }
 
     #[test]

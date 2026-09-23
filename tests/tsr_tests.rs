@@ -191,3 +191,48 @@ fn mouse_handler_is_far_called_and_registers_survive() {
     // Done, so the pending motion is delivered now.
     assert!(rust_dos::mouse::deliver_callback(&mut cpu));
 }
+
+#[test]
+fn tsr_loaded_by_a_program_gives_back_the_rest_of_its_memory() {
+    // A game loading its sound driver: PARENT shrinks itself and EXECs
+    // DRIVER, which stays resident with 20h paragraphs.
+    let base = scratch(
+        "child_tsr",
+        &[("PARENT.COM", &[0xEB, 0xFE]), ("DRIVER.COM", &[0xEB, 0xFE])],
+    );
+    let mut cpu = Cpu::new(base);
+    cpu.load_shell();
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let parent = cpu.current_psp;
+    let parent_base = parent as usize * 16;
+    cpu.set_es(parent);
+    cpu.set_bx(0x1000);
+    int21(&mut cpu, 0x4A);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+
+    cpu.bus.load_bytes(parent_base + 0x200, b"DRIVER.COM\0");
+    cpu.bus.load_bytes(parent_base + 0x210, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(parent_base + 0x220, &[0; 14]);
+    cpu.bus.write_16(parent_base + 0x222, 0x210);
+    cpu.bus.write_16(parent_base + 0x224, parent);
+    cpu.set_ds(parent);
+    cpu.set_dx(0x200);
+    cpu.set_es(parent);
+    cpu.set_bx(0x220);
+    cpu.set_ax(0x4B00);
+    int21::handle(&mut cpu);
+    let driver = cpu.current_psp;
+    assert_ne!(driver, parent);
+
+    cpu.set_dx(0x20);
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x31);
+    assert_eq!(cpu.current_psp, parent);
+    let block = walk(&cpu.bus).into_iter().find(|(seg, _)| seg + 1 == driver).unwrap().1;
+    assert_eq!(block.size, 0x20);
+
+    // The parent can allocate what the driver didn't keep.
+    cpu.set_bx(0x1000);
+    int21(&mut cpu, 0x48);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "allocation failed, max free {:04X}", cpu.bx());
+}

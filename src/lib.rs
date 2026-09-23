@@ -9,6 +9,7 @@ pub mod disk;
 pub mod dma;
 pub mod exec;
 pub mod f80;
+pub mod gus;
 pub mod instr_cache;
 pub mod kbc;
 pub mod keyboard;

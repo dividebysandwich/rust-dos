@@ -127,6 +127,10 @@ pub struct Bus {
     pub dma: crate::dma::Dma,
     /// The MPU-401 MIDI interface at 330h.
     pub mpu: crate::mpu401::Mpu401,
+    /// The Gravis Ultrasound, if one is installed.
+    pub gus: Option<crate::gus::Gus>,
+    /// The IRQ the Ultrasound's interrupt line holds up, if any.
+    gus_line: Option<u8>,
     /// Mixed output (44.1 kHz stereo, interleaved) rendered up to
     /// `audio_frames` frames of emulated time, waiting for `pump_audio`.
     pub audio_out: VecDeque<i16>,
@@ -218,6 +222,8 @@ impl Bus {
             sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default())),
             dma: crate::dma::Dma::new(),
             mpu: crate::mpu401::Mpu401::new(),
+            gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
+            gus_line: None,
             audio_out: VecDeque::new(),
             audio_frames: 0,
             sb_phase: 0.0,
@@ -811,13 +817,16 @@ impl Bus {
     }
 
     /// The next time (PIT ticks) a device needs attention: the timer's
-    /// next IRQ 0, or the end of the Sound Blaster's current block.
+    /// next IRQ 0, the end of the Sound Blaster's current block, or the
+    /// Ultrasound's next timer, DMA or voice interrupt.
     fn next_event(&self) -> Option<u64> {
         let sb = self.sb.as_ref().and_then(|sb| sb.next_event());
-        match (self.pit0.next_event(), sb) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let gus = self.gus_next_event();
+        [self.pit0.next_event(), sb, gus].into_iter().flatten().min()
+    }
+
+    fn gus_next_event(&self) -> Option<u64> {
+        self.gus.as_ref().and_then(|gus| gus.next_event(&self.dma))
     }
 
     /// Bring the PIT and the Sound Blaster up to the current instruction
@@ -831,6 +840,9 @@ impl Bus {
         if self.sb.as_ref().and_then(|sb| sb.next_event()).is_some_and(|t| t <= now) {
             self.sb_advance();
         }
+        if self.gus_next_event().is_some_and(|t| t <= now) {
+            self.gus_advance();
+        }
         self.clock.schedule(self.next_event());
     }
 
@@ -843,11 +855,91 @@ impl Bus {
         }
     }
 
+    /// Run the Ultrasound up to the present and update its interrupt line.
+    fn gus_advance(&mut self) {
+        let now = self.clock.now_ticks();
+        if let Some(gus) = &mut self.gus {
+            if let Some(written) = gus.advance(now, &mut self.dma, &mut self.ram) {
+                self.bump_page_gens(written.start, written.end);
+            }
+            self.sync_gus_irq();
+        }
+    }
+
+    /// Drive the Ultrasound's interrupt request: raise it when the line
+    /// goes up and whenever the card has a new reason to interrupt while
+    /// it is up, withdraw it when the line drops.
+    fn sync_gus_irq(&mut self) {
+        let Some(gus) = &mut self.gus else {
+            if let Some(irq) = self.gus_line.take() {
+                self.pic.lower(irq);
+            }
+            return;
+        };
+        let fresh = gus.take_fresh();
+        let line = gus.irq_line().then(|| gus.irq()).flatten();
+        if let Some(old) = self.gus_line
+            && line != Some(old)
+        {
+            self.pic.lower(old);
+        }
+        if let Some(irq) = line
+            && (fresh || self.gus_line != line)
+        {
+            self.pic.raise(irq);
+        }
+        self.gus_line = line;
+    }
+
+    /// Whether `port` belongs to the Ultrasound.
+    #[inline]
+    fn gus_claims(&self, port: u16) -> bool {
+        self.gus.as_ref().is_some_and(|gus| gus.claims(port))
+    }
+
+    fn gus_write(&mut self, port: u16, value: u8) {
+        let now = self.clock.now_ticks();
+        let Some(gus) = &mut self.gus else { return };
+        if gus.latch_only(port, true) {
+            // Drivers write the selects constantly.
+            gus.write(port, value, now);
+            return;
+        }
+        self.gus_advance();
+        if let Some(gus) = &mut self.gus {
+            gus.write(port, value, now);
+        }
+        self.sync_gus_irq();
+        self.clock.schedule(self.next_event());
+    }
+
+    fn gus_read(&mut self, port: u16) -> u8 {
+        if let Some(gus) = &mut self.gus
+            && gus.latch_only(port, false)
+        {
+            return gus.read(port);
+        }
+        self.gus_advance();
+        let value = self.gus.as_mut().map_or(0xFF, |gus| gus.read(port));
+        self.sync_gus_irq();
+        self.clock.schedule(self.next_event());
+        value
+    }
+
+    /// Install (or with None remove) the Gravis Ultrasound.
+    pub fn configure_gus(&mut self, config: Option<crate::gus::GusConfig>) {
+        let now = self.clock.now_ticks();
+        self.gus = config.filter(|c| c.enabled).map(|c| crate::gus::Gus::new(c, now));
+        self.sync_gus_irq();
+        self.clock.schedule(self.next_event());
+    }
+
     /// Render the mixed audio of every device up to the present, so a
     /// change a program makes now (an FM register, a DAC sample, the
     /// speaker gate) is heard from now on.
     pub fn audio_catch_up(&mut self) {
         self.sb_advance();
+        self.gus_advance();
         let rate = crate::opl::RATE as u64;
         let target = (self.clock.now_ticks() as u128 * rate as u128 / crate::timer::PIT_HZ as u128) as u64;
         // After a long pause (a debugger stop, a slow host) start afresh
@@ -874,6 +966,7 @@ impl Bus {
             None => (false, 0.0, 0),
         };
         const SPEAKER: f32 = 3000.0;
+        const GUS_GAIN: f32 = 1.0;
         for _ in 0..frames {
             let mut l = 0.0f32;
             let mut r = 0.0f32;
@@ -912,6 +1005,11 @@ impl Bus {
             let (ml, mr) = self.mpu.render();
             l += ml;
             r += mr;
+            if let Some(gus) = &mut self.gus {
+                let (gl, gr) = gus.pop_frame(crate::opl::RATE);
+                l += gl * GUS_GAIN;
+                r += gr * GUS_GAIN;
+            }
             if self.beep_frames > 0 {
                 self.beep_frames -= 1;
                 let s = if self.beep_frames % 50 < 25 { SPEAKER } else { -SPEAKER };
@@ -936,6 +1034,9 @@ impl Bus {
                 sb.out.drain(..extra);
             }
         }
+        if let Some(gus) = &mut self.gus {
+            gus.trim_output();
+        }
     }
 
     /// Frames of audio rendered since start.
@@ -952,7 +1053,10 @@ impl Bus {
         self.clock.schedule(self.next_event());
     }
 
-    /// Power-on state of the sound hardware, when a program ends.
+    /// Power-on state of the sound hardware, when a program ends. The
+    /// Ultrasound keeps its DRAM, and when a resident program has hooked
+    /// its interrupt (a MIDI driver like ULTRAMID), its settings too: only
+    /// its voices stop.
     pub fn reset_sound(&mut self) {
         let config = self.sb.as_ref().map(|sb| sb.config);
         let opl3 = self.opl.is_opl3();
@@ -960,6 +1064,16 @@ impl Bus {
         self.dma = crate::dma::Dma::new();
         self.mpu.reset();
         self.sb_frame = (0, 0);
+        let hooked = self.gus.as_ref().and_then(|gus| gus.irq()).is_some_and(|irq| {
+            let vector = if irq < 8 { 0x08 + irq as usize } else { 0x70 + irq as usize - 8 };
+            let entry = (self.read_16(vector * 4 + 2) as u32) << 16 | self.read_16(vector * 4) as u32;
+            entry != crate::bios::default_ivt()[vector]
+        });
+        if let Some(gus) = &mut self.gus {
+            if hooked { gus.silence() } else { gus.power_on() }
+        }
+        self.sync_gus_irq();
+        self.clock.schedule(self.next_event());
     }
 
     /// Port access of the Sound Blaster at `offset` from its base: FM
@@ -1251,13 +1365,23 @@ impl Bus {
 
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
             // register bank at 38Ah/38Bh.
-            0x388 => self.opl.write_address(0, value),
+            0x388 => {
+                self.opl.write_address(0, value);
+                // The Ultrasound latches AdLib register numbers too; its
+                // detection reads them back at 2XAh.
+                if let Some(gus) = &mut self.gus {
+                    gus.write_adlib_address(value);
+                }
+            }
             0x389 => self.opl_data(0, value),
             0x38A => self.opl.write_address(1, value),
             0x38B => self.opl_data(1, value),
 
             // The Sound Blaster, 16 ports from its base.
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
+
+            // The Gravis Ultrasound, at 2X0h-2XFh and 3X0h-3X7h.
+            p if self.gus_claims(p) => self.gus_write(p, value),
 
             // MPU-401 MIDI interface.
             0x330 => {
@@ -1266,11 +1390,12 @@ impl Bus {
             }
             0x331 => self.mpu.write_command(value),
 
-            // The DMA controllers and page registers. The Sound Blaster
-            // runs up to now first, so the transfer it is in sees the
-            // change when it happens.
+            // The DMA controllers and page registers. The sound cards run
+            // up to now first, so the transfers they are in see the change
+            // when it happens.
             p if crate::dma::Dma::owns(p) => {
                 self.sb_advance();
+                self.gus_advance();
                 self.dma.write(p, value);
                 self.clock.schedule(self.next_event());
             }
@@ -1466,6 +1591,8 @@ impl Bus {
 
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
 
+            p if self.gus_claims(p) => self.gus_read(p),
+
             0x330 => self.mpu.read_data(),
             0x331 => self.mpu.read_status(),
 
@@ -1473,6 +1600,7 @@ impl Bus {
             // transfer a sound card is running.
             p if crate::dma::Dma::owns(p) => {
                 self.sb_advance();
+                self.gus_advance();
                 let value = self.dma.read(p);
                 self.clock.schedule(self.next_event());
                 value

@@ -430,18 +430,54 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Install the configured sound hardware and advertise the Sound Blaster
-/// in the BLASTER environment variable.
+/// Install the configured sound hardware, advertise it in the BLASTER,
+/// ULTRASND and ULTRADIR environment variables, and give the MPU-401 its
+/// synthesizer.
 fn apply_sound_config(cpu: &mut cpu::Cpu, sound: &config::SoundConfig) {
+    use config::MidiSynth;
+
     cpu.bus.configure_sound(sound.card(), sound.opl3);
     match &sound.card() {
         Some(sb) => cpu.set_env("BLASTER", &sb.blaster()),
         None => cpu.set_env("BLASTER", ""),
     }
-    if let Some(path) = &sound.soundfont {
-        match cpu.bus.mpu.load_soundfont(path) {
-            Ok(()) => eprintln!("[CONFIG] General MIDI with SoundFont {}", path.display()),
-            Err(e) => eprintln!("[CONFIG] Warning: soundfont: {}", e),
+    let gus = sound.ultrasound();
+    match &gus {
+        Some(g) => {
+            cpu.set_env("ULTRASND", &g.ultrasnd());
+            cpu.set_env("ULTRADIR", &g.ultradir);
+        }
+        None => {
+            cpu.set_env("ULTRASND", "");
+            cpu.set_env("ULTRADIR", "");
+        }
+    }
+    cpu.bus.configure_gus(gus);
+
+    let soundfont = match sound.midisynth {
+        MidiSynth::SoundFont => true,
+        MidiSynth::Auto => sound.soundfont.is_some(),
+        MidiSynth::Gus | MidiSynth::None => false,
+    };
+    if soundfont {
+        match &sound.soundfont {
+            Some(path) => match cpu.bus.mpu.load_soundfont(path) {
+                Ok(()) => eprintln!("[CONFIG] General MIDI with SoundFont {}", path.display()),
+                Err(e) => eprintln!("[CONFIG] Warning: soundfont: {}", e),
+            },
+            None => eprintln!("[CONFIG] Warning: midisynth=soundfont needs a soundfont setting"),
+        }
+    } else if sound.midisynth != MidiSynth::None {
+        let ultradir = &sound.gus.ultradir;
+        match rust_dos::gus::patch::PatchBank::from_dos_dir(&cpu.bus.disk, ultradir) {
+            Ok((bank, dir)) => {
+                eprintln!("[CONFIG] General MIDI with the Ultrasound patches in {}", dir.display());
+                cpu.bus.mpu.load_gus_patches(bank);
+            }
+            Err(e) if sound.midisynth == MidiSynth::Gus => {
+                eprintln!("[CONFIG] Warning: midisynth=gus: {}", e)
+            }
+            Err(e) => eprintln!("[CONFIG] No General MIDI synthesizer (no soundfont, and {})", e),
         }
     }
 }

@@ -60,6 +60,14 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   card's BLASTER string (null without one). To listen or analyse, record
   `/ws/audio`: a JSON format header, then s16le stereo PCM at 44.1 kHz
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
+  `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
+  MPU-401 (`soundfont`, `gus` or `none`), with its active voices and any
+  patches it couldn't load.
+- **Gravis Ultrasound:** `/api/gus` shows the IRQ and DMA the driver
+  latched, the reset and mix registers, IRQ status and line, timers, DMA,
+  the number of active and playing voices, and every voice's registers.
+  A card that plays nothing often has `reset` without bit 1 (DAC off) or
+  voices whose volume stays 0.
 - **Kill a stuck program** with `POST /api/control/reboot_shell`. This is
   better than restarting the emulator.
 
