@@ -57,6 +57,9 @@ pub struct Clock {
     cycles_per_ms: u32,
     base_icount: u64,
     base_ticks: u64,
+    /// `base_ticks` in nanoseconds, for events finer than a PIT tick
+    /// (838 ns), such as the scanlines of the display.
+    base_ns: u64,
 }
 
 impl Clock {
@@ -70,6 +73,7 @@ impl Clock {
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
             base_ticks: 0,
+            base_ns: 0,
         }
     }
 
@@ -85,6 +89,12 @@ impl Clock {
     pub fn now_ticks(&self) -> u64 {
         let delta = self.icount.saturating_sub(self.base_icount) as u128;
         self.base_ticks + (delta * PIT_HZ as u128 / self.instructions_per_second()) as u64
+    }
+
+    /// Current emulated time in nanoseconds.
+    pub fn now_ns(&self) -> u64 {
+        let delta = self.icount.saturating_sub(self.base_icount) as u128;
+        self.base_ns + (delta * 1_000_000 / self.cycles_per_ms as u128) as u64
     }
 
     /// Current emulated time in microseconds.
@@ -104,6 +114,7 @@ impl Clock {
     /// bus must recompute the deadline afterwards (`Bus::set_cycles_per_ms`).
     pub fn set_cycles_per_ms(&mut self, cycles_per_ms: u32) {
         self.base_ticks = self.now_ticks();
+        self.base_ns = self.now_ns();
         self.base_icount = self.icount;
         self.cycles_per_ms = cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES);
     }

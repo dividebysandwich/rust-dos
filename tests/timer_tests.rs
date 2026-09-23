@@ -67,6 +67,17 @@ fn clock_speed_change_keeps_time_continuous() {
 }
 
 #[test]
+fn nanoseconds_stay_continuous_across_speed_changes() {
+    let mut clock = Clock::new(1000);
+    clock.icount = 500_000;
+    assert_eq!(clock.now_ns(), 500_000_000);
+    clock.set_cycles_per_ms(4000);
+    assert_eq!(clock.now_ns(), 500_000_000);
+    clock.icount += 4_000; // one millisecond at the new speed
+    assert_eq!(clock.now_ns(), 501_000_000);
+}
+
+#[test]
 fn default_timer_fires_at_18_2_hz() {
     let mut bus = bus_at(1000);
     let edges = run_timer(&mut bus, 10_000_000); // ten emulated seconds

@@ -55,66 +55,28 @@ pub fn handle(cpu: &mut Cpu) {
             // Reset Cursor
             set_cursor(cpu, 0, 0, 0);
 
-            match mode {
-                0x00 => {
-                    cpu.bus.log_string("[BIOS] Switch to Text Mode (40x25)");
-                    cpu.bus.video_mode = VideoMode::Text40x25;
+            let new_mode = match mode {
+                0x00 => Some((VideoMode::Text40x25, "Text Mode (40x25)")),
+                0x01 => Some((VideoMode::Text40x25Color, "Text Mode (40x25 Color)")),
+                0x02 => Some((VideoMode::Text80x25, "Text Mode (80x25)")),
+                0x03 => Some((VideoMode::Text80x25Color, "Text Mode (80x25 Color)")),
+                0x04 => Some((VideoMode::Cga320x200Color, "CGA Graphics Mode (320x200 Color)")),
+                0x05 => Some((VideoMode::Cga320x200, "CGA Graphics Mode (320x200)")),
+                0x06 => Some((VideoMode::Cga640x200, "CGA Graphics Mode (640x200)")),
+                0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
+                0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
+                0x10 => Some((VideoMode::Ega640x350, "EGA Graphics Mode (640x350 16-color)")),
+                0x12 => Some((VideoMode::Vga640x480, "VGA Graphics Mode (640x480 16-color)")),
+                0x13 => Some((VideoMode::Graphics320x200, "Graphics Mode (320x200)")),
+                _ => None,
+            };
+            match new_mode {
+                Some((new_mode, name)) => {
+                    cpu.bus.log_string(&format!("[BIOS] Switch to {}", name));
+                    cpu.bus.video_mode = new_mode;
+                    cpu.bus.vga.set_video_mode(new_mode);
                 }
-                0x01 => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to Text Mode (40x25Color)");
-                    cpu.bus.video_mode = VideoMode::Text40x25Color;
-                }
-                0x02 => {
-                    cpu.bus.log_string("[BIOS] Switch to Text Mode (80x25)");
-                    cpu.bus.video_mode = VideoMode::Text80x25;
-                }
-                0x03 => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to Text Mode (80x25 Color)");
-                    cpu.bus.video_mode = VideoMode::Text80x25Color;
-                }
-                0x04 => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to CGA Graphics Mode (320x200 Color)");
-                    cpu.bus.video_mode = VideoMode::Cga320x200Color;
-                }
-                0x06 => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to CGA Graphics Mode (640x200)");
-                    cpu.bus.video_mode = VideoMode::Cga640x200;
-                }
-                0x0D => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to EGA Graphics Mode (320x200 16-color)");
-                    cpu.bus.video_mode = VideoMode::Ega320x200;
-                    cpu.bus.vga.set_video_mode(VideoMode::Ega320x200);
-                }
-                0x0E => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to EGA Graphics Mode (640x200 16-color)");
-                    cpu.bus.video_mode = VideoMode::Ega640x200;
-                    cpu.bus.vga.set_video_mode(VideoMode::Ega640x200);
-                }
-                0x10 => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to EGA Graphics Mode (640x350 16-color)");
-                    cpu.bus.video_mode = VideoMode::Ega640x350;
-                    cpu.bus.vga.set_video_mode(VideoMode::Ega640x350);
-                }
-                0x12 => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to VGA Graphics Mode (640x480 16-color)");
-                    cpu.bus.video_mode = VideoMode::Vga640x480;
-                    cpu.bus.vga.set_video_mode(VideoMode::Vga640x480);
-                }
-                0x13 => {
-                    cpu.bus
-                        .log_string("[BIOS] Switch to Graphics Mode (320x200)");
-                    cpu.bus.video_mode = VideoMode::Graphics320x200;
-                    cpu.bus.vga.set_video_mode(VideoMode::Graphics320x200);
-                }
-                _ => cpu
+                None => cpu
                     .bus
                     .log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode)),
             }

@@ -684,6 +684,10 @@ impl Cpu {
         self.bus.write_8(0x0484, 24); // 25 rows
         self.bus.write_16(0x0485, 16); // 8x16 font cell
         self.bus.video_mode = crate::video::VideoMode::Text80x25Color;
+        // Registers and palette as the mode set leaves them, so a program
+        // that exits in mode X or with its own palette doesn't leave the
+        // shell in a 60 Hz mode or odd colors.
+        self.bus.vga.set_video_mode(crate::video::VideoMode::Text80x25Color);
         // Clear text VRAM so we don't show leftover text from the last program.
         for byte in self.bus.vga.vram_text.iter_mut() {
             *byte = 0;

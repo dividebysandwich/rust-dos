@@ -54,7 +54,10 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   DOS prompt), `cs_ip`, the video mode, `paused`, `input_queue`, and
   `cycles_per_ms`, the current CPU speed. `video.vga` shows the CRTC Start
   Address the program set and the one on screen, which helps when a game
-  that flips pages flickers or shows half-drawn frames.
+  that flips pages flickers or shows half-drawn frames. `video.crt` is the
+  display timing the VGA registers describe (refresh rate, total and
+  displayed scanlines): port 3DAh reports retrace and display enable from
+  it in emulated time, and the Start Address is latched at each retrace.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the

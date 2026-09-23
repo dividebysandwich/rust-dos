@@ -1022,6 +1022,7 @@ impl DebugHub {
     fn status(&self, cpu: &Cpu) -> Value {
         let (w, h) = cpu.bus.video_mode.dimensions();
         let crtc = &cpu.bus.vga.crtc_regs;
+        let timing = cpu.bus.vga.peek_timing();
         json!({
             "paused": self.paused,
             "icount": cpu.executed,
@@ -1052,6 +1053,12 @@ impl DebugHub {
                     "crtc_offset": format!("{:02X}", crtc[0x13]),
                     "crtc_underline": format!("{:02X}", crtc[0x14]),
                     "crtc_mode_control": format!("{:02X}", crtc[0x17]),
+                },
+                // The display timing programs see through port 3DAh.
+                "crt": {
+                    "hz": (timing.hz() * 100.0).round() / 100.0,
+                    "lines": timing.total,
+                    "display_lines": timing.display,
                 },
             },
             "drive_c": display_host_path(cpu.bus.disk.root_path()),

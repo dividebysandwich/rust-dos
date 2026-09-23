@@ -1442,6 +1442,12 @@ impl Bus {
 
             _ => {
                 if self.vga.ports().contains(&port) {
+                    // A retrace nobody watched may have passed since the
+                    // Start Address was last latched: latch it before the
+                    // program writes the next one.
+                    if matches!(port, 0x3D5 | 0x3B5) && matches!(self.vga.crtc_index, 0x0C | 0x0D) {
+                        self.sync_display();
+                    }
                     self.vga.io_write(port, value);
                     // Suppress the per-write log for DAC ports (0x3C6..0x3C9):
                     // a full 256-color palette update is 1024 writes, which
@@ -1648,6 +1654,9 @@ impl Bus {
                 val
             }
 
+            // VGA Input Status 1: retrace and display enable.
+            0x3DA | 0x3BA => self.input_status_1(),
+
             _ => {
                 if self.vga.ports().contains(&port) {
                     self.vga.io_read(port)
@@ -1656,6 +1665,26 @@ impl Bus {
                 }
             }
         }
+    }
+
+    /// Latch the display Start Address if emulated time has passed the
+    /// start of a vertical retrace since it was last latched, as the CRTC
+    /// does at every retrace.
+    pub fn sync_display(&mut self) {
+        let now = self.clock.now_ns();
+        if self.vga.retrace_began(now) {
+            self.vga.latch_start_address();
+        }
+    }
+
+    /// Input Status 1 (port 3DAh): bit 3 in the vertical retrace, bit 0
+    /// while display enable is off, from the CRT timing and emulated time.
+    /// Reading it also resets the attribute controller's flip-flop.
+    fn input_status_1(&mut self) -> u8 {
+        self.sync_display();
+        self.vga.attribute_flip_flop = false;
+        let now = self.clock.now_ns();
+        self.vga.timing().status(now)
     }
 
     /// Write a line to the log file and the debug server's log.

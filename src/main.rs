@@ -282,9 +282,9 @@ fn main() -> Result<(), String> {
         // palette/planar lookups inside `render_screen`) only happens when the
         // VGA state changed since last frame. On "clean" frames we reuse
         // `cached_frame` and just overlay the cursor/mouse/recording pip.
-        // Each frame is a vertical retrace: the CRTC picks up the Start
-        // Address the program flipped to, whether or not it polled port 3DAh.
-        cpu.bus.vga.latch_start_address();
+        // The CRTC picks up the Start Address the program flipped to at the
+        // vertical retraces that passed, whether or not it polled port 3DAh.
+        cpu.bus.sync_display();
         if cpu.bus.vga.dirty {
             video::render_screen(&mut cached_frame, &cpu.bus);
             cpu.bus.vga.clear_dirty();

@@ -1,3 +1,4 @@
+use super::crt::CrtTiming;
 use crate::bus::Device;
 use std::cell::Cell;
 
@@ -102,7 +103,6 @@ pub struct VgaCard {
     pub dac_state: u8,     // 0 = write mode, 3 = read mode (readable via 0x3C7)
     pub dac_mask: u8,      // PEL (pixel) mask register, port 0x3C6 (default 0xFF)
     pub misc_output_reg: u8,
-    pub retrace_counter: u8,
     pub palette: Vec<u8>, // 256 * 3
     pub vram_graphics: Vec<u8>,
     pub vram_text: Vec<u8>,
@@ -117,9 +117,24 @@ pub struct VgaCard {
     /// Real CRTCs sample the Start Address register at vertical retrace,
     /// not on every write — so games that page-flip rapidly mid-frame don't
     /// produce tearing. The renderer reads this value; `latch_start_address`
-    /// copies `crtc_regs[0x0C]/[0x0D]` here when the game polls the retrace
-    /// status bit (port 0x3DA bit 3 active), matching hardware semantics.
+    /// copies `crtc_regs[0x0C]/[0x0D]` here when a vertical retrace begins
+    /// in emulated time (`Bus::sync_display`).
     pub latched_start_addr: usize,
+
+    /// The display timing the registers describe, computed when first
+    /// needed after a timing register changed.
+    timing_cache: Option<CrtTiming>,
+    /// The last timing the registers described sensibly. Programs that
+    /// reprogram the CRTC pass through nonsense on the way; the monitor
+    /// keeps the old picture meanwhile.
+    good_timing: CrtTiming,
+    /// A timing that overrides the registers, for modes whose registers
+    /// the VGA doesn't model (VESA).
+    pub fixed_timing: Option<CrtTiming>,
+    /// Vertical retraces counted so far, to notice when another began.
+    retraces: u64,
+    /// The timing changed: restart the retrace count.
+    rebase: bool,
 
     /// Set whenever VRAM, palette, or any VGA state that would change the
     /// rendered image is touched. The main loop uses this to skip the
@@ -140,40 +155,20 @@ pub struct VgaCard {
 
 impl VgaCard {
     pub fn new() -> Self {
-        // Power-on palette matches the standard IBM VGA 256-color default,
-        // which is what real BIOS loads when the card is initialized. Mode
-        // switches that target mode 13h reload the same table via set_video_mode.
-        let palette: Vec<u8> = VGA_DEFAULT_PALETTE.to_vec();
-
-        let mut sequencer_regs = [0u8; 5];
-        sequencer_regs[4] = 0x02; // Extended Memory (Odd/Even)
-
-        let mut graphics_regs = [0u8; 9];
-        graphics_regs[5] = 0x10; // Mode: Odd/Even (10)
-        graphics_regs[6] = 0x0E; // Misc: Memory Map B8000 (10), Text Mode (0)
-
-        // Line Compare at its maximum (3FFh, spread over three registers):
-        // no split screen.
-        let mut crtc_regs = [0u8; 25];
-        crtc_regs[0x07] = 0x10;
-        crtc_regs[0x09] = 0x40;
-        crtc_regs[0x18] = 0xFF;
-
-        Self {
+        let mut vga = Self {
             sequencer_index: 0,
-            sequencer_regs,
+            sequencer_regs: [0; 5],
             graphics_index: 0,
-            graphics_regs,
+            graphics_regs: [0; 9],
             crtc_index: 0,
-            crtc_regs,
+            crtc_regs: [0; 25],
             dac_write_index: 0,
             dac_read_index: 0,
             dac_step: 0,
             dac_state: 0,
             dac_mask: 0xFF,
-            misc_output_reg: 0x67, // Text Mode (Color + RAM Enable)
-            retrace_counter: 0,
-            palette,
+            misc_output_reg: 0,
+            palette: VGA_DEFAULT_PALETTE.to_vec(),
             vram_graphics: vec![0; 256 * 1024], // 256KB (4 Planes x 64KB)
             vram_text: vec![0; 32 * 1024],      // 32KB (B8000-BFFFF)
             latches: Cell::new([0; 4]),
@@ -181,10 +176,18 @@ impl VgaCard {
             attribute_regs: [0; 21],
             attribute_flip_flop: false,
             latched_start_addr: 0,
+            timing_cache: None,
+            good_timing: CrtTiming::VGA_400,
+            fixed_timing: None,
+            retraces: 0,
+            rebase: true,
             dirty: true,
             dirty_y_min: 0,
             dirty_y_max: crate::video::SCREEN_HEIGHT,
-        }
+        };
+        // The BIOS starts in 80x25 color text mode.
+        vga.set_video_mode(super::VideoMode::Text80x25Color);
+        vga
     }
 
     /// Mark the entire screen as needing re-rendering. Use for state changes
@@ -237,30 +240,15 @@ impl VgaCard {
         }
     }
 
+    /// The mode the registers were programmed for when that differs from
+    /// what the BIOS set: 256 colors (Graphics Mode register bit 6) on a
+    /// color CRTC is mode 13h or one of its unchained "mode X" variants,
+    /// whichever mode the program started from. Some games start from mode
+    /// 12h for its 480-line timing and switch to 256 colors themselves.
     pub fn check_video_mode(&self) -> Option<super::VideoMode> {
-        // Check for Mode 13h (320x200 256 Color)
-
-        let gfx_mode = self.graphics_regs[0x05];
-        let is_256_color = (gfx_mode & 0x40) != 0;
-
-        // Sequencer Memory Mode (Index 0x04)
-        // Bit 3: Chain 4 (1=Enable/Doubleword aka Mode 13h, 0=Sequential/Byte/Word)
-        let seq_mem_mode = self.sequencer_regs[0x04];
-        let chain4 = (seq_mem_mode & 0x08) != 0;
-
-        // Misc Output (0x3C2)
-        // Bit 0: 0 = Mono (3B4), 1 = Color (3D4)
-        // Bit 6: Hsync Polarity
-        // Bit 7: Vsync Polarity
-        // Mode 13h: Color (1)
-        let misc = self.misc_output_reg;
-        let is_color = (misc & 0x01) != 0;
-
-        if is_color && is_256_color && chain4 {
-            return Some(super::VideoMode::Graphics320x200);
-        }
-
-        None
+        let is_256_color = self.graphics_regs[0x05] & 0x40 != 0;
+        let is_color = self.misc_output_reg & 0x01 != 0;
+        (is_color && is_256_color).then_some(super::VideoMode::Graphics320x200)
     }
 
     pub fn read_graphics(&self, offset: usize) -> u8 {
@@ -436,25 +424,6 @@ impl VgaCard {
         }
     }
 
-    /// Apply the attribute-controller defaults for 16-color planar modes:
-    /// the 16 palette registers point into the 64-color EGA palette, with
-    /// the historic quirk that entry 6 remaps to brown (0x14) and the
-    /// "bright" colors 8..15 use secondary + primary bits (0x38..0x3F).
-    fn load_ega_attribute_defaults(&mut self) {
-        const EGA_DEFAULTS: [u8; 16] = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
-            0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
-        ];
-        for (i, &v) in EGA_DEFAULTS.iter().enumerate() {
-            self.attribute_regs[i] = v;
-        }
-        self.attribute_regs[0x10] = 0x01; // Mode Control: graphics, 6-bit indices
-        self.attribute_regs[0x11] = 0x00; // Overscan
-        self.attribute_regs[0x12] = 0x0F; // Color Plane Enable (all 4 planes)
-        self.attribute_regs[0x13] = 0x00; // Horizontal Pixel Panning
-        self.attribute_regs[0x14] = 0x00; // Color Select
-    }
-
     /// Snapshot CRTC Start Address High/Low into the display-latched byte
     /// offset. Games overwhelmingly write Start Address as a direct byte
     /// offset (matching what they use for ES:DI when drawing the page),
@@ -489,6 +458,23 @@ impl VgaCard {
         line_compare / scanlines + 1
     }
 
+    /// Width and height in pixels of a graphics picture: 8 pixels per
+    /// character clock up to Horizontal Display End (4 in 256-color modes),
+    /// and the displayed scanlines over the scanlines per row (Maximum Scan
+    /// Line, doubled by its bit 7). 320x200 in mode 13h, 640x480 in mode
+    /// 12h, and whatever variants games program themselves: 320x240 or
+    /// 360x480 in 256 colors, 640x240 in 16.
+    pub fn graphics_size(&self) -> (usize, usize) {
+        let pixels_per_char = if self.graphics_regs[0x05] & 0x40 != 0 { 4 } else { 8 };
+        let width = (self.crtc_regs[0x01] as usize + 1) * pixels_per_char;
+        let mut scanlines = (self.crtc_regs[0x09] as usize & 0x1F) + 1;
+        if self.crtc_regs[0x09] & 0x80 != 0 {
+            scanlines *= 2;
+        }
+        let rows = self.peek_timing().display as usize / scanlines;
+        (width.clamp(16, 1024), rows.clamp(1, 1024))
+    }
+
     /// Pixels the display is shifted left by (Attribute register 13h, Horizontal
     /// PEL Panning): in 256-color modes in steps of half a pixel, of which
     /// only whole pixels show.
@@ -503,123 +489,84 @@ impl VgaCard {
         }
     }
 
+    /// Program the registers the way the BIOS does for a mode (see
+    /// `modes.rs`), with its palette.
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         self.mark_dirty_full();
         self.latched_start_addr = 0;
-        // No split screen (Line Compare 3FFh).
-        self.crtc_regs[0x07] |= 0x10;
-        self.crtc_regs[0x09] |= 0x40;
-        self.crtc_regs[0x18] = 0xFF;
-        match mode {
-            super::VideoMode::Ega320x200
-            | super::VideoMode::Ega640x200
-            | super::VideoMode::Ega640x350
-            | super::VideoMode::Vga640x480 => {
-                // Misc Output: pick CRT timing roughly matching the mode.
-                self.misc_output_reg = match mode {
-                    super::VideoMode::Vga640x480 => 0xE3,
-                    super::VideoMode::Ega640x350 => 0xA7,
-                    _ => 0x63,
-                };
-
-                // Sequencer: planar layout (no chain-4, no odd/even).
-                self.sequencer_regs[0] = 0x03;
-                self.sequencer_regs[1] = 0x01;
-                self.sequencer_regs[2] = 0x0F; // Map Mask = all planes writable
-                self.sequencer_regs[3] = 0x00;
-                self.sequencer_regs[4] = 0x06; // Extended memory + sequential
-
-                // Graphics Controller: write mode 0, 4-plane.
-                self.graphics_regs[0] = 0x00; // Set/Reset
-                self.graphics_regs[1] = 0x00; // Enable Set/Reset
-                self.graphics_regs[2] = 0x00; // Color Compare
-                self.graphics_regs[3] = 0x00; // Data Rotate
-                self.graphics_regs[4] = 0x00; // Read Map Select
-                self.graphics_regs[5] = 0x00; // Mode Register (write mode 0)
-                self.graphics_regs[6] = 0x05; // Graphics mode, map A0000
-                self.graphics_regs[7] = 0x0F; // Color Don't Care
-                self.graphics_regs[8] = 0xFF; // Bit Mask
-
-                // CRTC defaults. The real IBM EGA/VGA BIOS loads a full
-                // 25-register table when setting mode 0Dh, but only a few
-                // actually affect our emulation. The critical ones:
-                //   0x13 = Offset (words-per-row, 0x14 = 40-byte stride)
-                //   0x17 = Mode Control (0xA3 = word addressing, which is
-                //          what games assume when they page-flip via
-                //          Start Address High)
-                //   0x09 = Max Scan Line (0x41 = double-scan on 200-line modes)
-                self.crtc_regs[0x09] = match mode {
-                    super::VideoMode::Ega320x200 | super::VideoMode::Ega640x200 => 0x41,
-                    _ => 0x40,
-                };
-                self.crtc_regs[0x0C] = 0x00; // Start Address High
-                self.crtc_regs[0x0D] = 0x00; // Start Address Low
-                self.crtc_regs[0x13] = match mode {
-                    super::VideoMode::Ega320x200 => 0x14,
-                    super::VideoMode::Ega640x200
-                    | super::VideoMode::Ega640x350
-                    | super::VideoMode::Vga640x480 => 0x28,
-                    _ => 0x14,
-                };
-                self.crtc_regs[0x17] = 0xA3;
-
-                self.load_ega_palette();
-                self.load_ega_attribute_defaults();
-                self.dac_mask = 0xFF;
-
-                // Clear graphics VRAM so we don't see stale pixels.
-                for b in self.vram_graphics.iter_mut() {
-                    *b = 0;
-                }
-            }
-            super::VideoMode::Graphics320x200 => {
-                // Initialize Registers for Mode 13h
-
-                // Misc Output
-                self.misc_output_reg = 0x63;
-
-                // Sequencer
-                self.sequencer_regs[0] = 0x03; // Reset
-                self.sequencer_regs[1] = 0x01; // Clocking Mode
-                self.sequencer_regs[2] = 0x0F; // Map Mask (All planes)
-                self.sequencer_regs[3] = 0x00; // Char Map Select
-                self.sequencer_regs[4] = 0x0E; // Memory Mode (Chain 4)
-
-                // Graphics Controller
-                self.graphics_regs[0] = 0x00; // Set/Reset
-                self.graphics_regs[1] = 0x00; // Enable Set/Reset
-                self.graphics_regs[2] = 0x00; // Color Compare
-                self.graphics_regs[3] = 0x00; // Data Rotate
-                self.graphics_regs[4] = 0x00; // Read Map Select
-                self.graphics_regs[5] = 0x40; // Mode Register (256 Color)
-                self.graphics_regs[6] = 0x05; // Misc (Graphics + A0000)
-                self.graphics_regs[7] = 0x0F; // Color Don't Care
-                self.graphics_regs[8] = 0xFF; // Bit Mask
-
-                // CRTC: display from the start of VRAM, 80 bytes per row
-                // in each plane.
-                self.crtc_regs[0x09] = 0x41; // Max Scan Line: rows of 2 scanlines
-                self.crtc_regs[0x0C] = 0x00; // Start Address High
-                self.crtc_regs[0x0D] = 0x00; // Start Address Low
-                self.crtc_regs[0x13] = 0x28; // Offset
-
-                // Attribute Controller
-                self.attribute_regs[0x10] = 0x41; // Mode Control (Graphics)
-                self.attribute_regs[0x11] = 0x00; // Overscan
-                self.attribute_regs[0x12] = 0x0F; // Color Plane Enable
-                self.attribute_regs[0x13] = 0x00; // Horizontal Panning
-
-                // Reload the standard 256-color DAC palette, matching what the
-                // real IBM VGA BIOS does when setting mode 13h. Programs that
-                // customize only part of the palette rely on sensible defaults
-                // being present for the rest.
-                self.palette.copy_from_slice(&VGA_DEFAULT_PALETTE);
-                self.dac_mask = 0xFF;
-            }
-            _ => {
-                // Text Mode defaults?
-            }
+        let regs = super::modes::mode_regs(mode);
+        self.misc_output_reg = regs.misc;
+        self.sequencer_regs[0] = 0x03;
+        self.sequencer_regs[1..].copy_from_slice(&regs.seq);
+        self.crtc_regs = regs.crtc;
+        self.graphics_regs = regs.gc;
+        self.attribute_regs = regs.attr;
+        self.fixed_timing = None;
+        self.timing_cache = None;
+        self.dac_mask = 0xFF;
+        if mode.is_planar() {
+            self.load_ega_palette();
+            // Clear graphics VRAM so we don't see stale pixels.
+            self.vram_graphics.fill(0);
+        } else {
+            // The standard 256-color palette; its first 16 entries are the
+            // text and CGA colors. Programs that customize only part of the
+            // palette rely on sensible defaults for the rest.
+            self.palette.copy_from_slice(&VGA_DEFAULT_PALETTE);
         }
+    }
+
+    /// Invalidate the display timing after a register it depends on changed.
+    fn timing_changed(&mut self) {
+        self.timing_cache = None;
+    }
+
+    /// The display timing: the one the registers describe, or the last
+    /// sensible one while they describe none.
+    pub fn timing(&mut self) -> CrtTiming {
+        if let Some(timing) = self.timing_cache {
+            return timing;
+        }
+        let timing = self.fixed_timing.unwrap_or_else(|| {
+            CrtTiming::from_registers(
+                self.misc_output_reg,
+                self.sequencer_regs[1],
+                &self.crtc_regs,
+            )
+            .unwrap_or(self.good_timing)
+        });
+        if timing != self.good_timing {
+            self.good_timing = timing;
+            self.rebase = true;
+        }
+        self.timing_cache = Some(timing);
+        timing
+    }
+
+    /// The display timing, without caching it (for status displays).
+    pub fn peek_timing(&self) -> CrtTiming {
+        self.timing_cache.or(self.fixed_timing).unwrap_or_else(|| {
+            CrtTiming::from_registers(
+                self.misc_output_reg,
+                self.sequencer_regs[1],
+                &self.crtc_regs,
+            )
+            .unwrap_or(self.good_timing)
+        })
+    }
+
+    /// Whether a vertical retrace began since the last call, at emulated
+    /// time `t_ns`: that is when the CRTC latches the Start Address.
+    pub fn retrace_began(&mut self, t_ns: u64) -> bool {
+        let retraces = self.timing().retraces(t_ns);
+        if self.rebase {
+            self.rebase = false;
+            self.retraces = retraces;
+            return true;
+        }
+        let began = retraces != self.retraces;
+        self.retraces = retraces;
+        began
     }
 }
 
@@ -646,33 +593,13 @@ impl Device for VgaCard {
     fn io_read(&mut self, port: u16) -> u8 {
         // Mono-CRTC aliases: 3B4/3B5 == 3D4/3D5 and 3BA == 3DA. Games probe
         // these for monitor type detection; transparently redirect.
+        // Input Status 1 (3DAh/3BAh) depends on the time; the bus answers it.
         let port = match port {
             0x3B4 => 0x3D4,
             0x3B5 => 0x3D5,
-            0x3BA => 0x3DA,
             other => other,
         };
         match port {
-            0x3DA => {
-                // Input Status #1
-                // Reading 3DA resets the Attribute Controller Flip-Flop to Address Mode
-                self.attribute_flip_flop = false;
-
-                // Toggle VRetrace (Bit 3) and Display Enable (Bit 0)
-                self.retrace_counter = self.retrace_counter.wrapping_add(1);
-
-                // Toggle active/retrace every 8 reads to simulate timing
-                if (self.retrace_counter & 8) != 0 {
-                    // Entering retrace — real CRTCs latch Start Address here,
-                    // then hold it stable for the whole frame. Mirror that:
-                    // games can write CRTC 0x0C/0x0D arbitrarily many times
-                    // before the next vretrace and only the last value sticks.
-                    self.latch_start_address();
-                    0x09 // Retrace Active (Bit 3) + Display Disabled (Bit 0)
-                } else {
-                    0x00 // Display Active, No Retrace
-                }
-            }
             0x3C2 => {
                 // Input Status #0
                 // Bit 7: IRQ Pending (0=Clear)
@@ -748,7 +675,6 @@ impl Device for VgaCard {
         let port = match port {
             0x3B4 => 0x3D4,
             0x3B5 => 0x3D5,
-            0x3BA => 0x3DA,
             other => other,
         };
         match port {
@@ -770,6 +696,7 @@ impl Device for VgaCard {
             }
             0x3C2 => {
                 self.misc_output_reg = value;
+                self.timing_changed();
                 self.mark_dirty_full();
             }
             0x3C4 => self.sequencer_index = value,
@@ -786,7 +713,9 @@ impl Device for VgaCard {
                     }
 
                     self.sequencer_regs[self.sequencer_index as usize] = val;
-                    // println!("[VGA] Seq Reg {:02X} = {:02X}", self.sequencer_index, val);
+                    if self.sequencer_index == 0x01 {
+                        self.timing_changed();
+                    }
                     self.mark_dirty_full();
                 }
             }
@@ -810,14 +739,28 @@ impl Device for VgaCard {
             }
             0x3D4 => self.crtc_index = value,
             0x3D5 => {
-                if (self.crtc_index as usize) < self.crtc_regs.len() {
-                    self.crtc_regs[self.crtc_index as usize] = value;
+                let index = self.crtc_index as usize;
+                if index < self.crtc_regs.len() {
+                    // Vertical Retrace End bit 7 write-protects the timing
+                    // registers 00h-07h, all but the Line Compare bit of
+                    // the Overflow register.
+                    let value = match index {
+                        0x00..=0x06 if self.crtc_regs[0x11] & 0x80 != 0 => return,
+                        0x07 if self.crtc_regs[0x11] & 0x80 != 0 => {
+                            (self.crtc_regs[0x07] & !0x10) | (value & 0x10)
+                        }
+                        _ => value,
+                    };
+                    self.crtc_regs[index] = value;
+                    if matches!(index, 0x00..=0x07 | 0x10..=0x12 | 0x17) {
+                        self.timing_changed();
+                    }
                     // Start Address registers (0x0C/0x0D) update a pending
                     // value that the CRTC only picks up at vretrace.
                     // Writing them does NOT trigger a re-render — that
                     // would cause flicker when games rapid-flip buffers
-                    // mid-frame. The retrace read in `io_read` latches.
-                    if self.crtc_index != 0x0C && self.crtc_index != 0x0D {
+                    // mid-frame.
+                    if index != 0x0C && index != 0x0D {
                         self.mark_dirty_full();
                     }
                 }

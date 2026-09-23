@@ -1,6 +1,8 @@
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 
+pub mod crt;
+pub mod modes;
 pub mod vga;
 
 pub const SCREEN_WIDTH: u32 = 640;
@@ -99,32 +101,22 @@ pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
         VideoMode::Text40x25 | VideoMode::Text40x25Color => {
             render_text_mode_40x25(canvas, &bus.vga.vram_text, bus, y_min, y_max)
         }
-        // Mode 0Dh (320x200): 2x horizontal, 2x vertical -> 640x400 exactly.
-        VideoMode::Ega320x200 => render_planar(canvas, &bus.vga.vram_graphics, bus, 320, 200, 2, 2),
-        // Mode 0Eh (640x200): 2x vertical -> 640x400 exactly.
-        VideoMode::Ega640x200 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 200, 1, 2),
-        // Mode 10h (640x350): native. Leaves a 50-line black band at the bottom.
-        VideoMode::Ega640x350 => render_planar(canvas, &bus.vga.vram_graphics, bus, 640, 350, 1, 1),
-        // Mode 12h (640x480): we only have 400 lines of canvas. Compress via
-        // nearest-neighbour sampling to fit, keeping the full 640 width.
-        VideoMode::Vga640x480 => render_planar_fit(canvas, &bus.vga.vram_graphics, bus, 640, 480),
+        // 16-color planar modes (0Dh, 0Eh, 10h, 12h), at the size the CRTC
+        // registers give them.
+        VideoMode::Ega320x200 | VideoMode::Ega640x200 | VideoMode::Ega640x350 | VideoMode::Vga640x480 => {
+            render_planar(canvas, &bus.vga.vram_graphics, bus)
+        }
     }
 }
 
-/// Generic renderer for planar 16-color VGA/EGA modes (0Dh, 0Eh, 10h, 12h).
+/// Renderer for the planar 16-color VGA/EGA modes (0Dh, 0Eh, 10h, 12h and
+/// variants programs make of them, such as 640x240 with doubled scanlines).
 ///
 /// Reads pixels out of the 4-plane memory layout and runs each 4-bit pixel
-/// through the Attribute Controller palette, then the DAC. scale_x/scale_y
-/// let us upscale lower-res modes so they fill the standard 640x400 viewport.
-fn render_planar(
-    canvas: &mut [u8],
-    vram: &[u8],
-    bus: &Bus,
-    width: usize,
-    height: usize,
-    scale_x: usize,
-    scale_y: usize,
-) {
+/// through the Attribute Controller palette, then the DAC, scaling the
+/// picture to the canvas.
+fn render_planar(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+    let (width, rows) = bus.vga.graphics_size();
     let mix = palette_mix(bus);
     // CRTC Offset (index 0x13) holds bytes-per-scanline / 2 (i.e. words
     // per row). Fall back to width/8 if the game never touched it.
@@ -136,45 +128,24 @@ fn render_planar(
     let pan = bus.vga.pixel_panning();
     let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
 
-    for y in 0..height {
+    let canvas_w = SCREEN_WIDTH as usize;
+    let canvas_h = canvas.len() / (canvas_w * 3);
+    let row_bytes = canvas_w * 3;
+    let mut last_y = usize::MAX;
+    for ty in 0..canvas_h {
+        let y = ty * rows / canvas_h;
+        let dst = ty * row_bytes;
+        if y == last_y {
+            canvas.copy_within(dst - row_bytes..dst, dst);
+            continue;
+        }
+        last_y = y;
         // Rows past the split screen's start show VRAM from address 0.
         let (row_base, row, pan) = if y >= split { (0, y - split, split_pan) } else { (base, y, pan) };
-        for x in 0..width {
+        for tx in 0..canvas_w {
+            let x = tx * width / canvas_w;
             let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, x + pan, row, row_base, &mix);
-
-            for dy in 0..scale_y {
-                for dx in 0..scale_x {
-                    let tx = x * scale_x + dx;
-                    let ty = y * scale_y + dy;
-                    if tx < SCREEN_WIDTH as usize && ty < SCREEN_HEIGHT as usize {
-                        let idx = (ty * SCREEN_WIDTH as usize + tx) * 3;
-                        canvas[idx] = rgb.0;
-                        canvas[idx + 1] = rgb.1;
-                        canvas[idx + 2] = rgb.2;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Planar renderer for modes taller than SCREEN_HEIGHT (currently only
-/// mode 12h, which is 640x480 vs our 640x400 viewport). Uses nearest-neighbour
-/// sampling on the Y axis so all 480 source lines are represented.
-fn render_planar_fit(canvas: &mut [u8], vram: &[u8], bus: &Bus, width: usize, height: usize) {
-    let mix = palette_mix(bus);
-    let offset_reg = bus.vga.crtc_regs[0x13] as usize;
-    let bytes_per_row = if offset_reg != 0 { offset_reg * 2 } else { width / 8 };
-    let base = planar_base_offset(bus);
-    let split = bus.vga.split_row();
-
-    for ty in 0..SCREEN_HEIGHT as usize {
-        let sy = (ty as u64 * height as u64 / SCREEN_HEIGHT as u64) as usize;
-        let (row_base, row) = if sy >= split { (0, sy - split) } else { (base, sy) };
-        for tx in 0..SCREEN_WIDTH as usize {
-            let sx = (tx as u64 * width as u64 / SCREEN_WIDTH as u64) as usize;
-            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, sx, row, row_base, &mix);
-            let idx = (ty * SCREEN_WIDTH as usize + tx) * 3;
+            let idx = dst + tx * 3;
             canvas[idx] = rgb.0;
             canvas[idx + 1] = rgb.1;
             canvas[idx + 2] = rgb.2;
@@ -238,13 +209,16 @@ fn planar_pixel_rgb(
     bus.vga.get_rgb(dac_idx & bus.vga.dac_mask)
 }
 
-// Emulate Mode 13h (320x200) -> Scaled to 640x400
+/// 256-color modes: mode 13h and the unchained "mode X" family (320x240,
+/// 360x480, ...), whatever size the CRTC registers give them, scaled to
+/// the canvas.
 pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
     // The CRTC scans the 4 planes in parallel: pixel x of a row is in plane
     // x % 4 at Start Address + row * stride + x / 4. With Chain 4 (plain
     // mode 13h) that is where CPU address y * 320 + x lands. Unchained
     // "mode X" games draw into several pages and flip between them with
     // the Start Address.
+    let (width, rows) = bus.vga.graphics_size();
     let start = bus.vga.latched_start_addr;
     let stride = match bus.vga.crtc_regs[0x13] {
         0 => 80,
@@ -255,34 +229,31 @@ pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
     let split = bus.vga.split_row();
     let pan = bus.vga.pixel_panning();
     let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
-    for y in 0..200 {
+    // VGA hardware ANDs each pixel with the PEL mask before the DAC lookup.
+    let colors: Vec<(u8, u8, u8)> = (0..=255u8).map(|i| bus.vga.get_rgb(i & bus.vga.dac_mask)).collect();
+    let canvas_w = SCREEN_WIDTH as usize;
+    let canvas_h = canvas.len() / (canvas_w * 3);
+    let row_bytes = canvas_w * 3;
+    let mut last_y = usize::MAX;
+    for ty in 0..canvas_h {
+        let y = ty * rows / canvas_h;
+        let dst = ty * row_bytes;
+        if y == last_y {
+            canvas.copy_within(dst - row_bytes..dst, dst);
+            continue;
+        }
+        last_y = y;
         let (row, pan) = if y >= split { ((y - split) * stride, split_pan) } else { (start + y * stride, pan) };
-        for x in 0..320 {
-            let px = x + pan;
+        for tx in 0..canvas_w {
+            let px = tx * width / canvas_w + pan;
             let plane = px & 3;
             let offset = (row + (px >> 2)) & 0xFFFF;
-            let final_index = (plane * 65536) + offset;
-
-            let color_idx = if final_index < vram.len() {
-                vram[final_index]
-            } else {
-                0
-            };
-            // VGA hardware ANDs pixel through the PEL mask register before DAC lookup.
-            let rgb = bus.vga.get_rgb(color_idx & bus.vga.dac_mask);
-
-            // Scale 2x horizontally and 2x vertically
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let target_x = x * 2 + dx;
-                    let target_y = y * 2 + dy;
-                    let idx = (target_y * SCREEN_WIDTH as usize + target_x) * 3;
-
-                    canvas[idx] = rgb.0;
-                    canvas[idx + 1] = rgb.1;
-                    canvas[idx + 2] = rgb.2;
-                }
-            }
+            let color_idx = vram.get(plane * 65536 + offset).copied().unwrap_or(0);
+            let rgb = colors[color_idx as usize];
+            let idx = dst + tx * 3;
+            canvas[idx] = rgb.0;
+            canvas[idx + 1] = rgb.1;
+            canvas[idx + 2] = rgb.2;
         }
     }
 }
