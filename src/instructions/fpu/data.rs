@@ -104,7 +104,6 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
         let val: F80 = cpu.fpu_pop();
         let addr = calculate_addr(cpu, instr);
-        cpu.last_fstp_addr = addr;
 
         match instr.memory_size() {
             MemorySize::Float32 => {

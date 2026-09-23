@@ -1,5 +1,5 @@
 use iced_x86::{Instruction, Mnemonic};
-use crate::cpu::{Cpu, CpuFlags};
+use crate::cpu::Cpu;
 
 pub mod utils;
 pub mod fpu;
@@ -11,20 +11,7 @@ pub mod string;
 pub mod misc;
 
 pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
-    if !cpu.debug_qb_print {
-        dispatch(cpu, instr);
-        return;
-    }
-
-    let zf_before = cpu.get_cpu_flag(CpuFlags::ZF);
     dispatch(cpu, instr);
-    let zf_after = cpu.get_cpu_flag(CpuFlags::ZF);
-    if zf_before != zf_after {
-        cpu.bus.log_string(&format!(
-            "[ZF-CHANGED] {:?} changed ZF from {} to {} at {:04X}:{:04X}",
-            instr.mnemonic(), zf_before, zf_after, cpu.cs, cpu.ip.wrapping_sub(instr.len() as u16)
-        ));
-    }
 }
 
 #[inline(always)]

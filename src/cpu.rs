@@ -1,10 +1,9 @@
 use bitflags::bitflags;
-use iced_x86::{Decoder, DecoderOptions, Instruction, MemorySize, Mnemonic, OpKind, Register};
+use iced_x86::{Decoder, DecoderOptions, MemorySize, Register};
 use std::collections::VecDeque;
 
 use crate::bus::Bus;
 use crate::f80::F80;
-use crate::instructions::utils::calculate_addr;
 use crate::shell::get_shell_code;
 
 // FPU Tag Word Values
@@ -65,27 +64,6 @@ pub struct Cpu {
     pub di: u16,
     pub si: u16,
 
-    // For future 32-bit instructions
-    pub eax: u32,
-    #[allow(dead_code)]
-    pub ebx: u32,
-    #[allow(dead_code)]
-    pub ecx: u32,
-    #[allow(dead_code)]
-    pub edx: u32,
-    #[allow(dead_code)]
-    pub edi: u32,
-    #[allow(dead_code)]
-    pub esi: u32,
-    #[allow(dead_code)]
-    pub ebp: u32,
-    #[allow(dead_code)]
-    pub esp: u32,
-    #[allow(dead_code)]
-    pub eip: u32,
-    #[allow(dead_code)]
-    pub eflags: u32,
-
     // Pointers & Segments
     pub bp: u16,
     pub sp: u16,
@@ -125,12 +103,6 @@ pub struct Cpu {
     pub fpu_control: u16,
     pub fpu_tags: [u8; 8],
 
-    // REMOVEME: FLOAT DEBUGGING
-    pub debug_qb_print: bool,
-    pub last_fstp_addr: usize,
-
-    // Execution Trace
-    pub trace_log: VecDeque<String>,
     pub process_stack: Vec<ProcessContext>,
     pub last_timer_tick: u128,
     /// Set by BIOS services that wait for input (INT 16h with an empty
@@ -184,16 +156,6 @@ impl Cpu {
             ds: 0,
             es: 0,
             ss: 0,
-            eip: 0,
-            eax: 0,
-            ebx: 0,
-            ecx: 0,
-            edx: 0,
-            edi: 0,
-            esi: 0,
-            ebp: 0,
-            esp: 0,
-            eflags: 0,
             ip: 0x100,
             bus: Bus::new(root_path),
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
@@ -206,9 +168,6 @@ impl Cpu {
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),
             fpu_control: 0x037F, // Default Control Word
             fpu_tags: [FPU_TAG_EMPTY; 8],
-            debug_qb_print: false,
-            last_fstp_addr: 0,
-            trace_log: VecDeque::new(),
             current_psp: 0, // Will be set by loader
             heap_pointer: 0x2000,
             resident_end: crate::mcb::FIRST_MCB_SEG,
@@ -384,113 +343,6 @@ impl Cpu {
         self.bus.clock.icount += 1;
     }
 
-    // REMOVEME: Debugging QuickBASIC Float Conversion Issues
-    pub fn trace_qb_conversion(&mut self, instr: &Instruction) {
-        if !self.debug_qb_print {
-            return;
-        }
-
-        // TRACK ZF CHANGES: If ZF changes without an obvious reason, we need to know
-        let zf = self.get_cpu_flag(CpuFlags::ZF);
-
-        match instr.mnemonic() {
-            // Track the Decision Points
-            Mnemonic::Je | Mnemonic::Jne => {
-                // This is where the "08" vs "8" decision is actually made!
-                self.bus.log_string(
-                    format!(
-                        "[QB-TRACE] {:?} taken? (ZF={}) at {:04X}:{:04X}",
-                        instr.mnemonic(),
-                        zf,
-                        self.cs,
-                        self.ip
-                    )
-                    .as_str(),
-                );
-            }
-
-            // Monitor Sahf (The FPU->CPU Bridge)
-            Mnemonic::Sahf => {
-                let ah = (self.ax >> 8) as u8;
-                self.bus.log_string(
-                    format!("[QB-TRACE] SAHF: AH={:02X} (Bit6/ZF={})", ah, (ah >> 6) & 1).as_str(),
-                );
-            }
-
-            // Enhanced Scasb (Watch the DI/CX result)
-            Mnemonic::Scasb => {
-                let val = self.get_al();
-                let addr = self.get_physical_addr(self.es, self.di);
-                let mem_val = self.bus.read_8(addr);
-                self.bus.log_string(format!("[QB-TRACE] SCASB [{:05X}] AL={:02X} vs Mem={:02X} | CX={:04X} | DI={:04X} | ZF={}", 
-                    addr, val, mem_val, self.cx, self.di, zf).as_str());
-            }
-
-            // Monitor Pointer Adjustment
-            Mnemonic::Inc | Mnemonic::Dec => {
-                let reg = instr.op0_register();
-                if reg == Register::DI || reg == Register::SI || reg == Register::CX {
-                    self.bus.log_string(
-                        format!(
-                            "[QB-TRACE] {:?} {:?} -> {:04X} (ZF={})",
-                            instr.mnemonic(),
-                            reg,
-                            self.get_reg16(reg),
-                            zf
-                        )
-                        .as_str(),
-                    );
-                }
-            }
-
-            // Keep existing trackers
-            Mnemonic::Fstp if instr.memory_size() == MemorySize::Float80 => {
-                let addr = calculate_addr(self, instr);
-                self.last_fstp_addr = addr;
-                let m = self.bus.read_64(addr);
-                let se = self.bus.read_16(addr + 8);
-                self.bus.log_string(
-                    format!(
-                        "\n[QB-TRACE] FSTP TBYTE at {:05X} Raw: {:04X} {:016X}",
-                        addr, se, m
-                    )
-                    .as_str(),
-                );
-            }
-
-            Mnemonic::Stosb => {
-                let val = self.get_al();
-                let addr = self.get_physical_addr(self.es, self.di);
-                let ch = if val >= 32 && val <= 126 {
-                    val as char
-                } else {
-                    '.'
-                };
-                self.bus.log_string(
-                    format!(
-                        "[QB-TRACE] STOSB [{:05X}] <- {:02X} ('{}') DI={:04X}",
-                        addr, val, ch, self.di
-                    )
-                    .as_str(),
-                );
-            }
-
-            Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne => {
-                self.bus.log_string(
-                    format!(
-                        "[QB-TRACE] {:?} CX={:04X} ZF={} DI={:04X}",
-                        instr.mnemonic(),
-                        self.cx,
-                        zf,
-                        self.di
-                    )
-                    .as_str(),
-                );
-            }
-            _ => {}
-        }
-    }
-
     // Update Parity Flag based on result
     pub fn update_pf(&mut self, result: u16) {
         let low_byte = (result & 0xFF) as u8;
@@ -506,10 +358,6 @@ impl Cpu {
 
     // Helper to set/clear a flag
     pub fn set_cpu_flag(&mut self, mask: CpuFlags, value: bool) {
-        // REMOVEME: ZF ALERT
-        // if self.debug_qb_conversion && mask.contains(CpuFlags::ZF) {
-        //     let old_zf = self.flags.contains(CpuFlags::ZF);
-
         //     // ALARM only when ZF changes from FALSE -> TRUE
         //     if !old_zf && value == true {
         //         let instr_str = self.get_instruction_at_ip();
@@ -529,17 +377,6 @@ impl Cpu {
 
     // Allows overwriting the flags register with a new bitflags struct
     pub fn set_cpu_flags(&mut self, new_flags: CpuFlags) {
-        // REMOVEME: ZF ALERT
-        // let old_zf = self.flags.contains(CpuFlags::ZF);
-        // let new_zf = new_flags.contains(CpuFlags::ZF);
-        // if self.debug_qb_conversion && !old_zf && new_zf {
-        //     let instr_str = self.get_instruction_at_ip();
-        //     self.bus.log_string(&format!(
-        //         "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}",
-        //         self.cx, instr_str
-        //     ));
-        // }
-
         let raw_bits = new_flags.bits();
 
         // 0x0FD5 masks only the valid 8086 flags:
@@ -603,63 +440,6 @@ impl Cpu {
         let phys_addr = (segment as usize * 16) + offset as usize;
         // MASK TO 20 BITS to emulate 8086 wrap-around
         phys_addr & 0xFFFFF
-    }
-
-    /// Helper to read the first operand (Destination).
-    /// Returns: (Value, Optional Memory Address, Is 8-bit?)
-    /// If address is Some, you should write the result back to that address.
-    /// If address is None, you should write the result back to the register.
-    #[allow(dead_code)]
-    pub fn read_op0(cpu: &mut Cpu, instr: &Instruction) -> (u16, Option<usize>, bool) {
-        match instr.op0_kind() {
-            // Handle Register Operand
-            OpKind::Register => {
-                let reg = instr.op0_register();
-                let is_8bit = reg.is_gpr8();
-
-                let val = if is_8bit {
-                    cpu.get_reg8(reg) as u16
-                } else {
-                    cpu.get_reg16(reg)
-                };
-
-                (val, None, is_8bit)
-            }
-
-            // Handle Memory Operand
-            OpKind::Memory => {
-                let addr = calculate_addr(cpu, instr);
-                let is_8bit = instr.memory_size() == MemorySize::UInt8;
-
-                let val = if is_8bit {
-                    cpu.bus.read_8(addr) as u16
-                } else {
-                    cpu.bus.read_16(addr) // Uses the new helper above
-                };
-
-                (val, Some(addr), is_8bit)
-            }
-
-            // Fallback (Should not happen for R/W ops like ADD/RCL)
-            _ => (0, None, false),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn get_segment_value(&self, seg: Register) -> u16 {
-        match seg {
-            Register::ES => self.es,
-            Register::CS => self.cs,
-            Register::SS => self.ss,
-            Register::DS => self.ds,
-            // FS and GS are rarely used in standard Real Mode DOS,
-            // but returning 0 is safe for now.
-            Register::FS => 0,
-            Register::GS => 0,
-            // Fallback: If for some reason a non-segment register is passed,
-            // default to DS (Data Segment)
-            _ => self.ds,
-        }
     }
 
     // Extract High byte (AH)
@@ -1617,8 +1397,6 @@ impl Cpu {
         self.bus
             .log_string(&format!("[DEBUG] Heap starts at {:04X}", self.heap_pointer));
 
-        // Enable to do detailed debugging of exe programs
-        //self.debug_qb_conversion = true;
 
         true
     }
