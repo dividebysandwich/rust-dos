@@ -17,6 +17,7 @@ mod adlib;
 mod audio;
 mod bus;
 mod command;
+mod config;
 mod cpu;
 mod debug;
 mod disk;
@@ -36,12 +37,22 @@ mod video;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, long, default_value_t = 1)]
-    scale: u32,
+    /// Window scale factor [default: 1, or the config file's scale]
+    #[arg(short, long)]
+    scale: Option<u32>,
 
-    /// Root directory for Drive C:
-    #[arg(short, long, default_value = ".")]
-    dir: String,
+    /// Root directory for Drive C: [default: the config file's C:, or "."]
+    #[arg(short, long)]
+    dir: Option<String>,
+
+    /// Configuration file to use instead of ./rust-dos.conf or the
+    /// per-user default
+    #[arg(short, long, value_name = "FILE", conflicts_with = "no_config")]
+    config: Option<std::path::PathBuf>,
+
+    /// Don't read or create any configuration file
+    #[arg(long)]
+    no_config: bool,
 
     /// Start the HTTP/WebSocket debug server (local-only, unauthenticated).
     /// Optionally takes the listen address.
@@ -56,6 +67,8 @@ struct Args {
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
+    let config = load_config(&args)?;
+    let scale = args.scale.or(config.scale).unwrap_or(1);
     let mut debug_mode = false;
 
     let mut cursor_visible = true;
@@ -83,8 +96,8 @@ fn main() -> Result<(), String> {
     let window = video_subsystem
         .window(
             "Rust DOS Emulator",
-            video::SCREEN_WIDTH * args.scale,
-            video::SCREEN_HEIGHT * args.scale,
+            video::SCREEN_WIDTH * scale,
+            video::SCREEN_HEIGHT * scale,
         )
         .position_centered()
         .build()
@@ -101,8 +114,7 @@ fn main() -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
 
-    let root_path = std::path::PathBuf::from(&args.dir);
-    let mut cpu = Cpu::new(root_path);
+    let mut cpu = create_cpu(&args, &config);
     cpu.bus.audio_device = Some(audio_device);
     let mut dbg = match args.debug_server {
         Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity)?,
@@ -113,10 +125,11 @@ fn main() -> Result<(), String> {
     // Load Shell Code into Memory
     cpu.load_shell();
 
-    // If an AUTOEXEC.BAT exists in the C: root, queue its commands so the
-    // first shell prompt is preceded by the same automatic startup sequence
-    // a real PC would run. Each line runs as if typed at the prompt.
-    cpu.queue_batch_file("\\AUTOEXEC.BAT");
+    // Startup commands: the config's [autoexec] lines, then AUTOEXEC.BAT
+    // from the C: root if there is one, like the startup sequence a real PC
+    // would run. Each line runs as if typed at the prompt.
+    cpu.queue_batch_lines(&config.autoexec);
+    cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
 
     // Decoded-instruction cache. 64K direct-mapped slots (~3.5 MB) — comfortably
     // large for any DOS program's hot working set, and small enough to fit in
@@ -206,12 +219,12 @@ fn main() -> Result<(), String> {
                 }
 
                 Event::MouseMotion { x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, args.scale);
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, scale);
                     cpu.bus.mouse.set_position(vx, vy);
                 }
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, args.scale);
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, scale);
                     cpu.bus.mouse.set_position(vx, vy);
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_down(btn);
@@ -219,7 +232,7 @@ fn main() -> Result<(), String> {
                 }
 
                 Event::MouseButtonUp { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, args.scale);
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, scale);
                     cpu.bus.mouse.set_position(vx, vy);
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_up(btn);
@@ -837,6 +850,81 @@ fn main() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Find and parse the configuration file (see config.rs for the lookup
+/// order). Problems in the file are reported but never stop the emulator;
+/// only a missing `--config` file does.
+fn load_config(args: &Args) -> Result<config::Config, String> {
+    if args.no_config {
+        return Ok(config::Config::default());
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let config = config::load(
+        args.config.as_deref(),
+        &cwd,
+        config::default_path(),
+        dirs::home_dir().as_deref(),
+    )?;
+    if let Some(path) = &config.source {
+        let action = if config.created { "Created default" } else { "Using" };
+        eprintln!("[CONFIG] {} configuration file {}", action, path.display());
+    }
+    for warning in &config.warnings {
+        eprintln!("[CONFIG] Warning: {}", warning);
+    }
+    Ok(config)
+}
+
+/// Build the CPU with drive C: from `-d`, the config file or the working
+/// directory (in that order), then mount the config's other drives.
+fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
+    use crate::disk::{DRIVE_C, drive_letter};
+
+    let mut warnings = config.warnings.clone();
+    let mut warn = |msg: String| {
+        eprintln!("[CONFIG] Warning: {}", msg);
+        warnings.push(msg);
+    };
+
+    let config_c = config.drive(DRIVE_C);
+    let c_spec = match (&args.dir, config_c) {
+        (Some(_), Some(_)) => {
+            warn("-d/--dir overrides drive C: from the config file".to_string());
+            None
+        }
+        (None, Some(spec)) if !spec.path.is_dir() => {
+            warn(format!(
+                "C: {} is not a directory, using the current directory",
+                spec.path.display()
+            ));
+            None
+        }
+        (_, spec) => spec,
+    };
+    let root_path = match (&args.dir, c_spec) {
+        (Some(dir), _) => std::path::PathBuf::from(dir),
+        (None, Some(spec)) => spec.path.clone(),
+        (None, None) => std::path::PathBuf::from("."),
+    };
+
+    let mut cpu = Cpu::new(root_path.clone());
+    if let Some(spec) = c_spec {
+        // Remount C: to apply the config's drive type, label and -ro
+        if let Err(e) = cpu.bus.mount_drive(DRIVE_C, &root_path, spec.opts.clone(), true) {
+            warn(format!("cannot set up drive C: {}", e));
+        }
+    }
+    for spec in config.drives.iter().filter(|s| s.drive != DRIVE_C) {
+        if let Err(e) = cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), false) {
+            warn(format!("cannot mount {}: {}", drive_letter(spec.drive), e));
+        }
+    }
+
+    for warning in &warnings {
+        cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
+    }
+    cpu
 }
 
 /// Convert host window coordinates (in pixels, at window `scale`) into the

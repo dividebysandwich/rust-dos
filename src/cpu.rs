@@ -1138,8 +1138,19 @@ impl Cpu {
             filename,
             contents.len()
         ));
-        for raw_line in contents.lines() {
-            let line = raw_line.trim();
+        self.queue_batch_lines(contents.lines());
+        true
+    }
+
+    /// Append shell command lines to `batch_queue`, skipping blank lines and
+    /// `REM` comments. Used for .BAT files and the config's [autoexec].
+    pub fn queue_batch_lines<I, S>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for raw_line in lines {
+            let line = raw_line.as_ref().trim();
             if line.is_empty() {
                 continue;
             }
@@ -1149,7 +1160,6 @@ impl Cpu {
             }
             self.batch_queue.push_back(line.to_string());
         }
-        true
     }
 
     pub fn load_executable(&mut self, filename: &str, segment: Option<u16>) -> bool {

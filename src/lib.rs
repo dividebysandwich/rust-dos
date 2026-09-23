@@ -2,6 +2,7 @@ pub mod adlib;
 pub mod audio;
 pub mod bus;
 pub mod command;
+pub mod config;
 pub mod cpu;
 pub mod disk;
 pub mod f80;

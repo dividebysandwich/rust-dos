@@ -1,0 +1,40 @@
+# rust-dos configuration file
+#
+# rust-dos uses the first configuration file it finds (files are never
+# merged):
+#   1. the file given with -c/--config
+#   2. rust-dos.conf in the current working directory
+#   3. rust-dos.conf in the per-user configuration directory:
+#        Linux:   ~/.config/rust-dos/  (or $XDG_CONFIG_HOME/rust-dos/)
+#        macOS:   ~/Library/Application Support/rust-dos/
+#        Windows: %APPDATA%\rust-dos\
+# If none exists, a copy of this template is written to (3).
+# Start with --no-config to ignore all configuration files.
+#
+# Lines starting with # or ; are comments. Remove the # to use a setting.
+
+[emulator]
+# Window scale factor. -s/--scale overrides it.
+#scale=2
+
+[drives]
+# Mount host directories as DOS drives A: to Y:
+#   <letter> = <host path> [floppy|hdd|cdrom] [-label NAME] [-ro]
+#
+# hdd is the default type. floppy drives are removable 1.44 MB disks, cdrom
+# drives are read-only and visible to programs through MSCDEX, and -ro makes
+# any drive read-only. -label sets the volume label (up to 11 characters).
+# Quote paths that contain spaces. ~ is your home directory and relative
+# paths are relative to this file.
+# C: is the current working directory unless set here or with -d/--dir.
+#C=~/dos
+#A=~/dos/floppy floppy -label DISK1
+#D="~/dos/My CD" cdrom -label GAMECD
+
+[autoexec]
+# Commands typed at the DOS prompt on startup, one per line. They run
+# before C:\AUTOEXEC.BAT. A program started here delays the lines after it
+# until it exits.
+#MOUNT E ~/dos/extra
+#C:
+#CD GAMES

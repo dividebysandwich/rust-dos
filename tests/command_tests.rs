@@ -174,3 +174,16 @@ fn type_reads_drive_qualified_paths() {
     assert_eq!(run(&mut cpu, "TYPE D:\\SUB\\A.TXT"), "line one\nline two");
     assert_eq!(run(&mut cpu, "TYPE D:\\SUB\\NONE.TXT"), "File not found");
 }
+
+#[test]
+fn autoexec_lines_queue_before_autoexec_bat() {
+    let base = scratch("autoexec", &["c"]);
+    fs::write(base.join("c/AUTOEXEC.BAT"), "@ECHO OFF\r\nREM setup\r\n\r\nGAME\r\n").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.bus.disk.set_current_drive(25); // AUTOEXEC.BAT is found on C: regardless
+
+    cpu.queue_batch_lines(["MOUNT A floppy", "  ", "rem comment", "A:"]);
+    assert!(cpu.queue_batch_file("C:\\AUTOEXEC.BAT"));
+    let queued: Vec<&str> = cpu.batch_queue.iter().map(String::as_str).collect();
+    assert_eq!(queued, ["MOUNT A floppy", "A:", "@ECHO OFF", "GAME"]);
+}
