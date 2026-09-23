@@ -676,6 +676,10 @@ impl DiskController {
         }
 
         let (drive, path) = self.locate(filename).ok_or(0x03)?; // Path not found
+        // A directory (or a bare "D:") isn't a file: access denied.
+        if path.is_dir() {
+            return Err(0x05);
+        }
         let writable = self.is_writable(drive);
 
         let mut options = OpenOptions::new();

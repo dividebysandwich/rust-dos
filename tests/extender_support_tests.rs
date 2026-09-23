@@ -422,6 +422,10 @@ fn country_date_and_indos() {
     assert!(cpu.cx() >= 2024);
     assert!((1..=12).contains(&(cpu.dx() >> 8)));
 
+    // AH=37h: the switch character.
+    int21(&mut cpu, 0x3700);
+    assert_eq!((cpu.get_al(), cpu.get_dl()), (0, b'/'));
+
     // AH=34h: the InDOS flag is clear when a program looks.
     int21(&mut cpu, 0x3400);
     let flag = cpu.get_physical_addr(cpu.es(), cpu.bx());
@@ -477,6 +481,14 @@ fn device_names_open_devices_not_files() {
         int21(&mut cpu, 0x3E00);
     }
     assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no files created");
+    // Directories aren't files.
+    fs::create_dir(dir.join("SUB")).unwrap();
+    for name in ["C:", "SUB"] {
+        set_dsdx_string(&mut cpu, name);
+        int21(&mut cpu, 0x3D00);
+        assert!(cf(&cpu), "{}", name);
+        assert_eq!(cpu.ax(), 5, "{}", name);
+    }
 }
 
 #[test]
@@ -499,4 +511,42 @@ fn console_input_returns_extended_keys_as_zero_then_scan_code() {
 
 fn zf(cpu: &Cpu) -> bool {
     cpu.get_cpu_flag(CpuFlags::ZF)
+}
+
+#[test]
+fn mouse_driver_swaps_saves_and_restores_its_state() {
+    use rust_dos::interrupts::int33;
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let call = |cpu: &mut Cpu, ax: u16| {
+        cpu.set_ax(ax);
+        int33::handle(cpu);
+    };
+    call(&mut cpu, 0x0000);
+    cpu.set_cx(0x0002);
+    cpu.set_es(0x1234);
+    cpu.set_dx(0x0010);
+    call(&mut cpu, 0x000C);
+
+    // AX=15h sizes the buffer; AX=16h saves into it.
+    cpu.set_bx(0);
+    call(&mut cpu, 0x0015);
+    assert!(cpu.bx() > 0);
+    cpu.set_es(0x3000);
+    cpu.set_dx(0);
+    call(&mut cpu, 0x0016);
+
+    // AX=14h swaps in a new handler and hands back the old one.
+    cpu.set_cx(0x001F);
+    cpu.set_es(0x5678);
+    cpu.set_dx(0x0020);
+    call(&mut cpu, 0x0014);
+    assert_eq!((cpu.cx(), cpu.es(), cpu.dx()), (0x0002, 0x1234, 0x0010));
+    assert_eq!(cpu.bus.mouse.callback_cs, 0x5678);
+
+    // AX=17h brings the saved handler back.
+    cpu.set_es(0x3000);
+    cpu.set_dx(0);
+    call(&mut cpu, 0x0017);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.callback_mask, m.callback_cs, m.callback_ip), (0x0002, 0x1234, 0x0010));
 }

@@ -14,6 +14,10 @@ fn virtual_screen_dims(mode: VideoMode) -> (i32, i32) {
     (virt_w, h as i32)
 }
 
+/// Bytes of driver state AX=16h saves: the event handler's mask and
+/// address, the show/hide counter and the position.
+const STATE_SIZE: usize = 12;
+
 pub fn handle(cpu: &mut Cpu) {
     let ax = cpu.ax();
     let func = ax & 0xFFFF;
@@ -131,6 +135,43 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.mouse.callback_cs = cpu.es();
             cpu.bus.mouse.callback_ip = cpu.dx();
             crate::mouse::clear_callback_busy(&mut cpu.bus);
+        }
+
+        0x0014 => {
+            // Swap event handlers: install CX / ES:DX, return the old ones.
+            let (mask, seg, off) = (cpu.cx(), cpu.es(), cpu.dx());
+            let m = &mut cpu.bus.mouse;
+            let old = (m.callback_mask, m.callback_cs, m.callback_ip);
+            (m.callback_mask, m.callback_cs, m.callback_ip) = (mask, seg, off);
+            crate::mouse::clear_callback_busy(&mut cpu.bus);
+            cpu.set_cx(old.0);
+            cpu.set_es(old.1);
+            cpu.set_dx(old.2);
+        }
+
+        0x0015 => {
+            // Size of the driver state that AX=16h/17h save and restore.
+            cpu.set_bx(STATE_SIZE as u16);
+        }
+
+        0x0016 | 0x0017 => {
+            // Save the driver state to ES:DX, or restore it from there: the
+            // event handler, the cursor's visibility and position.
+            let addr = cpu.get_physical_addr(cpu.es(), cpu.dx());
+            if func == 0x0016 {
+                let m = &cpu.bus.mouse;
+                let words = [m.callback_mask, m.callback_cs, m.callback_ip, m.hide_counter as u16, m.x as u16, m.y as u16];
+                for (i, w) in words.into_iter().enumerate() {
+                    cpu.bus.write_16(addr + i * 2, w);
+                }
+            } else {
+                let w: Vec<u16> = (0..6).map(|i| cpu.bus.read_16(addr + i * 2)).collect();
+                let m = &mut cpu.bus.mouse;
+                (m.callback_mask, m.callback_cs, m.callback_ip) = (w[0], w[1], w[2]);
+                m.hide_counter = w[3] as i16 as i32;
+                (m.x, m.y) = (w[4] as i16 as i32, w[5] as i16 as i32);
+                crate::mouse::clear_callback_busy(&mut cpu.bus);
+            }
         }
 
         0x000F => {

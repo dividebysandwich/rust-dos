@@ -1750,6 +1750,17 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_bx((INDOS_FLAG - 0xF0000) as u16);
         }
 
+        // AH = 37h: Get (AL=00h) or set (AL=01h) the switch character,
+        // which stays '/'.
+        0x37 => match cpu.get_al() {
+            0x00 => {
+                cpu.set_reg8(Register::AL, 0);
+                cpu.set_reg8(Register::DL, b'/');
+            }
+            0x01 => cpu.set_reg8(Register::AL, 0),
+            _ => cpu.set_reg8(Register::AL, 0xFF),
+        },
+
         // AH = 38h: Get (or with DX=FFFFh set) country information.
         0x38 => {
             if cpu.dx() != 0xFFFF {
