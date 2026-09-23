@@ -5,11 +5,14 @@ pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     match ah {
         0x00 => {
-            let elapsed_ms = cpu.bus.start_time.elapsed().as_millis();
-            let ticks = (elapsed_ms as u64 * 182) / 10000;
-            cpu.cx = (ticks >> 16) as u16;
-            cpu.dx = (ticks & 0xFFFF) as u16;
-            cpu.set_reg8(Register::AL, 0);
+            // The tick count the timer interrupt maintains, as a real BIOS
+            // does, so it agrees with programs reading 0040:006C directly.
+            cpu.cx = cpu.bus.read_16(0x046E);
+            cpu.dx = cpu.bus.read_16(0x046C);
+            // AL = midnight flag, cleared by the read
+            let midnight = cpu.bus.read_8(0x0470);
+            cpu.bus.write_8(0x0470, 0);
+            cpu.set_reg8(Register::AL, midnight);
         }
         0x02 => { // Get Real-Time
             cpu.cx = 0; cpu.dx = 0;

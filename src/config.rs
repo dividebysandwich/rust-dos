@@ -8,6 +8,7 @@
 
 use crate::disk::DRIVE_Z;
 use crate::mount::{MountSpec, parse_drive_letter, parse_mount_spec, tokenize};
+use crate::timer::CpuSpeed;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -64,6 +65,8 @@ pub struct Config {
     /// True if `source` was just created from the template.
     pub created: bool,
     pub scale: Option<u32>,
+    /// Emulated CPU speed (`cycles`).
+    pub cycles: Option<CpuSpeed>,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -131,6 +134,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "scale" => match value.parse::<u32>() {
                             Ok(n) if (1..=16).contains(&n) => config.scale = Some(n),
                             _ => warn(format!("invalid scale '{}'", value)),
+                        },
+                        "cycles" => match CpuSpeed::parse(value) {
+                            Ok(speed) => config.cycles = Some(speed),
+                            Err(e) => warn(e),
                         },
                         _ => warn(format!("unknown setting '{}'", key)),
                     }
@@ -294,6 +301,7 @@ mod tests {
         let text = "\u{FEFF}# comment\r\n\
             [Emulator]\r\n\
             scale = 3\r\n\
+            cycles = 3000\r\n\
             \r\n\
             [DRIVES]\r\n\
             c = ~/dos\r\n\
@@ -311,6 +319,7 @@ mod tests {
         let config = parse(text, base, Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(config.scale, Some(3));
+        assert_eq!(config.cycles, Some(CpuSpeed::Fixed(3000)));
 
         let c = config.drive(2).unwrap();
         assert_eq!(c.path, home.join("dos"));
@@ -370,12 +379,24 @@ mod tests {
     }
 
     #[test]
+    fn cycles_accepts_max_and_rejects_nonsense() {
+        let config = parse("[emulator]\ncycles=Max\n", Path::new("/cfg"), None);
+        assert_eq!(config.cycles, Some(CpuSpeed::Max));
+
+        let config = parse("[emulator]\ncycles=fast\n", Path::new("/cfg"), None);
+        assert_eq!(config.cycles, None);
+        assert_eq!(config.warnings.len(), 1);
+        assert!(config.warnings[0].starts_with("line 2: invalid cycles 'fast'"));
+    }
+
+    #[test]
     fn template_is_all_comments() {
         let config = parse(TEMPLATE, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert!(config.drives.is_empty());
         assert!(config.autoexec.is_empty());
         assert_eq!(config.scale, None);
+        assert_eq!(config.cycles, None);
     }
 
     #[test]

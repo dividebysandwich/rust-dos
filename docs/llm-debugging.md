@@ -50,7 +50,8 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   and only then should you use `/api/screenshot` (a 640x400 PNG, including
   the text and mouse cursors).
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
-  DOS prompt), `cs_ip`, the video mode, `paused`, and `input_queue`.
+  DOS prompt), `cs_ip`, the video mode, `paused`, `input_queue`, and
+  `cycles_per_ms`, the current CPU speed.
 - **Kill a stuck program** with `POST /api/control/reboot_shell`. This is
   better than restarting the emulator.
 
@@ -183,9 +184,11 @@ A decimal-looking number like `100` means 0x100.
   action.
 - **Paused inside a BIOS stub.** When `CS` is F000, execution is inside an
   emulator service stub. `step` once or twice to get back to program code.
-- **Timer interrupt after pausing.** The first `step` after a pause usually
-  enters the timer interrupt (`HLE INT 08h`), because real time kept passing
-  while paused. That is expected, not a bug in the program.
+- **Emulated time.** Timers run on emulated time, which advances with
+  executed instructions at `cycles_per_ms` (see `/api/status`) and stops
+  while paused. Pausing, stepping and tracing don't change when a program
+  sees its timer interrupts (`HLE INT 08h` or its own handler) in
+  instruction terms, but a timer interrupt can arrive between any two steps.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
   16 ms). Use `icount` for exact ordering.
 - **Ring buffer size.** The trace ring holds 1,000,000 instructions by

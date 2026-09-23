@@ -35,6 +35,9 @@ pub fn handle(cpu: &mut Cpu) {
 
                 // Write it back to the stack
                 cpu.bus.write_16(stack_addr, retry_ip);
+
+                // Nothing to do until a key or timer interrupt arrives.
+                cpu.idle = true;
             }
         }
 

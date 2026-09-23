@@ -51,8 +51,6 @@ impl Slot {
 pub struct InstrCache {
     slots: Box<[Slot]>,
     mask: usize,
-    pub hits: u64,
-    pub misses: u64,
 }
 
 impl InstrCache {
@@ -62,12 +60,7 @@ impl InstrCache {
     pub fn new(capacity_log2: u32) -> Self {
         let n = 1usize << capacity_log2;
         let slots = vec![Slot::empty(); n].into_boxed_slice();
-        Self {
-            slots,
-            mask: n - 1,
-            hits: 0,
-            misses: 0,
-        }
+        Self { slots, mask: n - 1 }
     }
 
     #[inline(always)]
@@ -77,35 +70,30 @@ impl InstrCache {
         phys_ip & self.mask
     }
 
-    /// Lookup: returns `Some(instr)` only when the slot matches (cs, ip) and
-    /// the recorded page generation still matches the current one. Otherwise
-    /// the caller should decode fresh and call `insert`.
+    /// The decoded instruction at `cs:ip`. The cached decode is used only
+    /// when the slot matches (cs, ip) and the recorded page generation still
+    /// matches the current one; otherwise `decode` fills the slot afresh.
+    /// Returning a reference into the slot saves copying the instruction on
+    /// every hit.
     #[inline(always)]
-    pub fn lookup(&mut self, phys_ip: usize, cs: u16, ip: u16, page_gen: u32) -> Option<Instruction> {
+    pub fn get_or_decode(
+        &mut self,
+        phys_ip: usize,
+        cs: u16,
+        ip: u16,
+        page_gen: u32,
+        decode: impl FnOnce(&mut Instruction),
+    ) -> &Instruction {
         let idx = self.index(phys_ip);
         // SAFETY: idx is always in-bounds because we masked with `self.mask`
         // which is `len - 1` for a power-of-two-sized slots box.
-        let slot = unsafe { self.slots.get_unchecked(idx) };
-        if slot.cs == cs && slot.ip == ip && slot.page_gen == page_gen {
-            self.hits += 1;
-            Some(slot.instr)
-        } else {
-            self.misses += 1;
-            None
+        let slot = unsafe { self.slots.get_unchecked_mut(idx) };
+        if slot.cs != cs || slot.ip != ip || slot.page_gen != page_gen {
+            decode(&mut slot.instr);
+            slot.cs = cs;
+            slot.ip = ip;
+            slot.page_gen = page_gen;
         }
-    }
-
-    #[inline(always)]
-    pub fn insert(&mut self, phys_ip: usize, cs: u16, ip: u16, page_gen: u32, instr: Instruction) {
-        let idx = self.index(phys_ip);
-        // SAFETY: see `lookup`.
-        unsafe {
-            *self.slots.get_unchecked_mut(idx) = Slot {
-                cs,
-                ip,
-                page_gen,
-                instr,
-            };
-        }
+        &slot.instr
     }
 }

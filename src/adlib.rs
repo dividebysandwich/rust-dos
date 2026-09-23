@@ -8,8 +8,6 @@
 //! curves and attenuation mapping are approximations, not bit-exact to the
 //! real YM3812.
 
-use std::time::Instant;
-
 const NUM_OPERATORS: usize = 18;
 const NUM_CHANNELS: usize = 9;
 
@@ -233,15 +231,18 @@ pub struct AdLib {
     // Pseudo-noise for rhythm percussion
     noise_state: u32,
 
-    // Timer state (for AdLib detection)
+    // Timer state (for AdLib detection). Start times are in emulated
+    // microseconds, so detection routines see the timers expire after the
+    // right amount of emulated time, whether they wait with the PIT or with
+    // a loop of port reads.
     timer1_value: u8,
     timer2_value: u8,
     timer1_mask: bool,
     timer2_mask: bool,
     timer1_running: bool,
     timer2_running: bool,
-    timer1_started: Option<Instant>,
-    timer2_started: Option<Instant>,
+    timer1_started: Option<u64>,
+    timer2_started: Option<u64>,
     timer1_expired: bool,
     timer2_expired: bool,
 }
@@ -284,14 +285,16 @@ impl AdLib {
     }
 
     /// Writing to port 0x389 stores the value in the selected register.
-    pub fn write_register_data(&mut self, value: u8) {
+    /// `now_us` is the current emulated time in microseconds.
+    pub fn write_register_data(&mut self, value: u8, now_us: u64) {
         let reg = self.current_reg;
-        self.apply_register(reg, value);
+        self.apply_register(reg, value, now_us);
     }
 
     /// Status-byte read on port 0x388. Games poll this to detect AdLib.
-    pub fn read_status(&mut self) -> u8 {
-        self.update_timers();
+    /// `now_us` is the current emulated time in microseconds.
+    pub fn read_status(&mut self, now_us: u64) -> u8 {
+        self.update_timers(now_us);
         let mut status = 0u8;
         if self.timer1_expired || self.timer2_expired {
             status |= 0x80;
@@ -306,10 +309,10 @@ impl AdLib {
         status | 0x06
     }
 
-    fn update_timers(&mut self) {
+    fn update_timers(&mut self, now_us: u64) {
         if self.timer1_running {
             if let Some(start) = self.timer1_started {
-                let elapsed_us = start.elapsed().as_micros() as u64;
+                let elapsed_us = now_us.saturating_sub(start);
                 let period_us = (256 - self.timer1_value as u64) * 80;
                 if elapsed_us >= period_us && !self.timer1_mask {
                     self.timer1_expired = true;
@@ -318,7 +321,7 @@ impl AdLib {
         }
         if self.timer2_running {
             if let Some(start) = self.timer2_started {
-                let elapsed_us = start.elapsed().as_micros() as u64;
+                let elapsed_us = now_us.saturating_sub(start);
                 let period_us = (256 - self.timer2_value as u64) * 320;
                 if elapsed_us >= period_us && !self.timer2_mask {
                     self.timer2_expired = true;
@@ -327,7 +330,7 @@ impl AdLib {
         }
     }
 
-    fn apply_register(&mut self, reg: u8, value: u8) {
+    fn apply_register(&mut self, reg: u8, value: u8, now_us: u64) {
         self.registers[reg as usize] = value;
         match reg {
             0x01 => {
@@ -349,11 +352,11 @@ impl AdLib {
                     let t1_start = (value & 0x01) != 0;
                     let t2_start = (value & 0x02) != 0;
                     if t1_start && !self.timer1_running {
-                        self.timer1_started = Some(Instant::now());
+                        self.timer1_started = Some(now_us);
                         self.timer1_expired = false;
                     }
                     if t2_start && !self.timer2_running {
-                        self.timer2_started = Some(Instant::now());
+                        self.timer2_started = Some(now_us);
                         self.timer2_expired = false;
                     }
                     self.timer1_running = t1_start;

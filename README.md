@@ -64,6 +64,7 @@ configuration files.
 ```ini
 [emulator]
 scale=2
+cycles=max
 
 [drives]
 C=~/dos
@@ -75,8 +76,12 @@ D="~/dos/My CD" cdrom -label GAMECD
 D:
 ```
 
-* **`[emulator]`:** `scale` is the window scale factor. `-s/--scale`
-  overrides it.
+* **`[emulator]`:**
+  * `scale` is the window scale factor. `-s/--scale` overrides it.
+  * `cycles` is the CPU speed in instructions per millisecond. `max`, the
+    default, runs as fast as the host keeps up with in real time. Use a
+    number such as `3000` for old games that run too fast. `--cycles`
+    overrides it.
 * **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.

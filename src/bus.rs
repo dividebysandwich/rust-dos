@@ -61,16 +61,33 @@ pub struct Bus {
     pub pit_read_msb: bool,  // Channel 2 read LSB/MSB toggle
     pub pit_mode: u8,        // PIT Command Mode
     pub pit_write_msb: bool, // Toggle to handle 2-byte writes (LSB/MSB)
+    /// Channel 0 count register as assembled from port 0x40 writes. A
+    /// complete count is handed to `pit0`.
     pub pit0_divisor: u16,
     pub pit0_write_msb: bool,
     /// Toggle for alternating LSB/MSB when reading port 0x40 in 2-byte mode.
     pub pit0_read_msb: bool,
+    /// Channel 0 access mode from the last control word: 1 = LSB only,
+    /// 2 = MSB only, 3 = LSB then MSB.
+    pub pit0_access: u8,
     /// Value latched into the read buffer by a `latch counter` command on
     /// port 0x43. When `pit0_latched_active` is true, reads of port 0x40
     /// return this value instead of the live count until both bytes are read.
     pub pit0_latched: u16,
     pub pit0_latched_active: bool,
+    /// Channel 0 timing: when IRQ 0 fires.
+    pub pit0: crate::timer::Pit0,
+    /// Emulated time, advanced by the main loop.
+    pub clock: crate::timer::Clock,
     pub pic_mask: u8,
+    /// 8259 interrupt request register for edge-triggered lines (IRQ 0).
+    /// IRQ 1 and IRQ 5 requests live in `irq1_pending` and `sb.irq_pending`.
+    pub pic_irr: u8,
+    /// 8259 in-service register: interrupts delivered but not yet
+    /// acknowledged with an EOI. They block lines of equal or lower priority.
+    pub pic_isr: u8,
+    /// OCW3 read register select: port 0x20 reads return ISR instead of IRR.
+    pub pic_read_isr: bool,
     pub audio_phase: f32, // Track wave position to prevent clicking
     pub dta_segment: u16,
     pub dta_offset: u16,
@@ -132,9 +149,15 @@ impl Bus {
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
             pit0_read_msb: false,
+            pit0_access: 3,
             pit0_latched: 0,
             pit0_latched_active: false,
+            pit0: crate::timer::Pit0::new(),
+            clock: crate::timer::Clock::new(crate::timer::CpuSpeed::Max.initial_cycles()),
             pic_mask: 0x00,
+            pic_irr: 0,
+            pic_isr: 0,
+            pic_read_isr: false,
             audio_phase: 0.0,
             log_file: None,
             dta_segment: 0x1000,
@@ -538,7 +561,22 @@ impl Bus {
     }
 
     // Write a 16-bit value to memory (Little Endian)
+    #[inline(always)]
     pub fn write_16(&mut self, addr: usize, value: u16) -> bool {
+        // Fast path: both bytes in conventional memory, as in write_8.
+        if addr + 1 < ADDR_VGA_GRAPHICS {
+            // SAFETY: ram is a fixed 1 MiB buffer; addr + 1 < 0xA0000.
+            unsafe {
+                *self.ram.get_unchecked_mut(addr) = value as u8;
+                *self.ram.get_unchecked_mut(addr + 1) = (value >> 8) as u8;
+                // Both bytes' pages: the word may straddle a page boundary.
+                let g = self.page_gen.get_unchecked_mut((addr >> 12) & 0xFF);
+                *g = g.wrapping_add(1);
+                let g = self.page_gen.get_unchecked_mut(((addr + 1) >> 12) & 0xFF);
+                *g = g.wrapping_add(1);
+            }
+            return false;
+        }
         // Low byte
         let d1 = self.write_8(addr, (value & 0xFF) as u8);
         // High byte
@@ -547,7 +585,17 @@ impl Bus {
     }
 
     // read_16 helper
+    #[inline(always)]
     pub fn read_16(&self, addr: usize) -> u16 {
+        if addr + 1 < ADDR_VGA_GRAPHICS {
+            // SAFETY: ram is a fixed 1 MiB buffer; addr + 1 < 0xA0000.
+            return unsafe {
+                u16::from_le_bytes([
+                    *self.ram.get_unchecked(addr),
+                    *self.ram.get_unchecked(addr + 1),
+                ])
+            };
+        }
         let low = self.read_8(addr) as u16;
         let high = self.read_8(addr + 1) as u16;
         (high << 8) | low
@@ -575,15 +623,111 @@ impl Bus {
         self.write_32(addr + 4, (value >> 32) as u32);
     }
 
+    /// Start an execution batch that runs until instruction `end`.
+    pub fn start_batch(&mut self, end: u64) {
+        self.clock.set_batch_end(end);
+        self.clock.schedule(self.pit0.next_event());
+    }
+
+    /// Change the emulated CPU speed (instructions per emulated ms).
+    pub fn set_cycles_per_ms(&mut self, cycles_per_ms: u32) {
+        self.clock.set_cycles_per_ms(cycles_per_ms);
+        self.clock.schedule(self.pit0.next_event());
+    }
+
+    /// Bring the PIT up to the current instruction and request IRQ 0 if it
+    /// fired. The main loop calls this when `clock.icount` reaches
+    /// `clock.deadline`.
+    pub fn service_timers(&mut self) {
+        if self.pit0.advance(self.clock.now_ticks()) {
+            self.pic_irr |= 0x01;
+        }
+        self.clock.schedule(self.pit0.next_event());
+    }
+
+    /// Power-on state of the PIT channel 0 and the PIC, so a program that
+    /// exits (or is killed) with a fast timer or masked IRQs doesn't leave
+    /// them behind for the shell and the next program.
+    pub fn reset_timers(&mut self) {
+        // Mode 3, count 65536, counting from now.
+        self.pit0.set_mode(3);
+        self.pit0.write_count(0, self.clock.now_ticks());
+        self.pit0_divisor = 0;
+        self.pit0_write_msb = false;
+        self.pit0_read_msb = false;
+        self.pit0_access = 3;
+        self.pit0_latched_active = false;
+        self.pic_mask = 0;
+        self.pic_irr = 0;
+        self.pic_isr = 0;
+        self.pic_read_isr = false;
+        self.clock.schedule(self.pit0.next_event());
+    }
+
+    /// Requested lines: edge-triggered IRQ 0 plus the level sources.
+    fn pic_requests(&self) -> u8 {
+        self.pic_irr | ((self.irq1_pending as u8) << 1) | ((self.sb.irq_pending as u8) << 5)
+    }
+
+    /// The IRQ line the PIC would deliver now: requested, not masked, and not
+    /// blocked by an interrupt of equal or higher priority still in service.
+    #[inline(always)]
+    pub fn pic_pending_irq(&self) -> Option<u8> {
+        let requests = self.pic_requests() & !self.pic_mask;
+        if requests == 0 {
+            return None;
+        }
+        let line = requests.trailing_zeros() as u8;
+        if self.pic_isr != 0 && self.pic_isr.trailing_zeros() as u8 <= line {
+            return None;
+        }
+        Some(line)
+    }
+
+    /// The CPU took interrupt `line`: it is in service until an EOI.
+    pub fn pic_acknowledge(&mut self, line: u8) {
+        self.pic_isr |= 1 << line;
+        match line {
+            0 => self.pic_irr &= !0x01,
+            1 => self.irq1_pending = false,
+            // The Sound Blaster holds IRQ 5 until the driver acknowledges it
+            // by reading port 0x22E.
+            _ => {}
+        }
+    }
+
+    /// Discard a request for `line`, for lines with no handler installed.
+    pub fn pic_drop(&mut self, line: u8) {
+        match line {
+            0 => self.pic_irr &= !0x01,
+            1 => self.irq1_pending = false,
+            5 => self.sb.irq_pending = false,
+            _ => {}
+        }
+    }
+
     // Write to an I/O Port
     pub fn io_write(&mut self, port: u16, value: u8) {
+        self.clock.stall(crate::timer::IO_WRITE_NS);
         match port {
-            // PIC (Programmable Interrupt Controller) 0x20 / 0x21
-            // We ignore initialization words (ICWs) but acknowledge EOI (0x20).
+            // PIC (Programmable Interrupt Controller) 0x20 / 0x21.
+            // Initialization words (ICWs) are ignored.
             0x20 => {
-                self.log_string("[PIC] EOI Received");
-                // Command Register. 0x20 = End of Interrupt (EOI).
-                // log_string("[PIC] Command received");
+                if value & 0x18 == 0x08 {
+                    // OCW3: select the register port 0x20 reads return.
+                    if value & 0x02 != 0 {
+                        self.pic_read_isr = value & 0x01 != 0;
+                    }
+                } else if value & 0x10 == 0 {
+                    // OCW2: end of interrupt.
+                    match value >> 5 {
+                        // Non-specific: the highest priority line in service.
+                        0b001 | 0b101 => self.pic_isr &= self.pic_isr.wrapping_sub(1),
+                        // Specific: the line in bits 0-2.
+                        0b011 | 0b111 => self.pic_isr &= !(1 << (value & 0x07)),
+                        _ => {}
+                    }
+                }
             }
             0x21 => {
                 self.log_string(&format!("[PIC] IMR Set to {:02X}", value));
@@ -594,18 +738,41 @@ impl Bus {
             // Controls the system tick rate (IRQ 0).
             // Default is 18.2 Hz (Divisor 65535).
             0x40 => {
-                if !self.pit0_write_msb {
-                    // Write LSB
-                    self.pit0_divisor = (self.pit0_divisor & 0xFF00) | (value as u16);
-                    self.pit0_write_msb = true; // Next write is MSB
-                } else {
-                    // Write MSB
-                    self.pit0_divisor = (self.pit0_divisor & 0x00FF) | ((value as u16) << 8);
-                    self.pit0_write_msb = false; // Reset to LSB
-
-                    if self.pit0_divisor > 0 {
-                        let hz = 1_193_182 / self.pit0_divisor as u32;
-                        self.log_string(&format!("[PIT] Channel 0 Frequency set to {} Hz", hz));
+                let complete = match self.pit0_access {
+                    1 => {
+                        self.pit0_divisor = value as u16;
+                        true
+                    }
+                    2 => {
+                        self.pit0_divisor = (value as u16) << 8;
+                        true
+                    }
+                    _ if !self.pit0_write_msb => {
+                        // Write LSB
+                        self.pit0_divisor = (self.pit0_divisor & 0xFF00) | (value as u16);
+                        self.pit0_write_msb = true; // Next write is MSB
+                        false
+                    }
+                    _ => {
+                        // Write MSB
+                        self.pit0_divisor = (self.pit0_divisor & 0x00FF) | ((value as u16) << 8);
+                        self.pit0_write_msb = false; // Reset to LSB
+                        true
+                    }
+                };
+                if complete {
+                    // Programs that play sound through the timer rewrite the
+                    // count on every tick. Only log the first count after a
+                    // control word, which is how programs set a new rate.
+                    let was_counting = self.pit0.is_counting();
+                    self.pit0
+                        .write_count(self.pit0_divisor, self.clock.now_ticks());
+                    self.clock.schedule(self.pit0.next_event());
+                    if !was_counting {
+                        self.log_string(&format!(
+                            "[PIT] Channel 0 Frequency set to {} Hz",
+                            1_193_182 / self.pit0.reload()
+                        ));
                     }
                 }
             }
@@ -641,14 +808,22 @@ impl Bus {
                     // Latch counter command: freeze the current count into
                     // the read buffer so LSB/MSB reads stay consistent.
                     if channel == 0 {
-                        self.pit0_latched = self.pit0_current_count();
+                        self.pit0_latched = self.pit0.count(self.clock.now_ticks());
                         self.pit0_latched_active = true;
                         self.pit0_read_msb = false;
                     }
                 } else {
                     match channel {
-                        0 => self.pit0_write_msb = false, // Reset Channel 0 LSB/MSB
-                        2 => self.pit_write_msb = false,  // Reset Channel 2 LSB/MSB
+                        0 => {
+                            // New mode: the counter stops until a count is
+                            // written, and LSB/MSB sequencing starts over.
+                            self.pit0_write_msb = false;
+                            self.pit0_read_msb = false;
+                            self.pit0_access = access;
+                            self.pit0.set_mode((value >> 1) & 0x07);
+                            self.clock.schedule(self.pit0.next_event());
+                        }
+                        2 => self.pit_write_msb = false, // Reset Channel 2 LSB/MSB
                         _ => {}
                     }
                 }
@@ -671,7 +846,8 @@ impl Bus {
                 self.adlib.write_register_select(value);
             }
             0x389 | 0x229 | 0x221 => {
-                self.adlib.write_register_data(value);
+                self.adlib
+                    .write_register_data(value, self.clock.now_micros());
             }
 
             // --- Sound Blaster DSP (base 0x220) ---
@@ -755,48 +931,52 @@ impl Bus {
         }
     }
 
-    /// Compute the current PIT channel 0 count (0..=divisor-1). Real hardware
-    /// counts DOWN from `divisor` toward 0 at 1.193182 MHz, then reloads.
-    /// Programs time short intervals by latching two reads and subtracting —
-    /// if we always returned 0xFF, the two reads would be identical, elapsed
-    /// would evaluate to zero, and the next `DIV elapsed` would crash.
-    fn pit0_current_count(&self) -> u16 {
-        let divisor = if self.pit0_divisor == 0 {
-            0x10000u32
-        } else {
-            self.pit0_divisor as u32
-        };
-        let micros = self.start_time.elapsed().as_micros() as u64;
-        // ticks = micros * 1_193_182 / 1_000_000, done without overflow.
-        let ticks = micros.wrapping_mul(1_193_182) / 1_000_000;
-        let rem = (ticks % divisor as u64) as u32;
-        ((divisor - 1 - rem) & 0xFFFF) as u16
-    }
-
     // Read from an I/O Port
     pub fn io_read(&mut self, port: u16) -> u8 {
+        self.clock.stall(crate::timer::IO_READ_NS);
         match port {
+            // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
+            // 0x21 the interrupt mask. Programs read-modify-write the mask
+            // to unmask their IRQ without disturbing the others.
+            0x20 => {
+                if self.pic_read_isr {
+                    self.pic_isr
+                } else {
+                    self.pic_requests()
+                }
+            }
+            0x21 => self.pic_mask,
+
             // Port 0x40 — PIT channel 0 (system timer) data. The counter
-            // decrements at 1.193 MHz. Programs that need sub-tick timing
-            // (MicroProse's VGAME computes 1/elapsed_time, which faults if
-            // elapsed == 0) issue a latch command and read LSB then MSB.
+            // decrements at 1.193 MHz of emulated time. Programs that need
+            // sub-tick timing (MicroProse's VGAME computes 1/elapsed_time,
+            // which faults if elapsed == 0) issue a latch command and read
+            // LSB then MSB.
             0x40 => {
                 let val = if self.pit0_latched_active {
                     self.pit0_latched
                 } else {
-                    self.pit0_current_count()
+                    self.pit0.count(self.clock.now_ticks())
                 };
-                let byte = if !self.pit0_read_msb {
-                    self.pit0_read_msb = true;
-                    (val & 0xFF) as u8
-                } else {
-                    self.pit0_read_msb = false;
-                    if self.pit0_latched_active {
+                match self.pit0_access {
+                    1 => {
                         self.pit0_latched_active = false;
+                        (val & 0xFF) as u8
                     }
-                    (val >> 8) as u8
-                };
-                byte
+                    2 => {
+                        self.pit0_latched_active = false;
+                        (val >> 8) as u8
+                    }
+                    _ if !self.pit0_read_msb => {
+                        self.pit0_read_msb = true;
+                        (val & 0xFF) as u8
+                    }
+                    _ => {
+                        self.pit0_read_msb = false;
+                        self.pit0_latched_active = false;
+                        (val >> 8) as u8
+                    }
+                }
             }
 
             // Port 0x0201 — game port (joystick). Reads return four axis
@@ -848,7 +1028,7 @@ impl Bus {
             // timing loops ("wait until count < threshold"), independent of
             // whether they ever use the speaker. Returning a constant would
             // hang those loops, so we synthesize the current count from the
-            // active divisor and elapsed time, matching real hardware's
+            // active divisor and emulated time, matching real hardware's
             // 1.193 MHz tick rate.
             0x42 => {
                 let divisor = if self.pit_divisor == 0 {
@@ -856,8 +1036,7 @@ impl Bus {
                 } else {
                     self.pit_divisor as u32
                 };
-                let micros = self.start_time.elapsed().as_micros() as u64;
-                let ticks = micros.wrapping_mul(1_193_182) / 1_000_000;
+                let ticks = self.clock.now_ticks();
                 let rem = (ticks % divisor as u64) as u32;
                 let count = ((divisor - 1 - rem) & 0xFFFF) as u16;
                 if !self.pit_read_msb {
@@ -890,7 +1069,7 @@ impl Bus {
             // expired, bit 5 = timer2 expired. Games poll this to detect the
             // card by arming timer1 and checking that the bits flip in time.
             // Mirrored onto the SB's FM ports for AdLib-on-SB detection.
-            0x388 | 0x228 | 0x220 => self.adlib.read_status(),
+            0x388 | 0x228 | 0x220 => self.adlib.read_status(self.clock.now_micros()),
             0x389 | 0x229 | 0x221 => 0xFF,
 
             // --- Sound Blaster DSP reads ---

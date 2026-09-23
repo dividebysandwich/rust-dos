@@ -16,6 +16,10 @@
 [emulator]
 # Window scale factor. -s/--scale overrides it.
 #scale=2
+# CPU speed in instructions per millisecond, or max to run as fast as the
+# host keeps up with in real time. Lower it for old games that run too
+# fast. --cycles overrides it.
+#cycles=max
 
 [drives]
 # Mount host directories as DOS drives A: to Y:

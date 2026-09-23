@@ -32,6 +32,7 @@ mod mouse;
 mod recorder;
 mod sb;
 mod shell;
+mod timer;
 mod video;
 
 #[derive(Parser, Debug)]
@@ -63,6 +64,12 @@ struct Args {
     /// Allocated only once tracing is enabled via the debug server.
     #[arg(long, default_value_t = 1_000_000)]
     trace_capacity: usize,
+
+    /// Emulated CPU speed in instructions per millisecond, or "max" for as
+    /// fast as the host keeps up with [default: max, or the config file's
+    /// cycles]
+    #[arg(long, value_name = "N|max", value_parser = timer::CpuSpeed::parse)]
+    cycles: Option<timer::CpuSpeed>,
 }
 
 fn main() -> Result<(), String> {
@@ -145,8 +152,14 @@ fn main() -> Result<(), String> {
     let mut cached_frame: Vec<u8> =
         vec![0u8; (video::SCREEN_WIDTH * video::SCREEN_HEIGHT * 3) as usize];
 
+    // Paces emulated time against the wall clock, one frame at a time.
+    let speed = args.cycles.or(config.cycles).unwrap_or(timer::CpuSpeed::Max);
+    cpu.bus.set_cycles_per_ms(speed.initial_cycles());
+    let mut pacer = timer::Pacer::new(speed, std::time::Instant::now());
+
     // Main Loop
     'running: loop {
+        let frame_start = std::time::Instant::now();
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'running,
@@ -288,22 +301,26 @@ fn main() -> Result<(), String> {
             }
         }
 
-        // Sample the host clock ONCE per 30k-instruction batch rather than on
-        // every iteration. `Instant::elapsed()` is cheap on Linux (vDSO) but
-        // even cheap syscalls at 30 000 × 60fps = 1.8M calls/s add up. Losing
-        // at most one batch of timing resolution (~16ms worst-case) is well
-        // within the 55ms PIT tick budget.
-        let now_ms = cpu.bus.start_time.elapsed().as_millis();
-        let timer_due =
-            (cpu.bus.pic_mask & 0x01) == 0 && now_ms.wrapping_sub(cpu.last_timer_tick) >= 55;
-        let mut timer_fired = false;
+        // Run the emulated machine up to the wall clock. Emulated time is
+        // counted in instructions (see timer.rs), so timer interrupts land on
+        // the right instructions however the work is batched between frames.
+        let batch_start = std::time::Instant::now();
+        let batch_end = if dbg.paused {
+            cpu.bus.clock.icount
+        } else {
+            pacer.batch_end(&cpu.bus.clock, batch_start)
+        };
+        cpu.bus.start_batch(batch_end);
+        let batch_icount = cpu.bus.clock.icount;
+        let batch_stalled = cpu.bus.clock.stalled;
+        // Instructions skipped while the CPU waited for an interrupt.
+        let mut idle_instructions = 0u64;
 
-        // Hoist the iced_x86 decoder and instruction buffer OUT of the inner
-        // loop. Creating a fresh `Decoder::with_ip` every instruction did not
-        // allocate heap, but it re-initialized a ~256-byte struct 30 000 times
-        // per frame, and re-creating the `Instruction` via `decode()` by
-        // value forced a stack copy each iteration. Reusing a single decoder
-        // and calling `decode_out(&mut instr)` avoids both.
+        // Hoist the iced_x86 decoder OUT of the inner loop. Creating a fresh
+        // `Decoder::with_ip` every instruction did not allocate heap, but it
+        // re-initialized a ~256-byte struct for every decode. Reusing a
+        // single decoder and calling `decode_out` straight into the
+        // instruction cache slot avoids that and any stack copies.
         //
         // SAFETY: we build an overlapping read-only view of `cpu.bus.ram`
         // that outlives the subsequent mutable borrows (execute_instruction
@@ -322,34 +339,35 @@ fn main() -> Result<(), String> {
         let (ram_ptr, ram_len) = (cpu.bus.ram.as_ptr(), cpu.bus.ram.len());
         let ram_slice: &'static [u8] = unsafe { std::slice::from_raw_parts(ram_ptr, ram_len) };
         let mut decoder = Decoder::with_ip(16, ram_slice, 0, DecoderOptions::NONE);
-        let mut instr = iced_x86::Instruction::default();
 
         // Per-instruction debug hook (breakpoints / stepping / tracing) is
         // only consulted when something actually needs it.
         let dbg_hot = dbg.begin_batch(&cpu);
-        let batch_len = if dbg.paused { 0 } else { 500_000 };
 
-        // Execute instructions. The batch size is much larger than the legacy
-        // 30k because the decoded-instruction cache makes each fetch cheap
-        // enough that we can afford to execute many more x86 instructions per
-        // 16 ms frame — without this, the emulator idled the host CPU while
-        // still running at <2 MIPS. The outer SDL loop still caps wall-clock
-        // pacing via thread::sleep, so this is an upper bound, not a target.
-        for _ in 0..batch_len {
+        loop {
+            // Timer events, and the end of the batch.
+            if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
+                if cpu.bus.clock.icount >= cpu.bus.clock.batch_end() {
+                    break;
+                }
+                cpu.bus.service_timers();
+            }
+
             // Deliver pending hardware IRQs at the start of each instruction
             // as a CPU would, but only when the program has IF=1 (interrupts
-            // enabled) and the PIC IMR allows the line. Missing the exact
-            // instruction boundary doesn't matter — any iteration where IF
-            // is high will catch the pending IRQ.
+            // enabled) and the PIC lets the line through: not masked in the
+            // IMR and not blocked by an interrupt still in service.
             if cpu.get_cpu_flag(CpuFlags::IF) {
-                // IRQ 0 (timer) at 18.2 Hz — fires at most once per batch.
-                if timer_due && !timer_fired {
-                    let ivt = 0x08usize * 4;
+                // IRQ 0 (timer), IRQ 1 (keyboard) and IRQ 5 (Sound Blaster),
+                // highest priority first. The Sound Blaster ISR acks IRQ 5 by
+                // reading port 0x22E, which clears irq_pending via
+                // Bus::io_read.
+                if let Some(line) = cpu.bus.pic_pending_irq() {
+                    let ivt = (0x08 + line as usize) * 4;
                     let handler_ip = cpu.bus.read_16(ivt);
                     let handler_cs = cpu.bus.read_16(ivt + 2);
                     if handler_cs != 0 || handler_ip != 0 {
-                        cpu.last_timer_tick = now_ms;
-                        timer_fired = true;
+                        cpu.bus.pic_acknowledge(line);
                         cpu.push(cpu.get_cpu_flags().bits());
                         cpu.push(cpu.cs);
                         cpu.push(cpu.ip);
@@ -357,34 +375,14 @@ fn main() -> Result<(), String> {
                         cpu.ip = handler_ip;
                         cpu.set_cpu_flag(CpuFlags::IF, false);
                         cpu.set_cpu_flag(CpuFlags::TF, false);
-                        continue;
+                    } else {
+                        // No handler installed — drop the IRQ rather than
+                        // spinning on it.
+                        cpu.bus.pic_drop(line);
                     }
+                    continue;
                 }
 
-                // IRQ 1 (keyboard) — gated by PIC IMR bit 1. Fired once per
-                // key event so custom INT 09h ISRs see the scan code.
-                if cpu.bus.irq1_pending && (cpu.bus.pic_mask & 0x02) == 0 {
-                    cpu.bus.irq1_pending = false;
-                    let ivt = 0x09usize * 4;
-                    let handler_ip = cpu.bus.read_16(ivt);
-                    let handler_cs = cpu.bus.read_16(ivt + 2);
-                    if handler_cs != 0 || handler_ip != 0 {
-                        cpu.push(cpu.get_cpu_flags().bits());
-                        cpu.push(cpu.cs);
-                        cpu.push(cpu.ip);
-                        cpu.cs = handler_cs;
-                        cpu.ip = handler_ip;
-                        cpu.set_cpu_flag(CpuFlags::IF, false);
-                        cpu.set_cpu_flag(CpuFlags::TF, false);
-                        continue;
-                    }
-                }
-
-                // IRQ 5 (Sound Blaster) — gated by PIC IMR bit 5. Raised by
-                // DMA terminal count or the DSP force-IRQ opcodes. The ISR
-                // acks it by reading port 0x22E, which clears irq_pending
-                // via Bus::io_read. EOI to the PIC happens through the
-                // existing port 0x20 write-through.
                 // Mouse event callback — INT 33h AX=000C registers a far
                 // pointer that the "driver" should invoke on the events
                 // in its mask. Carrier Command (and most Microsoft-mouse
@@ -427,33 +425,7 @@ fn main() -> Result<(), String> {
                     cpu.set_cpu_flag(CpuFlags::TF, false);
                     continue;
                 }
-
-                if cpu.bus.sb.irq_pending && (cpu.bus.pic_mask & 0x20) == 0 {
-                    // Don't clear the flag here — the driver must ack via
-                    // 0x22E. This matches real hardware and keeps the ISR
-                    // path identical to DOSBox's SB implementation.
-                    let ivt = 0x0Dusize * 4; // IRQ 5 → INT 0Dh (0x08 + 5)
-                    let handler_ip = cpu.bus.read_16(ivt);
-                    let handler_cs = cpu.bus.read_16(ivt + 2);
-                    if handler_cs != 0 || handler_ip != 0 {
-                        cpu.push(cpu.get_cpu_flags().bits());
-                        cpu.push(cpu.cs);
-                        cpu.push(cpu.ip);
-                        cpu.cs = handler_cs;
-                        cpu.ip = handler_ip;
-                        cpu.set_cpu_flag(CpuFlags::IF, false);
-                        cpu.set_cpu_flag(CpuFlags::TF, false);
-                        continue;
-                    } else {
-                        // No handler installed — drop the IRQ rather than
-                        // spinning on it. A properly configured SB driver
-                        // always installs its ISR before unmasking IRQ 5.
-                        cpu.bus.sb.irq_pending = false;
-                    }
-                }
             }
-
-            let prev_ip = cpu.ip;
 
             // --- INJECT NEXT BATCH LINE ---
             // If we're idle in shell-land (no child program on the stack and CS
@@ -462,9 +434,9 @@ fn main() -> Result<(), String> {
             // typed command. We echo the line at a synthesized prompt so the
             // user sees what's running, MS-DOS style. A leading '@' suppresses
             // the echo.
-            if cpu.pending_command.is_none()
+            if cpu.cs == 0
+                && cpu.pending_command.is_none()
                 && !cpu.batch_queue.is_empty()
-                && cpu.cs == 0
                 && cpu.process_stack.is_empty()
             {
                 let raw = cpu.batch_queue.pop_front().unwrap();
@@ -485,7 +457,10 @@ fn main() -> Result<(), String> {
             }
 
             // --- HANDLE PENDING COMMANDS (Outside Interrupts) ---
-            if let Some(cmd) = cpu.pending_command.take() {
+            // (Checked before taking it: `take` would store None back on
+            // every instruction.)
+            if cpu.pending_command.is_some() {
+                let cmd = cpu.pending_command.take().unwrap();
                 // We have a command from the shell!
                 cpu.bus
                     .log_string(&format!("[MAIN] Processing Command: {}", cmd));
@@ -619,22 +594,27 @@ fn main() -> Result<(), String> {
                 cpu.set_cpu_flag(CpuFlags::CF, hle_cf);
                 cpu.set_cpu_flag(CpuFlags::ZF, hle_zf);
 
+                cpu.bus.clock.icount += 1;
+                if cpu.idle {
+                    // A BIOS service is waiting for input: skip ahead to the
+                    // next timer event instead of spinning on the retry.
+                    cpu.idle = false;
+                    idle_instructions += cpu.bus.clock.skip_to_deadline();
+                }
                 continue; // Done for this cycle
             }
 
             // Decode via the decoded-instruction cache. On a hit (the common
             // case inside hot loops) we skip iced's decode path entirely and
-            // copy the stored Instruction into our local buffer. On a miss we
-            // fall back to the reused decoder and insert the result.
+            // use the stored Instruction in place. On a miss the reused
+            // decoder fills the cache slot.
             let page_gen = cpu.bus.page_gen[(phys_ip >> 12) & 0xFF];
-            if let Some(cached) = instr_cache.lookup(phys_ip, cpu.cs, cpu.ip, page_gen) {
-                instr = cached;
-            } else {
+            let ip = cpu.ip;
+            let instr = instr_cache.get_or_decode(phys_ip, cpu.cs, ip, page_gen, |slot| {
                 decoder.set_position(phys_ip).unwrap();
-                decoder.set_ip(cpu.ip as u64);
-                decoder.decode_out(&mut instr);
-                instr_cache.insert(phys_ip, cpu.cs, cpu.ip, page_gen, instr);
-            }
+                decoder.set_ip(ip as u64);
+                decoder.decode_out(slot);
+            });
 
             if debug_mode || cpu.debug_qb_print {
                 // Filter out the 'Wait for Key' interrupt loop to save disk space
@@ -680,7 +660,9 @@ fn main() -> Result<(), String> {
                 }
             }
 
-            cpu.trace_qb_conversion(&instr);
+            if cpu.debug_qb_print {
+                cpu.trace_qb_conversion(instr);
+            }
 
             cpu.ip = instr.next_ip() as u16;
 
@@ -694,16 +676,21 @@ fn main() -> Result<(), String> {
                 break; // Break inner execution batch
             }
 
-            // Yield if we are in a tight loop
-            if cpu.ip == prev_ip {
-                std::thread::yield_now();
-            }
-
             // Make it so
-            instructions::execute_instruction(&mut cpu, &instr);
+            instructions::execute_instruction(&mut cpu, instr);
+            cpu.bus.clock.icount += 1;
+
+            if cpu.state == CpuState::Halted {
+                // HLT: nothing runs until the next interrupt.
+                cpu.state = CpuState::Running;
+                idle_instructions += cpu.bus.clock.skip_to_deadline();
+            }
         }
 
         dbg.end_batch(&cpu);
+        let exec_time = batch_start.elapsed();
+        let stalled = cpu.bus.clock.stalled - batch_stalled;
+        let executed = cpu.bus.clock.icount - batch_icount - idle_instructions - stalled;
 
         // Update Audio
         pump_audio(&mut cpu.bus);
@@ -846,7 +833,11 @@ fn main() -> Result<(), String> {
         canvas.copy(&texture, None, None)?;
         canvas.present();
 
-        std::thread::sleep(Duration::from_millis(16));
+        let overhead = frame_start.elapsed().saturating_sub(exec_time);
+        if let Some(cycles) = pacer.end_frame(&cpu.bus.clock, executed, exec_time, overhead) {
+            cpu.bus.set_cycles_per_ms(cycles);
+        }
+        pacer.wait_for_next_frame();
     }
 
     Ok(())

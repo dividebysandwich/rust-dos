@@ -129,6 +129,10 @@ pub struct Cpu {
     pub trace_log: VecDeque<String>,
     pub process_stack: Vec<ProcessContext>,
     pub last_timer_tick: u128,
+    /// Set by BIOS services that wait for input (INT 16h with an empty
+    /// keyboard buffer). The main loop then skips ahead to the next timer
+    /// event instead of spinning through the retry loop, like it does for HLT.
+    pub idle: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -206,6 +210,7 @@ impl Cpu {
             last_child_exit: 0,
             process_stack: Vec::new(),
             last_timer_tick: 0,
+            idle: false,
         }
     }
 
@@ -350,6 +355,7 @@ impl Cpu {
 
         // Execute
         crate::instructions::execute_instruction(self, &instr);
+        self.bus.clock.icount += 1;
     }
 
     // REMOVEME: Debugging QuickBASIC Float Conversion Issues
@@ -1105,6 +1111,8 @@ impl Cpu {
 
         self.flags = CpuFlags::from_bits_truncate(0x0202); // Reset Flags (IF=1)
         self.state = CpuState::Running;
+        self.idle = false;
+        self.bus.reset_timers();
 
         // No program is running yet: every paragraph of conventional memory
         // is available for allocation.

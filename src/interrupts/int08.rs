@@ -28,4 +28,8 @@ pub fn handle(cpu: &mut Cpu) {
     // We'll emulate the behavior: Explicitly run the handler logic for 1Ch.
     // But since we are inside `handle_hle`, we can't easily recurse cleanly without
     // potentially messing up the stack IF we did a real CPU loop.
+
+    // End of interrupt, as the BIOS handler does. Programs that hook INT 08h
+    // and chain here rely on it.
+    cpu.bus.io_write(0x20, 0x20);
 }

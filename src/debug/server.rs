@@ -682,7 +682,7 @@ Addresses are hex: "SEG:OFF" (registers allowed, e.g. "CS:IP", "DS:SI", "B800:0"
 or a linear address ("0x12345", "B8000").
 
 STATUS / SCREEN
-  GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps
+  GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed
   GET  /api/screenshot[?format=png|raw]    composited 640x400 frame (raw = RGB24 bytes)
   GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode)
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines

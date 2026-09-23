@@ -861,6 +861,7 @@ impl DebugHub {
             "icount": self.icount,
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
+            "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
             "cs_ip": format!("{:04X}:{:04X}", cpu.cs, cpu.ip),
             "cpu_state": format!("{:?}", cpu.state),
             "shell_idle": shell_idle(cpu),
