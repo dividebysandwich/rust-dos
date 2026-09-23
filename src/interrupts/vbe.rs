@@ -18,6 +18,8 @@ const MODE_LIST: u16 = 0x0180;
 /// The window function modes point at (WinFuncPtr), for programs that
 /// switch banks with a far call instead of INT 10h.
 pub const WINDOW_FUNCTION: u16 = 0x01C0;
+/// The protected-mode interface (function 0Ah).
+pub const PM_TABLE: u16 = 0x0200;
 
 const OEM: &[u8] = b"rust-dos VBE 2.0\0";
 const VENDOR: &[u8] = b"rust-dos\0";
@@ -43,6 +45,106 @@ pub fn install_rom(bus: &mut Bus) {
     list.extend([0xFF, 0xFF]);
     bus.load_bytes(rom(MODE_LIST), &list);
     bus.load_bytes(rom(WINDOW_FUNCTION), &[0xFE, 0x39, crate::bios::SERVICE_VBE_WINDOW, 0xCB]);
+    bus.load_bytes(rom(PM_TABLE), &pm_table());
+}
+
+/// Set Window in protected mode: bank DX of window BL (only A exists)
+/// goes to the Super VGA's bank register, CRTC 6Ah.
+#[rustfmt::skip]
+const PM_SET_WINDOW: &[u8] = &[
+    0x52,                   // push edx
+    0x50,                   // push eax
+    0xB0, 0x6A,             // mov al,6Ah
+    0x88, 0xD4,             // mov ah,dl
+    0x66, 0xBA, 0xD4, 0x03, // mov dx,3D4h
+    0x66, 0xEF,             // out dx,ax      ; index, then data at 3D5h
+    0x58,                   // pop eax
+    0x5A,                   // pop edx
+    0xC3,                   // ret
+];
+
+/// Set Display Start in protected mode: DX:CX is the start in bytes over 4
+/// (CRTC 0Dh, 0Ch and 69h). With BL=80h it returns once the vertical
+/// retrace that shows it has begun.
+#[rustfmt::skip]
+const PM_SET_DISPLAY_START: &[u8] = &[
+    0x50,                   // push eax
+    0x53,                   // push ebx
+    0x52,                   // push edx
+    0x88, 0xD7,             // mov bh,dl
+    0x66, 0xBA, 0xD4, 0x03, // mov dx,3D4h
+    0xB0, 0x0D,             // mov al,0Dh
+    0x88, 0xCC,             // mov ah,cl
+    0x66, 0xEF,             // out dx,ax
+    0xB0, 0x0C,             // mov al,0Ch
+    0x88, 0xEC,             // mov ah,ch
+    0x66, 0xEF,             // out dx,ax
+    0xB0, 0x69,             // mov al,69h
+    0x88, 0xFC,             // mov ah,bh
+    0x66, 0xEF,             // out dx,ax
+    0xF6, 0xC3, 0x80,       // test bl,80h
+    0x74, 0x0E,             // jz done
+    0x66, 0xBA, 0xDA, 0x03, // mov dx,3DAh
+    0xEC,                   // wait1: in al,dx
+    0xA8, 0x08,             // test al,8
+    0x75, 0xFB,             // jnz wait1     ; out of any retrace
+    0xEC,                   // wait2: in al,dx
+    0xA8, 0x08,             // test al,8
+    0x74, 0xFB,             // jz wait2      ; into the next
+    0x5A,                   // done: pop edx
+    0x5B,                   // pop ebx
+    0x58,                   // pop eax
+    0xC3,                   // ret
+];
+
+/// Set Primary Palette in protected mode: CX entries from DX on, from
+/// ES:EDI as blue, green, red and padding.
+#[rustfmt::skip]
+const PM_SET_PALETTE: &[u8] = &[
+    0x50,                   // push eax
+    0x51,                   // push ecx
+    0x52,                   // push edx
+    0x57,                   // push edi
+    0x88, 0xD0,             // mov al,dl
+    0x66, 0xBA, 0xC8, 0x03, // mov dx,3C8h
+    0xEE,                   // out dx,al
+    0x66, 0x42,             // inc dx
+    0x66, 0x85, 0xC9,       // test cx,cx
+    0x74, 0x15,             // jz done
+    0x26, 0x8A, 0x47, 0x02, // next: mov al,es:[edi+2]
+    0xEE,                   // out dx,al
+    0x26, 0x8A, 0x47, 0x01, // mov al,es:[edi+1]
+    0xEE,                   // out dx,al
+    0x26, 0x8A, 0x07,       // mov al,es:[edi]
+    0xEE,                   // out dx,al
+    0x83, 0xC7, 0x04,       // add edi,4
+    0x66, 0x49,             // dec cx
+    0x75, 0xEB,             // jnz next
+    0x5F,                   // done: pop edi
+    0x5A,                   // pop edx
+    0x59,                   // pop ecx
+    0x58,                   // pop eax
+    0xC3,                   // ret
+];
+
+/// The ports the protected-mode code uses; no memory-mapped registers.
+#[rustfmt::skip]
+const PM_PORTS: &[u8] = &[0xD4, 0x03, 0xD5, 0x03, 0xDA, 0x03, 0xC8, 0x03, 0xC9, 0x03, 0xFF, 0xFF, 0xFF, 0xFF];
+
+/// The table function 0Ah returns: the offsets of the three routines and
+/// of the port list, then the list and the 32-bit code, each routine
+/// ending in a near RET.
+fn pm_table() -> Vec<u8> {
+    let mut table = vec![0u8; 8];
+    let mut offsets = Vec::new();
+    for part in [PM_SET_WINDOW, PM_SET_DISPLAY_START, PM_SET_PALETTE, PM_PORTS] {
+        offsets.push(table.len() as u16);
+        table.extend_from_slice(part);
+    }
+    for (i, offset) in offsets.into_iter().enumerate() {
+        table[i * 2..i * 2 + 2].copy_from_slice(&offset.to_le_bytes());
+    }
+    table
 }
 
 fn write_bytes(bus: &mut Bus, addr: usize, bytes: &[u8]) {
@@ -76,6 +178,13 @@ pub fn handle(cpu: &mut Cpu) {
         0x06 => scan_line_length(cpu),
         0x08 => dac_width(cpu),
         0x09 => palette(cpu, es_di),
+        // The protected-mode interface: ES:DI, CX bytes long.
+        0x0A if cpu.get_reg8(Register::BL) == 0 => {
+            cpu.set_es(ROM_SEGMENT);
+            cpu.set_di(PM_TABLE);
+            cpu.set_cx(pm_table().len() as u16);
+            SUCCESS
+        }
         _ => FAILED,
     };
     cpu.set_ax(status);

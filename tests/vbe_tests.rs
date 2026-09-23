@@ -1,6 +1,8 @@
 //! The VESA BIOS Extensions: INT 10h AX=4Fxxh, banked and linear video
 //! memory, and the picture VESA modes make.
 
+mod pmrig;
+
 use iced_x86::Register;
 use rust_dos::cpu::Cpu;
 use rust_dos::interrupts::int10;
@@ -274,4 +276,55 @@ fn the_shell_takes_back_vesa_and_the_mouse_handler() {
     assert_eq!(cpu.bus.video_mode, VideoMode::Text80x25Color);
     assert!(cpu.bus.vbe.mode.is_none());
     assert_eq!((cpu.bus.mouse.callback_cs, cpu.bus.mouse.callback_mask), (0, 0));
+}
+
+#[test]
+fn the_protected_mode_interface_runs_in_a_32_bit_segment() {
+    use iced_x86::code_asm::{bl, cx, dx, eax, edi};
+    let mut rig = pmrig::Rig::new();
+    let cpu = &mut rig.cpu;
+    set_mode(cpu, 0x101);
+    assert_eq!(int10(cpu, 0x4F0A, 0, 0, 0), 0x004F);
+    let table = (cpu.es() as u32) << 4 | cpu.di() as u32;
+    assert!(cpu.cx() > 8);
+    let routine = |cpu: &Cpu, i: u32| table + cpu.bus.read_16((table + i * 2) as usize) as u32;
+    let (set_window, set_start, set_palette) = (routine(cpu, 0), routine(cpu, 1), routine(cpu, 2));
+    let ports = routine(cpu, 3) as usize;
+    assert_eq!(cpu.bus.read_16(ports), 0x3D4);
+
+    // Palette entry 7 as blue, green, red, padding.
+    rig.write32(pmrig::DATA, 0x0030_2010);
+    rig.run(|a| {
+        a.mov(bl, 0)?;
+        a.mov(dx, 5u32)?;
+        a.mov(eax, set_window)?;
+        a.call(eax)?;
+        // Display start 21234h doublewords.
+        a.mov(bl, 0)?;
+        a.mov(cx, 0x1234u32)?;
+        a.mov(dx, 0x0002u32)?;
+        a.mov(eax, set_start)?;
+        a.call(eax)?;
+        a.mov(bl, 0)?;
+        a.mov(cx, 1u32)?;
+        a.mov(dx, 7u32)?;
+        a.mov(edi, pmrig::DATA)?;
+        a.mov(eax, set_palette)?;
+        a.call(eax)?;
+        // And again, waiting for the retrace.
+        a.mov(bl, 0x80)?;
+        a.mov(cx, 0x0010u32)?;
+        a.mov(dx, 0u32)?;
+        a.mov(eax, set_start)?;
+        a.call(eax)?;
+        a.hlt()?;
+        Ok(())
+    });
+    let cpu = &mut rig.cpu;
+    assert_eq!(cpu.bus.vbe.bank, 5);
+    assert_eq!(&cpu.bus.vga.palette[21..24], &[0x30, 0x20, 0x10]);
+    // The retrace began as the call returned: the new start shows.
+    assert_eq!(cpu.bus.vbe.start, 0x40);
+    assert_eq!(cpu.bus.vbe.latched_start, 0x40);
+    assert_ne!(cpu.bus.io_read(0x3DA) & 0x08, 0, "in the retrace");
 }
