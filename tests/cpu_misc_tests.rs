@@ -142,3 +142,20 @@ fn test_enter_nested_level() {
     assert_eq!(cpu.bp(), 0xFFFC, "BP should point to the new frame base");
     assert_eq!(cpu.sp(), 0xFFF6, "Final SP incorrect");
 }
+#[test]
+fn rewriting_the_tail_of_a_cached_instruction_takes_effect() {
+    use rust_dos::bus::GEN_SHIFT;
+    // MOV AX,1234h placed so its immediate's high byte starts the next
+    // block of the decode cache's generation counters.
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let ip = (1u16 << GEN_SHIFT) - 2;
+    cpu.set_cs(0x1000);
+    cpu.set_ip(ip);
+    run_cpu_code(&mut cpu, &[0xB8, 0x34, 0x12]);
+    assert_eq!(cpu.ax(), 0x1234);
+
+    cpu.bus.write_8(0x10000 + ip as usize + 2, 0x56);
+    cpu.set_ip(ip);
+    cpu.step();
+    assert_eq!(cpu.ax(), 0x5634);
+}

@@ -8,6 +8,7 @@
 
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
+use crate::bus::GEN_SHIFT;
 use crate::command::CommandDispatcher;
 use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, Seg};
 use crate::instr_cache::InstrCache;
@@ -356,7 +357,10 @@ fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn
     let slow;
     let paged_crossing = paging && lin_ip & 0xFFF > 0xFF0;
     let instr = if phys_ip + 16 <= fetch.ram.len() && !paged_crossing {
-        let page_gen = cpu.bus.page_gen[phys_ip >> 12];
+        // The generations of the blocks holding the first and last byte
+        // an instruction can have: a write to either changes the sum.
+        let gens = &cpu.bus.page_gen;
+        let page_gen = gens[phys_ip >> GEN_SHIFT].wrapping_add(gens[(phys_ip + 14) >> GEN_SHIFT]);
         let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
         fetch.cache.get_or_decode(phys_ip, eip, code32, page_gen, |slot| {
             let decoder = if code32 { decoder32 } else { decoder16 };

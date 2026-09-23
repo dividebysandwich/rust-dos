@@ -7,11 +7,11 @@
 //! `iced_x86::Instruction` keyed by its physical address and reuse it on the
 //! next hit.
 //!
-//! Correctness in the face of self-modifying code is handled via a per-4KB-page
-//! generation counter on the bus (`Bus::page_gen`). Every write through the bus
-//! bumps the gen for the affected page, and every cache slot records the gen
-//! that was live at decode time. A slot is only returned on lookup when the
-//! page gen still matches, so an LZEXE-style unpacker that rewrites its own
+//! Correctness in the face of self-modifying code is handled via a generation
+//! counter per small block of RAM on the bus (`Bus::page_gen`). Every write
+//! through the bus bumps the gen for the affected block, and every cache slot
+//! records the gens that were live at decode time. A slot is only returned on
+//! lookup when they still match, so an LZEXE-style unpacker that rewrites its own
 //! code simply causes the cache to refill transparently on the next fetch.
 //!
 //! Two different (cs, ip) pairs can resolve to the same physical address but

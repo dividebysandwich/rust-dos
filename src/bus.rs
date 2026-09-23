@@ -34,6 +34,10 @@ pub trait Device {
 /// RAM when the configuration doesn't say.
 pub const DEFAULT_MEMORY_MB: usize = 16;
 
+/// log2 of the bytes of RAM each code generation counter covers: small
+/// enough that a program's variables rarely share a block with its code.
+pub const GEN_SHIFT: usize = 6;
+
 pub struct Bus {
     ram: Vec<u8>, // System RAM, allocated once
     pub video_mode: VideoMode, // Current State
@@ -141,10 +145,10 @@ pub struct Bus {
     pub audio_peak: u16,
     pub audio_underruns: u64,
 
-    /// Per-4KB-page generation counter for every page of RAM. Bumped on every
-    /// write inside the Bus write helpers. The decoded-instruction cache
-    /// stores the gen at decode time and invalidates a cached entry when the
-    /// gen for its page has changed — this is how we stay correct in the
+    /// Generation counter for every block of RAM (`GEN_SHIFT`). Bumped on
+    /// every write inside the Bus write helpers. The decoded-instruction
+    /// cache stores the gen at decode time and invalidates a cached entry
+    /// when the gen for its blocks has changed — this is how we stay correct in the
     /// face of self-modifying code (LZEXE, packers, etc.) without paying the
     /// cost of verifying cached bytes on every fetch.
     pub page_gen: Vec<u32>,
@@ -219,7 +223,7 @@ impl Bus {
             irq_levels: 0,
             audio_peak: 0,
             audio_underruns: 0,
-            page_gen: vec![0; ram_len >> 12],
+            page_gen: vec![0; ram_len >> GEN_SHIFT],
             log_hook: None,
             audio_hook: None,
         };
@@ -533,7 +537,7 @@ impl Bus {
 
     /// Invalidate cached decodes of the pages covering `start..end`.
     fn bump_page_gens(&mut self, start: usize, end: usize) {
-        for page in (start >> 12)..=((end - 1) >> 12) {
+        for page in (start >> GEN_SHIFT)..=((end - 1) >> GEN_SHIFT) {
             let g = &mut self.page_gen[page];
             *g = g.wrapping_add(1);
         }
@@ -625,7 +629,7 @@ impl Bus {
                 *self.ram.get_unchecked_mut(addr) = value;
                 // Bump generation for this page so the decoded-instruction
                 // cache invalidates any cached decodes that fell in it.
-                let g = self.page_gen.get_unchecked_mut(addr >> 12);
+                let g = self.page_gen.get_unchecked_mut(addr >> GEN_SHIFT);
                 *g = g.wrapping_add(1);
             }
             return false;
@@ -695,7 +699,7 @@ impl Bus {
         // Writes past the end of RAM go nowhere.
         if addr < self.ram.len() {
             self.ram[addr] = value;
-            let page = addr >> 12;
+            let page = addr >> GEN_SHIFT;
             self.page_gen[page] = self.page_gen[page].wrapping_add(1);
         }
         false
@@ -711,9 +715,9 @@ impl Bus {
                 *self.ram.get_unchecked_mut(addr) = value as u8;
                 *self.ram.get_unchecked_mut(addr + 1) = (value >> 8) as u8;
                 // Both bytes' pages: the word may straddle a page boundary.
-                let g = self.page_gen.get_unchecked_mut(addr >> 12);
+                let g = self.page_gen.get_unchecked_mut(addr >> GEN_SHIFT);
                 *g = g.wrapping_add(1);
-                let g = self.page_gen.get_unchecked_mut((addr + 1) >> 12);
+                let g = self.page_gen.get_unchecked_mut((addr + 1) >> GEN_SHIFT);
                 *g = g.wrapping_add(1);
             }
             return false;
@@ -764,8 +768,8 @@ impl Bus {
     pub fn write_32(&mut self, addr: usize, value: u32) {
         if self.is_plain_ram(addr, 4) {
             self.ram[addr..addr + 4].copy_from_slice(&value.to_le_bytes());
-            self.page_gen[addr >> 12] = self.page_gen[addr >> 12].wrapping_add(1);
-            let last = (addr + 3) >> 12;
+            self.page_gen[addr >> GEN_SHIFT] = self.page_gen[addr >> GEN_SHIFT].wrapping_add(1);
+            let last = (addr + 3) >> GEN_SHIFT;
             self.page_gen[last] = self.page_gen[last].wrapping_add(1);
             return;
         }

@@ -150,7 +150,9 @@ fn set_cr0(cpu: &mut Cpu, value: u32) -> CpuResult {
     }
     let changed = cpu.cr0 ^ value;
     cpu.cr0 = value;
-    if changed & (CR0_PG | CR0_PE | CR0_WP) != 0 {
+    // Translations are only used with paging on, and PE can't change
+    // while it is.
+    if changed & (CR0_PG | CR0_WP) != 0 {
         cpu.tlb.flush();
     }
     if changed & CR0_PE != 0 {

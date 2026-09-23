@@ -1,4 +1,4 @@
-use rust_dos::bus::Bus;
+use rust_dos::bus::{Bus, GEN_SHIFT};
 use rust_dos::video::{ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT};
 
 #[test]
@@ -171,15 +171,16 @@ fn test_speaker_io_port_61() {
 fn loader_writes_invalidate_cached_decodes() {
     let mut bus = Bus::new(std::path::PathBuf::from("."));
 
-    // A program image spanning two pages bumps the generation of both, so
+    // A program image spanning two blocks bumps the generation of both, so
     // decodes cached from the previous program at those addresses go stale.
-    let before = (bus.page_gen[0x10], bus.page_gen[0x11]);
+    let block = |addr: usize| addr >> GEN_SHIFT;
+    let before = (bus.page_gen[block(0x10FF0)], bus.page_gen[block(0x11000)]);
     bus.load_bytes(0x10FF0, &[0x90; 0x20]);
-    assert_ne!(bus.page_gen[0x10], before.0);
-    assert_ne!(bus.page_gen[0x11], before.1);
+    assert_ne!(bus.page_gen[block(0x10FF0)], before.0);
+    assert_ne!(bus.page_gen[block(0x11000)], before.1);
     assert_eq!(bus.ram()[0x11000], 0x90);
 
-    let before = bus.page_gen[0x20];
+    let before = bus.page_gen[block(0x20000)];
     bus.fill_ram(0x20000..0x20010, 0);
-    assert_ne!(bus.page_gen[0x20], before);
+    assert_ne!(bus.page_gen[block(0x20000)], before);
 }
