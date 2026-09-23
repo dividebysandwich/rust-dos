@@ -32,6 +32,9 @@ pub fn play_sdl_beep(bus: &mut Bus) {
 }
 
 pub fn pump_audio(bus: &mut Bus) {
+    // Taken before borrowing the audio device, which borrows the bus.
+    let ram_ptr = bus.ram().as_ptr();
+    let ram_len = bus.ram().len();
     if let Some(device) = &mut bus.audio_device {
         let current_bytes = device.size();
         
@@ -67,8 +70,6 @@ pub fn pump_audio(bus: &mut Bus) {
         // ram plus &mut references to sb and dma_ch1 on every sample; the
         // AdLib path needs &mut adlib. Taking them here keeps the hot
         // inner loop free of repeated field-access borrow checks.
-        let ram_ptr = bus.ram.as_ptr();
-        let ram_len = bus.ram.len();
         // SAFETY: single-threaded emulator; ram is a fixed 1 MiB Vec that
         // outlives this function. The bus mutable borrows we take next
         // don't resize or drop it. Same guarantee as the decoder slice in

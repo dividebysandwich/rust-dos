@@ -5,7 +5,7 @@ pub fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
     let mut curr = addr;
     let mut chars = Vec::new();
     loop {
-        let byte = bus.ram[curr];
+        let byte = bus.ram()[curr];
         if byte == 0 {
             break;
         }

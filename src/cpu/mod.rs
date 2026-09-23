@@ -285,7 +285,7 @@ impl Cpu {
 
         let phys_ip = self.get_physical_addr(self.cs(), self.ip());
         // Ensure we can read at least a few bytes
-        if phys_ip >= self.bus.ram.len() {
+        if phys_ip >= self.bus.ram().len() {
             return;
         }
 
@@ -309,7 +309,7 @@ impl Cpu {
 
         // Decode
         // We slice safe
-        let bytes = &self.bus.ram[phys_ip..];
+        let bytes = &self.bus.ram()[phys_ip..];
         let mut decoder = Decoder::with_ip(16, bytes, self.ip() as u64, DecoderOptions::NONE);
         let instr = decoder.decode();
 
@@ -774,9 +774,8 @@ impl Cpu {
         // 0x0400-0x04FF is the BIOS Data Area (BDA).
         // If we zero those, the system dies. The first MCB and resident TSRs
         // sit above.
-        for i in 0x0500..crate::mcb::FIRST_MCB_SEG as usize * 16 {
-            self.bus.ram[i] = 0;
-        }
+        self.bus
+            .fill_ram(0x0500..crate::mcb::FIRST_MCB_SEG as usize * 16, 0);
 
         // No program is running: every paragraph above the resident TSRs is
         // available for allocation.
@@ -815,9 +814,7 @@ impl Cpu {
         self.bus.write_16(0x0460, 0x0D0E);
 
         // Copy bytes
-        for (i, byte) in shell_code.iter().enumerate() {
-            self.bus.ram[start_addr + i] = *byte;
-        }
+        self.bus.load_bytes(start_addr, &shell_code);
 
         // Reset CPU State to "Boot" values
         self.set_cs(0);
@@ -953,11 +950,7 @@ impl Cpu {
         // COM-style overlay (no MZ header, no relocations)
         if bytes.len() < 0x1C || &bytes[0..2] != b"MZ" {
             let phys = self.get_physical_addr(load_segment, 0);
-            for (i, &b) in bytes.iter().enumerate() {
-                if phys + i < self.bus.ram.len() {
-                    self.bus.ram[phys + i] = b;
-                }
-            }
+            self.bus.load_bytes(phys, &bytes);
             return true;
         }
 
@@ -974,12 +967,7 @@ impl Cpu {
 
         // Copy image bytes directly at load_segment:0000 — no PSP, no offset.
         let image_phys = self.get_physical_addr(load_segment, 0);
-        let image_data = &bytes[header_size..];
-        for (i, &b) in image_data.iter().enumerate() {
-            if image_phys + i < self.bus.ram.len() {
-                self.bus.ram[image_phys + i] = b;
-            }
-        }
+        self.bus.load_bytes(image_phys, &bytes[header_size..]);
 
         // Apply relocations: each entry is (offset, segment); the 16-bit word
         // at (load_segment + segment):offset gets `reloc_factor` added to it.
@@ -991,7 +979,7 @@ impl Cpu {
 
                 let target_seg = load_segment.wrapping_add(rel_seg);
                 let phys = self.get_physical_addr(target_seg, rel_offset);
-                if phys + 2 <= self.bus.ram.len() {
+                if phys + 2 <= self.bus.ram().len() {
                     let cur = self.bus.read_16(phys);
                     self.bus.write_16(phys, cur.wrapping_add(reloc_factor));
                 }
@@ -1009,11 +997,7 @@ impl Cpu {
 
         // Clear 64KB of RAM segment for safety (simulating clean load)
         let phys_start_seg = self.get_physical_addr(load_segment, 0);
-        for i in 0..0x10000 {
-            if phys_start_seg + i < self.bus.ram.len() {
-                self.bus.ram[phys_start_seg + i] = 0;
-            }
-        }
+        self.bus.fill_ram(phys_start_seg..phys_start_seg + 0x10000, 0);
 
         // Re-install the HLE Interrupt Vectors — but ONLY for the top-level
         // load. A nested EXEC (segment.is_some()) must preserve the parent's
@@ -1028,11 +1012,7 @@ impl Cpu {
 
         // Load the file data at offset 0x100
         let phys_code_start = self.get_physical_addr(load_segment, start_offset);
-        for (i, b) in bytes.iter().enumerate() {
-            if phys_code_start + i < self.bus.ram.len() {
-                self.bus.ram[phys_code_start + i] = *b;
-            }
-        }
+        self.bus.load_bytes(phys_code_start, bytes);
 
         // COM State
         self.set_cs(load_segment);
@@ -1131,9 +1111,9 @@ impl Cpu {
         // Static Functionality Table set up in Bus::new(). Resident TSRs survive.
         if segment.is_none() {
             let first_mcb = crate::mcb::FIRST_MCB_SEG as usize * 16;
-            for i in (0x500..first_mcb).chain(self.resident_end as usize * 16..0xA0000) {
-                self.bus.ram[i] = 0;
-            }
+            self.bus.fill_ram(0x500..first_mcb, 0);
+            self.bus
+                .fill_ram(self.resident_end as usize * 16..0xA0000, 0);
         }
 
         // Re-install the HLE Interrupt Vectors — only for the top-level load.
@@ -1157,13 +1137,7 @@ impl Cpu {
         // Standard loader
         // DOS behavior: Skip the header, load the rest to CS:0000 (after PSP)
         let image_start_phys = self.get_physical_addr(relocation_base_segment, 0);
-        let image_data = &bytes[header_size..];
-
-        for (i, &b) in image_data.iter().enumerate() {
-            if image_start_phys + i < self.bus.ram.len() {
-                self.bus.ram[image_start_phys + i] = b;
-            }
-        }
+        self.bus.load_bytes(image_start_phys, &bytes[header_size..]);
 
         // Relocations
         // The file contains a table of pointers (Segment:Offset).
@@ -1181,18 +1155,17 @@ impl Cpu {
                 let target_seg = relocation_base_segment.wrapping_add(rel_seg);
                 let phys_addr = self.get_physical_addr(target_seg, rel_offset);
 
-                if phys_addr + 2 <= self.bus.ram.len() {
+                if phys_addr + 2 <= self.bus.ram().len() {
                     // Read the existing 16-bit value
-                    let val_low = self.bus.ram[phys_addr] as u16;
-                    let val_high = self.bus.ram[phys_addr + 1] as u16;
+                    let val_low = self.bus.ram()[phys_addr] as u16;
+                    let val_high = self.bus.ram()[phys_addr + 1] as u16;
                     let mut val = (val_high << 8) | val_low;
 
                     // PATCH: Add the actual start segment to the value
                     val = val.wrapping_add(relocation_base_segment);
 
                     // Write it back
-                    self.bus.ram[phys_addr] = (val & 0xFF) as u8;
-                    self.bus.ram[phys_addr + 1] = (val >> 8) as u8;
+                    self.bus.load_bytes(phys_addr, &val.to_le_bytes());
                 }
             }
         }

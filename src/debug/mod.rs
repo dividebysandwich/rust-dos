@@ -855,14 +855,14 @@ impl DebugHub {
             },
             Cmd::ReadMem { addr, len } => match parse_addr(cpu, &addr) {
                 Ok((phys, segoff)) => {
-                    let len = len.min(cpu.bus.ram.len().saturating_sub(phys));
+                    let len = len.min(cpu.bus.ram().len().saturating_sub(phys));
                     let data = (phys..phys + len).map(|a| cpu.bus.peek_8(a)).collect();
                     Reply::Bytes { addr: phys, segoff, data }
                 }
                 Err(e) => Reply::bad(e),
             },
             Cmd::WriteMem { addr, data } => match parse_addr(cpu, &addr) {
-                Ok((phys, _)) if phys + data.len() <= cpu.bus.ram.len() => {
+                Ok((phys, _)) if phys + data.len() <= cpu.bus.ram().len() => {
                     for (i, b) in data.iter().enumerate() {
                         cpu.bus.write_8(phys + i, *b);
                     }

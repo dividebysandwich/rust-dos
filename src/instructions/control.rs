@@ -144,15 +144,15 @@ fn retf(cpu: &mut Cpu, instr: &Instruction) {
         let start = phys.saturating_sub(80);
         let mut pre = String::new();
         for i in start..phys {
-            if i < cpu.bus.ram.len() {
-                pre.push_str(&format!("{:02X} ", cpu.bus.ram[i]));
+            if i < cpu.bus.ram().len() {
+                pre.push_str(&format!("{:02X} ", cpu.bus.ram()[i]));
             }
         }
         let mut here = String::new();
         for i in 0..16 {
             let a = phys.wrapping_add(i);
-            if a < cpu.bus.ram.len() {
-                here.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            if a < cpu.bus.ram().len() {
+                here.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
             }
         }
         cpu.bus.log_string(&format!("[RETF-BAD] fn -80 bytes: {}", pre.trim()));

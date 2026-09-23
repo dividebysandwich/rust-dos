@@ -280,11 +280,11 @@ fn main() -> Result<(), String> {
         // single decoder and calling `decode_out` straight into the
         // instruction cache slot avoids that and any stack copies.
         //
-        // SAFETY: we build an overlapping read-only view of `cpu.bus.ram`
+        // SAFETY: we build an overlapping read-only view of `cpu.bus.ram()`
         // that outlives the subsequent mutable borrows (execute_instruction
         // can write to ram via bus.write_8). This is sound in our setup
         // because:
-        //   1. `cpu.bus.ram` is a `Vec<u8>` of fixed 1 MiB capacity that is
+        //   1. `cpu.bus.ram()` is a `Vec<u8>` of fixed 1 MiB capacity that is
         //      never resized after `Bus::new()`, so the pointer stays valid.
         //   2. Emulation is single-threaded, so no concurrent access occurs.
         //   3. Reads go through the decoder's slice; writes go through
@@ -294,7 +294,7 @@ fn main() -> Result<(), String> {
         //   4. Self-modifying code (LZEXE decompressors, etc.) works because
         //      the decoder reads the ram bytes *at decode time* — writes
         //      performed on prior iterations are visible on the next decode.
-        let (ram_ptr, ram_len) = (cpu.bus.ram.as_ptr(), cpu.bus.ram.len());
+        let (ram_ptr, ram_len) = (cpu.bus.ram().as_ptr(), cpu.bus.ram().len());
         let ram_slice: &'static [u8] = unsafe { std::slice::from_raw_parts(ram_ptr, ram_len) };
         let mut decoder = Decoder::with_ip(16, ram_slice, 0, DecoderOptions::NONE);
 
@@ -473,8 +473,8 @@ fn main() -> Result<(), String> {
                 let mut sbytes = String::new();
                 for i in 0..64 {
                     let a = ss_base + cpu.sp() as usize + i;
-                    if a < cpu.bus.ram.len() {
-                        sbytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+                    if a < cpu.bus.ram().len() {
+                        sbytes.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
                     }
                 }
                 cpu.bus.log_string(&format!(

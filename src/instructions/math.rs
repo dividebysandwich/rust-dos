@@ -372,15 +372,15 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         let start = phys.saturating_sub(48);
         let mut prev = String::new();
         for i in start..phys {
-            if i < cpu.bus.ram.len() {
-                prev.push_str(&format!("{:02X} ", cpu.bus.ram[i]));
+            if i < cpu.bus.ram().len() {
+                prev.push_str(&format!("{:02X} ", cpu.bus.ram()[i]));
             }
         }
         let mut here = String::new();
         for i in 0..16 {
             let a = phys.wrapping_add(i);
-            if a < cpu.bus.ram.len() {
-                here.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            if a < cpu.bus.ram().len() {
+                here.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
             }
         }
         cpu.bus.log_string(&format!(
@@ -399,8 +399,8 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         let mut stack_bytes = String::new();
         for i in 0..32 {
             let a = ss_base + sp + i;
-            if a < cpu.bus.ram.len() {
-                stack_bytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            if a < cpu.bus.ram().len() {
+                stack_bytes.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
             }
         }
         cpu.bus.log_string(&format!(
@@ -415,8 +415,8 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         let mut frame_bytes = String::new();
         for i in 0..16 {
             let a = bp_addr + i;
-            if a < cpu.bus.ram.len() {
-                frame_bytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+            if a < cpu.bus.ram().len() {
+                frame_bytes.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
             }
         }
         cpu.bus.log_string(&format!(
@@ -433,8 +433,8 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         let caller_start = caller_phys.saturating_sub(32);
         let mut caller_bytes = String::new();
         for i in caller_start..caller_phys + 16 {
-            if i < cpu.bus.ram.len() {
-                caller_bytes.push_str(&format!("{:02X} ", cpu.bus.ram[i]));
+            if i < cpu.bus.ram().len() {
+                caller_bytes.push_str(&format!("{:02X} ", cpu.bus.ram()[i]));
             }
         }
         cpu.bus.log_string(&format!(

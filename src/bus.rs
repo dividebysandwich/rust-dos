@@ -32,7 +32,7 @@ pub trait Device {
 }
 
 pub struct Bus {
-    pub ram: Vec<u8>,          // 1MB System RAM
+    ram: Vec<u8>,              // 1MB System RAM
     pub video_mode: VideoMode, // Current State
     pub disk: DiskController,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
@@ -476,6 +476,44 @@ impl Bus {
         }
         // Scroll moves every visible row, so widen to the full screen.
         self.vga.mark_dirty_full();
+    }
+
+    /// Read-only view of system RAM for the instruction decoder, DMA and
+    /// debug dumps. It bypasses the VGA memory mapping. Writes go through
+    /// `write_8`, `load_bytes` or `fill_ram`, which let the decoded-
+    /// instruction cache see them.
+    #[inline(always)]
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
+    /// Copy `data` into RAM at `addr`, bypassing the VGA mapping, as program
+    /// loaders do. Bytes past the end of RAM are dropped.
+    pub fn load_bytes(&mut self, addr: usize, data: &[u8]) {
+        let end = addr.saturating_add(data.len()).min(self.ram.len());
+        if addr >= end {
+            return;
+        }
+        self.ram[addr..end].copy_from_slice(&data[..end - addr]);
+        self.bump_page_gens(addr, end);
+    }
+
+    /// Set every RAM byte in `range` to `value`, bypassing the VGA mapping.
+    pub fn fill_ram(&mut self, range: std::ops::Range<usize>, value: u8) {
+        let end = range.end.min(self.ram.len());
+        if range.start >= end {
+            return;
+        }
+        self.ram[range.start..end].fill(value);
+        self.bump_page_gens(range.start, end);
+    }
+
+    /// Invalidate cached decodes of the pages covering `start..end`.
+    fn bump_page_gens(&mut self, start: usize, end: usize) {
+        for page in (start >> 12)..=((end - 1) >> 12) {
+            let g = &mut self.page_gen[page & 0xFF];
+            *g = g.wrapping_add(1);
+        }
     }
 
     #[inline(always)]

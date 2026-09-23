@@ -124,8 +124,8 @@ fn dispatch(cpu: &mut Cpu, instr: &Instruction) {
             let mut bytes = String::new();
             for i in 0..16 {
                 let a = phys.wrapping_add(i);
-                if a < cpu.bus.ram.len() {
-                    bytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
+                if a < cpu.bus.ram().len() {
+                    bytes.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
                 }
             }
             cpu.bus.log_string(&format!(

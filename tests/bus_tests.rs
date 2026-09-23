@@ -27,7 +27,7 @@ fn test_vram_mapping() {
     // Verify read_8 maps correctly
     assert_eq!(bus.read_8(text_addr), 0x41);
     // Verify it DID NOT go to RAM or Graphics VRAM
-    assert_eq!(bus.ram[text_addr], 0x00);
+    assert_eq!(bus.ram()[text_addr], 0x00);
     assert_eq!(bus.vga.read_graphics(0), 0x00);
 
     // Test Graphics Mode VRAM (0xA0000)
@@ -45,7 +45,7 @@ fn test_vram_mapping() {
 
     assert_eq!(bus.vga.read_graphics(0), 0xFF);
     assert_eq!(bus.read_8(graph_addr), 0xFF);
-    assert_eq!(bus.ram[graph_addr], 0x00);
+    assert_eq!(bus.ram()[graph_addr], 0x00);
 }
 
 #[test]
@@ -164,4 +164,21 @@ fn test_speaker_io_port_61() {
     // 3. Write 0x02 (Bit 0 off)
     bus.io_write(0x61, 0x02);
     assert_eq!(bus.speaker_on, false);
+}
+
+#[test]
+fn loader_writes_invalidate_cached_decodes() {
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
+
+    // A program image spanning two pages bumps the generation of both, so
+    // decodes cached from the previous program at those addresses go stale.
+    let before = (bus.page_gen[0x10], bus.page_gen[0x11]);
+    bus.load_bytes(0x10FF0, &[0x90; 0x20]);
+    assert_ne!(bus.page_gen[0x10], before.0);
+    assert_ne!(bus.page_gen[0x11], before.1);
+    assert_eq!(bus.ram()[0x11000], 0x90);
+
+    let before = bus.page_gen[0x20];
+    bus.fill_ram(0x20000..0x20010, 0);
+    assert_ne!(bus.page_gen[0x20], before);
 }
