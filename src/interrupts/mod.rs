@@ -53,6 +53,27 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     cpu.set_cpu_flag(CpuFlags::TF, false);
 }
 
+/// Return from an HLE handler as its IRET would. Service interrupts hand
+/// their results back in CF and ZF (and clear DF), but the handlers of the
+/// hardware interrupts (IRQ 0-7, vectors 08h-0Fh) must restore the
+/// interrupted code's flags exactly: games chain their timer and keyboard
+/// ISRs to ours, and those can land between any compare and its jump.
+pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
+    let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
+    let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
+
+    cpu.ip = cpu.pop();
+    cpu.cs = cpu.pop();
+    let flags = CpuFlags::from_bits_truncate(cpu.pop());
+    cpu.set_cpu_flags(flags);
+
+    if !(0x08..=0x0F).contains(&vector) {
+        cpu.set_cpu_flag(CpuFlags::DF, false);
+        cpu.set_cpu_flag(CpuFlags::CF, hle_cf);
+        cpu.set_cpu_flag(CpuFlags::ZF, hle_zf);
+    }
+}
+
 pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
     match vector {
         0x00 => int00::handle(cpu),

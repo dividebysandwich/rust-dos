@@ -220,6 +220,33 @@ fn bios_timer_handler_sends_eoi() {
 }
 
 #[test]
+fn bios_timer_handler_returns_with_the_interrupted_flags() {
+    use rust_dos::cpu::CpuFlags;
+    // A program's ISR chained to ours: the IRET must restore the flags of
+    // the code the tick interrupted, whatever the handler left in them.
+    for (vector, service) in [(0x08, false), (0x09, false), (0x21, true)] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.ss = 0x3000;
+        cpu.sp = 0x0100;
+        let interrupted = CpuFlags::IF | CpuFlags::CF | CpuFlags::DF;
+        cpu.set_cpu_flags(interrupted);
+        cpu.push(cpu.get_cpu_flags().bits());
+        cpu.push(0x1234);
+        cpu.push(0x0100);
+        cpu.set_cpu_flags(CpuFlags::ZF);
+
+        rust_dos::interrupts::return_from_hle(&mut cpu, vector);
+
+        assert_eq!((cpu.cs, cpu.ip, cpu.sp), (0x1234, 0x0100, 0x0100));
+        assert!(cpu.get_cpu_flag(CpuFlags::IF));
+        // Services hand back their CF/ZF results and clear DF.
+        assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), !service, "CF, INT {vector:02X}h");
+        assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), service, "ZF, INT {vector:02X}h");
+        assert_eq!(cpu.get_cpu_flag(CpuFlags::DF), !service, "DF, INT {vector:02X}h");
+    }
+}
+
+#[test]
 fn shell_reload_resets_timer_and_pic() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     program_pit0(&mut cpu.bus, 0x34, 0x1F0E);

@@ -323,21 +323,9 @@ impl Cpu {
                 .bus
                 .read_8(self.get_physical_addr(self.cs, self.ip.wrapping_add(2)));
 
-            // Run the HLE handler
+            // Run the HLE handler, then simulate its IRET
             crate::interrupts::handle_hle(self, vector);
-
-            // Simulate IRET
-            self.ip = self.pop();
-            self.cs = self.pop();
-
-            let hle_cf = self.get_cpu_flag(CpuFlags::CF);
-            let hle_zf = self.get_cpu_flag(CpuFlags::ZF);
-            let flags_to_restore = CpuFlags::from_bits_truncate(self.pop());
-
-            self.set_cpu_flags(flags_to_restore);
-            self.set_cpu_flag(CpuFlags::DF, false);
-            self.set_cpu_flag(CpuFlags::CF, hle_cf);
-            self.set_cpu_flag(CpuFlags::ZF, hle_zf);
+            crate::interrupts::return_from_hle(self, vector);
             return;
         }
 

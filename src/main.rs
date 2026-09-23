@@ -578,21 +578,9 @@ fn main() -> Result<(), String> {
             if b0 == 0xFE && b1 == 0x38 {
                 let vector = ram_slice[phys_ip + 2];
 
-                // Run the HLE handler directly
+                // Run the HLE handler directly, then simulate its IRET
                 crate::interrupts::handle_hle(&mut cpu, vector);
-
-                // Do not call real IRET, just simulate it
-                cpu.ip = cpu.pop();
-                cpu.cs = cpu.pop();
-
-                let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
-                let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
-                let flags_to_restore = CpuFlags::from_bits_truncate(cpu.pop());
-
-                cpu.set_cpu_flags(flags_to_restore);
-                cpu.set_cpu_flag(CpuFlags::DF, false);
-                cpu.set_cpu_flag(CpuFlags::CF, hle_cf);
-                cpu.set_cpu_flag(CpuFlags::ZF, hle_zf);
+                crate::interrupts::return_from_hle(&mut cpu, vector);
 
                 cpu.bus.clock.icount += 1;
                 if cpu.idle {
