@@ -856,6 +856,7 @@ impl DebugHub {
 
     fn status(&self, cpu: &Cpu) -> Value {
         let (w, h) = cpu.bus.video_mode.dimensions();
+        let crtc = &cpu.bus.vga.crtc_regs;
         json!({
             "paused": self.paused,
             "icount": self.icount,
@@ -871,6 +872,17 @@ impl DebugHub {
                 "mode": cpu.bus.video_mode as u8,
                 "name": format!("{:?}", cpu.bus.video_mode),
                 "width": w, "height": h,
+                // Page flipping: the Start Address the program set and the
+                // one latched for display, plus the registers that decide
+                // the memory layout.
+                "vga": {
+                    "start_address": format!("{:02X}{:02X}", crtc[0x0C], crtc[0x0D]),
+                    "displayed_start": format!("{:04X}", cpu.bus.vga.latched_start_addr),
+                    "seq_memory_mode": format!("{:02X}", cpu.bus.vga.sequencer_regs[0x04]),
+                    "crtc_offset": format!("{:02X}", crtc[0x13]),
+                    "crtc_underline": format!("{:02X}", crtc[0x14]),
+                    "crtc_mode_control": format!("{:02X}", crtc[0x17]),
+                },
             },
             "drive_c": display_host_path(cpu.bus.disk.root_path()),
             "current_drive": drive_letter(cpu.bus.disk.get_current_drive()).to_string(),

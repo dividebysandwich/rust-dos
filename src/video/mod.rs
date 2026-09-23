@@ -232,14 +232,21 @@ fn planar_pixel_rgb(
 
 // Emulate Mode 13h (320x200) -> Scaled to 640x400
 pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+    // The CRTC scans the 4 planes in parallel: pixel x of a row is in plane
+    // x % 4 at Start Address + row * stride + x / 4. With Chain 4 (plain
+    // mode 13h) that is where CPU address y * 320 + x lands. Unchained
+    // "mode X" games draw into several pages and flip between them with
+    // the Start Address.
+    let start = bus.vga.latched_start_addr;
+    let stride = match bus.vga.crtc_regs[0x13] {
+        0 => 80,
+        words => words as usize * 2,
+    };
     for y in 0..200 {
+        let row = start + y * stride;
         for x in 0..320 {
-            let linear_addr = y * 320 + x;
-            // In Planar Mode 13h (Chain 4), pixels are interleaved across planes.
-            // Plane = Addr % 4
-            // Offset = Addr / 4
-            let plane = linear_addr & 3;
-            let offset = linear_addr >> 2;
+            let plane = x & 3;
+            let offset = (row + (x >> 2)) & 0xFFFF;
             let final_index = (plane * 65536) + offset;
 
             let color_idx = if final_index < vram.len() {

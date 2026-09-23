@@ -467,6 +467,7 @@ impl VgaCard {
 
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         self.mark_dirty_full();
+        self.latched_start_addr = 0;
         match mode {
             super::VideoMode::Ega320x200
             | super::VideoMode::Ega640x200
@@ -552,6 +553,12 @@ impl VgaCard {
                 self.graphics_regs[6] = 0x05; // Misc (Graphics + A0000)
                 self.graphics_regs[7] = 0x0F; // Color Don't Care
                 self.graphics_regs[8] = 0xFF; // Bit Mask
+
+                // CRTC: display from the start of VRAM, 80 bytes per row
+                // in each plane.
+                self.crtc_regs[0x0C] = 0x00; // Start Address High
+                self.crtc_regs[0x0D] = 0x00; // Start Address Low
+                self.crtc_regs[0x13] = 0x28; // Offset
 
                 // Attribute Controller
                 self.attribute_regs[0x10] = 0x41; // Mode Control (Graphics)

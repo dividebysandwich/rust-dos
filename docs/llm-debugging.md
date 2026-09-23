@@ -51,7 +51,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   the text and mouse cursors).
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode, `paused`, `input_queue`, and
-  `cycles_per_ms`, the current CPU speed.
+  `cycles_per_ms`, the current CPU speed. `video.vga` shows the CRTC Start
+  Address the program set and the one on screen, which helps when a game
+  that flips pages flickers or shows half-drawn frames.
 - **Kill a stuck program** with `POST /api/control/reboot_shell`. This is
   better than restarting the emulator.
 
