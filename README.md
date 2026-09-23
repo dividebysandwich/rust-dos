@@ -166,7 +166,7 @@ WebSocket streams:
 * `/ws/events`: log lines, pause/resume, and video mode changes.
 * `/ws/trace`: live instruction trace batches.
 * `/ws/screen?fps=5`: PNG frames, sent only when the screen changes.
-* `/ws/audio`: s16le 44.1 kHz mono PCM.
+* `/ws/audio`: s16le 44.1 kHz stereo PCM, after a JSON format header.
 * `/ws/input`: input events.
 
 To run without a window or sound device (for example under an agent), set

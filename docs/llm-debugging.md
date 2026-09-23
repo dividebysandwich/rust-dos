@@ -54,6 +54,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `cycles_per_ms`, the current CPU speed. `video.vga` shows the CRTC Start
   Address the program set and the one on screen, which helps when a game
   that flips pages flickers or shows half-drawn frames.
+- **Check sound with `/api/status` → `audio`.** `peak` is the loudest
+  sample since the previous status request (0 means silence), `underruns`
+  counts how often the output device ran dry, and `sound_blaster` is the
+  card's BLASTER string (null without one). To listen or analyse, record
+  `/ws/audio`: a JSON format header, then s16le stereo PCM at 44.1 kHz
+  (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
 - **Kill a stuck program** with `POST /api/control/reboot_shell`. This is
   better than restarting the emulator.
 
