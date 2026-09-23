@@ -16,8 +16,10 @@
 //! latches themselves get what they ask for.
 //!
 //! `patch` and `synth` play Ultrasound patches (`.PAT`) as a General MIDI
-//! synthesizer for the MPU-401, sharing the GF1's volume scale.
+//! synthesizer for the MPU-401, sharing the GF1's volume scale. `builtin`
+//! holds the Gravis patch set, for the drive programs find it on.
 
+pub mod builtin;
 pub mod patch;
 pub mod synth;
 pub mod tables;
@@ -54,19 +56,39 @@ pub struct GusConfig {
     pub base: u16,
     pub irq: u8,
     pub dma: u8,
-    /// The DOS directory of the Ultrasound software (ULTRADIR).
-    pub ultradir: String,
+    /// The drive with the built-in Ultrasound software (see `builtin`),
+    /// if there is one.
+    pub drive: Option<u8>,
+    /// The DOS directory of the Ultrasound software (ULTRADIR), when it is
+    /// not the built-in one.
+    pub ultradir: Option<String>,
 }
 
 impl Default for GusConfig {
     /// A card at 240h, IRQ 5, DMA 3, as DOSBox has it: the Sound Blaster
-    /// has IRQ 7, and some games only accept Ultrasound IRQs up to 7.
+    /// has IRQ 7, and some games only accept Ultrasound IRQs up to 7. The
+    /// built-in software is on X:.
     fn default() -> Self {
-        Self { enabled: true, base: 0x240, irq: 5, dma: 3, ultradir: "C:\\ULTRASND".to_string() }
+        Self { enabled: true, base: 0x240, irq: 5, dma: 3, drive: Some(b'X' - b'A'), ultradir: None }
     }
 }
 
 impl GusConfig {
+    /// Whether ULTRADIR is the built-in Ultrasound software.
+    pub fn builtin(&self) -> bool {
+        self.ultradir.is_none() && self.drive.is_some()
+    }
+
+    /// ULTRADIR: the configured directory, else the built-in software's,
+    /// else C:\ULTRASND, where the Gravis installer puts it.
+    pub fn ultradir(&self) -> String {
+        match (&self.ultradir, self.drive) {
+            (Some(dir), _) => dir.clone(),
+            (None, Some(drive)) => format!("{}:\\{}", crate::disk::drive_letter(drive), builtin::DIR),
+            (None, None) => "C:\\ULTRASND".to_string(),
+        }
+    }
+
     /// The ULTRASND environment variable: base port, playback and record
     /// DMA, GF1 and MIDI IRQ.
     pub fn ultrasnd(&self) -> String {

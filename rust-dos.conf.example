@@ -48,8 +48,13 @@
 #gusbase=240
 #gusirq=5
 #gusdma=3
+# The drive (D to Y) with the Gravis MIDI patches built into rust-dos, in
+# \ULTRASND, read-only. It is there when the Ultrasound is. none leaves it
+# out, to use patches of your own in ultradir.
+#gusdrive=X
 # The DOS directory with the Ultrasound software and its MIDI patches.
-#ultradir=C:\ULTRASND
+# The default is \ULTRASND on gusdrive, or C:\ULTRASND with gusdrive=none.
+#ultradir=X:\ULTRASND
 # What plays General MIDI sent to the MPU-401: auto (the SoundFont if one
 # is set, else the Ultrasound patches in ultradir), soundfont, gus, or
 # none.

@@ -474,3 +474,60 @@ fn parse_filename_handles_drive_prefixes() {
     parse(&mut cpu, "NAME.EXT", 0x00);
     assert_eq!(cpu.bus.read_8(fcb), 0);
 }
+
+#[test]
+fn the_ultrasound_patches_are_on_a_drive_of_their_own() {
+    let base = scratch("ultrasnd", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let ultradir = cpu.get_env("ULTRADIR").unwrap().to_string();
+    assert_eq!(ultradir, "X:\\ULTRASND");
+    set_dta(&mut cpu);
+
+    // The patches, where a game looks for them.
+    set_dsdx_string(&mut cpu, &format!("{}\\MIDI\\*.PAT", ultradir));
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x4E);
+    assert!(!cf(&cpu));
+    assert_eq!(cpu.bus.read_8(DTA + 0x15), 0x21); // read-only
+    let mut names = vec![dta_name(&cpu)];
+    loop {
+        int21(&mut cpu, 0x4F);
+        if cf(&cpu) {
+            break;
+        }
+        names.push(dta_name(&cpu));
+    }
+    let patches = rust_dos::gus::builtin::FILES.iter().filter(|(p, _)| p.ends_with(".PAT")).count();
+    assert_eq!(names.len(), patches);
+    assert!(names.iter().any(|n| n == "ACPIANO.PAT"));
+
+    // Read one from its directory; read/write opens are read-only.
+    set_dsdx_string(&mut cpu, "X:\\ULTRASND\\MIDI");
+    int21(&mut cpu, 0x3B);
+    assert!(!cf(&cpu));
+    set_dsdx_string(&mut cpu, "X:ACPIANO.PAT");
+    cpu.set_reg8(Register::AL, 0x02);
+    int21(&mut cpu, 0x3D);
+    assert!(!cf(&cpu));
+    let handle = cpu.ax();
+    cpu.set_bx(handle);
+    cpu.set_cx(12);
+    cpu.set_ds(0x5000);
+    cpu.set_dx(0);
+    int21(&mut cpu, 0x3F);
+    assert!(!cf(&cpu));
+    assert_eq!(cpu.ax(), 12);
+    let magic: Vec<u8> = (0..12).map(|i| cpu.bus.read_8(0x50000 + i)).collect();
+    assert_eq!(magic, b"GF1PATCH110\0");
+    cpu.set_bx(handle);
+    cpu.set_cx(1);
+    int21(&mut cpu, 0x40);
+    assert!(cf(&cpu));
+    assert_eq!(cpu.ax(), 0x05);
+
+    set_dsdx_string(&mut cpu, "X:NEW.PAT");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(cf(&cpu));
+    assert_eq!(cpu.ax(), 0x05);
+}

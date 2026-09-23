@@ -3,7 +3,6 @@ use crate::disk::{DriveKind, drive_letter, parse_drive_prefix};
 use crate::mount::{MOUNT_USAGE, MountCmd, display_host_path, parse_mount_command};
 use crate::video::print_string;
 use std::collections::HashMap;
-use std::fs;
 
 pub trait ShellCommand {
     /// `args` contains everything after the command name (e.g., "FILE.TXT" for "TYPE FILE.TXT")
@@ -90,7 +89,7 @@ impl ShellCommand for DirCommand {
         let letter = drive_letter(drive);
         let is_dir = rest.is_empty()
             || rest.ends_with('\\')
-            || cpu.bus.disk.resolve_path(arg).is_some_and(|p| p.is_dir());
+            || cpu.bus.disk.is_directory(arg);
         let spec = if rest.is_empty() {
             format!("{}:*.*", letter)
         } else if is_dir {
@@ -220,8 +219,8 @@ impl ShellCommand for TypeCommand {
             return;
         }
 
-        match cpu.bus.disk.resolve_path(target) {
-            Some(path) if path.is_file() => match fs::read(path) {
+        match cpu.bus.disk.file_data(target) {
+            Some(file) => match file.read() {
                 Ok(bytes) => {
                     // DOS formatting: \n -> \r\n
                     let contents = String::from_utf8_lossy(&bytes);
@@ -231,7 +230,7 @@ impl ShellCommand for TypeCommand {
                 }
                 Err(_) => print_string(cpu, "Error reading file\r\n"),
             },
-            _ => print_string(cpu, "File not found\r\n"),
+            None => print_string(cpu, "File not found\r\n"),
         }
     }
 }

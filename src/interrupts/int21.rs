@@ -1894,8 +1894,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.si()));
             let mode = cpu.get_reg8(Register::BL);
             let action = cpu.get_dl();
-            let exists = cpu.bus.disk.is_virtual_file(&filename)
-                || cpu.bus.disk.resolve_path(&filename).is_some_and(|p| p.is_file());
+            let exists = cpu.bus.disk.is_file(&filename);
             let psp = cpu.current_psp;
             let result = match (exists, action & 0x0F, action >> 4) {
                 (true, 1, _) => cpu.bus.disk.open_file(&filename, mode, psp).map(|h| (h, 1)),

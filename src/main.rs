@@ -421,9 +421,9 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Install the configured sound hardware, advertise it in the BLASTER,
-/// ULTRASND and ULTRADIR environment variables, and give the MPU-401 its
-/// synthesizer.
+/// Install the configured sound hardware and the drive with the built-in
+/// Ultrasound software, advertise them in the BLASTER, ULTRASND and
+/// ULTRADIR environment variables, and give the MPU-401 its synthesizer.
 fn apply_sound_config(cpu: &mut cpu::Cpu, sound: &config::SoundConfig) {
     use config::MidiSynth;
 
@@ -433,10 +433,13 @@ fn apply_sound_config(cpu: &mut cpu::Cpu, sound: &config::SoundConfig) {
         None => cpu.set_env("BLASTER", ""),
     }
     let gus = sound.ultrasound();
+    if let Err(e) = cpu.bus.mount_ultrasnd(gus.as_ref().and_then(|g| g.drive)) {
+        config_warning(cpu, &format!("gusdrive: {}", e));
+    }
     match &gus {
         Some(g) => {
             cpu.set_env("ULTRASND", &g.ultrasnd());
-            cpu.set_env("ULTRADIR", &g.ultradir);
+            cpu.set_env("ULTRADIR", &g.ultradir());
         }
         None => {
             cpu.set_env("ULTRASND", "");
@@ -461,13 +464,17 @@ fn apply_sound_config(cpu: &mut cpu::Cpu, sound: &config::SoundConfig) {
             None => config_warning(cpu, "midisynth=soundfont needs a soundfont setting"),
         }
     } else if sound.midisynth != MidiSynth::None {
-        let ultradir = &sound.gus.ultradir;
-        match rust_dos::gus::patch::PatchBank::from_dos_dir(&cpu.bus.disk, ultradir) {
-            Ok((bank, dir)) => {
-                cpu.bus.log_string(&format!(
-                    "[CONFIG] General MIDI with the Ultrasound patches in {}",
-                    dir.display()
-                ));
+        use rust_dos::gus::patch::PatchBank;
+        // The built-in patches whether or not their drive is there.
+        let bank = if sound.gus.builtin() {
+            Ok((PatchBank::builtin(), "built into rust-dos".to_string()))
+        } else {
+            PatchBank::from_dos_dir(&cpu.bus.disk, &sound.gus.ultradir()).map(|(bank, dir)| (bank, format!("in {}", dir)))
+        };
+        match bank {
+            Ok((bank, place)) => {
+                cpu.bus
+                    .log_string(&format!("[CONFIG] General MIDI with the Ultrasound patches {}", place));
                 cpu.bus.mpu.load_gus_patches(bank);
             }
             Err(e) if sound.midisynth == MidiSynth::Gus => {

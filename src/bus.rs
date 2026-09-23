@@ -130,6 +130,8 @@ pub struct Bus {
     pub gus: Option<crate::gus::Gus>,
     /// The IRQ the Ultrasound's interrupt line holds up, if any.
     gus_line: Option<u8>,
+    /// The drive with the built-in Ultrasound software, if any.
+    ultrasnd_drive: Option<u8>,
     /// Mixed output (44.1 kHz stereo, interleaved) rendered up to
     /// `audio_frames` frames of emulated time, waiting for `pump_audio`.
     pub audio_out: VecDeque<i16>,
@@ -223,6 +225,7 @@ impl Bus {
             mpu: crate::mpu401::Mpu401::new(),
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
             gus_line: None,
+            ultrasnd_drive: None,
             audio_out: VecDeque::new(),
             audio_frames: 0,
             sb_phase: 0.0,
@@ -318,8 +321,9 @@ impl Bus {
         // still want mcb::alloc to work for tests and any early allocation.
         crate::mcb::init_empty(&mut bus);
 
-        // Equipment word, hard disk count and DPBs reflect the drives C:/Z:.
-        bus.sync_drive_bda();
+        // The default Ultrasound's software, and the equipment word, hard
+        // disk count and DPBs for the drives C:, X: and Z:.
+        let _ = bus.mount_ultrasnd(crate::gus::GusConfig::default().drive);
 
         bus
     }
@@ -334,6 +338,28 @@ impl Bus {
         replace: bool,
     ) -> Result<std::path::PathBuf, String> {
         let result = self.disk.mount(drive, path, opts, replace);
+        self.sync_drive_bda();
+        result
+    }
+
+    /// Put the Ultrasound software built into rust-dos (`gus::builtin`) on
+    /// `drive`, or with None nowhere, in place of where it was.
+    pub fn mount_ultrasnd(&mut self, drive: Option<u8>) -> Result<(), String> {
+        // Unless a MOUNT has taken its place.
+        if let Some(old) = self.ultrasnd_drive.take()
+            && self.disk.drive_kind(old) == Some(DriveKind::Virtual)
+        {
+            let _ = self.disk.unmount(old);
+        }
+        let result = match drive {
+            Some(drive) => {
+                let files = crate::gus::builtin::drive(crate::disk::drive_letter(drive));
+                self.disk.mount_memory(drive, files, crate::gus::builtin::LABEL).map(|()| {
+                    self.ultrasnd_drive = Some(drive);
+                })
+            }
+            None => Ok(()),
+        };
         self.sync_drive_bda();
         result
     }

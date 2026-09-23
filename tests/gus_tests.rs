@@ -494,8 +494,16 @@ fn without_a_card_its_ports_are_open_bus() {
 }
 
 #[test]
-fn programs_find_the_card_in_the_environment() {
-    let cpu = Cpu::new(PathBuf::from("."));
+fn programs_find_the_card_and_its_patches_in_the_environment() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
     assert_eq!(cpu.get_env("ULTRASND"), Some("240,3,3,5,5"));
-    assert_eq!(cpu.get_env("ULTRADIR"), Some("C:\\ULTRASND"));
+    assert_eq!(cpu.get_env("ULTRADIR"), Some("X:\\ULTRASND"));
+    assert!(cpu.bus.disk.is_file("X:\\ULTRASND\\MIDI\\ACPIANO.PAT"));
+
+    // Elsewhere, or nowhere.
+    cpu.bus.mount_ultrasnd(Some(b'U' - b'A')).unwrap();
+    assert!(!cpu.bus.disk.is_mounted(b'X' - b'A'));
+    assert!(cpu.bus.disk.is_file("U:\\ULTRASND\\MIDI\\ACPIANO.PAT"));
+    cpu.bus.mount_ultrasnd(None).unwrap();
+    assert!(!cpu.bus.disk.is_mounted(b'U' - b'A'));
 }

@@ -7,8 +7,11 @@
 //! GF1's volume ramp units.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
+
+use crate::disk::{DiskController, FileData};
+use crate::memfs::Bytes;
 
 pub const MODE_16BIT: u8 = 0x01;
 pub const MODE_UNSIGNED: u8 = 0x02;
@@ -171,7 +174,7 @@ impl Patch {
 /// files, loaded when first played.
 pub struct PatchBank {
     /// Patch files by lower-case name without extension.
-    files: HashMap<String, PathBuf>,
+    files: HashMap<String, FileData>,
     melodic: Vec<Option<String>>,
     drums: Vec<Option<String>>,
     cache: HashMap<String, Option<Arc<Patch>>>,
@@ -180,7 +183,8 @@ pub struct PatchBank {
 }
 
 impl PatchBank {
-    /// A bank from the text of `ULTRASND.INI`, with the patches in `dir`.
+    /// A bank from the text of `ULTRASND.INI`, with the patches in host
+    /// directory `dir`.
     pub fn from_ini(ini: &str, dir: &Path) -> Self {
         let mut files = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -188,10 +192,29 @@ impl PatchBank {
                 let path = entry.path();
                 let is_pat = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pat"));
                 if let (true, Some(stem)) = (is_pat, path.file_stem().and_then(|s| s.to_str())) {
-                    files.insert(stem.to_ascii_lowercase(), path);
+                    files.insert(stem.to_ascii_lowercase(), FileData::Host(path));
                 }
             }
         }
+        Self::with_files(ini, files)
+    }
+
+    /// The patch set built into rust-dos (see `gus::builtin`).
+    pub fn builtin() -> Self {
+        let ini = super::builtin::file("ULTRASND.INI").unwrap_or_default();
+        let files = super::builtin::FILES
+            .iter()
+            .filter_map(|&(path, data)| {
+                let stem = path.strip_prefix("MIDI\\")?.strip_suffix(".PAT")?;
+                Some((stem.to_ascii_lowercase(), FileData::Memory(Bytes::Borrowed(data))))
+            })
+            .collect();
+        Self::with_files(&String::from_utf8_lossy(ini), files)
+    }
+
+    /// A bank from the text of `ULTRASND.INI`, with `files` by lower-case
+    /// name.
+    fn with_files(ini: &str, files: HashMap<String, FileData>) -> Self {
         let section = |names: &[&str]| -> Vec<Option<String>> {
             let mut map = vec![None; 128];
             for name in names {
@@ -223,23 +246,35 @@ impl PatchBank {
     /// The bank of the Ultrasound software in DOS directory `ultradir`
     /// (ULTRADIR) on the mounted drives: `ULTRASND.INI` there, and the
     /// patches in the directory it names or else in its MIDI directory.
-    /// Also returns the host directory of the patches.
-    pub fn from_dos_dir(disk: &crate::disk::DiskController, ultradir: &str) -> Result<(Self, PathBuf), String> {
+    /// Also returns the DOS directory of the patches.
+    pub fn from_dos_dir(disk: &DiskController, ultradir: &str) -> Result<(Self, String), String> {
         let dir = ultradir.trim_end_matches('\\');
-        let ini_path = disk
-            .resolve_path(&format!("{}\\ULTRASND.INI", dir))
-            .filter(|p| p.is_file())
-            .ok_or_else(|| format!("no {}\\ULTRASND.INI", dir))?;
-        let ini = std::fs::read(&ini_path).map_err(|e| format!("{}: {}", ini_path.display(), e))?;
+        let ini_path = format!("{}\\ULTRASND.INI", dir);
+        let ini = disk
+            .file_data(&ini_path)
+            .ok_or_else(|| format!("no {}", ini_path))?
+            .read()
+            .map_err(|e| format!("{}: {}", ini_path, e))?;
         let ini = String::from_utf8_lossy(&ini);
         let patches = Self::patch_dir(&ini)
-            .and_then(|d| disk.resolve_path(d.trim_end_matches('\\')))
-            .filter(|p| p.is_dir())
-            .or_else(|| disk.resolve_path(&format!("{}\\MIDI", dir)).filter(|p| p.is_dir()))
-            .ok_or_else(|| format!("no patch directory for {}", ini_path.display()))?;
-        let bank = Self::from_ini(&ini, &patches);
+            .map(|d| d.trim_end_matches('\\').to_string())
+            .filter(|d| disk.is_directory(d))
+            .or_else(|| Some(format!("{}\\MIDI", dir)).filter(|d| disk.is_directory(d)))
+            .ok_or_else(|| format!("no patch directory for {}", ini_path))?;
+        // The patches as programs see them, by their DOS names.
+        let files = disk
+            .list_directory(&format!("{}\\*.PAT", patches), 0)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| {
+                let data = disk.file_data(&format!("{}\\{}", patches, entry.filename))?;
+                let stem = entry.filename.split('.').next()?.to_ascii_lowercase();
+                Some((stem, data))
+            })
+            .collect();
+        let bank = Self::with_files(&ini, files);
         if bank.file_count() == 0 {
-            return Err(format!("no patches in {}", patches.display()));
+            return Err(format!("no patches in {}", patches));
         }
         Ok((bank, patches))
     }
@@ -277,7 +312,7 @@ impl PatchBank {
         let patch = self
             .files
             .get(name)
-            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|file| file.read().ok())
             .and_then(|bytes| parse(&bytes).ok())
             .map(Arc::new);
         if patch.is_none() {

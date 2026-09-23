@@ -26,7 +26,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
   General MIDI through the MPU-401 with a SoundFont or the Gravis patches
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
-  both digital audio and music (games load the patches from `ULTRADIR`)
+  both digital audio and music. The Gravis MIDI patch set is built in and
+  appears on drive X:, where `ULTRADIR` points, so games need no Ultrasound
+  installation
 * CGA graphics
 * FPU emulation
 * Interrupt handlers
@@ -101,15 +103,22 @@ D:
     send to the MPU-401 at 330h.
   * `gus` installs the Gravis Ultrasound: `true` (the default) or `false`.
     `gusbase` (hex: 210, 220, 240, 250 or 260), `gusirq` and `gusdma` set
-    its resources; the defaults are 240, 5 and 3. `ultradir` is the DOS
-    directory of the Ultrasound software and patches (default
-    `C:\ULTRASND`). The `ULTRASND` and `ULTRADIR` environment variables
-    follow them; drivers that program the card's IRQ and DMA latches
-    themselves get what they ask for.
+    its resources; the defaults are 240, 5 and 3. The `ULTRASND` and
+    `ULTRADIR` environment variables follow them; drivers that program the
+    card's IRQ and DMA latches themselves get what they ask for.
+  * `gusdrive` is the drive letter (D to Y) of the Gravis patch set built
+    into rust-dos, or `none`. The default is `X`. The drive is read-only and
+    holds the patches with `ULTRASND.INI` in `\ULTRASND`, as the Gravis
+    installer leaves them. It is there when the Ultrasound is.
+  * `ultradir` is the DOS directory of the Ultrasound software and patches.
+    It defaults to `\ULTRASND` on `gusdrive` (`X:\ULTRASND`), or to
+    `C:\ULTRASND` with `gusdrive=none`. To use patches of your own, set
+    `gusdrive=none` and put them in `ultradir`.
   * `midisynth` picks what plays the MPU-401's General MIDI: `auto` (the
     default: the SoundFont if `soundfont` is set, else the Ultrasound
     patches listed in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, or
-    `none`.
+    `none`. The built-in patches play even without the Ultrasound
+    (`gus=false`) unless `gusdrive` is `none`.
 * **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.
@@ -123,7 +132,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 
 ## Drives
 
-C: and the built-in Z: always exist. Mount more drives at the prompt:
+C: and the built-in Z: always exist, and so does X: with the Ultrasound
+patches unless the configuration moves or removes it. Mount more drives at
+the prompt:
 
 ```
 MOUNT                                     list drives

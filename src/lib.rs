@@ -17,6 +17,7 @@ pub mod log;
 pub mod instructions;
 pub mod interrupts;
 pub mod mcb;
+pub mod memfs;
 pub mod mount;
 pub mod mouse;
 pub mod mpu401;

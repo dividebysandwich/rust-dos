@@ -252,11 +252,21 @@ impl SoundConfig {
                     .filter(|d| matches!(d, 1 | 3 | 5 | 6 | 7))
                     .ok_or_else(|| format!("invalid gusdma '{}' (1, 3, 5, 6 or 7)", value))?;
             }
+            "gusdrive" => {
+                self.gus.drive = match value.to_ascii_lowercase().as_str() {
+                    "none" | "off" | "false" | "no" => None,
+                    _ => Some(
+                        parse_drive_letter(value)
+                            .filter(|&d| (3..DRIVE_Z).contains(&d))
+                            .ok_or_else(|| format!("invalid gusdrive '{}' (a letter from D to Y, or none)", value))?,
+                    ),
+                }
+            }
             "ultradir" => {
                 if value.is_empty() {
                     return Err("ultradir is empty".to_string());
                 }
-                self.gus.ultradir = value.to_string();
+                self.gus.ultradir = Some(value.to_string());
             }
             "midisynth" => {
                 self.midisynth = match value.to_ascii_lowercase().as_str() {
@@ -370,6 +380,18 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
         }
     }
     warnings.extend(config.sound.check());
+    // A drive of the user's own takes the letter of the built-in Ultrasound
+    // software.
+    if let Some(drive) = config.sound.gus.drive.filter(|_| config.sound.gus.enabled)
+        && config.drive(drive).is_some()
+    {
+        let letter = crate::disk::drive_letter(drive);
+        warnings.push(format!(
+            "[sound]: gusdrive {}: is mounted in [drives]; the built-in Ultrasound software is left out",
+            letter
+        ));
+        config.sound.gus.drive = None;
+    }
     config.warnings = warnings;
     config
 }
@@ -607,16 +629,47 @@ mod tests {
         );
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         let gus = config.sound.ultrasound().unwrap();
-        assert_eq!((gus.base, gus.irq, gus.dma, gus.ultradir.as_str()), (0x260, 11, 6, "D:\\GUS"));
+        assert_eq!((gus.base, gus.irq, gus.dma, gus.ultradir().as_str()), (0x260, 11, 6, "D:\\GUS"));
         assert_eq!(gus.ultrasnd(), "260,6,6,11,11");
+        assert!(!gus.builtin());
         assert_eq!(config.sound.midisynth, MidiSynth::Gus);
 
         let config = parse("[sound]\ngus=off\n", Path::new("/cfg"), None);
         assert_eq!(config.sound.ultrasound(), None);
 
-        let config = parse("[sound]\ngusbase=230\ngusirq=4\ngusdma=2\nmidisynth=mt32\n", Path::new("/cfg"), None);
-        assert_eq!(config.warnings.len(), 4, "{:?}", config.warnings);
+        let config = parse(
+            "[sound]\ngusbase=230\ngusirq=4\ngusdma=2\nmidisynth=mt32\ngusdrive=Z\n",
+            Path::new("/cfg"),
+            None,
+        );
+        assert_eq!(config.warnings.len(), 5, "{:?}", config.warnings);
         assert_eq!(config.sound.ultrasound(), Some(crate::gus::GusConfig::default()));
+    }
+
+    #[test]
+    fn the_builtin_ultrasound_drive() {
+        // X:, where ULTRADIR points unless it is set.
+        let gus = parse("", Path::new("/cfg"), None).sound.gus;
+        assert_eq!((gus.drive, gus.ultradir().as_str(), gus.builtin()), (Some(23), "X:\\ULTRASND", true));
+        let gus = parse("[sound]\ngusdrive=u:\n", Path::new("/cfg"), None).sound.gus;
+        assert_eq!((gus.drive, gus.ultradir().as_str()), (Some(20), "U:\\ULTRASND"));
+        let gus = parse("[sound]\ngusdrive=none\n", Path::new("/cfg"), None).sound.gus;
+        assert_eq!((gus.drive, gus.ultradir().as_str(), gus.builtin()), (None, "C:\\ULTRASND", false));
+        let gus = parse("[sound]\nultradir=D:\\GUS\n", Path::new("/cfg"), None).sound.gus;
+        assert_eq!((gus.drive, gus.ultradir().as_str(), gus.builtin()), (Some(23), "D:\\GUS", false));
+
+        for bad in ["C", "Z", "A:", "XY", ""] {
+            let config = parse(&format!("[sound]\ngusdrive={}\n", bad), Path::new("/cfg"), None);
+            assert_eq!(config.warnings.len(), 1, "{}: {:?}", bad, config.warnings);
+            assert_eq!(config.sound.gus.drive, Some(23));
+        }
+
+        // A drive of the user's own on X: wins.
+        let config = parse("[sound]\n[drives]\nX=/games\n", Path::new("/cfg"), None);
+        assert!(config.warnings[0].contains("gusdrive X:"), "{:?}", config.warnings);
+        assert_eq!(config.sound.gus.ultradir(), "C:\\ULTRASND");
+        let config = parse("[sound]\ngus=false\n[drives]\nX=/games\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
     #[test]

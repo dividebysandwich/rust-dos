@@ -64,11 +64,13 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
   MPU-401 (`soundfont`, `gus` or `none`), with its active voices and any
   patches it couldn't load.
-- **Gravis Ultrasound:** `/api/gus` shows the IRQ and DMA the driver
-  latched, the reset and mix registers, IRQ status and line, timers, DMA,
-  the number of active and playing voices, and every voice's registers.
-  A card that plays nothing often has `reset` without bit 1 (DAC off) or
-  voices whose volume stays 0.
+- **Gravis Ultrasound:** the built-in Gravis patch set is on the
+  read-only drive X: in `X:\ULTRASND`, where `ULTRADIR` points, so a game
+  needs no copy of the Ultrasound software on C:. `/api/gus` shows the IRQ
+  and DMA the driver latched, the reset and mix registers, IRQ status and
+  line, timers, DMA, the number of active and playing voices, and every
+  voice's registers. A card that plays nothing often has `reset` without
+  bit 1 (DAC off) or voices whose volume stays 0.
 - **Kill a stuck program** with `POST /api/control/reboot_shell`. This is
   better than restarting the emulator.
 

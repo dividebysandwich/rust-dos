@@ -248,7 +248,7 @@ fn default_environment() -> Vec<(String, String)> {
         ("COMSPEC".to_string(), "Z:\\COMMAND.COM".to_string()),
         ("BLASTER".to_string(), crate::sb::SbConfig::default().blaster()),
         ("ULTRASND".to_string(), gus.ultrasnd()),
-        ("ULTRADIR".to_string(), gus.ultradir),
+        ("ULTRADIR".to_string(), gus.ultradir()),
     ]
 }
 

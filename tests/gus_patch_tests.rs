@@ -1,11 +1,13 @@
-//! The General MIDI synthesizer with the real Gravis patch set. These need
-//! an Ultrasound install, so they are ignored by default:
+//! The General MIDI synthesizer with the Gravis patch set built into
+//! rust-dos. `renders_a_midi_file` plays one of the MIDI files of an
+//! Ultrasound install, so it is ignored by default:
 //!
 //!   ULTRASND_DIR=~/Games/DOS/ULTRASND cargo test --release --test gus_patch_tests -- --ignored --nocapture
 //!
-//! `renders_a_midi_file` writes `target/gus_midi.wav` for listening
-//! (`GUS_MIDI` picks the file, relative to the MIDI directory).
+//! It writes `target/gus_midi.wav` for listening (`GUS_MIDI` picks the
+//! file, relative to the MIDI directory).
 
+use rust_dos::gus::builtin;
 use rust_dos::gus::patch::{self, PatchBank};
 use rust_dos::gus::synth::GusSynth;
 use std::path::{Path, PathBuf};
@@ -24,21 +26,14 @@ fn find(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 #[test]
-#[ignore]
 fn every_patch_parses() {
-    let Some(dir) = ultrasnd_dir() else { return };
     let mut count = 0;
-    for entry in std::fs::read_dir(dir.join("MIDI")).unwrap().flatten() {
-        let path = entry.path();
-        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pat")) {
-            continue;
-        }
-        let bytes = std::fs::read(&path).unwrap();
-        let p = patch::parse(&bytes).unwrap_or_else(|e| panic!("{}: {}", path.display(), e));
+    for (path, bytes) in builtin::FILES.iter().filter(|(p, _)| p.ends_with(".PAT")) {
+        let p = patch::parse(bytes).unwrap_or_else(|e| panic!("{}: {}", path, e));
         for s in &p.samples {
-            assert!(!s.data.is_empty(), "{}", path.display());
+            assert!(!s.data.is_empty(), "{}", path);
             let mean = s.data.iter().map(|&v| v as f64).sum::<f64>() / s.data.len() as f64;
-            assert!(mean.abs() < 4000.0, "{}: DC {}", path.display(), mean);
+            assert!(mean.abs() < 4000.0, "{}: DC {}", path, mean);
         }
         count += 1;
     }
@@ -150,9 +145,8 @@ fn write_wav(path: &Path, samples: &[i16]) {
 #[ignore]
 fn renders_a_midi_file() {
     let Some(dir) = ultrasnd_dir() else { return };
-    let ini = std::fs::read_to_string(find(&dir, "ULTRASND.INI").unwrap()).unwrap();
     let midi_dir = dir.join("MIDI");
-    let mut synth = GusSynth::new(PatchBank::from_ini(&ini, &midi_dir));
+    let mut synth = GusSynth::new(PatchBank::builtin());
     let name = std::env::var("GUS_MIDI").unwrap_or_else(|_| "HERO.MID".to_string());
     let events = read_smf(&std::fs::read(find(&midi_dir, &name).expect("MIDI file")).unwrap());
     let seconds = events.last().map_or(0.0, |(t, _)| *t).min(60.0) + 2.0;
