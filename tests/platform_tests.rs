@@ -249,3 +249,33 @@ fn bios_keyboard_buffer_holds_15_keys() {
     }
     assert_eq!(bus.keyboard_buffer.len(), 15);
 }
+
+#[test]
+fn bios_translates_shift_ctrl_and_alt_combinations() {
+    use rust_dos::keyboard::{bios_keystroke, deliver_key_down};
+    const SHIFT: u8 = 0x02;
+    const CTRL: u8 = 0x04;
+    const ALT: u8 = 0x08;
+    for (scan, ascii, flags, keystroke) in [
+        (0x2D, b'x', 0, 0x2D78),
+        (0x2D, b'x', ALT, 0x2D00),
+        (0x2E, b'c', CTRL, 0x2E03),
+        (0x3F, 0, ALT, 0x6C00),  // Alt+F5
+        (0x43, 0, CTRL, 0x6600), // Ctrl+F9
+        (0x3B, 0, SHIFT, 0x5400),
+        (0x86, 0, CTRL, 0x8A00), // Ctrl+F12
+        (0x02, b'1', ALT, 0x7800),
+        (0x4B, 0, CTRL, 0x7300),
+        (0x0F, 0x09, SHIFT, 0x0F00),
+        (0x1C, 0x0D, CTRL, 0x1C0A),
+    ] {
+        assert_eq!(bios_keystroke(scan, ascii, flags), keystroke, "{scan:02X} {flags:02X}");
+    }
+
+    // Delivered keys follow the shift state at 40:17h.
+    let mut bus = Bus::new(PathBuf::from("."));
+    bus.write_8(0x0417, ALT);
+    deliver_key_down(&mut bus, 0x3F00, false);
+    assert_eq!(bus.keyboard_buffer.pop_front(), Some(0x6C00));
+    assert_eq!(bus.kbc.read_data(), 0x3F, "the controller gets the plain make code");
+}

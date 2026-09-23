@@ -17,16 +17,84 @@ fn send_scan(bus: &mut Bus, scan: u8, extended: bool) {
     bus.sync_keyboard_irq();
 }
 
-/// Deliver a key press: queue `(scan << 8) | ascii` for BIOS INT 16h readers,
-/// and send the make code to the keyboard controller for programs that read
-/// port 60h or install their own INT 09h ISR.
+/// Deliver a key press: queue its keystroke for BIOS INT 16h readers, as
+/// the BIOS translates `(scan << 8) | ascii` under the Shift, Ctrl and Alt
+/// state at 40:17h, and send the make code to the keyboard controller for
+/// programs that read port 60h or install their own INT 09h ISR.
 pub fn deliver_key_down(bus: &mut Bus, code: u16, extended: bool) {
+    let scan = (code >> 8) as u8;
     // The BIOS buffer holds 15 keystrokes; when it's full (a program that
     // reads the keyboard itself never empties it) new ones are dropped.
     if bus.keyboard_buffer.len() < BIOS_BUFFER_KEYS {
-        bus.keyboard_buffer.push_back(code);
+        let keystroke = bios_keystroke(scan, code as u8, bus.read_8(0x0417));
+        bus.keyboard_buffer.push_back(keystroke);
     }
-    send_scan(bus, (code >> 8) as u8, extended);
+    send_scan(bus, scan, extended);
+}
+
+/// The keystroke the BIOS keyboard handler stores for the make code `scan`
+/// of a key whose character is `ascii`, with the Shift (bits 0-1), Ctrl
+/// (bit 2) and Alt (bit 3) state `flags`: Alt and Ctrl combinations and
+/// shifted function keys have codes of their own.
+pub fn bios_keystroke(scan: u8, ascii: u8, flags: u8) -> u16 {
+    let key = |scan: u8, ascii: u8| (scan as u16) << 8 | ascii as u16;
+    let letter = matches!(scan, 0x10..=0x19 | 0x1E..=0x26 | 0x2C..=0x32);
+    if flags & 0x08 != 0 {
+        return match scan {
+            0x02..=0x0D => key(scan + 0x76, 0),
+            0x3B..=0x44 => key(scan + 0x2D, 0),
+            0x85 | 0x86 => key(scan + 6, 0),
+            0x0F => key(0xA5, 0),
+            0x39 => key(scan, ascii),
+            0x47 => key(0x97, 0),
+            0x48 => key(0x98, 0),
+            0x49 => key(0x99, 0),
+            0x4B => key(0x9B, 0),
+            0x4D => key(0x9D, 0),
+            0x4F => key(0x9F, 0),
+            0x50 => key(0xA0, 0),
+            0x51 => key(0xA1, 0),
+            0x52 => key(0xA2, 0),
+            0x53 => key(0xA3, 0),
+            _ => key(scan, 0),
+        };
+    }
+    if flags & 0x04 != 0 {
+        return match scan {
+            _ if letter => key(scan, ascii & 0x1F),
+            0x03 => key(scan, 0),
+            0x07 => key(scan, 0x1E),
+            0x0C => key(scan, 0x1F),
+            0x1A => key(scan, 0x1B),
+            0x1B => key(scan, 0x1D),
+            0x2B => key(scan, 0x1C),
+            0x1C => key(scan, 0x0A),
+            0x0E => key(scan, 0x7F),
+            0x0F => key(0x94, 0),
+            0x3B..=0x44 => key(scan + 0x23, 0),
+            0x85 | 0x86 => key(scan + 4, 0),
+            0x47 => key(0x77, 0),
+            0x48 => key(0x8D, 0),
+            0x49 => key(0x84, 0),
+            0x4B => key(0x73, 0),
+            0x4D => key(0x74, 0),
+            0x4F => key(0x75, 0),
+            0x50 => key(0x91, 0),
+            0x51 => key(0x76, 0),
+            0x52 => key(0x92, 0),
+            0x53 => key(0x93, 0),
+            _ => key(scan, ascii),
+        };
+    }
+    if flags & 0x03 != 0 {
+        return match scan {
+            0x3B..=0x44 => key(scan + 0x19, 0),
+            0x85 | 0x86 => key(scan + 2, 0),
+            0x0F => key(scan, 0),
+            _ => key(scan, ascii),
+        };
+    }
+    key(scan, ascii)
 }
 
 /// Deliver a key release: the break code (scan code | 80h). Games that track
