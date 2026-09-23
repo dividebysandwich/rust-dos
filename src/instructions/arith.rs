@@ -4,7 +4,7 @@
 use iced_x86::{Instruction, Register};
 
 use super::operand::{loc, op_size, read_op};
-use crate::cpu::alu::{AF, CF, OF, sign_extend, size_mask};
+use crate::cpu::alu::{AF, ARITH, CF, OF, PF, SF, ZF, sign_extend, size_mask};
 use crate::cpu::{Access, Cpu, CpuFlags, CpuResult, Fault};
 
 /// Two-operand ALU operations.
@@ -237,25 +237,36 @@ fn set_szp8(cpu: &mut Cpu, al: u8) {
     cpu.update_pf(al as u32);
 }
 
+/// The flags the BCD adjustments leave undefined are set the way a 386 sets
+/// them (see test386.asm, validated against a 386SX).
+
+/// OF of adding (or subtracting) the adjustment `adj` to AL `old`.
+fn bcd_overflow(old: u8, adj: u8, sub: bool) -> bool {
+    let r = if sub { old.wrapping_sub(adj) } else { old.wrapping_add(adj) };
+    if sub { (old ^ adj) & (old ^ r) & 0x80 != 0 } else { (old ^ r) & (adj ^ r) & 0x80 != 0 }
+}
+
 /// DAA: decimal adjust AL after addition.
 pub fn daa(cpu: &mut Cpu) -> CpuResult {
     let old_al = cpu.get_al();
     let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
-    let mut al = old_al;
+    let mut adj = 0u8;
     let mut cf = false;
     if old_al & 0x0F > 9 || cpu.get_cpu_flag(CpuFlags::AF) {
-        al = al.wrapping_add(6);
+        adj = 6;
         cf = old_cf || old_al > 0xF9;
         cpu.set_flag_bits(AF, AF);
     } else {
         cpu.set_flag_bits(AF, 0);
     }
     if old_al > 0x99 || old_cf {
-        al = al.wrapping_add(0x60);
+        adj = adj.wrapping_add(0x60);
         cf = true;
     }
+    let al = old_al.wrapping_add(adj);
     cpu.set_reg(Register::AL, al as u32);
     cpu.set_cpu_flag(CpuFlags::CF, cf);
+    cpu.set_cpu_flag(CpuFlags::OF, bcd_overflow(old_al, adj, false));
     set_szp8(cpu, al);
     Ok(())
 }
@@ -264,74 +275,117 @@ pub fn daa(cpu: &mut Cpu) -> CpuResult {
 pub fn das(cpu: &mut Cpu) -> CpuResult {
     let old_al = cpu.get_al();
     let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
-    let mut al = old_al;
+    let mut adj = 0u8;
     let mut cf = false;
     if old_al & 0x0F > 9 || cpu.get_cpu_flag(CpuFlags::AF) {
-        al = al.wrapping_sub(6);
+        adj = 6;
         cf = old_cf || old_al < 6;
         cpu.set_flag_bits(AF, AF);
     } else {
         cpu.set_flag_bits(AF, 0);
     }
     if old_al > 0x99 || old_cf {
-        al = al.wrapping_sub(0x60);
+        adj = adj.wrapping_add(0x60);
         cf = true;
     }
+    let al = old_al.wrapping_sub(adj);
     cpu.set_reg(Register::AL, al as u32);
     cpu.set_cpu_flag(CpuFlags::CF, cf);
+    cpu.set_cpu_flag(CpuFlags::OF, bcd_overflow(old_al, adj, true));
     set_szp8(cpu, al);
     Ok(())
 }
 
 /// AAA: ASCII adjust after addition.
 pub fn aaa(cpu: &mut Cpu) -> CpuResult {
-    let al = cpu.get_al();
-    if al & 0x0F > 9 || cpu.get_cpu_flag(CpuFlags::AF) {
-        cpu.set_ax(cpu.ax().wrapping_add(0x106));
-        cpu.set_flag_bits(AF | CF, AF | CF);
+    let old_al = cpu.get_al();
+    let sf = (0x7A..=0xF9).contains(&old_al);
+    let (adjust, of, zf_forced_clear) = if old_al & 0x0F > 9 {
+        (true, old_al & 0xF0 == 0x70, false)
+    } else if cpu.get_cpu_flag(CpuFlags::AF) {
+        (true, false, true)
     } else {
-        cpu.set_flag_bits(AF | CF, 0);
+        (false, false, false)
+    };
+    if adjust {
+        cpu.set_ax(cpu.ax().wrapping_add(0x106));
     }
-    cpu.set_reg(Register::AL, (cpu.get_al() & 0x0F) as u32);
+    let al = cpu.get_al();
+    let mut f = if adjust { AF | CF } else { 0 };
+    if sf {
+        f |= SF;
+    }
+    if of {
+        f |= OF;
+    }
+    if al == 0 && !zf_forced_clear {
+        f |= ZF;
+    }
+    if al.count_ones() % 2 == 0 {
+        f |= PF;
+    }
+    cpu.set_flag_bits(ARITH, f);
+    cpu.set_reg(Register::AL, (al & 0x0F) as u32);
     Ok(())
 }
 
 /// AAS: ASCII adjust after subtraction.
 pub fn aas(cpu: &mut Cpu) -> CpuResult {
-    let al = cpu.get_al();
-    if al & 0x0F > 9 || cpu.get_cpu_flag(CpuFlags::AF) {
+    let old_al = cpu.get_al();
+    let (adjust, sf, of) = if old_al & 0x0F > 9 {
+        (true, old_al > 0x85, false)
+    } else if cpu.get_cpu_flag(CpuFlags::AF) {
+        (true, !(0x06..=0x85).contains(&old_al), (0x80..=0x85).contains(&old_al))
+    } else {
+        (false, old_al >= 0x80, false)
+    };
+    if adjust {
         cpu.set_ax(cpu.ax().wrapping_sub(6));
         cpu.set_reg(Register::AH, cpu.get_ah().wrapping_sub(1) as u32);
-        cpu.set_flag_bits(AF | CF, AF | CF);
-    } else {
-        cpu.set_flag_bits(AF | CF, 0);
     }
-    cpu.set_reg(Register::AL, (cpu.get_al() & 0x0F) as u32);
+    let al = cpu.get_al();
+    let mut f = if adjust { AF | CF } else { 0 };
+    if sf {
+        f |= SF;
+    }
+    if of {
+        f |= OF;
+    }
+    if al == 0 {
+        f |= ZF;
+    }
+    if al.count_ones() % 2 == 0 {
+        f |= PF;
+    }
+    cpu.set_flag_bits(ARITH, f);
+    cpu.set_reg(Register::AL, (al & 0x0F) as u32);
     Ok(())
 }
 
 /// AAM: split AL into two digits of the immediate's base (10 unless
-/// encoded otherwise). A base of 0 raises #DE.
+/// encoded otherwise). A base of 0 raises #DE. CF, OF and AF are cleared.
 pub fn aam(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let base = instr.immediate8();
     if base == 0 {
         // A 386 changes the flags before it raises #DE.
-        cpu.set_flag_bits(crate::cpu::alu::ARITH, crate::cpu::alu::PF);
+        cpu.set_flag_bits(ARITH, PF);
         return Err(Fault::DE);
     }
     let al = cpu.get_al();
     cpu.set_reg(Register::AH, (al / base) as u32);
     cpu.set_reg(Register::AL, (al % base) as u32);
+    cpu.set_flag_bits(CF | OF | AF, 0);
     set_szp8(cpu, al % base);
     Ok(())
 }
 
-/// AAD: combine AH and AL digits of the immediate's base into AL.
+/// AAD: combine AH and AL digits of the immediate's base into AL. The
+/// flags are those of adding the high digit's value to AL.
 pub fn aad(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let base = instr.immediate8();
-    let al = cpu.get_al().wrapping_add(cpu.get_ah().wrapping_mul(base));
+    let high = cpu.get_ah().wrapping_mul(base);
+    let al = cpu.alu_add(1, cpu.get_al() as u32, high as u32, false) as u8;
     cpu.set_ax(al as u16);
-    set_szp8(cpu, al);
     Ok(())
 }
 

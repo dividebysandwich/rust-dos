@@ -11,18 +11,18 @@ pub fn fld(cpu: &mut Cpu, instr: &Instruction) {
 
         match instr.memory_size() {
             MemorySize::Float32 => {
-                let bits = cpu.bus.read_32(addr);
+                let bits = cpu.lin_read_32(addr);
                 f.set_f64(f32::from_bits(bits) as f64);
             }
             MemorySize::Float64 => {
-                let bits = cpu.bus.read_64(addr);
+                let bits = cpu.lin_read_64(addr);
                 f.set_f64(f64::from_bits(bits));
             }
             MemorySize::Float80 => {
                 // Load 10 bytes directly from memory without lossy conversion
                 let mut bytes = [0u8; 10];
                 for i in 0..10 {
-                    bytes[i] = cpu.bus.read_8(addr + i as usize);
+                    bytes[i] = cpu.lin_read_8(addr + i as usize);
                 }
                 f.set_bytes(&bytes);
             }
@@ -86,13 +86,13 @@ pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
 
     match instr.memory_size() {
         MemorySize::Int16 => {
-            cpu.bus.write_16(addr, rounded as i16 as u16);
+            cpu.lin_write_16(addr, rounded as i16 as u16);
         }
         MemorySize::Int32 => {
-            cpu.bus.write_32(addr, rounded as i32 as u32);
+            cpu.lin_write_32(addr, rounded as i32 as u32);
         }
         MemorySize::Int64 => {
-            cpu.bus.write_64(addr, rounded as i64 as u64);
+            cpu.lin_write_64(addr, rounded as i64 as u64);
         }
         _ => {}
     }
@@ -108,16 +108,16 @@ pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
         match instr.memory_size() {
             MemorySize::Float32 => {
                 let bits = (val.get_f64() as f32).to_bits();
-                cpu.bus.write_32(addr, bits);
+                cpu.lin_write_32(addr, bits);
             }
             MemorySize::Float64 => {
                 let bits = val.get_f64().to_bits();
-                cpu.bus.write_64(addr, bits);
+                cpu.lin_write_64(addr, bits);
             }
             MemorySize::Float80 => {
                 let bytes = val.get_bytes();
                 for i in 0..10 {
-                    cpu.bus.write_8(addr + i as usize, bytes[i]);
+                    cpu.lin_write_8(addr + i as usize, bytes[i]);
                 }
             }
             _ => {
@@ -146,7 +146,7 @@ pub fn fbstp(cpu: &mut Cpu, instr: &Instruction) {
 
     // Write the 10-byte BCD block to Memory
     for i in 0..10 {
-        cpu.bus.write_8(addr + i as usize, bcd_bytes[i]);
+        cpu.lin_write_8(addr + i as usize, bcd_bytes[i]);
     }
 }
 
@@ -159,16 +159,16 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
         match instr.memory_size() {
             MemorySize::Float32 => {
                 let bits = (st0.get_f64() as f32).to_bits();
-                cpu.bus.write_32(addr, bits);
+                cpu.lin_write_32(addr, bits);
             }
             MemorySize::Float64 => {
                 let bits = st0.get_f64().to_bits();
-                cpu.bus.write_64(addr, bits);
+                cpu.lin_write_64(addr, bits);
             }
             MemorySize::Float80 => {
                 let bytes = st0.get_bytes();
                 for i in 0..10 {
-                    cpu.bus.write_8(addr + i as usize, bytes[i]);
+                    cpu.lin_write_8(addr + i as usize, bytes[i]);
                 }
             }
             _ => {
@@ -273,10 +273,10 @@ pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
 
     match instr.memory_size() {
         MemorySize::Int16 => {
-            cpu.bus.write_16(addr, i_val as i16 as u16);
+            cpu.lin_write_16(addr, i_val as i16 as u16);
         }
         MemorySize::Int32 => {
-            cpu.bus.write_32(addr, i_val as i32 as u32);
+            cpu.lin_write_32(addr, i_val as i32 as u32);
         }
         _ => {
             cpu.bus.log_string(&format!(

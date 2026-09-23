@@ -90,8 +90,8 @@ pub fn fadd(cpu: &mut Cpu, instr: &Instruction) {
         let addr = calculate_addr(cpu, instr);
         let mut val = F80::new();
         match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.bus.read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.bus.read_64(addr))),
+            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
+            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
             _ => {}
         }
         let mut st0 = cpu.fpu_get(0);
@@ -133,8 +133,8 @@ pub fn fsub(cpu: &mut Cpu, instr: &Instruction) {
         let addr = calculate_addr(cpu, instr);
         let mut val = F80::new();
         match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.bus.read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.bus.read_64(addr))),
+            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
+            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
             _ => {}
         }
         let mut st0 = cpu.fpu_get(0);
@@ -169,8 +169,8 @@ pub fn fsubr(cpu: &mut Cpu, instr: &Instruction) {
         let addr = calculate_addr(cpu, instr);
         let mut val = F80::new();
         match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.bus.read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.bus.read_64(addr))),
+            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
+            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
             _ => {}
         }
         let st0 = cpu.fpu_get(0);
@@ -204,8 +204,8 @@ pub fn fmul(cpu: &mut Cpu, instr: &Instruction) {
         let addr = calculate_addr(cpu, instr);
         let mut val = F80::new();
         match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.bus.read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.bus.read_64(addr))),
+            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
+            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
             _ => {}
         }
         let mut st0 = cpu.fpu_get(0);
@@ -242,8 +242,8 @@ pub fn fdiv(cpu: &mut Cpu, instr: &Instruction) {
         let addr = calculate_addr(cpu, instr);
         let mut divisor = F80::new();
         match instr.memory_size() {
-            MemorySize::Float32 => divisor.set_f64(f32::from_bits(cpu.bus.read_32(addr)) as f64),
-            MemorySize::Float64 => divisor.set_f64(f64::from_bits(cpu.bus.read_64(addr))),
+            MemorySize::Float32 => divisor.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
+            MemorySize::Float64 => divisor.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
             _ => {}
         }
         let mut st0 = cpu.fpu_get(0);
@@ -295,8 +295,8 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
         let addr = calculate_addr(cpu, instr);
         let mut mem_val = F80::new();
         match instr.memory_size() {
-            MemorySize::Float32 => mem_val.set_f64(f32::from_bits(cpu.bus.read_32(addr)) as f64),
-            MemorySize::Float64 => mem_val.set_f64(f64::from_bits(cpu.bus.read_64(addr))),
+            MemorySize::Float32 => mem_val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
+            MemorySize::Float64 => mem_val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
             _ => mem_val.set_f64(1.0),
         }
 

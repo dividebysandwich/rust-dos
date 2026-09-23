@@ -6,10 +6,10 @@
 //! (`run_batch`); tests step it one instruction at a time (`Cpu::step`).
 //! Both go through the same code.
 
-use iced_x86::{Decoder, DecoderOptions};
+use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 use crate::command::CommandDispatcher;
-use crate::cpu::{CR0_PE, Cpu, CpuFlags, CpuState, Fault, IntSource, Seg};
+use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, Seg};
 use crate::instr_cache::InstrCache;
 
 /// Why `run_batch` returned.
@@ -44,7 +44,9 @@ impl ExecHook for NoHook {
 /// decoded-instruction cache, taken out of the CPU while it runs so a
 /// cached instruction can be used in place while the CPU executes it.
 struct Fetch {
-    decoder: Decoder<'static>,
+    /// Decoders for 16-bit and 32-bit code segments.
+    decoder16: Decoder<'static>,
+    decoder32: Decoder<'static>,
     ram: &'static [u8],
     cache: InstrCache,
 }
@@ -66,7 +68,8 @@ impl Fetch {
         let ram = cpu.bus.ram();
         let ram: &'static [u8] = unsafe { std::slice::from_raw_parts(ram.as_ptr(), ram.len()) };
         Self {
-            decoder: Decoder::with_ip(16, ram, 0, DecoderOptions::NONE),
+            decoder16: Decoder::with_ip(16, ram, 0, DecoderOptions::NONE),
+            decoder32: Decoder::with_ip(32, ram, 0, DecoderOptions::NONE),
             ram,
             cache: std::mem::take(&mut cpu.decode_cache),
         }
@@ -172,15 +175,18 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
     // interrupt still in service.
     if let Some(irq) = cpu.bus.pic_pending_irq() {
         let vector = cpu.bus.pic.vector(irq);
-        let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
-        if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
-            // No handler installed — drop the IRQ rather than spinning on it.
-            cpu.bus.pic_drop(irq);
-            return true;
+        if !cpu.pe() {
+            let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
+            if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
+                // No handler installed — drop the IRQ rather than spinning on it.
+                cpu.bus.pic_drop(irq);
+                return true;
+            }
         }
         cpu.bus.pic_acknowledge(irq);
+        cpu.state = CpuState::Running;
         let (eip, esp) = (cpu.eip(), cpu.esp());
-        if let Err(fault) = cpu.deliver_interrupt(vector, IntSource::External) {
+        if let Err(fault) = cpu.deliver_interrupt(vector, IntSource::External, None) {
             cpu.set_eip(eip);
             cpu.set_esp(esp);
             cpu.raise(fault);
@@ -188,8 +194,9 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
         return true;
     }
 
-    // Mouse event handler installed with INT 33h AX=000C.
-    crate::mouse::deliver_callback(cpu)
+    // Mouse event handler installed with INT 33h AX=000C, called the
+    // real-mode way.
+    !cpu.pe() && crate::mouse::deliver_callback(cpu)
 }
 
 enum Shell {
@@ -305,18 +312,32 @@ fn instruction(
     // Instruction fetch past the end of the code segment raises #GP(0).
     // (In 16-bit code, EIP runs on past FFFFh rather than wrapping.)
     let eip = cpu.eip();
-    let cs = *cpu.seg_cache(Seg::CS);
-    if eip > cs.limit {
+    let cs = cpu.seg_cache(Seg::CS);
+    let (cs_limit, code32, lin_ip) = (cs.limit, cs.attr & ATTR_DB != 0, cs.base.wrapping_add(eip));
+    if eip > cs_limit {
         cpu.raise(Fault::gp(0));
         return None;
     }
-    let phys_ip = cpu.translate(cs.base.wrapping_add(eip)) as usize;
+    let paging = cpu.cr0 & CR0_PG != 0;
+    let phys_ip = if !paging {
+        cpu.translate(lin_ip) as usize
+    } else {
+        let user = cpu.cpl == 3;
+        match cpu.lin_to_phys(lin_ip, false, user) {
+            Ok(p) => p as usize,
+            Err(fault) => {
+                cpu.raise(fault);
+                return None;
+            }
+        }
+    };
 
     // Tripwire: arriving in the IVT / BIOS data area with an application
     // context (DS not 0, not the shell at CS=0) almost always means a
     // corrupted FAR pointer landed us here.
     if cpu.cs() == 0
         && cpu.ip() < 0x100
+        && !cpu.pe()
         && cpu.ds() != 0
         && cpu.ds() != cpu.transient_segment()
         && cpu.current_psp != 0
@@ -332,29 +353,34 @@ fn instruction(
     cpu.executed += 1;
 
     // Decode via the decoded-instruction cache. On a hit (the common case
-    // inside hot loops) iced's decoder is skipped entirely.
+    // inside hot loops) iced's decoder is skipped entirely. An instruction
+    // that may continue on the next page of a paged address space, or runs
+    // past the end of RAM, is fetched byte by byte and not cached.
     let slow;
-    let instr = if phys_ip + 16 <= fetch.ram.len() {
+    let paged_crossing = paging && lin_ip & 0xFFF > 0xFF0;
+    let instr = if phys_ip + 16 <= fetch.ram.len() && !paged_crossing {
         let page_gen = cpu.bus.page_gen[phys_ip >> 12];
-        let decoder = &mut fetch.decoder;
-        fetch.cache.get_or_decode(phys_ip, cs.selector, eip, page_gen, |slot| {
+        let decoder = if code32 { &mut fetch.decoder32 } else { &mut fetch.decoder16 };
+        fetch.cache.get_or_decode(phys_ip, eip, code32, page_gen, |slot| {
             decoder.set_position(phys_ip).unwrap();
             decoder.set_ip(eip as u64);
             decoder.decode_out(slot);
         })
     } else {
-        // At the end of RAM or past it: fetch through the bus.
-        let mut bytes = [0u8; 16];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            let lin = cs.base.wrapping_add(eip).wrapping_add(i as u32);
-            *byte = cpu.bus.read_8(cpu.translate(lin) as usize);
+        match fetch_slow(cpu, lin_ip, eip, code32) {
+            Ok(i) => {
+                slow = i;
+                &slow
+            }
+            Err(fault) => {
+                cpu.raise(fault);
+                return None;
+            }
         }
-        slow = Decoder::with_ip(16, &bytes, eip as u64, DecoderOptions::NONE).decode();
-        &slow
     };
 
     let next_eip = eip.wrapping_add(instr.len() as u32);
-    if next_eip - 1 > cs.limit {
+    if next_eip - 1 > cs_limit {
         // The instruction's last bytes lie past the segment limit.
         cpu.raise(Fault::gp(0));
         return None;
@@ -418,6 +444,36 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         cpu.bus.clock.skip_to_deadline();
     }
     true
+}
+
+/// Decode the instruction at `lin_ip` from bytes fetched one at a time:
+/// at the end of RAM, or where the instruction may cross into another
+/// page. A page that can't be fetched faults only if the instruction
+/// needs bytes from it.
+fn fetch_slow(cpu: &mut Cpu, lin_ip: u32, eip: u32, code32: bool) -> Result<Instruction, Fault> {
+    let user = cpu.cpl == 3;
+    let mut bytes = [0u8; 16];
+    let mut len = 0;
+    let mut missing = None;
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        let lin = lin_ip.wrapping_add(i as u32);
+        match cpu.lin_to_phys(lin, false, user) {
+            Ok(p) => *byte = cpu.bus.read_8(p as usize),
+            Err(fault) => {
+                missing = Some(fault);
+                break;
+            }
+        }
+        len += 1;
+    }
+    let mut decoder = Decoder::with_ip(if code32 { 32 } else { 16 }, &bytes[..len], eip as u64, DecoderOptions::NONE);
+    let instr = decoder.decode();
+    if decoder.last_error() == iced_x86::DecoderError::NoMoreBytes
+        && let Some(fault) = missing
+    {
+        return Err(fault);
+    }
+    Ok(instr)
 }
 
 fn report_tripwire(cpu: &mut Cpu) {

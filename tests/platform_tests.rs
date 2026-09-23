@@ -27,12 +27,12 @@ fn a20_gate_decides_whether_addresses_wrap_at_1mb() {
     // 26 8A 07 -> MOV AL, ES:[BX] (FFFF:0020 = 10_0010h)
     let code = [0x26, 0x8A, 0x07];
 
-    cpu.bus.a20 = false;
+    cpu.bus.set_a20(false);
     run_cpu_code(&mut cpu, &code);
     assert_eq!(cpu.get_al(), 0x11, "A20 off: wraps to 0000:0010");
 
     cpu.set_ip(0x100);
-    cpu.bus.a20 = true;
+    cpu.bus.set_a20(true);
     run_cpu_code(&mut cpu, &code);
     assert_eq!(cpu.get_al(), 0x22, "A20 on: the HMA");
 }
@@ -41,21 +41,21 @@ fn a20_gate_decides_whether_addresses_wrap_at_1mb() {
 fn a20_through_port_92h_and_the_keyboard_controller() {
     let mut bus = Bus::new(PathBuf::from("."));
     bus.io_write(0x92, 0x02);
-    assert!(bus.a20);
+    assert!(bus.a20());
     assert_eq!(bus.io_read(0x92) & 0x02, 0x02);
     bus.io_write(0x92, 0x00);
-    assert!(!bus.a20);
+    assert!(!bus.a20());
 
     // 8042: D1h writes the output port; bit 1 is A20, bit 0 must stay set.
     bus.io_write(0x64, 0xD1);
     bus.io_write(0x60, 0xDF);
-    assert!(bus.a20);
+    assert!(bus.a20());
     assert!(!bus.reset_requested);
     // D0h reads it back.
     bus.io_write(0x64, 0xD0);
     assert_eq!(bus.io_read(0x60), 0xDF);
     bus.io_write(0x64, 0xDD);
-    assert!(!bus.a20);
+    assert!(!bus.a20());
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn int_15h_a20_and_memory_functions() {
     let mut cpu = cpu();
     cpu.set_ax(0x2401);
     int15::handle(&mut cpu);
-    assert!(cpu.bus.a20 && !cpu.get_cpu_flag(CpuFlags::CF));
+    assert!(cpu.bus.a20() && !cpu.get_cpu_flag(CpuFlags::CF));
     cpu.set_ax(0x2402);
     int15::handle(&mut cpu);
     assert_eq!(cpu.get_al(), 1);

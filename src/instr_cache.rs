@@ -4,7 +4,7 @@
 //! second (palette blits, string operations, tight game main loops). Running
 //! those bytes through `iced_x86::Decoder::decode_out` every single iteration
 //! shows up prominently in the profile, so we cache the decoded
-//! `iced_x86::Instruction` keyed by the current (cs, ip) and reuse it on the
+//! `iced_x86::Instruction` keyed by its physical address and reuse it on the
 //! next hit.
 //!
 //! Correctness in the face of self-modifying code is handled via a per-4KB-page
@@ -16,19 +16,22 @@
 //!
 //! Two different (cs, ip) pairs can resolve to the same physical address but
 //! produce instructions with different `near_branch16` / `next_ip` fields
-//! (iced stores absolute 16-bit targets, not displacements). The cache key
-//! therefore includes (cs, ip) directly rather than just phys_ip.
+//! (iced stores absolute targets, not displacements). The cache key
+//! therefore includes the instruction pointer, not just the physical
+//! address, and the code size, which decides how the bytes decode.
 
 use iced_x86::Instruction;
 
-/// One cache slot. Empty slots carry `cs == u16::MAX` (unreachable as a real
-/// segment because segments are 16-bit, but in practice DOS programs never
-/// run with CS=0xFFFF so this is a safe sentinel for "nothing cached").
+/// One cache slot, keyed by the physical address, the instruction pointer
+/// (iced stores absolute branch targets, so the same bytes decoded at
+/// another EIP differ) and the code size. Empty slots have an impossible
+/// physical address.
 #[derive(Clone, Copy)]
 struct Slot {
-    cs: u16,
-    ip: u32,
-    page_gen: u32,
+    /// The physical address (high half) and the instruction pointer.
+    addr: u64,
+    /// The page generation (high half) and whether it's 32-bit code.
+    version: u64,
     instr: Instruction,
 }
 
@@ -36,9 +39,8 @@ impl Slot {
     #[inline(always)]
     fn empty() -> Self {
         Self {
-            cs: u16::MAX,
-            ip: 0,
-            page_gen: 0,
+            addr: u64::MAX,
+            version: 0,
             instr: Instruction::default(),
         }
     }
@@ -86,22 +88,20 @@ impl InstrCache {
 
     #[inline(always)]
     fn index(&self, phys_ip: usize) -> usize {
-        // phys_ip's low 20 bits are the real address; the bottom bits already
-        // mix cs and ip, giving a decent distribution without a hash step.
         phys_ip & self.mask
     }
 
-    /// The decoded instruction at `cs:ip`. The cached decode is used only
-    /// when the slot matches (cs, ip) and the recorded page generation still
-    /// matches the current one; otherwise `decode` fills the slot afresh.
-    /// Returning a reference into the slot saves copying the instruction on
-    /// every hit.
+    /// The decoded instruction at `phys_ip`, decoded at `ip` as 16 or 32-bit
+    /// code. The cached decode is used only when the slot matches all
+    /// three and the recorded page generation still matches the current
+    /// one; otherwise `decode` fills the slot afresh. Returning a reference
+    /// into the slot saves copying the instruction on every hit.
     #[inline(always)]
     pub fn get_or_decode(
         &mut self,
         phys_ip: usize,
-        cs: u16,
         ip: u32,
+        code32: bool,
         page_gen: u32,
         decode: impl FnOnce(&mut Instruction),
     ) -> &Instruction {
@@ -109,11 +109,12 @@ impl InstrCache {
         // SAFETY: idx is always in-bounds because we masked with `self.mask`
         // which is `len - 1` for a power-of-two-sized slots box.
         let slot = unsafe { self.slots.get_unchecked_mut(idx) };
-        if slot.cs != cs || slot.ip != ip || slot.page_gen != page_gen {
+        let addr = (phys_ip as u64) << 32 | ip as u64;
+        let version = (page_gen as u64) << 1 | code32 as u64;
+        if slot.addr != addr || slot.version != version {
             decode(&mut slot.instr);
-            slot.cs = cs;
-            slot.ip = ip;
-            slot.page_gen = page_gen;
+            slot.addr = addr;
+            slot.version = version;
             self.misses += 1;
         } else {
             self.hits += 1;

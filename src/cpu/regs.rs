@@ -50,10 +50,18 @@ impl Seg {
 /// Access rights of a present, writable, accessed data segment: the state a
 /// segment register's hidden part has after reset.
 pub const AR_DATA_RW: u16 = 0x0093;
+/// Access rights of a real-mode segment in virtual-8086 mode: as above,
+/// with privilege level 3.
+pub const AR_DATA_RW_V86: u16 = 0x00F3;
 /// Descriptor flag: default operand size / stack pointer size is 32 bits.
 pub const ATTR_DB: u16 = 0x4000;
 /// Descriptor flag: the limit counts 4 KB pages.
 pub const ATTR_G: u16 = 0x8000;
+
+/// Reads through a segment register are allowed.
+pub const RIGHT_READ: u8 = 0x01;
+/// Writes through a segment register are allowed.
+pub const RIGHT_WRITE: u8 = 0x02;
 
 /// A segment register: the selector the program loaded and the descriptor
 /// cache (base, limit, access rights) the CPU uses for every access through
@@ -63,10 +71,19 @@ pub const ATTR_G: u16 = 0x8000;
 pub struct SegCache {
     pub selector: u16,
     pub base: u32,
+    /// The limit in bytes (the descriptor's limit, scaled by G).
     pub limit: u32,
     /// Descriptor access byte (bits 0-7: type, S, DPL, P) and flags
     /// (bits 12-15: AVL, 0, D/B, G), as in the descriptor's bytes 5 and 6.
     pub attr: u16,
+    /// The offsets accesses may use, `lo..=hi`: up to the limit for an
+    /// expand-up segment, above it for an expand-down one, none for a
+    /// null selector. Worked out at load time so an access needs only
+    /// these compares.
+    pub lo: u32,
+    pub hi: u32,
+    /// `RIGHT_READ` and `RIGHT_WRITE`, from the segment's type.
+    pub rights: u8,
 }
 
 impl SegCache {
@@ -78,7 +95,67 @@ impl SegCache {
             base: (selector as u32) << 4,
             limit: 0xFFFF,
             attr: AR_DATA_RW,
+            lo: 0,
+            hi: 0xFFFF,
+            rights: RIGHT_READ | RIGHT_WRITE,
         }
+    }
+
+    /// A register loaded with a null selector in protected mode: every
+    /// access through it faults.
+    pub const fn null(selector: u16) -> Self {
+        Self {
+            selector,
+            base: 0,
+            limit: 0,
+            attr: 0,
+            lo: 1,
+            hi: 0,
+            rights: 0,
+        }
+    }
+
+    /// A register loaded from a segment descriptor.
+    pub fn from_descriptor(selector: u16, base: u32, limit: u32, attr: u16) -> Self {
+        let mut cache = Self { selector, base, limit, attr, lo: 0, hi: 0, rights: 0 };
+        cache.update_checks();
+        cache
+    }
+
+    /// Work out `lo`, `hi` and `rights` from the limit and access rights.
+    pub fn update_checks(&mut self) {
+        let typ = self.attr & 0x0F;
+        let code = typ & 0x08 != 0;
+        let system = self.attr & 0x10 == 0;
+        self.rights = if system {
+            0
+        } else if code {
+            if typ & 0x02 != 0 { RIGHT_READ } else { 0 }
+        } else if typ & 0x02 != 0 {
+            RIGHT_READ | RIGHT_WRITE
+        } else {
+            RIGHT_READ
+        };
+        if !code && typ & 0x04 != 0 {
+            // Expand-down: the valid offsets lie above the limit, up to
+            // 64 KB or 4 GB as the B flag says.
+            self.lo = self.limit.wrapping_add(1);
+            self.hi = if self.attr & ATTR_DB != 0 { 0xFFFF_FFFF } else { 0xFFFF };
+            if self.lo == 0 {
+                // A limit of FFFFFFFFh leaves no offsets.
+                self.lo = 1;
+                self.hi = 0;
+            }
+        } else {
+            self.lo = 0;
+            self.hi = self.limit;
+        }
+    }
+
+    /// Privilege level of the segment (DPL).
+    #[inline(always)]
+    pub fn dpl(&self) -> u8 {
+        ((self.attr >> 5) & 3) as u8
     }
 }
 
@@ -172,13 +249,32 @@ impl Cpu {
         &self.seg[seg as usize]
     }
 
-    /// Load a segment register the way real mode does: the selector and a
-    /// base of `value << 4`. Limit and access rights keep their values.
+    /// Load a segment register the way real mode does: the selector, a
+    /// base of `value << 4`, and the access rights of a writable data
+    /// segment. The limit and the G and D/B flags keep their values, which
+    /// is what makes "unreal mode" work.
     #[inline(always)]
     pub fn load_seg_real(&mut self, seg: Seg, value: u16) {
         let cache = &mut self.seg[seg as usize];
         cache.selector = value;
         cache.base = (value as u32) << 4;
+        if cache.attr & 0x00FF != AR_DATA_RW || cache.rights != RIGHT_READ | RIGHT_WRITE || cache.lo != 0 {
+            cache.attr = (cache.attr & 0xF000) | AR_DATA_RW;
+            cache.update_checks();
+        }
+    }
+
+    /// Load a segment register in virtual-8086 mode: a 64 KB writable data
+    /// segment at `value << 4` with privilege level 3.
+    pub fn load_seg_v86(&mut self, seg: Seg, value: u16) {
+        self.seg[seg as usize] =
+            SegCache::from_descriptor(value, (value as u32) << 4, 0xFFFF, AR_DATA_RW_V86);
+    }
+
+    /// Replace a segment register and its descriptor cache.
+    #[inline(always)]
+    pub fn set_seg_cache(&mut self, seg: Seg, cache: SegCache) {
+        self.seg[seg as usize] = cache;
     }
 
     /// Value of a general-purpose (8, 16 or 32-bit) or segment register,

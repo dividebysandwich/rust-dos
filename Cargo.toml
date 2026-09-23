@@ -26,3 +26,5 @@ dirs = "6"
 [dev-dependencies]
 # Reads the gzip-compressed SingleStepTests suite in tests/sst386.rs.
 flate2 = "1"
+# The assembler builds the protected-mode test programs in tests/pm_*.rs.
+iced-x86 = { version = "1.21.0", features = ["code_asm"] }

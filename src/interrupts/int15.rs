@@ -20,11 +20,11 @@ pub fn handle(cpu: &mut Cpu) {
         // (keyboard controller and port 92h).
         0x24 => match al {
             0x00 | 0x01 => {
-                cpu.bus.a20 = al == 0x01;
+                cpu.bus.set_a20(al == 0x01);
                 ok(cpu);
             }
             0x02 => {
-                let a20 = cpu.bus.a20 as u8;
+                let a20 = cpu.bus.a20() as u8;
                 ok(cpu);
                 cpu.set_reg8(Register::AL, a20);
             }

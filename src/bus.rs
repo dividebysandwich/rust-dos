@@ -43,9 +43,10 @@ pub struct Bus {
     /// programs that read the keyboard themselves, the A20 gate and the
     /// CPU reset line.
     pub kbc: crate::kbc::Kbc,
-    /// The A20 gate: when false, address line 20 is forced to 0 and
-    /// addresses wrap at 1 MB as on an 8086.
-    pub a20: bool,
+    /// The A20 gate as a mask for physical addresses: with the gate
+    /// closed, address line 20 is forced to 0 and addresses wrap at 1 MB
+    /// as on an 8086. See `a20()` and `set_a20()`.
+    a20_mask: u32,
     /// Something asked for a CPU reset (8042 or port 92h); the execution
     /// loop carries it out.
     pub reset_requested: bool,
@@ -54,6 +55,9 @@ pub struct Bus {
     pub xms: crate::xms::Xms,
     /// Last POST code written to port 80h (or 190h, test ROMs).
     pub post_code: u8,
+    /// Text written to port E9h, the Bochs debug console, which test ROMs
+    /// and debugging builds of some programs print to (the first 16 MB).
+    pub debug_console: Vec<u8>,
     /// Port 61h bit 4, the DRAM refresh request, toggles on every read;
     /// delay loops count the toggles.
     refresh_toggle: bool,
@@ -152,10 +156,11 @@ impl Bus {
             disk: DiskController::new(root_path),
             keyboard_buffer: VecDeque::new(),
             kbc: crate::kbc::Kbc::new(),
-            a20: false,
+            a20_mask: !0x0010_0000,
             reset_requested: false,
             cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
             post_code: 0,
+            debug_console: Vec::new(),
             xms: crate::xms::Xms::new(),
             refresh_toggle: false,
             cursor_x: 0,
@@ -507,6 +512,23 @@ impl Bus {
         }
     }
 
+    /// Whether the A20 gate is open.
+    #[inline(always)]
+    pub fn a20(&self) -> bool {
+        self.a20_mask & 0x0010_0000 != 0
+    }
+
+    /// Open or close the A20 gate.
+    pub fn set_a20(&mut self, open: bool) {
+        self.a20_mask = if open { !0 } else { !0x0010_0000 };
+    }
+
+    /// Apply the A20 gate to a physical address.
+    #[inline(always)]
+    pub fn a20_mask(&self) -> u32 {
+        self.a20_mask
+    }
+
     /// True for `len` bytes at `addr` that are plain RAM: conventional
     /// memory below the video window, or extended memory above 1 MB.
     #[inline(always)]
@@ -540,10 +562,11 @@ impl Bus {
         if addr < self.ram.len() {
             return self.ram[addr];
         }
-        if addr >= 0xFFFF_0000 {
-            // The top 64 KB of the address space mirror the BIOS ROM, where
-            // a 386 fetches its first instruction after reset.
-            return self.ram[0xF0000 + (addr & 0xFFFF)];
+        if addr >= 0xFFFE_0000 {
+            // The top 128 KB of the address space mirror the BIOS ROM area
+            // (E0000h-FFFFFh), where a 386 fetches its first instruction
+            // after reset.
+            return self.ram[0xE0000 + (addr & 0x1FFFF)];
         }
         0xFF // nothing there: open bus
     }
@@ -828,7 +851,7 @@ impl Bus {
     /// Carry out what a keyboard controller or port 92h write asked for.
     fn apply_kbc_effects(&mut self, effects: crate::kbc::Effects) {
         if let Some(a20) = effects.a20 {
-            self.a20 = a20;
+            self.set_a20(a20);
         }
         if effects.reset {
             self.reset_requested = true;
@@ -860,7 +883,7 @@ impl Bus {
             // System control port A: bit 1 is the "fast A20" gate, bit 0
             // resets the CPU.
             0x92 => {
-                self.a20 = value & 0x02 != 0;
+                self.set_a20(value & 0x02 != 0);
                 if value & 0x01 != 0 {
                     self.reset_requested = true;
                 }
@@ -868,6 +891,11 @@ impl Bus {
 
             // POST code ports (80h on a PC, 190h for test ROMs).
             0x80 | 0x190 => self.post_code = value,
+            0xE9 => {
+                if self.debug_console.len() < 16 << 20 {
+                    self.debug_console.push(value);
+                }
+            }
             // Delay port, and the coprocessor's busy latch.
             0xED | 0xF0 | 0xF1 => {}
 
@@ -1189,7 +1217,7 @@ impl Bus {
             0x64 => self.kbc.read_status(),
 
             0x71 => self.cmos.read_data(),
-            0x92 => (self.a20 as u8) << 1,
+            0x92 => (self.a20() as u8) << 1,
 
             // AdLib status register (port 0x388). Bit 7 = IRQ, bit 6 = timer1
             // expired, bit 5 = timer2 expired. Games poll this to detect the

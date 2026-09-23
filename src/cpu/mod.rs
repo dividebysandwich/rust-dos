@@ -9,11 +9,16 @@ use crate::shell::get_shell_code;
 
 pub mod alu;
 pub mod fault;
+mod farxfer;
 pub mod mem;
+pub mod paging;
 mod regs;
+pub mod seg;
+pub mod task;
 pub use fault::{CpuResult, Fault, IntSource};
 pub use mem::{Access, MemRef};
 pub use regs::{ATTR_DB, ATTR_G, Seg, SegCache};
+pub use seg::Descriptor;
 
 /// Where the environment of programs started from the shell lives. The
 /// area below the first MCB belongs to the shell.
@@ -45,6 +50,15 @@ pub const CR0_MP: u32 = 0x0000_0002;
 pub const CR0_EM: u32 = 0x0000_0004;
 pub const CR0_TS: u32 = 0x0000_0008;
 pub const CR0_ET: u32 = 0x0000_0010;
+/// 486: numeric errors through #MF rather than IRQ 13.
+pub const CR0_NE: u32 = 0x0000_0020;
+/// 486: write protection of read-only pages against supervisor code.
+pub const CR0_WP: u32 = 0x0001_0000;
+/// 486: alignment checks.
+pub const CR0_AM: u32 = 0x0004_0000;
+/// 486: cache control.
+pub const CR0_NW: u32 = 0x2000_0000;
+pub const CR0_CD: u32 = 0x4000_0000;
 pub const CR0_PG: u32 = 0x8000_0000;
 
 // FPU Tag Word Values
@@ -119,6 +133,15 @@ pub struct Cpu {
     pub dr: [u32; 8],
     pub gdtr: DescTable,
     pub idtr: DescTable,
+    /// The local descriptor table and task register: selector and
+    /// descriptor cache.
+    pub ldtr: SegCache,
+    pub tr: SegCache,
+    /// Current privilege level: 0 in real mode, 3 in virtual-8086 mode,
+    /// in protected mode that of the code segment.
+    pub cpl: u8,
+    /// Page translations, see `paging.rs`.
+    pub tlb: paging::Tlb,
 
     pub bus: Bus,
     flags: CpuFlags,
@@ -166,6 +189,8 @@ pub struct Cpu {
     pub executed: u64,
     /// Vectors that software interrupts found at 0000:0000, logged once each.
     null_interrupts: [u64; 4],
+    /// Switches between real and protected mode (CR0.PE changes).
+    pub mode_switches: u64,
     /// Set by BIOS services that wait for input (INT 16h with an empty
     /// keyboard buffer). The main loop then skips ahead to the next timer
     /// event instead of spinning through the retry loop, like it does for HLT.
@@ -237,6 +262,10 @@ impl Cpu {
             dr: [0; 8],
             gdtr: DescTable { base: 0, limit: 0xFFFF },
             idtr: DescTable { base: 0, limit: 0x3FF },
+            ldtr: SegCache::null(0),
+            tr: SegCache::null(0),
+            cpl: 0,
+            tlb: paging::Tlb::default(),
             bus,
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
@@ -261,6 +290,7 @@ impl Cpu {
             decode_cache: InstrCache::new(16),
             executed: 0,
             null_interrupts: [0; 4],
+            mode_switches: 0,
             idle: false,
         }
     }
@@ -274,6 +304,20 @@ impl Cpu {
             self.bus.log_string(&format!(
                 "[CPU] INT {:02X}h has no handler (vector 0000:0000), skipped",
                 vector
+            ));
+        }
+    }
+
+    /// CR0.PE changed. The first switches are logged; DOS extenders then
+    /// switch for every DOS call and interrupt.
+    pub fn note_mode_switch(&mut self, protected: bool) {
+        self.mode_switches += 1;
+        if self.mode_switches <= 4 {
+            self.bus.log_string(&format!(
+                "[CPU] {} mode at {:04X}:{:08X}",
+                if protected { "Protected" } else { "Real" },
+                self.cs(),
+                self.eip()
             ));
         }
     }
@@ -460,7 +504,7 @@ impl Cpu {
         let addr = ((segment as usize) << 4) + offset as usize;
         // Without the A20 gate, FFFF:0010 and up wrap to the bottom of
         // memory as on an 8086.
-        if self.bus.a20 { addr } else { addr & !0x0010_0000 }
+        addr & self.bus.a20_mask() as usize
     }
 
     /// Extract Low byte of DX (DL)
@@ -518,15 +562,19 @@ impl Cpu {
         (self.fpu_top + i) & 7
     }
 
-    pub fn load_int_to_f80(&self, addr: usize, size: MemorySize) -> F80 {
+    pub fn load_int_to_f80(&mut self, addr: usize, size: MemorySize) -> F80 {
         let (val, neg) = match size {
             MemorySize::Int16 => {
-                let v = self.bus.read_16(addr) as i16;
-                (v.abs() as u128, v < 0)
+                let v = self.lin_read_16(addr) as i16;
+                (v.unsigned_abs() as u128, v < 0)
             }
             MemorySize::Int32 => {
-                let v = self.bus.read_32(addr) as i32;
-                (v.abs() as u128, v < 0)
+                let v = self.lin_read_32(addr) as i32;
+                (v.unsigned_abs() as u128, v < 0)
+            }
+            MemorySize::Int64 => {
+                let v = self.lin_read_64(addr) as i64;
+                (v.unsigned_abs() as u128, v < 0)
             }
             _ => (0, false),
         };
@@ -623,7 +671,7 @@ impl Cpu {
         // No program runs any more: its extended memory and A20 go too,
         // and a reset from now on is a cold boot.
         self.bus.xms = crate::xms::Xms::new();
-        self.bus.a20 = false;
+        self.bus.set_a20(false);
         self.bus.kbc.output_port &= !crate::kbc::OUT_A20;
         self.bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
 

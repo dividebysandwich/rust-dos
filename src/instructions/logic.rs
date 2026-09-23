@@ -3,7 +3,7 @@
 use iced_x86::{ConditionCode, Instruction, OpKind};
 
 use super::operand::{Loc, addr_size, effective_offset, loc, mem_seg, op_size, read_op};
-use crate::cpu::alu::{CF, ShiftOp, ZF, sign_extend};
+use crate::cpu::alu::{CF, OF, ShiftOp, ZF, sign_extend};
 use crate::cpu::{Access, Cpu, CpuFlags, CpuResult};
 
 /// ROL/ROR/RCL/RCR/SHL/SHR/SAR r/m by 1, CL or an immediate.
@@ -64,7 +64,12 @@ pub fn bit_test(cpu: &mut Cpu, instr: &Instruction, op: BitOp) -> CpuResult {
 
     let value = dest.read(cpu);
     let mask = 1u32 << bit;
-    cpu.set_flag_bits(CF, if value & mask != 0 { CF } else { 0 });
+    // OF is undefined: a 386 leaves it as the shifter rotating the operand
+    // right by the bit offset sets it (the top two bits differ).
+    let rotated = if bit == 0 { value } else { (value >> bit) | (value << (bits - bit)) };
+    let msb = 1u32 << (bits - 1);
+    let of = (rotated & msb != 0) != (rotated & (msb >> 1) != 0);
+    cpu.set_flag_bits(CF | OF, if value & mask != 0 { CF } else { 0 } | if of { OF } else { 0 });
     let r = match op {
         BitOp::Test => return Ok(()),
         BitOp::Set => value | mask,

@@ -1,4 +1,13 @@
-# CPU conformance tests (SingleStepTests/80386)
+# CPU conformance tests
+
+Two opt-in suites check the CPU against real hardware:
+[SingleStepTests/80386](#singlesteptests80386) for single instructions in
+real mode, and [test386.asm](#test386asm) for everything from reset through
+protected mode, paging, privilege levels, virtual-8086 mode and task
+switches. The regular test suite covers protected mode as well, in
+`tests/pm_tests.rs` (see [Protected-mode unit tests](#protected-mode-unit-tests)).
+
+## SingleStepTests/80386
 
 `tests/sst386.rs` runs the [SingleStepTests/80386](https://github.com/SingleStepTests/80386)
 real-mode suite against the emulator's CPU and reports pass rates per opcode.
@@ -12,7 +21,7 @@ opcodes carry the ModR/M reg field in the name (`80.4` is AND).
 The harness is opt-in (`#[ignore]`) and does not fail unless you ask it to,
 so it can measure progress while the CPU is incomplete.
 
-## Fetch the suite
+### Fetch the suite
 
 ```sh
 tests/sst386/fetch.sh            # into target/sst386/ (about 580 MB)
@@ -24,7 +33,7 @@ This makes a shallow, sparse git clone with only `v1_ex_real_mode/`
 metadata, including the undefined-flags mask `f_umask`). Run the script
 again to update the clone.
 
-## Run
+### Run
 
 ```sh
 SST386_DIR=target/sst386/v1_ex_real_mode \
@@ -50,7 +59,7 @@ SST386_DIR=target/sst386/v1_ex_real_mode SST386_FILTER=D0.0 SST386_SAMPLES=20 \
   cargo test --release --test sst386 -- --ignored --nocapture
 ```
 
-## Reading the report
+### Reading the report
 
 Each file gets one row: `tests`, `pass`, `fail`, `panic`, `skip`, and `pass%`
 (passes divided by the tests that ran, which excludes skipped tests). A
@@ -79,7 +88,7 @@ A failure line shows:
 After the file rows comes a table per opcode family (opcode map by size
 prefixes) and the totals.
 
-## What is compared
+### What is compared
 
 - **Registers:** EAX-EDI, ESP and EBP (32 bits), the CS/DS/ES/FS/GS/SS
   selectors, EIP, CR0, and EFLAGS bits 0-17. The suite's register dumps come
@@ -100,7 +109,7 @@ prefixes) and the totals.
   flag address).
 - **Bus cycles:** not checked.
 
-## Skipped tests
+### Skipped tests
 
 | Reason | Why |
 |---|---|
@@ -111,7 +120,7 @@ prefixes) and the totals.
 | file `FE.7` | FE /7 is the BOP encoding. The suite has no such file today. |
 | port input files | IN and INS (`E4`, `E5`, `EC`, `ED`, `6C`, `6D` and their prefixed forms). The suite expects every port to read FFh; the emulator's devices (PIT, PIC, port 61h, DMA) answer. |
 
-## Harness setup
+### Harness setup
 
 The tests assume flat, writable RAM and no interrupts, so each test gets
 this setup:
@@ -138,7 +147,7 @@ this setup:
 When the CPU changes (EFLAGS setter, CR0 accessor, larger RAM, a different
 `page_gen`), update that file.
 
-## Debugging a failing test
+### Debugging a failing test
 
 | Variable | Meaning |
 |---|---|
@@ -146,7 +155,7 @@ When the CPU changes (EFLAGS setter, CR0 accessor, larger RAM, a different
 | `SST386_INDEX=n` | Run only test `n` of each file, and print its initial memory to stderr. |
 | `SST386_DUMP=1` | Print one line per test to stderr: `DUMP`, the name, the initial and expected registers, the initial and final memory, and the exception number, separated by `\|`. For offline analysis of how the hardware behaves across many inputs. |
 
-## Current results
+### Current results
 
 With the emulator's CPU rewritten for the 386, 1,749,683 of the 1,749,699
 tests pass (one revoked test is skipped). The 16 failures:
@@ -176,3 +185,71 @@ Hardware behaviour the emulator reproduces because the suite showed it:
   half of ESP from the ESP image it otherwise skips.
 - **DAS/DAA** compare the original AL with 99h (the 8086 compares the
   adjusted AL with 9Fh).
+
+## test386.asm
+
+[test386.asm](https://github.com/barotto/test386.asm) is a test ROM for
+386-class CPUs. It starts at the reset vector and works through real mode,
+protected mode, paging and page faults, ring 3, virtual-8086 mode, task
+switches, and the instruction set, writing a POST code for each stage to
+port 190h. It halts with the code of the stage that failed, or FFh.
+
+### Build and run
+
+```sh
+tests/test386/build.sh           # clone and assemble into target/test386/ (needs nasm)
+TEST386_DIR=target/test386 \
+  cargo test --release --test test386 -- --ignored --nocapture
+```
+
+The build script configures the ROM for the emulator: POST codes on port
+190h, text on port E9h (the emulator's debug console,
+`bus.debug_console`), the 128 KB ROM that includes the task switch tests,
+and the 386's undefined flags tested. It also rewrites the
+`mov [mem], word imm` forms that NASM 3 rejects.
+
+The harness loads the ROM below 1 MB (the top of the address space mirrors
+it), resets a 386, and runs until the CPU halts. It prints each POST code as
+it is reached and fails unless the last one is FFh. Test EEh prints the
+results of thousands of arithmetic and logic operations; the harness
+writes them to `target/test386/rust-dos-EE-output.txt` and compares them
+with `test386-EE-reference.txt`, which comes with the ROM.
+
+`TEST386_TRACE=n` prints the last `n` distinct instruction addresses before
+a failure. Look them up in `target/test386/test386.lst`.
+
+### Current results
+
+All stages pass, through POST FFh, and the EEh output matches the
+reference. The undefined flags follow the 386 as test386.asm documents
+them:
+
+- **AAA, AAS:** SF, ZF, PF and OF as the 386 microcode leaves them.
+- **AAD:** the flags of adding the high digit's value to AL; **AAM**
+  clears CF, OF and AF; **DAA, DAS** set OF as the add or subtract of the
+  adjustment would.
+- **SHL, SHR:** AF is set for any count.
+- **BT, BTS, BTR, BTC:** OF as rotating the operand right by the bit offset
+  leaves it.
+
+Other hardware behaviour it checks: a 32-bit PUSH of a segment register
+writes only the low word of its slot; POP SS moves the stack pointer by the
+width of the stack it popped from; ENTER takes all of ESP as the frame
+pointer and write-checks the final stack pointer (a frame reaching into a
+page ring 3 can't write faults); ARPL writes (and checks) memory only when
+the RPL changes.
+
+## Protected-mode unit tests
+
+`tests/pm_tests.rs` runs small programs, assembled with iced's code
+assembler, on a machine that `tests/pmrig/mod.rs` sets up: a GDT with flat
+ring 0 and ring 3 segments, an IDT, a TSS, and a real-mode stub that enters
+protected mode as DOS extenders do (LGDT, LIDT, MOV CR0, far JMP, LTR).
+Handlers record the vector and their stack frame, so the tests check error
+codes, pushed addresses and frames: segment limits and types, null
+selectors, expand-down segments, far calls between 16 and 32-bit code, call
+gates with parameter copying, interrupts and IRET across privilege levels,
+the I/O permission bitmap, paging with accessed and dirty bits, page faults,
+the TLB and INVLPG, double faults and triple faults, hardware interrupts in
+protected mode, task switches, virtual-8086 mode, LAR/LSL/VERR/VERW/ARPL,
+and the return to real mode with a 4 GB DS.

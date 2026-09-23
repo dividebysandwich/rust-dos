@@ -99,8 +99,9 @@ fn iteration(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr) -> CpuResult {
             a.step(cpu, di);
         }
         StrOp::Ins => {
-            let dst = cpu.mem_ref(Seg::ES, a.get(cpu, di), size, Access::Write)?;
             let port = cpu.dx();
+            cpu.check_io(port, size)?;
+            let dst = cpu.mem_ref(Seg::ES, a.get(cpu, di), size, Access::Write)?;
             let mut value = 0;
             for i in 0..size as u16 {
                 value |= (cpu.bus.io_read(port.wrapping_add(i)) as u32) << (8 * i);
@@ -109,9 +110,10 @@ fn iteration(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr) -> CpuResult {
             a.step(cpu, di);
         }
         StrOp::Outs => {
+            let port = cpu.dx();
+            cpu.check_io(port, size)?;
             let src = cpu.mem_ref(a.src_seg, a.get(cpu, si), size, Access::Read)?;
             let value = cpu.mem_read(src);
-            let port = cpu.dx();
             for i in 0..size as u16 {
                 cpu.bus.io_write(port.wrapping_add(i), (value >> (8 * i)) as u8);
             }

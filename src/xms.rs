@@ -150,7 +150,8 @@ fn memory_end(cpu: &Cpu) -> u32 {
 /// Apply the local and global enables to the A20 gate.
 fn update_a20(cpu: &mut Cpu) {
     let xms = &cpu.bus.xms;
-    cpu.bus.a20 = xms.a20_global || xms.a20_local > 0;
+    let open = xms.a20_global || xms.a20_local > 0;
+    cpu.bus.set_a20(open);
 }
 
 /// The driver entry point: the function is in AH.
@@ -201,7 +202,7 @@ pub fn call(cpu: &mut Cpu) {
             ok(cpu);
         }
         0x07 => {
-            let a20 = cpu.bus.a20 as u16;
+            let a20 = cpu.bus.a20() as u16;
             cpu.set_ax(a20);
             cpu.set_bx(cpu.bx() & 0xFF00);
         }

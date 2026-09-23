@@ -107,7 +107,7 @@ impl Machine {
         cpu.bus.pic = rust_dos::pic::Pic::new();
         cpu.bus.pic.master.imr = 0xFF;
         // The 386EX the suite comes from has no A20 gate.
-        cpu.bus.a20 = true;
+        cpu.bus.set_a20(true);
 
         // A0000-AFFFF is VGA memory. In chain-4 mode with all planes
         // enabled, write mode 0, no set/reset, rotate or logical op and a

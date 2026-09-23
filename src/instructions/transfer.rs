@@ -7,17 +7,14 @@ use super::operand::{effective_offset, loc, mem_operand, mem_operand_at, op_size
 use crate::cpu::alu::{AF, CF, PF, SF, ZF, sign_extend, size_mask};
 use crate::cpu::{Access, Cpu, CpuFlags, CpuModel, CpuResult, Fault, Seg};
 
-/// Load a segment register in real mode. MOV SS and POP SS hold off
-/// interrupts for one instruction, so a program can load SP next.
+/// Load a segment register by MOV or POP. CS can't be loaded this way.
+/// MOV SS and POP SS hold off interrupts for one instruction, so a program
+/// can load SP next.
 fn load_seg(cpu: &mut Cpu, seg: Seg, value: u16) -> CpuResult {
     if seg == Seg::CS {
         return Err(Fault::UD);
     }
-    cpu.load_seg_real(seg, value);
-    if seg == Seg::SS {
-        cpu.irq_shadow = true;
-    }
-    Ok(())
+    cpu.load_segment(seg, value)
 }
 
 /// MOV between registers, memory and immediates, including segment,
@@ -93,7 +90,7 @@ pub fn load_far_pointer(cpu: &mut Cpu, instr: &Instruction, seg: Seg) -> CpuResu
     let sel_ref = mem_operand_at(cpu, instr, size as u32, 2, Access::Read)?;
     let offset = cpu.mem_read(off_ref);
     let selector = cpu.mem_read(sel_ref) as u16;
-    cpu.load_seg_real(seg, selector);
+    cpu.load_segment(seg, selector)?;
     cpu.set_reg(instr.op0_register(), offset);
     Ok(())
 }
@@ -106,6 +103,15 @@ fn stack_size(instr: &Instruction) -> u8 {
 
 pub fn push(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let size = stack_size(instr);
+    if size == 4 && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() {
+        // A 386 or 486 pushes a segment register with a 32-bit operand size
+        // as a 16-bit move into the dword slot, leaving its upper half.
+        let value = cpu.reg(instr.op0_register());
+        cpu.stack_write_below(4, 0, 2, value)?;
+        let sp = cpu.stack_ptr().wrapping_sub(4);
+        cpu.set_stack_ptr(sp);
+        return Ok(());
+    }
     let value = read_op(cpu, instr, 0, size)?;
     cpu.push_sized(size, value)
 }
@@ -119,9 +125,15 @@ pub fn pop(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             // A segment register pop reads only the selector word, also
             // with a 32-bit operand size, then releases the whole slot.
             let selector = cpu.stack_read(0, 2)? as u16;
+            // The stack pointer moves by the width of the stack popped,
+            // also when POP SS switches to a stack of the other width.
+            let stack32 = cpu.stack32();
             load_seg(cpu, seg, selector)?;
-            let sp = cpu.stack_ptr().wrapping_add(size as u32);
-            cpu.set_stack_ptr(sp);
+            if stack32 {
+                cpu.set_esp(cpu.esp().wrapping_add(size as u32));
+            } else {
+                cpu.set_sp(cpu.sp().wrapping_add(size as u16));
+            }
             return Ok(());
         }
     }
@@ -184,7 +196,14 @@ pub fn popa(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     Ok(())
 }
 
+/// PUSHF and POPF in virtual-8086 mode are for the monitor to emulate
+/// unless IOPL is 3.
+fn check_v86_iopl(cpu: &Cpu) -> CpuResult {
+    if cpu.v86() && cpu.iopl() < 3 { Err(Fault::gp(0)) } else { Ok(()) }
+}
+
 pub fn pushf(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    check_v86_iopl(cpu)?;
     if stack_size(instr) == 2 {
         let flags = cpu.flags16();
         cpu.push_sized(2, flags as u32)
@@ -195,9 +214,12 @@ pub fn pushf(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 }
 
 pub fn popf(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    check_v86_iopl(cpu)?;
     let size = stack_size(instr);
     let value = cpu.pop_sized(size)?;
-    if size == 2 {
+    if cpu.pe() {
+        cpu.load_flags_pm(value, size, false);
+    } else if size == 2 {
         cpu.load_flags16(value as u16);
     } else {
         cpu.load_eflags(value);
@@ -218,6 +240,7 @@ fn port(cpu: &Cpu, instr: &Instruction, i: u32) -> u16 {
 pub fn port_in(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let dest = instr.op0_register();
     let port = port(cpu, instr, 1);
+    cpu.check_io(port, dest.size() as u8)?;
     let mut value = 0;
     for i in 0..dest.size() as u16 {
         value |= (cpu.bus.io_read(port.wrapping_add(i)) as u32) << (8 * i);
@@ -232,6 +255,7 @@ pub fn port_in(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 pub fn port_out(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let src = instr.op1_register();
     let port = port(cpu, instr, 0);
+    cpu.check_io(port, src.size() as u8)?;
     let value = cpu.reg(src);
     for i in 0..src.size() as u16 {
         cpu.bus.io_write(port.wrapping_add(i), (value >> (8 * i)) as u8);

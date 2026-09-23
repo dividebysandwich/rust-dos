@@ -240,8 +240,12 @@ impl Cpu {
             f |= OF;
         }
         if szp_flags {
-            // Shifts set SF, ZF and PF from the result; AF is undefined.
-            self.set_flag_bits(CF | OF | SF | ZF | PF, f | szp(size, r));
+            // Shifts set SF, ZF and PF from the result. AF is undefined: a
+            // 386 sets it for SHL and SHR.
+            if matches!(op, ShiftOp::Shl | ShiftOp::Shr) {
+                f |= AF;
+            }
+            self.set_flag_bits(CF | OF | SF | ZF | PF | AF, f | szp(size, r) | (self.flag_bits() & AF));
         } else {
             // Rotates only change CF and OF.
             self.set_flag_bits(CF | OF, f);

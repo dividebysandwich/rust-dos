@@ -6,7 +6,14 @@
 //! fault) and delivers the exception, so the handler sees the faulting
 //! instruction's address, as on a 286 and later.
 
-use super::{Cpu, CpuFlags, Seg};
+use super::seg::{
+    Descriptor, INT_GATE16, INT_GATE32, TASK_GATE, TRAP_GATE16, TRAP_GATE32, is_null, rpl, sel_error,
+};
+use super::{Cpu, CpuFlags, Seg, SegCache};
+
+/// The EXT bit of an error code: the fault happened while delivering an
+/// event from outside the program (a hardware interrupt or an exception).
+pub const EXT: u32 = 1;
 
 /// An exception: its vector and, for the exceptions that have one, the error
 /// code pushed with it (protected mode only).
@@ -67,6 +74,39 @@ impl Fault {
     pub const fn gp(error: u32) -> Self {
         Fault::with_error(13, error)
     }
+
+    /// Page fault.
+    pub const fn pf(error: u32) -> Self {
+        Fault::with_error(14, error)
+    }
+
+    /// Faults that make a fault during their delivery a double fault.
+    fn contributory(&self) -> bool {
+        matches!(self.vector, 0 | 10 | 11 | 12 | 13)
+    }
+}
+
+/// Room for the values an interrupt or far call pushes: at most GS, FS, DS,
+/// ES, SS, ESP, EFLAGS, CS, EIP and an error code, or the 31 parameters a
+/// call gate copies plus SS, ESP, CS and EIP.
+pub(crate) struct Frame {
+    values: [u32; 36],
+    len: usize,
+}
+
+impl Frame {
+    pub(crate) fn new() -> Self {
+        Self { values: [0; 36], len: 0 }
+    }
+
+    pub(crate) fn push(&mut self, value: u32) {
+        self.values[self.len] = value;
+        self.len += 1;
+    }
+
+    pub(crate) fn values(&self) -> &[u32] {
+        &self.values[..self.len]
+    }
 }
 
 /// Result of an operation that can raise an exception.
@@ -86,12 +126,22 @@ pub enum IntSource {
 }
 
 impl Cpu {
-    /// Enter the handler of interrupt `vector`: push the flags and the
-    /// return address and jump through the interrupt vector table. `EIP` is
-    /// the return address: the faulting instruction for faults, the next
-    /// instruction for traps and hardware interrupts.
-    pub fn deliver_interrupt(&mut self, vector: u8, _source: IntSource) -> CpuResult {
-        // Real mode: the IVT at IDTR.base, four bytes per vector.
+    /// Enter the handler of interrupt `vector`. `EIP` is the return
+    /// address: the faulting instruction for faults, the next instruction
+    /// for traps and hardware interrupts. `error` is the error code
+    /// exceptions push in protected mode.
+    pub fn deliver_interrupt(&mut self, vector: u8, source: IntSource, error: Option<u32>) -> CpuResult {
+        if self.pe() {
+            self.deliver_pm(vector, source, error)
+        } else {
+            self.deliver_real(vector)
+        }
+    }
+
+    /// Real mode: push the flags and the return address and jump through
+    /// the interrupt vector table.
+    fn deliver_real(&mut self, vector: u8) -> CpuResult {
+        // The IVT at IDTR.base, four bytes per vector.
         let entry = vector as u32 * 4;
         if entry + 3 > self.idtr.limit as u32 {
             return Err(Fault::gp(entry + 2));
@@ -115,17 +165,232 @@ impl Cpu {
         Ok(())
     }
 
-    /// Deliver the exception raised by an instruction, escalating to a
-    /// double fault, and to a shutdown when the double fault can't be
-    /// delivered either.
-    pub fn raise(&mut self, fault: Fault) {
-        if self.deliver_interrupt(fault.vector, IntSource::Exception).is_ok() {
-            return;
+    /// Protected mode: enter the handler through the interrupt or trap gate
+    /// in the IDT, switching to the stack in the TSS for a handler at a
+    /// more privileged level, or switch tasks through a task gate.
+    fn deliver_pm(&mut self, vector: u8, source: IntSource, error: Option<u32>) -> CpuResult {
+        let ext = if source == IntSource::Software { 0 } else { EXT };
+        let idt_error = vector as u32 * 8 + 2 + ext;
+        if vector as u32 * 8 + 7 > self.idtr.limit as u32 {
+            return Err(Fault::gp(idt_error));
         }
-        if self.deliver_interrupt(8, IntSource::Exception).is_ok() {
-            return;
+        let entry = self.idtr.base.wrapping_add(vector as u32 * 8);
+        let low = self.sys_read_u32(entry)? as u64;
+        let high = self.sys_read_u32(entry.wrapping_add(4))? as u64;
+        let gate = Descriptor(low | (high << 32));
+        let typ = gate.typ();
+        if gate.is_segment() || !matches!(typ, TASK_GATE | INT_GATE16 | TRAP_GATE16 | INT_GATE32 | TRAP_GATE32) {
+            return Err(Fault::gp(idt_error));
+        }
+        // INT n, INT3 and INTO may only use gates of their privilege.
+        if source == IntSource::Software && gate.dpl() < self.cpl {
+            return Err(Fault::gp(idt_error));
+        }
+        if !gate.present() {
+            return Err(Fault::np(idt_error));
+        }
+        if typ == TASK_GATE {
+            return self.task_gate(gate.gate_selector(), super::task::Switch::Interrupt(error), ext);
+        }
+
+        let selector = gate.gate_selector();
+        if is_null(selector) {
+            return Err(Fault::gp(ext));
+        }
+        let mut desc = self.fetch_descriptor(selector, ext)?;
+        let sel_err = sel_error(selector) | ext;
+        if !desc.is_code() || desc.dpl() > self.cpl {
+            return Err(Fault::gp(sel_err));
+        }
+        if !desc.present() {
+            return Err(Fault::np(sel_err));
+        }
+        let size: u8 = if gate.is_32bit_system() { 4 } else { 2 };
+        let offset = gate.gate_offset();
+        if offset > desc.limit() {
+            return Err(Fault::gp(ext));
+        }
+        let v86 = self.v86();
+        let eflags = self.flags.bits();
+        let (cs, eip) = (self.cs() as u32, self.eip);
+
+        if !desc.conforming() && desc.dpl() < self.cpl {
+            // To a more privileged handler, on the stack the TSS holds for
+            // its level. From virtual-8086 mode that must be level 0, and
+            // the real-mode segment registers are saved too.
+            let new_cpl = desc.dpl();
+            if v86 && new_cpl != 0 {
+                return Err(Fault::gp(sel_err));
+            }
+            let (ss_sel, esp) = self.tss_stack(new_cpl, ext)?;
+            let ss_cache = self.check_new_stack(ss_sel, new_cpl, ext)?;
+            let mut frame = Frame::new();
+            if v86 {
+                for seg in [Seg::GS, Seg::FS, Seg::DS, Seg::ES] {
+                    frame.push(self.seg_cache(seg).selector as u32);
+                }
+            }
+            frame.push(self.ss() as u32);
+            frame.push(self.esp());
+            frame.push(eflags);
+            frame.push(cs);
+            frame.push(eip);
+            if let Some(code) = error {
+                frame.push(code);
+            }
+            let ss_fault = Fault::ss(sel_error(ss_sel) | ext);
+            let sp = self.push_frame(&ss_cache, esp, size, frame.values(), ss_fault, new_cpl == 3)?;
+            self.mark_accessed(selector, &mut desc)?;
+            self.set_seg_cache(Seg::SS, ss_cache);
+            self.set_esp(esp);
+            self.set_stack_ptr(sp);
+            if v86 {
+                for seg in [Seg::GS, Seg::FS, Seg::DS, Seg::ES] {
+                    self.set_seg_cache(seg, SegCache::null(0));
+                }
+            }
+            self.load_cs_pm(selector, &mut desc, new_cpl)?;
+        } else {
+            if v86 {
+                return Err(Fault::gp(sel_err));
+            }
+            // Same privilege level (or a conforming handler): the current
+            // stack.
+            let mut frame = Frame::new();
+            frame.push(eflags);
+            frame.push(cs);
+            frame.push(eip);
+            if let Some(code) = error {
+                frame.push(code);
+            }
+            let ss_cache = *self.seg_cache(Seg::SS);
+            let sp = self.stack_ptr();
+            let sp = self.push_frame(&ss_cache, sp, size, frame.values(), Fault::ss(ext), self.cpl == 3)?;
+            self.mark_accessed(selector, &mut desc)?;
+            self.set_stack_ptr(sp);
+            let cpl = self.cpl;
+            self.load_cs_pm(selector, &mut desc, cpl)?;
+        }
+        self.eip = offset;
+        self.flags.remove(CpuFlags::TF | CpuFlags::NT | CpuFlags::RF | CpuFlags::VM);
+        if matches!(typ, INT_GATE16 | INT_GATE32) {
+            self.flags.remove(CpuFlags::IF);
+        }
+        Ok(())
+    }
+
+    /// Check and write the values of a stack frame, the first value at the
+    /// highest address, onto the stack `cache` describes, starting below
+    /// `sp`. Returns the new stack pointer. Nothing is written unless every
+    /// slot can be: a slot outside the segment raises `fault`, one on an
+    /// unmapped page a page fault.
+    pub(crate) fn push_frame(
+        &mut self,
+        cache: &SegCache,
+        sp: u32,
+        size: u8,
+        values: &[u32],
+        fault: Fault,
+        user: bool,
+    ) -> CpuResult<u32> {
+        let stack32 = cache.attr & super::ATTR_DB != 0;
+        let mask = if stack32 { 0xFFFF_FFFF } else { 0xFFFF };
+        let mut refs = [None; 36];
+        let mut at = sp;
+        for (i, _) in values.iter().enumerate() {
+            at = at.wrapping_sub(size as u32) & mask;
+            let last = at.wrapping_add(size as u32 - 1);
+            if at < cache.lo || last > cache.hi || last < at || cache.rights & super::regs::RIGHT_WRITE == 0 {
+                return Err(fault);
+            }
+            let lin = cache.base.wrapping_add(at);
+            refs[i] = Some(self.lin_ref(lin, size, super::Access::Write, user)?);
+        }
+        for (i, &value) in values.iter().enumerate() {
+            if let Some(r) = refs[i] {
+                self.mem_write(r, value);
+            }
+        }
+        Ok(at)
+    }
+
+    /// The stack pointer for privilege level `cpl` in the current TSS.
+    pub(crate) fn tss_stack(&mut self, cpl: u8, ext: u32) -> CpuResult<(u16, u32)> {
+        let tr = self.tr;
+        let ts = Fault::ts(sel_error(tr.selector) | ext);
+        if tr.attr & 0x80 == 0 {
+            return Err(ts);
+        }
+        if tr.attr & 0x08 != 0 {
+            // 32-bit TSS: ESPn at 4 + 8n, SSn at 8 + 8n.
+            let at = 4 + 8 * cpl as u32;
+            if at + 5 > tr.limit {
+                return Err(ts);
+            }
+            let esp = self.sys_read(tr.base.wrapping_add(at), 4)?;
+            let ss = self.sys_read(tr.base.wrapping_add(at + 4), 2)? as u16;
+            Ok((ss, esp))
+        } else {
+            // 16-bit TSS: SPn at 2 + 4n, SSn at 4 + 4n.
+            let at = 2 + 4 * cpl as u32;
+            if at + 3 > tr.limit {
+                return Err(ts);
+            }
+            let sp = self.sys_read(tr.base.wrapping_add(at), 2)?;
+            let ss = self.sys_read(tr.base.wrapping_add(at + 2), 2)? as u16;
+            Ok((ss, sp))
+        }
+    }
+
+    /// Check the stack segment a switch to privilege level `cpl` takes
+    /// from the TSS, and return the cache to load.
+    pub(crate) fn check_new_stack(&mut self, selector: u16, cpl: u8, ext: u32) -> CpuResult<SegCache> {
+        let err = sel_error(selector) | ext;
+        if is_null(selector) {
+            return Err(Fault::ts(ext));
+        }
+        let mut desc = self.fetch_descriptor(selector, ext).map_err(|f| {
+            if f.vector == 13 { Fault::ts(err) } else { f }
+        })?;
+        if rpl(selector) != cpl || desc.dpl() != cpl || !desc.writable_data() {
+            return Err(Fault::ts(err));
+        }
+        if !desc.present() {
+            return Err(Fault::ss(err));
+        }
+        self.mark_accessed(selector, &mut desc)?;
+        Ok(desc.cache(selector))
+    }
+
+    /// Deliver the exception raised by an instruction. When its delivery
+    /// faults, the second fault is delivered instead, or a double fault
+    /// for two contributory faults (or a page fault followed by a
+    /// contributory or page fault), and a shutdown when the double fault
+    /// can't be delivered either.
+    pub fn raise(&mut self, fault: Fault) {
+        let mut current = fault;
+        for _ in 0..8 {
+            let (eip, esp) = (self.eip, self.esp());
+            match self.deliver_interrupt(current.vector, IntSource::Exception, self.error_code(current)) {
+                Ok(()) => return,
+                Err(second) => {
+                    self.eip = eip;
+                    self.set_esp(esp);
+                    if current.vector == 8 {
+                        break;
+                    }
+                    let double = (current.contributory() && second.contributory())
+                        || (current.vector == 14 && (second.contributory() || second.vector == 14));
+                    current = if double { Fault::df() } else { second };
+                }
+            }
         }
         self.shutdown();
+    }
+
+    /// The error code an exception pushes: in protected mode only.
+    fn error_code(&self, fault: Fault) -> Option<u32> {
+        if self.pe() { fault.error } else { None }
     }
 
     /// Triple fault: the processor stops, and an AT's chipset turns that
@@ -166,7 +431,12 @@ impl Cpu {
         self.cr3 = 0;
         self.gdtr = super::DescTable { base: 0, limit: 0xFFFF };
         self.idtr = super::DescTable { base: 0, limit: 0x3FF };
+        self.ldtr = super::SegCache::null(0);
+        self.tr = super::SegCache::null(0);
         self.seg = [super::SegCache::real(0); 6];
+        self.flags.remove(CpuFlags::VM | CpuFlags::NT | CpuFlags::RF);
+        self.cpl = 0;
+        self.tlb.flush();
         self.irq_shadow = false;
     }
 }

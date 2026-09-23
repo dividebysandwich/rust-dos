@@ -21,6 +21,37 @@ use arith::Op;
 use logic::BitOp;
 use string::StrOp;
 
+/// An FPU instruction. Kept out of `execute_instruction`, whose every
+/// call pays for the registers the inlined code of its arms needs.
+#[inline(never)]
+fn fpu_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    // No coprocessor (EM), or it belongs to another task (TS).
+    if cpu.cr0 & (CR0_EM | CR0_TS) != 0 {
+        return Err(Fault::NM);
+    }
+    check_fpu_operand(cpu, instr)?;
+    fpu::handle(cpu, instr);
+    Ok(())
+}
+
+/// Check an FPU instruction's memory operand, all of it, before the FPU
+/// changes any state: the FPU then accesses it without faulting.
+fn check_fpu_operand(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if !(0..instr.op_count()).any(|i| instr.op_kind(i) == iced_x86::OpKind::Memory) {
+        return Ok(());
+    }
+    use Mnemonic::*;
+    let access = match instr.mnemonic() {
+        Fst | Fstp | Fist | Fistp | Fisttp | Fbstp | Fstcw | Fnstcw | Fstsw | Fnstsw | Fsave | Fnsave
+        | Fstenv | Fnstenv => crate::cpu::Access::Write,
+        _ => crate::cpu::Access::Read,
+    };
+    let len = instr.memory_size().size().max(1) as u32;
+    let off = operand::effective_offset(cpu, instr);
+    cpu.check_span(operand::mem_seg(instr), off, len, access)?;
+    Ok(())
+}
+
 pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     use Mnemonic::*;
     match instr.mnemonic() {
@@ -159,7 +190,17 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Smsw => system::smsw(cpu, instr),
         Lmsw => system::lmsw(cpu, instr),
         Clts => system::clts(cpu),
-        Invd | Wbinvd | Invlpg => system::cache_op(cpu),
+        Invd | Wbinvd => system::cache_op(cpu),
+        Invlpg => system::invlpg(cpu, instr),
+        Lldt => system::lldt(cpu, instr),
+        Ltr => system::ltr(cpu, instr),
+        Sldt => system::store_selector(cpu, instr, false),
+        Str => system::store_selector(cpu, instr, true),
+        Lar => system::load_access(cpu, instr, false),
+        Lsl => system::load_access(cpu, instr, true),
+        Verr => system::verify(cpu, instr, false),
+        Verw => system::verify(cpu, instr, true),
+        Arpl => system::arpl(cpu, instr),
 
         // --- FPU ---
         Fadd | Faddp | Fiadd | Fsub | Fsubp | Fsubr | Fsubrp | Fisub | Fisubr | Fmul | Fmulp
@@ -169,14 +210,8 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         | Fbstp | Fxch | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fcom | Fcomp
         | Fcompp | Ficom | Ficomp | Ftst | Fxam | Fcomi | Fcomip | Fucomi | Fucomip | Finit
         | Fninit | Fldcw | Fstcw | Fnstcw | Fstsw | Fnstsw | Fclex | Fnclex | Fsave | Fnsave
-        | Frstor | Fstenv | Fnstenv | Fldenv | Fnop | Ffree | Fincstp | Fdecstp => {
-            // No coprocessor (EM), or it belongs to another task (TS).
-            if cpu.cr0 & (CR0_EM | CR0_TS) != 0 {
-                return Err(Fault::NM);
-            }
-            fpu::handle(cpu, instr);
-            Ok(())
-        }
+        | Frstor | Fstenv | Fnstenv | Fldenv | Fnop | Ffree | Fincstp | Fdecstp | Fucom | Fucomp
+        | Fucompp | Fneni | Fndisi | Fnsetpm | Feni | Fdisi | Fsetpm => fpu_instruction(cpu, instr),
 
         _ => Err(Fault::UD),
     }

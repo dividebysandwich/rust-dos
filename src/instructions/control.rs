@@ -26,14 +26,38 @@ fn jump_near(cpu: &mut Cpu, target: u32, size: u8) -> CpuResult {
     Ok(())
 }
 
-/// Load CS:EIP for a far transfer in real mode.
-fn jump_far(cpu: &mut Cpu, selector: u16, offset: u32) -> CpuResult {
+/// Load CS:EIP for a far transfer in real or virtual-8086 mode.
+fn jump_far_real(cpu: &mut Cpu, selector: u16, offset: u32) -> CpuResult {
     if offset > cpu.seg_cache(Seg::CS).limit {
         return Err(Fault::gp(0));
     }
-    cpu.load_seg_real(Seg::CS, selector);
+    if cpu.v86() {
+        cpu.load_seg_v86(Seg::CS, selector);
+    } else {
+        cpu.load_seg_real(Seg::CS, selector);
+    }
     cpu.set_eip(offset);
     Ok(())
+}
+
+/// JMP far: in protected mode to a code segment, through a call gate, or
+/// to another task.
+fn jump_far(cpu: &mut Cpu, selector: u16, offset: u32) -> CpuResult {
+    if cpu.pm() {
+        return cpu.jmp_far_pm(selector, offset);
+    }
+    jump_far_real(cpu, selector, offset)
+}
+
+/// CALL far with `size`-byte return address slots.
+fn call_far(cpu: &mut Cpu, selector: u16, offset: u32, size: u8) -> CpuResult {
+    if cpu.pm() {
+        return cpu.call_far_pm(selector, offset, size);
+    }
+    let (cs, eip) = (cpu.cs(), cpu.eip());
+    cpu.push_sized(size, cs as u32)?;
+    cpu.push_sized(size, eip)?;
+    jump_far_real(cpu, selector, offset)
 }
 
 /// Offset size of a far pointer in memory (m16:16 or m16:32).
@@ -70,7 +94,7 @@ pub fn jmp(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 }
 
 pub fn call(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let (cs, eip) = (cpu.cs(), cpu.eip());
+    let eip = cpu.eip();
     match instr.op0_kind() {
         OpKind::NearBranch16 | OpKind::NearBranch32 => {
             let size = branch_size(instr);
@@ -84,16 +108,12 @@ pub fn call(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             } else {
                 (4, instr.far_branch32())
             };
-            cpu.push_sized(size, cs as u32)?;
-            cpu.push_sized(size, eip)?;
-            jump_far(cpu, instr.far_branch_selector(), offset)
+            call_far(cpu, instr.far_branch_selector(), offset, size)
         }
         _ => {
             if matches!(instr.code(), Code::Call_m1616 | Code::Call_m1632) {
                 let (selector, offset, size) = read_far_pointer(cpu, instr)?;
-                cpu.push_sized(size, cs as u32)?;
-                cpu.push_sized(size, eip)?;
-                jump_far(cpu, selector, offset)
+                call_far(cpu, selector, offset, size)
             } else {
                 let size = op_size(instr, 0);
                 let target = read_op(cpu, instr, 0, size)?;
@@ -120,10 +140,13 @@ pub fn ret_near(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 
 pub fn ret_far(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let size = if matches!(instr.code(), Code::Retfd | Code::Retfd_imm16) { 4 } else { 2 };
+    if cpu.pm() {
+        return cpu.ret_far_pm(size, ret_release(instr));
+    }
     let offset = cpu.stack_read(0, size)?;
     let selector = cpu.stack_read(size as u32, size)? as u16;
     let offset = if size == 2 { offset & 0xFFFF } else { offset };
-    jump_far(cpu, selector, offset)?;
+    jump_far_real(cpu, selector, offset)?;
     let sp = cpu.stack_ptr().wrapping_add(2 * size as u32 + ret_release(instr));
     cpu.set_stack_ptr(sp);
     Ok(())
@@ -184,18 +207,26 @@ pub fn jcxz(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 }
 
 /// A software interrupt: INT n, INT3, INT1 or INTO. EIP already points at
-/// the next instruction. A vector the interrupt table leaves at 0000:0000
-/// is skipped, as programs call interrupts nothing has installed yet.
+/// the next instruction. In real mode, a vector the interrupt table leaves
+/// at 0000:0000 is skipped, as programs call interrupts nothing has
+/// installed yet.
 pub fn software_interrupt(cpu: &mut Cpu, vector: u8) -> CpuResult {
-    let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
-    if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
-        cpu.note_null_interrupt(vector);
-        return Ok(());
+    if !cpu.pe() {
+        let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
+        if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
+            cpu.note_null_interrupt(vector);
+            return Ok(());
+        }
     }
-    cpu.deliver_interrupt(vector, IntSource::Software)
+    cpu.deliver_interrupt(vector, IntSource::Software, None)
 }
 
 pub fn int(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    // In virtual-8086 mode INT n is for the monitor to emulate unless
+    // IOPL is 3.
+    if cpu.v86() && cpu.iopl() < 3 {
+        return Err(Fault::gp(0));
+    }
     software_interrupt(cpu, instr.immediate8())
 }
 
@@ -206,17 +237,26 @@ pub fn into(cpu: &mut Cpu) -> CpuResult {
     Ok(())
 }
 
-/// IRET/IRETD in real mode: pop (E)IP, CS and (E)FLAGS.
+/// IRET/IRETD: pop (E)IP, CS and (E)FLAGS. In virtual-8086 mode only
+/// with IOPL 3, and then without changing IOPL.
 pub fn iret(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let size = if instr.code() == Code::Iretd { 4 } else { 2 };
+    if cpu.pm() {
+        return cpu.iret_pm(size);
+    }
+    if cpu.v86() && cpu.iopl() < 3 {
+        return Err(Fault::gp(0));
+    }
     let offset = cpu.stack_read(0, size)?;
     let selector = cpu.stack_read(size as u32, size)? as u16;
     let flags = cpu.stack_read(2 * size as u32, size)?;
     let offset = if size == 2 { offset & 0xFFFF } else { offset };
-    jump_far(cpu, selector, offset)?;
+    jump_far_real(cpu, selector, offset)?;
     let sp = cpu.stack_ptr().wrapping_add(3 * size as u32);
     cpu.set_stack_ptr(sp);
-    if size == 2 {
+    if cpu.v86() {
+        cpu.load_flags_pm(flags, size, true);
+    } else if size == 2 {
         cpu.load_flags16(flags as u16);
     } else {
         cpu.load_eflags(flags);
@@ -252,7 +292,9 @@ pub fn enter(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 
     let ebp = cpu.ebp();
     cpu.push_sized(size, ebp)?;
-    let frame = cpu.stack_ptr();
+    // The frame pointer is all of ESP, whose upper half a 16-bit stack
+    // leaves alone.
+    let frame = cpu.esp();
 
     if level > 0 {
         let mut bp = if stack32 { ebp } else { ebp & 0xFFFF };
@@ -267,12 +309,16 @@ pub fn enter(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         cpu.push_sized(size, frame)?;
     }
 
+    let sp = cpu.stack_ptr().wrapping_sub(alloc);
+    let sp = if stack32 { sp } else { sp & 0xFFFF };
+    // The 386 finishes with a write check at the final stack pointer: a
+    // frame reaching into an unwritable page faults.
+    cpu.mem_ref(Seg::SS, sp, size, Access::Write)?;
     if size == 4 {
         cpu.set_ebp(frame);
     } else {
         cpu.set_bp(frame as u16);
     }
-    let sp = cpu.stack_ptr().wrapping_sub(alloc);
     cpu.set_stack_ptr(sp);
     Ok(())
 }

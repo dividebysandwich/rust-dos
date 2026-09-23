@@ -23,6 +23,8 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
 
         Mnemonic::Fsave | Mnemonic::Fnsave => control::fnsave(cpu, instr),
         Mnemonic::Frstor => control::frstor(cpu, instr),
+        Mnemonic::Fstenv | Mnemonic::Fnstenv => control::fnstenv(cpu, instr),
+        Mnemonic::Fldenv => control::fldenv(cpu, instr),
         Mnemonic::Fincstp => control::fincstp(cpu),
         Mnemonic::Fdecstp => control::fdecstp(cpu),
 
@@ -112,9 +114,12 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // ----------
 
         // Float Compare
-        Mnemonic::Fcom | Mnemonic::Fcomp | Mnemonic::Fcompp => {
-            comparison::fcom_variants(cpu, instr)
-        }
+        Mnemonic::Fcom | Mnemonic::Fcomp | Mnemonic::Fcompp | Mnemonic::Fucom | Mnemonic::Fucomp
+        | Mnemonic::Fucompp => comparison::fcom_variants(cpu, instr),
+
+        // 8087 and 287 mode controls: no-ops on a 387 and later.
+        Mnemonic::Fneni | Mnemonic::Fndisi | Mnemonic::Fnsetpm | Mnemonic::Feni | Mnemonic::Fdisi
+        | Mnemonic::Fsetpm => {}
 
         // Integer Compare
         Mnemonic::Ficom | Mnemonic::Ficomp => comparison::ficom_variants(cpu, instr),

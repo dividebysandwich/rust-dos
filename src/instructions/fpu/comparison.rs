@@ -1,4 +1,4 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, MemorySize, Register};
+use iced_x86::{Code, Instruction, Mnemonic, OpKind, MemorySize, Register};
 
 use crate::cpu::{Cpu, FpuFlags, CpuFlags, FPU_TAG_EMPTY};
 use crate::instructions::utils::calculate_addr;
@@ -23,7 +23,7 @@ fn fpu_compare_values(cpu: &mut Cpu, lhs: f64, rhs: f64) {
 }
 
 pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
-    let (lhs, rhs) = if instr.mnemonic() == Mnemonic::Fcompp {
+    let (lhs, rhs) = if matches!(instr.mnemonic(), Mnemonic::Fcompp | Mnemonic::Fucompp) {
         // FCOMPP is always ST(0) vs ST(1)
         (cpu.fpu_get(0).get_f64(), cpu.fpu_get(1).get_f64())
     } else {
@@ -33,19 +33,16 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
                 let val_0 = cpu.fpu_get(0).get_f64();
                 let addr = calculate_addr(cpu, instr);
                 let val_op = match instr.memory_size() {
-                    MemorySize::Float32 => f32::from_bits(cpu.bus.read_32(addr)) as f64,
-                    MemorySize::Float64 => f64::from_bits(cpu.bus.read_64(addr)),
+                    MemorySize::Float32 => f32::from_bits(cpu.lin_read_32(addr)) as f64,
+                    MemorySize::Float64 => f64::from_bits(cpu.lin_read_64(addr)),
                     _ => f64::NAN, 
                 };
                 (val_0, val_op)
             }
             OpKind::Register => {
-                // Read raw opcode from memory
-                // iced_x86 apparently has a bug with D8 vs DC ambiguity
-                let cs_base = (cpu.cs() as u32) << 4;
-                let instr_addr = (cpu.ip() as u32).wrapping_sub(instr.len() as u32);
-                let phys_addr = cs_base.wrapping_add(instr_addr) & 0xFFFFF;
-                let opcode_byte = cpu.bus.read_8(phys_addr as usize);
+                // The DC D0+i and DC D8+i encodings compare the other way
+                // round (ST(i) with ST(0)).
+                let dc_form = matches!(instr.code(), Code::Fcom_st0_sti_DCD0 | Code::Fcomp_st0_sti_DCD8);
 
                 // Identify the operand register index (i)
                 // iced_x86 might say "FCOM ST0, ST1" or "FCOM ST1, ST0"
@@ -67,15 +64,7 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
                 // Determine direction
                 // If memory has 0xDC, it's Reverse.
                 // If memory is 0x00 (Unit Test environment), fallback to checking operands.
-                let is_reverse = if opcode_byte == 0xDC {
-                    true
-                } else if opcode_byte == 0xD8 {
-                    false
-                } else {
-                    // Fallback for Unit Tests that don't write to RAM:
-                    // If op1 is ST0, iced_x86 usually implies Reverse syntax "FCOM STi, ST0"
-                    instr.op1_register() == Register::ST0
-                };
+                let is_reverse = dc_form;
 
                 if is_reverse {
                     (val_i, val_0) // ST(i) vs ST(0)
@@ -92,8 +81,8 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
     fpu_compare_values(cpu, lhs, rhs);
 
     match instr.mnemonic() {
-        Mnemonic::Fcomp => { cpu.fpu_pop(); },
-        Mnemonic::Fcompp => { cpu.fpu_pop(); cpu.fpu_pop(); },
+        Mnemonic::Fcomp | Mnemonic::Fucomp => { cpu.fpu_pop(); },
+        Mnemonic::Fcompp | Mnemonic::Fucompp => { cpu.fpu_pop(); cpu.fpu_pop(); },
         _ => {}
     }
 }
@@ -102,8 +91,8 @@ pub fn ficom_variants(cpu: &mut Cpu, instr: &Instruction) {
     let st0 = cpu.fpu_get(0).get_f64();
     let addr = calculate_addr(cpu, instr);
     let val = match instr.memory_size() {
-        MemorySize::Int16 => (cpu.bus.read_16(addr) as i16) as f64,
-        MemorySize::Int32 => (cpu.bus.read_32(addr) as i32) as f64,
+        MemorySize::Int16 => (cpu.lin_read_16(addr) as i16) as f64,
+        MemorySize::Int32 => (cpu.lin_read_32(addr) as i32) as f64,
         _ => 0.0,
     };
     fpu_compare_values(cpu, st0, val);

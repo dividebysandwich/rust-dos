@@ -280,11 +280,11 @@ fn xms_moves_lock_free_and_a20() {
     assert!(xms_call(&mut cpu, 0x05));
     assert!(xms_call(&mut cpu, 0x05));
     assert!(xms_call(&mut cpu, 0x06));
-    assert!(cpu.bus.a20);
+    assert!(cpu.bus.a20());
     xms_call(&mut cpu, 0x07);
     assert_eq!(cpu.ax(), 1);
     assert!(xms_call(&mut cpu, 0x06));
-    assert!(!cpu.bus.a20);
+    assert!(!cpu.bus.a20());
 }
 
 fn int21(cpu: &mut Cpu, ax: u16) {
@@ -445,7 +445,7 @@ fn the_shell_starts_in_real_mode_with_extended_memory_free() {
     assert_eq!(cpu.cr0 & rust_dos::cpu::CR0_PE, 0);
     assert_eq!(cpu.cr3, 0);
     assert_eq!((cpu.idtr.base, cpu.idtr.limit), (0, 0x3FF));
-    assert!(!cpu.bus.a20);
+    assert!(!cpu.bus.a20());
     cpu.bus.io_write(0x70, 0x0F);
     assert_eq!(cpu.bus.io_read(0x71), 0, "a reset is a cold boot again");
     // All of extended memory is free again.
