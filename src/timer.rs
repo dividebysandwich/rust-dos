@@ -51,6 +51,8 @@ pub struct Clock {
     pub deadline: u64,
     /// Instruction counts charged for I/O bus time rather than executed.
     pub stalled: u64,
+    /// Instruction counts skipped while the CPU waited for an interrupt.
+    pub idle: u64,
     batch_end: u64,
     cycles_per_ms: u32,
     base_icount: u64,
@@ -63,6 +65,7 @@ impl Clock {
             icount: 0,
             deadline: u64::MAX,
             stalled: 0,
+            idle: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
@@ -133,6 +136,7 @@ impl Clock {
         let target = self.deadline.min(self.batch_end);
         let skipped = target.saturating_sub(self.icount);
         self.icount += skipped;
+        self.idle += skipped;
         skipped
     }
 }

@@ -56,6 +56,19 @@ pub struct InstrCache {
     pub misses: u64,
 }
 
+impl Default for InstrCache {
+    /// A cache with no slots, as a placeholder while the real one is lent
+    /// out (see `exec::run_batch`). It must not be used for lookups.
+    fn default() -> Self {
+        Self {
+            slots: Box::new([]),
+            mask: 0,
+            hits: 0,
+            misses: 0,
+        }
+    }
+}
+
 impl InstrCache {
     /// `capacity_log2` = log2 of the number of slots. 16 → 64K slots ≈ 3.5 MB.
     /// This is comfortably larger than the working set of any DOS program we

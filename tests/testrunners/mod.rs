@@ -1,6 +1,9 @@
 use rust_dos::cpu::Cpu;
-use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+use iced_x86::{Decoder, DecoderOptions};
 
+/// Write `code` at CS:IP and step the CPU through it, through the same
+/// execution loop the emulator runs, until IP leaves the code, after a
+/// HLT, or after 100 steps.
 #[allow(dead_code)]
 pub fn run_cpu_code(cpu: &mut Cpu, code: &[u8]) {
     let cs_base = (cpu.cs() as u32) << 4;
@@ -11,28 +14,14 @@ pub fn run_cpu_code(cpu: &mut Cpu, code: &[u8]) {
         cpu.bus.write_8(phys_addr as usize, byte);
     }
 
-    let mut instructions_left = 100;
-
-    loop {
-        if instructions_left == 0 { break; }
-        instructions_left -= 1;
-
+    for _ in 0..100 {
         let current_offset = (cpu.ip() as u32).wrapping_sub(start_ip) as usize;
-        if current_offset >= code.len() { break; }
-
-        let mut decoder = Decoder::new(16, &code[current_offset..], DecoderOptions::NONE);
-        decoder.set_ip(cpu.ip() as u64);
-        
-        let instr = decoder.decode();
-        
-        // Update IP to point to next instruction
-        cpu.set_ip(instr.next_ip() as u16);
-
-        // Execute the instruction
-        rust_dos::instructions::execute_instruction(cpu, &instr);
-
-        // Check for HLT *after* execution so the CPU state updates
-        if instr.mnemonic() == Mnemonic::Hlt {
+        if current_offset >= code.len() {
+            break;
+        }
+        let halt = code[current_offset] == 0xF4;
+        cpu.step();
+        if halt {
             break;
         }
     }

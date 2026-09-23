@@ -1,9 +1,10 @@
 use bitflags::bitflags;
-use iced_x86::{Decoder, DecoderOptions, MemorySize};
+use iced_x86::MemorySize;
 use std::collections::VecDeque;
 
 use crate::bus::Bus;
 use crate::f80::F80;
+use crate::instr_cache::InstrCache;
 use crate::shell::get_shell_code;
 
 mod regs;
@@ -105,7 +106,14 @@ pub struct Cpu {
     pub fpu_tags: [u8; 8],
 
     pub process_stack: Vec<ProcessContext>,
-    pub last_timer_tick: u128,
+    /// Set by STI, MOV SS and POP SS: hardware interrupts wait until the
+    /// next instruction has run.
+    pub irq_shadow: bool,
+    /// Decoded instructions, see `instr_cache.rs`.
+    pub decode_cache: InstrCache,
+    /// Instructions (including emulator service traps) run since start, not
+    /// counting interrupt entries or time skipped while halted.
+    pub executed: u64,
     /// Set by BIOS services that wait for input (INT 16h with an empty
     /// keyboard buffer). The main loop then skips ahead to the next timer
     /// event instead of spinning through the retry loop, like it does for HLT.
@@ -162,7 +170,11 @@ impl Cpu {
             resident_end: crate::mcb::FIRST_MCB_SEG,
             last_child_exit: 0,
             process_stack: Vec::new(),
-            last_timer_tick: 0,
+            irq_shadow: false,
+            // 64K direct-mapped slots (~3.5 MB): comfortably large for any
+            // DOS program's hot working set.
+            decode_cache: InstrCache::new(16),
+            executed: 0,
             idle: false,
         }
     }
@@ -245,83 +257,6 @@ impl Cpu {
             self.bus.log_string("[CPU] Restore Failed: Stack Empty");
             false
         }
-    }
-
-    // ... step ...
-
-    pub fn step(&mut self) {
-        if self.state != CpuState::Running {
-            return;
-        }
-
-        // Timer Check (Approx 18.2 Hz -> ~55ms)
-        let now = self.bus.start_time.elapsed().as_millis();
-        if now - self.last_timer_tick >= 55 {
-            self.last_timer_tick = now;
-
-            // println!("[DEBUG] Injecting INT 08h");
-
-            // Inject INT 08h (Timer)
-            let ivt_offset = 0x08 * 4;
-            let handler_ip = self.bus.read_16(ivt_offset as usize);
-            let handler_cs = self.bus.read_16((ivt_offset + 2) as usize);
-
-            // Push Flags, CS, IP
-            self.push(self.flags16());
-            self.push(self.cs());
-            self.push(self.ip());
-
-            // Jump to Handler
-            self.set_ip(handler_ip);
-            self.set_cs(handler_cs);
-
-            // Disable Interrupts (IF=0) and Trap Flag (TF=0)
-            self.set_cpu_flag(CpuFlags::IF, false);
-            self.set_cpu_flag(CpuFlags::TF, false);
-
-            // We changed CS:IP, so we should return to fetch from new location
-            return;
-        }
-
-        let phys_ip = self.get_physical_addr(self.cs(), self.ip());
-        // Ensure we can read at least a few bytes
-        if phys_ip >= self.bus.ram().len() {
-            return;
-        }
-
-        // Peek next bytes (simplified)
-        let b0 = self.bus.read_8(phys_ip);
-        let b1 = self
-            .bus
-            .read_8(self.get_physical_addr(self.cs(), self.ip().wrapping_add(1)));
-
-        // Check for "BOP" (BIOS Operation) -> FE 38 XX
-        if b0 == 0xFE && b1 == 0x38 {
-            let vector = self
-                .bus
-                .read_8(self.get_physical_addr(self.cs(), self.ip().wrapping_add(2)));
-
-            // Run the HLE handler, then simulate its IRET
-            crate::interrupts::handle_hle(self, vector);
-            crate::interrupts::return_from_hle(self, vector);
-            return;
-        }
-
-        // Decode
-        // We slice safe
-        let bytes = &self.bus.ram()[phys_ip..];
-        let mut decoder = Decoder::with_ip(16, bytes, self.ip() as u64, DecoderOptions::NONE);
-        let instr = decoder.decode();
-
-        let disasm = format!("{:04X}:{:04X} {}", self.cs(), self.ip(), instr);
-        self.bus.log_trace(&disasm);
-
-        // Update IP
-        self.set_ip(instr.next_ip() as u16);
-
-        // Execute
-        crate::instructions::execute_instruction(self, &instr);
-        self.bus.clock.icount += 1;
     }
 
     // Update Parity Flag based on result

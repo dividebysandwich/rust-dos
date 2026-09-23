@@ -170,7 +170,6 @@ fn mouse_handler_is_far_called_and_registers_survive() {
     cpu.bus.mouse.set_position(120, 60);
     assert!(!rust_dos::mouse::deliver_callback(&mut cpu));
 
-    cpu.last_timer_tick = cpu.bus.start_time.elapsed().as_millis();
     for _ in 0..100 {
         if cpu.cs() == 0x3000 {
             break;

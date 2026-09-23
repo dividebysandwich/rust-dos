@@ -103,6 +103,10 @@ fn mov(cpu: &mut Cpu, instr: &Instruction) {
         } else {
             cpu.set_reg16(dest_reg, val);
         }
+        if dest_reg == Register::SS {
+            // No interrupt until the SP load that normally follows.
+            cpu.irq_shadow = true;
+        }
     }
     // MOV Segment, ... (e.g., MOV DS, AX)
     else if instr.op0_register().is_segment_register() {
@@ -196,6 +200,10 @@ fn pop(cpu: &mut Cpu, instr: &Instruction) {
     let val = cpu.pop();
     if instr.op0_kind() == OpKind::Register {
         cpu.set_reg16(instr.op0_register(), val);
+        if instr.op0_register() == Register::SS {
+            // No interrupt until the SP load that normally follows.
+            cpu.irq_shadow = true;
+        }
     } else if instr.op0_kind() == OpKind::Memory {
         let addr = calculate_addr(cpu, instr);
         cpu.bus.write_16(addr, val);

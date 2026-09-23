@@ -1207,20 +1207,10 @@ impl Bus {
         }
     }
 
-    pub fn log_trace(&mut self, s: &str) {
-        if self.log_file.is_none() {
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open("trace.log")
-                .expect("Failed to open trace.log");
-            self.log_file = Some(BufWriter::new(file));
-        }
-
-        // NO PRINTLN
+    /// Write buffered log lines to trace.log now, so they survive an abort.
+    pub fn flush_log(&mut self) {
         if let Some(writer) = &mut self.log_file {
-            let _ = writeln!(writer, "{}", s);
+            let _ = writer.flush();
         }
     }
 }
