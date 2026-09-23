@@ -114,14 +114,28 @@ pub struct Bus {
     // Mouse State (INT 33h)
     pub mouse: crate::mouse::MouseState,
 
-    // AdLib / OPL2 FM synthesizer (ports 0x388/0x389)
-    pub adlib: crate::adlib::AdLib,
-
-    // Sound Blaster 2.0 (ports 0x220..0x22F) + 8237 DMA channel 1.
-    // Kept side-by-side with the bus so the audio pump can pull PCM
-    // bytes straight out of ram using the DMA channel's address/page.
-    pub sb: crate::sb::SoundBlaster,
-    pub dma_ch1: crate::sb::Dma8237Ch1,
+    /// The FM synthesizer (OPL3 or OPL2) at 388h-38Bh and on the Sound
+    /// Blaster's ports.
+    pub opl: crate::opl::Opl,
+    /// The Sound Blaster, if one is installed.
+    pub sb: Option<crate::sb::SoundBlaster>,
+    /// The two 8237 DMA controllers.
+    pub dma: crate::dma::Dma,
+    /// The MPU-401 MIDI interface at 330h.
+    pub mpu: crate::mpu401::Mpu401,
+    /// Mixed output (44.1 kHz stereo, interleaved) rendered up to
+    /// `audio_frames` frames of emulated time, waiting for `pump_audio`.
+    pub audio_out: VecDeque<i16>,
+    audio_frames: u64,
+    /// Resampling position and last frame of the Sound Blaster's output.
+    sb_phase: f64,
+    sb_frame: (i16, i16),
+    /// Frames left of a BEL beep.
+    pub beep_frames: u32,
+    /// Output level and underruns, for the debugger: the peak sample since
+    /// it was last read, and how often the output device ran dry.
+    pub audio_peak: u16,
+    pub audio_underruns: u64,
 
     /// Per-4KB-page generation counter for every page of RAM. Bumped on every
     /// write inside the Bus write helpers. The decoded-instruction cache
@@ -189,9 +203,17 @@ impl Bus {
             vga: crate::video::vga::VgaCard::new(),
             search_handles: std::collections::HashMap::new(),
             mouse: crate::mouse::MouseState::new(),
-            adlib: crate::adlib::AdLib::new(),
-            sb: crate::sb::SoundBlaster::new(),
-            dma_ch1: crate::sb::Dma8237Ch1::default(),
+            opl: crate::opl::Opl::new(true),
+            sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default())),
+            dma: crate::dma::Dma::new(),
+            mpu: crate::mpu401::Mpu401::new(),
+            audio_out: VecDeque::new(),
+            audio_frames: 0,
+            sb_phase: 0.0,
+            sb_frame: (0, 0),
+            beep_frames: 0,
+            audio_peak: 0,
+            audio_underruns: 0,
             page_gen: vec![0; ram_len >> 12],
             log_hook: None,
             audio_hook: None,
@@ -766,23 +788,211 @@ impl Bus {
     /// Start an execution batch that runs until instruction `end`.
     pub fn start_batch(&mut self, end: u64) {
         self.clock.set_batch_end(end);
-        self.clock.schedule(self.pit0.next_event());
+        self.clock.schedule(self.next_event());
     }
 
     /// Change the emulated CPU speed (instructions per emulated ms).
     pub fn set_cycles_per_ms(&mut self, cycles_per_ms: u32) {
         self.clock.set_cycles_per_ms(cycles_per_ms);
-        self.clock.schedule(self.pit0.next_event());
+        self.clock.schedule(self.next_event());
     }
 
-    /// Bring the PIT up to the current instruction and request IRQ 0 if it
-    /// fired. The main loop calls this when `clock.icount` reaches
-    /// `clock.deadline`.
+    /// The next time (PIT ticks) a device needs attention: the timer's
+    /// next IRQ 0, or the end of the Sound Blaster's current block.
+    fn next_event(&self) -> Option<u64> {
+        let sb = self.sb.as_ref().and_then(|sb| sb.next_event());
+        match (self.pit0.next_event(), sb) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Bring the PIT and the Sound Blaster up to the current instruction
+    /// and request the interrupts that came due. The main loop calls this
+    /// when `clock.icount` reaches `clock.deadline`.
     pub fn service_timers(&mut self) {
-        if self.pit0.advance(self.clock.now_ticks()) {
+        let now = self.clock.now_ticks();
+        if self.pit0.advance(now) {
             self.pic.raise(0);
         }
-        self.clock.schedule(self.pit0.next_event());
+        if self.sb.as_ref().and_then(|sb| sb.next_event()).is_some_and(|t| t <= now) {
+            self.sb_advance();
+        }
+        self.clock.schedule(self.next_event());
+    }
+
+    /// Run the Sound Blaster's DSP up to the present.
+    fn sb_advance(&mut self) {
+        let now = self.clock.now_ticks();
+        if let Some(sb) = &mut self.sb {
+            sb.advance(now, &mut self.dma, &self.ram);
+        }
+    }
+
+    /// Render the mixed audio of every device up to the present, so a
+    /// change a program makes now (an FM register, a DAC sample, the
+    /// speaker gate) is heard from now on.
+    pub fn audio_catch_up(&mut self) {
+        self.sb_advance();
+        let rate = crate::opl::RATE as u64;
+        let target = (self.clock.now_ticks() as u128 * rate as u128 / crate::timer::PIT_HZ as u128) as u64;
+        // After a long pause (a debugger stop, a slow host) start afresh
+        // rather than render seconds of catch-up.
+        if target.saturating_sub(self.audio_frames) > rate / 2 {
+            self.audio_frames = target - rate / 2;
+        }
+        let frames = target.saturating_sub(self.audio_frames) as usize;
+        if frames == 0 {
+            return;
+        }
+        self.audio_frames = target;
+
+        let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
+        let speaker_step = crate::timer::PIT_HZ as f32 / divisor / rate as f32;
+        let speaker = self.speaker_on && speaker_step * rate as f32 > 20.0;
+        let ((vl, vr), (fl, fr)) = self.sb.as_ref().map_or(((1.0, 1.0), (1.0, 1.0)), |sb| sb.volumes());
+        let (sb_on, sb_step, dac) = match &self.sb {
+            Some(sb) => (
+                sb.speaker_on || sb.config.model == crate::sb::SbModel::Sb16,
+                sb.out_rate as f64 / rate as f64,
+                sb.dac,
+            ),
+            None => (false, 0.0, 0),
+        };
+        const SPEAKER: f32 = 3000.0;
+        for _ in 0..frames {
+            let mut l = 0.0f32;
+            let mut r = 0.0f32;
+            if speaker {
+                self.audio_phase += speaker_step;
+                if self.audio_phase >= 1.0 {
+                    self.audio_phase -= 1.0;
+                }
+                let s = if self.audio_phase < 0.5 { SPEAKER } else { -SPEAKER };
+                l += s;
+                r += s;
+            }
+            let (ol, or) = self.opl.render();
+            l += ol as f32 * fl;
+            r += or as f32 * fr;
+            if let Some(sb) = &mut self.sb {
+                if sb.out.is_empty() && self.sb_phase < 1.0 {
+                    self.sb_frame = (dac, dac);
+                }
+                self.sb_phase += sb_step;
+                while self.sb_phase >= 1.0 {
+                    self.sb_phase -= 1.0;
+                    match sb.out.pop_front() {
+                        Some(f) => self.sb_frame = f,
+                        None => {
+                            self.sb_phase = 0.0;
+                            break;
+                        }
+                    }
+                }
+                if sb_on {
+                    l += self.sb_frame.0 as f32 * vl;
+                    r += self.sb_frame.1 as f32 * vr;
+                }
+            }
+            let (ml, mr) = self.mpu.render();
+            l += ml;
+            r += mr;
+            if self.beep_frames > 0 {
+                self.beep_frames -= 1;
+                let s = if self.beep_frames % 50 < 25 { SPEAKER } else { -SPEAKER };
+                l += s;
+                r += s;
+            }
+            self.audio_out.push_back(l.clamp(-32768.0, 32767.0) as i16);
+            self.audio_out.push_back(r.clamp(-32768.0, 32767.0) as i16);
+        }
+        // Nobody drains it without an audio device: keep a second.
+        let max = 2 * rate as usize;
+        if self.audio_out.len() > max {
+            let extra = self.audio_out.len() - max;
+            self.audio_out.drain(..extra);
+        }
+        // The DSP's output gets ahead when its rate and ours round
+        // differently; keep at most a tenth of a second queued.
+        if let Some(sb) = &mut self.sb {
+            let keep = (sb.out_rate / 10).max(64) as usize;
+            if sb.out.len() > keep {
+                let extra = sb.out.len() - keep;
+                sb.out.drain(..extra);
+            }
+        }
+    }
+
+    /// Frames of audio rendered since start.
+    pub fn audio_frames(&self) -> u64 {
+        self.audio_frames
+    }
+
+    /// Replace the sound hardware: the Sound Blaster (None removes it) and
+    /// whether the FM chip is an OPL3.
+    pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
+        self.sb = sb.map(crate::sb::SoundBlaster::new);
+        self.opl = crate::opl::Opl::new(opl3);
+        self.clock.schedule(self.next_event());
+    }
+
+    /// Power-on state of the sound hardware, when a program ends.
+    pub fn reset_sound(&mut self) {
+        let config = self.sb.as_ref().map(|sb| sb.config);
+        let opl3 = self.opl.is_opl3();
+        self.configure_sound(config, opl3);
+        self.dma = crate::dma::Dma::new();
+        self.mpu.reset();
+        self.sb_frame = (0, 0);
+    }
+
+    /// Port access of the Sound Blaster at `offset` from its base: FM
+    /// ports go to the OPL.
+    fn sb_write(&mut self, offset: u16, value: u8) {
+        let model = self.sb.as_ref().map(|sb| sb.config.model);
+        let fm_ports = model != Some(crate::sb::SbModel::Sb2);
+        match offset {
+            0x0 | 0x8 => self.opl.write_address(0, value),
+            0x2 if fm_ports => self.opl.write_address(1, value),
+            0x1 | 0x9 => self.opl_data(0, value),
+            0x3 if fm_ports => self.opl_data(1, value),
+            _ => {
+                self.audio_catch_up();
+                let mut log = Vec::new();
+                if let Some(sb) = &mut self.sb {
+                    sb.write(offset, value, &mut log);
+                }
+                for line in log {
+                    self.log_string(&line);
+                }
+                self.clock.schedule(self.next_event());
+            }
+        }
+    }
+
+    fn sb_read(&mut self, offset: u16) -> u8 {
+        match offset {
+            0x0 | 0x2 | 0x8 => self.opl.read_status(self.clock.now_micros()),
+            _ => {
+                self.sb_advance();
+                let value = self.sb.as_mut().map_or(0xFF, |sb| sb.read(offset));
+                self.clock.schedule(self.next_event());
+                value
+            }
+        }
+    }
+
+    /// Write an FM register at its emulated time.
+    fn opl_data(&mut self, bank: usize, value: u8) {
+        self.audio_catch_up();
+        let now = self.clock.now_micros();
+        self.opl.write_data(bank, value, now);
+    }
+
+    /// The Sound Blaster's base port, if the card is there.
+    fn sb_base(&self) -> Option<u16> {
+        self.sb.as_ref().map(|sb| sb.config.base)
     }
 
     /// Power-on state of the PIT channel 0 and the PIC, so a program that
@@ -798,14 +1008,17 @@ impl Bus {
         self.pit0_access = 3;
         self.pit0_latched_active = false;
         self.pic = crate::pic::Pic::new();
-        self.clock.schedule(self.pit0.next_event());
+        self.clock.schedule(self.next_event());
     }
 
     /// Level-triggered request lines (bit n = IRQ n): the Sound Blaster
     /// holds its line until the driver acknowledges at port 22Eh.
     #[inline(always)]
     fn irq_levels(&self) -> u16 {
-        (self.sb.irq_pending as u16) << 5
+        match &self.sb {
+            Some(sb) if sb.irq_pending() => 1 << sb.config.irq,
+            _ => 0,
+        }
     }
 
     /// The IRQ (0-15) the PICs would deliver now: requested, not masked,
@@ -835,8 +1048,11 @@ impl Bus {
     /// Discard a request for `irq`, for lines with no handler installed.
     pub fn pic_drop(&mut self, irq: u8) {
         self.pic.lower(irq);
-        if irq == 5 {
-            self.sb.irq_pending = false;
+        if let Some(sb) = &mut self.sb
+            && sb.config.irq == irq
+        {
+            sb.irq8 = false;
+            sb.irq16 = false;
         }
     }
 
@@ -932,7 +1148,7 @@ impl Bus {
                     let was_counting = self.pit0.is_counting();
                     self.pit0
                         .write_count(self.pit0_divisor, self.clock.now_ticks());
-                    self.clock.schedule(self.pit0.next_event());
+                    self.clock.schedule(self.next_event());
                     if !was_counting {
                         self.log_string(&format!(
                             "[PIT] Channel 0 Frequency set to {} Hz",
@@ -946,6 +1162,9 @@ impl Bus {
             // This sets the frequency.
             // Frequency = 1,193,182 Hz / Divisor
             0x42 => {
+                if self.speaker_on {
+                    self.audio_catch_up();
+                }
                 if !self.pit_write_msb {
                     // Write LSB
                     self.pit_divisor = (self.pit_divisor & 0xFF00) | (value as u16);
@@ -986,7 +1205,7 @@ impl Bus {
                             self.pit0_read_msb = false;
                             self.pit0_access = access;
                             self.pit0.set_mode((value >> 1) & 0x07);
-                            self.clock.schedule(self.pit0.next_event());
+                            self.clock.schedule(self.next_event());
                         }
                         2 => self.pit_write_msb = false, // Reset Channel 2 LSB/MSB
                         _ => {}
@@ -1000,46 +1219,37 @@ impl Bus {
             0x61 => {
                 // If both Bit 0 and Bit 1 are set, the speaker is ON
                 let enabled = (value & 0x03) == 0x03;
+                if enabled != self.speaker_on {
+                    self.audio_catch_up();
+                }
                 self.speaker_on = enabled;
             }
 
-            // AdLib / OPL2 (YM3812). Port 0x388 selects the register,
-            // 0x389 writes data into the previously selected register.
-            // Sound Blaster also exposes OPL2 at 0x228/0x229 (mono FM)
-            // and mirrors it at 0x220/0x221 (SB 1.x legacy).
-            0x388 | 0x228 | 0x220 => {
-                self.adlib.write_register_select(value);
-            }
-            0x389 | 0x229 | 0x221 => {
-                self.adlib
-                    .write_register_data(value, self.clock.now_micros());
-            }
+            // The FM chip: AdLib ports 388h/389h, and the OPL3's second
+            // register bank at 38Ah/38Bh.
+            0x388 => self.opl.write_address(0, value),
+            0x389 => self.opl_data(0, value),
+            0x38A => self.opl.write_address(1, value),
+            0x38B => self.opl_data(1, value),
 
-            // --- Sound Blaster DSP (base 0x220) ---
-            // 0x226 Reset: write 1 then 0 triggers DSP ready (0xAA).
-            0x226 => { self.sb.write_reset(value); }
-            // 0x22C Write Command/Data. Buffer-status reads from same port.
-            0x22C => { self.sb.write_command(value); }
-            // 0x224/0x225 Mixer (SB Pro). We accept writes but stay SB 2.0
-            // identified at DSP level — some drivers probe the mixer
-            // before checking the DSP version.
-            0x224 => { self.sb.mixer_index_write(value); }
-            0x225 => { self.sb.mixer_data_write(value); }
+            // The Sound Blaster, 16 ports from its base.
+            p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
 
-            // --- 8237 DMA controller — only channel 1 matters for SB 8-bit. ---
-            0x02 => { self.dma_ch1.write_addr(value); }
-            0x03 => { self.dma_ch1.write_count(value); }
-            0x0A => { self.dma_ch1.write_single_mask(value); }
-            0x0B => { self.dma_ch1.write_mode(value); }
-            0x0C => { self.dma_ch1.clear_flipflop(); }
-            0x0D => { self.dma_ch1.master_reset(); }
-            // Other channels (0, 2, 3) — writes are harmless and we
-            // don't model them. Swallow so the unhandled-port log stays
-            // quiet when games initialize the full controller.
-            0x00 | 0x01 | 0x04..=0x09 | 0x0E | 0x0F => {}
-            // DMA page registers. Channel 1 lives at port 0x83.
-            0x83 => { self.dma_ch1.write_page(value); }
-            0x81 | 0x82 | 0x84..=0x8F => {}
+            // MPU-401 MIDI interface.
+            0x330 => {
+                self.audio_catch_up();
+                self.mpu.write_data(value);
+            }
+            0x331 => self.mpu.write_command(value),
+
+            // The DMA controllers and page registers. The Sound Blaster
+            // runs up to now first, so the transfer it is in sees the
+            // change when it happens.
+            p if crate::dma::Dma::owns(p) => {
+                self.sb_advance();
+                self.dma.write(p, value);
+                self.clock.schedule(self.next_event());
+            }
 
             // Dispatch to Devices
             // TODO: Use a proper map lookup
@@ -1219,29 +1429,24 @@ impl Bus {
             0x71 => self.cmos.read_data(),
             0x92 => (self.a20() as u8) << 1,
 
-            // AdLib status register (port 0x388). Bit 7 = IRQ, bit 6 = timer1
-            // expired, bit 5 = timer2 expired. Games poll this to detect the
-            // card by arming timer1 and checking that the bits flip in time.
-            // Mirrored onto the SB's FM ports for AdLib-on-SB detection.
-            0x388 | 0x228 | 0x220 => self.adlib.read_status(self.clock.now_micros()),
-            0x389 | 0x229 | 0x221 => 0xFF,
+            // The FM chip's status register: timer flags, which programs
+            // poll to detect an AdLib.
+            0x388 | 0x38A => self.opl.read_status(self.clock.now_micros()),
+            0x389 | 0x38B => 0xFF,
 
-            // --- Sound Blaster DSP reads ---
-            // 0x22A: Read Data — drains the DSP response FIFO.
-            0x22A => self.sb.read_data(),
-            // 0x22C: Write-buffer status — bit 7 set = DSP busy. Always ready.
-            0x22C => self.sb.read_write_status(),
-            // 0x22E: Read-buffer status + IRQ acknowledge.
-            0x22E => self.sb.read_buffer_status(),
-            // Mixer data read-back at 0x225.
-            0x225 => self.sb.mixer_data_read(),
+            p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
 
-            // --- 8237 DMA controller reads (channel 1) ---
-            0x02 => self.dma_ch1.read_addr(),
-            0x03 => self.dma_ch1.read_count(),
-            0x83 => self.dma_ch1.read_page(),
-            // Other DMA regs return open bus; keep quiet.
-            0x00 | 0x01 | 0x04..=0x0F | 0x80..=0x82 | 0x84..=0x8F => 0xFF,
+            0x330 => self.mpu.read_data(),
+            0x331 => self.mpu.read_status(),
+
+            // The DMA controllers, with the live address and count of a
+            // transfer a sound card is running.
+            p if crate::dma::Dma::owns(p) => {
+                self.sb_advance();
+                let value = self.dma.read(p);
+                self.clock.schedule(self.next_event());
+                value
+            }
 
             // Read PPI Port B: speaker gate and data, the DRAM refresh
             // request (bit 4, toggles), and the PIT channel 2 output (bit 5).

@@ -21,13 +21,16 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Configuration file with startup commands
 * Environment variables (`SET`, `PATH`)
 * XMS 3.0 extended memory and the A20 gate
+* 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
+  as DOS/4GW (Descent, Heretic)
+* Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
+  General MIDI through the MPU-401 with a SoundFont
 * CGA graphics
 * FPU emulation
 * Interrupt handlers
 
 ## What partially works
 
-* AdLib sound
 * VGA graphics
 * Programs using OVLs
 * TSRs
@@ -36,8 +39,6 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 * Mounting disk images
 * EMS
-* IRQs and DMA
-* Sound Blaster
 * Gravis Ultrasound
 * 640x480x16
 * VESA modes
@@ -88,6 +89,14 @@ D:
     or `386`.
   * `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
     first megabyte is extended memory for DOS extenders and XMS.
+* **`[sound]`:**
+  * `sbtype` is the Sound Blaster: `sb16` (the default), `sbpro2`, `sb2` or
+    `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's 16-bit
+    channel) set its resources; the defaults are 220, 7, 1 and 5. The
+    `BLASTER` environment variable follows them.
+  * `opl` is the FM synthesizer: `opl3` (the default) or `opl2`.
+  * `soundfont` is a General MIDI SoundFont (`.sf2`) for music programs
+    send to the MPU-401 at 330h. Without it the MPU-401 is silent.
 * **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.

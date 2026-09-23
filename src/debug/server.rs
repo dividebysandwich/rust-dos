@@ -687,7 +687,7 @@ async fn ws_audio(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
     let mut rx = s.shared.audio.subscribe();
     ws.on_upgrade(move |mut socket| async move {
         use broadcast::error::RecvError;
-        let header = json!({"type": "audio_format", "sample_rate": 44100, "channels": 1, "format": "s16le"});
+        let header = json!({"type": "audio_format", "sample_rate": 44100, "channels": 2, "format": "s16le"});
         if socket.send(Message::Text(header.to_string().into())).await.is_err() {
             return;
         }
@@ -813,6 +813,6 @@ WEBSOCKETS
   /ws/events          JSON: log lines, paused/resumed, video_mode changes
   /ws/trace           JSON: per-frame batches {"type":"trace","dropped":N,"entries":[...]} + events
   /ws/screen?fps=5    binary PNG frames, sent only when the screen changes
-  /ws/audio           text header, then binary s16le 44100 Hz mono chunks
+  /ws/audio           text header, then binary s16le 44100 Hz stereo (interleaved) chunks
   /ws/input           send input events (same JSON as /api/input/batch, optional "wait":true)
 "#;

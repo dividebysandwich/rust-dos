@@ -71,6 +71,9 @@ pub struct Config {
     pub cpu: Option<crate::cpu::CpuModel>,
     /// RAM in MB (`memsize`).
     pub memsize: Option<usize>,
+    /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
+    /// and a SoundFont for the MPU-401.
+    pub sound: SoundConfig,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -89,9 +92,85 @@ impl Config {
 enum Section {
     None,
     Emulator,
+    Sound,
     Drives,
     Autoexec,
     Unknown,
+}
+
+/// The `[sound]` section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundConfig {
+    /// The Sound Blaster's resources, and whether there is one.
+    pub sb: crate::sb::SbConfig,
+    pub sb_installed: bool,
+    /// OPL3 (as on an SB Pro 2 or SB16) rather than OPL2.
+    pub opl3: bool,
+    pub soundfont: Option<PathBuf>,
+}
+
+impl Default for SoundConfig {
+    fn default() -> Self {
+        Self { sb: crate::sb::SbConfig::default(), sb_installed: true, opl3: true, soundfont: None }
+    }
+}
+
+impl SoundConfig {
+    /// The Sound Blaster to install, if any.
+    pub fn card(&self) -> Option<crate::sb::SbConfig> {
+        self.sb_installed.then_some(self.sb)
+    }
+
+    fn set(&mut self, key: &str, value: &str, base_dir: &Path, home: Option<&Path>) -> Result<(), String> {
+        let sb = &mut self.sb;
+        let number = |min: u32, max: u32| match value.parse::<u32>() {
+            Ok(n) if (min..=max).contains(&n) => Ok(n),
+            _ => Err(format!("invalid {} '{}' ({} to {})", key, value, min, max)),
+        };
+        match key.to_ascii_lowercase().as_str() {
+            "sbtype" => {
+                if value.eq_ignore_ascii_case("none") {
+                    self.sb_installed = false;
+                } else {
+                    sb.model = crate::sb::SbModel::parse(value)
+                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sbpro2, sb2 or none)", value))?;
+                    self.sb_installed = true;
+                }
+            }
+            "sbbase" => {
+                let base = u16::from_str_radix(value.trim_start_matches("0x"), 16)
+                    .ok()
+                    .filter(|b| (0x210..=0x280).contains(b) && b & 0xF == 0)
+                    .ok_or_else(|| format!("invalid sbbase '{}' (210 to 280, hex)", value))?;
+                sb.base = base;
+            }
+            "irq" => {
+                let irq = number(2, 15)?;
+                if !matches!(irq, 2 | 3 | 5 | 7 | 9 | 10 | 11 | 12 | 15) {
+                    return Err(format!("invalid irq '{}'", value));
+                }
+                sb.irq = irq as u8;
+            }
+            "dma" => sb.dma8 = number(0, 3).and_then(|d| if d == 2 { Err("dma 2 belongs to the floppy".to_string()) } else { Ok(d) })? as u8,
+            "hdma" => sb.dma16 = number(5, 7)? as u8,
+            "opl" => {
+                self.opl3 = match value.to_ascii_lowercase().as_str() {
+                    "opl3" => true,
+                    "opl2" => false,
+                    _ => return Err(format!("invalid opl '{}' (opl3 or opl2)", value)),
+                }
+            }
+            "soundfont" => {
+                let path = match (value.strip_prefix("~/"), home) {
+                    (Some(rest), Some(h)) => h.join(rest),
+                    _ => base_dir.join(value),
+                };
+                self.soundfont = Some(path);
+            }
+            _ => return Err(format!("unknown setting '{}'", key)),
+        }
+        Ok(())
+    }
 }
 
 /// Parse config text. Relative drive paths resolve against `base_dir`.
@@ -112,6 +191,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             section = match name.trim().to_ascii_lowercase().as_str() {
                 "emulator" => Section::Emulator,
+                "sound" => Section::Sound,
                 "drives" => Section::Drives,
                 "autoexec" => Section::Autoexec,
                 other => {
@@ -126,7 +206,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             Section::Autoexec => config.autoexec.push(line.to_string()),
             Section::Unknown => {}
             Section::None => warn("setting outside of a section".to_string()),
-            Section::Emulator | Section::Drives => {
+            Section::Emulator | Section::Drives | Section::Sound => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -153,6 +233,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             _ => warn(format!("invalid cpu '{}' (386 or 486)", value)),
                         },
                         _ => warn(format!("unknown setting '{}'", key)),
+                    }
+                    continue;
+                }
+
+                if section == Section::Sound {
+                    if let Err(e) = config.sound.set(key, value, base_dir, home) {
+                        warn(e);
                     }
                     continue;
                 }
@@ -364,7 +451,7 @@ mod tests {
             D=/two\n\
             E=/x iso\n\
             nonsense\n\
-            [sound]\n\
+            [joystick]\n\
             ignored=1\n";
         let config = parse(text, Path::new("/cfg"), None);
         let joined = config.warnings.join("\n");
@@ -377,7 +464,7 @@ mod tests {
             "line 9: drive D: defined twice",
             "line 10: drive E: Unknown option 'iso'",
             "line 11: expected key=value",
-            "line 12: unknown section [sound]",
+            "line 12: unknown section [joystick]",
         ] {
             assert!(
                 joined.contains(expected),
@@ -389,6 +476,25 @@ mod tests {
         assert_eq!(config.warnings.len(), 9, "{}", joined);
         assert_eq!(config.drive(3).unwrap().path, Path::new("/two"));
         assert_eq!(config.scale, None);
+    }
+
+    #[test]
+    fn sound_section() {
+        let config = parse(
+            "[sound]\nsbtype=sbpro2\nsbbase=240\nirq=5\ndma=3\nopl=opl2\nsoundfont=gm.sf2\n",
+            Path::new("/cfg"),
+            None,
+        );
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let sb = config.sound.card().unwrap();
+        assert_eq!((sb.model, sb.base, sb.irq, sb.dma8), (crate::sb::SbModel::SbPro2, 0x240, 5, 3));
+        assert!(!config.sound.opl3);
+        assert_eq!(config.sound.soundfont.as_deref(), Some(Path::new("/cfg/gm.sf2")));
+        assert_eq!(sb.blaster(), "A240 I5 D3 T4");
+
+        let config = parse("[sound]\nsbtype=none\nirq=4\n", Path::new("/cfg"), None);
+        assert_eq!(config.sound.card(), None);
+        assert!(config.warnings[0].contains("invalid irq '4'"));
     }
 
     #[test]

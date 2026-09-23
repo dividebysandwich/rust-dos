@@ -229,17 +229,14 @@ pub struct ProcessContext {
 use std::path::PathBuf;
 
 /// The environment at startup. BLASTER advertises the Sound Blaster's
-/// resources as SET BLASTER in AUTOEXEC.BAT would: base port 220h, IRQ 5,
-/// DMA channel 1, type 3 (SB 2.0).
+/// resources as SET BLASTER in AUTOEXEC.BAT would (the configuration can
+/// change the card).
 fn default_environment() -> Vec<(String, String)> {
-    [
-        ("PATH", "C:\\"),
-        ("COMSPEC", "Z:\\COMMAND.COM"),
-        ("BLASTER", "A220 I5 D1 T3"),
+    vec![
+        ("PATH".to_string(), "C:\\".to_string()),
+        ("COMSPEC".to_string(), "Z:\\COMMAND.COM".to_string()),
+        ("BLASTER".to_string(), crate::sb::SbConfig::default().blaster()),
     ]
-    .into_iter()
-    .map(|(name, value)| (name.to_string(), value.to_string()))
-    .collect()
 }
 
 impl Cpu {
@@ -673,6 +670,7 @@ impl Cpu {
         self.state = CpuState::Running;
         self.idle = false;
         self.bus.reset_timers();
+        self.bus.reset_sound();
         // No program runs any more: its extended memory and A20 go too,
         // and a reset from now on is a cold boot.
         self.bus.xms = crate::xms::Xms::new();

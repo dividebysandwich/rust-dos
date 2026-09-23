@@ -75,7 +75,7 @@ fn main() -> Result<(), String> {
     let audio_subsystem = sdl_context.audio()?;
     let desired_spec = sdl2::audio::AudioSpecDesired {
         freq: Some(44100),
-        channels: Some(1), // Mono is fine for beeps
+        channels: Some(2),
         samples: None,     // Default buffer size
     };
     let audio_device = audio_subsystem
@@ -108,6 +108,7 @@ fn main() -> Result<(), String> {
     if let Some(model) = config.cpu {
         cpu.model = model;
     }
+    apply_sound_config(&mut cpu, &config.sound);
     cpu.bus.audio_device = Some(audio_device);
     let mut dbg = match args.debug_server {
         Some(addr) => debug::DebugHub::start(&mut cpu, addr, args.trace_capacity)?,
@@ -427,6 +428,22 @@ fn main() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Install the configured sound hardware and advertise the Sound Blaster
+/// in the BLASTER environment variable.
+fn apply_sound_config(cpu: &mut cpu::Cpu, sound: &config::SoundConfig) {
+    cpu.bus.configure_sound(sound.card(), sound.opl3);
+    match &sound.card() {
+        Some(sb) => cpu.set_env("BLASTER", &sb.blaster()),
+        None => cpu.set_env("BLASTER", ""),
+    }
+    if let Some(path) = &sound.soundfont {
+        match cpu.bus.mpu.load_soundfont(path) {
+            Ok(()) => eprintln!("[CONFIG] General MIDI with SoundFont {}", path.display()),
+            Err(e) => eprintln!("[CONFIG] Warning: soundfont: {}", e),
+        }
+    }
 }
 
 /// Find and parse the configuration file (see config.rs for the lookup

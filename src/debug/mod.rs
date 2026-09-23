@@ -46,7 +46,7 @@ pub struct Shared {
     pub events: broadcast::Sender<Arc<str>>,
     /// JSON trace batches (one per frame while subscribed).
     pub trace: broadcast::Sender<Arc<str>>,
-    /// Mixed audio, 44.1 kHz mono s16.
+    /// Mixed audio, 44.1 kHz stereo s16, interleaved.
     pub audio: broadcast::Sender<Arc<[i16]>>,
     pub log: Mutex<VecDeque<LogLine>>,
     pub start_time: Instant,
@@ -810,7 +810,11 @@ impl DebugHub {
 
     fn handle(&mut self, cpu: &mut Cpu, req: Request) {
         let reply = match req.cmd {
-            Cmd::Status => Reply::Json(self.status(cpu)),
+            Cmd::Status => {
+                let status = self.status(cpu);
+                cpu.bus.audio_peak = 0;
+                Reply::Json(status)
+            }
             Cmd::Stats => Reply::Json(self.stats_json()),
             Cmd::Screenshot => {
                 // Answered by the next capture_frame call.
@@ -1056,6 +1060,14 @@ impl DebugHub {
             "breakpoints": self.breakpoints.len(),
             "input_queue": self.input.len(),
             "keyboard_buffer": cpu.bus.keyboard_buffer.len(),
+            "audio": {
+                "peak": cpu.bus.audio_peak,
+                "underruns": cpu.bus.audio_underruns,
+                "frames": cpu.bus.audio_frames(),
+                "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.size() / 4),
+                "sound_blaster": cpu.bus.sb.as_ref().map(|sb| sb.config.blaster()),
+                "opl3": cpu.bus.opl.is_opl3(),
+            },
             "mouse": {
                 "installed": cpu.bus.mouse.installed,
                 "x": cpu.bus.mouse.x, "y": cpu.bus.mouse.y,

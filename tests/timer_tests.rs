@@ -363,12 +363,13 @@ fn int_1a_reads_the_bios_tick_count() {
 #[test]
 fn sound_blaster_irq_stays_raised_until_the_driver_acks_it() {
     let mut bus = bus_at(1000);
-    bus.io_write(0x22C, 0xF2); // DSP: force an 8-bit IRQ
-    assert_eq!(bus.pic_pending_irq(), Some(5));
-    bus.pic_acknowledge(5);
+    bus.io_write(0x21, 0x01); // mask the timer
+    bus.io_write(0x22C, 0xF2); // DSP: force an 8-bit IRQ (IRQ 7)
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+    bus.pic_acknowledge(7);
     // In service: not delivered again, although the card still raises it.
     assert_eq!(bus.pic_pending_irq(), None);
-    assert!(bus.sb.irq_pending);
+    assert!(bus.sb.as_ref().unwrap().irq_pending());
 
     bus.io_read(0x22E); // ISR acknowledges the card...
     bus.io_write(0x20, 0x20); // ...and the PIC

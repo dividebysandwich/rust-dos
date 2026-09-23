@@ -26,6 +26,22 @@
 # for DOS extenders and XMS.
 #memsize=16
 
+[sound]
+# The Sound Blaster: sb16 (the default), sbpro2, sb2, or none. Programs
+# learn its settings from the BLASTER environment variable, which follows
+# these.
+#sbtype=sb16
+# Base port (hex), IRQ, 8-bit DMA channel, and the SB16's 16-bit channel.
+#sbbase=220
+#irq=7
+#dma=1
+#hdma=5
+# FM synthesizer: opl3 (as on an SB Pro 2 or SB16) or opl2 (AdLib, SB 2.0).
+#opl=opl3
+# A General MIDI SoundFont (.sf2) for music sent to the MPU-401 at 330h.
+# Without one, the MPU-401 is there but plays nothing.
+#soundfont=~/soundfonts/GeneralUser.sf2
+
 [drives]
 # Mount host directories as DOS drives A: to Y:
 #   <letter> = <host path> [floppy|hdd|cdrom] [-label NAME] [-ro]
