@@ -122,3 +122,31 @@ fn free_owned_by_releases_chain_blocks() {
     let owned_by_5678 = chain.iter().filter(|(_, m)| m.owner == 0x5678).count();
     assert_eq!(owned_by_5678, 1);
 }
+
+#[test]
+fn allocation_strategies_pick_first_best_or_last_block() {
+    use rust_dos::mcb::Fit;
+    let mut bus = fresh_bus();
+    mcb::init_empty(&mut bus);
+    // Free holes of 0x80 and 0x20 paragraphs, then the rest of memory.
+    let a = mcb::alloc(&mut bus, 0x1234, 0x80).unwrap();
+    let _b = mcb::alloc(&mut bus, 0x1234, 0x10).unwrap();
+    let c = mcb::alloc(&mut bus, 0x1234, 0x20).unwrap();
+    let _d = mcb::alloc(&mut bus, 0x1234, 0x10).unwrap();
+    mcb::free(&mut bus, a).unwrap();
+    mcb::free(&mut bus, c).unwrap();
+
+    assert_eq!(mcb::alloc_fit(&mut bus, 0x1234, 0x10, Fit::Best).unwrap(), c);
+    assert_eq!(mcb::alloc_fit(&mut bus, 0x1234, 0x10, Fit::First).unwrap(), a);
+
+    // A last fit comes from the top of conventional memory.
+    let top = mcb::alloc_fit(&mut bus, 0x1234, 0x21D, Fit::Last).unwrap();
+    assert_eq!(top + 0x21D, END_OF_CONVENTIONAL);
+    let chain = walk(&bus);
+    let (last_seg, last) = chain[chain.len() - 1];
+    assert_eq!((last_seg + 1, last.signature, last.owner), (top, MCB_Z, 0x1234));
+    let (_, below) = chain[chain.len() - 2];
+    assert!(below.is_free());
+    assert_eq!(Fit::from_strategy(2), Fit::Last);
+    assert_eq!(Fit::from_strategy(0x80), Fit::First);
+}

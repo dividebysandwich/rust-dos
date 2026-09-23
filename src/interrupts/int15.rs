@@ -55,10 +55,19 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
         0x86 => {
-            // Wait (Microseconds)
+            // Wait CX:DX microseconds of emulated time, with interrupts
+            // enabled, as the BIOS does.
             let micros = ((cpu.cx() as u64) << 16) | (cpu.dx() as u64);
-            std::thread::sleep(std::time::Duration::from_micros(micros));
-            cpu.set_cpu_flag(CpuFlags::CF, false);
+            let now = cpu.bus.clock.now_ticks();
+            let until = *cpu.bios_wait_until.get_or_insert(now + micros * crate::timer::PIT_HZ / 1_000_000);
+            if now >= until {
+                cpu.bios_wait_until = None;
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else {
+                cpu.hle_wait();
+                let clock = &mut cpu.bus.clock;
+                clock.deadline = clock.deadline.min(clock.icount_at(until));
+            }
         }
         0xC0 => {
             // Get System Configuration

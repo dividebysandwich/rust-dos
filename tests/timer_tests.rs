@@ -376,3 +376,28 @@ fn sound_blaster_irq_stays_raised_until_the_driver_acks_it() {
     assert_eq!(bus.pic_pending_irq(), None);
     assert_eq!(bus.pic.master.isr, 0);
 }
+
+#[test]
+fn bios_wait_passes_emulated_time_with_interrupts_enabled() {
+    use rust_dos::cpu::CpuFlags;
+    use rust_dos::exec::{self, NoHook};
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    // MOV AH,86h; XOR CX,CX; MOV DX,20000 (20 ms); INT 15h; HLT
+    cpu.bus.load_bytes(0x20000, &[0xB4, 0x86, 0x31, 0xC9, 0xBA, 0x20, 0x4E, 0xCD, 0x15, 0xF4]);
+    cpu.set_cs(0x2000);
+    cpu.set_ip(0);
+    cpu.set_ss(0x3000);
+    cpu.set_sp(0x0100);
+    cpu.set_cpu_flag(CpuFlags::IF, true);
+    let start = cpu.bus.clock.now_micros();
+    while cpu.ip() != 0x0A {
+        let end = cpu.bus.clock.icount + 1000;
+        cpu.bus.start_batch(end);
+        exec::run_batch(&mut cpu, &mut NoHook, false);
+        assert!(cpu.bus.clock.now_micros() - start < 100_000, "the wait ends");
+    }
+    let waited = cpu.bus.clock.now_micros() - start;
+    assert!((20_000..25_000).contains(&waited), "waited {} us", waited);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+}

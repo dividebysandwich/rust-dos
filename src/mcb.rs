@@ -231,13 +231,40 @@ pub fn init_for_program(bus: &mut Bus, program_start_seg: u16, program_paras: u1
     );
 }
 
-/// AH=48h: allocate `paras` paragraphs to `owner_psp`.
+/// How AH=48h picks among the free blocks that are large enough (AH=58h).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fit {
+    /// The lowest one.
+    First,
+    /// The smallest one.
+    Best,
+    /// The highest one, allocating from its top end.
+    Last,
+}
+
+impl Fit {
+    /// The fit of an AH=58h strategy code (its low bits; the UMB bits
+    /// don't matter without upper memory).
+    pub fn from_strategy(strategy: u16) -> Fit {
+        match strategy & 0x3F {
+            0 => Fit::First,
+            1 => Fit::Best,
+            _ => Fit::Last,
+        }
+    }
+}
+
+/// AH=48h: allocate `paras` paragraphs to `owner_psp`, first fit.
 ///
 /// On success returns the first usable paragraph (one past the new MCB).
 /// On failure returns the size of the largest free block (for BX), which is
 /// what the BIOS returns when the caller asks for too much.
 pub fn alloc(bus: &mut Bus, owner_psp: u16, paras: u16) -> Result<u16, u16> {
-    // First-fit. Simple and matches real MS-DOS default strategy.
+    alloc_fit(bus, owner_psp, paras, Fit::First)
+}
+
+/// AH=48h with the allocation strategy `fit`.
+pub fn alloc_fit(bus: &mut Bus, owner_psp: u16, paras: u16, fit: Fit) -> Result<u16, u16> {
     let chain = walk(bus);
 
     let max_free = chain
@@ -251,53 +278,36 @@ pub fn alloc(bus: &mut Bus, owner_psp: u16, paras: u16) -> Result<u16, u16> {
         return Err(max_free);
     }
 
-    for (seg, m) in &chain {
-        if !m.is_free() || m.size < paras {
-            continue;
-        }
+    let mut fitting = chain.iter().filter(|(_, m)| m.is_free() && m.size >= paras);
+    let chosen = match fit {
+        Fit::First => fitting.next(),
+        Fit::Best => fitting.min_by_key(|(_, m)| m.size),
+        Fit::Last => fitting.last(),
+    };
+    let Some(&(seg, m)) = chosen else {
+        return Err(max_free);
+    };
 
-        if m.size == paras {
-            // Exact fit — flip ownership.
-            write_mcb(
-                bus,
-                *seg,
-                &Mcb {
-                    signature: m.signature,
-                    owner: owner_psp,
-                    size: paras,
-                },
-            );
-            return Ok(seg + 1);
-        }
-
-        // Split: shrink this block to `paras` and emit a new free block after
-        // it that takes the remainder (minus 1 paragraph for its own header).
-        let split_seg = seg + 1 + paras;
-        let was_last = m.is_last();
-        let remaining = m.size - paras - 1;
-
-        write_mcb(
-            bus,
-            *seg,
-            &Mcb {
-                signature: MCB_M,
-                owner: owner_psp,
-                size: paras,
-            },
-        );
-        write_mcb(
-            bus,
-            split_seg,
-            &Mcb {
-                signature: if was_last { MCB_Z } else { MCB_M },
-                owner: FREE_OWNER,
-                size: remaining,
-            },
-        );
+    if m.size == paras {
+        // Exact fit — flip ownership.
+        write_mcb(bus, seg, &Mcb { signature: m.signature, owner: owner_psp, size: paras });
         return Ok(seg + 1);
     }
 
-    Err(max_free)
+    // Split, leaving the remainder (minus 1 paragraph for the second
+    // header) free: after the new block, or before it for a last fit.
+    let remaining = m.size - paras - 1;
+    let last_signature = if m.is_last() { MCB_Z } else { MCB_M };
+    if fit == Fit::Last {
+        let block = seg + 1 + remaining;
+        write_mcb(bus, seg, &Mcb { signature: MCB_M, owner: FREE_OWNER, size: remaining });
+        write_mcb(bus, block, &Mcb { signature: last_signature, owner: owner_psp, size: paras });
+        Ok(block + 1)
+    } else {
+        write_mcb(bus, seg, &Mcb { signature: MCB_M, owner: owner_psp, size: paras });
+        write_mcb(bus, seg + 1 + paras, &Mcb { signature: last_signature, owner: FREE_OWNER, size: remaining });
+        Ok(seg + 1)
+    }
 }
 
 /// AH=49h: free the block that starts at `block_seg` (its MCB is at `block_seg - 1`).

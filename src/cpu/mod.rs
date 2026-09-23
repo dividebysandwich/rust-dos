@@ -173,6 +173,10 @@ pub struct Cpu {
     /// Scan code of an extended key whose 00h the console functions of
     /// INT 21h have returned, for the next read.
     pub con_pending_scan: Option<u8>,
+    /// Memory allocation strategy (INT 21h AH=58h).
+    pub alloc_strategy: u16,
+    /// End of an INT 15h AH=86h wait in progress, in PIT ticks.
+    pub bios_wait_until: Option<u64>,
 
     // FPU State
     pub fpu_stack: [F80; 8],
@@ -290,6 +294,8 @@ impl Cpu {
             last_child_exit: 0,
             last_dos_error: 0,
             con_pending_scan: None,
+            alloc_strategy: 0,
+            bios_wait_until: None,
             process_stack: Vec::new(),
             irq_shadow: false,
             // 64K direct-mapped slots (~3.5 MB): comfortably large for any
@@ -642,6 +648,9 @@ impl Cpu {
 
         // Re-install the HLE Interrupt Vectors
         self.install_bios_traps();
+        self.alloc_strategy = 0;
+        self.con_pending_scan = None;
+        self.bios_wait_until = None;
 
         // Reset text-mode BDA fields so state from a previous program (e.g.
         // Norton Commander's 80x50 configuration) doesn't leak into the shell

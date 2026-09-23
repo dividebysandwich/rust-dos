@@ -1430,7 +1430,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // confused with free blocks.
                 0x0008
             };
-            match crate::mcb::alloc(&mut cpu.bus, owner, requested) {
+            let fit = crate::mcb::Fit::from_strategy(cpu.alloc_strategy);
+            match crate::mcb::alloc_fit(&mut cpu.bus, owner, requested, fit) {
                 Ok(segment) => {
                     cpu.set_ax(segment);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1823,9 +1824,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 58h: Memory allocation strategy and UMB link state. There
         // are no UMBs; strategy is first fit.
+        // AH = 58h: Get (AL=00h) or set (AL=01h, BX) the memory allocation
+        // strategy, and the UMB link state (AL=02h/03h), which stays off.
         0x58 => {
             match cpu.get_al() {
-                0x00 | 0x02 => cpu.set_ax(0),
+                0x00 => cpu.set_ax(cpu.alloc_strategy),
+                0x01 => cpu.alloc_strategy = cpu.bx(),
+                0x02 => cpu.set_ax(0),
                 _ => {}
             }
             cpu.set_cpu_flag(CpuFlags::CF, false);
