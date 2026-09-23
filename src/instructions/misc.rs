@@ -23,22 +23,24 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // IRET: Interrupt Return
         // Pops IP, CS, and Flags from the stack.
         Mnemonic::Iret => {
-            let caller_cs = cpu.cs;
-            let caller_ip = cpu.ip.wrapping_sub(instr.len() as u16);
-            cpu.ip = cpu.pop();
-            cpu.cs = cpu.pop();
+            let caller_cs = cpu.cs();
+            let caller_ip = cpu.ip().wrapping_sub(instr.len() as u16);
+            let ip = cpu.pop();
+            cpu.set_ip(ip);
+            let cs = cpu.pop();
+            cpu.set_cs(cs);
             let flags = cpu.pop();
 
             // Restore flags (preserving reserved bits 1, 3, 5, 15)
             // 8086 Reserved: 1111_0000_0000_0010 (0xF002) are usually stuck/reserved
             // Simple mask: Preserve current reserved bits, write writable ones.
             // For simplicity in emulator: Write all, force bit 1 always ON.
-            cpu.set_cpu_flags(CpuFlags::from_bits_truncate(flags));
+            cpu.set_cpu_flags(CpuFlags::from_bits_truncate(flags as u32));
 
-            if cpu.cs == 0 && cpu.ip < 0x100 {
+            if cpu.cs() == 0 && cpu.ip() < 0x100 {
                 cpu.bus.log_string(&format!(
                     "[IRET-BAD] from {:04X}:{:04X} -> {:04X}:{:04X} flags={:04X} SS:SP={:04X}:{:04X}",
-                    caller_cs, caller_ip, cpu.cs, cpu.ip, flags, cpu.ss, cpu.sp
+                    caller_cs, caller_ip, cpu.cs(), cpu.ip(), flags, cpu.ss(), cpu.sp()
                 ));
             }
         }
@@ -54,8 +56,9 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // 1. MOV SP, BP (Release stack frame)
         // 2. POP BP     (Restore caller's base pointer)
         Mnemonic::Leave => {
-            cpu.sp = cpu.bp;
-            cpu.bp = cpu.pop();
+            cpu.set_sp(cpu.bp());
+            let bp = cpu.pop();
+            cpu.set_bp(bp);
         }
 
         // ENTER: High Level Procedure Entry
@@ -68,27 +71,27 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
 
             // Explicitly read the level byte from memory to avoid decoding ambiguity.
             // ENTER is 4 bytes: [Opcode, SizeLO, SizeHI, Level]
-            // cpu.ip points to the NEXT instruction, so back up 1 byte to find Level.
+            // cpu.ip() points to the NEXT instruction, so back up 1 byte to find Level.
             // (Instruction is 4 bytes long. Level is at offset 3)
-            let level_addr = (cpu.cs as u32 * 16 + cpu.ip as u32).wrapping_sub(1);
+            let level_addr = (cpu.cs() as u32 * 16 + cpu.ip() as u32).wrapping_sub(1);
             let level = cpu.bus.read_8(level_addr as usize) & 0x1F;
 
             // Push Caller's BP
-            cpu.push(cpu.bp);
+            cpu.push(cpu.bp());
     
             // Capture Frame Pointer (Current SP)
-            let frame_ptr = cpu.sp;
+            let frame_ptr = cpu.sp();
 
             // If Nested, copy pointers from previous frame
             if level > 0 {
                 // We walk down the previous frame's display array
                 // Loop runs level-1 times
-                let mut temp_bp = cpu.bp; 
+                let mut temp_bp = cpu.bp(); 
         
                 for _ in 1..level {
                     temp_bp = temp_bp.wrapping_sub(2);
                     // Read 16-bit pointer from Stack Segment
-                    let addr = cpu.get_physical_addr(cpu.ss, temp_bp);
+                    let addr = cpu.get_physical_addr(cpu.ss(), temp_bp);
                     let ptr_val = cpu.bus.read_16(addr);
                     cpu.push(ptr_val);
                 }
@@ -98,10 +101,10 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
             }
 
             // Set BP to the new Frame Pointer
-            cpu.bp = frame_ptr;
+            cpu.set_bp(frame_ptr);
 
             // Allocate Local Variables space
-            cpu.sp = cpu.sp.wrapping_sub(size);
+            cpu.set_sp(cpu.sp().wrapping_sub(size));
         }
 
         Mnemonic::Stc => cpu.set_cpu_flag(CpuFlags::CF, true),

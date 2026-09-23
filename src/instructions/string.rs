@@ -11,12 +11,12 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         return;
     }
 
-    while cpu.cx != 0 {
+    while cpu.cx() != 0 {
         // Execute the instruction (Updates DI/SI and Flags)
         execute_once(cpu, instr);
 
         // Decrement CX
-        cpu.cx = cpu.cx.wrapping_sub(1);
+        cpu.set_cx(cpu.cx().wrapping_sub(1));
 
         // Check termination based on Flags (ZF)
         let zf = cpu.get_cpu_flag(CpuFlags::ZF);
@@ -63,11 +63,11 @@ fn execute_once(cpu: &mut Cpu, instr: &Instruction) {
 
 fn get_string_src_segment(instr: &Instruction, cpu: &Cpu) -> u16 {
     match instr.segment_prefix() {
-        Register::CS => cpu.cs,
-        Register::ES => cpu.es,
-        Register::SS => cpu.ss,
-        Register::DS => cpu.ds,
-        _ => cpu.ds,
+        Register::CS => cpu.cs(),
+        Register::ES => cpu.es(),
+        Register::SS => cpu.ss(),
+        Register::DS => cpu.ds(),
+        _ => cpu.ds(),
     }
 }
 
@@ -79,17 +79,17 @@ fn update_indices(cpu: &mut Cpu, size: u16, update_si: bool, update_di: bool) {
     };
 
     if update_si {
-        cpu.si = cpu.si.wrapping_add(delta);
+        cpu.set_si(cpu.si().wrapping_add(delta));
     }
     if update_di {
-        cpu.di = cpu.di.wrapping_add(delta);
+        cpu.set_di(cpu.di().wrapping_add(delta));
     }
 }
 
 fn movs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
     let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
-    let dst_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
+    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
 
     if size == 1 {
         let val = cpu.bus.read_8(src_addr);
@@ -103,12 +103,12 @@ fn movs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
 }
 
 fn stos(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
-    let dst_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
 
     if size == 1 {
         cpu.bus.write_8(dst_addr, cpu.get_al());
     } else {
-        cpu.bus.write_16(dst_addr, cpu.ax);
+        cpu.bus.write_16(dst_addr, cpu.ax());
     }
 
     update_indices(cpu, size, false, true);
@@ -116,14 +116,14 @@ fn stos(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
 
 fn lods(cpu: &mut Cpu, instr: &Instruction, size: u16) {
     let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
+    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
 
     if size == 1 {
         let val = cpu.bus.read_8(src_addr);
         cpu.set_reg8(Register::AL, val);
     } else {
         let val = cpu.bus.read_16(src_addr);
-        cpu.ax = val;
+        cpu.set_ax(val);
     }
 
     update_indices(cpu, size, true, false);
@@ -131,8 +131,8 @@ fn lods(cpu: &mut Cpu, instr: &Instruction, size: u16) {
 
 fn cmps(cpu: &mut Cpu, instr: &Instruction, size: u16) {
     let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
-    let dst_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
+    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
 
     if size == 1 {
         let a = cpu.bus.read_8(src_addr);
@@ -148,14 +148,14 @@ fn cmps(cpu: &mut Cpu, instr: &Instruction, size: u16) {
 }
 
 fn scas(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
-    let dst_addr = cpu.get_physical_addr(cpu.es, cpu.di);
+    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
 
     if size == 1 {
         let acc = cpu.get_al();
         let mem = cpu.bus.read_8(dst_addr);
         cpu.alu_sub_8(acc, mem);
     } else {
-        let acc = cpu.ax;
+        let acc = cpu.ax();
         let mem = cpu.bus.read_16(dst_addr);
         cpu.alu_sub_16(acc, mem);
     }
@@ -165,8 +165,8 @@ fn scas(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
 
 fn outs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
     let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si);
-    let port = cpu.dx;
+    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
+    let port = cpu.dx();
 
     if size == 1 {
         let val = cpu.bus.read_8(src_addr);
@@ -182,8 +182,8 @@ fn outs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
 }
 
 fn ins(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
-    let dst_addr = cpu.get_physical_addr(cpu.es, cpu.di);
-    let port = cpu.dx;
+    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
+    let port = cpu.dx();
 
     if size == 1 {
         let val = cpu.bus.io_read(port);

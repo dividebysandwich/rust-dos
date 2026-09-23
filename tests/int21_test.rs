@@ -14,10 +14,10 @@ fn test_int21_ah29_parse_filename() {
     let mut cpu = Cpu::new(root_path.clone());
 
     // Setup input string at DS:SI (0x2000:0000)
-    cpu.ds = 0x2000;
+    cpu.set_ds(0x2000);
     cpu.set_reg16(Register::SI, 0x0000);
     let input_str = "TEST.TXT "; // Space terminated
-    let mut phys_si = cpu.get_physical_addr(cpu.ds, 0x0000);
+    let mut phys_si = cpu.get_physical_addr(cpu.ds(), 0x0000);
     for b in input_str.bytes() {
         cpu.bus.write_8(phys_si, b);
         phys_si += 1;
@@ -25,7 +25,7 @@ fn test_int21_ah29_parse_filename() {
     cpu.bus.write_8(phys_si, 0x00); // Null term just in case
 
     // Setup Output FCB at ES:DI (0x3000:0000)
-    cpu.es = 0x3000;
+    cpu.set_es(0x3000);
     cpu.set_reg16(Register::DI, 0x0000);
 
     // Call INT 21, AH=29
@@ -37,7 +37,7 @@ fn test_int21_ah29_parse_filename() {
     rust_dos::interrupts::int21::handle(&mut cpu);
 
     // Verify Output
-    let phys_di = cpu.get_physical_addr(cpu.es, 0x0000);
+    let phys_di = cpu.get_physical_addr(cpu.es(), 0x0000);
 
     // Byte 0: Drive (0=Default)
     assert_eq!(cpu.bus.read_8(phys_di), 0x00, "Drive should be 0");
@@ -93,10 +93,10 @@ fn test_int21_ah4b_exec() {
     fs::write(&com_path, vec![0x90, 0xCD, 0x20]).unwrap(); // NOP, INT 20
 
     // Setup Filename at DS:DX
-    cpu.ds = 0x2000;
-    cpu.dx = 0x0000;
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0x0000);
     let filename = "RUNME.COM";
-    let mut phys_dx = cpu.get_physical_addr(cpu.ds, cpu.dx);
+    let mut phys_dx = cpu.get_physical_addr(cpu.ds(), cpu.dx());
     for b in filename.bytes() {
         cpu.bus.write_8(phys_dx, b);
         phys_dx += 1;
@@ -105,9 +105,9 @@ fn test_int21_ah4b_exec() {
 
     // Setup Parameter Block at ES:BX
     // We strictly need this to exist, even if null.
-    cpu.es = 0x3000;
-    cpu.bx = 0x0000;
-    let param_phys = cpu.get_physical_addr(cpu.es, cpu.bx);
+    cpu.set_es(0x3000);
+    cpu.set_bx(0x0000);
+    let param_phys = cpu.get_physical_addr(cpu.es(), cpu.bx());
 
     // Set Command Line Pointer (Offset 2, Seg 4) to 0x4000:0000
     cpu.bus.write_16(param_phys + 2, 0x0000); // Offset
@@ -141,9 +141,9 @@ fn test_int21_ah4b_exec() {
     // Verify CS:IP reset (COM file). The exact segment is whatever the MCB
     // allocator handed out for the child; just confirm the offset and that
     // DS/CS agree (the PSP lives at CS:0000 for a COM file).
-    assert_eq!(cpu.ip, 0x100);
-    let psp_seg = cpu.ds;
-    assert_eq!(psp_seg, cpu.cs, "DS should equal CS for a COM child");
+    assert_eq!(cpu.ip(), 0x100);
+    let psp_seg = cpu.ds();
+    assert_eq!(psp_seg, cpu.cs(), "DS should equal CS for a COM child");
     assert!(psp_seg >= 0x1000, "PSP segment should be in conventional memory");
 
     let psp_phys = cpu.get_physical_addr(psp_seg, 0x80);
@@ -181,10 +181,10 @@ fn test_int21_ah4b_exec_with_env() {
     fs::write(&com_path, vec![0x90, 0xCD, 0x20]).unwrap();
 
     // Setup Filename
-    cpu.ds = 0x2000;
-    cpu.dx = 0x0000;
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0x0000);
     let filename = "ENVtest.COM";
-    let mut phys_dx = cpu.get_physical_addr(cpu.ds, cpu.dx);
+    let mut phys_dx = cpu.get_physical_addr(cpu.ds(), cpu.dx());
     for b in filename.bytes() {
         cpu.bus.write_8(phys_dx, b);
         phys_dx += 1;
@@ -201,9 +201,9 @@ fn test_int21_ah4b_exec_with_env() {
     }
 
     // Setup Parameter Block at ES:BX
-    cpu.es = 0x3000;
-    cpu.bx = 0x0000;
-    let param_phys = cpu.get_physical_addr(cpu.es, cpu.bx);
+    cpu.set_es(0x3000);
+    cpu.set_bx(0x0000);
+    let param_phys = cpu.get_physical_addr(cpu.es(), cpu.bx());
 
     // Offset 0: Env Seg
     cpu.bus.write_16(param_phys, env_src_seg);
@@ -233,7 +233,7 @@ fn test_int21_ah4b_exec_with_env() {
     }
 
     // Verify PSP -> Env Pointer
-    let psp_phys = cpu.get_physical_addr(cpu.ds, 0x2C); // DS is new PSP
+    let psp_phys = cpu.get_physical_addr(cpu.ds(), 0x2C); // DS is new PSP
     assert_eq!(cpu.bus.read_16(psp_phys), new_env_seg);
 
     fs::remove_dir_all(&root_path).unwrap();
@@ -268,10 +268,10 @@ fn test_int21_ah4b_exec_inheritance() {
     }
 
     // Setup Filename
-    cpu.ds = 0x2000;
-    cpu.dx = 0x0000;
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0x0000);
     let filename = "INHERIT.COM";
-    let mut phys_dx = cpu.get_physical_addr(cpu.ds, cpu.dx);
+    let mut phys_dx = cpu.get_physical_addr(cpu.ds(), cpu.dx());
     for b in filename.bytes() {
         cpu.bus.write_8(phys_dx, b);
         phys_dx += 1;
@@ -279,9 +279,9 @@ fn test_int21_ah4b_exec_inheritance() {
     cpu.bus.write_8(phys_dx, 0);
 
     // Setup Parameter Block at ES:BX
-    cpu.es = 0x3000;
-    cpu.bx = 0x0000;
-    let param_phys = cpu.get_physical_addr(cpu.es, cpu.bx);
+    cpu.set_es(0x3000);
+    cpu.set_bx(0x0000);
+    let param_phys = cpu.get_physical_addr(cpu.es(), cpu.bx());
 
     // Offset 0: Env Seg = 0 (INHERIT)
     cpu.bus.write_16(param_phys, 0x0000);
@@ -311,7 +311,7 @@ fn test_int21_ah4b_exec_inheritance() {
     }
 
     // Verify PSP -> Env Pointer
-    let psp_phys = cpu.get_physical_addr(cpu.ds, 0x2C); // DS is new PSP
+    let psp_phys = cpu.get_physical_addr(cpu.ds(), 0x2C); // DS is new PSP
     assert_eq!(cpu.bus.read_16(psp_phys), new_env_seg);
 
     fs::remove_dir_all(&root_path).unwrap();

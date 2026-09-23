@@ -117,7 +117,7 @@ pub fn handle_command_bop(cpu: &mut Cpu) {
     cpu.bus.keyboard_buffer.clear();
 
     // Read Command from DS:DX (set by the shell code)
-    let phys_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+    let phys_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
     let raw_cmd = read_asciiz_string(&cpu.bus, phys_addr);
 
     // Clean String

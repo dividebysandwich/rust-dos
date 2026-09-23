@@ -13,7 +13,7 @@ pub fn handle(cpu: &mut Cpu) {
                 // Key found: Return in AX
                 cpu.bus
                     .log_string(&format!("[BIOS] INT 16h Read Key: {:04X}", key_code));
-                cpu.ax = key_code;
+                cpu.set_ax(key_code);
             } else {
                 // Buffer empty: BLOCK.
                 // Since we are in an HLE Trap, the specific 'INT 16h' caller address
@@ -22,8 +22,8 @@ pub fn handle(cpu: &mut Cpu) {
                 // Stack Layout: [IP, CS, Flags] (Top down)
                 // We need to modify the IP at [SS:SP].
 
-                let sp = cpu.sp;
-                let ss = cpu.ss;
+                let sp = cpu.sp();
+                let ss = cpu.ss();
                 let stack_addr = cpu.get_physical_addr(ss, sp);
 
                 // Read the return IP from the stack
@@ -46,7 +46,7 @@ pub fn handle(cpu: &mut Cpu) {
         0x01 | 0x11 => {
             if let Some(&key_code) = cpu.bus.keyboard_buffer.front() {
                 cpu.set_cpu_flag(CpuFlags::ZF, false); // Key available
-                cpu.ax = key_code; // Preview key (do not remove)
+                cpu.set_ax(key_code); // Preview key (do not remove)
             } else {
                 cpu.set_cpu_flag(CpuFlags::ZF, true); // No key
             }
@@ -71,7 +71,7 @@ pub fn handle(cpu: &mut Cpu) {
         // CX = Key (CH=Scan, CL=Ascii)
         // Returns AL=0 (Success), AL=1 (Buffer Full)
         0x05 => {
-            let key = cpu.cx;
+            let key = cpu.cx();
             // Cap buffer at 16 keys to emulate BIOS buffer size limit
             if cpu.bus.keyboard_buffer.len() < 16 {
                 cpu.bus.keyboard_buffer.push_back(key);

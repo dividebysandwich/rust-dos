@@ -35,18 +35,18 @@ pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
     if (new_cs == 0 && new_ip < 0x100) || new_cs == 0xFFFF {
         cpu.bus.log_string(&format!(
             "[CPU] Suspicious INT {:02X} vector at IVT[{:02X}]={:04X}:{:04X} from CS:IP={:04X}:{:04X}",
-            vector, vector, new_cs, new_ip, cpu.cs, cpu.ip
+            vector, vector, new_cs, new_ip, cpu.cs(), cpu.ip()
         ));
     }
 
     // Push State (Simulate Hardware)
-    cpu.push(cpu.get_cpu_flags().bits());
-    cpu.push(cpu.cs);
-    cpu.push(cpu.ip);
+    cpu.push(cpu.flags16());
+    cpu.push(cpu.cs());
+    cpu.push(cpu.ip());
 
     // Jump
-    cpu.cs = new_cs;
-    cpu.ip = new_ip;
+    cpu.set_cs(new_cs);
+    cpu.set_ip(new_ip);
 
     // Disable Interrupts
     cpu.set_cpu_flag(CpuFlags::IF, false);
@@ -62,9 +62,12 @@ pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
     let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
     let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
 
-    cpu.ip = cpu.pop();
-    cpu.cs = cpu.pop();
-    let flags = CpuFlags::from_bits_truncate(cpu.pop());
+    let ip = cpu.pop();
+
+    cpu.set_ip(ip);
+    let cs = cpu.pop();
+    cpu.set_cs(cs);
+    let flags = CpuFlags::from_bits_truncate(cpu.pop() as u32);
     cpu.set_cpu_flags(flags);
 
     if !(0x08..=0x0F).contains(&vector) {

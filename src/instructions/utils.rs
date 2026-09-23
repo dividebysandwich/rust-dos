@@ -8,19 +8,19 @@ pub fn is_8bit_reg(reg: Register) -> bool {
 // Helper: Determine which segment register to use
 fn get_segment(cpu: &Cpu, instr: &Instruction) -> u16 {
     match instr.segment_prefix() {
-        Register::ES => cpu.es,
-        Register::CS => cpu.cs,
-        Register::SS => cpu.ss,
-        Register::DS => cpu.ds,
+        Register::ES => cpu.es(),
+        Register::CS => cpu.cs(),
+        Register::SS => cpu.ss(),
+        Register::DS => cpu.ds(),
         Register::FS => 0,
         Register::GS => 0,
         _ => {
             // Default rules: BP/SP use SS, others use DS
             let base = instr.memory_base();
             if base == Register::BP || base == Register::SP || base == Register::EBP || base == Register::ESP {
-                cpu.ss
+                cpu.ss()
             } else {
-                cpu.ds
+                cpu.ds()
             }
         }
     }

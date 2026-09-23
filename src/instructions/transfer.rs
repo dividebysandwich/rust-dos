@@ -184,7 +184,7 @@ fn push(cpu: &mut Cpu, instr: &Instruction) {
         _ => {
             cpu.bus.log_string(&format!(
                 "[PUSH] unhandled op kind {:?} at {:04X}:{:04X}",
-                instr.op0_kind(), cpu.cs, cpu.ip.wrapping_sub(instr.len() as u16)
+                instr.op0_kind(), cpu.cs(), cpu.ip().wrapping_sub(instr.len() as u16)
             ));
             0
         }
@@ -224,22 +224,22 @@ fn popa(cpu: &mut Cpu) {
     let cx = cpu.pop();
     let ax = cpu.pop();
 
-    cpu.di = di;
-    cpu.si = si;
+    cpu.set_di(di);
+    cpu.set_si(si);
     cpu.set_reg16(Register::BP, bp);
     cpu.set_reg16(Register::BX, bx);
-    cpu.dx = dx;
-    cpu.cx = cx;
-    cpu.ax = ax;
+    cpu.set_dx(dx);
+    cpu.set_cx(cx);
+    cpu.set_ax(ax);
 }
 
 fn pushf(cpu: &mut Cpu) {
-    cpu.push(cpu.get_cpu_flags().bits());
+    cpu.push(cpu.flags16());
 }
 
 fn popf(cpu: &mut Cpu) {
     let val = cpu.pop();
-    cpu.set_cpu_flags(CpuFlags::from_bits_truncate(val));
+    cpu.set_cpu_flags(CpuFlags::from_bits_truncate(val as u32));
 }
 
 fn lea(cpu: &mut Cpu, instr: &Instruction) {
@@ -254,7 +254,7 @@ fn lds(cpu: &mut Cpu, instr: &Instruction) {
     let offset = cpu.bus.read_16(addr);
     let segment = cpu.bus.read_16(addr + 2);
     cpu.set_reg16(reg, offset);
-    cpu.ds = segment;
+    cpu.set_ds(segment);
 }
 
 fn les(cpu: &mut Cpu, instr: &Instruction) {
@@ -263,12 +263,12 @@ fn les(cpu: &mut Cpu, instr: &Instruction) {
     let offset = cpu.bus.read_16(addr);
     let segment = cpu.bus.read_16(addr + 2);
     cpu.set_reg16(reg, offset);
-    cpu.es = segment;
+    cpu.set_es(segment);
 }
 
 fn port_in(cpu: &mut Cpu, instr: &Instruction) {
     let port = if instr.op1_kind() == OpKind::Register {
-        cpu.dx
+        cpu.dx()
     } else {
         instr.immediate8() as u16
     };
@@ -285,7 +285,7 @@ fn port_in(cpu: &mut Cpu, instr: &Instruction) {
 
 fn port_out(cpu: &mut Cpu, instr: &Instruction) {
     let port = if instr.op0_kind() == OpKind::Register {
-        cpu.dx
+        cpu.dx()
     } else {
         instr.immediate8() as u16
     };
@@ -304,13 +304,13 @@ fn port_out(cpu: &mut Cpu, instr: &Instruction) {
 
 fn cbw(cpu: &mut Cpu) {
     let al = cpu.get_al() as i8;
-    cpu.ax = al as i16 as u16;
+    cpu.set_ax(al as i16 as u16);
 }
 
 fn cwd(cpu: &mut Cpu) {
     // CWD (8086): AX -> DX:AX
-    let ax = cpu.ax as i16;
-    cpu.dx = if ax < 0 { 0xFFFF } else { 0x0000 };
+    let ax = cpu.ax() as i16;
+    cpu.set_dx(if ax < 0 { 0xFFFF } else { 0x0000 });
 }
 
 fn xlatb(cpu: &mut Cpu, instr: &Instruction) {
@@ -322,7 +322,7 @@ fn xlatb(cpu: &mut Cpu, instr: &Instruction) {
     let segment = if instr.segment_prefix() != Register::None {
         cpu.get_reg16(instr.segment_prefix())
     } else {
-        cpu.ds 
+        cpu.ds() 
     };
 
     // Calculate Offset: BX + AL (Zero Extended)

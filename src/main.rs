@@ -326,11 +326,11 @@ fn main() -> Result<(), String> {
                     let handler_cs = cpu.bus.read_16(ivt + 2);
                     if handler_cs != 0 || handler_ip != 0 {
                         cpu.bus.pic_acknowledge(line);
-                        cpu.push(cpu.get_cpu_flags().bits());
-                        cpu.push(cpu.cs);
-                        cpu.push(cpu.ip);
-                        cpu.cs = handler_cs;
-                        cpu.ip = handler_ip;
+                        cpu.push(cpu.flags16());
+                        cpu.push(cpu.cs());
+                        cpu.push(cpu.ip());
+                        cpu.set_cs(handler_cs);
+                        cpu.set_ip(handler_ip);
                         cpu.set_cpu_flag(CpuFlags::IF, false);
                         cpu.set_cpu_flag(CpuFlags::TF, false);
                     } else {
@@ -354,7 +354,7 @@ fn main() -> Result<(), String> {
             // typed command. We echo the line at a synthesized prompt so the
             // user sees what's running, MS-DOS style. A leading '@' suppresses
             // the echo.
-            if cpu.cs == 0
+            if cpu.cs() == 0
                 && cpu.pending_command.is_none()
                 && !cpu.batch_queue.is_empty()
                 && cpu.process_stack.is_empty()
@@ -438,7 +438,7 @@ fn main() -> Result<(), String> {
 
             // Handle "IP = 0" as an explicit exit (Standard COM behavior)
             // If the program jumps to the start of the segment, it wants to exit.
-            if cpu.ip == 0x0000 && cpu.cs == cpu.transient_segment() {
+            if cpu.ip() == 0x0000 && cpu.cs() == cpu.transient_segment() {
                 cpu.bus
                     .log_string("[DOS] Program jumped to offset 0000h. Exiting to Shell.");
                 // Flush log on exit so we don't lose tail data
@@ -457,29 +457,29 @@ fn main() -> Result<(), String> {
             // Current instruction. Direct indexing into ram — no VGA range
             // check needed for code fetch, code segments are always below
             // 0xA0000 in our loaded programs.
-            let phys_ip = cpu.get_physical_addr(cpu.cs, cpu.ip);
+            let phys_ip = cpu.get_physical_addr(cpu.cs(), cpu.ip());
 
             // Tripwire: arriving in the IVT / BIOS data area with an
             // application context (DS not 0, not the shell at CS=0) almost
             // always means a corrupted FAR pointer landed us here.
-            if cpu.cs == 0 && cpu.ip < 0x100 && cpu.ds != 0 && cpu.ds != cpu.transient_segment() {
+            if cpu.cs() == 0 && cpu.ip() < 0x100 && cpu.ds() != 0 && cpu.ds() != cpu.transient_segment() {
                 cpu.bus.log_string(&format!(
                     "[TRIPWIRE] Entered IVT region CS:IP={:04X}:{:04X} DS={:04X} ES={:04X} SS:SP={:04X}:{:04X} AX={:04X} BX={:04X} CX={:04X} DX={:04X}",
-                    cpu.cs, cpu.ip, cpu.ds, cpu.es, cpu.ss, cpu.sp, cpu.ax, cpu.bx, cpu.cx, cpu.dx
+                    cpu.cs(), cpu.ip(), cpu.ds(), cpu.es(), cpu.ss(), cpu.sp(), cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()
                 ));
                 // Dump 64 bytes of stack so we can see remaining return
                 // addresses (anything the RETF left unconsumed).
-                let ss_base = (cpu.ss as usize) * 16;
+                let ss_base = (cpu.ss() as usize) * 16;
                 let mut sbytes = String::new();
                 for i in 0..64 {
-                    let a = ss_base + cpu.sp as usize + i;
+                    let a = ss_base + cpu.sp() as usize + i;
                     if a < cpu.bus.ram.len() {
                         sbytes.push_str(&format!("{:02X} ", cpu.bus.ram[a]));
                     }
                 }
                 cpu.bus.log_string(&format!(
                     "[TRIPWIRE] stack@SS:SP ({:04X}:{:04X}): {}",
-                    cpu.ss, cpu.sp, sbytes.trim()
+                    cpu.ss(), cpu.sp(), sbytes.trim()
                 ));
                 let _ = cpu.bus.log_file.as_mut().unwrap().flush();
                 cpu.state = CpuState::RebootShell;
@@ -517,8 +517,8 @@ fn main() -> Result<(), String> {
             // use the stored Instruction in place. On a miss the reused
             // decoder fills the cache slot.
             let page_gen = cpu.bus.page_gen[(phys_ip >> 12) & 0xFF];
-            let ip = cpu.ip;
-            let instr = instr_cache.get_or_decode(phys_ip, cpu.cs, ip, page_gen, |slot| {
+            let ip = cpu.ip();
+            let instr = instr_cache.get_or_decode(phys_ip, cpu.cs(), ip, page_gen, |slot| {
                 decoder.set_position(phys_ip).unwrap();
                 decoder.set_ip(ip as u64);
                 decoder.decode_out(slot);
@@ -530,19 +530,19 @@ fn main() -> Result<(), String> {
                     || (instr.mnemonic() == Mnemonic::Jmp && instr.near_branch16() == 0x10E))
                 {
                     // Skip BIOS area noise
-                    if cpu.cs < 0xF000 {
+                    if cpu.cs() < 0xF000 {
                         // Format the instruction string manually since we can't capture stdout
                         // (Assuming you want the same format as print_debug_trace)
                         let instr_text = format!("{}", instr);
                         let log_line = format!(
                             "{:04X}:{:04X}  AX:{:04X} BX:{:04X} CX:{:04X} DX:{:04X} SP:{:04X}  {}",
-                            cpu.cs,
-                            cpu.ip,
+                            cpu.cs(),
+                            cpu.ip(),
                             cpu.get_reg16(iced_x86::Register::AX),
                             cpu.get_reg16(iced_x86::Register::BX),
                             cpu.get_reg16(iced_x86::Register::CX),
                             cpu.get_reg16(iced_x86::Register::DX),
-                            cpu.sp,
+                            cpu.sp(),
                             instr_text
                         );
 
@@ -568,7 +568,7 @@ fn main() -> Result<(), String> {
                 }
             }
 
-            cpu.ip = instr.next_ip() as u16;
+            cpu.set_ip(instr.next_ip() as u16);
 
             // Check State
             if cpu.state == CpuState::RebootShell {

@@ -75,7 +75,7 @@ pub fn handle(cpu: &mut Cpu) {
             let dta_off = cpu.bus.dta_offset;
             let dta_phys = cpu.get_physical_addr(dta_current, dta_off);
 
-            let input_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let input_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
             // Extended FCB: FFh marker, search attribute at +6 and the normal
             // FCB at +7. Volume label searches (attr 08h) come this way.
@@ -166,10 +166,10 @@ pub fn handle(cpu: &mut Cpu) {
             match cpu.bus.disk.drive_geometry(drive) {
                 Some((spc, bps, total)) => {
                     cpu.set_reg8(Register::AL, spc as u8);
-                    cpu.cx = bps;
-                    cpu.dx = total;
-                    cpu.ds = 0xF000;
-                    cpu.bx = (MEDIA_ID_TABLE - 0xF0000 + drive as usize) as u16;
+                    cpu.set_cx(bps);
+                    cpu.set_dx(total);
+                    cpu.set_ds(0xF000);
+                    cpu.set_bx((MEDIA_ID_TABLE - 0xF0000 + drive as usize) as u16);
                 }
                 None => cpu.set_reg8(Register::AL, 0xFF), // Invalid drive
             }
@@ -184,8 +184,8 @@ pub fn handle(cpu: &mut Cpu) {
             match cpu.bus.disk.drive_kind(drive) {
                 Some(kind) if kind != DriveKind::CdRom => {
                     cpu.set_reg8(Register::AL, 0x00);
-                    cpu.ds = 0xF000;
-                    cpu.bx = (DPB_TABLE - 0xF0000 + drive as usize * DPB_SIZE) as u16;
+                    cpu.set_ds(0xF000);
+                    cpu.set_bx((DPB_TABLE - 0xF0000 + drive as usize * DPB_SIZE) as u16);
                 }
                 _ => cpu.set_reg8(Register::AL, 0xFF),
             }
@@ -248,7 +248,7 @@ pub fn handle(cpu: &mut Cpu) {
                 }
             } else {
                 // Block by rewinding IP so the BOP trap re-fires next cycle.
-                let phys_sp = ((cpu.ss as usize) * 16 + cpu.sp as usize) & 0xFFFFF;
+                let phys_sp = ((cpu.ss() as usize) * 16 + cpu.sp() as usize) & 0xFFFFF;
                 let saved_ip = cpu.bus.read_16(phys_sp);
                 cpu.bus.write_16(phys_sp, saved_ip.wrapping_sub(4));
             }
@@ -262,8 +262,8 @@ pub fn handle(cpu: &mut Cpu) {
             } else {
                 // Retry logic
                 // Calculate Physical Address of the Stack Pointer (SS:SP)
-                let sp = cpu.sp;
-                let ss = cpu.ss;
+                let sp = cpu.sp();
+                let ss = cpu.ss();
                 let phys_sp = (ss as usize * 16) + sp as usize; // TODO: Check phys addr calc
 
                 let saved_ip = cpu.bus.read_16(phys_sp & 0xFFFFF);
@@ -281,7 +281,7 @@ pub fn handle(cpu: &mut Cpu) {
                 let ascii = (key_code & 0xFF) as u8;
                 cpu.set_reg8(Register::AL, ascii);
             } else {
-                let phys_sp = ((cpu.ss as usize) * 16 + cpu.sp as usize) & 0xFFFFF;
+                let phys_sp = ((cpu.ss() as usize) * 16 + cpu.sp() as usize) & 0xFFFFF;
                 let saved_ip = cpu.bus.read_16(phys_sp);
                 cpu.bus.write_16(phys_sp, saved_ip.wrapping_sub(4));
             }
@@ -299,9 +299,9 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 09h: Print String (Ends in '$')
         0x09 => {
-            let mut offset = cpu.dx;
+            let mut offset = cpu.dx();
             loop {
-                let char_byte = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds, offset));
+                let char_byte = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds(), offset));
                 if char_byte == b'$' {
                     break;
                 }
@@ -344,7 +344,7 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH=1Ah: Set Disk Transfer Area (DTA) Address
         0x1A => {
-            let ds = cpu.ds;
+            let ds = cpu.ds();
             let dx = cpu.get_reg16(Register::DX);
             cpu.bus.dta_segment = ds;
             cpu.bus.dta_offset = dx;
@@ -361,7 +361,7 @@ pub fn handle(cpu: &mut Cpu) {
 
             let flags = cpu.get_al();
             let si = cpu.get_reg16(Register::SI);
-            let str_addr = cpu.get_physical_addr(cpu.ds, si);
+            let str_addr = cpu.get_physical_addr(cpu.ds(), si);
             let raw_str = read_asciiz_string(&cpu.bus, str_addr);
 
             // Extract first token (space separated)
@@ -373,7 +373,7 @@ pub fn handle(cpu: &mut Cpu) {
                 let (drive_spec, name) = parse_drive_prefix(token);
                 let fcb = pattern_to_fcb(name);
                 let di = cpu.get_reg16(Register::DI);
-                let fcb_addr = cpu.get_physical_addr(cpu.es, di);
+                let fcb_addr = cpu.get_physical_addr(cpu.es(), di);
 
                 // Drive byte: 1 = A:, ... when the string names one. Without a
                 // drive it becomes 0 (default) unless AL bit 1 says to leave
@@ -411,8 +411,8 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 25h: Set Interrupt Vector
         0x25 => {
             let int_num = cpu.get_al() as usize;
-            let new_off = cpu.dx;
-            let new_seg = cpu.ds;
+            let new_off = cpu.dx();
+            let new_seg = cpu.ds();
             let phys_addr = int_num * 4;
 
             cpu.bus.write_8(phys_addr, (new_off & 0xFF) as u8);
@@ -429,7 +429,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 4Bh: Load and Execute Program (EXEC)
         0x4B => {
             let mode = cpu.get_al();
-            let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let name_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&cpu.bus, name_addr);
 
             // --- Stub out copy-protection / disk-swap helpers ---
@@ -493,8 +493,8 @@ pub fn handle(cpu: &mut Cpu) {
                 // Offset 06: Pointer to FCB 1 (dword) -> Write to PSP 5Ch
                 // Offset 0A: Pointer to FCB 2 (dword) -> Write to PSP 6Ch
 
-                let param_block = cpu.bx; // Offset in ES
-                let param_seg = cpu.es;
+                let param_block = cpu.bx(); // Offset in ES
+                let param_seg = cpu.es();
                 let param_phys = cpu.get_physical_addr(param_seg, param_block);
 
                 // Read Environment Segment
@@ -755,13 +755,13 @@ pub fn handle(cpu: &mut Cpu) {
                     // Set up the child's register state per DOS convention.
                     // AX = 0 typically (we don't validate FCBs). DS/ES already
                     // point to the PSP from load_executable.
-                    cpu.ax = 0;
-                    cpu.bx = 0;
-                    cpu.cx = 0;
-                    cpu.dx = 0;
-                    cpu.si = 0;
-                    cpu.di = 0;
-                    cpu.bp = 0;
+                    cpu.set_ax(0);
+                    cpu.set_bx(0);
+                    cpu.set_cx(0);
+                    cpu.set_dx(0);
+                    cpu.set_si(0);
+                    cpu.set_di(0);
+                    cpu.set_bp(0);
 
                     // Our BOP trap runs an implicit IRET-style pop after this
                     // handler returns: it pops IP, CS, flags from SS:SP. Since
@@ -769,8 +769,8 @@ pub fn handle(cpu: &mut Cpu) {
                     // stack, push the child's entry CS:IP plus sane flags so
                     // the pop lands us at the child's entry point rather than
                     // popping zeros off the bottom of its stack.
-                    let entry_ip = cpu.ip;
-                    let entry_cs = cpu.cs;
+                    let entry_ip = cpu.ip();
+                    let entry_cs = cpu.cs();
                     let entry_flags: u16 = 0x0202; // IF=1, reserved bit 1 always set
                     cpu.push(entry_flags);
                     cpu.push(entry_cs);
@@ -797,8 +797,8 @@ pub fn handle(cpu: &mut Cpu) {
                 // Parameter block pointed to by ES:BX:
                 //   +0 (word): load segment for the overlay image
                 //   +2 (word): relocation factor added to relocation targets
-                let param_block = cpu.bx;
-                let param_seg = cpu.es;
+                let param_block = cpu.bx();
+                let param_seg = cpu.es();
                 let param_phys = cpu.get_physical_addr(param_seg, param_block);
                 let overlay_seg = cpu.bus.read_16(param_phys);
                 let reloc_factor = cpu.bus.read_16(param_phys + 2);
@@ -838,7 +838,7 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH=2Fh: Get DTA Address
         0x2F => {
-            cpu.es = cpu.bus.dta_segment;
+            cpu.set_es(cpu.bus.dta_segment);
             cpu.set_reg16(Register::BX, cpu.bus.dta_offset);
         }
 
@@ -846,25 +846,25 @@ pub fn handle(cpu: &mut Cpu) {
         0x30 => {
             cpu.set_reg8(Register::AL, 5); // Major: 5
             cpu.set_reg8(Register::AH, 0); // Minor: .00
-            cpu.bx = 0xFF00; // OEM ID
-            cpu.cx = 0x0000; // Serial
+            cpu.set_bx(0xFF00); // OEM ID
+            cpu.set_cx(0x0000); // Serial
             cpu.bus.log_string("[DOS] Reported DOS Version 5.0");
         }
 
         // AH = 50h: Set current PSP to BX
         0x50 => {
-            cpu.current_psp = cpu.bx;
+            cpu.current_psp = cpu.bx();
         }
 
         // AH = 51h / 62h: Get current PSP into BX
         0x51 | 0x62 => {
-            cpu.bx = cpu.current_psp;
+            cpu.set_bx(cpu.current_psp);
         }
 
         // AH = 52h: Get List of Lists. ES:BX -> SYSVARS, first MCB at ES:[BX-2]
         0x52 => {
-            cpu.es = 0xF000;
-            cpu.bx = (DOS_LIST_OF_LISTS - 0xF0000) as u16;
+            cpu.set_es(0xF000);
+            cpu.set_bx((DOS_LIST_OF_LISTS - 0xF0000) as u16);
         }
 
         // AH = 31h: Terminate and Stay Resident
@@ -897,7 +897,7 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.heap_pointer = resident_end;
                 }
 
-                cpu.ax = return_code as u16; // Set return code (AL)
+                cpu.set_ax(return_code as u16); // Set return code (AL)
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 // Started from the shell: stay resident under the next programs.
@@ -930,11 +930,11 @@ pub fn handle(cpu: &mut Cpu) {
 
             let off_low = cpu.bus.read_8(phys_addr) as u16;
             let off_high = cpu.bus.read_8(phys_addr + 1) as u16;
-            cpu.bx = (off_high << 8) | off_low;
+            cpu.set_bx((off_high << 8) | off_low);
 
             let seg_low = cpu.bus.read_8(phys_addr + 2) as u16;
             let seg_high = cpu.bus.read_8(phys_addr + 3) as u16;
-            cpu.es = (seg_high << 8) | seg_low;
+            cpu.set_es((seg_high << 8) | seg_low);
         }
 
         // AH=36h: Get Disk Free Space
@@ -958,7 +958,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH=39h: Create Directory (MKDIR)
         // DS:DX -> ASCIZ directory name
         0x39 => {
-            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let path = read_asciiz_string(&cpu.bus, addr);
             match cpu.bus.disk.create_directory(&path) {
                 Ok(()) => {
@@ -967,7 +967,7 @@ pub fn handle(cpu: &mut Cpu) {
                         .log_string(&format!("[DOS] MKDIR '{}' -> OK", path));
                 }
                 Err(code) => {
-                    cpu.ax = code as u16;
+                    cpu.set_ax(code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.bus
                         .log_string(&format!("[DOS] MKDIR '{}' -> Err {:02X}", path, code));
@@ -978,7 +978,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH=3Ah: Remove Directory (RMDIR)
         // DS:DX -> ASCIZ directory name
         0x3A => {
-            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let path = read_asciiz_string(&cpu.bus, addr);
             match cpu.bus.disk.remove_directory(&path) {
                 Ok(()) => {
@@ -987,7 +987,7 @@ pub fn handle(cpu: &mut Cpu) {
                         .log_string(&format!("[DOS] RMDIR '{}' -> OK", path));
                 }
                 Err(code) => {
-                    cpu.ax = code as u16;
+                    cpu.set_ax(code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.bus
                         .log_string(&format!("[DOS] RMDIR '{}' -> Err {:02X}", path, code));
@@ -997,13 +997,13 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH=3Bh: Set Current Directory (CHDIR)
         0x3B => {
-            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let path = read_asciiz_string(&cpu.bus, addr);
             if cpu.bus.disk.set_current_directory(&path) {
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 cpu.set_cpu_flag(CpuFlags::CF, true);
-                cpu.ax = 0x03; // Path not found
+                cpu.set_ax(0x03); // Path not found
             }
         }
 
@@ -1018,12 +1018,12 @@ pub fn handle(cpu: &mut Cpu) {
         // want to shrink an existing file can still do so via AH=40h with
         // CX=0 once they have real data to write.
         0x3C => {
-            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&cpu.bus, addr);
             // Attributes in CX are ignored for now (TODO)
             match cpu.bus.disk.create_file(&filename, cpu.current_psp) {
                 Ok(handle) => {
-                    cpu.ax = handle;
+                    cpu.set_ax(handle);
                     cpu.bus.log_string(&format!(
                         "[DEBUG] Create File: '{}' -> Handle={:04X} (non-truncating)",
                         filename, handle
@@ -1031,7 +1031,7 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
-                    cpu.ax = code as u16;
+                    cpu.set_ax(code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
             }
@@ -1039,7 +1039,7 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH=3Dh: Open File
         0x3D => {
-            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&cpu.bus, addr);
             let mode = cpu.get_al();
 
@@ -1050,14 +1050,14 @@ pub fn handle(cpu: &mut Cpu) {
 
             match cpu.bus.disk.open_file(&filename, mode, cpu.current_psp) {
                 Ok(handle) => {
-                    cpu.ax = handle;
+                    cpu.set_ax(handle);
                     cpu.bus
                         .log_string(&format!("[DEBUG] Open Success, Handle={:04X}", handle));
                     // In real CPU, clear CF here
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
-                    cpu.ax = code as u16;
+                    cpu.set_ax(code as u16);
                     // In real CPU, set CF here
                     cpu.bus
                         .log_string(&format!("[DEBUG] Open Failed, Error={:04X}", code));
@@ -1068,22 +1068,22 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 3Eh: Close File
         0x3E => {
-            let handle = cpu.bx;
+            let handle = cpu.bx();
             // The standard devices (handles 0-4) are not in the file table;
             // closing them always succeeds.
             if handle < FIRST_USER_HANDLE || cpu.bus.disk.close_file(handle) {
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
-                cpu.ax = 0x06; // Invalid handle
+                cpu.set_ax(0x06); // Invalid handle
                 cpu.set_cpu_flag(CpuFlags::CF, true);
             }
         }
 
         // AH = 3Fh: Read from File (or Stdin)
         0x3F => {
-            let handle = cpu.bx;
-            let count = cpu.cx as usize;
-            let mut buf_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let handle = cpu.bx();
+            let count = cpu.cx() as usize;
+            let mut buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
             cpu.bus.log_string(&format!(
                 "[DEBUG] Read File Handle {:04X}, Count {:04X}",
@@ -1102,7 +1102,7 @@ pub fn handle(cpu: &mut Cpu) {
                         break;
                     }
                 }
-                cpu.ax = read_count as u16;
+                cpu.set_ax(read_count as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 match cpu.bus.disk.read_file(handle, count) {
@@ -1127,13 +1127,13 @@ pub fn handle(cpu: &mut Cpu) {
                             cpu.bus.write_8(buf_addr, *b);
                             buf_addr += 1;
                         }
-                        cpu.ax = bytes.len() as u16;
+                        cpu.set_ax(bytes.len() as u16);
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(e) => {
                         cpu.bus
                             .log_string(&format!("[DEBUG] Read Failed, Error={:04X}", e));
-                        cpu.ax = e;
+                        cpu.set_ax(e);
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
                 }
@@ -1149,9 +1149,9 @@ pub fn handle(cpu: &mut Cpu) {
         // with them. Log the call so we can spot legitimate truncations
         // while tracing and re-enable later if something depends on it.
         0x40 => {
-            let handle = cpu.bx;
-            let count = cpu.cx as usize;
-            let buf_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let handle = cpu.bx();
+            let count = cpu.cx() as usize;
+            let buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
             cpu.bus.log_string(&format!(
                 "[DEBUG] Write File Handle {:04X}, Count {:04X}",
@@ -1163,7 +1163,7 @@ pub fn handle(cpu: &mut Cpu) {
                     "[DOS] AH=40h CX=0 on handle {:04X} — truncate-at-pos NOT performed (safety)",
                     handle
                 ));
-                cpu.ax = 0;
+                cpu.set_ax(0);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
                 return;
             }
@@ -1186,17 +1186,17 @@ pub fn handle(cpu: &mut Cpu) {
 
                 let visual_s = s.replace('\x07', "");
                 crate::video::print_string(cpu, &visual_s);
-                cpu.ax = count as u16;
+                cpu.set_ax(count as u16);
             } else {
                 match cpu.bus.disk.write_file(handle, &data) {
                     Ok(written) => {
-                        cpu.ax = written;
+                        cpu.set_ax(written);
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(code) => {
                         // e.g. 05h on a file opened read-only (CD-ROM)
                         cpu.bus.log_string("[DEBUG] Write Failed");
-                        cpu.ax = code as u16;
+                        cpu.set_ax(code as u16);
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
                 }
@@ -1205,20 +1205,20 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 42h: Move File Pointer
         0x42 => {
-            let handle = cpu.bx;
-            let offset_high = cpu.cx as u32;
-            let offset_low = cpu.dx as u32;
+            let handle = cpu.bx();
+            let offset_high = cpu.cx() as u32;
+            let offset_low = cpu.dx() as u32;
             let offset = ((offset_high << 16) | offset_low) as i32;
             let whence = cpu.get_al();
 
             match cpu.bus.disk.seek_file(handle, offset as i64, whence) {
                 Ok(new_pos) => {
-                    cpu.dx = ((new_pos >> 16) & 0xFFFF) as u16;
-                    cpu.ax = (new_pos & 0xFFFF) as u16;
+                    cpu.set_dx(((new_pos >> 16) & 0xFFFF) as u16);
+                    cpu.set_ax((new_pos & 0xFFFF) as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(e) => {
-                    cpu.ax = e;
+                    cpu.set_ax(e);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
             }
@@ -1230,7 +1230,7 @@ pub fn handle(cpu: &mut Cpu) {
         // Attribute bits: 0x01=R/O, 0x02=Hidden, 0x04=System, 0x10=Directory, 0x20=Archive
         0x43 => {
             let al = cpu.get_reg8(Register::AL);
-            let addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&cpu.bus, addr);
             match al {
                 0x00 => match cpu.bus.disk.get_file_attribute(&filename) {
@@ -1239,24 +1239,24 @@ pub fn handle(cpu: &mut Cpu) {
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(code) => {
-                        cpu.ax = code as u16;
+                        cpu.set_ax(code as u16);
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                     }
                 },
                 0x01 => {
-                    let new_attr = cpu.cx;
+                    let new_attr = cpu.cx();
                     match cpu.bus.disk.set_file_attribute(&filename, new_attr) {
                         Ok(()) => {
                             cpu.set_cpu_flag(CpuFlags::CF, false);
                         }
                         Err(code) => {
-                            cpu.ax = code as u16;
+                            cpu.set_ax(code as u16);
                             cpu.set_cpu_flag(CpuFlags::CF, true);
                         }
                     }
                 }
                 _ => {
-                    cpu.ax = 0x01; // invalid function
+                    cpu.set_ax(0x01); // invalid function
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
             }
@@ -1265,7 +1265,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 44h: IOCTL (I/O Control)
         0x44 => {
             let al = cpu.get_al();
-            let bx = cpu.bx; // Handle
+            let bx = cpu.bx(); // Handle
 
             // cpu.bus.log_string(&format!(
             //     "[DOS] IOCTL AH=44h AL={:02X} Handle={:04X}",
@@ -1287,7 +1287,7 @@ pub fn handle(cpu: &mut Cpu) {
                         // Bit 2: NUL?
                         // Bit 1: Stdout
                         // Bit 0: Stdin
-                        cpu.dx = 0x80D3;
+                        cpu.set_dx(0x80D3);
                     } else {
                         // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive # (0=A)
                         let drive = cpu
@@ -1295,27 +1295,27 @@ pub fn handle(cpu: &mut Cpu) {
                             .disk
                             .handle_drive(bx)
                             .unwrap_or(cpu.bus.disk.get_current_drive());
-                        cpu.dx = drive as u16;
+                        cpu.set_dx(drive as u16);
                     }
                     cpu.set_cpu_flag(CpuFlags::CF, false);
-                    // cpu.bus.log_string(&format!("[DOS] IOCTL Get Device Info -> {:04X}", cpu.dx));
+                    // cpu.bus.log_string(&format!("[DOS] IOCTL Get Device Info -> {:04X}", cpu.dx()));
                 }
                 // Check if Block Device is Removable (BL = drive, 0=default)
                 0x08 => {
                     let drive = dos_drive_number(cpu, cpu.get_reg8(Register::BL));
                     match cpu.bus.disk.drive_kind(drive) {
                         None => {
-                            cpu.ax = 0x0F; // Invalid drive
+                            cpu.set_ax(0x0F); // Invalid drive
                             cpu.set_cpu_flag(CpuFlags::CF, true);
                         }
                         Some(DriveKind::CdRom) => {
                             // Redirector drives don't support this call
-                            cpu.ax = 0x01;
+                            cpu.set_ax(0x01);
                             cpu.set_cpu_flag(CpuFlags::CF, true);
                         }
                         Some(kind) => {
                             // AX=0 (Removable), AX=1 (Fixed)
-                            cpu.ax = if kind.is_removable() { 0 } else { 1 };
+                            cpu.set_ax(if kind.is_removable() { 0 } else { 1 });
                             cpu.set_cpu_flag(CpuFlags::CF, false);
                         }
                     }
@@ -1328,18 +1328,18 @@ pub fn handle(cpu: &mut Cpu) {
                     let drive = dos_drive_number(cpu, cpu.get_reg8(Register::BL));
                     match cpu.bus.disk.drive_kind(drive) {
                         None => {
-                            cpu.ax = 0x0F;
+                            cpu.set_ax(0x0F);
                             cpu.set_cpu_flag(CpuFlags::CF, true);
                         }
                         Some(kind) => {
-                            cpu.dx = if kind == DriveKind::CdRom { 0x1000 } else { 0x0802 };
+                            cpu.set_dx(if kind == DriveKind::CdRom { 0x1000 } else { 0x0802 });
                             cpu.set_cpu_flag(CpuFlags::CF, false);
                         }
                     }
                 }
                 _ => {
                     // Stub other subfunctions as success
-                    cpu.ax = 0;
+                    cpu.set_ax(0);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
             }
@@ -1347,12 +1347,12 @@ pub fn handle(cpu: &mut Cpu) {
         // AH=47h: Get Current Directory
         0x47 => {
             let dl = cpu.get_dl(); // Drive (0=Default, 1=A, ...)
-            let ds = cpu.ds;
+            let ds = cpu.ds();
             let si = cpu.get_reg16(Register::SI);
             let addr = cpu.get_physical_addr(ds, si);
             let drive = dos_drive_number(cpu, dl);
             let Some(cwd) = cpu.bus.disk.get_current_directory_of(drive) else {
-                cpu.ax = 0x0F; // Invalid drive
+                cpu.set_ax(0x0F); // Invalid drive
                 cpu.set_cpu_flag(CpuFlags::CF, true);
                 return;
             };
@@ -1383,7 +1383,7 @@ pub fn handle(cpu: &mut Cpu) {
         //   Return on failure: AX = 0008 (insufficient memory), BX = size of
         //     largest available block, CF = 1.
         0x48 => {
-            let requested = cpu.bx;
+            let requested = cpu.bx();
             let owner = if cpu.current_psp != 0 {
                 cpu.current_psp
             } else {
@@ -1394,7 +1394,7 @@ pub fn handle(cpu: &mut Cpu) {
             };
             match crate::mcb::alloc(&mut cpu.bus, owner, requested) {
                 Ok(segment) => {
-                    cpu.ax = segment;
+                    cpu.set_ax(segment);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     cpu.bus.log_string(&format!(
                         "[DOS] Alloc {:04X} paras -> {:04X}",
@@ -1402,8 +1402,8 @@ pub fn handle(cpu: &mut Cpu) {
                     ));
                 }
                 Err(max_free) => {
-                    cpu.ax = crate::mcb::ERR_INSUFFICIENT as u16;
-                    cpu.bx = max_free;
+                    cpu.set_ax(crate::mcb::ERR_INSUFFICIENT as u16);
+                    cpu.set_bx(max_free);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.bus.log_string(&format!(
                         "[DOS] Alloc {:04X} paras failed (max free {:04X})",
@@ -1416,16 +1416,16 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 49h: Free Memory Block
         //   ES = segment returned by AH=48h
         0x49 => {
-            let segment_to_free = cpu.es;
+            let segment_to_free = cpu.es();
             match crate::mcb::free(&mut cpu.bus, segment_to_free) {
                 Ok(()) => {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
-                    cpu.ax = 0;
+                    cpu.set_ax(0);
                     cpu.bus
                         .log_string(&format!("[DOS] Free {:04X} -> OK", segment_to_free));
                 }
                 Err(code) => {
-                    cpu.ax = code as u16;
+                    cpu.set_ax(code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.bus.log_string(&format!(
                         "[DOS] Free {:04X} -> Err {:02X}",
@@ -1439,7 +1439,7 @@ pub fn handle(cpu: &mut Cpu) {
         //   ES = segment to resize, BX = new size in paragraphs
         //   On failure: AX = 0008, BX = largest size the block could be grown to.
         0x4A => {
-            let segment = cpu.es;
+            let segment = cpu.es();
             let requested_size = cpu.get_reg16(Register::BX);
             match crate::mcb::resize(&mut cpu.bus, segment, requested_size) {
                 Ok(()) => {
@@ -1481,7 +1481,7 @@ pub fn handle(cpu: &mut Cpu) {
             // Try to restore parent process
             if cpu.restore_process_context() {
                 cpu.bus.log_string("[DOS] Returning to Parent Process");
-                cpu.ax = exit_code as u16;
+                cpu.set_ax(exit_code as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 cpu.state = CpuState::RebootShell;
@@ -1492,7 +1492,7 @@ pub fn handle(cpu: &mut Cpu) {
         //   AL = exit code, AH = termination type (0=normal, 1=Ctrl-C, 2=crit, 3=TSR)
         // Subsequent calls return zero until the next child terminates.
         0x4D => {
-            cpu.ax = cpu.last_child_exit;
+            cpu.set_ax(cpu.last_child_exit);
             cpu.last_child_exit = 0;
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
@@ -1507,7 +1507,7 @@ pub fn handle(cpu: &mut Cpu) {
             const OFFSET_INDEX: usize = 13;
 
             let (index, search_attr, raw_pattern, search_id) = if ah == 0x4E {
-                let name_addr = cpu.get_physical_addr(cpu.ds, cpu.dx);
+                let name_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
                 let mut pattern = read_asciiz_string(&cpu.bus, name_addr);
 
                 // Heuristic Fix for d.com (and potentially others):
@@ -1563,7 +1563,7 @@ pub fn handle(cpu: &mut Cpu) {
 
                 // Create a new Search ID
                 let sid = (cpu.bus.start_time.elapsed().as_nanos() & 0xFFFFFFFF) as u32;
-                (0, cpu.cx, pattern, sid)
+                (0, cpu.cx(), pattern, sid)
             } else {
                 let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
                 let attr = cpu.bus.read_8(dta_phys + OFFSET_ATTR_SEARCH) as u16;
@@ -1702,7 +1702,7 @@ pub fn handle(cpu: &mut Cpu) {
                 "[DOS] Unhandled INT 21h AH={:02X} AL={:02X} BX={:04X} CX={:04X} DX={:04X} DS={:04X} ES={:04X} SI={:04X} DI={:04X}",
                 ah,
                 al_val,
-                cpu.bx, cpu.cx, cpu.dx, cpu.ds, cpu.es, cpu.si, cpu.di
+                cpu.bx(), cpu.cx(), cpu.dx(), cpu.ds(), cpu.es(), cpu.si(), cpu.di()
             ));
         }
     }

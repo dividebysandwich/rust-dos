@@ -171,7 +171,7 @@ fn test_ret_imm16_cleans_stack() {
     //   b. Add 6 to SP. SP becomes 0x100.
     run_cpu_code(&mut cpu, &[0xC2, 0x06, 0x00]);
 
-    assert_eq!(cpu.ip, 0x1234, "RET failed to pop correct Return Address");
+    assert_eq!(cpu.ip(), 0x1234, "RET failed to pop correct Return Address");
     assert_eq!(cpu.get_reg16(Register::SP), 0x100, "RET N failed to clean up stack arguments (SP incorrect)");
 }
 

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 fn mode_13h() -> Cpu {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    cpu.ax = 0x0013;
+    cpu.set_ax(0x0013);
     cpu.set_reg8(Register::AH, 0x00);
     int10::handle(&mut cpu);
     cpu
@@ -56,7 +56,7 @@ fn unchained_pages_flip_at_retrace() {
     assert_eq!(pixel(&cpu, 4, 0), cpu.bus.vga.get_rgb(0));
 
     // A new mode starts displaying from the top of VRAM again.
-    cpu.ax = 0x0013;
+    cpu.set_ax(0x0013);
     int10::handle(&mut cpu);
     assert_eq!(cpu.bus.vga.latched_start_addr, 0);
 }

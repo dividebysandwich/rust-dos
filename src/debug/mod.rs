@@ -546,20 +546,20 @@ impl DebugHub {
             self.trace.push(TraceEntry {
                 t_us: self.batch_t_us,
                 icount: self.icount,
-                cs: cpu.cs,
-                ip: cpu.ip,
-                ax: cpu.ax,
-                bx: cpu.bx,
-                cx: cpu.cx,
-                dx: cpu.dx,
-                si: cpu.si,
-                di: cpu.di,
-                bp: cpu.bp,
-                sp: cpu.sp,
-                ds: cpu.ds,
-                es: cpu.es,
-                ss: cpu.ss,
-                flags: cpu.get_cpu_flags().bits(),
+                cs: cpu.cs(),
+                ip: cpu.ip(),
+                ax: cpu.ax(),
+                bx: cpu.bx(),
+                cx: cpu.cx(),
+                dx: cpu.dx(),
+                si: cpu.si(),
+                di: cpu.di(),
+                bp: cpu.bp(),
+                sp: cpu.sp(),
+                ds: cpu.ds(),
+                es: cpu.es(),
+                ss: cpu.ss(),
+                flags: cpu.flags16(),
                 bytes,
                 len: len as u8,
             });
@@ -933,7 +933,7 @@ impl DebugHub {
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
             "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
-            "cs_ip": format!("{:04X}:{:04X}", cpu.cs, cpu.ip),
+            "cs_ip": format!("{:04X}:{:04X}", cpu.cs(), cpu.ip()),
             "cpu_state": format!("{:?}", cpu.state),
             "shell_idle": shell_idle(cpu),
             "process_depth": cpu.process_stack.len(),
@@ -1015,11 +1015,11 @@ impl DebugHub {
                 Ok(v) => v,
                 Err(e) => return Reply::bad(e),
             },
-            None => (cpu.get_physical_addr(cpu.cs, cpu.ip), Some((cpu.cs, cpu.ip))),
+            None => (cpu.get_physical_addr(cpu.cs(), cpu.ip()), Some((cpu.cs(), cpu.ip()))),
         };
         let (seg, mut off) = segoff.unwrap_or(((phys >> 4) as u16, (phys & 0xF) as u16));
         let base = (seg as usize) << 4;
-        let cur = cpu.get_physical_addr(cpu.cs, cpu.ip);
+        let cur = cpu.get_physical_addr(cpu.cs(), cpu.ip());
         let mut lines = Vec::new();
         for _ in 0..count.min(1000) {
             let p = (base + off as usize) & 0xFFFFF;
@@ -1098,19 +1098,19 @@ pub fn parse_hex(s: &str) -> Result<u32, String> {
 
 fn reg16(cpu: &Cpu, name: &str) -> Option<u16> {
     Some(match name.to_ascii_lowercase().as_str() {
-        "ax" => cpu.ax,
-        "bx" => cpu.bx,
-        "cx" => cpu.cx,
-        "dx" => cpu.dx,
-        "si" => cpu.si,
-        "di" => cpu.di,
-        "bp" => cpu.bp,
-        "sp" => cpu.sp,
-        "cs" => cpu.cs,
-        "ds" => cpu.ds,
-        "es" => cpu.es,
-        "ss" => cpu.ss,
-        "ip" => cpu.ip,
+        "ax" => cpu.ax(),
+        "bx" => cpu.bx(),
+        "cx" => cpu.cx(),
+        "dx" => cpu.dx(),
+        "si" => cpu.si(),
+        "di" => cpu.di(),
+        "bp" => cpu.bp(),
+        "sp" => cpu.sp(),
+        "cs" => cpu.cs(),
+        "ds" => cpu.ds(),
+        "es" => cpu.es(),
+        "ss" => cpu.ss(),
+        "ip" => cpu.ip(),
         _ => return None,
     })
 }
@@ -1156,11 +1156,11 @@ pub fn regs_json(cpu: &Cpu) -> Value {
     .collect();
     let h = |v: u16| format!("{:04X}", v);
     json!({
-        "ax": h(cpu.ax), "bx": h(cpu.bx), "cx": h(cpu.cx), "dx": h(cpu.dx),
-        "si": h(cpu.si), "di": h(cpu.di), "bp": h(cpu.bp), "sp": h(cpu.sp),
-        "cs": h(cpu.cs), "ds": h(cpu.ds), "es": h(cpu.es), "ss": h(cpu.ss),
-        "ip": h(cpu.ip),
-        "flags": h(flags.bits()),
+        "ax": h(cpu.ax()), "bx": h(cpu.bx()), "cx": h(cpu.cx()), "dx": h(cpu.dx()),
+        "si": h(cpu.si()), "di": h(cpu.di()), "bp": h(cpu.bp()), "sp": h(cpu.sp()),
+        "cs": h(cpu.cs()), "ds": h(cpu.ds()), "es": h(cpu.es()), "ss": h(cpu.ss()),
+        "ip": h(cpu.ip()),
+        "flags": h(flags.bits() as u16),
         "flags_set": names,
     })
 }
@@ -1183,20 +1183,20 @@ fn set_regs(cpu: &mut Cpu, map: &Map<String, Value>) -> Result<(), String> {
     }
     for (k, v) in updates {
         match k.as_str() {
-            "ax" => cpu.ax = v,
-            "bx" => cpu.bx = v,
-            "cx" => cpu.cx = v,
-            "dx" => cpu.dx = v,
-            "si" => cpu.si = v,
-            "di" => cpu.di = v,
-            "bp" => cpu.bp = v,
-            "sp" => cpu.sp = v,
-            "cs" => cpu.cs = v,
-            "ds" => cpu.ds = v,
-            "es" => cpu.es = v,
-            "ss" => cpu.ss = v,
-            "ip" => cpu.ip = v,
-            "flags" => cpu.set_cpu_flags(CpuFlags::from_bits_truncate(v)),
+            "ax" => cpu.set_ax(v),
+            "bx" => cpu.set_bx(v),
+            "cx" => cpu.set_cx(v),
+            "dx" => cpu.set_dx(v),
+            "si" => cpu.set_si(v),
+            "di" => cpu.set_di(v),
+            "bp" => cpu.set_bp(v),
+            "sp" => cpu.set_sp(v),
+            "cs" => cpu.set_cs(v),
+            "ds" => cpu.set_ds(v),
+            "es" => cpu.set_es(v),
+            "ss" => cpu.set_ss(v),
+            "ip" => cpu.set_ip(v),
+            "flags" => cpu.set_cpu_flags(CpuFlags::from_bits_truncate(v as u32)),
             _ => unreachable!(),
         }
     }
@@ -1258,10 +1258,10 @@ fn shell_idle(cpu: &Cpu) -> bool {
         return false;
     }
     let caller_cs = || {
-        let frame = cpu.get_physical_addr(cpu.ss, cpu.sp.wrapping_add(2));
+        let frame = cpu.get_physical_addr(cpu.ss(), cpu.sp().wrapping_add(2));
         cpu.bus.read_16(frame)
     };
-    cpu.cs == 0 || (cpu.cs == 0xF000 && caller_cs() == 0)
+    cpu.cs() == 0 || (cpu.cs() == 0xF000 && caller_cs() == 0)
 }
 
 fn drives_json(cpu: &Cpu) -> Value {

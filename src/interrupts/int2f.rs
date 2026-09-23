@@ -37,21 +37,21 @@ fn mscdex(cpu: &mut Cpu, function: u8) {
     match function {
         // Installation check: BX = number of CD-ROM drives, CX = first one (0=A)
         0x00 => {
-            cpu.bx = cd_drives.len() as u16;
-            cpu.cx = cd_drives[0] as u16;
+            cpu.set_bx(cd_drives.len() as u16);
+            cpu.set_cx(cd_drives[0] as u16);
         }
         // CD-ROM drive check: CX = drive. BX=ADADh marks MSCDEX; AX is
         // nonzero when the drive is a CD-ROM.
         0x0B => {
-            let is_cd = cpu.cx < 26 && cd_drives.contains(&(cpu.cx as u8));
-            cpu.ax = if is_cd { 0x5AD8 } else { 0 };
-            cpu.bx = 0xADAD;
+            let is_cd = cpu.cx() < 26 && cd_drives.contains(&(cpu.cx() as u8));
+            cpu.set_ax(if is_cd { 0x5AD8 } else { 0 });
+            cpu.set_bx(0xADAD);
         }
         // MSCDEX version: BX = major/minor
-        0x0C => cpu.bx = MSCDEX_VERSION,
+        0x0C => cpu.set_bx(MSCDEX_VERSION),
         // Get CD-ROM drive letters: one byte (0=A) per drive at ES:BX
         0x0D => {
-            let addr = cpu.get_physical_addr(cpu.es, cpu.bx);
+            let addr = cpu.get_physical_addr(cpu.es(), cpu.bx());
             for (i, &drive) in cd_drives.iter().enumerate() {
                 cpu.bus.write_8(addr + i, drive);
             }
@@ -60,7 +60,7 @@ fn mscdex(cpu: &mut Cpu, function: u8) {
         0x10 => device_request(cpu),
         _ => {
             cpu.bus
-                .log_string(&format!("[MSCDEX] Unhandled INT 2Fh AX={:04X}", cpu.ax));
+                .log_string(&format!("[MSCDEX] Unhandled INT 2Fh AX={:04X}", cpu.ax()));
         }
     }
 }
@@ -69,7 +69,7 @@ fn mscdex(cpu: &mut Cpu, function: u8) {
 /// folder-backed CD: open/close and a few IOCTL input queries. Raw sector
 /// reads and audio aren't available.
 fn device_request(cpu: &mut Cpu) {
-    let req = cpu.get_physical_addr(cpu.es, cpu.bx);
+    let req = cpu.get_physical_addr(cpu.es(), cpu.bx());
     let command = cpu.bus.read_8(req + 2);
     let status = match command {
         // IOCTL input: transfer buffer far pointer at +0Eh; its first byte

@@ -262,16 +262,16 @@ fn mul(cpu: &mut Cpu, instr: &Instruction) {
     if is_8bit {
         let al = cpu.get_al() as u16;
         let res = al * src;
-        cpu.ax = res;
+        cpu.set_ax(res);
 
         let overflow = (res & 0xFF00) != 0;
         cpu.set_cpu_flag(CpuFlags::CF, overflow);
         cpu.set_cpu_flag(CpuFlags::OF, overflow);
     } else {
-        let ax = cpu.ax as u32;
+        let ax = cpu.ax() as u32;
         let res = ax * (src as u32);
-        cpu.ax = (res & 0xFFFF) as u16;
-        cpu.dx = (res >> 16) as u16;
+        cpu.set_ax((res & 0xFFFF) as u16);
+        cpu.set_dx((res >> 16) as u16);
 
         let overflow = (res & 0xFFFF0000) != 0;
         cpu.set_cpu_flag(CpuFlags::CF, overflow);
@@ -294,17 +294,17 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
             let al = cpu.get_al() as i8 as i16;
             let s = src as u8 as i8 as i16;
             let res = al * s;
-            cpu.ax = res as u16;
+            cpu.set_ax(res as u16);
 
             let fits = res == (res as i8 as i16);
             cpu.set_cpu_flag(CpuFlags::CF, !fits);
             cpu.set_cpu_flag(CpuFlags::OF, !fits);
         } else {
-            let ax = cpu.ax as i16 as i32;
+            let ax = cpu.ax() as i16 as i32;
             let s = src as i16 as i32;
             let res = ax * s;
-            cpu.ax = (res & 0xFFFF) as u16;
-            cpu.dx = (res >> 16) as u16;
+            cpu.set_ax((res & 0xFFFF) as u16);
+            cpu.set_dx((res >> 16) as u16);
 
             let fits = res == (res as i16 as i32);
             cpu.set_cpu_flag(CpuFlags::CF, !fits);
@@ -349,9 +349,9 @@ fn imul(cpu: &mut Cpu, instr: &Instruction) {
 /// Raise a divide error (INT 0). As on a 286 and later, the pushed return
 /// address is the faulting instruction's own, not the next one: handlers such
 /// as F-117A's compare it against the DIV's address and skip the instruction
-/// themselves. `cpu.ip` already points past the instruction when it executes.
+/// themselves. `cpu.ip()` already points past the instruction when it executes.
 fn divide_error(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.ip = cpu.ip.wrapping_sub(instr.len() as u16);
+    cpu.set_ip(cpu.ip().wrapping_sub(instr.len() as u16));
     interrupts::handle_interrupt(cpu, 0x00);
 }
 
@@ -365,10 +365,10 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
     let src = get_op0_val(cpu, instr, is_8bit).0;
 
     if src == 0 {
-        let ip = cpu.ip.wrapping_sub(instr.len() as u16);
+        let ip = cpu.ip().wrapping_sub(instr.len() as u16);
         // Dump 48 bytes before and 16 bytes at the DIV so we can see the
         // code that set up the divisor register.
-        let phys = cpu.get_physical_addr(cpu.cs, ip);
+        let phys = cpu.get_physical_addr(cpu.cs(), ip);
         let start = phys.saturating_sub(48);
         let mut prev = String::new();
         for i in start..phys {
@@ -385,8 +385,8 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         }
         cpu.bus.log_string(&format!(
             "[DIV/0] at {:04X}:{:04X} is_8bit={} AX={:04X} DX={:04X} BX={:04X} CX={:04X} SI={:04X} DI={:04X} BP={:04X} DS={:04X} ES={:04X}",
-            cpu.cs, ip, is_8bit,
-            cpu.ax, cpu.dx, cpu.bx, cpu.cx, cpu.si, cpu.di, cpu.bp, cpu.ds, cpu.es
+            cpu.cs(), ip, is_8bit,
+            cpu.ax(), cpu.dx(), cpu.bx(), cpu.cx(), cpu.si(), cpu.di(), cpu.bp(), cpu.ds(), cpu.es()
         ));
         cpu.bus.log_string(&format!("[DIV/0]   prev 48 bytes: {}", prev.trim()));
         cpu.bus.log_string(&format!("[DIV/0]   at CS:IP (16): {}", here.trim()));
@@ -394,8 +394,8 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         // Dump 32 bytes of the current stack so we can see the caller's
         // return address (and the preceding frame's return address). This
         // shows who called ITOA with CX=0.
-        let ss_base = (cpu.ss as usize) * 16;
-        let sp = cpu.sp as usize;
+        let ss_base = (cpu.ss() as usize) * 16;
+        let sp = cpu.sp() as usize;
         let mut stack_bytes = String::new();
         for i in 0..32 {
             let a = ss_base + sp + i;
@@ -405,13 +405,13 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         }
         cpu.bus.log_string(&format!(
             "[DIV/0]   stack@SS:SP ({:04X}:{:04X}): {}",
-            cpu.ss, cpu.sp, stack_bytes.trim()
+            cpu.ss(), cpu.sp(), stack_bytes.trim()
         ));
 
         // Also dump the frame around BP in case this is a standard
         // PUSH BP / MOV BP, SP callee — caller IP/CS typically at [BP+2]
         // (near) or [BP+2..BP+4] (far).
-        let bp_addr = ss_base + cpu.bp as usize;
+        let bp_addr = ss_base + cpu.bp() as usize;
         let mut frame_bytes = String::new();
         for i in 0..16 {
             let a = bp_addr + i;
@@ -421,7 +421,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         }
         cpu.bus.log_string(&format!(
             "[DIV/0]   frame@SS:BP ({:04X}:{:04X}): {}",
-            cpu.ss, cpu.bp, frame_bytes.trim()
+            cpu.ss(), cpu.bp(), frame_bytes.trim()
         ));
 
         // If the frame layout is PUSH BP / MOV BP, SP (so [BP] = saved BP,
@@ -429,7 +429,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         // This reveals who called the trapping routine and what they set
         // up before the CALL.
         let caller_ip = cpu.bus.read_16(bp_addr + 2);
-        let caller_phys = cpu.get_physical_addr(cpu.cs, caller_ip);
+        let caller_phys = cpu.get_physical_addr(cpu.cs(), caller_ip);
         let caller_start = caller_phys.saturating_sub(32);
         let mut caller_bytes = String::new();
         for i in caller_start..caller_phys + 16 {
@@ -439,7 +439,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         }
         cpu.bus.log_string(&format!(
             "[DIV/0]   caller @ {:04X}:{:04X} (ret site; -32..+16): {}",
-            cpu.cs, caller_ip, caller_bytes.trim()
+            cpu.cs(), caller_ip, caller_bytes.trim()
         ));
 
         divide_error(cpu, instr);
@@ -447,7 +447,7 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
     }
 
     if is_8bit {
-        let dividend = cpu.ax;
+        let dividend = cpu.ax();
         let divisor = src;
 
         let quotient = dividend / divisor;
@@ -460,8 +460,8 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
             cpu.set_reg8(Register::AH, remainder as u8);
         }
     } else {
-        let dx = cpu.dx as u32;
-        let ax = cpu.ax as u32;
+        let dx = cpu.dx() as u32;
+        let ax = cpu.ax() as u32;
         let dividend = (dx << 16) | ax;
         let divisor = src as u32;
 
@@ -471,8 +471,8 @@ fn div(cpu: &mut Cpu, instr: &Instruction) {
         if quotient > 0xFFFF {
             divide_error(cpu, instr);
         } else {
-            cpu.ax = quotient as u16;
-            cpu.dx = remainder as u16;
+            cpu.set_ax(quotient as u16);
+            cpu.set_dx(remainder as u16);
         }
     }
 }
@@ -487,18 +487,18 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
     let src = get_op0_val(cpu, instr, is_8bit).0;
 
     if src == 0 {
-        let ip = cpu.ip.wrapping_sub(instr.len() as u16);
+        let ip = cpu.ip().wrapping_sub(instr.len() as u16);
         cpu.bus.log_string(&format!(
             "[IDIV/0] at {:04X}:{:04X} {:?} is_8bit={} AX={:04X} DX={:04X} BX={:04X} CX={:04X} SI={:04X} DI={:04X} DS={:04X}",
-            cpu.cs, ip, instr, is_8bit,
-            cpu.ax, cpu.dx, cpu.bx, cpu.cx, cpu.si, cpu.di, cpu.ds
+            cpu.cs(), ip, instr, is_8bit,
+            cpu.ax(), cpu.dx(), cpu.bx(), cpu.cx(), cpu.si(), cpu.di(), cpu.ds()
         ));
         divide_error(cpu, instr);
         return;
     }
 
     if is_8bit {
-        let dividend = cpu.ax as i16;
+        let dividend = cpu.ax() as i16;
         let divisor = src as u8 as i8 as i16;
 
         if dividend == i16::MIN && divisor == -1 {
@@ -516,7 +516,7 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
             cpu.set_reg8(Register::AH, remainder as u8);
         }
     } else {
-        let dividend = ((cpu.dx as u32) << 16 | (cpu.ax as u32)) as i32;
+        let dividend = ((cpu.dx() as u32) << 16 | (cpu.ax() as u32)) as i32;
         let divisor = src as i16 as i32;
 
         if dividend == i32::MIN && divisor == -1 {
@@ -530,8 +530,8 @@ fn idiv(cpu: &mut Cpu, instr: &Instruction) {
         if quotient > 32767 || quotient < -32768 {
             divide_error(cpu, instr);
         } else {
-            cpu.ax = quotient as u16;
-            cpu.dx = remainder as u16;
+            cpu.set_ax(quotient as u16);
+            cpu.set_dx(remainder as u16);
         }
     }
 }
@@ -650,8 +650,8 @@ pub fn aas(cpu: &mut Cpu) {
     if (cpu.get_al() & 0x0F) > 9 || cpu.get_cpu_flag(CpuFlags::AF) {
         let al = cpu.get_al().wrapping_sub(6);
         cpu.set_reg8(Register::AL, al & 0x0F);
-        let ah = (cpu.ax >> 8) as u8;
-        cpu.ax = ((ah.wrapping_sub(1) as u16) << 8) | (cpu.get_al() as u16);
+        let ah = (cpu.ax() >> 8) as u8;
+        cpu.set_ax(((ah.wrapping_sub(1) as u16) << 8) | (cpu.get_al() as u16));
         cpu.set_cpu_flag(CpuFlags::CF, true);
         cpu.set_cpu_flag(CpuFlags::AF, true);
     } else {

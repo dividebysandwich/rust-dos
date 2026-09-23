@@ -15,7 +15,7 @@ fn virtual_screen_dims(mode: VideoMode) -> (i32, i32) {
 }
 
 pub fn handle(cpu: &mut Cpu) {
-    let ax = cpu.ax;
+    let ax = cpu.ax();
     let func = ax & 0xFFFF;
 
     match func {
@@ -25,8 +25,8 @@ pub fn handle(cpu: &mut Cpu) {
             let (w, h) = virtual_screen_dims(cpu.bus.video_mode);
             cpu.bus.mouse.reset(w, h);
             crate::mouse::clear_callback_busy(&mut cpu.bus);
-            cpu.ax = 0xFFFF;
-            cpu.bx = 3; // 3-button mouse
+            cpu.set_ax(0xFFFF);
+            cpu.set_bx(3); // 3-button mouse
         }
 
         0x0001 => {
@@ -46,15 +46,15 @@ pub fn handle(cpu: &mut Cpu) {
             //   BX = button state (bit 0 = left, 1 = right, 2 = middle)
             //   CX = X in virtual coords
             //   DX = Y in virtual coords
-            cpu.bx = cpu.bus.mouse.buttons as u16;
-            cpu.cx = (cpu.bus.mouse.x as u16) & 0xFFFF;
-            cpu.dx = (cpu.bus.mouse.y as u16) & 0xFFFF;
+            cpu.set_bx(cpu.bus.mouse.buttons as u16);
+            cpu.set_cx((cpu.bus.mouse.x as u16) & 0xFFFF);
+            cpu.set_dx((cpu.bus.mouse.y as u16) & 0xFFFF);
         }
 
         0x0004 => {
             // Set cursor position. CX = X, DX = Y.
-            let x = cpu.cx as i16 as i32;
-            let y = cpu.dx as i16 as i32;
+            let x = cpu.cx() as i16 as i32;
+            let y = cpu.dx() as i16 as i32;
             cpu.bus.mouse.set_position(x, y);
         }
 
@@ -62,30 +62,30 @@ pub fn handle(cpu: &mut Cpu) {
             // Get button press info. BX selects button (0=L, 1=R, 2=M).
             // Returns AX = current button state, BX = press count since last
             // query (reset to 0), CX = X at last press, DX = Y at last press.
-            let btn = (cpu.bx as usize).min(2);
+            let btn = (cpu.bx() as usize).min(2);
             let count = cpu.bus.mouse.press_count[btn];
-            cpu.ax = cpu.bus.mouse.buttons as u16;
-            cpu.bx = count;
-            cpu.cx = (cpu.bus.mouse.press_x[btn] as u16) & 0xFFFF;
-            cpu.dx = (cpu.bus.mouse.press_y[btn] as u16) & 0xFFFF;
+            cpu.set_ax(cpu.bus.mouse.buttons as u16);
+            cpu.set_bx(count);
+            cpu.set_cx((cpu.bus.mouse.press_x[btn] as u16) & 0xFFFF);
+            cpu.set_dx((cpu.bus.mouse.press_y[btn] as u16) & 0xFFFF);
             cpu.bus.mouse.press_count[btn] = 0;
         }
 
         0x0006 => {
             // Get button release info. Mirror of 0x0005.
-            let btn = (cpu.bx as usize).min(2);
+            let btn = (cpu.bx() as usize).min(2);
             let count = cpu.bus.mouse.release_count[btn];
-            cpu.ax = cpu.bus.mouse.buttons as u16;
-            cpu.bx = count;
-            cpu.cx = (cpu.bus.mouse.release_x[btn] as u16) & 0xFFFF;
-            cpu.dx = (cpu.bus.mouse.release_y[btn] as u16) & 0xFFFF;
+            cpu.set_ax(cpu.bus.mouse.buttons as u16);
+            cpu.set_bx(count);
+            cpu.set_cx((cpu.bus.mouse.release_x[btn] as u16) & 0xFFFF);
+            cpu.set_dx((cpu.bus.mouse.release_y[btn] as u16) & 0xFFFF);
             cpu.bus.mouse.release_count[btn] = 0;
         }
 
         0x0007 => {
             // Set horizontal range: CX = min, DX = max.
-            let lo = cpu.cx as i16 as i32;
-            let hi = cpu.dx as i16 as i32;
+            let lo = cpu.cx() as i16 as i32;
+            let hi = cpu.dx() as i16 as i32;
             let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
             cpu.bus.mouse.min_x = min;
             cpu.bus.mouse.max_x = max;
@@ -97,8 +97,8 @@ pub fn handle(cpu: &mut Cpu) {
 
         0x0008 => {
             // Set vertical range: CX = min, DX = max.
-            let lo = cpu.cx as i16 as i32;
-            let hi = cpu.dx as i16 as i32;
+            let lo = cpu.cx() as i16 as i32;
+            let hi = cpu.dx() as i16 as i32;
             let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
             cpu.bus.mouse.min_y = min;
             cpu.bus.mouse.max_y = max;
@@ -118,8 +118,8 @@ pub fn handle(cpu: &mut Cpu) {
 
         0x000B => {
             // Read motion counters. Returns CX = mickey X, DX = mickey Y. Clears.
-            cpu.cx = cpu.bus.mouse.mickey_x as u16;
-            cpu.dx = cpu.bus.mouse.mickey_y as u16;
+            cpu.set_cx(cpu.bus.mouse.mickey_x as u16);
+            cpu.set_dx(cpu.bus.mouse.mickey_y as u16);
             cpu.bus.mouse.mickey_x = 0;
             cpu.bus.mouse.mickey_y = 0;
         }
@@ -127,9 +127,9 @@ pub fn handle(cpu: &mut Cpu) {
         0x000C => {
             // Set event handler. CX = event mask, ES:DX = far pointer to a
             // handler the main loop CALL FARs on those events.
-            cpu.bus.mouse.callback_mask = cpu.cx;
-            cpu.bus.mouse.callback_cs = cpu.es;
-            cpu.bus.mouse.callback_ip = cpu.dx;
+            cpu.bus.mouse.callback_mask = cpu.cx();
+            cpu.bus.mouse.callback_cs = cpu.es();
+            cpu.bus.mouse.callback_ip = cpu.dx();
             crate::mouse::clear_callback_busy(&mut cpu.bus);
         }
 
@@ -151,9 +151,9 @@ pub fn handle(cpu: &mut Cpu) {
 
         0x001B => {
             // Get mouse sensitivity. Return plausible defaults.
-            cpu.bx = 50; // horiz mickeys per 8px
-            cpu.cx = 50; // vert
-            cpu.dx = 50; // double-speed threshold
+            cpu.set_bx(50); // horiz mickeys per 8px
+            cpu.set_cx(50); // vert
+            cpu.set_dx(50); // double-speed threshold
         }
 
         0x0024 => {
@@ -161,7 +161,7 @@ pub fn handle(cpu: &mut Cpu) {
             // BX = version (high byte major, low byte minor) -> 8.20
             // CH = mouse type (4 = PS/2)
             // CL = IRQ (0 = PS/2)
-            cpu.bx = 0x0814;
+            cpu.set_bx(0x0814);
             cpu.set_reg8(Register::CH, 0x04);
             cpu.set_reg8(Register::CL, 0x00);
         }
@@ -169,7 +169,7 @@ pub fn handle(cpu: &mut Cpu) {
         _ => {
             cpu.bus.log_string(&format!(
                 "[MOUSE] Unhandled INT 33h AX={:04X} BX={:04X} CX={:04X} DX={:04X}",
-                cpu.ax, cpu.bx, cpu.cx, cpu.dx
+                cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()
             ));
         }
     }

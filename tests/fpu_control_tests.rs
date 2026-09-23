@@ -61,7 +61,7 @@ fn test_fnstsw_ax_status_word_bridge() {
     // DF E0: FNSTSW AX
     testrunners::run_cpu_code(&mut cpu, &[0xDF, 0xE0]);
 
-    let sw = cpu.ax;
+    let sw = cpu.ax();
 
     // 1. Check Condition Code Bits
     // C0 is Bit 8 (0x0100)

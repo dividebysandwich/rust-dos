@@ -50,7 +50,7 @@ pub fn fnstsw(cpu: &mut Cpu, instr: &Instruction) {
 
     if instr.op0_kind() == OpKind::Register {
         if instr.op0_register() == Register::AX {
-            cpu.ax = raw_bits;
+            cpu.set_ax(raw_bits);
         }
     } else if instr.op0_kind() == OpKind::Memory {
         let addr = calculate_addr(cpu, instr);

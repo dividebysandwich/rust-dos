@@ -9,7 +9,7 @@ fn test_d_com_sequence() {
 
     // 1. Set DTA to 2000:0000
     // DS = 2000, DX = 0000
-    cpu.ds = 0x2000;
+    cpu.set_ds(0x2000);
     cpu.set_reg16(Register::DX, 0x0000);
     cpu.set_reg8(Register::AH, 0x1A);
     int21::handle(&mut cpu);
@@ -31,7 +31,7 @@ fn test_d_com_sequence() {
         cpu.bus.write_8(spec_phys + i, *b);
     }
 
-    cpu.ds = spec_seg as u16;
+    cpu.set_ds(spec_seg as u16);
     cpu.set_reg16(Register::DX, spec_off as u16);
     cpu.set_reg16(Register::CX, 0x10); // Directories + Files
     cpu.set_reg8(Register::AH, 0x4E);
@@ -94,7 +94,7 @@ fn test_fcb_sequence() {
     // DTA is NOT used for input pattern, but IS used for result.
 
     // Set DTA to 4000:0000
-    cpu.ds = 0x4000;
+    cpu.set_ds(0x4000);
     cpu.set_reg16(Register::DX, 0x0000);
     cpu.set_reg8(Register::AH, 0x1A);
     int21::handle(&mut cpu);
@@ -112,7 +112,7 @@ fn test_fcb_sequence() {
     }
     cpu.bus.write_8(fcb_phys, 0); // Drive Default
 
-    cpu.ds = fcb_seg as u16;
+    cpu.set_ds(fcb_seg as u16);
     cpu.set_reg16(Register::DX, fcb_off as u16);
     cpu.set_reg8(Register::AH, 0x11);
 
@@ -161,7 +161,7 @@ fn test_find_next_with_path() {
     // Search for "tests\*.rs"
 
     // 1. Set DTA
-    cpu.ds = 0x2000;
+    cpu.set_ds(0x2000);
     cpu.set_reg16(Register::DX, 0x0000);
     cpu.set_reg8(Register::AH, 0x1A);
     int21::handle(&mut cpu);
@@ -176,7 +176,7 @@ fn test_find_next_with_path() {
     }
 
     // 3. FindFirst
-    cpu.ds = spec_seg as u16;
+    cpu.set_ds(spec_seg as u16);
     cpu.set_reg16(Register::DX, spec_off as u16);
     cpu.set_reg16(Register::CX, 0x10);
     cpu.set_reg8(Register::AH, 0x4E);

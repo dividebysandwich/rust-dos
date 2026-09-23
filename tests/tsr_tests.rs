@@ -35,7 +35,7 @@ fn list_of_lists_points_at_first_mcb_and_dpb() {
     let base = scratch("lol", &[]);
     let mut cpu = Cpu::new(base);
     int21(&mut cpu, 0x52);
-    let lol = cpu.get_physical_addr(cpu.es, cpu.bx);
+    let lol = cpu.get_physical_addr(cpu.es(), cpu.bx());
     assert_eq!(cpu.bus.read_16(lol - 2), FIRST_MCB_SEG);
 
     // The first DPB is C:, the only drive mounted.
@@ -53,11 +53,11 @@ fn psp_functions_get_and_set_current_psp() {
     let mut cpu = Cpu::new(base);
     cpu.current_psp = 0x1234;
     for ah in [0x51, 0x62] {
-        cpu.bx = 0;
+        cpu.set_bx(0);
         int21(&mut cpu, ah);
-        assert_eq!(cpu.bx, 0x1234, "AH={:02X}", ah);
+        assert_eq!(cpu.bx(), 0x1234, "AH={:02X}", ah);
     }
-    cpu.bx = 0x2000;
+    cpu.set_bx(0x2000);
     int21(&mut cpu, 0x50);
     assert_eq!(cpu.current_psp, 0x2000);
 }
@@ -105,7 +105,7 @@ fn tsr_started_from_shell_stays_resident() {
     set_ivt(&mut cpu, 0x08, tsr, 0x0180); // hooked into the TSR
     set_ivt(&mut cpu, 0x16, 0x8000, 0x0000); // hooked outside it
 
-    cpu.dx = 0x20;
+    cpu.set_dx(0x20);
     cpu.set_reg8(Register::AL, 0);
     int21(&mut cpu, 0x31);
     assert_eq!(cpu.state, CpuState::RebootShell);
@@ -121,7 +121,7 @@ fn tsr_started_from_shell_stays_resident() {
     // The next program loads above the TSR and leaves it intact.
     assert!(cpu.load_executable("APP.COM", None));
     assert_eq!(cpu.current_psp, tsr + 0x21);
-    assert_eq!(cpu.cs, tsr + 0x21);
+    assert_eq!(cpu.cs(), tsr + 0x21);
     assert_eq!(cpu.bus.read_8(cpu.get_physical_addr(tsr, 0x1F0)), 0x5A);
     assert_eq!(ivt(&cpu, 0x08), (tsr, 0x0180));
 
@@ -147,20 +147,20 @@ fn mouse_handler_is_far_called_and_registers_survive() {
     for (i, b) in handler.iter().enumerate() {
         cpu.bus.write_8(0x20000 + i, *b);
     }
-    cpu.ax = 0x000C;
-    cpu.cx = 0x0001; // motion
-    cpu.es = 0x2000;
-    cpu.dx = 0x0000;
+    cpu.set_ax(0x000C);
+    cpu.set_cx(0x0001); // motion
+    cpu.set_es(0x2000);
+    cpu.set_dx(0x0000);
     int33::handle(&mut cpu);
 
     // Interrupted code at 3000:0010 with its own registers.
-    cpu.cs = 0x3000;
-    cpu.ip = 0x0010;
-    cpu.ss = 0x4000;
-    cpu.sp = 0x0100;
-    cpu.ax = 0xAAAA;
-    cpu.cx = 0xCCCC;
-    cpu.dx = 0xDDDD;
+    cpu.set_cs(0x3000);
+    cpu.set_ip(0x0010);
+    cpu.set_ss(0x4000);
+    cpu.set_sp(0x0100);
+    cpu.set_ax(0xAAAA);
+    cpu.set_cx(0xCCCC);
+    cpu.set_dx(0xDDDD);
     cpu.set_cpu_flag(CpuFlags::IF, true);
     cpu.set_cpu_flag(CpuFlags::CF, true);
     cpu.bus.mouse.set_position(100, 50);
@@ -172,16 +172,16 @@ fn mouse_handler_is_far_called_and_registers_survive() {
 
     cpu.last_timer_tick = cpu.bus.start_time.elapsed().as_millis();
     for _ in 0..100 {
-        if cpu.cs == 0x3000 {
+        if cpu.cs() == 0x3000 {
             break;
         }
         cpu.step();
     }
     assert_eq!(
-        (cpu.cs, cpu.ip, cpu.ss, cpu.sp),
+        (cpu.cs(), cpu.ip(), cpu.ss(), cpu.sp()),
         (0x3000, 0x0010, 0x4000, 0x0100)
     );
-    assert_eq!((cpu.ax, cpu.cx, cpu.dx), (0xAAAA, 0xCCCC, 0xDDDD));
+    assert_eq!((cpu.ax(), cpu.cx(), cpu.dx()), (0xAAAA, 0xCCCC, 0xDDDD));
     assert!(cpu.get_cpu_flag(CpuFlags::IF) && cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(cpu.bus.read_16(0x20100), 0x0001);
     assert_eq!(

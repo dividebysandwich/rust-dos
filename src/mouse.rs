@@ -286,11 +286,11 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     cpu.bus.write_16(CALLBACK_DATA + 14, handler_cs);
     cpu.bus.write_8(CALLBACK_BUSY, 1);
 
-    cpu.push(cpu.get_cpu_flags().bits());
-    cpu.push(cpu.cs);
-    cpu.push(cpu.ip);
-    cpu.cs = 0xF000;
-    cpu.ip = (CALLBACK_STUB - 0xF0000) as u16;
+    cpu.push(cpu.flags16());
+    cpu.push(cpu.cs());
+    cpu.push(cpu.ip());
+    cpu.set_cs(0xF000);
+    cpu.set_ip((CALLBACK_STUB - 0xF0000) as u16);
     cpu.set_cpu_flag(crate::cpu::CpuFlags::IF, false);
     cpu.set_cpu_flag(crate::cpu::CpuFlags::TF, false);
     true

@@ -42,8 +42,8 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
             OpKind::Register => {
                 // Read raw opcode from memory
                 // iced_x86 apparently has a bug with D8 vs DC ambiguity
-                let cs_base = (cpu.cs as u32) << 4;
-                let instr_addr = (cpu.ip as u32).wrapping_sub(instr.len() as u32);
+                let cs_base = (cpu.cs() as u32) << 4;
+                let instr_addr = (cpu.ip() as u32).wrapping_sub(instr.len() as u32);
                 let phys_addr = cs_base.wrapping_add(instr_addr) & 0xFFFFF;
                 let opcode_byte = cpu.bus.read_8(phys_addr as usize);
 

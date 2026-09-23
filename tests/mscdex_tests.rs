@@ -21,9 +21,9 @@ fn cdrom() -> MountOptions {
 }
 
 fn int2f(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16) {
-    cpu.ax = ax;
-    cpu.bx = bx;
-    cpu.cx = cx;
+    cpu.set_ax(ax);
+    cpu.set_bx(bx);
+    cpu.set_cx(cx);
     int2f::handle(cpu);
 }
 
@@ -32,14 +32,14 @@ fn not_installed_without_cd_drives() {
     let base = scratch("absent", &["c"]);
     let mut cpu = Cpu::new(base.join("c"));
     int2f(&mut cpu, 0x1500, 0, 0);
-    assert_eq!((cpu.ax, cpu.bx), (0x1500, 0));
+    assert_eq!((cpu.ax(), cpu.bx()), (0x1500, 0));
     int2f(&mut cpu, 0x150B, 0, 3);
-    assert_ne!(cpu.bx, 0xADAD);
+    assert_ne!(cpu.bx(), 0xADAD);
 
     // Other multiplex install checks stay "not installed"
     for ax in [0x1600u16, 0x1687, 0x4300, 0x1100] {
         int2f(&mut cpu, ax, 0x1234, 0x5678);
-        assert_eq!((cpu.ax, cpu.bx, cpu.cx), (ax, 0x1234, 0x5678));
+        assert_eq!((cpu.ax(), cpu.bx(), cpu.cx()), (ax, 0x1234, 0x5678));
     }
 }
 
@@ -58,18 +58,18 @@ fn mscdex_reports_mounted_cd_drives() {
         .unwrap();
 
     int2f(&mut cpu, 0x1500, 0, 0);
-    assert_eq!((cpu.bx, cpu.cx), (2, 4));
+    assert_eq!((cpu.bx(), cpu.cx()), (2, 4));
 
     int2f(&mut cpu, 0x150B, 0, 4);
-    assert_eq!(cpu.bx, 0xADAD);
-    assert_ne!(cpu.ax, 0);
+    assert_eq!(cpu.bx(), 0xADAD);
+    assert_ne!(cpu.ax(), 0);
     int2f(&mut cpu, 0x150B, 0, 3);
-    assert_eq!((cpu.ax, cpu.bx), (0, 0xADAD));
+    assert_eq!((cpu.ax(), cpu.bx()), (0, 0xADAD));
 
     int2f(&mut cpu, 0x150C, 0, 0);
-    assert_eq!(cpu.bx, 0x0217);
+    assert_eq!(cpu.bx(), 0x0217);
 
-    cpu.es = 0x3000;
+    cpu.set_es(0x3000);
     int2f(&mut cpu, 0x150D, 0, 0);
     assert_eq!(cpu.bus.read_8(0x30000), 4);
     assert_eq!(cpu.bus.read_8(0x30001), 6);
@@ -91,7 +91,7 @@ fn device_requests_answer_ioctl_queries() {
         cpu.bus.write_16(header + 0x0E, 0x0000);
         cpu.bus.write_16(header + 0x10, 0x3100);
         cpu.bus.write_8(buffer, control);
-        cpu.es = 0x3000;
+        cpu.set_es(0x3000);
         int2f(cpu, 0x1510, 0, 3);
         cpu.bus.read_16(header + 3)
     };

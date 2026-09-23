@@ -40,9 +40,9 @@ fn test_hlt_state() {
 #[test]
 fn test_int_and_iret() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.ip = 0x100;
-    cpu.sp = 0xFFFE;
-    cpu.cs = 0x0000;
+    cpu.set_ip(0x100);
+    cpu.set_sp(0xFFFE);
+    cpu.set_cs(0x0000);
 
     // We construct a scenario where the Interrupt Handler is INLINE
     // with our test code buffer so the runner can verify execution.
@@ -70,15 +70,15 @@ fn test_int_and_iret() {
     // 2. IRET executes. Pops IP(0x102), CS, Flags. IP becomes 0x102.
     // 3. HLT executes. Runner stops.
 
-    assert_eq!(cpu.sp, 0xFFFE, "Stack should be balanced after INT+IRET");
-    assert_eq!(cpu.ip, 0x103, "Runner IP should point after HLT (0x102 + 1)");
+    assert_eq!(cpu.sp(), 0xFFFE, "Stack should be balanced after INT+IRET");
+    assert_eq!(cpu.ip(), 0x103, "Runner IP should point after HLT (0x102 + 1)");
 }
 
 #[test]
 fn test_into_overflow() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.sp = 0xFFFE;
-    cpu.ss = 0x0000;
+    cpu.set_sp(0xFFFE);
+    cpu.set_ss(0x0000);
     
     // 1. Setup INT 4 Vector (Address 0x10)
     // We must point it somewhere valid so the emulator performs the PUSH
@@ -93,15 +93,15 @@ fn test_into_overflow() {
     
     // Should have pushed Flags(2) + CS(2) + IP(2) = 6 bytes
     // SP: FFFE - 6 = FFF8
-    assert_eq!(cpu.sp, 0xFFF8, "INTO should push interrupt stack frame if OF=1");
+    assert_eq!(cpu.sp(), 0xFFF8, "INTO should push interrupt stack frame if OF=1");
 }
 
 #[test]
 fn test_enter_leave_stack_frames() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.sp = 0xFFFE;
-    cpu.bp = 0xAAAA;
-    cpu.ss = 0x0000; // Important for get_physical_addr
+    cpu.set_sp(0xFFFE);
+    cpu.set_bp(0xAAAA);
+    cpu.set_ss(0x0000); // Important for get_physical_addr
 
     // ENTER 10, 0  (C8 0A 00 00)
     let code_enter_0 = [0xC8, 0x0A, 0x00, 0x00];
@@ -111,22 +111,22 @@ fn test_enter_leave_stack_frames() {
     // 2. FP = FFFC
     // 3. SP = FFFC - 10 = FFF2
     assert_eq!(cpu.bus.read_16(0xFFFC), 0xAAAA, "Old BP not saved correctly");
-    assert_eq!(cpu.bp, 0xFFFC, "BP not updated to Frame Pointer");
-    assert_eq!(cpu.sp, 0xFFF2, "SP not allocated for locals");
+    assert_eq!(cpu.bp(), 0xFFFC, "BP not updated to Frame Pointer");
+    assert_eq!(cpu.sp(), 0xFFF2, "SP not allocated for locals");
 
     // LEAVE (C9)
     run_cpu_code(&mut cpu, &[0xC9]);
     
-    assert_eq!(cpu.bp, 0xAAAA);
-    assert_eq!(cpu.sp, 0xFFFE);
+    assert_eq!(cpu.bp(), 0xAAAA);
+    assert_eq!(cpu.sp(), 0xFFFE);
 }
 
 #[test]
 fn test_enter_nested_level() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.sp = 0xFFFE;
-    cpu.bp = 0x8000;
-    cpu.ss = 0x0000;
+    cpu.set_sp(0xFFFE);
+    cpu.set_bp(0x8000);
+    cpu.set_ss(0x0000);
 
     // ENTER 4, 1 (C8 04 00 01)
     run_cpu_code(&mut cpu, &[0xC8, 0x04, 0x00, 0x01]);
@@ -139,6 +139,6 @@ fn test_enter_nested_level() {
     
     assert_eq!(cpu.bus.read_16(0xFFFC), 0x8000, "Should push old BP");
     assert_eq!(cpu.bus.read_16(0xFFFA), 0xFFFC, "Should push Frame Pointer for Display");
-    assert_eq!(cpu.bp, 0xFFFC, "BP should point to the new frame base");
-    assert_eq!(cpu.sp, 0xFFF6, "Final SP incorrect");
+    assert_eq!(cpu.bp(), 0xFFFC, "BP should point to the new frame base");
+    assert_eq!(cpu.sp(), 0xFFF6, "Final SP incorrect");
 }

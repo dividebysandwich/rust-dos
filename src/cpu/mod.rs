@@ -6,6 +6,9 @@ use crate::bus::Bus;
 use crate::f80::F80;
 use crate::shell::get_shell_code;
 
+mod regs;
+pub use regs::{AR_DATA_RW, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, Seg, SegCache};
+
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;
 pub const FPU_TAG_VALID: u8 = 0;
@@ -13,8 +16,10 @@ pub const FPU_TAG_VALID: u8 = 0;
 // Constants for Flag Bits
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct CpuFlags: u16 {
+    pub struct CpuFlags: u32 {
         const CF = 0x0001;
+        /// Bit 1 reads as 1 on every x86.
+        const R1 = 0x0002;
         const PF = 0x0004;
         const AF = 0x0010;
         const ZF = 0x0040;
@@ -23,6 +28,13 @@ bitflags! {
         const IF = 0x0200;
         const TF = 0x0100;
         const OF = 0x0800;
+        /// I/O privilege level (bits 12-13), nested task, and the 386
+        /// EFLAGS bits: resume, virtual-8086 mode, alignment check.
+        const IOPL = 0x3000;
+        const NT = 0x4000;
+        const RF = 0x0001_0000;
+        const VM = 0x0002_0000;
+        const AC = 0x0004_0000;
     }
 }
 
@@ -56,22 +68,11 @@ bitflags! {
 }
 
 pub struct Cpu {
-    // General Purpose
-    pub ax: u16,
-    pub bx: u16,
-    pub cx: u16,
-    pub dx: u16,
-    pub di: u16,
-    pub si: u16,
-
-    // Pointers & Segments
-    pub bp: u16,
-    pub sp: u16,
-    pub cs: u16,
-    pub ds: u16,
-    pub es: u16,
-    pub ss: u16,
-    pub ip: u16,
+    /// EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI (see `regs.rs` accessors).
+    gpr: [u32; 8],
+    eip: u32,
+    /// ES, CS, SS, DS, FS, GS.
+    seg: [SegCache; 6],
 
     pub bus: Bus,
     flags: CpuFlags,
@@ -119,22 +120,20 @@ pub enum CpuState {
     RebootShell,
 }
 
+/// The architectural register state: general-purpose registers, EIP,
+/// EFLAGS and the segment registers with their descriptor caches.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CpuSnapshot {
+    pub gpr: [u32; 8],
+    pub eip: u32,
+    pub flags: CpuFlags,
+    pub seg: [SegCache; 6],
+}
+
+/// A parent process's state while its child runs (INT 21h AH=4Bh).
 #[derive(Debug, Clone)]
 pub struct ProcessContext {
-    pub ax: u16,
-    pub bx: u16,
-    pub cx: u16,
-    pub dx: u16,
-    pub si: u16,
-    pub di: u16,
-    pub bp: u16,
-    pub sp: u16,
-    pub cs: u16,
-    pub ds: u16,
-    pub es: u16,
-    pub ss: u16,
-    pub ip: u16,
-    pub flags: CpuFlags,
+    pub regs: CpuSnapshot,
     pub psp: u16,
     pub heap_pointer: u16,
 }
@@ -144,19 +143,9 @@ use std::path::PathBuf;
 impl Cpu {
     pub fn new(root_path: PathBuf) -> Self {
         Self {
-            ax: 0,
-            bx: 0,
-            cx: 0,
-            dx: 0,
-            di: 0,
-            si: 0,
-            bp: 0,
-            sp: 0,
-            cs: 0,
-            ds: 0,
-            es: 0,
-            ss: 0,
-            ip: 0x100,
+            gpr: [0; 8],
+            eip: 0x100,
+            seg: [SegCache::real(0); 6],
             bus: Bus::new(root_path),
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
@@ -211,22 +200,27 @@ impl Cpu {
         ));
     }
 
+    /// Save the architectural register state.
+    pub fn snapshot(&self) -> CpuSnapshot {
+        CpuSnapshot {
+            gpr: self.gpr,
+            eip: self.eip,
+            flags: self.flags,
+            seg: self.seg,
+        }
+    }
+
+    /// Put back a register state saved by `snapshot`.
+    pub fn restore(&mut self, regs: &CpuSnapshot) {
+        self.gpr = regs.gpr;
+        self.eip = regs.eip;
+        self.flags = regs.flags;
+        self.seg = regs.seg;
+    }
+
     pub fn save_process_context(&mut self) {
         let context = ProcessContext {
-            ax: self.ax,
-            bx: self.bx,
-            cx: self.cx,
-            dx: self.dx,
-            si: self.si,
-            di: self.di,
-            bp: self.bp,
-            sp: self.sp,
-            cs: self.cs,
-            ds: self.ds,
-            es: self.es,
-            ss: self.ss,
-            ip: self.ip,
-            flags: self.flags,
+            regs: self.snapshot(),
             psp: self.current_psp,
             heap_pointer: self.heap_pointer,
         };
@@ -239,20 +233,7 @@ impl Cpu {
 
     pub fn restore_process_context(&mut self) -> bool {
         if let Some(context) = self.process_stack.pop() {
-            self.ax = context.ax;
-            self.bx = context.bx;
-            self.cx = context.cx;
-            self.dx = context.dx;
-            self.si = context.si;
-            self.di = context.di;
-            self.bp = context.bp;
-            self.sp = context.sp;
-            self.cs = context.cs;
-            self.ds = context.ds;
-            self.es = context.es;
-            self.ss = context.ss;
-            self.ip = context.ip;
-            self.flags = context.flags;
+            self.restore(&context.regs);
             self.current_psp = context.psp;
             self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
             self.bus.log_string(&format!(
@@ -286,13 +267,13 @@ impl Cpu {
             let handler_cs = self.bus.read_16((ivt_offset + 2) as usize);
 
             // Push Flags, CS, IP
-            self.push(self.flags.bits());
-            self.push(self.cs);
-            self.push(self.ip);
+            self.push(self.flags16());
+            self.push(self.cs());
+            self.push(self.ip());
 
             // Jump to Handler
-            self.ip = handler_ip;
-            self.cs = handler_cs;
+            self.set_ip(handler_ip);
+            self.set_cs(handler_cs);
 
             // Disable Interrupts (IF=0) and Trap Flag (TF=0)
             self.set_cpu_flag(CpuFlags::IF, false);
@@ -302,7 +283,7 @@ impl Cpu {
             return;
         }
 
-        let phys_ip = self.get_physical_addr(self.cs, self.ip);
+        let phys_ip = self.get_physical_addr(self.cs(), self.ip());
         // Ensure we can read at least a few bytes
         if phys_ip >= self.bus.ram.len() {
             return;
@@ -312,13 +293,13 @@ impl Cpu {
         let b0 = self.bus.read_8(phys_ip);
         let b1 = self
             .bus
-            .read_8(self.get_physical_addr(self.cs, self.ip.wrapping_add(1)));
+            .read_8(self.get_physical_addr(self.cs(), self.ip().wrapping_add(1)));
 
         // Check for "BOP" (BIOS Operation) -> FE 38 XX
         if b0 == 0xFE && b1 == 0x38 {
             let vector = self
                 .bus
-                .read_8(self.get_physical_addr(self.cs, self.ip.wrapping_add(2)));
+                .read_8(self.get_physical_addr(self.cs(), self.ip().wrapping_add(2)));
 
             // Run the HLE handler, then simulate its IRET
             crate::interrupts::handle_hle(self, vector);
@@ -329,14 +310,14 @@ impl Cpu {
         // Decode
         // We slice safe
         let bytes = &self.bus.ram[phys_ip..];
-        let mut decoder = Decoder::with_ip(16, bytes, self.ip as u64, DecoderOptions::NONE);
+        let mut decoder = Decoder::with_ip(16, bytes, self.ip() as u64, DecoderOptions::NONE);
         let instr = decoder.decode();
 
-        let disasm = format!("{:04X}:{:04X} {}", self.cs, self.ip, instr);
+        let disasm = format!("{:04X}:{:04X} {}", self.cs(), self.ip(), instr);
         self.bus.log_trace(&disasm);
 
         // Update IP
-        self.ip = instr.next_ip() as u16;
+        self.set_ip(instr.next_ip() as u16);
 
         // Execute
         crate::instructions::execute_instruction(self, &instr);
@@ -358,16 +339,6 @@ impl Cpu {
 
     // Helper to set/clear a flag
     pub fn set_cpu_flag(&mut self, mask: CpuFlags, value: bool) {
-        //     // ALARM only when ZF changes from FALSE -> TRUE
-        //     if !old_zf && value == true {
-        //         let instr_str = self.get_instruction_at_ip();
-        //         self.bus.log_string(&format!(
-        //             "[ZF-ALARM] ZF flipped FALSE -> TRUE! CX:{:04X} | Instruction: {}",
-        //             self.cx, instr_str
-        //         ));
-        //     }
-        // }
-
         if value {
             self.flags.insert(mask);
         } else {
@@ -389,6 +360,12 @@ impl Cpu {
 
     pub fn get_cpu_flags(&self) -> CpuFlags {
         self.flags
+    }
+
+    /// The low 16 bits of the flags register, as PUSHF and an interrupt
+    /// push them in 16-bit code.
+    pub fn flags16(&self) -> u16 {
+        self.flags.bits() as u16
     }
 
     pub fn set_fpu_flag(&mut self, flag: FpuFlags, value: bool) {
@@ -440,86 +417,6 @@ impl Cpu {
         let phys_addr = (segment as usize * 16) + offset as usize;
         // MASK TO 20 BITS to emulate 8086 wrap-around
         phys_addr & 0xFFFFF
-    }
-
-    // Extract High byte (AH)
-    pub fn get_ah(&self) -> u8 {
-        (self.ax >> 8) as u8
-    }
-    // Extract Low byte (AL)
-    pub fn get_al(&self) -> u8 {
-        (self.ax & 0xFF) as u8
-    }
-
-    // Set 8-bit Register
-    pub fn set_reg8(&mut self, reg: Register, value: u8) {
-        match reg {
-            Register::AL => self.ax = (self.ax & 0xFF00) | (value as u16),
-            Register::AH => self.ax = (self.ax & 0x00FF) | ((value as u16) << 8),
-            Register::BL => self.bx = (self.bx & 0xFF00) | (value as u16),
-            Register::BH => self.bx = (self.bx & 0x00FF) | ((value as u16) << 8),
-            Register::CL => self.cx = (self.cx & 0xFF00) | (value as u16),
-            Register::CH => self.cx = (self.cx & 0x00FF) | ((value as u16) << 8),
-            Register::DL => self.dx = (self.dx & 0xFF00) | (value as u16),
-            Register::DH => self.dx = (self.dx & 0x00FF) | ((value as u16) << 8),
-            _ => {}
-        }
-    }
-
-    // Get 8-bit Register
-    pub fn get_reg8(&self, reg: Register) -> u8 {
-        match reg {
-            Register::AL => (self.ax & 0xFF) as u8,
-            Register::AH => (self.ax >> 8) as u8,
-            Register::BL => (self.bx & 0xFF) as u8,
-            Register::BH => (self.bx >> 8) as u8,
-            Register::CL => (self.cx & 0xFF) as u8,
-            Register::CH => (self.cx >> 8) as u8,
-            Register::DL => (self.dx & 0xFF) as u8,
-            Register::DH => (self.dx >> 8) as u8,
-            _ => 0, // Panic or return 0 for unhandled registers
-        }
-    }
-
-    // Set 16-bit Register
-    pub fn set_reg16(&mut self, reg: Register, value: u16) {
-        match reg {
-            Register::AX | Register::EAX => self.ax = value,
-            Register::BX | Register::EBX => self.bx = value,
-            Register::CX | Register::ECX => self.cx = value,
-            Register::DX | Register::EDX => self.dx = value,
-            Register::SI | Register::ESI => self.si = value,
-            Register::DI | Register::EDI => self.di = value,
-            Register::BP | Register::EBP => self.bp = value,
-            Register::SP | Register::ESP => self.sp = value,
-
-            Register::ES => self.es = value,
-            Register::DS => self.ds = value,
-            Register::SS => self.ss = value,
-            Register::CS => self.cs = value,
-
-            _ => panic!("Unimplemented register write: {:?}", reg),
-        }
-    }
-
-    // Get 16-bit Register
-    pub fn get_reg16(&self, reg: Register) -> u16 {
-        match reg {
-            Register::AX | Register::EAX => self.ax,
-            Register::BX | Register::EBX => self.bx,
-            Register::CX | Register::ECX => self.cx,
-            Register::DX | Register::EDX => self.dx,
-            Register::SI | Register::ESI => self.si,
-            Register::DI | Register::EDI => self.di,
-            Register::BP | Register::EBP => self.bp,
-            Register::SP | Register::ESP => self.sp,
-
-            Register::ES => self.es,
-            Register::DS => self.ds,
-            Register::CS => self.cs,
-            Register::SS => self.ss,
-            _ => 0, // Panic or return 0 for unhandled registers
-        }
     }
 
     // ADD 16 bit
@@ -743,29 +640,29 @@ impl Cpu {
 
     // Stack Operations
     pub fn push(&mut self, value: u16) {
-        self.sp = self.sp.wrapping_sub(2);
-        let addr = self.get_physical_addr(self.ss, self.sp);
+        self.set_sp(self.sp().wrapping_sub(2));
+        let addr = self.get_physical_addr(self.ss(), self.sp());
         // Write Little Endian
         self.bus.write_8(addr, (value & 0xFF) as u8);
         self.bus.write_8(addr + 1, (value >> 8) as u8);
     }
     pub fn pop(&mut self) -> u16 {
-        let addr = self.get_physical_addr(self.ss, self.sp);
+        let addr = self.get_physical_addr(self.ss(), self.sp());
         let low = self.bus.read_8(addr) as u16;
         let high = self.bus.read_8(addr + 1) as u16;
-        self.sp = self.sp.wrapping_add(2);
+        self.set_sp(self.sp().wrapping_add(2));
         (high << 8) | low
     }
 
     /// Extract Low byte of DX (DL)
     pub fn get_dl(&self) -> u8 {
-        (self.dx & 0xFF) as u8
+        (self.dx() & 0xFF) as u8
     }
 
     /// Set Low byte of DX (DL)
     #[allow(dead_code)]
     pub fn set_dl(&mut self, value: u8) {
-        self.dx = (self.dx & 0xFF00) | (value as u16);
+        self.set_dx((self.dx() & 0xFF00) | (value as u16));
     }
 
     // ============== FPU Operations =================
@@ -923,20 +820,20 @@ impl Cpu {
         }
 
         // Reset CPU State to "Boot" values
-        self.cs = 0;
-        self.ds = 0;
-        self.es = 0;
-        self.ss = 0;
-        self.ip = 0x100; // Entry Point
-        self.sp = 0xFF00; // Stack Pointer (Safe distance away)
-        self.bp = 0;
+        self.set_cs(0);
+        self.set_ds(0);
+        self.set_es(0);
+        self.set_ss(0);
+        self.set_ip(0x100); // Entry Point
+        self.set_sp(0xFF00); // Stack Pointer (Safe distance away)
+        self.set_bp(0);
 
-        self.ax = 0;
-        self.bx = 0;
-        self.cx = 0;
-        self.dx = 0;
-        self.si = 0;
-        self.di = 0;
+        self.set_ax(0);
+        self.set_bx(0);
+        self.set_cx(0);
+        self.set_dx(0);
+        self.set_si(0);
+        self.set_di(0);
 
         self.flags = CpuFlags::from_bits_truncate(0x0202); // Reset Flags (IF=1)
         self.state = CpuState::Running;
@@ -1138,12 +1035,12 @@ impl Cpu {
         }
 
         // COM State
-        self.cs = load_segment;
-        self.ds = load_segment;
-        self.es = load_segment;
-        self.ss = load_segment; // Stack is in the same segment
-        self.ip = 0x100; // Entry Point
-        self.sp = 0xFFFE; // End of segment (64KB - 2)
+        self.set_cs(load_segment);
+        self.set_ds(load_segment);
+        self.set_es(load_segment);
+        self.set_ss(load_segment); // Stack is in the same segment
+        self.set_ip(0x100); // Entry Point
+        self.set_sp(0xFFFE); // End of segment (64KB - 2)
 
         // Setup PSP (Program Segment Prefix) at CS:0000
         let psp_phys = self.get_physical_addr(load_segment, 0);
@@ -1201,7 +1098,7 @@ impl Cpu {
 
         self.bus.log_string(&format!(
             "[DOS] Loaded COM file at {:04X}:{:04X}",
-            self.cs, self.ip
+            self.cs(), self.ip()
         ));
         // COM files are allocated the full 64KB segment by DOS convention.
         self.heap_pointer = load_segment + 0x1000;
@@ -1301,14 +1198,14 @@ impl Cpu {
         }
 
         // Setup Registers
-        self.ds = load_segment; // Point to PSP
-        self.es = load_segment;
+        self.set_ds(load_segment); // Point to PSP
+        self.set_es(load_segment);
 
         // CS/SS are relative to the Image Start (relocation_base_segment)
-        self.cs = relocation_base_segment.wrapping_add(init_cs);
-        self.ss = relocation_base_segment.wrapping_add(init_ss);
-        self.ip = init_ip;
-        self.sp = init_sp;
+        self.set_cs(relocation_base_segment.wrapping_add(init_cs));
+        self.set_ss(relocation_base_segment.wrapping_add(init_ss));
+        self.set_ip(init_ip);
+        self.set_sp(init_sp);
 
         let psp_phys = self.get_physical_addr(load_segment, 0);
 
@@ -1345,7 +1242,7 @@ impl Cpu {
 
         self.bus.log_string(&format!(
             "[DOS] Loaded. Entry CS:IP = {:04X}:{:04X}",
-            self.cs, self.ip
+            self.cs(), self.ip()
         ));
 
         // Determine the child's memory block size. Two paths:

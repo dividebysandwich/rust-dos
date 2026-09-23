@@ -39,8 +39,8 @@ fn set_dsdx_string(cpu: &mut Cpu, s: &str) {
     for (i, b) in s.bytes().chain(std::iter::once(0)).enumerate() {
         cpu.bus.write_8(base + i, b);
     }
-    cpu.ds = 0x2000;
-    cpu.dx = 0;
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0);
 }
 
 fn cf(cpu: &Cpu) -> bool {
@@ -48,8 +48,8 @@ fn cf(cpu: &Cpu) -> bool {
 }
 
 fn set_dta(cpu: &mut Cpu) {
-    cpu.ds = 0x4000;
-    cpu.dx = 0;
+    cpu.set_ds(0x4000);
+    cpu.set_dx(0);
     int21(cpu, 0x1A);
 }
 
@@ -63,8 +63,8 @@ fn dta_name(cpu: &Cpu) -> String {
 
 fn get_cwd(cpu: &mut Cpu, dl: u8) -> Option<String> {
     cpu.set_reg8(Register::DL, dl);
-    cpu.ds = 0x3000;
-    cpu.si = 0;
+    cpu.set_ds(0x3000);
+    cpu.set_si(0);
     cpu.set_cpu_flag(CpuFlags::CF, false);
     int21(cpu, 0x47);
     if cf(cpu) {
@@ -114,7 +114,7 @@ fn drive_selection_and_per_drive_directories() {
 
     // Invalid drive: CF=1, AX=0Fh
     assert_eq!(get_cwd(&mut cpu, 6), None);
-    assert_eq!(cpu.ax, 0x0F);
+    assert_eq!(cpu.ax(), 0x0F);
 
     // Relative open resolves against D:'s directory
     fs::write(base.join("d/DSUB/FILE.TXT"), b"hi").unwrap();
@@ -147,32 +147,32 @@ fn free_space_allocation_info_and_dpb() {
 
     cpu.set_reg8(Register::DL, 1); // A:
     int21(&mut cpu, 0x36);
-    assert_eq!((cpu.ax, cpu.cx, cpu.dx, cpu.bx), (1, 512, 2847, 2847));
+    assert_eq!((cpu.ax(), cpu.cx(), cpu.dx(), cpu.bx()), (1, 512, 2847, 2847));
 
     fs::write(base.join("a/SAVE.DAT"), vec![0u8; 1024]).unwrap();
     cpu.set_reg8(Register::DL, 1);
     int21(&mut cpu, 0x36);
-    assert_eq!(cpu.bx, 2845);
+    assert_eq!(cpu.bx(), 2845);
 
     cpu.set_reg8(Register::DL, 4); // D: CD-ROM
     int21(&mut cpu, 0x36);
-    assert_eq!((cpu.bx, cpu.cx), (0, 2048));
+    assert_eq!((cpu.bx(), cpu.cx()), (0, 2048));
 
     cpu.set_reg8(Register::DL, 3); // C: unchanged fake 80 MB
     int21(&mut cpu, 0x36);
-    assert_eq!((cpu.ax, cpu.bx, cpu.cx, cpu.dx), (8, 20000, 512, 20000));
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (8, 20000, 512, 20000));
 
     cpu.set_reg8(Register::DL, 7); // G: not mounted
     int21(&mut cpu, 0x36);
-    assert_eq!(cpu.ax, 0xFFFF);
+    assert_eq!(cpu.ax(), 0xFFFF);
 
     // AH=1Ch: DS:BX -> media descriptor
     cpu.set_reg8(Register::DL, 1);
     int21(&mut cpu, 0x1C);
-    let media = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds, cpu.bx));
-    assert_eq!((cpu.get_reg8(Register::AL), cpu.cx, media), (1, 512, 0xF0));
+    let media = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds(), cpu.bx()));
+    assert_eq!((cpu.get_reg8(Register::AL), cpu.cx(), media), (1, 512, 0xF0));
     int21(&mut cpu, 0x1B); // default drive (C:)
-    let media = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds, cpu.bx));
+    let media = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds(), cpu.bx()));
     assert_eq!((cpu.get_reg8(Register::AL), media), (8, 0xF8));
     cpu.set_reg8(Register::DL, 7);
     int21(&mut cpu, 0x1C);
@@ -182,7 +182,7 @@ fn free_space_allocation_info_and_dpb() {
     cpu.set_reg8(Register::DL, 3);
     int21(&mut cpu, 0x32);
     assert_eq!(cpu.get_reg8(Register::AL), 0);
-    let dpb = cpu.get_physical_addr(cpu.ds, cpu.bx);
+    let dpb = cpu.get_physical_addr(cpu.ds(), cpu.bx());
     assert_eq!(cpu.bus.read_8(dpb), DRIVE_C);
     assert_eq!(cpu.bus.read_16(dpb + 2), 512);
     assert_eq!(cpu.bus.read_8(dpb + 0x17), 0xF8);
@@ -219,7 +219,7 @@ fn ioctl_reports_drive_types() {
         cpu.set_reg8(Register::BL, bl);
         cpu.set_reg8(Register::AL, 0x08);
         int21(cpu, 0x44);
-        (cf(cpu), cpu.ax)
+        (cf(cpu), cpu.ax())
     };
     assert_eq!(removable(&mut cpu, 1), (false, 0)); // A: floppy
     assert_eq!(removable(&mut cpu, 3), (false, 1)); // C: fixed
@@ -231,7 +231,7 @@ fn ioctl_reports_drive_types() {
         cpu.set_reg8(Register::BL, bl);
         cpu.set_reg8(Register::AL, 0x09);
         int21(cpu, 0x44);
-        (cf(cpu), cpu.dx)
+        (cf(cpu), cpu.dx())
     };
     assert_eq!(remote(&mut cpu, 3), (false, 0x0802));
     assert_eq!(remote(&mut cpu, 4), (false, 0x1000));
@@ -242,10 +242,10 @@ fn ioctl_reports_drive_types() {
     cpu.set_reg8(Register::AL, 0);
     int21(&mut cpu, 0x3D);
     assert!(!cf(&cpu));
-    cpu.bx = cpu.ax;
+    cpu.set_bx(cpu.ax());
     cpu.set_reg8(Register::AL, 0x00);
     int21(&mut cpu, 0x44);
-    assert_eq!(cpu.dx, DRIVE_D as u16);
+    assert_eq!(cpu.dx(), DRIVE_D as u16);
 }
 
 #[test]
@@ -269,35 +269,35 @@ fn read_only_drives_reject_writes() {
 
     for name in ["D:\\NEW.TXT", "E:\\NEW.TXT"] {
         set_dsdx_string(&mut cpu, name);
-        cpu.cx = 0;
+        cpu.set_cx(0);
         int21(&mut cpu, 0x3C);
         assert!(cf(&cpu), "{}", name);
-        assert_eq!(cpu.ax, 0x05);
+        assert_eq!(cpu.ax(), 0x05);
     }
 
     set_dsdx_string(&mut cpu, "D:\\DATA.DAT");
     cpu.set_reg8(Register::AL, 0x01);
     int21(&mut cpu, 0x3D);
-    assert_eq!((cf(&cpu), cpu.ax), (true, 0x05));
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x05));
 
     // Read/write open is downgraded; the write then fails with CF set
     cpu.set_reg8(Register::AL, 0x02);
     int21(&mut cpu, 0x3D);
     assert!(!cf(&cpu));
-    cpu.bx = cpu.ax;
-    cpu.cx = 1;
+    cpu.set_bx(cpu.ax());
+    cpu.set_cx(1);
     int21(&mut cpu, 0x40);
-    assert_eq!((cf(&cpu), cpu.ax), (true, 0x05));
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x05));
 
     set_dsdx_string(&mut cpu, "D:\\NEWDIR");
     int21(&mut cpu, 0x39);
-    assert_eq!((cf(&cpu), cpu.ax), (true, 0x05));
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x05));
 
     set_dsdx_string(&mut cpu, "D:\\DATA.DAT");
     cpu.set_reg8(Register::AL, 0x00);
     int21(&mut cpu, 0x43);
     assert!(!cf(&cpu));
-    assert_eq!(cpu.cx & 0x01, 0x01);
+    assert_eq!(cpu.cx() & 0x01, 0x01);
 
     assert_eq!(fs::read(base.join("cd/DATA.DAT")).unwrap(), b"cd");
     assert!(!base.join("cd/NEW.TXT").exists());
@@ -320,7 +320,7 @@ fn find_next_stays_on_the_searched_drive() {
     set_dta(&mut cpu);
 
     set_dsdx_string(&mut cpu, "D:*.*");
-    cpu.cx = 0x10;
+    cpu.set_cx(0x10);
     int21(&mut cpu, 0x4E);
     assert!(!cf(&cpu));
     assert_eq!(cpu.bus.read_8(DTA), 4); // D: (1-based)
@@ -340,7 +340,7 @@ fn find_next_stays_on_the_searched_drive() {
 
     // "C:*.*" used to store "C" as the directory and lose FindNext
     set_dsdx_string(&mut cpu, "C:*.*");
-    cpu.cx = 0x10;
+    cpu.set_cx(0x10);
     int21(&mut cpu, 0x4E);
     assert!(!cf(&cpu));
     let mut names = vec![dta_name(&cpu)];
@@ -370,7 +370,7 @@ fn volume_labels_are_per_drive() {
     set_dta(&mut cpu);
 
     set_dsdx_string(&mut cpu, "A:*.*");
-    cpu.cx = 0x08;
+    cpu.set_cx(0x08);
     int21(&mut cpu, 0x4E);
     assert!(!cf(&cpu));
     assert_eq!(dta_name(&cpu), "MYDISK");
@@ -378,7 +378,7 @@ fn volume_labels_are_per_drive() {
 
     // A plain file that happens to be called RUSTDOS is just a file
     set_dsdx_string(&mut cpu, "C:RUSTDOS");
-    cpu.cx = 0x00;
+    cpu.set_cx(0x00);
     int21(&mut cpu, 0x4E);
     assert!(!cf(&cpu));
     assert_eq!(dta_name(&cpu), "RUSTDOS");
@@ -409,8 +409,8 @@ fn fcb_search_honors_drive_byte_and_extended_fcbs() {
     };
 
     write_fcb(&mut cpu, fcb, 1); // A:
-    cpu.ds = 0x5000;
-    cpu.dx = 0;
+    cpu.set_ds(0x5000);
+    cpu.set_dx(0);
     int21(&mut cpu, 0x11);
     assert_eq!(cpu.get_reg8(Register::AL), 0);
     assert_eq!(cpu.bus.read_8(DTA), 1);
@@ -450,10 +450,10 @@ fn parse_filename_handles_drive_prefixes() {
         for (i, b) in text.bytes().chain(std::iter::once(0)).enumerate() {
             cpu.bus.write_8(0x20000 + i, b);
         }
-        cpu.ds = 0x2000;
-        cpu.si = 0;
-        cpu.es = 0x3000;
-        cpu.di = 0;
+        cpu.set_ds(0x2000);
+        cpu.set_si(0);
+        cpu.set_es(0x3000);
+        cpu.set_di(0);
         cpu.set_reg8(Register::AL, al);
         int21(cpu, 0x29);
         cpu.get_reg8(Register::AL)
@@ -463,7 +463,7 @@ fn parse_filename_handles_drive_prefixes() {
     assert_eq!(cpu.bus.read_8(fcb), 4);
     let name: Vec<u8> = (1..12).map(|i| cpu.bus.read_8(fcb + i)).collect();
     assert_eq!(name, b"TEST    TXT");
-    assert_eq!(cpu.si, 10);
+    assert_eq!(cpu.si(), 10);
 
     assert_eq!(parse(&mut cpu, "E:X.Y", 0), 0xFF);
 

@@ -17,9 +17,9 @@ pub fn handle(cpu: &mut Cpu) {
         "[BIOS] INT 10h Called. AH={:02X}, AL={:02X}, BX={:04X}, CX={:04X}, DX={:04X}",
         ah,
         cpu.get_al(),
-        cpu.bx,
-        cpu.cx,
-        cpu.dx
+        cpu.bx(),
+        cpu.cx(),
+        cpu.dx()
     ));
 
     match ah {
@@ -159,7 +159,7 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 01h: Set Cursor Type
         0x01 => {
-            let cx = cpu.cx;
+            let cx = cpu.cx();
             cpu.bus.write_16(0x0460, cx);
         }
 
@@ -193,8 +193,8 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 04h: Read Light Pen
         0x04 => {
-            cpu.cx = 0;
-            cpu.dx = 0;
+            cpu.set_cx(0);
+            cpu.set_dx(0);
         }
 
         // AH = 05h: Set Active Page
@@ -250,7 +250,7 @@ pub fn handle(cpu: &mut Cpu) {
             let char_code = cpu.get_al();
             let page = cpu.get_reg8(Register::BH);
             let attr = cpu.get_reg8(Register::BL);
-            let count = cpu.cx as usize;
+            let count = cpu.cx() as usize;
 
             let (col, row) = get_cursor(cpu, page);
 
@@ -399,22 +399,22 @@ pub fn handle(cpu: &mut Cpu) {
                     // Set Single Palette Register
                     // BL = Palette Register (0-15)
                     // BH = Color Value
-                    let reg = (cpu.bx & 0xFF) as u8 & 0x0F;
-                    let val = (cpu.bx >> 8) as u8;
+                    let reg = (cpu.bx() & 0xFF) as u8 & 0x0F;
+                    let val = (cpu.bx() >> 8) as u8;
                     cpu.bus.vga.attribute_regs[reg as usize] = val;
                     cpu.bus.vga.mark_dirty_full();
                 }
                 0x01 => {
                     // Set Overscan (Border) Color
-                    let val = (cpu.bx >> 8) as u8; // BH
+                    let val = (cpu.bx() >> 8) as u8; // BH
                     cpu.bus.vga.attribute_regs[0x11] = val;
                     cpu.bus.vga.mark_dirty_full();
                 }
                 0x02 => {
                     // Set All Palette Registers + Overscan
                     // ES:DX points to 17 byte table (0-15 + Overscan)
-                    let es = cpu.es;
-                    let dx = cpu.dx;
+                    let es = cpu.es();
+                    let dx = cpu.dx();
                     let addr = cpu.get_physical_addr(es, dx);
 
                     for i in 0..16 {
@@ -442,7 +442,7 @@ pub fn handle(cpu: &mut Cpu) {
                     // Read Individual Palette Register
                     // BL = Register
                     // Return: BH = Value
-                    let reg = (cpu.bx & 0xFF) as u8 & 0x0F;
+                    let reg = (cpu.bx() & 0xFF) as u8 & 0x0F;
                     let val = cpu.bus.vga.attribute_regs[reg as usize];
                     cpu.set_reg8(Register::BH, val);
                 }
@@ -454,8 +454,8 @@ pub fn handle(cpu: &mut Cpu) {
                 0x09 => {
                     // Read All Palette Registers + Overscan
                     // ES:DX -> 17-byte buffer (16 palette + overscan)
-                    let es = cpu.es;
-                    let dx = cpu.dx;
+                    let es = cpu.es();
+                    let dx = cpu.dx();
                     let addr = cpu.get_physical_addr(es, dx);
                     for i in 0..16 {
                         let val = cpu.bus.vga.attribute_regs[i];
@@ -468,10 +468,10 @@ pub fn handle(cpu: &mut Cpu) {
                     // Set Individual DAC Register
                     // BX = Register (0-255)
                     // DH = Red, CH = Green, CL = Blue (each 6-bit, 0-63)
-                    let idx = (cpu.bx & 0xFF) as usize;
-                    let r = (cpu.dx >> 8) as u8 & 0x3F; // DH
-                    let g = (cpu.cx >> 8) as u8 & 0x3F; // CH
-                    let b = (cpu.cx & 0xFF) as u8 & 0x3F; // CL
+                    let idx = (cpu.bx() & 0xFF) as usize;
+                    let r = (cpu.dx() >> 8) as u8 & 0x3F; // DH
+                    let g = (cpu.cx() >> 8) as u8 & 0x3F; // CH
+                    let b = (cpu.cx() & 0xFF) as u8 & 0x3F; // CL
 
                     let base = idx * 3;
                     if base + 2 < cpu.bus.vga.palette.len() {
@@ -485,10 +485,10 @@ pub fn handle(cpu: &mut Cpu) {
                     // Set Block of DAC Registers
                     // BX = Starting register, CX = Count
                     // ES:DX -> table of (R,G,B) triplets (6-bit values each)
-                    let start = (cpu.bx & 0xFF) as usize;
-                    let count = cpu.cx as usize;
-                    let es = cpu.es;
-                    let dx = cpu.dx;
+                    let start = (cpu.bx() & 0xFF) as usize;
+                    let count = cpu.cx() as usize;
+                    let es = cpu.es();
+                    let dx = cpu.dx();
                     let addr = cpu.get_physical_addr(es, dx);
 
                     for i in 0..count {
@@ -522,7 +522,7 @@ pub fn handle(cpu: &mut Cpu) {
                     // Read Individual DAC Register
                     // BX = Register
                     // Return: DH=Red, CH=Green, CL=Blue
-                    let idx = (cpu.bx & 0xFF) as usize;
+                    let idx = (cpu.bx() & 0xFF) as usize;
                     let base = idx * 3;
                     if base + 2 < cpu.bus.vga.palette.len() {
                         let r = cpu.bus.vga.palette[base];
@@ -537,10 +537,10 @@ pub fn handle(cpu: &mut Cpu) {
                     // Read Block of DAC Registers
                     // BX = Starting register, CX = Count
                     // ES:DX -> buffer to receive (R,G,B) triplets
-                    let start = (cpu.bx & 0xFF) as usize;
-                    let count = cpu.cx as usize;
-                    let es = cpu.es;
-                    let dx = cpu.dx;
+                    let start = (cpu.bx() & 0xFF) as usize;
+                    let count = cpu.cx() as usize;
+                    let es = cpu.es();
+                    let dx = cpu.dx();
                     let addr = cpu.get_physical_addr(es, dx);
 
                     for i in 0..count {
@@ -579,8 +579,8 @@ pub fn handle(cpu: &mut Cpu) {
                 0x1B => {
                     // Perform Gray-Scale Summing
                     // BX = starting register, CX = count
-                    let start = (cpu.bx & 0xFF) as usize;
-                    let count = cpu.cx as usize;
+                    let start = (cpu.bx() & 0xFF) as usize;
+                    let count = cpu.cx() as usize;
 
                     for i in 0..count {
                         let base = (start + i) * 3;
@@ -665,24 +665,24 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_reg8(Register::DL, current_rows_minus_1);
                     match val_bh {
                         0x00 | 0x01 | 0x03 | 0x04 => {
-                            cpu.cx = 8;
-                            cpu.es = 0xF000;
-                            cpu.bp = 0xFA6E;
+                            cpu.set_cx(8);
+                            cpu.set_es(0xF000);
+                            cpu.set_bp(0xFA6E);
                         }
                         0x02 | 0x05 => {
-                            cpu.cx = 14;
-                            cpu.es = 0xC000;
-                            cpu.bp = 0x2000;
+                            cpu.set_cx(14);
+                            cpu.set_es(0xC000);
+                            cpu.set_bp(0x2000);
                         }
                         0x06 | 0x07 => {
-                            cpu.cx = 16;
-                            cpu.es = 0xC000;
-                            cpu.bp = 0x2000;
+                            cpu.set_cx(16);
+                            cpu.set_es(0xC000);
+                            cpu.set_bp(0x2000);
                         }
                         _ => {
-                            cpu.cx = 16;
-                            cpu.es = 0xC000;
-                            cpu.bp = 0x2000;
+                            cpu.set_cx(16);
+                            cpu.set_es(0xC000);
+                            cpu.set_bp(0x2000);
                         }
                     }
                 }
@@ -702,7 +702,7 @@ pub fn handle(cpu: &mut Cpu) {
                     // Get Configuration
                     cpu.set_reg8(Register::BH, 0); // Color Mode
                     cpu.set_reg8(Register::BL, 3); // 256KB Video Memory
-                    cpu.cx = 0; // Feature bits
+                    cpu.set_cx(0); // Feature bits
                 }
                 0x30 => {
                     // Select Scan Lines (AL = 0, 1, 2)
@@ -720,7 +720,7 @@ pub fn handle(cpu: &mut Cpu) {
             }
             cpu.bus.log_string(&format!(
                 "[BIOS] AH=12 Return: ax={:04X} bx={:04X} cx={:04X}",
-                cpu.ax, cpu.bx, cpu.cx
+                cpu.ax(), cpu.bx(), cpu.cx()
             ));
         }
 
@@ -733,15 +733,15 @@ pub fn handle(cpu: &mut Cpu) {
         // ES:BP = Pointer to string
         0x13 => {
             let mode = cpu.get_al();
-            let count = cpu.cx; // CX is loop count
+            let count = cpu.cx(); // CX is loop count
             let page = cpu.get_reg8(Register::BH);
             let attr = cpu.get_reg8(Register::BL);
             let start_row = cpu.get_reg8(Register::DH);
             let start_col = cpu.get_reg8(Register::DL);
 
             // Pointers
-            let es = cpu.es;
-            let bp = cpu.bp;
+            let es = cpu.es();
+            let bp = cpu.bp();
 
             // Decode Mode bits
             // Bit 0: Update cursor? (0=No, 1=Yes)
@@ -845,8 +845,8 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 1Bh: Get Video State Information
         // ES:DI points to 64-byte buffer
         0x1B => {
-            let es = cpu.es;
-            let di = cpu.di;
+            let es = cpu.es();
+            let di = cpu.di();
             let addr = cpu.get_physical_addr(es, di);
 
             // Clear buffer (64 bytes)
@@ -932,8 +932,8 @@ pub fn handle(cpu: &mut Cpu) {
             match al {
                 0x00 => {
                     // AL=00h: Return VBE Controller Info
-                    let es = cpu.es;
-                    let di = cpu.di;
+                    let es = cpu.es();
+                    let di = cpu.di();
                     let addr = cpu.get_physical_addr(es, di);
                     let vbe_signature = b"VESA";
                     for i in 0..4 {
@@ -945,8 +945,8 @@ pub fn handle(cpu: &mut Cpu) {
                 }
                 0x01 => {
                     // AL=01h: Return VBE Mode Info
-                    let es = cpu.es;
-                    let di = cpu.di;
+                    let es = cpu.es();
+                    let di = cpu.di();
                     let addr = cpu.get_physical_addr(es, di);
                     // For simplicity, only implement mode 0x101 (640x480x256)
                     let mode_number: u16 = 0x101;

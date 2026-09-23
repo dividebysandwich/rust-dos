@@ -226,18 +226,18 @@ fn bios_timer_handler_returns_with_the_interrupted_flags() {
     // the code the tick interrupted, whatever the handler left in them.
     for (vector, service) in [(0x08, false), (0x09, false), (0x21, true)] {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-        cpu.ss = 0x3000;
-        cpu.sp = 0x0100;
+        cpu.set_ss(0x3000);
+        cpu.set_sp(0x0100);
         let interrupted = CpuFlags::IF | CpuFlags::CF | CpuFlags::DF;
         cpu.set_cpu_flags(interrupted);
-        cpu.push(cpu.get_cpu_flags().bits());
+        cpu.push(cpu.flags16());
         cpu.push(0x1234);
         cpu.push(0x0100);
         cpu.set_cpu_flags(CpuFlags::ZF);
 
         rust_dos::interrupts::return_from_hle(&mut cpu, vector);
 
-        assert_eq!((cpu.cs, cpu.ip, cpu.sp), (0x1234, 0x0100, 0x0100));
+        assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (0x1234, 0x0100, 0x0100));
         assert!(cpu.get_cpu_flag(CpuFlags::IF));
         // Services hand back their CF/ZF results and clear DF.
         assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), !service, "CF, INT {vector:02X}h");
@@ -352,12 +352,12 @@ fn int_1a_reads_the_bios_tick_count() {
     cpu.bus.write_16(0x046C, 0x1234);
     cpu.bus.write_16(0x046E, 0x0005);
     cpu.bus.write_8(0x0470, 1);
-    cpu.ax = 0x0000;
+    cpu.set_ax(0x0000);
     rust_dos::interrupts::int1a::handle(&mut cpu);
-    assert_eq!((cpu.cx, cpu.dx, cpu.ax & 0xFF), (0x0005, 0x1234, 1));
+    assert_eq!((cpu.cx(), cpu.dx(), cpu.ax() & 0xFF), (0x0005, 0x1234, 1));
     // The midnight flag is reported once.
     rust_dos::interrupts::int1a::handle(&mut cpu);
-    assert_eq!(cpu.ax & 0xFF, 0);
+    assert_eq!(cpu.ax() & 0xFF, 0);
 }
 
 #[test]

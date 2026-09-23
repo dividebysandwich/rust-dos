@@ -42,31 +42,31 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 fn branch(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.ip = instr.near_branch16() as u16;
+    cpu.set_ip(instr.near_branch16() as u16);
 }
 
 fn jmp(cpu: &mut Cpu, instr: &Instruction) {
     match instr.code() {
         // JMP Rel (Short/Near)
         Code::Jmp_rel8_16 | Code::Jmp_rel16 | Code::Jmp_rel8_32 | Code::Jmp_rel32_32 => {
-            cpu.ip = instr.near_branch16() as u16;
+            cpu.set_ip(instr.near_branch16() as u16);
         }
 
         // JMP r/m16 (Near Indirect)
         Code::Jmp_rm16 => {
             if instr.op0_kind() == OpKind::Register {
-                cpu.ip = cpu.get_reg16(instr.op0_register());
+                cpu.set_ip(cpu.get_reg16(instr.op0_register()));
             } else {
                 let addr = calculate_addr(cpu, instr);
-                cpu.ip = cpu.bus.read_16(addr);
+                cpu.set_ip(cpu.bus.read_16(addr));
             }
         }
 
         // JMP ptr16:16 (Far Direct) -> JMP SEG:OFF
         // iced_x86: far_branch16() = offset, far_branch_selector() = segment.
         Code::Jmp_ptr1616 => {
-            cpu.ip = instr.far_branch16();
-            cpu.cs = instr.far_branch_selector();
+            cpu.set_ip(instr.far_branch16());
+            cpu.set_cs(instr.far_branch_selector());
         }
 
         // JMP m16:16 (Far Indirect) -> JMP DWORD PTR [BX]
@@ -74,8 +74,8 @@ fn jmp(cpu: &mut Cpu, instr: &Instruction) {
             let addr = calculate_addr(cpu, instr);
             let new_ip = cpu.bus.read_16(addr);
             let new_cs = cpu.bus.read_16(addr + 2);
-            cpu.ip = new_ip;
-            cpu.cs = new_cs;
+            cpu.set_ip(new_ip);
+            cpu.set_cs(new_cs);
         }
         _ => {cpu.bus.log_string(&format!("[CONTROL] Unsupported JMP instruction: {:?}", instr.code())); }
     }
@@ -84,56 +84,59 @@ fn jmp(cpu: &mut Cpu, instr: &Instruction) {
 fn call(cpu: &mut Cpu, instr: &Instruction) {
     match instr.code() {
         Code::Call_rel16 | Code::Call_rel32_32 => {
-            cpu.push(cpu.ip);
-            cpu.ip = instr.near_branch16() as u16;
+            cpu.push(cpu.ip());
+            cpu.set_ip(instr.near_branch16() as u16);
         }
         Code::Call_rm16 => {
-            cpu.push(cpu.ip);
+            cpu.push(cpu.ip());
             if instr.op0_kind() == OpKind::Register {
-                cpu.ip = cpu.get_reg16(instr.op0_register());
+                cpu.set_ip(cpu.get_reg16(instr.op0_register()));
             } else {
                 let addr = calculate_addr(cpu, instr);
-                cpu.ip = cpu.bus.read_16(addr);
+                cpu.set_ip(cpu.bus.read_16(addr));
             }
         }
         Code::Call_ptr1616 => {
-            cpu.push(cpu.cs);
-            cpu.push(cpu.ip);
-            cpu.ip = instr.far_branch16();
-            cpu.cs = instr.far_branch_selector();
+            cpu.push(cpu.cs());
+            cpu.push(cpu.ip());
+            cpu.set_ip(instr.far_branch16());
+            cpu.set_cs(instr.far_branch_selector());
         }
         Code::Call_m1616 => {
             let addr = calculate_addr(cpu, instr);
             let new_ip = cpu.bus.read_16(addr);
             let new_cs = cpu.bus.read_16(addr + 2);
-            cpu.push(cpu.cs);
-            cpu.push(cpu.ip);
-            cpu.ip = new_ip;
-            cpu.cs = new_cs;
+            cpu.push(cpu.cs());
+            cpu.push(cpu.ip());
+            cpu.set_ip(new_ip);
+            cpu.set_cs(new_cs);
         }
         _ => {cpu.bus.log_string(&format!("[CONTROL] Unsupported CALL instruction: {:?}", instr.code()));}
     }
 }
 
 fn ret(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.ip = cpu.pop();
+    let ip = cpu.pop();
+    cpu.set_ip(ip);
     if instr.op0_kind() == OpKind::Immediate16 {
-        cpu.sp = cpu.sp.wrapping_add(instr.immediate16());
+        cpu.set_sp(cpu.sp().wrapping_add(instr.immediate16()));
     }
 }
 
 fn retf(cpu: &mut Cpu, instr: &Instruction) {
-    let caller_cs = cpu.cs;
-    let caller_ip = cpu.ip.wrapping_sub(instr.len() as u16);
-    cpu.ip = cpu.pop();
-    cpu.cs = cpu.pop();
+    let caller_cs = cpu.cs();
+    let caller_ip = cpu.ip().wrapping_sub(instr.len() as u16);
+    let ip = cpu.pop();
+    cpu.set_ip(ip);
+    let cs = cpu.pop();
+    cpu.set_cs(cs);
     if instr.op0_kind() == OpKind::Immediate16 {
-        cpu.sp = cpu.sp.wrapping_add(instr.immediate16());
+        cpu.set_sp(cpu.sp().wrapping_add(instr.immediate16()));
     }
-    if cpu.cs == 0 && cpu.ip < 0x100 {
+    if cpu.cs() == 0 && cpu.ip() < 0x100 {
         cpu.bus.log_string(&format!(
             "[RETF-BAD] from {:04X}:{:04X} -> {:04X}:{:04X} SS:SP={:04X}:{:04X}",
-            caller_cs, caller_ip, cpu.cs, cpu.ip, cpu.ss, cpu.sp
+            caller_cs, caller_ip, cpu.cs(), cpu.ip(), cpu.ss(), cpu.sp()
         ));
         // Dump the function containing the RETF: 80 bytes before and 16 at
         // the RETF site so we can see the prologue, loop body, epilogue.
@@ -158,28 +161,28 @@ fn retf(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 fn loop_op(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.cx = cpu.cx.wrapping_sub(1);
-    if cpu.cx != 0 {
-        cpu.ip = instr.near_branch16() as u16;
+    cpu.set_cx(cpu.cx().wrapping_sub(1));
+    if cpu.cx() != 0 {
+        cpu.set_ip(instr.near_branch16() as u16);
     }
 }
 
 fn loope(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.cx = cpu.cx.wrapping_sub(1);
-    if cpu.cx != 0 && cpu.get_cpu_flag(CpuFlags::ZF) {
-        cpu.ip = instr.near_branch16() as u16;
+    cpu.set_cx(cpu.cx().wrapping_sub(1));
+    if cpu.cx() != 0 && cpu.get_cpu_flag(CpuFlags::ZF) {
+        cpu.set_ip(instr.near_branch16() as u16);
     }
 }
 
 fn loopne(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.cx = cpu.cx.wrapping_sub(1);
-    if cpu.cx != 0 && !cpu.get_cpu_flag(CpuFlags::ZF) {
-        cpu.ip = instr.near_branch16() as u16;
+    cpu.set_cx(cpu.cx().wrapping_sub(1));
+    if cpu.cx() != 0 && !cpu.get_cpu_flag(CpuFlags::ZF) {
+        cpu.set_ip(instr.near_branch16() as u16);
     }
 }
 
 fn jcxz(cpu: &mut Cpu, instr: &Instruction) {
-    if cpu.cx == 0 {
-        cpu.ip = instr.near_branch16() as u16;
+    if cpu.cx() == 0 {
+        cpu.set_ip(instr.near_branch16() as u16);
     }
 }

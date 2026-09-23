@@ -13,13 +13,13 @@ fn test_mov_and_registers() {
     
     testrunners::run_cpu_code(&mut cpu, &code);
 
-    assert_eq!(cpu.ax, 0x3434); 
+    assert_eq!(cpu.ax(), 0x3434); 
 }
 
 #[test]
 fn test_stack_push_pop() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.sp = 0xFFFE; // Initialize stack pointer
+    cpu.set_sp(0xFFFE); // Initialize stack pointer
 
     // B8 55 AA    MOV AX, 0xAA55
     // 50          PUSH AX
@@ -29,8 +29,8 @@ fn test_stack_push_pop() {
 
     testrunners::run_cpu_code(&mut cpu, &code);
 
-    assert_eq!(cpu.bx, 0xAA55);
-    assert_eq!(cpu.sp, 0xFFFE); // SP should return to start
+    assert_eq!(cpu.bx(), 0xAA55);
+    assert_eq!(cpu.sp(), 0xFFFE); // SP should return to start
 }
 
 #[test]
@@ -61,8 +61,8 @@ fn test_imul_16bit() {
     testrunners::run_cpu_code(&mut cpu, &code);
 
     // Result should be positive 32768
-    assert_eq!(cpu.dx, 0x0000);
-    assert_eq!(cpu.ax, 0x8000);
+    assert_eq!(cpu.dx(), 0x0000);
+    assert_eq!(cpu.ax(), 0x8000);
     // Since 0x8000 requires 16 bits (unsigned representation), 
     // but as a signed 16-bit number it is negative, overflow flags checks 
     // depend on if the result fits in the lower half strictly.
@@ -83,17 +83,17 @@ fn test_jumps_jz() {
 
     testrunners::run_cpu_code(&mut cpu, &code);
 
-    assert_eq!(cpu.ax, 0); // Should remain 0, MOV AX, FFFF skipped
+    assert_eq!(cpu.ax(), 0); // Should remain 0, MOV AX, FFFF skipped
 }
 
 #[test]
 fn test_string_rep_movsb() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.si = 0x0000;
-    cpu.di = 0x0010;
-    cpu.cx = 0x0003; // Copy 3 bytes
-    cpu.ds = 0x1000;
-    cpu.es = 0x1000;
+    cpu.set_si(0x0000);
+    cpu.set_di(0x0010);
+    cpu.set_cx(0x0003); // Copy 3 bytes
+    cpu.set_ds(0x1000);
+    cpu.set_es(0x1000);
     cpu.set_dflag(false); // Increment
 
     // Manually populate source memory in RAM
@@ -114,15 +114,15 @@ fn test_string_rep_movsb() {
     assert_eq!(cpu.bus.read_8(dest_phys+2), 0xCC);
 
     // Indices should update
-    assert_eq!(cpu.si, 3);
-    assert_eq!(cpu.di, 0x0013);
-    assert_eq!(cpu.cx, 0);
+    assert_eq!(cpu.si(), 3);
+    assert_eq!(cpu.di(), 0x0013);
+    assert_eq!(cpu.cx(), 0);
 }
 
 #[test]
 fn test_call_ret() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.sp = 0xFFFE;
+    cpu.set_sp(0xFFFE);
 
     // Layout:
     // 0x100: CALL +4     (E8 04 00) -> Jumps to 0x107 (Target)
@@ -145,15 +145,15 @@ fn test_call_ret() {
     // 3. JMP jumps to 0x119. 
     // 4. run_code sees IP 0x119 > code.len(), and exits loop.
     
-    assert_eq!(cpu.sp, 0xFFFE); // Stack should be balanced
+    assert_eq!(cpu.sp(), 0xFFFE); // Stack should be balanced
 }
 
 #[test]
 fn test_repe_scasb_backwards_mismatch() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.es = 0x1000;
-    cpu.di = 0x0004; // Point to the end of a buffer
-    cpu.cx = 0x0005; 
+    cpu.set_es(0x1000);
+    cpu.set_di(0x0004); // Point to the end of a buffer
+    cpu.set_cx(0x0005); 
     cpu.set_reg8(iced_x86::Register::AL, 0x30); // Scanning for '0'
     cpu.set_dflag(true); // Backwards!
 
@@ -176,7 +176,7 @@ fn test_repe_scasb_backwards_mismatch() {
     // 3. CX should be 0 because it processed all bytes or stopped at the first non-zero
     assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), false);
     let comparison: u16 = 0x0000;
-    assert_eq!(cpu.di, comparison.wrapping_sub(1)); // Stopped at index 0, then decremented
+    assert_eq!(cpu.di(), comparison.wrapping_sub(1)); // Stopped at index 0, then decremented
 }
 
 #[test]
@@ -186,8 +186,8 @@ fn test_qb_trim_logic() {
     // 2. SCASB (AL vs [DI]) -> Should set ZF=0
     // 3. JZ ... (Should NOT jump)
     
-    cpu.es = 0x1000;
-    cpu.di = 0x0000;
+    cpu.set_es(0x1000);
+    cpu.set_di(0x0000);
     cpu.set_reg8(iced_x86::Register::AL, 0x30);
     cpu.bus.write_8(cpu.get_physical_addr(0x1000, 0), 0x38); // The '8'
 
@@ -324,12 +324,12 @@ fn test_aas_instruction() {
 
     // 0x08 - 0x09 = 0xFF. AAS should adjust this.
     // AL = 0xFF -> AL = 0x09, AH = AH - 1, CF=1, AF=1
-    cpu.ax = 0x0108; // AH=1, AL=8
+    cpu.set_ax(0x0108); // AH=1, AL=8
     let code = [0x2C, 0x09, 0x3F]; // SUB AL, 9; AAS
     testrunners::run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 0x09);
-    assert_eq!(cpu.ax >> 8, 0x00, "AAS failed to decrement AH on borrow");
+    assert_eq!(cpu.ax() >> 8, 0x00, "AAS failed to decrement AH on borrow");
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
 }
 

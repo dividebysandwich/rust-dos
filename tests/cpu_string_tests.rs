@@ -8,11 +8,11 @@ fn test_rep_movsb_forward() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
     // Setup Pointers
-    cpu.ds = 0x1000;
-    cpu.si = 0x0000; // Source
-    cpu.es = 0x2000;
-    cpu.di = 0x0010; // Dest
-    cpu.cx = 5;      // Count
+    cpu.set_ds(0x1000);
+    cpu.set_si(0x0000); // Source
+    cpu.set_es(0x2000);
+    cpu.set_di(0x0010); // Dest
+    cpu.set_cx(5);      // Count
     cpu.set_dflag(false); // Increment mode
 
     // Write source data: 1, 2, 3, 4, 5
@@ -32,19 +32,19 @@ fn test_rep_movsb_forward() {
     }
 
     // Verify Register Updates
-    assert_eq!(cpu.cx, 0, "CX should be 0");
-    assert_eq!(cpu.si, 5, "SI incremented by 5");
-    assert_eq!(cpu.di, 0x0015, "DI incremented by 5");
+    assert_eq!(cpu.cx(), 0, "CX should be 0");
+    assert_eq!(cpu.si(), 5, "SI incremented by 5");
+    assert_eq!(cpu.di(), 0x0015, "DI incremented by 5");
 }
 
 #[test]
 fn test_rep_stosw_backward() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
-    cpu.es = 0x1000;
-    cpu.di = 0x0008; // Start at offset 8
-    cpu.cx = 3;      // Write 3 Words
-    cpu.ax = 0xABCD; // Pattern
+    cpu.set_es(0x1000);
+    cpu.set_di(0x0008); // Start at offset 8
+    cpu.set_cx(3);      // Write 3 Words
+    cpu.set_ax(0xABCD); // Pattern
     cpu.set_dflag(true); // Decrement mode
 
     // FD: STD (Set Direction Flag)
@@ -53,11 +53,11 @@ fn test_rep_stosw_backward() {
     run_cpu_code(&mut cpu, &code);
 
     assert!(cpu.get_cpu_flag(CpuFlags::DF));
-    assert_eq!(cpu.cx, 0);
+    assert_eq!(cpu.cx(), 0);
     
     // Check pointers: Started at 8. 3 words = 6 bytes. 
     // Decrement: 8 -> 6 -> 4 -> 2. Final DI should be 2.
-    assert_eq!(cpu.di, 2);
+    assert_eq!(cpu.di(), 2);
 
     // Check Memory (Backwards from 8)
     // Word 1 at [7,8] ?? No, x86 stores at [DI] then decrements.
@@ -74,8 +74,8 @@ fn test_rep_stosw_backward() {
 fn test_lodsb_no_rep() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
-    cpu.ds = 0x1000;
-    cpu.si = 0x0005;
+    cpu.set_ds(0x1000);
+    cpu.set_si(0x0005);
     cpu.set_dflag(false);
 
     // Write 'X' (0x58) to source
@@ -86,16 +86,16 @@ fn test_lodsb_no_rep() {
     run_cpu_code(&mut cpu, &[0xAC]);
 
     assert_eq!(cpu.get_al(), 0x58);
-    assert_eq!(cpu.si, 0x0006);
+    assert_eq!(cpu.si(), 0x0006);
 }
 
 #[test]
 fn test_repne_scasb_match_found() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
-    cpu.es = 0x1000;
-    cpu.di = 0x0000;
-    cpu.cx = 10;
+    cpu.set_es(0x1000);
+    cpu.set_di(0x0000);
+    cpu.set_cx(10);
     cpu.set_reg8(Register::AL, 0x42); // Search for 0x42
     cpu.set_dflag(false);
 
@@ -116,10 +116,10 @@ fn test_repne_scasb_match_found() {
     // 4. Loop 4 (Idx 3): 0x42 - 0x42 == 0. ZF=1. STOP.
     
     // CX started at 10. Decremented 4 times. Remaining: 6.
-    assert_eq!(cpu.cx, 6);
+    assert_eq!(cpu.cx(), 6);
     
     // DI incremented 4 times. Current: 4.
-    assert_eq!(cpu.di, 4);
+    assert_eq!(cpu.di(), 4);
 
     // Flag should be Equal (ZF=1) indicating match found
     assert!(cpu.get_cpu_flag(CpuFlags::ZF));
@@ -128,17 +128,17 @@ fn test_repne_scasb_match_found() {
 #[test]
 fn test_repne_scasb_no_match() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.es = 0x1000;
-    cpu.di = 0x0000;
-    cpu.cx = 5;
+    cpu.set_es(0x1000);
+    cpu.set_di(0x0000);
+    cpu.set_cx(5);
     cpu.set_reg8(Register::AL, 0xFF);
     
     // F2 AE: REPNE SCASB
     run_cpu_code(&mut cpu, &[0xF2, 0xAE]);
 
     // Should run until CX=0 because 0xFF is not in empty memory (0x00)
-    assert_eq!(cpu.cx, 0);
-    assert_eq!(cpu.di, 5);
+    assert_eq!(cpu.cx(), 0);
+    assert_eq!(cpu.di(), 5);
     assert!(!cpu.get_cpu_flag(CpuFlags::ZF)); // ZF=0 (Not Found)
 }
 
@@ -146,9 +146,9 @@ fn test_repne_scasb_no_match() {
 fn test_repe_cmpsb_mismatch() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     
-    cpu.ds = 0x1000; cpu.si = 0;
-    cpu.es = 0x1000; cpu.di = 10;
-    cpu.cx = 5;
+    cpu.set_ds(0x1000); cpu.set_si(0);
+    cpu.set_es(0x1000); cpu.set_di(10);
+    cpu.set_cx(5);
     cpu.set_dflag(false);
 
     // Source: "HELLO"
@@ -175,9 +175,9 @@ fn test_repe_cmpsb_mismatch() {
     // 3. 'L'=='L', ZF=1, CX=2, SI=3, DI=13
     // 4. 'L'!='X', ZF=0, CX=1, SI=4, DI=14 -> STOP
 
-    assert_eq!(cpu.cx, 1);
-    assert_eq!(cpu.si, 4);
-    assert_eq!(cpu.di, 14);
+    assert_eq!(cpu.cx(), 1);
+    assert_eq!(cpu.si(), 4);
+    assert_eq!(cpu.di(), 14);
     assert!(!cpu.get_cpu_flag(CpuFlags::ZF)); // Mismatch
 }
 
@@ -268,11 +268,11 @@ fn test_loop_zf_interaction() {
     // E1 FE -> LOOPE -2 (Jump back to self)
     // Should NOT jump because ZF is 0.
     
-    cpu.ip = 0x100;
+    cpu.set_ip(0x100);
     testrunners::run_cpu_code(&mut cpu, &[0xE1, 0xFE]);
 
     // Should have executed ONCE, seen ZF=0, and continued.
     // CX should decrement once (standard behavior for LOOPx instructions: dec then check).
     assert_eq!(cpu.get_reg16(iced_x86::Register::CX), 4, "LOOPE should decrement CX once");
-    assert_eq!(cpu.ip, 0x102, "LOOPE should NOT take branch if ZF=0");
+    assert_eq!(cpu.ip(), 0x102, "LOOPE should NOT take branch if ZF=0");
 }

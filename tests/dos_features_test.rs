@@ -57,10 +57,10 @@ fn test_int21_ah4b_command_com_interception() {
     fs::write(&target_path, vec![0x90, 0xCD, 0x20]).unwrap();
 
     // Setup DS:DX -> "COMMAND.COM"
-    cpu.ds = 0x2000;
-    cpu.dx = 0x0000;
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0x0000);
     let filename = "COMMAND.COM";
-    let mut phys_dx = cpu.get_physical_addr(cpu.ds, cpu.dx);
+    let mut phys_dx = cpu.get_physical_addr(cpu.ds(), cpu.dx());
     for b in filename.bytes() {
         cpu.bus.write_8(phys_dx, b);
         phys_dx += 1;
@@ -83,9 +83,9 @@ fn test_int21_ah4b_command_com_interception() {
     cpu.bus.write_8(tail_phys + 1 + cmd_tail.len(), 0x0D); // CR
 
     // Setup Parameter Block at ES:BX
-    cpu.es = 0x3000;
-    cpu.bx = 0x0000;
-    let param_phys = cpu.get_physical_addr(cpu.es, cpu.bx);
+    cpu.set_es(0x3000);
+    cpu.set_bx(0x0000);
+    let param_phys = cpu.get_physical_addr(cpu.es(), cpu.bx());
 
     // Offset 2: Cmd Line Pointer -> 0x4000:0000
     cpu.bus.write_16(param_phys + 2, tail_off);
@@ -108,8 +108,8 @@ fn test_int21_ah4b_command_com_interception() {
         "CF should be clear (EXEC success)"
     );
 
-    assert_eq!(cpu.ip, 0x100, "IP should be 0x100");
-    let code_phys = cpu.get_physical_addr(cpu.cs, cpu.ip);
+    assert_eq!(cpu.ip(), 0x100, "IP should be 0x100");
+    let code_phys = cpu.get_physical_addr(cpu.cs(), cpu.ip());
     assert_eq!(
         cpu.bus.read_8(code_phys),
         0x90,
@@ -125,7 +125,7 @@ fn test_int21_ah4b_command_com_interception() {
     // If args is empty, `new_tail` might be empty.
 
     // Let's verify PSP tail.
-    let psp_phys = cpu.get_physical_addr(cpu.ds, 0x80); // DS points to PSP after load
+    let psp_phys = cpu.get_physical_addr(cpu.ds(), 0x80); // DS points to PSP after load
     let len = cpu.bus.read_8(psp_phys);
     // If args empty, logic:
     // `if !args.is_empty() { ... }`
@@ -143,17 +143,17 @@ fn test_regression_acquire_panic() {
     // 1. Verify EBP access in set_reg16/get_reg16 does not panic
     cpu.set_reg16(Register::EBP, 0x1234);
     assert_eq!(cpu.get_reg16(Register::EBP), 0x1234);
-    assert_eq!(cpu.bp, 0x1234); // Should affect BP
+    assert_eq!(cpu.bp(), 0x1234); // Should affect BP
 
     // 2. Verify OUTSB (String Output Byte)
     // OUTS DX, DS:SI
     // Port: DX=0x0300
     // Data: DS:SI points to [0xAA, 0xBB]
-    cpu.dx = 0x0300;
-    cpu.ds = 0x2000;
-    cpu.si = 0x0000;
+    cpu.set_dx(0x0300);
+    cpu.set_ds(0x2000);
+    cpu.set_si(0x0000);
 
-    let addr = cpu.get_physical_addr(cpu.ds, cpu.si);
+    let addr = cpu.get_physical_addr(cpu.ds(), cpu.si());
     cpu.bus.write_8(addr, 0xAA);
     cpu.bus.write_8(addr + 1, 0xBB);
 
@@ -165,7 +165,7 @@ fn test_regression_acquire_panic() {
     // So we'll run a mini-program.
 
     // Code: 6E (OUTSB)
-    let code_addr = cpu.get_physical_addr(cpu.cs, cpu.ip);
+    let code_addr = cpu.get_physical_addr(cpu.cs(), cpu.ip());
     cpu.bus.write_8(code_addr, 0x6E);
 
     // Step
@@ -176,16 +176,16 @@ fn test_regression_acquire_panic() {
     // However, our string.rs uses cpu.bus.io_write.
     // If no device is attached to 0x300, it just logs or ignores.
     // But we want to ensure it didn't panic and SI advanced.
-    assert_eq!(cpu.si, 1);
+    assert_eq!(cpu.si(), 1);
 
     // OUTSW
     // Code: 6F
-    let code_addr = cpu.get_physical_addr(cpu.cs, cpu.ip);
+    let code_addr = cpu.get_physical_addr(cpu.cs(), cpu.ip());
     cpu.bus.write_8(code_addr, 0x6F);
 
     cpu.step(); // Should write 0xBB...? Wait, SI is 1. Address is 2000:0001 -> 0xBB.
     // OUTSW reads Word at 2000:0001 -> Low=0xBB, High=Unknown(0).
     // And writes to DX.
     // SI should advance by 2.
-    assert_eq!(cpu.si, 3);
+    assert_eq!(cpu.si(), 3);
 }

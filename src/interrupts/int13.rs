@@ -130,7 +130,7 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_reg8(Register::BL, 4); // 1.44M
                 } else {
                     // No such unit: zeroed geometry, callers check DL.
-                    cpu.cx = 0;
+                    cpu.set_cx(0);
                     cpu.set_reg8(Register::DH, 0);
                     cpu.set_reg8(Register::BL, 0);
                 }

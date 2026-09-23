@@ -18,7 +18,7 @@ fn test_fpu_to_cpu_flags_bridge() {
 
     // 2. FSTSW AX -> DF E0
     testrunners::run_fpu_code(&mut cpu, &[0xDF, 0xE0]);
-    let ah = (cpu.ax >> 8) as u8;
+    let ah = (cpu.ax() >> 8) as u8;
     assert!((ah & 0x40) != 0, "AH bit 6 (from C3) should be set. AH was {:02X}", ah);
 
     // 3. SAHF -> 9E
@@ -35,17 +35,17 @@ fn test_cwd_idiv_chain() {
     // We execute CWD. This MUST set DX to 0xFFFF (Sign extension).
     // If DX stays 0, the dividend becomes 0x0000FF9C (65436), and result is huge/positive.
     
-    cpu.ax = 0xFF9C; // -100
-    cpu.dx = 0x0000; // Reset DX to ensure CWD actually changes it
+    cpu.set_ax(0xFF9C); // -100
+    cpu.set_dx(0x0000); // Reset DX to ensure CWD actually changes it
     
     // 99 -> CWD
     testrunners::run_cpu_code(&mut cpu, &[0x99]);
     
-    assert_eq!(cpu.dx, 0xFFFF, "CWD failed to sign extend AX into DX");
+    assert_eq!(cpu.dx(), 0xFFFF, "CWD failed to sign extend AX into DX");
 
     // B9 02 00 -> MOV CX, 2
     // F7 F9    -> IDIV CX
     testrunners::run_cpu_code(&mut cpu, &[0xB9, 0x02, 0x00, 0xF7, 0xF9]);
 
-    assert_eq!(cpu.ax as i16, -50, "IDIV failed (likely due to bad CWD setup)");
+    assert_eq!(cpu.ax() as i16, -50, "IDIV failed (likely due to bad CWD setup)");
 }

@@ -56,7 +56,7 @@ fn equipment_word_and_hard_disk_count_follow_mounts() {
 
     cpu.set_reg8(Register::AH, 0);
     int11::handle(&mut cpu);
-    assert_eq!(cpu.ax, 0x0061);
+    assert_eq!(cpu.ax(), 0x0061);
 
     // Survives the shell reload, which clears RAM from 0x500 up
     cpu.load_shell();

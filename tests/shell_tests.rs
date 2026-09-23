@@ -127,7 +127,7 @@ fn shell_trap_returns_to_the_prompt_loop() {
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
     // The trap popped the frame the shell pushed: back at the JMP with the
     // stack balanced, not sliding through the IVT from 0000:0000.
-    assert_eq!((cpu.cs, cpu.ip, cpu.sp), (0, 0x182, 0xFF00));
+    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (0, 0x182, 0xFF00));
 
     // Next command comes through the same loop, prompt reprinted.
     type_keys(&mut cpu, "dir\r");
@@ -163,16 +163,16 @@ fn only_the_private_trap_queues_commands() {
     for (i, &b) in text.iter().enumerate() {
         cpu.bus.write_8(0x20000 + i, b);
     }
-    cpu.ds = 0x2000;
-    cpu.dx = 0;
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0);
 
     // A program's INT 2Fh (here the DPMI check) must not run as a command
     // or eat typed keys.
     cpu.bus.keyboard_buffer.push_back(b'k' as u16);
-    cpu.ax = 0x1687;
+    cpu.set_ax(0x1687);
     handle_hle(&mut cpu, 0x2F);
     assert!(cpu.pending_command.is_none());
-    assert_eq!(cpu.ax, 0x1687);
+    assert_eq!(cpu.ax(), 0x1687);
     assert_eq!(cpu.bus.keyboard_buffer.len(), 1);
 
     handle_hle(&mut cpu, SHELL_COMMAND_BOP);

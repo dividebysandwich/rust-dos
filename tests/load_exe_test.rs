@@ -40,8 +40,8 @@ fn test_load_executable_in_subdirectory() {
 
     // Verify it loaded as a COM file
     // CS should be 0x1000, IP should be 0x100
-    assert_eq!(cpu.cs, 0x1000);
-    assert_eq!(cpu.ip, 0x100);
+    assert_eq!(cpu.cs(), 0x1000);
+    assert_eq!(cpu.ip(), 0x100);
 
     // Cleanup
     fs::remove_dir_all(&root_path).unwrap();

@@ -6,12 +6,12 @@ pub fn handle(cpu: &mut Cpu) {
     match ah {
         0x88 => {
             // Extended Memory (16MB total -> 15MB extended)
-            cpu.ax = 15360;
+            cpu.set_ax(15360);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
         0x86 => {
             // Wait (Microseconds)
-            let micros = ((cpu.cx as u64) << 16) | (cpu.dx as u64);
+            let micros = ((cpu.cx() as u64) << 16) | (cpu.dx() as u64);
             std::thread::sleep(std::time::Duration::from_micros(micros));
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
@@ -37,8 +37,8 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.write_8(phys_addr + 6, 0x00);
             cpu.bus.write_8(phys_addr + 7, 0x00);
 
-            cpu.es = table_seg;
-            cpu.bx = table_off;
+            cpu.set_es(table_seg);
+            cpu.set_bx(table_off);
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }

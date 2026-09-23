@@ -11,24 +11,24 @@ fn test_math_add_sub_adc_sbb() {
     cpu.set_reg16(Register::AX, 10);
     // 05 14 00 -> ADD AX, 20
     run_cpu_code(&mut cpu, &[0x05, 0x14, 0x00]);
-    assert_eq!(cpu.ax, 30);
+    assert_eq!(cpu.ax(), 30);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 
     // 2. ADC: 30 + 5 + CF(0) = 35
     // 83 D0 05 -> ADC AX, 5
     run_cpu_code(&mut cpu, &[0x83, 0xD0, 0x05]);
-    assert_eq!(cpu.ax, 35);
+    assert_eq!(cpu.ax(), 35);
 
     // 3. SUB: 35 - 40 = -5 (0xFFFB, CF=1)
     // 2D 28 00 -> SUB AX, 40
     run_cpu_code(&mut cpu, &[0x2D, 0x28, 0x00]);
-    assert_eq!(cpu.ax, 0xFFFB);
+    assert_eq!(cpu.ax(), 0xFFFB);
     assert!(cpu.get_cpu_flag(CpuFlags::CF));
 
     // 4. SBB: 0xFFFB - 1 - CF(1) = 0xFFF9
     // 83 D8 01 -> SBB AX, 1
     run_cpu_code(&mut cpu, &[0x83, 0xD8, 0x01]);
-    assert_eq!(cpu.ax, 0xFFF9);
+    assert_eq!(cpu.ax(), 0xFFF9);
 }
 
 #[test]
@@ -40,11 +40,11 @@ fn test_math_mul_div() {
     cpu.set_reg8(Register::CL, 10);
     // F6 E1 -> MUL CL
     run_cpu_code(&mut cpu, &[0xF6, 0xE1]);
-    assert_eq!(cpu.ax, 2000);
+    assert_eq!(cpu.ax(), 2000);
     assert!(cpu.get_cpu_flag(CpuFlags::CF), "Overflow should be set (res > 8bit)");
 
     // DIV (Unsigned): 2000 / 10 = 200 (AL=200, AH=0)
-    cpu.ax = 2000;
+    cpu.set_ax(2000);
     cpu.set_reg8(Register::BL, 10);
     // F6 F3 -> DIV BL
     run_cpu_code(&mut cpu, &[0xF6, 0xF3]);
@@ -61,10 +61,10 @@ fn test_math_imul_idiv() {
     cpu.set_reg8(Register::DL, 10);
     // F6 EA -> IMUL DL
     run_cpu_code(&mut cpu, &[0xF6, 0xEA]);
-    assert_eq!(cpu.ax, 0xFFCE);
+    assert_eq!(cpu.ax(), 0xFFCE);
 
     // IDIV (Signed): -50 / 10 = -5 (AL=0xFB, AH=0)
-    cpu.ax = 0xFFCE;
+    cpu.set_ax(0xFFCE);
     cpu.set_reg8(Register::BL, 10);
     // F6 FB -> IDIV BL
     run_cpu_code(&mut cpu, &[0xF6, 0xFB]);
@@ -77,11 +77,11 @@ fn test_math_inc_dec_neg_cmp() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // INC: 0xFFFF -> 0 (ZF=1, CF should NOT be affected)
-    cpu.ax = 0xFFFF;
+    cpu.set_ax(0xFFFF);
     cpu.set_cpu_flag(CpuFlags::CF, false);
     // 40 -> INC AX
     run_cpu_code(&mut cpu, &[0x40]);
-    assert_eq!(cpu.ax, 0);
+    assert_eq!(cpu.ax(), 0);
     assert!(cpu.get_cpu_flag(CpuFlags::ZF));
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 
@@ -96,7 +96,7 @@ fn test_math_inc_dec_neg_cmp() {
     cpu.set_reg16(Register::BX, 10);
     // 81 FB 0A 00 -> CMP BX, 10
     run_cpu_code(&mut cpu, &[0x81, 0xFB, 0x0A, 0x00]);
-    assert_eq!(cpu.bx, 10, "CMP must not modify destination");
+    assert_eq!(cpu.bx(), 10, "CMP must not modify destination");
     assert!(cpu.get_cpu_flag(CpuFlags::ZF));
 }
 
@@ -156,14 +156,14 @@ fn test_inc_dec_must_preserve_carry_flag() {
     // DEC should set ZF/SF/OF/PF, but MUST PRESERVE CF.
     run_cpu_code(&mut cpu, &[0x48]);
 
-    assert_eq!(cpu.ax, 9);
+    assert_eq!(cpu.ax(), 9);
     assert!(cpu.get_cpu_flag(CpuFlags::CF), "DEC instruction illegally cleared the Carry Flag!");
 
     // 3. Execute INC AX (40)
     // INC should also PRESERVE CF.
     run_cpu_code(&mut cpu, &[0x40]);
     
-    assert_eq!(cpu.ax, 10);
+    assert_eq!(cpu.ax(), 10);
     assert!(cpu.get_cpu_flag(CpuFlags::CF), "INC instruction illegally cleared the Carry Flag!");
 }
 
@@ -285,18 +285,21 @@ fn test_divide_error_returns_to_faulting_instruction() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus.write_16(0x0000, 0x0000); // INT 0 handler at 2000:0000
         cpu.bus.write_16(0x0002, 0x2000);
-        cpu.cs = 0x1000;
-        cpu.ip = 0x0100;
-        cpu.ss = 0x3000;
-        cpu.sp = 0x0100;
-        cpu.es = 0x4000;
+        cpu.set_cs(0x1000);
+        cpu.set_ip(0x0100);
+        cpu.set_ss(0x3000);
+        cpu.set_sp(0x0100);
+        cpu.set_es(0x4000);
         cpu.bus.write_16(0x40000, 0);
-        (cpu.dx, cpu.ax, cpu.bx) = setup;
+        let (dx, ax, bx) = setup;
+        cpu.set_dx(dx);
+        cpu.set_ax(ax);
+        cpu.set_bx(bx);
 
         run_cpu_code(&mut cpu, code);
 
-        assert_eq!((cpu.cs, cpu.ip), (0x2000, 0x0000));
-        let stack = 0x30000 + cpu.sp as usize;
+        assert_eq!((cpu.cs(), cpu.ip()), (0x2000, 0x0000));
+        let stack = 0x30000 + cpu.sp() as usize;
         assert_eq!(cpu.bus.read_16(stack), 0x0100, "return IP");
         assert_eq!(cpu.bus.read_16(stack + 2), 0x1000, "return CS");
     }

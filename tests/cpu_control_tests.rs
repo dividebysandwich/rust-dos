@@ -12,23 +12,23 @@ fn test_unconditional_jmp_near_and_far() {
     // B8 01 00 -> MOV AX, 1
     let code_short = [0xEB, 0x05, 0x90, 0x90, 0x90, 0x90, 0x90, 0xB8, 0x01, 0x00];
     run_cpu_code(&mut cpu, &code_short);
-    assert_eq!(cpu.ax, 1, "Short JMP failed to reach target");
+    assert_eq!(cpu.ax(), 1, "Short JMP failed to reach target");
 
     // 2. JMP Far Direct (ptr16:16)
     // EA 00 10 00 20 -> JMP 2000:1000
     let mut cpu_far = Cpu::new(std::path::PathBuf::from("."));
     let code_far = [0xEA, 0x00, 0x10, 0x00, 0x20];
     run_cpu_code(&mut cpu_far, &code_far);
-    assert_eq!(cpu_far.ip, 0x1000);
-    assert_eq!(cpu_far.cs, 0x2000);
+    assert_eq!(cpu_far.ip(), 0x1000);
+    assert_eq!(cpu_far.cs(), 0x2000);
 }
 
 #[test]
 fn test_call_and_ret() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.ip = 0x100;
-    cpu.sp = 0xFFFE;
-    cpu.ss = 0x0000; // Ensure stack segment is zeroed for test simplicity
+    cpu.set_ip(0x100);
+    cpu.set_sp(0xFFFE);
+    cpu.set_ss(0x0000); // Ensure stack segment is zeroed for test simplicity
 
     // 0x100: CALL 0x105 (E8 02 00) -> Pushes 0x103
     // 0x103: HLT (F4)              -> STOP HERE
@@ -43,14 +43,14 @@ fn test_call_and_ret() {
 
     run_cpu_code(&mut cpu, &code);
     
-    assert_eq!(cpu.sp, 0xFFFE, "Stack pointer should return to initial state");
-    assert_eq!(cpu.ip, 0x104, "Final IP should be at the end of the return site");
+    assert_eq!(cpu.sp(), 0xFFFE, "Stack pointer should return to initial state");
+    assert_eq!(cpu.ip(), 0x104, "Final IP should be at the end of the return site");
 }
 
 #[test]
 fn test_conditional_jumps_logic() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.ip = 0x100;
+    cpu.set_ip(0x100);
     
     // 31 C0    (2 bytes) -> XOR AX, AX (ZF=1)
     // 74 03    (2 bytes) -> JZ +3 (Target 0x107)
@@ -71,7 +71,7 @@ fn test_conditional_jumps_logic() {
 #[test]
 fn test_loop_instructions() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-    cpu.ip = 0x100;
+    cpu.set_ip(0x100);
     
     // B9 05 00 (3 bytes) -> MOV CX, 5
     // B0 00    (2 bytes) -> MOV AL, 0 (Loop Start at 0x103)
@@ -90,7 +90,7 @@ fn test_loop_instructions() {
     run_cpu_code(&mut cpu, &code);
 
     assert_eq!(cpu.get_al(), 5);
-    assert_eq!(cpu.cx, 0);
+    assert_eq!(cpu.cx(), 0);
 }
 
 #[test]
@@ -120,13 +120,13 @@ fn test_loop_instruction() {
     // The test runner will execute this instruction repeatedly until 
     // CX becomes 0 and the loop condition fails (IP moves to next instruction).
     
-    cpu.ip = 0x100;
+    cpu.set_ip(0x100);
     testrunners::run_cpu_code(&mut cpu, &[0xE2, 0xFE]); 
     
     // The loop runs to completion in one go.
     assert_eq!(cpu.get_reg16(iced_x86::Register::CX), 0);
     // IP should have advanced past the 2-byte instruction
-    assert_eq!(cpu.ip, 0x102); 
+    assert_eq!(cpu.ip(), 0x102); 
 }
 
 #[test]
@@ -147,11 +147,11 @@ fn test_jump_signed_overflow_logic() {
     
     // 7C 05 -> JL +5
     
-    cpu.ip = 0x100;
+    cpu.set_ip(0x100);
     run_cpu_code(&mut cpu, &[0x7C, 0x05]);
     
     // If Jump Taken: IP = 0x100 + 2 (size) + 5 = 0x107
     // If Jump Not Taken: IP = 0x100 + 2 = 0x102
-    assert_eq!(cpu.ip, 0x107, "JL failed to respect Overflow Flag (SF=0, OF=1)");
+    assert_eq!(cpu.ip(), 0x107, "JL failed to respect Overflow Flag (SF=0, OF=1)");
 }
 
