@@ -1,138 +1,183 @@
+//! Instruction execution: one handler per instruction family, dispatched on
+//! iced's mnemonic. Handlers return `Err(Fault)` to raise an exception;
+//! anything not implemented for the emulated CPU raises #UD.
+
 use iced_x86::{Instruction, Mnemonic};
-use crate::cpu::Cpu;
 
-pub mod utils;
-pub mod fpu;
-pub mod math;
-pub mod logic;
+use crate::cpu::alu::ShiftOp;
+use crate::cpu::{CR0_EM, CR0_TS, Cpu, CpuFlags, CpuResult, Fault, Seg};
+
+pub mod arith;
 pub mod control;
-pub mod transfer;
+pub mod fpu;
+pub mod logic;
+pub mod operand;
 pub mod string;
-pub mod misc;
+pub mod system;
+pub mod transfer;
+pub mod utils;
 
-pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) {
-    dispatch(cpu, instr);
-}
+use arith::Op;
+use logic::BitOp;
+use string::StrOp;
 
-#[inline(always)]
-fn dispatch(cpu: &mut Cpu, instr: &Instruction) {
+pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    use Mnemonic::*;
     match instr.mnemonic() {
+        // --- Data transfer ---
+        Mov => transfer::mov(cpu, instr),
+        Movzx => transfer::movx(cpu, instr, false),
+        Movsx => transfer::movx(cpu, instr, true),
+        Xchg => transfer::xchg(cpu, instr),
+        Lea => transfer::lea(cpu, instr),
+        Lds => transfer::load_far_pointer(cpu, instr, Seg::DS),
+        Les => transfer::load_far_pointer(cpu, instr, Seg::ES),
+        Lfs => transfer::load_far_pointer(cpu, instr, Seg::FS),
+        Lgs => transfer::load_far_pointer(cpu, instr, Seg::GS),
+        Lss => transfer::load_far_pointer(cpu, instr, Seg::SS),
+        Push => transfer::push(cpu, instr),
+        Pop => transfer::pop(cpu, instr),
+        Pusha | Pushad => transfer::pusha(cpu, instr),
+        Popa | Popad => transfer::popa(cpu, instr),
+        Pushf | Pushfd => transfer::pushf(cpu, instr),
+        Popf | Popfd => transfer::popf(cpu, instr),
+        In => transfer::port_in(cpu, instr),
+        Out => transfer::port_out(cpu, instr),
+        Xlatb => transfer::xlat(cpu, instr),
+        Lahf => transfer::lahf(cpu),
+        Sahf => transfer::sahf(cpu),
+        Salc => transfer::salc(cpu),
+        Bswap => transfer::bswap(cpu, instr),
+        Xadd => transfer::xadd(cpu, instr),
+        Cmpxchg => transfer::cmpxchg(cpu, instr),
+        Cbw => arith::cbw(cpu),
+        Cwde => arith::cwde(cpu),
+        Cwd => arith::cwd(cpu),
+        Cdq => arith::cdq(cpu),
 
-        // Source: https://tizee.github.io/x86_ref_book_web/
+        // --- Arithmetic and logic ---
+        Add => arith::binary(cpu, instr, Op::Add),
+        Adc => arith::binary(cpu, instr, Op::Adc),
+        Sub => arith::binary(cpu, instr, Op::Sub),
+        Sbb => arith::binary(cpu, instr, Op::Sbb),
+        Cmp => arith::binary(cpu, instr, Op::Cmp),
+        And => arith::binary(cpu, instr, Op::And),
+        Or => arith::binary(cpu, instr, Op::Or),
+        Xor => arith::binary(cpu, instr, Op::Xor),
+        Test => arith::binary(cpu, instr, Op::Test),
+        Inc => arith::inc(cpu, instr),
+        Dec => arith::dec(cpu, instr),
+        Neg => arith::neg(cpu, instr),
+        Not => arith::not(cpu, instr),
+        Mul => arith::mul(cpu, instr),
+        Imul => arith::imul(cpu, instr),
+        Div => arith::div(cpu, instr),
+        Idiv => arith::idiv(cpu, instr),
+        Daa => arith::daa(cpu),
+        Das => arith::das(cpu),
+        Aaa => arith::aaa(cpu),
+        Aas => arith::aas(cpu),
+        Aam => arith::aam(cpu, instr),
+        Aad => arith::aad(cpu, instr),
 
-        // --- Data Transfer ---
-        Mnemonic::Mov | Mnemonic::Xchg | Mnemonic::Lea | 
-        Mnemonic::Lds | Mnemonic::Les |
-        Mnemonic::Push | Mnemonic::Pop | Mnemonic::Pusha | Mnemonic::Popa | 
-        Mnemonic::Pushf | Mnemonic::Popf |
-        Mnemonic::In | Mnemonic::Out | Mnemonic::Cbw | Mnemonic::Cwd |
-        Mnemonic::Xlatb | Mnemonic::Lahf | Mnemonic::Sahf => {
-            transfer::handle(cpu, instr);
+        // --- Shifts, rotates and bits ---
+        Rol => logic::shift(cpu, instr, ShiftOp::Rol),
+        Ror => logic::shift(cpu, instr, ShiftOp::Ror),
+        Rcl => logic::shift(cpu, instr, ShiftOp::Rcl),
+        Rcr => logic::shift(cpu, instr, ShiftOp::Rcr),
+        Shl | Sal => logic::shift(cpu, instr, ShiftOp::Shl),
+        Shr => logic::shift(cpu, instr, ShiftOp::Shr),
+        Sar => logic::shift(cpu, instr, ShiftOp::Sar),
+        Shld => logic::double_shift(cpu, instr, true),
+        Shrd => logic::double_shift(cpu, instr, false),
+        Bt => logic::bit_test(cpu, instr, BitOp::Test),
+        Bts => logic::bit_test(cpu, instr, BitOp::Set),
+        Btr => logic::bit_test(cpu, instr, BitOp::Reset),
+        Btc => logic::bit_test(cpu, instr, BitOp::Complement),
+        Bsf => logic::bit_scan(cpu, instr, true),
+        Bsr => logic::bit_scan(cpu, instr, false),
+        Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp
+        | Setl | Setge | Setle | Setg => logic::setcc(cpu, instr),
+
+        // --- Control transfer ---
+        Jmp => control::jmp(cpu, instr),
+        Call => control::call(cpu, instr),
+        Ret => control::ret_near(cpu, instr),
+        Retf => control::ret_far(cpu, instr),
+        Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge | Jle | Jg => {
+            control::jcc(cpu, instr)
         }
-
-        // --- Math / Arithmetic ---
-        Mnemonic::Add | Mnemonic::Sub | Mnemonic::Adc | Mnemonic::Sbb |
-        Mnemonic::Inc | Mnemonic::Dec | Mnemonic::Neg | Mnemonic::Aam |
-        Mnemonic::Mul | Mnemonic::Imul | Mnemonic::Div | Mnemonic::Idiv |
-        Mnemonic::Cmp | Mnemonic::Aaa | Mnemonic::Das | Mnemonic::Daa |
-        Mnemonic::Aas => {
-            math::handle(cpu, instr);
-        }
-
-        // --- FPU ---
-        // --- Math & Arithmetic ---
-        Mnemonic::Fadd | Mnemonic::Faddp | Mnemonic::Fiadd |
-        Mnemonic::Fsub | Mnemonic::Fsubp | Mnemonic::Fsubr | Mnemonic::Fsubrp |
-        Mnemonic::Fisub | Mnemonic::Fisubr |
-        Mnemonic::Fmul | Mnemonic::Fmulp | Mnemonic::Fimul |
-        Mnemonic::Fdiv | Mnemonic::Fdivp | Mnemonic::Fdivr | Mnemonic::Fdivrp |
-        Mnemonic::Fidiv | Mnemonic::Fidivr |
-        Mnemonic::Fsqrt | Mnemonic::Fscale | Mnemonic::Fprem | Mnemonic::Fprem1 |
-        Mnemonic::Frndint | Mnemonic::Fxtract | Mnemonic::Fabs | Mnemonic::Fchs |
-        Mnemonic::F2xm1 | Mnemonic::Fyl2x | Mnemonic::Fyl2xp1 |
-
-        // --- Transcendental ---
-        Mnemonic::Fsin | Mnemonic::Fcos | Mnemonic::Fsincos |
-        Mnemonic::Fptan | Mnemonic::Fpatan |
-
-        // --- Data Transfer ---
-        Mnemonic::Fld | Mnemonic::Fst | Mnemonic::Fstp |
-        Mnemonic::Fild | Mnemonic::Fist | Mnemonic::Fistp | Mnemonic::Fisttp |
-        Mnemonic::Fbld | Mnemonic::Fbstp |
-        Mnemonic::Fxch | Mnemonic::Fld1 | Mnemonic::Fldz | 
-        Mnemonic::Fldpi | Mnemonic::Fldl2e | Mnemonic::Fldl2t | 
-        Mnemonic::Fldlg2 | Mnemonic::Fldln2 |
-        
-        // --- Comparison ---
-        Mnemonic::Fcom | Mnemonic::Fcomp | Mnemonic::Fcompp |
-        Mnemonic::Ficom | Mnemonic::Ficomp |
-        Mnemonic::Ftst | Mnemonic::Fxam |
-        Mnemonic::Fcomi | Mnemonic::Fcomip | Mnemonic::Fucomi | Mnemonic::Fucomip |
-
-        // --- Control & State ---
-        Mnemonic::Finit | Mnemonic::Fninit |
-        Mnemonic::Fldcw | Mnemonic::Fstcw | Mnemonic::Fnstcw |
-        Mnemonic::Fstsw | Mnemonic::Fnstsw |
-        Mnemonic::Fclex | Mnemonic::Fnclex |
-        Mnemonic::Fsave | Mnemonic::Fnsave | Mnemonic::Frstor |
-        Mnemonic::Fstenv | Mnemonic::Fnstenv | Mnemonic::Fldenv |
-        Mnemonic::Fnop | Mnemonic::Ffree | Mnemonic::Fincstp | 
-        Mnemonic::Fdecstp => {
-            fpu::handle(cpu, instr);
-        }
-
-        // --- Logic / Bitwise ---
-        Mnemonic::And | Mnemonic::Or | Mnemonic::Xor | Mnemonic::Not | Mnemonic::Test |
-        Mnemonic::Shl | Mnemonic::Shr | Mnemonic::Sal | Mnemonic::Sar |
-        Mnemonic::Rol | Mnemonic::Ror | Mnemonic::Rcl | Mnemonic::Rcr |
-        Mnemonic::Aad=> {
-            logic::handle(cpu, instr);
-        }
-
-        // --- Control Flow ---
-        Mnemonic::Jmp | Mnemonic::Call | Mnemonic::Ret | Mnemonic::Retf |
-        Mnemonic::Loop | Mnemonic::Je | Mnemonic::Jne | Mnemonic::Jcxz | Mnemonic::Jecxz |
-        Mnemonic::Jb | Mnemonic::Jbe | Mnemonic::Ja | Mnemonic::Jae |
-        Mnemonic::Jl | Mnemonic::Jle | Mnemonic::Jg | Mnemonic::Jge |
-        Mnemonic::Jo | Mnemonic::Jno | Mnemonic::Js | Mnemonic::Jns |
-        Mnemonic::Jp | Mnemonic::Jnp | Mnemonic::Loopne |
-        Mnemonic::Loope => {
-            control::handle(cpu, instr);
-        }
+        Jcxz | Jecxz => control::jcxz(cpu, instr),
+        Loop | Loope | Loopne => control::loop_op(cpu, instr),
+        Int => control::int(cpu, instr),
+        Int3 => control::software_interrupt(cpu, 3),
+        Int1 => control::software_interrupt(cpu, 1),
+        Into => control::into(cpu),
+        Iret | Iretd => control::iret(cpu, instr),
+        Bound => control::bound(cpu, instr),
+        Enter => control::enter(cpu, instr),
+        Leave => control::leave(cpu, instr),
 
         // --- Strings ---
-        Mnemonic::Movsb | Mnemonic::Movsw | Mnemonic::Stosb | Mnemonic::Stosw |
-        Mnemonic::Lodsb | Mnemonic::Lodsw | Mnemonic::Cmpsb | Mnemonic::Cmpsw |
-        Mnemonic::Scasb | Mnemonic::Scasw |
-        Mnemonic::Outsb | Mnemonic::Outsw | Mnemonic::Insb | Mnemonic::Insw => {
-            string::handle(cpu, instr);
-        }
+        Movsb => string::string(cpu, instr, StrOp::Movs, 1),
+        Movsw => string::string(cpu, instr, StrOp::Movs, 2),
+        Movsd => string::string(cpu, instr, StrOp::Movs, 4),
+        Cmpsb => string::string(cpu, instr, StrOp::Cmps, 1),
+        Cmpsw => string::string(cpu, instr, StrOp::Cmps, 2),
+        Cmpsd => string::string(cpu, instr, StrOp::Cmps, 4),
+        Scasb => string::string(cpu, instr, StrOp::Scas, 1),
+        Scasw => string::string(cpu, instr, StrOp::Scas, 2),
+        Scasd => string::string(cpu, instr, StrOp::Scas, 4),
+        Lodsb => string::string(cpu, instr, StrOp::Lods, 1),
+        Lodsw => string::string(cpu, instr, StrOp::Lods, 2),
+        Lodsd => string::string(cpu, instr, StrOp::Lods, 4),
+        Stosb => string::string(cpu, instr, StrOp::Stos, 1),
+        Stosw => string::string(cpu, instr, StrOp::Stos, 2),
+        Stosd => string::string(cpu, instr, StrOp::Stos, 4),
+        Insb => string::string(cpu, instr, StrOp::Ins, 1),
+        Insw => string::string(cpu, instr, StrOp::Ins, 2),
+        Insd => string::string(cpu, instr, StrOp::Ins, 4),
+        Outsb => string::string(cpu, instr, StrOp::Outs, 1),
+        Outsw => string::string(cpu, instr, StrOp::Outs, 2),
+        Outsd => string::string(cpu, instr, StrOp::Outs, 4),
 
-        // --- System / Misc ---
-        Mnemonic::Int | Mnemonic::Nop | Mnemonic::Wait | Mnemonic::Hlt | 
-        Mnemonic::Stc | Mnemonic::Clc | Mnemonic::Std | Mnemonic::Cld | 
-        Mnemonic::Cli | Mnemonic::Sti | Mnemonic::Cmc | Mnemonic::Into |
-        Mnemonic::Iret | Mnemonic::Leave | Mnemonic::Enter
-        => { 
-            misc::handle(cpu, instr);
-        }
+        // --- Flags and system ---
+        Clc => system::set_flag(cpu, CpuFlags::CF, false),
+        Stc => system::set_flag(cpu, CpuFlags::CF, true),
+        Cmc => system::cmc(cpu),
+        Cld => system::set_flag(cpu, CpuFlags::DF, false),
+        Std => system::set_flag(cpu, CpuFlags::DF, true),
+        Cli => system::cli(cpu),
+        Sti => system::sti(cpu),
+        Hlt => system::hlt(cpu),
+        Nop | Pause => Ok(()),
+        Wait => system::wait(cpu),
+        Lgdt => system::load_table(cpu, instr, false),
+        Lidt => system::load_table(cpu, instr, true),
+        Sgdt => system::store_table(cpu, instr, false),
+        Sidt => system::store_table(cpu, instr, true),
+        Smsw => system::smsw(cpu, instr),
+        Lmsw => system::lmsw(cpu, instr),
+        Clts => system::clts(cpu),
+        Invd | Wbinvd | Invlpg => system::cache_op(cpu),
 
-        _ => {
-            let cs = cpu.cs();
-            let ip = cpu.ip().wrapping_sub(instr.len() as u16);
-            let phys = cpu.get_physical_addr(cs, ip);
-            let mut bytes = String::new();
-            for i in 0..16 {
-                let a = phys.wrapping_add(i);
-                if a < cpu.bus.ram().len() {
-                    bytes.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
-                }
+        // --- FPU ---
+        Fadd | Faddp | Fiadd | Fsub | Fsubp | Fsubr | Fsubrp | Fisub | Fisubr | Fmul | Fmulp
+        | Fimul | Fdiv | Fdivp | Fdivr | Fdivrp | Fidiv | Fidivr | Fsqrt | Fscale | Fprem
+        | Fprem1 | Frndint | Fxtract | Fabs | Fchs | F2xm1 | Fyl2x | Fyl2xp1 | Fsin | Fcos
+        | Fsincos | Fptan | Fpatan | Fld | Fst | Fstp | Fild | Fist | Fistp | Fisttp | Fbld
+        | Fbstp | Fxch | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fcom | Fcomp
+        | Fcompp | Ficom | Ficomp | Ftst | Fxam | Fcomi | Fcomip | Fucomi | Fucomip | Finit
+        | Fninit | Fldcw | Fstcw | Fnstcw | Fstsw | Fnstsw | Fclex | Fnclex | Fsave | Fnsave
+        | Frstor | Fstenv | Fnstenv | Fldenv | Fnop | Ffree | Fincstp | Fdecstp => {
+            // No coprocessor (EM), or it belongs to another task (TS).
+            if cpu.cr0 & (CR0_EM | CR0_TS) != 0 {
+                return Err(Fault::NM);
             }
-            cpu.bus.log_string(&format!(
-                "[CPU] Unhandled: {} at {:04X}:{:04X} bytes={} AX={:04X} BX={:04X} CX={:04X} DX={:04X} SI={:04X} DI={:04X} BP={:04X} SP={:04X} DS={:04X} ES={:04X} SS={:04X}",
-                instr, cs, ip, bytes.trim(),
-                cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx(), cpu.si(), cpu.di(), cpu.bp(), cpu.sp(), cpu.ds(), cpu.es(), cpu.ss()
-            ));
+            fpu::handle(cpu, instr);
+            Ok(())
         }
+
+        _ => Err(Fault::UD),
     }
 }

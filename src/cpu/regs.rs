@@ -50,6 +50,10 @@ impl Seg {
 /// Access rights of a present, writable, accessed data segment: the state a
 /// segment register's hidden part has after reset.
 pub const AR_DATA_RW: u16 = 0x0093;
+/// Descriptor flag: default operand size / stack pointer size is 32 bits.
+pub const ATTR_DB: u16 = 0x4000;
+/// Descriptor flag: the limit counts 4 KB pages.
+pub const ATTR_G: u16 = 0x8000;
 
 /// A segment register: the selector the program loaded and the descriptor
 /// cache (base, limit, access rights) the CPU uses for every access through
@@ -175,6 +179,38 @@ impl Cpu {
         let cache = &mut self.seg[seg as usize];
         cache.selector = value;
         cache.base = (value as u32) << 4;
+    }
+
+    /// Value of a general-purpose (8, 16 or 32-bit) or segment register,
+    /// zero-extended.
+    #[inline(always)]
+    pub fn reg(&self, reg: Register) -> u32 {
+        // iced numbers the registers AL..BH (1-8), AX..DI (21-28),
+        // EAX..EDI (37-44) and ES..GS (71-76) in x86 encoding order.
+        let r = reg as usize;
+        match r {
+            1..=4 => self.gpr[r - 1] & 0xFF,
+            5..=8 => (self.gpr[r - 5] >> 8) & 0xFF,
+            21..=28 => self.gpr[r - 21] & 0xFFFF,
+            37..=44 => self.gpr[r - 37],
+            71..=76 => self.seg[r - 71].selector as u32,
+            _ => 0,
+        }
+    }
+
+    /// Write a general-purpose register: the low 8 or 16 bits for the
+    /// smaller registers, leaving the rest alone. Segment registers are not
+    /// written here (see `load_seg_real`).
+    #[inline(always)]
+    pub fn set_reg(&mut self, reg: Register, value: u32) {
+        let r = reg as usize;
+        match r {
+            1..=4 => self.gpr[r - 1] = (self.gpr[r - 1] & !0xFF) | (value & 0xFF),
+            5..=8 => self.gpr[r - 5] = (self.gpr[r - 5] & !0xFF00) | ((value & 0xFF) << 8),
+            21..=28 => self.gpr[r - 21] = (self.gpr[r - 21] & !0xFFFF) | (value & 0xFFFF),
+            37..=44 => self.gpr[r - 37] = value,
+            _ => debug_assert!(false, "set_reg on {:?}", reg),
+        }
     }
 
     // Extract High byte (AH)

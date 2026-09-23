@@ -1,188 +1,293 @@
-use iced_x86::{Instruction, Mnemonic, Code, OpKind};
-use crate::cpu::{Cpu, CpuFlags};
-use super::utils::calculate_addr;
+//! Control transfer: jumps, calls and returns (near and far, 16 and 32-bit
+//! operand size), conditional jumps and loops, software interrupts, IRET,
+//! BOUND, and ENTER/LEAVE.
 
-pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
-    match instr.mnemonic() {
-        // Unconditional Transfers
-        Mnemonic::Jmp => jmp(cpu, instr),
-        Mnemonic::Call => call(cpu, instr),
-        Mnemonic::Ret => ret(cpu, instr),
-        Mnemonic::Retf => retf(cpu, instr),
+use iced_x86::{Code, Instruction, MemorySize, OpKind, Register};
 
-        // Loops
-        Mnemonic::Loop => loop_op(cpu, instr),
-        Mnemonic::Loope => loope(cpu, instr),
-        Mnemonic::Loopne => loopne(cpu, instr),
-        Mnemonic::Jcxz | Mnemonic::Jecxz => jcxz(cpu, instr),
+use super::logic::condition;
+use super::operand::{mem_operand, mem_operand_at, op_size, read_op};
+use crate::cpu::{Access, Cpu, CpuFlags, CpuResult, Fault, IntSource, Seg};
 
-        // Conditional Jumps
-        Mnemonic::Je => if cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
-        Mnemonic::Jne => if !cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
-        
-        Mnemonic::Jb => if cpu.get_cpu_flag(CpuFlags::CF) { branch(cpu, instr) },
-        Mnemonic::Jbe => if cpu.get_cpu_flag(CpuFlags::CF) || cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
-        Mnemonic::Ja => if !cpu.get_cpu_flag(CpuFlags::CF) && !cpu.get_cpu_flag(CpuFlags::ZF) { branch(cpu, instr) },
-        Mnemonic::Jae => if !cpu.get_cpu_flag(CpuFlags::CF) { branch(cpu, instr) },
+/// Operand size of a near branch: 2 or 4 bytes.
+#[inline(always)]
+fn branch_size(instr: &Instruction) -> u8 {
+    if instr.op0_kind() == OpKind::NearBranch32 { 4 } else { 2 }
+}
 
-        Mnemonic::Jl => if cpu.get_cpu_flag(CpuFlags::SF) != cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
-        Mnemonic::Jle => if cpu.get_cpu_flag(CpuFlags::ZF) || (cpu.get_cpu_flag(CpuFlags::SF) != cpu.get_cpu_flag(CpuFlags::OF)) { branch(cpu, instr) },
-        Mnemonic::Jg => if !cpu.get_cpu_flag(CpuFlags::ZF) && (cpu.get_cpu_flag(CpuFlags::SF) == cpu.get_cpu_flag(CpuFlags::OF)) { branch(cpu, instr) },
-        Mnemonic::Jge => if cpu.get_cpu_flag(CpuFlags::SF) == cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
-
-        Mnemonic::Js => if cpu.get_cpu_flag(CpuFlags::SF) { branch(cpu, instr) },
-        Mnemonic::Jns => if !cpu.get_cpu_flag(CpuFlags::SF) { branch(cpu, instr) },
-        Mnemonic::Jo => if cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
-        Mnemonic::Jno => if !cpu.get_cpu_flag(CpuFlags::OF) { branch(cpu, instr) },
-        Mnemonic::Jp => if cpu.get_cpu_flag(CpuFlags::PF) { branch(cpu, instr) },
-        Mnemonic::Jnp => if !cpu.get_cpu_flag(CpuFlags::PF) { branch(cpu, instr) },
-
-        _ => { cpu.bus.log_string(&format!("[CONTROL] Unsupported instruction: {:?}", instr.mnemonic()));}
+/// Jump to `target` in the current code segment, wrapped to the operand
+/// size. A target past the CS limit raises #GP(0).
+#[inline(always)]
+fn jump_near(cpu: &mut Cpu, target: u32, size: u8) -> CpuResult {
+    let target = if size == 2 { target & 0xFFFF } else { target };
+    if target > cpu.seg_cache(Seg::CS).limit {
+        return Err(Fault::gp(0));
     }
+    cpu.set_eip(target);
+    Ok(())
 }
 
-fn branch(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.set_ip(instr.near_branch16() as u16);
+/// Load CS:EIP for a far transfer in real mode.
+fn jump_far(cpu: &mut Cpu, selector: u16, offset: u32) -> CpuResult {
+    if offset > cpu.seg_cache(Seg::CS).limit {
+        return Err(Fault::gp(0));
+    }
+    cpu.load_seg_real(Seg::CS, selector);
+    cpu.set_eip(offset);
+    Ok(())
 }
 
-fn jmp(cpu: &mut Cpu, instr: &Instruction) {
-    match instr.code() {
-        // JMP Rel (Short/Near)
-        Code::Jmp_rel8_16 | Code::Jmp_rel16 | Code::Jmp_rel8_32 | Code::Jmp_rel32_32 => {
-            cpu.set_ip(instr.near_branch16() as u16);
+/// Offset size of a far pointer in memory (m16:16 or m16:32).
+fn far_pointer_size(instr: &Instruction) -> u8 {
+    if instr.memory_size() == MemorySize::SegPtr32 { 4 } else { 2 }
+}
+
+/// Read a far pointer operand: (selector, offset).
+fn read_far_pointer(cpu: &mut Cpu, instr: &Instruction) -> CpuResult<(u16, u32, u8)> {
+    let size = far_pointer_size(instr);
+    let off_ref = mem_operand(cpu, instr, size, Access::Read)?;
+    let sel_ref = mem_operand_at(cpu, instr, size as u32, 2, Access::Read)?;
+    Ok((cpu.mem_read(sel_ref) as u16, cpu.mem_read(off_ref), size))
+}
+
+pub fn jmp(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    match instr.op0_kind() {
+        OpKind::NearBranch16 | OpKind::NearBranch32 => {
+            jump_near(cpu, instr.near_branch_target() as u32, branch_size(instr))
         }
-
-        // JMP r/m16 (Near Indirect)
-        Code::Jmp_rm16 => {
-            if instr.op0_kind() == OpKind::Register {
-                cpu.set_ip(cpu.get_reg16(instr.op0_register()));
+        OpKind::FarBranch16 => jump_far(cpu, instr.far_branch_selector(), instr.far_branch16() as u32),
+        OpKind::FarBranch32 => jump_far(cpu, instr.far_branch_selector(), instr.far_branch32()),
+        _ => {
+            if matches!(instr.code(), Code::Jmp_m1616 | Code::Jmp_m1632) {
+                let (selector, offset, _) = read_far_pointer(cpu, instr)?;
+                jump_far(cpu, selector, offset)
             } else {
-                let addr = calculate_addr(cpu, instr);
-                cpu.set_ip(cpu.bus.read_16(addr));
+                let size = op_size(instr, 0);
+                let target = read_op(cpu, instr, 0, size)?;
+                jump_near(cpu, target, size)
             }
         }
-
-        // JMP ptr16:16 (Far Direct) -> JMP SEG:OFF
-        // iced_x86: far_branch16() = offset, far_branch_selector() = segment.
-        Code::Jmp_ptr1616 => {
-            cpu.set_ip(instr.far_branch16());
-            cpu.set_cs(instr.far_branch_selector());
-        }
-
-        // JMP m16:16 (Far Indirect) -> JMP DWORD PTR [BX]
-        Code::Jmp_m1616 => {
-            let addr = calculate_addr(cpu, instr);
-            let new_ip = cpu.bus.read_16(addr);
-            let new_cs = cpu.bus.read_16(addr + 2);
-            cpu.set_ip(new_ip);
-            cpu.set_cs(new_cs);
-        }
-        _ => {cpu.bus.log_string(&format!("[CONTROL] Unsupported JMP instruction: {:?}", instr.code())); }
     }
 }
 
-fn call(cpu: &mut Cpu, instr: &Instruction) {
-    match instr.code() {
-        Code::Call_rel16 | Code::Call_rel32_32 => {
-            cpu.push(cpu.ip());
-            cpu.set_ip(instr.near_branch16() as u16);
+pub fn call(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let (cs, eip) = (cpu.cs(), cpu.eip());
+    match instr.op0_kind() {
+        OpKind::NearBranch16 | OpKind::NearBranch32 => {
+            let size = branch_size(instr);
+            let target = instr.near_branch_target() as u32;
+            cpu.push_sized(size, eip)?;
+            jump_near(cpu, target, size)
         }
-        Code::Call_rm16 => {
-            cpu.push(cpu.ip());
-            if instr.op0_kind() == OpKind::Register {
-                cpu.set_ip(cpu.get_reg16(instr.op0_register()));
+        OpKind::FarBranch16 | OpKind::FarBranch32 => {
+            let (size, offset) = if instr.op0_kind() == OpKind::FarBranch16 {
+                (2, instr.far_branch16() as u32)
             } else {
-                let addr = calculate_addr(cpu, instr);
-                cpu.set_ip(cpu.bus.read_16(addr));
+                (4, instr.far_branch32())
+            };
+            cpu.push_sized(size, cs as u32)?;
+            cpu.push_sized(size, eip)?;
+            jump_far(cpu, instr.far_branch_selector(), offset)
+        }
+        _ => {
+            if matches!(instr.code(), Code::Call_m1616 | Code::Call_m1632) {
+                let (selector, offset, size) = read_far_pointer(cpu, instr)?;
+                cpu.push_sized(size, cs as u32)?;
+                cpu.push_sized(size, eip)?;
+                jump_far(cpu, selector, offset)
+            } else {
+                let size = op_size(instr, 0);
+                let target = read_op(cpu, instr, 0, size)?;
+                cpu.push_sized(size, eip)?;
+                jump_near(cpu, target, size)
             }
         }
-        Code::Call_ptr1616 => {
-            cpu.push(cpu.cs());
-            cpu.push(cpu.ip());
-            cpu.set_ip(instr.far_branch16());
-            cpu.set_cs(instr.far_branch_selector());
-        }
-        Code::Call_m1616 => {
-            let addr = calculate_addr(cpu, instr);
-            let new_ip = cpu.bus.read_16(addr);
-            let new_cs = cpu.bus.read_16(addr + 2);
-            cpu.push(cpu.cs());
-            cpu.push(cpu.ip());
-            cpu.set_ip(new_ip);
-            cpu.set_cs(new_cs);
-        }
-        _ => {cpu.bus.log_string(&format!("[CONTROL] Unsupported CALL instruction: {:?}", instr.code()));}
     }
 }
 
-fn ret(cpu: &mut Cpu, instr: &Instruction) {
-    let ip = cpu.pop();
-    cpu.set_ip(ip);
-    if instr.op0_kind() == OpKind::Immediate16 {
-        cpu.set_sp(cpu.sp().wrapping_add(instr.immediate16()));
+/// Extra bytes a RET releases (RET imm16), or 0.
+fn ret_release(instr: &Instruction) -> u32 {
+    if instr.op_count() == 1 { instr.immediate16() as u32 } else { 0 }
+}
+
+pub fn ret_near(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = if matches!(instr.code(), Code::Retnd | Code::Retnd_imm16) { 4 } else { 2 };
+    let target = cpu.stack_read(0, size)?;
+    jump_near(cpu, target, size)?;
+    let sp = cpu.stack_ptr().wrapping_add(size as u32 + ret_release(instr));
+    cpu.set_stack_ptr(sp);
+    Ok(())
+}
+
+pub fn ret_far(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = if matches!(instr.code(), Code::Retfd | Code::Retfd_imm16) { 4 } else { 2 };
+    let offset = cpu.stack_read(0, size)?;
+    let selector = cpu.stack_read(size as u32, size)? as u16;
+    let offset = if size == 2 { offset & 0xFFFF } else { offset };
+    jump_far(cpu, selector, offset)?;
+    let sp = cpu.stack_ptr().wrapping_add(2 * size as u32 + ret_release(instr));
+    cpu.set_stack_ptr(sp);
+    Ok(())
+}
+
+pub fn jcc(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if condition(cpu, instr.condition_code()) {
+        jump_near(cpu, instr.near_branch_target() as u32, branch_size(instr))?;
+    }
+    Ok(())
+}
+
+/// The counter a LOOPcc or JCXZ uses, CX or ECX, which the address size
+/// selects.
+fn count_register(instr: &Instruction) -> Register {
+    match instr.code() {
+        Code::Loop_rel8_16_ECX
+        | Code::Loop_rel8_32_ECX
+        | Code::Loope_rel8_16_ECX
+        | Code::Loope_rel8_32_ECX
+        | Code::Loopne_rel8_16_ECX
+        | Code::Loopne_rel8_32_ECX
+        | Code::Jecxz_rel8_16
+        | Code::Jecxz_rel8_32 => Register::ECX,
+        _ => Register::CX,
     }
 }
 
-fn retf(cpu: &mut Cpu, instr: &Instruction) {
-    let caller_cs = cpu.cs();
-    let caller_ip = cpu.ip().wrapping_sub(instr.len() as u16);
-    let ip = cpu.pop();
-    cpu.set_ip(ip);
-    let cs = cpu.pop();
-    cpu.set_cs(cs);
-    if instr.op0_kind() == OpKind::Immediate16 {
-        cpu.set_sp(cpu.sp().wrapping_add(instr.immediate16()));
+/// LOOP/LOOPE/LOOPNE: decrement the counter and jump while it's not zero
+/// (and ZF matches).
+pub fn loop_op(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let reg = count_register(instr);
+    let mask = if reg == Register::CX { 0xFFFF } else { 0xFFFF_FFFF };
+    let count = cpu.reg(reg).wrapping_sub(1) & mask;
+    let zf = cpu.get_cpu_flag(CpuFlags::ZF);
+    let taken = count != 0
+        && match instr.code() {
+            Code::Loope_rel8_16_CX | Code::Loope_rel8_32_CX | Code::Loope_rel8_16_ECX | Code::Loope_rel8_32_ECX => zf,
+            Code::Loopne_rel8_16_CX
+            | Code::Loopne_rel8_32_CX
+            | Code::Loopne_rel8_16_ECX
+            | Code::Loopne_rel8_32_ECX => !zf,
+            _ => true,
+        };
+    if taken {
+        jump_near(cpu, instr.near_branch_target() as u32, branch_size(instr))?;
     }
-    if cpu.cs() == 0 && cpu.ip() < 0x100 {
-        cpu.bus.log_string(&format!(
-            "[RETF-BAD] from {:04X}:{:04X} -> {:04X}:{:04X} SS:SP={:04X}:{:04X}",
-            caller_cs, caller_ip, cpu.cs(), cpu.ip(), cpu.ss(), cpu.sp()
-        ));
-        // Dump the function containing the RETF: 80 bytes before and 16 at
-        // the RETF site so we can see the prologue, loop body, epilogue.
-        let phys = cpu.get_physical_addr(caller_cs, caller_ip);
-        let start = phys.saturating_sub(80);
-        let mut pre = String::new();
-        for i in start..phys {
-            if i < cpu.bus.ram().len() {
-                pre.push_str(&format!("{:02X} ", cpu.bus.ram()[i]));
+    cpu.set_reg(reg, count);
+    Ok(())
+}
+
+/// JCXZ/JECXZ: jump if the counter is zero.
+pub fn jcxz(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if cpu.reg(count_register(instr)) == 0 {
+        jump_near(cpu, instr.near_branch_target() as u32, branch_size(instr))?;
+    }
+    Ok(())
+}
+
+/// A software interrupt: INT n, INT3, INT1 or INTO. EIP already points at
+/// the next instruction. A vector the interrupt table leaves at 0000:0000
+/// is skipped, as programs call interrupts nothing has installed yet.
+pub fn software_interrupt(cpu: &mut Cpu, vector: u8) -> CpuResult {
+    let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
+    if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
+        cpu.note_null_interrupt(vector);
+        return Ok(());
+    }
+    cpu.deliver_interrupt(vector, IntSource::Software)
+}
+
+pub fn int(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    software_interrupt(cpu, instr.immediate8())
+}
+
+pub fn into(cpu: &mut Cpu) -> CpuResult {
+    if cpu.get_cpu_flag(CpuFlags::OF) {
+        software_interrupt(cpu, 4)?;
+    }
+    Ok(())
+}
+
+/// IRET/IRETD in real mode: pop (E)IP, CS and (E)FLAGS.
+pub fn iret(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = if instr.code() == Code::Iretd { 4 } else { 2 };
+    let offset = cpu.stack_read(0, size)?;
+    let selector = cpu.stack_read(size as u32, size)? as u16;
+    let flags = cpu.stack_read(2 * size as u32, size)?;
+    let offset = if size == 2 { offset & 0xFFFF } else { offset };
+    jump_far(cpu, selector, offset)?;
+    let sp = cpu.stack_ptr().wrapping_add(3 * size as u32);
+    cpu.set_stack_ptr(sp);
+    if size == 2 {
+        cpu.load_flags16(flags as u16);
+    } else {
+        cpu.load_eflags(flags);
+    }
+    Ok(())
+}
+
+/// BOUND: #BR unless the signed register value is within the bounds pair
+/// in memory.
+pub fn bound(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if instr.op1_kind() != OpKind::Memory {
+        return Err(Fault::UD);
+    }
+    let size = op_size(instr, 0);
+    let lo_ref = mem_operand(cpu, instr, size, Access::Read)?;
+    let hi_ref = mem_operand_at(cpu, instr, size as u32, size, Access::Read)?;
+    let sx = |v: u32| crate::cpu::alu::sign_extend(size, v) as i32;
+    let value = sx(cpu.reg(instr.op0_register()));
+    let (lo, hi) = (sx(cpu.mem_read(lo_ref)), sx(cpu.mem_read(hi_ref)));
+    if value < lo || value > hi {
+        return Err(Fault::BR);
+    }
+    Ok(())
+}
+
+/// ENTER alloc, level: build a stack frame, copying `level - 1` frame
+/// pointers of the enclosing frames.
+pub fn enter(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size: u8 = if instr.code() == Code::Enterd_imm16_imm8 { 4 } else { 2 };
+    let alloc = instr.immediate16() as u32;
+    let level = instr.immediate8_2nd() & 0x1F;
+    let stack32 = cpu.stack32();
+
+    let ebp = cpu.ebp();
+    cpu.push_sized(size, ebp)?;
+    let frame = cpu.stack_ptr();
+
+    if level > 0 {
+        let mut bp = if stack32 { ebp } else { ebp & 0xFFFF };
+        for _ in 1..level {
+            bp = bp.wrapping_sub(size as u32);
+            if !stack32 {
+                bp &= 0xFFFF;
             }
+            let value = cpu.read_sized(Seg::SS, bp, size)?;
+            cpu.push_sized(size, value)?;
         }
-        let mut here = String::new();
-        for i in 0..16 {
-            let a = phys.wrapping_add(i);
-            if a < cpu.bus.ram().len() {
-                here.push_str(&format!("{:02X} ", cpu.bus.ram()[a]));
-            }
-        }
-        cpu.bus.log_string(&format!("[RETF-BAD] fn -80 bytes: {}", pre.trim()));
-        cpu.bus.log_string(&format!("[RETF-BAD] fn @RETF: {}", here.trim()));
+        cpu.push_sized(size, frame)?;
     }
+
+    if size == 4 {
+        cpu.set_ebp(frame);
+    } else {
+        cpu.set_bp(frame as u16);
+    }
+    let sp = cpu.stack_ptr().wrapping_sub(alloc);
+    cpu.set_stack_ptr(sp);
+    Ok(())
 }
 
-fn loop_op(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.set_cx(cpu.cx().wrapping_sub(1));
-    if cpu.cx() != 0 {
-        cpu.set_ip(instr.near_branch16() as u16);
+/// LEAVE: release the frame (stack pointer = frame pointer) and pop the
+/// caller's frame pointer.
+pub fn leave(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size: u8 = if instr.code() == Code::Leaved { 4 } else { 2 };
+    let frame = cpu.ebp();
+    cpu.set_stack_ptr(frame);
+    let value = cpu.pop_sized(size)?;
+    if size == 4 {
+        cpu.set_ebp(value);
+    } else {
+        cpu.set_bp(value as u16);
     }
-}
-
-fn loope(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.set_cx(cpu.cx().wrapping_sub(1));
-    if cpu.cx() != 0 && cpu.get_cpu_flag(CpuFlags::ZF) {
-        cpu.set_ip(instr.near_branch16() as u16);
-    }
-}
-
-fn loopne(cpu: &mut Cpu, instr: &Instruction) {
-    cpu.set_cx(cpu.cx().wrapping_sub(1));
-    if cpu.cx() != 0 && !cpu.get_cpu_flag(CpuFlags::ZF) {
-        cpu.set_ip(instr.near_branch16() as u16);
-    }
-}
-
-fn jcxz(cpu: &mut Cpu, instr: &Instruction) {
-    if cpu.cx() == 0 {
-        cpu.set_ip(instr.near_branch16() as u16);
-    }
+    Ok(())
 }

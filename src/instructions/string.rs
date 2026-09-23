@@ -1,199 +1,155 @@
-use crate::cpu::{Cpu, CpuFlags};
-use iced_x86::{Instruction, Mnemonic, Register};
+//! String instructions and their REP/REPE/REPNE prefixes, with 16 or 32-bit
+//! addressing (SI/DI/CX or ESI/EDI/ECX).
+//!
+//! Each iteration commits its index and count updates only after its
+//! memory accesses succeeded, so a fault leaves the registers at the
+//! faulting iteration and re-executing the instruction resumes there.
 
-pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
-    let has_rep = instr.has_rep_prefix();
-    let has_repne = instr.has_repne_prefix();
+use iced_x86::{Instruction, OpKind, Register};
 
-    // Non-REP: Execute once and return
-    if !has_rep && !has_repne {
-        execute_once(cpu, instr);
-        return;
+use super::operand::mem_seg;
+use crate::cpu::{Access, Cpu, CpuFlags, CpuResult, Seg};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrOp {
+    Movs,
+    Cmps,
+    Scas,
+    Lods,
+    Stos,
+    Ins,
+    Outs,
+}
+
+/// True when the instruction uses 32-bit addressing (ESI/EDI/ECX).
+fn addr32(instr: &Instruction) -> bool {
+    (0..instr.op_count()).any(|i| {
+        matches!(
+            instr.op_kind(i),
+            OpKind::MemorySegESI | OpKind::MemorySegEDI | OpKind::MemoryESEDI
+        )
+    })
+}
+
+/// The accumulator of an operand size: AL, AX or EAX.
+fn accumulator(size: u8) -> Register {
+    match size {
+        1 => Register::AL,
+        2 => Register::AX,
+        _ => Register::EAX,
+    }
+}
+
+/// Addressing of one string instruction.
+struct Addr {
+    mask: u32,
+    delta: u32,
+    src_seg: Seg,
+}
+
+impl Addr {
+    fn get(&self, cpu: &Cpu, reg: Register) -> u32 {
+        cpu.reg(reg) & self.mask
     }
 
-    while cpu.cx() != 0 {
-        // Execute the instruction (Updates DI/SI and Flags)
-        execute_once(cpu, instr);
+    /// Step SI/ESI or DI/EDI by the operand size in the direction DF says.
+    fn step(&self, cpu: &mut Cpu, reg: Register) {
+        let full = cpu.reg(reg);
+        let next = full.wrapping_add(self.delta);
+        cpu.set_reg(reg, (full & !self.mask) | (next & self.mask));
+    }
+}
 
-        // Decrement CX
-        cpu.set_cx(cpu.cx().wrapping_sub(1));
-
-        // Check termination based on Flags (ZF)
-        let zf = cpu.get_cpu_flag(CpuFlags::ZF);
-        match instr.mnemonic() {
-            Mnemonic::Cmpsb | Mnemonic::Cmpsw | Mnemonic::Scasb | Mnemonic::Scasw => {
-                // REPE/REPZ (F3): Loop while Equal (ZF=1). Stop if Not Equal (ZF=0).
-                if has_rep && !zf {
-                    break;
-                }
-                // REPNE/REPNZ (F2): Loop while Not Equal (ZF=0). Stop if Equal (ZF=1).
-                if has_repne && zf {
-                    break;
-                }
+/// One iteration: the memory and port accesses, then the index updates.
+fn iteration(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr) -> CpuResult {
+    let (si, di) = (Register::ESI, Register::EDI);
+    match op {
+        StrOp::Movs => {
+            let src = cpu.mem_ref(a.src_seg, a.get(cpu, si), size, Access::Read)?;
+            let dst = cpu.mem_ref(Seg::ES, a.get(cpu, di), size, Access::Write)?;
+            let value = cpu.mem_read(src);
+            cpu.mem_write(dst, value);
+            a.step(cpu, si);
+            a.step(cpu, di);
+        }
+        StrOp::Stos => {
+            let dst = cpu.mem_ref(Seg::ES, a.get(cpu, di), size, Access::Write)?;
+            let value = cpu.reg(accumulator(size));
+            cpu.mem_write(dst, value);
+            a.step(cpu, di);
+        }
+        StrOp::Lods => {
+            let src = cpu.mem_ref(a.src_seg, a.get(cpu, si), size, Access::Read)?;
+            let value = cpu.mem_read(src);
+            cpu.set_reg(accumulator(size), value);
+            a.step(cpu, si);
+        }
+        StrOp::Cmps => {
+            let src = cpu.mem_ref(a.src_seg, a.get(cpu, si), size, Access::Read)?;
+            let dst = cpu.mem_ref(Seg::ES, a.get(cpu, di), size, Access::Read)?;
+            let (x, y) = (cpu.mem_read(src), cpu.mem_read(dst));
+            cpu.alu_sub(size, x, y, false);
+            a.step(cpu, si);
+            a.step(cpu, di);
+        }
+        StrOp::Scas => {
+            let dst = cpu.mem_ref(Seg::ES, a.get(cpu, di), size, Access::Read)?;
+            let (x, y) = (cpu.reg(accumulator(size)), cpu.mem_read(dst));
+            cpu.alu_sub(size, x, y, false);
+            a.step(cpu, di);
+        }
+        StrOp::Ins => {
+            let dst = cpu.mem_ref(Seg::ES, a.get(cpu, di), size, Access::Write)?;
+            let port = cpu.dx();
+            let mut value = 0;
+            for i in 0..size as u16 {
+                value |= (cpu.bus.io_read(port.wrapping_add(i)) as u32) << (8 * i);
             }
-            _ => {} // MOVS, STOS, LODS do not check flags for termination
+            cpu.mem_write(dst, value);
+            a.step(cpu, di);
+        }
+        StrOp::Outs => {
+            let src = cpu.mem_ref(a.src_seg, a.get(cpu, si), size, Access::Read)?;
+            let value = cpu.mem_read(src);
+            let port = cpu.dx();
+            for i in 0..size as u16 {
+                cpu.bus.io_write(port.wrapping_add(i), (value >> (8 * i)) as u8);
+            }
+            a.step(cpu, si);
         }
     }
+    Ok(())
 }
 
-fn execute_once(cpu: &mut Cpu, instr: &Instruction) {
-    match instr.mnemonic() {
-        Mnemonic::Movsb => movs(cpu, instr, 1),
-        Mnemonic::Movsw => movs(cpu, instr, 2),
-        Mnemonic::Stosb => stos(cpu, instr, 1),
-        Mnemonic::Stosw => stos(cpu, instr, 2),
-        Mnemonic::Lodsb => lods(cpu, instr, 1),
-        Mnemonic::Lodsw => lods(cpu, instr, 2),
-        Mnemonic::Cmpsb => cmps(cpu, instr, 1),
-        Mnemonic::Cmpsw => cmps(cpu, instr, 2),
-        Mnemonic::Scasb => scas(cpu, instr, 1),
-        Mnemonic::Scasw => scas(cpu, instr, 2),
-        Mnemonic::Outsb => outs(cpu, instr, 1),
-        Mnemonic::Outsw => outs(cpu, instr, 2),
-        Mnemonic::Insb => ins(cpu, instr, 1),
-        Mnemonic::Insw => ins(cpu, instr, 2),
-        _ => {
-            cpu.bus.log_string(&format!(
-                "[STRING] Unsupported instruction: {:?}",
-                instr.mnemonic()
-            ));
-        }
-    }
-}
-
-fn get_string_src_segment(instr: &Instruction, cpu: &Cpu) -> u16 {
-    match instr.segment_prefix() {
-        Register::CS => cpu.cs(),
-        Register::ES => cpu.es(),
-        Register::SS => cpu.ss(),
-        Register::DS => cpu.ds(),
-        _ => cpu.ds(),
-    }
-}
-
-fn update_indices(cpu: &mut Cpu, size: u16, update_si: bool, update_di: bool) {
-    let delta = if cpu.dflag() {
-        (0u16).wrapping_sub(size)
-    } else {
-        size
+pub fn string(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResult {
+    let a32 = addr32(instr);
+    let addr = Addr {
+        mask: if a32 { 0xFFFF_FFFF } else { 0xFFFF },
+        delta: if cpu.get_cpu_flag(CpuFlags::DF) { (size as u32).wrapping_neg() } else { size as u32 },
+        // The source segment can be overridden; the destination is ES.
+        src_seg: mem_seg(instr),
     };
 
-    if update_si {
-        cpu.set_si(cpu.si().wrapping_add(delta));
-    }
-    if update_di {
-        cpu.set_di(cpu.di().wrapping_add(delta));
-    }
-}
-
-fn movs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
-    let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
-    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
-
-    if size == 1 {
-        let val = cpu.bus.read_8(src_addr);
-        cpu.bus.write_8(dst_addr, val);
-    } else {
-        let val = cpu.bus.read_16(src_addr);
-        cpu.bus.write_16(dst_addr, val);
+    let repe = instr.has_repe_prefix();
+    let repne = instr.has_repne_prefix();
+    if !repe && !repne {
+        return iteration(cpu, op, size, &addr);
     }
 
-    update_indices(cpu, size, true, true);
-}
-
-fn stos(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
-    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
-
-    if size == 1 {
-        cpu.bus.write_8(dst_addr, cpu.get_al());
-    } else {
-        cpu.bus.write_16(dst_addr, cpu.ax());
+    let counter = if a32 { Register::ECX } else { Register::CX };
+    let compares = matches!(op, StrOp::Cmps | StrOp::Scas);
+    loop {
+        let count = cpu.reg(counter);
+        if count == 0 {
+            return Ok(());
+        }
+        iteration(cpu, op, size, &addr)?;
+        cpu.set_reg(counter, count - 1);
+        if compares {
+            let zf = cpu.get_cpu_flag(CpuFlags::ZF);
+            if (repe && !zf) || (repne && zf) {
+                return Ok(());
+            }
+        }
     }
-
-    update_indices(cpu, size, false, true);
-}
-
-fn lods(cpu: &mut Cpu, instr: &Instruction, size: u16) {
-    let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
-
-    if size == 1 {
-        let val = cpu.bus.read_8(src_addr);
-        cpu.set_reg8(Register::AL, val);
-    } else {
-        let val = cpu.bus.read_16(src_addr);
-        cpu.set_ax(val);
-    }
-
-    update_indices(cpu, size, true, false);
-}
-
-fn cmps(cpu: &mut Cpu, instr: &Instruction, size: u16) {
-    let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
-    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
-
-    if size == 1 {
-        let a = cpu.bus.read_8(src_addr);
-        let b = cpu.bus.read_8(dst_addr);
-        cpu.alu_sub_8(a, b);
-    } else {
-        let a = cpu.bus.read_16(src_addr);
-        let b = cpu.bus.read_16(dst_addr);
-        cpu.alu_sub_16(a, b);
-    }
-
-    update_indices(cpu, size, true, true);
-}
-
-fn scas(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
-    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
-
-    if size == 1 {
-        let acc = cpu.get_al();
-        let mem = cpu.bus.read_8(dst_addr);
-        cpu.alu_sub_8(acc, mem);
-    } else {
-        let acc = cpu.ax();
-        let mem = cpu.bus.read_16(dst_addr);
-        cpu.alu_sub_16(acc, mem);
-    }
-
-    update_indices(cpu, size, false, true);
-}
-
-fn outs(cpu: &mut Cpu, instr: &Instruction, size: u16) {
-    let src_seg = get_string_src_segment(instr, cpu);
-    let src_addr = cpu.get_physical_addr(src_seg, cpu.si());
-    let port = cpu.dx();
-
-    if size == 1 {
-        let val = cpu.bus.read_8(src_addr);
-        cpu.bus.io_write(port, val);
-    } else {
-        let val = cpu.bus.read_16(src_addr);
-        // 16-bit I/O: Low byte to Port, High byte to Port+1
-        cpu.bus.io_write(port, (val & 0xFF) as u8);
-        cpu.bus.io_write(port.wrapping_add(1), (val >> 8) as u8);
-    }
-
-    update_indices(cpu, size, true, false);
-}
-
-fn ins(cpu: &mut Cpu, _instr: &Instruction, size: u16) {
-    let dst_addr = cpu.get_physical_addr(cpu.es(), cpu.di());
-    let port = cpu.dx();
-
-    if size == 1 {
-        let val = cpu.bus.io_read(port);
-        cpu.bus.write_8(dst_addr, val);
-    } else {
-        let low = cpu.bus.io_read(port);
-        let high = cpu.bus.io_read(port.wrapping_add(1));
-        let val = (low as u16) | ((high as u16) << 8);
-        cpu.bus.write_16(dst_addr, val);
-    }
-
-    update_indices(cpu, size, false, true);
 }

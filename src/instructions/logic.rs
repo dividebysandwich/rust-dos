@@ -1,311 +1,124 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, Register};
-use crate::cpu::{Cpu, CpuFlags};
-use super::utils::{calculate_addr, is_8bit_reg};
+//! Shifts and rotates, double shifts, bit tests and scans, and SETcc.
 
-pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
-    match instr.mnemonic() {
-        Mnemonic::And => logic_op(cpu, instr, |a, b| a & b),
-        Mnemonic::Or => logic_op(cpu, instr, |a, b| a | b),
-        Mnemonic::Xor => logic_op(cpu, instr, |a, b| a ^ b),
-        Mnemonic::Test => test(cpu, instr),
-        Mnemonic::Not => not(cpu, instr),
-        Mnemonic::Shl | Mnemonic::Sal => shift_op(cpu, instr, Mnemonic::Shl),
-        Mnemonic::Shr => shift_op(cpu, instr, Mnemonic::Shr),
-        Mnemonic::Sar => shift_op(cpu, instr, Mnemonic::Sar),
-        Mnemonic::Rcl => rotate_op(cpu, instr, Mnemonic::Rcl),
-        Mnemonic::Rcr => rotate_op(cpu, instr, Mnemonic::Rcr),
-        Mnemonic::Rol => rotate_op(cpu, instr, Mnemonic::Rol),
-        Mnemonic::Ror => rotate_op(cpu, instr, Mnemonic::Ror),
-        Mnemonic::Aad => aad(cpu, instr),
-        _ => { cpu.bus.log_string(&format!("[LOGIC] Unsupported instruction: {:?}", instr.mnemonic())); }
+use iced_x86::{ConditionCode, Instruction, OpKind};
+
+use super::operand::{Loc, addr_size, effective_offset, loc, mem_seg, op_size, read_op};
+use crate::cpu::alu::{CF, ShiftOp, ZF, sign_extend};
+use crate::cpu::{Access, Cpu, CpuFlags, CpuResult};
+
+/// ROL/ROR/RCL/RCR/SHL/SHR/SAR r/m by 1, CL or an immediate.
+pub fn shift(cpu: &mut Cpu, instr: &Instruction, op: ShiftOp) -> CpuResult {
+    let size = op_size(instr, 0);
+    let dest = loc(cpu, instr, 0, size, Access::Write)?;
+    let count = read_op(cpu, instr, 1, 1)? & 0x1F;
+    let r = cpu.alu_shift(op, size, dest.read(cpu), count);
+    if count != 0 {
+        dest.write(cpu, r);
     }
+    Ok(())
 }
 
-/// Generic helper for AND, OR, XOR (Read -> Op -> Write -> Flags)
-fn logic_op<F>(cpu: &mut Cpu, instr: &Instruction, op: F)
-where F: Fn(u16, u16) -> u16 {
-    // Determine operand size based on Destination (Op0)
-    let is_8bit = match instr.op0_kind() {
-        OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size().size() == 1,
-        _ => false,
-    };
+/// SHLD/SHRD r/m, reg, CL or imm8.
+pub fn double_shift(cpu: &mut Cpu, instr: &Instruction, left: bool) -> CpuResult {
+    let size = op_size(instr, 0);
+    let dest = loc(cpu, instr, 0, size, Access::Write)?;
+    let src = cpu.reg(instr.op1_register());
+    let count = read_op(cpu, instr, 2, 1)? & 0x1F;
+    let r = cpu.alu_double_shift(left, size, dest.read(cpu), src, count);
+    if count != 0 {
+        dest.write(cpu, r);
+    }
+    Ok(())
+}
 
-    // Read Destination (Op0)
-    let (dest, addr_opt) = if instr.op0_kind() == OpKind::Register {
-        let reg = instr.op0_register();
-        let val = if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) };
-        (val, None)
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        let val = if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) };
-        (val, Some(addr))
-    };
+/// Bit test operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitOp {
+    Test,
+    Set,
+    Reset,
+    Complement,
+}
 
-    // Read Source (Op1)
-    let src = if instr.op1_kind() == OpKind::Register {
-        if is_8bit { cpu.get_reg8(instr.op1_register()) as u16 } else { cpu.get_reg16(instr.op1_register()) }
-    } else if instr.op1_kind() == OpKind::Immediate8 {
-        instr.immediate8() as u16
-    } else if instr.op1_kind() == OpKind::Immediate8to16 {
-        instr.immediate8to16() as u16
-    } else if instr.op1_kind() == OpKind::Immediate16 {
-        instr.immediate16()
-    } else {
-        // Memory Source
-        let addr = calculate_addr(cpu, instr);
-        if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) }
-    };
+/// BT/BTS/BTR/BTC: copy the selected bit to CF, then leave, set, clear or
+/// flip it. With a register bit offset and a memory operand, the offset is
+/// signed and can select a bit outside the addressed word.
+pub fn bit_test(cpu: &mut Cpu, instr: &Instruction, op: BitOp) -> CpuResult {
+    let size = op_size(instr, 0);
+    let bits = size as u32 * 8;
+    let access = if op == BitOp::Test { Access::Read } else { Access::Write };
+    let offset = read_op(cpu, instr, 1, size)?;
 
-    // Perform Operation
-    let res = op(dest, src);
-
-    // Write Back
-    if let Some(addr) = addr_opt {
-        if is_8bit {
-            cpu.bus.write_8(addr, res as u8);
-        } else {
-            cpu.bus.write_16(addr, res);
+    let (dest, bit) = if instr.op0_kind() == OpKind::Memory && instr.op1_kind() == OpKind::Register {
+        let offset = sign_extend(size, offset) as i32;
+        let words = offset >> bits.trailing_zeros();
+        let mut addr = effective_offset(cpu, instr).wrapping_add((words * size as i32) as u32);
+        if addr_size(instr) == 2 {
+            addr &= 0xFFFF;
         }
+        let m = cpu.mem_ref(mem_seg(instr), addr, size, access)?;
+        (Loc::Mem(m), offset as u32 & (bits - 1))
     } else {
-        let reg = instr.op0_register();
-        if is_8bit {
-            cpu.set_reg8(reg, res as u8);
-        } else {
-            cpu.set_reg16(reg, res);
-        }
+        (loc(cpu, instr, 0, size, access)?, offset & (bits - 1))
+    };
+
+    let value = dest.read(cpu);
+    let mask = 1u32 << bit;
+    cpu.set_flag_bits(CF, if value & mask != 0 { CF } else { 0 });
+    let r = match op {
+        BitOp::Test => return Ok(()),
+        BitOp::Set => value | mask,
+        BitOp::Reset => value & !mask,
+        BitOp::Complement => value ^ mask,
+    };
+    dest.write(cpu, r);
+    Ok(())
+}
+
+/// BSF/BSR: index of the lowest or highest set bit. A zero source sets ZF
+/// and leaves the destination alone.
+pub fn bit_scan(cpu: &mut Cpu, instr: &Instruction, forward: bool) -> CpuResult {
+    let size = op_size(instr, 0);
+    let src = read_op(cpu, instr, 1, size)?;
+    if src == 0 {
+        cpu.set_flag_bits(ZF, ZF);
+        return Ok(());
     }
-
-    // Update Flags
-    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
-    cpu.set_cpu_flag(CpuFlags::SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_cpu_flag(CpuFlags::OF, false);
-    cpu.set_cpu_flag(CpuFlags::CF, false);
-    cpu.update_pf(res);
+    let index = if forward { src.trailing_zeros() } else { 31 - src.leading_zeros() };
+    cpu.set_flag_bits(ZF, 0);
+    cpu.set_reg(instr.op0_register(), index);
+    Ok(())
 }
 
-/// TEST: Same as AND, but discards result
-fn test(cpu: &mut Cpu, instr: &Instruction) {
-    let is_8bit = match instr.op0_kind() {
-        OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size().size() == 1,
-        _ => false,
-    };
-
-    // Read Dest
-    let dest = if instr.op0_kind() == OpKind::Register {
-        if is_8bit { cpu.get_reg8(instr.op0_register()) as u16 } else { cpu.get_reg16(instr.op0_register()) }
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) }
-    };
-
-    // Read Source
-    let src = if instr.op1_kind() == OpKind::Register {
-        if is_8bit { cpu.get_reg8(instr.op1_register()) as u16 } else { cpu.get_reg16(instr.op1_register()) }
-    } else if instr.op1_kind() == OpKind::Immediate8 {
-        instr.immediate8() as u16
-    } else if instr.op1_kind() == OpKind::Immediate8to16 {
-        instr.immediate8to16() as u16
-    } else if instr.op1_kind() == OpKind::Immediate16 {
-        instr.immediate16()
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) }
-    };
-
-    let res = dest & src;
-
-    // Flags Only
-    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res & 0xFF) == 0 } else { res == 0 });
-    cpu.set_cpu_flag(CpuFlags::SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_cpu_flag(CpuFlags::OF, false);
-    cpu.set_cpu_flag(CpuFlags::CF, false);
-    cpu.update_pf(res);
-}
-
-/// NOT: Invert bits (One's Complement)
-fn not(cpu: &mut Cpu, instr: &Instruction) {
-    let is_8bit = match instr.op0_kind() {
-        OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size().size() == 1,
-        _ => false,
-    };
-
-    // Read
-    let (val, addr_opt) = if instr.op0_kind() == OpKind::Register {
-        let reg = instr.op0_register();
-        let v = if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) };
-        (v, None)
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        let v = if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) };
-        (v, Some(addr))
-    };
-
-    // Invert
-    let res = !val;
-
-    // Write
-    if let Some(addr) = addr_opt {
-        if is_8bit { cpu.bus.write_8(addr, res as u8); } else { cpu.bus.write_16(addr, res); }
-    } else {
-        let reg = instr.op0_register();
-        if is_8bit { cpu.set_reg8(reg, res as u8); } else { cpu.set_reg16(reg, res); }
-    }
-    
-    // NOT does not modify flags
-}
-
-/// Helper to get shift count from Op1 or CL
-fn get_shift_count(cpu: &Cpu, instr: &Instruction) -> u32 {
-    // x86 shifts/rotates usually have the count in Op1
-    match instr.op1_kind() {
-        OpKind::Immediate8 => instr.immediate8() as u32,
-        OpKind::Register => cpu.get_reg8(instr.op1_register()) as u32,
-        _ => 1, // Fallback for single-operand decodings
+/// Whether condition `cc` of a Jcc, SETcc or LOOPcc holds.
+#[inline(always)]
+pub fn condition(cpu: &Cpu, cc: ConditionCode) -> bool {
+    let f = |flag| cpu.get_cpu_flag(flag);
+    match cc {
+        ConditionCode::o => f(CpuFlags::OF),
+        ConditionCode::no => !f(CpuFlags::OF),
+        ConditionCode::b => f(CpuFlags::CF),
+        ConditionCode::ae => !f(CpuFlags::CF),
+        ConditionCode::e => f(CpuFlags::ZF),
+        ConditionCode::ne => !f(CpuFlags::ZF),
+        ConditionCode::be => f(CpuFlags::CF) || f(CpuFlags::ZF),
+        ConditionCode::a => !f(CpuFlags::CF) && !f(CpuFlags::ZF),
+        ConditionCode::s => f(CpuFlags::SF),
+        ConditionCode::ns => !f(CpuFlags::SF),
+        ConditionCode::p => f(CpuFlags::PF),
+        ConditionCode::np => !f(CpuFlags::PF),
+        ConditionCode::l => f(CpuFlags::SF) != f(CpuFlags::OF),
+        ConditionCode::ge => f(CpuFlags::SF) == f(CpuFlags::OF),
+        ConditionCode::le => f(CpuFlags::ZF) || f(CpuFlags::SF) != f(CpuFlags::OF),
+        ConditionCode::g => !f(CpuFlags::ZF) && f(CpuFlags::SF) == f(CpuFlags::OF),
+        ConditionCode::None => true,
     }
 }
 
-/// SHL, SHR, SAR
-fn shift_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
-    let is_8bit = match instr.op0_kind() {
-        OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size().size() == 1,
-        _ => false,
-    };
-
-    let (val, addr_opt) = if instr.op0_kind() == OpKind::Register {
-        let reg = instr.op0_register();
-        (if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) }, None)
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        (if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) }, Some(addr))
-    };
-
-    let count = get_shift_count(cpu, instr) & 0x1F;
-    if count == 0 { return; }
-
-    let bit_width = if is_8bit { 8 } else { 16 };
-    let mut res = val;
-    let mut last_out = false;
-
-    for _ in 0..count {
-        match mnemonic {
-            Mnemonic::Shl | Mnemonic::Sal => {
-                last_out = (res & (1 << (bit_width - 1))) != 0;
-                res <<= 1;
-            },
-            Mnemonic::Shr => {
-                last_out = (res & 1) != 0;
-                res >>= 1;
-            },
-            Mnemonic::Sar => {
-                last_out = (res & 1) != 0;
-                let msb_mask = 1 << (bit_width - 1);
-                let msb = res & msb_mask;
-                res = (res >> 1) | msb; // Sign extension
-            },
-            _ => {
-                // If we hit this, the dispatcher sent a mnemonic we aren't handling
-                println!("[DEBUG] shift_op got unexpected mnemonic: {:?}", mnemonic);
-                return;
-            }
-        }
-    }
-
-    if is_8bit { res &= 0xFF; }
-
-    // Write Back
-    if let Some(addr) = addr_opt {
-        if is_8bit { cpu.bus.write_8(addr, res as u8); } else { cpu.bus.write_16(addr, res); }
-    } else {
-        let reg = instr.op0_register();
-        if is_8bit { cpu.set_reg8(reg, res as u8); } else { cpu.set_reg16(reg, res); }
-    }
-
-    // Flags
-    cpu.set_cpu_flag(CpuFlags::ZF, if is_8bit { (res as u8) == 0 } else { res == 0 });
-    cpu.set_cpu_flag(CpuFlags::SF, if is_8bit { (res & 0x80) != 0 } else { (res & 0x8000) != 0 });
-    cpu.set_cpu_flag(CpuFlags::CF, last_out);
-    cpu.update_pf(res);
-}
-
-fn rotate_op(cpu: &mut Cpu, instr: &Instruction, mnemonic: Mnemonic) {
-    let is_8bit = match instr.op0_kind() {
-        OpKind::Register => is_8bit_reg(instr.op0_register()),
-        OpKind::Memory => instr.memory_size().size() == 1,
-        _ => false,
-    };
-
-    let (mut val, addr_opt) = if instr.op0_kind() == OpKind::Register {
-        let reg = instr.op0_register();
-        (if is_8bit { cpu.get_reg8(reg) as u16 } else { cpu.get_reg16(reg) }, None)
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        (if is_8bit { cpu.bus.read_8(addr) as u16 } else { cpu.bus.read_16(addr) }, Some(addr))
-    };
-
-    let count = get_shift_count(cpu, instr) & 0x1F;
-    if count == 0 { return; }
-
-    let width = if is_8bit { 8 } else { 16 };
-
-    for _ in 0..count {
-        let old_cf = cpu.get_cpu_flag(CpuFlags::CF);
-        let msb_mask = 1 << (width - 1);
-        
-        match mnemonic {
-            Mnemonic::Rol => {
-                let msb = (val & msb_mask) != 0;
-                val = (val << 1) | (if msb { 1 } else { 0 });
-                cpu.set_cpu_flag(CpuFlags::CF, msb);
-            },
-            Mnemonic::Ror => {
-                let lsb = (val & 1) != 0;
-                val = (val >> 1) | (if lsb { msb_mask } else { 0 });
-                cpu.set_cpu_flag(CpuFlags::CF, lsb);
-            },
-            Mnemonic::Rcl => {
-                let msb = (val & msb_mask) != 0;
-                val = (val << 1) | (if old_cf { 1 } else { 0 });
-                cpu.set_cpu_flag(CpuFlags::CF, msb);
-            },
-            Mnemonic::Rcr => {
-                let lsb = (val & 1) != 0;
-                val = (val >> 1) | (if old_cf { msb_mask } else { 0 });
-                cpu.set_cpu_flag(CpuFlags::CF, lsb);
-            },
-            _ => unreachable!(),
-        }
-        if is_8bit { val &= 0xFF; }
-    }
-
-    if let Some(addr) = addr_opt {
-        if is_8bit { cpu.bus.write_8(addr, val as u8); } else { cpu.bus.write_16(addr, val); }
-    } else {
-        let reg = instr.op0_register();
-        if is_8bit { cpu.set_reg8(reg, val as u8); } else { cpu.set_reg16(reg, val); }
-    }
-}
-
-fn aad(cpu: &mut Cpu, instr: &Instruction) {
-    // Determine base (usually 10)
-    let base = if instr.op_count() > 0 && instr.op0_kind() == OpKind::Immediate8 {
-        instr.immediate8()
-    } else {
-        10
-    };
-    
-    let al = cpu.get_al();
-    let ah = cpu.get_ah();
-    
-    let res = (al as u16).wrapping_add((ah as u16).wrapping_mul(base as u16));
-    
-    cpu.set_reg8(Register::AL, (res & 0xFF) as u8);
-    cpu.set_reg8(Register::AH, 0);
-    
-    cpu.set_cpu_flag(CpuFlags::SF, (res & 0x80) != 0);
-    cpu.set_cpu_flag(CpuFlags::ZF, (res & 0xFF) == 0);
-    cpu.update_pf(res);
+/// SETcc r/m8.
+pub fn setcc(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let dest = loc(cpu, instr, 0, 1, Access::Write)?;
+    let value = condition(cpu, instr.condition_code()) as u32;
+    dest.write(cpu, value);
+    Ok(())
 }

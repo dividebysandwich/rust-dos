@@ -221,12 +221,12 @@ fn test_alu_sbb_comprehensive() {
 
     // --- 1. Basic Borrow Ripple (The 0x0100 - 1 Case) ---
     // Low Byte: 0x00 - 0x01 = 0xFF (CF=1)
-    let res_low = cpu.alu_sub_8(0x00, 0x01);
+    let res_low = cpu.alu_sub(1, (0x00) as u32, (0x01) as u32, false);
     assert_eq!(res_low, 0xFF);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
 
     // High Byte: 0x01 - 0x00 - (CF=1) = 0x00 (CF=0, ZF=1)
-    let res_high = cpu.alu_sbb_8(0x01, 0x00);
+    let res_high = cpu.alu_sub(1, (0x01) as u32, (0x00) as u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res_high, 0x00, "High byte of 0x0100 - 1 should be 0");
     assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true, "ZF should be set for high byte");
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false, "Borrow should be consumed");
@@ -234,7 +234,7 @@ fn test_alu_sbb_comprehensive() {
     // --- 2. The "Max Borrow" Case (0x0000 - 1) ---
     // 0x0000 - 0x0001 = 0xFFFF
     cpu.set_cpu_flag(CpuFlags::CF, false);
-    let res16 = cpu.alu_sbb_16(0x0000, 0x0001);
+    let res16 = cpu.alu_sub(2, (0x0000) as u32, (0x0001) as u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res16, 0xFFFF);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::AF), true, "Borrow from bit 3 to 4 should set AF");
@@ -242,7 +242,7 @@ fn test_alu_sbb_comprehensive() {
     // --- 3. Zero Flag Stability ---
     // 0x80 - 0x7F - (CF=1) = 0
     cpu.set_cpu_flag(CpuFlags::CF, true);
-    let res8 = cpu.alu_sbb_8(0x80, 0x7F);
+    let res8 = cpu.alu_sub(1, (0x80) as u32, (0x7F) as u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res8, 0);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::ZF), true);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), false);
@@ -250,7 +250,7 @@ fn test_alu_sbb_comprehensive() {
     // --- 4. Subbing with Carry-In causing a wrap ---
     // 0x00 - 0x00 - (CF=1) = 0xFF (CF=1)
     cpu.set_cpu_flag(CpuFlags::CF, true);
-    let res8_wrap = cpu.alu_sbb_8(0x00, 0x00);
+    let res8_wrap = cpu.alu_sub(1, (0x00) as u32, (0x00) as u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res8_wrap, 0xFF);
     assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), true);
 }
@@ -297,15 +297,17 @@ fn test_adc_af_flag() {
 fn test_das_instruction() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
-    // Case 1: 0x9A -> 0x94 (Standard adjustment)
-    // AL = 0x9A, DAS -> AL = 0x94
+    // Case 1: AL = 0x9A. Both digits need adjusting on a 386, which tests
+    // the original AL against 99h (an 8086 tests the adjusted AL against
+    // 9Fh and gives 0x94). Checked against the SingleStepTests 386 data.
     cpu.set_reg8(iced_x86::Register::AL, 0x9A);
     cpu.set_cpu_flag(CpuFlags::AF, false);
     cpu.set_cpu_flag(CpuFlags::CF, false);
     
     let code = [0x2F]; // DAS
     testrunners::run_cpu_code(&mut cpu, &code);
-    assert_eq!(cpu.get_al(), 0x94, "DAS failed to adjust 0x9A to 0x94");
+    assert_eq!(cpu.get_al(), 0x34, "DAS failed to adjust 0x9A to 0x34");
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
 
     // Case 2: Multi-digit borrow (Crucial for the '08' bug)
     // AL = 0x05, SUB AL, 0x06 (Result 0xFF, CF=1, AF=1)

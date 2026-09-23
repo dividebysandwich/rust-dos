@@ -41,31 +41,31 @@ fn test_alu_add_flags_16bit() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Simple Add
-    cpu.alu_add_16(10, 20);
+    cpu.alu_add(2, (10) as u32, (20) as u32, false);
     assert!(!cpu.get_cpu_flag(CpuFlags::ZF));
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
     assert!(!cpu.get_cpu_flag(CpuFlags::SF));
 
     // 2. Zero Flag
-    cpu.alu_add_16(0, 0);
+    cpu.alu_add(2, (0) as u32, (0) as u32, false);
     assert!(cpu.get_cpu_flag(CpuFlags::ZF));
 
     // 3. Carry Flag (Unsigned Overflow)
     // 0xFFFF + 1 = 0x0000 (Carry)
-    cpu.alu_add_16(0xFFFF, 1);
+    cpu.alu_add(2, (0xFFFF) as u32, (1) as u32, false);
     assert!(cpu.get_cpu_flag(CpuFlags::CF));
     assert!(cpu.get_cpu_flag(CpuFlags::ZF));
 
     // 4. Overflow Flag (Signed Overflow)
     // Max Positive (0x7FFF) + 1 = 0x8000 (Negative)
-    cpu.alu_add_16(0x7FFF, 1);
+    cpu.alu_add(2, (0x7FFF) as u32, (1) as u32, false);
     assert!(cpu.get_cpu_flag(CpuFlags::OF), "Signed Overflow not detected");
     assert!(cpu.get_cpu_flag(CpuFlags::SF), "Sign Flag should be set (result 0x8000 is negative)");
     assert!(!cpu.get_cpu_flag(CpuFlags::CF), "Unsigned Carry should NOT be set");
 
     // 5. Auxiliary Flag (Bit 3 -> 4 carry)
     // 0x0008 + 0x0008 = 0x0010
-    cpu.alu_add_16(0x0008, 0x0008);
+    cpu.alu_add(2, (0x0008) as u32, (0x0008) as u32, false);
     assert!(cpu.get_cpu_flag(CpuFlags::AF), "Auxiliary Flag failed");
 }
 
@@ -74,20 +74,20 @@ fn test_alu_sub_flags_8bit() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
 
     // 1. Simple Sub
-    let res = cpu.alu_sub_8(10, 3);
+    let res = cpu.alu_sub(1, (10) as u32, (3) as u32, false);
     assert_eq!(res, 7);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 
     // 2. Borrow (Carry Flag)
     // 3 - 5 = 254 (0xFE)
-    let res = cpu.alu_sub_8(3, 5);
+    let res = cpu.alu_sub(1, (3) as u32, (5) as u32, false);
     assert_eq!(res, 0xFE);
     assert!(cpu.get_cpu_flag(CpuFlags::CF), "Borrow (CF) not set for 3 - 5");
     assert!(cpu.get_cpu_flag(CpuFlags::SF), "Sign Flag not set for negative result");
 
     // 3. Signed Overflow
     // -128 (0x80) - 1 = 127 (0x7F) -> Underflow in signed space
-    cpu.alu_sub_8(0x80, 1);
+    cpu.alu_sub(1, (0x80) as u32, (1) as u32, false);
     assert!(cpu.get_cpu_flag(CpuFlags::OF), "Signed Overflow not detected for -128 - 1");
 }
 
@@ -99,7 +99,7 @@ fn test_alu_adc_carry_in() {
     cpu.set_cpu_flag(CpuFlags::CF, true);
 
     // 10 + 10 + 1(CF) = 21
-    let res = cpu.alu_adc_16(10, 10);
+    let res = cpu.alu_add(2, (10) as u32, (10) as u32, cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(res, 21);
     
     // Check if CF was updated by the result (21 fits, so CF=0)

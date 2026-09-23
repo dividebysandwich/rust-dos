@@ -7,8 +7,41 @@ use crate::f80::F80;
 use crate::instr_cache::InstrCache;
 use crate::shell::get_shell_code;
 
+pub mod alu;
+pub mod fault;
+pub mod mem;
 mod regs;
-pub use regs::{Seg, SegCache};
+pub use fault::{CpuResult, Fault, IntSource};
+pub use mem::{Access, MemRef};
+pub use regs::{ATTR_DB, ATTR_G, Seg, SegCache};
+
+/// FLAGS bits POPF and IRET load: CF, PF, AF, ZF, SF, TF, IF, DF, OF, IOPL
+/// and NT.
+const FLAGS16_WRITABLE: u32 = 0x7FD5;
+
+/// The processor being emulated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpuModel {
+    I386,
+    /// A 486DX: on-chip FPU, EFLAGS.AC, BSWAP/XADD/CMPXCHG/INVD/WBINVD/
+    /// INVLPG, and no CPUID.
+    I486,
+}
+
+/// A descriptor table register (GDTR, IDTR): base address and limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DescTable {
+    pub base: u32,
+    pub limit: u16,
+}
+
+/// CR0 bits.
+pub const CR0_PE: u32 = 0x0000_0001;
+pub const CR0_MP: u32 = 0x0000_0002;
+pub const CR0_EM: u32 = 0x0000_0004;
+pub const CR0_TS: u32 = 0x0000_0008;
+pub const CR0_ET: u32 = 0x0000_0010;
+pub const CR0_PG: u32 = 0x8000_0000;
 
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;
@@ -74,6 +107,14 @@ pub struct Cpu {
     eip: u32,
     /// ES, CS, SS, DS, FS, GS.
     seg: [SegCache; 6],
+    pub model: CpuModel,
+    pub cr0: u32,
+    pub cr2: u32,
+    pub cr3: u32,
+    /// Debug registers; stored, but breakpoints are not implemented.
+    pub dr: [u32; 8],
+    pub gdtr: DescTable,
+    pub idtr: DescTable,
 
     pub bus: Bus,
     flags: CpuFlags,
@@ -114,6 +155,8 @@ pub struct Cpu {
     /// Instructions (including emulator service traps) run since start, not
     /// counting interrupt entries or time skipped while halted.
     pub executed: u64,
+    /// Vectors that software interrupts found at 0000:0000, logged once each.
+    null_interrupts: [u64; 4],
     /// Set by BIOS services that wait for input (INT 16h with an empty
     /// keyboard buffer). The main loop then skips ahead to the next timer
     /// event instead of spinning through the retry loop, like it does for HLT.
@@ -154,6 +197,13 @@ impl Cpu {
             gpr: [0; 8],
             eip: 0x100,
             seg: [SegCache::real(0); 6],
+            model: CpuModel::I486,
+            cr0: CR0_ET,
+            cr2: 0,
+            cr3: 0,
+            dr: [0; 8],
+            gdtr: DescTable { base: 0, limit: 0xFFFF },
+            idtr: DescTable { base: 0, limit: 0x3FF },
             bus: Bus::new(root_path),
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
@@ -175,7 +225,21 @@ impl Cpu {
             // DOS program's hot working set.
             decode_cache: InstrCache::new(16),
             executed: 0,
+            null_interrupts: [0; 4],
             idle: false,
+        }
+    }
+
+    /// A software interrupt found its vector at 0000:0000 and was skipped.
+    /// Logged the first time for each vector.
+    pub fn note_null_interrupt(&mut self, vector: u8) {
+        let (word, bit) = (vector as usize / 64, 1u64 << (vector % 64));
+        if self.null_interrupts[word] & bit == 0 {
+            self.null_interrupts[word] |= bit;
+            self.bus.log_string(&format!(
+                "[CPU] INT {:02X}h has no handler (vector 0000:0000), skipped",
+                vector
+            ));
         }
     }
 
@@ -259,14 +323,6 @@ impl Cpu {
         }
     }
 
-    // Update Parity Flag based on result
-    pub fn update_pf(&mut self, result: u16) {
-        let low_byte = (result & 0xFF) as u8;
-        let ones = low_byte.count_ones();
-        // Even parity means an even number of 1s (e.g., 0, 2, 4, 8)
-        self.set_cpu_flag(CpuFlags::PF, (ones % 2) == 0);
-    }
-
     // Helper to get a flag state
     pub fn get_cpu_flag(&self, mask: CpuFlags) -> bool {
         (self.flags & mask) != CpuFlags::empty()
@@ -281,16 +337,33 @@ impl Cpu {
         }
     }
 
-    // Allows overwriting the flags register with a new bitflags struct
+    /// Load the 16-bit FLAGS register, as POPF and IRET do in real mode:
+    /// the status and control flags, IOPL and NT. Bit 15 stays 0 and bit 1
+    /// stays 1, which is how programs tell a 386 from an 8086 or 286.
     pub fn set_cpu_flags(&mut self, new_flags: CpuFlags) {
-        let raw_bits = new_flags.bits();
+        self.load_flags16(new_flags.bits() as u16);
+    }
 
-        // 0x0FD5 masks only the valid 8086 flags:
-        // (CF, PF, AF, ZF, SF, TF, IF, DF, OF)
-        // Then we OR with 0x0002 to ensure Bit 1 is always 1.
-        let sanitized_bits = (raw_bits & 0x0FD5) | 0x0002;
+    /// See `set_cpu_flags`.
+    pub fn load_flags16(&mut self, value: u16) {
+        let upper = self.flags.bits() & 0xFFFF_0000;
+        self.flags = CpuFlags::from_bits_retain(upper | (value as u32 & FLAGS16_WRITABLE) | 0x0002);
+    }
 
-        self.flags = CpuFlags::from_bits_truncate(sanitized_bits);
+    /// Load EFLAGS, as POPFD and IRETD do in real mode. VM and RF can't be
+    /// set this way; AC only exists on a 486.
+    pub fn load_eflags(&mut self, value: u32) {
+        let mut writable = FLAGS16_WRITABLE;
+        if self.model == CpuModel::I486 {
+            writable |= CpuFlags::AC.bits();
+        }
+        let keep = self.flags.bits() & CpuFlags::VM.bits();
+        self.flags = CpuFlags::from_bits_retain(keep | (value & writable) | 0x0002);
+    }
+
+    /// EFLAGS as PUSHFD pushes it: VM and RF read as 0.
+    pub fn eflags_image(&self) -> u32 {
+        self.flags.bits() & !(CpuFlags::VM.bits() | CpuFlags::RF.bits())
     }
 
     pub fn get_cpu_flags(&self) -> CpuFlags {
@@ -352,241 +425,6 @@ impl Cpu {
         let phys_addr = (segment as usize * 16) + offset as usize;
         // MASK TO 20 BITS to emulate 8086 wrap-around
         phys_addr & 0xFFFFF
-    }
-
-    // ADD 16 bit
-    pub fn alu_add_16(&mut self, dest: u16, src: u16) -> u16 {
-        let (result, carry) = dest.overflowing_add(src);
-
-        self.set_cpu_flag(CpuFlags::CF, carry);
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x8000) != 0); // High bit set?
-
-        self.update_pf(result);
-
-        // Overflow (Signed): if operands have same sign, but result has diff sign
-        let op1_sign = (dest & 0x8000) != 0;
-        let op2_sign = (src & 0x8000) != 0;
-        let res_sign = (result & 0x8000) != 0;
-        let overflow = (op1_sign == op2_sign) && (res_sign != op1_sign);
-        self.set_cpu_flag(CpuFlags::OF, overflow);
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
-
-        result
-    }
-
-    // SUB (and CMP) 16 bit
-    pub fn alu_sub_16(&mut self, dest: u16, src: u16) -> u16 {
-        let (result, borrow) = dest.overflowing_sub(src);
-
-        self.set_cpu_flag(CpuFlags::CF, borrow); // In SUB, CF acts as Borrow
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x8000) != 0);
-
-        self.update_pf(result);
-
-        // Overflow (Signed): operands diff sign, result diff sign from dest
-        let op1_sign = (dest & 0x8000) != 0;
-        let op2_sign = (src & 0x8000) != 0;
-        let res_sign = (result & 0x8000) != 0;
-        let overflow = (op1_sign != op2_sign) && (res_sign != op1_sign);
-        self.set_cpu_flag(CpuFlags::OF, overflow);
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
-
-        result
-    }
-
-    // SUB/CMP 8-bit
-    pub fn alu_sub_8(&mut self, dest: u8, src: u8) -> u8 {
-        let (result, borrow) = dest.overflowing_sub(src);
-
-        self.set_cpu_flag(CpuFlags::CF, borrow);
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x80) != 0); // Check Bit 7
-
-        self.update_pf(result as u16);
-
-        // 8-bit overflow (signed)
-        let op1_sign = (dest & 0x80) != 0;
-        let op2_sign = (src & 0x80) != 0;
-        let res_sign = (result & 0x80) != 0;
-        let overflow = (op1_sign != op2_sign) && (res_sign != op1_sign);
-        self.set_cpu_flag(CpuFlags::OF, overflow);
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
-
-        result
-    }
-
-    // ADD 8-bit
-    pub fn alu_add_8(&mut self, dest: u8, src: u8) -> u8 {
-        let (result, carry) = dest.overflowing_add(src);
-
-        self.set_cpu_flag(CpuFlags::CF, carry);
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x80) != 0);
-
-        self.update_pf(result as u16);
-
-        // 8-bit overflow (signed)
-        let op1_sign = (dest & 0x80) != 0;
-        let op2_sign = (src & 0x80) != 0;
-        let res_sign = (result & 0x80) != 0;
-        let overflow = (op1_sign == op2_sign) && (res_sign != op1_sign);
-        self.set_cpu_flag(CpuFlags::OF, overflow);
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
-
-        result
-    }
-
-    // SBB 8-bit
-    pub fn alu_sbb_8(&mut self, dest: u8, src: u8) -> u8 {
-        let carry_in = if self.get_cpu_flag(CpuFlags::CF) {
-            1
-        } else {
-            0
-        };
-
-        // We perform the math using u16 to easily detect borrows
-        let result_wide = (dest as u16)
-            .wrapping_sub(src as u16)
-            .wrapping_sub(carry_in as u16);
-        let result = result_wide as u8;
-
-        // Flags
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x80) != 0);
-
-        self.update_pf(result as u16);
-
-        // Carry (Borrow) happens if the result wrapped (result_wide > 0xFF)
-        self.set_cpu_flag(CpuFlags::CF, result_wide > 0xFF);
-
-        // Overflow for subtraction: (dest_sign != src_sign) && (dest_sign != result_sign)
-        let res_sign = (result & 0x80) != 0;
-        let src_sign = (src & 0x80) != 0;
-        let dest_sign = (dest & 0x80) != 0;
-
-        self.set_cpu_flag(
-            CpuFlags::OF,
-            (dest_sign != src_sign) && (dest_sign != res_sign),
-        );
-        self.set_cpu_flag(CpuFlags::AF, (dest & 0x0F) < ((src & 0x0F) + carry_in));
-
-        result
-    }
-
-    // SBB 16-bit
-    pub fn alu_sbb_16(&mut self, dest: u16, src: u16) -> u16 {
-        let carry_in = if self.get_cpu_flag(CpuFlags::CF) {
-            1
-        } else {
-            0
-        };
-
-        // Use u32 to capture borrows
-        let result_wide = (dest as u32)
-            .wrapping_sub(src as u32)
-            .wrapping_sub(carry_in as u32);
-        let result = result_wide as u16;
-
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x8000) != 0);
-
-        self.update_pf(result);
-
-        // Carry flag if we wrapped past 0
-        self.set_cpu_flag(CpuFlags::CF, result_wide > 0xFFFF);
-
-        // Set OF if the sign of the destination was different from the source,
-        // AND the sign of the result is different from the destination.
-        let dest_s = (dest & 0x8000) != 0;
-        let src_s = (src & 0x8000) != 0;
-        let res_s = (result & 0x8000) != 0;
-        self.set_cpu_flag(CpuFlags::OF, (dest_s != src_s) && (res_s != dest_s));
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
-
-        result
-    }
-
-    // ADC 8-bit
-    pub fn alu_adc_8(&mut self, dest: u8, src: u8) -> u8 {
-        let cf_in = if self.get_cpu_flag(CpuFlags::CF) {
-            1
-        } else {
-            0
-        };
-
-        // Use u16 to capture the carry out
-        let res_wide = (dest as u16) + (src as u16) + (cf_in as u16);
-        let result = res_wide as u8;
-
-        self.set_cpu_flag(CpuFlags::CF, res_wide > 0xFF);
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x80) != 0);
-        self.update_pf(result as u16);
-
-        // Overflow (Signed)
-        let op1_sign = (dest & 0x80) != 0;
-        let op2_sign = (src & 0x80) != 0;
-        let res_sign = (result & 0x80) != 0;
-        // Overflow happens if adding two numbers of same sign results in different sign
-        self.set_cpu_flag(
-            CpuFlags::OF,
-            (op1_sign == op2_sign) && (res_sign != op1_sign),
-        );
-
-        // AF: (op1 ^ op2 ^ result) & 0x10
-        // This detects if a carry occurred from bit 3 to bit 4
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
-        result
-    }
-
-    // ADC 16-bit
-    pub fn alu_adc_16(&mut self, dest: u16, src: u16) -> u16 {
-        let cf_in = if self.get_cpu_flag(CpuFlags::CF) {
-            1
-        } else {
-            0
-        };
-
-        // Use u32 to capture carry out
-        let res_wide = (dest as u32) + (src as u32) + (cf_in as u32);
-        let result = res_wide as u16;
-
-        self.set_cpu_flag(CpuFlags::CF, res_wide > 0xFFFF);
-        self.set_cpu_flag(CpuFlags::ZF, result == 0);
-        self.set_cpu_flag(CpuFlags::SF, (result & 0x8000) != 0);
-        self.update_pf(result);
-
-        // Overflow (Signed)
-        let op1_sign = (dest & 0x8000) != 0;
-        let op2_sign = (src & 0x8000) != 0;
-        let res_sign = (result & 0x8000) != 0;
-        self.set_cpu_flag(
-            CpuFlags::OF,
-            (op1_sign == op2_sign) && (res_sign != op1_sign),
-        );
-
-        // AF: Carry from bit 3 to 4
-        self.set_cpu_flag(CpuFlags::AF, ((dest ^ src ^ result) & 0x10) != 0);
-
-        result
-    }
-
-    // Stack Operations
-    pub fn push(&mut self, value: u16) {
-        self.set_sp(self.sp().wrapping_sub(2));
-        let addr = self.get_physical_addr(self.ss(), self.sp());
-        // Write Little Endian
-        self.bus.write_8(addr, (value & 0xFF) as u8);
-        self.bus.write_8(addr + 1, (value >> 8) as u8);
-    }
-    pub fn pop(&mut self) -> u16 {
-        let addr = self.get_physical_addr(self.ss(), self.sp());
-        let low = self.bus.read_8(addr) as u16;
-        let high = self.bus.read_8(addr + 1) as u16;
-        self.set_sp(self.sp().wrapping_add(2));
-        (high << 8) | low
     }
 
     /// Extract Low byte of DX (DL)
@@ -666,8 +504,11 @@ impl Cpu {
     /// hooked by a resident TSR.
     fn install_bios_traps(&mut self) {
         let mut phys_addr = 0xF1000;
+        // Keep new vectors at the end: programs may have remembered the
+        // addresses of the older traps.
         let hle_vectors = vec![
             0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33,
+            0x00, 0x06,
         ];
         let resident =
             (crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16;

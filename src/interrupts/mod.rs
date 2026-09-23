@@ -1,5 +1,6 @@
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 pub mod int00;
+pub mod int06;
 pub mod int08;
 pub mod int09;
 pub mod int10;
@@ -14,44 +15,6 @@ pub mod int21;
 pub mod int2f;
 pub mod int33;
 pub mod utils;
-
-/// Called when the CPU encounters "INT XX" instruction.
-/// This simulates the REAL hardware sequence: Push Flags/CS/IP -> Jump to IVT.
-pub fn handle_interrupt(cpu: &mut Cpu, vector: u8) {
-    // Read IVT
-    let ivt_addr = (vector as usize) * 4;
-    let new_ip = cpu.bus.read_16(ivt_addr);
-    let new_cs = cpu.bus.read_16(ivt_addr + 2);
-
-    if new_cs == 0 && new_ip == 0 {
-        //        cpu.bus
-        //            .log_string(&format!("[CPU] Null Interrupt {:02X}", vector));
-        return;
-    }
-
-    // Flag suspicious IVT targets: segment 0 outside the shell's code region,
-    // or any jump into the IVT itself. These almost always mean a corrupted
-    // IVT entry or a bad FAR indirection landed on an IVT byte.
-    if (new_cs == 0 && new_ip < 0x100) || new_cs == 0xFFFF {
-        cpu.bus.log_string(&format!(
-            "[CPU] Suspicious INT {:02X} vector at IVT[{:02X}]={:04X}:{:04X} from CS:IP={:04X}:{:04X}",
-            vector, vector, new_cs, new_ip, cpu.cs(), cpu.ip()
-        ));
-    }
-
-    // Push State (Simulate Hardware)
-    cpu.push(cpu.flags16());
-    cpu.push(cpu.cs());
-    cpu.push(cpu.ip());
-
-    // Jump
-    cpu.set_cs(new_cs);
-    cpu.set_ip(new_ip);
-
-    // Disable Interrupts
-    cpu.set_cpu_flag(CpuFlags::IF, false);
-    cpu.set_cpu_flag(CpuFlags::TF, false);
-}
 
 /// Return from an HLE handler as its IRET would. Service interrupts hand
 /// their results back in CF and ZF (and clear DF), but the handlers of the
@@ -77,9 +40,19 @@ pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
     }
 }
 
+/// Inline emulator services (`FE 39 vv`), which ROM code calls in the middle
+/// of a routine and which return by continuing with the next instruction.
+pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
+    cpu.bus.log_string(&format!(
+        "[CPU] Unknown inline emulator service {:02X}",
+        service
+    ));
+}
+
 pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
     match vector {
         0x00 => int00::handle(cpu),
+        0x06 => int06::handle(cpu),
         0x08 => int08::handle(cpu),
         0x09 => int09::handle(cpu),
         0x10 => int10::handle(cpu),

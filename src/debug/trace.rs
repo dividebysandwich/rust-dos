@@ -12,26 +12,35 @@ pub struct TraceEntry {
     /// Global instruction counter at the time this instruction executed.
     pub icount: u64,
     pub cs: u16,
-    pub ip: u16,
-    pub ax: u16,
-    pub bx: u16,
-    pub cx: u16,
-    pub dx: u16,
-    pub si: u16,
-    pub di: u16,
-    pub bp: u16,
-    pub sp: u16,
+    pub eip: u32,
+    /// EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI.
+    pub gpr: [u32; 8],
     pub ds: u16,
     pub es: u16,
     pub ss: u16,
-    pub flags: u16,
+    pub fs: u16,
+    pub gs: u16,
+    pub eflags: u32,
+    /// The code segment is 32-bit.
+    pub code32: bool,
     pub bytes: [u8; 15],
     pub len: u8,
 }
 
+/// Register names in `TraceEntry::gpr` order.
+const GPR_NAMES: [&str; 8] = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
+/// The order registers are shown in.
+const SHOW_ORDER: [usize; 8] = [0, 3, 1, 2, 6, 7, 5, 4];
+
 impl TraceEntry {
     pub fn code_bytes(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
+    }
+
+    /// Show 32-bit registers: in 32-bit code, or when 16-bit code uses the
+    /// upper halves.
+    fn wide(&self) -> bool {
+        self.code32 || self.eip > 0xFFFF || self.gpr.iter().any(|r| r >> 16 != 0)
     }
 
     /// Disassemble this entry. Returns (instruction bytes actually used,
@@ -43,49 +52,64 @@ impl TraceEntry {
             if bytes[2] == crate::shell::SHELL_COMMAND_BOP {
                 return (3, "HLE shell command".to_string());
             }
-            return (3, format!("HLE INT {:02X}h (AX={:04X})", bytes[2], self.ax));
+            return (3, format!("HLE INT {:02X}h (AX={:04X})", bytes[2], self.gpr[0] as u16));
         }
-        disasm_one(bytes, self.ip)
+        disasm_one(bytes, self.eip, self.code32)
     }
 
     pub fn to_json(&self) -> serde_json::Value {
         let (len, text) = self.disasm();
         let h = |v: u16| format!("{:04X}", v);
-        serde_json::json!({
+        let h32 = |v: u32| format!("{:08X}", v);
+        let mut v = serde_json::json!({
             "icount": self.icount,
             "t_ms": self.t_us as f64 / 1000.0,
-            "cs": h(self.cs), "ip": h(self.ip),
+            "cs": h(self.cs), "ip": h(self.eip as u16), "eip": h32(self.eip),
             "bytes": hex_bytes(&self.bytes[..len.min(self.len as usize)]),
             "asm": text,
-            "ax": h(self.ax), "bx": h(self.bx), "cx": h(self.cx), "dx": h(self.dx),
-            "si": h(self.si), "di": h(self.di), "bp": h(self.bp), "sp": h(self.sp),
-            "ds": h(self.ds), "es": h(self.es), "ss": h(self.ss),
-            "flags": h(self.flags),
-        })
+            "ds": h(self.ds), "es": h(self.es), "ss": h(self.ss), "fs": h(self.fs), "gs": h(self.gs),
+            "flags": h(self.eflags as u16), "eflags": h32(self.eflags),
+            "code32": self.code32,
+        });
+        for (i, name) in GPR_NAMES.iter().enumerate() {
+            v[*name] = h(self.gpr[i] as u16).into();
+            v[format!("e{}", name)] = h32(self.gpr[i]).into();
+        }
+        v
     }
 
     pub fn to_text(&self) -> String {
         let (len, text) = self.disasm();
+        let wide = self.wide();
+        let mut regs = String::new();
+        for i in SHOW_ORDER {
+            let name = GPR_NAMES[i].to_ascii_uppercase();
+            if wide {
+                regs.push_str(&format!("E{}={:08X} ", name, self.gpr[i]));
+            } else {
+                regs.push_str(&format!("{}={:04X} ", name, self.gpr[i] as u16));
+            }
+        }
+        let segs = if self.fs != 0 || self.gs != 0 {
+            format!(
+                "DS={:04X} ES={:04X} SS={:04X} FS={:04X} GS={:04X}",
+                self.ds, self.es, self.ss, self.fs, self.gs
+            )
+        } else {
+            format!("DS={:04X} ES={:04X} SS={:04X}", self.ds, self.es, self.ss)
+        };
+        let ip = if wide { format!("{:04X}:{:08X}", self.cs, self.eip) } else { format!("{:04X}:{:04X}", self.cs, self.eip) };
+        let flags = if wide { format!("FL={:08X}", self.eflags) } else { format!("FL={:04X}", self.eflags as u16) };
         format!(
-            "{:>12} {:>11.3} {:04X}:{:04X}  {:<20} {:<32} AX={:04X} BX={:04X} CX={:04X} DX={:04X} SI={:04X} DI={:04X} BP={:04X} SP={:04X} DS={:04X} ES={:04X} SS={:04X} FL={:04X}",
+            "{:>12} {:>11.3} {}  {:<20} {:<32} {}{} {}",
             self.icount,
             self.t_us as f64 / 1000.0,
-            self.cs,
-            self.ip,
+            ip,
             hex_bytes(&self.bytes[..len.min(self.len as usize)]),
             text,
-            self.ax,
-            self.bx,
-            self.cx,
-            self.dx,
-            self.si,
-            self.di,
-            self.bp,
-            self.sp,
-            self.ds,
-            self.es,
-            self.ss,
-            self.flags
+            regs,
+            segs,
+            flags
         )
     }
 }
@@ -97,9 +121,11 @@ pub fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ")
 }
 
-/// Disassemble one 16-bit instruction. Returns (length, text).
-pub fn disasm_one(bytes: &[u8], ip: u16) -> (usize, String) {
-    let mut decoder = Decoder::with_ip(16, bytes, ip as u64, DecoderOptions::NONE);
+/// Disassemble one instruction of 16-bit or 32-bit code. Returns (length,
+/// text).
+pub fn disasm_one(bytes: &[u8], ip: u32, code32: bool) -> (usize, String) {
+    let bitness = if code32 { 32 } else { 16 };
+    let mut decoder = Decoder::with_ip(bitness, bytes, ip as u64, DecoderOptions::NONE);
     let instr = decoder.decode();
     if instr.is_invalid() {
         return (1, "(bad)".to_string());

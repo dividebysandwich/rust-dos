@@ -9,7 +9,7 @@
 use iced_x86::{Decoder, DecoderOptions};
 
 use crate::command::CommandDispatcher;
-use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::cpu::{CR0_PE, Cpu, CpuFlags, CpuState, Fault, IntSource, Seg};
 use crate::instr_cache::InstrCache;
 
 /// Why `run_batch` returned.
@@ -168,21 +168,19 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
     // lets the line through: not masked in the IMR and not blocked by an
     // interrupt still in service.
     if let Some(line) = cpu.bus.pic_pending_irq() {
-        let ivt = (0x08 + line as usize) * 4;
-        let handler_ip = cpu.bus.read_16(ivt);
-        let handler_cs = cpu.bus.read_16(ivt + 2);
-        if handler_cs != 0 || handler_ip != 0 {
-            cpu.bus.pic_acknowledge(line);
-            cpu.push(cpu.flags16());
-            cpu.push(cpu.cs());
-            cpu.push(cpu.ip());
-            cpu.set_cs(handler_cs);
-            cpu.set_ip(handler_ip);
-            cpu.set_cpu_flag(CpuFlags::IF, false);
-            cpu.set_cpu_flag(CpuFlags::TF, false);
-        } else {
+        let vector = 0x08 + line;
+        let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
+        if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
             // No handler installed — drop the IRQ rather than spinning on it.
             cpu.bus.pic_drop(line);
+            return true;
+        }
+        cpu.bus.pic_acknowledge(line);
+        let (eip, esp) = (cpu.eip(), cpu.esp());
+        if let Err(fault) = cpu.deliver_interrupt(vector, IntSource::External) {
+            cpu.set_eip(eip);
+            cpu.set_esp(esp);
+            cpu.raise(fault);
         }
         return true;
     }
@@ -292,12 +290,25 @@ fn instruction(
     // This instruction ends the interrupt shadow of the previous one.
     cpu.irq_shadow = false;
 
-    let phys_ip = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+    // Instruction fetch past the end of the code segment raises #GP(0).
+    // (In 16-bit code, EIP runs on past FFFFh rather than wrapping.)
+    let eip = cpu.eip();
+    let cs = *cpu.seg_cache(Seg::CS);
+    if eip > cs.limit {
+        cpu.raise(Fault::gp(0));
+        return None;
+    }
+    let phys_ip = cpu.translate(cs.base.wrapping_add(eip)) as usize;
 
     // Tripwire: arriving in the IVT / BIOS data area with an application
     // context (DS not 0, not the shell at CS=0) almost always means a
     // corrupted FAR pointer landed us here.
-    if cpu.cs() == 0 && cpu.ip() < 0x100 && cpu.ds() != 0 && cpu.ds() != cpu.transient_segment() {
+    if cpu.cs() == 0
+        && cpu.ip() < 0x100
+        && cpu.ds() != 0
+        && cpu.ds() != cpu.transient_segment()
+        && cpu.current_psp != 0
+    {
         report_tripwire(cpu);
         cpu.state = CpuState::RebootShell;
         return None;
@@ -308,38 +319,33 @@ fn instruction(
     }
     cpu.executed += 1;
 
-    // Emulator service trap ("BOP"): FE 38 <vector>.
-    if fetch.ram[phys_ip] == 0xFE && fetch.ram[phys_ip + 1] == 0x38 {
-        let vector = fetch.ram[phys_ip + 2];
-
-        // Run the HLE handler directly, then simulate its IRET.
-        crate::interrupts::handle_hle(cpu, vector);
-        crate::interrupts::return_from_hle(cpu, vector);
-
-        cpu.bus.clock.icount += 1;
-        if cpu.idle {
-            // A BIOS service is waiting for input: skip ahead to the next
-            // timer event instead of spinning on the retry.
-            cpu.idle = false;
-            cpu.bus.clock.skip_to_deadline();
-        }
-        return None;
-    }
-
     // Decode via the decoded-instruction cache. On a hit (the common case
     // inside hot loops) iced's decoder is skipped entirely.
     let page_gen = cpu.bus.page_gen[(phys_ip >> 12) & 0xFF];
-    let ip = cpu.ip();
-    let cs = cpu.cs();
     let decoder = &mut fetch.decoder;
-    let instr = fetch.cache.get_or_decode(phys_ip, cs, ip, page_gen, |slot| {
+    let instr = fetch.cache.get_or_decode(phys_ip, cs.selector, eip, page_gen, |slot| {
         decoder.set_position(phys_ip).unwrap();
-        decoder.set_ip(ip as u64);
+        decoder.set_ip(eip as u64);
         decoder.decode_out(slot);
     });
 
-    cpu.set_ip(instr.next_ip() as u16);
-    crate::instructions::execute_instruction(cpu, instr);
+    let next_eip = eip.wrapping_add(instr.len() as u32);
+    if next_eip - 1 > cs.limit {
+        // The instruction's last bytes lie past the segment limit.
+        cpu.raise(Fault::gp(0));
+        return None;
+    }
+    let start_esp = cpu.esp();
+    cpu.set_eip(next_eip);
+    if let Err(fault) = crate::instructions::execute_instruction(cpu, instr) {
+        // A fault leaves the instruction undone: EIP back on it, and ESP as
+        // it was (the handlers commit everything else last).
+        cpu.set_eip(eip);
+        cpu.set_esp(start_esp);
+        if !(fault == Fault::UD && service_trap(cpu, fetch.ram, phys_ip)) {
+            cpu.raise(fault);
+        }
+    }
     cpu.bus.clock.icount += 1;
 
     if cpu.state == CpuState::Halted && cpu.bus.clock.deadline != u64::MAX {
@@ -350,6 +356,37 @@ fn instruction(
         cpu.bus.clock.skip_to_deadline();
     }
     None
+}
+
+/// Run the emulator service ("BOP") at `phys_ip`, if there is one. BOPs use
+/// the invalid FE /7 encodings and only work in real mode:
+///
+/// * `FE 38 vv`: the HLE handler of interrupt vv, entered through the
+///   interrupt vector table; returns with a simulated IRET.
+/// * `FE 39 vv`: an inline service vv; execution continues after it.
+fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
+    if cpu.cr0 & CR0_PE != 0 || ram[phys_ip] != 0xFE {
+        return false;
+    }
+    let vector = ram[phys_ip + 2];
+    match ram[phys_ip + 1] {
+        0x38 => {
+            crate::interrupts::handle_hle(cpu, vector);
+            crate::interrupts::return_from_hle(cpu, vector);
+        }
+        0x39 => {
+            cpu.set_ip(cpu.ip().wrapping_add(3));
+            crate::interrupts::handle_inline_bop(cpu, vector);
+        }
+        _ => return false,
+    }
+    if cpu.idle {
+        // A BIOS service is waiting for input: skip ahead to the next
+        // timer event instead of spinning on the retry.
+        cpu.idle = false;
+        cpu.bus.clock.skip_to_deadline();
+    }
+    true
 }
 
 fn report_tripwire(cpu: &mut Cpu) {

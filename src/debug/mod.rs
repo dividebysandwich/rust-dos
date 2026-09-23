@@ -548,19 +548,24 @@ impl DebugHub {
                 t_us: self.batch_t_us,
                 icount: cpu.executed,
                 cs: cpu.cs(),
-                ip: cpu.ip(),
-                ax: cpu.ax(),
-                bx: cpu.bx(),
-                cx: cpu.cx(),
-                dx: cpu.dx(),
-                si: cpu.si(),
-                di: cpu.di(),
-                bp: cpu.bp(),
-                sp: cpu.sp(),
+                eip: cpu.eip(),
+                gpr: [
+                    cpu.eax(),
+                    cpu.ecx(),
+                    cpu.edx(),
+                    cpu.ebx(),
+                    cpu.esp(),
+                    cpu.ebp(),
+                    cpu.esi(),
+                    cpu.edi(),
+                ],
                 ds: cpu.ds(),
                 es: cpu.es(),
                 ss: cpu.ss(),
-                flags: cpu.flags16(),
+                fs: cpu.fs(),
+                gs: cpu.gs(),
+                eflags: cpu.get_cpu_flags().bits(),
+                code32: false,
                 bytes,
                 len: len as u8,
             });
@@ -1028,7 +1033,7 @@ impl DebugHub {
             let (len, text) = if bytes[0] == 0xFE && bytes[1] == 0x38 {
                 (3, format!("HLE INT {:02X}h", bytes[2]))
             } else {
-                trace::disasm_one(&bytes, off)
+                trace::disasm_one(&bytes, off as u32, false)
             };
             let marker = match (p == cur, self.breakpoints.contains(&p)) {
                 (true, true) => "=>*",
@@ -1156,13 +1161,18 @@ pub fn regs_json(cpu: &Cpu) -> Value {
     .map(|(_, n)| *n)
     .collect();
     let h = |v: u16| format!("{:04X}", v);
+    let h32 = |v: u32| format!("{:08X}", v);
     json!({
         "ax": h(cpu.ax()), "bx": h(cpu.bx()), "cx": h(cpu.cx()), "dx": h(cpu.dx()),
         "si": h(cpu.si()), "di": h(cpu.di()), "bp": h(cpu.bp()), "sp": h(cpu.sp()),
+        "eax": h32(cpu.eax()), "ebx": h32(cpu.ebx()), "ecx": h32(cpu.ecx()), "edx": h32(cpu.edx()),
+        "esi": h32(cpu.esi()), "edi": h32(cpu.edi()), "ebp": h32(cpu.ebp()), "esp": h32(cpu.esp()),
         "cs": h(cpu.cs()), "ds": h(cpu.ds()), "es": h(cpu.es()), "ss": h(cpu.ss()),
-        "ip": h(cpu.ip()),
-        "flags": h(flags.bits() as u16),
+        "fs": h(cpu.fs()), "gs": h(cpu.gs()),
+        "ip": h(cpu.ip()), "eip": h32(cpu.eip()),
+        "flags": h(flags.bits() as u16), "eflags": h32(flags.bits()),
         "flags_set": names,
+        "cr0": h32(cpu.cr0),
     })
 }
 
@@ -1175,29 +1185,47 @@ fn set_regs(cpu: &mut Cpu, map: &Map<String, Value>) -> Result<(), String> {
             Value::String(s) => parse_hex(s)?,
             _ => return Err(format!("{}: value must be a number or hex string", k)),
         };
-        let val = u16::try_from(val).map_err(|_| format!("{}: value exceeds 16 bits", k))?;
         let key = k.to_ascii_lowercase();
-        if key != "flags" && reg16(cpu, &key).is_none() {
+        let wide = matches!(
+            key.as_str(),
+            "eax" | "ebx" | "ecx" | "edx" | "esi" | "edi" | "ebp" | "esp" | "eip" | "eflags"
+        );
+        if !wide && !matches!(key.as_str(), "flags" | "fs" | "gs") && reg16(cpu, &key).is_none() {
             return Err(format!("unknown register '{}'", k));
+        }
+        if !wide && val > 0xFFFF {
+            return Err(format!("{}: value exceeds 16 bits", k));
         }
         updates.push((key, val));
     }
     for (k, v) in updates {
         match k.as_str() {
-            "ax" => cpu.set_ax(v),
-            "bx" => cpu.set_bx(v),
-            "cx" => cpu.set_cx(v),
-            "dx" => cpu.set_dx(v),
-            "si" => cpu.set_si(v),
-            "di" => cpu.set_di(v),
-            "bp" => cpu.set_bp(v),
-            "sp" => cpu.set_sp(v),
-            "cs" => cpu.set_cs(v),
-            "ds" => cpu.set_ds(v),
-            "es" => cpu.set_es(v),
-            "ss" => cpu.set_ss(v),
-            "ip" => cpu.set_ip(v),
-            "flags" => cpu.set_cpu_flags(CpuFlags::from_bits_truncate(v as u32)),
+            "ax" => cpu.set_ax(v as u16),
+            "bx" => cpu.set_bx(v as u16),
+            "cx" => cpu.set_cx(v as u16),
+            "dx" => cpu.set_dx(v as u16),
+            "si" => cpu.set_si(v as u16),
+            "di" => cpu.set_di(v as u16),
+            "bp" => cpu.set_bp(v as u16),
+            "sp" => cpu.set_sp(v as u16),
+            "eax" => cpu.set_eax(v),
+            "ebx" => cpu.set_ebx(v),
+            "ecx" => cpu.set_ecx(v),
+            "edx" => cpu.set_edx(v),
+            "esi" => cpu.set_esi(v),
+            "edi" => cpu.set_edi(v),
+            "ebp" => cpu.set_ebp(v),
+            "esp" => cpu.set_esp(v),
+            "cs" => cpu.set_cs(v as u16),
+            "ds" => cpu.set_ds(v as u16),
+            "es" => cpu.set_es(v as u16),
+            "ss" => cpu.set_ss(v as u16),
+            "fs" => cpu.set_fs(v as u16),
+            "gs" => cpu.set_gs(v as u16),
+            "ip" => cpu.set_ip(v as u16),
+            "eip" => cpu.set_eip(v),
+            "flags" => cpu.load_flags16(v as u16),
+            "eflags" => cpu.load_eflags(v),
             _ => unreachable!(),
         }
     }

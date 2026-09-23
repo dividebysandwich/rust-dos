@@ -27,7 +27,7 @@ use iced_x86::Instruction;
 #[derive(Clone, Copy)]
 struct Slot {
     cs: u16,
-    ip: u16,
+    ip: u32,
     page_gen: u32,
     instr: Instruction,
 }
@@ -101,7 +101,7 @@ impl InstrCache {
         &mut self,
         phys_ip: usize,
         cs: u16,
-        ip: u16,
+        ip: u32,
         page_gen: u32,
         decode: impl FnOnce(&mut Instruction),
     ) -> &Instruction {

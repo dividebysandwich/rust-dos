@@ -1,374 +1,324 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, Register};
-use crate::cpu::{Cpu, CpuFlags};
-use super::utils::{calculate_addr, get_effective_addr, is_8bit_reg};
+//! Data transfer: MOV and friends, the stack, far pointer loads, port I/O,
+//! and the 486 exchange instructions.
 
-pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
-    match instr.mnemonic() {
-        Mnemonic::Mov => mov(cpu, instr),
-        Mnemonic::Xchg => xchg(cpu, instr),
-        
-        // Stack Operations
-        Mnemonic::Push => push(cpu, instr),
-        Mnemonic::Pop => pop(cpu, instr),
-        Mnemonic::Pusha => pusha(cpu),
-        Mnemonic::Popa => popa(cpu),
-        Mnemonic::Pushf => pushf(cpu),
-        Mnemonic::Popf => popf(cpu),
+use iced_x86::{Instruction, OpKind, Register};
 
-        // Address Loading
-        Mnemonic::Lea => lea(cpu, instr),
-        Mnemonic::Lds => lds(cpu, instr),
-        Mnemonic::Les => les(cpu, instr),
+use super::operand::{effective_offset, loc, mem_operand, mem_operand_at, op_size, read_op};
+use crate::cpu::alu::{AF, CF, PF, SF, ZF, sign_extend, size_mask};
+use crate::cpu::{Access, Cpu, CpuFlags, CpuModel, CpuResult, Fault, Seg};
 
-        // I/O Ports
-        Mnemonic::In => port_in(cpu, instr),
-        Mnemonic::Out => port_out(cpu, instr),
-
-        // Conversion
-        Mnemonic::Cbw => cbw(cpu),
-        Mnemonic::Cwd => cwd(cpu),
-
-        Mnemonic::Xlatb => xlatb(cpu, instr),
-        Mnemonic::Lahf => lahf(cpu),
-        Mnemonic::Sahf => sahf(cpu),
-        
-        _ => { cpu.bus.log_string(&format!("[TRANSFER] Unsupported instruction: {:?}", instr.mnemonic())); }
+/// Load a segment register in real mode. MOV SS and POP SS hold off
+/// interrupts for one instruction, so a program can load SP next.
+fn load_seg(cpu: &mut Cpu, seg: Seg, value: u16) -> CpuResult {
+    if seg == Seg::CS {
+        return Err(Fault::UD);
     }
+    cpu.load_seg_real(seg, value);
+    if seg == Seg::SS {
+        cpu.irq_shadow = true;
+    }
+    Ok(())
 }
 
-fn mov(cpu: &mut Cpu, instr: &Instruction) {
-    // MOV [Mem], ...
-    if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        
-        // Determine Source Value
-        let val = if instr.op1_kind() == OpKind::Register {
-            let reg = instr.op1_register();
-            if is_8bit_reg(reg) {
-                cpu.get_reg8(reg) as u16
-            } else {
-                cpu.get_reg16(reg)
-            }
-        } else if instr.op1_kind() == OpKind::Immediate8 {
-            instr.immediate8() as u16
-        } else if instr.op1_kind() == OpKind::Immediate16 {
-            instr.immediate16()
-        } else {
-            0
-        };
-
-        // Strict Size Determination
-        let is_8bit_dest = if instr.op1_kind() == OpKind::Register {
-            is_8bit_reg(instr.op1_register())
-        } else {
-            // If immediate, trust the memory size hint from the instruction
-            instr.memory_size().size() == 1
-        };
-
-        if is_8bit_dest {
-            cpu.bus.write_8(addr, val as u8);
-        } else {
-            cpu.bus.write_16(addr, val);
-        }
-    } 
-    // MOV Reg, ...
-    else if instr.op0_kind() == OpKind::Register {
-        let dest_reg = instr.op0_register();
-
-        let val = if instr.op1_kind() == OpKind::Register {
-            if is_8bit_reg(dest_reg) {
-                cpu.get_reg8(instr.op1_register()) as u16
-            } else {
-                cpu.get_reg16(instr.op1_register())
-            }
-        } else if instr.op1_kind() == OpKind::Memory {
-            let addr = calculate_addr(cpu, instr);
-            if is_8bit_reg(dest_reg) {
-                cpu.bus.read_8(addr) as u16
-            } else {
-                cpu.bus.read_16(addr)
-            }
-        } else if instr.op1_kind() == OpKind::Immediate8 {
-            instr.immediate8() as u16
-        } else if instr.op1_kind() == OpKind::Immediate16 {
-            instr.immediate16()
-        } else if instr.op1_kind() == OpKind::Immediate8to16 {
-            instr.immediate8to16() as u16
-        } else {
-            0
-        };
-
-        if is_8bit_reg(dest_reg) {
-            cpu.set_reg8(dest_reg, val as u8);
-        } else {
-            cpu.set_reg16(dest_reg, val);
-        }
-        if dest_reg == Register::SS {
-            // No interrupt until the SP load that normally follows.
-            cpu.irq_shadow = true;
-        }
-    }
-    // MOV Segment, ... (e.g., MOV DS, AX)
-    else if instr.op0_register().is_segment_register() {
-        let dest_reg = instr.op0_register();
-        let val = if instr.op1_kind() == OpKind::Register {
-            cpu.get_reg16(instr.op1_register())
-        } else if instr.op1_kind() == OpKind::Memory {
-            let addr = calculate_addr(cpu, instr);
-            cpu.bus.read_16(addr)
-        } else {
-            0
-        };
-        cpu.set_reg16(dest_reg, val);
-    }
-}
-
-fn xchg(cpu: &mut Cpu, instr: &Instruction) {
-    let op0 = instr.op0_kind();
-    let op1 = instr.op1_kind();
-
-    let is_8bit = if op0 == OpKind::Register {
-        is_8bit_reg(instr.op0_register())
-    } else if op1 == OpKind::Register {
-        is_8bit_reg(instr.op1_register())
-    } else {
-        instr.memory_size().size() == 1
-    };
-
-    // Read Operand 0
-    let (val0, addr0) = if op0 == OpKind::Register {
-        let reg = instr.op0_register();
-        if is_8bit { (cpu.get_reg8(reg) as u16, None) } else { (cpu.get_reg16(reg), None) }
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        if is_8bit { (cpu.bus.read_8(addr) as u16, Some(addr)) } else { (cpu.bus.read_16(addr), Some(addr)) }
-    };
-
-    // Read Operand 1
-    let (val1, addr1) = if op1 == OpKind::Register {
-        let reg = instr.op1_register();
-        if is_8bit { (cpu.get_reg8(reg) as u16, None) } else { (cpu.get_reg16(reg), None) }
-    } else {
-        let addr = calculate_addr(cpu, instr);
-        if is_8bit { (cpu.bus.read_8(addr) as u16, Some(addr)) } else { (cpu.bus.read_16(addr), Some(addr)) }
-    };
-
-    // Write Value 1 to Operand 0 location
-    if let Some(addr) = addr0 {
-        if is_8bit { cpu.bus.write_8(addr, val1 as u8); } else { cpu.bus.write_16(addr, val1); }
-    } else {
-        let reg = instr.op0_register();
-        if is_8bit { cpu.set_reg8(reg, val1 as u8); } else { cpu.set_reg16(reg, val1); }
-    }
-
-    // Write Value 0 to Operand 1 location
-    if let Some(addr) = addr1 {
-        if is_8bit { cpu.bus.write_8(addr, val0 as u8); } else { cpu.bus.write_16(addr, val0); }
-    } else {
-        let reg = instr.op1_register();
-        if is_8bit { cpu.set_reg8(reg, val0 as u8); } else { cpu.set_reg16(reg, val0); }
-    }
-}
-
-fn push(cpu: &mut Cpu, instr: &Instruction) {
-    let val = match instr.op0_kind() {
-        OpKind::Register => cpu.get_reg16(instr.op0_register()),
-        // `PUSH imm8` (opcode 6A) is encoded with the operand sign-extended
-        // to 16 bits on 8086/286+. iced reports this as Immediate8to16, not
-        // plain Immediate8 — missing this case made every `PUSH 0x0A`-style
-        // call push zero, crashing callees that read the arg (e.g. VGAME's
-        // itoa called with base=10 would see base=0 and DIV/0).
-        OpKind::Immediate8 => instr.immediate8() as i8 as i16 as u16,
-        OpKind::Immediate8to16 => instr.immediate8to16() as u16,
-        OpKind::Immediate16 => instr.immediate16(),
-        OpKind::Memory => {
-            let addr = calculate_addr(cpu, instr);
-            cpu.bus.read_16(addr)
-        }
-        _ => {
-            cpu.bus.log_string(&format!(
-                "[PUSH] unhandled op kind {:?} at {:04X}:{:04X}",
-                instr.op0_kind(), cpu.cs(), cpu.ip().wrapping_sub(instr.len() as u16)
-            ));
-            0
-        }
-    };
-    cpu.push(val);
-}
-
-fn pop(cpu: &mut Cpu, instr: &Instruction) {
-    let val = cpu.pop();
+/// MOV between registers, memory and immediates, including segment,
+/// control and debug registers.
+pub fn mov(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     if instr.op0_kind() == OpKind::Register {
-        cpu.set_reg16(instr.op0_register(), val);
-        if instr.op0_register() == Register::SS {
-            // No interrupt until the SP load that normally follows.
-            cpu.irq_shadow = true;
+        let dest = instr.op0_register();
+        if let Some(seg) = Seg::from_register(dest) {
+            let value = read_op(cpu, instr, 1, 2)? as u16;
+            return load_seg(cpu, seg, value);
         }
-    } else if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        cpu.bus.write_16(addr, val);
+        if dest.is_cr() || dest.is_dr() || dest.is_tr() {
+            return super::system::mov_to_system(cpu, instr);
+        }
+    }
+    if instr.op1_kind() == OpKind::Register {
+        let src = instr.op1_register();
+        if src.is_cr() || src.is_dr() || src.is_tr() {
+            return super::system::mov_from_system(cpu, instr);
+        }
+        if src.is_segment_register() {
+            // MOV r/m16, Sreg. A 32-bit register destination gets the
+            // selector zero-extended.
+            let size = op_size(instr, 0);
+            let dest = loc(cpu, instr, 0, size, Access::Write)?;
+            let value = cpu.reg(src);
+            dest.write(cpu, value);
+            return Ok(());
+        }
+    }
+    let size = op_size(instr, 0);
+    let dest = loc(cpu, instr, 0, size, Access::Write)?;
+    let value = read_op(cpu, instr, 1, size)?;
+    dest.write(cpu, value);
+    Ok(())
+}
+
+/// MOVZX/MOVSX: move with zero or sign extension.
+pub fn movx(cpu: &mut Cpu, instr: &Instruction, signed: bool) -> CpuResult {
+    let src_size = op_size(instr, 1);
+    let mut value = read_op(cpu, instr, 1, src_size)?;
+    if signed {
+        value = sign_extend(src_size, value);
+    }
+    cpu.set_reg(instr.op0_register(), value);
+    Ok(())
+}
+
+pub fn xchg(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = op_size(instr, 0);
+    let a = loc(cpu, instr, 0, size, Access::Write)?;
+    let b = loc(cpu, instr, 1, size, Access::Write)?;
+    let (va, vb) = (a.read(cpu), b.read(cpu));
+    a.write(cpu, vb);
+    b.write(cpu, va);
+    Ok(())
+}
+
+pub fn lea(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let offset = effective_offset(cpu, instr);
+    cpu.set_reg(instr.op0_register(), offset);
+    Ok(())
+}
+
+/// LDS/LES/LFS/LGS/LSS: load a far pointer (offset, then selector) from
+/// memory into a register and a segment register.
+pub fn load_far_pointer(cpu: &mut Cpu, instr: &Instruction, seg: Seg) -> CpuResult {
+    if instr.op1_kind() != OpKind::Memory {
+        return Err(Fault::UD);
+    }
+    let size = op_size(instr, 0);
+    let off_ref = mem_operand(cpu, instr, size, Access::Read)?;
+    let sel_ref = mem_operand_at(cpu, instr, size as u32, 2, Access::Read)?;
+    let offset = cpu.mem_read(off_ref);
+    let selector = cpu.mem_read(sel_ref) as u16;
+    cpu.load_seg_real(seg, selector);
+    cpu.set_reg(instr.op0_register(), offset);
+    Ok(())
+}
+
+/// Bytes a PUSH or POP moves: 2 or 4.
+#[inline(always)]
+fn stack_size(instr: &Instruction) -> u8 {
+    instr.stack_pointer_increment().unsigned_abs() as u8
+}
+
+pub fn push(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = stack_size(instr);
+    let value = read_op(cpu, instr, 0, size)?;
+    cpu.push_sized(size, value)
+}
+
+/// POP to a register, a segment register or memory. A memory destination
+/// addressed through ESP is addressed with the incremented ESP.
+pub fn pop(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = stack_size(instr);
+    if instr.op0_kind() == OpKind::Register {
+        if let Some(seg) = Seg::from_register(instr.op0_register()) {
+            // A segment register pop reads only the selector word, also
+            // with a 32-bit operand size, then releases the whole slot.
+            let selector = cpu.stack_read(0, 2)? as u16;
+            load_seg(cpu, seg, selector)?;
+            let sp = cpu.stack_ptr().wrapping_add(size as u32);
+            cpu.set_stack_ptr(sp);
+            return Ok(());
+        }
+    }
+    let value = cpu.pop_sized(size)?;
+    match instr.op0_kind() {
+        OpKind::Register => cpu.set_reg(instr.op0_register(), value),
+        _ => {
+            let dest = mem_operand(cpu, instr, size, Access::Write)?;
+            cpu.mem_write(dest, value);
+        }
+    }
+    Ok(())
+}
+
+/// PUSHA/PUSHAD: push the eight general-purpose registers, with the stack
+/// pointer as it was before the first push. The 386 stores them from the
+/// lowest address up, so when a slot faults, the ones below it are written.
+pub fn pusha(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = stack_size(instr) / 8;
+    let mask = size_mask(size);
+    let sp = cpu.esp() & mask;
+    let values = [cpu.eax(), cpu.ecx(), cpu.edx(), cpu.ebx(), sp, cpu.ebp(), cpu.esi(), cpu.edi()];
+    let total = 8 * size as u32;
+    for (i, v) in values.iter().enumerate().rev() {
+        let depth = total - (i as u32 + 1) * size as u32;
+        cpu.stack_write_below(total, depth, size, v & mask)?;
+    }
+    let sp = cpu.stack_ptr().wrapping_sub(total);
+    cpu.set_stack_ptr(sp);
+    Ok(())
+}
+
+/// POPA/POPAD: pop the general-purpose registers pushed by PUSHA, skipping
+/// the stack pointer. They load one by one: a fault leaves the registers
+/// popped before it loaded.
+pub fn popa(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = stack_size(instr) / 8;
+    let regs: [Register; 8] = if size == 2 {
+        [Register::DI, Register::SI, Register::BP, Register::None, Register::BX, Register::DX, Register::CX, Register::AX]
+    } else {
+        [Register::EDI, Register::ESI, Register::EBP, Register::None, Register::EBX, Register::EDX, Register::ECX, Register::EAX]
+    };
+    let mut esp_image = 0;
+    for (i, reg) in regs.into_iter().enumerate() {
+        let v = cpu.stack_read(i as u32 * size as u32, size)?;
+        if reg == Register::None {
+            esp_image = v;
+        } else {
+            cpu.set_reg(reg, v);
+        }
+    }
+    let sp = cpu.stack_ptr().wrapping_add(8 * size as u32);
+    cpu.set_stack_ptr(sp);
+    if size == 4 && !cpu.stack32() && cpu.model == CpuModel::I386 {
+        // POPAD on a 16-bit stack: a 386 loads the upper half of ESP from
+        // the ESP image it otherwise skips.
+        let esp = (esp_image & 0xFFFF_0000) | (cpu.esp() & 0xFFFF);
+        cpu.set_esp(esp);
+    }
+    Ok(())
+}
+
+pub fn pushf(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    if stack_size(instr) == 2 {
+        let flags = cpu.flags16();
+        cpu.push_sized(2, flags as u32)
+    } else {
+        let eflags = cpu.eflags_image();
+        cpu.push_sized(4, eflags)
     }
 }
 
-fn pusha(cpu: &mut Cpu) {
-    let sp = cpu.get_reg16(Register::SP);
-    cpu.push(cpu.get_reg16(Register::AX));
-    cpu.push(cpu.get_reg16(Register::CX));
-    cpu.push(cpu.get_reg16(Register::DX));
-    cpu.push(cpu.get_reg16(Register::BX));
-    cpu.push(sp);
-    cpu.push(cpu.get_reg16(Register::BP));
-    cpu.push(cpu.get_reg16(Register::SI));
-    cpu.push(cpu.get_reg16(Register::DI));
+pub fn popf(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let size = stack_size(instr);
+    let value = cpu.pop_sized(size)?;
+    if size == 2 {
+        cpu.load_flags16(value as u16);
+    } else {
+        cpu.load_eflags(value);
+    }
+    Ok(())
 }
 
-fn popa(cpu: &mut Cpu) {
-    let di = cpu.pop();
-    let si = cpu.pop();
-    let bp = cpu.pop();
-    let _sp = cpu.pop(); // Pop and discard SP
-    let bx = cpu.pop();
-    let dx = cpu.pop();
-    let cx = cpu.pop();
-    let ax = cpu.pop();
-
-    cpu.set_di(di);
-    cpu.set_si(si);
-    cpu.set_reg16(Register::BP, bp);
-    cpu.set_reg16(Register::BX, bx);
-    cpu.set_dx(dx);
-    cpu.set_cx(cx);
-    cpu.set_ax(ax);
-}
-
-fn pushf(cpu: &mut Cpu) {
-    cpu.push(cpu.flags16());
-}
-
-fn popf(cpu: &mut Cpu) {
-    let val = cpu.pop();
-    cpu.set_cpu_flags(CpuFlags::from_bits_truncate(val as u32));
-}
-
-fn lea(cpu: &mut Cpu, instr: &Instruction) {
-    let reg = instr.op0_register();
-    let offset = get_effective_addr(cpu, instr);
-    cpu.set_reg16(reg, offset);
-}
-
-fn lds(cpu: &mut Cpu, instr: &Instruction) {
-    let reg = instr.op0_register();
-    let addr = calculate_addr(cpu, instr);
-    let offset = cpu.bus.read_16(addr);
-    let segment = cpu.bus.read_16(addr + 2);
-    cpu.set_reg16(reg, offset);
-    cpu.set_ds(segment);
-}
-
-fn les(cpu: &mut Cpu, instr: &Instruction) {
-    let reg = instr.op0_register();
-    let addr = calculate_addr(cpu, instr);
-    let offset = cpu.bus.read_16(addr);
-    let segment = cpu.bus.read_16(addr + 2);
-    cpu.set_reg16(reg, offset);
-    cpu.set_es(segment);
-}
-
-fn port_in(cpu: &mut Cpu, instr: &Instruction) {
-    let port = if instr.op1_kind() == OpKind::Register {
+/// Port of IN/OUT: an immediate byte or DX.
+fn port(cpu: &Cpu, instr: &Instruction, i: u32) -> u16 {
+    if instr.op_kind(i) == OpKind::Register {
         cpu.dx()
     } else {
         instr.immediate8() as u16
-    };
-    if is_8bit_reg(instr.op0_register()) {
-        let val = cpu.bus.io_read(port);
-        cpu.set_reg8(instr.op0_register(), val);
-    } else {
-        // 16-bit IN: low byte from port, high byte from port+1.
-        let lo = cpu.bus.io_read(port) as u16;
-        let hi = cpu.bus.io_read(port.wrapping_add(1)) as u16;
-        cpu.set_reg16(instr.op0_register(), lo | (hi << 8));
     }
 }
 
-fn port_out(cpu: &mut Cpu, instr: &Instruction) {
-    let port = if instr.op0_kind() == OpKind::Register {
-        cpu.dx()
-    } else {
-        instr.immediate8() as u16
-    };
-    if is_8bit_reg(instr.op1_register()) {
-        let val = cpu.get_reg8(instr.op1_register());
-        cpu.bus.io_write(port, val);
-    } else {
-        // 16-bit OUT: low byte to port, high byte to port+1. EGA code
-        // relies on this to program Graphics/Sequencer index+data in
-        // a single instruction (e.g. OUT DX, AX with DX=0x3CE).
-        let val = cpu.get_reg16(instr.op1_register());
-        cpu.bus.io_write(port, (val & 0xFF) as u8);
-        cpu.bus.io_write(port.wrapping_add(1), (val >> 8) as u8);
+/// IN AL/AX/EAX. Wider reads take consecutive byte ports.
+pub fn port_in(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let dest = instr.op0_register();
+    let port = port(cpu, instr, 1);
+    let mut value = 0;
+    for i in 0..dest.size() as u16 {
+        value |= (cpu.bus.io_read(port.wrapping_add(i)) as u32) << (8 * i);
     }
+    cpu.set_reg(dest, value);
+    Ok(())
 }
 
-fn cbw(cpu: &mut Cpu) {
-    let al = cpu.get_al() as i8;
-    cpu.set_ax(al as i16 as u16);
+/// OUT AL/AX/EAX. Wider writes go to consecutive byte ports, low byte
+/// first: EGA/VGA code programs index and data registers with one
+/// OUT DX, AX.
+pub fn port_out(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let src = instr.op1_register();
+    let port = port(cpu, instr, 0);
+    let value = cpu.reg(src);
+    for i in 0..src.size() as u16 {
+        cpu.bus.io_write(port.wrapping_add(i), (value >> (8 * i)) as u8);
+    }
+    Ok(())
 }
 
-fn cwd(cpu: &mut Cpu) {
-    // CWD (8086): AX -> DX:AX
-    let ax = cpu.ax() as i16;
-    cpu.set_dx(if ax < 0 { 0xFFFF } else { 0x0000 });
+/// XLAT: AL = [seg:(E)BX + AL]. iced describes the operand as a memory
+/// reference with base (E)BX and index AL.
+pub fn xlat(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let m = mem_operand(cpu, instr, 1, Access::Read)?;
+    let value = cpu.mem_read(m);
+    cpu.set_reg(Register::AL, value);
+    Ok(())
 }
 
-fn xlatb(cpu: &mut Cpu, instr: &Instruction) {
-    let al = cpu.get_al();
-    let bx = cpu.get_reg16(Register::BX);
+/// LAHF: SF, ZF, AF, PF, CF (and the always-set bit 1) into AH.
+pub fn lahf(cpu: &mut Cpu) -> CpuResult {
+    let flags = cpu.get_cpu_flags().bits();
+    cpu.set_reg(Register::AH, (flags & (SF | ZF | AF | PF | CF)) | 0x02);
+    Ok(())
+}
 
-    // [CRITICAL FIX] Check for Segment Override Prefix
-    // XLAT defaults to DS:[BX+AL], but can be overridden (e.g., ES:[BX+AL])
-    let segment = if instr.segment_prefix() != Register::None {
-        cpu.get_reg16(instr.segment_prefix())
-    } else {
-        cpu.ds() 
+/// SAHF: AH into SF, ZF, AF, PF and CF.
+pub fn sahf(cpu: &mut Cpu) -> CpuResult {
+    let ah = cpu.get_ah() as u32;
+    cpu.set_flag_bits(SF | ZF | AF | PF | CF, ah);
+    Ok(())
+}
+
+/// SALC (undocumented D6): AL = CF ? FFh : 00h.
+pub fn salc(cpu: &mut Cpu) -> CpuResult {
+    let value = if cpu.get_cpu_flag(CpuFlags::CF) { 0xFF } else { 0 };
+    cpu.set_reg(Register::AL, value);
+    Ok(())
+}
+
+/// Raise #UD for 486 instructions on a 386.
+pub fn require_486(cpu: &Cpu) -> CpuResult {
+    if cpu.model == CpuModel::I386 { Err(Fault::UD) } else { Ok(()) }
+}
+
+/// BSWAP r32 (486).
+pub fn bswap(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    require_486(cpu)?;
+    let reg = instr.op0_register();
+    let value = cpu.reg(reg);
+    // With a 16-bit operand the result is undefined; a 486 clears it.
+    let r = if reg.size() == 2 { 0 } else { value.swap_bytes() };
+    cpu.set_reg(reg, r);
+    Ok(())
+}
+
+/// XADD r/m, reg (486): exchange, then store the sum in the destination.
+pub fn xadd(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    require_486(cpu)?;
+    let size = op_size(instr, 0);
+    let dest = loc(cpu, instr, 0, size, Access::Write)?;
+    let src_reg = instr.op1_register();
+    let (d, s) = (dest.read(cpu), cpu.reg(src_reg));
+    let sum = cpu.alu_add(size, d, s, false);
+    cpu.set_reg(src_reg, d);
+    dest.write(cpu, sum);
+    Ok(())
+}
+
+/// CMPXCHG r/m, reg (486): if the accumulator equals the destination, store
+/// the source there (ZF=1); otherwise load the destination into the
+/// accumulator (ZF=0). The destination is always written.
+pub fn cmpxchg(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    require_486(cpu)?;
+    let size = op_size(instr, 0);
+    let dest = loc(cpu, instr, 0, size, Access::Write)?;
+    let acc = match size {
+        1 => Register::AL,
+        2 => Register::AX,
+        _ => Register::EAX,
     };
-
-    // Calculate Offset: BX + AL (Zero Extended)
-    let offset = bx.wrapping_add(al as u16);
-    
-    // Read from memory
-    let phys_addr = cpu.get_physical_addr(segment, offset);
-    let val = cpu.bus.read_8(phys_addr);
-    
-    // Write back to AL
-    cpu.set_reg8(Register::AL, val);
-}
-
-// LAHF: Load Flags into AH
-// Transfers SF, ZF, AF, PF, CF into bits 7, 6, 4, 2, 0 of AH.
-// Bits 1, 3, 5 are reserved (usually 1, 0, 0 or similar, but 1,0,1 is common 8086).
-pub fn lahf(cpu: &mut Cpu) {
-    let mut ah: u8 = 0;
-    if cpu.get_cpu_flag(CpuFlags::SF) { ah |= 0x80; }
-    if cpu.get_cpu_flag(CpuFlags::ZF) { ah |= 0x40; }
-    if cpu.get_cpu_flag(CpuFlags::AF) { ah |= 0x10; }
-    if cpu.get_cpu_flag(CpuFlags::PF) { ah |= 0x04; }
-    if cpu.get_cpu_flag(CpuFlags::CF) { ah |= 0x01; }
-    
-    // Set reserved bits (Bit 1=1 is standard for 8086)
-    ah |= 0x02; 
-    
-    cpu.set_reg8(Register::AH, ah);
-}
-
-// SAHF: Store AH into Flags
-// Transfers bits 7, 6, 4, 2, 0 of AH to SF, ZF, AF, PF, CF respectively.
-pub fn sahf(cpu: &mut Cpu) {
-    let ah = cpu.get_ah();
-
-    cpu.set_cpu_flag(CpuFlags::SF, (ah & 0x80) != 0);
-    cpu.set_cpu_flag(CpuFlags::ZF, (ah & 0x40) != 0);
-    cpu.set_cpu_flag(CpuFlags::AF, (ah & 0x10) != 0);
-    cpu.set_cpu_flag(CpuFlags::PF, (ah & 0x04) != 0);
-    cpu.set_cpu_flag(CpuFlags::CF, (ah & 0x01) != 0);
+    let d = dest.read(cpu);
+    let a = cpu.reg(acc);
+    cpu.alu_sub(size, a, d, false);
+    if a == d {
+        let src = cpu.reg(instr.op1_register());
+        dest.write(cpu, src);
+    } else {
+        dest.write(cpu, d);
+        cpu.set_reg(acc, d);
+    }
+    Ok(())
 }
