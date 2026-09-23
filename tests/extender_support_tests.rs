@@ -478,3 +478,25 @@ fn device_names_open_devices_not_files() {
     }
     assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no files created");
 }
+
+#[test]
+fn console_input_returns_extended_keys_as_zero_then_scan_code() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.keyboard_buffer.extend([0x5000, 0x1C0D]); // Down, Enter
+    for (ah, expect) in [(0x0B, 0xFF), (0x08, 0x00), (0x0B, 0xFF), (0x07, 0x50), (0x08, 0x0D), (0x0B, 0x00)] {
+        int21(&mut cpu, (ah as u16) << 8);
+        assert_eq!(cpu.get_al(), expect, "AH={:02X}", ah);
+    }
+    // Direct console input and a flush.
+    cpu.bus.keyboard_buffer.push_back(0x4800); // Up
+    cpu.set_dx(0xFF);
+    int21(&mut cpu, 0x0600);
+    assert_eq!((cpu.get_al(), zf(&cpu)), (0x00, false));
+    int21(&mut cpu, 0x0C00);
+    int21(&mut cpu, 0x0B00);
+    assert_eq!(cpu.get_al(), 0x00, "flushed with the pending scan code");
+}
+
+fn zf(cpu: &Cpu) -> bool {
+    cpu.get_cpu_flag(CpuFlags::ZF)
+}

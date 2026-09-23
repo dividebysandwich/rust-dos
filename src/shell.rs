@@ -115,6 +115,7 @@ pub fn get_shell_code() -> Vec<u8> {
 pub fn handle_command_bop(cpu: &mut Cpu) {
     // Safety: Clear buffer so we don't repeat commands
     cpu.bus.keyboard_buffer.clear();
+    cpu.con_pending_scan = None;
 
     // Read Command from DS:DX (set by the shell code)
     let phys_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());

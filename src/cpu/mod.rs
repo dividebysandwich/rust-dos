@@ -170,6 +170,9 @@ pub struct Cpu {
     pub last_child_exit: u16,
     /// Error code of the last failed DOS call, for INT 21h AH=59h.
     pub last_dos_error: u16,
+    /// Scan code of an extended key whose 00h the console functions of
+    /// INT 21h have returned, for the next read.
+    pub con_pending_scan: Option<u8>,
 
     // FPU State
     pub fpu_stack: [F80; 8],
@@ -286,6 +289,7 @@ impl Cpu {
             resident_end: crate::mcb::FIRST_MCB_SEG,
             last_child_exit: 0,
             last_dos_error: 0,
+            con_pending_scan: None,
             process_stack: Vec::new(),
             irq_shadow: false,
             // 64K direct-mapped slots (~3.5 MB): comfortably large for any

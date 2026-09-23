@@ -85,6 +85,22 @@ fn dos_drive_number(cpu: &Cpu, code: u8) -> u8 {
     }
 }
 
+/// A character from the keyboard the way DOS's console driver reads it: an
+/// extended key (cursor keys, function keys) comes as 00h, and its scan
+/// code on the next read.
+fn con_read(cpu: &mut Cpu) -> Option<u8> {
+    if let Some(scan) = cpu.con_pending_scan.take() {
+        return Some(scan);
+    }
+    let key = cpu.bus.keyboard_buffer.pop_front()?;
+    let (scan, ascii) = ((key >> 8) as u8, key as u8);
+    if ascii == 0 || (ascii == 0xE0 && scan != 0) {
+        cpu.con_pending_scan = Some(scan);
+        return Some(0);
+    }
+    Some(ascii)
+}
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     dispatch(cpu, ah);
@@ -260,13 +276,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
             if dl == 0xFF {
                 // --- INPUT (Non-Blocking) ---
-                // Check if a key is in the buffer
-                if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
+                if let Some(ascii) = con_read(cpu) {
                     // Key Available: Return ASCII and Clear Zero Flag
-                    let ascii = (key_code & 0xFF) as u8;
-
-                    // Handle Extended Keys (First byte is 0x00) logic if necessary,
-                    // but for now we just return the low byte.
                     cpu.set_reg8(Register::AL, ascii);
                     cpu.set_zflag(false);
                 } else {
@@ -289,13 +300,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 01h: Read Character from Standard Input With Echo
         // Blocks until a key is available. Returns AL = ASCII, echoes to STDOUT.
         // If AL == 0 on return, the next call will return the scan code for
-        // extended keys (arrows/function keys). We simplify and just return
-        // the ASCII byte from our keyboard buffer entry.
+        // extended keys (arrows/function keys).
         0x01 => {
-            if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
-                let ascii = (key_code & 0xFF) as u8;
+            let pending = cpu.con_pending_scan.is_some();
+            if let Some(ascii) = con_read(cpu) {
                 cpu.set_reg8(Register::AL, ascii);
-                if ascii != 0 {
+                if ascii != 0 && !pending {
                     print_char(&mut cpu.bus, ascii);
                 }
             } else {
@@ -305,8 +315,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 07h: Direct Console Input Without Echo
         0x07 => {
-            if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
-                let ascii = (key_code & 0xFF) as u8;
+            if let Some(ascii) = con_read(cpu) {
                 cpu.set_reg8(Register::AL, ascii);
             } else {
                 cpu.hle_wait();
@@ -316,8 +325,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 08h: Direct Console Input Without Echo (checks Ctrl-Break).
         // Functionally identical to AH=07h for us; we don't model Ctrl-Break.
         0x08 => {
-            if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
-                let ascii = (key_code & 0xFF) as u8;
+            if let Some(ascii) = con_read(cpu) {
                 cpu.set_reg8(Register::AL, ascii);
             } else {
                 cpu.hle_wait();
@@ -327,7 +335,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 0Bh: Check Standard Input Status
         // Returns AL = 0xFF if a character is ready, 0x00 if not.
         0x0B => {
-            if cpu.bus.keyboard_buffer.is_empty() {
+            if cpu.bus.keyboard_buffer.is_empty() && cpu.con_pending_scan.is_none() {
                 cpu.set_reg8(Register::AL, 0x00);
             } else {
                 cpu.set_reg8(Register::AL, 0xFF);
@@ -358,6 +366,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let next_fn = cpu.get_al();
 
             cpu.bus.keyboard_buffer.clear();
+            cpu.con_pending_scan = None;
 
             match next_fn {
                 0x01 | 0x06 | 0x07 | 0x08 | 0x0A => {
@@ -1118,8 +1127,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // STDIN
                 let mut read_count = 0;
                 for _ in 0..count {
-                    if let Some(key) = cpu.bus.keyboard_buffer.pop_front() {
-                        cpu.bus.write_8(buf_addr, (key & 0xFF) as u8);
+                    if let Some(ascii) = con_read(cpu) {
+                        cpu.bus.write_8(buf_addr, ascii);
                         buf_addr += 1;
                         read_count += 1;
                     } else {
