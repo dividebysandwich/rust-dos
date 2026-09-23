@@ -229,9 +229,9 @@ impl Pit0 {
             return false;
         }
         if !self.periodic() {
-            // One-shot: the output stays high until the next count write.
+            // One-shot: the output stays high until the next count write,
+            // while the count keeps running down through zero.
             self.armed = false;
-            self.period_start = self.next_tc;
             return true;
         }
         self.period_start = self.next_tc;
@@ -247,7 +247,8 @@ impl Pit0 {
     }
 
     /// The value a counter read returns at `now`. The count runs down from
-    /// the reload value and restarts at each terminal count.
+    /// the reload value; periodic modes restart at each terminal count, the
+    /// one-shot modes wrap to FFFFh and go on.
     pub fn count(&self, now: u64) -> u16 {
         if !self.counting {
             return self.reload as u16;

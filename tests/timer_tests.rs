@@ -116,6 +116,22 @@ fn mode_0_fires_once_per_count() {
 }
 
 #[test]
+fn mode_0_count_runs_on_through_zero() {
+    // Pinball Fantasies' sound drivers chain one-shot timer interrupts
+    // through a frame: in the handler they read the count, which has run
+    // past zero by the interrupt latency, and subtract that from the next
+    // delay. A count that restarted from the reload value would push the
+    // next interrupt a whole period late.
+    let mut bus = bus_at(1000);
+    program_pit0(&mut bus, 0x30, 1000);
+    assert_eq!(run_timer(&mut bus, 1000).len(), 1); // at 1000 ticks = 839 instructions
+    bus.io_write(0x43, 0x00);
+    let elapsed = bus.clock.now_ticks() - 1000;
+    let count = bus.io_read(0x40) as u16 | (bus.io_read(0x40) as u16) << 8;
+    assert_eq!(count, 0u16.wrapping_sub(elapsed as u16));
+}
+
+#[test]
 fn control_word_stops_the_timer_until_a_count_is_written() {
     let mut bus = bus_at(1000);
     bus.io_write(0x43, 0x34);
