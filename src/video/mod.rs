@@ -65,30 +65,72 @@ impl VideoMode {
     }
 }
 
-pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
+/// A picture as the screen shows it: RGB24 pixels, row by row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
+impl Frame {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height, rgb: vec![0; (width * height * 3) as usize] }
+    }
+
+    /// Make the frame `width` x `height`. True if that changed its size;
+    /// it is black then.
+    pub fn resize(&mut self, width: u32, height: u32) -> bool {
+        if (width, height) == (self.width, self.height) {
+            return false;
+        }
+        *self = Self::new(width, height);
+        true
+    }
+}
+
+/// The size of the picture of the current video mode: 640x400 for the
+/// text and CGA modes, and for the others their size, doubled in each
+/// direction where it is small (mode 13h's 320x200 is 640x400, mode 12h
+/// 640x480, a 320x240 "mode X" 640x480).
+pub fn frame_size(bus: &Bus) -> (u32, u32) {
+    match bus.video_mode {
+        VideoMode::Graphics320x200
+        | VideoMode::Ega320x200
+        | VideoMode::Ega640x200
+        | VideoMode::Ega640x350
+        | VideoMode::Vga640x480 => {
+            let (width, rows) = bus.vga.graphics_size();
+            let width = if width < 400 { width * 2 } else { width };
+            let rows = if rows < 300 { rows * 2 } else { rows };
+            (width as u32, rows as u32)
+        }
+        _ => (SCREEN_WIDTH, SCREEN_HEIGHT),
+    }
+}
+
+/// Draw the rows the VGA marked dirty into `frame`, which must be
+/// `frame_size` big.
+pub fn render_screen(frame: &mut Frame, bus: &Bus) {
     // Re-render only the rows the VGA has marked dirty since the last call.
     // For the common case of a shell prompt blinking or one line of output,
     // this is one or two character rows out of 25 — orders of magnitude less
-    // work than re-rendering the whole 640x400 surface.
-    let y_min = bus.vga.dirty_y_min.min(SCREEN_HEIGHT) as usize;
-    let y_max = bus.vga.dirty_y_max.min(SCREEN_HEIGHT) as usize;
+    // work than re-rendering the whole screen.
+    let width = frame.width as usize;
+    let y_min = bus.vga.dirty_y_min.min(frame.height) as usize;
+    let y_max = bus.vga.dirty_y_max.min(frame.height) as usize;
     if y_min >= y_max {
         return;
     }
 
     // Black-fill just the dirty band. Renderers either fully cover this band
-    // (mode 13h, 0Eh, 12h, text) or leave a sub-row gap that we want to
-    // appear black (e.g. mode 10h's 50-line bottom gutter when that gutter
-    // happens to be in the dirty range).
-    let row_bytes = SCREEN_WIDTH as usize * 3;
-    let band_start = y_min * row_bytes;
-    let band_end = y_max * row_bytes;
-    for b in &mut canvas[band_start..band_end] {
-        *b = 0;
-    }
+    // or leave a sub-row gap that we want to appear black.
+    let row_bytes = width * 3;
+    frame.rgb[y_min * row_bytes..y_max * row_bytes].fill(0);
+    let canvas = &mut frame.rgb[..];
 
     match bus.video_mode {
-        VideoMode::Graphics320x200 => render_graphics_mode(canvas, &bus.vga.vram_graphics, bus),
+        VideoMode::Graphics320x200 => render_graphics_mode(canvas, width, &bus.vga.vram_graphics, bus),
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => {
             render_cga_mode4(canvas, &bus.vga.vram_text, bus)
         }
@@ -104,7 +146,7 @@ pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
         // 16-color planar modes (0Dh, 0Eh, 10h, 12h), at the size the CRTC
         // registers give them.
         VideoMode::Ega320x200 | VideoMode::Ega640x200 | VideoMode::Ega640x350 | VideoMode::Vga640x480 => {
-            render_planar(canvas, &bus.vga.vram_graphics, bus)
+            render_planar(canvas, width, &bus.vga.vram_graphics, bus)
         }
     }
 }
@@ -115,7 +157,7 @@ pub fn render_screen(canvas: &mut [u8], bus: &Bus) {
 /// Reads pixels out of the 4-plane memory layout and runs each 4-bit pixel
 /// through the Attribute Controller palette, then the DAC, scaling the
 /// picture to the canvas.
-fn render_planar(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
     let (width, rows) = bus.vga.graphics_size();
     let mix = palette_mix(bus);
     // CRTC Offset (index 0x13) holds bytes-per-scanline / 2 (i.e. words
@@ -128,7 +170,6 @@ fn render_planar(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
     let pan = bus.vga.pixel_panning();
     let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
 
-    let canvas_w = SCREEN_WIDTH as usize;
     let canvas_h = canvas.len() / (canvas_w * 3);
     let row_bytes = canvas_w * 3;
     let mut last_y = usize::MAX;
@@ -211,8 +252,8 @@ fn planar_pixel_rgb(
 
 /// 256-color modes: mode 13h and the unchained "mode X" family (320x240,
 /// 360x480, ...), whatever size the CRTC registers give them, scaled to
-/// the canvas.
-pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+/// the canvas, `canvas_w` pixels wide.
+pub fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
     // The CRTC scans the 4 planes in parallel: pixel x of a row is in plane
     // x % 4 at Start Address + row * stride + x / 4. With Chain 4 (plain
     // mode 13h) that is where CPU address y * 320 + x lands. Unchained
@@ -231,7 +272,6 @@ pub fn render_graphics_mode(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
     let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
     // VGA hardware ANDs each pixel with the PEL mask before the DAC lookup.
     let colors: Vec<(u8, u8, u8)> = (0..=255u8).map(|i| bus.vga.get_rgb(i & bus.vga.dac_mask)).collect();
-    let canvas_w = SCREEN_WIDTH as usize;
     let canvas_h = canvas.len() / (canvas_w * 3);
     let row_bytes = canvas_w * 3;
     let mut last_y = usize::MAX;

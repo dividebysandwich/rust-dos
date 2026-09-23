@@ -48,8 +48,11 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   immediately.
 - **Use text mode where you can.** `/api/screen/text` is a few hundred
   tokens; a screenshot costs far more. It returns HTTP 409 in graphics modes,
-  and only then should you use `/api/screenshot` (a 640x400 PNG, including
-  the text and mouse cursors).
+  and only then should you use `/api/screenshot` (a PNG, including the text
+  and mouse cursors). Its size is the picture's: 640x400 in text modes, and
+  the mode's own size in graphics modes, doubled where it is small (mode 13h
+  is 640x400, mode 12h and 320x240 "mode X" 640x480). `/api/status` →
+  `video.frame` has it.
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode, `paused`, `input_queue`, and
   `cycles_per_ms`, the current CPU speed. `video.vga` shows the CRTC Start
@@ -91,7 +94,7 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 | Click | `mouse` `{"action":"click","x":320,"y":200}` |
 | Sequence | `batch` `[{"type":"type","text":"cd game\n"},{"type":"wait","ms":500},{"type":"type","text":"game\n"}]` |
 
-- **Mouse coordinates** are pixels of the 640x400 screenshot by default.
+- **Mouse coordinates** are pixels of the screenshot by default.
   Pass `"coords":"virtual"` to use the INT 33h driver's own coordinates.
   `/api/status` → `mouse` shows the driver's position and whether it is
   installed.

@@ -154,15 +154,15 @@ fn text_response(s: String) -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], s).into_response()
 }
 
-fn encode_png(rgb: &[u8]) -> Result<Vec<u8>, String> {
+fn encode_png(frame: &video::Frame) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
-        let mut enc = png::Encoder::new(&mut out, video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
+        let mut enc = png::Encoder::new(&mut out, frame.width, frame.height);
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         enc.set_compression(png::Compression::Fast);
         let mut w = enc.write_header().map_err(|e| e.to_string())?;
-        w.write_image_data(rgb).map_err(|e| e.to_string())?;
+        w.write_image_data(&frame.rgb).map_err(|e| e.to_string())?;
     }
     Ok(out)
 }
@@ -189,12 +189,12 @@ struct FormatQuery {
 }
 
 async fn screenshot(State(s): State<AppState>, Query(q): Query<FormatQuery>) -> ApiResult {
-    let Reply::Frame(rgb) = s.call(Cmd::Screenshot, DEFAULT_TIMEOUT).await? else {
+    let Reply::Frame(frame) = s.call(Cmd::Screenshot, DEFAULT_TIMEOUT).await? else {
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "unexpected reply".into()));
     };
     match q.format.as_deref().unwrap_or("png") {
         "png" => {
-            let png = tokio::task::spawn_blocking(move || encode_png(&rgb))
+            let png = tokio::task::spawn_blocking(move || encode_png(&frame))
                 .await
                 .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                 .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -203,11 +203,11 @@ async fn screenshot(State(s): State<AppState>, Query(q): Query<FormatQuery>) -> 
         "raw" => Ok((
             [
                 (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                (header::HeaderName::from_static("x-width"), video::SCREEN_WIDTH.to_string()),
-                (header::HeaderName::from_static("x-height"), video::SCREEN_HEIGHT.to_string()),
+                (header::HeaderName::from_static("x-width"), frame.width.to_string()),
+                (header::HeaderName::from_static("x-height"), frame.height.to_string()),
                 (header::HeaderName::from_static("x-pixel-format"), "RGB24".to_string()),
             ],
-            rgb,
+            frame.rgb,
         )
             .into_response()),
         f => Err(bad(format!("unknown format '{}' (png, raw)", f))),
@@ -673,11 +673,11 @@ async fn ws_screen(State(s): State<AppState>, Query(q): Query<ScreenQuery>, ws: 
                 continue;
             }
             last_seq = seq;
-            let rgb = match s.shared.frame.lock() {
+            let frame = match s.shared.frame.lock() {
                 Ok(f) => f.clone(),
                 Err(_) => return,
             };
-            let png = match tokio::task::spawn_blocking(move || encode_png(&rgb)).await {
+            let png = match tokio::task::spawn_blocking(move || encode_png(&frame)).await {
                 Ok(Ok(p)) => p,
                 _ => continue,
             };
@@ -759,7 +759,10 @@ or a linear address ("0x12345", "B8000").
 STATUS / SCREEN
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed
   GET  /api/stats                          execution speed (MIPS) and decode-cache hit rate, per ~1 s
-  GET  /api/screenshot[?format=png|raw]    composited 640x400 frame (raw = RGB24 bytes)
+  GET  /api/screenshot[?format=png|raw]    the screen with its cursors, at the picture's
+                                           size: 640x400 in text modes, the mode's size
+                                           (small ones doubled) otherwise (raw = RGB24
+                                           bytes, size in x-width/x-height)
   GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode)
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines
 
@@ -775,7 +778,7 @@ INPUT  (append ?wait=false to return immediately instead of after delivery)
   POST /api/input/type   {"text":"dir\n", "delay_ms":0}
   POST /api/input/mouse  {"action":"move|down|up|click", "x":320, "y":200, "dx":0, "dy":0,
                           "button":"left|right|middle", "coords":"screen|virtual"}
-                         screen coords = pixels of the 640x400 screenshot (default)
+                         screen coords = pixels of the screenshot (default)
   POST /api/input/wait   {"ms":500}
   POST /api/input/batch  [{"type":"type","text":"cd games\n"},{"type":"wait","ms":300},
                           {"type":"key","key":"f1"}]

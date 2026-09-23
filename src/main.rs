@@ -67,7 +67,7 @@ fn main() -> Result<(), String> {
 
     // Initialize Recorder
     // TODO: Make configurable
-    let mut recorder = ScreenRecorder::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT, 15);
+    let mut recorder = ScreenRecorder::new(15);
 
     // SDL2 Setup
     let sdl_context = sdl2::init()?;
@@ -95,13 +95,17 @@ fn main() -> Result<(), String> {
 
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
     let texture_creator = canvas.texture_creator();
-    // Texture is always 640x400 RGB
+    // The texture has the size of the picture, which follows the video
+    // mode; the renderer scales it to the window, keeping its proportions.
     let mut texture = texture_creator
         .create_texture_streaming(
             PixelFormatEnum::RGB24,
             video::SCREEN_WIDTH,
             video::SCREEN_HEIGHT,
         )
+        .map_err(|e| e.to_string())?;
+    canvas
+        .set_logical_size(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)
         .map_err(|e| e.to_string())?;
 
     let mut cpu = create_cpu(&args, &config);
@@ -131,8 +135,9 @@ fn main() -> Result<(), String> {
     // frame. For a program that isn't actively touching VRAM, the per-SDL-
     // frame cost drops from "640×400×3 zero fill + per-pixel palette/planar
     // lookup" to "one memcpy of the cached buffer + a tiny overlay pass".
-    let mut cached_frame: Vec<u8> =
-        vec![0u8; (video::SCREEN_WIDTH * video::SCREEN_HEIGHT * 3) as usize];
+    let mut cached_frame = video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
+    // The cached render with the cursors on top, as the screen shows it.
+    let mut screen = cached_frame.clone();
 
     // Paces emulated time against the wall clock, one frame at a time.
     let speed = args.cycles.or(config.cycles).unwrap_or(timer::CpuSpeed::Max);
@@ -210,12 +215,12 @@ fn main() -> Result<(), String> {
                 }
 
                 Event::MouseMotion { x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, scale);
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, &cached_frame, x, y);
                     cpu.bus.mouse.set_position(vx, vy);
                 }
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, scale);
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, &cached_frame, x, y);
                     cpu.bus.mouse.set_position(vx, vy);
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_down(btn);
@@ -223,7 +228,7 @@ fn main() -> Result<(), String> {
                 }
 
                 Event::MouseButtonUp { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, x, y, scale);
+                    let (vx, vy) = host_to_virtual_mouse(&cpu, &cached_frame, x, y);
                     cpu.bus.mouse.set_position(vx, vy);
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_up(btn);
@@ -278,136 +283,141 @@ fn main() -> Result<(), String> {
             last_blink = std::time::Instant::now();
         }
 
-        // Render Frame. The expensive part (the 640×400×3 pixel fill driven by
+        // Render Frame. The expensive part (the pixel fill driven by
         // palette/planar lookups inside `render_screen`) only happens when the
         // VGA state changed since last frame. On "clean" frames we reuse
         // `cached_frame` and just overlay the cursor/mouse/recording pip.
         // The CRTC picks up the Start Address the program flipped to at the
         // vertical retraces that passed, whether or not it polled port 3DAh.
         cpu.bus.sync_display();
+        let (width, height) = video::frame_size(&cpu.bus);
+        if cached_frame.resize(width, height) {
+            cpu.bus.vga.mark_dirty_full();
+            texture = texture_creator
+                .create_texture_streaming(PixelFormatEnum::RGB24, width, height)
+                .map_err(|e| e.to_string())?;
+            canvas.set_logical_size(width, height).map_err(|e| e.to_string())?;
+            fit_window(&video_subsystem, canvas.window_mut(), width, height, scale);
+        }
         if cpu.bus.vga.dirty {
             video::render_screen(&mut cached_frame, &cpu.bus);
             cpu.bus.vga.clear_dirty();
         }
 
-        texture.with_lock(None, |buffer: &mut [u8], _pitch: usize| {
-            // Copy the cached render into the texture. This is a single
-            // ~768 KiB memcpy — cheap on any modern machine — and leaves us a
-            // clean canvas for the per-frame overlays (cursor/mouse/recorder
-            // indicator) without re-running the VGA renderer.
-            buffer.copy_from_slice(&cached_frame);
+        // Start from the cached render; the overlays go on top.
+        screen.clone_from(&cached_frame);
+        let buffer = &mut screen.rgb[..];
+        let frame_w = width as usize;
 
-            // Draw the Cursor (Overlay)
-            // Only draw the hardware cursor in Text Modes!
-            let current_mode = cpu.bus.video_mode;
-            let is_text_mode = matches!(
-                current_mode,
-                VideoMode::Text80x25
-                    | VideoMode::Text80x25Color
-                    | VideoMode::Text40x25
-                    | VideoMode::Text40x25Color
-            );
-            if is_text_mode {
-                // Read Cursor Position from BDA
-                let cursor_col = cpu.bus.read_8(0x0450) as usize;
-                let cursor_row = cpu.bus.read_8(0x0451) as usize;
+        // Draw the Cursor (Overlay)
+        // Only draw the hardware cursor in Text Modes!
+        let current_mode = cpu.bus.video_mode;
+        let is_text_mode = matches!(
+            current_mode,
+            VideoMode::Text80x25
+                | VideoMode::Text80x25Color
+                | VideoMode::Text40x25
+                | VideoMode::Text40x25Color
+        );
+        if is_text_mode {
+            // Read Cursor Position from BDA
+            let cursor_col = cpu.bus.read_8(0x0450) as usize;
+            let cursor_row = cpu.bus.read_8(0x0451) as usize;
 
-                // Read Cursor Shape from BDA
-                let cursor_shape = cpu.bus.read_16(0x0460);
-                let start_scan = (cursor_shape >> 8) as u8;
-                let end_scan = (cursor_shape & 0xFF) as u8;
+            // Read Cursor Shape from BDA
+            let cursor_shape = cpu.bus.read_16(0x0460);
+            let start_scan = (cursor_shape >> 8) as u8;
+            let end_scan = (cursor_shape & 0xFF) as u8;
 
-                // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
-                let is_hidden = (start_scan & 0x20) != 0;
+            // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
+            let is_hidden = (start_scan & 0x20) != 0;
 
-                // Determine Cell Width based on Mode
-                // 40-col modes have 16px wide characters (scaled 2x)
-                let (cell_width, max_cols) = match current_mode {
-                    VideoMode::Text40x25 | VideoMode::Text40x25Color => (16, 40),
-                    _ => (8, 80),
-                };
-                // Cell height and visible rows come from BDA so 80x43 / 80x50
-                // modes draw the cursor at the correct Y when programs like
-                // Norton Commander load the 8x8 font.
-                let cell_height = cpu.bus.read_16(0x0485) as usize;
-                let cell_height = if cell_height == 0 { 16 } else { cell_height };
-                let total_rows = cpu.bus.read_8(0x0484) as usize + 1;
+            // Determine Cell Width based on Mode
+            // 40-col modes have 16px wide characters (scaled 2x)
+            let (cell_width, max_cols) = match current_mode {
+                VideoMode::Text40x25 | VideoMode::Text40x25Color => (16, 40),
+                _ => (8, 80),
+            };
+            // Cell height and visible rows come from BDA so 80x43 / 80x50
+            // modes draw the cursor at the correct Y when programs like
+            // Norton Commander load the 8x8 font.
+            let cell_height = cpu.bus.read_16(0x0485) as usize;
+            let cell_height = if cell_height == 0 { 16 } else { cell_height };
+            let total_rows = cpu.bus.read_8(0x0484) as usize + 1;
 
-                if cursor_visible
-                    && !is_hidden
-                    && cursor_col < max_cols
-                    && cursor_row < total_rows
-                {
-                    // Calculate screen coordinates
-                    let start_x = cursor_col * cell_width;
-                    let start_y = cursor_row * cell_height;
+            if cursor_visible
+                && !is_hidden
+                && cursor_col < max_cols
+                && cursor_row < total_rows
+            {
+                // Calculate screen coordinates
+                let start_x = cursor_col * cell_width;
+                let start_y = cursor_row * cell_height;
 
-                    // Clamp scanlines to the active cell height - 1.
-                    let max_scan = cell_height.saturating_sub(1) as u8;
-                    let scan_start = (start_scan & 0x1F).min(max_scan) as usize;
-                    let scan_end = end_scan.min(max_scan) as usize;
+                // Clamp scanlines to the active cell height - 1.
+                let max_scan = cell_height.saturating_sub(1) as u8;
+                let scan_start = (start_scan & 0x1F).min(max_scan) as usize;
+                let scan_end = end_scan.min(max_scan) as usize;
 
-                    if scan_start <= scan_end {
-                        for y_off in scan_start..=scan_end {
-                            for x_off in 0..cell_width {
-                                let draw_x = start_x + x_off;
-                                let draw_y = start_y + y_off;
+                if scan_start <= scan_end {
+                    for y_off in scan_start..=scan_end {
+                        for x_off in 0..cell_width {
+                            let draw_x = start_x + x_off;
+                            let draw_y = start_y + y_off;
 
-                                // Safety Check
-                                let idx = (draw_y * video::SCREEN_WIDTH as usize + draw_x) * 3;
-                                if idx + 2 < buffer.len() {
-                                    // Draw Cursor (Invert or Solid Block)
-                                    // Using a distinct color (e.g., pure white or slightly transparent look)
-                                    // TODO: Check if simple overwrite is good enough
-                                    buffer[idx] = 0xDD;
-                                    buffer[idx + 1] = 0xDD;
-                                    buffer[idx + 2] = 0xDD;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Draw Mouse Cursor (software overlay) when visible and installed.
-            // The driver stores the cursor in virtual coords; map those to
-            // screen pixels over the same virtual extent the host pointer spans.
-            if cpu.bus.mouse.installed && cpu.bus.mouse.hide_counter <= 0 {
-                let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
-                let sx =
-                    (cpu.bus.mouse.x as i64 * video::SCREEN_WIDTH as i64 / virt_w as i64) as i32;
-                let sy =
-                    (cpu.bus.mouse.y as i64 * video::SCREEN_HEIGHT as i64 / virt_h as i64) as i32;
-                draw_default_mouse_cursor(buffer, sx, sy);
-            }
-
-            // Send Frame to Recorder / debug clients before drawing the
-            // recording indicator
-            recorder.capture(buffer);
-            dbg.capture_frame(buffer);
-
-            // Draw Recording Indicator
-            if recorder.is_active() {
-                let radius = 5;
-                let center_x = video::SCREEN_WIDTH as usize - 15;
-                let center_y = 15;
-
-                for y in (center_y - radius)..=(center_y + radius) {
-                    for x in (center_x - radius)..=(center_x + radius) {
-                        let dx = x as isize - center_x as isize;
-                        let dy = y as isize - center_y as isize;
-                        if dx * dx + dy * dy <= (radius * radius) as isize {
-                            let idx = (y * video::SCREEN_WIDTH as usize + x) * 3;
+                            // Safety Check
+                            let idx = (draw_y * frame_w + draw_x) * 3;
                             if idx + 2 < buffer.len() {
-                                buffer[idx] = 0xFF; // R
-                                buffer[idx + 1] = 0x00; // G
-                                buffer[idx + 2] = 0x00; // B
+                                buffer[idx] = 0xDD;
+                                buffer[idx + 1] = 0xDD;
+                                buffer[idx + 2] = 0xDD;
                             }
                         }
                     }
                 }
             }
-        })?;
+        }
+
+        // Draw Mouse Cursor (software overlay) when visible and installed.
+        // The driver stores the cursor in virtual coords; map those to
+        // screen pixels over the same virtual extent the host pointer spans.
+        if cpu.bus.mouse.installed && cpu.bus.mouse.hide_counter <= 0 {
+            let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
+            let sx = (cpu.bus.mouse.x as i64 * width as i64 / virt_w as i64) as i32;
+            let sy = (cpu.bus.mouse.y as i64 * height as i64 / virt_h as i64) as i32;
+            draw_default_mouse_cursor(&mut screen, sx, sy);
+        }
+
+        // Send Frame to Recorder / debug clients before drawing the
+        // recording indicator
+        recorder.capture(&screen);
+        dbg.capture_frame(&screen);
+
+        // Draw Recording Indicator
+        if recorder.is_active() {
+            let radius = 5;
+            let center_x = frame_w - 15;
+            let center_y = 15;
+
+            for y in (center_y - radius)..=(center_y + radius) {
+                for x in (center_x - radius)..=(center_x + radius) {
+                    let dx = x as isize - center_x as isize;
+                    let dy = y as isize - center_y as isize;
+                    if dx * dx + dy * dy <= (radius * radius) as isize {
+                        let idx = (y * frame_w + x) * 3;
+                        if idx + 2 < screen.rgb.len() {
+                            screen.rgb[idx] = 0xFF; // R
+                            screen.rgb[idx + 1] = 0x00; // G
+                            screen.rgb[idx + 2] = 0x00; // B
+                        }
+                    }
+                }
+            }
+        }
+        texture
+            .update(None, &screen.rgb, frame_w * 3)
+            .map_err(|e| e.to_string())?;
+        canvas.clear();
         canvas.copy(&texture, None, None)?;
         canvas.present();
 
@@ -592,19 +602,33 @@ fn open_log_file() -> Option<rust_dos::log::LogFile> {
     }
 }
 
-/// Convert host window coordinates (in pixels, at window `scale`) into the
-/// driver's virtual coordinate system (see `MouseState::virtual_extent`).
-fn host_to_virtual_mouse(cpu: &Cpu, host_x: i32, host_y: i32, scale: u32) -> (i32, i32) {
-    let scale = scale.max(1) as i32;
-    // Undo the window scale. The textured output is SCREEN_WIDTH x SCREEN_HEIGHT.
-    let px = (host_x / scale).clamp(0, video::SCREEN_WIDTH as i32 - 1);
-    let py = (host_y / scale).clamp(0, video::SCREEN_HEIGHT as i32 - 1);
+/// Convert mouse coordinates in the picture's pixels (SDL scales window
+/// coordinates to the logical size of the renderer, the picture's size)
+/// into the driver's virtual coordinate system (see
+/// `MouseState::virtual_extent`).
+fn host_to_virtual_mouse(cpu: &Cpu, frame: &video::Frame, x: i32, y: i32) -> (i32, i32) {
+    let (w, h) = (frame.width as i32, frame.height as i32);
+    let px = x.clamp(0, w - 1);
+    let py = y.clamp(0, h - 1);
 
     let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
 
-    let vx = (px as i64 * virt_w as i64 / video::SCREEN_WIDTH as i64) as i32;
-    let vy = (py as i64 * virt_h as i64 / video::SCREEN_HEIGHT as i64) as i32;
+    let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
+    let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
+}
+
+/// Make the window `scale` times the picture's size, or the largest whole
+/// multiple of it that fits the desktop.
+fn fit_window(video: &sdl2::VideoSubsystem, window: &mut sdl2::video::Window, width: u32, height: u32, scale: u32) {
+    let bounds = window.display_index().and_then(|display| video.display_usable_bounds(display));
+    let mut scale = scale.max(1);
+    if let Ok(bounds) = bounds {
+        while scale > 1 && (width * scale > bounds.width() || height * scale > bounds.height()) {
+            scale -= 1;
+        }
+    }
+    let _ = window.set_size(width * scale, height * scale);
 }
 
 fn sdl_button_to_index(button: MouseButton) -> Option<usize> {
@@ -637,7 +661,8 @@ const CURSOR_ARROW: [[u8; 16]; 16] = [
     [0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0],
 ];
 
-fn draw_default_mouse_cursor(buffer: &mut [u8], origin_x: i32, origin_y: i32) {
+fn draw_default_mouse_cursor(frame: &mut video::Frame, origin_x: i32, origin_y: i32) {
+    let (w, h) = (frame.width as i32, frame.height as i32);
     for (row_idx, row) in CURSOR_ARROW.iter().enumerate() {
         for (col_idx, &cell) in row.iter().enumerate() {
             if cell == 0 {
@@ -645,25 +670,18 @@ fn draw_default_mouse_cursor(buffer: &mut [u8], origin_x: i32, origin_y: i32) {
             }
             let x = origin_x + col_idx as i32;
             let y = origin_y + row_idx as i32;
-            if x < 0
-                || y < 0
-                || x >= video::SCREEN_WIDTH as i32
-                || y >= video::SCREEN_HEIGHT as i32
-            {
+            if x < 0 || y < 0 || x >= w || y >= h {
                 continue;
             }
-            let idx = (y as usize * video::SCREEN_WIDTH as usize + x as usize) * 3;
-            if idx + 2 >= buffer.len() {
-                continue;
-            }
+            let idx = (y * w + x) as usize * 3;
             let (r, g, b) = if cell == 1 {
                 (0xFF, 0xFF, 0xFF)
             } else {
                 (0x00, 0x00, 0x00)
             };
-            buffer[idx] = r;
-            buffer[idx + 1] = g;
-            buffer[idx + 2] = b;
+            frame.rgb[idx] = r;
+            frame.rgb[idx + 1] = g;
+            frame.rgb[idx + 2] = b;
         }
     }
 }

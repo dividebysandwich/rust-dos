@@ -18,10 +18,12 @@ fn mode_13h() -> Cpu {
 
 /// RGB of 320x200 pixel (x, y) in a fresh render.
 fn pixel(cpu: &Cpu, x: usize, y: usize) -> (u8, u8, u8) {
-    let mut frame = vec![0u8; (SCREEN_WIDTH * SCREEN_HEIGHT * 3) as usize];
+    let (width, height) = video::frame_size(&cpu.bus);
+    assert_eq!((width, height), (SCREEN_WIDTH, SCREEN_HEIGHT));
+    let mut frame = video::Frame::new(width, height);
     video::render_screen(&mut frame, &cpu.bus);
     let i = (y * 2 * SCREEN_WIDTH as usize + x * 2) * 3;
-    (frame[i], frame[i + 1], frame[i + 2])
+    (frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
 }
 
 fn out(cpu: &mut Cpu, port: u16, index: u8, value: u8) {

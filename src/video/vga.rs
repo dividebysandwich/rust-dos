@@ -142,7 +142,7 @@ pub struct VgaCard {
     pub dirty: bool,
 
     /// Inclusive lower / exclusive upper screen-row bounds of the region
-    /// that needs re-rendering this frame (0..SCREEN_HEIGHT). When
+    /// that needs re-rendering this frame (u32::MAX: to the bottom). When
     /// `dirty_y_min >= dirty_y_max` the dirty region is empty. Sites that
     /// can't easily compute an affected row range (palette writes, mode
     /// changes, planar VRAM writes) widen this to the full screen via
@@ -183,7 +183,7 @@ impl VgaCard {
             rebase: true,
             dirty: true,
             dirty_y_min: 0,
-            dirty_y_max: crate::video::SCREEN_HEIGHT,
+            dirty_y_max: u32::MAX,
         };
         // The BIOS starts in 80x25 color text mode.
         vga.set_video_mode(super::VideoMode::Text80x25Color);
@@ -197,7 +197,7 @@ impl VgaCard {
     pub fn mark_dirty_full(&mut self) {
         self.dirty = true;
         self.dirty_y_min = 0;
-        self.dirty_y_max = crate::video::SCREEN_HEIGHT;
+        self.dirty_y_max = u32::MAX;
     }
 
     /// Widen the dirty range to include `[y_start, y_end)` (screen rows).
@@ -217,12 +217,12 @@ impl VgaCard {
     }
 
     /// Reset after rendering. The empty range encodes "nothing dirty" as
-    /// `dirty_y_min == SCREEN_HEIGHT, dirty_y_max == 0` so the next
+    /// `dirty_y_min == u32::MAX, dirty_y_max == 0` so the next
     /// `mark_dirty_rows` widens correctly from a clean slate.
     #[inline]
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
-        self.dirty_y_min = crate::video::SCREEN_HEIGHT;
+        self.dirty_y_min = u32::MAX;
         self.dirty_y_max = 0;
     }
 

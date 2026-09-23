@@ -4,7 +4,7 @@
 
 use rust_dos::command::CommandDispatcher;
 use rust_dos::cpu::Cpu;
-use rust_dos::video::{self, SCREEN_HEIGHT, SCREEN_WIDTH};
+use rust_dos::video::{self, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::fs;
 use std::path::PathBuf;
 
@@ -19,19 +19,19 @@ fn scratch(name: &str) -> PathBuf {
 
 /// A shell-ready CPU whose frame has been rendered once, so later renders
 /// only repaint what gets marked dirty (like the main loop).
-fn rendered_shell(name: &str) -> (Cpu, Vec<u8>) {
+fn rendered_shell(name: &str) -> (Cpu, Frame) {
     let mut cpu = Cpu::new(scratch(name));
     cpu.load_shell();
-    let mut frame = vec![0u8; (SCREEN_WIDTH * SCREEN_HEIGHT * 3) as usize];
+    let mut frame = Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT);
     video::render_screen(&mut frame, &cpu.bus);
     cpu.bus.vga.clear_dirty();
     (cpu, frame)
 }
 
 /// True if any pixel in text row `row` is lit.
-fn row_has_pixels(frame: &[u8], row: usize) -> bool {
+fn row_has_pixels(frame: &Frame, row: usize) -> bool {
     let row_bytes = SCREEN_WIDTH as usize * 3;
-    frame[row * CELL_H * row_bytes..(row + 1) * CELL_H * row_bytes]
+    frame.rgb[row * CELL_H * row_bytes..(row + 1) * CELL_H * row_bytes]
         .iter()
         .any(|&b| b != 0)
 }

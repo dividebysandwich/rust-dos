@@ -36,9 +36,9 @@ const LOG_RING_CAPACITY: usize = 5000;
 
 /// State shared between the emulator thread and the server thread.
 pub struct Shared {
-    /// Latest composited 640x400 RGB24 frame. Only kept up to date while a
-    /// screen stream is subscribed.
-    pub frame: Mutex<Vec<u8>>,
+    /// Latest composited frame (the screen with its cursors). Only kept up
+    /// to date while a screen stream is subscribed.
+    pub frame: Mutex<video::Frame>,
     /// Bumped whenever `frame` changes.
     pub frame_seq: AtomicU64,
     pub screen_subscribers: AtomicUsize,
@@ -68,7 +68,7 @@ impl Shared {
 
 pub enum Reply {
     Json(Value),
-    Frame(Vec<u8>),
+    Frame(video::Frame),
     Trace(Vec<TraceEntry>),
     Bytes { addr: usize, segoff: Option<(u16, u32)>, data: Vec<u8> },
     Error(u16, String),
@@ -372,7 +372,8 @@ pub struct DebugHub {
     key_stall_frames: u32,
 
     frame_waiters: Vec<oneshot::Sender<Reply>>,
-    last_mode: Option<VideoMode>,
+    /// The video mode and picture size last reported as an event.
+    last_mode: Option<(VideoMode, (u32, u32))>,
     frames: u64,
     fps: f64,
     fps_mark: (Instant, u64),
@@ -457,7 +458,7 @@ impl DebugHub {
             );
         }
         let shared = Arc::new(Shared {
-            frame: Mutex::new(vec![0; (video::SCREEN_WIDTH * video::SCREEN_HEIGHT * 3) as usize]),
+            frame: Mutex::new(video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT)),
             frame_seq: AtomicU64::new(0),
             screen_subscribers: AtomicUsize::new(0),
             events: broadcast::channel(1024).0,
@@ -510,15 +511,17 @@ impl DebugHub {
 
         self.process_input(cpu);
 
-        if self.last_mode != Some(cpu.bus.video_mode) {
+        let mode = (cpu.bus.video_mode, video::frame_size(&cpu.bus));
+        if self.last_mode != Some(mode) {
             let (w, h) = cpu.bus.video_mode.dimensions();
             self.emit(json!({
                 "type": "video_mode",
                 "mode": cpu.bus.video_mode as u8,
                 "name": format!("{:?}", cpu.bus.video_mode),
                 "width": w, "height": h,
+                "frame": {"width": mode.1.0, "height": mode.1.1},
             }));
-            self.last_mode = Some(cpu.bus.video_mode);
+            self.last_mode = Some(mode);
         }
     }
 
@@ -699,7 +702,7 @@ impl DebugHub {
 
     /// Hand the composited frame (cached VGA render + cursor overlays) to
     /// screenshot requests and the screen stream.
-    pub fn capture_frame(&mut self, rgb: &[u8]) {
+    pub fn capture_frame(&mut self, screen: &video::Frame) {
         self.frames += 1;
         let (mark_t, mark_n) = self.fps_mark;
         let dt = mark_t.elapsed().as_secs_f64();
@@ -712,13 +715,13 @@ impl DebugHub {
             return;
         }
         for w in self.frame_waiters.drain(..) {
-            let _ = w.send(Reply::Frame(rgb.to_vec()));
+            let _ = w.send(Reply::Frame(screen.clone()));
         }
         if let Some(shared) = &self.shared {
             if shared.screen_subscribers.load(Ordering::Relaxed) > 0 {
                 if let Ok(mut frame) = shared.frame.lock() {
-                    if frame.as_slice() != rgb {
-                        frame.copy_from_slice(rgb);
+                    if *frame != *screen {
+                        frame.clone_from(screen);
                         shared.frame_seq.fetch_add(1, Ordering::Release);
                     }
                 }
@@ -1021,6 +1024,7 @@ impl DebugHub {
 
     fn status(&self, cpu: &Cpu) -> Value {
         let (w, h) = cpu.bus.video_mode.dimensions();
+        let (frame_w, frame_h) = video::frame_size(&cpu.bus);
         let crtc = &cpu.bus.vga.crtc_regs;
         let timing = cpu.bus.vga.peek_timing();
         json!({
@@ -1043,6 +1047,8 @@ impl DebugHub {
                 "mode": cpu.bus.video_mode as u8,
                 "name": format!("{:?}", cpu.bus.video_mode),
                 "width": w, "height": h,
+                // The picture as screenshots have it.
+                "frame": {"width": frame_w, "height": frame_h},
                 // Page flipping: the Start Address the program set and the
                 // one latched for display, plus the registers that decide
                 // the memory layout.
@@ -1213,14 +1219,16 @@ fn apply_key(cpu: &mut Cpu, key: PcKey, ascii: u8, down: bool) {
     }
 }
 
-/// Map 640x400 screenshot pixels into the mouse driver's virtual coordinate
-/// system (same convention as the SDL path in main.rs).
+/// Map screenshot pixels (the picture's own size) into the mouse driver's
+/// virtual coordinate system (same convention as the SDL path in main.rs).
 fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
-    let px = x.clamp(0, video::SCREEN_WIDTH as i32 - 1);
-    let py = y.clamp(0, video::SCREEN_HEIGHT as i32 - 1);
+    let (w, h) = video::frame_size(&cpu.bus);
+    let (w, h) = (w as i32, h as i32);
+    let px = x.clamp(0, w - 1);
+    let py = y.clamp(0, h - 1);
     let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.video_mode);
-    let vx = (px as i64 * virt_w as i64 / video::SCREEN_WIDTH as i64) as i32;
-    let vy = (py as i64 * virt_h as i64 / video::SCREEN_HEIGHT as i64) as i32;
+    let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
+    let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
 }
 
