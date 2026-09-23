@@ -150,15 +150,23 @@ impl Cpu {
             super::CpuModel::I486 => 0x0402,
         };
         self.flags = CpuFlags::R1;
+        self.reset_to_real_mode();
+        self.seg[Seg::CS as usize] = super::SegCache::real(0xF000);
+        self.eip = 0xFFF0;
+        self.state = super::CpuState::Running;
+    }
+
+    /// The system state of a reset, keeping the registers: real mode,
+    /// paging off, the descriptor tables at their power-on values and
+    /// real-mode segments. The shell starts from it however the last
+    /// program left the processor.
+    pub fn reset_to_real_mode(&mut self) {
         self.cr0 = super::CR0_ET;
         self.cr2 = 0;
         self.cr3 = 0;
         self.gdtr = super::DescTable { base: 0, limit: 0xFFFF };
         self.idtr = super::DescTable { base: 0, limit: 0x3FF };
         self.seg = [super::SegCache::real(0); 6];
-        self.seg[Seg::CS as usize] = super::SegCache::real(0xF000);
-        self.eip = 0xFFF0;
         self.irq_shadow = false;
-        self.state = super::CpuState::Running;
     }
 }

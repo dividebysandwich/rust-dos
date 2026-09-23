@@ -160,7 +160,10 @@ fn deliver_interrupts(cpu: &mut Cpu) -> bool {
     // The instruction after STI, MOV SS or POP SS runs before any
     // interrupt, so a program can switch SS:SP without being interrupted
     // halfway.
-    cpu.get_cpu_flag(CpuFlags::IF) && !cpu.irq_shadow && deliver_pending(cpu)
+    cpu.get_cpu_flag(CpuFlags::IF)
+        && !cpu.irq_shadow
+        && cpu.bus.interrupt_requested()
+        && deliver_pending(cpu)
 }
 
 fn deliver_pending(cpu: &mut Cpu) -> bool {
@@ -267,16 +270,25 @@ fn dispatch_command(cpu: &mut Cpu, cmd: &str) {
     let loaded = if lower.ends_with(".bat") {
         cpu.queue_batch_file(command)
     } else if !command.contains('.') {
-        cpu.load_executable(&format!("{}.com", command), None)
-            || cpu.load_executable(&format!("{}.exe", command), None)
+        load_program(cpu, &format!("{}.com", command), args)
+            || load_program(cpu, &format!("{}.exe", command), args)
             || cpu.queue_batch_file(&format!("{}.bat", command))
     } else {
-        cpu.load_executable(command, None)
+        load_program(cpu, command, args)
     };
 
     if !loaded {
         crate::video::print_string(cpu, "Bad command or file name.\r\n");
     }
+}
+
+/// Load a program from the shell with its command line arguments.
+fn load_program(cpu: &mut Cpu, filename: &str, args: &str) -> bool {
+    if !cpu.load_executable(filename, None) {
+        return false;
+    }
+    cpu.set_command_tail(cpu.current_psp, args);
+    true
 }
 
 /// Run one instruction or emulator service trap at CS:IP.

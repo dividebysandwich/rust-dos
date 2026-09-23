@@ -45,6 +45,7 @@ pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
 pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
     match service {
         crate::bios::SERVICE_TIMER_TICK => int08::tick(cpu),
+        crate::bios::SERVICE_XMS => crate::xms::call(cpu),
         crate::bios::SERVICE_POST => crate::bios::post(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",

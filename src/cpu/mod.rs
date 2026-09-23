@@ -15,6 +15,10 @@ pub use fault::{CpuResult, Fault, IntSource};
 pub use mem::{Access, MemRef};
 pub use regs::{ATTR_DB, ATTR_G, Seg, SegCache};
 
+/// Where the environment of programs started from the shell lives. The
+/// area below the first MCB belongs to the shell.
+pub const ENV_SEGMENT: u16 = 0x0C00;
+
 /// FLAGS bits POPF and IRET load: CF, PF, AF, ZF, SF, TF, IF, DF, OF, IOPL
 /// and NT.
 const FLAGS16_WRITABLE: u32 = 0x7FD5;
@@ -128,6 +132,9 @@ pub struct Cpu {
     /// prompt+line echo before dispatch). Toggled by the ECHO ON / ECHO OFF
     /// built-in. Defaults to true; persists across batches like real DOS.
     pub batch_echo: bool,
+    /// The master environment (SET, PATH), in order. Programs started from
+    /// the shell get a copy.
+    pub environment: Vec<(String, String)>,
     pub current_psp: u16,
     pub heap_pointer: u16,
     /// MCB segment where memory above the TSRs kept resident from the shell
@@ -138,6 +145,8 @@ pub struct Cpu {
     /// child process. Read-and-clear by INT 21h AH=4Dh. Termination type:
     /// 0 = normal (INT 21 AH=4C), 1 = Ctrl-C, 2 = critical error, 3 = TSR.
     pub last_child_exit: u16,
+    /// Error code of the last failed DOS call, for INT 21h AH=59h.
+    pub last_dos_error: u16,
 
     // FPU State
     pub fpu_stack: [F80; 8],
@@ -191,6 +200,20 @@ pub struct ProcessContext {
 
 use std::path::PathBuf;
 
+/// The environment at startup. BLASTER advertises the Sound Blaster's
+/// resources as SET BLASTER in AUTOEXEC.BAT would: base port 220h, IRQ 5,
+/// DMA channel 1, type 3 (SB 2.0).
+fn default_environment() -> Vec<(String, String)> {
+    [
+        ("PATH", "C:\\"),
+        ("COMSPEC", "Z:\\COMMAND.COM"),
+        ("BLASTER", "A220 I5 D1 T3"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect()
+}
+
 impl Cpu {
     /// A CPU on a machine with the default amount of RAM.
     pub fn new(root_path: PathBuf) -> Self {
@@ -220,6 +243,7 @@ impl Cpu {
             pending_command: None,
             batch_queue: VecDeque::new(),
             batch_echo: true,
+            environment: default_environment(),
             fpu_stack: [F80::new(); 8],
             fpu_top: 0,
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),
@@ -229,6 +253,7 @@ impl Cpu {
             heap_pointer: 0x2000,
             resident_end: crate::mcb::FIRST_MCB_SEG,
             last_child_exit: 0,
+            last_dos_error: 0,
             process_stack: Vec::new(),
             irq_shadow: false,
             // 64K direct-mapped slots (~3.5 MB): comfortably large for any
@@ -575,6 +600,7 @@ impl Cpu {
         self.bus.load_bytes(start_addr, &shell_code);
 
         // Reset CPU State to "Boot" values
+        self.reset_to_real_mode();
         self.set_cs(0);
         self.set_ds(0);
         self.set_es(0);
@@ -594,6 +620,12 @@ impl Cpu {
         self.state = CpuState::Running;
         self.idle = false;
         self.bus.reset_timers();
+        // No program runs any more: its extended memory and A20 go too,
+        // and a reset from now on is a cold boot.
+        self.bus.xms = crate::xms::Xms::new();
+        self.bus.a20 = false;
+        self.bus.kbc.output_port &= !crate::kbc::OUT_A20;
+        self.bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
 
         self.bus.disk.close_all_files();
 
@@ -668,11 +700,91 @@ impl Cpu {
         ));
 
         // Check for EXE Signature ("MZ")
-        if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
-            return self.load_exe(&bytes, segment);
+        let loaded = if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
+            self.load_exe(&bytes, segment)
         } else {
-            return self.load_com(&bytes, segment);
+            self.load_com(&bytes, segment)
+        };
+        if loaded && segment.is_none() {
+            // A program started from the shell gets the master environment
+            // in the shell's environment area. (EXEC gives a child its own
+            // copy of the parent's environment.)
+            let path = self.program_path(filename);
+            let block = self.environment_block(&path);
+            let env_phys = self.get_physical_addr(ENV_SEGMENT, 0);
+            self.bus.load_bytes(env_phys, &block);
+            let psp_phys = self.get_physical_addr(self.current_psp, 0);
+            self.bus.write_16(psp_phys + 0x2C, ENV_SEGMENT);
         }
+        loaded
+    }
+
+    /// A variable of the master environment.
+    pub fn get_env(&self, name: &str) -> Option<&str> {
+        self.environment
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Set a variable of the master environment, or remove it when `value`
+    /// is empty. Names are upper case, as COMMAND.COM stores them.
+    pub fn set_env(&mut self, name: &str, value: &str) {
+        let name = name.to_ascii_uppercase();
+        let existing = self.environment.iter().position(|(n, _)| *n == name);
+        match (existing, value.is_empty()) {
+            (Some(i), true) => {
+                self.environment.remove(i);
+            }
+            (Some(i), false) => self.environment[i].1 = value.to_string(),
+            (None, false) => self.environment.push((name, value.to_string())),
+            (None, true) => {}
+        }
+    }
+
+    /// Fully qualified DOS path of a program file name.
+    pub fn program_path(&self, filename: &str) -> String {
+        self.bus
+            .disk
+            .qualify_path(filename)
+            .unwrap_or_else(|| filename.to_ascii_uppercase())
+    }
+
+    /// An environment block with the master environment's variables,
+    /// followed, as DOS 3+ does, by a word count of 1 and the program's
+    /// fully qualified path. Programs find their own directory (and DOS
+    /// extenders their own EXE file) through that path.
+    pub fn environment_block(&self, program_path: &str) -> Vec<u8> {
+        let mut block = Vec::new();
+        for (name, value) in &self.environment {
+            block.extend_from_slice(name.as_bytes());
+            block.push(b'=');
+            block.extend_from_slice(value.as_bytes());
+            block.push(0);
+        }
+        if self.environment.is_empty() {
+            block.push(0);
+        }
+        block.push(0);
+        block.extend_from_slice(&[0x01, 0x00]);
+        block.extend_from_slice(program_path.as_bytes());
+        block.push(0);
+        block
+    }
+
+    /// Write a program's command tail to its PSP (offset 80h: length, the
+    /// text, CR). DOS passes the arguments with their leading space.
+    pub fn set_command_tail(&mut self, psp: u16, args: &str) {
+        let args = args.trim();
+        let mut tail = Vec::new();
+        if !args.is_empty() {
+            tail.push(b' ');
+            tail.extend(args.bytes().take(125));
+        }
+        let psp_phys = self.get_physical_addr(psp, 0);
+        self.bus.write_8(psp_phys + 0x80, tail.len() as u8);
+        self.bus.load_bytes(psp_phys + 0x81, &tail);
+        self.bus.write_8(psp_phys + 0x81 + tail.len(), 0x0D);
     }
 
     /// INT 21h AH=4Bh AL=03h — Load Overlay.
@@ -797,42 +909,12 @@ impl Cpu {
         self.bus.write_8(psp_phys + 6, 0x03);
         self.bus.write_8(psp_phys + 7, 0x00);
 
-        // Offset 0x2C: Segment address of environment block
-        // 0x0000 = No environment / Use parent. Prevents access violation if app checks.
-        self.bus.write_8(psp_phys + 0x2C, 0x00);
-        self.bus.write_8(psp_phys + 0x2D, 0x00);
-
-        // TODO: Pass Command Line Arguments via PSP
-        // Offset 0x80: Command Tail Length (Empty)
-        self.bus.write_8(psp_phys + 0x80, 0x00);
-        // Offset 0x81: Command Tail (CR only)
-        self.bus.write_8(psp_phys + 0x81, 0x0D);
-
-        // --- ENVIRONMENT SETUP ---
-        // Create a default environment block if none exists (usually for first program)
-        // Segment 0x0C00
-        let env_seg = 0x0C00;
-        let env_phys = self.get_physical_addr(env_seg, 0);
-
-        // Simple Default Env: "PATH=C:\" \0 "COMSPEC=COMMAND.COM" \0 \0
-        // BLASTER advertises the SB resource map to drivers at autodetect
-        // time: A220 base I/O, I5 IRQ, D1 DMA, T3 = SB 2.0. Matches what
-        // SET BLASTER in AUTOEXEC.BAT would publish on a real PC.
-        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0BLASTER=A220 I5 D1 T3\0\0";
-        for (i, &b) in default_env.iter().enumerate() {
-            self.bus.write_8(env_phys + i, b);
-        }
-
-        // Point PSP to this environment
-        self.bus.write_16(psp_phys + 0x2C, env_seg);
+        // Offset 0x2C: environment segment, set by whoever started the
+        // program (load_executable or EXEC).
+        self.bus.write_16(psp_phys + 0x2C, 0);
+        // Offset 0x80: empty command tail, filled in by the caller.
+        self.set_command_tail(load_segment, "");
         self.current_psp = load_segment;
-
-        self.bus.log_string(&format!(
-            "[DEBUG] Wrote PSP[06] = {:02X} at Phys {:05X}. Env at {:04X}",
-            self.bus.read_8(psp_phys + 6),
-            psp_phys + 6,
-            env_seg
-        ));
 
         self.bus.log_string(&format!(
             "[DOS] Loaded COM file at {:04X}:{:04X}",
@@ -892,10 +974,24 @@ impl Cpu {
             return false;
         }
 
+        // The load module is the part of the file the MZ header counts:
+        // pages of 512 bytes, the last one partly used. Bound programs such
+        // as DOS extenders keep more data (their protected-mode image) after
+        // it, which they read from the file themselves.
+        let pages = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        let last_page = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
+        let module_len = match (pages, last_page) {
+            (0, _) => bytes.len(),
+            (p, 0) => p * 512,
+            (p, l) => (p - 1) * 512 + l,
+        };
+        let image_end = module_len.clamp(header_size, bytes.len());
+        let image_data = &bytes[header_size..image_end];
+
         // Standard loader
         // DOS behavior: Skip the header, load the rest to CS:0000 (after PSP)
         let image_start_phys = self.get_physical_addr(relocation_base_segment, 0);
-        self.bus.load_bytes(image_start_phys, &bytes[header_size..]);
+        self.bus.load_bytes(image_start_phys, image_data);
 
         // Relocations
         // The file contains a table of pointers (Segment:Offset).
@@ -951,24 +1047,11 @@ impl Cpu {
         self.bus.write_8(psp_phys + 2, 0x00);
         self.bus.write_8(psp_phys + 3, 0xA0);
 
-        // TODO: Pass Command Line Arguments via PSP
-        // Offset 0x80: Command Tail Length (0 bytes)
-        self.bus.write_8(psp_phys + 0x80, 0x00);
-        // Offset 0x81: Command Tail (CR character)
-        self.bus.write_8(psp_phys + 0x81, 0x0D);
-
-        // Create a default environment block
-        let env_seg = 0x0C00;
-        let env_phys = self.get_physical_addr(env_seg, 0);
-        // BLASTER advertises the SB resource map to drivers at autodetect
-        // time: A220 base I/O, I5 IRQ, D1 DMA, T3 = SB 2.0. Matches what
-        // SET BLASTER in AUTOEXEC.BAT would publish on a real PC.
-        let default_env = b"PATH=C:\\\0COMSPEC=COMMAND.COM\0BLASTER=A220 I5 D1 T3\0\0";
-        for (i, &b) in default_env.iter().enumerate() {
-            self.bus.write_8(env_phys + i, b);
-        }
-
-        self.bus.write_16(psp_phys + 0x2C, env_seg);
+        // Offset 0x80: empty command tail, filled in by the caller.
+        self.set_command_tail(load_segment, "");
+        // Offset 0x2C: environment segment, set by whoever started the
+        // program (load_executable or EXEC).
+        self.bus.write_16(psp_phys + 0x2C, 0);
         self.current_psp = load_segment;
 
         self.bus.log_string(&format!(
@@ -985,8 +1068,7 @@ impl Cpu {
         //  * Nested EXEC (segment == Some): the caller has already allocated
         //    an MCB for us via mcb::alloc. We simply read its size and leave
         //    the chain alone so the parent's allocations stay intact.
-        let image_len = bytes.len() - header_size;
-        let image_paras = ((image_len + 15) / 16) as u16;
+        let image_paras = image_data.len().div_ceil(16) as u16;
         let min_program_paras = 0x10 + image_paras + min_alloc;
 
         let program_paras = if segment.is_none() {

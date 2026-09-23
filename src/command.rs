@@ -31,6 +31,8 @@ impl CommandDispatcher {
         dispatcher.register("CHDIR", Box::new(CdCommand));
         dispatcher.register("ECHO", Box::new(EchoCommand));
         dispatcher.register("MOUNT", Box::new(MountCommand));
+        dispatcher.register("SET", Box::new(SetCommand));
+        dispatcher.register("PATH", Box::new(PathCommand));
 
         dispatcher
     }
@@ -50,6 +52,13 @@ impl CommandDispatcher {
                 print_string(cpu, "Invalid drive specification\r\n");
             }
             return true;
+        }
+        // "PATH=C:\DOS" is PATH with its argument after the '='.
+        if let Some((name, value)) = command.split_once('=') {
+            if name.eq_ignore_ascii_case("PATH") {
+                PathCommand.execute(cpu, &format!("{} {}", value, args));
+                return true;
+            }
         }
         if let Some(cmd) = self.registry.get(&command.to_uppercase()) {
             cmd.execute(cpu, args);
@@ -247,6 +256,46 @@ impl ShellCommand for ExitCommand {
         cpu.bus
             .log_string("[SHELL] Exiting Emulator via command...");
         std::process::exit(0);
+    }
+}
+
+struct SetCommand;
+impl ShellCommand for SetCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let args = args.trim_start();
+        match args.split_once('=') {
+            Some((name, value)) => cpu.set_env(name.trim(), value),
+            None if args.trim().is_empty() => {
+                let lines: Vec<String> = cpu
+                    .environment
+                    .iter()
+                    .map(|(name, value)| format!("{}={}\r\n", name, value))
+                    .collect();
+                for line in lines {
+                    print_string(cpu, &line);
+                }
+            }
+            None => print_string(cpu, "Syntax error\r\n"),
+        }
+    }
+}
+
+struct PathCommand;
+impl ShellCommand for PathCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let path = args.trim().trim_start_matches('=').trim();
+        match path {
+            "" => {
+                let text = match cpu.get_env("PATH") {
+                    Some(p) => format!("PATH={}\r\n", p),
+                    None => "No Path\r\n".to_string(),
+                };
+                print_string(cpu, &text);
+            }
+            // "PATH ;" clears the search path.
+            ";" => cpu.set_env("PATH", ""),
+            _ => cpu.set_env("PATH", &path.to_ascii_uppercase()),
+        }
     }
 }
 

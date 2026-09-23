@@ -8,6 +8,47 @@ use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{DriveKind, FIRST_USER_HANDLE, drive_letter, parse_drive_prefix};
 use crate::video::print_char;
 
+/// The InDOS flag (AH=34h), with the critical error flag before it.
+const INDOS_FLAG: usize = 0xFF101;
+/// A RETF for the case map routine of the country information.
+const CASE_MAP_ROUTINE: usize = 0xFF0FF;
+
+/// Return a result the DOS way: AX and CF clear, or the error code in AX
+/// and CF set.
+fn set_result(cpu: &mut Cpu, result: Result<u16, u8>) {
+    match result {
+        Ok(ax) => {
+            cpu.set_ax(ax);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+        Err(code) => {
+            cpu.set_ax(code as u16);
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+        }
+    }
+}
+
+/// The 34-byte country information of AH=38h for the USA: m/d/y dates,
+/// "$" currency, "," thousands, "." decimals, 12-hour clock.
+fn write_country_info(cpu: &mut Cpu, addr: usize) {
+    let mut info = [0u8; 34];
+    info[0] = 0; // date format: USA
+    info[2] = b'$';
+    info[7] = b',';
+    info[9] = b'.';
+    info[11] = b'-';
+    info[13] = b':';
+    info[15] = 0; // currency symbol before the value
+    info[16] = 2; // decimal digits
+    info[17] = 0; // 12-hour clock
+    // Case map routine (far pointer): a RETF.
+    cpu.bus.write_8(CASE_MAP_ROUTINE, 0xCB);
+    let case_map = ((CASE_MAP_ROUTINE - 0xF0000) as u32) | 0xF000_0000;
+    info[18..22].copy_from_slice(&case_map.to_le_bytes());
+    info[22] = b',';
+    cpu.bus.load_bytes(addr, &info);
+}
+
 /// Allocate the largest available free MCB for a child process about to be
 /// loaded via EXEC, and return its first usable paragraph (the new PSP seg).
 /// The MCB owner is temporarily set to the placeholder 0xFFFF and must be
@@ -46,6 +87,17 @@ fn dos_drive_number(cpu: &Cpu, code: u8) -> u8 {
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    dispatch(cpu, ah);
+    // Remember the error of a failed handle or file call for AH=59h. The
+    // calls in this range that don't report through CF leave it as the
+    // caller had it.
+    let reports_cf = !matches!(ah, 0x4C | 0x4D | 0x50 | 0x51 | 0x54 | 0x59 | 0x62);
+    if (0x39..=0x6C).contains(&ah) && reports_cf && cpu.get_cpu_flag(CpuFlags::CF) {
+        cpu.last_dos_error = cpu.ax();
+    }
+}
+
+fn dispatch(cpu: &mut Cpu, ah: u8) {
     match ah {
         // AH = 0Eh: Select Default Drive
         0x0E => {
@@ -587,11 +639,8 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.bus
                     .log_string(&format!("[DEBUG] EXEC Env Content: {}", env_preview));
 
-                // DOS 3.0+ Program Name Appending
-                // After the double-null (00 00), we append:
-                // 1. A word count (0x0001)
-                // 2. The full path of the executable program (AsciiZ)
-                // This allows the program to find its own directory (e.g., to load nc.mnu).
+                // The environment ends with a double NUL; the program path
+                // goes after it (below, once the program is known).
                 if env_block.len() < 2
                     || env_block[env_block.len() - 1] != 0
                     || env_block[env_block.len() - 2] != 0
@@ -601,38 +650,6 @@ pub fn handle(cpu: &mut Cpu) {
                         env_block.push(0);
                     }
                 }
-
-                // Append Word Count 0x0001 (Little Endian: 01 00)
-                env_block.push(0x01);
-                env_block.push(0x00);
-
-                // Append Filename (FullPath)
-                // Using `filename` from function arg which logs show is fully qualified (C:\NC3\NCMAIN.EXE)
-                for b in filename.bytes() {
-                    env_block.push(b);
-                }
-                env_block.push(0x00); // Null terminator for filename
-
-                // DEBUG LOG: Verify what we appended
-                let mut dbg_tail = String::new();
-                // Last 50 bytes or so
-                let start_chk = if env_block.len() > 60 {
-                    env_block.len() - 60
-                } else {
-                    0
-                };
-                for i in start_chk..env_block.len() {
-                    let b = env_block[i];
-                    if b >= 32 && b <= 126 {
-                        dbg_tail.push(b as char);
-                    } else if b == 0 {
-                        dbg_tail.push_str("\\0");
-                    } else {
-                        dbg_tail.push_str(&format!("\\x{:02X}", b));
-                    }
-                }
-                cpu.bus
-                    .log_string(&format!("[DEBUG] Env Tail: {}", dbg_tail));
 
                 // Check for COMMAND.COM interception
                 let upper_name = filename.to_ascii_uppercase();
@@ -685,6 +702,27 @@ pub fn handle(cpu: &mut Cpu) {
                         (filename.clone(), cmd_tail.clone())
                     };
 
+                // DOS 3.0+ puts a word count of 1 and the program's fully
+                // qualified path after the environment. Programs find their
+                // own directory with it, and DOS extenders their EXE file.
+                env_block.extend_from_slice(&[0x01, 0x00]);
+                env_block.extend_from_slice(cpu.program_path(&target_filename).as_bytes());
+                env_block.push(0);
+
+                // The child's environment gets a memory block of its own,
+                // freed with the child's other memory when it exits.
+                let env_paras = env_block.len().div_ceil(16) as u16;
+                let env_seg = match crate::mcb::alloc(&mut cpu.bus, 0xFFFF, env_paras) {
+                    Ok(seg) => seg,
+                    Err(_) => {
+                        cpu.set_cpu_flag(CpuFlags::CF, true);
+                        cpu.set_reg16(Register::AX, 0x08); // Insufficient memory
+                        cpu.bus
+                            .log_string("[DOS] EXEC: no memory for the environment");
+                        return;
+                    }
+                };
+
                 // Save the parent's full context (registers, SS:SP, CS:IP of
                 // the instruction right after the INT 21 that got us here, PSP,
                 // heap pointer). When the child calls AH=4Ch, the AH=4Ch
@@ -699,6 +737,7 @@ pub fn handle(cpu: &mut Cpu) {
                 let load_segment = match find_child_load_segment(cpu) {
                     Some(seg) => seg,
                     None => {
+                        let _ = crate::mcb::free(&mut cpu.bus, env_seg);
                         cpu.restore_process_context();
                         cpu.set_cpu_flag(CpuFlags::CF, true);
                         cpu.set_reg16(Register::AX, 0x08); // Insufficient memory
@@ -725,20 +764,19 @@ pub fn handle(cpu: &mut Cpu) {
 
                     let psp_phys = cpu.get_physical_addr(load_segment, 0);
 
-                    // Write the environment block to its own segment. Using
-                    // heap_pointer is wrong after load_executable (it now
-                    // points into the child's MCB arena); use the block just
-                    // below the child's PSP or the fixed 0x0C00 slot.
-                    let new_env_seg = 0x0C00;
-                    let new_env_phys = cpu.get_physical_addr(new_env_seg, 0);
-                    for (i, &b) in env_block.iter().enumerate() {
-                        cpu.bus.write_8(new_env_phys + i, b);
-                    }
-                    // Clear a terminator beyond the block
-                    cpu.bus.write_8(new_env_phys + env_block.len(), 0);
-
-                    // Update PSP offset 0x2C (Environment Segment)
-                    cpu.bus.write_16(psp_phys + 0x2C, new_env_seg);
+                    // The environment, owned by the child.
+                    let env_phys = cpu.get_physical_addr(env_seg, 0);
+                    cpu.bus.load_bytes(env_phys, &env_block);
+                    let env_mcb = crate::mcb::read_mcb(&cpu.bus, env_seg - 1);
+                    crate::mcb::write_mcb(
+                        &mut cpu.bus,
+                        env_seg - 1,
+                        &crate::mcb::Mcb {
+                            owner: load_segment,
+                            ..env_mcb
+                        },
+                    );
+                    cpu.bus.write_16(psp_phys + 0x2C, env_seg);
 
                     // Update PSP offset 0x16 (Parent PSP Segment)
                     cpu.bus.write_16(psp_phys + 0x16, parent_psp_before);
@@ -781,9 +819,10 @@ pub fn handle(cpu: &mut Cpu) {
                         entry_cs, entry_ip, parent_psp_before
                     ));
                 } else {
-                    // Load failed — release the MCB we allocated, pop the
+                    // Load failed — release the MCBs we allocated, pop the
                     // context we just saved, and return an error to the parent.
                     let _ = crate::mcb::free(&mut cpu.bus, load_segment);
+                    let _ = crate::mcb::free(&mut cpu.bus, env_seg);
                     cpu.restore_process_context();
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     cpu.set_reg16(Register::AX, 0x02); // File not found
@@ -1685,6 +1724,226 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_reg16(Register::AX, code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
+            }
+        }
+
+        // AH = 0Dh: Disk reset (flush buffers). Nothing is buffered.
+        0x0D => {}
+
+        // AH = 2Ah: Get date. CX=year, DH=month, DL=day, AL=day of week.
+        0x2A => {
+            use chrono::Datelike;
+            let now = Local::now();
+            cpu.set_cx(now.year() as u16);
+            cpu.set_dx(((now.month() as u16) << 8) | now.day() as u16);
+            cpu.set_reg8(Register::AL, now.weekday().num_days_from_sunday() as u8);
+        }
+
+        // AH = 2Bh / 2Dh: Set date / time. The host clock can't be set;
+        // report success.
+        0x2B | 0x2D => cpu.set_reg8(Register::AL, 0),
+
+        // AH = 34h: Address of the InDOS flag. DOS services run in one step
+        // here, so it's never set when a program looks.
+        0x34 => {
+            cpu.bus.write_8(INDOS_FLAG, 0);
+            cpu.set_es(0xF000);
+            cpu.set_bx((INDOS_FLAG - 0xF0000) as u16);
+        }
+
+        // AH = 38h: Get (or with DX=FFFFh set) country information.
+        0x38 => {
+            if cpu.dx() != 0xFFFF {
+                let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+                write_country_info(cpu, addr);
+            }
+            cpu.set_bx(1); // country code: USA
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+
+        // AH = 41h: Delete file (DS:DX).
+        0x41 => {
+            let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
+            let result = cpu.bus.disk.delete_file(&filename).map(|_| cpu.ax());
+            set_result(cpu, result);
+        }
+
+        // AH = 45h: Duplicate handle BX. AH = 46h: make handle CX refer to
+        // the file of handle BX.
+        0x45 | 0x46 => {
+            let handle = cpu.bx();
+            let target = (ah == 0x46).then(|| cpu.cx());
+            let result = if handle < FIRST_USER_HANDLE {
+                // The standard devices aren't in the file table: hand back
+                // the device handle, which closing leaves alone.
+                Ok(target.unwrap_or(handle))
+            } else {
+                cpu.bus.disk.duplicate_handle(handle, target)
+            };
+            let result = result.map(|h| if ah == 0x46 { cpu.ax() } else { h });
+            set_result(cpu, result);
+        }
+
+        // AH = 56h: Rename file DS:DX to ES:DI.
+        0x56 => {
+            let from = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
+            let to = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.es(), cpu.di()));
+            let result = cpu.bus.disk.rename_file(&from, &to).map(|_| cpu.ax());
+            set_result(cpu, result);
+        }
+
+        // AH = 57h: Get (AL=0) or set (AL=1) a file's date and time.
+        0x57 => {
+            let handle = cpu.bx();
+            if cpu.get_al() == 0 {
+                match cpu.bus.disk.file_time(handle) {
+                    Ok((time, date)) => {
+                        cpu.set_cx(time);
+                        cpu.set_dx(date);
+                        cpu.set_cpu_flag(CpuFlags::CF, false);
+                    }
+                    Err(e) => set_result(cpu, Err(e)),
+                }
+            } else if cpu.bus.disk.is_open(handle) {
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else {
+                set_result(cpu, Err(0x06));
+            }
+        }
+
+        // AH = 58h: Memory allocation strategy and UMB link state. There
+        // are no UMBs; strategy is first fit.
+        0x58 => {
+            match cpu.get_al() {
+                0x00 | 0x02 => cpu.set_ax(0),
+                _ => {}
+            }
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+
+        // AH = 59h: Extended error information for the last failed call.
+        0x59 => {
+            let error = cpu.last_dos_error;
+            cpu.set_ax(error);
+            // Class: file/item not found, or other; action: abort; locus:
+            // block device.
+            let class = if matches!(error, 2 | 3) { 8 } else { 13 };
+            cpu.set_bx((class << 8) | 4);
+            cpu.set_reg8(Register::CH, 2);
+        }
+
+        // AH = 5Ah: Create a temporary file in the directory at DS:DX,
+        // whose name is appended there.
+        0x5A => {
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+            let mut dir = read_asciiz_string(&cpu.bus, addr);
+            if !dir.is_empty() && !dir.ends_with('\\') {
+                dir.push('\\');
+            }
+            match cpu.bus.disk.create_temp_file(&dir, cpu.current_psp) {
+                Ok((handle, name)) => {
+                    for (i, b) in name.bytes().chain(std::iter::once(0)).enumerate() {
+                        cpu.bus.write_8(addr + i, b);
+                    }
+                    set_result(cpu, Ok(handle));
+                }
+                Err(e) => set_result(cpu, Err(e)),
+            }
+        }
+
+        // AH = 5Bh: Create a new file (fails if it exists).
+        0x5B => {
+            let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
+            let result = cpu.bus.disk.create_new_file(&filename, cpu.current_psp);
+            set_result(cpu, result);
+        }
+
+        // AH = 60h: Canonical ("true") name of DS:SI into ES:DI.
+        0x60 => {
+            let name = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.si()));
+            match cpu.bus.disk.qualify_path(&name) {
+                Some(full) => {
+                    let dest = cpu.get_physical_addr(cpu.es(), cpu.di());
+                    for (i, b) in full.bytes().take(127).chain(std::iter::once(0)).enumerate() {
+                        cpu.bus.write_8(dest + i, b);
+                    }
+                    set_result(cpu, Ok(cpu.ax()));
+                }
+                None => set_result(cpu, Err(0x03)),
+            }
+        }
+
+        // AH = 65h: Extended country information and character case
+        // conversion.
+        0x65 => match cpu.get_al() {
+            0x01 => {
+                // Info ID 1, length, country 1, code page 437, then the
+                // country information of AH=38h.
+                let dest = cpu.get_physical_addr(cpu.es(), cpu.di());
+                cpu.bus.write_8(dest, 0x01);
+                cpu.bus.write_16(dest + 1, 38);
+                cpu.bus.write_16(dest + 3, 1);
+                cpu.bus.write_16(dest + 5, 437);
+                write_country_info(cpu, dest + 7);
+                cpu.set_cx(41);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            }
+            0x20 => {
+                let upper = cpu.get_dl().to_ascii_uppercase();
+                cpu.set_reg8(Register::DL, upper);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            }
+            0x21 | 0x22 => {
+                let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+                let len = if cpu.get_al() == 0x21 { cpu.cx() as usize } else { usize::MAX };
+                for i in 0..len {
+                    let b = cpu.bus.read_8(addr + i);
+                    if len == usize::MAX && b == 0 {
+                        break;
+                    }
+                    cpu.bus.write_8(addr + i, b.to_ascii_uppercase());
+                }
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            }
+            _ => set_result(cpu, Err(0x01)),
+        },
+
+        // AH = 66h: Get (AL=1) or set (AL=2) the global code page.
+        0x66 => {
+            if cpu.get_al() == 0x01 {
+                cpu.set_bx(437);
+                cpu.set_dx(437);
+            }
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+
+        // AH = 67h: Set handle count, AH = 68h: commit file. Nothing to do.
+        0x67 | 0x68 | 0x6A => cpu.set_cpu_flag(CpuFlags::CF, false),
+
+        // AX = 6C00h: Extended open/create. BL = access mode, DL = action
+        // (low nibble: file exists, 0 fail / 1 open / 2 replace; high
+        // nibble: file missing, 0 fail / 1 create), DS:SI = name. Returns
+        // the handle in AX and the action taken in CX.
+        0x6C => {
+            let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.si()));
+            let mode = cpu.get_reg8(Register::BL);
+            let action = cpu.get_dl();
+            let exists = cpu.bus.disk.is_virtual_file(&filename)
+                || cpu.bus.disk.resolve_path(&filename).is_some_and(|p| p.is_file());
+            let psp = cpu.current_psp;
+            let result = match (exists, action & 0x0F, action >> 4) {
+                (true, 1, _) => cpu.bus.disk.open_file(&filename, mode, psp).map(|h| (h, 1)),
+                (true, 2, _) => cpu.bus.disk.create_file(&filename, psp).map(|h| (h, 3)),
+                (true, _, _) => Err(0x50),
+                (false, _, 1) => cpu.bus.disk.create_file(&filename, psp).map(|h| (h, 2)),
+                (false, _, _) => Err(0x02),
+            };
+            match result {
+                Ok((handle, taken)) => {
+                    cpu.set_cx(taken);
+                    set_result(cpu, Ok(handle));
+                }
+                Err(e) => set_result(cpu, Err(e)),
             }
         }
 

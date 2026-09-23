@@ -34,10 +34,11 @@ pub fn handle(cpu: &mut Cpu) {
             }
             _ => unsupported(cpu),
         },
-        // Extended memory size in KB (at most 64 MB - 1 KB).
+        // Extended memory size in KB. The XMS driver owns all of it, so
+        // this reports none, as with HIMEM.SYS loaded: programs that took
+        // the memory this way would overwrite XMS blocks.
         0x88 => {
-            let kb = extended_kb(cpu).min(0xFFFF) as u16;
-            cpu.set_ax(kb);
+            cpu.set_ax(0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
         0x87 => block_move(cpu),

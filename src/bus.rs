@@ -50,6 +50,8 @@ pub struct Bus {
     /// loop carries it out.
     pub reset_requested: bool,
     pub cmos: crate::cmos::Cmos,
+    /// The XMS driver's allocations and A20 state.
+    pub xms: crate::xms::Xms,
     /// Last POST code written to port 80h (or 190h, test ROMs).
     pub post_code: u8,
     /// Port 61h bit 4, the DRAM refresh request, toggles on every read;
@@ -154,6 +156,7 @@ impl Bus {
             reset_requested: false,
             cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
             post_code: 0,
+            xms: crate::xms::Xms::new(),
             refresh_toggle: false,
             cursor_x: 0,
             cursor_y: 0,
@@ -788,6 +791,16 @@ impl Bus {
     #[inline(always)]
     pub fn pic_pending_irq(&self) -> Option<u8> {
         self.pic.pending(self.irq_levels())
+    }
+
+    /// Whether any device requests an interrupt or a mouse event handler
+    /// call waits: the cheap test the CPU makes before each instruction,
+    /// ahead of the PIC's priority logic.
+    #[inline(always)]
+    pub fn interrupt_requested(&self) -> bool {
+        (self.pic.master.irr | self.pic.slave.irr) != 0
+            || self.irq_levels() != 0
+            || self.mouse.pending_callback_events & self.mouse.callback_mask != 0
     }
 
     /// The CPU takes interrupt `irq`: it is in service until an EOI.

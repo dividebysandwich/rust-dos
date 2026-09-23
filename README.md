@@ -19,6 +19,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Passthrough filesystem
 * Mounting host directories as floppy, hard disk and CD-ROM drives
 * Configuration file with startup commands
+* Environment variables (`SET`, `PATH`)
+* XMS 3.0 extended memory and the A20 gate
 * CGA graphics
 * FPU emulation
 * Interrupt handlers
@@ -33,7 +35,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 ## What's not implemented yet
 
 * Mounting disk images
-* XMS/EMS
+* EMS
 * IRQs and DMA
 * Sound Blaster
 * Gravis Ultrasound

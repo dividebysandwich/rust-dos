@@ -204,9 +204,10 @@ fn int_15h_a20_and_memory_functions() {
     int15::handle(&mut cpu);
     assert_eq!(cpu.get_al(), 1);
 
+    // The XMS driver owns extended memory: none left for INT 15h users.
     cpu.set_reg8(Register::AH, 0x88);
     int15::handle(&mut cpu);
-    assert_eq!(cpu.ax(), 15 * 1024);
+    assert_eq!(cpu.ax(), 0);
 
     cpu.set_ax(0xE801);
     int15::handle(&mut cpu);

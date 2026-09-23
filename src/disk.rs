@@ -441,6 +441,22 @@ impl DiskController {
         ))
     }
 
+    /// Fully qualified DOS path of a file name, e.g. "DESCENTR.EXE" in
+    /// C:\DESCENT -> "C:\DESCENT\DESCENTR.EXE" (INT 21h AH=60h, and the
+    /// program path DOS puts after a program's environment). Purely
+    /// logical; the file need not exist.
+    pub fn qualify_path(&self, spec: &str) -> Option<String> {
+        let normalized = spec.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized)?;
+        let drive = self.drive(drive_num)?;
+        let components = Self::logical_components(drive, rest);
+        Some(format!(
+            "{}:\\{}",
+            drive_letter(drive_num),
+            components.join("\\").to_ascii_uppercase()
+        ))
+    }
+
     // Helper to check if a file exists on Z:
     pub fn is_virtual_file(&self, filename: &str) -> bool {
         self.virtual_file_name(filename)
@@ -668,6 +684,109 @@ impl DiskController {
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
         self.open_file(filename, 0x02, owner)
+    }
+
+    /// INT 21h, AH=5Bh: create a file that must not exist yet.
+    pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
+        if self.resolve_path(filename).is_some_and(|p| p.exists()) {
+            return Err(0x50); // File exists
+        }
+        self.create_file(filename, owner)
+    }
+
+    /// INT 21h, AH=5Ah: create a file with a unique name in `directory`
+    /// (which ends in a backslash). Returns the handle and the name.
+    pub fn create_temp_file(&mut self, directory: &str, owner: u16) -> Result<(u16, String), u8> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        for i in 0..1000u32 {
+            let name = format!("{}{:08X}", directory, stamp.wrapping_add(i) & 0x0FFF_FFFF);
+            if let Ok(handle) = self.create_new_file(&name, owner) {
+                return Ok((handle, name));
+            }
+        }
+        Err(0x05)
+    }
+
+    /// INT 21h, AH=41h: delete a file.
+    pub fn delete_file(&self, filename: &str) -> Result<(), u8> {
+        let (drive, path) = self.locate(filename).ok_or(0x03)?;
+        if !path.is_file() {
+            return Err(0x02); // File not found
+        }
+        self.check_writable(drive)?;
+        fs::remove_file(path).map_err(|_| 0x05)
+    }
+
+    /// INT 21h, AH=56h: rename or move a file within a drive.
+    pub fn rename_file(&self, from: &str, to: &str) -> Result<(), u8> {
+        let (drive, source) = self.locate(from).ok_or(0x03)?;
+        if !source.exists() {
+            return Err(0x02);
+        }
+        self.check_writable(drive)?;
+        let normalized = to.replace('/', "\\");
+        let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
+        if to_drive != drive {
+            return Err(0x11); // Not same device
+        }
+        let (parent_dos, leaf) = match rest.rsplit_once('\\') {
+            Some(("", l)) => ("\\", l),
+            Some((p, l)) => (p, l),
+            None => (".", rest),
+        };
+        let parent = self.resolve_on(to_drive, parent_dos).ok_or(0x03)?;
+        if leaf.is_empty() || !parent.is_dir() {
+            return Err(0x03);
+        }
+        if self.find_existing_child(&parent, leaf).is_some() {
+            return Err(0x05); // Destination exists
+        }
+        fs::rename(source, parent.join(leaf.to_uppercase())).map_err(|_| 0x05)
+    }
+
+    /// INT 21h, AH=45h/46h: a second handle for the file behind `handle`,
+    /// sharing its position. `new_handle` picks the number (AH=46h, which
+    /// closes a file already open there).
+    pub fn duplicate_handle(&mut self, handle: u16, new_handle: Option<u16>) -> Result<u16, u8> {
+        let open = self.open_files.get(&handle).ok_or(0x06)?;
+        let file = match &open.file {
+            Some(f) => Some(f.try_clone().map_err(|_| 0x04)?),
+            None => None,
+        };
+        let copy = OpenFile {
+            file,
+            drive: open.drive,
+            owner: open.owner,
+        };
+        let target = match new_handle {
+            Some(h) if h < HANDLE_LIMIT => h,
+            Some(_) => return Err(0x06),
+            None => self.free_handle()?,
+        };
+        self.open_files.insert(target, copy);
+        Ok(target)
+    }
+
+    /// INT 21h, AX=5700h: the DOS time and date of a file's last change.
+    pub fn file_time(&self, handle: u16) -> Result<(u16, u16), u8> {
+        let open = self.open_files.get(&handle).ok_or(0x06)?;
+        let modified = open
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .and_then(|m| m.modified().ok());
+        let t: DateTime<Local> = modified.map_or_else(Local::now, DateTime::from);
+        let time = (t.hour() << 11 | t.minute() << 5 | t.second() / 2) as u16;
+        let year = (t.year().max(1980) - 1980) as u32;
+        let date = (year << 9 | t.month() << 5 | t.day()) as u16;
+        Ok((time, date))
+    }
+
+    /// True if `handle` is open.
+    pub fn is_open(&self, handle: u16) -> bool {
+        self.open_files.contains_key(&handle)
     }
 
     // INT 21h, AH=3Eh: Close File

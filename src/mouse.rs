@@ -257,12 +257,12 @@ pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
 /// which returns with RETF. The caller checks IF first. Returns true when
 /// the handler was entered.
 pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
-    let busy = callback_busy(&cpu.bus);
-    let mouse = &mut cpu.bus.mouse;
+    let mouse = &cpu.bus.mouse;
     let fire = mouse.pending_callback_events & mouse.callback_mask;
-    if fire == 0 || (mouse.callback_cs == 0 && mouse.callback_ip == 0) || busy {
+    if fire == 0 || (mouse.callback_cs == 0 && mouse.callback_ip == 0) || callback_busy(&cpu.bus) {
         return false;
     }
+    let mouse = &mut cpu.bus.mouse;
     // Snapshot and consume the bits we're about to handle.
     mouse.pending_callback_events &= !fire;
     let dx = mouse.mickey_x - mouse.last_callback_mickey_x;

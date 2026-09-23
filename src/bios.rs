@@ -15,6 +15,7 @@ pub const HLE_VECTORS: [u8; 17] = [
 const TRAP_BASE: u16 = 0x1000;
 
 /// Inline emulator services (`FE 39 nn`) used by the ROM code.
+pub const SERVICE_XMS: u8 = 0x01;
 pub const SERVICE_TIMER_TICK: u8 = 0x08;
 pub const SERVICE_POST: u8 = 0xF0;
 
@@ -23,6 +24,8 @@ const TIMER_HANDLER: u16 = 0x1100;
 const MASTER_EOI_HANDLER: u16 = 0x1110;
 const SLAVE_EOI_HANDLER: u16 = 0x1120;
 const IRQ9_HANDLER: u16 = 0x1130;
+/// The XMS driver entry point (INT 2Fh AX=4310h).
+pub const XMS_ENTRY: u16 = 0x1140;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -88,6 +91,13 @@ pub fn install(bus: &mut Bus) {
         bus,
         IRQ9_HANDLER,
         &[0x50, 0xB0, 0x20, 0xE6, 0xA0, 0x58, 0xCD, 0x0A, 0xCF],
+    );
+    // The XMS entry starts with a short jump over three NOPs, so programs
+    // can hook it, as the XMS spec requires; then the driver, then RETF.
+    write_rom(
+        bus,
+        XMS_ENTRY,
+        &[0xEB, 0x03, 0x90, 0x90, 0x90, 0xFE, 0x39, SERVICE_XMS, 0xCB],
     );
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);

@@ -36,8 +36,9 @@ fn not_installed_without_cd_drives() {
     int2f(&mut cpu, 0x150B, 0, 3);
     assert_ne!(cpu.bx(), 0xADAD);
 
-    // Other multiplex install checks stay "not installed"
-    for ax in [0x1600u16, 0x1687, 0x4300, 0x1100] {
+    // Other multiplex install checks stay "not installed" (XMS, 4300h,
+    // is installed: see extender_support_tests)
+    for ax in [0x1600u16, 0x1687, 0x1100] {
         int2f(&mut cpu, ax, 0x1234, 0x5678);
         assert_eq!((cpu.ax(), cpu.bx(), cpu.cx()), (ax, 0x1234, 0x5678));
     }

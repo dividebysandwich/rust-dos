@@ -156,12 +156,12 @@ fn test_int21_ah4b_exec() {
     }
     assert_eq!(tail_read, cmd_tail);
 
-    // Verify Environment Block
-    // Since we didn't specify one, it should use Default.
-    // Check offsets, etc.
+    // The child gets an environment block of its own, owned by it.
     let env_seg_ptr_phys = cpu.get_physical_addr(psp_seg, 0x2C);
     let new_env_seg = cpu.bus.read_16(env_seg_ptr_phys);
-    assert_eq!(new_env_seg, 0x0C00, "Should use scratch segment 0x0C00");
+    assert_ne!(new_env_seg, 0);
+    let env_mcb = rust_dos::mcb::read_mcb(&cpu.bus, new_env_seg - 1);
+    assert_eq!(env_mcb.owner, psp_seg);
 
     fs::remove_dir_all(&root_path).unwrap();
 }
@@ -219,11 +219,15 @@ fn test_int21_ah4b_exec_with_env() {
 
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 
-    // Verify New Env Block at 0x0C00
-    let new_env_seg = 0x0C00;
+    // The child's environment is a copy of the block passed, followed by
+    // the program's path.
+    let psp_phys = cpu.get_physical_addr(cpu.ds(), 0x2C); // DS is new PSP
+    let new_env_seg = cpu.bus.read_16(psp_phys);
+    assert_ne!(new_env_seg, env_src_seg);
     let new_env_phys = cpu.get_physical_addr(new_env_seg, 0);
 
-    for (i, &b) in env_data.iter().enumerate() {
+    let expected = [&env_data[..], b"\x01\x00C:\\ENVTEST.COM\0"].concat();
+    for (i, &b) in expected.iter().enumerate() {
         assert_eq!(
             cpu.bus.read_8(new_env_phys + i),
             b,
@@ -231,10 +235,6 @@ fn test_int21_ah4b_exec_with_env() {
             i
         );
     }
-
-    // Verify PSP -> Env Pointer
-    let psp_phys = cpu.get_physical_addr(cpu.ds(), 0x2C); // DS is new PSP
-    assert_eq!(cpu.bus.read_16(psp_phys), new_env_seg);
 
     fs::remove_dir_all(&root_path).unwrap();
 }
@@ -297,8 +297,10 @@ fn test_int21_ah4b_exec_inheritance() {
 
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
 
-    // Verify New Env Block at 0x0C00
-    let new_env_seg = 0x0C00;
+    // The child's environment is a copy of the parent's.
+    let psp_phys = cpu.get_physical_addr(cpu.ds(), 0x2C); // DS is new PSP
+    let new_env_seg = cpu.bus.read_16(psp_phys);
+    assert_ne!(new_env_seg, parent_env_seg);
     let new_env_phys = cpu.get_physical_addr(new_env_seg, 0);
 
     for (i, &b) in env_data.iter().enumerate() {
@@ -309,10 +311,6 @@ fn test_int21_ah4b_exec_inheritance() {
             i
         );
     }
-
-    // Verify PSP -> Env Pointer
-    let psp_phys = cpu.get_physical_addr(cpu.ds(), 0x2C); // DS is new PSP
-    assert_eq!(cpu.bus.read_16(psp_phys), new_env_seg);
 
     fs::remove_dir_all(&root_path).unwrap();
 }

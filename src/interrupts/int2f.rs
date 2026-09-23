@@ -22,8 +22,18 @@ const DEVICE_STATUS: u32 = 0x0216;
 const VOLUME_SECTORS: u32 = 0xFFFF;
 
 pub fn handle(cpu: &mut Cpu) {
-    if cpu.get_ah() == 0x15 {
-        mscdex(cpu, cpu.get_al());
+    match cpu.ax() {
+        // XMS driver installation check: AL=80h.
+        0x4300 => cpu.set_ax(0x4380),
+        // XMS driver entry point in ES:BX.
+        0x4310 => {
+            cpu.set_es(0xF000);
+            cpu.set_bx(crate::bios::XMS_ENTRY);
+        }
+        _ if cpu.get_ah() == 0x15 => mscdex(cpu, cpu.get_al()),
+        // Everything else (DPMI 1687h, Windows 16xxh, ...) is not installed:
+        // the registers come back unchanged.
+        _ => {}
     }
 }
 

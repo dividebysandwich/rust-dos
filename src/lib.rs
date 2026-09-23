@@ -23,3 +23,4 @@ pub mod sb;
 pub mod shell;
 pub mod timer;
 pub mod video;
+pub mod xms;
