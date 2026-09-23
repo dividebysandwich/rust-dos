@@ -132,6 +132,10 @@ pub struct Bus {
     sb_frame: (i16, i16),
     /// Frames left of a BEL beep.
     pub beep_frames: u32,
+    /// Level-triggered interrupt request lines (bit n = IRQ n): the Sound
+    /// Blaster holds its line until the driver acknowledges. Kept up to
+    /// date by `update_irq_levels`, as the CPU tests it every instruction.
+    irq_levels: u16,
     /// Output level and underruns, for the debugger: the peak sample since
     /// it was last read, and how often the output device ran dry.
     pub audio_peak: u16,
@@ -212,6 +216,7 @@ impl Bus {
             sb_phase: 0.0,
             sb_frame: (0, 0),
             beep_frames: 0,
+            irq_levels: 0,
             audio_peak: 0,
             audio_underruns: 0,
             page_gen: vec![0; ram_len >> 12],
@@ -826,6 +831,7 @@ impl Bus {
         let now = self.clock.now_ticks();
         if let Some(sb) = &mut self.sb {
             sb.advance(now, &mut self.dma, &self.ram);
+            self.update_irq_levels();
         }
     }
 
@@ -934,6 +940,7 @@ impl Bus {
     pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
         self.sb = sb.map(crate::sb::SoundBlaster::new);
         self.opl = crate::opl::Opl::new(opl3);
+        self.update_irq_levels();
         self.clock.schedule(self.next_event());
     }
 
@@ -966,6 +973,7 @@ impl Bus {
                 for line in log {
                     self.log_string(&line);
                 }
+                self.update_irq_levels();
                 self.clock.schedule(self.next_event());
             }
         }
@@ -977,6 +985,7 @@ impl Bus {
             _ => {
                 self.sb_advance();
                 let value = self.sb.as_mut().map_or(0xFF, |sb| sb.read(offset));
+                self.update_irq_levels();
                 self.clock.schedule(self.next_event());
                 value
             }
@@ -1015,10 +1024,16 @@ impl Bus {
     /// holds its line until the driver acknowledges at port 22Eh.
     #[inline(always)]
     fn irq_levels(&self) -> u16 {
-        match &self.sb {
+        self.irq_levels
+    }
+
+    /// Recompute the level-triggered request lines after a device changed
+    /// its interrupt output.
+    fn update_irq_levels(&mut self) {
+        self.irq_levels = match &self.sb {
             Some(sb) if sb.irq_pending() => 1 << sb.config.irq,
             _ => 0,
-        }
+        };
     }
 
     /// The IRQ (0-15) the PICs would deliver now: requested, not masked,
@@ -1054,6 +1069,7 @@ impl Bus {
             sb.irq8 = false;
             sb.irq16 = false;
         }
+        self.update_irq_levels();
     }
 
     /// Raise IRQ 1 if a byte just entered the keyboard controller's output

@@ -86,12 +86,14 @@ impl Fetch {
 /// `hot` enables the per-instruction `ExecHook::before_exec` call.
 pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReason {
     let mut fetch = Fetch::new(cpu);
-    let reason = run(cpu, &mut fetch, hook, hot);
+    // Two copies of the loop: the one without the per-instruction hook
+    // doesn't test for it on every instruction.
+    let reason = if hot { run::<true>(cpu, &mut fetch, hook) } else { run::<false>(cpu, &mut fetch, hook) };
     fetch.finish(cpu);
     reason
 }
 
-fn run(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook, hot: bool) -> StopReason {
+fn run<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> StopReason {
     loop {
         if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
             if cpu.bus.clock.icount >= cpu.bus.clock.batch_end() {
@@ -116,7 +118,7 @@ fn run(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook, hot: bool) -> 
             }
         }
 
-        if let Some(reason) = instruction(cpu, fetch, hook, hot) {
+        if let Some(reason) = instruction::<HOT>(cpu, fetch, hook) {
             return reason;
         }
     }
@@ -145,7 +147,7 @@ impl Cpu {
             return;
         }
         let mut fetch = Fetch::new(self);
-        instruction(self, &mut fetch, &mut NoHook, false);
+        instruction::<false>(self, &mut fetch, &mut NoHook);
         fetch.finish(self);
     }
 
@@ -300,12 +302,7 @@ fn load_program(cpu: &mut Cpu, filename: &str, args: &str) -> bool {
 
 /// Run one instruction or emulator service trap at CS:IP.
 #[inline(always)]
-fn instruction(
-    cpu: &mut Cpu,
-    fetch: &mut Fetch,
-    hook: &mut dyn ExecHook,
-    hot: bool,
-) -> Option<StopReason> {
+fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> Option<StopReason> {
     // This instruction ends the interrupt shadow of the previous one.
     cpu.irq_shadow = false;
 
@@ -347,7 +344,7 @@ fn instruction(
         return None;
     }
 
-    if hot && hook.before_exec(cpu, phys_ip, fetch.ram) {
+    if HOT && hook.before_exec(cpu, phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
     cpu.executed += 1;
@@ -360,8 +357,9 @@ fn instruction(
     let paged_crossing = paging && lin_ip & 0xFFF > 0xFF0;
     let instr = if phys_ip + 16 <= fetch.ram.len() && !paged_crossing {
         let page_gen = cpu.bus.page_gen[phys_ip >> 12];
-        let decoder = if code32 { &mut fetch.decoder32 } else { &mut fetch.decoder16 };
+        let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
         fetch.cache.get_or_decode(phys_ip, eip, code32, page_gen, |slot| {
+            let decoder = if code32 { decoder32 } else { decoder16 };
             decoder.set_position(phys_ip).unwrap();
             decoder.set_ip(eip as u64);
             decoder.decode_out(slot);

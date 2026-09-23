@@ -159,6 +159,39 @@ impl SegCache {
     }
 }
 
+/// Where a general-purpose register lives in `gpr`: the index, and the
+/// shift and mask of its bits.
+#[derive(Clone, Copy)]
+struct RegSlot {
+    index: u8,
+    shift: u8,
+    mask: u32,
+}
+
+/// iced's number of ES, the first segment register. Below it, iced numbers
+/// the registers AL..BH (1-8), AX..DI (21-28) and EAX..EDI (37-44) in x86
+/// encoding order.
+const SEG_REGS: usize = Register::ES as usize;
+
+/// The slot of each iced register number below `SEG_REGS` (mask 0 for
+/// registers that aren't general-purpose ones).
+const REG_SLOTS: [RegSlot; SEG_REGS] = {
+    let mut slots = [RegSlot { index: 0, shift: 0, mask: 0 }; SEG_REGS];
+    let mut i = 0;
+    while i < 4 {
+        slots[Register::AL as usize + i] = RegSlot { index: i as u8, shift: 0, mask: 0xFF };
+        slots[Register::AH as usize + i] = RegSlot { index: i as u8, shift: 8, mask: 0xFF };
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 8 {
+        slots[Register::AX as usize + i] = RegSlot { index: i as u8, shift: 0, mask: 0xFFFF };
+        slots[Register::EAX as usize + i] = RegSlot { index: i as u8, shift: 0, mask: 0xFFFF_FFFF };
+        i += 1;
+    }
+    slots
+};
+
 /// Getter and setter pairs for the 32-bit, 16-bit and 8-bit views of the
 /// general-purpose registers.
 macro_rules! gpr_accessors {
@@ -281,17 +314,12 @@ impl Cpu {
     /// zero-extended.
     #[inline(always)]
     pub fn reg(&self, reg: Register) -> u32 {
-        // iced numbers the registers AL..BH (1-8), AX..DI (21-28),
-        // EAX..EDI (37-44) and ES..GS (71-76) in x86 encoding order.
         let r = reg as usize;
-        match r {
-            1..=4 => self.gpr[r - 1] & 0xFF,
-            5..=8 => (self.gpr[r - 5] >> 8) & 0xFF,
-            21..=28 => self.gpr[r - 21] & 0xFFFF,
-            37..=44 => self.gpr[r - 37],
-            71..=76 => self.seg[r - 71].selector as u32,
-            _ => 0,
+        if r >= SEG_REGS {
+            return self.seg.get(r - SEG_REGS).map_or(0, |s| s.selector as u32);
         }
+        let slot = REG_SLOTS[r];
+        (self.gpr[slot.index as usize] >> slot.shift) & slot.mask
     }
 
     /// Write a general-purpose register: the low 8 or 16 bits for the
@@ -300,13 +328,10 @@ impl Cpu {
     #[inline(always)]
     pub fn set_reg(&mut self, reg: Register, value: u32) {
         let r = reg as usize;
-        match r {
-            1..=4 => self.gpr[r - 1] = (self.gpr[r - 1] & !0xFF) | (value & 0xFF),
-            5..=8 => self.gpr[r - 5] = (self.gpr[r - 5] & !0xFF00) | ((value & 0xFF) << 8),
-            21..=28 => self.gpr[r - 21] = (self.gpr[r - 21] & !0xFFFF) | (value & 0xFFFF),
-            37..=44 => self.gpr[r - 37] = value,
-            _ => debug_assert!(false, "set_reg on {:?}", reg),
-        }
+        debug_assert!(r < SEG_REGS && REG_SLOTS[r].mask != 0, "set_reg on {:?}", reg);
+        let slot = REG_SLOTS[r.min(SEG_REGS - 1)];
+        let g = &mut self.gpr[slot.index as usize];
+        *g = (*g & !(slot.mask << slot.shift)) | ((value & slot.mask) << slot.shift);
     }
 
     // Extract High byte (AH)
