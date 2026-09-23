@@ -17,6 +17,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Executing COM and EXE programs
 * Basic disk operations
 * Passthrough filesystem
+* Mounting host directories as floppy, hard disk and CD-ROM drives
+* Configuration file with startup commands
 * CGA graphics
 * FPU emulation
 * Interrupt handlers
@@ -30,7 +32,6 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## What's not implemented yet
 
-* Mounting additional drives
 * Mounting disk images
 * XMS/EMS
 * IRQs and DMA
@@ -38,6 +39,77 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Gravis Ultrasound
 * 640x480x16
 * VESA modes
+
+## Configuration
+
+rust-dos reads a DOSBox-style configuration file. It uses the first file it
+finds, and never merges files:
+
+1. The file given with `-c/--config FILE`. If that file doesn't exist,
+   rust-dos exits with an error.
+2. `rust-dos.conf` in the current working directory.
+3. `rust-dos.conf` in the per-user configuration directory:
+
+   | Platform | Directory |
+   |---|---|
+   | Linux | `~/.config/rust-dos/` (or `$XDG_CONFIG_HOME/rust-dos/`) |
+   | macOS | `~/Library/Application Support/rust-dos/` |
+   | Windows | `%APPDATA%\rust-dos\` |
+
+If none of these exists, rust-dos writes a commented template (a copy of
+[`rust-dos.conf.example`](rust-dos.conf.example)) to the per-user directory.
+The template changes nothing until you edit it. `--no-config` ignores all
+configuration files.
+
+```ini
+[emulator]
+scale=2
+
+[drives]
+C=~/dos
+A=~/dos/floppy floppy -label DISK1
+D="~/dos/My CD" cdrom -label GAMECD
+
+[autoexec]
+@ECHO OFF
+D:
+```
+
+* **`[emulator]`:** `scale` is the window scale factor. `-s/--scale`
+  overrides it.
+* **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
+  * Relative paths are relative to the configuration file, and `~` is your
+    home directory. Quote paths that contain spaces.
+  * `-d/--dir` overrides C:. Without either, C: is the current working
+    directory.
+* **`[autoexec]`:** commands that run at the DOS prompt on startup, before
+  `C:\AUTOEXEC.BAT`. A program started here delays the following lines until
+  it exits.
+
+Mistakes in the file are printed as warnings; the emulator still starts.
+
+## Drives
+
+C: and the built-in Z: always exist. Mount more drives at the prompt:
+
+```
+MOUNT                                     list drives
+MOUNT A ~/dos/floppy floppy               mount a host directory
+MOUNT D ~/dos/cd -t cdrom -label GAMECD   same, with -t for the type
+MOUNT -u A                                unmount
+A:                                        switch to drive A:
+```
+
+Relative `MOUNT` paths are relative to the emulator's working directory.
+Each drive keeps its own current directory, as in DOS.
+
+| Type | Behaves like |
+|---|---|
+| `hdd` (default) | A fixed disk. BIOS unit 80h and up. |
+| `floppy` | A removable 1.44 MB disk whose free space reflects its files. On A: and B: it is also a BIOS floppy drive (equipment word, INT 13h units 0-1). |
+| `cdrom` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. Only the directory's files are available: no raw sector reads or CD audio. |
+
+`-ro` makes any drive read-only.
 
 ## Keyboard shortcuts
 
@@ -66,6 +138,7 @@ curl -XPOST -H content-type:application/json -d '{"addr":"1234:0100"}' localhost
 curl 'localhost:8086/api/control/wait?timeout_ms=10000'
 curl 'localhost:8086/api/memory?addr=DS:SI&len=64'
 curl -XPUT -H content-type:application/json -d '{"path":"/path/to/game"}' localhost:8086/api/drive/C
+curl -XPUT -H content-type:application/json -d '{"path":"/path/to/cd","type":"cdrom"}' localhost:8086/api/drive/D
 ```
 
 WebSocket streams:

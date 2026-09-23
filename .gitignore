@@ -10,6 +10,8 @@ target
 *.COM
 *_capture*.gif
 trace.log
+# Local emulator configuration (see rust-dos.conf.example)
+rust-dos.conf
 NC2/
 programs/
 *.BAT

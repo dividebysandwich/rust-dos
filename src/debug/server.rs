@@ -69,7 +69,7 @@ fn router(state: AppState) -> Router {
         .route("/api/input", axum::routing::delete(input_clear))
         .route("/api/input/{kind}", post(input_post))
         .route("/api/drive", get(drives))
-        .route("/api/drive/{letter}", put(mount).post(mount))
+        .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
@@ -336,12 +336,29 @@ async fn drives(State(s): State<AppState>) -> ApiResult {
 #[derive(Deserialize)]
 struct MountBody {
     path: String,
+    /// floppy, hdd or cdrom
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    read_only: bool,
 }
 
 async fn mount(State(s): State<AppState>, Path(letter): Path<String>, body: Bytes) -> ApiResult {
     let b: MountBody = from_value(parse_body(&body)?)?;
-    let drive = letter.trim_end_matches(':').to_string();
-    s.call_json(Cmd::Mount { drive, path: b.path }, DEFAULT_TIMEOUT).await
+    let cmd = Cmd::Mount {
+        drive: letter,
+        path: b.path,
+        kind: b.kind,
+        label: b.label,
+        read_only: b.read_only,
+    };
+    s.call_json(cmd, DEFAULT_TIMEOUT).await
+}
+
+async fn unmount(State(s): State<AppState>, Path(letter): Path<String>) -> ApiResult {
+    s.call_json(Cmd::Unmount { drive: letter }, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -702,8 +719,12 @@ EXECUTION CONTROL
   GET  /api/ivt              interrupt vector table
 
 DRIVES
-  GET  /api/drive
-  PUT  /api/drive/C {"path":"/home/me/dos/game"}   remount C: (closes open files)
+  GET    /api/drive                                list drives, types and paths
+  PUT    /api/drive/D {"path":"/home/me/dos/cd","type":"cdrom","label":"GAMECD"}
+                   mount or replace a drive; type floppy|hdd|cdrom, optional
+                   "read_only":true. Replacing closes that drive's open files;
+                   with no options a remount keeps the drive's type and label.
+  DELETE /api/drive/D                              unmount (not C: or Z:)
 
 WEBSOCKETS
   /ws/events          JSON: log lines, paused/resumed, video_mode changes

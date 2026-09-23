@@ -222,21 +222,6 @@ impl DiskController {
             .unwrap_or(Path::new(""))
     }
 
-    /// Remount drive C: onto a different host directory at runtime, keeping
-    /// its type and label. Files open on C: are closed; other drives are
-    /// unaffected.
-    pub fn set_root(&mut self, path: &Path) -> Result<PathBuf, String> {
-        let opts = self
-            .drive(DRIVE_C)
-            .map(|d| MountOptions {
-                kind: d.kind,
-                label: Some(d.label.clone()),
-                read_only: d.read_only,
-            })
-            .unwrap_or_default();
-        self.mount(DRIVE_C, path, opts, true)
-    }
-
     /// Mount a host directory as `drive`. Unless `replace` is set, the drive
     /// must not already be mounted. Replacing closes the files open on it.
     pub fn mount(
@@ -1235,10 +1220,7 @@ mod tests {
         fs::write(base.join("d/DATA/f.txt"), b"x").unwrap();
         let resolved = disk.resolve_path("D:F.TXT").unwrap();
         assert!(resolved.ends_with("DATA/f.txt"));
-        assert_eq!(
-            disk.qualify_directory("D:*.*").as_deref(),
-            Some("D:\\DATA")
-        );
+        assert_eq!(disk.qualify_directory("D:*.*").as_deref(), Some("D:\\DATA"));
         assert_eq!(disk.qualify_directory("\\*.*").as_deref(), Some("C:\\"));
     }
 
@@ -1249,11 +1231,17 @@ mod tests {
         assert!(disk.resolve_path("E:\\X").is_none());
         assert_eq!(disk.set_current_drive(4), LASTDRIVE);
         assert_eq!(disk.get_current_drive(), DRIVE_C);
-        assert!(disk.mount(DRIVE_Z, &base, MountOptions::default(), true).is_err());
+        assert!(
+            disk.mount(DRIVE_Z, &base, MountOptions::default(), true)
+                .is_err()
+        );
         assert!(disk.unmount(DRIVE_C).is_err());
         assert!(disk.unmount(DRIVE_Z).is_err());
         assert!(disk.unmount(4).is_err());
-        assert!(disk.mount(3, &base.join("missing"), MountOptions::default(), false).is_err());
+        assert!(
+            disk.mount(3, &base.join("missing"), MountOptions::default(), false)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1319,7 +1307,8 @@ mod tests {
         let hd = disk.open_file("D:\\F.TXT", 0).unwrap();
         assert_eq!(disk.handle_drive(hd), Some(3));
 
-        disk.set_root(&base.join("c2")).unwrap();
+        disk.mount(DRIVE_C, &base.join("c2"), MountOptions::default(), true)
+            .unwrap();
         assert!(disk.read_file(hc, 1).is_err());
         assert!(disk.read_file(hd, 1).is_ok());
 

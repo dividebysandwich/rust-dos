@@ -10,7 +10,7 @@ This file covers how to use the endpoints well.
 ```sh
 cargo build --release
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-  ./target/release/rust-dos -d /path/to/dos/files --debug-server &
+  ./target/release/rust-dos --no-config -d /path/to/dos/files --debug-server &
 until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 ```
 
@@ -20,6 +20,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   mixed and streamed.
 - **C: drive:** `-d` sets it. `AUTOEXEC.BAT` in that directory runs at
   startup.
+- **`--no-config`:** without it, rust-dos reads `rust-dos.conf` from the
+  working directory or the per-user config directory. That file can mount
+  drives and run commands at startup, and on first start rust-dos writes a
+  template into the user's config directory. Pass `--no-config` for
+  reproducible runs, or `--config FILE` to test a specific configuration.
 - **Port conflict:** if port 8086 is in use, the emulator exits at startup
   with a `cannot bind` error. Kill the old instance (`kill $(pgrep -x rust-dos)`)
   or pass `--debug-server 127.0.0.1:<port>`.
@@ -45,7 +50,7 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   and only then should you use `/api/screenshot` (a 640x400 PNG, including
   the text and mouse cursors).
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
-  `C:\>` prompt), `cs_ip`, the video mode, `paused`, and `input_queue`.
+  DOS prompt), `cs_ip`, the video mode, `paused`, and `input_queue`.
 - **Kill a stuck program** with `POST /api/control/reboot_shell`. This is
   better than restarting the emulator.
 
@@ -148,11 +153,17 @@ curl -s -XPOST $H/api/control/resume
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
 
-### Switch to another program directory
+### Switch to another program directory, or mount more drives
 
 `PUT /api/drive/C {"path":"/abs/path"}` remounts C: without restarting.
-Open files are closed and the current directory resets to `C:\`. Do this at
-the shell prompt, not while a program is running.
+Files open on C: are closed and its current directory resets to `C:\`. Do
+this at the shell prompt, not while a program is running.
+
+The same call mounts other drives. Add `"type"` (`floppy`, `hdd` or `cdrom`),
+`"label"` or `"read_only":true`, for example
+`PUT /api/drive/D {"path":"/abs/cd","type":"cdrom","label":"GAMECD"}`.
+`DELETE /api/drive/D` unmounts a drive, and `GET /api/drive` lists them. At
+the DOS prompt, the `MOUNT` command does the same.
 
 ## 5. Addresses
 

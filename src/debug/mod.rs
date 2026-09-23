@@ -23,7 +23,9 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
+use crate::mount::{display_host_path, parse_drive_letter, parse_kind};
 use crate::video::{self, VideoMode};
 use keys::PcKey;
 use trace::{TraceEntry, TraceRing};
@@ -120,7 +122,14 @@ pub enum Cmd {
     RemoveBreakpoint(Option<String>),
     Ivt,
     Drives,
-    Mount { drive: String, path: String },
+    Mount {
+        drive: String,
+        path: String,
+        kind: Option<String>,
+        label: Option<String>,
+        read_only: bool,
+    },
+    Unmount { drive: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -819,17 +828,26 @@ impl DebugHub {
             },
             Cmd::Ivt => Reply::Json(ivt_json(cpu)),
             Cmd::Drives => Reply::Json(drives_json(cpu)),
-            Cmd::Mount { drive, path } => {
-                if !drive.eq_ignore_ascii_case("c") {
-                    Reply::bad("only drive C: can be mounted to a host directory")
-                } else {
-                    match cpu.bus.disk.set_root(&PathBuf::from(&path)) {
-                        Ok(p) => {
-                            cpu.bus.log_string(&format!("[DEBUG] Drive C: remounted to {}", p.display()));
-                            Reply::Json(drives_json(cpu))
-                        }
-                        Err(e) => Reply::bad(e),
+            Cmd::Mount { drive, path, kind, label, read_only } => {
+                match mount_drive(cpu, &drive, &path, kind.as_deref(), label, read_only) {
+                    Ok(root) => {
+                        cpu.bus.log_string(&format!(
+                            "[DEBUG] Drive {} mounted to {}",
+                            drive,
+                            root.display()
+                        ));
+                        Reply::Json(drives_json(cpu))
                     }
+                    Err(e) => Reply::bad(e),
+                }
+            }
+            Cmd::Unmount { drive } => {
+                let result = parse_drive_letter(&drive)
+                    .ok_or_else(|| format!("invalid drive letter '{}'", drive))
+                    .and_then(|d| cpu.bus.unmount_drive(d));
+                match result {
+                    Ok(()) => Reply::Json(drives_json(cpu)),
+                    Err(e) => Reply::bad(e),
                 }
             }
         };
@@ -845,7 +863,7 @@ impl DebugHub {
             "fps": (self.fps * 10.0).round() / 10.0,
             "cs_ip": format!("{:04X}:{:04X}", cpu.cs, cpu.ip),
             "cpu_state": format!("{:?}", cpu.state),
-            "shell_idle": cpu.cs == 0 && cpu.process_stack.is_empty(),
+            "shell_idle": shell_idle(cpu),
             "process_depth": cpu.process_stack.len(),
             "current_psp": format!("{:04X}", cpu.current_psp),
             "video": {
@@ -853,7 +871,8 @@ impl DebugHub {
                 "name": format!("{:?}", cpu.bus.video_mode),
                 "width": w, "height": h,
             },
-            "drive_c": cpu.bus.disk.root_path().display().to_string(),
+            "drive_c": display_host_path(cpu.bus.disk.root_path()),
+            "current_drive": drive_letter(cpu.bus.disk.get_current_drive()).to_string(),
             "trace": self.trace_status(),
             "breakpoints": self.breakpoints.len(),
             "input_queue": self.input.len(),
@@ -1149,13 +1168,73 @@ fn ivt_json(cpu: &Cpu) -> Value {
     json!({"ivt": entries})
 }
 
+/// True while the built-in shell (segment 0000) is running with no program
+/// loaded. At the prompt the shell spends half its time inside the INT 16h
+/// BIOS trap at F000, so a trap whose caller (the CS in the IRET frame on
+/// top of the stack) is the shell counts as well.
+fn shell_idle(cpu: &Cpu) -> bool {
+    if !cpu.process_stack.is_empty() {
+        return false;
+    }
+    let caller_cs = || {
+        let frame = cpu.get_physical_addr(cpu.ss, cpu.sp.wrapping_add(2));
+        cpu.bus.read_16(frame)
+    };
+    cpu.cs == 0 || (cpu.cs == 0xF000 && caller_cs() == 0)
+}
+
 fn drives_json(cpu: &Cpu) -> Value {
+    let drives: Map<String, Value> = cpu
+        .bus
+        .disk
+        .mounted_drives()
+        .into_iter()
+        .map(|info| {
+            let entry = json!({
+                "type": info.kind.name(),
+                "path": info.root.as_deref().map(display_host_path),
+                "label": info.label,
+                "read_only": info.read_only,
+                "current_dir": info.current_dir,
+            });
+            (info.letter().to_string(), entry)
+        })
+        .collect();
     json!({
-        "current_drive": (b'A' + cpu.bus.disk.get_current_drive()) as char,
+        "current_drive": drive_letter(cpu.bus.disk.get_current_drive()).to_string(),
         "current_dir": cpu.bus.disk.get_current_directory(),
-        "drives": {
-            "C": cpu.bus.disk.root_path().display().to_string(),
-            "Z": "(virtual)",
-        },
+        "drives": drives,
     })
+}
+
+/// Mount (or replace) a drive from the debug API. Without explicit options
+/// a remount keeps the drive's current type, label and read-only flag.
+fn mount_drive(
+    cpu: &mut Cpu,
+    drive: &str,
+    path: &str,
+    kind: Option<&str>,
+    label: Option<String>,
+    read_only: bool,
+) -> Result<PathBuf, String> {
+    let drive =
+        parse_drive_letter(drive).ok_or_else(|| format!("invalid drive letter '{}'", drive))?;
+    let kind = match kind {
+        Some(k) => Some(parse_kind(k).ok_or_else(|| format!("unknown drive type '{}'", k))?),
+        None => None,
+    };
+    let explicit = kind.is_some() || label.is_some() || read_only;
+    let opts = match cpu.bus.disk.drive_info(drive) {
+        Some(info) if !explicit => MountOptions {
+            kind: info.kind,
+            label: Some(info.label),
+            read_only: info.read_only,
+        },
+        _ => MountOptions {
+            kind: kind.unwrap_or(DriveKind::HardDisk),
+            label,
+            read_only,
+        },
+    };
+    cpu.bus.mount_drive(drive, &PathBuf::from(path), opts, true)
 }
