@@ -391,7 +391,8 @@ fn main() -> Result<(), String> {
         }
 
         // The window opening or closing: it takes the keyboard and mouse
-        // from the machine, which pauses (see the batch below).
+        // from the machine, which pauses but for the Mixer page (see the
+        // batch below).
         if ui.is_open() != ui_shown {
             ui_shown = ui.is_open();
             if ui_shown {
@@ -411,7 +412,7 @@ fn main() -> Result<(), String> {
         // counted in instructions (see timer.rs), so timer interrupts land on
         // the right instructions however the work is batched between frames.
         let batch_start = std::time::Instant::now();
-        let batch_end = if dbg.paused || ui.is_open() {
+        let batch_end = if dbg.paused || ui.pauses_machine() {
             cpu.bus.clock.icount
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
@@ -491,6 +492,9 @@ fn main() -> Result<(), String> {
         // Recordings show the machine alone. Debug clients see the
         // settings window as well, but not the recording indicator.
         recorder.capture(&screen);
+        if ui.is_open() {
+            ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
+        }
         ui.draw(&mut screen);
         dbg.capture_frame(&screen);
 

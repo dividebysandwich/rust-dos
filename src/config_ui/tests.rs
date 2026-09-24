@@ -295,6 +295,91 @@ fn the_monochrome_monitor_steps_through_the_phosphors() {
 }
 
 #[test]
+fn the_mixer_page_sets_volumes() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Mixer);
+    assert_eq!(ui.items().len(), crate::mixer::CHANNELS);
+    ui.row = ui.items().iter().position(|&i| i == Item::Volume(Channel::Fm)).unwrap();
+    let fm = |host: &FakeHost| host.applied.last().unwrap().mixer.level(Channel::Fm);
+
+    // Tens up and down, and no further than 0 and 200.
+    keys(&mut ui, &mut host, &[Right]);
+    assert_eq!(fm(&host), 110);
+    keys(&mut ui, &mut host, &[Left, Left]);
+    assert_eq!(fm(&host), 90);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 90% ■■■■■■■■■···········"));
+
+    // A typed volume, then steps to the tens around it.
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace]);
+    ui.text("85", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(fm(&host), 85);
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(fm(&host), 80);
+    keys(&mut ui, &mut host, &[Right, Right]);
+    assert_eq!(fm(&host), 100);
+
+    // Too loud is refused.
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace, Backspace]);
+    ui.text("250", &mut host);
+    ui.key(Enter, &mut host);
+    assert!(status(&ui).1, "{:?}", status(&ui));
+    assert_eq!(ui.settings.mixer.level(Channel::Fm), 100);
+    ui.key(Esc, &mut host);
+
+    // Delete puts it back to 100.
+    for _ in 0..30 {
+        ui.key(Left, &mut host);
+    }
+    assert_eq!(fm(&host), 0);
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(fm(&host), 100);
+    for _ in 0..30 {
+        ui.key(Right, &mut host);
+    }
+    assert_eq!(fm(&host), 200);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(&*format!("200% {}", "■".repeat(20))));
+    assert!(ui.items().iter().all(|i| i.applies() == Applies::Now));
+
+    keys(&mut ui, &mut host, &[Save]);
+    assert_eq!(host.saved.last().unwrap().mixer.level(Channel::Fm), 200);
+}
+
+#[test]
+fn the_machine_plays_on_while_the_mixer_page_shows() {
+    let host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    assert!(!ui.pauses_machine());
+    ui.open(&Settings::default(), None, &host);
+    assert!(ui.pauses_machine());
+    ui.show_page(Page::Mixer);
+    assert!(!ui.pauses_machine());
+    ui.show_page(Page::Sound);
+    assert!(ui.pauses_machine());
+}
+
+#[test]
+fn the_meters_fall_slowly() {
+    let host = FakeHost::new();
+    let mut ui = opened(&host);
+    let mut peaks = [0.0; crate::mixer::CHANNELS];
+    peaks[Channel::Sb as usize] = 0.5;
+    ui.set_mixer_status(false, peaks);
+    ui.set_mixer_status(true, [0.0; crate::mixer::CHANNELS]);
+    assert!((ui.levels[Channel::Sb as usize] - 0.48).abs() < 1e-6);
+    assert!(ui.muted);
+    // Loud, clipping and muted meters draw.
+    peaks[Channel::Master as usize] = 1.5;
+    ui.set_mixer_status(true, peaks);
+    ui.show_page(Page::Mixer);
+    ui.draw(&mut Frame::new(640, 400));
+    ui.set_mixer_status(false, peaks);
+    ui.draw(&mut Frame::new(640, 400));
+}
+
+#[test]
 fn a_browser_gets_what_it_has() {
     let browser = Frontend { window: false, host_files: false };
     let mut host = FakeHost::new();

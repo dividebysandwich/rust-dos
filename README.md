@@ -162,7 +162,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 
 Press **Ctrl+F12**, or type `DOSCONFIG` at the DOS prompt, to open the
 settings window over the running program. The program pauses while it is
-open. Ctrl+F12 or Esc closes it.
+open, except on the Mixer page, where it plays on so you hear the volumes
+as you set them. Ctrl+F12 or Esc closes it.
 
 * **Drives:** mount a host directory or a disk or CD image (Ins), change or
   swap the one a drive shows (Enter; this is how to change discs in the
@@ -173,10 +174,12 @@ open. Ctrl+F12 or Esc closes it.
 * **Emulator:** the CPU speed, the processor, the memory size and the disk
   speeds.
 * **Sound:** everything in `[sound]`, and the disk noises.
+* **Mixer:** the volume of each sound source and the master volume
+  (`[mixer]`), with a meter of how loud each one plays.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
-pages, and the mouse works too. The display settings, the CPU speed and the
-disk speeds and noises take effect at once. The processor and sound hardware change once no program is
+pages, and the mouse works too. The display settings, the CPU speed, the
+disk speeds and noises and the volumes take effect at once. The processor and sound hardware change once no program is
 running, so a game isn't left without the card it set up. The memory size
 takes effect the next time rust-dos starts.
 

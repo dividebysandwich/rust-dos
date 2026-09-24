@@ -303,10 +303,10 @@ impl Machine {
         // Emulated time is counted in instructions (see timer.rs), so
         // however long the page's frames are, timer interrupts land on the
         // right instructions. The machine waits while the settings window
-        // is open.
+        // is open, but for its Mixer page.
         let cpu = &mut self.cpu;
         let batch_start = Instant::now();
-        let batch_end = if cpu.bus.exit_requested || self.ui.is_open() {
+        let batch_end = if cpu.bus.exit_requested || self.ui.pauses_machine() {
             cpu.bus.clock.icount
         } else {
             self.pacer.batch_end(&cpu.bus.clock, batch_start)
@@ -761,6 +761,9 @@ impl Machine {
         self.next.clone_from(&self.picture);
         video::overlay::draw_cursors(&mut self.next, bus, self.cursor_visible);
         video::mono::apply(&mut self.next, self.settings.monochrome);
+        if self.ui.is_open() {
+            self.ui.set_mixer_status(bus.mixer.muted, bus.mixer.take_peaks());
+        }
         self.ui.draw(&mut self.next);
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
             && self.next.rgb == self.screen.rgb;

@@ -19,6 +19,7 @@ use crate::config::{MidiSynth, Settings};
 use crate::cpu::CpuModel;
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
+use crate::mixer::{CHANNELS, Channel, MAX_LEVEL};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use crate::sb::SbModel;
 use crate::timer::CpuSpeed;
@@ -89,9 +90,10 @@ enum Page {
     Display,
     Emulator,
     Sound,
+    Mixer,
 }
 
-const PAGES: [Page; 4] = [Page::Drives, Page::Display, Page::Emulator, Page::Sound];
+const PAGES: [Page; 5] = [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer];
 
 impl Page {
     fn title(self) -> &'static str {
@@ -100,6 +102,7 @@ impl Page {
             Page::Display => "Display",
             Page::Emulator => "Emulator",
             Page::Sound => "Sound",
+            Page::Mixer => "Mixer",
         }
     }
 
@@ -112,6 +115,16 @@ impl Page {
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
                 SoundFont, HardDiskNoise, FloppyDiskNoise,
+            ],
+            Page::Mixer => &[
+                Volume(Channel::Master),
+                Volume(Channel::Speaker),
+                Volume(Channel::Sb),
+                Volume(Channel::Fm),
+                Volume(Channel::Gus),
+                Volume(Channel::Midi),
+                Volume(Channel::CdAudio),
+                Volume(Channel::DiskNoise),
             ],
         }
     }
@@ -167,6 +180,8 @@ enum Item {
     FloppyDiskSpeed,
     HardDiskNoise,
     FloppyDiskNoise,
+    /// A volume in the host's mixer.
+    Volume(Channel),
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -190,6 +205,16 @@ fn step_number(values: &[u32], current: u32, dir: isize) -> u32 {
 
 const CYCLES: [u32; 8] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, u32::MAX];
 const MEMSIZES: [u32; 6] = [2, 4, 8, 16, 32, 64];
+
+/// How many cells the bar of a volume has: one for every 10%.
+const VOLUME_BAR: usize = (MAX_LEVEL / 10) as usize;
+
+/// A volume as a number and a bar of small squares, which stay apart
+/// from the next row's: "120% ■■■■■■■■■■■■········".
+fn volume_bar(percent: u16) -> String {
+    let full = (percent / 10) as usize;
+    format!("{:>3}% {}{}", percent, "■".repeat(full), "·".repeat(VOLUME_BAR - full))
+}
 
 fn on_off(on: bool) -> String {
     if on { "on" } else { "off" }.to_string()
@@ -232,6 +257,7 @@ impl Item {
             FloppyDiskSpeed => "Floppy disk speed",
             HardDiskNoise => "Hard disk noise",
             FloppyDiskNoise => "Floppy disk noise",
+            Volume(channel) => channel.label(),
         }
     }
 
@@ -248,7 +274,7 @@ impl Item {
         use Item::*;
         match self {
             Scale | Fullscreen | Aspect | Filter | Shader | Monochrome | Cycles => Applies::Now,
-            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise => Applies::Now,
+            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
@@ -256,7 +282,7 @@ impl Item {
 
     fn input(self) -> Input {
         match self {
-            Item::Cycles => Input::ChoiceOrText,
+            Item::Cycles | Item::Volume(_) => Input::ChoiceOrText,
             Item::UltraDir => Input::Text,
             Item::SoundFont => Input::File,
             _ => Input::Choice,
@@ -320,6 +346,7 @@ impl Item {
             FloppyDiskSpeed => s.disk.floppy_disk_speed.describe(DiskClass::Floppy),
             HardDiskNoise => s.disk.hard_disk_noise.name().to_string(),
             FloppyDiskNoise => s.disk.floppy_disk_noise.name().to_string(),
+            Volume(channel) => volume_bar(s.mixer.level(channel)),
         }
     }
 
@@ -389,6 +416,12 @@ impl Item {
             FloppyDiskSpeed => s.disk.floppy_disk_speed = cycle(&DiskSpeed::ALL, s.disk.floppy_disk_speed, dir),
             HardDiskNoise => s.disk.hard_disk_noise = cycle(&NoiseMode::ALL, s.disk.hard_disk_noise, dir),
             FloppyDiskNoise => s.disk.floppy_disk_noise = cycle(&NoiseMode::ALL, s.disk.floppy_disk_noise, dir),
+            // In tens of percent, from a value in between to the next ten.
+            Volume(channel) => {
+                let level = s.mixer.level(channel);
+                let tens = if dir > 0 { level / 10 + 1 } else { level.div_ceil(10).saturating_sub(1) };
+                s.mixer.set_level(channel, tens * 10);
+            }
             UltraDir | SoundFont => {}
         }
     }
@@ -401,6 +434,7 @@ impl Item {
                 CpuSpeed::Fixed(n) => n.to_string(),
             },
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
+            Item::Volume(channel) => s.mixer.level(channel).to_string(),
             _ => String::new(),
         }
     }
@@ -410,6 +444,7 @@ impl Item {
         match self {
             Item::Cycles => s.cycles = CpuSpeed::parse(text)?,
             Item::UltraDir => s.sound.gus.ultradir = (!text.is_empty()).then(|| text.to_string()),
+            Item::Volume(channel) => s.mixer.set_level(channel, crate::mixer::parse_level(text)?),
             _ => {}
         }
         Ok(())
@@ -420,6 +455,11 @@ impl Item {
         match self {
             Item::UltraDir => s.sound.gus.ultradir.take().is_some(),
             Item::SoundFont => s.sound.soundfont.take().is_some(),
+            Item::Volume(channel) => {
+                let changed = s.mixer.level(channel) != 100;
+                s.mixer.set_level(channel, 100);
+                changed
+            }
             _ => false,
         }
     }
@@ -479,6 +519,10 @@ pub struct ConfigUi {
     hits: Vec<Hit>,
     /// Rows of the list the last frame showed, for Page Up and Down.
     visible: usize,
+    /// What the Mixer page's meters show (`set_mixer_status`): how loud
+    /// each source is, falling slowly, and whether the output is muted.
+    levels: [f32; CHANNELS],
+    muted: bool,
 }
 
 impl Default for ConfigUi {
@@ -512,11 +556,30 @@ impl ConfigUi {
             layout: None,
             hits: Vec::new(),
             visible: 10,
+            levels: [0.0; CHANNELS],
+            muted: false,
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Whether the machine waits while the window is open: it does,
+    /// except on the Mixer page, where it plays on to be heard.
+    pub fn pauses_machine(&self) -> bool {
+        self.open && self.page != Page::Mixer
+    }
+
+    /// How loud each sound source was since the last frame (see
+    /// `Mixer::take_peaks`), and whether the output is muted, for the
+    /// Mixer page's meters.
+    pub fn set_mixer_status(&mut self, muted: bool, peaks: [f32; CHANNELS]) {
+        // The meters fall about 20 dB a second.
+        for (level, peak) in self.levels.iter_mut().zip(peaks) {
+            *level = peak.max(*level * 0.96);
+        }
+        self.muted = muted;
     }
 
     /// Open on the current settings and drives. `config_file` is where
@@ -1075,7 +1138,15 @@ impl ConfigUi {
                 Applies::AtPrompt => "at prompt",
                 Applies::NextStart => "next start",
             };
-            g.text(note_col + 1, row, note, draw::NOTE);
+            match item {
+                Item::Volume(Channel::Master) if self.muted => {
+                    g.text(note_col + 1, row, "muted", draw::ERROR);
+                }
+                Item::Volume(channel) => self.draw_meter(g, note_col + 1, row, self.levels[channel as usize]),
+                _ => {
+                    g.text(note_col + 1, row, note, draw::NOTE);
+                }
+            }
 
             let end = note_col.saturating_sub(1);
             if selected && let Some(field) = &self.edit {
@@ -1096,6 +1167,28 @@ impl ConfigUi {
             } else {
                 g.text_to(value_col + 2, row, &value, draw::BRIGHT, end);
             }
+        }
+    }
+
+    /// A level meter of `METER` cells at (`col`, `row`): 6 dB a cell
+    /// from -60 dB, green, then yellow for the loudest, red where the
+    /// sound clips.
+    fn draw_meter(&self, g: &mut Grid, col: usize, row: usize, level: f32) {
+        const METER: usize = 10;
+        let lit = if level <= 0.0 {
+            0
+        } else {
+            let db = 20.0 * level.log10();
+            ((db + 60.0) / 6.0).ceil().clamp(0.0, METER as f32) as usize
+        };
+        for cell in 0..METER {
+            let color = match cell {
+                _ if cell >= lit => draw::DIM,
+                _ if cell == METER - 1 && level >= 1.0 => draw::ERROR,
+                _ if cell >= METER - 3 => draw::KEY,
+                _ => draw::GOOD,
+            };
+            g.char(col + cell, row, if cell < lit { 0xFE } else { 0xFA }, color);
         }
     }
 
