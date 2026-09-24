@@ -183,8 +183,9 @@ const CRT: &str = include_str!("shader/crt.glsl");
 
 /// The vertex and fragment shader of a look. They take the frame as the
 /// texture `u_frame`; the CRT looks also take the frame's size in pixels
-/// as `u_source` and the picture's on the screen as `u_output`, and read
-/// a mipmap of the frame. The fragment shader writes `o_color`.
+/// as `u_source`, the picture's on the screen as `u_output` and whether
+/// the tube has a colour mask as `u_mask` (1 or 0, for a monochrome tube),
+/// and read a mipmap of the frame. The fragment shader writes `o_color`.
 pub fn sources(shader: Shader, glsl: Glsl) -> (String, String) {
     let preamble = glsl.preamble();
     let fragment = match shader.look() {
@@ -255,6 +256,7 @@ mod tests {
         let (_, curved) = sources(Shader::Curved, Glsl::Gl150);
         assert!(curved.contains("#define CURVATURE vec2(0.03, 0.04)\n"));
         assert!(curved.contains("#define CURVED 1\n") && curved.contains("#define MASK 2\n"));
+        assert!(curved.contains("uniform float u_mask;") && curved.contains("MASK_STRENGTH * u_mask"));
         let (_, flat) = sources(Shader::Scanlines, Glsl::Gl150);
         assert!(flat.contains("#define CURVED 0\n") && flat.contains("#define MASK 0\n"));
     }

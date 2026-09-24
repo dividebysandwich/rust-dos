@@ -6,6 +6,7 @@
 mod gl;
 
 use crate::config::{Filter, Settings};
+use crate::video::mono::Monochrome;
 use crate::video::shader::Shader;
 use crate::video::{self, Frame};
 use gl::{GlScreen, NoGl};
@@ -101,6 +102,7 @@ impl<'a> Display<'a> {
                 if let Err(problem) = gl.select(settings.shader, settings.filter) {
                     warning = Some(problem);
                 }
+                gl.set_color_mask(settings.monochrome == Monochrome::Off);
                 let renderer = gl.renderer().to_string();
                 (Output::Gl(Box::new(gl)), renderer)
             }
@@ -170,11 +172,15 @@ impl<'a> Display<'a> {
         self.layout()
     }
 
-    /// Take on the display settings: scale, fullscreen, aspect, filter and
-    /// shader. A shader that can't be shown is the error, once the rest is
-    /// done; the setting stays, to be saved.
+    /// Take on the display settings: scale, fullscreen, aspect, filter,
+    /// shader and the monochrome tube's missing mask. A shader that can't
+    /// be shown is the error, once the rest is done; the setting stays, to
+    /// be saved.
     pub fn apply(&mut self, settings: &Settings) -> Result<(), String> {
         let mut problem = None;
+        if let Output::Gl(gl) = &mut self.out {
+            gl.set_color_mask(settings.monochrome == Monochrome::Off);
+        }
         if (settings.shader, settings.filter) != (self.shader, self.filter) {
             let new_shader = settings.shader != self.shader;
             self.shader = settings.shader;

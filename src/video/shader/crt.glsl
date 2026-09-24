@@ -18,6 +18,8 @@ uniform sampler2D u_frame;
 uniform vec2 u_source;
 // The picture's size on the screen, in pixels.
 uniform vec2 u_output;
+// 1 for a colour tube's mask, 0 for a monochrome tube, which has none.
+uniform float u_mask;
 
 in vec2 v_uv;
 out vec4 o_color;
@@ -97,7 +99,7 @@ vec3 scanlines(vec2 pos) {
 // pixels wide, too small for it.
 vec3 mask(vec2 f) {
     float pixels = u_output.x / u_source.x;
-    float s = MASK_STRENGTH * smoothstep(1.25, 2.0, pixels);
+    float s = MASK_STRENGTH * u_mask * smoothstep(1.25, 2.0, pixels);
     float w = max(1.0, floor(pixels / 3.0 + 0.5));
     int x = int(f.x / w);
     int phase = x - 3 * (x / 3);

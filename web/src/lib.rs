@@ -21,6 +21,7 @@ use rust_dos::exec::{self, NoHook};
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
 use rust_dos::mount::MountSpec;
 use rust_dos::timer::{CpuSpeed, Pacer};
+use rust_dos::video::mono::Monochrome;
 use rust_dos::video::shader::{self, Glsl, Shader};
 use rust_dos::video::{self, Frame};
 use wasm_bindgen::prelude::*;
@@ -238,6 +239,13 @@ impl Machine {
     /// `shader_program`): its name, or "none" where the page can't.
     pub fn shader(&self) -> String {
         self.shown_shader().name().to_string()
+    }
+
+    /// Whether the monitor is monochrome (`monochrome`): the picture comes
+    /// in its phosphor's colour, and the CRT looks leave out their colour
+    /// mask.
+    pub fn mono(&self) -> bool {
+        self.settings.monochrome != Monochrome::Off
     }
 
     /// Whether the page draws with WebGL 2, which the CRT shaders need.
@@ -751,6 +759,7 @@ impl Machine {
         }
         self.next.clone_from(&self.picture);
         video::overlay::draw_cursors(&mut self.next, bus, self.cursor_visible);
+        video::mono::apply(&mut self.next, self.settings.monochrome);
         self.ui.draw(&mut self.next);
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
             && self.next.rgb == self.screen.rgb;
@@ -777,8 +786,8 @@ struct PageHost<'m> {
 }
 
 impl Host for PageHost<'_> {
-    /// The page shows the picture as `aspect`, `filter` and `shader` say
-    /// (see `Machine::aspect`).
+    /// The page shows the picture as `aspect`, `filter`, `shader` and
+    /// `monochrome` say (see `Machine::aspect`).
     fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
         let old = std::mem::replace(self.settings, new.clone());
         if new.shader != old.shader && new.shader != Shader::None && !self.shaders {

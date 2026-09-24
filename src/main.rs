@@ -479,9 +479,12 @@ fn main() -> Result<(), String> {
             cpu.bus.vga.clear_dirty();
         }
 
-        // Start from the cached render; the overlays go on top.
+        // Start from the cached render; the overlays go on top. A
+        // monochrome monitor shows them in its phosphor's colour, but not
+        // the settings window.
         screen.clone_from(&cached_frame);
         video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
+        video::mono::apply(&mut screen, settings.monochrome);
         let frame_w = width as usize;
 
         // Recordings show the machine alone. Debug clients see the
@@ -625,7 +628,7 @@ struct MainHost<'m, 'd> {
 impl Host for MainHost<'_, '_> {
     fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
         let old = std::mem::replace(self.settings, new.clone());
-        let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader);
+        let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader, s.monochrome);
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
         }

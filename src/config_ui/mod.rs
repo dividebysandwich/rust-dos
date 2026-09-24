@@ -107,7 +107,7 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives => &[],
-            Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader],
+            Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
             Page::Emulator => &[Cycles, Cpu, Memsize, HardDiskSpeed, FloppyDiskSpeed],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -145,6 +145,7 @@ enum Item {
     Aspect,
     Filter,
     Shader,
+    Monochrome,
     Cycles,
     Cpu,
     Memsize,
@@ -209,6 +210,7 @@ impl Item {
             Aspect => "4:3 aspect correction",
             Filter => "Scaling filter",
             Shader => "CRT shader",
+            Monochrome => "Monochrome monitor",
             Cycles => "CPU speed (cycles)",
             Cpu => "Processor",
             Memsize => "Memory",
@@ -245,7 +247,7 @@ impl Item {
     fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Filter | Shader | Cycles => Applies::Now,
+            Scale | Fullscreen | Aspect | Filter | Shader | Monochrome | Cycles => Applies::Now,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
@@ -274,6 +276,7 @@ impl Item {
             }
             .to_string(),
             Shader => s.shader.describe().to_string(),
+            Monochrome => s.monochrome.describe().to_string(),
             Cycles => match s.cycles {
                 CpuSpeed::Max => "max".to_string(),
                 CpuSpeed::Fixed(n) => format!("{} per ms", n),
@@ -332,6 +335,7 @@ impl Item {
             Aspect => s.aspect = !s.aspect,
             Filter => s.filter = cycle(&[crate::config::Filter::Nearest, crate::config::Filter::Linear], s.filter, dir),
             Shader => s.shader = cycle(&crate::video::shader::Shader::ALL, s.shader, dir),
+            Monochrome => s.monochrome = cycle(&crate::video::mono::Monochrome::ALL, s.monochrome, dir),
             Cycles => {
                 let current = match s.cycles {
                     CpuSpeed::Max => u32::MAX,

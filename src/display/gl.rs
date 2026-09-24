@@ -20,6 +20,7 @@ struct Program {
     program: glow::Program,
     source: Option<glow::UniformLocation>,
     output: Option<glow::UniformLocation>,
+    mask: Option<glow::UniformLocation>,
 }
 
 // Every `unsafe` below is a call into OpenGL, whose context `open` makes
@@ -40,6 +41,9 @@ pub struct GlScreen {
     programs: HashMap<Shader, Result<Program, String>>,
     /// The look drawn with: the one chosen, or none if it doesn't compile.
     active: Shader,
+    /// 1 for a colour tube's mask in front of the CRT looks, 0 for a
+    /// monochrome tube's none (`u_mask`).
+    mask: f32,
     renderer: String,
 }
 
@@ -129,6 +133,7 @@ impl GlScreen {
             texture_size: (0, 0),
             programs: HashMap::from([(Shader::None, Ok(plain))]),
             active: Shader::None,
+            mask: 1.0,
             renderer,
         })
     }
@@ -180,6 +185,12 @@ impl GlScreen {
         result
     }
 
+    /// Whether the CRT looks put a colour tube's mask in front of the
+    /// picture, or show a monochrome tube, whose phosphor is one colour.
+    pub fn set_color_mask(&mut self, on: bool) {
+        self.mask = if on { 1.0 } else { 0.0 };
+    }
+
     /// Show `frame`, letterboxed at `display` proportions.
     pub fn present(&mut self, frame: &Frame, display: (u32, u32)) {
         let gl = &self.gl;
@@ -224,6 +235,7 @@ impl GlScreen {
                 gl.use_program(Some(program.program));
                 gl.uniform_2_f32(program.source.as_ref(), frame.width as f32, frame.height as f32);
                 gl.uniform_2_f32(program.output.as_ref(), w as f32, h as f32);
+                gl.uniform_1_f32(program.mask.as_ref(), self.mask);
                 gl.bind_vertex_array(Some(self.vao));
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
@@ -280,6 +292,7 @@ fn compile(gl: &glow::Context, glsl: Glsl, shader: Shader) -> Result<Program, St
             program,
             source: gl.get_uniform_location(program, "u_source"),
             output: gl.get_uniform_location(program, "u_output"),
+            mask: gl.get_uniform_location(program, "u_mask"),
         })
     }
 }

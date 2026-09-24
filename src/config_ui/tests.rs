@@ -277,6 +277,24 @@ fn the_crt_shader_steps_through_the_looks() {
 }
 
 #[test]
+fn the_monochrome_monitor_steps_through_the_phosphors() {
+    use crate::video::mono::Monochrome;
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Display);
+    ui.row = ui.items().iter().position(|&i| i == Item::Monochrome).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("off (colour)"));
+    keys(&mut ui, &mut host, &[Right, Right, Right, Right, Left]);
+    let phosphors: Vec<Monochrome> = host.applied.iter().map(|s| s.monochrome).collect();
+    use Monochrome::*;
+    assert_eq!(phosphors, [White, Amber, Green, Off, Green]);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("green"));
+    keys(&mut ui, &mut host, &[Save]);
+    assert_eq!(host.saved.last().unwrap().monochrome, Green);
+}
+
+#[test]
 fn a_browser_gets_what_it_has() {
     let browser = Frontend { window: false, host_files: false };
     let mut host = FakeHost::new();
@@ -286,7 +304,7 @@ fn a_browser_gets_what_it_has() {
 
     // No window to scale or make fullscreen, no SoundFont to pick.
     ui.show_page(Page::Display);
-    assert_eq!(ui.items(), [Item::Aspect, Item::Filter, Item::Shader]);
+    assert_eq!(ui.items(), [Item::Aspect, Item::Filter, Item::Shader, Item::Monochrome]);
     keys(&mut ui, &mut host, &[Right]);
     assert!(host.applied.last().unwrap().aspect);
     ui.show_page(Page::Sound);

@@ -14,6 +14,7 @@ use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::timer::CpuSpeed;
+use crate::video::mono::Monochrome;
 use crate::video::shader::Shader;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -85,6 +86,8 @@ pub struct Config {
     pub filter: Option<Filter>,
     /// The CRT look (`shader`).
     pub shader: Option<Shader>,
+    /// A monochrome monitor's phosphor (`monochrome`).
+    pub monochrome: Option<Monochrome>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
@@ -419,6 +422,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(shader) => config.shader = Some(shader),
                             None => warn(format!("invalid shader '{}' (none, scanlines, aperture or curved)", value)),
                         },
+                        "monochrome" => match Monochrome::parse(value) {
+                            Some(mono) => config.monochrome = Some(mono),
+                            None => warn(format!("invalid monochrome '{}' (off, white, amber or green)", value)),
+                        },
                         "cycles" => match CpuSpeed::parse(value) {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
@@ -573,6 +580,7 @@ pub struct Settings {
     pub aspect: bool,
     pub filter: Filter,
     pub shader: Shader,
+    pub monochrome: Monochrome,
     pub cycles: CpuSpeed,
     pub cpu: CpuModel,
     /// RAM in MB.
@@ -589,6 +597,7 @@ impl Default for Settings {
             aspect: false,
             filter: Filter::Nearest,
             shader: Shader::None,
+            monochrome: Monochrome::Off,
             cycles: CpuSpeed::Max,
             cpu: CpuModel::I486,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
@@ -607,6 +616,7 @@ impl Settings {
             aspect: config.aspect.unwrap_or(default.aspect),
             filter: config.filter.unwrap_or(default.filter),
             shader: config.shader.unwrap_or(default.shader),
+            monochrome: config.monochrome.unwrap_or(default.monochrome),
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             memsize: config.memsize.unwrap_or(default.memsize),
@@ -629,6 +639,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "aspect", yes_no(settings.aspect)),
         (Emulator, "filter", Some(settings.filter.name().to_string())),
         (Emulator, "shader", Some(settings.shader.name().to_string())),
+        (Emulator, "monochrome", Some(settings.monochrome.name().to_string())),
         (
             Emulator,
             "cycles",
@@ -1162,19 +1173,20 @@ mod tests {
         assert_eq!(config.scale, None);
         assert_eq!(config.cycles, None);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
-        assert_eq!(config.shader, None);
+        assert_eq!((config.shader, config.monochrome), (None, None));
         assert_eq!(config.sound, SoundConfig::default());
     }
 
     #[test]
     fn display_settings() {
-        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=Curved\n";
+        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=Curved\nmonochrome=Amber\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(false), Some(Filter::Linear)));
-        assert_eq!(config.shader, Some(Shader::Curved));
-        let config = parse("[emulator]\nfullscreen=maybe\nfilter=blur\nshader=crt\n", Path::new("/cfg"), None);
-        assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
+        assert_eq!((config.shader, config.monochrome), (Some(Shader::Curved), Some(Monochrome::Amber)));
+        let text = "[emulator]\nfullscreen=maybe\nfilter=blur\nshader=crt\nmonochrome=blue\n";
+        let config = parse(text, Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 4, "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings::default());
     }
 
@@ -1201,6 +1213,7 @@ mod tests {
             aspect: true,
             filter: Filter::Linear,
             shader: Shader::Curved,
+            monochrome: Monochrome::Green,
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
             memsize: 32,
@@ -1253,6 +1266,7 @@ mod tests {
         }
         assert!(text.contains("#scale=2\nscale=3\n"), "{}", text);
         assert!(text.contains("#shader=none\nshader=curved\n"), "{}", text);
+        assert!(text.contains("#monochrome=off\nmonochrome=green\n"), "{}", text);
         assert!(text.contains("#sbtype=sb16\nsbtype=sbpro2\n"), "{}", text);
         assert!(text.contains("#E=~/dos/images/game.cue\nC=~/dos\nD=\"~/cd images/game.cue\" cdrom -label GAME\n"), "{}", text);
         assert!(text.contains("soundfont=~/sf/General User.sf2\n"), "{}", text);

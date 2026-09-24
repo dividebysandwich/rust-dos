@@ -3,6 +3,7 @@ use crate::cpu::Cpu;
 
 pub mod crt;
 pub mod modes;
+pub mod mono;
 pub mod overlay;
 pub mod shader;
 pub mod vbe;

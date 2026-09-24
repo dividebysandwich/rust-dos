@@ -36,6 +36,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Emulated disk speeds and disk drive noises
 * CRT shaders: scanlines, an aperture grille or a curved shadow mask tube
   (see [CRT shaders](#crt-shaders))
+* Monochrome monitors: white, amber or green phosphor
 * Configuration file with startup commands
 * Environment variables (`SET`, `PATH`)
 * Running in a web browser as WebAssembly, with C: kept in the browser's
@@ -97,6 +98,11 @@ D:
     pixels) or `linear` (smooth). It applies without a CRT shader.
   * `shader` gives the picture a CRT look: `none` (the default),
     `scanlines`, `aperture` or `curved`. See [CRT shaders](#crt-shaders).
+  * `monochrome` shows the picture on a monochrome monitor: `off` (the
+    default, a colour monitor), `white`, `amber` or `green`. Each colour
+    shows as bright as it is, in the phosphor's colour, and the CRT
+    shaders leave out their colour mask. Screenshots and recordings are
+    monochrome as well; the settings window stays in colour.
   * `cycles` is the CPU speed in instructions per millisecond. `max`, the
     default, runs as fast as the host keeps up with in real time. Use a
     number such as `3000` for old games that run too fast. `--cycles`
@@ -157,7 +163,7 @@ open. Ctrl+F12 or Esc closes it.
   middle of a game), or unmount it (Del). **Browse...** picks directories
   and images from the host.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
-  filter and the CRT shader.
+  filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the memory size and the disk
   speeds.
 * **Sound:** everything in `[sound]`, and the disk noises.
@@ -184,6 +190,9 @@ picture as a monitor of the time would have:
   phosphor stripes over the scanlines.
 * `curved`: a curved tube with a shadow mask, rounded corners and darker
   edges. The mouse follows the curve.
+
+With `monochrome`, the aperture grille and the shadow mask are left out, as
+a monochrome tube has a single phosphor; the scanlines, glow and curve stay.
 
 A VGA shows its 200-line modes double-scanned, so each of the 400 lines is a
 scanline. The looks need a few screen pixels per line: at scale 1 the

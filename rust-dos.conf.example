@@ -31,6 +31,10 @@
 # The looks need OpenGL 3 and show best at scale 2 or more, or fullscreen.
 # Screenshots and recordings stay without them.
 #shader=none
+# A monochrome monitor: off (colour, the default), white, amber or green.
+# The picture shows in the phosphor's colour, as bright as its colours
+# are, and the CRT shaders leave out their colour mask.
+#monochrome=off
 # CPU speed in instructions per millisecond, or max to run as fast as the
 # host keeps up with in real time. Lower it for old games that run too
 # fast. --cycles overrides it.

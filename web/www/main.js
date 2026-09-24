@@ -46,6 +46,8 @@ aspect=true
 #filter=nearest
 # A CRT look: none, scanlines, aperture or curved. It needs WebGL 2.
 #shader=none
+# A monochrome monitor: off (colour), white, amber or green.
+#monochrome=off
 # CPU speed in instructions per millisecond, or max to run as fast as the
 # browser keeps up with. Lower it for old games that run too fast.
 #cycles=max
@@ -320,6 +322,8 @@ function makeGlScreen() {
   let frame;
   let look = 'none';
   let smooth = false;
+  /// A monochrome tube, whose phosphor is one colour: no colour mask.
+  let mono = false;
 
   function setUp() {
     texture = gl.createTexture();
@@ -361,6 +365,7 @@ function makeGlScreen() {
       program,
       source: gl.getUniformLocation(program, 'u_source'),
       output: gl.getUniformLocation(program, 'u_output'),
+      mask: gl.getUniformLocation(program, 'u_mask'),
     };
   }
 
@@ -400,10 +405,12 @@ function makeGlScreen() {
 
   return {
     /// Draw through the look `name`, or the plain picture, `smooth` or
-    /// sharp. A look that doesn't compile leaves the picture plain.
-    select(name, isSmooth) {
+    /// sharp, on a colour or a monochrome (`isMono`) tube. A look that
+    /// doesn't compile leaves the picture plain.
+    select(name, isSmooth, isMono) {
       look = program(name) ? name : 'none';
       smooth = isSmooth;
+      mono = isMono;
       program(look);
       filter();
     },
@@ -433,6 +440,7 @@ function makeGlScreen() {
       gl.useProgram(entry.program);
       gl.uniform2f(entry.source, frame.width, frame.height);
       gl.uniform2f(entry.output, canvas.width, canvas.height);
+      gl.uniform1f(entry.mask, mono ? 0 : 1);
       gl.bindVertexArray(vao);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -1205,13 +1213,14 @@ function syncSettings() {
 }
 
 /// Show the picture as the settings have it: stretched to 4:3 or not,
-/// sharp or smooth, through a CRT shader or not.
+/// sharp or smooth, through a CRT shader or not, on a colour or a
+/// monochrome tube.
 function showPicture() {
   if (screenGl) {
-    const look = { name: machine.shader(), smooth: machine.smooth() };
-    if (look.name !== shownLook?.name || look.smooth !== shownLook?.smooth) {
+    const look = { name: machine.shader(), smooth: machine.smooth(), mono: machine.mono() };
+    if (look.name !== shownLook?.name || look.smooth !== shownLook?.smooth || look.mono !== shownLook?.mono) {
       shownLook = look;
-      screenGl.select(look.name, look.smooth);
+      screenGl.select(look.name, look.smooth, look.mono);
       screenGl.render();
     }
   } else {
