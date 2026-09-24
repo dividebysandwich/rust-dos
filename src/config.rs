@@ -1,13 +1,17 @@
 //! The rust-dos configuration file: a DOSBox-style INI file with
-//! `[emulator]`, `[drives]` and `[autoexec]` sections. See
+//! `[emulator]`, `[sound]`, `[drives]` and `[autoexec]` sections. See
 //! `rust-dos.conf.example` for the format.
 //!
 //! Lookup order, first match wins: `--config FILE`, `./rust-dos.conf`, then
 //! `rust-dos.conf` in the per-user configuration directory, where a
 //! commented template is written on first start.
+//!
+//! The settings window saves back into the file in use (`save`), changing
+//! only the lines of the settings and drives and keeping everything else.
 
+use crate::cpu::CpuModel;
 use crate::disk::DRIVE_Z;
-use crate::mount::{MountSpec, parse_drive_letter, parse_mount_spec, tokenize};
+use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::timer::CpuSpeed;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -71,10 +75,16 @@ pub struct Config {
     /// True if `source` was just created from the template.
     pub created: bool,
     pub scale: Option<u32>,
+    /// Desktop fullscreen (`fullscreen`).
+    pub fullscreen: Option<bool>,
+    /// Stretch the picture to 4:3 (`aspect`).
+    pub aspect: Option<bool>,
+    /// How the picture is scaled to the window (`filter`).
+    pub filter: Option<Filter>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
-    pub cpu: Option<crate::cpu::CpuModel>,
+    pub cpu: Option<CpuModel>,
     /// RAM in MB (`memsize`).
     pub memsize: Option<usize>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
@@ -94,7 +104,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     None,
     Emulator,
@@ -102,6 +112,64 @@ enum Section {
     Drives,
     Autoexec,
     Unknown,
+}
+
+impl Section {
+    fn parse(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "emulator" => Section::Emulator,
+            "sound" => Section::Sound,
+            "drives" => Section::Drives,
+            "autoexec" => Section::Autoexec,
+            _ => Section::Unknown,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Section::Emulator => "emulator",
+            Section::Sound => "sound",
+            Section::Drives => "drives",
+            Section::Autoexec => "autoexec",
+            Section::None | Section::Unknown => "",
+        }
+    }
+}
+
+/// How the picture is scaled up to the window (`filter`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    /// Sharp pixels.
+    #[default]
+    Nearest,
+    /// Smooth, interpolated pixels.
+    Linear,
+}
+
+impl Filter {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "nearest" => Some(Filter::Nearest),
+            "linear" => Some(Filter::Linear),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Filter::Nearest => "nearest",
+            Filter::Linear => "linear",
+        }
+    }
+}
+
+/// A yes/no setting: true, on, yes or 1, or false, off, no or 0.
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Some(true),
+        "false" | "off" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// The synthesizer that plays the MPU-401's General MIDI (`midisynth`).
@@ -126,6 +194,17 @@ pub struct SoundConfig {
     /// The Gravis Ultrasound; `enabled` says whether there is one.
     pub gus: crate::gus::GusConfig,
     pub midisynth: MidiSynth,
+}
+
+impl MidiSynth {
+    pub fn name(self) -> &'static str {
+        match self {
+            MidiSynth::Auto => "auto",
+            MidiSynth::SoundFont => "soundfont",
+            MidiSynth::Gus => "gus",
+            MidiSynth::None => "none",
+        }
+    }
 }
 
 impl Default for SoundConfig {
@@ -155,7 +234,7 @@ impl SoundConfig {
     /// Problems between settings, once the section is read: an Ultrasound
     /// on the Sound Blaster's ports is left out; shared IRQs and DMA
     /// channels only work while programs use one card at a time.
-    fn check(&mut self) -> Vec<String> {
+    pub fn check(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
         let Some(sb) = self.card() else { return warnings };
         if !self.gus.enabled {
@@ -225,11 +304,8 @@ impl SoundConfig {
                 self.soundfont = Some(path);
             }
             "gus" => {
-                self.gus.enabled = match value.to_ascii_lowercase().as_str() {
-                    "true" | "on" | "yes" | "1" => true,
-                    "false" | "off" | "no" | "0" => false,
-                    _ => return Err(format!("invalid gus '{}' (true or false)", value)),
-                }
+                self.gus.enabled =
+                    parse_bool(value).ok_or_else(|| format!("invalid gus '{}' (true or false)", value))?;
             }
             "gusbase" => {
                 // 230h would put 3X0h-3X7h on the MPU-401 at 330h.
@@ -299,16 +375,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
         }
 
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            section = match name.trim().to_ascii_lowercase().as_str() {
-                "emulator" => Section::Emulator,
-                "sound" => Section::Sound,
-                "drives" => Section::Drives,
-                "autoexec" => Section::Autoexec,
-                other => {
-                    warn(format!("unknown section [{}]", other));
-                    Section::Unknown
-                }
-            };
+            section = Section::parse(name);
+            if section == Section::Unknown {
+                warn(format!("unknown section [{}]", name.trim().to_ascii_lowercase()));
+            }
             continue;
         }
 
@@ -329,6 +399,15 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(n) if (1..=16).contains(&n) => config.scale = Some(n),
                             _ => warn(format!("invalid scale '{}'", value)),
                         },
+                        "fullscreen" | "aspect" => match parse_bool(value) {
+                            Some(on) if key.eq_ignore_ascii_case("fullscreen") => config.fullscreen = Some(on),
+                            Some(on) => config.aspect = Some(on),
+                            None => warn(format!("invalid {} '{}' (true or false)", key, value)),
+                        },
+                        "filter" => match Filter::parse(value) {
+                            Some(filter) => config.filter = Some(filter),
+                            None => warn(format!("invalid filter '{}' (nearest or linear)", value)),
+                        },
                         "cycles" => match CpuSpeed::parse(value) {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
@@ -338,8 +417,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             _ => warn(format!("invalid memsize '{}' (2 to 64 MB)", value)),
                         },
                         "cpu" => match value.to_ascii_lowercase().as_str() {
-                            "386" => config.cpu = Some(crate::cpu::CpuModel::I386),
-                            "486" => config.cpu = Some(crate::cpu::CpuModel::I486),
+                            "386" => config.cpu = Some(CpuModel::I386),
+                            "486" => config.cpu = Some(CpuModel::I486),
                             _ => warn(format!("invalid cpu '{}' (386 or 486)", value)),
                         },
                         _ => warn(format!("unknown setting '{}'", key)),
@@ -458,6 +537,328 @@ pub fn load(
         .collect();
     config.source = Some(path);
     Ok(config)
+}
+
+/// The settings in effect: the configuration with every value that is not
+/// set filled in with its default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settings {
+    pub scale: u32,
+    pub fullscreen: bool,
+    pub aspect: bool,
+    pub filter: Filter,
+    pub cycles: CpuSpeed,
+    pub cpu: CpuModel,
+    /// RAM in MB.
+    pub memsize: usize,
+    pub sound: SoundConfig,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            scale: 1,
+            fullscreen: false,
+            aspect: false,
+            filter: Filter::Nearest,
+            cycles: CpuSpeed::Max,
+            cpu: CpuModel::I486,
+            memsize: crate::bus::DEFAULT_MEMORY_MB,
+            sound: SoundConfig::default(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn from_config(config: &Config) -> Self {
+        let default = Self::default();
+        Self {
+            scale: config.scale.unwrap_or(default.scale),
+            fullscreen: config.fullscreen.unwrap_or(default.fullscreen),
+            aspect: config.aspect.unwrap_or(default.aspect),
+            filter: config.filter.unwrap_or(default.filter),
+            cycles: config.cycles.unwrap_or(default.cycles),
+            cpu: config.cpu.unwrap_or(default.cpu),
+            memsize: config.memsize.unwrap_or(default.memsize),
+            sound: config.sound.clone(),
+        }
+    }
+}
+
+/// Every setting as the file writes it: section, key and value, or None
+/// for a setting that is not set.
+fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static str, Option<String>)> {
+    use Section::{Emulator, Sound};
+    let yes_no = |on: bool| Some(if on { "true" } else { "false" }.to_string());
+    let sound = &settings.sound;
+    let (sb, gus) = (&sound.sb, &sound.gus);
+    vec![
+        (Emulator, "scale", Some(settings.scale.to_string())),
+        (Emulator, "fullscreen", yes_no(settings.fullscreen)),
+        (Emulator, "aspect", yes_no(settings.aspect)),
+        (Emulator, "filter", Some(settings.filter.name().to_string())),
+        (
+            Emulator,
+            "cycles",
+            Some(match settings.cycles {
+                CpuSpeed::Max => "max".to_string(),
+                CpuSpeed::Fixed(n) => n.to_string(),
+            }),
+        ),
+        (
+            Emulator,
+            "cpu",
+            Some(match settings.cpu {
+                CpuModel::I386 => "386",
+                CpuModel::I486 => "486",
+            }
+            .to_string()),
+        ),
+        (Emulator, "memsize", Some(settings.memsize.to_string())),
+        (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
+        (Sound, "sbbase", Some(format!("{:X}", sb.base))),
+        (Sound, "irq", Some(sb.irq.to_string())),
+        (Sound, "dma", Some(sb.dma8.to_string())),
+        (Sound, "hdma", Some(sb.dma16.to_string())),
+        (Sound, "opl", Some(if sound.opl3 { "opl3" } else { "opl2" }.to_string())),
+        (Sound, "soundfont", sound.soundfont.as_deref().map(|p| contract_home(p, home))),
+        (Sound, "gus", yes_no(gus.enabled)),
+        (Sound, "gusbase", Some(format!("{:X}", gus.base))),
+        (Sound, "gusirq", Some(gus.irq.to_string())),
+        (Sound, "gusdma", Some(gus.dma.to_string())),
+        (
+            Sound,
+            "gusdrive",
+            Some(gus.drive.map_or("none".to_string(), |d| crate::disk::drive_letter(d).to_string())),
+        ),
+        (Sound, "ultradir", gus.ultradir.clone()),
+        (Sound, "midisynth", Some(sound.midisynth.name().to_string())),
+    ]
+}
+
+/// What a line of the file is, for `update_text`.
+#[derive(Debug, PartialEq)]
+enum Line {
+    Header(Section),
+    /// `key=value` (the key in lower case), or a drive line in `[drives]`.
+    Setting(String),
+    /// A commented-out `#key=value`, the template's examples.
+    Example(String),
+    /// Blank lines, other comments, `[autoexec]` commands.
+    Other,
+}
+
+/// The section and kind of every line.
+fn classify(lines: &[String]) -> Vec<(Section, Line)> {
+    let mut section = Section::None;
+    let key_of = |text: &str| {
+        let key = text.split_once('=')?.0.trim();
+        (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == ':'))
+            .then(|| key.to_ascii_lowercase())
+    };
+    lines
+        .iter()
+        .map(|raw| {
+            let line = raw.trim();
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                section = Section::parse(name);
+                return (section, Line::Header(section));
+            }
+            let kind = match section {
+                Section::Emulator | Section::Sound | Section::Drives => {
+                    if let Some(comment) = line.strip_prefix(['#', ';']) {
+                        key_of(comment.trim_start_matches(['#', ';']).trim_start())
+                            .map_or(Line::Other, Line::Example)
+                    } else {
+                        key_of(line).map_or(Line::Other, Line::Setting)
+                    }
+                }
+                _ => Line::Other,
+            };
+            (section, kind)
+        })
+        .collect()
+}
+
+/// Index after the last non-blank line of the last `[section]` block, or
+/// None if the file has no such section.
+fn section_end(lines: &[String], layout: &[(Section, Line)], section: Section) -> Option<usize> {
+    let header = layout.iter().rposition(|(_, l)| *l == Line::Header(section))?;
+    let mut last = header;
+    for (i, (_, line)) in layout.iter().enumerate().skip(header + 1) {
+        if matches!(line, Line::Header(_)) {
+            break;
+        }
+        if !lines[i].trim().is_empty() {
+            last = i;
+        }
+    }
+    Some(last + 1)
+}
+
+/// Where a new line of `section` goes: after the commented example of
+/// `key` if there is one, else at the end of the section. Creates the
+/// section, before `[autoexec]` or at the end, if the file has none.
+fn insertion_point(lines: &mut Vec<String>, section: Section, key: Option<&str>) -> usize {
+    let layout = classify(lines);
+    if let Some(key) = key
+        && let Some(i) = layout.iter().rposition(|(s, l)| *s == section && *l == Line::Example(key.to_string()))
+    {
+        return i + 1;
+    }
+    if let Some(end) = section_end(lines, &layout, section) {
+        return end;
+    }
+    let header = format!("[{}]", section.name());
+    match layout.iter().position(|(_, l)| *l == Line::Header(Section::Autoexec)) {
+        Some(autoexec) => {
+            lines.splice(autoexec..autoexec, [header, String::new()]);
+            autoexec + 1
+        }
+        None => {
+            if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push(header);
+            lines.len()
+        }
+    }
+}
+
+/// `line` (`key=value`) with a new value, keeping the key as written and
+/// the spacing around the '='.
+fn with_value(line: &str, value: &str) -> String {
+    let eq = line.find('=').unwrap_or(line.len());
+    let rest = line.get(eq + 1..).unwrap_or("");
+    let gap = rest.len() - rest.trim_start().len();
+    format!("{}={}{}", &line[..eq], &rest[..gap], value)
+}
+
+/// Set `key` in `section` to `value`: the last line that sets it gets the
+/// new value, or a new line is added. With None, the lines that set it
+/// are commented out.
+fn set_key(lines: &mut Vec<String>, section: Section, key: &str, value: Option<&str>) {
+    let layout = classify(lines);
+    let setting = Line::Setting(key.to_string());
+    let existing: Vec<usize> =
+        (0..lines.len()).filter(|&i| layout[i].0 == section && layout[i].1 == setting).collect();
+    match (existing.last(), value) {
+        (Some(&i), Some(value)) => lines[i] = with_value(&lines[i], value),
+        (Some(_), None) => {
+            for i in existing {
+                lines[i] = format!("#{}", lines[i]);
+            }
+        }
+        (None, Some(value)) => {
+            let at = insertion_point(lines, section, Some(key));
+            lines.insert(at, format!("{}={}", key, value));
+        }
+        (None, None) => {}
+    }
+}
+
+/// Set the `[drives]` line of `drive` to `spec`: the last line for the
+/// drive gets the new value, or a line is added after the other drives.
+/// With None, the drive's lines are removed.
+fn set_drive(lines: &mut Vec<String>, drive: u8, spec: Option<&MountSpec>, home: Option<&Path>) {
+    let layout = classify(lines);
+    let is_drive = |(s, l): &(Section, Line)| {
+        *s == Section::Drives && matches!(l, Line::Setting(k) if parse_drive_letter(k).is_some())
+    };
+    let existing: Vec<usize> = (0..lines.len())
+        .filter(|&i| {
+            is_drive(&layout[i])
+                && matches!(&layout[i].1, Line::Setting(k) if parse_drive_letter(k) == Some(drive))
+        })
+        .collect();
+    match (existing.last(), spec) {
+        (Some(&i), Some(spec)) => lines[i] = with_value(&lines[i], &mount_spec_value(spec, home)),
+        (Some(_), None) => {
+            for &i in existing.iter().rev() {
+                lines.remove(i);
+            }
+        }
+        (None, Some(spec)) => {
+            let line = format!("{}={}", crate::disk::drive_letter(drive), mount_spec_value(spec, home));
+            let at = match layout.iter().rposition(is_drive) {
+                Some(last) => last + 1,
+                None => insertion_point(lines, Section::Drives, None),
+            };
+            lines.insert(at, line);
+        }
+        (None, None) => {}
+    }
+}
+
+/// A change to `[drives]`: the drive's new mount, or None for no drive.
+pub type DriveChange = (u8, Option<MountSpec>);
+
+/// `original` with what changed from `baseline` to `settings`, and the
+/// drive changes, written into it. Everything else in the file (comments,
+/// blank lines, `[autoexec]`, the settings that didn't change) stays as it
+/// is.
+pub fn update_text(
+    original: &str,
+    baseline: &Settings,
+    settings: &Settings,
+    drives: &[DriveChange],
+    home: Option<&Path>,
+) -> String {
+    let (bom, text) = match original.strip_prefix('\u{FEFF}') {
+        Some(rest) => ("\u{FEFF}", rest),
+        None => ("", original),
+    };
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let final_newline = text.is_empty() || text.ends_with('\n');
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+
+    let before = entries(baseline, home);
+    for ((section, key, value), (_, _, old)) in entries(settings, home).into_iter().zip(before) {
+        if value != old {
+            set_key(&mut lines, section, key, value.as_deref());
+        }
+    }
+    for (drive, spec) in drives {
+        set_drive(&mut lines, *drive, spec.as_ref(), home);
+    }
+
+    let mut out = format!("{}{}", bom, lines.join(newline));
+    if final_newline && !lines.is_empty() {
+        out.push_str(newline);
+    }
+    out
+}
+
+/// Save what changed from `baseline` to `settings`, and the drive changes,
+/// into the configuration file at `path` (see `update_text`). The file is
+/// replaced in one step, so a failed write leaves the old one.
+pub fn save(
+    path: &Path,
+    baseline: &Settings,
+    settings: &Settings,
+    drives: &[DriveChange],
+    home: Option<&Path>,
+) -> Result<(), String> {
+    let original = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(e) => return Err(format!("cannot read {}: {}", path.display(), e)),
+    };
+    let text = update_text(&original, baseline, settings, drives, home);
+    // Write through a symbolic link rather than replacing it, and keep the
+    // file's permissions.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut temp_name = target.file_name().unwrap_or_default().to_os_string();
+    temp_name.push(".tmp");
+    let temp = target.with_file_name(temp_name);
+    let permissions = fs::metadata(&target).map(|m| m.permissions()).ok();
+    fs::write(&temp, text)
+        .and_then(|()| permissions.map_or(Ok(()), |p| fs::set_permissions(&temp, p)))
+        .and_then(|()| fs::rename(&temp, &target))
+        .map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            format!("cannot write {}: {}", target.display(), e)
+        })
 }
 
 #[cfg(test)]
@@ -724,7 +1125,142 @@ mod tests {
         assert!(config.autoexec.is_empty());
         assert_eq!(config.scale, None);
         assert_eq!(config.cycles, None);
+        assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
         assert_eq!(config.sound, SoundConfig::default());
+    }
+
+    #[test]
+    fn display_settings() {
+        let config = parse("[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(false), Some(Filter::Linear)));
+        let config = parse("[emulator]\nfullscreen=maybe\nfilter=blur\n", Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config), Settings::default());
+    }
+
+    /// Settings with every value away from its default.
+    fn changed_settings() -> Settings {
+        let sound = SoundConfig {
+            sb: crate::sb::SbConfig { model: crate::sb::SbModel::SbPro2, base: 0x240, irq: 5, dma8: 3, dma16: 6 },
+            sb_installed: true,
+            opl3: false,
+            soundfont: Some(PathBuf::from("/home/u/sf/General User.sf2")),
+            gus: crate::gus::GusConfig {
+                enabled: true,
+                base: 0x260,
+                irq: 11,
+                dma: 6,
+                drive: Some(20),
+                ultradir: Some("D:\\GUS".to_string()),
+            },
+            midisynth: MidiSynth::Gus,
+        };
+        Settings {
+            scale: 3,
+            fullscreen: true,
+            aspect: true,
+            filter: Filter::Linear,
+            cycles: CpuSpeed::Fixed(3000),
+            cpu: CpuModel::I386,
+            memsize: 32,
+            sound,
+        }
+    }
+
+    fn drive_specs() -> Vec<MountSpec> {
+        use crate::disk::MountOptions;
+        vec![
+            MountSpec { drive: 2, path: "/home/u/dos".into(), opts: MountOptions::default() },
+            MountSpec {
+                drive: 3,
+                path: "/home/u/cd images/game.cue".into(),
+                opts: MountOptions { kind: DriveKind::CdRom, label: Some("GAME".into()), read_only: false },
+            },
+        ]
+    }
+
+    #[test]
+    fn saved_settings_parse_back() {
+        let home = Path::new("/home/u");
+        let settings = changed_settings();
+        let changes: Vec<DriveChange> = drive_specs().into_iter().map(|s| (s.drive, Some(s))).collect();
+        let text = update_text(TEMPLATE, &Settings::default(), &settings, &changes, Some(home));
+        let config = parse(&text, Path::new("/cfg"), Some(home));
+        assert!(config.warnings.is_empty(), "{:?}\n{}", config.warnings, text);
+        assert_eq!(Settings::from_config(&config), settings);
+        assert_eq!(config.drives, drive_specs());
+
+        // The template's examples and comments stay, each new line right
+        // after its example.
+        for line in TEMPLATE.lines() {
+            assert!(text.contains(line), "lost '{}'", line);
+        }
+        assert!(text.contains("#scale=2\nscale=3\n"), "{}", text);
+        assert!(text.contains("#sbtype=sb16\nsbtype=sbpro2\n"), "{}", text);
+        assert!(text.contains("#E=~/dos/images/game.cue\nC=~/dos\nD=\"~/cd images/game.cue\" cdrom -label GAME\n"), "{}", text);
+        assert!(text.contains("soundfont=~/sf/General User.sf2\n"), "{}", text);
+
+        // Saving the same again changes nothing.
+        assert_eq!(update_text(&text, &settings, &settings, &changes, Some(home)), text);
+    }
+
+    #[test]
+    fn unchanged_settings_leave_the_file_alone() {
+        let settings = changed_settings();
+        assert_eq!(update_text(TEMPLATE, &settings, &settings, &[], None), TEMPLATE);
+        assert_eq!(update_text("", &settings, &settings, &[], None), "");
+        assert_eq!(update_text("[emulator]\nscale=2", &settings, &settings, &[], None), "[emulator]\nscale=2");
+    }
+
+    #[test]
+    fn existing_lines_change_in_place() {
+        let text = "\u{FEFF}[Emulator]\r\nScale = 2\r\ncycles=max\r\n[sound]\r\nsoundfont=gm.sf2\r\n\r\n[drives]\r\nc: = /old\r\n# keep\r\nD=/cd cdrom\r\nd=/cd2\r\n[autoexec]\r\nC:\r\n";
+        let sound = SoundConfig { soundfont: Some("gm.sf2".into()), ..SoundConfig::default() };
+        let baseline = Settings { scale: 2, sound, ..Settings::default() };
+        let settings = Settings { scale: 4, ..Settings::default() };
+        let spec = |drive, path: &str| Some(MountSpec { drive, path: path.into(), opts: Default::default() });
+        let changes = [(2, spec(2, "/new")), (3, None), (4, spec(4, "/e"))];
+        assert_eq!(
+            update_text(text, &baseline, &settings, &changes, None),
+            // A cleared setting is commented out; a removed drive loses all
+            // its lines; a new one goes after the other drives.
+            "\u{FEFF}[Emulator]\r\nScale = 4\r\ncycles=max\r\n[sound]\r\n#soundfont=gm.sf2\r\n\r\n[drives]\r\nc: = /new\r\nE=/e\r\n# keep\r\n[autoexec]\r\nC:\r\n"
+        );
+    }
+
+    #[test]
+    fn missing_sections_go_before_autoexec() {
+        let settings = Settings { memsize: 8, ..Settings::default() };
+        let base = Settings::default();
+        let changes = [(3, Some(MountSpec { drive: 3, path: "/d".into(), opts: Default::default() }))];
+        assert_eq!(
+            update_text("[autoexec]\nDIR\n", &base, &settings, &changes, None),
+            "[emulator]\nmemsize=8\n\n[drives]\nD=/d\n\n[autoexec]\nDIR\n"
+        );
+        assert_eq!(update_text("# mine\n", &base, &settings, &[], None), "# mine\n\n[emulator]\nmemsize=8\n");
+        // A second [emulator] block gets the new line.
+        assert_eq!(
+            update_text("[emulator]\nscale=2\n[sound]\n[emulator]\ncpu=386\n", &base, &settings, &[], None),
+            "[emulator]\nscale=2\n[sound]\n[emulator]\ncpu=386\nmemsize=8\n"
+        );
+    }
+
+    #[test]
+    fn save_replaces_the_file() {
+        let base = scratch("save");
+        let path = base.join(FILE_NAME);
+        fs::write(&path, "# my settings\n[emulator]\nscale=2\n").unwrap();
+        let before = Settings { scale: 2, ..Settings::default() };
+        let settings = Settings { scale: 3, ..Settings::default() };
+        save(&path, &before, &settings, &[], None).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# my settings\n[emulator]\nscale=3\n");
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+
+        // A file that has gone missing starts over from the template.
+        fs::remove_file(&path).unwrap();
+        save(&path, &before, &settings, &[], None).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("#scale=2\nscale=3\n"));
     }
 
     #[test]

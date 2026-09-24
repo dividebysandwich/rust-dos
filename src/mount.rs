@@ -229,6 +229,46 @@ pub fn display_host_path(path: &Path) -> String {
     s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
+/// Host path as the user would write it: under the home directory it
+/// starts with `~/`, which `expand_host_path` turns back into the path.
+pub fn contract_home(path: &Path, home: Option<&Path>) -> String {
+    let display = display_host_path(path);
+    let Some(home) = home else { return display };
+    match Path::new(&display).strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => display,
+    }
+}
+
+/// A token `tokenize` reads back as `s`: quoted if it contains whitespace.
+fn quote(s: &str) -> String {
+    if s.is_empty() || s.contains(char::is_whitespace) {
+        format!("\"{}\"", s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// The `<host path> [type] [-label NAME] [-ro]` text of a mount, as the
+/// `[drives]` section and `MOUNT` take it: the inverse of
+/// `parse_mount_spec`.
+pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
+    let mut value = quote(&contract_home(&spec.path, home));
+    if spec.opts.kind != DriveKind::HardDisk {
+        value.push(' ');
+        value.push_str(spec.opts.kind.name());
+    }
+    if let Some(label) = spec.opts.label.as_deref().filter(|l| !l.is_empty()) {
+        value.push_str(" -label ");
+        value.push_str(&quote(label));
+    }
+    if spec.opts.read_only {
+        value.push_str(" -ro");
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +381,36 @@ mod tests {
         assert!(parse_imgmount_command("d a.cue b.cue", &locate, cwd, None).is_err());
         assert!(parse_imgmount_command("d", &locate, cwd, None).is_err());
         assert!(parse_imgmount_command("", &locate, cwd, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mount_spec_values_parse_back() {
+        let home = Path::new("/home/u");
+        let base = Path::new("/cfg");
+        let specs = [
+            MountSpec { drive: 2, path: "/home/u/dos".into(), opts: MountOptions::default() },
+            MountSpec {
+                drive: 0,
+                path: "/home/u/My Disks/a".into(),
+                opts: MountOptions { kind: DriveKind::Floppy, label: Some("DISK 1".into()), read_only: true },
+            },
+            MountSpec {
+                drive: 3,
+                path: "/games/cd.cue".into(),
+                opts: MountOptions { kind: DriveKind::CdRom, label: None, read_only: false },
+            },
+        ];
+        for spec in specs {
+            let value = mount_spec_value(&spec, Some(home));
+            let back = parse_mount_spec(spec.drive, &toks(&value), base, Some(home)).unwrap();
+            assert_eq!(back, spec, "{}", value);
+        }
+        assert_eq!(mount_spec_value(&MountSpec { drive: 2, path: "/home/u".into(), opts: MountOptions::default() }, Some(home)), "~");
+        assert_eq!(
+            mount_spec_value(&MountSpec { drive: 2, path: "/home/u/x y".into(), opts: MountOptions::default() }, None),
+            "\"/home/u/x y\""
+        );
     }
 
     #[test]

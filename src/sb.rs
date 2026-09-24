@@ -41,6 +41,15 @@ impl SbModel {
         }
     }
 
+    /// The `sbtype` setting that selects the card.
+    pub fn name(self) -> &'static str {
+        match self {
+            SbModel::Sb2 => "sb2",
+            SbModel::SbPro2 => "sbpro2",
+            SbModel::Sb16 => "sb16",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "sb2" | "sb20" => Some(SbModel::Sb2),

@@ -16,6 +16,12 @@
 [emulator]
 # Window scale factor. -s/--scale overrides it.
 #scale=2
+# Fill the screen instead of a window, keeping the picture's proportions.
+#fullscreen=false
+# Stretch the picture to 4:3, as a monitor showed 320x200 and 640x400.
+#aspect=false
+# How the picture is scaled up: nearest (sharp pixels) or linear (smooth).
+#filter=nearest
 # CPU speed in instructions per millisecond, or max to run as fast as the
 # host keeps up with in real time. Lower it for old games that run too
 # fast. --cycles overrides it.

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use crate::cdrom::image::CdImage;
 use crate::cdrom::Extent;
 use crate::memfs::{Bytes, MemFs, Node};
+use crate::mount::MountSpec;
 
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
 pub const FIRST_USER_HANDLE: u16 = 5;
@@ -191,6 +192,10 @@ pub struct DriveInfo {
     /// True for CD-ROMs, `-ro` mounts and the drives held in memory.
     pub read_only: bool,
     pub current_dir: String,
+    /// The mount as it was asked for (the path as given, the options before
+    /// the label defaults and CD images' type), as the configuration file
+    /// has it. None for the drives held in memory.
+    pub mount: Option<MountSpec>,
 }
 
 impl DriveInfo {
@@ -214,6 +219,8 @@ struct Drive {
     current_dir: String, // DOS directory relative to root (e.g., "GAMES\DOOM")
     label: String,
     read_only: bool,
+    /// The mount as it was asked for.
+    mount: Option<MountSpec>,
 }
 
 impl Drive {
@@ -362,7 +369,7 @@ impl DiskController {
             let _ = fs::create_dir_all(&root_path);
         }
 
-        let canonical = fs::canonicalize(&root_path).unwrap_or(root_path);
+        let canonical = fs::canonicalize(&root_path).unwrap_or_else(|_| root_path.clone());
 
         // Create a dummy COMMAND.COM on Z:
         let mut z_files = MemFs::new();
@@ -375,6 +382,7 @@ impl DiskController {
             current_dir: String::new(),
             label: DEFAULT_LABEL.to_string(),
             read_only: false,
+            mount: Some(MountSpec { drive: DRIVE_C, path: root_path.clone(), opts: MountOptions::default() }),
         });
         drives[DRIVE_Z as usize] = Some(Self::memory_drive(z_files, DEFAULT_LABEL));
 
@@ -392,6 +400,7 @@ impl DiskController {
             current_dir: String::new(),
             label: normalize_label(label),
             read_only: true,
+            mount: None,
         }
     }
 
@@ -459,6 +468,7 @@ impl DiskController {
                 current_dir: String::new(),
                 label: label(&volume_label),
                 read_only: true,
+                mount: Some(MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() }),
             });
             return Ok(canonical);
         }
@@ -474,6 +484,7 @@ impl DiskController {
             current_dir: String::new(),
             label: label(DEFAULT_LABEL),
             read_only: opts.read_only || opts.kind == DriveKind::CdRom,
+            mount: Some(MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() }),
         });
         Ok(canonical)
     }
@@ -549,6 +560,7 @@ impl DiskController {
             label: d.label.clone(),
             read_only: !d.writable(),
             current_dir: d.current_dir.to_ascii_uppercase(),
+            mount: d.mount.clone(),
         })
     }
 

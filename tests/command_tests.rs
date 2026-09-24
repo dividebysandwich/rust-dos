@@ -65,6 +65,20 @@ fn drive_letter_switches_drives() {
 }
 
 #[test]
+fn drives_keep_their_mount_options() {
+    let base = scratch("options", &["c", "floppy"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let opts = MountOptions { kind: DriveKind::Floppy, label: Some("disk 1".into()), read_only: true };
+    cpu.bus.mount_drive(0, &base.join("floppy"), opts.clone(), false).unwrap();
+    let info = cpu.bus.disk.drive_info(0).unwrap();
+    // The label as given, not as DOS shows it.
+    let mount = info.mount.unwrap();
+    assert_eq!((info.label.as_str(), mount.path, mount.opts), ("DISK 1", base.join("floppy"), opts));
+    assert_eq!(cpu.bus.disk.drive_info(2).unwrap().mount.unwrap().opts, MountOptions::default());
+    assert!(cpu.bus.disk.drive_info(25).unwrap().mount.is_none());
+}
+
+#[test]
 fn mount_lists_mounts_and_unmounts() {
     let base = scratch("mount", &["c", "floppy", "cd"]);
     let mut cpu = Cpu::new(base.join("c"));
