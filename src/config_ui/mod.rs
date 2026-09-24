@@ -12,6 +12,7 @@ mod draw;
 use browser::{Browser, CD_IMAGES, Row, SOUNDFONTS};
 use dialog::{Event, Field, MountDialog, TextField};
 use draw::{Grid, Layout, Rgb};
+pub use draw::cp437;
 
 use crate::config::{MidiSynth, Settings};
 use crate::cpu::CpuModel;

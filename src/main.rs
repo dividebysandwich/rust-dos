@@ -160,6 +160,7 @@ fn main() -> Result<(), String> {
 
     // Load Shell Code into Memory
     cpu.load_shell();
+    print_banner(&mut cpu, &config, args.no_config);
 
     // Startup commands: the config's [autoexec] lines, then AUTOEXEC.BAT
     // from the C: root if there is one, like the startup sequence a real PC
@@ -859,6 +860,68 @@ fn release_input(cpu: &mut Cpu, held: &mut HashMap<Keycode, (u8, bool)>) {
 fn config_warning(cpu: &mut Cpu, msg: &str) {
     eprintln!("[CONFIG] Warning: {}", msg);
     cpu.bus.log_string(&format!("[CONFIG] Warning: {}", msg));
+}
+
+/// The box above the first DOS prompt: the emulator and its version, the
+/// configuration file in use and the way to the settings window.
+fn print_banner(cpu: &mut Cpu, config: &config::Config, no_config: bool) {
+    // Bright cyan, white and yellow on blue.
+    const FRAME: u8 = 0x1B;
+    const TEXT: u8 = 0x1F;
+    const HIGHLIGHT: u8 = 0x1E;
+    // The widest text inside the frame: a line of 80 would wrap.
+    const MAX_WIDTH: usize = 74;
+
+    let label = "Config file: ";
+    let file = match &config.source {
+        Some(path) => {
+            let path = mount::display_host_path(&std::path::absolute(path).unwrap_or_else(|_| path.clone()));
+            if config.created { format!("{} (new)", path) } else { path }
+        }
+        None if no_config => "none (--no-config)".to_string(),
+        None => "none".to_string(),
+    };
+    // A path too long for the box keeps its end.
+    let room = MAX_WIDTH - label.len();
+    let file = match file.chars().count() {
+        n if n > room => format!("...{}", file.chars().skip(n - room + 3).collect::<String>()),
+        _ => file,
+    };
+    let lines: [&[(&str, u8)]; 4] = [
+        &[
+            (&format!("Rust-DOS v{}", env!("CARGO_PKG_VERSION")), HIGHLIGHT),
+            (&format!(" - {}", env!("CARGO_PKG_DESCRIPTION")), TEXT),
+        ],
+        &[],
+        &[(label, TEXT), (&file, HIGHLIGHT)],
+        &[
+            ("Press ", TEXT),
+            ("Ctrl+F12", HIGHLIGHT),
+            (" or type ", TEXT),
+            ("DOSCONFIG", HIGHLIGHT),
+            (" to open the settings.", TEXT),
+        ],
+    ];
+    let len = |line: &[(&str, u8)]| line.iter().map(|(text, _)| text.chars().count()).sum::<usize>();
+    let width = lines.iter().map(|line| len(line)).max().unwrap_or(0);
+
+    fn put(cpu: &mut Cpu, text: &str, attr: u8) {
+        let cells: Vec<u8> = text.chars().map(config_ui::cp437).collect();
+        video::print_cp437(cpu, &cells, attr);
+    }
+    put(cpu, &format!("╔{}╗", "═".repeat(width + 2)), FRAME);
+    video::print_string(cpu, "\r\n");
+    for line in lines {
+        put(cpu, "║ ", FRAME);
+        for (text, attr) in line {
+            put(cpu, text, *attr);
+        }
+        put(cpu, &" ".repeat(width - len(line)), TEXT);
+        put(cpu, " ║", FRAME);
+        video::print_string(cpu, "\r\n");
+    }
+    put(cpu, &format!("╚{}╝", "═".repeat(width + 2)), FRAME);
+    video::print_string(cpu, "\r\n\r\n");
 }
 
 /// Find and parse the configuration file (see config.rs for the lookup
