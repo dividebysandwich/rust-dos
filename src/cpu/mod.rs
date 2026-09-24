@@ -750,9 +750,16 @@ impl Cpu {
     }
 
     /// The contents of a program or batch file, on any drive: a host
-    /// directory, a CD image or a drive held in memory.
-    fn read_program_file(&self, filename: &str) -> Option<crate::memfs::Bytes> {
-        self.bus.disk.file_data(filename)?.read().ok()
+    /// directory, a disk or CD image or a drive held in memory. Reading it
+    /// takes the time the drive's speed says.
+    fn read_program_file(&mut self, filename: &str) -> Option<crate::memfs::Bytes> {
+        let bytes = self.bus.disk.file_data(filename)?.read().ok()?;
+        if let Some(drive) = self.bus.disk.drive_of(filename) {
+            let key = self.bus.disk.file_key(filename);
+            let access = crate::disknoise::Access::File { write: false, key };
+            self.bus.drive_activity(drive, crate::diskio::OPEN_BYTES + bytes.len() as u32, access);
+        }
+        Some(bytes)
     }
 
     /// Read a .BAT file from the virtual disk and append its commands to

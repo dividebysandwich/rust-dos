@@ -3,8 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The extensions of the CD images a drive can show.
-pub const CD_IMAGES: &[&str] = &["cue", "iso", "bin", "img"];
+/// The extensions of the disk and CD images a drive can show.
+pub const IMAGES: &[&str] = &["cue", "iso", "bin", "img", "ima", "vfd", "flp", "dsk"];
 pub const SOUNDFONTS: &[&str] = &["sf2"];
 
 pub struct Entry {
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn lists_directories_then_wanted_files() {
         let dir = scratch("list");
-        let mut b = Browser::new("t", &dir, true, CD_IMAGES);
+        let mut b = Browser::new("t", &dir, true, IMAGES);
         assert_eq!(names(&b), ["..", "games", "Images", "a.iso", "b.CUE"]);
         assert_eq!(b.rows(), 6);
 
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn starts_at_the_nearest_existing_directory() {
         let dir = scratch("start");
-        let b = Browser::new("t", &dir.join("games/doom/missing/deeper"), false, CD_IMAGES);
+        let b = Browser::new("t", &dir.join("games/doom/missing/deeper"), false, IMAGES);
         assert_eq!(b.dir, dir.join("games/doom"));
         // Without directory picking the entries start at row 0.
         assert!(matches!(b.row(0), Some(Row::Entry(e)) if e.name == ".."));

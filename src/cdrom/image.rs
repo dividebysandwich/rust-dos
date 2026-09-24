@@ -258,7 +258,18 @@ impl Backing {
         let mut file = File::open(path).map_err(error)?;
         let total = file.metadata().map_err(error)?.len();
         let (data_offset, len) = match format {
-            FileFormat::Wave => wave_data(&mut file).map_err(|e| format!("{}: {}", path.display(), e))?,
+            FileFormat::Wave => {
+                let (format, offset, size) =
+                    wave_data(&mut file).map_err(|e| format!("{}: {}", path.display(), e))?;
+                // Only CD audio fits a CD track.
+                if format != (WaveFormat { channels: 2, rate: 44_100, bits: 16 }) {
+                    return Err(format!(
+                        "{}: only 16-bit stereo 44.1 kHz PCM WAVE files can be CD audio",
+                        path.display()
+                    ));
+                }
+                (offset, size)
+            }
             _ => (0, total),
         };
         Ok(Backing { file: RefCell::new(file), data_offset, len, swap: format == FileFormat::Motorola })
@@ -288,16 +299,24 @@ fn swap_samples(buf: &mut [u8]) {
     }
 }
 
-/// Where the samples of a WAVE file are, and how many bytes. Only CD
-/// audio fits a CD track: PCM, 2 channels, 16 bits, 44.1 kHz.
-fn wave_data(file: &mut File) -> Result<(u64, u64), String> {
+/// The format of a PCM WAVE file's samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaveFormat {
+    pub channels: u16,
+    pub rate: u32,
+    pub bits: u16,
+}
+
+/// The format of a PCM WAVE file's samples, where they are and how many
+/// bytes.
+pub fn wave_data<R: Read + Seek>(file: &mut R) -> Result<(WaveFormat, u64, u64), String> {
     let mut header = [0u8; 12];
     file.read_exact(&mut header).map_err(|e| e.to_string())?;
     if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
         return Err("not a WAVE file".to_string());
     }
     let mut at = 12u64;
-    let mut format_ok = false;
+    let mut format = None;
     loop {
         let mut chunk = [0u8; 8];
         file.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
@@ -309,13 +328,11 @@ fn wave_data(file: &mut File) -> Result<(u64, u64), String> {
                 file.read_exact(&mut fmt).map_err(|e| e.to_string())?;
                 let word = |i: usize| u16::from_le_bytes([fmt[i], fmt[i + 1]]);
                 let rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
-                format_ok = word(0) == 1 && word(2) == 2 && rate == 44_100 && word(14) == 16;
+                format = (word(0) == 1).then_some(WaveFormat { channels: word(2), rate, bits: word(14) });
             }
             b"data" => {
-                if !format_ok {
-                    return Err("only 16-bit stereo 44.1 kHz PCM WAVE files can be CD audio".to_string());
-                }
-                return Ok((at + 8, size));
+                let format = format.ok_or("not a PCM WAVE file")?;
+                return Ok((format, at + 8, size));
             }
             _ => {}
         }

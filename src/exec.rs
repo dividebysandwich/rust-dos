@@ -233,7 +233,10 @@ impl Cpu {
             return false;
         }
         let caller_cs = || {
-            let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(2));
+            // A service waiting for slow disk access has its deadline and
+            // vector (10 bytes) over the return frame.
+            let waiting = self.ip() == crate::bios::IO_WAIT;
+            let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(if waiting { 12 } else { 2 }));
             self.bus.read_16(frame)
         };
         self.cs() == 0 || (self.cs() == 0xF000 && caller_cs() == 0)
@@ -322,7 +325,13 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
     // instruction.)
     if cpu.pending_command.is_some() {
         let cmd = cpu.pending_command.take().unwrap();
+        cpu.bus.disk_io.clear();
         dispatch_command(cpu, &cmd);
+        // A program loaded from a slow disk starts once it's read.
+        let disk_time = cpu.bus.disk_io.take_pending();
+        if disk_time > 0 && cpu.state == CpuState::Running {
+            crate::diskio::wait_before(cpu, disk_time);
+        }
         return Shell::Handled;
     }
 
@@ -550,13 +559,18 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     let vector = ram[phys_ip + 2];
     match ram[phys_ip + 1] {
         0x38 => {
+            cpu.bus.disk_io.clear();
             crate::interrupts::handle_hle(cpu, vector);
+            let disk_time = cpu.bus.disk_io.take_pending();
             if cpu.hle_retry {
                 // Stay on the trap, with interrupts on as the BIOS's own
                 // wait loops have them; the caller's flags come back with
                 // its return frame.
                 cpu.hle_retry = false;
                 cpu.set_cpu_flag(CpuFlags::IF, true);
+            } else if disk_time > 0 && !(0x08..=0x0F).contains(&vector) && cpu.state == CpuState::Running {
+                // Slow disk access: the service returns once it's done.
+                crate::diskio::begin_wait(cpu, vector, disk_time);
             } else {
                 crate::interrupts::return_from_hle(cpu, vector);
             }

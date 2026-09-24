@@ -144,8 +144,10 @@ pub enum Cmd {
         kind: Option<String>,
         label: Option<String>,
         read_only: bool,
+        images: Vec<String>,
     },
     Unmount { drive: String },
+    SwapImages,
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,8 +1081,15 @@ impl DebugHub {
             }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
             Cmd::Drives => Reply::Json(drives_json(cpu)),
-            Cmd::Mount { drive, path, kind, label, read_only } => {
-                match mount_drive(cpu, &drive, &path, kind.as_deref(), label, read_only) {
+            Cmd::SwapImages => {
+                let messages = cpu.bus.swap_images();
+                for message in &messages {
+                    cpu.bus.log_string(&format!("[DEBUG] {}", message));
+                }
+                Reply::Json(json!({"messages": messages, "drives": drives_json(cpu)}))
+            }
+            Cmd::Mount { drive, path, kind, label, read_only, images } => {
+                match mount_drive(cpu, &drive, &path, kind.as_deref(), label, read_only, images) {
                     Ok(root) => {
                         cpu.bus.log_string(&format!(
                             "[DEBUG] Drive {} mounted to {}",
@@ -1161,7 +1170,12 @@ impl DebugHub {
                     "display_lines": timing.display,
                 },
             },
-            "drive_c": display_host_path(cpu.bus.disk.root_path()),
+            "drive_c": cpu
+                .bus
+                .disk
+                .drive_info(crate::disk::DRIVE_C)
+                .and_then(|info| info.root.or(info.image))
+                .map(|path| display_host_path(&path)),
             "current_drive": drive_letter(cpu.bus.disk.get_current_drive()).to_string(),
             "trace": self.trace_status(),
             "breakpoints": self.breakpoints.len(),
@@ -1534,6 +1548,8 @@ fn drives_json(cpu: &Cpu) -> Value {
                 "type": info.kind.name(),
                 "path": info.root.as_ref().or(info.image.as_ref()).map(|p| display_host_path(p)),
                 "image": info.image.is_some(),
+                "images": info.images.iter().map(|p| display_host_path(p)).collect::<Vec<_>>(),
+                "image_index": info.image_index,
                 "label": info.label,
                 "read_only": info.read_only,
                 "current_dir": info.current_dir,
@@ -1557,6 +1573,7 @@ fn mount_drive(
     kind: Option<&str>,
     label: Option<String>,
     read_only: bool,
+    images: Vec<String>,
 ) -> Result<PathBuf, String> {
     let drive =
         parse_drive_letter(drive).ok_or_else(|| format!("invalid drive letter '{}'", drive))?;
@@ -1566,19 +1583,22 @@ fn mount_drive(
     };
     let explicit = kind.is_some() || label.is_some() || read_only;
     let path = PathBuf::from(path);
-    let opts = match cpu.bus.disk.drive_info(drive) {
-        // A CD image brings its own label.
-        Some(info) if !explicit => MountOptions {
+    let mut opts = match cpu.bus.disk.drive_info(drive) {
+        // An image brings its own type and label.
+        Some(info) if !explicit && !path.is_file() => MountOptions {
             kind: info.kind,
-            label: (!path.is_file() && info.image.is_none()).then_some(info.label),
+            label: info.image.is_none().then_some(info.label),
             read_only: info.read_only,
+            ..Default::default()
         },
         _ => MountOptions {
             kind: kind.unwrap_or(DriveKind::HardDisk),
             label,
             read_only,
+            ..Default::default()
         },
     };
+    opts.more_images = images.into_iter().map(PathBuf::from).collect();
     cpu.bus.mount_drive(drive, &path, opts, true)
 }
 

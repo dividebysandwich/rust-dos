@@ -9,7 +9,7 @@ mod browser;
 mod dialog;
 mod draw;
 
-use browser::{Browser, CD_IMAGES, Row, SOUNDFONTS};
+use browser::{Browser, IMAGES, Row, SOUNDFONTS};
 use dialog::{Event, Field, MountDialog, TextField};
 use draw::{Grid, Layout, Rgb};
 pub use draw::cp437;
@@ -17,6 +17,7 @@ pub use draw::cp437;
 use crate::config::{MidiSynth, Settings};
 use crate::cpu::CpuModel;
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
+use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use crate::sb::SbModel;
 use crate::timer::CpuSpeed;
@@ -83,10 +84,10 @@ impl Page {
         match self {
             Page::Drives => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter],
-            Page::Emulator => &[Cycles, Cpu, Memsize],
+            Page::Emulator => &[Cycles, Cpu, Memsize, HardDiskSpeed, FloppyDiskSpeed],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
-                SoundFont,
+                SoundFont, HardDiskNoise, FloppyDiskNoise,
             ],
         }
     }
@@ -136,6 +137,10 @@ enum Item {
     UltraDir,
     Midi,
     SoundFont,
+    HardDiskSpeed,
+    FloppyDiskSpeed,
+    HardDiskNoise,
+    FloppyDiskNoise,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -189,6 +194,10 @@ impl Item {
             UltraDir => "  ULTRADIR",
             Midi => "MIDI synthesizer",
             SoundFont => "SoundFont",
+            HardDiskSpeed => "Hard disk speed",
+            FloppyDiskSpeed => "Floppy disk speed",
+            HardDiskNoise => "Hard disk noise",
+            FloppyDiskNoise => "Floppy disk noise",
         }
     }
 
@@ -196,6 +205,7 @@ impl Item {
         use Item::*;
         match self {
             Scale | Fullscreen | Aspect | Filter | Cycles => Applies::Now,
+            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
@@ -261,6 +271,10 @@ impl Item {
             }
             .to_string(),
             SoundFont => s.sound.soundfont.as_deref().map_or("none".to_string(), |p| contract_home(p, home)),
+            HardDiskSpeed => s.disk.hard_disk_speed.describe(DiskClass::HardDisk),
+            FloppyDiskSpeed => s.disk.floppy_disk_speed.describe(DiskClass::Floppy),
+            HardDiskNoise => s.disk.hard_disk_noise.name().to_string(),
+            FloppyDiskNoise => s.disk.floppy_disk_noise.name().to_string(),
         }
     }
 
@@ -320,6 +334,10 @@ impl Item {
                 let synths = [MidiSynth::Auto, MidiSynth::SoundFont, MidiSynth::Gus, MidiSynth::None];
                 sound.midisynth = cycle(&synths, sound.midisynth, dir);
             }
+            HardDiskSpeed => s.disk.hard_disk_speed = cycle(&DiskSpeed::ALL, s.disk.hard_disk_speed, dir),
+            FloppyDiskSpeed => s.disk.floppy_disk_speed = cycle(&DiskSpeed::ALL, s.disk.floppy_disk_speed, dir),
+            HardDiskNoise => s.disk.hard_disk_noise = cycle(&NoiseMode::ALL, s.disk.hard_disk_noise, dir),
+            FloppyDiskNoise => s.disk.floppy_disk_noise = cycle(&NoiseMode::ALL, s.disk.floppy_disk_noise, dir),
             UltraDir | SoundFont => {}
         }
     }
@@ -715,6 +733,13 @@ impl ConfigUi {
         }
     }
 
+    /// The drives changed outside the window (Ctrl+F4): show them as they
+    /// are now, and what happened.
+    pub fn drives_changed(&mut self, host: &dyn Host, message: &str) {
+        self.refresh_drives(host, None);
+        self.info(message);
+    }
+
     fn refresh_drives(&mut self, host: &dyn Host, select: Option<u8>) {
         self.drives = host.drives();
         if let Some(drive) = select
@@ -776,10 +801,10 @@ impl ConfigUi {
         let home = self.home.as_deref();
         let (title, current, pick_dirs, extensions) = match pick {
             Pick::MountPath => (
-                "Pick a directory or CD image",
+                "Pick a directory or disk image",
                 self.dialog.as_ref().map(|d| d.path.text()).unwrap_or_default(),
                 true,
-                CD_IMAGES,
+                IMAGES,
             ),
             Pick::SoundFont => (
                 "Pick a SoundFont (.sf2)",
@@ -940,10 +965,13 @@ impl ConfigUi {
             let (fg, dim) = if builtin { (draw::DIM, draw::DIM) } else { (draw::TEXT, draw::BRIGHT) };
             g.text(2, row, &format!("{}:", info.letter()), dim);
             g.text(6, row, info.kind.name(), fg);
-            let path = match info.image.as_ref().or(info.root.as_ref()) {
+            let mut path = match info.image.as_ref().or(info.root.as_ref()) {
                 Some(path) => contract_home(path, self.home.as_deref()),
                 None => "(built into rust-dos)".to_string(),
             };
+            if info.images.len() > 1 {
+                path = format!("({}/{}) {}", info.image_index + 1, info.images.len(), path);
+            }
             g.text_to(14, row, &fit(&path, path_width), fg, label_col - 1);
             g.text_to(label_col, row, &info.label, fg, cols - 4);
             if info.read_only && !builtin {

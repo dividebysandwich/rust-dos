@@ -25,6 +25,7 @@ fn opts(kind: DriveKind, label: Option<&str>) -> MountOptions {
         kind,
         label: label.map(str::to_string),
         read_only: false,
+        ..Default::default()
     }
 }
 

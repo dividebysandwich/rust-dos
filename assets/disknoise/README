@@ -1,0 +1,4 @@
+Disk drive noise samples from DOSBox Staging (resources/disk-noises,
+https://github.com/dosbox-staging/dosbox-staging), a GPL-2.0-or-later
+project, converted losslessly from FLAC to 16-bit mono 22050 Hz WAVE files.
+fdd_spinup is left out: DOSBox Staging never plays it.

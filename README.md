@@ -20,6 +20,10 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Mounting host directories as floppy, hard disk and CD-ROM drives
 * Mounting CD images (CUE sheets with BIN or WAV tracks, ISO, BIN and IMG)
   as CD-ROM drives, including DOSBox's `IMGMOUNT` command
+* Mounting floppy and hard disk images (FAT12 and FAT16) for reading and
+  writing, with sector access through INT 13h and INT 25h/26h, and lists of
+  disks to change with Ctrl+F4
+* DOSBox Staging's emulated disk speeds and disk drive noises
 * Configuration file with startup commands
 * Environment variables (`SET`, `PATH`)
 * XMS 3.0 extended memory and the A20 gate
@@ -130,8 +134,11 @@ D:
     patches listed in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, or
     `none`. The built-in patches play even without the Ultrasound
     (`gus=false`) unless `gusdrive` is `none`.
-* **`[drives]`:** each line is `LETTER = PATH [floppy|hdd|cdrom] [-label NAME] [-ro]`.
-  * PATH is a directory or a CD image (see [Drives](#drives)).
+* **`[emulator]`** also has `hard_disk_speed` and `floppy_disk_speed`, and
+  **`[sound]`** `hard_disk_noise` and `floppy_disk_noise` (see
+  [Disk speed and noises](#disk-speed-and-noises)).
+* **`[drives]`:** each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`.
+  * PATH is a directory, or a disk or CD image (see [Drives](#drives)).
   * Relative paths are relative to the configuration file, and `~` is your
     home directory. Quote paths that contain spaces.
   * `-d/--dir` overrides C:. Without either, C: is the current working
@@ -148,18 +155,19 @@ Press **Ctrl+F12**, or type `DOSCONFIG` at the DOS prompt, to open the
 settings window over the running program. The program pauses while it is
 open. Ctrl+F12 or Esc closes it.
 
-* **Drives:** mount a host directory or CD image (Ins), change or swap the
-  one a drive shows (Enter; this is how to change discs in the middle of a
-  game), or unmount it (Del). **Browse...** picks directories and CD images
-  from the host.
+* **Drives:** mount a host directory or a disk or CD image (Ins), change or
+  swap the one a drive shows (Enter; this is how to change discs in the
+  middle of a game), or unmount it (Del). **Browse...** picks directories
+  and images from the host.
 * **Display:** the scale, fullscreen, 4:3 aspect correction and the scaling
   filter.
-* **Emulator:** the CPU speed, the processor and the memory size.
-* **Sound:** everything in `[sound]`.
+* **Emulator:** the CPU speed, the processor, the memory size and the disk
+  speeds.
+* **Sound:** everything in `[sound]`, and the disk noises.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
-pages, and the mouse works too. The display settings and the CPU speed take
-effect at once. The processor and sound hardware change once no program is
+pages, and the mouse works too. The display settings, the CPU speed and the
+disk speeds and noises take effect at once. The processor and sound hardware change once no program is
 running, so a game isn't left without the card it set up. The memory size
 takes effect the next time rust-dos starts.
 
@@ -180,6 +188,8 @@ MOUNT A ~/dos/floppy                      mount a host directory
 MOUNT D ~/dos/cd -t cdrom -label GAMECD   same, with -t for the type
 MOUNT D ~/dos/game.cue                    mount a CD image
 IMGMOUNT D C:\GAME\CD\GAME.CUE -t cdrom   the same, as DOSBox writes it
+IMGMOUNT A disk1.img disk2.img            floppy images; Ctrl+F4 changes disks
+IMGMOUNT C ~/dos/hdd.img                  a hard disk image as C:
 MOUNT -u A                                unmount
 A:                                        switch to drive A:
 ```
@@ -196,6 +206,50 @@ syntax, so the batch files made for DOSBox work unchanged: it looks for the
 image by its DOS path first (`C:\GAME\CD\GAME.CUE`) and then as a host
 path. Programs run from the image as from any other drive.
 
+### Disk images
+
+A floppy or hard disk image holds a FAT12 or FAT16 file system that
+programs read and write like any other drive's; what they write goes into
+the image file. An image whose size is a floppy disk's (160 KB to 2.88 MB,
+as in DOSBox's table) is a floppy, anything else a hard disk: an image of a
+whole disk with a partition table, whose first FAT partition is the drive,
+or of a single volume. The hard disk's geometry comes from its partition
+table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
+`-size 512,S,H,C`) gives it. `-t floppy` or `-t hdd` overrides the choice,
+and an image file that can't be written, or `-ro`, makes a write-protected
+disk. `IMGMOUNT C` puts a hard disk image in place of C:'s directory.
+
+The BIOS sees the images as disks: INT 13h reads and writes their sectors by
+cylinder, head and sector and reports their real geometry, and DOS's absolute
+disk read and write (INT 25h/26h) reach the sectors of the volume. Programs
+that check for their original disk with these find what's on the image.
+Drives from host directories have no sectors; INT 13h reports success for
+them without reading anything, which passes simple presence checks.
+
+A list of images (`IMGMOUNT A disk1.img disk2.img disk3.img`, or the same
+in `[drives]`) puts the first disk in the drive. **Ctrl+F4** changes every
+drive with a list to its next disk, as in DOSBox; files a program has open
+keep reading the disk they were opened on, and INT 13h's disk change line
+tells the program another disk went in. CD image lists work the same way.
+
+### Disk speed and noises
+
+By default disks are as fast as the host. As in DOSBox Staging,
+`hard_disk_speed` in `[emulator]` slows hard disks down to those of the
+mid-1990s (`fast`, ~15 MB/s), the early 1990s (`medium`, ~2.5 MB/s) or the
+1980s (`slow`, ~600 kB/s), and `floppy_disk_speed` floppies to extra-high
+(`fast`, ~120 kB/s), high (`medium`, ~60 kB/s) or double density (`slow`,
+~30 kB/s). Reading, writing, opening and loading files and INT 13h and
+INT 25h/26h sector transfers take that long in emulated time; the machine
+runs on meanwhile, so music and animations don't stop. CD-ROMs are not
+slowed down.
+
+`hard_disk_noise` and `floppy_disk_noise` in `[sound]` add the drives'
+noises, with DOSBox Staging's recordings: `seek-only` plays the heads
+moving on each access, and `on` adds a hard disk spinning up and humming
+and a floppy's motor running while it is in use. They sound best with a
+disk speed below `maximum`.
+
 Host files and directories whose names aren't valid 8.3 names get short
 names the way DOSBox and Windows make them: the start of the name and a
 number, counted in sorted order per directory. `Day Of The Tentacle.BIN`
@@ -211,11 +265,11 @@ long and the short name open the file.
 `-ro` makes any drive read-only.
 
 A: and B: are always floppy drives, whatever type the mount gives, and
-can't hold a CD. Programs see them the way they see a real 1.44 MB drive:
+can't hold a CD or a partitioned hard disk image. Programs see them the way they see a real 1.44 MB drive:
 in the BIOS equipment word and CMOS, as INT 13h units 0 and 1 with the
 diskette parameter table of INT 1Eh, as removable drives, and with a
 1.44 MB diskette's layout in the drive parameter block and IOCTL 440Dh
-(device type 07h, FAT12). A disk on B: alone makes a two-drive machine
+(device type 07h, FAT12), or a disk image's own layout. A disk on B: alone makes a two-drive machine
 with A: empty.
 
 ## Log file
@@ -229,6 +283,8 @@ is replaced on every start and stops growing at 64 MB.
 ## Keyboard shortcuts
 
 Ctrl+F12: Open or close the [settings window](#settings-window)
+
+Ctrl+F4: Put the next disk in the drives mounted from lists of images
 
 PrintScreen: Toggle screen recording to a video file
 

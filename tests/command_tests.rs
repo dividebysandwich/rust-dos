@@ -77,7 +77,7 @@ fn dosconfig_asks_for_the_settings_window() {
 fn drives_keep_their_mount_options() {
     let base = scratch("options", &["c", "floppy"]);
     let mut cpu = Cpu::new(base.join("c"));
-    let opts = MountOptions { kind: DriveKind::Floppy, label: Some("disk 1".into()), read_only: true };
+    let opts = MountOptions { kind: DriveKind::Floppy, label: Some("disk 1".into()), read_only: true, ..Default::default() };
     cpu.bus.mount_drive(0, &base.join("floppy"), opts.clone(), false).unwrap();
     let info = cpu.bus.disk.drive_info(0).unwrap();
     // The label as given, not as DOS shows it.
@@ -146,7 +146,7 @@ fn mount_lists_mounts_and_unmounts() {
         &format!("MOUNT e {}", base.join("nope").display()),
     );
     assert!(
-        out.replace('\n', "").ends_with("is not a directory or a CD image"),
+        out.replace('\n', "").ends_with("is not a directory or a disk or CD image"),
         "{}",
         out
     );
@@ -181,6 +181,7 @@ fn dir_lists_any_drive() {
         kind: DriveKind::Floppy,
         label: Some("DATA".to_string()),
         read_only: false,
+        ..Default::default()
     };
     cpu.bus
         .mount_drive(3, &base.join("d"), opts, false)

@@ -8,9 +8,9 @@ use crate::cpu::Cpu;
 /// Vectors handled by emulator services (`FE 38 vv` traps). Their traps sit
 /// four bytes apart from F000:1000 in this order; new vectors go at the end
 /// because programs may remember the addresses of the older ones.
-pub const HLE_VECTORS: [u8; 17] = [
+pub const HLE_VECTORS: [u8; 19] = [
     0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33, 0x00,
-    0x06,
+    0x06, 0x25, 0x26,
 ];
 const TRAP_BASE: u16 = 0x1000;
 
@@ -22,6 +22,8 @@ pub const SERVICE_CD_STRATEGY: u8 = 0x15;
 pub const SERVICE_CD_INTERRUPT: u8 = 0x16;
 /// The VESA window function (WinFuncPtr).
 pub const SERVICE_VBE_WINDOW: u8 = 0x17;
+/// Waiting for slow disk access to end (`diskio::wait`).
+pub const SERVICE_IO_WAIT: u8 = 0x18;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.
@@ -33,6 +35,9 @@ const IRQ9_HANDLER: u16 = 0x1130;
 pub const XMS_ENTRY: u16 = 0x1140;
 /// The diskette parameter table INT 1Eh points to, for 1.44 MB drives.
 pub const DISKETTE_PARAMS: u16 = 0x1150;
+/// Where disk services wait for slow disk access to end, after the CD-ROM
+/// driver's entries.
+pub const IO_WAIT: u16 = 0x1190;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -115,6 +120,8 @@ pub fn install(bus: &mut Bus) {
         DISKETTE_PARAMS,
         &[0xDF, 0x02, 0x25, 0x02, 0x12, 0x1B, 0xFF, 0x6C, 0xF6, 0x0F, 0x08],
     );
+    // Disk services wait here for slow disk access (`diskio::wait`).
+    write_rom(bus, IO_WAIT, &[0xFE, 0x39, SERVICE_IO_WAIT]);
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);
     // BIOS date and the model byte: an AT (FCh).

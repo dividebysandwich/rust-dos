@@ -8,6 +8,8 @@ use std::rc::Rc;
 
 use crate::cdrom::image::CdImage;
 use crate::cdrom::Extent;
+use crate::diskimage::{self, Chs, DiskImage, ImageKind};
+use crate::fat::{self, EntryRef, FatVolume};
 use crate::memfs::{Bytes, MemFs, Node};
 use crate::mount::MountSpec;
 
@@ -34,6 +36,17 @@ const FLOPPY_CLUSTERS: u16 = 2847;
 /// DOS time and date of the files held in memory: 1 January 2020.
 const MEMORY_TIME: u16 = 0x0000;
 const MEMORY_DATE: u16 = 0x5021;
+
+/// A list of owned path components as the FAT driver takes them.
+fn refs(parts: &[String]) -> Vec<&str> {
+    parts.iter().map(String::as_str).collect()
+}
+
+/// A path on a disk image the way DOS shows it: its components as they are
+/// in the directory entries, "GAMES\DOOM".
+fn canonical_path(parts: &[&str]) -> String {
+    parts.iter().map(|p| fat::canonical_name(p).unwrap_or_else(|| p.to_ascii_uppercase())).collect::<Vec<_>>().join("\\")
+}
 
 pub fn drive_letter(drive: u8) -> char {
     (b'A' + drive) as char
@@ -176,7 +189,7 @@ impl DriveKind {
         } else {
             (clusters as u32 + 2) * 2
         };
-        FatLayout {
+        let mut layout = FatLayout {
             bytes_per_sector,
             sectors_per_cluster,
             clusters,
@@ -188,7 +201,10 @@ impl DriveKind {
             heads,
             hidden_sectors,
             media: self.media_descriptor(),
-        }
+            sectors: 0,
+        };
+        layout.sectors = layout.first_data_sector() as u32 + clusters as u32 * sectors_per_cluster as u32;
+        layout
     }
 }
 
@@ -210,6 +226,8 @@ pub struct FatLayout {
     pub heads: u16,
     pub hidden_sectors: u32,
     pub media: u8,
+    /// Sectors in the volume, which may run on past the last cluster.
+    pub sectors: u32,
 }
 
 impl FatLayout {
@@ -223,7 +241,7 @@ impl FatLayout {
     }
 
     pub fn total_sectors(&self) -> u32 {
-        self.first_data_sector() as u32 + self.clusters as u32 * self.sectors_per_cluster as u32
+        self.sectors
     }
 
     pub fn cylinders(&self) -> u16 {
@@ -260,12 +278,18 @@ impl FatLayout {
     }
 }
 
-/// How a host directory is presented to DOS.
+/// How a host directory or disk image is presented to DOS.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountOptions {
     pub kind: DriveKind,
     pub label: Option<String>,
     pub read_only: bool,
+    /// The images after the first of a drive mounted from a list of them,
+    /// which Ctrl+F4 steps through.
+    pub more_images: Vec<PathBuf>,
+    /// A hard disk image's geometry, where it can't be found from the
+    /// image.
+    pub geometry: Option<Chs>,
 }
 
 impl Default for MountOptions {
@@ -274,6 +298,8 @@ impl Default for MountOptions {
             kind: DriveKind::HardDisk,
             label: None,
             read_only: false,
+            more_images: Vec::new(),
+            geometry: None,
         }
     }
 }
@@ -283,10 +309,14 @@ impl Default for MountOptions {
 pub struct DriveInfo {
     pub drive: u8,
     pub kind: DriveKind,
-    /// Host directory; `None` for the drives held in memory and CD images.
+    /// Host directory; `None` for the drives held in memory and images.
     pub root: Option<PathBuf>,
-    /// The CD image the drive shows.
+    /// The disk or CD image the drive shows.
     pub image: Option<PathBuf>,
+    /// All the images of a drive mounted from a list of them, and which one
+    /// it shows.
+    pub images: Vec<PathBuf>,
+    pub image_index: usize,
     pub label: String,
     /// True for CD-ROMs, `-ro` mounts and the drives held in memory.
     pub read_only: bool,
@@ -310,6 +340,8 @@ enum Storage {
     /// A tree held in memory, whose files are either in memory too or on
     /// the CD image.
     Tree { files: MemFs, image: Option<Rc<CdImage>> },
+    /// The FAT file system of a floppy or hard disk image.
+    Fat(Rc<FatVolume>),
 }
 
 struct Drive {
@@ -320,6 +352,11 @@ struct Drive {
     read_only: bool,
     /// The mount as it was asked for.
     mount: Option<MountSpec>,
+    /// The images of a drive mounted from images, and which one is in.
+    images: Vec<PathBuf>,
+    image: usize,
+    /// Another disk went in since INT 13h last looked (AH=16h).
+    media_changed: bool,
 }
 
 impl Drive {
@@ -331,7 +368,7 @@ impl Drive {
     fn host_root(&self) -> Option<&Path> {
         match &self.storage {
             Storage::Host(root) => Some(root),
-            Storage::Tree { .. } => None,
+            _ => None,
         }
     }
 
@@ -339,14 +376,22 @@ impl Drive {
     fn tree(&self) -> Option<&MemFs> {
         match &self.storage {
             Storage::Tree { files, .. } => Some(files),
-            Storage::Host(_) => None,
+            _ => None,
         }
     }
 
     fn image(&self) -> Option<&Rc<CdImage>> {
         match &self.storage {
             Storage::Tree { image, .. } => image.as_ref(),
-            Storage::Host(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The file system of a drive mounted from a disk image.
+    fn fat(&self) -> Option<&Rc<FatVolume>> {
+        match &self.storage {
+            Storage::Fat(volume) => Some(volume),
+            _ => None,
         }
     }
 }
@@ -357,6 +402,8 @@ struct OpenFile {
     /// PSP of the process that opened the file. DOS closes a process's files
     /// when it terminates.
     owner: u16,
+    /// Tells the file apart from others (`DiskController::file_key`).
+    key: u64,
 }
 
 /// What an open handle reads and writes.
@@ -367,6 +414,9 @@ enum OpenData {
     Memory(Bytes, Rc<Cell<u64>>),
     /// A file on a CD image, and the shared position.
     Image(Rc<CdImage>, Extent, Rc<Cell<u64>>),
+    /// A file on a disk image: where its directory entry is, the shared
+    /// position, and whether it was opened for writing.
+    Fat { volume: Rc<FatVolume>, at: EntryRef, pos: Rc<Cell<u64>>, write: bool },
     /// A character device opened by name (NUL, CON, PRN...).
     Device(CharDevice),
 }
@@ -377,6 +427,7 @@ pub enum FileData {
     Host(PathBuf),
     Memory(Bytes),
     Image(Rc<CdImage>, Extent),
+    Fat(Rc<FatVolume>, fat::Entry),
 }
 
 impl std::fmt::Debug for CdImage {
@@ -394,6 +445,12 @@ impl FileData {
             FileData::Image(image, extent) => {
                 let mut data = vec![0u8; extent.size as usize];
                 image.read_extent(extent, 0, &mut data)?;
+                Ok(Bytes::Owned(data))
+            }
+            FileData::Fat(volume, entry) => {
+                let mut data = vec![0u8; entry.size as usize];
+                let n = volume.read(entry, 0, &mut data).map_err(|_| std::io::ErrorKind::InvalidData)?;
+                data.truncate(n);
                 Ok(Bytes::Owned(data))
             }
         }
@@ -482,6 +539,9 @@ impl DiskController {
             label: DEFAULT_LABEL.to_string(),
             read_only: false,
             mount: Some(MountSpec { drive: DRIVE_C, path: root_path.clone(), opts: MountOptions::default() }),
+            images: Vec::new(),
+            image: 0,
+            media_changed: false,
         });
         drives[DRIVE_Z as usize] = Some(Self::memory_drive(z_files, DEFAULT_LABEL));
 
@@ -500,6 +560,9 @@ impl DiskController {
             label: normalize_label(label),
             read_only: true,
             mount: None,
+            images: Vec::new(),
+            image: 0,
+            media_changed: false,
         }
     }
 
@@ -515,7 +578,9 @@ impl DiskController {
             .unwrap_or(Path::new(""))
     }
 
-    /// Mount a host directory as `drive`. Unless `replace` is set, the drive
+    /// Mount a host directory, or a disk or CD image, as `drive`. A list of
+    /// images (the path and `opts.more_images`) puts the first in, and
+    /// Ctrl+F4 the next (`swap_image`). Unless `replace` is set, the drive
     /// must not already be mounted. Replacing closes the files open on it.
     /// On A: and B: the drive is a floppy whatever `opts.kind` says.
     pub fn mount(
@@ -538,27 +603,88 @@ impl DiskController {
         // A: and B: are floppies whatever the type asked for, but a CD
         // can't be one.
         let floppy_drive = drive < FLOPPY_DRIVES;
-        if floppy_drive && (opts.kind == DriveKind::CdRom || path.is_file()) {
+        if floppy_drive && opts.kind == DriveKind::CdRom {
             return Err(format!("Drive {}: is a floppy drive and can't be a CD-ROM", letter));
         }
-        let kind = if floppy_drive { DriveKind::Floppy } else { opts.kind };
-        let label = |default: &str| {
-            opts.label
-                .as_deref()
-                .map(normalize_label)
-                .filter(|l| !l.is_empty())
-                .unwrap_or_else(|| normalize_label(default))
-        };
+        let spec = MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() };
         if path.is_file() {
-            // A CD image.
+            let mut images = Vec::new();
+            for image in std::iter::once(path).chain(opts.more_images.iter().map(PathBuf::as_path)) {
+                if !image.is_file() {
+                    return Err(format!("{} is not a disk or CD image", image.display()));
+                }
+                let canonical = fs::canonicalize(image).map_err(|e| e.to_string())?;
+                // Two drives on one image would each think they know
+                // what's on it.
+                let elsewhere = (0..LASTDRIVE)
+                    .find(|&d| d != drive && self.drive(d).is_some_and(|other| other.images.contains(&canonical)));
+                if let Some(other) = elsewhere {
+                    return Err(format!("{} is already mounted as {}:", image.display(), drive_letter(other)));
+                }
+                images.push(canonical);
+            }
+            let (kind, storage, volume_label, writable) = Self::open_image(drive, &images[0], &opts)?;
+            self.close_drive_files(drive);
+            self.drives[drive as usize] = Some(Drive {
+                kind,
+                storage,
+                current_dir: String::new(),
+                label: Self::label_for(&opts, &volume_label),
+                read_only: opts.read_only || !writable,
+                mount: Some(spec),
+                images: images.clone(),
+                image: 0,
+                media_changed: true,
+            });
+            return Ok(images.swap_remove(0));
+        }
+        if !opts.more_images.is_empty() {
+            return Err("Only disk and CD images can be mounted as a list".to_string());
+        }
+        if !path.is_dir() {
+            return Err(format!("{} is not a directory or a disk or CD image", path.display()));
+        }
+        let kind = if floppy_drive { DriveKind::Floppy } else { opts.kind };
+        let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
+
+        self.close_drive_files(drive);
+        self.drives[drive as usize] = Some(Drive {
+            kind,
+            storage: Storage::Host(canonical.clone()),
+            current_dir: String::new(),
+            label: Self::label_for(&opts, DEFAULT_LABEL),
+            read_only: opts.read_only || kind == DriveKind::CdRom,
+            mount: Some(spec),
+            images: Vec::new(),
+            image: 0,
+            media_changed: floppy_drive,
+        });
+        Ok(canonical)
+    }
+
+    /// The label of a drive: the one the mount asks for, or else `default`.
+    fn label_for(opts: &MountOptions, default: &str) -> String {
+        opts.label
+            .as_deref()
+            .map(normalize_label)
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| normalize_label(default))
+    }
+
+    /// Open the disk or CD image at `path` for `drive`: the drive's type,
+    /// its storage, the volume label and whether the image can be written.
+    fn open_image(drive: u8, path: &Path, opts: &MountOptions) -> Result<(DriveKind, Storage, String, bool), String> {
+        let letter = drive_letter(drive);
+        let floppy_drive = drive < FLOPPY_DRIVES;
+        let found = diskimage::detect(path, opts.kind)?;
+        if found == ImageKind::Cd {
+            if floppy_drive {
+                return Err(format!("Drive {}: is a floppy drive and can't be a CD-ROM", letter));
+            }
             if drive == DRIVE_C {
-                return Err("Drive C: must be a host directory".to_string());
+                return Err("Drive C: can't be a CD-ROM".to_string());
             }
-            if !matches!(opts.kind, DriveKind::CdRom | DriveKind::HardDisk) {
-                return Err("Only CD-ROM images can be mounted".to_string());
-            }
-            let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
-            let image = CdImage::open(&canonical)?;
+            let image = CdImage::open(path)?;
             // A disc of only audio tracks has no file system.
             let (files, volume_label) = match image.data_track() {
                 Some(_) => {
@@ -568,32 +694,59 @@ impl DiskController {
                 None => (MemFs::new(), "AUDIO_CD".to_string()),
             };
             let volume_label = if volume_label.is_empty() { "CDROM".to_string() } else { volume_label };
-            self.close_drive_files(drive);
-            self.drives[drive as usize] = Some(Drive {
-                kind: DriveKind::CdRom,
-                storage: Storage::Tree { files, image: Some(Rc::new(image)) },
-                current_dir: String::new(),
-                label: label(&volume_label),
-                read_only: true,
-                mount: Some(MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() }),
-            });
-            return Ok(canonical);
+            return Ok((DriveKind::CdRom, Storage::Tree { files, image: Some(Rc::new(image)) }, volume_label, false));
         }
-        if !path.is_dir() {
-            return Err(format!("{} is not a directory or a CD image", path.display()));
-        }
-        let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        // A: and B: take a hard disk image without a partition table as a
+        // floppy of its size.
+        let floppy = found == ImageKind::Floppy || floppy_drive;
+        let open = || -> Result<(Rc<DiskImage>, FatVolume), String> {
+            let disk = Rc::new(DiskImage::open(path, floppy, opts.geometry, opts.read_only)?);
+            let (start, sectors) = disk.fat_volume()?;
+            let volume = FatVolume::open(disk.clone(), start, sectors)?;
+            Ok((disk, volume))
+        };
+        let (disk, volume) = open().map_err(|e| match found {
+            ImageKind::HardDisk if floppy_drive => {
+                format!("Drive {}: is a floppy drive and can't hold a hard disk image", letter)
+            }
+            _ => format!("{}: {}", path.display(), e),
+        })?;
+        let volume_label = volume.label().unwrap_or_default();
+        let kind = if floppy { DriveKind::Floppy } else { DriveKind::HardDisk };
+        Ok((kind, Storage::Fat(Rc::new(volume)), volume_label, disk.writable()))
+    }
 
-        self.close_drive_files(drive);
-        self.drives[drive as usize] = Some(Drive {
-            kind,
-            storage: Storage::Host(canonical.clone()),
-            current_dir: String::new(),
-            label: label(DEFAULT_LABEL),
-            read_only: opts.read_only || kind == DriveKind::CdRom,
-            mount: Some(MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() }),
-        });
-        Ok(canonical)
+    /// Put the next image in a drive mounted from a list of them, as
+    /// Ctrl+F4 does. Files open on the drive keep reading the disk they were
+    /// opened on, and the current directory stays if the new disk has it.
+    /// Returns what changed, or None for a drive with one image or none.
+    pub fn swap_image(&mut self, drive: u8) -> Result<Option<String>, String> {
+        let Some(d) = self.drive(drive).filter(|d| d.images.len() > 1) else {
+            return Ok(None);
+        };
+        let next = (d.image + 1) % d.images.len();
+        let path = d.images[next].clone();
+        let opts = d.mount.as_ref().map(|m| m.opts.clone()).unwrap_or_default();
+        let (kind, storage, volume_label, writable) = Self::open_image(drive, &path, &opts)?;
+        let letter = drive_letter(drive);
+        let d = self.drives[drive as usize].as_mut().unwrap();
+        if kind != d.kind {
+            return Err(format!("{} can't go in drive {}:, which is a {}", path.display(), letter, d.kind.name()));
+        }
+        d.storage = storage;
+        d.image = next;
+        d.label = Self::label_for(&opts, &volume_label);
+        d.read_only = opts.read_only || !writable;
+        d.media_changed = true;
+        let count = d.images.len();
+        let current = format!("{}:\\{}", letter, d.current_dir);
+        if !self.is_directory(&current)
+            && let Some(d) = self.drives[drive as usize].as_mut()
+        {
+            d.current_dir.clear();
+        }
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        Ok(Some(format!("Drive {}: disk {} of {}: {}", letter, next + 1, count, name)))
     }
 
     /// Mount `files` as the read-only drive `drive`, which must not be
@@ -658,12 +811,36 @@ impl DiskController {
         self.drive(drive)?.image().cloned()
     }
 
+    /// The file system of a drive mounted from a disk image.
+    pub fn fat_volume(&self, drive: u8) -> Option<Rc<FatVolume>> {
+        self.drive(drive)?.fat().cloned()
+    }
+
+    /// The disk image of a drive mounted from one, as the BIOS reads it.
+    pub fn bios_image(&self, drive: u8) -> Option<Rc<DiskImage>> {
+        self.fat_volume(drive).map(|volume| volume.disk().clone())
+    }
+
+    /// Whether another disk went in `drive` since the last time this was
+    /// asked (INT 13h AH=16h's disk change line).
+    pub fn take_media_changed(&mut self, drive: u8) -> bool {
+        self.drives
+            .get_mut(drive as usize)
+            .and_then(Option::as_mut)
+            .is_some_and(|d| std::mem::take(&mut d.media_changed))
+    }
+
     pub fn drive_info(&self, drive: u8) -> Option<DriveInfo> {
         self.drive(drive).map(|d| DriveInfo {
             drive,
             kind: d.kind,
             root: d.host_root().map(Path::to_path_buf),
-            image: d.image().map(|image| image.path().to_path_buf()),
+            image: d
+                .image()
+                .map(|image| image.path().to_path_buf())
+                .or_else(|| d.fat().map(|volume| volume.disk().path().to_path_buf())),
+            images: d.images.clone(),
+            image_index: d.image,
             label: d.label.clone(),
             read_only: !d.writable(),
             current_dir: d.current_dir.to_ascii_uppercase(),
@@ -694,6 +871,25 @@ impl DiskController {
     /// Drive a file handle was opened on (Z: for virtual handles).
     pub fn handle_drive(&self, handle: u16) -> Option<u8> {
         self.open_files.get(&handle).map(|f| f.drive)
+    }
+
+    /// What tells an open file apart from others, for telling sequential
+    /// disk access from random (the disk noises).
+    pub fn handle_key(&self, handle: u16) -> Option<u64> {
+        self.open_files.get(&handle).map(|f| f.key)
+    }
+
+    /// Which drive a DOS path is on.
+    pub fn drive_of(&self, dos_path: &str) -> Option<u8> {
+        self.split_drive(&dos_path.replace('/', "\\")).map(|(drive, _)| drive)
+    }
+
+    /// A number that tells the file a DOS path names apart from others.
+    pub fn file_key(&self, dos_path: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.qualify_path(dos_path).unwrap_or_else(|| dos_path.to_ascii_uppercase()).hash(&mut hasher);
+        hasher.finish()
     }
 
     /// The character device an open handle refers to, if any.
@@ -851,6 +1047,24 @@ impl DiskController {
         Some((drive_num, drive, path))
     }
 
+    /// The drive a DOS path is on and the path there, if that drive is
+    /// mounted from a disk image.
+    fn locate_fat(&self, dos_path: &str) -> Option<(u8, Rc<FatVolume>, Vec<String>)> {
+        let normalized = dos_path.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized)?;
+        let drive = self.drive(drive_num)?;
+        let volume = drive.fat()?.clone();
+        let parts = Self::logical_components(drive, rest).into_iter().map(str::to_string).collect();
+        Some((drive_num, volume, parts))
+    }
+
+    /// The file or directory a DOS path names on a drive mounted from a
+    /// disk image: None if the path is on another drive.
+    fn find_fat(&self, dos_path: &str) -> Option<Result<fat::Entry, u8>> {
+        let (_, volume, parts) = self.locate_fat(dos_path)?;
+        Some(volume.find(&refs(&parts)))
+    }
+
     /// A file on a drive held in memory.
     fn virtual_file(&self, filename: &str) -> Option<&Node> {
         let (_, drive, path) = self.locate_in_memory(filename)?;
@@ -864,19 +1078,35 @@ impl DiskController {
 
     /// Whether a DOS path names an existing file, on any drive.
     pub fn is_file(&self, dos_path: &str) -> bool {
+        if let Some(found) = self.find_fat(dos_path) {
+            return found.is_ok_and(|e| !e.is_dir());
+        }
         self.is_virtual_file(dos_path) || self.resolve_path(dos_path).is_some_and(|p| p.is_file())
     }
 
     /// Whether a DOS path names an existing directory, on any drive.
     pub fn is_directory(&self, dos_path: &str) -> bool {
+        if let Some(found) = self.find_fat(dos_path) {
+            return found.is_ok_and(|e| e.is_dir());
+        }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => drive.tree().is_some_and(|files| files.is_dir(&path)),
             None => self.resolve_path(dos_path).is_some_and(|p| p.is_dir()),
         }
     }
 
+    /// Whether a DOS path names an existing file or directory, on any
+    /// drive.
+    pub fn exists(&self, dos_path: &str) -> bool {
+        self.is_file(dos_path) || self.is_directory(dos_path)
+    }
+
     /// Where the contents of the file a DOS path names are, on any drive.
     pub fn file_data(&self, dos_path: &str) -> Option<FileData> {
+        if let Some((_, volume, parts)) = self.locate_fat(dos_path) {
+            let entry = volume.find(&refs(&parts)).ok().filter(|e| !e.is_dir())?;
+            return Some(FileData::Fat(volume, entry));
+        }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => FileData::of(drive.tree()?.file(&path)?, drive.image()),
             None => self.resolve_path(dos_path).filter(|p| p.is_file()).map(FileData::Host),
@@ -926,6 +1156,17 @@ impl DiskController {
         let Some(drive) = self.drive(drive_num) else {
             return false;
         };
+        if let Some(volume) = drive.fat() {
+            let parts = Self::logical_components(drive, rest);
+            if !volume.find(&parts).is_ok_and(|e| e.is_dir()) {
+                return false;
+            }
+            let dir = canonical_path(&parts);
+            if let Some(d) = self.drives[drive_num as usize].as_mut() {
+                d.current_dir = dir;
+            }
+            return true;
+        }
         if let Some(files) = drive.tree() {
             let dir = Self::memory_path(drive, rest);
             if !files.is_dir(&dir) {
@@ -998,7 +1239,7 @@ impl DiskController {
             let handle = self.free_handle()?;
             self.open_files.insert(
                 handle,
-                OpenFile { data: OpenData::Device(device), drive: self.current_drive, owner },
+                OpenFile { data: OpenData::Device(device), drive: self.current_drive, owner, key: 0 },
             );
             return Ok(handle);
         }
@@ -1021,7 +1262,38 @@ impl DiskController {
                 _ => return Err(0x0C),
             }
             let handle = self.free_handle()?;
-            self.open_files.insert(handle, OpenFile { data, drive, owner });
+            let key = self.file_key(filename);
+            self.open_files.insert(handle, OpenFile { data, drive, owner, key });
+            return Ok(handle);
+        }
+
+        if let Some((drive, volume, parts)) = self.locate_fat(filename) {
+            let writable = self.is_writable(drive);
+            let access = mode & 0x03;
+            match access {
+                3 => return Err(0x0C),
+                1 if !writable => return Err(0x05),
+                _ => {}
+            }
+            let parts = refs(&parts);
+            let handle = self.free_handle()?;
+            let entry = match volume.find(&parts) {
+                Ok(entry) if entry.is_dir() => return Err(0x05),
+                Ok(entry) => entry,
+                Err(0x02) if create && writable => volume.create(&parts, 0)?,
+                Err(0x02) if create => return Err(0x05),
+                Err(e) => return Err(e),
+            };
+            // Read/write opens on write-protected disks are downgraded, as
+            // on CD-ROMs; read-only files can't be written.
+            let write = access != 0 && writable;
+            if write && entry.attr & fat::ATTR_READ_ONLY != 0 {
+                return Err(0x05);
+            }
+            let at = entry.at.ok_or(0x05u8)?;
+            let data = OpenData::Fat { volume, at, pos: Rc::new(Cell::new(0)), write };
+            let key = self.file_key(filename);
+            self.open_files.insert(handle, OpenFile { data, drive, owner, key });
             return Ok(handle);
         }
 
@@ -1059,12 +1331,14 @@ impl DiskController {
         let handle = self.free_handle()?;
         match options.open(path) {
             Ok(file) => {
+                let key = self.file_key(filename);
                 self.open_files.insert(
                     handle,
                     OpenFile {
                         data: OpenData::Host(file),
                         drive,
                         owner,
+                        key,
                     },
                 );
                 Ok(handle)
@@ -1087,7 +1361,7 @@ impl DiskController {
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
     pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
-        if char_device(filename).is_none() && self.resolve_path(filename).is_some_and(|p| p.exists()) {
+        if char_device(filename).is_none() && self.exists(filename) {
             return Err(0x50); // File exists
         }
         self.create_file(filename, owner)
@@ -1110,6 +1384,18 @@ impl DiskController {
 
     /// INT 21h, AH=41h: delete a file.
     pub fn delete_file(&self, filename: &str) -> Result<(), u8> {
+        if let Some((drive, volume, parts)) = self.locate_fat(filename) {
+            let parts = refs(&parts);
+            let entry = volume.find(&parts)?;
+            if entry.is_dir() {
+                return Err(0x02);
+            }
+            self.check_writable(drive)?;
+            if entry.attr & fat::ATTR_READ_ONLY != 0 {
+                return Err(0x05);
+            }
+            return volume.remove(&parts);
+        }
         let (drive, path) = self.locate(filename).ok_or(0x03)?;
         if !path.is_file() {
             return Err(0x02); // File not found
@@ -1120,6 +1406,24 @@ impl DiskController {
 
     /// INT 21h, AH=56h: rename or move a file within a drive.
     pub fn rename_file(&self, from: &str, to: &str) -> Result<(), u8> {
+        if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
+            let from_parts = refs(&from_parts);
+            if from_parts.is_empty() {
+                return Err(0x05);
+            }
+            volume.find(&from_parts)?;
+            self.check_writable(drive)?;
+            let normalized = to.replace('/', "\\");
+            let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
+            if to_drive != drive {
+                return Err(0x11); // Not same device
+            }
+            let to_parts = Self::logical_components(self.drive(drive).ok_or(0x03u8)?, rest);
+            if to_parts.is_empty() {
+                return Err(0x03);
+            }
+            return volume.rename(&from_parts, &to_parts);
+        }
         let (drive, source) = self.locate(from).ok_or(0x03)?;
         if !source.exists() {
             return Err(0x02);
@@ -1154,12 +1458,16 @@ impl DiskController {
             OpenData::Host(f) => OpenData::Host(f.try_clone().map_err(|_| 0x04)?),
             OpenData::Memory(data, pos) => OpenData::Memory(data.clone(), pos.clone()),
             OpenData::Image(image, extent, pos) => OpenData::Image(image.clone(), *extent, pos.clone()),
+            OpenData::Fat { volume, at, pos, write } => {
+                OpenData::Fat { volume: volume.clone(), at: *at, pos: pos.clone(), write: *write }
+            }
             OpenData::Device(device) => OpenData::Device(*device),
         };
         let copy = OpenFile {
             data,
             drive: open.drive,
             owner: open.owner,
+            key: open.key,
         };
         let target = match new_handle {
             Some(h) if h < HANDLE_LIMIT => h,
@@ -1177,6 +1485,10 @@ impl DiskController {
             OpenData::Host(f) => f.metadata().ok().and_then(|m| m.modified().ok()),
             OpenData::Memory(..) => return Ok((MEMORY_TIME, MEMORY_DATE)),
             OpenData::Image(_, extent, _) => return Ok((extent.time, extent.date)),
+            OpenData::Fat { volume, at, .. } => {
+                let entry = volume.reload(*at)?;
+                return Ok((entry.time, entry.date));
+            }
             OpenData::Device(_) => None,
         };
         let t: DateTime<Local> = modified.map_or_else(Local::now, DateTime::from);
@@ -1184,6 +1496,15 @@ impl DiskController {
         let year = (t.year().max(1980) - 1980) as u32;
         let date = (year << 9 | t.month() << 5 | t.day()) as u16;
         Ok((time, date))
+    }
+
+    /// INT 21h AX=5701h: set the time and date of an open file. Only
+    /// files on disk images keep them; host files keep their own.
+    pub fn set_file_time(&self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
+        match &self.open_files.get(&handle).ok_or(0x06u8)?.data {
+            OpenData::Fat { volume, at, .. } => volume.set_time(*at, time, date),
+            _ => Ok(()),
+        }
     }
 
     /// True if `handle` is open.
@@ -1224,6 +1545,14 @@ impl DiskController {
                     pos.set(pos.get() + n as u64);
                     return Ok(buffer);
                 }
+                OpenData::Fat { volume, at, pos, .. } => {
+                    let entry = volume.reload(*at)?;
+                    let mut buffer = vec![0u8; count];
+                    let n = volume.read(&entry, pos.get(), &mut buffer)?;
+                    buffer.truncate(n);
+                    pos.set(pos.get() + n as u64);
+                    return Ok(buffer);
+                }
                 OpenData::Device(_) => return Ok(Vec::new()),
             };
             let mut buffer = vec![0u8; count];
@@ -1245,6 +1574,12 @@ impl DiskController {
             let file = match &mut open.data {
                 OpenData::Host(file) => file,
                 OpenData::Memory(..) | OpenData::Image(..) => return Err(0x05),
+                OpenData::Fat { write: false, .. } => return Err(0x05),
+                OpenData::Fat { volume, at, pos, .. } => {
+                    let n = volume.write(*at, pos.get(), data)?;
+                    pos.set(pos.get() + n as u64);
+                    return Ok(n as u16);
+                }
                 OpenData::Device(_) => return Ok(data.len() as u16),
             };
             match file.write(data) {
@@ -1277,6 +1612,10 @@ impl DiskController {
                 OpenData::Host(file) => file,
                 OpenData::Memory(data, pos) => return Self::seek_in(data.len() as u64, pos, offset, origin),
                 OpenData::Image(_, extent, pos) => return Self::seek_in(extent.size as u64, pos, offset, origin),
+                OpenData::Fat { volume, at, pos, .. } => {
+                    let size = volume.reload(*at)?.size;
+                    return Self::seek_in(size as u64, pos, offset, origin);
+                }
                 OpenData::Device(_) => return Ok(0),
             };
             let seek_from = match origin {
@@ -1301,7 +1640,24 @@ impl DiskController {
     /// Allocation geometry of `drive` (0-based): (sectors per cluster, bytes
     /// per sector, total clusters).
     pub fn drive_geometry(&self, drive: u8) -> Option<(u16, u16, u16)> {
-        self.drive_kind(drive).map(DriveKind::geometry)
+        self.layout(drive).map(|l| (l.sectors_per_cluster, l.bytes_per_sector, l.clusters))
+    }
+
+    /// Where `drive`'s FAT, directory and data are: a disk image's own, or
+    /// a plausible one for the others (see `DriveKind::layout`).
+    pub fn layout(&self, drive: u8) -> Option<FatLayout> {
+        let d = self.drive(drive)?;
+        Some(d.fat().map_or_else(|| d.kind.layout(), |volume| volume.layout()))
+    }
+
+    /// The media descriptor byte of `drive` (0 if it isn't mounted).
+    pub fn media_descriptor(&self, drive: u8) -> u8 {
+        self.layout(drive).map_or(0, |l| l.media)
+    }
+
+    /// The volume serial number of a drive mounted from a disk image.
+    pub fn volume_serial(&self, drive: u8) -> Option<u32> {
+        self.fat_volume(drive)?.serial()
     }
 
     // INT 21h, AH=36h: Get Disk Free Space
@@ -1315,6 +1671,11 @@ impl DiskController {
         };
 
         let d = self.drive(target_drive).ok_or(0x0Fu16)?; // Invalid Drive
+        if let Some(volume) = d.fat() {
+            let layout = volume.layout();
+            let free = volume.free_clusters().min(layout.clusters as u32) as u16;
+            return Ok((layout.sectors_per_cluster, free, layout.bytes_per_sector, layout.clusters));
+        }
         let (spc, bps, total) = d.kind.geometry();
         let free = match d.kind {
             // Floppies report real usage so programs can tell whether a save
@@ -1375,6 +1736,9 @@ impl DiskController {
                 None => Err(0x02),
             };
         }
+        if let Some(found) = self.find_fat(filename) {
+            return found.map(|e| e.attr as u16);
+        }
         let (drive, path) = self.locate(filename).ok_or(0x03)?;
         if !path.exists() {
             return Err(0x02); // File Not Found
@@ -1401,6 +1765,12 @@ impl DiskController {
     /// Hidden/System bits. Directory and Volume Label bits cannot be set via
     /// this call on real DOS either.
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
+        if let Some((drive, volume, parts)) = self.locate_fat(filename) {
+            let parts = refs(&parts);
+            volume.find(&parts)?;
+            self.check_writable(drive)?;
+            return volume.set_attr(&parts, attr as u8);
+        }
         let (drive, path) = self.locate(filename).ok_or(0x03)?;
         if !path.exists() {
             return Err(0x02);
@@ -1423,6 +1793,12 @@ impl DiskController {
         let normalized = path.replace('/', "\\");
         let (drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
+        if let Some((_, volume, parts)) = self.locate_fat(path) {
+            if parts.is_empty() {
+                return Err(0x05);
+            }
+            return volume.mkdir(&refs(&parts));
+        }
 
         // resolve_path walks any existing leaf, but MKDIR needs to create a new
         // leaf — so resolve the parent, then append the final component.
@@ -1453,6 +1829,17 @@ impl DiskController {
     pub fn remove_directory(&self, path: &str) -> Result<(), u8> {
         let normalized = path.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
+        if let Some((_, volume, parts)) = self.locate_fat(path) {
+            let parts = refs(&parts);
+            if parts.is_empty() || !volume.find(&parts).is_ok_and(|e| e.is_dir()) {
+                return Err(0x03);
+            }
+            self.check_writable(drive_num)?;
+            if self.drive(drive_num).is_some_and(|d| canonical_path(&parts) == d.current_dir) {
+                return Err(0x10);
+            }
+            return volume.rmdir(&parts);
+        }
         let (host_path, dos_form) = self.resolve_names_on(drive_num, rest).ok_or(0x03)?;
         if !host_path.is_dir() {
             return Err(0x03);
@@ -1619,6 +2006,26 @@ impl DiskController {
         // Search attribute bits an entry needs to be listed.
         let restricted_bits = 0x02 | 0x04 | 0x10;
         let mut valid_entries: Vec<DosDirEntry> = Vec::new();
+
+        if let Some(volume) = drive.fat() {
+            let dir = Self::logical_components(drive, search_dir_str);
+            for entry in volume.list(&dir).map_err(|_| 0x03u8)? {
+                let attr = entry.attr;
+                if (attr as u16 & restricted_bits) & !search_attr != 0 || !Self::matches_pattern(&entry.name, pattern) {
+                    continue;
+                }
+                valid_entries.push(DosDirEntry {
+                    is_dir: entry.is_dir(),
+                    is_readonly: attr & fat::ATTR_READ_ONLY != 0,
+                    filename: entry.name,
+                    size: entry.size,
+                    dos_time: entry.time,
+                    dos_date: entry.date,
+                    attr,
+                });
+            }
+            return Ok(valid_entries);
+        }
 
         if let Some(files) = drive.tree() {
             let dir = Self::memory_path(drive, search_dir_str);
@@ -2023,6 +2430,7 @@ mod tests {
             kind: DriveKind::CdRom,
             label: Some("gamecd_disk1".to_string()),
             read_only: false,
+            ..Default::default()
         };
         disk.mount(3, &base.join("d"), opts, false).unwrap();
 

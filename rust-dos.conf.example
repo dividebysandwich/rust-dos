@@ -31,6 +31,18 @@
 # RAM in MB, 2 to 64. Memory above the first megabyte is extended memory
 # for DOS extenders and XMS.
 #memsize=16
+# How fast hard disks are, as DOSBox Staging has it:
+#   maximum  as fast as possible, no slowdown (the default)
+#   fast     a mid-1990s hard disk (~15 MB/s)
+#   medium   an early 1990s hard disk (~2.5 MB/s)
+#   slow     a 1980s hard disk (~600 kB/s)
+#hard_disk_speed=maximum
+# How fast floppy drives are:
+#   maximum  as fast as possible, no slowdown (the default)
+#   fast     an extra-high density (ED) floppy (~120 kB/s)
+#   medium   a high density (HD) floppy (~60 kB/s)
+#   slow     a double density (DD) floppy (~30 kB/s)
+#floppy_disk_speed=maximum
 
 [sound]
 # The Sound Blaster: sb16 (the default), sbpro2, sb2, or none. Programs
@@ -65,21 +77,36 @@
 # is set, else the Ultrasound patches in ultradir), soundfont, gus, or
 # none.
 #midisynth=auto
+# The noises the hard disks and floppy drives make: off (the default),
+# seek-only (the heads moving), or on (the disk spinning as well). They
+# sound best with the disk speeds above set lower than maximum.
+#hard_disk_noise=off
+#floppy_disk_noise=off
 
 [drives]
-# Mount host directories or CD images as DOS drives A: to Y:
-#   <letter> = <host path> [floppy|hdd|cdrom] [-label NAME] [-ro]
+# Mount host directories, or floppy, hard disk or CD images, as DOS drives
+# A: to Y:
+#   <letter> = <host path> [more images] [floppy|hdd|cdrom] [-label NAME]
+#              [-ro] [-chs C,H,S]
 #
 # hdd is the default type. floppy drives are removable 1.44 MB disks, cdrom
 # drives are read-only and visible to programs through MSCDEX, and -ro makes
 # any drive read-only. -label sets the volume label (up to 11 characters).
-# A CD image (.cue, .iso, .bin or .img) always makes a CD-ROM drive.
 # A: and B: are always floppy drives.
+# Disk images (.img, .ima, .vfd, .flp, .dsk) hold a FAT12 or FAT16 file
+# system that programs can read and write, also sector by sector through
+# the BIOS (INT 13h) and DOS (INT 25h/26h). An image the size of a floppy
+# disk is a floppy, others are hard disks with a partition table; -chs
+# gives a hard disk image's geometry where it can't be found from the
+# image. CD images are .cue, .iso and .bin files.
+# A list of images puts the first in the drive; Ctrl+F4 changes to the
+# next, in every drive with a list.
 # Quote paths that contain spaces. ~ is your home directory and relative
 # paths are relative to this file.
 # C: is the current working directory unless set here or with -d/--dir.
 #C=~/dos
 #A=~/dos/floppy floppy -label DISK1
+#B=~/dos/images/disk1.img ~/dos/images/disk2.img
 #D="~/dos/My CD" cdrom -label GAMECD
 #E=~/dos/images/game.cue
 

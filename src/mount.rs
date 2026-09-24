@@ -2,19 +2,89 @@
 //! command and the `[drives]` section of the config file, and of the
 //! DOSBox-style `IMGMOUNT` command.
 //!
-//! A mount spec is `<host path> [type] [-t type] [-label NAME] [-ro]` where
-//! type is `floppy`, `hdd` (alias `dir`) or `cdrom` (alias `iso`). The path
-//! is a directory, or a CD image (.cue, .iso, .bin, .img), which always
-//! makes a CD-ROM drive. A: and B: are floppies whatever the type says.
+//! A mount spec is `<host path> [more images] [type] [-t type] [-label NAME]
+//! [-ro] [-chs C,H,S]` where type is `floppy`, `hdd` (alias `dir`) or
+//! `cdrom` (alias `iso`). The path is a directory, or a disk or CD image
+//! (.img, .ima, .vfd, .flp, .dsk, .iso, .cue, .bin), whose type is found
+//! from the image unless it's given. Several images make a list that
+//! Ctrl+F4 steps through. A: and B: are floppies whatever the type says.
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions};
+use crate::diskimage::Chs;
 use std::path::{Path, PathBuf};
 
-pub const MOUNT_USAGE: &str =
-    "Usage: MOUNT [drive path [floppy|hdd|cdrom] [-label NAME] [-ro]]\r\n       MOUNT -u drive\r\n";
+pub const MOUNT_USAGE: &str = "Usage: MOUNT [drive path [floppy|hdd|cdrom] [-label NAME] [-ro]]\r\n       MOUNT drive image [image ...] [options]\r\n       MOUNT -u drive\r\n";
 
-pub const IMGMOUNT_USAGE: &str =
-    "Usage: IMGMOUNT drive image [-t cdrom|iso] [-label NAME]\r\n       IMGMOUNT -u drive\r\n";
+pub const IMGMOUNT_USAGE: &str = "Usage: IMGMOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r\n                [-chs C,H,S] [-size 512,S,H,C]\r\n       IMGMOUNT -u drive\r\nCtrl+F4 puts the next image of a list in.\r\n";
+
+/// The extensions of disk and CD images.
+const IMAGE_EXTENSIONS: &[&str] = &["img", "ima", "vfd", "flp", "dsk", "iso", "cue", "bin"];
+
+/// Whether a name is a disk or CD image's, by its extension.
+fn is_image_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|e| IMAGE_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Parse numbers separated by commas, as -chs and -size take them.
+fn numbers(value: &str, count: usize, option: &str) -> Result<Vec<u32>, String> {
+    let numbers: Vec<u32> = value.split(',').map(|n| n.trim().parse::<u32>()).collect::<Result<_, _>>().map_err(|_| {
+        format!("{} needs {} numbers separated by commas", option, count)
+    })?;
+    if numbers.len() != count || numbers.contains(&0) {
+        return Err(format!("{} needs {} numbers separated by commas", option, count));
+    }
+    Ok(numbers)
+}
+
+/// A hard disk geometry from `-chs cylinders,heads,sectors`.
+fn parse_chs(value: &str) -> Result<Chs, String> {
+    let n = numbers(value, 3, "-chs")?;
+    if n[1] > 255 || n[2] > 63 {
+        return Err("-chs takes at most 255 heads and 63 sectors".to_string());
+    }
+    Ok(Chs { cylinders: n[0], heads: n[1], sectors: n[2] })
+}
+
+/// A hard disk geometry from DOSBox's `-size bytes,sectors,heads,cylinders`.
+fn parse_size(value: &str) -> Result<Chs, String> {
+    let n = numbers(value, 4, "-size")?;
+    if n[0] != 512 {
+        return Err("Only disks with 512-byte sectors can be mounted".to_string());
+    }
+    parse_chs(&format!("{},{},{}", n[3], n[2], n[1]))
+}
+
+/// Take an option that the mount commands share. Returns false for a token
+/// that isn't one.
+fn mount_option(
+    token: &str,
+    iter: &mut std::slice::Iter<'_, String>,
+    opts: &mut MountOptions,
+) -> Result<bool, String> {
+    match token.to_ascii_lowercase().as_str() {
+        "-t" => {
+            let value = iter.next().ok_or("-t needs a drive type")?;
+            opts.kind = parse_kind(value).ok_or_else(|| format!("Unknown drive type '{}'", value))?;
+        }
+        "-label" => {
+            let value = iter.next().ok_or("-label needs a name")?;
+            opts.label = Some(value.clone());
+        }
+        "-ro" => opts.read_only = true,
+        "-chs" => opts.geometry = Some(parse_chs(iter.next().ok_or("-chs needs a geometry")?)?),
+        "-size" => opts.geometry = Some(parse_size(iter.next().ok_or("-size needs a geometry")?)?),
+        "-fs" => match iter.next().ok_or("-fs needs a file system")?.to_ascii_lowercase().as_str() {
+            "fat" => {}
+            "iso" => opts.kind = DriveKind::CdRom,
+            "none" => return Err("Disk images without a DOS file system can't be mounted".to_string()),
+            other => return Err(format!("Unknown file system '{}'", other)),
+        },
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
 
 /// A parsed request to mount `path` as `drive`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,26 +186,20 @@ pub fn parse_mount_spec(
     }
     let (raw_path, options) = tokens
         .split_first()
-        .ok_or_else(|| "Missing host directory or CD image".to_string())?;
+        .ok_or_else(|| "Missing host directory or disk image".to_string())?;
 
     let mut opts = MountOptions::default();
     let mut iter = options.iter();
     while let Some(token) = iter.next() {
-        match token.to_ascii_lowercase().as_str() {
-            "-t" => {
-                let value = iter.next().ok_or("-t needs a drive type")?;
-                opts.kind =
-                    parse_kind(value).ok_or_else(|| format!("Unknown drive type '{}'", value))?;
+        if mount_option(token, &mut iter, &mut opts)? {
+            continue;
+        }
+        match parse_kind(token) {
+            Some(kind) => opts.kind = kind,
+            None if is_image_name(token) && is_image_name(raw_path) => {
+                opts.more_images.push(expand_host_path(token, base, home));
             }
-            "-label" => {
-                let value = iter.next().ok_or("-label needs a name")?;
-                opts.label = Some(value.clone());
-            }
-            "-ro" => opts.read_only = true,
-            other => {
-                opts.kind =
-                    parse_kind(other).ok_or_else(|| format!("Unknown option '{}'", token))?;
-            }
+            None => return Err(format!("Unknown option '{}'", token)),
         }
     }
 
@@ -169,10 +233,10 @@ pub fn parse_mount_command(
 }
 
 /// Parse the arguments of an `IMGMOUNT` command, DOSBox's command for disk
-/// images: `IMGMOUNT d image [-t cdrom|iso] [-fs iso] [-label NAME]`. Only
-/// CD images can be mounted. `locate` finds the image by its DOS path
-/// (as DOSBox batch files name it, "C:\GAME\CD\GAME.CUE"); a host path
-/// relative to `cwd` is the fallback.
+/// images: `IMGMOUNT d image [image ...] [-t floppy|hdd|cdrom|iso]
+/// [-fs fat|iso] [-label NAME] [-ro] [-chs C,H,S] [-size 512,S,H,C]`.
+/// `locate` finds an image by its DOS path (as DOSBox batch files name it,
+/// "C:\GAME\CD\GAME.CUE"); a host path relative to `cwd` is the fallback.
 pub fn parse_imgmount_command(
     args: &str,
     locate: &dyn Fn(&str) -> Option<PathBuf>,
@@ -194,31 +258,23 @@ pub fn parse_imgmount_command(
     if drive == DRIVE_Z {
         return Err("Drive Z: is reserved".to_string());
     }
-    let mut opts = MountOptions { kind: DriveKind::CdRom, read_only: true, ..Default::default() };
-    let mut image = None;
+    let mut opts = MountOptions::default();
+    let mut images = Vec::new();
     let mut iter = tokens[1..].iter();
     while let Some(token) = iter.next() {
-        match token.to_ascii_lowercase().as_str() {
-            "-t" => {
-                let value = iter.next().ok_or("-t needs a type")?;
-                if !matches!(value.to_ascii_lowercase().as_str(), "cdrom" | "iso") {
-                    return Err("Only CD-ROM images are supported".to_string());
-                }
-            }
-            "-fs" => {
-                let value = iter.next().ok_or("-fs needs a file system")?;
-                if !value.eq_ignore_ascii_case("iso") {
-                    return Err("Only CD-ROM images are supported".to_string());
-                }
-            }
-            "-label" => opts.label = Some(iter.next().ok_or("-label needs a name")?.clone()),
-            "-ro" => {}
-            other if other.starts_with('-') => return Err(format!("Unknown option '{}'", token)),
-            _ if image.is_some() => return Err("Only one image at a time can be mounted".to_string()),
-            _ => image = Some(locate(token).unwrap_or_else(|| expand_host_path(token, cwd, home))),
+        if mount_option(token, &mut iter, &mut opts)? {
+            continue;
         }
+        if token.starts_with('-') {
+            return Err(format!("Unknown option '{}'", token));
+        }
+        images.push(locate(token).unwrap_or_else(|| expand_host_path(token, cwd, home)));
     }
-    let path = image.ok_or_else(|| "Missing image".to_string())?;
+    if images.is_empty() {
+        return Err("Missing image".to_string());
+    }
+    let path = images.remove(0);
+    opts.more_images = images;
     Ok(MountCmd::Mount(MountSpec { drive, path, opts }))
 }
 
@@ -250,11 +306,15 @@ fn quote(s: &str) -> String {
     }
 }
 
-/// The `<host path> [type] [-label NAME] [-ro]` text of a mount, as the
-/// `[drives]` section and `MOUNT` take it: the inverse of
-/// `parse_mount_spec`.
+/// The `<host path> [more images] [type] [-label NAME] [-ro] [-chs C,H,S]`
+/// text of a mount, as the `[drives]` section and `MOUNT` take it: the
+/// inverse of `parse_mount_spec`.
 pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
     let mut value = quote(&contract_home(&spec.path, home));
+    for image in &spec.opts.more_images {
+        value.push(' ');
+        value.push_str(&quote(&contract_home(image, home)));
+    }
     if spec.opts.kind != DriveKind::HardDisk {
         value.push(' ');
         value.push_str(spec.opts.kind.name());
@@ -265,6 +325,9 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
     }
     if spec.opts.read_only {
         value.push_str(" -ro");
+    }
+    if let Some(chs) = spec.opts.geometry {
+        value.push_str(&format!(" -chs {},{},{}", chs.cylinders, chs.heads, chs.sectors));
     }
     value
 }
@@ -333,6 +396,10 @@ mod tests {
         assert!(parse_mount_spec(3, &toks("x zip"), base, None).is_err());
         let spec = parse_mount_spec(3, &toks("game.cue iso"), base, None).unwrap();
         assert_eq!(spec.opts.kind, DriveKind::CdRom);
+        let spec = parse_mount_spec(0, &toks("a.img b.IMA floppy"), base, None).unwrap();
+        assert_eq!(spec.opts.more_images, [base.join("b.IMA")]);
+        // Only images make lists.
+        assert!(parse_mount_spec(3, &toks("dir b.img"), base, None).is_err());
         assert!(parse_mount_spec(3, &toks("x -t"), base, None).is_err());
         assert!(parse_mount_spec(25, &toks("x"), base, None).is_err());
     }
@@ -377,8 +444,25 @@ mod tests {
             other => panic!("{:?}", other),
         }
         assert_eq!(parse_imgmount_command("-u d", &locate, cwd, None), Ok(MountCmd::Unmount(3)));
-        assert!(parse_imgmount_command("d disk.img -t hdd", &locate, cwd, None).is_err());
-        assert!(parse_imgmount_command("d a.cue b.cue", &locate, cwd, None).is_err());
+        match parse_imgmount_command("a d1.img d2.img d3.img -t floppy -ro", &locate, cwd, None).unwrap() {
+            MountCmd::Mount(spec) => {
+                assert_eq!(spec.path, cwd.join("d1.img"));
+                assert_eq!(spec.opts.more_images, [cwd.join("d2.img"), cwd.join("d3.img")]);
+                assert_eq!((spec.opts.kind, spec.opts.read_only), (DriveKind::Floppy, true));
+            }
+            other => panic!("{:?}", other),
+        }
+        match parse_imgmount_command("c hdd.img -size 512,63,16,142 -fs fat", &locate, cwd, None).unwrap() {
+            MountCmd::Mount(spec) => {
+                assert_eq!(spec.opts.kind, DriveKind::HardDisk);
+                assert_eq!(spec.opts.geometry, Some(Chs { cylinders: 142, heads: 16, sectors: 63 }));
+            }
+            other => panic!("{:?}", other),
+        }
+        assert!(parse_imgmount_command("c hdd.img -size 1024,63,16,142", &locate, cwd, None).is_err());
+        assert!(parse_imgmount_command("c hdd.img -chs 10,16", &locate, cwd, None).is_err());
+        assert!(parse_imgmount_command("a boot.img -fs none", &locate, cwd, None).is_err());
+        assert!(parse_imgmount_command("d x.img -t zip", &locate, cwd, None).is_err());
         assert!(parse_imgmount_command("d", &locate, cwd, None).is_err());
         assert!(parse_imgmount_command("", &locate, cwd, None).is_err());
     }
@@ -393,12 +477,29 @@ mod tests {
             MountSpec {
                 drive: 0,
                 path: "/home/u/My Disks/a".into(),
-                opts: MountOptions { kind: DriveKind::Floppy, label: Some("DISK 1".into()), read_only: true },
+                opts: MountOptions { kind: DriveKind::Floppy, label: Some("DISK 1".into()), read_only: true, ..Default::default() },
             },
             MountSpec {
                 drive: 3,
                 path: "/games/cd.cue".into(),
-                opts: MountOptions { kind: DriveKind::CdRom, label: None, read_only: false },
+                opts: MountOptions { kind: DriveKind::CdRom, label: None, read_only: false, ..Default::default() },
+            },
+            MountSpec {
+                drive: 0,
+                path: "/home/u/disks/disk 1.img".into(),
+                opts: MountOptions {
+                    kind: DriveKind::Floppy,
+                    more_images: vec!["/home/u/disks/disk 2.img".into(), "/other/d3.ima".into()],
+                    ..Default::default()
+                },
+            },
+            MountSpec {
+                drive: 2,
+                path: "/hd/c.img".into(),
+                opts: MountOptions {
+                    geometry: Some(Chs { cylinders: 615, heads: 4, sectors: 17 }),
+                    ..Default::default()
+                },
             },
         ];
         for spec in specs {

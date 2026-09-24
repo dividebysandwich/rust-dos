@@ -70,6 +70,7 @@ fn router(state: AppState) -> Router {
         .route("/api/input", axum::routing::delete(input_clear))
         .route("/api/input/{kind}", post(input_post))
         .route("/api/drive", get(drives))
+        .route("/api/drive/swap", post(swap_images))
         .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
@@ -356,6 +357,14 @@ struct MountBody {
     label: Option<String>,
     #[serde(default)]
     read_only: bool,
+    /// More images after `path`, which /api/drive/swap (Ctrl+F4) steps
+    /// through.
+    #[serde(default)]
+    images: Vec<String>,
+}
+
+async fn swap_images(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::SwapImages, DEFAULT_TIMEOUT).await
 }
 
 async fn mount(State(s): State<AppState>, Path(letter): Path<String>, body: Bytes) -> ApiResult {
@@ -366,6 +375,7 @@ async fn mount(State(s): State<AppState>, Path(letter): Path<String>, body: Byte
         kind: b.kind,
         label: b.label,
         read_only: b.read_only,
+        images: b.images,
     };
     s.call_json(cmd, DEFAULT_TIMEOUT).await
 }
@@ -817,10 +827,14 @@ DRIVES
   GET    /api/drive                                list drives, types and paths
   PUT    /api/drive/D {"path":"/home/me/dos/cd","type":"cdrom","label":"GAMECD"}
                    mount or replace a drive; type floppy|hdd|cdrom, optional
-                   "read_only":true. The path is a directory or a CD image
-                   (.cue, .iso, .bin, .img), which makes a CD-ROM drive.
+                   "read_only":true. The path is a directory or a disk or CD
+                   image (.img, .ima, .vfd, .flp, .dsk, .cue, .iso, .bin);
+                   an image's type is found from the image unless given.
+                   "images":["disk2.img",...] adds images to step through.
                    Replacing closes that drive's open files; with no options
                    a remount keeps the drive's type and label.
+  POST   /api/drive/swap                           next image in every drive
+                   mounted from a list of images (Ctrl+F4)
   DELETE /api/drive/D                              unmount (not C: or Z:)
 
 WEBSOCKETS

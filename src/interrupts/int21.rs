@@ -6,6 +6,8 @@ use crate::audio::play_sdl_beep;
 use crate::bus::{DOS_LIST_OF_LISTS, DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{DriveKind, FIRST_USER_HANDLE, drive_letter, parse_drive_prefix};
+use crate::diskio;
+use crate::disknoise::Access;
 use crate::video::print_char;
 
 /// The InDOS flag (AH=34h), with the critical error flag before it.
@@ -94,17 +96,23 @@ fn dos_drive_number(cpu: &Cpu, code: u8) -> u8 {
 /// anything. CD-ROMs are redirector drives, which have no block device.
 fn generic_block_ioctl(cpu: &mut Cpu) {
     let drive = dos_drive_number(cpu, cpu.get_reg8(Register::BL));
-    let kind = match cpu.bus.disk.drive_kind(drive) {
-        None => return set_result(cpu, Err(0x0F)), // invalid drive
-        Some(DriveKind::CdRom) => return set_result(cpu, Err(0x01)), // invalid function
-        Some(kind) => kind,
+    let (kind, layout) = match (cpu.bus.disk.drive_kind(drive), cpu.bus.disk.layout(drive)) {
+        (Some(DriveKind::CdRom), _) => return set_result(cpu, Err(0x01)), // invalid function
+        (Some(kind), Some(layout)) => (kind, layout),
+        _ => return set_result(cpu, Err(0x0F)), // invalid drive
     };
-    let layout = kind.layout();
     let block = cpu.get_physical_addr(cpu.ds(), cpu.dx());
     match cpu.cx() {
         0x0860 => {
             // 00: special functions, which the caller sets.
-            let device_type = if kind == DriveKind::Floppy { 0x07 } else { 0x05 }; // 1.44 MB or fixed
+            let device_type = match (kind, layout.sectors_per_track) {
+                (DriveKind::Floppy, 8 | 9) if layout.cylinders() <= 40 => 0x00, // 320/360 KB
+                (DriveKind::Floppy, 15) => 0x01,                               // 1.2 MB
+                (DriveKind::Floppy, 9) => 0x02,                                // 720 KB
+                (DriveKind::Floppy, 36) => 0x09,                               // 2.88 MB
+                (DriveKind::Floppy, _) => 0x07,                                // 1.44 MB
+                _ => 0x05,                                                     // fixed disk
+            };
             cpu.bus.write_8(block + 0x01, device_type);
             cpu.bus.write_16(block + 0x02, if kind.is_removable() { 0 } else { 1 }); // 02: bit 0 = fixed
             cpu.bus.write_16(block + 0x04, layout.cylinders());
@@ -115,7 +123,8 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
         }
         0x0866 => {
             cpu.bus.write_16(block, 0); // 00: info level
-            cpu.bus.write_32(block + 0x02, VOLUME_SERIAL + drive as u32);
+            let serial = cpu.bus.disk.volume_serial(drive).unwrap_or(VOLUME_SERIAL + drive as u32);
+            cpu.bus.write_32(block + 0x02, serial);
             let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
             let label = if label.is_empty() { "NO NAME".to_string() } else { label };
             let padded = label.bytes().chain(std::iter::repeat(b' ')).take(11);
@@ -126,6 +135,22 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
         _ => {}
     }
     set_result(cpu, Ok(0));
+}
+
+/// Disk access through an open file: `bytes` moved (`data` tells a read
+/// from a write), or a call that moves none. It takes the time the drive's
+/// speed says and makes its noise (see `diskio`); devices take none.
+fn file_io(cpu: &mut Cpu, handle: u16, bytes: u32, data: Option<bool>) {
+    let disk = &cpu.bus.disk;
+    let (Some(drive), None, Some(key)) = (disk.handle_drive(handle), disk.handle_device(handle), disk.handle_key(handle))
+    else {
+        return;
+    };
+    let access = match data {
+        Some(write) => Access::File { write, key },
+        None => Access::Other,
+    };
+    cpu.bus.drive_activity(drive, bytes, access);
 }
 
 /// A character from the keyboard the way DOS's console driver reads it: an
@@ -1098,6 +1123,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // Attributes in CX are ignored for now (TODO)
             match cpu.bus.disk.create_file(&filename, cpu.current_psp) {
                 Ok(handle) => {
+                    file_io(cpu, handle, diskio::CREATE_BYTES, None);
                     cpu.set_ax(handle);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
@@ -1120,6 +1146,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
             match cpu.bus.disk.open_file(&filename, mode, cpu.current_psp) {
                 Ok(handle) => {
+                    file_io(cpu, handle, diskio::OPEN_BYTES, None);
                     cpu.set_ax(handle);
                     // In real CPU, clear CF here
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1172,6 +1199,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             } else {
                 match cpu.bus.disk.read_file(handle, count) {
                     Ok(bytes) => {
+                        file_io(cpu, handle, bytes.len() as u32, Some(false));
                         for b in &bytes {
                             cpu.bus.write_8(buf_addr, *b);
                             buf_addr += 1;
@@ -1234,6 +1262,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             } else {
                 match cpu.bus.disk.write_file(handle, &data) {
                     Ok(written) => {
+                        file_io(cpu, handle, written as u32, Some(true));
                         cpu.set_ax(written);
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
@@ -1260,6 +1289,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
             match cpu.bus.disk.seek_file(handle, offset as i64, whence) {
                 Ok(new_pos) => {
+                    file_io(cpu, handle, diskio::SEEK_BYTES, None);
                     cpu.set_dx(((new_pos >> 16) & 0xFFFF) as u16);
                     cpu.set_ax((new_pos & 0xFFFF) as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1810,10 +1840,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                     Err(e) => set_result(cpu, Err(e)),
                 }
-            } else if cpu.bus.disk.is_open(handle) {
-                cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
-                set_result(cpu, Err(0x06));
+                let result = cpu.bus.disk.set_file_time(handle, cpu.cx(), cpu.dx());
+                set_result(cpu, result.map(|()| 0));
             }
         }
 
@@ -1852,6 +1881,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             }
             match cpu.bus.disk.create_temp_file(&dir, cpu.current_psp) {
                 Ok((handle, name)) => {
+                    file_io(cpu, handle, diskio::CREATE_BYTES, None);
                     for (i, b) in name.bytes().chain(std::iter::once(0)).enumerate() {
                         cpu.bus.write_8(addr + i, b);
                     }
@@ -1865,6 +1895,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x5B => {
             let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
             let result = cpu.bus.disk.create_new_file(&filename, cpu.current_psp);
+            if let Ok(handle) = result {
+                file_io(cpu, handle, diskio::CREATE_BYTES, None);
+            }
             set_result(cpu, result);
         }
 
@@ -1949,6 +1982,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             };
             match result {
                 Ok((handle, taken)) => {
+                    let bytes = if taken == 1 { diskio::OPEN_BYTES } else { diskio::CREATE_BYTES };
+                    file_io(cpu, handle, bytes, None);
                     cpu.set_cx(taken);
                     set_result(cpu, Ok(handle));
                 }

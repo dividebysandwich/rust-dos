@@ -11,6 +11,7 @@
 
 use crate::cpu::CpuModel;
 use crate::disk::DRIVE_Z;
+use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::timer::CpuSpeed;
 use std::fs::{self, OpenOptions};
@@ -90,6 +91,9 @@ pub struct Config {
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
     /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,
+    /// How fast the disks are (`[emulator]`) and the noises they make
+    /// (`[sound]`).
+    pub disk: DiskSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -421,13 +425,27 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "486" => config.cpu = Some(CpuModel::I486),
                             _ => warn(format!("invalid cpu '{}' (386 or 486)", value)),
                         },
+                        "hard_disk_speed" | "floppy_disk_speed" => match DiskSpeed::parse(value) {
+                            Some(speed) if key.eq_ignore_ascii_case("hard_disk_speed") => {
+                                config.disk.hard_disk_speed = speed
+                            }
+                            Some(speed) => config.disk.floppy_disk_speed = speed,
+                            None => warn(format!("invalid {} '{}' (maximum, fast, medium or slow)", key, value)),
+                        },
                         _ => warn(format!("unknown setting '{}'", key)),
                     }
                     continue;
                 }
 
                 if section == Section::Sound {
-                    if let Err(e) = config.sound.set(key, value, base_dir, home) {
+                    let lower = key.to_ascii_lowercase();
+                    if matches!(lower.as_str(), "hard_disk_noise" | "floppy_disk_noise") {
+                        match NoiseMode::parse(value) {
+                            Some(mode) if lower == "hard_disk_noise" => config.disk.hard_disk_noise = mode,
+                            Some(mode) => config.disk.floppy_disk_noise = mode,
+                            None => warn(format!("invalid {} '{}' (off, seek-only or on)", key, value)),
+                        }
+                    } else if let Err(e) = config.sound.set(key, value, base_dir, home) {
                         warn(e);
                     }
                     continue;
@@ -552,6 +570,7 @@ pub struct Settings {
     /// RAM in MB.
     pub memsize: usize,
     pub sound: SoundConfig,
+    pub disk: DiskSettings,
 }
 
 impl Default for Settings {
@@ -565,6 +584,7 @@ impl Default for Settings {
             cpu: CpuModel::I486,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
             sound: SoundConfig::default(),
+            disk: DiskSettings::default(),
         }
     }
 }
@@ -581,6 +601,7 @@ impl Settings {
             cpu: config.cpu.unwrap_or(default.cpu),
             memsize: config.memsize.unwrap_or(default.memsize),
             sound: config.sound.clone(),
+            disk: config.disk,
         }
     }
 }
@@ -615,6 +636,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
             .to_string()),
         ),
         (Emulator, "memsize", Some(settings.memsize.to_string())),
+        (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
+        (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
         (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
         (Sound, "sbbase", Some(format!("{:X}", sb.base))),
         (Sound, "irq", Some(sb.irq.to_string())),
@@ -633,6 +656,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         ),
         (Sound, "ultradir", gus.ultradir.clone()),
         (Sound, "midisynth", Some(sound.midisynth.name().to_string())),
+        (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
+        (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ]
 }
 
@@ -653,7 +678,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
     let mut section = Section::None;
     let key_of = |text: &str| {
         let key = text.split_once('=')?.0.trim();
-        (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == ':'))
+        (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_'))
             .then(|| key.to_ascii_lowercase())
     };
     lines
@@ -1165,6 +1190,12 @@ mod tests {
             cpu: CpuModel::I386,
             memsize: 32,
             sound,
+            disk: DiskSettings {
+                hard_disk_speed: DiskSpeed::Medium,
+                floppy_disk_speed: DiskSpeed::Slow,
+                hard_disk_noise: NoiseMode::On,
+                floppy_disk_noise: NoiseMode::SeekOnly,
+            },
         }
     }
 
@@ -1175,7 +1206,16 @@ mod tests {
             MountSpec {
                 drive: 3,
                 path: "/home/u/cd images/game.cue".into(),
-                opts: MountOptions { kind: DriveKind::CdRom, label: Some("GAME".into()), read_only: false },
+                opts: MountOptions { kind: DriveKind::CdRom, label: Some("GAME".into()), read_only: false, ..Default::default() },
+            },
+            MountSpec {
+                drive: 0,
+                path: "/home/u/disks/disk 1.img".into(),
+                opts: MountOptions {
+                    kind: DriveKind::Floppy,
+                    more_images: vec!["/home/u/disks/disk 2.img".into()],
+                    ..Default::default()
+                },
             },
         ]
     }

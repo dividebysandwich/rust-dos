@@ -2,8 +2,9 @@
 
 use super::UiKey;
 use crate::disk::{DRIVE_C, DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter};
+use crate::diskimage::{self, Chs, ImageKind};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A line of text being edited.
 #[derive(Clone, Debug, Default)]
@@ -95,6 +96,12 @@ pub struct MountDialog {
     pub label: TextField,
     pub read_only: bool,
     pub focus: Field,
+    /// What the dialog doesn't show of the mount it changes, kept while
+    /// the path stays as it was: the drive's other images and a hard disk
+    /// image's geometry.
+    original: String,
+    more_images: Vec<PathBuf>,
+    geometry: Option<Chs>,
 }
 
 impl MountDialog {
@@ -113,6 +120,9 @@ impl MountDialog {
             label: TextField::default(),
             read_only: false,
             focus: Field::Path,
+            original: String::new(),
+            more_images: Vec::new(),
+            geometry: None,
         })
     }
 
@@ -125,15 +135,19 @@ impl MountDialog {
                 spec.as_ref().map(|s| s.opts.clone()).unwrap_or_default(),
             ),
         };
+        let path = contract_home(&path, home);
         Self {
             existing: true,
             drive: info.drive,
             free: Vec::new(),
-            path: TextField::new(&contract_home(&path, home)),
+            path: TextField::new(&path),
             kind: info.kind,
             label: TextField::new(opts.label.as_deref().unwrap_or("")),
             read_only: opts.read_only,
             focus: Field::Path,
+            original: path,
+            more_images: opts.more_images,
+            geometry: opts.geometry,
         }
     }
 
@@ -236,12 +250,16 @@ impl MountDialog {
         Event::None
     }
 
-    /// Take a path picked in the browser. An image makes a CD-ROM, except
-    /// on A: and B:, where mounting it will fail.
+    /// Take a path picked in the browser. An image sets the drive type to
+    /// its own, except on A: and B:, where mounting a CD will fail.
     pub fn picked(&mut self, path: &Path, home: Option<&Path>) {
         self.path = TextField::new(&contract_home(path, home));
         if path.is_file() && !self.kind_fixed() {
-            self.kind = DriveKind::CdRom;
+            self.kind = match diskimage::detect(path, DriveKind::HardDisk) {
+                Ok(ImageKind::Cd) => DriveKind::CdRom,
+                Ok(ImageKind::Floppy) => DriveKind::Floppy,
+                _ => DriveKind::HardDisk,
+            };
         }
         self.focus = Field::Mount;
     }
@@ -252,18 +270,24 @@ impl MountDialog {
         let raw = self.path.text();
         let raw = raw.trim();
         if raw.is_empty() {
-            return Err("Enter a host directory or CD image".to_string());
+            return Err("Enter a host directory or a disk or CD image".to_string());
         }
         let label = self.label.text().trim().to_string();
         if raw.contains('"') || label.contains('"') {
             return Err("The configuration file can't hold a '\"'".to_string());
         }
         let path = expand_host_path(raw, cwd, home);
-        let kind = if path.is_file() { DriveKind::CdRom } else { self.kind };
+        let unchanged = raw == self.original;
         Ok(MountSpec {
             drive: self.drive,
             path,
-            opts: MountOptions { kind, label: (!label.is_empty()).then_some(label), read_only: self.read_only },
+            opts: MountOptions {
+                kind: self.kind,
+                label: (!label.is_empty()).then_some(label),
+                read_only: self.read_only,
+                more_images: if unchanged { self.more_images.clone() } else { Vec::new() },
+                geometry: if unchanged { self.geometry } else { None },
+            },
         })
     }
 }
@@ -297,6 +321,8 @@ mod tests {
             read_only: false,
             current_dir: String::new(),
             mount: Some(MountSpec { drive, path: "/x".into(), opts: MountOptions::default() }),
+            images: Vec::new(),
+            image_index: 0,
         }
     }
 
@@ -352,10 +378,20 @@ mod tests {
     #[test]
     fn changing_a_drive_keeps_its_mount() {
         let mut info = drive(3, DriveKind::Floppy);
-        info.mount.as_mut().unwrap().opts = MountOptions { kind: DriveKind::Floppy, label: Some("D1".into()), read_only: true };
+        info.mount.as_mut().unwrap().opts = MountOptions {
+            kind: DriveKind::Floppy,
+            label: Some("D1".into()),
+            read_only: true,
+            more_images: vec!["/y".into()],
+            geometry: None,
+        };
         let mut d = MountDialog::change(&info, None);
         assert_eq!((d.path.text(), d.label.text(), d.read_only, d.kind), ("/x".into(), "D1".into(), true, DriveKind::Floppy));
         assert_eq!(d.fields(), [Field::Path, Field::Browse, Field::Kind, Field::Label, Field::ReadOnly, Field::Mount, Field::Unmount, Field::Cancel]);
+        // The drive's other images stay while the path does.
+        assert_eq!(d.spec(Path::new("/"), None).unwrap().opts.more_images, [PathBuf::from("/y")]);
+        d.path = TextField::new("/z");
+        assert!(d.spec(Path::new("/"), None).unwrap().opts.more_images.is_empty());
         d.focus = Field::Mount;
         d.key(UiKey::Right);
         assert_eq!(d.key(UiKey::Enter), Event::Unmount);

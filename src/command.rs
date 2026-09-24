@@ -1,5 +1,5 @@
 use crate::cpu::Cpu;
-use crate::disk::{DriveKind, drive_letter, parse_drive_prefix};
+use crate::disk::{DRIVE_C, DriveKind, drive_letter, parse_drive_prefix};
 use crate::mount::{
     IMGMOUNT_USAGE, MOUNT_USAGE, MountCmd, MountSpec, display_host_path, parse_imgmount_command, parse_mount_command,
 };
@@ -465,7 +465,7 @@ impl ShellCommand for CdCommand {
 }
 
 /// MOUNT                          list drives
-/// MOUNT d path [type] [options]  mount a host directory or a CD image
+/// MOUNT d path [type] [options]  mount a host directory or a disk or CD image
 /// MOUNT -u d                     unmount
 struct MountCommand;
 impl ShellCommand for MountCommand {
@@ -486,11 +486,12 @@ impl ShellCommand for MountCommand {
                         ""
                     };
                     let line = format!(
-                        "{}:    {:<7} {:<11} {}{}\r\n",
+                        "{}:    {:<7} {:<11} {}{}{}\r\n",
                         info.letter(),
                         info.kind.name(),
                         info.label,
                         host,
+                        disk_number(info.image_index, info.images.len()),
                         access
                     );
                     print_string(cpu, &line);
@@ -506,8 +507,8 @@ impl ShellCommand for MountCommand {
     }
 }
 
-/// IMGMOUNT d image [-t cdrom|iso] [-label NAME]   mount a CD image
-/// IMGMOUNT -u d                                  unmount
+/// IMGMOUNT d image [image ...] [options]   mount disk or CD images
+/// IMGMOUNT -u d                            unmount
 ///
 /// DOSBox's command, for the batch files made for it. The image is found
 /// by its DOS path first.
@@ -530,15 +531,24 @@ impl ShellCommand for ImgMountCommand {
     }
 }
 
+/// " (disk 2 of 3)" for a drive mounted from a list of images.
+fn disk_number(index: usize, count: usize) -> String {
+    if count > 1 { format!(" (disk {} of {})", index + 1, count) } else { String::new() }
+}
+
 fn mount(cpu: &mut Cpu, spec: MountSpec) {
-    match cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, false) {
+    // C: is always there; a disk image can take the host directory's place.
+    let replace = spec.drive == DRIVE_C && spec.path.is_file();
+    match cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, replace) {
         Ok(path) => {
             let kind = cpu.bus.disk.drive_kind(spec.drive).map_or("", DriveKind::name);
+            let count = cpu.bus.disk.drive_info(spec.drive).map_or(0, |info| info.images.len());
             let msg = format!(
-                "Drive {}: is mounted as {} {}\r\n",
+                "Drive {}: is mounted as {} {}{}\r\n",
                 drive_letter(spec.drive),
                 kind,
-                display_host_path(&path)
+                display_host_path(&path),
+                disk_number(0, count)
             );
             print_string(cpu, &msg);
         }

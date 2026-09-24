@@ -11,6 +11,8 @@ fn drive_info(spec: &MountSpec) -> DriveInfo {
         read_only: spec.opts.read_only,
         current_dir: String::new(),
         mount: Some(spec.clone()),
+        images: Vec::new(),
+        image_index: 0,
     }
 }
 
@@ -107,9 +109,16 @@ fn settings_change_live() {
     ui.key(Esc, &mut host);
 
     // Memory waits for the next start.
-    keys(&mut ui, &mut host, &[End, Right]);
+    ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    keys(&mut ui, &mut host, &[Right]);
     assert_eq!(host.applied.last().unwrap().memsize, 32);
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
+
+    // The disk speed changes at once.
+    keys(&mut ui, &mut host, &[End, Left]);
+    assert_eq!(host.applied.last().unwrap().disk.floppy_disk_speed, crate::diskio::DiskSpeed::Slow);
+    assert!(status(&ui).0.is_empty() || !status(&ui).0.contains("next time"), "{:?}", status(&ui));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("slow (~30 kB/s)"));
 }
 
 #[test]

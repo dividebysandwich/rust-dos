@@ -26,7 +26,7 @@ mod display;
 // re-exports let the binary's modules refer to the library modules as
 // `crate::...`.
 use rust_dos::{
-    audio, config, cpu, disk, exec, keyboard, mount, recorder, sb, shell, timer, video,
+    audio, config, cpu, disk, diskimage, diskio, exec, keyboard, mount, recorder, sb, shell, timer, video,
 };
 
 #[derive(Parser, Debug)]
@@ -141,6 +141,7 @@ fn main() -> Result<(), String> {
 
     let mut cpu = create_cpu(&args, &config);
     cpu.model = settings.cpu;
+    cpu.bus.set_disk_settings(settings.disk);
     for warning in apply_sound_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
@@ -235,6 +236,21 @@ fn main() -> Result<(), String> {
                     if keycode == Keycode::F12 && ctrl && !alt {
                         if !repeat {
                             toggle_ui!();
+                        }
+                        continue;
+                    }
+                    // Ctrl+F4 puts the next disk in the drives mounted
+                    // from lists of images, as in DOSBox.
+                    if keycode == Keycode::F4 && ctrl && !alt {
+                        if !repeat {
+                            let messages = cpu.bus.swap_images();
+                            for message in &messages {
+                                eprintln!("[DISK] {}", message);
+                                cpu.bus.log_string(&format!("[DISK] {}", message));
+                            }
+                            if ui.is_open() && !messages.is_empty() {
+                                ui.drives_changed(&host!(), &messages.join("; "));
+                            }
                         }
                         continue;
                     }
@@ -778,6 +794,9 @@ impl Host for MainHost<'_, '_> {
                 self.cpu.bus.set_cycles_per_ms(n);
             }
         }
+        if new.disk != old.disk {
+            self.cpu.bus.set_disk_settings(new.disk);
+        }
         if !self.machine.differs(new) {
             return Ok(None);
         }
@@ -968,27 +987,29 @@ fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
             warn("-d/--dir overrides drive C: from the config file".to_string());
             None
         }
-        (None, Some(spec)) if !spec.path.is_dir() => {
+        (None, Some(spec)) if !spec.path.is_dir() && !spec.path.is_file() => {
             warn(format!(
-                "C: {} is not a directory, using the current directory",
+                "C: {} is not a directory or a disk image, using the current directory",
                 spec.path.display()
             ));
             None
         }
         (_, spec) => spec,
     };
+    // A disk image goes in once C: is there.
     let root_path = match (&args.dir, c_spec) {
         (Some(dir), _) => std::path::PathBuf::from(dir),
-        (None, Some(spec)) => spec.path.clone(),
-        (None, None) => std::path::PathBuf::from("."),
+        (None, Some(spec)) if spec.path.is_dir() => spec.path.clone(),
+        _ => std::path::PathBuf::from("."),
     };
 
     let memory_mb = config.memsize.unwrap_or(rust_dos::bus::DEFAULT_MEMORY_MB);
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
     cpu.bus.log_file = open_log_file();
     if let Some(spec) = c_spec {
-        // Remount C: to apply the config's drive type, label and -ro
-        if let Err(e) = cpu.bus.mount_drive(DRIVE_C, &root_path, spec.opts.clone(), true) {
+        // Remount C: to apply the config's drive type, label and -ro, or
+        // with its disk image.
+        if let Err(e) = cpu.bus.mount_drive(DRIVE_C, &spec.path, spec.opts.clone(), true) {
             warn(format!("cannot set up drive C: {}", e));
         }
     }

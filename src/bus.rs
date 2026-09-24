@@ -140,6 +140,9 @@ pub struct Bus {
     ultrasnd_drive: Option<u8>,
     /// The CD drive playing audio tracks, for MSCDEX.
     pub cdaudio: crate::cdrom::audio::CdPlayer,
+    /// The time disk access takes, and the drives' noises.
+    pub disk_io: crate::diskio::DiskIo,
+    pub disknoise: crate::disknoise::DiskNoise,
     /// What MSCDEX keeps between calls.
     pub mscdex: crate::interrupts::mscdex::MscdexState,
     /// Mixed output (44.1 kHz stereo, interleaved) rendered up to
@@ -246,6 +249,8 @@ impl Bus {
             gus_line: None,
             ultrasnd_drive: None,
             cdaudio: crate::cdrom::audio::CdPlayer::new(),
+            disk_io: crate::diskio::DiskIo::default(),
+            disknoise: crate::disknoise::DiskNoise::new(),
             mscdex: Default::default(),
             audio_out: VecDeque::new(),
             audio_frames: 0,
@@ -391,6 +396,62 @@ impl Bus {
         result
     }
 
+    /// Take the disk speed and noise settings.
+    pub fn set_disk_settings(&mut self, settings: crate::diskio::DiskSettings) {
+        self.audio_catch_up();
+        self.disk_io.settings = settings;
+        self.disknoise.set_modes(settings.floppy_disk_noise, settings.hard_disk_noise);
+    }
+
+    /// A drive of `class` moved `bytes`: charge the time that takes at the
+    /// drive's speed, and make its noise.
+    pub fn disk_activity(&mut self, class: crate::diskio::DiskClass, bytes: u32, access: crate::disknoise::Access) {
+        let pending = self.disk_io.charge(class, bytes);
+        if self.disknoise.enabled(class) {
+            // The noise starts now and goes on while the access does.
+            self.audio_catch_up();
+            let frames = (pending as u128 * crate::opl::RATE as u128 / 1_000_000_000) as u64;
+            self.disknoise.io(class, access, frames);
+        }
+    }
+
+    /// `bytes` were moved on `drive`, if it is a floppy drive or a hard
+    /// disk.
+    pub fn drive_activity(&mut self, drive: u8, bytes: u32, access: crate::disknoise::Access) {
+        if let Some(class) = self.disk.drive_kind(drive).and_then(crate::diskio::DiskClass::of) {
+            self.disk_activity(class, bytes, access);
+        }
+    }
+
+    /// Sectors of a drive's disk image were read or written through the
+    /// BIOS or INT 25h/26h, from sector `lba` of the disk on.
+    pub fn sector_activity(&mut self, drive: u8, lba: u64, sectors: u32, _write: bool) {
+        let per_track = self.disk.bios_image(drive).map_or(1, |disk| disk.geometry().sectors.max(1) as u64);
+        let bytes = sectors.saturating_mul(crate::diskimage::SECTOR_SIZE as u32);
+        self.drive_activity(drive, bytes, crate::disknoise::Access::Track(lba / per_track));
+    }
+
+    /// Put the next image in every drive mounted from a list of images, as
+    /// Ctrl+F4 does. Returns what changed, and what went wrong.
+    pub fn swap_images(&mut self) -> Vec<String> {
+        let mut messages = Vec::new();
+        for drive in 0..LASTDRIVE {
+            match self.disk.swap_image(drive) {
+                Ok(Some(message)) => {
+                    self.cdaudio.stop_drive(drive);
+                    self.mscdex.disc_changed(drive);
+                    messages.push(message);
+                }
+                Ok(None) => {}
+                Err(e) => messages.push(e),
+            }
+        }
+        if !messages.is_empty() {
+            self.sync_drive_bda();
+        }
+        messages
+    }
+
     /// Unmount a DOS drive and refresh the BIOS view of the drive set.
     pub fn unmount_drive(&mut self, drive: u8) -> Result<(), String> {
         let result = self.disk.unmount(drive);
@@ -422,16 +483,18 @@ impl Bus {
             .filter(|&(_, k)| k != DriveKind::CdRom)
             .collect();
         for drive in 0..LASTDRIVE {
-            let media = self.disk.drive_kind(drive).map_or(0, |k| k.media_descriptor());
+            let media = self.disk.media_descriptor(drive);
             self.write_8(MEDIA_ID_TABLE + drive as usize, media);
             let base = DPB_TABLE + drive as usize * DPB_SIZE;
             for i in 0..DPB_SIZE {
                 self.write_8(base + i, 0);
             }
         }
-        for (i, &(drive, kind)) in with_dpb.iter().enumerate() {
+        for (i, &(drive, _)) in with_dpb.iter().enumerate() {
             let next = with_dpb.get(i + 1).map(|&(d, _)| d);
-            self.write_dpb(drive, kind, next);
+            if let Some(layout) = self.disk.layout(drive) {
+                self.write_dpb(drive, layout, next);
+            }
         }
         self.write_list_of_lists(&with_dpb);
     }
@@ -454,7 +517,7 @@ impl Bus {
             }
             None => self.write_32(base, 0xFFFF_FFFF),
         }
-        let max_sector = with_dpb.iter().map(|&(_, k)| k.geometry().1).max();
+        let max_sector = with_dpb.iter().filter_map(|&(d, _)| self.disk.layout(d)).map(|l| l.bytes_per_sector).max();
         self.write_16(base + 0x10, max_sector.unwrap_or(512)); // 10: max bytes per sector
         self.write_8(base + 0x20, with_dpb.len() as u8); // 20: block devices
         self.write_8(base + 0x21, LASTDRIVE); // 21: LASTDRIVE
@@ -474,10 +537,9 @@ impl Bus {
         self.write_8(base + 0x50, 0xCB); // RETF for the NUL driver entries, past the table
     }
 
-    /// Fill in a DOS 4+ style Drive Parameter Block with a plausible FAT
-    /// layout for the drive's reported geometry.
-    fn write_dpb(&mut self, drive: u8, kind: DriveKind, next: Option<u8>) {
-        let layout = kind.layout();
+    /// Fill in a DOS 4+ style Drive Parameter Block with the drive's FAT
+    /// layout: a disk image's own, or a plausible one for its geometry.
+    fn write_dpb(&mut self, drive: u8, layout: crate::disk::FatLayout, next: Option<u8>) {
         let spc = layout.sectors_per_cluster;
         let base = DPB_TABLE + drive as usize * DPB_SIZE;
 
@@ -1040,8 +1102,9 @@ impl Bus {
         // After a long pause (a debugger stop, a slow host) start afresh
         // rather than render seconds of catch-up.
         if target.saturating_sub(self.audio_frames) > rate / 2 {
-            // A CD plays on meanwhile.
+            // A CD plays on meanwhile, and the disks spin.
             self.cdaudio.skip(target - rate / 2 - self.audio_frames);
+            self.disknoise.skip(target - rate / 2 - self.audio_frames);
             self.audio_frames = target - rate / 2;
         }
         let frames = target.saturating_sub(self.audio_frames) as usize;
@@ -1106,6 +1169,9 @@ impl Bus {
             let (cdl, cdr) = self.cdaudio.render();
             l += cdl * cl;
             r += cdr * cr;
+            let noise = self.disknoise.render();
+            l += noise;
+            r += noise;
             if let Some(gus) = &mut self.gus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 l += gl * GUS_GAIN;
