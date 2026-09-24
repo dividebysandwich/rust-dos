@@ -164,7 +164,15 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
             (width as u32, rows as u32)
         }
         VideoMode::Vesa => bus.vbe.frame_size().unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT)),
-        _ => (SCREEN_WIDTH, SCREEN_HEIGHT),
+        // Text: its characters across, and the scanlines the CRTC shows
+        // (the EGA's 350, the VGA's 400; the CGA's 200 scanned twice).
+        _ => match text::geometry(bus) {
+            Some(g) if bus.vga.adapter != adapter::Adapter::Cga => {
+                let lines = bus.vga.peek_timing().display.clamp(200, 600);
+                ((g.cols * g.cell_w()) as u32, lines)
+            }
+            _ => (SCREEN_WIDTH, SCREEN_HEIGHT),
+        },
     }
 }
 

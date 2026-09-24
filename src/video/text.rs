@@ -73,14 +73,7 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
     let rows = bus.text_rows();
     match bus.video_mode {
         VideoMode::Text80x25 | VideoMode::Text80x25Color => {
-            // Programs like Norton Commander switch to 80x50 by loading the
-            // 8x8 font (INT 10h AH=11h AL=12h); the character height is in
-            // BDA 0485h.
-            let (font, font_h): (&'static [u8], usize) = match bus.read_16(0x0485) {
-                1..=10 => (FONT_8X8, 8),
-                11..=14 => (FONT_8X14, 14),
-                _ => (FONT_8X16, 16),
-            };
+            let (font, font_h) = font_of_height(bus);
             Some(TextGeometry {
                 cols: 80,
                 rows,
@@ -94,20 +87,34 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 wrap,
             })
         }
-        // The 8x8 font drawn twice as wide and high.
-        VideoMode::Text40x25 | VideoMode::Text40x25Color => Some(TextGeometry {
-            cols: 40,
-            rows,
-            font: FONT_8X8,
-            stride: 8,
-            font_h: 8,
-            x_scale: 2,
-            y_scale: 2,
-            row_bytes: 80,
-            start,
-            wrap,
-        }),
+        // The font of the 80-column modes, drawn twice as wide.
+        VideoMode::Text40x25 | VideoMode::Text40x25Color => {
+            let (font, font_h) = font_of_height(bus);
+            Some(TextGeometry {
+                cols: 40,
+                rows,
+                font,
+                stride: font_h,
+                font_h,
+                x_scale: 2,
+                y_scale: 1,
+                row_bytes: 80,
+                start,
+                wrap,
+            })
+        }
         _ => None,
+    }
+}
+
+/// The ROM font of the character height in BDA 0485h: programs like Norton
+/// Commander switch to 80x50 by loading the 8x8 font (INT 10h AH=11h
+/// AL=12h), and the EGA's text is in its 8x14.
+fn font_of_height(bus: &Bus) -> (&'static [u8], usize) {
+    match bus.read_16(0x0485) {
+        1..=10 => (FONT_8X8, 8),
+        11..=14 => (FONT_8X14, 14),
+        _ => (FONT_8X16, 16),
     }
 }
 

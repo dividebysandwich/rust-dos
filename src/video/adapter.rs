@@ -10,13 +10,16 @@ pub enum Adapter {
     Svga,
     /// IBM's VGA, without VESA modes.
     Vga,
+    /// IBM's Enhanced Graphics Adapter with an Enhanced Color Display: 16
+    /// of 64 colours at 640x350, 16 at 320x200 and 640x200, 60 Hz.
+    Ega,
     /// IBM's Color Graphics Adapter: 4 colours at 320x200, 2 at 640x200,
     /// 16 in text, through a 6845 CRTC.
     Cga,
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 3] = [Adapter::Svga, Adapter::Vga, Adapter::Cga];
+    pub const ALL: [Adapter; 4] = [Adapter::Svga, Adapter::Vga, Adapter::Ega, Adapter::Cga];
 
     /// The adapter a `machine` value names, DOSBox's names included.
     pub fn parse(s: &str) -> Option<Self> {
@@ -25,6 +28,7 @@ impl Adapter {
                 Some(Adapter::Svga)
             }
             "vga" | "vgaonly" => Some(Adapter::Vga),
+            "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
             _ => None,
         }
@@ -34,6 +38,7 @@ impl Adapter {
         match self {
             Adapter::Svga => "svga",
             Adapter::Vga => "vga",
+            Adapter::Ega => "ega",
             Adapter::Cga => "cga",
         }
     }
@@ -43,6 +48,7 @@ impl Adapter {
         match self {
             Adapter::Svga => "Super VGA (VESA)",
             Adapter::Vga => "VGA",
+            Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
         }
     }
@@ -69,6 +75,7 @@ impl Adapter {
     pub fn supports_mode(self, mode: u8) -> bool {
         match self {
             Adapter::Cga => mode <= 0x06,
+            Adapter::Ega => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10),
             _ => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10 | 0x12 | 0x13),
         }
     }

@@ -78,6 +78,10 @@ pub struct VgaCard {
     /// with `machine=cga` (see cga.rs).
     pub cga_mode: u8,
     pub cga_color: u8,
+
+    /// The EGA's configuration switches (SW1-SW4, bits 0-3), which Input
+    /// Status 0 (3C2h) reads one at a time.
+    pub switches: u8,
 }
 
 /// The memory text and CGA modes show: 32 KB at B8000h (or B0000h for a
@@ -94,6 +98,10 @@ const COLOR_PORTS: &[u16] = &[
 const MONO_PORTS: &[u16] = &[
     0x3B4, 0x3B5, 0x3BA, 0x3C0, 0x3C1, 0x3C2, 0x3C3, 0x3C4, 0x3C5, 0x3C6, 0x3C7, 0x3C8, 0x3C9, 0x3CC, 0x3CE, 0x3CF,
 ];
+/// The EGA's: no DAC, and nothing to read the Miscellaneous Output register
+/// or the attribute controller back.
+const EGA_COLOR_PORTS: &[u16] = &[0x3C0, 0x3C2, 0x3C4, 0x3C5, 0x3CE, 0x3CF, 0x3D4, 0x3D5, 0x3DA];
+const EGA_MONO_PORTS: &[u16] = &[0x3B4, 0x3B5, 0x3BA, 0x3C0, 0x3C2, 0x3C4, 0x3C5, 0x3CE, 0x3CF];
 
 impl VgaCard {
     pub fn new() -> Self {
@@ -131,6 +139,7 @@ impl VgaCard {
             blink_on: true,
             cga_mode: 0x29,
             cga_color: 0x30,
+            switches: 0b0110,
         };
         // The BIOS starts in 80x25 color text mode.
         vga.set_video_mode(super::VideoMode::Text80x25Color);
@@ -202,9 +211,18 @@ impl VgaCard {
     }
 
     /// The colour of attribute (pixel or character colour) `attr`, 0-15,
-    /// through the palette registers and the DAC.
+    /// through the palette registers and the DAC. An EGA has no DAC: its
+    /// palette registers drive the monitor, which in the 200-line modes
+    /// (positive vertical sync, Miscellaneous Output bit 7 clear) takes
+    /// RGB and intensity, and in the 350-line ones rgbRGB.
     pub fn attribute_rgb(&self, attr: u8) -> (u8, u8, u8) {
-        self.get_rgb(self.dac_index(self.attribute_regs[(attr & 0x0F) as usize]))
+        let value = self.attribute_regs[(attr & 0x0F) as usize];
+        if self.adapter == super::adapter::Adapter::Ega {
+            let monitor = if self.misc_output_reg & 0x80 == 0 { DacTable::Cga } else { DacTable::Ega };
+            let [r, g, b] = monitor.color(value & 0x3F);
+            return (r << 2 | r >> 4, g << 2 | g >> 4, b << 2 | b >> 4);
+        }
+        self.get_rgb(self.dac_index(value))
     }
 
     /// Where the text and CGA modes' memory is, how big the window onto it
@@ -499,7 +517,10 @@ impl VgaCard {
             self.cga_set_mode(mode);
             return;
         }
-        let regs = super::modes::mode_regs(mode);
+        let regs = match self.adapter {
+            super::adapter::Adapter::Ega => super::modes::ega_mode_regs(mode),
+            _ => super::modes::mode_regs(mode),
+        };
         self.misc_output_reg = regs.misc;
         self.sequencer_regs[0] = 0x03;
         self.sequencer_regs[1..].copy_from_slice(&regs.seq);
@@ -537,6 +558,9 @@ impl VgaCard {
     fn registers_timing(&self) -> Option<CrtTiming> {
         match self.adapter {
             super::adapter::Adapter::Cga => self.cga_timing(),
+            super::adapter::Adapter::Ega => {
+                CrtTiming::from_ega_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs)
+            }
             _ => CrtTiming::from_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs),
         }
     }
@@ -580,9 +604,12 @@ impl Device for VgaCard {
     fn ports(&self) -> &'static [u16] {
         // Static slices so the bus can check port ownership without
         // allocating on every I/O (palette updates do >1000 port writes).
+        let color = self.misc_output_reg & 0x01 != 0;
         match self.adapter {
             super::adapter::Adapter::Cga => super::cga::PORTS,
-            _ if self.misc_output_reg & 0x01 != 0 => COLOR_PORTS,
+            super::adapter::Adapter::Ega if color => EGA_COLOR_PORTS,
+            super::adapter::Adapter::Ega => EGA_MONO_PORTS,
+            _ if color => COLOR_PORTS,
             _ => MONO_PORTS,
         }
     }
@@ -590,6 +617,14 @@ impl Device for VgaCard {
     fn io_read(&mut self, port: u16) -> u8 {
         if self.adapter == super::adapter::Adapter::Cga {
             return self.cga_io_read(port);
+        }
+        // The EGA's registers are write-only, but for the switches and the
+        // CRTC's start address, cursor and light pen (0Ch-11h).
+        if self.adapter == super::adapter::Adapter::Ega
+            && !matches!(port, 0x3C2)
+            && !(matches!(port, 0x3D5 | 0x3B5) && (0x0C..=0x11).contains(&self.crtc_index))
+        {
+            return 0xFF;
         }
         // The CRTC at 3B4h in a monochrome mode is the same one (see
         // `ports`). Input Status 1 (3DAh/3BAh) depends on the time; the bus
@@ -609,10 +644,7 @@ impl Device for VgaCard {
                 // Common setting: 0110 aka 6.
                 // Let's emulate bits 2-3 of Write directing which bit of 0110 to read.
                 let select = (self.misc_output_reg >> 2) & 0x03;
-                let switches = 0b0110; // EGA Color 80x25? Or 0b1001?
-                // RBIL:
-                // 0110 = Color 80x25
-                let switch_val = (switches >> select) & 0x01;
+                let switch_val = (self.switches >> select) & 0x01;
 
                 switch_val << 4 // Return switch sense in Bit 4
             }

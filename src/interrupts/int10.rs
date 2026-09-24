@@ -1,5 +1,6 @@
 use crate::audio::play_sdl_beep;
 use crate::cpu::Cpu;
+use crate::video::adapter::Adapter;
 use crate::video::bios::{self as video_bios, rom_pointer};
 use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode, pixels};
 use iced_x86::Register;
@@ -56,9 +57,13 @@ fn get_vector(cpu: &Cpu, vector: usize) -> (u16, u16) {
     (cpu.bus.read_16(vector * 4 + 2), cpu.bus.read_16(vector * 4))
 }
 
-/// The scanlines the text modes have, over which a font's rows go.
-fn text_scanlines(_cpu: &Cpu) -> u16 {
-    400
+/// The scanlines the text modes have, over which a font's rows go: the
+/// VGA's 400, the EGA's 350.
+fn text_scanlines(cpu: &Cpu) -> u16 {
+    match cpu.bus.vga.adapter {
+        Adapter::Ega => 350,
+        _ => 400,
+    }
 }
 
 /// Take a font of `height` for the text mode: as many rows as fit in the
@@ -206,7 +211,8 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     // Update BDA 0x0484 (Rows on Screen minus 1) and 0x0485 (char height).
     // Mode set always resets the cell size to the mode's default.
     let (rows, char_height): (u8, u16) = match mode {
-        // Text modes: 25 rows, VGA 8x16 font is the default.
+        // Text modes: 25 rows of the 8x14 font on an EGA, 8x16 on a VGA.
+        0x00..=0x03 if cpu.bus.vga.adapter == Adapter::Ega => (24, 14),
         0x00..=0x03 => (24, 16),
         // CGA 40-col graphics counts as 25 rows.
         0x04 | 0x05 => (24, 8),

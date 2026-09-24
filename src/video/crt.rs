@@ -123,6 +123,50 @@ impl CrtTiming {
         sane.then_some(timing)
     }
 
+    /// The timing an EGA produces from its registers: the 14.318 or 16.257
+    /// MHz clock (Miscellaneous Output bits 2-3), halved by the sequencer's
+    /// Clocking Mode bit 3, 8 or 9-dot characters, and the CRTC's counts,
+    /// which on the EGA are the totals less 2, with only bit 8 of the
+    /// vertical ones in the Overflow register.
+    pub fn from_ega_registers(misc: u8, seq01: u8, crtc: &[u8]) -> Option<Self> {
+        let mut clock: u64 = if (misc >> 2) & 3 == 1 { 16_257_000 } else { 14_318_180 };
+        if seq01 & 0x08 != 0 {
+            clock /= 2;
+        }
+        let dots: u64 = if seq01 & 0x01 != 0 { 8 } else { 9 };
+        let htotal = crtc[0x00] as u64 + 2;
+        let hdisplay = (crtc[0x01] as u64 + 1).min(htotal);
+        let overflow = crtc[0x07] as u32;
+        let high = |bit: u32| ((overflow >> bit) & 1) << 8;
+        let mut total = (crtc[0x06] as u32 | high(0)) + 2;
+        let mut display = (crtc[0x12] as u32 | high(1)) + 1;
+        let mut retrace_start = crtc[0x10] as u32 | high(2);
+        let length = match (crtc[0x11] as u32).wrapping_sub(retrace_start) & 0x0F {
+            0 => 16,
+            n => n,
+        };
+        let mut retrace_end = retrace_start + length;
+        if crtc[0x17] & 0x04 != 0 {
+            total *= 2;
+            display *= 2;
+            retrace_start *= 2;
+            retrace_end *= 2;
+        }
+        let ns = |chars: u64| (chars * dots * 1_000_000_000 + clock / 2) / clock;
+        let timing = Self {
+            line_ns: ns(htotal) as u32,
+            hdisplay_ns: ns(hdisplay) as u32,
+            total,
+            display: display.min(total),
+            retrace_start,
+            retrace_end,
+        };
+        let line_hz = 1_000_000_000 / timing.line_ns.max(1) as u64;
+        let frame_hz = 1_000_000_000 / timing.frame_ns().max(1);
+        let sane = retrace_start < total && (15_000..=30_000).contains(&line_hz) && (40..=90).contains(&frame_hz);
+        sane.then_some(timing)
+    }
+
     /// The timing a Motorola 6845 (the CGA's and MDA's CRTC) produces from
     /// its registers R0-R9 at `char_clock` characters a second: R0 + 1
     /// characters a scanline, R1 of them shown; R4 + 1 character rows of R9

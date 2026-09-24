@@ -60,7 +60,11 @@ pub fn reset_for_shell(bus: &mut Bus) {
     bus.write_8(0x0451, 0); // Cursor row
     bus.write_8(0x0465, 0x29);
     bus.write_8(0x0466, 0x30);
-    let height = if adapter.ega_bios() { 16 } else { 0 };
+    let height = match adapter {
+        Adapter::Cga => 0,
+        Adapter::Ega => 14,
+        _ => 16,
+    };
     if adapter.ega_bios() {
         bus.write_8(0x0484, 24); // 25 rows
         bus.write_16(0x0485, height); // 8x16 font cell
@@ -107,9 +111,28 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         install_fonts(bus);
         return;
     }
-    // 0484h and 0485h: 25 rows of 16 scanlines.
+    // 0484h and 0485h: 25 rows of the text font (8x14 on the EGA's 350
+    // lines, 8x16 on the VGA's 400).
+    let ega = setup.adapter == Adapter::Ega;
     bus.write_8(0x0484, 24);
-    bus.write_16(0x0485, 16);
+    bus.write_16(0x0485, if ega { 14 } else { 16 });
+    bus.write_16(0x0460, cursor_shape(setup.adapter, if ega { 14 } else { 16 }));
+    // An EGA's switches for an Enhanced Color Display in its 350-line
+    // mode; the VGA reads its monitor instead.
+    bus.vga.switches = if ega { 0b1001 } else { 0b0110 };
+    if ega {
+        // 0487h: bits 5-6 the memory (256 KB); 0488h: the switches and
+        // the feature bits; the VGA's 0489h and 048Ah are 0.
+        bus.write_8(0x0487, 0x60);
+        bus.write_8(0x0488, 0xF9);
+        bus.write_8(0x0489, 0x00);
+        bus.write_8(0x048A, 0x00);
+        // The EGA BIOS ROM: 16 KB (32 blocks), without the VGA's name.
+        bus.load_bytes(0xC0000, &[0x55, 0xAA, 0x20]);
+        bus.load_bytes(0xC001E, b"IBM EGA");
+        install_fonts(bus);
+        return;
+    }
 
     // 0487h: bits 5-6 the memory (11: 256 KB).
     bus.write_8(0x0487, 0x60);

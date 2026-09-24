@@ -111,9 +111,10 @@ D:
     or `386`.
   * `machine` is the display adapter programs find when they look for
     one, and so the graphics they choose: `svga` (the default, a VGA with
-    VESA modes up to 1024x768), `vga` (an IBM VGA, without VESA modes) or
-    `cga` (an IBM CGA: 4 colours at 320x200, 2 at 640x200, 60 Hz). A change
-    takes effect at the DOS prompt.
+    VESA modes up to 1024x768), `vga` (an IBM VGA, without VESA modes),
+    `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
+    640x350, 60 Hz) or `cga` (an IBM CGA: 4 colours at 320x200, 2 at
+    640x200, 60 Hz). A change takes effect at the DOS prompt.
   * `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
     first megabyte is extended memory for DOS extenders and XMS.
 * **`[sound]`:**
