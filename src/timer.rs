@@ -329,6 +329,12 @@ impl Pacer {
         }
     }
 
+    /// Change the speed, as from the settings window. The caller sets the
+    /// clock's rate (`CpuSpeed::initial_cycles`).
+    pub fn set_speed(&mut self, speed: CpuSpeed) {
+        self.speed = speed;
+    }
+
     /// The instruction count the next batch should run to, so emulated time
     /// catches up with the wall clock at `now`. If emulation fell too far
     /// behind (slow host, debugger pause), the backlog is dropped and only

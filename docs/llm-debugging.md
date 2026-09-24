@@ -111,6 +111,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Unknown key names** return an error that lists all valid names.
 - **Stop pending input:** `DELETE /api/input` clears whatever is still
   queued.
+- **The settings window** opens with `DOSCONFIG` at the prompt or
+  `key {"key":"f12","mods":["ctrl"]}`, and closes with the same key or
+  `esc`. While it is open the machine is paused, `/api/status` shows
+  `"settings_window": true`, screenshots show the window, and keys and
+  mouse clicks go to the window instead of the machine. Recordings leave
+  it out.
 
 ## 4. Recipes
 

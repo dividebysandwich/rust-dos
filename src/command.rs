@@ -35,6 +35,7 @@ impl CommandDispatcher {
         dispatcher.register("IMGMOUNT", Box::new(ImgMountCommand));
         dispatcher.register("SET", Box::new(SetCommand));
         dispatcher.register("PATH", Box::new(PathCommand));
+        dispatcher.register("DOSCONFIG", Box::new(DosConfigCommand));
 
         dispatcher
     }
@@ -299,6 +300,14 @@ impl ShellCommand for PathCommand {
             ";" => cpu.set_env("PATH", ""),
             _ => cpu.set_env("PATH", &path.to_ascii_uppercase()),
         }
+    }
+}
+
+/// DOSCONFIG: open the settings window, as Ctrl+F12 does.
+struct DosConfigCommand;
+impl ShellCommand for DosConfigCommand {
+    fn execute(&self, cpu: &mut Cpu, _args: &str) {
+        cpu.bus.config_ui_requested = true;
     }
 }
 

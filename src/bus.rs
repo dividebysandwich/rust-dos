@@ -53,6 +53,9 @@ pub struct Bus {
     /// Something asked for a CPU reset (8042 or port 92h); the execution
     /// loop carries it out.
     pub reset_requested: bool,
+    /// The DOSCONFIG command asked for the settings window; the frontend
+    /// opens it.
+    pub config_ui_requested: bool,
     pub cmos: crate::cmos::Cmos,
     /// The XMS driver's allocations and A20 state.
     pub xms: crate::xms::Xms,
@@ -202,6 +205,7 @@ impl Bus {
             kbc: crate::kbc::Kbc::new(),
             a20_mask: !0x0010_0000,
             reset_requested: false,
+            config_ui_requested: false,
             cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
             post_code: 0,
             debug_console: Vec::new(),

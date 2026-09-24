@@ -22,6 +22,17 @@ pub const MAX_ROWS: u8 = 25;
 static FONT_8X16: &[u8] = include_bytes!("assets/IBM_VGA_8x16.bin");
 static FONT_8X8: &[u8] = include_bytes!("assets/IBM_VGA_8x8.bin");
 
+/// The VGA's 8x16 font: 256 CP437 glyphs of 16 bytes, one per row, the
+/// leftmost pixel in bit 7.
+pub fn font_8x16() -> &'static [u8] {
+    FONT_8X16
+}
+
+/// The VGA's 8x8 font, laid out like `font_8x16`.
+pub fn font_8x8() -> &'static [u8] {
+    FONT_8X8
+}
+
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum VideoMode {
     Text40x25 = 0x00,

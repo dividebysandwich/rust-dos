@@ -90,6 +90,12 @@ D:
 
 * **`[emulator]`:**
   * `scale` is the window scale factor. `-s/--scale` overrides it.
+  * `fullscreen=true` fills the screen instead of a window, keeping the
+    picture's proportions.
+  * `aspect=true` stretches the picture to 4:3, the shape a monitor gave
+    320x200 and 640x400.
+  * `filter` is how the picture is scaled up: `nearest` (the default, sharp
+    pixels) or `linear` (smooth).
   * `cycles` is the CPU speed in instructions per millisecond. `max`, the
     default, runs as fast as the host keeps up with in real time. Use a
     number such as `3000` for old games that run too fast. `--cycles`
@@ -135,6 +141,32 @@ D:
   it exits.
 
 Mistakes in the file are printed as warnings; the emulator still starts.
+
+### Settings window
+
+Press **Ctrl+F12**, or type `DOSCONFIG` at the DOS prompt, to open the
+settings window over the running program. The program pauses while it is
+open. Ctrl+F12 or Esc closes it.
+
+* **Drives:** mount a host directory or CD image (Ins), change or swap the
+  one a drive shows (Enter; this is how to change discs in the middle of a
+  game), or unmount it (Del). **Browse...** picks directories and CD images
+  from the host.
+* **Display:** the scale, fullscreen, 4:3 aspect correction and the scaling
+  filter.
+* **Emulator:** the CPU speed, the processor and the memory size.
+* **Sound:** everything in `[sound]`.
+
+Left and Right change a setting, Enter types or picks a value, Tab switches
+pages, and the mouse works too. The display settings and the CPU speed take
+effect at once. The processor and sound hardware change once no program is
+running, so a game isn't left without the card it set up. The memory size
+takes effect the next time rust-dos starts.
+
+**F2** (or Ctrl+S) saves the settings and drives to the configuration file
+in use. Only what changed is written: comments, `[autoexec]`, the settings
+you didn't touch and the file's own spelling of paths stay as they are, and
+drives that the startup commands mount aren't copied into `[drives]`.
 
 ## Drives
 
@@ -187,6 +219,8 @@ exceptions and configuration warnings. Attach this file to bug reports. It
 is replaced on every start and stops growing at 64 MB.
 
 ## Keyboard shortcuts
+
+Ctrl+F12: Open or close the [settings window](#settings-window)
 
 PrintScreen: Toggle screen recording to a video file
 

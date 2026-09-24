@@ -225,6 +225,19 @@ impl Cpu {
     pub fn at_shell_prompt(&self) -> bool {
         self.cs() == 0 && self.process_stack.is_empty()
     }
+
+    /// True while no program runs: the shell is at its prompt, or in the
+    /// BIOS waiting for the keystroke it asked for.
+    pub fn shell_idle(&self) -> bool {
+        if !self.process_stack.is_empty() {
+            return false;
+        }
+        let caller_cs = || {
+            let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(2));
+            self.bus.read_16(frame)
+        };
+        self.cs() == 0 || (self.cs() == 0xF000 && caller_cs() == 0)
+    }
 }
 
 /// Deliver a pending hardware interrupt, or a mouse event handler call, if

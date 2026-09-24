@@ -65,6 +65,15 @@ fn drive_letter_switches_drives() {
 }
 
 #[test]
+fn dosconfig_asks_for_the_settings_window() {
+    let base = scratch("dosconfig", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    assert!(!cpu.bus.config_ui_requested);
+    assert_eq!(run(&mut cpu, "dosconfig"), "");
+    assert!(cpu.bus.config_ui_requested);
+}
+
+#[test]
 fn drives_keep_their_mount_options() {
     let base = scratch("options", &["c", "floppy"]);
     let mut cpu = Cpu::new(base.join("c"));

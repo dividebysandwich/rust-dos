@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, oneshot};
 
+use crate::config_ui::UiKey;
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
@@ -228,6 +229,16 @@ enum LowInput {
 
 const DEFAULT_HOLD_MS: u64 = 50;
 
+/// Remote input for the settings window while it is open.
+pub enum UiInput {
+    Key(UiKey),
+    /// A left click at a screenshot (frame) pixel.
+    Click(i32, i32),
+}
+
+/// F12 in the key table: the scan code of its BIOS keystroke.
+const F12_SCAN: u8 = 0x86;
+
 fn modifier_key(name: &str) -> Result<PcKey, String> {
     match keys::lookup(name) {
         Some(k) if k.modifier != 0 => Ok(k),
@@ -371,6 +382,18 @@ pub struct DebugHub {
     input: VecDeque<LowInput>,
     input_wait_until: Option<Instant>,
     key_stall_frames: u32,
+    /// While the settings window is open, remote input goes to it
+    /// (`take_ui_input`) instead of to the machine.
+    pub divert: bool,
+    ui_input: Vec<UiInput>,
+    /// Where the remote mouse is, for clicks on the settings window.
+    ui_pointer: (i32, i32),
+    /// Ctrl+F12 came in: open or close the settings window.
+    hotkey: bool,
+    /// Shift, Ctrl and Alt bits (as at 40:17h) the remote client holds.
+    remote_mods: u8,
+    /// Keys the remote client holds down on the machine.
+    remote_held: Vec<PcKey>,
 
     frame_waiters: Vec<oneshot::Sender<Reply>>,
     /// The video mode and picture size last reported as an event.
@@ -441,6 +464,12 @@ impl DebugHub {
             input: VecDeque::new(),
             input_wait_until: None,
             key_stall_frames: 0,
+            divert: false,
+            ui_input: Vec::new(),
+            ui_pointer: (0, 0),
+            hotkey: false,
+            remote_mods: 0,
+            remote_held: Vec::new(),
             frame_waiters: Vec::new(),
             last_mode: None,
             frames: 0,
@@ -758,15 +787,16 @@ impl DebugHub {
                 LowInput::KeyDown { .. } | LowInput::KeyUp { .. } => {
                     // Let the program catch up with the keyboard controller's
                     // queue before adding more, but don't stall forever on
-                    // programs that never read the port.
-                    if cpu.bus.kbc.pending() > 0 && self.key_stall_frames < 2 {
+                    // programs that never read the port. The settings window
+                    // takes keys at once.
+                    if !self.divert && cpu.bus.kbc.pending() > 0 && self.key_stall_frames < 2 {
                         self.key_stall_frames += 1;
                         return;
                     }
                     self.key_stall_frames = 0;
                     match self.input.pop_front().unwrap() {
-                        LowInput::KeyDown { key, ascii } => apply_key(cpu, key, ascii, true),
-                        LowInput::KeyUp { key } => apply_key(cpu, key, 0, false),
+                        LowInput::KeyDown { key, ascii } => self.key_down(cpu, key, ascii),
+                        LowInput::KeyUp { key } => self.key_up(cpu, key),
                         _ => unreachable!(),
                     }
                     // One scan code per frame.
@@ -780,6 +810,11 @@ impl DebugHub {
                 _ => {}
             }
             match self.input.pop_front().unwrap() {
+                LowInput::MouseTo { x, y, coords: Coords::Screen } if self.divert => self.ui_pointer = (x, y),
+                LowInput::Button { idx: 0, down: true } if self.divert => {
+                    self.ui_input.push(UiInput::Click(self.ui_pointer.0, self.ui_pointer.1));
+                }
+                LowInput::MouseTo { .. } | LowInput::MouseRel { .. } | LowInput::Button { .. } if self.divert => {}
                 LowInput::MouseTo { x, y, coords } => {
                     let (vx, vy) = match coords {
                         Coords::Virtual => (x, y),
@@ -804,6 +839,49 @@ impl DebugHub {
                 _ => unreachable!(),
             }
         }
+    }
+
+    /// A remote key press: to the settings window while it is open, else
+    /// to the machine. Ctrl+F12 toggles the window, as on the keyboard.
+    fn key_down(&mut self, cpu: &mut Cpu, key: PcKey, ascii: u8) {
+        self.remote_mods |= key.modifier;
+        if key.scan == F12_SCAN && self.remote_mods & (keys::MOD_CTRL | keys::MOD_ALT) == keys::MOD_CTRL {
+            self.hotkey = true;
+        } else if self.divert {
+            self.ui_input.extend(ui_key(key, ascii, self.remote_mods).map(UiInput::Key));
+        } else {
+            apply_key(cpu, key, ascii, true);
+            if !self.remote_held.iter().any(|k| same_key(k, &key)) {
+                self.remote_held.push(key);
+            }
+        }
+    }
+
+    /// A remote key release. Only keys the machine saw go down come up.
+    fn key_up(&mut self, cpu: &mut Cpu, key: PcKey) {
+        self.remote_mods &= !key.modifier;
+        if let Some(i) = self.remote_held.iter().position(|k| same_key(k, &key)) {
+            self.remote_held.remove(i);
+            apply_key(cpu, key, 0, false);
+        }
+    }
+
+    /// Release the keys the remote client holds on the machine, as the
+    /// settings window opens and takes the keyboard.
+    pub fn release_keys(&mut self, cpu: &mut Cpu) {
+        for key in std::mem::take(&mut self.remote_held) {
+            apply_key(cpu, key, 0, false);
+        }
+    }
+
+    /// Remote input for the settings window since the last call.
+    pub fn take_ui_input(&mut self) -> Vec<UiInput> {
+        std::mem::take(&mut self.ui_input)
+    }
+
+    /// Whether a remote Ctrl+F12 came in since the last call.
+    pub fn take_hotkey(&mut self) -> bool {
+        std::mem::take(&mut self.hotkey)
     }
 
     // ----- request handling --------------------------------------------------
@@ -1034,6 +1112,7 @@ impl DebugHub {
         let timing = cpu.bus.vga.peek_timing();
         json!({
             "paused": self.paused,
+            "settings_window": self.divert,
             "icount": cpu.executed,
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
@@ -1045,7 +1124,7 @@ impl DebugHub {
             },
             "cpu_mode": pm::mode_name(cpu),
             "cpu_state": format!("{:?}", cpu.state),
-            "shell_idle": shell_idle(cpu),
+            "shell_idle": cpu.shell_idle(),
             "process_depth": cpu.process_stack.len(),
             "current_psp": format!("{:04X}", cpu.current_psp),
             "video": {
@@ -1242,6 +1321,40 @@ fn apply_key(cpu: &mut Cpu, key: PcKey, ascii: u8, down: bool) {
     }
 }
 
+fn same_key(a: &PcKey, b: &PcKey) -> bool {
+    (a.scan, a.extended) == (b.scan, b.extended)
+}
+
+/// What a remote key does in the settings window: `ascii` is the character
+/// it types under the modifiers `mods`.
+fn ui_key(key: PcKey, ascii: u8, mods: u8) -> Option<UiKey> {
+    use UiKey::*;
+    let shift = mods & (keys::MOD_LSHIFT | keys::MOD_RSHIFT) != 0;
+    let ctrl = mods & keys::MOD_CTRL != 0;
+    Some(match key.scan {
+        _ if key.modifier != 0 => return None,
+        0x48 => Up,
+        0x50 => Down,
+        0x4B => Left,
+        0x4D => Right,
+        0x49 => PageUp,
+        0x51 => PageDown,
+        0x47 => Home,
+        0x4F => End,
+        0x1C => Enter,
+        0x01 => Esc,
+        0x0F if shift => BackTab,
+        0x0F => Tab,
+        0x0E => Backspace,
+        0x53 => Delete,
+        0x52 => Insert,
+        0x3C => Save,
+        0x1F if ctrl => Save,
+        _ if (0x20..0x7F).contains(&ascii) => Char(ascii as char),
+        _ => return None,
+    })
+}
+
 /// Map screenshot pixels (the picture's own size) into the mouse driver's
 /// virtual coordinate system (same convention as the SDL path in main.rs).
 fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
@@ -1410,17 +1523,6 @@ fn ivt_json(cpu: &Cpu) -> Value {
 /// loaded. At the prompt the shell spends half its time inside the INT 16h
 /// BIOS trap at F000, so a trap whose caller (the CS in the IRET frame on
 /// top of the stack) is the shell counts as well.
-fn shell_idle(cpu: &Cpu) -> bool {
-    if !cpu.process_stack.is_empty() {
-        return false;
-    }
-    let caller_cs = || {
-        let frame = cpu.get_physical_addr(cpu.ss(), cpu.sp().wrapping_add(2));
-        cpu.bus.read_16(frame)
-    };
-    cpu.cs() == 0 || (cpu.cs() == 0xF000 && caller_cs() == 0)
-}
-
 fn drives_json(cpu: &Cpu) -> Value {
     let drives: Map<String, Value> = cpu
         .bus
