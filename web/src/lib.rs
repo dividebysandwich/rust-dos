@@ -21,6 +21,7 @@ use rust_dos::exec::{self, NoHook};
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
 use rust_dos::mount::MountSpec;
 use rust_dos::timer::{CpuSpeed, Pacer};
+use rust_dos::video::shader::{self, Glsl, Shader};
 use rust_dos::video::{self, Frame};
 use wasm_bindgen::prelude::*;
 use web_time::{Duration, Instant};
@@ -50,6 +51,20 @@ extern "C" {
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
+}
+
+/// The WebGL 2 shaders of the look `name` (`Machine::shader`): vertex, then
+/// fragment. Nothing for a name that isn't one. The CRT looks read the
+/// texture's mipmap.
+#[wasm_bindgen]
+pub fn shader_program(name: &str) -> Vec<String> {
+    match Shader::parse(name) {
+        Some(look) => {
+            let (vertex, fragment) = shader::sources(look, Glsl::Es300);
+            vec![vertex, fragment]
+        }
+        None => Vec::new(),
+    }
 }
 
 /// The sound on its way to the page, which plays it with Web Audio.
@@ -145,6 +160,8 @@ pub struct Machine {
     next: Frame,
     /// `screen` as the canvas takes it: RGBA.
     rgba: Vec<u8>,
+    /// Whether the page draws with WebGL 2, which the CRT shaders need.
+    shaders: bool,
     cursor_visible: bool,
     last_blink: Instant,
     /// Keys pressed on the machine and not released yet, by
@@ -194,6 +211,7 @@ impl Machine {
             screen: blank.clone(),
             next: blank,
             rgba: Vec::new(),
+            shaders: false,
             cursor_visible: true,
             last_blink: Instant::now(),
             held: HashMap::new(),
@@ -214,6 +232,32 @@ impl Machine {
     /// Whether to scale the picture up smoothly (`filter=linear`).
     pub fn smooth(&self) -> bool {
         self.settings.filter == Filter::Linear
+    }
+
+    /// The CRT look to draw the picture with (`shader`, see
+    /// `shader_program`): its name, or "none" where the page can't.
+    pub fn shader(&self) -> String {
+        self.shown_shader().name().to_string()
+    }
+
+    /// Whether the page draws with WebGL 2, which the CRT shaders need.
+    /// Without it, a shader in the configuration is a warning.
+    pub fn set_shaders_available(&mut self, available: bool) {
+        self.shaders = available;
+        if !available && self.settings.shader != Shader::None {
+            let warning =
+                format!("shader={} needs WebGL 2, which this browser doesn't have", self.settings.shader.name());
+            self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
+            self.warnings.push(warning);
+        }
+    }
+
+    /// The screen position at (`u`, `v`), 0 to 1 across and down the
+    /// canvas, bent as the CRT shader bends the picture: x and y in screen
+    /// pixels, outside the screen on the black around a curved one.
+    pub fn frame_point(&self, u: f32, v: f32) -> Vec<f32> {
+        let (u, v) = self.shown_shader().warp(u, v);
+        vec![u * self.screen.width as f32, v * self.screen.height as f32]
     }
 
     /// Send the emulator's log to the browser console.
@@ -667,8 +711,14 @@ impl Machine {
             hardware: &mut self.hardware,
             saved: &mut self.saved,
             requests: &mut self.requests,
+            shaders: self.shaders,
         };
         action(&mut self.ui, &mut host)
+    }
+
+    /// The shader the picture is drawn with.
+    fn shown_shader(&self) -> Shader {
+        if self.shaders { self.settings.shader } else { Shader::None }
     }
 
     /// Show the settings window, if it is open, the drives as they are now,
@@ -722,13 +772,18 @@ struct PageHost<'m> {
     hardware: &'m mut Hardware,
     saved: &'m mut Saved,
     requests: &'m mut Requests,
+    /// Whether the page draws with WebGL 2 (`Machine::set_shaders_available`).
+    shaders: bool,
 }
 
 impl Host for PageHost<'_> {
-    /// The page shows the picture as `aspect` and `filter` say (see
-    /// `Machine::aspect`).
+    /// The page shows the picture as `aspect`, `filter` and `shader` say
+    /// (see `Machine::aspect`).
     fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
         let old = std::mem::replace(self.settings, new.clone());
+        if new.shader != old.shader && new.shader != Shader::None && !self.shaders {
+            return Err("CRT shaders need WebGL 2, which this browser doesn't have".to_string());
+        }
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
             // At max, the pacer tunes the speed from the current one.

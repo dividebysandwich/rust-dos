@@ -6,9 +6,10 @@
 // Page parameters: ?zip=URL copies an archive to C: at startup and ?run=
 // types a command at the first prompt (both can be given more than once);
 // ?persist=0 keeps C: in memory only; ?log sends the emulator's log to the
-// console.
+// console; ?renderer=2d draws without WebGL 2, and so without the CRT
+// shaders.
 
-import init, { Machine } from './pkg/rust_dos_web.js';
+import init, { Machine, shader_program } from './pkg/rust_dos_web.js';
 import { DiskStore } from './storage.js';
 import { unzip } from './zip.js';
 
@@ -40,8 +41,11 @@ const DEFAULT_CONFIG = `# Rust-DOS settings, in the format of rust-dos.conf. Rem
 [emulator]
 # Stretch the picture to 4:3, as a monitor showed 320x200 and 640x400.
 aspect=true
-# How the picture is scaled up: nearest (sharp pixels) or linear (smooth).
+# How the picture is scaled up: nearest (sharp pixels) or linear (smooth),
+# without a CRT shader.
 #filter=nearest
+# A CRT look: none, scanlines, aperture or curved. It needs WebGL 2.
+#shader=none
 # CPU speed in instructions per millisecond, or max to run as fast as the
 # browser keeps up with. Lower it for old games that run too fast.
 #cycles=max
@@ -77,7 +81,10 @@ const persist = params.get('persist') !== '0';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
-const screen2d = canvas.getContext('2d', { alpha: false });
+/// The picture is drawn with WebGL 2, through the CRT shaders, or else put
+/// on a 2D canvas as it is. A canvas keeps the kind it is first asked for.
+const screenGl = params.get('renderer') === '2d' ? null : makeGlScreen();
+const screen2d = screenGl ? null : canvas.getContext('2d', { alpha: false });
 
 let wasm;
 let machine;
@@ -231,7 +238,8 @@ function showSound() {
 // ---------------------------------------------------------------------
 
 /// Size the canvas to fill the stage at the picture's proportions: 4:3
-/// with `aspect`, else its pixels' own.
+/// with `aspect`, else its pixels' own. With WebGL it has the screen's
+/// pixels, which the CRT shaders need, and is drawn again.
 function layout() {
   const stage = $('stage');
   const style = getComputedStyle(stage);
@@ -239,29 +247,198 @@ function layout() {
     width: stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
     height: stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
   };
-  const ratio = machine?.aspect() ? 4 / 3 : canvas.width / canvas.height;
+  const ratio = machine?.aspect() ? 4 / 3 : (machine?.screen_width() ?? 640) / (machine?.screen_height() ?? 400);
   let width = room.width;
   let height = width / ratio;
   if (height > room.height) {
     height = room.height;
     width = height * ratio;
   }
-  canvas.style.width = `${Math.max(0, Math.floor(width))}px`;
-  canvas.style.height = `${Math.max(0, Math.floor(height))}px`;
+  width = Math.max(0, Math.floor(width));
+  height = Math.max(0, Math.floor(height));
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  if (screenGl) {
+    const scale = window.devicePixelRatio || 1;
+    const pixels = { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+    if (canvas.width !== pixels.width || canvas.height !== pixels.height) {
+      canvas.width = pixels.width;
+      canvas.height = pixels.height;
+    }
+    screenGl.render();
+  }
+}
+
+/// The screen's pixels change with the browser's zoom and between monitors.
+function watchPixelRatio() {
+  matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
+    'change',
+    () => {
+      layout();
+      watchPixelRatio();
+    },
+    { once: true },
+  );
 }
 
 function draw() {
   const width = machine.screen_width();
   const height = machine.screen_height();
+  // The pixels stay in the module's memory; the view is made anew each
+  // time, as the memory can grow.
+  if (screenGl) {
+    const pixels = new Uint8Array(wasm.memory.buffer, machine.screen_pixels(), width * height * 4);
+    if (screenGl.upload(pixels, width, height)) {
+      layout();
+    } else {
+      screenGl.render();
+    }
+    return;
+  }
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
     layout();
   }
-  // The pixels stay in the module's memory; the view is made anew each
-  // time, as the memory can grow.
   const pixels = new Uint8ClampedArray(wasm.memory.buffer, machine.screen_pixels(), width * height * 4);
   screen2d.putImageData(new ImageData(pixels, width, height), 0, 0);
+}
+
+/// The screen drawn with WebGL 2: the picture as a texture, shown through
+/// the look the settings choose, whose shaders come from the emulator
+/// (`shader_program`). Null where the browser has no WebGL 2.
+function makeGlScreen() {
+  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false });
+  if (!gl) {
+    return null;
+  }
+  let texture;
+  let vao;
+  /// The looks compiled so far, by name; null for one that doesn't work.
+  let programs;
+  /// The picture's size, once there is one.
+  let frame;
+  let look = 'none';
+  let smooth = false;
+
+  function setUp() {
+    texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // The vertex shader makes its triangle from the vertex number.
+    vao = gl.createVertexArray();
+    programs = new Map();
+    frame = null;
+  }
+
+  function compile(name) {
+    const sources = shader_program(name);
+    const program = gl.createProgram();
+    const shaders = [gl.VERTEX_SHADER, gl.FRAGMENT_SHADER].map((type, i) => {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, sources[i]);
+      gl.compileShader(shader);
+      gl.attachShader(program, shader);
+      return shader;
+    });
+    gl.linkProgram(program);
+    const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
+    if (!linked) {
+      const logs = shaders.map((shader) => gl.getShaderInfoLog(shader));
+      console.warn(`The ${name} shader doesn't work here:`, gl.getProgramInfoLog(program), ...logs);
+    }
+    for (const shader of shaders) {
+      gl.deleteShader(shader);
+    }
+    if (!linked) {
+      gl.deleteProgram(program);
+      return null;
+    }
+    gl.useProgram(program);
+    gl.uniform1i(gl.getUniformLocation(program, 'u_frame'), 0);
+    return {
+      program,
+      source: gl.getUniformLocation(program, 'u_source'),
+      output: gl.getUniformLocation(program, 'u_output'),
+    };
+  }
+
+  function program(name) {
+    if (!programs.has(name)) {
+      programs.set(name, compile(name));
+      if (!programs.get(name) && !gl.isContextLost()) {
+        toast(`The ${name} CRT shader doesn't work in this browser.`, 'warn');
+      }
+    }
+    return programs.get(name);
+  }
+
+  /// Set the texture's filter: the CRT looks read its mipmap, and the
+  /// picture without one is sharp or smooth.
+  function filter() {
+    const mipmaps = look !== 'none';
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    const magnify = mipmaps || smooth ? gl.LINEAR : gl.NEAREST;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : magnify);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magnify);
+    if (mipmaps && frame) {
+      gl.generateMipmap(gl.TEXTURE_2D);
+    }
+  }
+
+  canvas.addEventListener('webglcontextlost', (event) => event.preventDefault());
+  canvas.addEventListener('webglcontextrestored', () => {
+    setUp();
+    if (machine) {
+      shownLook = undefined;
+      showPicture();
+      draw();
+    }
+  });
+  setUp();
+
+  return {
+    /// Draw through the look `name`, or the plain picture, `smooth` or
+    /// sharp. A look that doesn't compile leaves the picture plain.
+    select(name, isSmooth) {
+      look = program(name) ? name : 'none';
+      smooth = isSmooth;
+      program(look);
+      filter();
+    },
+
+    /// Take the picture's pixels (RGBA). Returns whether its size changed.
+    upload(pixels, width, height) {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      const resized = frame?.width !== width || frame?.height !== height;
+      if (resized) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        frame = { width, height };
+      }
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      if (look !== 'none') {
+        gl.generateMipmap(gl.TEXTURE_2D);
+      }
+      return resized;
+    },
+
+    /// Draw the picture over the whole canvas.
+    render() {
+      const entry = programs.get(look);
+      if (!frame || !entry || gl.isContextLost()) {
+        return;
+      }
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(entry.program);
+      gl.uniform2f(entry.source, frame.width, frame.height);
+      gl.uniform2f(entry.output, canvas.width, canvas.height);
+      gl.bindVertexArray(vao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -406,19 +583,24 @@ const pointer = { x: 0, y: 0 };
 const buttonsDown = new Set();
 const captured = () => document.pointerLockElement === canvas;
 
+/// The screen pixel under the mouse, through the curve of a curved CRT
+/// shader.
 function screenPoint(event) {
   const rect = canvas.getBoundingClientRect();
-  return {
-    x: ((event.clientX - rect.left) * canvas.width) / rect.width,
-    y: ((event.clientY - rect.top) * canvas.height) / rect.height,
-  };
+  const [x, y] = machine.frame_point((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
+  return { x, y };
 }
 
 function movePointer(event) {
+  if (!machine || halted) {
+    return;
+  }
   if (captured()) {
     const rect = canvas.getBoundingClientRect();
-    pointer.x = Math.min(Math.max(pointer.x + (event.movementX * canvas.width) / rect.width, 0), canvas.width - 1);
-    pointer.y = Math.min(Math.max(pointer.y + (event.movementY * canvas.height) / rect.height, 0), canvas.height - 1);
+    const width = machine.screen_width();
+    const height = machine.screen_height();
+    pointer.x = Math.min(Math.max(pointer.x + (event.movementX * width) / rect.width, 0), width - 1);
+    pointer.y = Math.min(Math.max(pointer.y + (event.movementY * height) / rect.height, 0), height - 1);
   } else {
     Object.assign(pointer, screenPoint(event));
   }
@@ -989,6 +1171,8 @@ $('erase-c').addEventListener('click', async () => {
 /// while it is open.
 let settingsShown = false;
 let shownAspect;
+/// The CRT look and filter WebGL draws with.
+let shownLook;
 
 /// Hand the settings window input, then take care of what came of it.
 function settingsInput(action) {
@@ -1021,9 +1205,18 @@ function syncSettings() {
 }
 
 /// Show the picture as the settings have it: stretched to 4:3 or not,
-/// sharp or smooth.
+/// sharp or smooth, through a CRT shader or not.
 function showPicture() {
-  canvas.classList.toggle('smooth', machine.smooth());
+  if (screenGl) {
+    const look = { name: machine.shader(), smooth: machine.smooth() };
+    if (look.name !== shownLook?.name || look.smooth !== shownLook?.smooth) {
+      shownLook = look;
+      screenGl.select(look.name, look.smooth);
+      screenGl.render();
+    }
+  } else {
+    canvas.classList.toggle('smooth', machine.smooth());
+  }
   if (machine.aspect() !== shownAspect) {
     shownAspect = machine.aspect();
     layout();
@@ -1093,6 +1286,9 @@ $('restart').addEventListener('click', () => location.reload());
 
 new ResizeObserver(layout).observe($('stage'));
 document.addEventListener('fullscreenchange', layout);
+if (screenGl) {
+  watchPixelRatio();
+}
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
@@ -1118,6 +1314,7 @@ async function start() {
   if (params.has('log')) {
     machine.log_to_console();
   }
+  machine.set_shaders_available(screenGl !== null);
   for (const warning of machine.warnings()) {
     toast(`Settings: ${warning}`, 'warn');
   }

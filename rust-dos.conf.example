@@ -21,7 +21,16 @@
 # Stretch the picture to 4:3, as a monitor showed 320x200 and 640x400.
 #aspect=false
 # How the picture is scaled up: nearest (sharp pixels) or linear (smooth).
+# Only without a CRT shader, which does its own scaling.
 #filter=nearest
+# A CRT look for the picture:
+#   none       the pixels as they are (the default)
+#   scanlines  a flat screen with the scanlines of a VGA monitor
+#   aperture   a flat aperture grille monitor: scanlines and phosphor stripes
+#   curved     a curved tube with a shadow mask, rounded corners and glow
+# The looks need OpenGL 3 and show best at scale 2 or more, or fullscreen.
+# Screenshots and recordings stay without them.
+#shader=none
 # CPU speed in instructions per millisecond, or max to run as fast as the
 # host keeps up with in real time. Lower it for old games that run too
 # fast. --cycles overrides it.

@@ -133,17 +133,11 @@ fn main() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     audio_device.resume();
 
-    let (window_width, window_height) = Display::window_size(&settings);
-    let window = video_subsystem
-        .window("Rust DOS Emulator", window_width, window_height)
-        .position_centered()
-        .build()
-        .map_err(|e| e.to_string())?;
-    let canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
-    let texture_creator = canvas.texture_creator();
     // The picture has the size the video mode gives it; the display scales
-    // it to the window.
-    let mut display = Display::new(canvas, &texture_creator, video_subsystem.clone(), &settings)?;
+    // it to the window. The textures are for SDL's renderer, which draws
+    // where there is no OpenGL 3.
+    let textures = std::cell::OnceCell::new();
+    let mut display = Display::open(&video_subsystem, "Rust DOS Emulator", &settings, &textures)?;
     // Typed text is only wanted in the settings window.
     let text_input = video_subsystem.text_input();
     text_input.stop();
@@ -155,6 +149,10 @@ fn main() -> Result<(), String> {
         config_warning(&mut cpu, &warning);
     }
     cpu.bus.audio_device = Some(Box::new(SdlAudio(audio_device)));
+    cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
+    if let Some(warning) = display.shader_warning() {
+        config_warning(&mut cpu, warning);
+    }
     let mut machine = Machine { cpu: settings.cpu, sound: settings.sound.clone() };
     let mut saved = Saved {
         file: config.source.clone(),
@@ -627,7 +625,7 @@ struct MainHost<'m, 'd> {
 impl Host for MainHost<'_, '_> {
     fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
         let old = std::mem::replace(self.settings, new.clone());
-        let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter);
+        let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader);
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
         }

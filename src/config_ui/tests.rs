@@ -1,5 +1,6 @@
 use super::*;
 use crate::disk::MountOptions;
+use crate::video::shader::Shader;
 
 fn drive_info(spec: &MountSpec) -> DriveInfo {
     DriveInfo {
@@ -25,6 +26,8 @@ struct FakeHost {
     saved: Vec<Settings>,
     /// The drives `choose_image` was asked for.
     images: Vec<Option<u8>>,
+    /// Whether CRT shaders are refused, as without OpenGL 3.
+    no_shaders: bool,
 }
 
 impl FakeHost {
@@ -40,6 +43,7 @@ impl FakeHost {
             unmounts: vec![],
             saved: vec![],
             images: vec![],
+            no_shaders: false,
         }
     }
 }
@@ -47,6 +51,9 @@ impl FakeHost {
 impl Host for FakeHost {
     fn apply(&mut self, settings: &Settings) -> Result<Option<String>, String> {
         self.applied.push(settings.clone());
+        if self.no_shaders && settings.shader != Shader::None {
+            return Err("CRT shaders need OpenGL 3".to_string());
+        }
         Ok(None)
     }
 
@@ -247,6 +254,29 @@ fn every_page_draws_and_clicks() {
 }
 
 #[test]
+fn the_crt_shader_steps_through_the_looks() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Display);
+    ui.row = ui.items().iter().position(|&i| i == Item::Shader).unwrap();
+    keys(&mut ui, &mut host, &[Right, Right, Right, Right]);
+    let looks: Vec<Shader> = host.applied.iter().map(|s| s.shader).collect();
+    assert_eq!(looks, [Shader::Scanlines, Shader::Aperture, Shader::Curved, Shader::None]);
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(host.applied.last().unwrap().shader, Shader::Curved);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("curved CRT"));
+
+    // Without shaders the window says so, and keeps the setting to save.
+    host.no_shaders = true;
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(status(&ui), ("CRT shaders need OpenGL 3", true));
+    assert_eq!(ui.settings.shader, Shader::Aperture);
+    keys(&mut ui, &mut host, &[Save]);
+    assert_eq!(host.saved.last().unwrap().shader, Shader::Aperture);
+}
+
+#[test]
 fn a_browser_gets_what_it_has() {
     let browser = Frontend { window: false, host_files: false };
     let mut host = FakeHost::new();
@@ -256,7 +286,7 @@ fn a_browser_gets_what_it_has() {
 
     // No window to scale or make fullscreen, no SoundFont to pick.
     ui.show_page(Page::Display);
-    assert_eq!(ui.items(), [Item::Aspect, Item::Filter]);
+    assert_eq!(ui.items(), [Item::Aspect, Item::Filter, Item::Shader]);
     keys(&mut ui, &mut host, &[Right]);
     assert!(host.applied.last().unwrap().aspect);
     ui.show_page(Page::Sound);

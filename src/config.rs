@@ -14,6 +14,7 @@ use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::timer::CpuSpeed;
+use crate::video::shader::Shader;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,8 @@ pub struct Config {
     pub aspect: Option<bool>,
     /// How the picture is scaled to the window (`filter`).
     pub filter: Option<Filter>,
+    /// The CRT look (`shader`).
+    pub shader: Option<Shader>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
@@ -412,6 +415,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(filter) => config.filter = Some(filter),
                             None => warn(format!("invalid filter '{}' (nearest or linear)", value)),
                         },
+                        "shader" => match Shader::parse(value) {
+                            Some(shader) => config.shader = Some(shader),
+                            None => warn(format!("invalid shader '{}' (none, scanlines, aperture or curved)", value)),
+                        },
                         "cycles" => match CpuSpeed::parse(value) {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
@@ -565,6 +572,7 @@ pub struct Settings {
     pub fullscreen: bool,
     pub aspect: bool,
     pub filter: Filter,
+    pub shader: Shader,
     pub cycles: CpuSpeed,
     pub cpu: CpuModel,
     /// RAM in MB.
@@ -580,6 +588,7 @@ impl Default for Settings {
             fullscreen: false,
             aspect: false,
             filter: Filter::Nearest,
+            shader: Shader::None,
             cycles: CpuSpeed::Max,
             cpu: CpuModel::I486,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
@@ -597,6 +606,7 @@ impl Settings {
             fullscreen: config.fullscreen.unwrap_or(default.fullscreen),
             aspect: config.aspect.unwrap_or(default.aspect),
             filter: config.filter.unwrap_or(default.filter),
+            shader: config.shader.unwrap_or(default.shader),
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             memsize: config.memsize.unwrap_or(default.memsize),
@@ -618,6 +628,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "fullscreen", yes_no(settings.fullscreen)),
         (Emulator, "aspect", yes_no(settings.aspect)),
         (Emulator, "filter", Some(settings.filter.name().to_string())),
+        (Emulator, "shader", Some(settings.shader.name().to_string())),
         (
             Emulator,
             "cycles",
@@ -1151,16 +1162,19 @@ mod tests {
         assert_eq!(config.scale, None);
         assert_eq!(config.cycles, None);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
+        assert_eq!(config.shader, None);
         assert_eq!(config.sound, SoundConfig::default());
     }
 
     #[test]
     fn display_settings() {
-        let config = parse("[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\n", Path::new("/cfg"), None);
+        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=Curved\n";
+        let config = parse(text, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(false), Some(Filter::Linear)));
-        let config = parse("[emulator]\nfullscreen=maybe\nfilter=blur\n", Path::new("/cfg"), None);
-        assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+        assert_eq!(config.shader, Some(Shader::Curved));
+        let config = parse("[emulator]\nfullscreen=maybe\nfilter=blur\nshader=crt\n", Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings::default());
     }
 
@@ -1186,6 +1200,7 @@ mod tests {
             fullscreen: true,
             aspect: true,
             filter: Filter::Linear,
+            shader: Shader::Curved,
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
             memsize: 32,
@@ -1237,6 +1252,7 @@ mod tests {
             assert!(text.contains(line), "lost '{}'", line);
         }
         assert!(text.contains("#scale=2\nscale=3\n"), "{}", text);
+        assert!(text.contains("#shader=none\nshader=curved\n"), "{}", text);
         assert!(text.contains("#sbtype=sb16\nsbtype=sbpro2\n"), "{}", text);
         assert!(text.contains("#E=~/dos/images/game.cue\nC=~/dos\nD=\"~/cd images/game.cue\" cdrom -label GAME\n"), "{}", text);
         assert!(text.contains("soundfont=~/sf/General User.sf2\n"), "{}", text);

@@ -30,6 +30,8 @@ web-time = "1"
 # which the browser build (web/) has in JavaScript instead.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 sdl2 = { version = "0.38" }
+# The window's OpenGL, which draws the CRT shaders.
+glow = "0.17"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 

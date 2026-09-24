@@ -107,7 +107,7 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives => &[],
-            Page::Display => &[Scale, Fullscreen, Aspect, Filter],
+            Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader],
             Page::Emulator => &[Cycles, Cpu, Memsize, HardDiskSpeed, FloppyDiskSpeed],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -144,6 +144,7 @@ enum Item {
     Fullscreen,
     Aspect,
     Filter,
+    Shader,
     Cycles,
     Cpu,
     Memsize,
@@ -207,6 +208,7 @@ impl Item {
             Fullscreen => "Fullscreen",
             Aspect => "4:3 aspect correction",
             Filter => "Scaling filter",
+            Shader => "CRT shader",
             Cycles => "CPU speed (cycles)",
             Cpu => "Processor",
             Memsize => "Memory",
@@ -243,7 +245,7 @@ impl Item {
     fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Filter | Cycles => Applies::Now,
+            Scale | Fullscreen | Aspect | Filter | Shader | Cycles => Applies::Now,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
@@ -271,6 +273,7 @@ impl Item {
                 crate::config::Filter::Linear => "linear (smooth)",
             }
             .to_string(),
+            Shader => s.shader.describe().to_string(),
             Cycles => match s.cycles {
                 CpuSpeed::Max => "max".to_string(),
                 CpuSpeed::Fixed(n) => format!("{} per ms", n),
@@ -328,6 +331,7 @@ impl Item {
             Fullscreen => s.fullscreen = !s.fullscreen,
             Aspect => s.aspect = !s.aspect,
             Filter => s.filter = cycle(&[crate::config::Filter::Nearest, crate::config::Filter::Linear], s.filter, dir),
+            Shader => s.shader = cycle(&crate::video::shader::Shader::ALL, s.shader, dir),
             Cycles => {
                 let current = match s.cycles {
                     CpuSpeed::Max => u32::MAX,

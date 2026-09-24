@@ -4,6 +4,7 @@ use crate::cpu::Cpu;
 pub mod crt;
 pub mod modes;
 pub mod overlay;
+pub mod shader;
 pub mod vbe;
 pub mod vga;
 

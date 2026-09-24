@@ -34,6 +34,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   writing, with sector access through INT 13h and INT 25h/26h, and lists of
   disks to change with Ctrl+F4
 * Emulated disk speeds and disk drive noises
+* CRT shaders: scanlines, an aperture grille or a curved shadow mask tube
+  (see [CRT shaders](#crt-shaders))
 * Configuration file with startup commands
 * Environment variables (`SET`, `PATH`)
 * Running in a web browser as WebAssembly, with C: kept in the browser's
@@ -92,7 +94,9 @@ D:
   * `aspect=true` stretches the picture to 4:3, the shape a monitor gave
     320x200 and 640x400.
   * `filter` is how the picture is scaled up: `nearest` (the default, sharp
-    pixels) or `linear` (smooth).
+    pixels) or `linear` (smooth). It applies without a CRT shader.
+  * `shader` gives the picture a CRT look: `none` (the default),
+    `scanlines`, `aperture` or `curved`. See [CRT shaders](#crt-shaders).
   * `cycles` is the CPU speed in instructions per millisecond. `max`, the
     default, runs as fast as the host keeps up with in real time. Use a
     number such as `3000` for old games that run too fast. `--cycles`
@@ -152,8 +156,8 @@ open. Ctrl+F12 or Esc closes it.
   swap the one a drive shows (Enter; this is how to change discs in the
   middle of a game), or unmount it (Del). **Browse...** picks directories
   and images from the host.
-* **Display:** the scale, fullscreen, 4:3 aspect correction and the scaling
-  filter.
+* **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
+  filter and the CRT shader.
 * **Emulator:** the CPU speed, the processor, the memory size and the disk
   speeds.
 * **Sound:** everything in `[sound]`, and the disk noises.
@@ -168,6 +172,29 @@ takes effect the next time rust-dos starts.
 in use. Only what changed is written: comments, `[autoexec]`, the settings
 you didn't touch and the file's own spelling of paths stay as they are, and
 drives that the startup commands mount aren't copied into `[drives]`.
+
+### CRT shaders
+
+`shader` in `[emulator]`, or the settings window's Display page, shows the
+picture as a monitor of the time would have:
+
+* `scanlines`: a flat screen with the scanlines of a VGA monitor. Bright
+  lines are wider than dark ones, and light glows a little around them.
+* `aperture`: a flat aperture grille monitor, with red, green and blue
+  phosphor stripes over the scanlines.
+* `curved`: a curved tube with a shadow mask, rounded corners and darker
+  edges. The mouse follows the curve.
+
+A VGA shows its 200-line modes double-scanned, so each of the 400 lines is a
+scanline. The looks need a few screen pixels per line: at scale 1 the
+scanlines and phosphors fade out, and they look best at scale 3 or more, or
+in fullscreen on a large screen. At exactly 2x or 3x without 4:3 aspect
+correction the scanlines are sharpest.
+
+The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
+`SDL_VIDEODRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
+before and says why at startup; the log names what draws the picture.
+Recordings and debug-server screenshots always show the plain picture.
 
 ## Drives
 
@@ -317,8 +344,9 @@ In the browser:
   [settings window](#settings-window), as in the rust-dos program. Its
   Drives page inserts disk and CD images you pick (Ins, or Enter for a
   drive's next disk) and ejects them (Del); there is no window scale or
-  fullscreen setting, as the page has its own *Fullscreen*. F2 saves the
-  settings to the `rust-dos.conf` that the browser keeps.
+  fullscreen setting, as the page has its own *Fullscreen*. The CRT shaders
+  need WebGL 2. F2 saves the settings to the `rust-dos.conf` that the
+  browser keeps.
 * *Config file* edits that `rust-dos.conf` as text, `[autoexec]` included,
   and restarts the machine with it. `[drives]` has no host directories to
   mount there.
@@ -329,7 +357,9 @@ In the browser:
 The page takes parameters: `?zip=URL` copies an archive to C: at startup,
 `?run=COMMAND` types a command at the first prompt (both can repeat), for
 example `?zip=games/keen.zip&run=cd%20keen&run=keen1`. `?persist=0` keeps C:
-in memory only, and `?log` sends the emulator's log to the browser console.
+in memory only, `?log` sends the emulator's log to the browser console, and
+`?renderer=2d` draws the screen without WebGL 2, and so without the CRT
+shaders.
 
 ## Debug & remote-control server
 
