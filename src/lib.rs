@@ -5,6 +5,7 @@ pub mod cdrom;
 pub mod cmos;
 pub mod command;
 pub mod config;
+pub mod config_ui;
 pub mod cpu;
 pub mod disk;
 pub mod diskimage;

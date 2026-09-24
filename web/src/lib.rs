@@ -2,7 +2,9 @@
 //! page in `www/` runs one animation frame at a time the way the rust-dos
 //! program's main loop runs its window. The page brings the keyboard, the
 //! mouse, the sound and the drives: C: is a hard disk image held in
-//! memory, which the page keeps in the browser's storage.
+//! memory, which the page keeps in the browser's storage. The settings
+//! window (Ctrl+F12, DOSCONFIG) is the rust-dos program's, drawn over the
+//! screen.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -10,19 +12,26 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use rust_dos::audio::{self, AudioOutput};
-use rust_dos::config::{self, Filter, Settings};
-use rust_dos::cpu::Cpu;
-use rust_dos::disk::{self, DRIVE_C, DriveKind, MountOptions};
+use rust_dos::config::{self, Filter, Settings, SoundConfig};
+use rust_dos::config_ui::{ConfigUi, Frontend, Host, UiKey};
+use rust_dos::cpu::{Cpu, CpuModel};
+use rust_dos::disk::{self, DRIVE_C, DriveInfo, DriveKind, MountOptions, drive_letter};
 use rust_dos::diskimage::{self, DiskImage, MemoryImage};
 use rust_dos::exec::{self, NoHook};
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
-use rust_dos::timer::Pacer;
+use rust_dos::mount::MountSpec;
+use rust_dos::timer::{CpuSpeed, Pacer};
 use rust_dos::video::{self, Frame};
 use wasm_bindgen::prelude::*;
 use web_time::{Duration, Instant};
 
 /// C:'s image, as the drive list and downloads name it.
 const C_IMAGE: &str = "C.IMG";
+/// The configuration file, as the settings window names it. The page keeps
+/// its text.
+const CONFIG_FILE: &str = "rust-dos.conf";
+/// The settings window has no window or files of the host's to offer here.
+const BROWSER: Frontend = Frontend { window: false, host_files: false };
 /// How often the text cursor blinks.
 const BLINK: Duration = Duration::from_millis(500);
 /// The Caps Lock key's scan code, and its bit at 40:17h.
@@ -67,11 +76,63 @@ impl AudioOutput for PageAudio {
     }
 }
 
+/// The processor and sound hardware in place. Changed settings reach them
+/// only while no program runs: one would lose track of the hardware it set
+/// up.
+struct Hardware {
+    cpu: CpuModel,
+    sound: SoundConfig,
+}
+
+impl Hardware {
+    fn differs(&self, settings: &Settings) -> bool {
+        self.cpu != settings.cpu || self.sound != settings.sound
+    }
+
+    /// Put the settings' processor and sound hardware in place. Returns the
+    /// problems with them.
+    fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
+        cpu.model = settings.cpu;
+        let warnings = if settings.sound != self.sound {
+            cpu.bus.log_string("[CONFIG] The sound settings changed");
+            rust_dos::sound::apply_config(cpu, &settings.sound, Some(&self.sound))
+        } else {
+            Vec::new()
+        };
+        self.cpu = settings.cpu;
+        self.sound = settings.sound.clone();
+        warnings
+    }
+}
+
+/// The configuration file's text as the page keeps it, and the settings it
+/// has, which saving writes the changes from.
+struct Saved {
+    text: String,
+    settings: Settings,
+}
+
+/// What the settings window leaves for the page to do.
+#[derive(Default)]
+struct Requests {
+    /// The configuration file's text, saved and not kept by the page yet.
+    config: Option<String>,
+    /// A disk image to pick for a drive, or for whichever suits it (-1).
+    image: Option<i32>,
+}
+
 /// The emulated PC, as the page sees it.
 #[wasm_bindgen]
 pub struct Machine {
     cpu: Cpu,
+    /// The settings in effect (or waiting, see `Hardware`).
     settings: Settings,
+    hardware: Hardware,
+    saved: Saved,
+    /// The settings window (Ctrl+F12, DOSCONFIG), and what it asked of the
+    /// page.
+    ui: ConfigUi,
+    requests: Requests,
     autoexec: Vec<String>,
     warnings: Vec<String>,
     pacer: Pacer,
@@ -95,13 +156,13 @@ pub struct Machine {
 
 #[wasm_bindgen]
 impl Machine {
-    /// A machine set up as the configuration file text `config` (in
+    /// A machine set up as the configuration file text `text` (in
     /// rust-dos.conf's format) has it. There are no host directories for
     /// `[drives]` to mount: the page mounts C: (`format_c`, `mount_image`)
     /// before `boot`.
     #[wasm_bindgen(constructor)]
-    pub fn new(config: &str) -> Machine {
-        let config = config::parse(config, Path::new("/"), None);
+    pub fn new(text: &str) -> Machine {
+        let config = config::parse(text, Path::new("/"), None);
         let settings = Settings::from_config(&config);
         let mut warnings = config.warnings.clone();
         if !config.drives.is_empty() {
@@ -121,7 +182,11 @@ impl Machine {
         Machine {
             pacer: Pacer::new(settings.cycles, Instant::now()),
             cpu,
+            hardware: Hardware { cpu: settings.cpu, sound: settings.sound.clone() },
+            saved: Saved { text: text.to_string(), settings: settings.clone() },
             settings,
+            ui: ConfigUi::for_frontend(BROWSER),
+            requests: Requests::default(),
             autoexec: config.autoexec,
             warnings,
             sound,
@@ -184,10 +249,11 @@ impl Machine {
 
         // Emulated time is counted in instructions (see timer.rs), so
         // however long the page's frames are, timer interrupts land on the
-        // right instructions.
+        // right instructions. The machine waits while the settings window
+        // is open.
         let cpu = &mut self.cpu;
         let batch_start = Instant::now();
-        let batch_end = if cpu.bus.exit_requested {
+        let batch_end = if cpu.bus.exit_requested || self.ui.is_open() {
             cpu.bus.clock.icount
         } else {
             self.pacer.batch_end(&cpu.bus.clock, batch_start)
@@ -199,8 +265,19 @@ impl Machine {
         let clock = &cpu.bus.clock;
         let executed = clock.icount - icount - (clock.idle - idle) - (clock.stalled - stalled);
 
-        audio::pump_audio(&mut cpu.bus);
-        cpu.bus.flush_log();
+        // DOSCONFIG asks for the settings window.
+        if std::mem::take(&mut self.cpu.bus.config_ui_requested) && !self.ui.is_open() {
+            self.toggle_settings();
+        }
+        // Processor and sound changes wait for the running program to end.
+        if !self.ui.is_open() && self.cpu.shell_idle() && self.hardware.differs(&self.settings) {
+            for warning in self.hardware.apply(&mut self.cpu, &self.settings) {
+                self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
+            }
+        }
+
+        audio::pump_audio(&mut self.cpu.bus);
+        self.cpu.bus.flush_log();
         let changed = self.render();
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
@@ -255,9 +332,59 @@ impl Machine {
         self.cpu.bus.exit_requested
     }
 
-    /// Whether DOSCONFIG asked for the settings since the last call.
-    pub fn take_settings_request(&mut self) -> bool {
-        std::mem::take(&mut self.cpu.bus.config_ui_requested)
+    // ------------------------------------------------------------------
+    // The settings window
+    // ------------------------------------------------------------------
+
+    /// Open or close the settings window (Ctrl+F12). It takes the keyboard
+    /// and the mouse: the page sends them with `settings_key`,
+    /// `settings_click` and `settings_wheel` while it is open.
+    pub fn toggle_settings(&mut self) {
+        if self.ui.is_open() {
+            self.ui.close();
+        } else {
+            let current = self.settings.clone();
+            self.with_ui(|ui, host| ui.open(&current, Some(PathBuf::from(CONFIG_FILE)), &*host));
+        }
+    }
+
+    /// Whether the settings window is open, which DOSCONFIG can do too.
+    pub fn settings_open(&self) -> bool {
+        self.ui.is_open()
+    }
+
+    /// A key went down while the settings window is open: `key` is its
+    /// `KeyboardEvent.key`, and `ctrl` whether Ctrl is held other than for
+    /// AltGr.
+    pub fn settings_key(&mut self, key: &str, ctrl: bool, shift: bool) {
+        if let Some(key) = ui_key(key, ctrl, shift) {
+            self.with_ui(|ui, host| ui.key(key, host));
+        }
+    }
+
+    /// A click at (`x`, `y`) on the screen, in its pixels, while the
+    /// settings window is open.
+    pub fn settings_click(&mut self, x: f64, y: f64) {
+        self.with_ui(|ui, host| ui.click(x as i32, y as i32, host));
+    }
+
+    /// The mouse wheel turned `notches` over the settings window, up if
+    /// more than 0.
+    pub fn settings_wheel(&mut self, notches: i32) {
+        self.with_ui(|ui, host| ui.wheel(notches, host));
+    }
+
+    /// The disk image the settings window asked the page to pick since the
+    /// last call: for that drive, or -1 for whichever suits the image.
+    /// `mount_image` puts it in.
+    pub fn take_image_request(&mut self) -> Option<i32> {
+        self.requests.image.take()
+    }
+
+    /// The configuration file's text, if the settings window saved the
+    /// settings into it since the last call, for the page to keep.
+    pub fn take_saved_config(&mut self) -> Option<String> {
+        self.requests.config.take()
     }
 
     // ------------------------------------------------------------------
@@ -406,12 +533,16 @@ impl Machine {
             _ => DriveKind::HardDisk,
         };
         let opts = MountOptions { kind, ..MountOptions::default() };
-        self.cpu.bus.mount_memory_image(drive, name, data, opts).map_err(|e| JsError::new(&e))
+        self.cpu.bus.mount_memory_image(drive, name, data, opts).map_err(|e| JsError::new(&e))?;
+        self.drives_changed(&format!("{} is in drive {}:", name, drive_letter(drive)));
+        Ok(())
     }
 
     /// Take the disk out of `drive`.
     pub fn unmount(&mut self, drive: u8) -> Result<(), JsError> {
-        self.cpu.bus.unmount_drive(drive).map_err(|e| JsError::new(&e))
+        self.cpu.bus.unmount_drive(drive).map_err(|e| JsError::new(&e))?;
+        self.drives_changed(&format!("Drive {}: is empty", drive_letter(drive)));
+        Ok(())
     }
 
     /// The mounted drives, as JSON: for each its letter, type (as
@@ -527,8 +658,30 @@ impl Machine {
 }
 
 impl Machine {
+    /// Hand `action` the settings window, and the machine as its host.
+    fn with_ui<T>(&mut self, action: impl FnOnce(&mut ConfigUi, &mut PageHost) -> T) -> T {
+        let mut host = PageHost {
+            cpu: &mut self.cpu,
+            pacer: &mut self.pacer,
+            settings: &mut self.settings,
+            hardware: &mut self.hardware,
+            saved: &mut self.saved,
+            requests: &mut self.requests,
+        };
+        action(&mut self.ui, &mut host)
+    }
+
+    /// Show the settings window, if it is open, the drives as they are now,
+    /// and what happened to them.
+    fn drives_changed(&mut self, message: &str) {
+        if self.ui.is_open() {
+            self.with_ui(|ui, host| ui.drives_changed(&*host, message));
+        }
+    }
+
     /// Render the video card's picture where it changed and put the
-    /// cursors on top. Returns whether the screen changed.
+    /// cursors and the settings window on top. Returns whether the screen
+    /// changed.
     fn render(&mut self) -> bool {
         if self.last_blink.elapsed() >= BLINK {
             self.cursor_visible = !self.cursor_visible;
@@ -548,6 +701,7 @@ impl Machine {
         }
         self.next.clone_from(&self.picture);
         video::overlay::draw_cursors(&mut self.next, bus, self.cursor_visible);
+        self.ui.draw(&mut self.next);
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
             && self.next.rgb == self.screen.rgb;
         if same && !self.rgba.is_empty() {
@@ -558,6 +712,110 @@ impl Machine {
         self.rgba.extend(self.screen.rgb.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]));
         true
     }
+}
+
+/// The settings window's way to the machine, and to the page.
+struct PageHost<'m> {
+    cpu: &'m mut Cpu,
+    pacer: &'m mut Pacer,
+    settings: &'m mut Settings,
+    hardware: &'m mut Hardware,
+    saved: &'m mut Saved,
+    requests: &'m mut Requests,
+}
+
+impl Host for PageHost<'_> {
+    /// The page shows the picture as `aspect` and `filter` say (see
+    /// `Machine::aspect`).
+    fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
+        let old = std::mem::replace(self.settings, new.clone());
+        if new.cycles != old.cycles {
+            self.pacer.set_speed(new.cycles);
+            // At max, the pacer tunes the speed from the current one.
+            if let CpuSpeed::Fixed(n) = new.cycles {
+                self.cpu.bus.set_cycles_per_ms(n);
+            }
+        }
+        if new.disk != old.disk {
+            self.cpu.bus.set_disk_settings(new.disk);
+        }
+        if !self.hardware.differs(new) {
+            return Ok(None);
+        }
+        if !self.cpu.shell_idle() {
+            return Ok(Some("Takes effect when the running program ends".to_string()));
+        }
+        match self.hardware.apply(self.cpu, new).into_iter().next() {
+            Some(problem) => Err(problem),
+            None => Ok(None),
+        }
+    }
+
+    /// Not asked for: without host files, the page picks disk images (see
+    /// `choose_image`).
+    fn mount(&mut self, spec: MountSpec, _replace: bool) -> Result<PathBuf, String> {
+        Err(format!("{}: there are no host files in the browser", spec.path.display()))
+    }
+
+    fn unmount(&mut self, drive: u8) -> Result<(), String> {
+        self.cpu.bus.unmount_drive(drive)
+    }
+
+    fn drives(&self) -> Vec<DriveInfo> {
+        self.cpu.bus.disk.mounted_drives()
+    }
+
+    /// Write what changed into the configuration file's text, for the page
+    /// to keep (`take_saved_config`). Its drives are in the page's hands.
+    fn save(&mut self, settings: &Settings) -> Result<(), String> {
+        let saved = &mut *self.saved;
+        saved.text = config::update_text(&saved.text, &saved.settings, settings, &[], None);
+        saved.settings = settings.clone();
+        self.requests.config = Some(saved.text.clone());
+        self.cpu.bus.log_string("[CONFIG] Saved the settings");
+        Ok(())
+    }
+
+    fn choose_image(&mut self, drive: Option<u8>) -> Result<(), String> {
+        if drive == Some(DRIVE_C) {
+            return Err("C: is kept in this browser: Drives on the page downloads or erases it".to_string());
+        }
+        self.requests.image = Some(drive.map_or(-1, i32::from));
+        Ok(())
+    }
+}
+
+/// The settings window's key for a key press, if it takes it: `key` is the
+/// `KeyboardEvent.key`, the key's name or what it types with the keyboard
+/// layout.
+fn ui_key(key: &str, ctrl: bool, shift: bool) -> Option<UiKey> {
+    Some(match key {
+        "ArrowUp" => UiKey::Up,
+        "ArrowDown" => UiKey::Down,
+        "ArrowLeft" => UiKey::Left,
+        "ArrowRight" => UiKey::Right,
+        "PageUp" => UiKey::PageUp,
+        "PageDown" => UiKey::PageDown,
+        "Home" => UiKey::Home,
+        "End" => UiKey::End,
+        "Enter" => UiKey::Enter,
+        "Escape" => UiKey::Esc,
+        "Tab" if shift => UiKey::BackTab,
+        "Tab" => UiKey::Tab,
+        "Backspace" => UiKey::Backspace,
+        "Delete" => UiKey::Delete,
+        "Insert" => UiKey::Insert,
+        "F2" => UiKey::Save,
+        _ if ctrl && key.eq_ignore_ascii_case("s") => UiKey::Save,
+        _ if ctrl => return None,
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => UiKey::Char(c),
+                _ => return None,
+            }
+        }
+    })
 }
 
 /// The key of `keyboard::KEYS` that a `KeyboardEvent.code` names.
@@ -712,6 +970,22 @@ mod tests {
         let kp8 = pc_key("Numpad8").unwrap();
         assert_eq!(typed_char(kp8, "Numpad8", "8", 0), b'8');
         assert_eq!(typed_char(kp8, "Numpad8", "ArrowUp", 0), 0);
+    }
+
+    #[test]
+    fn keys_for_the_settings_window() {
+        assert_eq!(ui_key("ArrowUp", false, false), Some(UiKey::Up));
+        assert_eq!(ui_key("Tab", false, true), Some(UiKey::BackTab));
+        assert_eq!(ui_key("Escape", false, false), Some(UiKey::Esc));
+        assert_eq!((ui_key("F2", false, false), ui_key("S", true, true)), (Some(UiKey::Save), Some(UiKey::Save)));
+        // What the layout types, AltGr's too; not Ctrl combinations or
+        // keys that type nothing.
+        assert_eq!(ui_key("ö", false, false), Some(UiKey::Char('ö')));
+        assert_eq!(ui_key("\\", false, false), Some(UiKey::Char('\\')));
+        assert_eq!(ui_key(" ", false, false), Some(UiKey::Char(' ')));
+        assert_eq!(ui_key("c", true, false), None);
+        assert_eq!(ui_key("Dead", false, false), None);
+        assert_eq!(ui_key("Shift", false, true), None);
     }
 
     #[test]

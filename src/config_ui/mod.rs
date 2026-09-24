@@ -2,8 +2,9 @@
 //! with Ctrl+F12 or the DOSCONFIG command. It changes the settings, mounts,
 //! swaps and unmounts drives, and saves both to the configuration file.
 //!
-//! It knows nothing of SDL or the machine: the frontend feeds it keys,
-//! typed text and clicks, and carries out what it asks for through `Host`.
+//! It knows nothing of SDL, the browser or the machine: the frontend feeds
+//! it keys, typed text and clicks, and carries out what it asks for through
+//! `Host`. What the frontend doesn't have (`Frontend`) isn't offered.
 
 mod browser;
 mod dialog;
@@ -47,6 +48,22 @@ pub enum UiKey {
     Char(char),
 }
 
+/// What the frontend has that some of the settings need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frontend {
+    /// A window of its own, which can be scaled and made fullscreen.
+    pub window: bool,
+    /// The host's files: drives are mounted from its directories and
+    /// images, and a SoundFont is picked from them. Without them (in the
+    /// browser), the frontend picks disk images itself (`Host::choose_image`).
+    pub host_files: bool,
+}
+
+impl Frontend {
+    /// The rust-dos program.
+    pub const DESKTOP: Frontend = Frontend { window: true, host_files: true };
+}
+
 /// What the window needs the emulator to do.
 pub trait Host {
     /// Take on changed settings. Returns a note on when they take effect,
@@ -57,6 +74,13 @@ pub trait Host {
     fn drives(&self) -> Vec<DriveInfo>;
     /// Save the settings and the drives to the configuration file.
     fn save(&mut self, settings: &Settings) -> Result<(), String>;
+    /// Without the host's files: have the user pick a disk or CD image for
+    /// `drive`, or for whichever drive suits it (None). The frontend mounts
+    /// it once it is picked, and tells the window (`drives_changed`).
+    fn choose_image(&mut self, drive: Option<u8>) -> Result<(), String> {
+        let _ = drive;
+        Err("Disk images are mounted from the host's files here".to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +193,12 @@ fn on_off(on: bool) -> String {
     if on { "on" } else { "off" }.to_string()
 }
 
+/// Whether General MIDI can play through a SoundFont: one picked from the
+/// host's files, with the synthesizer built in.
+fn soundfonts(frontend: Frontend) -> bool {
+    cfg!(feature = "midi") && frontend.host_files
+}
+
 impl Item {
     fn label(self) -> &'static str {
         use Item::*;
@@ -198,6 +228,15 @@ impl Item {
             FloppyDiskSpeed => "Floppy disk speed",
             HardDiskNoise => "Hard disk noise",
             FloppyDiskNoise => "Floppy disk noise",
+        }
+    }
+
+    /// Whether the frontend has what the setting needs.
+    fn available(self, frontend: Frontend) -> bool {
+        match self {
+            Item::Scale | Item::Fullscreen => frontend.window,
+            Item::SoundFont => soundfonts(frontend),
+            _ => true,
         }
     }
 
@@ -280,7 +319,7 @@ impl Item {
 
     /// Step the setting left (-1) or right (1). `drives` are the mounted
     /// drives, which the Ultrasound's drive can't take.
-    fn step(self, s: &mut Settings, dir: isize, drives: &[DriveInfo]) {
+    fn step(self, s: &mut Settings, dir: isize, drives: &[DriveInfo], frontend: Frontend) {
         use Item::*;
         let sound = &mut s.sound;
         let (sb, gus) = (&mut sound.sb, &mut sound.gus);
@@ -331,8 +370,12 @@ impl Item {
                 gus.drive = cycle(&letters, gus.drive, dir);
             }
             Midi => {
-                let synths = [MidiSynth::Auto, MidiSynth::SoundFont, MidiSynth::Gus, MidiSynth::None];
-                sound.midisynth = cycle(&synths, sound.midisynth, dir);
+                let synths: &[MidiSynth] = if soundfonts(frontend) {
+                    &[MidiSynth::Auto, MidiSynth::SoundFont, MidiSynth::Gus, MidiSynth::None]
+                } else {
+                    &[MidiSynth::Auto, MidiSynth::Gus, MidiSynth::None]
+                };
+                sound.midisynth = cycle(synths, sound.midisynth, dir);
             }
             HardDiskSpeed => s.disk.hard_disk_speed = cycle(&DiskSpeed::ALL, s.disk.hard_disk_speed, dir),
             FloppyDiskSpeed => s.disk.floppy_disk_speed = cycle(&DiskSpeed::ALL, s.disk.floppy_disk_speed, dir),
@@ -407,6 +450,7 @@ struct Hit {
 }
 
 pub struct ConfigUi {
+    frontend: Frontend,
     open: bool,
     page: Page,
     /// Selected row of the page and the first one shown.
@@ -436,8 +480,14 @@ impl Default for ConfigUi {
 }
 
 impl ConfigUi {
+    /// The rust-dos program's window.
     pub fn new() -> Self {
+        Self::for_frontend(Frontend::DESKTOP)
+    }
+
+    pub fn for_frontend(frontend: Frontend) -> Self {
         Self {
+            frontend,
             open: false,
             page: Page::Drives,
             row: 0,
@@ -485,12 +535,17 @@ impl ConfigUi {
     fn row_count(&self) -> usize {
         match self.page {
             Page::Drives => self.drives.len() + 1,
-            page => page.items().len(),
+            _ => self.items().len(),
         }
     }
 
+    /// The page's settings that the frontend has.
+    fn items(&self) -> Vec<Item> {
+        self.page.items().iter().copied().filter(|item| item.available(self.frontend)).collect()
+    }
+
     fn item(&self) -> Option<Item> {
-        self.page.items().get(self.row).copied()
+        self.items().get(self.row).copied()
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -651,7 +706,7 @@ impl ConfigUi {
     }
 
     fn step(&mut self, item: Item, dir: isize, host: &mut dyn Host) {
-        item.step(&mut self.settings, dir, &self.drives);
+        item.step(&mut self.settings, dir, &self.drives, self.frontend);
         self.changed(item, host);
     }
 
@@ -707,10 +762,11 @@ impl ConfigUi {
     fn drives_key(&mut self, key: UiKey, host: &mut dyn Host) {
         let selected = self.drives.get(self.row).cloned();
         match (key, selected) {
-            (UiKey::Insert, _) | (UiKey::Enter, None) => self.new_drive(),
+            (UiKey::Insert, _) | (UiKey::Enter, None) => self.new_drive(host),
             (UiKey::Enter, Some(info)) if info.kind == DriveKind::Virtual => {
                 self.info(format!("Drive {}: is built into rust-dos", info.letter()));
             }
+            (UiKey::Enter, Some(info)) if !self.frontend.host_files => self.choose_image(Some(info.drive), host),
             (UiKey::Enter, Some(info)) => {
                 self.status = None;
                 self.dialog = Some(MountDialog::change(&info, self.home.as_deref()));
@@ -723,7 +779,10 @@ impl ConfigUi {
         }
     }
 
-    fn new_drive(&mut self) {
+    fn new_drive(&mut self, host: &mut dyn Host) {
+        if !self.frontend.host_files {
+            return self.choose_image(None, host);
+        }
         match MountDialog::new_drive(&self.drives) {
             Some(dialog) => {
                 self.status = None;
@@ -733,8 +792,16 @@ impl ConfigUi {
         }
     }
 
-    /// The drives changed outside the window (Ctrl+F4): show them as they
-    /// are now, and what happened.
+    /// Without the host's files, the frontend picks the image.
+    fn choose_image(&mut self, drive: Option<u8>, host: &mut dyn Host) {
+        match host.choose_image(drive) {
+            Ok(()) => self.status = None,
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// The drives changed outside the window (Ctrl+F4, an image the
+    /// frontend picked): show them as they are now, and what happened.
     pub fn drives_changed(&mut self, host: &dyn Host, message: &str) {
         self.refresh_drives(host, None);
         self.info(message);
@@ -958,7 +1025,8 @@ impl ConfigUi {
             }
             self.hits.push(Hit { row, col: 1, width: cols - 2, target: Target::Row(i) });
             let Some(info) = self.drives.get(i) else {
-                g.text(2, row, "+ Mount a drive...", draw::KEY);
+                let text = if self.frontend.host_files { "+ Mount a drive..." } else { "+ Insert a disk or CD image..." };
+                g.text(2, row, text, draw::KEY);
                 continue;
             };
             let builtin = info.kind == DriveKind::Virtual;
@@ -982,7 +1050,7 @@ impl ConfigUi {
 
     fn draw_settings(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
         let cols = g.cols;
-        let items = self.page.items();
+        let items = self.items();
         Self::keep_visible(&mut self.scroll, self.row, content.len());
         let value_col = 27.min(cols / 2);
         let note_col = cols - 13;
@@ -1137,10 +1205,11 @@ impl ConfigUi {
         } else if self.edit.is_some() {
             vec![("Enter", "OK", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::Drives {
+            let (mount, unmount) = if self.frontend.host_files { ("Mount", "Unmount") } else { ("Insert", "Eject") };
             vec![
                 ("Enter", "Change", Enter),
-                ("Ins", "Mount", Insert),
-                ("Del", "Unmount", Delete),
+                ("Ins", mount, Insert),
+                ("Del", unmount, Delete),
                 ("Tab", "Page", Tab),
                 ("F2", "Save", Save),
                 ("Esc", "Close", Esc),

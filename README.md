@@ -313,9 +313,15 @@ In the browser:
   next free drive. *Drives* inserts an image into a drive of your choice,
   ejects it, downloads C: or a floppy as an image file (which the rust-dos
   program can mount), and erases C:.
-* *Settings* (or Ctrl+F12, or `DOSCONFIG`) edits the configuration in the
-  format of `rust-dos.conf`, which the browser keeps. `[drives]` has no host
-  directories to mount there.
+* *Settings* (or Ctrl+F12, or `DOSCONFIG`) opens the
+  [settings window](#settings-window), as in the rust-dos program. Its
+  Drives page inserts disk and CD images you pick (Ins, or Enter for a
+  drive's next disk) and ejects them (Del); there is no window scale or
+  fullscreen setting, as the page has its own *Fullscreen*. F2 saves the
+  settings to the `rust-dos.conf` that the browser keeps.
+* *Config file* edits that `rust-dos.conf` as text, `[autoexec]` included,
+  and restarts the machine with it. `[drives]` has no host directories to
+  mount there.
 * Clicking the screen while a program uses the mouse captures the mouse;
   Ctrl+F10 or Esc releases it. Sound starts with the first key press or
   click, as browsers require.

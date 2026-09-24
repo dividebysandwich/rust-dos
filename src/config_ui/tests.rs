@@ -23,6 +23,8 @@ struct FakeHost {
     mounts: Vec<(MountSpec, bool)>,
     unmounts: Vec<u8>,
     saved: Vec<Settings>,
+    /// The drives `choose_image` was asked for.
+    images: Vec<Option<u8>>,
 }
 
 impl FakeHost {
@@ -31,7 +33,14 @@ impl FakeHost {
         let mut z = drive_info(&MountSpec { drive: 25, path: "/".into(), opts: MountOptions::default() });
         z.kind = DriveKind::Virtual;
         z.mount = None;
-        Self { drives: vec![drive_info(&c), z], applied: vec![], mounts: vec![], unmounts: vec![], saved: vec![] }
+        Self {
+            drives: vec![drive_info(&c), z],
+            applied: vec![],
+            mounts: vec![],
+            unmounts: vec![],
+            saved: vec![],
+            images: vec![],
+        }
     }
 }
 
@@ -61,6 +70,14 @@ impl Host for FakeHost {
 
     fn save(&mut self, settings: &Settings) -> Result<(), String> {
         self.saved.push(settings.clone());
+        Ok(())
+    }
+
+    fn choose_image(&mut self, drive: Option<u8>) -> Result<(), String> {
+        if drive == Some(2) {
+            return Err("C: stays".to_string());
+        }
+        self.images.push(drive);
         Ok(())
     }
 }
@@ -227,6 +244,45 @@ fn every_page_draws_and_clicks() {
     let (x, y) = at(step.col, step.row);
     ui.click(x, y, &mut host);
     assert_eq!(ui.settings.sound.sb.model, SbModel::SbPro2);
+}
+
+#[test]
+fn a_browser_gets_what_it_has() {
+    let browser = Frontend { window: false, host_files: false };
+    let mut host = FakeHost::new();
+    let mut ui = ConfigUi::for_frontend(browser);
+    ui.open(&Settings::default(), Some("rust-dos.conf".into()), &host);
+    use UiKey::*;
+
+    // No window to scale or make fullscreen, no SoundFont to pick.
+    ui.show_page(Page::Display);
+    assert_eq!(ui.items(), [Item::Aspect, Item::Filter]);
+    keys(&mut ui, &mut host, &[Right]);
+    assert!(host.applied.last().unwrap().aspect);
+    ui.show_page(Page::Sound);
+    assert!(!ui.items().contains(&Item::SoundFont));
+    ui.row = ui.items().iter().position(|&i| i == Item::Midi).unwrap();
+    keys(&mut ui, &mut host, &[Right, Right, Right]);
+    let synths: Vec<MidiSynth> = host.applied.iter().rev().take(3).map(|s| s.sound.midisynth).collect();
+    assert_eq!(synths, [MidiSynth::Auto, MidiSynth::None, MidiSynth::Gus]);
+
+    // Drives come from images the frontend picks, not a dialog of host paths.
+    ui.show_page(Page::Drives);
+    ui.drives.insert(1, drive_info(&MountSpec { drive: 0, path: "A.IMG".into(), opts: MountOptions::default() }));
+    keys(&mut ui, &mut host, &[Insert, Down, Enter, End, Enter]);
+    assert!(ui.dialog.is_none());
+    assert_eq!(host.images, [None, Some(0), None]);
+    // The frontend can refuse, and says why.
+    keys(&mut ui, &mut host, &[Home, Enter]);
+    assert_eq!(status(&ui), ("C: stays", true));
+    keys(&mut ui, &mut host, &[Down, Delete]);
+    assert_eq!(host.unmounts, [0]);
+
+    let mut frame = Frame::new(640, 400);
+    for page in PAGES {
+        ui.show_page(page);
+        ui.draw(&mut frame);
+    }
 }
 
 #[test]

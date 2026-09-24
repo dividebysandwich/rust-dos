@@ -16,18 +16,14 @@ use crate::mount::{MountCmd, MountSpec};
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
 
-mod config_ui;
 mod debug;
 mod display;
 mod sdl_keys;
 
-// The emulator itself is the library crate; the debug server, the settings
-// window and the window's display are private to the binary. These
-// re-exports let the binary's modules refer to the library modules as
-// `crate::...`.
-use rust_dos::{
-    audio, config, cpu, disk, diskimage, diskio, exec, keyboard, mount, recorder, sb, shell, sound, timer, video,
-};
+// The emulator itself is the library crate; the debug server and the
+// window's display are private to the binary. These re-exports let the
+// binary's modules refer to the library modules as `crate::...`.
+use rust_dos::{audio, config, config_ui, cpu, disk, exec, keyboard, mount, recorder, shell, sound, timer, video};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

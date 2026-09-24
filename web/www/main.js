@@ -27,6 +27,10 @@ const DEFAULT_C_MEGABYTES = 250;
 const DISK_IMAGE = /\.(img|ima|vfd|flp|dsk|iso)$/i;
 
 const CONFIG_KEY = 'rust-dos.conf';
+/// Wheel travel that makes a notch, in pixels, and what a line and a page
+/// of it are.
+const WHEEL_NOTCH = 100;
+const WHEEL_UNITS = [1, 33, 400];
 const C_SIZE_KEY = 'rust-dos.c-megabytes';
 const MUTED_KEY = 'rust-dos.muted';
 
@@ -94,11 +98,14 @@ function remembered(key, fallback) {
   }
 }
 
+/// Returns whether the browser kept it.
 function remember(key, value) {
   try {
     localStorage.setItem(key, value);
+    return true;
   } catch {
     // Settings then last until the page closes.
+    return false;
   }
 }
 
@@ -281,8 +288,9 @@ function frame(now) {
       draw();
     }
     showActivity(machine.take_drive_activity(), now);
-    if (machine.take_settings_request()) {
-      openSettings();
+    // DOSCONFIG opens the settings window.
+    if (machine.settings_open() !== settingsShown) {
+      syncSettings();
     }
     if (machine.exit_requested()) {
       saveC();
@@ -345,12 +353,12 @@ window.addEventListener('keydown', (event) => {
     return;
   }
   speaker.start();
-  // Ctrl+F12 opens the settings and Ctrl+F10 lets go of the mouse, as in
-  // the rust-dos program and DOSBox.
+  // Ctrl+F12 opens and closes the settings window and Ctrl+F10 lets go of
+  // the mouse, as in the rust-dos program and DOSBox.
   if (event.ctrlKey && !event.altKey && event.code === 'F12') {
     event.preventDefault();
     if (!event.repeat) {
-      openSettings();
+      settingsInput(() => machine.toggle_settings());
     }
     return;
   }
@@ -361,6 +369,15 @@ window.addEventListener('keydown', (event) => {
   }
   // The system's and the browser's shortcuts.
   if (event.metaKey) {
+    return;
+  }
+  // The settings window has the keyboard while it is open.
+  if (settingsShown) {
+    if (event.code !== 'F11') {
+      event.preventDefault();
+    }
+    const ctrl = event.ctrlKey && !event.getModifierState('AltGraph');
+    settingsInput(() => machine.settings_key(event.key, ctrl, event.shiftKey));
     return;
   }
   const taken = guard(() => machine.key_down(event.code, event.key, event.getModifierState('AltGraph')));
@@ -408,7 +425,12 @@ function movePointer(event) {
   guard(() => machine.mouse_move(pointer.x, pointer.y));
 }
 
-canvas.addEventListener('pointermove', movePointer);
+canvas.addEventListener('pointermove', (event) => {
+  // The machine's mouse is still while the settings window is open.
+  if (!settingsShown) {
+    movePointer(event);
+  }
+});
 
 canvas.addEventListener('pointerdown', (event) => {
   speaker.start();
@@ -416,6 +438,10 @@ canvas.addEventListener('pointerdown', (event) => {
     return;
   }
   event.preventDefault();
+  // Clicks on the settings window go to it (see below).
+  if (settingsShown) {
+    return;
+  }
   // A program using the mouse gets it captured by a click, which it
   // doesn't see, as in DOSBox.
   if (event.pointerType === 'mouse' && !captured() && guard(() => machine.mouse_installed())) {
@@ -439,6 +465,36 @@ window.addEventListener('pointerup', (event) => {
 });
 
 canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
+// The settings window takes clicks when they end, not as they start: its
+// Insert opens the file picker, which a touch may do only once it ends.
+canvas.addEventListener('click', (event) => {
+  if (settingsShown && event.button === 0) {
+    const { x, y } = screenPoint(event);
+    settingsInput(() => machine.settings_click(x, y));
+  }
+});
+
+/// Wheel travel short of a notch.
+let wheelTravel = 0;
+
+canvas.addEventListener(
+  'wheel',
+  (event) => {
+    if (!settingsShown) {
+      return;
+    }
+    event.preventDefault();
+    wheelTravel += event.deltaY * (WHEEL_UNITS[event.deltaMode] ?? 1);
+    const notches = Math.trunc(wheelTravel / WHEEL_NOTCH);
+    if (notches) {
+      wheelTravel -= notches * WHEEL_NOTCH;
+      // Up is more than 0 for the window.
+      settingsInput(() => machine.settings_wheel(-notches));
+    }
+  },
+  { passive: false },
+);
 
 document.addEventListener('pointerlockchange', () => {
   canvas.classList.toggle('captured', captured());
@@ -893,13 +949,22 @@ function openDrives() {
   openDialog($('drives'));
 }
 
+/// The drive the image being picked goes in, or undefined for whichever
+/// suits it.
+let imageDrive;
+
+function pickImage(drive) {
+  imageDrive = drive;
+  $('image-input').click();
+}
+
 $('open-drives').addEventListener('click', openDrives);
-$('choose-image').addEventListener('click', () => $('image-input').click());
+$('choose-image').addEventListener('click', () => pickImage(Number($('image-drive').value)));
 $('image-input').addEventListener('change', (event) => {
   const [file] = event.target.files;
   event.target.value = '';
   if (file) {
-    const drive = Number($('image-drive').value);
+    const drive = imageDrive;
     enqueue(() => insertImage(file, drive));
   }
 });
@@ -919,8 +984,64 @@ $('erase-c').addEventListener('click', async () => {
 // Settings
 // ---------------------------------------------------------------------
 
+/// Whether the settings window was open when the page last looked. The
+/// emulator draws it over the screen; it has the keyboard and the mouse
+/// while it is open.
+let settingsShown = false;
+let shownAspect;
+
+/// Hand the settings window input, then take care of what came of it.
+function settingsInput(action) {
+  guard(() => {
+    action();
+    syncSettings();
+    showDrives();
+  });
+}
+
+/// Keep up with the settings window: it takes the keyboard and the mouse
+/// from DOS as it opens, asks for disk images, saves the settings for the
+/// page to keep and changes how the picture is shown.
+function syncSettings() {
+  const open = machine.settings_open();
+  if (open && !settingsShown) {
+    releaseInput();
+    document.exitPointerLock?.();
+  }
+  settingsShown = open;
+  const drive = machine.take_image_request();
+  if (drive !== undefined) {
+    pickImage(drive < 0 ? undefined : drive);
+  }
+  const text = machine.take_saved_config();
+  if (text !== undefined && !remember(CONFIG_KEY, text)) {
+    toast("The settings can't be kept: this browser doesn't let the page store them.", 'warn');
+  }
+  showPicture();
+}
+
+/// Show the picture as the settings have it: stretched to 4:3 or not,
+/// sharp or smooth.
+function showPicture() {
+  canvas.classList.toggle('smooth', machine.smooth());
+  if (machine.aspect() !== shownAspect) {
+    shownAspect = machine.aspect();
+    layout();
+  }
+}
+
 function openSettings() {
-  if (!machine || halted || $('settings').open) {
+  settingsInput(() => {
+    if (!machine.settings_open()) {
+      machine.toggle_settings();
+    }
+  });
+}
+
+/// The configuration file as text, for what the settings window doesn't
+/// have: `[autoexec]`.
+function openConfigFile() {
+  if (!machine || halted || $('config-file').open) {
     return;
   }
   $('config').value = remembered(CONFIG_KEY, DEFAULT_CONFIG);
@@ -932,10 +1053,11 @@ function openSettings() {
       return item;
     }),
   );
-  openDialog($('settings'));
+  openDialog($('config-file'));
 }
 
 $('open-settings').addEventListener('click', openSettings);
+$('open-config').addEventListener('click', openConfigFile);
 $('config-defaults').addEventListener('click', () => {
   $('config').value = DEFAULT_CONFIG;
 });
@@ -1003,7 +1125,7 @@ async function start() {
   for (const url of params.getAll('zip')) {
     await fetchZip(url);
   }
-  canvas.classList.toggle('smooth', machine.smooth());
+  showPicture();
   const notes = [
     store
       ? "C: is kept in this browser's storage."

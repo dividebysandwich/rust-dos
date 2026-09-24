@@ -1,8 +1,7 @@
 //! Drawing the settings window: a grid of CP437 character cells, rendered
 //! with the VGA font onto the picture over a semi-transparent panel.
 
-use crate::debug::keys::CP437;
-use crate::video::{self, Frame};
+use crate::video::{self, CP437, Frame};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);

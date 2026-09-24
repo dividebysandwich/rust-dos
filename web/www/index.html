@@ -16,6 +16,7 @@
     <button type="button" id="add-folder" title="Copy a folder to C:">Add folder</button>
     <button type="button" id="open-drives">Drives</button>
     <button type="button" id="open-settings" title="Ctrl+F12">Settings</button>
+    <button type="button" id="open-config" title="Edit rust-dos.conf, [autoexec] included">Config file</button>
     <button type="button" id="sound" aria-pressed="true">Sound on</button>
     <button type="button" id="fullscreen">Fullscreen</button>
   </nav>
@@ -84,10 +85,10 @@
   </form>
 </dialog>
 
-<dialog id="settings">
+<dialog id="config-file">
   <form method="dialog" class="dialog-body">
-    <h2>Settings</h2>
-    <p class="note">The settings of the <code>rust-dos.conf</code> file, which this browser keeps. The machine restarts with them; C: stays as it is.</p>
+    <h2>Config file</h2>
+    <p class="note">The <code>rust-dos.conf</code> file, which this browser keeps: what the settings window (Ctrl+F12) saves, and the commands of <code>[autoexec]</code>. The machine restarts with it; C: stays as it is.</p>
     <label for="config" class="visually-hidden">Configuration</label>
     <textarea id="config" spellcheck="false" rows="18"></textarea>
     <ul id="config-warnings" class="warnings"></ul>
