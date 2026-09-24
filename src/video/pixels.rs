@@ -135,11 +135,22 @@ pub fn put_pixel(bus: &mut Bus, x: usize, y: usize, color: u8) {
     bus.vga.mark_dirty_full();
 }
 
+/// The physical address an interrupt vector points to.
+fn vector_address(bus: &Bus, vector: usize) -> usize {
+    bus.read_16(vector * 4) as usize + ((bus.read_16(vector * 4 + 2) as usize) << 4)
+}
+
 /// Row `row` of the glyph of `ch`: from the graphics font INT 43h points
-/// to, `char_height` bytes a glyph.
+/// to, `char_height` bytes a glyph. A CGA's BIOS has the first 128 glyphs
+/// of its 8x8 font at F000:FA6E, and INT 1Fh points to the rest.
 fn glyph_row(bus: &Bus, ch: u8, row: usize) -> u8 {
-    let vector = bus.read_16(0x43 * 4) as usize | (bus.read_16(0x43 * 4 + 2) as usize) << 4;
-    bus.read_8(vector + ch as usize * char_height(bus) + row)
+    if !bus.vga.adapter.ega_bios() {
+        return match ch {
+            0..=0x7F => bus.read_8(super::bios::PC_FONT_8X8 + ch as usize * 8 + row),
+            _ => bus.read_8(vector_address(bus, 0x1F) + (ch as usize - 0x80) * 8 + row),
+        };
+    }
+    bus.read_8(vector_address(bus, 0x43) + ch as usize * char_height(bus) + row)
 }
 
 /// Draw `ch` in the character cell at (`col`, `row`): the glyph's pixels

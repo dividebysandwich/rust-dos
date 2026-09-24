@@ -727,9 +727,9 @@ impl Bus {
             // for planar read-modify-write sequences.
             return self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
         }
-        let (text, size) = self.vga.text_window();
+        let (text, size, wrap) = self.vga.text_window();
         if (text..text + size).contains(&addr) {
-            return self.vga.vram_text[addr - text];
+            return self.vga.vram_text[(addr - text) & wrap];
         }
         if addr < self.ram.len() {
             return self.ram[addr];
@@ -798,9 +798,9 @@ impl Bus {
                     | VideoMode::Vga640x480
             );
         }
-        let (text, size) = self.vga.text_window();
+        let (text, size, wrap) = self.vga.text_window();
         if (text..text + size).contains(&addr) {
-            let text_off = addr - text;
+            let text_off = (addr - text) & wrap;
             self.vga.vram_text[text_off] = value;
 
             // Narrow the dirty range to just the affected character row when
@@ -1590,7 +1590,7 @@ impl Bus {
             // Ports we intentionally ignore — writes are harmless but other-
             // wise spam the log. Programs blindly touch these as leftovers
             // from CGA/EGA-era code even when they're really talking to VGA.
-            0x3D8 | 0x3D9 => {
+            0x3D8 | 0x3D9 if self.vga.adapter != video::adapter::Adapter::Cga => {
                 // CGA Mode Control / Color Select. Real VGA ignores writes
                 // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
             }
@@ -1631,6 +1631,17 @@ impl Bus {
                     //         port, value
                     //     ));
                     // }
+
+                    // A CGA's mode is what its Mode Control register says,
+                    // whether the BIOS set it or the program did.
+                    if port == 0x3D8 && self.vga.adapter == video::adapter::Adapter::Cga {
+                        let mode = self.vga.cga_video_mode();
+                        if mode != self.video_mode {
+                            self.log_string(&format!("[CGA] Mode Control {:02X}: {:?}", value, mode));
+                            self.video_mode = mode;
+                            self.vga.mark_dirty_full();
+                        }
+                    }
 
                     // Check if video mode changed
                     // (A VESA mode is a 256-color mode to these registers.)

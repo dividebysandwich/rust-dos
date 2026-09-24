@@ -73,6 +73,11 @@ pub struct VgaCard {
     /// Whether blinking characters show (the blink's phase, which the
     /// front end sets).
     blink_on: bool,
+
+    /// The CGA's Mode Control (3D8h) and Color Select (3D9h) registers,
+    /// with `machine=cga` (see cga.rs).
+    pub cga_mode: u8,
+    pub cga_color: u8,
 }
 
 /// The memory text and CGA modes show: 32 KB at B8000h (or B0000h for a
@@ -124,6 +129,8 @@ impl VgaCard {
             dirty_y_min: 0,
             dirty_y_max: u32::MAX,
             blink_on: true,
+            cga_mode: 0x29,
+            cga_color: 0x30,
         };
         // The BIOS starts in 80x25 color text mode.
         vga.set_video_mode(super::VideoMode::Text80x25Color);
@@ -200,18 +207,25 @@ impl VgaCard {
         self.get_rgb(self.dac_index(self.attribute_regs[(attr & 0x0F) as usize]))
     }
 
-    /// Where the text and CGA modes' memory is, and how big: B8000h, or
+    /// Where the text and CGA modes' memory is, how big the window onto it
+    /// is, and where the memory wraps (a mask): 32 KB at B8000h, or at
     /// B0000h when the Graphics Miscellaneous register maps memory there
-    /// (the monochrome text mode 7).
-    pub fn text_window(&self) -> (usize, usize) {
+    /// (the monochrome text mode 7). The CGA's 16 KB show twice.
+    pub fn text_window(&self) -> (usize, usize, usize) {
+        if self.adapter == super::adapter::Adapter::Cga {
+            return (0xB8000, 0x8000, 0x3FFF);
+        }
         let base = if self.graphics_regs[0x06] & 0x0C == 0x08 { 0xB0000 } else { 0xB8000 };
-        (base, 0x8000)
+        (base, 0x8000, 0x7FFF)
     }
 
     /// Whether attribute bit 7 makes characters blink rather than select
     /// the bright background colours (Attribute Mode Control bit 3, in a
-    /// text mode).
+    /// text mode; the CGA's Mode Control bit 5).
     pub fn blinks(&self) -> bool {
+        if self.adapter == super::adapter::Adapter::Cga {
+            return self.cga_mode & 0x22 == 0x20;
+        }
         let mode = self.attribute_regs[0x10];
         mode & 0x01 == 0 && mode & 0x08 != 0
     }
@@ -248,6 +262,9 @@ impl VgaCard {
     /// whichever mode the program started from. Some games start from mode
     /// 12h for its 480-line timing and switch to 256 colors themselves.
     pub fn check_video_mode(&self) -> Option<super::VideoMode> {
+        if !self.adapter.vga_bios() {
+            return None;
+        }
         let is_256_color = self.graphics_regs[0x05] & 0x40 != 0;
         let is_color = self.misc_output_reg & 0x01 != 0;
         (is_color && is_256_color).then_some(super::VideoMode::Graphics320x200)
@@ -478,6 +495,10 @@ impl VgaCard {
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         self.mark_dirty_full();
         self.latched_start_addr = 0;
+        if self.adapter == super::adapter::Adapter::Cga {
+            self.cga_set_mode(mode);
+            return;
+        }
         let regs = super::modes::mode_regs(mode);
         self.misc_output_reg = regs.misc;
         self.sequencer_regs[0] = 0x03;
@@ -507,20 +528,26 @@ impl VgaCard {
         self.timing_cache = None;
     }
 
+    pub(super) fn invalidate_timing(&mut self) {
+        self.timing_changed();
+    }
+
+    /// The timing the CRTC's registers describe, if it is one a monitor
+    /// shows.
+    fn registers_timing(&self) -> Option<CrtTiming> {
+        match self.adapter {
+            super::adapter::Adapter::Cga => self.cga_timing(),
+            _ => CrtTiming::from_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs),
+        }
+    }
+
     /// The display timing: the one the registers describe, or the last
     /// sensible one while they describe none.
     pub fn timing(&mut self) -> CrtTiming {
         if let Some(timing) = self.timing_cache {
             return timing;
         }
-        let timing = self.fixed_timing.unwrap_or_else(|| {
-            CrtTiming::from_registers(
-                self.misc_output_reg,
-                self.sequencer_regs[1],
-                &self.crtc_regs,
-            )
-            .unwrap_or(self.good_timing)
-        });
+        let timing = self.fixed_timing.unwrap_or_else(|| self.registers_timing().unwrap_or(self.good_timing));
         if timing != self.good_timing {
             self.good_timing = timing;
             self.rebase = true;
@@ -531,14 +558,7 @@ impl VgaCard {
 
     /// The display timing, without caching it (for status displays).
     pub fn peek_timing(&self) -> CrtTiming {
-        self.timing_cache.or(self.fixed_timing).unwrap_or_else(|| {
-            CrtTiming::from_registers(
-                self.misc_output_reg,
-                self.sequencer_regs[1],
-                &self.crtc_regs,
-            )
-            .unwrap_or(self.good_timing)
-        })
+        self.timing_cache.or(self.fixed_timing).unwrap_or_else(|| self.registers_timing().unwrap_or(self.good_timing))
     }
 
     /// Whether a vertical retrace began since the last call, at emulated
@@ -560,10 +580,17 @@ impl Device for VgaCard {
     fn ports(&self) -> &'static [u16] {
         // Static slices so the bus can check port ownership without
         // allocating on every I/O (palette updates do >1000 port writes).
-        if self.misc_output_reg & 0x01 != 0 { COLOR_PORTS } else { MONO_PORTS }
+        match self.adapter {
+            super::adapter::Adapter::Cga => super::cga::PORTS,
+            _ if self.misc_output_reg & 0x01 != 0 => COLOR_PORTS,
+            _ => MONO_PORTS,
+        }
     }
 
     fn io_read(&mut self, port: u16) -> u8 {
+        if self.adapter == super::adapter::Adapter::Cga {
+            return self.cga_io_read(port);
+        }
         // The CRTC at 3B4h in a monochrome mode is the same one (see
         // `ports`). Input Status 1 (3DAh/3BAh) depends on the time; the bus
         // answers it.
@@ -645,6 +672,9 @@ impl Device for VgaCard {
     }
 
     fn io_write(&mut self, port: u16, value: u8) {
+        if self.adapter == super::adapter::Adapter::Cga {
+            return self.cga_io_write(port, value);
+        }
         let port = match port {
             0x3B4 => 0x3D4,
             0x3B5 => 0x3D5,

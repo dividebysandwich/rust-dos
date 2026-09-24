@@ -3,6 +3,7 @@ use crate::cpu::Cpu;
 
 pub mod adapter;
 pub mod bios;
+pub mod cga;
 pub mod crt;
 pub mod modes;
 pub mod mono;
@@ -376,12 +377,27 @@ pub fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus
     }
 }
 
+/// Where CGA graphics start in memory, and whether they show at all: a
+/// CGA's 6845 starts at its Start Address (counted in words) and Mode
+/// Control bit 3 turns the picture off; a VGA starts at 0.
+fn cga_start(bus: &Bus) -> Option<usize> {
+    match bus.vga.adapter {
+        adapter::Adapter::Cga if !bus.vga.cga_video_enabled() => None,
+        adapter::Adapter::Cga => Some(bus.vga.latched_start_addr * 2),
+        _ => Some(0),
+    }
+}
+
 /// CGA mode 4/5 (320x200, 4 colors): two bits a pixel, even rows at 0000h
 /// and odd rows at 2000h. A VGA takes the four colors from palette
 /// registers 0-3, which INT 10h AH=0Bh sets for the background and the
-/// palette.
+/// palette; a CGA from its Color Select register.
 fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
-    let colors: [(u8, u8, u8); 4] = std::array::from_fn(|pixel| bus.vga.attribute_rgb(pixel as u8));
+    let Some(start) = cga_start(bus) else { return };
+    let colors: [(u8, u8, u8); 4] = match bus.vga.adapter {
+        adapter::Adapter::Cga => bus.vga.cga_colors_4(),
+        _ => std::array::from_fn(|pixel| bus.vga.attribute_rgb(pixel as u8)),
+    };
 
     for y in 0..200 {
         // Determine memory offset based on interleave
@@ -389,7 +405,7 @@ fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
         let line_offset = bank_offset + ((y / 2) * 80);
 
         for byte_idx in 0..80 {
-            let byte = vram[line_offset + byte_idx];
+            let byte = vram[bank_offset + ((line_offset - bank_offset + start + byte_idx) & 0x1FFF)];
 
             // 4 pixels per byte (2 bits each)
             for p in 0..4 {
@@ -418,21 +434,21 @@ fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
 }
 
 /// CGA mode 6 (640x200, 2 colors): a bit a pixel, interleaved like mode
-/// 4, in palette registers 0 and 1.
+/// 4, in palette registers 0 and 1 (on a CGA black and the Color Select
+/// register's color).
 fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
-    let bg = bus.vga.attribute_rgb(0);
-    let fg = bus.vga.attribute_rgb(1);
+    let Some(start) = cga_start(bus) else { return };
+    let [bg, fg] = match bus.vga.adapter {
+        adapter::Adapter::Cga => bus.vga.cga_colors_2(),
+        _ => [bus.vga.attribute_rgb(0), bus.vga.attribute_rgb(1)],
+    };
 
     for y in 0..200 {
         let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
         let line_offset = bank_offset + ((y / 2) * 80);
 
         for byte_idx in 0..80 {
-            let offset = line_offset + byte_idx;
-            if offset >= vram.len() {
-                continue;
-            }
-            let byte = vram[offset];
+            let byte = vram[bank_offset + ((line_offset - bank_offset + start + byte_idx) & 0x1FFF)];
 
             // 8 pixels per byte (1 bit each)
             for p in 0..8 {

@@ -388,10 +388,10 @@ fn the_video_card_changes_at_the_prompt() {
     ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
     assert_eq!(Item::Machine.applies(), Applies::AtPrompt);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("Super VGA (VESA)"));
-    keys(&mut ui, &mut host, &[UiKey::Right]);
-    assert_eq!(host.applied.last().unwrap().machine, Adapter::Vga);
-    keys(&mut ui, &mut host, &[UiKey::Right]);
-    assert_eq!(host.applied.last().unwrap().machine, Adapter::Svga);
+    for adapter in [Adapter::Vga, Adapter::Cga, Adapter::Svga] {
+        keys(&mut ui, &mut host, &[UiKey::Right]);
+        assert_eq!(host.applied.last().unwrap().machine, adapter);
+    }
 }
 
 #[test]

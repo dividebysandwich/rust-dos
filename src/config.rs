@@ -433,7 +433,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "machine" => match Adapter::parse(value) {
                             Some(adapter) => config.machine = Some(adapter),
-                            None => warn(format!("invalid machine '{}' (svga or vga)", value)),
+                            None => warn(format!("invalid machine '{}' (svga, vga or cga)", value)),
                         },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),

@@ -2,6 +2,7 @@
 //! rows, how big a character cell is and with which font, where in text
 //! memory the screen starts, and drawing the characters in their colours.
 
+use super::adapter::Adapter;
 use super::{FONT_8X8, FONT_8X14, FONT_8X16, VideoMode};
 use crate::bus::Bus;
 
@@ -10,8 +11,11 @@ use crate::bus::Bus;
 pub struct TextGeometry {
     pub cols: usize,
     pub rows: usize,
-    /// The glyphs, `font_h` bytes each, the leftmost pixel in bit 7.
+    /// The glyphs, `stride` bytes each, the leftmost pixel in bit 7, and
+    /// the scanlines of a character row, `font_h`: fewer than a glyph has
+    /// shows its top, more add blank ones.
     pub font: &'static [u8],
+    pub stride: usize,
     pub font_h: usize,
     /// How many screen pixels a font pixel takes across and down: 2x2 in
     /// the 40-column modes.
@@ -60,9 +64,12 @@ impl TextGeometry {
 
 /// The text screen of the current mode, or None in a graphics mode.
 pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
-    let (_, window) = bus.vga.text_window();
+    if bus.vga.adapter == Adapter::Cga {
+        return cga_geometry(bus);
+    }
+    let (_, _, wrap) = bus.vga.text_window();
     // The CRTC counts the Start Address in characters: two bytes each.
-    let start = (bus.vga.latched_start_addr * 2) & (window - 1);
+    let start = (bus.vga.latched_start_addr * 2) & wrap;
     let rows = bus.text_rows();
     match bus.video_mode {
         VideoMode::Text80x25 | VideoMode::Text80x25Color => {
@@ -78,12 +85,13 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 cols: 80,
                 rows,
                 font,
+                stride: font_h,
                 font_h,
                 x_scale: 1,
                 y_scale: 1,
                 row_bytes: 160,
                 start,
-                wrap: window - 1,
+                wrap,
             })
         }
         // The 8x8 font drawn twice as wide and high.
@@ -91,15 +99,45 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
             cols: 40,
             rows,
             font: FONT_8X8,
+            stride: 8,
             font_h: 8,
             x_scale: 2,
             y_scale: 2,
             row_bytes: 80,
             start,
-            wrap: window - 1,
+            wrap,
         }),
         _ => None,
     }
+}
+
+/// The CGA's text screen, as its 6845 has it: R1 characters a row, R6
+/// rows of R9 + 1 scanlines, each drawn twice for the 400 lines of the
+/// picture. Programs make other shapes of it, such as 80x100 rows of two
+/// scanlines for 16 colours at 160x100.
+fn cga_geometry(bus: &Bus) -> Option<TextGeometry> {
+    if !matches!(
+        bus.video_mode,
+        VideoMode::Text80x25 | VideoMode::Text80x25Color | VideoMode::Text40x25 | VideoMode::Text40x25Color
+    ) {
+        return None;
+    }
+    let regs = &bus.vga.crtc_regs;
+    let cols = (regs[1] as usize).clamp(1, 80);
+    let rows = ((regs[6] & 0x7F) as usize).clamp(1, 100);
+    let (_, _, wrap) = bus.vga.text_window();
+    Some(TextGeometry {
+        cols,
+        rows,
+        font: FONT_8X8,
+        stride: 8,
+        font_h: (regs[9] & 0x1F) as usize + 1,
+        x_scale: if cols > 40 { 1 } else { 2 },
+        y_scale: 2,
+        row_bytes: cols * 2,
+        start: (bus.vga.latched_start_addr * 2) & wrap,
+        wrap,
+    })
 }
 
 /// Draw the text rows that fall in the screen rows `y_min..y_max` of
@@ -112,7 +150,12 @@ pub fn render(canvas: &mut [u8], canvas_w: usize, bus: &Bus, g: &TextGeometry, y
     let vram = &vga.vram_text;
     let blinks = vga.blinks();
     let blink_on = vga.blink_on();
-    let colors: [(u8, u8, u8); 16] = std::array::from_fn(|attr| vga.attribute_rgb(attr as u8));
+    let colors: [(u8, u8, u8); 16] = match vga.adapter {
+        // Mode Control bit 3 turns the CGA's picture off.
+        Adapter::Cga if !vga.cga_video_enabled() => return,
+        Adapter::Cga => vga.cga_text_colors(),
+        _ => std::array::from_fn(|attr| vga.attribute_rgb(attr as u8)),
+    };
     let (cell_w, cell_h) = (g.cell_w(), g.cell_h());
     let canvas_h = canvas.len() / (canvas_w * 3);
     let row_lo = (y_min / cell_h).min(g.rows);
@@ -129,9 +172,9 @@ pub fn render(canvas: &mut [u8], canvas_w: usize, bus: &Bus, g: &TextGeometry, y
                 (attr & 0x0F, attr >> 4, false)
             };
             let (fg, bg) = (colors[fg as usize], colors[bg as usize]);
-            let glyph = &g.font[char_code * g.font_h..(char_code + 1) * g.font_h];
 
-            for (y, &bits) in glyph.iter().enumerate() {
+            for y in 0..g.font_h {
+                let bits = if y < g.stride { g.font[char_code * g.stride + y] } else { 0 };
                 for x in 0..8 {
                     let on = !hidden && (bits >> (7 - x)) & 1 == 1;
                     let (r, gr, b) = if on { fg } else { bg };

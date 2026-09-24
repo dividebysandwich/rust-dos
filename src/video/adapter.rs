@@ -10,10 +10,13 @@ pub enum Adapter {
     Svga,
     /// IBM's VGA, without VESA modes.
     Vga,
+    /// IBM's Color Graphics Adapter: 4 colours at 320x200, 2 at 640x200,
+    /// 16 in text, through a 6845 CRTC.
+    Cga,
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 2] = [Adapter::Svga, Adapter::Vga];
+    pub const ALL: [Adapter; 3] = [Adapter::Svga, Adapter::Vga, Adapter::Cga];
 
     /// The adapter a `machine` value names, DOSBox's names included.
     pub fn parse(s: &str) -> Option<Self> {
@@ -22,6 +25,7 @@ impl Adapter {
                 Some(Adapter::Svga)
             }
             "vga" | "vgaonly" => Some(Adapter::Vga),
+            "cga" => Some(Adapter::Cga),
             _ => None,
         }
     }
@@ -30,6 +34,7 @@ impl Adapter {
         match self {
             Adapter::Svga => "svga",
             Adapter::Vga => "vga",
+            Adapter::Cga => "cga",
         }
     }
 
@@ -38,6 +43,7 @@ impl Adapter {
         match self {
             Adapter::Svga => "Super VGA (VESA)",
             Adapter::Vga => "VGA",
+            Adapter::Cga => "CGA",
         }
     }
 
@@ -52,9 +58,19 @@ impl Adapter {
         matches!(self, Adapter::Svga | Adapter::Vga)
     }
 
+    /// Whether the BIOS has the EGA's functions: the palette registers
+    /// (INT 10h AH=10h), the character generator (AH=11h) and the
+    /// configuration (AH=12h).
+    pub fn ega_bios(self) -> bool {
+        self != Adapter::Cga
+    }
+
     /// Whether the BIOS sets standard mode `mode` (INT 10h AH=00h).
     pub fn supports_mode(self, mode: u8) -> bool {
-        matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10 | 0x12 | 0x13)
+        match self {
+            Adapter::Cga => mode <= 0x06,
+            _ => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10 | 0x12 | 0x13),
+        }
     }
 }
 

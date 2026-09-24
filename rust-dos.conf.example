@@ -44,6 +44,7 @@
 # The display adapter, which programs look for to pick their graphics:
 #   svga  a VGA with VESA modes up to 1024x768 (the default)
 #   vga   an IBM VGA, without VESA modes
+#   cga   an IBM CGA: 4 colours at 320x200, 2 at 640x200
 # A change takes effect at the DOS prompt.
 #machine=svga
 # RAM in MB, 2 to 64. Memory above the first megabyte is extended memory

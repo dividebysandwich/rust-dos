@@ -2,7 +2,8 @@
 //! BIOS data area's fields about the adapter and the monitor, and the video
 //! BIOS ROM at C000h.
 
-use super::adapter::VideoSetup;
+use super::VideoMode;
+use super::adapter::{Adapter, VideoSetup};
 use crate::bus::Bus;
 
 /// The video BIOS ROM's segment, and where its fonts are in it: the 8x8
@@ -34,6 +35,42 @@ pub fn graphics_font(mode: u8) -> (u16, u16) {
     }
 }
 
+/// The text cursor's scanlines for a text mode with `height` scanlines to
+/// a character: the two above the bottom one (the CGA's 8: 6 and 7).
+pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
+    match (adapter, height) {
+        (Adapter::Cga, _) | (_, 8) => 0x0607,
+        (_, 14) => 0x0B0C,
+        _ => 0x0D0E,
+    }
+}
+
+/// Put the machine in the text mode the DOS prompt runs in, with the
+/// registers, palette and BIOS data a mode set leaves, so a program that
+/// exited in another mode, with its own palette or rows, doesn't leave the
+/// prompt in it.
+pub fn reset_for_shell(bus: &mut Bus) {
+    let adapter = bus.vga.adapter;
+    bus.write_8(0x0449, 0x03); // Mode 3 (80x25 color text)
+    bus.write_16(0x044A, 80); // 80 columns
+    bus.write_16(0x044C, 0x1000); // page size
+    bus.write_16(0x044E, 0); // page 0's offset
+    bus.write_8(0x0462, 0); // Active page 0
+    bus.write_8(0x0450, 0); // Cursor col
+    bus.write_8(0x0451, 0); // Cursor row
+    bus.write_8(0x0465, 0x29);
+    bus.write_8(0x0466, 0x30);
+    let height = if adapter.ega_bios() { 16 } else { 0 };
+    if adapter.ega_bios() {
+        bus.write_8(0x0484, 24); // 25 rows
+        bus.write_16(0x0485, height); // 8x16 font cell
+    }
+    bus.write_16(0x0460, cursor_shape(adapter, height));
+    bus.video_mode = VideoMode::Text80x25Color;
+    bus.vga.set_video_mode(VideoMode::Text80x25Color);
+    bus.vbe.reset();
+}
+
 /// Write the fonts into the ROMs.
 fn install_fonts(bus: &mut Bus) {
     let rom = |offset: u16| ((ROM_SEGMENT as usize) << 4) + offset as usize;
@@ -57,6 +94,22 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     bus.write_16(0x0410, equipment | 0x0020);
     // The CRTC's address.
     bus.write_16(0x0463, 0x03D4);
+
+    if setup.adapter == Adapter::Cga {
+        // The CGA's BIOS keeps neither the rows and the character height
+        // (0484h-0486h) nor the EGA's and VGA's information (0487h-048Ah),
+        // and there is no video BIOS ROM at C000h.
+        for addr in 0x0484..=0x048A {
+            bus.write_8(addr, 0);
+        }
+        bus.load_bytes(0xC0000, &[0xFF; 3]);
+        bus.load_bytes(0xC001E, &[0xFF; 7]);
+        install_fonts(bus);
+        return;
+    }
+    // 0484h and 0485h: 25 rows of 16 scanlines.
+    bus.write_8(0x0484, 24);
+    bus.write_16(0x0485, 16);
 
     // 0487h: bits 5-6 the memory (11: 256 KB).
     bus.write_8(0x0487, 0x60);

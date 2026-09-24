@@ -95,9 +95,9 @@ fn graphics_font(cpu: &mut Cpu, pointer: u32, height: u16) {
 /// The address of the character at (`col`, `row`) of text page `page`,
 /// each page `page_size` (BDA 044Ch) bytes on from the last.
 fn cell_addr(cpu: &Cpu, page: u8, col: usize, row: usize) -> usize {
-    let (base, size) = cpu.bus.vga.text_window();
+    let (base, _, wrap) = cpu.bus.vga.text_window();
     let page_offset = page as usize * cpu.bus.read_16(0x044C) as usize;
-    base + ((page_offset + (row * text_cols(cpu) + col) * 2) & (size - 1))
+    base + ((page_offset + (row * text_cols(cpu) + col) * 2) & wrap)
 }
 
 /// The active display page (BDA 0462h).
@@ -219,11 +219,18 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         0x13 => (24, 8),
         _ => (24, 16),
     };
-    cpu.bus.write_8(0x0484, rows);
-    cpu.bus.write_16(0x0485, char_height);
-    // The graphics modes draw characters with the font INT 43h points to.
-    let (font, _) = video_bios::graphics_font(mode);
-    set_vector(cpu, 0x43, rom_pointer(font));
+    let adapter = cpu.bus.vga.adapter;
+    if mode <= 0x03 {
+        cpu.bus.write_16(0x0460, video_bios::cursor_shape(adapter, char_height));
+    }
+    // The CGA's BIOS keeps neither these nor the graphics font.
+    if adapter.ega_bios() {
+        cpu.bus.write_8(0x0484, rows);
+        cpu.bus.write_16(0x0485, char_height);
+        // The graphics modes draw characters with the font INT 43h points to.
+        let (font, _) = video_bios::graphics_font(mode);
+        set_vector(cpu, 0x43, rom_pointer(font));
+    }
 }
 
 pub fn handle(cpu: &mut Cpu) {
@@ -241,7 +248,10 @@ pub fn handle(cpu: &mut Cpu) {
         0x12 => (0x30..=0x36).contains(&cpu.get_reg8(Register::BL)),
         _ => false,
     };
-    if (vga_only && !adapter.vga_bios()) || (ah == 0x4F && !adapter.has_vbe()) {
+    // Before them, the EGA's palette registers, character generator and
+    // configuration (AH=10h-12h), which a CGA's BIOS hasn't either.
+    let ega_only = matches!(ah, 0x10..=0x12);
+    if (vga_only && !adapter.vga_bios()) || (ega_only && !adapter.ega_bios()) || (ah == 0x4F && !adapter.has_vbe()) {
         return;
     }
 
@@ -413,6 +423,11 @@ pub fn handle(cpu: &mut Cpu) {
                 _ => return,
             }
             cpu.bus.write_8(0x0466, select);
+            if !cpu.bus.vga.adapter.ega_bios() {
+                // A CGA has the register itself.
+                cpu.bus.io_write(0x3D9, select);
+                return;
+            }
             let graphics = cpu.bus.read_8(0x0449) > 3;
             let regs = &mut cpu.bus.vga.attribute_regs;
             if bh == 0x00 {

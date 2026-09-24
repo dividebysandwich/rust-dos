@@ -123,6 +123,32 @@ impl CrtTiming {
         sane.then_some(timing)
     }
 
+    /// The timing a Motorola 6845 (the CGA's and MDA's CRTC) produces from
+    /// its registers R0-R9 at `char_clock` characters a second: R0 + 1
+    /// characters a scanline, R1 of them shown; R4 + 1 character rows of R9
+    /// + 1 scanlines, and R5 more scanlines, a frame, R6 rows shown; the
+    /// vertical sync from row R7 on, 16 scanlines long.
+    pub fn from_6845(regs: &[u8], char_clock: u64) -> Option<Self> {
+        let htotal = regs[0] as u64 + 1;
+        let hdisplay = (regs[1] as u64).min(htotal);
+        let row = (regs[9] & 0x1F) as u32 + 1;
+        let total = (regs[4] & 0x7F) as u32 * row + row + (regs[5] & 0x1F) as u32;
+        let display = ((regs[6] & 0x7F) as u32 * row).min(total);
+        let retrace_start = (regs[7] & 0x7F) as u32 * row;
+        let ns = |chars: u64| (chars * 1_000_000_000 + char_clock / 2) / char_clock;
+        let timing = Self {
+            line_ns: ns(htotal) as u32,
+            hdisplay_ns: ns(hdisplay) as u32,
+            total,
+            display,
+            retrace_start,
+            retrace_end: retrace_start + 16,
+        };
+        let frame_hz = 1_000_000_000 / timing.frame_ns().max(1);
+        let sane = retrace_start < total && (40..=120).contains(&frame_hz) && timing.line_ns > 0;
+        sane.then_some(timing)
+    }
+
     pub fn frame_ns(&self) -> u64 {
         self.line_ns as u64 * self.total as u64
     }

@@ -363,7 +363,7 @@ impl ShellCommand for ClsCommand {
         // Direct VRAM clear to avoid circular dependency on int10.rs:
         // Space (0x20) with Gray-on-Black (0x07) on every cell of the text
         // screen, wherever the adapter keeps it (B8000h, B0000h).
-        let (base, _) = cpu.bus.vga.text_window();
+        let (base, _, _) = cpu.bus.vga.text_window();
         for i in (0..cpu.bus.text_rows() * 160).step_by(2) {
             cpu.bus.write_8(base + i, 0x20);
             cpu.bus.write_8(base + i + 1, 0x07);
