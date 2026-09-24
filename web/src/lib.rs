@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use rust_dos::audio::{self, AudioOutput};
 use rust_dos::config::{self, Filter, Settings, SoundConfig};
+use rust_dos::config_ui::osd::Osd;
 use rust_dos::config_ui::{ConfigUi, Frontend, Host, UiKey};
 use rust_dos::cpu::{Cpu, CpuModel};
 use rust_dos::disk::{self, DRIVE_C, DriveInfo, DriveKind, MountOptions, drive_letter};
@@ -177,6 +178,10 @@ pub struct Machine {
     next: Frame,
     /// `screen` as the canvas takes it: RGBA.
     rgba: Vec<u8>,
+    /// What the hotkeys did, over the picture, and whether the machine is
+    /// paused (Alt+Pause).
+    osd: Osd,
+    paused: bool,
     /// Whether the page draws with WebGL 2, which the CRT shaders need.
     shaders: bool,
     cursor_visible: bool,
@@ -230,6 +235,8 @@ impl Machine {
             screen: blank.clone(),
             next: blank,
             rgba: Vec::new(),
+            osd: Osd::new(),
+            paused: false,
             shaders: false,
             cursor_visible: true,
             last_blink: Instant::now(),
@@ -323,7 +330,8 @@ impl Machine {
         // is open, but for its Mixer page.
         let cpu = &mut self.cpu;
         let batch_start = Instant::now();
-        let batch_end = if cpu.bus.exit_requested || self.ui.pauses_machine() {
+        let waiting = self.ui.pauses_machine() || self.paused;
+        let batch_end = if cpu.bus.exit_requested || waiting {
             cpu.bus.clock.icount
         } else {
             self.pacer.batch_end(&cpu.bus.clock, batch_start)
@@ -346,7 +354,7 @@ impl Machine {
             }
         }
 
-        audio::pump_audio(&mut self.cpu.bus);
+        audio::pump_audio(&mut self.cpu.bus, waiting);
         self.cpu.bus.flush_log();
         let changed = self.render();
 
@@ -400,6 +408,48 @@ impl Machine {
     /// Whether EXIT turned the machine off.
     pub fn exit_requested(&self) -> bool {
         self.cpu.bus.exit_requested
+    }
+
+    // ------------------------------------------------------------------
+    // Hotkeys
+    // ------------------------------------------------------------------
+
+    /// Pause the machine or resume it (Alt+Pause). Returns whether it is
+    /// paused.
+    pub fn toggle_pause(&mut self) -> bool {
+        self.paused = !self.paused;
+        if self.paused {
+            self.release_input();
+            self.osd.show_lasting("Paused (Alt+Pause resumes)");
+        } else {
+            self.osd.clear_lasting();
+        }
+        self.paused
+    }
+
+    /// Slow the CPU down by a tenth or speed it up (Ctrl+F11 and
+    /// Ctrl+Shift+F11), but for in the settings window, which has the
+    /// speed on its Emulator page.
+    pub fn step_speed(&mut self, faster: bool) {
+        if self.ui.is_open() {
+            return;
+        }
+        let mut new = self.settings.clone();
+        new.cycles = self.settings.cycles.stepped(self.cpu.bus.clock.cycles_per_ms(), faster);
+        let _ = self.with_ui(|_, host| host.apply(&new));
+        self.osd.show(match new.cycles {
+            CpuSpeed::Max => "CPU speed max".to_string(),
+            CpuSpeed::Fixed(n) => format!("CPU speed {} cycles", n),
+        });
+    }
+
+    /// The page's sound is off or on (its Sound button, Ctrl+F8), for the
+    /// mixer to show; with `announce`, on the screen too.
+    pub fn set_muted(&mut self, muted: bool, announce: bool) {
+        self.cpu.bus.mixer.muted = muted;
+        if announce {
+            self.osd.show(if muted { "Sound off (Ctrl+F8)" } else { "Sound on" });
+        }
     }
 
     // ------------------------------------------------------------------
@@ -466,6 +516,10 @@ impl Machine {
     /// `alt_graph` whether AltGr is held. Returns whether the machine took
     /// the key, which the page then keeps from the browser.
     pub fn key_down(&mut self, code: &str, key: &str, alt_graph: bool) -> bool {
+        // The paused machine takes no keys.
+        if self.paused {
+            return true;
+        }
         let bus = &mut self.cpu.bus;
         if code == "CapsLock" {
             if !self.held.contains_key(code) {
@@ -784,6 +838,7 @@ impl Machine {
             self.ui.set_mixer_status(bus.mixer.muted, bus.mixer.take_peaks());
         }
         self.ui.draw(&mut self.next);
+        self.osd.draw(&mut self.next);
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
             && self.next.rgb == self.screen.rgb;
         if same && !self.rgba.is_empty() {

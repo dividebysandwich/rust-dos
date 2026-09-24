@@ -9,6 +9,7 @@
 mod browser;
 mod dialog;
 mod draw;
+pub mod osd;
 
 use browser::{Browser, IMAGES, Row, SOUNDFONTS};
 use dialog::{Event, Field, MountDialog, TextField};

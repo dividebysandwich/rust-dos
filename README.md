@@ -335,11 +335,17 @@ is replaced on every start and stops growing at 64 MB.
 
 ## Keyboard shortcuts
 
-Ctrl+F12: Open or close the [settings window](#settings-window)
+| Keys | What they do |
+|---|---|
+| Ctrl+F12 | Open or close the [settings window](#settings-window) |
+| Ctrl+F4 | Put the next disk in the drives mounted from lists of images |
+| Alt+Pause | Pause the machine, and resume it |
+| Ctrl+F11 | Slow the CPU down by a tenth (from `max`, from the speed it reached) |
+| Ctrl+Shift+F11 | Speed the CPU up by a tenth |
+| Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |
+| PrintScreen | Toggle screen recording to a video file |
 
-Ctrl+F4: Put the next disk in the drives mounted from lists of images
-
-PrintScreen: Toggle screen recording to a video file
+A message at the top of the picture says what they did.
 
 ## Running in a browser
 

@@ -17,9 +17,11 @@ pub fn play_sdl_beep(bus: &mut Bus) {
 
 /// Hand the audio rendered since the last call to the host: the output
 /// device, which gets silence while the mixer is muted, and the debug
-/// server's audio stream. Called once per video frame. Returns the
-/// samples, for recordings, which the mute leaves alone.
-pub fn pump_audio(bus: &mut Bus) -> Vec<i16> {
+/// server's audio stream. Called once per video frame; `idle` while the
+/// machine waits (paused, or in the settings window), when the device
+/// running dry isn't an underrun. Returns the samples, for recordings,
+/// which the mute leaves alone.
+pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
     bus.audio_catch_up();
     let samples: Vec<i16> = bus.audio_out.drain(..).collect();
     let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
@@ -33,7 +35,9 @@ pub fn pump_audio(bus: &mut Bus) -> Vec<i16> {
         let mut out = Vec::with_capacity(samples.len() + rate / 10);
         if queued < rate / 50 {
             out.resize((rate * 3 / 40 - queued) * 2, 0);
-            bus.audio_underruns += 1;
+            if !idle {
+                bus.audio_underruns += 1;
+            }
         }
         let room = (rate / 4).saturating_sub(queued) * 2;
         let take = samples.len().min(room);

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::audio::pump_audio;
 use crate::config::{Settings, SoundConfig};
+use crate::config_ui::osd::Osd;
 use crate::config_ui::{ConfigUi, Host, UiKey};
 use crate::cpu::{Cpu, CpuModel};
 use crate::disk::{DriveInfo, DriveKind, LASTDRIVE};
@@ -201,6 +202,10 @@ fn main() -> Result<(), String> {
     // Keys pressed on the machine and not released yet: their scan codes
     // and whether they have the E0 prefix.
     let mut held: HashMap<Keycode, (u8, bool)> = HashMap::new();
+    // What the hotkeys did, over the picture, and whether the machine is
+    // paused (Alt+Pause).
+    let mut osd = Osd::new();
+    let mut paused = false;
 
     // What the settings window changes: the machine, the display and the
     // speed, and what saving writes.
@@ -265,10 +270,47 @@ fn main() -> Result<(), String> {
                         }
                         continue;
                     }
+                    // Alt+Pause pauses the machine and resumes it, as in
+                    // DOSBox.
+                    if keycode == Keycode::Pause && alt && !ctrl {
+                        if !repeat {
+                            paused = !paused;
+                            if paused {
+                                release_input(&mut cpu, &mut held);
+                                osd.show_lasting("Paused (Alt+Pause resumes)");
+                            } else {
+                                osd.clear_lasting();
+                            }
+                        }
+                        continue;
+                    }
+                    // Ctrl+F11 slows the CPU down by a tenth and
+                    // Ctrl+Shift+F11 speeds it up, but for in the settings
+                    // window, which has the speed on its Emulator page.
+                    if keycode == Keycode::F11 && ctrl && !alt && !ui.is_open() {
+                        let faster = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                        let mut new = settings.clone();
+                        new.cycles = settings.cycles.stepped(cpu.bus.clock.cycles_per_ms(), faster);
+                        let _ = host!().apply(&new);
+                        osd.show(speed_message(new.cycles));
+                        continue;
+                    }
+                    // Ctrl+F8 turns the sound off and on.
+                    if keycode == Keycode::F8 && ctrl && !alt {
+                        if !repeat {
+                            cpu.bus.mixer.muted = !cpu.bus.mixer.muted;
+                            osd.show(if cpu.bus.mixer.muted { "Sound off (Ctrl+F8)" } else { "Sound on" });
+                        }
+                        continue;
+                    }
                     if ui.is_open() {
                         if let Some(key) = ui_key(keycode, keymod) {
                             ui.key(key, &mut host!());
                         }
+                        continue;
+                    }
+                    // The paused machine takes no keys.
+                    if paused {
                         continue;
                     }
                     // A key still held from the settings window repeats
@@ -415,7 +457,8 @@ fn main() -> Result<(), String> {
         // counted in instructions (see timer.rs), so timer interrupts land on
         // the right instructions however the work is batched between frames.
         let batch_start = std::time::Instant::now();
-        let batch_end = if dbg.paused || ui.pauses_machine() {
+        let waiting = dbg.paused || ui.pauses_machine() || paused;
+        let batch_end = if waiting {
             cpu.bus.clock.icount
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
@@ -458,7 +501,7 @@ fn main() -> Result<(), String> {
         }
 
         // Update Audio
-        pump_audio(&mut cpu.bus);
+        pump_audio(&mut cpu.bus, waiting);
         cpu.bus.flush_log();
 
         // Update Cursor Blink
@@ -501,6 +544,7 @@ fn main() -> Result<(), String> {
             ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
         }
         ui.draw(&mut screen);
+        osd.draw(&mut screen);
         dbg.capture_frame(&screen);
 
         // Draw Recording Indicator
@@ -553,6 +597,14 @@ fn apply_machine(cpu: &mut Cpu, machine: &mut Machine, settings: &Settings) -> V
     machine.sound = settings.sound.clone();
     machine.video = settings.video_setup();
     warnings
+}
+
+/// What the on-screen message says of a new CPU speed.
+fn speed_message(speed: CpuSpeed) -> String {
+    match speed {
+        CpuSpeed::Max => "CPU speed max".to_string(),
+        CpuSpeed::Fixed(n) => format!("CPU speed {} cycles", n),
+    }
 }
 
 /// Put another display adapter in, at the prompt: its BIOS data, and the

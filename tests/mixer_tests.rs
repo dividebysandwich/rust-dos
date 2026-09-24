@@ -111,14 +111,14 @@ fn the_mute_silences_the_device_but_not_the_recording() {
     speaker_on(&mut bus);
 
     wait_ms(&mut bus, 20);
-    let samples = pump_audio(&mut bus);
+    let samples = pump_audio(&mut bus, false);
     assert!(samples.iter().any(|&s| s != 0));
     assert_eq!(*played.borrow(), samples);
 
     played.borrow_mut().clear();
     bus.mixer.muted = true;
     wait_ms(&mut bus, 20);
-    let samples = pump_audio(&mut bus);
+    let samples = pump_audio(&mut bus, false);
     assert!(samples.iter().any(|&s| s != 0));
     assert_eq!(played.borrow().len(), samples.len());
     assert!(played.borrow().iter().all(|&s| s == 0));

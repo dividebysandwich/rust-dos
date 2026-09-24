@@ -308,6 +308,18 @@ impl CpuSpeed {
             CpuSpeed::Fixed(n) => n,
         }
     }
+
+    /// The speed a step slower or faster (the hotkeys): 10% of the speed
+    /// the CPU runs at, `current`, rounded to hundreds. Slower from `max`
+    /// starts from the speed it reached; faster from `max` stays there.
+    pub fn stepped(self, current: u32, faster: bool) -> CpuSpeed {
+        if self == CpuSpeed::Max && faster {
+            return CpuSpeed::Max;
+        }
+        let step = (current / 10).max(100);
+        let next = if faster { current.saturating_add(step) } else { current.saturating_sub(step) };
+        CpuSpeed::Fixed((next.div_ceil(100) * 100).clamp(MIN_CYCLES, MAX_CYCLES))
+    }
 }
 
 /// Keeps emulated time in step with the wall clock, one video frame at a
@@ -393,5 +405,22 @@ impl Pacer {
             // Too far behind to catch up; start counting from now.
             self.next_frame = now;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_speed_steps_by_a_tenth() {
+        assert_eq!(CpuSpeed::Fixed(20_000).stepped(20_000, true), CpuSpeed::Fixed(22_000));
+        assert_eq!(CpuSpeed::Fixed(20_000).stepped(20_000, false), CpuSpeed::Fixed(18_000));
+        // Slower from max starts where max got to; faster stays max.
+        assert_eq!(CpuSpeed::Max.stepped(123_456, false), CpuSpeed::Fixed(111_200));
+        assert_eq!(CpuSpeed::Max.stepped(50_000, true), CpuSpeed::Max);
+        // No slower than the slowest.
+        assert_eq!(CpuSpeed::Fixed(150).stepped(150, false), CpuSpeed::Fixed(MIN_CYCLES));
+        assert_eq!(CpuSpeed::Fixed(MIN_CYCLES).stepped(MIN_CYCLES, false), CpuSpeed::Fixed(MIN_CYCLES));
     }
 }

@@ -250,6 +250,16 @@ function showSound() {
   button.setAttribute('aria-pressed', String(!speaker.muted));
 }
 
+/// Turn the sound off or on, with the Sound button or Ctrl+F8 (`announce`:
+/// say so on the screen), and tell the machine's mixer.
+function setSound(muted, announce) {
+  speaker.setMuted(muted);
+  showSound();
+  if (machine) {
+    guard(() => machine.set_muted(muted, announce));
+  }
+}
+
 // ---------------------------------------------------------------------
 // The screen
 // ---------------------------------------------------------------------
@@ -565,6 +575,27 @@ window.addEventListener('keydown', (event) => {
   if (event.ctrlKey && event.code === 'F10') {
     event.preventDefault();
     document.exitPointerLock?.();
+    return;
+  }
+  // Alt+Pause pauses the machine, Ctrl+F11 and Ctrl+Shift+F11 slow the CPU
+  // down and speed it up, and Ctrl+F8 turns the sound off and on.
+  if (event.altKey && !event.ctrlKey && event.code === 'Pause') {
+    event.preventDefault();
+    if (!event.repeat) {
+      guard(() => machine.toggle_pause());
+    }
+    return;
+  }
+  if (event.ctrlKey && !event.altKey && event.code === 'F11') {
+    event.preventDefault();
+    guard(() => machine.step_speed(event.shiftKey));
+    return;
+  }
+  if (event.ctrlKey && !event.altKey && event.code === 'F8') {
+    event.preventDefault();
+    if (!event.repeat) {
+      setSound(!speaker.muted, true);
+    }
     return;
   }
   // The system's and the browser's shortcuts.
@@ -1288,8 +1319,7 @@ $('config-save').addEventListener('click', () => {
 // ---------------------------------------------------------------------
 
 $('sound').addEventListener('click', () => {
-  speaker.setMuted(!speaker.muted);
-  showSound();
+  setSound(!speaker.muted, false);
 });
 
 $('fullscreen').addEventListener('click', async () => {
@@ -1335,6 +1365,7 @@ async function start() {
     return;
   }
   machine = new Machine(remembered(CONFIG_KEY, DEFAULT_CONFIG));
+  machine.set_muted(speaker.muted, false);
   if (params.has('log')) {
     machine.log_to_console();
   }
