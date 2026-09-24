@@ -109,6 +109,10 @@ D:
     overrides it.
   * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU)
     or `386`.
+  * `machine` is the display adapter programs find when they look for
+    one, and so the graphics they choose: `svga` (the default, a VGA with
+    VESA modes up to 1024x768) or `vga` (an IBM VGA, without VESA modes). A
+    change takes effect at the DOS prompt.
   * `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
     first megabyte is extended memory for DOS extenders and XMS.
 * **`[sound]`:**
@@ -171,16 +175,16 @@ as you set them. Ctrl+F12 or Esc closes it.
   and images from the host.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
-* **Emulator:** the CPU speed, the processor, the memory size and the disk
-  speeds.
+* **Emulator:** the CPU speed, the processor, the video card, the memory
+  size and the disk speeds.
 * **Sound:** everything in `[sound]`, and the disk noises.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the
-disk speeds and noises and the volumes take effect at once. The processor and sound hardware change once no program is
-running, so a game isn't left without the card it set up. The memory size
+disk speeds and noises and the volumes take effect at once. The processor, the video card and the sound hardware change once no
+program is running, so a game isn't left without the card it set up. The memory size
 takes effect the next time rust-dos starts.
 
 **F2** (or Ctrl+S) saves the settings and drives to the configuration file

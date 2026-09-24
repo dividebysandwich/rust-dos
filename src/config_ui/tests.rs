@@ -380,6 +380,21 @@ fn the_meters_fall_slowly() {
 }
 
 #[test]
+fn the_video_card_changes_at_the_prompt() {
+    use crate::video::adapter::Adapter;
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    assert_eq!(Item::Machine.applies(), Applies::AtPrompt);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("Super VGA (VESA)"));
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    assert_eq!(host.applied.last().unwrap().machine, Adapter::Vga);
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    assert_eq!(host.applied.last().unwrap().machine, Adapter::Svga);
+}
+
+#[test]
 fn a_browser_gets_what_it_has() {
     let browser = Frontend { window: false, host_files: false };
     let mut host = FakeHost::new();

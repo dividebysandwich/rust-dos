@@ -15,6 +15,7 @@ use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::mixer::{Channel, MixerSettings};
 use crate::timer::CpuSpeed;
+use crate::video::adapter::{Adapter, VideoSetup};
 use crate::video::mono::Monochrome;
 use crate::video::shader::Shader;
 use std::fs::{self, OpenOptions};
@@ -89,6 +90,8 @@ pub struct Config {
     pub shader: Option<Shader>,
     /// A monochrome monitor's phosphor (`monochrome`).
     pub monochrome: Option<Monochrome>,
+    /// The display adapter (`machine`).
+    pub machine: Option<Adapter>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
@@ -428,6 +431,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(shader) => config.shader = Some(shader),
                             None => warn(format!("invalid shader '{}' (none, scanlines, aperture or curved)", value)),
                         },
+                        "machine" => match Adapter::parse(value) {
+                            Some(adapter) => config.machine = Some(adapter),
+                            None => warn(format!("invalid machine '{}' (svga or vga)", value)),
+                        },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),
                             None => warn(format!("invalid monochrome '{}' (off, white, amber or green)", value)),
@@ -598,6 +605,7 @@ pub struct Settings {
     pub filter: Filter,
     pub shader: Shader,
     pub monochrome: Monochrome,
+    pub machine: Adapter,
     pub cycles: CpuSpeed,
     pub cpu: CpuModel,
     /// RAM in MB.
@@ -616,6 +624,7 @@ impl Default for Settings {
             filter: Filter::Nearest,
             shader: Shader::None,
             monochrome: Monochrome::Off,
+            machine: Adapter::Svga,
             cycles: CpuSpeed::Max,
             cpu: CpuModel::I486,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
@@ -627,6 +636,11 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// The display adapter and monitor programs see.
+    pub fn video_setup(&self) -> VideoSetup {
+        VideoSetup { adapter: self.machine }
+    }
+
     pub fn from_config(config: &Config) -> Self {
         let default = Self::default();
         Self {
@@ -636,6 +650,7 @@ impl Settings {
             filter: config.filter.unwrap_or(default.filter),
             shader: config.shader.unwrap_or(default.shader),
             monochrome: config.monochrome.unwrap_or(default.monochrome),
+            machine: config.machine.unwrap_or(default.machine),
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             memsize: config.memsize.unwrap_or(default.memsize),
@@ -662,6 +677,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "filter", Some(settings.filter.name().to_string())),
         (Emulator, "shader", Some(settings.shader.name().to_string())),
         (Emulator, "monochrome", Some(settings.monochrome.name().to_string())),
+        (Emulator, "machine", Some(settings.machine.name().to_string())),
         (
             Emulator,
             "cycles",
@@ -1197,7 +1213,7 @@ mod tests {
         assert_eq!(config.scale, None);
         assert_eq!(config.cycles, None);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
-        assert_eq!((config.shader, config.monochrome), (None, None));
+        assert_eq!((config.shader, config.monochrome, config.machine), (None, None, None));
         assert_eq!(config.sound, SoundConfig::default());
         assert_eq!(config.mixer, MixerSettings::default());
     }
@@ -1213,6 +1229,16 @@ mod tests {
         let config = parse(text, Path::new("/cfg"), None);
         assert_eq!(config.warnings.len(), 4, "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings::default());
+    }
+
+    #[test]
+    fn machine_settings() {
+        let config = parse("[emulator]\nmachine=VGAonly\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.machine, Some(Adapter::Vga));
+        assert_eq!(parse("[emulator]\nmachine=svga_s3\n", Path::new("/cfg"), None).machine, Some(Adapter::Svga));
+        let config = parse("[emulator]\nmachine=pcjr\n", Path::new("/cfg"), None);
+        assert_eq!((config.machine, config.warnings.len()), (None, 1));
     }
 
     #[test]
@@ -1251,6 +1277,7 @@ mod tests {
             filter: Filter::Linear,
             shader: Shader::Curved,
             monochrome: Monochrome::Green,
+            machine: Adapter::Vga,
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
             memsize: 32,
@@ -1311,6 +1338,7 @@ mod tests {
         assert!(text.contains("#scale=2\nscale=3\n"), "{}", text);
         assert!(text.contains("#shader=none\nshader=curved\n"), "{}", text);
         assert!(text.contains("#monochrome=off\nmonochrome=green\n"), "{}", text);
+        assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
         assert!(text.contains("#master=100\nmaster=5\n"), "{}", text);
         assert!(text.contains("#disknoise=100\ndisknoise=75\n"), "{}", text);
         assert!(text.contains("#sbtype=sb16\nsbtype=sbpro2\n"), "{}", text);

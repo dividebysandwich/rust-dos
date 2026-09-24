@@ -5,6 +5,8 @@ use std::cell::Cell;
 
 
 pub struct VgaCard {
+    /// The adapter programs see (`machine`).
+    pub adapter: super::adapter::Adapter,
     pub sequencer_index: u8,
     pub sequencer_regs: [u8; 5],
     pub graphics_index: u8,
@@ -91,6 +93,7 @@ const MONO_PORTS: &[u16] = &[
 impl VgaCard {
     pub fn new() -> Self {
         let mut vga = Self {
+            adapter: super::adapter::Adapter::default(),
             sequencer_index: 0,
             sequencer_regs: [0; 5],
             graphics_index: 0,

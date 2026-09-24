@@ -1,6 +1,8 @@
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 
+pub mod adapter;
+pub mod bios;
 pub mod crt;
 pub mod modes;
 pub mod mono;

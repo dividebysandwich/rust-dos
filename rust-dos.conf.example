@@ -41,6 +41,11 @@
 #cycles=max
 # Processor: 486 (the default, a 486DX with FPU) or 386.
 #cpu=486
+# The display adapter, which programs look for to pick their graphics:
+#   svga  a VGA with VESA modes up to 1024x768 (the default)
+#   vga   an IBM VGA, without VESA modes
+# A change takes effect at the DOS prompt.
+#machine=svga
 # RAM in MB, 2 to 64. Memory above the first megabyte is extended memory
 # for DOS extenders and XMS.
 #memsize=16

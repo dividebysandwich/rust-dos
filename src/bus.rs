@@ -291,42 +291,17 @@ impl Bus {
         // 0x0463: CRT Controller Base Address (0x3D4 for Color)
         bus.write_16(0x0463, 0x03D4);
 
-        // 0x0410: Equipment List. Bits 4-5 = 10 (80x25 Color)
-        // Bit 0 = Floppy. 0x21 (Floppy + Color)
-        bus.write_16(0x0410, 0x0021);
+        // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
+        // the video adapter's bits come with it below.
+        bus.write_16(0x0410, 0x0001);
 
         // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
         bus.write_8(0x0484, 24);
         // 0x0485: Character height in scan lines. 16 = VGA 8x16 default.
         bus.write_16(0x0485, 16);
 
-        // 0x0487: EGA/VGA Info. Bits 5-6 = 11 (256KB Video RAM).
-        // 0x60 = 01100000
-        bus.write_8(0x0487, 0x60);
-
-        // 0x0488: VGA Feature Switches & Misc (bits 3-0 = EGA config switches)
-        // 0x09 is a common VGA config (1001b).
-        bus.write_8(0x0488, 0x09);
-
-        // 0x0489: VGA video control flags. Bit 0: the VGA is active; bits 7
-        // and 4 the text modes' scanlines (01: 400); bit 1 gray-scale
-        // summing, bit 2 a monochrome monitor, bit 3 no palette loading.
-        bus.write_8(0x0489, 0x11);
-
-        // 0x048A: the index of the VGA's entry in the display combination
-        // code table (INT 10h AH=1Ah returns the code itself).
-        bus.write_8(0x048A, 0x0B);
-
-        // 0x0496: Keyboard State (0 = Standard)ture at C000:0000
-        bus.ram[0xC0000] = 0x55;
-        bus.ram[0xC0001] = 0xAA;
-        bus.ram[0xC0002] = 0x40; // 32KB (64 * 512 bytes)
-        // bus.write_string(0xC001E, "IBM VGA");
-        // write "IBM VGA" to C000:001E
-        let signature = b"IBM VGA";
-        for (i, &byte) in signature.iter().enumerate() {
-            bus.ram[0xC001E + i] = byte;
-        }
+        // The display adapter: its BIOS data and ROM.
+        video::bios::install(&mut bus, video::adapter::VideoSetup::default());
 
         // Initialize SFT at F000:E000 (Address 0xFE000)
         // 00-02: Modes supported (All)

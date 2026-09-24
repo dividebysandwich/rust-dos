@@ -21,6 +21,7 @@ use rust_dos::exec::{self, NoHook};
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
 use rust_dos::mount::MountSpec;
 use rust_dos::timer::{CpuSpeed, Pacer};
+use rust_dos::video::adapter::VideoSetup;
 use rust_dos::video::mono::Monochrome;
 use rust_dos::video::shader::{self, Glsl, Shader};
 use rust_dos::video::{self, Frame};
@@ -98,11 +99,12 @@ impl AudioOutput for PageAudio {
 struct Hardware {
     cpu: CpuModel,
     sound: SoundConfig,
+    video: VideoSetup,
 }
 
 impl Hardware {
     fn differs(&self, settings: &Settings) -> bool {
-        self.cpu != settings.cpu || self.sound != settings.sound
+        self.cpu != settings.cpu || self.sound != settings.sound || self.video != settings.video_setup()
     }
 
     /// Put the settings' processor and sound hardware in place. Returns the
@@ -115,8 +117,16 @@ impl Hardware {
         } else {
             Vec::new()
         };
+        // Another display adapter: its BIOS data, and the text mode it
+        // starts in, keeping what the screen shows.
+        if settings.video_setup() != self.video {
+            cpu.bus.log_string(&format!("[CONFIG] The display adapter is now {}", settings.machine.describe()));
+            video::bios::install(&mut cpu.bus, settings.video_setup());
+            rust_dos::interrupts::int10::set_mode(cpu, 0x83);
+        }
         self.cpu = settings.cpu;
         self.sound = settings.sound.clone();
+        self.video = settings.video_setup();
         warnings
     }
 }
@@ -188,6 +198,7 @@ impl Machine {
         }
         let mut cpu = Cpu::with_memory(PathBuf::from("/"), settings.memsize);
         cpu.model = settings.cpu;
+        video::bios::install(&mut cpu.bus, settings.video_setup());
         cpu.bus.set_disk_settings(settings.disk);
         cpu.bus.set_mixer(settings.mixer);
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
@@ -201,7 +212,7 @@ impl Machine {
         Machine {
             pacer: Pacer::new(settings.cycles, Instant::now()),
             cpu,
-            hardware: Hardware { cpu: settings.cpu, sound: settings.sound.clone() },
+            hardware: Hardware { cpu: settings.cpu, sound: settings.sound.clone(), video: settings.video_setup() },
             saved: Saved { text: text.to_string(), settings: settings.clone() },
             settings,
             ui: ConfigUi::for_frontend(BROWSER),

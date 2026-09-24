@@ -1137,6 +1137,8 @@ impl DebugHub {
             "process_depth": cpu.process_stack.len(),
             "current_psp": format!("{:04X}", cpu.current_psp),
             "video": {
+                // The display adapter programs see (`machine`).
+                "adapter": cpu.bus.vga.adapter.name(),
                 "mode": cpu.bus.video_mode as u8,
                 "name": format!("{:?}", cpu.bus.video_mode),
                 "width": w, "height": h,

@@ -62,6 +62,11 @@ fn active_page(cpu: &Cpu) -> u8 {
 pub fn set_mode(cpu: &mut Cpu, al: u8) {
     let keep = al & 0x80 != 0;
     let mode = al & 0x7F;
+    // A mode the adapter doesn't have leaves the one it is in.
+    if !cpu.bus.vga.adapter.supports_mode(mode) {
+        cpu.bus.log_string(&format!("[BIOS] Video mode {:02X} isn't on this adapter", mode));
+        return;
+    }
     cpu.bus.vbe.reset();
 
     // Clear Screen, unless AL bit 7 asks to keep video memory.
@@ -172,6 +177,22 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    let adapter = cpu.bus.vga.adapter;
+
+    // What the adapter's BIOS doesn't have returns with the registers as
+    // they were, which is how programs tell the adapters apart: the VESA
+    // extensions (AH=4Fh), the VGA's display combination code and state
+    // information (AH=1Ah-1Ch), its DAC functions (AH=10h AL=07h and up)
+    // and its scanline and other options (AH=12h BL=30h-36h).
+    let vga_only = match ah {
+        0x1A..=0x1C => true,
+        0x10 => cpu.get_al() >= 0x07,
+        0x12 => (0x30..=0x36).contains(&cpu.get_reg8(Register::BL)),
+        _ => false,
+    };
+    if (vga_only && !adapter.vga_bios()) || (ah == 0x4F && !adapter.has_vbe()) {
+        return;
+    }
 
     match ah {
         // AH = 00h: Set Video Mode

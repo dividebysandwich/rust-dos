@@ -15,6 +15,7 @@ use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
+use crate::video::adapter::VideoSetup;
 
 mod debug;
 mod display;
@@ -67,11 +68,12 @@ struct Args {
 struct Machine {
     cpu: CpuModel,
     sound: SoundConfig,
+    video: VideoSetup,
 }
 
 impl Machine {
     fn differs(&self, settings: &Settings) -> bool {
-        self.cpu != settings.cpu || self.sound != settings.sound
+        self.cpu != settings.cpu || self.sound != settings.sound || self.video != settings.video_setup()
     }
 }
 
@@ -144,6 +146,7 @@ fn main() -> Result<(), String> {
 
     let mut cpu = create_cpu(&args, &config);
     cpu.model = settings.cpu;
+    video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.set_disk_settings(settings.disk);
     cpu.bus.set_mixer(settings.mixer);
     for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
@@ -154,7 +157,7 @@ fn main() -> Result<(), String> {
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
     }
-    let mut machine = Machine { cpu: settings.cpu, sound: settings.sound.clone() };
+    let mut machine = Machine { cpu: settings.cpu, sound: settings.sound.clone(), video: settings.video_setup() };
     let mut saved = Saved {
         file: config.source.clone(),
         autoexec: config.autoexec.clone(),
@@ -543,9 +546,21 @@ fn apply_machine(cpu: &mut Cpu, machine: &mut Machine, settings: &Settings) -> V
     } else {
         Vec::new()
     };
+    if settings.video_setup() != machine.video {
+        change_adapter(cpu, settings.video_setup());
+    }
     machine.cpu = settings.cpu;
     machine.sound = settings.sound.clone();
+    machine.video = settings.video_setup();
     warnings
+}
+
+/// Put another display adapter in, at the prompt: its BIOS data, and the
+/// text mode it starts in, keeping what the screen shows.
+fn change_adapter(cpu: &mut Cpu, setup: VideoSetup) {
+    cpu.bus.log_string(&format!("[CONFIG] The display adapter is now {}", setup.adapter.describe()));
+    video::bios::install(&mut cpu.bus, setup);
+    rust_dos::interrupts::int10::set_mode(cpu, 0x83);
 }
 
 /// The drives the configuration file can hold, by letter: mounts of host
