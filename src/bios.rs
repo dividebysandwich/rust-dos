@@ -68,6 +68,11 @@ pub fn default_ivt() -> [u32; 256] {
     }
     ivt[0x08] = far(TIMER_HANDLER);
     ivt[0x1E] = far(DISKETTE_PARAMS);
+    // The video BIOS's fonts: the second half of the 8x8 font for the CGA
+    // graphics modes, and the graphics font of the mode it starts in.
+    use crate::video::bios::{FONT_8X8, FONT_8X8_HIGH, rom_pointer};
+    ivt[0x1F] = rom_pointer(FONT_8X8_HIGH);
+    ivt[0x43] = rom_pointer(FONT_8X8);
     ivt
 }
 

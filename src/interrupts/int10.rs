@@ -1,6 +1,7 @@
 use crate::audio::play_sdl_beep;
 use crate::cpu::Cpu;
-use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode};
+use crate::video::bios::{self as video_bios, rom_pointer};
+use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode, pixels};
 use iced_x86::Register;
 
 /// Current number of text rows on the screen, read from BDA 0x0484.
@@ -36,12 +37,59 @@ fn text_mode(cpu: &Cpu) -> bool {
     )
 }
 
-/// The characters in a row of the current text mode.
+/// The characters in a row of the current mode.
 fn text_cols(cpu: &Cpu) -> usize {
     match cpu.bus.video_mode {
         VideoMode::Text40x25 | VideoMode::Text40x25Color => 40,
+        _ if pixels::graphics_mode(&cpu.bus) => pixels::cells(&cpu.bus).0,
         _ => 80,
     }
+}
+
+/// Point an interrupt vector (INT 1Fh, 43h) at the far pointer `pointer`.
+fn set_vector(cpu: &mut Cpu, vector: usize, pointer: u32) {
+    cpu.bus.write_16(vector * 4, pointer as u16);
+    cpu.bus.write_16(vector * 4 + 2, (pointer >> 16) as u16);
+}
+
+fn get_vector(cpu: &Cpu, vector: usize) -> (u16, u16) {
+    (cpu.bus.read_16(vector * 4 + 2), cpu.bus.read_16(vector * 4))
+}
+
+/// The scanlines the text modes have, over which a font's rows go.
+fn text_scanlines(_cpu: &Cpu) -> u16 {
+    400
+}
+
+/// Take a font of `height` for the text mode: as many rows as fit in the
+/// scanlines, and a cursor at the bottom of the cell.
+fn text_font(cpu: &mut Cpu, height: u16) {
+    let rows = text_scanlines(cpu) / height;
+    cpu.bus.write_8(0x0484, (rows - 1) as u8);
+    cpu.bus.write_16(0x0485, height);
+    let cursor = match height {
+        8 => 0x0607,
+        14 => 0x0B0C,
+        _ => 0x0D0E,
+    };
+    cpu.bus.write_16(0x0460, cursor);
+    cpu.bus.vga.crtc_regs[0x09] = (cpu.bus.vga.crtc_regs[0x09] & 0xE0) | (height - 1) as u8;
+    cpu.bus.vga.mark_dirty_full();
+}
+
+/// Take a graphics font (INT 43h) of `height`, with the rows BL says: 0
+/// DL of them, 1 14, 2 25, 3 43.
+fn graphics_font(cpu: &mut Cpu, pointer: u32, height: u16) {
+    set_vector(cpu, 0x43, pointer);
+    cpu.bus.write_16(0x0485, height);
+    let rows = match cpu.get_reg8(Register::BL) {
+        0 => cpu.get_reg8(Register::DL),
+        1 => 14,
+        2 => 25,
+        3 => 43,
+        _ => return,
+    };
+    cpu.bus.write_8(0x0484, rows.saturating_sub(1));
 }
 
 /// The address of the character at (`col`, `row`) of text page `page`,
@@ -173,6 +221,9 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     };
     cpu.bus.write_8(0x0484, rows);
     cpu.bus.write_16(0x0485, char_height);
+    // The graphics modes draw characters with the font INT 43h points to.
+    let (font, _) = video_bios::graphics_font(mode);
+    set_vector(cpu, 0x43, rom_pointer(font));
 }
 
 pub fn handle(cpu: &mut Cpu) {
@@ -287,9 +338,35 @@ pub fn handle(cpu: &mut Cpu) {
         0x08 => {
             let page = cpu.get_reg8(Register::BH);
             let (col, row) = get_cursor(cpu, page);
-            let (char_code, attr) = read_char_at(cpu, col, row, page);
+            let (char_code, attr) = if pixels::graphics_mode(&cpu.bus) {
+                (pixels::read_char(&cpu.bus, col as usize, row as usize), 0)
+            } else {
+                read_char_at(cpu, col, row, page)
+            };
             cpu.set_reg8(Register::AH, attr);
             cpu.set_reg8(Register::AL, char_code);
+        }
+
+        // AH = 0Ah: Write Character at Cursor Position, keeping the
+        // attributes (in graphics modes in the colour BL).
+        // AL = Char, BH = Page, BL = Color, CX = Count
+        0x0A => {
+            let char_code = cpu.get_al();
+            let page = cpu.get_reg8(Register::BH);
+            let color = cpu.get_reg8(Register::BL);
+            let (col, row) = get_cursor(cpu, page);
+            let cols = text_cols(cpu);
+            for i in 0..cpu.cx() as usize {
+                let (c, r) = ((col as usize + i) % cols, row as usize + (col as usize + i) / cols);
+                if r < active_rows(cpu) as usize {
+                    let attr = if pixels::graphics_mode(&cpu.bus) {
+                        color
+                    } else {
+                        read_page_char(cpu, page, c as u8, r as u8).1
+                    };
+                    write_page_char(cpu, page, c as u8, r as u8, char_code, attr);
+                }
+            }
         }
 
         // AH = 09h: Write Character and Attribute at Cursor Position
@@ -359,9 +436,12 @@ pub fn handle(cpu: &mut Cpu) {
         0x0E => {
             let char_code = cpu.get_reg8(Register::AL);
             // On the active page, as the IBM BIOS does whatever BH says.
+            // In graphics modes BL is the character's colour.
             let page = active_page(cpu);
             let (mut col, mut row) = get_cursor(cpu, page);
             let cols = text_cols(cpu) as u8;
+            let graphics = pixels::graphics_mode(&cpu.bus);
+            let color = cpu.get_reg8(Register::BL);
 
             match char_code {
                 0x07 => play_sdl_beep(&mut cpu.bus), // Bell
@@ -383,8 +463,11 @@ pub fn handle(cpu: &mut Cpu) {
                 }
                 _ => {
                     // Printable, in the attribute the cell has.
-                    let (_, attr) = read_page_char(cpu, page, col, row);
-                    let attr = if attr == 0 { 0x07 } else { attr };
+                    let attr = match read_page_char(cpu, page, col, row).1 {
+                        _ if graphics => color,
+                        0 => 0x07,
+                        attr => attr,
+                    };
                     write_page_char(cpu, page, col, row, char_code, attr);
                     col += 1;
                 }
@@ -399,8 +482,11 @@ pub fn handle(cpu: &mut Cpu) {
             // Handle Scrolling
             let rows = active_rows(cpu);
             if row >= rows {
-                // Scroll entire screen up by 1 line
-                scroll_area(cpu, true, 1, 0x07, 0, 0, rows - 1, cols - 1);
+                // Scroll entire screen up by 1 line, keeping the bottom
+                // line's attribute (colour 0 in graphics modes).
+                let fill = if graphics { 0 } else { read_page_char(cpu, page, col.min(cols - 1), rows - 1).1 };
+                let fill = if fill == 0 && !graphics { 0x07 } else { fill };
+                scroll_area(cpu, true, 1, fill, 0, 0, rows - 1, cols - 1);
                 row = rows - 1;
             }
 
@@ -664,42 +750,47 @@ pub fn handle(cpu: &mut Cpu) {
         0x11 => {
             let al = cpu.get_al();
             match al {
-                // AL=10h/11h/12h/14h: Load ROM font and reprogram the CRTC /
-                // BDA for the new character height. The "programmed" variants
-                // (10-14h) change the displayed row count; the "not programmed"
-                // variants (20-24h) just load the font glyphs. We don't maintain
-                // a mutable font RAM so there's nothing to copy; we just update
-                // the BDA fields the renderer reads.
-                //
-                // AL=11h: 8x14 font (EGA)  -> 25 rows on 350-line display
-                // AL=12h: 8x8 font        -> 43 rows on EGA (350) or 50 rows on VGA (400)
-                // AL=14h: 8x16 font (VGA) -> 25 rows on 400-line display
-                0x11 | 0x12 | 0x14 => {
-                    let (rows_minus_one, char_height) = match al {
-                        0x11 => (24u8, 14u16),
-                        0x12 => (49u8, 8u16), // assume VGA 400-line display
-                        0x14 => (24u8, 16u16),
-                        _ => unreachable!(),
+                // AL=10h/11h/12h/14h: load a font and take its height: as
+                // many rows as fit in the text mode's scanlines (on a VGA's
+                // 400: 25 of 16, 28 of 14, 50 of 8). The text renderer draws
+                // with the ROM font of that height; there is no font RAM
+                // for a program's own glyphs (AL=10h: BH bytes a glyph).
+                0x10 | 0x11 | 0x12 | 0x14 => {
+                    let height = match al {
+                        0x10 => (cpu.get_reg8(Register::BH) as u16).clamp(1, 32),
+                        0x11 => 14,
+                        0x12 => 8,
+                        _ => 16,
                     };
-                    cpu.bus.write_8(0x0484, rows_minus_one);
-                    cpu.bus.write_16(0x0485, char_height);
-                    cpu.bus.log_string(&format!(
-                        "[BIOS] INT 10h AH=11h AL={:02X}: font loaded, rows={} height={}",
-                        al,
-                        rows_minus_one as u16 + 1,
-                        char_height
-                    ));
+                    if text_mode(cpu) {
+                        text_font(cpu, height);
+                    }
                 }
-                // AL=20h/22h/23h/24h: load font without reprogramming the CRTC.
-                // We have nothing to do here (font glyphs come from constant tables)
-                // but we need to acknowledge the call so software doesn't think
-                // the BIOS is broken.
-                0x20 | 0x22 | 0x23 | 0x24 => {}
+                // AL=00h-04h load glyphs into the character generator
+                // without changing the rows, and set its block specifier.
+                0x00..=0x04 => {}
+                // AL=20h: the second half of the 8x8 font for the CGA
+                // graphics modes (INT 1Fh) is at ES:BP.
+                0x20 => {
+                    let pointer = (cpu.es() as u32) << 16 | cpu.bp() as u32;
+                    set_vector(cpu, 0x1F, pointer);
+                }
+                // AL=21h-24h: the graphics font (INT 43h): a program's own at
+                // ES:BP with CX bytes a glyph, or the ROM's 8x14, 8x8 and
+                // 8x16; BL gives the rows (see `graphics_font`).
+                0x21 => {
+                    let pointer = (cpu.es() as u32) << 16 | cpu.bp() as u32;
+                    graphics_font(cpu, pointer, cpu.cx());
+                }
+                0x22 => graphics_font(cpu, rom_pointer(video_bios::FONT_8X14), 14),
+                0x23 => graphics_font(cpu, rom_pointer(video_bios::FONT_8X8), 8),
+                0x24 => graphics_font(cpu, rom_pointer(video_bios::FONT_8X16), 16),
                 0x30 => {
                     // Get Font Information
                     // Returns:
                     //   ES:BP -> pointer to the requested font (selected by BH)
-                    //   CX    = character height in scan lines (for that font)
+                    //   CX    = the height of the font on the screen (BDA
+                    //           0485h), whichever font was asked for
                     //   DL    = CURRENT character rows on screen - 1
                     //           (NOT a property of the queried font — programs
                     //           like Norton Commander use DL as the authoritative
@@ -707,39 +798,30 @@ pub fn handle(cpu: &mut Cpu) {
                     //           queried font's implied row count here would make
                     //           NC draw its UI scaled to 50 rows even in 80x25.)
                     //
-                    // BH = 0: Int 1Fh pointer (8x8)
-                    //      1: Int 43h pointer (8x8 first half)
+                    // BH = 0: Int 1Fh pointer (8x8, second half)
+                    //      1: Int 43h pointer (the graphics font)
                     //      2: ROM 8x14 font
                     //      3: ROM 8x8 font (lo)
                     //      4: ROM 8x8 font (hi)
                     //      5: ROM 9x14 alternate font
                     //      6: ROM 8x16 font (VGA)
                     //      7: ROM 9x16 alternate font (VGA)
-                    let val_bh = cpu.get_reg8(Register::BH);
                     let current_rows_minus_1 = cpu.bus.read_8(0x0484);
                     cpu.set_reg8(Register::DL, current_rows_minus_1);
-                    match val_bh {
-                        0x00 | 0x01 | 0x03 | 0x04 => {
-                            cpu.set_cx(8);
-                            cpu.set_es(0xF000);
-                            cpu.set_bp(0xFA6E);
-                        }
-                        0x02 | 0x05 => {
-                            cpu.set_cx(14);
-                            cpu.set_es(0xC000);
-                            cpu.set_bp(0x2000);
-                        }
-                        0x06 | 0x07 => {
-                            cpu.set_cx(16);
-                            cpu.set_es(0xC000);
-                            cpu.set_bp(0x2000);
-                        }
-                        _ => {
-                            cpu.set_cx(16);
-                            cpu.set_es(0xC000);
-                            cpu.set_bp(0x2000);
-                        }
-                    }
+                    cpu.set_cx(cpu.bus.read_16(0x0485));
+                    let rom = |offset| (video_bios::ROM_SEGMENT, offset);
+                    let (segment, offset) = match cpu.get_reg8(Register::BH) {
+                        0x00 => get_vector(cpu, 0x1F),
+                        0x01 => get_vector(cpu, 0x43),
+                        0x02 => rom(video_bios::FONT_8X14),
+                        0x03 => rom(video_bios::FONT_8X8),
+                        0x04 => rom(video_bios::FONT_8X8_HIGH),
+                        0x05 => rom(video_bios::FONT_9X14),
+                        0x07 => rom(video_bios::FONT_9X16),
+                        _ => rom(video_bios::FONT_8X16),
+                    };
+                    cpu.set_es(segment);
+                    cpu.set_bp(offset);
                 }
                 _ => {
                     cpu.bus
@@ -984,45 +1066,23 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 4Fh: VESA BIOS Extensions
         0x4F => super::vbe::handle(cpu),
 
-        // AH = 0Ch: Write Graphics Pixel
-        // AL = Color Value
-        // BH = Page Number (Ignored in Mode 13h)
+        // AH = 0Ch: Write Graphics Pixel, in any standard graphics mode
+        // AL = Color Value (bit 7: XOR it with the pixel's)
+        // BH = Page Number
         // CX = Column (X)
         // DX = Row (Y)
         0x0C => {
-            let color = cpu.get_al();
-            let x = cpu.get_reg16(Register::CX) as usize;
-            let y = cpu.get_reg16(Register::DX) as usize;
-
-            // Mode 13h Dimensions
-            let width = 320;
-            let height = 200;
-
-            if x < width && y < height {
-                // Calculate Linear Address for Mode 13h (0xA0000 base)
-                let offset = 0xA0000 + (y * width + x);
-                cpu.bus.write_8(offset, color);
-            }
+            let (x, y, color) = (cpu.cx() as usize, cpu.dx() as usize, cpu.get_al());
+            pixels::put_pixel(&mut cpu.bus, x, y, color);
         }
 
         // AH = 0Dh: Read Graphics Pixel
-        // BH = Page Number (Ignored in Mode 13h)
+        // BH = Page Number
         // CX = Column (X)
         // DX = Row (Y)
         // Returns: AL = Color Value
         0x0D => {
-            let x = cpu.get_reg16(Register::CX) as usize;
-            let y = cpu.get_reg16(Register::DX) as usize;
-            let width = 320;
-            let height = 200;
-
-            let color = if x < width && y < height {
-                let offset = 0xA0000 + (y * width + x);
-                cpu.bus.read_8(offset)
-            } else {
-                0 // Return black if out of bounds
-            };
-
+            let color = pixels::get_pixel(&cpu.bus, cpu.cx() as usize, cpu.dx() as usize);
             cpu.set_reg8(Register::AL, color);
         }
 
@@ -1076,9 +1136,12 @@ fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
 
 /// Writes a character and attribute to text page `page`.
 fn write_page_char(cpu: &mut Cpu, page: u8, col: u8, row: u8, char_code: u8, attr: u8) {
+    if pixels::graphics_mode(&cpu.bus) {
+        // `attr` is the colour, XORed with bit 7.
+        pixels::draw_char(&mut cpu.bus, col as usize, row as usize, char_code, attr);
+        return;
+    }
     if !text_mode(cpu) {
-        // TODO: Graphics Mode font rendering
-        cpu.bus.log_string("[BIOS] write_char_at called in unsupported video mode");
         return;
     }
     let addr = cell_addr(cpu, page, col as usize, row as usize);
@@ -1112,33 +1175,11 @@ fn scroll_area(
     row_end: u8,
     col_end: u8,
 ) {
-    // Check for Graphics Mode Clearing
-    let is_graphics = matches!(
-        cpu.bus.video_mode,
-        VideoMode::Cga320x200
-            | VideoMode::Cga320x200Color
-            | VideoMode::Cga640x200
-            | VideoMode::Graphics320x200
-    );
-
-    // If we are in graphics mode and asked to "Clear Screen" (lines = 0),
-    // just zero out the VRAM.
-    if is_graphics && lines == 0 {
-        // Determine which VRAM buffer to clear
-        if cpu.bus.video_mode == VideoMode::Graphics320x200 {
-            for i in 0..cpu.bus.vga.vram_graphics.len() {
-                cpu.bus.vga.vram_graphics[i] = 0;
-            }
-        } else {
-            // CGA Modes use the text buffer range
-            for i in 0..16384 {
-                // 16KB CGA Memory
-                if i < cpu.bus.vga.vram_text.len() {
-                    cpu.bus.vga.vram_text[i] = 0;
-                }
-            }
-        }
-        cpu.bus.vga.mark_dirty_full();
+    // Graphics modes scroll pixels, a character cell at a time, and fill
+    // with the colour in `attr`.
+    if pixels::graphics_mode(&cpu.bus) {
+        let (top, left, bottom, right) = (row_start as usize, col_start as usize, row_end as usize, col_end as usize);
+        pixels::scroll(&mut cpu.bus, up, lines as usize, attr, top, left, bottom, right);
         return;
     }
 

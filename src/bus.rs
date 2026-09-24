@@ -318,11 +318,6 @@ impl Bus {
         // 0D: Misc Flags (0)
         // 10: Save Pointer Caps (0)
 
-        // Initialize 8x16 Font at C000:2000 (Address 0xC2000)
-        // Just fill with a visible pattern so checks pass (non-zero)
-        for i in 0..(256 * 16) {
-            bus.ram[0xC2000 + i] = (i % 256) as u8;
-        }
 
         // BIOS ROM code and the interrupt vector table.
         crate::bios::install(&mut bus);

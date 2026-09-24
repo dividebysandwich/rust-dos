@@ -2,7 +2,7 @@
 //! rows, how big a character cell is and with which font, where in text
 //! memory the screen starts, and drawing the characters in their colours.
 
-use super::{FONT_8X8, FONT_8X16, VideoMode};
+use super::{FONT_8X8, FONT_8X14, FONT_8X16, VideoMode};
 use crate::bus::Bus;
 
 /// The shape of the text screen of the current mode.
@@ -71,6 +71,7 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
             // BDA 0485h.
             let (font, font_h): (&'static [u8], usize) = match bus.read_16(0x0485) {
                 1..=10 => (FONT_8X8, 8),
+                11..=14 => (FONT_8X14, 14),
                 _ => (FONT_8X16, 16),
             };
             Some(TextGeometry {

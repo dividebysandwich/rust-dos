@@ -226,3 +226,101 @@ fn ega_configuration_reports_the_switches() {
     assert_eq!(cpu.get_reg8(Register::CL), cpu.bus.read_8(0x0488) & 0x0F);
     assert_eq!(cpu.get_reg8(Register::CH), cpu.bus.read_8(0x0488) >> 4);
 }
+
+/// The glyph of `ch` in a font of `height` at segment:offset.
+fn glyph_at(cpu: &Cpu, segment: u16, offset: u16, ch: u8, height: usize) -> Vec<u8> {
+    let base = ((segment as usize) << 4) + offset as usize + ch as usize * height;
+    (0..height).map(|i| cpu.bus.read_8(base + i)).collect()
+}
+
+#[test]
+fn the_rom_fonts_are_where_int_10h_says() {
+    let mut cpu = machine(0x03);
+    let fonts = [(2u16, 14usize, video::font_8x14()), (3, 8, video::font_8x8()), (6, 16, video::font_8x16())];
+    for (bh, height, font) in fonts {
+        int10(&mut cpu, 0x1130, bh << 8, 0, 0);
+        let glyph = glyph_at(&cpu, cpu.es(), cpu.bp(), b'A', height);
+        assert_eq!(glyph, font[b'A' as usize * height..(b'A' as usize + 1) * height], "BH={}", bh);
+        assert_eq!(cpu.cx(), 16, "CX is the height of the font on the screen");
+        assert_eq!(cpu.get_reg8(Register::DL), 24);
+    }
+    // The 8x8 font's second half, and INT 1Fh pointing at it.
+    int10(&mut cpu, 0x1130, 0x0400, 0, 0);
+    let high = (cpu.es(), cpu.bp());
+    assert_eq!(glyph_at(&cpu, high.0, high.1, 0x00, 8), video::font_8x8()[0x80 * 8..0x81 * 8]);
+    int10(&mut cpu, 0x1130, 0x0000, 0, 0);
+    assert_eq!((cpu.es(), cpu.bp()), high);
+    // The PC BIOS's 8x8 font at F000:FA6E.
+    assert_eq!(glyph_at(&cpu, 0xF000, 0xFA6E, b'A', 8), [0x30, 0x78, 0xCC, 0xCC, 0xFC, 0xCC, 0xCC, 0x00]);
+    // The 9-dot alternate glyphs: a character code, 14 bytes, ..., 0.
+    int10(&mut cpu, 0x1130, 0x0500, 0, 0);
+    assert_eq!(cpu.bus.read_8(((cpu.es() as usize) << 4) + cpu.bp() as usize), 0x1D);
+}
+
+#[test]
+fn text_fonts_set_the_rows_that_fit() {
+    let mut cpu = machine(0x03);
+    for (al, rows, height) in [(0x12u8, 50u8, 8u16), (0x11, 28, 14), (0x14, 25, 16)] {
+        int10(&mut cpu, 0x1100 | al as u16, 0, 0, 0);
+        assert_eq!(cpu.bus.read_8(0x0484) + 1, rows, "AL={:02X}", al);
+        assert_eq!(cpu.bus.read_16(0x0485), height);
+        let geometry = video::text::geometry(&cpu.bus).unwrap();
+        assert_eq!((geometry.rows, geometry.font_h), (rows as usize, height as usize));
+    }
+}
+
+#[test]
+fn the_bios_writes_text_in_graphics_modes() {
+    // Mode 13h: teletype in colour BL, from the 8x8 graphics font.
+    let mut cpu = machine(0x13);
+    int10(&mut cpu, 0x0E41, 0x0004, 0, 0);
+    let read = |cpu: &mut Cpu, x: u16, y: u16| {
+        int10(cpu, 0x0D00, 0, x, y);
+        cpu.get_al()
+    };
+    // The top row of 'A' is 00110000.
+    assert_eq!((read(&mut cpu, 2, 0), read(&mut cpu, 3, 0), read(&mut cpu, 1, 0)), (4, 4, 0));
+    assert_eq!(cpu.bus.read_8(0x0450), 1, "the cursor moved on");
+
+    // Mode 4: AH=09h, and AH=08h reads the character back.
+    let mut cpu = machine(0x04);
+    int10(&mut cpu, 0x0941, 0x0003, 1, 0);
+    assert_eq!(read(&mut cpu, 2, 0), 3);
+    int10(&mut cpu, 0x0800, 0, 0, 0);
+    assert_eq!(cpu.get_al(), b'A');
+
+    // Mode 12h: the 8x16 font, in a plane colour. Row 2 of 'A' is 00010000.
+    let mut cpu = machine(0x12);
+    int10(&mut cpu, 0x0E41, 0x000F, 0, 0);
+    assert_eq!((read(&mut cpu, 3, 2), read(&mut cpu, 2, 2)), (15, 0));
+}
+
+#[test]
+fn graphics_pixels_xor_and_scroll() {
+    let mut cpu = machine(0x12);
+    int10(&mut cpu, 0x0C05, 0, 10, 20);
+    int10(&mut cpu, 0x0C83, 0, 10, 20);
+    int10(&mut cpu, 0x0D00, 0, 10, 20);
+    assert_eq!(cpu.get_al(), 5 ^ 3);
+    // In 256 colours bit 7 is part of the colour.
+    let mut cpu = machine(0x13);
+    int10(&mut cpu, 0x0C05, 0, 10, 20);
+    int10(&mut cpu, 0x0C83, 0, 10, 20);
+    int10(&mut cpu, 0x0D00, 0, 10, 20);
+    assert_eq!(cpu.get_al(), 0x83);
+
+    // A line feed on the last row scrolls the screen up a character row.
+    int10(&mut cpu, 0x0C07, 0, 0, 8);
+    int10(&mut cpu, 0x0200, 0, 0, 24 << 8);
+    int10(&mut cpu, 0x0E0A, 0, 0, 0);
+    int10(&mut cpu, 0x0D00, 0, 0, 0);
+    assert_eq!(cpu.get_al(), 7);
+    int10(&mut cpu, 0x0D00, 0, 0, 8);
+    assert_eq!(cpu.get_al(), 0);
+
+    // AH=06h clears a window in the fill colour.
+    let mut cpu = machine(0x0D);
+    int10(&mut cpu, 0x0600, 0x0200, 0, (24 << 8) | 39);
+    int10(&mut cpu, 0x0D00, 0, 100, 100);
+    assert_eq!(cpu.get_al(), 2);
+}

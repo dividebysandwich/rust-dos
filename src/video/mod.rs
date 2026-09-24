@@ -8,6 +8,7 @@ pub mod modes;
 pub mod mono;
 pub mod overlay;
 pub mod palette;
+pub mod pixels;
 pub mod shader;
 pub mod text;
 pub mod vbe;
@@ -47,13 +48,24 @@ pub const BDA_CURSOR_MODE: usize = 0x0460;
 pub const MAX_COLS: u8 = 80;
 pub const MAX_ROWS: u8 = 25;
 
+// The IBM EGA and VGA ROM fonts (see assets/README.md).
 static FONT_8X16: &[u8] = include_bytes!("assets/IBM_VGA_8x16.bin");
+static FONT_8X14: &[u8] = include_bytes!("assets/IBM_EGA_8x14.bin");
 static FONT_8X8: &[u8] = include_bytes!("assets/IBM_VGA_8x8.bin");
+/// The glyphs that differ in a 9-dot wide character cell: a character
+/// code, then its glyph, for each; a 0 ends the table.
+pub static FONT_9X14_ALTERNATE: &[u8] = include_bytes!("assets/IBM_EGA_9x14_alt.bin");
+pub static FONT_9X16_ALTERNATE: &[u8] = include_bytes!("assets/IBM_VGA_9x16_alt.bin");
 
 /// The VGA's 8x16 font: 256 CP437 glyphs of 16 bytes, one per row, the
 /// leftmost pixel in bit 7.
 pub fn font_8x16() -> &'static [u8] {
     FONT_8X16
+}
+
+/// The EGA's 8x14 font, laid out like `font_8x16`.
+pub fn font_8x14() -> &'static [u8] {
+    FONT_8X14
 }
 
 /// The VGA's 8x8 font, laid out like `font_8x16`.
