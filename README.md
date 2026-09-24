@@ -4,7 +4,7 @@
 
 ## Introduction
 
-Rust-DOS is a DOS emulator. It is a work in progress and most programs don't run yet. It does however contain a good amount of CPU mnemonics and interrupts implemented, and can run simple programs.
+Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early days up to the dawn of Windows95. It is a work in progress and some games and programs may not run yet.
 
 *Rust-DOS is looking for contributors!*
 
@@ -14,38 +14,30 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## What works
 
-* Executing COM and EXE programs
-* Basic disk operations
-* Passthrough filesystem
-* Mounting host directories as floppy, hard disk and CD-ROM drives
-* Mounting CD images (CUE sheets with BIN or WAV tracks, ISO, BIN and IMG)
-  as CD-ROM drives, including DOSBox's `IMGMOUNT` command
-* Mounting floppy and hard disk images (FAT12 and FAT16) for reading and
-  writing, with sector access through INT 13h and INT 25h/26h, and lists of
-  disks to change with Ctrl+F4
-* DOSBox Staging's emulated disk speeds and disk drive noises
-* Configuration file with startup commands
-* Running in a web browser as WebAssembly, with C: kept in the browser's
-  storage (see [Running in a browser](#running-in-a-browser))
-* Environment variables (`SET`, `PATH`)
+* FPU emulation
+* Interrupt handlers
 * XMS 3.0 extended memory and the A20 gate
 * 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
   as DOS/4GW (Descent, Heretic)
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
   General MIDI through the MPU-401 with a SoundFont or the Gravis patches
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
-  both digital audio and music. The Gravis MIDI patch set is built in and
-  appears on drive X:, where `ULTRADIR` points, so games need no Ultrasound
-  installation
-* CGA graphics
-* VGA graphics: text, CGA, EGA and VGA modes, and the "mode X" variants
-  games program into the registers, with the display timing (retrace,
-  display enable) in emulated time
+  both digital audio and music with built-in patch set.
+* Graphics: text, CGA, EGA and VGA modes with Mode X support
 * VESA VBE 2.0: 256-color, 15/16-bit and 32-bit modes from 320x200 to
-  1024x768 with 4 MB of video memory, bank switching and a linear frame
-  buffer. The window and screenshots take the mode's size
-* FPU emulation
-* Interrupt handlers
+  1024x768 with 4 MB of video memory, bank switching and linear frame
+  buffer.
+* Mounting host directories as floppy, hard disk and CD-ROM drives
+* Mounting CD images (CUE sheets with BIN or WAV tracks, ISO, BIN and IMG)
+  as CD-ROM drives, including DOSBox's `IMGMOUNT` command
+* Mounting floppy and hard disk images (FAT12 and FAT16) for reading and
+  writing, with sector access through INT 13h and INT 25h/26h, and lists of
+  disks to change with Ctrl+F4
+* Emulated disk speeds and disk drive noises
+* Configuration file with startup commands
+* Environment variables (`SET`, `PATH`)
+* Running in a web browser as WebAssembly, with C: kept in the browser's
+  storage (see [Running in a browser](#running-in-a-browser))
 
 ## What partially works
 
@@ -54,7 +46,6 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## What's not implemented yet
 
-* Mounting floppy and hard disk images
 * EMS
 * GUS MAX / Interwave codec, and SB emulation on the GUS (SBOS, MegaEm)
 
