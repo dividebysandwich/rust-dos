@@ -9,6 +9,7 @@ use crate::cpu::{CR0_EM, CR0_TS, Cpu, CpuFlags, CpuResult, Fault, Seg};
 
 pub mod arith;
 pub mod control;
+pub mod fast;
 pub mod fpu;
 pub mod logic;
 pub mod operand;
@@ -50,6 +51,16 @@ fn check_fpu_operand(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let off = operand::effective_offset(cpu, instr);
     cpu.check_span(operand::mem_seg(instr), off, len, access)?;
     Ok(())
+}
+
+/// Executes one decoded instruction.
+pub type Handler = fn(&mut Cpu, &Instruction) -> CpuResult;
+
+/// The handler for `instr`, chosen when it is decoded: one made for its
+/// form if it is a common one (see `fast.rs`), otherwise
+/// `execute_instruction`.
+pub fn handler(instr: &Instruction) -> Handler {
+    fast::select(instr).unwrap_or(execute_instruction)
 }
 
 pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {

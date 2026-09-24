@@ -64,7 +64,10 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   a VESA mode (`video.name` is `Vesa`), `video.vbe` shows the VBE mode
   number, size and bits per pixel, the bank of the window at A0000h, the
   bytes per scan line, the displayed start offset and the DAC width; the
-  log has a `Switch to VESA mode` line for each mode set.
+  log has a `Switch to VESA mode` line for each mode set. `pic` shows both
+  interrupt controllers' vector bases and their request (`irr`), mask
+  (`imr`) and in-service (`isr`) registers, master first: a request that
+  stays set under a mask bit is an IRQ the program has turned off.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the

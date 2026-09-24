@@ -7,6 +7,7 @@
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{Cpu, CpuState};
+use rust_dos::exec::{ExecHook, StopReason, run_batch};
 use std::path::PathBuf;
 
 /// Where things are in memory (linear = physical until a test enables
@@ -249,6 +250,42 @@ impl Rig {
                 return;
             }
             self.cpu.step();
+        }
+        panic!("no HLT: CS:EIP {:04X}:{:08X}", self.cpu.cs(), self.cpu.eip());
+    }
+}
+
+/// Stops the execution loop before a HLT instruction.
+struct StopAtHlt;
+
+impl ExecHook for StopAtHlt {
+    fn before_exec(&mut self, _cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
+        ram.get(phys_ip) == Some(&0xF4)
+    }
+}
+
+impl Rig {
+    /// Like `run`, but the program runs the way the emulator runs programs:
+    /// in batches through `run_batch`, whose instruction fetch differs from
+    /// `Cpu::step`'s (it keeps a code window, see exec.rs).
+    pub fn run_batched(&mut self, f: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>) {
+        let code = asm32(CODE, f);
+        self.load(CODE, &code);
+        self.enter_pm();
+        self.run_batched_to_halt();
+    }
+
+    /// Run through `run_batch` until the next instruction is a HLT (HLT
+    /// itself waits for the next timer event there and goes on), at most a
+    /// million instructions.
+    pub fn run_batched_to_halt(&mut self) {
+        let start = self.cpu.executed;
+        while self.cpu.executed - start < 1_000_000 {
+            let end = self.cpu.bus.clock.icount + 10_000;
+            self.cpu.bus.start_batch(end);
+            if run_batch(&mut self.cpu, &mut StopAtHlt, true) == StopReason::Paused {
+                return;
+            }
         }
         panic!("no HLT: CS:EIP {:04X}:{:08X}", self.cpu.cs(), self.cpu.eip());
     }

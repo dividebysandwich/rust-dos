@@ -12,6 +12,7 @@ use crate::bus::GEN_SHIFT;
 use crate::command::CommandDispatcher;
 use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, Seg};
 use crate::instr_cache::InstrCache;
+use crate::instructions::Handler;
 
 /// Why `run_batch` returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,67 @@ struct Fetch {
     decoder32: Decoder<'static>,
     ram: &'static [u8],
     cache: InstrCache,
+    window: CodeWindow,
+}
+
+/// The page instructions are being fetched from: where it is in physical
+/// memory, and what that depends on. Inside it, an instruction needs none of
+/// the checks and translation `locate` makes: it can't run past the page
+/// (the window ends 15 bytes before it does), past RAM, or into the IVT,
+/// and a CS limit it would run past sends it through `locate`. The
+/// translation holds while the TLB isn't flushed, the privilege level (the
+/// pages' user bits) and the A20 gate don't change; CS can change, as the
+/// window is linear addresses.
+struct CodeWindow {
+    /// First linear address, and how many bytes the window has (0: none).
+    lin: u32,
+    len: u32,
+    /// Physical address of `lin`.
+    phys: usize,
+    tlb_epoch: u32,
+    cpl: u8,
+    a20_mask: u32,
+}
+
+/// Bytes at the end of a page where an instruction can start and run on
+/// into the next one (the longest is 15 bytes).
+const PAGE_TAIL: u32 = 15;
+
+impl CodeWindow {
+    const NONE: CodeWindow = CodeWindow { lin: 0, len: 0, phys: 0, tlb_epoch: 0, cpl: 0, a20_mask: 0 };
+
+    /// The physical address of the instruction at `eip` (linear address
+    /// `lin_ip`), if it is inside the window and ends within the CS limit.
+    #[inline(always)]
+    fn phys(&self, cpu: &Cpu, eip: u32, lin_ip: u32, cs_limit: u32) -> Option<usize> {
+        let offset = lin_ip.wrapping_sub(self.lin);
+        let inside = offset < self.len
+            && eip as u64 + PAGE_TAIL as u64 - 1 <= cs_limit as u64
+            && self.tlb_epoch == cpu.tlb.epoch
+            && self.cpl == cpu.cpl
+            && self.a20_mask == cpu.bus.a20_mask();
+        inside.then(|| self.phys + offset as usize)
+    }
+
+    /// Make the page of `lin_ip`, which is at `phys_ip`, the window, unless
+    /// it is the first page (the tripwire watches the IVT there) or not all
+    /// in RAM.
+    fn open(&mut self, cpu: &Cpu, lin_ip: u32, phys_ip: usize, ram_len: usize) {
+        let offset = lin_ip & 0xFFF;
+        let phys = phys_ip - offset as usize;
+        if lin_ip < 0x1000 || phys + 0x1000 > ram_len {
+            *self = Self::NONE;
+            return;
+        }
+        *self = CodeWindow {
+            lin: lin_ip - offset,
+            len: 0x1000 - PAGE_TAIL,
+            phys,
+            tlb_epoch: cpu.tlb.epoch,
+            cpl: cpu.cpl,
+            a20_mask: cpu.bus.a20_mask(),
+        };
+    }
 }
 
 impl Fetch {
@@ -73,6 +135,7 @@ impl Fetch {
             decoder32: Decoder::with_ip(32, ram, 0, DecoderOptions::NONE),
             ram,
             cache: std::mem::take(&mut cpu.decode_cache),
+            window: CodeWindow::NONE,
         }
     }
 
@@ -107,10 +170,13 @@ fn run<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHoo
             continue;
         }
 
-        // Fast check first: the shell rarely has anything to do.
-        if cpu.pending_command.is_some()
-            || !cpu.batch_queue.is_empty()
-            || cpu.state == CpuState::RebootShell
+        // Fast check first: the shell rarely has anything to do. It hands
+        // over command lines from its own code at CS 0, and batch lines wait
+        // while a program started from the batch file runs, so they only
+        // count once the shell is back at its prompt.
+        if cpu.state == CpuState::RebootShell
+            || (cpu.cs() == 0
+                && (cpu.pending_command.is_some() || (!cpu.batch_queue.is_empty() && cpu.process_stack.is_empty())))
         {
             match shell_services(cpu) {
                 Shell::Idle => {}
@@ -133,6 +199,8 @@ impl Cpu {
         if self.bus.clock.icount >= self.bus.clock.deadline {
             self.bus.service_timers();
         }
+        // Callers may have raised interrupts or changed the PICs directly.
+        self.bus.refresh_irq();
         match self.state {
             CpuState::Running => {}
             // HLT: only an interrupt resumes execution.
@@ -166,9 +234,9 @@ fn deliver_interrupts(cpu: &mut Cpu) -> bool {
     // The instruction after STI, MOV SS or POP SS runs before any
     // interrupt, so a program can switch SS:SP without being interrupted
     // halfway.
-    cpu.get_cpu_flag(CpuFlags::IF)
+    cpu.bus.irq_ready
+        && cpu.get_cpu_flag(CpuFlags::IF)
         && !cpu.irq_shadow
-        && cpu.bus.interrupt_requested()
         && deliver_pending(cpu)
 }
 
@@ -199,7 +267,9 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
 
     // Mouse event handler installed with INT 33h AX=000C, called the
     // real-mode way.
-    !cpu.pe() && crate::mouse::deliver_callback(cpu)
+    let called = !cpu.pe() && crate::mouse::deliver_callback(cpu);
+    cpu.bus.refresh_irq();
+    called
 }
 
 enum Shell {
@@ -307,11 +377,112 @@ fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn
     // This instruction ends the interrupt shadow of the previous one.
     cpu.irq_shadow = false;
 
-    // Instruction fetch past the end of the code segment raises #GP(0).
-    // (In 16-bit code, EIP runs on past FFFFh rather than wrapping.)
     let eip = cpu.eip();
     let cs = cpu.seg_cache(Seg::CS);
     let (cs_limit, code32, lin_ip) = (cs.limit, cs.attr & ATTR_DB != 0, cs.base.wrapping_add(eip));
+    let (phys_ip, cacheable) = match fetch.window.phys(cpu, eip, lin_ip, cs_limit) {
+        Some(phys_ip) => (phys_ip, true),
+        None => match locate(cpu, fetch, eip, lin_ip, cs_limit) {
+            Some(located) => located,
+            None => return None,
+        },
+    };
+
+    if HOT && hook.before_exec(cpu, phys_ip, fetch.ram) {
+        return Some(StopReason::Paused);
+    }
+    cpu.executed += 1;
+
+    // Decode via the decoded-instruction cache. On a hit (the common case
+    // inside hot loops) iced's decoder is skipped entirely. An instruction
+    // that may continue on a page that isn't next to its own in physical
+    // memory, or runs past the end of RAM, is fetched byte by byte and not
+    // cached.
+    let slow;
+    let (instr, handler) = if cacheable {
+        // The generations of the blocks holding the first and last byte
+        // an instruction can have: a write to either changes the sum.
+        let gens = &cpu.bus.page_gen;
+        debug_assert!((phys_ip + 14) >> GEN_SHIFT < gens.len());
+        // SAFETY: a cacheable instruction's 16 bytes are all in RAM, and
+        // there is a generation for every block of RAM.
+        let page_gen = unsafe {
+            gens.get_unchecked(phys_ip >> GEN_SHIFT).wrapping_add(*gens.get_unchecked((phys_ip + 14) >> GEN_SHIFT))
+        };
+        let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
+        fetch.cache.get_or_decode(phys_ip, eip, code32, page_gen, |slot| {
+            let decoder = if code32 { decoder32 } else { decoder16 };
+            decoder.set_position(phys_ip).unwrap();
+            decoder.set_ip(eip as u64);
+            decoder.decode_out(slot);
+        })
+    } else {
+        match fetch_slow(cpu, lin_ip, eip, code32) {
+            Ok(i) => {
+                slow = i;
+                (&slow, crate::instructions::execute_instruction as Handler)
+            }
+            Err(fault) => {
+                cpu.raise(fault);
+                return None;
+            }
+        }
+    };
+
+    let next_eip = eip.wrapping_add(instr.len() as u32);
+    if next_eip - 1 > cs_limit {
+        // The instruction's last bytes lie past the segment limit.
+        cpu.raise(Fault::gp(0));
+        return None;
+    }
+    let start_esp = cpu.esp();
+    cpu.set_eip(next_eip);
+    if let Err(fault) = handler(cpu, instr) {
+        // A fault leaves the instruction undone: EIP back on it, and ESP as
+        // it was (the handlers commit everything else last).
+        cpu.set_eip(eip);
+        cpu.set_esp(start_esp);
+        if !(fault == Fault::UD && service_trap(cpu, fetch.ram, phys_ip)) {
+            cpu.raise(fault);
+        }
+    }
+    cpu.bus.clock.icount += 1;
+
+    if cpu.bus.reset_requested {
+        // The keyboard controller or port 92h pulsed the reset line.
+        cpu.bus.reset_requested = false;
+        cpu.bus.log_string("[CPU] Reset requested");
+        cpu.reset();
+        cpu.bus.refresh_irq();
+    }
+
+    if cpu.state != CpuState::Running {
+        halt(cpu);
+    }
+    None
+}
+
+/// After an instruction that left the CPU halted or wanting the shell back.
+/// HLT: nothing runs until the next interrupt, so skip ahead to the next
+/// timer event. With nothing scheduled (a CPU stepped outside a batch) it
+/// stays halted until an interrupt arrives.
+#[cold]
+fn halt(cpu: &mut Cpu) {
+    if cpu.state == CpuState::Halted && cpu.bus.clock.deadline != u64::MAX {
+        cpu.state = CpuState::Running;
+        cpu.bus.clock.skip_to_deadline();
+    }
+}
+
+/// Where the instruction at `eip` (linear address `lin_ip`) is, when it
+/// isn't in the code window: its physical address, and whether its bytes
+/// are all in RAM there so it can be decoded in place and cached. Raises
+/// the fault an instruction fetch takes and returns None, as it does when
+/// the tripwire goes off. Otherwise the page becomes the code window.
+#[inline(never)]
+fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32) -> Option<(usize, bool)> {
+    // Instruction fetch past the end of the code segment raises #GP(0).
+    // (In 16-bit code, EIP runs on past FFFFh rather than wrapping.)
     if eip > cs_limit {
         cpu.raise(Fault::gp(0));
         return None;
@@ -345,76 +516,12 @@ fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn
         return None;
     }
 
-    if HOT && hook.before_exec(cpu, phys_ip, fetch.ram) {
-        return Some(StopReason::Paused);
-    }
-    cpu.executed += 1;
-
-    // Decode via the decoded-instruction cache. On a hit (the common case
-    // inside hot loops) iced's decoder is skipped entirely. An instruction
-    // that may continue on the next page of a paged address space, or runs
-    // past the end of RAM, is fetched byte by byte and not cached.
-    let slow;
-    let paged_crossing = paging && lin_ip & 0xFFF > 0xFF0;
-    let instr = if phys_ip + 16 <= fetch.ram.len() && !paged_crossing {
-        // The generations of the blocks holding the first and last byte
-        // an instruction can have: a write to either changes the sum.
-        let gens = &cpu.bus.page_gen;
-        let page_gen = gens[phys_ip >> GEN_SHIFT].wrapping_add(gens[(phys_ip + 14) >> GEN_SHIFT]);
-        let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
-        fetch.cache.get_or_decode(phys_ip, eip, code32, page_gen, |slot| {
-            let decoder = if code32 { decoder32 } else { decoder16 };
-            decoder.set_position(phys_ip).unwrap();
-            decoder.set_ip(eip as u64);
-            decoder.decode_out(slot);
-        })
-    } else {
-        match fetch_slow(cpu, lin_ip, eip, code32) {
-            Ok(i) => {
-                slow = i;
-                &slow
-            }
-            Err(fault) => {
-                cpu.raise(fault);
-                return None;
-            }
-        }
-    };
-
-    let next_eip = eip.wrapping_add(instr.len() as u32);
-    if next_eip - 1 > cs_limit {
-        // The instruction's last bytes lie past the segment limit.
-        cpu.raise(Fault::gp(0));
-        return None;
-    }
-    let start_esp = cpu.esp();
-    cpu.set_eip(next_eip);
-    if let Err(fault) = crate::instructions::execute_instruction(cpu, instr) {
-        // A fault leaves the instruction undone: EIP back on it, and ESP as
-        // it was (the handlers commit everything else last).
-        cpu.set_eip(eip);
-        cpu.set_esp(start_esp);
-        if !(fault == Fault::UD && service_trap(cpu, fetch.ram, phys_ip)) {
-            cpu.raise(fault);
-        }
-    }
-    cpu.bus.clock.icount += 1;
-
-    if cpu.bus.reset_requested {
-        // The keyboard controller or port 92h pulsed the reset line.
-        cpu.bus.reset_requested = false;
-        cpu.bus.log_string("[CPU] Reset requested");
-        cpu.reset();
-    }
-
-    if cpu.state == CpuState::Halted && cpu.bus.clock.deadline != u64::MAX {
-        // HLT: nothing runs until the next interrupt, so skip ahead to the
-        // next timer event. With nothing scheduled (a CPU stepped outside a
-        // batch) it stays halted until an interrupt arrives.
-        cpu.state = CpuState::Running;
-        cpu.bus.clock.skip_to_deadline();
-    }
-    None
+    fetch.window.open(cpu, lin_ip, phys_ip, fetch.ram.len());
+    // An instruction that starts near the end of a page may continue on the
+    // next one. Where that page follows in physical memory too, as it
+    // mostly does, its bytes lie together in RAM like any other's.
+    let contiguous = !paging || lin_ip & 0xFFF <= 0xFF0 || next_page_follows(cpu, lin_ip, phys_ip);
+    Some((phys_ip, contiguous && phys_ip + 16 <= fetch.ram.len()))
 }
 
 /// Run the emulator service ("BOP") at `phys_ip`, if there is one. BOPs use
@@ -453,7 +560,17 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         cpu.idle = false;
         cpu.bus.clock.skip_to_deadline();
     }
+    // Services change what may interrupt (INT 33h's mouse event mask).
+    cpu.bus.refresh_irq();
     true
+}
+
+/// Whether the page after the one `lin_ip` is in maps to the physical page
+/// after `phys_ip`'s, so an instruction can run on into it.
+fn next_page_follows(cpu: &mut Cpu, lin_ip: u32, phys_ip: usize) -> bool {
+    let next = (lin_ip | 0xFFF).wrapping_add(1);
+    let user = cpu.cpl == 3;
+    matches!(cpu.lin_to_phys(next, false, user), Ok(p) if p as usize == (phys_ip | 0xFFF) + 1)
 }
 
 /// Decode the instruction at `lin_ip` from bytes fetched one at a time:

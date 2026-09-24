@@ -1088,6 +1088,14 @@ impl DebugHub {
             "breakpoints": self.breakpoints.len(),
             "input_queue": self.input.len(),
             "keyboard_buffer": cpu.bus.keyboard_buffer.len(),
+            // The interrupt controllers: requests waiting, masked lines and
+            // lines in service (bit n = line n of that chip).
+            "pic": {
+                "vectors": [format!("{:02X}", cpu.bus.pic.master.base), format!("{:02X}", cpu.bus.pic.slave.base)],
+                "irr": [format!("{:02X}", cpu.bus.pic.master.irr), format!("{:02X}", cpu.bus.pic.slave.irr)],
+                "imr": [format!("{:02X}", cpu.bus.pic.master.imr), format!("{:02X}", cpu.bus.pic.slave.imr)],
+                "isr": [format!("{:02X}", cpu.bus.pic.master.isr), format!("{:02X}", cpu.bus.pic.slave.isr)],
+            },
             "audio": {
                 "peak": cpu.bus.audio_peak,
                 "underruns": cpu.bus.audio_underruns,

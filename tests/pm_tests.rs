@@ -623,3 +623,158 @@ fn back_to_real_mode_with_a_flat_ds() {
     assert_eq!(rig.cpu.cs(), 0);
     assert_eq!(rig.read32(0x20_0000), 0x5A5A, "DS kept its 4 GB limit");
 }
+
+// --- Running in batches ---
+//
+// The emulator runs programs through `run_batch`, which keeps the page
+// instructions come from as a code window instead of translating every
+// fetch. These tests change what that translation depends on while code
+// runs on in the same page.
+
+/// Code for linear page 30000h that points the page's table entry at
+/// physical 31000h, flushes the TLB with `flush`, and jumps to offset 40h of
+/// the page, where BX gets `marker`. It goes at both 30000h and 31000h, with
+/// different markers, so BX tells which page the jump landed in.
+fn remap_and_jump(marker: u32, flush: fn(&mut CodeAssembler) -> Result<(), IcedError>) -> Vec<u8> {
+    let mut code = asm32(0x30000, |a| {
+        a.mov(dword_ptr(0x81000 + 0x30 * 4), 0x31003u32)?;
+        flush(a)?;
+        a.jmp(0x30040u64)
+    });
+    assert!(code.len() <= 0x40);
+    code.resize(0x40, 0x90);
+    code.extend(asm32(0x30040, |a| {
+        a.mov(ebx, marker)?;
+        a.hlt()
+    }));
+    code
+}
+
+fn run_remap(flush: fn(&mut CodeAssembler) -> Result<(), IcedError>) -> Rig {
+    let mut rig = Rig::new();
+    page_tables(&mut rig);
+    rig.load(0x30000, &remap_and_jump(0xAAAA, flush));
+    rig.load(0x31000, &remap_and_jump(0xBBBB, flush));
+    rig.run_batched(|a| {
+        enable_paging(a)?;
+        a.mov(eax, 0x30000u32)?;
+        a.jmp(eax)
+    });
+    rig
+}
+
+#[test]
+fn batched_code_follows_its_page_remapped_by_a_cr3_load() {
+    let rig = run_remap(|a| {
+        a.mov(eax, cr3)?;
+        a.mov(cr3, eax)
+    });
+    assert_eq!(rig.cpu.ebx(), 0xBBBB);
+}
+
+#[test]
+fn batched_code_follows_its_page_remapped_by_invlpg() {
+    let rig = run_remap(|a| a.invlpg(ptr(0x30000)));
+    assert_eq!(rig.cpu.ebx(), 0xBBBB);
+}
+
+#[test]
+fn batched_ring_3_code_on_a_supervisor_page_faults() {
+    let mut rig = Rig::new();
+    page_tables(&mut rig);
+    // Ring 3 may use pages whose entries say so: only its stack. The code
+    // page 30000h is the supervisor's.
+    rig.write32(0x80000, 0x81000 | 0x7);
+    rig.write32(0x81000 + 0x5F * 4, 0x5F000 | 0x7);
+    rig.record(PF);
+    // Ring 0 code on the page IRETs to ring 3 code further down it.
+    let mut code = asm32(0x30000, |a| {
+        a.push(DATA32_R3 as u32)?;
+        a.push(STACK3_TOP)?;
+        a.pushfd()?;
+        a.push(CODE32_R3 as u32)?;
+        a.push(0x30080u32)?;
+        a.iretd()
+    });
+    code.resize(0x80, 0x90);
+    code.extend(asm32(0x30080, |a| {
+        a.mov(ebx, 0x3333u32)?;
+        a.hlt()
+    }));
+    rig.load(0x30000, &code);
+    rig.run_batched(|a| {
+        enable_paging(a)?;
+        a.mov(eax, 0x30000u32)?;
+        a.jmp(eax)
+    });
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[0]), (PF as u32, 0x5), "user fetch from a supervisor page");
+    assert_eq!(rig.cpu.cr2, 0x30080);
+    assert_ne!(rig.cpu.ebx(), 0x3333);
+}
+
+#[test]
+fn batched_code_follows_the_a20_gate() {
+    // Real mode at FFFF:0110, linear 100100h: with A20 on, physical
+    // 100100h, with it off, 000100h. The code turns A20 off through port
+    // 92h and jumps ahead; BX tells which copy it landed in.
+    let block = |marker: u16| {
+        let mut code = asm16(0x110, |a| {
+            a.in_(al, 0x92)?;
+            a.and(al, 0xFD)?;
+            a.out(0x92, al)?;
+            a.jmp(0x130u64)
+        });
+        assert!(code.len() <= 0x20);
+        code.resize(0x20, 0x90);
+        code.extend(asm16(0x130, |a| {
+            a.mov(bx, marker as u32)?;
+            a.hlt()
+        }));
+        code
+    };
+    let mut rig = Rig::new();
+    rig.load(0x10_0100, &block(0xAAAA));
+    rig.load(0x100, &block(0xBBBB));
+    rig.cpu.set_cs(0xFFFF);
+    rig.cpu.set_ip(0x110);
+    rig.run_batched_to_halt();
+    assert!(!rig.cpu.bus.a20());
+    assert_eq!(rig.cpu.bx(), 0xBBBB);
+}
+
+#[test]
+fn batched_instruction_running_past_the_cs_limit_raises_gp() {
+    let mut rig = Rig::new();
+    rig.record(GP);
+    // A 32-bit code segment at 30000h, byte granular, whose limit FFFh is
+    // the fourth byte of a 5-byte MOV at FFCh.
+    rig.set_gdt(FREE, seg_desc(0x30000, 0x0FFF, CODE_R0, 0x4));
+    let mut code = vec![0x90; 0xFC];
+    code.extend(asm32(0xFFC, |a| a.mov(eax, 0x1234_5678u32)));
+    rig.load(0x30F00, &code);
+    rig.run_batched(|a| a.jmp_far(FREE, 0xF00));
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[0], stack[1]), (GP as u32, 0, 0xFFC));
+    assert_ne!(rig.cpu.eax(), 0x1234_5678);
+}
+
+#[test]
+fn batched_code_sees_its_own_changes() {
+    let mut rig = Rig::new();
+    // A subroutine in the same page: MOV AL, 0; RET.
+    rig.load(0x10100, &asm32(0x10100, |a| {
+        a.mov(al, 0)?;
+        a.ret()
+    }));
+    rig.run_batched(|a| {
+        a.call(0x10100u64)?;
+        a.mov(ebx, eax)?;
+        // Rewrite the immediate and call it again.
+        a.mov(byte_ptr(0x10101), 0x42)?;
+        a.call(0x10100u64)?;
+        a.hlt()
+    });
+    assert_eq!(rig.cpu.ebx() & 0xFF, 0);
+    assert_eq!(rig.cpu.eax() & 0xFF, 0x42);
+}

@@ -9,11 +9,12 @@
 //! reference that comes with it.
 
 use rust_dos::cpu::{Cpu, CpuModel, CpuState};
+use rust_dos::exec::{NoHook, run_batch};
 use std::path::PathBuf;
 
-#[test]
-#[ignore]
-fn test386_rom() {
+/// The ROM's directory, and a 386 that starts running it from reset with
+/// every interrupt masked.
+fn machine() -> (PathBuf, Cpu) {
     let dir = PathBuf::from(std::env::var("TEST386_DIR").expect("TEST386_DIR not set"));
     let rom = std::fs::read(dir.join("test386.bin")).expect("test386.bin");
     assert!(rom.len() == 0x10000 || rom.len() == 0x20000);
@@ -24,6 +25,13 @@ fn test386_rom() {
     cpu.bus.io_write(0x21, 0xFF);
     cpu.bus.io_write(0xA1, 0xFF);
     cpu.reset();
+    (dir, cpu)
+}
+
+#[test]
+#[ignore]
+fn test386_rom() {
+    let (dir, mut cpu) = machine();
 
     // TEST386_TRACE=n prints the last n instruction addresses on failure.
     let trace_len: usize = std::env::var("TEST386_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -58,6 +66,43 @@ fn test386_rom() {
         cpu.state,
         steps
     );
+    check_results(&dir, &cpu);
+}
+
+/// The same ROM run the way the emulator runs programs, in batches through
+/// `run_batch`, whose instruction fetch differs from `Cpu::step`'s (the code
+/// window). HLT there waits for the end of the batch and goes on, so the run
+/// ends when the ROM reports success, or when it stops making progress.
+#[test]
+#[ignore]
+fn test386_rom_batched() {
+    let (dir, mut cpu) = machine();
+    let mut last_post = cpu.bus.post_code;
+    let mut last_progress = 0;
+    while cpu.bus.post_code != 0xFF && cpu.executed - last_progress < 100_000_000 {
+        let end = cpu.bus.clock.icount + 100_000;
+        cpu.bus.start_batch(end);
+        run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.post_code != last_post {
+            last_post = cpu.bus.post_code;
+            last_progress = cpu.executed;
+            println!("POST {:02X} after about {} instructions", last_post, cpu.executed);
+        }
+    }
+    println!(
+        "Stopped with POST {:02X} at {:04X}:{:08X} after {} instructions",
+        cpu.bus.post_code,
+        cpu.cs(),
+        cpu.eip(),
+        cpu.executed
+    );
+    check_results(&dir, &cpu);
+}
+
+/// The ROM finished with POST code FFh, and test EEh's results match the
+/// reference that comes with it.
+fn check_results(dir: &std::path::Path, cpu: &Cpu) {
+    let post = cpu.bus.post_code;
     assert_eq!(post, 0xFF, "test {:02X} failed; look up EIP in test386.lst", post);
 
     // Test EEh prints its results; compare them with the reference.

@@ -152,6 +152,13 @@ pub struct Bus {
     /// Blaster holds its line until the driver acknowledges. Kept up to
     /// date by `update_irq_levels`, as the CPU tests it every instruction.
     irq_levels: u16,
+    /// `interrupt_requested` as of the last change to the interrupt lines,
+    /// the PICs or the mouse event handler, so the CPU tests one flag
+    /// before each instruction. `refresh_irq` works it out again; it runs
+    /// after everything that can change it while instructions execute
+    /// (timer events, port I/O, interrupt delivery, emulator services) and
+    /// at the start of each batch, after the front end's input.
+    pub irq_ready: bool,
     /// Output level and underruns, for the debugger: the peak sample since
     /// it was last read, and how often the output device ran dry.
     pub audio_peak: u16,
@@ -242,6 +249,7 @@ impl Bus {
             sb_frame: (0, 0),
             beep_frames: 0,
             irq_levels: 0,
+            irq_ready: false,
             audio_peak: 0,
             audio_underruns: 0,
             unhandled_writes: vec![0; 0x10000],
@@ -895,6 +903,7 @@ impl Bus {
     pub fn start_batch(&mut self, end: u64) {
         self.clock.set_batch_end(end);
         self.clock.schedule(self.next_event());
+        self.refresh_irq();
     }
 
     /// Change the emulated CPU speed (instructions per emulated ms).
@@ -931,6 +940,7 @@ impl Bus {
             self.gus_advance();
         }
         self.clock.schedule(self.next_event());
+        self.refresh_irq();
     }
 
     /// Run the Sound Blaster's DSP up to the present.
@@ -960,6 +970,7 @@ impl Bus {
         let Some(gus) = &mut self.gus else {
             if let Some(irq) = self.gus_line.take() {
                 self.pic.lower(irq);
+                self.refresh_irq();
             }
             return;
         };
@@ -976,6 +987,7 @@ impl Bus {
             self.pic.raise(irq);
         }
         self.gus_line = line;
+        self.refresh_irq();
     }
 
     /// Whether `port` belongs to the Ultrasound.
@@ -1250,6 +1262,7 @@ impl Bus {
             Some(sb) if sb.irq_pending() => 1 << sb.config.irq,
             _ => 0,
         };
+        self.refresh_irq();
     }
 
     /// The IRQ (0-15) the PICs would deliver now: requested, not masked,
@@ -1260,20 +1273,32 @@ impl Bus {
         self.pic.pending(self.irq_levels())
     }
 
-    /// Whether any device requests an interrupt or a mouse event handler
-    /// call waits: the cheap test the CPU makes before each instruction,
-    /// ahead of the PIC's priority logic.
+    /// Whether any device requests an interrupt on a line its PIC doesn't
+    /// mask, or a mouse event handler call waits: the cheap test the CPU
+    /// makes before each instruction, ahead of the PIC's priority logic.
+    /// Masked requests stay out of it: a driver that polls its card with the
+    /// card's IRQ masked (HMI's Ultrasound driver) leaves the request
+    /// latched for as long as it runs.
     #[inline(always)]
     pub fn interrupt_requested(&self) -> bool {
-        (self.pic.master.irr | self.pic.slave.irr) != 0
-            || self.irq_levels() != 0
-            || self.mouse.pending_callback_events & self.mouse.callback_mask != 0
+        let levels = self.irq_levels();
+        let master = (self.pic.master.irr | levels as u8) & !self.pic.master.imr;
+        let slave = (self.pic.slave.irr | (levels >> 8) as u8) & !self.pic.slave.imr;
+        master | slave != 0 || self.mouse.pending_callback_events & self.mouse.callback_mask != 0
+    }
+
+    /// Work out `irq_ready` again.
+    #[inline]
+    pub fn refresh_irq(&mut self) {
+        self.irq_ready = self.interrupt_requested();
     }
 
     /// The CPU takes interrupt `irq`: it is in service until an EOI.
     /// Returns its vector.
     pub fn pic_acknowledge(&mut self, irq: u8) -> u8 {
-        self.pic.acknowledge(irq)
+        let vector = self.pic.acknowledge(irq);
+        self.refresh_irq();
+        vector
     }
 
     /// Discard a request for `irq`, for lines with no handler installed.
@@ -1293,6 +1318,7 @@ impl Bus {
     pub fn sync_keyboard_irq(&mut self) {
         if self.kbc.take_irq() {
             self.pic.raise(1);
+            self.refresh_irq();
         }
     }
 
@@ -1307,9 +1333,16 @@ impl Bus {
         self.sync_keyboard_irq();
     }
 
-    // Write to an I/O Port
+    /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
         self.clock.stall(crate::timer::IO_WRITE_NS);
+        self.write_port(port, value);
+        // The write may have programmed the PICs or made a device raise or
+        // withdraw its interrupt.
+        self.refresh_irq();
+    }
+
+    fn write_port(&mut self, port: u16, value: u8) {
         match port {
             // The two 8259 interrupt controllers.
             0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.write(port, value),
@@ -1566,8 +1599,17 @@ impl Bus {
     }
 
     // Read from an I/O Port
+    /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
         self.clock.stall(crate::timer::IO_READ_NS);
+        let value = self.read_port(port);
+        // Reads acknowledge interrupts of some devices (the Sound Blaster's
+        // at 22Eh, the Ultrasound's status).
+        self.refresh_irq();
+        value
+    }
+
+    fn read_port(&mut self, port: u16) -> u8 {
         match port {
             // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
             // 0x21 the interrupt mask. Programs read-modify-write the mask

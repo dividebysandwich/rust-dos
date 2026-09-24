@@ -40,21 +40,26 @@ const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0 };
 /// page tables, as on a real 386.
 pub struct Tlb {
     entries: Box<[TlbEntry]>,
+    /// Counts flushes, full or of one page: a translation kept elsewhere
+    /// (the execution loop's code window) holds while it doesn't change.
+    pub epoch: u32,
 }
 
 impl Default for Tlb {
     fn default() -> Self {
-        Self { entries: vec![EMPTY; 2 * TLB_ENTRIES].into_boxed_slice() }
+        Self { entries: vec![EMPTY; 2 * TLB_ENTRIES].into_boxed_slice(), epoch: 0 }
     }
 }
 
 impl Tlb {
     pub fn flush(&mut self) {
         self.entries.fill(EMPTY);
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     /// Drop the translations of the page holding `lin` (INVLPG).
     pub fn flush_page(&mut self, lin: u32) {
+        self.epoch = self.epoch.wrapping_add(1);
         let page = lin >> 12;
         for set in 0..2 {
             let e = &mut self.entries[set * TLB_ENTRIES + page as usize % TLB_ENTRIES];

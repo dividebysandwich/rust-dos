@@ -19,19 +19,25 @@
 //! (iced stores absolute targets, not displacements). The cache key
 //! therefore includes the instruction pointer, not just the physical
 //! address, and the code size, which decides how the bytes decode.
+//!
+//! Each slot also keeps the handler chosen for the instruction when it was
+//! decoded (`instructions::handler`), so a hit goes straight to it.
 
 use iced_x86::Instruction;
+
+use crate::instructions::{Handler, execute_instruction, handler};
 
 /// One cache slot, keyed by the physical address, the instruction pointer
 /// (iced stores absolute branch targets, so the same bytes decoded at
 /// another EIP differ) and the code size. Empty slots have an impossible
-/// physical address.
+/// physical address. 64 bytes: one cache line.
 #[derive(Clone, Copy)]
 struct Slot {
     /// The physical address (high half) and the instruction pointer.
     addr: u64,
     /// The page generation (high half) and whether it's 32-bit code.
     version: u64,
+    handler: Handler,
     instr: Instruction,
 }
 
@@ -41,6 +47,7 @@ impl Slot {
         Self {
             addr: u64::MAX,
             version: 0,
+            handler: execute_instruction,
             instr: Instruction::default(),
         }
     }
@@ -92,10 +99,11 @@ impl InstrCache {
     }
 
     /// The decoded instruction at `phys_ip`, decoded at `ip` as 16 or 32-bit
-    /// code. The cached decode is used only when the slot matches all
-    /// three and the recorded page generation still matches the current
-    /// one; otherwise `decode` fills the slot afresh. Returning a reference
-    /// into the slot saves copying the instruction on every hit.
+    /// code, and its handler. The cached decode is used only when the slot
+    /// matches all three and the recorded page generation still matches
+    /// the current one; otherwise `decode` fills the slot afresh. Returning
+    /// a reference into the slot saves copying the instruction on every
+    /// hit.
     #[inline(always)]
     pub fn get_or_decode(
         &mut self,
@@ -104,7 +112,7 @@ impl InstrCache {
         code32: bool,
         page_gen: u32,
         decode: impl FnOnce(&mut Instruction),
-    ) -> &Instruction {
+    ) -> (&Instruction, Handler) {
         let idx = self.index(phys_ip);
         // SAFETY: idx is always in-bounds because we masked with `self.mask`
         // which is `len - 1` for a power-of-two-sized slots box.
@@ -113,12 +121,13 @@ impl InstrCache {
         let version = (page_gen as u64) << 1 | code32 as u64;
         if slot.addr != addr || slot.version != version {
             decode(&mut slot.instr);
+            slot.handler = handler(&slot.instr);
             slot.addr = addr;
             slot.version = version;
             self.misses += 1;
         } else {
             self.hits += 1;
         }
-        &slot.instr
+        (&slot.instr, slot.handler)
     }
 }

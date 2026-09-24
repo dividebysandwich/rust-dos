@@ -210,7 +210,11 @@ and the 386's undefined flags tested. It also rewrites the
 
 The harness loads the ROM below 1 MB (the top of the address space mirrors
 it), resets a 386, and runs until the CPU halts. It prints each POST code as
-it is reached and fails unless the last one is FFh. Test EEh prints the
+it is reached and fails unless the last one is FFh. It runs the ROM twice:
+`test386_rom` one instruction at a time with `Cpu::step`, and
+`test386_rom_batched` in batches through `exec::run_batch`, as the emulator
+runs programs, whose instruction fetch keeps a code window that `step`
+doesn't. Test EEh prints the
 results of thousands of arithmetic and logic operations; the harness
 writes them to `target/test386/rust-dos-EE-output.txt` and compares them
 with `test386-EE-reference.txt`, which comes with the ROM.
