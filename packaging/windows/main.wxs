@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Built by the release workflow (WiX 5):
+     wix build packaging/windows/main.wxs -arch x64 \
+         -d Version=<cargo version> -d BinDir=target/release \
+         -d SdlDir=SDL2/lib/x64 -o <out>.msi
+
+     rust-dos.exe links SDL2 dynamically, so SDL2.dll is installed beside
+     it. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package Name="rust-dos"
+             Manufacturer="dividebysandwich"
+             Version="$(var.Version)"
+             UpgradeCode="8D25CB17-EB5C-4C51-A269-85A3B7DE052C"
+             Language="1033"
+             Compressed="yes"
+             Scope="perMachine">
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Property Id="ARPURLINFOABOUT" Value="https://github.com/dividebysandwich/rust-dos" />
+
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="INSTALLFOLDER" Name="rust-dos">
+                <Component Id="MainExe" Guid="1373D50B-35B4-4C27-9837-AB0FEC4A04B4">
+                    <File Id="RustDosExe" Source="$(var.BinDir)/rust-dos.exe" KeyPath="yes" />
+                </Component>
+                <Component Id="SdlDll" Guid="1E10BA41-1628-43F6-AAFC-A0DE6E00E2B0">
+                    <File Id="Sdl2Dll" Source="$(var.SdlDir)/SDL2.dll" KeyPath="yes" />
+                </Component>
+                <Component Id="Docs" Guid="6F2EB829-9BFC-4A1D-946B-D20FCC688BC9">
+                    <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+                    <File Id="ReadmeMd" Source="README.md" />
+                </Component>
+                <!-- So rust-dos can be started from a command prompt with
+                     its options, e.g. rust-dos -d C:\dos. -->
+                <Component Id="PathEnv" Guid="A1A8CDA9-9D83-4327-ADE2-034A1E7CFE02">
+                    <RegistryValue Root="HKLM" Key="Software\rust-dos" Name="PathEnv" Type="integer" Value="1" KeyPath="yes" />
+                    <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Component Id="StartMenuShortcut" Guid="6780D0A0-5F22-4598-9DF2-E54C6570DFDD">
+                <Shortcut Id="AppShortcut"
+                          Name="rust-dos"
+                          Description="An x86 DOS emulator written in Rust"
+                          Target="[INSTALLFOLDER]rust-dos.exe"
+                          WorkingDirectory="INSTALLFOLDER" />
+                <RegistryValue Root="HKCU" Key="Software\rust-dos" Name="Shortcut" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </StandardDirectory>
+
+        <Feature Id="Main">
+            <ComponentRef Id="MainExe" />
+            <ComponentRef Id="SdlDll" />
+            <ComponentRef Id="Docs" />
+            <ComponentRef Id="PathEnv" />
+            <ComponentRef Id="StartMenuShortcut" />
+        </Feature>
+    </Package>
+</Wix>

@@ -3,6 +3,12 @@ name: Rust
 on:
   push:
   pull_request:
+  # Manual runs build every artifact (downloadable from the run page)
+  # without creating a release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,258 +22,194 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libsdl2-dev
+      - uses: actions/checkout@v7
 
-      - name: Cargo cache
-        uses: actions/cache@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ./target
-          key: test-cargo-registry-${{ hashFiles('Cargo.lock') }}
-      - name: List
-        run: find ./
+          key: test
+
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
   build:
+    name: ${{ matrix.label }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    # Empty for every non-compat entry, which means "no container".
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
+        # The -compat builds are the two Linux builds compiled inside an
+        # Ubuntu 22.04 container, so the binaries link glibc 2.35 and SDL
+        # 2.0.20 and run on stable/LTS distributions (Ubuntu 22.04, Mint 21,
+        # Debian 12, Raspberry Pi OS bookworm) that refuse the regular builds
+        # with "version `GLIBC_2.39' not found". A container rather than
+        # `runs-on: ubuntu-22.04` because GitHub is retiring that runner
+        # image, while a container image keeps working on any runner.
         include:
-          - TARGET: x86_64-unknown-linux-gnu 
-            OS: ubuntu-latest
-          - TARGET: aarch64-apple-darwin
-            OS: macos-latest
-          - TARGET: x86_64-pc-windows-msvc
-            OS: windows-latest
-    needs: test
-    runs-on: ${{ matrix.OS }}
-    env:
-      NAME: rust-dos
-      TARGET: ${{ matrix.TARGET }}
-      OS: ${{ matrix.OS }}
+          - label: linux-x86_64
+            os: ubuntu-latest
+          - label: linux-aarch64
+            os: ubuntu-24.04-arm
+          - label: linux-x86_64-compat
+            os: ubuntu-latest
+            container: ubuntu:22.04
+          - label: linux-aarch64-compat
+            os: ubuntu-24.04-arm
+            container: ubuntu:22.04
+          - label: windows-x86_64
+            os: windows-latest
+          - label: macos-aarch64
+            os: macos-latest
+          - label: macos-x86_64
+            os: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
-      - name: Calculate Cargo hash
-        id: cargo-hash
+      # The -compat jobs start from a bare Ubuntu 22.04 image rather than the
+      # runner image, so everything the runner normally provides is installed
+      # here (as root: the image has no sudo). This must run before checkout:
+      # without git in the container, actions/checkout falls back to
+      # downloading through the REST API. zstd is for the cache archives, and
+      # build-essential also brings binutils (strip) and dpkg-dev
+      # (dpkg-shlibdeps, which cargo-deb runs for the .deb's Depends).
+      - name: Install build environment (compat container)
+        if: matrix.container
         run: |
-          # Try sha256sum (Linux/Windows), fall back to shasum (macOS)
-          if command -v sha256sum > /dev/null; then
-            echo "hash=$(sha256sum Cargo.lock | awk '{print $1}')" >> $GITHUB_OUTPUT
-          else
-            echo "hash=$(shasum -a 256 Cargo.lock | awk '{print $1}')" >> $GITHUB_OUTPUT
-          fi
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl zstd build-essential pkg-config libsdl2-dev
 
-      - name: Cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ./target
-          key: build-cargo-registry-${{ matrix.TARGET }}-${{ steps.cargo-hash.outputs.hash }}
-      
+      - uses: actions/checkout@v7
+
+      - name: Compute version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_VERSION="$GITHUB_REF_NAME"
+          else
+            RELEASE_VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          CARGO_VERSION=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          {
+            echo "CARGO_VERSION=$CARGO_VERSION"
+            echo "PKG=rust-dos-$RELEASE_VERSION-${{ matrix.label }}"
+          } >> "$GITHUB_ENV"
+
       - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libsdl2-dev
+        # The -compat container jobs installed everything above, pre-checkout.
+        if: runner.os == 'Linux' && !matrix.container
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install sdl2
-          echo "LIBRARY_PATH=$(brew --prefix)/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=$(brew --prefix)/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$(brew --prefix)/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          # Download SDL2 development libraries for Visual C++
+          # SDL2 development libraries for Visual C++
           curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
           unzip -q SDL2-devel-VC.zip
-          
-          # Rename for easier handling
           mv SDL2-2.30.0 SDL2
-          
-          # Set Environment variables so the Rust Linker finds .lib files
-          echo "LIB=$PWD/SDL2/lib/x64" >> $GITHUB_ENV
-          echo "INCLUDE=$PWD/SDL2/include" >> $GITHUB_ENV
-          
-          # Copy the DLL to the root so we can zip it with the binary later
-          cp SDL2/lib/x64/SDL2.dll .
+          # So the linker finds SDL2.lib
+          echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
+          echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
 
-      - name: Install rust target
-        run: rustup target add $TARGET
-        
-      - name: Install cargo-bundle
-        if: runner.os == 'macOS'
-        run: cargo install cargo-bundle
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.label }}
 
-      - name: Run build (Linux/Windows)
-        if: runner.os != 'macOS'
-        run: cargo build --release --verbose --target $TARGET
+      - name: Build
+        run: cargo build --release --locked --verbose
 
-      - name: Run bundle (macOS)
-        if: runner.os == 'macOS'
-        run: cargo bundle --release --target $TARGET
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          strip target/release/rust-dos
+          mkdir -p out stage/rust-dos
+          cp target/release/rust-dos README.md LICENSE stage/rust-dos/
+          tar czf "out/$PKG.tar.gz" -C stage rust-dos
+          cargo install cargo-deb --locked
+          cargo deb --no-build -o "out/$PKG.deb"
 
-      - name: Install zip
+      - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: choco install zip
-        
-      - name: Compress
         run: |
-          mkdir -p ./artifacts
-          if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
-            TAG=$GITHUB_REF_NAME
-          else
-            TAG=$GITHUB_SHA
-          fi
+          mkdir -p out stage/rust-dos
+          cp target/release/rust-dos.exe SDL2/lib/x64/SDL2.dll README.md stage/rust-dos/
+          cp LICENSE stage/rust-dos/LICENSE.txt
+          7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
+          dotnet tool install --global wix --version 5.0.2
+          wix build packaging/windows/main.wxs -arch x64 \
+            -d Version="$CARGO_VERSION" -d BinDir=target/release -d SdlDir=SDL2/lib/x64 \
+            -o "out/$PKG.msi"
 
-          if [[ $OS =~ ^windows.*$ ]]; then
-              EXEC=$NAME.exe
-              mv ./target/$TARGET/release/$EXEC ./$EXEC
-              # Use 'zip' for Windows
-              zip ./artifacts/$NAME-$TARGET-$TAG.zip $EXEC SDL2.dll README.md LICENSE
-          
-          elif [[ $OS =~ ^macos.*$ ]]; then
-              APP_DIR="./target/$TARGET/release/bundle/osx"
-              
-              echo "--- Listing bundle directory contents ---"
-              ls -l "$APP_DIR"
-              echo "-------------------------------------------"
-
-              # Find the .app directory name automatically
-              APP_NAME_WITH_EXT=$(find "$APP_DIR" -name "*.app" -maxdepth 1 -exec basename {} \;)
-
-              if [ -z "$APP_NAME_WITH_EXT" ]; then
-                  echo "Error: No .app directory found in $APP_DIR"
-                  exit 1
-              fi
-
-              echo "Found app: $APP_NAME_WITH_EXT"
-              
-              # Copy readme and license into the directory to get clean paths
-              echo "Copying auxiliary files into bundle directory..."
-              cp ./README.md "$APP_DIR/"
-              cp ./LICENSE "$APP_DIR/"
-              
-              echo "Zipping app from $APP_DIR"
-              
-              # cd into the directory containing the .app so it's at the zip root
-              # Now zip the app and the local copies of the readme/license
-              (cd "$APP_DIR" && zip -r -q "../../../../../artifacts/$NAME-$TARGET-$TAG.zip" "$APP_NAME_WITH_EXT" README.md LICENSE)
-
-          else
-              EXEC=$NAME
-              mv ./target/$TARGET/release/$EXEC ./$EXEC
-              # Use 'tar' for Linux
-              tar -czf ./artifacts/$NAME-$TARGET-$TAG.tar.gz $EXEC README.md LICENSE
-          fi
-          
-      - name: Archive artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: result-${{ matrix.TARGET }}
-          path: |
-            ./artifacts
-
-  build-msi:
-    name: Build Windows MSI
-    needs: test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ./target
-          key: msi-cargo-registry-${{ hashFiles('Cargo.lock') }}
-
-      - name: Install SDL2 (Windows)
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
         run: |
-          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
-          unzip -q SDL2-devel-VC.zip
-          mv SDL2-2.30.0 SDL2
-          echo "LIB=$PWD/SDL2/lib/x64" >> $GITHUB_ENV
-          echo "INCLUDE=$PWD/SDL2/include" >> $GITHUB_ENV
-          
-          # For cargo-wix, we usually need the DLL to be available to link/run
-          cp SDL2/lib/x64/SDL2.dll .
-
-      - name: Install cargo-wix
-        run: cargo install cargo-wix
-
-      - name: Build MSI
-        run: |
-          if [ ! -d "wix" ]; then
-            echo "Wix configuration not found, initializing defaults..."
-            cargo wix init
+          cargo install cargo-bundle
+          cargo bundle --release
+          APP_DIR=target/release/bundle/osx
+          APP=$(find "$APP_DIR" -maxdepth 1 -name "*.app" -exec basename {} \;)
+          if [ -z "$APP" ]; then
+            echo "::error::No .app in $APP_DIR"
+            exit 1
           fi
-          cargo wix --nocapture
+          # README and LICENSE beside the app, so the zip has clean paths.
+          cp README.md LICENSE "$APP_DIR/"
+          mkdir -p out
+          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" README.md LICENSE)
 
-      - name: Archive MSI
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: result-msi
-          path: target/wix/*.msi
+          name: pkg-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
 
-  build-deb:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libsdl2-dev
-
-      - name: Cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ./target
-          key: deb-cargo-registry-${{ hashFiles('Cargo.lock') }}
-      
-      - name: Install cargo-deb
-        run: cargo install cargo-deb
-
-      - name: Build the binary
-        run: cargo build --release --verbose
-
-      - name: Build Debian package
-        run: cargo deb
-
-      - name: Archive Debian package
-        uses: actions/upload-artifact@v4
-        with:
-          name: result-deb
-          path: target/debian/*.deb
-
-  deploy:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [build, build-deb, build-msi]
+  release:
+    name: create release
+    if: github.ref_type == 'tag'
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
-          path: ./artifacts
-      - name: List
-        run: find ./artifacts
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        with:
-           files: |
-            ./artifacts/*/*.tar.gz
-            ./artifacts/*/*.zip
-            ./artifacts/*/*.deb
-            ./artifacts/*/*.msi
-            ./*.flatpak
+          pattern: pkg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          ### Which file to download
+
+          - **Windows**: the `.msi` installs rust-dos with SDL2 and adds it to
+            the Start menu and PATH; the `.zip` is the same, portable.
+          - **macOS**: the `.zip` holds the app, for Apple Silicon
+            (`macos-aarch64`) or Intel (`macos-x86_64`). It needs SDL2 from
+            Homebrew (`brew install sdl2`). The app is unsigned: right-click →
+            Open on first launch, or clear the quarantine with
+            `xattr -dr com.apple.quarantine <app>`.
+          - **Linux**: a `.deb` or a portable `.tar.gz`, for PCs (`x86_64`) or
+            ARM boards such as a Raspberry Pi (`aarch64`). The tarball needs
+            SDL2 (`libsdl2-2.0-0` on Debian and Ubuntu); the `.deb` declares it.
+            Take the **`-compat`** file if the regular one refuses to start
+            with ``version `GLIBC_2.39' not found``, as it does on Ubuntu 22.04,
+            Linux Mint 21, Debian 12 and Raspberry Pi OS (bookworm). It is
+            built against glibc 2.35 and runs on old and new distributions.
+          EOF
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "rust-dos $GITHUB_REF_NAME" --notes-file notes.md --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber dist/*
