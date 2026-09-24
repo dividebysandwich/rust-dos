@@ -633,6 +633,16 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
 }
 
 pub fn print_string(cpu: &mut Cpu, s: &str) {
+    print_cells(cpu, s.chars().map(|c| c as u8), 0x07);
+}
+
+/// Print code page 437 characters in the colors of `attr`, as
+/// `print_string` prints in light gray.
+pub fn print_cp437(cpu: &mut Cpu, text: &[u8], attr: u8) {
+    print_cells(cpu, text.iter().copied(), attr);
+}
+
+fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
     let mut col = cpu.bus.cursor_x;
     let mut row = cpu.bus.cursor_y;
     let max_cols = 80;
@@ -647,15 +657,15 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
         });
     };
 
-    for c in s.chars() {
+    for c in text {
         match c {
-            '\r' => {
+            b'\r' => {
                 col = 0;
             }
-            '\n' => {
+            b'\n' => {
                 row += 1;
             }
-            '\x08' => {
+            0x08 => {
                 // Backspace
                 if col > 0 {
                     col -= 1;
@@ -672,8 +682,8 @@ pub fn print_string(cpu: &mut Cpu, s: &str) {
                 // Printable Character
                 let offset = (row * max_cols + col) * 2;
                 if offset < SIZE_TEXT {
-                    cpu.bus.vga.vram_text[offset] = c as u8;
-                    cpu.bus.vga.vram_text[offset + 1] = 0x07; // Attribute: Light Gray
+                    cpu.bus.vga.vram_text[offset] = c;
+                    cpu.bus.vga.vram_text[offset + 1] = attr;
                     touch(offset);
                 }
                 col += 1;

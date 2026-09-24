@@ -216,6 +216,58 @@ fn dir_lists_any_drive() {
 }
 
 #[test]
+fn ls_lists_names_in_columns() {
+    let base = scratch("ls", &["c", "d/GAMES", "d/docs", "d/MANY"]);
+    for name in ["readme.txt", "setup.exe", "install.bat", "config.sys", "cdrom.com", "notes"] {
+        fs::write(base.join("d").join(name), b"x").unwrap();
+    }
+    fs::write(base.join("d/GAMES/doom.exe"), b"x").unwrap();
+    for i in 1..=8 {
+        fs::write(base.join(format!("d/MANY/file{:02}.txt", i)), b"x").unwrap();
+    }
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.bus
+        .mount_drive(3, &base.join("d"), MountOptions::default(), false)
+        .unwrap();
+    let attr = |cpu: &Cpu, row: usize, col: usize| cpu.bus.vga.vram_text[(row * 80 + col) * 2 + 1];
+
+    // Directories first in capitals, then the files in lower case, as
+    // many to a line as fit. Each column is as wide as its longest name.
+    assert_eq!(
+        run(&mut cpu, "LS D:"),
+        "DOCS       GAMES  MANY  cdrom.com  config.sys  install.bat  notes  readme.txt\n\
+         setup.exe"
+    );
+    assert_eq!(attr(&cpu, 0, 0), 0x09, "directories are blue");
+    assert_eq!(attr(&cpu, 0, 24), 0x0A, "programs are green");
+    assert_eq!(attr(&cpu, 0, 35), 0x07, "other files are gray");
+    assert_eq!(attr(&cpu, 0, 47), 0x0A, "batch files are green");
+    assert_eq!(attr(&cpu, 1, 0), 0x0A);
+
+    // Twelve-column names, six to a line and filled row by row.
+    assert_eq!(
+        run(&mut cpu, "ls d:\\many"),
+        "file01.txt  file02.txt  file03.txt  file04.txt  file05.txt  file06.txt\n\
+         file07.txt  file08.txt"
+    );
+
+    assert_eq!(run(&mut cpu, "ls d:\\games"), "doom.exe");
+    run(&mut cpu, "D:");
+    run(&mut cpu, "CD GAMES");
+    assert_eq!(run(&mut cpu, "ls"), "doom.exe");
+    assert!(run(&mut cpu, "ls ..").starts_with("DOCS       GAMES  MANY"));
+    // "c*" is "c*.*", and names two patterns both find are listed once.
+    assert_eq!(run(&mut cpu, "ls d:\\c*"), "cdrom.com  config.sys");
+    assert_eq!(run(&mut cpu, "ls d:\\*.exe d:\\s*"), "setup.exe");
+    assert!(run(&mut cpu, "LS Z:").contains("command.com"));
+
+    assert_eq!(run(&mut cpu, "ls d:*.zip"), "No files or subdirectories to display");
+    assert_eq!(run(&mut cpu, "ls /x"), "Invalid switch - /x");
+    assert_eq!(run(&mut cpu, "ls d:\\g*\\doom.exe"), "Unhandled wildcard pattern - d:\\g*\\doom.exe");
+    assert!(run(&mut cpu, "ls /?").starts_with("Lists the files and directories"));
+}
+
+#[test]
 fn type_reads_drive_qualified_paths() {
     let base = scratch("type", &["c", "d/SUB"]);
     fs::write(base.join("d/SUB/a.txt"), b"line one\nline two").unwrap();

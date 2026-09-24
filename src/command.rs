@@ -3,7 +3,7 @@ use crate::disk::{DriveKind, drive_letter, parse_drive_prefix};
 use crate::mount::{
     IMGMOUNT_USAGE, MOUNT_USAGE, MountCmd, MountSpec, display_host_path, parse_imgmount_command, parse_mount_command,
 };
-use crate::video::print_string;
+use crate::video::{print_cp437, print_string};
 use std::collections::HashMap;
 
 pub trait ShellCommand {
@@ -23,6 +23,7 @@ impl CommandDispatcher {
 
         // Register core commands
         dispatcher.register("DIR", Box::new(DirCommand));
+        dispatcher.register("LS", Box::new(LsCommand));
         dispatcher.register("VER", Box::new(VerCommand));
         dispatcher.register("VERSION", Box::new(VerCommand)); // Alias
         dispatcher.register("TYPE", Box::new(TypeCommand));
@@ -82,25 +83,11 @@ impl ShellCommand for DirCommand {
             .split_whitespace()
             .find(|a| !a.starts_with('/'))
             .unwrap_or("");
-        let (drive_spec, rest) = parse_drive_prefix(arg);
-        let drive = drive_spec.unwrap_or(cpu.bus.disk.get_current_drive());
-        if !cpu.bus.disk.is_mounted(drive) {
+        let Some((drive, spec)) = search_spec(cpu, arg) else {
             print_string(cpu, "Invalid drive specification\r\n");
             return;
-        }
-
-        // A bare drive or directory lists everything in it.
-        let letter = drive_letter(drive);
-        let is_dir = rest.is_empty()
-            || rest.ends_with('\\')
-            || cpu.bus.disk.is_directory(arg);
-        let spec = if rest.is_empty() {
-            format!("{}:*.*", letter)
-        } else if is_dir {
-            format!("{}:{}\\*.*", letter, rest.trim_end_matches('\\'))
-        } else {
-            format!("{}:{}", letter, rest)
         };
+        let letter = drive_letter(drive);
 
         let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
         if label.is_empty() {
@@ -168,6 +155,137 @@ impl ShellCommand for DirCommand {
             ),
         );
     }
+}
+
+/// The drive and search spec that DIR and LS list for a path: everything
+/// in the directory it names (the current one if it names none), or the
+/// files matching it. None if its drive isn't mounted.
+fn search_spec(cpu: &Cpu, arg: &str) -> Option<(u8, String)> {
+    let (drive_spec, rest) = parse_drive_prefix(arg);
+    let drive = drive_spec.unwrap_or(cpu.bus.disk.get_current_drive());
+    if !cpu.bus.disk.is_mounted(drive) {
+        return None;
+    }
+    let letter = drive_letter(drive);
+    let spec = if rest.is_empty() {
+        format!("{}:*.*", letter)
+    } else if rest.ends_with('\\') || cpu.bus.disk.is_directory(arg) {
+        format!("{}:{}\\*.*", letter, rest.trim_end_matches('\\'))
+    } else {
+        format!("{}:{}", letter, rest)
+    };
+    Some((drive, spec))
+}
+
+const LS_USAGE: &str = "Lists the files and directories in wide format.\r\n\
+\r\n\
+LS [/A] [pattern|path ...]\r\n\
+\r\n\
+  pattern  file names, with the wildcards * and ?\r\n\
+  path     a directory to list the contents of\r\n\
+  /A       also list hidden and system files\r\n\
+\r\n\
+Directories are shown in blue, programs and batch files (*.COM, *.EXE,\r\n\
+*.BAT) in green.\r\n";
+
+/// LS [/A] [pattern|path ...]: the names in a directory in as many
+/// columns as fit, as DOSBox Staging's LS lists them. Directories come
+/// first, in blue capitals; the files follow in lower case, programs and
+/// batch files in green.
+struct LsCommand;
+impl ShellCommand for LsCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let mut all = false;
+        let mut patterns = Vec::new();
+        for arg in args.split_whitespace() {
+            match arg.to_ascii_lowercase().as_str() {
+                "/?" | "-?" | "-h" | "--help" => {
+                    print_string(cpu, LS_USAGE);
+                    return;
+                }
+                "/a" | "-a" => all = true,
+                _ if arg.starts_with('/') => {
+                    print_string(cpu, &format!("Invalid switch - {}\r\n", arg));
+                    return;
+                }
+                _ => patterns.push(arg),
+            }
+        }
+        // Only the last part of a path can have wildcards.
+        for pattern in &patterns {
+            let wildcard = pattern.find(['*', '?']);
+            if wildcard.is_some_and(|w| pattern.rfind(['\\', '/']).is_some_and(|sep| sep > w)) {
+                print_string(cpu, &format!("Unhandled wildcard pattern - {}\r\n", pattern));
+                return;
+            }
+        }
+        if patterns.is_empty() {
+            patterns.push("");
+        }
+
+        let search_attr = if all { 0x16 } else { 0x10 };
+        let mut entries = Vec::new();
+        for pattern in patterns {
+            let Some((_, mut spec)) = search_spec(cpu, pattern) else {
+                continue;
+            };
+            // "C*" is "C*.*", as in DOSBox.
+            if !spec.rsplit(['\\', ':']).next().is_some_and(|name| name.contains('.')) {
+                spec.push_str(".*");
+            }
+            if let Ok(found) = cpu.bus.disk.list_directory(&spec, search_attr) {
+                entries.extend(found.into_iter().filter(|e| e.filename != "." && e.filename != ".."));
+            }
+        }
+        if entries.is_empty() {
+            print_string(cpu, "No files or subdirectories to display\r\n");
+            return;
+        }
+        entries.sort_by_key(|e| (!e.is_dir, e.filename.to_ascii_uppercase()));
+        // Patterns that overlap find some names twice.
+        entries.dedup_by(|a, b| a.is_dir == b.is_dir && a.filename.eq_ignore_ascii_case(&b.filename));
+
+        let widths: Vec<usize> = entries.iter().map(|e| e.filename.len() + LS_SEPARATION).collect();
+        let columns = ls_columns(&widths, LS_SCREEN_COLS);
+        for (i, entry) in entries.iter().enumerate() {
+            let (name, attr) = if entry.is_dir {
+                (entry.filename.to_ascii_uppercase(), 0x09)
+            } else {
+                let name = entry.filename.to_ascii_lowercase();
+                let program = [".com", ".exe", ".bat"].iter().any(|ext| name.ends_with(ext));
+                (name, if program { 0x0A } else { 0x07 })
+            };
+            print_cp437(cpu, name.as_bytes(), attr);
+            let column = i % columns.len();
+            if column + 1 == columns.len() || i + 1 == entries.len() {
+                print_string(cpu, "\r\n");
+            } else {
+                print_string(cpu, &" ".repeat(columns[column] - name.len()));
+            }
+        }
+    }
+}
+
+/// Spaces at least between LS's columns.
+const LS_SEPARATION: usize = 2;
+/// The shell's text mode is 80 columns wide.
+const LS_SCREEN_COLS: usize = 80;
+
+/// The widths of the columns LS fills row by row with names `widths` wide
+/// (separation included): as many as fit in a line shorter than the
+/// screen, so the line never wraps.
+fn ls_columns(widths: &[usize], screen_cols: usize) -> Vec<usize> {
+    let most = ((screen_cols - 1) / (LS_SEPARATION + 1)).min(widths.len());
+    for count in (2..=most).rev() {
+        let mut columns = vec![0; count];
+        for (i, &width) in widths.iter().enumerate() {
+            columns[i % count] = columns[i % count].max(width);
+        }
+        if columns.iter().sum::<usize>() < screen_cols {
+            return columns;
+        }
+    }
+    vec![widths.iter().copied().max().unwrap_or(0)]
 }
 
 /// "MM-DD-YY  HH:MMa" from packed DOS date and time words.
