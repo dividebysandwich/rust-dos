@@ -25,6 +25,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   disks to change with Ctrl+F4
 * DOSBox Staging's emulated disk speeds and disk drive noises
 * Configuration file with startup commands
+* Running in a web browser as WebAssembly, with C: kept in the browser's
+  storage (see [Running in a browser](#running-in-a-browser))
 * Environment variables (`SET`, `PATH`)
 * XMS 3.0 extended memory and the A20 gate
 * 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
@@ -287,6 +289,50 @@ Ctrl+F12: Open or close the [settings window](#settings-window)
 Ctrl+F4: Put the next disk in the drives mounted from lists of images
 
 PrintScreen: Toggle screen recording to a video file
+
+## Running in a browser
+
+`web/` builds Rust-DOS for the browser: the emulator as a WebAssembly module
+and a page that runs it, in `web/www`. It needs the `wasm32-unknown-unknown`
+Rust target and the `wasm-bindgen` program in the version `web/Cargo.lock`
+has (the build script says which, and how to install it). `wasm-opt` from
+binaryen is used if it is installed.
+
+```sh
+rustup target add wasm32-unknown-unknown
+./web/build.sh
+python3 -m http.server -d web/www
+```
+
+Then open http://localhost:8000/. `web/www` is the whole site: put it on any
+web server that serves `.wasm` files as `application/wasm` (GitHub Pages,
+nginx, a CDN). Releases include it as `rust-dos-<version>-web.zip`.
+
+In the browser:
+
+* C: is a 250 MB hard disk image that the browser keeps in its storage
+  (IndexedDB), so it is there again the next time the page is opened. Only
+  the parts of the disk that hold something take memory and storage.
+* Drop files, folders or `.zip` archives on the page, or use *Add files* and
+  *Add folder*, to copy them to C:. An archive goes in a directory named
+  after it, unless its files are in one directory already. Long file names
+  get DOSBox-style short names (`LONGRE~1.TXT`).
+* Dropping a floppy image (`.img`, `.ima`, `.vfd`, `.flp`, `.dsk`) puts it
+  in A:, a CD image (`.iso`) in a CD-ROM drive and a hard disk image in the
+  next free drive. *Drives* inserts an image into a drive of your choice,
+  ejects it, downloads C: or a floppy as an image file (which the rust-dos
+  program can mount), and erases C:.
+* *Settings* (or Ctrl+F12, or `DOSCONFIG`) edits the configuration in the
+  format of `rust-dos.conf`, which the browser keeps. `[drives]` has no host
+  directories to mount there.
+* Clicking the screen while a program uses the mouse captures the mouse;
+  Ctrl+F10 or Esc releases it. Sound starts with the first key press or
+  click, as browsers require.
+
+The page takes parameters: `?zip=URL` copies an archive to C: at startup,
+`?run=COMMAND` types a command at the first prompt (both can repeat), for
+example `?zip=games/keen.zip&run=cd%20keen&run=keen1`. `?persist=0` keeps C:
+in memory only, and `?log` sends the emulator's log to the browser console.
 
 ## Debug & remote-control server
 

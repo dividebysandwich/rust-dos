@@ -377,7 +377,7 @@ impl ShellCommand for ExitCommand {
         cpu.bus
             .log_string("[SHELL] Exiting Emulator via command...");
         cpu.bus.flush_log();
-        std::process::exit(0);
+        cpu.bus.exit_requested = true;
     }
 }
 

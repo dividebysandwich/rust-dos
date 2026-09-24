@@ -172,10 +172,59 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  web:
+    name: web
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web
+          workspaces: web
+
+      # web/build.sh runs the wasm-bindgen program, which must be the version
+      # web/Cargo.lock has.
+      - name: Install wasm-bindgen
+        run: |
+          VERSION=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' web/Cargo.lock)
+          if [ "$(wasm-bindgen --version 2>/dev/null | cut -d' ' -f2)" != "$VERSION" ]; then
+            cargo install wasm-bindgen-cli --version "$VERSION" --locked
+          fi
+
+      # The tests run on the host, where the rust-dos library brings SDL2.
+      - name: Test
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev
+          cd web && cargo test --locked
+
+      - name: Build
+        run: ./web/build.sh
+
+      - name: Package
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_VERSION="$GITHUB_REF_NAME"
+          else
+            RELEASE_VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          mkdir -p out
+          (cd web/www && zip -r -q "$GITHUB_WORKSPACE/out/rust-dos-$RELEASE_VERSION-web.zip" .)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-web
+          path: out/*
+          if-no-files-found: error
+
   release:
     name: create release
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, web]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -207,6 +256,9 @@ jobs:
             with ``version `GLIBC_2.39' not found``, as it does on Ubuntu 22.04,
             Linux Mint 21, Debian 12 and Raspberry Pi OS (bookworm). It is
             built against glibc 2.35 and runs on old and new distributions.
+          - **Browser**: the `-web.zip` is a web site that runs rust-dos in the
+            browser. Put its files on a web server; see *Running in a browser*
+            in the README.
           EOF
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \

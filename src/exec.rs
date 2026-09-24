@@ -23,6 +23,8 @@ pub enum StopReason {
     Paused,
     /// A program ended and the shell was reloaded.
     ShellReloaded,
+    /// The EXIT command asked to turn the machine off (`Bus::exit_requested`).
+    Exit,
 }
 
 /// Observer of the execution loop, such as the debugger.
@@ -146,7 +148,8 @@ impl Fetch {
 }
 
 /// Run until emulated time reaches the batch end set with
-/// `Bus::start_batch`, the hook stops execution, or the shell is reloaded.
+/// `Bus::start_batch`, the hook stops execution, the shell is reloaded or
+/// EXIT turns the machine off.
 /// `hot` enables the per-instruction `ExecHook::before_exec` call.
 pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReason {
     let mut fetch = Fetch::new(cpu);
@@ -180,6 +183,8 @@ fn run<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHoo
         {
             match shell_services(cpu) {
                 Shell::Idle => {}
+                // Nothing after EXIT runs, not even the rest of its batch file.
+                Shell::Handled if cpu.bus.exit_requested => return StopReason::Exit,
                 Shell::Handled => continue,
                 Shell::Reloaded => return StopReason::ShellReloaded,
             }

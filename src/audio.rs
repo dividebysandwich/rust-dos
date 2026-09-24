@@ -1,5 +1,14 @@
 use crate::bus::Bus;
 
+/// Where the mixed output goes: the SDL window's sound device, or the
+/// browser's. Samples are 44.1 kHz stereo, interleaved.
+pub trait AudioOutput {
+    /// Stereo frames queued and not played yet.
+    fn queued_frames(&self) -> usize;
+    /// Queue samples behind those waiting.
+    fn queue(&mut self, samples: &[i16]) -> Result<(), String>;
+}
+
 /// The BEL character's beep: 200 ms of 880 Hz, mixed into the output.
 pub fn play_sdl_beep(bus: &mut Bus) {
     bus.audio_catch_up();
@@ -17,7 +26,7 @@ pub fn pump_audio(bus: &mut Bus) {
         // Emulated time runs close to the wall clock, so the queue stays
         // near its level; bound it both ways. Too little and the device
         // runs dry between frames: pad with silence. Too much is latency.
-        let queued = device.size() as usize / 4;
+        let queued = device.queued_frames();
         let rate = crate::opl::RATE as usize;
         let mut out = Vec::with_capacity(samples.len() + rate / 10);
         if queued < rate / 50 {
@@ -27,7 +36,7 @@ pub fn pump_audio(bus: &mut Bus) {
         let room = (rate / 4).saturating_sub(queued) * 2;
         out.extend_from_slice(&samples[..samples.len().min(room)]);
         if !out.is_empty()
-            && let Err(e) = device.queue_audio(&out)
+            && let Err(e) = device.queue(&out)
         {
             eprintln!("[AUDIO] Queue error: {}", e);
         }

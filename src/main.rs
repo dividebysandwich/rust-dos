@@ -15,18 +15,18 @@ use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
-use crate::video::VideoMode;
 
 mod config_ui;
 mod debug;
 mod display;
+mod sdl_keys;
 
 // The emulator itself is the library crate; the debug server, the settings
 // window and the window's display are private to the binary. These
 // re-exports let the binary's modules refer to the library modules as
 // `crate::...`.
 use rust_dos::{
-    audio, config, cpu, disk, diskimage, diskio, exec, keyboard, mount, recorder, sb, shell, timer, video,
+    audio, config, cpu, disk, diskimage, diskio, exec, keyboard, mount, recorder, sb, shell, sound, timer, video,
 };
 
 #[derive(Parser, Debug)]
@@ -76,6 +76,19 @@ struct Machine {
 impl Machine {
     fn differs(&self, settings: &Settings) -> bool {
         self.cpu != settings.cpu || self.sound != settings.sound
+    }
+}
+
+/// The SDL sound device, where the mixed output goes.
+struct SdlAudio(sdl2::audio::AudioQueue<i16>);
+
+impl audio::AudioOutput for SdlAudio {
+    fn queued_frames(&self) -> usize {
+        self.0.size() as usize / 4
+    }
+
+    fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
+        self.0.queue_audio(samples)
     }
 }
 
@@ -142,10 +155,10 @@ fn main() -> Result<(), String> {
     let mut cpu = create_cpu(&args, &config);
     cpu.model = settings.cpu;
     cpu.bus.set_disk_settings(settings.disk);
-    for warning in apply_sound_config(&mut cpu, &settings.sound, None) {
+    for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
-    cpu.bus.audio_device = Some(audio_device);
+    cpu.bus.audio_device = Some(Box::new(SdlAudio(audio_device)));
     let mut machine = Machine { cpu: settings.cpu, sound: settings.sound.clone() };
     let mut saved = Saved {
         file: config.source.clone(),
@@ -290,11 +303,11 @@ fn main() -> Result<(), String> {
                     // for BIOS-based input, and ALSO latch the raw scan code
                     // at port 0x60 + raise IRQ1 so games that poll the port
                     // or install a custom INT 09h ISR see the event.
-                    let extended = keyboard::is_extended(keycode);
-                    if let Some(scan) = keyboard::modifier_scan(keycode) {
+                    let extended = sdl_keys::is_extended(keycode);
+                    if let Some(scan) = sdl_keys::modifier_scan(keycode) {
                         keyboard::deliver_scan_only(&mut cpu.bus, scan, extended);
                         held.insert(keycode, (scan, extended));
-                    } else if let Some(code) = keyboard::map_sdl_to_pc(keycode, keymod) {
+                    } else if let Some(code) = sdl_keys::map_sdl_to_pc(keycode, keymod) {
                         keyboard::deliver_key_down(&mut cpu.bus, code, extended);
                         held.insert(keycode, ((code >> 8) as u8, extended));
                     }
@@ -344,12 +357,12 @@ fn main() -> Result<(), String> {
                     if ui.is_open() => {}
 
                 Event::MouseMotion { x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, &cached_frame, display.to_frame(x, y));
+                    let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
                     cpu.bus.mouse.set_position(vx, vy);
                 }
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, &cached_frame, display.to_frame(x, y));
+                    let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
                     cpu.bus.mouse.set_position(vx, vy);
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_down(btn);
@@ -357,7 +370,7 @@ fn main() -> Result<(), String> {
                 }
 
                 Event::MouseButtonUp { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = host_to_virtual_mouse(&cpu, &cached_frame, display.to_frame(x, y));
+                    let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
                     cpu.bus.mouse.set_position(vx, vy);
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_up(btn);
@@ -429,6 +442,10 @@ fn main() -> Result<(), String> {
             cpu.decode_cache.hits,
             cpu.decode_cache.misses,
         );
+        // EXIT turns the machine off.
+        if cpu.bus.exit_requested {
+            break 'running;
+        }
 
         // DOSCONFIG asks for the settings window.
         if std::mem::take(&mut cpu.bus.config_ui_requested) && !ui.is_open() {
@@ -470,87 +487,8 @@ fn main() -> Result<(), String> {
 
         // Start from the cached render; the overlays go on top.
         screen.clone_from(&cached_frame);
-        let buffer = &mut screen.rgb[..];
+        video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
         let frame_w = width as usize;
-
-        // Draw the Cursor (Overlay)
-        // Only draw the hardware cursor in Text Modes!
-        let current_mode = cpu.bus.video_mode;
-        let is_text_mode = matches!(
-            current_mode,
-            VideoMode::Text80x25
-                | VideoMode::Text80x25Color
-                | VideoMode::Text40x25
-                | VideoMode::Text40x25Color
-        );
-        if is_text_mode {
-            // Read Cursor Position from BDA
-            let cursor_col = cpu.bus.read_8(0x0450) as usize;
-            let cursor_row = cpu.bus.read_8(0x0451) as usize;
-
-            // Read Cursor Shape from BDA
-            let cursor_shape = cpu.bus.read_16(0x0460);
-            let start_scan = (cursor_shape >> 8) as u8;
-            let end_scan = (cursor_shape & 0xFF) as u8;
-
-            // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
-            let is_hidden = (start_scan & 0x20) != 0;
-
-            // Determine Cell Width based on Mode
-            // 40-col modes have 16px wide characters (scaled 2x)
-            let (cell_width, max_cols) = match current_mode {
-                VideoMode::Text40x25 | VideoMode::Text40x25Color => (16, 40),
-                _ => (8, 80),
-            };
-            // Cell height and visible rows come from BDA so 80x43 / 80x50
-            // modes draw the cursor at the correct Y when programs like
-            // Norton Commander load the 8x8 font.
-            let cell_height = cpu.bus.read_16(0x0485) as usize;
-            let cell_height = if cell_height == 0 { 16 } else { cell_height };
-            let total_rows = cpu.bus.read_8(0x0484) as usize + 1;
-
-            if cursor_visible
-                && !is_hidden
-                && cursor_col < max_cols
-                && cursor_row < total_rows
-            {
-                // Calculate screen coordinates
-                let start_x = cursor_col * cell_width;
-                let start_y = cursor_row * cell_height;
-
-                // Clamp scanlines to the active cell height - 1.
-                let max_scan = cell_height.saturating_sub(1) as u8;
-                let scan_start = (start_scan & 0x1F).min(max_scan) as usize;
-                let scan_end = end_scan.min(max_scan) as usize;
-
-                if scan_start <= scan_end {
-                    for y_off in scan_start..=scan_end {
-                        for x_off in 0..cell_width {
-                            let draw_x = start_x + x_off;
-                            let draw_y = start_y + y_off;
-
-                            // Safety Check
-                            let idx = (draw_y * frame_w + draw_x) * 3;
-                            if idx + 2 < buffer.len() {
-                                buffer[idx] = 0xDD;
-                                buffer[idx + 1] = 0xDD;
-                                buffer[idx + 2] = 0xDD;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Draw Mouse Cursor (software overlay) when visible and installed.
-        // The driver stores the cursor in virtual coords; map those to
-        // screen pixels over the same virtual extent the host pointer spans.
-        if cpu.bus.mouse.installed && cpu.bus.mouse.hide_counter <= 0 {
-            let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.display_size());
-            let sx = (cpu.bus.mouse.x as i64 * width as i64 / virt_w as i64) as i32;
-            let sy = (cpu.bus.mouse.y as i64 * height as i64 / virt_h as i64) as i32;
-            draw_default_mouse_cursor(&mut screen, sx, sy);
-        }
 
         // Recordings show the machine alone. Debug clients see the
         // settings window as well, but not the recording indicator.
@@ -591,103 +529,13 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Install the configured sound hardware and the drive with the built-in
-/// Ultrasound software, advertise them in the BLASTER, ULTRASND and
-/// ULTRADIR environment variables, and give the MPU-401 its synthesizer.
-/// With the configuration in place (`old`), only the parts that changed
-/// are replaced, so a resident Ultrasound driver keeps its card when only
-/// the Sound Blaster changes. Returns the problems.
-fn apply_sound_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig>) -> Vec<String> {
-    use config::MidiSynth;
-
-    let mut warnings = Vec::new();
-    // A changed configuration gets the checks the file's got.
-    let mut sound = sound.clone();
-    let mut old = old.cloned();
-    if let Some(old) = &mut old {
-        old.check();
-        warnings.extend(sound.check().into_iter().map(|w| w.trim_start_matches("[sound]: ").to_string()));
-    }
-    let changed = |part: &dyn Fn(&SoundConfig) -> String| old.as_ref().is_none_or(|old| part(old) != part(&sound));
-
-    if changed(&|s| format!("{:?} {}", s.card(), s.opl3)) {
-        cpu.bus.configure_sound(sound.card(), sound.opl3);
-        match &sound.card() {
-            Some(sb) => cpu.set_env("BLASTER", &sb.blaster()),
-            None => cpu.set_env("BLASTER", ""),
-        }
-    }
-    let gus = sound.ultrasound();
-    if changed(&|s| format!("{:?}", s.ultrasound().and_then(|g| g.drive)))
-        && let Err(e) = cpu.bus.mount_ultrasnd(gus.as_ref().and_then(|g| g.drive))
-    {
-        warnings.push(format!("gusdrive: {}", e));
-    }
-    match &gus {
-        Some(g) => {
-            cpu.set_env("ULTRASND", &g.ultrasnd());
-            cpu.set_env("ULTRADIR", &g.ultradir());
-        }
-        None => {
-            cpu.set_env("ULTRASND", "");
-            cpu.set_env("ULTRADIR", "");
-        }
-    }
-    if changed(&|s| format!("{:?}", s.ultrasound().map(|g| (g.base, g.irq, g.dma)))) {
-        cpu.bus.configure_gus(gus);
-    }
-
-    let midi = |s: &SoundConfig| format!("{:?} {:?} {} {}", s.midisynth, s.soundfont, s.gus.builtin(), s.gus.ultradir());
-    if !changed(&midi) {
-        return warnings;
-    }
-    cpu.bus.mpu.remove_synth();
-    let soundfont = match sound.midisynth {
-        MidiSynth::SoundFont => true,
-        MidiSynth::Auto => sound.soundfont.is_some(),
-        MidiSynth::Gus | MidiSynth::None => false,
-    };
-    if soundfont {
-        match &sound.soundfont {
-            Some(path) => match cpu.bus.mpu.load_soundfont(path) {
-                Ok(()) => cpu
-                    .bus
-                    .log_string(&format!("[CONFIG] General MIDI with SoundFont {}", path.display())),
-                Err(e) => warnings.push(format!("soundfont: {}", e)),
-            },
-            None => warnings.push("midisynth=soundfont needs a soundfont setting".to_string()),
-        }
-    } else if sound.midisynth != MidiSynth::None {
-        use rust_dos::gus::patch::PatchBank;
-        // The built-in patches whether or not their drive is there.
-        let bank = if sound.gus.builtin() {
-            Ok((PatchBank::builtin(), "built into rust-dos".to_string()))
-        } else {
-            PatchBank::from_dos_dir(&cpu.bus.disk, &sound.gus.ultradir()).map(|(bank, dir)| (bank, format!("in {}", dir)))
-        };
-        match bank {
-            Ok((bank, place)) => {
-                cpu.bus
-                    .log_string(&format!("[CONFIG] General MIDI with the Ultrasound patches {}", place));
-                cpu.bus.mpu.load_gus_patches(bank);
-            }
-            Err(e) if sound.midisynth == MidiSynth::Gus => warnings.push(format!("midisynth=gus: {}", e)),
-            Err(e) => cpu.bus.log_string(&format!(
-                "[CONFIG] No General MIDI synthesizer (no soundfont, and {})",
-                e
-            )),
-        }
-    }
-    warnings
-}
-
 /// Put the settings' processor and sound hardware in place. Only while no
 /// program runs: one would lose track of the hardware it set up.
 fn apply_machine(cpu: &mut Cpu, machine: &mut Machine, settings: &Settings) -> Vec<String> {
     cpu.model = settings.cpu;
     let warnings = if settings.sound != machine.sound {
         cpu.bus.log_string("[CONFIG] The sound settings changed");
-        apply_sound_config(cpu, &settings.sound, Some(&machine.sound))
+        sound::apply_config(cpu, &settings.sound, Some(&machine.sound))
     } else {
         Vec::new()
     };
@@ -1043,72 +891,11 @@ fn open_log_file() -> Option<rust_dos::log::LogFile> {
     }
 }
 
-/// Convert mouse coordinates in the picture's pixels (see
-/// `Display::to_frame`) into the driver's virtual coordinate system (see
-/// `MouseState::virtual_extent`).
-fn host_to_virtual_mouse(cpu: &Cpu, frame: &video::Frame, (x, y): (i32, i32)) -> (i32, i32) {
-    let (w, h) = (frame.width as i32, frame.height as i32);
-    let px = x.clamp(0, w - 1);
-    let py = y.clamp(0, h - 1);
-
-    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.display_size());
-
-    let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
-    let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
-    (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
-}
-
 fn sdl_button_to_index(button: MouseButton) -> Option<usize> {
     match button {
         MouseButton::Left => Some(0),
         MouseButton::Right => Some(1),
         MouseButton::Middle => Some(2),
         _ => None,
-    }
-}
-
-/// Classic Microsoft-style arrow cursor as a 16x16 bitmap. 1 = white pixel,
-/// 2 = black outline, 0 = transparent. Hotspot is (0,0).
-const CURSOR_ARROW: [[u8; 16]; 16] = [
-    [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,2,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,2,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,2,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,2,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,2,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,1,2,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,1,1,2,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,2,2,2,2,0,0,0,0,0,0],
-    [2,1,1,2,1,1,2,0,0,0,0,0,0,0,0,0],
-    [2,1,2,0,2,1,1,2,0,0,0,0,0,0,0,0],
-    [2,2,0,0,2,1,1,2,0,0,0,0,0,0,0,0],
-    [0,0,0,0,0,2,1,1,2,0,0,0,0,0,0,0],
-    [0,0,0,0,0,2,1,1,2,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0],
-];
-
-fn draw_default_mouse_cursor(frame: &mut video::Frame, origin_x: i32, origin_y: i32) {
-    let (w, h) = (frame.width as i32, frame.height as i32);
-    for (row_idx, row) in CURSOR_ARROW.iter().enumerate() {
-        for (col_idx, &cell) in row.iter().enumerate() {
-            if cell == 0 {
-                continue;
-            }
-            let x = origin_x + col_idx as i32;
-            let y = origin_y + row_idx as i32;
-            if x < 0 || y < 0 || x >= w || y >= h {
-                continue;
-            }
-            let idx = (y * w + x) as usize * 3;
-            let (r, g, b) = if cell == 1 {
-                (0xFF, 0xFF, 0xFF)
-            } else {
-                (0x00, 0x00, 0x00)
-            };
-            frame.rgb[idx] = r;
-            frame.rgb[idx + 1] = g;
-            frame.rgb[idx + 2] = b;
-        }
     }
 }

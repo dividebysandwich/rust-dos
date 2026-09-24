@@ -5,7 +5,7 @@
 //! A floppy's geometry comes from the image size, as DOSBox has it; a hard
 //! disk's from the mount options, its partition table or boot sector.
 
-use std::cell::Cell;
+use std::cell::{Cell, Ref, RefCell};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -103,27 +103,59 @@ pub enum ImageKind {
 /// The rest are hard disks when they start with a partition table or a boot
 /// sector, and CDs when they hold an ISO 9660 volume.
 pub fn detect(path: &Path, requested: DriveKind) -> Result<ImageKind, String> {
-    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin") {
-        return Ok(ImageKind::Cd);
-    }
-    if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp") {
-        return Ok(ImageKind::Floppy);
+    if let Some(kind) = kind_by_name(path, requested) {
+        return Ok(kind);
     }
     let mut file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
     let len = file.metadata().map_err(|e| e.to_string())?.len();
-    if floppy_geometry(len).is_some() {
-        return Ok(ImageKind::Floppy);
-    }
     let mut boot = [0u8; SECTOR_SIZE];
-    if file.read_exact(&mut boot).is_ok() && (Bpb::parse(&boot).is_some() || partitions(&boot, len / 512).is_some())
-    {
-        return Ok(ImageKind::HardDisk);
+    let boot = file.read_exact(&mut boot).is_ok().then_some(&boot[..]);
+    if let Some(kind) = kind_by_contents(len, boot) {
+        return Ok(kind);
     }
     if crate::cdrom::image::CdImage::open(path).is_ok() {
         return Ok(ImageKind::Cd);
     }
     Err(format!("{} is not a floppy, hard disk or CD image", path.display()))
+}
+
+/// What kind of image `data` is, as `detect` finds for a file named `name`.
+pub fn detect_memory(name: &str, data: &MemoryImage, requested: DriveKind) -> Result<ImageKind, String> {
+    if let Some(kind) = kind_by_name(Path::new(name), requested) {
+        return Ok(kind);
+    }
+    let mut boot = [0u8; SECTOR_SIZE];
+    let boot = data.read_at(0, &mut boot).then_some(&boot[..]);
+    if let Some(kind) = kind_by_contents(data.len(), boot) {
+        return Ok(kind);
+    }
+    if crate::cdrom::image::CdImage::probe(data) {
+        return Ok(ImageKind::Cd);
+    }
+    Err(format!("{} is not a floppy, hard disk or CD image", name))
+}
+
+/// The kind of image the drive type asked for or the file name's extension
+/// says, if they do.
+fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin") {
+        return Some(ImageKind::Cd);
+    }
+    if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp") {
+        return Some(ImageKind::Floppy);
+    }
+    None
+}
+
+/// The kind of an image of `len` bytes that starts with `boot`, if its size
+/// is a floppy's or it starts with a partition table or boot sector.
+fn kind_by_contents(len: u64, boot: Option<&[u8]>) -> Option<ImageKind> {
+    if floppy_geometry(len).is_some() {
+        return Some(ImageKind::Floppy);
+    }
+    let boot = boot?;
+    (Bpb::parse(boot).is_some() || partitions(boot, len / 512).is_some()).then_some(ImageKind::HardDisk)
 }
 
 /// The fields of a FAT boot sector's BIOS parameter block that tell where
@@ -219,10 +251,104 @@ fn partitions(mbr: &[u8], disk_sectors: u64) -> Option<Vec<Partition>> {
     (!found.is_empty()).then_some(found)
 }
 
-/// A disk image file.
+/// Bytes in each piece of an image held in memory.
+pub const CHUNK: usize = 64 << 10;
+
+/// The bytes of a disk or CD image held in memory, as the browser build
+/// has its drives, in `CHUNK`-sized pieces. Only pieces with something
+/// other than zeros take memory, so an empty hard disk takes next to none.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryImage {
+    len: u64,
+    chunks: Vec<Option<Box<[u8]>>>,
+}
+
+impl MemoryImage {
+    /// `len` bytes of zeros.
+    pub fn new(len: u64) -> Self {
+        Self { len, chunks: vec![None; len.div_ceil(CHUNK as u64) as usize] }
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Pieces in the image, the last one maybe shorter than `CHUNK`.
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// The piece `index`, or None if it is zeros.
+    pub fn chunk(&self, index: usize) -> Option<&[u8]> {
+        self.chunks.get(index)?.as_deref()
+    }
+
+    /// Fill `buf` from byte `at` on. False if that runs past the end.
+    pub fn read_at(&self, at: u64, buf: &mut [u8]) -> bool {
+        if at.checked_add(buf.len() as u64).is_none_or(|end| end > self.len) {
+            return false;
+        }
+        let mut done = 0;
+        while done < buf.len() {
+            let pos = at as usize + done;
+            let (index, offset) = (pos / CHUNK, pos % CHUNK);
+            let n = (CHUNK - offset).min(buf.len() - done);
+            match &self.chunks[index] {
+                Some(chunk) => buf[done..done + n].copy_from_slice(&chunk[offset..offset + n]),
+                None => buf[done..done + n].fill(0),
+            }
+            done += n;
+        }
+        true
+    }
+
+    /// Put `data` at byte `at` on. False if that runs past the end.
+    pub fn write_at(&mut self, at: u64, data: &[u8]) -> bool {
+        if at.checked_add(data.len() as u64).is_none_or(|end| end > self.len) {
+            return false;
+        }
+        let mut done = 0;
+        while done < data.len() {
+            let pos = at as usize + done;
+            let (index, offset) = (pos / CHUNK, pos % CHUNK);
+            let n = (CHUNK - offset).min(data.len() - done);
+            let part = &data[done..done + n];
+            let chunk_len = (self.len as usize - index * CHUNK).min(CHUNK);
+            let chunk = &mut self.chunks[index];
+            // Zeros where there are zeros already need no memory.
+            if chunk.is_some() || part.iter().any(|&b| b != 0) {
+                chunk.get_or_insert_with(|| vec![0; chunk_len].into_boxed_slice())[offset..offset + n].copy_from_slice(part);
+            }
+            done += n;
+        }
+        true
+    }
+}
+
+impl From<Vec<u8>> for MemoryImage {
+    fn from(data: Vec<u8>) -> Self {
+        let mut image = Self::new(data.len() as u64);
+        image.write_at(0, &data);
+        image
+    }
+}
+
+/// Where the sectors of a disk image are.
+enum Backing {
+    File(File),
+    /// In memory, and which `CHUNK`s were written since `take_written`
+    /// last looked.
+    Memory { data: RefCell<MemoryImage>, written: RefCell<Vec<bool>> },
+}
+
+/// A disk image: a file, or held in memory.
 pub struct DiskImage {
     path: PathBuf,
-    file: File,
+    backing: Backing,
     sectors: u64,
     geometry: Chs,
     floppy: bool,
@@ -245,7 +371,7 @@ impl DiskImage {
     /// the file can't be written, which makes the disk write-protected.
     pub fn open(path: &Path, floppy: bool, geometry: Option<Chs>, read_only: bool) -> Result<Self, String> {
         let error = |e: std::io::Error| format!("{}: {}", path.display(), e);
-        let (mut file, writable) = if read_only {
+        let (file, writable) = if read_only {
             (File::open(path).map_err(error)?, false)
         } else {
             match OpenOptions::new().read(true).write(true).open(path) {
@@ -254,10 +380,75 @@ impl DiskImage {
             }
         };
         let len = file.metadata().map_err(error)?.len();
+        Self::new(path, Backing::File(file), len, floppy, geometry, writable)
+    }
+
+    /// A disk image held in memory, which `name` names in messages, as
+    /// `open` makes of a file with those bytes.
+    pub fn from_memory(
+        name: &str,
+        data: MemoryImage,
+        floppy: bool,
+        geometry: Option<Chs>,
+        read_only: bool,
+    ) -> Result<Self, String> {
+        let len = data.len();
+        let written = RefCell::new(vec![false; data.chunk_count()]);
+        let backing = Backing::Memory { data: RefCell::new(data), written };
+        Self::new(Path::new(name), backing, len, floppy, geometry, !read_only)
+    }
+
+    /// An empty hard disk of `bytes` bytes held in memory: a partition
+    /// table with one FAT16 partition over the whole cylinders, formatted
+    /// with the volume label `label`.
+    pub fn blank_hard_disk(name: &str, bytes: u64, label: Option<&str>) -> Result<Self, String> {
+        // Big enough for FAT16 with single-sector clusters.
+        if bytes < 4 << 20 {
+            return Err("The disk is too small".to_string());
+        }
+        let disk = Self::from_memory(name, MemoryImage::new(bytes), false, None, false)?;
+        let g = disk.geometry;
+        let per_cylinder = g.heads as u64 * g.sectors as u64;
+        let start = g.sectors as u64;
+        let sectors = (g.cylinders as u64 * per_cylinder).min(disk.sectors) - start;
+        // One partition from the second track to the end of the last whole
+        // cylinder, FAT16 (06h), or FAT16 under 32 MB (04h).
+        let chs = |lba: u64| {
+            let (c, rest) = (lba / per_cylinder, lba % per_cylinder);
+            let (h, s) = (rest / g.sectors as u64, rest % g.sectors as u64 + 1);
+            let c = c.min(1023);
+            [h as u8, (s as u8) | ((c >> 8) as u8) << 6, c as u8]
+        };
+        let mut mbr = [0u8; SECTOR_SIZE];
+        let entry = &mut mbr[0x1BE..0x1CE];
+        entry[0] = 0x80;
+        entry[1..4].copy_from_slice(&chs(start));
+        entry[4] = if sectors < 0x10000 { 0x04 } else { 0x06 };
+        entry[5..8].copy_from_slice(&chs(start + sectors - 1));
+        entry[8..12].copy_from_slice(&(start as u32).to_le_bytes());
+        entry[12..16].copy_from_slice(&(sectors as u32).to_le_bytes());
+        mbr[510] = 0x55;
+        mbr[511] = 0xAA;
+        disk.write(0, &mbr).map_err(|_| "Can't write the disk".to_string())?;
+        crate::fat::format(&disk, start, sectors, label)?;
+        Ok(disk)
+    }
+
+    fn new(path: &Path, backing: Backing, len: u64, floppy: bool, geometry: Option<Chs>, writable: bool) -> Result<Self, String> {
         let sectors = len / SECTOR_SIZE as u64;
         if sectors == 0 {
             return Err(format!("{} is empty", path.display()));
         }
+        let mut disk = Self {
+            path: path.to_path_buf(),
+            backing,
+            sectors,
+            geometry: Chs { cylinders: 0, heads: 0, sectors: 0 },
+            floppy,
+            bios_type: 0,
+            writable,
+            generation: Cell::new(0),
+        };
         let (geometry, bios_type) = if floppy {
             match geometry {
                 Some(chs) => (chs, floppy_type_of(chs)),
@@ -266,13 +457,15 @@ impl DiskImage {
             }
         } else {
             let mut boot = [0u8; SECTOR_SIZE];
-            file.read_exact(&mut boot).map_err(error)?;
+            disk.read_at(0, &mut boot).map_err(|e| format!("{}: {}", path.display(), e))?;
             (geometry.unwrap_or_else(|| hard_disk_geometry(&boot, sectors)), 0)
         };
         if geometry.heads == 0 || geometry.sectors == 0 || geometry.cylinders == 0 {
             return Err("Invalid disk geometry".to_string());
         }
-        Ok(Self { path: path.to_path_buf(), file, sectors, geometry, floppy, bios_type, writable, generation: Cell::new(0) })
+        disk.geometry = geometry;
+        disk.bios_type = bios_type;
+        Ok(disk)
     }
 
     pub fn path(&self) -> &Path {
@@ -305,6 +498,28 @@ impl DiskImage {
         self.generation.get()
     }
 
+    /// The bytes of an image held in memory.
+    pub fn memory(&self) -> Option<Ref<'_, MemoryImage>> {
+        match &self.backing {
+            Backing::Memory { data, .. } => Some(data.borrow()),
+            Backing::File(_) => None,
+        }
+    }
+
+    /// The `CHUNK`s of an image held in memory written since the last
+    /// call, by number, for keeping a copy of the image up to date.
+    pub fn take_written(&self) -> Vec<usize> {
+        match &self.backing {
+            Backing::Memory { written, .. } => written
+                .borrow_mut()
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(i, w)| std::mem::take(w).then_some(i))
+                .collect(),
+            Backing::File(_) => Vec::new(),
+        }
+    }
+
     /// The sector number of cylinder `c`, head `h`, sector `s` (from 1), if
     /// that is a sector of the geometry. Multi-sector transfers run on from
     /// there across heads and cylinders.
@@ -327,10 +542,20 @@ impl DiskImage {
     /// Read `buf.len()` bytes from sector `lba` on.
     pub fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), u8> {
         self.check(lba, buf.len())?;
-        let mut file = &self.file;
-        file.seek(SeekFrom::Start(lba * SECTOR_SIZE as u64))
-            .and_then(|_| file.read_exact(buf))
-            .map_err(|_| STATUS_CONTROLLER_FAILURE)
+        self.read_at(lba * SECTOR_SIZE as u64, buf).map_err(|_| STATUS_CONTROLLER_FAILURE)
+    }
+
+    fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        match &self.backing {
+            Backing::File(file) => {
+                let mut file = file;
+                file.seek(SeekFrom::Start(at)).and_then(|_| file.read_exact(buf))
+            }
+            Backing::Memory { data, .. } => match data.borrow().read_at(at, buf) {
+                true => Ok(()),
+                false => Err(std::io::ErrorKind::UnexpectedEof.into()),
+            },
+        }
     }
 
     /// Write `data` from sector `lba` on.
@@ -340,10 +565,25 @@ impl DiskImage {
         }
         self.check(lba, data.len())?;
         self.generation.set(self.generation.get() + 1);
-        let mut file = &self.file;
-        file.seek(SeekFrom::Start(lba * SECTOR_SIZE as u64))
-            .and_then(|_| file.write_all(data))
-            .map_err(|_| STATUS_CONTROLLER_FAILURE)
+        let at = lba * SECTOR_SIZE as u64;
+        match &self.backing {
+            Backing::File(file) => {
+                let mut file = file;
+                file.seek(SeekFrom::Start(at))
+                    .and_then(|_| file.write_all(data))
+                    .map_err(|_| STATUS_CONTROLLER_FAILURE)
+            }
+            Backing::Memory { data: image, written } => {
+                if !image.borrow_mut().write_at(at, data) {
+                    return Err(STATUS_SECTOR_NOT_FOUND);
+                }
+                if !data.is_empty() {
+                    let at = at as usize;
+                    written.borrow_mut()[at / CHUNK..=(at + data.len() - 1) / CHUNK].fill(true);
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Where the FAT volume on the disk is: (first sector, sectors). A
@@ -457,6 +697,59 @@ mod tests {
         let ro = DiskImage::open(&path, true, None, true).unwrap();
         assert!(!ro.writable());
         assert_eq!(ro.write(0, &[0; 512]), Err(STATUS_WRITE_PROTECTED));
+    }
+
+    #[test]
+    fn disks_held_in_memory() {
+        let disk = DiskImage::blank_hard_disk("C.IMG", 8 << 20, Some("RUSTDOS")).unwrap();
+        assert!(!disk.is_floppy() && disk.writable());
+        // Only the partition table, the boot sector, the FATs and the root
+        // directory's label take memory: the first two pieces.
+        let used = |disk: &DiskImage| {
+            let memory = disk.memory().unwrap();
+            (0..memory.chunk_count()).filter(|&i| memory.chunk(i).is_some()).count()
+        };
+        assert_eq!(used(&disk), 2);
+        let g = disk.geometry();
+        assert_eq!((g.heads, g.sectors), (16, 63));
+        // One partition from the second track to the last whole cylinder.
+        let (start, sectors) = disk.fat_volume().unwrap();
+        assert_eq!((start, start + sectors), (63, g.cylinders as u64 * 16 * 63));
+        let kind = detect_memory("C.IMG", &disk.memory().unwrap(), DriveKind::HardDisk);
+        assert_eq!(kind, Ok(ImageKind::HardDisk));
+        assert!(DiskImage::blank_hard_disk("C.IMG", 1 << 20, None).is_err());
+
+        // Formatting wrote the partition table; writes are counted once.
+        assert_eq!(disk.take_written().first(), Some(&0));
+        assert!(disk.take_written().is_empty());
+        disk.write(300, &[0xAB; 1024]).unwrap();
+        assert_eq!(disk.take_written(), [300 * SECTOR_SIZE / CHUNK]);
+        assert_eq!(used(&disk), 3);
+        // Zeros where there are zeros take no memory.
+        disk.write(disk.sectors() - 2, &[0; 1024]).unwrap();
+        disk.write(299, &[0; 1024]).unwrap();
+        assert_eq!(used(&disk), 3);
+        let mut buf = [0u8; 512];
+        disk.read(301, &mut buf).unwrap();
+        assert_eq!(buf, [0xAB; 512]);
+        assert_eq!(disk.read(disk.sectors(), &mut buf), Err(STATUS_SECTOR_NOT_FOUND));
+
+        let floppy = DiskImage::from_memory("A.IMG", MemoryImage::new(737_280), true, None, true).unwrap();
+        assert_eq!(floppy.geometry(), Chs { cylinders: 80, heads: 2, sectors: 9 });
+        assert_eq!(floppy.write(0, &[0; 512]), Err(STATUS_WRITE_PROTECTED));
+        assert_eq!(detect_memory("A.IMG", &floppy.memory().unwrap(), DriveKind::HardDisk), Ok(ImageKind::Floppy));
+        assert!(detect_memory("junk.dat", &vec![1; 5000].into(), DriveKind::HardDisk).is_err());
+
+        // Pieces cut across, and a short last one.
+        let mut image = MemoryImage::new(CHUNK as u64 * 2 + 100);
+        assert!(image.write_at(CHUNK as u64 - 2, &[1, 2, 3, 4]));
+        assert!(image.write_at(CHUNK as u64 * 2 + 98, &[5, 6]));
+        assert!(!image.write_at(CHUNK as u64 * 2 + 99, &[7, 8]));
+        let mut buf = [9u8; 6];
+        assert!(image.read_at(CHUNK as u64 - 3, &mut buf));
+        assert_eq!(buf, [0, 1, 2, 3, 4, 0]);
+        assert_eq!(image.chunk(2).map(<[u8]>::len), Some(100));
+        assert!(!image.read_at(CHUNK as u64 * 2 + 99, &mut buf));
     }
 
     #[test]

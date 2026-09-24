@@ -852,7 +852,7 @@ impl DebugHub {
         } else if self.divert {
             self.ui_input.extend(ui_key(key, ascii, self.remote_mods).map(UiInput::Key));
         } else {
-            apply_key(cpu, key, ascii, true);
+            keyboard::apply_key(&mut cpu.bus, key, ascii, true);
             if !self.remote_held.iter().any(|k| same_key(k, &key)) {
                 self.remote_held.push(key);
             }
@@ -864,7 +864,7 @@ impl DebugHub {
         self.remote_mods &= !key.modifier;
         if let Some(i) = self.remote_held.iter().position(|k| same_key(k, &key)) {
             self.remote_held.remove(i);
-            apply_key(cpu, key, 0, false);
+            keyboard::apply_key(&mut cpu.bus, key, 0, false);
         }
     }
 
@@ -872,7 +872,7 @@ impl DebugHub {
     /// settings window opens and takes the keyboard.
     pub fn release_keys(&mut self, cpu: &mut Cpu) {
         for key in std::mem::take(&mut self.remote_held) {
-            apply_key(cpu, key, 0, false);
+            keyboard::apply_key(&mut cpu.bus, key, 0, false);
         }
     }
 
@@ -1193,7 +1193,7 @@ impl DebugHub {
                 "peak": cpu.bus.audio_peak,
                 "underruns": cpu.bus.audio_underruns,
                 "frames": cpu.bus.audio_frames(),
-                "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.size() / 4),
+                "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.queued_frames()),
                 "sound_blaster": cpu.bus.sb.as_ref().map(|sb| sb.config.blaster()),
                 "opl3": cpu.bus.opl.is_opl3(),
                 "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
@@ -1314,24 +1314,6 @@ impl DebugHub {
             "exceptions": exceptions,
             "mode_switch": self.break_mode_switch,
         })
-    }
-}
-
-fn apply_key(cpu: &mut Cpu, key: PcKey, ascii: u8, down: bool) {
-    if key.modifier != 0 {
-        let mut flags = cpu.bus.read_8(0x0417);
-        if down {
-            flags |= key.modifier;
-            keyboard::deliver_scan_only(&mut cpu.bus, key.scan, key.extended);
-        } else {
-            flags &= !key.modifier;
-            keyboard::deliver_key_up(&mut cpu.bus, key.scan, key.extended);
-        }
-        cpu.bus.write_8(0x0417, flags);
-    } else if down {
-        keyboard::deliver_key_down(&mut cpu.bus, ((key.scan as u16) << 8) | ascii as u16, key.extended);
-    } else {
-        keyboard::deliver_key_up(&mut cpu.bus, key.scan, key.extended);
     }
 }
 

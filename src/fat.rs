@@ -39,6 +39,7 @@ const FILE_NOT_FOUND: u8 = 0x02;
 const PATH_NOT_FOUND: u8 = 0x03;
 const ACCESS_DENIED: u8 = 0x05;
 const WRITE_FAULT: u8 = 0x1D;
+const DISK_FULL: u8 = 0x27;
 const READ_FAULT: u8 = 0x1E;
 
 /// Volumes with fewer clusters than this have 12-bit FATs, and with fewer
@@ -693,6 +694,31 @@ impl FatVolume {
         })();
         let finished = self.finish(&mut state);
         result.and(finished).map(|()| written)
+    }
+
+    /// Put a file with the contents `data`, dated `time` and `date`, at
+    /// `path`, making the directories on its way and replacing a file that
+    /// is there. 27h (disk full) if it doesn't fit, which leaves no file.
+    pub fn put_file(&self, path: &[&str], data: &[u8], time: u16, date: u16) -> Result<(), u8> {
+        let (_, dirs) = path.split_last().ok_or(ACCESS_DENIED)?;
+        for depth in 1..=dirs.len() {
+            match self.find(&dirs[..depth]) {
+                Ok(entry) if entry.is_dir() => {}
+                Ok(_) => return Err(ACCESS_DENIED),
+                Err(_) => self.mkdir(&dirs[..depth])?,
+            }
+        }
+        match self.find(path) {
+            Ok(entry) if entry.is_dir() => return Err(ACCESS_DENIED),
+            Ok(_) => self.remove(path)?,
+            Err(_) => {}
+        }
+        let at = self.create(path, 0)?.at.ok_or(ACCESS_DENIED)?;
+        if self.write(at, 0, data)? < data.len() {
+            let _ = self.remove(path);
+            return Err(DISK_FULL);
+        }
+        self.set_time(at, time, date)
     }
 
     /// Set the time and date of the entry at `at`.

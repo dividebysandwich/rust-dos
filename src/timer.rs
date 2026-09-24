@@ -10,7 +10,8 @@
 //!
 //! Time is measured in PIT input clock ticks (1.193182 MHz).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 pub const PIT_HZ: u64 = 1_193_182;
 

@@ -1,6 +1,3 @@
-use sdl2::keyboard::Keycode;
-use sdl2::keyboard::Mod;
-
 use crate::bus::Bus;
 
 /// Keystrokes the BIOS keyboard buffer at 40:1E holds.
@@ -112,155 +109,205 @@ pub fn deliver_scan_only(bus: &mut Bus, scan: u8, extended: bool) {
     send_scan(bus, scan, extended);
 }
 
-/// Extended keys, which send an E0 prefix: the grey cursor block, keypad
-/// Enter and /, right Ctrl and right Alt.
-pub fn is_extended(keycode: Keycode) -> bool {
-    matches!(
-        keycode,
-        Keycode::Up
-            | Keycode::Down
-            | Keycode::Left
-            | Keycode::Right
-            | Keycode::Home
-            | Keycode::End
-            | Keycode::PageUp
-            | Keycode::PageDown
-            | Keycode::Insert
-            | Keycode::Delete
-            | Keycode::KpEnter
-            | Keycode::KpDivide
-            | Keycode::RCtrl
-            | Keycode::RAlt
-    )
-}
-
-/// Scan code of a modifier key, which has no INT 16h keystroke.
-pub fn modifier_scan(keycode: Keycode) -> Option<u8> {
-    match keycode {
-        Keycode::LShift => Some(0x2A),
-        Keycode::RShift => Some(0x36),
-        Keycode::LCtrl | Keycode::RCtrl => Some(0x1D),
-        Keycode::LAlt | Keycode::RAlt => Some(0x38),
-        Keycode::CapsLock => Some(0x3A),
-        _ => None,
+/// A key of `KEYS` going down (`down`) or up: a modifier sets or clears its
+/// bit at 40:17h and sends only its scan code; any other key goes down
+/// typing `ascii` (see `deliver_key_down`).
+pub fn apply_key(bus: &mut Bus, key: PcKey, ascii: u8, down: bool) {
+    if key.modifier != 0 {
+        let mut flags = bus.read_8(0x0417);
+        if down {
+            flags |= key.modifier;
+            deliver_scan_only(bus, key.scan, key.extended);
+        } else {
+            flags &= !key.modifier;
+            deliver_key_up(bus, key.scan, key.extended);
+        }
+        bus.write_8(0x0417, flags);
+    } else if down {
+        deliver_key_down(bus, ((key.scan as u16) << 8) | ascii as u16, key.extended);
+    } else {
+        deliver_key_up(bus, key.scan, key.extended);
     }
 }
 
-/// Returns a tuple of (Scancode, ASCII) for a given SDL Keycode.
-/// Scancode is the high byte, ASCII is the low byte.
-pub fn map_sdl_to_pc(keycode: Keycode, keymod: Mod) -> Option<u16> {
-    let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-    let _ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
-    let _alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
+// The keys by name, for input that doesn't come from the SDL window (the
+// debug server's, the browser's). Scan codes mirror the window's
+// (`sdl_keys.rs` in the rust-dos program).
 
-    // Construct u16 from (Scan, Ascii)
-    let k = |scan: u8, ascii: u8| Some(((scan as u16) << 8) | (ascii as u16));
+/// A PC key: set-1 scan code, unshifted/shifted ASCII, and — for modifier
+/// keys — the BIOS shift-flag bit it controls at 0040:0017. Extended keys
+/// (the grey cursor block, right Ctrl/Alt, keypad Enter and /) send an E0
+/// prefix before their scan code.
+#[derive(Clone, Copy, Debug)]
+pub struct PcKey {
+    pub scan: u8,
+    pub ascii: u8,
+    pub shifted: u8,
+    pub modifier: u8,
+    pub extended: bool,
+}
 
-    match keycode {
-        // Alphanumeric (Respects Shift)
-        Keycode::A => if shift { k(0x1E, b'A') } else { k(0x1E, b'a') },
-        Keycode::B => if shift { k(0x30, b'B') } else { k(0x30, b'b') },
-        Keycode::C => if shift { k(0x2E, b'C') } else { k(0x2E, b'c') },
-        Keycode::D => if shift { k(0x20, b'D') } else { k(0x20, b'd') },
-        Keycode::E => if shift { k(0x12, b'E') } else { k(0x12, b'e') },
-        Keycode::F => if shift { k(0x21, b'F') } else { k(0x21, b'f') },
-        Keycode::G => if shift { k(0x22, b'G') } else { k(0x22, b'g') },
-        Keycode::H => if shift { k(0x23, b'H') } else { k(0x23, b'h') },
-        Keycode::I => if shift { k(0x17, b'I') } else { k(0x17, b'i') },
-        Keycode::J => if shift { k(0x24, b'J') } else { k(0x24, b'j') },
-        Keycode::K => if shift { k(0x25, b'K') } else { k(0x25, b'k') },
-        Keycode::L => if shift { k(0x26, b'L') } else { k(0x26, b'l') },
-        Keycode::M => if shift { k(0x32, b'M') } else { k(0x32, b'm') },
-        Keycode::N => if shift { k(0x31, b'N') } else { k(0x31, b'n') },
-        Keycode::O => if shift { k(0x18, b'O') } else { k(0x18, b'o') },
-        Keycode::P => if shift { k(0x19, b'P') } else { k(0x19, b'p') },
-        Keycode::Q => if shift { k(0x10, b'Q') } else { k(0x10, b'q') },
-        Keycode::R => if shift { k(0x13, b'R') } else { k(0x13, b'r') },
-        Keycode::S => if shift { k(0x1F, b'S') } else { k(0x1F, b's') },
-        Keycode::T => if shift { k(0x14, b'T') } else { k(0x14, b't') },
-        Keycode::U => if shift { k(0x16, b'U') } else { k(0x16, b'u') },
-        Keycode::V => if shift { k(0x2F, b'V') } else { k(0x2F, b'v') },
-        Keycode::W => if shift { k(0x11, b'W') } else { k(0x11, b'w') },
-        Keycode::X => if shift { k(0x2D, b'X') } else { k(0x2D, b'x') },
-        Keycode::Y => if shift { k(0x15, b'Y') } else { k(0x15, b'y') },
-        Keycode::Z => if shift { k(0x2C, b'Z') } else { k(0x2C, b'z') },
+pub const MOD_RSHIFT: u8 = 0x01;
+pub const MOD_LSHIFT: u8 = 0x02;
+pub const MOD_CTRL: u8 = 0x04;
+pub const MOD_ALT: u8 = 0x08;
 
-        // Numbers (Top Row)
-        Keycode::Num0 => if shift { k(0x0B, b')') } else { k(0x0B, b'0') },
-        Keycode::Num1 => if shift { k(0x02, b'!') } else { k(0x02, b'1') },
-        Keycode::Num2 => if shift { k(0x03, b'@') } else { k(0x03, b'2') },
-        Keycode::Num3 => if shift { k(0x04, b'#') } else { k(0x04, b'3') },
-        Keycode::Num4 => if shift { k(0x05, b'$') } else { k(0x05, b'4') },
-        Keycode::Num5 => if shift { k(0x06, b'%') } else { k(0x06, b'5') },
-        Keycode::Num6 => if shift { k(0x07, b'^') } else { k(0x07, b'6') },
-        Keycode::Num7 => if shift { k(0x08, b'&') } else { k(0x08, b'7') },
-        Keycode::Num8 => if shift { k(0x09, b'*') } else { k(0x09, b'8') },
-        Keycode::Num9 => if shift { k(0x0A, b'(') } else { k(0x0A, b'9') },
+const fn k(scan: u8, ascii: u8, shifted: u8) -> PcKey {
+    PcKey { scan, ascii, shifted, modifier: 0, extended: false }
+}
 
-        // Special Characters
-        Keycode::Space => k(0x39, b' '),
-        Keycode::Return => k(0x1C, 0x0D),
-        Keycode::Backspace => k(0x0E, 0x08),
-        Keycode::Tab => k(0x0F, 0x09),
-        Keycode::Escape => k(0x01, 0x1B),
-        Keycode::Minus => if shift { k(0x0C, b'_') } else { k(0x0C, b'-') },
-        Keycode::Equals => if shift { k(0x0D, b'+') } else { k(0x0D, b'=') },
-        Keycode::LeftBracket => if shift { k(0x1A, b'{') } else { k(0x1A, b'[') },
-        Keycode::RightBracket => if shift { k(0x1B, b'}') } else { k(0x1B, b']') },
-        Keycode::Backslash => if shift { k(0x2B, b'|') } else { k(0x2B, b'\\') },
-        Keycode::Semicolon => if shift { k(0x27, b':') } else { k(0x27, b';') },
-        Keycode::Quote => if shift { k(0x28, b'"') } else { k(0x28, b'\'') },
-        Keycode::Comma => if shift { k(0x33, b'<') } else { k(0x33, b',') },
-        Keycode::Period => if shift { k(0x34, b'>') } else { k(0x34, b'.') },
-        Keycode::Slash => if shift { k(0x35, b'?') } else { k(0x35, b'/') },
-        Keycode::Backquote => if shift { k(0x29, b'~') } else { k(0x29, b'`') },
+/// An extended key.
+const fn x(scan: u8, ascii: u8) -> PcKey {
+    PcKey { scan, ascii, shifted: ascii, modifier: 0, extended: true }
+}
 
-        // Function Keys (F1-F10: Standard | F11-F12: Extended)
-        Keycode::F1 => k(0x3B, 0),
-        Keycode::F2 => k(0x3C, 0),
-        Keycode::F3 => k(0x3D, 0),
-        Keycode::F4 => k(0x3E, 0),
-        Keycode::F5 => k(0x3F, 0),
-        Keycode::F6 => k(0x40, 0),
-        Keycode::F7 => k(0x41, 0),
-        Keycode::F8 => k(0x42, 0),
-        Keycode::F9 => k(0x43, 0),
-        Keycode::F10 => k(0x44, 0),
-        Keycode::F11 => k(0x85, 0),
-        Keycode::F12 => k(0x86, 0),
+const fn m(scan: u8, modifier: u8) -> PcKey {
+    PcKey { scan, ascii: 0, shifted: 0, modifier, extended: false }
+}
 
-        // Navigation / Editing (Extended Keys usually have 0x00 or 0xE0 prefix)
-        // DOS usually returns 0x00 as the ASCII code for these extended keys.
-        Keycode::Up => k(0x48, 0),
-        Keycode::Down => k(0x50, 0),
-        Keycode::Left => k(0x4B, 0),
-        Keycode::Right => k(0x4D, 0),
-        Keycode::Home => k(0x47, 0),
-        Keycode::End => k(0x4F, 0),
-        Keycode::PageUp => k(0x49, 0),
-        Keycode::PageDown => k(0x51, 0),
-        Keycode::Insert => k(0x52, 0),
-        Keycode::Delete => k(0x53, 0), // Note: Sometimes 0xE0 prefix in modern BIOS
+/// An extended modifier (right Ctrl, right Alt).
+const fn mx(scan: u8, modifier: u8) -> PcKey {
+    PcKey { scan, ascii: 0, shifted: 0, modifier, extended: true }
+}
 
-        // Keypad (Assuming NumLock Off for navigation, On for numbers)
-        // Simplified: Always treat as Numbers for now
-        Keycode::Kp0 => k(0x52, b'0'),
-        Keycode::Kp1 => k(0x4F, b'1'),
-        Keycode::Kp2 => k(0x50, b'2'),
-        Keycode::Kp3 => k(0x51, b'3'),
-        Keycode::Kp4 => k(0x4B, b'4'),
-        Keycode::Kp5 => k(0x4C, b'5'),
-        Keycode::Kp6 => k(0x4D, b'6'),
-        Keycode::Kp7 => k(0x47, b'7'),
-        Keycode::Kp8 => k(0x48, b'8'),
-        Keycode::Kp9 => k(0x49, b'9'),
-        Keycode::KpPeriod => k(0x53, b'.'),
-        Keycode::KpPlus => k(0x4E, b'+'),
-        Keycode::KpMinus => k(0x4A, b'-'),
-        Keycode::KpMultiply => k(0x37, b'*'),
-        Keycode::KpDivide => k(0x35, b'/'),
-        Keycode::KpEnter => k(0x1C, 0x0D), // Treated same as main Enter
+/// (name, key). Names are matched case-insensitively.
+const KEYS: &[(&str, PcKey)] = &[
+    ("a", k(0x1E, b'a', b'A')),
+    ("b", k(0x30, b'b', b'B')),
+    ("c", k(0x2E, b'c', b'C')),
+    ("d", k(0x20, b'd', b'D')),
+    ("e", k(0x12, b'e', b'E')),
+    ("f", k(0x21, b'f', b'F')),
+    ("g", k(0x22, b'g', b'G')),
+    ("h", k(0x23, b'h', b'H')),
+    ("i", k(0x17, b'i', b'I')),
+    ("j", k(0x24, b'j', b'J')),
+    ("k", k(0x25, b'k', b'K')),
+    ("l", k(0x26, b'l', b'L')),
+    ("m", k(0x32, b'm', b'M')),
+    ("n", k(0x31, b'n', b'N')),
+    ("o", k(0x18, b'o', b'O')),
+    ("p", k(0x19, b'p', b'P')),
+    ("q", k(0x10, b'q', b'Q')),
+    ("r", k(0x13, b'r', b'R')),
+    ("s", k(0x1F, b's', b'S')),
+    ("t", k(0x14, b't', b'T')),
+    ("u", k(0x16, b'u', b'U')),
+    ("v", k(0x2F, b'v', b'V')),
+    ("w", k(0x11, b'w', b'W')),
+    ("x", k(0x2D, b'x', b'X')),
+    ("y", k(0x15, b'y', b'Y')),
+    ("z", k(0x2C, b'z', b'Z')),
+    ("0", k(0x0B, b'0', b')')),
+    ("1", k(0x02, b'1', b'!')),
+    ("2", k(0x03, b'2', b'@')),
+    ("3", k(0x04, b'3', b'#')),
+    ("4", k(0x05, b'4', b'$')),
+    ("5", k(0x06, b'5', b'%')),
+    ("6", k(0x07, b'6', b'^')),
+    ("7", k(0x08, b'7', b'&')),
+    ("8", k(0x09, b'8', b'*')),
+    ("9", k(0x0A, b'9', b'(')),
+    ("minus", k(0x0C, b'-', b'_')),
+    ("equals", k(0x0D, b'=', b'+')),
+    ("leftbracket", k(0x1A, b'[', b'{')),
+    ("rightbracket", k(0x1B, b']', b'}')),
+    ("backslash", k(0x2B, b'\\', b'|')),
+    ("semicolon", k(0x27, b';', b':')),
+    ("quote", k(0x28, b'\'', b'"')),
+    ("comma", k(0x33, b',', b'<')),
+    ("period", k(0x34, b'.', b'>')),
+    ("slash", k(0x35, b'/', b'?')),
+    ("backquote", k(0x29, b'`', b'~')),
+    ("space", k(0x39, b' ', b' ')),
+    ("enter", k(0x1C, 0x0D, 0x0D)),
+    ("return", k(0x1C, 0x0D, 0x0D)),
+    ("backspace", k(0x0E, 0x08, 0x08)),
+    ("tab", k(0x0F, 0x09, 0x09)),
+    ("escape", k(0x01, 0x1B, 0x1B)),
+    ("esc", k(0x01, 0x1B, 0x1B)),
+    ("f1", k(0x3B, 0, 0)),
+    ("f2", k(0x3C, 0, 0)),
+    ("f3", k(0x3D, 0, 0)),
+    ("f4", k(0x3E, 0, 0)),
+    ("f5", k(0x3F, 0, 0)),
+    ("f6", k(0x40, 0, 0)),
+    ("f7", k(0x41, 0, 0)),
+    ("f8", k(0x42, 0, 0)),
+    ("f9", k(0x43, 0, 0)),
+    ("f10", k(0x44, 0, 0)),
+    ("f11", k(0x85, 0, 0)),
+    ("f12", k(0x86, 0, 0)),
+    ("up", x(0x48, 0)),
+    ("down", x(0x50, 0)),
+    ("left", x(0x4B, 0)),
+    ("right", x(0x4D, 0)),
+    ("home", x(0x47, 0)),
+    ("end", x(0x4F, 0)),
+    ("pageup", x(0x49, 0)),
+    ("pagedown", x(0x51, 0)),
+    ("insert", x(0x52, 0)),
+    ("delete", x(0x53, 0)),
+    ("kp0", k(0x52, b'0', b'0')),
+    ("kp1", k(0x4F, b'1', b'1')),
+    ("kp2", k(0x50, b'2', b'2')),
+    ("kp3", k(0x51, b'3', b'3')),
+    ("kp4", k(0x4B, b'4', b'4')),
+    ("kp5", k(0x4C, b'5', b'5')),
+    ("kp6", k(0x4D, b'6', b'6')),
+    ("kp7", k(0x47, b'7', b'7')),
+    ("kp8", k(0x48, b'8', b'8')),
+    ("kp9", k(0x49, b'9', b'9')),
+    ("kpperiod", k(0x53, b'.', b'.')),
+    ("kpplus", k(0x4E, b'+', b'+')),
+    ("kpminus", k(0x4A, b'-', b'-')),
+    ("kpmultiply", k(0x37, b'*', b'*')),
+    ("kpdivide", x(0x35, b'/')),
+    ("kpenter", x(0x1C, 0x0D)),
+    ("lshift", m(0x2A, MOD_LSHIFT)),
+    ("shift", m(0x2A, MOD_LSHIFT)),
+    ("rshift", m(0x36, MOD_RSHIFT)),
+    ("ctrl", m(0x1D, MOD_CTRL)),
+    ("lctrl", m(0x1D, MOD_CTRL)),
+    ("rctrl", mx(0x1D, MOD_CTRL)),
+    ("alt", m(0x38, MOD_ALT)),
+    ("lalt", m(0x38, MOD_ALT)),
+    ("ralt", mx(0x38, MOD_ALT)),
+];
 
-        _ => None,
+pub fn lookup(name: &str) -> Option<PcKey> {
+    let lower = name.to_ascii_lowercase();
+    KEYS.iter().find(|(n, _)| *n == lower).map(|(_, key)| *key)
+}
+
+/// Map a character to (key, needs_shift) for typing text.
+pub fn char_to_key(c: char) -> Option<(PcKey, bool)> {
+    match c {
+        '\n' | '\r' => return lookup("enter").map(|key| (key, false)),
+        '\t' => return lookup("tab").map(|key| (key, false)),
+        '\x08' => return lookup("backspace").map(|key| (key, false)),
+        '\x1b' => return lookup("escape").map(|key| (key, false)),
+        _ => {}
     }
+    if !c.is_ascii() || c.is_ascii_control() {
+        return None;
+    }
+    let b = c as u8;
+    // Only the printable main-block keys; the keypad duplicates would
+    // otherwise shadow digits and operators.
+    KEYS.iter()
+        .filter(|(n, _)| !n.starts_with("kp"))
+        .find_map(|(_, key)| {
+            if key.ascii == b {
+                Some((*key, false))
+            } else if key.shifted == b && key.shifted != key.ascii {
+                Some((*key, true))
+            } else {
+                None
+            }
+        })
+}
+
+pub fn names() -> Vec<&'static str> {
+    KEYS.iter().map(|(n, _)| *n).collect()
 }

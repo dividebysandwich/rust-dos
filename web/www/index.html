@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Rust-DOS, an x86 DOS emulator written in Rust, running in the browser.">
+<title>Rust-DOS</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="main.js"></script>
+</head>
+<body>
+<header class="bar">
+  <span class="brand">Rust-DOS</span>
+  <nav class="actions" aria-label="Machine">
+    <button type="button" id="add-files" title="Copy files or .zip archives to C:">Add files</button>
+    <button type="button" id="add-folder" title="Copy a folder to C:">Add folder</button>
+    <button type="button" id="open-drives">Drives</button>
+    <button type="button" id="open-settings" title="Ctrl+F12">Settings</button>
+    <button type="button" id="sound" aria-pressed="true">Sound on</button>
+    <button type="button" id="fullscreen">Fullscreen</button>
+  </nav>
+</header>
+
+<main id="stage">
+  <canvas id="screen" width="640" height="400" aria-label="DOS screen"></canvas>
+  <div id="loading" class="overlay"><p>Loading Rust-DOS…</p></div>
+  <div id="drop" class="overlay" hidden>
+    <p><strong>Drop to add to C:</strong><br>Files, folders and .zip archives are copied to C:. Floppy and CD images (.img, .ima, .iso) go in a drive.</p>
+  </div>
+  <div id="halt" class="overlay" hidden>
+    <div class="halt-box">
+      <p id="halt-message"></p>
+      <button type="button" id="restart">Restart</button>
+    </div>
+  </div>
+</main>
+
+<footer class="status">
+  <div id="drive-chips" class="chips"></div>
+  <span id="mouse-hint" hidden>Mouse captured. Ctrl+F10 or Esc releases it.</span>
+  <span id="speed" class="readout"></span>
+</footer>
+
+<div id="toasts" role="status" aria-live="polite"></div>
+
+<dialog id="drives">
+  <form method="dialog" class="dialog-body">
+    <h2>Drives</h2>
+    <div class="drive-table-wrap">
+    <table class="drive-table">
+      <thead><tr><th scope="col">Drive</th><th scope="col">Type</th><th scope="col">Label</th><th scope="col">Size</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+      <tbody id="drive-rows"></tbody>
+    </table>
+    </div>
+    <p id="c-note" class="note"></p>
+
+    <fieldset>
+      <legend>Insert a disk image</legend>
+      <p class="note">Floppy images (.img, .ima, .vfd) and hard disk images, or CD images (.iso) for a CD-ROM drive.</p>
+      <div class="row">
+        <label for="image-drive">Drive</label>
+        <select id="image-drive"></select>
+        <button type="button" id="choose-image">Choose image…</button>
+      </div>
+    </fieldset>
+
+    <fieldset id="erase">
+      <legend>Erase C:</legend>
+      <p class="note">Starts over with an empty C: of the size you pick, and restarts the machine. Everything on C: is lost; download its image first to keep it.</p>
+      <div class="row">
+        <label for="c-size">Size</label>
+        <select id="c-size">
+          <option value="250">250 MB</option>
+          <option value="500">500 MB</option>
+          <option value="1000">1 GB</option>
+        </select>
+        <button type="button" id="erase-c" class="danger">Erase C: and restart</button>
+      </div>
+    </fieldset>
+
+    <div class="dialog-actions">
+      <button value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings">
+  <form method="dialog" class="dialog-body">
+    <h2>Settings</h2>
+    <p class="note">The settings of the <code>rust-dos.conf</code> file, which this browser keeps. The machine restarts with them; C: stays as it is.</p>
+    <label for="config" class="visually-hidden">Configuration</label>
+    <textarea id="config" spellcheck="false" rows="18"></textarea>
+    <ul id="config-warnings" class="warnings"></ul>
+    <div class="dialog-actions">
+      <button type="button" id="config-defaults">Default settings</button>
+      <span class="spacer"></span>
+      <button value="close">Cancel</button>
+      <button type="button" id="config-save" class="primary">Save and restart</button>
+    </div>
+  </form>
+</dialog>
+
+<input type="file" id="file-input" multiple hidden>
+<input type="file" id="folder-input" webkitdirectory hidden>
+<input type="file" id="image-input" hidden>
+</body>
+</html>

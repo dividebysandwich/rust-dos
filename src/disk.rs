@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use crate::cdrom::image::CdImage;
 use crate::cdrom::Extent;
-use crate::diskimage::{self, Chs, DiskImage, ImageKind};
+use crate::diskimage::{self, Chs, DiskImage, ImageKind, MemoryImage};
 use crate::fat::{self, EntryRef, FatVolume};
 use crate::memfs::{Bytes, MemFs, Node};
 use crate::mount::MountSpec;
@@ -89,7 +89,7 @@ fn is_short_name(name: &str) -> bool {
 /// characters DOS doesn't allow, and become the start of the name with a
 /// number, `~N`, counted per prefix: "Day Of The Tentacle.BIN" and ".cue"
 /// are DAYOFT~1.BIN and DAYOFT~2.CUE.
-pub(crate) fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
     let mut used = std::collections::HashSet::new();
     let mut result = vec![String::new(); names.len()];
     // 8.3 names come first, so that no generated name takes one.
@@ -674,46 +674,141 @@ impl DiskController {
     /// Open the disk or CD image at `path` for `drive`: the drive's type,
     /// its storage, the volume label and whether the image can be written.
     fn open_image(drive: u8, path: &Path, opts: &MountOptions) -> Result<(DriveKind, Storage, String, bool), String> {
-        let letter = drive_letter(drive);
-        let floppy_drive = drive < FLOPPY_DRIVES;
         let found = diskimage::detect(path, opts.kind)?;
         if found == ImageKind::Cd {
-            if floppy_drive {
-                return Err(format!("Drive {}: is a floppy drive and can't be a CD-ROM", letter));
-            }
-            if drive == DRIVE_C {
-                return Err("Drive C: can't be a CD-ROM".to_string());
-            }
-            let image = CdImage::open(path)?;
-            // A disc of only audio tracks has no file system.
-            let (files, volume_label) = match image.data_track() {
-                Some(_) => {
-                    let volume = crate::cdrom::iso9660::read_volume(&image)?;
-                    (volume.files, volume.label)
-                }
-                None => (MemFs::new(), "AUDIO_CD".to_string()),
-            };
-            let volume_label = if volume_label.is_empty() { "CDROM".to_string() } else { volume_label };
-            return Ok((DriveKind::CdRom, Storage::Tree { files, image: Some(Rc::new(image)) }, volume_label, false));
+            Self::check_cd_drive(drive)?;
+            return Self::cd_storage(CdImage::open(path)?);
         }
         // A: and B: take a hard disk image without a partition table as a
         // floppy of its size.
-        let floppy = found == ImageKind::Floppy || floppy_drive;
+        let floppy = found == ImageKind::Floppy || drive < FLOPPY_DRIVES;
+        let name = path.display().to_string();
+        Self::fat_storage(drive, found, &name, || DiskImage::open(path, floppy, opts.geometry, opts.read_only))
+    }
+
+    /// Whether a CD image can go in `drive`: not in a floppy drive, and not
+    /// as C:.
+    fn check_cd_drive(drive: u8) -> Result<(), String> {
+        if drive < FLOPPY_DRIVES {
+            return Err(format!("Drive {}: is a floppy drive and can't be a CD-ROM", drive_letter(drive)));
+        }
+        if drive == DRIVE_C {
+            return Err("Drive C: can't be a CD-ROM".to_string());
+        }
+        Ok(())
+    }
+
+    /// The type, storage, volume label and writability of a CD drive with
+    /// `image` in it.
+    fn cd_storage(image: CdImage) -> Result<(DriveKind, Storage, String, bool), String> {
+        // A disc of only audio tracks has no file system.
+        let (files, volume_label) = match image.data_track() {
+            Some(_) => {
+                let volume = crate::cdrom::iso9660::read_volume(&image)?;
+                (volume.files, volume.label)
+            }
+            None => (MemFs::new(), "AUDIO_CD".to_string()),
+        };
+        let volume_label = if volume_label.is_empty() { "CDROM".to_string() } else { volume_label };
+        Ok((DriveKind::CdRom, Storage::Tree { files, image: Some(Rc::new(image)) }, volume_label, false))
+    }
+
+    /// The type, storage, volume label and writability of `drive` with the
+    /// floppy or hard disk image `open` opens, which was `found` to be of
+    /// that kind and `name` names in messages.
+    fn fat_storage(
+        drive: u8,
+        found: ImageKind,
+        name: &str,
+        open: impl FnOnce() -> Result<DiskImage, String>,
+    ) -> Result<(DriveKind, Storage, String, bool), String> {
         let open = || -> Result<(Rc<DiskImage>, FatVolume), String> {
-            let disk = Rc::new(DiskImage::open(path, floppy, opts.geometry, opts.read_only)?);
+            let disk = Rc::new(open()?);
             let (start, sectors) = disk.fat_volume()?;
             let volume = FatVolume::open(disk.clone(), start, sectors)?;
             Ok((disk, volume))
         };
         let (disk, volume) = open().map_err(|e| match found {
-            ImageKind::HardDisk if floppy_drive => {
-                format!("Drive {}: is a floppy drive and can't hold a hard disk image", letter)
+            ImageKind::HardDisk if drive < FLOPPY_DRIVES => {
+                format!("Drive {}: is a floppy drive and can't hold a hard disk image", drive_letter(drive))
             }
-            _ => format!("{}: {}", path.display(), e),
+            _ => format!("{}: {}", name, e),
         })?;
         let volume_label = volume.label().unwrap_or_default();
-        let kind = if floppy { DriveKind::Floppy } else { DriveKind::HardDisk };
+        let kind = if disk.is_floppy() { DriveKind::Floppy } else { DriveKind::HardDisk };
         Ok((kind, Storage::Fat(Rc::new(volume)), volume_label, disk.writable()))
+    }
+
+    /// Mount a disk or CD image held in memory as `drive`, replacing what is
+    /// there, as `mount` mounts an image file named `name`: which kind of
+    /// image it is comes from `opts.kind`, the name and the contents (see
+    /// `diskimage::detect_memory`).
+    pub fn mount_memory_image(
+        &mut self,
+        drive: u8,
+        name: &str,
+        data: MemoryImage,
+        opts: MountOptions,
+    ) -> Result<(), String> {
+        Self::check_image_drive(drive, &opts)?;
+        let found = diskimage::detect_memory(name, &data, opts.kind)?;
+        let (kind, storage, volume_label, writable) = if found == ImageKind::Cd {
+            Self::check_cd_drive(drive)?;
+            Self::cd_storage(CdImage::from_memory(name, data)?)?
+        } else {
+            let floppy = found == ImageKind::Floppy || drive < FLOPPY_DRIVES;
+            let open = || DiskImage::from_memory(name, data, floppy, opts.geometry, opts.read_only);
+            Self::fat_storage(drive, found, name, open)?
+        };
+        self.insert_image_drive(drive, kind, storage, &volume_label, writable, &opts);
+        Ok(())
+    }
+
+    /// Mount the floppy or hard disk image `disk` as `drive`, replacing what
+    /// is there: one made in memory (`DiskImage::blank_hard_disk`).
+    pub fn mount_disk_image(&mut self, drive: u8, disk: DiskImage, opts: MountOptions) -> Result<(), String> {
+        Self::check_image_drive(drive, &opts)?;
+        let found = if disk.is_floppy() { ImageKind::Floppy } else { ImageKind::HardDisk };
+        let name = disk.path().display().to_string();
+        let (kind, storage, volume_label, writable) = Self::fat_storage(drive, found, &name, || Ok(disk))?;
+        self.insert_image_drive(drive, kind, storage, &volume_label, writable, &opts);
+        Ok(())
+    }
+
+    /// Whether an image held in memory can be mounted as `drive`.
+    fn check_image_drive(drive: u8, opts: &MountOptions) -> Result<(), String> {
+        if drive >= LASTDRIVE {
+            return Err("Invalid drive letter".to_string());
+        }
+        if drive == DRIVE_Z || opts.kind == DriveKind::Virtual {
+            return Err(format!("Drive {}: is reserved", drive_letter(drive)));
+        }
+        Ok(())
+    }
+
+    /// Put an image held in memory in `drive`, closing the files open on
+    /// what was there.
+    fn insert_image_drive(
+        &mut self,
+        drive: u8,
+        kind: DriveKind,
+        storage: Storage,
+        volume_label: &str,
+        writable: bool,
+        opts: &MountOptions,
+    ) {
+        self.close_drive_files(drive);
+        self.drives[drive as usize] = Some(Drive {
+            kind,
+            storage,
+            current_dir: String::new(),
+            label: Self::label_for(opts, volume_label),
+            read_only: opts.read_only || !writable,
+            mount: None,
+            images: Vec::new(),
+            image: 0,
+            media_changed: true,
+        });
     }
 
     /// Put the next image in a drive mounted from a list of them, as
@@ -1370,8 +1465,8 @@ impl DiskController {
     /// INT 21h, AH=5Ah: create a file with a unique name in `directory`
     /// (which ends in a backslash). Returns the handle and the name.
     pub fn create_temp_file(&mut self, directory: &str, owner: u16) -> Result<(u16, String), u8> {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let stamp = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         for i in 0..1000u32 {
             let name = format!("{}{:08X}", directory, stamp.wrapping_add(i) & 0x0FFF_FFFF);
@@ -2439,6 +2534,39 @@ mod tests {
         let d = disk.find_directory_entry("D:\\*.*", 0, 0x08).unwrap();
         assert_eq!(d.filename, "GAMECD_D.ISK");
         assert_eq!(disk.volume_label(3).unwrap(), "GAMECD_DISK");
+    }
+
+    #[test]
+    fn images_held_in_memory() {
+        let mut disk = DiskController::new(scratch("memimage"));
+        // A hard disk made for C:, and files put on it.
+        let c = DiskImage::blank_hard_disk("C.IMG", 8 << 20, Some("web")).unwrap();
+        disk.mount_disk_image(DRIVE_C, c, MountOptions::default()).unwrap();
+        disk.fat_volume(DRIVE_C).unwrap().put_file(&["GAMES", "KEEN", "KEEN1.EXE"], b"MZ", 0, 0x5021).unwrap();
+        assert!(disk.is_file("C:\\GAMES\\KEEN\\KEEN1.EXE") && disk.is_directory("C:\\GAMES"));
+        let info = disk.drive_info(DRIVE_C).unwrap();
+        assert_eq!((info.kind, info.label.as_str(), info.read_only), (DriveKind::HardDisk, "WEB", false));
+        assert!(info.mount.is_none() && info.root.is_none());
+
+        // A floppy image's bytes as A:, written through DOS.
+        let blank = DiskImage::from_memory("F.IMG", MemoryImage::new(1_474_560), true, None, false).unwrap();
+        fat::format(&blank, 0, 2880, None).unwrap();
+        let bytes = blank.memory().unwrap().clone();
+        disk.mount_memory_image(0, "DISK1.IMA", bytes.clone(), MountOptions::default()).unwrap();
+        assert_eq!(disk.drive_kind(0), Some(DriveKind::Floppy));
+        disk.bios_image(0).unwrap().take_written();
+        let h = disk.create_file("A:\\SAVE.DAT", PSP).unwrap();
+        assert_eq!(disk.write_file(h, b"saved"), Ok(5));
+        disk.close_file(h);
+        assert!(!disk.bios_image(0).unwrap().take_written().is_empty());
+        assert!(matches!(disk.file_data("A:\\SAVE.DAT").map(|f| f.read()), Some(Ok(d)) if &d[..] == b"saved"));
+
+        // Not a CD in a floppy drive or as C:, nor junk anywhere.
+        let cd = MountOptions { kind: DriveKind::CdRom, ..MountOptions::default() };
+        assert!(disk.mount_memory_image(1, "B.ISO", bytes.clone(), cd.clone()).is_err());
+        assert!(disk.mount_memory_image(DRIVE_C, "C.ISO", bytes, cd).is_err());
+        assert!(disk.mount_memory_image(3, "junk.dat", vec![1; 5000].into(), MountOptions::default()).is_err());
+        assert!(!disk.is_mounted(3) && disk.is_file("C:\\GAMES\\KEEN\\KEEN1.EXE"));
     }
 
     #[test]

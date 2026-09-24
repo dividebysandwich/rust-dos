@@ -3,6 +3,7 @@
 
 use super::cue::{parse_cue, FileFormat, TrackMode};
 use super::{Extent, DATA_SECTOR, RAW_SECTOR};
+use crate::diskimage::MemoryImage;
 use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -36,13 +37,20 @@ impl Track {
 
 /// A file that holds track data.
 struct Backing {
-    file: RefCell<File>,
+    source: Source,
     /// Where the sector data starts (after a WAVE header).
     data_offset: u64,
     /// Bytes of sector data.
     len: u64,
     /// Audio samples are big-endian.
     swap: bool,
+}
+
+/// Where a track file's bytes are.
+enum Source {
+    File(RefCell<File>),
+    /// In memory, as the browser build has its CD images.
+    Memory(MemoryImage),
 }
 
 pub struct CdImage {
@@ -117,17 +125,36 @@ impl CdImage {
     }
 
     fn open_bare(path: &Path) -> Result<Self, String> {
-        let backing = Backing::open(path, FileFormat::Binary)?;
+        Self::bare(path, Backing::open(path, FileFormat::Binary)?)
+    }
+
+    /// A bare image of one data track held in memory, as `open` makes of a
+    /// file with those bytes; `name` names it in messages.
+    pub fn from_memory(name: &str, data: MemoryImage) -> Result<Self, String> {
+        let len = data.len();
+        Self::bare(Path::new(name), Backing { source: Source::Memory(data), data_offset: 0, len, swap: false })
+    }
+
+    /// Whether `data` is a bare image of one data track.
+    pub fn probe(data: &MemoryImage) -> bool {
+        Self::bare_mode(data.len(), |at, buf| data.read_at(at, buf)).is_some()
+    }
+
+    /// The sector format of a bare image of `len` bytes, found from where
+    /// the ISO 9660 volume descriptor is, which `read` fills a buffer from.
+    fn bare_mode(len: u64, mut read: impl FnMut(u64, &mut [u8]) -> bool) -> Option<TrackMode> {
         // The Primary Volume Descriptor is sector 16: "CD001" at byte 1 of
         // its user data.
         let layouts = [TrackMode::Mode1_2048, TrackMode::Mode1_2352, TrackMode::Mode2_2352, TrackMode::Mode2_2336];
         let mut probe = [0u8; 5];
-        let mode = layouts
-            .into_iter()
-            .find(|mode| {
-                let at = 16 * mode.sector_size() + mode.data_offset() + 1;
-                backing.read_at(at, &mut probe).is_ok() && &probe == b"CD001"
-            })
+        layouts.into_iter().find(|mode| {
+            let at = 16 * mode.sector_size() + mode.data_offset() + 1;
+            at < len && read(at, &mut probe) && &probe == b"CD001"
+        })
+    }
+
+    fn bare(path: &Path, backing: Backing) -> Result<Self, String> {
+        let mode = Self::bare_mode(backing.len, |at, buf| backing.read_at(at, buf).is_ok())
             .ok_or_else(|| format!("{} is not an ISO 9660 CD image", path.display()))?;
         let sectors = (backing.len / mode.sector_size()) as u32;
         let track = Track {
@@ -272,7 +299,7 @@ impl Backing {
             }
             _ => (0, total),
         };
-        Ok(Backing { file: RefCell::new(file), data_offset, len, swap: format == FileFormat::Motorola })
+        Ok(Backing { source: Source::File(RefCell::new(file)), data_offset, len, swap: format == FileFormat::Motorola })
     }
 
     /// Fill `buf` from byte `at` of the sector data; past the end of the
@@ -283,9 +310,18 @@ impl Backing {
             return Ok(());
         }
         let n = buf.len().min((self.len - at) as usize);
-        let mut file = self.file.borrow_mut();
-        file.seek(SeekFrom::Start(self.data_offset + at))?;
-        file.read_exact(&mut buf[..n])
+        let at = self.data_offset + at;
+        match &self.source {
+            Source::File(file) => {
+                let mut file = file.borrow_mut();
+                file.seek(SeekFrom::Start(at))?;
+                file.read_exact(&mut buf[..n])
+            }
+            Source::Memory(data) => match data.read_at(at, &mut buf[..n]) {
+                true => Ok(()),
+                false => Err(io::ErrorKind::UnexpectedEof.into()),
+            },
+        }
     }
 }
 
@@ -439,5 +475,21 @@ mod tests {
 
         fs::write(dir.join("junk.iso"), vec![0u8; 40 * 2048]).unwrap();
         assert!(CdImage::open(&dir.join("junk.iso")).is_err());
+    }
+
+    #[test]
+    fn images_held_in_memory() {
+        let mut iso = vec![0u8; 17 * 2048];
+        iso[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"CD001");
+        let iso = MemoryImage::from(iso);
+        assert!(CdImage::probe(&iso));
+        let image = CdImage::from_memory("GAME.ISO", iso).unwrap();
+        assert_eq!(image.tracks()[0].mode, TrackMode::Mode1_2048);
+        assert_eq!(image.leadout(), 17);
+        let mut sector = [0u8; DATA_SECTOR];
+        image.read_data(16, &mut sector).unwrap();
+        assert_eq!(&sector[1..6], b"CD001");
+        assert!(!CdImage::probe(&MemoryImage::new(40 * 2048)));
+        assert!(CdImage::from_memory("junk.iso", MemoryImage::new(40 * 2048)).is_err());
     }
 }

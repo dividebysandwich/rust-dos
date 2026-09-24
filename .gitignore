@@ -36,3 +36,7 @@ programs/
 
 # Screenshots for the website
 /screenshots/
+
+# The browser build (web/build.sh)
+/web/target
+/web/www/pkg

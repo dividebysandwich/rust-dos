@@ -1,6 +1,5 @@
-use sdl2::audio::AudioQueue;
 use std::collections::VecDeque;
-use std::time::Instant;
+use web_time::Instant;
 
 use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
 use crate::video::vbe::Vbe;
@@ -56,6 +55,8 @@ pub struct Bus {
     /// The DOSCONFIG command asked for the settings window; the frontend
     /// opens it.
     pub config_ui_requested: bool,
+    /// The EXIT command asked to turn the machine off; the frontend quits.
+    pub exit_requested: bool,
     pub cmos: crate::cmos::Cmos,
     /// The XMS driver's allocations and A20 state.
     pub xms: crate::xms::Xms,
@@ -82,7 +83,7 @@ pub struct Bus {
     /// real-time threshold (e.g. 24–1124 µs) show the stick permanently
     /// pegged. Carrier Command uses this as its primary cursor input.
     pub joystick_read_count: u32,
-    pub audio_device: Option<AudioQueue<i16>>,
+    pub audio_device: Option<Box<dyn crate::audio::AudioOutput>>,
     pub speaker_on: bool,    // Is the speaker playing?
     pub pit_divisor: u16,    // Current Frequency Divisor
     pub pit_read_msb: bool,  // Channel 2 read LSB/MSB toggle
@@ -143,6 +144,9 @@ pub struct Bus {
     /// The time disk access takes, and the drives' noises.
     pub disk_io: crate::diskio::DiskIo,
     pub disknoise: crate::disknoise::DiskNoise,
+    /// The drives read or written since the front end last looked (bit n
+    /// for drive n), for its activity lights.
+    pub drives_active: u32,
     /// What MSCDEX keeps between calls.
     pub mscdex: crate::interrupts::mscdex::MscdexState,
     /// Mixed output (44.1 kHz stereo, interleaved) rendered up to
@@ -209,6 +213,7 @@ impl Bus {
             a20_mask: !0x0010_0000,
             reset_requested: false,
             config_ui_requested: false,
+            exit_requested: false,
             cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
             post_code: 0,
             debug_console: Vec::new(),
@@ -251,6 +256,7 @@ impl Bus {
             cdaudio: crate::cdrom::audio::CdPlayer::new(),
             disk_io: crate::diskio::DiskIo::default(),
             disknoise: crate::disknoise::DiskNoise::new(),
+            drives_active: 0,
             mscdex: Default::default(),
             audio_out: VecDeque::new(),
             audio_frames: 0,
@@ -364,7 +370,39 @@ impl Bus {
         opts: MountOptions,
         replace: bool,
     ) -> Result<std::path::PathBuf, String> {
-        let result = self.disk.mount(drive, path, opts, replace);
+        self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace))
+    }
+
+    /// Mount a disk or CD image held in memory as a DOS drive, replacing
+    /// what is there. See `DiskController::mount_memory_image`.
+    pub fn mount_memory_image(
+        &mut self,
+        drive: u8,
+        name: &str,
+        data: crate::diskimage::MemoryImage,
+        opts: MountOptions,
+    ) -> Result<(), String> {
+        self.mount_with(drive, |disk| disk.mount_memory_image(drive, name, data, opts))
+    }
+
+    /// Mount a disk image made in memory as a DOS drive, replacing what is
+    /// there. See `DiskController::mount_disk_image`.
+    pub fn mount_disk_image(
+        &mut self,
+        drive: u8,
+        image: crate::diskimage::DiskImage,
+        opts: MountOptions,
+    ) -> Result<(), String> {
+        self.mount_with(drive, |disk| disk.mount_disk_image(drive, image, opts))
+    }
+
+    /// Mount `drive` with `mount` and refresh the BIOS view of the drive set.
+    fn mount_with<T>(
+        &mut self,
+        drive: u8,
+        mount: impl FnOnce(&mut DiskController) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let result = mount(&mut self.disk);
         if result.is_ok() {
             // Another disc: whatever played stops, and MSCDEX says so.
             self.cdaudio.stop_drive(drive);
@@ -418,6 +456,7 @@ impl Bus {
     /// `bytes` were moved on `drive`, if it is a floppy drive or a hard
     /// disk.
     pub fn drive_activity(&mut self, drive: u8, bytes: u32, access: crate::disknoise::Access) {
+        self.drives_active |= 1 << drive;
         if let Some(class) = self.disk.drive_kind(drive).and_then(crate::diskio::DiskClass::of) {
             self.disk_activity(class, bytes, access);
         }
