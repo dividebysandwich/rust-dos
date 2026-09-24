@@ -20,7 +20,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 /// A machine with `adapter`, in its text mode as at the prompt.
 fn machine(adapter: Adapter) -> Cpu {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    bios::install(&mut cpu.bus, VideoSetup { adapter });
+    bios::install(&mut cpu.bus, VideoSetup { adapter, ..Default::default() });
     int10::set_mode(&mut cpu, 0x03);
     cpu
 }
@@ -56,6 +56,6 @@ fn both_vgas_have_the_vga_bios() {
 fn the_adapter_keeps_the_floppies_in_the_equipment_word() {
     let mut cpu = machine(Adapter::Vga);
     let floppies = cpu.bus.read_16(0x0410) & !0x30;
-    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Svga });
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Svga, ..Default::default() });
     assert_eq!(cpu.bus.read_16(0x0410) & !0x30, floppies);
 }

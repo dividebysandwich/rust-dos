@@ -51,7 +51,8 @@ pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
 /// palette or rows, doesn't leave the prompt in it.
 pub fn reset_for_shell(bus: &mut Bus) {
     let adapter = bus.vga.adapter;
-    let mode = if adapter.mono_only() { VideoMode::Mono80x25 } else { VideoMode::Text80x25Color };
+    let mono = bus.vga.setup().mono();
+    let mode = if mono { VideoMode::Mono80x25 } else { VideoMode::Text80x25Color };
     bus.write_8(0x0449, mode as u8); // Mode 3 (80x25 color text) or 7
     bus.write_16(0x044A, 80); // 80 columns
     bus.write_16(0x044C, 0x1000); // page size
@@ -70,10 +71,19 @@ pub fn reset_for_shell(bus: &mut Bus) {
         bus.write_8(0x0484, 24); // 25 rows
         bus.write_16(0x0485, height); // 8x16 font cell
     }
-    bus.write_16(0x0460, cursor_shape(adapter, height));
+    bus.write_16(0x0460, cursor_shape(adapter, if adapter.mono_only() { 14 } else { height }));
     bus.video_mode = mode;
     bus.vga.set_video_mode(mode);
+    if gray_summing(bus) {
+        bus.vga.sum_to_gray(0..256);
+    }
     bus.vbe.reset();
+}
+
+/// Whether the VGA BIOS sums the palettes it loads to grey (BDA 0489h bit
+/// 1, set for a monochrome monitor).
+pub fn gray_summing(bus: &Bus) -> bool {
+    bus.vga.adapter.vga_bios() && bus.read_8(0x0489) & 0x02 != 0
 }
 
 /// Write the fonts into the ROMs.
@@ -92,11 +102,12 @@ fn install_fonts(bus: &mut Bus) {
 /// caller sets the one the adapter starts in.
 pub fn install(bus: &mut Bus, setup: VideoSetup) {
     bus.vga.adapter = setup.adapter;
+    bus.vga.mono_monitor = setup.mono_monitor;
 
     // Equipment word bits 4-5: the initial video mode, 10 for 80x25 in
     // colour, 11 for monochrome. The other bits are the floppies' and the
     // coprocessor's.
-    let mono = setup.adapter.mono_only();
+    let mono = setup.mono();
     let equipment = bus.read_16(0x0410) & !0x0030;
     bus.write_16(0x0410, equipment | if mono { 0x0030 } else { 0x0020 });
     // The CRTC's address.
@@ -117,17 +128,22 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     // 0484h and 0485h: 25 rows of the text font (8x14 on the EGA's 350
     // lines, 8x16 on the VGA's 400).
     let ega = setup.adapter == Adapter::Ega;
+    // An EGA's switches for an Enhanced Color Display, or for the IBM
+    // Monochrome Display (1011); the VGA reads its monitor instead.
     bus.write_8(0x0484, 24);
     bus.write_16(0x0485, if ega { 14 } else { 16 });
     bus.write_16(0x0460, cursor_shape(setup.adapter, if ega { 14 } else { 16 }));
-    // An EGA's switches for an Enhanced Color Display in its 350-line
-    // mode; the VGA reads its monitor instead.
-    bus.vga.switches = if ega { 0b1001 } else { 0b0110 };
+    bus.vga.switches = match (ega, mono) {
+        (true, true) => 0b1011,
+        (true, false) => 0b1001,
+        _ => 0b0110,
+    };
     if ega {
-        // 0487h: bits 5-6 the memory (256 KB); 0488h: the switches and
-        // the feature bits; the VGA's 0489h and 048Ah are 0.
-        bus.write_8(0x0487, 0x60);
-        bus.write_8(0x0488, 0xF9);
+        // 0487h: bits 5-6 the memory (256 KB), bit 1 a monochrome monitor;
+        // 0488h: the switches and the feature bits; the VGA's 0489h and
+        // 048Ah are 0.
+        bus.write_8(0x0487, if mono { 0x62 } else { 0x60 });
+        bus.write_8(0x0488, 0xF0 | bus.vga.switches);
         bus.write_8(0x0489, 0x00);
         bus.write_8(0x048A, 0x00);
         // The EGA BIOS ROM: 16 KB (32 blocks), without the VGA's name.
@@ -143,9 +159,10 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     // colour display.
     bus.write_8(0x0488, 0x09);
     // 0489h: bit 0 the VGA is active; bits 7 and 4 the text modes'
-    // scanlines (01: 400); bit 1 gray-scale summing, bit 2 a monochrome
-    // monitor, bit 3 no palette loading.
-    bus.write_8(0x0489, 0x11);
+    // scanlines (01: 400); bit 1 gray-scale summing and bit 2 a monochrome
+    // monitor, which the BIOS sums the palettes it loads for; bit 3 no
+    // palette loading.
+    bus.write_8(0x0489, if mono { 0x17 } else { 0x11 });
     // 048Ah: the index of the VGA's entry in the display combination code
     // table (INT 10h AH=1Ah returns the code itself).
     bus.write_8(0x048A, 0x0B);

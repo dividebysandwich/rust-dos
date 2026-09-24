@@ -87,6 +87,9 @@ pub struct VgaCard {
     /// (3BFh) registers, with `machine=hercules` (see hercules.rs).
     pub herc_mode: u8,
     pub herc_config: u8,
+
+    /// A monochrome monitor on the adapter (see `VideoSetup`).
+    pub mono_monitor: bool,
 }
 
 /// The memory text and CGA modes show: 32 KB at B8000h (or B0000h for a
@@ -147,6 +150,7 @@ impl VgaCard {
             switches: 0b0110,
             herc_mode: 0x29,
             herc_config: 0,
+            mono_monitor: false,
         };
         // The BIOS starts in 80x25 color text mode.
         vga.set_video_mode(super::VideoMode::Text80x25Color);
@@ -203,6 +207,24 @@ impl VgaCard {
         }
     }
 
+    /// The adapter and the monitor programs see.
+    pub fn setup(&self) -> super::adapter::VideoSetup {
+        super::adapter::VideoSetup { adapter: self.adapter, mono_monitor: self.mono_monitor }
+    }
+
+    /// Sum DAC entries `range` to shades of grey, 30% red, 59% green and
+    /// 11% blue, as the VGA BIOS does for a monochrome monitor, which shows
+    /// only how bright a colour is.
+    pub fn sum_to_gray(&mut self, range: std::ops::Range<usize>) {
+        let max = self.dac_value_mask();
+        for entry in range.filter(|&i| i < 256) {
+            let rgb = &mut self.palette[entry * 3..entry * 3 + 3];
+            let gray = ((rgb[0] as u32 * 30 + rgb[1] as u32 * 59 + rgb[2] as u32 * 11 + 50) / 100) as u8;
+            rgb.fill(gray.min(max));
+        }
+        self.mark_dirty_full();
+    }
+
     /// The DAC entry a palette register's value (`attribute_regs[0..16]`)
     /// selects: its six bits, and the two or four above them from the
     /// Color Select register (14h), as Attribute Mode Control bit 7 says.
@@ -225,7 +247,11 @@ impl VgaCard {
     pub fn attribute_rgb(&self, attr: u8) -> (u8, u8, u8) {
         let value = self.attribute_regs[(attr & 0x0F) as usize];
         if self.adapter == super::adapter::Adapter::Ega {
-            let monitor = if self.misc_output_reg & 0x80 == 0 { DacTable::Cga } else { DacTable::Ega };
+            let monitor = match self.misc_output_reg {
+                _ if self.mono_monitor => DacTable::Mono,
+                misc if misc & 0x80 == 0 => DacTable::Cga,
+                _ => DacTable::Ega,
+            };
             let [r, g, b] = monitor.color(value & 0x3F);
             return (r << 2 | r >> 4, g << 2 | g >> 4, b << 2 | b >> 4);
         }

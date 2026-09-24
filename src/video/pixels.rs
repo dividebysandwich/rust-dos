@@ -29,7 +29,12 @@ fn layout(bus: &Bus) -> Option<(Layout, usize, usize)> {
     let layout = match mode {
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => Layout::Cga4,
         VideoMode::Cga640x200 => Layout::Cga2,
-        VideoMode::Ega320x200 | VideoMode::Ega640x200 | VideoMode::Ega640x350 | VideoMode::Vga640x480 => Layout::Planar,
+        VideoMode::Ega320x200
+        | VideoMode::Ega640x200
+        | VideoMode::Ega640x350
+        | VideoMode::Ega640x350Mono
+        | VideoMode::Vga640x480
+        | VideoMode::Vga640x480Mono => Layout::Planar,
         VideoMode::Graphics320x200 => Layout::Linear,
         _ => return None,
     };

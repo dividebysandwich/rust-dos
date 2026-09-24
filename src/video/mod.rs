@@ -90,7 +90,12 @@ pub enum VideoMode {
     Mono80x25 = 0x07,
     Ega320x200 = 0x0D,  // EGA planar, 16 colors
     Ega640x200 = 0x0E,  // EGA planar, 16 colors
+    /// The EGA's monochrome graphics: 640x350 in planes 0 and 2, the video
+    /// and the intensity.
+    Ega640x350Mono = 0x0F,
     Ega640x350 = 0x10,  // EGA planar, 16 colors
+    /// The VGA's 640x480 in two colors: plane 0.
+    Vga640x480Mono = 0x11,
     Vga640x480 = 0x12,  // VGA planar, 16 colors
     Graphics320x200 = 0x13,
     /// The Hercules card's 720x348 graphics, which programs set with its
@@ -109,7 +114,9 @@ impl VideoMode {
             VideoMode::Ega320x200
                 | VideoMode::Ega640x200
                 | VideoMode::Ega640x350
+                | VideoMode::Ega640x350Mono
                 | VideoMode::Vga640x480
+                | VideoMode::Vga640x480Mono
         )
     }
 
@@ -124,8 +131,8 @@ impl VideoMode {
             VideoMode::HercGraphics => hercules::GRAPHICS_SIZE,
             VideoMode::Ega320x200 => (320, 200),
             VideoMode::Ega640x200 => (640, 200),
-            VideoMode::Ega640x350 => (640, 350),
-            VideoMode::Vga640x480 => (640, 480),
+            VideoMode::Ega640x350 | VideoMode::Ega640x350Mono => (640, 350),
+            VideoMode::Vga640x480 | VideoMode::Vga640x480Mono => (640, 480),
             VideoMode::Graphics320x200 => (320, 200),
             // The mode's size is in `Bus::vbe`; see `Bus::display_size`.
             VideoMode::Vesa => (640, 480),
@@ -167,7 +174,9 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
         | VideoMode::Ega320x200
         | VideoMode::Ega640x200
         | VideoMode::Ega640x350
-        | VideoMode::Vga640x480 => {
+        | VideoMode::Ega640x350Mono
+        | VideoMode::Vga640x480
+        | VideoMode::Vga640x480Mono => {
             let (width, rows) = bus.vga.graphics_size();
             let width = if width < 400 { width * 2 } else { width };
             let rows = if rows < 300 { rows * 2 } else { rows };
@@ -230,9 +239,12 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         VideoMode::HercGraphics => hercules::render_graphics(canvas, width, &bus.vga),
         // 16-color planar modes (0Dh, 0Eh, 10h, 12h), at the size the CRTC
         // registers give them.
-        VideoMode::Ega320x200 | VideoMode::Ega640x200 | VideoMode::Ega640x350 | VideoMode::Vga640x480 => {
-            render_planar(canvas, width, &bus.vga.vram_graphics, bus)
-        }
+        VideoMode::Ega320x200
+        | VideoMode::Ega640x200
+        | VideoMode::Ega640x350
+        | VideoMode::Ega640x350Mono
+        | VideoMode::Vga640x480
+        | VideoMode::Vga640x480Mono => render_planar(canvas, width, &bus.vga.vram_graphics, bus),
         VideoMode::Vesa => render_vbe(canvas, width, y_min, y_max, bus),
     }
 }

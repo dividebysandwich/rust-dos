@@ -136,7 +136,22 @@ enum Applies {
     Now,
     /// Once no program runs: changing the hardware under one would break it.
     AtPrompt,
+    /// On the screen now, and for programs once none runs (the monochrome
+    /// monitor).
+    NowAndAtPrompt,
     NextStart,
+}
+
+/// What the window says of hardware changes waiting for the running
+/// program to end, the video setup in place being `video`: a monitor that
+/// changed alone has changed on the screen already.
+pub fn pending_note(video: crate::video::adapter::VideoSetup, new: &Settings) -> &'static str {
+    let setup = new.video_setup();
+    if setup != video && setup.adapter == video.adapter {
+        "The picture changed; programs see the monitor once the running program ends"
+    } else {
+        "Takes effect when the running program ends"
+    }
 }
 
 /// How a setting is changed.
@@ -276,7 +291,8 @@ impl Item {
     fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Filter | Shader | Monochrome | Cycles => Applies::Now,
+            Scale | Fullscreen | Aspect | Filter | Shader | Cycles => Applies::Now,
+            Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
@@ -1141,6 +1157,7 @@ impl ConfigUi {
             let note = match item.applies() {
                 Applies::Now => "",
                 Applies::AtPrompt => "at prompt",
+                Applies::NowAndAtPrompt => "now+prompt",
                 Applies::NextStart => "next start",
             };
             match item {

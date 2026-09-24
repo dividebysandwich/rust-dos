@@ -119,10 +119,16 @@ impl Hardware {
         };
         // Another display adapter: its BIOS data, and the text mode it
         // starts in, keeping what the screen shows.
-        if settings.video_setup() != self.video {
-            cpu.bus.log_string(&format!("[CONFIG] The display adapter is now {}", settings.machine.describe()));
-            video::bios::install(&mut cpu.bus, settings.video_setup());
-            rust_dos::interrupts::int10::set_mode(cpu, 0x83);
+        let setup = settings.video_setup();
+        if setup != self.video {
+            let monitor = if setup.mono() { "monochrome" } else { "colour" };
+            cpu.bus.log_string(&format!(
+                "[CONFIG] The display is now {} with a {} monitor",
+                setup.adapter.describe(),
+                monitor
+            ));
+            video::bios::install(&mut cpu.bus, setup);
+            rust_dos::interrupts::int10::set_mode(cpu, 0x80 | setup.prompt_mode());
         }
         self.cpu = settings.cpu;
         self.sound = settings.sound.clone();
@@ -827,7 +833,7 @@ impl Host for PageHost<'_> {
             return Ok(None);
         }
         if !self.cpu.shell_idle() {
-            return Ok(Some("Takes effect when the running program ends".to_string()));
+            return Ok(Some(rust_dos::config_ui::pending_note(self.hardware.video, new).to_string()));
         }
         match self.hardware.apply(self.cpu, new).into_iter().next() {
             Some(problem) => Err(problem),

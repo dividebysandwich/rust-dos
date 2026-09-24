@@ -51,6 +51,12 @@ fn text_cols(cpu: &Cpu) -> usize {
     }
 }
 
+/// The VGA's display combination code (INT 10h AH=1Ah): 08h with a colour
+/// monitor, 07h with a monochrome one.
+fn display_combination(cpu: &Cpu) -> u8 {
+    if cpu.bus.vga.mono_monitor { 0x07 } else { 0x08 }
+}
+
 /// Point an interrupt vector (INT 1Fh, 43h) at the far pointer `pointer`.
 fn set_vector(cpu: &mut Cpu, vector: usize, pointer: u32) {
     cpu.bus.write_16(vector * 4, pointer as u16);
@@ -121,7 +127,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     // A monochrome adapter only has mode 7, whatever a program asks for.
     let mode = if cpu.bus.vga.adapter.mono_only() { 0x07 } else { al & 0x7F };
     // A mode the adapter doesn't have leaves the one it is in.
-    if !cpu.bus.vga.adapter.supports_mode(mode) {
+    if !cpu.bus.vga.setup().supports_mode(mode) {
         cpu.bus.log_string(&format!("[BIOS] Video mode {:02X} isn't on this adapter", mode));
         return;
     }
@@ -141,7 +147,9 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         0x07 => Some((VideoMode::Mono80x25, "Monochrome Text Mode (80x25)")),
         0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
         0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
+        0x0F => Some((VideoMode::Ega640x350Mono, "EGA Graphics Mode (640x350 monochrome)")),
         0x10 => Some((VideoMode::Ega640x350, "EGA Graphics Mode (640x350 16-color)")),
+        0x11 => Some((VideoMode::Vga640x480Mono, "VGA Graphics Mode (640x480 2-color)")),
         0x12 => Some((VideoMode::Vga640x480, "VGA Graphics Mode (640x480 16-color)")),
         0x13 => Some((VideoMode::Graphics320x200, "Graphics Mode (320x200)")),
         _ => None,
@@ -207,8 +215,8 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         0x06 => (24, 8),
         // EGA/VGA planar modes and 13h: treat as 25-row equivalents.
         0x0D | 0x0E => (24, 8),
-        0x10 => (24, 14),
-        0x12 => (29, 16), // 30 rows at 640x480
+        0x0F | 0x10 => (24, 14),
+        0x11 | 0x12 => (29, 16), // 30 rows at 640x480
         0x13 => (24, 8),
         _ => (24, 16),
     };
@@ -216,6 +224,10 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     if mode <= 0x03 || mode == 0x07 {
         let height = if adapter.mono_only() { 14 } else { char_height };
         cpu.bus.write_16(0x0460, video_bios::cursor_shape(adapter, height));
+    }
+    // A monochrome monitor's VGA sums the colours it loads to grey.
+    if video_bios::gray_summing(&cpu.bus) {
+        cpu.bus.vga.sum_to_gray(0..256);
     }
     // The CGA's BIOS keeps neither these nor the graphics font.
     if adapter.ega_bios() {
@@ -629,6 +641,9 @@ pub fn handle(cpu: &mut Cpu) {
                         cpu.bus.vga.palette[base + 2] = b;
                         cpu.bus.vga.mark_dirty_full();
                     }
+                    if video_bios::gray_summing(&cpu.bus) {
+                        cpu.bus.vga.sum_to_gray(idx..idx + 1);
+                    }
                 }
                 0x12 => {
                     // Set Block of DAC Registers
@@ -652,6 +667,9 @@ pub fn handle(cpu: &mut Cpu) {
                         cpu.bus.vga.palette[base + 2] = cpu.bus.read_8(src + 2) & mask;
                     }
                     cpu.bus.vga.mark_dirty_full();
+                    if video_bios::gray_summing(&cpu.bus) {
+                        cpu.bus.vga.sum_to_gray(start..start + count);
+                    }
                 }
                 0x13 => {
                     // Select Color Page
@@ -731,22 +749,7 @@ pub fn handle(cpu: &mut Cpu) {
                     // BX = starting register, CX = count
                     let start = (cpu.bx() & 0xFF) as usize;
                     let count = cpu.cx() as usize;
-
-                    for i in 0..count {
-                        let base = (start + i) * 3;
-                        if base + 2 >= cpu.bus.vga.palette.len() {
-                            break;
-                        }
-                        let r = cpu.bus.vga.palette[base] as u32;
-                        let g = cpu.bus.vga.palette[base + 1] as u32;
-                        let b = cpu.bus.vga.palette[base + 2] as u32;
-                        // NTSC-style luminance formula scaled into 6-bit range
-                        let gray = ((r * 30 + g * 59 + b * 11) / 100).min(63) as u8;
-                        cpu.bus.vga.palette[base] = gray;
-                        cpu.bus.vga.palette[base + 1] = gray;
-                        cpu.bus.vga.palette[base + 2] = gray;
-                    }
-                    cpu.bus.vga.mark_dirty_full();
+                    cpu.bus.vga.sum_to_gray(start..start + count);
                 }
                 _ => {
                     cpu.bus
@@ -858,6 +861,14 @@ pub fn handle(cpu: &mut Cpu) {
                 0x30 => {
                     // Select Scan Lines (AL = 0, 1, 2)
                     // We just acknowledge it
+                    cpu.set_reg8(Register::AL, 0x12);
+                }
+                0x33 => {
+                    // Gray-Scale Summing: AL 0 on, 1 off, for the palettes
+                    // the BIOS loads (BDA 0489h bit 1).
+                    let flags = cpu.bus.read_8(0x0489);
+                    let flags = if cpu.get_al() == 0 { flags | 0x02 } else { flags & !0x02 };
+                    cpu.bus.write_8(0x0489, flags);
                     cpu.set_reg8(Register::AL, 0x12);
                 }
                 0x34 => {
@@ -978,10 +989,11 @@ pub fn handle(cpu: &mut Cpu) {
             let al = cpu.get_al();
             if al == 0x00 {
                 // Get Display Combination Code
-                // BL = Active Display (08 = VGA w/ Color Analog)
+                // BL = Active Display (08 = VGA w/ Color Analog, 07 = VGA
+                // w/ Monochrome Analog)
                 // BH = Inactive Display (00 = None)
                 cpu.set_reg8(Register::AL, 0x1A); // Function Supported
-                cpu.set_reg8(Register::BL, 0x08);
+                cpu.set_reg8(Register::BL, display_combination(cpu));
                 cpu.set_reg8(Register::BH, 0x00);
             } else {
                 cpu.bus
@@ -1048,8 +1060,7 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.write_16(addr + 0x23, 16);
 
             // 25: Active Display Combination Code (DCC)
-            // 08 = VGA w/ Color Analog
-            cpu.bus.write_8(addr + 0x25, 0x08);
+            cpu.bus.write_8(addr + 0x25, display_combination(cpu));
 
             // 26: Alternate DCC (00 = None)
             cpu.bus.write_8(addr + 0x26, 0x00);

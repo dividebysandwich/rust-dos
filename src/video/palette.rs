@@ -34,7 +34,7 @@ impl DacTable {
             | VideoMode::Ega320x200
             | VideoMode::Ega640x200 => DacTable::Cga,
             VideoMode::Graphics320x200 | VideoMode::Vesa => DacTable::Vga256,
-            VideoMode::Mono80x25 => DacTable::Mono,
+            VideoMode::Mono80x25 | VideoMode::Ega640x350Mono => DacTable::Mono,
             _ => DacTable::Ega,
         }
     }

@@ -33,7 +33,9 @@
 #shader=none
 # A monochrome monitor: off (colour, the default), white, amber or green.
 # The picture shows in the phosphor's colour, as bright as its colours
-# are, and the CRT shaders leave out their colour mask.
+# are, and the CRT shaders leave out their colour mask. On a VGA or EGA
+# (machine), programs see the monochrome monitor too, from the DOS prompt
+# on, and the prompt is the monochrome text mode 7.
 #monochrome=off
 # CPU speed in instructions per millisecond, or max to run as fast as the
 # host keeps up with in real time. Lower it for old games that run too

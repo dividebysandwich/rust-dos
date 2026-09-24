@@ -19,7 +19,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 fn ega(mode: u8) -> Cpu {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.bus.set_cycles_per_ms(1000);
-    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Ega });
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Ega, ..Default::default() });
     int10::set_mode(&mut cpu, mode);
     cpu
 }
@@ -138,7 +138,7 @@ fn text_is_640x350_in_the_8x14_font() {
 #[test]
 fn the_shell_runs_on_an_ega() {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Ega });
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Ega, ..Default::default() });
     cpu.load_shell();
     video::print_string(&mut cpu, "HELLO");
     assert_eq!(video::frame_size(&cpu.bus), (640, 350));

@@ -558,9 +558,10 @@ fn apply_machine(cpu: &mut Cpu, machine: &mut Machine, settings: &Settings) -> V
 /// Put another display adapter in, at the prompt: its BIOS data, and the
 /// text mode it starts in, keeping what the screen shows.
 fn change_adapter(cpu: &mut Cpu, setup: VideoSetup) {
-    cpu.bus.log_string(&format!("[CONFIG] The display adapter is now {}", setup.adapter.describe()));
+    let monitor = if setup.mono() { "monochrome" } else { "colour" };
+    cpu.bus.log_string(&format!("[CONFIG] The display is now {} with a {} monitor", setup.adapter.describe(), monitor));
     video::bios::install(&mut cpu.bus, setup);
-    rust_dos::interrupts::int10::set_mode(cpu, 0x83);
+    rust_dos::interrupts::int10::set_mode(cpu, 0x80 | setup.prompt_mode());
 }
 
 /// The drives the configuration file can hold, by letter: mounts of host
@@ -671,7 +672,7 @@ impl Host for MainHost<'_, '_> {
             return Ok(None);
         }
         if !self.cpu.shell_idle() {
-            return Ok(Some("Takes effect when the running program ends".to_string()));
+            return Ok(Some(config_ui::pending_note(self.machine.video, new).to_string()));
         }
         match apply_machine(self.cpu, self.machine, new).into_iter().next() {
             Some(problem) => Err(problem),

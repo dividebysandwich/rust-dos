@@ -292,6 +292,13 @@ fn the_monochrome_monitor_steps_through_the_phosphors() {
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("green"));
     keys(&mut ui, &mut host, &[Save]);
     assert_eq!(host.saved.last().unwrap().monochrome, Green);
+    assert_eq!(Item::Monochrome.applies(), Applies::NowAndAtPrompt);
+
+    // Programs see the new monitor at the prompt; the picture is new now.
+    let colour = Settings::default().video_setup();
+    assert!(pending_note(colour, &ui.settings).starts_with("The picture changed"));
+    let cga = Settings { machine: crate::video::adapter::Adapter::Cga, ..ui.settings.clone() };
+    assert_eq!(pending_note(colour, &cga), "Takes effect when the running program ends");
 }
 
 #[test]

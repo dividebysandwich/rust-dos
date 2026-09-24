@@ -636,9 +636,15 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The display adapter and monitor programs see.
+    /// The display adapter and monitor programs see: with `monochrome`, a
+    /// VGA's or EGA's monitor is monochrome too (a CGA's stays colour).
     pub fn video_setup(&self) -> VideoSetup {
-        VideoSetup { adapter: self.machine }
+        let mono_monitor = match self.machine {
+            Adapter::Cga => false,
+            Adapter::Hercules => true,
+            _ => self.monochrome != Monochrome::Off,
+        };
+        VideoSetup { adapter: self.machine, mono_monitor }
     }
 
     pub fn from_config(config: &Config) -> Self {

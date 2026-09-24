@@ -20,7 +20,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 fn cga(mode: u8) -> Cpu {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.bus.set_cycles_per_ms(1000);
-    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Cga });
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Cga, ..Default::default() });
     int10::set_mode(&mut cpu, mode);
     cpu
 }
@@ -188,7 +188,7 @@ fn the_bios_writes_graphics_text_from_the_rom_font() {
 #[test]
 fn the_shell_runs_on_a_cga() {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Cga });
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Cga, ..Default::default() });
     cpu.load_shell();
     video::print_string(&mut cpu, "HELLO");
     let frame = picture(&mut cpu);

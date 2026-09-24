@@ -102,7 +102,14 @@ D:
     default, a colour monitor), `white`, `amber` or `green`. Each colour
     shows as bright as it is, in the phosphor's colour, and the CRT
     shaders leave out their colour mask. Screenshots and recordings are
-    monochrome as well; the settings window stays in colour.
+    monochrome as well; the settings window stays in colour. With a VGA or
+    an EGA (`machine`), programs see the monochrome monitor too, from the
+    next DOS prompt on, and those that support one choose their monochrome
+    graphics: a VGA reports an analog monochrome display (INT 10h AH=1Ah
+    gives 07h), sums the colours its BIOS loads to grey and starts in the
+    monochrome text mode 7; an EGA has IBM's Monochrome Display, and only
+    modes 7 and 0Fh. On a CGA it is the look alone, and a Hercules card is
+    always monochrome.
   * `cycles` is the CPU speed in instructions per millisecond. `max`, the
     default, runs as fast as the host keeps up with in real time. Use a
     number such as `3000` for old games that run too fast. `--cycles`

@@ -21,7 +21,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 fn hercules() -> Cpu {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.bus.set_cycles_per_ms(1000);
-    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Hercules });
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Hercules, ..Default::default() });
     int10::set_mode(&mut cpu, 0x07);
     cpu
 }
@@ -160,7 +160,7 @@ fn mda_attributes() {
 #[test]
 fn the_shell_runs_on_a_hercules_card() {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Hercules });
+    bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Hercules, ..Default::default() });
     cpu.load_shell();
     assert_eq!(cpu.bus.video_mode, VideoMode::Mono80x25);
     video::print_string(&mut cpu, "HELLO");

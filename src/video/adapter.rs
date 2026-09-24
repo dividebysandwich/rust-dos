@@ -89,7 +89,7 @@ impl Adapter {
             Adapter::Hercules => mode == 0x07,
             Adapter::Cga => mode <= 0x06,
             Adapter::Ega => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10),
-            _ => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10 | 0x12 | 0x13),
+            _ => matches!(mode, 0x00..=0x07 | 0x0D..=0x13),
         }
     }
 }
@@ -98,4 +98,31 @@ impl Adapter {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VideoSetup {
     pub adapter: Adapter,
+    /// A monochrome monitor (`monochrome`): a VGA's analog one, which only
+    /// shows shades of grey, or the IBM Monochrome Display on an EGA, which
+    /// only takes the monochrome modes. A Hercules card always has one; a
+    /// CGA's colour monitor shows a monochrome look only.
+    pub mono_monitor: bool,
+}
+
+impl VideoSetup {
+    /// Whether programs see a monochrome display.
+    pub fn mono(self) -> bool {
+        self.adapter.mono_only() || self.mono_monitor
+    }
+
+    /// Whether the BIOS sets standard mode `mode` (INT 10h AH=00h): an EGA
+    /// on a monochrome monitor has modes 07h and 0Fh only.
+    pub fn supports_mode(self, mode: u8) -> bool {
+        match self.adapter {
+            Adapter::Ega if self.mono_monitor => matches!(mode, 0x07 | 0x0F),
+            adapter => adapter.supports_mode(mode),
+        }
+    }
+
+    /// The mode the machine starts in and the DOS prompt runs in: 80x25
+    /// text, in colour (3) or monochrome (7).
+    pub fn prompt_mode(self) -> u8 {
+        if self.mono() { 0x07 } else { 0x03 }
+    }
 }
