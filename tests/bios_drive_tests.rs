@@ -129,3 +129,57 @@ fn write_protected_floppy_rejects_bios_writes() {
     assert_eq!(int13(&mut cpu, 0x03, 0x00), (true, 0x03));
     assert_eq!(int13(&mut cpu, 0x02, 0x00), (false, 0x00));
 }
+
+#[test]
+fn a_and_b_are_bios_floppies_whatever_their_type() {
+    let base = scratch("ab", &["c", "a", "b"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    assert_eq!((cpu.bus.cmos.get(0x10), cpu.bus.cmos.get(0x14) & 0xC1), (0x00, 0x00));
+
+    // B: alone: two units, the first without a disk.
+    cpu.bus
+        .mount_drive(1, &base.join("b"), MountOptions::default(), false)
+        .unwrap();
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0061);
+    assert_eq!((cpu.bus.cmos.get(0x10), cpu.bus.cmos.get(0x14) & 0xC1), (0x44, 0x41));
+    assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE + 1), 0xF0);
+    assert_eq!(int13(&mut cpu, 0x15, 0x00), (false, 0x02));
+    assert_eq!(int13(&mut cpu, 0x02, 0x00), (true, 0x80));
+    assert_eq!(int13(&mut cpu, 0x02, 0x01), (false, 0x00));
+    assert_eq!(int13(&mut cpu, 0x15, 0x02), (false, 0x00));
+
+    // AH=08h: 1.44 MB geometry and ES:DI -> the table INT 1Eh points to.
+    for unit in [0, 1] {
+        assert_eq!(int13(&mut cpu, 0x08, unit), (false, 0x00));
+        assert_eq!((cpu.get_reg8(Register::BL), cpu.get_reg8(Register::DL)), (4, 2));
+        assert_eq!((cpu.get_reg8(Register::CH), cpu.get_reg8(Register::CL), cpu.get_reg8(Register::DH)), (79, 18, 1));
+        assert_eq!((cpu.es(), cpu.get_reg16(Register::DI)), (cpu.bus.read_16(0x1E * 4 + 2), cpu.bus.read_16(0x1E * 4)));
+    }
+    let table = cpu.get_physical_addr(cpu.es(), cpu.get_reg16(Register::DI));
+    assert_eq!((cpu.bus.read_8(table + 3), cpu.bus.read_8(table + 4)), (0x02, 18)); // 512-byte sectors, 18 per track
+
+    cpu.bus.unmount_drive(1).unwrap();
+    cpu.bus
+        .mount_drive(0, &base.join("a"), kind(DriveKind::HardDisk), false)
+        .unwrap();
+    assert_eq!(cpu.bus.disk.drive_kind(0), Some(DriveKind::Floppy));
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0021);
+    assert_eq!((cpu.bus.cmos.get(0x10), cpu.bus.cmos.get(0x14) & 0xC1), (0x40, 0x01));
+    // Not a fixed disk: C: stays the only one.
+    assert_eq!(cpu.bus.read_8(0x0475), 1);
+    assert_eq!(int13(&mut cpu, 0x02, 0x81), (true, 0xAA));
+    assert!(cpu.bus.mount_drive(1, &base.join("b"), kind(DriveKind::CdRom), false).is_err());
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0021);
+}
+
+#[test]
+fn floppies_on_other_letters_are_not_bios_units() {
+    let base = scratch("floppy_e", &["c", "e"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.bus
+        .mount_drive(4, &base.join("e"), kind(DriveKind::Floppy), false)
+        .unwrap();
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0020);
+    assert_eq!(int13(&mut cpu, 0x02, 0x04), (true, 0x80));
+    assert_eq!(int13(&mut cpu, 0x15, 0x04), (false, 0x00));
+}

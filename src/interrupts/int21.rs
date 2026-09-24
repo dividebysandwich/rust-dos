@@ -12,6 +12,8 @@ use crate::video::print_char;
 const INDOS_FLAG: usize = 0xFF101;
 /// A RETF for the case map routine of the country information.
 const CASE_MAP_ROUTINE: usize = 0xFF0FF;
+/// Volume serial number of drive A:; each drive's is its number more.
+const VOLUME_SERIAL: u32 = 0x1234_0000;
 
 /// Return a result the DOS way: AX and CF clear, or the error code in AX
 /// and CF set.
@@ -83,6 +85,47 @@ fn dos_drive_number(cpu: &Cpu, code: u8) -> u8 {
     } else {
         code - 1
     }
+}
+
+/// INT 21h AX=440Dh, generic IOCTL for block devices: BL = drive (0 =
+/// default), CX = category and function, DS:DX -> parameter block. Get
+/// Device Parameters (0860h) and Get Media ID (0866h) are how programs tell
+/// floppies from hard disks; the other functions succeed without doing
+/// anything. CD-ROMs are redirector drives, which have no block device.
+fn generic_block_ioctl(cpu: &mut Cpu) {
+    let drive = dos_drive_number(cpu, cpu.get_reg8(Register::BL));
+    let kind = match cpu.bus.disk.drive_kind(drive) {
+        None => return set_result(cpu, Err(0x0F)), // invalid drive
+        Some(DriveKind::CdRom) => return set_result(cpu, Err(0x01)), // invalid function
+        Some(kind) => kind,
+    };
+    let layout = kind.layout();
+    let block = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+    match cpu.cx() {
+        0x0860 => {
+            // 00: special functions, which the caller sets.
+            let device_type = if kind == DriveKind::Floppy { 0x07 } else { 0x05 }; // 1.44 MB or fixed
+            cpu.bus.write_8(block + 0x01, device_type);
+            cpu.bus.write_16(block + 0x02, if kind.is_removable() { 0 } else { 1 }); // 02: bit 0 = fixed
+            cpu.bus.write_16(block + 0x04, layout.cylinders());
+            cpu.bus.write_8(block + 0x06, 0); // 06: media type, the drive's own
+            for (i, &b) in layout.bpb().iter().enumerate() {
+                cpu.bus.write_8(block + 0x07 + i, b);
+            }
+        }
+        0x0866 => {
+            cpu.bus.write_16(block, 0); // 00: info level
+            cpu.bus.write_32(block + 0x02, VOLUME_SERIAL + drive as u32);
+            let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
+            let label = if label.is_empty() { "NO NAME".to_string() } else { label };
+            let padded = label.bytes().chain(std::iter::repeat(b' ')).take(11);
+            for (i, b) in padded.chain(layout.fs_type().iter().copied()).enumerate() {
+                cpu.bus.write_8(block + 0x06 + i, b);
+            }
+        }
+        _ => {}
+    }
+    set_result(cpu, Ok(0));
 }
 
 /// A character from the keyboard the way DOS's console driver reads it: an
@@ -1345,6 +1388,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         }
                     }
                 }
+                0x0D => generic_block_ioctl(cpu),
                 _ => {
                     // Stub other subfunctions as success
                     cpu.set_ax(0);

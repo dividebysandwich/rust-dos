@@ -1056,7 +1056,7 @@ impl ConfigUi {
             }
         };
         put(g, Field::Browse, top + 3, "", &button("[ Browse... ]", top + 3, value_col));
-        put(g, Field::Kind, top + 4, "Type", &choice(dialog.kind.name().to_string(), top + 4, true));
+        put(g, Field::Kind, top + 4, "Type", &choice(dialog.kind.name().to_string(), top + 4, !dialog.kind_fixed()));
         put(g, Field::Label, top + 5, "Label", &text_field(&dialog.label, top + 5, 12));
         let ro = if dialog.read_only { "yes" } else { "no" }.to_string();
         put(g, Field::ReadOnly, top + 6, "Read-only", &choice(ro, top + 6, true));

@@ -206,7 +206,8 @@ The same call mounts other drives. Add `"type"` (`floppy`, `hdd` or `cdrom`),
 `PUT /api/drive/D {"path":"/abs/cd","type":"cdrom","label":"GAMECD"}`.
 A path to a CD image (`.cue`, `.iso`, `.bin`, `.img`) mounts the image as a
 CD-ROM drive; `GET /api/drive` then shows `"image":true` and the image's
-path. `DELETE /api/drive/D` unmounts a drive, and `GET /api/drive` lists
+path. A: and B: are always floppies, whatever `"type"` says, and refuse CD
+images. `DELETE /api/drive/D` unmounts a drive, and `GET /api/drive` lists
 them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 
 ### Protected-mode programs (DOS extenders)

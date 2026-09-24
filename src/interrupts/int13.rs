@@ -7,22 +7,22 @@
 //! and the game loops with an "insert disk" prompt.
 //!
 //! This stub reports success for the standard operations on drives that are
-//! mounted (floppy-type A:/B: and hard-disk-type drives) and errors for the
-//! rest. It does NOT return real sector content, so copy-protection schemes
-//! that hash the data still fail. For simple presence checks it's usually
-//! enough.
+//! mounted (A:/B:, which are always floppies, and hard-disk-type drives) and
+//! errors for the rest. It does NOT return real sector content, so
+//! copy-protection schemes that hash the data still fail. For simple
+//! presence checks it's usually enough.
 
 use crate::cpu::{Cpu, CpuFlags};
-use crate::disk::DriveKind;
+use crate::disk::{DriveKind, FLOPPY_DRIVES};
 use iced_x86::Register;
 
 /// Map a BIOS drive number to the DOS drive (0=A:) behind it. Units 00h/01h
-/// are floppy-type mounts on A:/B:; 80h+n is the n-th hard-disk-type mount
+/// are the floppies mounted on A:/B:; 80h+n is the n-th hard-disk-type mount
 /// in drive-letter order. Anything else (including probes like DL=FFh, which
 /// F117's DSWAP.EXE uses to find where the BIOS rejects drives) is absent.
 fn bios_drive(cpu: &Cpu, dl: u8) -> Option<u8> {
     if dl < 0x80 {
-        (dl < 2 && cpu.bus.disk.drive_kind(dl) == Some(DriveKind::Floppy)).then_some(dl)
+        (dl < FLOPPY_DRIVES && cpu.bus.disk.drive_kind(dl) == Some(DriveKind::Floppy)).then_some(dl)
     } else {
         cpu.bus
             .disk
@@ -32,10 +32,10 @@ fn bios_drive(cpu: &Cpu, dl: u8) -> Option<u8> {
     }
 }
 
+/// Floppy units the BIOS has, whether or not a disk is in them: a mount on
+/// B: alone makes an empty A: unit too.
 fn floppy_count(cpu: &Cpu) -> u8 {
-    (0..2)
-        .filter(|&d| cpu.bus.disk.drive_kind(d) == Some(DriveKind::Floppy))
-        .count() as u8
+    cpu.bus.disk.floppy_units()
 }
 
 /// Standard INT 13h error return: CF=1, AH = status code.
@@ -118,16 +118,19 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH=08h Get Drive Parameters. DL returns the number of drives of
-        // that class.
+        // that class, and for floppies ES:DI the diskette parameter table.
         0x08 => {
             if dl < 0x80 {
                 let count = floppy_count(cpu);
-                if drive.is_some() {
+                if dl < count {
                     // Floppy: 1.44M (2 heads, 18 sectors, 80 cylinders)
                     cpu.set_reg8(Register::CH, 79);
                     cpu.set_reg8(Register::CL, 18);
                     cpu.set_reg8(Register::DH, 1);
                     cpu.set_reg8(Register::BL, 4); // 1.44M
+                    cpu.set_reg8(Register::AL, 0);
+                    cpu.set_es(0xF000);
+                    cpu.set_di(crate::bios::DISKETTE_PARAMS);
                 } else {
                     // No such unit: zeroed geometry, callers check DL.
                     cpu.set_cx(0);
@@ -156,8 +159,9 @@ pub fn handle(cpu: &mut Cpu) {
         //   02 for floppy w/ change-line, 03 for hard disk.
         0x15 => {
             let kind = match drive {
+                // A floppy unit without a disk is still there.
+                _ if dl < 0x80 => if dl < floppy_count(cpu) { 0x02 } else { 0 },
                 None => 0,
-                Some(_) if dl < 0x80 => 0x02,
                 Some(_) => 0x03,
             };
             cpu.set_reg8(Register::AH, kind);

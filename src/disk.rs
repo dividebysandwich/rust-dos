@@ -19,6 +19,9 @@ const HANDLE_LIMIT: u16 = 0xFF;
 // Drive numbers are 0-based (0=A:, 2=C:, 25=Z:).
 pub const DRIVE_C: u8 = 2;
 pub const DRIVE_Z: u8 = 25;
+/// A: and B: are the BIOS floppy units: whatever is mounted there is a
+/// floppy drive.
+pub const FLOPPY_DRIVES: u8 = 2;
 /// Number of drive letters reported to programs (LASTDRIVE=Z).
 pub const LASTDRIVE: u8 = 26;
 
@@ -158,6 +161,102 @@ impl DriveKind {
             DriveKind::CdRom => (1, 2048, 0xFFFF),
             DriveKind::Virtual => (1, 512, 2000),
         }
+    }
+
+    /// The FAT file system behind `geometry`: a 1.44 MB diskette's for
+    /// floppies, and a plausible one around the cluster count for the rest.
+    pub fn layout(self) -> FatLayout {
+        let (sectors_per_cluster, bytes_per_sector, clusters) = self.geometry();
+        let (root_entries, sectors_per_track, heads, hidden_sectors) = match self {
+            DriveKind::Floppy => (224, 18, 2, 0),
+            _ => (512, 63, 16, 63),
+        };
+        let fat_bytes = if clusters < FAT12_MAX_CLUSTERS {
+            ((clusters as u32 + 2) * 3).div_ceil(2)
+        } else {
+            (clusters as u32 + 2) * 2
+        };
+        FatLayout {
+            bytes_per_sector,
+            sectors_per_cluster,
+            clusters,
+            reserved_sectors: 1,
+            fats: 2,
+            root_entries,
+            sectors_per_fat: fat_bytes.div_ceil(bytes_per_sector as u32) as u16,
+            sectors_per_track,
+            heads,
+            hidden_sectors,
+            media: self.media_descriptor(),
+        }
+    }
+}
+
+/// Volumes with fewer clusters than this have 12-bit FATs.
+const FAT12_MAX_CLUSTERS: u16 = 4085;
+
+/// Where a drive's FAT, root directory and data would lie, as DOS reports
+/// it in the drive parameter block and the BIOS parameter block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FatLayout {
+    pub bytes_per_sector: u16,
+    pub sectors_per_cluster: u16,
+    pub clusters: u16,
+    pub reserved_sectors: u16,
+    pub fats: u16,
+    pub root_entries: u16,
+    pub sectors_per_fat: u16,
+    pub sectors_per_track: u16,
+    pub heads: u16,
+    pub hidden_sectors: u32,
+    pub media: u8,
+}
+
+impl FatLayout {
+    pub fn first_dir_sector(&self) -> u16 {
+        self.reserved_sectors + self.fats * self.sectors_per_fat
+    }
+
+    pub fn first_data_sector(&self) -> u16 {
+        let root_sectors = (self.root_entries as u32 * 32).div_ceil(self.bytes_per_sector as u32);
+        self.first_dir_sector() + root_sectors as u16
+    }
+
+    pub fn total_sectors(&self) -> u32 {
+        self.first_data_sector() as u32 + self.clusters as u32 * self.sectors_per_cluster as u32
+    }
+
+    pub fn cylinders(&self) -> u16 {
+        let per_cylinder = self.sectors_per_track as u32 * self.heads as u32;
+        (self.hidden_sectors + self.total_sectors()).div_ceil(per_cylinder) as u16
+    }
+
+    /// "FAT12   " or "FAT16   ", as the boot sector names it.
+    pub fn fs_type(&self) -> &'static [u8; 8] {
+        if self.clusters < FAT12_MAX_CLUSTERS { b"FAT12   " } else { b"FAT16   " }
+    }
+
+    /// The DOS 4 BIOS parameter block, as a boot sector has it from offset
+    /// 0Bh and IOCTL 440Dh/0860h returns it.
+    pub fn bpb(&self) -> [u8; 31] {
+        let mut bpb = [0u8; 31];
+        let total = self.total_sectors();
+        let small_total = if total > 0xFFFF { 0 } else { total as u16 };
+        bpb[0x00..0x02].copy_from_slice(&self.bytes_per_sector.to_le_bytes());
+        bpb[0x02] = self.sectors_per_cluster as u8;
+        bpb[0x03..0x05].copy_from_slice(&self.reserved_sectors.to_le_bytes());
+        bpb[0x05] = self.fats as u8;
+        bpb[0x06..0x08].copy_from_slice(&self.root_entries.to_le_bytes());
+        bpb[0x08..0x0A].copy_from_slice(&small_total.to_le_bytes());
+        bpb[0x0A] = self.media;
+        bpb[0x0B..0x0D].copy_from_slice(&self.sectors_per_fat.to_le_bytes());
+        bpb[0x0D..0x0F].copy_from_slice(&self.sectors_per_track.to_le_bytes());
+        bpb[0x0F..0x11].copy_from_slice(&self.heads.to_le_bytes());
+        bpb[0x11..0x15].copy_from_slice(&self.hidden_sectors.to_le_bytes());
+        if small_total == 0 {
+            bpb[0x15..0x19].copy_from_slice(&total.to_le_bytes());
+        }
+        bpb
     }
 }
 
@@ -418,6 +517,7 @@ impl DiskController {
 
     /// Mount a host directory as `drive`. Unless `replace` is set, the drive
     /// must not already be mounted. Replacing closes the files open on it.
+    /// On A: and B: the drive is a floppy whatever `opts.kind` says.
     pub fn mount(
         &mut self,
         drive: u8,
@@ -435,6 +535,13 @@ impl DiskController {
         if self.is_mounted(drive) && !replace {
             return Err(format!("Drive {}: is already mounted", letter));
         }
+        // A: and B: are floppies whatever the type asked for, but a CD
+        // can't be one.
+        let floppy_drive = drive < FLOPPY_DRIVES;
+        if floppy_drive && (opts.kind == DriveKind::CdRom || path.is_file()) {
+            return Err(format!("Drive {}: is a floppy drive and can't be a CD-ROM", letter));
+        }
+        let kind = if floppy_drive { DriveKind::Floppy } else { opts.kind };
         let label = |default: &str| {
             opts.label
                 .as_deref()
@@ -479,11 +586,11 @@ impl DiskController {
 
         self.close_drive_files(drive);
         self.drives[drive as usize] = Some(Drive {
-            kind: opts.kind,
+            kind,
             storage: Storage::Host(canonical.clone()),
             current_dir: String::new(),
             label: label(DEFAULT_LABEL),
-            read_only: opts.read_only || opts.kind == DriveKind::CdRom,
+            read_only: opts.read_only || kind == DriveKind::CdRom,
             mount: Some(MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() }),
         });
         Ok(canonical)
@@ -566,6 +673,15 @@ impl DiskController {
 
     pub fn mounted_drives(&self) -> Vec<DriveInfo> {
         (0..LASTDRIVE).filter_map(|d| self.drive_info(d)).collect()
+    }
+
+    /// Floppy drives the BIOS reports: one for A:, two for B: even with A:
+    /// empty, as a machine with two drives and one disk.
+    pub fn floppy_units(&self) -> u8 {
+        (0..FLOPPY_DRIVES)
+            .rev()
+            .find(|&d| self.drive_kind(d) == Some(DriveKind::Floppy))
+            .map_or(0, |d| d + 1)
     }
 
     /// Mounted drives of the given kind, in drive-letter order.
@@ -1843,6 +1959,58 @@ mod tests {
         assert_eq!((spc, bps), (1, 512));
         assert_eq!(free, total - 2);
         assert_eq!(disk.get_disk_free_space(5), Err(0x0F));
+    }
+
+    #[test]
+    fn a_and_b_are_always_floppies() {
+        let base = scratch("floppy_letters");
+        for d in ["c", "a", "b", "e"] {
+            fs::create_dir_all(base.join(d)).unwrap();
+        }
+        fs::write(base.join("game.iso"), b"").unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        assert_eq!(disk.floppy_units(), 0);
+
+        // B: alone makes two units, the first one empty.
+        disk.mount(1, &base.join("b"), MountOptions::default(), false).unwrap();
+        assert_eq!(disk.drive_kind(1), Some(DriveKind::Floppy));
+        assert_eq!(disk.floppy_units(), 2);
+        let hdd = MountOptions { kind: DriveKind::HardDisk, read_only: true, ..Default::default() };
+        disk.mount(0, &base.join("a"), hdd.clone(), false).unwrap();
+        let info = disk.drive_info(0).unwrap();
+        assert_eq!((info.kind, info.read_only), (DriveKind::Floppy, true));
+        // The mount stays as asked for, for the configuration file.
+        assert_eq!(info.mount.unwrap().opts, hdd);
+        disk.unmount(1).unwrap();
+        assert_eq!(disk.floppy_units(), 1);
+
+        assert!(disk.mount(1, &base.join("b"), cdrom(), false).unwrap_err().contains("floppy"));
+        assert!(disk.mount(1, &base.join("game.iso"), MountOptions::default(), false).is_err());
+        assert!(!disk.is_mounted(1));
+
+        // Other letters keep the type they are given.
+        disk.mount(4, &base.join("e"), MountOptions::default(), false).unwrap();
+        assert_eq!(disk.drive_kind(4), Some(DriveKind::HardDisk));
+    }
+
+    #[test]
+    fn floppies_have_a_1_44_mb_diskette_layout() {
+        let floppy = DriveKind::Floppy.layout();
+        assert_eq!((floppy.sectors_per_fat, floppy.first_dir_sector(), floppy.first_data_sector()), (9, 19, 33));
+        assert_eq!((floppy.total_sectors(), floppy.cylinders(), floppy.fs_type()), (2880, 80, b"FAT12   "));
+        // The BPB of a DOS-formatted 1.44 MB diskette.
+        assert_eq!(
+            floppy.bpb()[..0x15],
+            [0x00, 0x02, 0x01, 0x01, 0x00, 0x02, 0xE0, 0x00, 0x40, 0x0B, 0xF0, 0x09, 0x00, 0x12, 0x00, 0x02, 0x00, 0, 0, 0, 0]
+        );
+        assert_eq!(floppy.bpb()[0x15..], [0; 10]);
+
+        let hdd = DriveKind::HardDisk.layout();
+        assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (79, b"FAT16   "));
+        assert_eq!(hdd.total_sectors(), 191 + 8 * 20000);
+        let bpb = hdd.bpb();
+        assert_eq!((bpb[0x08], bpb[0x09], bpb[0x0A]), (0, 0, 0xF8));
+        assert_eq!(u32::from_le_bytes(bpb[0x15..0x19].try_into().unwrap()), hdd.total_sectors());
     }
 
     #[test]

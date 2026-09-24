@@ -74,6 +74,7 @@
 # drives are read-only and visible to programs through MSCDEX, and -ro makes
 # any drive read-only. -label sets the volume label (up to 11 characters).
 # A CD image (.cue, .iso, .bin or .img) always makes a CD-ROM drive.
+# A: and B: are always floppy drives.
 # Quote paths that contain spaces. ~ is your home directory and relative
 # paths are relative to this file.
 # C: is the current working directory unless set here or with -d/--dir.

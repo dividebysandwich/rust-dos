@@ -404,14 +404,13 @@ impl Bus {
     pub fn sync_drive_bda(&mut self) {
         // Equipment word: bit 0 = floppy present, bits 6-7 = floppy count - 1.
         // Only A: and B: are BIOS floppy units. Other bits are left alone.
-        let floppies = (0..2)
-            .filter(|&d| self.disk.drive_kind(d) == Some(DriveKind::Floppy))
-            .count() as u16;
+        let floppies = self.disk.floppy_units();
         let mut equipment = self.read_16(0x0410) & !0x00C1;
         if floppies > 0 {
-            equipment |= 0x0001 | ((floppies - 1) << 6);
+            equipment |= 0x0001 | ((floppies as u16 - 1) << 6);
         }
         self.write_16(0x0410, equipment);
+        self.cmos.set_floppies(floppies);
 
         // 0x0475: number of fixed disks (INT 13h units 80h+).
         let hard_disks = self.disk.drives_of_kind(DriveKind::HardDisk).len();
@@ -478,30 +477,23 @@ impl Bus {
     /// Fill in a DOS 4+ style Drive Parameter Block with a plausible FAT
     /// layout for the drive's reported geometry.
     fn write_dpb(&mut self, drive: u8, kind: DriveKind, next: Option<u8>) {
-        let (spc, bps, total) = kind.geometry();
+        let layout = kind.layout();
+        let spc = layout.sectors_per_cluster;
         let base = DPB_TABLE + drive as usize * DPB_SIZE;
-        let (root_entries, sectors_per_fat): (u16, u16) = match kind {
-            DriveKind::Floppy => (224, 9),
-            _ => (512, ((total as u32 + 2) * 2).div_ceil(bps as u32) as u16),
-        };
-        let reserved: u16 = 1;
-        let fat_count: u16 = 2;
-        let first_dir_sector = reserved + fat_count * sectors_per_fat;
-        let root_sectors = (root_entries as u32 * 32).div_ceil(bps as u32) as u16;
 
         self.write_8(base, drive); // 00: drive number (0=A)
         self.write_8(base + 0x01, drive); // 01: unit within driver
-        self.write_16(base + 0x02, bps); // 02: bytes per sector
+        self.write_16(base + 0x02, layout.bytes_per_sector); // 02: bytes per sector
         self.write_8(base + 0x04, (spc - 1) as u8); // 04: sectors per cluster - 1
         self.write_8(base + 0x05, spc.trailing_zeros() as u8); // 05: cluster shift
-        self.write_16(base + 0x06, reserved); // 06: reserved sectors
-        self.write_8(base + 0x08, fat_count as u8); // 08: number of FATs
-        self.write_16(base + 0x09, root_entries); // 09: root directory entries
-        self.write_16(base + 0x0B, first_dir_sector + root_sectors); // 0B: first data sector
-        self.write_16(base + 0x0D, total.saturating_add(1)); // 0D: highest cluster
-        self.write_16(base + 0x0F, sectors_per_fat); // 0F: sectors per FAT
-        self.write_16(base + 0x11, first_dir_sector); // 11: first directory sector
-        self.write_8(base + 0x17, kind.media_descriptor()); // 17: media ID
+        self.write_16(base + 0x06, layout.reserved_sectors); // 06: reserved sectors
+        self.write_8(base + 0x08, layout.fats as u8); // 08: number of FATs
+        self.write_16(base + 0x09, layout.root_entries); // 09: root directory entries
+        self.write_16(base + 0x0B, layout.first_data_sector()); // 0B: first data sector
+        self.write_16(base + 0x0D, layout.clusters.saturating_add(1)); // 0D: highest cluster
+        self.write_16(base + 0x0F, layout.sectors_per_fat); // 0F: sectors per FAT
+        self.write_16(base + 0x11, layout.first_dir_sector()); // 11: first directory sector
+        self.write_8(base + 0x17, layout.media); // 17: media ID
         self.write_8(base + 0x18, 0x00); // 18: disk accessed
         // 19: far pointer to the next DPB, FFFF:FFFF ends the chain
         match next {

@@ -176,7 +176,7 @@ the prompt:
 
 ```
 MOUNT                                     list drives
-MOUNT A ~/dos/floppy floppy               mount a host directory
+MOUNT A ~/dos/floppy                      mount a host directory
 MOUNT D ~/dos/cd -t cdrom -label GAMECD   same, with -t for the type
 MOUNT D ~/dos/game.cue                    mount a CD image
 IMGMOUNT D C:\GAME\CD\GAME.CUE -t cdrom   the same, as DOSBox writes it
@@ -205,10 +205,18 @@ long and the short name open the file.
 | Type | Behaves like |
 |---|---|
 | `hdd` (default) | A fixed disk. BIOS unit 80h and up. |
-| `floppy` | A removable 1.44 MB disk whose free space reflects its files. On A: and B: it is also a BIOS floppy drive (equipment word, INT 13h units 0-1). |
+| `floppy` | A removable 1.44 MB disk whose free space reflects its files. |
 | `cdrom` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. From a CD image it is a whole disc: raw and cooked sector reads, the volume descriptors, the table of contents, and audio tracks that play through the Sound Blaster mixer's CD volume. From a directory, only its files are available. |
 
 `-ro` makes any drive read-only.
+
+A: and B: are always floppy drives, whatever type the mount gives, and
+can't hold a CD. Programs see them the way they see a real 1.44 MB drive:
+in the BIOS equipment word and CMOS, as INT 13h units 0 and 1 with the
+diskette parameter table of INT 1Eh, as removable drives, and with a
+1.44 MB diskette's layout in the drive parameter block and IOCTL 440Dh
+(device type 07h, FAT12). A disk on B: alone makes a two-drive machine
+with A: empty.
 
 ## Log file
 

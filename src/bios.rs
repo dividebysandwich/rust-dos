@@ -31,6 +31,8 @@ const SLAVE_EOI_HANDLER: u16 = 0x1120;
 const IRQ9_HANDLER: u16 = 0x1130;
 /// The XMS driver entry point (INT 2Fh AX=4310h).
 pub const XMS_ENTRY: u16 = 0x1140;
+/// The diskette parameter table INT 1Eh points to, for 1.44 MB drives.
+pub const DISKETTE_PARAMS: u16 = 0x1150;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -60,6 +62,7 @@ pub fn default_ivt() -> [u32; 256] {
         ivt[vector as usize] = far(TRAP_BASE + 4 * i as u16);
     }
     ivt[0x08] = far(TIMER_HANDLER);
+    ivt[0x1E] = far(DISKETTE_PARAMS);
     ivt
 }
 
@@ -103,6 +106,14 @@ pub fn install(bus: &mut Bus) {
         bus,
         XMS_ENTRY,
         &[0xEB, 0x03, 0x90, 0x90, 0x90, 0xFE, 0x39, SERVICE_XMS, 0xCB],
+    );
+    // Step rate and head unload, head load, motor off delay, 512-byte
+    // sectors, 18 per track, gap length, data length, format gap length,
+    // format filler, head settle and motor start times.
+    write_rom(
+        bus,
+        DISKETTE_PARAMS,
+        &[0xDF, 0x02, 0x25, 0x02, 0x12, 0x1B, 0xFF, 0x6C, 0xF6, 0x0F, 0x08],
     );
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);

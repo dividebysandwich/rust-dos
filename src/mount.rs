@@ -5,7 +5,7 @@
 //! A mount spec is `<host path> [type] [-t type] [-label NAME] [-ro]` where
 //! type is `floppy`, `hdd` (alias `dir`) or `cdrom` (alias `iso`). The path
 //! is a directory, or a CD image (.cue, .iso, .bin, .img), which always
-//! makes a CD-ROM drive.
+//! makes a CD-ROM drive. A: and B: are floppies whatever the type says.
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions};
 use std::path::{Path, PathBuf};

@@ -1,7 +1,7 @@
 //! The settings window's text fields and its dialog for mounting a drive.
 
 use super::UiKey;
-use crate::disk::{DRIVE_C, DRIVE_Z, DriveInfo, DriveKind, LASTDRIVE, MountOptions, drive_letter};
+use crate::disk::{DRIVE_C, DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use std::path::Path;
 
@@ -109,7 +109,7 @@ impl MountDialog {
             drive,
             free,
             path: TextField::default(),
-            kind: DriveKind::HardDisk,
+            kind: Self::default_kind(drive),
             label: TextField::default(),
             read_only: false,
             focus: Field::Path,
@@ -137,6 +137,15 @@ impl MountDialog {
         }
     }
 
+    fn default_kind(drive: u8) -> DriveKind {
+        if drive < FLOPPY_DRIVES { DriveKind::Floppy } else { DriveKind::HardDisk }
+    }
+
+    /// A: and B: are always floppies.
+    pub fn kind_fixed(&self) -> bool {
+        self.drive < FLOPPY_DRIVES
+    }
+
     pub fn title(&self) -> String {
         if self.existing {
             format!("Change drive {}:", drive_letter(self.drive))
@@ -152,7 +161,11 @@ impl MountDialog {
         if !self.existing {
             fields.push(Drive);
         }
-        fields.extend([Path, Browse, Kind, Label, ReadOnly, Mount]);
+        fields.extend([Path, Browse]);
+        if !self.kind_fixed() {
+            fields.push(Kind);
+        }
+        fields.extend([Label, ReadOnly, Mount]);
         if self.existing && self.drive != DRIVE_C {
             fields.push(Unmount);
         }
@@ -174,10 +187,14 @@ impl MountDialog {
     pub fn step(&mut self, field: Field, dir: isize) {
         match field {
             Field::Drive if !self.free.is_empty() => {
+                let was_fixed = self.kind_fixed();
                 let at = self.free.iter().position(|&d| d == self.drive).unwrap_or(0) as isize;
                 self.drive = self.free[(at + dir).rem_euclid(self.free.len() as isize) as usize];
+                if self.kind_fixed() != was_fixed {
+                    self.kind = Self::default_kind(self.drive);
+                }
             }
-            Field::Kind => {
+            Field::Kind if !self.kind_fixed() => {
                 let at = KINDS.iter().position(|&k| k == self.kind).unwrap_or(0) as isize;
                 self.kind = KINDS[(at + dir).rem_euclid(KINDS.len() as isize) as usize];
             }
@@ -219,10 +236,11 @@ impl MountDialog {
         Event::None
     }
 
-    /// Take a path picked in the browser. An image makes a CD-ROM.
+    /// Take a path picked in the browser. An image makes a CD-ROM, except
+    /// on A: and B:, where mounting it will fail.
     pub fn picked(&mut self, path: &Path, home: Option<&Path>) {
         self.path = TextField::new(&contract_home(path, home));
-        if path.is_file() {
+        if path.is_file() && !self.kind_fixed() {
             self.kind = DriveKind::CdRom;
         }
         self.focus = Field::Mount;
@@ -307,6 +325,28 @@ mod tests {
         assert_eq!(d.key(UiKey::Enter), Event::Submit);
         let spec = d.spec(Path::new("/"), None).unwrap();
         assert_eq!((spec.drive, spec.path.as_path(), spec.opts.kind), (24, Path::new("/tmp"), DriveKind::Floppy));
+    }
+
+    #[test]
+    fn a_and_b_are_only_floppies() {
+        let drives = [drive(2, DriveKind::HardDisk), drive(25, DriveKind::Virtual)];
+        let mut d = MountDialog::new_drive(&drives).unwrap();
+        d.kind = DriveKind::CdRom;
+        d.focus = Field::Drive;
+        d.key(UiKey::Left);
+        assert_eq!((d.drive, d.kind), (1, DriveKind::Floppy));
+        assert!(!d.fields().contains(&Field::Kind));
+        d.step(Field::Kind, 1);
+        d.key(UiKey::Left);
+        assert_eq!((d.drive, d.kind), (0, DriveKind::Floppy));
+        d.key(UiKey::Right);
+        d.key(UiKey::Right);
+        assert_eq!((d.drive, d.kind), (3, DriveKind::HardDisk));
+
+        // With C: to Z: taken, a new drive is A:.
+        let taken: Vec<DriveInfo> = (2..26).map(|n| drive(n, DriveKind::HardDisk)).collect();
+        let d = MountDialog::new_drive(&taken).unwrap();
+        assert_eq!((d.drive, d.kind), (0, DriveKind::Floppy));
     }
 
     #[test]

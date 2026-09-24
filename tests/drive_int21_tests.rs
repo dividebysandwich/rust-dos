@@ -249,6 +249,65 @@ fn ioctl_reports_drive_types() {
 }
 
 #[test]
+fn generic_ioctl_describes_floppies_and_hard_disks() {
+    let base = scratch("ioctl_params", &["c", "a", "cd"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    // No type given: A: is a floppy all the same.
+    cpu.bus
+        .mount_drive(DRIVE_A, &base.join("a"), opts(DriveKind::HardDisk, Some("disk1")), false)
+        .unwrap();
+    cpu.bus
+        .mount_drive(DRIVE_D, &base.join("cd"), opts(DriveKind::CdRom, None), false)
+        .unwrap();
+
+    let block = 0x50000;
+    let ioctl = |cpu: &mut Cpu, bl: u8, cx: u16| {
+        for i in 0..0x40 {
+            cpu.bus.write_8(block + i, 0xAA);
+        }
+        cpu.set_ds(0x5000);
+        cpu.set_dx(0);
+        cpu.set_reg8(Register::BL, bl);
+        cpu.set_cx(cx);
+        cpu.set_reg8(Register::AL, 0x0D);
+        int21(cpu, 0x44);
+        (cf(cpu), cpu.ax())
+    };
+    let bytes = |cpu: &Cpu, at: usize, len: usize| (0..len).map(|i| cpu.bus.read_8(block + at + i)).collect::<Vec<u8>>();
+
+    // Get Device Parameters: a 1.44 MB diskette drive
+    assert_eq!(ioctl(&mut cpu, 1, 0x0860), (false, 0));
+    assert_eq!(cpu.bus.read_8(block), 0xAA); // special functions untouched
+    assert_eq!(cpu.bus.read_8(block + 1), 0x07);
+    assert_eq!((cpu.bus.read_16(block + 2), cpu.bus.read_16(block + 4)), (0, 80));
+    assert_eq!(cpu.bus.read_16(block + 7), 512);
+    assert_eq!(cpu.bus.read_8(block + 9), 1); // sectors per cluster
+    assert_eq!(cpu.bus.read_16(block + 0x0F), 2880); // total sectors
+    assert_eq!(cpu.bus.read_8(block + 0x11), 0xF0);
+    assert_eq!((cpu.bus.read_16(block + 0x14), cpu.bus.read_16(block + 0x16)), (18, 2));
+
+    // A fixed disk, whose sector count needs the 32-bit field
+    assert_eq!(ioctl(&mut cpu, 3, 0x0860), (false, 0));
+    assert_eq!((cpu.bus.read_8(block + 1), cpu.bus.read_16(block + 2)), (0x05, 1));
+    assert_eq!((cpu.bus.read_16(block + 0x0F), cpu.bus.read_8(block + 0x11)), (0, 0xF8));
+    assert!(cpu.bus.read_32(block + 0x1C) > 0xFFFF);
+
+    // Get Media ID: the volume label and a FAT12 file system
+    assert_eq!(ioctl(&mut cpu, 1, 0x0866), (false, 0));
+    assert_eq!(cpu.bus.read_16(block), 0);
+    assert_eq!(bytes(&cpu, 6, 19), b"DISK1      FAT12   ");
+    assert_eq!(ioctl(&mut cpu, 0, 0x0866), (false, 0)); // default = C:
+    assert_eq!(bytes(&cpu, 0x11, 8), b"FAT16   ");
+    let c_serial = cpu.bus.read_32(block + 2);
+    ioctl(&mut cpu, 1, 0x0866);
+    assert_ne!(cpu.bus.read_32(block + 2), c_serial);
+
+    // CD-ROMs are redirector drives; unmounted drives are invalid
+    assert_eq!(ioctl(&mut cpu, 4, 0x0860), (true, 0x01));
+    assert_eq!(ioctl(&mut cpu, 7, 0x0860), (true, 0x0F));
+}
+
+#[test]
 fn read_only_drives_reject_writes() {
     let base = scratch("readonly", &["c", "cd", "ro"]);
     fs::write(base.join("cd/DATA.DAT"), b"cd").unwrap();
