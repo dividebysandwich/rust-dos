@@ -1,6 +1,6 @@
 use crate::audio::play_sdl_beep;
 use crate::cpu::Cpu;
-use crate::video::{ADDR_VGA_TEXT, BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode};
+use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode};
 use iced_x86::Register;
 
 /// Current number of text rows on the screen, read from BDA 0x0484.
@@ -8,7 +8,53 @@ use iced_x86::Register;
 /// this value to 43 or 50 rows; hard-coding 25 would make the renderer and
 /// scroll logic ignore everything below the first 25 rows.
 fn active_rows(cpu: &Cpu) -> u8 {
-    cpu.bus.read_8(0x0484).wrapping_add(1).max(1)
+    cpu.bus.text_rows() as u8
+}
+
+/// The bytes of video memory a page of `mode` takes (BDA 044Ch).
+fn page_size(mode: u8) -> u16 {
+    match mode {
+        0x00 | 0x01 => 0x0800,
+        0x02 | 0x03 | 0x07 => 0x1000,
+        0x04..=0x06 | 0x0E => 0x4000,
+        0x0D => 0x2000,
+        0x0F | 0x10 => 0x8000,
+        0x11 | 0x12 => 0xA000,
+        _ => 0xFA00,
+    }
+}
+
+/// The values of the CGA's Mode Control register (3D8h) the IBM BIOS sets
+/// for modes 0-7, which it keeps in BDA 0465h.
+const MODE_CONTROL: [u8; 8] = [0x2C, 0x28, 0x2D, 0x29, 0x2A, 0x2E, 0x1E, 0x29];
+
+/// Whether the current mode is a text mode.
+fn text_mode(cpu: &Cpu) -> bool {
+    matches!(
+        cpu.bus.video_mode,
+        VideoMode::Text80x25 | VideoMode::Text80x25Color | VideoMode::Text40x25 | VideoMode::Text40x25Color
+    )
+}
+
+/// The characters in a row of the current text mode.
+fn text_cols(cpu: &Cpu) -> usize {
+    match cpu.bus.video_mode {
+        VideoMode::Text40x25 | VideoMode::Text40x25Color => 40,
+        _ => 80,
+    }
+}
+
+/// The address of the character at (`col`, `row`) of text page `page`,
+/// each page `page_size` (BDA 044Ch) bytes on from the last.
+fn cell_addr(cpu: &Cpu, page: u8, col: usize, row: usize) -> usize {
+    let (base, size) = cpu.bus.vga.text_window();
+    let page_offset = page as usize * cpu.bus.read_16(0x044C) as usize;
+    base + ((page_offset + (row * text_cols(cpu) + col) * 2) & (size - 1))
+}
+
+/// The active display page (BDA 0462h).
+fn active_page(cpu: &Cpu) -> u8 {
+    cpu.bus.read_8(0x0462)
 }
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
@@ -89,6 +135,14 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     cpu.bus.vga.mark_dirty_full();
     cpu.bus.write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
     cpu.bus.write_8(0x0462, 0); // Update BDA Active Page to 0
+    cpu.bus.write_16(0x044C, page_size(mode));
+    cpu.bus.write_16(0x044E, 0);
+    // The CGA's mode and colour registers as its BIOS sets them: palette 1
+    // at high intensity, and in mode 6 white on black.
+    if let Some(&control) = MODE_CONTROL.get(mode as usize) {
+        cpu.bus.write_8(0x0465, control);
+    }
+    cpu.bus.write_8(0x0466, if mode == 0x06 { 0x3F } else { 0x30 });
     let cols: u16 = match mode {
         0x00 | 0x01 | 0x04 | 0x05 => 40,
         0x13 => 40, // Mode 13h uses 40 columns text
@@ -163,10 +217,19 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_dx(0);
         }
 
-        // AH = 05h: Set Active Page
+        // AH = 05h: Set Active Page. The CRTC shows the page from its
+        // Start Address on, which counts characters in the text modes and
+        // bytes of each plane in the 16-color ones.
         0x05 => {
             let page = cpu.get_reg8(Register::AL);
-            cpu.bus.write_8(0x0462, page); // Update BDA Active Page
+            let offset = page as usize * cpu.bus.read_16(0x044C) as usize;
+            cpu.bus.write_8(0x0462, page);
+            cpu.bus.write_16(0x044E, offset as u16);
+            let start = if text_mode(cpu) { offset / 2 } else { offset };
+            cpu.bus.vga.crtc_regs[0x0C] = (start >> 8) as u8;
+            cpu.bus.vga.crtc_regs[0x0D] = start as u8;
+            let (col, row) = get_cursor(cpu, page);
+            set_cursor(cpu, col, row, page);
         }
 
         // AH = 06h: Scroll Up
@@ -219,14 +282,15 @@ pub fn handle(cpu: &mut Cpu) {
             let (col, row) = get_cursor(cpu, page);
 
             // Repeat char count times (without moving cursor)
+            let cols = text_cols(cpu);
             for i in 0..count {
                 // Determine VRAM offset
                 // Note: DOS wraps to next line visually for this function, but doesn't scroll
-                let temp_col = (col as usize + i) % MAX_COLS as usize;
-                let temp_row = (row as usize) + (col as usize + i) / MAX_COLS as usize;
+                let temp_col = (col as usize + i) % cols;
+                let temp_row = (row as usize) + (col as usize + i) / cols;
 
                 if temp_row < active_rows(cpu) as usize {
-                    write_char_at(cpu, temp_col as u8, temp_row as u8, char_code, attr);
+                    write_page_char(cpu, page, temp_col as u8, temp_row as u8, char_code, attr);
                 }
             }
         }
@@ -236,45 +300,47 @@ pub fn handle(cpu: &mut Cpu) {
         //      BL = Color Value (0-15 for Border, 0-31 for CGA Background)
         // BH = 01h: Set Palette (CGA 320x200 Mode 4/5 only)
         //      BL = Palette ID (0 or 1)
+        // BDA 0466h keeps the CGA's Color Select register (3D9h): the
+        // background in bits 0-3, the intensity of mode 4's colors in bit 4
+        // and its palette in bit 5. An EGA or VGA sets its palette registers
+        // to match: the border (11h), and in the CGA graphics modes the
+        // background (0) and mode 4's three colors (1-3).
         0x0B => {
             let bh = cpu.get_reg8(Register::BH);
             let bl = cpu.get_reg8(Register::BL);
-
-            // Update BIOS Data Area (BDA) at 0x0466.
-            // This byte mirrors the CGA Color Select Register (Port 0x3D9).
-            let mut current_3d9 = cpu.bus.read_8(0x0466);
-
-            if bh == 0x00 {
-                // Set Background / Border Color
-                // Bits 0-3 represent the border/background color.
-                // Bit 4 is Intensity (sometimes part of background in some modes).
-
-                // Clear lower 5 bits and set new color
-                current_3d9 = (current_3d9 & 0xE0) | (bl & 0x1F);
-                cpu.bus.write_8(0x0466, current_3d9);
-
-                // TODO: Renderer needs to actually read 0x0466 to
-                // draw the border or change the background color of transparent pixels.
-            } else if bh == 0x01 {
-                // Set CGA Palette
-                // Bit 5 controls the active palette in Mode 4.
-                // 0 = Palette 0 (Ugly Green/Red/Brown)
-                // 1 = Palette 1 (Even uglier Cyan/Magenta/White)
-
-                if (bl & 0x01) != 0 {
-                    current_3d9 |= 0x20; // Set Bit 5
-                } else {
-                    current_3d9 &= !0x20; // Clear Bit 5
-                }
-                cpu.bus.write_8(0x0466, current_3d9);
+            let mut select = cpu.bus.read_8(0x0466);
+            match bh {
+                0x00 => select = (select & 0xE0) | (bl & 0x1F),
+                0x01 => select = (select & 0xDF) | if bl & 1 != 0 { 0x20 } else { 0 },
+                _ => return,
             }
+            cpu.bus.write_8(0x0466, select);
+            let graphics = cpu.bus.read_8(0x0449) > 3;
+            let regs = &mut cpu.bus.vga.attribute_regs;
+            if bh == 0x00 {
+                // An RGBI color: intensity in bit 4 of a palette register.
+                let color = (bl & 0x07) | (bl << 1 & 0x10);
+                regs[0x11] = color;
+                if graphics {
+                    regs[0x00] = color;
+                }
+            }
+            if graphics {
+                let first = (select & 0x10) | 0x02 | (select >> 5 & 1);
+                for (i, reg) in regs[1..=3].iter_mut().enumerate() {
+                    *reg = first + 2 * i as u8;
+                }
+            }
+            cpu.bus.vga.mark_dirty_full();
         }
 
         // AH = 0Eh: Teletype Output
         0x0E => {
             let char_code = cpu.get_reg8(Register::AL);
-            // Always Page 0 for basic TTY
-            let (mut col, mut row) = get_cursor(cpu, 0);
+            // On the active page, as the IBM BIOS does whatever BH says.
+            let page = active_page(cpu);
+            let (mut col, mut row) = get_cursor(cpu, page);
+            let cols = text_cols(cpu) as u8;
 
             match char_code {
                 0x07 => play_sdl_beep(&mut cpu.bus), // Bell
@@ -283,7 +349,7 @@ pub fn handle(cpu: &mut Cpu) {
                     if col > 0 {
                         col -= 1;
                         // Visual erase
-                        write_char_at(cpu, col, row, 0x20, 0x07);
+                        write_page_char(cpu, page, col, row, 0x20, 0x07);
                     }
                 }
                 0x0D => {
@@ -295,14 +361,16 @@ pub fn handle(cpu: &mut Cpu) {
                     row += 1;
                 }
                 _ => {
-                    // Printable
-                    write_char_at(cpu, col, row, char_code, 0x07);
+                    // Printable, in the attribute the cell has.
+                    let (_, attr) = read_page_char(cpu, page, col, row);
+                    let attr = if attr == 0 { 0x07 } else { attr };
+                    write_page_char(cpu, page, col, row, char_code, attr);
                     col += 1;
                 }
             }
 
             // Handle Line Wrapping
-            if col >= MAX_COLS {
+            if col >= cols {
                 col = 0;
                 row += 1;
             }
@@ -311,12 +379,12 @@ pub fn handle(cpu: &mut Cpu) {
             let rows = active_rows(cpu);
             if row >= rows {
                 // Scroll entire screen up by 1 line
-                scroll_area(cpu, true, 1, 0x07, 0, 0, rows - 1, MAX_COLS - 1);
+                scroll_area(cpu, true, 1, 0x07, 0, 0, rows - 1, cols - 1);
                 row = rows - 1;
             }
 
             // Update Cursor (Sync BDA and Internal)
-            set_cursor(cpu, col, row, 0);
+            set_cursor(cpu, col, row, page);
         }
 
         // AH = 0Fh: Get Video Mode
@@ -665,10 +733,15 @@ pub fn handle(cpu: &mut Cpu) {
             let bl = cpu.get_reg8(Register::BL);
             match bl {
                 0x10 => {
-                    // Get Configuration
-                    cpu.set_reg8(Register::BH, 0); // Color Mode
-                    cpu.set_reg8(Register::BL, 3); // 256KB Video Memory
-                    cpu.set_cx(0); // Feature bits
+                    // Get Configuration: BH 0 for a color CRTC at 3D4h, BL
+                    // the memory (3: 256 KB), CL the switches and CH the
+                    // feature bits, from BDA 0488h.
+                    let switches = cpu.bus.read_8(0x0488);
+                    let mono = cpu.bus.read_16(0x0463) == 0x3B4;
+                    cpu.set_reg8(Register::BH, mono as u8);
+                    cpu.set_reg8(Register::BL, 3);
+                    cpu.set_reg8(Register::CL, switches & 0x0F);
+                    cpu.set_reg8(Register::CH, switches >> 4);
                 }
                 0x30 => {
                     // Select Scan Lines (AL = 0, 1, 2)
@@ -974,62 +1047,36 @@ fn get_cursor(cpu: &Cpu, page: u8) -> (u8, u8) {
     }
 }
 
-/// Writes a character and attribute to VRAM (Text Mode)
+/// Writes a character and attribute to the active page (text modes).
 fn write_char_at(cpu: &mut Cpu, col: u8, row: u8, char_code: u8, attr: u8) {
-    match cpu.bus.video_mode {
-        // Standard Text Modes
-        VideoMode::Text80x25
-        | VideoMode::Text80x25Color
-        | VideoMode::Text40x25
-        | VideoMode::Text40x25Color => {
-            let cols = if cpu.bus.video_mode == VideoMode::Text40x25
-                || cpu.bus.video_mode == VideoMode::Text40x25Color
-            {
-                40
-            } else {
-                80
-            };
+    let page = active_page(cpu);
+    write_page_char(cpu, page, col, row, char_code, attr);
+}
 
-            let offset = (row as usize * cols + col as usize) * 2;
-            if offset < cpu.bus.vga.vram_text.len() {
-                cpu.bus.write_8(ADDR_VGA_TEXT + offset, char_code);
-                cpu.bus.write_8(ADDR_VGA_TEXT + offset + 1, attr);
-            }
-        }
+/// Writes a character and attribute to text page `page`.
+fn write_page_char(cpu: &mut Cpu, page: u8, col: u8, row: u8, char_code: u8, attr: u8) {
+    if !text_mode(cpu) {
         // TODO: Graphics Mode font rendering
-        _ => {
-            cpu.bus
-                .log_string("[BIOS] write_char_at called in unsupported video mode");
-        }
+        cpu.bus.log_string("[BIOS] write_char_at called in unsupported video mode");
+        return;
     }
+    let addr = cell_addr(cpu, page, col as usize, row as usize);
+    cpu.bus.write_8(addr, char_code);
+    cpu.bus.write_8(addr + 1, attr);
+}
+
+/// Reads a character and attribute from text page `page`.
+fn read_page_char(cpu: &Cpu, page: u8, col: u8, row: u8) -> (u8, u8) {
+    if !text_mode(cpu) {
+        return (0, 0);
+    }
+    let addr = cell_addr(cpu, page, col as usize, row as usize);
+    (cpu.bus.read_8(addr), cpu.bus.read_8(addr + 1))
 }
 
 /// Reads a character and attribute from VRAM (Text Mode)
-fn read_char_at(cpu: &Cpu, col: u8, row: u8, _page: u8) -> (u8, u8) {
-    match cpu.bus.video_mode {
-        VideoMode::Text80x25
-        | VideoMode::Text80x25Color
-        | VideoMode::Text40x25
-        | VideoMode::Text40x25Color => {
-            let cols = if cpu.bus.video_mode == VideoMode::Text40x25
-                || cpu.bus.video_mode == VideoMode::Text40x25Color
-            {
-                40
-            } else {
-                80
-            };
-
-            let offset = (row as usize * cols + col as usize) * 2;
-            if offset < cpu.bus.vga.vram_text.len() {
-                let char_code = cpu.bus.read_8(ADDR_VGA_TEXT + offset);
-                let attr = cpu.bus.read_8(ADDR_VGA_TEXT + offset + 1);
-                (char_code, attr)
-            } else {
-                (0, 0)
-            }
-        }
-        _ => (0, 0),
-    }
+fn read_char_at(cpu: &Cpu, col: u8, row: u8, page: u8) -> (u8, u8) {
+    read_page_char(cpu, page, col, row)
 }
 
 /// Generic Scroll Function (Handles AH=06, AH=07, AH=00, AH=0E)
@@ -1075,13 +1122,8 @@ fn scroll_area(
     }
 
     // Safety Clamps for Text Mode Logic
-    let max_cols = if cpu.bus.video_mode == VideoMode::Text40x25
-        || cpu.bus.video_mode == VideoMode::Text40x25Color
-    {
-        40
-    } else {
-        80
-    };
+    let max_cols = text_cols(cpu);
+    let page = active_page(cpu);
 
     // Safety Clamps. Use the BDA row count so scrolling respects 80x43/50.
     let rows = active_rows(cpu) as usize;
@@ -1105,14 +1147,7 @@ fn scroll_area(
         // Scroll Up (Copy Lower -> Upper)
         for r in r_start..=(r_end.saturating_sub(count)) {
             for c in c_start..=c_end {
-                let src_r = r + count;
-                // Read from Source
-                let src_offset = (src_r * max_cols + c) * 2;
-
-                // Read directly from bus to handle scrolling
-                // Use read_8 directly because there's no read_char_at
-                let val = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset);
-                let at = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset + 1);
+                let (val, at) = read_page_char(cpu, page, c as u8, (r + count) as u8);
 
                 // Write to Dest
                 write_char_at(cpu, c as u8, r as u8, val, at);
@@ -1132,10 +1167,7 @@ fn scroll_area(
         if effective_start <= r_end {
             for r in (effective_start..=r_end).rev() {
                 for c in c_start..=c_end {
-                    let src_r = r - count;
-                    let src_offset = (src_r * max_cols + c) * 2;
-                    let val = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset);
-                    let at = cpu.bus.read_8(ADDR_VGA_TEXT + src_offset + 1);
+                    let (val, at) = read_page_char(cpu, page, c as u8, (r - count) as u8);
 
                     write_char_at(cpu, c as u8, r as u8, val, at);
                 }

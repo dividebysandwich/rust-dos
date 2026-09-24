@@ -1471,23 +1471,17 @@ fn set_regs(cpu: &mut Cpu, map: &Map<String, Value>) -> Result<(), String> {
 
 fn screen_text(cpu: &Cpu) -> Reply {
     let mode = cpu.bus.video_mode;
-    let (cols, rows) = match mode {
-        VideoMode::Text80x25 | VideoMode::Text80x25Color => (80, cpu.bus.peek_8(0x0484) as usize + 1),
-        VideoMode::Text40x25 | VideoMode::Text40x25Color => (40, 25),
-        _ => {
-            return Reply::Error(
-                409,
-                format!("video mode {:?} is a graphics mode; use /api/screenshot", mode),
-            );
-        }
+    let Some(geometry) = crate::video::text::geometry(&cpu.bus) else {
+        return Reply::Error(409, format!("video mode {:?} is a graphics mode; use /api/screenshot", mode));
     };
+    let (cols, rows) = (geometry.cols, geometry.rows);
     let vram = &cpu.bus.vga.vram_text;
     let lines: Vec<String> = (0..rows)
         .map(|r| {
             let s: String = (0..cols)
                 .map(|c| {
-                    let off = (r * cols + c) * 2;
-                    vram.get(off).map_or(' ', |b| keys::CP437[*b as usize])
+                    let off = (geometry.start + r * geometry.row_bytes + c * 2) & geometry.wrap;
+                    keys::CP437[vram[off] as usize]
                 })
                 .collect();
             s.trim_end().to_string()

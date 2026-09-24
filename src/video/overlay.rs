@@ -2,7 +2,7 @@
 //! text cursor and the mouse pointer, which the front ends draw over each
 //! frame (see `render_screen`).
 
-use super::{Frame, VideoMode};
+use super::Frame;
 use crate::bus::Bus;
 
 /// Draw the text mode cursor, if `cursor_visible` (the blink phase), and the
@@ -13,69 +13,31 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
     let buffer = &mut frame.rgb[..];
     let frame_w = width as usize;
 
-    // Draw the Cursor (Overlay)
-    // Only draw the hardware cursor in Text Modes!
-    let current_mode = bus.video_mode;
-    let is_text_mode = matches!(
-        current_mode,
-        VideoMode::Text80x25
-            | VideoMode::Text80x25Color
-            | VideoMode::Text40x25
-            | VideoMode::Text40x25Color
-    );
-    if is_text_mode {
-        // Read Cursor Position from BDA
-        let cursor_col = bus.read_8(0x0450) as usize;
-        let cursor_row = bus.read_8(0x0451) as usize;
-
-        // Read Cursor Shape from BDA
+    // The text mode cursor, at the active page's cursor position (BDA
+    // 0450h, two bytes a page) and with the shape in BDA 0460h, whose
+    // scanlines count in the font's rows.
+    if let Some(geometry) = super::text::geometry(bus) {
+        let page = bus.read_8(0x0462).min(7) as usize;
+        let cursor_col = bus.read_8(0x0450 + page * 2) as usize;
+        let cursor_row = bus.read_8(0x0451 + page * 2) as usize;
         let cursor_shape = bus.read_16(0x0460);
         let start_scan = (cursor_shape >> 8) as u8;
         let end_scan = (cursor_shape & 0xFF) as u8;
-
         // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
         let is_hidden = (start_scan & 0x20) != 0;
 
-        // Determine Cell Width based on Mode
-        // 40-col modes have 16px wide characters (scaled 2x)
-        let (cell_width, max_cols) = match current_mode {
-            VideoMode::Text40x25 | VideoMode::Text40x25Color => (16, 40),
-            _ => (8, 80),
-        };
-        // Cell height and visible rows come from BDA so 80x43 / 80x50
-        // modes draw the cursor at the correct Y when programs like
-        // Norton Commander load the 8x8 font.
-        let cell_height = bus.read_16(0x0485) as usize;
-        let cell_height = if cell_height == 0 { 16 } else { cell_height };
-        let total_rows = bus.read_8(0x0484) as usize + 1;
-
-        if cursor_visible
-            && !is_hidden
-            && cursor_col < max_cols
-            && cursor_row < total_rows
-        {
-            // Calculate screen coordinates
-            let start_x = cursor_col * cell_width;
-            let start_y = cursor_row * cell_height;
-
-            // Clamp scanlines to the active cell height - 1.
-            let max_scan = cell_height.saturating_sub(1) as u8;
+        if cursor_visible && !is_hidden && cursor_col < geometry.cols && cursor_row < geometry.rows {
+            let (cell_w, cell_h) = (geometry.cell_w(), geometry.cell_h());
+            let max_scan = geometry.font_h.saturating_sub(1) as u8;
             let scan_start = (start_scan & 0x1F).min(max_scan) as usize;
             let scan_end = end_scan.min(max_scan) as usize;
-
-            if scan_start <= scan_end {
-                for y_off in scan_start..=scan_end {
-                    for x_off in 0..cell_width {
-                        let draw_x = start_x + x_off;
-                        let draw_y = start_y + y_off;
-
-                        // Safety Check
-                        let idx = (draw_y * frame_w + draw_x) * 3;
-                        if idx + 2 < buffer.len() {
-                            buffer[idx] = 0xDD;
-                            buffer[idx + 1] = 0xDD;
-                            buffer[idx + 2] = 0xDD;
-                        }
+            let x0 = cursor_col * cell_w;
+            for y in scan_start * geometry.y_scale..(scan_end + 1) * geometry.y_scale {
+                let draw_y = cursor_row * cell_h + y;
+                for draw_x in x0..x0 + cell_w {
+                    let idx = (draw_y * frame_w + draw_x) * 3;
+                    if draw_x < frame_w && idx + 2 < buffer.len() {
+                        buffer[idx..idx + 3].fill(0xDD);
                     }
                 }
             }

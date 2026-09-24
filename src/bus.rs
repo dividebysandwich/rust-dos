@@ -3,7 +3,7 @@ use web_time::Instant;
 
 use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
 use crate::video::vbe::Vbe;
-use crate::video::{self, ADDR_VGA_GRAPHICS, ADDR_VGA_TEXT, SIZE_GRAPHICS, SIZE_TEXT, VideoMode};
+use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 /// ROM table of media descriptor bytes, one per drive letter. INT 21h
 /// AH=1Bh/1Ch return a far pointer (F000:E900+drive) into it.
@@ -280,8 +280,10 @@ impl Bus {
         bus.write_8(0x0449, 0x03);
         // 0x044A: Number of Columns (80 = 0x50)
         bus.write_16(0x044A, 80);
-        // 0x044E: Video Page Size (4096 bytes approx, usually 0x1000)
-        bus.write_16(0x044E, 0x1000);
+        // 0x044C: Video Page Size (80x25 text: 4000 bytes, rounded to 4 KB),
+        // 0x044E: the offset of the active page.
+        bus.write_16(0x044C, 0x1000);
+        bus.write_16(0x044E, 0);
         // 0x0460: Cursor Shape (Start Line 13, End Line 14 for VGA)
         bus.write_16(0x0460, 0x0D0E);
         // 0x0462: Active Page (0)
@@ -306,15 +308,14 @@ impl Bus {
         // 0x09 is a common VGA config (1001b).
         bus.write_8(0x0488, 0x09);
 
-        // 0x0489: VGA Misc Flags
-        //   Bit 0 = cursor emulation enabled (standard on VGA)
-        //   Bits 6-5 = 01 (400 scan-line mode)
-        // 0x21 = 00100001
-        bus.write_8(0x0489, 0x21);
+        // 0x0489: VGA video control flags. Bit 0: the VGA is active; bits 7
+        // and 4 the text modes' scanlines (01: 400); bit 1 gray-scale
+        // summing, bit 2 a monochrome monitor, bit 3 no palette loading.
+        bus.write_8(0x0489, 0x11);
 
-        // 0x048A: DCC (Display Combination Code)
-        // 0x08 = VGA w/ Color
-        bus.write_8(0x048A, 0x08);
+        // 0x048A: the index of the VGA's entry in the display combination
+        // code table (INT 10h AH=1Ah returns the code itself).
+        bus.write_8(0x048A, 0x0B);
 
         // 0x0496: Keyboard State (0 = Standard)ture at C000:0000
         bus.ram[0xC0000] = 0x55;
@@ -627,32 +628,30 @@ impl Bus {
     /// must call this (or `vga.mark_dirty_full`), or the dirty-rect renderer
     /// never repaints the change. Same row math as the `write_8` text path.
     pub fn mark_text_dirty(&mut self, start: usize, end: usize) {
-        if end <= start {
-            return;
+        match video::text::geometry(self) {
+            Some(geometry) => {
+                if let Some((y0, y1)) = geometry.screen_rows(start, end) {
+                    self.vga.mark_dirty_rows(y0, y1);
+                }
+            }
+            None => self.vga.mark_dirty_full(),
         }
-        let (row_bytes, cell_h) = match self.video_mode {
-            VideoMode::Text80x25 | VideoMode::Text80x25Color => {
-                let cell_h = self.read_8(0x0485) as usize;
-                (160, if cell_h == 0 { 16 } else { cell_h })
-            }
-            // 8x8 font scaled 2x, irrespective of the BDA value
-            VideoMode::Text40x25 | VideoMode::Text40x25Color => (80, 16),
-            _ => {
-                self.vga.mark_dirty_full();
-                return;
-            }
-        };
-        let h = video::SCREEN_HEIGHT;
-        let y0 = ((start / row_bytes) * cell_h) as u32;
-        let y1 = ((end - 1) / row_bytes + 1) as u32 * cell_h as u32;
-        self.vga.mark_dirty_rows(y0.min(h), y1.min(h));
+    }
+
+    /// The rows of the text screen: BDA 0484h holds them less one, and is 0
+    /// where a BIOS doesn't keep it (the CGA's), which means 25.
+    pub fn text_rows(&self) -> usize {
+        match self.read_8(0x0484) {
+            0 => 25,
+            rows => rows as usize + 1,
+        }
     }
 
     // Helper: Scroll the text screen up by 1 line
     pub fn scroll_up(&mut self) {
         // Read the current row count from BDA so 80x43 / 80x50 modes scroll
         // their whole visible area, not just the first 25 rows.
-        let rows = self.read_8(0x0484) as usize + 1;
+        let rows = self.text_rows();
         let row_size = 160; // 80 chars * 2 bytes
         let screen_size = rows * row_size;
         if screen_size > self.vga.vram_text.len() {
@@ -758,8 +757,9 @@ impl Bus {
             // for planar read-modify-write sequences.
             return self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
         }
-        if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
-            return self.vga.vram_text[addr - ADDR_VGA_TEXT];
+        let (text, size) = self.vga.text_window();
+        if (text..text + size).contains(&addr) {
+            return self.vga.vram_text[addr - text];
         }
         if addr < self.ram.len() {
             return self.ram[addr];
@@ -828,37 +828,17 @@ impl Bus {
                     | VideoMode::Vga640x480
             );
         }
-        if addr >= ADDR_VGA_TEXT && addr < ADDR_VGA_TEXT + SIZE_TEXT {
-            let text_off = addr - ADDR_VGA_TEXT;
+        let (text, size) = self.vga.text_window();
+        if (text..text + size).contains(&addr) {
+            let text_off = addr - text;
             self.vga.vram_text[text_off] = value;
 
             // Narrow the dirty range to just the affected character row when
-            // we're in a text mode. Cell height comes from BDA 0x485 (set by
-            // INT 10h font swaps); 80x50 mode loads the 8-pixel font and
-            // reduces this to 8. CGA graphics modes (4/5/6) also live in
-            // this VRAM but their byte-to-scanline mapping is interleaved,
-            // so we conservatively repaint everything for those.
-            match self.video_mode {
-                VideoMode::Text80x25 | VideoMode::Text80x25Color => {
-                    let cell_h = self.read_8(0x0485) as usize;
-                    let cell_h = if cell_h == 0 { 16 } else { cell_h };
-                    let row = text_off / 160;
-                    let y0 = (row * cell_h) as u32;
-                    let y1 = ((row + 1) * cell_h) as u32;
-                    let h = video::SCREEN_HEIGHT;
-                    self.vga.mark_dirty_rows(y0.min(h), y1.min(h));
-                }
-                VideoMode::Text40x25 | VideoMode::Text40x25Color => {
-                    // 40-col modes use the 8x8 font scaled 2x = 16 screen
-                    // rows per text row, irrespective of the BDA value.
-                    let row = text_off / 80;
-                    let y0 = (row * 16) as u32;
-                    let y1 = ((row + 1) * 16) as u32;
-                    let h = video::SCREEN_HEIGHT;
-                    self.vga.mark_dirty_rows(y0.min(h), y1.min(h));
-                }
-                _ => self.vga.mark_dirty_full(),
-            }
+            // we're in a text mode (see `text::geometry`). CGA graphics modes
+            // (4/5/6) also live in this VRAM but their byte-to-scanline
+            // mapping is interleaved, so we conservatively repaint everything
+            // for those.
+            self.mark_text_dirty(text_off, text_off + 1);
 
             // Check if current mode uses this memory
             return matches!(
@@ -1651,7 +1631,9 @@ impl Bus {
             }
 
             // Super VGA CRTC registers, past the VGA's 00h-18h.
-            0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 => self.ext_crtc_write(self.vga.crtc_index, value),
+            0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 && self.vga.decodes(port) => {
+                self.ext_crtc_write(self.vga.crtc_index, value)
+            }
 
             _ => {
                 if self.vga.ports().contains(&port) {
@@ -1880,9 +1862,12 @@ impl Bus {
                 val
             }
 
-            // VGA Input Status 1: retrace and display enable.
-            0x3DA | 0x3BA => self.input_status_1(),
-            0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 => self.ext_crtc_read(self.vga.crtc_index),
+            // VGA Input Status 1: retrace and display enable, at the CRTC's
+            // address (3DAh in colour modes, 3BAh in monochrome ones).
+            0x3DA | 0x3BA if self.vga.decodes(port) => self.input_status_1(),
+            0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 && self.vga.decodes(port) => {
+                self.ext_crtc_read(self.vga.crtc_index)
+            }
 
             _ => {
                 if self.vga.ports().contains(&port) {

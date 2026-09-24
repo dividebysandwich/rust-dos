@@ -462,6 +462,8 @@ fn main() -> Result<(), String> {
         if last_blink.elapsed() >= blink_interval {
             cursor_visible = !cursor_visible;
             last_blink = std::time::Instant::now();
+            // Blinking characters keep the cursor's time.
+            cpu.bus.vga.set_blink(cursor_visible);
         }
 
         // Render Frame. The expensive part (the pixel fill driven by

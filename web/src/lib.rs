@@ -745,6 +745,8 @@ impl Machine {
         if self.last_blink.elapsed() >= BLINK {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = Instant::now();
+            // Blinking characters keep the cursor's time.
+            self.cpu.bus.vga.set_blink(self.cursor_visible);
         }
         let bus = &mut self.cpu.bus;
         // The CRTC picks up the Start Address the program flipped to at the

@@ -5,7 +5,9 @@ pub mod crt;
 pub mod modes;
 pub mod mono;
 pub mod overlay;
+pub mod palette;
 pub mod shader;
+pub mod text;
 pub mod vbe;
 pub mod vga;
 
@@ -176,14 +178,13 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => {
             render_cga_mode4(canvas, &bus.vga.vram_text, bus)
         }
-        VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vga.vram_text),
+        VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vga.vram_text, bus),
         // Text renderers honour the dirty row band so a single-line shell
         // update only repaints those 16 scanlines instead of the full 80x25.
-        VideoMode::Text80x25 | VideoMode::Text80x25Color => {
-            render_text_mode_80x25(canvas, &bus.vga.vram_text, bus, y_min, y_max)
-        }
-        VideoMode::Text40x25 | VideoMode::Text40x25Color => {
-            render_text_mode_40x25(canvas, &bus.vga.vram_text, bus, y_min, y_max)
+        VideoMode::Text80x25 | VideoMode::Text80x25Color | VideoMode::Text40x25 | VideoMode::Text40x25Color => {
+            if let Some(geometry) = text::geometry(bus) {
+                text::render(canvas, width, bus, &geometry, y_min, y_max);
+            }
         }
         // 16-color planar modes (0Dh, 0Eh, 10h, 12h), at the size the CRTC
         // registers give them.
@@ -253,7 +254,10 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
 /// picture to the canvas.
 fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
     let (width, rows) = bus.vga.graphics_size();
-    let mix = palette_mix(bus);
+    // The planes the Color Plane Enable register lets through, and the
+    // colour of each pixel value.
+    let planes = bus.vga.attribute_regs[0x12] & 0x0F;
+    let colors: [(u8, u8, u8); 16] = std::array::from_fn(|pixel| bus.vga.attribute_rgb(pixel as u8 & planes));
     // CRTC Offset (index 0x13) holds bytes-per-scanline / 2 (i.e. words
     // per row). Fall back to width/8 if the game never touched it.
     let offset_reg = bus.vga.crtc_regs[0x13] as usize;
@@ -279,7 +283,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
         let (row_base, row, pan) = if y >= split { (0, y - split, split_pan) } else { (base, y, pan) };
         for tx in 0..canvas_w {
             let x = tx * width / canvas_w;
-            let rgb = planar_pixel_rgb(bus, vram, bytes_per_row, x + pan, row, row_base, &mix);
+            let rgb = colors[planar_pixel(vram, bytes_per_row, x + pan, row, row_base) as usize];
             let idx = dst + tx * 3;
             canvas[idx] = rgb.0;
             canvas[idx + 1] = rgb.1;
@@ -296,52 +300,18 @@ fn planar_base_offset(bus: &Bus) -> usize {
     bus.vga.latched_start_addr
 }
 
-/// Precomputed DAC mapping selector. The attribute palette register holds
-/// six bits (P5..P0). The DAC receives an 8-bit index assembled from the
-/// attribute register, the Mode Control P54S bit, and the Color Select
-/// register. Two rules, depending on P54S:
-///   P54S=0: dac = (attr & 0x3F)           | ((color_select & 0x0C) << 4)
-///   P54S=1: dac = (attr & 0x0F)           | ((color_select & 0x0F) << 4)
-struct PaletteMix {
-    p54s: bool,
-    color_select: u8,
-}
-
-fn palette_mix(bus: &Bus) -> PaletteMix {
-    PaletteMix {
-        p54s: (bus.vga.attribute_regs[0x10] & 0x80) != 0,
-        color_select: bus.vga.attribute_regs[0x14],
-    }
-}
-
-fn planar_pixel_rgb(
-    bus: &Bus,
-    vram: &[u8],
-    bytes_per_row: usize,
-    x: usize,
-    y: usize,
-    base: usize,
-    mix: &PaletteMix,
-) -> (u8, u8, u8) {
+/// The 4-bit value of pixel (`x`, `y`): a bit from each plane.
+fn planar_pixel(vram: &[u8], bytes_per_row: usize, x: usize, y: usize, base: usize) -> u8 {
     // Plane space wraps at 64 KiB; games with smaller back buffers rely on
     // that so page flips near the top of VRAM don't walk into garbage.
     let byte_offset = (base + y * bytes_per_row + (x / 8)) & 0xFFFF;
     let bit_pos = 7 - (x % 8) as u8;
-    let mut pixel_idx: u8 = 0;
+    let mut pixel: u8 = 0;
     for plane in 0..4 {
-        let idx = plane * 65536 + byte_offset;
-        if idx < vram.len() {
-            let bit = (vram[idx] >> bit_pos) & 1;
-            pixel_idx |= bit << plane;
-        }
+        let bit = (vram[plane * 65536 + byte_offset] >> bit_pos) & 1;
+        pixel |= bit << plane;
     }
-    let attr = bus.vga.attribute_regs[pixel_idx as usize & 0x0F] & 0x3F;
-    let dac_idx = if mix.p54s {
-        (attr & 0x0F) | ((mix.color_select & 0x0F) << 4)
-    } else {
-        attr | ((mix.color_select & 0x0C) << 4)
-    };
-    bus.vga.get_rgb(dac_idx & bus.vga.dac_mask)
+    pixel
 }
 
 /// 256-color modes: mode 13h and the unchained "mode X" family (320x240,
@@ -392,33 +362,12 @@ pub fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus
     }
 }
 
-// CGA Mode 4/5 (320x200 4 color)
-// Memory is interleaved: Even rows at 0x0000, Odd rows at 0x2000
+/// CGA mode 4/5 (320x200, 4 colors): two bits a pixel, even rows at 0000h
+/// and odd rows at 2000h. A VGA takes the four colors from palette
+/// registers 0-3, which INT 10h AH=0Bh sets for the background and the
+/// palette.
 fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
-    // Read Palette from BDA (0x0466)
-    // Bit 5 = Palette ID (0=Red/Green/Brown, 1=Cyan/Magenta/White)
-    // Bit 0-3 = Background Color (Index in VGA Palette)
-    let cga_reg = bus.read_8(0x0466);
-    let bg_color_idx = cga_reg & 0x0F;
-    let palette_id = (cga_reg & 0x20) != 0;
-    // Get RGB values using the bus
-    let bg_rgb_val = bus.vga.get_rgb(bg_color_idx);
-
-    // Hardcoded Indices
-    let p0 = [
-        bg_rgb_val,
-        bus.vga.get_rgb(2),
-        bus.vga.get_rgb(4),
-        bus.vga.get_rgb(6),
-    ];
-    let p1 = [
-        bg_rgb_val,
-        bus.vga.get_rgb(3),
-        bus.vga.get_rgb(5),
-        bus.vga.get_rgb(7),
-    ];
-
-    let current_pal = if palette_id { p1 } else { p0 };
+    let colors: [(u8, u8, u8); 4] = std::array::from_fn(|pixel| bus.vga.attribute_rgb(pixel as u8));
 
     for y in 0..200 {
         // Determine memory offset based on interleave
@@ -426,19 +375,13 @@ fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
         let line_offset = bank_offset + ((y / 2) * 80);
 
         for byte_idx in 0..80 {
-            let offset = line_offset + byte_idx;
-            if offset >= vram.len() {
-                continue;
-            }
-
-            let byte = vram[offset];
+            let byte = vram[line_offset + byte_idx];
 
             // 4 pixels per byte (2 bits each)
             for p in 0..4 {
                 // High bits are leftmost pixel
                 let shift = 6 - (p * 2);
-                let color_idx = (byte >> shift) & 0x03;
-                let rgb = current_pal[color_idx as usize];
+                let rgb = colors[((byte >> shift) & 0x03) as usize];
 
                 let x = (byte_idx * 4) + p;
 
@@ -460,10 +403,11 @@ fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
     }
 }
 
-// CGA Mode 6 (640x200 2 color - Black & White)
-fn render_cga_mode6(canvas: &mut [u8], vram: &[u8]) {
-    let fg = (255, 255, 255);
-    let bg = (0, 0, 0);
+/// CGA mode 6 (640x200, 2 colors): a bit a pixel, interleaved like mode
+/// 4, in palette registers 0 and 1.
+fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
+    let bg = bus.vga.attribute_rgb(0);
+    let fg = bus.vga.attribute_rgb(1);
 
     for y in 0..200 {
         let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
@@ -492,117 +436,6 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8]) {
                         canvas[idx] = rgb.0;
                         canvas[idx + 1] = rgb.1;
                         canvas[idx + 2] = rgb.2;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Emulate Text Mode (80x25) using authentic 8x16 Font
-// No scaling needed for height (16px * 25 rows = 400px)
-pub fn render_text_mode_80x25(canvas: &mut [u8], vram: &[u8], bus: &Bus, y_min: usize, y_max: usize) {
-    // Programs like Norton Commander switch to 80x50 by loading the 8x8 font
-    // (INT 10h AH=11h AL=12h). The row count and character cell height live in
-    // BDA 0x0484 / 0x0485; honour them so all rows the program wrote are drawn.
-    let rows = bus.read_8(0x0484) as usize + 1;
-    let char_height = bus.read_16(0x0485) as usize;
-    let (font, font_height): (&[u8], usize) = match char_height {
-        0..=10 => (FONT_8X8, 8),
-        _ => (FONT_8X16, 16),
-    };
-
-    // Skip text rows that fall entirely outside the dirty band. We round
-    // outward — a row whose first pixel is < y_max and whose last pixel is
-    // >= y_min still has visible bytes inside the band.
-    let row_first = y_min / font_height;
-    let row_last = (y_max + font_height - 1) / font_height;
-    let row_lo = row_first.min(rows);
-    let row_hi = row_last.min(rows);
-
-    for row in row_lo..row_hi {
-        for col in 0..80 {
-            let offset = (row * 80 + col) * 2;
-            if offset + 1 >= vram.len() {
-                continue;
-            }
-            let char_code = vram[offset] as usize;
-            let attr = vram[offset + 1];
-
-            let fg = bus.vga.get_rgb(attr & 0x0F);
-            let bg = bus.vga.get_rgb((attr >> 4) & 0x0F);
-
-            let glyph_start = char_code * font_height;
-            if glyph_start + font_height > font.len() {
-                continue;
-            }
-
-            for y in 0..font_height {
-                let glyph_row = font[glyph_start + y];
-                for x in 0..8 {
-                    let on = (glyph_row >> (7 - x)) & 1 == 1;
-                    let color = if on { fg } else { bg };
-
-                    let screen_x = (col * 8) + x;
-                    let screen_y = (row * font_height) + y;
-                    if screen_y >= SCREEN_HEIGHT as usize {
-                        continue;
-                    }
-                    let idx = (screen_y * SCREEN_WIDTH as usize + screen_x) * 3;
-                    if idx + 2 >= canvas.len() {
-                        continue;
-                    }
-                    canvas[idx] = color.0;
-                    canvas[idx + 1] = color.1;
-                    canvas[idx + 2] = color.2;
-                }
-            }
-        }
-    }
-}
-
-// Emulate Text Mode (40x25) using authentic 8x8 Font
-// Scaled 2x width, 2x height (8 source rows * 2 = 16 screen rows per text row)
-fn render_text_mode_40x25(canvas: &mut [u8], vram: &[u8], bus: &Bus, y_min: usize, y_max: usize) {
-    let row_lo = (y_min / 16).min(25);
-    let row_hi = ((y_max + 15) / 16).min(25);
-    for row in row_lo..row_hi {
-        for col in 0..40 {
-            let offset = (row * 40 + col) * 2;
-            if offset + 1 >= vram.len() {
-                continue;
-            }
-
-            let char_code = vram[offset] as usize;
-            let attr = vram[offset + 1];
-
-            let fg = bus.vga.get_rgb(attr & 0x0F);
-            let bg = bus.vga.get_rgb((attr >> 4) & 0x0F);
-
-            // Each character is 8 bytes long in the 8x8 font
-            let glyph_start = char_code * 8;
-
-            for y in 0..8 {
-                let glyph_row = FONT_8X8[glyph_start + y];
-
-                for x in 0..8 {
-                    let on = (glyph_row >> (7 - x)) & 1 == 1;
-                    let color = if on { fg } else { bg };
-
-                    // Calculate Base Position (40 cols * 16px wide)
-                    let start_x = (col * 16) + (x * 2);
-                    let start_y = (row * 16) + (y * 2);
-
-                    // Draw 2x2 pixel block for every 1 font pixel
-                    for dy in 0..2 {
-                        for dx in 0..2 {
-                            let idx = ((start_y + dy) * SCREEN_WIDTH as usize + (start_x + dx)) * 3;
-                            if idx + 2 < canvas.len() {
-                                canvas[idx] = color.0;
-                                canvas[idx + 1] = color.1;
-                                canvas[idx + 2] = color.2;
-                            }
-                        }
                     }
                 }
             }
@@ -649,7 +482,7 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
 
     // Handle Scrolling, using the row count from BDA so 80x43 / 80x50 modes
     // get proper scroll behaviour rather than being clamped to 25.
-    let rows = bus.read_8(0x0484) as usize + 1;
+    let rows = bus.text_rows();
     if bus.cursor_y >= rows {
         bus.scroll_up();
         bus.cursor_y = rows - 1;
@@ -670,7 +503,7 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
     let mut col = cpu.bus.cursor_x;
     let mut row = cpu.bus.cursor_y;
     let max_cols = 80;
-    let max_rows = cpu.bus.read_8(0x0484) as usize + 1;
+    let max_rows = cpu.bus.text_rows();
     // Text VRAM range written directly below, for the dirty-rect renderer
     let mut touched: Option<(usize, usize)> = None;
     let mut scrolled = false;
