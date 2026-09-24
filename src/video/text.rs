@@ -17,10 +17,19 @@ pub struct TextGeometry {
     pub font: &'static [u8],
     pub stride: usize,
     pub font_h: usize,
-    /// How many screen pixels a font pixel takes across and down: 2x2 in
-    /// the 40-column modes.
+    /// How many screen pixels a font pixel takes across and down: twice as
+    /// wide in the 40-column modes, twice as high on the CGA.
     pub x_scale: usize,
     pub y_scale: usize,
+    /// Pixels a character cell has across: 8, or 9 in the monochrome mode,
+    /// whose line-drawing characters (C0h-DFh) repeat their eighth column
+    /// in the ninth and whose `alternate` glyphs replace some of the font's.
+    pub dots: usize,
+    pub alternate: &'static [u8],
+    /// The monochrome mode's attributes (see `mda_colors`) rather than
+    /// colours, with the underline on scanline `underline`.
+    pub mono: bool,
+    pub underline: usize,
     /// Bytes of text memory per row: a character and its attribute each.
     pub row_bytes: usize,
     /// Where the screen starts in text memory (the CRTC's Start Address, in
@@ -32,7 +41,7 @@ pub struct TextGeometry {
 impl TextGeometry {
     /// A character cell's width on the screen.
     pub fn cell_w(&self) -> usize {
-        8 * self.x_scale
+        self.dots * self.x_scale
     }
 
     /// A character cell's height on the screen.
@@ -82,6 +91,40 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 font_h,
                 x_scale: 1,
                 y_scale: 1,
+                dots: 8,
+                alternate: &[],
+                mono: false,
+                underline: 0,
+                row_bytes: 160,
+                start,
+                wrap,
+            })
+        }
+        // The monochrome mode 7: 9-dot cells, the 14-line font on an MDA,
+        // Hercules card or EGA and the 16-line one on a VGA, with the
+        // alternate glyphs of 9-dot cells.
+        VideoMode::Mono80x25 => {
+            let (font, font_h) = match bus.vga.adapter {
+                Adapter::Hercules => (FONT_8X14, 14),
+                _ => font_of_height(bus),
+            };
+            let (alternate, underline) = match (bus.vga.adapter, font_h) {
+                (Adapter::Hercules, _) => (super::FONT_9X14_ALTERNATE, 13),
+                (_, 16) => (super::FONT_9X16_ALTERNATE, (bus.vga.crtc_regs[0x14] & 0x1F) as usize),
+                _ => (super::FONT_9X14_ALTERNATE, (bus.vga.crtc_regs[0x14] & 0x1F) as usize),
+            };
+            Some(TextGeometry {
+                cols: 80,
+                rows,
+                font,
+                stride: font_h,
+                font_h,
+                x_scale: 1,
+                y_scale: 1,
+                dots: 9,
+                alternate,
+                mono: true,
+                underline,
                 row_bytes: 160,
                 start,
                 wrap,
@@ -98,6 +141,10 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 font_h,
                 x_scale: 2,
                 y_scale: 1,
+                dots: 8,
+                alternate: &[],
+                mono: false,
+                underline: 0,
                 row_bytes: 80,
                 start,
                 wrap,
@@ -141,10 +188,42 @@ fn cga_geometry(bus: &Bus) -> Option<TextGeometry> {
         font_h: (regs[9] & 0x1F) as usize + 1,
         x_scale: if cols > 40 { 1 } else { 2 },
         y_scale: 2,
+        dots: 8,
+        alternate: &[],
+        mono: false,
+        underline: 0,
         row_bytes: cols * 2,
         start: (bus.vga.latched_start_addr * 2) & wrap,
         wrap,
     })
+}
+
+/// The colours of a monochrome attribute, as IBM's Monochrome Display
+/// Adapter shows them: foreground and background, and whether it is
+/// underlined. Background 7 with foreground 0 is reverse video, foreground
+/// 0 otherwise nothing at all, 1 underlined; bit 3 brightens the
+/// foreground, and without blinking bit 7 the background.
+pub fn mda_colors(attr: u8, blinks: bool) -> ((u8, u8, u8), (u8, u8, u8), bool) {
+    use super::hercules::{BLACK, BRIGHT, NORMAL};
+    let (fg_bits, bg_bits) = (attr & 0x07, (attr >> 4) & 0x07);
+    let fg = if attr & 0x08 != 0 { BRIGHT } else { NORMAL };
+    let reverse_bg = if !blinks && attr & 0x80 != 0 { BRIGHT } else { NORMAL };
+    match (bg_bits, fg_bits) {
+        (7, 0) => (BLACK, reverse_bg, false),
+        (_, 0) => (BLACK, BLACK, false),
+        (_, 1) => (fg, BLACK, true),
+        _ => (fg, BLACK, false),
+    }
+}
+
+/// The glyph `alternate` has for `ch`, if it has one: a table of character
+/// codes, each followed by its glyph of `height` bytes, ending with a 0.
+fn alternate_glyph(alternate: &'static [u8], ch: u8, height: usize) -> Option<&'static [u8]> {
+    alternate
+        .chunks(height + 1)
+        .take_while(|entry| entry[0] != 0 && entry.len() == height + 1)
+        .find(|entry| entry[0] == ch)
+        .map(|entry| &entry[1..])
 }
 
 /// Draw the text rows that fall in the screen rows `y_min..y_max` of
@@ -160,6 +239,7 @@ pub fn render(canvas: &mut [u8], canvas_w: usize, bus: &Bus, g: &TextGeometry, y
     let colors: [(u8, u8, u8); 16] = match vga.adapter {
         // Mode Control bit 3 turns the CGA's picture off.
         Adapter::Cga if !vga.cga_video_enabled() => return,
+        Adapter::Hercules if !vga.herc_video_enabled() => return,
         Adapter::Cga => vga.cga_text_colors(),
         _ => std::array::from_fn(|attr| vga.attribute_rgb(attr as u8)),
     };
@@ -171,19 +251,34 @@ pub fn render(canvas: &mut [u8], canvas_w: usize, bus: &Bus, g: &TextGeometry, y
     for row in row_lo..row_hi {
         for col in 0..g.cols {
             let offset = (g.start + row * g.row_bytes + col * 2) & g.wrap;
-            let char_code = vram[offset] as usize;
+            let char_code = vram[offset];
             let attr = vram[offset + 1];
-            let (fg, bg, hidden) = if blinks {
-                (attr & 0x0F, (attr >> 4) & 0x07, attr & 0x80 != 0 && !blink_on)
+            let hidden = blinks && attr & 0x80 != 0 && !blink_on;
+            let (fg, bg, underline) = if g.mono {
+                mda_colors(attr, blinks)
+            } else if blinks {
+                (colors[(attr & 0x0F) as usize], colors[((attr >> 4) & 0x07) as usize], false)
             } else {
-                (attr & 0x0F, attr >> 4, false)
+                (colors[(attr & 0x0F) as usize], colors[(attr >> 4) as usize], false)
             };
-            let (fg, bg) = (colors[fg as usize], colors[bg as usize]);
+            let glyph = alternate_glyph(g.alternate, char_code, g.font_h);
+            // The line-drawing characters reach into a 9-dot cell's ninth
+            // column; the others leave it blank.
+            let line_drawing = (0xC0..=0xDF).contains(&char_code);
 
             for y in 0..g.font_h {
-                let bits = if y < g.stride { g.font[char_code * g.stride + y] } else { 0 };
-                for x in 0..8 {
-                    let on = !hidden && (bits >> (7 - x)) & 1 == 1;
+                let bits = match glyph {
+                    Some(glyph) => glyph[y],
+                    None if y < g.stride => g.font[char_code as usize * g.stride + y],
+                    None => 0,
+                };
+                let underlined = underline && y == g.underline;
+                for x in 0..g.dots {
+                    let lit = match x {
+                        8 => line_drawing && bits & 1 != 0,
+                        _ => (bits >> (7 - x)) & 1 == 1,
+                    };
+                    let on = !hidden && (lit || underlined);
                     let (r, gr, b) = if on { fg } else { bg };
                     for dy in 0..g.y_scale {
                         let py = row * cell_h + y * g.y_scale + dy;

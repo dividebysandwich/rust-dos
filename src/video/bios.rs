@@ -45,13 +45,14 @@ pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
     }
 }
 
-/// Put the machine in the text mode the DOS prompt runs in, with the
-/// registers, palette and BIOS data a mode set leaves, so a program that
-/// exited in another mode, with its own palette or rows, doesn't leave the
-/// prompt in it.
+/// Put the machine in the text mode the DOS prompt runs in (3, or 7 on a
+/// monochrome adapter), with the registers, palette and BIOS data a mode
+/// set leaves, so a program that exited in another mode, with its own
+/// palette or rows, doesn't leave the prompt in it.
 pub fn reset_for_shell(bus: &mut Bus) {
     let adapter = bus.vga.adapter;
-    bus.write_8(0x0449, 0x03); // Mode 3 (80x25 color text)
+    let mode = if adapter.mono_only() { VideoMode::Mono80x25 } else { VideoMode::Text80x25Color };
+    bus.write_8(0x0449, mode as u8); // Mode 3 (80x25 color text) or 7
     bus.write_16(0x044A, 80); // 80 columns
     bus.write_16(0x044C, 0x1000); // page size
     bus.write_16(0x044E, 0); // page 0's offset
@@ -62,7 +63,7 @@ pub fn reset_for_shell(bus: &mut Bus) {
     bus.write_8(0x0466, 0x30);
     let height = match adapter {
         Adapter::Cga => 0,
-        Adapter::Ega => 14,
+        Adapter::Ega | Adapter::Hercules => 14,
         _ => 16,
     };
     if adapter.ega_bios() {
@@ -70,8 +71,8 @@ pub fn reset_for_shell(bus: &mut Bus) {
         bus.write_16(0x0485, height); // 8x16 font cell
     }
     bus.write_16(0x0460, cursor_shape(adapter, height));
-    bus.video_mode = VideoMode::Text80x25Color;
-    bus.vga.set_video_mode(VideoMode::Text80x25Color);
+    bus.video_mode = mode;
+    bus.vga.set_video_mode(mode);
     bus.vbe.reset();
 }
 
@@ -93,14 +94,16 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     bus.vga.adapter = setup.adapter;
 
     // Equipment word bits 4-5: the initial video mode, 10 for 80x25 in
-    // colour. The other bits are the floppies' and the coprocessor's.
+    // colour, 11 for monochrome. The other bits are the floppies' and the
+    // coprocessor's.
+    let mono = setup.adapter.mono_only();
     let equipment = bus.read_16(0x0410) & !0x0030;
-    bus.write_16(0x0410, equipment | 0x0020);
+    bus.write_16(0x0410, equipment | if mono { 0x0030 } else { 0x0020 });
     // The CRTC's address.
-    bus.write_16(0x0463, 0x03D4);
+    bus.write_16(0x0463, if mono { 0x03B4 } else { 0x03D4 });
 
-    if setup.adapter == Adapter::Cga {
-        // The CGA's BIOS keeps neither the rows and the character height
+    if matches!(setup.adapter, Adapter::Cga | Adapter::Hercules) {
+        // The PC BIOS keeps neither the rows and the character height
         // (0484h-0486h) nor the EGA's and VGA's information (0487h-048Ah),
         // and there is no video BIOS ROM at C000h.
         for addr in 0x0484..=0x048A {

@@ -817,6 +817,8 @@ impl Bus {
                     | VideoMode::Text80x25Color
                     | VideoMode::Text40x25
                     | VideoMode::Text40x25Color
+                    | VideoMode::Mono80x25
+                    | VideoMode::HercGraphics
                     | VideoMode::Cga320x200
                     | VideoMode::Cga320x200Color
                     | VideoMode::Cga640x200
@@ -1632,12 +1634,17 @@ impl Bus {
                     //     ));
                     // }
 
-                    // A CGA's mode is what its Mode Control register says,
-                    // whether the BIOS set it or the program did.
-                    if port == 0x3D8 && self.vga.adapter == video::adapter::Adapter::Cga {
-                        let mode = self.vga.cga_video_mode();
+                    // A CGA's or Hercules card's mode is what its Mode
+                    // Control register says, whether the BIOS set it or the
+                    // program did.
+                    let mode_control = match (port, self.vga.adapter) {
+                        (0x3D8, video::adapter::Adapter::Cga) => Some(self.vga.cga_video_mode()),
+                        (0x3B8, video::adapter::Adapter::Hercules) => Some(self.vga.herc_video_mode()),
+                        _ => None,
+                    };
+                    if let Some(mode) = mode_control {
                         if mode != self.video_mode {
-                            self.log_string(&format!("[CGA] Mode Control {:02X}: {:?}", value, mode));
+                            self.log_string(&format!("[VIDEO] Mode Control {:02X}: {:?}", value, mode));
                             self.video_mode = mode;
                             self.vga.mark_dirty_full();
                         }
@@ -1923,7 +1930,11 @@ impl Bus {
         self.sync_display();
         self.vga.attribute_flip_flop = false;
         let now = self.clock.now_ns();
-        self.vga.timing().status(now)
+        let timing = self.vga.timing();
+        match self.vga.adapter {
+            video::adapter::Adapter::Hercules => video::hercules::status(&timing, now),
+            _ => timing.status(now),
+        }
     }
 
     /// Write a line to the log file and the debug server's log.

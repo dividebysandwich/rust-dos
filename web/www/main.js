@@ -53,7 +53,8 @@ aspect=true
 #cycles=max
 # Processor: 486 (a 486DX with FPU) or 386.
 #cpu=486
-# The display adapter: svga (VGA with VESA modes), vga, ega or cga.
+# The display adapter: svga (VGA with VESA modes), vga, ega, cga or
+# hercules.
 #machine=svga
 # RAM in MB, 2 to 64.
 #memsize=16

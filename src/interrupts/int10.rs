@@ -34,7 +34,11 @@ const MODE_CONTROL: [u8; 8] = [0x2C, 0x28, 0x2D, 0x29, 0x2A, 0x2E, 0x1E, 0x29];
 fn text_mode(cpu: &Cpu) -> bool {
     matches!(
         cpu.bus.video_mode,
-        VideoMode::Text80x25 | VideoMode::Text80x25Color | VideoMode::Text40x25 | VideoMode::Text40x25Color
+        VideoMode::Text80x25
+            | VideoMode::Text80x25Color
+            | VideoMode::Text40x25
+            | VideoMode::Text40x25Color
+            | VideoMode::Mono80x25
     )
 }
 
@@ -114,47 +118,14 @@ fn active_page(cpu: &Cpu) -> u8 {
 /// contents of video memory). This also leaves a VESA mode.
 pub fn set_mode(cpu: &mut Cpu, al: u8) {
     let keep = al & 0x80 != 0;
-    let mode = al & 0x7F;
+    // A monochrome adapter only has mode 7, whatever a program asks for.
+    let mode = if cpu.bus.vga.adapter.mono_only() { 0x07 } else { al & 0x7F };
     // A mode the adapter doesn't have leaves the one it is in.
     if !cpu.bus.vga.adapter.supports_mode(mode) {
         cpu.bus.log_string(&format!("[BIOS] Video mode {:02X} isn't on this adapter", mode));
         return;
     }
     cpu.bus.vbe.reset();
-
-    // Clear Screen, unless AL bit 7 asks to keep video memory.
-    let rows_max = active_rows(cpu).saturating_sub(1);
-    match mode {
-        _ if keep => {}
-        // Text Modes: Clear with Spaces and Attribute 0x07
-        0x00..=0x03 => {
-            scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
-        }
-        // CGA Graphics Modes (4, 5, 6): Zero out 16KB of B8000 Memory
-        0x04..=0x06 => {
-            for i in 0..16384 {
-                if i < cpu.bus.vga.vram_text.len() {
-                    cpu.bus.vga.vram_text[i] = 0x00;
-                }
-            }
-            cpu.bus.vga.mark_dirty_full();
-        }
-        // VGA Graphics Mode (13h) or planar EGA/VGA modes: clear the
-        // entire 256KB planar VRAM. set_video_mode also zeros it but
-        // we do it here so mode setting is consistent with other mode
-        // clears above.
-        0x0D | 0x0E | 0x10 | 0x12 | 0x13 => {
-            for i in 0..cpu.bus.vga.vram_graphics.len() {
-                cpu.bus.vga.vram_graphics[i] = 0x00;
-            }
-            cpu.bus.vga.mark_dirty_full();
-        }
-        // Fallback / Stubbed modes
-        _ => {
-            // Optional: Clear text ram just in case
-            scroll_area(cpu, true, 0, 0x07, 0, 0, rows_max, MAX_COLS - 1);
-        }
-    }
 
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);
@@ -167,6 +138,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         0x04 => Some((VideoMode::Cga320x200Color, "CGA Graphics Mode (320x200 Color)")),
         0x05 => Some((VideoMode::Cga320x200, "CGA Graphics Mode (320x200)")),
         0x06 => Some((VideoMode::Cga640x200, "CGA Graphics Mode (640x200)")),
+        0x07 => Some((VideoMode::Mono80x25, "Monochrome Text Mode (80x25)")),
         0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
         0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
         0x10 => Some((VideoMode::Ega640x350, "EGA Graphics Mode (640x350 16-color)")),
@@ -187,6 +159,21 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
                 cpu.bus.video_mode = VideoMode::Text80x25Color;
                 cpu.bus.vga.set_video_mode(VideoMode::Text80x25Color);
             }
+        }
+    }
+
+    // Clear the mode's memory, unless AL bit 7 asks to keep it: spaces in
+    // light grey in the text modes, 0 in the graphics modes.
+    if !keep {
+        let vga = &mut cpu.bus.vga;
+        match mode {
+            0x00..=0x03 | 0x07 => {
+                for cell in vga.vram_text[..0x8000].chunks_mut(2) {
+                    cell.copy_from_slice(&[0x20, 0x07]);
+                }
+            }
+            0x04..=0x06 => vga.vram_text[..0x4000].fill(0),
+            _ => vga.vram_graphics.fill(0),
         }
     }
 
@@ -212,8 +199,8 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     // Mode set always resets the cell size to the mode's default.
     let (rows, char_height): (u8, u16) = match mode {
         // Text modes: 25 rows of the 8x14 font on an EGA, 8x16 on a VGA.
-        0x00..=0x03 if cpu.bus.vga.adapter == Adapter::Ega => (24, 14),
-        0x00..=0x03 => (24, 16),
+        0x00..=0x03 | 0x07 if cpu.bus.vga.adapter == Adapter::Ega => (24, 14),
+        0x00..=0x03 | 0x07 => (24, 16),
         // CGA 40-col graphics counts as 25 rows.
         0x04 | 0x05 => (24, 8),
         // CGA 640x200 2-color.
@@ -226,8 +213,9 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         _ => (24, 16),
     };
     let adapter = cpu.bus.vga.adapter;
-    if mode <= 0x03 {
-        cpu.bus.write_16(0x0460, video_bios::cursor_shape(adapter, char_height));
+    if mode <= 0x03 || mode == 0x07 {
+        let height = if adapter.mono_only() { 14 } else { char_height };
+        cpu.bus.write_16(0x0460, video_bios::cursor_shape(adapter, height));
     }
     // The CGA's BIOS keeps neither these nor the graphics font.
     if adapter.ega_bios() {

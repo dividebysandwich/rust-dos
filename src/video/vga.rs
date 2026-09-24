@@ -82,6 +82,11 @@ pub struct VgaCard {
     /// The EGA's configuration switches (SW1-SW4, bits 0-3), which Input
     /// Status 0 (3C2h) reads one at a time.
     pub switches: u8,
+
+    /// The Hercules card's Mode Control (3B8h) and Configuration Switch
+    /// (3BFh) registers, with `machine=hercules` (see hercules.rs).
+    pub herc_mode: u8,
+    pub herc_config: u8,
 }
 
 /// The memory text and CGA modes show: 32 KB at B8000h (or B0000h for a
@@ -140,6 +145,8 @@ impl VgaCard {
             cga_mode: 0x29,
             cga_color: 0x30,
             switches: 0b0110,
+            herc_mode: 0x29,
+            herc_config: 0,
         };
         // The BIOS starts in 80x25 color text mode.
         vga.set_video_mode(super::VideoMode::Text80x25Color);
@@ -230,8 +237,10 @@ impl VgaCard {
     /// B0000h when the Graphics Miscellaneous register maps memory there
     /// (the monochrome text mode 7). The CGA's 16 KB show twice.
     pub fn text_window(&self) -> (usize, usize, usize) {
-        if self.adapter == super::adapter::Adapter::Cga {
-            return (0xB8000, 0x8000, 0x3FFF);
+        match self.adapter {
+            super::adapter::Adapter::Cga => return (0xB8000, 0x8000, 0x3FFF),
+            super::adapter::Adapter::Hercules => return self.herc_window(),
+            _ => {}
         }
         let base = if self.graphics_regs[0x06] & 0x0C == 0x08 { 0xB0000 } else { 0xB8000 };
         (base, 0x8000, 0x7FFF)
@@ -241,8 +250,10 @@ impl VgaCard {
     /// the bright background colours (Attribute Mode Control bit 3, in a
     /// text mode; the CGA's Mode Control bit 5).
     pub fn blinks(&self) -> bool {
-        if self.adapter == super::adapter::Adapter::Cga {
-            return self.cga_mode & 0x22 == 0x20;
+        match self.adapter {
+            super::adapter::Adapter::Cga => return self.cga_mode & 0x22 == 0x20,
+            super::adapter::Adapter::Hercules => return self.herc_mode & 0x22 == 0x20,
+            _ => {}
         }
         let mode = self.attribute_regs[0x10];
         mode & 0x01 == 0 && mode & 0x08 != 0
@@ -513,9 +524,10 @@ impl VgaCard {
     pub fn set_video_mode(&mut self, mode: super::VideoMode) {
         self.mark_dirty_full();
         self.latched_start_addr = 0;
-        if self.adapter == super::adapter::Adapter::Cga {
-            self.cga_set_mode(mode);
-            return;
+        match self.adapter {
+            super::adapter::Adapter::Cga => return self.cga_set_mode(mode),
+            super::adapter::Adapter::Hercules => return self.herc_set_mode(),
+            _ => {}
         }
         let regs = match self.adapter {
             super::adapter::Adapter::Ega => super::modes::ega_mode_regs(mode),
@@ -558,6 +570,7 @@ impl VgaCard {
     fn registers_timing(&self) -> Option<CrtTiming> {
         match self.adapter {
             super::adapter::Adapter::Cga => self.cga_timing(),
+            super::adapter::Adapter::Hercules => self.herc_timing(),
             super::adapter::Adapter::Ega => {
                 CrtTiming::from_ega_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs)
             }
@@ -607,6 +620,7 @@ impl Device for VgaCard {
         let color = self.misc_output_reg & 0x01 != 0;
         match self.adapter {
             super::adapter::Adapter::Cga => super::cga::PORTS,
+            super::adapter::Adapter::Hercules => super::hercules::PORTS,
             super::adapter::Adapter::Ega if color => EGA_COLOR_PORTS,
             super::adapter::Adapter::Ega => EGA_MONO_PORTS,
             _ if color => COLOR_PORTS,
@@ -615,8 +629,10 @@ impl Device for VgaCard {
     }
 
     fn io_read(&mut self, port: u16) -> u8 {
-        if self.adapter == super::adapter::Adapter::Cga {
-            return self.cga_io_read(port);
+        match self.adapter {
+            super::adapter::Adapter::Cga => return self.cga_io_read(port),
+            super::adapter::Adapter::Hercules => return self.herc_io_read(port),
+            _ => {}
         }
         // The EGA's registers are write-only, but for the switches and the
         // CRTC's start address, cursor and light pen (0Ch-11h).
@@ -704,8 +720,10 @@ impl Device for VgaCard {
     }
 
     fn io_write(&mut self, port: u16, value: u8) {
-        if self.adapter == super::adapter::Adapter::Cga {
-            return self.cga_io_write(port, value);
+        match self.adapter {
+            super::adapter::Adapter::Cga => return self.cga_io_write(port, value),
+            super::adapter::Adapter::Hercules => return self.herc_io_write(port, value),
+            _ => {}
         }
         let port = match port {
             0x3B4 => 0x3D4,

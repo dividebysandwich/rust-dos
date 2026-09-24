@@ -16,10 +16,13 @@ pub enum Adapter {
     /// IBM's Color Graphics Adapter: 4 colours at 320x200, 2 at 640x200,
     /// 16 in text, through a 6845 CRTC.
     Cga,
+    /// The Hercules Graphics Card on a monochrome monitor: the MDA's text
+    /// and 720x348 graphics, 50 Hz.
+    Hercules,
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 4] = [Adapter::Svga, Adapter::Vga, Adapter::Ega, Adapter::Cga];
+    pub const ALL: [Adapter; 5] = [Adapter::Svga, Adapter::Vga, Adapter::Ega, Adapter::Cga, Adapter::Hercules];
 
     /// The adapter a `machine` value names, DOSBox's names included.
     pub fn parse(s: &str) -> Option<Self> {
@@ -30,6 +33,7 @@ impl Adapter {
             "vga" | "vgaonly" => Some(Adapter::Vga),
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
+            "hercules" | "herc" | "hgc" => Some(Adapter::Hercules),
             _ => None,
         }
     }
@@ -40,6 +44,7 @@ impl Adapter {
             Adapter::Vga => "vga",
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
+            Adapter::Hercules => "hercules",
         }
     }
 
@@ -50,6 +55,7 @@ impl Adapter {
             Adapter::Vga => "VGA",
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
+            Adapter::Hercules => "Hercules (mono)",
         }
     }
 
@@ -68,12 +74,19 @@ impl Adapter {
     /// (INT 10h AH=10h), the character generator (AH=11h) and the
     /// configuration (AH=12h).
     pub fn ega_bios(self) -> bool {
-        self != Adapter::Cga
+        !matches!(self, Adapter::Cga | Adapter::Hercules)
+    }
+
+    /// Whether the adapter only has a monochrome monitor's modes: the text
+    /// mode 7 (and graphics the BIOS doesn't know).
+    pub fn mono_only(self) -> bool {
+        self == Adapter::Hercules
     }
 
     /// Whether the BIOS sets standard mode `mode` (INT 10h AH=00h).
     pub fn supports_mode(self, mode: u8) -> bool {
         match self {
+            Adapter::Hercules => mode == 0x07,
             Adapter::Cga => mode <= 0x06,
             Adapter::Ega => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10),
             _ => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10 | 0x12 | 0x13),

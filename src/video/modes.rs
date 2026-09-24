@@ -216,6 +216,35 @@ const EGA_10: VgaModeRegs = VgaModeRegs {
     attr: VGA_ATTR,
 };
 
+/// The monochrome text mode 7 at B0000h, on an EGA with IBM's Monochrome
+/// Display (9x14 cells, 720x350) and on a VGA (9x16, 720x400): the
+/// palette registers hold its shades, 08h the normal video and 18h bright.
+#[rustfmt::skip]
+const MONO_ATTR: [u8; 21] = [
+    0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x10, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18,
+    0x0E, 0x00, 0x0F, 0x08, 0x00,
+];
+
+#[rustfmt::skip]
+const EGA_MONO_TEXT: VgaModeRegs = VgaModeRegs {
+    misc: 0xA6,
+    seq: [0x00, 0x03, 0x00, 0x03],
+    crtc: [0x60, 0x4F, 0x56, 0x3A, 0x51, 0x60, 0x70, 0x1F, 0x00, 0x0D, 0x0B, 0x0C, 0x00,
+           0x00, 0x00, 0x00, 0x5E, 0x2E, 0x5D, 0x28, 0x0D, 0x5E, 0x6E, 0xA3, 0xFF],
+    gc: [0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0A, 0x00, 0xFF],
+    attr: MONO_ATTR,
+};
+
+#[rustfmt::skip]
+const VGA_MONO_TEXT: VgaModeRegs = VgaModeRegs {
+    misc: 0x66,
+    seq: [0x00, 0x03, 0x00, 0x02],
+    crtc: [0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F, 0x00, 0x4F, 0x0D, 0x0E, 0x00,
+           0x00, 0x00, 0x00, 0x9C, 0x8E, 0x8F, 0x28, 0x0F, 0x96, 0xB9, 0xA3, 0xFF],
+    gc: [0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0A, 0x00, 0xFF],
+    attr: MONO_ATTR,
+};
+
 /// The EGA BIOS's register table of a mode.
 pub fn ega_mode_regs(mode: VideoMode) -> &'static VgaModeRegs {
     match mode {
@@ -225,6 +254,7 @@ pub fn ega_mode_regs(mode: VideoMode) -> &'static VgaModeRegs {
         VideoMode::Ega320x200 => &EGA_0D,
         VideoMode::Ega640x200 => &EGA_0E,
         VideoMode::Ega640x350 => &EGA_10,
+        VideoMode::Mono80x25 => &EGA_MONO_TEXT,
         _ => &EGA_TEXT_80,
     }
 }
@@ -236,11 +266,12 @@ pub fn mode_regs(mode: VideoMode) -> &'static VgaModeRegs {
         VideoMode::Text80x25 | VideoMode::Text80x25Color => &TEXT_80,
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => &CGA_320,
         VideoMode::Cga640x200 => &CGA_640,
+        VideoMode::Mono80x25 => &VGA_MONO_TEXT,
         VideoMode::Ega320x200 => &EGA_320,
         VideoMode::Ega640x200 => &EGA_640,
         VideoMode::Ega640x350 => &EGA_350,
         VideoMode::Vga640x480 => &VGA_480,
         // VESA modes are 256-color modes to the VGA's registers.
-        VideoMode::Graphics320x200 | VideoMode::Vesa => &VGA_256,
+        VideoMode::Graphics320x200 | VideoMode::Vesa | VideoMode::HercGraphics => &VGA_256,
     }
 }

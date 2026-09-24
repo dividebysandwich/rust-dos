@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod bios;
 pub mod cga;
 pub mod crt;
+pub mod hercules;
 pub mod modes;
 pub mod mono;
 pub mod overlay;
@@ -84,11 +85,18 @@ pub enum VideoMode {
     #[allow(dead_code)]
     Cga320x200 = 0x05, // I can't be bothered and just treat it as Color too
     Cga640x200 = 0x06,
+    /// The monochrome text mode of the MDA and the Hercules card: 80x25 in
+    /// 9x14 cells at B0000h.
+    Mono80x25 = 0x07,
     Ega320x200 = 0x0D,  // EGA planar, 16 colors
     Ega640x200 = 0x0E,  // EGA planar, 16 colors
     Ega640x350 = 0x10,  // EGA planar, 16 colors
     Vga640x480 = 0x12,  // VGA planar, 16 colors
     Graphics320x200 = 0x13,
+    /// The Hercules card's 720x348 graphics, which programs set with its
+    /// registers; the BIOS knows nothing of it. Never written to the BIOS
+    /// data area.
+    HercGraphics = 0xFE,
     /// A VESA mode: which one, and its size, are in `Bus::vbe`. Never
     /// written to the BIOS data area.
     Vesa = 0xFF,
@@ -112,6 +120,8 @@ impl VideoMode {
             VideoMode::Text80x25 | VideoMode::Text80x25Color => (640, 400),
             VideoMode::Cga320x200Color | VideoMode::Cga320x200 => (320, 200),
             VideoMode::Cga640x200 => (640, 200),
+            VideoMode::Mono80x25 => (720, 350),
+            VideoMode::HercGraphics => hercules::GRAPHICS_SIZE,
             VideoMode::Ega320x200 => (320, 200),
             VideoMode::Ega640x200 => (640, 200),
             VideoMode::Ega640x350 => (640, 350),
@@ -164,6 +174,10 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
             (width as u32, rows as u32)
         }
         VideoMode::Vesa => bus.vbe.frame_size().unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT)),
+        VideoMode::HercGraphics => {
+            let (width, height, ..) = bus.vga.herc_graphics_shape();
+            (width as u32, height as u32)
+        }
         // Text: its characters across, and the scanlines the CRTC shows
         // (the EGA's 350, the VGA's 400; the CGA's 200 scanned twice).
         _ => match text::geometry(bus) {
@@ -204,11 +218,16 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         VideoMode::Cga640x200 => render_cga_mode6(canvas, &bus.vga.vram_text, bus),
         // Text renderers honour the dirty row band so a single-line shell
         // update only repaints those 16 scanlines instead of the full 80x25.
-        VideoMode::Text80x25 | VideoMode::Text80x25Color | VideoMode::Text40x25 | VideoMode::Text40x25Color => {
+        VideoMode::Text80x25
+        | VideoMode::Text80x25Color
+        | VideoMode::Text40x25
+        | VideoMode::Text40x25Color
+        | VideoMode::Mono80x25 => {
             if let Some(geometry) = text::geometry(bus) {
                 text::render(canvas, width, bus, &geometry, y_min, y_max);
             }
         }
+        VideoMode::HercGraphics => hercules::render_graphics(canvas, width, &bus.vga),
         // 16-color planar modes (0Dh, 0Eh, 10h, 12h), at the size the CRTC
         // registers give them.
         VideoMode::Ega320x200 | VideoMode::Ega640x200 | VideoMode::Ega640x350 | VideoMode::Vga640x480 => {
