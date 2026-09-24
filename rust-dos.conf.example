@@ -96,6 +96,24 @@
 #hard_disk_noise=off
 #floppy_disk_noise=off
 
+[mixer]
+# The volume of each sound source in percent, 0 to 200. At 100, the
+# default, a source plays as loud as its card makes it; master is the
+# volume of them all. Programs set the Sound Blaster's own mixer on top.
+#master=100
+# The PC speaker and the beeps of the DOS prompt.
+#speaker=100
+# The Sound Blaster's digital audio, and its FM synthesizer (the AdLib).
+#sb=100
+#fm=100
+# The Gravis Ultrasound.
+#gus=100
+# General MIDI music sent to the MPU-401.
+#midi=100
+# The audio tracks of CDs, and the disk drives' noises.
+#cdaudio=100
+#disknoise=100
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

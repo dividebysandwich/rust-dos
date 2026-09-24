@@ -189,6 +189,7 @@ impl Machine {
         let mut cpu = Cpu::with_memory(PathBuf::from("/"), settings.memsize);
         cpu.model = settings.cpu;
         cpu.bus.set_disk_settings(settings.disk);
+        cpu.bus.set_mixer(settings.mixer);
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
@@ -802,6 +803,9 @@ impl Host for PageHost<'_> {
         }
         if new.disk != old.disk {
             self.cpu.bus.set_disk_settings(new.disk);
+        }
+        if new.mixer != old.mixer {
+            self.cpu.bus.set_mixer(new.mixer);
         }
         if !self.hardware.differs(new) {
             return Ok(None);

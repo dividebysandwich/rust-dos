@@ -24,6 +24,7 @@ pub mod instructions;
 pub mod interrupts;
 pub mod mcb;
 pub mod memfs;
+pub mod mixer;
 pub mod mount;
 pub mod mouse;
 pub mod mpu401;

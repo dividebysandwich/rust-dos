@@ -140,6 +140,12 @@ D:
 * **`[emulator]`** also has `hard_disk_speed` and `floppy_disk_speed`, and
   **`[sound]`** `hard_disk_noise` and `floppy_disk_noise` (see
   [Disk speed and noises](#disk-speed-and-noises)).
+* **`[mixer]`:** the volume of each sound source in percent, from 0 to 200:
+  `speaker` (the PC speaker and the prompt's beeps), `sb` (the Sound
+  Blaster's digital audio), `fm` (the FM synthesizer), `gus`, `midi`,
+  `cdaudio` and `disknoise`, and `master` for all of them together. At 100,
+  the default, a source plays as loud as its card makes it. The volumes
+  apply on top of the Sound Blaster's own mixer, which programs set.
 * **`[drives]`:** each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`.
   * PATH is a directory, or a disk or CD image (see [Drives](#drives)).
   * Relative paths are relative to the configuration file, and `~` is your

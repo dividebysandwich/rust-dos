@@ -74,6 +74,18 @@ aspect=true
 #hard_disk_noise=off
 #floppy_disk_noise=off
 
+[mixer]
+# The volume of each sound source in percent, 0 to 200 (100 is as loud as
+# the card makes it), and of everything together.
+#master=100
+#speaker=100
+#sb=100
+#fm=100
+#gus=100
+#midi=100
+#cdaudio=100
+#disknoise=100
+
 [autoexec]
 # Commands typed at the DOS prompt on startup, before C:\\AUTOEXEC.BAT.
 `;

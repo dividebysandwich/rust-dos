@@ -13,6 +13,7 @@ use crate::cpu::CpuModel;
 use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
+use crate::mixer::{Channel, MixerSettings};
 use crate::timer::CpuSpeed;
 use crate::video::mono::Monochrome;
 use crate::video::shader::Shader;
@@ -100,6 +101,8 @@ pub struct Config {
     /// How fast the disks are (`[emulator]`) and the noises they make
     /// (`[sound]`).
     pub disk: DiskSettings,
+    /// `[mixer]`: the volumes of the sound sources.
+    pub mixer: MixerSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -119,6 +122,7 @@ enum Section {
     None,
     Emulator,
     Sound,
+    Mixer,
     Drives,
     Autoexec,
     Unknown,
@@ -129,6 +133,7 @@ impl Section {
         match name.trim().to_ascii_lowercase().as_str() {
             "emulator" => Section::Emulator,
             "sound" => Section::Sound,
+            "mixer" => Section::Mixer,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             _ => Section::Unknown,
@@ -139,6 +144,7 @@ impl Section {
         match self {
             Section::Emulator => "emulator",
             Section::Sound => "sound",
+            Section::Mixer => "mixer",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::None | Section::Unknown => "",
@@ -396,7 +402,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             Section::Autoexec => config.autoexec.push(line.to_string()),
             Section::Unknown => {}
             Section::None => warn("setting outside of a section".to_string()),
-            Section::Emulator | Section::Drives | Section::Sound => {
+            Section::Emulator | Section::Drives | Section::Sound | Section::Mixer => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -447,6 +453,17 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             None => warn(format!("invalid {} '{}' (maximum, fast, medium or slow)", key, value)),
                         },
                         _ => warn(format!("unknown setting '{}'", key)),
+                    }
+                    continue;
+                }
+
+                if section == Section::Mixer {
+                    match Channel::parse(key) {
+                        Some(channel) => match crate::mixer::parse_level(value) {
+                            Ok(percent) => config.mixer.set_level(channel, percent),
+                            Err(e) => warn(format!("{}: {}", channel.key(), e)),
+                        },
+                        None => warn(format!("unknown setting '{}'", key)),
                     }
                     continue;
                 }
@@ -587,6 +604,7 @@ pub struct Settings {
     pub memsize: usize,
     pub sound: SoundConfig,
     pub disk: DiskSettings,
+    pub mixer: MixerSettings,
 }
 
 impl Default for Settings {
@@ -603,6 +621,7 @@ impl Default for Settings {
             memsize: crate::bus::DEFAULT_MEMORY_MB,
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
+            mixer: MixerSettings::default(),
         }
     }
 }
@@ -622,6 +641,7 @@ impl Settings {
             memsize: config.memsize.unwrap_or(default.memsize),
             sound: config.sound.clone(),
             disk: config.disk,
+            mixer: config.mixer,
         }
     }
 }
@@ -633,7 +653,9 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
     let yes_no = |on: bool| Some(if on { "true" } else { "false" }.to_string());
     let sound = &settings.sound;
     let (sb, gus) = (&sound.sb, &sound.gus);
-    vec![
+    let mixer = Channel::ALL
+        .map(|channel| (Section::Mixer, channel.key(), Some(settings.mixer.level(channel).to_string())));
+    let mut entries = vec![
         (Emulator, "scale", Some(settings.scale.to_string())),
         (Emulator, "fullscreen", yes_no(settings.fullscreen)),
         (Emulator, "aspect", yes_no(settings.aspect)),
@@ -680,7 +702,9 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "midisynth", Some(sound.midisynth.name().to_string())),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
-    ]
+    ];
+    entries.extend(mixer);
+    entries
 }
 
 /// What a line of the file is, for `update_text`.
@@ -712,7 +736,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 return (section, Line::Header(section));
             }
             let kind = match section {
-                Section::Emulator | Section::Sound | Section::Drives => {
+                Section::Emulator | Section::Sound | Section::Mixer | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(comment.trim_start_matches(['#', ';']).trim_start())
                             .map_or(Line::Other, Line::Example)
@@ -1175,6 +1199,7 @@ mod tests {
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
         assert_eq!((config.shader, config.monochrome), (None, None));
         assert_eq!(config.sound, SoundConfig::default());
+        assert_eq!(config.mixer, MixerSettings::default());
     }
 
     #[test]
@@ -1188,6 +1213,18 @@ mod tests {
         let config = parse(text, Path::new("/cfg"), None);
         assert_eq!(config.warnings.len(), 4, "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings::default());
+    }
+
+    #[test]
+    fn mixer_settings() {
+        let text = "[mixer]\nmaster=80\nFM = 150%\ncdaudio=0\nsb=300\nbass=10\n";
+        let config = parse(text, Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+        assert!(config.warnings[0].starts_with("line 5: sb: invalid volume '300'"), "{:?}", config.warnings);
+        assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
+        let mixer = Settings::from_config(&config).mixer;
+        let levels = Channel::ALL.map(|channel| mixer.level(channel));
+        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100]);
     }
 
     /// Settings with every value away from its default.
@@ -1223,6 +1260,13 @@ mod tests {
                 floppy_disk_speed: DiskSpeed::Slow,
                 hard_disk_noise: NoiseMode::On,
                 floppy_disk_noise: NoiseMode::SeekOnly,
+            },
+            mixer: {
+                let mut mixer = MixerSettings::default();
+                for (i, channel) in Channel::ALL.into_iter().enumerate() {
+                    mixer.set_level(channel, 10 * i as u16 + 5);
+                }
+                mixer
             },
         }
     }
@@ -1267,6 +1311,8 @@ mod tests {
         assert!(text.contains("#scale=2\nscale=3\n"), "{}", text);
         assert!(text.contains("#shader=none\nshader=curved\n"), "{}", text);
         assert!(text.contains("#monochrome=off\nmonochrome=green\n"), "{}", text);
+        assert!(text.contains("#master=100\nmaster=5\n"), "{}", text);
+        assert!(text.contains("#disknoise=100\ndisknoise=75\n"), "{}", text);
         assert!(text.contains("#sbtype=sb16\nsbtype=sbpro2\n"), "{}", text);
         assert!(text.contains("#E=~/dos/images/game.cue\nC=~/dos\nD=\"~/cd images/game.cue\" cdrom -label GAME\n"), "{}", text);
         assert!(text.contains("soundfont=~/sf/General User.sf2\n"), "{}", text);

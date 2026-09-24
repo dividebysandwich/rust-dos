@@ -145,6 +145,7 @@ fn main() -> Result<(), String> {
     let mut cpu = create_cpu(&args, &config);
     cpu.model = settings.cpu;
     cpu.bus.set_disk_settings(settings.disk);
+    cpu.bus.set_mixer(settings.mixer);
     for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
@@ -641,6 +642,9 @@ impl Host for MainHost<'_, '_> {
         }
         if new.disk != old.disk {
             self.cpu.bus.set_disk_settings(new.disk);
+        }
+        if new.mixer != old.mixer {
+            self.cpu.bus.set_mixer(new.mixer);
         }
         if !self.machine.differs(new) {
             return Ok(None);

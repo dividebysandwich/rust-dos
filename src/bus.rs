@@ -158,6 +158,8 @@ pub struct Bus {
     sb_frame: (i16, i16),
     /// Frames left of a BEL beep.
     pub beep_frames: u32,
+    /// The host's volumes for each source (`[mixer]`) and the mute.
+    pub mixer: crate::mixer::Mixer,
     /// Level-triggered interrupt request lines (bit n = IRQ n): the Sound
     /// Blaster holds its line until the driver acknowledges. Kept up to
     /// date by `update_irq_levels`, as the CPU tests it every instruction.
@@ -263,6 +265,7 @@ impl Bus {
             sb_phase: 0.0,
             sb_frame: (0, 0),
             beep_frames: 0,
+            mixer: crate::mixer::Mixer::default(),
             irq_levels: 0,
             irq_ready: false,
             audio_peak: 0,
@@ -439,6 +442,12 @@ impl Bus {
         self.audio_catch_up();
         self.disk_io.settings = settings;
         self.disknoise.set_modes(settings.floppy_disk_noise, settings.hard_disk_noise);
+    }
+
+    /// Take the volumes of the host's mixer, from the sound rendered next.
+    pub fn set_mixer(&mut self, settings: crate::mixer::MixerSettings) {
+        self.audio_catch_up();
+        self.mixer.set(settings);
     }
 
     /// A drive of `class` moved `bytes`: charge the time that takes at the
@@ -1167,21 +1176,23 @@ impl Bus {
         };
         const SPEAKER: f32 = 3000.0;
         const GUS_GAIN: f32 = 1.0;
+        // Each source at its volume in the host's mixer, then all of them
+        // at the master volume.
+        use crate::mixer::{Channel, add};
+        let gains = self.mixer.gains();
+        let mut peaks = [0.0f32; crate::mixer::CHANNELS];
         for _ in 0..frames {
-            let mut l = 0.0f32;
-            let mut r = 0.0f32;
+            let mut mix = (0.0f32, 0.0f32);
             if speaker {
                 self.audio_phase += speaker_step;
                 if self.audio_phase >= 1.0 {
                     self.audio_phase -= 1.0;
                 }
                 let s = if self.audio_phase < 0.5 { SPEAKER } else { -SPEAKER };
-                l += s;
-                r += s;
+                add(&mut mix, &mut peaks, &gains, Channel::Speaker, (s, s));
             }
             let (ol, or) = self.opl.render();
-            l += ol as f32 * fl;
-            r += or as f32 * fr;
+            add(&mut mix, &mut peaks, &gains, Channel::Fm, (ol as f32 * fl, or as f32 * fr));
             if let Some(sb) = &mut self.sb {
                 if sb.out.is_empty() && self.sb_phase < 1.0 {
                     self.sb_frame = (dac, dac);
@@ -1198,33 +1209,29 @@ impl Bus {
                     }
                 }
                 if sb_on {
-                    l += self.sb_frame.0 as f32 * vl;
-                    r += self.sb_frame.1 as f32 * vr;
+                    let frame = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    add(&mut mix, &mut peaks, &gains, Channel::Sb, frame);
                 }
             }
-            let (ml, mr) = self.mpu.render();
-            l += ml;
-            r += mr;
+            add(&mut mix, &mut peaks, &gains, Channel::Midi, self.mpu.render());
             let (cdl, cdr) = self.cdaudio.render();
-            l += cdl * cl;
-            r += cdr * cr;
+            add(&mut mix, &mut peaks, &gains, Channel::CdAudio, (cdl * cl, cdr * cr));
             let noise = self.disknoise.render();
-            l += noise;
-            r += noise;
+            add(&mut mix, &mut peaks, &gains, Channel::DiskNoise, (noise, noise));
             if let Some(gus) = &mut self.gus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
-                l += gl * GUS_GAIN;
-                r += gr * GUS_GAIN;
+                add(&mut mix, &mut peaks, &gains, Channel::Gus, (gl * GUS_GAIN, gr * GUS_GAIN));
             }
             if self.beep_frames > 0 {
                 self.beep_frames -= 1;
                 let s = if self.beep_frames % 50 < 25 { SPEAKER } else { -SPEAKER };
-                l += s;
-                r += s;
+                add(&mut mix, &mut peaks, &gains, Channel::Speaker, (s, s));
             }
+            let (l, r) = crate::mixer::master(mix, &mut peaks, &gains);
             self.audio_out.push_back(l.clamp(-32768.0, 32767.0) as i16);
             self.audio_out.push_back(r.clamp(-32768.0, 32767.0) as i16);
         }
+        self.mixer.add_peaks(peaks);
         // Nobody drains it without an audio device: keep a second.
         let max = 2 * rate as usize;
         if self.audio_out.len() > max {

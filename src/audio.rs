@@ -16,8 +16,10 @@ pub fn play_sdl_beep(bus: &mut Bus) {
 }
 
 /// Hand the audio rendered since the last call to the host: the output
-/// device and the debug server's audio stream. Called once per video frame.
-pub fn pump_audio(bus: &mut Bus) {
+/// device, which gets silence while the mixer is muted, and the debug
+/// server's audio stream. Called once per video frame. Returns the
+/// samples, for recordings, which the mute leaves alone.
+pub fn pump_audio(bus: &mut Bus) -> Vec<i16> {
     bus.audio_catch_up();
     let samples: Vec<i16> = bus.audio_out.drain(..).collect();
     let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
@@ -34,7 +36,12 @@ pub fn pump_audio(bus: &mut Bus) {
             bus.audio_underruns += 1;
         }
         let room = (rate / 4).saturating_sub(queued) * 2;
-        out.extend_from_slice(&samples[..samples.len().min(room)]);
+        let take = samples.len().min(room);
+        if bus.mixer.muted {
+            out.resize(out.len() + take, 0);
+        } else {
+            out.extend_from_slice(&samples[..take]);
+        }
         if !out.is_empty()
             && let Err(e) = device.queue(&out)
         {
@@ -44,4 +51,5 @@ pub fn pump_audio(bus: &mut Bus) {
     if let Some(hook) = &mut bus.audio_hook {
         hook(&samples);
     }
+    samples
 }
