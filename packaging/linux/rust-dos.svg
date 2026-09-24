@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <radialGradient id="shadow" cx="128" cy="240" r="110" gradientTransform="matrix(1 0 0 0.09 0 218.4)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="case" x1="0" y1="184" x2="0" y2="234" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C4531F"/>
+      <stop offset="1" stop-color="#8C3210"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="18" x2="0" y2="178" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EA7A3C"/>
+      <stop offset="1" stop-color="#B4441A"/>
+    </linearGradient>
+    <linearGradient id="neck" x1="0" y1="176" x2="0" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3E1405"/>
+      <stop offset="1" stop-color="#6A250B"/>
+    </linearGradient>
+    <radialGradient id="screen" cx="128" cy="92" r="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1D2C30"/>
+      <stop offset="1" stop-color="#07090B"/>
+    </radialGradient>
+  </defs>
+
+  <ellipse cx="128" cy="240" rx="110" ry="10" fill="url(#shadow)"/>
+
+  <!-- Desktop case with a 5.25" floppy drive -->
+  <rect x="22" y="184" width="212" height="50" rx="10" fill="url(#case)" stroke="#4A1805" stroke-width="4"/>
+  <rect x="28" y="189" width="200" height="3" rx="1.5" fill="#F0915A" opacity="0.55"/>
+  <rect x="40" y="203" width="4" height="18" rx="2" fill="#5A1E08"/>
+  <rect x="50" y="203" width="4" height="18" rx="2" fill="#5A1E08"/>
+  <rect x="60" y="203" width="4" height="18" rx="2" fill="#5A1E08"/>
+  <rect x="128" y="199" width="92" height="24" rx="4" fill="#5A1E08"/>
+  <rect x="137" y="208" width="74" height="6" rx="3" fill="#160601"/>
+  <circle cx="101" cy="211" r="5" fill="#63E35F"/>
+  <circle cx="99.5" cy="209.5" r="1.8" fill="#D8FFD0"/>
+
+  <!-- Monitor stand -->
+  <path d="M104 172 H152 L160 188 H96 Z" fill="url(#neck)"/>
+
+  <!-- Monitor -->
+  <rect x="30" y="18" width="196" height="160" rx="18" fill="url(#body)" stroke="#4A1805" stroke-width="4"/>
+  <rect x="44" y="23" width="168" height="3" rx="1.5" fill="#FFC49A" opacity="0.55"/>
+  <rect x="44" y="31" width="168" height="126" rx="12" fill="#3A1204"/>
+  <rect x="49" y="36" width="158" height="116" rx="9" fill="url(#screen)"/>
+    <!-- C:\>_ in the IBM VGA 8x8 font of src/video/assets/IBM_VGA_8x8.bin -->
+  <rect x="71.12" y="76" width="13" height="3.25" fill="#DADADA"/>
+  <rect x="67.87" y="79.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="80.87" y="79.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="64.62" y="82.5" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="64.62" y="85.75" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="64.62" y="89" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="67.87" y="92.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="80.87" y="92.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="71.12" y="95.5" width="13" height="3.25" fill="#DADADA"/>
+  <rect x="97.12" y="79.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="97.12" y="82.5" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="97.12" y="92.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="97.12" y="95.5" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="116.62" y="76" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="119.87" y="79.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="123.12" y="82.5" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="126.37" y="85.75" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="129.62" y="89" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="132.87" y="92.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="136.12" y="95.5" width="3.25" height="3.25" fill="#DADADA"/>
+  <rect x="145.87" y="76" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="149.12" y="79.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="152.37" y="82.5" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="155.62" y="85.75" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="152.37" y="89" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="149.12" y="92.25" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="145.87" y="95.5" width="6.5" height="3.25" fill="#DADADA"/>
+  <rect x="168.62" y="98.75" width="26" height="3.25" fill="#DADADA"/>
+  <!-- Glare on the tube -->
+  <path d="M58 36 H198 A9 9 0 0 1 207 45 V62 Q128 52 49 70 V45 A9 9 0 0 1 58 36 Z" fill="#FFFFFF" opacity="0.07"/>
+  <circle cx="204" cy="167" r="4" fill="#63E35F"/>
+  <rect x="48" y="164" width="30" height="6" rx="3" fill="#8A3110"/>
+</svg>

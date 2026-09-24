@@ -12,8 +12,13 @@ use gl::{GlScreen, NoGl};
 use sdl2::VideoSubsystem;
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{ScaleMode, Texture, TextureCreator, WindowCanvas};
+use sdl2::surface::Surface;
 use sdl2::video::{FullscreenType, Window, WindowContext};
 use std::cell::OnceCell;
+
+/// The window's icon: packaging/linux/rust-dos.svg drawn at 128x128 with
+/// `rsvg-convert -w 128 -h 128`.
+static ICON_PNG: &[u8] = include_bytes!("../assets/rust-dos.png");
 
 /// The size the picture is shown at, in the renderer's logical pixels: the
 /// frame itself, or with `aspect` stretched to 4:3, the shape a monitor
@@ -135,6 +140,10 @@ impl<'a> Display<'a> {
             renderer,
             warning,
         };
+        // For the window managers and taskbars that take the icon from the
+        // window rather than from rust-dos.desktop. The test below keeps
+        // the icon decoding, so there is nothing to report.
+        let _ = set_icon(display.out.window_mut());
         display.set_fullscreen(settings.fullscreen)?;
         Ok(display)
     }
@@ -298,6 +307,27 @@ fn window_to_frame(
     ((u * frame.0 as f32).floor() as i32, (v * frame.1 as f32).floor() as i32)
 }
 
+/// The icon's width, height and pixels, four bytes each: red, green, blue
+/// and alpha.
+fn icon() -> Result<(u32, u32, Vec<u8>), String> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(ICON_PNG)).read_info().map_err(|e| e.to_string())?;
+    let mut pixels = vec![0; reader.output_buffer_size().ok_or("the icon is too big")?];
+    let info = reader.next_frame(&mut pixels).map_err(|e| e.to_string())?;
+    if (info.color_type, info.bit_depth) != (png::ColorType::Rgba, png::BitDepth::Eight) {
+        return Err(format!("the icon is {:?} {:?}, not 8-bit RGBA", info.color_type, info.bit_depth));
+    }
+    pixels.truncate(info.buffer_size());
+    Ok((info.width, info.height, pixels))
+}
+
+fn set_icon(window: &mut Window) -> Result<(), String> {
+    let (width, height, mut pixels) = icon()?;
+    let surface = Surface::from_data(&mut pixels, width, height, width * 4, PixelFormatEnum::RGBA32)?;
+    // SDL keeps a copy.
+    window.set_icon(surface);
+    Ok(())
+}
+
 fn scale_mode(filter: Filter) -> ScaleMode {
     match filter {
         Filter::Nearest => ScaleMode::Nearest,
@@ -333,6 +363,18 @@ fn fit_window(video: &VideoSubsystem, window: &mut Window, width: u32, height: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_decodes() {
+        let (width, height, pixels) = icon().unwrap();
+        assert_eq!((width, height), (128, 128));
+        assert_eq!(pixels.len(), 128 * 128 * 4);
+        // Transparent in the corner, the opaque orange monitor in the middle
+        // of its top edge.
+        assert_eq!(pixels[3], 0);
+        let top = (12 * 128 + 64) * 4;
+        assert!(pixels[top + 3] == 255 && pixels[top] > pixels[top + 2]);
+    }
 
     #[test]
     fn aspect_correction_stretches_to_4_3() {

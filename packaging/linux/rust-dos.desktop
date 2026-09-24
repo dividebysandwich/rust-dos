@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Rust-DOS
+GenericName=DOS Emulator
+Comment=Run DOS programs and games on an emulated x86 PC
+Exec=rust-dos
+Icon=rust-dos
+Terminal=false
+Categories=Game;Emulator;
+Keywords=DOS;MS-DOS;x86;PC;emulator;retro;
+StartupWMClass=rust-dos
