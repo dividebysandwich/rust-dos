@@ -94,6 +94,17 @@ fn a_protected_mode_program_with_timer_interrupts_runs_in_lockstep() {
     lockstep(&mut a.cpu, &mut b.cpu, 400, 5_000, |_, _| {}).unwrap();
     assert!(a.cpu.edi() > 10, "IRQ 0 came {} times", a.cpu.edi());
     assert_eq!(a.cpu.ecx(), 0, "the loop ran to the end");
+    report(&b.cpu);
+}
+
+/// Check that the second machine ran translated code when it should have,
+/// and show the recompiler's counts.
+fn report(cpu: &Cpu) {
+    let stats = cpu.dynrec.stats();
+    println!("{:?}", stats);
+    if second_core() != CoreMode::Normal && rust_dos::dynrec::AVAILABLE {
+        assert!(stats.runs > 0, "no translated code ran");
+    }
 }
 
 /// A copy of `programs/<dir>` for one machine, without the swap files a
@@ -142,16 +153,21 @@ fn local_programs_in_lockstep() {
         let (dir, command) = entry.split_once(':').expect("DIR:COMMAND");
         let mut a = program_machine(dir, "a", command, CoreMode::Normal);
         let mut b = program_machine(dir, "b", command, second_core());
-        let started = std::time::Instant::now();
         match lockstep(&mut a, &mut b, batches, len, |_, _| {}) {
-            Ok(n) => println!(
-                "{}: {} batches, {} instructions, equal ({:.1}s; mode switches {}, exceptions {})",
+            Ok(run) => println!(
+                "{}: {} batches, {} instructions, equal (mode switches {}, exceptions {})\n  \
+                 normal {:.2}s ({:.0} MIPS), {} {:.2}s ({:.0} MIPS)\n  {:?}",
                 entry,
-                n,
+                run.batches,
                 a.executed,
-                started.elapsed().as_secs_f64(),
                 a.mode_switches,
-                a.exceptions
+                a.exceptions,
+                run.a_time.as_secs_f64(),
+                a.executed as f64 / run.a_time.as_secs_f64() / 1e6,
+                second_core().name(),
+                run.b_time.as_secs_f64(),
+                b.executed as f64 / run.b_time.as_secs_f64() / 1e6,
+                b.dynrec.stats()
             ),
             Err(e) => {
                 println!("{}: {}", entry, e);

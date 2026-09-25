@@ -36,6 +36,9 @@ pub const DEFAULT_MEMORY_MB: usize = 16;
 /// enough that a program's variables rarely share a block with its code.
 pub const GEN_SHIFT: usize = 6;
 
+/// Where `Bus` keeps the A20 mask, for the dynamic recompiler's code.
+pub(crate) const A20_MASK_OFFSET: usize = std::mem::offset_of!(Bus, a20_mask);
+
 pub struct Bus {
     ram: Vec<u8>, // System RAM, allocated once
     pub video_mode: VideoMode, // Current State

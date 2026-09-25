@@ -96,6 +96,9 @@ fn test386_rom_batched() {
         cpu.eip(),
         cpu.executed
     );
+    if cpu.dynamic_active() {
+        println!("Dynamic core: {:?}", cpu.dynrec.stats());
+    }
     check_results(&dir, &cpu);
 }
 

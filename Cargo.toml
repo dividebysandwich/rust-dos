@@ -37,6 +37,18 @@ glow = "0.17"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 
+# The dynamic recompiler's code generator and its executable memory
+# (src/dynrec).
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+dynasm = "5"
+dynasmrt = "5"
+
+[target.'cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
+
 [features]
 default = ["midi"]
 midi = ["dep:rustysynth"]

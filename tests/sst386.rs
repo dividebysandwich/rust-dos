@@ -766,6 +766,8 @@ fn sst386_real_mode() {
     );
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
+    // Blocks the dynamic recompiler ran (RUST_DOS_CORE=dynamic).
+    let translated = std::sync::atomic::AtomicU64::new(0);
     let slots: Vec<Mutex<Option<FileResult>>> = files.iter().map(|_| Mutex::new(None)).collect();
     let worker_panic = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
@@ -779,7 +781,9 @@ fn sst386_real_mode() {
                         // A fresh machine per file: device state (the PIT a
                         // test can read with IN) must not depend on which
                         // files a worker ran before.
-                        let r = run_file(&mut Machine::new(), path, name, &cfg);
+                        let mut machine = Machine::new();
+                        let r = run_file(&mut machine, path, name, &cfg);
+                        translated.fetch_add(machine.cpu.dynrec.stats().runs, Ordering::Relaxed);
                         *slots[i].lock().unwrap() = Some(r);
                         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                         if n % 50 == 0 || n == files.len() {
@@ -809,12 +813,14 @@ fn sst386_real_mode() {
         .zip(slots)
         .map(|((name, _), slot)| (name, slot.into_inner().unwrap().unwrap()))
         .collect();
+    let translated = translated.into_inner();
     let header = format!(
-        "SingleStepTests/80386 real mode: {} files from {} in {:.1}s ({} threads)",
+        "SingleStepTests/80386 real mode: {} files from {} in {:.1}s ({} threads{})",
         results.len(),
         cfg.dir.display(),
         started.elapsed().as_secs_f64(),
-        threads
+        threads,
+        if translated > 0 { format!(", dynamic core: {} translated blocks run", translated) } else { String::new() }
     );
     let stdout_report = render(&results, 1, &header);
     let full_report = render(&results, cfg.samples, &header);

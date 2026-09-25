@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use rust_dos::cpu::{Cpu, CpuSnapshot};
-use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos::exec::{ExecHook, NoHook, StopReason, run_batch};
 /// The registers and counters compared after each batch (memory is
 /// compared directly, see `memory_difference`).
 #[derive(Debug, PartialEq)]
@@ -77,34 +77,75 @@ pub fn memory_difference(a: &Cpu, b: &Cpu) -> Option<String> {
         .or_else(|| first("debug console", &p.debug_console, &q.debug_console))
 }
 
-/// Run one batch of `len` instructions' time.
-pub fn batch(cpu: &mut Cpu, len: u64) -> StopReason {
+/// Stops a batch before a HLT (which in a batch would wait for the next
+/// timer event and go on).
+pub struct StopAtHlt;
+
+impl ExecHook for StopAtHlt {
+    fn before_exec(&mut self, _cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
+        ram.get(phys_ip) == Some(&0xF4)
+    }
+
+    fn per_instruction(&self) -> bool {
+        false
+    }
+}
+
+/// Run one batch of `len` instructions' time, stopping before a HLT with
+/// `stop_at_hlt`.
+pub fn batch(cpu: &mut Cpu, len: u64, stop_at_hlt: bool) -> StopReason {
     let end = cpu.bus.clock.icount + len;
     cpu.bus.start_batch(end);
-    run_batch(cpu, &mut NoHook, false)
+    if stop_at_hlt { run_batch(cpu, &mut StopAtHlt, true) } else { run_batch(cpu, &mut NoHook, false) }
+}
+
+/// How a lockstep run went: the batches run, and the time each machine
+/// took for them.
+pub struct Run {
+    pub batches: usize,
+    pub a_time: std::time::Duration,
+    pub b_time: std::time::Duration,
 }
 
 /// Run `a` and `b` side by side for `batches` batches of `len`, calling
 /// `each` on both before every batch (to type keys, say), and compare them
-/// after each. Stops early once both have ended the program (their shell
-/// reloaded). Returns the number of batches run, or where they diverged.
+/// after each. Stops early once the program turned the machine off (EXIT).
+/// Returns how it went, or where they diverged.
 pub fn lockstep(
     a: &mut Cpu,
     b: &mut Cpu,
     batches: usize,
     len: u64,
+    each: impl FnMut(usize, &mut Cpu),
+) -> Result<Run, String> {
+    lockstep_with(a, b, batches, len, false, each)
+}
+
+/// `lockstep`, stopping at the first HLT with `stop_at_hlt` (the batch
+/// it comes in ends before it).
+pub fn lockstep_with(
+    a: &mut Cpu,
+    b: &mut Cpu,
+    batches: usize,
+    len: u64,
+    stop_at_hlt: bool,
     mut each: impl FnMut(usize, &mut Cpu),
-) -> Result<usize, String> {
+) -> Result<Run, String> {
     let start = State::of(a);
     let other = State::of(b);
     if start != other {
         return Err(format!("the machines differ before they start:\n{}", start.diff(&other)));
     }
+    let mut run = Run { batches, a_time: Default::default(), b_time: Default::default() };
     for n in 0..batches {
         each(n, a);
         each(n, b);
-        let ra = batch(a, len);
-        let rb = batch(b, len);
+        let started = std::time::Instant::now();
+        let ra = batch(a, len, stop_at_hlt);
+        run.a_time += started.elapsed();
+        let started = std::time::Instant::now();
+        let rb = batch(b, len, stop_at_hlt);
+        run.b_time += started.elapsed();
         let (sa, sb) = (State::of(a), State::of(b));
         let memory = memory_difference(a, b);
         if ra != rb || sa != sb || memory.is_some() {
@@ -120,9 +161,10 @@ pub fn lockstep(
                 memory
             ));
         }
-        if ra == StopReason::Exit {
-            return Ok(n + 1);
+        if ra == StopReason::Exit || (stop_at_hlt && ra == StopReason::Paused) {
+            run.batches = n + 1;
+            return Ok(run);
         }
     }
-    Ok(batches)
+    Ok(run)
 }

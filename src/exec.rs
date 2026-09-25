@@ -11,6 +11,7 @@ use iced_x86::{Decoder, DecoderOptions, Instruction};
 use crate::bus::GEN_SHIFT;
 use crate::command::CommandDispatcher;
 use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
+use crate::dynrec::{DynState, Run};
 use crate::instr_cache::InstrCache;
 use crate::instructions::Handler;
 
@@ -62,6 +63,8 @@ struct Fetch {
     ram: &'static [u8],
     cache: InstrCache,
     window: CodeWindow,
+    /// The dynamic recompiler, taken out of the CPU like the cache.
+    dynrec: DynState,
 }
 
 /// The page instructions are being fetched from: where it is in physical
@@ -146,12 +149,15 @@ impl Fetch {
             ram,
             cache: std::mem::take(&mut cpu.decode_cache),
             window: CodeWindow::NONE,
+            dynrec: std::mem::take(&mut cpu.dynrec),
         }
     }
 
-    /// Give the decoded-instruction cache back to the CPU.
+    /// Give the decoded-instruction cache and the recompiler back to the
+    /// CPU.
     fn finish(self, cpu: &mut Cpu) {
         cpu.decode_cache = self.cache;
+        cpu.dynrec = self.dynrec;
     }
 }
 
@@ -161,14 +167,22 @@ impl Fetch {
 /// `hot` enables the per-instruction `ExecHook::before_exec` call.
 pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReason {
     let mut fetch = Fetch::new(cpu);
-    // Two copies of the loop: the one without the per-instruction hook
-    // doesn't test for it on every instruction.
-    let reason = if hot { run::<true>(cpu, &mut fetch, hook) } else { run::<false>(cpu, &mut fetch, hook) };
+    // Copies of the loop: the one without the per-instruction hook doesn't
+    // test for it on every instruction, and the interpreter's doesn't look
+    // for translated code. A program that switches to protected mode
+    // during the batch (`core=auto`) goes on the recompiler in the next.
+    let dynamic = cpu.dynamic_active() && !(hot && hook.per_instruction());
+    let reason = match (hot, dynamic) {
+        (false, false) => run::<false, false>(cpu, &mut fetch, hook),
+        (false, true) => run::<false, true>(cpu, &mut fetch, hook),
+        (true, false) => run::<true, false>(cpu, &mut fetch, hook),
+        (true, true) => run::<true, true>(cpu, &mut fetch, hook),
+    };
     fetch.finish(cpu);
     reason
 }
 
-fn run<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> StopReason {
+fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> StopReason {
     loop {
         if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
             if cpu.bus.clock.icount >= cpu.bus.clock.batch_end() {
@@ -198,7 +212,14 @@ fn run<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHoo
             }
         }
 
-        if let Some(reason) = instruction::<HOT>(cpu, fetch, hook) {
+        // An instruction in an interrupt shadow runs on its own, as the
+        // loop checks for interrupts again after it.
+        let stop = if DYN && !cpu.irq_shadow && cpu.dynamic_active() {
+            dynamic::<HOT>(cpu, fetch, hook, false)
+        } else {
+            instruction::<HOT>(cpu, fetch, hook)
+        };
+        if let Some(reason) = stop {
             return reason;
         }
     }
@@ -229,7 +250,11 @@ impl Cpu {
             return;
         }
         let mut fetch = Fetch::new(self);
-        instruction::<false>(self, &mut fetch, &mut NoHook);
+        if self.dynamic_active() && !self.irq_shadow {
+            dynamic::<false>(self, &mut fetch, &mut NoHook, true);
+        } else {
+            instruction::<false>(self, &mut fetch, &mut NoHook);
+        }
         fetch.finish(self);
     }
 
@@ -439,6 +464,45 @@ fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn
     cpu.irq_shadow = false;
     let at = fetch_location(cpu, fetch)?;
     execute_at::<HOT>(cpu, fetch, hook, at)
+}
+
+/// Run translated code from CS:EIP, or the instruction there through the
+/// interpreter where there is none: outside the code window, in the shell,
+/// and in the page of the mouse driver's stub, which lets the next event
+/// handler call in by clearing a byte of RAM (see `mouse::callback_busy`):
+/// the interpreter looks for one after every instruction. With `single`,
+/// translated blocks hold one instruction.
+#[inline(always)]
+fn dynamic<const HOT: bool>(
+    cpu: &mut Cpu,
+    fetch: &mut Fetch,
+    hook: &mut dyn ExecHook,
+    single: bool,
+) -> Option<StopReason> {
+    let at = fetch_location(cpu, fetch)?;
+    if HOT && hook.before_exec(cpu, at.phys_ip, fetch.ram) {
+        return Some(StopReason::Paused);
+    }
+    let translatable = fetch.window.phys(cpu, at.eip, at.lin_ip, at.cs_limit).is_some()
+        && at.phys_ip >> 12 != crate::mouse::CALLBACK_STUB >> 12
+        && !cpu.in_shell_code();
+    if !translatable {
+        return execute_at::<false>(cpu, fetch, hook, at);
+    }
+    match fetch.dynrec.run(cpu, &at, single) {
+        Run::Interpret => execute_at::<false>(cpu, fetch, hook, at),
+        Run::Ran => {
+            finish_instruction(cpu);
+            None
+        }
+        Run::Fault { fault, phys_ip } => {
+            after_fault(cpu, fault, fetch.ram, phys_ip);
+            cpu.bus.clock.icount += 1;
+            finish_instruction(cpu);
+            None
+        }
+        Run::Panic(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 /// Find the instruction at CS:EIP: in the code window, or else through

@@ -262,6 +262,12 @@ impl ExecHook for StopAtHlt {
     fn before_exec(&mut self, _cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
         ram.get(phys_ip) == Some(&0xF4)
     }
+
+    /// The dynamic recompiler runs blocks between the calls: it leaves
+    /// every HLT to the interpreter, so the hook sees them all.
+    fn per_instruction(&self) -> bool {
+        false
+    }
 }
 
 impl Rig {

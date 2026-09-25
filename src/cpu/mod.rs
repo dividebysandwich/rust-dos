@@ -10,6 +10,7 @@ use crate::shell::get_shell_code;
 pub mod alu;
 pub mod fault;
 mod farxfer;
+pub mod layout;
 pub mod mem;
 pub mod paging;
 mod regs;
