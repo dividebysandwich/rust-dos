@@ -4,7 +4,7 @@ description = "An x86 DOS emulator written in Rust"
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [dependencies]
@@ -33,11 +33,11 @@ web-time = "1"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 sdl2 = { version = "0.38" }
 # The window's OpenGL, which draws the CRT shaders.
-glow = "0.17"
+glow = "0.18.0"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 # munt's MT-32 emulation, loaded when the MT-32 is chosen (src/mt32.rs).
-libloading = "0.8"
+libloading = "0.9.0"
 # MIDI out of the host's MIDI ports (src/midiout.rs).
 midir = { version = "0.11", optional = true }
 

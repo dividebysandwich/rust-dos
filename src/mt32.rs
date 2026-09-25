@@ -190,7 +190,7 @@ fn open_library(path: Option<&Path>) -> Result<Library, String> {
     }
     let mut last = String::new();
     for name in library_names() {
-        match unsafe { Library::new(name) } {
+        match unsafe { Library::new(*name) } {
             Ok(lib) => return Ok(lib),
             Err(e) => last = e.to_string(),
         }
