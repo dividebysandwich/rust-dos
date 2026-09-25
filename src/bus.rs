@@ -69,6 +69,9 @@ pub struct Bus {
     /// Values the settings window's Cheats page froze, put back before
     /// every frame while the program runs (`apply_freezes`).
     pub freezes: Vec<crate::cheats::Freeze>,
+    /// The MIXER command changed the mixer's settings, which the frontend
+    /// takes over into its own.
+    pub mixer_changed: bool,
     /// The frames the program drew: the retraces after which the picture
     /// had changed, or while it flips pages, the flips (see `sync_display`).
     pub frames_drawn: u64,
@@ -229,6 +232,7 @@ impl Bus {
             umb: None,
             lpt_dac: None,
             freezes: Vec::new(),
+            mixer_changed: false,
             frames_drawn: 0,
             retraces: 0,
             last_flip: None,

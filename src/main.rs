@@ -744,6 +744,11 @@ fn main() -> Result<(), String> {
         if std::mem::take(&mut cpu.bus.config_ui_requested) && !ui.is_open() {
             toggle_ui!();
         }
+        // MIXER changed the mixer: the settings have it, to show and save.
+        if std::mem::take(&mut cpu.bus.mixer_changed) {
+            settings.mixer = cpu.bus.mixer.settings();
+            ui.sync_mixer(settings.mixer);
+        }
         // A launched game that has ended: the settings and drives before it
         // come back.
         if !ui.is_open()

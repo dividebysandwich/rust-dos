@@ -297,3 +297,32 @@ fn autoexec_lines_queue_before_autoexec_bat() {
     let queued: Vec<&str> = cpu.batch_queue.iter().map(String::as_str).collect();
     assert_eq!(queued, ["MOUNT A floppy", "A:", "@ECHO OFF", "GAME"]);
 }
+
+#[test]
+fn mixer_sets_volumes_and_shows_the_table() {
+    let mut cpu = Cpu::new(scratch("mixer", &["c"]).join("c"));
+    let out = run(&mut cpu, "MIXER x30 opl 150 pcspeaker d-6 r40");
+    assert!(out.starts_with("Channel"), "{}", out);
+    let opl = out.lines().find(|l| l.starts_with("OPL")).unwrap();
+    assert!(opl.contains(" 150:150") && opl.contains("+3.52"), "{}", opl);
+    assert!(opl.contains("Stereo") && opl.contains("30"), "crossfeed on every stereo channel: {}", opl);
+    let speaker = out.lines().find(|l| l.starts_with("PCSPEAKER")).unwrap();
+    assert!(speaker.contains("  50:50") && speaker.contains("Mono") && speaker.contains("40"), "{}", speaker);
+    // The volumes and the reverb that came on are the settings', for the
+    // frontend to take over.
+    let settings = cpu.bus.mixer.settings();
+    assert_eq!(settings.level(rust_dos::mixer::Channel::Fm), 150);
+    assert_eq!(settings.reverb, rust_dos::mixer::ReverbPreset::Medium);
+    assert!(std::mem::take(&mut cpu.bus.mixer_changed));
+    assert_eq!(cpu.bus.mixer.reverb_send(rust_dos::mixer::Channel::Speaker), 0.4);
+}
+
+#[test]
+fn mixer_noshow_prints_nothing_and_errors_say_why() {
+    let mut cpu = Cpu::new(scratch("mixer_noshow", &["c"]).join("c"));
+    assert_eq!(run(&mut cpu, "MIXER sb reverse /noshow"), "");
+    assert!(cpu.bus.mixer.reverse(rust_dos::mixer::Channel::Sb));
+    assert!(!cpu.bus.mixer_changed, "line-out isn't a setting");
+    assert_eq!(run(&mut cpu, "MIXER disney 50"), "MIXER: Channel DISNEY is not active");
+    assert!(run(&mut cpu, "MIXER /?").starts_with("Displays or changes the sound mixer settings."));
+}

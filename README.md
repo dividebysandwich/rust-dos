@@ -203,6 +203,19 @@ D:
     default), `tiny`, `small`, `medium`, `large` or `huge`. `chorus`
     thickens them: `off` (the default), `light`, `normal` or `strong`. The
     presets and how much of the music they get follow DOSBox Staging's.
+  * The `MIXER` command shows the mixer and changes it at the prompt, or
+    from `[autoexec]`, in DOSBox Staging's syntax:
+    `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,
+    `PCSPEAKER`, `SB`, `OPL`, `GUS`, `MIDI`, `CDAUDIO`, `DISKNOISE` and
+    `LPTDAC` (DOSBox Staging's names for them work too), and the commands a
+    volume (`0` to `200` percent, or decibels as `d-6`), `STEREO` or
+    `REVERSE`, a crossfeed (`x0` to `x100`), and how much goes to the
+    reverb and chorus (`r0` to `r100`, `c0` to `c100`, which turn them on
+    if they are off). Without a channel, `x`, `r` and `c` change every
+    channel; `MIXER /?` has the details. For example,
+    `MIXER CDAUDIO 50 SB REVERSE /NOSHOW` or `MIXER X30 OPL 150 R50 C30`.
+    The volumes and effects it sets are the settings window's, which F2
+    saves.
 * **`[joystick]`:** the game port, which programs read joysticks from.
   * `joysticktype` is what is plugged in: `auto` (the default), `4axis`,
     `2axis`, `mouse` or `none` (no game port).

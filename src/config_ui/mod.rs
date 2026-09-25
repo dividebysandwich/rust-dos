@@ -759,6 +759,12 @@ impl ConfigUi {
         self.open && !matches!(self.page, Page::Mixer | Page::Stats)
     }
 
+    /// The mixer's settings changed outside the window (the MIXER
+    /// command): show them as they are now, and change them from there.
+    pub fn sync_mixer(&mut self, mixer: crate::mixer::MixerSettings) {
+        self.settings.mixer = mixer;
+    }
+
     /// What the Stats page shows, for the frontend to hand over every
     /// frame while the window is open.
     pub fn set_stats(&mut self, view: crate::stats::StatsView) {

@@ -39,6 +39,7 @@ impl CommandDispatcher {
         dispatcher.register("DOSCONFIG", Box::new(DosConfigCommand));
         dispatcher.register("LOADHIGH", Box::new(LoadHighCommand));
         dispatcher.register("LH", Box::new(LoadHighCommand));
+        dispatcher.register("MIXER", Box::new(crate::mixer_command::MixerCommand));
 
         dispatcher
     }

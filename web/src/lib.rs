@@ -388,6 +388,11 @@ impl Machine {
         if std::mem::take(&mut self.cpu.bus.config_ui_requested) && !self.ui.is_open() {
             self.toggle_settings();
         }
+        // MIXER changed the mixer: the settings have it, to show and save.
+        if std::mem::take(&mut self.cpu.bus.mixer_changed) {
+            self.settings.mixer = self.cpu.bus.mixer.settings();
+            self.ui.sync_mixer(self.settings.mixer);
+        }
         // A launched game that has ended: the settings from before it come
         // back.
         if !self.ui.is_open()
