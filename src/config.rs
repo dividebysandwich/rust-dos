@@ -1727,6 +1727,7 @@ mod tests {
             memsize: 32,
             ems: false,
             umb: false,
+            keyboard_layout: LayoutSetting::Named("gr"),
             sound,
             disk: DiskSettings {
                 hard_disk_speed: DiskSpeed::Medium,

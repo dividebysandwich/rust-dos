@@ -27,6 +27,7 @@ pub mod fat;
 pub mod file_commands;
 pub mod games;
 pub mod hosttime;
+pub mod import;
 pub mod gus;
 pub mod instr_cache;
 pub mod kbc;
