@@ -406,8 +406,10 @@ picture as a monitor of the time would have:
   phosphor stripes over the scanlines.
 * `crt`: a curved tube with a shadow mask, rounded corners and darker
   edges. The mouse follows the curve. `crt_curvature` sets how far it
-  bends, in percent: `0` is flat, `100` the most, `30` the default; the
-  Display page has it below the shader while the CRT look is chosen.
+  bends, in percent: `0` is flat, `100` the most, `30` the default; and
+  `crt_glow` how much light glows around its bright parts: `0` none,
+  `100` the most, `20` the default. The Display page has both below the
+  shader while the CRT look is chosen.
 
 With `monochrome`, the aperture grille and the shadow mask are left out, as
 a monochrome tube has a single phosphor; the scanlines, glow and curve stay.

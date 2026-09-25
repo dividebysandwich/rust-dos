@@ -48,8 +48,10 @@ aspect=true
 #filter=nearest
 # A CRT look: none, scanlines, aperture or crt. It needs WebGL 2.
 #shader=none
-# How far the crt look's tube bends, in percent (0 flat to 100).
+# How far the crt look's tube bends, in percent (0 flat to 100), and how
+# much light glows around bright parts (0 none to 100).
 #crt_curvature=30
+#crt_glow=20
 # A monochrome monitor: off (colour), white, amber or green.
 #monochrome=off
 # CPU speed in instructions per millisecond, or max to run as fast as the
@@ -409,8 +411,10 @@ function makeGlScreen() {
   let smooth = false;
   /// A monochrome tube, whose phosphor is one colour: no colour mask.
   let mono = false;
-  /// How far the CRT look's tube bends, across and down.
+  /// How far the CRT look's tube bends, across and down, and how much
+  /// light spreads around bright parts.
   let curvature = [0, 0];
+  let glow = 0;
 
   function setUp() {
     texture = gl.createTexture();
@@ -454,6 +458,7 @@ function makeGlScreen() {
       output: gl.getUniformLocation(program, 'u_output'),
       mask: gl.getUniformLocation(program, 'u_mask'),
       curvature: gl.getUniformLocation(program, 'u_curvature'),
+      glow: gl.getUniformLocation(program, 'u_glow'),
     };
   }
 
@@ -493,13 +498,15 @@ function makeGlScreen() {
 
   return {
     /// Draw through the look `name`, or the plain picture, `smooth` or
-    /// sharp, on a colour or a monochrome (`isMono`) tube that bends as
-    /// `bend` says. A look that doesn't compile leaves the picture plain.
-    select(name, isSmooth, isMono, bend) {
+    /// sharp, on a colour or a monochrome (`isMono`) tube that bends and
+    /// glows as `bend` and `shine` say. A look that doesn't compile leaves
+    /// the picture plain.
+    select(name, isSmooth, isMono, bend, shine) {
       look = program(name) ? name : 'none';
       smooth = isSmooth;
       mono = isMono;
       curvature = bend;
+      glow = shine;
       program(look);
       filter();
     },
@@ -531,6 +538,7 @@ function makeGlScreen() {
       gl.uniform2f(entry.output, canvas.width, canvas.height);
       gl.uniform1f(entry.mask, mono ? 0 : 1);
       gl.uniform2f(entry.curvature, curvature[0], curvature[1]);
+      gl.uniform1f(entry.glow, glow);
       gl.bindVertexArray(vao);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -1846,7 +1854,7 @@ function syncSettings() {
 
 /// Show the picture as the settings have it: stretched to 4:3 or not,
 /// sharp or smooth, through a CRT shader or not, on a colour or a
-/// monochrome tube, bent as far as the CRT look's curvature says.
+/// monochrome tube, bent and glowing as the CRT look's settings say.
 function showPicture() {
   if (screenGl) {
     const look = {
@@ -1854,11 +1862,12 @@ function showPicture() {
       smooth: machine.smooth(),
       mono: machine.mono(),
       curvature: Array.from(machine.shader_curvature()),
+      glow: machine.shader_glow(),
     };
-    const same = ['name', 'smooth', 'mono'].every((key) => look[key] === shownLook?.[key]);
+    const same = ['name', 'smooth', 'mono', 'glow'].every((key) => look[key] === shownLook?.[key]);
     if (!same || look.curvature.join() !== shownLook.curvature.join()) {
       shownLook = look;
-      screenGl.select(look.name, look.smooth, look.mono, look.curvature);
+      screenGl.select(look.name, look.smooth, look.mono, look.curvature, look.glow);
       screenGl.render();
     }
   } else {

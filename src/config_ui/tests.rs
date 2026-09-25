@@ -411,7 +411,24 @@ fn the_crt_shader_steps_through_the_looks() {
     keys(&mut ui, &mut host, &[Delete]);
     assert_eq!(host.applied.last().unwrap().crt.curvature, 30);
     assert_eq!(Item::CrtCurvature.applies(), Applies::Now);
-    keys(&mut ui, &mut host, &[Up, Left]);
+    // And its glow below that.
+    keys(&mut ui, &mut host, &[Down]);
+    assert_eq!(ui.item(), Some(Item::CrtGlow));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 20% ■■········"));
+    for _ in 0..10 {
+        ui.key(Right, &mut host);
+    }
+    assert_eq!(host.applied.last().unwrap().crt.glow, 100);
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace, Backspace]);
+    ui.text("150", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(status(&ui), ("The glow goes from 0 to 100%", true));
+    keys(&mut ui, &mut host, &[Esc, Left]);
+    assert_eq!(host.applied.last().unwrap().crt.glow, 90);
+    assert_eq!(Item::CrtGlow.applies(), Applies::Now);
+    keys(&mut ui, &mut host, &[Save]);
+    assert_eq!(host.saved.last().unwrap().crt, crate::video::shader::CrtSettings { curvature: 30, glow: 90 });
+    keys(&mut ui, &mut host, &[Up, Up, Left]);
     assert_eq!(host.applied.last().unwrap().shader, Shader::Aperture);
     assert!(!ui.items().contains(&Item::CrtCurvature));
     keys(&mut ui, &mut host, &[Right]);

@@ -314,6 +314,12 @@ impl Machine {
         self.shown_shader().curvature(self.settings.crt).to_vec()
     }
 
+    /// How much light spreads around bright parts in the look shown
+    /// (`u_glow`, see `Shader::glow`).
+    pub fn shader_glow(&self) -> f32 {
+        self.shown_shader().glow(self.settings.crt)
+    }
+
     /// Whether the monitor is monochrome (`monochrome`): the picture comes
     /// in its phosphor's colour, and the CRT looks leave out their colour
     /// mask.

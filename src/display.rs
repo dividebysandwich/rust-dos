@@ -456,7 +456,7 @@ mod tests {
         let (x, y) = at((0, 0), twice, Shader::Crt);
         assert!(x < 0 && y < 0);
         // A flat CRT only has the overscan.
-        let flat = window_to_frame((0, 0), twice.0, twice.1, twice.2, twice.3, (Shader::Crt, CrtSettings { curvature: 0 }));
+        let flat = window_to_frame((0, 0), twice.0, twice.1, twice.2, twice.3, (Shader::Crt, CrtSettings { curvature: 0, ..CrtSettings::default() }));
         assert!(flat.0 > x && flat.0 < 0 && flat.1 > y && flat.1 < 0, "{:?}", flat);
         assert_eq!(at((0, 0), twice, Shader::Aperture), (0, 0));
     }

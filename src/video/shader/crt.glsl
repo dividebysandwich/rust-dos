@@ -5,7 +5,6 @@
 //   EDGE           how wide the step between two pixels is, in frame pixels
 //   MASK_STRENGTH  how much of the light the mask takes, 0 to 1
 //   SLOT_GAP       the light left in the gaps of the slot mask
-//   GLOW           how much light spreads around bright parts
 //   OVERSCAN       how much of the picture the bezel covers
 //   CORNER         the corners' radius, in picture heights
 //   VIGNETTE       how much darker the edges are
@@ -21,6 +20,8 @@ uniform vec2 u_output;
 uniform float u_mask;
 // How far the tube bends, across and down, with CURVED.
 uniform vec2 u_curvature;
+// How much light spreads around bright parts.
+uniform float u_glow;
 
 in vec2 v_uv;
 out vec4 o_color;
@@ -153,6 +154,6 @@ void main() {
 #if MASK != 0
     light *= mask(gl_FragCoord.xy);
 #endif
-    light += GLOW * glow(t);
+    light += u_glow * glow(t);
     o_color = vec4(encode(light * shade), 1.0);
 }

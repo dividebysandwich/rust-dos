@@ -22,6 +22,7 @@ struct Program {
     output: Option<glow::UniformLocation>,
     mask: Option<glow::UniformLocation>,
     curvature: Option<glow::UniformLocation>,
+    glow: Option<glow::UniformLocation>,
 }
 
 // Every `unsafe` below is a call into OpenGL, whose context `open` makes
@@ -247,6 +248,7 @@ impl GlScreen {
                 gl.uniform_1_f32(program.mask.as_ref(), self.mask);
                 let [cx, cy] = self.active.curvature(self.crt);
                 gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
+                gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
                 gl.bind_vertex_array(Some(self.vao));
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
@@ -305,6 +307,7 @@ fn compile(gl: &glow::Context, glsl: Glsl, shader: Shader) -> Result<Program, St
             output: gl.get_uniform_location(program, "u_output"),
             mask: gl.get_uniform_location(program, "u_mask"),
             curvature: gl.get_uniform_location(program, "u_curvature"),
+            glow: gl.get_uniform_location(program, "u_glow"),
         })
     }
 }

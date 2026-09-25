@@ -33,6 +33,9 @@
 #shader=none
 # How far the crt look's tube bends, in percent: 0 is flat, 100 the most.
 #crt_curvature=30
+# How much light glows around the bright parts of the crt look, in
+# percent: 0 is none, 100 the most.
+#crt_glow=20
 # A monochrome monitor: off (colour, the default), white, amber or green.
 # The picture shows in the phosphor's colour, as bright as its colours
 # are, and the CRT shaders leave out their colour mask. On a VGA or EGA

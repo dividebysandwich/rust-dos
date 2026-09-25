@@ -2,17 +2,20 @@
 //! window's OpenGL and the browser's WebGL 2 draw them with, and the tube's
 //! curvature, which mouse positions have to go through too.
 
-/// The CRT look's own settings, in percent: `crt_curvature` in
-/// `[emulator]`.
+/// The CRT look's own settings, in percent: `crt_curvature` and
+/// `crt_glow` in `[emulator]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CrtSettings {
     /// How far the tube bends, from 0 (flat) to `MAX_AMOUNT`.
     pub curvature: u16,
+    /// How much light spreads around bright parts, from 0 (none) to
+    /// `MAX_AMOUNT`.
+    pub glow: u16,
 }
 
 impl Default for CrtSettings {
     fn default() -> Self {
-        Self { curvature: 30 }
+        Self { curvature: 30, glow: 20 }
     }
 }
 
@@ -28,6 +31,10 @@ pub fn parse_amount(value: &str) -> Option<u16> {
 /// How far the CRT's tube bends at the most, across and down: a quarter
 /// more down, as the picture is a quarter wider than high.
 const MAX_CURVATURE: [f32; 2] = [0.1, 0.4 / 3.0];
+
+/// The most glow of the CRT: the light of the frame around a point, blurred,
+/// that adds to it.
+const MAX_GLOW: f32 = 0.4;
 
 /// How the picture is shown: as it is, or through a CRT look.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -97,6 +104,17 @@ impl Shader {
         }
     }
 
+    /// How much light spreads around bright parts with `crt` (`u_glow`):
+    /// the CRT's as its setting says, the flat looks' a little.
+    pub fn glow(self, crt: CrtSettings) -> f32 {
+        match self {
+            Shader::None => 0.0,
+            Shader::Scanlines => 0.04,
+            Shader::Aperture => 0.06,
+            Shader::Crt => MAX_GLOW * crt.glow.min(MAX_AMOUNT) as f32 / MAX_AMOUNT as f32,
+        }
+    }
+
     fn look(self) -> Option<Look> {
         let flat = Look {
             mask: Mask::None,
@@ -104,7 +122,6 @@ impl Shader {
             edge: 0.5,
             mask_strength: 0.0,
             slot_gap: 1.0,
-            glow: 0.04,
             curved: false,
             overscan: 1.0,
             corner: 0.0,
@@ -118,7 +135,6 @@ impl Shader {
                 beam: [0.18, 0.30],
                 edge: 0.4,
                 mask_strength: 0.35,
-                glow: 0.06,
                 ..flat
             }),
             Shader::Crt => Some(Look {
@@ -127,7 +143,6 @@ impl Shader {
                 edge: 0.6,
                 mask_strength: 0.35,
                 slot_gap: 0.5,
-                glow: 0.08,
                 curved: true,
                 overscan: 1.02,
                 corner: 0.03,
@@ -146,8 +161,8 @@ enum Mask {
 }
 
 /// A CRT look, as the #defines crt.glsl is built with. The overscan is
-/// here once for the shader and `Shader::warp`, and how far the tube bends
-/// is a uniform (`Shader::curvature`).
+/// here once for the shader and `Shader::warp`; how far the tube bends and
+/// how much it glows are uniforms (`Shader::curvature`, `Shader::glow`).
 #[derive(Clone, Copy, Debug)]
 struct Look {
     mask: Mask,
@@ -156,7 +171,6 @@ struct Look {
     edge: f32,
     mask_strength: f32,
     slot_gap: f32,
-    glow: f32,
     /// A tube that bends as `u_curvature` says, with rounded corners.
     curved: bool,
     overscan: f32,
@@ -176,7 +190,6 @@ impl Look {
             ("EDGE", format!("{:?}", self.edge)),
             ("MASK_STRENGTH", format!("{:?}", self.mask_strength)),
             ("SLOT_GAP", format!("{:?}", self.slot_gap)),
-            ("GLOW", format!("{:?}", self.glow)),
             ("OVERSCAN", format!("{:?}", self.overscan)),
             ("CORNER", format!("{:?}", self.corner)),
             ("VIGNETTE", format!("{:?}", self.vignette)),
@@ -225,9 +238,10 @@ const CRT: &str = include_str!("shader/crt.glsl");
 /// The vertex and fragment shader of a look. They take the frame as the
 /// texture `u_frame`; the CRT looks also take the frame's size in pixels
 /// as `u_source`, the picture's on the screen as `u_output`, whether the
-/// tube has a colour mask as `u_mask` (1 or 0, for a monochrome tube) and
-/// how far it bends as `u_curvature` (`Shader::curvature`), and read a
-/// mipmap of the frame. The fragment shader writes `o_color`.
+/// tube has a colour mask as `u_mask` (1 or 0, for a monochrome tube), how
+/// far it bends as `u_curvature` (`Shader::curvature`) and how much it
+/// glows as `u_glow` (`Shader::glow`), and read a mipmap of the frame. The
+/// fragment shader writes `o_color`.
 pub fn sources(shader: Shader, glsl: Glsl) -> (String, String) {
     let preamble = glsl.preamble();
     let fragment = match shader.look() {
@@ -288,10 +302,17 @@ mod tests {
         let [x, y] = Shader::Crt.curvature(CrtSettings::default());
         assert!((x - 0.03).abs() < 1e-6 && (y - 0.04).abs() < 1e-6);
         assert_eq!(Shader::Aperture.curvature(CrtSettings::default()), [0.0, 0.0]);
-        let corner = |curvature| Shader::Crt.warp(CrtSettings { curvature }, 0.0, 0.0).0;
+        let corner = |curvature| Shader::Crt.warp(CrtSettings { curvature, ..CrtSettings::default() }, 0.0, 0.0).0;
         assert!(corner(100) < corner(30) && corner(30) < corner(0));
         assert_eq!(corner(0), 0.5 - 0.5 * 1.02);
         assert_eq!(parse_amount(" 45% "), Some(45));
+
+        // The CRT glows as it always did by default, and as its setting
+        // says; the flat looks a little, whatever it says.
+        assert!((Shader::Crt.glow(CrtSettings::default()) - 0.08).abs() < 1e-6);
+        assert_eq!(Shader::Crt.glow(CrtSettings { glow: 0, ..CrtSettings::default() }), 0.0);
+        assert_eq!(Shader::Crt.glow(CrtSettings { glow: 100, ..CrtSettings::default() }), MAX_GLOW);
+        assert_eq!(Shader::Scanlines.glow(CrtSettings { glow: 100, ..CrtSettings::default() }), 0.04);
         assert_eq!(parse_amount("101"), None);
     }
 
@@ -309,6 +330,7 @@ mod tests {
         }
         let (_, curved) = sources(Shader::Crt, Glsl::Gl150);
         assert!(curved.contains("uniform vec2 u_curvature;") && curved.contains("u_curvature * c.yx * c.yx"));
+        assert!(curved.contains("uniform float u_glow;") && curved.contains("u_glow * glow(t)"));
         assert!(curved.contains("#define CURVED 1\n") && curved.contains("#define MASK 2\n"));
         assert!(curved.contains("uniform float u_mask;") && curved.contains("MASK_STRENGTH * u_mask"));
         let (_, flat) = sources(Shader::Scanlines, Glsl::Gl150);
