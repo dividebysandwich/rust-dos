@@ -239,6 +239,11 @@ pub struct Cpu {
     /// Where the prompt was printed, (column, row), while a line is typed
     /// after it.
     pub shell_prompt_at: Option<(u8, u8)>,
+    /// The secondary COMMAND.COMs running, the innermost last.
+    pub secondary_shells: Vec<crate::command_com::SecondaryShell>,
+    /// Set while a command line of a secondary COMMAND.COM runs: what it
+    /// asks the shell's program to do.
+    pub secondary: Option<crate::command_com::Dispatch>,
     /// The batch files running, whose lines are dispatched as if typed
     /// at the prompt while the shell is idle (no child program on the
     /// process_stack and CS still in shell-land), and ECHO.
@@ -350,7 +355,8 @@ use std::path::PathBuf;
 fn default_environment() -> Vec<(String, String)> {
     let gus = crate::gus::GusConfig::default();
     vec![
-        ("PATH".to_string(), "C:\\".to_string()),
+        // Z: holds COMMAND.COM, as in DOSBox.
+        ("PATH".to_string(), "C:\\;Z:\\".to_string()),
         ("COMSPEC".to_string(), "Z:\\COMMAND.COM".to_string()),
         ("BLASTER".to_string(), crate::sb::SbConfig::default().blaster()),
         ("ULTRASND".to_string(), gus.ultrasnd()),
@@ -393,6 +399,8 @@ impl Cpu {
             shell_completion: None,
             shell_wait: None,
             shell_prompt_at: None,
+            secondary_shells: Vec::new(),
+            secondary: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
             fpu_stack: [F80::new(); 8],
@@ -896,6 +904,8 @@ impl Cpu {
         self.con_pending_scan = None;
         self.con_line = None;
         self.con_pending.clear();
+        self.secondary_shells.clear();
+        self.secondary = None;
         self.bios_wait_until = None;
 
         // Reset text-mode BDA fields so state from a previous program (e.g.

@@ -428,9 +428,15 @@ impl ShellCommand for ClsCommand {
     }
 }
 
+/// EXIT: back from a secondary COMMAND.COM to the program that started it,
+/// or, at the top-level prompt, quit rust-dos.
 struct ExitCommand;
 impl ShellCommand for ExitCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
+        if let Some(dispatch) = cpu.secondary.as_mut() {
+            dispatch.exit = true;
+            return;
+        }
         cpu.bus
             .log_string("[SHELL] Exiting Emulator via command...");
         cpu.bus.flush_log();

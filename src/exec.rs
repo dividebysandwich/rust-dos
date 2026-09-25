@@ -360,7 +360,7 @@ enum Shell {
 /// also lets the timers run between the lines of a batch file that loops
 /// with GOTO and starts no program, which would otherwise never give the
 /// front end the machine back.
-const BATCH_LINE_NS: u64 = 500_000;
+pub const BATCH_LINE_NS: u64 = 500_000;
 
 /// Feed batch lines to the shell, dispatch the command line it handed over,
 /// and reload it after a program ends.
@@ -484,6 +484,10 @@ fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> bo
     };
     if path.to_ascii_uppercase().ends_with(".BAT") {
         cpu.start_batch_file(&path, command, args, call)
+    } else if let Some(dispatch) = cpu.secondary.as_mut() {
+        // A secondary COMMAND.COM runs it with EXEC.
+        dispatch.exec = Some((path, args.to_string()));
+        true
     } else {
         load_program(cpu, &path, args, high)
     }

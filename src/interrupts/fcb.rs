@@ -148,11 +148,17 @@ pub fn parse_filename(cpu: &mut Cpu) {
 /// the second does.
 pub fn set_psp_fcbs(bus: &mut Bus, psp: u16, args: &[u8]) -> u16 {
     let base = psp as usize * 16;
+    set_fcbs(bus, base + 0x5C, base + 0x6C, args)
+}
+
+/// The FCBs of the first two parameters in `args` at `fcb1` and `fcb2`, as
+/// `set_psp_fcbs` makes them.
+pub fn set_fcbs(bus: &mut Bus, fcb1: usize, fcb2: usize, args: &[u8]) -> u16 {
     let mut ax = 0;
     let mut words = args
         .split(|&b| b == b' ' || b == b'\t')
         .filter(|w| !w.is_empty() && !w.starts_with(b"/"));
-    for (i, fcb) in [base + 0x5C, base + 0x6C].into_iter().enumerate() {
+    for (i, fcb) in [fcb1, fcb2].into_iter().enumerate() {
         bus.load_bytes(fcb, &[0; 12]);
         bus.load_bytes(fcb + 1, &[b' '; 11]);
         let parsed = words.next().map(|w| parse_name(w, true)).unwrap_or_default();

@@ -209,7 +209,7 @@ fn dir_lists_any_drive() {
     assert!(out.contains("\n.            <DIR>\n"), "{}", out);
 
     let out = run(&mut cpu, "DIR Z:");
-    assert!(out.contains("COMMAND  COM          5,000"), "{}", out);
+    assert!(out.contains("COMMAND  COM"), "{}", out);
 
     assert_eq!(run(&mut cpu, "DIR Q:"), "Invalid drive specification");
     assert!(run(&mut cpu, "DIR D:\\SUB\\*.BAT").ends_with("File not found"));

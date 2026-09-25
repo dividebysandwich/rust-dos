@@ -1,3 +1,4 @@
+pub mod asm16;
 pub mod audio;
 pub mod batch;
 pub mod bios;
@@ -7,6 +8,7 @@ pub mod cheats;
 pub mod cdrom;
 pub mod cmos;
 pub mod command;
+pub mod command_com;
 pub mod config;
 pub mod config_ui;
 pub mod cpu;

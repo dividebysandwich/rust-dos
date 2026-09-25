@@ -70,6 +70,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_SHELL_PROMPT => crate::shell::prompt(cpu),
         crate::bios::SERVICE_SHELL_KEY_READY => crate::shell::key_ready(cpu),
         crate::bios::SERVICE_SHELL_TICK => crate::shell::tick(cpu),
+        crate::bios::SERVICE_COMMAND => crate::command_com::service(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service

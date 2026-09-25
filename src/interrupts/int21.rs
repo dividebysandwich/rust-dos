@@ -635,56 +635,14 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                 }
 
-                // Check for COMMAND.COM interception
-                let upper_name = filename.to_ascii_uppercase();
-                let (target_filename, target_cmd_tail_bytes) =
-                    if upper_name.ends_with("COMMAND.COM") {
-                        // Check for /C (execute string)
-                        // cmd_str is derived from cmd_tail (which includes length byte at 0? No, cmd_tail is vec of bytes)
-                        // In previous code:
-                        // let len = cpu.bus.read_8(cmd_phys);
-                        // for i in 0..len { cmd_tail.push(...) }
-                        // So cmd_tail is just the string bytes (no len, no CR).
-
-                        let full_cmd = String::from_utf8_lossy(&cmd_tail).to_string();
-                        let trimmed = full_cmd.trim_start();
-
-                        if trimmed.to_ascii_uppercase().starts_with("/C") {
-                            // Extract program and args
-                            // Format: /C program args
-                            let after_c = trimmed[2..].trim_start();
-                            // Get program name (up to first space)
-                            let mut parts = after_c.splitn(2, char::is_whitespace);
-                            let prog = parts.next().unwrap_or("");
-                            let args = parts.next().unwrap_or("");
-
-                            // Construct new command tail for the target program
-                            // Standard DOS command tail: [LEN] [SPACE] [ARGS] [CR]
-
-                            let mut new_tail = Vec::new();
-
-                            if !args.is_empty() {
-                                new_tail.push(b' ');
-                                for b in args.bytes() {
-                                    new_tail.push(b);
-                                }
-                            }
-                            // Note: CR is added later by the write logic (cpu.bus.write_8(..., 0x0D))
-
-                            cpu.bus.log_string(&format!(
-                                "[DOS] Intercepted COMMAND.COM /C. Target='{}', Args='{}'",
-                                prog, args
-                            ));
-
-                            (prog.to_string(), new_tail)
-                        } else {
-                            // Not /C? Just run COMMAND.COM (which is dummy)
-                            // It will load the dummy Z:\COMMAND.COM which is NOPs.
-                            (filename.clone(), cmd_tail.clone())
-                        }
-                    } else {
-                        (filename.clone(), cmd_tail.clone())
-                    };
+                // COMMAND.COM, wherever a program looks for it (the COMSPEC,
+                // or C:\COMMAND.COM where there is none), is ours on Z:.
+                let is_command_com = filename
+                    .rsplit(['\\', '/', ':'])
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("COMMAND.COM"));
+                let target_filename = if is_command_com { "Z:\\COMMAND.COM".to_string() } else { filename.clone() };
+                let target_cmd_tail_bytes = cmd_tail.clone();
 
                 // DOS 3.0+ puts a word count of 1 and the program's fully
                 // qualified path after the environment. Programs find their

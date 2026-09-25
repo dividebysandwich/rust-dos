@@ -1,5 +1,6 @@
 use crate::cpu::Cpu;
 use crate::disk::{DiskController, drive_letter};
+use crate::asm16::Asm;
 use crate::dosstr;
 use crate::interrupts::utils::read_asciiz_bytes;
 use crate::video;
@@ -33,59 +34,6 @@ pub struct ShellLabels {
     pub key_ready: u16,
 }
 
-/// A tiny assembler for the shell's code: bytes, and jumps to labels
-/// resolved at the end, so the code can change without offsets worked out
-/// by hand.
-struct Asm {
-    code: Vec<u8>,
-    labels: Vec<(&'static str, u16)>,
-    /// (position of the operand, label, 1 for a short jump's displacement
-    /// or 2 for an absolute word)
-    fixups: Vec<(usize, &'static str, u8)>,
-}
-
-impl Asm {
-    fn label(&mut self, name: &'static str) {
-        self.labels.push((name, ORIGIN + self.code.len() as u16));
-    }
-
-    fn op(&mut self, bytes: &[u8]) {
-        self.code.extend_from_slice(bytes);
-    }
-
-    /// A short jump (`opcode` rel8) to a label.
-    fn jump(&mut self, opcode: u8, target: &'static str) {
-        self.code.push(opcode);
-        self.fixups.push((self.code.len(), target, 1));
-        self.code.push(0);
-    }
-
-    /// An instruction ending in the address of a label as a word.
-    fn address(&mut self, bytes: &[u8], target: &'static str) {
-        self.code.extend_from_slice(bytes);
-        self.fixups.push((self.code.len(), target, 2));
-        self.code.extend_from_slice(&[0, 0]);
-    }
-
-    fn at(&self, name: &str) -> u16 {
-        self.labels.iter().find(|(n, _)| *n == name).map(|&(_, at)| at).unwrap_or_else(|| panic!("no label {}", name))
-    }
-
-    fn finish(mut self) -> Vec<u8> {
-        for &(pos, target, size) in &self.fixups {
-            let target = self.at(target);
-            if size == 1 {
-                let next = ORIGIN as i32 + pos as i32 + 1;
-                let disp = i8::try_from(target as i32 - next).expect("short jump out of range");
-                self.code[pos] = disp as u8;
-            } else {
-                self.code[pos..pos + 2].copy_from_slice(&target.to_le_bytes());
-            }
-        }
-        self.code
-    }
-}
-
 /// A Tiny "OS" written in Machine Code, and its labels. Asks the emulator
 /// for the prompt, reads keys into a buffer at offset 0x0200, and on Enter
 /// hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
@@ -93,7 +41,7 @@ impl Asm {
 /// keys and the extended keys (Esc, Tab, Up and Down) to `edit_key`.
 fn assemble() -> (Vec<u8>, ShellLabels) {
     use crate::bios::{SERVICE_SHELL_KEY, SERVICE_SHELL_KEY_READY, SERVICE_SHELL_PROMPT, SERVICE_SHELL_TICK};
-    let mut a = Asm { code: Vec::new(), labels: Vec::new(), fixups: Vec::new() };
+    let mut a = Asm::new(ORIGIN);
     // We are loaded at SHELL_SEGMENT:0100 (see Cpu::load_shell). Set
     // DS=ES=SS=CS so buffers and stack live in the shell segment.
     a.op(&[0x8C, 0xC8]); // MOV AX, CS
@@ -548,28 +496,30 @@ impl Choice {
 /// `handle_command_bop`. Batch lines wait until then.
 pub fn enter_wait(cpu: &mut Cpu, wait: ShellWait) {
     use crate::cpu::{SHELL_SEGMENT, SHELL_STACK};
-    cpu.set_cs(SHELL_SEGMENT);
-    cpu.set_ds(SHELL_SEGMENT);
-    cpu.set_es(SHELL_SEGMENT);
-    cpu.set_ss(SHELL_SEGMENT);
-    cpu.set_sp(SHELL_STACK);
-    cpu.set_ip(match wait {
-        ShellWait::Line(_) => labels().prompt_start,
-        _ => labels().shell_wait,
-    });
+    // A secondary COMMAND.COM waits in its own code (see command_com.rs).
+    if cpu.secondary.is_none() {
+        cpu.set_cs(SHELL_SEGMENT);
+        cpu.set_ds(SHELL_SEGMENT);
+        cpu.set_es(SHELL_SEGMENT);
+        cpu.set_ss(SHELL_SEGMENT);
+        cpu.set_sp(SHELL_STACK);
+        cpu.set_ip(match wait {
+            ShellWait::Line(_) => labels().prompt_start,
+            _ => labels().shell_wait,
+        });
+    }
     cpu.shell_wait = Some(wait);
 }
 
-/// The shell's code at KEY_READY (SERVICE_SHELL_KEY_READY), with the key
-/// PAUSE or CHOICE waited for in AX. Ctrl+C ends the batch files; a key
-/// CHOICE doesn't take beeps and waits again.
-pub fn key_ready(cpu: &mut Cpu) {
-    let key = cpu.ax() as u8;
-    let Some(wait) = cpu.shell_wait.take() else { return };
+/// A key for what PAUSE or CHOICE waits for: Ctrl+C ends the batch files,
+/// and a key CHOICE doesn't take beeps and it waits on. Whether the wait
+/// is over.
+pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
+    let Some(wait) = cpu.shell_wait.take() else { return true };
     if key == 0x03 {
         video::print_string(cpu, "^C\r\n");
         cpu.batch.clear();
-        return;
+        return true;
     }
     match wait {
         ShellWait::Pause => video::print_string(cpu, "\r\n"),
@@ -582,9 +532,26 @@ pub fn key_ready(cpu: &mut Cpu) {
             None => {
                 crate::audio::play_sdl_beep(&mut cpu.bus);
                 cpu.shell_wait = Some(ShellWait::Choice(choice));
-                cpu.set_ip(labels().shell_wait);
+                return false;
             }
         },
+    }
+    true
+}
+
+/// The key a CHOICE takes once its time is up, if it is.
+pub fn timed_out_key(cpu: &Cpu) -> Option<u8> {
+    match cpu.shell_wait {
+        Some(ShellWait::Choice(Choice { timeout: Some((key, at)), .. })) if cpu.bus.clock.now_ticks() >= at => Some(key),
+        _ => None,
+    }
+}
+
+/// The shell's code at KEY_READY (SERVICE_SHELL_KEY_READY), with the key
+/// PAUSE or CHOICE waited for in AX (`take_key`).
+pub fn key_ready(cpu: &mut Cpu) {
+    if !take_key(cpu, cpu.ax() as u8) {
+        cpu.set_ip(labels().shell_wait);
     }
 }
 
@@ -592,9 +559,7 @@ pub fn key_ready(cpu: &mut Cpu) {
 /// (SERVICE_SHELL_TICK): once a CHOICE's time is up, its default key is
 /// handed over as if pressed.
 pub fn tick(cpu: &mut Cpu) {
-    if let Some(ShellWait::Choice(Choice { timeout: Some((key, at)), .. })) = cpu.shell_wait
-        && cpu.bus.clock.now_ticks() >= at
-    {
+    if let Some(key) = timed_out_key(cpu) {
         cpu.set_ax(key as u16);
         cpu.set_ip(labels().key_ready);
     }

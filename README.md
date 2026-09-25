@@ -557,10 +557,15 @@ files.
 ### Commands
 
 A program or batch file is found where its name says, or else in the
-current directory and then in the directories of `PATH`, in order; without
-an extension it is the first `.COM`, `.EXE` or `.BAT` file of that name in
-the first directory that has one. Besides these, the prompt has these
-commands:
+current directory and then in the directories of `PATH` (`C:\;Z:\` to
+begin with), in order; without an extension it is the first `.COM`, `.EXE`
+or `.BAT` file of that name in the first directory that has one.
+
+`Z:\COMMAND.COM` is the `COMSPEC`: programs that shell out to DOS run it,
+with `/C` for a command (built-in commands, programs and batch files
+alike) and without for a prompt until `EXIT`, and its exit code is the
+ERRORLEVEL its command left. Programs that look for `C:\COMMAND.COM` get it
+too. Besides these, the prompt has these commands:
 
 | Command | What it does |
 |---|---|
@@ -578,7 +583,8 @@ commands:
 | `MIXER` | see [`[mixer]`](#configuration) |
 | `LOADHIGH` (`LH`) | load a program into upper memory |
 | `DOSCONFIG` | open the settings window |
-| `EXIT` | quit rust-dos |
+| `EXIT` | quit rust-dos, or go back from `COMMAND` |
+| `COMMAND [/C command \| /K command]` | a second prompt, until `EXIT`; `/C` runs the command and goes back, `/K` runs it and stays |
 
 ### Prompt
 

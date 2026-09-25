@@ -33,6 +33,8 @@ pub const SERVICE_SHELL_PROMPT: u8 = 0x1A;
 pub const SERVICE_SHELL_KEY_READY: u8 = 0x1B;
 /// A tick while PAUSE or CHOICE waits, for CHOICE's timeout (`shell::tick`).
 pub const SERVICE_SHELL_TICK: u8 = 0x1C;
+/// A secondary COMMAND.COM asking what to do next (`command_com::service`).
+pub const SERVICE_COMMAND: u8 = 0x1D;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.

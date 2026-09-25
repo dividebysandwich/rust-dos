@@ -532,9 +532,9 @@ impl DiskController {
 
         let canonical = fs::canonicalize(&root_path).unwrap_or_else(|_| root_path.clone());
 
-        // Create a dummy COMMAND.COM on Z:
+        // COMMAND.COM on Z:, which programs run to shell out.
         let mut z_files = MemFs::new();
-        z_files.insert("COMMAND.COM", vec![0x90; 5000]);
+        z_files.insert("COMMAND.COM", crate::command_com::stub_code());
 
         let mut drives: [Option<Drive>; 26] = std::array::from_fn(|_| None);
         drives[DRIVE_C as usize] = Some(Drive {

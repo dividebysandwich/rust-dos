@@ -444,3 +444,85 @@ fn a_program_finds_its_parameters_in_its_fcbs_and_its_dta_at_psp_80h() {
     run_batch_files(&mut cpu);
     assert_eq!(cpu.errorlevel, b'A', "GAME from C:GAME.DAT, upper case");
 }
+
+/// A program that runs C:\COMMAND.COM with the command tail `tail` and
+/// exits with the exit code it got back (INT 21h AH=4Dh).
+fn shell_out(tail: &str) -> Vec<u8> {
+    use rust_dos::asm16::Asm;
+    let mut a = Asm::new(0x100);
+    a.op(&[0xB4, 0x4A, 0xBB, 0x00, 0x10, 0xCD, 0x21]); // shrink to 64 KB
+    for field in ["TAIL_SEG", "FCB1_SEG", "FCB2_SEG"] {
+        a.address(&[0x8C, 0x0E], field); // MOV [field], CS
+    }
+    a.address(&[0xBB], "PARAMS"); // MOV BX, PARAMS
+    a.address(&[0xBA], "NAME"); // MOV DX, NAME
+    a.op(&[0xB8, 0x00, 0x4B, 0xCD, 0x21]); // EXEC
+    a.op(&[0xB4, 0x4D, 0xCD, 0x21]); // AH=4Dh: AL = its exit code
+    a.op(&[0xB4, 0x4C, 0xCD, 0x21]); // exit with it
+    a.label("NAME");
+    a.op(b"C:\\COMMAND.COM\0");
+    a.label("TAIL");
+    a.op(&[tail.len() as u8]);
+    a.op(tail.as_bytes());
+    a.op(&[0x0D]);
+    a.label("FCB");
+    a.op(&[0; 16]);
+    a.label("PARAMS");
+    a.op(&[0, 0]);
+    a.address(&[], "TAIL");
+    a.label("TAIL_SEG");
+    a.op(&[0, 0]);
+    a.address(&[], "FCB");
+    a.label("FCB1_SEG");
+    a.op(&[0, 0]);
+    a.address(&[], "FCB");
+    a.label("FCB2_SEG");
+    a.op(&[0, 0]);
+    a.finish()
+}
+
+#[test]
+fn a_program_runs_commands_through_command_com() {
+    let dir = scratch(
+        "command_com",
+        &[
+            ("SHCOPY.COM", &shell_out(" /C COPY A.TXT B.TXT")),
+            ("BAT.COM", &shell_out(" /C X.BAT")),
+            ("FINDIT.COM", &shell_out(" /C HELLO one")),
+            ("X.BAT", b"@echo off\r\nEXIT5\r\n"),
+            ("EXIT5.COM", &exits_with(5)),
+            ("A.TXT", b"text"),
+        ],
+    );
+    fs::create_dir_all(dir.join("BIN")).unwrap();
+    fs::write(dir.join("BIN/HELLO.COM"), exits_with(7)).unwrap();
+    let mut cpu = machine(&dir);
+
+    cpu.pending_command = Some("SHCOPY".into());
+    run_batch_files(&mut cpu);
+    assert_eq!(fs::read(dir.join("B.TXT")).unwrap(), b"text", "a built-in command");
+    assert_eq!(cpu.errorlevel, 0);
+
+    cpu.pending_command = Some("BAT".into());
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 5, "a batch file's program's exit code comes back");
+
+    cpu.queue_batch_lines(["@SET PATH=C:\\BIN", "@FINDIT"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 7, "a program found on the PATH");
+    assert!(cpu.secondary_shells.is_empty());
+}
+
+#[test]
+fn command_com_without_c_is_a_prompt_until_exit() {
+    let dir = scratch("command_prompt", &[]);
+    let mut cpu = machine(&dir);
+    type_line(&mut cpu, b"z:\\command\r");
+    assert!(screen(&cpu).contains("Type EXIT to go back."), "{}", screen(&cpu));
+    type_line(&mut cpu, b"echo inside\r");
+    assert!(!cpu.shell_idle(), "still in COMMAND.COM");
+    type_line(&mut cpu, b"exit\r");
+    run_until(&mut cpu, 200, |cpu| cpu.shell_idle());
+    assert!(cpu.shell_idle());
+    assert!(cpu.secondary_shells.is_empty());
+}
