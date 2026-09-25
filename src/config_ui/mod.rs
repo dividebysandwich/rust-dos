@@ -506,7 +506,7 @@ impl Item {
             }
             .to_string(),
             SoundFont => s.sound.soundfont.as_deref().map_or("none".to_string(), |p| contract_home(p, home)),
-            Mt32Roms => s.sound.mt32roms.as_deref().map_or("the usual places".to_string(), |p| contract_home(p, home)),
+            Mt32Roms => s.sound.mt32roms.as_deref().map_or("default".to_string(), |p| contract_home(p, home)),
             Mt32Model => s.sound.mt32model.describe().to_string(),
             MidiPort if s.sound.midiport.is_empty() => "the first".to_string(),
             MidiPort => s.sound.midiport.clone(),
