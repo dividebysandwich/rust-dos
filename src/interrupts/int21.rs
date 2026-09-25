@@ -171,6 +171,66 @@ fn con_read(cpu: &mut Cpu) -> Option<u8> {
     Some(ascii)
 }
 
+/// A line being typed at the keyboard for INT 21h AH=0Ah or a read of
+/// CON, which waits for more keys until Enter.
+#[derive(Clone, Debug, Default)]
+pub struct ConLine {
+    /// The buffer of the call it is for (DS, DX): another call starts a
+    /// new line.
+    buffer: (u16, u16),
+    text: Vec<u8>,
+}
+
+/// Echo a character read from the console at the cursor, as DOS does.
+fn con_echo(cpu: &mut Cpu, text: &[u8]) {
+    for &b in text {
+        print_char(&mut cpu.bus, b);
+    }
+    let (col, row) = (cpu.bus.cursor_x as u8, cpu.bus.cursor_y as u8);
+    cpu.bus.write_8(0x0450, col);
+    cpu.bus.write_8(0x0451, row);
+}
+
+/// Edit a line from the keyboard as DOS's console does, for AH=0Ah and
+/// reads of CON: typed characters are echoed while fewer than `max` are
+/// there (a beep past that), Backspace takes one back, and Esc starts the
+/// line again after a backslash. The line once Enter is pressed; None
+/// while it waits for keys (`hle_wait`), the line so far kept for the call
+/// that goes on.
+fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
+    let buffer = (cpu.ds(), cpu.dx());
+    let mut line = cpu.con_line.take().filter(|l| l.buffer == buffer).unwrap_or(ConLine { buffer, text: Vec::new() });
+    loop {
+        let Some(c) = con_read(cpu) else {
+            cpu.con_line = Some(line);
+            cpu.hle_wait();
+            return None;
+        };
+        match c {
+            0x0D => return Some(line.text),
+            0x08 => {
+                if line.text.pop().is_some() {
+                    con_echo(cpu, b"\x08 \x08");
+                }
+            }
+            0x1B => {
+                con_echo(cpu, b"\\\r\n");
+                line.text.clear();
+            }
+            // An extended key: its scan code comes next, and neither is typed.
+            0x00 => {
+                con_read(cpu);
+            }
+            _ if c < 0x20 => {}
+            _ if line.text.len() < max => {
+                line.text.push(c);
+                con_echo(cpu, &[c]);
+            }
+            _ => play_sdl_beep(&mut cpu.bus),
+        }
+    }
+}
+
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     dispatch(cpu, ah);
@@ -397,6 +457,22 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             }
         }
 
+        // AH = 0Ah: Buffered Keyboard Input into DS:DX: at most (its first
+        // byte) - 1 characters, their count at DS:DX+1, and the line with
+        // its CR from DS:DX+2. Only the CR is echoed at the end.
+        0x0A => {
+            let buffer = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+            let max = cpu.bus.read_8(buffer) as usize;
+            if max > 0
+                && let Some(line) = edit_line(cpu, max - 1)
+            {
+                con_echo(cpu, b"\r");
+                cpu.bus.write_8(buffer + 1, line.len() as u8);
+                cpu.bus.load_bytes(buffer + 2, &line);
+                cpu.bus.write_8(buffer + 2 + line.len(), 0x0D);
+            }
+        }
+
         // AH = 0Bh: Check Standard Input Status
         // Returns AL = 0xFF if a character is ready, 0x00 if not.
         0x0B => {
@@ -432,6 +508,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
             cpu.bus.keyboard_buffer.clear();
             cpu.con_pending_scan = None;
+            cpu.con_pending.clear();
 
             match next_fn {
                 0x01 | 0x06 | 0x07 | 0x08 | 0x0A => {
@@ -1182,18 +1259,18 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let mut buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
             if handle == 0 {
-                // STDIN
-                let mut read_count = 0;
-                for _ in 0..count {
-                    if let Some(ascii) = con_read(cpu) {
-                        cpu.bus.write_8(buf_addr, ascii);
-                        buf_addr += 1;
-                        read_count += 1;
-                    } else {
-                        break;
-                    }
+                // STDIN, the console: read a line at a time as DOS does,
+                // waiting for Enter, and hand out the line with its CR LF
+                // over as many reads as it takes.
+                if cpu.con_pending.is_empty() && count > 0 {
+                    let Some(line) = edit_line(cpu, 127) else { return };
+                    con_echo(cpu, b"\r\n");
+                    cpu.con_pending.extend(line);
+                    cpu.con_pending.extend([0x0D, 0x0A]);
                 }
-                cpu.set_ax(read_count as u16);
+                let taken: Vec<u8> = cpu.con_pending.drain(..count.min(cpu.con_pending.len())).collect();
+                cpu.bus.load_bytes(buf_addr, &taken);
+                cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 match cpu.bus.disk.read_file(handle, count) {
@@ -2031,6 +2108,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
                 Err(e) => set_result(cpu, Err(e)),
             }
+        }
+
+        // AX = 71xxh: the long file name functions of Windows 95, which
+        // aren't there: AX=7100h and CF set, as plain DOS answers.
+        0x71 => {
+            cpu.set_ax(0x7100);
+            cpu.set_cpu_flag(CpuFlags::CF, true);
         }
 
         _ => {

@@ -266,6 +266,10 @@ pub struct Cpu {
     /// Scan code of an extended key whose 00h the console functions of
     /// INT 21h have returned, for the next read.
     pub con_pending_scan: Option<u8>,
+    /// The line being typed for INT 21h AH=0Ah or a read of CON.
+    pub con_line: Option<crate::interrupts::int21::ConLine>,
+    /// What is left of the last line read from CON, for the next reads.
+    pub con_pending: VecDeque<u8>,
     /// Memory allocation strategy (INT 21h AH=58h).
     pub alloc_strategy: u16,
     /// End of an INT 15h AH=86h wait in progress, in PIT ticks.
@@ -402,6 +406,8 @@ impl Cpu {
             errorlevel: 0,
             last_dos_error: 0,
             con_pending_scan: None,
+            con_line: None,
+            con_pending: VecDeque::new(),
             alloc_strategy: 0,
             bios_wait_until: None,
             process_stack: Vec::new(),
@@ -884,6 +890,8 @@ impl Cpu {
         self.install_bios_traps();
         self.alloc_strategy = 0;
         self.con_pending_scan = None;
+        self.con_line = None;
+        self.con_pending.clear();
         self.bios_wait_until = None;
 
         // Reset text-mode BDA fields so state from a previous program (e.g.

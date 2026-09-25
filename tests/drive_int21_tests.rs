@@ -591,3 +591,76 @@ fn the_ultrasound_patches_are_on_a_drive_of_their_own() {
     assert!(cf(&cpu));
     assert_eq!(cpu.ax(), 0x05);
 }
+
+fn keys(cpu: &mut Cpu, text: &[u8]) {
+    for &b in text {
+        cpu.bus.keyboard_buffer.push_back(b as u16);
+    }
+}
+
+/// INT 21h AH=0Ah into the buffer at 2000:0000 of `max` characters: the
+/// line if Enter came, None while it waits for keys.
+fn buffered_input(cpu: &mut Cpu, max: u8) -> Option<Vec<u8>> {
+    cpu.bus.write_8(0x20000, max);
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0);
+    int21(cpu, 0x0A);
+    if std::mem::take(&mut cpu.hle_retry) {
+        return None;
+    }
+    let len = cpu.bus.read_8(0x20001) as usize;
+    assert_eq!(cpu.bus.read_8(0x20002 + len), 0x0D, "the line ends in CR");
+    Some((0..len).map(|i| cpu.bus.read_8(0x20002 + i)).collect())
+}
+
+#[test]
+fn buffered_input_edits_a_line_and_waits_for_enter() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    keys(&mut cpu, b"ab\x08c\r");
+    assert_eq!(buffered_input(&mut cpu, 10).as_deref(), Some(&b"ac"[..]));
+
+    // It waits for the keys, keeping what was typed.
+    assert_eq!(buffered_input(&mut cpu, 10), None);
+    keys(&mut cpu, b"x");
+    assert_eq!(buffered_input(&mut cpu, 10), None);
+    cpu.bus.keyboard_buffer.push_back(0x4800); // Up: not typed
+    keys(&mut cpu, b"y\r");
+    assert_eq!(buffered_input(&mut cpu, 10).as_deref(), Some(&b"xy"[..]));
+
+    // At most max - 1 characters; Esc starts again.
+    keys(&mut cpu, b"abcd\r");
+    assert_eq!(buffered_input(&mut cpu, 3).as_deref(), Some(&b"ab"[..]));
+    keys(&mut cpu, b"old\x1Bnew\r");
+    assert_eq!(buffered_input(&mut cpu, 10).as_deref(), Some(&b"new"[..]));
+}
+
+#[test]
+fn reading_the_console_reads_whole_lines() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0);
+    let read = |cpu: &mut Cpu, count: u16| {
+        cpu.set_bx(0);
+        cpu.set_cx(count);
+        int21(cpu, 0x3F);
+        if std::mem::take(&mut cpu.hle_retry) {
+            return None;
+        }
+        Some((0..cpu.ax() as usize).map(|i| cpu.bus.read_8(0x20000 + i)).collect::<Vec<u8>>())
+    };
+    assert_eq!(read(&mut cpu, 10), None, "it waits for a line");
+    keys(&mut cpu, b"hi\r");
+    assert_eq!(read(&mut cpu, 1).as_deref(), Some(&b"h"[..]));
+    assert_eq!(read(&mut cpu, 10).as_deref(), Some(&b"i\r\n"[..]));
+    assert_eq!(read(&mut cpu, 10), None);
+}
+
+#[test]
+fn long_file_name_calls_fail() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+    cpu.set_ax(0x716C);
+    int21::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x7100);
+    assert!(cf(&cpu));
+}

@@ -401,3 +401,27 @@ fn programs_are_found_in_the_current_directory_then_on_the_path() {
     let screen = screen(&cpu);
     assert!(screen.contains("went there\nBad command or file name."), "{}", screen);
 }
+
+#[test]
+fn a_program_reads_a_line_with_int_21h_0ah() {
+    #[rustfmt::skip]
+    let read = [
+        0xC6, 0x06, 0x00, 0x02, 0x0A,   // MOV BYTE [0200h], 10
+        0xB4, 0x0A,                     // MOV AH, 0Ah
+        0xBA, 0x00, 0x02,               // MOV DX, 0200h
+        0xCD, 0x21,                     // INT 21h
+        0xA0, 0x01, 0x02,               // MOV AL, [0201h]: the count
+        0xB4, 0x4C,                     // MOV AH, 4Ch
+        0xCD, 0x21,                     // INT 21h
+    ];
+    let dir = scratch("read_line", &[("READ.COM", &read)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("READ".into());
+    run_until(&mut cpu, 200, |_| false);
+    assert!(!cpu.shell_idle(), "it waits for the line");
+    for key in b"abc\r" {
+        cpu.bus.keyboard_buffer.push_back(*key as u16);
+    }
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.shell_idle()));
+    assert_eq!(cpu.errorlevel, 3);
+}
