@@ -9,6 +9,9 @@ use std::f32::consts::PI;
 /// The mixer's sample rate.
 const RATE: f32 = crate::opl::RATE as f32;
 
+/// The resonance of a second-order Butterworth filter, the flattest.
+pub const BUTTERWORTH_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
 /// Below this, a filter's state is silence (samples are 16-bit values, so
 /// it is far below the smallest step): tails end in zeros, not in denormal
 /// numbers, which are slow, and silence stays exactly silent.
@@ -105,7 +108,7 @@ pub struct SpeakerFilter {
 
 impl Default for SpeakerFilter {
     fn default() -> Self {
-        Self { first: OnePoleHighpass::new(120.0), high: Biquad::highpass(120.0, 1.0), low: Biquad::lowpass(4800.0, 0.7071) }
+        Self { first: OnePoleHighpass::new(120.0), high: Biquad::highpass(120.0, 1.0), low: Biquad::lowpass(4800.0, BUTTERWORTH_Q) }
     }
 }
 
@@ -143,7 +146,7 @@ impl StereoLowpass {
 
     /// New coefficients, keeping the state, so nothing clicks.
     fn design(&mut self, cutoff: f32, order: usize) {
-        let qs: &[f32] = if order >= 4 { &[0.5412, 1.3066] } else { &[0.7071] };
+        let qs: &[f32] = if order >= 4 { &[0.5412, 1.3066] } else { &[BUTTERWORTH_Q] };
         for (i, &q) in qs.iter().enumerate() {
             let fresh = Biquad::lowpass(cutoff, q);
             for section in [&mut self.left[i], &mut self.right[i]] {
@@ -288,7 +291,7 @@ impl Reverb {
             allpasses: [left_allpasses, right_allpasses],
             feedback: room * 0.28 + 0.7,
             damp: damp * 0.4,
-            input_filter: [Biquad::highpass(highpass, 0.7071); 2],
+            input_filter: [Biquad::highpass(highpass, BUTTERWORTH_Q); 2],
         }
     }
 
@@ -417,17 +420,17 @@ mod tests {
 
     #[test]
     fn a_lowpass_passes_the_bass_and_stops_the_treble() {
-        let mut low = Biquad::lowpass(1000.0, 0.7071);
+        let mut low = Biquad::lowpass(1000.0, BUTTERWORTH_Q);
         assert!((gain(|x| low.process(x), 100.0) - 1.0).abs() < 0.02);
-        let mut low = Biquad::lowpass(1000.0, 0.7071);
-        assert!((gain(|x| low.process(x), 1000.0) - 0.7071).abs() < 0.02);
-        let mut low = Biquad::lowpass(1000.0, 0.7071);
+        let mut low = Biquad::lowpass(1000.0, BUTTERWORTH_Q);
+        assert!((gain(|x| low.process(x), 1000.0) - BUTTERWORTH_Q).abs() < 0.02);
+        let mut low = Biquad::lowpass(1000.0, BUTTERWORTH_Q);
         assert!(gain(|x| low.process(x), 10000.0) < 0.02);
     }
 
     #[test]
     fn a_highpass_removes_dc() {
-        let mut high = Biquad::highpass(120.0, 0.7071);
+        let mut high = Biquad::highpass(120.0, BUTTERWORTH_Q);
         let mut last = 1.0;
         for _ in 0..44100 {
             last = high.process(1.0);

@@ -8,7 +8,7 @@
 //! Staging (disney.cpp and covox.cpp), both play through filters that give
 //! them the sound of the real devices.
 
-use crate::dsp::{Biquad, OnePoleHighpass};
+use crate::dsp::{BUTTERWORTH_Q, Biquad, OnePoleHighpass};
 use std::collections::VecDeque;
 
 /// The parallel port's base, and its data, status and control ports.
@@ -86,8 +86,8 @@ pub struct LptDac {
 impl LptDac {
     pub fn new(kind: LptDacType) -> Self {
         let (high, low) = match kind {
-            LptDacType::Disney => (Some(Biquad::highpass(100.0, 0.7071)), Biquad::lowpass(2000.0, 0.7071)),
-            _ => (None, Biquad::lowpass(9000.0, 0.7071)),
+            LptDacType::Disney => (Some(Biquad::highpass(100.0, BUTTERWORTH_Q)), Biquad::lowpass(2000.0, BUTTERWORTH_Q)),
+            _ => (None, Biquad::lowpass(9000.0, BUTTERWORTH_Q)),
         };
         Self {
             kind,
