@@ -2,8 +2,10 @@
 //! with sound (AVI), into the capture folder (`capture_dir`) under names
 //! that say when they were made.
 
+pub mod avi;
 pub mod png;
 pub mod wav;
+pub mod zmbv;
 
 use std::path::{Path, PathBuf};
 

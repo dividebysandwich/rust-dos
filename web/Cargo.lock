@@ -825,6 +825,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "flate2",
  "font8x8",
  "gif",
  "glow",

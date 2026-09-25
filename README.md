@@ -128,6 +128,10 @@ D:
     `capture` (the default) in the directory rust-dos started in, or a
     path of your own. Screenshots show the picture as the recordings do:
     with the monochrome look, without a CRT shader or the settings window.
+    Video recordings are AVI files in DOSBox's lossless ZMBV codec, which
+    ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
+    with its sound, so they keep in step through pauses and fast forward;
+    a recording stops at 1 GB.
   * `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
     first megabyte is extended memory for DOS extenders and XMS.
 * **`[sound]`:**
@@ -352,6 +356,7 @@ is replaced on every start and stops growing at 64 MB.
 | Alt+Enter | Switch between the window and fullscreen |
 | Ctrl+F5 | Save a screenshot (PNG) |
 | Ctrl+F6 | Start and stop recording the sound (WAV) |
+| Ctrl+F7 | Start and stop recording video with sound (AVI) |
 | PrintScreen | Start and stop recording an animation (GIF) |
 
 A message at the top of the picture says what they did. A captured mouse

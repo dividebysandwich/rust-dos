@@ -14,6 +14,7 @@ use crate::cpu::{Cpu, CpuModel};
 use crate::disk::{DriveInfo, DriveKind, LASTDRIVE};
 use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
+use crate::capture::avi::VideoRecorder;
 use crate::capture::wav::WavWriter;
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
@@ -219,6 +220,8 @@ fn main() -> Result<(), String> {
     // recorded (Ctrl+F6).
     let mut screenshot = false;
     let mut sound_recording: Option<WavWriter> = None;
+    // The video being recorded (Ctrl+F7).
+    let mut video_recording: Option<VideoRecorder> = None;
     macro_rules! capture_mouse {
         ($on:expr) => {{
             let on = $on;
@@ -382,6 +385,31 @@ fn main() -> Result<(), String> {
                                     }
                                     Err(e) => osd.show(e),
                                 },
+                            }
+                        }
+                        continue;
+                    }
+                    // Ctrl+F7 starts and stops recording video with sound.
+                    if keycode == Keycode::F7 && ctrl && !alt {
+                        if !repeat {
+                            match video_recording.take() {
+                                Some(video) => match video.stop() {
+                                    Ok(frames) => osd.show(format!("Video recording stopped ({} frames)", frames)),
+                                    Err(e) => osd.show(format!("The video recording failed: {}", e)),
+                                },
+                                None => {
+                                    let (w, h) = (cached_frame.width as usize, cached_frame.height as usize);
+                                    let now = cpu.bus.clock.now_ns();
+                                    match capture::capture_path(&settings.capture_dir, "video", "avi")
+                                        .and_then(|path| VideoRecorder::start(&path, w, h, now).map(|v| (path, v)))
+                                    {
+                                        Ok((path, video)) => {
+                                            video_recording = Some(video);
+                                            osd.show(format!("Recording video to {}", path.display()));
+                                        }
+                                        Err(e) => osd.show(e),
+                                    }
+                                }
                             }
                         }
                         continue;
@@ -674,6 +702,16 @@ fn main() -> Result<(), String> {
         // Recordings show the machine alone. Debug clients see the
         // settings window as well, but not the recording indicator.
         recorder.capture(&screen);
+        if let Some(video) = &mut video_recording {
+            if !video.record(&screen, samples.clone(), cpu.bus.clock.now_ns()) {
+                if let Some(video) = video_recording.take() {
+                    match video.stop() {
+                        Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
+                        Err(e) => osd.show(format!("The video recording failed: {}", e)),
+                    }
+                }
+            }
+        }
         if std::mem::take(&mut screenshot) {
             let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
                 .and_then(|path| capture::png::save(&screen, &path).map(|()| path));
@@ -690,7 +728,7 @@ fn main() -> Result<(), String> {
         dbg.capture_frame(&screen);
 
         // Draw Recording Indicator
-        if recorder.is_active() {
+        if recorder.is_active() || sound_recording.is_some() || video_recording.is_some() {
             let radius = 5;
             let center_x = frame_w - 15;
             let center_y = 15;
@@ -717,6 +755,18 @@ fn main() -> Result<(), String> {
             cpu.bus.set_cycles_per_ms(cycles);
         }
         pacer.wait_for_next_frame();
+    }
+
+    // Recordings still going are finished, so their files play.
+    if let Some(video) = video_recording
+        && let Err(e) = video.stop()
+    {
+        eprintln!("The video recording failed: {}", e);
+    }
+    if let Some(wav) = sound_recording
+        && let Err(e) = wav.finish()
+    {
+        eprintln!("The sound recording failed: {}", e);
     }
 
     Ok(())
