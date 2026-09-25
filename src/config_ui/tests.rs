@@ -36,6 +36,10 @@ struct FakeHost {
     /// The machine's memory for the Cheats page, and its frozen values.
     ram: Vec<u8>,
     frozen: Vec<crate::cheats::Freeze>,
+    /// The save states in the slots, and the slot the hotkeys use.
+    states: Vec<SlotView>,
+    slot: u8,
+    loaded: Vec<u8>,
 }
 
 impl FakeHost {
@@ -57,6 +61,9 @@ impl FakeHost {
             created: vec![],
             ram: vec![],
             frozen: vec![],
+            states: vec![],
+            slot: 1,
+            loaded: vec![],
         }
     }
 }
@@ -147,6 +154,37 @@ impl Host for FakeHost {
 
     fn set_freezes(&mut self, freezes: Vec<crate::cheats::Freeze>) {
         self.frozen = freezes;
+    }
+
+    fn states_available(&self) -> bool {
+        true
+    }
+
+    fn states(&self) -> Vec<SlotView> {
+        self.states.clone()
+    }
+
+    fn current_slot(&self) -> u8 {
+        self.slot
+    }
+
+    fn save_state(&mut self, slot: u8) -> Result<String, String> {
+        self.states.retain(|s| s.slot != slot);
+        let header = crate::savestate::slots::Header { saved: "2026-09-26 12:00:00".into(), program: "KEEN4E.EXE".into(), ..Default::default() };
+        self.states.push(SlotView { slot, header: Some(header), picture: Some(Frame::new(160, 100)) });
+        self.slot = slot;
+        Ok(format!("Saved to slot {}", slot))
+    }
+
+    fn load_state(&mut self, slot: u8) -> Result<String, String> {
+        self.loaded.push(slot);
+        self.slot = slot;
+        Ok(format!("Loaded slot {}", slot))
+    }
+
+    fn delete_state(&mut self, slot: u8) -> Result<(), String> {
+        self.states.retain(|s| s.slot != slot);
+        Ok(())
     }
 }
 
@@ -895,4 +933,35 @@ fn the_cheats_page_finds_sets_and_freezes() {
     // Changed or not, without a search, is an error.
     keys(&mut ui, &mut host, &[Down, Down, Down, Right, Enter]);
     assert!(status(&ui).1, "{:?}", status(&ui));
+}
+
+#[test]
+fn the_states_page_saves_loads_and_empties_slots() {
+    let mut host = FakeHost::new();
+    host.slot = 3;
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_states(&host);
+    assert_eq!((ui.page, ui.row, ui.states.len()), (Page::States, 2, 9), "on the hotkeys' slot");
+    // An empty slot doesn't load; Ins saves to it.
+    ui.key(Enter, &mut host);
+    assert!(status(&ui).1 && host.loaded.is_empty());
+    ui.key(Insert, &mut host);
+    assert_eq!(status(&ui), ("Saved to slot 3", false));
+    assert!(ui.states[2].header.is_some());
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    assert!(ui.hits.iter().any(|h| matches!(h.target, Target::Row(2))));
+    // Del asks, Enter empties it.
+    ui.key(Delete, &mut host);
+    assert!(status(&ui).1);
+    ui.key(Enter, &mut host);
+    assert!(ui.states[2].header.is_none() && host.states.is_empty());
+    // Enter on a filled slot loads it and closes the window.
+    ui.key(Down, &mut host);
+    ui.key(Insert, &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.loaded, [4]);
+    assert!(!ui.is_open());
+    assert_eq!(ui.take_notice().as_deref(), Some("Loaded slot 4"));
 }

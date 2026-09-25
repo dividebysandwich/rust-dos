@@ -17,6 +17,18 @@ pub fn encode(frame: &Frame) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The picture in PNG file bytes, as RGB, if it is one.
+pub fn decode(bytes: &[u8]) -> Option<Frame> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut pixels).ok()?;
+    if info.color_type != png::ColorType::Rgb || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    pixels.truncate(info.buffer_size());
+    Some(Frame { width: info.width, height: info.height, rgb: pixels })
+}
+
 /// Save `frame` as a PNG file at `path`.
 pub fn save(frame: &Frame, path: &Path) -> Result<(), String> {
     std::fs::write(path, encode(frame)?).map_err(|e| format!("{}: {}", path.display(), e))

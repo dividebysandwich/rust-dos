@@ -346,6 +346,10 @@ as you set them, and the Stats page, which shows it running. Ctrl+F12 or Esc clo
   reverb and chorus with their dry/wet mixes.
 * **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
   makes one from the settings as they are, Del deletes one.
+* **States:** the [save state](#save-states) slots of the game playing,
+  with when each was saved, in which program, and a picture of the screen:
+  Enter loads one, Ins saves to one, Del empties one. Ctrl+F9 opens the
+  window on this page.
 * **Cheats:** finds a game's values in memory, such as its lives or money,
   and changes them. Search for the value the game shows (or for any value,
   when the game shows none, such as an energy bar), close the window and
@@ -659,6 +663,7 @@ is replaced on every start and stops growing at 64 MB.
 | Ctrl+F2 | Load the current slot |
 | Ctrl+F3 | Pick the next slot (it says what is in it) |
 | Ctrl+Shift+F3 | Pick the previous slot |
+| Ctrl+F9 | Open the settings window on the save states |
 | Ctrl+F4 | Put the next disk in the drives mounted from lists of images |
 | Alt+Pause | Pause the machine, and resume it |
 | Alt+F12 (held) | Fast forward: the machine runs up to eight times as fast, without sound |
@@ -689,7 +694,8 @@ whatever the program is doing.
 
 There are nine slots. **Ctrl+F1** saves to the current slot (slot 1 at
 first), **Ctrl+F2** loads it, and **Ctrl+F3** and **Ctrl+Shift+F3** pick
-another, showing when the state in it was saved and in which program. While
+another, showing when the state in it was saved and in which program; the
+settings window's **States** page (Ctrl+F9) shows them all. While
 a [game](#game-profiles) plays the slots are its own, in `states/<game>`
 beside the configuration file (in the per-user directory without one);
 otherwise they are in `states/dos`. A slot file holds a small picture of

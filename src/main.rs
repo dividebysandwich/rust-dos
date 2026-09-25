@@ -291,6 +291,7 @@ fn main() -> Result<(), String> {
     let states_root = saved.file.as_deref().and_then(std::path::Path::parent).map(|dir| dir.join("states"))
         .or_else(|| config::user_dir().map(|dir| dir.join("states")));
     let mut slot: u8 = 1;
+    let mut state_loaded = false;
     let (state_done, state_results) = std::sync::mpsc::channel::<Result<String, String>>();
     macro_rules! capture_mouse {
         ($on:expr) => {{
@@ -317,6 +318,8 @@ fn main() -> Result<(), String> {
                 states: &states_root,
                 picture: &cached_frame,
                 state_done: &state_done,
+                slot: &mut slot,
+                state_loaded: &mut state_loaded,
             }
         };
     }
@@ -396,23 +399,15 @@ fn main() -> Result<(), String> {
                         if repeat || ui.is_open() {
                             continue;
                         }
+                        let current = slot;
                         if keycode == Keycode::F1 {
-                            if let Err(e) = host!().save_slot(slot) {
-                                osd.show(format!("Slot {} can't be saved: {}", slot, e));
+                            if let Err(e) = host!().save_slot(current) {
+                                osd.show(format!("Slot {} can't be saved: {}", current, e));
                             }
                         } else if keycode == Keycode::F2 {
-                            let loaded = host!().load_slot(slot);
-                            match loaded {
-                                Ok(header) => {
-                                    release_input(&mut cpu, &mut held);
-                                    let mut message = format!("Loaded slot {}: {}", slot, describe_state(&header));
-                                    if let Some(video) = video_recording.take() {
-                                        let _ = video.stop();
-                                        message.push_str(" (the video recording stopped)");
-                                    }
-                                    osd.show(message);
-                                }
-                                Err(e) => osd.show(format!("Slot {} can't be loaded: {}", slot, e)),
+                            match host!().load_slot(current) {
+                                Ok(header) => osd.show(format!("Loaded slot {}: {}", current, describe_state(&header))),
+                                Err(e) => osd.show(format!("Slot {} can't be loaded: {}", current, e)),
                             }
                         } else {
                             let back = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
@@ -422,6 +417,16 @@ fn main() -> Result<(), String> {
                                 Some(header) => format!("Slot {}: {}", slot, describe_state(&header)),
                                 None => format!("Slot {}: empty", slot),
                             });
+                        }
+                        continue;
+                    }
+                    // Ctrl+F9 opens the settings window on the save states.
+                    if keycode == Keycode::F9 && ctrl && !alt {
+                        if !repeat {
+                            if !ui.is_open() {
+                                toggle_ui!();
+                            }
+                            ui.show_states(&host!());
                         }
                         continue;
                     }
@@ -722,10 +727,6 @@ fn main() -> Result<(), String> {
             let path = request.path.clone();
             if request.load {
                 let loaded = host!().load_file(&path);
-                if loaded.is_ok() {
-                    release_input(&mut cpu, &mut held);
-                    dbg.release_keys(&mut cpu);
-                }
                 request.done(loaded.map(|header| serde_json::json!({"loaded": path, "header": header})));
             } else {
                 let saved = host!().save_file(&path);
@@ -736,6 +737,19 @@ fn main() -> Result<(), String> {
             match input {
                 debug::UiInput::Key(key) => ui.key(key, &mut host!()),
                 debug::UiInput::Click(x, y) => ui.click(x, y, &mut host!()),
+            }
+        }
+
+        // A save state loaded: the keys held go up, and a video recording
+        // stops, as its time would jump.
+        if std::mem::take(&mut state_loaded) {
+            release_input(&mut cpu, &mut held);
+            dbg.release_keys(&mut cpu);
+            if let Some(video) = video_recording.take() {
+                match video.stop() {
+                    Ok(frames) => osd.show(format!("The video recording stopped at the load ({} frames)", frames)),
+                    Err(e) => osd.show(format!("The video recording failed: {}", e)),
+                }
             }
         }
 
@@ -1105,6 +1119,10 @@ struct MainHost<'m, 'd> {
     states: &'m Option<PathBuf>,
     picture: &'m video::Frame,
     state_done: &'m std::sync::mpsc::Sender<Result<String, String>>,
+    /// The slot the hotkeys use, and whether a state was loaded (the
+    /// machine's keys and a video recording go).
+    slot: &'m mut u8,
+    state_loaded: &'m mut bool,
 }
 
 impl MainHost<'_, '_> {
@@ -1261,6 +1279,7 @@ impl MainHost<'_, '_> {
         }
         savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string())?;
         self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
+        *self.state_loaded = true;
         self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
         Ok(header)
     }
@@ -1436,6 +1455,44 @@ impl Host for MainHost<'_, '_> {
     fn set_freezes(&mut self, freezes: Vec<rust_dos::cheats::Freeze>) {
         self.cpu.bus.freezes = freezes;
         self.cpu.bus.apply_freezes();
+    }
+
+    fn states_available(&self) -> bool {
+        self.states.is_some()
+    }
+
+    fn states(&self) -> Vec<config_ui::SlotView> {
+        let Ok(dir) = self.slot_dir() else { return Vec::new() };
+        slots::list(&dir)
+            .into_iter()
+            .map(|(slot, header, picture)| config_ui::SlotView {
+                slot,
+                header: Some(header),
+                picture: capture::png::decode(&picture),
+            })
+            .collect()
+    }
+
+    fn current_slot(&self) -> u8 {
+        *self.slot
+    }
+
+    fn save_state(&mut self, slot: u8) -> Result<String, String> {
+        let path = slots::slot_path(&self.slot_dir()?, slot);
+        self.save_file(&path)?;
+        *self.slot = slot;
+        Ok(format!("Saved to slot {}", slot))
+    }
+
+    fn load_state(&mut self, slot: u8) -> Result<String, String> {
+        let header = self.load_slot(slot)?;
+        *self.slot = slot;
+        Ok(format!("Loaded slot {}: {}", slot, describe_state(&header)))
+    }
+
+    fn delete_state(&mut self, slot: u8) -> Result<(), String> {
+        let path = slots::slot_path(&self.slot_dir()?, slot);
+        std::fs::remove_file(&path).map_err(|e| format!("{}: {}", path.display(), e))
     }
 }
 

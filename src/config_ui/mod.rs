@@ -12,12 +12,14 @@ mod dialog;
 mod draw;
 mod games;
 pub mod osd;
+mod states;
 
 use browser::{Browser, IMAGES, MT32_ROMS, Row, SOUNDFONTS};
 use dialog::{Event, Field, MountDialog, TextField};
 use draw::{Grid, Layout, Rgb};
 pub use draw::cp437;
 use games::{GameDialog, GameField};
+pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
 
@@ -138,6 +140,35 @@ pub trait Host {
     fn set_freezes(&mut self, freezes: Vec<crate::cheats::Freeze>) {
         let _ = freezes;
     }
+    /// Whether save states can be kept (there is somewhere to keep them).
+    fn states_available(&self) -> bool {
+        false
+    }
+    /// The save state slots with a state in them, of the game playing or of
+    /// the machine without one.
+    fn states(&self) -> Vec<SlotView> {
+        Vec::new()
+    }
+    /// The slot the hotkeys save to and load (Ctrl+F1, Ctrl+F2).
+    fn current_slot(&self) -> u8 {
+        1
+    }
+    /// Save the machine to `slot`, which the hotkeys use from then on.
+    /// Returns what to tell the user.
+    fn save_state(&mut self, slot: u8) -> Result<String, String> {
+        let _ = slot;
+        Err("There are no save states here".to_string())
+    }
+    /// Load the state in `slot`, which the hotkeys use from then on.
+    /// Returns what to tell the user.
+    fn load_state(&mut self, slot: u8) -> Result<String, String> {
+        let _ = slot;
+        Err("There are no save states here".to_string())
+    }
+    fn delete_state(&mut self, slot: u8) -> Result<(), String> {
+        let _ = slot;
+        Err("There are no save states here".to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,12 +179,22 @@ enum Page {
     Sound,
     Mixer,
     Games,
+    States,
     Cheats,
     Stats,
 }
 
-const PAGES: [Page; 8] =
-    [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer, Page::Games, Page::Cheats, Page::Stats];
+const PAGES: [Page; 9] = [
+    Page::Drives,
+    Page::Display,
+    Page::Emulator,
+    Page::Sound,
+    Page::Mixer,
+    Page::Games,
+    Page::States,
+    Page::Cheats,
+    Page::Stats,
+];
 
 impl Page {
     fn title(self) -> &'static str {
@@ -164,6 +205,7 @@ impl Page {
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
             Page::Games => "Games",
+            Page::States => "States",
             Page::Cheats => "Cheats",
             Page::Stats => "Stats",
         }
@@ -172,7 +214,7 @@ impl Page {
     fn items(self) -> &'static [Item] {
         use Item::*;
         match self {
-            Page::Drives | Page::Games | Page::Cheats | Page::Stats => &[],
+            Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Stats => &[],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
@@ -851,6 +893,12 @@ pub struct ConfigUi {
     /// frame drew as text, drawn over it in pixels.
     stats: Option<crate::stats::StatsView>,
     plots: Vec<Plot>,
+    /// The States page: the slots, whether there is anywhere to keep
+    /// states, and the pictures the last frame drew in pixels (the cell
+    /// of their top left corner).
+    states: Vec<SlotView>,
+    states_available: bool,
+    pictures: Vec<((usize, usize), Frame)>,
 }
 
 /// A graph for `draw::plot`.
@@ -902,6 +950,9 @@ impl ConfigUi {
             cheats: cheats::Cheats::default(),
             stats: None,
             plots: Vec::new(),
+            states: Vec::new(),
+            states_available: false,
+            pictures: Vec::new(),
         }
     }
 
@@ -958,6 +1009,7 @@ impl ConfigUi {
         self.cheats.edit = None;
         self.cheats.refresh(host);
         self.refresh_games(host);
+        self.refresh_states(host);
     }
 
     /// What the window has to tell the user after it closed, for the
@@ -976,6 +1028,7 @@ impl ConfigUi {
         match self.page {
             Page::Drives => self.drives.len() + 1,
             Page::Games => self.games.len() + 1 + self.frontend.host_files as usize,
+            Page::States => self.states.len(),
             Page::Cheats => self.cheats.rows().len(),
             Page::Stats => 0,
             _ => self.items().len(),
@@ -1116,6 +1169,9 @@ impl ConfigUi {
     }
 
     fn page_key(&mut self, key: UiKey, host: &mut dyn Host) {
+        if self.confirm_delete.is_some() && self.page == Page::States {
+            return self.states_key(key, host);
+        }
         if self.confirm_delete.is_some() {
             return self.games_key(key, host);
         }
@@ -1131,6 +1187,7 @@ impl ConfigUi {
             UiKey::Save => self.save(host),
             _ if self.page == Page::Drives => self.drives_key(key, host),
             _ if self.page == Page::Games => self.games_key(key, host),
+            _ if self.page == Page::States => self.states_key(key, host),
             _ if self.page == Page::Cheats => self.cheats_key(key, host),
             _ if self.page == Page::Stats => {}
             _ => self.setting_key(key, host),
@@ -1455,6 +1512,8 @@ impl ConfigUi {
             self.draw_drives(&mut g, content);
         } else if self.page == Page::Games {
             self.draw_games(&mut g, content);
+        } else if self.page == Page::States {
+            self.draw_states(&mut g, content);
         } else if self.page == Page::Cheats {
             self.draw_cheats(&mut g, content);
         } else if self.page == Page::Stats {
@@ -1486,6 +1545,7 @@ impl ConfigUi {
         for plot in std::mem::take(&mut self.plots) {
             draw::plot(frame, &layout, plot.cells, &plot.values, crate::stats::HISTORY, plot.max, plot.color);
         }
+        self.draw_pictures(frame, &layout);
         self.layout = Some(layout);
     }
 
@@ -1852,6 +1912,14 @@ impl ConfigUi {
             vec![("Tab", "Next", Tab), ("Enter", "Create", Enter), ("Esc", "Cancel", Esc)]
         } else if self.confirm_delete.is_some() {
             vec![("Enter", "Delete", Enter), ("Esc", "Keep", Esc)]
+        } else if self.page == Page::States {
+            vec![
+                ("Enter", "Load", Enter),
+                ("Ins", "Save", Insert),
+                ("Del", "Delete", Delete),
+                ("Tab", "Page", Tab),
+                ("Esc", "Close", Esc),
+            ]
         } else if self.edit.is_some() || self.cheats.edit.is_some() {
             vec![("Enter", "OK", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::Cheats {
