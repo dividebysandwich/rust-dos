@@ -18,7 +18,7 @@ pub const MOUNT_USAGE: &str = "Usage: MOUNT [drive path [floppy|hdd|cdrom] [-lab
 pub const IMGMOUNT_USAGE: &str = "Usage: IMGMOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r\n                [-chs C,H,S] [-size 512,S,H,C]\r\n       IMGMOUNT -u drive\r\nCtrl+F4 puts the next image of a list in.\r\n";
 
 /// The extensions of disk and CD images.
-const IMAGE_EXTENSIONS: &[&str] = &["img", "ima", "vfd", "flp", "dsk", "iso", "cue", "bin"];
+const IMAGE_EXTENSIONS: &[&str] = &["img", "ima", "vfd", "flp", "dsk", "iso", "cue", "bin", "gog", "ins"];
 
 /// Whether a name is a disk or CD image's, by its extension.
 fn is_image_name(name: &str) -> bool {
@@ -75,6 +75,12 @@ fn mount_option(
         "-ro" => opts.read_only = true,
         "-chs" => opts.geometry = Some(parse_chs(iter.next().ok_or("-chs needs a geometry")?)?),
         "-size" => opts.geometry = Some(parse_size(iter.next().ok_or("-size needs a geometry")?)?),
+        // DOSBox's options for its own CD-ROM access and free space
+        // reports, which batch files made for it pass: taken and ignored.
+        "-ioctl" | "-noioctl" | "-ioctl_dio" | "-ioctl_dx" | "-ioctl_mci" | "-aspi" => {}
+        "-freesize" | "-usecd" => {
+            iter.next().ok_or_else(|| format!("{} needs a number", token))?;
+        }
         "-fs" => match iter.next().ok_or("-fs needs a file system")?.to_ascii_lowercase().as_str() {
             "fat" => {}
             "iso" => opts.kind = DriveKind::CdRom,
@@ -463,6 +469,14 @@ mod tests {
         assert!(parse_imgmount_command("c hdd.img -chs 10,16", &locate, cwd, None).is_err());
         assert!(parse_imgmount_command("a boot.img -fs none", &locate, cwd, None).is_err());
         assert!(parse_imgmount_command("d x.img -t zip", &locate, cwd, None).is_err());
+        assert!(parse_imgmount_command("d x.img -t overlay", &locate, cwd, None).is_err());
+        // DOSBox's own options are taken and ignored.
+        match parse_imgmount_command("d game.ins -t iso -ioctl -freesize 100 -usecd 0", &locate, cwd, None).unwrap() {
+            MountCmd::Mount(spec) => assert_eq!((spec.path, spec.opts.kind), (cwd.join("game.ins"), DriveKind::CdRom)),
+            other => panic!("{:?}", other),
+        }
+        assert!(parse_imgmount_command("d x.iso -freesize", &locate, cwd, None).is_err());
+        assert!(is_image_name("GAME.GOG") && is_image_name("game.ins"));
         assert!(parse_imgmount_command("d", &locate, cwd, None).is_err());
         assert!(parse_imgmount_command("", &locate, cwd, None).is_err());
     }

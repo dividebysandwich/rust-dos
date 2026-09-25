@@ -139,7 +139,8 @@ pub fn detect_memory(name: &str, data: &MemoryImage, requested: DriveKind) -> Re
 /// says, if they do.
 fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin") {
+    // GOG's CD images are .gog (the sectors) and .ins (the CUE sheet).
+    if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin" | "gog" | "ins") {
         return Some(ImageKind::Cd);
     }
     if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp") {
