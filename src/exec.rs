@@ -370,28 +370,32 @@ fn dispatch_command(cpu: &mut Cpu, cmd: &str) {
         return;
     }
 
-    // Load a program. With no extension we probe .com, .exe, then .bat,
-    // matching COMMAND.COM's precedence. A loaded program starts at the
-    // CS:IP the loader set.
-    let lower = command.to_lowercase();
-    let loaded = if lower.ends_with(".bat") {
-        cpu.queue_batch_file(command)
-    } else if !command.contains('.') {
-        load_program(cpu, &format!("{}.com", command), args)
-            || load_program(cpu, &format!("{}.exe", command), args)
-            || cpu.queue_batch_file(&format!("{}.bat", command))
-    } else {
-        load_program(cpu, command, args)
-    };
-
-    if !loaded {
+    if !run_program(cpu, command, args, false) {
         crate::video::print_string(cpu, "Bad command or file name.\r\n");
     }
 }
 
+/// Start a program or batch file from the shell with its command line
+/// arguments, in upper memory with `high` (LOADHIGH). With no extension we
+/// probe .com, .exe, then .bat, matching COMMAND.COM's precedence. A loaded
+/// program starts at the CS:IP the loader set. False if there is none.
+pub fn run_program(cpu: &mut Cpu, command: &str, args: &str, high: bool) -> bool {
+    let lower = command.to_lowercase();
+    if lower.ends_with(".bat") {
+        cpu.queue_batch_file(command)
+    } else if !command.contains('.') {
+        load_program(cpu, &format!("{}.com", command), args, high)
+            || load_program(cpu, &format!("{}.exe", command), args, high)
+            || cpu.queue_batch_file(&format!("{}.bat", command))
+    } else {
+        load_program(cpu, command, args, high)
+    }
+}
+
 /// Load a program from the shell with its command line arguments.
-fn load_program(cpu: &mut Cpu, filename: &str, args: &str) -> bool {
-    if !cpu.load_executable(filename, None) {
+fn load_program(cpu: &mut Cpu, filename: &str, args: &str, high: bool) -> bool {
+    let loaded = if high { cpu.load_executable_high(filename) } else { cpu.load_executable(filename, None) };
+    if !loaded {
         return false;
     }
     cpu.set_command_tail(cpu.current_psp, args);

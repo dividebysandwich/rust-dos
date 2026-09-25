@@ -102,7 +102,8 @@ struct Hardware {
     cpu: CpuModel,
     sound: SoundConfig,
     video: VideoSetup,
-    ems: bool,
+    /// Expanded memory and upper memory blocks.
+    memory: (bool, bool),
 }
 
 impl Hardware {
@@ -110,14 +111,14 @@ impl Hardware {
         self.cpu != settings.cpu
             || self.sound != settings.sound
             || self.video != settings.video_setup()
-            || self.ems != settings.ems
+            || self.memory != (settings.ems, settings.umb)
     }
 
     /// Put the settings' processor and sound hardware in place. Returns the
     /// problems with them.
     fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
         cpu.model = settings.cpu;
-        let warnings = if settings.sound != self.sound {
+        let mut warnings = if settings.sound != self.sound {
             cpu.bus.log_string("[CONFIG] The sound settings changed");
             rust_dos::sound::apply_config(cpu, &settings.sound, Some(&self.sound))
         } else {
@@ -135,14 +136,15 @@ impl Hardware {
             ));
             video::bios::switch(cpu, setup);
         }
-        if settings.ems != self.ems {
-            cpu.bus.log_string(&format!("[CONFIG] Expanded memory is {}", if settings.ems { "on" } else { "off" }));
-            rust_dos::ems::set_enabled(&mut cpu.bus, settings.ems);
+        if (settings.ems, settings.umb) != self.memory {
+            let on_off = |on| if on { "on" } else { "off" };
+            cpu.bus.log_string(&format!("[CONFIG] EMS {}, upper memory {}", on_off(settings.ems), on_off(settings.umb)));
+            warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         }
         self.cpu = settings.cpu;
         self.sound = settings.sound.clone();
         self.video = settings.video_setup();
-        self.ems = settings.ems;
+        self.memory = (settings.ems, settings.umb);
         warnings
     }
 }
@@ -222,7 +224,7 @@ impl Machine {
         cpu.bus.set_disk_settings(settings.disk);
         cpu.bus.set_mixer(settings.mixer);
         cpu.bus.set_joystick(settings.joystick);
-        rust_dos::ems::set_enabled(&mut cpu.bus, settings.ems);
+        warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
@@ -238,7 +240,7 @@ impl Machine {
                 cpu: settings.cpu,
                 sound: settings.sound.clone(),
                 video: settings.video_setup(),
-                ems: settings.ems,
+                memory: (settings.ems, settings.umb),
             },
             saved: Saved { text: text.to_string(), settings: settings.clone() },
             settings,

@@ -59,11 +59,13 @@ fn write_country_info(cpu: &mut Cpu, addr: usize) {
 /// patched to the child's PSP by the caller once load_executable sets it.
 /// Returns None if no free memory could be allocated.
 fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
-    // Walk the chain to find the largest free block.
+    // Walk the chain to find the largest free block: in conventional
+    // memory, unless the program asked for upper memory and linked it.
+    let upper = cpu.alloc_strategy & 0xC0 != 0 && cpu.bus.umb.is_some_and(|u| u.linked);
     let chain = crate::mcb::walk(&cpu.bus);
     let largest = chain
         .iter()
-        .filter(|(_, m)| m.is_free())
+        .filter(|(s, m)| m.is_free() && (upper || *s < crate::mcb::UMB_COVER_SEG))
         .map(|(_, m)| m.size)
         .max()
         .unwrap_or(0);
@@ -1486,8 +1488,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // confused with free blocks.
                 0x0008
             };
-            let fit = crate::mcb::Fit::from_strategy(cpu.alloc_strategy);
-            match crate::mcb::alloc_fit(&mut cpu.bus, owner, requested, fit) {
+            match crate::mcb::alloc_strategy(&mut cpu.bus, owner, requested, cpu.alloc_strategy) {
                 Ok(segment) => {
                     cpu.set_ax(segment);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1861,18 +1862,35 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             }
         }
 
-        // AH = 58h: Memory allocation strategy and UMB link state. There
-        // are no UMBs; strategy is first fit.
         // AH = 58h: Get (AL=00h) or set (AL=01h, BX) the memory allocation
-        // strategy, and the UMB link state (AL=02h/03h), which stays off.
+        // strategy: first, best or last fit (0-2), in upper memory only
+        // (40h) or first (80h); get (AL=02h) or set (AL=03h, BX) whether
+        // upper memory is linked to conventional memory.
         0x58 => {
-            match cpu.get_al() {
-                0x00 => cpu.set_ax(cpu.alloc_strategy),
-                0x01 => cpu.alloc_strategy = cpu.bx(),
-                0x02 => cpu.set_ax(0),
-                _ => {}
+            let ok = match cpu.get_al() {
+                0x00 => {
+                    cpu.set_ax(cpu.alloc_strategy);
+                    true
+                }
+                0x01 if matches!(cpu.bx() & 0x3F, 0..=2) && matches!(cpu.bx() & !0x3F, 0x00 | 0x40 | 0x80) => {
+                    cpu.alloc_strategy = cpu.bx();
+                    true
+                }
+                0x02 => {
+                    let linked = cpu.bus.umb.is_some_and(|u| u.linked);
+                    cpu.set_ax(linked as u16);
+                    true
+                }
+                0x03 if cpu.bx() <= 1 => {
+                    let on = cpu.bx() == 1;
+                    crate::mcb::link_upper(&mut cpu.bus, on).is_ok()
+                }
+                _ => false,
+            };
+            if !ok {
+                cpu.set_ax(0x01);
             }
-            cpu.set_cpu_flag(CpuFlags::CF, false);
+            cpu.set_cpu_flag(CpuFlags::CF, !ok);
         }
 
         // AH = 59h: Extended error information for the last failed call.

@@ -64,6 +64,11 @@
 # EMM386 has it. true (the default) or false. A change takes effect at the
 # DOS prompt.
 #ems=true
+# Upper memory blocks between 640 KB and 1 MB, D000h to EFFFh (to DFFFh with
+# EMS), where LOADHIGH (LH) loads TSRs and drivers out of the way of the
+# programs. true (the default) or false. A change takes effect at the DOS
+# prompt.
+#umb=true
 # How fast hard disks are, as DOSBox Staging has it:
 #   maximum  as fast as possible, no slowdown (the default)
 #   fast     a mid-1990s hard disk (~15 MB/s)

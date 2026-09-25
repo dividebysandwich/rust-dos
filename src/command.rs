@@ -37,6 +37,8 @@ impl CommandDispatcher {
         dispatcher.register("SET", Box::new(SetCommand));
         dispatcher.register("PATH", Box::new(PathCommand));
         dispatcher.register("DOSCONFIG", Box::new(DosConfigCommand));
+        dispatcher.register("LOADHIGH", Box::new(LoadHighCommand));
+        dispatcher.register("LH", Box::new(LoadHighCommand));
 
         dispatcher
     }
@@ -428,6 +430,29 @@ struct DosConfigCommand;
 impl ShellCommand for DosConfigCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
         cpu.bus.config_ui_requested = true;
+    }
+}
+
+/// LOADHIGH (LH): run a program in upper memory, where a TSR stays out of
+/// conventional memory. DOS's /L and /S switches are taken and ignored.
+struct LoadHighCommand;
+impl ShellCommand for LoadHighCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let mut rest = args.trim();
+        while rest.starts_with('/') {
+            rest = rest.split_once(char::is_whitespace).map_or("", |(_, r)| r.trim_start());
+        }
+        let (program, program_args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        if program.is_empty() {
+            print_string(cpu, "Required parameter missing\r\n");
+            return;
+        }
+        if cpu.bus.umb.is_none() {
+            print_string(cpu, "No upper memory (umb=false): loading the program low\r\n");
+        }
+        if !crate::exec::run_program(cpu, program, program_args.trim(), true) {
+            print_string(cpu, "Bad command or file name.\r\n");
+        }
     }
 }
 

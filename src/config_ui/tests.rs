@@ -441,6 +441,10 @@ fn expanded_memory_changes_at_the_prompt() {
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on"));
     keys(&mut ui, &mut host, &[UiKey::Right]);
     assert!(!host.applied.last().unwrap().ems);
+    keys(&mut ui, &mut host, &[UiKey::Down, UiKey::Right]);
+    assert_eq!(ui.item(), Some(Item::Umb));
+    assert_eq!(Item::Umb.applies(), Applies::AtPrompt);
+    assert!(!host.applied.last().unwrap().umb);
 }
 
 #[test]

@@ -58,8 +58,10 @@ aspect=true
 #machine=svga
 # RAM in MB, 2 to 64.
 #memsize=16
-# Expanded memory (EMS 4.0) for the games that want it: true or false.
+# Expanded memory (EMS 4.0) for the games that want it, and upper memory
+# blocks for LOADHIGH: true or false.
 #ems=true
+#umb=true
 # How fast disks are: maximum, fast, medium or slow.
 #hard_disk_speed=maximum
 #floppy_disk_speed=maximum

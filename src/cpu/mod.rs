@@ -31,6 +31,36 @@ pub const ENV_SEGMENT: u16 = 0x0C00;
 pub const SHELL_SEGMENT: u16 = 0x0070;
 pub const SHELL_STACK: u16 = 0x0F00;
 
+/// Where a program goes (see `load_executable`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// Started from the shell: above the resident programs, with all of
+    /// conventional memory.
+    Shell,
+    /// Started by EXEC, into the block allocated for it at this PSP segment.
+    Child(u16),
+    /// Started from the shell with LOADHIGH, into the upper memory block
+    /// allocated for it at this PSP segment.
+    High(u16),
+}
+
+/// The paragraphs a program needs to start: its PSP, its code, and for a
+/// COM file a stack, for an EXE file the memory its header asks for.
+fn program_paras(bytes: &[u8]) -> u16 {
+    if bytes.len() >= 0x20 && &bytes[0..2] == b"MZ" {
+        let word = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
+        let (last_page, pages, header, min_alloc) = (word(2), word(4), word(8), word(10));
+        let module = match (pages, last_page) {
+            (0, _) => bytes.len(),
+            (p, 0) => p * 512,
+            (p, l) => (p - 1) * 512 + l,
+        };
+        (0x10 + module.saturating_sub(header * 16).div_ceil(16) + min_alloc).min(0xFFFF) as u16
+    } else {
+        (0x10 + bytes.len().div_ceil(16) + 0x20).min(0x1000) as u16
+    }
+}
+
 /// FLAGS bits POPF and IRET load: CF, PF, AF, ZF, SF, TF, IF, DF, OF, IOPL
 /// and NT.
 const FLAGS16_WRITABLE: u32 = 0x7FD5;
@@ -171,6 +201,8 @@ pub struct Cpu {
     /// begins; `FIRST_MCB_SEG` when there are none. Programs started from
     /// the shell load right above it.
     pub resident_end: u16,
+    /// The PSPs of the TSRs kept resident in upper memory (LOADHIGH).
+    pub resident_upper: Vec<u16>,
     /// Exit code (AL) and termination type (AH) of the most recently terminated
     /// child process. Read-and-clear by INT 21h AH=4Dh. Termination type:
     /// 0 = normal (INT 21 AH=4C), 1 = Ctrl-C, 2 = critical error, 3 = TSR.
@@ -301,6 +333,7 @@ impl Cpu {
             current_psp: 0, // Will be set by loader
             heap_pointer: 0x2000,
             resident_end: crate::mcb::FIRST_MCB_SEG,
+            resident_upper: Vec::new(),
             last_child_exit: 0,
             last_dos_error: 0,
             con_pending_scan: None,
@@ -370,15 +403,23 @@ impl Cpu {
     pub fn keep_resident(&mut self, psp: u16, paras: u16) {
         // DOS keeps at least the 6 paragraphs of the PSP itself.
         let _ = crate::mcb::resize(&mut self.bus, psp, paras.max(6));
+        // Loaded high: it stays in its upper memory block.
+        if psp > crate::mcb::UMB_COVER_SEG {
+            self.resident_upper.push(psp);
+            self.bus.log_string(&format!("[DOS] TSR: resident in upper memory at {:04X}", psp));
+            return;
+        }
+        // The last block of conventional memory in use.
         let chain = crate::mcb::walk(&self.bus);
         let end = chain
             .iter()
-            .rev()
-            .find(|(_, m)| !m.is_free())
+            .take_while(|(s, _)| *s < crate::mcb::UMB_COVER_SEG)
+            .filter(|(_, m)| !m.is_free())
+            .last()
             .map_or(self.resident_end, |&(s, m)| {
                 s.saturating_add(1).saturating_add(m.size)
             });
-        if end >= crate::mcb::END_OF_CONVENTIONAL {
+        if end >= crate::mcb::low_end(&self.bus) {
             self.bus
                 .log_string("[DOS] TSR: no memory left above it, not keeping it resident");
             return;
@@ -639,11 +680,42 @@ impl Cpu {
     }
 
     /// Put the BIOS's interrupt vectors back, except those hooked by a
-    /// resident TSR.
+    /// resident TSR, in conventional or upper memory.
     fn install_bios_traps(&mut self) {
-        let resident =
-            (crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16;
-        crate::bios::restore_ivt(&mut self.bus, resident);
+        let mut resident = vec![(crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16];
+        for &psp in &self.resident_upper {
+            let block = crate::mcb::read_mcb(&self.bus, psp - 1);
+            resident.push(psp as usize * 16..(psp as usize + block.size as usize) * 16);
+        }
+        crate::bios::restore_ivt(&mut self.bus, &resident);
+    }
+
+    /// Turn expanded memory and upper memory blocks on or off, with no
+    /// program running. Upper memory holding resident programs stays as it
+    /// is until rust-dos starts again.
+    pub fn set_upper_memory(&mut self, ems: bool, umb: bool) -> Result<(), String> {
+        crate::ems::set_enabled(&mut self.bus, ems);
+        // With EMS, its page frame takes the upper half of upper memory.
+        let size = if ems { 0x1000 } else { 0x2000 };
+        let wanted = umb.then_some(size);
+        if self.bus.umb.map(|u| u.size) == wanted {
+            return Ok(());
+        }
+        if !self.resident_upper.is_empty() {
+            return Err("Upper memory holds resident programs: it changes the next time rust-dos starts".to_string());
+        }
+        let _ = crate::mcb::link_upper(&mut self.bus, false);
+        self.bus.umb = wanted.map(|size| crate::mcb::Umb { size, linked: false });
+        crate::mcb::build_upper(&mut self.bus);
+        match crate::mcb::release_from(&mut self.bus, self.resident_end) {
+            Some(end) => self.resident_end = end,
+            None => {
+                crate::mcb::init_empty(&mut self.bus);
+                self.resident_end = crate::mcb::FIRST_MCB_SEG;
+            }
+        }
+        self.bus.sync_drive_bda();
+        Ok(())
     }
 
     pub fn load_shell(&mut self) {
@@ -663,7 +735,9 @@ impl Cpu {
             .fill_ram(0x0500..crate::mcb::FIRST_MCB_SEG as usize * 16, 0);
 
         // No program is running: every paragraph above the resident TSRs is
-        // available for allocation.
+        // available for allocation, and upper memory but for the TSRs loaded
+        // high, unlinked again.
+        let _ = crate::mcb::link_upper(&mut self.bus, false);
         match crate::mcb::release_from(&mut self.bus, self.resident_end) {
             Some(end) => self.resident_end = end,
             None => {
@@ -672,6 +746,11 @@ impl Cpu {
                 crate::mcb::init_empty(&mut self.bus);
                 self.resident_end = crate::mcb::FIRST_MCB_SEG;
             }
+        }
+        let resident: Vec<u16> = self.resident_upper.clone();
+        if !crate::mcb::release_upper(&mut self.bus, &resident) {
+            self.bus.log_string("[DOS] Upper memory chain corrupt, dropping the programs loaded high");
+            self.resident_upper.clear();
         }
 
         // Re-install the HLE Interrupt Vectors
@@ -796,11 +875,42 @@ impl Cpu {
         }
     }
 
+    /// Load a program: from the shell (`segment` None), above the resident
+    /// programs with all of memory, or for EXEC, into the block allocated
+    /// for it at PSP segment `segment`.
     pub fn load_executable(&mut self, filename: &str, segment: Option<u16>) -> bool {
         let Some(bytes) = self.read_program_file(filename) else {
             return false;
         };
+        let placement = segment.map_or(Placement::Shell, Placement::Child);
+        self.load_program_bytes(filename, &bytes, placement)
+    }
 
+    /// LOADHIGH: load a program from the shell into the largest free upper
+    /// memory block, if it fits there, else as `load_executable` does.
+    pub fn load_executable_high(&mut self, filename: &str) -> bool {
+        let Some(bytes) = self.read_program_file(filename) else {
+            return false;
+        };
+        let block = crate::mcb::largest_free_upper(&self.bus).filter(|&(_, size)| size >= program_paras(&bytes));
+        let Some((mcb_seg, size)) = block else {
+            self.bus.log_string(&format!("[DOS] LOADHIGH: {} doesn't fit in upper memory, loading it low", filename));
+            return self.load_program_bytes(filename, &bytes, Placement::Shell);
+        };
+        // The whole block, as EXEC gives a child all of one; the program
+        // gives back what it doesn't need.
+        let block = crate::mcb::read_mcb(&self.bus, mcb_seg);
+        crate::mcb::write_mcb(&mut self.bus, mcb_seg, &crate::mcb::Mcb { owner: 0xFFFF, ..block });
+        let psp = mcb_seg + 1;
+        if !self.load_program_bytes(filename, &bytes, Placement::High(psp)) {
+            crate::mcb::write_mcb(&mut self.bus, mcb_seg, &block);
+            return false;
+        }
+        crate::mcb::write_mcb(&mut self.bus, mcb_seg, &crate::mcb::Mcb { owner: psp, size, ..block });
+        true
+    }
+
+    fn load_program_bytes(&mut self, filename: &str, bytes: &[u8], placement: Placement) -> bool {
         self.bus.log_string(&format!(
             "[DOS] Loading {} ({} bytes)",
             filename,
@@ -809,11 +919,11 @@ impl Cpu {
 
         // Check for EXE Signature ("MZ")
         let loaded = if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
-            self.load_exe(&bytes, segment)
+            self.load_exe(bytes, placement)
         } else {
-            self.load_com(&bytes, segment)
+            self.load_com(bytes, placement)
         };
-        if loaded && segment.is_none() {
+        if loaded && !matches!(placement, Placement::Child(_)) {
             // A program started from the shell gets the master environment
             // in the shell's environment area. (EXEC gives a child its own
             // copy of the parent's environment.)
@@ -966,15 +1076,35 @@ impl Cpu {
         true
     }
 
+    /// The top of a program's memory, for its PSP: the end of conventional
+    /// memory, or of its upper memory block.
+    fn memory_top(&self, placement: Placement, load_segment: u16) -> u16 {
+        match placement {
+            Placement::High(psp) => psp + crate::mcb::read_mcb(&self.bus, psp - 1).size,
+            Placement::Shell => crate::mcb::low_end(&self.bus),
+            Placement::Child(_) => 0xA000,
+        }
+        .max(load_segment)
+    }
+
     // COM loader
-    fn load_com(&mut self, bytes: &[u8], segment: Option<u16>) -> bool {
-        let is_nested = segment.is_some();
-        let load_segment = segment.unwrap_or(self.transient_segment());
+    fn load_com(&mut self, bytes: &[u8], placement: Placement) -> bool {
+        let is_nested = matches!(placement, Placement::Child(_));
+        let load_segment = match placement {
+            Placement::Shell => self.transient_segment(),
+            Placement::Child(segment) | Placement::High(segment) => segment,
+        };
         let start_offset = 0x100; // COM files always start at 100h
+        // A program loaded high has its block, up to 64 KB.
+        let top = self.memory_top(placement, load_segment);
+        let segment_bytes = match placement {
+            Placement::High(_) => ((top - load_segment) as usize * 16).min(0x10000),
+            _ => 0x10000,
+        };
 
         // Clear 64KB of RAM segment for safety (simulating clean load)
         let phys_start_seg = self.get_physical_addr(load_segment, 0);
-        self.bus.fill_ram(phys_start_seg..phys_start_seg + 0x10000, 0);
+        self.bus.fill_ram(phys_start_seg..phys_start_seg + segment_bytes, 0);
 
         // Re-install the HLE Interrupt Vectors — but ONLY for the top-level
         // load. A nested EXEC (segment.is_some()) must preserve the parent's
@@ -997,7 +1127,7 @@ impl Cpu {
         self.set_es(load_segment);
         self.set_ss(load_segment); // Stack is in the same segment
         self.set_ip(0x100); // Entry Point
-        self.set_sp(0xFFFE); // End of segment (64KB - 2)
+        self.set_sp((segment_bytes - 2) as u16); // End of segment (64KB - 2)
 
         // Setup PSP (Program Segment Prefix) at CS:0000
         let psp_phys = self.get_physical_addr(load_segment, 0);
@@ -1006,11 +1136,9 @@ impl Cpu {
         self.bus.write_8(psp_phys, 0xCD);
         self.bus.write_8(psp_phys + 1, 0x20);
 
-        // Offset 0x02: Top of Memory (Segment)
-        // 0xA000 corresponds to 640KB (standard DOS conventional memory limit)
-        // We write it in Little Endian (00 A0)
-        self.bus.write_8(psp_phys + 2, 0x00);
-        self.bus.write_8(psp_phys + 3, 0xA0);
+        // Offset 0x02: Top of Memory (Segment): the end of conventional
+        // memory (640 KB), or of the upper memory block.
+        self.bus.write_16(psp_phys + 2, top);
 
         // [0x06] Bytes in Segment (CP/M compatibility)
         self.bus.write_8(psp_phys + 6, 0x03);
@@ -1029,12 +1157,15 @@ impl Cpu {
         ));
         // COM files are allocated the full 64KB segment by DOS convention.
         self.heap_pointer = load_segment + 0x1000;
-        crate::mcb::init_for_program(&mut self.bus, load_segment, 0x1000);
+        // Loaded high, it has its upper memory block already.
+        if !matches!(placement, Placement::High(_)) {
+            crate::mcb::init_for_program(&mut self.bus, load_segment, 0x1000);
+        }
         true
     }
 
     // EXE loader
-    pub fn load_exe(&mut self, bytes: &[u8], segment: Option<u16>) -> bool {
+    fn load_exe(&mut self, bytes: &[u8], placement: Placement) -> bool {
         if bytes.len() < 0x20 || &bytes[0..2] != b"MZ" {
             self.bus.log_string("[DOS] Invalid EXE: Missing MZ header");
             return false;
@@ -1056,21 +1187,24 @@ impl Cpu {
         // Clear Conventional Memory (Only if starting fresh from the shell, probably shouldn't blindly wipe if nested)
         // Stop at 0xA0000 to preserve VGA VRAM, BIOS ROM signature, font tables, and
         // Static Functionality Table set up in Bus::new(). Resident TSRs survive.
-        if segment.is_none() {
+        if placement == Placement::Shell {
             let first_mcb = crate::mcb::FIRST_MCB_SEG as usize * 16;
             self.bus.fill_ram(0x500..first_mcb, 0);
-            self.bus
-                .fill_ram(self.resident_end as usize * 16..0xA0000, 0);
+            let end = crate::mcb::low_end(&self.bus) as usize * 16;
+            self.bus.fill_ram(self.resident_end as usize * 16..end, 0);
         }
 
         // Re-install the HLE Interrupt Vectors — only for the top-level load.
         // See the same guard in load_com for the reason: nested EXECs must
         // preserve the parent's IVT so TSR / overlay-installed hooks survive.
-        if segment.is_none() {
+        if !matches!(placement, Placement::Child(_)) {
             self.install_bios_traps();
         }
 
-        let load_segment: u16 = segment.unwrap_or(self.transient_segment());
+        let load_segment: u16 = match placement {
+            Placement::Shell => self.transient_segment(),
+            Placement::Child(segment) | Placement::High(segment) => segment,
+        };
         let relocation_base_segment = load_segment + 0x10;
 
         // Load Binary
@@ -1148,11 +1282,10 @@ impl Cpu {
         self.bus.write_8(psp_phys + 1, 0x20);
 
         // Offset 0x02: Top of Memory (Segment)
-        // Programs read this to know how much RAM they have.
-        // We report 640KB (0xA000 paragraphs).
-        // Little Endian: 00 A0
-        self.bus.write_8(psp_phys + 2, 0x00);
-        self.bus.write_8(psp_phys + 3, 0xA0);
+        // Programs read this to know how much RAM they have: the end of
+        // conventional memory (640KB), or of their upper memory block.
+        let top = self.memory_top(placement, load_segment);
+        self.bus.write_16(psp_phys + 2, top);
 
         // Offset 0x80: empty command tail, filled in by the caller.
         self.set_command_tail(load_segment, "");
@@ -1178,8 +1311,8 @@ impl Cpu {
         let image_paras = image_data.len().div_ceil(16) as u16;
         let min_program_paras = 0x10 + image_paras + min_alloc;
 
-        let program_paras = if segment.is_none() {
-            let available = 0xA000u16.saturating_sub(load_segment);
+        let program_paras = if placement == Placement::Shell {
+            let available = crate::mcb::low_end(&self.bus).saturating_sub(load_segment);
             let desired = if max_alloc == 0 {
                 min_program_paras
             } else {

@@ -146,11 +146,12 @@ pub fn install(bus: &mut Bus) {
 
 /// Put the default vectors back, except those pointing into `keep`
 /// (the memory of resident programs, whose hooks must survive).
-pub fn restore_ivt(bus: &mut Bus, keep: std::ops::Range<usize>) {
+pub fn restore_ivt(bus: &mut Bus, keep: &[std::ops::Range<usize>]) {
     for (vector, &entry) in default_ivt().iter().enumerate() {
         let offset = bus.read_16(vector * 4) as usize;
         let segment = bus.read_16(vector * 4 + 2) as usize;
-        if keep.contains(&((segment << 4) + offset)) {
+        let at = (segment << 4) + offset;
+        if keep.iter().any(|range| range.contains(&at)) {
             continue;
         }
         bus.write_16(vector * 4, entry as u16);
