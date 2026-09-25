@@ -1,8 +1,10 @@
 //! Games set up for DOSBox, made into game profiles (games.rs): a DOSBox
 //! configuration file's settings, the drives its `[autoexec]` mounts and
-//! the commands that start the game (dosbox.rs).
+//! the commands that start the game (dosbox.rs), and GOG's installs, which
+//! run DOSBox with such files (gog.rs).
 
 pub mod dosbox;
+pub mod gog;
 
 use crate::mount::{MountSpec, mount_spec_value};
 use std::fs;

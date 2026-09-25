@@ -42,9 +42,10 @@ fn parse(text: &str) -> Conf {
 }
 
 /// A game whose DOSBox configuration is `texts` (in the order DOSBox reads
-/// them), called `name`. Paths in them are relative to `working_dir`, the
-/// directory DOSBox runs in.
-pub fn import(texts: &[&str], working_dir: &Path, name: &str, home: Option<&Path>) -> Imported {
+/// them), called `name`. Paths in them are relative to the directory DOSBox
+/// runs in, the first of `bases` where they are (the files may have moved
+/// since they were set up).
+pub fn import(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>) -> Imported {
     let mut imported = Imported { name: name.to_string(), ..Default::default() };
     let confs: Vec<Conf> = texts.iter().map(|t| parse(t)).collect();
     let mut gus_set = false;
@@ -70,7 +71,7 @@ pub fn import(texts: &[&str], working_dir: &Path, name: &str, home: Option<&Path
         } else if on_z && (verb == "cd" || verb == "chdir" || verb.starts_with("cd.") || verb.starts_with("cd\\")) {
             continue;
         }
-        autoexec_line(&mut imported, line, working_dir, home, &mut roots);
+        autoexec_line(&mut imported, line, bases, home, &mut roots);
     }
     imported
 }
@@ -190,7 +191,8 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
 /// would end rust-dos, and DOSBox's own commands go; the rest runs as it
 /// is. `roots` are the directories of the drives mounted so far, for
 /// images named by their DOS paths.
-fn autoexec_line(imported: &mut Imported, line: &str, working_dir: &Path, home: Option<&Path>, roots: &mut Vec<(u8, PathBuf)>) {
+fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: Option<&Path>, roots: &mut Vec<(u8, PathBuf)>) {
+    let working_dir = bases.first().map_or(Path::new("."), PathBuf::as_path);
     let command = line.trim_start_matches('@').trim();
     let tokens = tokenize(command).unwrap_or_default();
     let verb = tokens.first().map(|t| t.to_ascii_lowercase()).unwrap_or_default();
@@ -204,7 +206,7 @@ fn autoexec_line(imported: &mut Imported, line: &str, working_dir: &Path, home: 
             };
             let mut rest = tokens[2..].to_vec();
             if let Some(path) = rest.first_mut() {
-                *path = host_path(working_dir, path).to_string_lossy().into_owned();
+                *path = resolve(bases, path).to_string_lossy().into_owned();
             }
             match parse_mount_spec(drive, &rest, working_dir, home) {
                 Ok(spec) => {
@@ -224,7 +226,7 @@ fn autoexec_line(imported: &mut Imported, line: &str, working_dir: &Path, home: 
                 // before.
                 let image = i >= 2 && !option_value && !token.starts_with('-');
                 option_value = token.starts_with('-') && !matches!(token.to_ascii_lowercase().as_str(), "-ro" | "-ioctl" | "-noioctl");
-                let token = if image { image_path(token, working_dir, roots).to_string_lossy().into_owned() } else { token.clone() };
+                let token = if image { image_path(token, bases, roots).to_string_lossy().into_owned() } else { token.clone() };
                 args.push(if token.contains(char::is_whitespace) { format!("\"{}\"", token) } else { token });
             }
             match parse_imgmount_command(&args.join(" "), &|_| None, working_dir, home) {
@@ -251,13 +253,20 @@ fn autoexec_line(imported: &mut Imported, line: &str, working_dir: &Path, home: 
 
 /// An image IMGMOUNT names: a DOS path on a drive the lines before mounted
 /// ("C:\GAME\CD.CUE"), or a host path from the working directory.
-fn image_path(token: &str, working_dir: &Path, roots: &[(u8, PathBuf)]) -> PathBuf {
+fn image_path(token: &str, bases: &[PathBuf], roots: &[(u8, PathBuf)]) -> PathBuf {
     if let (Some(drive), Some(rest)) = (token.get(..2).and_then(parse_drive_letter), token.get(2..))
         && let Some((_, root)) = roots.iter().rev().find(|(d, _)| *d == drive)
     {
         return host_path(root, rest.trim_start_matches(['\\', '/']));
     }
-    host_path(working_dir, token)
+    resolve(bases, token)
+}
+
+/// A path relative to the first of `bases` it is found from, or else to the
+/// first.
+fn resolve(bases: &[PathBuf], rel: &str) -> PathBuf {
+    let candidates = bases.iter().map(|base| host_path(base, rel));
+    candidates.clone().find(|p| p.exists()).or_else(|| candidates.clone().next()).unwrap_or_else(|| PathBuf::from(rel))
 }
 
 #[cfg(test)]
@@ -280,7 +289,7 @@ mod tests {
     #[test]
     fn a_gog_configuration_becomes_a_profile() {
         let dir = scratch("gog");
-        let imported = import(&[GOG_CONF, GOG_SINGLE], &dir.join("DOSBOX"), "The Game", None);
+        let imported = import(&[GOG_CONF, GOG_SINGLE], &[dir.join("DOSBOX")], "The Game", None);
         let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
         assert_eq!(get("cycles"), Some("12000"));
         assert_eq!(get("machine"), Some("svga"));
@@ -307,7 +316,7 @@ mod tests {
     #[test]
     fn settings_map_onto_rust_dos_s() {
         let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\n[sblaster]\nsbtype=gb\n";
-        let imported = import(&[conf], Path::new("/"), "x", None);
+        let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
         let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
         assert_eq!(get("cycles"), Some("max"));
         assert_eq!(get("cpu"), Some("386"));
@@ -327,7 +336,7 @@ mod tests {
         fs::create_dir_all(dir.join("cd")).unwrap();
         fs::write(dir.join("cd/game.cue"), "").unwrap();
         let conf = "[autoexec]\nmount c .\nimgmount d c:\\cd\\GAME.CUE -t cdrom\nkeyb fr\n";
-        let imported = import(&[conf], &dir, "x", None);
+        let imported = import(&[conf], std::slice::from_ref(&dir), "x", None);
         assert_eq!(imported.drives[1].path, dir.join("cd/game.cue"));
         assert!(imported.settings.iter().any(|(_, k, v)| *k == "keyboard_layout" && v == "fr"));
         assert!(imported.autoexec.is_empty());
