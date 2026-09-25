@@ -14,8 +14,8 @@ pub const MAX_LINE: usize = 0x7F;
 
 /// A Tiny "OS" written in Machine Code. Reads keys into a buffer at offset 0x0200
 /// On Enter, hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
-/// Handles backspace visually and in buffer, and hands the extended keys
-/// (Up and Down: the command history) to `history_key`.
+/// Handles backspace visually and in buffer, and hands the other control
+/// keys and the extended keys (Esc, Up and Down) to `edit_key`.
 #[rustfmt::skip] // keep one instruction per line
 pub fn get_shell_code() -> Vec<u8> {
     vec![
@@ -73,11 +73,12 @@ pub fn get_shell_code() -> Vec<u8> {
         // Check BACKSPACE (0x08)
         0x3C, 0x08, // CMP AL, 0x08
         0x74, 0x17, // JE HANDLE_BACKSPACE (0x0160)
-        // Extended keys (AL 00h, or E0h for the grey ones): the arrows
-        0x3C, 0x00, // CMP AL, 0x00
-        0x74, 0x2A, // JE EXTENDED (0x0177)
+        // Control keys (Esc, Tab, Ctrl+letters) and extended keys (AL 00h,
+        // or E0h for the grey ones) aren't typed
+        0x3C, 0x20, // CMP AL, 0x20
+        0x72, 0x2A, // JB EDIT_KEY (0x0177)
         0x3C, 0xE0, // CMP AL, 0xE0
-        0x74, 0x26, // JE EXTENDED (0x0177)
+        0x74, 0x26, // JE EDIT_KEY (0x0177)
         // A full buffer takes no more (MAX_LINE characters)
         0x81, 0xFE, 0x7F, 0x02, // CMP SI, 0x027F
         0x73, 0xE6, // JAE WAIT_KEY
@@ -101,9 +102,9 @@ pub fn get_shell_code() -> Vec<u8> {
         0xB0, 0x08, 0xCD, 0x10, // Print Backspace
         0xEB, 0xC6, // JMP WAIT_KEY
         // ----------------------------------------------------
-        // EXTENDED KEYS (0x0177): the history replaces the line (SI)
+        // EDIT KEYS (0x0177): Esc or the history replaces the line (SI)
         // ----------------------------------------------------
-        0xFE, 0x39, crate::bios::SERVICE_SHELL_HISTORY, // history_key
+        0xFE, 0x39, crate::bios::SERVICE_SHELL_KEY, // edit_key
         0xEB, 0xC1, // JMP WAIT_KEY
         // ----------------------------------------------------
         // EXECUTE COMMAND (0x017C)
@@ -173,14 +174,16 @@ impl ShellHistory {
     }
 }
 
-/// An extended key at the prompt (the shell code's EXTENDED, AH its scan
-/// code): Up and Down put the line before or after in the command history
-/// in place of the one being typed, on the screen and in the buffer at
-/// DS:0200h, and leave SI after it. The other keys do nothing.
-pub fn history_key(cpu: &mut Cpu) {
-    let line = match cpu.get_ah() {
-        0x48 => cpu.shell_history.older(),
-        0x50 => cpu.shell_history.newer(),
+/// A control or extended key at the prompt (the shell code's EDIT_KEY, AL
+/// its character, 00h or E0h for an extended key, AH its scan code): Esc
+/// blanks the line being typed, and Up and Down put the line before or
+/// after in the command history in its place, on the screen and in the
+/// buffer at DS:0200h, and leave SI after it. The other keys do nothing.
+pub fn edit_key(cpu: &mut Cpu) {
+    let line = match (cpu.get_al(), cpu.get_ah()) {
+        (0x1B, _) => Some(""),
+        (0x00 | 0xE0, 0x48) => cpu.shell_history.older(),
+        (0x00 | 0xE0, 0x50) => cpu.shell_history.newer(),
         _ => None,
     };
     let Some(line) = line.map(|l| l.bytes().take(MAX_LINE).collect::<Vec<u8>>()) else { return };

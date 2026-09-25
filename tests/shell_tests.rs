@@ -298,6 +298,30 @@ fn other_extended_keys_leave_the_line_alone() {
 }
 
 #[test]
+fn esc_blanks_the_line() {
+    let base = scratch("esc", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    // Esc used to be typed as a left arrow.
+    type_keys(&mut cpu, "dir\x1bver\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+    let text = screen_text(&cpu);
+    assert_eq!(text.trim_end(), "C:\\>ver", "{}", text);
+}
+
+#[test]
+fn control_keys_are_not_typed() {
+    let base = scratch("control", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    // Tab and Ctrl+A used to show as a circle and a face.
+    type_keys(&mut cpu, "a\tb\x01c\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("abc"));
+    let text = screen_text(&cpu);
+    assert_eq!(text.trim_end(), "C:\\>abc", "{}", text);
+}
+
+#[test]
 fn a_line_takes_at_most_127_characters() {
     let base = scratch("long_line", &["c"]);
     let mut cpu = Cpu::new(base.join("c"));
