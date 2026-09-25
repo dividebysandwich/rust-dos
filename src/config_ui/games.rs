@@ -83,6 +83,11 @@ impl ConfigUi {
             return;
         }
         let selected = self.games.get(self.row).cloned();
+        // The row after "+ New game": importing one set up for DOSBox.
+        if key == UiKey::Enter && self.row == self.games.len() + 1 {
+            self.open_browser(super::Pick::ImportGame);
+            return;
+        }
         match (key, selected) {
             (UiKey::Insert, _) | (UiKey::Enter, None) => {
                 self.status = None;
@@ -150,7 +155,8 @@ impl ConfigUi {
             }
             self.hits.push(Hit { row, col: 1, width: cols - 2, target: Target::Row(i) });
             let Some(game) = self.games.get(i) else {
-                g.text(2, row, "+ New game from the current settings...", draw::KEY);
+                let text = if i == self.games.len() { "+ New game from the current settings..." } else { "+ Import a GOG game or DOSBox .conf..." };
+                g.text(2, row, text, draw::KEY);
                 continue;
             };
             let running = self.active_game.as_deref() == Some(game.id.as_str());

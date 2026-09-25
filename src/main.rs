@@ -77,8 +77,14 @@ struct Args {
 
     /// Launch a game at startup: a profile in the games folder beside the
     /// configuration file, by its file name or its name
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", conflicts_with = "import")]
     game: Option<String>,
+
+    /// Import a game set up for DOSBox (a GOG install's folder, a folder
+    /// with DOSBox configuration files, or one of them) as a game profile,
+    /// and launch it
+    #[arg(long, value_name = "PATH")]
+    import: Option<std::path::PathBuf>,
 }
 
 /// The processor, sound hardware, display and expanded memory in place.
@@ -148,7 +154,19 @@ fn main() -> Result<(), String> {
     }
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
-    let startup_game = match &args.game {
+    let imported = match &args.import {
+        Some(source) => {
+            let dir = games_dir(config.source.as_deref()).ok_or("--import needs a configuration file, beside which the games folder is")?;
+            let (id, name, warnings) = games::import(&dir, source, dirs::home_dir().as_deref())?;
+            println!("Imported {} as the game profile {}", name, dir.join(format!("{}.conf", id)).display());
+            for warning in warnings {
+                println!("  {}", warning);
+            }
+            Some(id)
+        }
+        None => None,
+    };
+    let startup_game = match args.game.as_ref().or(imported.as_ref()) {
         Some(query) => Some(find_game(config.source.as_deref(), query)?),
         None => None,
     };
@@ -1213,6 +1231,20 @@ impl Host for MainHost<'_, '_> {
         let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
         let path = dir.join(format!("{}.conf", id));
         std::fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {}", path.display(), e))
+    }
+
+    fn import_game(&mut self, source: &std::path::Path) -> Result<(String, String), String> {
+        let dir = games_dir(self.saved.file.as_deref())
+            .ok_or("Game profiles go beside the configuration file, and there is none (--no-config)")?;
+        let (id, name, warnings) = games::import(&dir, source, dirs::home_dir().as_deref())?;
+        for warning in &warnings {
+            self.cpu.bus.log_string(&format!("[CONFIG] Import of {}: {}", name, warning));
+        }
+        let message = match warnings.len() {
+            0 => format!("{} is imported: Enter launches it", name),
+            n => format!("{} is imported; {} settings didn't come across (see the log)", name, n),
+        };
+        Ok((id, message))
     }
 
     fn current_directory(&self) -> String {

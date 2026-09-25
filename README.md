@@ -398,6 +398,15 @@ C:
 KEEN4E
 ```
 
+A game set up for DOSBox becomes a profile with its **Import** row, or
+`--import PATH` at startup (which also launches it): a GOG install's folder
+(its `goggame-*.info` says how GOG runs DOSBox), a folder with DOSBox
+configuration files (GOG's older `dosboxGame.conf` and
+`dosboxGame_single.conf`), or one such file. The profile gets the CPU,
+memory, video, sound, joystick and keyboard settings the configuration has,
+the drives its `[autoexec]` mounts (CD images included), and its commands
+but EXIT; what doesn't come across goes to the log.
+
 The settings window's **Games** page lists the profiles. Enter launches a
 game at the DOS prompt: its settings apply on top of the configuration's,
 its drives are mounted, and its commands run. When they have run and the

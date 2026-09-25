@@ -162,7 +162,11 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("gus", "gusbase") => imported.set("sound", "gusbase", first.to_ascii_uppercase()),
         ("gus", "gusirq") => imported.set("sound", "gusirq", first),
         ("gus", "gusdma") => imported.set("sound", "gusdma", first),
-        ("gus", "ultradir") => imported.set("sound", "ultradir", value.to_string()),
+        // DOSBox's own default is no directory of the game's: rust-dos's
+        // built-in patches serve.
+        ("gus", "ultradir") if !value.trim().eq_ignore_ascii_case("C:\\ULTRASND") => {
+            imported.set("sound", "ultradir", value.to_string())
+        }
         ("midi", "mpu401") if first == "none" => imported.set("sound", "midisynth", "none"),
         ("midi", "mididevice") => match first {
             "mt32" => imported.set("sound", "midisynth", "mt32"),

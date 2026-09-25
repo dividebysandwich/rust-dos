@@ -778,8 +778,16 @@ fn the_games_page_launches_makes_and_deletes_games() {
     let mut ui = opened(&host);
     use UiKey::*;
     ui.show_page(Page::Games);
-    assert_eq!(ui.row_count(), 2, "the game and the new one");
+    assert_eq!(ui.row_count(), 3, "the game, a new one and an imported one");
     ui.draw(&mut Frame::new(640, 400));
+
+    // The last row imports a game set up for DOSBox, picked from the host's
+    // files.
+    keys(&mut ui, &mut host, &[End, Enter]);
+    let (browser, _) = ui.browser.as_ref().expect("the file picker is open");
+    assert_eq!(browser.title, "Pick a GOG game's folder or a DOSBox .conf");
+    assert!(browser.pick_dirs);
+    keys(&mut ui, &mut host, &[Esc, Home]);
 
     // Ins: a new game, in the prompt's directory; its command is needed.
     keys(&mut ui, &mut host, &[Insert]);

@@ -113,6 +113,12 @@ pub trait Host {
         let _ = id;
         Err("There are no game profiles here".to_string())
     }
+    /// Make a profile of the game set up for DOSBox at `source` (games.rs's
+    /// `import`). Returns its id, and what to tell the user.
+    fn import_game(&mut self, source: &Path) -> Result<(String, String), String> {
+        let _ = source;
+        Err("Games are imported from the host's files".to_string())
+    }
     /// The DOS directory the prompt is in, where a new game likely is.
     fn current_directory(&self) -> String {
         "C:\\".to_string()
@@ -770,11 +776,13 @@ impl Item {
 
 /// What a file browser is picking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pick {
+pub(super) enum Pick {
     MountPath,
     SoundFont,
     /// The directory with the MT-32's ROMs.
     Mt32Roms,
+    /// A game set up for DOSBox, to import.
+    ImportGame,
 }
 
 struct Status {
@@ -967,7 +975,7 @@ impl ConfigUi {
     fn row_count(&self) -> usize {
         match self.page {
             Page::Drives => self.drives.len() + 1,
-            Page::Games => self.games.len() + 1,
+            Page::Games => self.games.len() + 1 + self.frontend.host_files as usize,
             Page::Cheats => self.cheats.rows().len(),
             Page::Stats => 0,
             _ => self.items().len(),
@@ -1316,7 +1324,7 @@ impl ConfigUi {
         }
     }
 
-    fn open_browser(&mut self, pick: Pick) {
+    pub(super) fn open_browser(&mut self, pick: Pick) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let home = self.home.as_deref();
         let (title, current, pick_dirs, extensions) = match pick {
@@ -1338,6 +1346,7 @@ impl ConfigUi {
                 true,
                 MT32_ROMS,
             ),
+            Pick::ImportGame => ("Pick a GOG game's folder or a DOSBox .conf", String::new(), true, &["conf"][..]),
         };
         let start = if current.trim().is_empty() {
             self.config_file.as_deref().and_then(Path::parent).map_or(cwd.clone(), Path::to_path_buf)
@@ -1382,6 +1391,16 @@ impl ConfigUi {
                         self.settings.sound.soundfont = Some(path);
                         self.changed(Item::SoundFont, host);
                     }
+                    Pick::ImportGame => match host.import_game(&path) {
+                        Ok((id, message)) => {
+                            self.refresh_games(host);
+                            if let Some(i) = self.games.iter().position(|g| g.id == id) {
+                                self.row = i;
+                            }
+                            self.info(message);
+                        }
+                        Err(e) => self.error(e),
+                    },
                     // A ROM picked stands for its directory.
                     Pick::Mt32Roms => {
                         let dir = if path.is_dir() { path } else { path.parent().map(Path::to_path_buf).unwrap_or(path) };

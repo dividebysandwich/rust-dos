@@ -199,6 +199,28 @@ pub fn prompt_directory(cpu: &Cpu) -> String {
     format!("{}:\\{}", crate::disk::drive_letter(drive), dir.trim_start_matches('\\'))
 }
 
+/// A game set up for DOSBox, made into a profile in the games folder `dir`:
+/// a GOG install or a folder with DOSBox configuration files (`source` a
+/// directory), or such a file. Returns the profile's id and the game's name
+/// and what of the configuration didn't come across.
+pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String, String, Vec<String>), String> {
+    // The profile's paths are absolute: it lives in another folder.
+    let source = std::fs::canonicalize(source).map_err(|e| format!("{}: {}", source.display(), e))?;
+    let source = source.as_path();
+    let imported = if source.is_dir() {
+        crate::import::gog::import(source, home)?
+    } else {
+        crate::import::gog::import_conf(source, home)?
+    };
+    let taken: Vec<String> = list(dir).into_iter().map(|(e, _)| e.id).collect();
+    let id = slug(&imported.name, &taken);
+    let path = dir.join(format!("{}.conf", id));
+    std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&path, imported.profile_text(home)))
+        .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+    Ok((id, imported.name, imported.warnings))
+}
+
 /// A game that was launched and hasn't ended.
 #[derive(Clone, Debug)]
 pub struct ActiveGame {

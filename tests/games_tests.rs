@@ -73,3 +73,36 @@ fn a_game_runs_its_commands_and_ends_at_the_prompt() {
     assert!(run_until(&mut cpu, 5000, |cpu| game.done(cpu)), "the game ends");
     assert!(!cpu.batch.is_active());
 }
+
+#[test]
+fn an_imported_dosbox_game_runs_and_its_drives_come_back() {
+    // GAME.COM exits at once; the game's folder is D:, where DOSBox had it.
+    let dir = scratch("import", &[]);
+    let game_dir = dir.join("thegame");
+    fs::create_dir_all(&game_dir).unwrap();
+    fs::write(game_dir.join("GAME.COM"), [0xB9, 0x00, 0x40, 0xE2, 0xFE, 0xB8, 0x00, 0x4C, 0xCD, 0x21]).unwrap();
+    fs::write(game_dir.join("dosbox_game.conf"), "[cpu]\ncycles=fixed 3000\n[autoexec]\n").unwrap();
+    fs::write(game_dir.join("dosbox_game_single.conf"), "[autoexec]\n@echo off\nmount d .\nd:\ngame.com\nexit\n").unwrap();
+
+    let games_dir = dir.join("games");
+    let (id, name, warnings) = games::import(&games_dir, &game_dir, None).unwrap();
+    assert_eq!((id.as_str(), name.as_str()), ("thegame", "thegame"));
+    assert!(warnings.is_empty(), "{:?}", warnings);
+    let text = fs::read_to_string(games_dir.join("thegame.conf")).unwrap();
+    let base = Settings::default();
+    let prepared = games::prepare(&id, &base, &text, &games_dir, None).unwrap();
+    assert_eq!(prepared.settings.cycles, CpuSpeed::Fixed(3000));
+    assert_eq!(prepared.drives[0].path, fs::canonicalize(&game_dir).unwrap());
+
+    let mut cpu = Cpu::new(dir.clone());
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.load_shell();
+    for spec in &prepared.drives {
+        cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), true).unwrap();
+    }
+    cpu.queue_batch_lines(&prepared.autoexec);
+    let game = ActiveGame { id, name, base, saved: prepared.settings, replaced: Vec::new() };
+    assert!(run_until(&mut cpu, 1000, |cpu| !cpu.shell_idle()), "the game starts");
+    assert!(run_until(&mut cpu, 5000, |cpu| game.done(cpu)), "the game ends");
+    assert_eq!(cpu.bus.disk.get_current_drive(), 3, "on D:, as DOSBox had it");
+}
