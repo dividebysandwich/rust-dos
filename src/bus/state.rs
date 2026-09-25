@@ -9,6 +9,7 @@ use crate::savestate::{Reader, Result, State, StateError, Writer};
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 1;
 const CORE_VERSION: u16 = 1;
+const VIDEO_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -57,15 +58,15 @@ impl Bus {
             sb_phase,
             sb_frame,
             beep_frames,
-            // Not saved yet: the video card, the sound devices and DOS's
-            // memory managers, drives and devices.
-            video_mode: _,
-            vga: _,
-            vbe: _,
-            retraces: _,
-            last_flip: _,
-            gate_array_shadow: _,
-            gate_array_shadow_at: _,
+            video_mode,
+            vga,
+            vbe,
+            retraces,
+            last_flip,
+            gate_array_shadow,
+            gate_array_shadow_at,
+            // Not saved yet: the sound devices and DOS's memory managers,
+            // drives and devices.
             opl: _,
             sb: _,
             mpu: _,
@@ -124,6 +125,9 @@ impl Bus {
                 post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
             );
         });
+        w.section(b"VIDE", VIDEO_VERSION, |w| {
+            save_all!(w; video_mode, vga, vbe, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        });
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -165,13 +169,13 @@ impl Bus {
             sb_phase,
             sb_frame,
             beep_frames,
-            video_mode: _,
-            vga: _,
-            vbe: _,
-            retraces: _,
-            last_flip: _,
-            gate_array_shadow: _,
-            gate_array_shadow_at: _,
+            video_mode,
+            vga,
+            vbe,
+            retraces,
+            last_flip,
+            gate_array_shadow,
+            gate_array_shadow_at,
             opl: _,
             sb: _,
             mpu: _,
@@ -213,20 +217,18 @@ impl Bus {
             log_hook: _,
             audio_hook: _,
         } = self;
-        {
-            let mut r = r.section(b"RAM ", RAM_VERSION)?;
-            let len = r.count()?;
-            if len != ram.len() {
-                return Err(StateError::Mismatch(format!(
-                    "it has {} KB of memory, this machine {} KB",
-                    len / 1024,
-                    ram.len() / 1024
-                )));
-            }
-            ram.copy_from_slice(r.take(len)?);
+        let mut section = r.section(b"RAM ", RAM_VERSION)?;
+        let len = section.count()?;
+        if len != ram.len() {
+            return Err(StateError::Mismatch(format!(
+                "it has {} KB of memory, this machine {} KB",
+                len / 1024,
+                ram.len() / 1024
+            )));
         }
-        let mut r = r.section(b"CORE", CORE_VERSION)?;
-        load_all!(&mut r;
+        ram.copy_from_slice(section.take(len)?);
+        let mut section = r.section(b"CORE", CORE_VERSION)?;
+        load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
             pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
@@ -234,6 +236,8 @@ impl Bus {
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
             post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
         );
+        let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
+        load_all!(&mut section; video_mode, vga, vbe, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         Ok(())
     }
 
@@ -245,7 +249,7 @@ impl Bus {
     pub(crate) fn after_load(&mut self) {
         self.page_gen.fill(0);
         self.update_irq_levels();
-        self.vga.mark_dirty_full();
+        self.vga.after_load();
         self.audio_out.clear();
     }
 }

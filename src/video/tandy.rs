@@ -429,3 +429,5 @@ pub fn render_graphics(canvas: &mut [u8], bus: &Bus) {
         }
     }
 }
+
+crate::state_fields!(GateArray { index, flip_flop, palette_mask, border, mode2, ext, palette, page });

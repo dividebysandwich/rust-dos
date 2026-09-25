@@ -911,3 +911,29 @@ impl Device for VgaCard {
         }
     }
 }
+
+crate::state_fields!(VgaCard {
+    sequencer_index, sequencer_regs, graphics_index, graphics_regs, crtc_index, crtc_regs,
+    dac_write_index, dac_read_index, dac_step, dac_state, dac_mask, dac_8bit, misc_output_reg,
+    palette, vram_graphics, vram_text, latches,
+    attribute_index, attribute_regs, attribute_flip_flop, latched_start_addr,
+    good_timing, fixed_timing, retraces, rebase, drawn, flipped,
+    cga_mode, cga_color, tandy, herc_mode, herc_config,
+} skip {
+    // Set from the configuration, which a state carries in its header.
+    adapter, composite, switches, mono_monitor,
+    // Worked out again after a load (`after_load`).
+    timing_cache, composite_decoder, dirty, dirty_y_min, dirty_y_max,
+    // The front end's.
+    blink_on,
+});
+
+impl VgaCard {
+    /// Work out what the registers imply again after a load, and draw the
+    /// picture anew.
+    pub fn after_load(&mut self) {
+        self.timing_cache = None;
+        self.refresh_composite();
+        self.mark_dirty_full();
+    }
+}

@@ -749,3 +749,26 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
         cpu.bus.mark_text_dirty(start, end);
     }
 }
+
+/// Saved as its number.
+impl crate::savestate::State for VideoMode {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        (*self as u8).save(w);
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        use VideoMode::*;
+        const ALL: &[VideoMode] = &[
+            Text40x25, Text40x25Color, Text80x25, Text80x25Color, Cga320x200Color, Cga320x200, Cga640x200,
+            Mono80x25, Tandy160x200x16, Tandy320x200x16, Tandy640x200x4, Ega320x200, Ega640x200, Ega640x350Mono,
+            Ega640x350, Vga640x480Mono, Vga640x480, Graphics320x200, HercGraphics, Vesa,
+        ];
+        let mut number = 0u8;
+        number.load(r)?;
+        *self = ALL
+            .iter()
+            .copied()
+            .find(|&m| m as u8 == number)
+            .ok_or_else(|| crate::savestate::StateError::Invalid(format!("video mode {:X}h", number)))?;
+        Ok(())
+    }
+}

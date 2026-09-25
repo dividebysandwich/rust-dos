@@ -169,3 +169,31 @@ impl Vbe {
         (VRAM_SIZE as u32) / self.pitch.max(1)
     }
 }
+
+/// The mode is saved by its number, and found again among the modes.
+impl crate::savestate::State for Vbe {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        let Vbe { vram, mode, lfb, bank, pitch, start, latched_start, start_high } = self;
+        vram.save(w);
+        mode.map_or(0, |m| m.number).save(w);
+        crate::savestate::State::save(&(*lfb, *bank, *pitch), w);
+        crate::savestate::State::save(&(*start, *latched_start, *start_high), w);
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let Vbe { vram, mode, lfb, bank, pitch, start, latched_start, start_high } = self;
+        vram.load(r)?;
+        let mut number = 0u16;
+        number.load(r)?;
+        *mode = match number {
+            0 => None,
+            n => Some(find_mode(n).ok_or_else(|| crate::savestate::StateError::Invalid(format!("VESA mode {:X}h", n)))?),
+        };
+        lfb.load(r)?;
+        bank.load(r)?;
+        pitch.load(r)?;
+        start.load(r)?;
+        latched_start.load(r)?;
+        start_high.load(r)?;
+        Ok(())
+    }
+}

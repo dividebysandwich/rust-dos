@@ -86,7 +86,7 @@ impl VgaCard {
 
     /// Have the decoder for the colour burst and revision in place while
     /// composite is on.
-    fn refresh_composite(&mut self) {
+    pub(super) fn refresh_composite(&mut self) {
         if !self.composite_active() {
             return;
         }

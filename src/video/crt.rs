@@ -4,7 +4,7 @@
 //! palette changes and even their timer calibration against it.
 
 /// One frame of the display, as the CRTC counts it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CrtTiming {
     /// Length of a scanline, horizontal blanking and retrace included.
     pub line_ns: u32,
@@ -239,6 +239,9 @@ impl CrtTiming {
         self.retraces(t_ns) * self.frame_ns() + self.retrace_ns()
     }
 }
+
+crate::state_fields!(CrtTiming { line_ns, hdisplay_ns, total, display, retrace_start, retrace_end });
+
 
 #[cfg(test)]
 mod tests {
