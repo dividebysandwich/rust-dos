@@ -15,7 +15,7 @@ use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickSettings, JoystickType};
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
-use crate::mixer::{Channel, MixerSettings};
+use crate::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
 use crate::timer::CpuSpeed;
 use crate::video::adapter::{Adapter, VideoSetup};
 use crate::video::mono::Monochrome;
@@ -490,12 +490,31 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                 }
 
                 if section == Section::Mixer {
-                    match Channel::parse(key) {
-                        Some(channel) => match crate::mixer::parse_level(value) {
-                            Ok(percent) => config.mixer.set_level(channel, percent),
-                            Err(e) => warn(format!("{}: {}", channel.key(), e)),
+                    let mixer = &mut config.mixer;
+                    match key.to_ascii_lowercase().as_str() {
+                        "speaker_filter" => match parse_bool(value) {
+                            Some(on) => mixer.speaker_filter = on,
+                            None => warn(format!("invalid speaker_filter '{}' (on or off)", value)),
                         },
-                        None => warn(format!("unknown setting '{}'", key)),
+                        "sb_filter" => match SbFilter::parse(value) {
+                            Some(filter) => mixer.sb_filter = filter,
+                            None => warn(format!("invalid sb_filter '{}' (auto or off)", value)),
+                        },
+                        "reverb" => match ReverbPreset::parse(value) {
+                            Some(preset) => mixer.reverb = preset,
+                            None => warn(format!("invalid reverb '{}' (off, tiny, small, medium, large or huge)", value)),
+                        },
+                        "chorus" => match ChorusPreset::parse(value) {
+                            Some(preset) => mixer.chorus = preset,
+                            None => warn(format!("invalid chorus '{}' (off, light, normal or strong)", value)),
+                        },
+                        _ => match Channel::parse(key) {
+                            Some(channel) => match crate::mixer::parse_level(value) {
+                                Ok(percent) => mixer.set_level(channel, percent),
+                                Err(e) => warn(format!("{}: {}", channel.key(), e)),
+                            },
+                            None => warn(format!("unknown setting '{}'", key)),
+                        },
                     }
                     continue;
                 }
@@ -785,6 +804,13 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
     entries.extend(mixer);
+    let on_off = |on: bool| Some(if on { "on" } else { "off" }.to_string());
+    entries.extend([
+        (Section::Mixer, "speaker_filter", on_off(settings.mixer.speaker_filter)),
+        (Section::Mixer, "sb_filter", Some(settings.mixer.sb_filter.name().to_string())),
+        (Section::Mixer, "reverb", Some(settings.mixer.reverb.name().to_string())),
+        (Section::Mixer, "chorus", Some(settings.mixer.chorus.name().to_string())),
+    ]);
     entries.extend([
         (Section::Joystick, "joysticktype", Some(settings.joystick.kind.name().to_string())),
         (Section::Joystick, "deadzone", Some(settings.joystick.deadzone.to_string())),
@@ -1334,6 +1360,17 @@ mod tests {
         let mixer = Settings::from_config(&config).mixer;
         let levels = Channel::ALL.map(|channel| mixer.level(channel));
         assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100]);
+        assert!(mixer.speaker_filter);
+        assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
+
+        let text = "[mixer]\nspeaker_filter=off\nsb_filter=OFF\nreverb=Large\nchorus=light\n";
+        let config = parse(text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let mixer = config.mixer;
+        assert!(!mixer.speaker_filter);
+        assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Off, ReverbPreset::Large, ChorusPreset::Light));
+        let text = "[mixer]\nspeaker_filter=maybe\nsb_filter=sb1\nreverb=hall\nchorus=heavy\n";
+        assert_eq!(parse(text, Path::new("/cfg"), None).warnings.len(), 4);
     }
 
     #[test]
@@ -1391,6 +1428,10 @@ mod tests {
                 for (i, channel) in Channel::ALL.into_iter().enumerate() {
                     mixer.set_level(channel, 10 * i as u16 + 5);
                 }
+                mixer.speaker_filter = false;
+                mixer.sb_filter = SbFilter::Off;
+                mixer.reverb = ReverbPreset::Medium;
+                mixer.chorus = ChorusPreset::Strong;
                 mixer
             },
             joystick: JoystickSettings { kind: JoystickType::TwoAxis, deadzone: 20 },

@@ -138,6 +138,19 @@
 # The audio tracks of CDs, and the disk drives' noises.
 #cdaudio=100
 #disknoise=100
+# The PC speaker through a filter that gives it the sound of the small
+# speaker in a PC, without the harsh edges: on (the default) or off.
+#speaker_filter=on
+# The Sound Blaster's output filter: auto (the default) filters as the
+# model does (sbtype: 4.8 kHz on an SB 2.0, 3.2 kHz on an SB Pro, half the
+# sample rate on an SB16), off leaves the sound as the card makes it.
+#sb_filter=auto
+# A reverb for the FM synthesizer and MIDI music: off (the default), tiny,
+# small, medium, large or huge.
+#reverb=off
+# A chorus for the FM synthesizer and MIDI music: off (the default), light,
+# normal or strong.
+#chorus=off
 
 [joystick]
 # What the game port has plugged in: auto (the default: one game controller

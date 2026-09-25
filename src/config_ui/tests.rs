@@ -308,7 +308,7 @@ fn the_mixer_page_sets_volumes() {
     let mut ui = opened(&host);
     use UiKey::*;
     ui.show_page(Page::Mixer);
-    assert_eq!(ui.items().len(), crate::mixer::CHANNELS);
+    assert_eq!(ui.items().iter().filter(|i| matches!(i, Item::Volume(_))).count(), crate::mixer::CHANNELS);
     ui.row = ui.items().iter().position(|&i| i == Item::Volume(Channel::Fm)).unwrap();
     let fm = |host: &FakeHost| host.applied.last().unwrap().mixer.level(Channel::Fm);
 
@@ -353,6 +353,27 @@ fn the_mixer_page_sets_volumes() {
 
     keys(&mut ui, &mut host, &[Save]);
     assert_eq!(host.saved.last().unwrap().mixer.level(Channel::Fm), 200);
+}
+
+#[test]
+fn the_mixer_page_switches_filters_and_effects() {
+    use crate::mixer::{ChorusPreset, ReverbPreset, SbFilter};
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Mixer);
+    ui.row = ui.items().iter().position(|&i| i == Item::SpeakerFilter).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on"));
+    keys(&mut ui, &mut host, &[Right]);
+    assert!(!host.applied.last().unwrap().mixer.speaker_filter);
+    keys(&mut ui, &mut host, &[Down, Right]);
+    assert_eq!(host.applied.last().unwrap().mixer.sb_filter, SbFilter::Off);
+    keys(&mut ui, &mut host, &[Down, Right, Right, Right]);
+    assert_eq!(host.applied.last().unwrap().mixer.reverb, ReverbPreset::Medium);
+    keys(&mut ui, &mut host, &[Down, Left]);
+    assert_eq!(host.applied.last().unwrap().mixer.chorus, ChorusPreset::Strong);
+    assert_eq!(Item::Reverb.applies(), Applies::Now);
+    ui.draw(&mut Frame::new(640, 400));
 }
 
 #[test]

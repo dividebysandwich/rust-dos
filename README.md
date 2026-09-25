@@ -184,6 +184,17 @@ D:
   `cdaudio` and `disknoise`, and `master` for all of them together. At 100,
   the default, a source plays as loud as its card makes it. The volumes
   apply on top of the Sound Blaster's own mixer, which programs set.
+  * `speaker_filter` gives the PC speaker the sound of the small speaker in
+    a PC, without the harsh edges of its square wave: `on` (the default)
+    or `off`.
+  * `sb_filter` is the Sound Blaster's output filter: `auto` (the default)
+    filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
+    on an SB Pro and half the sample rate on an SB16; `off` leaves the
+    sound as the card makes it.
+  * `reverb` adds a room to the FM synthesizer and MIDI music: `off` (the
+    default), `tiny`, `small`, `medium`, `large` or `huge`. `chorus`
+    thickens them: `off` (the default), `light`, `normal` or `strong`. The
+    presets and how much of the music they get follow DOSBox Staging's.
 * **`[joystick]`:** the game port, which programs read joysticks from.
   * `joysticktype` is what is plugged in: `auto` (the default), `4axis`,
     `2axis`, `mouse` or `none` (no game port).
@@ -231,7 +242,8 @@ as you set them. Ctrl+F12 or Esc closes it.
   size, expanded and upper memory, the disk speeds and the joystick.
 * **Sound:** everything in `[sound]`, and the disk noises.
 * **Mixer:** the volume of each sound source and the master volume
-  (`[mixer]`), with a meter of how loud each one plays.
+  (`[mixer]`), with a meter of how loud each one plays, and the filters,
+  reverb and chorus.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the

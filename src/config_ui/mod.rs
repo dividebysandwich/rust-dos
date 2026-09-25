@@ -21,7 +21,7 @@ use crate::cpu::CpuModel;
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickType, MAX_DEADZONE};
-use crate::mixer::{CHANNELS, Channel, MAX_LEVEL};
+use crate::mixer::{CHANNELS, Channel, ChorusPreset, MAX_LEVEL, ReverbPreset};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use crate::sb::SbModel;
 use crate::timer::CpuSpeed;
@@ -130,6 +130,10 @@ impl Page {
                 Volume(Channel::Midi),
                 Volume(Channel::CdAudio),
                 Volume(Channel::DiskNoise),
+                SpeakerFilter,
+                SbFilter,
+                Reverb,
+                Chorus,
             ],
         }
     }
@@ -212,6 +216,11 @@ enum Item {
     /// What the game port has plugged in, and the controllers' deadzone.
     Joystick,
     Deadzone,
+    /// The mixer's filters and effects.
+    SpeakerFilter,
+    SbFilter,
+    Reverb,
+    Chorus,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -294,6 +303,10 @@ impl Item {
             CaptureDir => "Capture folder",
             Joystick => "Joystick",
             Deadzone => "  Deadzone",
+            SpeakerFilter => "PC speaker filter",
+            SbFilter => "Sound Blaster filter",
+            Reverb => "Reverb (FM, MIDI)",
+            Chorus => "Chorus (FM, MIDI)",
         }
     }
 
@@ -313,7 +326,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | Cycles => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
-            Joystick | Deadzone => Applies::Now,
+            Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
@@ -392,6 +405,14 @@ impl Item {
             CaptureDir => contract_home(&s.capture_dir, home),
             Joystick => s.joystick.kind.describe().to_string(),
             Deadzone => format!("{}%", s.joystick.deadzone),
+            SpeakerFilter => on_off(s.mixer.speaker_filter),
+            Item::SbFilter => match s.mixer.sb_filter {
+                crate::mixer::SbFilter::Auto => "as the model has it",
+                crate::mixer::SbFilter::Off => "off",
+            }
+            .to_string(),
+            Reverb => s.mixer.reverb.name().to_string(),
+            Chorus => s.mixer.chorus.name().to_string(),
         }
     }
 
@@ -471,6 +492,13 @@ impl Item {
                 s.mixer.set_level(channel, tens * 10);
             }
             Joystick => s.joystick.kind = cycle(&JoystickType::ALL, s.joystick.kind, dir),
+            SpeakerFilter => s.mixer.speaker_filter = !s.mixer.speaker_filter,
+            Item::SbFilter => {
+                use crate::mixer::SbFilter as Filter;
+                s.mixer.sb_filter = cycle(&[Filter::Auto, Filter::Off], s.mixer.sb_filter, dir)
+            }
+            Reverb => s.mixer.reverb = cycle(&ReverbPreset::ALL, s.mixer.reverb, dir),
+            Chorus => s.mixer.chorus = cycle(&ChorusPreset::ALL, s.mixer.chorus, dir),
             // In fives of percent.
             Deadzone => {
                 let dz = s.joystick.deadzone as isize;

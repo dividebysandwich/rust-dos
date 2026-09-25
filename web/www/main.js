@@ -92,6 +92,13 @@ aspect=true
 #midi=100
 #cdaudio=100
 #disknoise=100
+# The PC speaker's and the Sound Blaster's filters (on/off, auto/off), and
+# a reverb (off, tiny, small, medium, large, huge) and a chorus (off,
+# light, normal, strong) for the FM synthesizer and MIDI music.
+#speaker_filter=on
+#sb_filter=auto
+#reverb=off
+#chorus=off
 
 [joystick]
 # What the game port has: auto (one gamepad is both joysticks and all four
