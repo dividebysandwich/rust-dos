@@ -290,6 +290,9 @@ impl GamePort {
     }
 }
 
+// The game port's own state; the settings and the host's controllers stay.
+crate::state_fields!(GamePort { read_count } skip { settings, pads });
+
 #[cfg(test)]
 mod tests {
     use super::*;

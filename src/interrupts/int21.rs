@@ -1982,3 +1982,5 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         }
     }
 }
+
+crate::state_fields!(ConLine { buffer, text });

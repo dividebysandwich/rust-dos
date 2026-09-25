@@ -475,3 +475,20 @@ pub fn char_to_key(c: char) -> Option<(PcKey, bool)> {
 pub fn names() -> Vec<&'static str> {
     KEYS.iter().map(|(n, _)| *n).collect()
 }
+
+/// The layout is saved by its code; the keys held and the dead key's accent
+/// as they are.
+impl crate::savestate::State for KeyboardState {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        self.layout.code.to_string().save(w);
+        self.held.save(w);
+        self.dead.save(w);
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let mut code = String::new();
+        code.load(r)?;
+        self.layout = Layout::by_code(&code).unwrap_or(self.layout);
+        self.held.load(r)?;
+        self.dead.load(r)
+    }
+}

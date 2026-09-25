@@ -15,6 +15,7 @@ pub mod mem;
 pub mod paging;
 mod regs;
 pub mod seg;
+mod state;
 pub mod task;
 pub use fault::{CpuResult, Fault, IntSource};
 pub use mem::{Access, MemRef};

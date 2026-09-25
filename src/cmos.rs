@@ -116,3 +116,19 @@ impl Cmos {
         self.ram[(index & 0x7F) as usize] = value;
     }
 }
+
+impl crate::savestate::State for Cmos {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        self.index.save(w);
+        self.ram.save(w);
+        self.offset.num_milliseconds().save(w);
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        self.index.load(r)?;
+        self.ram.load(r)?;
+        let mut ms = 0i64;
+        ms.load(r)?;
+        self.offset = TimeDelta::milliseconds(ms);
+        Ok(())
+    }
+}

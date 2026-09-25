@@ -327,6 +327,15 @@ fn set_up_exec(cpu: &mut Cpu, psp: u16, path: &str, args: &str) {
     }
 }
 
+crate::state_enum!(Asked { Asked::Nothing, Asked::Exec, Asked::Key, Asked::Line });
+crate::state_fields!(SecondaryShell { psp, batch, errorlevel, wait, once, command, asked });
+
+impl Default for SecondaryShell {
+    fn default() -> Self {
+        SecondaryShell::new(0, "")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -459,9 +459,10 @@ pub fn prompt(cpu: &mut Cpu) {
 }
 
 /// What the shell waits for, outside of a typed line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ShellWait {
     /// PAUSE: any key.
+    #[default]
     Pause,
     /// CHOICE: one of its keys.
     Choice(Choice),
@@ -597,4 +598,41 @@ pub fn abandon_input(cpu: &mut Cpu) -> bool {
     cpu.set_cs(SHELL_SEGMENT);
     cpu.set_ip(labels().after_trap);
     true
+}
+
+crate::state_fields!(Choice { keys, case_sensitive, timeout });
+
+impl crate::savestate::State for ShellWait {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        match self {
+            ShellWait::Pause => 0u8.save(w),
+            ShellWait::Choice(choice) => {
+                1u8.save(w);
+                choice.save(w);
+            }
+            ShellWait::Line(purpose) => {
+                2u8.save(w);
+                purpose.save(w);
+            }
+        }
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let mut kind = 0u8;
+        kind.load(r)?;
+        *self = match kind {
+            0 => ShellWait::Pause,
+            1 => {
+                let mut choice = Choice { keys: Vec::new(), case_sensitive: false, timeout: None };
+                choice.load(r)?;
+                ShellWait::Choice(choice)
+            }
+            2 => {
+                let mut purpose = crate::time_commands::LinePurpose::Date;
+                purpose.load(r)?;
+                ShellWait::Line(purpose)
+            }
+            _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
+        };
+        Ok(())
+    }
 }

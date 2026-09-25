@@ -410,3 +410,5 @@ impl Cpu {
         }
     }
 }
+
+crate::state_fields!(SegCache { selector, base, limit, attr, lo, hi, rights });

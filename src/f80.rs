@@ -502,3 +502,5 @@ impl F80 {
         f64::from_bits(f64_bits)
     }
 }
+
+crate::state_fields!(F80 { st });

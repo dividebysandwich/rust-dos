@@ -16,12 +16,13 @@
 use crate::dosstr;
 
 /// Where a frame's lines come from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FrameKind {
     /// A .BAT file.
     File,
     /// Lines handed over as a list: the configuration's [autoexec], a
     /// game's commands, the web page's.
+    #[default]
     Lines,
     /// The commands a FOR line runs, one per member of its set, with its
     /// variable and the file's parameters already in them.
@@ -342,6 +343,17 @@ fn label_key(label: &[u8]) -> Vec<u8> {
         .take(8)
         .map(u8::to_ascii_uppercase)
         .collect()
+}
+
+crate::state_enum!(FrameKind { FrameKind::File, FrameKind::Lines, FrameKind::For });
+crate::state_fields!(Frame { kind, lines, pc, params, shift });
+// `dispatching` is only set while a line runs, never between.
+crate::state_fields!(Batch { frames, echo, echo_before } skip { dispatching });
+
+impl Default for Frame {
+    fn default() -> Self {
+        Frame::new(FrameKind::Lines, Vec::new(), Vec::new())
+    }
 }
 
 #[cfg(test)]

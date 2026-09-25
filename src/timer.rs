@@ -355,11 +355,19 @@ impl Pacer {
     /// up with it.
     pub fn set_fast_forward(&mut self, on: bool, clock: &Clock, now: Instant) {
         if self.fast_forward && !on {
-            self.anchor_wall = now;
-            self.anchor_ticks = clock.now_ticks();
-            self.next_frame = now;
+            self.rebase(clock, now);
         }
         self.fast_forward = on;
+    }
+
+    /// Go on from the clock's time as it is now, after it jumped (a save
+    /// state loaded, fast forward let go): without this, emulated time
+    /// ahead of the wall clock would stand still until the wall clock
+    /// caught up, and time behind it would race to catch up.
+    pub fn rebase(&mut self, clock: &Clock, now: Instant) {
+        self.anchor_wall = now;
+        self.anchor_ticks = clock.now_ticks();
+        self.next_frame = now;
     }
 
     pub fn fast_forward(&self) -> bool {
@@ -438,6 +446,9 @@ impl Pacer {
         }
     }
 }
+
+crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, armed, period_start, next_tc });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns });
 
 #[cfg(test)]
 mod tests {

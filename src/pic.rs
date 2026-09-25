@@ -245,3 +245,6 @@ impl Pic {
         }
     }
 }
+
+crate::state_fields!(Pic8259 { irr, imr, isr, base, init_step, icw4_needed, single, aeoi, read_isr });
+crate::state_fields!(Pic { master, slave });

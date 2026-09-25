@@ -220,3 +220,5 @@ impl Kbc {
         effects
     }
 }
+
+crate::state_fields!(Kbc { queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq });

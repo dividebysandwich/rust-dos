@@ -5,6 +5,8 @@ use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
 use crate::video::vbe::Vbe;
 use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
+mod state;
+
 /// ROM table of media descriptor bytes, one per drive letter. INT 21h
 /// AH=1Bh/1Ch return a far pointer (F000:E900+drive) into it.
 pub const MEDIA_ID_TABLE: usize = 0xFE900;

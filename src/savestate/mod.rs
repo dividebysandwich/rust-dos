@@ -14,6 +14,8 @@
 //! a version and its length, so a section a newer rust-dos changed is
 //! refused rather than misread.
 
+pub mod machine;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// Why a state can't be loaded.

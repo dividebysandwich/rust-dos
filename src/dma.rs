@@ -317,3 +317,7 @@ impl Dma {
         tc
     }
 }
+
+crate::state_fields!(DmaChannel { base_addr, base_count, cur_addr, cur_count, page, mode, masked });
+crate::state_fields!(Controller { ch, flipflop, tc, request, command, temp });
+crate::state_fields!(Dma { ctrl, extra_pages });

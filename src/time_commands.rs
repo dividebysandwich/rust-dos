@@ -137,6 +137,8 @@ impl ShellCommand for TimeCommand {
     }
 }
 
+crate::state_enum!(LinePurpose { LinePurpose::Date, LinePurpose::Time });
+
 #[cfg(test)]
 mod tests {
     use super::*;
