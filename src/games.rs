@@ -216,7 +216,7 @@ pub struct ActiveGame {
 impl ActiveGame {
     /// Whether the game's commands have run and the prompt is back.
     pub fn done(&self, cpu: &Cpu) -> bool {
-        cpu.batch_queue.is_empty() && cpu.pending_command.is_none() && cpu.shell_idle()
+        !cpu.batch.is_active() && cpu.pending_command.is_none() && cpu.shell_idle()
     }
 }
 
@@ -290,7 +290,7 @@ mod tests {
         };
         cpu.queue_batch_lines(["X"]);
         assert!(!game.done(&cpu));
-        cpu.batch_queue.clear();
+        cpu.batch.clear();
         assert!(game.done(&cpu));
     }
 }

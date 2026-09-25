@@ -40,16 +40,14 @@ fn builtin(name: &str) -> Option<&'static (dyn ShellCommand + Sync)> {
 
 /// The command name at the start of a command line, and the rest of the
 /// line after it, as COMMAND.COM splits them. The name ends at a space or
-/// tab, which the rest leaves out, or at one of `/ = , ;`, which it keeps
-/// (DIR/W, PATH=C:\DOS). A built-in's name also ends at `.`, `\` or `:`,
-/// so CD.., CD\ and ECHO. work, while GAME.EXE and C:\GAME stay a
-/// program's name.
+/// tab, or at one of `/ = , ;` (DIR/W, PATH=C:\DOS), which the rest begins
+/// with. A built-in's name also ends at `.`, `\` or `:`, so CD.., CD\ and
+/// ECHO. work, while GAME.EXE and C:\GAME stay a program's name.
 pub fn split_command(line: &str) -> (&str, &str) {
     let line = line.trim_start_matches([' ', '\t', ',', ';', '=']);
     for (i, c) in line.char_indices() {
         match c {
-            ' ' | '\t' => return (&line[..i], &line[i + 1..]),
-            '/' | '=' | ',' | ';' => return (&line[..i], &line[i..]),
+            ' ' | '\t' | '/' | '=' | ',' | ';' => return (&line[..i], &line[i..]),
             '.' | '\\' | ':' if builtin(&line[..i]).is_some() => return (&line[..i], &line[i..]),
             _ => {}
         }
@@ -497,20 +495,23 @@ impl ShellCommand for LoadHighCommand {
 struct EchoCommand;
 impl ShellCommand for EchoCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
+        // The character after ECHO separates it from the text: a space, or
+        // a dot and the like, with which ECHO. prints an empty line.
         if let Some(text) = args.strip_prefix(['.', ':', ',', ';', '=', '\\', '[', ']', '+', '(']) {
             print_string(cpu, &format!("{}\r\n", text));
             return;
         }
-        let trimmed = args.trim();
+        let text = args.strip_prefix([' ', '\t']).unwrap_or(args);
+        let trimmed = text.trim();
         if trimmed.is_empty() {
-            let state = if cpu.batch_echo { "on" } else { "off" };
+            let state = if cpu.batch.echo { "on" } else { "off" };
             print_string(cpu, &format!("ECHO is {}\r\n", state));
             return;
         }
         match trimmed.to_ascii_uppercase().as_str() {
-            "ON" => cpu.batch_echo = true,
-            "OFF" => cpu.batch_echo = false,
-            _ => print_string(cpu, &format!("{}\r\n", args)),
+            "ON" => cpu.batch.echo = true,
+            "OFF" => cpu.batch.echo = false,
+            _ => print_string(cpu, &format!("{}\r\n", text)),
         }
     }
 }

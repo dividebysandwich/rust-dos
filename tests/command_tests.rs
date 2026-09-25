@@ -293,8 +293,7 @@ fn autoexec_lines_queue_before_autoexec_bat() {
 
     cpu.queue_batch_lines(["MOUNT A floppy", "  ", "rem comment", "A:"]);
     assert!(cpu.queue_batch_file("C:\\AUTOEXEC.BAT"));
-    let queued: Vec<&str> = cpu.batch_queue.iter().map(String::as_str).collect();
-    assert_eq!(queued, ["MOUNT A floppy", "A:", "@ECHO OFF", "GAME"]);
+    assert_eq!(cpu.batch.pending_lines(), ["MOUNT A floppy", "rem comment", "A:", "@ECHO OFF", "REM setup", "GAME"]);
 }
 
 #[test]
@@ -328,17 +327,17 @@ fn mixer_noshow_prints_nothing_and_errors_say_why() {
 
 #[test]
 fn command_names_end_where_command_com_ends_them() {
-    assert_eq!(split_command("DIR /W"), ("DIR", "/W"));
+    assert_eq!(split_command("DIR /W"), ("DIR", " /W"));
     assert_eq!(split_command("DIR/W"), ("DIR", "/W"));
     assert_eq!(split_command("cd.."), ("cd", ".."));
     assert_eq!(split_command("CD\\GAMES"), ("CD", "\\GAMES"));
     assert_eq!(split_command("ECHO."), ("ECHO", "."));
-    assert_eq!(split_command("echo  two spaces"), ("echo", " two spaces"));
+    assert_eq!(split_command("echo  two spaces"), ("echo", "  two spaces"));
     assert_eq!(split_command("PATH=C:\\DOS"), ("PATH", "=C:\\DOS"));
     // Programs keep their dots, backslashes and colons.
-    assert_eq!(split_command("GAME.EXE -x"), ("GAME.EXE", "-x"));
+    assert_eq!(split_command("GAME.EXE -x"), ("GAME.EXE", " -x"));
     assert_eq!(split_command("CDPLAYER.EXE"), ("CDPLAYER.EXE", ""));
-    assert_eq!(split_command("C:\\GAMES\\GO.BAT 1"), ("C:\\GAMES\\GO.BAT", "1"));
+    assert_eq!(split_command("C:\\GAMES\\GO.BAT 1"), ("C:\\GAMES\\GO.BAT", " 1"));
     assert_eq!(split_command("D:"), ("D:", ""));
     assert_eq!(split_command("  VER"), ("VER", ""));
 }
@@ -350,6 +349,8 @@ fn echo_prints_its_text_as_it_is() {
     assert_eq!(run(&mut cpu, "ECHO    1. Play"), "   1. Play");
     assert_eq!(run(&mut cpu, "ECHO."), "");
     assert_eq!(run(&mut cpu, "ECHO.hi"), "hi");
+    assert_eq!(run(&mut cpu, "ECHO [x]"), "[x]");
+    assert_eq!(run(&mut cpu, "ECHO .x"), ".x");
     assert_eq!(run(&mut cpu, "ECHO"), "ECHO is on");
     // Code page 437 characters (a box corner and an umlaut) print as they are.
     run(&mut cpu, "ECHO \u{C9}\u{84}");

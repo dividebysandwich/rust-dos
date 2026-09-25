@@ -234,14 +234,10 @@ pub struct Cpu {
     pub shell_history: crate::shell::ShellHistory,
     /// Where Tab left the line at the prompt, for Tab again.
     pub shell_completion: Option<crate::shell::Completion>,
-    /// Pending batch-file command lines waiting to be dispatched as if the user
-    /// had typed them at the prompt. Drained by main loop while the shell is
-    /// idle (no child program on the process_stack and CS still in shell-land).
-    pub batch_queue: VecDeque<String>,
-    /// COMMAND.COM "ECHO" state. When false, batch lines run silently (no
-    /// prompt+line echo before dispatch). Toggled by the ECHO ON / ECHO OFF
-    /// built-in. Defaults to true; persists across batches like real DOS.
-    pub batch_echo: bool,
+    /// The batch files running, whose lines are dispatched as if typed
+    /// at the prompt while the shell is idle (no child program on the
+    /// process_stack and CS still in shell-land), and ECHO.
+    pub batch: crate::batch::Batch,
     /// The master environment (SET, PATH), in order. Programs started from
     /// the shell get a copy.
     pub environment: Vec<(String, String)>,
@@ -381,8 +377,7 @@ impl Cpu {
             pending_command: None,
             shell_history: crate::shell::ShellHistory::default(),
             shell_completion: None,
-            batch_queue: VecDeque::new(),
-            batch_echo: true,
+            batch: crate::batch::Batch::default(),
             environment: default_environment(),
             fpu_stack: [F80::new(); 8],
             fpu_top: 0,
@@ -943,41 +938,40 @@ impl Cpu {
         Some(bytes)
     }
 
-    /// Read a .BAT file from the virtual disk and append its commands to
-    /// `batch_queue`. Blank lines and `REM` comments are stripped. Returns
-    /// false if the file can't be located or read.
+    /// Run a .BAT file from the virtual disk once the batch lines queued
+    /// before it have run, as AUTOEXEC.BAT after the config's [autoexec].
+    /// Returns false if the file can't be located or read.
     pub fn queue_batch_file(&mut self, filename: &str) -> bool {
         let Some(bytes) = self.read_program_file(filename) else {
             return false;
         };
-        let contents = String::from_utf8_lossy(&bytes);
-        self.bus.log_string(&format!(
-            "[BATCH] Queueing {} ({} bytes)",
-            filename,
-            contents.len()
-        ));
-        self.queue_batch_lines(contents.lines());
+        self.bus.log_string(&format!("[BATCH] Queueing {} ({} bytes)", filename, bytes.len()));
+        self.batch.append_file(filename, &bytes, "");
         true
     }
 
-    /// Append shell command lines to `batch_queue`, skipping blank lines and
-    /// `REM` comments. Used for .BAT files and the config's [autoexec].
+    /// Run shell command lines once the batch lines queued before them
+    /// have run, as if they were a batch file: the config's [autoexec], a
+    /// game's commands.
     pub fn queue_batch_lines<I, S>(&mut self, lines: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        for raw_line in lines {
-            let line = raw_line.as_ref().trim();
-            if line.is_empty() {
-                continue;
-            }
-            let upper = line.to_ascii_uppercase();
-            if upper == "REM" || upper.starts_with("REM ") || upper.starts_with("REM\t") {
-                continue;
-            }
-            self.batch_queue.push_back(line.to_string());
-        }
+        self.batch.append_lines(lines);
+    }
+
+    /// Start the batch file `filename` with the parameters `args`, `name`
+    /// being how it was called (its `%0`): in place of the batch file
+    /// running when a batch line starts it, else (and with `call`) before
+    /// the batch lines waiting. Returns false if it can't be read.
+    pub fn start_batch_file(&mut self, filename: &str, name: &str, args: &str, call: bool) -> bool {
+        let Some(bytes) = self.read_program_file(filename) else {
+            return false;
+        };
+        self.bus.log_string(&format!("[BATCH] Starting {} ({} bytes)", filename, bytes.len()));
+        self.batch.start_file(name, &bytes, args, call);
+        true
     }
 
     /// Load a program: from the shell (`segment` None), above the resident

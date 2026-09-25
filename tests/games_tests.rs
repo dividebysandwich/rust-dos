@@ -71,5 +71,5 @@ fn a_game_runs_its_commands_and_ends_at_the_prompt() {
     assert!(!game.done(&cpu));
     // It ends, and the prompt is back.
     assert!(run_until(&mut cpu, 5000, |cpu| game.done(cpu)), "the game ends");
-    assert!(cpu.batch_queue.is_empty());
+    assert!(!cpu.batch.is_active());
 }

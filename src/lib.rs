@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod batch;
 pub mod bios;
 pub mod bus;
 pub mod capture;

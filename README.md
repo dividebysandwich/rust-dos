@@ -521,6 +521,24 @@ diskette parameter table of INT 1Eh, as removable drives, and with a
 (device type 07h, FAT12), or a disk image's own layout. A disk on B: alone makes a two-drive machine
 with A: empty.
 
+## The DOS prompt
+
+### Batch files
+
+A `.BAT` file runs its lines at the prompt one after the other, as
+COMMAND.COM does, and a program it starts runs before the next line.
+`%0` is the name the file was started by and `%1` to `%9` its parameters
+(spaces, commas, semicolons and `=` separate them, double quotes keep them
+together), `%NAME%` is the environment variable, and `%%` a percent sign.
+Lines are shown at the prompt before they run unless `ECHO OFF` or a
+leading `@` hides them; ECHO is on again once the batch file has ended.
+Lines beginning with `:` are labels. A batch file started from another
+takes its place, as in DOS, and the rest of the first never runs.
+Ctrl+C between two lines ends the batch files.
+
+`[autoexec]` is a batch file too, run before `C:\AUTOEXEC.BAT`, and so are
+a [game profile](#game-profiles)'s commands.
+
 ## Log file
 
 rust-dos logs what it does to `rust-dos.log` in the per-user configuration

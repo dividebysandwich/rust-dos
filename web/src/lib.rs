@@ -1153,7 +1153,7 @@ impl Host for PageHost<'_> {
     }
 
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
-        if !self.cpu.shell_idle() || !self.cpu.batch_queue.is_empty() {
+        if !self.cpu.shell_idle() || self.cpu.batch.is_active() {
             return Err("A program is running: quit it to launch a game".to_string());
         }
         self.start_game(id)

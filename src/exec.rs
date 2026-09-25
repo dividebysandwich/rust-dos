@@ -214,7 +214,7 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         // they only count once the shell is back at its prompt.
         if cpu.state == CpuState::RebootShell
             || (cpu.in_shell_code()
-                && (cpu.pending_command.is_some() || (!cpu.batch_queue.is_empty() && cpu.process_stack.is_empty())))
+                && (cpu.pending_command.is_some() || (cpu.batch.is_active() && cpu.process_stack.is_empty())))
         {
             match shell_services(cpu) {
                 Shell::Idle => {}
@@ -355,27 +355,32 @@ enum Shell {
     Reloaded,
 }
 
+/// The emulated time COMMAND.COM takes to read and run a batch line. It
+/// also lets the timers run between the lines of a batch file that loops
+/// with GOTO and starts no program, which would otherwise never give the
+/// front end the machine back.
+const BATCH_LINE_NS: u64 = 500_000;
+
 /// Feed batch lines to the shell, dispatch the command line it handed over,
 /// and reload it after a program ends.
 fn shell_services(cpu: &mut Cpu) -> Shell {
-    // If the shell is idle at its prompt and batch lines are pending, pop
-    // one and feed it through the same path as a typed command. The line is
-    // echoed at a synthesized prompt, MS-DOS style. A leading '@'
-    // suppresses the echo.
-    if cpu.pending_command.is_none() && !cpu.batch_queue.is_empty() && cpu.at_shell_prompt() {
-        let raw = cpu.batch_queue.pop_front().unwrap();
-        let (line, line_echo) = match raw.strip_prefix('@') {
-            Some(stripped) => (stripped.trim().to_string(), false),
-            None => (raw, true),
-        };
-        if !line.is_empty() {
-            // Per-line @ suppresses the echo for that line only; ECHO OFF
-            // (cpu.batch_echo) suppresses all subsequent lines.
-            if line_echo && cpu.batch_echo {
+    // If the shell is idle at its prompt and batch lines are pending, take
+    // the next and feed it through the same path as a typed command. The
+    // line is echoed at a synthesized prompt, MS-DOS style, unless ECHO is
+    // off or it begins with '@'. Ctrl+C ends the batch files.
+    let mut from_batch = false;
+    if cpu.pending_command.is_none() && cpu.batch.is_active() && cpu.at_shell_prompt() {
+        if take_ctrl_c(cpu) {
+            cpu.batch.clear();
+            crate::video::print_string(cpu, "^C\r\n");
+        } else if let Some(line) = cpu.batch.next_line(&cpu.environment) {
+            if line.echo {
                 crate::shell::show_prompt(cpu);
-                crate::video::print_string(cpu, &format!("{}\r\n", line));
+                crate::video::print_string(cpu, &format!("{}\r\n", line.text));
             }
-            cpu.pending_command = Some(line);
+            cpu.pending_command = Some(line.text);
+            from_batch = true;
+            cpu.bus.clock.stall(BATCH_LINE_NS);
         }
     }
 
@@ -384,7 +389,14 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
     if cpu.pending_command.is_some() {
         let cmd = cpu.pending_command.take().unwrap();
         cpu.bus.disk_io.clear();
+        // A batch file a batch line starts takes the place of the one
+        // running.
+        cpu.batch.dispatching = from_batch;
         dispatch_command(cpu, &cmd);
+        cpu.batch.dispatching = false;
+        if from_batch {
+            cpu.batch.settle();
+        }
         // A program loaded from a slow disk starts once it's read.
         let disk_time = cpu.bus.disk_io.take_pending();
         if disk_time > 0 && cpu.state == CpuState::Running {
@@ -405,6 +417,19 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
     }
 
     Shell::Idle
+}
+
+/// Take a Ctrl+C (or Ctrl+Break) keystroke out of the keyboard buffer, if
+/// one was pressed.
+fn take_ctrl_c(cpu: &mut Cpu) -> bool {
+    let buffer = &mut cpu.bus.keyboard_buffer;
+    match buffer.iter().position(|&key| key & 0xFF == 0x03 || key == 0x0000) {
+        Some(i) => {
+            buffer.remove(i);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Run a command line handed over by the shell: a built-in command, or a
@@ -438,11 +463,11 @@ fn dispatch_command(cpu: &mut Cpu, cmd: &str) {
 pub fn run_program(cpu: &mut Cpu, command: &str, args: &str, high: bool) -> bool {
     let lower = command.to_lowercase();
     if lower.ends_with(".bat") {
-        cpu.queue_batch_file(command)
+        cpu.start_batch_file(command, command, args, false)
     } else if !command.contains('.') {
         load_program(cpu, &format!("{}.com", command), args, high)
             || load_program(cpu, &format!("{}.exe", command), args, high)
-            || cpu.queue_batch_file(&format!("{}.bat", command))
+            || cpu.start_batch_file(&format!("{}.bat", command), command, args, false)
     } else {
         load_program(cpu, command, args, high)
     }
