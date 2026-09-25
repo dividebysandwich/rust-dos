@@ -124,28 +124,6 @@ fn with_machine(base: &Settings, from: &Settings) -> Settings {
     }
 }
 
-/// The program running, as DOS started it: the name at the end of its
-/// environment. Empty at the prompt.
-pub fn program_name(cpu: &Cpu) -> String {
-    if cpu.shell_idle() {
-        return String::new();
-    }
-    let bus = &cpu.bus;
-    let env = bus.read_16(cpu.current_psp as usize * 16 + 0x2C) as usize * 16;
-    if env == 0 {
-        return String::new();
-    }
-    // The variables end with an empty one; a count (1) and the program's
-    // path follow.
-    let Some(end) = (0..0x8000).find(|&i| bus.read_8(env + i) == 0 && bus.read_8(env + i + 1) == 0) else {
-        return String::new();
-    };
-    let path: Vec<u8> = (env + end + 4..env + end + 4 + 128).map(|a| bus.read_8(a)).take_while(|&b| b != 0).collect();
-    let path = crate::dosstr::from_bytes(&path);
-    let name = path.rsplit(['\\', ':']).next().unwrap_or("");
-    if name.bytes().all(|b| b.is_ascii_graphic()) { name.to_string() } else { String::new() }
-}
-
 /// A small picture of `frame`, as PNG.
 pub fn thumbnail(frame: &Frame) -> Vec<u8> {
     let (w, h) = THUMBNAIL;
@@ -184,7 +162,7 @@ pub fn header(cpu: &Cpu, settings: &Settings, game: Option<(&str, &str)>) -> Hea
         saved: crate::hosttime::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         game: game.map(|(id, _)| id.to_string()),
         game_name: game.map(|(_, name)| name.to_string()),
-        program: program_name(cpu),
+        program: cpu.program.clone(),
         machine: machine_text(settings),
         memsize: cpu.bus.ram().len() >> 20,
         emulated_ns: cpu.bus.clock.now_ns(),

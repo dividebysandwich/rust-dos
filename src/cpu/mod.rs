@@ -270,6 +270,9 @@ pub struct Cpu {
     /// The exit code of the last program started from the shell, which
     /// IF ERRORLEVEL tests.
     pub errorlevel: u8,
+    /// The program running, as DOS started it (`KEEN4E.EXE`), for what a
+    /// save state says it was saved in; empty at the prompt.
+    pub program: String,
     /// Error code of the last failed DOS call, for INT 21h AH=59h.
     pub last_dos_error: u16,
     /// Scan code of an extended key whose 00h the console functions of
@@ -349,6 +352,8 @@ pub struct ProcessContext {
     pub heap_pointer: u16,
     /// The parent's DTA (segment, offset), which the child's replaces.
     pub dta: (u16, u16),
+    /// The parent's name (`Cpu::program`).
+    pub program: String,
 }
 
 use std::path::PathBuf;
@@ -419,6 +424,7 @@ impl Cpu {
             resident_upper: Vec::new(),
             last_child_exit: 0,
             errorlevel: 0,
+            program: String::new(),
             last_dos_error: 0,
             con_pending_scan: None,
             con_line: None,
@@ -563,6 +569,7 @@ impl Cpu {
             psp: self.current_psp,
             heap_pointer: self.heap_pointer,
             dta: (self.bus.dta_segment, self.bus.dta_offset),
+            program: self.program.clone(),
         };
         self.process_stack.push(context);
         self.bus.log_string(&format!(
@@ -614,6 +621,7 @@ impl Cpu {
             self.current_psp = context.psp;
             self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
             (self.bus.dta_segment, self.bus.dta_offset) = context.dta;
+            self.program = context.program;
             self.bus.log_string(&format!(
                 "[CPU] Context Restored. Stack Depth: {}",
                 self.process_stack.len()
@@ -881,6 +889,7 @@ impl Cpu {
         // dynamic recompiler's code for the last program goes.
         self.dyn_latched = false;
         self.dynrec.flush();
+        self.program.clear();
 
         // Get the Code
         let shell_code = get_shell_code();
@@ -1110,6 +1119,7 @@ impl Cpu {
             // tail.
             self.bus.dta_segment = self.current_psp;
             self.bus.dta_offset = 0x80;
+            self.program = filename.rsplit(['\\', '/', ':']).next().unwrap_or(filename).to_ascii_uppercase();
         }
         if loaded && !matches!(placement, Placement::Child(_)) {
             // A program started from the shell gets the master environment

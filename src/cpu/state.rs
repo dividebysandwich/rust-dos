@@ -10,7 +10,7 @@ use crate::savestate::{Reader, Result, State, Writer};
 crate::state_fields!(DescTable { base, limit });
 crate::state_enum!(CpuState { CpuState::Running, CpuState::Halted, CpuState::RebootShell });
 crate::state_fields!(CpuSnapshot { gpr, eip, flags, seg });
-crate::state_fields!(ProcessContext { regs, psp, heap_pointer, dta });
+crate::state_fields!(ProcessContext { regs, psp, heap_pointer, dta, program });
 
 impl State for CpuFlags {
     fn save(&self, w: &mut Writer) {
@@ -43,6 +43,7 @@ impl Default for ProcessContext {
             psp: 0,
             heap_pointer: 0,
             dta: (0, 0),
+            program: String::new(),
         }
     }
 }
@@ -51,7 +52,7 @@ crate::state_fields!(Cpu {
     gpr, eip, seg, cr0, cr2, cr3, dr, gdtr, idtr, ldtr, tr, cpl, flags, state,
     pending_command, shell_wait, shell_prompt_at, secondary_shells, batch,
     environment, current_psp, heap_pointer, resident_end, resident_upper,
-    last_child_exit, errorlevel, last_dos_error, con_pending_scan, con_line,
+    last_child_exit, errorlevel, program, last_dos_error, con_pending_scan, con_line,
     con_pending, alloc_strategy, bios_wait_until,
     fpu_stack, fpu_top, fpu_flags, fpu_control, fpu_tags,
     process_stack, irq_shadow, executed, idle, hle_retry, dyn_latched,
