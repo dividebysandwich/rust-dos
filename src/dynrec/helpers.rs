@@ -28,6 +28,9 @@ pub const EXIT_LIMIT: u32 = 8;
 /// The block left for a known EIP in its page through a link that isn't
 /// set yet (the index is the link's).
 pub const EXIT_UNLINKED: u32 = 9;
+/// With EXIT_FAULT, EXIT_GP0 and EXIT_SMC: the guest's arithmetic flags
+/// are in the context's `flags`, not yet in the CPU.
+pub const EXIT_FLAGS: u32 = 1 << 16;
 
 /// A memory operand handle at or above this is `SLOW + slot`: the operand
 /// isn't plain RAM in one page, and loads and stores go through
@@ -66,6 +69,9 @@ pub struct JitCtx {
     pub smc_hi: u32,
     /// The fault an instruction raised, for EXIT_FAULT.
     pub fault: Fault,
+    /// The register the code keeps the guest's arithmetic flags in where
+    /// it changes them, as it left (for EXIT_FLAGS).
+    pub flags: u32,
     /// A panic in Rust called from translated code, to resume in the
     /// execution loop.
     pub panic: Option<Box<dyn Any + Send>>,
@@ -90,6 +96,7 @@ pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
 pub const CTX_PARITY: i32 = offset_of!(JitCtx, parity) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
+pub const CTX_FLAGS: i32 = offset_of!(JitCtx, flags) as i32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
 pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
 pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
@@ -118,6 +125,7 @@ impl JitCtx {
             smc_lo: 0,
             smc_hi: 0,
             fault: Fault::UD,
+            flags: 0,
             panic: None,
             refs: [MemRef { lin: 0, phys: 0, phys2: 0, size: 1 }; 4],
             parity: std::array::from_fn(|b| if (b as u8).count_ones().is_multiple_of(2) { 0x04 } else { 0 }),

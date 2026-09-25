@@ -180,6 +180,102 @@ fn a_page_fault_in_the_middle_of_a_block_reports_its_address() {
     assert_ne!(b.cpu.edx(), 9);
 }
 
+/// The arithmetic flags of EFLAGS.
+const ARITH: u32 = 0x8D5;
+
+#[test]
+fn flags_the_code_keeps_in_a_register_reach_a_fault_handler() {
+    // SUB sets CF (and AF and SF); INC then sets the rest but leaves CF,
+    // and the load faults before the block puts the flags back.
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFF, DATA_R0, 0x4));
+        let code = asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(ds, ax)?;
+            a.mov(ecx, 0x7Fu32)?;
+            a.mov(ebx, 5u32)?;
+            a.sub(ebx, 7)?;
+            a.inc(ecx)?;
+            a.mov(eax, dword_ptr(0x200))?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!(vector, GP as u32);
+    assert_eq!(stack[3] & ARITH, 0x11, "CF from the SUB, AF from the INC: EFLAGS {:08X}", stack[3]);
+}
+
+#[test]
+fn flags_the_code_keeps_in_a_register_survive_a_store_into_the_block() {
+    let prefix = |a: &mut CodeAssembler| {
+        a.mov(ecx, 0x7Fu32)?;
+        a.mov(ebx, 5u32)?;
+        a.sub(ebx, 7)?;
+        a.inc(ecx)?;
+        a.mov(byte_ptr(0), 0x42)
+    };
+    // The MOV's displacement is where the next instruction's immediate is.
+    let patch = CODE + asm32(CODE, prefix).len() as u32 + 1;
+    let (mut a, mut b) = twins(|rig| {
+        let code = asm32(CODE, |a| {
+            a.mov(ecx, 0x7Fu32)?;
+            a.mov(ebx, 5u32)?;
+            a.sub(ebx, 7)?;
+            a.inc(ecx)?;
+            a.mov(byte_ptr(patch as u64), 0x42)?;
+            a.mov(edx, 0x1111_1111u32)?;
+            a.pushfd()?;
+            a.pop(esi)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edx(), 0x1111_1142, "the patched immediate");
+    assert_eq!(b.cpu.esi() & ARITH, 0x11, "EFLAGS {:08X}", b.cpu.esi());
+    if AVAILABLE {
+        assert!(stats.smc > 0, "the store stopped the block: {:?}", stats);
+    }
+}
+
+#[test]
+fn flags_are_exact_where_handlers_read_them_and_after_flags_nothing_reads() {
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            // CF from the SUB through the INC into the ADC.
+            a.mov(eax, ecx)?;
+            a.sub(eax, 1000)?;
+            a.inc(ebx)?;
+            a.adc(esi, 0)?;
+            // Flags set again before anything reads them.
+            a.shr(eax, 3)?;
+            a.sar(ebx, 2)?;
+            a.rol(edx, 5)?;
+            a.add(ebp, eax)?;
+            // Handlers that read them in the middle of a block.
+            a.cmp(eax, ebx)?;
+            a.pushfd()?;
+            a.pop(edx)?;
+            a.test(ecx, 3)?;
+            a.lahf()?;
+            a.xor(edx, eax)?;
+            // CF set and complemented in the register, and read.
+            a.stc()?;
+            a.cmc()?;
+            a.adc(ebp, 0)?;
+            a.neg(eax)?;
+            a.sbb(esi, eax)?;
+            a.shl(ebp, 1)?;
+            a.rcr(esi, 1)
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+}
+
 /// A program with IRQ 0 firing often, running `body` in a loop.
 fn with_timer(rig: &mut Rig, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) {
     rig.handler(0x08, 0, |a| {

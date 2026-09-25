@@ -21,6 +21,8 @@ mod block;
 #[cfg(dynrec)]
 mod codemem;
 #[cfg(dynrec)]
+mod flags;
+#[cfg(dynrec)]
 mod helpers;
 #[cfg(dynrec)]
 mod translate;
@@ -493,7 +495,7 @@ mod engine {
                     // made-up values): nothing it did counts.
                     return Run::Panic(payload);
                 }
-                let (kind, ix) = (ret as u32 & 0xFF, (ret as u32 >> 8) as usize);
+                let (kind, ix) = (ret as u32 & 0xFF, (ret as u32 >> 8 & 0xFF) as usize);
                 // SAFETY: the block the code returned from (the one entered,
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.
@@ -505,6 +507,9 @@ mod engine {
                     // with it.
                     cpu.bus.clock.icount += data.lag[ix] as u64;
                     cpu.executed += ix as u64 + 1;
+                    if ret as u32 & EXIT_FLAGS != 0 {
+                        cpu.set_flag_bits(crate::cpu::alu::ARITH, self.ctx.flags);
+                    }
                 }
                 let exited = data.id;
                 let none_ran = cpu.bus.clock.icount == start;

@@ -3,12 +3,14 @@
 //! Registers while translated code runs: X19 the CPU, X20 the context
 //! (`JitCtx`), X21 RAM, X22 RAM's code generations, W23 set when a store hit
 //! the block's later bytes, X27 the CPU plus `HI` (the CPU's fields past
-//! X19's offsets' reach); W24-W26 hold the operations' temporaries
-//! (`uop::T`), which calls keep, and X0-X17 are scratch (X18, the
-//! platform's register, is never touched). The guest's registers and flags
-//! stay in the CPU. AArch64 has neither the parity nor the auxiliary carry
-//! flag, so the code computes the guest's flags the way `cpu::alu` defines
-//! them, with a parity table in the context.
+//! X19's offsets' reach), W28 the guest's arithmetic flags where the code
+//! has changed them (see `Gen::dirty`); W24-W26 hold the operations'
+//! temporaries (`uop::T`), which calls keep, and X0-X17 are scratch (X18,
+//! the platform's register, is never touched). The guest's registers stay
+//! in the CPU. AArch64 has neither the parity nor the auxiliary carry flag,
+//! so the code computes the guest's flags the way `cpu::alu` defines them,
+//! with a parity table in the context, and only those that are live (see
+//! `flags`).
 
 // dynasm converts the registers it is given at run time with `into`, and
 // checks the bit field operands it is given with comparisons that are
@@ -72,7 +74,8 @@ const HIB: u8 = 27;
 /// The way in from Rust: `enter(cpu, ctx, code)` saves the registers Rust
 /// expects kept, sets up the fixed ones and branches to `code`; translated
 /// code leaves through `exit` with the exit code in W0 and its block in
-/// X1, which it stores in the context before returning the code.
+/// X1, which it stores in the context with W28 (the flags, for
+/// `EXIT_FLAGS`) before returning the code.
 pub struct Trampoline {
     pub bytes: Vec<u8>,
     pub enter: usize,
@@ -108,6 +111,7 @@ pub fn trampoline() -> Trampoline {
     dynasm!(ops
         ; .arch aarch64
         ; str x1, [x20, CTX_EXIT_DATA as u32]
+        ; str w28, [x20, CTX_FLAGS as u32]
         ; ldp x27, x28, [sp, 80]
         ; ldp x25, x26, [sp, 64]
         ; ldp x23, x24, [sp, 48]
@@ -182,6 +186,13 @@ struct Gen<'a> {
     stubs: [Option<DynamicLabel>; LINKS],
     /// The instruction being translated.
     ix: usize,
+    /// The flags live after each operation, and after the one being
+    /// translated; whether the guest's arithmetic flags are in W28, and
+    /// were where each instruction may stop (see `x64::Gen`).
+    live: Vec<Vec<u32>>,
+    live_after: u32,
+    dirty: bool,
+    dirty_at: Vec<bool>,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -216,6 +227,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         link,
         stubs: [None; LINKS],
         ix: 0,
+        live: super::flags::live(items),
+        live_after: 0,
+        dirty: false,
+        dirty_at: vec![false; n],
     };
     g.prologue(items);
     let mut synced = 0;
@@ -228,11 +243,15 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                     synced = ix as i32;
                 }
                 g.synced[ix] = synced;
+                g.flags_back();
+                g.dirty = false;
                 g.fallback(ix as u32);
             }
             Some(uops) => {
                 g.synced[ix] = synced;
-                for uop in uops {
+                g.dirty_at[ix] = g.dirty;
+                for (k, uop) in uops.iter().enumerate() {
+                    g.live_after = g.live[ix][k];
                     g.uop(uop);
                 }
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
@@ -243,9 +262,9 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                     dynasm!(g.ops ; .arch aarch64 ; cbz w23, =>skip);
                     g.mov32(0, next);
                     g.field(Access::Str32, 0, layout::EIP);
+                    g.mov32(0, EXIT_SMC | if g.dirty { EXIT_FLAGS } else { 0 });
                     dynasm!(g.ops
                         ; .arch aarch64
-                        ; movz w0, EXIT_SMC
                         ; b =>fail
                         ; =>skip
                     );
@@ -262,8 +281,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         None if !super::block::ends_block(&data.instrs[last]) => g.leave(Some(next), 0, false),
         _ => {}
     }
-    // The end: the counts, and back to the execution loop.
+    // The end: the counts, and back to the execution loop. The code that
+    // branches here has put the flags back.
     dynasm!(g.ops ; .arch aarch64 ; =>tail);
+    g.dirty = false;
     g.leave(None, 0, false);
     g.epilogue();
     let data_ptr = data as *const BlockData as u64;
@@ -446,13 +467,15 @@ impl Gen<'_> {
             }
         }
         // An instruction stopped the block: the exit code gets its index,
-        // and the execution loop counts it (see `BlockData::lag`).
+        // and whether the flags are in W28, and the execution loop counts
+        // it (see `BlockData::lag`).
         let fail_tail = self.ops.new_dynamic_label();
         for (ix, label) in self.fail.clone().into_iter().enumerate() {
             if let Some(label) = label {
                 dynasm!(self.ops ; .arch aarch64 ; =>label);
-                if ix > 0 {
-                    self.mov32(9, (ix as u32) << 8);
+                let bits = (ix as u32) << 8 | if self.dirty_at[ix] { EXIT_FLAGS } else { 0 };
+                if bits != 0 {
+                    self.mov32(9, bits);
                     dynasm!(self.ops ; .arch aarch64 ; orr w0, w0, w9);
                 }
                 dynasm!(self.ops ; .arch aarch64 ; b =>fail_tail);
@@ -668,14 +691,15 @@ impl Gen<'_> {
             Uop::Imul { size, a, b } => self.imul(size, a, b),
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
             Uop::Flag { mask, set } => {
-                self.field(Access::Ldr32, 0, layout::FLAGS);
-                self.mov32(1, mask);
-                match set {
-                    Some(true) => dynasm!(self.ops ; .arch aarch64 ; orr w0, w0, w1),
-                    Some(false) => dynasm!(self.ops ; .arch aarch64 ; bic w0, w0, w1),
-                    None => dynasm!(self.ops ; .arch aarch64 ; eor w0, w0, w1),
+                // DF is always in the CPU, the arithmetic flags in W28 once
+                // the code has changed them.
+                let (arith, other) = (mask & ARITH, mask & !ARITH);
+                if other != 0 {
+                    self.flag_op(other, set, false);
                 }
-                self.field(Access::Str32, 0, layout::FLAGS);
+                if arith != 0 && self.live_after & arith != 0 {
+                    self.flag_op(arith, set, self.dirty);
+                }
             }
             Uop::CheckLimit { src } => {
                 self.value_w0(src);
@@ -686,6 +710,7 @@ impl Gen<'_> {
             Uop::Exit { eip: Src::Imm(target) } => self.leave(Some(target), 0, true),
             Uop::Exit { eip: Src::T(t) } => {
                 self.field(Access::Str32, r(t), layout::EIP);
+                self.flags_back();
                 if self.link {
                     // A return: through its link if it goes where the link
                     // was made to.
@@ -818,38 +843,114 @@ impl Gen<'_> {
         self.slow.push(Slow::MemRef { at, back, t, desc, fail });
     }
 
-    /// SF, ZF and PF of the result in W0 (`bits` wide) into W5.
+    /// Set (Some(true)), clear or complement the flags in `mask`, in W28
+    /// or in the CPU.
+    fn flag_op(&mut self, mask: u32, set: Option<bool>, in_w28: bool) {
+        let reg = if in_w28 { 28 } else { 0 };
+        if !in_w28 {
+            self.field(Access::Ldr32, 0, layout::FLAGS);
+        }
+        self.mov32(1, mask);
+        match set {
+            Some(true) => dynasm!(self.ops ; .arch aarch64 ; orr W(reg), W(reg), w1),
+            Some(false) => dynasm!(self.ops ; .arch aarch64 ; bic W(reg), W(reg), w1),
+            None => dynasm!(self.ops ; .arch aarch64 ; eor W(reg), W(reg), w1),
+        }
+        if !in_w28 {
+            self.field(Access::Str32, 0, layout::FLAGS);
+        }
+    }
+
+    /// Put the guest's arithmetic flags from W28 into the CPU, if they are
+    /// there. W6, W8 and W9 are changed.
+    fn flags_back(&mut self) {
+        if self.dirty {
+            self.field(Access::Ldr32, 8, layout::FLAGS);
+            self.mov32(9, ARITH);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; bic w8, w8, w9
+                ; and w6, w28, w9
+                ; orr w8, w8, w6
+            );
+            self.field(Access::Str32, 8, layout::FLAGS);
+        }
+    }
+
+    /// Put the flags `need` from W5 (whose other bits are 0 or dead) into
+    /// the guest's flags in W28. The others stay, from the CPU if they
+    /// aren't in W28 yet and are live.
+    fn merge(&mut self, need: u32) {
+        if ARITH & !need & self.live_after == 0 {
+            dynasm!(self.ops ; .arch aarch64 ; mov w28, w5);
+        } else {
+            if !self.dirty {
+                self.field(Access::Ldr32, 28, layout::FLAGS);
+            }
+            self.mov32(9, need);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; bic w28, w28, w9
+                ; and w5, w5, w9
+                ; orr w28, w28, w5
+            );
+        }
+        self.dirty = true;
+    }
+
+    /// W5 = the flags `need`: those of `regs` (CF, OF, AF) from W1, W2 and
+    /// W3, which hold 0 or 1, those of `ones` set, SF, ZF and PF from the
+    /// result in W0 (`bits` wide), and the rest 0.
     ///
     /// The bitfield instructions' `lsb` operands are single names
     /// throughout: dynasm pastes a run-time `lsb` into its range check
     /// (`31 - lsb`) as it is, so `bits - 1` there would check `31 - bits -
     /// 1`, which underflows at 32 bits (a panic in debug builds).
-    fn szp(&mut self, bits: u32) {
+    fn flags_w5(&mut self, bits: u32, need: u32, regs: u32, ones: u32) {
+        if need == 0 {
+            return;
+        }
         let sign = bits - 1;
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; and w6, w0, 0xFF
-            ; add x6, x20, x6
-            ; ldrb w5, [x6, CTX_PARITY as u32]
-            ; cmp w0, 0
-            ; cset w6, eq
-            ; orr w5, w5, w6, lsl 6
-            ; ubfx w6, w0, sign, 1
-            ; orr w5, w5, w6, lsl 7
-        );
+        let mut first = true;
+        for (flag, reg, at) in [(CF, 1, 0), (AF, 3, 4), (OF, 2, 11)] {
+            if need & regs & flag != 0 {
+                self.put_w5(&mut first, reg, at);
+            }
+        }
+        if need & PF != 0 {
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; and w6, w0, 0xFF
+                ; add x6, x20, x6
+                ; ldrb w6, [x6, CTX_PARITY as u32]
+            );
+            self.put_w5(&mut first, 6, 0);
+        }
+        if need & ZF != 0 {
+            dynasm!(self.ops ; .arch aarch64 ; cmp w0, 0 ; cset w6, eq);
+            self.put_w5(&mut first, 6, 6);
+        }
+        if need & SF != 0 {
+            dynasm!(self.ops ; .arch aarch64 ; ubfx w6, w0, sign, 1);
+            self.put_w5(&mut first, 6, 7);
+        }
+        let ones = need & ones;
+        if first {
+            self.mov32(5, ones);
+        } else if ones != 0 {
+            self.mov32(6, ones);
+            dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, w6);
+        }
     }
 
-    /// Put the bits of W5 in `mask` into the guest's flags.
-    fn merge(&mut self, mask: u32) {
-        self.field(Access::Ldr32, 8, layout::FLAGS);
-        self.mov32(9, mask);
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; bic w8, w8, w9
-            ; and w5, w5, w9
-            ; orr w8, w8, w5
-        );
-        self.field(Access::Str32, 8, layout::FLAGS);
+    /// W5 = W`reg` << `at`, or W5 |= that after the first.
+    fn put_w5(&mut self, first: &mut bool, reg: u8, at: u32) {
+        if *first {
+            dynasm!(self.ops ; .arch aarch64 ; lsl w5, W(reg), at);
+        } else {
+            dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, W(reg), lsl at);
+        }
+        *first = false;
     }
 
     /// W0 = W0 & the size's mask.
@@ -861,41 +962,44 @@ impl Gen<'_> {
         }
     }
 
-    /// The flags of an addition (`sub` false) or subtraction of W11 and
-    /// W10 whose full result is in X0 (a 64-bit sum or difference of the
-    /// zero-extended operands), into W5; W0 becomes the result.
-    fn arith_flags(&mut self, size: u8, sub: bool) {
+    /// An addition (`sub` false) or subtraction of W11 from W10 whose full
+    /// result is in X0 (a 64-bit sum or difference of the zero-extended
+    /// operands): W0 becomes the result, and W5 its flags `need`.
+    fn arith_flags(&mut self, size: u8, sub: bool, need: u32) {
         let bits = size as u32 * 8;
         let sign = bits - 1;
-        if sub {
-            // A borrow makes the 64-bit difference negative.
-            dynasm!(self.ops ; .arch aarch64 ; lsr x1, x0, 63);
-        } else {
-            dynasm!(self.ops ; .arch aarch64 ; lsr x1, x0, bits);
+        if need & CF != 0 {
+            if sub {
+                // A borrow makes the 64-bit difference negative.
+                dynasm!(self.ops ; .arch aarch64 ; lsr x1, x0, 63);
+            } else {
+                dynasm!(self.ops ; .arch aarch64 ; lsr x1, x0, bits);
+            }
         }
         self.cut(size);
-        if sub {
-            // OF: the operands' signs differ and the result's is the
-            // subtrahend's.
-            dynasm!(self.ops ; .arch aarch64 ; eor w2, w10, w11 ; eor w3, w10, w0 ; and w2, w2, w3);
-        } else {
-            // OF: the operands' signs agree and the result's doesn't.
-            dynasm!(self.ops ; .arch aarch64 ; eor w2, w10, w0 ; eor w3, w11, w0 ; and w2, w2, w3);
+        if need & OF != 0 {
+            if sub {
+                // OF: the operands' signs differ and the result's is the
+                // subtrahend's.
+                dynasm!(self.ops ; .arch aarch64 ; eor w2, w10, w11 ; eor w3, w10, w0 ; and w2, w2, w3);
+            } else {
+                // OF: the operands' signs agree and the result's doesn't.
+                dynasm!(self.ops ; .arch aarch64 ; eor w2, w10, w0 ; eor w3, w11, w0 ; and w2, w2, w3);
+            }
+            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w2, sign, 1);
         }
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; ubfx w2, w2, sign, 1
-            ; eor w3, w10, w11
-            ; eor w3, w3, w0
-            ; ubfx w3, w3, 4, 1
-        );
-        self.szp(bits);
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; orr w5, w5, w1
-            ; orr w5, w5, w3, lsl 4
-            ; orr w5, w5, w2, lsl 11
-        );
+        if need & AF != 0 {
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; eor w3, w10, w11
+                ; eor w3, w3, w0
+                ; ubfx w3, w3, 4, 1
+            );
+        }
+        if need != 0 {
+            self.flags_w5(bits, need, CF | OF | AF, 0);
+            self.merge(need);
+        }
     }
 
     /// W10 = a, W11 = b.
@@ -909,11 +1013,16 @@ impl Gen<'_> {
 
     /// W12 = the guest's CF.
     fn carry_in(&mut self) {
-        self.field(Access::Ldr32, 12, layout::FLAGS);
-        dynasm!(self.ops ; .arch aarch64 ; and w12, w12, 1);
+        if self.dirty {
+            dynasm!(self.ops ; .arch aarch64 ; and w12, w28, 1);
+        } else {
+            self.field(Access::Ldr32, 12, layout::FLAGS);
+            dynasm!(self.ops ; .arch aarch64 ; and w12, w12, 1);
+        }
     }
 
     fn alu(&mut self, op: AluOp, size: u8, a: T, b: Src) {
+        let need = ARITH & self.live_after;
         self.operands(a, b);
         match op {
             AluOp::Add | AluOp::Adc => {
@@ -924,8 +1033,7 @@ impl Gen<'_> {
                 if op == AluOp::Adc {
                     dynasm!(self.ops ; .arch aarch64 ; add x0, x0, x12);
                 }
-                self.arith_flags(size, false);
-                self.merge(ARITH);
+                self.arith_flags(size, false, need);
             }
             AluOp::Sub | AluOp::Sbb | AluOp::Cmp => {
                 if op == AluOp::Sbb {
@@ -935,8 +1043,7 @@ impl Gen<'_> {
                 if op == AluOp::Sbb {
                     dynasm!(self.ops ; .arch aarch64 ; sub x0, x0, x12);
                 }
-                self.arith_flags(size, true);
-                self.merge(ARITH);
+                self.arith_flags(size, true, need);
             }
             AluOp::And | AluOp::Or | AluOp::Xor | AluOp::Test => {
                 match op {
@@ -945,8 +1052,10 @@ impl Gen<'_> {
                     _ => dynasm!(self.ops ; .arch aarch64 ; and w0, w10, w11),
                 }
                 // SZP; CF, OF and AF clear.
-                self.szp(size as u32 * 8);
-                self.merge(ARITH);
+                if need != 0 {
+                    self.flags_w5(size as u32 * 8, need, 0, 0);
+                    self.merge(need);
+                }
             }
         }
         if op.writes() {
@@ -968,14 +1077,12 @@ impl Gen<'_> {
                 } else {
                     dynasm!(self.ops ; .arch aarch64 ; sub x0, x10, x11);
                 }
-                self.arith_flags(size, op == UnOp::Dec);
-                self.merge(ARITH & !CF);
+                self.arith_flags(size, op == UnOp::Dec, ARITH & !CF & self.live_after);
             }
             UnOp::Neg => {
                 // 0 - t.
                 dynasm!(self.ops ; .arch aarch64 ; mov w11, W(r(t)) ; movz w10, 0 ; sub x0, x10, x11);
-                self.arith_flags(size, true);
-                self.merge(ARITH);
+                self.arith_flags(size, true, ARITH & self.live_after);
             }
         }
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
@@ -986,6 +1093,7 @@ impl Gen<'_> {
     fn shift(&mut self, op: ShiftOp, size: u8, t: T, count: u8) {
         let bits = size as u32 * 8;
         let c = count as u32;
+        let need = super::flags::shift_flags(op) & self.live_after;
         // The sign bit, the one below it, and the last bit a shift left or
         // right moves out.
         let (sign, below) = (bits - 1, bits - 2);
@@ -994,39 +1102,27 @@ impl Gen<'_> {
         match op {
             ShiftOp::Shl => {
                 // CF: the last bit out; OF: the result's sign ^ CF; AF set.
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; lsl w0, w10, c
-                    ; ubfx w1, w10, out_left, 1
-                );
+                dynasm!(self.ops ; .arch aarch64 ; lsl w0, w10, c);
+                if need & (CF | OF) != 0 {
+                    dynasm!(self.ops ; .arch aarch64 ; ubfx w1, w10, out_left, 1);
+                }
                 self.cut(size);
-                dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; eor w2, w2, w1);
-                self.szp(bits);
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; orr w5, w5, w1
-                    ; orr w5, w5, AF
-                    ; orr w5, w5, w2, lsl 11
-                );
-                self.merge(ARITH);
+                if need & OF != 0 {
+                    dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; eor w2, w2, w1);
+                }
+                self.flags_w5(bits, need, CF | OF, AF);
             }
             ShiftOp::Shr => {
                 // CF: the last bit out; OF: the result's top two bits
                 // differ (its top bit is 0); AF set.
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; lsr w0, w10, c
-                    ; ubfx w1, w10, out_right, 1
-                    ; ubfx w2, w0, below, 1
-                );
-                self.szp(bits);
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; orr w5, w5, w1
-                    ; orr w5, w5, AF
-                    ; orr w5, w5, w2, lsl 11
-                );
-                self.merge(ARITH);
+                dynasm!(self.ops ; .arch aarch64 ; lsr w0, w10, c);
+                if need & CF != 0 {
+                    dynasm!(self.ops ; .arch aarch64 ; ubfx w1, w10, out_right, 1);
+                }
+                if need & OF != 0 {
+                    dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, below, 1);
+                }
+                self.flags_w5(bits, need, CF | OF, AF);
             }
             ShiftOp::Sar => {
                 // OF clear, AF kept.
@@ -1035,15 +1131,12 @@ impl Gen<'_> {
                     2 => dynasm!(self.ops ; .arch aarch64 ; sxth w10, w10),
                     _ => {}
                 }
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; asr w0, w10, c
-                    ; ubfx w1, w10, out_right, 1
-                );
+                dynasm!(self.ops ; .arch aarch64 ; asr w0, w10, c);
+                if need & CF != 0 {
+                    dynasm!(self.ops ; .arch aarch64 ; ubfx w1, w10, out_right, 1);
+                }
                 self.cut(size);
-                self.szp(bits);
-                dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, w1);
-                self.merge(CF | OF | SZP);
+                self.flags_w5(bits, need, CF, 0);
             }
             ShiftOp::Rol | ShiftOp::Ror => {
                 let left = op == ShiftOp::Rol;
@@ -1073,10 +1166,12 @@ impl Gen<'_> {
                         ; eor w2, w2, w1
                     );
                 }
-                dynasm!(self.ops ; .arch aarch64 ; orr w5, w1, w2, lsl 11);
-                self.merge(CF | OF);
+                self.flags_w5(bits, need, CF | OF, 0);
             }
             ShiftOp::Rcl | ShiftOp::Rcr => unreachable!("not translated"),
+        }
+        if need != 0 {
+            self.merge(need);
         }
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
     }
@@ -1088,6 +1183,7 @@ impl Gen<'_> {
         let c = count as u32;
         let back = bits - c;
         let (sign, below, out_right) = (bits - 1, bits - 2, c - 1);
+        let need = (CF | OF | SZP) & self.live_after;
         dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(dst)) ; mov w11, W(r(src)));
         if left {
             // dest:src shifted left; CF is the last bit out of dest.
@@ -1109,55 +1205,49 @@ impl Gen<'_> {
             );
         }
         self.cut(size);
-        if left {
-            // OF = the result's sign ^ CF.
-            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; eor w2, w2, w1);
-        } else {
-            // OF = the result's top two bits differ.
-            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; ubfx w3, w0, below, 1 ; eor w2, w2, w3);
+        if need != 0 {
+            if left {
+                // OF = the result's sign ^ CF.
+                dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; eor w2, w2, w1);
+            } else {
+                // OF = the result's top two bits differ.
+                dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; ubfx w3, w0, below, 1 ; eor w2, w2, w3);
+            }
+            self.flags_w5(bits, need, CF | OF, 0);
+            self.merge(need);
         }
-        self.szp(bits);
-        dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, w1 ; orr w5, w5, w2, lsl 11);
-        self.merge(CF | OF | SZP);
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(dst)), w0);
     }
 
     /// The two- and three-operand IMUL: a = a * b cut to `size`, CF and OF
     /// when the product doesn't fit.
     fn imul(&mut self, size: u8, a: T, b: Src) {
+        let need = (CF | OF) & self.live_after;
         self.operands(a, b);
         if size == 2 {
             // Both 16-bit products fit in 32 bits.
-            dynasm!(self.ops
-                ; .arch aarch64
-                ; sxth w10, w10
-                ; sxth w11, w11
-                ; mul w0, w10, w11
-                ; sxth w1, w0
-                ; cmp w1, w0
-                ; cset w2, ne
-                ; and w0, w0, 0xFFFF
-            );
+            dynasm!(self.ops ; .arch aarch64 ; sxth w10, w10 ; sxth w11, w11 ; mul w0, w10, w11);
+            if need != 0 {
+                dynasm!(self.ops ; .arch aarch64 ; sxth w1, w0 ; cmp w1, w0 ; cset w2, ne);
+            }
+            dynasm!(self.ops ; .arch aarch64 ; and w0, w0, 0xFFFF);
         } else {
-            dynasm!(self.ops
-                ; .arch aarch64
-                ; smull x0, w10, w11
-                ; sxtw x1, w0
-                ; cmp x1, x0
-                ; cset w2, ne
-            );
+            dynasm!(self.ops ; .arch aarch64 ; smull x0, w10, w11);
+            if need != 0 {
+                dynasm!(self.ops ; .arch aarch64 ; sxtw x1, w0 ; cmp x1, x0 ; cset w2, ne);
+            }
         }
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; orr w5, w2, w2, lsl 11
-            ; mov W(r(a)), w0
-        );
-        self.merge(CF | OF);
+        dynasm!(self.ops ; .arch aarch64 ; mov W(r(a)), w0);
+        if need != 0 {
+            dynasm!(self.ops ; .arch aarch64 ; orr w5, w2, w2, lsl 11);
+            self.merge(need);
+        }
     }
 
     /// MUL or IMUL of AL, AX or EAX by t into AX, DX:AX or EDX:EAX: CF and
     /// OF when the upper half is in use (for IMUL, isn't the lower's sign).
     fn mul_wide(&mut self, signed: bool, size: u8, t: T) {
+        let need = (CF | OF) & self.live_after;
         let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
         let access = match size {
             1 => Access::Ldr8,
@@ -1190,7 +1280,9 @@ impl Gen<'_> {
                 ; cmp w1, w0
             ),
         }
-        dynasm!(self.ops ; .arch aarch64 ; cset w2, ne ; orr w5, w2, w2, lsl 11);
+        if need != 0 {
+            dynasm!(self.ops ; .arch aarch64 ; cset w2, ne ; orr w5, w2, w2, lsl 11);
+        }
         match size {
             1 => self.set_gpr(Gpr::word(0), 0),
             2 => {
@@ -1204,19 +1296,26 @@ impl Gen<'_> {
                 self.field(Access::Str32, 0, high);
             }
         }
-        self.merge(CF | OF);
+        if need != 0 {
+            self.merge(need);
+        }
     }
 
     fn exit_if(&mut self, cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)>) {
         let yes = self.ops.new_dynamic_label();
+        // The flags go back into the CPU for both ways out; the condition
+        // reads them where they were.
+        let in_w28 = self.dirty;
+        self.flags_back();
+        self.dirty = false;
         match cond {
-            Cond::Flags(cc) => self.condition(cc, yes),
+            Cond::Flags(cc) => self.condition(cc, yes, in_w28),
             Cond::Zero(t) => dynasm!(self.ops ; .arch aarch64 ; cbz W(r(t)), =>yes),
             Cond::NonZero(t) => dynasm!(self.ops ; .arch aarch64 ; cbnz W(r(t)), =>yes),
             Cond::NonZeroZf(t, zf) => {
                 let no = self.ops.new_dynamic_label();
                 dynasm!(self.ops ; .arch aarch64 ; cbz W(r(t)), =>no);
-                self.field(Access::Ldr32, 0, layout::FLAGS);
+                self.load_flags_w0(in_w28);
                 dynasm!(self.ops ; .arch aarch64 ; tst w0, ZF);
                 if zf {
                     dynasm!(self.ops ; .arch aarch64 ; b.ne =>yes);
@@ -1253,6 +1352,7 @@ impl Gen<'_> {
             self.mov32(0, eip);
             self.field(Access::Str32, 0, layout::EIP);
         }
+        self.flags_back();
         self.counts();
         match eip {
             Some(eip) if self.link && self.data.in_page(eip) => {
@@ -1340,21 +1440,23 @@ impl Gen<'_> {
         );
     }
 
-    /// Branch to `yes` if condition `cc` holds on the guest's flags.
-    fn condition(&mut self, cc: ConditionCode, yes: DynamicLabel) {
+    /// W0 = the guest's flags, from W28 (`in_w28`) or the CPU.
+    fn load_flags_w0(&mut self, in_w28: bool) {
+        if in_w28 {
+            dynasm!(self.ops ; .arch aarch64 ; mov w0, w28);
+        } else {
+            self.field(Access::Ldr32, 0, layout::FLAGS);
+        }
+    }
+
+    /// Branch to `yes` if condition `cc` holds on the guest's flags, in W28
+    /// (`in_w28`) or the CPU.
+    fn condition(&mut self, cc: ConditionCode, yes: DynamicLabel, in_w28: bool) {
         use ConditionCode as C;
-        self.field(Access::Ldr32, 0, layout::FLAGS);
-        let bits = |cc| match cc {
-            C::o | C::no => OF,
-            C::b | C::ae => CF,
-            C::e | C::ne => ZF,
-            C::be | C::a => CF | ZF,
-            C::s | C::ns => SF,
-            _ => PF,
-        };
+        self.load_flags_w0(in_w28);
         match cc {
             C::o | C::b | C::e | C::be | C::s | C::p | C::no | C::ae | C::ne | C::a | C::ns | C::np => {
-                self.mov32(1, bits(cc));
+                self.mov32(1, super::flags::cond_flags(cc));
                 dynasm!(self.ops ; .arch aarch64 ; tst w0, w1);
                 if matches!(cc, C::o | C::b | C::e | C::be | C::s | C::p) {
                     dynasm!(self.ops ; .arch aarch64 ; b.ne =>yes);

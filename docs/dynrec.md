@@ -137,16 +137,32 @@ Each instruction becomes one of two things:
   instruction works in a block from the start; translating more forms only
   makes them faster.
 
-Both code generators keep the guest's registers and flags in the `Cpu`:
+Both code generators keep the guest's registers in the `Cpu`, and its
+arithmetic flags (CF, PF, AF, ZF, SF, OF) in a host register from the
+first instruction in a block that changes them:
 
-- **Flags on x86-64** come from the host's own flags (PUSHF), from host
+- **Where they go back.** The flags go back into the `Cpu` wherever
+  anything else may read them: where the block leaves (to another block
+  too) and before a handler runs. An instruction that stops the block
+  (a fault, a store into its later bytes) sets `EXIT_FLAGS` in its exit
+  code instead: the trampoline leaves the register in the `JitCtx`, and
+  the execution loop puts it back.
+- **Only the live ones.** `flags.rs` finds, for each operation, which of
+  the flags it sets are read before another operation sets them again:
+  by a condition, a carry in, or anything outside the block, which sees
+  all of them wherever the block may leave, a fault included. The
+  others aren't computed.
+- **On x86-64** they come from the host's own flags (PUSHF), from host
   instructions of the operand's size, where they match the interpreter's
   (`cpu::alu`). They are fixed up where the interpreter defines what the
   host leaves undefined: AF of the logic operations, OF of shifts by more
-  than 1, and the 386's AF of SHL and SHR.
-- **Flags on ARM64**, which has neither a parity nor an auxiliary carry
-  flag, are computed as `cpu::alu` defines them: the carry from a 64-bit
-  sum or difference of the operands, PF from a table in the `JitCtx`.
+  than 1, and the 386's AF of SHL and SHR. ADD, SUB, CMP, ADC, SBB and
+  NEG, whose flags are the host's, are two instructions (`pushfq; pop
+  rbp`); INC and DEC get the guest's CF into the host's first.
+- **On ARM64**, which has neither a parity nor an auxiliary carry flag,
+  they are computed as `cpu::alu` defines them, one by one: the carry
+  from a 64-bit sum or difference of the operands, PF from a table in the
+  `JitCtx`.
 - Memory operands are checked inline against the segment's precomputed
   limits and rights. With paging on, the code looks the page up in the
   TLB as `Cpu::lin_to_phys` does. Plain RAM within a page is then read and
@@ -166,6 +182,7 @@ Registers while translated code runs:
 | RAM | R13 | X21 |
 | the code generations | R14 | X22 |
 | set when a store hit the block's later bytes | R15 | W23 |
+| the guest's arithmetic flags | EBP | W28 |
 | the operations' temporaries | R8–R11 (saved around calls) | W24–W26 (kept by calls) |
 
 On x86-64, calls into Rust use the System V convention, which Rust offers
@@ -334,8 +351,11 @@ batches into `target/dyndiff/<dir>/`, to find where a program gets to.
    (`Set`, `Store`, flags). The exception is where the handler itself
    writes memory before it faults, as CALL does.
 2. If it needs an operation the code generators don't have, add one to
-   `uop.rs` and its code to `x64.rs` and `a64.rs`. Take flags from the
-   host only where they match `cpu::alu`'s; compute the rest.
+   `uop.rs` and its code to `x64.rs` and `a64.rs`, and say in
+   `Uop::flags_set` and `Uop::flags_used` (`flags.rs`) which flags it sets
+   and which must be right before it: those it reads, and all of them if
+   it may leave the block. Take flags from the host only where they match
+   `cpu::alu`'s; compute the rest, and only the live ones.
 3. Run `dynrec_tests`, the lockstep tests, and SingleStepTests with
    `RUST_DOS_CORE=dynamic`, whose report must be the interpreter's, on
    both hosts (ARM64 under qemu, see [Testing](#testing)).

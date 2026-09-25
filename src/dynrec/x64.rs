@@ -2,9 +2,10 @@
 //!
 //! Registers while translated code runs: RBX the CPU, R12 the context
 //! (`JitCtx`), R13 RAM, R14 RAM's code generations, R15 set when a store
-//! hit the block's later bytes; R8-R11 hold the operations' temporaries
-//! (`uop::T`), and RAX, RCX, RDX, RSI and RDI are scratch. The guest's
-//! registers and flags stay in the CPU. Translated code calls Rust with the
+//! hit the block's later bytes, EBP the guest's arithmetic flags where the
+//! code has changed them (see `Gen::dirty`); R8-R11 hold the operations'
+//! temporaries (`uop::T`), and RAX, RCX, RDX, RSI and RDI are scratch. The
+//! guest's registers stay in the CPU. Translated code calls Rust with the
 //! System V convention, which Rust offers on every x86-64 host.
 
 // dynasm converts the registers it is given at run time with `into`.
@@ -49,7 +50,8 @@ const EXTENDED: u32 = 0x10_0000;
 /// The way in from Rust: `enter(cpu, ctx, code)` saves the registers Rust
 /// expects kept, sets up the fixed ones and jumps to `code`; translated
 /// code leaves through `exit` with the exit code in EAX and its block in
-/// RDX, which it stores in the context before returning the code.
+/// RDX, which it stores in the context with EBP (the flags, for
+/// `EXIT_FLAGS`) before returning the code.
 pub struct Trampoline {
     pub bytes: Vec<u8>,
     pub enter: usize,
@@ -81,6 +83,7 @@ pub fn trampoline() -> Trampoline {
     dynasm!(ops
         ; .arch x64
         ; mov QWORD [r12 + CTX_EXIT_DATA], rdx
+        ; mov DWORD [r12 + CTX_FLAGS], ebp
         ; add rsp, 8
         ; pop r15
         ; pop r14
@@ -136,6 +139,18 @@ struct Gen<'a> {
     stubs: [Option<DynamicLabel>; LINKS],
     /// The instruction being translated.
     ix: usize,
+    /// The flags live after each operation (`flags::live`), and after the
+    /// one being translated.
+    live: Vec<Vec<u32>>,
+    live_after: u32,
+    /// The guest's arithmetic flags are in EBP, not yet in the CPU (whose
+    /// other flags are right). They go back into the CPU where anything
+    /// else may read them: where the block leaves and before a handler.
+    /// Per instruction, whether they are in EBP where it may stop, before
+    /// it changes them; the execution loop puts them back then
+    /// (`EXIT_FLAGS`).
+    dirty: bool,
+    dirty_at: Vec<bool>,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -177,6 +192,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         link,
         stubs: [None; LINKS],
         ix: 0,
+        live: super::flags::live(items),
+        live_after: 0,
+        dirty: false,
+        dirty_at: vec![false; n],
     };
     g.prologue(items);
     let mut synced = 0;
@@ -190,11 +209,17 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                     synced = ix as i32;
                 }
                 g.synced[ix] = synced;
+                g.flags_back();
+                g.dirty = false;
                 g.fallback(ix as i32);
             }
             Some(uops) => {
                 g.synced[ix] = synced;
-                for uop in uops {
+                // Operations check what can fault before they change the
+                // flags: they are as at the instruction's start there.
+                g.dirty_at[ix] = g.dirty;
+                for (k, uop) in uops.iter().enumerate() {
+                    g.live_after = g.live[ix][k];
                     g.uop(uop);
                 }
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
@@ -210,7 +235,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                         ; jz =>skip
                         ; =>smc
                         ; mov DWORD [rbx + EIP], next
-                        ; mov eax, EXIT_SMC as i32
+                        ; mov eax, (EXIT_SMC | if g.dirty { EXIT_FLAGS } else { 0 }) as i32
                         ; jmp =>fail
                         ; =>skip
                     );
@@ -227,8 +252,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         None if !super::block::ends_block(&data.instrs[last]) => g.leave(Some(next), 0, false),
         _ => {}
     }
-    // The end: the counts, and back to the execution loop.
+    // The end: the counts, and back to the execution loop. The code that
+    // jumps here has put the flags back.
     dynasm!(g.ops ; .arch x64 ; =>tail);
+    g.dirty = false;
     g.leave(None, 0, false);
     g.epilogue();
     let stubs = g.stubs.map(|s| s.map(|l| g.ops.labels().resolve_dynamic(l).expect("stub").0));
@@ -329,13 +356,15 @@ impl Gen<'_> {
             }
         }
         // An instruction stopped the block: the exit code gets its index,
-        // and the execution loop counts it (see `BlockData::lag`).
+        // and whether the flags are in EBP, and the execution loop counts
+        // it (see `BlockData::lag`).
         let fail_tail = self.ops.new_dynamic_label();
         for (ix, label) in self.fail.clone().into_iter().enumerate() {
             if let Some(label) = label {
                 dynasm!(self.ops ; .arch x64 ; =>label);
-                if ix > 0 {
-                    dynasm!(self.ops ; .arch x64 ; or eax, (ix as i32) << 8);
+                let bits = (ix as u32) << 8 | if self.dirty_at[ix] { EXIT_FLAGS } else { 0 };
+                if bits != 0 {
+                    dynasm!(self.ops ; .arch x64 ; or eax, bits as i32);
                 }
                 dynasm!(self.ops ; .arch x64 ; jmp =>fail_tail);
             }
@@ -568,15 +597,23 @@ impl Gen<'_> {
                     (_, Src::Imm(v)) => dynasm!(self.ops ; .arch x64 ; imul Rd(a), Rd(a), v as i32),
                 }
                 // CF and OF: the product doesn't fit.
-                self.host_flags();
-                self.merge(CF | OF, CF | OF);
+                if self.wanted(CF | OF) {
+                    self.host_flags();
+                    self.merge(CF | OF, CF | OF);
+                }
             }
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
-            Uop::Flag { mask, set } => match set {
-                Some(true) => dynasm!(self.ops ; .arch x64 ; or DWORD [rbx + FLAGS], mask as i32),
-                Some(false) => dynasm!(self.ops ; .arch x64 ; and DWORD [rbx + FLAGS], !mask as i32),
-                None => dynasm!(self.ops ; .arch x64 ; xor DWORD [rbx + FLAGS], mask as i32),
-            },
+            Uop::Flag { mask, set } => {
+                // DF is always in the CPU, the arithmetic flags in EBP
+                // once the code has changed them.
+                let (arith, other) = (mask & ARITH, mask & !ARITH);
+                if other != 0 {
+                    self.flag_op(other, set, false);
+                }
+                if arith != 0 && self.wanted(arith) {
+                    self.flag_op(arith, set, self.dirty);
+                }
+            }
             Uop::CheckLimit { src } => {
                 self.value_eax(src);
                 let gp = self.gp0();
@@ -585,6 +622,7 @@ impl Gen<'_> {
             Uop::Exit { eip: Src::Imm(target) } => self.leave(Some(target), 0, true),
             Uop::Exit { eip: Src::T(t) } => {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)));
+                self.flags_back();
                 if self.link {
                     // A return: through its link if it goes where the link
                     // was made to.
@@ -704,28 +742,82 @@ impl Gen<'_> {
         self.slow.push(Slow::MemRef { at, back, t, desc, fail });
     }
 
-    /// Merge the host's flags (in EAX, from PUSHF) into the guest's: the
-    /// bits in `mask` become those of EAX & `bits`.
+    /// Whether any of the flags `set` that the operation sets are live.
+    fn wanted(&self, set: u32) -> bool {
+        set & self.live_after != 0
+    }
+
+    /// Put the guest's arithmetic flags from EBP into the CPU, if they are
+    /// there. ECX is changed.
+    fn flags_back(&mut self) {
+        if self.dirty {
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov ecx, DWORD [rbx + FLAGS]
+                ; and ecx, !ARITH as i32
+                ; and ebp, ARITH as i32
+                ; or ecx, ebp
+                ; mov DWORD [rbx + FLAGS], ecx
+            );
+        }
+    }
+
+    /// Host CF = the guest's CF.
+    fn carry_in(&mut self) {
+        if self.dirty {
+            dynasm!(self.ops ; .arch x64 ; bt ebp, 0);
+        } else {
+            dynasm!(self.ops ; .arch x64 ; bt DWORD [rbx + FLAGS], 0);
+        }
+    }
+
+    /// Set (Some(true)), clear or complement the flags in `mask`, in EBP or
+    /// in the CPU.
+    fn flag_op(&mut self, mask: u32, set: Option<bool>, ebp: bool) {
+        match (set, ebp) {
+            (Some(true), false) => dynasm!(self.ops ; .arch x64 ; or DWORD [rbx + FLAGS], mask as i32),
+            (Some(false), false) => dynasm!(self.ops ; .arch x64 ; and DWORD [rbx + FLAGS], !mask as i32),
+            (None, false) => dynasm!(self.ops ; .arch x64 ; xor DWORD [rbx + FLAGS], mask as i32),
+            (Some(true), true) => dynasm!(self.ops ; .arch x64 ; or ebp, mask as i32),
+            (Some(false), true) => dynasm!(self.ops ; .arch x64 ; and ebp, !mask as i32),
+            (None, true) => dynasm!(self.ops ; .arch x64 ; xor ebp, mask as i32),
+        }
+    }
+
+    /// Merge the host's flags (in EAX, from PUSHF) into the guest's in EBP:
+    /// the bits in `mask` become those of EAX & `bits`. The others stay,
+    /// from the CPU if they aren't in EBP yet and are live.
     fn merge(&mut self, mask: u32, bits: u32) {
-        dynasm!(self.ops
-            ; .arch x64
-            ; and eax, bits as i32
-            ; mov ecx, DWORD [rbx + FLAGS]
-            ; and ecx, !mask as i32
-            ; or ecx, eax
-            ; mov DWORD [rbx + FLAGS], ecx
-        );
+        dynasm!(self.ops ; .arch x64 ; and eax, bits as i32);
+        if ARITH & !mask & self.live_after == 0 {
+            dynasm!(self.ops ; .arch x64 ; mov ebp, eax);
+        } else {
+            if !self.dirty {
+                dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
+            }
+            dynasm!(self.ops
+                ; .arch x64
+                ; and ebp, !mask as i32
+                ; or ebp, eax
+            );
+        }
+        self.dirty = true;
     }
 
     fn host_flags(&mut self) {
         dynasm!(self.ops ; .arch x64 ; pushfq ; pop rax);
     }
 
+    /// The host's flags are the guest's arithmetic flags: into EBP.
+    fn host_flags_ebp(&mut self) {
+        dynasm!(self.ops ; .arch x64 ; pushfq ; pop rbp);
+        self.dirty = true;
+    }
+
     fn alu(&mut self, op: AluOp, size: u8, a: T, b: Src) {
         let a = r(a);
         if matches!(op, AluOp::Adc | AluOp::Sbb) {
-            // The guest's carry in.
-            dynasm!(self.ops ; .arch x64 ; bt DWORD [rbx + FLAGS], 0);
+            self.carry_in();
         }
         macro_rules! op {
             ($m:ident) => {
@@ -750,11 +842,13 @@ impl Gen<'_> {
             AluOp::Cmp => op!(cmp),
             AluOp::Test => op!(test),
         }
-        self.host_flags();
-        match op {
-            // The logic operations clear CF, OF and AF.
-            AluOp::And | AluOp::Or | AluOp::Xor | AluOp::Test => self.merge(ARITH, SZP),
-            _ => self.merge(ARITH, ARITH),
+        if !self.wanted(ARITH) {
+            return;
+        }
+        self.host_flags_ebp();
+        if matches!(op, AluOp::And | AluOp::Or | AluOp::Xor | AluOp::Test) {
+            // The logic operations clear AF (and CF and OF, as the host).
+            dynasm!(self.ops ; .arch x64 ; and ebp, !AF as i32);
         }
     }
 
@@ -769,20 +863,19 @@ impl Gen<'_> {
                 }
             };
         }
+        let wanted = op != UnOp::Not && self.wanted(ARITH);
+        if wanted && matches!(op, UnOp::Inc | UnOp::Dec) && self.live_after & CF != 0 {
+            // INC and DEC leave CF, the host's as well: make it the guest's.
+            self.carry_in();
+        }
         match op {
             UnOp::Inc => op!(inc),
             UnOp::Dec => op!(dec),
             UnOp::Neg => op!(neg),
-            UnOp::Not => {
-                op!(not);
-                return;
-            }
+            UnOp::Not => op!(not),
         }
-        self.host_flags();
-        match op {
-            // INC and DEC leave CF.
-            UnOp::Inc | UnOp::Dec => self.merge(ARITH & !CF, ARITH & !CF),
-            _ => self.merge(ARITH, ARITH),
+        if wanted {
+            self.host_flags_ebp();
         }
     }
 
@@ -807,6 +900,9 @@ impl Gen<'_> {
             ShiftOp::Rol => op!(rol),
             ShiftOp::Ror => op!(ror),
             ShiftOp::Rcl | ShiftOp::Rcr => unreachable!("not translated"),
+        }
+        if !self.wanted(super::flags::shift_flags(op)) {
+            return;
         }
         self.host_flags();
         let top = size as i8 * 8 - 1;
@@ -881,6 +977,9 @@ impl Gen<'_> {
             (false, 2) => dynasm!(self.ops ; .arch x64 ; shrd Rw(d), Rw(s), c),
             (false, _) => dynasm!(self.ops ; .arch x64 ; shrd Rd(d), Rd(s), c),
         }
+        if !self.wanted(CF | OF | SZP) {
+            return;
+        }
         self.host_flags();
         let top = size as i8 * 8 - 1;
         if left {
@@ -930,7 +1029,10 @@ impl Gen<'_> {
             (true, 2) => dynasm!(self.ops ; .arch x64 ; imul Rw(t)),
             (true, _) => dynasm!(self.ops ; .arch x64 ; imul Rd(t)),
         }
-        dynasm!(self.ops ; .arch x64 ; pushfq);
+        let wanted = self.wanted(CF | OF);
+        if wanted {
+            dynasm!(self.ops ; .arch x64 ; pushfq);
+        }
         match size {
             1 => {
                 dynasm!(self.ops ; .arch x64 ; mov ecx, eax);
@@ -944,24 +1046,28 @@ impl Gen<'_> {
             }
             _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + acc], eax ; mov DWORD [rbx + high], edx),
         }
-        dynasm!(self.ops ; .arch x64 ; pop rax);
-        self.merge(CF | OF, CF | OF);
+        if wanted {
+            dynasm!(self.ops ; .arch x64 ; pop rax);
+            self.merge(CF | OF, CF | OF);
+        }
     }
 
     fn exit_if(&mut self, cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)>) {
         let yes = self.ops.new_dynamic_label();
+        // The flags go back into the CPU for both ways out; the condition
+        // reads them where they were.
+        let ebp = self.dirty;
+        self.flags_back();
+        self.dirty = false;
         match cond {
-            Cond::Flags(cc) => self.condition(cc, yes),
+            Cond::Flags(cc) => self.condition(cc, yes, ebp),
             Cond::Zero(t) => dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jz =>yes),
             Cond::NonZero(t) => dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jnz =>yes),
             Cond::NonZeroZf(t, zf) => {
                 let no = self.ops.new_dynamic_label();
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; test Rd(r(t)), Rd(r(t))
-                    ; jz =>no
-                    ; test DWORD [rbx + FLAGS], ZF as i32
-                );
+                dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jz =>no);
+                self.load_flags_eax(ebp);
+                dynasm!(self.ops ; .arch x64 ; test eax, ZF as i32);
                 if zf {
                     dynasm!(self.ops ; .arch x64 ; jnz =>yes);
                 } else {
@@ -993,6 +1099,7 @@ impl Gen<'_> {
         if let (Some(eip), true) = (eip, set) {
             dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], eip as i32);
         }
+        self.flags_back();
         self.counts();
         match eip {
             Some(eip) if self.link && self.data.in_page(eip) => {
@@ -1070,29 +1177,38 @@ impl Gen<'_> {
         }
     }
 
-    /// Jump to `yes` if condition `cc` holds on the guest's flags.
-    fn condition(&mut self, cc: ConditionCode, yes: DynamicLabel) {
+    /// EAX = the guest's flags, from EBP (`ebp`) or the CPU.
+    fn load_flags_eax(&mut self, ebp: bool) {
+        if ebp {
+            dynasm!(self.ops ; .arch x64 ; mov eax, ebp);
+        } else {
+            dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FLAGS]);
+        }
+    }
+
+    /// Jump to `yes` if condition `cc` holds on the guest's flags, in EBP
+    /// (`ebp`) or the CPU.
+    fn condition(&mut self, cc: ConditionCode, yes: DynamicLabel, ebp: bool) {
         use ConditionCode as C;
-        let bits = |cc| match cc {
-            C::o | C::no => OF,
-            C::b | C::ae => CF,
-            C::e | C::ne => ZF,
-            C::be | C::a => CF | ZF,
-            C::s | C::ns => SF,
-            _ => PF,
-        };
+        let bits = super::flags::cond_flags(cc) as i32;
         match cc {
-            C::o | C::b | C::e | C::be | C::s | C::p => {
-                dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + FLAGS], bits(cc) as i32 ; jnz =>yes)
-            }
-            C::no | C::ae | C::ne | C::a | C::ns | C::np => {
-                dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + FLAGS], bits(cc) as i32 ; jz =>yes)
+            C::o | C::b | C::e | C::be | C::s | C::p | C::no | C::ae | C::ne | C::a | C::ns | C::np => {
+                if ebp {
+                    dynasm!(self.ops ; .arch x64 ; test ebp, bits);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + FLAGS], bits);
+                }
+                if matches!(cc, C::o | C::b | C::e | C::be | C::s | C::p) {
+                    dynasm!(self.ops ; .arch x64 ; jnz =>yes);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; jz =>yes);
+                }
             }
             C::l | C::ge => {
                 // SF != OF: OF moved down to SF's bit.
+                self.load_flags_eax(ebp);
                 dynasm!(self.ops
                     ; .arch x64
-                    ; mov eax, DWORD [rbx + FLAGS]
                     ; mov ecx, eax
                     ; shr ecx, 4
                     ; xor ecx, eax
@@ -1106,9 +1222,9 @@ impl Gen<'_> {
             }
             _ => {
                 // LE: ZF or SF != OF; G: neither.
+                self.load_flags_eax(ebp);
                 dynasm!(self.ops
                     ; .arch x64
-                    ; mov eax, DWORD [rbx + FLAGS]
                     ; mov ecx, eax
                     ; shr ecx, 4
                     ; xor ecx, eax
