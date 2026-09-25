@@ -276,6 +276,60 @@ fn flags_are_exact_where_handlers_read_them_and_after_flags_nothing_reads() {
     assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
 }
 
+#[test]
+fn divisions_and_their_faults_are_the_interpreters() {
+    let (mut a, mut b) = twins(|rig| {
+        // #DE: skip the division (ESI holds its length) and count it.
+        rig.handler(0, 0, |a| {
+            a.add(dword_ptr(esp), esi)?;
+            a.inc(dword_ptr(RESULT))?;
+            a.iretd()
+        });
+        with_timer(rig, |a| {
+            // Dividends and divisors from the loop count, some of them 0,
+            // some quotients too big, and the most negative ones by -1.
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x9E37_79B1u32 as i32)?;
+            a.mov(ebx, ecx)?;
+            a.and(ebx, 0x1F)?;
+            a.sub(ebx, 3)?;
+            a.mov(dword_ptr(DATA), ebx)?;
+            a.mov(edx, eax)?;
+            a.sar(edx, 7)?;
+            a.add(ebp, eax)?;
+            let div = |a: &mut CodeAssembler, len: u32, f: &dyn Fn(&mut CodeAssembler) -> Result<(), IcedError>| {
+                a.mov(esi, len)?;
+                f(a)?;
+                a.xor(ebp, eax)?;
+                a.add(ebp, edx)
+            };
+            div(a, 2, &|a| a.idiv(ebx))?;
+            a.mov(edx, ecx)?;
+            a.shr(edx, 9)?;
+            div(a, 2, &|a| a.div(ebx))?;
+            div(a, 6, &|a| a.idiv(dword_ptr(DATA)))?;
+            a.mov(edx, eax)?;
+            div(a, 3, &|a| a.idiv(bx))?;
+            div(a, 3, &|a| a.div(bx))?;
+            a.mov(eax, ecx)?;
+            div(a, 2, &|a| a.idiv(bl))?;
+            div(a, 2, &|a| a.div(bl))?;
+            // -2^31 / -1, -2^15 / -1, -2^7 / -1.
+            a.mov(edx, 0x8000_0000u32)?;
+            a.xor(eax, eax)?;
+            a.mov(ebx, 0xFFFF_FFFFu32)?;
+            div(a, 2, &|a| a.idiv(ebx))?;
+            a.mov(edx, 0x8000u32)?;
+            div(a, 3, &|a| a.idiv(bx))?;
+            a.mov(eax, 0x8000u32)?;
+            div(a, 2, &|a| a.idiv(bl))
+        });
+    });
+    run_both(&mut a, &mut b);
+    let faults = b.read32(RESULT);
+    assert!(faults > 100, "#DE came {} times", faults);
+}
+
 /// A program with IRQ 0 firing often, running `body` in a loop.
 fn with_timer(rig: &mut Rig, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) {
     rig.handler(0x08, 0, |a| {

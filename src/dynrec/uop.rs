@@ -123,6 +123,11 @@ pub enum Uop {
     /// MUL or IMUL (`signed`) of AL, AX or EAX by t, into AX, DX:AX or
     /// EDX:EAX. Only CF and OF change.
     MulWide { signed: bool, size: u8, t: T },
+    /// DIV or IDIV (`signed`) of AX, DX:AX or EDX:EAX by t: the quotient
+    /// into AL, AX or EAX and the remainder into AH, DX or EDX, or #DE
+    /// before anything changes if t is 0 or the quotient doesn't fit. The
+    /// flags stay, as the interpreter leaves them.
+    DivWide { signed: bool, size: u8, t: T },
     /// Set (Some(true)), clear or complement (None) the flags in `mask`.
     Flag { mask: u32, set: Option<bool> },
     /// #GP(0) if the value is past the CS limit (a near jump's target).

@@ -58,7 +58,9 @@ impl Uop {
         match *self {
             Uop::Alu { op: AluOp::Adc | AluOp::Sbb, .. } => CF,
             Uop::Flag { mask, set: None } => mask & ARITH,
-            Uop::MemRef { .. } | Uop::CheckLimit { .. } | Uop::Exit { .. } | Uop::ExitIf { .. } => ARITH,
+            Uop::MemRef { .. } | Uop::CheckLimit { .. } | Uop::DivWide { .. } | Uop::Exit { .. } | Uop::ExitIf { .. } => {
+                ARITH
+            }
             _ => 0,
         }
     }

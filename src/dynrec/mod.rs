@@ -500,7 +500,7 @@ mod engine {
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.
                 let data = unsafe { &*self.ctx.exit_data };
-                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_SMC) {
+                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC) {
                     // Instruction ix stopped the block: it counts as executed
                     // (the interpreter counts it before running it) but not in
                     // the instruction count, which this adds once it has dealt
@@ -581,9 +581,13 @@ mod engine {
                         index = t;
                         continue;
                     }
-                    EXIT_FAULT | EXIT_GP0 => {
+                    EXIT_FAULT | EXIT_GP0 | EXIT_DE => {
                         cpu.set_eip(data.eips[ix]);
-                        let fault = if kind == EXIT_GP0 { Fault::gp(0) } else { self.ctx.fault };
+                        let fault = match kind {
+                            EXIT_GP0 => Fault::gp(0),
+                            EXIT_DE => Fault::DE,
+                            _ => self.ctx.fault,
+                        };
                         Run::Fault { fault, phys_ip: data.phys_of(ix), page }
                     }
                     EXIT_SMC => {

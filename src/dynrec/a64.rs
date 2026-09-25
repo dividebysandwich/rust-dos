@@ -161,6 +161,8 @@ enum Slow {
     MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
     Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T },
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, lo: u32, hi: u32 },
+    /// An instruction's fault with an exit code of its own (#GP(0), #DE).
+    Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
 }
 
 struct Gen<'a> {
@@ -522,6 +524,9 @@ impl Gen<'_> {
                         ; b =>back
                     );
                 }
+                Slow::Fault { at, code, fail } => {
+                    dynasm!(self.ops ; .arch aarch64 ; =>at ; movz w0, code ; b =>fail);
+                }
                 Slow::Store { at, back, m, src, lo, hi } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at);
                     self.mov32(9, lo);
@@ -544,18 +549,13 @@ impl Gen<'_> {
         }
     }
 
-    /// Instruction ix's #GP(0) exit.
-    fn gp0(&mut self) -> DynamicLabel {
-        let (label, skip, fail) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label(), self.fail());
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; b =>skip
-            ; =>label
-            ; movz w0, EXIT_GP0
-            ; b =>fail
-            ; =>skip
-        );
-        label
+    /// Where the instruction being translated raises a fault that has an
+    /// exit code of its own (`EXIT_GP0`, `EXIT_DE`).
+    fn fault_exit(&mut self, code: u32) -> DynamicLabel {
+        let at = self.ops.new_dynamic_label();
+        let fail = self.fail();
+        self.slow.push(Slow::Fault { at, code, fail });
+        at
     }
 
     /// The physical addresses of the block's bytes after the current
@@ -690,6 +690,7 @@ impl Gen<'_> {
             Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, count),
             Uop::Imul { size, a, b } => self.imul(size, a, b),
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
+            Uop::DivWide { signed, size, t } => self.div_wide(signed, size, t),
             Uop::Flag { mask, set } => {
                 // DF is always in the CPU, the arithmetic flags in W28 once
                 // the code has changed them.
@@ -703,7 +704,7 @@ impl Gen<'_> {
             }
             Uop::CheckLimit { src } => {
                 self.value_w0(src);
-                let gp = self.gp0();
+                let gp = self.fault_exit(EXIT_GP0);
                 self.field(Access::Ldr32, 1, seg_field(Seg::CS, layout::SEG_LIMIT));
                 dynasm!(self.ops ; .arch aarch64 ; cmp w0, w1 ; b.hi =>gp);
             }
@@ -1301,6 +1302,115 @@ impl Gen<'_> {
         }
     }
 
+    /// DIV or IDIV of AX, DX:AX or EDX:EAX by t, or #DE first where the
+    /// quotient doesn't fit. The flags stay.
+    fn div_wide(&mut self, signed: bool, size: u8, t: T) {
+        let t = r(t);
+        let de = self.fault_exit(EXIT_DE);
+        let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
+        match (signed, size) {
+            // Unsigned, the quotient fits if the dividend's upper half is
+            // below the divisor, which a divisor of 0 never is.
+            (false, 1) => {
+                self.field(Access::Ldr16, 0, acc);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; lsr w1, w0, 8
+                    ; cmp w1, W(t)
+                    ; b.hs =>de
+                    ; udiv w3, w0, W(t)
+                    ; msub w4, w3, W(t), w0
+                    ; orr w3, w3, w4, lsl 8
+                );
+                self.set_gpr(Gpr::word(0), 3);
+            }
+            (false, 2) => {
+                self.field(Access::Ldr16, 0, acc);
+                self.field(Access::Ldr16, 1, high);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; cmp w1, W(t)
+                    ; b.hs =>de
+                    ; orr w0, w0, w1, lsl 16
+                    ; udiv w3, w0, W(t)
+                    ; msub w4, w3, W(t), w0
+                );
+                self.set_gpr(Gpr::word(0), 3);
+                self.set_gpr(Gpr::word(2), 4);
+            }
+            (false, _) => {
+                self.field(Access::Ldr32, 0, acc);
+                self.field(Access::Ldr32, 1, high);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; cmp w1, W(t)
+                    ; b.hs =>de
+                    ; orr x0, x0, x1, lsl 32
+                    ; mov w2, W(t)
+                    ; udiv x3, x0, x2
+                    ; msub x4, x3, x2, x0
+                );
+                self.field(Access::Str32, 3, acc);
+                self.field(Access::Str32, 4, high);
+            }
+            // Signed, the division is at least twice as wide as the
+            // guest's (and never traps), and then the quotient must fit.
+            (true, 1) => {
+                self.field(Access::Ldr16, 0, acc);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; sxtb w2, W(t)
+                    ; cbz w2, =>de
+                    ; sxth w0, w0
+                    ; sdiv w3, w0, w2
+                    ; sxtb w5, w3
+                    ; cmp w5, w3
+                    ; b.ne =>de
+                    ; msub w4, w3, w2, w0
+                    ; and w3, w3, 0xFF
+                    ; orr w3, w3, w4, lsl 8
+                );
+                self.set_gpr(Gpr::word(0), 3);
+            }
+            (true, 2) => {
+                self.field(Access::Ldr16, 0, acc);
+                self.field(Access::Ldr16, 1, high);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; sxth x2, W(t)
+                    ; cbz x2, =>de
+                    ; orr w0, w0, w1, lsl 16
+                    ; sxtw x0, w0
+                    ; sdiv x3, x0, x2
+                    ; sxth x5, w3
+                    ; cmp x5, x3
+                    ; b.ne =>de
+                    ; msub x4, x3, x2, x0
+                );
+                self.set_gpr(Gpr::word(0), 3);
+                self.set_gpr(Gpr::word(2), 4);
+            }
+            (true, _) => {
+                self.field(Access::Ldr32, 0, acc);
+                self.field(Access::Ldr32, 1, high);
+                // -2^63 / -1 gives -2^63, which doesn't fit either.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; sxtw x2, W(t)
+                    ; cbz x2, =>de
+                    ; orr x0, x0, x1, lsl 32
+                    ; sdiv x3, x0, x2
+                    ; sxtw x5, w3
+                    ; cmp x5, x3
+                    ; b.ne =>de
+                    ; msub x4, x3, x2, x0
+                );
+                self.field(Access::Str32, 3, acc);
+                self.field(Access::Str32, 4, high);
+            }
+        }
+    }
+
     fn exit_if(&mut self, cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)>) {
         let yes = self.ops.new_dynamic_label();
         // The flags go back into the CPU for both ways out; the condition
@@ -1330,7 +1440,7 @@ impl Gen<'_> {
         self.leave(Some(next), 1, true);
         dynasm!(self.ops ; .arch aarch64 ; =>yes);
         // Taken: the target must be within the CS limit.
-        let gp = self.gp0();
+        let gp = self.fault_exit(EXIT_GP0);
         self.mov32(0, taken);
         self.field(Access::Ldr32, 1, seg_field(Seg::CS, layout::SEG_LIMIT));
         dynasm!(self.ops ; .arch aarch64 ; cmp w0, w1 ; b.hi =>gp);

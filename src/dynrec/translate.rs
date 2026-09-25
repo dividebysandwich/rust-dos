@@ -51,6 +51,8 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool) -> Option<Vec<Uo
         Nop => instr.op_count() == 0,
         Imul => imul(instr, &mut u),
         Mul => mul_wide(instr, false, &mut u),
+        Div => div_wide(instr, false, &mut u),
+        Idiv => div_wide(instr, true, &mut u),
         Shld => double_shift(instr, true, &mut u),
         Shrd => double_shift(instr, false, &mut u),
         Shl | Sal => shift(instr, ShiftOp::Shl, &mut u),
@@ -420,23 +422,35 @@ fn imul(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// MUL, and the one-operand IMUL.
-fn mul_wide(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
+/// The operand of MUL, DIV and the one-operand IMUL and IDIV into T1, and
+/// its size.
+fn wide_operand(instr: &Instruction, u: &mut Vec<Uop>) -> Option<u8> {
     if instr.op_count() != 1 {
-        return false;
+        return None;
     }
     let size = match instr.op0_kind() {
-        OpKind::Register => match gpr(instr.op0_register()) {
-            Some(r) => r.size,
-            None => return false,
-        },
+        OpKind::Register => gpr(instr.op0_register())?.size,
         OpKind::Memory => instr.memory_size().size() as u8,
-        _ => return false,
+        _ => return None,
     };
-    if !matches!(size, 1 | 2 | 4) || source_t1(instr, 0, size, u).is_none() {
-        return false;
+    if !matches!(size, 1 | 2 | 4) {
+        return None;
     }
+    source_t1(instr, 0, size, u)?;
+    Some(size)
+}
+
+/// MUL, and the one-operand IMUL.
+fn mul_wide(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(size) = wide_operand(instr, u) else { return false };
     u.push(Uop::MulWide { signed, size, t: T1 });
+    true
+}
+
+/// DIV and IDIV.
+fn div_wide(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(size) = wide_operand(instr, u) else { return false };
+    u.push(Uop::DivWide { signed, size, t: T1 });
     true
 }
 

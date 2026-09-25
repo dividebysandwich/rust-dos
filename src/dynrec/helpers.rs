@@ -28,8 +28,11 @@ pub const EXIT_LIMIT: u32 = 8;
 /// The block left for a known EIP in its page through a link that isn't
 /// set yet (the index is the link's).
 pub const EXIT_UNLINKED: u32 = 9;
-/// With EXIT_FAULT, EXIT_GP0 and EXIT_SMC: the guest's arithmetic flags
-/// are in the context's `flags`, not yet in the CPU.
+/// An instruction raised #DE (a division by 0, or a quotient that
+/// doesn't fit).
+pub const EXIT_DE: u32 = 10;
+/// With EXIT_FAULT, EXIT_GP0, EXIT_DE and EXIT_SMC: the guest's arithmetic
+/// flags are in the context's `flags`, not yet in the CPU.
 pub const EXIT_FLAGS: u32 = 1 << 16;
 
 /// A memory operand handle at or above this is `SLOW + slot`: the operand
