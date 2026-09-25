@@ -22,7 +22,7 @@ use games::{GameDialog, GameField};
 use crate::games::{GameEntry, NewGame};
 
 use crate::config::{MidiSynth, Settings};
-use crate::cpu::CpuModel;
+use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickType, MAX_DEADZONE};
@@ -168,8 +168,8 @@ impl Page {
             Page::Drives | Page::Games | Page::Cheats | Page::Stats => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
             Page::Emulator => &[
-                Cycles, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick, Deadzone,
-                CaptureDir,
+                Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
+                Deadzone, CaptureDir,
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -239,6 +239,8 @@ enum Item {
     Shader,
     Monochrome,
     Cycles,
+    /// What runs the instructions: interpreter or dynamic recompiler.
+    Core,
     Cpu,
     /// The display adapter.
     Machine,
@@ -333,6 +335,7 @@ impl Item {
             Shader => "CRT shader",
             Monochrome => "Monochrome monitor",
             Cycles => "CPU speed (cycles)",
+            Core => "CPU core",
             Cpu => "Processor",
             Machine => "Video card",
             Memsize => "Memory",
@@ -374,6 +377,7 @@ impl Item {
             Item::Scale | Item::Fullscreen => frontend.window,
             Item::SoundFont => soundfonts(frontend),
             Item::CaptureDir => frontend.host_files,
+            Item::Core => crate::dynrec::AVAILABLE,
             _ => true,
         }
     }
@@ -381,7 +385,7 @@ impl Item {
     fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Filter | Shader | Cycles => Applies::Now,
+            Scale | Fullscreen | Aspect | Filter | Shader | Cycles | Core => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus => Applies::Now,
@@ -417,6 +421,12 @@ impl Item {
                 CpuSpeed::Max => "max".to_string(),
                 CpuSpeed::Fixed(n) => format!("{} per ms", n),
             },
+            Core => match s.core {
+                CoreMode::Auto => "auto (recompiler in protected mode)",
+                CoreMode::Dynamic => "dynamic recompiler",
+                CoreMode::Normal => "normal (interpreter)",
+            }
+            .to_string(),
             Cpu => match s.cpu {
                 CpuModel::I386 => "386",
                 CpuModel::I486 => "486",
@@ -498,6 +508,7 @@ impl Item {
                     n => CpuSpeed::Fixed(n),
                 };
             }
+            Core => s.core = cycle(&[CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], s.core, dir),
             Cpu => s.cpu = cycle(&[CpuModel::I386, CpuModel::I486], s.cpu, dir),
             Machine => s.machine = cycle(&crate::video::adapter::Adapter::ALL, s.machine, dir),
             Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
@@ -1315,7 +1326,19 @@ impl ConfigUi {
         let value_col = 27.min(cols / 2);
         let lines = [
             ("Frames drawn", format!("{:.0} a second, on a {:.0} Hz display", view.fps, view.refresh_hz)),
-            ("Emulated CPU", format!("{} cycles/ms, {:.1} MIPS", view.cycles_per_ms, view.mips)),
+            (
+                "Emulated CPU",
+                format!(
+                    "{} cycles/ms, {:.1} MIPS{}",
+                    view.cycles_per_ms,
+                    view.mips,
+                    match (crate::dynrec::AVAILABLE, view.recompiler) {
+                        (false, _) => "",
+                        (true, true) => ", recompiled",
+                        (true, false) => ", interpreted",
+                    }
+                ),
+            ),
             ("Host CPU use", format!("{:.0}%, the picture {:.1} ms a frame", view.cpu_use, view.render_ms)),
         ];
         for (i, (label, value)) in lines.iter().enumerate() {

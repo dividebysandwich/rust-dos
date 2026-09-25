@@ -43,6 +43,17 @@
 #cycles=max
 # Processor: 486 (the default, a 486DX with FPU) or 386.
 #cpu=486
+# What runs the programs' instructions:
+#   auto     the interpreter, and the dynamic recompiler for a program
+#            from when it switches to protected mode until it ends (the
+#            default, as in DOSBox)
+#   dynamic  the dynamic recompiler, which translates the programs' code
+#            into the host's and runs protected-mode games several times
+#            faster
+#   normal   the interpreter
+# Both run programs exactly the same way. The recompiler needs an x86-64
+# host; on others the interpreter runs everything. --core overrides it.
+#core=auto
 # The display adapter, which programs look for to pick their graphics:
 #   svga  a VGA with VESA modes up to 1024x768 (the default)
 #   vga   an IBM VGA, without VESA modes

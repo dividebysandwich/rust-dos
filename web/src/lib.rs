@@ -237,6 +237,8 @@ impl Machine {
         }
         let mut cpu = Cpu::with_memory(PathBuf::from("/"), settings.memsize);
         cpu.model = settings.cpu;
+        // (The browser has no recompiler: every core is the interpreter.)
+        cpu.core = settings.core;
         video::bios::install(&mut cpu.bus, settings.video_setup());
         cpu.bus.set_disk_settings(settings.disk);
         cpu.bus.set_mixer(settings.mixer);
@@ -428,7 +430,7 @@ impl Machine {
             self.cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed();
-        self.last_frame = Some((frame_start, FrameTimes { wall: busy, busy, render, executed }));
+        self.last_frame = Some((frame_start, FrameTimes { wall: busy, busy, render, executed, recompiler: false }));
         changed
     }
 
@@ -1057,6 +1059,9 @@ impl Host for PageHost<'_> {
             if let CpuSpeed::Fixed(n) = new.cycles {
                 self.cpu.bus.set_cycles_per_ms(n);
             }
+        }
+        if new.core != old.core {
+            self.cpu.core = new.core;
         }
         if new.disk != old.disk {
             self.cpu.bus.set_disk_settings(new.disk);

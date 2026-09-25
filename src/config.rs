@@ -10,7 +10,7 @@
 //! The settings window saves back into the file in use (`save`), changing
 //! only the lines of the settings and drives and keeping everything else.
 
-use crate::cpu::CpuModel;
+use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickSettings, JoystickType};
@@ -101,6 +101,8 @@ pub struct Config {
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
     pub cpu: Option<CpuModel>,
+    /// What runs the programs' instructions (`core`).
+    pub core: Option<CoreMode>,
     /// RAM in MB (`memsize`).
     pub memsize: Option<usize>,
     /// Expanded memory (`ems`).
@@ -486,6 +488,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.umb = Some(on),
                             None => warn(format!("invalid {} '{}' (true or false)", key, value)),
                         },
+                        "core" => match CoreMode::parse(value) {
+                            Ok(core) => config.core = Some(core),
+                            Err(e) => warn(e),
+                        },
                         "cpu" => match value.to_ascii_lowercase().as_str() {
                             "386" => config.cpu = Some(CpuModel::I386),
                             "486" => config.cpu = Some(CpuModel::I486),
@@ -693,6 +699,7 @@ pub struct Settings {
     pub capture_dir: PathBuf,
     pub cycles: CpuSpeed,
     pub cpu: CpuModel,
+    pub core: CoreMode,
     /// RAM in MB.
     pub memsize: usize,
     /// Expanded memory (EMS).
@@ -718,6 +725,7 @@ impl Default for Settings {
             capture_dir: PathBuf::from("capture"),
             cycles: CpuSpeed::Max,
             cpu: CpuModel::I486,
+            core: CoreMode::Auto,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
             ems: true,
             umb: true,
@@ -754,6 +762,7 @@ impl Settings {
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
+            core: config.core.unwrap_or(default.core),
             memsize: config.memsize.unwrap_or(default.memsize),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
@@ -800,6 +809,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
             }
             .to_string()),
         ),
+        (Emulator, "core", Some(settings.core.name().to_string())),
         (Emulator, "memsize", Some(settings.memsize.to_string())),
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
@@ -1354,13 +1364,25 @@ mod tests {
     }
 
     #[test]
+    fn core_takes_auto_dynamic_or_normal() {
+        let config = parse("[emulator]\ncore=Dynamic\n", Path::new("/cfg"), None);
+        assert_eq!(config.core, Some(CoreMode::Dynamic));
+        assert_eq!(Settings::from_config(&config).core, CoreMode::Dynamic);
+        assert_eq!(Settings::default().core, CoreMode::Auto);
+
+        let config = parse("[emulator]\ncore=fast\n", Path::new("/cfg"), None);
+        assert_eq!(config.core, None);
+        assert!(config.warnings[0].starts_with("line 2: invalid core 'fast'"), "{:?}", config.warnings);
+    }
+
+    #[test]
     fn template_is_all_comments() {
         let config = parse(TEMPLATE, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert!(config.drives.is_empty());
         assert!(config.autoexec.is_empty());
         assert_eq!(config.scale, None);
-        assert_eq!(config.cycles, None);
+        assert_eq!((config.cycles, config.core), (None, None));
         assert_eq!((config.ems, config.umb), (None, None));
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
         assert_eq!((config.shader, config.monochrome, config.machine), (None, None, None));
@@ -1456,6 +1478,7 @@ mod tests {
             capture_dir: PathBuf::from("/home/u/dos captures"),
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
+            core: CoreMode::Dynamic,
             memsize: 32,
             ems: false,
             umb: false,

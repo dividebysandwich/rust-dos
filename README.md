@@ -20,6 +20,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   upper memory blocks with `LOADHIGH` (`LH`)
 * 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
   as DOS/4GW (Descent, Heretic)
+* A dynamic recompiler that translates protected-mode programs' code into
+  x86-64 host code and runs it exactly as the interpreter would (see
+  [docs/dynrec.md](docs/dynrec.md))
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
   General MIDI through the MPU-401 with a SoundFont or the Gravis patches
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
@@ -119,6 +122,17 @@ D:
     overrides it.
   * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU)
     or `386`.
+  * `core` is what runs the programs' instructions: `auto` (the default)
+    runs the interpreter, and the dynamic recompiler for a program from the
+    moment it switches to protected mode until it ends, as DOSBox's
+    `core=auto` does; `dynamic` always runs the recompiler, and `normal`
+    the interpreter. The recompiler translates blocks of the program's code
+    into the host's own and runs CPU-bound code several times faster. Both
+    run programs exactly the same way, instruction for instruction, so
+    there is no need to switch back for a game that misbehaves. The
+    recompiler needs an x86-64 host; on others and in the browser the
+    interpreter runs everything. `--core` overrides it. See
+    [docs/dynrec.md](docs/dynrec.md).
   * `machine` is the display adapter programs find when they look for
     one, and so the graphics they choose: `svga` (the default, a VGA with
     VESA modes up to 1024x768), `vga` (an IBM VGA, without VESA modes),

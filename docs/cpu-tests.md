@@ -7,6 +7,9 @@ protected mode, paging, privilege levels, virtual-8086 mode and task
 switches. The regular test suite covers protected mode as well, in
 `tests/pm_tests.rs` (see [Protected-mode unit tests](#protected-mode-unit-tests)).
 
+All of them run on the dynamic recompiler as well (see
+[On the dynamic recompiler](#on-the-dynamic-recompiler)).
+
 ## SingleStepTests/80386
 
 `tests/sst386.rs` runs the [SingleStepTests/80386](https://github.com/SingleStepTests/80386)
@@ -257,3 +260,30 @@ the I/O permission bitmap, paging with accessed and dirty bits, page faults,
 the TLB and INVLPG, double faults and triple faults, hardware interrupts in
 protected mode, task switches, virtual-8086 mode, LAR/LSL/VERR/VERW/ARPL,
 and the return to real mode with a 4 GB DS.
+
+## On the dynamic recompiler
+
+`RUST_DOS_CORE=dynamic` makes every CPU a test creates run on the dynamic
+recompiler (see [dynrec.md](dynrec.md)), and the suites above check its
+code as they check the interpreter:
+
+```sh
+RUST_DOS_CORE=dynamic cargo test --release
+RUST_DOS_CORE=dynamic SST386_DIR=target/sst386/v1_ex_real_mode \
+  cargo test --release --test sst386 -- --ignored --nocapture
+RUST_DOS_CORE=dynamic TEST386_DIR=target/test386 \
+  cargo test --release --test test386 -- --ignored --nocapture
+```
+
+- **SingleStepTests.** They step the CPU with `Cpu::step`, which on the
+  recompiler translates one-instruction blocks. So each test's
+  instruction goes through the code generator: natively translated if it
+  is one of the forms the recompiler translates, else through a call of
+  its handler. The report's header counts the translated blocks run, and
+  the report must be the interpreter's, failures and all.
+- **test386.** `test386_rom_batched` runs mostly in translated blocks,
+  linked to each other. Both runs must reach POST FFh after the same
+  number of instructions as on the interpreter, and the harness prints
+  the recompiler's counts.
+- **The protected-mode unit tests' batched runs.** They use a hook that
+  lets the recompiler run blocks between its calls.

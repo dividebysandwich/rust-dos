@@ -16,13 +16,14 @@ pub const HISTORY: usize = 120;
 /// One of the frontend's frames: how long it was, how long the emulator
 /// worked in it (running the machine and drawing the picture, not waiting
 /// for the next frame), how long of that drawing the picture took, and
-/// the instructions it ran.
+/// the instructions it ran, and whether the dynamic recompiler ran them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameTimes {
     pub wall: Duration,
     pub busy: Duration,
     pub render: Duration,
     pub executed: u64,
+    pub recompiler: bool,
 }
 
 /// The numbers and graphs of the Stats page.
@@ -33,8 +34,10 @@ pub struct StatsView {
     pub fps: f32,
     pub refresh_hz: f32,
     pub cycles_per_ms: u32,
-    /// Emulated instructions a second, in millions.
+    /// Emulated instructions a second, in millions, and whether the
+    /// dynamic recompiler ran them (else the interpreter).
     pub mips: f32,
+    pub recompiler: bool,
     /// The share of the host's time the emulator takes, in percent.
     pub cpu_use: f32,
     /// Drawing the picture, in ms a frame.
@@ -76,6 +79,7 @@ impl Stats {
         self.frames += 1;
         self.view.refresh_hz = bus.vga.peek_timing().hz() as f32;
         self.view.cycles_per_ms = bus.clock.cycles_per_ms();
+        self.view.recompiler = times.recompiler;
         if self.wall < WINDOW {
             return;
         }
@@ -118,6 +122,7 @@ mod tests {
             busy: Duration::from_millis(busy_ms),
             render: Duration::from_micros(500),
             executed: 100_000,
+            recompiler: false,
         }
     }
 

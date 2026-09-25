@@ -712,9 +712,33 @@ impl DebugHub {
         }
     }
 
-    fn stats_json(&self) -> Value {
+    fn stats_json(&self, cpu: &Cpu) -> Value {
         let st = &self.stats;
+        let d = cpu.dynrec.stats();
         json!({
+            // The `core` setting, and whether the dynamic recompiler runs
+            // the instructions now.
+            "core": cpu.core.name(),
+            "recompiler": cpu.dynamic_active(),
+            // The recompiler's counts since start: blocks translated and
+            // their instructions (native: into host code; the others call
+            // their interpreter handlers), blocks translated now and their
+            // host code, flushes of all of it, blocks entered from the
+            // execution loop, and blocks that stopped at once for the timer
+            // deadline, or because their code had changed (stale) or
+            // changed under them (smc).
+            "dynrec": {
+                "blocks": d.blocks,
+                "instructions": d.instructions,
+                "native": d.native,
+                "live_blocks": d.live_blocks,
+                "code_bytes": d.code_bytes,
+                "flushes": d.flushes,
+                "runs": d.runs,
+                "deadline": d.deadline,
+                "stale": d.stale,
+                "smc": d.smc,
+            },
             // Host speed while executing guest code, excluding idle skips,
             // rendering and frame pacing.
             "mips": (st.mips * 100.0).round() / 100.0,
@@ -895,7 +919,7 @@ impl DebugHub {
                 cpu.bus.audio_peak = 0;
                 Reply::Json(status)
             }
-            Cmd::Stats => Reply::Json(self.stats_json()),
+            Cmd::Stats => Reply::Json(self.stats_json(cpu)),
             Cmd::Screenshot => {
                 // Answered by the next capture_frame call.
                 self.frame_waiters.push(req.reply);

@@ -193,6 +193,12 @@ fn settings_change_live() {
     assert!(ui.edit.is_some());
     ui.key(Esc, &mut host);
 
+    // The CPU core changes at once.
+    ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Core).unwrap();
+    keys(&mut ui, &mut host, &[Right]);
+    assert_eq!(host.applied.last().unwrap().core, crate::cpu::CoreMode::Dynamic);
+    assert!(!status(&ui).0.contains("prompt"), "{:?}", status(&ui));
+
     // Memory waits for the next start.
     ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Memsize).unwrap();
     keys(&mut ui, &mut host, &[Right]);
@@ -464,6 +470,7 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
         refresh_hz: 70.0,
         cycles_per_ms: 100_000,
         mips: 98.5,
+        recompiler: true,
         cpu_use: 40.0,
         render_ms: 0.4,
         fps_history: vec![30.0, 35.0, 70.0],

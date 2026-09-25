@@ -10,7 +10,7 @@ use crate::audio::pump_audio;
 use crate::config::{Settings, SoundConfig};
 use crate::config_ui::osd::Osd;
 use crate::config_ui::{ConfigUi, Host, UiKey};
-use crate::cpu::{Cpu, CpuModel};
+use crate::cpu::{CoreMode, Cpu, CpuModel};
 use crate::disk::{DriveInfo, DriveKind, LASTDRIVE};
 use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
@@ -68,6 +68,12 @@ struct Args {
     /// cycles]
     #[arg(long, value_name = "N|max", value_parser = timer::CpuSpeed::parse)]
     cycles: Option<timer::CpuSpeed>,
+
+    /// What runs the programs' instructions: auto (the interpreter, and the
+    /// dynamic recompiler for protected-mode programs), dynamic or normal
+    /// [default: auto, or the config file's core]
+    #[arg(long, value_name = "auto|dynamic|normal", value_parser = CoreMode::parse)]
+    core: Option<CoreMode>,
 
     /// Launch a game at startup: a profile in the games folder beside the
     /// configuration file, by its file name or its name
@@ -136,6 +142,9 @@ fn main() -> Result<(), String> {
     if let Some(cycles) = args.cycles {
         settings.cycles = cycles;
     }
+    if let Some(core) = args.core {
+        settings.core = core;
+    }
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
     let startup_game = match &args.game {
@@ -193,6 +202,7 @@ fn main() -> Result<(), String> {
 
     let mut cpu = create_cpu(&args, &config, memory_mb);
     cpu.model = settings.cpu;
+    cpu.core = settings.core;
     video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.set_disk_settings(settings.disk);
     cpu.bus.set_mixer(settings.mixer);
@@ -877,7 +887,16 @@ fn main() -> Result<(), String> {
             cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed();
-        last_frame = Some((frame_start, rust_dos::stats::FrameTimes { wall: busy, busy, render: render_time, executed }));
+        last_frame = Some((
+            frame_start,
+            rust_dos::stats::FrameTimes {
+                wall: busy,
+                busy,
+                render: render_time,
+                executed,
+                recompiler: cpu.dynamic_active(),
+            },
+        ));
         pacer.wait_for_next_frame();
     }
 
@@ -1110,6 +1129,9 @@ impl Host for MainHost<'_, '_> {
             if let CpuSpeed::Fixed(n) = new.cycles {
                 self.cpu.bus.set_cycles_per_ms(n);
             }
+        }
+        if new.core != old.core {
+            self.cpu.core = new.core;
         }
         if new.disk != old.disk {
             self.cpu.bus.set_disk_settings(new.disk);
