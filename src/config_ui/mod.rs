@@ -978,7 +978,7 @@ impl ConfigUi {
 
     fn save(&mut self, host: &mut dyn Host) {
         let Some(path) = &self.config_file else {
-            self.error("No configuration file to save to (rust-dos started with --no-config)");
+            self.error("No configuration file to save to (Rust-DOS started with --no-config)");
             return;
         };
         let shown = contract_home(path, self.home.as_deref());
@@ -1017,7 +1017,7 @@ impl ConfigUi {
             Err(problem) => self.error(problem),
             Ok(Some(note)) => self.info(note),
             Ok(None) if item.applies() == Applies::NextStart => {
-                self.info("Takes effect the next time rust-dos starts (F2 saves it)")
+                self.info("Takes effect the next time Rust-DOS starts (F2 saves it)")
             }
             Ok(None) => {}
         }
@@ -1063,7 +1063,7 @@ impl ConfigUi {
         match (key, selected) {
             (UiKey::Insert, _) | (UiKey::Enter, None) => self.new_drive(host),
             (UiKey::Enter, Some(info)) if info.kind == DriveKind::Virtual => {
-                self.info(format!("Drive {}: is built into rust-dos", info.letter()));
+                self.info(format!("Drive {}: is built into Rust-DOS", info.letter()));
             }
             (UiKey::Enter, Some(info)) if !self.frontend.host_files => self.choose_image(Some(info.drive), host),
             (UiKey::Enter, Some(info)) => {
@@ -1246,7 +1246,7 @@ impl ConfigUi {
 
         // Frame, title, tabs and separators.
         g.line(0, 0xC9, 0xCD, 0xBB, draw::BORDER);
-        let title = " rust-dos settings ";
+        let title = " Rust-DOS settings ";
         g.text((cols - title.len()) / 2, 0, title, draw::BRIGHT);
         for row in 1..rows - 1 {
             g.char(0, row, 0xBA, draw::BORDER);
@@ -1423,7 +1423,7 @@ impl ConfigUi {
             g.text(6, row, info.kind.name(), fg);
             let mut path = match info.image.as_ref().or(info.root.as_ref()) {
                 Some(path) => contract_home(path, self.home.as_deref()),
-                None => "(built into rust-dos)".to_string(),
+                None => "(built into Rust-DOS)".to_string(),
             };
             if info.images.len() > 1 {
                 path = format!("({}/{}) {}", info.image_index + 1, info.images.len(), path);
