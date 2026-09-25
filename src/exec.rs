@@ -179,6 +179,9 @@ impl Fetch {
 /// EXIT turns the machine off.
 /// `hot` enables the per-instruction `ExecHook::before_exec` call.
 pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReason {
+    if crate::savestate::machine::chaos() {
+        crate::savestate::machine::reload(cpu);
+    }
     let mut fetch = Fetch::new(cpu);
     // Copies of the loop: the one without the per-instruction hook doesn't
     // test for it on every instruction, and the interpreter's doesn't look

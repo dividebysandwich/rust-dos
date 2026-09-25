@@ -756,3 +756,7 @@ fn coalesce_chain(bus: &mut Bus, start: u16) {
         }
     }
 }
+
+// Whether there is upper memory comes with the configuration, and with it
+// its size; programs link it and unlink it.
+crate::state_fields!(Umb { linked } skip { size });

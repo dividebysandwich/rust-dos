@@ -334,6 +334,15 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     true
 }
 
+crate::state_fields!(MouseState {
+    installed, hide_counter, x, y, buttons, min_x, max_x, min_y, max_y,
+    press_count, press_x, press_y, release_count, release_x, release_y,
+    mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
+    callback_mask, callback_cs, callback_ip, pending_callback_events,
+    last_callback_mickey_x, last_callback_mickey_y, rest_x, rest_y,
+});
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

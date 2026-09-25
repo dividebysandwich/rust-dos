@@ -552,3 +552,5 @@ pub fn install_device(bus: &mut Bus, nul: usize) {
         bus.write_16(nul + 2, 0xF000);
     }
 }
+
+crate::state_fields!(MscdexState { request, changed, locked });

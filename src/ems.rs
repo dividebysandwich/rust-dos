@@ -807,3 +807,6 @@ fn move_or_exchange(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
     }
     if overlap { MOVE_OVERLAP } else { OK }
 }
+
+crate::state_fields!(Handle { pages, name });
+crate::state_fields!(Ems { handles, mapped, saved });

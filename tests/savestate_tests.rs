@@ -406,3 +406,82 @@ fn a_loaded_machine_sounds_the_same() {
     }
     assert!(loudest > 1000, "there is something to hear: {}", loudest);
 }
+
+/// INT 21h with AX, BX, CX and DS:DX at 2000:0000, with `text` there as
+/// an ASCIIZ string. Returns AX, or the error with CF set.
+fn dos(cpu: &mut Cpu, function: u16, bx_value: u16, cx_value: u16, text: &str) -> Result<u16, u16> {
+    for (i, b) in text.bytes().chain(std::iter::once(0)).enumerate() {
+        cpu.bus.write_8(0x20000 + i, b);
+    }
+    cpu.set_ds(0x2000);
+    cpu.set_dx(0);
+    cpu.set_ax(function);
+    cpu.set_bx(bx_value);
+    cpu.set_cx(cx_value);
+    rust_dos::interrupts::int21::handle(cpu);
+    if cpu.get_cpu_flag(rust_dos::cpu::CpuFlags::CF) { Err(cpu.ax()) } else { Ok(cpu.ax()) }
+}
+
+/// Read `count` bytes from `handle`.
+fn read(cpu: &mut Cpu, handle: u16, count: u16) -> Vec<u8> {
+    let read = dos(cpu, 0x3F00, handle, count, "").unwrap() as usize;
+    (0..read).map(|i| cpu.bus.read_8(0x20000 + i)).collect()
+}
+
+#[test]
+fn a_loaded_machine_has_its_drives_files_and_memory() {
+    fix_time();
+    let data: Vec<u8> = (0..1024u32).map(|i| i as u8).collect();
+    let dir = scratch("files", &[("DATA.BIN", &data), ("TEMP.BIN", b"gone soon")]);
+    fs::create_dir_all(dir.join("SUB")).unwrap();
+    let d_dir = scratch("files_d", &[("ON_D.TXT", b"d")]);
+    let e_dir = scratch("files_e", &[]);
+    let machine = || {
+        let mut cpu = machine_in(&dir);
+        rust_dos::ems::set_enabled(&mut cpu.bus, true);
+        cpu
+    };
+    let mut a = machine();
+    a.bus.disk.mount(3, &d_dir, Default::default(), false).unwrap();
+    dos(&mut a, 0x3B00, 0, 0, "SUB").unwrap();
+    let data_handle = dos(&mut a, 0x3D00, 0, 0, "..\\DATA.BIN").unwrap();
+    assert_eq!(read(&mut a, data_handle, 10), &data[..10]);
+    let duplicate = dos(&mut a, 0x4500, data_handle, 0, "").unwrap();
+    let temp_handle = dos(&mut a, 0x3D02, 0, 0, "C:\\TEMP.BIN").unwrap();
+    let on_d = dos(&mut a, 0x3D00, 0, 0, "D:ON_D.TXT").unwrap();
+    // Expanded memory with a page mapped and written.
+    a.set_bx(4);
+    a.set_ax(0x4300);
+    rust_dos::ems::handle(&mut a);
+    let ems_handle = a.dx();
+    a.set_bx(2);
+    a.set_ax(0x4401);
+    rust_dos::ems::handle(&mut a);
+    assert_eq!(a.get_ah(), 0);
+    a.bus.write_8(0xE4000, 0x5A);
+
+    let state = machine::save(&a);
+    fs::remove_file(dir.join("TEMP.BIN")).unwrap();
+    let mut b = machine();
+    b.bus.disk.mount(4, &e_dir, Default::default(), false).unwrap();
+    machine::load(&mut b, &state).unwrap();
+
+    // The drives as they were: D: mounted, E: gone, SUB current on C:.
+    assert!(b.bus.disk.is_mounted(3) && !b.bus.disk.is_mounted(4));
+    assert_eq!(b.bus.disk.get_current_directory_of(2).as_deref(), Some("SUB"));
+    // The file and its duplicate share their position again; the file
+    // that went is closed.
+    assert_eq!(read(&mut b, duplicate, 5), &data[10..15]);
+    assert_eq!(read(&mut b, data_handle, 5), &data[15..20]);
+    assert_eq!(read(&mut b, on_d, 5), b"d");
+    assert!(!b.bus.disk.is_open(temp_handle));
+    // The expanded memory's handle and its page in the frame.
+    let handles = b.bus.ems.as_ref().unwrap().handles();
+    assert!(handles.iter().any(|&(h, pages, _)| h == ems_handle && pages == 4), "{:?}", handles);
+    assert_eq!(b.bus.read_8(0xE4000), 0x5A);
+    b.set_bx(0);
+    b.set_ax(0x4401);
+    b.set_dx(ems_handle);
+    rust_dos::ems::handle(&mut b);
+    assert_eq!(b.get_ah(), 0, "the handle can be mapped");
+}

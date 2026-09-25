@@ -11,6 +11,7 @@ const RAM_VERSION: u16 = 1;
 const CORE_VERSION: u16 = 1;
 const VIDEO_VERSION: u16 = 1;
 const SOUND_VERSION: u16 = 1;
+const DOS_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -74,14 +75,13 @@ impl Bus {
             tandy_sound,
             lpt_dac,
             cdaudio,
-            // Not saved yet: DOS's memory managers, drives and devices.
-            xms: _,
-            ems: _,
-            umb: _,
-            mouse: _,
-            mscdex: _,
-            disk: _,
-            disk_io: _,
+            xms,
+            ems,
+            umb,
+            mouse,
+            mscdex,
+            disk,
+            disk_io,
             // Set from the configuration, which a state carries in its
             // header.
             tandy_mode: _,
@@ -128,6 +128,12 @@ impl Bus {
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
+        w.section(b"DOS ", DOS_VERSION, |w| {
+            save_all!(w; xms, mouse, mscdex, disk_io);
+            save_device(ems, w);
+            save_device(umb, w);
+            disk.save_state(w);
+        });
         w.section(b"SOUN", SOUND_VERSION, |w| {
             save_all!(w; opl, mpu, gus_line, tandy_sound);
             save_device(sb, w);
@@ -138,8 +144,9 @@ impl Bus {
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
-    /// allocation, and must be as large as the saved one.
-    pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<()> {
+    /// allocation, and must be as large as the saved one. Returns the
+    /// files open in the state that couldn't be opened again.
+    pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
         let Bus {
             ram,
             keyboard_buffer,
@@ -191,13 +198,13 @@ impl Bus {
             tandy_sound,
             lpt_dac,
             cdaudio,
-            xms: _,
-            ems: _,
-            umb: _,
-            mouse: _,
-            mscdex: _,
+            xms,
+            ems,
+            umb,
+            mouse,
+            mscdex,
             disk,
-            disk_io: _,
+            disk_io,
             tandy_mode: _,
             ultrasnd_drive: _,
             irq_levels: _,
@@ -245,13 +252,19 @@ impl Bus {
         );
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        // The drives before the sound: the CD playing is in one.
+        let mut section = r.section(b"DOS ", DOS_VERSION)?;
+        load_all!(&mut section; xms, mouse, mscdex, disk_io);
+        load_device(ems, "expanded memory manager", &mut section)?;
+        load_device(umb, "upper memory", &mut section)?;
+        let lost = disk.load_state(&mut section)?;
         let mut section = r.section(b"SOUN", SOUND_VERSION)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
-        Ok(())
+        Ok(lost)
     }
 
     /// Bring what is worked out from the saved state up to date after a
@@ -262,12 +275,19 @@ impl Bus {
     /// setup again, and the sound rendered before the load is dropped with
     /// what rang on of it in the mixer.
     pub(crate) fn after_load(&mut self) {
-        self.page_gen.fill(0);
-        self.update_irq_levels();
-        self.vga.after_load();
+        self.after_reload();
         self.opl.after_load();
         self.mpu.after_load();
         self.mixer.clear_tails();
         self.audio_out.clear();
+    }
+
+    /// `after_load` for a state loaded into the machine that saved it,
+    /// whose FM chip, synthesizer and sound output are still those of the
+    /// state.
+    pub(crate) fn after_reload(&mut self) {
+        self.page_gen.fill(0);
+        self.update_irq_levels();
+        self.vga.after_load();
     }
 }

@@ -39,7 +39,7 @@ const ERR_LOCKED: u8 = 0xAB;
 const ERR_NO_UMB: u8 = 0xB1;
 const ERR_INVALID_UMB: u8 = 0xB2;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Block {
     base: u32,
     /// Size in KB.
@@ -441,3 +441,6 @@ fn move_block(cpu: &mut Cpu) {
         (Err(e), _) | (_, Err(e)) => fail(cpu, e),
     }
 }
+
+crate::state_fields!(Block { base, size_kb, locks });
+crate::state_fields!(Xms { blocks, hma_allocated, a20_local, a20_global, ems_pages });

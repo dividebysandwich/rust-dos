@@ -209,6 +209,11 @@ pub fn wait(cpu: &mut Cpu) {
     }
 }
 
+// The delay a disk access still owes; how long they take is the
+// configuration's.
+crate::state_fields!(DiskIo { pending_ns } skip { settings });
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

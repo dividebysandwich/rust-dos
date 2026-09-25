@@ -13,6 +13,8 @@ use crate::fat::{self, EntryRef, FatVolume};
 use crate::memfs::{Bytes, MemFs, Node};
 use crate::mount::MountSpec;
 
+mod state;
+
 // DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
 pub const FIRST_USER_HANDLE: u16 = 5;
 /// A job file table has at most 255 slots (0xFF marks an unused one).
@@ -404,6 +406,12 @@ struct OpenFile {
     owner: u16,
     /// Tells the file apart from others (`DiskController::file_key`).
     key: u64,
+    /// The file as it was opened, for a save state to open it again: its
+    /// full DOS path and access mode, and the open it came from, which
+    /// the handles duplicated from it share with it.
+    path: String,
+    mode: u8,
+    group: u64,
 }
 
 /// What an open handle reads and writes.
@@ -467,10 +475,11 @@ impl FileData {
 }
 
 /// A DOS character device a program opened by name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CharDevice {
     /// NUL, and the printer and serial ports, which nothing is attached
     /// to: reads find nothing, writes vanish.
+    #[default]
     Nul,
     /// CON: writes go to the screen.
     Con,
@@ -509,6 +518,8 @@ pub struct DosDirEntry {
 pub struct DiskController {
     // Map DOS Handle (u16) -> Rust File Object
     open_files: HashMap<u16, OpenFile>,
+    /// The number the next open gets (`OpenFile::group`).
+    next_group: u64,
 
     // File System State
     drives: [Option<Drive>; 26],
@@ -552,6 +563,7 @@ impl DiskController {
 
         Self {
             open_files: HashMap::new(),
+            next_group: 0,
             drives,
             current_drive: DRIVE_C, // Default to C:
             emm_device: false,
@@ -1319,6 +1331,14 @@ impl DiskController {
     /// Lowest unused handle, like DOS taking the first free job file table
     /// slot. Programs expect small numbers: the Microsoft C runtime rejects
     /// handles at or above its 20-entry file table.
+    /// A file just opened as `filename` with access `mode`, from an open
+    /// of its own.
+    fn opened(&mut self, data: OpenData, drive: u8, owner: u16, key: u64, filename: &str, mode: u8) -> OpenFile {
+        let path = self.qualify_path(filename).unwrap_or_else(|| filename.to_ascii_uppercase());
+        self.next_group += 1;
+        OpenFile { data, drive, owner, key, path, mode, group: self.next_group }
+    }
+
     fn free_handle(&self) -> Result<u16, u8> {
         (FIRST_USER_HANDLE..HANDLE_LIMIT)
             .find(|h| !self.open_files.contains_key(h))
@@ -1350,10 +1370,8 @@ impl DiskController {
         // create.
         if let Some(device) = self.device(filename) {
             let handle = self.free_handle()?;
-            self.open_files.insert(
-                handle,
-                OpenFile { data: OpenData::Device(device), drive: self.current_drive, owner, key: 0 },
-            );
+            let file = self.opened(OpenData::Device(device), self.current_drive, owner, 0, filename, mode);
+            self.open_files.insert(handle, file);
             return Ok(handle);
         }
         // Files held in memory are read-only: read/write opens are
@@ -1376,7 +1394,8 @@ impl DiskController {
             }
             let handle = self.free_handle()?;
             let key = self.file_key(filename);
-            self.open_files.insert(handle, OpenFile { data, drive, owner, key });
+            let file = self.opened(data, drive, owner, key, filename, mode);
+            self.open_files.insert(handle, file);
             return Ok(handle);
         }
 
@@ -1406,7 +1425,8 @@ impl DiskController {
             let at = entry.at.ok_or(0x05u8)?;
             let data = OpenData::Fat { volume, at, pos: Rc::new(Cell::new(0)), write };
             let key = self.file_key(filename);
-            self.open_files.insert(handle, OpenFile { data, drive, owner, key });
+            let file = self.opened(data, drive, owner, key, filename, mode);
+            self.open_files.insert(handle, file);
             return Ok(handle);
         }
 
@@ -1445,15 +1465,8 @@ impl DiskController {
         match options.open(path) {
             Ok(file) => {
                 let key = self.file_key(filename);
-                self.open_files.insert(
-                    handle,
-                    OpenFile {
-                        data: OpenData::Host(file),
-                        drive,
-                        owner,
-                        key,
-                    },
-                );
+                let file = self.opened(OpenData::Host(file), drive, owner, key, filename, mode);
+                self.open_files.insert(handle, file);
                 Ok(handle)
             }
             Err(_) => Err(0x02),
@@ -1606,6 +1619,9 @@ impl DiskController {
             drive: open.drive,
             owner: open.owner,
             key: open.key,
+            path: open.path.clone(),
+            mode: open.mode,
+            group: open.group,
         };
         let target = match new_handle {
             Some(h) if h < HANDLE_LIMIT => h,
