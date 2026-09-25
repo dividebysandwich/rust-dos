@@ -52,6 +52,7 @@ pub mod mt32;
 pub mod opl;
 pub mod pic;
 pub mod recorder;
+pub mod savestate;
 pub mod sb;
 pub mod shell;
 pub mod sn76489;
