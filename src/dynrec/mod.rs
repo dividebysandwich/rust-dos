@@ -197,12 +197,14 @@ mod engine {
         }
     }
 
-    /// A translated block: its code and its guest block (owned: freed
-    /// when the block is).
+    /// A translated block: its code, its guest block (owned: freed when the
+    /// block is), and the links of other blocks to it.
     struct Block {
         key: Key,
         code: *const u8,
         data: NonNull<BlockData>,
+        /// Blocks (index, link) whose link may lead here.
+        backlinks: Vec<(u32, u8)>,
     }
 
     impl Drop for Block {
@@ -289,10 +291,28 @@ mod engine {
             Some(index)
         }
 
+        /// The block for `key` at `at`, translating it if need be; None if
+        /// no block starts there.
+        fn find(&mut self, cpu: &Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
+            if let Some(index) = self.lookup(key) {
+                return Some(index);
+            }
+            let none = key.index() >> (FRONT_BITS - NONE_BITS);
+            let gens = instr_gens(&cpu.bus.page_gen, key.phys);
+            if self.none[none] == Some((key, gens)) {
+                return None;
+            }
+            let found = self.translate(cpu, at, key, stats);
+            if found.is_none() {
+                self.none[none] = Some((key, gens));
+            }
+            found
+        }
+
         /// Translate the block at `at`. None if no block starts there.
         fn translate(&mut self, cpu: &Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
-            let max = if key.mode & 2 != 0 { 1 } else { MAX_BLOCK };
-            let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max)?;
+            let single = key.mode & 2 != 0;
+            let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK })?;
             let stack32 = key.mode & 4 != 0;
             let items: Vec<_> = (0..data.count())
                 .map(|ix| {
@@ -301,17 +321,17 @@ mod engine {
                 })
                 .collect();
             let native = items.iter().filter(|i| i.is_some()).count() as u64;
-            let data = NonNull::from(Box::leak(Box::new(data)));
+            let mut data = NonNull::from(Box::leak(Box::new(data)));
             // SAFETY: just made, and owned by the block from here on.
-            let bytes = backend::block(unsafe { data.as_ref() }, &items);
-            let code = match self.mem.add(&bytes) {
-                Some(code) => code,
+            let code = backend::block(unsafe { data.as_ref() }, &items, !single);
+            let base = match self.mem.add(&code.bytes) {
+                Some(base) => base,
                 None => {
                     // Full: start over (nothing translated is running). A
                     // block too big for all of it isn't translated.
                     self.flush(stats);
-                    match self.mem.add(&bytes) {
-                        Some(code) => code,
+                    match self.mem.add(&code.bytes) {
+                        Some(base) => base,
                         None => {
                             drop(unsafe { Box::from_raw(data.as_ptr()) });
                             return None;
@@ -319,38 +339,53 @@ mod engine {
                     }
                 }
             };
-            stats.blocks += 1;
-            stats.instructions += unsafe { data.as_ref() }.count() as u64;
-            stats.native += native;
-            stats.live_blocks += 1;
-            stats.code_bytes = self.mem.used() as u64;
-            let block = Block { key, code, data };
-            let index = match self.free.pop() {
-                Some(index) => {
-                    self.blocks[index as usize] = Some(block);
-                    index
+            let index = self.free.pop().unwrap_or(self.blocks.len() as u32);
+            {
+                // SAFETY: owned by the block, and not in use.
+                let data = unsafe { data.as_mut() };
+                for (k, stub) in code.stubs.iter().enumerate() {
+                    if let Some(stub) = stub {
+                        data.stubs[k] = base as usize + stub;
+                        data.links[k] = data.stubs[k];
+                    }
                 }
-                None => {
-                    self.blocks.push(Some(block));
-                    self.blocks.len() as u32 - 1
-                }
-            };
+                data.id = index;
+                stats.blocks += 1;
+                stats.instructions += data.count() as u64;
+                stats.native += native;
+                stats.live_blocks += 1;
+                stats.code_bytes = self.mem.used() as u64;
+            }
+            let block = Block { key, code: base, data, backlinks: Vec::new() };
+            if index as usize == self.blocks.len() {
+                self.blocks.push(Some(block));
+            } else {
+                self.blocks[index as usize] = Some(block);
+            }
             self.map.insert(key, index);
             self.front[key.index()] = index + 1;
             Some(index)
         }
 
-        /// Drop a block whose bytes changed.
+        /// Drop a block whose bytes changed, and the links to it.
         fn retire(&mut self, index: u32, stats: &mut DynStats) {
-            if let Some(block) = self.blocks[index as usize].take() {
-                self.map.remove(&block.key);
-                let slot = block.key.index();
-                if self.front[slot] == index + 1 {
-                    self.front[slot] = 0;
+            let Some(block) = self.blocks[index as usize].take() else { return };
+            for &(from, k) in &block.backlinks {
+                if let Some(source) = self.blocks[from as usize].as_mut() {
+                    // SAFETY: owned by the block, and not in use.
+                    let data = unsafe { source.data.as_mut() };
+                    if data.links[k as usize] == block.code as usize {
+                        data.links[k as usize] = data.stubs[k as usize];
+                    }
                 }
-                self.free.push(index);
-                stats.live_blocks -= 1;
             }
+            self.map.remove(&block.key);
+            let slot = block.key.index();
+            if self.front[slot] == index + 1 {
+                self.front[slot] = 0;
+            }
+            self.free.push(index);
+            stats.live_blocks -= 1;
         }
 
         pub fn run(&mut self, cpu: &mut Cpu, at: &At, single: bool, stats: &mut DynStats) -> Run {
@@ -359,38 +394,17 @@ mod engine {
                 self.flush(stats);
                 self.model = cpu.model;
             }
-            let key = Key {
-                phys: at.phys_ip as u32,
-                eip: at.eip,
-                mode: at.code32 as u8 | (single as u8) << 1 | (cpu.stack32() as u8) << 2,
-            };
-            let mut index = match self.lookup(key) {
-                Some(index) => index,
-                None => {
-                    let none = key.index() >> (FRONT_BITS - NONE_BITS);
-                    let gens = instr_gens(&cpu.bus.page_gen, key.phys);
-                    if self.none[none] == Some((key, gens)) {
-                        return Run::Interpret;
-                    }
-                    match self.translate(cpu, at, key, stats) {
-                        Some(index) => index,
-                        None => {
-                            self.none[none] = Some((key, gens));
-                            return Run::Interpret;
-                        }
-                    }
-                }
-            };
+            let mode = at.code32 as u8 | (single as u8) << 1 | (cpu.stack32() as u8) << 2;
+            let key = Key { phys: at.phys_ip as u32, eip: at.eip, mode };
+            let Some(mut index) = self.find(cpu, at, key, stats) else { return Run::Interpret };
+            // A block that stops before its first instruction (the timer
+            // deadline, the CS limit, changed bytes) leaves the instruction
+            // at EIP to the interpreter if nothing ran before it, else to
+            // the execution loop, which checks the deadline first.
+            let start = cpu.bus.clock.icount;
             let mut retried = false;
             loop {
                 let block = self.blocks[index as usize].as_ref().unwrap();
-                // SAFETY: the block owns its data.
-                let data = unsafe { block.data.as_ref() };
-                if data.limit_need > at.cs_limit as u64 {
-                    // The interpreter would fetch part of it past the code
-                    // window.
-                    return Run::Interpret;
-                }
                 self.ctx.ram = cpu.bus.ram().as_ptr();
                 self.ctx.ram_len = cpu.bus.ram().len() as u64;
                 self.ctx.page_gen = cpu.bus.page_gen.as_ptr();
@@ -404,18 +418,26 @@ mod engine {
                     return Run::Panic(payload);
                 }
                 let (kind, ix) = (ret as u32 & 0xFF, (ret as u32 >> 8) as usize);
-                // SAFETY: the block the code returned from is still alive:
-                // nothing retires blocks while code runs.
+                // SAFETY: the block the code returned from (the one entered,
+                // or one linked from it) is still alive: nothing retires
+                // blocks while code runs.
                 let data = unsafe { &*self.ctx.exit_data };
+                let exited = data.id;
+                let none_ran = cpu.bus.clock.icount == start;
                 return match kind {
                     EXIT_NEXT => Run::Ran,
-                    EXIT_DEADLINE => {
-                        stats.deadline += 1;
-                        Run::Interpret
+                    EXIT_DEADLINE | EXIT_LIMIT => {
+                        if kind == EXIT_DEADLINE {
+                            stats.deadline += 1;
+                        }
+                        if none_ran { Run::Interpret } else { Run::Ran }
                     }
                     EXIT_STALE => {
                         stats.stale += 1;
-                        self.retire(index, stats);
+                        self.retire(exited, stats);
+                        if !none_ran {
+                            return Run::Ran;
+                        }
                         if retried {
                             return Run::Interpret;
                         }
@@ -428,6 +450,28 @@ mod engine {
                             None => Run::Interpret,
                         }
                     }
+                    EXIT_UNLINKED => {
+                        // A block left for a known EIP in its page: link it to
+                        // the block there and go on in that one. Nothing a
+                        // block can change stops the next from being entered
+                        // as the execution loop would (see `block`).
+                        let target = cpu.eip();
+                        let t_at = At { eip: target, phys_ip: data.phys_in_page(target) as usize, ..*at };
+                        let t_key = Key { phys: t_at.phys_ip as u32, eip: target, mode };
+                        let flushes = stats.flushes;
+                        let Some(t) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran };
+                        // (Translating it may have made room by throwing all
+                        // blocks away, the one to link from with them.)
+                        if stats.flushes == flushes {
+                            let t_code = self.blocks[t as usize].as_ref().unwrap().code;
+                            let source = self.blocks[exited as usize].as_mut().unwrap();
+                            // SAFETY: owned by the block, and not in use.
+                            unsafe { source.data.as_mut() }.links[ix] = t_code as usize;
+                            self.blocks[t as usize].as_mut().unwrap().backlinks.push((exited, ix as u8));
+                        }
+                        index = t;
+                        continue;
+                    }
                     EXIT_FAULT | EXIT_GP0 => {
                         cpu.set_eip(data.eips[ix]);
                         let fault = if kind == EXIT_GP0 { Fault::gp(0) } else { self.ctx.fault };
@@ -438,7 +482,7 @@ mod engine {
                         // The instruction is done; the rest of the block
                         // changed under it.
                         cpu.bus.clock.icount += 1;
-                        self.retire(index, stats);
+                        self.retire(exited, stats);
                         Run::Ran
                     }
                     _ => unreachable!("exit code {:X}", ret),

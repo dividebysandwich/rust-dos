@@ -46,7 +46,14 @@ pub struct BlockData {
     /// The CS limit the block needs: the interpreter fetches every one of
     /// its instructions through the code window only if the limit is at
     /// least this.
-    pub limit_need: u64,
+    pub limit_need: u32,
+    /// Where the block's linkable exits (to a known EIP in its page) jump:
+    /// the translated code of the block there, or else the exit's stub in
+    /// `stubs`, which returns to the execution loop to have it linked.
+    pub links: [usize; 2],
+    pub stubs: [usize; 2],
+    /// The block's index in the translator's table.
+    pub id: u32,
 }
 
 impl BlockData {
@@ -54,7 +61,8 @@ impl BlockData {
     /// window, with at most `max` instructions. None if no block can start
     /// there: the interpreter runs that instruction itself.
     pub fn build(at: &At, ram: &[u8], page_gen: &[u32], max: usize) -> Option<BlockData> {
-        let page_off = at.lin_ip & 0xFFF;
+        // Linear and physical addresses are the same within a page.
+        let page_off = at.phys_ip as u32 & 0xFFF;
         let page_phys = at.phys_ip - page_off as usize;
         let page = &ram[page_phys..page_phys + 0x1000];
         let mut decoder = Decoder::new(if at.code32 { 32 } else { 16 }, page, DecoderOptions::NONE);
@@ -91,7 +99,11 @@ impl BlockData {
             phys,
             len,
             handlers: instrs.iter().map(handler).collect(),
-            limit_need: *eips.last().unwrap() as u64 + PAGE_TAIL as u64 - 1,
+            // (The code window has checked this doesn't overflow.)
+            limit_need: *eips.last().unwrap() + PAGE_TAIL - 1,
+            links: [0; 2],
+            stubs: [0; 2],
+            id: 0,
             instrs: instrs.into_boxed_slice(),
             eips: eips.into_boxed_slice(),
             writes: writes.into_boxed_slice(),
@@ -123,6 +135,18 @@ impl BlockData {
         self.phys as usize + self.offset(ix)
     }
 
+    /// Whether `eip` is in the block's page (linearly, which is also
+    /// physically): translated code links an exit to a block there.
+    pub fn in_page(&self, eip: u32) -> bool {
+        let at = (self.phys & 0xFFF) as i64 + eip.wrapping_sub(self.eips[0]) as i32 as i64;
+        (0..0x1000).contains(&at)
+    }
+
+    /// The physical address of `eip`, in the block's page.
+    pub fn phys_in_page(&self, eip: u32) -> u32 {
+        self.phys.wrapping_add(eip.wrapping_sub(self.eips[0]))
+    }
+
     /// Whether the block's bytes from instruction `ix` on (all of them for
     /// 0) are still what was translated.
     pub fn unchanged_from(&self, ram: &[u8], ix: usize) -> bool {
@@ -137,7 +161,7 @@ impl BlockData {
 
 /// Whether the block ends after `instr`: it transfers control, or it may
 /// change something the execution loop checks between instructions.
-fn ends_block(instr: &Instruction) -> bool {
+pub fn ends_block(instr: &Instruction) -> bool {
     use Mnemonic::*;
     if instr.flow_control() != FlowControl::Next {
         return true;

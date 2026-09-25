@@ -22,6 +22,12 @@ pub const EXIT_DEADLINE: u32 = 5;
 pub const EXIT_STALE: u32 = 6;
 /// An instruction raised #GP(0) (a near jump past the CS limit).
 pub const EXIT_GP0: u32 = 7;
+/// The block needs a larger CS limit to be fetched through the code
+/// window; nothing ran.
+pub const EXIT_LIMIT: u32 = 8;
+/// The block left for a known EIP in its page through a link that isn't
+/// set yet (the index is the link's).
+pub const EXIT_UNLINKED: u32 = 9;
 
 /// A memory operand handle at or above this is `SLOW + slot`: the operand
 /// isn't plain RAM in one page, and loads and stores go through
@@ -78,6 +84,7 @@ pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
+pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
 
 impl JitCtx {
     pub fn new(exit: usize) -> Self {

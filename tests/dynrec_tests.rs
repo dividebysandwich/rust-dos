@@ -313,3 +313,76 @@ fn auto_uses_the_recompiler_from_protected_mode_until_the_program_ends() {
     rig.cpu.load_shell();
     assert!(!rig.cpu.dynamic_active());
 }
+
+#[test]
+fn changing_a_linked_block_unlinks_it() {
+    // Two passes of a loop whose blocks link to each other; between them
+    // the code rewrites the ADD's immediate in the block the jump leads
+    // to, 1 then 16: EBX = 5 + 80.
+    let b_at = CODE + 0x80;
+    let (mut a, mut b) = twins(|rig| {
+        let head = asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.mov(esi, 2u32)?;
+            a.mov(ecx, 5u32)?;
+            a.inc(edx)?;
+            a.jmp(b_at as u64)
+        });
+        rig.load(CODE, &head);
+        // The loop's top: the INC EDX (at 12 = 2 + 5 + 5).
+        let top = CODE + 12;
+        let body = asm32(b_at, |a| {
+            a.db(&[0x83, 0xC3, 0x01])?; // add ebx, 1
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.mov(byte_ptr(b_at as u64 + 2), 0x10)?;
+            a.mov(ecx, 5u32)?;
+            a.dec(esi)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        });
+        rig.load(b_at, &body);
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), 85);
+    if AVAILABLE {
+        assert!(stats.stale > 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn a_smaller_cs_limit_stops_a_linked_block() {
+    // A loop of two linked blocks runs under a flat code segment, then
+    // the same code under one whose limit ends inside the JNZ: #GP(0)
+    // there, as the interpreter has it.
+    let b_at = CODE + 0x80;
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(0, b_at + 1, CODE_R0, 0x4));
+        let head = asm32(CODE, |a| {
+            a.mov(ecx, 100u32)?;
+            a.xor(esi, esi)?;
+            a.inc(edx)?;
+            a.jmp(b_at as u64)
+        });
+        rig.load(CODE, &head);
+        let top = CODE + 7;
+        let body = asm32(b_at, |a| {
+            a.dec(ecx)?; // 1 byte, at the limit - 1
+            a.jnz(top as u64)?; // 2 bytes: its last is past the limit
+            a.inc(esi)?;
+            a.mov(ecx, 100u32)?;
+            a.cmp(esi, 1)?;
+            a.jne(0x10400u64)?;
+            // The second time around: under the small segment.
+            a.db(&[0xEA])?;
+            a.dd(&[top])?;
+            a.dw(&[FREE])?;
+            a.hlt()
+        });
+        rig.load(b_at, &body);
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0], stack[1]), (GP as u32, 0, b_at + 1));
+}

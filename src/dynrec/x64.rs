@@ -123,14 +123,26 @@ struct Gen<'a> {
     /// The prologue's ways out, and where it goes on.
     deadline: DynamicLabel,
     revalidate: DynamicLabel,
+    limit: DynamicLabel,
     body: DynamicLabel,
     slow: Vec<Slow>,
+    /// Whether exits to a known EIP in the page may be linked, and the
+    /// stubs of the links used.
+    link: bool,
+    stubs: [Option<DynamicLabel>; 2],
     /// The instruction being translated.
     ix: usize,
 }
 
+/// A translated block's code, and where its links' stubs are in it.
+pub struct Code {
+    pub bytes: Vec<u8>,
+    pub stubs: [Option<usize>; 2],
+}
+
 /// Translate a block: each instruction's operations (`items[ix]`), or a
-/// call of its interpreter handler (None).
+/// call of its interpreter handler (None). With `link`, exits to a known
+/// EIP in the block's page go through its links.
 ///
 /// The prologue checks that the block fits before the timer deadline and
 /// that its bytes' chunks haven't been written since it was translated
@@ -138,12 +150,13 @@ struct Gen<'a> {
 /// handler call the instruction count is brought up to date, as devices
 /// read the time from it; the count of executed instructions is only
 /// brought up to date where the code returns.
-pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>]) -> Vec<u8> {
+pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();
     let fail = (0..n).map(|_| ops.new_dynamic_label()).collect();
     let (tail, deadline, revalidate, body) =
         (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
+    let limit = ops.new_dynamic_label();
     let mut g = Gen {
         ops,
         data,
@@ -153,8 +166,11 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>]) -> Vec<u8> {
         tail,
         deadline,
         revalidate,
+        limit,
         body,
         slow: Vec::new(),
+        link,
+        stubs: [None; 2],
         ix: 0,
     };
     g.prologue(items);
@@ -197,26 +213,21 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>]) -> Vec<u8> {
             }
         }
     }
-    // A block that ran out of length goes on at the next instruction.
+    // A block that ran out of length goes on at the next instruction (a
+    // handler sets EIP itself).
     let last = n - 1;
-    if items[last].as_ref().is_some_and(|u| !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. }))) {
-        let next = data.eips[last].wrapping_add(data.instrs[last].len() as u32) as i32;
-        dynasm!(g.ops ; .arch x64 ; mov DWORD [rbx + EIP], next);
+    let next = data.eips[last].wrapping_add(data.instrs[last].len() as u32);
+    match &items[last] {
+        Some(u) if !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. })) => g.leave(Some(next), 0, true),
+        None if !super::block::ends_block(&data.instrs[last]) => g.leave(Some(next), 0, false),
+        _ => {}
     }
     // The end: the counts, and back to the execution loop.
-    let (n, final_synced) = (n as i32, g.synced[last]);
-    let data_ptr = g.data_ptr;
-    dynasm!(g.ops
-        ; .arch x64
-        ; =>tail
-        ; add QWORD [rbx + ICOUNT], n - final_synced
-        ; add QWORD [rbx + EXECUTED], n
-        ; mov eax, EXIT_NEXT as i32
-        ; mov rdx, QWORD data_ptr
-        ; jmp QWORD [r12 + CTX_EXIT]
-    );
+    dynasm!(g.ops ; .arch x64 ; =>tail);
+    g.leave(None, 0, false);
     g.epilogue();
-    g.ops.finalize().expect("block")
+    let stubs = g.stubs.map(|s| s.map(|l| g.ops.labels().resolve_dynamic(l).expect("stub").0));
+    Code { bytes: g.ops.finalize().expect("block"), stubs }
 }
 
 impl Gen<'_> {
@@ -225,12 +236,15 @@ impl Gen<'_> {
         let n = data.count() as i32;
         let (deadline, revalidate, body) = (self.deadline, self.revalidate, self.body);
         let data_ptr = self.data_ptr;
+        let limit = self.limit;
         dynasm!(self.ops
             ; .arch x64
             ; mov rax, QWORD [rbx + ICOUNT]
             ; add rax, n
             ; cmp rax, QWORD [rbx + DEADLINE]
             ; ja =>deadline
+            ; cmp DWORD [rbx + seg_field(Seg::CS, layout::SEG_LIMIT)], data.limit_need as i32
+            ; jb =>limit
             ; mov rdx, QWORD data_ptr
             ; mov eax, DWORD [r14 + (data.chunk_first * 4) as i32]
         );
@@ -269,11 +283,15 @@ impl Gen<'_> {
     fn epilogue(&mut self) {
         let data_ptr = self.data_ptr;
         // The prologue's ways out: nothing ran.
-        let (deadline, revalidate, body) = (self.deadline, self.revalidate, self.body);
+        let (deadline, revalidate, limit, body) = (self.deadline, self.revalidate, self.limit, self.body);
         dynasm!(self.ops
             ; .arch x64
             ; =>deadline
             ; mov eax, EXIT_DEADLINE as i32
+            ; mov rdx, QWORD data_ptr
+            ; jmp QWORD [r12 + CTX_EXIT]
+            ; =>limit
+            ; mov eax, EXIT_LIMIT as i32
             ; mov rdx, QWORD data_ptr
             ; jmp QWORD [r12 + CTX_EXIT]
             ; =>revalidate
@@ -286,6 +304,17 @@ impl Gen<'_> {
             ; mov rdx, QWORD data_ptr
             ; jmp QWORD [r12 + CTX_EXIT]
         );
+        // The links' stubs: back to the execution loop to be linked.
+        for (k, stub) in self.stubs.iter().enumerate() {
+            if let Some(stub) = *stub {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; =>stub
+                    ; mov eax, (EXIT_UNLINKED | (k as u32) << 8) as i32
+                    ; jmp QWORD [r12 + CTX_EXIT]
+                );
+            }
+        }
         for ix in 0..self.data.count() {
             // Instruction ix stopped the block: it counts as executed (the
             // interpreter counts it before running it) but not in the
@@ -526,10 +555,10 @@ impl Gen<'_> {
                 let gp = self.gp0();
                 dynasm!(self.ops ; .arch x64 ; cmp eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_LIMIT)] ; ja =>gp);
             }
-            Uop::Exit { eip } => {
-                self.value_eax(eip);
+            Uop::Exit { eip: Src::Imm(target) } => self.leave(Some(target), 0, true),
+            Uop::Exit { eip: Src::T(t) } => {
                 let tail = self.tail;
-                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], eax ; jmp =>tail);
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)) ; jmp =>tail);
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
         }
@@ -792,10 +821,10 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; =>no);
             }
         }
-        let tail = self.tail;
         // Not taken.
         self.commit(commit);
-        dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], next as i32 ; jmp =>tail ; =>yes);
+        self.leave(Some(next), 1, true);
+        dynasm!(self.ops ; .arch x64 ; =>yes);
         // Taken: the target must be within the CS limit.
         let gp = self.gp0();
         dynasm!(self.ops
@@ -805,7 +834,33 @@ impl Gen<'_> {
             ; ja =>gp
         );
         self.commit(commit);
-        dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], taken as i32 ; jmp =>tail);
+        self.leave(Some(taken), 0, true);
+    }
+
+    /// Leave the block after its last instruction, at `eip` if the code
+    /// sets it (`set`) or knows it: through link `slot` if that is in the
+    /// page, else back to the execution loop. The counts first.
+    fn leave(&mut self, eip: Option<u32>, slot: usize, set: bool) {
+        let data = self.data;
+        let (n, synced) = (data.count() as i32, self.synced[data.count() - 1]);
+        if let (Some(eip), true) = (eip, set) {
+            dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], eip as i32);
+        }
+        let data_ptr = self.data_ptr;
+        dynasm!(self.ops
+            ; .arch x64
+            ; add QWORD [rbx + ICOUNT], n - synced
+            ; add QWORD [rbx + EXECUTED], n
+            ; mov rdx, QWORD data_ptr
+        );
+        match eip {
+            Some(eip) if self.link && data.in_page(eip) => {
+                let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
+                let _ = stub;
+                dynasm!(self.ops ; .arch x64 ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]);
+            }
+            _ => dynasm!(self.ops ; .arch x64 ; mov eax, EXIT_NEXT as i32 ; jmp QWORD [r12 + CTX_EXIT]),
+        }
     }
 
     fn commit(&mut self, commit: Option<(Gpr, T)>) {
