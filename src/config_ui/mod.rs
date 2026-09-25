@@ -26,7 +26,7 @@ use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickType, MAX_DEADZONE};
-use crate::mixer::{CHANNELS, Channel, ChorusPreset, MAX_LEVEL, ReverbPreset};
+use crate::mixer::{CHANNELS, Channel, ChorusPreset, DEFAULT_MIX, MAX_LEVEL, MAX_MIX, ReverbPreset};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use crate::sb::SbModel;
 use crate::timer::CpuSpeed;
@@ -189,7 +189,9 @@ impl Page {
                 SpeakerFilter,
                 SbFilter,
                 Reverb,
+                ReverbMix,
                 Chorus,
+                ChorusMix,
             ],
         }
     }
@@ -287,6 +289,10 @@ enum Item {
     SbFilter,
     Reverb,
     Chorus,
+    /// The dry/wet mixes of the reverb and the chorus, shown while they
+    /// are on.
+    ReverbMix,
+    ChorusMix,
     /// The DAC on the parallel port.
     LptDac,
     /// The Tandy's and PCjr's sound chip.
@@ -315,14 +321,19 @@ fn step_number(values: &[u32], current: u32, dir: isize) -> u32 {
 const CYCLES: [u32; 8] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, u32::MAX];
 const MEMSIZES: [u32; 6] = [2, 4, 8, 16, 32, 64];
 
-/// How many cells the bar of a volume has: one for every 10%.
-const VOLUME_BAR: usize = (MAX_LEVEL / 10) as usize;
+/// A percentage of up to `max` as a number and a bar of small squares, one
+/// for every 10%, which stay apart from the next row's:
+/// "120% ■■■■■■■■■■■■········".
+fn percent_bar(percent: u16, max: u16) -> String {
+    let (full, cells) = ((percent.min(max) / 10) as usize, (max / 10) as usize);
+    format!("{:>3}% {}{}", percent, "■".repeat(full), "·".repeat(cells - full))
+}
 
-/// A volume as a number and a bar of small squares, which stay apart
-/// from the next row's: "120% ■■■■■■■■■■■■········".
-fn volume_bar(percent: u16) -> String {
-    let full = (percent / 10) as usize;
-    format!("{:>3}% {}{}", percent, "■".repeat(full), "·".repeat(VOLUME_BAR - full))
+/// A percentage stepped left or right to the next ten, from a value in
+/// between to the ten on that side, within 0 to `max`.
+fn step_tens(percent: u16, dir: isize, max: u16) -> u16 {
+    let tens = if dir > 0 { percent / 10 + 1 } else { percent.div_ceil(10).saturating_sub(1) };
+    (tens * 10).min(max)
 }
 
 fn on_off(on: bool) -> String {
@@ -401,6 +412,7 @@ impl Item {
             SbFilter => "Sound Blaster filter",
             Reverb => "Reverb (FM, GUS, MIDI)",
             Chorus => "Chorus (FM, GUS, MIDI)",
+            ReverbMix | ChorusMix => "  Dry/wet mix",
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
         }
@@ -419,13 +431,23 @@ impl Item {
         }
     }
 
+    /// Whether the setting means anything with the settings `s`: the
+    /// effects' mixes while they are on.
+    fn shown(self, s: &Settings) -> bool {
+        match self {
+            Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
+            Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
+            _ => true,
+        }
+    }
+
     fn applies(self) -> Applies {
         use Item::*;
         match self {
             Scale | Fullscreen | Aspect | Filter | Shader | Composite | CompositeEra | Cycles | Core => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
-            Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus => Applies::Now,
+            Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
@@ -433,7 +455,9 @@ impl Item {
 
     fn input(self) -> Input {
         match self {
-            Item::Cycles | Item::Volume(_) | Item::Deadzone => Input::ChoiceOrText,
+            Item::Cycles | Item::Volume(_) | Item::Deadzone | Item::ReverbMix | Item::ChorusMix => {
+                Input::ChoiceOrText
+            }
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::SoundFont | Item::Mt32Roms => Input::File,
             _ => Input::Choice,
@@ -514,7 +538,7 @@ impl Item {
             FloppyDiskSpeed => s.disk.floppy_disk_speed.describe(DiskClass::Floppy),
             HardDiskNoise => s.disk.hard_disk_noise.name().to_string(),
             FloppyDiskNoise => s.disk.floppy_disk_noise.name().to_string(),
-            Volume(channel) => volume_bar(s.mixer.level(channel)),
+            Volume(channel) => percent_bar(s.mixer.level(channel), MAX_LEVEL),
             CaptureDir => contract_home(&s.capture_dir, home),
             Joystick => s.joystick.kind.describe().to_string(),
             Deadzone => format!("{}%", s.joystick.deadzone),
@@ -526,6 +550,8 @@ impl Item {
             .to_string(),
             Reverb => s.mixer.reverb.name().to_string(),
             Chorus => s.mixer.chorus.name().to_string(),
+            ReverbMix => percent_bar(s.mixer.reverb_mix, MAX_MIX),
+            ChorusMix => percent_bar(s.mixer.chorus_mix, MAX_MIX),
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
         }
@@ -627,11 +653,9 @@ impl Item {
             HardDiskNoise => s.disk.hard_disk_noise = cycle(&NoiseMode::ALL, s.disk.hard_disk_noise, dir),
             FloppyDiskNoise => s.disk.floppy_disk_noise = cycle(&NoiseMode::ALL, s.disk.floppy_disk_noise, dir),
             // In tens of percent, from a value in between to the next ten.
-            Volume(channel) => {
-                let level = s.mixer.level(channel);
-                let tens = if dir > 0 { level / 10 + 1 } else { level.div_ceil(10).saturating_sub(1) };
-                s.mixer.set_level(channel, tens * 10);
-            }
+            Volume(channel) => s.mixer.set_level(channel, step_tens(s.mixer.level(channel), dir, MAX_LEVEL)),
+            ReverbMix => s.mixer.reverb_mix = step_tens(s.mixer.reverb_mix, dir, MAX_MIX),
+            ChorusMix => s.mixer.chorus_mix = step_tens(s.mixer.chorus_mix, dir, MAX_MIX),
             Joystick => s.joystick.kind = cycle(&JoystickType::ALL, s.joystick.kind, dir),
             SpeakerFilter => s.mixer.speaker_filter = !s.mixer.speaker_filter,
             Item::SbFilter => {
@@ -663,6 +687,8 @@ impl Item {
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),
             Item::Deadzone => s.joystick.deadzone.to_string(),
+            Item::ReverbMix => s.mixer.reverb_mix.to_string(),
+            Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             _ => String::new(),
         }
     }
@@ -676,6 +702,8 @@ impl Item {
             Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),
             Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), dirs::home_dir().as_deref()),
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
+            Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
+            Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
             _ => {}
         }
         Ok(())
@@ -701,6 +729,8 @@ impl Item {
                 let default = crate::joystick::JoystickSettings::default().deadzone;
                 std::mem::replace(&mut s.joystick.deadzone, default) != default
             }
+            Item::ReverbMix => std::mem::replace(&mut s.mixer.reverb_mix, DEFAULT_MIX) != DEFAULT_MIX,
+            Item::ChorusMix => std::mem::replace(&mut s.mixer.chorus_mix, DEFAULT_MIX) != DEFAULT_MIX,
             _ => false,
         }
     }
@@ -850,6 +880,8 @@ impl ConfigUi {
     /// command): show them as they are now, and change them from there.
     pub fn sync_mixer(&mut self, mixer: crate::mixer::MixerSettings) {
         self.settings.mixer = mixer;
+        // An effect turned off takes its mix off the page.
+        self.row = self.row.min(self.row_count().saturating_sub(1));
     }
 
     /// What the Stats page shows, for the frontend to hand over every
@@ -910,9 +942,11 @@ impl ConfigUi {
         }
     }
 
-    /// The page's settings that the frontend has.
+    /// The page's settings that the frontend has and that mean something
+    /// as the settings are.
     fn items(&self) -> Vec<Item> {
-        self.page.items().iter().copied().filter(|item| item.available(self.frontend)).collect()
+        let shown = |item: &Item| item.available(self.frontend) && item.shown(&self.settings);
+        self.page.items().iter().copied().filter(shown).collect()
     }
 
     fn item(&self) -> Option<Item> {

@@ -435,12 +435,40 @@ fn the_mixer_page_switches_filters_and_effects() {
     assert!(!host.applied.last().unwrap().mixer.speaker_filter);
     keys(&mut ui, &mut host, &[Down, Right]);
     assert_eq!(host.applied.last().unwrap().mixer.sb_filter, SbFilter::Off);
+    // The effects' mixes show while they are on.
+    assert!(!ui.items().contains(&Item::ReverbMix) && !ui.items().contains(&Item::ChorusMix));
     keys(&mut ui, &mut host, &[Down, Right, Right, Right]);
     assert_eq!(host.applied.last().unwrap().mixer.reverb, ReverbPreset::Medium);
+    keys(&mut ui, &mut host, &[Down]);
+    assert_eq!(ui.item(), Some(Item::ReverbMix));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 50% ■■■■■·····"));
+    keys(&mut ui, &mut host, &[Right, Right, Right, Right, Right, Right]);
+    assert_eq!(host.applied.last().unwrap().mixer.reverb_mix, 100);
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace, Backspace]);
+    ui.text("35", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().mixer.reverb_mix, 35);
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(host.applied.last().unwrap().mixer.reverb_mix, 30);
     keys(&mut ui, &mut host, &[Down, Left]);
     assert_eq!(host.applied.last().unwrap().mixer.chorus, ChorusPreset::Strong);
+    keys(&mut ui, &mut host, &[Down, Left, Left]);
+    assert_eq!(host.applied.last().unwrap().mixer.chorus_mix, 30);
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().mixer.chorus_mix, 50);
     assert_eq!(Item::Reverb.applies(), Applies::Now);
+    assert_eq!(Item::ChorusMix.applies(), Applies::Now);
     ui.draw(&mut Frame::new(640, 400));
+    keys(&mut ui, &mut host, &[Save]);
+    let saved = host.saved.last().unwrap().mixer;
+    assert_eq!((saved.reverb_mix, saved.chorus_mix), (30, 50));
+
+    // The MIXER command turning the chorus off takes its mix away.
+    let mut mixer = saved;
+    mixer.chorus = ChorusPreset::Off;
+    ui.sync_mixer(mixer);
+    assert!(!ui.items().contains(&Item::ChorusMix));
+    assert_eq!(ui.item(), Some(Item::Chorus));
 }
 
 #[test]

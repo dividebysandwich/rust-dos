@@ -33,6 +33,11 @@ pub const CHANNELS: usize = 10;
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
 
+/// The wettest mix of an effect, in percent, and the one where the music
+/// and the effect both play in full.
+pub const MAX_MIX: u16 = 100;
+pub const DEFAULT_MIX: u16 = 50;
+
 impl Channel {
     pub const ALL: [Channel; CHANNELS] = [
         Channel::Master,
@@ -127,6 +132,12 @@ pub struct MixerSettings {
     /// MIDI are sent to.
     pub reverb: ReverbPreset,
     pub chorus: ChorusPreset,
+    /// How the sources sent to the reverb and the chorus are heard, in
+    /// percent from 0 (dry: without the effect) to `MAX_MIX` (wet: only
+    /// the effect). At `DEFAULT_MIX` both play in full; towards dry the
+    /// effect fades out, towards wet the sources themselves do.
+    pub reverb_mix: u16,
+    pub chorus_mix: u16,
 }
 
 impl Default for MixerSettings {
@@ -137,6 +148,8 @@ impl Default for MixerSettings {
             sb_filter: SbFilter::Auto,
             reverb: ReverbPreset::Off,
             chorus: ChorusPreset::Off,
+            reverb_mix: DEFAULT_MIX,
+            chorus_mix: DEFAULT_MIX,
         }
     }
 }
@@ -159,6 +172,23 @@ pub fn parse_level(value: &str) -> Result<u16, String> {
         Ok(percent) if percent <= MAX_LEVEL => Ok(percent),
         _ => Err(format!("invalid volume '{}' (0 to {})", value.trim(), MAX_LEVEL)),
     }
+}
+
+/// A mix as written: a number of percent, with or without the %.
+pub fn parse_mix(value: &str) -> Result<u16, String> {
+    let number = value.trim().trim_end_matches('%').trim_end();
+    match number.parse::<u16>() {
+        Ok(percent) if percent <= MAX_MIX => Ok(percent),
+        _ => Err(format!("invalid mix '{}' (0 to {})", value.trim(), MAX_MIX)),
+    }
+}
+
+/// The gains of the sources sent to an effect and of the effect, of a mix
+/// in percent: both 1 at `DEFAULT_MIX`, the one falling to 0 towards its
+/// end.
+fn dry_wet(mix: u16) -> (f32, f32) {
+    let wet = mix.min(MAX_MIX) as f32 / MAX_MIX as f32;
+    ((2.0 - 2.0 * wet).min(1.0), (2.0 * wet).min(1.0))
 }
 
 /// The filters' and effects' state.
@@ -188,6 +218,11 @@ pub struct Mixer {
     /// How much of each source goes into the reverb and the chorus, 0 to 1.
     reverb_sends: [f32; CHANNELS],
     chorus_sends: [f32; CHANNELS],
+    /// The gain of each source itself, less than 1 where the mix of an
+    /// effect it is sent to is on the wet side, and of the effects' sound.
+    dry: [f32; CHANNELS],
+    reverb_wet: f32,
+    chorus_wet: f32,
     /// How much of each source's left channel goes to the right and back,
     /// 0 to 1 (mono), and whether its channels are swapped.
     crossfeed: [f32; CHANNELS],
@@ -205,6 +240,9 @@ impl Default for Mixer {
             peaks: [0.0; CHANNELS],
             reverb_sends: [0.0; CHANNELS],
             chorus_sends: [0.0; CHANNELS],
+            dry: [1.0; CHANNELS],
+            reverb_wet: 1.0,
+            chorus_wet: 1.0,
             crossfeed: [0.0; CHANNELS],
             reverse: [false; CHANNELS],
             dsp: Dsp::default(),
@@ -251,6 +289,25 @@ impl Mixer {
         if settings.sb_filter != old.sb_filter {
             self.dsp.sb = StereoLowpass::default();
         }
+        self.mix();
+    }
+
+    /// Work out the dry and wet gains from the mixes and the sends.
+    fn mix(&mut self) {
+        let (reverb_dry, reverb_wet) = dry_wet(self.settings.reverb_mix);
+        let (chorus_dry, chorus_wet) = dry_wet(self.settings.chorus_mix);
+        let (reverb, chorus) = (self.dsp.reverb.is_some(), self.dsp.chorus.is_some());
+        for i in 0..CHANNELS {
+            let mut dry = 1.0;
+            if reverb && self.reverb_sends[i] > 0.0 {
+                dry *= reverb_dry;
+            }
+            if chorus && self.chorus_sends[i] > 0.0 {
+                dry *= chorus_dry;
+            }
+            self.dry[i] = dry;
+        }
+        (self.reverb_wet, self.chorus_wet) = (reverb_wet, chorus_wet);
     }
 
     /// A source's send to the reverb, 0 to 1.
@@ -260,6 +317,7 @@ impl Mixer {
 
     pub fn set_reverb_send(&mut self, channel: Channel, level: f32) {
         self.reverb_sends[channel.index()] = level.clamp(0.0, 1.0);
+        self.mix();
     }
 
     /// A source's send to the chorus, 0 to 1.
@@ -269,6 +327,7 @@ impl Mixer {
 
     pub fn set_chorus_send(&mut self, channel: Channel, level: f32) {
         self.chorus_sends[channel.index()] = level.clamp(0.0, 1.0);
+        self.mix();
     }
 
     /// How much a source's channels are mixed into each other, 0 to 1.
@@ -306,8 +365,9 @@ impl Mixer {
         }
         let peak = &mut peaks[i];
         *peak = peak.max(l.abs()).max(r.abs());
-        frame.dry.0 += l;
-        frame.dry.1 += r;
+        let dry = self.dry[i];
+        frame.dry.0 += l * dry;
+        frame.dry.1 += r * dry;
         let send = self.reverb_sends[i];
         if send > 0.0 {
             frame.reverb.0 += l * send;
@@ -334,19 +394,19 @@ impl Mixer {
     }
 
     /// The mix of a frame: the sources with the reverb and chorus of what
-    /// they sent, at the master volume. Notes the mix's peak.
+    /// they sent, as the mixes have them, at the master volume. Notes the mix's peak.
     #[inline]
     pub(crate) fn finish(&mut self, frame: MixFrame, peaks: &mut [f32; CHANNELS]) -> (f32, f32) {
         let (mut l, mut r) = frame.dry;
         if let Some(reverb) = &mut self.dsp.reverb {
             let (a, b) = reverb.process(frame.reverb);
-            l += a;
-            r += b;
+            l += a * self.reverb_wet;
+            r += b * self.reverb_wet;
         }
         if let Some(chorus) = &mut self.dsp.chorus {
             let (a, b) = chorus.process(frame.chorus);
-            l += a;
-            r += b;
+            l += a * self.chorus_wet;
+            r += b * self.chorus_wet;
         }
         let gain = self.gains[Channel::Master.index()];
         let (l, r) = (l * gain, r * gain);
@@ -457,6 +517,45 @@ mod tests {
         mixer.set_crossfeed(Channel::Gus, 1.0);
         mixer.add(&mut mix, &mut peaks, Channel::Gus, (100.0, 0.0));
         assert_eq!(mix.dry, (50.0, 50.0));
+    }
+
+    #[test]
+    fn the_mixes_trade_the_sources_for_their_effects() {
+        assert_eq!(parse_mix("30"), Ok(30));
+        assert_eq!(parse_mix(" 100 % "), Ok(100));
+        assert!(parse_mix("101").is_err());
+        assert_eq!(dry_wet(0), (1.0, 0.0));
+        assert_eq!(dry_wet(DEFAULT_MIX), (1.0, 1.0));
+        assert_eq!(dry_wet(75), (0.5, 1.0));
+        assert_eq!(dry_wet(MAX_MIX), (0.0, 1.0));
+
+        let mut mixer = Mixer::default();
+        let mut settings = MixerSettings { reverb: ReverbPreset::Small, reverb_mix: 100, chorus_mix: 0, ..MixerSettings::default() };
+        mixer.set(settings);
+        let mut peaks = [0.0; CHANNELS];
+        let mut mix = MixFrame::default();
+        // All wet: the FM synthesizer is only heard through the reverb; the
+        // Sound Blaster, which isn't sent to it, stays.
+        mixer.add(&mut mix, &mut peaks, Channel::Fm, (100.0, 100.0));
+        mixer.add(&mut mix, &mut peaks, Channel::Sb, (10.0, 10.0));
+        assert_eq!(mix.dry, (10.0, 10.0));
+        assert_eq!(mix.reverb, (40.0, 40.0));
+        assert_eq!(peaks[Channel::Fm.index()], 100.0, "the meter shows the source");
+        // A chorus that is off takes nothing away, however dry its mix.
+        settings.chorus_mix = MAX_MIX;
+        settings.reverb_mix = 0;
+        mixer.set(settings);
+        let mut mix = MixFrame::default();
+        mixer.add(&mut mix, &mut peaks, Channel::Fm, (100.0, 100.0));
+        assert_eq!(mix.dry, (100.0, 100.0));
+        assert_eq!(mixer.reverb_wet, 0.0);
+        // A send set by hand counts too.
+        settings.chorus = ChorusPreset::Light;
+        mixer.set(settings);
+        assert_eq!(mixer.dry[Channel::Sb.index()], 1.0);
+        mixer.set_chorus_send(Channel::Sb, 0.5);
+        assert_eq!(mixer.dry[Channel::Sb.index()], 0.0);
+        assert_eq!(mixer.dry[Channel::Speaker.index()], 1.0);
     }
 
     #[test]

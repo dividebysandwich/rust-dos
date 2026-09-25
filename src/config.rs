@@ -611,6 +611,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(preset) => mixer.chorus = preset,
                             None => warn(format!("invalid chorus '{}' (off, light, normal or strong)", value)),
                         },
+                        "reverb_mix" | "chorus_mix" => match crate::mixer::parse_mix(value) {
+                            Ok(mix) if key.eq_ignore_ascii_case("reverb_mix") => mixer.reverb_mix = mix,
+                            Ok(mix) => mixer.chorus_mix = mix,
+                            Err(e) => warn(format!("{}: {}", key.to_ascii_lowercase(), e)),
+                        },
                         _ => match Channel::parse(key) {
                             Some(channel) => match crate::mixer::parse_level(value) {
                                 Ok(percent) => mixer.set_level(channel, percent),
@@ -940,7 +945,9 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Section::Mixer, "speaker_filter", on_off(settings.mixer.speaker_filter)),
         (Section::Mixer, "sb_filter", Some(settings.mixer.sb_filter.name().to_string())),
         (Section::Mixer, "reverb", Some(settings.mixer.reverb.name().to_string())),
+        (Section::Mixer, "reverb_mix", Some(settings.mixer.reverb_mix.to_string())),
         (Section::Mixer, "chorus", Some(settings.mixer.chorus.name().to_string())),
+        (Section::Mixer, "chorus_mix", Some(settings.mixer.chorus_mix.to_string())),
     ]);
     entries.extend([
         (Section::Joystick, "joysticktype", Some(settings.joystick.kind.name().to_string())),
@@ -1557,14 +1564,19 @@ mod tests {
         assert!(mixer.speaker_filter);
         assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
-        let text = "[mixer]\nspeaker_filter=off\nsb_filter=OFF\nreverb=Large\nchorus=light\n";
+        assert_eq!((mixer.reverb_mix, mixer.chorus_mix), (50, 50));
+
+        let text = "[mixer]\nspeaker_filter=off\nsb_filter=OFF\nreverb=Large\nchorus=light\nreverb_mix=80%\nChorus_Mix=0\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         let mixer = config.mixer;
         assert!(!mixer.speaker_filter);
         assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Off, ReverbPreset::Large, ChorusPreset::Light));
-        let text = "[mixer]\nspeaker_filter=maybe\nsb_filter=sb1\nreverb=hall\nchorus=heavy\n";
-        assert_eq!(parse(text, Path::new("/cfg"), None).warnings.len(), 4);
+        assert_eq!((mixer.reverb_mix, mixer.chorus_mix), (80, 0));
+        let text = "[mixer]\nspeaker_filter=maybe\nsb_filter=sb1\nreverb=hall\nchorus=heavy\nreverb_mix=150\nchorus_mix=wet\n";
+        let config = parse(text, Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 6, "{:?}", config.warnings);
+        assert!(config.warnings[4].contains("reverb_mix: invalid mix '150' (0 to 100)"), "{:?}", config.warnings);
     }
 
     #[test]
@@ -1634,6 +1646,8 @@ mod tests {
                 mixer.sb_filter = SbFilter::Off;
                 mixer.reverb = ReverbPreset::Medium;
                 mixer.chorus = ChorusPreset::Strong;
+                mixer.reverb_mix = 70;
+                mixer.chorus_mix = 20;
                 mixer
             },
             joystick: JoystickSettings { kind: JoystickType::TwoAxis, deadzone: 20 },

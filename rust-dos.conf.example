@@ -201,9 +201,16 @@
 # A reverb for the FM synthesizer and MIDI music: off (the default), tiny,
 # small, medium, large or huge.
 #reverb=off
+# How the music and the reverb are mixed, in percent: 0 is the music dry,
+# without the reverb, 100 the reverb alone, and at 50 (the default) both
+# play in full. Below 50 the reverb fades out, above it the dry music.
+#reverb_mix=50
 # A chorus for the FM synthesizer and MIDI music: off (the default), light,
 # normal or strong.
 #chorus=off
+# How the music and the chorus are mixed, as reverb_mix: 0 dry, 100 the
+# chorus alone, 50 (the default) both in full.
+#chorus_mix=50
 
 [joystick]
 # What the game port has plugged in: auto (the default: one game controller

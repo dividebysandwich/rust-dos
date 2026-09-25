@@ -100,11 +100,14 @@ aspect=true
 #lptdac=100
 # The PC speaker's and the Sound Blaster's filters (on/off, auto/off), and
 # a reverb (off, tiny, small, medium, large, huge) and a chorus (off,
-# light, normal, strong) for the FM synthesizer and MIDI music.
+# light, normal, strong) for the FM synthesizer and MIDI music, each with
+# its dry/wet mix in percent (0 dry, 100 the effect alone, 50 both).
 #speaker_filter=on
 #sb_filter=auto
 #reverb=off
+#reverb_mix=50
 #chorus=off
+#chorus_mix=50
 
 [joystick]
 # What the game port has: auto (one gamepad is both joysticks and all four

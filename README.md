@@ -261,7 +261,11 @@ D:
     Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
     `large` or `huge`. `chorus` thickens them: `off` (the default),
     `light`, `normal` or `strong`. The presets and how much of the music
-    they get follow DOSBox Staging's.
+    they get follow DOSBox Staging's. `reverb_mix` and `chorus_mix` set
+    how the music and each effect are mixed, in percent: `0` is the music
+    dry, without the effect, `100` the effect alone, and at `50` (the
+    default) both play in full; below 50 the effect fades out, above it
+    the dry music does.
   * The `MIXER` command shows the mixer and changes it at the prompt, or
     from `[autoexec]`, in DOSBox Staging's syntax:
     `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,
@@ -323,7 +327,7 @@ as you set them, and the Stats page, which shows it running. Ctrl+F12 or Esc clo
 * **Sound:** everything in `[sound]`, and the disk noises.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays, and the filters,
-  reverb and chorus.
+  reverb and chorus with their dry/wet mixes.
 * **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
   makes one from the settings as they are, Del deletes one.
 * **Cheats:** finds a game's values in memory, such as its lives or money,
