@@ -263,7 +263,10 @@ fn bios_translates_shift_ctrl_and_alt_combinations() {
         (0x3F, 0, ALT, 0x6C00),  // Alt+F5
         (0x43, 0, CTRL, 0x6600), // Ctrl+F9
         (0x3B, 0, SHIFT, 0x5400),
-        (0x86, 0, CTRL, 0x8A00), // Ctrl+F12
+        (0x58, 0, CTRL, 0x8A00), // Ctrl+F12
+        (0x57, 0, 0, 0x8500),    // F11
+        (0x58, 0, SHIFT, 0x8800),
+        (0x57, 0, ALT, 0x8B00),
         (0x02, b'1', ALT, 0x7800),
         (0x4B, 0, CTRL, 0x7300),
         (0x0F, 0x09, SHIFT, 0x0F00),
@@ -278,4 +281,29 @@ fn bios_translates_shift_ctrl_and_alt_combinations() {
     deliver_key_down(&mut bus, 0x3F00, false);
     assert_eq!(bus.keyboard_buffer.pop_front(), Some(0x6C00));
     assert_eq!(bus.kbc.read_data(), 0x3F, "the controller gets the plain make code");
+}
+
+#[test]
+fn f11_and_f12_send_their_make_codes_and_only_the_enhanced_reads_return_them() {
+    use rust_dos::keyboard::{apply_key, lookup};
+    let mut cpu = cpu();
+    let f12 = lookup("f12").unwrap();
+    apply_key(&mut cpu.bus, f12, 0, true);
+    assert_eq!(cpu.bus.kbc.read_data(), 0x58, "a game's own keyboard handler reads F12's make code");
+    apply_key(&mut cpu.bus, f12, 0, false);
+    assert_eq!(cpu.bus.kbc.read_data(), 0xD8);
+    apply_key(&mut cpu.bus, lookup("a").unwrap(), b'a', true);
+
+    // INT 16h AH=11h and 10h see F12 first...
+    cpu.set_ax(0x1100);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x8600);
+    // ...AH=01h and 00h skip it, as an AT BIOS does.
+    cpu.set_ax(0x0100);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1E61);
+    cpu.set_ax(0x0000);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1E61);
+    assert!(cpu.bus.keyboard_buffer.is_empty());
 }

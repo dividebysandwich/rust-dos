@@ -107,7 +107,7 @@ pub fn map_sdl_to_pc(keycode: Keycode, keymod: Mod) -> Option<u16> {
         Keycode::Slash => if shift { k(0x35, b'?') } else { k(0x35, b'/') },
         Keycode::Backquote => if shift { k(0x29, b'~') } else { k(0x29, b'`') },
 
-        // Function Keys (F1-F10: Standard | F11-F12: Extended)
+        // Function Keys (the keystrokes of F11 and F12 are 85h and 86h)
         Keycode::F1 => k(0x3B, 0),
         Keycode::F2 => k(0x3C, 0),
         Keycode::F3 => k(0x3D, 0),
@@ -118,8 +118,8 @@ pub fn map_sdl_to_pc(keycode: Keycode, keymod: Mod) -> Option<u16> {
         Keycode::F8 => k(0x42, 0),
         Keycode::F9 => k(0x43, 0),
         Keycode::F10 => k(0x44, 0),
-        Keycode::F11 => k(0x85, 0),
-        Keycode::F12 => k(0x86, 0),
+        Keycode::F11 => k(0x57, 0),
+        Keycode::F12 => k(0x58, 0),
 
         // Navigation / Editing (Extended Keys usually have 0x00 or 0xE0 prefix)
         // DOS usually returns 0x00 as the ASCII code for these extended keys.

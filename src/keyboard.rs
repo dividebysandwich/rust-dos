@@ -40,7 +40,7 @@ pub fn bios_keystroke(scan: u8, ascii: u8, flags: u8) -> u16 {
         return match scan {
             0x02..=0x0D => key(scan + 0x76, 0),
             0x3B..=0x44 => key(scan + 0x2D, 0),
-            0x85 | 0x86 => key(scan + 6, 0),
+            0x57 | 0x58 => key(scan + 0x34, 0),
             0x0F => key(0xA5, 0),
             0x39 => key(scan, ascii),
             0x47 => key(0x97, 0),
@@ -69,7 +69,7 @@ pub fn bios_keystroke(scan: u8, ascii: u8, flags: u8) -> u16 {
             0x0E => key(scan, 0x7F),
             0x0F => key(0x94, 0),
             0x3B..=0x44 => key(scan + 0x23, 0),
-            0x85 | 0x86 => key(scan + 4, 0),
+            0x57 | 0x58 => key(scan + 0x32, 0),
             0x47 => key(0x77, 0),
             0x48 => key(0x8D, 0),
             0x49 => key(0x84, 0),
@@ -86,12 +86,17 @@ pub fn bios_keystroke(scan: u8, ascii: u8, flags: u8) -> u16 {
     if flags & 0x03 != 0 {
         return match scan {
             0x3B..=0x44 => key(scan + 0x19, 0),
-            0x85 | 0x86 => key(scan + 2, 0),
+            0x57 | 0x58 => key(scan + 0x30, 0),
             0x0F => key(scan, 0),
             _ => key(scan, ascii),
         };
     }
-    key(scan, ascii)
+    match scan {
+        // F11 and F12 came with the enhanced keyboard, and their
+        // keystrokes don't have their scan codes.
+        0x57 | 0x58 => key(scan + 0x2E, 0),
+        _ => key(scan, ascii),
+    }
 }
 
 /// Deliver a key release: the break code (scan code | 80h). Games that track
@@ -236,8 +241,8 @@ const KEYS: &[(&str, PcKey)] = &[
     ("f8", k(0x42, 0, 0)),
     ("f9", k(0x43, 0, 0)),
     ("f10", k(0x44, 0, 0)),
-    ("f11", k(0x85, 0, 0)),
-    ("f12", k(0x86, 0, 0)),
+    ("f11", k(0x57, 0, 0)),
+    ("f12", k(0x58, 0, 0)),
     ("up", x(0x48, 0)),
     ("down", x(0x50, 0)),
     ("left", x(0x4B, 0)),

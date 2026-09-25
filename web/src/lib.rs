@@ -1367,7 +1367,7 @@ mod tests {
         assert_eq!(pc_key("KeyA").map(|k| k.scan), Some(0x1E));
         assert_eq!(pc_key("Digit1").map(|k| k.scan), Some(0x02));
         assert_eq!(pc_key("Numpad7").map(|k| (k.scan, k.extended)), Some((0x47, false)));
-        assert_eq!(pc_key("F12").map(|k| k.scan), Some(0x86));
+        assert_eq!(pc_key("F12").map(|k| k.scan), Some(0x58));
         assert_eq!(pc_key("ArrowLeft").map(|k| (k.scan, k.extended)), Some((0x4B, true)));
         assert_eq!(pc_key("ControlRight").map(|k| (k.modifier, k.extended)), Some((MOD_CTRL, true)));
         assert!(pc_key("MetaLeft").is_none() && pc_key("Fn").is_none());

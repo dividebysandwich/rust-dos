@@ -245,8 +245,8 @@ pub enum UiInput {
     Click(i32, i32),
 }
 
-/// F12 in the key table: the scan code of its BIOS keystroke.
-const F12_SCAN: u8 = 0x86;
+/// F12 in the key table: its make code.
+const F12_SCAN: u8 = 0x58;
 
 fn modifier_key(name: &str) -> Result<PcKey, String> {
     match keys::lookup(name) {
