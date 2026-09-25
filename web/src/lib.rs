@@ -21,6 +21,7 @@ use rust_dos::diskimage::{self, DiskImage, MemoryImage};
 use rust_dos::exec::{self, NoHook};
 use rust_dos::games::{self, ActiveGame, GameEntry, NewGame};
 use rust_dos::joystick::PadState;
+use rust_dos::keylayout::{Layout, LayoutSetting};
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
 use rust_dos::stats::{FrameTimes, Stats};
 use rust_dos::mount::MountSpec;
@@ -244,6 +245,8 @@ impl Machine {
         cpu.bus.set_mixer(settings.mixer);
         cpu.bus.set_joystick(settings.joystick);
         cpu.bus.vga.set_composite(settings.composite);
+        // With auto the page hands over what the browser's layout types.
+        cpu.bus.kbd.layout = settings.keyboard_layout.layout(Layout::us());
         warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         for warning in &warnings {
@@ -664,13 +667,24 @@ impl Machine {
             }
             return true;
         }
-        // AltGr is there to type characters with, not as Alt.
-        if key == "AltGraph" {
+        // A layout of the machine's own types the characters itself, from
+        // where the keys are, AltGr (the right Alt) and all.
+        let own_layout = self.settings.keyboard_layout != LayoutSetting::Auto;
+        // With the browser's layout, AltGr is there to type characters
+        // with, not as Alt.
+        if key == "AltGraph" && !own_layout {
             return false;
         }
         let Some(pc) = pc_key(code) else {
             return false;
         };
+        if own_layout {
+            if !(pc.modifier != 0 && self.held.contains_key(code)) {
+                keyboard::apply_key(bus, pc, 0, true);
+                self.held.insert(code.to_string(), pc);
+            }
+            return true;
+        }
         if pc.modifier != 0 {
             if !self.held.contains_key(code) {
                 keyboard::apply_key(bus, pc, 0, true);
@@ -1075,6 +1089,9 @@ impl Host for PageHost<'_> {
         }
         if new.core != old.core {
             self.cpu.core = new.core;
+        }
+        if new.keyboard_layout != old.keyboard_layout {
+            self.cpu.bus.kbd.layout = new.keyboard_layout.layout(Layout::us());
         }
         if new.disk != old.disk {
             self.cpu.bus.set_disk_settings(new.disk);

@@ -27,6 +27,7 @@ use crate::config_ui::UiKey;
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
+use rust_dos::keylayout::Layout;
 use crate::mount::{display_host_path, parse_drive_letter, parse_kind};
 use crate::video::vbe::Vbe;
 use crate::video::{self, VideoMode};
@@ -228,6 +229,8 @@ pub enum Coords {
 /// Low-level queued input, applied by the main loop at frame boundaries.
 enum LowInput {
     KeyDown { key: PcKey, ascii: u8 },
+    /// A character no key types, as Alt and the keypad type it.
+    Char(u8),
     KeyUp { key: PcKey },
     MouseTo { x: i32, y: i32, coords: Coords },
     MouseRel { dx: i32, dy: i32 },
@@ -266,7 +269,54 @@ fn ascii_for(key: PcKey, mods: u8) -> u8 {
     if mods & (keys::MOD_LSHIFT | keys::MOD_RSHIFT) != 0 { key.shifted } else { key.ascii }
 }
 
-fn expand_input(ev: &InputEvent, out: &mut Vec<LowInput>) -> Result<(), String> {
+/// The keys that type `c` in `layout`: its key with Shift and AltGr as it
+/// needs them. A character the
+/// layout has on no key (or only as a dead key's accent) is typed as the
+/// US keyboard types it, or else as Alt and the keypad type any.
+fn keys_for_char(c: char, layout: &Layout, out: &mut Vec<LowInput>) -> Result<(), String> {
+    let special = match c {
+        '\n' | '\r' => Some("enter"),
+        '\t' => Some("tab"),
+        '\x08' => Some("backspace"),
+        '\x1b' => Some("escape"),
+        _ => None,
+    };
+    if let Some(name) = special {
+        let key = keys::lookup(name).unwrap();
+        out.push(LowInput::KeyDown { key, ascii: 0 });
+        out.push(LowInput::KeyUp { key });
+        return Ok(());
+    }
+    let byte = rust_dos::keylayout::cp437(c).ok_or_else(|| format!("cannot type character {:?}", c))?;
+    let (key, shift, altgr, ascii) = match layout.reverse(byte) {
+        Some((scan, shift, altgr)) => {
+            (PcKey { scan, ascii: byte, shifted: byte, modifier: 0, extended: false }, shift, altgr, byte)
+        }
+        None => match keys::char_to_key(c) {
+            Some((key, shift)) => (key, shift, false, if shift { key.shifted } else { key.ascii }),
+            None => {
+                out.push(LowInput::Char(byte));
+                return Ok(());
+            }
+        },
+    };
+    let modifiers: Vec<PcKey> = [(shift, "lshift"), (altgr, "ralt")]
+        .into_iter()
+        .filter(|&(on, _)| on)
+        .map(|(_, name)| keys::lookup(name).unwrap())
+        .collect();
+    for &m in &modifiers {
+        out.push(LowInput::KeyDown { key: m, ascii: 0 });
+    }
+    out.push(LowInput::KeyDown { key, ascii });
+    out.push(LowInput::KeyUp { key });
+    for &m in modifiers.iter().rev() {
+        out.push(LowInput::KeyUp { key: m });
+    }
+    Ok(())
+}
+
+fn expand_input(ev: &InputEvent, layout: &Layout, out: &mut Vec<LowInput>) -> Result<(), String> {
     match ev {
         InputEvent::Key { key, scancode, ascii, action, mods, hold_ms } => {
             let mod_keys = mods.iter().map(|m| modifier_key(m)).collect::<Result<Vec<_>, _>>()?;
@@ -299,19 +349,8 @@ fn expand_input(ev: &InputEvent, out: &mut Vec<LowInput>) -> Result<(), String> 
             }
         }
         InputEvent::Type { text, delay_ms } => {
-            let shift = keys::lookup("lshift").unwrap();
             for c in text.chars() {
-                let (key, needs_shift) =
-                    keys::char_to_key(c).ok_or_else(|| format!("cannot type character {:?}", c))?;
-                if needs_shift {
-                    out.push(LowInput::KeyDown { key: shift, ascii: 0 });
-                }
-                let ascii = if needs_shift { key.shifted } else { key.ascii };
-                out.push(LowInput::KeyDown { key, ascii });
-                out.push(LowInput::KeyUp { key });
-                if needs_shift {
-                    out.push(LowInput::KeyUp { key: shift });
-                }
+                keys_for_char(c, layout, out)?;
                 if let Some(d) = delay_ms.filter(|d| *d > 0) {
                     out.push(LowInput::Wait(Duration::from_millis(d)));
                 }
@@ -886,6 +925,14 @@ impl DebugHub {
                 _ => {}
             }
             match self.input.pop_front().unwrap() {
+                // Typed as Alt and the keypad type it: a keystroke with no
+                // scan code.
+                LowInput::Char(byte) if !self.divert => {
+                    if cpu.bus.keyboard_buffer.len() < keyboard::BIOS_BUFFER_KEYS {
+                        cpu.bus.keyboard_buffer.push_back(byte as u16);
+                    }
+                }
+                LowInput::Char(_) => {}
                 LowInput::MouseTo { x, y, coords: Coords::Screen } if self.divert => self.ui_pointer = (x, y),
                 LowInput::Button { idx: 0, down: true } if self.divert => {
                     self.ui_input.push(UiInput::Click(self.ui_pointer.0, self.ui_pointer.1));
@@ -992,7 +1039,7 @@ impl DebugHub {
             Cmd::Input { events, wait } => {
                 let mut low = Vec::new();
                 for ev in &events {
-                    if let Err(e) = expand_input(ev, &mut low) {
+                    if let Err(e) = expand_input(ev, cpu.bus.kbd.layout, &mut low) {
                         let _ = req.reply.send(Reply::bad(e));
                         return;
                     }
@@ -1783,7 +1830,33 @@ impl crate::exec::ExecHook for DebugHub {
 
 #[cfg(test)]
 mod tests {
-    use super::step_over_len;
+    use super::{LowInput, keys_for_char, step_over_len};
+    use rust_dos::keylayout::Layout;
+
+    /// The scan codes of the keys going down to type `c`.
+    fn scans(c: char, layout: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        keys_for_char(c, Layout::by_code(layout).unwrap(), &mut out).unwrap();
+        out.iter()
+            .filter_map(|ev| match ev {
+                LowInput::KeyDown { key, .. } => Some(key.scan),
+                LowInput::Char(byte) => Some(*byte),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn text_is_typed_on_the_layout_s_keys() {
+        assert_eq!(scans('y', "gr"), [0x2C]);
+        assert_eq!(scans('y', "us"), [0x15]);
+        assert_eq!(scans(':', "gr"), [0x2A, 0x34], "Shift and the period key");
+        assert_eq!(scans('\\', "gr"), [0x38, 0x0C], "AltGr and the ß key");
+        assert_eq!(scans('ä', "gr"), [0x28]);
+        // A character no key types comes as a keystroke of its own.
+        assert_eq!(scans('é', "us"), [0x82]);
+        assert_eq!(scans('\n', "fr"), [0x1C]);
+    }
 
     #[test]
     fn step_over_runs_calls_interrupts_loops_and_repeats() {

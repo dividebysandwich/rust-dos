@@ -239,7 +239,9 @@ pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char:
 
     let mods = Mods { shift: flags & 0x03 != 0, caps: flags & 0x40 != 0, num: flags & 0x20 != 0, altgr: flags3 & 0x08 != 0 };
     let (typed, on_altgr) = match host_char {
-        Some(c) => (Typed::Char(c), false),
+        // A character typed with AltGr held is one the host's layout has
+        // there.
+        Some(c) => (Typed::Char(c), mods.altgr && c >= 0x20),
         None => bus.kbd.layout.translate(scan, extended, mods),
     };
     // A character typed with AltGr is no Alt (or Ctrl, which some hosts
