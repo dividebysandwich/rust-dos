@@ -244,12 +244,21 @@ pub struct Completion {
 }
 
 /// A control or extended key at the prompt (the shell code's EDIT_KEY, AL
-/// its character, 00h or E0h for an extended key, AH its scan code): Esc
-/// blanks the line being typed, Tab and Shift+Tab complete the name being
+/// its character, 00h or E0h for an extended key, AH its scan code):
+/// Ctrl+C starts again at a new prompt, Esc blanks the line being typed, Tab and Shift+Tab complete the name being
 /// typed in it (`complete`), and Up and Down put the line before or after
 /// in the command history in its place, on the screen and in the buffer at
 /// DS:0200h, and leave SI after it. The other keys do nothing.
 pub fn edit_key(cpu: &mut Cpu) {
+    // Ctrl+C gives up the line (and DATE's or TIME's question, and the
+    // batch files waiting) and starts again at a new prompt.
+    if cpu.get_al() == 0x03 {
+        video::print_string(cpu, "^C\r\n");
+        cpu.shell_wait = None;
+        cpu.batch.clear();
+        cpu.set_ip(labels().prompt_start);
+        return;
+    }
     let line = match (cpu.get_al(), cpu.get_ah()) {
         (0x09, _) => complete(cpu, true),
         (0x00, 0x0F) => complete(cpu, false),
@@ -391,6 +400,12 @@ pub fn handle_command_bop(cpu: &mut Cpu) {
         }
     }
     let clean_cmd = dosstr::from_bytes(&clean);
+    // The new date or time DATE or TIME asked for.
+    if let Some(ShellWait::Line(purpose)) = cpu.shell_wait {
+        cpu.shell_wait = None;
+        crate::time_commands::line_entered(cpu, purpose, &clean_cmd);
+        return;
+    }
     cpu.shell_history.push(&clean_cmd);
     cpu.shell_completion = None;
 
@@ -423,7 +438,7 @@ pub fn show_prompt(cpu: &mut Cpu) {
 /// version, $_ a new line, $E Escape, $H a backspace and $$ a dollar sign.
 pub fn render_prompt(cpu: &Cpu) -> Vec<u8> {
     let spec = dosstr::to_bytes(cpu.get_env("PROMPT").unwrap_or("$P$G"));
-    let now = crate::hosttime::now();
+    let now = cpu.bus.cmos.now();
     let mut out = Vec::new();
     let mut codes = spec.iter();
     while let Some(&b) = codes.next() {
@@ -502,6 +517,9 @@ pub enum ShellWait {
     Pause,
     /// CHOICE: one of its keys.
     Choice(Choice),
+    /// DATE or TIME: a line with the new date or time, typed at the
+    /// prompt's line editor without the prompt.
+    Line(crate::time_commands::LinePurpose),
 }
 
 /// A CHOICE waiting for a key.
@@ -525,7 +543,9 @@ impl Choice {
 
 /// Have the shell wait for a key for PAUSE or CHOICE, from the command
 /// that asks: its code goes to SHELL_WAIT, where the timers and interrupts
-/// run on, and the key comes to `key_ready`. Batch lines wait until then.
+/// run on, and the key comes to `key_ready`. For a line (DATE, TIME) it
+/// goes to the line editor, without the prompt, and the line to
+/// `handle_command_bop`. Batch lines wait until then.
 pub fn enter_wait(cpu: &mut Cpu, wait: ShellWait) {
     use crate::cpu::{SHELL_SEGMENT, SHELL_STACK};
     cpu.set_cs(SHELL_SEGMENT);
@@ -533,7 +553,10 @@ pub fn enter_wait(cpu: &mut Cpu, wait: ShellWait) {
     cpu.set_es(SHELL_SEGMENT);
     cpu.set_ss(SHELL_SEGMENT);
     cpu.set_sp(SHELL_STACK);
-    cpu.set_ip(labels().shell_wait);
+    cpu.set_ip(match wait {
+        ShellWait::Line(_) => labels().prompt_start,
+        _ => labels().shell_wait,
+    });
     cpu.shell_wait = Some(wait);
 }
 
@@ -550,6 +573,7 @@ pub fn key_ready(cpu: &mut Cpu) {
     }
     match wait {
         ShellWait::Pause => video::print_string(cpu, "\r\n"),
+        ShellWait::Line(_) => {}
         ShellWait::Choice(choice) => match choice.index(key) {
             Some(i) => {
                 video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));

@@ -1,20 +1,24 @@
 //! The AT's CMOS RAM and real-time clock (MC146818) at ports 70h/71h.
 //!
 //! Port 70h selects a register (bit 7 masks NMI), port 71h reads or writes
-//! it. The clock registers read the host's local time in BCD. The BIOS
+//! it. The clock registers read the host's local time in BCD, moved by
+//! what DOS or the BIOS set the clock to. The BIOS
 //! configuration part reports the floppy drives mounted on A: and B: as
 //! 1.44 MB drives, a coprocessor, and the base and extended memory sizes.
 //! Register 0Fh is the shutdown status byte that tells the BIOS, after a CPU
 //! reset, whether to resume a program through the pointer at 40:67 (used by
 //! 286-era protected mode code).
 
-use chrono::{Datelike, Timelike};
+use chrono::{Datelike, NaiveDateTime, TimeDelta, Timelike};
 
 pub const SHUTDOWN_STATUS: u8 = 0x0F;
 
 pub struct Cmos {
     index: u8,
     ram: [u8; 128],
+    /// How far the machine's clock is from the host's, which DATE, TIME and
+    /// the services that set the clock move it.
+    offset: TimeDelta,
 }
 
 fn bcd(value: u32) -> u8 {
@@ -36,7 +40,7 @@ impl Cmos {
         ram[0x18] = (ext >> 8) as u8;
         ram[0x30] = ext as u8;
         ram[0x31] = (ext >> 8) as u8;
-        let mut cmos = Self { index: 0, ram };
+        let mut cmos = Self { index: 0, ram, offset: TimeDelta::zero() };
         cmos.update_checksum();
         cmos
     }
@@ -67,8 +71,19 @@ impl Cmos {
         self.index = value & 0x7F;
     }
 
+    /// The machine's local date and time: the host's, moved by what DOS
+    /// or the BIOS set it to.
+    pub fn now(&self) -> NaiveDateTime {
+        crate::hosttime::now().naive_local() + self.offset
+    }
+
+    /// Set the machine's clock to `at`, a local date and time.
+    pub fn set_now(&mut self, at: NaiveDateTime) {
+        self.offset = at - crate::hosttime::now().naive_local();
+    }
+
     pub fn read_data(&self) -> u8 {
-        let now = crate::hosttime::now();
+        let now = self.now();
         match self.index {
             0x00 => bcd(now.second()),
             0x02 => bcd(now.minute()),

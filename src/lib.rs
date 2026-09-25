@@ -53,6 +53,7 @@ pub mod shell;
 pub mod sn76489;
 pub mod sound;
 pub mod stats;
+pub mod time_commands;
 pub mod timer;
 pub mod video;
 pub mod xms;

@@ -328,3 +328,51 @@ fn batch_lines_run_while_the_prompt_waits_for_a_key() {
     run_batch_files(&mut cpu);
     assert_eq!(screen(&cpu), "C:\\>echo one\none\nC:\\>");
 }
+
+fn type_line(cpu: &mut Cpu, line: &[u8]) {
+    for &b in line {
+        cpu.bus.keyboard_buffer.push_back(b as u16);
+    }
+    run_until(cpu, 100, |_| false);
+}
+
+#[test]
+fn date_and_time_set_the_machine_s_clock() {
+    use chrono::NaiveDate;
+    rust_dos::hosttime::fix(NaiveDate::from_ymd_opt(2026, 9, 25).unwrap().and_hms_opt(14, 3, 5));
+    let dir = scratch("date", &[]);
+    let mut cpu = machine(&dir);
+    type_line(&mut cpu, b"date\r");
+    assert!(screen(&cpu).contains("Current date is Fri 09-25-2026\nEnter new date (mm-dd-yy):"), "{}", screen(&cpu));
+    type_line(&mut cpu, b"13-01-93\r");
+    assert!(screen(&cpu).contains("Invalid date\nEnter new date (mm-dd-yy):"), "{}", screen(&cpu));
+    type_line(&mut cpu, b"12-24-93\r");
+    type_line(&mut cpu, b"time 23:59\r");
+
+    // DOS and the BIOS both see the new date and time.
+    cpu.set_ax(0x2A00);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!((cpu.cx(), cpu.dx()), (1993, 0x0C18));
+    cpu.set_ax(0x0400);
+    rust_dos::interrupts::int1a::handle(&mut cpu);
+    assert_eq!((cpu.cx(), cpu.dx()), (0x1993, 0x1224));
+    cpu.set_ax(0x0200);
+    rust_dos::interrupts::int1a::handle(&mut cpu);
+    assert_eq!(cpu.cx(), 0x2359, "{}", screen(&cpu));
+    // INT 21h AH=2Bh refuses a date that isn't one.
+    cpu.set_ax(0x2B00);
+    cpu.set_cx(1999);
+    cpu.set_dx(0x021E); // February 30th
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.get_al(), 0xFF);
+    rust_dos::hosttime::fix(None);
+}
+
+#[test]
+fn ctrl_c_gives_up_the_line_at_the_prompt() {
+    let dir = scratch("ctrl_c", &[]);
+    let mut cpu = machine(&dir);
+    type_line(&mut cpu, b"dir\x03");
+    type_line(&mut cpu, b"ver\r");
+    assert!(screen(&cpu).starts_with("C:\\>dir^C\nC:\\>ver\nRust-DOS"), "{}", screen(&cpu));
+}

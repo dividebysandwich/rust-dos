@@ -568,6 +568,7 @@ Besides running programs and batch files, the prompt has these commands:
 | `REN old new`, `RENAME` | rename files, with wildcards (`REN *.TXT *.BAK`) |
 | `MD dir`, `MKDIR`, `RD dir`, `RMDIR` | make and remove directories |
 | `VOL [d:]` | a drive's label and serial number |
+| `DATE [mm-dd-yy]`, `TIME [hh:mm[:ss]]` | set the date or time, or show it and ask for a new one. The machine's clock starts at the host's and keeps the difference it is set to, for DOS, the BIOS and the CMOS clock; files still get the host's time. |
 | `CLS`, `VER`, `ECHO`, `SET`, `PATH`, `PROMPT` | as in DOS |
 | `MOUNT`, `IMGMOUNT` | see [Drives](#drives) |
 | `MIXER` | see [`[mixer]`](#configuration) |
@@ -581,7 +582,8 @@ Besides running programs and batch files, the prompt has these commands:
 are `$P` the drive and directory, `$N` the drive, `$G` `>`, `$L` `<`,
 `$B` `|`, `$Q` `=`, `$D` the date, `$T` the time, `$V` the version, `$_`
 a new line, `$E` Escape, `$H` a backspace and `$$` a dollar sign. `ECHO
-OFF` typed at the prompt hides it.
+OFF` typed at the prompt hides it. Ctrl+C gives up the line being typed
+and starts again at a new prompt.
 
 `[autoexec]` is a batch file too, run before `C:\AUTOEXEC.BAT`, and so are
 a [game profile](#game-profiles)'s commands.

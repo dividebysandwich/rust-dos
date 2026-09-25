@@ -1,4 +1,4 @@
-use chrono::Timelike;
+use chrono::{Datelike, Timelike};
 use iced_x86::Register;
 
 use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
@@ -923,7 +923,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 2Ch: Get System Time
         // Returns: CH=Hour, CL=Minute, DH=Second, DL=1/100s
         0x2C => {
-            let now = crate::hosttime::now();
+            let now = cpu.bus.cmos.now();
 
             let hour = now.hour() as u8;
             let minute = now.minute() as u8;
@@ -1763,16 +1763,35 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 2Ah: Get date. CX=year, DH=month, DL=day, AL=day of week.
         0x2A => {
-            use chrono::Datelike;
-            let now = crate::hosttime::now();
+            let now = cpu.bus.cmos.now();
             cpu.set_cx(now.year() as u16);
             cpu.set_dx(((now.month() as u16) << 8) | now.day() as u16);
             cpu.set_reg8(Register::AL, now.weekday().num_days_from_sunday() as u8);
         }
 
-        // AH = 2Bh / 2Dh: Set date / time. The host clock can't be set;
-        // report success.
-        0x2B | 0x2D => cpu.set_reg8(Register::AL, 0),
+        // AH = 2Bh: Set date (CX year, DH month, DL day), AH = 2Dh: Set
+        // time (CH hour, CL minute, DH second, DL hundredths): AL=FFh if
+        // it isn't one.
+        0x2B | 0x2D => {
+            let now = cpu.bus.cmos.now();
+            let at = if ah == 0x2B {
+                chrono::NaiveDate::from_ymd_opt(cpu.cx() as i32, (cpu.dx() >> 8) as u32, cpu.get_dl() as u32)
+                    .filter(|d| (1980..=2099).contains(&d.year()))
+                    .map(|date| date.and_time(now.time()))
+            } else {
+                let (h, m) = ((cpu.cx() >> 8) as u32, (cpu.cx() & 0xFF) as u32);
+                chrono::NaiveTime::from_hms_milli_opt(h, m, (cpu.dx() >> 8) as u32, cpu.get_dl() as u32 * 10)
+                    .filter(|_| cpu.get_dl() < 100)
+                    .map(|time| now.date().and_time(time))
+            };
+            match at {
+                Some(at) => {
+                    cpu.bus.cmos.set_now(at);
+                    cpu.set_reg8(Register::AL, 0);
+                }
+                None => cpu.set_reg8(Register::AL, 0xFF),
+            }
+        }
 
         // AH = 34h: Address of the InDOS flag. DOS services run in one step
         // here, so it's never set when a program looks.
