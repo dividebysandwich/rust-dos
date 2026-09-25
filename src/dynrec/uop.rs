@@ -117,6 +117,18 @@ pub enum Uop {
     /// SHLD (`left`) or SHRD of `dst` by a count of 1 to size * 8 - 1,
     /// filling in from `src`.
     DoubleShift { left: bool, size: u8, dst: T, src: T, count: u8 },
+    /// Shift or rotate by register `count` (CL) & 31: if that is 0, nothing
+    /// changes and the instruction ends here, without the operations after
+    /// this one. For bytes and words, a `Bail` has made it less than the
+    /// width.
+    ShiftVar { op: ShiftOp, size: u8, t: T, count: Gpr },
+    /// SHLD or SHRD by register `count` & 31, as `ShiftVar` and
+    /// `DoubleShift`.
+    DoubleShiftVar { left: bool, size: u8, dst: T, src: T, count: Gpr },
+    /// If t & `mask` isn't 0, the instruction's handler runs it instead of
+    /// the operations after this one (a case they don't cover). Nothing
+    /// before it may change anything, or fault.
+    Bail { t: T, mask: u32 },
     /// a = a * b, signed, cut to `size` (2 or 4) bytes: the two- and
     /// three-operand IMUL. Only CF and OF change.
     Imul { size: u8, a: T, b: Src },

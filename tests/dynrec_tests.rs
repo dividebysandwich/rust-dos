@@ -385,6 +385,84 @@ fn setcc_sees_the_flags_wherever_they_are() {
     run_both(&mut a, &mut b);
 }
 
+#[test]
+fn shifts_by_cl_and_of_memory_are_the_interpreters() {
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            // CL, the loop count's low byte, takes every count: 0, and
+            // those past a byte's and a word's width, which a 386 shifts
+            // its own way.
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x9E37_79B1u32 as i32)?;
+            a.mov(ebx, eax)?;
+            a.ror(ebx, 7)?;
+            a.mov(edx, ebx)?;
+            a.not(edx)?;
+            a.mov(dword_ptr(DATA), eax)?;
+            a.mov(dword_ptr(DATA + 4), ebx)?;
+            a.mov(dword_ptr(DATA + 8), edx)?;
+            macro_rules! all {
+                ($m:ident) => {
+                    a.$m(eax, cl)?;
+                    a.adc(ebp, eax)?;
+                    a.$m(bx, cl)?;
+                    a.$m(dl, cl)?;
+                    a.$m(dh, cl)?;
+                    a.pushfd()?;
+                    a.pop(esi)?;
+                    a.xor(ebp, esi)?;
+                    a.$m(dword_ptr(DATA), cl)?;
+                    a.$m(word_ptr(DATA + 4), cl)?;
+                    a.$m(byte_ptr(DATA + 6), cl)?;
+                    a.$m(dword_ptr(DATA + 8), 5)?;
+                    a.$m(byte_ptr(DATA + 9), 1)?;
+                    a.adc(ebp, ebx)?;
+                    a.sbb(ebp, edx)?;
+                };
+            }
+            all!(shl);
+            all!(shr);
+            all!(sar);
+            all!(rol);
+            all!(ror);
+            a.shld(eax, ebx, cl)?;
+            a.adc(ebp, eax)?;
+            a.shrd(ebx, edx, cl)?;
+            a.shld(si, bx, cl)?;
+            a.shrd(word_ptr(DATA + 4), ax, cl)?;
+            a.shld(dword_ptr(DATA), edx, cl)?;
+            a.adc(ebp, esi)?;
+            a.add(ebp, dword_ptr(DATA))?;
+            a.add(ebp, dword_ptr(DATA + 4))?;
+            a.add(ebp, dword_ptr(DATA + 8))?;
+            a.add(ebp, ebx)?;
+            a.add(ebp, edx)
+        });
+    });
+    run_both(&mut a, &mut b);
+}
+
+#[test]
+fn a_shift_by_a_cl_of_0_still_checks_its_operand_for_writing() {
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        // A read-only data segment.
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFF, 0x90, 0x4));
+        let code = asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(ds, ax)?;
+            a.xor(ecx, ecx)?;
+            a.shl(dword_ptr(0x10), cl)?;
+            a.mov(edx, 3u32)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.recorded().0, GP as u32);
+    assert_ne!(b.cpu.edx(), 3);
+}
+
 /// A program with IRQ 0 firing often, running `body` in a loop.
 fn with_timer(rig: &mut Rig, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) {
     rig.handler(0x08, 0, |a| {

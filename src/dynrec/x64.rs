@@ -117,6 +117,9 @@ enum Slow {
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
+    /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
+    /// with the flags in EBP there (`dirty`), and goes on at `end`.
+    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool },
 }
 
 struct Gen<'a> {
@@ -125,9 +128,15 @@ struct Gen<'a> {
     data_ptr: i64,
     /// Per instruction: where it stops the block with the exit code in EAX
     /// (made where something jumps there), and how far the instruction
-    /// count is brought up to date for it.
+    /// count is brought up to date for it. The stops' way out.
     fail: Vec<Option<DynamicLabel>>,
     synced: Vec<i32>,
+    fail_tail: DynamicLabel,
+    /// Where the instruction being translated ends (made where something
+    /// jumps there), and per instruction whether the flags are in EBP
+    /// there.
+    end: Option<DynamicLabel>,
+    end_dirty: Vec<bool>,
     tail: DynamicLabel,
     /// The prologue's ways out, and where it goes on.
     deadline: DynamicLabel,
@@ -178,13 +187,16 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
     let n = data.count();
     let (tail, deadline, revalidate, body) =
         (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
-    let limit = ops.new_dynamic_label();
+    let (limit, fail_tail) = (ops.new_dynamic_label(), ops.new_dynamic_label());
     let mut g = Gen {
         ops,
         data,
         data_ptr: data as *const BlockData as i64,
         fail: vec![None; n],
         synced: vec![0; n],
+        fail_tail,
+        end: None,
+        end_dirty: vec![false; n],
         tail,
         deadline,
         revalidate,
@@ -223,6 +235,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                 for (k, uop) in uops.iter().enumerate() {
                     g.live_after = g.live[ix][k];
                     g.uop(uop);
+                }
+                g.end_dirty[ix] = g.dirty;
+                if let Some(end) = g.end.take() {
+                    dynasm!(g.ops ; .arch x64 ; =>end);
                 }
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
                     // A store hit the rest of the block: leave after this
@@ -304,6 +320,12 @@ impl Gen<'_> {
         *self.fail[self.ix].get_or_insert_with(|| ops.new_dynamic_label())
     }
 
+    /// Where the instruction being translated ends.
+    fn end(&mut self) -> DynamicLabel {
+        let ops = &mut self.ops;
+        *self.end.get_or_insert_with(|| ops.new_dynamic_label())
+    }
+
     /// Run instruction `ix` through its handler.
     fn fallback(&mut self, ix: i32) {
         let data_ptr = self.data_ptr;
@@ -360,7 +382,7 @@ impl Gen<'_> {
         // An instruction stopped the block: the exit code gets its index,
         // and whether the flags are in EBP, and the execution loop counts
         // it (see `BlockData::lag`).
-        let fail_tail = self.ops.new_dynamic_label();
+        let fail_tail = self.fail_tail;
         for (ix, label) in self.fail.clone().into_iter().enumerate() {
             if let Some(label) = label {
                 dynasm!(self.ops ; .arch x64 ; =>label);
@@ -371,7 +393,7 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; jmp =>fail_tail);
             }
         }
-        if self.fail.iter().any(Option::is_some) {
+        if self.fail.iter().any(Option::is_some) || self.slow.iter().any(|s| matches!(s, Slow::Bail { .. })) {
             dynasm!(self.ops
                 ; .arch x64
                 ; =>fail_tail
@@ -434,6 +456,42 @@ impl Gen<'_> {
                         ; =>at
                         ; mov eax, code as i32
                         ; jmp =>fail
+                    );
+                }
+                Slow::Bail { at, end, ix, dirty } => {
+                    // As a handler's call in the block, but with the
+                    // instruction count put back after it, as the code on
+                    // from `end` has it. A stop leaves the flags the handler
+                    // left in the CPU.
+                    let lag = ix as i32 - self.synced[ix];
+                    dynasm!(self.ops ; .arch x64 ; =>at);
+                    self.dirty = dirty;
+                    self.flags_back();
+                    if lag > 0 {
+                        dynasm!(self.ops ; .arch x64 ; add QWORD [rbx + ICOUNT], lag);
+                    }
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov rdi, rbx
+                        ; mov rsi, r12
+                        ; mov rdx, QWORD data_ptr
+                        ; mov ecx, ix as i32
+                        ; call QWORD [r12 + CTX_FALLBACK]
+                    );
+                    if lag > 0 {
+                        dynasm!(self.ops ; .arch x64 ; sub QWORD [rbx + ICOUNT], lag);
+                    }
+                    dynasm!(self.ops ; .arch x64 ; test eax, eax ; jnz >stop);
+                    if self.end_dirty[ix] {
+                        dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
+                    }
+                    let fail_tail = self.fail_tail;
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; jmp =>end
+                        ; stop:
+                        ; or eax, (ix as i32) << 8
+                        ; jmp =>fail_tail
                     );
                 }
                 Slow::Store { at, back, m, src, lo, hi } => {
@@ -589,8 +647,22 @@ impl Gen<'_> {
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
-            Uop::Shift { op, size, t, count } => self.shift(op, size, t, count),
-            Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, count),
+            Uop::Shift { op, size, t, count } => self.shift(op, size, t, Some(count)),
+            Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, Some(count)),
+            Uop::ShiftVar { op, size, t, count } => {
+                self.var_count(count, super::flags::shift_flags(op));
+                self.shift(op, size, t, None);
+            }
+            Uop::DoubleShiftVar { left, size, dst, src, count } => {
+                self.var_count(count, CF | OF | SZP);
+                self.double_shift(left, size, dst, src, None);
+            }
+            Uop::Bail { t, mask } => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), mask as i32 ; jnz =>at);
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty });
+            }
             Uop::Imul { size, a, b } => {
                 let a = r(a);
                 match (size, b) {
@@ -892,17 +964,33 @@ impl Gen<'_> {
         }
     }
 
-    /// Shifts and rotates by 1 to width - 1, with the flags `alu_shift`
-    /// gives them where the host's are undefined.
-    fn shift(&mut self, op: ShiftOp, size: u8, t: T, count: u8) {
+    /// The count of a shift by register `count` (CL) & 31 into ECX, and on
+    /// to the instruction's end if it is 0: nothing changes then. The
+    /// guest's flags are in EBP both ways if the shift's are live.
+    fn var_count(&mut self, count: Gpr, set: u32) {
+        let end = self.end();
+        dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [rbx + gpr_offset(count)]);
+        if self.wanted(set) && !self.dirty {
+            dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
+            self.dirty = true;
+        }
+        dynasm!(self.ops ; .arch x64 ; and ecx, 31 ; jz =>end);
+    }
+
+    /// Shifts and rotates by 1 to width - 1, `count` or CL (None, in ECX),
+    /// with the flags `alu_shift` gives them where the host's are
+    /// undefined.
+    fn shift(&mut self, op: ShiftOp, size: u8, t: T, count: Option<u8>) {
         let t = r(t);
-        let c = count as i8;
         macro_rules! op {
             ($m:ident) => {
-                match size {
-                    1 => dynasm!(self.ops ; .arch x64 ; $m Rb(t), c),
-                    2 => dynasm!(self.ops ; .arch x64 ; $m Rw(t), c),
-                    _ => dynasm!(self.ops ; .arch x64 ; $m Rd(t), c),
+                match (size, count) {
+                    (1, Some(c)) => dynasm!(self.ops ; .arch x64 ; $m Rb(t), c as i8),
+                    (2, Some(c)) => dynasm!(self.ops ; .arch x64 ; $m Rw(t), c as i8),
+                    (_, Some(c)) => dynasm!(self.ops ; .arch x64 ; $m Rd(t), c as i8),
+                    (1, None) => dynasm!(self.ops ; .arch x64 ; $m Rb(t), cl),
+                    (2, None) => dynasm!(self.ops ; .arch x64 ; $m Rw(t), cl),
+                    (_, None) => dynasm!(self.ops ; .arch x64 ; $m Rd(t), cl),
                 }
             };
         }
@@ -936,13 +1024,24 @@ impl Gen<'_> {
                 self.merge(ARITH, ARITH);
             }
             ShiftOp::Shr => {
-                // OF is the original sign for a count of 1, else 0; AF set.
-                let of = if count == 1 { OF } else { 0 };
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; and eax, (CF | SZP | of) as i32
-                    ; or eax, AF as i32
-                );
+                // OF is the original sign for a count of 1, else 0 (the
+                // result's bit below its top); AF set.
+                match count {
+                    Some(c) => {
+                        let of = if c == 1 { OF } else { 0 };
+                        dynasm!(self.ops ; .arch x64 ; and eax, (CF | SZP | of) as i32);
+                    }
+                    None => dynasm!(self.ops
+                        ; .arch x64
+                        ; mov ecx, Rd(t)
+                        ; shr ecx, top - 1
+                        ; and ecx, 1
+                        ; shl ecx, 11
+                        ; and eax, (CF | SZP) as i32
+                        ; or eax, ecx
+                    ),
+                }
+                dynasm!(self.ops ; .arch x64 ; or eax, AF as i32);
                 self.merge(ARITH, ARITH);
             }
             // OF clear, AF kept.
@@ -980,15 +1079,20 @@ impl Gen<'_> {
         }
     }
 
-    /// SHLD and SHRD by 1 to width - 1: the host's result, CF, SF, ZF and
-    /// PF; OF as `alu_double_shift` has it; AF kept.
-    fn double_shift(&mut self, left: bool, size: u8, dst: T, src: T, count: u8) {
-        let (d, s, c) = (r(dst), r(src), count as i8);
-        match (left, size) {
-            (true, 2) => dynasm!(self.ops ; .arch x64 ; shld Rw(d), Rw(s), c),
-            (true, _) => dynasm!(self.ops ; .arch x64 ; shld Rd(d), Rd(s), c),
-            (false, 2) => dynasm!(self.ops ; .arch x64 ; shrd Rw(d), Rw(s), c),
-            (false, _) => dynasm!(self.ops ; .arch x64 ; shrd Rd(d), Rd(s), c),
+    /// SHLD and SHRD by 1 to width - 1, `count` or CL (None, in ECX): the
+    /// host's result, CF, SF, ZF and PF; OF as `alu_double_shift` has it;
+    /// AF kept.
+    fn double_shift(&mut self, left: bool, size: u8, dst: T, src: T, count: Option<u8>) {
+        let (d, s) = (r(dst), r(src));
+        match (left, size, count) {
+            (true, 2, Some(c)) => dynasm!(self.ops ; .arch x64 ; shld Rw(d), Rw(s), c as i8),
+            (true, _, Some(c)) => dynasm!(self.ops ; .arch x64 ; shld Rd(d), Rd(s), c as i8),
+            (false, 2, Some(c)) => dynasm!(self.ops ; .arch x64 ; shrd Rw(d), Rw(s), c as i8),
+            (false, _, Some(c)) => dynasm!(self.ops ; .arch x64 ; shrd Rd(d), Rd(s), c as i8),
+            (true, 2, None) => dynasm!(self.ops ; .arch x64 ; shld Rw(d), Rw(s), cl),
+            (true, _, None) => dynasm!(self.ops ; .arch x64 ; shld Rd(d), Rd(s), cl),
+            (false, 2, None) => dynasm!(self.ops ; .arch x64 ; shrd Rw(d), Rw(s), cl),
+            (false, _, None) => dynasm!(self.ops ; .arch x64 ; shrd Rd(d), Rd(s), cl),
         }
         if !self.wanted(CF | OF | SZP) {
             return;

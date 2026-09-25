@@ -122,8 +122,9 @@ Each instruction becomes one of two things:
 - **Native code.** `translate.rs` turns the common forms into operations
   (`uop.rs`), which the code generator turns into host code:
   - MOV, the ALU operations, INC, DEC, NEG and NOT;
-  - shifts and rotates by a constant;
-  - SHLD and SHRD by a constant;
+  - shifts and rotates but RCL and RCR, by a constant or CL, of registers
+    and memory;
+  - SHLD and SHRD by a constant or CL;
   - MUL and IMUL in all their forms, DIV and IDIV;
   - LEA, MOVZX, MOVSX, XCHG of registers, CBW, CWD, CWDE and CDQ;
   - the flag instructions, and SETcc;
@@ -131,7 +132,10 @@ Each instruction becomes one of two things:
   - near JMP, CALL, RET, Jcc, LOOPcc and JCXZ.
 
   Each does what the instruction's interpreter handler does, in the same
-  order, flags included.
+  order, flags included. Where a form has rare cases the operations don't
+  cover (a byte or word shifted by CL past its width), a `Bail` operation
+  checks for them first and runs the instruction through its handler
+  instead.
 - **A call of its interpreter handler.** Everything else runs through
   `jit_fallback`, which does what `exec::execute_at` does. Every
   instruction works in a block from the start; translating more forms only

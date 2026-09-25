@@ -163,6 +163,9 @@ enum Slow {
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
+    /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
+    /// with the flags in W28 there (`dirty`), and goes on at `end`.
+    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool },
 }
 
 struct Gen<'a> {
@@ -172,9 +175,15 @@ struct Gen<'a> {
     data_lit: DynamicLabel,
     /// Per instruction: where it stops the block with the exit code in W0
     /// (made where something jumps there), and how far the instruction
-    /// count is brought up to date for it.
+    /// count is brought up to date for it. The stops' way out.
     fail: Vec<Option<DynamicLabel>>,
     synced: Vec<i32>,
+    fail_tail: DynamicLabel,
+    /// Where the instruction being translated ends (made where something
+    /// branches there), and per instruction whether the flags are in W28
+    /// there.
+    end: Option<DynamicLabel>,
+    end_dirty: Vec<bool>,
     tail: DynamicLabel,
     /// The prologue's ways out, and where it goes on.
     deadline: DynamicLabel,
@@ -214,12 +223,16 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
     let n = data.count();
     let mut labels = || ops.new_dynamic_label();
     let (data_lit, tail, deadline, revalidate, limit, body) = (labels(), labels(), labels(), labels(), labels(), labels());
+    let fail_tail = labels();
     let mut g = Gen {
         ops,
         data,
         data_lit,
         fail: vec![None; n],
         synced: vec![0; n],
+        fail_tail,
+        end: None,
+        end_dirty: vec![false; n],
         tail,
         deadline,
         revalidate,
@@ -255,6 +268,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                 for (k, uop) in uops.iter().enumerate() {
                     g.live_after = g.live[ix][k];
                     g.uop(uop);
+                }
+                g.end_dirty[ix] = g.dirty;
+                if let Some(end) = g.end.take() {
+                    dynasm!(g.ops ; .arch aarch64 ; =>end);
                 }
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
                     // A store hit the rest of the block: leave after this
@@ -355,6 +372,12 @@ impl Gen<'_> {
     fn fail(&mut self) -> DynamicLabel {
         let ops = &mut self.ops;
         *self.fail[self.ix].get_or_insert_with(|| ops.new_dynamic_label())
+    }
+
+    /// Where the instruction being translated ends.
+    fn end(&mut self) -> DynamicLabel {
+        let ops = &mut self.ops;
+        *self.end.get_or_insert_with(|| ops.new_dynamic_label())
     }
 
     /// X1 = the block's data.
@@ -471,7 +494,7 @@ impl Gen<'_> {
         // An instruction stopped the block: the exit code gets its index,
         // and whether the flags are in W28, and the execution loop counts
         // it (see `BlockData::lag`).
-        let fail_tail = self.ops.new_dynamic_label();
+        let fail_tail = self.fail_tail;
         for (ix, label) in self.fail.clone().into_iter().enumerate() {
             if let Some(label) = label {
                 dynasm!(self.ops ; .arch aarch64 ; =>label);
@@ -483,7 +506,7 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch aarch64 ; b =>fail_tail);
             }
         }
-        if self.fail.iter().any(Option::is_some) {
+        if self.fail.iter().any(Option::is_some) || self.slow.iter().any(|s| matches!(s, Slow::Bail { .. })) {
             dynasm!(self.ops ; .arch aarch64 ; =>fail_tail);
             self.data_x1();
             self.exit();
@@ -526,6 +549,44 @@ impl Gen<'_> {
                 }
                 Slow::Fault { at, code, fail } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at ; movz w0, code ; b =>fail);
+                }
+                Slow::Bail { at, end, ix, dirty } => {
+                    // As a handler's call in the block, but with the
+                    // instruction count put back after it, as the code on
+                    // from `end` has it. A stop leaves the flags the handler
+                    // left in the CPU.
+                    let lag = (ix as i32 - self.synced[ix]) as u32;
+                    dynasm!(self.ops ; .arch aarch64 ; =>at);
+                    self.dirty = dirty;
+                    self.flags_back();
+                    self.add_field64(layout::ICOUNT, lag);
+                    let lit = self.data_lit;
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; mov x0, x19
+                        ; mov x1, x20
+                        ; ldr x2, =>lit
+                    );
+                    self.mov32(3, ix as u32);
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; ldr x16, [x20, CTX_FALLBACK as u32]
+                        ; blr x16
+                        ; mov w8, w0
+                    );
+                    if lag > 0 {
+                        self.field(Access::Ldr64, 0, layout::ICOUNT);
+                        dynasm!(self.ops ; .arch aarch64 ; sub x0, x0, lag);
+                        self.field(Access::Str64, 0, layout::ICOUNT);
+                    }
+                    dynasm!(self.ops ; .arch aarch64 ; cbnz w8, >stop);
+                    if self.end_dirty[ix] {
+                        self.field(Access::Ldr32, 28, layout::FLAGS);
+                    }
+                    let fail_tail = self.fail_tail;
+                    dynasm!(self.ops ; .arch aarch64 ; b =>end ; stop:);
+                    self.mov32(9, (ix as u32) << 8);
+                    dynasm!(self.ops ; .arch aarch64 ; orr w0, w8, w9 ; b =>fail_tail);
                 }
                 Slow::Store { at, back, m, src, lo, hi } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at);
@@ -686,8 +747,22 @@ impl Gen<'_> {
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
-            Uop::Shift { op, size, t, count } => self.shift(op, size, t, count),
-            Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, count),
+            Uop::Shift { op, size, t, count } => self.shift(op, size, t, Some(count)),
+            Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, Some(count)),
+            Uop::ShiftVar { op, size, t, count } => {
+                self.var_count(count, super::flags::shift_flags(op));
+                self.shift(op, size, t, None);
+            }
+            Uop::DoubleShiftVar { left, size, dst, src, count } => {
+                self.var_count(count, CF | OF | SZP);
+                self.double_shift(left, size, dst, src, None);
+            }
+            Uop::Bail { t, mask } => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch aarch64 ; tst W(r(t)), mask ; b.ne =>at);
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty });
+            }
             Uop::Imul { size, a, b } => self.imul(size, a, b),
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
             Uop::DivWide { signed, size, t } => self.div_wide(signed, size, t),
@@ -1096,23 +1171,87 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
     }
 
-    /// Shifts and rotates by 1 to width - 1, with the flags `alu_shift`
-    /// gives them.
-    fn shift(&mut self, op: ShiftOp, size: u8, t: T, count: u8) {
+    /// The count of a shift by register `count` (CL) & 31 into W12, and on
+    /// to the instruction's end if it is 0: nothing changes then. The
+    /// guest's flags are in W28 both ways if the shift's are live.
+    fn var_count(&mut self, count: Gpr, set: u32) {
+        let end = self.end();
+        self.field(Access::Ldr8, 12, gpr_offset(count));
+        if set & self.live_after != 0 && !self.dirty {
+            self.field(Access::Ldr32, 28, layout::FLAGS);
+            self.dirty = true;
+        }
+        dynasm!(self.ops ; .arch aarch64 ; ands w12, w12, 31 ; b.eq =>end);
+    }
+
+    /// W`dst` = W`src` shifted left (`left`) or right by `count`, or by W12
+    /// (None), logically.
+    fn shift_by(&mut self, left: bool, dst: u8, src: u8, count: Option<u8>) {
+        match (left, count) {
+            (true, Some(c)) => {
+                let c = c as u32;
+                dynasm!(self.ops ; .arch aarch64 ; lsl W(dst), W(src), c);
+            }
+            (false, Some(c)) => {
+                let c = c as u32;
+                dynasm!(self.ops ; .arch aarch64 ; lsr W(dst), W(src), c);
+            }
+            (true, None) => dynasm!(self.ops ; .arch aarch64 ; lsl W(dst), W(src), w12),
+            (false, None) => dynasm!(self.ops ; .arch aarch64 ; lsr W(dst), W(src), w12),
+        }
+    }
+
+    /// W1 = bit `bits` - the count of W10 (CF of a shift left), or bit
+    /// the count - 1 (of a shift right), for a count below `bits`.
+    fn out_bit(&mut self, left: bool, bits: u32, count: Option<u8>) {
+        match count {
+            Some(c) => {
+                let at = if left { bits - c as u32 } else { c as u32 - 1 };
+                dynasm!(self.ops ; .arch aarch64 ; ubfx w1, w10, at, 1);
+            }
+            None => {
+                if left {
+                    self.mov32(2, bits);
+                    dynasm!(self.ops ; .arch aarch64 ; sub w2, w2, w12);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; sub w2, w12, 1);
+                }
+                dynasm!(self.ops ; .arch aarch64 ; lsr w1, w10, w2 ; and w1, w1, 1);
+            }
+        }
+    }
+
+    /// W`dst` = W`src` shifted left (`left`) or right by `bits` - the count
+    /// (`count`, or W12 for None; W3 is changed).
+    fn shift_back(&mut self, left: bool, dst: u8, src: u8, bits: u32, count: Option<u8>) {
+        match count {
+            Some(c) => self.shift_by(left, dst, src, Some((bits - c as u32) as u8)),
+            None => {
+                self.mov32(3, bits);
+                dynasm!(self.ops ; .arch aarch64 ; sub w3, w3, w12);
+                if left {
+                    dynasm!(self.ops ; .arch aarch64 ; lsl W(dst), W(src), w3);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; lsr W(dst), W(src), w3);
+                }
+            }
+        }
+    }
+
+    /// Shifts and rotates by 1 to width - 1, `count` or W12 (None), with
+    /// the flags `alu_shift` gives them.
+    fn shift(&mut self, op: ShiftOp, size: u8, t: T, count: Option<u8>) {
         let bits = size as u32 * 8;
-        let c = count as u32;
         let need = super::flags::shift_flags(op) & self.live_after;
-        // The sign bit, the one below it, and the last bit a shift left or
-        // right moves out.
+        // The sign bit and the one below it.
         let (sign, below) = (bits - 1, bits - 2);
-        let (out_left, out_right) = (bits - c, c - 1);
         dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(t)));
         match op {
             ShiftOp::Shl => {
                 // CF: the last bit out; OF: the result's sign ^ CF; AF set.
-                dynasm!(self.ops ; .arch aarch64 ; lsl w0, w10, c);
+                self.shift_by(true, 0, 10, count);
                 if need & (CF | OF) != 0 {
-                    dynasm!(self.ops ; .arch aarch64 ; ubfx w1, w10, out_left, 1);
+                    self.out_bit(true, bits, count);
                 }
                 self.cut(size);
                 if need & OF != 0 {
@@ -1123,9 +1262,9 @@ impl Gen<'_> {
             ShiftOp::Shr => {
                 // CF: the last bit out; OF: the result's top two bits
                 // differ (its top bit is 0); AF set.
-                dynasm!(self.ops ; .arch aarch64 ; lsr w0, w10, c);
+                self.shift_by(false, 0, 10, count);
                 if need & CF != 0 {
-                    dynasm!(self.ops ; .arch aarch64 ; ubfx w1, w10, out_right, 1);
+                    self.out_bit(false, bits, count);
                 }
                 if need & OF != 0 {
                     dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, below, 1);
@@ -1139,9 +1278,15 @@ impl Gen<'_> {
                     2 => dynasm!(self.ops ; .arch aarch64 ; sxth w10, w10),
                     _ => {}
                 }
-                dynasm!(self.ops ; .arch aarch64 ; asr w0, w10, c);
+                match count {
+                    Some(c) => {
+                        let c = c as u32;
+                        dynasm!(self.ops ; .arch aarch64 ; asr w0, w10, c);
+                    }
+                    None => dynasm!(self.ops ; .arch aarch64 ; asr w0, w10, w12),
+                }
                 if need & CF != 0 {
-                    dynasm!(self.ops ; .arch aarch64 ; ubfx w1, w10, out_right, 1);
+                    self.out_bit(false, bits, count);
                 }
                 self.cut(size);
                 self.flags_w5(bits, need, CF, 0);
@@ -1149,12 +1294,18 @@ impl Gen<'_> {
             ShiftOp::Rol | ShiftOp::Ror => {
                 let left = op == ShiftOp::Rol;
                 if size == 4 {
-                    let right = if left { 32 - c } else { c };
-                    dynasm!(self.ops ; .arch aarch64 ; ror w0, w10, right);
-                } else if left {
-                    dynasm!(self.ops ; .arch aarch64 ; lsl w2, w10, c ; lsr w3, w10, bits - c ; orr w0, w2, w3);
+                    match (left, count) {
+                        (_, Some(c)) => {
+                            let right = if left { 32 - c as u32 } else { c as u32 };
+                            dynasm!(self.ops ; .arch aarch64 ; ror w0, w10, right);
+                        }
+                        (true, None) => dynasm!(self.ops ; .arch aarch64 ; neg w2, w12 ; ror w0, w10, w2),
+                        (false, None) => dynasm!(self.ops ; .arch aarch64 ; ror w0, w10, w12),
+                    }
                 } else {
-                    dynasm!(self.ops ; .arch aarch64 ; lsr w2, w10, c ; lsl w3, w10, bits - c ; orr w0, w2, w3);
+                    self.shift_by(left, 2, 10, count);
+                    self.shift_back(!left, 3, 10, bits, count);
+                    dynasm!(self.ops ; .arch aarch64 ; orr w0, w2, w3);
                 }
                 self.cut(size);
                 if left {
@@ -1184,33 +1335,20 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
     }
 
-    /// SHLD and SHRD by 1 to width - 1, with the flags
-    /// `alu_double_shift` gives them (AF kept).
-    fn double_shift(&mut self, left: bool, size: u8, dst: T, src: T, count: u8) {
+    /// SHLD and SHRD by 1 to width - 1, `count` or W12 (None), with the
+    /// flags `alu_double_shift` gives them (AF kept).
+    fn double_shift(&mut self, left: bool, size: u8, dst: T, src: T, count: Option<u8>) {
         let bits = size as u32 * 8;
-        let c = count as u32;
-        let back = bits - c;
-        let (sign, below, out_right) = (bits - 1, bits - 2, c - 1);
+        let (sign, below) = (bits - 1, bits - 2);
         let need = (CF | OF | SZP) & self.live_after;
         dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(dst)) ; mov w11, W(r(src)));
-        if left {
-            // dest:src shifted left; CF is the last bit out of dest.
-            dynasm!(self.ops
-                ; .arch aarch64
-                ; lsl w2, w10, c
-                ; lsr w3, w11, back
-                ; orr w0, w2, w3
-                ; ubfx w1, w10, back, 1
-            );
-        } else {
-            // src:dest shifted right; CF is the last bit out of dest.
-            dynasm!(self.ops
-                ; .arch aarch64
-                ; lsr w2, w10, c
-                ; lsl w3, w11, back
-                ; orr w0, w2, w3
-                ; ubfx w1, w10, out_right, 1
-            );
+        // dest:src shifted left, or src:dest right; CF is the last bit out
+        // of dest.
+        self.shift_by(left, 2, 10, count);
+        self.shift_back(!left, 4, 11, bits, count);
+        dynasm!(self.ops ; .arch aarch64 ; orr w0, w2, w4);
+        if need & (CF | OF) != 0 {
+            self.out_bit(left, bits, count);
         }
         self.cut(size);
         if need != 0 {

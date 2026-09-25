@@ -362,20 +362,62 @@ fn flag(mask: u32, set: Option<bool>, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// Shifts and rotates of a register by an immediate count from 1 to the
-/// width less 1, which the host's instructions do as the interpreter does.
+/// CL, the count of the shifts by a register.
+const CL: Gpr = Gpr { index: ECX, high: false, size: 1 };
+
+/// Shifts and rotates of a register or memory by an immediate count from 1
+/// to the width less 1, or by CL, which the host's instructions do as the
+/// interpreter does. Counts by CL of the width or more (of a byte or word)
+/// run through the handler.
 fn shift(instr: &Instruction, op: ShiftOp, u: &mut Vec<Uop>) -> bool {
-    if instr.op0_kind() != OpKind::Register || !is_imm(instr.op1_kind()) {
+    let size = match instr.op0_kind() {
+        OpKind::Register => match gpr(instr.op0_register()) {
+            Some(r) => r.size,
+            None => return false,
+        },
+        OpKind::Memory => instr.memory_size().size() as u8,
+        _ => return false,
+    };
+    if !matches!(size, 1 | 2 | 4) {
         return false;
     }
-    let Some(r) = gpr(instr.op0_register()) else { return false };
-    let count = instr.immediate(1) as u32 & 0x1F;
-    if count == 0 || count >= r.size as u32 * 8 {
+    let shift = if is_imm(instr.op1_kind()) {
+        let count = instr.immediate(1) as u32 & 0x1F;
+        if count == 0 || count >= size as u32 * 8 {
+            return false;
+        }
+        Uop::Shift { op, size, t: T0, count: count as u8 }
+    } else if instr.op1_register() == Register::CL {
+        if size < 4 {
+            u.push(Uop::Get { t: T1, r: CL });
+            u.push(Uop::Bail { t: T1, mask: 0x1F & !(size as u32 * 8 - 1) });
+        }
+        Uop::ShiftVar { op, size, t: T0, count: CL }
+    } else {
         return false;
+    };
+    modify(instr, size, shift, u)
+}
+
+/// Operand 0 (a register or memory of `size` bytes) into T0, `op` on it,
+/// and back.
+fn modify(instr: &Instruction, size: u8, op: Uop, u: &mut Vec<Uop>) -> bool {
+    match instr.op0_kind() {
+        OpKind::Register => {
+            let r = gpr(instr.op0_register()).unwrap();
+            u.push(Uop::Get { t: T0, r });
+            u.push(op);
+            u.push(Uop::Set { r, t: T0 });
+        }
+        _ => {
+            if mem(instr, T2, size, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load { dst: T0, m: T2, size });
+            u.push(op);
+            u.push(Uop::Store { m: T2, src: T0, size });
+        }
     }
-    u.push(Uop::Get { t: T0, r });
-    u.push(Uop::Shift { op, size: r.size, t: T0, count: count as u8 });
-    u.push(Uop::Set { r, t: T0 });
     true
 }
 
@@ -456,19 +498,33 @@ fn div_wide(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// SHLD and SHRD by an immediate count below the operand's width (a 386
-/// rotates the source in for 16-bit operands shifted by more).
+/// SHLD and SHRD by an immediate count below the operand's width, or by
+/// CL (a 386 rotates the source in for 16-bit operands shifted by more:
+/// by CL, those run through the handler).
 fn double_shift(instr: &Instruction, left: bool, u: &mut Vec<Uop>) -> bool {
-    if instr.op_count() != 3 || instr.op1_kind() != OpKind::Register || !is_imm(instr.op2_kind()) {
+    if instr.op_count() != 3 || instr.op1_kind() != OpKind::Register {
         return false;
     }
     let Some(src) = gpr(instr.op1_register()) else { return false };
     let size = src.size;
-    let count = instr.immediate(2) as u32 & 0x1F;
-    if size == 1 || count == 0 || count >= size as u32 * 8 {
+    if size == 1 {
         return false;
     }
-    let count = count as u8;
+    let shift = if is_imm(instr.op2_kind()) {
+        let count = instr.immediate(2) as u32 & 0x1F;
+        if count == 0 || count >= size as u32 * 8 {
+            return false;
+        }
+        Uop::DoubleShift { left, size, dst: T0, src: T1, count: count as u8 }
+    } else if instr.op2_register() == Register::CL {
+        if size == 2 {
+            u.push(Uop::Get { t: T1, r: CL });
+            u.push(Uop::Bail { t: T1, mask: 0x10 });
+        }
+        Uop::DoubleShiftVar { left, size, dst: T0, src: T1, count: CL }
+    } else {
+        return false;
+    };
     match instr.op0_kind() {
         OpKind::Register => {
             let Some(dest) = gpr(instr.op0_register()) else { return false };
@@ -477,7 +533,7 @@ fn double_shift(instr: &Instruction, left: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::Get { t: T0, r: dest });
             u.push(Uop::Get { t: T1, r: src });
-            u.push(Uop::DoubleShift { left, size, dst: T0, src: T1, count });
+            u.push(shift);
             u.push(Uop::Set { r: dest, t: T0 });
         }
         OpKind::Memory => {
@@ -486,7 +542,7 @@ fn double_shift(instr: &Instruction, left: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::Load { dst: T0, m: T2, size });
             u.push(Uop::Get { t: T1, r: src });
-            u.push(Uop::DoubleShift { left, size, dst: T0, src: T1, count });
+            u.push(shift);
             u.push(Uop::Store { m: T2, src: T0, size });
         }
         _ => return false,

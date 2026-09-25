@@ -44,8 +44,8 @@ impl Uop {
             Uop::Alu { .. } => ARITH,
             Uop::Unary { op: UnOp::Inc | UnOp::Dec, .. } => ARITH & !CF,
             Uop::Unary { op: UnOp::Neg, .. } => ARITH,
-            Uop::Shift { op, .. } => shift_flags(op),
-            Uop::DoubleShift { .. } => CF | OF | SZP,
+            Uop::Shift { op, .. } | Uop::ShiftVar { op, .. } => shift_flags(op),
+            Uop::DoubleShift { .. } | Uop::DoubleShiftVar { .. } => CF | OF | SZP,
             Uop::Imul { .. } | Uop::MulWide { .. } => CF | OF,
             Uop::Flag { mask, .. } => mask & ARITH,
             _ => 0,
@@ -59,6 +59,10 @@ impl Uop {
             Uop::Alu { op: AluOp::Adc | AluOp::Sbb, .. } => CF,
             Uop::Flag { mask, set: None } => mask & ARITH,
             Uop::SetCond { cc, .. } => cond_flags(cc),
+            // A count of 0 leaves the flags as they were.
+            Uop::ShiftVar { op, .. } => shift_flags(op),
+            Uop::DoubleShiftVar { .. } => CF | OF | SZP,
+            Uop::Bail { .. } => ARITH,
             Uop::MemRef { .. } | Uop::CheckLimit { .. } | Uop::DivWide { .. } | Uop::Exit { .. } | Uop::ExitIf { .. } => {
                 ARITH
             }
