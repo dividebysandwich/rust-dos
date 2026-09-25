@@ -1548,12 +1548,38 @@ impl ConfigUi {
         g.background(1, row, g.cols - 2, draw::SELECT);
     }
 
+    /// A scroll bar left of the right border, beside the `list` rows that
+    /// show `total` rows from `scroll` on, if they don't all fit. A click
+    /// above or below its thumb pages up or down.
+    fn draw_scrollbar(&mut self, g: &mut Grid, list: std::ops::Range<usize>, scroll: usize, total: usize) {
+        let height = list.len();
+        if height == 0 || total <= height {
+            return;
+        }
+        let col = g.cols - 2;
+        let thumb = (height * height).div_ceil(total).clamp(1, height);
+        let hidden = total - height;
+        let top = (scroll.min(hidden) * (height - thumb) + hidden / 2) / hidden;
+        for (i, row) in list.enumerate() {
+            let key = match i {
+                _ if i < top => UiKey::PageUp,
+                _ if i >= top + thumb => UiKey::PageDown,
+                _ => {
+                    g.char(col, row, 0xDB, draw::BORDER);
+                    continue;
+                }
+            };
+            g.char(col, row, 0xB0, draw::DIM);
+            self.hits.push(Hit { row, col, width: 1, target: Target::Key(key) });
+        }
+    }
+
     fn draw_drives(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
         let cols = g.cols;
         Self::keep_visible(&mut self.scroll, self.row, content.len());
         let label_col = cols - 16;
         let path_width = label_col.saturating_sub(15);
-        for (i, row) in (self.scroll..self.row_count()).zip(content) {
+        for (i, row) in (self.scroll..self.row_count()).zip(content.clone()) {
             if i == self.row {
                 self.select_row(g, row);
             }
@@ -1580,6 +1606,7 @@ impl ConfigUi {
                 g.text(cols - 4, row, "ro", fg);
             }
         }
+        self.draw_scrollbar(g, content, self.scroll, self.row_count());
     }
 
     fn draw_settings(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
@@ -1588,7 +1615,7 @@ impl ConfigUi {
         Self::keep_visible(&mut self.scroll, self.row, content.len());
         let value_col = 27.min(cols / 2);
         let note_col = cols - 13;
-        for (i, row) in (self.scroll..items.len()).zip(content) {
+        for (i, row) in (self.scroll..items.len()).zip(content.clone()) {
             let item = items[i];
             let selected = i == self.row;
             if selected {
@@ -1632,6 +1659,7 @@ impl ConfigUi {
                 g.text_to(value_col + 2, row, &value, draw::BRIGHT, end);
             }
         }
+        self.draw_scrollbar(g, content, self.scroll, items.len());
     }
 
     /// A level meter of `METER` cells at (`col`, `row`): 6 dB a cell
@@ -1743,8 +1771,9 @@ impl ConfigUi {
         g.text_to(2, content.start + 1, &fit(&dir, cols - 4), draw::DIM, cols - 2);
         let list = content.start + 2..content.end;
         Self::keep_visible(&mut self.browser_scroll, browser.selected, list.len());
+        let (scroll, total) = (self.browser_scroll, browser.rows());
         let separator = std::path::MAIN_SEPARATOR;
-        for (i, row) in (self.browser_scroll..browser.rows()).zip(list) {
+        for (i, row) in (self.browser_scroll..browser.rows()).zip(list.clone()) {
             if i == browser.selected {
                 g.background(1, row, cols - 2, draw::SELECT);
             }
@@ -1758,6 +1787,7 @@ impl ConfigUi {
             };
             g.text_to(4, row, &fit(&text, cols - 7), color, cols - 2);
         }
+        self.draw_scrollbar(g, list, scroll, total);
     }
 
     /// The key hints for what is showing, each clickable.

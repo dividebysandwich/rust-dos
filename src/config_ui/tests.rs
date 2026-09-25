@@ -333,6 +333,57 @@ fn every_page_draws_and_clicks() {
 }
 
 #[test]
+fn long_pages_have_a_scroll_bar() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    let mut frame = Frame::new(640, 400);
+    let layout = Layout::for_frame(640, 400);
+    let at = |col: usize, row: usize| ((layout.x + col * 8 + 4) as i32, (layout.y + row * layout.cell_h + 4) as i32);
+    // The scroll bar's rows that page up and down.
+    let bar = |ui: &ConfigUi| -> Vec<(usize, UiKey)> {
+        ui.hits
+            .iter()
+            .filter(|h| h.col == layout.cols - 2)
+            .filter_map(|h| match h.target {
+                Target::Key(key) => Some((h.row, key)),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // The Display page fits.
+    ui.show_page(Page::Display);
+    ui.draw(&mut frame);
+    assert!(bar(&ui).is_empty());
+
+    // The Sound page doesn't: the thumb is at the top, and below it the
+    // bar pages down.
+    ui.show_page(Page::Sound);
+    ui.draw(&mut frame);
+    let (visible, total) = (ui.visible, ui.items().len());
+    assert!(total > visible, "{} rows in {}", total, visible);
+    let rows = bar(&ui);
+    assert!(rows.iter().all(|&(_, key)| key == UiKey::PageDown), "{:?}", rows);
+    assert_eq!(rows.first().unwrap().0, 3 + visible - rows.len());
+    let (x, y) = at(layout.cols - 2, rows.last().unwrap().0);
+    ui.click(x, y, &mut host);
+    assert_eq!(ui.row, visible);
+    ui.draw(&mut frame);
+    assert_eq!(ui.scroll, 1);
+    ui.key(UiKey::End, &mut host);
+    ui.draw(&mut frame);
+    assert_eq!(ui.scroll, total - visible);
+
+    // At the end, the thumb is at the bottom and the bar above pages up.
+    let rows = bar(&ui);
+    assert!(rows.iter().all(|&(_, key)| key == UiKey::PageUp), "{:?}", rows);
+    assert_eq!(rows.first().unwrap().0, 3);
+    let (x, y) = at(layout.cols - 2, 3);
+    ui.click(x, y, &mut host);
+    assert_eq!(ui.row, total - 1 - visible);
+}
+
+#[test]
 fn the_crt_shader_steps_through_the_looks() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);

@@ -212,7 +212,7 @@ impl ConfigUi {
         let value_col = 27.min(cols / 2);
         let end = cols - 2;
         let cheats = &self.cheats;
-        for (i, row) in (self.scroll..rows.len()).zip(content) {
+        for (i, row) in (self.scroll..rows.len()).zip(content.clone()) {
             let selected = i == self.row;
             if selected {
                 g.background(1, row, cols - 2, draw::SELECT);
@@ -283,6 +283,7 @@ impl ConfigUi {
                 g.background(col + cursor, row, 1, draw::SELECT);
             }
         }
+        self.draw_scrollbar(g, content, self.scroll, rows.len());
     }
 
     /// The key hints of the Cheats page's selected row.

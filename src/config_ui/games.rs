@@ -144,7 +144,7 @@ impl ConfigUi {
         let cols = g.cols;
         Self::keep_visible(&mut self.scroll, self.row, content.len());
         let command_col = 30.min(cols / 2);
-        for (i, row) in (self.scroll..self.row_count()).zip(content) {
+        for (i, row) in (self.scroll..self.row_count()).zip(content.clone()) {
             if i == self.row {
                 self.select_row(g, row);
             }
@@ -161,6 +161,7 @@ impl ConfigUi {
                 g.text(cols - 10, row, "running", draw::GOOD);
             }
         }
+        self.draw_scrollbar(g, content, self.scroll, self.row_count());
     }
 
     pub(super) fn draw_game_dialog(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
