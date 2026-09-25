@@ -613,7 +613,16 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
 fn next_page_follows(cpu: &mut Cpu, lin_ip: u32, phys_ip: usize) -> bool {
     let next = (lin_ip | 0xFFF).wrapping_add(1);
     let user = cpu.cpl == 3;
-    matches!(cpu.lin_to_phys(next, false, user), Ok(p) if p as usize == (phys_ip | 0xFFF) + 1)
+    // A page that isn't there faults only if the instruction needs bytes
+    // from it (`fetch_slow`): looking doesn't change CR2.
+    let cr2 = cpu.cr2;
+    match cpu.lin_to_phys(next, false, user) {
+        Ok(p) => p as usize == (phys_ip | 0xFFF) + 1,
+        Err(_) => {
+            cpu.cr2 = cr2;
+            false
+        }
+    }
 }
 
 /// Decode the instruction at `lin_ip` from bytes fetched one at a time:
@@ -625,6 +634,9 @@ fn fetch_slow(cpu: &mut Cpu, lin_ip: u32, eip: u32, code32: bool) -> Result<Inst
     let mut bytes = [0u8; 16];
     let mut len = 0;
     let mut missing = None;
+    // Looking at a page the instruction turns out not to need doesn't
+    // change CR2.
+    let cr2 = cpu.cr2;
     for (i, byte) in bytes.iter_mut().enumerate() {
         let lin = lin_ip.wrapping_add(i as u32);
         match cpu.lin_to_phys(lin, false, user) {
@@ -643,6 +655,7 @@ fn fetch_slow(cpu: &mut Cpu, lin_ip: u32, eip: u32, code32: bool) -> Result<Inst
     {
         return Err(fault);
     }
+    cpu.cr2 = cr2;
     Ok(instr)
 }
 

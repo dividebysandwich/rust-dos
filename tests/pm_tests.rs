@@ -392,6 +392,40 @@ fn page_faults_report_the_address_and_cause() {
 }
 
 #[test]
+fn code_at_the_end_of_a_page_before_a_missing_one_leaves_cr2_alone() {
+    // The last instructions of linear page 30000h, with page 31000h not
+    // present: they fit in their page, so nothing faults and CR2 keeps
+    // the value the program gave it.
+    let mut tail = vec![0x90; 0xFF4];
+    tail.extend(asm32(0x30FF4, |a| {
+        a.mov(ebx, 0x1234u32)?;
+        a.hlt()
+    }));
+    assert!(tail.len() <= 0x1000);
+    for batched in [false, true] {
+        let mut rig = Rig::new();
+        page_tables(&mut rig);
+        rig.write32(0x81000 + 0x31 * 4, 0);
+        rig.load(0x30000, &tail);
+        let program = |a: &mut CodeAssembler| {
+            enable_paging(a)?;
+            a.mov(eax, 0xC0FFEEu32)?;
+            a.mov(cr2, eax)?;
+            a.mov(eax, 0x30FF4u32)?;
+            a.jmp(eax)
+        };
+        if batched {
+            rig.run_batched(program);
+            // run_batched stops before the HLT.
+        } else {
+            rig.run(program);
+        }
+        assert_eq!(rig.cpu.ebx(), 0x1234, "batched: {batched}");
+        assert_eq!(rig.cpu.cr2, 0xC0FFEE, "batched: {batched}");
+    }
+}
+
+#[test]
 fn tlb_keeps_old_translations_until_invlpg() {
     let mut rig = Rig::new();
     page_tables(&mut rig);
