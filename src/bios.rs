@@ -27,6 +27,12 @@ pub const SERVICE_VBE_WINDOW: u8 = 0x17;
 pub const SERVICE_IO_WAIT: u8 = 0x18;
 /// Esc, Tab, Up and Down at the DOS prompt: the line editing (`shell::edit_key`).
 pub const SERVICE_SHELL_KEY: u8 = 0x19;
+/// The shell's prompt, printed by `shell::prompt`.
+pub const SERVICE_SHELL_PROMPT: u8 = 0x1A;
+/// The key PAUSE or CHOICE waited for, handed to `shell::key_ready`.
+pub const SERVICE_SHELL_KEY_READY: u8 = 0x1B;
+/// A tick while PAUSE or CHOICE waits, for CHOICE's timeout (`shell::tick`).
+pub const SERVICE_SHELL_TICK: u8 = 0x1C;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.

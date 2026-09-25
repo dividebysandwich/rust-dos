@@ -28,6 +28,9 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("SHIFT", &ShiftCommand),
     ("IF", &IfCommand),
     ("FOR", &ForCommand),
+    ("PAUSE", &PauseCommand),
+    ("CHOICE", &ChoiceCommand),
+    ("PROMPT", &PromptCommand),
     ("MOUNT", &MountCommand),
     ("IMGMOUNT", &ImgMountCommand),
     ("SET", &SetCommand),
@@ -626,6 +629,93 @@ fn file_exists(cpu: &Cpu, name: &str) -> bool {
         cpu.bus.disk.matching_files(name).is_ok_and(|files| !files.is_empty())
     } else {
         cpu.bus.disk.is_file(name)
+    }
+}
+
+/// PAUSE: wait for a key. Ctrl+C ends the batch files.
+struct PauseCommand;
+impl ShellCommand for PauseCommand {
+    fn execute(&self, cpu: &mut Cpu, _args: &str) {
+        print_string(cpu, "Press any key to continue . . .");
+        crate::shell::enter_wait(cpu, crate::shell::ShellWait::Pause);
+    }
+}
+
+/// CHOICE [/C[:]keys] [/N] [/S] [/T[:]c,nn] [text]: show the text and the
+/// keys (Y and N without /C), as in "Continue [Y,N]?", and wait for one
+/// of them; the ERRORLEVEL is its position among them, from 1. /N leaves
+/// the keys out, /S tells upper from lower case, and /T takes the key c
+/// once nn seconds have passed without one.
+struct ChoiceCommand;
+impl ShellCommand for ChoiceCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        match parse_choice(cpu, args) {
+            Ok((choice, text, show_keys)) => {
+                let mut prompt = text.to_string();
+                if show_keys {
+                    let keys: Vec<String> = choice.keys.iter().map(|&k| (k as char).to_string()).collect();
+                    prompt.push_str(&format!("[{}]?", keys.join(",")));
+                }
+                print_string(cpu, &prompt);
+                crate::shell::enter_wait(cpu, crate::shell::ShellWait::Choice(choice));
+            }
+            Err(e) => {
+                print_string(cpu, &format!("{}\r\n", e));
+                cpu.errorlevel = 255;
+            }
+        }
+    }
+}
+
+/// CHOICE's switches: the keys to wait for, its text, and whether to show
+/// the keys.
+fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &'a str, bool), String> {
+    let mut keys = b"YN".to_vec();
+    let (mut case_sensitive, mut show_keys, mut timeout) = (false, true, None);
+    let mut rest = args.trim_start();
+    while let Some(switch) = rest.strip_prefix('/') {
+        let (word, after) = first_word(switch);
+        rest = after.trim_start();
+        let (letter, value) = word.split_at(word.chars().next().map_or(0, char::len_utf8));
+        let value = value.strip_prefix(':').unwrap_or(value);
+        match letter.to_ascii_uppercase().as_str() {
+            "C" => keys = crate::dosstr::to_bytes(value),
+            "N" => show_keys = false,
+            "S" => case_sensitive = true,
+            "T" => {
+                let (key, seconds) = value.split_once(',').ok_or("Invalid switch - /T")?;
+                let (key, seconds) = (key.bytes().next(), seconds.trim().parse::<u64>().ok());
+                let (Some(key), Some(seconds)) = (key, seconds.filter(|&s| s <= 99)) else {
+                    return Err("Invalid switch - /T".into());
+                };
+                timeout = Some((key, seconds));
+            }
+            _ => return Err(format!("Invalid switch - /{}", word)),
+        }
+    }
+    if !case_sensitive {
+        keys.make_ascii_uppercase();
+    }
+    if keys.is_empty() {
+        return Err("Invalid switch - /C".into());
+    }
+    let mut choice = crate::shell::Choice { keys, case_sensitive, timeout: None };
+    if let Some((key, seconds)) = timeout {
+        let Some(i) = choice.keys.iter().position(|&k| if case_sensitive { k == key } else { k.eq_ignore_ascii_case(&key) }) else {
+            return Err("Timeout default not in specified (or default) choices.".into());
+        };
+        let at = cpu.bus.clock.now_ticks() + seconds * crate::timer::PIT_HZ;
+        choice.timeout = Some((choice.keys[i], at));
+    }
+    Ok((choice, rest, show_keys))
+}
+
+/// PROMPT [text]: set the prompt, with $ codes (see `shell::render_prompt`);
+/// without text, back to $P$G.
+struct PromptCommand;
+impl ShellCommand for PromptCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        cpu.set_env("PROMPT", args);
     }
 }
 

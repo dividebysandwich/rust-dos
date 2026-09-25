@@ -7,7 +7,6 @@ use std::fs;
 use std::path::PathBuf;
 
 const SHELL_BASE: u64 = 0x100;
-const PROMPT_START: u64 = 0x10B;
 
 fn scratch(name: &str, dirs: &[&str]) -> PathBuf {
     let base = PathBuf::from("target/test_shell").join(name);
@@ -62,17 +61,20 @@ fn shell_code_branches_land_on_instructions() {
         }
     }
 
-    // The loop ends with JMP PROMPT_START, right after the command trap.
-    let (last_ip, last) = decoded.last().unwrap();
-    let last = last.as_ref().unwrap();
-    assert_eq!(last.mnemonic(), Mnemonic::Jmp);
-    assert_eq!(last.near_branch_target(), PROMPT_START);
-    let (_, trap) = &decoded[decoded.len() - 2];
+    // The command trap returns to a JMP PROMPT_START.
+    let labels = rust_dos::shell::labels();
+    let at = |ip: u16| decoded.iter().position(|(i, _)| *i == ip as u64).expect("an instruction starts there");
+    let (_, jmp) = &decoded[at(labels.after_trap)];
+    let jmp = jmp.as_ref().unwrap();
+    assert_eq!(jmp.mnemonic(), Mnemonic::Jmp);
+    assert_eq!(jmp.near_branch_target(), labels.prompt_start as u64);
+    let (trap_ip, trap) = &decoded[at(labels.after_trap) - 1];
     assert!(trap.is_none());
-    assert_eq!(
-        get_shell_code()[(*last_ip - SHELL_BASE) as usize - 1],
-        SHELL_COMMAND_BOP
-    );
+    assert_eq!(get_shell_code()[(*trap_ip - SHELL_BASE) as usize + 2], SHELL_COMMAND_BOP);
+    assert!(decoded[at(labels.prompt_start)].1.is_none(), "the prompt is the emulator's");
+    assert!(decoded[at(labels.key_ready)].1.is_none(), "the key goes to the emulator");
+    at(labels.shell_wait);
+    at(labels.key_read);
 
     // The return address pushed for the trap is that JMP.
     let mov_ax = decoded
@@ -84,7 +86,7 @@ fn shell_code_branches_land_on_instructions() {
                 && i.op1_kind() == OpKind::Immediate16
         })
         .expect("MOV AX, imm16");
-    assert_eq!(mov_ax.immediate16() as u64, *last_ip);
+    assert_eq!(mov_ax.immediate16(), labels.after_trap);
 
     // Code must stay clear of the input buffer at 0x200.
     assert!(SHELL_BASE + (get_shell_code().len() as u64) <= 0x200);

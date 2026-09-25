@@ -241,3 +241,90 @@ fn for_runs_a_command_for_every_member_and_every_matching_file() {
     let screen = screen(&cpu);
     assert!(screen.contains("[a]\n[b]\n[c]\nfirst\nsecond"), "{}", screen);
 }
+
+#[test]
+fn pause_waits_for_a_key_with_the_clock_running() {
+    let dir = scratch("pause", &[("T.BAT", b"@echo off\r\npause\r\necho after\r\n")]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_until(&mut cpu, 300, |_| false);
+    let ticks = cpu.bus.read_16(0x046C);
+    run_until(&mut cpu, 300, |_| false);
+    assert!(cpu.bus.read_16(0x046C) > ticks, "the timer ticks while PAUSE waits");
+    let text = screen(&cpu);
+    assert!(text.contains("Press any key to continue . . .") && !text.contains("after"), "{}", text);
+
+    cpu.bus.keyboard_buffer.push_back(0x1E61);
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("continue . . .\nafter"), "{}", screen(&cpu));
+}
+
+#[test]
+fn choice_sets_the_errorlevel_to_the_key_s_position() {
+    let dir = scratch(
+        "choice",
+        &[("T.BAT", b"@echo off\r\nchoice /c:ynq Go on\r\nif errorlevel 3 goto q\r\nif errorlevel 2 goto n\r\necho yes\r\ngoto end\r\n:n\r\necho no\r\ngoto end\r\n:q\r\necho quit\r\n:end\r\n")],
+    );
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_until(&mut cpu, 100, |_| false);
+    assert!(screen(&cpu).contains("Go on[Y,N,Q]?"), "{}", screen(&cpu));
+    // A key it doesn't take is ignored.
+    cpu.bus.keyboard_buffer.push_back(0x2D78); // x
+    run_until(&mut cpu, 100, |_| false);
+    assert!(cpu.shell_wait.is_some());
+    cpu.bus.keyboard_buffer.push_back(0x316E); // n
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("Go on[Y,N,Q]?N\nno"), "{}", screen(&cpu));
+    assert_eq!(cpu.errorlevel, 2);
+}
+
+#[test]
+fn choice_takes_its_default_when_the_time_is_up() {
+    let dir = scratch("choice_timeout", &[("T.BAT", b"@echo off\r\nchoice /N /T:n,2\r\necho done %1\r\n")]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_until(&mut cpu, 1500, |_| false);
+    assert!(cpu.shell_wait.is_some(), "still waiting after 1.5 s");
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("N\ndone"), "{}", screen(&cpu));
+    assert_eq!(cpu.errorlevel, 2);
+}
+
+#[test]
+fn prompt_codes_make_the_prompt() {
+    let dir = scratch("prompt", &[]);
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines(["@prompt $n$g", "@echo x", "@prompt [$p]$_$$"]);
+    run_batch_files(&mut cpu);
+    let text = screen(&cpu);
+    assert!(text.ends_with("x\n[C:\\]\n$"), "{}", text);
+}
+
+#[test]
+fn echo_off_at_the_prompt_hides_the_prompt() {
+    let dir = scratch("echo_off", &[]);
+    let mut cpu = machine(&dir);
+    for line in [b"echo off\r".as_slice(), b"echo hi\r"] {
+        for b in line {
+            cpu.bus.keyboard_buffer.push_back(*b as u16);
+        }
+        run_until(&mut cpu, 100, |_| false);
+    }
+    assert_eq!(screen(&cpu), "C:\\>echo off\necho hi\nhi");
+}
+
+#[test]
+fn batch_lines_run_while_the_prompt_waits_for_a_key() {
+    let dir = scratch("abandon", &[]);
+    let mut cpu = machine(&dir);
+    // The prompt is up and waiting for a key, something typed already.
+    for key in [0x1E61u16, 0x3062] {
+        cpu.bus.keyboard_buffer.push_back(key);
+    }
+    run_until(&mut cpu, 100, |_| false);
+    assert_eq!(screen(&cpu), "C:\\>ab");
+    cpu.queue_batch_lines(["echo one"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(screen(&cpu), "C:\\>echo one\none\nC:\\>");
+}

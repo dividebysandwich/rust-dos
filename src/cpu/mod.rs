@@ -234,6 +234,11 @@ pub struct Cpu {
     pub shell_history: crate::shell::ShellHistory,
     /// Where Tab left the line at the prompt, for Tab again.
     pub shell_completion: Option<crate::shell::Completion>,
+    /// What PAUSE or CHOICE waits for; batch lines wait with it.
+    pub shell_wait: Option<crate::shell::ShellWait>,
+    /// Where the prompt was printed, (column, row), while a line is typed
+    /// after it.
+    pub shell_prompt_at: Option<(u8, u8)>,
     /// The batch files running, whose lines are dispatched as if typed
     /// at the prompt while the shell is idle (no child program on the
     /// process_stack and CS still in shell-land), and ECHO.
@@ -380,6 +385,8 @@ impl Cpu {
             pending_command: None,
             shell_history: crate::shell::ShellHistory::default(),
             shell_completion: None,
+            shell_wait: None,
+            shell_prompt_at: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
             fpu_stack: [F80::new(); 8],

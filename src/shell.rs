@@ -13,120 +13,175 @@ pub const SHELL_COMMAND_BOP: u8 = 0xFF;
 /// current directory's at 0300h begins.
 pub const MAX_LINE: usize = 0x7F;
 
-/// A Tiny "OS" written in Machine Code. Reads keys into a buffer at offset 0x0200
-/// On Enter, hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
+/// Where the shell's code is loaded in its segment.
+const ORIGIN: u16 = 0x0100;
+
+/// Offsets in the shell's code (at SHELL_SEGMENT:0100h) that the emulator
+/// sends it to.
+#[derive(Clone, Copy, Debug)]
+pub struct ShellLabels {
+    /// The prompt is printed and a line read from here.
+    pub prompt_start: u16,
+    /// Where the prompt's INT 16h for the next key of the line returns.
+    pub key_read: u16,
+    /// The command trap returns here, to a JMP PROMPT_START: batch lines are
+    /// dispatched before it.
+    pub after_trap: u16,
+    /// PAUSE and CHOICE wait for a key here.
+    pub shell_wait: u16,
+    /// The key they waited for is handed over here, in AX.
+    pub key_ready: u16,
+}
+
+/// A tiny assembler for the shell's code: bytes, and jumps to labels
+/// resolved at the end, so the code can change without offsets worked out
+/// by hand.
+struct Asm {
+    code: Vec<u8>,
+    labels: Vec<(&'static str, u16)>,
+    /// (position of the operand, label, 1 for a short jump's displacement
+    /// or 2 for an absolute word)
+    fixups: Vec<(usize, &'static str, u8)>,
+}
+
+impl Asm {
+    fn label(&mut self, name: &'static str) {
+        self.labels.push((name, ORIGIN + self.code.len() as u16));
+    }
+
+    fn op(&mut self, bytes: &[u8]) {
+        self.code.extend_from_slice(bytes);
+    }
+
+    /// A short jump (`opcode` rel8) to a label.
+    fn jump(&mut self, opcode: u8, target: &'static str) {
+        self.code.push(opcode);
+        self.fixups.push((self.code.len(), target, 1));
+        self.code.push(0);
+    }
+
+    /// An instruction ending in the address of a label as a word.
+    fn address(&mut self, bytes: &[u8], target: &'static str) {
+        self.code.extend_from_slice(bytes);
+        self.fixups.push((self.code.len(), target, 2));
+        self.code.extend_from_slice(&[0, 0]);
+    }
+
+    fn at(&self, name: &str) -> u16 {
+        self.labels.iter().find(|(n, _)| *n == name).map(|&(_, at)| at).unwrap_or_else(|| panic!("no label {}", name))
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        for &(pos, target, size) in &self.fixups {
+            let target = self.at(target);
+            if size == 1 {
+                let next = ORIGIN as i32 + pos as i32 + 1;
+                let disp = i8::try_from(target as i32 - next).expect("short jump out of range");
+                self.code[pos] = disp as u8;
+            } else {
+                self.code[pos..pos + 2].copy_from_slice(&target.to_le_bytes());
+            }
+        }
+        self.code
+    }
+}
+
+/// A Tiny "OS" written in Machine Code, and its labels. Asks the emulator
+/// for the prompt, reads keys into a buffer at offset 0x0200, and on Enter
+/// hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
 /// Handles backspace visually and in buffer, and hands the other control
 /// keys and the extended keys (Esc, Tab, Up and Down) to `edit_key`.
-#[rustfmt::skip] // keep one instruction per line
+fn assemble() -> (Vec<u8>, ShellLabels) {
+    use crate::bios::{SERVICE_SHELL_KEY, SERVICE_SHELL_KEY_READY, SERVICE_SHELL_PROMPT, SERVICE_SHELL_TICK};
+    let mut a = Asm { code: Vec::new(), labels: Vec::new(), fixups: Vec::new() };
+    // We are loaded at SHELL_SEGMENT:0100 (see Cpu::load_shell). Set
+    // DS=ES=SS=CS so buffers and stack live in the shell segment.
+    a.op(&[0x8C, 0xC8]); // MOV AX, CS
+    a.op(&[0x8E, 0xD8]); // MOV DS, AX
+    a.op(&[0x8E, 0xC0]); // MOV ES, AX
+    a.op(&[0x8E, 0xD0]); // MOV SS, AX
+    a.op(&[0xBC, 0x00, 0x0F]); // MOV SP, 0x0F00 (SHELL_STACK)
+
+    a.label("PROMPT_START");
+    a.op(&[0xFE, 0x39, SERVICE_SHELL_PROMPT]); // `prompt`: print it, SI = 0200h
+
+    // Read keys: Enter hands the line over, Backspace takes a character
+    // back, control and extended keys (AL below 20h) go to `edit_key`.
+    a.label("WAIT_KEY");
+    a.op(&[0xB4, 0x00, 0xCD, 0x16]); // MOV AH, 00h; INT 16h
+    a.label("KEY_READ");
+    a.op(&[0x3C, 0x0D]); // CMP AL, 0Dh
+    a.jump(0x74, "EXECUTE"); // JE
+    a.op(&[0x3C, 0x08]); // CMP AL, 08h
+    a.jump(0x74, "BACKSPACE"); // JE
+    a.op(&[0x3C, 0x20]); // CMP AL, 20h
+    a.jump(0x72, "EDIT_KEY"); // JB
+    // A full buffer takes no more (MAX_LINE characters)
+    a.op(&[0x81, 0xFE, 0x7F, 0x02]); // CMP SI, 027Fh
+    a.jump(0x73, "WAIT_KEY"); // JAE
+    a.op(&[0xB4, 0x0E, 0xCD, 0x10]); // MOV AH, 0Eh; INT 10h: echo it
+    a.op(&[0x88, 0x04, 0x46]); // MOV [SI], AL; INC SI
+    a.jump(0xEB, "WAIT_KEY");
+
+    a.label("BACKSPACE");
+    a.op(&[0x81, 0xFE, 0x00, 0x02]); // CMP SI, 0200h
+    a.jump(0x74, "WAIT_KEY"); // JE: nothing to take back
+    a.op(&[0x4E, 0xB4, 0x0E]); // DEC SI; MOV AH, 0Eh
+    a.op(&[0xB0, 0x08, 0xCD, 0x10, 0xB0, 0x20, 0xCD, 0x10, 0xB0, 0x08, 0xCD, 0x10]); // BS, space, BS
+    a.jump(0xEB, "WAIT_KEY");
+
+    // Esc, Tab or the history replace the line (SI).
+    a.label("EDIT_KEY");
+    a.op(&[0xFE, 0x39, SERVICE_SHELL_KEY]);
+    a.jump(0xEB, "WAIT_KEY");
+
+    a.label("EXECUTE");
+    a.op(&[0xC6, 0x04, 0x00]); // MOV BYTE PTR [SI], 0
+    a.op(&[0xB4, 0x0E, 0xB0, 0x0D, 0xCD, 0x10, 0xB0, 0x0A, 0xCD, 0x10]); // CR LF
+    a.op(&[0xBA, 0x00, 0x02]); // MOV DX, 0200h
+    // The trap returns like an IRET, so build the frame an INT would:
+    // FLAGS, CS, then the address of the JMP below.
+    a.op(&[0x9C, 0x0E]); // PUSHF; PUSH CS
+    a.address(&[0xB8], "AFTER_TRAP"); // MOV AX, AFTER_TRAP
+    a.op(&[0x50]); // PUSH AX
+    a.op(&[0xFE, 0x38, SHELL_COMMAND_BOP]); // Hand the line to the Rust shell
+    a.label("AFTER_TRAP");
+    a.jump(0xEB, "PROMPT_START");
+
+    // PAUSE and CHOICE: wait for a key with the timers running (a CHOICE
+    // with a timeout looks at the time on every tick), then hand it over.
+    a.label("SHELL_WAIT");
+    a.op(&[0xB4, 0x01, 0xCD, 0x16]); // MOV AH, 01h; INT 16h
+    a.jump(0x75, "GOT_KEY"); // JNZ
+    a.op(&[0xFE, 0x39, SERVICE_SHELL_TICK]); // may hand over the default
+    a.op(&[0xF4]); // HLT until the next tick
+    a.jump(0xEB, "SHELL_WAIT");
+    a.label("GOT_KEY");
+    a.op(&[0xB4, 0x00, 0xCD, 0x16]); // MOV AH, 00h; INT 16h
+    a.label("KEY_READY");
+    a.op(&[0xFE, 0x39, SERVICE_SHELL_KEY_READY]); // `key_ready`
+    a.jump(0xEB, "PROMPT_START");
+
+    let labels = ShellLabels {
+        prompt_start: a.at("PROMPT_START"),
+        key_read: a.at("KEY_READ"),
+        after_trap: a.at("AFTER_TRAP"),
+        shell_wait: a.at("SHELL_WAIT"),
+        key_ready: a.at("KEY_READY"),
+    };
+    (a.finish(), labels)
+}
+
+static SHELL: std::sync::OnceLock<(Vec<u8>, ShellLabels)> = std::sync::OnceLock::new();
+
+/// The shell's code, loaded at SHELL_SEGMENT:0100h.
 pub fn get_shell_code() -> Vec<u8> {
-    vec![
-        // ----------------------------------------------------
-        // BOOTLOADER: Initialize Segments
-        // ----------------------------------------------------
-        // We are loaded at SHELL_SEGMENT:0100 (see Cpu::load_shell).
-        // Set DS=ES=SS=CS so buffers and stack live in the shell segment.
-        0x8C, 0xC8, // MOV AX, CS (Copy CS to AX)
-        0x8E, 0xD8, // MOV DS, AX
-        0x8E, 0xC0, // MOV ES, AX
-        0x8E, 0xD0, // MOV SS, AX
-        0xBC, 0x00, 0x0F, // MOV SP, 0x0F00 (SHELL_STACK)
-        // ----------------------------------------------------
-        // SHELL LOOP START
-        // ----------------------------------------------------
-        // Label: PROMPT_START (0x010B)
-        // 1. Print the current drive and ":\"
-        0xB4, 0x19, 0xCD, 0x21, // MOV AH, 19h, INT 21h (AL = drive, 0=A)
-        0x04, 0x41, // ADD AL, 'A'
-        0xB4, 0x0E, 0xCD, 0x10, // MOV AH, 0Eh, INT 10h
-        0xB0, 0x3A, 0xCD, 0x10, // MOV AL, ':', INT 10h
-        0xB0, 0x5C, 0xCD, 0x10, // MOV AL, '\', INT 10h
-        // 2. Get Current Directory (INT 21h, AH=47h)
-        // Returns null-terminated string at DS:SI (we use 0x0300 as buffer)
-        // DL = Drive (0=Default/C)
-        0xB4, 0x47, // MOV AH, 47h
-        0xB2, 0x00, // MOV DL, 0
-        0xBE, 0x00, 0x03, // MOV SI, 0x0300
-        0xCD, 0x21, // INT 21h
-        // 3. Print CWD Loop
-        0xBE, 0x00, 0x03, // MOV SI, 0x0300 (Reset SI to start of buffer)
-        // Label: PRINT_LOOP
-        0xAC, // LODSB (AL = [SI], SI++)
-        0x08, 0xC0, // OR AL, AL
-        0x74, 0x06, // JZ PRINT_DONE (+6 bytes to '>')
-        0xB4, 0x0E, // MOV AH, 0Eh
-        0xCD, 0x10, // INT 10h
-        0xEB, 0xF5, // JMP PRINT_LOOP (-11 bytes)
-        // Label: PRINT_DONE
-        // 4. Print ">"
-        0xB4, 0x0E, // MOV AH, 0Eh (SafeGuard: ensure AH is 0E)
-        0xB0, 0x3E, 0xCD, 0x10, // MOV AL, '>', INT 10h
-        // Reset Buffer Pointer
-        0xBE, 0x00, 0x02, // MOV SI, 0x0200 (Buffer Start)
-        // ----------------------------------------------------
-        // INPUT LOOP (Wait for keys)
-        // ----------------------------------------------------
-        // Label: WAIT_KEY (0x013D)
-        0xB4, 0x00, // MOV AH, 00h
-        0xCD, 0x16, // INT 16h (Wait for Key)
-        // Check ENTER (0x0D)
-        0x3C, 0x0D, // CMP AL, 0x0D
-        0x74, 0x37, // JE EXECUTE (0x017C)
-        // Check BACKSPACE (0x08)
-        0x3C, 0x08, // CMP AL, 0x08
-        0x74, 0x17, // JE HANDLE_BACKSPACE (0x0160)
-        // Control keys (Esc, Tab, Ctrl+letters) and extended keys (AL 00h,
-        // or E0h for the grey ones) aren't typed
-        0x3C, 0x20, // CMP AL, 0x20
-        0x72, 0x2A, // JB EDIT_KEY (0x0177)
-        0x3C, 0xE0, // CMP AL, 0xE0
-        0x74, 0x26, // JE EDIT_KEY (0x0177)
-        // A full buffer takes no more (MAX_LINE characters)
-        0x81, 0xFE, 0x7F, 0x02, // CMP SI, 0x027F
-        0x73, 0xE6, // JAE WAIT_KEY
-        // Normal Character
-        0xB4, 0x0E, // MOV AH, 0Eh (Teletype Output)
-        0xCD, 0x10, // INT 10h (Print Char)
-        0x88, 0x04, // MOV [SI], AL (Store in Buffer)
-        0x46, // INC SI (Advance Pointer)
-        0xEB, 0xDD, // JMP WAIT_KEY
-        // ----------------------------------------------------
-        // BACKSPACE HANDLER (0x0160)
-        // ----------------------------------------------------
-        // Check Boundary (Start of Buffer)
-        0x81, 0xFE, 0x00, 0x02, // CMP SI, 0x0200
-        0x74, 0xD7, // JE WAIT_KEY (If empty, just wait)
-        // Perform Visual Backspace
-        0x4E, // DEC SI (Move Pointer Back)
-        0xB4, 0x0E, // MOV AH, 0Eh
-        0xB0, 0x08, 0xCD, 0x10, // Print Backspace
-        0xB0, 0x20, 0xCD, 0x10, // Print Space
-        0xB0, 0x08, 0xCD, 0x10, // Print Backspace
-        0xEB, 0xC6, // JMP WAIT_KEY
-        // ----------------------------------------------------
-        // EDIT KEYS (0x0177): Esc, Tab or the history replaces the line (SI)
-        // ----------------------------------------------------
-        0xFE, 0x39, crate::bios::SERVICE_SHELL_KEY, // edit_key
-        0xEB, 0xC1, // JMP WAIT_KEY
-        // ----------------------------------------------------
-        // EXECUTE COMMAND (0x017C)
-        // ----------------------------------------------------
-        0xC6, 0x04, 0x00, // MOV BYTE PTR [SI], 0 (Null Terminate)
-        // Print Newline
-        0xB4, 0x0E, 0xB0, 0x0D, 0xCD, 0x10, // CR
-        0xB0, 0x0A, 0xCD, 0x10, // LF
-        0xBA, 0x00, 0x02, // MOV DX, 0x0200
-        // The trap returns like an IRET, so build the frame an INT would:
-        // FLAGS, CS, then the address of the JMP below.
-        0x9C, // PUSHF
-        0x0E, // PUSH CS
-        0xB8, 0x95, 0x01, // MOV AX, 0x0195
-        0x50, // PUSH AX
-        0xFE, 0x38, SHELL_COMMAND_BOP, // Hand the line to the Rust shell
-        // ----------------------------------------------------
-        // RESET LOOP
-        // ----------------------------------------------------
-        0xE9, 0x73, 0xFF, // 0x0195: JMP PROMPT_START (-141 bytes, a near jump)
-    ]
+    SHELL.get_or_init(assemble).0.clone()
+}
+
+/// Where the parts of the shell's code are.
+pub fn labels() -> ShellLabels {
+    SHELL.get_or_init(assemble).1
 }
 
 /// The lines typed at the prompt, oldest first, for Up and Down.
@@ -354,12 +409,203 @@ pub fn prompt_string(disk: &DiskController) -> String {
     )
 }
 
+/// Print the prompt PROMPT sets (`render_prompt`), as the shell does
+/// before a line is typed or a batch line runs. The registers stay as they
+/// were.
 pub fn show_prompt(cpu: &mut Cpu) {
-    // let col = cpu.bus.read_8(0x0450);
-    // if col != 0 {
-    //     video::print_string(cpu, "\r\n");
-    // }
+    let text = render_prompt(cpu);
+    teletype(cpu, &text);
+}
 
-    let prompt = prompt_string(&cpu.bus.disk);
-    video::print_string(cpu, &prompt);
+/// The prompt as the PROMPT variable has it ($P$G if it isn't set), with
+/// its codes put in: $P the current drive and directory, $N the drive,
+/// $G > $L < $B | $Q = $A & $C ( $F ), $D the date, $T the time, $V the
+/// version, $_ a new line, $E Escape, $H a backspace and $$ a dollar sign.
+pub fn render_prompt(cpu: &Cpu) -> Vec<u8> {
+    let spec = dosstr::to_bytes(cpu.get_env("PROMPT").unwrap_or("$P$G"));
+    let now = crate::hosttime::now();
+    let mut out = Vec::new();
+    let mut codes = spec.iter();
+    while let Some(&b) = codes.next() {
+        if b != b'$' {
+            out.push(b);
+            continue;
+        }
+        let Some(code) = codes.next() else { break };
+        match code.to_ascii_uppercase() {
+            b'P' => out.extend(dosstr::to_bytes(prompt_string(&cpu.bus.disk).trim_end_matches('>'))),
+            b'N' => out.push(drive_letter(cpu.bus.disk.get_current_drive()) as u8),
+            b'G' => out.push(b'>'),
+            b'L' => out.push(b'<'),
+            b'B' => out.push(b'|'),
+            b'Q' => out.push(b'='),
+            b'A' => out.push(b'&'),
+            b'C' => out.push(b'('),
+            b'F' => out.push(b')'),
+            b'$' => out.push(b'$'),
+            b'_' => out.extend(b"\r\n"),
+            b'E' => out.push(0x1B),
+            b'H' => out.extend(b"\x08 \x08"),
+            b'D' => out.extend(now.format("%a %m-%d-%Y").to_string().bytes()),
+            b'T' => {
+                use chrono::Timelike;
+                let hundredths = now.nanosecond() / 10_000_000 % 100;
+                out.extend(format!("{}.{:02}", now.format("%H:%M:%S"), hundredths).bytes());
+            }
+            b'V' => out.extend(format!("Rust-DOS Version {}", env!("CARGO_PKG_VERSION")).bytes()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Print code page 437 text with INT 10h's teletype, at the cursor of the
+/// page shown, as the shell's own code prints; the registers stay as they
+/// were.
+fn teletype(cpu: &mut Cpu, text: &[u8]) {
+    let saved = (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx());
+    let page = cpu.bus.read_8(0x0462) as u16;
+    for &b in text {
+        video_call(cpu, 0x0E00 | b as u16, page << 8, 0, 0);
+    }
+    let (ax, bx, cx, dx) = saved;
+    cpu.set_ax(ax);
+    cpu.set_reg16(iced_x86::Register::BX, bx);
+    cpu.set_cx(cx);
+    cpu.set_dx(dx);
+}
+
+/// The cursor of the page shown: (column, row).
+fn cursor(cpu: &Cpu) -> (u8, u8) {
+    let page = cpu.bus.read_8(0x0462) as usize;
+    (cpu.bus.read_8(0x0450 + page * 2), cpu.bus.read_8(0x0451 + page * 2))
+}
+
+/// The shell's code at PROMPT_START (SERVICE_SHELL_PROMPT): the prompt,
+/// unless ECHO is off or DATE or TIME ask for a line, and the line
+/// buffer emptied (SI).
+pub fn prompt(cpu: &mut Cpu) {
+    cpu.set_si(0x0200);
+    // The batch files have run: ECHO is as it was before them.
+    cpu.batch.settle();
+    cpu.shell_prompt_at = None;
+    if cpu.batch.echo && cpu.shell_wait.is_none() {
+        cpu.shell_prompt_at = Some(cursor(cpu));
+        show_prompt(cpu);
+    }
+}
+
+/// What the shell waits for, outside of a typed line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShellWait {
+    /// PAUSE: any key.
+    Pause,
+    /// CHOICE: one of its keys.
+    Choice(Choice),
+}
+
+/// A CHOICE waiting for a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    /// The keys it takes; the ERRORLEVEL is the position of the one
+    /// pressed, from 1.
+    pub keys: Vec<u8>,
+    /// Whether 'y' and 'Y' are different keys (/S).
+    pub case_sensitive: bool,
+    /// The key it takes without one, and when (PIT ticks), for /T.
+    pub timeout: Option<(u8, u64)>,
+}
+
+impl Choice {
+    /// The position of `key` among the keys, if it is one of them.
+    fn index(&self, key: u8) -> Option<usize> {
+        self.keys.iter().position(|&k| if self.case_sensitive { k == key } else { k.eq_ignore_ascii_case(&key) })
+    }
+}
+
+/// Have the shell wait for a key for PAUSE or CHOICE, from the command
+/// that asks: its code goes to SHELL_WAIT, where the timers and interrupts
+/// run on, and the key comes to `key_ready`. Batch lines wait until then.
+pub fn enter_wait(cpu: &mut Cpu, wait: ShellWait) {
+    use crate::cpu::{SHELL_SEGMENT, SHELL_STACK};
+    cpu.set_cs(SHELL_SEGMENT);
+    cpu.set_ds(SHELL_SEGMENT);
+    cpu.set_es(SHELL_SEGMENT);
+    cpu.set_ss(SHELL_SEGMENT);
+    cpu.set_sp(SHELL_STACK);
+    cpu.set_ip(labels().shell_wait);
+    cpu.shell_wait = Some(wait);
+}
+
+/// The shell's code at KEY_READY (SERVICE_SHELL_KEY_READY), with the key
+/// PAUSE or CHOICE waited for in AX. Ctrl+C ends the batch files; a key
+/// CHOICE doesn't take beeps and waits again.
+pub fn key_ready(cpu: &mut Cpu) {
+    let key = cpu.ax() as u8;
+    let Some(wait) = cpu.shell_wait.take() else { return };
+    if key == 0x03 {
+        video::print_string(cpu, "^C\r\n");
+        cpu.batch.clear();
+        return;
+    }
+    match wait {
+        ShellWait::Pause => video::print_string(cpu, "\r\n"),
+        ShellWait::Choice(choice) => match choice.index(key) {
+            Some(i) => {
+                video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));
+                cpu.errorlevel = i as u8 + 1;
+            }
+            None => {
+                crate::audio::play_sdl_beep(&mut cpu.bus);
+                cpu.shell_wait = Some(ShellWait::Choice(choice));
+                cpu.set_ip(labels().shell_wait);
+            }
+        },
+    }
+}
+
+/// The shell's code on every tick while PAUSE or CHOICE waits
+/// (SERVICE_SHELL_TICK): once a CHOICE's time is up, its default key is
+/// handed over as if pressed.
+pub fn tick(cpu: &mut Cpu) {
+    if let Some(ShellWait::Choice(Choice { timeout: Some((key, at)), .. })) = cpu.shell_wait
+        && cpu.bus.clock.now_ticks() >= at
+    {
+        cpu.set_ax(key as u16);
+        cpu.set_ip(labels().key_ready);
+    }
+}
+
+/// While the shell waits in INT 16h for the next key of a line being
+/// typed, batch lines came to run (the browser page's commands, a game
+/// launched from the settings window): give up the line, take the prompt
+/// back off the screen, and go on where they are dispatched, instead of
+/// waiting for a key first. Called from INT 16h waiting for a key; false
+/// if its caller isn't the shell at its prompt.
+pub fn abandon_input(cpu: &mut Cpu) -> bool {
+    use crate::cpu::SHELL_SEGMENT;
+    if cpu.pe() || !cpu.batch.is_active() || cpu.shell_wait.is_some() || !cpu.process_stack.is_empty() {
+        return false;
+    }
+    let frame = cpu.get_physical_addr(cpu.ss(), cpu.sp());
+    if cpu.bus.read_16(frame + 2) != SHELL_SEGMENT || cpu.bus.read_16(frame) != labels().key_read {
+        return false;
+    }
+    if let Some((col, row)) = cpu.shell_prompt_at.take() {
+        let (end_col, end_row) = cursor(cpu);
+        let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
+        let start = row as usize * cols + col as usize;
+        let end = end_row as usize * cols + end_col as usize;
+        let page = cpu.bus.read_8(0x0462) as u16;
+        let at = |cpu: &mut Cpu| video_call(cpu, 0x0200, page << 8, 0, ((row as u16) << 8) | col as u16);
+        at(cpu);
+        for _ in start..end.max(start) {
+            video_call(cpu, 0x0E20, page << 8, 0, 0);
+        }
+        at(cpu);
+    }
+    cpu.set_sp(cpu.sp().wrapping_add(6));
+    cpu.set_cs(SHELL_SEGMENT);
+    cpu.set_ip(labels().after_trap);
+    true
 }

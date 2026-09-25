@@ -214,7 +214,8 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         // they only count once the shell is back at its prompt.
         if cpu.state == CpuState::RebootShell
             || (cpu.in_shell_code()
-                && (cpu.pending_command.is_some() || (cpu.batch.is_active() && cpu.process_stack.is_empty())))
+                && (cpu.pending_command.is_some()
+                    || (cpu.batch.is_active() && cpu.shell_wait.is_none() && cpu.process_stack.is_empty())))
         {
             match shell_services(cpu) {
                 Shell::Idle => {}
@@ -369,7 +370,7 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
     // line is echoed at a synthesized prompt, MS-DOS style, unless ECHO is
     // off or it begins with '@'. Ctrl+C ends the batch files.
     let mut from_batch = false;
-    if cpu.pending_command.is_none() && cpu.batch.is_active() && cpu.at_shell_prompt() {
+    if cpu.pending_command.is_none() && cpu.batch.is_active() && cpu.shell_wait.is_none() && cpu.at_shell_prompt() {
         if take_ctrl_c(cpu) {
             cpu.batch.clear();
             crate::video::print_string(cpu, "^C\r\n");
@@ -758,11 +759,16 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
             crate::interrupts::handle_hle(cpu, vector);
             let disk_time = cpu.bus.disk_io.take_pending();
             if cpu.hle_retry {
-                // Stay on the trap, with interrupts on as the BIOS's own
-                // wait loops have them; the caller's flags come back with
-                // its return frame.
                 cpu.hle_retry = false;
-                cpu.set_cpu_flag(CpuFlags::IF, true);
+                if vector == 0x16 && crate::shell::abandon_input(cpu) {
+                    // Batch lines came while the prompt waited for a key.
+                    cpu.idle = false;
+                } else {
+                    // Stay on the trap, with interrupts on as the BIOS's own
+                    // wait loops have them; the caller's flags come back with
+                    // its return frame.
+                    cpu.set_cpu_flag(CpuFlags::IF, true);
+                }
             } else if disk_time > 0 && !(0x08..=0x0F).contains(&vector) && cpu.state == CpuState::Running {
                 // Slow disk access: the service returns once it's done.
                 crate::diskio::begin_wait(cpu, vector, disk_time);

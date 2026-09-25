@@ -1203,7 +1203,7 @@ impl Host for MainHost<'_, '_> {
     }
 
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
-        if !self.cpu.shell_idle() || self.cpu.batch.is_active() {
+        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
             return Err("A program is running: quit it to launch a game".to_string());
         }
         let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no configuration file for the games folder")?;

@@ -548,6 +548,19 @@ files.
   set in place of `%%v` (`%v` at the prompt); members with wildcards stand
   for the files they match.
 * `SHIFT` moves the parameters down by one: `%2` becomes `%1`.
+* `PAUSE` waits for a key. `CHOICE [/C[:]keys] [/N] [/S] [/T[:]c,nn]
+  [text]` shows the text and the keys (`[Y,N]?` without `/C`) and waits
+  for one of them; the ERRORLEVEL is its position among them, from 1. `/N`
+  leaves the keys out, `/S` tells upper from lower case, and `/T` takes the
+  key `c` after `nn` seconds without one.
+
+### Prompt
+
+`PROMPT text` sets the prompt, `$P$G` (`C:\GAMES>`) without it. Its codes
+are `$P` the drive and directory, `$N` the drive, `$G` `>`, `$L` `<`,
+`$B` `|`, `$Q` `=`, `$D` the date, `$T` the time, `$V` the version, `$_`
+a new line, `$E` Escape, `$H` a backspace and `$$` a dollar sign. `ECHO
+OFF` typed at the prompt hides it.
 
 `[autoexec]` is a batch file too, run before `C:\AUTOEXEC.BAT`, and so are
 a [game profile](#game-profiles)'s commands.
