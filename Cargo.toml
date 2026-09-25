@@ -27,6 +27,8 @@ nuked-opl3 = "0.1"
 rustysynth = { version = "1.3", optional = true }
 # std::time::Instant and SystemTime, which panic in the browser (web/).
 web-time = "1"
+# Compressed audio tracks of CD images (Ogg Vorbis, FLAC, MP3).
+symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
 
 # The window, the sound device and the debug server of the rust-dos program,
 # which the browser build (web/) has in JavaScript instead.
@@ -54,8 +56,10 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["midi", "hostmidi"]
+default = ["midi", "hostmidi", "cdaudio"]
 midi = ["dep:rustysynth"]
+# CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
+cdaudio = ["dep:symphonia"]
 # The MPU-401's MIDI out of the host's MIDI ports (ALSA on Linux, which
 # needs libasound2-dev to build).
 hostmidi = ["dep:midir"]

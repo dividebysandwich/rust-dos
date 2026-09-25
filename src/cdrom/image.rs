@@ -51,6 +51,9 @@ enum Source {
     File(RefCell<File>),
     /// In memory, as the browser build has its CD images.
     Memory(MemoryImage),
+    /// Decoded from a compressed audio file as they are read.
+    #[cfg(feature = "cdaudio")]
+    Decoded(RefCell<super::decoded::DecodedTrack>),
 }
 
 pub struct CdImage {
@@ -67,7 +70,8 @@ impl CdImage {
     /// (.iso, .bin, .img), whose sector format is found from where the
     /// ISO 9660 volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let is_cue = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue"));
+        // GOG's CUE sheets are .ins files.
+        let is_cue = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("ins"));
         if is_cue {
             Self::open_cue(path)
         } else {
@@ -285,21 +289,32 @@ impl Backing {
         let mut file = File::open(path).map_err(error)?;
         let total = file.metadata().map_err(error)?.len();
         let (data_offset, len) = match format {
-            FileFormat::Wave => {
-                let (format, offset, size) =
-                    wave_data(&mut file).map_err(|e| format!("{}: {}", path.display(), e))?;
-                // Only CD audio fits a CD track.
-                if format != (WaveFormat { channels: 2, rate: 44_100, bits: 16 }) {
-                    return Err(format!(
-                        "{}: only 16-bit stereo 44.1 kHz PCM WAVE files can be CD audio",
-                        path.display()
-                    ));
-                }
-                (offset, size)
-            }
+            // A WAVE file of CD audio is read as it is; any other (another
+            // rate, or a compressed file the sheet calls WAVE, as many do)
+            // is decoded.
+            FileFormat::Wave => match wave_data(&mut file) {
+                Ok((WaveFormat { channels: 2, rate: 44_100, bits: 16 }, offset, size)) => (offset, size),
+                _ => return Self::decoded(path),
+            },
+            FileFormat::Compressed => return Self::decoded(path),
             _ => (0, total),
         };
         Ok(Backing { source: Source::File(RefCell::new(file)), data_offset, len, swap: format == FileFormat::Motorola })
+    }
+
+    /// A compressed audio file, decoded to CD audio as it is read. Its
+    /// length is rounded up to whole sectors, the last one padded with
+    /// silence.
+    #[cfg(feature = "cdaudio")]
+    fn decoded(path: &Path) -> Result<Self, String> {
+        let track = super::decoded::DecodedTrack::open(path)?;
+        let len = track.byte_len().next_multiple_of(RAW_SECTOR as u64);
+        Ok(Backing { source: Source::Decoded(RefCell::new(track)), data_offset: 0, len, swap: false })
+    }
+
+    #[cfg(not(feature = "cdaudio"))]
+    fn decoded(path: &Path) -> Result<Self, String> {
+        Err(format!("{}: this rust-dos can't play compressed audio files", path.display()))
     }
 
     /// Fill `buf` from byte `at` of the sector data; past the end of the
@@ -321,6 +336,11 @@ impl Backing {
                 true => Ok(()),
                 false => Err(io::ErrorKind::UnexpectedEof.into()),
             },
+            #[cfg(feature = "cdaudio")]
+            Source::Decoded(track) => {
+                track.borrow_mut().read_at(at, &mut buf[..n]);
+                Ok(())
+            }
         }
     }
 }

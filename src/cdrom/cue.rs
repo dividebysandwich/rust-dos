@@ -59,8 +59,11 @@ pub enum FileFormat {
     Binary,
     /// Raw sectors; audio samples big-endian.
     Motorola,
-    /// A RIFF WAVE file of 16-bit stereo 44.1 kHz audio.
+    /// A RIFF WAVE file: of 16-bit stereo 44.1 kHz audio, or decoded to
+    /// it (and anything that turns out to be a compressed file).
     Wave,
+    /// A compressed audio file (Ogg Vorbis, FLAC, MP3), decoded to CD audio.
+    Compressed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +119,7 @@ pub fn parse_cue(text: &str) -> Result<CueSheet, String> {
                     "BINARY" => FileFormat::Binary,
                     "MOTOROLA" => FileFormat::Motorola,
                     "WAVE" => FileFormat::Wave,
+                    "MP3" | "OGG" | "VORBIS" | "FLAC" => FileFormat::Compressed,
                     other => return Err(error(format!("{} files are not supported", other))),
                 };
                 sheet.files.push(CueFile { name: arg(1)?.to_string(), format, tracks: Vec::new() });
@@ -208,7 +212,8 @@ mod tests {
     #[test]
     fn errors() {
         assert!(parse_cue("TRACK 01 AUDIO").is_err());
-        assert!(parse_cue("FILE \"x.mp3\" MP3\n TRACK 01 AUDIO").is_err());
+        assert_eq!(parse_cue("FILE \"x.mp3\" MP3\n TRACK 01 AUDIO").unwrap().files[0].format, FileFormat::Compressed);
+        assert!(parse_cue("FILE \"x.opus\" OPUS\n TRACK 01 AUDIO").is_err());
         assert!(parse_cue("FILE \"x.bin\" BINARY\n TRACK 01 CDG").is_err());
         assert!(parse_cue("FILE \"x.bin\" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:61:00").is_err());
         assert!(parse_cue("").is_err());

@@ -451,10 +451,13 @@ Relative `MOUNT` paths are relative to the emulator's working directory.
 Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
-volume name unless `-label` says otherwise. It can be a CUE sheet (with
-BINARY, MOTOROLA or 16-bit stereo 44.1 kHz WAVE files, any number of tracks
+volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
+or GOG's `.ins`, with BINARY, MOTOROLA or WAVE files, any number of tracks
 and gaps) or a bare image of an ISO 9660 data track in 2048, 2336 or
-2352-byte sectors (`.iso`, `.bin`, `.img`). `IMGMOUNT` takes DOSBox's
+2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). Audio tracks can
+be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
+many sheets call them), and WAVE files at other rates: they are decoded to
+CD audio as they play. `IMGMOUNT` takes DOSBox's
 syntax, so the batch files made for DOSBox work unchanged: it looks for the
 image by its DOS path first (`C:\GAME\CD\GAME.CUE`) and then as a host
 path. Programs run from the image as from any other drive.
