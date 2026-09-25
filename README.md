@@ -50,6 +50,10 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Configuration file with startup commands
 * Most settings changeable without restart (including graphics adapter!)
 * Environment variables (`SET`, `PATH`)
+* A DOS prompt with [batch files](#batch-files) as COMMAND.COM runs them
+  (parameters, `IF`, `GOTO`, `CALL`, `FOR`, `CHOICE`, `PAUSE`), `COPY`,
+  `DEL`, `REN`, `MD`, `RD`, `DATE`, `TIME`, redirection, and a
+  `COMMAND.COM` programs can shell out to
 * Web based debugger UI
 * Runs in a web browser as WebAssembly, with C: kept in the browser's
   storage (see [Running in a browser](#running-in-a-browser))
