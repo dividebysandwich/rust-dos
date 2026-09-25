@@ -594,6 +594,7 @@ too. Besides these, the prompt has these commands:
 | `REN old new`, `RENAME` | rename files, with wildcards (`REN *.TXT *.BAK`) |
 | `MD dir`, `MKDIR`, `RD dir`, `RMDIR` | make and remove directories |
 | `VOL [d:]` | a drive's label and serial number |
+| `KEYB [code]` | type in another keyboard layout (see `keyboard_layout`), or show which |
 | `DATE [mm-dd-yy]`, `TIME [hh:mm[:ss]]` | set the date or time, or show it and ask for a new one. The machine's clock starts at the host's and keeps the difference it is set to, for DOS, the BIOS and the CMOS clock; files still get the host's time. |
 | `CLS`, `VER`, `ECHO`, `SET`, `PATH`, `PROMPT` | as in DOS |
 | `MOUNT`, `IMGMOUNT` | see [Drives](#drives) |

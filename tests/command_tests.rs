@@ -427,3 +427,15 @@ fn del_ren_md_rd_and_vol() {
     assert_eq!(run(&mut cpu, "VOL"), " Volume in drive C is RUSTDOS\n Volume Serial Number is 1234-0002");
     assert_eq!(run(&mut cpu, "VOL Q:"), "Invalid drive specification");
 }
+
+#[test]
+fn keyb_changes_the_keyboard_layout() {
+    let base = scratch("keyb", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    assert_eq!(run(&mut cpu, "KEYB"), "Current keyboard code: US (United States)");
+    run(&mut cpu, "KEYB GR,437");
+    assert_eq!(cpu.bus.kbd.layout.code, "gr");
+    assert_eq!(run(&mut cpu, "KEYB de"), "");
+    assert_eq!(run(&mut cpu, "KEYB XX"), "Invalid keyboard code specified");
+    assert_eq!((cpu.errorlevel, cpu.bus.kbd.layout.code), (1, "gr"));
+}

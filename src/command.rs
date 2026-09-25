@@ -41,6 +41,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("RD", &crate::file_commands::RdCommand),
     ("RMDIR", &crate::file_commands::RdCommand),
     ("VOL", &crate::file_commands::VolCommand),
+    ("KEYB", &KeybCommand),
     ("DATE", &crate::time_commands::DateCommand),
     ("TIME", &crate::time_commands::TimeCommand),
     ("MOUNT", &MountCommand),
@@ -726,6 +727,31 @@ fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &
         choice.timeout = Some((choice.keys[i], at));
     }
     Ok((choice, rest, show_keys))
+}
+
+/// KEYB [code[,codepage]]: type in another keyboard layout (keylayout.rs),
+/// or show which. The code page is taken and ignored: the text is code page
+/// 437. An unknown code sets ERRORLEVEL 1.
+struct KeybCommand;
+impl ShellCommand for KeybCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let code = args.split([',', ' ', '\t']).next().unwrap_or("").trim();
+        if code.is_empty() {
+            let layout = cpu.bus.kbd.layout;
+            print_string(cpu, &format!("Current keyboard code: {} ({})\r\n", layout.code.to_ascii_uppercase(), layout.name));
+            return;
+        }
+        match crate::keylayout::Layout::by_code(code) {
+            Some(layout) => {
+                cpu.bus.kbd.layout = layout;
+                cpu.errorlevel = 0;
+            }
+            None => {
+                print_string(cpu, "Invalid keyboard code specified\r\n");
+                cpu.errorlevel = 1;
+            }
+        }
+    }
 }
 
 /// PROMPT [text]: set the prompt, with $ codes (see `shell::render_prompt`);
