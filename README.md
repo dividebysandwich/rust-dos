@@ -556,7 +556,11 @@ files.
 
 ### Commands
 
-Besides running programs and batch files, the prompt has these commands:
+A program or batch file is found where its name says, or else in the
+current directory and then in the directories of `PATH`, in order; without
+an extension it is the first `.COM`, `.EXE` or `.BAT` file of that name in
+the first directory that has one. Besides these, the prompt has these
+commands:
 
 | Command | What it does |
 |---|---|

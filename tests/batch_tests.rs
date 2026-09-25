@@ -376,3 +376,28 @@ fn ctrl_c_gives_up_the_line_at_the_prompt() {
     type_line(&mut cpu, b"ver\r");
     assert!(screen(&cpu).starts_with("C:\\>dir^C\nC:\\>ver\nRust-DOS"), "{}", screen(&cpu));
 }
+
+#[test]
+fn programs_are_found_in_the_current_directory_then_on_the_path() {
+    let dir = scratch("path", &[("HELLO.COM", &exits_with(1))]);
+    fs::create_dir_all(dir.join("BIN")).unwrap();
+    fs::write(dir.join("BIN/HELLO.COM"), exits_with(7)).unwrap();
+    fs::write(dir.join("BIN/TOOL.EXE.TXT"), b"").unwrap();
+    fs::write(dir.join("BIN/GO.BAT"), b"@echo went %1\r\n").unwrap();
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines(["@SET PATH=C:\\BIN", "@HELLO"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 1, "the current directory comes first");
+
+    fs::remove_file(dir.join("HELLO.COM")).unwrap();
+    cpu.queue_batch_lines(["@HELLO"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 7, "then PATH");
+
+    // (GO takes the place of the lines it is run from.)
+    cpu.queue_batch_lines(["@GO there"]);
+    cpu.queue_batch_lines(["@TOOL.EXE.TXT"]);
+    run_batch_files(&mut cpu);
+    let screen = screen(&cpu);
+    assert!(screen.contains("went there\nBad command or file name."), "{}", screen);
+}

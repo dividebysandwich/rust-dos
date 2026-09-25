@@ -479,16 +479,40 @@ pub fn call(cpu: &mut Cpu, line: &str) {
 
 /// `run_program`, and with `call` a batch file on top of the one running.
 fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> bool {
-    let lower = command.to_lowercase();
-    if lower.ends_with(".bat") {
-        cpu.start_batch_file(command, command, args, call)
-    } else if !command.contains('.') {
-        load_program(cpu, &format!("{}.com", command), args, high)
-            || load_program(cpu, &format!("{}.exe", command), args, high)
-            || cpu.start_batch_file(&format!("{}.bat", command), command, args, call)
+    let Some(path) = find_program(cpu, command) else {
+        return false;
+    };
+    if path.to_ascii_uppercase().ends_with(".BAT") {
+        cpu.start_batch_file(&path, command, args, call)
     } else {
-        load_program(cpu, command, args, high)
+        load_program(cpu, &path, args, high)
     }
+}
+
+/// Where the program or batch file `command` is, as COMMAND.COM looks for
+/// it: where it says when it names a directory or drive, else in the
+/// current directory and then in those of PATH, in order. Without an
+/// extension it is a .COM, .EXE or .BAT file, the first of them in the
+/// first directory that has one; other extensions don't run.
+pub fn find_program(cpu: &Cpu, command: &str) -> Option<String> {
+    const RUNNABLE: [&str; 3] = [".COM", ".EXE", ".BAT"];
+    let name = command.rsplit(['\\', '/', ':']).next().unwrap_or(command);
+    let names: Vec<String> = match name.rfind('.') {
+        Some(dot) if RUNNABLE.iter().any(|ext| name[dot..].eq_ignore_ascii_case(ext)) => vec![command.to_string()],
+        Some(_) => return None,
+        None => RUNNABLE.iter().map(|ext| format!("{}{}", command, ext)).collect(),
+    };
+    let find = |dir: &str| names.iter().map(|n| format!("{}{}", dir, n)).find(|p| cpu.bus.disk.is_file(p));
+    if let Some(path) = find("") {
+        return Some(path);
+    }
+    if name.len() != command.len() {
+        return None;
+    }
+    let path = cpu.get_env("PATH").unwrap_or("");
+    path.split(';').map(str::trim).filter(|dir| !dir.is_empty()).find_map(|dir| {
+        if dir.ends_with(['\\', ':']) { find(dir) } else { find(&format!("{}\\", dir)) }
+    })
 }
 
 /// Load a program from the shell with its command line arguments.
