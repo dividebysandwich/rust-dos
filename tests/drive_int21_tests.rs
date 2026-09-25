@@ -476,6 +476,12 @@ fn fcb_search_honors_drive_byte_and_extended_fcbs() {
     assert_eq!(cpu.bus.read_8(DTA), 1);
     let name: Vec<u8> = (1..12).map(|i| cpu.bus.read_8(DTA + i)).collect();
     assert_eq!(name, b"GAME    EXE");
+    // The drive byte and the file's directory entry: size at 1Dh.
+    assert_eq!(cpu.bus.read_32(DTA + 0x1D), 1);
+    assert_ne!(cpu.bus.read_16(DTA + 0x19), 0, "the date");
+    // Only one file: the next search finds nothing.
+    int21(&mut cpu, 0x12);
+    assert_eq!(cpu.get_reg8(Register::AL), 0xFF);
 
     write_fcb(&mut cpu, fcb, 6); // F: not mounted
     int21(&mut cpu, 0x11);

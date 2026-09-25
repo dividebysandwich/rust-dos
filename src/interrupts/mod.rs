@@ -15,6 +15,7 @@ pub mod int21;
 pub mod int25;
 pub mod int2f;
 pub mod int33;
+pub mod fcb;
 pub mod mscdex;
 pub mod vbe;
 pub mod utils;

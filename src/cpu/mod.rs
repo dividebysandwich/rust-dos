@@ -338,6 +338,8 @@ pub struct ProcessContext {
     pub regs: CpuSnapshot,
     pub psp: u16,
     pub heap_pointer: u16,
+    /// The parent's DTA (segment, offset), which the child's replaces.
+    pub dta: (u16, u16),
 }
 
 use std::path::PathBuf;
@@ -547,6 +549,7 @@ impl Cpu {
             regs: self.snapshot(),
             psp: self.current_psp,
             heap_pointer: self.heap_pointer,
+            dta: (self.bus.dta_segment, self.bus.dta_offset),
         };
         self.process_stack.push(context);
         self.bus.log_string(&format!(
@@ -597,6 +600,7 @@ impl Cpu {
             self.restore(&context.regs);
             self.current_psp = context.psp;
             self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
+            (self.bus.dta_segment, self.bus.dta_offset) = context.dta;
             self.bus.log_string(&format!(
                 "[CPU] Context Restored. Stack Depth: {}",
                 self.process_stack.len()
@@ -1058,6 +1062,12 @@ impl Cpu {
         } else {
             self.load_com(bytes, placement)
         };
+        if loaded {
+            // A program starts with its DTA at PSP:0080h, over its command
+            // tail.
+            self.bus.dta_segment = self.current_psp;
+            self.bus.dta_offset = 0x80;
+        }
         if loaded && !matches!(placement, Placement::Child(_)) {
             // A program started from the shell gets the master environment
             // in the shell's environment area. (EXEC gives a child its own

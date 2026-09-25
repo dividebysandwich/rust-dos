@@ -425,3 +425,22 @@ fn a_program_reads_a_line_with_int_21h_0ah() {
     assert!(run_until(&mut cpu, 1000, |cpu| cpu.shell_idle()));
     assert_eq!(cpu.errorlevel, 3);
 }
+
+#[test]
+fn a_program_finds_its_parameters_in_its_fcbs_and_its_dta_at_psp_80h() {
+    #[rustfmt::skip]
+    let fcb = [
+        0xB4, 0x2F, 0xCD, 0x21,         // INT 21h AH=2Fh: ES:BX = the DTA
+        0x80, 0xFB, 0x80,               // CMP BL, 80h
+        0x75, 0x07,                     // JNE fail
+        0xA0, 0x5E, 0x00,               // MOV AL, [5Eh]: the first FCB's second letter
+        0xB4, 0x4C, 0xCD, 0x21,         // exit with it
+        0x00, 0x00,
+        0xB8, 0x01, 0x4C, 0xCD, 0x21,   // fail: exit with 1
+    ];
+    let dir = scratch("fcbs", &[("FCB.COM", &fcb)]);
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines(["@FCB c:game.dat other"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, b'A', "GAME from C:GAME.DAT, upper case");
+}

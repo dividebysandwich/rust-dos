@@ -522,6 +522,8 @@ fn load_program(cpu: &mut Cpu, filename: &str, args: &str, high: bool) -> bool {
         return false;
     }
     cpu.set_command_tail(cpu.current_psp, args);
+    let ax = crate::interrupts::fcb::set_psp_fcbs(&mut cpu.bus, cpu.current_psp, &crate::dosstr::to_bytes(args));
+    cpu.set_ax(ax);
     true
 }
 

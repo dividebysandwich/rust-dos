@@ -5,7 +5,7 @@ use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
 use crate::bus::{DOS_LIST_OF_LISTS, DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
 use crate::cpu::{Cpu, CpuFlags, CpuState};
-use crate::disk::{DriveKind, FIRST_USER_HANDLE, drive_letter, parse_drive_prefix};
+use crate::disk::{DriveKind, FIRST_USER_HANDLE, parse_drive_prefix};
 use crate::diskio;
 use crate::disknoise::Access;
 use crate::video::print_char;
@@ -264,91 +264,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         }
 
         // AH=11h (Find First FCB) / AH=12h (Find Next FCB)
-        0x11 | 0x12 => {
-            let dta_current = cpu.bus.dta_segment;
-            let dta_off = cpu.bus.dta_offset;
-            let dta_phys = cpu.get_physical_addr(dta_current, dta_off);
-
-            let input_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-
-            // Extended FCB: FFh marker, search attribute at +6 and the normal
-            // FCB at +7. Volume label searches (attr 08h) come this way.
-            let extended = cpu.bus.read_8(input_addr) == 0xFF;
-            let (fcb_addr, search_attr) = if extended {
-                (input_addr + 7, cpu.bus.read_8(input_addr + 6) as u16)
-            } else {
-                (input_addr, 0x10) // Directory + Archive + ReadOnly (Implicit for FCB?)
-            };
-
-            let index = if ah == 0x11 {
-                0
-            } else {
-                // Read index from FCB reserved area (Offset 0x0C)
-                cpu.bus.read_16(fcb_addr + 0x0C) as usize
-            };
-            let name = read_dta_template(&cpu.bus, fcb_addr);
-
-            // FCB drive byte: 0 = default, 1 = A:, ...
-            let fcb_drive = cpu.bus.read_8(fcb_addr);
-            let drive = if fcb_drive == 0 {
-                cpu.bus.disk.get_current_drive()
-            } else {
-                fcb_drive - 1
-            };
-
-            let result = if cpu.bus.disk.is_mounted(drive) {
-                let pattern = format!("{}:{}", drive_letter(drive), name);
-                cpu.bus
-                    .disk
-                    .find_directory_entry(&pattern, index, search_attr)
-            } else {
-                Err(0x0F)
-            };
-
-            match result {
-                Ok(entry) => {
-                    // Success: AL=00
-                    cpu.set_reg8(Register::AL, 0x00);
-
-                    // The result goes to the DTA, as an extended FCB if the
-                    // request was one.
-                    let out = if extended {
-                        cpu.bus.write_8(dta_phys, 0xFF);
-                        for i in 1..6 {
-                            cpu.bus.write_8(dta_phys + i, 0);
-                        }
-                        cpu.bus.write_8(dta_phys + 6, entry.attr);
-                        dta_phys + 7
-                    } else {
-                        dta_phys
-                    };
-
-                    // Drive (1 = A:), then the 11-byte name
-                    cpu.bus.write_8(out, drive + 1);
-                    let fcb_bytes = pattern_to_fcb(&entry.filename);
-                    for i in 0..11 {
-                        cpu.bus.write_8(out + 1 + i, fcb_bytes[i]);
-                    }
-
-                    // Store Index for Next Call at Input FCB Reserved Area (Offset 0x0C)
-                    // This allows FindNext to know where to resume, even if DTA != Input FCB
-                    cpu.bus.write_16(fcb_addr + 0x0C, (index + 1) as u16);
-
-                    // FCB: 16h=Time, 14h=Date, 10h=Size
-                    cpu.bus.write_16(out + 0x16, entry.dos_time);
-                    cpu.bus.write_16(out + 0x14, entry.dos_date);
-                    cpu.bus.write_32(out + 0x10, entry.size);
-                }
-                Err(_) => {
-                    // Failure: AL=FFh
-                    cpu.bus.log_string(&format!(
-                        "[DOS] FCB Find{:02X} Failed: Drive={} Pattern='{}' Index={}",
-                        ah, fcb_drive, name, index
-                    ));
-                    cpu.set_reg8(Register::AL, 0xFF);
-                }
-            }
-        }
+        0x11 | 0x12 => super::fcb::find(cpu, ah == 0x11),
 
         // AH=1Bh: Allocation info for the default drive; AH=1Ch: for drive DL
         // (0=default, 1=A). Returns AL=sectors per cluster, CX=bytes per
@@ -539,60 +455,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         }
 
         // AH = 29h: Parse Filename
-        0x29 => {
-            // DS:SI = Pointer to string
-            // ES:DI = Pointer to FCB
-            // AL = Bit mask (0x01=Leading separators, 0x02=Drive ID, 0x04=Ext, 0x08=Name)
-            // For now we just do a basic implementation that reads the string and writes FCB
-
-            let flags = cpu.get_al();
-            let si = cpu.get_reg16(Register::SI);
-            let str_addr = cpu.get_physical_addr(cpu.ds(), si);
-            let raw_str = read_asciiz_string(&cpu.bus, str_addr);
-
-            // Extract first token (space separated)
-            let token = raw_str.split_whitespace().next().unwrap_or("");
-
-            if token.is_empty() {
-                cpu.set_reg8(Register::AL, 0xFF); // Invalid
-            } else {
-                let (drive_spec, name) = parse_drive_prefix(token);
-                let fcb = pattern_to_fcb(name);
-                let di = cpu.get_reg16(Register::DI);
-                let fcb_addr = cpu.get_physical_addr(cpu.es(), di);
-
-                // Drive byte: 1 = A:, ... when the string names one. Without a
-                // drive it becomes 0 (default) unless AL bit 1 says to leave
-                // the existing byte alone.
-                let mut invalid_drive = false;
-                match drive_spec {
-                    Some(d) => {
-                        invalid_drive = !cpu.bus.disk.is_mounted(d);
-                        cpu.bus.write_8(fcb_addr, d + 1);
-                    }
-                    None if flags & 0x02 == 0 => {
-                        cpu.bus.write_8(fcb_addr, 0);
-                    }
-                    None => {}
-                }
-
-                for i in 0..11 {
-                    cpu.bus.write_8(fcb_addr + 1 + i, fcb[i]);
-                }
-
-                // AL=FF invalid drive, 01 if wildcards, else 00
-                if invalid_drive {
-                    cpu.set_reg8(Register::AL, 0xFF);
-                } else if name.contains('*') || name.contains('?') {
-                    cpu.set_reg8(Register::AL, 0x01);
-                } else {
-                    cpu.set_reg8(Register::AL, 0x00);
-                }
-
-                let new_si = si.wrapping_add(token.len() as u16);
-                cpu.set_reg16(Register::SI, new_si);
-            }
-        }
+        // AH = 29h: Parse a file name at DS:SI into the FCB at ES:DI.
+        0x29 => super::fcb::parse_filename(cpu),
 
         // AH = 25h: Set Interrupt Vector
         0x25 => {
@@ -896,6 +760,20 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.bus.write_16(psp_phys + 0x0A, return_address.0);
                     cpu.bus.write_16(psp_phys + 0x0C, return_address.1);
 
+                    // The two FCBs of the parameter block (at +06h and
+                    // +0Ah), and the AX the child starts with: AL (AH) FFh
+                    // if the first (second) names a drive that isn't there.
+                    let mut child_ax = 0u16;
+                    for (i, pointer) in [param_phys + 6, param_phys + 0x0A].into_iter().enumerate() {
+                        let (off, seg) = (cpu.bus.read_16(pointer), cpu.bus.read_16(pointer + 2));
+                        let from = cpu.get_physical_addr(seg, off);
+                        let fcb: Vec<u8> = (0..16).map(|j| cpu.bus.read_8(from + j)).collect();
+                        cpu.bus.load_bytes(psp_phys + 0x5C + 0x10 * i, &fcb);
+                        if fcb[0] != 0 && !cpu.bus.disk.is_mounted(fcb[0].wrapping_sub(1)) {
+                            child_ax |= 0xFF << (8 * i);
+                        }
+                    }
+
                     // Write Command Tail to PSP+0x80
                     cpu.bus
                         .write_8(psp_phys + 0x80, target_cmd_tail_bytes.len() as u8);
@@ -912,7 +790,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         // current. The parent's context stays saved for when
                         // the child terminates.
                         let (entry, stack) = ((cpu.cs(), cpu.ip()), (cpu.ss(), cpu.sp().wrapping_sub(2)));
-                        cpu.bus.write_16(cpu.get_physical_addr(stack.0, stack.1), 0);
+                        cpu.bus.write_16(cpu.get_physical_addr(stack.0, stack.1), child_ax);
                         cpu.bus.write_16(param_phys + 0x0E, stack.1);
                         cpu.bus.write_16(param_phys + 0x10, stack.0);
                         cpu.bus.write_16(param_phys + 0x12, entry.1);
@@ -930,9 +808,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
 
                     // Set up the child's register state per DOS convention.
-                    // AX = 0 typically (we don't validate FCBs). DS/ES already
-                    // point to the PSP from load_executable.
-                    cpu.set_ax(0);
+                    // DS/ES already point to the PSP from load_executable.
+                    cpu.set_ax(child_ax);
                     cpu.set_bx(0);
                     cpu.set_cx(0);
                     cpu.set_dx(0);

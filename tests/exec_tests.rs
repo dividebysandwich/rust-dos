@@ -108,6 +108,12 @@ fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
     let base = psp as usize * 16;
     cpu.bus.write_16(base + 0x202, 0x0280); // command tail
     cpu.bus.write_16(base + 0x204, psp);
+    // FCBs: the first on drive A:, the second on the default drive.
+    for (field, fcb) in [(0x206, 0x2A0), (0x20A, 0x2C0)] {
+        cpu.bus.write_16(base + field, fcb);
+        cpu.bus.write_16(base + field + 2, psp);
+    }
+    cpu.bus.load_bytes(base + 0x2A0, b"\x01GAME    DAT");
     cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
     cpu.bus.load_bytes(base + 0x300, b"CHILD.COM\0");
     let parent_sp = cpu.sp();
@@ -120,7 +126,10 @@ fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
     let word = |cpu: &Cpu, off: usize| cpu.bus.read_16(base + 0x200 + off);
     let (sp, ss, ip, cs) = (word(&cpu, 0x0E), word(&cpu, 0x10), word(&cpu, 0x12), word(&cpu, 0x14));
     assert_eq!((cs, ip), (child_psp, 0x0100));
-    assert_eq!(cpu.bus.read_16(ss as usize * 16 + sp as usize), 0, "initial AX on the stack");
+    // A: isn't there: AL is FFh.
+    assert_eq!(cpu.bus.read_16(ss as usize * 16 + sp as usize), 0x00FF, "initial AX on the stack");
+    let child_fcb: Vec<u8> = (0..12).map(|i| cpu.bus.read_8(child_psp as usize * 16 + 0x5C + i)).collect();
+    assert_eq!(child_fcb, b"\x01GAME    DAT", "the FCBs are copied into the child's PSP");
 
     // The debugger takes over termination and runs the child.
     let child_base = child_psp as usize * 16;
