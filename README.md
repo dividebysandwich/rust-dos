@@ -42,7 +42,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   writing, with sector access through INT 13h and INT 25h/26h, and lists of
   disks to change with Ctrl+F4
 * Emulated disk speeds and disk drive noises
-* CRT shaders: scanlines, an aperture grille or a curved shadow mask tube
+* CRT shaders: scanlines, an aperture grille or a curved shadow mask CRT
   (see [CRT shaders](#crt-shaders))
 * Monochrome monitors: white, amber or green phosphor
 * Joysticks on the game port from game controllers (two sticks and four
@@ -99,7 +99,7 @@ D:
   * `filter` is how the picture is scaled up: `nearest` (the default, sharp
     pixels) or `linear` (smooth). It applies without a CRT shader.
   * `shader` gives the picture a CRT look: `none` (the default),
-    `scanlines`, `aperture` or `curved`. See [CRT shaders](#crt-shaders).
+    `scanlines`, `aperture` or `crt`. See [CRT shaders](#crt-shaders).
   * `monochrome` shows the picture on a monochrome monitor: `off` (the
     default, a colour monitor), `white`, `amber` or `green`. Each colour
     shows as bright as it is, in the phosphor's colour, and the CRT
@@ -404,7 +404,7 @@ picture as a monitor of the time would have:
   lines are wider than dark ones, and light glows a little around them.
 * `aperture`: a flat aperture grille monitor, with red, green and blue
   phosphor stripes over the scanlines.
-* `curved`: a curved tube with a shadow mask, rounded corners and darker
+* `crt`: a curved tube with a shadow mask, rounded corners and darker
   edges. The mouse follows the curve.
 
 With `monochrome`, the aperture grille and the shadow mask are left out, as

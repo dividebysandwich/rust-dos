@@ -46,7 +46,7 @@ aspect=true
 # How the picture is scaled up: nearest (sharp pixels) or linear (smooth),
 # without a CRT shader.
 #filter=nearest
-# A CRT look: none, scanlines, aperture or curved. It needs WebGL 2.
+# A CRT look: none, scanlines, aperture or crt. It needs WebGL 2.
 #shader=none
 # A monochrome monitor: off (colour), white, amber or green.
 #monochrome=off

@@ -27,7 +27,7 @@
 #   none       the pixels as they are (the default)
 #   scanlines  a flat screen with the scanlines of a VGA monitor
 #   aperture   a flat aperture grille monitor: scanlines and phosphor stripes
-#   curved     a curved tube with a shadow mask, rounded corners and glow
+#   crt        a curved tube with a shadow mask, rounded corners and glow
 # The looks need OpenGL 3 and show best at scale 2 or more, or fullscreen.
 # Screenshots and recordings stay without them.
 #shader=none

@@ -446,8 +446,8 @@ mod tests {
         let retina = ((640, 400), (1280, 800), (640, 400), (640, 400));
         assert_eq!(at((320, 200), retina, Shader::None), (320, 200));
         // The curved tube keeps the middle and bends the corners away.
-        assert_eq!(at((639, 399), twice, Shader::Curved), (319, 199));
-        let (x, y) = at((0, 0), twice, Shader::Curved);
+        assert_eq!(at((639, 399), twice, Shader::Crt), (319, 199));
+        let (x, y) = at((0, 0), twice, Shader::Crt);
         assert!(x < 0 && y < 0);
         assert_eq!(at((0, 0), twice, Shader::Aperture), (0, 0));
     }

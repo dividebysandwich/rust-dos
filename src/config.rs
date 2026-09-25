@@ -533,7 +533,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "shader" => match Shader::parse(value) {
                             Some(shader) => config.shader = Some(shader),
-                            None => warn(format!("invalid shader '{}' (none, scanlines, aperture or curved)", value)),
+                            None => warn(format!("invalid shader '{}' (none, scanlines, aperture or crt)", value)),
                         },
                         "capture_dir" => {
                             let value = value.trim_matches('"');
@@ -1581,12 +1581,12 @@ mod tests {
 
     #[test]
     fn display_settings() {
-        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=Curved\nmonochrome=Amber\n";
+        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=CRT\nmonochrome=Amber\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(false), Some(Filter::Linear)));
-        assert_eq!((config.shader, config.monochrome), (Some(Shader::Curved), Some(Monochrome::Amber)));
-        let text = "[emulator]\nfullscreen=maybe\nfilter=blur\nshader=crt\nmonochrome=blue\n";
+        assert_eq!((config.shader, config.monochrome), (Some(Shader::Crt), Some(Monochrome::Amber)));
+        let text = "[emulator]\nfullscreen=maybe\nfilter=blur\nshader=bent\nmonochrome=blue\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert_eq!(config.warnings.len(), 4, "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings::default());
@@ -1683,7 +1683,7 @@ mod tests {
             fullscreen: true,
             aspect: true,
             filter: Filter::Linear,
-            shader: Shader::Curved,
+            shader: Shader::Crt,
             monochrome: Monochrome::Green,
             composite: CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New },
             machine: Adapter::Vga,
@@ -1756,7 +1756,7 @@ mod tests {
             assert!(text.contains(line), "lost '{}'", line);
         }
         assert!(text.contains("#scale=2\nscale=3\n"), "{}", text);
-        assert!(text.contains("#shader=none\nshader=curved\n"), "{}", text);
+        assert!(text.contains("#shader=none\nshader=crt\n"), "{}", text);
         assert!(text.contains("#monochrome=off\nmonochrome=green\n"), "{}", text);
         assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
         assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);

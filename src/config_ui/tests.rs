@@ -392,10 +392,10 @@ fn the_crt_shader_steps_through_the_looks() {
     ui.row = ui.items().iter().position(|&i| i == Item::Shader).unwrap();
     keys(&mut ui, &mut host, &[Right, Right, Right, Right]);
     let looks: Vec<Shader> = host.applied.iter().map(|s| s.shader).collect();
-    assert_eq!(looks, [Shader::Scanlines, Shader::Aperture, Shader::Curved, Shader::None]);
+    assert_eq!(looks, [Shader::Scanlines, Shader::Aperture, Shader::Crt, Shader::None]);
     keys(&mut ui, &mut host, &[Left]);
-    assert_eq!(host.applied.last().unwrap().shader, Shader::Curved);
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("curved CRT"));
+    assert_eq!(host.applied.last().unwrap().shader, Shader::Crt);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("CRT"));
 
     // Without shaders the window says so, and keeps the setting to save.
     host.no_shaders = true;

@@ -12,14 +12,17 @@ pub enum Shader {
     /// A flat aperture grille monitor: scanlines and phosphor stripes.
     Aperture,
     /// A curved tube with a shadow mask, rounded corners and darker edges.
-    Curved,
+    Crt,
 }
 
 impl Shader {
-    pub const ALL: [Shader; 4] = [Shader::None, Shader::Scanlines, Shader::Aperture, Shader::Curved];
+    pub const ALL: [Shader; 4] = [Shader::None, Shader::Scanlines, Shader::Aperture, Shader::Crt];
 
+    /// A look by its name, or the CRT by its old one, `curved`.
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|shader| shader.name().eq_ignore_ascii_case(s.trim()))
+        let s = s.trim();
+        let found = Self::ALL.into_iter().find(|shader| shader.name().eq_ignore_ascii_case(s));
+        found.or_else(|| s.eq_ignore_ascii_case("curved").then_some(Shader::Crt))
     }
 
     pub fn name(self) -> &'static str {
@@ -27,7 +30,7 @@ impl Shader {
             Shader::None => "none",
             Shader::Scanlines => "scanlines",
             Shader::Aperture => "aperture",
-            Shader::Curved => "curved",
+            Shader::Crt => "crt",
         }
     }
 
@@ -37,7 +40,7 @@ impl Shader {
             Shader::None => "none",
             Shader::Scanlines => "scanlines",
             Shader::Aperture => "aperture grille",
-            Shader::Curved => "curved CRT",
+            Shader::Crt => "CRT",
         }
     }
 
@@ -77,7 +80,7 @@ impl Shader {
                 glow: 0.06,
                 ..flat
             }),
-            Shader::Curved => Some(Look {
+            Shader::Crt => Some(Look {
                 mask: Mask::Slots,
                 beam: [0.18, 0.30],
                 edge: 0.6,
@@ -210,8 +213,9 @@ mod tests {
         for shader in Shader::ALL {
             assert_eq!(Shader::parse(shader.name()), Some(shader));
         }
-        assert_eq!(Shader::parse(" Curved "), Some(Shader::Curved));
-        assert_eq!(Shader::parse("crt"), None);
+        assert_eq!(Shader::parse(" CRT "), Some(Shader::Crt));
+        assert_eq!(Shader::parse("Curved"), Some(Shader::Crt));
+        assert_eq!(Shader::parse("crt-royale"), None);
     }
 
     #[test]
@@ -225,7 +229,7 @@ mod tests {
 
     #[test]
     fn the_curved_tube_bends_the_edges() {
-        let warp = |u, v| Shader::Curved.warp(u, v);
+        let warp = |u, v| Shader::Crt.warp(u, v);
         assert_eq!(warp(0.5, 0.5), (0.5, 0.5));
         // The corners are behind the bezel.
         let (u, v) = warp(0.0, 0.0);
@@ -253,7 +257,7 @@ mod tests {
                 assert!(fragment.contains("out vec4 o_color;"));
             }
         }
-        let (_, curved) = sources(Shader::Curved, Glsl::Gl150);
+        let (_, curved) = sources(Shader::Crt, Glsl::Gl150);
         assert!(curved.contains("#define CURVATURE vec2(0.03, 0.04)\n"));
         assert!(curved.contains("#define CURVED 1\n") && curved.contains("#define MASK 2\n"));
         assert!(curved.contains("uniform float u_mask;") && curved.contains("MASK_STRENGTH * u_mask"));
