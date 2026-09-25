@@ -12,7 +12,9 @@
 //! Each entry is a directory under `programs/` and the command that starts
 //! the program there. `DYNDIFF_CORE` picks the second machine's core
 //! (default `dynamic`; `normal` checks that the comparison itself is
-//! deterministic).
+//! deterministic). `DYNDIFF_KEYS` presses keys before given batches, as
+//! `BATCH:KEY` pairs (`600:enter,700:down`), which get a program to the
+//! part to test.
 
 mod dyndiff;
 mod pmrig;
@@ -138,6 +140,30 @@ fn program_machine(dir: &str, machine: &str, command: &str, core: CoreMode) -> C
     cpu
 }
 
+/// The keys of `DYNDIFF_KEYS`: (batch, key) pairs.
+fn scripted_keys() -> Vec<(usize, rust_dos::keyboard::PcKey)> {
+    let Ok(list) = std::env::var("DYNDIFF_KEYS") else { return Vec::new() };
+    list.split(',')
+        .map(|entry| {
+            let (batch, name) = entry.split_once(':').expect("BATCH:KEY");
+            let key = rust_dos::keyboard::lookup(name).unwrap_or_else(|| panic!("no key {}", name));
+            (batch.parse().expect("batch number"), key)
+        })
+        .collect()
+}
+
+/// Press the keys due before batch `n`, and let go of those pressed before
+/// the one before it.
+fn press_keys(keys: &[(usize, rust_dos::keyboard::PcKey)], n: usize, cpu: &mut Cpu) {
+    for &(at, key) in keys {
+        if at == n {
+            rust_dos::keyboard::apply_key(&mut cpu.bus, key, key.ascii, true);
+        } else if at + 1 == n {
+            rust_dos::keyboard::apply_key(&mut cpu.bus, key, key.ascii, false);
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn local_programs_in_lockstep() {
@@ -148,12 +174,13 @@ fn local_programs_in_lockstep() {
     let batches = std::env::var("DYNDIFF_BATCHES").map_or(2_000, |v| v.parse().unwrap());
     let len = std::env::var("DYNDIFF_BATCH_LEN").map_or(100_000, |v| v.parse().unwrap());
     fix_time();
+    let keys = scripted_keys();
     let mut failures = Vec::new();
     for entry in list.split(',') {
         let (dir, command) = entry.split_once(':').expect("DIR:COMMAND");
         let mut a = program_machine(dir, "a", command, CoreMode::Normal);
         let mut b = program_machine(dir, "b", command, second_core());
-        match lockstep(&mut a, &mut b, batches, len, |_, _| {}) {
+        match lockstep(&mut a, &mut b, batches, len, |n, cpu| press_keys(&keys, n, cpu)) {
             Ok(run) => println!(
                 "{}: {} batches, {} instructions, equal (mode switches {}, exceptions {})\n  \
                  normal {:.2}s ({:.0} MIPS), {} {:.2}s ({:.0} MIPS)\n  {:?}",
@@ -179,7 +206,10 @@ fn local_programs_in_lockstep() {
 }
 
 /// One program on one core, for timing and profiling: the first entry of
-/// `DYNDIFF_PROGRAMS` on `DYNDIFF_CORE`, without comparisons.
+/// `DYNDIFF_PROGRAMS` on `DYNDIFF_CORE`, without comparisons, with the keys
+/// of `DYNDIFF_KEYS`. Only batches from `DYNDIFF_TIME_FROM` on are timed
+/// (the part of the program to measure), and `DYNDIFF_SHOTS` saves the
+/// screen after every that many batches, to find it.
 #[test]
 #[ignore]
 fn local_program_alone() {
@@ -189,24 +219,47 @@ fn local_program_alone() {
     };
     let batches: usize = std::env::var("DYNDIFF_BATCHES").map_or(2_000, |v| v.parse().unwrap());
     let len = std::env::var("DYNDIFF_BATCH_LEN").map_or(100_000, |v| v.parse().unwrap());
+    let time_from: usize = std::env::var("DYNDIFF_TIME_FROM").map_or(0, |v| v.parse().unwrap());
+    let shots: Option<usize> = std::env::var("DYNDIFF_SHOTS").ok().map(|v| v.parse().unwrap());
     fix_time();
+    let keys = scripted_keys();
     let entry = list.split(',').next().unwrap();
     let (dir, command) = entry.split_once(':').expect("DIR:COMMAND");
     let mut cpu = program_machine(dir, "a", command, second_core());
-    let started = std::time::Instant::now();
-    for _ in 0..batches {
+    let mut time = std::time::Duration::ZERO;
+    let mut timed = 0;
+    for n in 0..batches {
+        press_keys(&keys, n, &mut cpu);
+        let executed = cpu.executed;
+        let started = std::time::Instant::now();
         dyndiff::batch(&mut cpu, len, false);
+        if n >= time_from {
+            time += started.elapsed();
+            timed += cpu.executed - executed;
+        }
+        if shots.is_some_and(|every| (n + 1) % every == 0) {
+            save_screen(&mut cpu, &format!("target/dyndiff/{}/shot-{:05}.png", dir, n + 1));
+        }
     }
-    let secs = started.elapsed().as_secs_f64();
+    let secs = time.as_secs_f64();
     println!(
         "{} on {}: {} instructions in {:.2}s ({:.0} MIPS)\n  {:?}",
         entry,
         second_core().name(),
-        cpu.executed,
+        timed,
         secs,
-        cpu.executed as f64 / secs / 1e6,
+        timed as f64 / secs / 1e6,
         cpu.dynrec.stats()
     );
+}
+
+/// Save the screen as a PNG file.
+fn save_screen(cpu: &mut Cpu, path: &str) {
+    let (width, height) = rust_dos::video::frame_size(&cpu.bus);
+    let mut frame = rust_dos::video::Frame::new(width, height);
+    cpu.bus.vga.mark_dirty_full();
+    rust_dos::video::render_screen(&mut frame, &cpu.bus);
+    rust_dos::capture::png::save(&frame, Path::new(path)).unwrap();
 }
 
 /// CPU-bound protected-mode programs on both cores, in lockstep, with their

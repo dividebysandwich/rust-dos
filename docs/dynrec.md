@@ -268,7 +268,17 @@ DYNDIFF_PROGRAMS="D1SW:DCNTSHR,STUNTS:STUNTS" DYNDIFF_BATCHES=3000 \
 
 Each entry is a directory under `programs/` and the command that starts
 the program there. `DYNDIFF_CORE=normal` compares the interpreter with
-itself, which shows the comparison is deterministic.
+itself, which shows the comparison is deterministic. `DYNDIFF_KEYS`
+presses keys before given batches, as `BATCH:KEY` pairs with the debug
+server's key names, to get a program past its menus: Descent's first
+demo, from the registered version's directory, is
+
+```sh
+DYNDIFF_PROGRAMS=Descent:DESCENTR DYNDIFF_BATCHES=9000 \
+  DYNDIFF_KEYS="3600:enter,3800:down,3820:down,3840:down,3860:down,3880:down,3950:enter,4150:enter"
+```
+
+which plays from about batch 4500.
 
 **The whole suite on the recompiler.** `RUST_DOS_CORE=dynamic cargo test`
 runs every test on the recompiler. `Cpu::step` translates one-instruction
@@ -305,12 +315,16 @@ recompiler's own tests on macOS and Windows.
 **Speed.** `compute_speed` runs CPU-bound protected-mode programs (a
 CRC-32, a bubble sort, shifts and rotates) on both cores in lockstep and
 prints their speeds. `local_program_alone` runs one program on one core,
-for profiling:
+for profiling, with the keys of `DYNDIFF_KEYS`:
 
 ```sh
 cargo test --release --test dyndiff_tests compute_speed -- --ignored --nocapture
 DYNDIFF_PROGRAMS=TD3:TD3 cargo test --release --test dyndiff_tests local_program_alone -- --ignored --nocapture
 ```
+
+It times only the batches from `DYNDIFF_TIME_FROM` on (`4500` for the
+Descent demo above), and `DYNDIFF_SHOTS=N` saves the screen every N
+batches into `target/dyndiff/<dir>/`, to find where a program gets to.
 
 ## Translating another instruction form
 
