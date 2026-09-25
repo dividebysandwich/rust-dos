@@ -209,10 +209,11 @@ D:
     (`gus=false`) unless `gusdrive` is `none`.
   * `mt32` plays a Roland MT-32 or CM-32L, emulated by
     [munt](https://github.com/munt/munt). rust-dos loads munt's library
-    when the MT-32 is chosen, so it has to be installed: `munt` on Arch,
-    `libmt32emu2` on Debian and Ubuntu, `brew install mt32emu` on macOS, or
-    `mt32emu.dll` beside `rust-dos.exe` on Windows (`mt32lib` gives the
-    library's path if the system doesn't find it). The MT-32's ROMs are not
+    when the MT-32 is chosen, so it has to be installed: `munt` on Arch
+    (from the AUR), `libmt32emu2` on Debian and Ubuntu, and `brew install
+    mt32emu` on macOS; the Windows downloads come with it (`mt32emu-2.dll`
+    beside `rust-dos.exe`, under munt's LGPL 2.1). `mt32lib` gives the
+    library's path if the system doesn't find it. The MT-32's ROMs are not
     part of it: `mt32roms` is the directory with a control ROM and a PCM
     ROM of the same model, whatever the files are called. Without the
     setting rust-dos looks in `mt32-roms` in its configuration directory,

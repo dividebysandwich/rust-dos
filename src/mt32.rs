@@ -165,7 +165,9 @@ impl Api {
 /// The names the library goes by, in the order they are tried.
 fn library_names() -> &'static [&'static str] {
     if cfg!(target_os = "windows") {
-        &["mt32emu.dll", "libmt32emu.dll", "libmt32emu-2.dll"]
+        // munt's own build names it after its major version, as the Windows
+        // packages of rust-dos ship it.
+        &["mt32emu-2.dll", "mt32emu.dll", "libmt32emu-2.dll", "libmt32emu.dll"]
     } else if cfg!(target_os = "macos") {
         &[
             "libmt32emu.dylib",

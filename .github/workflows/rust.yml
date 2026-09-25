@@ -167,6 +167,28 @@ jobs:
           echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
           echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
 
+      # munt's libmt32emu, which rust-dos loads for midisynth=mt32, from its
+      # source: munt publishes no Windows build of the library. Its shared
+      # build is mt32emu-2.dll; the packages ship it beside rust-dos.exe with
+      # its licence (LGPL 2.1).
+      - name: Build munt's libmt32emu (Windows)
+        if: runner.os == 'Windows'
+        env:
+          MUNT_TAG: munt_2_8_2
+        run: |
+          curl -fsSL -o munt.tar.gz "https://github.com/munt/munt/archive/refs/tags/$MUNT_TAG.tar.gz"
+          tar xzf munt.tar.gz
+          cmake -S "munt-$MUNT_TAG/mt32emu" -B munt-build -A x64 -Dlibmt32emu_SHARED=ON -DBUILD_TESTING=OFF
+          cmake --build munt-build --config Release
+          mkdir -p mt32emu
+          DLL=$(find munt-build -name 'mt32emu-2.dll' | head -n1)
+          if [ -z "$DLL" ]; then
+            echo "::error::No mt32emu-2.dll in munt-build"
+            exit 1
+          fi
+          cp "$DLL" mt32emu/
+          cp "munt-$MUNT_TAG/mt32emu/COPYING.LESSER.txt" mt32emu/mt32emu-LICENSE.txt
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -189,12 +211,12 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos.exe SDL2/lib/x64/SDL2.dll README.md stage/rust-dos/
+          cp target/release/rust-dos.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
           dotnet tool install --global wix --version 5.0.2
           wix build packaging/windows/main.wxs -arch x64 \
-            -d Version="$CARGO_VERSION" -d BinDir=target/release -d SdlDir=SDL2/lib/x64 \
+            -d Version="$CARGO_VERSION" -d BinDir=target/release -d SdlDir=SDL2/lib/x64 -d MuntDir=mt32emu \
             -o "out/$PKG.msi"
 
       - name: Package (macOS)
@@ -289,8 +311,9 @@ jobs:
           cat > notes.md <<'EOF'
           ### Which file to download
 
-          - **Windows**: the `.msi` installs rust-dos with SDL2 and adds it to
-            the Start menu and PATH; the `.zip` is the same, portable.
+          - **Windows**: the `.msi` installs rust-dos with SDL2 and munt's
+            MT-32 emulation and adds it to the Start menu and PATH; the `.zip`
+            is the same, portable.
           - **macOS**: the `.zip` holds the app, for Apple Silicon
             (`macos-aarch64`) or Intel (`macos-x86_64`). It needs SDL2 from
             Homebrew (`brew install sdl2`). The app is unsigned: right-click →
@@ -298,7 +321,9 @@ jobs:
             `xattr -dr com.apple.quarantine <app>`.
           - **Linux**: a `.deb` or a portable `.tar.gz`, for PCs (`x86_64`) or
             ARM boards such as a Raspberry Pi (`aarch64`). The tarball needs
-            SDL2 (`libsdl2-2.0-0` on Debian and Ubuntu); the `.deb` declares it.
+            SDL2 and ALSA (`libsdl2-2.0-0` and `libasound2` on Debian and
+            Ubuntu); the `.deb` declares them. For the MT-32, install munt's
+            library (`libmt32emu2`).
             Take the **`-compat`** file if the regular one refuses to start
             with ``version `GLIBC_2.39' not found``, as it does on Ubuntu 22.04,
             Linux Mint 21, Debian 12 and Raspberry Pi OS (bookworm). It is

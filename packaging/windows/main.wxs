@@ -2,10 +2,11 @@
 <!-- Built by the release workflow (WiX 5):
      wix build packaging/windows/main.wxs -arch x64 \
          -d Version=<cargo version> -d BinDir=target/release \
-         -d SdlDir=SDL2/lib/x64 -o <out>.msi
+         -d SdlDir=SDL2/lib/x64 -d MuntDir=mt32emu -o <out>.msi
 
      rust-dos.exe links SDL2 dynamically, so SDL2.dll is installed beside
-     it. -->
+     it, and munt's MT-32 emulation, mt32emu-2.dll, which it loads for
+     midisynth=mt32, with the library's licence (LGPL 2.1). -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
     <Package Name="rust-dos"
              Manufacturer="dividebysandwich"
@@ -27,6 +28,10 @@
                 </Component>
                 <Component Id="SdlDll" Guid="1E10BA41-1628-43F6-AAFC-A0DE6E00E2B0">
                     <File Id="Sdl2Dll" Source="$(var.SdlDir)/SDL2.dll" KeyPath="yes" />
+                </Component>
+                <Component Id="MuntDll" Guid="3962CD19-6D47-4ED2-B1A1-86AD0B2F3577">
+                    <File Id="Mt32EmuDll" Source="$(var.MuntDir)/mt32emu-2.dll" KeyPath="yes" />
+                    <File Id="Mt32EmuLicense" Source="$(var.MuntDir)/mt32emu-LICENSE.txt" />
                 </Component>
                 <Component Id="Docs" Guid="6F2EB829-9BFC-4A1D-946B-D20FCC688BC9">
                     <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
@@ -55,6 +60,7 @@
         <Feature Id="Main">
             <ComponentRef Id="MainExe" />
             <ComponentRef Id="SdlDll" />
+            <ComponentRef Id="MuntDll" />
             <ComponentRef Id="Docs" />
             <ComponentRef Id="PathEnv" />
             <ComponentRef Id="StartMenuShortcut" />
