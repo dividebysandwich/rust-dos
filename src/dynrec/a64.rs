@@ -164,10 +164,10 @@ struct Gen<'a> {
     data: &'a BlockData,
     /// Where the block's data pointer is, in the literal after the code.
     data_lit: DynamicLabel,
-    /// Per instruction: where it leaves the block with the exit code in W0
-    /// (counting it as executed but not done), and the instruction count
-    /// brought up to date for it.
-    fail: Vec<DynamicLabel>,
+    /// Per instruction: where it stops the block with the exit code in W0
+    /// (made where something jumps there), and how far the instruction
+    /// count is brought up to date for it.
+    fail: Vec<Option<DynamicLabel>>,
     synced: Vec<i32>,
     tail: DynamicLabel,
     /// The prologue's ways out, and where it goes on.
@@ -184,10 +184,12 @@ struct Gen<'a> {
     ix: usize,
 }
 
-/// A translated block's code, and where its links' stubs are in it.
+/// A translated block's code, where its links' stubs are in it, and how
+/// far behind each instruction the instruction count is (`BlockData::lag`).
 pub struct Code {
     pub bytes: Vec<u8>,
     pub stubs: [Option<usize>; LINKS],
+    pub lag: Box<[u8]>,
 }
 
 /// Translate a block: each instruction's operations (`items[ix]`), or a
@@ -197,14 +199,13 @@ pub struct Code {
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();
-    let fail = (0..n).map(|_| ops.new_dynamic_label()).collect();
     let mut labels = || ops.new_dynamic_label();
     let (data_lit, tail, deadline, revalidate, limit, body) = (labels(), labels(), labels(), labels(), labels(), labels());
     let mut g = Gen {
         ops,
         data,
         data_lit,
-        fail,
+        fail: vec![None; n],
         synced: vec![0; n],
         tail,
         deadline,
@@ -238,7 +239,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                     // A store hit the rest of the block: leave after this
                     // instruction.
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    let (fail, skip) = (g.fail[ix], g.ops.new_dynamic_label());
+                    let (fail, skip) = (g.fail(), g.ops.new_dynamic_label());
                     dynasm!(g.ops ; .arch aarch64 ; cbz w23, =>skip);
                     g.mov32(0, next);
                     g.field(Access::Str32, 0, layout::EIP);
@@ -273,7 +274,8 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         ; .u64 data_ptr
     );
     let stubs = g.stubs.map(|s| s.map(|l| g.ops.labels().resolve_dynamic(l).expect("stub").0));
-    Code { bytes: g.ops.finalize().expect("block"), stubs }
+    let lag = g.synced.iter().enumerate().map(|(ix, &synced)| (ix as i32 - synced) as u8).collect();
+    Code { bytes: g.ops.finalize().expect("block"), stubs, lag }
 }
 
 impl Gen<'_> {
@@ -323,6 +325,13 @@ impl Gen<'_> {
             dynasm!(self.ops ; .arch aarch64 ; add x0, x0, x9);
         }
         self.field(Access::Str64, 0, off);
+    }
+
+    /// Where the instruction being translated stops the block, with the
+    /// exit code in W0.
+    fn fail(&mut self) -> DynamicLabel {
+        let ops = &mut self.ops;
+        *self.fail[self.ix].get_or_insert_with(|| ops.new_dynamic_label())
     }
 
     /// X1 = the block's data.
@@ -385,7 +394,7 @@ impl Gen<'_> {
 
     /// Run instruction `ix` through its handler.
     fn fallback(&mut self, ix: u32) {
-        let fail = self.fail[ix as usize];
+        let fail = self.fail();
         let lit = self.data_lit;
         dynasm!(self.ops
             ; .arch aarch64
@@ -436,15 +445,21 @@ impl Gen<'_> {
                 self.exit();
             }
         }
-        for ix in 0..self.data.count() {
-            // Instruction ix stopped the block: it counts as executed but
-            // not in the instruction count (see `x64`).
-            let label = self.fail[ix];
-            dynasm!(self.ops ; .arch aarch64 ; =>label ; mov w8, w0);
-            self.add_field64(layout::ICOUNT, (ix as i32 - self.synced[ix]) as u32);
-            self.add_field64(layout::EXECUTED, ix as u32 + 1);
-            self.mov32(9, (ix as u32) << 8);
-            dynasm!(self.ops ; .arch aarch64 ; orr w0, w8, w9);
+        // An instruction stopped the block: the exit code gets its index,
+        // and the execution loop counts it (see `BlockData::lag`).
+        let fail_tail = self.ops.new_dynamic_label();
+        for (ix, label) in self.fail.clone().into_iter().enumerate() {
+            if let Some(label) = label {
+                dynasm!(self.ops ; .arch aarch64 ; =>label);
+                if ix > 0 {
+                    self.mov32(9, (ix as u32) << 8);
+                    dynasm!(self.ops ; .arch aarch64 ; orr w0, w0, w9);
+                }
+                dynasm!(self.ops ; .arch aarch64 ; b =>fail_tail);
+            }
+        }
+        if self.fail.iter().any(Option::is_some) {
+            dynasm!(self.ops ; .arch aarch64 ; =>fail_tail);
             self.data_x1();
             self.exit();
         }
@@ -508,7 +523,7 @@ impl Gen<'_> {
 
     /// Instruction ix's #GP(0) exit.
     fn gp0(&mut self) -> DynamicLabel {
-        let (label, skip, fail) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label(), self.fail[self.ix]);
+        let (label, skip, fail) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label(), self.fail());
         dynasm!(self.ops
             ; .arch aarch64
             ; b =>skip
@@ -799,7 +814,8 @@ impl Gen<'_> {
             ; =>back
         );
         let desc = memref_desc(seg, size, write, slot);
-        self.slow.push(Slow::MemRef { at, back, t, desc, fail: self.fail[self.ix] });
+        let fail = self.fail();
+        self.slow.push(Slow::MemRef { at, back, t, desc, fail });
     }
 
     /// SF, ZF and PF of the result in W0 (`bits` wide) into W5.

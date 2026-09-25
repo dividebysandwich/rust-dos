@@ -384,6 +384,7 @@ mod engine {
                     }
                 }
                 data.id = index;
+                data.lag = code.lag;
                 stats.blocks += 1;
                 stats.instructions += data.count() as u64;
                 stats.native += native;
@@ -497,6 +498,14 @@ mod engine {
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.
                 let data = unsafe { &*self.ctx.exit_data };
+                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_SMC) {
+                    // Instruction ix stopped the block: it counts as executed
+                    // (the interpreter counts it before running it) but not in
+                    // the instruction count, which this adds once it has dealt
+                    // with it.
+                    cpu.bus.clock.icount += data.lag[ix] as u64;
+                    cpu.executed += ix as u64 + 1;
+                }
                 let exited = data.id;
                 let none_ran = cpu.bus.clock.icount == start;
                 let page = Page { lin: cs_base.wrapping_add(data.eips[0]) & !0xFFF, phys: data.phys as usize & !0xFFF };

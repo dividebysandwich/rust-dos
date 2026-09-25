@@ -81,6 +81,10 @@ pub struct BlockData {
     pub guards: [Guard; LINKS],
     /// The block's index in the translator's table.
     pub id: u32,
+    /// Per instruction, how many instructions the instruction count is
+    /// behind while it runs: the translated code brings it up to date
+    /// only before handlers and where the block ends.
+    pub lag: Box<[u8]>,
 }
 
 impl BlockData {
@@ -132,6 +136,7 @@ impl BlockData {
             stubs: [0; LINKS],
             guards: [Guard::default(); LINKS],
             id: 0,
+            lag: Box::new([]),
             instrs: instrs.into_boxed_slice(),
             eips: eips.into_boxed_slice(),
             writes: writes.into_boxed_slice(),
