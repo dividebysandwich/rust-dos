@@ -243,6 +243,7 @@ impl Machine {
         cpu.bus.set_disk_settings(settings.disk);
         cpu.bus.set_mixer(settings.mixer);
         cpu.bus.set_joystick(settings.joystick);
+        cpu.bus.vga.set_composite(settings.composite);
         warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         for warning in &warnings {
@@ -1071,6 +1072,9 @@ impl Host for PageHost<'_> {
         }
         if new.joystick != old.joystick {
             self.cpu.bus.set_joystick(new.joystick);
+        }
+        if new.composite != old.composite {
+            self.cpu.bus.vga.set_composite(new.composite);
         }
         if !self.hardware.differs(new) {
             return Ok(None);

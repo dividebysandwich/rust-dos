@@ -5,6 +5,7 @@ use iced_x86::Register;
 use rust_dos::cpu::Cpu;
 use rust_dos::interrupts::int10;
 use rust_dos::video::adapter::{Adapter, VideoSetup};
+use rust_dos::video::composite::{CompositeEra, CompositeMode, CompositeSettings};
 use rust_dos::video::{self, Frame, VideoMode, bios};
 use std::path::PathBuf;
 
@@ -195,4 +196,98 @@ fn the_shell_runs_on_a_cga() {
     assert!(frame.rgb[..640 * 16 * 3].iter().any(|&b| b != 0));
     assert_eq!(cpu.bus.read_16(0x0460), 0x0607);
     assert_eq!(cpu.bus.read_8(0x0484), 0);
+}
+
+/// Fill the graphics memory (both banks) with `byte`.
+fn fill(cpu: &mut Cpu, byte: u8) {
+    for offset in 0..0x4000 {
+        cpu.bus.write_8(0xB8000 + offset, byte);
+    }
+}
+
+fn composite(cpu: &mut Cpu, mode: CompositeMode, era: CompositeEra) {
+    cpu.bus.vga.set_composite(CompositeSettings { mode, era });
+}
+
+/// The colour in the middle of the screen, away from the border.
+fn middle(cpu: &mut Cpu) -> (u8, u8, u8) {
+    pixel(&picture(cpu), 320, 200)
+}
+
+fn saturated((r, g, b): (u8, u8, u8)) -> bool {
+    r.max(g).max(b) as i32 - r.min(g).min(b) as i32 > 60
+}
+
+#[test]
+fn composite_games_get_artifact_colours_in_640x200() {
+    // What King's Quest does for a composite monitor: mode 6, then the
+    // colour burst on (Mode Control 1Ah), white on black.
+    let mut cpu = cga(0x06);
+    cpu.bus.io_write(0x3D8, 0x1A);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Cga640x200);
+    fill(&mut cpu, 0x00);
+    assert_eq!(middle(&mut cpu), (0, 0, 0));
+    fill(&mut cpu, 0xFF);
+    let (r, g, b) = middle(&mut cpu);
+    assert!(r > 230 && g > 230 && b > 230, "white: {:?}", (r, g, b));
+    // 0011 and 1100: two pixels on, two off, a cycle of the colour
+    // carrier at opposite phases: blue and brown, say.
+    fill(&mut cpu, 0x33);
+    let blue = middle(&mut cpu);
+    fill(&mut cpu, 0xCC);
+    let brown = middle(&mut cpu);
+    assert!(saturated(blue) && saturated(brown), "{:?} {:?}", blue, brown);
+    assert_ne!(blue, brown);
+    assert!(blue.2 > blue.0, "0011 is bluish: {:?}", blue);
+
+    // The BIOS's own mode 6 has the burst off: an RGB picture, as on a
+    // CGA's colour monitor.
+    cpu.bus.io_write(0x3D8, 0x1E);
+    fill(&mut cpu, 0x33);
+    let frame = picture(&mut cpu);
+    assert_eq!((pixel(&frame, 320, 200), pixel(&frame, 322, 200)), ((0, 0, 0), (0xFF, 0xFF, 0xFF)));
+}
+
+#[test]
+fn composite_follows_the_setting() {
+    let mut cpu = cga(0x06);
+    cpu.bus.io_write(0x3D8, 0x1A);
+    fill(&mut cpu, 0x33);
+    // Off: the RGB monitor's two colours, whatever the program set.
+    composite(&mut cpu, CompositeMode::Off, CompositeEra::Old);
+    assert_eq!(pixel(&picture(&mut cpu), 322, 200), (0xFF, 0xFF, 0xFF));
+    // On: composite with the BIOS's mode 6 too, where the missing burst
+    // makes the patterns grey.
+    composite(&mut cpu, CompositeMode::On, CompositeEra::Old);
+    cpu.bus.io_write(0x3D8, 0x1E);
+    let (r, g, b) = middle(&mut cpu);
+    assert!(r == g && g == b && r > 40 && r < 220, "grey: {:?}", (r, g, b));
+    // The two revisions of the card mix the colours differently.
+    cpu.bus.io_write(0x3D8, 0x1A);
+    let old = middle(&mut cpu);
+    composite(&mut cpu, CompositeMode::On, CompositeEra::New);
+    assert_ne!(old, middle(&mut cpu));
+    // Only a CGA has the composite output.
+    let mut vga = Cpu::new(PathBuf::from("."));
+    int10::set_mode(&mut vga, 0x06);
+    vga.bus.vga.set_composite(CompositeSettings { mode: CompositeMode::On, era: CompositeEra::Old });
+    assert!(!vga.bus.vga.composite_active());
+}
+
+#[test]
+fn composite_320x200_blends_the_palette() {
+    let mut cpu = cga(0x04);
+    // Palette 1 (cyan, magenta, white); 01 pixels: cyan on an RGB monitor.
+    fill(&mut cpu, 0x55);
+    let rgb = middle(&mut cpu);
+    assert_eq!(rgb, (0x55, 0xFF, 0xFF));
+    // Auto leaves 320x200 to the RGB monitor; on, it is composite.
+    composite(&mut cpu, CompositeMode::On, CompositeEra::Old);
+    let decoded = middle(&mut cpu);
+    assert_ne!(decoded, rgb);
+    assert!(saturated(decoded), "{:?}", decoded);
+    // Mode 5 has no colour burst: grey.
+    cpu.bus.io_write(0x3D8, 0x0E);
+    let (r, g, b) = middle(&mut cpu);
+    assert!(r == g && g == b, "{:?}", (r, g, b));
 }

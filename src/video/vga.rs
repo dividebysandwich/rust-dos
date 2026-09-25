@@ -84,6 +84,11 @@ pub struct VgaCard {
     /// with `machine=cga` (see cga.rs).
     pub cga_mode: u8,
     pub cga_color: u8,
+    /// How the CGA's monitor shows its graphics (`composite`,
+    /// `composite_era`), and the composite decoder for the Mode Control
+    /// register's colour burst, while one is needed (see composite.rs).
+    pub composite: super::composite::CompositeSettings,
+    pub(super) composite_decoder: Option<Box<super::composite::Decoder>>,
 
     /// The EGA's configuration switches (SW1-SW4, bits 0-3), which Input
     /// Status 0 (3C2h) reads one at a time.
@@ -155,6 +160,8 @@ impl VgaCard {
             blink_on: true,
             cga_mode: 0x29,
             cga_color: 0x30,
+            composite: super::composite::CompositeSettings::default(),
+            composite_decoder: None,
             switches: 0b0110,
             herc_mode: 0x29,
             herc_config: 0,

@@ -5,6 +5,7 @@
 //! It is the same `VgaCard`, answering as a CGA does.
 
 use super::VideoMode;
+use super::composite::{CompositeMode, CompositeSettings, Decoder};
 use super::crt::CrtTiming;
 use super::palette::rgbi;
 use super::vga::VgaCard;
@@ -55,7 +56,49 @@ impl VgaCard {
     /// A register that changes the picture or its timing changed.
     fn cga_changed(&mut self) {
         self.invalidate_timing();
+        self.refresh_composite();
         self.mark_dirty_full();
+    }
+
+    /// Change how the monitor shows the graphics (`composite`).
+    pub fn set_composite(&mut self, settings: CompositeSettings) {
+        if settings != self.composite {
+            self.composite = settings;
+            self.refresh_composite();
+            self.mark_dirty_full();
+        }
+    }
+
+    /// Whether the graphics go through the composite decoder: a CGA in a
+    /// graphics mode with `composite=on`, or with `auto` in 640x200 with
+    /// the colour burst, the mode composite programs draw artifact colours
+    /// in (the BIOS's mode 6 turns the burst off).
+    pub fn composite_active(&self) -> bool {
+        let mode = self.cga_mode;
+        self.adapter == super::adapter::Adapter::Cga
+            && mode & 0x02 != 0
+            && match self.composite.mode {
+                CompositeMode::On => true,
+                CompositeMode::Auto => mode & 0x10 != 0 && mode & 0x04 == 0,
+                CompositeMode::Off => false,
+            }
+    }
+
+    /// Have the decoder for the colour burst and revision in place while
+    /// composite is on.
+    fn refresh_composite(&mut self) {
+        if !self.composite_active() {
+            return;
+        }
+        let bw = self.cga_mode & 0x04 != 0;
+        if !self.composite_decoder.as_ref().is_some_and(|d| d.is_for(self.composite.era, bw)) {
+            self.composite_decoder = Some(Box::new(Decoder::new(self.composite.era, bw)));
+        }
+    }
+
+    /// The composite decoder, while the graphics go through it.
+    pub fn composite_decoder(&self) -> Option<&Decoder> {
+        if self.composite_active() { self.composite_decoder.as_deref() } else { None }
     }
 
     pub(super) fn cga_io_read(&mut self, port: u16) -> u8 {
@@ -139,6 +182,11 @@ impl VgaCard {
     /// the colour burst (Mode Control bit 2) an RGB monitor shows the third
     /// palette: cyan, red and white.
     pub fn cga_colors_4(&self) -> [(u8, u8, u8); 4] {
+        self.cga_indices_4().map(rgb)
+    }
+
+    /// The RGBI colours (0-15) behind `cga_colors_4`.
+    pub fn cga_indices_4(&self) -> [u8; 4] {
         let select = self.cga_color;
         let bright = if select & 0x10 != 0 { 0x08 } else { 0 };
         let colors = if self.cga_mode & 0x04 != 0 {
@@ -148,7 +196,7 @@ impl VgaCard {
         } else {
             [2, 4, 6]
         };
-        [rgb(select & 0x0F), rgb(colors[0] | bright), rgb(colors[1] | bright), rgb(colors[2] | bright)]
+        [select & 0x0F, colors[0] | bright, colors[1] | bright, colors[2] | bright]
     }
 
     /// The two colours of the 640x200 mode: black, and the Color Select

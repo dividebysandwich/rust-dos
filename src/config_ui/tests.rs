@@ -606,7 +606,10 @@ fn a_browser_gets_what_it_has() {
 
     // No window to scale or make fullscreen, no SoundFont to pick.
     ui.show_page(Page::Display);
-    assert_eq!(ui.items(), [Item::Aspect, Item::Filter, Item::Shader, Item::Monochrome]);
+    assert_eq!(
+        ui.items(),
+        [Item::Aspect, Item::Filter, Item::Shader, Item::Monochrome, Item::Composite, Item::CompositeEra]
+    );
     keys(&mut ui, &mut host, &[Right]);
     assert!(host.applied.last().unwrap().aspect);
     ui.show_page(Page::Sound);

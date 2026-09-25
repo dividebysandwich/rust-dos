@@ -166,7 +166,7 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives | Page::Games | Page::Cheats | Page::Stats => &[],
-            Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
+            Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome, Composite, CompositeEra],
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, CaptureDir,
@@ -238,6 +238,9 @@ enum Item {
     Filter,
     Shader,
     Monochrome,
+    /// The CGA's composite monitor, and which CGA makes the signal.
+    Composite,
+    CompositeEra,
     Cycles,
     /// What runs the instructions: interpreter or dynamic recompiler.
     Core,
@@ -357,6 +360,8 @@ impl Item {
             Filter => "Scaling filter",
             Shader => "CRT shader",
             Monochrome => "Monochrome monitor",
+            Composite => "CGA composite colour",
+            CompositeEra => "  CGA revision",
             Cycles => "CPU speed (cycles)",
             Core => "CPU core",
             Cpu => "Processor",
@@ -413,7 +418,7 @@ impl Item {
     fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Filter | Shader | Cycles | Core => Applies::Now,
+            Scale | Fullscreen | Aspect | Filter | Shader | Composite | CompositeEra | Cycles | Core => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus => Applies::Now,
@@ -445,6 +450,8 @@ impl Item {
             .to_string(),
             Shader => s.shader.describe().to_string(),
             Monochrome => s.monochrome.describe().to_string(),
+            Composite => s.composite.mode.describe().to_string(),
+            CompositeEra => s.composite.era.describe().to_string(),
             Cycles => match s.cycles {
                 CpuSpeed::Max => "max".to_string(),
                 CpuSpeed::Fixed(n) => format!("{} per ms", n),
@@ -532,6 +539,12 @@ impl Item {
             Filter => s.filter = cycle(&[crate::config::Filter::Nearest, crate::config::Filter::Linear], s.filter, dir),
             Shader => s.shader = cycle(&crate::video::shader::Shader::ALL, s.shader, dir),
             Monochrome => s.monochrome = cycle(&crate::video::mono::Monochrome::ALL, s.monochrome, dir),
+            Composite => {
+                s.composite.mode = cycle(&crate::video::composite::CompositeMode::ALL, s.composite.mode, dir)
+            }
+            CompositeEra => {
+                s.composite.era = cycle(&crate::video::composite::CompositeEra::ALL, s.composite.era, dir)
+            }
             Cycles => {
                 let current = match s.cycles {
                     CpuSpeed::Max => u32::MAX,

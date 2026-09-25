@@ -4,6 +4,7 @@ use crate::cpu::Cpu;
 pub mod adapter;
 pub mod bios;
 pub mod cga;
+pub mod composite;
 pub mod crt;
 pub mod hercules;
 pub mod modes;
@@ -433,6 +434,20 @@ fn cga_start(bus: &Bus) -> Option<usize> {
 /// palette; a CGA from its Color Select register.
 fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
     let Some(start) = cga_start(bus) else { return };
+    if let Some(decoder) = bus.vga.composite_decoder() {
+        // On a composite monitor: each pixel is two of the card's 640
+        // samples a line, and the background is the border too.
+        let indices = bus.vga.cga_indices_4();
+        let border = bus.vga.cga_color & 0x0F;
+        render_cga_composite(canvas, vram, start, decoder, border, |byte, samples| {
+            for p in 0..4 {
+                let color = indices[((byte >> (6 - p * 2)) & 3) as usize];
+                samples[p * 2] = color;
+                samples[p * 2 + 1] = color;
+            }
+        });
+        return;
+    }
     let colors: [(u8, u8, u8); 4] = match bus.vga.adapter {
         adapter::Adapter::Cga => bus.vga.cga_colors_4(),
         _ => std::array::from_fn(|pixel| bus.vga.attribute_rgb(pixel as u8)),
@@ -477,6 +492,18 @@ fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
 /// register's color).
 fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
     let Some(start) = cga_start(bus) else { return };
+    if let Some(decoder) = bus.vga.composite_decoder() {
+        // On a composite monitor: a sample a pixel, in the Color Select
+        // register's colour on black; the artifact colours come from the
+        // patterns.
+        let fg = bus.vga.cga_color & 0x0F;
+        render_cga_composite(canvas, vram, start, decoder, 0, |byte, samples| {
+            for (p, sample) in samples.iter_mut().enumerate() {
+                *sample = if (byte >> (7 - p)) & 1 != 0 { fg } else { 0 };
+            }
+        });
+        return;
+    }
     let [bg, fg] = match bus.vga.adapter {
         adapter::Adapter::Cga => bus.vga.cga_colors_2(),
         _ => [bus.vga.attribute_rgb(0), bus.vga.attribute_rgb(1)],
@@ -507,6 +534,37 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
                         canvas[idx + 2] = rgb.2;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// The CGA's graphics through the composite decoder: each of the 200 lines
+/// (interleaved like modes 4 to 6) as the 640 samples `samples` makes of
+/// each of its 80 bytes (8 a byte), decoded to 640 pixels and drawn twice
+/// for 400 lines.
+fn render_cga_composite(
+    canvas: &mut [u8],
+    vram: &[u8],
+    start: usize,
+    decoder: &composite::Decoder,
+    border: u8,
+    samples: impl Fn(u8, &mut [u8]),
+) {
+    let width = SCREEN_WIDTH as usize;
+    let mut line = [0u8; 640];
+    let mut rgb = [0u8; 640 * 3];
+    for y in 0..200 {
+        let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
+        for byte_idx in 0..80 {
+            let byte = vram[bank_offset + ((y / 2 * 80 + start + byte_idx) & 0x1FFF)];
+            samples(byte, &mut line[byte_idx * 8..byte_idx * 8 + 8]);
+        }
+        decoder.decode_line(&line, border, &mut rgb);
+        for dy in 0..2 {
+            let row = (y * 2 + dy) * width * 3;
+            if row + rgb.len() <= canvas.len() {
+                canvas[row..row + rgb.len()].copy_from_slice(&rgb);
             }
         }
     }

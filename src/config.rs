@@ -19,6 +19,7 @@ use crate::mount::{MountSpec, contract_home, expand_host_path, mount_spec_value,
 use crate::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
 use crate::timer::CpuSpeed;
 use crate::video::adapter::{Adapter, VideoSetup};
+use crate::video::composite::{CompositeEra, CompositeMode, CompositeSettings};
 use crate::video::mono::Monochrome;
 use crate::video::shader::Shader;
 use std::fs::{self, OpenOptions};
@@ -93,6 +94,9 @@ pub struct Config {
     pub shader: Option<Shader>,
     /// A monochrome monitor's phosphor (`monochrome`).
     pub monochrome: Option<Monochrome>,
+    /// The CGA's composite monitor (`composite`, `composite_era`).
+    pub composite: Option<CompositeMode>,
+    pub composite_era: Option<CompositeEra>,
     /// The display adapter (`machine`).
     pub machine: Option<Adapter>,
     /// Where screenshots and recordings go (`capture_dir`).
@@ -539,6 +543,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(mono) => config.monochrome = Some(mono),
                             None => warn(format!("invalid monochrome '{}' (off, white, amber or green)", value)),
                         },
+                        "composite" => match CompositeMode::parse(value) {
+                            Some(mode) => config.composite = Some(mode),
+                            None => warn(format!("invalid composite '{}' (auto, on or off)", value)),
+                        },
+                        "composite_era" => match CompositeEra::parse(value) {
+                            Some(era) => config.composite_era = Some(era),
+                            None => warn(format!("invalid composite_era '{}' (old or new)", value)),
+                        },
                         "cycles" => match CpuSpeed::parse(value) {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
@@ -757,6 +769,8 @@ pub struct Settings {
     pub filter: Filter,
     pub shader: Shader,
     pub monochrome: Monochrome,
+    /// The CGA's composite monitor.
+    pub composite: CompositeSettings,
     pub machine: Adapter,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
@@ -785,6 +799,7 @@ impl Default for Settings {
             filter: Filter::Nearest,
             shader: Shader::None,
             monochrome: Monochrome::Off,
+            composite: CompositeSettings::default(),
             machine: Adapter::Svga,
             capture_dir: PathBuf::from("capture"),
             cycles: CpuSpeed::Max,
@@ -822,6 +837,10 @@ impl Settings {
             filter: config.filter.unwrap_or(default.filter),
             shader: config.shader.unwrap_or(default.shader),
             monochrome: config.monochrome.unwrap_or(default.monochrome),
+            composite: CompositeSettings {
+                mode: config.composite.unwrap_or(default.composite.mode),
+                era: config.composite_era.unwrap_or(default.composite.era),
+            },
             machine: config.machine.unwrap_or(default.machine),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             cycles: config.cycles.unwrap_or(default.cycles),
@@ -854,6 +873,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "filter", Some(settings.filter.name().to_string())),
         (Emulator, "shader", Some(settings.shader.name().to_string())),
         (Emulator, "monochrome", Some(settings.monochrome.name().to_string())),
+        (Emulator, "composite", Some(settings.composite.mode.name().to_string())),
+        (Emulator, "composite_era", Some(settings.composite.era.name().to_string())),
         (Emulator, "machine", Some(settings.machine.name().to_string())),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (
@@ -1503,6 +1524,17 @@ mod tests {
     }
 
     #[test]
+    fn composite_settings() {
+        let config = parse("[emulator]\ncomposite=on\ncomposite_era=NEW\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.composite, CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New });
+        let config = parse("[emulator]\ncomposite=rgb\ncomposite_era=1985\n", Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config).composite, CompositeSettings::default());
+    }
+
+    #[test]
     fn mixer_settings() {
         let text = "[mixer]\nmaster=80\nFM = 150%\ncdaudio=0\nsb=300\nbass=10\n";
         let config = parse(text, Path::new("/cfg"), None);
@@ -1566,6 +1598,7 @@ mod tests {
             filter: Filter::Linear,
             shader: Shader::Curved,
             monochrome: Monochrome::Green,
+            composite: CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New },
             machine: Adapter::Vga,
             capture_dir: PathBuf::from("/home/u/dos captures"),
             cycles: CpuSpeed::Fixed(3000),

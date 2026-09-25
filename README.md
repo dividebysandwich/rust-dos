@@ -28,7 +28,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
   both digital audio and music with built-in patch set.
 * Covox Speech Thing and Disney Sound Source on the parallel port
-* Graphics: text, CGA, EGA and VGA modes with Mode X support
+* Graphics: text, CGA, EGA and VGA modes with Mode X support, and the
+  CGA's composite artifact colours
 * VESA VBE 2.0: 256-color, 15/16-bit and 32-bit modes from 320x200 to
   1024x768 with 4 MB of video memory, bank switching and linear frame
   buffer.
@@ -107,6 +108,18 @@ D:
     monochrome text mode 7; an EGA has IBM's Monochrome Display, and only
     modes 7 and 0Fh. On a CGA it is the look alone, and a Hercules card is
     always monochrome.
+  * `composite` shows a CGA's graphics (`machine=cga`) as a composite
+    monitor or TV did: fine patterns of pixels come out as colours, the
+    "artifact colours" that King's Quest, the Ultima games, Sierra's AGI
+    games and many more have a composite option for, 16 of them at
+    640x200. `auto` (the default) does so when a program turns on 640x200
+    graphics with the colour burst, which only programs for composite
+    monitors do; `on` always does in the graphics modes (at 320x200 the
+    palette's colours blend into others); `off` shows the RGB monitor's
+    colours. `composite_era` is the card: `old` (the default, IBM's first
+    CGA, which the classic games were drawn for) or `new`. The decoder is
+    reenigne's model of the CGA's composite output, as DOSBox Staging has
+    it. It applies at once.
   * `cycles` is the CPU speed in instructions per millisecond. `max`, the
     default, runs as fast as the host keeps up with in real time. Use a
     number such as `3000` for old games that run too fast. `--cycles`

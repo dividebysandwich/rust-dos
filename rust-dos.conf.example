@@ -37,6 +37,17 @@
 # (machine), programs see the monochrome monitor too, from the DOS prompt
 # on, and the prompt is the monochrome text mode 7.
 #monochrome=off
+# The CGA's composite monitor (machine=cga): the colours a composite
+# monitor or TV makes of fine patterns of pixels, which King's Quest, the
+# Ultima games and many more drew their graphics with. auto (the default)
+# decodes the picture as a composite monitor does when a program turns on
+# 640x200 graphics with the colour burst, which only programs for
+# composite monitors do; on always does in the graphics modes; off shows
+# the RGB monitor's colours.
+#composite=auto
+# The CGA that makes the composite signal: old (IBM's first cards, which
+# the classic games were drawn for) or new (from 1984 on).
+#composite_era=old
 # CPU speed in instructions per millisecond, or max to run as fast as the
 # host keeps up with in real time. Lower it for old games that run too
 # fast. --cycles overrides it.

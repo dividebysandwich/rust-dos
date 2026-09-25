@@ -207,6 +207,7 @@ fn main() -> Result<(), String> {
     cpu.bus.set_disk_settings(settings.disk);
     cpu.bus.set_mixer(settings.mixer);
     cpu.bus.set_joystick(settings.joystick);
+    cpu.bus.vga.set_composite(settings.composite);
     if let Err(e) = cpu.set_upper_memory(settings.ems, settings.umb) {
         config_warning(&mut cpu, &e);
     }
@@ -1146,6 +1147,9 @@ impl Host for MainHost<'_, '_> {
         }
         if new.joystick != old.joystick {
             self.cpu.bus.set_joystick(new.joystick);
+        }
+        if new.composite != old.composite {
+            self.cpu.bus.vga.set_composite(new.composite);
         }
         if !self.machine.differs(new) {
             return Ok(None);
