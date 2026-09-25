@@ -801,7 +801,13 @@ impl Gen<'_> {
     }
 
     /// SF, ZF and PF of the result in W0 (`bits` wide) into W5.
+    ///
+    /// The bitfield instructions' `lsb` operands are single names
+    /// throughout: dynasm pastes a run-time `lsb` into its range check
+    /// (`31 - lsb`) as it is, so `bits - 1` there would check `31 - bits -
+    /// 1`, which underflows at 32 bits (a panic in debug builds).
     fn szp(&mut self, bits: u32) {
+        let sign = bits - 1;
         dynasm!(self.ops
             ; .arch aarch64
             ; and w6, w0, 0xFF
@@ -810,7 +816,7 @@ impl Gen<'_> {
             ; cmp w0, 0
             ; cset w6, eq
             ; orr w5, w5, w6, lsl 6
-            ; ubfx w6, w0, bits - 1, 1
+            ; ubfx w6, w0, sign, 1
             ; orr w5, w5, w6, lsl 7
         );
     }
@@ -842,6 +848,7 @@ impl Gen<'_> {
     /// zero-extended operands), into W5; W0 becomes the result.
     fn arith_flags(&mut self, size: u8, sub: bool) {
         let bits = size as u32 * 8;
+        let sign = bits - 1;
         if sub {
             // A borrow makes the 64-bit difference negative.
             dynasm!(self.ops ; .arch aarch64 ; lsr x1, x0, 63);
@@ -859,7 +866,7 @@ impl Gen<'_> {
         }
         dynasm!(self.ops
             ; .arch aarch64
-            ; ubfx w2, w2, bits - 1, 1
+            ; ubfx w2, w2, sign, 1
             ; eor w3, w10, w11
             ; eor w3, w3, w0
             ; ubfx w3, w3, 4, 1
@@ -961,6 +968,10 @@ impl Gen<'_> {
     fn shift(&mut self, op: ShiftOp, size: u8, t: T, count: u8) {
         let bits = size as u32 * 8;
         let c = count as u32;
+        // The sign bit, the one below it, and the last bit a shift left or
+        // right moves out.
+        let (sign, below) = (bits - 1, bits - 2);
+        let (out_left, out_right) = (bits - c, c - 1);
         dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(t)));
         match op {
             ShiftOp::Shl => {
@@ -968,10 +979,10 @@ impl Gen<'_> {
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; lsl w0, w10, c
-                    ; ubfx w1, w10, bits - c, 1
+                    ; ubfx w1, w10, out_left, 1
                 );
                 self.cut(size);
-                dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, bits - 1, 1 ; eor w2, w2, w1);
+                dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; eor w2, w2, w1);
                 self.szp(bits);
                 dynasm!(self.ops
                     ; .arch aarch64
@@ -987,8 +998,8 @@ impl Gen<'_> {
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; lsr w0, w10, c
-                    ; ubfx w1, w10, c - 1, 1
-                    ; ubfx w2, w0, bits - 2, 1
+                    ; ubfx w1, w10, out_right, 1
+                    ; ubfx w2, w0, below, 1
                 );
                 self.szp(bits);
                 dynasm!(self.ops
@@ -1009,7 +1020,7 @@ impl Gen<'_> {
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; asr w0, w10, c
-                    ; ubfx w1, w10, c - 1, 1
+                    ; ubfx w1, w10, out_right, 1
                 );
                 self.cut(size);
                 self.szp(bits);
@@ -1032,15 +1043,15 @@ impl Gen<'_> {
                     dynasm!(self.ops
                         ; .arch aarch64
                         ; and w1, w0, 1
-                        ; ubfx w2, w0, bits - 1, 1
+                        ; ubfx w2, w0, sign, 1
                         ; eor w2, w2, w1
                     );
                 } else {
                     // CF: the result's top bit; OF: its top two bits differ.
                     dynasm!(self.ops
                         ; .arch aarch64
-                        ; ubfx w1, w0, bits - 1, 1
-                        ; ubfx w2, w0, bits - 2, 1
+                        ; ubfx w1, w0, sign, 1
+                        ; ubfx w2, w0, below, 1
                         ; eor w2, w2, w1
                     );
                 }
@@ -1058,6 +1069,7 @@ impl Gen<'_> {
         let bits = size as u32 * 8;
         let c = count as u32;
         let back = bits - c;
+        let (sign, below, out_right) = (bits - 1, bits - 2, c - 1);
         dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(dst)) ; mov w11, W(r(src)));
         if left {
             // dest:src shifted left; CF is the last bit out of dest.
@@ -1075,16 +1087,16 @@ impl Gen<'_> {
                 ; lsr w2, w10, c
                 ; lsl w3, w11, back
                 ; orr w0, w2, w3
-                ; ubfx w1, w10, c - 1, 1
+                ; ubfx w1, w10, out_right, 1
             );
         }
         self.cut(size);
         if left {
             // OF = the result's sign ^ CF.
-            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, bits - 1, 1 ; eor w2, w2, w1);
+            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; eor w2, w2, w1);
         } else {
             // OF = the result's top two bits differ.
-            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, bits - 1, 1 ; ubfx w3, w0, bits - 2, 1 ; eor w2, w2, w3);
+            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; ubfx w3, w0, below, 1 ; eor w2, w2, w3);
         }
         self.szp(bits);
         dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, w1 ; orr w5, w5, w2, lsl 11);
