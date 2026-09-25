@@ -2,17 +2,16 @@ use crate::bus::Bus;
 
 /// Helper to read a string from memory (DS:DX) until 0x00 (ASCIIZ)
 pub fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
-    let mut curr = addr;
-    let mut chars = Vec::new();
-    loop {
-        let byte = bus.ram()[curr];
-        if byte == 0 {
-            break;
-        }
-        chars.push(byte);
-        curr += 1;
-    }
-    String::from_utf8_lossy(&chars).to_string()
+    String::from_utf8_lossy(&read_asciiz_bytes(bus, addr)).to_string()
+}
+
+/// The bytes of the ASCIIZ string at `addr`, without its 0, as they are:
+/// code page 437 text that `read_asciiz_string` would mangle above 7Fh.
+pub fn read_asciiz_bytes(bus: &Bus, addr: usize) -> Vec<u8> {
+    let ram = bus.ram();
+    let tail = ram.get(addr..).unwrap_or_default();
+    let len = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+    tail[..len].to_vec()
 }
 
 /// Converts a filename pattern (e.g., "*.*", "FILE.TXT") to DOS FCB format (11 bytes).

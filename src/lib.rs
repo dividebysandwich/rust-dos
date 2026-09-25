@@ -13,6 +13,7 @@ pub mod disk;
 pub mod diskimage;
 pub mod diskio;
 pub mod disknoise;
+pub mod dosstr;
 pub mod dma;
 pub mod dsp;
 pub mod dynrec;

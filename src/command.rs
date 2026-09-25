@@ -4,52 +4,71 @@ use crate::mount::{
     IMGMOUNT_USAGE, MOUNT_USAGE, MountCmd, MountSpec, display_host_path, parse_imgmount_command, parse_mount_command,
 };
 use crate::video::{print_cp437, print_string};
-use std::collections::HashMap;
 
 pub trait ShellCommand {
     /// `args` contains everything after the command name (e.g., "FILE.TXT" for "TYPE FILE.TXT")
     fn execute(&self, cpu: &mut Cpu, args: &str);
 }
 
-pub struct CommandDispatcher {
-    registry: HashMap<String, Box<dyn ShellCommand>>,
+/// The built-in commands, by name.
+static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
+    ("DIR", &DirCommand),
+    ("LS", &LsCommand),
+    ("VER", &VerCommand),
+    ("VERSION", &VerCommand),
+    ("TYPE", &TypeCommand),
+    ("CLS", &ClsCommand),
+    ("EXIT", &ExitCommand),
+    ("CD", &CdCommand),
+    ("CHDIR", &CdCommand),
+    ("ECHO", &EchoCommand),
+    ("REM", &RemCommand),
+    ("MOUNT", &MountCommand),
+    ("IMGMOUNT", &ImgMountCommand),
+    ("SET", &SetCommand),
+    ("PATH", &PathCommand),
+    ("DOSCONFIG", &DosConfigCommand),
+    ("LOADHIGH", &LoadHighCommand),
+    ("LH", &LoadHighCommand),
+    ("MIXER", &crate::mixer_command::MixerCommand),
+];
+
+/// The built-in command called `name`, in any case.
+fn builtin(name: &str) -> Option<&'static (dyn ShellCommand + Sync)> {
+    COMMANDS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|&(_, command)| command)
 }
+
+/// The command name at the start of a command line, and the rest of the
+/// line after it, as COMMAND.COM splits them. The name ends at a space or
+/// tab, which the rest leaves out, or at one of `/ = , ;`, which it keeps
+/// (DIR/W, PATH=C:\DOS). A built-in's name also ends at `.`, `\` or `:`,
+/// so CD.., CD\ and ECHO. work, while GAME.EXE and C:\GAME stay a
+/// program's name.
+pub fn split_command(line: &str) -> (&str, &str) {
+    let line = line.trim_start_matches([' ', '\t', ',', ';', '=']);
+    for (i, c) in line.char_indices() {
+        match c {
+            ' ' | '\t' => return (&line[..i], &line[i + 1..]),
+            '/' | '=' | ',' | ';' => return (&line[..i], &line[i..]),
+            '.' | '\\' | ':' if builtin(&line[..i]).is_some() => return (&line[..i], &line[i..]),
+            _ => {}
+        }
+    }
+    (line, "")
+}
+
+/// Runs the built-in commands.
+#[derive(Default)]
+pub struct CommandDispatcher;
 
 impl CommandDispatcher {
     pub fn new() -> Self {
-        let mut dispatcher = Self {
-            registry: HashMap::new(),
-        };
-
-        // Register core commands
-        dispatcher.register("DIR", Box::new(DirCommand));
-        dispatcher.register("LS", Box::new(LsCommand));
-        dispatcher.register("VER", Box::new(VerCommand));
-        dispatcher.register("VERSION", Box::new(VerCommand)); // Alias
-        dispatcher.register("TYPE", Box::new(TypeCommand));
-        dispatcher.register("CLS", Box::new(ClsCommand));
-        dispatcher.register("EXIT", Box::new(ExitCommand));
-        dispatcher.register("CD", Box::new(CdCommand));
-        dispatcher.register("CHDIR", Box::new(CdCommand));
-        dispatcher.register("ECHO", Box::new(EchoCommand));
-        dispatcher.register("MOUNT", Box::new(MountCommand));
-        dispatcher.register("IMGMOUNT", Box::new(ImgMountCommand));
-        dispatcher.register("SET", Box::new(SetCommand));
-        dispatcher.register("PATH", Box::new(PathCommand));
-        dispatcher.register("DOSCONFIG", Box::new(DosConfigCommand));
-        dispatcher.register("LOADHIGH", Box::new(LoadHighCommand));
-        dispatcher.register("LH", Box::new(LoadHighCommand));
-        dispatcher.register("MIXER", Box::new(crate::mixer_command::MixerCommand));
-
-        dispatcher
+        Self
     }
 
-    /// Registers a new command dynamically
-    pub fn register(&mut self, name: &str, command: Box<dyn ShellCommand>) {
-        self.registry.insert(name.to_uppercase(), command);
-    }
-
-    /// Returns true if the command was found and executed, false otherwise.
+    /// Run `command` if it is a built-in, with `args` as `split_command`
+    /// left them. Returns true if the command was found and executed,
+    /// false otherwise.
     pub fn dispatch(&self, cpu: &mut Cpu, command: &str, args: &str) -> bool {
         // "D:" switches the current drive
         if let (Some(drive), "") = parse_drive_prefix(command) {
@@ -67,12 +86,14 @@ impl CommandDispatcher {
                 return true;
             }
         }
-        if let Some(cmd) = self.registry.get(&command.to_uppercase()) {
-            cmd.execute(cpu, args);
-            true
-        } else {
-            false
-        }
+        let Some(cmd) = builtin(command) else {
+            return false;
+        };
+        // ECHO prints its text as it is, spaces and all, which batch files
+        // indent their menus with.
+        let raw = command.eq_ignore_ascii_case("ECHO") || command.eq_ignore_ascii_case("REM");
+        cmd.execute(cpu, if raw { args } else { args.trim() });
+        true
     }
 }
 
@@ -347,17 +368,30 @@ impl ShellCommand for TypeCommand {
         match cpu.bus.disk.file_data(target) {
             Some(file) => match file.read() {
                 Ok(bytes) => {
-                    // DOS formatting: \n -> \r\n
-                    let contents = String::from_utf8_lossy(&bytes);
-                    let dos_text = contents.replace('\n', "\r\n").replace("\r\r\n", "\r\n");
-                    print_string(cpu, &dos_text);
-                    print_string(cpu, "\r\n");
+                    print_cp437(cpu, &type_text(&bytes), 0x07);
+                    if cpu.bus.cursor_x != 0 {
+                        print_string(cpu, "\r\n");
+                    }
                 }
                 Err(_) => print_string(cpu, "Error reading file\r\n"),
             },
             None => print_string(cpu, "File not found\r\n"),
         }
     }
+}
+
+/// A text file as TYPE shows it: up to its end of file mark (^Z), with its
+/// lines ending in CR LF even where the file has LF alone.
+fn type_text(bytes: &[u8]) -> Vec<u8> {
+    let end = bytes.iter().position(|&b| b == 0x1A).unwrap_or(bytes.len());
+    let mut text = Vec::with_capacity(end);
+    for (i, &b) in bytes[..end].iter().enumerate() {
+        if b == b'\n' && (i == 0 || bytes[i - 1] != b'\r') {
+            text.push(b'\r');
+        }
+        text.push(b);
+    }
+    text
 }
 
 struct ClsCommand;
@@ -457,9 +491,16 @@ impl ShellCommand for LoadHighCommand {
     }
 }
 
+/// ECHO [ON|OFF|text]: turn the echo of batch lines on or off, show
+/// whether it is, or print the text. ECHO. (or ECHO: and the like) prints
+/// the text after the dot, an empty line if there is none.
 struct EchoCommand;
 impl ShellCommand for EchoCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
+        if let Some(text) = args.strip_prefix(['.', ':', ',', ';', '=', '\\', '[', ']', '+', '(']) {
+            print_string(cpu, &format!("{}\r\n", text));
+            return;
+        }
         let trimmed = args.trim();
         if trimmed.is_empty() {
             let state = if cpu.batch_echo { "on" } else { "off" };
@@ -472,6 +513,12 @@ impl ShellCommand for EchoCommand {
             _ => print_string(cpu, &format!("{}\r\n", args)),
         }
     }
+}
+
+/// REM: a comment, which does nothing.
+struct RemCommand;
+impl ShellCommand for RemCommand {
+    fn execute(&self, _cpu: &mut Cpu, _args: &str) {}
 }
 
 struct CdCommand;

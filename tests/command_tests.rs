@@ -1,4 +1,4 @@
-use rust_dos::command::CommandDispatcher;
+use rust_dos::command::{CommandDispatcher, split_command};
 use rust_dos::cpu::Cpu;
 use rust_dos::disk::{DriveKind, MountOptions};
 use std::fs;
@@ -22,10 +22,7 @@ fn run(cpu: &mut Cpu, line: &str) -> String {
     }
     cpu.bus.cursor_x = 0;
     cpu.bus.cursor_y = 0;
-    let (command, args) = match line.split_once(' ') {
-        Some((c, a)) => (c, a.trim()),
-        None => (line, ""),
-    };
+    let (command, args) = split_command(line);
     assert!(
         CommandDispatcher::new().dispatch(cpu, command, args),
         "{} is not a built-in",
@@ -327,4 +324,49 @@ fn mixer_noshow_prints_nothing_and_errors_say_why() {
     assert!(!cpu.bus.mixer_changed, "line-out isn't a setting");
     assert_eq!(run(&mut cpu, "MIXER disney 50"), "MIXER: Channel DISNEY is not active");
     assert!(run(&mut cpu, "MIXER /?").starts_with("Displays or changes the sound mixer settings."));
+}
+
+#[test]
+fn command_names_end_where_command_com_ends_them() {
+    assert_eq!(split_command("DIR /W"), ("DIR", "/W"));
+    assert_eq!(split_command("DIR/W"), ("DIR", "/W"));
+    assert_eq!(split_command("cd.."), ("cd", ".."));
+    assert_eq!(split_command("CD\\GAMES"), ("CD", "\\GAMES"));
+    assert_eq!(split_command("ECHO."), ("ECHO", "."));
+    assert_eq!(split_command("echo  two spaces"), ("echo", " two spaces"));
+    assert_eq!(split_command("PATH=C:\\DOS"), ("PATH", "=C:\\DOS"));
+    // Programs keep their dots, backslashes and colons.
+    assert_eq!(split_command("GAME.EXE -x"), ("GAME.EXE", "-x"));
+    assert_eq!(split_command("CDPLAYER.EXE"), ("CDPLAYER.EXE", ""));
+    assert_eq!(split_command("C:\\GAMES\\GO.BAT 1"), ("C:\\GAMES\\GO.BAT", "1"));
+    assert_eq!(split_command("D:"), ("D:", ""));
+    assert_eq!(split_command("  VER"), ("VER", ""));
+}
+
+#[test]
+fn echo_prints_its_text_as_it_is() {
+    let base = scratch("echo", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    assert_eq!(run(&mut cpu, "ECHO    1. Play"), "   1. Play");
+    assert_eq!(run(&mut cpu, "ECHO."), "");
+    assert_eq!(run(&mut cpu, "ECHO.hi"), "hi");
+    assert_eq!(run(&mut cpu, "ECHO"), "ECHO is on");
+    // Code page 437 characters (a box corner and an umlaut) print as they are.
+    run(&mut cpu, "ECHO \u{C9}\u{84}");
+    assert_eq!(&cpu.bus.vga.vram_text[..4], &[0xC9, 0x07, 0x84, 0x07]);
+    assert_eq!(run(&mut cpu, "REM nothing"), "");
+}
+
+#[test]
+fn cd_dot_dot_and_type_stop_at_the_end_of_file_mark() {
+    let base = scratch("cddotdot", &["c/sub"]);
+    fs::write(base.join("c/sub/a.txt"), b"one\ntwo\x1Ajunk").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    run(&mut cpu, "CD SUB");
+    assert_eq!(run(&mut cpu, "CD"), "C:\\SUB");
+    assert_eq!(run(&mut cpu, "TYPE A.TXT"), "one\ntwo");
+    run(&mut cpu, "CD..");
+    assert_eq!(run(&mut cpu, "CD"), "C:\\");
+    run(&mut cpu, "CD\\SUB");
+    assert_eq!(run(&mut cpu, "CD"), "C:\\SUB");
 }

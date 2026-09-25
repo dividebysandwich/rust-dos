@@ -9,7 +9,7 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 use crate::bus::GEN_SHIFT;
-use crate::command::CommandDispatcher;
+use crate::command::{CommandDispatcher, split_command};
 use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
 use crate::dynrec::{DynState, Run};
 use crate::instr_cache::InstrCache;
@@ -413,17 +413,20 @@ fn dispatch_command(cpu: &mut Cpu, cmd: &str) {
     cpu.bus
         .log_string(&format!("[MAIN] Processing Command: {}", cmd));
 
-    let (command, args) = match cmd.split_once(' ') {
-        Some((c, a)) => (c, a.trim()),
-        None => (cmd, ""),
-    };
+    // A leading '@' (which hides a batch line's echo) means nothing here.
+    let cmd = cmd.trim_start();
+    let cmd = cmd.strip_prefix('@').unwrap_or(cmd);
+    let (command, args) = split_command(cmd);
+    if command.is_empty() {
+        return;
+    }
 
     if CommandDispatcher::new().dispatch(cpu, command, args) {
         // Built-in command executed. The shell continues.
         return;
     }
 
-    if !run_program(cpu, command, args, false) {
+    if !run_program(cpu, command, args.trim(), false) {
         crate::video::print_string(cpu, "Bad command or file name.\r\n");
     }
 }

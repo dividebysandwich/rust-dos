@@ -1,6 +1,7 @@
 use crate::cpu::Cpu;
 use crate::disk::{DiskController, drive_letter};
-use crate::interrupts::utils::read_asciiz_string;
+use crate::dosstr;
+use crate::interrupts::utils::read_asciiz_bytes;
 use crate::video;
 
 /// Private BOP vector the shell uses to hand a typed line to the emulator.
@@ -203,7 +204,7 @@ pub fn edit_key(cpu: &mut Cpu) {
             (0x00 | 0xE0, 0x50) => cpu.shell_history.newer(),
             _ => None,
         }
-        .map(|l| l.bytes().collect()),
+        .map(dosstr::to_bytes),
     };
     let Some(mut line) = line else { return };
     line.truncate(MAX_LINE);
@@ -268,7 +269,7 @@ fn complete(cpu: &mut Cpu, forward: bool) -> Option<Vec<u8>> {
         }
     };
     let mut line = typed[..completion.start].to_vec();
-    line.extend(completion.names.get(completion.index)?.bytes());
+    line.extend(dosstr::to_bytes(completion.names.get(completion.index)?));
     line.truncate(MAX_LINE);
     completion.line = line.clone();
     cpu.shell_completion = Some(completion);
@@ -283,7 +284,7 @@ fn completion_names(cpu: &Cpu, typed: &[u8], word: usize) -> Vec<String> {
     let command = typed.split(|&b| b == b' ').find(|w| !w.is_empty()).unwrap_or_default();
     let cd = word > 0 && (command.eq_ignore_ascii_case(b"CD") || command.eq_ignore_ascii_case(b"CHDIR"));
     // "GA" looks for "GA*.*", "GAME.E" for "GAME.E*".
-    let name = String::from_utf8_lossy(&typed[word..]);
+    let name = dosstr::from_bytes(&typed[word..]);
     let mask = if name.rsplit(['\\', '/', ':']).next().is_some_and(|n| n.contains('.')) {
         format!("{}*", name)
     } else {
@@ -321,20 +322,20 @@ pub fn handle_command_bop(cpu: &mut Cpu) {
     cpu.bus.keyboard_buffer.clear();
     cpu.con_pending_scan = None;
 
-    // Read Command from DS:DX (set by the shell code)
+    // Read Command from DS:DX (set by the shell code): the typed
+    // characters, code page 437 ones included, without control characters.
     let phys_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-    let raw_cmd = read_asciiz_string(&cpu.bus, phys_addr);
-
-    // Clean String
-    let mut clean_chars = Vec::new();
-    for c in raw_cmd.chars() {
-        if c == '\x08' {
-            clean_chars.pop();
-        } else if c.is_ascii_graphic() || c == ' ' {
-            clean_chars.push(c);
+    let mut clean = Vec::new();
+    for b in read_asciiz_bytes(&cpu.bus, phys_addr) {
+        match b {
+            0x08 => {
+                clean.pop();
+            }
+            0x20..=0x7E | 0x80..=0xFF => clean.push(b),
+            _ => {}
         }
     }
-    let clean_cmd: String = clean_chars.into_iter().collect();
+    let clean_cmd = dosstr::from_bytes(&clean);
     cpu.shell_history.push(&clean_cmd);
     cpu.shell_completion = None;
 

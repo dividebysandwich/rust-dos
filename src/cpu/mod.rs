@@ -1080,9 +1080,9 @@ impl Cpu {
     pub fn environment_block(&self, program_path: &str) -> Vec<u8> {
         let mut block = Vec::new();
         for (name, value) in &self.environment {
-            block.extend_from_slice(name.as_bytes());
+            block.extend(crate::dosstr::to_bytes(name));
             block.push(b'=');
-            block.extend_from_slice(value.as_bytes());
+            block.extend(crate::dosstr::to_bytes(value));
             block.push(0);
         }
         if self.environment.is_empty() {
@@ -1102,7 +1102,7 @@ impl Cpu {
         let mut tail = Vec::new();
         if !args.is_empty() {
             tail.push(b' ');
-            tail.extend(args.bytes().take(125));
+            tail.extend(crate::dosstr::to_bytes(args).into_iter().take(125));
         }
         let psp_phys = self.get_physical_addr(psp, 0);
         self.bus.write_8(psp_phys + 0x80, tail.len() as u8);

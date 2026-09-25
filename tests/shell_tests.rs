@@ -412,3 +412,15 @@ fn a_recalled_line_that_wrapped_is_erased_whole() {
     let at = rows.iter().rposition(|r| r == "C:\\>ab").expect("the recalled line");
     assert_eq!(rows[at + 1], "", "{:?}", &rows[..at + 2]);
 }
+
+#[test]
+fn code_page_437_characters_reach_the_command_line() {
+    let base = scratch("cp437", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    // "echo ä" with the umlaut as its code page 437 byte, 84h.
+    for key in [b'e', b'c', b'h', b'o', b' ', 0x84, b'\r'] {
+        cpu.bus.keyboard_buffer.push_back(key as u16);
+    }
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo \u{84}"));
+}
