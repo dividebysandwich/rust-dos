@@ -1110,8 +1110,42 @@ fn set_drive(lines: &mut Vec<String>, drive: u8, spec: Option<&MountSpec>, home:
     }
 }
 
+/// Whether a line of `lines` sets `key` in `section`.
+fn has_key(lines: &[String], section: Section, key: &str) -> bool {
+    let setting = Line::Setting(key.to_string());
+    classify(lines).into_iter().any(|(s, line)| s == section && line == setting)
+}
+
 /// A change to `[drives]`: the drive's new mount, or None for no drive.
 pub type DriveChange = (u8, Option<MountSpec>);
+
+/// `original` with `write` done to its lines and the drive changes written
+/// into it, keeping its byte order mark and line ends.
+fn edit_text(
+    original: &str,
+    drives: &[DriveChange],
+    home: Option<&Path>,
+    write: impl FnOnce(&mut Vec<String>),
+) -> String {
+    let (bom, text) = match original.strip_prefix('\u{FEFF}') {
+        Some(rest) => ("\u{FEFF}", rest),
+        None => ("", original),
+    };
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let final_newline = text.is_empty() || text.ends_with('\n');
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+
+    write(&mut lines);
+    for (drive, spec) in drives {
+        set_drive(&mut lines, *drive, spec.as_ref(), home);
+    }
+
+    let mut out = format!("{}{}", bom, lines.join(newline));
+    if final_newline && !lines.is_empty() {
+        out.push_str(newline);
+    }
+    out
+}
 
 /// `original` with what changed from `baseline` to `settings`, and the
 /// drive changes, written into it. Everything else in the file (comments,
@@ -1124,47 +1158,77 @@ pub fn update_text(
     drives: &[DriveChange],
     home: Option<&Path>,
 ) -> String {
-    let (bom, text) = match original.strip_prefix('\u{FEFF}') {
-        Some(rest) => ("\u{FEFF}", rest),
-        None => ("", original),
-    };
-    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let final_newline = text.is_empty() || text.ends_with('\n');
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-
-    let before = entries(baseline, home);
-    for ((section, key, value), (_, _, old)) in entries(settings, home).into_iter().zip(before) {
-        if value != old {
-            set_key(&mut lines, section, key, value.as_deref());
+    edit_text(original, drives, home, |lines| {
+        let before = entries(baseline, home);
+        for ((section, key, value), (_, _, old)) in entries(settings, home).into_iter().zip(before) {
+            if value != old {
+                set_key(lines, section, key, value.as_deref());
+            }
         }
-    }
-    for (drive, spec) in drives {
-        set_drive(&mut lines, *drive, spec.as_ref(), home);
-    }
-
-    let mut out = format!("{}{}", bom, lines.join(newline));
-    if final_newline && !lines.is_empty() {
-        out.push_str(newline);
-    }
-    out
+    })
 }
 
-/// Save what changed from `baseline` to `settings`, and the drive changes,
-/// into the configuration file at `path` (see `update_text`). The file is
-/// replaced in one step, so a failed write leaves the old one.
+/// `original`, the text of a configuration file whose relative paths are
+/// from `base_dir`, with every setting in it: what changed from `baseline`
+/// to `settings` is written as `update_text` does, and each setting the
+/// file has no line for yet is added with the value the file stood for
+/// without it, the default. So the lines already there that didn't change,
+/// and the command-line options that stand in for them, stay as they are.
+pub fn complete_text(
+    original: &str,
+    base_dir: &Path,
+    baseline: &Settings,
+    settings: &Settings,
+    drives: &[DriveChange],
+    home: Option<&Path>,
+) -> String {
+    let file = Settings::from_config(&parse(original, base_dir, home));
+    edit_text(original, drives, home, |lines| {
+        let before = entries(baseline, home).into_iter().zip(entries(&file, home));
+        for ((section, key, value), ((_, _, old), (_, _, in_file))) in entries(settings, home).into_iter().zip(before) {
+            if value != old {
+                set_key(lines, section, key, value.as_deref());
+            } else if !has_key(lines, section, key) {
+                set_key(lines, section, key, in_file.as_deref());
+            }
+        }
+    })
+}
+
+/// What `save` writes of the settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Saving {
+    /// Every setting (`complete_text`): the configuration file.
+    All,
+    /// What changed (`update_text`): a game profile, which has only the
+    /// game's own settings.
+    Changes,
+}
+
+/// Save the settings, as `saving` says, and the drive changes into the
+/// configuration file at `path`. The file is replaced in one step, so a
+/// failed write leaves the old one.
 pub fn save(
     path: &Path,
     baseline: &Settings,
     settings: &Settings,
     drives: &[DriveChange],
     home: Option<&Path>,
+    saving: Saving,
 ) -> Result<(), String> {
     let original = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
         Err(e) => return Err(format!("cannot read {}: {}", path.display(), e)),
     };
-    let text = update_text(&original, baseline, settings, drives, home);
+    let text = match saving {
+        Saving::All => {
+            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            let base_dir = absolute.parent().unwrap_or(Path::new(""));
+            complete_text(&original, base_dir, baseline, settings, drives, home)
+        }
+        Saving::Changes => update_text(&original, baseline, settings, drives, home),
+    };
     // Write through a symbolic link rather than replacing it, and keep the
     // file's permissions.
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1755,14 +1819,57 @@ mod tests {
         fs::write(&path, "# my settings\n[emulator]\nscale=2\n").unwrap();
         let before = Settings { scale: 2, ..Settings::default() };
         let settings = Settings { scale: 3, ..Settings::default() };
-        save(&path, &before, &settings, &[], None).unwrap();
+        save(&path, &before, &settings, &[], None, Saving::Changes).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "# my settings\n[emulator]\nscale=3\n");
         assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
 
         // A file that has gone missing starts over from the template.
         fs::remove_file(&path).unwrap();
-        save(&path, &before, &settings, &[], None).unwrap();
+        save(&path, &before, &settings, &[], None, Saving::Changes).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("#scale=2\nscale=3\n"));
+
+        // All of them: the file gets every setting, and parses back to them.
+        fs::write(&path, "# my settings\n[emulator]\nscale=2\n").unwrap();
+        save(&path, &before, &settings, &[], None, Saving::All).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# my settings\n[emulator]\nscale=3\nfullscreen=false\n"), "{}", text);
+        assert!(text.contains("\n[mixer]\nmaster=100\n"), "{}", text);
+        assert_eq!(Settings::from_config(&parse(&text, &base, None)), settings);
+    }
+
+    #[test]
+    fn saving_all_fills_in_every_setting() {
+        let home = Path::new("/home/u");
+        let text = "[emulator]\nscale = 2\ncycles=max\n[sound]\nsoundfont=sf/gm.sf2\n\n[autoexec]\nDIR\n";
+        let file = Settings::from_config(&parse(text, Path::new("/cfg"), Some(home)));
+        assert_eq!(file.sound.soundfont.as_deref(), Some(Path::new("/cfg/sf/gm.sf2")));
+        // The command line asked for more speed, and the window for a
+        // shader and no Gravis Ultrasound.
+        let baseline = Settings { cycles: CpuSpeed::Fixed(20000), ..file.clone() };
+        let mut settings = Settings { shader: Shader::Aperture, ..baseline.clone() };
+        settings.sound.gus.enabled = false;
+        let saved = complete_text(text, Path::new("/cfg"), &baseline, &settings, &[], Some(home));
+
+        // Every setting has a line, the lines that were there stay as they
+        // were written, and the command line's speed isn't kept.
+        for (section, key, _) in entries(&settings, Some(home)) {
+            // (The file's SoundFont; no Ultrasound directory or MT-32 of its own.)
+            let wanted = !matches!(key, "ultradir" | "mt32roms" | "mt32lib" | "midiport");
+            assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);
+        }
+        assert!(saved.starts_with("[emulator]\nscale = 2\ncycles=max\nfullscreen=false\n"), "{}", saved);
+        assert!(saved.contains("shader=aperture\n") && saved.contains("gus=false\n"), "{}", saved);
+        assert!(saved.contains("soundfont=sf/gm.sf2\n"), "{}", saved);
+        assert!(saved.contains("\n[joystick]\njoysticktype=auto\ndeadzone=10\n\n[autoexec]\nDIR\n"), "{}", saved);
+        let config = parse(&saved, Path::new("/cfg"), Some(home));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });
+
+        // Saving again changes nothing; a speed the window changed is saved.
+        assert_eq!(complete_text(&saved, Path::new("/cfg"), &settings, &settings, &[], Some(home)), saved);
+        let faster = Settings { cycles: CpuSpeed::Fixed(30000), ..settings.clone() };
+        let again = complete_text(&saved, Path::new("/cfg"), &settings, &faster, &[], Some(home));
+        assert!(again.starts_with("[emulator]\nscale = 2\ncycles=30000\n"), "{}", again);
     }
 
     #[test]

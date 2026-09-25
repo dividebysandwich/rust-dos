@@ -279,9 +279,20 @@ fn save_and_close() {
     assert_eq!(host.saved.len(), 1);
     assert_eq!(status(&ui), ("Saved to /cfg/rust-dos.conf", false));
 
+    // What changed on every page is saved, whichever page F2 is pressed on.
+    use UiKey::*;
+    ui.show_page(Page::Display);
+    keys(&mut ui, &mut host, &[Right]);
+    ui.show_page(Page::Sound);
+    keys(&mut ui, &mut host, &[Right]);
+    ui.show_page(Page::Games);
+    ui.key(Save, &mut host);
+    let saved = host.saved.last().unwrap();
+    assert_eq!((saved.scale, saved.sound.sb.model), (2, SbModel::SbPro2));
+
     ui.open(&Settings::default(), None, &host);
     ui.key(UiKey::Save, &mut host);
-    assert_eq!(host.saved.len(), 1);
+    assert_eq!(host.saved.len(), 2);
     assert!(status(&ui).1);
 
     ui.key(UiKey::Esc, &mut host);

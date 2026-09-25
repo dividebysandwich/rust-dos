@@ -121,8 +121,9 @@ impl audio::AudioOutput for SdlAudio {
 }
 
 /// What saving the settings compares against: the settings and drives as
-/// the configuration file has them, from startup or the last save. Only
-/// what changed since is written, so command-line options, drives that
+/// the configuration file has them, from startup or the last save. Saving
+/// writes what changed since and adds the settings the file has no line
+/// for, so the command-line options that weren't changed, drives that
 /// failed to mount and the file's own spelling of paths stay as they are.
 struct Saved {
     file: Option<PathBuf>,
@@ -1028,14 +1029,15 @@ fn drive_changes(cpu: &Cpu, saved: &Saved) -> Vec<config::DriveChange> {
     changes
 }
 
-/// Save the settings and the drives that changed since the file was read
+/// Save every setting, and the drives that changed since the file was read
 /// or last saved.
 fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<(), String> {
     let Some(path) = saved.file.clone() else {
         return Err("No configuration file".to_string());
     };
     let changes = drive_changes(cpu, saved);
-    config::save(&path, &saved.settings, settings, &changes, dirs::home_dir().as_deref())?;
+    let home = dirs::home_dir();
+    config::save(&path, &saved.settings, settings, &changes, home.as_deref(), config::Saving::All)?;
     cpu.bus.log_string(&format!("[CONFIG] Saved the settings to {}", path.display()));
     saved.settings = settings.clone();
     saved.drives = mounted_drives(cpu);
@@ -1185,7 +1187,7 @@ impl Host for MainHost<'_, '_> {
         if let Some(game) = self.game.as_mut() {
             let dir = games_dir(self.saved.file.as_deref()).ok_or("No configuration file")?;
             let path = dir.join(format!("{}.conf", game.id));
-            config::save(&path, &game.saved, settings, &[], dirs::home_dir().as_deref())?;
+            config::save(&path, &game.saved, settings, &[], dirs::home_dir().as_deref(), config::Saving::Changes)?;
             game.saved = settings.clone();
             return Ok(());
         }

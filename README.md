@@ -352,10 +352,13 @@ disk speeds and noises, the joystick and the volumes take effect at once. The pr
 program is running, so a game isn't left without the card it set up. The memory size
 takes effect the next time rust-dos starts.
 
-**F2** (or Ctrl+S) saves the settings and drives to the configuration file
-in use. Only what changed is written: comments, `[autoexec]`, the settings
-you didn't touch and the file's own spelling of paths stay as they are, and
-drives that the startup commands mount aren't copied into `[drives]`.
+**F2** (or Ctrl+S) saves the settings of every page and the drives to the
+configuration file in use. Each setting gets a line: those you changed get
+their new values, and those the file has no line for yet are added with
+the value they had without one. Comments, `[autoexec]`, the lines of the
+settings you didn't touch (and their spelling of paths) and command-line
+options you didn't change stay as they are, and drives that the startup
+commands mount aren't copied into `[drives]`.
 
 ### Game profiles
 

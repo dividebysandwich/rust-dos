@@ -1102,9 +1102,10 @@ impl Host for PageHost<'_> {
         self.cpu.bus.disk.mounted_drives()
     }
 
-    /// Write what changed into the configuration file's text, for the page
-    /// to keep (`take_saved_config`), or while a game plays, into its
-    /// profile's (`take_saved_games`). Its drives are in the page's hands.
+    /// Write every setting into the configuration file's text, for the page
+    /// to keep (`take_saved_config`), or while a game plays, what changed
+    /// into its profile's (`take_saved_games`). Its drives are in the
+    /// page's hands.
     fn save(&mut self, settings: &Settings) -> Result<(), String> {
         if let Some(game) = self.game.as_mut() {
             let text = self.games.get(&game.id).cloned().unwrap_or_default();
@@ -1114,7 +1115,7 @@ impl Host for PageHost<'_> {
             return Ok(());
         }
         let saved = &mut *self.saved;
-        saved.text = config::update_text(&saved.text, &saved.settings, settings, &[], None);
+        saved.text = config::complete_text(&saved.text, Path::new("/"), &saved.settings, settings, &[], None);
         saved.settings = settings.clone();
         self.requests.config = Some(saved.text.clone());
         self.cpu.bus.log_string("[CONFIG] Saved the settings");
