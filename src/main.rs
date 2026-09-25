@@ -206,6 +206,23 @@ fn main() -> Result<(), String> {
     // paused (Alt+Pause).
     let mut osd = Osd::new();
     let mut paused = false;
+    // The mouse captured for a program (Ctrl+F10, or a click once it has
+    // the mouse driver): SDL's relative mode, whose motion keeps coming at
+    // the window's edges.
+    let sdl_mouse = sdl_context.mouse();
+    let mut mouse_captured = false;
+    // The button whose click captured the mouse, whose release the program
+    // doesn't see either.
+    let mut capturing_click: Option<MouseButton> = None;
+    macro_rules! capture_mouse {
+        ($on:expr) => {{
+            let on = $on;
+            if on != mouse_captured {
+                sdl_mouse.set_relative_mouse_mode(on);
+                mouse_captured = on;
+            }
+        }};
+    }
 
     // What the settings window changes: the machine, the display and the
     // speed, and what saving writes.
@@ -242,6 +259,7 @@ fn main() -> Result<(), String> {
                 // Losing the keyboard lets go of what it held.
                 Event::Window { win_event: WindowEvent::FocusLost, .. } => {
                     release_input(&mut cpu, &mut held);
+                    capture_mouse!(false);
                     if pacer.fast_forward() {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
                         cpu.bus.mixer.fast_forward = false;
@@ -286,6 +304,7 @@ fn main() -> Result<(), String> {
                             paused = !paused;
                             if paused {
                                 release_input(&mut cpu, &mut held);
+                                capture_mouse!(false);
                                 osd.show_lasting("Paused (Alt+Pause resumes)");
                             } else {
                                 osd.clear_lasting();
@@ -311,6 +330,26 @@ fn main() -> Result<(), String> {
                             pacer.set_fast_forward(true, &cpu.bus.clock, std::time::Instant::now());
                             cpu.bus.mixer.fast_forward = true;
                             osd.show_lasting("Fast forward");
+                        }
+                        continue;
+                    }
+                    // Ctrl+F10 captures the mouse and lets it go, as in
+                    // DOSBox.
+                    if keycode == Keycode::F10 && ctrl && !alt {
+                        if !repeat && !ui.is_open() && !paused {
+                            capture_mouse!(!mouse_captured);
+                            osd.show(if mouse_captured { "Mouse captured (Ctrl+F10 releases)" } else { "Mouse released" });
+                        }
+                        continue;
+                    }
+                    // Alt+Enter switches between the window and fullscreen.
+                    if keycode == Keycode::Return && alt && !ctrl {
+                        if !repeat && !ui.is_open() {
+                            let mut new = settings.clone();
+                            new.fullscreen = !new.fullscreen;
+                            if let Err(e) = host!().apply(&new) {
+                                osd.show(e);
+                            }
                         }
                         continue;
                     }
@@ -417,26 +456,52 @@ fn main() -> Result<(), String> {
                     ui.wheel(dy, &mut host!());
                 }
 
-                // The machine's mouse is still while the window is open.
+                // The machine's mouse is still while the window is open or
+                // the machine paused.
                 Event::MouseMotion { .. } | Event::MouseButtonDown { .. } | Event::MouseButtonUp { .. }
-                    if ui.is_open() => {}
+                    if ui.is_open() || paused => {}
 
-                Event::MouseMotion { x, y, .. } => {
-                    let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
-                    cpu.bus.mouse.set_position(vx, vy);
+                // Captured, the mouse moves the driver's cursor by its
+                // motion; otherwise to where it is on the picture.
+                Event::MouseMotion { x, y, xrel, yrel, .. } => {
+                    if mouse_captured {
+                        let (sx, sy) = display.frame_scale();
+                        let frame_motion = (xrel as f64 * sx, yrel as f64 * sy);
+                        let (dx, dy) = video::overlay::frame_motion_to_mouse(&cpu.bus, &cached_frame, frame_motion);
+                        cpu.bus.mouse.move_by(dx, dy);
+                    } else {
+                        let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
+                        cpu.bus.mouse.set_position(vx, vy);
+                    }
                 }
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
-                    cpu.bus.mouse.set_position(vx, vy);
+                    // A program using the mouse gets it captured by a click,
+                    // which it doesn't see, as in DOSBox.
+                    if !mouse_captured && cpu.bus.mouse.installed {
+                        capture_mouse!(true);
+                        capturing_click = Some(mouse_btn);
+                        osd.show("Mouse captured (Ctrl+F10 releases)");
+                        continue;
+                    }
+                    if !mouse_captured {
+                        let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
+                        cpu.bus.mouse.set_position(vx, vy);
+                    }
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_down(btn);
                     }
                 }
 
                 Event::MouseButtonUp { mouse_btn, x, y, .. } => {
-                    let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
-                    cpu.bus.mouse.set_position(vx, vy);
+                    if capturing_click == Some(mouse_btn) {
+                        capturing_click = None;
+                        continue;
+                    }
+                    if !mouse_captured {
+                        let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
+                        cpu.bus.mouse.set_position(vx, vy);
+                    }
                     if let Some(btn) = sdl_button_to_index(mouse_btn) {
                         cpu.bus.mouse.button_up(btn);
                     }
@@ -467,6 +532,7 @@ fn main() -> Result<(), String> {
             ui_shown = ui.is_open();
             if ui_shown {
                 release_input(&mut cpu, &mut held);
+                capture_mouse!(false);
                 dbg.release_keys(&mut cpu);
                 text_input.start();
             } else {

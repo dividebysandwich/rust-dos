@@ -256,6 +256,20 @@ impl<'a> Display<'a> {
     /// SDL's renderer, in window coordinates with OpenGL. Outside the
     /// picture (the black bars of fullscreen, the bezel of a curved
     /// shader) the result is outside the frame.
+    /// How many frame pixels a pixel of mouse motion on the window (in
+    /// its events' units) is, across and down.
+    pub fn frame_scale(&self) -> (f64, f64) {
+        let display = display_size(self.frame.0, self.frame.1, self.aspect);
+        let (w, h) = match &self.out {
+            Output::Gl(gl) => {
+                let (_, _, w, h) = letterbox(gl.window().size(), display);
+                (w, h)
+            }
+            Output::Sdl { .. } => display,
+        };
+        (self.frame.0 as f64 / w.max(1) as f64, self.frame.1 as f64 / h.max(1) as f64)
+    }
+
     pub fn to_frame(&self, x: i32, y: i32) -> (i32, i32) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
         match &self.out {

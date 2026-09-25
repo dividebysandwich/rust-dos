@@ -344,9 +344,14 @@ is replaced on every start and stops growing at 64 MB.
 | Ctrl+F11 | Slow the CPU down by a tenth (from `max`, from the speed it reached) |
 | Ctrl+Shift+F11 | Speed the CPU up by a tenth |
 | Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |
+| Ctrl+F10 | Capture the mouse for the program, and let it go; a click captures it too once a program uses the mouse |
+| Alt+Enter | Switch between the window and fullscreen |
 | PrintScreen | Toggle screen recording to a video file |
 
-A message at the top of the picture says what they did.
+A message at the top of the picture says what they did. A captured mouse
+moves the program's cursor by its motion, so a game that turns with the
+mouse keeps turning at the edge of the screen; the settings window, Alt+Pause
+and leaving the window let it go.
 
 ## Running in a browser
 

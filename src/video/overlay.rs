@@ -70,6 +70,13 @@ pub fn frame_to_mouse(bus: &Bus, frame: &Frame, (x, y): (i32, i32)) -> (i32, i32
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
 }
 
+/// A motion of (`dx`, `dy`) frame pixels in the mouse driver's virtual
+/// pixels (see `frame_to_mouse`).
+pub fn frame_motion_to_mouse(bus: &Bus, frame: &Frame, (dx, dy): (f64, f64)) -> (f64, f64) {
+    let (virt_w, virt_h) = bus.mouse.virtual_extent(bus.display_size());
+    (dx * virt_w as f64 / frame.width.max(1) as f64, dy * virt_h as f64 / frame.height.max(1) as f64)
+}
+
 /// Classic Microsoft-style arrow cursor as a 16x16 bitmap. 1 = white pixel,
 /// 2 = black outline, 0 = transparent. Hotspot is (0,0).
 const CURSOR_ARROW: [[u8; 16]; 16] = [

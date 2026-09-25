@@ -64,6 +64,10 @@ pub struct MouseState {
     /// destroying the AH=0Bh counter's independent accumulator.
     pub last_callback_mickey_x: i16,
     pub last_callback_mickey_y: i16,
+    /// The parts of a pixel a captured mouse moved that the cursor hasn't
+    /// yet (see `move_by`).
+    rest_x: f64,
+    rest_y: f64,
 }
 
 impl MouseState {
@@ -94,6 +98,8 @@ impl MouseState {
             pending_callback_events: 0,
             last_callback_mickey_x: 0,
             last_callback_mickey_y: 0,
+            rest_x: 0.0,
+            rest_y: 0.0,
         }
     }
 
@@ -161,7 +167,38 @@ impl MouseState {
         let new_y = y.clamp(self.min_y, self.max_y);
         let dx = new_x - self.x;
         let dy = new_y - self.y;
+        self.add_mickeys(dx, dy);
 
+        if dx != 0 || dy != 0 {
+            self.pending_callback_events |= 0x01; // motion
+        }
+
+        self.x = new_x;
+        self.y = new_y;
+    }
+
+    /// Move the cursor by (`dx`, `dy`) virtual pixels, as a captured mouse
+    /// does: the mickeys count all of the motion, at the edges of the
+    /// clipping window too, where the cursor stops, so a game that turns
+    /// with the mouse keeps turning.
+    pub fn move_by(&mut self, dx: f64, dy: f64) {
+        self.rest_x += dx;
+        self.rest_y += dy;
+        let (dx, dy) = (self.rest_x.trunc() as i32, self.rest_y.trunc() as i32);
+        self.rest_x -= dx as f64;
+        self.rest_y -= dy as f64;
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        self.add_mickeys(dx, dy);
+        self.pending_callback_events |= 0x01; // motion
+        self.x = (self.x + dx).clamp(self.min_x, self.max_x);
+        self.y = (self.y + dy).clamp(self.min_y, self.max_y);
+    }
+
+    /// Count the mickeys of a motion of (`dx`, `dy`) virtual pixels (see
+    /// `set_position`).
+    fn add_mickeys(&mut self, dx: i32, dy: i32) {
         self.mickey_accum_x += dx * 2;
         self.mickey_accum_y += dy * 4;
         let emit_x = self.mickey_accum_x / 3;
@@ -175,13 +212,6 @@ impl MouseState {
         self.mickey_y = self.mickey_y.wrapping_add(
             emit_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
         );
-
-        if dx != 0 || dy != 0 {
-            self.pending_callback_events |= 0x01; // motion
-        }
-
-        self.x = new_x;
-        self.y = new_y;
     }
 
     /// Record a button-down event at the current cursor position.
@@ -302,4 +332,31 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     cpu.set_cpu_flag(crate::cpu::CpuFlags::IF, false);
     cpu.set_cpu_flag(crate::cpu::CpuFlags::TF, false);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_captured_mouse_keeps_counting_at_the_edge() {
+        let mut mouse = MouseState::new();
+        mouse.reset(640, 200);
+        mouse.set_position(639, 100);
+        let before = mouse.mickey_x;
+        for _ in 0..10 {
+            mouse.move_by(3.0, 0.0);
+        }
+        assert_eq!(mouse.x, 639, "the cursor stops at the edge");
+        assert_eq!(mouse.mickey_x - before, 20, "the mickeys count all 30 pixels");
+        assert_ne!(mouse.pending_callback_events & 0x01, 0);
+
+        // Parts of a pixel add up.
+        let mut mouse = MouseState::new();
+        mouse.reset(640, 200);
+        for _ in 0..4 {
+            mouse.move_by(0.25, -0.5);
+        }
+        assert_eq!((mouse.x, mouse.y), (321, 98));
+    }
 }

@@ -611,6 +611,13 @@ impl Machine {
     }
 
     /// The mouse moved to (`x`, `y`) on the screen, in its pixels.
+    /// The captured mouse moved by (`dx`, `dy`) screen pixels: the driver's
+    /// cursor stops at the edges, but its mickeys don't.
+    pub fn mouse_move_by(&mut self, dx: f64, dy: f64) {
+        let (dx, dy) = video::overlay::frame_motion_to_mouse(&self.cpu.bus, &self.screen, (dx, dy));
+        self.cpu.bus.mouse.move_by(dx, dy);
+    }
+
     pub fn mouse_move(&mut self, x: f64, y: f64) {
         let (vx, vy) = video::overlay::frame_to_mouse(&self.cpu.bus, &self.screen, (x as i32, y as i32));
         self.cpu.bus.mouse.set_position(vx, vy);

@@ -661,14 +661,19 @@ function movePointer(event) {
     return;
   }
   if (captured()) {
+    // The motion in screen pixels: the program's mickeys keep counting at
+    // the edges, where the cursor stops.
     const rect = canvas.getBoundingClientRect();
     const width = machine.screen_width();
     const height = machine.screen_height();
-    pointer.x = Math.min(Math.max(pointer.x + (event.movementX * width) / rect.width, 0), width - 1);
-    pointer.y = Math.min(Math.max(pointer.y + (event.movementY * height) / rect.height, 0), height - 1);
-  } else {
-    Object.assign(pointer, screenPoint(event));
+    const dx = (event.movementX * width) / rect.width;
+    const dy = (event.movementY * height) / rect.height;
+    pointer.x = Math.min(Math.max(pointer.x + dx, 0), width - 1);
+    pointer.y = Math.min(Math.max(pointer.y + dy, 0), height - 1);
+    guard(() => machine.mouse_move_by(dx, dy));
+    return;
   }
+  Object.assign(pointer, screenPoint(event));
   guard(() => machine.mouse_move(pointer.x, pointer.y));
 }
 
