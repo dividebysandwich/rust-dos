@@ -22,11 +22,11 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   as DOS/4GW (Descent, Heretic)
 * Dynamic recompiler translates protected-mode program code into
   x86-64 or ARM64 host code (see [docs/dynrec.md](docs/dynrec.md))
-* Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
-  MIDI through the MPU-401: General MIDI with a SoundFont or the Gravis
-  patches, the Roland MT-32 through munt, or out of the host's MIDI ports
+* Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
   both digital audio and music with built-in patch set.
+* Roland MT-32 support via Munt
+* General MIDI via SoundFont, Gravis  Ultrasound, Roland MT-32 or out of the host's MIDI ports
 * Covox Speech Thing and Disney Sound Source on the parallel port
 * Graphics: text, CGA, EGA and VGA modes with Mode X support, and the
   CGA's composite artifact colours
@@ -48,7 +48,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Joysticks on the game port from game controllers (two sticks and four
   buttons), or the mouse as a joystick
 * Configuration file with startup commands
+* Most settings changeable without restart (including graphics adapter!)
 * Environment variables (`SET`, `PATH`)
+* Web based debugger UI
 * Runs in a web browser as WebAssembly, with C: kept in the browser's
   storage (see [Running in a browser](#running-in-a-browser))
 
@@ -622,9 +624,11 @@ text screen, typing input, tracing instructions, setting breakpoints, and
 inspecting registers and memory. It has no authentication and no encryption,
 so keep it bound to localhost.
 
+<img width="1349" height="1017" alt="image" src="https://github.com/user-attachments/assets/3d01c401-3e3a-4ef3-a2df-ddb280b983a1" />
+
 Open the address in a web browser (`http://127.0.0.1:8086/`) for the
-debugger page: the screen, which takes the keyboard (and, if asked, the
-mouse) when clicked; pause, resume, step, step over and run to an address
+debugger page which shows the screen (with remote input),
+pause, resume, step, step over and run to an address
 (F8, F11 and F10, as in browsers' developer tools); the disassembly around
 CS:IP, where a click beside an instruction sets a breakpoint and a
 double-click runs to it; the registers and flags, which a click changes; a
