@@ -1125,9 +1125,9 @@ impl MainHost<'_, '_> {
         };
         let name = |path: &std::path::Path| path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
         let result = match drop_action(path) {
-            DropAction::ImportGame(source) => self.import_game(&source).and_then(|(id, imported)| {
-                Ok(self.launch_game(&id).unwrap_or(imported))
-            }),
+            DropAction::ImportGame(source) => {
+                self.import_game(&source).map(|(id, imported)| self.launch_game(&id).unwrap_or(imported))
+            }
             DropAction::MountFolder(dir) => {
                 mount(self, free(self.cpu), &dir, DriveKind::HardDisk).map(|d| format!("{}: is {}", disk::drive_letter(d), name(&dir)))
             }
@@ -1146,13 +1146,13 @@ impl MainHost<'_, '_> {
                     Some(info) => Ok(info.drive),
                     None => mount(self, free(self.cpu), &dir, DriveKind::HardDisk),
                 };
-                drive.and_then(|d| {
+                drive.map(|d| {
                     if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
-                        return Ok(format!("{}: is {}; quit the program running to start {}", disk::drive_letter(d), name(&dir), name(&program)));
+                        return format!("{}: is {}; quit the program running to start {}", disk::drive_letter(d), name(&dir), name(&program));
                     }
                     let letter = disk::drive_letter(d);
                     self.cpu.queue_batch_lines([format!("{}:", letter), "CD \\".to_string(), name(&program)]);
-                    Ok(format!("Starting {} from {}:", name(&program), letter))
+                    format!("Starting {} from {}:", name(&program), letter)
                 })
             }
             DropAction::Zip(archive) => (|| {
