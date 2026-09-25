@@ -25,6 +25,8 @@ pub const SERVICE_CD_INTERRUPT: u8 = 0x16;
 pub const SERVICE_VBE_WINDOW: u8 = 0x17;
 /// Waiting for slow disk access to end (`diskio::wait`).
 pub const SERVICE_IO_WAIT: u8 = 0x18;
+/// Up and Down at the DOS prompt: the command history (`shell::history_key`).
+pub const SERVICE_SHELL_HISTORY: u8 = 0x19;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.

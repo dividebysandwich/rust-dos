@@ -533,6 +533,9 @@ is replaced on every start and stops growing at 64 MB.
 | Ctrl+F7 | Start and stop recording video with sound (AVI) |
 | PrintScreen | Start and stop recording an animation (GIF) |
 
+At the DOS prompt, Up and Down step through the lines typed before (the
+last 100), which can be changed before Enter runs them.
+
 A message at the top of the picture says what they did. A captured mouse
 moves the program's cursor by its motion, so a game that turns with the
 mouse keeps turning at the edge of the screen; the settings window, Alt+Pause

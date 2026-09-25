@@ -18,15 +18,16 @@ fn scratch(name: &str, dirs: &[&str]) -> PathBuf {
     base
 }
 
-/// Decode the shell code at 0000:0100, treating each `FE 38 xx` trap as a
-/// 3-byte instruction. Returns (offset, instruction) pairs; traps are None.
+/// Decode the shell code at 0000:0100, treating each `FE 38 xx` trap and
+/// `FE 39 xx` service as a 3-byte instruction. Returns (offset,
+/// instruction) pairs; traps are None.
 fn decode_shell() -> Vec<(u64, Option<Instruction>)> {
     let code = get_shell_code();
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < code.len() {
         let ip = SHELL_BASE + pos as u64;
-        if code[pos] == 0xFE && code.get(pos + 1) == Some(&0x38) {
+        if code[pos] == 0xFE && matches!(code.get(pos + 1), Some(&0x38) | Some(&0x39)) {
             out.push((ip, None));
             pos += 3;
             continue;
@@ -127,7 +128,11 @@ fn shell_trap_returns_to_the_prompt_loop() {
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
     // The trap popped the frame the shell pushed: back at the JMP with the
     // stack balanced, not sliding through the IVT from 0000:0000.
-    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (SHELL_SEGMENT, 0x182, SHELL_STACK));
+    // Right after the trap.
+    let code = get_shell_code();
+    let trap = code.windows(3).position(|w| w == [0xFE, 0x38, SHELL_COMMAND_BOP]).unwrap();
+    let jmp_ip = (SHELL_BASE as usize + trap + 3) as u16;
+    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (SHELL_SEGMENT, jmp_ip, SHELL_STACK));
 
     // Next command comes through the same loop, prompt reprinted.
     type_keys(&mut cpu, "dir\r");
@@ -218,4 +223,114 @@ fn another_video_card_keeps_the_prompt_where_it_was() {
         assert_eq!((cpu.bus.read_8(0x0450), cpu.bus.read_8(0x0451)), before, "{:?}", adapter);
         assert_eq!(&screen_text(&cpu)[..7], "C:\\>ver", "{:?}: the screen stays", adapter);
     }
+}
+
+/// An extended key: AL 0, AH its scan code (48h Up, 50h Down, 4Bh Left).
+fn extended_key(cpu: &mut Cpu, scan: u8) {
+    cpu.bus.keyboard_buffer.push_back((scan as u16) << 8);
+}
+
+const UP: u8 = 0x48;
+const DOWN: u8 = 0x50;
+
+#[test]
+fn up_and_down_step_through_the_command_history() {
+    let base = scratch("history", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    // Nothing yet: Up does nothing.
+    extended_key(&mut cpu, UP);
+    type_keys(&mut cpu, "echo one\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo one"));
+    type_keys(&mut cpu, "echo two\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo two"));
+
+    // Up: the last line, on the screen and entered.
+    extended_key(&mut cpu, UP);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo two"));
+    assert!(screen_text(&cpu).contains("C:\\>echo two"), "{}", screen_text(&cpu));
+    // The same line again isn't kept twice: Up, Up is the first line, and
+    // Down from there the second.
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, DOWN);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo two"));
+    assert_eq!(cpu.shell_history.entries(), ["echo one", "echo two"]);
+
+    // Down past the newest line: an empty one to type in.
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, DOWN);
+    type_keys(&mut cpu, "ver\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+
+    // A recalled line can be changed before it is entered.
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, UP);
+    type_keys(&mut cpu, "\x08\x08\x08six\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo six"));
+    // What was there is gone from the screen: "echo six", then the shorter
+    // "ver" over it.
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, UP);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+    let text = screen_text(&cpu);
+    let last = text.as_bytes().chunks(80).map(|r| String::from_utf8_lossy(r).trim_end().to_string()).filter(|r| r.starts_with("C:\\>ver")).last();
+    assert_eq!(last.as_deref(), Some("C:\\>ver"), "{}", text);
+}
+
+#[test]
+fn other_extended_keys_leave_the_line_alone() {
+    let base = scratch("extended", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    // Left and F1 used to end the line at a NUL.
+    type_keys(&mut cpu, "ab");
+    extended_key(&mut cpu, 0x4B);
+    extended_key(&mut cpu, 0x3B);
+    // A grey arrow's E0h.
+    cpu.bus.keyboard_buffer.push_back(0x4DE0);
+    type_keys(&mut cpu, "c\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("abc"));
+}
+
+#[test]
+fn a_line_takes_at_most_127_characters() {
+    let base = scratch("long_line", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, &"x".repeat(200));
+    type_keys(&mut cpu, "\r");
+    let line = run_until_command(&mut cpu).unwrap();
+    assert_eq!(line.len(), rust_dos::shell::MAX_LINE);
+    // The directory buffer after it is untouched: the prompt still shows.
+    type_keys(&mut cpu, "ver\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+}
+
+#[test]
+fn a_recalled_line_that_wrapped_is_erased_whole() {
+    let base = scratch("history_wrap", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, &"y".repeat(100));
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).map(|l| l.len()), Some(100));
+    type_keys(&mut cpu, "ab\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ab"));
+    // The long line onto two rows, then the short one over it.
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, DOWN);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ab"));
+    let text = screen_text(&cpu);
+    let rows: Vec<String> = text.as_bytes().chunks(80).map(|r| String::from_utf8_lossy(r).trim_end().to_string()).collect();
+    // The recalled line, with the long one's second row blank under it (the
+    // next prompt comes after the command runs).
+    let at = rows.iter().rposition(|r| r == "C:\\>ab").expect("the recalled line");
+    assert_eq!(rows[at + 1], "", "{:?}", &rows[..at + 2]);
 }

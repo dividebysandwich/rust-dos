@@ -8,9 +8,14 @@ use crate::video;
 /// so it can't collide with a real INT FFh or with the INT 2Fh multiplexer.
 pub const SHELL_COMMAND_BOP: u8 = 0xFF;
 
+/// The longest line the prompt takes: its buffer at 0200h ends where the
+/// current directory's at 0300h begins.
+pub const MAX_LINE: usize = 0x7F;
+
 /// A Tiny "OS" written in Machine Code. Reads keys into a buffer at offset 0x0200
 /// On Enter, hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
-/// Handles backspace visually and in buffer
+/// Handles backspace visually and in buffer, and hands the extended keys
+/// (Up and Down: the command history) to `history_key`.
 #[rustfmt::skip] // keep one instruction per line
 pub fn get_shell_code() -> Vec<u8> {
     vec![
@@ -59,37 +64,49 @@ pub fn get_shell_code() -> Vec<u8> {
         // ----------------------------------------------------
         // INPUT LOOP (Wait for keys)
         // ----------------------------------------------------
-        // Label: WAIT_KEY
+        // Label: WAIT_KEY (0x013D)
         0xB4, 0x00, // MOV AH, 00h
         0xCD, 0x16, // INT 16h (Wait for Key)
         // Check ENTER (0x0D)
         0x3C, 0x0D, // CMP AL, 0x0D
-        // Jump +36 bytes (0x24) to skip normal char handling AND backspace handling
-        0x74, 0x24, // JE EXECUTE
+        0x74, 0x37, // JE EXECUTE (0x017C)
         // Check BACKSPACE (0x08)
         0x3C, 0x08, // CMP AL, 0x08
-        0x74, 0x09, // JE HANDLE_BACKSPACE (+9 bytes)
+        0x74, 0x17, // JE HANDLE_BACKSPACE (0x0160)
+        // Extended keys (AL 00h, or E0h for the grey ones): the arrows
+        0x3C, 0x00, // CMP AL, 0x00
+        0x74, 0x2A, // JE EXTENDED (0x0177)
+        0x3C, 0xE0, // CMP AL, 0xE0
+        0x74, 0x26, // JE EXTENDED (0x0177)
+        // A full buffer takes no more (MAX_LINE characters)
+        0x81, 0xFE, 0x7F, 0x02, // CMP SI, 0x027F
+        0x73, 0xE6, // JAE WAIT_KEY
         // Normal Character
         0xB4, 0x0E, // MOV AH, 0Eh (Teletype Output)
         0xCD, 0x10, // INT 10h (Print Char)
         0x88, 0x04, // MOV [SI], AL (Store in Buffer)
         0x46, // INC SI (Advance Pointer)
-        0xEB, 0xEB, // JMP WAIT_KEY (-21 bytes)
+        0xEB, 0xDD, // JMP WAIT_KEY
         // ----------------------------------------------------
-        // BACKSPACE HANDLER
+        // BACKSPACE HANDLER (0x0160)
         // ----------------------------------------------------
         // Check Boundary (Start of Buffer)
         0x81, 0xFE, 0x00, 0x02, // CMP SI, 0x0200
-        0x74, 0xE5, // JE WAIT_KEY (-27 bytes) (If empty, just wait)
+        0x74, 0xD7, // JE WAIT_KEY (If empty, just wait)
         // Perform Visual Backspace
         0x4E, // DEC SI (Move Pointer Back)
         0xB4, 0x0E, // MOV AH, 0Eh
         0xB0, 0x08, 0xCD, 0x10, // Print Backspace
         0xB0, 0x20, 0xCD, 0x10, // Print Space
         0xB0, 0x08, 0xCD, 0x10, // Print Backspace
-        0xEB, 0xD4, // JMP WAIT_KEY (-44 bytes)
+        0xEB, 0xC6, // JMP WAIT_KEY
         // ----------------------------------------------------
-        // EXECUTE COMMAND
+        // EXTENDED KEYS (0x0177): the history replaces the line (SI)
+        // ----------------------------------------------------
+        0xFE, 0x39, crate::bios::SERVICE_SHELL_HISTORY, // history_key
+        0xEB, 0xC1, // JMP WAIT_KEY
+        // ----------------------------------------------------
+        // EXECUTE COMMAND (0x017C)
         // ----------------------------------------------------
         0xC6, 0x04, 0x00, // MOV BYTE PTR [SI], 0 (Null Terminate)
         // Print Newline
@@ -100,14 +117,112 @@ pub fn get_shell_code() -> Vec<u8> {
         // FLAGS, CS, then the address of the JMP below.
         0x9C, // PUSHF
         0x0E, // PUSH CS
-        0xB8, 0x82, 0x01, // MOV AX, 0x0182
+        0xB8, 0x95, 0x01, // MOV AX, 0x0195
         0x50, // PUSH AX
         0xFE, 0x38, SHELL_COMMAND_BOP, // Hand the line to the Rust shell
         // ----------------------------------------------------
         // RESET LOOP
         // ----------------------------------------------------
-        0xEB, 0x87, // 0x0182: JMP PROMPT_START (-121 bytes)
+        0xE9, 0x73, 0xFF, // 0x0195: JMP PROMPT_START (-141 bytes, a near jump)
     ]
+}
+
+/// The lines typed at the prompt, oldest first, for Up and Down.
+#[derive(Clone, Debug, Default)]
+pub struct ShellHistory {
+    entries: Vec<String>,
+    /// The entry Up and Down are at: `entries.len()` is the new line
+    /// below the newest.
+    pos: usize,
+}
+
+impl ShellHistory {
+    /// The lines kept.
+    const MAX: usize = 100;
+
+    /// A line was entered: keep it, unless it is empty or the one before
+    /// again, and start again from below the newest.
+    pub fn push(&mut self, line: &str) {
+        if !line.is_empty() && self.entries.last().map(String::as_str) != Some(line) {
+            self.entries.push(line.to_string());
+            if self.entries.len() > Self::MAX {
+                self.entries.remove(0);
+            }
+        }
+        self.pos = self.entries.len();
+    }
+
+    /// Up: the entry before, if there is one.
+    pub fn older(&mut self) -> Option<&str> {
+        self.pos = self.pos.checked_sub(1)?;
+        self.entries.get(self.pos).map(String::as_str)
+    }
+
+    /// Down: the entry after, or the empty new line after the newest; None
+    /// when already there.
+    pub fn newer(&mut self) -> Option<&str> {
+        if self.pos >= self.entries.len() {
+            return None;
+        }
+        self.pos += 1;
+        Some(self.entries.get(self.pos).map_or("", String::as_str))
+    }
+
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+}
+
+/// An extended key at the prompt (the shell code's EXTENDED, AH its scan
+/// code): Up and Down put the line before or after in the command history
+/// in place of the one being typed, on the screen and in the buffer at
+/// DS:0200h, and leave SI after it. The other keys do nothing.
+pub fn history_key(cpu: &mut Cpu) {
+    let line = match cpu.get_ah() {
+        0x48 => cpu.shell_history.older(),
+        0x50 => cpu.shell_history.newer(),
+        _ => None,
+    };
+    let Some(line) = line.map(|l| l.bytes().take(MAX_LINE).collect::<Vec<u8>>()) else { return };
+    let saved = (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx());
+
+    // Back to where the line began, over as many cells as it had
+    // characters (it may have wrapped onto the next row).
+    let typed = (cpu.si() as usize).saturating_sub(0x0200).min(MAX_LINE);
+    let page = cpu.bus.read_8(0x0462);
+    let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
+    let (col, row) = (cpu.bus.read_8(0x0450 + page as usize * 2), cpu.bus.read_8(0x0451 + page as usize * 2));
+    let start = (row as usize * cols + col as usize).saturating_sub(typed);
+    let set_cursor = |cpu: &mut Cpu| video_call(cpu, 0x0200, (page as u16) << 8, 0, ((start / cols) as u16) << 8 | (start % cols) as u16);
+    // Blank it, and write the new line from its start.
+    set_cursor(cpu);
+    for _ in 0..typed {
+        video_call(cpu, 0x0E20, (page as u16) << 8, 0, 0);
+    }
+    set_cursor(cpu);
+    for &b in &line {
+        video_call(cpu, 0x0E00 | b as u16, (page as u16) << 8, 0, 0);
+    }
+
+    let buffer = cpu.get_physical_addr(cpu.ds(), 0x0200);
+    for (i, &b) in line.iter().enumerate() {
+        cpu.bus.write_8(buffer + i, b);
+    }
+    cpu.set_si(0x0200 + line.len() as u16);
+    let (ax, bx, cx, dx) = saved;
+    cpu.set_ax(ax);
+    cpu.set_reg16(iced_x86::Register::BX, bx);
+    cpu.set_cx(cx);
+    cpu.set_dx(dx);
+}
+
+/// INT 10h with these registers.
+fn video_call(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
+    cpu.set_ax(ax);
+    cpu.set_reg16(iced_x86::Register::BX, bx);
+    cpu.set_cx(cx);
+    cpu.set_dx(dx);
+    crate::interrupts::int10::handle(cpu);
 }
 
 /// SHELL_COMMAND_BOP handler: queue the ASCIIZ line at DS:DX for the main
@@ -131,6 +246,7 @@ pub fn handle_command_bop(cpu: &mut Cpu) {
         }
     }
     let clean_cmd: String = clean_chars.into_iter().collect();
+    cpu.shell_history.push(&clean_cmd);
 
     // Queue for Main Loop
     if !clean_cmd.is_empty() {

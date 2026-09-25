@@ -65,6 +65,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_CD_INTERRUPT => mscdex::interrupt(cpu),
         crate::bios::SERVICE_VBE_WINDOW => vbe::window_call(cpu),
         crate::bios::SERVICE_IO_WAIT => crate::diskio::wait(cpu),
+        crate::bios::SERVICE_SHELL_HISTORY => crate::shell::history_key(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service

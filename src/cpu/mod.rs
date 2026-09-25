@@ -229,6 +229,9 @@ pub struct Cpu {
     flags: CpuFlags,
     pub state: CpuState,
     pub pending_command: Option<String>,
+    /// The lines typed at the prompt, for Up and Down. They stay while
+    /// programs run and the shell is loaded again.
+    pub shell_history: crate::shell::ShellHistory,
     /// Pending batch-file command lines waiting to be dispatched as if the user
     /// had typed them at the prompt. Drained by main loop while the shell is
     /// idle (no child program on the process_stack and CS still in shell-land).
@@ -374,6 +377,7 @@ impl Cpu {
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
             pending_command: None,
+            shell_history: crate::shell::ShellHistory::default(),
             batch_queue: VecDeque::new(),
             batch_echo: true,
             environment: default_environment(),
