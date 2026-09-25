@@ -636,6 +636,10 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
         bus.scroll_up();
         bus.cursor_y = rows - 1;
     }
+    // The BIOS's cursor follows, as `print_cells` keeps it.
+    let (col, row) = (bus.cursor_x as u8, bus.cursor_y as u8);
+    bus.write_8(0x0450, col);
+    bus.write_8(0x0451, row);
 }
 
 pub fn print_string(cpu: &mut Cpu, s: &str) {

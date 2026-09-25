@@ -526,3 +526,19 @@ fn command_com_without_c_is_a_prompt_until_exit() {
     assert!(cpu.shell_idle());
     assert!(cpu.secondary_shells.is_empty());
 }
+
+#[test]
+fn what_a_program_printed_stays_on_the_screen_after_it() {
+    #[rustfmt::skip]
+    let hello = [
+        0xB4, 0x09, 0xBA, 0x09, 0x01,   // MOV AH, 09h; MOV DX, 0109h
+        0xCD, 0x21,                     // INT 21h
+        0xCD, 0x20,                     // INT 20h
+        b'h', b'i', b'$',
+    ];
+    let dir = scratch("keep_screen", &[("HELLO.COM", &hello)]);
+    let mut cpu = machine(&dir);
+    type_line(&mut cpu, b"hello\r");
+    run_until(&mut cpu, 200, |cpu| cpu.shell_idle());
+    assert_eq!(screen(&cpu), "C:\\>hello\nhi\nC:\\>");
+}

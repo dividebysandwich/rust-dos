@@ -186,9 +186,6 @@ fn con_echo(cpu: &mut Cpu, text: &[u8]) {
     for &b in text {
         print_char(&mut cpu.bus, b);
     }
-    let (col, row) = (cpu.bus.cursor_x as u8, cpu.bus.cursor_y as u8);
-    cpu.bus.write_8(0x0450, col);
-    cpu.bus.write_8(0x0451, row);
 }
 
 /// Edit a line from the keyboard as DOS's console does, for AH=0Ah and

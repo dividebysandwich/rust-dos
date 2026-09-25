@@ -79,12 +79,14 @@ fn print_char_and_scrolling_are_repainted() {
 }
 
 #[test]
-fn shell_reload_clears_the_old_screen() {
+fn shell_reload_clears_the_old_screen_of_another_text_mode() {
     let (mut cpu, mut frame) = rendered_shell("reload");
     video::print_string(&mut cpu, "left over from a program");
     video::render_screen(&mut frame, &cpu.bus);
     assert!(row_has_pixels(&frame, 0));
 
+    // It ended with 50 rows.
+    cpu.bus.write_8(0x0484, 49);
     cpu.bus.vga.clear_dirty();
     cpu.load_shell();
     video::render_screen(&mut frame, &cpu.bus);

@@ -858,6 +858,19 @@ impl Cpu {
         ));
     }
 
+    /// Whether the screen is in the text mode the prompt runs in: mode 3
+    /// (7 on a monochrome adapter), 80 columns by 25 rows, page 0.
+    fn prompt_text_mode(&self) -> bool {
+        let bus = &self.bus;
+        let mode = if bus.vga.setup().mono() { 0x07 } else { 0x03 };
+        let rows_ok = !bus.vga.adapter.ega_bios() || bus.read_8(0x0484) == 24;
+        (bus.read_8(0x0449) & 0x7F) == mode
+            && bus.video_mode as u8 == mode
+            && bus.read_16(0x044A) == 80
+            && rows_ok
+            && bus.read_8(0x0462) == 0
+    }
+
     pub fn load_shell(&mut self) {
         // No program runs: `core=auto` is back on the interpreter, and the
         // dynamic recompiler's code for the last program goes.
@@ -908,6 +921,10 @@ impl Cpu {
         self.secondary = None;
         self.bios_wait_until = None;
 
+        // A program that ends in the prompt's own text mode leaves what it
+        // printed on the screen, as in DOS, and the prompt goes on below.
+        let kept_cursor = self.prompt_text_mode().then(|| (self.bus.read_8(0x0450), self.bus.read_8(0x0451)));
+
         // Reset text-mode BDA fields so state from a previous program (e.g.
         // Norton Commander's 80x50 configuration) doesn't leak into the shell
         // and cause the renderer to draw more rows than the shell expects.
@@ -920,9 +937,20 @@ impl Cpu {
         // into memory the shell reuses.
         self.bus.mouse.remove_callback();
         crate::mouse::clear_callback_busy(&mut self.bus);
-        // Clear text VRAM so we don't show leftover text from the last program.
-        self.bus.vga.vram_text.fill(0);
-        self.bus.text_mem_mut().fill(0);
+        match kept_cursor {
+            Some((col, row)) => {
+                self.bus.write_8(0x0450, col);
+                self.bus.write_8(0x0451, row);
+                self.bus.cursor_x = col as usize;
+                self.bus.cursor_y = row as usize;
+            }
+            None => {
+                // Clear text VRAM so we don't show leftover text from the
+                // last program's other mode.
+                self.bus.vga.vram_text.fill(0);
+                self.bus.text_mem_mut().fill(0);
+            }
+        }
         self.bus.vga.mark_dirty_full();
 
         // Copy bytes
