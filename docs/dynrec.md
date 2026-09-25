@@ -123,6 +123,8 @@ Each instruction becomes one of two things:
   (`uop.rs`), which the code generator turns into host code:
   - MOV, the ALU operations, INC, DEC, NEG and NOT;
   - shifts and rotates by a constant;
+  - SHLD and SHRD by a constant;
+  - MUL and IMUL in all their forms;
   - LEA, MOVZX, MOVSX, XCHG of registers, CBW, CWD, CWDE and CDQ;
   - the flag instructions;
   - PUSH and POP of registers and constants;

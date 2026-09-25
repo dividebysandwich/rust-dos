@@ -114,6 +114,15 @@ pub enum Uop {
     Unary { op: UnOp, size: u8, t: T },
     /// Shift or rotate by a count of 1 to size * 8 - 1.
     Shift { op: ShiftOp, size: u8, t: T, count: u8 },
+    /// SHLD (`left`) or SHRD of `dst` by a count of 1 to size * 8 - 1,
+    /// filling in from `src`.
+    DoubleShift { left: bool, size: u8, dst: T, src: T, count: u8 },
+    /// a = a * b, signed, cut to `size` (2 or 4) bytes: the two- and
+    /// three-operand IMUL. Only CF and OF change.
+    Imul { size: u8, a: T, b: Src },
+    /// MUL or IMUL (`signed`) of AL, AX or EAX by t, into AX, DX:AX or
+    /// EDX:EAX. Only CF and OF change.
+    MulWide { signed: bool, size: u8, t: T },
     /// Set (Some(true)), clear or complement (None) the flags in `mask`.
     Flag { mask: u32, set: Option<bool> },
     /// #GP(0) if the value is past the CS limit (a near jump's target).

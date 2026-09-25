@@ -657,6 +657,9 @@ impl Gen<'_> {
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
             Uop::Shift { op, size, t, count } => self.shift(op, size, t, count),
+            Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, count),
+            Uop::Imul { size, a, b } => self.imul(size, a, b),
+            Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
             Uop::Flag { mask, set } => {
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 self.mov32(1, mask);
@@ -1035,6 +1038,131 @@ impl Gen<'_> {
             ShiftOp::Rcl | ShiftOp::Rcr => unreachable!("not translated"),
         }
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
+    }
+
+    /// SHLD and SHRD by 1 to width - 1, with the flags
+    /// `alu_double_shift` gives them (AF kept).
+    fn double_shift(&mut self, left: bool, size: u8, dst: T, src: T, count: u8) {
+        let bits = size as u32 * 8;
+        let c = count as u32;
+        let back = bits - c;
+        dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(dst)) ; mov w11, W(r(src)));
+        if left {
+            // dest:src shifted left; CF is the last bit out of dest.
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; lsl w2, w10, c
+                ; lsr w3, w11, back
+                ; orr w0, w2, w3
+                ; ubfx w1, w10, back, 1
+            );
+        } else {
+            // src:dest shifted right; CF is the last bit out of dest.
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; lsr w2, w10, c
+                ; lsl w3, w11, back
+                ; orr w0, w2, w3
+                ; ubfx w1, w10, c - 1, 1
+            );
+        }
+        self.cut(size);
+        if left {
+            // OF = the result's sign ^ CF.
+            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, bits - 1, 1 ; eor w2, w2, w1);
+        } else {
+            // OF = the result's top two bits differ.
+            dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, bits - 1, 1 ; ubfx w3, w0, bits - 2, 1 ; eor w2, w2, w3);
+        }
+        self.szp(bits);
+        dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, w1 ; orr w5, w5, w2, lsl 11);
+        self.merge(CF | OF | SZP);
+        dynasm!(self.ops ; .arch aarch64 ; mov W(r(dst)), w0);
+    }
+
+    /// The two- and three-operand IMUL: a = a * b cut to `size`, CF and OF
+    /// when the product doesn't fit.
+    fn imul(&mut self, size: u8, a: T, b: Src) {
+        self.operands(a, b);
+        if size == 2 {
+            // Both 16-bit products fit in 32 bits.
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; sxth w10, w10
+                ; sxth w11, w11
+                ; mul w0, w10, w11
+                ; sxth w1, w0
+                ; cmp w1, w0
+                ; cset w2, ne
+                ; and w0, w0, 0xFFFF
+            );
+        } else {
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; smull x0, w10, w11
+                ; sxtw x1, w0
+                ; cmp x1, x0
+                ; cset w2, ne
+            );
+        }
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; orr w5, w2, w2, lsl 11
+            ; mov W(r(a)), w0
+        );
+        self.merge(CF | OF);
+    }
+
+    /// MUL or IMUL of AL, AX or EAX by t into AX, DX:AX or EDX:EAX: CF and
+    /// OF when the upper half is in use (for IMUL, isn't the lower's sign).
+    fn mul_wide(&mut self, signed: bool, size: u8, t: T) {
+        let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
+        let access = match size {
+            1 => Access::Ldr8,
+            2 => Access::Ldr16,
+            _ => Access::Ldr32,
+        };
+        self.field(access, 10, acc);
+        dynasm!(self.ops ; .arch aarch64 ; mov w11, W(r(t)));
+        match (signed, size) {
+            (false, 4) => dynasm!(self.ops ; .arch aarch64 ; umull x0, w10, w11 ; lsr x1, x0, 32 ; cmp x1, 0),
+            (true, 4) => dynasm!(self.ops ; .arch aarch64 ; smull x0, w10, w11 ; sxtw x1, w0 ; cmp x1, x0),
+            (false, _) => {
+                let bits = size as u32 * 8;
+                dynasm!(self.ops ; .arch aarch64 ; mul w0, w10, w11 ; lsr w1, w0, bits ; cmp w1, 0);
+            }
+            (true, 1) => dynasm!(self.ops
+                ; .arch aarch64
+                ; sxtb w10, w10
+                ; sxtb w11, w11
+                ; mul w0, w10, w11
+                ; sxtb w1, w0
+                ; cmp w1, w0
+            ),
+            (true, _) => dynasm!(self.ops
+                ; .arch aarch64
+                ; sxth w10, w10
+                ; sxth w11, w11
+                ; mul w0, w10, w11
+                ; sxth w1, w0
+                ; cmp w1, w0
+            ),
+        }
+        dynasm!(self.ops ; .arch aarch64 ; cset w2, ne ; orr w5, w2, w2, lsl 11);
+        match size {
+            1 => self.field(Access::Str16, 0, acc),
+            2 => {
+                self.field(Access::Str16, 0, acc);
+                dynasm!(self.ops ; .arch aarch64 ; lsr w0, w0, 16);
+                self.field(Access::Str16, 0, high);
+            }
+            _ => {
+                self.field(Access::Str32, 0, acc);
+                dynasm!(self.ops ; .arch aarch64 ; lsr x0, x0, 32);
+                self.field(Access::Str32, 0, high);
+            }
+        }
+        self.merge(CF | OF);
     }
 
     fn exit_if(&mut self, cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)>) {

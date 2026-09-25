@@ -49,6 +49,10 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool) -> Option<Vec<Uo
         Cld => flag(DF, Some(false), &mut u),
         Std => flag(DF, Some(true), &mut u),
         Nop => instr.op_count() == 0,
+        Imul => imul(instr, &mut u),
+        Mul => mul_wide(instr, false, &mut u),
+        Shld => double_shift(instr, true, &mut u),
+        Shrd => double_shift(instr, false, &mut u),
         Shl | Sal => shift(instr, ShiftOp::Shl, &mut u),
         Shr => shift(instr, ShiftOp::Shr, &mut u),
         Sar => shift(instr, ShiftOp::Sar, &mut u),
@@ -368,6 +372,109 @@ fn shift(instr: &Instruction, op: ShiftOp, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::Get { t: T0, r });
     u.push(Uop::Shift { op, size: r.size, t: T0, count: count as u8 });
     u.push(Uop::Set { r, t: T0 });
+    true
+}
+
+/// Operand `i` (a register or memory of `size` bytes) into T1, memory
+/// checked for reading through T2.
+fn source_t1(instr: &Instruction, i: u32, size: u8, u: &mut Vec<Uop>) -> Option<()> {
+    match instr.op_kind(i) {
+        OpKind::Register => {
+            let r = gpr(instr.op_register(i))?;
+            (r.size == size).then(|| u.push(Uop::Get { t: T1, r }))
+        }
+        OpKind::Memory => {
+            mem(instr, T2, size, false, u)?;
+            u.push(Uop::Load { dst: T1, m: T2, size });
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+/// IMUL: the one-operand form widens as MUL does; the two- and
+/// three-operand forms multiply into a register.
+fn imul(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    if instr.op_count() == 1 {
+        return mul_wide(instr, true, u);
+    }
+    let Some(dest) = gpr(instr.op0_register()) else { return false };
+    if instr.op0_kind() != OpKind::Register || dest.size == 1 {
+        return false;
+    }
+    let size = dest.size;
+    if source_t1(instr, 1, size, u).is_none() {
+        return false;
+    }
+    let b = if instr.op_count() == 2 {
+        u.insert(0, Uop::Get { t: T0, r: dest });
+        Src::T(T1)
+    } else if is_imm(instr.op2_kind()) {
+        u.push(Uop::Copy { dst: T0, src: T1 });
+        Src::Imm(instr.immediate(2) as u32 & size_mask(size))
+    } else {
+        return false;
+    };
+    u.push(Uop::Imul { size, a: T0, b });
+    u.push(Uop::Set { r: dest, t: T0 });
+    true
+}
+
+/// MUL, and the one-operand IMUL.
+fn mul_wide(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
+    if instr.op_count() != 1 {
+        return false;
+    }
+    let size = match instr.op0_kind() {
+        OpKind::Register => match gpr(instr.op0_register()) {
+            Some(r) => r.size,
+            None => return false,
+        },
+        OpKind::Memory => instr.memory_size().size() as u8,
+        _ => return false,
+    };
+    if !matches!(size, 1 | 2 | 4) || source_t1(instr, 0, size, u).is_none() {
+        return false;
+    }
+    u.push(Uop::MulWide { signed, size, t: T1 });
+    true
+}
+
+/// SHLD and SHRD by an immediate count below the operand's width (a 386
+/// rotates the source in for 16-bit operands shifted by more).
+fn double_shift(instr: &Instruction, left: bool, u: &mut Vec<Uop>) -> bool {
+    if instr.op_count() != 3 || instr.op1_kind() != OpKind::Register || !is_imm(instr.op2_kind()) {
+        return false;
+    }
+    let Some(src) = gpr(instr.op1_register()) else { return false };
+    let size = src.size;
+    let count = instr.immediate(2) as u32 & 0x1F;
+    if size == 1 || count == 0 || count >= size as u32 * 8 {
+        return false;
+    }
+    let count = count as u8;
+    match instr.op0_kind() {
+        OpKind::Register => {
+            let Some(dest) = gpr(instr.op0_register()) else { return false };
+            if dest.size != size {
+                return false;
+            }
+            u.push(Uop::Get { t: T0, r: dest });
+            u.push(Uop::Get { t: T1, r: src });
+            u.push(Uop::DoubleShift { left, size, dst: T0, src: T1, count });
+            u.push(Uop::Set { r: dest, t: T0 });
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, size, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load { dst: T0, m: T2, size });
+            u.push(Uop::Get { t: T1, r: src });
+            u.push(Uop::DoubleShift { left, size, dst: T0, src: T1, count });
+            u.push(Uop::Store { m: T2, src: T0, size });
+        }
+        _ => return false,
+    }
     true
 }
 

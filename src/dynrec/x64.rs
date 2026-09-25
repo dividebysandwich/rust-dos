@@ -546,6 +546,20 @@ impl Gen<'_> {
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
             Uop::Shift { op, size, t, count } => self.shift(op, size, t, count),
+            Uop::DoubleShift { left, size, dst, src, count } => self.double_shift(left, size, dst, src, count),
+            Uop::Imul { size, a, b } => {
+                let a = r(a);
+                match (size, b) {
+                    (2, Src::T(b)) => dynasm!(self.ops ; .arch x64 ; imul Rw(a), Rw(r(b))),
+                    (_, Src::T(b)) => dynasm!(self.ops ; .arch x64 ; imul Rd(a), Rd(r(b))),
+                    (2, Src::Imm(v)) => dynasm!(self.ops ; .arch x64 ; imul Rw(a), Rw(a), v as i16),
+                    (_, Src::Imm(v)) => dynasm!(self.ops ; .arch x64 ; imul Rd(a), Rd(a), v as i32),
+                }
+                // CF and OF: the product doesn't fit.
+                self.host_flags();
+                self.merge(CF | OF, CF | OF);
+            }
+            Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
             Uop::Flag { mask, set } => match set {
                 Some(true) => dynasm!(self.ops ; .arch x64 ; or DWORD [rbx + FLAGS], mask as i32),
                 Some(false) => dynasm!(self.ops ; .arch x64 ; and DWORD [rbx + FLAGS], !mask as i32),
@@ -820,6 +834,75 @@ impl Gen<'_> {
                 self.merge(CF | OF, CF | OF);
             }
         }
+    }
+
+    /// SHLD and SHRD by 1 to width - 1: the host's result, CF, SF, ZF and
+    /// PF; OF as `alu_double_shift` has it; AF kept.
+    fn double_shift(&mut self, left: bool, size: u8, dst: T, src: T, count: u8) {
+        let (d, s, c) = (r(dst), r(src), count as i8);
+        match (left, size) {
+            (true, 2) => dynasm!(self.ops ; .arch x64 ; shld Rw(d), Rw(s), c),
+            (true, _) => dynasm!(self.ops ; .arch x64 ; shld Rd(d), Rd(s), c),
+            (false, 2) => dynasm!(self.ops ; .arch x64 ; shrd Rw(d), Rw(s), c),
+            (false, _) => dynasm!(self.ops ; .arch x64 ; shrd Rd(d), Rd(s), c),
+        }
+        self.host_flags();
+        let top = size as i8 * 8 - 1;
+        if left {
+            // OF = the result's sign ^ CF.
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov ecx, eax
+                ; shr ecx, 7
+                ; xor ecx, eax
+            );
+        } else {
+            // OF = the result's top two bits differ.
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov ecx, Rd(d)
+                ; mov edx, ecx
+                ; shr ecx, top
+                ; shr edx, top - 1
+                ; xor ecx, edx
+            );
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; and ecx, 1
+            ; shl ecx, 11
+            ; and eax, (CF | SZP) as i32
+            ; or eax, ecx
+        );
+        self.merge(CF | OF | SZP, CF | OF | SZP);
+    }
+
+    /// MUL or IMUL of AL, AX or EAX by t into AX, DX:AX or EDX:EAX, with the
+    /// host's CF and OF.
+    fn mul_wide(&mut self, signed: bool, size: u8, t: T) {
+        let t = r(t);
+        let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
+        match size {
+            1 => dynasm!(self.ops ; .arch x64 ; movzx eax, BYTE [rbx + acc]),
+            2 => dynasm!(self.ops ; .arch x64 ; movzx eax, WORD [rbx + acc]),
+            _ => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + acc]),
+        }
+        match (signed, size) {
+            (false, 1) => dynasm!(self.ops ; .arch x64 ; mul Rb(t)),
+            (false, 2) => dynasm!(self.ops ; .arch x64 ; mul Rw(t)),
+            (false, _) => dynasm!(self.ops ; .arch x64 ; mul Rd(t)),
+            (true, 1) => dynasm!(self.ops ; .arch x64 ; imul Rb(t)),
+            (true, 2) => dynasm!(self.ops ; .arch x64 ; imul Rw(t)),
+            (true, _) => dynasm!(self.ops ; .arch x64 ; imul Rd(t)),
+        }
+        dynasm!(self.ops ; .arch x64 ; pushfq);
+        match size {
+            1 => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + acc], ax),
+            2 => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + acc], ax ; mov WORD [rbx + high], dx),
+            _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + acc], eax ; mov DWORD [rbx + high], edx),
+        }
+        dynasm!(self.ops ; .arch x64 ; pop rax);
+        self.merge(CF | OF, CF | OF);
     }
 
     fn exit_if(&mut self, cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)>) {
