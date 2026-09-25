@@ -161,9 +161,66 @@ pub fn render(grid: &Grid, layout: &Layout, frame: &mut Frame) {
     }
 }
 
+/// A graph of `values`, oldest first, the newest at the right edge and
+/// `history` of them across the whole width, on a scale from 0 to `max`,
+/// in the cells from (`col`, `row`), `cols` wide and `rows` high, drawn
+/// onto `frame` where `layout` put the panel.
+pub fn plot(frame: &mut Frame, layout: &Layout, cells: (usize, usize, usize, usize), values: &[f32], history: usize, max: f32, color: Rgb) {
+    let (col, row, cols, rows) = cells;
+    let (x0, y0) = (layout.x + col * 8, layout.y + row * layout.cell_h);
+    let (w, h) = (cols * 8, rows * layout.cell_h);
+    let (width, height) = (frame.width as usize, frame.height as usize);
+    let mut put = |x: usize, y: usize, c: Rgb| {
+        if x < width && y < height {
+            let i = (y * width + x) * 3;
+            frame.rgb[i..i + 3].copy_from_slice(&[c.0, c.1, c.2]);
+        }
+    };
+    let faint = Rgb(color.0 / 3, color.1 / 3, color.2 / 3);
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            // A dotted line at each quarter of the scale.
+            let quarter = (1..4).any(|q| y == y0 + h - h * q / 4) && x % 2 == 0;
+            put(x, y, if quarter { DIM } else { FIELD });
+        }
+    }
+    if values.is_empty() || w == 0 || h == 0 || max <= 0.0 {
+        return;
+    }
+    for i in 0..w {
+        // The sample this column shows, counting from the newest.
+        let back = (w - 1 - i) * history.max(1) / w;
+        let Some(&value) = values.len().checked_sub(back + 1).and_then(|at| values.get(at)) else { continue };
+        let bar = ((value / max).clamp(0.0, 1.0) * h as f32).round() as usize;
+        for dy in 0..bar {
+            put(x0 + i, y0 + h - 1 - dy, if dy + 1 == bar { color } else { faint });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plots_draw_inside_their_cells() {
+        let mut frame = Frame::new(640, 400);
+        let layout = Layout::for_frame(640, 400);
+        plot(&mut frame, &layout, (2, 10, 20, 4), &[0.0, 50.0, 100.0], 120, 100.0, GOOD);
+        let px = |x: usize, y: usize| {
+            let i = (y * 640 + x) * 3;
+            Rgb(frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
+        };
+        let (x0, y0) = (layout.x + 16, layout.y + 10 * layout.cell_h);
+        let (w, h) = (160, 4 * layout.cell_h);
+        // The newest, full scale, reaches the top at the right edge.
+        assert_eq!(px(x0 + w - 1, y0), GOOD);
+        // Nothing drawn outside the cells.
+        assert_eq!(px(x0 - 1, y0), Rgb(0, 0, 0));
+        assert_eq!(px(x0 + w, y0 + h - 1), Rgb(0, 0, 0));
+        // The oldest columns are empty: there were only three samples.
+        assert_eq!(px(x0, y0 + h - 1), FIELD);
+    }
 
     #[test]
     fn text_maps_to_code_page_437() {

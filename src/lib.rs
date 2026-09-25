@@ -41,6 +41,7 @@ pub mod recorder;
 pub mod sb;
 pub mod shell;
 pub mod sound;
+pub mod stats;
 pub mod timer;
 pub mod video;
 pub mod xms;

@@ -142,10 +142,11 @@ enum Page {
     Mixer,
     Games,
     Cheats,
+    Stats,
 }
 
-const PAGES: [Page; 7] =
-    [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer, Page::Games, Page::Cheats];
+const PAGES: [Page; 8] =
+    [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer, Page::Games, Page::Cheats, Page::Stats];
 
 impl Page {
     fn title(self) -> &'static str {
@@ -157,13 +158,14 @@ impl Page {
             Page::Mixer => "Mixer",
             Page::Games => "Games",
             Page::Cheats => "Cheats",
+            Page::Stats => "Stats",
         }
     }
 
     fn items(self) -> &'static [Item] {
         use Item::*;
         match self {
-            Page::Drives | Page::Games | Page::Cheats => &[],
+            Page::Drives | Page::Games | Page::Cheats | Page::Stats => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
             Page::Emulator => &[
                 Cycles, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick, Deadzone,
@@ -688,6 +690,18 @@ pub struct ConfigUi {
     notice: Option<String>,
     /// The Cheats page's search.
     cheats: cheats::Cheats,
+    /// What the Stats page shows (`set_stats`), and the graphs the last
+    /// frame drew as text, drawn over it in pixels.
+    stats: Option<crate::stats::StatsView>,
+    plots: Vec<Plot>,
+}
+
+/// A graph for `draw::plot`.
+struct Plot {
+    cells: (usize, usize, usize, usize),
+    values: Vec<f32>,
+    max: f32,
+    color: Rgb,
 }
 
 impl Default for ConfigUi {
@@ -729,6 +743,8 @@ impl ConfigUi {
             confirm_delete: None,
             notice: None,
             cheats: cheats::Cheats::default(),
+            stats: None,
+            plots: Vec::new(),
         }
     }
 
@@ -737,9 +753,16 @@ impl ConfigUi {
     }
 
     /// Whether the machine waits while the window is open: it does,
-    /// except on the Mixer page, where it plays on to be heard.
+    /// except on the Mixer page, where it plays on to be heard, and the
+    /// Stats page, which shows it running.
     pub fn pauses_machine(&self) -> bool {
-        self.open && self.page != Page::Mixer
+        self.open && !matches!(self.page, Page::Mixer | Page::Stats)
+    }
+
+    /// What the Stats page shows, for the frontend to hand over every
+    /// frame while the window is open.
+    pub fn set_stats(&mut self, view: crate::stats::StatsView) {
+        self.stats = Some(view);
     }
 
     /// How loud each sound source was since the last frame (see
@@ -789,6 +812,7 @@ impl ConfigUi {
             Page::Drives => self.drives.len() + 1,
             Page::Games => self.games.len() + 1,
             Page::Cheats => self.cheats.rows().len(),
+            Page::Stats => 0,
             _ => self.items().len(),
         }
     }
@@ -941,6 +965,7 @@ impl ConfigUi {
             _ if self.page == Page::Drives => self.drives_key(key, host),
             _ if self.page == Page::Games => self.games_key(key, host),
             _ if self.page == Page::Cheats => self.cheats_key(key, host),
+            _ if self.page == Page::Stats => {}
             _ => self.setting_key(key, host),
         }
     }
@@ -1241,6 +1266,8 @@ impl ConfigUi {
             self.draw_games(&mut g, content);
         } else if self.page == Page::Cheats {
             self.draw_cheats(&mut g, content);
+        } else if self.page == Page::Stats {
+            self.draw_stats(&mut g, content);
         } else {
             self.draw_settings(&mut g, content);
         }
@@ -1265,7 +1292,52 @@ impl ConfigUi {
         }
 
         draw::render(&g, &layout, frame);
+        for plot in std::mem::take(&mut self.plots) {
+            draw::plot(frame, &layout, plot.cells, &plot.values, crate::stats::HISTORY, plot.max, plot.color);
+        }
         self.layout = Some(layout);
+    }
+
+    /// The Stats page: the numbers, and a graph each of the frames the
+    /// program draws and of the host's time the emulator takes.
+    fn draw_stats(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
+        let cols = g.cols;
+        let Some(view) = &self.stats else {
+            g.text(2, content.start, "Measuring...", draw::DIM);
+            return;
+        };
+        let value_col = 27.min(cols / 2);
+        let lines = [
+            ("Frames drawn", format!("{:.0} a second, on a {:.0} Hz display", view.fps, view.refresh_hz)),
+            ("Emulated CPU", format!("{} cycles/ms, {:.1} MIPS", view.cycles_per_ms, view.mips)),
+            ("Host CPU use", format!("{:.0}%, the picture {:.1} ms a frame", view.cpu_use, view.render_ms)),
+        ];
+        for (i, (label, value)) in lines.iter().enumerate() {
+            let row = content.start + i;
+            if row < content.end {
+                g.text_to(2, row, label, draw::TEXT, value_col - 1);
+                g.text_to(value_col, row, value, draw::BRIGHT, cols - 2);
+            }
+        }
+        // Two graphs, each with its title above it, in what is left.
+        let first = content.start + lines.len() + 1;
+        let left = content.end.saturating_sub(first);
+        if left < 4 {
+            return;
+        }
+        let height = left / 2 - 1;
+        let fps_max = view.fps_history.iter().copied().fold(view.refresh_hz, f32::max).max(1.0);
+        let fps_max = (fps_max / 10.0).ceil() * 10.0;
+        let graphs = [
+            ("Frames a second, the last 30 s", format!("{:.0}", fps_max), view.fps_history.clone(), fps_max, draw::GOOD),
+            ("Host CPU use, the last 30 s", "100%".to_string(), view.cpu_history.clone(), 100.0, draw::KEY),
+        ];
+        for (i, (title, scale, values, max, color)) in graphs.into_iter().enumerate() {
+            let top = first + i * (height + 1);
+            g.text(2, top, title, draw::TEXT);
+            g.text(cols - 2 - scale.len(), top, &scale, draw::DIM);
+            self.plots.push(Plot { cells: (2, top + 1, cols - 4, height), values, max, color });
+        }
     }
 
     /// The page tabs on row 1: with a space around each title where they
@@ -1551,6 +1623,8 @@ impl ConfigUi {
             vec![("Enter", "OK", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::Cheats {
             self.cheats_hints()
+        } else if self.page == Page::Stats {
+            vec![("Tab", "Page", Tab), ("Esc", "Close", Esc)]
         } else if self.page == Page::Games {
             vec![
                 ("Enter", "Launch", Enter),

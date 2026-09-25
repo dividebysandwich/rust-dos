@@ -69,6 +69,12 @@ pub struct Bus {
     /// Values the settings window's Cheats page froze, put back before
     /// every frame while the program runs (`apply_freezes`).
     pub freezes: Vec<crate::cheats::Freeze>,
+    /// The frames the program drew: the retraces after which the picture
+    /// had changed, or while it flips pages, the flips (see `sync_display`).
+    pub frames_drawn: u64,
+    /// Retraces counted, and the one of the last page flip.
+    retraces: u64,
+    last_flip: Option<u64>,
     /// Last POST code written to port 80h (or 190h, test ROMs).
     pub post_code: u8,
     /// Text written to port E9h, the Bochs debug console, which test ROMs
@@ -223,6 +229,9 @@ impl Bus {
             umb: None,
             lpt_dac: None,
             freezes: Vec::new(),
+            frames_drawn: 0,
+            retraces: 0,
+            last_flip: None,
             refresh_toggle: false,
             cursor_x: 0,
             cursor_y: 0,
@@ -1937,7 +1946,25 @@ impl Bus {
             if self.vbe.latched_start != self.vbe.start {
                 self.vbe.latched_start = self.vbe.start;
                 self.vga.mark_dirty_full();
+                self.vga.flipped = true;
             }
+            self.count_frame();
+        }
+    }
+
+    /// A retrace began: count a frame if the program drew one. A program
+    /// that flips pages draws the next frame out of sight, so while it
+    /// flips (a flip within the last second or so) only the flips count.
+    fn count_frame(&mut self) {
+        self.retraces += 1;
+        let flipped = std::mem::take(&mut self.vga.flipped);
+        let drawn = std::mem::take(&mut self.vga.drawn);
+        if flipped {
+            self.last_flip = Some(self.retraces);
+        }
+        let flipping = self.last_flip.is_some_and(|at| self.retraces - at < 70);
+        if flipped || (drawn && !flipping) {
+            self.frames_drawn += 1;
         }
     }
 

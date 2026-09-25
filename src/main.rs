@@ -317,9 +317,17 @@ fn main() -> Result<(), String> {
         }
     }
 
+    // What the settings window's Stats page shows, and the last frame's
+    // start and times for it.
+    let mut stats = rust_dos::stats::Stats::new();
+    let mut last_frame: Option<(std::time::Instant, rust_dos::stats::FrameTimes)> = None;
+
     // Main Loop
     'running: loop {
         let frame_start = std::time::Instant::now();
+        if let Some((start, times)) = last_frame {
+            stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
+        }
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'running,
@@ -785,10 +793,12 @@ fn main() -> Result<(), String> {
             cpu.bus.vga.mark_dirty_full();
             display.set_frame_size(width, height)?;
         }
+        let render_start = std::time::Instant::now();
         if cpu.bus.vga.dirty {
             video::render_screen(&mut cached_frame, &cpu.bus);
             cpu.bus.vga.clear_dirty();
         }
+        let render_time = render_start.elapsed();
 
         // Start from the cached render; the overlays go on top. A
         // monochrome monitor shows them in its phosphor's colour, but not
@@ -821,6 +831,7 @@ fn main() -> Result<(), String> {
         }
         if ui.is_open() {
             ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
+            ui.set_stats(stats.view());
         }
         ui.draw(&mut screen);
         osd.draw(&mut screen);
@@ -853,6 +864,8 @@ fn main() -> Result<(), String> {
         if let Some(cycles) = pacer.end_frame(&cpu.bus.clock, executed, exec_time, overhead) {
             cpu.bus.set_cycles_per_ms(cycles);
         }
+        let busy = frame_start.elapsed();
+        last_frame = Some((frame_start, rust_dos::stats::FrameTimes { wall: busy, busy, render: render_time, executed }));
         pacer.wait_for_next_frame();
     }
 

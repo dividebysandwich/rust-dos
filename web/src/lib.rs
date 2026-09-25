@@ -22,6 +22,7 @@ use rust_dos::exec::{self, NoHook};
 use rust_dos::games::{self, ActiveGame, GameEntry, NewGame};
 use rust_dos::joystick::PadState;
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
+use rust_dos::stats::{FrameTimes, Stats};
 use rust_dos::mount::MountSpec;
 use rust_dos::timer::{CpuSpeed, Pacer};
 use rust_dos::video::adapter::VideoSetup;
@@ -209,6 +210,10 @@ pub struct Machine {
     /// not ended yet.
     games: BTreeMap<String, String>,
     game: Option<ActiveGame>,
+    /// What the settings window's Stats page shows, and the last frame's
+    /// start and times for it.
+    stats: Stats,
+    last_frame: Option<(Instant, FrameTimes)>,
 }
 
 #[wasm_bindgen]
@@ -269,6 +274,8 @@ impl Machine {
             staged: None,
             games: BTreeMap::new(),
             game: None,
+            stats: Stats::new(),
+            last_frame: None,
         }
     }
 
@@ -349,6 +356,11 @@ impl Machine {
     /// whether the screen changed.
     pub fn run_frame(&mut self, queued: u32) -> bool {
         let frame_start = Instant::now();
+        // The page's frames come with the display's refresh: the time
+        // between them is the emulator's to take.
+        if let Some((start, times)) = self.last_frame {
+            self.stats.record(&self.cpu.bus, FrameTimes { wall: frame_start - start, ..times });
+        }
         self.sound.borrow_mut().queued = queued as usize;
 
         // Emulated time is counted in instructions (see timer.rs), so
@@ -397,12 +409,16 @@ impl Machine {
 
         audio::pump_audio(&mut self.cpu.bus, waiting);
         self.cpu.bus.flush_log();
+        let render_start = Instant::now();
         let changed = self.render();
+        let render = render_start.elapsed();
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
         if let Some(cycles) = self.pacer.end_frame(&self.cpu.bus.clock, executed, exec_time, overhead) {
             self.cpu.bus.set_cycles_per_ms(cycles);
         }
+        let busy = frame_start.elapsed();
+        self.last_frame = Some((frame_start, FrameTimes { wall: busy, busy, render, executed }));
         changed
     }
 
@@ -953,6 +969,7 @@ impl Machine {
         video::mono::apply(&mut self.next, self.settings.monochrome);
         if self.ui.is_open() {
             self.ui.set_mixer_status(bus.mixer.muted, bus.mixer.take_peaks());
+            self.ui.set_stats(self.stats.view());
         }
         self.ui.draw(&mut self.next);
         self.osd.draw(&mut self.next);

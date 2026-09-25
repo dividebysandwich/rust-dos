@@ -448,6 +448,32 @@ fn the_machine_plays_on_while_the_mixer_page_shows() {
     assert!(!ui.pauses_machine());
     ui.show_page(Page::Sound);
     assert!(ui.pauses_machine());
+    ui.show_page(Page::Stats);
+    assert!(!ui.pauses_machine(), "the Stats page shows it running");
+}
+
+#[test]
+fn the_stats_page_draws_its_numbers_and_graphs() {
+    let host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Stats);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    ui.set_stats(crate::stats::StatsView {
+        fps: 35.0,
+        refresh_hz: 70.0,
+        cycles_per_ms: 100_000,
+        mips: 98.5,
+        cpu_use: 40.0,
+        render_ms: 0.4,
+        fps_history: vec![30.0, 35.0, 70.0],
+        cpu_history: vec![40.0; 120],
+    });
+    for (width, height) in [(640, 400), (320, 200), (1024, 768)] {
+        let mut frame = Frame::new(width, height);
+        ui.draw(&mut frame);
+        assert!(frame.rgb.chunks(3).any(|px| px == [draw::GOOD.0, draw::GOOD.1, draw::GOOD.2]), "the frames graph at {}x{}", width, height);
+    }
 }
 
 #[test]

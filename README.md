@@ -238,7 +238,7 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 Press **Ctrl+F12**, or type `DOSCONFIG` at the DOS prompt, to open the
 settings window over the running program. The program pauses while it is
 open, except on the Mixer page, where it plays on so you hear the volumes
-as you set them. Ctrl+F12 or Esc closes it.
+as you set them, and the Stats page, which shows it running. Ctrl+F12 or Esc closes it.
 
 * **Drives:** mount a host directory or a disk or CD image (Ins), change or
   swap the one a drive shows (Enter; this is how to change discs in the
@@ -264,6 +264,11 @@ as you set them. Ctrl+F12 or Esc closes it.
   or 32 bits, typed in decimal or hex (`0x1F`, `$1F`, `1Fh`), and the
   search covers conventional memory, or all of it for games with DOS
   extenders.
+* **Stats:** how the machine runs: the frames a second the program draws
+  (a retrace after which the picture changed, or for a game that flips
+  pages, each flip) and the display's refresh rate, the emulated CPU's
+  speed, and how much of the host's CPU time the emulator takes, with a
+  graph of the frames and of the host's CPU over the last 30 seconds.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the

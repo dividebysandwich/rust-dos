@@ -70,6 +70,12 @@ pub struct VgaCard {
     pub dirty_y_min: u32,
     pub dirty_y_max: u32,
 
+    /// Whether the program changed the picture since the last retrace, and
+    /// whether it flipped pages (the start address), for counting the
+    /// frames it draws (`Bus::frames_drawn`).
+    pub drawn: bool,
+    pub flipped: bool,
+
     /// Whether blinking characters show (the blink's phase, which the
     /// front end sets).
     blink_on: bool,
@@ -144,6 +150,8 @@ impl VgaCard {
             dirty: true,
             dirty_y_min: 0,
             dirty_y_max: u32::MAX,
+            drawn: false,
+            flipped: false,
             blink_on: true,
             cga_mode: 0x29,
             cga_color: 0x30,
@@ -163,6 +171,7 @@ impl VgaCard {
     #[inline]
     pub fn mark_dirty_full(&mut self) {
         self.dirty = true;
+        self.drawn = true;
         self.dirty_y_min = 0;
         self.dirty_y_max = u32::MAX;
     }
@@ -175,6 +184,7 @@ impl VgaCard {
             return;
         }
         self.dirty = true;
+        self.drawn = true;
         if self.dirty_y_min > y_start {
             self.dirty_y_min = y_start;
         }
@@ -296,7 +306,10 @@ impl VgaCard {
         if on != self.blink_on {
             self.blink_on = on;
             if self.blinks() {
+                // The blink is no frame of the program's.
+                let drawn = self.drawn;
                 self.mark_dirty_full();
+                self.drawn = drawn;
             }
         }
     }
@@ -494,6 +507,7 @@ impl VgaCard {
         if new_addr != self.latched_start_addr {
             self.latched_start_addr = new_addr;
             self.mark_dirty_full();
+            self.flipped = true;
         }
     }
 
