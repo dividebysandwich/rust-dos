@@ -594,6 +594,15 @@ fn main() -> Result<(), String> {
 
                 Event::TextInput { text, .. } if ui.is_open() => ui.text(&text, &mut host!()),
 
+                // A file or folder dropped onto the window.
+                Event::DropFile { filename, .. } => {
+                    let message = host!().dropped(std::path::Path::new(&filename));
+                    if ui.is_open() {
+                        ui.drives_changed(&host!(), &message);
+                    }
+                    osd.show(message);
+                }
+
                 // Game controllers come and go; the first two are the
                 // game port's.
                 Event::ControllerDeviceAdded { which, .. } => {
@@ -1100,6 +1109,56 @@ impl MainHost<'_, '_> {
         let message = format!("Starting {}", prepared.name);
         *self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced });
         Ok(message)
+    }
+
+    /// A file or folder dropped onto the window: a game set up for DOSBox
+    /// is imported and launched, a folder or disk image mounted, a CD image
+    /// put in the CD-ROM drive, a floppy in A:, and a program run from its
+    /// folder. Returns what to tell the user.
+    fn dropped(&mut self, path: &std::path::Path) -> String {
+        use rust_dos::import::drop::{DropAction, drop_action};
+        let free = |cpu: &Cpu| (3..LASTDRIVE - 1).find(|&d| !cpu.bus.disk.is_mounted(d));
+        let mount = |host: &mut Self, drive: Option<u8>, path: &std::path::Path, kind: DriveKind| -> Result<u8, String> {
+            let drive = drive.ok_or("There is no free drive letter")?;
+            let spec = MountSpec { drive, path: path.to_path_buf(), opts: disk::MountOptions { kind, ..Default::default() } };
+            host.mount(spec, true).map(|_| drive)
+        };
+        let name = |path: &std::path::Path| path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        let result = match drop_action(path) {
+            DropAction::ImportGame(source) => self.import_game(&source).and_then(|(id, imported)| {
+                Ok(self.launch_game(&id).unwrap_or(imported))
+            }),
+            DropAction::MountFolder(dir) => {
+                mount(self, free(self.cpu), &dir, DriveKind::HardDisk).map(|d| format!("{}: is {}", disk::drive_letter(d), name(&dir)))
+            }
+            DropAction::Disc(image) => {
+                let drive = self.cpu.bus.disk.drives_of_kind(DriveKind::CdRom).first().copied().or_else(|| free(self.cpu));
+                mount(self, drive, &image, DriveKind::CdRom).map(|d| format!("{}: has {}", disk::drive_letter(d), name(&image)))
+            }
+            DropAction::Floppy(image) => mount(self, Some(0), &image, DriveKind::Floppy).map(|_| format!("A: has {}", name(&image))),
+            DropAction::HardDisk(image) => {
+                mount(self, free(self.cpu), &image, DriveKind::HardDisk).map(|d| format!("{}: is {}", disk::drive_letter(d), name(&image)))
+            }
+            DropAction::Run(program) => {
+                let dir = program.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+                let mounted = self.cpu.bus.disk.mounted_drives().into_iter().find(|d| d.root.as_deref() == Some(dir.as_path()));
+                let drive = match mounted {
+                    Some(info) => Ok(info.drive),
+                    None => mount(self, free(self.cpu), &dir, DriveKind::HardDisk),
+                };
+                drive.and_then(|d| {
+                    if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
+                        return Ok(format!("{}: is {}; quit the program running to start {}", disk::drive_letter(d), name(&dir), name(&program)));
+                    }
+                    let letter = disk::drive_letter(d);
+                    self.cpu.queue_batch_lines([format!("{}:", letter), "CD \\".to_string(), name(&program)]);
+                    Ok(format!("Starting {} from {}:", name(&program), letter))
+                })
+            }
+            DropAction::Zip(_) => Err("Zip archives can't be dropped here yet".to_string()),
+            DropAction::Nothing(e) => Err(e),
+        };
+        result.unwrap_or_else(|e| e)
     }
 
     /// A game has ended: the settings and drives from before it.

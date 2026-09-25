@@ -4,6 +4,7 @@
 //! run DOSBox with such files (gog.rs).
 
 pub mod dosbox;
+pub mod drop;
 pub mod gog;
 
 use crate::mount::{MountSpec, mount_spec_value};

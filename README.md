@@ -450,6 +450,12 @@ Recordings and debug-server screenshots always show the plain picture.
 
 ## Drives
 
+Dropping something onto the window uses it: a GOG game's folder or a DOSBox
+configuration file is [imported](#game-profiles) as a game and launched, a
+folder or hard disk image is mounted on the first free drive from D:, a CD
+image goes into the CD-ROM drive (or a new one), a floppy image into A:,
+and a program or batch file is started from its folder.
+
 C: and the built-in Z: always exist, and so does X: with the Ultrasound
 patches unless the configuration moves or removes it. Mount more drives at
 the prompt:
