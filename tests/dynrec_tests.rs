@@ -330,6 +330,61 @@ fn divisions_and_their_faults_are_the_interpreters() {
     assert!(faults > 100, "#DE came {} times", faults);
 }
 
+#[test]
+fn setcc_sees_the_flags_wherever_they_are() {
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            // Every condition, on flags in the register and in the CPU
+            // (after a handler), into byte registers high and low and
+            // memory, summed into EBP.
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x9E37_79B1u32 as i32)?;
+            a.mov(ebx, ecx)?;
+            a.shl(ebx, 20)?;
+            macro_rules! set {
+                ($m:ident, $k:expr) => {
+                    match $k % 3 {
+                        0 => a.$m(dl)?,
+                        1 => a.$m(dh)?,
+                        _ => a.$m(byte_ptr(DATA + $k))?,
+                    }
+                };
+            }
+            for k in 0..16u32 {
+                if k % 4 == 0 {
+                    a.cmp(eax, ebx)?;
+                } else if k % 4 == 2 {
+                    a.sub(ebx, eax)?;
+                    a.pushfd()?;
+                    a.popfd()?;
+                }
+                match k {
+                    0 => set!(seto, k),
+                    1 => set!(setno, k),
+                    2 => set!(setb, k),
+                    3 => set!(setae, k),
+                    4 => set!(sete, k),
+                    5 => set!(setne, k),
+                    6 => set!(setbe, k),
+                    7 => set!(seta, k),
+                    8 => set!(sets, k),
+                    9 => set!(setns, k),
+                    10 => set!(setp, k),
+                    11 => set!(setnp, k),
+                    12 => set!(setl, k),
+                    13 => set!(setge, k),
+                    14 => set!(setle, k),
+                    _ => set!(setg, k),
+                }
+                a.add(ebp, edx)?;
+                a.rol(ebp, 3)?;
+            }
+            a.add(ebp, dword_ptr(DATA))
+        });
+    });
+    run_both(&mut a, &mut b);
+}
+
 /// A program with IRQ 0 firing often, running `body` in a loop.
 fn with_timer(rig: &mut Rig, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) {
     rig.handler(0x08, 0, |a| {

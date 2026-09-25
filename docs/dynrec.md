@@ -126,7 +126,7 @@ Each instruction becomes one of two things:
   - SHLD and SHRD by a constant;
   - MUL and IMUL in all their forms, DIV and IDIV;
   - LEA, MOVZX, MOVSX, XCHG of registers, CBW, CWD, CWDE and CDQ;
-  - the flag instructions;
+  - the flag instructions, and SETcc;
   - PUSH and POP of registers and constants;
   - near JMP, CALL, RET, Jcc, LOOPcc and JCXZ.
 

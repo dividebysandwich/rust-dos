@@ -691,6 +691,13 @@ impl Gen<'_> {
             Uop::Imul { size, a, b } => self.imul(size, a, b),
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
             Uop::DivWide { signed, size, t } => self.div_wide(signed, size, t),
+            Uop::SetCond { t, cc } => {
+                if self.test_condition(cc, self.dirty) {
+                    dynasm!(self.ops ; .arch aarch64 ; cset W(r(t)), ne);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; cset W(r(t)), eq);
+                }
+            }
             Uop::Flag { mask, set } => {
                 // DF is always in the CPU, the arithmetic flags in W28 once
                 // the code has changed them.
@@ -1562,26 +1569,28 @@ impl Gen<'_> {
     /// Branch to `yes` if condition `cc` holds on the guest's flags, in W28
     /// (`in_w28`) or the CPU.
     fn condition(&mut self, cc: ConditionCode, yes: DynamicLabel, in_w28: bool) {
+        if self.test_condition(cc, in_w28) {
+            dynasm!(self.ops ; .arch aarch64 ; b.ne =>yes);
+        } else {
+            dynasm!(self.ops ; .arch aarch64 ; b.eq =>yes);
+        }
+    }
+
+    /// Test condition `cc` on the guest's flags, in W28 (`in_w28`) or the
+    /// CPU: it holds if the host's Z is clear (true) or set (false).
+    fn test_condition(&mut self, cc: ConditionCode, in_w28: bool) -> bool {
         use ConditionCode as C;
         self.load_flags_w0(in_w28);
         match cc {
             C::o | C::b | C::e | C::be | C::s | C::p | C::no | C::ae | C::ne | C::a | C::ns | C::np => {
                 self.mov32(1, super::flags::cond_flags(cc));
                 dynasm!(self.ops ; .arch aarch64 ; tst w0, w1);
-                if matches!(cc, C::o | C::b | C::e | C::be | C::s | C::p) {
-                    dynasm!(self.ops ; .arch aarch64 ; b.ne =>yes);
-                } else {
-                    dynasm!(self.ops ; .arch aarch64 ; b.eq =>yes);
-                }
+                matches!(cc, C::o | C::b | C::e | C::be | C::s | C::p)
             }
             C::l | C::ge => {
                 // SF != OF: OF moved down to SF's bit.
                 dynasm!(self.ops ; .arch aarch64 ; eor w1, w0, w0, lsr 4 ; tst w1, SF);
-                if cc == C::l {
-                    dynasm!(self.ops ; .arch aarch64 ; b.ne =>yes);
-                } else {
-                    dynasm!(self.ops ; .arch aarch64 ; b.eq =>yes);
-                }
+                cc == C::l
             }
             _ => {
                 // LE: ZF or SF != OF; G: neither.
@@ -1591,12 +1600,9 @@ impl Gen<'_> {
                     ; and w1, w1, SF
                     ; and w0, w0, ZF
                     ; orr w0, w0, w1
+                    ; tst w0, w0
                 );
-                if cc == C::le {
-                    dynasm!(self.ops ; .arch aarch64 ; cbnz w0, =>yes);
-                } else {
-                    dynasm!(self.ops ; .arch aarch64 ; cbz w0, =>yes);
-                }
+                cc == C::le
             }
         }
     }

@@ -64,6 +64,8 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool) -> Option<Vec<Uo
         Pop => pop(instr, stack32, &mut u),
         Jmp => jmp(instr, &mut u),
         Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge | Jle | Jg => jcc(instr, next, &mut u),
+        Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
+        | Setle | Setg => setcc(instr, &mut u),
         Loop | Loope | Loopne => loop_op(instr, next, &mut u),
         Jcxz | Jecxz => jcxz(instr, next, &mut u),
         Call => call(instr, next, stack32, &mut u),
@@ -567,6 +569,27 @@ fn jcc(instr: &Instruction, next: u32, u: &mut Vec<Uop>) -> bool {
         return false;
     }
     u.push(Uop::ExitIf { cond: Cond::Flags(instr.condition_code()), taken: target, next, commit: None });
+    true
+}
+
+/// SETcc of a byte register or memory.
+fn setcc(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let cc = instr.condition_code();
+    match instr.op0_kind() {
+        OpKind::Register => {
+            let Some(r) = gpr(instr.op0_register()) else { return false };
+            u.push(Uop::SetCond { t: T0, cc });
+            u.push(Uop::Set { r, t: T0 });
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, 1, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::SetCond { t: T0, cc });
+            u.push(Uop::Store { m: T2, src: T0, size: 1 });
+        }
+        _ => return false,
+    }
     true
 }
 

@@ -130,6 +130,8 @@ pub enum Uop {
     DivWide { signed: bool, size: u8, t: T },
     /// Set (Some(true)), clear or complement (None) the flags in `mask`.
     Flag { mask: u32, set: Option<bool> },
+    /// t = 1 if condition `cc` holds on the flags, else 0 (SETcc).
+    SetCond { t: T, cc: ConditionCode },
     /// #GP(0) if the value is past the CS limit (a near jump's target).
     CheckLimit { src: Src },
     /// Leave the block with EIP = the value.
