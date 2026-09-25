@@ -24,6 +24,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   General MIDI through the MPU-401 with a SoundFont or the Gravis patches
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
   both digital audio and music with built-in patch set.
+* The Covox Speech Thing and the Disney Sound Source on the parallel port
 * Graphics: text, CGA, EGA and VGA modes with Mode X support
 * VESA VBE 2.0: 256-color, 15/16-bit and 32-bit modes from 320x200 to
   1024x768 with 4 MB of video memory, bank switching and linear frame
@@ -175,13 +176,20 @@ D:
     patches listed in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, or
     `none`. The built-in patches play even without the Ultrasound
     (`gus=false`) unless `gusdrive` is `none`.
+  * `lpt_dac` puts a DAC on the parallel port LPT1 (378h), which many games
+    of the late 1980s and early 1990s play digital sound through: `none`
+    (the default), `disney` (the Disney Sound Source, with its 16-byte
+    FIFO played at 7 kHz) or `covox` (the Covox Speech Thing). Both sound
+    through filters that give them the real devices' sound, as in DOSBox
+    Staging. A change takes effect at the DOS prompt.
 * **`[emulator]`** also has `hard_disk_speed` and `floppy_disk_speed`, and
   **`[sound]`** `hard_disk_noise` and `floppy_disk_noise` (see
   [Disk speed and noises](#disk-speed-and-noises)).
 * **`[mixer]`:** the volume of each sound source in percent, from 0 to 200:
   `speaker` (the PC speaker and the prompt's beeps), `sb` (the Sound
   Blaster's digital audio), `fm` (the FM synthesizer), `gus`, `midi`,
-  `cdaudio` and `disknoise`, and `master` for all of them together. At 100,
+  `cdaudio`, `disknoise` and `lptdac` (the Covox or Disney Sound Source),
+  and `master` for all of them together. At 100,
   the default, a source plays as loud as its card makes it. The volumes
   apply on top of the Sound Blaster's own mixer, which programs set.
   * `speaker_filter` gives the PC speaker the sound of the small speaker in

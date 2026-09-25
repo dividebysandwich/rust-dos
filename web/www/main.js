@@ -79,6 +79,9 @@ aspect=true
 #opl=opl3
 # The Gravis Ultrasound, with its MIDI patches on drive X:.
 #gus=true
+# A DAC on the parallel port: none, disney (the Disney Sound Source) or
+# covox.
+#lpt_dac=none
 # The noises the disks make: off, seek-only or on.
 #hard_disk_noise=off
 #floppy_disk_noise=off
@@ -94,6 +97,7 @@ aspect=true
 #midi=100
 #cdaudio=100
 #disknoise=100
+#lptdac=100
 # The PC speaker's and the Sound Blaster's filters (on/off, auto/off), and
 # a reverb (off, tiny, small, medium, large, huge) and a chorus (off,
 # light, normal, strong) for the FM synthesizer and MIDI music.

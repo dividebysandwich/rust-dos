@@ -152,7 +152,7 @@ impl Page {
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
-                SoundFont, HardDiskNoise, FloppyDiskNoise,
+                SoundFont, LptDac, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),
@@ -163,6 +163,7 @@ impl Page {
                 Volume(Channel::Midi),
                 Volume(Channel::CdAudio),
                 Volume(Channel::DiskNoise),
+                Volume(Channel::LptDac),
                 SpeakerFilter,
                 SbFilter,
                 Reverb,
@@ -254,6 +255,8 @@ enum Item {
     SbFilter,
     Reverb,
     Chorus,
+    /// The DAC on the parallel port.
+    LptDac,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -340,6 +343,7 @@ impl Item {
             SbFilter => "Sound Blaster filter",
             Reverb => "Reverb (FM, MIDI)",
             Chorus => "Chorus (FM, MIDI)",
+            LptDac => "Parallel port DAC",
         }
     }
 
@@ -446,6 +450,7 @@ impl Item {
             .to_string(),
             Reverb => s.mixer.reverb.name().to_string(),
             Chorus => s.mixer.chorus.name().to_string(),
+            LptDac => s.sound.lpt_dac.describe().to_string(),
         }
     }
 
@@ -532,6 +537,7 @@ impl Item {
             }
             Reverb => s.mixer.reverb = cycle(&ReverbPreset::ALL, s.mixer.reverb, dir),
             Chorus => s.mixer.chorus = cycle(&ChorusPreset::ALL, s.mixer.chorus, dir),
+            LptDac => sound.lpt_dac = cycle(&crate::lpt_dac::LptDacType::ALL, sound.lpt_dac, dir),
             // In fives of percent.
             Deadzone => {
                 let dz = s.joystick.deadzone as isize;

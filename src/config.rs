@@ -14,6 +14,7 @@ use crate::cpu::CpuModel;
 use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickSettings, JoystickType};
+use crate::lpt_dac::LptDacType;
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
 use crate::timer::CpuSpeed;
@@ -232,6 +233,8 @@ pub struct SoundConfig {
     /// The Gravis Ultrasound; `enabled` says whether there is one.
     pub gus: crate::gus::GusConfig,
     pub midisynth: MidiSynth,
+    /// The Covox or Disney Sound Source on LPT1 (`lpt_dac`).
+    pub lpt_dac: LptDacType,
 }
 
 impl MidiSynth {
@@ -254,6 +257,7 @@ impl Default for SoundConfig {
             soundfont: None,
             gus: crate::gus::GusConfig::default(),
             midisynth: MidiSynth::Auto,
+            lpt_dac: LptDacType::None,
         }
     }
 }
@@ -390,6 +394,10 @@ impl SoundConfig {
                     "none" => MidiSynth::None,
                     _ => return Err(format!("invalid midisynth '{}' (auto, soundfont, gus or none)", value)),
                 }
+            }
+            "lpt_dac" => {
+                self.lpt_dac = LptDacType::parse(value)
+                    .ok_or_else(|| format!("invalid lpt_dac '{}' (none, disney or covox)", value))?;
             }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
@@ -815,6 +823,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         ),
         (Sound, "ultradir", gus.ultradir.clone()),
         (Sound, "midisynth", Some(sound.midisynth.name().to_string())),
+        (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
@@ -1219,6 +1228,15 @@ mod tests {
     }
 
     #[test]
+    fn a_dac_on_the_parallel_port() {
+        let config = parse("[sound]\nlpt_dac=Disney\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.sound.lpt_dac, LptDacType::Disney);
+        let config = parse("[sound]\nlpt_dac=ston1\n", Path::new("/cfg"), None);
+        assert_eq!((config.sound.lpt_dac, config.warnings.len()), (LptDacType::None, 1));
+    }
+
+    #[test]
     fn ultrasound_settings() {
         let config = parse(
             "[sound]\ngusbase=260\ngusirq=11\ngusdma=6\nultradir=D:\\GUS\nmidisynth=gus\n",
@@ -1383,7 +1401,7 @@ mod tests {
         assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
         let mixer = Settings::from_config(&config).mixer;
         let levels = Channel::ALL.map(|channel| mixer.level(channel));
-        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100]);
+        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100]);
         assert!(mixer.speaker_filter);
         assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -1425,6 +1443,7 @@ mod tests {
                 ultradir: Some("D:\\GUS".to_string()),
             },
             midisynth: MidiSynth::Gus,
+            lpt_dac: LptDacType::Disney,
         };
         Settings {
             scale: 3,

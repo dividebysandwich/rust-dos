@@ -64,6 +64,8 @@ pub struct Bus {
     pub ems: Option<crate::ems::Ems>,
     /// Upper memory blocks, if DOS has them (see mcb.rs).
     pub umb: Option<crate::mcb::Umb>,
+    /// The Covox or Disney Sound Source on LPT1, if there is one.
+    pub lpt_dac: Option<crate::lpt_dac::LptDac>,
     /// Last POST code written to port 80h (or 190h, test ROMs).
     pub post_code: u8,
     /// Text written to port E9h, the Bochs debug console, which test ROMs
@@ -216,6 +218,7 @@ impl Bus {
             xms: crate::xms::Xms::new(),
             ems: None,
             umb: None,
+            lpt_dac: None,
             refresh_toggle: false,
             cursor_x: 0,
             cursor_y: 0,
@@ -415,6 +418,18 @@ impl Bus {
     pub fn set_mixer(&mut self, settings: crate::mixer::MixerSettings) {
         self.audio_catch_up();
         self.mixer.set(settings);
+    }
+
+    /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the BIOS data area
+    /// has LPT1 while there is one.
+    pub fn configure_lpt_dac(&mut self, kind: crate::lpt_dac::LptDacType) {
+        self.audio_catch_up();
+        let present = kind != crate::lpt_dac::LptDacType::None;
+        self.lpt_dac = present.then(|| crate::lpt_dac::LptDac::new(kind));
+        self.write_16(0x0408, if present { crate::lpt_dac::LPT1 } else { 0 });
+        // Equipment word bits 14-15: the parallel ports.
+        let equipment = self.read_16(0x0410) & !0xC000;
+        self.write_16(0x0410, equipment | if present { 0x4000 } else { 0 });
     }
 
     /// Take the `[joystick]` settings: what the game port has plugged in,
@@ -1224,6 +1239,10 @@ impl Bus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 self.mixer.add(&mut mix, &mut peaks, Channel::Gus, (gl * GUS_GAIN, gr * GUS_GAIN));
             }
+            if let Some(dac) = &mut self.lpt_dac {
+                let s = dac.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::LptDac, (s, s));
+            }
             let (l, r) = self.mixer.finish(mix, &mut peaks);
             self.audio_out.push_back(l.clamp(-32768.0, 32767.0) as i16);
             self.audio_out.push_back(r.clamp(-32768.0, 32767.0) as i16);
@@ -1644,6 +1663,20 @@ impl Bus {
             // Game port write: the one-shots fire.
             0x0201 => self.joystick.arm(),
 
+            // The DAC on the parallel port, heard from now on.
+            crate::lpt_dac::DATA if self.lpt_dac.is_some() => {
+                self.audio_catch_up();
+                if let Some(dac) = &mut self.lpt_dac {
+                    dac.write_data(value);
+                }
+            }
+            crate::lpt_dac::CONTROL if self.lpt_dac.is_some() => {
+                self.audio_catch_up();
+                if let Some(dac) = &mut self.lpt_dac {
+                    dac.write_control(value);
+                }
+            }
+
             // Super VGA CRTC registers, past the VGA's 00h-18h.
             0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 && self.vga.decodes(port) => {
                 self.ext_crtc_write(self.vga.crtc_index, value)
@@ -1770,6 +1803,18 @@ impl Bus {
 
             // The game port: the joysticks' axes and buttons.
             0x0201 => self.joystick.read(&self.mouse),
+
+            // The DAC on the parallel port: the Disney's FIFO empties as
+            // it plays.
+            crate::lpt_dac::DATA | crate::lpt_dac::STATUS | crate::lpt_dac::CONTROL if self.lpt_dac.is_some() => {
+                self.audio_catch_up();
+                let dac = self.lpt_dac.as_ref().unwrap();
+                match port {
+                    crate::lpt_dac::DATA => dac.read_data(),
+                    crate::lpt_dac::STATUS => dac.read_status(),
+                    _ => dac.read_control(),
+                }
+            }
 
             // Port 0x42 — PIT channel 2 (PC speaker tone) data. Some games
             // read this port as a cheap free-running counter for tight

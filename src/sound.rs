@@ -48,6 +48,9 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     if changed(&|s| format!("{:?}", s.ultrasound().map(|g| (g.base, g.irq, g.dma)))) {
         cpu.bus.configure_gus(gus);
     }
+    if changed(&|s| s.lpt_dac.name().to_string()) {
+        cpu.bus.configure_lpt_dac(sound.lpt_dac);
+    }
 
     let midi = |s: &SoundConfig| format!("{:?} {:?} {} {}", s.midisynth, s.soundfont, s.gus.builtin(), s.gus.ultradir());
     if !changed(&midi) {

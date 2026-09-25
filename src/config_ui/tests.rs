@@ -509,6 +509,21 @@ fn expanded_memory_changes_at_the_prompt() {
 }
 
 #[test]
+fn the_parallel_port_dac_changes_at_the_prompt() {
+    use crate::lpt_dac::LptDacType;
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Sound);
+    ui.row = ui.items().iter().position(|&i| i == Item::LptDac).unwrap();
+    assert_eq!(Item::LptDac.applies(), Applies::AtPrompt);
+    keys(&mut ui, &mut host, &[UiKey::Right, UiKey::Right]);
+    assert_eq!(host.applied.last().unwrap().sound.lpt_dac, LptDacType::Covox);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("Covox Speech Thing"));
+    ui.show_page(Page::Mixer);
+    assert!(ui.items().contains(&Item::Volume(Channel::LptDac)));
+}
+
+#[test]
 fn the_capture_folder_is_typed() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
