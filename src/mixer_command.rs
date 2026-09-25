@@ -30,6 +30,7 @@ fn channel_named(name: &str) -> Option<Channel> {
         "CDAUDIO" | "CDDA" => Channel::CdAudio,
         "DISKNOISE" | "HDDNOISE" | "FDDNOISE" => Channel::DiskNoise,
         "LPTDAC" | "DISNEY" | "COVOX" => Channel::LptDac,
+        "TANDY" | "PCJR" | "PSG" => Channel::Tandy,
         _ => return None,
     })
 }
@@ -46,12 +47,13 @@ fn display_name(channel: Channel) -> &'static str {
         Channel::CdAudio => "CDAUDIO",
         Channel::DiskNoise => "DISKNOISE",
         Channel::LptDac => "LPTDAC",
+        Channel::Tandy => "TANDY",
     }
 }
 
 /// Whether a channel has two sides, which line-out and crossfeed need.
 fn stereo(channel: Channel) -> bool {
-    !matches!(channel, Channel::Master | Channel::Speaker | Channel::DiskNoise | Channel::LptDac)
+    !matches!(channel, Channel::Master | Channel::Speaker | Channel::DiskNoise | Channel::LptDac | Channel::Tandy)
 }
 
 /// The channels that play here: the master, the speaker, and the sound
@@ -64,6 +66,7 @@ pub fn active_channels(cpu: &Cpu) -> Vec<Channel> {
             Channel::Sb => bus.sb.is_some(),
             Channel::Gus => bus.gus.is_some(),
             Channel::LptDac => bus.lpt_dac.is_some(),
+            Channel::Tandy => bus.tandy_sound_enabled(),
             Channel::DiskNoise => bus.disknoise.enabled(crate::diskio::DiskClass::HardDisk)
                 || bus.disknoise.enabled(crate::diskio::DiskClass::Floppy),
             _ => true,
@@ -366,7 +369,7 @@ impl ShellCommand for MixerCommand {
 mod tests {
     use super::*;
 
-    const ALL: [Channel; 9] = Channel::ALL;
+    const ALL: [Channel; 10] = Channel::ALL;
 
     #[test]
     fn volumes_in_percent_decibels_and_sides() {

@@ -69,6 +69,10 @@ pub struct Bus {
     pub umb: Option<crate::mcb::Umb>,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
     pub lpt_dac: Option<crate::lpt_dac::LptDac>,
+    /// The Tandy's and PCjr's sound chip (`tandy`), heard while
+    /// `tandy_sound_enabled`.
+    pub tandy_sound: crate::sn76489::Sn76489,
+    pub tandy_mode: crate::sn76489::TandySound,
     /// Values the settings window's Cheats page froze, put back before
     /// every frame while the program runs (`apply_freezes`).
     pub freezes: Vec<crate::cheats::Freeze>,
@@ -81,6 +85,11 @@ pub struct Bus {
     /// Retraces counted, and the one of the last page flip.
     retraces: u64,
     last_flip: Option<u64>,
+    /// The Tandy's or PCjr's picture memory as it was at the last retrace,
+    /// and where it was: programs (and the recompiler) write it as plain
+    /// RAM, which marks nothing for repainting.
+    gate_array_shadow: Vec<u8>,
+    gate_array_shadow_at: usize,
     /// Last POST code written to port 80h (or 190h, test ROMs).
     pub post_code: u8,
     /// Text written to port E9h, the Bochs debug console, which test ROMs
@@ -239,11 +248,15 @@ impl Bus {
             ems: None,
             umb: None,
             lpt_dac: None,
+            tandy_sound: crate::sn76489::Sn76489::new(crate::sn76489::Variant::Ncr8496),
+            tandy_mode: crate::sn76489::TandySound::Auto,
             freezes: Vec::new(),
             mixer_changed: false,
             frames_drawn: 0,
             retraces: 0,
             last_flip: None,
+            gate_array_shadow: Vec::new(),
+            gate_array_shadow_at: usize::MAX,
             refresh_toggle: false,
             cursor_x: 0,
             cursor_y: 0,
@@ -457,6 +470,33 @@ impl Bus {
         }
     }
 
+    /// Whether the Tandy's and PCjr's sound chip is there: on those
+    /// machines, or on any with `tandy=on`.
+    pub fn tandy_sound_enabled(&self) -> bool {
+        match self.tandy_mode {
+            crate::sn76489::TandySound::On => true,
+            crate::sn76489::TandySound::Off => false,
+            crate::sn76489::TandySound::Auto => self.vga.adapter.gate_array(),
+        }
+    }
+
+    /// Set the `tandy` setting.
+    pub fn configure_tandy_sound(&mut self, mode: crate::sn76489::TandySound) {
+        self.audio_catch_up();
+        self.tandy_mode = mode;
+    }
+
+    /// The sound chip, the PCjr's SN76496 on a PCjr and the NCR 8496
+    /// elsewhere, as the machine is now.
+    fn tandy_chip(&mut self) -> &mut crate::sn76489::Sn76489 {
+        use crate::sn76489::{Sn76489, Variant};
+        let variant = if self.vga.adapter == video::adapter::Adapter::Pcjr { Variant::Sn76496 } else { Variant::Ncr8496 };
+        if self.tandy_sound.variant() != variant {
+            self.tandy_sound = Sn76489::new(variant);
+        }
+        &mut self.tandy_sound
+    }
+
     /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the BIOS data area
     /// has LPT1 while there is one.
     pub fn configure_lpt_dac(&mut self, kind: crate::lpt_dac::LptDacType) {
@@ -614,7 +654,7 @@ impl Bus {
         // 63: whether upper memory is linked; 66: its first MCB, the one
         // that covers the memory below it; 68: where allocations search from.
         self.write_8(base + 0x63, self.umb.is_some_and(|u| u.linked) as u8);
-        self.write_16(base + 0x66, if self.umb.is_some() { crate::mcb::UMB_COVER_SEG } else { 0xFFFF });
+        self.write_16(base + 0x66, if self.umb.is_some() { crate::mcb::umb_cover_seg(self) } else { 0xFFFF });
         self.write_16(base + 0x68, crate::mcb::FIRST_MCB_SEG);
         self.write_8(base + 0x6C, 0xCB); // RETF for the NUL driver entries, past the table
     }
@@ -687,18 +727,17 @@ impl Bus {
         let rows = self.text_rows();
         let row_size = 160; // 80 chars * 2 bytes
         let screen_size = rows * row_size;
-        if screen_size > self.vga.vram_text.len() {
+        let text = self.text_mem_mut();
+        if screen_size > text.len() {
             return;
         }
 
         // Move memory back
-        for i in 0..(screen_size - row_size) {
-            self.vga.vram_text[i] = self.vga.vram_text[i + row_size];
-        }
+        text.copy_within(row_size..screen_size, 0);
 
         // Clear bottom row with space + light-gray attribute pairs.
-        for i in (screen_size - row_size)..screen_size {
-            self.vga.vram_text[i] = if i % 2 == 0 { 0x20 } else { 0x07 };
+        for (i, byte) in text[screen_size - row_size..screen_size].iter_mut().enumerate() {
+            *byte = if i % 2 == 0 { 0x20 } else { 0x07 };
         }
         // Scroll moves every visible row, so widen to the full screen.
         self.vga.mark_dirty_full();
@@ -714,8 +753,15 @@ impl Bus {
     }
 
     /// Copy `data` into RAM at `addr`, bypassing the VGA mapping, as program
-    /// loaders do. Bytes past the end of RAM are dropped.
+    /// loaders do. Bytes past the end of RAM are dropped. Bytes for the
+    /// video memory window (A0000h-BFFFFh) go through it.
     pub fn load_bytes(&mut self, addr: usize, data: &[u8]) {
+        if Self::touches_video(addr, data.len()) {
+            for (i, &b) in data.iter().enumerate() {
+                self.write_8(addr + i, b);
+            }
+            return;
+        }
         let end = addr.saturating_add(data.len()).min(self.ram.len());
         if addr >= end {
             return;
@@ -735,14 +781,27 @@ impl Bus {
         self.bump_page_gens(to, to + len);
     }
 
-    /// Set every RAM byte in `range` to `value`, bypassing the VGA mapping.
+    /// Set every RAM byte in `range` to `value`, bypassing the VGA mapping
+    /// but for the video memory window, which it goes through.
     pub fn fill_ram(&mut self, range: std::ops::Range<usize>, value: u8) {
+        if Self::touches_video(range.start, range.len()) {
+            for addr in range {
+                self.write_8(addr, value);
+            }
+            return;
+        }
         let end = range.end.min(self.ram.len());
         if range.start >= end {
             return;
         }
         self.ram[range.start..end].fill(value);
         self.bump_page_gens(range.start, end);
+    }
+
+    /// Whether `len` bytes at `addr` reach into the video memory window,
+    /// A0000h-BFFFFh.
+    fn touches_video(addr: usize, len: usize) -> bool {
+        len > 0 && addr < 0xC0000 && addr.saturating_add(len) > ADDR_VGA_GRAPHICS
     }
 
     /// Invalidate cached decodes of the pages covering `start..end`.
@@ -800,6 +859,9 @@ impl Bus {
             // work correctly. read_graphics also latches planes, needed
             // for planar read-modify-write sequences.
             return self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
+        }
+        if let Some(ram) = self.vga.cpu_window(addr) {
+            return self.ram[ram];
         }
         let (text, size, wrap) = self.vga.text_window();
         if (text..text + size).contains(&addr) {
@@ -871,6 +933,18 @@ impl Bus {
                     | VideoMode::Ega640x350
                     | VideoMode::Vga640x480
             );
+        }
+        // The Tandy's and PCjr's window onto system memory.
+        if let Some(ram) = self.vga.cpu_window(addr) {
+            self.ram[ram] = value;
+            let page = ram >> GEN_SHIFT;
+            self.page_gen[page] = self.page_gen[page].wrapping_add(1);
+            let (base, size) = self.vga.crt_range();
+            if !(base..base + size).contains(&ram) {
+                return false;
+            }
+            self.mark_text_dirty(ram - base, ram - base + 1);
+            return true;
         }
         let (text, size, wrap) = self.vga.text_window();
         if (text..text + size).contains(&addr) {
@@ -1219,6 +1293,7 @@ impl Bus {
         // at the master volume.
         use crate::mixer::Channel;
         let mut peaks = [0.0f32; crate::mixer::CHANNELS];
+        let tandy_on = self.tandy_sound_enabled();
         for _ in 0..frames {
             let mut mix = crate::mixer::MixFrame::default();
             // The PC speaker, and the prompt's beep, through the speaker's
@@ -1280,6 +1355,10 @@ impl Bus {
                 let s = dac.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::LptDac, (s, s));
             }
+            if tandy_on {
+                let s = self.tandy_sound.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Tandy, (s, s));
+            }
             let (l, r) = self.mixer.finish(mix, &mut peaks);
             self.audio_out.push_back(l.clamp(-32768.0, 32767.0) as i16);
             self.audio_out.push_back(r.clamp(-32768.0, 32767.0) as i16);
@@ -1329,6 +1408,7 @@ impl Bus {
         self.configure_sound(config, opl3);
         self.dma = crate::dma::Dma::new();
         self.mpu.reset();
+        self.tandy_sound = crate::sn76489::Sn76489::new(self.tandy_sound.variant());
         self.cdaudio.reset();
         self.sb_frame = (0, 0);
         let hooked = self.gus.as_ref().and_then(|gus| gus.irq()).is_some_and(|irq| {
@@ -1678,6 +1758,14 @@ impl Bus {
             }
             0x331 => self.mpu.write_command(value),
 
+            // The Tandy's and PCjr's sound chip, where the second DMA
+            // controller's channel 4 (the cascade, which nothing
+            // programs) has its address and count.
+            0xC0 | 0xC1 if self.tandy_sound_enabled() => {
+                self.audio_catch_up();
+                self.tandy_chip().write(value);
+            }
+
             // The DMA controllers and page registers. The sound cards run
             // up to now first, so the transfers they are in see the change
             // when it happens.
@@ -1693,7 +1781,7 @@ impl Bus {
             // Ports we intentionally ignore — writes are harmless but other-
             // wise spam the log. Programs blindly touch these as leftovers
             // from CGA/EGA-era code even when they're really talking to VGA.
-            0x3D8 | 0x3D9 if self.vga.adapter != video::adapter::Adapter::Cga => {
+            0x3D8 | 0x3D9 if !self.vga.decodes(port) => {
                 // CGA Mode Control / Color Select. Real VGA ignores writes
                 // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
             }
@@ -1752,6 +1840,8 @@ impl Bus {
                     let mode_control = match (port, self.vga.adapter) {
                         (0x3D8, video::adapter::Adapter::Cga) => Some(self.vga.cga_video_mode()),
                         (0x3B8, video::adapter::Adapter::Hercules) => Some(self.vga.herc_video_mode()),
+                        (0x3D8 | 0x3DA | 0x3DE, video::adapter::Adapter::Tandy)
+                        | (0x3DA, video::adapter::Adapter::Pcjr) => Some(self.vga.tandy_video_mode()),
                         _ => None,
                     };
                     if let Some(mode) = mode_control {
@@ -1962,8 +2052,61 @@ impl Bus {
                 self.vga.mark_dirty_full();
                 self.vga.flipped = true;
             }
+            if self.vga.adapter.gate_array() {
+                self.compare_gate_array();
+            }
             self.count_frame();
         }
+    }
+
+    /// Repaint what changed in the Tandy's or PCjr's picture memory since
+    /// the last retrace, however it was written.
+    fn compare_gate_array(&mut self) {
+        let (base, size) = self.vga.crt_range();
+        let Some(now) = self.ram.get(base..base + size) else { return };
+        if self.gate_array_shadow_at != base || self.gate_array_shadow.len() != size {
+            self.gate_array_shadow.clear();
+            self.gate_array_shadow.extend_from_slice(now);
+            self.gate_array_shadow_at = base;
+            self.vga.mark_dirty_full();
+            return;
+        }
+        let Some(first) = now.iter().zip(&self.gate_array_shadow).position(|(a, b)| a != b) else { return };
+        let last = now.iter().zip(&self.gate_array_shadow).rposition(|(a, b)| a != b).unwrap_or(first);
+        self.gate_array_shadow.copy_from_slice(now);
+        self.mark_text_dirty(first, last + 1);
+    }
+
+    /// The memory the text and CGA modes show from: the card's, or on a
+    /// Tandy or PCjr the pages of system memory the picture comes from.
+    pub fn display_mem(&self) -> &[u8] {
+        if self.vga.adapter.gate_array() {
+            let (base, size) = self.vga.crt_range();
+            return &self.ram[base..base + size];
+        }
+        &self.vga.vram_text
+    }
+
+    /// The text and CGA modes' memory as programs see it at B8000h, from
+    /// its start: the card's, or on a Tandy or PCjr the pages of system
+    /// memory the window shows.
+    pub fn text_mem(&self) -> &[u8] {
+        if self.vga.adapter.gate_array() {
+            let (base, size) = self.vga.cpu_range();
+            return &self.ram[base..base + size];
+        }
+        &self.vga.vram_text
+    }
+
+    /// `text_mem` to write. The caller marks what it changes for
+    /// repainting.
+    pub fn text_mem_mut(&mut self) -> &mut [u8] {
+        if self.vga.adapter.gate_array() {
+            let (base, size) = self.vga.cpu_range();
+            self.bump_page_gens(base, base + size);
+            return &mut self.ram[base..base + size];
+        }
+        &mut self.vga.vram_text
     }
 
     /// A retrace began: count a frame if the program drew one. A program
@@ -2030,6 +2173,7 @@ impl Bus {
     fn input_status_1(&mut self) -> u8 {
         self.sync_display();
         self.vga.attribute_flip_flop = false;
+        self.vga.gate_array_status_read();
         let now = self.clock.now_ns();
         let timing = self.vga.timing();
         match self.vga.adapter {

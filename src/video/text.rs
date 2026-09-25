@@ -73,7 +73,7 @@ impl TextGeometry {
 
 /// The text screen of the current mode, or None in a graphics mode.
 pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
-    if bus.vga.adapter == Adapter::Cga {
+    if bus.vga.adapter.cga_like() {
         return cga_geometry(bus);
     }
     let (_, _, wrap) = bus.vga.text_window();
@@ -231,9 +231,16 @@ fn alternate_glyph(alternate: &'static [u8], ch: u8, height: usize) -> Option<&'
 /// controller's palette registers and the DAC, as a VGA's do. With blinking
 /// on, attribute bit 7 blinks the character and the background has only
 /// the eight dark colours.
-pub fn render(canvas: &mut [u8], canvas_w: usize, bus: &Bus, g: &TextGeometry, y_min: usize, y_max: usize) {
+pub fn render(
+    canvas: &mut [u8],
+    canvas_w: usize,
+    bus: &Bus,
+    g: &TextGeometry,
+    y_min: usize,
+    y_max: usize,
+    vram: &[u8],
+) {
     let vga = &bus.vga;
-    let vram = &vga.vram_text;
     let blinks = vga.blinks();
     let blink_on = vga.blink_on();
     let colors: [(u8, u8, u8); 16] = match vga.adapter {
@@ -241,6 +248,9 @@ pub fn render(canvas: &mut [u8], canvas_w: usize, bus: &Bus, g: &TextGeometry, y
         Adapter::Cga if !vga.cga_video_enabled() => return,
         Adapter::Hercules if !vga.herc_video_enabled() => return,
         Adapter::Cga => vga.cga_text_colors(),
+        // The Tandy's and PCjr's through their palette registers.
+        Adapter::Tandy | Adapter::Pcjr if !vga.gate_array_enabled() => return,
+        Adapter::Tandy | Adapter::Pcjr => vga.gate_array_colors(),
         _ => std::array::from_fn(|attr| vga.attribute_rgb(attr as u8)),
     };
     let (cell_w, cell_h) = (g.cell_w(), g.cell_h());

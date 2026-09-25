@@ -30,6 +30,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Covox Speech Thing and Disney Sound Source on the parallel port
 * Graphics: text, CGA, EGA and VGA modes with Mode X support, and the
   CGA's composite artifact colours
+* Tandy 1000 and IBM PCjr: their 16-colour graphics and their SN76489
+  sound
 * VESA VBE 2.0: 256-color, 15/16-bit and 32-bit modes from 320x200 to
   1024x768 with 4 MB of video memory, bank switching and linear frame
   buffer.
@@ -142,9 +144,20 @@ D:
     VESA modes up to 1024x768), `vga` (an IBM VGA, without VESA modes),
     `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
     640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
-    640x200, 60 Hz) or `hercules` (a Hercules Graphics Card on a monochrome
-    monitor: the MDA's text and 720x348 graphics, 50 Hz). A change takes
-    effect at the DOS prompt.
+    640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
+    `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
+    text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
+    prompt.
+  * With `tandy` and `pcjr` programs find the machine they were made for
+    (the model byte, and the Tandy's BIOS name) and its video: the CGA's
+    modes and 16 colours at 160x200 and 320x200 (modes 08h and 09h), and 4
+    at 640x200 (0Ah), from pages of system memory the page register picks
+    (INT 10h AH=05h AL=80h-83h), with the palette registers (AH=10h), and
+    the three-voice SN76489 sound chip (see `tandy` below). Their video
+    memory is part of the 640 KB: DOS's memory ends at 624 KB on a Tandy,
+    and starts above 144 KB on a PCjr, as DOSBox has it for Sierra's
+    games. Not there: the Tandy 1000 SL/TL's DAC and 640x200 in 16
+    colours, and the PCjr's cartridges.
   * `capture_dir` is the folder screenshots and recordings go in:
     `capture` (the default) in the directory rust-dos started in, or a
     path of your own. Screenshots show the picture as the recordings do:
@@ -220,14 +233,18 @@ D:
     FIFO played at 7 kHz) or `covox` (the Covox Speech Thing). Both sound
     through filters that give them the real devices' sound, as in DOSBox
     Staging. A change takes effect at the DOS prompt.
+  * `tandy` is the Tandy 1000's and PCjr's sound chip at port C0h, three
+    square waves and noise: `auto` (the default) on those machines, `on`
+    on any (for games that play Tandy sound with VGA graphics), or `off`.
 * **`[emulator]`** also has `hard_disk_speed` and `floppy_disk_speed`, and
   **`[sound]`** `hard_disk_noise` and `floppy_disk_noise` (see
   [Disk speed and noises](#disk-speed-and-noises)).
 * **`[mixer]`:** the volume of each sound source in percent, from 0 to 200:
   `speaker` (the PC speaker and the prompt's beeps), `sb` (the Sound
   Blaster's digital audio), `fm` (the FM synthesizer), `gus`, `midi`,
-  `cdaudio`, `disknoise` and `lptdac` (the Covox or Disney Sound Source),
-  and `master` for all of them together. At 100,
+  `cdaudio`, `disknoise`, `lptdac` (the Covox or Disney Sound Source) and
+  `tandy` (the Tandy's and PCjr's sound chip), and `master` for all of
+  them together. At 100,
   the default, a source plays as loud as its card makes it. The volumes
   apply on top of the Sound Blaster's own mixer, which programs set.
   * `speaker_filter` gives the PC speaker the sound of the small speaker in

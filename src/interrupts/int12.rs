@@ -1,5 +1,8 @@
 use crate::cpu::Cpu;
 
+/// The base memory in KB, as the BIOS data area has it (0413h): 640, or
+/// less where the video takes the top of it (a Tandy 1000's 624).
 pub fn handle(cpu: &mut Cpu) {
-    cpu.set_ax(640); // KB
+    let kb = cpu.bus.read_16(0x0413);
+    cpu.set_ax(kb);
 }

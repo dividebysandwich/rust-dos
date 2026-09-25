@@ -65,7 +65,7 @@ fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
     let chain = crate::mcb::walk(&cpu.bus);
     let largest = chain
         .iter()
-        .filter(|(s, m)| m.is_free() && (upper || *s < crate::mcb::UMB_COVER_SEG))
+        .filter(|(s, m)| m.is_free() && (upper || *s < crate::mcb::umb_cover_seg(&cpu.bus)))
         .map(|(_, m)| m.size)
         .max()
         .unwrap_or(0);

@@ -51,6 +51,9 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     if changed(&|s| s.lpt_dac.name().to_string()) {
         cpu.bus.configure_lpt_dac(sound.lpt_dac);
     }
+    if changed(&|s| s.tandy.name().to_string()) {
+        cpu.bus.configure_tandy_sound(sound.tandy);
+    }
 
     let midi = |s: &SoundConfig| {
         format!(

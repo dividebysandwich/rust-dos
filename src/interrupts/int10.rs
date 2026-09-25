@@ -19,7 +19,9 @@ fn page_size(mode: u8) -> u16 {
         0x00 | 0x01 => 0x0800,
         0x02 | 0x03 | 0x07 => 0x1000,
         0x04..=0x06 | 0x0E => 0x4000,
-        0x0D => 0x2000,
+        // The Tandy's and PCjr's 16-colour and 640x200x4 modes, as DOSBox
+        // has their BIOS keep them.
+        0x08..=0x0A | 0x0D => 0x2000,
         0x0F | 0x10 => 0x8000,
         0x11 | 0x12 => 0xA000,
         _ => 0xFA00,
@@ -132,6 +134,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         return;
     }
     cpu.bus.vbe.reset();
+    let adapter = cpu.bus.vga.adapter;
 
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);
@@ -145,6 +148,9 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         0x05 => Some((VideoMode::Cga320x200, "CGA Graphics Mode (320x200)")),
         0x06 => Some((VideoMode::Cga640x200, "CGA Graphics Mode (640x200)")),
         0x07 => Some((VideoMode::Mono80x25, "Monochrome Text Mode (80x25)")),
+        0x08 => Some((VideoMode::Tandy160x200x16, "Tandy/PCjr Graphics Mode (160x200 16-color)")),
+        0x09 => Some((VideoMode::Tandy320x200x16, "Tandy/PCjr Graphics Mode (320x200 16-color)")),
+        0x0A => Some((VideoMode::Tandy640x200x4, "Tandy/PCjr Graphics Mode (640x200 4-color)")),
         0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
         0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
         0x0F => Some((VideoMode::Ega640x350Mono, "EGA Graphics Mode (640x350 monochrome)")),
@@ -171,8 +177,18 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     }
 
     // Clear the mode's memory, unless AL bit 7 asks to keep it: spaces in
-    // light grey in the text modes, 0 in the graphics modes.
-    if !keep {
+    // light grey in the text modes, 0 in the graphics modes. The Tandy's
+    // and PCjr's is the system memory the picture comes from.
+    if !keep && adapter.gate_array() {
+        let (base, size) = cpu.bus.vga.crt_range();
+        if mode <= 0x03 {
+            for addr in (base..base + size).step_by(2) {
+                cpu.bus.write_16(addr, 0x0720);
+            }
+        } else {
+            cpu.bus.fill_ram(base..base + size, 0);
+        }
+    } else if !keep {
         let vga = &mut cpu.bus.vga;
         match mode {
             0x00..=0x03 | 0x07 => {
@@ -196,8 +212,16 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         cpu.bus.write_8(0x0465, control);
     }
     cpu.bus.write_8(0x0466, if mode == 0x06 { 0x3F } else { 0x30 });
+    if adapter.gate_array() {
+        // The Tandy's and PCjr's registers as the mode set them: Mode
+        // Control, Color Select and the CRT/processor page register.
+        cpu.bus.write_8(0x0465, cpu.bus.vga.cga_mode);
+        cpu.bus.write_8(0x0466, cpu.bus.vga.cga_color);
+        cpu.bus.write_8(0x048A, cpu.bus.vga.tandy.page);
+    }
     let cols: u16 = match mode {
-        0x00 | 0x01 | 0x04 | 0x05 => 40,
+        0x08 => 20,
+        0x00 | 0x01 | 0x04 | 0x05 | 0x09 => 40,
         0x13 => 40, // Mode 13h uses 40 columns text
         _ => 80,
     };
@@ -220,7 +244,6 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         0x13 => (24, 8),
         _ => (24, 16),
     };
-    let adapter = cpu.bus.vga.adapter;
     if mode <= 0x03 || mode == 0x07 {
         let height = if adapter.mono_only() { 14 } else { char_height };
         cpu.bus.write_16(0x0460, video_bios::cursor_shape(adapter, height));
@@ -237,6 +260,101 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         let (font, _) = video_bios::graphics_font(mode);
         set_vector(cpu, 0x43, rom_pointer(font));
     }
+}
+
+/// INT 10h AH=05h AL=80h-83h on a Tandy or PCjr: 80h reads the page the
+/// picture comes from into BH and the one the processor sees into BL, 81h
+/// sets the processor's, 82h the picture's, 83h both. The PCjr returns
+/// them all the same.
+fn gate_array_pages(cpu: &mut Cpu) {
+    let (al, bh, bl) = (cpu.get_al(), cpu.get_reg8(Register::BH), cpu.get_reg8(Register::BL));
+    let mut page = cpu.bus.read_8(0x048A);
+    match al {
+        0x80 => {
+            cpu.set_reg8(Register::BH, page & 7);
+            cpu.set_reg8(Register::BL, (page >> 3) & 7);
+        }
+        0x81 => page = (page & 0xC7) | (bl & 7) << 3,
+        0x82 => page = (page & 0xF8) | (bh & 7),
+        0x83 => page = (page & 0xC0) | (bh & 7) | (bl & 7) << 3,
+        _ => {}
+    }
+    if cpu.bus.vga.adapter == Adapter::Pcjr {
+        cpu.set_reg8(Register::BH, page & 7);
+        cpu.set_reg8(Register::BL, (page >> 3) & 7);
+    }
+    cpu.bus.io_write(0x3DF, page);
+    cpu.bus.write_8(0x048A, page);
+}
+
+/// INT 10h AH=0Bh on a Tandy or PCjr: the Tandy has the CGA's Color Select
+/// register, and in its 16-colour modes also takes the background into
+/// palette register 0; the PCjr sets its palette registers: the background
+/// (and the border), and mode 4's three colours or mode 6's one.
+fn gate_array_color_select(cpu: &mut Cpu, bh: u8, bl: u8, select: u8) {
+    let mode = cpu.bus.read_8(0x0449);
+    let graphics = !matches!(mode, 0x00..=0x03);
+    let tandy = cpu.bus.vga.adapter == Adapter::Tandy;
+    if tandy {
+        cpu.bus.io_write(0x3D9, select);
+    }
+    let ga = &mut cpu.bus.vga.tandy;
+    match bh {
+        0x00 => {
+            if !tandy || matches!(mode, 0x08 | 0x09) {
+                ga.border = select & 0x0F;
+                if graphics {
+                    ga.palette[0] = select & 0x0F;
+                }
+            }
+        }
+        _ if tandy => {}
+        _ => match mode {
+            0x04 | 0x05 => {
+                let colors = if bl & 1 != 0 { [0x03, 0x05, 0x0F] } else { [0x02, 0x04, 0x06] };
+                ga.palette[1..4].copy_from_slice(&colors);
+            }
+            0x06 => ga.palette[1] = if bl & 1 != 0 { 0x0F } else { 0 },
+            _ => {
+                for (i, p) in ga.palette.iter_mut().enumerate().skip(1) {
+                    *p = i as u8;
+                }
+            }
+        },
+    }
+    cpu.bus.vga.mark_dirty_full();
+}
+
+/// INT 10h AH=10h AL=00h-02h on a Tandy or PCjr: a palette register, the
+/// border, or all of them from ES:DX. The Tandy's 320x200 CGA modes take
+/// their colours from the bright registers the Color Select register
+/// picks, which AL=00h sets for colours 1-3; in 640x200x2 colour 1 is the
+/// Color Select register's.
+fn gate_array_palette_function(cpu: &mut Cpu) {
+    let (al, bh, bl) = (cpu.get_al(), cpu.get_reg8(Register::BH), cpu.get_reg8(Register::BL));
+    let tandy = cpu.bus.vga.adapter == Adapter::Tandy;
+    let mode = cpu.bus.read_8(0x0449);
+    match al {
+        0x00 => {
+            let reg = match (tandy, mode, bl & 0x0F) {
+                (true, 0x04 | 0x05, reg @ 1..=3) => {
+                    reg * 2 + 8 + (cpu.bus.read_8(0x0466) >> 5 & 1)
+                }
+                (true, 0x06, 1) => cpu.bus.vga.cga_color & 0x0F,
+                (_, _, reg) => reg,
+            };
+            cpu.bus.vga.tandy.palette[reg as usize & 0x0F] = bh & 0x0F;
+        }
+        0x01 => cpu.bus.vga.tandy.border = bh,
+        _ => {
+            let addr = cpu.get_physical_addr(cpu.es(), cpu.dx());
+            for i in 0..16 {
+                cpu.bus.vga.tandy.palette[i] = cpu.bus.read_8(addr + i) & 0x0F;
+            }
+            cpu.bus.vga.tandy.border = cpu.bus.read_8(addr + 16);
+        }
+    }
+    cpu.bus.vga.mark_dirty_full();
 }
 
 pub fn handle(cpu: &mut Cpu) {
@@ -257,7 +375,13 @@ pub fn handle(cpu: &mut Cpu) {
     // Before them, the EGA's palette registers, character generator and
     // configuration (AH=10h-12h), which a CGA's BIOS hasn't either.
     let ega_only = matches!(ah, 0x10..=0x12);
-    if (vga_only && !adapter.vga_bios()) || (ega_only && !adapter.ega_bios()) || (ah == 0x4F && !adapter.has_vbe()) {
+    // The Tandy's and PCjr's BIOS has AH=10h's palette registers and border
+    // (AL=00h-02h), for their gate array.
+    let gate_array_palette = ah == 0x10 && adapter.gate_array() && cpu.get_al() <= 0x02;
+    if (vga_only && !adapter.vga_bios())
+        || (ega_only && !adapter.ega_bios() && !gate_array_palette)
+        || (ah == 0x4F && !adapter.has_vbe())
+    {
         return;
     }
 
@@ -308,6 +432,9 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 05h: Set Active Page. The CRTC shows the page from its
         // Start Address on, which counts characters in the text modes and
         // bytes of each plane in the 16-color ones.
+        // AL=80h-83h on a Tandy or PCjr: read or set the pages the picture
+        // comes from (BH) and the processor sees at B8000h (BL).
+        0x05 if adapter.gate_array() && cpu.get_al() & 0x80 != 0 => gate_array_pages(cpu),
         0x05 => {
             let page = cpu.get_reg8(Register::AL);
             let offset = page as usize * cpu.bus.read_16(0x044C) as usize;
@@ -429,6 +556,10 @@ pub fn handle(cpu: &mut Cpu) {
                 _ => return,
             }
             cpu.bus.write_8(0x0466, select);
+            if cpu.bus.vga.adapter.gate_array() {
+                gate_array_color_select(cpu, bh, bl, select);
+                return;
+            }
             if !cpu.bus.vga.adapter.ega_bios() {
                 // A CGA has the register itself.
                 cpu.bus.io_write(0x3D9, select);
@@ -552,6 +683,7 @@ pub fn handle(cpu: &mut Cpu) {
         }
 
         // AH = 10h: Palette / Color Registers
+        0x10 if adapter.gate_array() => gate_array_palette_function(cpu),
         0x10 => {
             let al = cpu.get_al();
             match al {

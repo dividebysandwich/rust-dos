@@ -316,5 +316,7 @@ pub fn mode_regs(mode: VideoMode) -> &'static VgaModeRegs {
         VideoMode::Vga640x480 => &VGA_480,
         // VESA modes are 256-color modes to the VGA's registers.
         VideoMode::Graphics320x200 | VideoMode::Vesa | VideoMode::HercGraphics => &VGA_256,
+        // Only the Tandy's and PCjr's gate array has these.
+        VideoMode::Tandy160x200x16 | VideoMode::Tandy320x200x16 | VideoMode::Tandy640x200x4 => &CGA_320,
     }
 }

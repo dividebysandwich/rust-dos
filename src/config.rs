@@ -294,6 +294,8 @@ pub struct SoundConfig {
     pub midiport: String,
     /// The Covox or Disney Sound Source on LPT1 (`lpt_dac`).
     pub lpt_dac: LptDacType,
+    /// The Tandy's and PCjr's sound chip (`tandy`).
+    pub tandy: crate::sn76489::TandySound,
 }
 
 impl MidiSynth {
@@ -323,6 +325,7 @@ impl Default for SoundConfig {
             mt32lib: None,
             midiport: String::new(),
             lpt_dac: LptDacType::None,
+            tandy: crate::sn76489::TandySound::Auto,
         }
     }
 }
@@ -465,6 +468,10 @@ impl SoundConfig {
                     }
                 }
             }
+            "tandy" => {
+                self.tandy = crate::sn76489::TandySound::parse(value)
+                    .ok_or_else(|| format!("invalid tandy '{}' (auto, on or off)", value))?;
+            }
             "lpt_dac" => {
                 self.lpt_dac = LptDacType::parse(value)
                     .ok_or_else(|| format!("invalid lpt_dac '{}' (none, disney or covox)", value))?;
@@ -537,7 +544,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         }
                         "machine" => match Adapter::parse(value) {
                             Some(adapter) => config.machine = Some(adapter),
-                            None => warn(format!("invalid machine '{}' (svga, vga, ega, cga or hercules)", value)),
+                            None => warn(format!("invalid machine '{}' (svga, vga, ega, cga, tandy, pcjr or hercules)", value)),
                         },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),
@@ -821,7 +828,7 @@ impl Settings {
     /// VGA's or EGA's monitor is monochrome too (a CGA's stays colour).
     pub fn video_setup(&self) -> VideoSetup {
         let mono_monitor = match self.machine {
-            Adapter::Cga => false,
+            Adapter::Cga | Adapter::Tandy | Adapter::Pcjr => false,
             Adapter::Hercules => true,
             _ => self.monochrome != Monochrome::Off,
         };
@@ -923,6 +930,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "mt32lib", sound.mt32lib.as_deref().map(|p| contract_home(p, home))),
         (Sound, "midiport", (!sound.midiport.is_empty()).then(|| sound.midiport.clone())),
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
+        (Sound, "tandy", Some(sound.tandy.name().to_string())),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
@@ -1519,7 +1527,9 @@ mod tests {
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(config.machine, Some(Adapter::Vga));
         assert_eq!(parse("[emulator]\nmachine=svga_s3\n", Path::new("/cfg"), None).machine, Some(Adapter::Svga));
-        let config = parse("[emulator]\nmachine=pcjr\n", Path::new("/cfg"), None);
+        assert_eq!(parse("[emulator]\nmachine=PCjr\n", Path::new("/cfg"), None).machine, Some(Adapter::Pcjr));
+        assert_eq!(parse("[emulator]\nmachine=tandy\n", Path::new("/cfg"), None).machine, Some(Adapter::Tandy));
+        let config = parse("[emulator]\nmachine=mcga\n", Path::new("/cfg"), None);
         assert_eq!((config.machine, config.warnings.len()), (None, 1));
     }
 
@@ -1543,7 +1553,7 @@ mod tests {
         assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
         let mixer = Settings::from_config(&config).mixer;
         let levels = Channel::ALL.map(|channel| mixer.level(channel));
-        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100]);
+        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100]);
         assert!(mixer.speaker_filter);
         assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -1590,6 +1600,7 @@ mod tests {
             mt32lib: Some(PathBuf::from("/opt/munt/libmt32emu.so")),
             midiport: "FLUID".to_string(),
             lpt_dac: LptDacType::Disney,
+            tandy: crate::sn76489::TandySound::On,
         };
         Settings {
             scale: 3,

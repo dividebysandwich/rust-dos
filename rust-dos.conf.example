@@ -71,6 +71,9 @@
 #   vga   an IBM VGA, without VESA modes
 #   ega   an IBM EGA with an Enhanced Color Display: 16 of 64 colours
 #   cga   an IBM CGA: 4 colours at 320x200, 2 at 640x200
+#   tandy a Tandy 1000: the CGA's modes and 16 colours at 160x200 and
+#         320x200, 4 at 640x200, and its three-voice sound chip
+#   pcjr  an IBM PCjr, which the Tandy copies
 #   hercules  a Hercules Graphics Card on a monochrome monitor: text and
 #         720x348 graphics
 # A change takes effect at the DOS prompt.
@@ -157,6 +160,10 @@
 # sound through: none (the default), disney (the Disney Sound Source) or
 # covox (the Covox Speech Thing).
 #lpt_dac=none
+# The Tandy 1000's and PCjr's sound chip at port C0h, three square waves
+# and noise: auto (the default) on those machines (machine), on on any, for
+# games that play Tandy sound with VGA graphics, or off.
+#tandy=auto
 # The noises the hard disks and floppy drives make: off (the default),
 # seek-only (the heads moving), or on (the disk spinning as well). They
 # sound best with the disk speeds above set lower than maximum.
@@ -182,6 +189,8 @@
 #disknoise=100
 # The Covox or Disney Sound Source on the parallel port (lpt_dac).
 #lptdac=100
+# The Tandy's and PCjr's sound chip.
+#tandy=100
 # The PC speaker through a filter that gives it the sound of the small
 # speaker in a PC, without the harsh edges: on (the default) or off.
 #speaker_filter=on

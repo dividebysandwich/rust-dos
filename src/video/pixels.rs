@@ -19,6 +19,12 @@ enum Layout {
     Planar,
     /// Mode 13h: a byte a pixel, spread over the planes four at a time.
     Linear,
+    /// The Tandy's and PCjr's 16 colours: a nibble a pixel, the left one
+    /// high, in 2 (160x200) or 4 (320x200) banks of 8 KB by scanline.
+    Tandy16,
+    /// Their 640x200 in 4 colours: for 8 pixels a byte of their low bits
+    /// and one of their high bits, in 4 banks.
+    Tandy4High,
 }
 
 /// The layout and size in pixels of the current mode, if it is a standard
@@ -36,6 +42,8 @@ fn layout(bus: &Bus) -> Option<(Layout, usize, usize)> {
         | VideoMode::Vga640x480
         | VideoMode::Vga640x480Mono => Layout::Planar,
         VideoMode::Graphics320x200 => Layout::Linear,
+        VideoMode::Tandy160x200x16 | VideoMode::Tandy320x200x16 => Layout::Tandy16,
+        VideoMode::Tandy640x200x4 => Layout::Tandy4High,
         _ => return None,
     };
     Some((layout, width, height))
@@ -68,6 +76,20 @@ fn cga_offset(x: usize, y: usize, per_byte: usize) -> usize {
     (y & 1) * 0x2000 + (y >> 1) * 80 + x / per_byte
 }
 
+/// Where the byte with pixel (`x`, `y`) of a Tandy or PCjr mode is in
+/// system memory: from the page the processor sees on, and in the 32 KB
+/// modes the one after it too, as their BIOS draws, which on a PCjr sees
+/// only 16 KB through the window at B8000h.
+fn gate_array_addr(bus: &Bus, layout: Layout, x: usize, y: usize, width: usize) -> usize {
+    let (base, _) = bus.vga.cpu_range();
+    let offset = match (layout, bus.video_mode) {
+        (Layout::Tandy4High, _) => (y >> 2) * 160 + ((x >> 2) & !1) + (y & 3) * 0x2000,
+        (_, VideoMode::Tandy320x200x16) => (y >> 2) * (width / 2) + x / 2 + (y & 3) * 0x2000,
+        _ => (y >> 1) * (width / 2) + x / 2 + (y & 1) * 0x2000,
+    };
+    base + offset
+}
+
 /// The colour of pixel (`x`, `y`), or 0 off the screen.
 pub fn get_pixel(bus: &Bus, x: usize, y: usize) -> u8 {
     let Some((layout, width, height)) = layout(bus) else { return 0 };
@@ -76,8 +98,17 @@ pub fn get_pixel(bus: &Bus, x: usize, y: usize) -> u8 {
     }
     let vga = &bus.vga;
     match layout {
-        Layout::Cga4 => vga.vram_text[cga_offset(x, y, 4)] >> (6 - (x % 4) * 2) & 3,
-        Layout::Cga2 => vga.vram_text[cga_offset(x, y, 8)] >> (7 - x % 8) & 1,
+        Layout::Cga4 => bus.text_mem()[cga_offset(x, y, 4)] >> (6 - (x % 4) * 2) & 3,
+        Layout::Cga2 => bus.text_mem()[cga_offset(x, y, 8)] >> (7 - x % 8) & 1,
+        Layout::Tandy16 => {
+            let byte = bus.ram()[gate_array_addr(bus, layout, x, y, width)];
+            if x & 1 == 0 { byte >> 4 } else { byte & 0x0F }
+        }
+        Layout::Tandy4High => {
+            let at = gate_array_addr(bus, layout, x, y, width);
+            let bit = 7 - x % 8;
+            (bus.ram()[at] >> bit & 1) | (bus.ram()[at + 1] >> bit & 1) << 1
+        }
         Layout::Planar => {
             let offset = planar_offset(bus, x, y, width);
             (0..4).map(|p| (vga.vram_graphics[p * 0x10000 + offset] >> (7 - x % 8) & 1) << p).sum()
@@ -120,8 +151,23 @@ pub fn put_pixel(bus: &mut Bus, x: usize, y: usize, color: u8) {
             let offset = cga_offset(x, y, per_byte);
             let shift = (per_byte - 1 - x % per_byte) * depth;
             let mask = ((1u8 << depth) - 1) << shift;
-            let byte = &mut bus.vga.vram_text[offset];
+            let byte = &mut bus.text_mem_mut()[offset];
             *byte = merge(*byte, mask, color << shift);
+        }
+        Layout::Tandy16 => {
+            let at = gate_array_addr(bus, layout, x, y, width);
+            let (mask, bits) = if x & 1 == 0 { (0xF0, color << 4) } else { (0x0F, color & 0x0F) };
+            let old = bus.read_8(at);
+            bus.write_8(at, merge(old, mask, bits));
+        }
+        Layout::Tandy4High => {
+            let at = gate_array_addr(bus, layout, x, y, width);
+            let mask = 0x80u8 >> (x % 8);
+            for plane in 0..2 {
+                let bits = if color >> plane & 1 != 0 { 0xFF } else { 0 };
+                let old = bus.read_8(at + plane);
+                bus.write_8(at + plane, merge(old, mask, bits));
+            }
         }
         Layout::Planar => {
             let offset = planar_offset(bus, x, y, width);

@@ -3,6 +3,7 @@
 //! and the interrupt vector table programs start with.
 
 use crate::bus::Bus;
+use crate::video::adapter::Adapter;
 use crate::cpu::Cpu;
 
 /// Vectors handled by emulator services (`FE 38 vv` traps). Their traps sit
@@ -46,6 +47,33 @@ const ROM: usize = 0xF0000;
 
 fn far(offset: u16) -> u32 {
     (0xF000 << 16) | offset as u32
+}
+
+/// Where the Tandy 1000's BIOS has its name, whose first byte (21h, "!")
+/// games look for: F000:C000.
+const TANDY_SIGNATURE: u16 = 0xC000;
+/// The Tandy's BIOS name, as DOSBox has it.
+const TANDY_BIOS_NAME: &[u8] = b"!BIOS ROM version 02.00.00\r\nCompatibility Software\r\nCopyright (C) 1984,1985,1986,1987\r\nPhoenix Software Associates Ltd.\r\nand Tandy";
+
+/// What says which machine this is, for the display adapter `bus` has:
+/// the model byte at F000:FFFE (FFh a Tandy 1000, FDh a PCjr, FCh an AT),
+/// the Tandy's BIOS name at F000:C000, and the base memory (BDA 0413h),
+/// less the video memory at the top of 640 KB on a Tandy.
+pub fn set_machine_id(bus: &mut Bus) {
+    let adapter = bus.vga.adapter;
+    let model = match adapter {
+        Adapter::Tandy => 0xFF,
+        Adapter::Pcjr => 0xFD,
+        _ => 0xFC,
+    };
+    write_rom(bus, 0xFFFE, &[model, 0x00]);
+    let mut name = [0u8; TANDY_BIOS_NAME.len()];
+    if adapter == Adapter::Tandy {
+        name.copy_from_slice(TANDY_BIOS_NAME);
+    }
+    write_rom(bus, TANDY_SIGNATURE, &name);
+    let kb = crate::mcb::conventional_end(bus) / 64;
+    bus.write_16(0x0413, kb);
 }
 
 fn write_rom(bus: &mut Bus, offset: u16, code: &[u8]) {
@@ -129,11 +157,9 @@ pub fn install(bus: &mut Bus) {
     write_rom(bus, IO_WAIT, &[0xFE, 0x39, SERVICE_IO_WAIT]);
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);
-    // BIOS date and the model byte: an AT (FCh).
+    // BIOS date, the model byte and the base memory.
     write_rom(bus, 0xFFF5, b"01/10/92");
-    write_rom(bus, 0xFFFE, &[0xFC, 0x00]);
-    // Base memory in KB.
-    bus.write_16(0x0413, 640);
+    set_machine_id(bus);
 
     let ivt = default_ivt();
     for (vector, &entry) in ivt.iter().enumerate() {

@@ -95,8 +95,10 @@ pub fn handle(cpu: &mut Cpu) {
 
             // Byte 0-1: Length (8)
             cpu.bus.write_16(phys_addr, 0x0008);
-            // Byte 2: Model (FC = AT)
-            cpu.bus.write_8(phys_addr + 2, 0xFC);
+            // Byte 2: Model, as at F000:FFFE (FC = AT, FF = Tandy 1000, FD
+            // = PCjr)
+            let model = cpu.bus.read_8(0xFFFFE);
+            cpu.bus.write_8(phys_addr + 2, model);
             // Byte 3: Submodel (01 = AT)
             cpu.bus.write_8(phys_addr + 3, 0x01);
             // Byte 4: BIOS Revision (0)

@@ -31,6 +31,7 @@
 //! and one chain runs through both.
 
 use crate::bus::Bus;
+use crate::video::adapter::Adapter;
 
 /// Signature byte for "more blocks follow".
 pub const MCB_M: u8 = 0x4D;
@@ -54,6 +55,34 @@ pub const DOS_OWNER: u16 = 0x0008;
 /// With upper memory, the MCB in the last paragraph of conventional memory
 /// that covers the memory up to the upper memory blocks.
 pub const UMB_COVER_SEG: u16 = 0x9FFF;
+/// On a Tandy 1000: where conventional memory's blocks end, 624 KB. The
+/// top 16 KB is the video memory the 16 KB modes show, and the 32 KB modes
+/// reach 16 KB below it, as on a real Tandy.
+pub const TANDY_END: u16 = 0x9C00;
+/// On a PCjr: the MCB of the first block programs can have. DOS keeps the
+/// memory below, which holds the video memory at 18000h-1FFFFh and 16 KB
+/// above it that Space Quest 1.0x needs, as DOSBox's expanded PCjr memory
+/// has it.
+pub const PCJR_FIRST_FREE: u16 = 0x2400;
+
+/// Where conventional memory ends on this machine (without upper memory's
+/// cover block): A0000h, or 9C000h on a Tandy.
+pub fn conventional_end(bus: &Bus) -> u16 {
+    if bus.vga.adapter == Adapter::Tandy { TANDY_END } else { END_OF_CONVENTIONAL }
+}
+
+/// The MCB in conventional memory's last paragraph that covers the memory
+/// up to the upper memory blocks.
+pub fn umb_cover_seg(bus: &Bus) -> u16 {
+    conventional_end(bus) - 1
+}
+
+/// The MCB of the first block programs can have: the first MCB, or on a
+/// PCjr the one after the block DOS keeps over the video memory.
+pub fn first_free(bus: &Bus) -> u16 {
+    if bus.vga.adapter == Adapter::Pcjr { PCJR_FIRST_FREE } else { FIRST_MCB_SEG }
+}
+
 /// The first upper memory block's MCB, and where upper memory ends.
 pub const UMB_START: u16 = 0xD000;
 pub const UMB_END: u16 = 0xF000;
@@ -123,7 +152,7 @@ pub fn write_mcb(bus: &mut Bus, seg: u16, mcb: &Mcb) {
 /// memory's cover MCB, or the end of conventional memory without upper
 /// memory.
 pub fn low_end(bus: &Bus) -> u16 {
-    if bus.umb.is_some() { UMB_COVER_SEG } else { END_OF_CONVENTIONAL }
+    if bus.umb.is_some() { umb_cover_seg(bus) } else { conventional_end(bus) }
 }
 
 /// Walk the MCB chain from FIRST_MCB_SEG to the 'Z' sentinel. Returns the
@@ -157,7 +186,7 @@ fn chain_of(bus: &Bus, seg: u16) -> Vec<(u16, Mcb)> {
 }
 
 fn walk_from(bus: &Bus, start: u16) -> Vec<(u16, Mcb)> {
-    let limit = if bus.umb.is_some() { UMB_END } else { END_OF_CONVENTIONAL };
+    let limit = if bus.umb.is_some() { UMB_END } else { conventional_end(bus) };
     let mut out = Vec::new();
     let mut seg = start;
     loop {
@@ -187,10 +216,18 @@ fn walk_from(bus: &Bus, start: u16) -> Vec<(u16, Mcb)> {
 /// conventional memory. Used when the shell is loaded and no user process owns
 /// anything yet.
 pub fn init_empty(bus: &mut Bus) {
-    let free_paras = low_end(bus) - FIRST_MCB_SEG - 1;
+    let first = first_free(bus);
+    if first > FIRST_MCB_SEG {
+        // The PCjr's: DOS keeps the memory up to it.
+        write_mcb(bus, FIRST_MCB_SEG, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: first - FIRST_MCB_SEG - 1 });
+        for (i, &b) in b"SC".iter().enumerate() {
+            bus.write_8(header_addr(FIRST_MCB_SEG) + 8 + i, b);
+        }
+    }
+    let free_paras = low_end(bus) - first - 1;
     write_mcb(
         bus,
-        FIRST_MCB_SEG,
+        first,
         &Mcb {
             signature: MCB_Z,
             owner: FREE_OWNER,
@@ -206,9 +243,9 @@ pub fn init_empty(bus: &mut Bus) {
 /// which is below `seg` when the TSRs have freed their memory, or None when
 /// the chain is corrupt and doesn't reach `seg`.
 pub fn release_from(bus: &mut Bus, seg: u16) -> Option<u16> {
-    if seg <= FIRST_MCB_SEG {
+    if seg <= first_free(bus) {
         init_empty(bus);
-        return Some(FIRST_MCB_SEG);
+        return Some(first_free(bus));
     }
     let end = low_end(bus);
     let chain = walk(bus);
@@ -248,9 +285,10 @@ pub fn release_from(bus: &mut Bus, seg: u16) -> Option<u16> {
 /// cover MCB (see `release_from`).
 pub fn build_upper(bus: &mut Bus) {
     let Some(umb) = bus.umb else { return };
-    write_mcb(bus, UMB_COVER_SEG, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: UMB_START - UMB_COVER_SEG - 1 });
+    let cover = umb_cover_seg(bus);
+    write_mcb(bus, cover, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: UMB_START - cover - 1 });
     for (i, &b) in b"SC".iter().enumerate() {
-        bus.write_8(header_addr(UMB_COVER_SEG) + 8 + i, b);
+        bus.write_8(header_addr(cover) + 8 + i, b);
     }
     write_mcb(bus, UMB_START, &Mcb { signature: MCB_Z, owner: FREE_OWNER, size: umb.size - 1 });
     bus.umb = Some(Umb { linked: false, ..umb });
@@ -265,8 +303,9 @@ pub fn link_upper(bus: &mut Bus, on: bool) -> Result<(), ()> {
         return Ok(());
     }
     let chain = walk(bus);
-    let &(last, m) = chain.iter().take_while(|(s, _)| *s < UMB_COVER_SEG).last().ok_or(())?;
-    if last as u32 + 1 + m.size as u32 != UMB_COVER_SEG as u32 {
+    let cover = umb_cover_seg(bus);
+    let &(last, m) = chain.iter().take_while(|(s, _)| *s < cover).last().ok_or(())?;
+    if last as u32 + 1 + m.size as u32 != cover as u32 {
         return Err(());
     }
     write_mcb(bus, last, &Mcb { signature: if on { MCB_M } else { MCB_Z }, ..m });

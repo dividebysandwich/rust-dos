@@ -476,7 +476,8 @@ impl Cpu {
         // DOS keeps at least the 6 paragraphs of the PSP itself.
         let _ = crate::mcb::resize(&mut self.bus, psp, paras.max(6));
         // Loaded high: it stays in its upper memory block.
-        if psp > crate::mcb::UMB_COVER_SEG {
+        let cover = crate::mcb::umb_cover_seg(&self.bus);
+        if psp > cover {
             self.resident_upper.push(psp);
             self.bus.log_string(&format!("[DOS] TSR: resident in upper memory at {:04X}", psp));
             return;
@@ -485,7 +486,7 @@ impl Cpu {
         let chain = crate::mcb::walk(&self.bus);
         let end = chain
             .iter()
-            .take_while(|(s, _)| *s < crate::mcb::UMB_COVER_SEG)
+            .take_while(|(s, _)| *s < cover)
             .filter(|(_, m)| !m.is_free())
             .last()
             .map_or(self.resident_end, |&(s, m)| {
@@ -785,11 +786,28 @@ impl Cpu {
             Some(end) => self.resident_end = end,
             None => {
                 crate::mcb::init_empty(&mut self.bus);
-                self.resident_end = crate::mcb::FIRST_MCB_SEG;
+                self.resident_end = crate::mcb::first_free(&self.bus);
             }
         }
         self.bus.sync_drive_bda();
         Ok(())
+    }
+
+    /// Lay conventional memory out afresh for another machine, at the
+    /// prompt: a Tandy's ends below its video memory and a PCjr's first
+    /// block is above its. The resident programs go, and the programs
+    /// loaded high.
+    pub fn relayout_conventional(&mut self) {
+        let _ = crate::mcb::link_upper(&mut self.bus, false);
+        crate::mcb::init_empty(&mut self.bus);
+        crate::mcb::build_upper(&mut self.bus);
+        self.resident_end = crate::mcb::first_free(&self.bus);
+        self.resident_upper.clear();
+        self.bus.log_string(&format!(
+            "[DOS] Conventional memory for this machine: {} KB from {:04X}, resident programs dropped",
+            (crate::mcb::conventional_end(&self.bus) - self.resident_end - 1) as usize * 16 / 1024,
+            self.resident_end + 1
+        ));
     }
 
     pub fn load_shell(&mut self) {
@@ -823,7 +841,7 @@ impl Cpu {
                 self.bus
                     .log_string("[DOS] MCB chain corrupt, dropping resident programs");
                 crate::mcb::init_empty(&mut self.bus);
-                self.resident_end = crate::mcb::FIRST_MCB_SEG;
+                self.resident_end = crate::mcb::first_free(&self.bus);
             }
         }
         let resident: Vec<u16> = self.resident_upper.clone();
@@ -851,9 +869,8 @@ impl Cpu {
         self.bus.mouse.remove_callback();
         crate::mouse::clear_callback_busy(&mut self.bus);
         // Clear text VRAM so we don't show leftover text from the last program.
-        for byte in self.bus.vga.vram_text.iter_mut() {
-            *byte = 0;
-        }
+        self.bus.vga.vram_text.fill(0);
+        self.bus.text_mem_mut().fill(0);
         self.bus.vga.mark_dirty_full();
 
         // Copy bytes
@@ -1163,7 +1180,7 @@ impl Cpu {
         match placement {
             Placement::High(psp) => psp + crate::mcb::read_mcb(&self.bus, psp - 1).size,
             Placement::Shell => crate::mcb::low_end(&self.bus),
-            Placement::Child(_) => 0xA000,
+            Placement::Child(_) => crate::mcb::conventional_end(&self.bus),
         }
         .max(load_segment)
     }

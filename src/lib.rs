@@ -47,6 +47,7 @@ pub mod pic;
 pub mod recorder;
 pub mod sb;
 pub mod shell;
+pub mod sn76489;
 pub mod sound;
 pub mod stats;
 pub mod timer;

@@ -13,6 +13,7 @@ pub mod overlay;
 pub mod palette;
 pub mod pixels;
 pub mod shader;
+pub mod tandy;
 pub mod text;
 pub mod vbe;
 pub mod vga;
@@ -89,6 +90,12 @@ pub enum VideoMode {
     /// The monochrome text mode of the MDA and the Hercules card: 80x25 in
     /// 9x14 cells at B0000h.
     Mono80x25 = 0x07,
+    /// The Tandy 1000's and PCjr's 16 colours at 160x200 and 320x200, two
+    /// pixels a byte, and 4 colours at 640x200 in pairs of bytes (see
+    /// tandy.rs).
+    Tandy160x200x16 = 0x08,
+    Tandy320x200x16 = 0x09,
+    Tandy640x200x4 = 0x0A,
     Ega320x200 = 0x0D,  // EGA planar, 16 colors
     Ega640x200 = 0x0E,  // EGA planar, 16 colors
     /// The EGA's monochrome graphics: 640x350 in planes 0 and 2, the video
@@ -129,6 +136,9 @@ impl VideoMode {
             VideoMode::Cga320x200Color | VideoMode::Cga320x200 => (320, 200),
             VideoMode::Cga640x200 => (640, 200),
             VideoMode::Mono80x25 => (720, 350),
+            VideoMode::Tandy160x200x16 => (160, 200),
+            VideoMode::Tandy320x200x16 => (320, 200),
+            VideoMode::Tandy640x200x4 => (640, 200),
             VideoMode::HercGraphics => hercules::GRAPHICS_SIZE,
             VideoMode::Ega320x200 => (320, 200),
             VideoMode::Ega640x200 => (640, 200),
@@ -191,7 +201,7 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
         // Text: its characters across, and the scanlines the CRTC shows
         // (the EGA's 350, the VGA's 400; the CGA's 200 scanned twice).
         _ => match text::geometry(bus) {
-            Some(g) if bus.vga.adapter != adapter::Adapter::Cga => {
+            Some(g) if !bus.vga.adapter.cga_like() => {
                 let lines = bus.vga.peek_timing().display.clamp(200, 600);
                 ((g.cols * g.cell_w()) as u32, lines)
             }
@@ -220,6 +230,15 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
     frame.rgb[y_min * row_bytes..y_max * row_bytes].fill(0);
     let canvas = &mut frame.rgb[..];
 
+    // The Tandy's and PCjr's video shows system memory.
+    if bus.vga.adapter.gate_array() {
+        match text::geometry(bus) {
+            Some(geometry) => text::render(canvas, width, bus, &geometry, y_min, y_max, bus.display_mem()),
+            None => tandy::render_graphics(canvas, bus),
+        }
+        return;
+    }
+
     match bus.video_mode {
         VideoMode::Graphics320x200 => render_graphics_mode(canvas, width, &bus.vga.vram_graphics, bus),
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => {
@@ -234,7 +253,7 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         | VideoMode::Text40x25Color
         | VideoMode::Mono80x25 => {
             if let Some(geometry) = text::geometry(bus) {
-                text::render(canvas, width, bus, &geometry, y_min, y_max);
+                text::render(canvas, width, bus, &geometry, y_min, y_max, &bus.vga.vram_text);
             }
         }
         VideoMode::HercGraphics => hercules::render_graphics(canvas, width, &bus.vga),
@@ -247,6 +266,8 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         | VideoMode::Vga640x480
         | VideoMode::Vga640x480Mono => render_planar(canvas, width, &bus.vga.vram_graphics, bus),
         VideoMode::Vesa => render_vbe(canvas, width, y_min, y_max, bus),
+        // Only the gate array has them, which is drawn above.
+        VideoMode::Tandy160x200x16 | VideoMode::Tandy320x200x16 | VideoMode::Tandy640x200x4 => {}
     }
 }
 
@@ -587,15 +608,16 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
                 bus.cursor_x -= 1;
                 // Visually clear the character
                 let offset = (bus.cursor_y * 80 + bus.cursor_x) * 2;
-                bus.vga.vram_text[offset] = 0x20; // Space
+                bus.text_mem_mut()[offset] = 0x20; // Space
                 bus.mark_text_dirty(offset, offset + 2);
             }
         }
         _ => {
             // Print standard character
             let offset = (bus.cursor_y * 80 + bus.cursor_x) * 2;
-            bus.vga.vram_text[offset] = ascii;
-            bus.vga.vram_text[offset + 1] = 0x07; // Light Gray Attribute
+            let text = bus.text_mem_mut();
+            text[offset] = ascii;
+            text[offset + 1] = 0x07; // Light Gray Attribute
             bus.cursor_x += 1;
             bus.mark_text_dirty(offset, offset + 2);
         }
@@ -655,9 +677,10 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
                     col -= 1;
                     // Visual Erase (Space + Light Gray)
                     let offset = (row * max_cols + col) * 2;
-                    if offset < SIZE_TEXT {
-                        cpu.bus.vga.vram_text[offset] = 0x20;
-                        cpu.bus.vga.vram_text[offset + 1] = 0x07;
+                    let text = cpu.bus.text_mem_mut();
+                    if offset + 1 < text.len() {
+                        text[offset] = 0x20;
+                        text[offset + 1] = 0x07;
                         touch(offset);
                     }
                 }
@@ -665,9 +688,10 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
             _ => {
                 // Printable Character
                 let offset = (row * max_cols + col) * 2;
-                if offset < SIZE_TEXT {
-                    cpu.bus.vga.vram_text[offset] = c;
-                    cpu.bus.vga.vram_text[offset + 1] = attr;
+                let text = cpu.bus.text_mem_mut();
+                if offset + 1 < text.len() {
+                    text[offset] = c;
+                    text[offset + 1] = attr;
                     touch(offset);
                 }
                 col += 1;
@@ -687,19 +711,12 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
             let screen_size = max_rows * row_size;
 
             // Shift everything up by one row
-            // We can't use `copy_within` easily on Vec<u8> across overlapping ranges in simple rust
-            // without unsafe or a temp buffer, but a simple loop works fine for 4KB.
-            for i in 0..(screen_size - row_size) {
-                cpu.bus.vga.vram_text[i] = cpu.bus.vga.vram_text[i + row_size];
-            }
+            let text = cpu.bus.text_mem_mut();
+            text.copy_within(row_size..screen_size, 0);
 
-            // Clear bottom row
-            for i in (screen_size - row_size)..screen_size {
-                if i % 2 == 0 {
-                    cpu.bus.vga.vram_text[i] = 0x20; // Space
-                } else {
-                    cpu.bus.vga.vram_text[i] = 0x07; // Color
-                }
+            // Clear bottom row: spaces in light grey.
+            for (i, byte) in text[screen_size - row_size..screen_size].iter_mut().enumerate() {
+                *byte = if i % 2 == 0 { 0x20 } else { 0x07 };
             }
 
             row = max_rows - 1;

@@ -40,8 +40,20 @@ pub fn graphics_font(mode: u8) -> (u16, u16) {
 /// the prompt carries on where it was.
 pub fn switch(cpu: &mut crate::cpu::Cpu, setup: VideoSetup) {
     let (col, row) = (cpu.bus.read_8(0x0450), cpu.bus.read_8(0x0451));
+    // What the screen shows, for a machine whose text memory is elsewhere.
+    let text: Vec<u8> = cpu.bus.display_mem()[..80 * 25 * 2].to_vec();
+    let layout = |bus: &Bus| (crate::mcb::first_free(bus), crate::mcb::conventional_end(bus));
+    let before = layout(&cpu.bus);
     install(&mut cpu.bus, setup);
+    if layout(&cpu.bus) != before {
+        // The Tandy's and PCjr's video memory is in DOS's.
+        cpu.relayout_conventional();
+    }
     crate::interrupts::int10::set_mode(cpu, 0x80 | setup.prompt_mode());
+    if cpu.bus.display_mem().len() >= text.len() && setup.prompt_mode() == 0x03 {
+        cpu.bus.text_mem_mut()[..text.len()].copy_from_slice(&text);
+        cpu.bus.vga.mark_dirty_full();
+    }
     let row = row.min(cpu.bus.text_rows() as u8 - 1);
     cpu.bus.write_8(0x0450, col);
     cpu.bus.write_8(0x0451, row);
@@ -53,7 +65,7 @@ pub fn switch(cpu: &mut crate::cpu::Cpu, setup: VideoSetup) {
 /// a character: the two above the bottom one (the CGA's 8: 6 and 7).
 pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
     match (adapter, height) {
-        (Adapter::Cga, _) | (_, 8) => 0x0607,
+        (Adapter::Cga | Adapter::Tandy | Adapter::Pcjr, _) | (_, 8) => 0x0607,
         (_, 14) => 0x0B0C,
         _ => 0x0D0E,
     }
@@ -77,7 +89,7 @@ pub fn reset_for_shell(bus: &mut Bus) {
     bus.write_8(0x0465, 0x29);
     bus.write_8(0x0466, 0x30);
     let height = match adapter {
-        Adapter::Cga => 0,
+        Adapter::Cga | Adapter::Tandy | Adapter::Pcjr => 0,
         Adapter::Ega | Adapter::Hercules => 14,
         _ => 16,
     };
@@ -122,12 +134,20 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     // colour, 11 for monochrome. The other bits are the floppies' and the
     // coprocessor's.
     let mono = setup.mono();
-    let equipment = bus.read_16(0x0410) & !0x0030;
+    let equipment = bus.read_16(0x0410) & !0x0130;
     bus.write_16(0x0410, equipment | if mono { 0x0030 } else { 0x0020 });
     // The CRTC's address.
     bus.write_16(0x0463, if mono { 0x03B4 } else { 0x03D4 });
+    // The model byte and memory a Tandy's or PCjr's BIOS has.
+    crate::bios::set_machine_id(bus);
+    if setup.adapter == Adapter::Pcjr {
+        // Equipment bit 8: no DMA controller, which programs (The Ancient
+        // Art of War) take for a PCjr.
+        let equipment = bus.read_16(0x0410);
+        bus.write_16(0x0410, equipment | 0x0100);
+    }
 
-    if matches!(setup.adapter, Adapter::Cga | Adapter::Hercules) {
+    if matches!(setup.adapter, Adapter::Cga | Adapter::Hercules | Adapter::Tandy | Adapter::Pcjr) {
         // The PC BIOS keeps neither the rows and the character height
         // (0484h-0486h) nor the EGA's and VGA's information (0487h-048Ah),
         // and there is no video BIOS ROM at C000h.

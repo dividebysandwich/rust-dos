@@ -19,10 +19,17 @@ pub enum Adapter {
     /// The Hercules Graphics Card on a monochrome monitor: the MDA's text
     /// and 720x348 graphics, 50 Hz.
     Hercules,
+    /// The Tandy 1000's video: the CGA's modes and 16 colours at 160x200
+    /// and 320x200 and 4 at 640x200, from the top of system memory.
+    Tandy,
+    /// The IBM PCjr's, which the Tandy's copies: its memory is the first
+    /// 128 KB of system memory.
+    Pcjr,
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 5] = [Adapter::Svga, Adapter::Vga, Adapter::Ega, Adapter::Cga, Adapter::Hercules];
+    pub const ALL: [Adapter; 7] =
+        [Adapter::Svga, Adapter::Vga, Adapter::Ega, Adapter::Cga, Adapter::Tandy, Adapter::Pcjr, Adapter::Hercules];
 
     /// The adapter a `machine` value names, DOSBox's names included.
     pub fn parse(s: &str) -> Option<Self> {
@@ -34,6 +41,8 @@ impl Adapter {
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
             "hercules" | "herc" | "hgc" => Some(Adapter::Hercules),
+            "tandy" => Some(Adapter::Tandy),
+            "pcjr" => Some(Adapter::Pcjr),
             _ => None,
         }
     }
@@ -45,6 +54,8 @@ impl Adapter {
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
             Adapter::Hercules => "hercules",
+            Adapter::Tandy => "tandy",
+            Adapter::Pcjr => "pcjr",
         }
     }
 
@@ -56,6 +67,8 @@ impl Adapter {
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
             Adapter::Hercules => "Hercules (mono)",
+            Adapter::Tandy => "Tandy 1000",
+            Adapter::Pcjr => "IBM PCjr",
         }
     }
 
@@ -74,7 +87,19 @@ impl Adapter {
     /// (INT 10h AH=10h), the character generator (AH=11h) and the
     /// configuration (AH=12h).
     pub fn ega_bios(self) -> bool {
-        !matches!(self, Adapter::Cga | Adapter::Hercules)
+        !matches!(self, Adapter::Cga | Adapter::Hercules | Adapter::Tandy | Adapter::Pcjr)
+    }
+
+    /// Whether the adapter works as a CGA does: a 6845 at 3D4h, the CGA's
+    /// modes and colours, and no EGA or VGA registers.
+    pub fn cga_like(self) -> bool {
+        matches!(self, Adapter::Cga | Adapter::Tandy | Adapter::Pcjr)
+    }
+
+    /// Whether the video is the PCjr's video gate array (or the Tandy
+    /// 1000's copy of it), which shows system memory.
+    pub fn gate_array(self) -> bool {
+        matches!(self, Adapter::Tandy | Adapter::Pcjr)
     }
 
     /// Whether the adapter only has a monochrome monitor's modes: the text
@@ -88,6 +113,7 @@ impl Adapter {
         match self {
             Adapter::Hercules => mode == 0x07,
             Adapter::Cga => mode <= 0x06,
+            Adapter::Tandy | Adapter::Pcjr => matches!(mode, 0x00..=0x06 | 0x08..=0x0A),
             Adapter::Ega => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10),
             _ => matches!(mode, 0x00..=0x07 | 0x0D..=0x13),
         }

@@ -24,9 +24,11 @@ pub enum Channel {
     DiskNoise,
     /// The Covox or Disney Sound Source on the parallel port.
     LptDac,
+    /// The Tandy's and PCjr's sound chip.
+    Tandy,
 }
 
-pub const CHANNELS: usize = 9;
+pub const CHANNELS: usize = 10;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -42,6 +44,7 @@ impl Channel {
         Channel::CdAudio,
         Channel::DiskNoise,
         Channel::LptDac,
+        Channel::Tandy,
     ];
 
     /// Its key in `[mixer]`.
@@ -56,6 +59,7 @@ impl Channel {
             Channel::CdAudio => "cdaudio",
             Channel::DiskNoise => "disknoise",
             Channel::LptDac => "lptdac",
+            Channel::Tandy => "tandy",
         }
     }
 
@@ -75,6 +79,7 @@ impl Channel {
             Channel::CdAudio => "CD audio",
             Channel::DiskNoise => "Disk noise",
             Channel::LptDac => "Covox/Disney",
+            Channel::Tandy => "Tandy/PCjr",
         }
     }
 

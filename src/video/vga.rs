@@ -90,6 +90,10 @@ pub struct VgaCard {
     pub composite: super::composite::CompositeSettings,
     pub(super) composite_decoder: Option<Box<super::composite::Decoder>>,
 
+    /// The Tandy's and PCjr's video gate array (see tandy.rs); Mode
+    /// Control and Color Select are `cga_mode` and `cga_color`.
+    pub tandy: super::tandy::GateArray,
+
     /// The EGA's configuration switches (SW1-SW4, bits 0-3), which Input
     /// Status 0 (3C2h) reads one at a time.
     pub switches: u8,
@@ -162,6 +166,7 @@ impl VgaCard {
             cga_color: 0x30,
             composite: super::composite::CompositeSettings::default(),
             composite_decoder: None,
+            tandy: super::tandy::GateArray::default(),
             switches: 0b0110,
             herc_mode: 0x29,
             herc_config: 0,
@@ -281,7 +286,9 @@ impl VgaCard {
     /// (the monochrome text mode 7). The CGA's 16 KB show twice.
     pub fn text_window(&self) -> (usize, usize, usize) {
         match self.adapter {
-            super::adapter::Adapter::Cga => return (0xB8000, 0x8000, 0x3FFF),
+            super::adapter::Adapter::Cga | super::adapter::Adapter::Tandy | super::adapter::Adapter::Pcjr => {
+                return (0xB8000, 0x8000, 0x3FFF);
+            }
             super::adapter::Adapter::Hercules => return self.herc_window(),
             _ => {}
         }
@@ -295,6 +302,7 @@ impl VgaCard {
     pub fn blinks(&self) -> bool {
         match self.adapter {
             super::adapter::Adapter::Cga => return self.cga_mode & 0x22 == 0x20,
+            super::adapter::Adapter::Tandy | super::adapter::Adapter::Pcjr => return self.gate_array_blinks(),
             super::adapter::Adapter::Hercules => return self.herc_mode & 0x22 == 0x20,
             _ => {}
         }
@@ -573,6 +581,7 @@ impl VgaCard {
         self.latched_start_addr = 0;
         match self.adapter {
             super::adapter::Adapter::Cga => return self.cga_set_mode(mode),
+            super::adapter::Adapter::Tandy | super::adapter::Adapter::Pcjr => return self.tandy_set_mode(mode),
             super::adapter::Adapter::Hercules => return self.herc_set_mode(),
             _ => {}
         }
@@ -616,7 +625,9 @@ impl VgaCard {
     /// shows.
     fn registers_timing(&self) -> Option<CrtTiming> {
         match self.adapter {
-            super::adapter::Adapter::Cga => self.cga_timing(),
+            super::adapter::Adapter::Cga | super::adapter::Adapter::Tandy | super::adapter::Adapter::Pcjr => {
+                self.cga_timing()
+            }
             super::adapter::Adapter::Hercules => self.herc_timing(),
             super::adapter::Adapter::Ega => {
                 CrtTiming::from_ega_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs)
@@ -667,6 +678,8 @@ impl Device for VgaCard {
         let color = self.misc_output_reg & 0x01 != 0;
         match self.adapter {
             super::adapter::Adapter::Cga => super::cga::PORTS,
+            super::adapter::Adapter::Tandy => super::tandy::TANDY_PORTS,
+            super::adapter::Adapter::Pcjr => super::tandy::PCJR_PORTS,
             super::adapter::Adapter::Hercules => super::hercules::PORTS,
             super::adapter::Adapter::Ega if color => EGA_COLOR_PORTS,
             super::adapter::Adapter::Ega => EGA_MONO_PORTS,
@@ -678,6 +691,7 @@ impl Device for VgaCard {
     fn io_read(&mut self, port: u16) -> u8 {
         match self.adapter {
             super::adapter::Adapter::Cga => return self.cga_io_read(port),
+            super::adapter::Adapter::Tandy | super::adapter::Adapter::Pcjr => return self.tandy_io_read(port),
             super::adapter::Adapter::Hercules => return self.herc_io_read(port),
             _ => {}
         }
@@ -769,6 +783,7 @@ impl Device for VgaCard {
     fn io_write(&mut self, port: u16, value: u8) {
         match self.adapter {
             super::adapter::Adapter::Cga => return self.cga_io_write(port, value),
+            super::adapter::Adapter::Tandy | super::adapter::Adapter::Pcjr => return self.tandy_io_write(port, value),
             super::adapter::Adapter::Hercules => return self.herc_io_write(port, value),
             _ => {}
         }

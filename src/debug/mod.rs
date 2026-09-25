@@ -1671,7 +1671,7 @@ fn screen_text(cpu: &Cpu) -> Reply {
         return Reply::Error(409, format!("video mode {:?} is a graphics mode; use /api/screenshot", mode));
     };
     let (cols, rows) = (geometry.cols, geometry.rows);
-    let vram = &cpu.bus.vga.vram_text;
+    let vram = cpu.bus.display_mem();
     let lines: Vec<String> = (0..rows)
         .map(|r| {
             let s: String = (0..cols)

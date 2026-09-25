@@ -173,7 +173,7 @@ impl Page {
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
-                SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, HardDiskNoise, FloppyDiskNoise,
+                SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),
@@ -185,6 +185,7 @@ impl Page {
                 Volume(Channel::CdAudio),
                 Volume(Channel::DiskNoise),
                 Volume(Channel::LptDac),
+                Volume(Channel::Tandy),
                 SpeakerFilter,
                 SbFilter,
                 Reverb,
@@ -288,6 +289,8 @@ enum Item {
     Chorus,
     /// The DAC on the parallel port.
     LptDac,
+    /// The Tandy's and PCjr's sound chip.
+    TandySound,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -399,6 +402,7 @@ impl Item {
             Reverb => "Reverb (FM, GUS, MIDI)",
             Chorus => "Chorus (FM, GUS, MIDI)",
             LptDac => "Parallel port DAC",
+            TandySound => "Tandy/PCjr sound",
         }
     }
 
@@ -523,6 +527,7 @@ impl Item {
             Reverb => s.mixer.reverb.name().to_string(),
             Chorus => s.mixer.chorus.name().to_string(),
             LptDac => s.sound.lpt_dac.describe().to_string(),
+            TandySound => s.sound.tandy.describe().to_string(),
         }
     }
 
@@ -636,6 +641,7 @@ impl Item {
             Reverb => s.mixer.reverb = cycle(&ReverbPreset::ALL, s.mixer.reverb, dir),
             Chorus => s.mixer.chorus = cycle(&ChorusPreset::ALL, s.mixer.chorus, dir),
             LptDac => sound.lpt_dac = cycle(&crate::lpt_dac::LptDacType::ALL, sound.lpt_dac, dir),
+            TandySound => sound.tandy = cycle(&crate::sn76489::TandySound::ALL, sound.tandy, dir),
             // In fives of percent.
             Deadzone => {
                 let dz = s.joystick.deadzone as isize;
