@@ -178,7 +178,7 @@ fn run<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHoo
         // lines wait while a program started from the batch file runs, so
         // they only count once the shell is back at its prompt.
         if cpu.state == CpuState::RebootShell
-            || (cpu.cs() == SHELL_SEGMENT
+            || (cpu.in_shell_code()
                 && (cpu.pending_command.is_some() || (!cpu.batch_queue.is_empty() && cpu.process_stack.is_empty())))
         {
             match shell_services(cpu) {
@@ -228,7 +228,14 @@ impl Cpu {
     /// True while the shell runs with no program started from it: the
     /// point at which batch lines and typed commands are dispatched.
     pub fn at_shell_prompt(&self) -> bool {
-        self.cs() == SHELL_SEGMENT && self.process_stack.is_empty()
+        self.in_shell_code() && self.process_stack.is_empty()
+    }
+
+    /// Whether the shell's code runs: at SHELL_SEGMENT, in real mode. In
+    /// protected mode the same number is a selector of a DOS extender's
+    /// (DOS/4GW's code is 0070h), whose program is anything but idle.
+    pub fn in_shell_code(&self) -> bool {
+        !self.pe() && self.cs() == SHELL_SEGMENT
     }
 
     /// True while no program runs: the shell is at its prompt, or in the
@@ -244,7 +251,7 @@ impl Cpu {
             let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(if waiting { 12 } else { 2 }));
             self.bus.read_16(frame)
         };
-        self.cs() == SHELL_SEGMENT || (self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT)
+        !self.pe() && (self.cs() == SHELL_SEGMENT || (self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT))
     }
 }
 

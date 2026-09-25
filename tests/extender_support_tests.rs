@@ -550,3 +550,16 @@ fn mouse_driver_swaps_saves_and_restores_its_state() {
     let m = &cpu.bus.mouse;
     assert_eq!((m.callback_mask, m.callback_cs, m.callback_ip), (0x0002, 0x1234, 0x0010));
 }
+
+#[test]
+fn a_dos_extender_s_code_at_the_shell_s_number_is_no_prompt() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.load_shell();
+    assert!(cpu.shell_idle() && cpu.at_shell_prompt());
+    // In protected mode 0070h is a selector, DOS/4GW's code segment's: the
+    // program runs, and a batch file's next lines wait for it.
+    cpu.cr0 |= rust_dos::cpu::CR0_PE;
+    assert_eq!(cpu.cs(), rust_dos::cpu::SHELL_SEGMENT);
+    assert!(!cpu.shell_idle());
+    assert!(!cpu.at_shell_prompt());
+}
