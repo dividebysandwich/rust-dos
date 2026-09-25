@@ -28,6 +28,8 @@ mod translate;
 mod uop;
 #[cfg(all(dynrec, target_arch = "x86_64"))]
 mod x64;
+#[cfg(all(dynrec, target_arch = "aarch64"))]
+mod a64;
 
 /// Whether this build has a code generator for its host.
 pub const AVAILABLE: bool = cfg!(dynrec);
@@ -148,6 +150,9 @@ mod engine {
     use super::block::BlockData;
     use super::codemem::CodeMemory;
     use super::helpers::*;
+    #[cfg(target_arch = "aarch64")]
+    use super::a64 as backend;
+    #[cfg(target_arch = "x86_64")]
     use super::x64 as backend;
     use super::*;
 

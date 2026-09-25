@@ -20,20 +20,67 @@ defaults:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every test on Linux, on the interpreter and on the dynamic
+        # recompiler, whose two code generators (x86-64 and AArch64) need a
+        # host of their kind. On macOS and Windows the recompiler's own tests,
+        # for their executable memory (MAP_JIT, VirtualAlloc) and Windows's
+        # calling convention.
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            full: true
+          - label: linux-aarch64
+            os: ubuntu-24.04-arm
+            full: true
+          - label: macos-aarch64
+            os: macos-latest
+          - label: windows-x86_64
+            os: windows-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sdl2
+          echo "LIBRARY_PATH=$(brew --prefix)/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
+          unzip -q SDL2-devel-VC.zip
+          mv SDL2-2.30.0 SDL2
+          echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
+          echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          key: test-${{ matrix.label }}
 
       - name: Run tests
+        if: matrix.full
         run: cargo test --locked --verbose
+
+      - name: Run tests on the dynamic recompiler
+        if: matrix.full
+        run: RUST_DOS_CORE=dynamic cargo test --locked
+
+      - name: Run the dynamic recompiler's tests
+        if: ${{ !matrix.full }}
+        run: |
+          cargo test --locked --test dynrec_tests --test dyndiff_tests --test pm_tests
+          RUST_DOS_CORE=dynamic cargo test --locked --test pm_tests --test cpu32_tests
 
   build:
     name: ${{ matrix.label }}

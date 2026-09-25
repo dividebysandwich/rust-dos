@@ -21,8 +21,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
   as DOS/4GW (Descent, Heretic)
 * A dynamic recompiler that translates protected-mode programs' code into
-  x86-64 host code and runs it exactly as the interpreter would (see
-  [docs/dynrec.md](docs/dynrec.md))
+  x86-64 or ARM64 host code and runs it exactly as the interpreter would
+  (see [docs/dynrec.md](docs/dynrec.md))
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
   General MIDI through the MPU-401 with a SoundFont or the Gravis patches
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
@@ -130,8 +130,8 @@ D:
     into the host's own and runs CPU-bound code several times faster. Both
     run programs exactly the same way, instruction for instruction, so
     there is no need to switch back for a game that misbehaves. The
-    recompiler needs an x86-64 host; on others and in the browser the
-    interpreter runs everything. `--core` overrides it. See
+    recompiler needs an x86-64 or ARM64 host; on others and in the browser
+    the interpreter runs everything. `--core` overrides it. See
     [docs/dynrec.md](docs/dynrec.md).
   * `machine` is the display adapter programs find when they look for
     one, and so the graphics they choose: `svga` (the default, a VGA with

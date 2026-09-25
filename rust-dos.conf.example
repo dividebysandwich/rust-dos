@@ -52,7 +52,8 @@
 #            faster
 #   normal   the interpreter
 # Both run programs exactly the same way. The recompiler needs an x86-64
-# host; on others the interpreter runs everything. --core overrides it.
+# or ARM64 host; on others the interpreter runs everything. --core
+# overrides it.
 #core=auto
 # The display adapter, which programs look for to pick their graphics:
 #   svga  a VGA with VESA modes up to 1024x768 (the default)

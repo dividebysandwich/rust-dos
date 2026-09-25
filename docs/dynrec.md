@@ -8,7 +8,8 @@ faults leave the same state as with the interpreter. The two cores can
 therefore be run side by side and compared after every batch, which is how
 the recompiler is tested (see [Testing](#testing)).
 
-It generates code for x86-64 hosts. On other hosts and in the browser,
+It generates code for x86-64 hosts (`x64.rs`) and ARM64 hosts (`a64.rs`).
+On other hosts and in the browser,
 `dynrec::AVAILABLE` is false and the interpreter runs everything.
 
 ## Choosing the core
@@ -119,7 +120,7 @@ Other exactness rules:
 Each instruction becomes one of two things:
 
 - **Native code.** `translate.rs` turns the common forms into operations
-  (`uop.rs`), which `x64.rs` turns into host code:
+  (`uop.rs`), which the code generator turns into host code:
   - MOV, the ALU operations, INC, DEC, NEG and NOT;
   - shifts and rotates by a constant;
   - LEA, MOVZX, MOVSX, XCHG of registers, CBW, CWD, CWDE and CDQ;
@@ -134,13 +135,16 @@ Each instruction becomes one of two things:
   instruction works in a block from the start; translating more forms only
   makes them faster.
 
-The x86-64 code keeps the guest's registers and flags in the `Cpu` and
-works on them with host instructions of the same size:
+Both code generators keep the guest's registers and flags in the `Cpu`:
 
-- Flags come from the host's own flags (PUSHF) where they match the
-  interpreter's (`cpu::alu`). They are fixed up where the interpreter
-  defines what the host leaves undefined: AF of the logic operations, OF of
-  shifts by more than 1, and the 386's AF of SHL and SHR.
+- **Flags on x86-64** come from the host's own flags (PUSHF), from host
+  instructions of the operand's size, where they match the interpreter's
+  (`cpu::alu`). They are fixed up where the interpreter defines what the
+  host leaves undefined: AF of the logic operations, OF of shifts by more
+  than 1, and the 386's AF of SHL and SHR.
+- **Flags on ARM64**, which has neither a parity nor an auxiliary carry
+  flag, are computed as `cpu::alu` defines them: the carry from a 64-bit
+  sum or difference of the operands, PF from a table in the `JitCtx`.
 - Memory operands are checked inline against the segment's precomputed
   limits and rights. With paging on, the code looks the page up in the
   TLB as `Cpu::lin_to_phys` does. Plain RAM within a page is then read and
@@ -153,17 +157,18 @@ works on them with host instructions of the same size:
 
 Registers while translated code runs:
 
-| Register | Holds |
-|---|---|
-| RBX | the `Cpu` |
-| R12 | the `JitCtx` |
-| R13 | RAM |
-| R14 | the code generations |
-| R15 | set when a store hit the block's later bytes |
-| R8–R11 | the operations' temporaries |
+| Holds | x86-64 | ARM64 |
+|---|---|---|
+| the `Cpu` | RBX | X19, and X27 for its fields past X19's offsets' reach |
+| the `JitCtx` | R12 | X20 |
+| RAM | R13 | X21 |
+| the code generations | R14 | X22 |
+| set when a store hit the block's later bytes | R15 | W23 |
+| the operations' temporaries | R8–R11 (saved around calls) | W24–W26 (kept by calls) |
 
-Calls into Rust use the System V convention, which Rust offers on every
-x86-64 host, Windows included.
+On x86-64, calls into Rust use the System V convention, which Rust offers
+on every x86-64 host, Windows included; on ARM64 the platform's own. ARM64
+code never touches X18, which macOS reserves.
 
 ### Linking
 
@@ -255,6 +260,24 @@ RUST_DOS_CORE=dynamic TEST386_DIR=target/test386 \
   cargo test --release --test test386 -- --ignored --nocapture
 ```
 
+**ARM64 on an x86-64 machine.** The tests run under qemu's user-mode
+emulation, with an aarch64 cross linker (Arch: `qemu-user` and
+`aarch64-linux-gnu-gcc`) and `rustup target add aarch64-unknown-linux-gnu`.
+The test binaries don't use SDL, but the emulator binary built with them
+links it, so a stub library stands in:
+
+```sh
+mkdir -p /tmp/a64stub && aarch64-linux-gnu-gcc -shared -o /tmp/a64stub/libSDL2.so -x c /dev/null
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-L /tmp/a64stub -C link-arg=-Wl,--unresolved-symbols=ignore-all"
+RUST_DOS_CORE=dynamic cargo test --release --target aarch64-unknown-linux-gnu
+```
+
+The lockstep and conformance commands above take the same `--target`. CI
+runs every test on both cores on Linux x86-64 and ARM64 runners, and the
+recompiler's own tests on macOS and Windows.
+
 **Speed.** `compute_speed` runs CPU-bound protected-mode programs (a
 CRC-32, a bubble sort, shifts and rotates) on both cores in lockstep and
 prints their speeds. `local_program_alone` runs one program on one core,
@@ -272,8 +295,9 @@ DYNDIFF_PROGRAMS=TD3:TD3 cargo test --release --test dyndiff_tests local_program
    fault (`MemRef`, `CheckLimit`) before anything that changes state
    (`Set`, `Store`, flags). The exception is where the handler itself
    writes memory before it faults, as CALL does.
-2. If it needs an operation the code generator doesn't have, add one to
-   `uop.rs` and its code to `x64.rs`. Take flags from the host only where
-   they match `cpu::alu`'s; compute the rest.
+2. If it needs an operation the code generators don't have, add one to
+   `uop.rs` and its code to `x64.rs` and `a64.rs`. Take flags from the
+   host only where they match `cpu::alu`'s; compute the rest.
 3. Run `dynrec_tests`, the lockstep tests, and SingleStepTests with
-   `RUST_DOS_CORE=dynamic`, whose report must be the interpreter's.
+   `RUST_DOS_CORE=dynamic`, whose report must be the interpreter's, on
+   both hosts (ARM64 under qemu, see [Testing](#testing)).

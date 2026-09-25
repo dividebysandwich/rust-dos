@@ -19,7 +19,9 @@ pub struct CodeMemory {
     used: usize,
     /// Bytes at the start that `clear` keeps (the trampoline).
     kept: usize,
-    /// The pages can't be writable and executable at once.
+    /// The pages can't be writable and executable at once. (On Apple
+    /// Silicon the thread switches MAP_JIT pages instead.)
+    #[cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
     toggle: bool,
 }
 

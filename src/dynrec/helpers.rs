@@ -71,6 +71,8 @@ pub struct JitCtx {
     pub panic: Option<Box<dyn Any + Send>>,
     /// Memory operands checked by `jit_memref` that aren't plain RAM.
     pub refs: [MemRef; 4],
+    /// PF (04h or 0) of every byte value, for hosts without a parity flag.
+    pub parity: [u8; 256],
 }
 
 pub const CTX_FALLBACK: i32 = offset_of!(JitCtx, fallback) as i32;
@@ -84,6 +86,8 @@ pub const CTX_READ: i32 = offset_of!(JitCtx, read) as i32;
 pub const CTX_WRITE: i32 = offset_of!(JitCtx, write) as i32;
 pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
 pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub const CTX_PARITY: i32 = offset_of!(JitCtx, parity) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
@@ -108,6 +112,7 @@ impl JitCtx {
             fault: Fault::UD,
             panic: None,
             refs: [MemRef { lin: 0, phys: 0, phys2: 0, size: 1 }; 4],
+            parity: std::array::from_fn(|b| if (b as u8).count_ones() % 2 == 0 { 0x04 } else { 0 }),
         }
     }
 }

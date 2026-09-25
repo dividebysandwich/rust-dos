@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     // The hosts the dynamic recompiler (src/dynrec) generates code for.
     println!("cargo::rustc-check-cfg=cfg(dynrec)");
-    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+    if matches!(std::env::var("CARGO_CFG_TARGET_ARCH").as_deref(), Ok("x86_64" | "aarch64")) {
         println!("cargo::rustc-cfg=dynrec");
     }
 
