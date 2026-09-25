@@ -443,6 +443,15 @@ impl Machine {
         });
     }
 
+    /// The picture as a PNG image: as the screen shows it, with the cursors
+    /// and a monochrome monitor's colour, without the settings window.
+    pub fn screenshot_png(&self) -> Vec<u8> {
+        let mut frame = self.picture.clone();
+        video::overlay::draw_cursors(&mut frame, &self.cpu.bus, self.cursor_visible);
+        video::mono::apply(&mut frame, self.settings.monochrome);
+        rust_dos::capture::png::encode(&frame).unwrap_or_default()
+    }
+
     /// Run the machine fast while Alt+F12 is held, or at its speed again.
     pub fn set_fast_forward(&mut self, on: bool) {
         if on == self.pacer.fast_forward() || (on && self.paused) {

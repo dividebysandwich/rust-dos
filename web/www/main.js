@@ -178,15 +178,21 @@ function formatSize(bytes) {
 // ---------------------------------------------------------------------
 
 /// Web Audio, fed a buffer per frame, each starting where the last ends.
+/// The sound goes through `gain`, where a recording takes it, then
+/// `output`, which the mute turns down while a recording runs; otherwise
+/// the mute suspends it all.
 const speaker = {
   context: null,
   gain: null,
+  output: null,
   next: 0,
   muted: remembered(MUTED_KEY, '0') === '1',
+  /// Where a recording takes the sound (`record`), while one runs.
+  tap: null,
 
   /// Browsers start sound only after the user does something on the page.
   start() {
-    if (this.muted) {
+    if (this.muted && !this.tap) {
       return;
     }
     if (!this.context) {
@@ -196,15 +202,37 @@ const speaker = {
         this.context = new AudioContext({ latencyHint: 'interactive' });
       }
       this.gain = this.context.createGain();
-      this.gain.connect(this.context.destination);
+      this.output = this.context.createGain();
+      this.gain.connect(this.output);
+      this.output.connect(this.context.destination);
     }
+    this.output.gain.value = this.muted ? 0 : 1;
     if (this.context.state === 'suspended') {
       this.context.resume();
     }
   },
 
   playing() {
-    return !this.muted && this.context?.state === 'running';
+    return (!this.muted || this.tap !== null) && this.context?.state === 'running';
+  },
+
+  /// The sound as a stream, for a recording, heard or not.
+  record() {
+    this.tap = true;
+    this.start();
+    this.tap = this.context.createMediaStreamDestination();
+    this.gain.connect(this.tap);
+    return this.tap.stream;
+  },
+
+  stopRecording() {
+    if (this.tap) {
+      this.gain.disconnect(this.tap);
+      this.tap = null;
+    }
+    if (this.muted) {
+      this.context?.suspend();
+    }
   },
 
   /// Frames waiting to be played. While nothing plays, a queue so full the
@@ -236,7 +264,7 @@ const speaker = {
   setMuted(muted) {
     this.muted = muted;
     remember(MUTED_KEY, muted ? '1' : '0');
-    if (muted) {
+    if (muted && !this.tap) {
       this.context?.suspend();
     } else {
       this.start();
@@ -595,6 +623,19 @@ window.addEventListener('keydown', (event) => {
   if (event.ctrlKey && !event.altKey && event.code === 'F11') {
     event.preventDefault();
     guard(() => machine.step_speed(event.shiftKey));
+    return;
+  }
+  // Ctrl+F5 saves a screenshot and Ctrl+F7 records video, as the buttons
+  // do (and as in the rust-dos program).
+  if (event.ctrlKey && !event.altKey && (event.code === 'F5' || event.code === 'F7')) {
+    event.preventDefault();
+    if (!event.repeat) {
+      if (event.code === 'F5') {
+        screenshot();
+      } else {
+        toggleRecording();
+      }
+    }
     return;
   }
   if (event.ctrlKey && !event.altKey && event.code === 'F8') {
@@ -1115,12 +1156,81 @@ function download(drive, name) {
   for (let index = 0; index * chunk < size; index++) {
     parts.push(machine.image_chunk(drive, index) ?? zeros.subarray(0, Math.min(chunk, size - index * chunk)));
   }
-  const url = URL.createObjectURL(new Blob(parts, { type: 'application/octet-stream' }));
+  saveBlob(new Blob(parts, { type: 'application/octet-stream' }), name);
+}
+
+/// Offer `blob` as a file called `name` to save.
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = name;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+/// The date and time for a capture's file name, as the rust-dos program
+/// names them: 2026-09-25_14-03-07.
+function captureStamp() {
+  const d = new Date();
+  const two = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}_${two(d.getHours())}-${two(d.getMinutes())}-${two(d.getSeconds())}`;
+}
+
+/// Save the picture as a PNG image (Screenshot, Ctrl+F5).
+function screenshot() {
+  const png = guard(() => machine.screenshot_png());
+  if (png?.length) {
+    saveBlob(new Blob([png], { type: 'image/png' }), `rust-dos_screenshot_${captureStamp()}.png`);
+  }
+}
+
+/// The video recording running (Record, Ctrl+F7): the screen as the page
+/// shows it, CRT look and all, and the sound.
+let recording = null;
+
+function toggleRecording() {
+  if (recording) {
+    recording.stop();
+    return;
+  }
+  if (!window.MediaRecorder || !canvas.captureStream) {
+    toast("This browser can't record the screen.", 'warn');
+    return;
+  }
+  const video = canvas.captureStream(60);
+  let tracks = video.getVideoTracks();
+  try {
+    tracks = tracks.concat(speaker.record().getAudioTracks());
+  } catch {
+    // Without Web Audio, a recording without sound.
+  }
+  const types = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
+  const type = types.find((t) => MediaRecorder.isTypeSupported(t));
+  const recorder = new MediaRecorder(new MediaStream(tracks), type ? { mimeType: type } : undefined);
+  const chunks = [];
+  recorder.addEventListener('dataavailable', (event) => {
+    if (event.data.size) {
+      chunks.push(event.data);
+    }
+  });
+  recorder.addEventListener('stop', () => {
+    speaker.stopRecording();
+    video.getTracks().forEach((track) => track.stop());
+    const extension = recorder.mimeType.includes('mp4') ? 'mp4' : 'webm';
+    saveBlob(new Blob(chunks, { type: recorder.mimeType }), `rust-dos_video_${captureStamp()}.${extension}`);
+    recording = null;
+    showRecording();
+  });
+  recorder.start(1000);
+  recording = recorder;
+  showRecording();
+}
+
+function showRecording() {
+  const button = $('record');
+  button.textContent = recording ? 'Stop recording' : 'Record';
+  button.setAttribute('aria-pressed', String(recording !== null));
 }
 
 function fillDrivesDialog() {
@@ -1336,6 +1446,18 @@ $('config-save').addEventListener('click', () => {
 
 $('sound').addEventListener('click', () => {
   setSound(!speaker.muted, false);
+});
+
+$('screenshot').addEventListener('click', () => {
+  if (machine) {
+    screenshot();
+  }
+});
+
+$('record').addEventListener('click', () => {
+  if (machine) {
+    toggleRecording();
+  }
 });
 
 $('fullscreen').addEventListener('click', async () => {

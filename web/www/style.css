@@ -56,7 +56,8 @@ button:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 button.danger { border-color: var(--danger); color: var(--danger); }
-button[aria-pressed="false"] { color: var(--muted); }
+#sound[aria-pressed="false"] { color: var(--muted); }
+#record[aria-pressed="true"] { color: var(--danger); border-color: var(--danger); }
 
 select {
   background: var(--panel-raised);

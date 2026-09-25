@@ -406,9 +406,15 @@ In the browser:
 * *Config file* edits that `rust-dos.conf` as text, `[autoexec]` included,
   and restarts the machine with it. `[drives]` has no host directories to
   mount there.
+* *Screenshot* (or Ctrl+F5) downloads the screen as a PNG image, and
+  *Record* (or Ctrl+F7) records it with its sound until pressed again,
+  then downloads the video: WebM, or MP4 where the browser records no
+  WebM. The recording shows the screen as the page does, CRT look
+  included, and keeps the sound even with *Sound off*.
 * Clicking the screen while a program uses the mouse captures the mouse;
   Ctrl+F10 or Esc releases it. Sound starts with the first key press or
-  click, as browsers require.
+  click, as browsers require. The other [keyboard shortcuts](#keyboard-shortcuts)
+  work in the page too.
 
 The page takes parameters: `?zip=URL` copies an archive to C: at startup,
 `?run=COMMAND` types a command at the first prompt (both can repeat), for
