@@ -36,6 +36,10 @@ sdl2 = { version = "0.38" }
 glow = "0.17"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+# munt's MT-32 emulation, loaded when the MT-32 is chosen (src/mt32.rs).
+libloading = "0.8"
+# MIDI out of the host's MIDI ports (src/midiout.rs).
+midir = { version = "0.11", optional = true }
 
 # The dynamic recompiler's code generator and its executable memory
 # (src/dynrec).
@@ -50,8 +54,11 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["midi"]
+default = ["midi", "hostmidi"]
 midi = ["dep:rustysynth"]
+# The MPU-401's MIDI out of the host's MIDI ports (ALSA on Linux, which
+# needs libasound2-dev to build).
+hostmidi = ["dep:midir"]
 
 [dev-dependencies]
 # Reads the gzip-compressed SingleStepTests suite in tests/sst386.rs.

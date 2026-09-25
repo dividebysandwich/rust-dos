@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 /// The extensions of the disk and CD images a drive can show.
 pub const IMAGES: &[&str] = &["cue", "iso", "bin", "img", "ima", "vfd", "flp", "dsk"];
 pub const SOUNDFONTS: &[&str] = &["sf2"];
+pub const MT32_ROMS: &[&str] = &["rom", "bin"];
 
 pub struct Entry {
     pub name: String,

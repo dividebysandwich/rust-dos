@@ -13,7 +13,7 @@ mod draw;
 mod games;
 pub mod osd;
 
-use browser::{Browser, IMAGES, Row, SOUNDFONTS};
+use browser::{Browser, IMAGES, MT32_ROMS, Row, SOUNDFONTS};
 use dialog::{Event, Field, MountDialog, TextField};
 use draw::{Grid, Layout, Rgb};
 pub use draw::cp437;
@@ -173,7 +173,7 @@ impl Page {
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
-                SoundFont, LptDac, HardDiskNoise, FloppyDiskNoise,
+                SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),
@@ -262,6 +262,11 @@ enum Item {
     UltraDir,
     Midi,
     SoundFont,
+    /// munt's MT-32: the directory with its ROMs and the model.
+    Mt32Roms,
+    Mt32Model,
+    /// The host's MIDI port for `midisynth=host`.
+    MidiPort,
     HardDiskSpeed,
     FloppyDiskSpeed,
     HardDiskNoise,
@@ -324,6 +329,24 @@ fn soundfonts(frontend: Frontend) -> bool {
     cfg!(feature = "midi") && frontend.host_files
 }
 
+/// Whether munt's MT-32 can play: its library and ROMs are the host's.
+fn mt32(frontend: Frontend) -> bool {
+    cfg!(not(target_arch = "wasm32")) && frontend.host_files
+}
+
+/// Whether MIDI can go out of the host's MIDI ports.
+fn host_midi(frontend: Frontend) -> bool {
+    cfg!(all(feature = "hostmidi", not(target_arch = "wasm32"))) && frontend.host_files
+}
+
+/// The host's MIDI ports, by name.
+fn midi_ports() -> Vec<String> {
+    #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+    return crate::midiout::list_ports();
+    #[cfg(not(all(feature = "hostmidi", not(target_arch = "wasm32"))))]
+    Vec::new()
+}
+
 impl Item {
     fn label(self) -> &'static str {
         use Item::*;
@@ -355,6 +378,9 @@ impl Item {
             UltraDir => "  ULTRADIR",
             Midi => "MIDI synthesizer",
             SoundFont => "SoundFont",
+            Mt32Roms => "MT-32 ROMs",
+            Mt32Model => "MT-32 model",
+            MidiPort => "MIDI port",
             HardDiskSpeed => "Hard disk speed",
             FloppyDiskSpeed => "Floppy disk speed",
             HardDiskNoise => "Hard disk noise",
@@ -376,6 +402,8 @@ impl Item {
         match self {
             Item::Scale | Item::Fullscreen => frontend.window,
             Item::SoundFont => soundfonts(frontend),
+            Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
+            Item::MidiPort => host_midi(frontend),
             Item::CaptureDir => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             _ => true,
@@ -398,7 +426,7 @@ impl Item {
         match self {
             Item::Cycles | Item::Volume(_) | Item::Deadzone => Input::ChoiceOrText,
             Item::UltraDir | Item::CaptureDir => Input::Text,
-            Item::SoundFont => Input::File,
+            Item::SoundFont | Item::Mt32Roms => Input::File,
             _ => Input::Choice,
         }
     }
@@ -461,10 +489,16 @@ impl Item {
                 MidiSynth::Auto => "auto",
                 MidiSynth::SoundFont => "SoundFont",
                 MidiSynth::Gus => "Ultrasound patches",
+                MidiSynth::Mt32 => "MT-32 (munt)",
+                MidiSynth::Host => "host MIDI port",
                 MidiSynth::None => "none",
             }
             .to_string(),
             SoundFont => s.sound.soundfont.as_deref().map_or("none".to_string(), |p| contract_home(p, home)),
+            Mt32Roms => s.sound.mt32roms.as_deref().map_or("the usual places".to_string(), |p| contract_home(p, home)),
+            Mt32Model => s.sound.mt32model.describe().to_string(),
+            MidiPort if s.sound.midiport.is_empty() => "the first".to_string(),
+            MidiPort => s.sound.midiport.clone(),
             HardDiskSpeed => s.disk.hard_disk_speed.describe(DiskClass::HardDisk),
             FloppyDiskSpeed => s.disk.floppy_disk_speed.describe(DiskClass::Floppy),
             HardDiskNoise => s.disk.hard_disk_noise.name().to_string(),
@@ -544,12 +578,31 @@ impl Item {
                 gus.drive = cycle(&letters, gus.drive, dir);
             }
             Midi => {
-                let synths: &[MidiSynth] = if soundfonts(frontend) {
-                    &[MidiSynth::Auto, MidiSynth::SoundFont, MidiSynth::Gus, MidiSynth::None]
-                } else {
-                    &[MidiSynth::Auto, MidiSynth::Gus, MidiSynth::None]
+                let mut synths = vec![MidiSynth::Auto];
+                if soundfonts(frontend) {
+                    synths.push(MidiSynth::SoundFont);
+                }
+                synths.push(MidiSynth::Gus);
+                if mt32(frontend) {
+                    synths.push(MidiSynth::Mt32);
+                }
+                if host_midi(frontend) {
+                    synths.push(MidiSynth::Host);
+                }
+                synths.push(MidiSynth::None);
+                sound.midisynth = cycle(&synths, sound.midisynth, dir);
+            }
+            Mt32Model => sound.mt32model = cycle(&crate::config::Mt32Model::ALL, sound.mt32model, dir),
+            // The ports there are now, and the first of them (empty).
+            MidiPort => {
+                let mut ports = vec![String::new()];
+                ports.extend(midi_ports());
+                let at = ports.iter().position(|p| *p == sound.midiport);
+                let next = match at {
+                    Some(i) => (i as isize + dir).rem_euclid(ports.len() as isize) as usize,
+                    None => 0,
                 };
-                sound.midisynth = cycle(synths, sound.midisynth, dir);
+                sound.midiport = ports.swap_remove(next);
             }
             HardDiskSpeed => s.disk.hard_disk_speed = cycle(&DiskSpeed::ALL, s.disk.hard_disk_speed, dir),
             FloppyDiskSpeed => s.disk.floppy_disk_speed = cycle(&DiskSpeed::ALL, s.disk.floppy_disk_speed, dir),
@@ -576,7 +629,7 @@ impl Item {
                 let fives = if dir > 0 { dz / 5 + 1 } else { (dz + 4) / 5 - 1 };
                 s.joystick.deadzone = (fives * 5).clamp(0, MAX_DEADZONE as isize) as u8;
             }
-            UltraDir | SoundFont | CaptureDir => {}
+            UltraDir | SoundFont | Mt32Roms | CaptureDir => {}
         }
     }
 
@@ -614,6 +667,8 @@ impl Item {
         match self {
             Item::UltraDir => s.sound.gus.ultradir.take().is_some(),
             Item::SoundFont => s.sound.soundfont.take().is_some(),
+            Item::Mt32Roms => s.sound.mt32roms.take().is_some(),
+            Item::MidiPort => !std::mem::take(&mut s.sound.midiport).is_empty(),
             Item::CaptureDir => {
                 let default = Settings::default().capture_dir;
                 std::mem::replace(&mut s.capture_dir, default.clone()) != default
@@ -637,6 +692,8 @@ impl Item {
 enum Pick {
     MountPath,
     SoundFont,
+    /// The directory with the MT-32's ROMs.
+    Mt32Roms,
 }
 
 struct Status {
@@ -1009,6 +1066,7 @@ impl ConfigUi {
             (UiKey::Enter, Input::ChoiceOrText | Input::Text) => {
                 self.edit = Some(TextField::new(&item.text(&self.settings)));
             }
+            (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}
@@ -1189,6 +1247,12 @@ impl ConfigUi {
                 false,
                 SOUNDFONTS,
             ),
+            Pick::Mt32Roms => (
+                "Pick the directory with the MT-32's ROMs",
+                self.settings.sound.mt32roms.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                true,
+                MT32_ROMS,
+            ),
         };
         let start = if current.trim().is_empty() {
             self.config_file.as_deref().and_then(Path::parent).map_or(cwd.clone(), Path::to_path_buf)
@@ -1232,6 +1296,12 @@ impl ConfigUi {
                     Pick::SoundFont => {
                         self.settings.sound.soundfont = Some(path);
                         self.changed(Item::SoundFont, host);
+                    }
+                    // A ROM picked stands for its directory.
+                    Pick::Mt32Roms => {
+                        let dir = if path.is_dir() { path } else { path.parent().map(Path::to_path_buf).unwrap_or(path) };
+                        self.settings.sound.mt32roms = Some(dir);
+                        self.changed(Item::Mt32Roms, host);
                     }
                 }
             }

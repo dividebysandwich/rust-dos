@@ -1,9 +1,10 @@
 //! The Roland MPU-401 MIDI interface at 330h/331h, in UART mode: MIDI bytes
-//! a program writes go to a General MIDI synthesizer. That is either
-//! `rustysynth` playing a SoundFont (with the `midi` feature), or the
-//! Gravis Ultrasound patch set played by `gus::synth`. Without one the
-//! interface is still there, so programs that detect it work, but it plays
-//! nothing.
+//! a program writes go to a synthesizer. That is `rustysynth` playing a
+//! SoundFont (with the `midi` feature), the Gravis Ultrasound patch set
+//! played by `gus::synth`, a Roland MT-32 played by munt (`mt32`), or a MIDI
+//! port of the host (`midiout`, with the `hostmidi` feature). Without one
+//! the interface is still there, so programs that detect it work, but it
+//! plays nothing.
 
 use std::collections::VecDeque;
 
@@ -15,8 +16,10 @@ const ACK: u8 = 0xFE;
 /// Frames the synthesizer renders at a time.
 #[cfg(feature = "midi")]
 const BLOCK: usize = 64;
-/// Longest System Exclusive message kept for the synthesizer.
-const SYSEX_MAX: usize = 64;
+/// Longest System Exclusive message kept for the synthesizer: more than
+/// the MT-32's largest (a bank of timbres goes in messages of up to 256
+/// bytes of data).
+const SYSEX_MAX: usize = 8192;
 
 enum Synth {
     None,
@@ -27,6 +30,10 @@ enum Synth {
         block: (Vec<f32>, Vec<f32>, usize),
     },
     Gus(Box<GusSynth>),
+    #[cfg(not(target_arch = "wasm32"))]
+    Mt32(Box<crate::mt32::Mt32>),
+    #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+    Host(Box<crate::midiout::HostMidi>),
 }
 
 pub struct Mpu401 {
@@ -69,13 +76,43 @@ impl Mpu401 {
         self.synth = Synth::None;
     }
 
-    /// Which synthesizer plays: "soundfont", "gus" or "none".
+    /// Which synthesizer plays: "soundfont", "gus", "mt32", "host" or
+    /// "none".
     pub fn synth_name(&self) -> &'static str {
         match self.synth {
             Synth::None => "none",
             #[cfg(feature = "midi")]
             Synth::SoundFont { .. } => "soundfont",
             Synth::Gus(_) => "gus",
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(_) => "mt32",
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(_) => "host",
+        }
+    }
+
+    /// Play the MT-32 with munt. Returns what plays, for the log.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_mt32(&mut self, synth: crate::mt32::Mt32) -> String {
+        let description = synth.description().to_string();
+        self.synth = Synth::Mt32(Box::new(synth));
+        description
+    }
+
+    /// Send the MIDI out of a port of the host. Returns the port's name.
+    #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+    pub fn open_host(&mut self, port: crate::midiout::HostMidi) -> String {
+        let name = port.name().to_string();
+        self.synth = Synth::Host(Box::new(port));
+        name
+    }
+
+    /// What the MT-32's display shows, once, when a program changed it.
+    pub fn take_lcd_message(&mut self) -> Option<String> {
+        match &mut self.synth {
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.take_lcd_message(),
+            _ => None,
         }
     }
 
@@ -118,6 +155,10 @@ impl Mpu401 {
             #[cfg(feature = "midi")]
             Synth::SoundFont { synth, .. } => synth.reset(),
             Synth::Gus(synth) => synth.reset(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.notes_off(),
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(port) => port.notes_off(),
         }
     }
 
@@ -153,10 +194,8 @@ impl Mpu401 {
                 return;
             }
             0xF7 => {
-                if std::mem::take(&mut self.in_sysex)
-                    && let Synth::Gus(synth) = &mut self.synth
-                {
-                    synth.sysex(&self.sysex);
+                if std::mem::take(&mut self.in_sysex) {
+                    self.sysex_done();
                 }
                 return;
             }
@@ -198,6 +237,24 @@ impl Mpu401 {
                 synth.process_midi_message((status & 0x0F) as i32, (status & 0xF0) as i32, d1 as i32, d2 as i32)
             }
             Synth::Gus(synth) => synth.message(status, d1, d2),
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.message(status, d1, d2),
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(port) => port.message(status, d1, d2),
+        }
+    }
+
+    /// A whole System Exclusive message came, in `self.sysex`. The
+    /// SoundFont synthesizer takes none.
+    fn sysex_done(&mut self) {
+        let body = &self.sysex;
+        match &mut self.synth {
+            Synth::Gus(synth) => synth.sysex(body),
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.sysex(body),
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(port) => port.sysex(body),
+            _ => {}
         }
     }
 
@@ -217,6 +274,43 @@ impl Mpu401 {
                 frame
             }
             Synth::Gus(synth) => synth.render(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.render(),
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(_) => (0.0, 0.0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_sysex_arrives_whole() {
+        // An MT-32 timbre bank goes in messages longer than the 64 bytes
+        // the interface used to keep.
+        let mut mpu = Mpu401::new();
+        mpu.write_data(0xF0);
+        for i in 0..300u32 {
+            mpu.write_data((i % 0x80) as u8);
+            // Real-time bytes may come in between.
+            if i == 100 {
+                mpu.write_data(0xF8);
+            }
+        }
+        mpu.write_data(0xF7);
+        assert_eq!(mpu.sysex.len(), 300);
+        assert!(!mpu.in_sysex);
+        assert_eq!(mpu.sysex[299], (299 % 0x80) as u8);
+    }
+
+    #[test]
+    fn running_status_after_sysex() {
+        let mut mpu = Mpu401::new();
+        for b in [0x90, 0x3C, 0x7F, 0xF0, 0x41, 0xF7, 0x90, 0x3C, 0x00, 0x40] {
+            mpu.write_data(b);
+        }
+        assert_eq!((mpu.status, mpu.have, mpu.data[0]), (0x90, 1, 0x40));
     }
 }

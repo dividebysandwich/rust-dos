@@ -793,6 +793,11 @@ fn main() -> Result<(), String> {
             osd.show(format!("The sound recording failed: {}", e));
             sound_recording = None;
         }
+        // What a game shows on the MT-32's display.
+        if let Some(message) = cpu.bus.mpu.take_lcd_message() {
+            cpu.bus.log_string(&format!("[MIDI] MT-32 display: {}", message));
+            osd.show(format!("MT-32: {}", message));
+        }
         cpu.bus.flush_log();
 
         // Update Cursor Blink

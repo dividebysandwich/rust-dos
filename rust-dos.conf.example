@@ -123,10 +123,25 @@
 # The DOS directory with the Ultrasound software and its MIDI patches.
 # The default is \ULTRASND on gusdrive, or C:\ULTRASND with gusdrive=none.
 #ultradir=X:\ULTRASND
-# What plays General MIDI sent to the MPU-401: auto (the SoundFont if one
-# is set, else the Ultrasound patches in ultradir), soundfont, gus, or
-# none.
+# What plays the MIDI sent to the MPU-401: auto (the SoundFont if one is
+# set, else the Ultrasound patches in ultradir), soundfont, gus, mt32 (a
+# Roland MT-32 or CM-32L, played by munt), host (out of a MIDI port of
+# this computer, to a synthesizer there or a real module), or none.
 #midisynth=auto
+# The MT-32's ROMs for midisynth=mt32: a directory with a control ROM and a
+# PCM ROM of the same model, whatever the files are called. Without it
+# rust-dos looks in mt32-roms beside this file's default location, in
+# DOSBox's mt32-roms and in /usr/share/mt32-rom-data. munt's library
+# (libmt32emu) must be installed; mt32lib gives its path if the system
+# doesn't find it.
+#mt32roms=~/mt32-roms
+# Which ROMs to play with: auto (the CM-32L's if they are there, else the
+# MT-32's), mt32 or cm32l.
+#mt32model=auto
+#mt32lib=/usr/lib/libmt32emu.so.2
+# The MIDI port for midisynth=host: a part of its name or its number. The
+# default is the first port (on Linux, the first other than Midi Through).
+#midiport=FLUID
 # A DAC on the parallel port LPT1 (378h), which many games play digital
 # sound through: none (the default), disney (the Disney Sound Source) or
 # covox (the Covox Speech Thing).

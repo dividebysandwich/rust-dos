@@ -23,7 +23,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * Dynamic recompiler translates protected-mode program code into
   x86-64 or ARM64 host code (see [docs/dynrec.md](docs/dynrec.md))
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
-  General MIDI through the MPU-401 with a SoundFont or the Gravis patches
+  MIDI through the MPU-401: General MIDI with a SoundFont or the Gravis
+  patches, the Roland MT-32 through munt, or out of the host's MIDI ports
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
   both digital audio and music with built-in patch set.
 * Covox Speech Thing and Disney Sound Source on the parallel port
@@ -175,11 +176,31 @@ D:
     It defaults to `\ULTRASND` on `gusdrive` (`X:\ULTRASND`), or to
     `C:\ULTRASND` with `gusdrive=none`. To use patches of your own, set
     `gusdrive=none` and put them in `ultradir`.
-  * `midisynth` picks what plays the MPU-401's General MIDI: `auto` (the
-    default: the SoundFont if `soundfont` is set, else the Ultrasound
-    patches listed in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, or
+  * `midisynth` picks what plays the MPU-401's MIDI: `auto` (the default:
+    the SoundFont if `soundfont` is set, else the Ultrasound patches listed
+    in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, `mt32`, `host`, or
     `none`. The built-in patches play even without the Ultrasound
     (`gus=false`) unless `gusdrive` is `none`.
+  * `mt32` plays a Roland MT-32 or CM-32L, emulated by
+    [munt](https://github.com/munt/munt). rust-dos loads munt's library
+    when the MT-32 is chosen, so it has to be installed: `munt` on Arch,
+    `libmt32emu2` on Debian and Ubuntu, `brew install mt32emu` on macOS, or
+    `mt32emu.dll` beside `rust-dos.exe` on Windows (`mt32lib` gives the
+    library's path if the system doesn't find it). The MT-32's ROMs are not
+    part of it: `mt32roms` is the directory with a control ROM and a PCM
+    ROM of the same model, whatever the files are called. Without the
+    setting rust-dos looks in `mt32-roms` in its configuration directory,
+    in DOSBox's `mt32-roms`, and in `/usr/share/mt32-rom-data`.
+    `mt32model` picks the ROMs to play with: `auto` (the CM-32L's if they
+    are there, else the MT-32's), `mt32` or `cm32l`. What a game shows on
+    the MT-32's display appears over the picture.
+  * `host` sends the MIDI out of a MIDI port of the computer (ALSA,
+    CoreMIDI or Windows MIDI): to a real MT-32 or Sound Canvas, or to a
+    software synthesizer such as FluidSynth or munt's. `midiport` is a part
+    of the port's name or its number; the default is the first port (on
+    Linux, the first other than Midi Through). Building rust-dos with it
+    needs ALSA's development files on Linux (`libasound2-dev`); without the
+    `hostmidi` feature it is left out.
   * `lpt_dac` puts a DAC on the parallel port LPT1 (378h), which many games
     of the late 1980s and early 1990s play digital sound through: `none`
     (the default), `disney` (the Disney Sound Source, with its 16-byte

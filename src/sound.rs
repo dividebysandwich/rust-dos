@@ -52,7 +52,19 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
         cpu.bus.configure_lpt_dac(sound.lpt_dac);
     }
 
-    let midi = |s: &SoundConfig| format!("{:?} {:?} {} {}", s.midisynth, s.soundfont, s.gus.builtin(), s.gus.ultradir());
+    let midi = |s: &SoundConfig| {
+        format!(
+            "{:?} {:?} {} {} {:?} {:?} {:?} {}",
+            s.midisynth,
+            s.soundfont,
+            s.gus.builtin(),
+            s.gus.ultradir(),
+            s.mt32roms,
+            s.mt32model,
+            s.mt32lib,
+            s.midiport
+        )
+    };
     if !changed(&midi) {
         return warnings;
     }
@@ -60,9 +72,19 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     let soundfont = match sound.midisynth {
         MidiSynth::SoundFont => true,
         MidiSynth::Auto => sound.soundfont.is_some(),
-        MidiSynth::Gus | MidiSynth::None => false,
+        MidiSynth::Gus | MidiSynth::Mt32 | MidiSynth::Host | MidiSynth::None => false,
     };
-    if soundfont {
+    if sound.midisynth == MidiSynth::Mt32 {
+        match start_mt32(cpu, &sound) {
+            Ok(what) => cpu.bus.log_string(&format!("[CONFIG] MIDI on the {}", what)),
+            Err(e) => warnings.push(format!("midisynth=mt32: {}", e)),
+        }
+    } else if sound.midisynth == MidiSynth::Host {
+        match start_host(cpu, &sound) {
+            Ok(name) => cpu.bus.log_string(&format!("[CONFIG] MIDI out of the host's port {}", name)),
+            Err(e) => warnings.push(format!("midisynth=host: {}", e)),
+        }
+    } else if soundfont {
         match &sound.soundfont {
             Some(path) => match cpu.bus.mpu.load_soundfont(path) {
                 Ok(()) => cpu
@@ -93,4 +115,31 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
         }
     }
     warnings
+}
+
+/// Give the MPU-401 munt's MT-32 with the configured ROMs. Returns what
+/// plays.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_mt32(cpu: &mut Cpu, sound: &SoundConfig) -> Result<String, String> {
+    let synth =
+        crate::mt32::Mt32::open(sound.mt32roms.as_deref(), sound.mt32model, sound.mt32lib.as_deref(), crate::opl::RATE)?;
+    Ok(cpu.bus.mpu.load_mt32(synth))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_mt32(_: &mut Cpu, _: &SoundConfig) -> Result<String, String> {
+    Err("the browser has no MT-32".to_string())
+}
+
+/// Send the MPU-401's MIDI out of the configured port of the host. Returns
+/// the port's name.
+#[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+fn start_host(cpu: &mut Cpu, sound: &SoundConfig) -> Result<String, String> {
+    let port = crate::midiout::HostMidi::open(&sound.midiport)?;
+    Ok(cpu.bus.mpu.open_host(port))
+}
+
+#[cfg(not(all(feature = "hostmidi", not(target_arch = "wasm32"))))]
+fn start_host(_: &mut Cpu, _: &SoundConfig) -> Result<String, String> {
+    Err("this build has no MIDI out of the host (the `hostmidi` feature)".to_string())
 }

@@ -27,6 +27,8 @@ pub mod instr_cache;
 pub mod kbc;
 pub mod keyboard;
 pub mod log;
+#[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+pub mod midiout;
 pub mod lpt_dac;
 pub mod instructions;
 pub mod interrupts;
@@ -38,6 +40,8 @@ pub mod mixer_command;
 pub mod mount;
 pub mod mouse;
 pub mod mpu401;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mt32;
 pub mod opl;
 pub mod pic;
 pub mod recorder;

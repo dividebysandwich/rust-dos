@@ -15,7 +15,7 @@ use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickSettings, JoystickType};
 use crate::lpt_dac::LptDacType;
-use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
+use crate::mount::{MountSpec, contract_home, expand_host_path, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
 use crate::timer::CpuSpeed;
 use crate::video::adapter::{Adapter, VideoSetup};
@@ -213,14 +213,58 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// The synthesizer that plays the MPU-401's General MIDI (`midisynth`).
+/// The synthesizer that plays the MPU-401's MIDI (`midisynth`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MidiSynth {
     /// The SoundFont if one is set, else the Ultrasound patches.
     Auto,
     SoundFont,
     Gus,
+    /// The Roland MT-32 (or CM-32L), played by munt.
+    Mt32,
+    /// A MIDI port of the host (`midiport`).
+    Host,
     None,
+}
+
+/// The model the ROMs are for (`mt32model`): the MT-32, or the CM-32L with
+/// its extra sound effects. `Auto` takes the CM-32L's ROMs when they are
+/// there, as DOSBox Staging does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mt32Model {
+    Auto,
+    Mt32,
+    Cm32l,
+}
+
+impl Mt32Model {
+    pub const ALL: [Mt32Model; 3] = [Mt32Model::Auto, Mt32Model::Mt32, Mt32Model::Cm32l];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Mt32Model::Auto),
+            "mt32" | "mt-32" => Some(Mt32Model::Mt32),
+            "cm32l" | "cm-32l" => Some(Mt32Model::Cm32l),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mt32Model::Auto => "auto",
+            Mt32Model::Mt32 => "mt32",
+            Mt32Model::Cm32l => "cm32l",
+        }
+    }
+
+    /// As the settings window shows it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Mt32Model::Auto => "auto (CM-32L, else MT-32)",
+            Mt32Model::Mt32 => "MT-32",
+            Mt32Model::Cm32l => "CM-32L",
+        }
+    }
 }
 
 /// The `[sound]` section.
@@ -235,6 +279,15 @@ pub struct SoundConfig {
     /// The Gravis Ultrasound; `enabled` says whether there is one.
     pub gus: crate::gus::GusConfig,
     pub midisynth: MidiSynth,
+    /// The directory with the MT-32's ROMs (`mt32roms`); without it, the
+    /// usual places (`mt32::default_rom_dirs`).
+    pub mt32roms: Option<PathBuf>,
+    pub mt32model: Mt32Model,
+    /// munt's library, where the system doesn't find it (`mt32lib`).
+    pub mt32lib: Option<PathBuf>,
+    /// The host's MIDI port for `midisynth=host`: a part of its name or its
+    /// number; empty for the first.
+    pub midiport: String,
     /// The Covox or Disney Sound Source on LPT1 (`lpt_dac`).
     pub lpt_dac: LptDacType,
 }
@@ -245,6 +298,8 @@ impl MidiSynth {
             MidiSynth::Auto => "auto",
             MidiSynth::SoundFont => "soundfont",
             MidiSynth::Gus => "gus",
+            MidiSynth::Mt32 => "mt32",
+            MidiSynth::Host => "host",
             MidiSynth::None => "none",
         }
     }
@@ -259,6 +314,10 @@ impl Default for SoundConfig {
             soundfont: None,
             gus: crate::gus::GusConfig::default(),
             midisynth: MidiSynth::Auto,
+            mt32roms: None,
+            mt32model: Mt32Model::Auto,
+            mt32lib: None,
+            midiport: String::new(),
             lpt_dac: LptDacType::None,
         }
     }
@@ -340,13 +399,14 @@ impl SoundConfig {
                     _ => return Err(format!("invalid opl '{}' (opl3 or opl2)", value)),
                 }
             }
-            "soundfont" => {
-                let path = match (value.strip_prefix("~/"), home) {
-                    (Some(rest), Some(h)) => h.join(rest),
-                    _ => base_dir.join(value),
-                };
-                self.soundfont = Some(path);
+            "soundfont" => self.soundfont = Some(expand_host_path(value, base_dir, home)),
+            "mt32roms" => self.mt32roms = Some(expand_host_path(value, base_dir, home)),
+            "mt32lib" => self.mt32lib = Some(expand_host_path(value, base_dir, home)),
+            "mt32model" => {
+                self.mt32model = Mt32Model::parse(value)
+                    .ok_or_else(|| format!("invalid mt32model '{}' (auto, mt32 or cm32l)", value))?;
             }
+            "midiport" => self.midiport = value.to_string(),
             "gus" => {
                 self.gus.enabled =
                     parse_bool(value).ok_or_else(|| format!("invalid gus '{}' (true or false)", value))?;
@@ -393,8 +453,12 @@ impl SoundConfig {
                     "auto" => MidiSynth::Auto,
                     "soundfont" => MidiSynth::SoundFont,
                     "gus" => MidiSynth::Gus,
+                    "mt32" | "mt-32" | "munt" => MidiSynth::Mt32,
+                    "host" | "hostmidi" | "external" => MidiSynth::Host,
                     "none" => MidiSynth::None,
-                    _ => return Err(format!("invalid midisynth '{}' (auto, soundfont, gus or none)", value)),
+                    _ => {
+                        return Err(format!("invalid midisynth '{}' (auto, soundfont, gus, mt32, host or none)", value));
+                    }
                 }
             }
             "lpt_dac" => {
@@ -833,6 +897,10 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         ),
         (Sound, "ultradir", gus.ultradir.clone()),
         (Sound, "midisynth", Some(sound.midisynth.name().to_string())),
+        (Sound, "mt32roms", sound.mt32roms.as_deref().map(|p| contract_home(p, home))),
+        (Sound, "mt32model", Some(sound.mt32model.name().to_string())),
+        (Sound, "mt32lib", sound.mt32lib.as_deref().map(|p| contract_home(p, home))),
+        (Sound, "midiport", (!sound.midiport.is_empty()).then(|| sound.midiport.clone())),
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
@@ -1264,12 +1332,32 @@ mod tests {
         assert_eq!(config.sound.ultrasound(), None);
 
         let config = parse(
-            "[sound]\ngusbase=230\ngusirq=4\ngusdma=2\nmidisynth=mt32\ngusdrive=Z\n",
+            "[sound]\ngusbase=230\ngusirq=4\ngusdma=2\nmidisynth=mt64\ngusdrive=Z\n",
             Path::new("/cfg"),
             None,
         );
         assert_eq!(config.warnings.len(), 5, "{:?}", config.warnings);
         assert_eq!(config.sound.ultrasound(), Some(crate::gus::GusConfig::default()));
+    }
+
+    #[test]
+    fn mt32_and_host_midi_settings() {
+        let text = "[sound]\nmidisynth=mt32\nmt32roms=~/roms\nmt32model=CM-32L\nmt32lib=lib/libmt32emu.so\n";
+        let config = parse(text, Path::new("/cfg"), Some(Path::new("/home/u")));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let sound = &config.sound;
+        assert_eq!(sound.midisynth, MidiSynth::Mt32);
+        assert_eq!(sound.mt32roms.as_deref(), Some(Path::new("/home/u/roms")));
+        assert_eq!(sound.mt32model, Mt32Model::Cm32l);
+        assert_eq!(sound.mt32lib.as_deref(), Some(Path::new("/cfg/lib/libmt32emu.so")));
+
+        let config = parse("[sound]\nmidisynth=host\nmidiport=UM-ONE\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!((config.sound.midisynth, config.sound.midiport.as_str()), (MidiSynth::Host, "UM-ONE"));
+
+        let config = parse("[sound]\nmt32model=sc55\n", Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+        assert_eq!(config.sound.mt32model, Mt32Model::Auto);
     }
 
     #[test]
@@ -1465,6 +1553,10 @@ mod tests {
                 ultradir: Some("D:\\GUS".to_string()),
             },
             midisynth: MidiSynth::Gus,
+            mt32roms: Some(PathBuf::from("/home/u/roms")),
+            mt32model: Mt32Model::Cm32l,
+            mt32lib: Some(PathBuf::from("/opt/munt/libmt32emu.so")),
+            midiport: "FLUID".to_string(),
             lpt_dac: LptDacType::Disney,
         };
         Settings {
