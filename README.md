@@ -124,6 +124,10 @@ D:
     640x200, 60 Hz) or `hercules` (a Hercules Graphics Card on a monochrome
     monitor: the MDA's text and 720x348 graphics, 50 Hz). A change takes
     effect at the DOS prompt.
+  * `capture_dir` is the folder screenshots and recordings go in:
+    `capture` (the default) in the directory rust-dos started in, or a
+    path of your own. Screenshots show the picture as the recordings do:
+    with the monochrome look, without a CRT shader or the settings window.
   * `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
     first megabyte is extended memory for DOS extenders and XMS.
 * **`[sound]`:**
@@ -346,7 +350,9 @@ is replaced on every start and stops growing at 64 MB.
 | Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |
 | Ctrl+F10 | Capture the mouse for the program, and let it go; a click captures it too once a program uses the mouse |
 | Alt+Enter | Switch between the window and fullscreen |
-| PrintScreen | Toggle screen recording to a video file |
+| Ctrl+F5 | Save a screenshot (PNG) |
+| Ctrl+F6 | Start and stop recording the sound (WAV) |
+| PrintScreen | Start and stop recording an animation (GIF) |
 
 A message at the top of the picture says what they did. A captured mouse
 moves the program's cursor by its motion, so a game that turns with the

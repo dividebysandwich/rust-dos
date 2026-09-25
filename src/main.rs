@@ -14,6 +14,7 @@ use crate::cpu::{Cpu, CpuModel};
 use crate::disk::{DriveInfo, DriveKind, LASTDRIVE};
 use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
+use crate::capture::wav::WavWriter;
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
 use crate::video::adapter::VideoSetup;
@@ -25,7 +26,7 @@ mod sdl_keys;
 // The emulator itself is the library crate; the debug server and the
 // window's display are private to the binary. These re-exports let the
 // binary's modules refer to the library modules as `crate::...`.
-use rust_dos::{audio, config, config_ui, cpu, disk, exec, keyboard, mount, recorder, shell, sound, timer, video};
+use rust_dos::{audio, capture, config, config_ui, cpu, disk, exec, keyboard, mount, recorder, shell, sound, timer, video};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -214,6 +215,10 @@ fn main() -> Result<(), String> {
     // The button whose click captured the mouse, whose release the program
     // doesn't see either.
     let mut capturing_click: Option<MouseButton> = None;
+    // A screenshot to take of the next frame (Ctrl+F5), and the sound being
+    // recorded (Ctrl+F6).
+    let mut screenshot = false;
+    let mut sound_recording: Option<WavWriter> = None;
     macro_rules! capture_mouse {
         ($on:expr) => {{
             let on = $on;
@@ -353,6 +358,34 @@ fn main() -> Result<(), String> {
                         }
                         continue;
                     }
+                    // Ctrl+F5 saves a screenshot, and Ctrl+F6 starts and stops
+                    // recording the sound, as in DOSBox.
+                    if keycode == Keycode::F5 && ctrl && !alt {
+                        if !repeat {
+                            screenshot = true;
+                        }
+                        continue;
+                    }
+                    if keycode == Keycode::F6 && ctrl && !alt {
+                        if !repeat {
+                            match sound_recording.take() {
+                                Some(wav) => match wav.finish() {
+                                    Ok(seconds) => osd.show(format!("Sound recording stopped ({:.1} s)", seconds)),
+                                    Err(e) => osd.show(format!("The sound recording failed: {}", e)),
+                                },
+                                None => match capture::capture_path(&settings.capture_dir, "sound", "wav")
+                                    .and_then(|path| WavWriter::create(&path).map(|wav| (path, wav)))
+                                {
+                                    Ok((path, wav)) => {
+                                        sound_recording = Some(wav);
+                                        osd.show(format!("Recording the sound to {}", path.display()));
+                                    }
+                                    Err(e) => osd.show(e),
+                                },
+                            }
+                        }
+                        continue;
+                    }
                     // Ctrl+F8 turns the sound off and on.
                     if keycode == Keycode::F8 && ctrl && !alt {
                         if !repeat {
@@ -392,7 +425,11 @@ fn main() -> Result<(), String> {
 
                     // Recorder Toggle
                     if keycode == Keycode::PrintScreen {
-                        recorder.toggle();
+                        match recorder.toggle(&settings.capture_dir) {
+                            Ok(Some(path)) => osd.show(format!("Recording an animation to {}", path.display())),
+                            Ok(None) => osd.show("Animation recording stopped"),
+                            Err(e) => osd.show(e),
+                        }
                         continue;
                     }
 
@@ -592,7 +629,13 @@ fn main() -> Result<(), String> {
         }
 
         // Update Audio
-        pump_audio(&mut cpu.bus, waiting);
+        let samples = pump_audio(&mut cpu.bus, waiting);
+        if let Some(wav) = &mut sound_recording
+            && let Err(e) = wav.write(&samples)
+        {
+            osd.show(format!("The sound recording failed: {}", e));
+            sound_recording = None;
+        }
         cpu.bus.flush_log();
 
         // Update Cursor Blink
@@ -631,6 +674,14 @@ fn main() -> Result<(), String> {
         // Recordings show the machine alone. Debug clients see the
         // settings window as well, but not the recording indicator.
         recorder.capture(&screen);
+        if std::mem::take(&mut screenshot) {
+            let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
+                .and_then(|path| capture::png::save(&screen, &path).map(|()| path));
+            match saved {
+                Ok(path) => osd.show(format!("Screenshot saved to {}", path.display())),
+                Err(e) => osd.show(e),
+            }
+        }
         if ui.is_open() {
             ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
         }

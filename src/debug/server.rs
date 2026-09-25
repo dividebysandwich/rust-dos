@@ -156,16 +156,7 @@ fn text_response(s: String) -> Response {
 }
 
 fn encode_png(frame: &video::Frame) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut out, frame.width, frame.height);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.set_compression(png::Compression::Fast);
-        let mut w = enc.write_header().map_err(|e| e.to_string())?;
-        w.write_image_data(&frame.rgb).map_err(|e| e.to_string())?;
-    }
-    Ok(out)
+    rust_dos::capture::png::encode(frame)
 }
 
 // ---------------------------------------------------------------------------

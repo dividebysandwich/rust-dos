@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod bios;
 pub mod bus;
+pub mod capture;
 pub mod cdrom;
 pub mod cmos;
 pub mod command;

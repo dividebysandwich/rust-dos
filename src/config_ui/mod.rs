@@ -112,7 +112,7 @@ impl Page {
         match self {
             Page::Drives => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
-            Page::Emulator => &[Cycles, Cpu, Machine, Memsize, HardDiskSpeed, FloppyDiskSpeed],
+            Page::Emulator => &[Cycles, Cpu, Machine, Memsize, HardDiskSpeed, FloppyDiskSpeed, CaptureDir],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
                 SoundFont, HardDiskNoise, FloppyDiskNoise,
@@ -200,6 +200,8 @@ enum Item {
     FloppyDiskNoise,
     /// A volume in the host's mixer.
     Volume(Channel),
+    /// Where screenshots and recordings go.
+    CaptureDir,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -277,6 +279,7 @@ impl Item {
             HardDiskNoise => "Hard disk noise",
             FloppyDiskNoise => "Floppy disk noise",
             Volume(channel) => channel.label(),
+            CaptureDir => "Capture folder",
         }
     }
 
@@ -285,6 +288,7 @@ impl Item {
         match self {
             Item::Scale | Item::Fullscreen => frontend.window,
             Item::SoundFont => soundfonts(frontend),
+            Item::CaptureDir => frontend.host_files,
             _ => true,
         }
     }
@@ -294,7 +298,7 @@ impl Item {
         match self {
             Scale | Fullscreen | Aspect | Filter | Shader | Cycles => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
-            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) => Applies::Now,
+            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
@@ -303,7 +307,7 @@ impl Item {
     fn input(self) -> Input {
         match self {
             Item::Cycles | Item::Volume(_) => Input::ChoiceOrText,
-            Item::UltraDir => Input::Text,
+            Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::SoundFont => Input::File,
             _ => Input::Choice,
         }
@@ -368,6 +372,7 @@ impl Item {
             HardDiskNoise => s.disk.hard_disk_noise.name().to_string(),
             FloppyDiskNoise => s.disk.floppy_disk_noise.name().to_string(),
             Volume(channel) => volume_bar(s.mixer.level(channel)),
+            CaptureDir => contract_home(&s.capture_dir, home),
         }
     }
 
@@ -444,7 +449,7 @@ impl Item {
                 let tens = if dir > 0 { level / 10 + 1 } else { level.div_ceil(10).saturating_sub(1) };
                 s.mixer.set_level(channel, tens * 10);
             }
-            UltraDir | SoundFont => {}
+            UltraDir | SoundFont | CaptureDir => {}
         }
     }
 
@@ -457,6 +462,7 @@ impl Item {
             },
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
+            Item::CaptureDir => s.capture_dir.display().to_string(),
             _ => String::new(),
         }
     }
@@ -467,6 +473,8 @@ impl Item {
             Item::Cycles => s.cycles = CpuSpeed::parse(text)?,
             Item::UltraDir => s.sound.gus.ultradir = (!text.is_empty()).then(|| text.to_string()),
             Item::Volume(channel) => s.mixer.set_level(channel, crate::mixer::parse_level(text)?),
+            Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),
+            Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), dirs::home_dir().as_deref()),
             _ => {}
         }
         Ok(())
@@ -477,6 +485,10 @@ impl Item {
         match self {
             Item::UltraDir => s.sound.gus.ultradir.take().is_some(),
             Item::SoundFont => s.sound.soundfont.take().is_some(),
+            Item::CaptureDir => {
+                let default = Settings::default().capture_dir;
+                std::mem::replace(&mut s.capture_dir, default.clone()) != default
+            }
             Item::Volume(channel) => {
                 let changed = s.mixer.level(channel) != 100;
                 s.mixer.set_level(channel, 100);

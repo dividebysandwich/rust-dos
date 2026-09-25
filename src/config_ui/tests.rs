@@ -139,7 +139,8 @@ fn settings_change_live() {
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
 
     // The disk speed changes at once.
-    keys(&mut ui, &mut host, &[End, Left]);
+    ui.row = ui.items().iter().position(|&i| i == Item::FloppyDiskSpeed).unwrap();
+    keys(&mut ui, &mut host, &[Left]);
     assert_eq!(host.applied.last().unwrap().disk.floppy_disk_speed, crate::diskio::DiskSpeed::Slow);
     assert!(status(&ui).0.is_empty() || !status(&ui).0.contains("next time"), "{:?}", status(&ui));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("slow (~30 kB/s)"));
@@ -399,6 +400,25 @@ fn the_video_card_changes_at_the_prompt() {
         keys(&mut ui, &mut host, &[UiKey::Right]);
         assert_eq!(host.applied.last().unwrap().machine, adapter);
     }
+}
+
+#[test]
+fn the_capture_folder_is_typed() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::CaptureDir).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("capture"));
+    keys(&mut ui, &mut host, &[Enter, End]);
+    for _ in 0..7 {
+        ui.key(Backspace, &mut host);
+    }
+    ui.text("shots", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().capture_dir, PathBuf::from("shots"));
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().capture_dir, PathBuf::from("capture"));
 }
 
 #[test]

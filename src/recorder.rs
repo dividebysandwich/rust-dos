@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::BufWriter;
+use std::path::{Path, PathBuf};
 use gif::{Encoder, Repeat};
 use std::time::{Instant, Duration};
-use chrono::Local;
 
 use crate::video::Frame;
 
@@ -35,25 +35,26 @@ impl ScreenRecorder {
         self.is_recording
     }
 
-    pub fn toggle(&mut self) {
+    /// Start recording to a new file in `dir`, or stop. Returns the file
+    /// it started recording to.
+    pub fn toggle(&mut self, dir: &Path) -> Result<Option<PathBuf>, String> {
         if self.is_recording {
             self.stop();
+            Ok(None)
         } else {
-            self.start();
+            self.start(dir).map(Some)
         }
     }
 
-    fn start(&mut self) {
-        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
-        let filename = format!("rust-dos_capture_{}.gif", timestamp);
-
-        println!("[RECORDER] Started recording to {}", filename);
-
-        let file = File::create(&filename).expect("Failed to create record file");
+    fn start(&mut self, dir: &Path) -> Result<PathBuf, String> {
+        let path = crate::capture::capture_path(dir, "animation", "gif")?;
+        let file = File::create(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        println!("[RECORDER] Started recording to {}", path.display());
         self.pending = Some(BufWriter::new(file));
         self.encoder = None;
         self.is_recording = true;
         self.last_frame_time = Instant::now();
+        Ok(path)
     }
 
     fn stop(&mut self) {

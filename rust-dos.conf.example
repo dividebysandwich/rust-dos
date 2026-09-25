@@ -52,6 +52,10 @@
 #         720x348 graphics
 # A change takes effect at the DOS prompt.
 #machine=svga
+# Where screenshots (Ctrl+F5) and sound (Ctrl+F6), video (Ctrl+F7) and
+# animation (PrintScreen) recordings go: a folder, relative to the
+# directory rust-dos started in.
+#capture_dir=capture
 # RAM in MB, 2 to 64. Memory above the first megabyte is extended memory
 # for DOS extenders and XMS.
 #memsize=16

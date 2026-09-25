@@ -92,6 +92,8 @@ pub struct Config {
     pub monochrome: Option<Monochrome>,
     /// The display adapter (`machine`).
     pub machine: Option<Adapter>,
+    /// Where screenshots and recordings go (`capture_dir`).
+    pub capture_dir: Option<PathBuf>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
@@ -431,6 +433,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(shader) => config.shader = Some(shader),
                             None => warn(format!("invalid shader '{}' (none, scanlines, aperture or curved)", value)),
                         },
+                        "capture_dir" => {
+                            let value = value.trim_matches('"');
+                            config.capture_dir = Some(match (value.strip_prefix("~/"), home) {
+                                (Some(rest), Some(h)) => h.join(rest),
+                                _ => PathBuf::from(value),
+                            });
+                        }
                         "machine" => match Adapter::parse(value) {
                             Some(adapter) => config.machine = Some(adapter),
                             None => warn(format!("invalid machine '{}' (svga, vga, ega, cga or hercules)", value)),
@@ -606,6 +615,9 @@ pub struct Settings {
     pub shader: Shader,
     pub monochrome: Monochrome,
     pub machine: Adapter,
+    /// Where screenshots and recordings go; relative to the working
+    /// directory.
+    pub capture_dir: PathBuf,
     pub cycles: CpuSpeed,
     pub cpu: CpuModel,
     /// RAM in MB.
@@ -625,6 +637,7 @@ impl Default for Settings {
             shader: Shader::None,
             monochrome: Monochrome::Off,
             machine: Adapter::Svga,
+            capture_dir: PathBuf::from("capture"),
             cycles: CpuSpeed::Max,
             cpu: CpuModel::I486,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
@@ -657,6 +670,7 @@ impl Settings {
             shader: config.shader.unwrap_or(default.shader),
             monochrome: config.monochrome.unwrap_or(default.monochrome),
             machine: config.machine.unwrap_or(default.machine),
+            capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             memsize: config.memsize.unwrap_or(default.memsize),
@@ -684,6 +698,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "shader", Some(settings.shader.name().to_string())),
         (Emulator, "monochrome", Some(settings.monochrome.name().to_string())),
         (Emulator, "machine", Some(settings.machine.name().to_string())),
+        (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (
             Emulator,
             "cycles",
@@ -1284,6 +1299,7 @@ mod tests {
             shader: Shader::Curved,
             monochrome: Monochrome::Green,
             machine: Adapter::Vga,
+            capture_dir: PathBuf::from("/home/u/dos captures"),
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
             memsize: 32,
@@ -1345,6 +1361,7 @@ mod tests {
         assert!(text.contains("#shader=none\nshader=curved\n"), "{}", text);
         assert!(text.contains("#monochrome=off\nmonochrome=green\n"), "{}", text);
         assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
+        assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);
         assert!(text.contains("#master=100\nmaster=5\n"), "{}", text);
         assert!(text.contains("#disknoise=100\ndisknoise=75\n"), "{}", text);
         assert!(text.contains("#sbtype=sb16\nsbtype=sbpro2\n"), "{}", text);
