@@ -1,6 +1,6 @@
 use clap::Parser;
 use sdl2::event::{Event, WindowEvent};
-use sdl2::keyboard::{Keycode, Mod};
+use sdl2::keyboard::{Keycode, Mod, Scancode};
 use sdl2::mouse::{MouseButton, MouseWheelDirection};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -209,6 +209,8 @@ fn main() -> Result<(), String> {
     cpu.bus.set_mixer(settings.mixer);
     cpu.bus.set_joystick(settings.joystick);
     cpu.bus.vga.set_composite(settings.composite);
+    apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
+    sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
     if let Err(e) = cpu.set_upper_memory(settings.ems, settings.umb) {
         config_warning(&mut cpu, &e);
     }
@@ -268,7 +270,7 @@ fn main() -> Result<(), String> {
     let mut ui_shown = false;
     // Keys pressed on the machine and not released yet: their scan codes
     // and whether they have the E0 prefix.
-    let mut held: HashMap<Keycode, (u8, bool)> = HashMap::new();
+    let mut held: HashMap<Scancode, (u8, bool)> = HashMap::new();
     // What the hotkeys did, over the picture, and whether the machine is
     // paused (Alt+Pause).
     let mut osd = Osd::new();
@@ -351,6 +353,12 @@ fn main() -> Result<(), String> {
             match event {
                 Event::Quit { .. } => break 'running,
                 // Losing the keyboard lets go of what it held.
+                // Coming back, the host's keyboard may have another
+                // layout and other locks.
+                Event::Window { win_event: WindowEvent::FocusGained, .. } => {
+                    sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
+                    apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
+                }
                 Event::Window { win_event: WindowEvent::FocusLost, .. } => {
                     release_input(&mut cpu, &mut held);
                     capture_mouse!(false);
@@ -362,6 +370,7 @@ fn main() -> Result<(), String> {
                 }
                 Event::KeyDown {
                     keycode: Some(keycode),
+                    scancode,
                     keymod,
                     repeat,
                     ..
@@ -520,22 +529,10 @@ fn main() -> Result<(), String> {
                     }
                     // A key still held from the settings window repeats
                     // for nobody.
-                    if repeat && !held.contains_key(&keycode) {
+                    let Some(scancode) = scancode else { continue };
+                    if repeat && !held.contains_key(&scancode) {
                         continue;
                     }
-
-                    // Update BDA Shift Flags (0x0417)
-                    // This lets INT 16h AH=02 report modifier state correctly
-                    let mut flags = cpu.bus.read_8(0x0417);
-                    match keycode {
-                        Keycode::RShift => flags |= 0x01,
-                        Keycode::LShift => flags |= 0x02,
-                        Keycode::LCtrl | Keycode::RCtrl => flags |= 0x04,
-                        Keycode::LAlt | Keycode::RAlt => flags |= 0x08,
-                        Keycode::CapsLock => flags ^= 0x40, // Toggle on press
-                        _ => {}
-                    }
-                    cpu.bus.write_8(0x0417, flags);
 
                     // Recorder Toggle
                     if keycode == Keycode::PrintScreen {
@@ -547,22 +544,17 @@ fn main() -> Result<(), String> {
                         continue;
                     }
 
-                    // Map Key to PC Scancode/ASCII. High byte = scancode,
-                    // low byte = ASCII. Keep pushing to the INT 16h buffer
-                    // for BIOS-based input, and ALSO latch the raw scan code
-                    // at port 0x60 + raise IRQ1 so games that poll the port
-                    // or install a custom INT 09h ISR see the event.
-                    let extended = sdl_keys::is_extended(keycode);
-                    if let Some(scan) = sdl_keys::modifier_scan(keycode) {
-                        keyboard::deliver_scan_only(&mut cpu.bus, scan, extended);
-                        held.insert(keycode, (scan, extended));
-                    } else if let Some(code) = sdl_keys::map_sdl_to_pc(keycode, keymod) {
-                        keyboard::deliver_key_down(&mut cpu.bus, code, extended);
-                        held.insert(keycode, ((code >> 8) as u8, extended));
+                    // The PC key where the host's key is: its scan code
+                    // for programs that read the keyboard themselves, and
+                    // what the keyboard layout types with it for the BIOS.
+                    if let Some((scan, extended)) = sdl_keys::pc_scan(scancode) {
+                        keyboard::key_event(&mut cpu.bus, scan, extended, true, None);
+                        held.insert(scancode, (scan, extended));
                     }
                 }
                 Event::KeyUp {
                     keycode: Some(keycode),
+                    scancode,
                     ..
                 } => {
                     if keycode == Keycode::F12 && pacer.fast_forward() {
@@ -573,26 +565,13 @@ fn main() -> Result<(), String> {
                     }
                     // Only keys the machine saw go down come up for it,
                     // not those of the settings window.
-                    let Some((scan, extended)) = held.remove(&keycode) else {
+                    let Some((scan, extended)) = scancode.and_then(|scancode| held.remove(&scancode)) else {
                         continue;
                     };
-
-                    // Update BDA Shift Flags (Clear bits)
-                    let mut flags = cpu.bus.read_8(0x0417);
-                    match keycode {
-                        Keycode::RShift => flags &= !0x01,
-                        Keycode::LShift => flags &= !0x02,
-                        Keycode::LCtrl | Keycode::RCtrl => flags &= !0x04,
-                        Keycode::LAlt | Keycode::RAlt => flags &= !0x08,
-                        _ => {}
-                    }
-                    cpu.bus.write_8(0x0417, flags);
-
-                    // Deliver release scan code (scancode | 0x80) to port 0x60
-                    // and fire IRQ1. Games that track held keys (arrow-key
-                    // movement, etc.) need these to know when the key stops
-                    // being pressed.
-                    keyboard::deliver_key_up(&mut cpu.bus, scan, extended);
+                    // Games that track held keys (arrow-key movement, etc.)
+                    // need the break code to know when the key stops being
+                    // pressed.
+                    keyboard::key_event(&mut cpu.bus, scan, extended, false, None);
                 }
 
                 Event::TextInput { text, .. } if ui.is_open() => ui.text(&text, &mut host!()),
@@ -709,10 +688,9 @@ fn main() -> Result<(), String> {
                 text_input.start();
             } else {
                 text_input.stop();
-                // Caps Lock may have changed while the window had the keys.
-                let caps = sdl_context.keyboard().mod_state().contains(Mod::CAPSMOD);
-                let flags = cpu.bus.read_8(0x0417) & !0x40;
-                cpu.bus.write_8(0x0417, flags | if caps { 0x40 } else { 0 });
+                // Caps and Num Lock may have changed while the window had
+                // the keys.
+                sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
             }
         }
 
@@ -1153,6 +1131,9 @@ impl Host for MainHost<'_, '_> {
         if new.composite != old.composite {
             self.cpu.bus.vga.set_composite(new.composite);
         }
+        if new.keyboard_layout != old.keyboard_layout {
+            apply_keyboard_layout(self.cpu, new.keyboard_layout);
+        }
         if !self.machine.differs(new) {
             return Ok(None);
         }
@@ -1288,17 +1269,36 @@ fn ui_key(keycode: Keycode, keymod: Mod) -> Option<UiKey> {
 /// Let go of everything the machine holds as the settings window takes the
 /// keyboard and mouse: release the keys and buttons, so no game is left
 /// with Ctrl or a fire button held down.
-fn release_input(cpu: &mut Cpu, held: &mut HashMap<Keycode, (u8, bool)>) {
-    for (_, (scan, extended)) in held.drain() {
-        keyboard::deliver_key_up(&mut cpu.bus, scan, extended);
-    }
-    // Shift, Ctrl and Alt; the lock states stay.
-    let flags = cpu.bus.read_8(0x0417);
-    cpu.bus.write_8(0x0417, flags & !0x0F);
+fn release_input(cpu: &mut Cpu, held: &mut HashMap<Scancode, (u8, bool)>) {
+    held.clear();
+    // Shift, Ctrl and Alt too; the lock states stay.
+    keyboard::release_all(&mut cpu.bus);
     for button in 0..3 {
         if cpu.bus.mouse.buttons & (1 << button) != 0 {
             cpu.bus.mouse.button_up(button);
         }
+    }
+}
+
+/// Caps Lock and Num Lock as the host's keyboard has them.
+fn sync_locks(cpu: &mut Cpu, mods: Mod) {
+    let mut flags = cpu.bus.read_8(0x0417) & !0x60;
+    if mods.contains(Mod::CAPSMOD) {
+        flags |= 0x40;
+    }
+    if mods.contains(Mod::NUMMOD) {
+        flags |= 0x20;
+    }
+    cpu.bus.write_8(0x0417, flags);
+}
+
+/// The keyboard layout the machine types in: the setting's, or the host
+/// keyboard's for auto.
+fn apply_keyboard_layout(cpu: &mut Cpu, setting: rust_dos::keylayout::LayoutSetting) {
+    let layout = setting.layout(sdl_keys::detect_layout());
+    if !std::ptr::eq(cpu.bus.kbd.layout, layout) {
+        cpu.bus.log_string(&format!("[INPUT] Keyboard layout: {} ({})", layout.name, layout.code));
+        cpu.bus.kbd.layout = layout;
     }
 }
 

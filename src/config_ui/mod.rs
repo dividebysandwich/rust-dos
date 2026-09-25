@@ -172,7 +172,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, CaptureDir,
+                Deadzone, KeyboardLayout, CaptureDir,
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -261,6 +261,7 @@ enum Item {
     /// Expanded memory and upper memory blocks.
     Ems,
     Umb,
+    KeyboardLayout,
     SbType,
     SbBase,
     SbIrq,
@@ -392,6 +393,7 @@ impl Item {
             Memsize => "Memory",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
+            KeyboardLayout => "Keyboard layout",
             SbType => "Sound Blaster",
             SbBase => "  Base port",
             SbIrq => "  IRQ",
@@ -457,7 +459,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core => Applies::Now,
+            Cycles | Core | KeyboardLayout => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
@@ -513,6 +515,7 @@ impl Item {
             Memsize => format!("{} MB", s.memsize),
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
+            KeyboardLayout => s.keyboard_layout.describe(),
             SbType if !s.sound.sb_installed => "none".to_string(),
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
@@ -608,6 +611,7 @@ impl Item {
             Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
             Ems => s.ems = !s.ems,
             Umb => s.umb = !s.umb,
+            KeyboardLayout => s.keyboard_layout = cycle(&crate::keylayout::LayoutSetting::all(), s.keyboard_layout, dir),
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
                 match cycle(&models, sound.sb_installed.then_some(sb.model), dir) {

@@ -201,6 +201,51 @@ const ALIASES: &[(&str, &str)] = &[
     ("da", "dk"),
 ];
 
+/// The `keyboard_layout` setting: the host keyboard's own (`auto`), or
+/// one of the layouts by its KEYB code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LayoutSetting {
+    #[default]
+    Auto,
+    Named(&'static str),
+}
+
+impl LayoutSetting {
+    pub fn parse(value: &str) -> Option<Self> {
+        if value.trim().eq_ignore_ascii_case("auto") {
+            return Some(Self::Auto);
+        }
+        Layout::by_code(value).map(|l| Self::Named(l.code))
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Named(code) => code,
+        }
+    }
+
+    /// auto, then every layout, for the settings window.
+    pub fn all() -> Vec<Self> {
+        std::iter::once(Self::Auto).chain(LAYOUTS.iter().map(|l| Self::Named(l.code))).collect()
+    }
+
+    pub fn describe(self) -> String {
+        match self {
+            Self::Auto => "auto (the keyboard's)".to_string(),
+            Self::Named(code) => Layout::by_code(code).map_or(code.to_string(), |l| format!("{} ({})", l.name, l.code)),
+        }
+    }
+
+    /// The layout, with `detected` the host keyboard's for auto.
+    pub fn layout(self, detected: &'static Layout) -> &'static Layout {
+        match self {
+            Self::Auto => detected,
+            Self::Named(code) => Layout::by_code(code).unwrap_or(detected),
+        }
+    }
+}
+
 /// What a key types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Typed {
@@ -357,6 +402,60 @@ impl Layout {
     }
 }
 
+/// The layout the country (or language) of a locale uses, as KEYB's code.
+pub fn locale_layout(lang: &str, country: Option<&str>) -> Option<&'static str> {
+    let lang = lang.to_ascii_lowercase();
+    let country = country.map(str::to_ascii_uppercase);
+    Some(match (lang.as_str(), country.as_deref()) {
+        ("de", Some("CH")) => "sg",
+        ("fr", Some("CH")) => "sf",
+        ("fr" | "nl", Some("BE")) => "be",
+        ("en", Some("GB" | "IE")) => "uk",
+        ("es", Some(c)) if c != "ES" => "la",
+        ("de", _) => "gr",
+        ("fr", _) => "fr",
+        ("it", _) => "it",
+        ("es", _) => "sp",
+        ("pt", _) => "po",
+        ("da", _) => "dk",
+        ("nb" | "nn" | "no", _) => "no",
+        ("sv", _) => "sv",
+        ("fi", _) => "su",
+        ("en", _) => "us",
+        _ => return None,
+    })
+}
+
+/// The layout of the host's keyboard, from the characters `host` its keys
+/// type (scan code, character) and its locale: the one that has the most
+/// of them in the same places, the locale's where several do.
+pub fn detect(host: &[(u8, char)], locale: Option<&'static str>) -> &'static Layout {
+    let spacing = |c: char| match c {
+        '\u{301}' => '´',
+        '\u{300}' => '`',
+        '\u{302}' => '^',
+        '\u{308}' => '¨',
+        '\u{303}' => '~',
+        c => c,
+    };
+    let score = |layout: &Layout| {
+        host.iter()
+            .filter(|&&(scan, c)| {
+                KEYS.iter().position(|&k| k == scan).is_some_and(|i| {
+                    let own = spacing(layout.char_at(i, 0));
+                    own.to_lowercase().eq(c.to_lowercase())
+                })
+            })
+            .count()
+    };
+    let best = LAYOUTS.iter().map(score).max().unwrap_or(0);
+    let tied = |layout: &&Layout| score(layout) == best;
+    locale
+        .and_then(|code| LAYOUTS.iter().filter(tied).find(|l| l.code == code))
+        .or_else(|| LAYOUTS.iter().find(tied))
+        .unwrap_or(Layout::us())
+}
+
 fn typed(c: char) -> Typed {
     if c == NONE {
         Typed::None
@@ -430,6 +529,19 @@ mod tests {
         assert_eq!(compose('\u{308}', b'U'), Some(0x9A));
         assert_eq!(compose('\u{301}', b'x'), None);
         assert_eq!(spacing_accent('\u{302}'), b'^');
+    }
+
+    #[test]
+    fn the_host_s_layout_is_found_from_its_keys() {
+        // A German keyboard: Z and Y swapped, ö ä ü.
+        let host: Vec<(u8, char)> = [(0x15, 'z'), (0x2C, 'y'), (0x27, 'ö'), (0x28, 'ä'), (0x1A, 'ü'), (0x10, 'q')].to_vec();
+        assert_eq!(detect(&host, None).code, "gr");
+        // A Swiss one has them too; the locale tells.
+        let swiss: Vec<(u8, char)> = [(0x15, 'z'), (0x2C, 'y'), (0x27, 'ö'), (0x28, 'ä')].to_vec();
+        assert_eq!(detect(&swiss, locale_layout("de", Some("CH"))).code, "sg");
+        assert_eq!(detect(&[(0x10, 'a'), (0x1E, 'q'), (0x11, 'z')], None).code, "fr");
+        assert_eq!(detect(&[], None).code, "us");
+        assert_eq!(detect(&[(0x10, 'q'), (0x2B, '#')], locale_layout("en", Some("GB"))).code, "uk");
     }
 
     #[test]

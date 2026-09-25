@@ -14,6 +14,7 @@ use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickSettings, JoystickType};
+use crate::keylayout::LayoutSetting;
 use crate::lpt_dac::LptDacType;
 use crate::mount::{MountSpec, contract_home, expand_host_path, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
@@ -116,6 +117,8 @@ pub struct Config {
     pub ems: Option<bool>,
     /// Upper memory blocks (`umb`).
     pub umb: Option<bool>,
+    /// The keyboard layout (`keyboard_layout`).
+    pub keyboard_layout: Option<LayoutSetting>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
     /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,
@@ -585,6 +588,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(core) => config.core = Some(core),
                             Err(e) => warn(e),
                         },
+                        "keyboard_layout" => match LayoutSetting::parse(value) {
+                            Some(layout) => config.keyboard_layout = Some(layout),
+                            None => warn(format!("invalid keyboard_layout '{}' (auto or a KEYB code such as us, gr, fr)", value)),
+                        },
                         "cpu" => match value.to_ascii_lowercase().as_str() {
                             "386" => config.cpu = Some(CpuModel::I386),
                             "486" => config.cpu = Some(CpuModel::I486),
@@ -808,6 +815,7 @@ pub struct Settings {
     pub ems: bool,
     /// Upper memory blocks.
     pub umb: bool,
+    pub keyboard_layout: LayoutSetting,
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
@@ -833,6 +841,7 @@ impl Default for Settings {
             memsize: crate::bus::DEFAULT_MEMORY_MB,
             ems: true,
             umb: true,
+            keyboard_layout: LayoutSetting::Auto,
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
@@ -878,6 +887,7 @@ impl Settings {
             memsize: config.memsize.unwrap_or(default.memsize),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
+            keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
             sound: config.sound.clone(),
             disk: config.disk,
             mixer: config.mixer,
@@ -929,6 +939,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "memsize", Some(settings.memsize.to_string())),
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
+        (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
         (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
         (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),

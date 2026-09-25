@@ -1,158 +1,146 @@
-//! The SDL window's keys as PC keys: scan codes, and the characters they
-//! type.
+//! The SDL window's keys as PC keys: the scan codes of where they are on
+//! the keyboard, and the layout of the host's keyboard, which the machine
+//! types in with `keyboard_layout=auto`.
 
-use sdl2::keyboard::Keycode;
-use sdl2::keyboard::Mod;
+use rust_dos::keylayout::{self, Layout};
+use sdl2::keyboard::{Keycode, Scancode};
 
-/// Extended keys, which send an E0 prefix: the grey cursor block, keypad
-/// Enter and /, right Ctrl and right Alt.
-pub fn is_extended(keycode: Keycode) -> bool {
-    matches!(
-        keycode,
-        Keycode::Up
-            | Keycode::Down
-            | Keycode::Left
-            | Keycode::Right
-            | Keycode::Home
-            | Keycode::End
-            | Keycode::PageUp
-            | Keycode::PageDown
-            | Keycode::Insert
-            | Keycode::Delete
-            | Keycode::KpEnter
-            | Keycode::KpDivide
-            | Keycode::RCtrl
-            | Keycode::RAlt
-    )
-}
-
-/// Scan code of a modifier key, which has no INT 16h keystroke.
-pub fn modifier_scan(keycode: Keycode) -> Option<u8> {
-    match keycode {
-        Keycode::LShift => Some(0x2A),
-        Keycode::RShift => Some(0x36),
-        Keycode::LCtrl | Keycode::RCtrl => Some(0x1D),
-        Keycode::LAlt | Keycode::RAlt => Some(0x38),
-        Keycode::CapsLock => Some(0x3A),
+/// The PC keyboard's set-1 scan code of the key at `scancode`, and whether
+/// it sends E0 first. SDL's scan codes are the positions of the keys, as
+/// the PC's are, whatever they type.
+pub fn pc_scan(scancode: Scancode) -> Option<(u8, bool)> {
+    use Scancode::*;
+    let plain = |scan: u8| Some((scan, false));
+    let extended = |scan: u8| Some((scan, true));
+    match scancode {
+        A => plain(0x1E),
+        B => plain(0x30),
+        C => plain(0x2E),
+        D => plain(0x20),
+        E => plain(0x12),
+        F => plain(0x21),
+        G => plain(0x22),
+        H => plain(0x23),
+        I => plain(0x17),
+        J => plain(0x24),
+        K => plain(0x25),
+        L => plain(0x26),
+        M => plain(0x32),
+        N => plain(0x31),
+        O => plain(0x18),
+        P => plain(0x19),
+        Q => plain(0x10),
+        R => plain(0x13),
+        S => plain(0x1F),
+        T => plain(0x14),
+        U => plain(0x16),
+        V => plain(0x2F),
+        W => plain(0x11),
+        X => plain(0x2D),
+        Y => plain(0x15),
+        Z => plain(0x2C),
+        Num1 => plain(0x02),
+        Num2 => plain(0x03),
+        Num3 => plain(0x04),
+        Num4 => plain(0x05),
+        Num5 => plain(0x06),
+        Num6 => plain(0x07),
+        Num7 => plain(0x08),
+        Num8 => plain(0x09),
+        Num9 => plain(0x0A),
+        Num0 => plain(0x0B),
+        Return => plain(0x1C),
+        Escape => plain(0x01),
+        Backspace => plain(0x0E),
+        Tab => plain(0x0F),
+        Space => plain(0x39),
+        Minus => plain(0x0C),
+        Equals => plain(0x0D),
+        LeftBracket => plain(0x1A),
+        RightBracket => plain(0x1B),
+        Backslash | NonUsHash => plain(0x2B),
+        Semicolon => plain(0x27),
+        Apostrophe => plain(0x28),
+        Grave => plain(0x29),
+        Comma => plain(0x33),
+        Period => plain(0x34),
+        Slash => plain(0x35),
+        NonUsBackslash => plain(0x56),
+        CapsLock => plain(0x3A),
+        F1 => plain(0x3B),
+        F2 => plain(0x3C),
+        F3 => plain(0x3D),
+        F4 => plain(0x3E),
+        F5 => plain(0x3F),
+        F6 => plain(0x40),
+        F7 => plain(0x41),
+        F8 => plain(0x42),
+        F9 => plain(0x43),
+        F10 => plain(0x44),
+        F11 => plain(0x57),
+        F12 => plain(0x58),
+        ScrollLock => plain(0x46),
+        NumLockClear => plain(0x45),
+        Insert => extended(0x52),
+        Home => extended(0x47),
+        PageUp => extended(0x49),
+        Delete => extended(0x53),
+        End => extended(0x4F),
+        PageDown => extended(0x51),
+        Right => extended(0x4D),
+        Left => extended(0x4B),
+        Down => extended(0x50),
+        Up => extended(0x48),
+        KpDivide => extended(0x35),
+        KpMultiply => plain(0x37),
+        KpMinus => plain(0x4A),
+        KpPlus => plain(0x4E),
+        KpEnter => extended(0x1C),
+        Kp1 => plain(0x4F),
+        Kp2 => plain(0x50),
+        Kp3 => plain(0x51),
+        Kp4 => plain(0x4B),
+        Kp5 => plain(0x4C),
+        Kp6 => plain(0x4D),
+        Kp7 => plain(0x47),
+        Kp8 => plain(0x48),
+        Kp9 => plain(0x49),
+        Kp0 => plain(0x52),
+        KpPeriod => plain(0x53),
+        LCtrl => plain(0x1D),
+        LShift => plain(0x2A),
+        LAlt => plain(0x38),
+        RCtrl => extended(0x1D),
+        RShift => plain(0x36),
+        RAlt => extended(0x38),
+        LGui => extended(0x5B),
+        RGui => extended(0x5C),
+        Application => extended(0x5D),
         _ => None,
     }
 }
 
-/// Returns a tuple of (Scancode, ASCII) for a given SDL Keycode.
-/// Scancode is the high byte, ASCII is the low byte.
-pub fn map_sdl_to_pc(keycode: Keycode, keymod: Mod) -> Option<u16> {
-    let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-    let _ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
-    let _alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
-
-    // Construct u16 from (Scan, Ascii)
-    let k = |scan: u8, ascii: u8| Some(((scan as u16) << 8) | (ascii as u16));
-
-    match keycode {
-        // Alphanumeric (Respects Shift)
-        Keycode::A => if shift { k(0x1E, b'A') } else { k(0x1E, b'a') },
-        Keycode::B => if shift { k(0x30, b'B') } else { k(0x30, b'b') },
-        Keycode::C => if shift { k(0x2E, b'C') } else { k(0x2E, b'c') },
-        Keycode::D => if shift { k(0x20, b'D') } else { k(0x20, b'd') },
-        Keycode::E => if shift { k(0x12, b'E') } else { k(0x12, b'e') },
-        Keycode::F => if shift { k(0x21, b'F') } else { k(0x21, b'f') },
-        Keycode::G => if shift { k(0x22, b'G') } else { k(0x22, b'g') },
-        Keycode::H => if shift { k(0x23, b'H') } else { k(0x23, b'h') },
-        Keycode::I => if shift { k(0x17, b'I') } else { k(0x17, b'i') },
-        Keycode::J => if shift { k(0x24, b'J') } else { k(0x24, b'j') },
-        Keycode::K => if shift { k(0x25, b'K') } else { k(0x25, b'k') },
-        Keycode::L => if shift { k(0x26, b'L') } else { k(0x26, b'l') },
-        Keycode::M => if shift { k(0x32, b'M') } else { k(0x32, b'm') },
-        Keycode::N => if shift { k(0x31, b'N') } else { k(0x31, b'n') },
-        Keycode::O => if shift { k(0x18, b'O') } else { k(0x18, b'o') },
-        Keycode::P => if shift { k(0x19, b'P') } else { k(0x19, b'p') },
-        Keycode::Q => if shift { k(0x10, b'Q') } else { k(0x10, b'q') },
-        Keycode::R => if shift { k(0x13, b'R') } else { k(0x13, b'r') },
-        Keycode::S => if shift { k(0x1F, b'S') } else { k(0x1F, b's') },
-        Keycode::T => if shift { k(0x14, b'T') } else { k(0x14, b't') },
-        Keycode::U => if shift { k(0x16, b'U') } else { k(0x16, b'u') },
-        Keycode::V => if shift { k(0x2F, b'V') } else { k(0x2F, b'v') },
-        Keycode::W => if shift { k(0x11, b'W') } else { k(0x11, b'w') },
-        Keycode::X => if shift { k(0x2D, b'X') } else { k(0x2D, b'x') },
-        Keycode::Y => if shift { k(0x15, b'Y') } else { k(0x15, b'y') },
-        Keycode::Z => if shift { k(0x2C, b'Z') } else { k(0x2C, b'z') },
-
-        // Numbers (Top Row)
-        Keycode::Num0 => if shift { k(0x0B, b')') } else { k(0x0B, b'0') },
-        Keycode::Num1 => if shift { k(0x02, b'!') } else { k(0x02, b'1') },
-        Keycode::Num2 => if shift { k(0x03, b'@') } else { k(0x03, b'2') },
-        Keycode::Num3 => if shift { k(0x04, b'#') } else { k(0x04, b'3') },
-        Keycode::Num4 => if shift { k(0x05, b'$') } else { k(0x05, b'4') },
-        Keycode::Num5 => if shift { k(0x06, b'%') } else { k(0x06, b'5') },
-        Keycode::Num6 => if shift { k(0x07, b'^') } else { k(0x07, b'6') },
-        Keycode::Num7 => if shift { k(0x08, b'&') } else { k(0x08, b'7') },
-        Keycode::Num8 => if shift { k(0x09, b'*') } else { k(0x09, b'8') },
-        Keycode::Num9 => if shift { k(0x0A, b'(') } else { k(0x0A, b'9') },
-
-        // Special Characters
-        Keycode::Space => k(0x39, b' '),
-        Keycode::Return => k(0x1C, 0x0D),
-        Keycode::Backspace => k(0x0E, 0x08),
-        Keycode::Tab => k(0x0F, 0x09),
-        Keycode::Escape => k(0x01, 0x1B),
-        Keycode::Minus => if shift { k(0x0C, b'_') } else { k(0x0C, b'-') },
-        Keycode::Equals => if shift { k(0x0D, b'+') } else { k(0x0D, b'=') },
-        Keycode::LeftBracket => if shift { k(0x1A, b'{') } else { k(0x1A, b'[') },
-        Keycode::RightBracket => if shift { k(0x1B, b'}') } else { k(0x1B, b']') },
-        Keycode::Backslash => if shift { k(0x2B, b'|') } else { k(0x2B, b'\\') },
-        Keycode::Semicolon => if shift { k(0x27, b':') } else { k(0x27, b';') },
-        Keycode::Quote => if shift { k(0x28, b'"') } else { k(0x28, b'\'') },
-        Keycode::Comma => if shift { k(0x33, b'<') } else { k(0x33, b',') },
-        Keycode::Period => if shift { k(0x34, b'>') } else { k(0x34, b'.') },
-        Keycode::Slash => if shift { k(0x35, b'?') } else { k(0x35, b'/') },
-        Keycode::Backquote => if shift { k(0x29, b'~') } else { k(0x29, b'`') },
-
-        // Function Keys (the keystrokes of F11 and F12 are 85h and 86h)
-        Keycode::F1 => k(0x3B, 0),
-        Keycode::F2 => k(0x3C, 0),
-        Keycode::F3 => k(0x3D, 0),
-        Keycode::F4 => k(0x3E, 0),
-        Keycode::F5 => k(0x3F, 0),
-        Keycode::F6 => k(0x40, 0),
-        Keycode::F7 => k(0x41, 0),
-        Keycode::F8 => k(0x42, 0),
-        Keycode::F9 => k(0x43, 0),
-        Keycode::F10 => k(0x44, 0),
-        Keycode::F11 => k(0x57, 0),
-        Keycode::F12 => k(0x58, 0),
-
-        // Navigation / Editing (Extended Keys usually have 0x00 or 0xE0 prefix)
-        // DOS usually returns 0x00 as the ASCII code for these extended keys.
-        Keycode::Up => k(0x48, 0),
-        Keycode::Down => k(0x50, 0),
-        Keycode::Left => k(0x4B, 0),
-        Keycode::Right => k(0x4D, 0),
-        Keycode::Home => k(0x47, 0),
-        Keycode::End => k(0x4F, 0),
-        Keycode::PageUp => k(0x49, 0),
-        Keycode::PageDown => k(0x51, 0),
-        Keycode::Insert => k(0x52, 0),
-        Keycode::Delete => k(0x53, 0), // Note: Sometimes 0xE0 prefix in modern BIOS
-
-        // Keypad (Assuming NumLock Off for navigation, On for numbers)
-        // Simplified: Always treat as Numbers for now
-        Keycode::Kp0 => k(0x52, b'0'),
-        Keycode::Kp1 => k(0x4F, b'1'),
-        Keycode::Kp2 => k(0x50, b'2'),
-        Keycode::Kp3 => k(0x51, b'3'),
-        Keycode::Kp4 => k(0x4B, b'4'),
-        Keycode::Kp5 => k(0x4C, b'5'),
-        Keycode::Kp6 => k(0x4D, b'6'),
-        Keycode::Kp7 => k(0x47, b'7'),
-        Keycode::Kp8 => k(0x48, b'8'),
-        Keycode::Kp9 => k(0x49, b'9'),
-        Keycode::KpPeriod => k(0x53, b'.'),
-        Keycode::KpPlus => k(0x4E, b'+'),
-        Keycode::KpMinus => k(0x4A, b'-'),
-        Keycode::KpMultiply => k(0x37, b'*'),
-        Keycode::KpDivide => k(0x35, b'/'),
-        Keycode::KpEnter => k(0x1C, 0x0D), // Treated same as main Enter
-
-        _ => None,
-    }
+/// The layout of the host's keyboard: from the characters the host says
+/// its character keys type, and its locale where layouts are alike.
+pub fn detect_layout() -> &'static Layout {
+    // The keys whose characters tell layouts apart, by where they are.
+    use Scancode::*;
+    let keys = [
+        Q, W, E, R, T, Y, U, I, O, P, A, S, D, F, G, H, J, K, L, Z, X, C, V, B, N, M, Num1, Num2, Num3, Num4, Num5,
+        Num6, Num7, Num8, Num9, Num0, Minus, Equals, LeftBracket, RightBracket, Backslash, Semicolon, Apostrophe,
+        Grave, Comma, Period, Slash, NonUsBackslash,
+    ];
+    let host: Vec<(u8, char)> = keys
+        .into_iter()
+        .filter_map(|scancode| {
+            let (scan, _) = pc_scan(scancode)?;
+            let keycode = Keycode::from_scancode(scancode)?;
+            let c = char::from_u32(keycode.into_i32() as u32).filter(|c| !c.is_control())?;
+            Some((scan, c))
+        })
+        .collect();
+    let locale = sdl2::locale::get_preferred_locales()
+        .next()
+        .and_then(|l| keylayout::locale_layout(&l.lang, l.country.as_deref()));
+    keylayout::detect(&host, locale)
 }

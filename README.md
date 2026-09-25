@@ -187,6 +187,16 @@ D:
     out of the conventional memory games need, and programs can allocate
     upper memory themselves (INT 21h AH=58h). A change takes effect at the
     DOS prompt.
+  * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
+    has them: `auto` (the default) takes the host keyboard's, or one of
+    `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and
+    French), `fr`, `be`, `it`, `sp` (`es`), `la` (Latin American), `po`
+    (`pt`), `dk`, `no`, `sv` (`se`) and `su` (Finnish, `fi`). Keys send the
+    scan codes of where they are, as on a real keyboard, so games that read
+    the keyboard themselves find WASD where it is; AltGr types the third
+    characters of the keys, and dead keys put their accents on the next
+    letter. Characters code page 437 doesn't have (€, ø) type nothing.
+    `KEYB` at the prompt changes it too.
 * **`[sound]`:**
   * `sbtype` is the Sound Blaster: `sb16` (the default), `sbpro2`, `sb2` or
     `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's 16-bit
