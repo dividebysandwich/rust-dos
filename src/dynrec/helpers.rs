@@ -6,7 +6,7 @@ use std::mem::offset_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::block::BlockData;
-use crate::cpu::{Cpu, Fault};
+use crate::cpu::{Access, Cpu, Fault, MemRef, Seg};
 
 /// How translated code returned to the execution loop: the low byte of
 /// its return value. The rest is the index of the instruction it concerns.
@@ -20,6 +20,16 @@ pub const EXIT_NEXT: u32 = 4;
 pub const EXIT_DEADLINE: u32 = 5;
 /// The block's bytes changed; nothing ran.
 pub const EXIT_STALE: u32 = 6;
+/// An instruction raised #GP(0) (a near jump past the CS limit).
+pub const EXIT_GP0: u32 = 7;
+
+/// A memory operand handle at or above this is `SLOW + slot`: the operand
+/// isn't plain RAM in one page, and loads and stores go through
+/// `jit_read` and `jit_write` with the operand checked in `refs[slot]`.
+/// Below it, a handle is the operand's physical address in RAM.
+pub const SLOW: u32 = 0xFFFF_FF00;
+/// `jit_memref`'s result for a fault.
+pub const MEMREF_FAULT: u64 = u64::MAX;
 
 /// The context translated code runs in. Its first fields are read by the
 /// code, which keeps a pointer to it in a register.
@@ -36,10 +46,23 @@ pub struct JitCtx {
     pub page_gen: *const u32,
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
+    /// `jit_memref`, `jit_read` and `jit_write`.
+    pub memref: usize,
+    pub read: usize,
+    pub write: usize,
+    /// Bytes of RAM.
+    pub ram_len: u64,
+    /// The bytes of the running block after the instruction that stores,
+    /// as physical addresses `lo..hi`, for `jit_write`.
+    pub smc_lo: u32,
+    pub smc_hi: u32,
     /// The fault an instruction raised, for EXIT_FAULT.
     pub fault: Fault,
-    /// A handler's panic, for EXIT_PANIC, to resume in the execution loop.
+    /// A panic in Rust called from translated code, to resume in the
+    /// execution loop.
     pub panic: Option<Box<dyn Any + Send>>,
+    /// Memory operands checked by `jit_memref` that aren't plain RAM.
+    pub refs: [MemRef; 4],
 }
 
 pub const CTX_FALLBACK: i32 = offset_of!(JitCtx, fallback) as i32;
@@ -48,6 +71,12 @@ pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
 pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
 pub const CTX_EXIT_DATA: i32 = offset_of!(JitCtx, exit_data) as i32;
+pub const CTX_MEMREF: i32 = offset_of!(JitCtx, memref) as i32;
+pub const CTX_READ: i32 = offset_of!(JitCtx, read) as i32;
+pub const CTX_WRITE: i32 = offset_of!(JitCtx, write) as i32;
+pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
+pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
+pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
 
 impl JitCtx {
@@ -59,8 +88,15 @@ impl JitCtx {
             ram: std::ptr::null(),
             page_gen: std::ptr::null(),
             exit_data: std::ptr::null_mut(),
+            memref: jit_memref as *const () as usize,
+            read: jit_read as *const () as usize,
+            write: jit_write as *const () as usize,
+            ram_len: 0,
+            smc_lo: 0,
+            smc_hi: 0,
             fault: Fault::UD,
             panic: None,
+            refs: [MemRef { lin: 0, phys: 0, phys2: 0, size: 1 }; 4],
         }
     }
 }
@@ -147,5 +183,79 @@ jit_fn! {
         } else {
             1
         }
+    }
+}
+
+/// Keep a panic in Rust code that translated code called for the execution
+/// loop to resume (unwinding can't cross translated code).
+fn guard<R>(ctx: &mut JitCtx, fallback: R, f: impl FnOnce() -> R) -> R {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(payload) => {
+            ctx.panic.get_or_insert(payload);
+            fallback
+        }
+    }
+}
+
+/// How a MemRef's operand is described to `jit_memref`: the segment, the
+/// size, whether it is written, and the slot.
+pub fn memref_desc(seg: Seg, size: u8, write: bool, slot: u8) -> u32 {
+    seg as u32 | (size as u32) << 4 | (write as u32) << 7 | (slot as u32) << 8
+}
+
+jit_fn! {
+    /// Check a memory operand at seg:off as `Cpu::mem_ref` does. Returns
+    /// its physical address if it is plain RAM within a page, which the
+    /// code then accesses itself, else `SLOW + slot` (the checked operand
+    /// kept in the slot), or MEMREF_FAULT with the fault in the context.
+    fn jit_memref(cpu: *mut Cpu, ctx: *mut JitCtx, off: u32, desc: u32) -> u64 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        let seg = Seg::ALL[(desc & 7) as usize];
+        let size = (desc >> 4 & 7) as u8;
+        let access = if desc & 0x80 != 0 { Access::Write } else { Access::Read };
+        let slot = (desc >> 8 & 3) as usize;
+        match guard(ctx, Err(Fault::UD), || cpu.mem_ref(seg, off, size, access)) {
+            Ok(r) => {
+                if r.phys & 0xFFF <= 0x1000 - size as u32 && cpu.bus.is_plain_ram(r.phys as usize, size as usize) {
+                    r.phys as u64
+                } else {
+                    ctx.refs[slot] = r;
+                    (SLOW + slot as u32) as u64
+                }
+            }
+            Err(fault) => {
+                ctx.fault = fault;
+                MEMREF_FAULT
+            }
+        }
+    }
+}
+
+jit_fn! {
+    /// Read the operand checked into `slot`.
+    fn jit_read(cpu: *mut Cpu, ctx: *mut JitCtx, slot: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        let r = ctx.refs[slot as usize & 3];
+        guard(ctx, 0, || cpu.mem_read(r))
+    }
+}
+
+jit_fn! {
+    /// Write the operand checked into `slot`. Returns 1 if the write hit
+    /// the running block's later bytes (`smc_lo..smc_hi`), else 0.
+    fn jit_write(cpu: *mut Cpu, ctx: *mut JitCtx, slot: u32, value: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        let r = ctx.refs[slot as usize & 3];
+        guard(ctx, (), || cpu.mem_write(r, value));
+        let in_first = 0x1000 - (r.phys & 0xFFF);
+        let hit = (0..r.size as u32).any(|i| {
+            let p = if i < in_first { r.phys + i } else { r.phys2 + i - in_first };
+            (ctx.smc_lo..ctx.smc_hi).contains(&p)
+        });
+        hit as u32
     }
 }

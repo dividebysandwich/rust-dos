@@ -177,3 +177,182 @@ fn local_programs_in_lockstep() {
     }
     assert!(failures.is_empty(), "diverged: {:?}", failures);
 }
+
+/// One program on one core, for timing and profiling: the first entry of
+/// `DYNDIFF_PROGRAMS` on `DYNDIFF_CORE`, without comparisons.
+#[test]
+#[ignore]
+fn local_program_alone() {
+    let Ok(list) = std::env::var("DYNDIFF_PROGRAMS") else {
+        println!("DYNDIFF_PROGRAMS is not set: nothing to run");
+        return;
+    };
+    let batches: usize = std::env::var("DYNDIFF_BATCHES").map_or(2_000, |v| v.parse().unwrap());
+    let len = std::env::var("DYNDIFF_BATCH_LEN").map_or(100_000, |v| v.parse().unwrap());
+    fix_time();
+    let entry = list.split(',').next().unwrap();
+    let (dir, command) = entry.split_once(':').expect("DIR:COMMAND");
+    let mut cpu = program_machine(dir, "a", command, second_core());
+    let started = std::time::Instant::now();
+    for _ in 0..batches {
+        dyndiff::batch(&mut cpu, len, false);
+    }
+    let secs = started.elapsed().as_secs_f64();
+    println!(
+        "{} on {}: {} instructions in {:.2}s ({:.0} MIPS)\n  {:?}",
+        entry,
+        second_core().name(),
+        cpu.executed,
+        secs,
+        cpu.executed as f64 / secs / 1e6,
+        cpu.dynrec.stats()
+    );
+}
+
+/// CPU-bound protected-mode programs on both cores, in lockstep, with their
+/// speeds: a table-driven CRC-32, a bubble sort, and a mix of shifts and
+/// rotates on registers.
+#[test]
+#[ignore]
+fn compute_speed() {
+    fix_time();
+    let programs: [(&str, fn(&mut Rig)); 3] = [("crc32", crc32_program), ("sort", sort_program), ("bits", bits_program)];
+    for (name, program) in programs {
+        let mut a = Rig::new();
+        let mut b = Rig::new();
+        a.cpu.core = CoreMode::Normal;
+        b.cpu.core = second_core();
+        for rig in [&mut a, &mut b] {
+            program(rig);
+            rig.enter_pm();
+        }
+        let run = dyndiff::lockstep_with(&mut a.cpu, &mut b.cpu, 100_000, 100_000, true, |_, _| {}).unwrap();
+        println!(
+            "{}: {} instructions; normal {:.0} MIPS, {} {:.0} MIPS\n  {:?}",
+            name,
+            a.cpu.executed,
+            a.cpu.executed as f64 / run.a_time.as_secs_f64() / 1e6,
+            second_core().name(),
+            b.cpu.executed as f64 / run.b_time.as_secs_f64() / 1e6,
+            b.cpu.dynrec.stats()
+        );
+    }
+}
+
+/// CRC-32 of 64 KB at DATA, 64 times over, with the table at DATA + 64K.
+fn crc32_program(rig: &mut Rig) {
+    let table = DATA + 0x10000;
+    let code = asm32(CODE, |a| {
+        // The table.
+        a.xor(ecx, ecx)?;
+        let mut entry = a.create_label();
+        a.set_label(&mut entry)?;
+        a.mov(eax, ecx)?;
+        a.mov(edx, 8u32)?;
+        let mut bit = a.create_label();
+        let mut no_xor = a.create_label();
+        a.set_label(&mut bit)?;
+        a.shr(eax, 1)?;
+        a.jnc(no_xor)?;
+        a.xor(eax, 0xEDB8_8320u32)?;
+        a.set_label(&mut no_xor)?;
+        a.dec(edx)?;
+        a.jnz(bit)?;
+        a.mov(dword_ptr(ecx * 4 + table), eax)?;
+        a.inc(ecx)?;
+        a.cmp(ecx, 256)?;
+        a.jb(entry)?;
+        // The data: a pattern.
+        a.xor(ecx, ecx)?;
+        let mut fill = a.create_label();
+        a.set_label(&mut fill)?;
+        a.mov(eax, ecx)?;
+        a.imul_3(eax, eax, 1_103_515_245)?;
+        a.mov(byte_ptr(ecx + DATA), al)?;
+        a.inc(ecx)?;
+        a.cmp(ecx, 0x10000)?;
+        a.jb(fill)?;
+        // 64 passes.
+        a.mov(ebp, 64u32)?;
+        let mut pass = a.create_label();
+        a.set_label(&mut pass)?;
+        a.mov(eax, 0xFFFF_FFFFu32)?;
+        a.mov(esi, DATA)?;
+        a.mov(ecx, 0x10000u32)?;
+        let mut byte = a.create_label();
+        a.set_label(&mut byte)?;
+        a.movzx(edx, byte_ptr(esi))?;
+        a.xor(dl, al)?;
+        a.shr(eax, 8)?;
+        a.xor(eax, dword_ptr(edx * 4 + table))?;
+        a.inc(esi)?;
+        a.dec(ecx)?;
+        a.jnz(byte)?;
+        a.not(eax)?;
+        a.mov(dword_ptr(RESULT), eax)?;
+        a.dec(ebp)?;
+        a.jnz(pass)?;
+        a.hlt()
+    });
+    rig.load(CODE, &code);
+}
+
+/// Bubble sort of 1500 dwords at DATA.
+fn sort_program(rig: &mut Rig) {
+    let code = asm32(CODE, |a| {
+        a.xor(ecx, ecx)?;
+        let mut fill = a.create_label();
+        a.set_label(&mut fill)?;
+        a.mov(eax, ecx)?;
+        a.imul_3(eax, eax, 0x9E37_79B1u32 as i32)?;
+        a.mov(dword_ptr(ecx * 4 + DATA), eax)?;
+        a.inc(ecx)?;
+        a.cmp(ecx, 1500)?;
+        a.jb(fill)?;
+        a.mov(ebx, 1499u32)?;
+        let mut outer = a.create_label();
+        a.set_label(&mut outer)?;
+        a.xor(esi, esi)?;
+        let mut inner = a.create_label();
+        let mut no_swap = a.create_label();
+        a.set_label(&mut inner)?;
+        a.mov(eax, dword_ptr(esi * 4 + DATA))?;
+        a.mov(edx, dword_ptr(esi * 4 + DATA + 4))?;
+        a.cmp(eax, edx)?;
+        a.jbe(no_swap)?;
+        a.mov(dword_ptr(esi * 4 + DATA), edx)?;
+        a.mov(dword_ptr(esi * 4 + DATA + 4), eax)?;
+        a.set_label(&mut no_swap)?;
+        a.inc(esi)?;
+        a.cmp(esi, ebx)?;
+        a.jb(inner)?;
+        a.dec(ebx)?;
+        a.jnz(outer)?;
+        a.hlt()
+    });
+    rig.load(CODE, &code);
+}
+
+/// Shifts, rotates and arithmetic on registers, 3 million rounds.
+fn bits_program(rig: &mut Rig) {
+    let code = asm32(CODE, |a| {
+        a.mov(eax, 0x1234_5678u32)?;
+        a.mov(ebx, 0x9ABC_DEF0u32)?;
+        a.mov(ecx, 3_000_000u32)?;
+        let mut top = a.create_label();
+        a.set_label(&mut top)?;
+        a.rol(eax, 5)?;
+        a.add(eax, ebx)?;
+        a.mov(edx, eax)?;
+        a.shr(edx, 3)?;
+        a.xor(ebx, edx)?;
+        a.lea(esi, ptr(eax + ebx * 2 + 7))?;
+        a.sub(ebx, esi)?;
+        a.adc(eax, 0)?;
+        a.dec(ecx)?;
+        a.jnz(top)?;
+        a.mov(dword_ptr(RESULT), eax)?;
+        a.hlt()
+    });
+    rig.load(CODE, &code);
+}

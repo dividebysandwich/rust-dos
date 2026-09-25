@@ -19,6 +19,9 @@ pub const SEG_LO: usize = offset_of!(SegCache, lo);
 pub const SEG_HI: usize = offset_of!(SegCache, hi);
 pub const SEG_RIGHTS: usize = offset_of!(SegCache, rights);
 pub const SEG_ATTR: usize = offset_of!(SegCache, attr);
+/// `SegCache::rights` bits.
+pub const RIGHT_READ: u8 = super::regs::RIGHT_READ;
+pub const RIGHT_WRITE: u8 = super::regs::RIGHT_WRITE;
 pub const CR0: usize = offset_of!(Cpu, cr0);
 pub const CPL: usize = offset_of!(Cpu, cpl);
 pub const EXECUTED: usize = offset_of!(Cpu, executed);

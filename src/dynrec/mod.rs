@@ -22,6 +22,10 @@ mod block;
 mod codemem;
 #[cfg(dynrec)]
 mod helpers;
+#[cfg(dynrec)]
+mod translate;
+#[cfg(dynrec)]
+mod uop;
 #[cfg(all(dynrec, target_arch = "x86_64"))]
 mod x64;
 
@@ -38,9 +42,11 @@ const CODE_SIZE: usize = 32 << 20;
 /// Counts for the statistics.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DynStats {
-    /// Blocks translated, and their guest instructions.
+    /// Blocks translated, and their guest instructions, of which these
+    /// were translated into host code (the rest call their handlers).
     pub blocks: u64,
     pub instructions: u64,
+    pub native: u64,
     /// Blocks translated now, and their host code's bytes.
     pub live_blocks: u64,
     pub code_bytes: u64,
@@ -147,13 +153,42 @@ mod engine {
 
     /// What a block is translated for: where its bytes are, the EIP they
     /// were decoded at, and how.
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     struct Key {
         phys: u32,
         eip: u32,
-        /// Bit 0: 32-bit code; bit 1: one instruction (`Cpu::step`).
+        /// Bit 0: 32-bit code; bit 1: one instruction (`Cpu::step`); bit 2:
+        /// a 32-bit stack.
         mode: u8,
     }
+
+    impl std::hash::Hash for Key {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            state.write_u64((self.phys as u64) << 32 | self.eip as u64 ^ (self.mode as u64) << 60);
+        }
+    }
+
+    /// A hasher for keys, which hash as one word: a multiply is enough.
+    #[derive(Default)]
+    struct KeyHasher(u64);
+
+    impl std::hash::Hasher for KeyHasher {
+        fn write(&mut self, bytes: &[u8]) {
+            for &b in bytes {
+                self.write_u64(b as u64);
+            }
+        }
+
+        fn write_u64(&mut self, v: u64) {
+            self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517C_C1B7_2722_0A95);
+        }
+
+        fn finish(&self) -> u64 {
+            self.0
+        }
+    }
+
+    type KeyMap = HashMap<Key, u32, std::hash::BuildHasherDefault<KeyHasher>>;
 
     impl Key {
         fn index(&self) -> usize {
@@ -178,8 +213,17 @@ mod engine {
         }
     }
 
-    /// log2 of the slots of the direct-mapped table in front of the map.
+    /// log2 of the slots of the direct-mapped table in front of the map,
+    /// and of the table of places where no block starts.
     const FRONT_BITS: u32 = 14;
+    const NONE_BITS: u32 = 12;
+
+    /// The code generations of the chunks an instruction at `phys` can be
+    /// in (it is at most 15 bytes long).
+    fn instr_gens(page_gen: &[u32], phys: u32) -> u32 {
+        let (first, last) = (phys as usize >> crate::bus::GEN_SHIFT, (phys as usize + 14) >> crate::bus::GEN_SHIFT);
+        page_gen[first].wrapping_add(page_gen[last])
+    }
 
     pub struct Engine {
         mem: CodeMemory,
@@ -187,7 +231,11 @@ mod engine {
         ctx: Box<JitCtx>,
         blocks: Vec<Option<Block>>,
         free: Vec<u32>,
-        map: HashMap<Key, u32>,
+        map: KeyMap,
+        /// Places where no block starts (the interpreter runs the
+        /// instruction: an emulator service trap, HLT), with the code
+        /// generations of the instruction's chunks then, direct-mapped.
+        none: Box<[Option<(Key, u32)>]>,
         /// Block index + 1 for a key's slot, 0 for none.
         front: Box<[u32]>,
         /// The CPU model the blocks' handlers were chosen for.
@@ -209,7 +257,8 @@ mod engine {
                 ctx: Box::new(JitCtx::new(base + tramp.exit)),
                 blocks: Vec::new(),
                 free: Vec::new(),
-                map: HashMap::new(),
+                map: KeyMap::default(),
+                none: vec![None; 1 << NONE_BITS].into_boxed_slice(),
                 front: vec![0; 1 << FRONT_BITS].into_boxed_slice(),
                 model,
             })
@@ -219,6 +268,7 @@ mod engine {
             self.blocks.clear();
             self.free.clear();
             self.map.clear();
+            self.none.fill(None);
             self.front.fill(0);
             self.mem.clear();
             stats.flushes += 1;
@@ -243,9 +293,17 @@ mod engine {
         fn translate(&mut self, cpu: &Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
             let max = if key.mode & 2 != 0 { 1 } else { MAX_BLOCK };
             let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max)?;
+            let stack32 = key.mode & 4 != 0;
+            let items: Vec<_> = (0..data.count())
+                .map(|ix| {
+                    let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
+                    super::translate::translate(&data.instrs[ix], next, stack32)
+                })
+                .collect();
+            let native = items.iter().filter(|i| i.is_some()).count() as u64;
             let data = NonNull::from(Box::leak(Box::new(data)));
             // SAFETY: just made, and owned by the block from here on.
-            let bytes = backend::block(unsafe { data.as_ref() });
+            let bytes = backend::block(unsafe { data.as_ref() }, &items);
             let code = match self.mem.add(&bytes) {
                 Some(code) => code,
                 None => {
@@ -263,6 +321,7 @@ mod engine {
             };
             stats.blocks += 1;
             stats.instructions += unsafe { data.as_ref() }.count() as u64;
+            stats.native += native;
             stats.live_blocks += 1;
             stats.code_bytes = self.mem.used() as u64;
             let block = Block { key, code, data };
@@ -300,13 +359,27 @@ mod engine {
                 self.flush(stats);
                 self.model = cpu.model;
             }
-            let key = Key { phys: at.phys_ip as u32, eip: at.eip, mode: at.code32 as u8 | (single as u8) << 1 };
+            let key = Key {
+                phys: at.phys_ip as u32,
+                eip: at.eip,
+                mode: at.code32 as u8 | (single as u8) << 1 | (cpu.stack32() as u8) << 2,
+            };
             let mut index = match self.lookup(key) {
                 Some(index) => index,
-                None => match self.translate(cpu, at, key, stats) {
-                    Some(index) => index,
-                    None => return Run::Interpret,
-                },
+                None => {
+                    let none = key.index() >> (FRONT_BITS - NONE_BITS);
+                    let gens = instr_gens(&cpu.bus.page_gen, key.phys);
+                    if self.none[none] == Some((key, gens)) {
+                        return Run::Interpret;
+                    }
+                    match self.translate(cpu, at, key, stats) {
+                        Some(index) => index,
+                        None => {
+                            self.none[none] = Some((key, gens));
+                            return Run::Interpret;
+                        }
+                    }
+                }
             };
             let mut retried = false;
             loop {
@@ -319,11 +392,17 @@ mod engine {
                     return Run::Interpret;
                 }
                 self.ctx.ram = cpu.bus.ram().as_ptr();
+                self.ctx.ram_len = cpu.bus.ram().len() as u64;
                 self.ctx.page_gen = cpu.bus.page_gen.as_ptr();
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and
                 // gets the CPU and context it expects.
                 let ret = unsafe { (self.enter)(cpu, &mut *self.ctx, block.code) };
+                if let Some(payload) = self.ctx.panic.take() {
+                    // Rust code the block called panicked (it went on with
+                    // made-up values): nothing it did counts.
+                    return Run::Panic(payload);
+                }
                 let (kind, ix) = (ret as u32 & 0xFF, (ret as u32 >> 8) as usize);
                 // SAFETY: the block the code returned from is still alive:
                 // nothing retires blocks while code runs.
@@ -349,9 +428,10 @@ mod engine {
                             None => Run::Interpret,
                         }
                     }
-                    EXIT_FAULT => {
+                    EXIT_FAULT | EXIT_GP0 => {
                         cpu.set_eip(data.eips[ix]);
-                        Run::Fault { fault: self.ctx.fault, phys_ip: data.phys_of(ix) }
+                        let fault = if kind == EXIT_GP0 { Fault::gp(0) } else { self.ctx.fault };
+                        Run::Fault { fault, phys_ip: data.phys_of(ix) }
                     }
                     EXIT_SMC => {
                         stats.smc += 1;
@@ -361,7 +441,6 @@ mod engine {
                         self.retire(index, stats);
                         Run::Ran
                     }
-                    EXIT_PANIC => Run::Panic(self.ctx.panic.take().expect("a panic")),
                     _ => unreachable!("exit code {:X}", ret),
                 };
             }

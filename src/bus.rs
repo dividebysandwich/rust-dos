@@ -773,7 +773,7 @@ impl Bus {
     /// True for `len` bytes at `addr` that are plain RAM: conventional
     /// memory below the video window, or extended memory above 1 MB.
     #[inline(always)]
-    fn is_plain_ram(&self, addr: usize, len: usize) -> bool {
+    pub(crate) fn is_plain_ram(&self, addr: usize, len: usize) -> bool {
         addr + len <= ADDR_VGA_GRAPHICS || (addr >= 0x10_0000 && addr + len <= self.ram.len())
     }
 
