@@ -646,3 +646,37 @@ fn shell_file_commands_work_on_disk_images() {
     run(&mut cpu, "COPY A:\\README.TXT C:\\README.TXT");
     assert_eq!(fs::read(dir.join("c/README.TXT")).unwrap(), b"hello floppy");
 }
+
+#[test]
+fn fcb_files_work_on_disk_images() {
+    let dir = fatimage::scratch("fcb");
+    let image = floppy_with_files(&dir);
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+    let (fcb, dta) = (0x30000, 0x40000);
+    cpu.set_ds(0x4000);
+    cpu.set_dx(0);
+    int21(&mut cpu, 0x1A00);
+    let set_fcb = |cpu: &mut Cpu, name: &[u8; 11]| {
+        cpu.bus.load_bytes(fcb, &[0; 0x25]);
+        cpu.bus.write_8(fcb, 1);
+        cpu.bus.load_bytes(fcb + 1, name);
+        cpu.set_ds(0x3000);
+        cpu.set_dx(0);
+    };
+    set_fcb(&mut cpu, b"FCB     DAT");
+    int21(&mut cpu, 0x1600);
+    assert_eq!(cpu.get_al(), 0);
+    cpu.bus.load_bytes(dta, &pattern(128, 5));
+    int21(&mut cpu, 0x1500);
+    int21(&mut cpu, 0x1000);
+    assert_eq!(read_file(&mut cpu, "A:\\FCB.DAT"), pattern(128, 5));
+
+    set_fcb(&mut cpu, b"README  TXT");
+    int21(&mut cpu, 0x0F00);
+    assert_eq!((cpu.get_al(), cpu.bus.read_32(fcb + 0x10)), (0, 12));
+    int21(&mut cpu, 0x1400);
+    assert_eq!(cpu.get_al(), 3, "a partial record");
+    assert_eq!(&(0..14).map(|i| cpu.bus.read_8(dta + i)).collect::<Vec<u8>>(), b"hello floppy\0\0");
+    int21(&mut cpu, 0x1000);
+}

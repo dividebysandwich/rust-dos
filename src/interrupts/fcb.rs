@@ -222,6 +222,251 @@ pub fn find(cpu: &mut Cpu, first: bool) {
     cpu.bus.write_16(fcb + 0x0C, (index + 1) as u16);
 }
 
+/// Where the file functions keep the DOS handle of an FCB's open file:
+/// in its reserved bytes (18h-1Fh), with a mark that says it is one.
+const HANDLE_FIELD: usize = 0x18;
+const HANDLE_MARK: u16 = 0x4346;
+
+/// Where an FCB's fields are for the file functions (after an extended
+/// FCB's header).
+fn fcb_start(cpu: &Cpu) -> usize {
+    fcb_at(cpu).0
+}
+
+/// The DOS path an FCB names: its drive, name and extension.
+fn fcb_path(cpu: &Cpu, fcb: usize) -> String {
+    format!("{}:{}", drive_letter(fcb_drive(cpu, fcb)), read_dta_template(&cpu.bus, fcb))
+}
+
+fn record_size(bus: &Bus, fcb: usize) -> u16 {
+    bus.read_16(fcb + 0x0E)
+}
+
+/// The FCB's open file, if the file functions opened one for it.
+fn fcb_handle(cpu: &Cpu, fcb: usize) -> Option<u16> {
+    (cpu.bus.read_16(fcb + HANDLE_FIELD + 2) == HANDLE_MARK)
+        .then(|| cpu.bus.read_16(fcb + HANDLE_FIELD))
+        .filter(|&h| cpu.bus.disk.is_open(h))
+}
+
+/// Fill in an FCB for the file just opened as `handle`: its drive, a
+/// record size of 128 bytes, the file's size, date and time, block 0 and
+/// the handle.
+fn set_up_fcb(cpu: &mut Cpu, fcb: usize, handle: u16) {
+    let drive = fcb_drive(cpu, fcb);
+    let size = cpu.bus.disk.seek_file(handle, 0, 2).unwrap_or(0) as u32;
+    let _ = cpu.bus.disk.seek_file(handle, 0, 0);
+    let (time, date) = cpu.bus.disk.file_time(handle).unwrap_or((0, 0));
+    let bus = &mut cpu.bus;
+    bus.write_8(fcb, drive + 1);
+    bus.write_16(fcb + 0x0C, 0);
+    bus.write_16(fcb + 0x0E, 128);
+    bus.write_32(fcb + 0x10, size);
+    bus.write_16(fcb + 0x14, date);
+    bus.write_16(fcb + 0x16, time);
+    bus.write_16(fcb + HANDLE_FIELD, handle);
+    bus.write_16(fcb + HANDLE_FIELD + 2, HANDLE_MARK);
+}
+
+/// INT 21h AH=0Fh: open the file the FCB names, read/write where the
+/// drive lets it be written. AH=16h (`create`): make it, empty.
+pub fn open(cpu: &mut Cpu, create: bool) {
+    let fcb = fcb_start(cpu);
+    let path = fcb_path(cpu, fcb);
+    let owner = cpu.current_psp;
+    if create && cpu.bus.disk.write_whole_file(&path, &[], None).is_err() {
+        cpu.set_reg8(Register::AL, 0xFF);
+        return;
+    }
+    match cpu.bus.disk.open_file(&path, 0x02, owner) {
+        Ok(handle) => {
+            set_up_fcb(cpu, fcb, handle);
+            cpu.set_reg8(Register::AL, 0x00);
+        }
+        Err(_) => cpu.set_reg8(Register::AL, 0xFF),
+    }
+}
+
+/// INT 21h AH=10h: close the FCB's file.
+pub fn close(cpu: &mut Cpu) {
+    let fcb = fcb_start(cpu);
+    let closed = match fcb_handle(cpu, fcb) {
+        Some(handle) => {
+            cpu.bus.write_16(fcb + HANDLE_FIELD + 2, 0);
+            cpu.bus.disk.close_file(handle)
+        }
+        None => false,
+    };
+    cpu.set_reg8(Register::AL, if closed { 0x00 } else { 0xFF });
+}
+
+/// INT 21h AH=13h: delete the files the FCB names, wildcards and all.
+pub fn delete(cpu: &mut Cpu) {
+    let fcb = fcb_start(cpu);
+    let path = fcb_path(cpu, fcb);
+    let files = cpu.bus.disk.matching_files(&path).unwrap_or_default();
+    let deleted = files.iter().filter(|(file, _)| cpu.bus.disk.delete_file(file).is_ok()).count();
+    cpu.set_reg8(Register::AL, if deleted > 0 { 0x00 } else { 0xFF });
+}
+
+/// INT 21h AH=17h: rename the files the FCB names (at 01h) to the name at
+/// 11h, whose '?'s keep the old name's characters.
+pub fn rename(cpu: &mut Cpu) {
+    let fcb = fcb_start(cpu);
+    let path = fcb_path(cpu, fcb);
+    let template = read_dta_template(&cpu.bus, fcb + 0x10);
+    let dir = format!("{}:", drive_letter(fcb_drive(cpu, fcb)));
+    let files = cpu.bus.disk.matching_files(&path).unwrap_or_default();
+    let mut renamed = 0;
+    for (file, entry) in files {
+        let target = format!("{}{}", dir, crate::file_commands::apply_template(&entry.filename, &template));
+        if cpu.bus.disk.rename_file(&file, &target).is_ok() {
+            renamed += 1;
+        }
+    }
+    cpu.set_reg8(Register::AL, if renamed > 0 { 0x00 } else { 0xFF });
+}
+
+/// INT 21h AH=23h: the size of the file the FCB names, in records of its
+/// record size, rounded up, in its random record field.
+pub fn file_size(cpu: &mut Cpu) {
+    let fcb = fcb_start(cpu);
+    let path = fcb_path(cpu, fcb);
+    let owner = cpu.current_psp;
+    let Ok(handle) = cpu.bus.disk.open_file(&path, 0, owner) else {
+        cpu.set_reg8(Register::AL, 0xFF);
+        return;
+    };
+    let size = cpu.bus.disk.seek_file(handle, 0, 2).unwrap_or(0);
+    cpu.bus.disk.close_file(handle);
+    let record = record_size(&cpu.bus, fcb).max(1) as u64;
+    cpu.bus.write_32(fcb + 0x21, size.div_ceil(record) as u32);
+    cpu.set_reg8(Register::AL, 0x00);
+}
+
+/// The sequential record of an FCB: its current block (0Ch) and record in
+/// it (20h).
+fn current_record(bus: &Bus, fcb: usize) -> u32 {
+    bus.read_16(fcb + 0x0C) as u32 * 128 + bus.read_8(fcb + 0x20) as u32
+}
+
+fn set_current_record(bus: &mut Bus, fcb: usize, record: u32) {
+    bus.write_16(fcb + 0x0C, (record / 128) as u16);
+    bus.write_8(fcb + 0x20, (record % 128) as u8);
+}
+
+/// The random record field (21h): four bytes, three for records of 64
+/// bytes or more.
+fn random_record(bus: &Bus, fcb: usize) -> u32 {
+    let value = bus.read_32(fcb + 0x21);
+    if record_size(bus, fcb) >= 64 { value & 0x00FF_FFFF } else { value }
+}
+
+fn set_random_record(bus: &mut Bus, fcb: usize, record: u32) {
+    if record_size(bus, fcb) >= 64 {
+        bus.write_16(fcb + 0x21, record as u16);
+        bus.write_8(fcb + 0x23, (record >> 16) as u8);
+    } else {
+        bus.write_32(fcb + 0x21, record);
+    }
+}
+
+/// INT 21h AH=24h: set the random record field to the sequential record.
+pub fn set_random(cpu: &mut Cpu) {
+    let fcb = fcb_start(cpu);
+    let record = current_record(&cpu.bus, fcb);
+    set_random_record(&mut cpu.bus, fcb, record);
+}
+
+/// Read `count` records from `record` on of the FCB's file into the DTA.
+/// Returns the records read (a partial last one, padded with zeros,
+/// counts) and AL: 00h, 01h at the end of the file with nothing read, 02h
+/// if they don't fit in the DTA's segment, 03h for a partial record.
+fn read_records(cpu: &mut Cpu, fcb: usize, record: u32, count: u32) -> (u32, u8) {
+    let Some(handle) = fcb_handle(cpu, fcb) else { return (0, 0x01) };
+    let size = record_size(&cpu.bus, fcb).max(1) as u32;
+    if cpu.bus.dta_offset as u32 + size * count > 0x1_0000 {
+        return (0, 0x02);
+    }
+    if cpu.bus.disk.seek_file(handle, record as i64 * size as i64, 0).is_err() {
+        return (0, 0x01);
+    }
+    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset);
+    let data = cpu.bus.disk.read_file(handle, (size * count) as usize).unwrap_or_default();
+    if data.is_empty() {
+        return (0, 0x01);
+    }
+    let whole = data.len() as u32 / size;
+    let partial = !(data.len() as u32).is_multiple_of(size);
+    let mut padded = data;
+    padded.resize(padded.len().next_multiple_of(size as usize), 0);
+    cpu.bus.load_bytes(dta, &padded);
+    if partial { (whole + 1, 0x03) } else { (whole, if whole < count { 0x01 } else { 0x00 }) }
+}
+
+/// Write `count` records from the DTA to the FCB's file from `record` on;
+/// with no records, make the file end there. Returns the records written
+/// and AL: 00h, 01h if the disk is full, 02h if they don't fit in the
+/// DTA's segment.
+fn write_records(cpu: &mut Cpu, fcb: usize, record: u32, count: u32) -> (u32, u8) {
+    let Some(handle) = fcb_handle(cpu, fcb) else { return (0, 0x01) };
+    let size = record_size(&cpu.bus, fcb).max(1) as u32;
+    if cpu.bus.dta_offset as u32 + size * count > 0x1_0000 {
+        return (0, 0x02);
+    }
+    let at = record as u64 * size as u64;
+    if count == 0 {
+        let al = if cpu.bus.disk.set_file_size(handle, at).is_ok() { 0x00 } else { 0x01 };
+        cpu.bus.write_32(fcb + 0x10, at as u32);
+        return (0, al);
+    }
+    if cpu.bus.disk.seek_file(handle, at as i64, 0).is_err() {
+        return (0, 0x01);
+    }
+    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset);
+    let data: Vec<u8> = (0..(size * count) as usize).map(|i| cpu.bus.read_8(dta + i)).collect();
+    let written = cpu.bus.disk.write_file(handle, &data).unwrap_or(0) as u32;
+    let end = at + written as u64;
+    if end > cpu.bus.read_32(fcb + 0x10) as u64 {
+        cpu.bus.write_32(fcb + 0x10, end as u32);
+    }
+    (written / size, if written < size * count { 0x01 } else { 0x00 })
+}
+
+/// INT 21h AH=14h and 15h (`write`): read or write the sequential record
+/// and go on to the next.
+pub fn sequential(cpu: &mut Cpu, write: bool) {
+    let fcb = fcb_start(cpu);
+    let record = current_record(&cpu.bus, fcb);
+    let (done, al) = if write { write_records(cpu, fcb, record, 1) } else { read_records(cpu, fcb, record, 1) };
+    set_current_record(&mut cpu.bus, fcb, record + done);
+    cpu.set_reg8(Register::AL, al);
+}
+
+/// INT 21h AH=21h and 22h (`write`): read or write the random record,
+/// which becomes the sequential one.
+pub fn random(cpu: &mut Cpu, write: bool) {
+    let fcb = fcb_start(cpu);
+    let record = random_record(&cpu.bus, fcb);
+    set_current_record(&mut cpu.bus, fcb, record);
+    let (_, al) = if write { write_records(cpu, fcb, record, 1) } else { read_records(cpu, fcb, record, 1) };
+    cpu.set_reg8(Register::AL, al);
+}
+
+/// INT 21h AH=27h and 28h (`write`): read or write CX records from the
+/// random record on, CX those done; the random and sequential records go
+/// on after them.
+pub fn random_block(cpu: &mut Cpu, write: bool) {
+    let fcb = fcb_start(cpu);
+    let record = random_record(&cpu.bus, fcb);
+    let count = cpu.cx() as u32;
+    let (done, al) = if write { write_records(cpu, fcb, record, count) } else { read_records(cpu, fcb, record, count) };
+    set_random_record(&mut cpu.bus, fcb, record + done);
+    set_current_record(&mut cpu.bus, fcb, record + done);
+    cpu.set_cx(done as u16);
+    cpu.set_reg8(Register::AL, al);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

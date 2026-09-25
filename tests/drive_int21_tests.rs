@@ -670,3 +670,84 @@ fn long_file_name_calls_fail() {
     assert_eq!(cpu.ax(), 0x7100);
     assert!(cf(&cpu));
 }
+
+/// Put an FCB for `name` (drive, 8.3 name) at 3000:0000 and point DS:DX at
+/// it.
+fn set_fcb(cpu: &mut Cpu, drive: u8, name: &[u8; 11]) {
+    let fcb = 0x30000;
+    cpu.bus.load_bytes(fcb, &[0; 0x25]);
+    cpu.bus.write_8(fcb, drive);
+    cpu.bus.load_bytes(fcb + 1, name);
+    cpu.set_ds(0x3000);
+    cpu.set_dx(0);
+}
+
+const FCB: usize = 0x30000;
+
+fn fcb_file_functions_on(cpu: &mut Cpu, drive: u8) {
+    set_dta(cpu);
+    cpu.set_ds(0x3000);
+    // Create SAVE.DAT, write two records of 128 bytes and a third with a
+    // record size of 16, and close it.
+    set_fcb(cpu, drive, b"SAVE    DAT");
+    int21(cpu, 0x16);
+    assert_eq!(cpu.get_al(), 0, "created");
+    assert_eq!(cpu.bus.read_16(FCB + 0x0E), 128, "records of 128 bytes");
+    for record in 0..2u8 {
+        cpu.bus.load_bytes(DTA, &[record + 1; 128]);
+        int21(cpu, 0x15);
+        assert_eq!(cpu.get_al(), 0);
+    }
+    assert_eq!(cpu.bus.read_8(FCB + 0x20), 2, "the next record");
+    assert_eq!(cpu.bus.read_32(FCB + 0x10), 256, "the file's size");
+    int21(cpu, 0x10);
+    assert_eq!(cpu.get_al(), 0);
+
+    // Its size in records, then open it and read record 1 at random.
+    set_fcb(cpu, drive, b"SAVE    DAT");
+    cpu.bus.write_16(FCB + 0x0E, 64);
+    int21(cpu, 0x23);
+    assert_eq!(cpu.bus.read_32(FCB + 0x21) & 0xFF_FFFF, 4);
+    int21(cpu, 0x0F);
+    assert_eq!(cpu.get_al(), 0);
+    cpu.bus.write_32(FCB + 0x21, 1);
+    int21(cpu, 0x21);
+    assert_eq!(cpu.get_al(), 0);
+    assert_eq!(cpu.bus.read_8(DTA), 2);
+    // A block of three records from record 1: two are there.
+    cpu.bus.write_32(FCB + 0x21, 1);
+    cpu.set_cx(3);
+    int21(cpu, 0x27);
+    assert_eq!((cpu.get_al(), cpu.cx()), (1, 1));
+    // Past the end, a sequential read finds nothing.
+    int21(cpu, 0x14);
+    assert_eq!(cpu.get_al(), 1);
+    int21(cpu, 0x10);
+
+    // Rename it ('?' keeps the old name's character there, a blank past
+    // its end), and delete it with a wildcard.
+    set_fcb(cpu, drive, b"SAVE    DAT");
+    cpu.bus.load_bytes(FCB + 0x11, b"??ME????BAK");
+    int21(cpu, 0x17);
+    assert_eq!(cpu.get_al(), 0);
+    set_fcb(cpu, drive, b"SAME????BAK");
+    int21(cpu, 0x0F);
+    assert_eq!(cpu.get_al(), 0xFF, "a name with wildcards doesn't open");
+    set_fcb(cpu, drive, b"SAME    BAK");
+    int21(cpu, 0x0F);
+    assert_eq!((cpu.get_al(), cpu.bus.read_32(FCB + 0x10)), (0, 256));
+    int21(cpu, 0x10);
+    set_fcb(cpu, drive, b"S???????BAK");
+    int21(cpu, 0x13);
+    assert_eq!(cpu.get_al(), 0);
+    int21(cpu, 0x13);
+    assert_eq!(cpu.get_al(), 0xFF);
+}
+
+#[test]
+fn fcb_file_functions_work_on_host_directories() {
+    let base = scratch("fcb_files", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    fcb_file_functions_on(&mut cpu, 0);
+    assert!(!base.join("c/SAME.BAK").exists() && !base.join("c/SAVE.DAT").exists());
+}

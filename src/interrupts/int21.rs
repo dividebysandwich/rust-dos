@@ -266,6 +266,17 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH=11h (Find First FCB) / AH=12h (Find Next FCB)
         0x11 | 0x12 => super::fcb::find(cpu, ah == 0x11),
 
+        // The FCB file functions of DOS 1, see fcb.rs.
+        0x0F | 0x16 => super::fcb::open(cpu, ah == 0x16),
+        0x10 => super::fcb::close(cpu),
+        0x13 => super::fcb::delete(cpu),
+        0x14 | 0x15 => super::fcb::sequential(cpu, ah == 0x15),
+        0x17 => super::fcb::rename(cpu),
+        0x21 | 0x22 => super::fcb::random(cpu, ah == 0x22),
+        0x23 => super::fcb::file_size(cpu),
+        0x24 => super::fcb::set_random(cpu),
+        0x27 | 0x28 => super::fcb::random_block(cpu, ah == 0x28),
+
         // AH=1Bh: Allocation info for the default drive; AH=1Ch: for drive DL
         // (0=default, 1=A). Returns AL=sectors per cluster, CX=bytes per
         // sector, DX=total clusters and DS:BX -> media ID byte.
