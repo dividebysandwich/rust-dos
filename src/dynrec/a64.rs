@@ -147,8 +147,6 @@ enum Access {
     Ldr16,
     Ldr32,
     Ldr64,
-    Str8,
-    Str16,
     Str32,
     Str64,
 }
@@ -297,8 +295,6 @@ impl Gen<'_> {
                 Access::Ldr16 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(reg), [x19, x9]),
                 Access::Ldr32 => dynasm!(self.ops ; .arch aarch64 ; ldr W(reg), [x19, x9]),
                 Access::Ldr64 => dynasm!(self.ops ; .arch aarch64 ; ldr X(reg), [x19, x9]),
-                Access::Str8 => dynasm!(self.ops ; .arch aarch64 ; strb W(reg), [x19, x9]),
-                Access::Str16 => dynasm!(self.ops ; .arch aarch64 ; strh W(reg), [x19, x9]),
                 Access::Str32 => dynasm!(self.ops ; .arch aarch64 ; str W(reg), [x19, x9]),
                 Access::Str64 => dynasm!(self.ops ; .arch aarch64 ; str X(reg), [x19, x9]),
             }
@@ -309,8 +305,6 @@ impl Gen<'_> {
             Access::Ldr16 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(reg), [X(base), rel]),
             Access::Ldr32 => dynasm!(self.ops ; .arch aarch64 ; ldr W(reg), [X(base), rel]),
             Access::Ldr64 => dynasm!(self.ops ; .arch aarch64 ; ldr X(reg), [X(base), rel]),
-            Access::Str8 => dynasm!(self.ops ; .arch aarch64 ; strb W(reg), [X(base), rel]),
-            Access::Str16 => dynasm!(self.ops ; .arch aarch64 ; strh W(reg), [X(base), rel]),
             Access::Str32 => dynasm!(self.ops ; .arch aarch64 ; str W(reg), [X(base), rel]),
             Access::Str64 => dynasm!(self.ops ; .arch aarch64 ; str X(reg), [X(base), rel]),
         }
@@ -546,14 +540,7 @@ impl Gen<'_> {
                 };
                 self.field(access, r(t), gpr_offset(g));
             }
-            Uop::Set { r: g, t } => {
-                let access = match g.size {
-                    4 => Access::Str32,
-                    2 => Access::Str16,
-                    _ => Access::Str8,
-                };
-                self.field(access, r(t), gpr_offset(g));
-            }
+            Uop::Set { r: g, t } => self.set_gpr(g, r(t)),
             Uop::Const { t, v } => self.mov32(r(t), v),
             Uop::Copy { dst, src } => dynasm!(self.ops ; .arch aarch64 ; mov W(r(dst)), W(r(src))),
             Uop::AddConst { t, v, size } => {
@@ -696,6 +683,21 @@ impl Gen<'_> {
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
         }
+    }
+
+    /// The register = the low bytes of W`reg`. The register's whole word
+    /// is written, so that later loads of it are forwarded from one store
+    /// (see `x64::Gen::set_ecx`). W7 is changed.
+    fn set_gpr(&mut self, g: Gpr, reg: u8) {
+        let off = gpr_offset(Gpr::dword(g.index));
+        if g.size == 4 {
+            self.field(Access::Str32, reg, off);
+            return;
+        }
+        let (lsb, width) = (g.high as u32 * 8, g.size as u32 * 8);
+        self.field(Access::Ldr32, 7, off);
+        dynasm!(self.ops ; .arch aarch64 ; bfi w7, W(reg), lsb, width);
+        self.field(Access::Str32, 7, off);
     }
 
     /// W9 = the register, zero-extended.
@@ -1174,11 +1176,11 @@ impl Gen<'_> {
         }
         dynasm!(self.ops ; .arch aarch64 ; cset w2, ne ; orr w5, w2, w2, lsl 11);
         match size {
-            1 => self.field(Access::Str16, 0, acc),
+            1 => self.set_gpr(Gpr::word(0), 0),
             2 => {
-                self.field(Access::Str16, 0, acc);
+                self.set_gpr(Gpr::word(0), 0);
                 dynasm!(self.ops ; .arch aarch64 ; lsr w0, w0, 16);
-                self.field(Access::Str16, 0, high);
+                self.set_gpr(Gpr::word(2), 0);
             }
             _ => {
                 self.field(Access::Str32, 0, acc);

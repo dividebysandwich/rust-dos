@@ -449,12 +449,8 @@ impl Gen<'_> {
                 }
             }
             Uop::Set { r: g, t } => {
-                let (t, off) = (r(t), gpr_offset(g));
-                match g.size {
-                    4 => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + off], Rd(t)),
-                    2 => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + off], Rw(t)),
-                    _ => dynasm!(self.ops ; .arch x64 ; mov BYTE [rbx + off], Rb(t)),
-                }
+                dynasm!(self.ops ; .arch x64 ; mov ecx, Rd(r(t)));
+                self.set_ecx(g);
             }
             Uop::Const { t, v } => dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), v as i32),
             Uop::Copy { dst, src } => dynasm!(self.ops ; .arch x64 ; mov Rd(r(dst)), Rd(r(src))),
@@ -587,6 +583,20 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
+        }
+    }
+
+    /// The register = the low bytes of ECX. The register's whole dword is
+    /// written, so that later loads of it are forwarded from one store:
+    /// a load of a dword written in bytes waits for the stores to finish.
+    /// EAX is changed.
+    fn set_ecx(&mut self, g: Gpr) {
+        let off = gpr_offset(Gpr::dword(g.index));
+        match (g.size, g.high) {
+            (4, _) => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + off], ecx),
+            (2, _) => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + off] ; mov ax, cx ; mov DWORD [rbx + off], eax),
+            (_, false) => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + off] ; mov al, cl ; mov DWORD [rbx + off], eax),
+            (_, true) => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + off] ; mov ah, cl ; mov DWORD [rbx + off], eax),
         }
     }
 
@@ -908,8 +918,16 @@ impl Gen<'_> {
         }
         dynasm!(self.ops ; .arch x64 ; pushfq);
         match size {
-            1 => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + acc], ax),
-            2 => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + acc], ax ; mov WORD [rbx + high], dx),
+            1 => {
+                dynasm!(self.ops ; .arch x64 ; mov ecx, eax);
+                self.set_ecx(Gpr::word(0));
+            }
+            2 => {
+                dynasm!(self.ops ; .arch x64 ; mov ecx, eax ; mov esi, edx);
+                self.set_ecx(Gpr::word(0));
+                dynasm!(self.ops ; .arch x64 ; mov ecx, esi);
+                self.set_ecx(Gpr::word(2));
+            }
             _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + acc], eax ; mov DWORD [rbx + high], edx),
         }
         dynasm!(self.ops ; .arch x64 ; pop rax);
