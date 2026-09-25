@@ -142,7 +142,7 @@ impl Api {
         unsafe {
             macro_rules! f {
                 ($name:literal) => {
-                    *lib.get($name).map_err(|e| format!("libmt32emu has no {}: {}", String::from_utf8_lossy($name), e))?
+                    *lib.get($name).map_err(|e| format!("libmt32emu has no {}: {}", String::from_utf8_lossy($name), load_error(e)))?
                 };
             }
             Ok(Api {
@@ -186,16 +186,25 @@ fn open_library(path: Option<&Path>) -> Result<Library, String> {
     // SAFETY: loading runs the library's initializers, which munt's are
     // fine with.
     if let Some(path) = path {
-        return unsafe { Library::new(path) }.map_err(|e| format!("{}: {}", path.display(), e));
+        return unsafe { Library::new(path) }.map_err(|e| format!("{}: {}", path.display(), load_error(e)));
     }
     let mut last = String::new();
     for name in library_names() {
         match unsafe { Library::new(*name) } {
             Ok(lib) => return Ok(lib),
-            Err(e) => last = e.to_string(),
+            Err(e) => last = load_error(e),
         }
     }
     Err(format!("munt's libmt32emu isn't installed ({})", last))
+}
+
+/// Why loading failed, as the system said it: libloading's own message is
+/// only "dlopen failed" and keeps the system's reason as its source.
+fn load_error(e: libloading::Error) -> String {
+    match std::error::Error::source(&e) {
+        Some(reason) => reason.to_string(),
+        None => e.to_string(),
+    }
 }
 
 /// A ROM munt identified: its id, e.g. "ctrl_mt32_1_07" or "pcm_cm32l".
