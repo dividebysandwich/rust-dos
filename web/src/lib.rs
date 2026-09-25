@@ -443,6 +443,20 @@ impl Machine {
         });
     }
 
+    /// Run the machine fast while Alt+F12 is held, or at its speed again.
+    pub fn set_fast_forward(&mut self, on: bool) {
+        if on == self.pacer.fast_forward() || (on && self.paused) {
+            return;
+        }
+        self.pacer.set_fast_forward(on, &self.cpu.bus.clock, Instant::now());
+        self.cpu.bus.mixer.fast_forward = on;
+        if on {
+            self.osd.show_lasting("Fast forward");
+        } else {
+            self.osd.clear_lasting();
+        }
+    }
+
     /// The page's sound is off or on (its Sound button, Ctrl+F8), for the
     /// mixer to show; with `announce`, on the screen too.
     pub fn set_muted(&mut self, muted: bool, announce: bool) {

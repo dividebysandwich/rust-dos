@@ -1,5 +1,5 @@
 use clap::Parser;
-use sdl2::event::Event;
+use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::{Keycode, Mod};
 use sdl2::mouse::{MouseButton, MouseWheelDirection};
 use std::collections::{BTreeMap, HashMap};
@@ -239,6 +239,15 @@ fn main() -> Result<(), String> {
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'running,
+                // Losing the keyboard lets go of what it held.
+                Event::Window { win_event: WindowEvent::FocusLost, .. } => {
+                    release_input(&mut cpu, &mut held);
+                    if pacer.fast_forward() {
+                        pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
+                        cpu.bus.mixer.fast_forward = false;
+                        osd.clear_lasting();
+                    }
+                }
                 Event::KeyDown {
                     keycode: Some(keycode),
                     keymod,
@@ -293,6 +302,16 @@ fn main() -> Result<(), String> {
                         new.cycles = settings.cycles.stepped(cpu.bus.clock.cycles_per_ms(), faster);
                         let _ = host!().apply(&new);
                         osd.show(speed_message(new.cycles));
+                        continue;
+                    }
+                    // Holding Alt+F12 runs the machine fast, as in DOSBox
+                    // Staging, until F12 comes up.
+                    if keycode == Keycode::F12 && alt && !ctrl {
+                        if !repeat && !paused {
+                            pacer.set_fast_forward(true, &cpu.bus.clock, std::time::Instant::now());
+                            cpu.bus.mixer.fast_forward = true;
+                            osd.show_lasting("Fast forward");
+                        }
                         continue;
                     }
                     // Ctrl+F8 turns the sound off and on.
@@ -356,6 +375,12 @@ fn main() -> Result<(), String> {
                     keycode: Some(keycode),
                     ..
                 } => {
+                    if keycode == Keycode::F12 && pacer.fast_forward() {
+                        pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
+                        cpu.bus.mixer.fast_forward = false;
+                        osd.clear_lasting();
+                        continue;
+                    }
                     // Only keys the machine saw go down come up for it,
                     // not those of the settings window.
                     let Some((scan, extended)) = held.remove(&keycode) else {

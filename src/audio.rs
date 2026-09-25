@@ -41,7 +41,7 @@ pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
         }
         let room = (rate / 4).saturating_sub(queued) * 2;
         let take = samples.len().min(room);
-        if bus.mixer.muted {
+        if bus.mixer.muted || bus.mixer.fast_forward {
             out.resize(out.len() + take, 0);
         } else {
             out.extend_from_slice(&samples[..take]);

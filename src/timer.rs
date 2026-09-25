@@ -21,6 +21,10 @@ const FRAME: Duration = Duration::from_micros(16_667);
 /// is dropped rather than caught up.
 const MAX_LAG: Duration = Duration::from_millis(50);
 
+/// How many frames of emulated time a frame runs while fast forwarding,
+/// as far as the host keeps up.
+const FAST_FORWARD_FRAMES: u32 = 8;
+
 /// Speed range accepted for `cycles`, in instructions per emulated ms.
 pub const MIN_CYCLES: u32 = 100;
 pub const MAX_CYCLES: u32 = 2_000_000;
@@ -330,6 +334,9 @@ pub struct Pacer {
     anchor_wall: Instant,
     anchor_ticks: u64,
     next_frame: Instant,
+    /// Fast forward (held Alt+F12): emulated time runs ahead of the wall
+    /// clock.
+    fast_forward: bool,
 }
 
 impl Pacer {
@@ -339,7 +346,24 @@ impl Pacer {
             anchor_wall: now,
             anchor_ticks: 0,
             next_frame: now,
+            fast_forward: false,
         }
+    }
+
+    /// Start or stop fast forwarding. When it stops, emulated time goes on
+    /// from where it got to, rather than waiting for the wall clock to catch
+    /// up with it.
+    pub fn set_fast_forward(&mut self, on: bool, clock: &Clock, now: Instant) {
+        if self.fast_forward && !on {
+            self.anchor_wall = now;
+            self.anchor_ticks = clock.now_ticks();
+            self.next_frame = now;
+        }
+        self.fast_forward = on;
+    }
+
+    pub fn fast_forward(&self) -> bool {
+        self.fast_forward
     }
 
     /// Change the speed, as from the settings window. The caller sets the
@@ -354,6 +378,9 @@ impl Pacer {
     /// one frame's worth is scheduled.
     pub fn batch_end(&mut self, clock: &Clock, now: Instant) -> u64 {
         let emulated = clock.now_ticks();
+        if self.fast_forward {
+            return clock.icount_at(emulated + duration_to_ticks(FRAME) * FAST_FORWARD_FRAMES as u64);
+        }
         let wall =
             self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
         let target = if wall > emulated + duration_to_ticks(MAX_LAG) {
@@ -395,8 +422,12 @@ impl Pacer {
         (next != clock.cycles_per_ms()).then_some(next)
     }
 
-    /// Sleep until the next video frame is due.
+    /// Sleep until the next video frame is due; fast forwarding, not at all.
     pub fn wait_for_next_frame(&mut self) {
+        if self.fast_forward {
+            self.next_frame = Instant::now();
+            return;
+        }
         self.next_frame += FRAME;
         let now = Instant::now();
         if self.next_frame > now {
@@ -411,6 +442,36 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_forward_runs_ahead_and_goes_on_from_there() {
+        let start = Instant::now();
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        // Normally a frame of wall time is a frame of emulated time.
+        let frame_ticks = duration_to_ticks(FRAME);
+        let end = pacer.batch_end(&clock, start + FRAME);
+        assert!(end.abs_diff(clock.icount_at(frame_ticks)) <= 1);
+
+        // Fast forward: eight frames each time, whatever the wall clock.
+        pacer.set_fast_forward(true, &clock, start);
+        for _ in 0..10 {
+            let end = pacer.batch_end(&clock, start + FRAME);
+            let target = clock.icount_at(clock.now_ticks() + frame_ticks * FAST_FORWARD_FRAMES as u64);
+            assert_eq!(end, target);
+            clock.icount = end;
+        }
+        let ahead = clock.now_ticks();
+        assert!(ahead >= frame_ticks * 80);
+
+        // Released, emulated time goes on from where it got to: the next
+        // frame runs a frame, not nothing until the wall clock catches up.
+        let now = start + FRAME * 2;
+        pacer.set_fast_forward(false, &clock, now);
+        let end = pacer.batch_end(&clock, now + FRAME);
+        let ran = clock.icount_at(ahead + frame_ticks).abs_diff(end);
+        assert!(ran <= 1, "{} instructions off a frame", ran);
+    }
 
     #[test]
     fn the_speed_steps_by_a_tenth() {

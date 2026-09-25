@@ -340,6 +340,7 @@ is replaced on every start and stops growing at 64 MB.
 | Ctrl+F12 | Open or close the [settings window](#settings-window) |
 | Ctrl+F4 | Put the next disk in the drives mounted from lists of images |
 | Alt+Pause | Pause the machine, and resume it |
+| Alt+F12 (held) | Fast forward: the machine runs up to eight times as fast, without sound |
 | Ctrl+F11 | Slow the CPU down by a tenth (from `max`, from the speed it reached) |
 | Ctrl+Shift+F11 | Speed the CPU up by a tenth |
 | Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |

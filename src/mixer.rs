@@ -114,6 +114,9 @@ pub struct Mixer {
     gains: [f32; CHANNELS],
     /// Silence at the output device. Recordings still get the sound.
     pub muted: bool,
+    /// Fast forwarding, whose sound, too fast and too much of it, the
+    /// output device doesn't get either.
+    pub fast_forward: bool,
     /// The loudest sample of each source since `take_peaks`, after its
     /// volume, as a fraction of full scale; `Master`'s is the mix's.
     peaks: [f32; CHANNELS],
@@ -121,7 +124,13 @@ pub struct Mixer {
 
 impl Default for Mixer {
     fn default() -> Self {
-        Self { settings: MixerSettings::default(), gains: [1.0; CHANNELS], muted: false, peaks: [0.0; CHANNELS] }
+        Self {
+            settings: MixerSettings::default(),
+            gains: [1.0; CHANNELS],
+            muted: false,
+            fast_forward: false,
+            peaks: [0.0; CHANNELS],
+        }
     }
 }
 

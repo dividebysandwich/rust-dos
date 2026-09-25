@@ -577,13 +577,19 @@ window.addEventListener('keydown', (event) => {
     document.exitPointerLock?.();
     return;
   }
-  // Alt+Pause pauses the machine, Ctrl+F11 and Ctrl+Shift+F11 slow the CPU
-  // down and speed it up, and Ctrl+F8 turns the sound off and on.
+  // Alt+Pause pauses the machine, holding Alt+F12 runs it fast, Ctrl+F11
+  // and Ctrl+Shift+F11 slow the CPU down and speed it up, and Ctrl+F8 turns
+  // the sound off and on.
   if (event.altKey && !event.ctrlKey && event.code === 'Pause') {
     event.preventDefault();
     if (!event.repeat) {
       guard(() => machine.toggle_pause());
     }
+    return;
+  }
+  if (event.altKey && !event.ctrlKey && event.code === 'F12') {
+    event.preventDefault();
+    guard(() => machine.set_fast_forward(true));
     return;
   }
   if (event.ctrlKey && !event.altKey && event.code === 'F11') {
@@ -619,6 +625,10 @@ window.addEventListener('keydown', (event) => {
 });
 
 window.addEventListener('keyup', (event) => {
+  // Fast forward lasts while F12 is held.
+  if (event.code === 'F12' && machine) {
+    guard(() => machine.set_fast_forward(false));
+  }
   if (guard(() => machine.key_up(event.code))) {
     event.preventDefault();
   }
@@ -626,6 +636,7 @@ window.addEventListener('keyup', (event) => {
 
 function releaseInput() {
   guard(() => machine.release_input());
+  guard(() => machine.set_fast_forward(false));
   buttonsDown.clear();
 }
 
