@@ -323,9 +323,11 @@ function setSound(muted, announce) {
 function layout() {
   const stage = $('stage');
   const style = getComputedStyle(stage);
+  // The on-screen keyboard takes the bottom of the stage.
+  const keyboard = $('osk').hidden ? 0 : $('osk').offsetHeight + parseFloat(style.rowGap || '0');
   const room = {
     width: stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
-    height: stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+    height: stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - keyboard,
   };
   const ratio = machine?.aspect() ? 4 / 3 : (machine?.screen_width() ?? 640) / (machine?.screen_height() ?? 400);
   let width = room.width;
@@ -541,9 +543,19 @@ const PAD_BUTTONS = [0, 1, 2, 3, 12, 13, 14, 15];
 /// Whether the machine had a gamepad in each slot at the last frame.
 const padsShown = [false, false];
 
-/// Hand the machine the first two gamepads for the game port.
+/// Hand the machine the first two gamepads for the game port, the touch
+/// controls after the real ones while they are the joystick.
 function pollGamepads() {
-  const pads = [...(navigator.getGamepads?.() ?? [])].filter((pad) => pad?.connected);
+  const pads = [...(navigator.getGamepads?.() ?? [])]
+    .filter((pad) => pad?.connected)
+    .map((pad) => ({
+      axes: pad.axes.slice(0, 4),
+      buttons: PAD_BUTTONS.reduce((bits, index, bit) => (pad.buttons[index]?.pressed ? bits | (1 << bit) : bits), 0),
+    }));
+  const touch = touchGamepad();
+  if (touch) {
+    pads.push(touch);
+  }
   for (let slot = 0; slot < 2; slot++) {
     const pad = pads[slot];
     if (!pad) {
@@ -553,8 +565,7 @@ function pollGamepads() {
       }
       continue;
     }
-    const buttons = PAD_BUTTONS.reduce((bits, index, bit) => (pad.buttons[index]?.pressed ? bits | (1 << bit) : bits), 0);
-    machine.set_gamepad(slot, true, pad.axes.slice(0, 4), buttons);
+    machine.set_gamepad(slot, true, pad.axes, pad.buttons);
     padsShown[slot] = true;
   }
 }
@@ -774,7 +785,12 @@ function movePointer(event) {
 
 canvas.addEventListener('pointermove', (event) => {
   // The machine's mouse is still while the settings window is open.
-  if (!settingsShown) {
+  if (settingsShown) {
+    return;
+  }
+  if (event.pointerType === 'touch') {
+    trackpadMove(event);
+  } else {
     movePointer(event);
   }
 });
@@ -787,6 +803,12 @@ canvas.addEventListener('pointerdown', (event) => {
   event.preventDefault();
   // Clicks on the settings window go to it (see below).
   if (settingsShown) {
+    return;
+  }
+  // A finger works the mouse as a trackpad does.
+  if (event.pointerType === 'touch') {
+    canvas.setPointerCapture(event.pointerId);
+    trackpadDown(event);
     return;
   }
   // A program using the mouse gets it captured by a click, which it
@@ -806,12 +828,21 @@ canvas.addEventListener('pointerdown', (event) => {
 });
 
 window.addEventListener('pointerup', (event) => {
+  if (event.pointerType === 'touch') {
+    trackpadUp(event);
+    return;
+  }
   if (buttonsDown.delete(event.button)) {
     guard(() => machine.mouse_button(event.button, false));
   }
 });
 
 canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+canvas.addEventListener('pointercancel', (event) => {
+  if (event.pointerType === 'touch') {
+    trackpadCancel(event);
+  }
+});
 
 // The settings window takes clicks when they end, not as they start: its
 // Insert opens the file picker, which a touch may do only once it ends.
@@ -847,6 +878,367 @@ document.addEventListener('pointerlockchange', () => {
   canvas.classList.toggle('captured', captured());
   $('mouse-hint').hidden = !captured();
 });
+
+
+// ---------------------------------------------------------------------
+// Touch controls and the on-screen keyboard
+// ---------------------------------------------------------------------
+
+const TOUCH_KEY = 'rust-dos.touch';
+const KEYBOARD_KEY = 'rust-dos.keyboard';
+const PAD_MODE_KEY = 'rust-dos.pad-mode';
+/// A phone or a tablet: the touch controls show from the start.
+const coarsePointer = matchMedia('(pointer: coarse)').matches;
+
+/// The D-pad and the buttons as keys: the arrows, and Enter, Space, Ctrl
+/// and Alt (the buttons' order is the joystick's buttons 1 to 4).
+const DPAD_KEYS = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight' };
+const PAD_KEYS = ['Enter', 'Space', 'ControlLeft', 'AltLeft'];
+
+/// The touch controls: whether they show, whether they are keys or the
+/// joystick, and the directions and buttons held.
+const touchPad = {
+  shown: false,
+  joystick: remembered(PAD_MODE_KEY, 'keys') === 'joystick',
+  directions: new Set(),
+  buttons: new Set(),
+};
+
+/// The touch controls as a gamepad for `pollGamepads`, while they are the
+/// joystick: the D-pad's axes and the buttons' bits.
+function touchGamepad() {
+  if (!touchPad.shown || !touchPad.joystick) {
+    return null;
+  }
+  const d = touchPad.directions;
+  const axes = [(d.has('right') ? 1 : 0) - (d.has('left') ? 1 : 0), (d.has('down') ? 1 : 0) - (d.has('up') ? 1 : 0), 0, 0];
+  const buttons = [...touchPad.buttons].reduce((bits, button) => bits | (1 << button), 0);
+  return { axes, buttons };
+}
+
+/// A key of the touch controls or the on-screen keyboard went down or up:
+/// to the settings window while it is open, else to DOS.
+function touchKey(code, down) {
+  speaker.start();
+  if (settingsShown) {
+    if (down) {
+      settingsInput(() => machine.settings_key(settingsKeyName(code), osk.latched.has('ControlLeft') || osk.latched.has('ControlRight'), shiftLatched()));
+    }
+    return;
+  }
+  guard(() => (down ? machine.key_down(code, '', false) : machine.key_up(code)));
+}
+
+/// Hold the D-pad's `directions` from now on.
+function setDirections(directions) {
+  const before = touchPad.directions;
+  touchPad.directions = directions;
+  for (const [name, code] of Object.entries(DPAD_KEYS)) {
+    const now = directions.has(name);
+    $('dpad').querySelector(`.${name}`).classList.toggle('down-now', now);
+    if (!touchPad.joystick && now !== before.has(name)) {
+      touchKey(code, now);
+    }
+  }
+}
+
+/// The directions of a touch at (`x`, `y`) on the D-pad: eight of them,
+/// none in its middle.
+function dpadDirections(x, y) {
+  const rect = $('dpad').getBoundingClientRect();
+  const dx = (x - rect.left) / rect.width - 0.5;
+  const dy = (y - rect.top) / rect.height - 0.5;
+  const directions = new Set();
+  if (Math.hypot(dx, dy) < 0.12) {
+    return directions;
+  }
+  const angle = Math.atan2(dy, dx);
+  const sector = Math.round(angle / (Math.PI / 4));
+  // Sectors from the right, clockwise (down is +y): 0 right, 2 down.
+  const names = { 0: ['right'], 1: ['right', 'down'], 2: ['down'], 3: ['down', 'left'], 4: ['left'], '-4': ['left'], '-3': ['left', 'up'], '-2': ['up'], '-1': ['up', 'right'] };
+  for (const name of names[sector] ?? []) {
+    directions.add(name);
+  }
+  return directions;
+}
+
+function setUpDpad() {
+  const dpad = $('dpad');
+  dpad.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    speaker.start();
+    dpad.setPointerCapture(event.pointerId);
+    setDirections(dpadDirections(event.clientX, event.clientY));
+  });
+  dpad.addEventListener('pointermove', (event) => {
+    if (dpad.hasPointerCapture(event.pointerId)) {
+      setDirections(dpadDirections(event.clientX, event.clientY));
+    }
+  });
+  for (const type of ['pointerup', 'pointercancel']) {
+    dpad.addEventListener(type, () => setDirections(new Set()));
+  }
+}
+
+/// A button that is held while touched: `press` and `release` run as it
+/// goes down and comes up.
+function holdButton(button, press, release) {
+  let held = false;
+  button.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    speaker.start();
+    button.setPointerCapture(event.pointerId);
+    if (!held) {
+      held = true;
+      button.classList.add('down-now');
+      press();
+    }
+  });
+  const up = () => {
+    if (held) {
+      held = false;
+      button.classList.remove('down-now');
+      release();
+    }
+  };
+  button.addEventListener('pointerup', up);
+  button.addEventListener('pointercancel', up);
+  button.addEventListener('contextmenu', (event) => event.preventDefault());
+}
+
+function setUpPadButtons() {
+  for (const button of document.querySelectorAll('.pad-button')) {
+    const index = Number(button.dataset.button);
+    holdButton(
+      button,
+      () => {
+        touchPad.buttons.add(index);
+        if (!touchPad.joystick) {
+          touchKey(PAD_KEYS[index], true);
+        }
+      },
+      () => {
+        touchPad.buttons.delete(index);
+        if (!touchPad.joystick) {
+          touchKey(PAD_KEYS[index], false);
+        }
+      },
+    );
+  }
+  holdButton($('pad-esc'), () => touchKey('Escape', true), () => touchKey('Escape', false));
+  $('pad-mode').addEventListener('click', () => {
+    // Let go of everything held as keys or as the joystick first.
+    setDirections(new Set());
+    for (const index of touchPad.buttons) {
+      if (!touchPad.joystick) {
+        touchKey(PAD_KEYS[index], false);
+      }
+    }
+    touchPad.buttons.clear();
+    touchPad.joystick = !touchPad.joystick;
+    remember(PAD_MODE_KEY, touchPad.joystick ? 'joystick' : 'keys');
+    showPadMode();
+    toast(touchPad.joystick ? 'The D-pad and buttons are the joystick' : 'The D-pad and buttons are the arrow keys, Enter, Space, Ctrl and Alt');
+  });
+}
+
+function showPadMode() {
+  $('pad-mode').textContent = touchPad.joystick ? 'Joystick' : 'Keys';
+  $('pad-mode').setAttribute('aria-pressed', String(touchPad.joystick));
+  const labels = touchPad.joystick ? ['1', '2', '3', '4'] : ['Enter', 'Space', 'Ctrl', 'Alt'];
+  for (const button of document.querySelectorAll('.pad-button')) {
+    button.textContent = labels[Number(button.dataset.button)];
+  }
+}
+
+function showTouch(shown) {
+  touchPad.shown = shown;
+  $('touch').hidden = !shown;
+  $('touch-toggle').setAttribute('aria-pressed', String(shown));
+  remember(TOUCH_KEY, shown ? 'on' : 'off');
+  if (!shown) {
+    setDirections(new Set());
+    touchPad.buttons.clear();
+  }
+}
+
+// The on-screen keyboard: a PC keyboard's keys by their
+// `KeyboardEvent.code`, with what they type and, shifted, what else.
+// Widths are in keys.
+const OSK_ROWS = [
+  [['Esc', 'Escape'], ...Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, `F${i + 1}`])],
+  [['`', 'Backquote', 1, '`', '~'], ...'1234567890'.split('').map((d, i) => [d, `Digit${d}`, 1, d, '!@#$%^&*()'[i]]), ['-', 'Minus', 1, '-', '_'], ['=', 'Equal', 1, '=', '+'], ['⌫', 'Backspace', 1.8]],
+  [['Tab', 'Tab', 1.4], ...'QWERTYUIOP'.split('').map((c) => [c, `Key${c}`, 1, c.toLowerCase(), c]), ['[', 'BracketLeft', 1, '[', '{'], [']', 'BracketRight', 1, ']', '}'], ['\\', 'Backslash', 1.4, '\\', '|']],
+  [['Caps', 'CapsLock', 1.7], ...'ASDFGHJKL'.split('').map((c) => [c, `Key${c}`, 1, c.toLowerCase(), c]), [';', 'Semicolon', 1, ';', ':'], ["'", 'Quote', 1, "'", '"'], ['Enter', 'Enter', 2.1]],
+  [['Shift', 'ShiftLeft', 2.2], ...'ZXCVBNM'.split('').map((c) => [c, `Key${c}`, 1, c.toLowerCase(), c]), [',', 'Comma', 1, ',', '<'], ['.', 'Period', 1, '.', '>'], ['/', 'Slash', 1, '/', '?'], ['Shift', 'ShiftRight', 2.6]],
+  [['Ctrl', 'ControlLeft', 1.5], ['Alt', 'AltLeft', 1.5], ['Space', 'Space', 6, ' ', ' '], ['Alt', 'AltRight', 1.5], ['Ctrl', 'ControlRight', 1.5]],
+  [['Ins', 'Insert'], ['Del', 'Delete'], ['Home', 'Home'], ['End', 'End'], ['PgUp', 'PageUp'], ['PgDn', 'PageDown'], ['←', 'ArrowLeft'], ['↑', 'ArrowUp'], ['↓', 'ArrowDown'], ['→', 'ArrowRight']],
+];
+const MODIFIERS = new Set(['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight']);
+/// The keyboard's keys by code, and the modifiers latched by a tap until
+/// the next key.
+const osk = { keys: new Map(), latched: new Set() };
+
+const shiftLatched = () => osk.latched.has('ShiftLeft') || osk.latched.has('ShiftRight');
+
+/// What the settings window takes for a key: its `KeyboardEvent.key`.
+function settingsKeyName(code) {
+  const key = osk.keys.get(code);
+  if (key?.char !== undefined) {
+    return shiftLatched() ? key.shifted : key.char;
+  }
+  return { Space: ' ' }[code] ?? code.replace(/Left$|Right$/, '');
+}
+
+/// Let go of the latched modifiers, after the key they were for.
+function releaseLatched() {
+  for (const code of osk.latched) {
+    touchKey(code, false);
+    osk.keys.get(code)?.button.classList.remove('latched');
+  }
+  osk.latched.clear();
+}
+
+function buildKeyboard() {
+  const board = $('osk');
+  for (const row of OSK_ROWS) {
+    const line = document.createElement('div');
+    line.className = 'osk-row';
+    for (const [label, code, width = 1, char, shifted] of row) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'osk-key';
+      button.tabIndex = -1;
+      button.textContent = label;
+      button.setAttribute('aria-label', code);
+      button.style.setProperty('--width', String(width));
+      osk.keys.set(code, { button, char, shifted });
+      if (MODIFIERS.has(code)) {
+        // A tap holds it for the next key; a second tap lets it go.
+        button.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          if (osk.latched.delete(code)) {
+            button.classList.remove('latched');
+            touchKey(code, false);
+          } else {
+            osk.latched.add(code);
+            button.classList.add('latched');
+            touchKey(code, true);
+          }
+        });
+      } else {
+        holdButton(
+          button,
+          () => touchKey(code, true),
+          () => {
+            touchKey(code, false);
+            releaseLatched();
+          },
+        );
+      }
+      line.append(button);
+    }
+    board.append(line);
+  }
+}
+
+function showKeyboard(shown) {
+  $('osk').hidden = !shown;
+  $('keyboard-toggle').setAttribute('aria-pressed', String(shown));
+  remember(KEYBOARD_KEY, shown ? 'on' : 'off');
+  if (!shown) {
+    releaseLatched();
+  }
+  layout();
+}
+
+// The screen as a trackpad for the mouse: a finger moves it, a tap
+// clicks, a tap with two fingers clicks the right button, and a finger
+// held still for a moment holds the left button until it lifts.
+const TAP_MS = 250;
+const HOLD_MS = 450;
+const TAP_TRAVEL = 8;
+const trackpad = { touches: new Map(), fingers: 0, held: false, holdTimer: 0 };
+
+function trackpadDown(event) {
+  trackpad.touches.set(event.pointerId, { x: event.clientX, y: event.clientY, at: event.timeStamp, travel: 0 });
+  trackpad.fingers = Math.max(trackpad.fingers, trackpad.touches.size);
+  clearTimeout(trackpad.holdTimer);
+  if (trackpad.touches.size === 1) {
+    trackpad.holdTimer = setTimeout(() => {
+      const touch = trackpad.touches.get(event.pointerId);
+      if (touch && touch.travel < TAP_TRAVEL && trackpad.touches.size === 1) {
+        trackpad.held = true;
+        guard(() => machine.mouse_button(0, true));
+      }
+    }, HOLD_MS);
+  }
+}
+
+function trackpadMove(event) {
+  const touch = trackpad.touches.get(event.pointerId);
+  if (!touch) {
+    return;
+  }
+  const dx = event.clientX - touch.x;
+  const dy = event.clientY - touch.y;
+  touch.x = event.clientX;
+  touch.y = event.clientY;
+  touch.travel += Math.hypot(dx, dy);
+  // One finger moves the mouse, at the pace of the screen's pixels.
+  if (trackpad.touches.size === 1) {
+    const rect = canvas.getBoundingClientRect();
+    guard(() => machine.mouse_move_by((dx * machine.screen_width()) / rect.width, (dy * machine.screen_height()) / rect.height));
+  }
+}
+
+/// A touch the browser took over (a gesture): no click, and the button
+/// held comes up.
+function trackpadCancel(event) {
+  trackpad.touches.delete(event.pointerId);
+  clearTimeout(trackpad.holdTimer);
+  if (trackpad.held && trackpad.touches.size === 0) {
+    trackpad.held = false;
+    guard(() => machine.mouse_button(0, false));
+  }
+  if (trackpad.touches.size === 0) {
+    trackpad.fingers = 0;
+  }
+}
+
+function trackpadUp(event) {
+  const touch = trackpad.touches.get(event.pointerId);
+  trackpad.touches.delete(event.pointerId);
+  clearTimeout(trackpad.holdTimer);
+  if (!touch) {
+    return;
+  }
+  if (trackpad.held) {
+    if (trackpad.touches.size === 0) {
+      trackpad.held = false;
+      guard(() => machine.mouse_button(0, false));
+    }
+  } else if (touch.travel < TAP_TRAVEL && event.timeStamp - touch.at < TAP_MS && trackpad.touches.size === 0) {
+    // A click the program sees, held long enough for one that polls.
+    const button = trackpad.fingers >= 2 ? 2 : 0;
+    guard(() => machine.mouse_button(button, true));
+    setTimeout(() => guard(() => machine.mouse_button(button, false)), 60);
+  }
+  if (trackpad.touches.size === 0) {
+    trackpad.fingers = 0;
+  }
+}
+
+function setUpTouch() {
+  setUpDpad();
+  setUpPadButtons();
+  buildKeyboard();
+  showPadMode();
+  $('touch-toggle').addEventListener('click', () => showTouch(!touchPad.shown));
+  $('keyboard-toggle').addEventListener('click', () => showKeyboard($('osk').hidden));
+  showTouch(remembered(TOUCH_KEY, coarsePointer ? 'on' : 'off') === 'on');
+  showKeyboard(remembered(KEYBOARD_KEY, 'off') === 'on');
+}
 
 // ---------------------------------------------------------------------
 // C: in the browser's storage
@@ -1562,6 +1954,7 @@ async function start() {
   }
   machine = new Machine(remembered(CONFIG_KEY, DEFAULT_CONFIG));
   machine.set_games(remembered(GAMES_KEY, '{}'));
+  setUpTouch();
   machine.set_muted(speaker.muted, false);
   if (params.has('log')) {
     machine.log_to_console();

@@ -92,6 +92,10 @@ select {
 #stage {
   position: relative;
   display: grid;
+  /* The picture, and the on-screen keyboard below it when it shows. */
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 8px;
   place-items: center;
   min-height: 0;
   padding: 12px var(--gutter);
@@ -99,6 +103,8 @@ select {
 }
 
 #screen {
+  grid-row: 1;
+  grid-column: 1;
   display: block;
   background: #000;
   image-rendering: pixelated;
@@ -110,6 +116,99 @@ select {
 #screen.captured { cursor: none; }
 
 #stage:fullscreen { padding: 0; background: #000; }
+
+/* Touch controls: a D-pad and four buttons over the bottom of the
+   picture, see-through, out of the way of the rest of it. */
+.touch {
+  grid-row: 1;
+  grid-column: 1;
+  place-self: stretch;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 env(safe-area-inset-right, 0px) 4px env(safe-area-inset-left, 0px);
+  pointer-events: none;
+  z-index: 1;
+}
+.touch > * { pointer-events: auto; }
+.dpad {
+  position: relative;
+  flex: none;
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 0.07);
+  border: 1px solid rgb(255 255 255 / 0.2);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dpad-arm {
+  position: absolute;
+  width: 34%;
+  height: 34%;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.14);
+}
+.dpad-arm.up { left: 33%; top: 6%; }
+.dpad-arm.down { left: 33%; bottom: 6%; }
+.dpad-arm.left { top: 33%; left: 6%; }
+.dpad-arm.right { top: 33%; right: 6%; }
+.dpad-arm.down-now { background: var(--accent); }
+.pad-middle { display: flex; gap: 8px; margin-bottom: 8px; }
+.pad-buttons {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(2, 64px);
+  gap: 10px;
+}
+.pad-button, .pad-small {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  background: rgb(255 255 255 / 0.1);
+  border-color: rgb(255 255 255 / 0.25);
+  color: var(--text);
+}
+.pad-button {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 12.5px;
+}
+.pad-small { min-width: 56px; min-height: 44px; font-size: 12.5px; }
+.pad-button.down-now, .pad-small.down-now { background: var(--accent); color: var(--accent-ink); }
+#pad-mode[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+#touch-toggle[aria-pressed="true"], #keyboard-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* The on-screen keyboard, below the picture. */
+.osk {
+  grid-row: 2;
+  grid-column: 1;
+  place-self: stretch;
+  display: grid;
+  gap: 4px;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+.osk-row { display: flex; gap: 4px; }
+.osk-key {
+  flex: var(--width, 1) 1 0;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 2px;
+  font: 12px var(--mono);
+  overflow: hidden;
+  white-space: nowrap;
+  touch-action: none;
+}
+.osk-key.down-now, .osk-key.latched { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 #stage:fullscreen #screen { box-shadow: none; }
 
 .overlay {

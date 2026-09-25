@@ -518,6 +518,15 @@ In the browser:
   included, and keeps the sound even with *Sound off*.
 * Gamepads work as joysticks once a button is pressed on them, as browsers
   require (see `[joystick]`).
+* On phones and tablets, *Touch* shows a D-pad and four buttons over the
+  bottom of the screen (on its own where the screen is a touch screen).
+  They are the arrow keys, Enter, Space, Ctrl and Alt, or with *Keys*
+  switched to *Joystick*, the joystick and its four buttons; *Esc* is
+  there too. A finger on the screen moves the mouse as on a trackpad: a
+  tap clicks, a tap with two fingers clicks the right button, and holding
+  a finger still for a moment holds the left button until it lifts.
+  *Keyboard* shows a PC keyboard below the screen, whose Shift, Ctrl and
+  Alt stay down for the next key; it types into the settings window too.
 * Clicking the screen while a program uses the mouse captures the mouse;
   Ctrl+F10 or Esc releases it. Sound starts with the first key press or
   click, as browsers require. The other [keyboard shortcuts](#keyboard-shortcuts)

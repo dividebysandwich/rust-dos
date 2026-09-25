@@ -21,11 +21,28 @@
     <button type="button" id="screenshot" title="Ctrl+F5">Screenshot</button>
     <button type="button" id="record" title="Ctrl+F7" aria-pressed="false">Record</button>
     <button type="button" id="fullscreen">Fullscreen</button>
+    <button type="button" id="touch-toggle" aria-pressed="false" title="A D-pad and buttons on the screen">Touch</button>
+    <button type="button" id="keyboard-toggle" aria-pressed="false" title="A PC keyboard on the screen">Keyboard</button>
   </nav>
 </header>
 
 <main id="stage">
   <canvas id="screen" width="640" height="400" aria-label="DOS screen"></canvas>
+  <div id="touch" class="touch" hidden>
+    <div id="dpad" class="dpad" role="group" aria-label="D-pad: the arrow keys or the joystick">
+      <span class="dpad-arm up"></span><span class="dpad-arm down"></span><span class="dpad-arm left"></span><span class="dpad-arm right"></span>
+    </div>
+    <div class="pad-middle">
+      <button type="button" id="pad-esc" class="pad-small" tabindex="-1">Esc</button>
+      <button type="button" id="pad-mode" class="pad-small" tabindex="-1" aria-pressed="false" title="The D-pad and buttons as keys or as the joystick">Keys</button>
+    </div>
+    <div class="pad-buttons" role="group" aria-label="Buttons">
+      <button type="button" class="pad-button" data-button="2" tabindex="-1">Ctrl</button>
+      <button type="button" class="pad-button" data-button="3" tabindex="-1">Alt</button>
+      <button type="button" class="pad-button" data-button="0" tabindex="-1">Enter</button>
+      <button type="button" class="pad-button" data-button="1" tabindex="-1">Space</button>
+    </div>
+  </div>
   <div id="loading" class="overlay"><p>Loading Rust-DOS…</p></div>
   <div id="drop" class="overlay" hidden>
     <p><strong>Drop to add to C:</strong><br>Files, folders and .zip archives are copied to C:. Floppy and CD images (.img, .ima, .iso) go in a drive.</p>
@@ -36,6 +53,7 @@
       <button type="button" id="restart">Restart</button>
     </div>
   </div>
+  <section id="osk" class="osk" hidden aria-label="On-screen keyboard"></section>
 </main>
 
 <footer class="status">
