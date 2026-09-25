@@ -174,19 +174,41 @@ code never touches X18, which macOS reserves.
 
 ### Linking
 
-An exit to a known EIP in the block's own page jumps through one of the
-block's two links (`BlockData::links`), which are data, not code:
+A block leaves to another block without the execution loop through its
+links (`BlockData::links`): two for exits to a known EIP (a jump's target,
+a conditional jump's next instruction), and one for a return. Links are
+data, not code:
 
-- A link starts at a stub that returns to the execution loop, which
-  translates the block at the target, sets the link and goes on in it.
+- A link starts at a stub that returns to the execution loop.
+- The execution loop then finds or translates the block at the target and
+  sets the link.
 - When a block is thrown away, the links to it are set back to their stubs
   (`Block::backlinks`).
-- Linking only within a page means nothing a chain of blocks can do
-  changes where the next block's code is: the page's translation, CS, CPL
-  and A20 only change through instructions that end a block without a
-  link.
 
-Loops run in translated code until the next timer event.
+Nothing a chain of blocks can do changes what the execution loop checks
+before a block (see [What a block holds](#what-a-block-holds)), so a
+linked block only needs its own prologue. Where the next block's code is
+takes more care:
+
+- **Within the block's page.** The link is taken as it is. The page's
+  translation, CS, CPL and A20 only change through instructions that end
+  a block without a link, so the next block is where it was.
+- **To another page, and returns.** The link keeps a `Guard`: the CS base,
+  the A20 gate and paging when it was made, with paging the target page's
+  physical page in the TLB, and for a return its target EIP. The code
+  takes the link only while all of these are the same. Fetching the target
+  then goes as the interpreter's fetch would: to the same physical page,
+  without walking the page tables. Otherwise it goes back to the execution
+  loop through the stub.
+  - The execution loop makes these links when the block it runs next is
+    at the stub's target (`Pending`): its own fetch just found the target,
+    under the translation the guard records.
+  - After a chain that crossed pages, the execution loop's code window is
+    moved to the page the last instruction was in, as the interpreter's
+    would have been (`CodeWindow::moved`).
+
+Loops, and calls and returns between pages, run in translated code until
+the next timer event.
 
 ### Code memory
 
