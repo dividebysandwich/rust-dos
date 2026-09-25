@@ -44,6 +44,8 @@ pub struct Bus {
     pub video_mode: VideoMode, // Current State
     pub disk: DiskController,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
+    /// The keyboard's layout and the keys held (see keyboard.rs).
+    pub kbd: crate::keyboard::KeyboardState,
     /// The 8042 keyboard controller (ports 60h/64h): scan codes for
     /// programs that read the keyboard themselves, the A20 gate and the
     /// CPU reset line.
@@ -236,6 +238,7 @@ impl Bus {
             video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
             disk: DiskController::new(root_path),
             keyboard_buffer: VecDeque::new(),
+            kbd: crate::keyboard::KeyboardState::default(),
             kbc: crate::kbc::Kbc::new(),
             a20_mask: !0x0010_0000,
             reset_requested: false,
@@ -333,6 +336,11 @@ impl Bus {
         // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
         // the video adapter's bits come with it below.
         bus.write_16(0x0410, 0x0001);
+
+        // 0x0417: Num Lock on, as the BIOS leaves it; 0x0496: an enhanced
+        // (101-key) keyboard.
+        bus.write_8(0x0417, 0x20);
+        bus.write_8(0x0496, crate::keyboard::ENHANCED_KEYBOARD);
 
         // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
         bus.write_8(0x0484, 24);

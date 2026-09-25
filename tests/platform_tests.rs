@@ -307,3 +307,56 @@ fn f11_and_f12_send_their_make_codes_and_only_the_enhanced_reads_return_them() {
     assert_eq!(cpu.ax(), 0x1E61);
     assert!(cpu.bus.keyboard_buffer.is_empty());
 }
+
+#[test]
+fn the_bios_keeps_left_and_right_ctrl_and_alt_apart() {
+    use rust_dos::keyboard::key_event;
+    let mut cpu = cpu();
+    key_event(&mut cpu.bus, 0x1D, false, true, None); // left Ctrl
+    key_event(&mut cpu.bus, 0x38, true, true, None); // right Alt
+    assert_eq!(cpu.bus.read_8(0x0417) & 0x0C, 0x0C);
+    cpu.set_ax(0x1200);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.get_ah() & 0x0F, 0x09, "left Ctrl and right Alt");
+    key_event(&mut cpu.bus, 0x1D, false, false, None);
+    key_event(&mut cpu.bus, 0x38, true, false, None);
+    assert_eq!(cpu.bus.read_8(0x0417) & 0x0C, 0);
+    // Caps Lock toggles once however long it is held.
+    let caps = cpu.bus.read_8(0x0417) & 0x40;
+    key_event(&mut cpu.bus, 0x3A, false, true, None);
+    key_event(&mut cpu.bus, 0x3A, false, true, None);
+    key_event(&mut cpu.bus, 0x3A, false, false, None);
+    assert_eq!(cpu.bus.read_8(0x0417) & 0x40, caps ^ 0x40);
+}
+
+#[test]
+fn keys_type_in_the_keyboard_layout() {
+    use rust_dos::keyboard::key_event;
+    use rust_dos::keylayout::Layout;
+    let mut cpu = cpu();
+    cpu.bus.kbd.layout = Layout::by_code("gr").unwrap();
+    let press = |cpu: &mut Cpu, scan: u8, extended: bool| {
+        key_event(&mut cpu.bus, scan, extended, true, None);
+        key_event(&mut cpu.bus, scan, extended, false, None);
+        cpu.bus.keyboard_buffer.pop_front()
+    };
+    assert_eq!(press(&mut cpu, 0x15, false), Some(0x157A), "Z where the US keyboard has Y");
+    // AltGr+Q is @, a plain character.
+    key_event(&mut cpu.bus, 0x38, true, true, None);
+    assert_eq!(press(&mut cpu, 0x10, false), Some(0x1040));
+    // AltGr with a key that has nothing there is Alt.
+    assert_eq!(press(&mut cpu, 0x1E, false), Some(0x1E00));
+    key_event(&mut cpu.bus, 0x38, true, false, None);
+    // Ctrl+Z is ^Z, on the German Z key.
+    key_event(&mut cpu.bus, 0x1D, false, true, None);
+    assert_eq!(press(&mut cpu, 0x15, false), Some(0x151A));
+    key_event(&mut cpu.bus, 0x1D, false, false, None);
+    // ´ then e is é; ´ then x is both; ´ then space the accent.
+    assert_eq!(press(&mut cpu, 0x0D, false), None, "the dead key waits");
+    assert_eq!(press(&mut cpu, 0x12, false), Some(0x1282));
+    press(&mut cpu, 0x0D, false);
+    assert_eq!(press(&mut cpu, 0x2D, false), Some(0x0027));
+    assert_eq!(cpu.bus.keyboard_buffer.pop_front(), Some(0x2D78));
+    // The make code is the key's, whatever it types.
+    assert!(cpu.bus.kbc.read_data() != 0);
+}

@@ -31,6 +31,7 @@ pub mod gus;
 pub mod instr_cache;
 pub mod kbc;
 pub mod keyboard;
+pub mod keylayout;
 pub mod log;
 #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
 pub mod midiout;

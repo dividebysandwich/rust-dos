@@ -1,4 +1,5 @@
 use crate::bus::Bus;
+use crate::keylayout::{Layout, Mods, Typed, compose, spacing_accent};
 
 /// Keystrokes the BIOS keyboard buffer at 40:1E holds.
 pub const BIOS_BUFFER_KEYS: usize = 15;
@@ -32,10 +33,11 @@ pub fn deliver_key_down(bus: &mut Bus, code: u16, extended: bool) {
 /// The keystroke the BIOS keyboard handler stores for the make code `scan`
 /// of a key whose character is `ascii`, with the Shift (bits 0-1), Ctrl
 /// (bit 2) and Alt (bit 3) state `flags`: Alt and Ctrl combinations and
-/// shifted function keys have codes of their own.
+/// shifted function keys have codes of their own. Ctrl with a letter is
+/// the letter's control character, wherever the layout has the letter.
 pub fn bios_keystroke(scan: u8, ascii: u8, flags: u8) -> u16 {
     let key = |scan: u8, ascii: u8| (scan as u16) << 8 | ascii as u16;
-    let letter = matches!(scan, 0x10..=0x19 | 0x1E..=0x26 | 0x2C..=0x32);
+    let letter = ascii.is_ascii_alphabetic();
     if flags & 0x08 != 0 {
         return match scan {
             0x02..=0x0D => key(scan + 0x76, 0),
@@ -114,25 +116,180 @@ pub fn deliver_scan_only(bus: &mut Bus, scan: u8, extended: bool) {
     send_scan(bus, scan, extended);
 }
 
-/// A key of `KEYS` going down (`down`) or up: a modifier sets or clears its
-/// bit at 40:17h and sends only its scan code; any other key goes down
-/// typing `ascii` (see `deliver_key_down`).
+/// A key of `KEYS` going down (`down`) or up, typing `ascii` (0: what the
+/// layout makes of it), as `key_event` has it.
 pub fn apply_key(bus: &mut Bus, key: PcKey, ascii: u8, down: bool) {
-    if key.modifier != 0 {
-        let mut flags = bus.read_8(0x0417);
-        if down {
-            flags |= key.modifier;
-            deliver_scan_only(bus, key.scan, key.extended);
-        } else {
-            flags &= !key.modifier;
-            deliver_key_up(bus, key.scan, key.extended);
-        }
-        bus.write_8(0x0417, flags);
-    } else if down {
-        deliver_key_down(bus, ((key.scan as u16) << 8) | ascii as u16, key.extended);
-    } else {
-        deliver_key_up(bus, key.scan, key.extended);
+    key_event(bus, key.scan, key.extended, down, (ascii != 0).then_some(ascii));
+}
+
+/// The keyboard as the BIOS and KEYB see it: the layout the keys type in,
+/// the keys held, and the accent a dead key left for the next letter.
+#[derive(Clone, Debug)]
+pub struct KeyboardState {
+    pub layout: &'static Layout,
+    /// One bit for each key held, by `key_id`.
+    held: [u64; 8],
+    dead: Option<char>,
+}
+
+impl Default for KeyboardState {
+    fn default() -> Self {
+        Self { layout: Layout::us(), held: [0; 8], dead: None }
     }
+}
+
+fn key_id(scan: u8, extended: bool) -> usize {
+    (scan & 0x7F) as usize | (extended as usize) << 8
+}
+
+impl KeyboardState {
+    fn is_held(&self, id: usize) -> bool {
+        self.held[id / 64] & 1 << (id % 64) != 0
+    }
+
+    fn set_held(&mut self, id: usize, down: bool) {
+        if down {
+            self.held[id / 64] |= 1 << (id % 64);
+        } else {
+            self.held[id / 64] &= !(1 << (id % 64));
+        }
+    }
+}
+
+/// BDA 40:17h: the shift keys and locks.
+const FLAGS: usize = 0x0417;
+/// BDA 40:18h: the left Ctrl and Alt and the lock keys held.
+const FLAGS2: usize = 0x0418;
+/// BDA 40:96h: the right Ctrl and Alt held, and an enhanced keyboard.
+const FLAGS3: usize = 0x0496;
+pub const ENHANCED_KEYBOARD: u8 = 0x10;
+
+fn set_bit(byte: &mut u8, bit: u8, on: bool) {
+    if on {
+        *byte |= bit;
+    } else {
+        *byte &= !bit;
+    }
+}
+
+/// A key of the PC keyboard went down (again, when held) or up: its set-1
+/// scan code `scan`, with `extended` for the keys that send E0 first (the
+/// grey keys, right Ctrl and Alt, keypad Enter and /). The BIOS's state
+/// follows: Shift, Ctrl and Alt at 40:17h, the left and right ones apart
+/// at 40:18h and 40:96h, and the locks. A key that types something queues
+/// its keystroke for INT 16h: `host_char` when the host says what it typed
+/// (code page 437), else what the layout makes of it, with a dead key's
+/// accent on it. AltGr (the right Alt) types a layout's third level as a
+/// plain character; with nothing there it is Alt. Every key sends its make
+/// or break code to the keyboard controller, for programs that read the
+/// keyboard themselves.
+pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char: Option<u8>) {
+    let id = key_id(scan, extended);
+    let repeat = down && bus.kbd.is_held(id);
+    bus.kbd.set_held(id, down);
+    let (mut flags, mut flags2, mut flags3) = (bus.read_8(FLAGS), bus.read_8(FLAGS2), bus.read_8(FLAGS3));
+    let modifier = match (scan, extended) {
+        (0x2A, false) => {
+            set_bit(&mut flags, 0x02, down);
+            true
+        }
+        (0x36, false) => {
+            set_bit(&mut flags, 0x01, down);
+            true
+        }
+        (0x1D, _) => {
+            if extended { set_bit(&mut flags3, 0x04, down) } else { set_bit(&mut flags2, 0x01, down) }
+            set_bit(&mut flags, 0x04, flags2 & 0x01 != 0 || flags3 & 0x04 != 0);
+            true
+        }
+        (0x38, _) => {
+            if extended { set_bit(&mut flags3, 0x08, down) } else { set_bit(&mut flags2, 0x02, down) }
+            set_bit(&mut flags, 0x08, flags2 & 0x02 != 0 || flags3 & 0x08 != 0);
+            true
+        }
+        (0x3A | 0x45 | 0x46, false) => {
+            let bit = match scan {
+                0x3A => 0x40,
+                0x45 => 0x20,
+                _ => 0x10,
+            };
+            set_bit(&mut flags2, bit, down);
+            if down && !repeat {
+                flags ^= bit;
+            }
+            true
+        }
+        _ => false,
+    };
+    bus.write_8(FLAGS, flags);
+    bus.write_8(FLAGS2, flags2);
+    bus.write_8(FLAGS3, flags3);
+    if !down {
+        send_scan(bus, scan | 0x80, extended);
+        return;
+    }
+    if modifier {
+        send_scan(bus, scan, extended);
+        return;
+    }
+    // Insert switches the BIOS's insert mode.
+    if scan == 0x52 && (extended || (flags & 0x20 == 0) == (flags & 0x03 == 0)) && !repeat {
+        bus.write_8(FLAGS, flags ^ 0x80);
+    }
+
+    let mods = Mods { shift: flags & 0x03 != 0, caps: flags & 0x40 != 0, num: flags & 0x20 != 0, altgr: flags3 & 0x08 != 0 };
+    let (typed, on_altgr) = match host_char {
+        Some(c) => (Typed::Char(c), false),
+        None => bus.kbd.layout.translate(scan, extended, mods),
+    };
+    // A character typed with AltGr is no Alt (or Ctrl, which some hosts
+    // send with it) combination.
+    let flags = if on_altgr { flags & !0x0C } else { flags };
+    let combination = flags & 0x0C != 0;
+    let mut keystrokes: Vec<u16> = Vec::new();
+    match typed {
+        Typed::Dead(accent) if !combination => {
+            // A second dead key types the first accent and waits with its own.
+            if let Some(previous) = bus.kbd.dead.replace(accent) {
+                keystrokes.push(bios_keystroke(0, spacing_accent(previous), 0));
+            }
+        }
+        Typed::Dead(_) => keystrokes.push(bios_keystroke(scan, 0, flags)),
+        Typed::Char(c) => {
+            match bus.kbd.dead.take() {
+                Some(accent) if !combination => match compose(accent, c) {
+                    Some(composed) => keystrokes.push(bios_keystroke(scan, composed, flags)),
+                    None if c == b' ' => keystrokes.push(bios_keystroke(scan, spacing_accent(accent), flags)),
+                    None => {
+                        keystrokes.push(bios_keystroke(0, spacing_accent(accent), 0));
+                        keystrokes.push(bios_keystroke(scan, c, flags));
+                    }
+                },
+                _ => keystrokes.push(bios_keystroke(scan, c, flags)),
+            }
+        }
+        Typed::None => keystrokes.push(bios_keystroke(scan, 0, flags)),
+    }
+    for keystroke in keystrokes {
+        // The BIOS buffer holds 15 keystrokes; when it's full (a program
+        // that reads the keyboard itself never empties it) new ones are
+        // dropped.
+        if bus.keyboard_buffer.len() < BIOS_BUFFER_KEYS {
+            bus.keyboard_buffer.push_back(keystroke);
+        }
+    }
+    send_scan(bus, scan, extended);
+}
+
+/// Let go of every key the machine holds, as the host takes the keyboard
+/// away: their break codes, and Shift, Ctrl and Alt up. The locks stay.
+pub fn release_all(bus: &mut Bus) {
+    for id in 0..512 {
+        if bus.kbd.is_held(id) {
+            key_event(bus, (id & 0x7F) as u8, id >= 256, false, None);
+        }
+    }
+    bus.kbd.dead = None;
 }
 
 // The keys by name, for input that doesn't come from the SDL window (the

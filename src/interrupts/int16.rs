@@ -56,6 +56,15 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_reg8(iced_x86::Register::AL, status);
         }
 
+        // AH = 12h: Get Extended Shift Status: AL as AH=02h, AH the keys
+        // held: left Ctrl (bit 0) and Alt (1), right Ctrl (2) and Alt
+        // (3), Scroll, Num and Caps Lock (4-6) and SysRq (7).
+        0x12 => {
+            let (flags2, flags3) = (cpu.bus.read_8(0x0418), cpu.bus.read_8(0x0496));
+            let high = (flags2 & 0x03) | (flags3 & 0x0C) | (flags2 & 0x70) | ((flags2 & 0x04) << 5);
+            cpu.set_ax((high as u16) << 8 | cpu.bus.read_8(BDA_SHIFT_FLAGS) as u16);
+        }
+
         // AH = 05h: Store Key (Push to Buffer)
         // CX = Key (CH=Scan, CL=Ascii)
         // Returns AL=0 (Success), AL=1 (Buffer Full)
