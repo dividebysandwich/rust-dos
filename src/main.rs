@@ -106,6 +106,12 @@ impl audio::AudioOutput for SdlAudio {
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
         self.0.queue_audio(samples)
     }
+
+    /// The device takes its buffer from the queue at once; 20 ms more is
+    /// for a video frame that comes late.
+    fn target_frames(&self) -> usize {
+        self.0.spec().samples as usize + self.0.spec().freq as usize / 50
+    }
 }
 
 /// What saving the settings compares against: the settings and drives as
@@ -158,7 +164,8 @@ fn main() -> Result<(), String> {
     let desired_spec = sdl2::audio::AudioSpecDesired {
         freq: Some(44100),
         channels: Some(2),
-        samples: None,     // Default buffer size
+        // SDL's default is 2048 frames, 46 ms of latency.
+        samples: Some(512),
     };
     let audio_device = audio_subsystem
         .open_queue::<i16, _>(None, &desired_spec)

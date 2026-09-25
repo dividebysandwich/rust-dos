@@ -95,6 +95,11 @@ impl AudioOutput for PageAudio {
         self.0.borrow_mut().out.extend_from_slice(samples);
         Ok(())
     }
+
+    /// 40 ms, as the page's frames come less evenly than a window's.
+    fn target_frames(&self) -> usize {
+        rust_dos::opl::RATE as usize / 25
+    }
 }
 
 /// The processor and sound hardware in place. Changed settings reach them

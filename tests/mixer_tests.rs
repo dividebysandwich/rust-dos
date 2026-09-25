@@ -113,14 +113,19 @@ fn master_is_the_volume_of_the_mix() {
 struct Recorder(Rc<RefCell<Vec<i16>>>);
 
 impl AudioOutput for Recorder {
+    // Always at its target, so the sound is neither padded, dropped nor
+    // resampled.
     fn queued_frames(&self) -> usize {
-        // Enough that nothing is padded, little enough that all fits.
         rust_dos::opl::RATE as usize / 10
     }
 
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
         self.0.borrow_mut().extend_from_slice(samples);
         Ok(())
+    }
+
+    fn target_frames(&self) -> usize {
+        rust_dos::opl::RATE as usize / 10
     }
 }
 

@@ -161,6 +161,8 @@ pub struct Bus {
     /// `audio_frames` frames of emulated time, waiting for `pump_audio`.
     pub audio_out: VecDeque<i16>,
     audio_frames: u64,
+    /// How `pump_audio` holds the output device's queue at its target.
+    pub audio_feed: crate::audio::Feed,
     /// Resampling position and last frame of the Sound Blaster's output.
     sb_phase: f64,
     sb_frame: (i16, i16),
@@ -277,6 +279,7 @@ impl Bus {
             drives_active: 0,
             mscdex: Default::default(),
             audio_out: VecDeque::new(),
+            audio_feed: crate::audio::Feed::default(),
             audio_frames: 0,
             sb_phase: 0.0,
             sb_frame: (0, 0),
