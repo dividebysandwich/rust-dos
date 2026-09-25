@@ -54,7 +54,8 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   is 640x400, mode 12h and 320x240 "mode X" 640x480). `/api/status` →
   `video.frame` has it.
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
-  DOS prompt), `cs_ip`, the video mode, `paused`, `input_queue`, and
+  DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
+  adapter `machine` gives programs), `paused`, `input_queue`, and
   `cycles_per_ms`, the current CPU speed. `video.vga` shows the CRTC Start
   Address the program set and the one on screen, which helps when a game
   that flips pages flickers or shows half-drawn frames. `video.crt` is the
