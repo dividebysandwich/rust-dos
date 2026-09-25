@@ -1483,9 +1483,7 @@ impl DiskController {
     /// INT 21h, AH=5Ah: create a file with a unique name in `directory`
     /// (which ends in a backslash). Returns the handle and the name.
     pub fn create_temp_file(&mut self, directory: &str, owner: u16) -> Result<(u16, String), u8> {
-        let stamp = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
+        let stamp = crate::hosttime::now().timestamp_subsec_nanos();
         for i in 0..1000u32 {
             let name = format!("{}{:08X}", directory, stamp.wrapping_add(i) & 0x0FFF_FFFF);
             if let Ok(handle) = self.create_new_file(&name, owner) {
@@ -1604,7 +1602,7 @@ impl DiskController {
             }
             OpenData::Device(_) => None,
         };
-        let t: DateTime<Local> = modified.map_or_else(Local::now, DateTime::from);
+        let t: DateTime<Local> = modified.map_or_else(crate::hosttime::now, DateTime::from);
         let time = (t.hour() << 11 | t.minute() << 5 | t.second() / 2) as u16;
         let year = (t.year().max(1980) - 1980) as u32;
         let date = (year << 9 | t.month() << 5 | t.day()) as u16;

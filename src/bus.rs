@@ -128,6 +128,9 @@ pub struct Bus {
     /// The Super VGA side of the card: VESA modes and their memory.
     pub vbe: crate::video::vbe::Vbe,
     pub search_handles: std::collections::HashMap<u32, String>,
+    /// The search ID FindFirst handed out last (the key of
+    /// `search_handles`, kept in the program's DTA).
+    pub search_serial: u32,
 
     // Mouse State (INT 33h)
     pub mouse: crate::mouse::MouseState,
@@ -265,6 +268,7 @@ impl Bus {
             vga: crate::video::vga::VgaCard::new(),
             vbe: crate::video::vbe::Vbe::new(),
             search_handles: std::collections::HashMap::new(),
+            search_serial: 0,
             mouse: crate::mouse::MouseState::new(),
             opl: crate::opl::Opl::new(true),
             sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default())),

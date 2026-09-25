@@ -1,4 +1,4 @@
-use chrono::{Local, Timelike};
+use chrono::Timelike;
 use iced_x86::Register;
 
 use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
@@ -927,7 +927,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 2Ch: Get System Time
         // Returns: CH=Hour, CL=Minute, DH=Second, DL=1/100s
         0x2C => {
-            let now = Local::now();
+            let now = crate::hosttime::now();
 
             let hour = now.hour() as u8;
             let minute = now.minute() as u8;
@@ -1646,7 +1646,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
 
                 // Create a new Search ID
-                let sid = (cpu.bus.start_time.elapsed().as_nanos() & 0xFFFFFFFF) as u32;
+                cpu.bus.search_serial = cpu.bus.search_serial.wrapping_add(1);
+                let sid = cpu.bus.search_serial;
                 (0, cpu.cx(), pattern, sid)
             } else {
                 let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
@@ -1774,7 +1775,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 2Ah: Get date. CX=year, DH=month, DL=day, AL=day of week.
         0x2A => {
             use chrono::Datelike;
-            let now = Local::now();
+            let now = crate::hosttime::now();
             cpu.set_cx(now.year() as u16);
             cpu.set_dx(((now.month() as u16) << 8) | now.day() as u16);
             cpu.set_reg8(Register::AL, now.weekday().num_days_from_sunday() as u8);

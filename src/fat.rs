@@ -14,7 +14,7 @@ use std::cell::{RefCell, RefMut};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Timelike};
 
 use crate::disk::FatLayout;
 use crate::diskimage::{Bpb, DiskImage, SECTOR_SIZE, STATUS_SECTOR_NOT_FOUND, STATUS_WRITE_PROTECTED};
@@ -49,7 +49,7 @@ const FAT16_MAX_CLUSTERS: u64 = 65525;
 
 /// The current local time as a directory entry has it: (time, date).
 pub fn dos_now() -> (u16, u16) {
-    let t = Local::now();
+    let t = crate::hosttime::now();
     let time = (t.hour() << 11 | t.minute() << 5 | (t.second() / 2)) as u16;
     let date = (((t.year().clamp(1980, 2107) - 1980) as u32) << 9 | t.month() << 5 | t.day()) as u16;
     (time, date)

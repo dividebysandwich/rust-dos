@@ -8,7 +8,7 @@
 //! reset, whether to resume a program through the pointer at 40:67 (used by
 //! 286-era protected mode code).
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Timelike};
 
 pub const SHUTDOWN_STATUS: u8 = 0x0F;
 
@@ -68,7 +68,7 @@ impl Cmos {
     }
 
     pub fn read_data(&self) -> u8 {
-        let now = Local::now();
+        let now = crate::hosttime::now();
         match self.index {
             0x00 => bcd(now.second()),
             0x02 => bcd(now.minute()),
