@@ -5,7 +5,7 @@ use std::any::Any;
 use std::mem::offset_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use super::block::BlockData;
+use super::block::{BlockData, Guard};
 use crate::cpu::{Access, Cpu, Fault, MemRef, Seg};
 
 /// How translated code returned to the execution loop: the low byte of
@@ -92,6 +92,14 @@ pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
 pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
+pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
+pub const GUARD_SIZE: i32 = std::mem::size_of::<Guard>() as i32;
+pub const GUARD_EIP: i32 = offset_of!(Guard, eip) as i32;
+pub const GUARD_CS_BASE: i32 = offset_of!(Guard, cs_base) as i32;
+pub const GUARD_A20: i32 = offset_of!(Guard, a20) as i32;
+pub const GUARD_PAGING: i32 = offset_of!(Guard, paging) as i32;
+pub const GUARD_PAGE: i32 = offset_of!(Guard, page) as i32;
+pub const GUARD_PHYS: i32 = offset_of!(Guard, phys) as i32;
 
 impl JitCtx {
     pub fn new(exit: usize) -> Self {
@@ -112,7 +120,7 @@ impl JitCtx {
             fault: Fault::UD,
             panic: None,
             refs: [MemRef { lin: 0, phys: 0, phys2: 0, size: 1 }; 4],
-            parity: std::array::from_fn(|b| if (b as u8).count_ones() % 2 == 0 { 0x04 } else { 0 }),
+            parity: std::array::from_fn(|b| if (b as u8).count_ones().is_multiple_of(2) { 0x04 } else { 0 }),
         }
     }
 }

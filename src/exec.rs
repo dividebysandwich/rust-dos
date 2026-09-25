@@ -106,6 +106,19 @@ impl CodeWindow {
         inside.then(|| self.phys + offset as usize)
     }
 
+    /// Translated code ran on into `page` through links (see
+    /// `dynrec::Page`): make it the window, as the interpreter would have
+    /// when it fetched from it, with what the window depended on then
+    /// (`at`: the TLB's epoch, CPL and the A20 gate before the code ran,
+    /// which only its last instruction can have changed).
+    fn moved(&mut self, page: crate::dynrec::Page, at: (u32, u8, u32)) {
+        if self.len != 0 && self.lin == page.lin {
+            return;
+        }
+        let (tlb_epoch, cpl, a20_mask) = at;
+        *self = CodeWindow { lin: page.lin, len: 0x1000 - PAGE_TAIL, phys: page.phys, tlb_epoch, cpl, a20_mask };
+    }
+
     /// Make the page of `lin_ip`, which is at `phys_ip`, the window, unless
     /// it is the first page (the tripwire watches the IVT there) or not all
     /// in RAM.
@@ -489,13 +502,17 @@ fn dynamic<const HOT: bool>(
     if !translatable {
         return execute_at::<false>(cpu, fetch, hook, at);
     }
+    // What the code window depends on, before the blocks run.
+    let window = (cpu.tlb.epoch, cpu.cpl, cpu.bus.a20_mask());
     match fetch.dynrec.run(cpu, &at, single) {
         Run::Interpret => execute_at::<false>(cpu, fetch, hook, at),
-        Run::Ran => {
+        Run::Ran { page } => {
+            fetch.window.moved(page, window);
             finish_instruction(cpu);
             None
         }
-        Run::Fault { fault, phys_ip } => {
+        Run::Fault { fault, phys_ip, page } => {
+            fetch.window.moved(page, window);
             after_fault(cpu, fault, fetch.ram, phys_ip);
             cpu.bus.clock.icount += 1;
             finish_instruction(cpu);

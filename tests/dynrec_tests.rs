@@ -386,3 +386,61 @@ fn a_smaller_cs_limit_stops_a_linked_block() {
     let (vector, stack) = b.recorded();
     assert_eq!((vector, stack[0], stack[1]), (GP as u32, 0, b_at + 1));
 }
+
+/// A loop that calls a function in another page 50 times, then maps that
+/// page to another function (with INVLPG if `flush`) and calls it 50 times
+/// more. The links from the loop to the function and back are made under
+/// the first translation; after the remap they must go wherever the
+/// interpreter's fetch goes: to the new function after INVLPG, and without
+/// it to the old one the TLB still has.
+fn remapped_callee(flush: bool) -> u32 {
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.load(0x31000, &asm32(0x31000, |a| {
+            a.add(ebx, 1)?;
+            a.ret()
+        }));
+        rig.load(0x32000, &asm32(0x31000, |a| {
+            a.add(ebx, 100)?;
+            a.ret()
+        }));
+        let code = asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 50u32)?;
+            let mut first = a.create_label();
+            a.set_label(&mut first)?;
+            a.call(0x31000u64)?;
+            a.dec(ecx)?;
+            a.jnz(first)?;
+            a.mov(dword_ptr(table + 0x31 * 4), 0x32003u32)?;
+            if flush {
+                a.invlpg(ptr(0x31000))?;
+            }
+            a.mov(ecx, 50u32)?;
+            let mut second = a.create_label();
+            a.set_label(&mut second)?;
+            a.call(0x31000u64)?;
+            a.dec(ecx)?;
+            a.jnz(second)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    b.cpu.ebx()
+}
+
+#[test]
+fn links_to_another_page_follow_its_remapping() {
+    assert_eq!(remapped_callee(true), 50 + 5000);
+    assert_eq!(remapped_callee(false), 100, "the TLB keeps the old translation");
+}

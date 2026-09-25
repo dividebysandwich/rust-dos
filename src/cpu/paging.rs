@@ -84,6 +84,14 @@ impl Tlb {
         (user as usize) * TLB_ENTRIES + page as usize % TLB_ENTRIES
     }
 
+    /// The translation of linear page `page` for privilege level 3 or the
+    /// others (`user`): its physical page, if the TLB has it.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn lookup(&self, page: u32, user: bool) -> Option<u32> {
+        let e = self.entries[Self::slot(page, user)];
+        (e.read_tag == page + 1).then_some(e.phys)
+    }
+
     /// The entries, supervisor then user, `TLB_ENTRIES` each, for the
     /// dynamic recompiler's code. The allocation never moves.
     #[cfg_attr(not(dynrec), allow(dead_code))]

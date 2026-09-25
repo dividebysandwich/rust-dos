@@ -10,11 +10,16 @@
 //! flag, so the code computes the guest's flags the way `cpu::alu` defines
 //! them, with a parity table in the context.
 
+// dynasm converts the registers it is given at run time with `into`, and
+// checks the bit field operands it is given with comparisons that are
+// constant for constant operands.
+#![allow(clippy::useless_conversion, clippy::absurd_extreme_comparisons, clippy::eq_op)]
+
 use dynasmrt::aarch64::Aarch64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use iced_x86::ConditionCode;
 
-use super::block::BlockData;
+use super::block::{BlockData, LINKS, RETURN_LINK};
 use super::helpers::*;
 use super::uop::*;
 use crate::cpu::Seg;
@@ -176,7 +181,7 @@ struct Gen<'a> {
     /// Whether exits to a known EIP in the page may be linked, and the
     /// stubs of the links used.
     link: bool,
-    stubs: [Option<DynamicLabel>; 2],
+    stubs: [Option<DynamicLabel>; LINKS],
     /// The instruction being translated.
     ix: usize,
 }
@@ -184,7 +189,7 @@ struct Gen<'a> {
 /// A translated block's code, and where its links' stubs are in it.
 pub struct Code {
     pub bytes: Vec<u8>,
-    pub stubs: [Option<usize>; 2],
+    pub stubs: [Option<usize>; LINKS],
 }
 
 /// Translate a block: each instruction's operations (`items[ix]`), or a
@@ -210,7 +215,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         body,
         slow: Vec::new(),
         link,
-        stubs: [None; 2],
+        stubs: [None; LINKS],
         ix: 0,
     };
     g.prologue(items);
@@ -678,9 +683,16 @@ impl Gen<'_> {
             }
             Uop::Exit { eip: Src::Imm(target) } => self.leave(Some(target), 0, true),
             Uop::Exit { eip: Src::T(t) } => {
-                let tail = self.tail;
                 self.field(Access::Str32, r(t), layout::EIP);
-                dynasm!(self.ops ; .arch aarch64 ; b =>tail);
+                if self.link {
+                    // A return: through its link if it goes where the link
+                    // was made to.
+                    self.counts();
+                    self.guarded(RETURN_LINK, Some(t));
+                } else {
+                    let tail = self.tail;
+                    dynasm!(self.ops ; .arch aarch64 ; b =>tail);
+                }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
         }
@@ -1207,26 +1219,95 @@ impl Gen<'_> {
     /// sets it (`set`) or knows it: through link `slot` if that is in the
     /// page, else back to the execution loop. The counts first.
     fn leave(&mut self, eip: Option<u32>, slot: usize, set: bool) {
-        let data = self.data;
-        let (n, synced) = (data.count() as i32, self.synced[data.count() - 1]);
         if let (Some(eip), true) = (eip, set) {
             self.mov32(0, eip);
             self.field(Access::Str32, 0, layout::EIP);
         }
-        self.add_field64(layout::ICOUNT, (n - synced) as u32);
-        self.add_field64(layout::EXECUTED, n as u32);
-        self.data_x1();
+        self.counts();
         match eip {
-            Some(eip) if self.link && data.in_page(eip) => {
+            Some(eip) if self.link && self.data.in_page(eip) => {
                 self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
                 let at = DATA_LINKS as u32 + slot as u32 * 8;
                 dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x1, at] ; br x16);
             }
+            Some(_) if self.link => self.guarded(slot, None),
             _ => {
                 dynasm!(self.ops ; .arch aarch64 ; movz w0, EXIT_NEXT);
                 self.exit();
             }
         }
+    }
+
+    /// Bring the counts up to date for leaving the block after its last
+    /// instruction, and X1 = the block.
+    fn counts(&mut self) {
+        let data = self.data;
+        let (n, synced) = (data.count() as i32, self.synced[data.count() - 1]);
+        self.add_field64(layout::ICOUNT, (n - synced) as u32);
+        self.add_field64(layout::EXECUTED, n as u32);
+        self.data_x1();
+    }
+
+    /// Leave through link `slot` to another page, if fetching its target
+    /// goes as when the link was made (see `x64::Gen::guarded`), else
+    /// through the stub. X1 is the block.
+    fn guarded(&mut self, slot: usize, eip: Option<T>) {
+        let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
+        let g = DATA_GUARDS as u32 + slot as u32 * GUARD_SIZE as u32;
+        let (g_eip, g_cs, g_a20, g_paging, g_page, g_phys) = (
+            g + GUARD_EIP as u32,
+            g + GUARD_CS_BASE as u32,
+            g + GUARD_A20 as u32,
+            g + GUARD_PAGING as u32,
+            g + GUARD_PAGE as u32,
+            g + GUARD_PHYS as u32,
+        );
+        if let Some(t) = eip {
+            dynasm!(self.ops ; .arch aarch64 ; ldr w2, [x1, g_eip] ; cmp W(r(t)), w2 ; b.ne =>stub);
+        }
+        self.field(Access::Ldr32, 2, seg_field(Seg::CS, layout::SEG_BASE));
+        dynasm!(self.ops ; .arch aarch64 ; ldr w3, [x1, g_cs] ; cmp w2, w3 ; b.ne =>stub);
+        self.field(Access::Ldr32, 2, layout::A20_MASK);
+        dynasm!(self.ops ; .arch aarch64 ; ldr w3, [x1, g_a20] ; cmp w2, w3 ; b.ne =>stub);
+        self.field(Access::Ldr32, 2, layout::CR0);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; lsr w2, w2, 31
+            ; ldr w3, [x1, g_paging]
+            ; cmp w2, w3
+            ; b.ne =>stub
+            ; cbz w2, >go
+            // The TLB entry of the page in the set of the privilege level.
+            ; ldr w4, [x1, g_page]
+            ; and w3, w4, (layout::TLB_SET - 1) as u32
+        );
+        self.field(Access::Ldr8, 2, layout::CPL);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; cmp w2, 3
+            ; b.ne >supervisor
+            ; add w3, w3, layout::TLB_SET as u32
+            ; supervisor:
+        );
+        self.mov32(5, layout::TLB_ENTRY_SIZE as u32);
+        let at = DATA_LINKS as u32 + slot as u32 * 8;
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; umull x3, w3, w5
+            ; ldr x6, [x20, CTX_TLB as u32]
+            ; add x6, x6, x3
+            ; add w4, w4, 1
+            ; ldr w5, [x6, layout::TLB_READ_TAG as u32]
+            ; cmp w4, w5
+            ; b.ne =>stub
+            ; ldr w5, [x6, layout::TLB_PHYS as u32]
+            ; ldr w3, [x1, g_phys]
+            ; cmp w5, w3
+            ; b.ne =>stub
+            ; go:
+            ; ldr x16, [x1, at]
+            ; br x16
+        );
     }
 
     /// Branch to `yes` if condition `cc` holds on the guest's flags.

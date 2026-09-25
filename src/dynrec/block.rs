@@ -21,6 +21,31 @@ use crate::instructions::{Handler, handler};
 /// code window on (`exec::PAGE_TAIL`).
 const PAGE_TAIL: u32 = 15;
 
+/// Links a block's exits can have: 0 and 1 to a known EIP (a jump's
+/// target, a conditional one's next instruction), 2 to a return's.
+pub const LINKS: usize = 3;
+/// The link of a return.
+pub const RETURN_LINK: usize = 2;
+
+/// What a link to another page was made under. Translated code takes it
+/// only while fetching its target would go the same way, as the
+/// interpreter's instruction fetch would without the link: the same CS
+/// base, A20 gate and paging, and with paging the same translation in the
+/// TLB. Links within the block's page need none of this (see `block`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Guard {
+    /// The target's EIP, which a return's link must see again.
+    pub eip: u32,
+    pub cs_base: u32,
+    pub a20: u32,
+    /// 1 with paging on; then the target's linear page number and the
+    /// TLB's physical page for it.
+    pub paging: u32,
+    pub page: u32,
+    pub phys: u32,
+}
+
 /// A block of guest code. The translated code reads `gen_sum` and passes
 /// the block to the helpers, so it lives at a fixed address (boxed) for
 /// as long as the code can run.
@@ -47,11 +72,13 @@ pub struct BlockData {
     /// its instructions through the code window only if the limit is at
     /// least this.
     pub limit_need: u32,
-    /// Where the block's linkable exits (to a known EIP in its page) jump:
-    /// the translated code of the block there, or else the exit's stub in
-    /// `stubs`, which returns to the execution loop to have it linked.
-    pub links: [usize; 2],
-    pub stubs: [usize; 2],
+    /// Where the block's linkable exits jump: the translated code of the
+    /// block their EIP leads to, or else the exit's stub in `stubs`, which
+    /// returns to the execution loop to have it linked; and for links to
+    /// another page, what they were made under.
+    pub links: [usize; LINKS],
+    pub stubs: [usize; LINKS],
+    pub guards: [Guard; LINKS],
     /// The block's index in the translator's table.
     pub id: u32,
 }
@@ -101,8 +128,9 @@ impl BlockData {
             handlers: instrs.iter().map(handler).collect(),
             // (The code window has checked this doesn't overflow.)
             limit_need: *eips.last().unwrap() + PAGE_TAIL - 1,
-            links: [0; 2],
-            stubs: [0; 2],
+            links: [0; LINKS],
+            stubs: [0; LINKS],
+            guards: [Guard::default(); LINKS],
             id: 0,
             instrs: instrs.into_boxed_slice(),
             eips: eips.into_boxed_slice(),

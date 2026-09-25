@@ -7,11 +7,14 @@
 //! registers and flags stay in the CPU. Translated code calls Rust with the
 //! System V convention, which Rust offers on every x86-64 host.
 
+// dynasm converts the registers it is given at run time with `into`.
+#![allow(clippy::useless_conversion)]
+
 use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use iced_x86::ConditionCode;
 
-use super::block::BlockData;
+use super::block::{BlockData, LINKS, RETURN_LINK};
 use super::helpers::*;
 use super::uop::*;
 use crate::cpu::Seg;
@@ -130,7 +133,7 @@ struct Gen<'a> {
     /// Whether exits to a known EIP in the page may be linked, and the
     /// stubs of the links used.
     link: bool,
-    stubs: [Option<DynamicLabel>; 2],
+    stubs: [Option<DynamicLabel>; LINKS],
     /// The instruction being translated.
     ix: usize,
 }
@@ -138,7 +141,7 @@ struct Gen<'a> {
 /// A translated block's code, and where its links' stubs are in it.
 pub struct Code {
     pub bytes: Vec<u8>,
-    pub stubs: [Option<usize>; 2],
+    pub stubs: [Option<usize>; LINKS],
 }
 
 /// Translate a block: each instruction's operations (`items[ix]`), or a
@@ -171,7 +174,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         body,
         slow: Vec::new(),
         link,
-        stubs: [None; 2],
+        stubs: [None; LINKS],
         ix: 0,
     };
     g.prologue(items);
@@ -572,8 +575,16 @@ impl Gen<'_> {
             }
             Uop::Exit { eip: Src::Imm(target) } => self.leave(Some(target), 0, true),
             Uop::Exit { eip: Src::T(t) } => {
-                let tail = self.tail;
-                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)) ; jmp =>tail);
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)));
+                if self.link {
+                    // A return: through its link if it goes where the link
+                    // was made to.
+                    self.counts();
+                    self.guarded(RETURN_LINK, Some(t));
+                } else {
+                    let tail = self.tail;
+                    dynasm!(self.ops ; .arch x64 ; jmp =>tail);
+                }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
         }
@@ -947,11 +958,25 @@ impl Gen<'_> {
     /// sets it (`set`) or knows it: through link `slot` if that is in the
     /// page, else back to the execution loop. The counts first.
     fn leave(&mut self, eip: Option<u32>, slot: usize, set: bool) {
-        let data = self.data;
-        let (n, synced) = (data.count() as i32, self.synced[data.count() - 1]);
         if let (Some(eip), true) = (eip, set) {
             dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], eip as i32);
         }
+        self.counts();
+        match eip {
+            Some(eip) if self.link && self.data.in_page(eip) => {
+                self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
+                dynasm!(self.ops ; .arch x64 ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]);
+            }
+            Some(_) if self.link => self.guarded(slot, None),
+            _ => dynasm!(self.ops ; .arch x64 ; mov eax, EXIT_NEXT as i32 ; jmp QWORD [r12 + CTX_EXIT]),
+        }
+    }
+
+    /// Bring the counts up to date for leaving the block after its last
+    /// instruction, and RDX = the block.
+    fn counts(&mut self) {
+        let data = self.data;
+        let (n, synced) = (data.count() as i32, self.synced[data.count() - 1]);
         let data_ptr = self.data_ptr;
         dynasm!(self.ops
             ; .arch x64
@@ -959,14 +984,52 @@ impl Gen<'_> {
             ; add QWORD [rbx + EXECUTED], n
             ; mov rdx, QWORD data_ptr
         );
-        match eip {
-            Some(eip) if self.link && data.in_page(eip) => {
-                let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
-                let _ = stub;
-                dynasm!(self.ops ; .arch x64 ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]);
-            }
-            _ => dynasm!(self.ops ; .arch x64 ; mov eax, EXIT_NEXT as i32 ; jmp QWORD [r12 + CTX_EXIT]),
+    }
+
+    /// Leave through link `slot` to another page, if fetching its target
+    /// goes as when the link was made (its `Guard`): the same EIP for a
+    /// return (in `eip`), CS base, A20 gate and paging, and with paging
+    /// the target page's translation still in the TLB. Otherwise through
+    /// the stub, to the execution loop. RDX is the block.
+    fn guarded(&mut self, slot: usize, eip: Option<T>) {
+        let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
+        let g = DATA_GUARDS + slot as i32 * GUARD_SIZE;
+        if let Some(t) = eip {
+            dynasm!(self.ops ; .arch x64 ; cmp Rd(r(t)), DWORD [rdx + g + GUARD_EIP] ; jne =>stub);
         }
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov ecx, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
+            ; cmp ecx, DWORD [rdx + g + GUARD_CS_BASE]
+            ; jne =>stub
+            ; mov ecx, DWORD [rbx + A20]
+            ; cmp ecx, DWORD [rdx + g + GUARD_A20]
+            ; jne =>stub
+            ; mov ecx, DWORD [rbx + CR0]
+            ; shr ecx, 31
+            ; cmp ecx, DWORD [rdx + g + GUARD_PAGING]
+            ; jne =>stub
+            ; test ecx, ecx
+            ; jz >go
+            // The TLB entry of the page in the set of the privilege level.
+            ; mov ecx, DWORD [rdx + g + GUARD_PAGE]
+            ; and ecx, (layout::TLB_SET - 1) as i32
+            ; cmp BYTE [rbx + CPL], 3
+            ; jne >supervisor
+            ; add ecx, layout::TLB_SET as i32
+            ; supervisor:
+            ; imul ecx, ecx, layout::TLB_ENTRY_SIZE as i32
+            ; add rcx, QWORD [r12 + CTX_TLB]
+            ; mov esi, DWORD [rdx + g + GUARD_PAGE]
+            ; inc esi
+            ; cmp esi, DWORD [rcx + layout::TLB_READ_TAG as i32]
+            ; jne =>stub
+            ; mov esi, DWORD [rcx + layout::TLB_PHYS as i32]
+            ; cmp esi, DWORD [rdx + g + GUARD_PHYS]
+            ; jne =>stub
+            ; go:
+            ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]
+        );
     }
 
     fn commit(&mut self, commit: Option<(Gpr, T)>) {

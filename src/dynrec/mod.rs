@@ -68,14 +68,25 @@ pub struct DynStats {
 pub(crate) enum Run {
     /// Nothing: the interpreter runs the instruction.
     Interpret,
-    /// Translated code ran; EIP is where it stopped.
-    Ran,
+    /// Translated code ran; EIP is where it stopped. `page` is the page the
+    /// last instruction was in (see `Page`).
+    Ran { page: Page },
     /// An instruction faulted. It was undone, but for being counted as
     /// executed: EIP is on it and ESP as before. The execution loop
     /// delivers the fault and counts the instruction.
-    Fault { fault: Fault, phys_ip: usize },
+    Fault { fault: Fault, phys_ip: usize, page: Page },
     /// An instruction's handler panicked.
     Panic(Box<dyn std::any::Any + Send>),
+}
+
+/// The linear and physical address of the page translated code ran its
+/// last instruction in. Blocks linked across pages move on without the
+/// execution loop, whose code window the interpreter would have moved to
+/// that page (see `exec::CodeWindow`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Page {
+    pub lin: u32,
+    pub phys: usize,
 }
 
 /// The recompiler's state: its translated code and what it knows about it.
@@ -147,7 +158,8 @@ mod engine {
     use std::collections::HashMap;
     use std::ptr::NonNull;
 
-    use super::block::BlockData;
+    use super::block::{BlockData, Guard, RETURN_LINK};
+    use crate::cpu::{CR0_PG, Seg};
     use super::codemem::CodeMemory;
     use super::helpers::*;
     #[cfg(target_arch = "aarch64")]
@@ -232,8 +244,24 @@ mod engine {
         page_gen[first].wrapping_add(page_gen[last])
     }
 
+    /// A link to another page (or a return's) that the execution loop
+    /// makes when it runs the block at `eip` next: the block `from` (whose
+    /// code is at `code`, in case the index has been reused) left through
+    /// link `slot` for it. Links are made while nothing was thrown away
+    /// (`flushes`), between blocks of one `mode`.
+    #[derive(Clone, Copy)]
+    struct Pending {
+        from: u32,
+        code: *const u8,
+        slot: u8,
+        eip: u32,
+        mode: u8,
+        flushes: u64,
+    }
+
     pub struct Engine {
         mem: CodeMemory,
+        pending: Option<Pending>,
         enter: backend::Enter,
         ctx: Box<JitCtx>,
         blocks: Vec<Option<Block>>,
@@ -260,6 +288,7 @@ mod engine {
             let enter = unsafe { std::mem::transmute::<usize, backend::Enter>(base + tramp.enter) };
             Ok(Engine {
                 mem,
+                pending: None,
                 enter,
                 ctx: Box::new(JitCtx::new(base + tramp.exit)),
                 blocks: Vec::new(),
@@ -372,6 +401,37 @@ mod engine {
             Some(index)
         }
 
+        /// Link block `from` to block `to`, which the execution loop is about
+        /// to run at `at` after `from` left through the link for it, with
+        /// the guard of how its fetch went (see `Guard`).
+        fn link_guarded(&mut self, p: Pending, to: u32, cpu: &Cpu, at: &At) {
+            let page = at.lin_ip >> 12;
+            let paging = cpu.cr0 & CR0_PG != 0;
+            let phys = if paging {
+                match cpu.tlb.lookup(page, cpu.cpl == 3) {
+                    Some(phys) => phys,
+                    None => return,
+                }
+            } else {
+                0
+            };
+            let guard = Guard {
+                eip: at.eip,
+                cs_base: cpu.seg_cache(Seg::CS).base,
+                a20: cpu.bus.a20_mask(),
+                paging: paging as u32,
+                page,
+                phys,
+            };
+            let to_code = self.blocks[to as usize].as_ref().unwrap().code;
+            let Some(source) = self.blocks[p.from as usize].as_mut().filter(|b| b.code == p.code) else { return };
+            // SAFETY: owned by the block, and not in use.
+            let data = unsafe { source.data.as_mut() };
+            data.guards[p.slot as usize] = guard;
+            data.links[p.slot as usize] = to_code as usize;
+            self.blocks[to as usize].as_mut().unwrap().backlinks.push((p.from, p.slot));
+        }
+
         /// Drop a block whose bytes changed, and the links to it.
         fn retire(&mut self, index: u32, stats: &mut DynStats) {
             let Some(block) = self.blocks[index as usize].take() else { return };
@@ -401,7 +461,16 @@ mod engine {
             }
             let mode = at.code32 as u8 | (single as u8) << 1 | (cpu.stack32() as u8) << 2;
             let key = Key { phys: at.phys_ip as u32, eip: at.eip, mode };
+            let pending = self.pending.take();
             let Some(mut index) = self.find(cpu, at, key, stats) else { return Run::Interpret };
+            if let Some(p) = pending
+                && !single
+                && (p.eip, p.mode, p.flushes) == (at.eip, mode, stats.flushes)
+            {
+                self.link_guarded(p, index, cpu, at);
+            }
+            // The CS base: blocks linked to each other run under one.
+            let cs_base = at.lin_ip.wrapping_sub(at.eip);
             // A block that stops before its first instruction (the timer
             // deadline, the CS limit, changed bytes) leaves the instruction
             // at EIP to the interpreter if nothing ran before it, else to
@@ -430,19 +499,25 @@ mod engine {
                 let data = unsafe { &*self.ctx.exit_data };
                 let exited = data.id;
                 let none_ran = cpu.bus.clock.icount == start;
+                let page = Page { lin: cs_base.wrapping_add(data.eips[0]) & !0xFFF, phys: data.phys as usize & !0xFFF };
                 return match kind {
-                    EXIT_NEXT => Run::Ran,
+                    EXIT_NEXT => Run::Ran { page },
                     EXIT_DEADLINE | EXIT_LIMIT => {
                         if kind == EXIT_DEADLINE {
                             stats.deadline += 1;
                         }
-                        if none_ran { Run::Interpret } else { Run::Ran }
+                        // A block linked to from another page stopped before
+                        // its first instruction: fetching it would have moved
+                        // the interpreter's window to its page without side
+                        // effects, as the link's guard found the page in the
+                        // TLB (or paging off) just now.
+                        if none_ran { Run::Interpret } else { Run::Ran { page } }
                     }
                     EXIT_STALE => {
                         stats.stale += 1;
                         self.retire(exited, stats);
                         if !none_ran {
-                            return Run::Ran;
+                            return Run::Ran { page };
                         }
                         if retried {
                             return Run::Interpret;
@@ -456,6 +531,20 @@ mod engine {
                             None => Run::Interpret,
                         }
                     }
+                    EXIT_UNLINKED if ix == RETURN_LINK || !data.in_page(cpu.eip()) => {
+                        // A block left for another page, or returned: the
+                        // execution loop finds the block there, as its fetch
+                        // may go through the page tables, and links it.
+                        self.pending = Some(Pending {
+                            from: exited,
+                            code: self.blocks[exited as usize].as_ref().unwrap().code,
+                            slot: ix as u8,
+                            eip: cpu.eip(),
+                            mode,
+                            flushes: stats.flushes,
+                        });
+                        Run::Ran { page }
+                    }
                     EXIT_UNLINKED => {
                         // A block left for a known EIP in its page: link it to
                         // the block there and go on in that one. Nothing a
@@ -465,7 +554,7 @@ mod engine {
                         let t_at = At { eip: target, phys_ip: data.phys_in_page(target) as usize, ..*at };
                         let t_key = Key { phys: t_at.phys_ip as u32, eip: target, mode };
                         let flushes = stats.flushes;
-                        let Some(t) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran };
+                        let Some(t) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran { page } };
                         // (Translating it may have made room by throwing all
                         // blocks away, the one to link from with them.)
                         if stats.flushes == flushes {
@@ -481,7 +570,7 @@ mod engine {
                     EXIT_FAULT | EXIT_GP0 => {
                         cpu.set_eip(data.eips[ix]);
                         let fault = if kind == EXIT_GP0 { Fault::gp(0) } else { self.ctx.fault };
-                        Run::Fault { fault, phys_ip: data.phys_of(ix) }
+                        Run::Fault { fault, phys_ip: data.phys_of(ix), page }
                     }
                     EXIT_SMC => {
                         stats.smc += 1;
@@ -489,7 +578,7 @@ mod engine {
                         // changed under it.
                         cpu.bus.clock.icount += 1;
                         self.retire(exited, stats);
-                        Run::Ran
+                        Run::Ran { page }
                     }
                     _ => unreachable!("exit code {:X}", ret),
                 };
