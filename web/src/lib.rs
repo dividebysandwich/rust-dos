@@ -308,6 +308,12 @@ impl Machine {
         self.shown_shader().name().to_string()
     }
 
+    /// How far the tube of the CRT look shown bends, across and down
+    /// (`u_curvature`, see `Shader::curvature`).
+    pub fn shader_curvature(&self) -> Vec<f32> {
+        self.shown_shader().curvature(self.settings.crt).to_vec()
+    }
+
     /// Whether the monitor is monochrome (`monochrome`): the picture comes
     /// in its phosphor's colour, and the CRT looks leave out their colour
     /// mask.
@@ -331,7 +337,7 @@ impl Machine {
     /// canvas, bent as the CRT shader bends the picture: x and y in screen
     /// pixels, outside the screen on the black around a curved one.
     pub fn frame_point(&self, u: f32, v: f32) -> Vec<f32> {
-        let (u, v) = self.shown_shader().warp(u, v);
+        let (u, v) = self.shown_shader().warp(self.settings.crt, u, v);
         vec![u * self.screen.width as f32, v * self.screen.height as f32]
     }
 

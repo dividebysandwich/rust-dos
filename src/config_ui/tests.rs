@@ -397,6 +397,25 @@ fn the_crt_shader_steps_through_the_looks() {
     assert_eq!(host.applied.last().unwrap().shader, Shader::Crt);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("CRT"));
 
+    // The CRT look has its curvature below it.
+    ui.row = ui.items().iter().position(|&i| i == Item::Shader).unwrap();
+    assert_eq!(ui.items()[ui.row + 1], Item::CrtCurvature);
+    keys(&mut ui, &mut host, &[Down]);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 30% ■■■·······"));
+    keys(&mut ui, &mut host, &[Right, Right]);
+    assert_eq!(host.applied.last().unwrap().crt.curvature, 50);
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace]);
+    ui.text("0", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().crt.curvature, 0);
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().crt.curvature, 30);
+    assert_eq!(Item::CrtCurvature.applies(), Applies::Now);
+    keys(&mut ui, &mut host, &[Up, Left]);
+    assert_eq!(host.applied.last().unwrap().shader, Shader::Aperture);
+    assert!(!ui.items().contains(&Item::CrtCurvature));
+    keys(&mut ui, &mut host, &[Right]);
+
     // Without shaders the window says so, and keeps the setting to save.
     host.no_shaders = true;
     keys(&mut ui, &mut host, &[Left]);

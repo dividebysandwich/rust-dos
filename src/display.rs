@@ -7,7 +7,7 @@ mod gl;
 
 use crate::config::{Filter, Settings};
 use crate::video::mono::Monochrome;
-use crate::video::shader::Shader;
+use crate::video::shader::{CrtSettings, Shader};
 use crate::video::{self, Frame};
 use gl::{GlScreen, NoGl};
 use sdl2::VideoSubsystem;
@@ -50,6 +50,7 @@ pub struct Display<'a> {
     aspect: bool,
     filter: Filter,
     shader: Shader,
+    crt: CrtSettings,
     /// What draws the picture, for the log.
     renderer: String,
     /// Why the shader the settings ask for isn't shown, if it isn't.
@@ -103,6 +104,7 @@ impl<'a> Display<'a> {
                     warning = Some(problem);
                 }
                 gl.set_color_mask(settings.monochrome == Monochrome::Off);
+                gl.set_crt(settings.crt);
                 let renderer = gl.renderer().to_string();
                 (Output::Gl(Box::new(gl)), renderer)
             }
@@ -139,6 +141,7 @@ impl<'a> Display<'a> {
             aspect: settings.aspect,
             filter: settings.filter,
             shader: settings.shader,
+            crt: settings.crt,
             renderer,
             warning,
         };
@@ -173,13 +176,15 @@ impl<'a> Display<'a> {
     }
 
     /// Take on the display settings: scale, fullscreen, aspect, filter,
-    /// shader and the monochrome tube's missing mask. A shader that can't
-    /// be shown is the error, once the rest is done; the setting stays, to
-    /// be saved.
+    /// shader, the CRT look's own and the monochrome tube's missing mask. A
+    /// shader that can't be shown is the error, once the rest is done; the
+    /// setting stays, to be saved.
     pub fn apply(&mut self, settings: &Settings) -> Result<(), String> {
         let mut problem = None;
+        self.crt = settings.crt;
         if let Output::Gl(gl) = &mut self.out {
             gl.set_color_mask(settings.monochrome == Monochrome::Off);
+            gl.set_crt(settings.crt);
         }
         if (settings.shader, settings.filter) != (self.shader, self.filter) {
             let new_shader = settings.shader != self.shader;
@@ -275,7 +280,8 @@ impl<'a> Display<'a> {
         match &self.out {
             Output::Gl(gl) => {
                 let window = gl.window();
-                window_to_frame((x, y), window.size(), window.drawable_size(), display, self.frame, gl.active())
+                let look = (gl.active(), self.crt);
+                window_to_frame((x, y), window.size(), window.drawable_size(), display, self.frame, look)
             }
             Output::Sdl { .. } => {
                 (logical_to_frame(x, display.0, self.frame.0), logical_to_frame(y, display.1, self.frame.1))
@@ -306,16 +312,16 @@ fn letterbox(outer: Size, inner: Size) -> (u32, u32, u32, u32) {
 type Size = (u32, u32);
 
 /// A mouse position in window coordinates as the frame pixel under it,
-/// through the letterbox and the shader's curvature: in a `window` whose
-/// drawable has `drawable` pixels (more on a high-DPI screen), the `frame`
-/// shown at `display` proportions.
+/// through the letterbox and the curvature of the shader with its CRT
+/// settings: in a `window` whose drawable has `drawable` pixels (more on a
+/// high-DPI screen), the `frame` shown at `display` proportions.
 fn window_to_frame(
     (x, y): (i32, i32),
     window: Size,
     drawable: Size,
     display: Size,
     frame: Size,
-    shader: Shader,
+    (shader, crt): (Shader, CrtSettings),
 ) -> (i32, i32) {
     let (vx, vy, vw, vh) = letterbox(drawable, display);
     // The middle of the window's pixel, in the drawable's.
@@ -323,7 +329,7 @@ fn window_to_frame(
     let py = (y as f32 + 0.5) * drawable.1 as f32 / window.1.max(1) as f32;
     let u = (px - vx as f32) / vw.max(1) as f32;
     let v = (py - vy as f32) / vh.max(1) as f32;
-    let (u, v) = shader.warp(u, v);
+    let (u, v) = shader.warp(crt, u, v);
     ((u * frame.0 as f32).floor() as i32, (v * frame.1 as f32).floor() as i32)
 }
 
@@ -430,7 +436,7 @@ mod tests {
     #[test]
     fn window_positions_map_to_frame_pixels() {
         let at = |pos, (window, drawable, display, frame), shader| {
-            window_to_frame(pos, window, drawable, display, frame, shader)
+            window_to_frame(pos, window, drawable, display, frame, (shader, CrtSettings::default()))
         };
         // A 640x400 frame at 2x, as SDL's renderer maps it.
         let twice = ((1280, 800), (1280, 800), (640, 400), (640, 400));
@@ -449,6 +455,9 @@ mod tests {
         assert_eq!(at((639, 399), twice, Shader::Crt), (319, 199));
         let (x, y) = at((0, 0), twice, Shader::Crt);
         assert!(x < 0 && y < 0);
+        // A flat CRT only has the overscan.
+        let flat = window_to_frame((0, 0), twice.0, twice.1, twice.2, twice.3, (Shader::Crt, CrtSettings { curvature: 0 }));
+        assert!(flat.0 > x && flat.0 < 0 && flat.1 > y && flat.1 < 0, "{:?}", flat);
         assert_eq!(at((0, 0), twice, Shader::Aperture), (0, 0));
     }
 }

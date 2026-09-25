@@ -31,6 +31,8 @@
 # The looks need OpenGL 3 and show best at scale 2 or more, or fullscreen.
 # Screenshots and recordings stay without them.
 #shader=none
+# How far the crt look's tube bends, in percent: 0 is flat, 100 the most.
+#crt_curvature=30
 # A monochrome monitor: off (colour, the default), white, amber or green.
 # The picture shows in the phosphor's colour, as bright as its colours
 # are, and the CRT shaders leave out their colour mask. On a VGA or EGA

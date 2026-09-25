@@ -31,6 +31,7 @@ use crate::mount::{MountSpec, contract_home, expand_host_path};
 use crate::sb::SbModel;
 use crate::timer::CpuSpeed;
 use crate::video::Frame;
+use crate::video::shader::{CrtSettings, MAX_AMOUNT, parse_amount};
 use std::path::{Path, PathBuf};
 
 /// A key the window acts on.
@@ -166,7 +167,9 @@ impl Page {
         use Item::*;
         match self {
             Page::Drives | Page::Games | Page::Cheats | Page::Stats => &[],
-            Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome, Composite, CompositeEra],
+            Page::Display => {
+                &[Scale, Fullscreen, Aspect, Filter, Shader, CrtCurvature, Monochrome, Composite, CompositeEra]
+            }
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, CaptureDir,
@@ -240,6 +243,8 @@ enum Item {
     Aspect,
     Filter,
     Shader,
+    /// How far the CRT look's tube bends, shown with that look.
+    CrtCurvature,
     Monochrome,
     /// The CGA's composite monitor, and which CGA makes the signal.
     Composite,
@@ -373,6 +378,7 @@ impl Item {
             Aspect => "4:3 aspect correction",
             Filter => "Scaling filter",
             Shader => "CRT shader",
+            CrtCurvature => "  Curvature",
             Monochrome => "Monochrome monitor",
             Composite => "CGA composite colour",
             CompositeEra => "  CGA revision",
@@ -431,10 +437,11 @@ impl Item {
         }
     }
 
-    /// Whether the setting means anything with the settings `s`: the
-    /// effects' mixes while they are on.
+    /// Whether the setting means anything with the settings `s`: the CRT
+    /// look's own with that look, the effects' mixes while they are on.
     fn shown(self, s: &Settings) -> bool {
         match self {
+            Item::CrtCurvature => s.shader == crate::video::shader::Shader::Crt,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             _ => true,
@@ -444,7 +451,9 @@ impl Item {
     fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Filter | Shader | Composite | CompositeEra | Cycles | Core => Applies::Now,
+            Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | Composite | CompositeEra | Cycles | Core => {
+                Applies::Now
+            }
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
@@ -455,7 +464,7 @@ impl Item {
 
     fn input(self) -> Input {
         match self {
-            Item::Cycles | Item::Volume(_) | Item::Deadzone | Item::ReverbMix | Item::ChorusMix => {
+            Item::Cycles | Item::Volume(_) | Item::Deadzone | Item::ReverbMix | Item::ChorusMix | Item::CrtCurvature => {
                 Input::ChoiceOrText
             }
             Item::UltraDir | Item::CaptureDir => Input::Text,
@@ -477,6 +486,7 @@ impl Item {
             }
             .to_string(),
             Shader => s.shader.describe().to_string(),
+            CrtCurvature => percent_bar(s.crt.curvature, MAX_AMOUNT),
             Monochrome => s.monochrome.describe().to_string(),
             Composite => s.composite.mode.describe().to_string(),
             CompositeEra => s.composite.era.describe().to_string(),
@@ -569,6 +579,7 @@ impl Item {
             Aspect => s.aspect = !s.aspect,
             Filter => s.filter = cycle(&[crate::config::Filter::Nearest, crate::config::Filter::Linear], s.filter, dir),
             Shader => s.shader = cycle(&crate::video::shader::Shader::ALL, s.shader, dir),
+            CrtCurvature => s.crt.curvature = step_tens(s.crt.curvature, dir, MAX_AMOUNT),
             Monochrome => s.monochrome = cycle(&crate::video::mono::Monochrome::ALL, s.monochrome, dir),
             Composite => {
                 s.composite.mode = cycle(&crate::video::composite::CompositeMode::ALL, s.composite.mode, dir)
@@ -687,6 +698,7 @@ impl Item {
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),
             Item::Deadzone => s.joystick.deadzone.to_string(),
+            Item::CrtCurvature => s.crt.curvature.to_string(),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             _ => String::new(),
@@ -702,6 +714,7 @@ impl Item {
             Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),
             Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), dirs::home_dir().as_deref()),
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
+            Item::CrtCurvature => s.crt.curvature = parse_amount(text).ok_or("The curvature goes from 0 to 100%")?,
             Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
             _ => {}
@@ -728,6 +741,10 @@ impl Item {
             Item::Deadzone => {
                 let default = crate::joystick::JoystickSettings::default().deadzone;
                 std::mem::replace(&mut s.joystick.deadzone, default) != default
+            }
+            Item::CrtCurvature => {
+                let default = CrtSettings::default().curvature;
+                std::mem::replace(&mut s.crt.curvature, default) != default
             }
             Item::ReverbMix => std::mem::replace(&mut s.mixer.reverb_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::ChorusMix => std::mem::replace(&mut s.mixer.chorus_mix, DEFAULT_MIX) != DEFAULT_MIX,

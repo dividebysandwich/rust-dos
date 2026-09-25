@@ -21,7 +21,7 @@ use crate::timer::CpuSpeed;
 use crate::video::adapter::{Adapter, VideoSetup};
 use crate::video::composite::{CompositeEra, CompositeMode, CompositeSettings};
 use crate::video::mono::Monochrome;
-use crate::video::shader::Shader;
+use crate::video::shader::{CrtSettings, Shader};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -90,8 +90,10 @@ pub struct Config {
     pub aspect: Option<bool>,
     /// How the picture is scaled to the window (`filter`).
     pub filter: Option<Filter>,
-    /// The CRT look (`shader`).
+    /// The CRT look (`shader`), and how far its tube bends
+    /// (`crt_curvature`).
     pub shader: Option<Shader>,
+    pub crt_curvature: Option<u16>,
     /// A monochrome monitor's phosphor (`monochrome`).
     pub monochrome: Option<Monochrome>,
     /// The CGA's composite monitor (`composite`, `composite_era`).
@@ -535,6 +537,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(shader) => config.shader = Some(shader),
                             None => warn(format!("invalid shader '{}' (none, scanlines, aperture or crt)", value)),
                         },
+                        "crt_curvature" => match crate::video::shader::parse_amount(value) {
+                            Some(percent) => config.crt_curvature = Some(percent),
+                            None => warn(format!("invalid crt_curvature '{}' (0 to 100)", value)),
+                        },
                         "capture_dir" => {
                             let value = value.trim_matches('"');
                             config.capture_dir = Some(match (value.strip_prefix("~/"), home) {
@@ -780,6 +786,8 @@ pub struct Settings {
     pub aspect: bool,
     pub filter: Filter,
     pub shader: Shader,
+    /// The CRT look's own settings.
+    pub crt: CrtSettings,
     pub monochrome: Monochrome,
     /// The CGA's composite monitor.
     pub composite: CompositeSettings,
@@ -810,6 +818,7 @@ impl Default for Settings {
             aspect: false,
             filter: Filter::Nearest,
             shader: Shader::None,
+            crt: CrtSettings::default(),
             monochrome: Monochrome::Off,
             composite: CompositeSettings::default(),
             machine: Adapter::Svga,
@@ -848,6 +857,7 @@ impl Settings {
             aspect: config.aspect.unwrap_or(default.aspect),
             filter: config.filter.unwrap_or(default.filter),
             shader: config.shader.unwrap_or(default.shader),
+            crt: CrtSettings { curvature: config.crt_curvature.unwrap_or(default.crt.curvature) },
             monochrome: config.monochrome.unwrap_or(default.monochrome),
             composite: CompositeSettings {
                 mode: config.composite.unwrap_or(default.composite.mode),
@@ -884,6 +894,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "aspect", yes_no(settings.aspect)),
         (Emulator, "filter", Some(settings.filter.name().to_string())),
         (Emulator, "shader", Some(settings.shader.name().to_string())),
+        (Emulator, "crt_curvature", Some(settings.crt.curvature.to_string())),
         (Emulator, "monochrome", Some(settings.monochrome.name().to_string())),
         (Emulator, "composite", Some(settings.composite.mode.name().to_string())),
         (Emulator, "composite_era", Some(settings.composite.era.name().to_string())),
@@ -1581,14 +1592,15 @@ mod tests {
 
     #[test]
     fn display_settings() {
-        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=CRT\nmonochrome=Amber\n";
+        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=CRT\nmonochrome=Amber\ncrt_curvature=0\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(false), Some(Filter::Linear)));
         assert_eq!((config.shader, config.monochrome), (Some(Shader::Crt), Some(Monochrome::Amber)));
-        let text = "[emulator]\nfullscreen=maybe\nfilter=blur\nshader=bent\nmonochrome=blue\n";
+        assert_eq!(Settings::from_config(&config).crt, CrtSettings { curvature: 0 });
+        let text = "[emulator]\nfullscreen=maybe\nfilter=blur\nshader=bent\nmonochrome=blue\ncrt_curvature=200\n";
         let config = parse(text, Path::new("/cfg"), None);
-        assert_eq!(config.warnings.len(), 4, "{:?}", config.warnings);
+        assert_eq!(config.warnings.len(), 5, "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings::default());
     }
 
@@ -1684,6 +1696,7 @@ mod tests {
             aspect: true,
             filter: Filter::Linear,
             shader: Shader::Crt,
+            crt: CrtSettings { curvature: 70 },
             monochrome: Monochrome::Green,
             composite: CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New },
             machine: Adapter::Vga,

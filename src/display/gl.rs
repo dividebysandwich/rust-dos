@@ -2,7 +2,7 @@
 
 use crate::config::Filter;
 use crate::video::Frame;
-use crate::video::shader::{self, Glsl, Shader};
+use crate::video::shader::{self, CrtSettings, Glsl, Shader};
 use glow::HasContext;
 use sdl2::VideoSubsystem;
 use sdl2::video::{GLContext, GLProfile, SwapInterval, Window};
@@ -21,6 +21,7 @@ struct Program {
     source: Option<glow::UniformLocation>,
     output: Option<glow::UniformLocation>,
     mask: Option<glow::UniformLocation>,
+    curvature: Option<glow::UniformLocation>,
 }
 
 // Every `unsafe` below is a call into OpenGL, whose context `open` makes
@@ -44,6 +45,8 @@ pub struct GlScreen {
     /// 1 for a colour tube's mask in front of the CRT looks, 0 for a
     /// monochrome tube's none (`u_mask`).
     mask: f32,
+    /// The CRT look's own settings.
+    crt: CrtSettings,
     renderer: String,
 }
 
@@ -134,6 +137,7 @@ impl GlScreen {
             programs: HashMap::from([(Shader::None, Ok(plain))]),
             active: Shader::None,
             mask: 1.0,
+            crt: CrtSettings::default(),
             renderer,
         })
     }
@@ -191,6 +195,11 @@ impl GlScreen {
         self.mask = if on { 1.0 } else { 0.0 };
     }
 
+    /// Show the CRT look with `crt`.
+    pub fn set_crt(&mut self, crt: CrtSettings) {
+        self.crt = crt;
+    }
+
     /// Show `frame`, letterboxed at `display` proportions.
     pub fn present(&mut self, frame: &Frame, display: (u32, u32)) {
         let gl = &self.gl;
@@ -236,6 +245,8 @@ impl GlScreen {
                 gl.uniform_2_f32(program.source.as_ref(), frame.width as f32, frame.height as f32);
                 gl.uniform_2_f32(program.output.as_ref(), w as f32, h as f32);
                 gl.uniform_1_f32(program.mask.as_ref(), self.mask);
+                let [cx, cy] = self.active.curvature(self.crt);
+                gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
                 gl.bind_vertex_array(Some(self.vao));
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
@@ -293,6 +304,7 @@ fn compile(gl: &glow::Context, glsl: Glsl, shader: Shader) -> Result<Program, St
             source: gl.get_uniform_location(program, "u_source"),
             output: gl.get_uniform_location(program, "u_output"),
             mask: gl.get_uniform_location(program, "u_mask"),
+            curvature: gl.get_uniform_location(program, "u_curvature"),
         })
     }
 }

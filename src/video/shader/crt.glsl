@@ -1,12 +1,11 @@
 // The CRT looks. Before this come the look's #defines (see shader.rs):
 //   MASK           0 none, 1 aperture grille, 2 slot mask
-//   CURVED         1 for a curved tube with rounded corners, else 0
+//   CURVED         1 for a tube that bends and has rounded corners, else 0
 //   BEAM_MIN/MAX   the beam's width (sigma, in scanlines) at black and white
 //   EDGE           how wide the step between two pixels is, in frame pixels
 //   MASK_STRENGTH  how much of the light the mask takes, 0 to 1
 //   SLOT_GAP       the light left in the gaps of the slot mask
 //   GLOW           how much light spreads around bright parts
-//   CURVATURE      how far the tube bends, across and down
 //   OVERSCAN       how much of the picture the bezel covers
 //   CORNER         the corners' radius, in picture heights
 //   VIGNETTE       how much darker the edges are
@@ -20,6 +19,8 @@ uniform vec2 u_source;
 uniform vec2 u_output;
 // 1 for a colour tube's mask, 0 for a monochrome tube, which has none.
 uniform float u_mask;
+// How far the tube bends, across and down, with CURVED.
+uniform vec2 u_curvature;
 
 in vec2 v_uv;
 out vec4 o_color;
@@ -137,7 +138,7 @@ void main() {
     // Where the curved glass shows the picture (Shader::warp in shader.rs
     // is the same), and the tube's rounded edge, smoothed over a pixel.
     vec2 c = (v_uv * 2.0 - 1.0) * OVERSCAN;
-    c *= 1.0 + CURVATURE * c.yx * c.yx;
+    c *= 1.0 + u_curvature * c.yx * c.yx;
     vec2 t = c * 0.5 + 0.5;
     vec2 q = (abs(t - 0.5) - 0.5) * vec2(u_output.x / u_output.y, 1.0) + CORNER;
     float edge = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - CORNER;

@@ -2,6 +2,33 @@
 //! window's OpenGL and the browser's WebGL 2 draw them with, and the tube's
 //! curvature, which mouse positions have to go through too.
 
+/// The CRT look's own settings, in percent: `crt_curvature` in
+/// `[emulator]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CrtSettings {
+    /// How far the tube bends, from 0 (flat) to `MAX_AMOUNT`.
+    pub curvature: u16,
+}
+
+impl Default for CrtSettings {
+    fn default() -> Self {
+        Self { curvature: 30 }
+    }
+}
+
+/// The most of a CRT setting, in percent.
+pub const MAX_AMOUNT: u16 = 100;
+
+/// A CRT setting as written: a number of percent, with or without the %.
+pub fn parse_amount(value: &str) -> Option<u16> {
+    let number = value.trim().trim_end_matches('%').trim_end();
+    number.parse::<u16>().ok().filter(|&percent| percent <= MAX_AMOUNT)
+}
+
+/// How far the CRT's tube bends at the most, across and down: a quarter
+/// more down, as the picture is a quarter wider than high.
+const MAX_CURVATURE: [f32; 2] = [0.1, 0.4 / 3.0];
+
 /// How the picture is shown: as it is, or through a CRT look.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Shader {
@@ -45,15 +72,29 @@ impl Shader {
     }
 
     /// Where the picture shows the point `(u, v)` of the frame: 0 to 1
-    /// across and down it, the same bend as the shader's. Points on the
-    /// black around a curved picture come out below 0 or above 1.
-    pub fn warp(self, u: f32, v: f32) -> (f32, f32) {
-        let Some(look) = self.look().filter(Look::curved) else {
+    /// across and down it, the same bend as the shader's with `crt`.
+    /// Points on the black around a curved picture come out below 0 or
+    /// above 1.
+    pub fn warp(self, crt: CrtSettings, u: f32, v: f32) -> (f32, f32) {
+        let Some(look) = self.look().filter(|look| look.curved) else {
             return (u, v);
         };
+        let [cx, cy] = self.curvature(crt);
         let (x, y) = ((u * 2.0 - 1.0) * look.overscan, (v * 2.0 - 1.0) * look.overscan);
-        let (x, y) = (x * (1.0 + look.curvature[0] * y * y), y * (1.0 + look.curvature[1] * x * x));
+        let (x, y) = (x * (1.0 + cx * y * y), y * (1.0 + cy * x * x));
         (x * 0.5 + 0.5, y * 0.5 + 0.5)
+    }
+
+    /// How far the tube bends across and down with `crt` (`u_curvature`):
+    /// only the CRT's does.
+    pub fn curvature(self, crt: CrtSettings) -> [f32; 2] {
+        match self {
+            Shader::Crt => {
+                let amount = crt.curvature.min(MAX_AMOUNT) as f32 / MAX_AMOUNT as f32;
+                MAX_CURVATURE.map(|most| most * amount)
+            }
+            _ => [0.0, 0.0],
+        }
     }
 
     fn look(self) -> Option<Look> {
@@ -64,7 +105,7 @@ impl Shader {
             mask_strength: 0.0,
             slot_gap: 1.0,
             glow: 0.04,
-            curvature: [0.0, 0.0],
+            curved: false,
             overscan: 1.0,
             corner: 0.0,
             vignette: 0.0,
@@ -87,7 +128,7 @@ impl Shader {
                 mask_strength: 0.35,
                 slot_gap: 0.5,
                 glow: 0.08,
-                curvature: [0.03, 0.04],
+                curved: true,
                 overscan: 1.02,
                 corner: 0.03,
                 vignette: 0.15,
@@ -104,8 +145,9 @@ enum Mask {
     Slots = 2,
 }
 
-/// A CRT look, as the #defines crt.glsl is built with. The curvature is
-/// here once for the shader and `Shader::warp`.
+/// A CRT look, as the #defines crt.glsl is built with. The overscan is
+/// here once for the shader and `Shader::warp`, and how far the tube bends
+/// is a uniform (`Shader::curvature`).
 #[derive(Clone, Copy, Debug)]
 struct Look {
     mask: Mask,
@@ -115,30 +157,26 @@ struct Look {
     mask_strength: f32,
     slot_gap: f32,
     glow: f32,
-    curvature: [f32; 2],
+    /// A tube that bends as `u_curvature` says, with rounded corners.
+    curved: bool,
     overscan: f32,
     corner: f32,
     vignette: f32,
 }
 
 impl Look {
-    fn curved(&self) -> bool {
-        self.curvature != [0.0, 0.0] || self.overscan != 1.0
-    }
-
     /// The look as GLSL. `{:?}` writes a float so that it reads back as
     /// the same float, with a decimal point.
     fn defines(&self) -> String {
         let defines = [
             ("MASK", format!("{}", self.mask as u8)),
-            ("CURVED", format!("{}", self.curved() as u8)),
+            ("CURVED", format!("{}", self.curved as u8)),
             ("BEAM_MIN", format!("{:?}", self.beam[0])),
             ("BEAM_MAX", format!("{:?}", self.beam[1])),
             ("EDGE", format!("{:?}", self.edge)),
             ("MASK_STRENGTH", format!("{:?}", self.mask_strength)),
             ("SLOT_GAP", format!("{:?}", self.slot_gap)),
             ("GLOW", format!("{:?}", self.glow)),
-            ("CURVATURE", format!("vec2({:?}, {:?})", self.curvature[0], self.curvature[1])),
             ("OVERSCAN", format!("{:?}", self.overscan)),
             ("CORNER", format!("{:?}", self.corner)),
             ("VIGNETTE", format!("{:?}", self.vignette)),
@@ -186,9 +224,10 @@ const CRT: &str = include_str!("shader/crt.glsl");
 
 /// The vertex and fragment shader of a look. They take the frame as the
 /// texture `u_frame`; the CRT looks also take the frame's size in pixels
-/// as `u_source`, the picture's on the screen as `u_output` and whether
-/// the tube has a colour mask as `u_mask` (1 or 0, for a monochrome tube),
-/// and read a mipmap of the frame. The fragment shader writes `o_color`.
+/// as `u_source`, the picture's on the screen as `u_output`, whether the
+/// tube has a colour mask as `u_mask` (1 or 0, for a monochrome tube) and
+/// how far it bends as `u_curvature` (`Shader::curvature`), and read a
+/// mipmap of the frame. The fragment shader writes `o_color`.
 pub fn sources(shader: Shader, glsl: Glsl) -> (String, String) {
     let preamble = glsl.preamble();
     let fragment = match shader.look() {
@@ -222,14 +261,14 @@ mod tests {
     fn flat_looks_bend_nothing() {
         for shader in [Shader::None, Shader::Scanlines, Shader::Aperture] {
             for (u, v) in [(0.0, 0.0), (0.3, 0.7), (1.0, 1.0), (-0.2, 1.5)] {
-                assert_eq!(shader.warp(u, v), (u, v));
+                assert_eq!(shader.warp(CrtSettings::default(), u, v), (u, v));
             }
         }
     }
 
     #[test]
     fn the_curved_tube_bends_the_edges() {
-        let warp = |u, v| Shader::Crt.warp(u, v);
+        let warp = |u, v| Shader::Crt.warp(CrtSettings::default(), u, v);
         assert_eq!(warp(0.5, 0.5), (0.5, 0.5));
         // The corners are behind the bezel.
         let (u, v) = warp(0.0, 0.0);
@@ -243,6 +282,17 @@ mod tests {
         // Points further down stay further down.
         let rows: Vec<f32> = (0..=20).map(|i| warp(0.1, i as f32 / 20.0).1).collect();
         assert!(rows.windows(2).all(|w| w[0] < w[1]));
+
+        // The default is the bend the tube always had; more bends the
+        // corners further, none leaves only the overscan.
+        let [x, y] = Shader::Crt.curvature(CrtSettings::default());
+        assert!((x - 0.03).abs() < 1e-6 && (y - 0.04).abs() < 1e-6);
+        assert_eq!(Shader::Aperture.curvature(CrtSettings::default()), [0.0, 0.0]);
+        let corner = |curvature| Shader::Crt.warp(CrtSettings { curvature }, 0.0, 0.0).0;
+        assert!(corner(100) < corner(30) && corner(30) < corner(0));
+        assert_eq!(corner(0), 0.5 - 0.5 * 1.02);
+        assert_eq!(parse_amount(" 45% "), Some(45));
+        assert_eq!(parse_amount("101"), None);
     }
 
     #[test]
@@ -258,7 +308,7 @@ mod tests {
             }
         }
         let (_, curved) = sources(Shader::Crt, Glsl::Gl150);
-        assert!(curved.contains("#define CURVATURE vec2(0.03, 0.04)\n"));
+        assert!(curved.contains("uniform vec2 u_curvature;") && curved.contains("u_curvature * c.yx * c.yx"));
         assert!(curved.contains("#define CURVED 1\n") && curved.contains("#define MASK 2\n"));
         assert!(curved.contains("uniform float u_mask;") && curved.contains("MASK_STRENGTH * u_mask"));
         let (_, flat) = sources(Shader::Scanlines, Glsl::Gl150);

@@ -1127,7 +1127,7 @@ impl MainHost<'_, '_> {
 impl Host for MainHost<'_, '_> {
     fn apply(&mut self, new: &Settings) -> Result<Option<String>, String> {
         let old = std::mem::replace(self.settings, new.clone());
-        let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader, s.monochrome);
+        let shown = |s: &Settings| (s.scale, s.fullscreen, s.aspect, s.filter, s.shader, s.crt, s.monochrome);
         if shown(new) != shown(&old) {
             self.display.apply(new)?;
         }

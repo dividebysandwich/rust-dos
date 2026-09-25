@@ -405,7 +405,9 @@ picture as a monitor of the time would have:
 * `aperture`: a flat aperture grille monitor, with red, green and blue
   phosphor stripes over the scanlines.
 * `crt`: a curved tube with a shadow mask, rounded corners and darker
-  edges. The mouse follows the curve.
+  edges. The mouse follows the curve. `crt_curvature` sets how far it
+  bends, in percent: `0` is flat, `100` the most, `30` the default; the
+  Display page has it below the shader while the CRT look is chosen.
 
 With `monochrome`, the aperture grille and the shadow mask are left out, as
 a monochrome tube has a single phosphor; the scanlines, glow and curve stay.
