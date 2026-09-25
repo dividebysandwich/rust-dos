@@ -371,3 +371,59 @@ fn cd_dot_dot_and_type_stop_at_the_end_of_file_mark() {
     run(&mut cpu, "CD\\SUB");
     assert_eq!(run(&mut cpu, "CD"), "C:\\SUB");
 }
+
+#[test]
+fn copy_copies_files_to_names_and_directories() {
+    let base = scratch("copy", &["c/sub", "c/dest"]);
+    fs::write(base.join("c/A.TXT"), b"alpha").unwrap();
+    fs::write(base.join("c/B.TXT"), b"beta\x1Ajunk").unwrap();
+    fs::write(base.join("c/LONG.TXT"), b"a much longer file than alpha").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+
+    assert_eq!(run(&mut cpu, "COPY A.TXT NEW.TXT"), "        1 file(s) copied");
+    assert_eq!(fs::read(base.join("c/NEW.TXT")).unwrap(), b"alpha");
+    // Over a longer file only the source's bytes are left.
+    run(&mut cpu, "COPY A.TXT LONG.TXT");
+    assert_eq!(fs::read(base.join("c/LONG.TXT")).unwrap(), b"alpha");
+    // Into a directory, with wildcards, keeping the date and time.
+    let when = fs::metadata(base.join("c/A.TXT")).unwrap().modified().unwrap();
+    assert_eq!(run(&mut cpu, "COPY *.TXT DEST"), "A.TXT\nB.TXT\nLONG.TXT\nNEW.TXT\n        4 file(s) copied");
+    assert_eq!(fs::read(base.join("c/dest/B.TXT")).unwrap(), b"beta\x1Ajunk", "binary by default");
+    let copied = fs::metadata(base.join("c/dest/A.TXT")).unwrap().modified().unwrap();
+    assert!(copied.duration_since(when).unwrap_or_else(|e| e.duration()).as_secs() < 3);
+    // A destination with wildcards takes the names.
+    run(&mut cpu, "COPY DEST\\*.TXT SUB\\*.BAK");
+    assert_eq!(fs::read(base.join("c/sub/A.BAK")).unwrap(), b"alpha");
+    // Joining, as text up to the end of file mark.
+    assert_eq!(run(&mut cpu, "COPY A.TXT+B.TXT AB.TXT"), "A.TXT\nB.TXT\n        1 file(s) copied");
+    assert_eq!(fs::read(base.join("c/AB.TXT")).unwrap(), b"alphabeta");
+    assert_eq!(run(&mut cpu, "COPY A.TXT A.TXT"), "File cannot be copied onto itself\n        0 file(s) copied");
+    assert_eq!(run(&mut cpu, "COPY NONE.TXT X.TXT"), "File not found - NONE.TXT\n        0 file(s) copied");
+    assert_eq!(run(&mut cpu, "COPY A.TXT CON"), "alpha        1 file(s) copied");
+}
+
+#[test]
+fn del_ren_md_rd_and_vol() {
+    let base = scratch("files", &["c"]);
+    for name in ["ONE.TXT", "TWO.TXT", "KEEP.DAT"] {
+        fs::write(base.join("c").join(name), name).unwrap();
+    }
+    let mut cpu = Cpu::new(base.join("c"));
+    run(&mut cpu, "REN *.TXT *.BAK");
+    assert!(base.join("c/ONE.BAK").is_file() && base.join("c/TWO.BAK").is_file());
+    assert_eq!(run(&mut cpu, "REN NONE.X Y.X"), "Duplicate file name or file not found");
+    run(&mut cpu, "DEL *.BAK");
+    assert!(!base.join("c/ONE.BAK").exists() && base.join("c/KEEP.DAT").exists());
+    assert_eq!(run(&mut cpu, "ERASE *.BAK"), "File not found");
+
+    run(&mut cpu, "MD GAMES");
+    assert!(base.join("c/GAMES").is_dir());
+    run(&mut cpu, "COPY KEEP.DAT GAMES");
+    assert_eq!(run(&mut cpu, "RD GAMES"), "Invalid path, not directory,\nor directory not empty");
+    run(&mut cpu, "DEL GAMES");
+    assert_eq!(run(&mut cpu, "RMDIR GAMES"), "");
+    assert!(!base.join("c/GAMES").exists());
+
+    assert_eq!(run(&mut cpu, "VOL"), " Volume in drive C is RUSTDOS\n Volume Serial Number is 1234-0002");
+    assert_eq!(run(&mut cpu, "VOL Q:"), "Invalid drive specification");
+}

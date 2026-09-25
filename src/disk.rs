@@ -1493,6 +1493,33 @@ impl DiskController {
         Err(0x05)
     }
 
+    /// Write a whole file at once, as COPY does: `data` at `dos_path`,
+    /// replacing a file that is there, dated `stamp` (the packed DOS time
+    /// and date) or now.
+    pub fn write_whole_file(&self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+        if let Some((drive, volume, parts)) = self.locate_fat(dos_path) {
+            self.check_writable(drive)?;
+            let (time, date) = stamp.unwrap_or_else(fat::dos_now);
+            return volume.put_file(&refs(&parts), data, time, date);
+        }
+        if self.locate_in_memory(dos_path).is_some() {
+            return Err(0x05);
+        }
+        let (drive, path) = self.locate(dos_path).ok_or(0x03)?;
+        self.check_writable(drive)?;
+        if path.is_dir() {
+            return Err(0x05);
+        }
+        if !path.parent().is_some_and(Path::is_dir) {
+            return Err(0x03);
+        }
+        fs::write(&path, data).map_err(|_| 0x05)?;
+        if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
+            let _ = fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(when));
+        }
+        Ok(())
+    }
+
     /// INT 21h, AH=41h: delete a file.
     pub fn delete_file(&self, filename: &str) -> Result<(), u8> {
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
@@ -2243,6 +2270,15 @@ impl DiskController {
 
         Ok(valid_entries)
     }
+}
+
+/// The local time a packed DOS time and date stand for.
+fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
+    use chrono::TimeZone;
+    let (year, month, day) = (1980 + (date >> 9) as i32, (date >> 5 & 0x0F) as u32, (date & 0x1F) as u32);
+    let (hour, minute, second) = ((time >> 11) as u32, (time >> 5 & 0x3F) as u32, (time & 0x1F) as u32 * 2);
+    let local = chrono::Local.with_ymd_and_hms(year, month, day, hour, minute, second).earliest()?;
+    Some(local.into())
 }
 
 #[cfg(test)]

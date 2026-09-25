@@ -616,3 +616,33 @@ fn images_from_mkfs_and_checked_by_fsck() {
     assert_eq!(read_file(&mut cpu, "A:\\ONE\\F4.DAT"), pattern(1400, 4));
     assert_eq!(read_file(&mut cpu, "A:\\ONE\\TWO\\BIG.BIN").len(), 300_000);
 }
+
+#[test]
+fn shell_file_commands_work_on_disk_images() {
+    use rust_dos::command::{CommandDispatcher, split_command};
+    let dir = fatimage::scratch("shell_files");
+    let image = floppy_with_files(&dir);
+    let mut cpu = cpu(&dir);
+    fs::write(dir.join("c/SAVE.DAT"), pattern(5000, 3)).unwrap();
+    mount(&mut cpu, DRIVE_A, &image);
+    let run = |cpu: &mut Cpu, line: &str| {
+        let (command, args) = split_command(line);
+        assert!(CommandDispatcher::new().dispatch(cpu, command, args));
+    };
+
+    run(&mut cpu, "COPY SAVE.DAT A:\\");
+    assert_eq!(read_file(&mut cpu, "A:\\SAVE.DAT"), pattern(5000, 3));
+    // A shorter file over it leaves only its bytes.
+    run(&mut cpu, "COPY A:\\README.TXT A:\\SAVE.DAT");
+    assert_eq!(read_file(&mut cpu, "A:\\SAVE.DAT"), b"hello floppy");
+    run(&mut cpu, "MD A:\\NEW");
+    run(&mut cpu, "COPY A:\\GAMES\\*.* A:\\NEW");
+    assert_eq!(read_file(&mut cpu, "A:\\NEW\\DOOM.EXE"), pattern(3000, 1));
+    run(&mut cpu, "REN A:\\NEW\\DOOM.EXE DOOM.BAK");
+    assert_eq!(read_file(&mut cpu, "A:\\NEW\\DOOM.BAK"), pattern(3000, 1));
+    run(&mut cpu, "DEL A:\\NEW\\*.*");
+    run(&mut cpu, "RD A:\\NEW");
+    assert!(!cpu.bus.disk.exists("A:\\NEW"));
+    run(&mut cpu, "COPY A:\\README.TXT C:\\README.TXT");
+    assert_eq!(fs::read(dir.join("c/README.TXT")).unwrap(), b"hello floppy");
+}

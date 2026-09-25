@@ -554,6 +554,27 @@ files.
   leaves the keys out, `/S` tells upper from lower case, and `/T` takes the
   key `c` after `nn` seconds without one.
 
+### Commands
+
+Besides running programs and batch files, the prompt has these commands:
+
+| Command | What it does |
+|---|---|
+| `DIR [path]`, `LS [/A] [path]` | list files, `LS` in wide columns |
+| `CD [path]`, `D:` | change the directory, or the drive |
+| `TYPE file` | show a text file |
+| `COPY source[+source...] [destination] [/A\|/B]` | copy files to a directory or other names (wildcards fill in the destination's), or join them into one; `/A` reads them as text up to their end-of-file mark (the default when joining), `/B` as binary. Plain copies keep their date and time, and `CON` as the destination shows them. |
+| `DEL file`, `ERASE file` | delete files, all of a directory's when given one |
+| `REN old new`, `RENAME` | rename files, with wildcards (`REN *.TXT *.BAK`) |
+| `MD dir`, `MKDIR`, `RD dir`, `RMDIR` | make and remove directories |
+| `VOL [d:]` | a drive's label and serial number |
+| `CLS`, `VER`, `ECHO`, `SET`, `PATH`, `PROMPT` | as in DOS |
+| `MOUNT`, `IMGMOUNT` | see [Drives](#drives) |
+| `MIXER` | see [`[mixer]`](#configuration) |
+| `LOADHIGH` (`LH`) | load a program into upper memory |
+| `DOSCONFIG` | open the settings window |
+| `EXIT` | quit rust-dos |
+
 ### Prompt
 
 `PROMPT text` sets the prompt, `$P$G` (`C:\GAMES>`) without it. Its codes

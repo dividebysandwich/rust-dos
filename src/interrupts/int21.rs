@@ -15,7 +15,7 @@ const INDOS_FLAG: usize = 0xFF101;
 /// A RETF for the case map routine of the country information.
 const CASE_MAP_ROUTINE: usize = 0xFF0FF;
 /// Volume serial number of drive A:; each drive's is its number more.
-const VOLUME_SERIAL: u32 = 0x1234_0000;
+pub const VOLUME_SERIAL: u32 = 0x1234_0000;
 
 /// Return a result the DOS way: AX and CF clear, or the error code in AX
 /// and CF set.
