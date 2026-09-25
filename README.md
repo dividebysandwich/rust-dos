@@ -55,7 +55,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   `DEL`, `REN`, `MD`, `RD`, `DATE`, `TIME`, redirection, and a
   `COMMAND.COM` programs can shell out to
 * [Save states](#save-states): nine slots for each game (Ctrl+F1 saves,
-  Ctrl+F2 loads)
+  Ctrl+F2 loads), and rewind (holding Alt+F11)
 * Web based debugger UI
 * Runs in a web browser as WebAssembly, with C: kept in the browser's
   storage (see [Running in a browser](#running-in-a-browser))
@@ -199,6 +199,13 @@ D:
     characters of the keys, and dead keys put their accents on the next
     letter. Characters code page 437 doesn't have (€, ø) type nothing.
     `KEYB` at the prompt changes it too.
+  * `rewind=true` keeps the machine's states of the last minutes, a state
+    for every half second it runs, and holding **Alt+F11** goes back
+    through them. `rewind_memory` is the memory they may take in MB (256
+    by default; 16 to 4096): each state takes only what changed since the
+    one after it, so a game that changes little goes back a long way. The
+    states start over when a game starts or ends, the hardware changes or
+    a [save state](#save-states) is loaded. Off by default.
 * **`[sound]`:**
   * `sbtype` is the Sound Blaster: `sb16` (the default), `sbpro2`, `sb2` or
     `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's 16-bit
@@ -339,7 +346,8 @@ as you set them, and the Stats page, which shows it running. Ctrl+F12 or Esc clo
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
-  size, expanded and upper memory, the disk speeds and the joystick.
+  size, expanded and upper memory, the disk speeds, the joystick and
+  rewind.
 * **Sound:** everything in `[sound]`, and the disk noises.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays, and the filters,
@@ -667,6 +675,7 @@ is replaced on every start and stops growing at 64 MB.
 | Ctrl+F4 | Put the next disk in the drives mounted from lists of images |
 | Alt+Pause | Pause the machine, and resume it |
 | Alt+F12 (held) | Fast forward: the machine runs up to eight times as fast, without sound |
+| Alt+F11 (held) | Rewind: go back in time, half a second every third frame (with `rewind=true`) |
 | Ctrl+F11 | Slow the CPU down by a tenth (from `max`, from the speed it reached) |
 | Ctrl+Shift+F11 | Speed the CPU up by a tenth |
 | Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |

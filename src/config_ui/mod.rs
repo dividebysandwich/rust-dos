@@ -220,7 +220,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, KeyboardLayout, CaptureDir,
+                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir,
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -310,6 +310,9 @@ enum Item {
     Ems,
     Umb,
     KeyboardLayout,
+    /// Rewind (held Alt+F11) and the memory it takes.
+    Rewind,
+    RewindMemory,
     SbType,
     SbBase,
     SbIrq,
@@ -376,6 +379,7 @@ fn step_number(values: &[u32], current: u32, dir: isize) -> u32 {
 
 const CYCLES: [u32; 8] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, u32::MAX];
 const MEMSIZES: [u32; 6] = [2, 4, 8, 16, 32, 64];
+const REWIND_MEMORY: [u32; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 
 /// A percentage of up to `max` as a number and a bar of small squares, one
 /// for every 10%, which stay apart from the next row's:
@@ -442,6 +446,8 @@ impl Item {
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             KeyboardLayout => "Keyboard layout",
+            Rewind => "Rewind (Alt+F11)",
+            RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
             SbBase => "  Base port",
             SbIrq => "  IRQ",
@@ -486,6 +492,8 @@ impl Item {
             Item::MidiPort => host_midi(frontend),
             Item::CaptureDir => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
+            // A thread of its own packs rewind's states.
+            Item::Rewind | Item::RewindMemory => frontend.window,
             _ => true,
         }
     }
@@ -497,6 +505,7 @@ impl Item {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
+            Item::RewindMemory => s.rewind,
             _ => true,
         }
     }
@@ -507,7 +516,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | KeyboardLayout => Applies::Now,
+            Cycles | Core | KeyboardLayout | Rewind | RewindMemory => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
@@ -564,6 +573,8 @@ impl Item {
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
             KeyboardLayout => s.keyboard_layout.describe(),
+            Rewind => on_off(s.rewind),
+            RewindMemory => format!("{} MB", s.rewind_memory),
             SbType if !s.sound.sb_installed => "none".to_string(),
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
@@ -660,6 +671,8 @@ impl Item {
             Ems => s.ems = !s.ems,
             Umb => s.umb = !s.umb,
             KeyboardLayout => s.keyboard_layout = cycle(&crate::keylayout::LayoutSetting::all(), s.keyboard_layout, dir),
+            Rewind => s.rewind = !s.rewind,
+            RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory as u32, dir) as usize,
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
                 match cycle(&models, sound.sb_installed.then_some(sb.model), dir) {

@@ -292,6 +292,15 @@ fn main() -> Result<(), String> {
         .or_else(|| config::user_dir().map(|dir| dir.join("states")));
     let mut slot: u8 = 1;
     let mut state_loaded = false;
+    // Rewind (held Alt+F11): the states of the last minutes, which a thread
+    // packs, when the next is due (emulated and wall time), the rewinding
+    // going on (the emulated time it started at, and the frames since),
+    // and the game and hardware the states are of.
+    let rewinder = savestate::rewind::Rewinder::start(settings.rewind_memory << 20);
+    let mut rewind_memory = settings.rewind_memory;
+    let mut next_capture = (0u64, std::time::Instant::now());
+    let mut rewinding: Option<(u64, u32)> = None;
+    let mut rewind_of: (Option<String>, Hardware, bool) = (None, machine.clone(), settings.rewind);
     let (state_done, state_results) = std::sync::mpsc::channel::<Result<String, String>>();
     macro_rules! capture_mouse {
         ($on:expr) => {{
@@ -372,6 +381,10 @@ fn main() -> Result<(), String> {
                     if pacer.fast_forward() {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
                         cpu.bus.mixer.fast_forward = false;
+                        osd.clear_lasting();
+                    }
+                    if rewinding.take().is_some() {
+                        pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
                         osd.clear_lasting();
                     }
                 }
@@ -469,6 +482,22 @@ fn main() -> Result<(), String> {
                         new.cycles = settings.cycles.stepped(cpu.bus.clock.cycles_per_ms(), faster);
                         let _ = host!().apply(&new);
                         osd.show(speed_message(new.cycles));
+                        continue;
+                    }
+                    // Holding Alt+F11 goes back in time, a step every
+                    // third frame, until F11 comes up.
+                    if keycode == Keycode::F11 && alt && !ctrl {
+                        if !repeat && !paused && !ui.is_open() && rewinding.is_none() {
+                            if settings.rewind {
+                                release_input(&mut cpu, &mut held);
+                                let now = cpu.bus.clock.now_ns();
+                                rewinder.push(now, savestate::machine::save(&cpu));
+                                rewinding = Some((now, 0));
+                                osd.show_lasting("Rewind");
+                            } else {
+                                osd.show("Rewind is off: the settings window's Emulator page turns it on");
+                            }
+                        }
                         continue;
                     }
                     // Holding Alt+F12 runs the machine fast, as in DOSBox
@@ -608,6 +637,13 @@ fn main() -> Result<(), String> {
                         osd.clear_lasting();
                         continue;
                     }
+                    // The machine goes on from where rewinding got to.
+                    if keycode == Keycode::F11 && rewinding.take().is_some() {
+                        pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
+                        osd.clear_lasting();
+                        next_capture = (cpu.bus.clock.now_ns() + REWIND_INTERVAL_NS, std::time::Instant::now());
+                        continue;
+                    }
                     // Only keys the machine saw go down come up for it,
                     // not those of the settings window.
                     let Some((scan, extended)) = scancode.and_then(|scancode| held.remove(&scancode)) else {
@@ -743,6 +779,7 @@ fn main() -> Result<(), String> {
         // A save state loaded: the keys held go up, and a video recording
         // stops, as its time would jump.
         if std::mem::take(&mut state_loaded) {
+            rewinder.clear();
             release_input(&mut cpu, &mut held);
             dbg.release_keys(&mut cpu);
             if let Some(video) = video_recording.take() {
@@ -775,7 +812,7 @@ fn main() -> Result<(), String> {
         // counted in instructions (see timer.rs), so timer interrupts land on
         // the right instructions however the work is batched between frames.
         let batch_start = std::time::Instant::now();
-        let waiting = dbg.paused || ui.pauses_machine() || paused;
+        let waiting = dbg.paused || ui.pauses_machine() || paused || rewinding.is_some();
         // The values frozen on the Cheats page, as the program left them.
         cpu.bus.apply_freezes();
         // The controllers as they are now; at rest while the machine waits.
@@ -798,6 +835,37 @@ fn main() -> Result<(), String> {
         let dbg_hot = dbg.begin_batch(&cpu);
         exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
         dbg.end_batch(&cpu);
+
+        // Rewind: its states start over for another game or other
+        // hardware, and go when it is turned off; a state is taken every
+        // half second the machine runs, and while Alt+F11 is held, the
+        // machine goes a state back every third frame.
+        if rewind_of.0.as_deref() != game.as_ref().map(|g| g.id.as_str()) || rewind_of.1 != machine || rewind_of.2 != settings.rewind {
+            rewinder.clear();
+            rewind_of = (game.as_ref().map(|g| g.id.clone()), machine.clone(), settings.rewind);
+        }
+        if settings.rewind_memory != rewind_memory {
+            rewind_memory = settings.rewind_memory;
+            rewinder.set_budget(rewind_memory << 20);
+        }
+        let now_ns = cpu.bus.clock.now_ns();
+        if settings.rewind && !waiting && now_ns >= next_capture.0 && next_capture.1.elapsed() >= Duration::from_millis(250) {
+            rewinder.offer(now_ns, savestate::machine::save(&cpu));
+            next_capture = (now_ns + REWIND_INTERVAL_NS, std::time::Instant::now());
+        }
+        if let Some((started, frames)) = &mut rewinding {
+            *frames += 1;
+            if *frames % 3 == 1 {
+                let back = |at: u64| (started.saturating_sub(at)) as f64 / 1e9;
+                match rewinder.step_back() {
+                    Some((at, state)) => match savestate::machine::load(&mut cpu, &state) {
+                        Ok(()) => osd.show_lasting(format!("Rewind -{:.1} s", back(at))),
+                        Err(e) => osd.show_lasting(format!("Rewind: {}", e)),
+                    },
+                    None => osd.show_lasting(format!("Rewind -{:.1} s: as far back as it goes", back(cpu.bus.clock.now_ns()))),
+                }
+            }
+        }
 
         let exec_time = batch_start.elapsed();
         let stalled = cpu.bus.clock.stalled - batch_stalled;
@@ -986,6 +1054,9 @@ fn main() -> Result<(), String> {
 
     Ok(())
 }
+
+/// The emulated time between the states rewind takes.
+const REWIND_INTERVAL_NS: u64 = 500_000_000;
 
 /// What a slot's message says of the state in it: when it was saved,
 /// and in which program.

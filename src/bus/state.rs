@@ -134,10 +134,12 @@ impl Bus {
             save_device(umb, w);
             disk.save_state(w);
         });
+        // The Ultrasound's memory first, where it stays in place for
+        // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
+            save_device(gus, w);
             save_all!(w; opl, mpu, gus_line, tandy_sound);
             save_device(sb, w);
-            save_device(gus, w);
             save_device(lpt_dac, w);
             cdaudio.save_state(w);
         });
@@ -259,9 +261,9 @@ impl Bus {
         load_device(umb, "upper memory", &mut section)?;
         let lost = disk.load_state(&mut section)?;
         let mut section = r.section(b"SOUN", SOUND_VERSION)?;
+        load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
         load_device(sb, "Sound Blaster", &mut section)?;
-        load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
         Ok(lost)

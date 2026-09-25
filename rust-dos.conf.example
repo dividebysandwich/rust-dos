@@ -100,6 +100,13 @@
 # programs. true (the default) or false. A change takes effect at the DOS
 # prompt.
 #umb=true
+# Rewind: holding Alt+F11 goes back in time, half a second a step. It keeps
+# the machine's states of the last minutes, which take memory and a little
+# of the host's time: true or false (the default).
+#rewind=false
+# The memory rewind's states may take, in MB (16 to 4096); the oldest go
+# when they need more.
+#rewind_memory=256
 # How fast hard disks are, as DOSBox Staging has it:
 #   maximum  as fast as possible, no slowdown (the default)
 #   fast     a mid-1990s hard disk (~15 MB/s)

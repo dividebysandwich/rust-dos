@@ -310,7 +310,11 @@ fn a_loaded_machine_shows_the_same_picture() {
 /// A machine at the prompt with the default Sound Blaster 16 and
 /// Ultrasound, and the Tandy's sound chip.
 fn sound_machine() -> Cpu {
-    let mut cpu = Cpu::new(PathBuf::from("."));
+    sound_machine_in(Path::new("."))
+}
+
+fn sound_machine_in(dir: &Path) -> Cpu {
+    let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.bus.set_cycles_per_ms(1000);
     cpu.bus.configure_sound(Some(rust_dos::sb::SbConfig::default()), true);
     cpu.bus.configure_tandy_sound(rust_dos::sn76489::TandySound::On);
@@ -525,4 +529,35 @@ fn a_slot_brings_its_hardware_and_its_memory_size_must_match() {
 
     assert_eq!(slots::refusal(&header, 16), None);
     assert!(slots::refusal(&header, 8).is_some(), "a 16 MB state on an 8 MB machine");
+}
+
+#[test]
+fn rewind_goes_back_through_a_running_machine_in_small_steps() {
+    use rust_dos::savestate::rewind::History;
+    fix_time();
+    let dir = scratch("rewind", &[("DOTS.COM", &dots_program())]);
+    let mut cpu = sound_machine_in(&dir);
+    cpu.pending_command = Some("DOTS".to_string());
+    let mut history = History::new(usize::MAX);
+    let mut states = Vec::new();
+    for n in 0..8 {
+        for _ in 0..500 {
+            run_ms(&mut cpu);
+        }
+        let state = machine::save(&cpu);
+        history.push(n, state.clone());
+        states.push(state);
+    }
+    let whole = states[0].len();
+    let deltas = history.bytes() - whole;
+    // A few bytes changed each half second: the steps take next to nothing.
+    assert!(deltas < 7 * 1000, "7 steps take {} bytes, a state {}", deltas, whole);
+    for n in (0..7).rev() {
+        let (at, state) = history.step_back().unwrap();
+        assert_eq!(at, n as u64);
+        assert!(state == states[n].as_slice(), "step back to {}", n);
+    }
+    // A step back loads.
+    machine::load(&mut cpu, &states[3]).unwrap();
+    assert!(machine::save(&cpu) == states[3]);
 }

@@ -119,6 +119,10 @@ pub struct Config {
     pub umb: Option<bool>,
     /// The keyboard layout (`keyboard_layout`).
     pub keyboard_layout: Option<LayoutSetting>,
+    /// Rewind (`rewind`), and the memory its states may take in MB
+    /// (`rewind_memory`).
+    pub rewind: Option<bool>,
+    pub rewind_memory: Option<usize>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
     /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,
@@ -588,6 +592,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(core) => config.core = Some(core),
                             Err(e) => warn(e),
                         },
+                        "rewind" => match parse_bool(value) {
+                            Some(on) => config.rewind = Some(on),
+                            None => warn(format!("invalid rewind '{}' (true or false)", value)),
+                        },
+                        "rewind_memory" => match value.parse::<usize>() {
+                            Ok(mb) if (16..=4096).contains(&mb) => config.rewind_memory = Some(mb),
+                            _ => warn(format!("invalid rewind_memory '{}' (16 to 4096 MB)", value)),
+                        },
                         "keyboard_layout" => match LayoutSetting::parse(value) {
                             Some(layout) => config.keyboard_layout = Some(layout),
                             None => warn(format!("invalid keyboard_layout '{}' (auto or a KEYB code such as us, gr, fr)", value)),
@@ -816,6 +828,9 @@ pub struct Settings {
     /// Upper memory blocks.
     pub umb: bool,
     pub keyboard_layout: LayoutSetting,
+    /// Rewind with held Alt+F11, and the memory in MB its states may take.
+    pub rewind: bool,
+    pub rewind_memory: usize,
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
@@ -842,6 +857,8 @@ impl Default for Settings {
             ems: true,
             umb: true,
             keyboard_layout: LayoutSetting::Auto,
+            rewind: false,
+            rewind_memory: 256,
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
@@ -887,6 +904,8 @@ impl Settings {
             memsize: config.memsize.unwrap_or(default.memsize),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
+            rewind: config.rewind.unwrap_or(default.rewind),
+            rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
             sound: config.sound.clone(),
             disk: config.disk,
@@ -940,6 +959,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
+        (Emulator, "rewind", yes_no(settings.rewind)),
+        (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
         (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
         (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
@@ -1728,6 +1749,8 @@ mod tests {
             ems: false,
             umb: false,
             keyboard_layout: LayoutSetting::Named("gr"),
+            rewind: true,
+            rewind_memory: 512,
             sound,
             disk: DiskSettings {
                 hard_disk_speed: DiskSpeed::Medium,
