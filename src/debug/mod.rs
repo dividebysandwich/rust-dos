@@ -156,6 +156,28 @@ pub enum Cmd {
     },
     Unmount { drive: String },
     SwapImages,
+    /// Save the machine to a save state file, or load one, which the front
+    /// end does (`take_state_requests`).
+    SaveState { path: String },
+    LoadState { path: String },
+}
+
+/// A save state to save or load, which the front end carries out and
+/// answers (`done`).
+pub struct StateRequest {
+    pub load: bool,
+    pub path: PathBuf,
+    reply: oneshot::Sender<Reply>,
+}
+
+impl StateRequest {
+    /// Answer the request: what was saved or loaded, or why not.
+    pub fn done(self, result: Result<Value, String>) {
+        let _ = self.reply.send(match result {
+            Ok(value) => Reply::Json(value),
+            Err(e) => Reply::bad(e),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +479,8 @@ pub struct DebugHub {
     ui_pointer: (i32, i32),
     /// Ctrl+F12 came in: open or close the settings window.
     hotkey: bool,
+    /// Save states to save or load, for the front end.
+    state_requests: Vec<StateRequest>,
     /// Shift, Ctrl and Alt bits (as at 40:17h) the remote client holds.
     remote_mods: u8,
     /// Keys the remote client holds down on the machine.
@@ -537,6 +561,7 @@ impl DebugHub {
             ui_input: Vec::new(),
             ui_pointer: (0, 0),
             hotkey: false,
+            state_requests: Vec::new(),
             remote_mods: 0,
             remote_held: Vec::new(),
             frame_waiters: Vec::new(),
@@ -1007,10 +1032,30 @@ impl DebugHub {
         std::mem::take(&mut self.hotkey)
     }
 
+    /// The save states remote clients asked to save or load.
+    pub fn take_state_requests(&mut self) -> Vec<StateRequest> {
+        std::mem::take(&mut self.state_requests)
+    }
+
     // ----- request handling --------------------------------------------------
 
     fn handle(&mut self, cpu: &mut Cpu, req: Request) {
-        let reply = match req.cmd {
+        let cmd = match req.cmd {
+            Cmd::SaveState { path } | Cmd::LoadState { path } if path.is_empty() => {
+                let _ = req.reply.send(Reply::bad("a path is needed"));
+                return;
+            }
+            Cmd::SaveState { path } => {
+                self.state_requests.push(StateRequest { load: false, path: PathBuf::from(path), reply: req.reply });
+                return;
+            }
+            Cmd::LoadState { path } => {
+                self.state_requests.push(StateRequest { load: true, path: PathBuf::from(path), reply: req.reply });
+                return;
+            }
+            cmd => cmd,
+        };
+        let reply = match cmd {
             Cmd::Status => {
                 let status = self.status(cpu);
                 cpu.bus.audio_peak = 0;
@@ -1276,6 +1321,7 @@ impl DebugHub {
                     Err(e) => Reply::bad(e),
                 }
             }
+            Cmd::SaveState { .. } | Cmd::LoadState { .. } => unreachable!("handed to the front end above"),
             Cmd::Unmount { drive } => {
                 let result = parse_drive_letter(&drive)
                     .ok_or_else(|| format!("invalid drive letter '{}'", drive))

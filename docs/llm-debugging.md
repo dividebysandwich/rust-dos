@@ -233,6 +233,16 @@ every drive with a list, as Ctrl+F4 does (`images` and `image_index` in
 `"type"` says, and refuse CD images. `DELETE /api/drive/D` unmounts a drive, and `GET /api/drive` lists
 them. At the DOS prompt, the `MOUNT` and `IMGMOUNT` commands do the same.
 
+### Save states
+
+`POST /api/state/save {"path":"/abs/before-boss.state"}` saves the whole
+machine to a file, and `POST /api/state/load` with the same body goes back
+to it, as the Ctrl+F1 and Ctrl+F2 slots do. Save before a step that is
+slow to reach (a menu path, a level) and load to try it again. The load's
+reply has the state's header: when it was saved, the program, and the
+hardware settings it applies first. The files and disk images on the host
+aren't part of a state: what a program wrote since stays written.
+
 ### Protected-mode programs (DOS extenders)
 
 Programs built with DOS/4GW, DOS/32A, PMODE or Borland's RTM switch the CPU

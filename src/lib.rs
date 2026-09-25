@@ -26,6 +26,7 @@ pub mod f80;
 pub mod fat;
 pub mod file_commands;
 pub mod games;
+pub mod hardware;
 pub mod hosttime;
 pub mod import;
 pub mod gus;

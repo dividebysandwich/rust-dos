@@ -12,21 +12,21 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use rust_dos::audio::{self, AudioOutput};
-use rust_dos::config::{self, Filter, Settings, SoundConfig};
+use rust_dos::config::{self, Filter, Settings};
 use rust_dos::config_ui::osd::Osd;
 use rust_dos::config_ui::{ConfigUi, Frontend, Host, UiKey};
-use rust_dos::cpu::{Cpu, CpuModel};
+use rust_dos::cpu::Cpu;
 use rust_dos::disk::{self, DRIVE_C, DriveInfo, DriveKind, MountOptions, drive_letter};
 use rust_dos::diskimage::{self, DiskImage, MemoryImage};
 use rust_dos::exec::{self, NoHook};
 use rust_dos::games::{self, ActiveGame, GameEntry, NewGame};
+use rust_dos::hardware::Hardware;
 use rust_dos::joystick::PadState;
 use rust_dos::keylayout::{Layout, LayoutSetting};
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
 use rust_dos::stats::{FrameTimes, Stats};
 use rust_dos::mount::MountSpec;
 use rust_dos::timer::{CpuSpeed, Pacer};
-use rust_dos::video::adapter::VideoSetup;
 use rust_dos::video::mono::Monochrome;
 use rust_dos::video::shader::{self, Glsl, Shader};
 use rust_dos::video::{self, Frame};
@@ -100,60 +100,6 @@ impl AudioOutput for PageAudio {
     /// 40 ms, as the page's frames come less evenly than a window's.
     fn target_frames(&self) -> usize {
         rust_dos::opl::RATE as usize / 25
-    }
-}
-
-/// The processor and sound hardware in place. Changed settings reach them
-/// only while no program runs: one would lose track of the hardware it set
-/// up.
-struct Hardware {
-    cpu: CpuModel,
-    sound: SoundConfig,
-    video: VideoSetup,
-    /// Expanded memory and upper memory blocks.
-    memory: (bool, bool),
-}
-
-impl Hardware {
-    fn differs(&self, settings: &Settings) -> bool {
-        self.cpu != settings.cpu
-            || self.sound != settings.sound
-            || self.video != settings.video_setup()
-            || self.memory != (settings.ems, settings.umb)
-    }
-
-    /// Put the settings' processor and sound hardware in place. Returns the
-    /// problems with them.
-    fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
-        cpu.model = settings.cpu;
-        let mut warnings = if settings.sound != self.sound {
-            cpu.bus.log_string("[CONFIG] The sound settings changed");
-            rust_dos::sound::apply_config(cpu, &settings.sound, Some(&self.sound))
-        } else {
-            Vec::new()
-        };
-        // Another display adapter: its BIOS data, and the text mode it
-        // starts in, keeping what the screen shows.
-        let setup = settings.video_setup();
-        if setup != self.video {
-            let monitor = if setup.mono() { "monochrome" } else { "colour" };
-            cpu.bus.log_string(&format!(
-                "[CONFIG] The display is now {} with a {} monitor",
-                setup.adapter.describe(),
-                monitor
-            ));
-            video::bios::switch(cpu, setup);
-        }
-        if (settings.ems, settings.umb) != self.memory {
-            let on_off = |on| if on { "on" } else { "off" };
-            cpu.bus.log_string(&format!("[CONFIG] EMS {}, upper memory {}", on_off(settings.ems), on_off(settings.umb)));
-            warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
-        }
-        self.cpu = settings.cpu;
-        self.sound = settings.sound.clone();
-        self.video = settings.video_setup();
-        self.memory = (settings.ems, settings.umb);
-        warnings
     }
 }
 
@@ -259,12 +205,7 @@ impl Machine {
         Machine {
             pacer: Pacer::new(settings.cycles, Instant::now()),
             cpu,
-            hardware: Hardware {
-                cpu: settings.cpu,
-                sound: settings.sound.clone(),
-                video: settings.video_setup(),
-                memory: (settings.ems, settings.umb),
-            },
+            hardware: Hardware::of(&settings),
             saved: Saved { text: text.to_string(), settings: settings.clone() },
             settings,
             ui: ConfigUi::for_frontend(BROWSER),

@@ -75,6 +75,7 @@ fn router(state: AppState) -> Router {
         .route("/api/drive", get(drives))
         .route("/api/drive/swap", post(swap_images))
         .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
+        .route("/api/state/{action}", post(state_file))
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
@@ -395,6 +396,21 @@ async fn mount(State(s): State<AppState>, Path(letter): Path<String>, body: Byte
 
 async fn unmount(State(s): State<AppState>, Path(letter): Path<String>) -> ApiResult {
     s.call_json(Cmd::Unmount { drive: letter }, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+struct StateBody {
+    /// The save state file, on the host.
+    path: String,
+}
+
+async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body: Bytes) -> ApiResult {
+    let b: StateBody = from_value(parse_body(&body)?)?;
+    match action.as_str() {
+        "save" => s.call_json(Cmd::SaveState { path: b.path }, DEFAULT_TIMEOUT).await,
+        "load" => s.call_json(Cmd::LoadState { path: b.path }, DEFAULT_TIMEOUT).await,
+        _ => Err(ApiError(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
+    }
 }
 
 #[derive(Deserialize)]
@@ -882,6 +898,11 @@ DRIVES
   POST   /api/drive/swap                           next image in every drive
                    mounted from a list of images (Ctrl+F4)
   DELETE /api/drive/D                              unmount (not C: or Z:)
+
+SAVE STATES
+  POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
+  POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
+                   settings, then the machine (the same memsize only)
 
 WEBSOCKETS
   /ws/events          JSON: log lines, paused/resumed, video_mode changes

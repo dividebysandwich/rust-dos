@@ -15,6 +15,7 @@
 //! refused rather than misread.
 
 pub mod machine;
+pub mod slots;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 

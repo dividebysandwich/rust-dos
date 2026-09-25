@@ -7,10 +7,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::audio::pump_audio;
-use crate::config::{Settings, SoundConfig};
+use crate::config::Settings;
 use crate::config_ui::osd::Osd;
 use crate::config_ui::{ConfigUi, Host, UiKey};
-use crate::cpu::{CoreMode, Cpu, CpuModel};
+use crate::cpu::{CoreMode, Cpu};
 use crate::disk::{DriveInfo, DriveKind, LASTDRIVE};
 use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
@@ -18,7 +18,6 @@ use crate::capture::avi::VideoRecorder;
 use crate::capture::wav::WavWriter;
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
-use crate::video::adapter::VideoSetup;
 
 mod debug;
 mod display;
@@ -32,6 +31,8 @@ use rust_dos::{
     video,
 };
 use rust_dos::games::{ActiveGame, GameEntry, NewGame};
+use rust_dos::hardware::Hardware;
+use rust_dos::savestate::{self, slots};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -85,26 +86,6 @@ struct Args {
     /// and launch it
     #[arg(long, value_name = "PATH")]
     import: Option<std::path::PathBuf>,
-}
-
-/// The processor, sound hardware, display and expanded memory in place.
-/// Changed settings reach them only while no program runs (see
-/// `apply_machine`).
-struct Machine {
-    cpu: CpuModel,
-    sound: SoundConfig,
-    video: VideoSetup,
-    /// Expanded memory and upper memory blocks.
-    memory: (bool, bool),
-}
-
-impl Machine {
-    fn differs(&self, settings: &Settings) -> bool {
-        self.cpu != settings.cpu
-            || self.sound != settings.sound
-            || self.video != settings.video_setup()
-            || self.memory != (settings.ems, settings.umb)
-    }
 }
 
 /// The SDL sound device, where the mixed output goes.
@@ -240,12 +221,7 @@ fn main() -> Result<(), String> {
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
     }
-    let mut machine = Machine {
-        cpu: settings.cpu,
-        sound: settings.sound.clone(),
-        video: settings.video_setup(),
-        memory: (settings.ems, settings.umb),
-    };
+    let mut machine = Hardware::of(&settings);
     let mut saved = Saved {
         file: config.source.clone(),
         autoexec: config.autoexec.clone(),
@@ -309,6 +285,13 @@ fn main() -> Result<(), String> {
     let mut sound_recording: Option<WavWriter> = None;
     // The video being recorded (Ctrl+F7).
     let mut video_recording: Option<VideoRecorder> = None;
+    // The save states, in `states` beside the configuration file: the slot
+    // Ctrl+F1 saves to and Ctrl+F2 loads (Ctrl+F3 picks another), and the
+    // results of the threads writing them.
+    let states_root = saved.file.as_deref().and_then(std::path::Path::parent).map(|dir| dir.join("states"))
+        .or_else(|| config::user_dir().map(|dir| dir.join("states")));
+    let mut slot: u8 = 1;
+    let (state_done, state_results) = std::sync::mpsc::channel::<Result<String, String>>();
     macro_rules! capture_mouse {
         ($on:expr) => {{
             let on = $on;
@@ -331,6 +314,9 @@ fn main() -> Result<(), String> {
                 machine: &mut machine,
                 saved: &mut saved,
                 game: &mut game,
+                states: &states_root,
+                picture: &cached_frame,
+                state_done: &state_done,
             }
         };
     }
@@ -400,6 +386,42 @@ fn main() -> Result<(), String> {
                     if keycode == Keycode::F12 && ctrl && !alt {
                         if !repeat {
                             toggle_ui!();
+                        }
+                        continue;
+                    }
+                    // Ctrl+F1 saves the machine to the current slot,
+                    // Ctrl+F2 loads it, and Ctrl+F3 and Ctrl+Shift+F3 pick
+                    // the next and the previous slot.
+                    if matches!(keycode, Keycode::F1 | Keycode::F2 | Keycode::F3) && ctrl && !alt {
+                        if repeat || ui.is_open() {
+                            continue;
+                        }
+                        if keycode == Keycode::F1 {
+                            if let Err(e) = host!().save_slot(slot) {
+                                osd.show(format!("Slot {} can't be saved: {}", slot, e));
+                            }
+                        } else if keycode == Keycode::F2 {
+                            let loaded = host!().load_slot(slot);
+                            match loaded {
+                                Ok(header) => {
+                                    release_input(&mut cpu, &mut held);
+                                    let mut message = format!("Loaded slot {}: {}", slot, describe_state(&header));
+                                    if let Some(video) = video_recording.take() {
+                                        let _ = video.stop();
+                                        message.push_str(" (the video recording stopped)");
+                                    }
+                                    osd.show(message);
+                                }
+                                Err(e) => osd.show(format!("Slot {} can't be loaded: {}", slot, e)),
+                            }
+                        } else {
+                            let back = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                            slot = if back { (slot + slots::SLOTS - 2) % slots::SLOTS + 1 } else { slot % slots::SLOTS + 1 };
+                            let header = host!().slot_dir().ok().and_then(|dir| slots::read_file_header(&slots::slot_path(&dir, slot)));
+                            osd.show(match header {
+                                Some(header) => format!("Slot {}: {}", slot, describe_state(&header)),
+                                None => format!("Slot {}: empty", slot),
+                            });
                         }
                         continue;
                     }
@@ -696,6 +718,20 @@ fn main() -> Result<(), String> {
         if dbg.take_hotkey() {
             toggle_ui!();
         }
+        for request in dbg.take_state_requests() {
+            let path = request.path.clone();
+            if request.load {
+                let loaded = host!().load_file(&path);
+                if loaded.is_ok() {
+                    release_input(&mut cpu, &mut held);
+                    dbg.release_keys(&mut cpu);
+                }
+                request.done(loaded.map(|header| serde_json::json!({"loaded": path, "header": header})));
+            } else {
+                let saved = host!().save_file(&path);
+                request.done(saved.map(|()| serde_json::json!({"saved": path})));
+            }
+        }
         for input in dbg.take_ui_input() {
             match input {
                 debug::UiInput::Key(key) => ui.key(key, &mut host!()),
@@ -785,9 +821,19 @@ fn main() -> Result<(), String> {
         if let Some(notice) = ui.take_notice() {
             osd.show(notice);
         }
+        // Save states written.
+        for result in state_results.try_iter() {
+            match result {
+                Ok(message) => osd.show(message),
+                Err(e) => {
+                    cpu.bus.log_string(&format!("[STATE] {}", e));
+                    osd.show(format!("The state can't be saved: {}", e));
+                }
+            }
+        }
         // Processor and sound changes wait for the running program to end.
         if !ui.is_open() && cpu.shell_idle() && machine.differs(&settings) {
-            for warning in apply_machine(&mut cpu, &mut machine, &settings) {
+            for warning in machine.apply(&mut cpu, &settings) {
                 config_warning(&mut cpu, &warning);
             }
         }
@@ -927,29 +973,13 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Put the settings' processor and sound hardware in place. Only while no
-/// program runs: one would lose track of the hardware it set up.
-fn apply_machine(cpu: &mut Cpu, machine: &mut Machine, settings: &Settings) -> Vec<String> {
-    cpu.model = settings.cpu;
-    let mut warnings = if settings.sound != machine.sound {
-        cpu.bus.log_string("[CONFIG] The sound settings changed");
-        sound::apply_config(cpu, &settings.sound, Some(&machine.sound))
-    } else {
-        Vec::new()
-    };
-    if settings.video_setup() != machine.video {
-        change_adapter(cpu, settings.video_setup());
+/// What a slot's message says of the state in it: when it was saved,
+/// and in which program.
+fn describe_state(header: &slots::Header) -> String {
+    match header.program.as_str() {
+        "" => header.saved.clone(),
+        program => format!("{}, {}", header.saved, program),
     }
-    if (settings.ems, settings.umb) != machine.memory {
-        let on_off = |on| if on { "on" } else { "off" };
-        cpu.bus.log_string(&format!("[CONFIG] EMS {}, upper memory {}", on_off(settings.ems), on_off(settings.umb)));
-        warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
-    }
-    machine.cpu = settings.cpu;
-    machine.sound = settings.sound.clone();
-    machine.video = settings.video_setup();
-    machine.memory = (settings.ems, settings.umb);
-    warnings
 }
 
 /// What the on-screen message says of a new CPU speed.
@@ -958,14 +988,6 @@ fn speed_message(speed: CpuSpeed) -> String {
         CpuSpeed::Max => "CPU speed max".to_string(),
         CpuSpeed::Fixed(n) => format!("CPU speed {} cycles", n),
     }
-}
-
-/// Put another display adapter in, at the prompt: its BIOS data, and the
-/// text mode it starts in, keeping what the screen shows.
-fn change_adapter(cpu: &mut Cpu, setup: VideoSetup) {
-    let monitor = if setup.mono() { "monochrome" } else { "colour" };
-    cpu.bus.log_string(&format!("[CONFIG] The display is now {} with a {} monitor", setup.adapter.describe(), monitor));
-    video::bios::switch(cpu, setup);
 }
 
 /// The drives the configuration file can hold, by letter: mounts of host
@@ -1074,10 +1096,15 @@ struct MainHost<'m, 'd> {
     pacer: &'m mut timer::Pacer,
     /// The settings in effect (or waiting, see `Machine`).
     settings: &'m mut Settings,
-    machine: &'m mut Machine,
+    machine: &'m mut Hardware,
     saved: &'m mut Saved,
     /// The game launched and not ended yet.
     game: &'m mut Option<ActiveGame>,
+    /// The save states: their folder, the picture the machine shows, for
+    /// theirs, and where the thread writing one says it is done.
+    states: &'m Option<PathBuf>,
+    picture: &'m video::Frame,
+    state_done: &'m std::sync::mpsc::Sender<Result<String, String>>,
 }
 
 impl MainHost<'_, '_> {
@@ -1173,6 +1200,77 @@ impl MainHost<'_, '_> {
     }
 
     /// A game has ended: the settings and drives from before it.
+    /// The folder of the save states' slots: the game's, or the machine's
+    /// without one.
+    fn slot_dir(&self) -> Result<PathBuf, String> {
+        let root = self.states.as_deref().ok_or("There is no folder for save states")?;
+        Ok(slots::slot_dir(root, self.game.as_ref().map(|g| g.id.as_str())))
+    }
+
+    /// The machine's state now, with its header and picture.
+    fn capture_state(&self) -> (slots::Header, video::Frame, Vec<u8>) {
+        let game = self.game.as_ref().map(|g| (g.id.as_str(), g.name.as_str()));
+        // The hardware in place, not a change waiting for the program to end.
+        let hardware = self.machine.settings(self.settings);
+        (slots::header(self.cpu, &hardware, game), self.picture.clone(), savestate::machine::save(self.cpu))
+    }
+
+    /// Save the machine to slot `slot`. Its state is taken now; a thread
+    /// packs it and writes the file, and says on `state_done` when it has.
+    fn save_slot(&mut self, slot: u8) -> Result<(), String> {
+        let path = slots::slot_path(&self.slot_dir()?, slot);
+        let (header, picture, state) = self.capture_state();
+        let done = self.state_done.clone();
+        self.cpu.bus.log_string(&format!("[STATE] Saving to {}", path.display()));
+        std::thread::spawn(move || {
+            let data = slots::encode(&header, &slots::thumbnail(&picture), &state);
+            let result = slots::write_file(&path, &data).map(|()| format!("Saved to slot {}", slot));
+            let _ = done.send(result);
+        });
+        Ok(())
+    }
+
+    /// Save the machine to the file `path`, now.
+    fn save_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let (header, picture, state) = self.capture_state();
+        slots::write_file(path, &slots::encode(&header, &slots::thumbnail(&picture), &state))?;
+        self.cpu.bus.log_string(&format!("[STATE] Saved to {}", path.display()));
+        Ok(())
+    }
+
+    /// Load the save state file `path`: the hardware it was saved with
+    /// first, as the settings have it, then the machine. Memory can't
+    /// change its size, so a state of another memsize is refused.
+    fn load_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
+        let data = std::fs::read(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "empty".to_string(),
+            _ => format!("{}: {}", path.display(), e),
+        })?;
+        let (header, state) = slots::decode(&data)?;
+        if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
+            return Err(why);
+        }
+        let hardware = slots::machine_settings(&header.machine, self.settings);
+        if let Err(e) = self.apply(&hardware) {
+            config_warning(self.cpu, &e);
+        }
+        if self.machine.differs(self.settings) {
+            for warning in self.machine.apply(self.cpu, self.settings) {
+                config_warning(self.cpu, &warning);
+            }
+        }
+        savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string())?;
+        self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
+        self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
+        Ok(header)
+    }
+
+    /// Load slot `slot`.
+    fn load_slot(&mut self, slot: u8) -> Result<slots::Header, String> {
+        let path = slots::slot_path(&self.slot_dir()?, slot);
+        self.load_file(&path)
+    }
+
     fn end_game(&mut self, game: ActiveGame) {
         self.cpu.bus.log_string(&format!("[CONFIG] The game {} has ended", game.name));
         if let Err(e) = self.apply(&game.base) {
@@ -1228,7 +1326,7 @@ impl Host for MainHost<'_, '_> {
         if !self.cpu.shell_idle() {
             return Ok(Some(config_ui::pending_note(self.machine.video, new).to_string()));
         }
-        match apply_machine(self.cpu, self.machine, new).into_iter().next() {
+        match self.machine.apply(self.cpu, new).into_iter().next() {
             Some(problem) => Err(problem),
             None => Ok(None),
         }

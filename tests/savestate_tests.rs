@@ -485,3 +485,44 @@ fn a_loaded_machine_has_its_drives_files_and_memory() {
     rust_dos::ems::handle(&mut b);
     assert_eq!(b.get_ah(), 0, "the handle can be mapped");
 }
+
+/// A machine as rust-dos starts one with `settings`' hardware.
+fn configured_machine(dir: &Path, settings: &rust_dos::config::Settings) -> (Cpu, rust_dos::hardware::Hardware) {
+    let mut cpu = machine_in(dir);
+    let defaults = rust_dos::config::Settings::default();
+    rust_dos::sound::apply_config(&mut cpu, &defaults.sound, None);
+    let mut hardware = rust_dos::hardware::Hardware::of(&defaults);
+    hardware.apply(&mut cpu, settings);
+    (cpu, hardware)
+}
+
+#[test]
+fn a_slot_brings_its_hardware_and_its_memory_size_must_match() {
+    use rust_dos::savestate::slots;
+    fix_time();
+    let dir = scratch("hardware", &[]);
+    let mut settings = rust_dos::config::Settings::default();
+    settings.sound.sb.model = rust_dos::sb::SbModel::SbPro2;
+    settings.sound.gus.enabled = false;
+    settings.machine = Adapter::Cga;
+    let (a, _) = configured_machine(&dir, &settings);
+    let header = slots::header(&a, &settings, None);
+    let file = slots::encode(&header, &[], &machine::save(&a));
+
+    // A machine with the default hardware, an Ultrasound among it, can't
+    // take the state as it is.
+    let defaults = rust_dos::config::Settings::default();
+    let (mut b, mut hardware) = configured_machine(&dir, &defaults);
+    let (header, state) = slots::decode(&file).unwrap();
+    assert!(matches!(machine::load(&mut b, &state), Err(StateError::Mismatch(_))));
+    // With the header's hardware in place first, it can.
+    let wanted = slots::machine_settings(&header.machine, &defaults);
+    assert_eq!((wanted.machine, wanted.sound.gus.enabled), (Adapter::Cga, false));
+    hardware.apply(&mut b, &wanted);
+    machine::load(&mut b, &state).unwrap();
+    assert!(b.bus.gus.is_none() && b.bus.sb.as_ref().unwrap().config.model == rust_dos::sb::SbModel::SbPro2);
+    assert_eq!(b.bus.vga.adapter, Adapter::Cga);
+
+    assert_eq!(slots::refusal(&header, 16), None);
+    assert!(slots::refusal(&header, 8).is_some(), "a 16 MB state on an 8 MB machine");
+}

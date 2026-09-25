@@ -54,6 +54,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   (parameters, `IF`, `GOTO`, `CALL`, `FOR`, `CHOICE`, `PAUSE`), `COPY`,
   `DEL`, `REN`, `MD`, `RD`, `DATE`, `TIME`, redirection, and a
   `COMMAND.COM` programs can shell out to
+* [Save states](#save-states): nine slots for each game (Ctrl+F1 saves,
+  Ctrl+F2 loads)
 * Web based debugger UI
 * Runs in a web browser as WebAssembly, with C: kept in the browser's
   storage (see [Running in a browser](#running-in-a-browser))
@@ -653,6 +655,10 @@ is replaced on every start and stops growing at 64 MB.
 | Keys | What they do |
 |---|---|
 | Ctrl+F12 | Open or close the [settings window](#settings-window) |
+| Ctrl+F1 | Save the machine to the current [save state](#save-states) slot |
+| Ctrl+F2 | Load the current slot |
+| Ctrl+F3 | Pick the next slot (it says what is in it) |
+| Ctrl+Shift+F3 | Pick the previous slot |
 | Ctrl+F4 | Put the next disk in the drives mounted from lists of images |
 | Alt+Pause | Pause the machine, and resume it |
 | Alt+F12 (held) | Fast forward: the machine runs up to eight times as fast, without sound |
@@ -673,6 +679,37 @@ A message at the top of the picture says what they did. A captured mouse
 moves the program's cursor by its motion, so a game that turns with the
 mouse keeps turning at the edge of the screen; the settings window, Alt+Pause
 and leaving the window let it go.
+
+## Save states
+
+A save state is the whole machine as it is: the processor, the memory, the
+screen, the sound cards and the music playing, DOS's memory and open files,
+and where a batch file had got to. Loading one goes back to that moment,
+whatever the program is doing.
+
+There are nine slots. **Ctrl+F1** saves to the current slot (slot 1 at
+first), **Ctrl+F2** loads it, and **Ctrl+F3** and **Ctrl+Shift+F3** pick
+another, showing when the state in it was saved and in which program. While
+a [game](#game-profiles) plays the slots are its own, in `states/<game>`
+beside the configuration file (in the per-user directory without one);
+otherwise they are in `states/dos`. A slot file holds a small picture of
+the screen, when it was saved, and the machine's hardware settings.
+
+* Loading a state puts its hardware back first: the processor, the sound
+  cards, the display adapter, EMS and upper memory, and the CPU speed. The
+  memory's size (`memsize`) can't change while rust-dos runs, so a state of
+  a machine with another size isn't loaded.
+* The files on the host and in disk images aren't part of a state: what a
+  program wrote after the state was saved stays written, as in DOSBox. The
+  drives are mounted as they were, and files the program had open are
+  opened again where it was in them; one that is gone stays closed (the
+  log says which).
+* The FM chip's and the MIDI synthesizer's sound can't be saved, so they
+  are told their registers, instruments and (for the MT-32) timbres again:
+  notes that were playing start again.
+
+The [debug server](#debug--remote-control-server) saves and loads states
+in files of your choosing (`POST /api/state/save` and `/api/state/load`).
 
 ## Running in a browser
 
