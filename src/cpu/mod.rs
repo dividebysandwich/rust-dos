@@ -24,6 +24,13 @@ pub use seg::Descriptor;
 /// area below the first MCB belongs to the shell.
 pub const ENV_SEGMENT: u16 = 0x0C00;
 
+/// Where the shell runs: its code at SHELL_SEGMENT:0100, its line buffers
+/// at 0200 and 0300, and its stack below SHELL_STACK, in the memory between
+/// the BIOS data area and the environment (ENV_SEGMENT), clear of the
+/// interrupt vector table, whose vectors the BIOS and programs write.
+pub const SHELL_SEGMENT: u16 = 0x0070;
+pub const SHELL_STACK: u16 = 0x0F00;
+
 /// FLAGS bits POPF and IRET load: CF, PF, AF, ZF, SF, TF, IF, DF, OF, IOPL
 /// and NT.
 const FLAGS16_WRITABLE: u32 = 0x7FD5;
@@ -643,9 +650,9 @@ impl Cpu {
         // Get the Code
         let shell_code = get_shell_code();
 
-        // Load into RAM at CS:IP (0x0000:0x0100)
+        // Load into RAM at CS:IP (SHELL_SEGMENT:0x0100)
         // We use 0x100 because .COM files (and our shell) expect to run there.
-        let start_addr = 0x100;
+        let start_addr = SHELL_SEGMENT as usize * 16 + 0x100;
 
         // Clear RAM
         // 0x0000-0x03FF is the IVT.
@@ -696,12 +703,12 @@ impl Cpu {
 
         // Reset CPU State to "Boot" values
         self.reset_to_real_mode();
-        self.set_cs(0);
-        self.set_ds(0);
-        self.set_es(0);
-        self.set_ss(0);
+        self.set_cs(SHELL_SEGMENT);
+        self.set_ds(SHELL_SEGMENT);
+        self.set_es(SHELL_SEGMENT);
+        self.set_ss(SHELL_SEGMENT);
         self.set_ip(0x100); // Entry Point
-        self.set_sp(0xFF00); // Stack Pointer (Safe distance away)
+        self.set_sp(SHELL_STACK);
         self.set_bp(0);
 
         self.set_ax(0);

@@ -1,5 +1,5 @@
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind};
-use rust_dos::cpu::Cpu;
+use rust_dos::cpu::{Cpu, SHELL_SEGMENT, SHELL_STACK};
 use rust_dos::disk::MountOptions;
 use rust_dos::interrupts::handle_hle;
 use rust_dos::shell::{SHELL_COMMAND_BOP, get_shell_code};
@@ -127,7 +127,7 @@ fn shell_trap_returns_to_the_prompt_loop() {
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
     // The trap popped the frame the shell pushed: back at the JMP with the
     // stack balanced, not sliding through the IVT from 0000:0000.
-    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (0, 0x182, 0xFF00));
+    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (SHELL_SEGMENT, 0x182, SHELL_STACK));
 
     // Next command comes through the same loop, prompt reprinted.
     type_keys(&mut cpu, "dir\r");
@@ -177,4 +177,45 @@ fn only_the_private_trap_queues_commands() {
 
     handle_hle(&mut cpu, SHELL_COMMAND_BOP);
     assert_eq!(cpu.pending_command.as_deref(), Some("hello"));
+}
+
+#[test]
+fn a_mode_set_at_the_prompt_leaves_the_shell_alone() {
+    // The BIOS points INT 43h at the graphics font on every mode set, as a
+    // change of video card at the prompt makes one. The shell's code is
+    // clear of the vector table, so the prompt carries on below.
+    let base = scratch("mode_set", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    rust_dos::interrupts::int10::set_mode(&mut cpu, 0x83);
+    let code = get_shell_code();
+    let at = SHELL_SEGMENT as usize * 16 + 0x100;
+    assert_eq!((0..code.len()).map(|i| cpu.bus.read_8(at + i)).collect::<Vec<_>>(), code);
+
+    type_keys(&mut cpu, "ver\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+    type_keys(&mut cpu, "dir\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("dir"));
+    let text = screen_text(&cpu);
+    assert_eq!(text.matches("C:\\>").count(), 2, "{}", text);
+    // The second prompt is on the next row, not over the first.
+    assert_eq!(&text[..7], "C:\\>ver");
+    assert_eq!(&text[80..87], "C:\\>dir");
+}
+
+#[test]
+fn another_video_card_keeps_the_prompt_where_it_was() {
+    use rust_dos::video::adapter::{Adapter, VideoSetup};
+    let base = scratch("switch", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, "ver\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+    let before = (cpu.bus.read_8(0x0450), cpu.bus.read_8(0x0451));
+    assert_eq!(before.1, 1);
+    for adapter in [Adapter::Ega, Adapter::Cga, Adapter::Hercules, Adapter::Svga] {
+        rust_dos::video::bios::switch(&mut cpu, VideoSetup { adapter, ..Default::default() });
+        assert_eq!((cpu.bus.read_8(0x0450), cpu.bus.read_8(0x0451)), before, "{:?}", adapter);
+        assert_eq!(&screen_text(&cpu)[..7], "C:\\>ver", "{:?}: the screen stays", adapter);
+    }
 }

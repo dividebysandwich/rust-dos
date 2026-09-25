@@ -804,8 +804,7 @@ fn speed_message(speed: CpuSpeed) -> String {
 fn change_adapter(cpu: &mut Cpu, setup: VideoSetup) {
     let monitor = if setup.mono() { "monochrome" } else { "colour" };
     cpu.bus.log_string(&format!("[CONFIG] The display is now {} with a {} monitor", setup.adapter.describe(), monitor));
-    video::bios::install(&mut cpu.bus, setup);
-    rust_dos::interrupts::int10::set_mode(cpu, 0x80 | setup.prompt_mode());
+    video::bios::switch(cpu, setup);
 }
 
 /// The drives the configuration file can hold, by letter: mounts of host

@@ -35,6 +35,20 @@ pub fn graphics_font(mode: u8) -> (u16, u16) {
     }
 }
 
+/// Put another adapter in at the prompt: its BIOS data and the text mode
+/// it starts in, keeping what the screen shows and where the cursor is, so
+/// the prompt carries on where it was.
+pub fn switch(cpu: &mut crate::cpu::Cpu, setup: VideoSetup) {
+    let (col, row) = (cpu.bus.read_8(0x0450), cpu.bus.read_8(0x0451));
+    install(&mut cpu.bus, setup);
+    crate::interrupts::int10::set_mode(cpu, 0x80 | setup.prompt_mode());
+    let row = row.min(cpu.bus.text_rows() as u8 - 1);
+    cpu.bus.write_8(0x0450, col);
+    cpu.bus.write_8(0x0451, row);
+    cpu.bus.cursor_x = col as usize;
+    cpu.bus.cursor_y = row as usize;
+}
+
 /// The text cursor's scanlines for a text mode with `height` scanlines to
 /// a character: the two above the bottom one (the CGA's 8: 6 and 7).
 pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {

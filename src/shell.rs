@@ -17,13 +17,13 @@ pub fn get_shell_code() -> Vec<u8> {
         // ----------------------------------------------------
         // BOOTLOADER: Initialize Segments
         // ----------------------------------------------------
-        // We are loaded at CS=0x0000, IP=0x0100 (see Cpu::load_shell).
+        // We are loaded at SHELL_SEGMENT:0100 (see Cpu::load_shell).
         // Set DS=ES=SS=CS so buffers and stack live in the shell segment.
         0x8C, 0xC8, // MOV AX, CS (Copy CS to AX)
         0x8E, 0xD8, // MOV DS, AX
         0x8E, 0xC0, // MOV ES, AX
         0x8E, 0xD0, // MOV SS, AX
-        0xBC, 0x00, 0xFF, // MOV SP, 0xFF00
+        0xBC, 0x00, 0x0F, // MOV SP, 0x0F00 (SHELL_STACK)
         // ----------------------------------------------------
         // SHELL LOOP START
         // ----------------------------------------------------

@@ -128,8 +128,7 @@ impl Hardware {
                 setup.adapter.describe(),
                 monitor
             ));
-            video::bios::install(&mut cpu.bus, setup);
-            rust_dos::interrupts::int10::set_mode(cpu, 0x80 | setup.prompt_mode());
+            video::bios::switch(cpu, setup);
         }
         self.cpu = settings.cpu;
         self.sound = settings.sound.clone();

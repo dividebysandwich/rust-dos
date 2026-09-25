@@ -10,7 +10,7 @@ use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 use crate::bus::GEN_SHIFT;
 use crate::command::CommandDispatcher;
-use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, Seg};
+use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
 use crate::instr_cache::InstrCache;
 use crate::instructions::Handler;
 
@@ -174,11 +174,11 @@ fn run<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHoo
         }
 
         // Fast check first: the shell rarely has anything to do. It hands
-        // over command lines from its own code at CS 0, and batch lines wait
-        // while a program started from the batch file runs, so they only
-        // count once the shell is back at its prompt.
+        // over command lines from its own code (at SHELL_SEGMENT), and batch
+        // lines wait while a program started from the batch file runs, so
+        // they only count once the shell is back at its prompt.
         if cpu.state == CpuState::RebootShell
-            || (cpu.cs() == 0
+            || (cpu.cs() == SHELL_SEGMENT
                 && (cpu.pending_command.is_some() || (!cpu.batch_queue.is_empty() && cpu.process_stack.is_empty())))
         {
             match shell_services(cpu) {
@@ -228,7 +228,7 @@ impl Cpu {
     /// True while the shell runs with no program started from it: the
     /// point at which batch lines and typed commands are dispatched.
     pub fn at_shell_prompt(&self) -> bool {
-        self.cs() == 0 && self.process_stack.is_empty()
+        self.cs() == SHELL_SEGMENT && self.process_stack.is_empty()
     }
 
     /// True while no program runs: the shell is at its prompt, or in the
@@ -244,7 +244,7 @@ impl Cpu {
             let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(if waiting { 12 } else { 2 }));
             self.bus.read_16(frame)
         };
-        self.cs() == 0 || (self.cs() == 0xF000 && caller_cs() == 0)
+        self.cs() == SHELL_SEGMENT || (self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT)
     }
 }
 
@@ -529,8 +529,8 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
     };
 
     // Tripwire: arriving in the IVT / BIOS data area with an application
-    // context (DS not 0, not the shell at CS=0) almost always means a
-    // corrupted FAR pointer landed us here.
+    // context (DS not 0) almost always means a corrupted FAR pointer landed
+    // us here.
     if cpu.cs() == 0
         && cpu.ip() < 0x100
         && !cpu.pe()
