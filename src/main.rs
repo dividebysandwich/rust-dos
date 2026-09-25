@@ -27,7 +27,7 @@ mod sdl_keys;
 // The emulator itself is the library crate; the debug server and the
 // window's display are private to the binary. These re-exports let the
 // binary's modules refer to the library modules as `crate::...`.
-use rust_dos::{audio, capture, config, config_ui, cpu, disk, exec, keyboard, mount, recorder, shell, sound, timer, video};
+use rust_dos::{audio, capture, config, config_ui, cpu, disk, exec, joystick, keyboard, mount, recorder, shell, sound, timer, video};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -137,6 +137,16 @@ fn main() -> Result<(), String> {
         .open_queue::<i16, _>(None, &desired_spec)
         .map_err(|e| e.to_string())?;
     audio_device.resume();
+    // Game controllers for the game port; the emulator does without them.
+    let controller_subsystem = match sdl_context.game_controller() {
+        Ok(subsystem) => Some(subsystem),
+        Err(e) => {
+            eprintln!("[INPUT] No game controllers: {}", e);
+            None
+        }
+    };
+    // The controllers plugged in, in the order they came.
+    let mut controllers: Vec<sdl2::controller::GameController> = Vec::new();
 
     // The picture has the size the video mode gives it; the display scales
     // it to the window. The textures are for SDL's renderer, which draws
@@ -152,6 +162,7 @@ fn main() -> Result<(), String> {
     video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.set_disk_settings(settings.disk);
     cpu.bus.set_mixer(settings.mixer);
+    cpu.bus.set_joystick(settings.joystick);
     for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
@@ -511,6 +522,27 @@ fn main() -> Result<(), String> {
 
                 Event::TextInput { text, .. } if ui.is_open() => ui.text(&text, &mut host!()),
 
+                // Game controllers come and go; the first two are the
+                // game port's.
+                Event::ControllerDeviceAdded { which, .. } => {
+                    let Some(subsystem) = &controller_subsystem else { continue };
+                    match subsystem.open(which) {
+                        Ok(pad) if controllers.iter().all(|c| c.instance_id() != pad.instance_id()) => {
+                            cpu.bus.log_string(&format!("[INPUT] Game controller: {}", pad.name()));
+                            osd.show(format!("Game controller: {}", pad.name()));
+                            controllers.push(pad);
+                        }
+                        Ok(_) => {}
+                        Err(e) => cpu.bus.log_string(&format!("[INPUT] Can't open game controller {}: {}", which, e)),
+                    }
+                }
+                Event::ControllerDeviceRemoved { which, .. } => {
+                    if let Some(i) = controllers.iter().position(|c| c.instance_id() == which) {
+                        osd.show(format!("Game controller unplugged: {}", controllers[i].name()));
+                        controllers.remove(i);
+                    }
+                }
+
                 Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } if ui.is_open() => {
                     let (fx, fy) = display.to_frame(x, y);
                     ui.click(fx, fy, &mut host!());
@@ -614,6 +646,11 @@ fn main() -> Result<(), String> {
         // the right instructions however the work is batched between frames.
         let batch_start = std::time::Instant::now();
         let waiting = dbg.paused || ui.pauses_machine() || paused;
+        // The controllers as they are now; at rest while the machine waits.
+        for slot in 0..2 {
+            let pad = controllers.get(slot).map(|pad| if waiting { joystick::PadState::default() } else { pad_state(pad) });
+            cpu.bus.joystick.set_pad(slot, pad);
+        }
         let batch_end = if waiting {
             cpu.bus.clock.icount
         } else {
@@ -911,6 +948,9 @@ impl Host for MainHost<'_, '_> {
         if new.mixer != old.mixer {
             self.cpu.bus.set_mixer(new.mixer);
         }
+        if new.joystick != old.joystick {
+            self.cpu.bus.set_joystick(new.joystick);
+        }
         if !self.machine.differs(new) {
             return Ok(None);
         }
@@ -1154,6 +1194,29 @@ fn open_log_file() -> Option<rust_dos::log::LogFile> {
             eprintln!("Warning: cannot create the log file {}: {}", path.display(), e);
             None
         }
+    }
+}
+
+/// A game controller's sticks and buttons, as the game port takes them.
+fn pad_state(pad: &sdl2::controller::GameController) -> joystick::PadState {
+    use sdl2::controller::{Axis, Button};
+    let axis = |axis| pad.axis(axis) as f32 / 32767.0;
+    let buttons = [
+        (Button::A, joystick::PAD_A),
+        (Button::B, joystick::PAD_B),
+        (Button::X, joystick::PAD_X),
+        (Button::Y, joystick::PAD_Y),
+        (Button::DPadUp, joystick::PAD_UP),
+        (Button::DPadDown, joystick::PAD_DOWN),
+        (Button::DPadLeft, joystick::PAD_LEFT),
+        (Button::DPadRight, joystick::PAD_RIGHT),
+    ]
+    .into_iter()
+    .filter(|&(button, _)| pad.button(button))
+    .fold(0, |bits, (_, bit)| bits | bit);
+    joystick::PadState {
+        axes: [axis(Axis::LeftX), axis(Axis::LeftY), axis(Axis::RightX), axis(Axis::RightY)],
+        buttons,
     }
 }
 

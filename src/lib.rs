@@ -23,6 +23,7 @@ pub mod keyboard;
 pub mod log;
 pub mod instructions;
 pub mod interrupts;
+pub mod joystick;
 pub mod mcb;
 pub mod memfs;
 pub mod mixer;

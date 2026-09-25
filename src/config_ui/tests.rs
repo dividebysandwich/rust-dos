@@ -403,6 +403,35 @@ fn the_video_card_changes_at_the_prompt() {
 }
 
 #[test]
+fn the_joystick_steps_through_the_types() {
+    use crate::joystick::JoystickType;
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Joystick).unwrap();
+    assert_eq!(Item::Joystick.applies(), Applies::Now);
+    keys(&mut ui, &mut host, &[Right, Right, Right, Right, Right]);
+    let kinds: Vec<JoystickType> = host.applied.iter().map(|s| s.joystick.kind).collect();
+    use JoystickType as J;
+    assert_eq!(kinds, [J::FourAxis, J::TwoAxis, J::Mouse, J::None, J::Auto]);
+
+    // The deadzone in fives, typed, and back to 10 with Delete.
+    keys(&mut ui, &mut host, &[Down, Right]);
+    assert_eq!(host.applied.last().unwrap().joystick.deadzone, 15);
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace]);
+    ui.text("12", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().joystick.deadzone, 12);
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("10%"));
+    keys(&mut ui, &mut host, &[Left, Left, Left]);
+    assert_eq!(host.applied.last().unwrap().joystick.deadzone, 0);
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().joystick.deadzone, 10);
+}
+
+#[test]
 fn the_capture_folder_is_typed() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);

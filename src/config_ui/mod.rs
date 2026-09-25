@@ -20,6 +20,7 @@ use crate::config::{MidiSynth, Settings};
 use crate::cpu::CpuModel;
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
+use crate::joystick::{JoystickType, MAX_DEADZONE};
 use crate::mixer::{CHANNELS, Channel, MAX_LEVEL};
 use crate::mount::{MountSpec, contract_home, expand_host_path};
 use crate::sb::SbModel;
@@ -112,7 +113,7 @@ impl Page {
         match self {
             Page::Drives => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
-            Page::Emulator => &[Cycles, Cpu, Machine, Memsize, HardDiskSpeed, FloppyDiskSpeed, CaptureDir],
+            Page::Emulator => &[Cycles, Cpu, Machine, Memsize, HardDiskSpeed, FloppyDiskSpeed, Joystick, Deadzone, CaptureDir],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
                 SoundFont, HardDiskNoise, FloppyDiskNoise,
@@ -202,6 +203,9 @@ enum Item {
     Volume(Channel),
     /// Where screenshots and recordings go.
     CaptureDir,
+    /// What the game port has plugged in, and the controllers' deadzone.
+    Joystick,
+    Deadzone,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -280,6 +284,8 @@ impl Item {
             FloppyDiskNoise => "Floppy disk noise",
             Volume(channel) => channel.label(),
             CaptureDir => "Capture folder",
+            Joystick => "Joystick",
+            Deadzone => "  Deadzone",
         }
     }
 
@@ -299,6 +305,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | Cycles => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
+            Joystick | Deadzone => Applies::Now,
             Memsize => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
@@ -306,7 +313,7 @@ impl Item {
 
     fn input(self) -> Input {
         match self {
-            Item::Cycles | Item::Volume(_) => Input::ChoiceOrText,
+            Item::Cycles | Item::Volume(_) | Item::Deadzone => Input::ChoiceOrText,
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::SoundFont => Input::File,
             _ => Input::Choice,
@@ -373,6 +380,8 @@ impl Item {
             FloppyDiskNoise => s.disk.floppy_disk_noise.name().to_string(),
             Volume(channel) => volume_bar(s.mixer.level(channel)),
             CaptureDir => contract_home(&s.capture_dir, home),
+            Joystick => s.joystick.kind.describe().to_string(),
+            Deadzone => format!("{}%", s.joystick.deadzone),
         }
     }
 
@@ -449,6 +458,13 @@ impl Item {
                 let tens = if dir > 0 { level / 10 + 1 } else { level.div_ceil(10).saturating_sub(1) };
                 s.mixer.set_level(channel, tens * 10);
             }
+            Joystick => s.joystick.kind = cycle(&JoystickType::ALL, s.joystick.kind, dir),
+            // In fives of percent.
+            Deadzone => {
+                let dz = s.joystick.deadzone as isize;
+                let fives = if dir > 0 { dz / 5 + 1 } else { (dz + 4) / 5 - 1 };
+                s.joystick.deadzone = (fives * 5).clamp(0, MAX_DEADZONE as isize) as u8;
+            }
             UltraDir | SoundFont | CaptureDir => {}
         }
     }
@@ -463,6 +479,7 @@ impl Item {
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),
+            Item::Deadzone => s.joystick.deadzone.to_string(),
             _ => String::new(),
         }
     }
@@ -475,6 +492,7 @@ impl Item {
             Item::Volume(channel) => s.mixer.set_level(channel, crate::mixer::parse_level(text)?),
             Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),
             Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), dirs::home_dir().as_deref()),
+            Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
             _ => {}
         }
         Ok(())
@@ -493,6 +511,10 @@ impl Item {
                 let changed = s.mixer.level(channel) != 100;
                 s.mixer.set_level(channel, 100);
                 changed
+            }
+            Item::Deadzone => {
+                let default = crate::joystick::JoystickSettings::default().deadzone;
+                std::mem::replace(&mut s.joystick.deadzone, default) != default
             }
             _ => false,
         }

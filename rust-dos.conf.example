@@ -129,6 +129,18 @@
 #cdaudio=100
 #disknoise=100
 
+[joystick]
+# What the game port has plugged in: auto (the default: one game controller
+# is both joysticks and all four buttons, two are a joystick each, and
+# without any the mouse is joystick A), 4axis (one controller: the left
+# stick is joystick A, the right stick joystick B, A, B, X and Y the four
+# buttons), 2axis (two controllers, each a joystick with two buttons),
+# mouse, or none (no game port).
+#joysticktype=auto
+# How far a stick moves before it counts, in percent of its travel (0 to
+# 90), so a controller at rest reads as centred.
+#deadzone=10
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

@@ -1,5 +1,6 @@
 //! The rust-dos configuration file: a DOSBox-style INI file with
-//! `[emulator]`, `[sound]`, `[drives]` and `[autoexec]` sections. See
+//! `[emulator]`, `[sound]`, `[mixer]`, `[joystick]`, `[drives]` and
+//! `[autoexec]` sections. See
 //! `rust-dos.conf.example` for the format.
 //!
 //! Lookup order, first match wins: `--config FILE`, `./rust-dos.conf`, then
@@ -12,6 +13,7 @@
 use crate::cpu::CpuModel;
 use crate::disk::DRIVE_Z;
 use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
+use crate::joystick::{JoystickSettings, JoystickType};
 use crate::mount::{MountSpec, contract_home, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
 use crate::mixer::{Channel, MixerSettings};
 use crate::timer::CpuSpeed;
@@ -108,6 +110,8 @@ pub struct Config {
     pub disk: DiskSettings,
     /// `[mixer]`: the volumes of the sound sources.
     pub mixer: MixerSettings,
+    /// `[joystick]`: what the game port has plugged in.
+    pub joystick: JoystickSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -128,6 +132,7 @@ enum Section {
     Emulator,
     Sound,
     Mixer,
+    Joystick,
     Drives,
     Autoexec,
     Unknown,
@@ -139,6 +144,7 @@ impl Section {
             "emulator" => Section::Emulator,
             "sound" => Section::Sound,
             "mixer" => Section::Mixer,
+            "joystick" => Section::Joystick,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             _ => Section::Unknown,
@@ -150,6 +156,7 @@ impl Section {
             Section::Emulator => "emulator",
             Section::Sound => "sound",
             Section::Mixer => "mixer",
+            Section::Joystick => "joystick",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::None | Section::Unknown => "",
@@ -407,7 +414,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             Section::Autoexec => config.autoexec.push(line.to_string()),
             Section::Unknown => {}
             Section::None => warn("setting outside of a section".to_string()),
-            Section::Emulator | Section::Drives | Section::Sound | Section::Mixer => {
+            Section::Emulator | Section::Drives | Section::Sound | Section::Mixer | Section::Joystick => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -480,6 +487,21 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Err(e) => warn(format!("{}: {}", channel.key(), e)),
                         },
                         None => warn(format!("unknown setting '{}'", key)),
+                    }
+                    continue;
+                }
+
+                if section == Section::Joystick {
+                    match key.to_ascii_lowercase().as_str() {
+                        "joysticktype" => match JoystickType::parse(value) {
+                            Some(kind) => config.joystick.kind = kind,
+                            None => warn(format!("invalid joysticktype '{}' (auto, 4axis, 2axis, mouse or none)", value)),
+                        },
+                        "deadzone" => match crate::joystick::parse_deadzone(value) {
+                            Ok(percent) => config.joystick.deadzone = percent,
+                            Err(e) => warn(e),
+                        },
+                        _ => warn(format!("unknown setting '{}'", key)),
                     }
                     continue;
                 }
@@ -625,6 +647,7 @@ pub struct Settings {
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
+    pub joystick: JoystickSettings,
 }
 
 impl Default for Settings {
@@ -644,6 +667,7 @@ impl Default for Settings {
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
+            joystick: JoystickSettings::default(),
         }
     }
 }
@@ -677,6 +701,7 @@ impl Settings {
             sound: config.sound.clone(),
             disk: config.disk,
             mixer: config.mixer,
+            joystick: config.joystick,
         }
     }
 }
@@ -741,6 +766,10 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
     entries.extend(mixer);
+    entries.extend([
+        (Section::Joystick, "joysticktype", Some(settings.joystick.kind.name().to_string())),
+        (Section::Joystick, "deadzone", Some(settings.joystick.deadzone.to_string())),
+    ]);
     entries
 }
 
@@ -773,7 +802,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 return (section, Line::Header(section));
             }
             let kind = match section {
-                Section::Emulator | Section::Sound | Section::Mixer | Section::Drives => {
+                Section::Emulator | Section::Sound | Section::Mixer | Section::Joystick | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(comment.trim_start_matches(['#', ';']).trim_start())
                             .map_or(Line::Other, Line::Example)
@@ -1083,7 +1112,7 @@ mod tests {
             D=/two\n\
             E=/x zip\n\
             nonsense\n\
-            [joystick]\n\
+            [serial]\n\
             ignored=1\n";
         let config = parse(text, Path::new("/cfg"), None);
         let joined = config.warnings.join("\n");
@@ -1096,7 +1125,7 @@ mod tests {
             "line 9: drive D: defined twice",
             "line 10: drive E: Unknown option 'zip'",
             "line 11: expected key=value",
-            "line 12: unknown section [joystick]",
+            "line 12: unknown section [serial]",
         ] {
             assert!(
                 joined.contains(expected),
@@ -1237,6 +1266,7 @@ mod tests {
         assert_eq!((config.shader, config.monochrome, config.machine), (None, None, None));
         assert_eq!(config.sound, SoundConfig::default());
         assert_eq!(config.mixer, MixerSettings::default());
+        assert_eq!(config.joystick, JoystickSettings::default());
     }
 
     #[test]
@@ -1272,6 +1302,18 @@ mod tests {
         let mixer = Settings::from_config(&config).mixer;
         let levels = Channel::ALL.map(|channel| mixer.level(channel));
         assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100]);
+    }
+
+    #[test]
+    fn joystick_settings() {
+        let text = "[Joystick]\njoysticktype=4AXIS\ndeadzone=25%\n";
+        let config = parse(text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.joystick, JoystickSettings { kind: JoystickType::FourAxis, deadzone: 25 });
+        let text = "[joystick]\njoysticktype=fcs\ndeadzone=95\ntimed=false\n";
+        let config = parse(text, Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
+        assert_eq!(config.joystick, JoystickSettings::default());
     }
 
     /// Settings with every value away from its default.
@@ -1317,6 +1359,7 @@ mod tests {
                 }
                 mixer
             },
+            joystick: JoystickSettings { kind: JoystickType::TwoAxis, deadzone: 20 },
         }
     }
 
@@ -1364,6 +1407,7 @@ mod tests {
         assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);
         assert!(text.contains("#master=100\nmaster=5\n"), "{}", text);
         assert!(text.contains("#disknoise=100\ndisknoise=75\n"), "{}", text);
+        assert!(text.contains("#joysticktype=auto\njoysticktype=2axis\n"), "{}", text);
         assert!(text.contains("#sbtype=sb16\nsbtype=sbpro2\n"), "{}", text);
         assert!(text.contains("#E=~/dos/images/game.cue\nC=~/dos\nD=\"~/cd images/game.cue\" cdrom -label GAME\n"), "{}", text);
         assert!(text.contains("soundfont=~/sf/General User.sf2\n"), "{}", text);

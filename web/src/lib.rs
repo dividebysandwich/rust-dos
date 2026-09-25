@@ -19,6 +19,7 @@ use rust_dos::cpu::{Cpu, CpuModel};
 use rust_dos::disk::{self, DRIVE_C, DriveInfo, DriveKind, MountOptions, drive_letter};
 use rust_dos::diskimage::{self, DiskImage, MemoryImage};
 use rust_dos::exec::{self, NoHook};
+use rust_dos::joystick::PadState;
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
 use rust_dos::mount::MountSpec;
 use rust_dos::timer::{CpuSpeed, Pacer};
@@ -211,6 +212,7 @@ impl Machine {
         video::bios::install(&mut cpu.bus, settings.video_setup());
         cpu.bus.set_disk_settings(settings.disk);
         cpu.bus.set_mixer(settings.mixer);
+        cpu.bus.set_joystick(settings.joystick);
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
@@ -631,6 +633,22 @@ impl Machine {
         self.cpu.bus.mouse.set_position(vx, vy);
     }
 
+    /// The gamepad in `slot` (0 or 1) for the game port, as the Gamepad
+    /// API has it with the standard mapping: `axes` its left and right
+    /// sticks' x and y, and `buttons` bits 0-3 for A, B, X and Y and 4-7
+    /// for the D-pad's up, down, left and right. Not `connected`, the slot
+    /// is empty. At rest while the machine waits.
+    pub fn set_gamepad(&mut self, slot: u8, connected: bool, axes: Vec<f32>, buttons: u32) {
+        let pad = connected.then(|| {
+            if self.paused || self.ui.pauses_machine() {
+                return PadState::default();
+            }
+            let axis = |i: usize| axes.get(i).copied().filter(|a| a.is_finite()).unwrap_or(0.0);
+            PadState { axes: [axis(0), axis(1), axis(2), axis(3)], buttons: buttons as u16 }
+        });
+        self.cpu.bus.joystick.set_pad(slot as usize, pad);
+    }
+
     /// A mouse button (`MouseEvent.button`: 0 left, 1 middle, 2 right)
     /// went down or up.
     pub fn mouse_button(&mut self, button: u8, down: bool) {
@@ -912,6 +930,9 @@ impl Host for PageHost<'_> {
         }
         if new.mixer != old.mixer {
             self.cpu.bus.set_mixer(new.mixer);
+        }
+        if new.joystick != old.joystick {
+            self.cpu.bus.set_joystick(new.joystick);
         }
         if !self.hardware.differs(new) {
             return Ok(None);

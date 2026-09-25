@@ -42,6 +42,22 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
         0x87 => block_move(cpu),
+        // The BIOS's joystick: DX=0 reads the buttons into bits 4-7 of AL,
+        // DX=1 the axes of joysticks A and B into AX, BX, CX and DX.
+        0x84 if cpu.bus.joystick.present() && cpu.dx() <= 1 => {
+            let mouse = &cpu.bus.mouse;
+            if cpu.dx() == 0 {
+                let switches = cpu.bus.joystick.bios_switches(mouse);
+                cpu.set_reg8(Register::AL, switches);
+            } else {
+                let [ax, ay, bx, by] = cpu.bus.joystick.bios_axes(mouse);
+                cpu.set_ax(ax);
+                cpu.set_bx(ay);
+                cpu.set_cx(bx);
+                cpu.set_dx(by);
+            }
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
         // AX=E801h: memory between 1 and 16 MB in KB (AX, CX), and above
         // 16 MB in 64 KB blocks (BX, DX).
         0xE8 if al == 0x01 => {

@@ -89,6 +89,14 @@ aspect=true
 #cdaudio=100
 #disknoise=100
 
+[joystick]
+# What the game port has: auto (one gamepad is both joysticks and all four
+# buttons, two are a joystick each, and without one the mouse is joystick
+# A), 4axis, 2axis, mouse or none.
+#joysticktype=auto
+# How far a stick moves before it counts, in percent (0 to 90).
+#deadzone=10
+
 [autoexec]
 # Commands typed at the DOS prompt on startup, before C:\\AUTOEXEC.BAT.
 `;
@@ -509,6 +517,34 @@ function makeGlScreen() {
 let frames = 0;
 let lastStatus = 0;
 
+/// The standard gamepad's buttons the game port takes, in the order of the
+/// bits `Machine.set_gamepad` has them: A, B, X, Y, then the D-pad's up,
+/// down, left and right.
+const PAD_BUTTONS = [0, 1, 2, 3, 12, 13, 14, 15];
+/// Whether the machine had a gamepad in each slot at the last frame.
+const padsShown = [false, false];
+
+/// Hand the machine the first two gamepads for the game port.
+function pollGamepads() {
+  const pads = [...(navigator.getGamepads?.() ?? [])].filter((pad) => pad?.connected);
+  for (let slot = 0; slot < 2; slot++) {
+    const pad = pads[slot];
+    if (!pad) {
+      if (padsShown[slot]) {
+        machine.set_gamepad(slot, false, [], 0);
+        padsShown[slot] = false;
+      }
+      continue;
+    }
+    const buttons = PAD_BUTTONS.reduce((bits, index, bit) => (pad.buttons[index]?.pressed ? bits | (1 << bit) : bits), 0);
+    machine.set_gamepad(slot, true, pad.axes.slice(0, 4), buttons);
+    padsShown[slot] = true;
+  }
+}
+
+window.addEventListener('gamepadconnected', (event) => toast(`Gamepad: ${event.gamepad.id}`));
+window.addEventListener('gamepaddisconnected', (event) => toast(`Gamepad unplugged: ${event.gamepad.id}`));
+
 function frame(now) {
   if (halted) {
     return;
@@ -520,6 +556,7 @@ function frame(now) {
     return;
   }
   try {
+    pollGamepads();
     const changed = machine.run_frame(speaker.queued());
     speaker.play(machine.take_sound());
     if (changed) {

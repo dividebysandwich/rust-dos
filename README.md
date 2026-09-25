@@ -37,6 +37,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * CRT shaders: scanlines, an aperture grille or a curved shadow mask tube
   (see [CRT shaders](#crt-shaders))
 * Monochrome monitors: white, amber or green phosphor
+* Joysticks on the game port from game controllers (two sticks and four
+  buttons), or the mouse as a joystick
 * Configuration file with startup commands
 * Environment variables (`SET`, `PATH`)
 * Running in a web browser as WebAssembly, with C: kept in the browser's
@@ -169,6 +171,24 @@ D:
   `cdaudio` and `disknoise`, and `master` for all of them together. At 100,
   the default, a source plays as loud as its card makes it. The volumes
   apply on top of the Sound Blaster's own mixer, which programs set.
+* **`[joystick]`:** the game port, which programs read joysticks from.
+  * `joysticktype` is what is plugged in: `auto` (the default), `4axis`,
+    `2axis`, `mouse` or `none` (no game port).
+    * `auto` depends on the game controllers connected (Xbox or
+      PlayStation style, through SDL or the browser's Gamepad API). One
+      controller is both joysticks and all four buttons, two controllers
+      are a joystick each, and with none the mouse is joystick A.
+    * `4axis` is one controller: the left stick is joystick A and the
+      right stick joystick B (a flight simulator's rudder and throttle),
+      and A, B, X and Y are buttons 1 to 4.
+    * `2axis` is two controllers, each a joystick with two buttons (A and
+      B).
+    * `mouse` makes the mouse joystick A, its buttons the fire buttons.
+    * On every controller the D-pad moves the left stick while the stick
+      is at rest.
+  * `deadzone` is how far a stick moves, in percent of its travel (0 to 90,
+    default 10), before it counts, so a controller at rest reads as
+    centred.
 * **`[drives]`:** each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`.
   * PATH is a directory, or a disk or CD image (see [Drives](#drives)).
   * Relative paths are relative to the configuration file, and `~` is your
@@ -195,14 +215,14 @@ as you set them. Ctrl+F12 or Esc closes it.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
-  size and the disk speeds.
+  size, the disk speeds and the joystick.
 * **Sound:** everything in `[sound]`, and the disk noises.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the
-disk speeds and noises and the volumes take effect at once. The processor, the video card and the sound hardware change once no
+disk speeds and noises, the joystick and the volumes take effect at once. The processor, the video card and the sound hardware change once no
 program is running, so a game isn't left without the card it set up. The memory size
 takes effect the next time rust-dos starts.
 
@@ -411,6 +431,8 @@ In the browser:
   then downloads the video: WebM, or MP4 where the browser records no
   WebM. The recording shows the screen as the page does, CRT look
   included, and keeps the sound even with *Sound off*.
+* Gamepads work as joysticks once a button is pressed on them, as browsers
+  require (see `[joystick]`).
 * Clicking the screen while a program uses the mouse captures the mouse;
   Ctrl+F10 or Esc releases it. Sound starts with the first key press or
   click, as browsers require. The other [keyboard shortcuts](#keyboard-shortcuts)
