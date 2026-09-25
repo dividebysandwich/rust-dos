@@ -407,6 +407,7 @@ mod engine {
                 let block = self.blocks[index as usize].as_ref().unwrap();
                 self.ctx.ram = cpu.bus.ram().as_ptr();
                 self.ctx.ram_len = cpu.bus.ram().len() as u64;
+                self.ctx.tlb = cpu.tlb.entries_ptr() as *const u8;
                 self.ctx.page_gen = cpu.bus.page_gen.as_ptr();
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and

@@ -27,6 +27,7 @@ const EIP: i32 = layout::EIP as i32;
 const FLAGS: i32 = layout::FLAGS as i32;
 const CR0: i32 = layout::CR0 as i32;
 const A20: i32 = layout::A20_MASK as i32;
+const CPL: i32 = layout::CPL as i32;
 
 /// Flag bits.
 const CF: u32 = 0x001;
@@ -594,6 +595,7 @@ impl Gen<'_> {
             seg_field(seg, layout::SEG_BASE),
         );
         let last = size as i32 - 1;
+        let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as i32;
         dynasm!(self.ops
             ; .arch x64
             // The segment's limit and type, as `seg_linear` checks them.
@@ -606,13 +608,34 @@ impl Gen<'_> {
             ; ja =>at
             ; test BYTE [rbx + rights], need as i8
             ; jz =>at
-            // Paging on (CR0.PG is the sign bit): the helper translates.
-            ; cmp DWORD [rbx + CR0], 0
-            ; jl =>at
             ; mov eax, Rd(t_)
             ; add eax, DWORD [rbx + base]
+            // Paging on (CR0.PG is the sign bit): through the TLB.
+            ; cmp DWORD [rbx + CR0], 0
+            ; jl >paging
+            ; and eax, DWORD [rbx + A20]
+            ; jmp >physical
+            // The entry of the page (linear address >> 12) in the set of
+            // the privilege level: its tag must be the page + 1.
+            ; paging:
+            ; mov ecx, eax
+            ; shr ecx, 12
+            ; mov edx, ecx
+            ; and edx, (layout::TLB_SET - 1) as i32
+            ; cmp BYTE [rbx + CPL], 3
+            ; jne >supervisor
+            ; add edx, layout::TLB_SET as i32
+            ; supervisor:
+            ; imul edx, edx, layout::TLB_ENTRY_SIZE as i32
+            ; add rdx, QWORD [r12 + CTX_TLB]
+            ; inc ecx
+            ; cmp ecx, DWORD [rdx + tag]
+            ; jne =>at
+            ; and eax, 0xFFF
+            ; or eax, DWORD [rdx + layout::TLB_PHYS as i32]
             ; and eax, DWORD [rbx + A20]
             // Within a page, in plain RAM.
+            ; physical:
             ; mov ecx, eax
             ; and ecx, 0xFFF
             ; cmp ecx, 0x1000 - size as i32

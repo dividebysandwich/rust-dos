@@ -28,5 +28,13 @@ pub const EXECUTED: usize = offset_of!(Cpu, executed);
 pub const ICOUNT: usize = offset_of!(Cpu, bus.clock.icount);
 pub const DEADLINE: usize = offset_of!(Cpu, bus.clock.deadline);
 pub const A20_MASK: usize = offset_of!(Cpu, bus) + crate::bus::A20_MASK_OFFSET;
+/// A TLB entry (`Tlb::entries_ptr`): its tags and physical page, its size,
+/// and the entries of each set (supervisor, then user), which a page
+/// number modulo it indexes.
+pub const TLB_READ_TAG: usize = super::paging::TLB_READ_TAG;
+pub const TLB_WRITE_TAG: usize = super::paging::TLB_WRITE_TAG;
+pub const TLB_PHYS: usize = super::paging::TLB_PHYS;
+pub const TLB_ENTRY_SIZE: usize = super::paging::TLB_ENTRY_SIZE;
+pub const TLB_SET: usize = super::paging::TLB_SET;
 
 const _: () = assert!(size_of::<CpuFlags>() == 4);

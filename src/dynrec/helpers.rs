@@ -58,6 +58,8 @@ pub struct JitCtx {
     pub write: usize,
     /// Bytes of RAM.
     pub ram_len: u64,
+    /// The TLB's entries.
+    pub tlb: *const u8,
     /// The bytes of the running block after the instruction that stores,
     /// as physical addresses `lo..hi`, for `jit_write`.
     pub smc_lo: u32,
@@ -81,6 +83,7 @@ pub const CTX_MEMREF: i32 = offset_of!(JitCtx, memref) as i32;
 pub const CTX_READ: i32 = offset_of!(JitCtx, read) as i32;
 pub const CTX_WRITE: i32 = offset_of!(JitCtx, write) as i32;
 pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
+pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
@@ -99,6 +102,7 @@ impl JitCtx {
             read: jit_read as *const () as usize,
             write: jit_write as *const () as usize,
             ram_len: 0,
+            tlb: std::ptr::null(),
             smc_lo: 0,
             smc_hi: 0,
             fault: Fault::UD,

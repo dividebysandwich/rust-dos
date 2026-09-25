@@ -21,9 +21,11 @@ const TLB_ENTRIES: usize = 1024;
 /// A translation, valid for reads when `read_tag` is the linear page number
 /// + 1, and for writes when `write_tag` is: a page that may not be written,
 /// or whose dirty bit isn't set yet, has a write tag of 0, so writes to it
-/// walk the page tables.
+/// walk the page tables. `repr(C)`: the dynamic recompiler's code looks
+/// translations up itself (see `layout`).
 #[derive(Clone, Copy)]
-struct TlbEntry {
+#[repr(C)]
+pub(crate) struct TlbEntry {
     read_tag: u32,
     write_tag: u32,
     /// Physical address of the page.
@@ -31,6 +33,14 @@ struct TlbEntry {
 }
 
 const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0 };
+
+/// Where an entry's fields are, its size, and the entries in each set,
+/// for `layout`.
+pub(crate) const TLB_READ_TAG: usize = std::mem::offset_of!(TlbEntry, read_tag);
+pub(crate) const TLB_WRITE_TAG: usize = std::mem::offset_of!(TlbEntry, write_tag);
+pub(crate) const TLB_PHYS: usize = std::mem::offset_of!(TlbEntry, phys);
+pub(crate) const TLB_ENTRY_SIZE: usize = std::mem::size_of::<TlbEntry>();
+pub(crate) const TLB_SET: usize = TLB_ENTRIES;
 
 /// Translations the CPU has walked the page tables for, direct-mapped by
 /// linear page number, in two sets: for accesses at privilege level 3,
@@ -72,6 +82,13 @@ impl Tlb {
     #[inline(always)]
     fn slot(page: u32, user: bool) -> usize {
         (user as usize) * TLB_ENTRIES + page as usize % TLB_ENTRIES
+    }
+
+    /// The entries, supervisor then user, `TLB_ENTRIES` each, for the
+    /// dynamic recompiler's code. The allocation never moves.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn entries_ptr(&self) -> *const TlbEntry {
+        self.entries.as_ptr()
     }
 }
 
