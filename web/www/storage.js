@@ -1,9 +1,11 @@
 // Keeping C: in the browser: its image in IndexedDB, as the pieces the
 // emulator counts writes in (Machine.chunk_size()), so saving a change
-// writes only the pieces it touched. Pieces of zeros aren't stored.
+// writes only the pieces it touched. Pieces of zeros aren't stored. The
+// save states' slots are kept there too, by `<game or dos>/<slot>`.
 
 const DATABASE = 'rust-dos';
 const STORE = 'c-drive';
+const STATES = 'states';
 const META = 'meta';
 
 function done(request) {
@@ -32,8 +34,16 @@ export class DiskStore {
     if (!('indexedDB' in globalThis)) {
       return null;
     }
-    const request = indexedDB.open(DATABASE, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(STORE);
+    // Version 1 kept C: only; version 2 adds the save states.
+    const request = indexedDB.open(DATABASE, 2);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      for (const name of [STORE, STATES]) {
+        if (!db.objectStoreNames.contains(name)) {
+          db.createObjectStore(name);
+        }
+      }
+    };
     return new DiskStore(await done(request));
   }
 
@@ -97,6 +107,28 @@ export class DiskStore {
         store.put(bytes, index);
       } else {
         store.delete(index);
+      }
+    }
+    await finished(transaction);
+  }
+
+  /// The save states kept: [key, bytes] each.
+  async states() {
+    const transaction = this.db.transaction(STATES, 'readonly');
+    const store = transaction.objectStore(STATES);
+    const [keys, values] = await Promise.all([done(store.getAllKeys()), done(store.getAll())]);
+    return keys.map((key, i) => [key, values[i]]);
+  }
+
+  /// Keep save states: [key, bytes], with null bytes for a slot emptied.
+  async saveStates(changes) {
+    const transaction = this.db.transaction(STATES, 'readwrite');
+    const store = transaction.objectStore(STATES);
+    for (const [key, bytes] of changes) {
+      if (bytes) {
+        store.put(bytes, key);
+      } else {
+        store.delete(key);
       }
     }
     await finished(transaction);

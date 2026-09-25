@@ -21,6 +21,7 @@ use rust_dos::diskimage::{self, DiskImage, MemoryImage};
 use rust_dos::exec::{self, NoHook};
 use rust_dos::games::{self, ActiveGame, GameEntry, NewGame};
 use rust_dos::hardware::Hardware;
+use rust_dos::savestate::{self, slots};
 use rust_dos::joystick::PadState;
 use rust_dos::keylayout::{Layout, LayoutSetting};
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
@@ -119,6 +120,17 @@ struct Requests {
     image: Option<i32>,
     /// The game profiles changed, for the page to keep.
     games: bool,
+    /// The save states saved or emptied, by key, for the page to keep.
+    states: std::collections::BTreeSet<String>,
+}
+
+/// What a slot's message says of the state in it: when it was saved,
+/// and in which program.
+fn describe_state(header: &slots::Header) -> String {
+    match header.program.as_str() {
+        "" => header.saved.clone(),
+        program => format!("{}, {}", header.saved, program),
+    }
 }
 
 /// The emulated PC, as the page sees it.
@@ -162,6 +174,10 @@ pub struct Machine {
     /// not ended yet.
     games: BTreeMap<String, String>,
     game: Option<ActiveGame>,
+    /// The save states the page keeps (slot files, see savestate/slots.rs)
+    /// by `<game or dos>/<slot>`, and the slot the hotkeys use.
+    states: BTreeMap<String, Vec<u8>>,
+    slot: u8,
     /// What the settings window's Stats page shows, and the last frame's
     /// start and times for it.
     stats: Stats,
@@ -226,6 +242,8 @@ impl Machine {
             staged: None,
             games: BTreeMap::new(),
             game: None,
+            states: BTreeMap::new(),
+            slot: 1,
             stats: Stats::new(),
             last_frame: None,
         }
@@ -501,9 +519,63 @@ impl Machine {
         }
     }
 
+    /// A save state the page kept, by its key, for the slots.
+    pub fn put_state(&mut self, key: &str, data: Vec<u8>) {
+        self.states.insert(key.to_string(), data);
+    }
+
+    /// The keys of the save states saved or emptied since the last call,
+    /// for the page to keep (`state_data`) or forget.
+    pub fn take_state_changes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.requests.states).into_iter().collect()
+    }
+
+    /// The save state of a key, if there is one.
+    pub fn state_data(&self, key: &str) -> Option<Vec<u8>> {
+        self.states.get(key).cloned()
+    }
+
+    /// The save state hotkeys: save to the current slot (Ctrl+F1, 1), load
+    /// it (Ctrl+F2, 2), or pick the next or, with `back`, the previous
+    /// (Ctrl+F3, 3).
+    pub fn state_hotkey(&mut self, action: u8, back: bool) {
+        if self.ui.is_open() {
+            return;
+        }
+        let slot = self.slot;
+        let message = match action {
+            1 => self.with_ui(|_, host| host.save_slot(slot)).unwrap_or_else(|e| format!("Slot {} can't be saved: {}", slot, e)),
+            2 => match self.with_ui(|_, host| host.load_slot(slot)) {
+                Ok(message) => {
+                    self.release_input();
+                    message
+                }
+                Err(e) => format!("Slot {} can't be loaded: {}", slot, e),
+            },
+            _ => {
+                let next = if back { (slot + slots::SLOTS - 2) % slots::SLOTS + 1 } else { slot % slots::SLOTS + 1 };
+                self.slot = next;
+                let key = self.with_ui(|_, host| host.state_key(next));
+                match self.states.get(&key).and_then(|data| slots::read_header(data).ok()) {
+                    Some((header, _, _)) => format!("Slot {}: {}", self.slot, describe_state(&header)),
+                    None => format!("Slot {}: empty", self.slot),
+                }
+            }
+        };
+        self.osd.show(message);
+    }
+
     // ------------------------------------------------------------------
     // The settings window
     // ------------------------------------------------------------------
+
+    /// Open the settings window on the save states (Ctrl+F9).
+    pub fn show_states(&mut self) {
+        if !self.ui.is_open() {
+            self.toggle_settings();
+        }
+        self.with_ui(|ui, host| ui.show_states(&*host));
+    }
 
     /// Open or close the settings window (Ctrl+F12). It takes the keyboard
     /// and the mouse: the page sends them with `settings_key`,
@@ -905,6 +977,9 @@ impl Machine {
             shaders: self.shaders,
             games: &mut self.games,
             game: &mut self.game,
+            states: &mut self.states,
+            slot: &mut self.slot,
+            picture: &self.picture,
         };
         action(&mut self.ui, &mut host)
     }
@@ -977,9 +1052,56 @@ struct PageHost<'m> {
     shaders: bool,
     games: &'m mut BTreeMap<String, String>,
     game: &'m mut Option<ActiveGame>,
+    /// The save states, the slot the hotkeys use, and the picture a
+    /// state saved now has.
+    states: &'m mut BTreeMap<String, Vec<u8>>,
+    slot: &'m mut u8,
+    picture: &'m Frame,
 }
 
 impl PageHost<'_> {
+    /// The key a slot's state has: the game's slots, or the machine's
+    /// without one.
+    fn state_key(&self, slot: u8) -> String {
+        format!("{}/{}", self.game.as_ref().map_or("dos", |g| g.id.as_str()), slot)
+    }
+
+    /// Save the machine to slot `slot`.
+    fn save_slot(&mut self, slot: u8) -> Result<String, String> {
+        let hardware = self.hardware.settings(self.settings);
+        let game = self.game.as_ref().map(|g| (g.id.as_str(), g.name.as_str()));
+        let header = slots::header(self.cpu, &hardware, game);
+        let data = slots::encode(&header, &slots::thumbnail(self.picture), &savestate::machine::save(self.cpu));
+        let key = self.state_key(slot);
+        self.states.insert(key.clone(), data);
+        self.requests.states.insert(key);
+        *self.slot = slot;
+        Ok(format!("Saved to slot {}", slot))
+    }
+
+    /// Load slot `slot`: the hardware it was saved with first, then the
+    /// machine. A state of another memsize is refused.
+    fn load_slot(&mut self, slot: u8) -> Result<String, String> {
+        let data = self.states.get(&self.state_key(slot)).ok_or("empty")?;
+        let (header, state) = slots::decode(data)?;
+        if let Some(why) = slots::refusal(&header, self.cpu.bus.ram().len() >> 20) {
+            return Err(why);
+        }
+        let hardware = slots::machine_settings(&header.machine, self.settings);
+        if let Err(e) = self.apply(&hardware) {
+            self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", e));
+        }
+        if self.hardware.differs(self.settings) {
+            for warning in self.hardware.apply(self.cpu, self.settings) {
+                self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
+            }
+        }
+        savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string())?;
+        self.pacer.rebase(&self.cpu.bus.clock, Instant::now());
+        *self.slot = slot;
+        Ok(format!("Loaded slot {}: {}", slot, describe_state(&header)))
+    }
+
     /// Launch the game `id`: its settings over these, and the commands that
     /// start it. The browser has no host directories for its drives.
     fn start_game(&mut self, id: &str) -> Result<String, String> {
@@ -1154,6 +1276,43 @@ impl Host for PageHost<'_> {
     fn set_freezes(&mut self, freezes: Vec<rust_dos::cheats::Freeze>) {
         self.cpu.bus.freezes = freezes;
         self.cpu.bus.apply_freezes();
+    }
+
+    fn states_available(&self) -> bool {
+        true
+    }
+
+    fn states(&self) -> Vec<rust_dos::config_ui::SlotView> {
+        (1..=slots::SLOTS)
+            .filter_map(|slot| {
+                let data = self.states.get(&self.state_key(slot))?;
+                let (header, picture, _) = slots::read_header(data).ok()?;
+                Some(rust_dos::config_ui::SlotView {
+                    slot,
+                    header: Some(header),
+                    picture: rust_dos::capture::png::decode(picture),
+                })
+            })
+            .collect()
+    }
+
+    fn current_slot(&self) -> u8 {
+        *self.slot
+    }
+
+    fn save_state(&mut self, slot: u8) -> Result<String, String> {
+        self.save_slot(slot)
+    }
+
+    fn load_state(&mut self, slot: u8) -> Result<String, String> {
+        self.load_slot(slot)
+    }
+
+    fn delete_state(&mut self, slot: u8) -> Result<(), String> {
+        let key = self.state_key(slot);
+        self.states.remove(&key);
+        self.requests.states.insert(key);
+        Ok(())
     }
 }
 

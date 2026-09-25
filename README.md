@@ -773,6 +773,11 @@ In the browser:
   then downloads the video: WebM, or MP4 where the browser records no
   WebM. The recording shows the screen as the page does, CRT look
   included, and keeps the sound even with *Sound off*.
+* [Save states](#save-states) work as in the rust-dos program: Ctrl+F1
+  saves to the current slot, Ctrl+F2 loads it, Ctrl+F3 and Ctrl+Shift+F3
+  pick another, and Ctrl+F9 shows the slots in the settings window. The
+  browser keeps them in its storage with C:. Rewind is for the rust-dos
+  program only.
 * Gamepads work as joysticks once a button is pressed on them, as browsers
   require (see `[joystick]`).
 * On phones and tablets, *Touch* shows a D-pad and four buttons over the

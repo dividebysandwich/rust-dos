@@ -688,6 +688,24 @@ window.addEventListener('keydown', (event) => {
     document.exitPointerLock?.();
     return;
   }
+  // Ctrl+F1 saves the machine to the current slot, Ctrl+F2 loads it, and
+  // Ctrl+F3 and Ctrl+Shift+F3 pick another; Ctrl+F9 shows them all in the
+  // settings window, as in the rust-dos program.
+  if (event.ctrlKey && !event.altKey && ['F1', 'F2', 'F3'].includes(event.code)) {
+    event.preventDefault();
+    if (!event.repeat) {
+      guard(() => machine.state_hotkey(Number(event.code.slice(1)), event.shiftKey));
+      keepStates();
+    }
+    return;
+  }
+  if (event.ctrlKey && !event.altKey && event.code === 'F9') {
+    event.preventDefault();
+    if (!event.repeat) {
+      settingsInput(() => machine.show_states());
+    }
+    return;
+  }
   // Alt+Pause pauses the machine, holding Alt+F12 runs it fast, Ctrl+F11
   // and Ctrl+Shift+F11 slow the CPU down and speed it up, and Ctrl+F8 turns
   // the sound off and on.
@@ -1849,7 +1867,44 @@ function syncSettings() {
   if (games !== undefined && !remember(GAMES_KEY, games)) {
     toast("The game profiles can't be kept: this browser doesn't let the page store them.", 'warn');
   }
+  keepStates();
   showPicture();
+}
+
+let statesLost = false;
+
+/// Keep the save states saved or emptied since the last time in the
+/// browser's storage.
+function keepStates() {
+  const keys = machine.take_state_changes();
+  if (!keys.length) {
+    return;
+  }
+  if (!store) {
+    if (!statesLost) {
+      toast("Save states are lost when the page closes: this browser doesn't let the page store them.", 'warn');
+    }
+    statesLost = true;
+    return;
+  }
+  const changes = keys.map((key) => [key, machine.state_data(key) ?? null]);
+  store.saveStates(changes).catch((error) => {
+    toast(`The save state can't be kept in the browser's storage: ${error.message ?? error}`, 'warn');
+  });
+}
+
+/// Give the machine the save states the browser keeps.
+async function restoreStates() {
+  if (!store) {
+    return;
+  }
+  try {
+    for (const [key, bytes] of await store.states()) {
+      machine.put_state(key, bytes);
+    }
+  } catch (error) {
+    toast(`The save states couldn't be read back from the browser's storage: ${error.message ?? error}`, 'warn');
+  }
 }
 
 /// Show the picture as the settings have it: stretched to 4:3 or not,
@@ -1989,6 +2044,7 @@ async function start() {
     toast(`Settings: ${warning}`, 'warn');
   }
   await setUpC();
+  await restoreStates();
   for (const url of params.getAll('zip')) {
     await fetchZip(url);
   }
