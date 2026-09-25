@@ -191,6 +191,10 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
     match std::mem::replace(&mut shell.asked, Asked::Nothing) {
         Asked::Nothing => {}
         Asked::Exec => {
+            // The files the program's command line redirected its input
+            // and output to are closed.
+            cpu.bus.disk.close_file(0);
+            cpu.bus.disk.close_file(1);
             if cpu.get_cpu_flag(CpuFlags::CF) {
                 print_string(cpu, "Bad command or file name.\r\n");
             } else {

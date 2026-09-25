@@ -653,6 +653,11 @@ pub fn print_cp437(cpu: &mut Cpu, text: &[u8], attr: u8) {
 }
 
 fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
+    // A built-in command's output redirected to a file.
+    if let Some(captured) = cpu.stdout_capture.as_mut() {
+        captured.extend(text);
+        return;
+    }
     let mut col = cpu.bus.cursor_x;
     let mut row = cpu.bus.cursor_y;
     let max_cols = 80;

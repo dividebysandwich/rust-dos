@@ -244,6 +244,9 @@ pub struct Cpu {
     /// Set while a command line of a secondary COMMAND.COM runs: what it
     /// asks the shell's program to do.
     pub secondary: Option<crate::command_com::Dispatch>,
+    /// What a built-in command prints while its output is redirected
+    /// (`>file`), instead of the screen.
+    pub stdout_capture: Option<Vec<u8>>,
     /// The batch files running, whose lines are dispatched as if typed
     /// at the prompt while the shell is idle (no child program on the
     /// process_stack and CS still in shell-land), and ECHO.
@@ -401,6 +404,7 @@ impl Cpu {
             shell_prompt_at: None,
             secondary_shells: Vec::new(),
             secondary: None,
+            stdout_capture: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
             fpu_stack: [F80::new(); 8],

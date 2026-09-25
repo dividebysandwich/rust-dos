@@ -542,3 +542,41 @@ fn what_a_program_printed_stays_on_the_screen_after_it() {
     run_until(&mut cpu, 200, |cpu| cpu.shell_idle());
     assert_eq!(screen(&cpu), "C:\\>hello\nhi\nC:\\>");
 }
+
+#[test]
+fn output_and_input_can_be_redirected() {
+    #[rustfmt::skip]
+    let hello = [
+        0xB4, 0x09, 0xBA, 0x09, 0x01,   // MOV AH, 09h; MOV DX, 0109h
+        0xCD, 0x21,                     // INT 21h
+        0xCD, 0x20,                     // INT 20h
+        b'h', b'i', b'\r', b'\n', b'$',
+    ];
+    #[rustfmt::skip]
+    let echo = [
+        // Read up to 20 bytes of standard input to 0200h and write them out.
+        0xB4, 0x3F, 0x31, 0xDB, 0xB9, 0x14, 0x00, 0xBA, 0x00, 0x02, 0xCD, 0x21,
+        0x89, 0xC1, 0xB4, 0x40, 0xBB, 0x01, 0x00, 0xCD, 0x21,
+        0xCD, 0x20,
+    ];
+    let dir = scratch("redirect", &[("HELLO.COM", &hello), ("ECHOIN.COM", &echo), ("IN.TXT", b"from a file")]);
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines([
+        "@echo first > OUT.TXT",
+        "@echo second>>OUT.TXT",
+        "@dir > NUL",
+        "@md SUB > NUL",
+        "@HELLO > PROG.TXT",
+        "@HELLO >> PROG.TXT",
+        "@ECHOIN < IN.TXT > COPY.TXT",
+        "@echo shown | nothing",
+    ]);
+    run_batch_files(&mut cpu);
+    assert_eq!(fs::read(dir.join("OUT.TXT")).unwrap(), b"first\r\nsecond\r\n");
+    assert!(dir.join("SUB").is_dir(), "> NUL isn't the directory's name");
+    assert_eq!(fs::read(dir.join("PROG.TXT")).unwrap(), b"hi\r\nhi\r\n");
+    assert_eq!(fs::read(dir.join("COPY.TXT")).unwrap(), b"from a file");
+    let screen = screen(&cpu);
+    assert!(!screen.contains("hi") && !screen.contains("Volume"), "{}", screen);
+    assert!(screen.contains("shown"), "{}", screen);
+}

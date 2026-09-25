@@ -442,18 +442,120 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     // A leading '@' (which hides a batch line's echo) means nothing here.
     let cmd = cmd.trim_start();
     let cmd = cmd.strip_prefix('@').unwrap_or(cmd);
-    let (command, args) = split_command(cmd);
+    let (cmd, redirect) = take_redirections(cmd);
+    let (command, args) = split_command(&cmd);
     if command.is_empty() {
         return;
     }
 
-    if CommandDispatcher::new().dispatch(cpu, command, args) {
+    if redirect.output.is_some() {
+        cpu.stdout_capture = Some(Vec::new());
+    }
+    let builtin = CommandDispatcher::new().dispatch(cpu, command, args);
+    if let Some(captured) = cpu.stdout_capture.take()
+        && builtin
+    {
+        write_redirected(cpu, &redirect, &captured);
+    }
+    if builtin {
         // Built-in command executed. The shell continues.
         return;
     }
 
-    if !run_program(cpu, command, args.trim(), false) {
-        crate::video::print_string(cpu, "Bad command or file name.\r\n");
+    match start(cpu, command, args.trim(), false, false) {
+        None => crate::video::print_string(cpu, "Bad command or file name.\r\n"),
+        Some(Started::Program) => redirect_program(cpu, &redirect),
+        Some(Started::Batch) => {}
+    }
+}
+
+/// Where a command line sends its output and takes its input.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Redirections {
+    /// `>file`, or `>>file` to add to it (true).
+    pub output: Option<(String, bool)>,
+    /// `<file`.
+    pub input: Option<String>,
+}
+
+/// A command line without its redirections (`>file`, `>>file`, `<file`),
+/// and them. What comes after a '|' is left out: there are no pipes.
+pub fn take_redirections(line: &str) -> (String, Redirections) {
+    let mut redirect = Redirections::default();
+    let mut rest = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                rest.push(c);
+            }
+            '>' | '<' if !quoted => {
+                let append = c == '>' && chars.next_if_eq(&'>').is_some();
+                while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+                let mut name = String::new();
+                while let Some(c) = chars.next_if(|c| !matches!(c, ' ' | '\t' | '<' | '>' | '|')) {
+                    name.push(c);
+                }
+                if c == '>' {
+                    redirect.output = Some((name, append));
+                } else {
+                    redirect.input = Some(name);
+                }
+            }
+            '|' if !quoted => break,
+            _ => rest.push(c),
+        }
+    }
+    (rest.trim_end().to_string(), redirect)
+}
+
+/// Where a built-in command's redirected output goes: into the file
+/// (after what it had with >>), or nowhere for NUL.
+fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
+    let Some((path, append)) = &redirect.output else { return };
+    match crate::disk::char_device(path) {
+        Some(crate::disk::CharDevice::Con) => return crate::video::print_cp437(cpu, captured, 0x07),
+        Some(_) => return,
+        None => {}
+    }
+    let mut data = Vec::new();
+    if *append && let Some(file) = cpu.bus.disk.file_data(path) {
+        data.extend(file.read().map(|b| b.to_vec()).unwrap_or_default());
+        if data.last() == Some(&0x1A) {
+            data.pop();
+        }
+    }
+    data.extend_from_slice(captured);
+    if cpu.bus.disk.write_whole_file(path, &data, None).is_err() {
+        crate::video::print_string(cpu, "File creation error\r\n");
+    }
+}
+
+/// Give a program started from the shell the files its command line
+/// redirected: its handle 1 (standard output) and 0 (standard input).
+fn redirect_program(cpu: &mut Cpu, redirect: &Redirections) {
+    let owner = cpu.current_psp;
+    let disk = &mut cpu.bus.disk;
+    if let Some((path, append)) = &redirect.output {
+        let is_device = crate::disk::char_device(path).is_some();
+        if !is_device && (!append || !disk.exists(path)) {
+            let _ = disk.write_whole_file(path, &[], None);
+        }
+        if let Ok(handle) = disk.open_file(path, 0x01, owner) {
+            if *append {
+                let _ = disk.seek_file(handle, 0, 2);
+            }
+            let _ = disk.duplicate_handle(handle, Some(1));
+            disk.close_file(handle);
+        }
+    }
+    if let Some(path) = &redirect.input
+        && let Ok(handle) = disk.open_file(path, 0x00, owner)
+    {
+        let _ = disk.duplicate_handle(handle, Some(0));
+        disk.close_file(handle);
     }
 }
 
@@ -462,7 +564,14 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
 /// probe .com, .exe, then .bat, matching COMMAND.COM's precedence. A loaded
 /// program starts at the CS:IP the loader set. False if there is none.
 pub fn run_program(cpu: &mut Cpu, command: &str, args: &str, high: bool) -> bool {
-    start(cpu, command, args, high, false)
+    start(cpu, command, args, high, false).is_some()
+}
+
+/// What `start` started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Started {
+    Program,
+    Batch,
 }
 
 /// CALL: run a command line as the shell does, but a batch file on top of
@@ -472,25 +581,23 @@ pub fn call(cpu: &mut Cpu, line: &str) {
     if command.is_empty() || CommandDispatcher::new().dispatch(cpu, command, args) {
         return;
     }
-    if !start(cpu, command, args.trim(), false, true) {
+    if start(cpu, command, args.trim(), false, true).is_none() {
         crate::video::print_string(cpu, "Bad command or file name.\r\n");
     }
 }
 
 /// `run_program`, and with `call` a batch file on top of the one running.
-fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> bool {
-    let Some(path) = find_program(cpu, command) else {
-        return false;
-    };
+fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> Option<Started> {
+    let path = find_program(cpu, command)?;
     if path.to_ascii_uppercase().ends_with(".BAT") {
-        cpu.start_batch_file(&path, command, args, call)
-    } else if let Some(dispatch) = cpu.secondary.as_mut() {
+        return cpu.start_batch_file(&path, command, args, call).then_some(Started::Batch);
+    }
+    if let Some(dispatch) = cpu.secondary.as_mut() {
         // A secondary COMMAND.COM runs it with EXEC.
         dispatch.exec = Some((path, args.to_string()));
-        true
-    } else {
-        load_program(cpu, &path, args, high)
+        return Some(Started::Program);
     }
+    load_program(cpu, &path, args, high).then_some(Started::Program)
 }
 
 /// Where the program or batch file `command` is, as COMMAND.COM looks for

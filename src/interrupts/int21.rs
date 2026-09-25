@@ -171,6 +171,19 @@ fn con_read(cpu: &mut Cpu) -> Option<u8> {
     Some(ascii)
 }
 
+/// Write a character to standard output (handle 1) as DOS's character
+/// functions do: to the screen (a bell beeps), or to where the command
+/// line redirected it.
+fn stdout_char(cpu: &mut Cpu, byte: u8) {
+    if cpu.bus.disk.is_open(1) && cpu.bus.disk.handle_device(1) != Some(crate::disk::CharDevice::Con) {
+        let _ = cpu.bus.disk.write_file(1, &[byte]);
+    } else if byte == 0x07 {
+        play_sdl_beep(&mut cpu.bus);
+    } else {
+        print_char(&mut cpu.bus, byte);
+    }
+}
+
 /// A line being typed at the keyboard for INT 21h AH=0Ah or a read of
 /// CON, which waits for more keys until Enter.
 #[derive(Clone, Debug, Default)]
@@ -311,11 +324,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 02h: Output Character (DL = Char)
         0x02 => {
             let char_byte = cpu.get_dl();
-            if char_byte == 0x07 {
-                play_sdl_beep(&mut cpu.bus);
-            } else {
-                print_char(&mut cpu.bus, char_byte);
-            }
+            stdout_char(cpu, char_byte);
             cpu.set_reg8(Register::AL, char_byte);
         }
 
@@ -337,11 +346,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             } else {
                 // --- OUTPUT ---
                 // Write character in DL to screen
-                if dl == 0x07 {
-                    play_sdl_beep(&mut cpu.bus);
-                } else {
-                    print_char(&mut cpu.bus, dl);
-                }
+                stdout_char(cpu, dl);
                 // AL is officially undefined on output, but we leave it alone.
             }
         }
@@ -415,12 +420,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 if char_byte == b'$' {
                     break;
                 }
-
-                if char_byte == 0x07 {
-                    play_sdl_beep(&mut cpu.bus);
-                } else {
-                    print_char(&mut cpu.bus, char_byte);
-                }
+                stdout_char(cpu, char_byte);
                 offset += 1;
             }
         }
@@ -1087,7 +1087,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let handle = cpu.bx();
             // The standard devices (handles 0-4) are not in the file table;
             // closing them always succeeds.
-            if handle < FIRST_USER_HANDLE || cpu.bus.disk.close_file(handle) {
+            if cpu.bus.disk.close_file(handle) || handle < FIRST_USER_HANDLE {
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 cpu.set_ax(0x06); // Invalid handle
@@ -1101,7 +1101,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let count = cpu.cx() as usize;
             let mut buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
-            if handle == 0 {
+            if handle == 0 && !cpu.bus.disk.is_open(0) {
                 // STDIN, the console: read a line at a time as DOS does,
                 // waiting for Enter, and hand out the line with its CR LF
                 // over as many reads as it takes.
@@ -1166,8 +1166,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 data.push(cpu.bus.read_8(buf_addr + i));
             }
 
-            let console = cpu.bus.disk.handle_device(handle) == Some(crate::disk::CharDevice::Con);
-            if handle == 1 || handle == 2 || console {
+            // Handles 1 and 2 are the screen unless the command line
+            // redirected them.
+            let console = cpu.bus.disk.handle_device(handle) == Some(crate::disk::CharDevice::Con)
+                || ((handle == 1 || handle == 2) && !cpu.bus.disk.is_open(handle));
+            if console {
                 // STDOUT/STDERR, or CON opened by name
                 for &byte in &data {
                     if byte == 0x07 {

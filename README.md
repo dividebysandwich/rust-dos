@@ -586,6 +586,11 @@ too. Besides these, the prompt has these commands:
 | `EXIT` | quit rust-dos, or go back from `COMMAND` |
 | `COMMAND [/C command \| /K command]` | a second prompt, until `EXIT`; `/C` runs the command and goes back, `/K` runs it and stays |
 
+`>file` sends what a command (a built-in one or a program) prints to a
+file, `>>file` adds it to the end of one, and `<file` gives a program a file
+to read as its input; `>NUL` throws the output away. There are no pipes:
+what comes after a `|` is left out.
+
 ### Prompt
 
 `PROMPT text` sets the prompt, `$P$G` (`C:\GAMES>`) without it. Its codes
