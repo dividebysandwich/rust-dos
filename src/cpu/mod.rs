@@ -805,6 +805,8 @@ impl Cpu {
         // No program runs any more: its extended memory and A20 go too,
         // and a reset from now on is a cold boot.
         self.bus.xms = crate::xms::Xms::new();
+        // The addresses of its values mean nothing to the next program.
+        self.bus.freezes.clear();
         if self.bus.ems.is_some() {
             self.bus.ems = Some(crate::ems::Ems::new());
         }

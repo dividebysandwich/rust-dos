@@ -358,6 +358,8 @@ impl Machine {
         let cpu = &mut self.cpu;
         let batch_start = Instant::now();
         let waiting = self.ui.pauses_machine() || self.paused;
+        // The values frozen on the Cheats page, as the program left them.
+        cpu.bus.apply_freezes();
         let batch_end = if cpu.bus.exit_requested || waiting {
             cpu.bus.clock.icount
         } else {
@@ -1126,6 +1128,25 @@ impl Host for PageHost<'_> {
 
     fn current_directory(&self) -> String {
         games::prompt_directory(self.cpu)
+    }
+
+    fn memory(&self) -> &[u8] {
+        self.cpu.bus.ram()
+    }
+
+    fn poke(&mut self, addr: usize, bytes: &[u8]) {
+        for (i, &byte) in bytes.iter().enumerate() {
+            self.cpu.bus.write_8(addr + i, byte);
+        }
+    }
+
+    fn freezes(&self) -> Vec<rust_dos::cheats::Freeze> {
+        self.cpu.bus.freezes.clone()
+    }
+
+    fn set_freezes(&mut self, freezes: Vec<rust_dos::cheats::Freeze>) {
+        self.cpu.bus.freezes = freezes;
+        self.cpu.bus.apply_freezes();
     }
 }
 

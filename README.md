@@ -254,6 +254,16 @@ as you set them. Ctrl+F12 or Esc closes it.
   reverb and chorus.
 * **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
   makes one from the settings as they are, Del deletes one.
+* **Cheats:** finds a game's values in memory, such as its lives or money,
+  and changes them. Search for the value the game shows (or for any value,
+  when the game shows none, such as an energy bar), close the window and
+  play on until it changes, then narrow the addresses down: by the new
+  value, or by whether it changed, went up or went down. Once few are
+  left, Enter sets one's value, and Ins freezes it: the machine puts the
+  value back before every frame until the program ends. Values are 8, 16
+  or 32 bits, typed in decimal or hex (`0x1F`, `$1F`, `1Fh`), and the
+  search covers conventional memory, or all of it for games with DOS
+  extenders.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the

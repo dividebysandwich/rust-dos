@@ -66,6 +66,9 @@ pub struct Bus {
     pub umb: Option<crate::mcb::Umb>,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
     pub lpt_dac: Option<crate::lpt_dac::LptDac>,
+    /// Values the settings window's Cheats page froze, put back before
+    /// every frame while the program runs (`apply_freezes`).
+    pub freezes: Vec<crate::cheats::Freeze>,
     /// Last POST code written to port 80h (or 190h, test ROMs).
     pub post_code: u8,
     /// Text written to port E9h, the Bochs debug console, which test ROMs
@@ -219,6 +222,7 @@ impl Bus {
             ems: None,
             umb: None,
             lpt_dac: None,
+            freezes: Vec::new(),
             refresh_toggle: false,
             cursor_x: 0,
             cursor_y: 0,
@@ -418,6 +422,16 @@ impl Bus {
     pub fn set_mixer(&mut self, settings: crate::mixer::MixerSettings) {
         self.audio_catch_up();
         self.mixer.set(settings);
+    }
+
+    /// Put the frozen values back (the frontends do before every frame).
+    pub fn apply_freezes(&mut self) {
+        for i in 0..self.freezes.len() {
+            let freeze = self.freezes[i];
+            for (j, byte) in freeze.width.bytes_of(freeze.value).into_iter().enumerate() {
+                self.write_8(freeze.addr + j, byte);
+            }
+        }
     }
 
     /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the BIOS data area

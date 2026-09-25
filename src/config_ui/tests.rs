@@ -33,6 +33,9 @@ struct FakeHost {
     games: Vec<GameEntry>,
     launched: Vec<String>,
     created: Vec<NewGame>,
+    /// The machine's memory for the Cheats page, and its frozen values.
+    ram: Vec<u8>,
+    frozen: Vec<crate::cheats::Freeze>,
 }
 
 impl FakeHost {
@@ -52,6 +55,8 @@ impl FakeHost {
             games: vec![],
             launched: vec![],
             created: vec![],
+            ram: vec![],
+            frozen: vec![],
         }
     }
 }
@@ -126,6 +131,22 @@ impl Host for FakeHost {
 
     fn current_directory(&self) -> String {
         "C:\\GAMES".to_string()
+    }
+
+    fn memory(&self) -> &[u8] {
+        &self.ram
+    }
+
+    fn poke(&mut self, addr: usize, bytes: &[u8]) {
+        self.ram[addr..addr + bytes.len()].copy_from_slice(bytes);
+    }
+
+    fn freezes(&self) -> Vec<crate::cheats::Freeze> {
+        self.frozen.clone()
+    }
+
+    fn set_freezes(&mut self, freezes: Vec<crate::cheats::Freeze>) {
+        self.frozen = freezes;
     }
 }
 
@@ -652,4 +673,56 @@ fn the_tabs_fit_or_scroll() {
             assert!(ui.hits.iter().filter(|h| h.row == 1).all(|h| h.col + h.width < ui.layout.unwrap().cols));
         }
     }
+}
+
+#[test]
+fn the_cheats_page_finds_sets_and_freezes() {
+    use crate::cheats::{Freeze, Width};
+    let mut host = FakeHost::new();
+    host.ram = vec![0; 0x10000];
+    host.ram[0x1234] = 3;
+    host.ram[0x2000] = 3;
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Cheats);
+    assert!(ui.pauses_machine());
+    // A new search for 3 finds both.
+    ui.row = 2;
+    keys(&mut ui, &mut host, &[Enter]);
+    ui.text("3", &mut host);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert!(status(&ui).0.starts_with("2 addresses hold 3"), "{:?}", status(&ui));
+    assert_eq!(ui.row_count(), 6);
+    ui.draw(&mut Frame::new(640, 400));
+
+    // The game changed one to 2: narrowing to 2 leaves it.
+    host.ram[0x1234] = 2;
+    keys(&mut ui, &mut host, &[Down, Enter]);
+    ui.text("2", &mut host);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert_eq!(ui.row_count(), 5);
+    assert!(status(&ui).0.starts_with("One address is left"), "{:?}", status(&ui));
+
+    // Set it to 9, then freeze it.
+    keys(&mut ui, &mut host, &[Down, Enter, End, Backspace]);
+    ui.text("9", &mut host);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert_eq!(host.ram[0x1234], 9);
+    keys(&mut ui, &mut host, &[Insert]);
+    assert_eq!(host.frozen, [Freeze { addr: 0x1234, width: Width::Byte, value: 9 }]);
+    assert_eq!(ui.row_count(), 6, "the frozen value is listed");
+    ui.draw(&mut Frame::new(640, 400));
+    keys(&mut ui, &mut host, &[End, Delete]);
+    assert!(host.frozen.is_empty());
+
+    // A typo is refused; a bigger value size starts again.
+    keys(&mut ui, &mut host, &[Home, Down, Down, Enter]);
+    ui.text("lots", &mut host);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert!(status(&ui).1);
+    keys(&mut ui, &mut host, &[Esc, Home, Right]);
+    assert_eq!(ui.row_count(), 4);
+    // Changed or not, without a search, is an error.
+    keys(&mut ui, &mut host, &[Down, Down, Down, Right, Enter]);
+    assert!(status(&ui).1, "{:?}", status(&ui));
 }

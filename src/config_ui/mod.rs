@@ -7,6 +7,7 @@
 //! `Host`. What the frontend doesn't have (`Frontend`) isn't offered.
 
 mod browser;
+mod cheats;
 mod dialog;
 mod draw;
 mod games;
@@ -115,6 +116,21 @@ pub trait Host {
     fn current_directory(&self) -> String {
         "C:\\".to_string()
     }
+    /// The machine's RAM, for the Cheats page to search.
+    fn memory(&self) -> &[u8] {
+        &[]
+    }
+    /// Write `bytes` to the machine's memory at `addr`.
+    fn poke(&mut self, addr: usize, bytes: &[u8]) {
+        let _ = (addr, bytes);
+    }
+    /// The values the machine keeps frozen, and new ones.
+    fn freezes(&self) -> Vec<crate::cheats::Freeze> {
+        Vec::new()
+    }
+    fn set_freezes(&mut self, freezes: Vec<crate::cheats::Freeze>) {
+        let _ = freezes;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,9 +141,11 @@ enum Page {
     Sound,
     Mixer,
     Games,
+    Cheats,
 }
 
-const PAGES: [Page; 6] = [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer, Page::Games];
+const PAGES: [Page; 7] =
+    [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer, Page::Games, Page::Cheats];
 
 impl Page {
     fn title(self) -> &'static str {
@@ -138,13 +156,14 @@ impl Page {
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
             Page::Games => "Games",
+            Page::Cheats => "Cheats",
         }
     }
 
     fn items(self) -> &'static [Item] {
         use Item::*;
         match self {
-            Page::Drives | Page::Games => &[],
+            Page::Drives | Page::Games | Page::Cheats => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
             Page::Emulator => &[
                 Cycles, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick, Deadzone,
@@ -667,6 +686,8 @@ pub struct ConfigUi {
     confirm_delete: Option<usize>,
     /// What to tell the user once the window has closed (a game launched).
     notice: Option<String>,
+    /// The Cheats page's search.
+    cheats: cheats::Cheats,
 }
 
 impl Default for ConfigUi {
@@ -707,6 +728,7 @@ impl ConfigUi {
             game_dialog: None,
             confirm_delete: None,
             notice: None,
+            cheats: cheats::Cheats::default(),
         }
     }
 
@@ -745,6 +767,8 @@ impl ConfigUi {
         self.browser = None;
         self.game_dialog = None;
         self.confirm_delete = None;
+        self.cheats.edit = None;
+        self.cheats.refresh(host);
         self.refresh_games(host);
     }
 
@@ -764,6 +788,7 @@ impl ConfigUi {
         match self.page {
             Page::Drives => self.drives.len() + 1,
             Page::Games => self.games.len() + 1,
+            Page::Cheats => self.cheats.rows().len(),
             _ => self.items().len(),
         }
     }
@@ -802,6 +827,8 @@ impl ConfigUi {
             self.dialog_key(key, host);
         } else if self.game_dialog.is_some() {
             self.game_dialog_key(key, host);
+        } else if self.cheats.edit.is_some() {
+            self.cheats_edit_key(key, host);
         } else if self.edit.is_some() {
             self.edit_key(key, host);
         } else {
@@ -833,16 +860,19 @@ impl ConfigUi {
             Target::Tab(page) => {
                 if self.dialog.is_none() && self.browser.is_none() && self.game_dialog.is_none() {
                     self.edit = None;
+                    self.cheats.edit = None;
                     self.show_page(page);
                 }
             }
             Target::Row(i) if i == self.row => self.key(UiKey::Enter, host),
             Target::Row(i) => {
                 self.edit = None;
+                self.cheats.edit = None;
                 self.row = i;
             }
             Target::Step(i, dir) => {
                 self.edit = None;
+                self.cheats.edit = None;
                 self.row = i;
                 self.key(if dir < 0 { UiKey::Left } else { UiKey::Right }, host);
             }
@@ -910,6 +940,7 @@ impl ConfigUi {
             UiKey::Save => self.save(host),
             _ if self.page == Page::Drives => self.drives_key(key, host),
             _ if self.page == Page::Games => self.games_key(key, host),
+            _ if self.page == Page::Cheats => self.cheats_key(key, host),
             _ => self.setting_key(key, host),
         }
     }
@@ -1208,6 +1239,8 @@ impl ConfigUi {
             self.draw_drives(&mut g, content);
         } else if self.page == Page::Games {
             self.draw_games(&mut g, content);
+        } else if self.page == Page::Cheats {
+            self.draw_cheats(&mut g, content);
         } else {
             self.draw_settings(&mut g, content);
         }
@@ -1514,8 +1547,10 @@ impl ConfigUi {
             vec![("Tab", "Next", Tab), ("Enter", "Create", Enter), ("Esc", "Cancel", Esc)]
         } else if self.confirm_delete.is_some() {
             vec![("Enter", "Delete", Enter), ("Esc", "Keep", Esc)]
-        } else if self.edit.is_some() {
+        } else if self.edit.is_some() || self.cheats.edit.is_some() {
             vec![("Enter", "OK", Enter), ("Esc", "Cancel", Esc)]
+        } else if self.page == Page::Cheats {
+            self.cheats_hints()
         } else if self.page == Page::Games {
             vec![
                 ("Enter", "Launch", Enter),

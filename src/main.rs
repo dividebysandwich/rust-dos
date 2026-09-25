@@ -694,6 +694,8 @@ fn main() -> Result<(), String> {
         // the right instructions however the work is batched between frames.
         let batch_start = std::time::Instant::now();
         let waiting = dbg.paused || ui.pauses_machine() || paused;
+        // The values frozen on the Cheats page, as the program left them.
+        cpu.bus.apply_freezes();
         // The controllers as they are now; at rest while the machine waits.
         for slot in 0..2 {
             let pad = controllers.get(slot).map(|pad| if waiting { joystick::PadState::default() } else { pad_state(pad) });
@@ -1176,6 +1178,25 @@ impl Host for MainHost<'_, '_> {
 
     fn current_directory(&self) -> String {
         games::prompt_directory(self.cpu)
+    }
+
+    fn memory(&self) -> &[u8] {
+        self.cpu.bus.ram()
+    }
+
+    fn poke(&mut self, addr: usize, bytes: &[u8]) {
+        for (i, &byte) in bytes.iter().enumerate() {
+            self.cpu.bus.write_8(addr + i, byte);
+        }
+    }
+
+    fn freezes(&self) -> Vec<rust_dos::cheats::Freeze> {
+        self.cpu.bus.freezes.clone()
+    }
+
+    fn set_freezes(&mut self, freezes: Vec<rust_dos::cheats::Freeze>) {
+        self.cpu.bus.freezes = freezes;
+        self.cpu.bus.apply_freezes();
     }
 }
 
