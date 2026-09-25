@@ -13,7 +13,9 @@ fn scratch(name: &str, dirs: &[&str]) -> PathBuf {
     fs::canonicalize(&base).unwrap()
 }
 
-/// Run a shell command line and return what it printed.
+/// Run a shell command line and return what it printed. A row ends where
+/// the printing did: the spaces the command printed stay, so a line that
+/// wrapped at a space joins up again without the rows' line breaks.
 fn run(cpu: &mut Cpu, line: &str) -> String {
     for b in cpu.bus.vga.vram_text.iter_mut() {
         *b = 0;
@@ -37,10 +39,10 @@ fn run(cpu: &mut Cpu, line: &str) -> String {
         .map(|row| {
             row.iter()
                 .step_by(2)
-                .map(|&b| if b == 0 { ' ' } else { b as char })
+                .map(|&b| b as char)
                 .collect::<String>()
-                .trim_end()
-                .to_string()
+                .trim_end_matches('\0')
+                .replace('\0', " ")
         })
         .collect::<Vec<_>>()
         .join("\n")
