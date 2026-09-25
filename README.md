@@ -1,6 +1,6 @@
 # Rust-DOS
 
-<img width="640" height="400" alt="image" src="https://img.playspoon.com/t9vbqf.gif" />
+<img width="640" height="400" alt="image" src="https://img.playspoon.com/cgyo2w.gif" />
 
 ## Introduction
 
@@ -12,7 +12,7 @@ Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early 
 
 I wanted to learn more about the nuances of DOS emulation. Also, there's only one other DOS emulator written in Rust, and that one hasn't seen any development in 5 years and was using lots of unsafe{} code blocks.
 
-## What works
+## Features
 
 * FPU emulation
 * Interrupt handlers
@@ -20,22 +20,21 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   upper memory blocks with `LOADHIGH` (`LH`)
 * 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
   as DOS/4GW (Descent, Heretic)
-* A dynamic recompiler that translates protected-mode programs' code into
-  x86-64 or ARM64 host code and runs it exactly as the interpreter would
-  (see [docs/dynrec.md](docs/dynrec.md))
+* Dynamic recompiler translates protected-mode program code into
+  x86-64 or ARM64 host code (see [docs/dynrec.md](docs/dynrec.md))
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
   General MIDI through the MPU-401 with a SoundFont or the Gravis patches
 * Gravis Ultrasound: 32 wavetable voices, 1 MB of DRAM, DMA and timers, for
   both digital audio and music with built-in patch set.
-* The Covox Speech Thing and the Disney Sound Source on the parallel port
+* Covox Speech Thing and Disney Sound Source on the parallel port
 * Graphics: text, CGA, EGA and VGA modes with Mode X support
 * VESA VBE 2.0: 256-color, 15/16-bit and 32-bit modes from 320x200 to
   1024x768 with 4 MB of video memory, bank switching and linear frame
   buffer.
-* Mounting host directories as floppy, hard disk and CD-ROM drives
-* Mounting CD images (CUE sheets with BIN or WAV tracks, ISO, BIN and IMG)
+* Mount host directories as floppy, hard disk and CD-ROM drives
+* Mount CD images (CUE sheets with BIN or WAV tracks, ISO, BIN and IMG)
   as CD-ROM drives, including DOSBox's `IMGMOUNT` command
-* Mounting floppy and hard disk images (FAT12 and FAT16) for reading and
+* Mount floppy and hard disk images (FAT12 and FAT16) for reading and
   writing, with sector access through INT 13h and INT 25h/26h, and lists of
   disks to change with Ctrl+F4
 * Emulated disk speeds and disk drive noises
@@ -46,17 +45,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   buttons), or the mouse as a joystick
 * Configuration file with startup commands
 * Environment variables (`SET`, `PATH`)
-* Running in a web browser as WebAssembly, with C: kept in the browser's
+* Runs in a web browser as WebAssembly, with C: kept in the browser's
   storage (see [Running in a browser](#running-in-a-browser))
-
-## What partially works
-
-* Programs using OVLs
-* TSRs
-
-## What's not implemented yet
-
-* GUS MAX / Interwave codec, and SB emulation on the GUS (SBOS, MegaEm)
 
 ## Configuration
 
@@ -180,7 +170,7 @@ D:
   * `gusdrive` is the drive letter (D to Y) of the Gravis patch set built
     into rust-dos, or `none`. The default is `X`. The drive is read-only and
     holds the patches with `ULTRASND.INI` in `\ULTRASND`, as the Gravis
-    installer leaves them. It is there when the Ultrasound is.
+    installer leaves them. The drive exists only if GUS is enabled.
   * `ultradir` is the DOS directory of the Ultrasound software and patches.
     It defaults to `\ULTRASND` on `gusdrive` (`X:\ULTRASND`), or to
     `C:\ULTRASND` with `gusdrive=none`. To use patches of your own, set
@@ -605,3 +595,22 @@ To run without a window or sound device (for example under an agent), set
 `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`. The instruction trace ring holds
 `--trace-capacity` entries (default 1,000,000, about 64 bytes each). It is
 allocated only once tracing is enabled.
+
+## Contributing, LLM Usage, Licensing
+
+Both local and hosted LLMs (usually advertised as "Generative AI") were used in 
+the development of this software. Contributions written using LLMs are ok 
+provided the following rules are observed:
+
+* **Read and review** generated code. You should be able to answer questions 
+about your contribution.
+* **Document and comment** non-trivial parts of the code.
+* **Test** your contribution using actual games and programs.
+* Don't use LLMs for trivial things like changing a constant. This is slow, 
+  wasteful and runs the risk of unneccessary modifications elsewhere.
+* Use modern, sufficiently sized models with sufficient context size. Running 
+  small or outdated models or limiting them to small contexts results in low 
+  quality code and damage to existing functionality.
+* Usage of locally-hosted LLMs is encouraged, but not required.
+* Please keep commits as vendor-neutral as possible, i.e. put skills into the 
+  ``doc`` directory and reference them.
