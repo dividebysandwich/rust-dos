@@ -9,12 +9,16 @@
 mod browser;
 mod dialog;
 mod draw;
+mod games;
 pub mod osd;
 
 use browser::{Browser, IMAGES, Row, SOUNDFONTS};
 use dialog::{Event, Field, MountDialog, TextField};
 use draw::{Grid, Layout, Rgb};
 pub use draw::cp437;
+use games::{GameDialog, GameField};
+
+use crate::games::{GameEntry, NewGame};
 
 use crate::config::{MidiSynth, Settings};
 use crate::cpu::CpuModel;
@@ -84,6 +88,33 @@ pub trait Host {
         let _ = drive;
         Err("Disk images are mounted from the host's files here".to_string())
     }
+    /// The game profiles (games.rs), by name.
+    fn games(&self) -> Vec<GameEntry> {
+        Vec::new()
+    }
+    /// The game launched and not ended yet, by its id.
+    fn active_game(&self) -> Option<String> {
+        None
+    }
+    /// Launch the game `id` at the prompt: its settings, its drives and the
+    /// commands that start it. Returns what to tell the user.
+    fn launch_game(&mut self, id: &str) -> Result<String, String> {
+        let _ = id;
+        Err("There are no game profiles here".to_string())
+    }
+    /// Make a profile of `game` with `settings`. Returns its id.
+    fn create_game(&mut self, game: &NewGame, settings: &Settings) -> Result<String, String> {
+        let _ = (game, settings);
+        Err("There are no game profiles here".to_string())
+    }
+    fn delete_game(&mut self, id: &str) -> Result<(), String> {
+        let _ = id;
+        Err("There are no game profiles here".to_string())
+    }
+    /// The DOS directory the prompt is in, where a new game likely is.
+    fn current_directory(&self) -> String {
+        "C:\\".to_string()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,9 +124,10 @@ enum Page {
     Emulator,
     Sound,
     Mixer,
+    Games,
 }
 
-const PAGES: [Page; 5] = [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer];
+const PAGES: [Page; 6] = [Page::Drives, Page::Display, Page::Emulator, Page::Sound, Page::Mixer, Page::Games];
 
 impl Page {
     fn title(self) -> &'static str {
@@ -105,13 +137,14 @@ impl Page {
             Page::Emulator => "Emulator",
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
+            Page::Games => "Games",
         }
     }
 
     fn items(self) -> &'static [Item] {
         use Item::*;
         match self {
-            Page::Drives => &[],
+            Page::Drives | Page::Games => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
             Page::Emulator => &[
                 Cycles, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick, Deadzone,
@@ -583,6 +616,7 @@ enum Target {
     Step(usize, isize),
     Key(UiKey),
     Field(Field),
+    GameField(GameField),
     BrowserRow(usize),
 }
 
@@ -619,6 +653,14 @@ pub struct ConfigUi {
     /// each source is, falling slowly, and whether the output is muted.
     levels: [f32; CHANNELS],
     muted: bool,
+    /// The Games page: the profiles, the one running, a new one being
+    /// made, and one asked to be deleted.
+    games: Vec<GameEntry>,
+    active_game: Option<String>,
+    game_dialog: Option<GameDialog>,
+    confirm_delete: Option<usize>,
+    /// What to tell the user once the window has closed (a game launched).
+    notice: Option<String>,
 }
 
 impl Default for ConfigUi {
@@ -654,6 +696,11 @@ impl ConfigUi {
             visible: 10,
             levels: [0.0; CHANNELS],
             muted: false,
+            games: Vec::new(),
+            active_game: None,
+            game_dialog: None,
+            confirm_delete: None,
+            notice: None,
         }
     }
 
@@ -690,7 +737,15 @@ impl ConfigUi {
         self.edit = None;
         self.dialog = None;
         self.browser = None;
-        self.row = self.row.min(self.row_count().saturating_sub(1));
+        self.game_dialog = None;
+        self.confirm_delete = None;
+        self.refresh_games(host);
+    }
+
+    /// What the window has to tell the user after it closed, for the
+    /// frontend to show over the picture.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     pub fn close(&mut self) {
@@ -702,6 +757,7 @@ impl ConfigUi {
     fn row_count(&self) -> usize {
         match self.page {
             Page::Drives => self.drives.len() + 1,
+            Page::Games => self.games.len() + 1,
             _ => self.items().len(),
         }
     }
@@ -738,6 +794,8 @@ impl ConfigUi {
             self.browser_key(key, host);
         } else if self.dialog.is_some() {
             self.dialog_key(key, host);
+        } else if self.game_dialog.is_some() {
+            self.game_dialog_key(key, host);
         } else if self.edit.is_some() {
             self.edit_key(key, host);
         } else {
@@ -767,7 +825,7 @@ impl ConfigUi {
         };
         match target {
             Target::Tab(page) => {
-                if self.dialog.is_none() && self.browser.is_none() {
+                if self.dialog.is_none() && self.browser.is_none() && self.game_dialog.is_none() {
                     self.edit = None;
                     self.show_page(page);
                 }
@@ -794,6 +852,7 @@ impl ConfigUi {
                     }
                 }
             }
+            Target::GameField(field) => self.game_field_clicked(field, host),
             Target::BrowserRow(i) => {
                 if let Some((browser, _)) = &mut self.browser {
                     if browser.selected == i {
@@ -811,6 +870,7 @@ impl ConfigUi {
             self.page = page;
             self.row = 0;
             self.scroll = 0;
+            self.confirm_delete = None;
         }
     }
 
@@ -829,6 +889,9 @@ impl ConfigUi {
     }
 
     fn page_key(&mut self, key: UiKey, host: &mut dyn Host) {
+        if self.confirm_delete.is_some() {
+            return self.games_key(key, host);
+        }
         if let Some(row) = Self::navigate(key, self.row, self.row_count(), self.visible) {
             self.row = row;
             return;
@@ -840,6 +903,7 @@ impl ConfigUi {
             UiKey::BackTab => self.show_page(PAGES[(at + PAGES.len() - 1) % PAGES.len()]),
             UiKey::Save => self.save(host),
             _ if self.page == Page::Drives => self.drives_key(key, host),
+            _ if self.page == Page::Games => self.games_key(key, host),
             _ => self.setting_key(key, host),
         }
     }
@@ -1123,17 +1187,7 @@ impl ConfigUi {
         g.line(2, 0xC7, 0xC4, 0xB6, draw::BORDER);
         g.line(rows - 4, 0xC7, 0xC4, 0xB6, draw::BORDER);
         g.line(rows - 1, 0xC8, 0xCD, 0xBC, draw::BORDER);
-        let mut x = 2;
-        for page in PAGES {
-            let label = format!(" {} ", page.title());
-            let selected = page == self.page;
-            if selected {
-                g.background(x, 1, label.len(), draw::SELECT);
-            }
-            let end = g.text_to(x, 1, &label, if selected { draw::BRIGHT } else { draw::TEXT }, cols - 1);
-            self.hits.push(Hit { row: 1, col: x, width: end - x, target: Target::Tab(page) });
-            x = end + 1;
-        }
+        self.draw_tabs(&mut g);
 
         // The page, or what is open over it.
         let content = 3..rows - 4;
@@ -1142,8 +1196,12 @@ impl ConfigUi {
             self.draw_browser(&mut g, content);
         } else if self.dialog.is_some() {
             self.draw_dialog(&mut g, content);
+        } else if self.game_dialog.is_some() {
+            self.draw_game_dialog(&mut g, content);
         } else if self.page == Page::Drives {
             self.draw_drives(&mut g, content);
+        } else if self.page == Page::Games {
+            self.draw_games(&mut g, content);
         } else {
             self.draw_settings(&mut g, content);
         }
@@ -1157,6 +1215,9 @@ impl ConfigUi {
             }
             None => {
                 let text = match &self.config_file {
+                    Some(path) if self.active_game.is_some() => {
+                        format!("Game profile: {}", contract_home(path, self.home.as_deref()))
+                    }
                     Some(path) => format!("Configuration file: {}", contract_home(path, self.home.as_deref())),
                     None => "No configuration file (--no-config): the settings can't be saved".to_string(),
                 };
@@ -1166,6 +1227,49 @@ impl ConfigUi {
 
         draw::render(&g, &layout, frame);
         self.layout = Some(layout);
+    }
+
+    /// The page tabs on row 1: with a space around each title where they
+    /// fit, without where that fits, and else as many as fit around the
+    /// selected one, with ◄ and ► for those left out.
+    fn draw_tabs(&mut self, g: &mut Grid) {
+        let end = g.cols - 1;
+        let room = end - 2;
+        let titles: Vec<&str> = PAGES.iter().map(|p| p.title()).collect();
+        let width = |pad: usize, pages: &[&str]| pages.iter().map(|t| t.len() + 2 * pad + 1).sum::<usize>().saturating_sub(1);
+        let pad = if width(1, &titles) <= room { 1 } else { 0 };
+        let selected = PAGES.iter().position(|&p| p == self.page).unwrap_or(0);
+        // The first tab shown: the selected one fits after it, with room
+        // for the arrows.
+        let mut first = 0;
+        if width(pad, &titles) > room {
+            while first < selected && width(pad, &titles[first..=selected]) + 4 > room {
+                first += 1;
+            }
+        }
+        let mut x = 2;
+        if first > 0 {
+            g.char(x, 1, 0x11, draw::KEY);
+            self.hits.push(Hit { row: 1, col: x, width: 1, target: Target::Key(UiKey::BackTab) });
+            x += 2;
+        }
+        for (i, &page) in PAGES.iter().enumerate().skip(first) {
+            let label = format!("{:pad$}{}{:pad$}", "", page.title(), "", pad = pad);
+            let more = i + 1 < PAGES.len();
+            // Room for this one, and the ► if more follow.
+            if x + label.len() + if more { 2 } else { 0 } > end && i > selected {
+                g.char(end - 1, 1, 0x10, draw::KEY);
+                self.hits.push(Hit { row: 1, col: end - 1, width: 1, target: Target::Key(UiKey::Tab) });
+                break;
+            }
+            let is_selected = page == self.page;
+            if is_selected {
+                g.background(x, 1, label.len().min(end - x), draw::SELECT);
+            }
+            let after = g.text_to(x, 1, &label, if is_selected { draw::BRIGHT } else { draw::TEXT }, end);
+            self.hits.push(Hit { row: 1, col: x, width: after - x, target: Target::Tab(page) });
+            x = after + 1;
+        }
     }
 
     /// Scroll `scroll` so that `selected` is among the `visible` rows.
@@ -1400,8 +1504,21 @@ impl ConfigUi {
             vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace), ("Esc", "Cancel", Esc)]
         } else if self.dialog.is_some() {
             vec![("Tab", "Next", Tab), ("Enter", "Mount", Enter), ("Esc", "Cancel", Esc)]
+        } else if self.game_dialog.is_some() {
+            vec![("Tab", "Next", Tab), ("Enter", "Create", Enter), ("Esc", "Cancel", Esc)]
+        } else if self.confirm_delete.is_some() {
+            vec![("Enter", "Delete", Enter), ("Esc", "Keep", Esc)]
         } else if self.edit.is_some() {
             vec![("Enter", "OK", Enter), ("Esc", "Cancel", Esc)]
+        } else if self.page == Page::Games {
+            vec![
+                ("Enter", "Launch", Enter),
+                ("Ins", "New", Insert),
+                ("Del", "Delete", Delete),
+                ("Tab", "Page", Tab),
+                ("F2", "Save", Save),
+                ("Esc", "Close", Esc),
+            ]
         } else if self.page == Page::Drives {
             let (mount, unmount) = if self.frontend.host_files { ("Mount", "Unmount") } else { ("Insert", "Eject") };
             vec![

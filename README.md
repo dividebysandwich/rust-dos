@@ -244,6 +244,8 @@ as you set them. Ctrl+F12 or Esc closes it.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays, and the filters,
   reverb and chorus.
+* **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
+  makes one from the settings as they are, Del deletes one.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the
@@ -255,6 +257,41 @@ takes effect the next time rust-dos starts.
 in use. Only what changed is written: comments, `[autoexec]`, the settings
 you didn't touch and the file's own spelling of paths stay as they are, and
 drives that the startup commands mount aren't copied into `[drives]`.
+
+### Game profiles
+
+A game can have settings of its own, and the commands that start it, in a
+profile: a file in the `games` folder beside the configuration file (or,
+in the browser, in the page's storage). It is a configuration file with a
+`[game]` section for the game's name, the settings that differ from
+`rust-dos.conf`'s, the drives it needs, and `[autoexec]` with the commands
+that start it:
+
+```ini
+[game]
+name=Commander Keen 4
+
+[emulator]
+cycles=10000
+
+[drives]
+C=~/dos/keen4
+
+[autoexec]
+C:
+KEEN4E
+```
+
+The settings window's **Games** page lists the profiles. Enter launches a
+game at the DOS prompt: its settings apply on top of the configuration's,
+its drives are mounted, and its commands run. When they have run and the
+game has returned to the prompt, the settings and drives are back as they
+were. **Ins** makes a profile from the settings as they are now: only
+those that differ from the configuration file's, and the drives mounted
+since, go in it, with the game's name, its directory and the command that
+starts it. While a game plays, F2 saves the settings window's changes to
+its profile. `--game NAME` launches a game at startup, by its file name
+(`keen4`) or its name, and so does `?game=NAME` in the browser.
 
 ### CRT shaders
 
@@ -464,7 +501,8 @@ In the browser:
   work in the page too.
 
 The page takes parameters: `?zip=URL` copies an archive to C: at startup,
-`?run=COMMAND` types a command at the first prompt (both can repeat), for
+`?run=COMMAND` types a command at the first prompt (both can repeat),
+`?game=NAME` launches a [game profile](#game-profiles), for
 example `?zip=games/keen.zip&run=cd%20keen&run=keen1`. `?persist=0` keeps C:
 in memory only, `?log` sends the emulator's log to the browser console, and
 `?renderer=2d` draws the screen without WebGL 2, and so without the CRT

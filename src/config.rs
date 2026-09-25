@@ -120,6 +120,8 @@ pub struct Config {
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
     pub autoexec: Vec<String>,
+    /// A game profile's name (`[game]`, see games.rs).
+    pub game_name: Option<String>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -139,6 +141,8 @@ enum Section {
     Joystick,
     Drives,
     Autoexec,
+    /// A game profile's (games.rs).
+    Game,
     Unknown,
 }
 
@@ -151,6 +155,7 @@ impl Section {
             "joystick" => Section::Joystick,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
+            "game" => Section::Game,
             _ => Section::Unknown,
         }
     }
@@ -163,6 +168,7 @@ impl Section {
             Section::Joystick => "joystick",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
+            Section::Game => "game",
             Section::None | Section::Unknown => "",
         }
     }
@@ -418,7 +424,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             Section::Autoexec => config.autoexec.push(line.to_string()),
             Section::Unknown => {}
             Section::None => warn("setting outside of a section".to_string()),
-            Section::Emulator | Section::Drives | Section::Sound | Section::Mixer | Section::Joystick => {
+            Section::Emulator | Section::Drives | Section::Sound | Section::Mixer | Section::Joystick | Section::Game => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -515,6 +521,15 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             },
                             None => warn(format!("unknown setting '{}'", key)),
                         },
+                    }
+                    continue;
+                }
+
+                if section == Section::Game {
+                    match key.to_ascii_lowercase().as_str() {
+                        "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
+                        "name" => warn("the game's name is empty".to_string()),
+                        _ => warn(format!("unknown setting '{}'", key)),
                     }
                     continue;
                 }
@@ -1277,6 +1292,15 @@ mod tests {
         let config = parse("[emulator]\nmemsize=128\n", Path::new("/cfg"), None);
         assert_eq!(config.memsize, None);
         assert!(config.warnings[0].contains("invalid memsize '128'"));
+    }
+
+    #[test]
+    fn a_game_section_names_the_profile() {
+        let config = parse("[game]\nname = Commander Keen 4\n[autoexec]\nKEEN4E\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.game_name.as_deref(), Some("Commander Keen 4"));
+        let config = parse("[game]\nname=\nyear=1991\n", Path::new("/cfg"), None);
+        assert_eq!((config.game_name, config.warnings.len()), (None, 2));
     }
 
     #[test]

@@ -34,6 +34,8 @@ const WHEEL_NOTCH = 100;
 const WHEEL_UNITS = [1, 33, 400];
 const C_SIZE_KEY = 'rust-dos.c-megabytes';
 const MUTED_KEY = 'rust-dos.muted';
+/// The game profiles, as `Machine.set_games` takes them.
+const GAMES_KEY = 'rust-dos.games';
 
 const DEFAULT_CONFIG = `# Rust-DOS settings, in the format of rust-dos.conf. Remove the # in
 # front of a setting to use it. They take effect when the machine restarts.
@@ -1429,6 +1431,10 @@ function syncSettings() {
   if (text !== undefined && !remember(CONFIG_KEY, text)) {
     toast("The settings can't be kept: this browser doesn't let the page store them.", 'warn');
   }
+  const games = machine.take_saved_games();
+  if (games !== undefined && !remember(GAMES_KEY, games)) {
+    toast("The game profiles can't be kept: this browser doesn't let the page store them.", 'warn');
+  }
   showPicture();
 }
 
@@ -1551,6 +1557,7 @@ async function start() {
     return;
   }
   machine = new Machine(remembered(CONFIG_KEY, DEFAULT_CONFIG));
+  machine.set_games(remembered(GAMES_KEY, '{}'));
   machine.set_muted(speaker.muted, false);
   if (params.has('log')) {
     machine.log_to_console();
@@ -1571,6 +1578,14 @@ async function start() {
     'Drop files, folders, .zip archives or disk images here to add them.',
   ];
   machine.boot(notes, params.getAll('run'));
+  // ?game= launches a game profile once the startup commands have run.
+  for (const game of params.getAll('game')) {
+    try {
+      machine.launch_game(game);
+    } catch (error) {
+      toast(error.message ?? String(error), 'warn');
+    }
+  }
   showDrives();
   layout();
   $('loading').hidden = true;

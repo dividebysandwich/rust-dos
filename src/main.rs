@@ -27,7 +27,11 @@ mod sdl_keys;
 // The emulator itself is the library crate; the debug server and the
 // window's display are private to the binary. These re-exports let the
 // binary's modules refer to the library modules as `crate::...`.
-use rust_dos::{audio, capture, config, config_ui, cpu, disk, exec, joystick, keyboard, mount, recorder, shell, sound, timer, video};
+use rust_dos::{
+    audio, capture, config, config_ui, cpu, disk, exec, games, joystick, keyboard, mount, recorder, shell, sound, timer,
+    video,
+};
+use rust_dos::games::{ActiveGame, GameEntry, NewGame};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -64,6 +68,11 @@ struct Args {
     /// cycles]
     #[arg(long, value_name = "N|max", value_parser = timer::CpuSpeed::parse)]
     cycles: Option<timer::CpuSpeed>,
+
+    /// Launch a game at startup: a profile in the games folder beside the
+    /// configuration file, by its file name or its name
+    #[arg(long, value_name = "NAME")]
+    game: Option<String>,
 }
 
 /// The processor, sound hardware, display and expanded memory in place.
@@ -121,6 +130,18 @@ fn main() -> Result<(), String> {
     if let Some(cycles) = args.cycles {
         settings.cycles = cycles;
     }
+    // A game to launch: its profile, read now so its memory size is the
+    // machine's.
+    let startup_game = match &args.game {
+        Some(query) => Some(find_game(config.source.as_deref(), query)?),
+        None => None,
+    };
+    let memory_mb = match &startup_game {
+        Some((entry, text, dir)) => {
+            games::prepare(&entry.id, &settings, text, dir, dirs::home_dir().as_deref())?.settings.memsize
+        }
+        None => settings.memsize,
+    };
 
     let mut cursor_visible = true;
     let mut last_blink = std::time::Instant::now();
@@ -163,7 +184,7 @@ fn main() -> Result<(), String> {
     let text_input = video_subsystem.text_input();
     text_input.stop();
 
-    let mut cpu = create_cpu(&args, &config);
+    let mut cpu = create_cpu(&args, &config, memory_mb);
     cpu.model = settings.cpu;
     video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.set_disk_settings(settings.disk);
@@ -233,6 +254,8 @@ fn main() -> Result<(), String> {
     // paused (Alt+Pause).
     let mut osd = Osd::new();
     let mut paused = false;
+    // The game launched from its profile and not ended yet.
+    let mut game: Option<ActiveGame> = None;
     // The mouse captured for a program (Ctrl+F10, or a click once it has
     // the mouse driver): SDL's relative mode, whose motion keeps coming at
     // the window's edges.
@@ -268,6 +291,7 @@ fn main() -> Result<(), String> {
                 settings: &mut settings,
                 machine: &mut machine,
                 saved: &mut saved,
+                game: &mut game,
             }
         };
     }
@@ -276,11 +300,21 @@ fn main() -> Result<(), String> {
             if ui.is_open() {
                 ui.close();
             } else {
-                let file = saved.file.clone();
+                // While a game plays, F2 saves to its profile.
+                let file = match &game {
+                    Some(game) => games_dir(saved.file.as_deref()).map(|dir| dir.join(format!("{}.conf", game.id))),
+                    None => saved.file.clone(),
+                };
                 let current = settings.clone();
                 ui.open(&current, file, &host!());
             }
         };
+    }
+    if let Some((entry, text, dir)) = &startup_game {
+        match host!().start_game(&entry.id, text, dir) {
+            Ok(message) => osd.show(message),
+            Err(e) => config_warning(&mut cpu, &e),
+        }
     }
 
     // Main Loop
@@ -700,6 +734,18 @@ fn main() -> Result<(), String> {
         if std::mem::take(&mut cpu.bus.config_ui_requested) && !ui.is_open() {
             toggle_ui!();
         }
+        // A launched game that has ended: the settings and drives before it
+        // come back.
+        if !ui.is_open()
+            && let Some(ended) = game.take_if(|g| g.done(&cpu))
+        {
+            let name = ended.name.clone();
+            host!().end_game(ended);
+            osd.show(format!("{} has ended: your settings are back", name));
+        }
+        if let Some(notice) = ui.take_notice() {
+            osd.show(notice);
+        }
         // Processor and sound changes wait for the running program to end.
         if !ui.is_open() && cpu.shell_idle() && machine.differs(&settings) {
             for warning in apply_machine(&mut cpu, &mut machine, &settings) {
@@ -908,12 +954,9 @@ fn startup_mounts(cpu: &Cpu, autoexec: &[String]) -> Vec<MountSpec> {
         .collect()
 }
 
-/// Save the settings and the drives that changed since the file was read
-/// or last saved.
-fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<(), String> {
-    let Some(path) = saved.file.clone() else {
-        return Err("No configuration file".to_string());
-    };
+/// The drives that changed since the configuration file was read or last
+/// saved, but for those the startup commands mount.
+fn drive_changes(cpu: &Cpu, saved: &Saved) -> Vec<config::DriveChange> {
     let current = mounted_drives(cpu);
     let startup = startup_mounts(cpu, &saved.autoexec);
     let same_place = |a: &MountSpec, b: &MountSpec| {
@@ -930,11 +973,39 @@ fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<
             Some(spec) => changes.push((drive, Some(spec.clone()))),
         }
     }
+    changes
+}
+
+/// Save the settings and the drives that changed since the file was read
+/// or last saved.
+fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<(), String> {
+    let Some(path) = saved.file.clone() else {
+        return Err("No configuration file".to_string());
+    };
+    let changes = drive_changes(cpu, saved);
     config::save(&path, &saved.settings, settings, &changes, dirs::home_dir().as_deref())?;
     cpu.bus.log_string(&format!("[CONFIG] Saved the settings to {}", path.display()));
     saved.settings = settings.clone();
-    saved.drives = current;
+    saved.drives = mounted_drives(cpu);
     Ok(())
+}
+
+/// The folder of the game profiles: `games` beside the configuration
+/// file `config`.
+fn games_dir(config: Option<&std::path::Path>) -> Option<PathBuf> {
+    config?.parent().map(|dir| dir.join("games"))
+}
+
+/// The game profile `query` names: its entry, its text and its folder.
+fn find_game(config: Option<&std::path::Path>, query: &str) -> Result<(GameEntry, String, PathBuf), String> {
+    let dir = games_dir(config).ok_or("--game needs a configuration file, beside which the games folder is")?;
+    let games = games::list(&dir);
+    let entries: Vec<GameEntry> = games.iter().map(|(e, _)| e.clone()).collect();
+    let entry = games::find(&entries, query)
+        .ok_or_else(|| format!("No game called {} in {}", query, dir.display()))?
+        .clone();
+    let text = games.into_iter().find(|(e, _)| e.id == entry.id).map(|(_, t)| t).unwrap_or_default();
+    Ok((entry, text, dir))
 }
 
 /// The settings window's way to the machine, the display and the speed.
@@ -946,6 +1017,57 @@ struct MainHost<'m, 'd> {
     settings: &'m mut Settings,
     machine: &'m mut Machine,
     saved: &'m mut Saved,
+    /// The game launched and not ended yet.
+    game: &'m mut Option<ActiveGame>,
+}
+
+impl MainHost<'_, '_> {
+    /// Launch the game `id` from its profile `text` in the folder `dir`:
+    /// its settings over these, its drives over theirs, and the commands
+    /// that start it.
+    fn start_game(&mut self, id: &str, text: &str, dir: &std::path::Path) -> Result<String, String> {
+        if let Some(previous) = self.game.take() {
+            self.end_game(previous);
+        }
+        let base = self.settings.clone();
+        let prepared = games::prepare(id, &base, text, dir, dirs::home_dir().as_deref())?;
+        for warning in &prepared.warnings {
+            config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
+        }
+        if let Err(e) = self.apply(&prepared.settings) {
+            config_warning(self.cpu, &e);
+        }
+        let mut replaced = Vec::new();
+        for spec in &prepared.drives {
+            let before = self.cpu.bus.disk.mounted_drives().into_iter().find(|d| d.drive == spec.drive).and_then(|d| d.mount);
+            match self.cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), true) {
+                Ok(_) => replaced.push((spec.drive, before)),
+                Err(e) => config_warning(self.cpu, &format!("games/{}.conf: drive {}: {}", id, disk::drive_letter(spec.drive), e)),
+            }
+        }
+        self.cpu.queue_batch_lines(&prepared.autoexec);
+        self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} (games/{}.conf)", prepared.name, id));
+        let message = format!("Starting {}", prepared.name);
+        *self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced });
+        Ok(message)
+    }
+
+    /// A game has ended: the settings and drives from before it.
+    fn end_game(&mut self, game: ActiveGame) {
+        self.cpu.bus.log_string(&format!("[CONFIG] The game {} has ended", game.name));
+        if let Err(e) = self.apply(&game.base) {
+            config_warning(self.cpu, &e);
+        }
+        for (drive, before) in game.replaced.into_iter().rev() {
+            let result = match before {
+                Some(spec) => self.cpu.bus.mount_drive(drive, &spec.path, spec.opts, true).map(|_| ()),
+                None => self.cpu.bus.unmount_drive(drive),
+            };
+            if let Err(e) = result {
+                config_warning(self.cpu, &format!("drive {}: {}", disk::drive_letter(drive), e));
+            }
+        }
+    }
 }
 
 impl Host for MainHost<'_, '_> {
@@ -1001,7 +1123,59 @@ impl Host for MainHost<'_, '_> {
     }
 
     fn save(&mut self, settings: &Settings) -> Result<(), String> {
+        // While a game plays, into its profile.
+        if let Some(game) = self.game.as_mut() {
+            let dir = games_dir(self.saved.file.as_deref()).ok_or("No configuration file")?;
+            let path = dir.join(format!("{}.conf", game.id));
+            config::save(&path, &game.saved, settings, &[], dirs::home_dir().as_deref())?;
+            game.saved = settings.clone();
+            return Ok(());
+        }
         save_config(self.cpu, self.saved, settings)
+    }
+
+    fn games(&self) -> Vec<GameEntry> {
+        games_dir(self.saved.file.as_deref()).map_or_else(Vec::new, |dir| games::list(&dir).into_iter().map(|(e, _)| e).collect())
+    }
+
+    fn active_game(&self) -> Option<String> {
+        self.game.as_ref().map(|g| g.id.clone())
+    }
+
+    fn launch_game(&mut self, id: &str) -> Result<String, String> {
+        if !self.cpu.shell_idle() || !self.cpu.batch_queue.is_empty() {
+            return Err("A program is running: quit it to launch a game".to_string());
+        }
+        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no configuration file for the games folder")?;
+        let path = dir.join(format!("{}.conf", id));
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+        self.start_game(id, &text, &dir)
+    }
+
+    fn create_game(&mut self, new: &NewGame, settings: &Settings) -> Result<String, String> {
+        let dir = games_dir(self.saved.file.as_deref())
+            .ok_or("Game profiles go beside the configuration file, and there is none (--no-config)")?;
+        let taken: Vec<String> = games::list(&dir).into_iter().map(|(e, _)| e.id).collect();
+        let id = games::slug(&new.name, &taken);
+        let base = self.game.as_ref().map_or(&self.saved.settings, |g| &g.base);
+        let drives = drive_changes(self.cpu, self.saved);
+        let text = games::profile_text(new, base, settings, &drives, dirs::home_dir().as_deref())?;
+        let path = dir.join(format!("{}.conf", id));
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, text))
+            .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+        self.cpu.bus.log_string(&format!("[CONFIG] Made the game profile {}", path.display()));
+        Ok(id)
+    }
+
+    fn delete_game(&mut self, id: &str) -> Result<(), String> {
+        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
+        let path = dir.join(format!("{}.conf", id));
+        std::fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {}", path.display(), e))
+    }
+
+    fn current_directory(&self) -> String {
+        games::prompt_directory(self.cpu)
     }
 }
 
@@ -1146,7 +1320,7 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
 /// Build the CPU with drive C: from `-d`, the config file or the working
 /// directory (in that order), then mount the config's other drives. Opens
 /// the log file.
-fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
+fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     use crate::disk::{DRIVE_C, drive_letter};
 
     let mut warnings = config.warnings.clone();
@@ -1177,7 +1351,6 @@ fn create_cpu(args: &Args, config: &config::Config) -> Cpu {
         _ => std::path::PathBuf::from("."),
     };
 
-    let memory_mb = config.memsize.unwrap_or(rust_dos::bus::DEFAULT_MEMORY_MB);
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
     cpu.bus.log_file = open_log_file();
     if let Some(spec) = c_spec {

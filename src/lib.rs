@@ -18,6 +18,7 @@ pub mod ems;
 pub mod exec;
 pub mod f80;
 pub mod fat;
+pub mod games;
 pub mod gus;
 pub mod instr_cache;
 pub mod kbc;

@@ -19,6 +19,7 @@ use rust_dos::cpu::{Cpu, CpuModel};
 use rust_dos::disk::{self, DRIVE_C, DriveInfo, DriveKind, MountOptions, drive_letter};
 use rust_dos::diskimage::{self, DiskImage, MemoryImage};
 use rust_dos::exec::{self, NoHook};
+use rust_dos::games::{self, ActiveGame, GameEntry, NewGame};
 use rust_dos::joystick::PadState;
 use rust_dos::keyboard::{self, MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_RSHIFT, PcKey};
 use rust_dos::mount::MountSpec;
@@ -163,6 +164,8 @@ struct Requests {
     config: Option<String>,
     /// A disk image to pick for a drive, or for whichever suits it (-1).
     image: Option<i32>,
+    /// The game profiles changed, for the page to keep.
+    games: bool,
 }
 
 /// The emulated PC, as the page sees it.
@@ -202,6 +205,10 @@ pub struct Machine {
     held: HashMap<String, PcKey>,
     /// The disk image `begin_image` started, for `mount_image`.
     staged: Option<MemoryImage>,
+    /// The game profiles the page keeps, by id, and the game launched and
+    /// not ended yet.
+    games: BTreeMap<String, String>,
+    game: Option<ActiveGame>,
 }
 
 #[wasm_bindgen]
@@ -260,6 +267,8 @@ impl Machine {
             last_blink: Instant::now(),
             held: HashMap::new(),
             staged: None,
+            games: BTreeMap::new(),
+            game: None,
         }
     }
 
@@ -364,6 +373,18 @@ impl Machine {
         // DOSCONFIG asks for the settings window.
         if std::mem::take(&mut self.cpu.bus.config_ui_requested) && !self.ui.is_open() {
             self.toggle_settings();
+        }
+        // A launched game that has ended: the settings from before it come
+        // back.
+        if !self.ui.is_open()
+            && let Some(ended) = self.game.take_if(|g| g.done(&self.cpu))
+        {
+            let name = ended.name.clone();
+            self.with_ui(|_, host| host.end_game(ended));
+            self.osd.show(format!("{} has ended: your settings are back", name));
+        }
+        if let Some(notice) = self.ui.take_notice() {
+            self.osd.show(notice);
         }
         // Processor and sound changes wait for the running program to end.
         if !self.ui.is_open() && self.cpu.shell_idle() && self.hardware.differs(&self.settings) {
@@ -505,8 +526,36 @@ impl Machine {
             self.ui.close();
         } else {
             let current = self.settings.clone();
-            self.with_ui(|ui, host| ui.open(&current, Some(PathBuf::from(CONFIG_FILE)), &*host));
+            // While a game plays, F2 saves to its profile.
+            let file = match &self.game {
+                Some(game) => format!("games/{}.conf", game.id),
+                None => CONFIG_FILE.to_string(),
+            };
+            self.with_ui(|ui, host| ui.open(&current, Some(PathBuf::from(file)), &*host));
         }
+    }
+
+    /// The game profiles the page keeps, as JSON: an object of their texts
+    /// by id.
+    pub fn set_games(&mut self, json: &str) {
+        self.games = serde_json::from_str(json).unwrap_or_default();
+    }
+
+    /// The game profiles, as `set_games` takes them, if the settings window
+    /// changed them since the last call, for the page to keep.
+    pub fn take_saved_games(&mut self) -> Option<String> {
+        std::mem::take(&mut self.requests.games).then(|| serde_json::to_string(&self.games).unwrap_or_default())
+    }
+
+    /// Launch the game `query` names (its id or its name) at startup: its
+    /// settings, and the commands that start it, after the startup
+    /// commands.
+    pub fn launch_game(&mut self, query: &str) -> Result<(), JsError> {
+        let entries: Vec<GameEntry> = self.games.iter().map(|(id, text)| games::entry(id, text)).collect();
+        let id = games::find(&entries, query).map(|g| g.id.clone()).ok_or_else(|| JsError::new(&format!("No game called {}", query)))?;
+        let message = self.with_ui(|_, host| host.start_game(&id)).map_err(|e| JsError::new(&e))?;
+        self.osd.show(message);
+        Ok(())
     }
 
     /// Whether the settings window is open, which DOSCONFIG can do too.
@@ -856,6 +905,8 @@ impl Machine {
             saved: &mut self.saved,
             requests: &mut self.requests,
             shaders: self.shaders,
+            games: &mut self.games,
+            game: &mut self.game,
         };
         action(&mut self.ui, &mut host)
     }
@@ -925,6 +976,42 @@ struct PageHost<'m> {
     requests: &'m mut Requests,
     /// Whether the page draws with WebGL 2 (`Machine::set_shaders_available`).
     shaders: bool,
+    games: &'m mut BTreeMap<String, String>,
+    game: &'m mut Option<ActiveGame>,
+}
+
+impl PageHost<'_> {
+    /// Launch the game `id`: its settings over these, and the commands that
+    /// start it. The browser has no host directories for its drives.
+    fn start_game(&mut self, id: &str) -> Result<String, String> {
+        if let Some(previous) = self.game.take() {
+            self.end_game(previous);
+        }
+        let text = self.games.get(id).cloned().ok_or_else(|| format!("No game {}", id))?;
+        let base = self.settings.clone();
+        let prepared = games::prepare(id, &base, &text, Path::new("/"), None)?;
+        for warning in &prepared.warnings {
+            self.cpu.bus.log_string(&format!("[CONFIG] Warning: games/{}.conf: {}", id, warning));
+        }
+        if !prepared.drives.is_empty() {
+            self.cpu.bus.log_string("[CONFIG] Warning: a game's [drives] has no host directories in the browser");
+        }
+        if let Err(e) = self.apply(&prepared.settings) {
+            self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", e));
+        }
+        self.cpu.queue_batch_lines(&prepared.autoexec);
+        let message = format!("Starting {}", prepared.name);
+        *self.game =
+            Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced: Vec::new() });
+        Ok(message)
+    }
+
+    /// A game has ended: the settings from before it.
+    fn end_game(&mut self, game: ActiveGame) {
+        if let Err(e) = self.apply(&game.base) {
+            self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", e));
+        }
+    }
 }
 
 impl Host for PageHost<'_> {
@@ -978,8 +1065,16 @@ impl Host for PageHost<'_> {
     }
 
     /// Write what changed into the configuration file's text, for the page
-    /// to keep (`take_saved_config`). Its drives are in the page's hands.
+    /// to keep (`take_saved_config`), or while a game plays, into its
+    /// profile's (`take_saved_games`). Its drives are in the page's hands.
     fn save(&mut self, settings: &Settings) -> Result<(), String> {
+        if let Some(game) = self.game.as_mut() {
+            let text = self.games.get(&game.id).cloned().unwrap_or_default();
+            self.games.insert(game.id.clone(), config::update_text(&text, &game.saved, settings, &[], None));
+            game.saved = settings.clone();
+            self.requests.games = true;
+            return Ok(());
+        }
         let saved = &mut *self.saved;
         saved.text = config::update_text(&saved.text, &saved.settings, settings, &[], None);
         saved.settings = settings.clone();
@@ -994,6 +1089,43 @@ impl Host for PageHost<'_> {
         }
         self.requests.image = Some(drive.map_or(-1, i32::from));
         Ok(())
+    }
+
+    fn games(&self) -> Vec<GameEntry> {
+        let mut games: Vec<GameEntry> = self.games.iter().map(|(id, text)| games::entry(id, text)).collect();
+        games.sort_by_key(|g| g.name.to_lowercase());
+        games
+    }
+
+    fn active_game(&self) -> Option<String> {
+        self.game.as_ref().map(|g| g.id.clone())
+    }
+
+    fn launch_game(&mut self, id: &str) -> Result<String, String> {
+        if !self.cpu.shell_idle() || !self.cpu.batch_queue.is_empty() {
+            return Err("A program is running: quit it to launch a game".to_string());
+        }
+        self.start_game(id)
+    }
+
+    fn create_game(&mut self, new: &NewGame, settings: &Settings) -> Result<String, String> {
+        let taken: Vec<String> = self.games.keys().cloned().collect();
+        let id = games::slug(&new.name, &taken);
+        let base = self.game.as_ref().map_or(&self.saved.settings, |g| &g.base);
+        let text = games::profile_text(new, base, settings, &[], None)?;
+        self.games.insert(id.clone(), text);
+        self.requests.games = true;
+        Ok(id)
+    }
+
+    fn delete_game(&mut self, id: &str) -> Result<(), String> {
+        self.games.remove(id).ok_or_else(|| format!("No game {}", id))?;
+        self.requests.games = true;
+        Ok(())
+    }
+
+    fn current_directory(&self) -> String {
+        games::prompt_directory(self.cpu)
     }
 }
 

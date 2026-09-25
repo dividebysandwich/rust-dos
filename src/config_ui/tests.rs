@@ -1,5 +1,6 @@
 use super::*;
 use crate::disk::MountOptions;
+use crate::games::{GameEntry, NewGame};
 use crate::video::shader::Shader;
 
 fn drive_info(spec: &MountSpec) -> DriveInfo {
@@ -28,6 +29,10 @@ struct FakeHost {
     images: Vec<Option<u8>>,
     /// Whether CRT shaders are refused, as without OpenGL 3.
     no_shaders: bool,
+    /// The game profiles, and the games launched and made.
+    games: Vec<GameEntry>,
+    launched: Vec<String>,
+    created: Vec<NewGame>,
 }
 
 impl FakeHost {
@@ -44,6 +49,9 @@ impl FakeHost {
             saved: vec![],
             images: vec![],
             no_shaders: false,
+            games: vec![],
+            launched: vec![],
+            created: vec![],
         }
     }
 }
@@ -86,6 +94,38 @@ impl Host for FakeHost {
         }
         self.images.push(drive);
         Ok(())
+    }
+
+    fn games(&self) -> Vec<GameEntry> {
+        self.games.clone()
+    }
+
+    fn active_game(&self) -> Option<String> {
+        self.launched.last().cloned()
+    }
+
+    fn launch_game(&mut self, id: &str) -> Result<String, String> {
+        self.launched.push(id.to_string());
+        Ok(format!("Starting {}", id))
+    }
+
+    fn create_game(&mut self, game: &NewGame, _settings: &Settings) -> Result<String, String> {
+        if game.command.is_empty() {
+            return Err("The game needs a command".to_string());
+        }
+        self.created.push(game.clone());
+        let id = crate::games::slug(&game.name, &[]);
+        self.games.push(GameEntry { id: id.clone(), name: game.name.clone(), command: game.command.clone() });
+        Ok(id)
+    }
+
+    fn delete_game(&mut self, id: &str) -> Result<(), String> {
+        self.games.retain(|g| g.id != id);
+        Ok(())
+    }
+
+    fn current_directory(&self) -> String {
+        "C:\\GAMES".to_string()
     }
 }
 
@@ -531,4 +571,70 @@ fn long_text_is_shortened_in_the_middle() {
     assert_eq!(fit("/home/user/dos/games", 30), "/home/user/dos/games");
     assert_eq!(fit("/home/user/dos/games/doom.cue", 14), "/ho...doom.cue");
     assert_eq!(fit("abcdef", 2), "ab");
+}
+
+#[test]
+fn the_games_page_launches_makes_and_deletes_games() {
+    let mut host = FakeHost::new();
+    host.games.push(GameEntry { id: "stunts".into(), name: "Stunts".into(), command: "STUNTS".into() });
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Games);
+    assert_eq!(ui.row_count(), 2, "the game and the new one");
+    ui.draw(&mut Frame::new(640, 400));
+
+    // Ins: a new game, in the prompt's directory; its command is needed.
+    keys(&mut ui, &mut host, &[Insert]);
+    assert_eq!(ui.game_dialog.as_ref().unwrap().directory.text(), "C:\\GAMES");
+    ui.text("Commander Keen", &mut host);
+    keys(&mut ui, &mut host, &[Tab, End, Backspace, Backspace, Backspace, Backspace, Backspace]);
+    ui.text("KEEN", &mut host);
+    keys(&mut ui, &mut host, &[Tab, Tab, Enter]);
+    assert!(status(&ui).1, "{:?}", status(&ui));
+    assert!(ui.game_dialog.is_some());
+    ui.draw(&mut Frame::new(640, 400));
+    keys(&mut ui, &mut host, &[BackTab]);
+    ui.text("KEEN4E", &mut host);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert!(ui.game_dialog.is_none(), "{:?}", status(&ui));
+    assert_eq!(host.created[0], NewGame { name: "Commander Keen".into(), directory: "C:\\KEEN".into(), command: "KEEN4E".into() });
+    assert_eq!(ui.games[ui.row].id, "commander-keen");
+
+    // Del asks first; Esc keeps it, Enter deletes it.
+    keys(&mut ui, &mut host, &[Delete]);
+    assert!(status(&ui).0.starts_with("Delete Commander Keen?"));
+    keys(&mut ui, &mut host, &[Esc]);
+    assert_eq!(ui.games.len(), 2);
+    assert!(ui.is_open());
+    keys(&mut ui, &mut host, &[Delete, Enter]);
+    assert_eq!(ui.games.len(), 1);
+
+    // Enter launches the game and closes the window, with a notice.
+    keys(&mut ui, &mut host, &[Home, Enter]);
+    assert_eq!(host.launched, ["stunts"]);
+    assert!(!ui.is_open());
+    assert_eq!(ui.take_notice().as_deref(), Some("Starting stunts"));
+    ui.open(&Settings::default(), Some("/cfg/games/stunts.conf".into()), &host);
+    assert_eq!(ui.active_game.as_deref(), Some("stunts"));
+    ui.show_page(Page::Games);
+    ui.draw(&mut Frame::new(640, 400));
+}
+
+#[test]
+fn the_tabs_fit_or_scroll() {
+    let host = FakeHost::new();
+    let mut ui = opened(&host);
+    for (width, height) in [(640, 400), (400, 300), (320, 200)] {
+        let mut frame = Frame::new(width, height);
+        for page in PAGES {
+            ui.show_page(page);
+            ui.draw(&mut frame);
+            if ui.layout.is_none() {
+                continue;
+            }
+            let tab = ui.hits.iter().find(|h| matches!(h.target, Target::Tab(p) if p == page));
+            assert!(tab.is_some(), "{:?} has its tab at {}x{}", page, width, height);
+            assert!(ui.hits.iter().filter(|h| h.row == 1).all(|h| h.col + h.width < ui.layout.unwrap().cols));
+        }
+    }
 }
