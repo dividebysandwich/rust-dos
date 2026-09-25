@@ -221,6 +221,31 @@ pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String,
     Ok((id, imported.name, imported.warnings))
 }
 
+/// A zip archive of a game, unpacked into a folder of its own in the games
+/// folder `dir`. With the one program there is to start it
+/// (`import::zip::start_program`) it gets a profile with the folder as C:,
+/// whose id and name come back; the folder comes back either way.
+pub fn unpack(dir: &Path, archive: &Path) -> Result<(std::path::PathBuf, Option<(String, String)>), String> {
+    let data = std::fs::read(archive).map_err(|e| format!("{}: {}", archive.display(), e))?;
+    let name = archive.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
+    // Neither a profile nor a folder there already.
+    let taken: Vec<String> = list(dir)
+        .into_iter()
+        .map(|(e, _)| e.id)
+        .chain(std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()))
+        .collect();
+    let id = slug(&name, &taken);
+    let folder = dir.join(&id);
+    let files = crate::import::zip::extract(&data, &folder).map_err(|e| format!("{}: {}", archive.display(), e))?;
+    let Some(program) = crate::import::zip::start_program(&files) else {
+        return Ok((folder, None));
+    };
+    let text = format!("[game]\nname={}\n\n[drives]\nC={}\n\n[autoexec]\nC:\n{}\n", name, id, program);
+    let path = dir.join(format!("{}.conf", id));
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+    Ok((folder, Some((id, name))))
+}
+
 /// A game that was launched and hasn't ended.
 #[derive(Clone, Debug)]
 pub struct ActiveGame {
@@ -297,6 +322,30 @@ mod tests {
         assert_eq!(find(&games, "KEEN4").map(|g| g.name.as_str()), Some("Commander Keen 4"));
         assert_eq!(find(&games, "commander keen 4").map(|g| g.id.as_str()), Some("keen4"));
         assert!(find(&games, "doom").is_none());
+    }
+
+    #[test]
+    fn a_zipped_game_is_unpacked_with_a_profile() {
+        let dir = std::path::PathBuf::from("target/test_games_unpack");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("Commander Keen.zip");
+        let data = crate::import::zip::tests::zip(&[("KEEN4E.EXE", b"MZ", true), ("SETUP.EXE", b"MZ", false)]);
+        std::fs::write(&archive, data).unwrap();
+        let games = dir.join("games");
+        std::fs::create_dir_all(&games).unwrap();
+        let (folder, profile) = unpack(&games, &archive).unwrap();
+        assert_eq!(folder, games.join("commander-keen"));
+        assert!(folder.join("KEEN4E.EXE").is_file());
+        let (id, name) = profile.unwrap();
+        assert_eq!((id.as_str(), name.as_str()), ("commander-keen", "Commander Keen"));
+        let text = std::fs::read_to_string(games.join("commander-keen.conf")).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert_eq!(prepared.drives[0].path, folder, "C: is the folder, next to the profile");
+        assert_eq!(prepared.autoexec, ["C:", "KEEN4E.EXE"]);
+        // Again: a folder and profile of its own.
+        let (again, _) = unpack(&games, &archive).unwrap();
+        assert_eq!(again, games.join("commander-keen-2"));
     }
 
     #[test]

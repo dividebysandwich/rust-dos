@@ -454,7 +454,11 @@ Dropping something onto the window uses it: a GOG game's folder or a DOSBox
 configuration file is [imported](#game-profiles) as a game and launched, a
 folder or hard disk image is mounted on the first free drive from D:, a CD
 image goes into the CD-ROM drive (or a new one), a floppy image into A:,
-and a program or batch file is started from its folder.
+and a program or batch file is started from its folder. A zip archive is
+unpacked into a folder of its own in the games folder; with a single
+program to start the game (setup and install programs aside) it becomes a
+game profile with that folder as C: and is launched, else the folder is
+mounted to make a profile from.
 
 C: and the built-in Z: always exist, and so does X: with the Ultrasound
 patches unless the configuration moves or removes it. Mount more drives at

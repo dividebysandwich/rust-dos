@@ -6,6 +6,7 @@
 pub mod dosbox;
 pub mod drop;
 pub mod gog;
+pub mod zip;
 
 use crate::mount::{MountSpec, mount_spec_value};
 use std::fs;

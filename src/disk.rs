@@ -2289,7 +2289,7 @@ impl DiskController {
 }
 
 /// The local time a packed DOS time and date stand for.
-fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
+pub fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
     use chrono::TimeZone;
     let (year, month, day) = (1980 + (date >> 9) as i32, (date >> 5 & 0x0F) as u32, (date & 0x1F) as u32);
     let (hour, minute, second) = ((time >> 11) as u32, (time >> 5 & 0x3F) as u32, (time & 0x1F) as u32 * 2);
