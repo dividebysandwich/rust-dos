@@ -33,6 +33,14 @@ pub trait ExecHook {
     /// with the instruction's physical address and all of RAM. Returns true
     /// to stop before the instruction executes.
     fn before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool;
+
+    /// Whether `before_exec` has to see every instruction. When it doesn't,
+    /// the dynamic recompiler runs blocks of instructions between the
+    /// calls: `before_exec` then sees the first instruction of each block
+    /// and the instructions the interpreter runs, which include every HLT.
+    fn per_instruction(&self) -> bool {
+        true
+    }
 }
 
 /// A hook that observes nothing.
@@ -409,24 +417,56 @@ fn load_program(cpu: &mut Cpu, filename: &str, args: &str, high: bool) -> bool {
     true
 }
 
+/// Where the instruction at CS:EIP is, as `fetch_location` found it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct At {
+    pub eip: u32,
+    /// Its linear address.
+    pub lin_ip: u32,
+    pub cs_limit: u32,
+    /// A 32-bit code segment.
+    pub code32: bool,
+    pub phys_ip: usize,
+    /// Its bytes are all in RAM at `phys_ip`, so it can be decoded in place
+    /// and cached.
+    pub cacheable: bool,
+}
+
 /// Run one instruction or emulator service trap at CS:IP.
 #[inline(always)]
 fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> Option<StopReason> {
     // This instruction ends the interrupt shadow of the previous one.
     cpu.irq_shadow = false;
+    let at = fetch_location(cpu, fetch)?;
+    execute_at::<HOT>(cpu, fetch, hook, at)
+}
 
+/// Find the instruction at CS:EIP: in the code window, or else through
+/// `locate`, which raises the fault an instruction fetch takes (and returns
+/// None, as it does when the tripwire goes off).
+#[inline(always)]
+fn fetch_location(cpu: &mut Cpu, fetch: &mut Fetch) -> Option<At> {
     let eip = cpu.eip();
     let cs = cpu.seg_cache(Seg::CS);
     let (cs_limit, code32, lin_ip) = (cs.limit, cs.attr & ATTR_DB != 0, cs.base.wrapping_add(eip));
     let (phys_ip, cacheable) = match fetch.window.phys(cpu, eip, lin_ip, cs_limit) {
         Some(phys_ip) => (phys_ip, true),
-        None => match locate(cpu, fetch, eip, lin_ip, cs_limit) {
-            Some(located) => located,
-            None => return None,
-        },
+        None => locate(cpu, fetch, eip, lin_ip, cs_limit)?,
     };
+    Some(At { eip, lin_ip, cs_limit, code32, phys_ip, cacheable })
+}
 
-    if HOT && hook.before_exec(cpu, phys_ip, fetch.ram) {
+/// Run the instruction `fetch_location` found. `HOOK` calls the
+/// debugger's `before_exec` first.
+#[inline(always)]
+fn execute_at<const HOOK: bool>(
+    cpu: &mut Cpu,
+    fetch: &mut Fetch,
+    hook: &mut dyn ExecHook,
+    at: At,
+) -> Option<StopReason> {
+    let At { eip, lin_ip, cs_limit, code32, phys_ip, cacheable } = at;
+    if HOOK && hook.before_exec(cpu, phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
     cpu.executed += 1;
@@ -480,12 +520,26 @@ fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn
         // it was (the handlers commit everything else last).
         cpu.set_eip(eip);
         cpu.set_esp(start_esp);
-        if !(fault == Fault::UD && service_trap(cpu, fetch.ram, phys_ip)) {
-            cpu.raise(fault);
-        }
+        after_fault(cpu, fault, fetch.ram, phys_ip);
     }
     cpu.bus.clock.icount += 1;
+    finish_instruction(cpu);
+    None
+}
 
+/// An instruction at `phys_ip` faulted and was undone: deliver the fault,
+/// unless it is the #UD of an emulator service trap, which runs instead.
+pub(crate) fn after_fault(cpu: &mut Cpu, fault: Fault, ram: &[u8], phys_ip: usize) {
+    if !(fault == Fault::UD && service_trap(cpu, ram, phys_ip)) {
+        cpu.raise(fault);
+    }
+}
+
+/// After an instruction has run (or faulted): carry out a reset the
+/// keyboard controller or port 92h asked for, and skip the time a HLT
+/// waits.
+#[inline(always)]
+pub(crate) fn finish_instruction(cpu: &mut Cpu) {
     if cpu.bus.reset_requested {
         // The keyboard controller or port 92h pulsed the reset line.
         cpu.bus.reset_requested = false;
@@ -497,7 +551,6 @@ fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn
     if cpu.state != CpuState::Running {
         halt(cpu);
     }
-    None
 }
 
 /// After an instruction that left the CPU halted or wanting the shell back.
