@@ -321,6 +321,60 @@ fn control_keys_are_not_typed() {
     assert_eq!(text.trim_end(), "C:\\>abc", "{}", text);
 }
 
+const SHIFT_TAB: u8 = 0x0F;
+
+/// The last row of the screen that begins with `prefix`, without the
+/// blanks after it.
+fn last_row_with(cpu: &Cpu, prefix: &str) -> Option<String> {
+    let text = screen_text(cpu);
+    text.as_bytes()
+        .chunks(80)
+        .map(|r| String::from_utf8_lossy(r).trim_end().to_string())
+        .filter(|r| r.starts_with(prefix))
+        .last()
+}
+
+#[test]
+fn tab_completes_file_and_directory_names() {
+    let base = scratch("tab", &["c/GAMES", "c/GRAPHICS"]);
+    fs::write(base.join("c/GO.EXE"), b"").unwrap();
+    fs::write(base.join("c/GAMES/DOOM.EXE"), b"").unwrap();
+    fs::write(base.join("c/GAMES/DOOM.WAD"), b"").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+
+    // The programs first, then the others by name, and round again.
+    for (tabs, line) in [(1, "GO.EXE"), (2, "GAMES"), (3, "GRAPHICS"), (4, "GO.EXE")] {
+        type_keys(&mut cpu, "g");
+        type_keys(&mut cpu, &"\t".repeat(tabs));
+        type_keys(&mut cpu, "\r");
+        assert_eq!(run_until_command(&mut cpu).as_deref(), Some(line), "{} tabs", tabs);
+    }
+    // A shorter name leaves nothing of the longer one on the screen.
+    assert_eq!(last_row_with(&cpu, "C:\\>GA").as_deref(), Some("C:\\>GAMES"));
+
+    // Shift+Tab goes backwards, from the last.
+    type_keys(&mut cpu, "g");
+    extended_key(&mut cpu, SHIFT_TAB);
+    extended_key(&mut cpu, SHIFT_TAB);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("GAMES"));
+
+    // The last word, in the directory it names; typing more starts over.
+    type_keys(&mut cpu, "type ga\t\\d\t\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("type GAMES\\DOOM.WAD"));
+    assert_eq!(last_row_with(&cpu, "C:\\>type").as_deref(), Some("C:\\>type GAMES\\DOOM.WAD"));
+
+    // CD goes only through the directories.
+    type_keys(&mut cpu, "cd \t\t\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("cd GAMES"));
+
+    // Nothing fits: Tab does nothing.
+    type_keys(&mut cpu, "x\ty\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("xy"));
+    assert_eq!(last_row_with(&cpu, "C:\\>x").as_deref(), Some("C:\\>xy"));
+}
+
 #[test]
 fn a_line_takes_at_most_127_characters() {
     let base = scratch("long_line", &["c"]);

@@ -232,6 +232,8 @@ pub struct Cpu {
     /// The lines typed at the prompt, for Up and Down. They stay while
     /// programs run and the shell is loaded again.
     pub shell_history: crate::shell::ShellHistory,
+    /// Where Tab left the line at the prompt, for Tab again.
+    pub shell_completion: Option<crate::shell::Completion>,
     /// Pending batch-file command lines waiting to be dispatched as if the user
     /// had typed them at the prompt. Drained by main loop while the shell is
     /// idle (no child program on the process_stack and CS still in shell-land).
@@ -378,6 +380,7 @@ impl Cpu {
             state: CpuState::Running,
             pending_command: None,
             shell_history: crate::shell::ShellHistory::default(),
+            shell_completion: None,
             batch_queue: VecDeque::new(),
             batch_echo: true,
             environment: default_environment(),
