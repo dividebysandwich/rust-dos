@@ -135,3 +135,54 @@ fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
     assert_eq!(cpu.current_psp, psp);
     assert_eq!(cpu.last_child_exit, 7);
 }
+
+#[test]
+fn int_20h_frees_the_memory_of_a_child_program() {
+    #[rustfmt::skip]
+    let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    #[rustfmt::skip]
+    let child = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 100h paragraphs
+        0xBB, 0x00, 0x01,       // MOV BX,0100h
+        0xCD, 0x21,             // INT 21h
+        0xB4, 0x48,             // MOV AH,48h: allocate 10h paragraphs
+        0xBB, 0x10, 0x00,       // MOV BX,0010h
+        0xCD, 0x21,             // INT 21h
+        0xCD, 0x20,             // INT 20h
+    ];
+    let dir = scratch("int20_frees", &[("PARENT.COM", &parent), ("CHILD.COM", &child)]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x202, 0x0280);
+    cpu.bus.write_16(base + 0x204, psp);
+    cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(base + 0x300, b"CHILD.COM\0");
+
+    let mut child_psp = None;
+    for _ in 0..1000 {
+        if cpu.current_psp != psp {
+            child_psp = Some(cpu.current_psp);
+        }
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.bus.read_8(at) == 0xF4 && cpu.current_psp == psp {
+            break;
+        }
+        cpu.step();
+    }
+    let child_psp = child_psp.expect("the child ran");
+    assert_eq!(cpu.current_psp, psp, "back in the parent");
+    assert_eq!(cpu.last_child_exit, 0);
+    let owned: Vec<u16> = rust_dos::mcb::walk(&cpu.bus).into_iter().filter(|(_, m)| m.owner == child_psp).map(|(seg, _)| seg).collect();
+    assert!(owned.is_empty(), "the child's blocks are free: {:X?}", owned);
+}

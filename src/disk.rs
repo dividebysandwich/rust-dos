@@ -2087,6 +2087,21 @@ impl DiskController {
             .ok_or(0x12)
     }
 
+    /// The files a path names, with wildcards in its last part or not,
+    /// each with its fully qualified DOS path, as DEL, COPY, REN, FOR and
+    /// IF EXIST take them: directories, hidden and system files are left
+    /// out.
+    pub fn matching_files(&self, spec: &str) -> Result<Vec<(String, DosDirEntry)>, u8> {
+        let entries = self.list_directory(spec, 0)?;
+        let dir = self.qualify_directory(spec).ok_or(0x03u8)?;
+        let dir = dir.trim_end_matches('\\');
+        Ok(entries
+            .into_iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| (format!("{}\\{}", dir, e.filename), e))
+            .collect())
+    }
+
     /// All entries matching a search spec, in the order FindFirst/FindNext
     /// return them. Directory listings (DIR) use this directly.
     pub fn list_directory(

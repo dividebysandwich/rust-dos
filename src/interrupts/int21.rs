@@ -197,13 +197,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x00 => {
             cpu.bus
                 .log_string("[DOS] Program Terminated (Legacy INT 20h/21h AH=00).");
-            cpu.bus.disk.close_process_files(cpu.current_psp);
-
-            if cpu.return_to_parent() {
+            if cpu.terminate(0) {
                 cpu.bus
                     .log_string("[DOS] AH=00: Returning to Parent Process");
-            } else {
-                cpu.state = CpuState::RebootShell;
             }
         }
 
@@ -1013,6 +1009,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // Started from the shell: stay resident under the next programs.
                 cpu.keep_resident(tsr_psp, paras_to_keep);
                 cpu.state = CpuState::RebootShell;
+                cpu.errorlevel = return_code;
             }
             cpu.last_child_exit = 0x0300 | return_code as u16;
         }
@@ -1555,20 +1552,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 exit_code
             ));
 
-            // Record for parent to retrieve. High byte = termination type 0 (normal).
-            cpu.last_child_exit = exit_code as u16;
-
-            // Free any memory and close the files owned by the exiting PSP.
-            crate::mcb::free_owned_by(&mut cpu.bus, cpu.current_psp);
-            cpu.bus.disk.close_process_files(cpu.current_psp);
-
-            // Try to restore parent process
-            if cpu.return_to_parent() {
+            // Kept for the parent to retrieve, or as the ERRORLEVEL. High
+            // byte = termination type 0 (normal).
+            if cpu.terminate(exit_code) {
                 cpu.bus.log_string("[DOS] Returning to Parent Process");
                 cpu.set_ax(exit_code as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
-            } else {
-                cpu.state = CpuState::RebootShell;
             }
         }
 

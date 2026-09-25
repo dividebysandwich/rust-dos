@@ -1,17 +1,12 @@
-use crate::cpu::{Cpu, CpuState};
+use crate::cpu::Cpu;
 
+/// INT 20h: Terminate Program, with exit code 0: back to the parent
+/// process, or to the shell.
 pub fn handle(cpu: &mut Cpu) {
-    // INT 20h: Terminate Program
-    // DOS standard behavior: This restores the parent process (the shell).
-    // This simply signals the main loop to reload the shell.
-
     cpu.bus.log_string("[INT20] Program Terminated.");
-    cpu.bus.disk.close_process_files(cpu.current_psp);
-
-    if cpu.return_to_parent() {
+    if cpu.terminate(0) {
         cpu.bus.log_string("[INT20] Returning to Parent Process");
     } else {
         cpu.bus.log_string("[INT20] No Parent. Rebooting Shell...");
-        cpu.state = CpuState::RebootShell;
     }
 }

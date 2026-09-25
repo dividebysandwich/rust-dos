@@ -23,6 +23,11 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("CHDIR", &CdCommand),
     ("ECHO", &EchoCommand),
     ("REM", &RemCommand),
+    ("GOTO", &GotoCommand),
+    ("CALL", &CallCommand),
+    ("SHIFT", &ShiftCommand),
+    ("IF", &IfCommand),
+    ("FOR", &ForCommand),
     ("MOUNT", &MountCommand),
     ("IMGMOUNT", &ImgMountCommand),
     ("SET", &SetCommand),
@@ -520,6 +525,148 @@ impl ShellCommand for EchoCommand {
 struct RemCommand;
 impl ShellCommand for RemCommand {
     fn execute(&self, _cpu: &mut Cpu, _args: &str) {}
+}
+
+/// GOTO label: go on after the line `:label` in the batch file running,
+/// or end it if it has none. At the prompt it does nothing.
+struct GotoCommand;
+impl ShellCommand for GotoCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        if !cpu.batch.running() {
+            return;
+        }
+        let label = args.split_whitespace().next().unwrap_or("");
+        if !cpu.batch.goto(label) {
+            print_string(cpu, "Label not found\r\n");
+            cpu.batch.end_file();
+        }
+    }
+}
+
+/// CALL command: run a batch file and come back to the one running, as
+/// running it from a batch line without CALL never does.
+struct CallCommand;
+impl ShellCommand for CallCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        crate::exec::call(cpu, args);
+    }
+}
+
+/// SHIFT: move the batch file's parameters down by one, %1 to %0 and so on.
+struct ShiftCommand;
+impl ShellCommand for ShiftCommand {
+    fn execute(&self, cpu: &mut Cpu, _args: &str) {
+        cpu.batch.shift();
+    }
+}
+
+/// IF [NOT] ERRORLEVEL n command, IF [NOT] EXIST file command, IF [NOT]
+/// string1==string2 command: run the command if the condition holds (or,
+/// with NOT, doesn't). ERRORLEVEL n holds for an exit code of n or more,
+/// and strings compare in their case.
+struct IfCommand;
+impl ShellCommand for IfCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let (not, rest) = match keyword(args, "NOT") {
+            Some(rest) => (true, rest),
+            None => (false, args),
+        };
+        let condition = if let Some(rest) = keyword(rest, "ERRORLEVEL") {
+            let (number, command) = first_word(rest);
+            number.parse::<u16>().ok().map(|n| (cpu.errorlevel as u16 >= n, command))
+        } else if let Some(rest) = keyword(rest, "EXIST") {
+            let (name, command) = first_word(rest);
+            Some((file_exists(cpu, name), command))
+        } else if let Some((left, right)) = rest.split_once("==") {
+            let (right, command) = first_word(right);
+            Some((left.trim() == right, command))
+        } else {
+            None
+        };
+        match condition {
+            Some((holds, command)) if !command.trim().is_empty() => {
+                if holds != not {
+                    crate::exec::run_command_line(cpu, command);
+                }
+            }
+            _ => print_string(cpu, "Syntax error\r\n"),
+        }
+    }
+}
+
+/// The rest of `text` after the word `word` (in any case) and the
+/// whitespace after it, if it begins with them.
+fn keyword<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    let rest = text.get(word.len()..)?;
+    (text[..word.len()].eq_ignore_ascii_case(word) && rest.starts_with([' ', '\t'])).then(|| rest.trim_start())
+}
+
+/// The first word of `text` and the rest after it.
+fn first_word(text: &str) -> (&str, &str) {
+    let text = text.trim_start();
+    text.split_once([' ', '\t']).unwrap_or((text, ""))
+}
+
+/// Whether IF EXIST finds `name`: a file, or one matching its wildcards.
+/// `dir\NUL` exists when the directory does, which batch files test
+/// directories with.
+fn file_exists(cpu: &Cpu, name: &str) -> bool {
+    let name = name.trim_matches('"');
+    let upper = name.to_ascii_uppercase();
+    if upper == "NUL" || upper.ends_with("\\NUL") || upper.ends_with(":NUL") {
+        let dir = &name[..name.len() - 3];
+        return match dir.trim_end_matches('\\') {
+            "" => true,
+            d if d.ends_with(':') => parse_drive_prefix(d).0.is_some_and(|drive| cpu.bus.disk.is_mounted(drive)),
+            d => cpu.bus.disk.is_directory(d),
+        };
+    }
+    if name.contains(['*', '?']) {
+        cpu.bus.disk.matching_files(name).is_ok_and(|files| !files.is_empty())
+    } else {
+        cpu.bus.disk.is_file(name)
+    }
+}
+
+/// FOR %v IN (set) DO command (%%v in a batch file): run the command once
+/// for every member of the set, with the member in place of %v. Members
+/// with wildcards stand for the files they match.
+struct ForCommand;
+impl ShellCommand for ForCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        match for_lines(cpu, args) {
+            Some(lines) => cpu.batch.push_for(lines),
+            None => print_string(cpu, "Syntax error\r\n"),
+        }
+    }
+}
+
+/// The command lines a FOR line runs, None if it isn't one.
+fn for_lines(cpu: &Cpu, args: &str) -> Option<Vec<String>> {
+    let rest = args.trim_start().strip_prefix('%')?;
+    let var = rest.chars().next().filter(|c| !c.is_whitespace() && *c != '%')?;
+    let variable = format!("%{}", var);
+    let rest = keyword(&rest[var.len_utf8()..], "IN")?;
+    let rest = rest.strip_prefix('(')?;
+    let (set, rest) = rest.split_once(')')?;
+    let command = keyword(rest, "DO")?;
+    if command.trim().is_empty() {
+        return None;
+    }
+    let mut members = Vec::new();
+    for member in set.split([' ', '\t', ',', ';']).filter(|m| !m.is_empty()) {
+        if member.contains(['*', '?']) {
+            // The files it matches, in the directory it names.
+            let dir = member.rfind(['\\', ':']).map_or("", |i| &member[..=i]);
+            if let Ok(files) = cpu.bus.disk.matching_files(member) {
+                members.extend(files.into_iter().map(|(_, e)| format!("{}{}", dir, e.filename)));
+            }
+        } else {
+            members.push(member.to_string());
+        }
+    }
+    Some(members.iter().map(|m| command.replace(&variable, m)).collect())
 }
 
 struct CdCommand;

@@ -253,6 +253,9 @@ pub struct Cpu {
     /// child process. Read-and-clear by INT 21h AH=4Dh. Termination type:
     /// 0 = normal (INT 21 AH=4C), 1 = Ctrl-C, 2 = critical error, 3 = TSR.
     pub last_child_exit: u16,
+    /// The exit code of the last program started from the shell, which
+    /// IF ERRORLEVEL tests.
+    pub errorlevel: u8,
     /// Error code of the last failed DOS call, for INT 21h AH=59h.
     pub last_dos_error: u16,
     /// Scan code of an extended key whose 00h the console functions of
@@ -389,6 +392,7 @@ impl Cpu {
             resident_end: crate::mcb::FIRST_MCB_SEG,
             resident_upper: Vec::new(),
             last_child_exit: 0,
+            errorlevel: 0,
             last_dos_error: 0,
             con_pending_scan: None,
             alloc_strategy: 0,
@@ -536,6 +540,23 @@ impl Cpu {
             "[CPU] Context Saved. Stack Depth: {}",
             self.process_stack.len()
         ));
+    }
+
+    /// End the running program with the exit code `code` (INT 21h AH=4Ch,
+    /// and 0 for INT 20h and AH=00h): its memory is freed and its files
+    /// closed, and the code kept for its parent (AH=4Dh), or as the
+    /// ERRORLEVEL when the shell started it, which is then loaded again.
+    /// Returns whether it went back to a parent.
+    pub fn terminate(&mut self, code: u8) -> bool {
+        self.last_child_exit = code as u16;
+        crate::mcb::free_owned_by(&mut self.bus, self.current_psp);
+        self.bus.disk.close_process_files(self.current_psp);
+        if self.return_to_parent() {
+            return true;
+        }
+        self.errorlevel = code;
+        self.state = CpuState::RebootShell;
+        false
     }
 
     /// End the current process: back to the parent's context, returning

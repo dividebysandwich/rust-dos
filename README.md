@@ -533,8 +533,21 @@ together), `%NAME%` is the environment variable, and `%%` a percent sign.
 Lines are shown at the prompt before they run unless `ECHO OFF` or a
 leading `@` hides them; ECHO is on again once the batch file has ended.
 Lines beginning with `:` are labels. A batch file started from another
-takes its place, as in DOS, and the rest of the first never runs.
-Ctrl+C between two lines ends the batch files.
+takes its place, as in DOS, and the rest of the first never runs;
+`CALL` runs it and comes back. Ctrl+C between two lines ends the batch
+files.
+
+* `GOTO label` goes on after `:label` (its first eight characters count),
+  and ends the batch file if it has no such label.
+* `IF [NOT] ERRORLEVEL n command` runs the command if the last program
+  started from the prompt exited with n or more; `IF [NOT] EXIST file
+  command` if the file (or one matching its wildcards) exists, `dir\NUL`
+  standing for a directory; `IF [NOT] a==b command` if the two strings
+  are the same, in the same case.
+* `FOR %%v IN (set) DO command` runs the command for every member of the
+  set in place of `%%v` (`%v` at the prompt); members with wildcards stand
+  for the files they match.
+* `SHIFT` moves the parameters down by one: `%2` becomes `%1`.
 
 `[autoexec]` is a batch file too, run before `C:\AUTOEXEC.BAT`, and so are
 a [game profile](#game-profiles)'s commands.

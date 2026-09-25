@@ -154,3 +154,90 @@ fn a_typed_batch_file_gets_its_arguments() {
     run_batch_files(&mut cpu);
     assert!(screen(&cpu).contains("[hello]"), "{}", screen(&cpu));
 }
+
+#[test]
+fn if_errorlevel_tests_the_last_program_s_exit_code() {
+    let dir = scratch(
+        "errorlevel",
+        &[
+            ("TEST.BAT", b"@echo off\r\nEXIT3\r\nif errorlevel 4 echo four\r\nif errorlevel 3 echo three\r\nif not errorlevel 3 echo below\r\nEXIT0\r\nif not errorlevel 1 echo zero\r\n"),
+            ("EXIT3.COM", &exits_with(3)),
+            ("EXIT0.COM", &exits_with(0)),
+        ],
+    );
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("TEST".into());
+    run_batch_files(&mut cpu);
+    // Each program clears the screen as it ends, so only what came after the last shows.
+    assert!(screen(&cpu).contains("zero"), "{}", screen(&cpu));
+    assert_eq!(cpu.errorlevel, 0);
+
+    let dir = scratch("errorlevel3", &[("T.BAT", b"@echo off\r\nEXIT3\r\nif errorlevel 4 echo four\r\nif errorlevel 3 echo three\r\nif not errorlevel 3 echo below\r\n"), ("EXIT3.COM", &exits_with(3))]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    let screen = screen(&cpu);
+    assert!(screen.contains("three") && !screen.contains("four") && !screen.contains("below"), "{}", screen);
+    assert_eq!(cpu.errorlevel, 3);
+}
+
+#[test]
+fn if_compares_strings_and_finds_files() {
+    let dir = scratch(
+        "if",
+        &[
+            ("T.BAT", b"@echo off\r\nif \"%1\"==\"\" echo no parameter\r\nif %1==x echo x given\r\nif not %1==y echo not y\r\nif exist T.BAT echo found\r\nif exist *.XYZ echo wild\r\nif not exist NONE.TXT echo missing\r\nif exist SUB\\NUL echo dir\r\n"),
+            ("A.XYZ", b""),
+        ],
+    );
+    fs::create_dir_all(dir.join("SUB")).unwrap();
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T x".into());
+    run_batch_files(&mut cpu);
+    let screen = screen(&cpu);
+    assert!(screen.contains("x given\nnot y\nfound\nwild\nmissing\ndir"), "{}", screen);
+    assert!(!screen.contains("no parameter"));
+}
+
+#[test]
+fn goto_jumps_to_labels_and_a_missing_label_ends_the_file() {
+    let dir = scratch(
+        "goto",
+        &[("T.BAT", b"@echo off\r\nset N=\r\n:again\r\nif \"%N%\"==\"xxx\" goto done\r\nset N=%N%x\r\necho %N%\r\ngoto again\r\n:done\r\necho done\r\ngoto nowhere\r\necho never\r\n")],
+    );
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    let screen = screen(&cpu);
+    assert!(screen.contains("x\nxx\nxxx\ndone\nLabel not found"), "{}", screen);
+    assert!(!screen.contains("never"));
+}
+
+#[test]
+fn call_comes_back_and_shift_moves_the_parameters() {
+    let dir = scratch(
+        "call",
+        &[
+            ("MAIN.BAT", b"@echo off\r\ncall sub one two\r\necho back in main\r\n"),
+            ("SUB.BAT", b"echo sub %1\r\nshift\r\necho sub %1\r\n"),
+        ],
+    );
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("MAIN".into());
+    run_batch_files(&mut cpu);
+    let screen = screen(&cpu);
+    assert!(screen.contains("sub one\nsub two\nback in main"), "{}", screen);
+}
+
+#[test]
+fn for_runs_a_command_for_every_member_and_every_matching_file() {
+    let dir = scratch(
+        "for",
+        &[("T.BAT", b"@echo off\r\nfor %%v in (a b,c) do echo [%%v]\r\nfor %%f in (*.TXT) do type %%f\r\n"), ("ONE.TXT", b"first"), ("TWO.TXT", b"second")],
+    );
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    let screen = screen(&cpu);
+    assert!(screen.contains("[a]\n[b]\n[c]\nfirst\nsecond"), "{}", screen);
+}

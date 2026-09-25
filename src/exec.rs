@@ -392,7 +392,7 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
         // A batch file a batch line starts takes the place of the one
         // running.
         cpu.batch.dispatching = from_batch;
-        dispatch_command(cpu, &cmd);
+        run_command_line(cpu, &cmd);
         cpu.batch.dispatching = false;
         if from_batch {
             cpu.batch.settle();
@@ -432,9 +432,9 @@ fn take_ctrl_c(cpu: &mut Cpu) -> bool {
     }
 }
 
-/// Run a command line handed over by the shell: a built-in command, or a
-/// program or batch file.
-fn dispatch_command(cpu: &mut Cpu, cmd: &str) {
+/// Run a command line handed over by the shell (or by IF): a built-in
+/// command, or a program or batch file.
+pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     cpu.bus
         .log_string(&format!("[MAIN] Processing Command: {}", cmd));
 
@@ -461,13 +461,30 @@ fn dispatch_command(cpu: &mut Cpu, cmd: &str) {
 /// probe .com, .exe, then .bat, matching COMMAND.COM's precedence. A loaded
 /// program starts at the CS:IP the loader set. False if there is none.
 pub fn run_program(cpu: &mut Cpu, command: &str, args: &str, high: bool) -> bool {
+    start(cpu, command, args, high, false)
+}
+
+/// CALL: run a command line as the shell does, but a batch file on top of
+/// the one running, which goes on after it.
+pub fn call(cpu: &mut Cpu, line: &str) {
+    let (command, args) = split_command(line);
+    if command.is_empty() || CommandDispatcher::new().dispatch(cpu, command, args) {
+        return;
+    }
+    if !start(cpu, command, args.trim(), false, true) {
+        crate::video::print_string(cpu, "Bad command or file name.\r\n");
+    }
+}
+
+/// `run_program`, and with `call` a batch file on top of the one running.
+fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> bool {
     let lower = command.to_lowercase();
     if lower.ends_with(".bat") {
-        cpu.start_batch_file(command, command, args, false)
+        cpu.start_batch_file(command, command, args, call)
     } else if !command.contains('.') {
         load_program(cpu, &format!("{}.com", command), args, high)
             || load_program(cpu, &format!("{}.exe", command), args, high)
-            || cpu.start_batch_file(&format!("{}.bat", command), command, args, false)
+            || cpu.start_batch_file(&format!("{}.bat", command), command, args, call)
     } else {
         load_program(cpu, command, args, high)
     }

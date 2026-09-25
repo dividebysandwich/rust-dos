@@ -200,9 +200,10 @@ impl Batch {
         }
     }
 
-    /// Whether a batch file (not only a list of lines) is running.
-    pub fn in_file(&self) -> bool {
-        self.frames.iter().rev().find(|f| f.kind != FrameKind::For).is_some_and(|f| f.kind == FrameKind::File)
+    /// Whether a batch file (or a list of lines) runs, for the commands
+    /// that only mean something in one, such as GOTO.
+    pub fn running(&self) -> bool {
+        !self.frames.is_empty()
     }
 
     /// The lines waiting to run, in the order they will (as they are in
