@@ -51,7 +51,7 @@ impl JoystickType {
     /// As the settings window shows it.
     pub fn describe(self) -> &'static str {
         match self {
-            JoystickType::Auto => "auto (controllers, else the mouse)",
+            JoystickType::Auto => "auto (controller / mouse)",
             JoystickType::FourAxis => "one controller, 4 axes",
             JoystickType::TwoAxis => "two controllers",
             JoystickType::Mouse => "the mouse",

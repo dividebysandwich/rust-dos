@@ -461,7 +461,7 @@ impl Item {
                 CpuSpeed::Fixed(n) => format!("{} per ms", n),
             },
             Core => match s.core {
-                CoreMode::Auto => "auto (recompiler in protected mode)",
+                CoreMode::Auto => "auto (recomp. in prot. mode)",
                 CoreMode::Dynamic => "dynamic recompiler",
                 CoreMode::Normal => "normal (interpreter)",
             }
@@ -520,7 +520,7 @@ impl Item {
             Deadzone => format!("{}%", s.joystick.deadzone),
             SpeakerFilter => on_off(s.mixer.speaker_filter),
             Item::SbFilter => match s.mixer.sb_filter {
-                crate::mixer::SbFilter::Auto => "as the model has it",
+                crate::mixer::SbFilter::Auto => "auto (model-dependent)",
                 crate::mixer::SbFilter::Off => "off",
             }
             .to_string(),
@@ -1428,7 +1428,7 @@ impl ConfigUi {
                     }
                 ),
             ),
-            ("Host CPU use", format!("{:.0}%, the picture {:.1} ms a frame", view.cpu_use, view.render_ms)),
+            ("Host CPU use", format!("{:.0}%, frametime {:.1} ms", view.cpu_use, view.render_ms)),
         ];
         for (i, (label, value)) in lines.iter().enumerate() {
             let row = content.start + i;

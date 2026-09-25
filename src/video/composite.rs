@@ -48,7 +48,7 @@ impl CompositeMode {
     /// As the settings window shows it.
     pub fn describe(self) -> &'static str {
         match self {
-            CompositeMode::Auto => "auto (640x200 with colour burst)",
+            CompositeMode::Auto => "auto (640x200 colour burst)",
             CompositeMode::On => "on",
             CompositeMode::Off => "off (RGB monitor)",
         }
