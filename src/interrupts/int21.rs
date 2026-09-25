@@ -1358,6 +1358,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     if device == Some(crate::disk::CharDevice::Nul) {
                         // Character device, NUL.
                         cpu.set_dx(0x8084);
+                    } else if device == Some(crate::disk::CharDevice::Emm) {
+                        // The expanded memory manager: a character device
+                        // taking IOCTL.
+                        cpu.set_dx(0xC080);
                     } else if bx <= 2 || device == Some(crate::disk::CharDevice::Con) {
                         // 1000 0000 1101 0011 = 80D3
                         // Bit 7: Char device
@@ -1419,6 +1423,17 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     }
                 }
                 0x0D => generic_block_ioctl(cpu),
+                // The expanded memory manager is always ready, which is
+                // how programs tell EMMXXXX0 from a file of that name; it
+                // hands no control data to programs.
+                0x06 | 0x07 if cpu.bus.disk.handle_device(bx) == Some(crate::disk::CharDevice::Emm) => {
+                    cpu.set_reg8(Register::AL, 0xFF);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                }
+                0x02 if cpu.bus.disk.handle_device(bx) == Some(crate::disk::CharDevice::Emm) => {
+                    cpu.set_ax(0x01);
+                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                }
                 _ => {
                     // Stub other subfunctions as success
                     cpu.set_ax(0);

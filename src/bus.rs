@@ -60,6 +60,8 @@ pub struct Bus {
     pub cmos: crate::cmos::Cmos,
     /// The XMS driver's allocations and A20 state.
     pub xms: crate::xms::Xms,
+    /// The expanded memory manager (INT 67h), if EMS is on.
+    pub ems: Option<crate::ems::Ems>,
     /// Last POST code written to port 80h (or 190h, test ROMs).
     pub post_code: u8,
     /// Text written to port E9h, the Bochs debug console, which test ROMs
@@ -210,6 +212,7 @@ impl Bus {
             post_code: 0,
             debug_console: Vec::new(),
             xms: crate::xms::Xms::new(),
+            ems: None,
             refresh_toggle: false,
             cursor_x: 0,
             cursor_y: 0,
@@ -545,8 +548,10 @@ impl Bus {
         let retf = (base + 0x50 - 0xF0000) as u16;
         self.write_16(nul + 0x06, retf); // strategy entry
         self.write_16(nul + 0x08, retf); // interrupt entry
-        // The CD-ROM driver follows NUL when there are CD drives.
+        // The CD-ROM driver follows NUL when there are CD drives, and the
+        // expanded memory manager's device comes before it.
         crate::interrupts::mscdex::install_device(self, nul);
+        crate::ems::install_device(self, nul);
         for (i, &b) in b"NUL     ".iter().enumerate() {
             self.write_8(nul + 0x0A + i, b);
         }
@@ -657,6 +662,17 @@ impl Bus {
         }
         self.ram[addr..end].copy_from_slice(&data[..end - addr]);
         self.bump_page_gens(addr, end);
+    }
+
+    /// Copy `len` bytes of RAM from `from` to `to`, bypassing the VGA
+    /// mapping, as the expanded memory manager maps its pages.
+    pub fn copy_ram(&mut self, from: usize, to: usize, len: usize) {
+        let len = len.min(self.ram.len().saturating_sub(from.max(to)));
+        if len == 0 {
+            return;
+        }
+        self.ram.copy_within(from..from + len, to);
+        self.bump_page_gens(to, to + len);
     }
 
     /// Set every RAM byte in `range` to `value`, bypassing the VGA mapping.

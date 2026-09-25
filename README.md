@@ -16,7 +16,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 * FPU emulation
 * Interrupt handlers
-* XMS 3.0 extended memory and the A20 gate
+* XMS 3.0 extended memory and the A20 gate, and EMS 4.0 expanded memory
 * 386/486 protected mode, paging and virtual-8086 mode: DOS extenders such
   as DOS/4GW (Descent, Heretic)
 * Sound Blaster 16, SB Pro 2 and SB 2.0 digital audio, OPL3 FM music, and
@@ -51,7 +51,6 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## What's not implemented yet
 
-* EMS
 * GUS MAX / Interwave codec, and SB emulation on the GUS (SBOS, MegaEm)
 
 ## Configuration
@@ -136,6 +135,12 @@ D:
     a recording stops at 1 GB.
   * `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
     first megabyte is extended memory for DOS extenders and XMS.
+  * `ems` gives programs expanded memory (LIM EMS 4.0, INT 67h), which
+    many games of the early 1990s want: `true` (the default) or `false`.
+    As with EMM386, 16 KB pages of extended memory show through a page
+    frame at E000h, and EMS and XMS share the same memory. There is no
+    VCPI: DOS extenders run as they do without EMM386. A change takes
+    effect at the DOS prompt.
 * **`[sound]`:**
   * `sbtype` is the Sound Blaster: `sb16` (the default), `sbpro2`, `sb2` or
     `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's 16-bit
@@ -215,14 +220,14 @@ as you set them. Ctrl+F12 or Esc closes it.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
-  size, the disk speeds and the joystick.
+  size, expanded memory, the disk speeds and the joystick.
 * **Sound:** everything in `[sound]`, and the disk noises.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the
-disk speeds and noises, the joystick and the volumes take effect at once. The processor, the video card and the sound hardware change once no
+disk speeds and noises, the joystick and the volumes take effect at once. The processor, the video card, expanded memory and the sound hardware change once no
 program is running, so a game isn't left without the card it set up. The memory size
 takes effect the next time rust-dos starts.
 

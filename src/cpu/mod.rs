@@ -726,6 +726,9 @@ impl Cpu {
         // No program runs any more: its extended memory and A20 go too,
         // and a reset from now on is a cold boot.
         self.bus.xms = crate::xms::Xms::new();
+        if self.bus.ems.is_some() {
+            self.bus.ems = Some(crate::ems::Ems::new());
+        }
         self.bus.set_a20(false);
         self.bus.kbc.output_port &= !crate::kbc::OUT_A20;
         self.bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);

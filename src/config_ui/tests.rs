@@ -432,6 +432,18 @@ fn the_joystick_steps_through_the_types() {
 }
 
 #[test]
+fn expanded_memory_changes_at_the_prompt() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Ems).unwrap();
+    assert_eq!(Item::Ems.applies(), Applies::AtPrompt);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on"));
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    assert!(!host.applied.last().unwrap().ems);
+}
+
+#[test]
 fn the_capture_folder_is_typed() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);

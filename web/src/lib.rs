@@ -102,11 +102,15 @@ struct Hardware {
     cpu: CpuModel,
     sound: SoundConfig,
     video: VideoSetup,
+    ems: bool,
 }
 
 impl Hardware {
     fn differs(&self, settings: &Settings) -> bool {
-        self.cpu != settings.cpu || self.sound != settings.sound || self.video != settings.video_setup()
+        self.cpu != settings.cpu
+            || self.sound != settings.sound
+            || self.video != settings.video_setup()
+            || self.ems != settings.ems
     }
 
     /// Put the settings' processor and sound hardware in place. Returns the
@@ -131,9 +135,14 @@ impl Hardware {
             ));
             video::bios::switch(cpu, setup);
         }
+        if settings.ems != self.ems {
+            cpu.bus.log_string(&format!("[CONFIG] Expanded memory is {}", if settings.ems { "on" } else { "off" }));
+            rust_dos::ems::set_enabled(&mut cpu.bus, settings.ems);
+        }
         self.cpu = settings.cpu;
         self.sound = settings.sound.clone();
         self.video = settings.video_setup();
+        self.ems = settings.ems;
         warnings
     }
 }
@@ -213,6 +222,7 @@ impl Machine {
         cpu.bus.set_disk_settings(settings.disk);
         cpu.bus.set_mixer(settings.mixer);
         cpu.bus.set_joystick(settings.joystick);
+        rust_dos::ems::set_enabled(&mut cpu.bus, settings.ems);
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
@@ -224,7 +234,12 @@ impl Machine {
         Machine {
             pacer: Pacer::new(settings.cycles, Instant::now()),
             cpu,
-            hardware: Hardware { cpu: settings.cpu, sound: settings.sound.clone(), video: settings.video_setup() },
+            hardware: Hardware {
+                cpu: settings.cpu,
+                sound: settings.sound.clone(),
+                video: settings.video_setup(),
+                ems: settings.ems,
+            },
             saved: Saved { text: text.to_string(), settings: settings.clone() },
             settings,
             ui: ConfigUi::for_frontend(BROWSER),

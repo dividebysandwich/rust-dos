@@ -100,6 +100,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             cpu.set_reg8(iced_x86::Register::AH, 0x29);
         } // IO Error, Selected, Out of Paper
         0x2F => int2f::handle(cpu),
+        0x67 => crate::ems::handle(cpu),
         0x33 => int33::handle(cpu),
         0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F => {
             /* FPU Vector - IRET */

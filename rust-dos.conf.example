@@ -59,6 +59,11 @@
 # RAM in MB, 2 to 64. Memory above the first megabyte is extended memory
 # for DOS extenders and XMS.
 #memsize=16
+# Expanded memory (EMS 4.0), which many games of the early 1990s need: 16 KB
+# pages of extended memory, shown through a page frame at E000h, as
+# EMM386 has it. true (the default) or false. A change takes effect at the
+# DOS prompt.
+#ems=true
 # How fast hard disks are, as DOSBox Staging has it:
 #   maximum  as fast as possible, no slowdown (the default)
 #   fast     a mid-1990s hard disk (~15 MB/s)

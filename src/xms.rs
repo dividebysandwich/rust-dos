@@ -7,7 +7,9 @@
 //!
 //! Extended memory blocks are carved out of RAM above the HMA (10FFF0h).
 //! Locking a block returns its physical address, which is how DOS
-//! extenders take the memory over for their protected-mode programs.
+//! extenders take the memory over for their protected-mode programs. The
+//! expanded memory manager (ems.rs) takes its 16 KB pages from the same
+//! memory, from the top down.
 
 use crate::cpu::Cpu;
 
@@ -17,6 +19,8 @@ const XMS_BASE: u32 = 0x0011_0000;
 const KB: u32 = 1024;
 /// Handles the driver can hand out.
 const MAX_HANDLES: usize = 64;
+/// The expanded memory manager's pages, in bytes.
+const EMS_PAGE: u32 = 0x4000;
 
 /// XMS error codes (returned in BL).
 const ERR_NOT_IMPLEMENTED: u8 = 0x80;
@@ -52,6 +56,8 @@ pub struct Xms {
     a20_local: u32,
     /// Global A20 enable (functions 03h/04h).
     a20_global: bool,
+    /// The expanded memory manager's pages, by address.
+    ems_pages: Vec<u32>,
 }
 
 impl Xms {
@@ -92,6 +98,7 @@ impl Xms {
             .iter()
             .flatten()
             .map(|b| (b.base, b.base + b.size_kb * KB))
+            .chain(self.ems_pages.iter().map(|&page| (page, page + EMS_PAGE)))
             .collect();
         used.sort();
         let mut gaps = Vec::new();
@@ -114,6 +121,32 @@ impl Xms {
         let largest = gaps.iter().map(|&(_, kb)| kb).max().unwrap_or(0);
         let total = gaps.iter().map(|&(_, kb)| kb).sum();
         (largest, total)
+    }
+
+    /// Take a 16 KB page for expanded memory, from the top of the free
+    /// memory, away from the XMS blocks. Returns its address.
+    pub(crate) fn take_page(&mut self, memory_end: u32) -> Option<u32> {
+        let (base, kb) = self.gaps(memory_end).into_iter().rev().find(|&(_, kb)| kb * KB >= EMS_PAGE)?;
+        let page = base + kb * KB - EMS_PAGE;
+        self.ems_pages.push(page);
+        Some(page)
+    }
+
+    /// Give back an expanded memory page.
+    pub(crate) fn release_page(&mut self, page: u32) {
+        if let Some(i) = self.ems_pages.iter().position(|&p| p == page) {
+            self.ems_pages.swap_remove(i);
+        }
+    }
+
+    /// How many expanded memory pages the free memory has room for.
+    pub(crate) fn free_pages(&self, memory_end: u32) -> u32 {
+        self.gaps(memory_end).iter().map(|&(_, kb)| kb * KB / EMS_PAGE).sum()
+    }
+
+    /// How many expanded memory pages all of extended memory has room for.
+    pub(crate) fn total_pages(&self, memory_end: u32) -> u32 {
+        memory_end.saturating_sub(XMS_BASE) / EMS_PAGE
     }
 
     /// Allocate `size_kb` KB. Returns the handle.

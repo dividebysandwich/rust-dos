@@ -474,6 +474,9 @@ pub enum CharDevice {
     Nul,
     /// CON: writes go to the screen.
     Con,
+    /// EMMXXXX0, the expanded memory manager, which programs open to see
+    /// whether there is EMS.
+    Emm,
 }
 
 /// The character device a file name names. DOS finds devices by name in
@@ -510,6 +513,8 @@ pub struct DiskController {
     // File System State
     drives: [Option<Drive>; 26],
     current_drive: u8, // 0=A, ... 2=C, ... 25=Z
+    /// Whether the expanded memory manager's EMMXXXX0 device is there.
+    pub emm_device: bool,
 }
 
 impl DiskController {
@@ -549,6 +554,7 @@ impl DiskController {
             open_files: HashMap::new(),
             drives,
             current_drive: DRIVE_C, // Default to C:
+            emm_device: false,
         }
     }
 
@@ -1319,6 +1325,18 @@ impl DiskController {
             .ok_or(0x04) // Too many open files
     }
 
+    /// The character device `filename` names, EMMXXXX0 among them while
+    /// there is EMS.
+    pub fn device(&self, filename: &str) -> Option<CharDevice> {
+        let device = char_device(filename);
+        if device.is_some() || !self.emm_device {
+            return device;
+        }
+        let last = filename.rsplit(['\\', '/', ':']).next()?;
+        let stem = last.split('.').next()?.trim();
+        stem.eq_ignore_ascii_case("EMMXXXX0").then_some(CharDevice::Emm)
+    }
+
     // INT 21h, AH=3Dh: Open File. `owner` is the PSP of the calling process.
     pub fn open_file(&mut self, filename: &str, mode: u8, owner: u16) -> Result<u16, u8> {
         self.open_or_create(filename, mode, owner, false)
@@ -1330,7 +1348,7 @@ impl DiskController {
     fn open_or_create(&mut self, filename: &str, mode: u8, owner: u16, create: bool) -> Result<u16, u8> {
         // Devices open by name, whatever the directory; there's no file to
         // create.
-        if let Some(device) = char_device(filename) {
+        if let Some(device) = self.device(filename) {
             let handle = self.free_handle()?;
             self.open_files.insert(
                 handle,
@@ -1445,7 +1463,7 @@ impl DiskController {
     // INT 21h, AH=3Ch: Create File. Opens read/write, creating the file if
     // missing but never truncating (see int21.rs for why).
     pub fn create_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
-        if char_device(filename).is_some() {
+        if self.device(filename).is_some() {
             return self.open_file(filename, 0x02, owner);
         }
         let normalized = filename.replace('/', "\\");
@@ -1456,7 +1474,7 @@ impl DiskController {
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
     pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
-        if char_device(filename).is_none() && self.exists(filename) {
+        if self.device(filename).is_none() && self.exists(filename) {
             return Err(0x50); // File exists
         }
         self.create_file(filename, owner)

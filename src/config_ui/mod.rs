@@ -113,7 +113,9 @@ impl Page {
         match self {
             Page::Drives => &[],
             Page::Display => &[Scale, Fullscreen, Aspect, Filter, Shader, Monochrome],
-            Page::Emulator => &[Cycles, Cpu, Machine, Memsize, HardDiskSpeed, FloppyDiskSpeed, Joystick, Deadzone, CaptureDir],
+            Page::Emulator => &[
+                Cycles, Cpu, Machine, Memsize, Ems, HardDiskSpeed, FloppyDiskSpeed, Joystick, Deadzone, CaptureDir,
+            ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
                 SoundFont, HardDiskNoise, FloppyDiskNoise,
@@ -181,6 +183,8 @@ enum Item {
     /// The display adapter.
     Machine,
     Memsize,
+    /// Expanded memory.
+    Ems,
     SbType,
     SbBase,
     SbIrq,
@@ -264,6 +268,7 @@ impl Item {
             Cpu => "Processor",
             Machine => "Video card",
             Memsize => "Memory",
+            Ems => "Expanded memory (EMS)",
             SbType => "Sound Blaster",
             SbBase => "  Base port",
             SbIrq => "  IRQ",
@@ -345,6 +350,7 @@ impl Item {
             .to_string(),
             Machine => s.machine.describe().to_string(),
             Memsize => format!("{} MB", s.memsize),
+            Ems => on_off(s.ems),
             SbType if !s.sound.sb_installed => "none".to_string(),
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
@@ -411,6 +417,7 @@ impl Item {
             Cpu => s.cpu = cycle(&[CpuModel::I386, CpuModel::I486], s.cpu, dir),
             Machine => s.machine = cycle(&crate::video::adapter::Adapter::ALL, s.machine, dir),
             Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
+            Ems => s.ems = !s.ems,
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
                 match cycle(&models, sound.sb_installed.then_some(sb.model), dir) {

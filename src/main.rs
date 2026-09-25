@@ -66,17 +66,22 @@ struct Args {
     cycles: Option<timer::CpuSpeed>,
 }
 
-/// The processor and sound hardware in place. Changed settings reach them
-/// only while no program runs (see `apply_machine`).
+/// The processor, sound hardware, display and expanded memory in place.
+/// Changed settings reach them only while no program runs (see
+/// `apply_machine`).
 struct Machine {
     cpu: CpuModel,
     sound: SoundConfig,
     video: VideoSetup,
+    ems: bool,
 }
 
 impl Machine {
     fn differs(&self, settings: &Settings) -> bool {
-        self.cpu != settings.cpu || self.sound != settings.sound || self.video != settings.video_setup()
+        self.cpu != settings.cpu
+            || self.sound != settings.sound
+            || self.video != settings.video_setup()
+            || self.ems != settings.ems
     }
 }
 
@@ -163,6 +168,7 @@ fn main() -> Result<(), String> {
     cpu.bus.set_disk_settings(settings.disk);
     cpu.bus.set_mixer(settings.mixer);
     cpu.bus.set_joystick(settings.joystick);
+    rust_dos::ems::set_enabled(&mut cpu.bus, settings.ems);
     for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
@@ -171,7 +177,8 @@ fn main() -> Result<(), String> {
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
     }
-    let mut machine = Machine { cpu: settings.cpu, sound: settings.sound.clone(), video: settings.video_setup() };
+    let mut machine =
+        Machine { cpu: settings.cpu, sound: settings.sound.clone(), video: settings.video_setup(), ems: settings.ems };
     let mut saved = Saved {
         file: config.source.clone(),
         autoexec: config.autoexec.clone(),
@@ -822,9 +829,14 @@ fn apply_machine(cpu: &mut Cpu, machine: &mut Machine, settings: &Settings) -> V
     if settings.video_setup() != machine.video {
         change_adapter(cpu, settings.video_setup());
     }
+    if settings.ems != machine.ems {
+        cpu.bus.log_string(&format!("[CONFIG] Expanded memory is {}", if settings.ems { "on" } else { "off" }));
+        rust_dos::ems::set_enabled(&mut cpu.bus, settings.ems);
+    }
     machine.cpu = settings.cpu;
     machine.sound = settings.sound.clone();
     machine.video = settings.video_setup();
+    machine.ems = settings.ems;
     warnings
 }
 

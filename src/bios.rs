@@ -8,9 +8,9 @@ use crate::cpu::Cpu;
 /// Vectors handled by emulator services (`FE 38 vv` traps). Their traps sit
 /// four bytes apart from F000:1000 in this order; new vectors go at the end
 /// because programs may remember the addresses of the older ones.
-pub const HLE_VECTORS: [u8; 19] = [
+pub const HLE_VECTORS: [u8; 20] = [
     0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33, 0x00,
-    0x06, 0x25, 0x26,
+    0x06, 0x25, 0x26, 0x67,
 ];
 const TRAP_BASE: u16 = 0x1000;
 

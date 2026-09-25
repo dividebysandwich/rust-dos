@@ -102,6 +102,8 @@ pub struct Config {
     pub cpu: Option<CpuModel>,
     /// RAM in MB (`memsize`).
     pub memsize: Option<usize>,
+    /// Expanded memory (`ems`).
+    pub ems: Option<bool>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
     /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,
@@ -463,6 +465,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(mb) if (2..=64).contains(&mb) => config.memsize = Some(mb),
                             _ => warn(format!("invalid memsize '{}' (2 to 64 MB)", value)),
                         },
+                        "ems" => match parse_bool(value) {
+                            Some(on) => config.ems = Some(on),
+                            None => warn(format!("invalid ems '{}' (true or false)", value)),
+                        },
                         "cpu" => match value.to_ascii_lowercase().as_str() {
                             "386" => config.cpu = Some(CpuModel::I386),
                             "486" => config.cpu = Some(CpuModel::I486),
@@ -644,6 +650,8 @@ pub struct Settings {
     pub cpu: CpuModel,
     /// RAM in MB.
     pub memsize: usize,
+    /// Expanded memory (EMS).
+    pub ems: bool,
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
@@ -664,6 +672,7 @@ impl Default for Settings {
             cycles: CpuSpeed::Max,
             cpu: CpuModel::I486,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
+            ems: true,
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
@@ -698,6 +707,7 @@ impl Settings {
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             memsize: config.memsize.unwrap_or(default.memsize),
+            ems: config.ems.unwrap_or(default.ems),
             sound: config.sound.clone(),
             disk: config.disk,
             mixer: config.mixer,
@@ -742,6 +752,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
             .to_string()),
         ),
         (Emulator, "memsize", Some(settings.memsize.to_string())),
+        (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
         (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
         (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
@@ -1235,6 +1246,16 @@ mod tests {
     }
 
     #[test]
+    fn memory_settings() {
+        let config = parse("[emulator]\nems=off\n", Path::new("/cfg"), None);
+        assert_eq!(config.ems, Some(false));
+        assert!(!Settings::from_config(&config).ems);
+        assert!(Settings::from_config(&parse("", Path::new("/cfg"), None)).ems);
+        let config = parse("[emulator]\nems=lots\n", Path::new("/cfg"), None);
+        assert_eq!((config.ems, config.warnings.len()), (None, 1));
+    }
+
+    #[test]
     fn cpu_model() {
         let config = parse("[emulator]\ncpu=386\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::I386));
@@ -1262,6 +1283,7 @@ mod tests {
         assert!(config.autoexec.is_empty());
         assert_eq!(config.scale, None);
         assert_eq!(config.cycles, None);
+        assert_eq!(config.ems, None);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
         assert_eq!((config.shader, config.monochrome, config.machine), (None, None, None));
         assert_eq!(config.sound, SoundConfig::default());
@@ -1345,6 +1367,7 @@ mod tests {
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
             memsize: 32,
+            ems: false,
             sound,
             disk: DiskSettings {
                 hard_disk_speed: DiskSpeed::Medium,
