@@ -244,6 +244,10 @@ impl Sn76489 {
     }
 }
 
+// The chip's variant comes with the machine.
+crate::state_fields!(Sn76489 { registers, latched, volume, period, count, output, rng, phase, high, low } skip { variant });
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

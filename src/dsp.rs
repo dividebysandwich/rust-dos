@@ -402,6 +402,11 @@ impl Chorus {
     }
 }
 
+// A filter's memory; its coefficients come with the device it is in.
+crate::state_fields!(Biquad { z1, z2 } skip { b0, b1, b2, a1, a2 });
+crate::state_fields!(OnePoleHighpass { x1, y1 } skip { a });
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

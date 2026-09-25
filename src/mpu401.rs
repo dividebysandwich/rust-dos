@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 
 use crate::gus::patch::PatchBank;
+use crate::midi_shadow::{Midi, MidiShadow};
 use crate::gus::synth::GusSynth;
 
 /// Acknowledge byte for commands.
@@ -36,6 +37,53 @@ enum Synth {
     Host(Box<crate::midiout::HostMidi>),
 }
 
+impl Synth {
+    /// Silence everything playing, and set a SoundFont or Ultrasound
+    /// synthesizer back to its defaults.
+    fn silence(&mut self) {
+        match self {
+            Synth::None => {}
+            #[cfg(feature = "midi")]
+            Synth::SoundFont { synth, block } => {
+                synth.reset();
+                block.2 = BLOCK;
+            }
+            Synth::Gus(synth) => synth.reset(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.notes_off(),
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(port) => port.notes_off(),
+        }
+    }
+
+    fn message(&mut self, status: u8, d1: u8, d2: u8) {
+        match self {
+            Synth::None => {}
+            #[cfg(feature = "midi")]
+            Synth::SoundFont { synth, .. } => {
+                synth.process_midi_message((status & 0x0F) as i32, (status & 0xF0) as i32, d1 as i32, d2 as i32)
+            }
+            Synth::Gus(synth) => synth.message(status, d1, d2),
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.message(status, d1, d2),
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(port) => port.message(status, d1, d2),
+        }
+    }
+
+    /// A System Exclusive message; the SoundFont synthesizer takes none.
+    fn sysex(&mut self, body: &[u8]) {
+        match self {
+            Synth::Gus(synth) => synth.sysex(body),
+            #[cfg(not(target_arch = "wasm32"))]
+            Synth::Mt32(synth) => synth.sysex(body),
+            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
+            Synth::Host(port) => port.sysex(body),
+            _ => {}
+        }
+    }
+}
+
 pub struct Mpu401 {
     read_buf: VecDeque<u8>,
     /// Running status and the data bytes of the message being received.
@@ -44,6 +92,8 @@ pub struct Mpu401 {
     have: usize,
     in_sysex: bool,
     sysex: Vec<u8>,
+    /// What the synthesizer was told, for after a save state is loaded.
+    shadow: MidiShadow,
     synth: Synth,
 }
 
@@ -62,6 +112,7 @@ impl Mpu401 {
             have: 0,
             in_sysex: false,
             sysex: Vec::new(),
+            shadow: MidiShadow::default(),
             synth: Synth::None,
         }
     }
@@ -150,16 +201,8 @@ impl Mpu401 {
         self.status = 0;
         self.have = 0;
         self.in_sysex = false;
-        match &mut self.synth {
-            Synth::None => {}
-            #[cfg(feature = "midi")]
-            Synth::SoundFont { synth, .. } => synth.reset(),
-            Synth::Gus(synth) => synth.reset(),
-            #[cfg(not(target_arch = "wasm32"))]
-            Synth::Mt32(synth) => synth.notes_off(),
-            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
-            Synth::Host(port) => port.notes_off(),
-        }
+        self.shadow.reset_channels();
+        self.synth.silence();
     }
 
     /// Status port: bit 7 clear when a byte can be read, bit 6 clear when
@@ -230,32 +273,25 @@ impl Mpu401 {
     }
 
     fn message(&mut self, status: u8, d1: u8, d2: u8) {
-        match &mut self.synth {
-            Synth::None => {}
-            #[cfg(feature = "midi")]
-            Synth::SoundFont { synth, .. } => {
-                synth.process_midi_message((status & 0x0F) as i32, (status & 0xF0) as i32, d1 as i32, d2 as i32)
-            }
-            Synth::Gus(synth) => synth.message(status, d1, d2),
-            #[cfg(not(target_arch = "wasm32"))]
-            Synth::Mt32(synth) => synth.message(status, d1, d2),
-            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
-            Synth::Host(port) => port.message(status, d1, d2),
-        }
+        self.shadow.message(status, d1, d2);
+        self.synth.message(status, d1, d2);
     }
 
-    /// A whole System Exclusive message came, in `self.sysex`. The
-    /// SoundFont synthesizer takes none.
+    /// A whole System Exclusive message came, in `self.sysex`.
     fn sysex_done(&mut self) {
-        let body = &self.sysex;
-        match &mut self.synth {
-            Synth::Gus(synth) => synth.sysex(body),
-            #[cfg(not(target_arch = "wasm32"))]
-            Synth::Mt32(synth) => synth.sysex(body),
-            #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
-            Synth::Host(port) => port.sysex(body),
-            _ => {}
-        }
+        self.shadow.sysex(&self.sysex);
+        self.synth.sysex(&self.sysex);
+    }
+
+    /// Tell the synthesizer, which a save state can't hold, what it was
+    /// told before the state was saved, after the state is loaded.
+    pub fn after_load(&mut self) {
+        self.synth.silence();
+        let Mpu401 { shadow, synth, .. } = self;
+        shadow.replay(|midi| match midi {
+            Midi::Message(status, d1, d2) => synth.message(status, d1, d2),
+            Midi::Sysex(body) => synth.sysex(body),
+        });
     }
 
     /// One stereo frame of synthesizer output at the mixer's rate.
@@ -281,6 +317,9 @@ impl Mpu401 {
         }
     }
 }
+
+// The synthesizer is the host's; `after_load` tells it what it missed.
+crate::state_fields!(Mpu401 { read_buf, status, data, have, in_sysex, sysex, shadow } skip { synth });
 
 #[cfg(test)]
 mod tests {

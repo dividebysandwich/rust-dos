@@ -306,3 +306,103 @@ fn a_loaded_machine_shows_the_same_picture() {
     }
     shows_the_same_after_a_load("Tandy mode 9", Adapter::Tandy, &mut a);
 }
+
+/// A machine at the prompt with the default Sound Blaster 16 and
+/// Ultrasound, and the Tandy's sound chip.
+fn sound_machine() -> Cpu {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_sound(Some(rust_dos::sb::SbConfig::default()), true);
+    cpu.bus.configure_tandy_sound(rust_dos::sn76489::TandySound::On);
+    cpu.load_shell();
+    cpu
+}
+
+/// The sound of the millisecond since the last call.
+fn sound(cpu: &mut Cpu) -> Vec<i16> {
+    cpu.bus.audio_catch_up();
+    cpu.bus.audio_out.drain(..).collect()
+}
+
+#[test]
+fn a_loaded_machine_sounds_the_same() {
+    fix_time();
+    let mut a = sound_machine();
+    let bus = &mut a.bus;
+    // The Sound Blaster plays a sawtooth from memory over and over.
+    for i in 0..4096 {
+        bus.write_8(0x20000 + i, (i * 7) as u8);
+    }
+    bus.io_write(0x226, 1);
+    bus.io_write(0x226, 0);
+    let dsp = |bus: &mut rust_dos::bus::Bus, value: u8| bus.io_write(0x22C, value);
+    dsp(bus, 0xD1);
+    dsp(bus, 0x40);
+    dsp(bus, 211);
+    bus.io_write(0x0A, 0x05);
+    bus.io_write(0x0C, 0x00);
+    bus.io_write(0x0B, 0x59);
+    for value in [0x00, 0x00, 0x02] {
+        bus.io_write(if value == 0x02 { 0x83 } else { 0x02 }, value);
+    }
+    bus.io_write(0x03, 0xFF);
+    bus.io_write(0x03, 0x0F);
+    bus.io_write(0x0A, 0x01);
+    dsp(bus, 0x48);
+    dsp(bus, 0xFF);
+    dsp(bus, 0x07);
+    dsp(bus, 0x1C);
+    // The FM chip holds a note.
+    for (reg, value) in [(0x20, 0x01), (0x40, 0x10), (0x60, 0xF0), (0x80, 0x77), (0x23, 0x01), (0x43, 0x00), (0x63, 0xF0), (0x83, 0x77), (0xA0, 0x98), (0xB0, 0x31)] {
+        bus.io_write(0x388, reg);
+        bus.io_write(0x389, value);
+    }
+    // The Ultrasound loops a sample at a quarter of its volume.
+    let gus = |bus: &mut rust_dos::bus::Bus, reg: u8, value: u16, wide: bool| {
+        bus.io_write(0x343, reg);
+        if wide {
+            bus.io_write(0x344, value as u8);
+        }
+        bus.io_write(0x345, (value >> 8) as u8);
+    };
+    for addr in 0..256u32 {
+        gus(bus, 0x43, addr as u16, true);
+        gus(bus, 0x44, 0, false);
+        bus.io_write(0x347, (addr * 3) as u8);
+    }
+    bus.io_write(0x342, 0);
+    for (reg, sample) in [(0x02, 0u32), (0x04, 255), (0x0A, 0)] {
+        let pos = sample << 9;
+        gus(bus, reg, (pos >> 16) as u16 & 0x1FFF, true);
+        gus(bus, reg + 1, pos as u16, true);
+    }
+    gus(bus, 0x01, 1 << 10, true);
+    gus(bus, 0x09, 0xC000, true);
+    gus(bus, 0x0D, 0x0300, false);
+    gus(bus, 0x00, 0x0800, false);
+    // The Tandy's chip holds a tone.
+    for value in [0x8E, 0x0F, 0x92] {
+        bus.io_write(0xC0, value);
+    }
+    for _ in 0..300 {
+        run_ms(&mut a);
+    }
+
+    let state = machine::save(&a);
+    let mut b = sound_machine();
+    machine::load(&mut b, &state).unwrap();
+    machine::load(&mut a, &state).unwrap();
+    assert!(machine::save(&b) == state, "a loaded state saves as the same bytes");
+    let mut loudest = 0;
+    for n in 0..300 {
+        run_ms(&mut a);
+        run_ms(&mut b);
+        let (sa, sb) = (sound(&mut a), sound(&mut b));
+        assert!(sa == sb, "the sound differs after {} ms", n);
+        loudest = sa.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0).max(loudest);
+        if n % 100 == 0 {
+            assert!(machine::save(&a) == machine::save(&b), "the states diverged after {} ms", n);
+        }
+    }
+    assert!(loudest > 1000, "there is something to hear: {}", loudest);
+}

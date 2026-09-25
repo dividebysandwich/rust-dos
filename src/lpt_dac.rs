@@ -163,6 +163,31 @@ impl LptDac {
     }
 }
 
+/// Which DAC it is comes with the configuration, and with it whether the
+/// Disney's filter is there.
+impl crate::savestate::State for LptDac {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        let LptDac { kind: _, data, control, fifo, phase, high, low, dc } = self;
+        (*data, *control).save(w);
+        fifo.save(w);
+        phase.save(w);
+        crate::savestate::save_device(high, w);
+        low.save(w);
+        dc.save(w);
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let LptDac { kind: _, data, control, fifo, phase, high, low, dc } = self;
+        data.load(r)?;
+        control.load(r)?;
+        fifo.load(r)?;
+        phase.load(r)?;
+        crate::savestate::load_device(high, "Disney Sound Source", r)?;
+        low.load(r)?;
+        dc.load(r)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

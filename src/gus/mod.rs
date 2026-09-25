@@ -920,3 +920,14 @@ impl Gus {
         })
     }
 }
+
+crate::state_fields!(Timer { value, running, masked, reached, irq, next_ns });
+crate::state_fields!(Gus {
+    dram, voices, active, voice_sel, reg_sel, data, select_readback, dram_addr, mix, latch_armed,
+    irq, midi_irq, dma_ch, adlib_cmd, reset_reg, status, wave_irq, ramp_irq, irq_chan, fresh,
+    timer_ctrl, timers, dma_ctrl, dma_addr, dma_pos, dma_active, dma_frac, sample_ctrl,
+    last_ticks, frame_frac, out, phase, prev, cur, gain,
+} skip {
+    // The configuration's, and a buffer each mix starts afresh.
+    config, mix_buf,
+});

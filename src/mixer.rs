@@ -292,6 +292,15 @@ impl Mixer {
         self.mix();
     }
 
+    /// Start the filters and effects from silence, dropping the sound that
+    /// rang on in them, as after a save state was loaded.
+    pub fn clear_tails(&mut self) {
+        self.dsp.speaker = SpeakerFilter::default();
+        self.dsp.sb = StereoLowpass::default();
+        self.dsp.reverb = (self.settings.reverb != ReverbPreset::Off).then(|| Reverb::new(self.settings.reverb));
+        self.dsp.chorus = (self.settings.chorus != ChorusPreset::Off).then(Chorus::new);
+    }
+
     /// Work out the dry and wet gains from the mixes and the sends.
     fn mix(&mut self) {
         let (reverb_dry, reverb_wet) = dry_wet(self.settings.reverb_mix);

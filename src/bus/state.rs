@@ -4,12 +4,13 @@
 //! until it is one or the other.
 
 use super::Bus;
-use crate::savestate::{Reader, Result, State, StateError, Writer};
+use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, save_device};
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 1;
 const CORE_VERSION: u16 = 1;
 const VIDEO_VERSION: u16 = 1;
+const SOUND_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -65,16 +66,15 @@ impl Bus {
             last_flip,
             gate_array_shadow,
             gate_array_shadow_at,
-            // Not saved yet: the sound devices and DOS's memory managers,
-            // drives and devices.
-            opl: _,
-            sb: _,
-            mpu: _,
-            gus: _,
-            gus_line: _,
-            tandy_sound: _,
-            lpt_dac: _,
-            cdaudio: _,
+            opl,
+            sb,
+            mpu,
+            gus,
+            gus_line,
+            tandy_sound,
+            lpt_dac,
+            cdaudio,
+            // Not saved yet: DOS's memory managers, drives and devices.
             xms: _,
             ems: _,
             umb: _,
@@ -128,6 +128,13 @@ impl Bus {
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
+        w.section(b"SOUN", SOUND_VERSION, |w| {
+            save_all!(w; opl, mpu, gus_line, tandy_sound);
+            save_device(sb, w);
+            save_device(gus, w);
+            save_device(lpt_dac, w);
+            cdaudio.save_state(w);
+        });
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -176,20 +183,20 @@ impl Bus {
             last_flip,
             gate_array_shadow,
             gate_array_shadow_at,
-            opl: _,
-            sb: _,
-            mpu: _,
-            gus: _,
-            gus_line: _,
-            tandy_sound: _,
-            lpt_dac: _,
-            cdaudio: _,
+            opl,
+            sb,
+            mpu,
+            gus,
+            gus_line,
+            tandy_sound,
+            lpt_dac,
+            cdaudio,
             xms: _,
             ems: _,
             umb: _,
             mouse: _,
             mscdex: _,
-            disk: _,
+            disk,
             disk_io: _,
             tandy_mode: _,
             ultrasnd_drive: _,
@@ -238,18 +245,29 @@ impl Bus {
         );
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        let mut section = r.section(b"SOUN", SOUND_VERSION)?;
+        load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
+        load_device(sb, "Sound Blaster", &mut section)?;
+        load_device(gus, "Gravis Ultrasound", &mut section)?;
+        load_device(lpt_dac, "DAC on LPT1", &mut section)?;
+        cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
         Ok(())
     }
 
     /// Bring what is worked out from the saved state up to date after a
     /// load, once the CPU's caches are empty: the code generations start
     /// again from nothing (so machines loaded from one state are alike),
-    /// the interrupt lines follow the devices, the picture is drawn anew
-    /// and the sound rendered before the load is dropped.
+    /// the interrupt lines follow the devices, the picture is drawn anew,
+    /// the FM chip and the MIDI synthesizer are told their registers and
+    /// setup again, and the sound rendered before the load is dropped with
+    /// what rang on of it in the mixer.
     pub(crate) fn after_load(&mut self) {
         self.page_gen.fill(0);
         self.update_irq_levels();
         self.vga.after_load();
+        self.opl.after_load();
+        self.mpu.after_load();
+        self.mixer.clear_tails();
         self.audio_out.clear();
     }
 }

@@ -240,6 +240,9 @@ fn sample16(dram: &[u8], addr: u32) -> f32 {
     i16::from_le_bytes([dram[byte], dram[(byte + 1) & DRAM_MASK as usize]]) as f32
 }
 
+crate::state_fields!(Voice { wave_ctrl, freq, start, end, pos, ramp_ctrl, ramp_rate, ramp_start, ramp_end, vol, pan });
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

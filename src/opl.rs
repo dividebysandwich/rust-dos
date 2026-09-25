@@ -26,6 +26,9 @@ pub struct Opl {
     /// Whether any key has been played since the last reset, so a silent
     /// chip can skip synthesis.
     active: bool,
+    /// The chip's registers as written, for a save state: the chip can't
+    /// be saved, so a loaded state writes them to a new one (`after_load`).
+    regs: [[u8; 256]; 2],
 }
 
 impl Opl {
@@ -39,6 +42,7 @@ impl Opl {
             timer_mask: [false; 2],
             timer_expired: [false; 2],
             active: false,
+            regs: [[0; 256]; 2],
         }
     }
 
@@ -75,7 +79,43 @@ impl Opl {
         if (0xA0..=0xB8).contains(&reg) || reg == 0xBD {
             self.active = true;
         }
+        self.regs[bank][reg as usize] = value;
         self.chip.write_register((bank as u16) << 8 | reg as u16, value);
+    }
+
+    /// A new chip with the registers of the loaded state: the OPL3 mode
+    /// and four-operator connections first, as they change what the
+    /// other registers mean, then the rest, the frequencies and key-ons
+    /// and the rhythm register last, so the notes playing start again
+    /// with their instruments.
+    pub fn after_load(&mut self) {
+        self.chip = Opl3Chip::new(RATE);
+        let key_part = |reg: usize| (0xA0..=0xB8).contains(&reg) || reg == 0xBD;
+        let mut order = Vec::with_capacity(512);
+        if self.opl3 {
+            order.extend([(1, 0x05), (1, 0x04)]);
+        }
+        for bank in 0..2 {
+            for reg in 0..256 {
+                let timer = bank == 0 && (0x02..=0x04).contains(&reg);
+                let mode = bank == 1 && matches!(reg, 0x04 | 0x05);
+                if !timer && !mode && !key_part(reg) {
+                    order.push((bank, reg));
+                }
+            }
+        }
+        for bank in 0..2 {
+            order.extend((0xA0..=0xA8).chain(0xB0..=0xB8).map(|reg| (bank, reg)));
+        }
+        order.push((0, 0xBD));
+        // A new chip's registers are all 0, as are those never written
+        // (some of which it has no slot for).
+        for (bank, reg) in order {
+            let value = self.regs[bank][reg];
+            if value != 0 && (bank == 0 || self.opl3) {
+                self.chip.write_register((bank as u16) << 8 | reg as u16, value);
+            }
+        }
     }
 
     fn timer_control(&mut self, value: u8, now_us: u64) {
@@ -134,3 +174,7 @@ impl Opl {
         (frame[0], frame[1])
     }
 }
+
+// Whether it is an OPL3 comes with the Sound Blaster's model; the chip is
+// written anew from `regs` after a load.
+crate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3 });

@@ -94,7 +94,7 @@ impl SbConfig {
 }
 
 /// A DMA transfer the DSP runs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Transfer {
     bits16: bool,
     stereo: bool,
@@ -596,3 +596,12 @@ impl SoundBlaster {
         }
     }
 }
+
+crate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block, remaining, rate, paused, last_block });
+crate::state_fields!(SoundBlaster {
+    reset_stage, in_command, params, params_needed, read_buf, test_reg, speaker_on, tc_rate, sb16_rate,
+    block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
+    mixer_index, mixer,
+} skip {
+    config,
+});

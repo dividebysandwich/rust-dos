@@ -186,3 +186,85 @@ impl CdPlayer {
         self.buffer.extend(samples);
     }
 }
+
+crate::state_enum!(PlayState { PlayState::Stopped, PlayState::Playing, PlayState::Paused });
+
+impl CdPlayer {
+    /// Save what plays: the range, the position and the samples read
+    /// ahead. The disc is the drive's.
+    pub(crate) fn save_state(&self, w: &mut crate::savestate::Writer) {
+        use crate::savestate::State;
+        let CdPlayer { image, drive, state, start, end, played, buffer, next, channels } = self;
+        image.is_some().save(w);
+        (*drive, *state).save(w);
+        (*start, *end, *played).save(w);
+        buffer.save(w);
+        (*next, *channels).save(w);
+    }
+
+    /// Load what `save_state` saved, playing the disc `image` finds in its
+    /// drive; with none there any more, the player stops.
+    pub(crate) fn load_state(
+        &mut self,
+        r: &mut crate::savestate::Reader,
+        image_of: impl FnOnce(u8) -> Option<Rc<CdImage>>,
+    ) -> crate::savestate::Result<()> {
+        use crate::savestate::State;
+        let CdPlayer { image, drive, state, start, end, played, buffer, next, channels } = self;
+        let mut had_image = false;
+        had_image.load(r)?;
+        drive.load(r)?;
+        state.load(r)?;
+        start.load(r)?;
+        end.load(r)?;
+        played.load(r)?;
+        buffer.load(r)?;
+        next.load(r)?;
+        channels.load(r)?;
+        *image = if had_image { image_of(*drive) } else { None };
+        if had_image && image.is_none() {
+            self.reset();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::savestate::{Reader, Writer};
+
+    fn tone_disc() -> Rc<CdImage> {
+        let dir = std::path::PathBuf::from("target/test_cd_player_state");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy("tests/cdimage/audio/tone.wav", dir.join("tone.wav")).unwrap();
+        std::fs::write(dir.join("tone.cue"), "FILE \"tone.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n").unwrap();
+        Rc::new(CdImage::open(&dir.join("tone.cue")).unwrap())
+    }
+
+    #[test]
+    fn a_loaded_player_plays_on_from_where_it_was() {
+        let disc = tone_disc();
+        let mut player = CdPlayer::new();
+        player.play(3, disc.clone(), 0, 20);
+        player.channels[1] = (0, 0x80);
+        for _ in 0..1000 {
+            player.render();
+        }
+        let mut w = Writer::new();
+        player.save_state(&mut w);
+
+        let mut loaded = CdPlayer::new();
+        loaded.load_state(&mut Reader::new(&w.buf), |drive| (drive == 3).then(|| disc.clone())).unwrap();
+        assert_eq!((loaded.state(), loaded.range(), loaded.channels), (PlayState::Playing, (0, 20), player.channels));
+        let ahead: Vec<_> = (0..5000).map(|_| player.render()).collect();
+        let after: Vec<_> = (0..5000).map(|_| loaded.render()).collect();
+        assert!(ahead == after && ahead.iter().any(|&(l, _)| l != 0.0));
+
+        // With the disc gone from the drive, the player stops.
+        let mut gone = CdPlayer::new();
+        gone.load_state(&mut Reader::new(&w.buf), |_| None).unwrap();
+        assert_eq!(gone.state(), PlayState::Stopped);
+    }
+}
