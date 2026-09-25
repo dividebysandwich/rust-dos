@@ -588,7 +588,19 @@ text screen, typing input, tracing instructions, setting breakpoints, and
 inspecting registers and memory. It has no authentication and no encryption,
 so keep it bound to localhost.
 
-`GET /` lists every endpoint. Some examples:
+Open the address in a web browser (`http://127.0.0.1:8086/`) for the
+debugger page: the screen, which takes the keyboard (and, if asked, the
+mouse) when clicked; pause, resume, step, step over and run to an address
+(F8, F11 and F10, as in browsers' developer tools); the disassembly around
+CS:IP, where a click beside an instruction sets a breakpoint and a
+double-click runs to it; the registers and flags, which a click changes; a
+hex view of memory to edit byte by byte; the stack; breakpoints, pauses on
+exceptions and mode switches, and watchpoints, which pause when a value in
+memory changes; and the log, the instruction trace, the descriptor tables,
+the interrupt vectors and the rest of the machine's state.
+
+For scripts and agents, `GET /` with curl lists every endpoint. Some
+examples:
 
 ```sh
 curl localhost:8086/api/status

@@ -1,0 +1,1347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rust-dos debugger</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23222'/%3E%3Ctext x='3' y='12' font-family='monospace' font-size='10' fill='%237fd962'%3E%3E_%3C/text%3E%3C/svg%3E">
+<style>
+/* The rust-dos debugger: the debug server's API as one page. It talks to
+   the server it came from, and needs nothing else. */
+:root {
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --panel-2: #f0f2f5;
+  --border: #d8dce2;
+  --text: #1d2126;
+  --muted: #68707c;
+  --accent: #1f6feb;
+  --accent-text: #ffffff;
+  --good: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+  --current: #fff3b0;
+  --changed: #c2410c;
+  --bp: #d1242f;
+  --sel: #dbe9ff;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --panel-2: #1e232b;
+    --border: #2c333d;
+    --text: #d8dde4;
+    --muted: #8b95a3;
+    --accent: #3b82f6;
+    --accent-text: #ffffff;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+    --current: #3d3514;
+    --changed: #fb923c;
+    --bp: #f85149;
+    --sel: #1d3557;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 var(--sans);
+  display: flex;
+  flex-direction: column;
+}
+button, input, select {
+  font: inherit;
+  color: inherit;
+}
+button {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+input[type=text], select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 7px;
+  min-width: 0;
+}
+input[type=text] { font-family: var(--mono); }
+input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+
+/* Toolbar */
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 14px; margin: 0 8px 0 0; font-weight: 650; }
+.group { display: flex; gap: 6px; align-items: center; }
+#state {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-weight: 600;
+}
+#state::before {
+  content: ""; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--good);
+}
+#state.paused::before { background: var(--warn); }
+#state.offline::before { background: var(--bad); }
+#statusline { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); }
+#statusline b { color: var(--text); font-weight: 600; font-family: var(--mono); }
+
+/* Layout */
+main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  grid-template-columns: minmax(320px, 1.15fr) minmax(300px, 1fr) minmax(250px, .72fr);
+  grid-template-rows: minmax(260px, 1.1fr) minmax(200px, 1fr) minmax(150px, .8fr);
+  grid-template-areas:
+    "screen dis regs"
+    "mem mem side"
+    "bottom bottom bottom";
+}
+@media (max-width: 1100px) {
+  main {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto;
+    grid-template-areas: "screen screen" "dis regs" "mem mem" "side side" "bottom bottom";
+    overflow: auto;
+  }
+  .panel { min-height: 260px; }
+}
+@media (max-width: 700px) {
+  main { grid-template-columns: 1fr; grid-template-areas: "screen" "dis" "regs" "mem" "side" "bottom"; }
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.panel > .head {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.panel > .head h2 { font-size: 12px; margin: 0 auto 0 0; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.panel > .body { flex: 1; overflow: auto; min-height: 0; }
+.head input[type=text] { width: 11em; }
+.head button { padding: 2px 8px; }
+
+/* Screen */
+#screen-panel { grid-area: screen; }
+#screen-wrap {
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: #000;
+  position: relative;
+  outline: none;
+}
+#screen-wrap.captured { box-shadow: inset 0 0 0 2px var(--accent); }
+#screen {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+#screen-hint {
+  position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.65); color: #ddd; padding: 2px 8px; border-radius: 4px; font-size: 12px;
+  pointer-events: none;
+}
+#screen-wrap.captured #screen-hint { display: none; }
+
+/* Disassembly */
+#dis-panel { grid-area: dis; }
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 1px 6px; white-space: nowrap; text-align: left; }
+th { position: sticky; top: 0; background: var(--panel-2); font-weight: 600; color: var(--muted); font-size: 12px; }
+.code { font-family: var(--mono); font-size: 12.5px; }
+#dis tr { cursor: default; }
+#dis tr:hover { background: var(--panel-2); }
+#dis tr.current { background: var(--current); }
+#dis td.gutter { width: 18px; padding: 0 0 0 6px; cursor: pointer; }
+#dis td.gutter::before {
+  content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  border: 1px solid transparent;
+}
+#dis tr:hover td.gutter::before { border-color: var(--bp); opacity: .5; }
+#dis tr.bp td.gutter::before { background: var(--bp); border-color: var(--bp); opacity: 1; }
+#dis td.addr { color: var(--muted); }
+#dis td.bytes { color: var(--muted); }
+#dis tr.current td.addr::after { content: " ◀"; color: var(--warn); }
+#dis td.asm { width: 100%; }
+
+/* Registers */
+#regs-panel { grid-area: regs; }
+.regs { display: grid; grid-template-columns: repeat(2, auto 1fr); gap: 2px 8px; padding: 8px; align-items: center; }
+.regs .name { color: var(--muted); font-family: var(--mono); text-transform: uppercase; }
+.val {
+  font-family: var(--mono); cursor: text; border-radius: 4px; padding: 0 3px;
+  border: 1px solid transparent;
+}
+.val:hover { border-color: var(--border); }
+.val.changed, .hex.changed { color: var(--changed); font-weight: 700; }
+.val input { width: 7em; padding: 0 3px; font-family: var(--mono); }
+.flags { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px; }
+.flag {
+  font-family: var(--mono); font-size: 12px; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--border); cursor: pointer; color: var(--muted);
+}
+.flag.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.flag.changed { box-shadow: 0 0 0 1px var(--changed); }
+.subhead { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 6px 8px 2px; border-top: 1px solid var(--border); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; padding: 2px 8px 8px; font-family: var(--mono); font-size: 12px; }
+.kv span:nth-child(odd) { color: var(--muted); }
+
+/* Memory */
+#mem-panel { grid-area: mem; }
+#mem { width: auto; }
+#mem td { padding: 0 3px; }
+#mem td.addr { color: var(--muted); padding-right: 10px; }
+#mem td.hex { cursor: text; }
+#mem td.hex:hover { background: var(--panel-2); }
+#mem td.hex.sep { padding-left: 10px; }
+#mem td.ascii { padding-left: 14px; letter-spacing: .5px; color: var(--muted); white-space: pre; }
+#mem td.hex input { width: 2.4em; padding: 0 2px; font-family: var(--mono); }
+#mem td.hex.watched { text-decoration: underline dotted var(--accent) 2px; }
+
+/* Side: stack, breakpoints, watchpoints */
+#side-panel { grid-area: side; }
+.tabs { display: flex; gap: 2px; }
+.tab {
+  background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 3px 8px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tabpane { display: none; }
+.tabpane.active { display: block; }
+.list { list-style: none; margin: 0; padding: 4px 0; }
+.list li { display: flex; align-items: center; gap: 8px; padding: 2px 8px; font-family: var(--mono); }
+.list li:hover { background: var(--panel-2); }
+.list li .grow { flex: 1; }
+.list li button { padding: 0 6px; font-size: 12px; }
+.addrow { display: flex; gap: 6px; padding: 6px 8px; flex-wrap: wrap; align-items: center; border-top: 1px solid var(--border); }
+.addrow input[type=text] { flex: 1; min-width: 8em; }
+.checks { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 8px; }
+.checks label { display: inline-flex; gap: 4px; align-items: center; font-family: var(--mono); font-size: 12px; }
+.empty { color: var(--muted); padding: 6px 8px; font-style: italic; }
+
+/* Bottom: log, trace, tables, status */
+#bottom-panel { grid-area: bottom; }
+#log { font-family: var(--mono); font-size: 12px; padding: 4px 8px; white-space: pre-wrap; word-break: break-all; }
+#log .t { color: var(--muted); }
+#trace td, #tables td { font-family: var(--mono); font-size: 12px; }
+pre.json { margin: 0; padding: 6px 8px; font-family: var(--mono); font-size: 12px; }
+
+#toast {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%) translateY(20px);
+  background: var(--bad); color: #fff; padding: 8px 14px; border-radius: 8px;
+  opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; max-width: 80vw;
+  box-shadow: 0 4px 16px rgba(0,0,0,.25);
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.info { background: var(--accent); }
+kbd {
+  font-family: var(--mono); font-size: 11px; border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 4px; padding: 0 4px; color: var(--muted);
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>rust-dos debugger</h1>
+  <div class="group">
+    <button id="btn-run" class="primary" title="Pause or resume (F8)">Pause</button>
+    <button id="btn-step" title="Execute one instruction (F11)">Step</button>
+    <button id="btn-over" title="Step, running calls, interrupts, loops and REP string instructions through (F10)">Step over</button>
+    <button id="btn-runto" title="Resume until an address (double-click a disassembly row)">Run to…</button>
+    <button id="btn-reboot" title="End the running program and return to the DOS prompt">Reboot shell</button>
+  </div>
+  <span id="state" class="offline">connecting</span>
+  <div id="statusline">
+    <span>CS:IP <b id="st-csip">—</b></span>
+    <span>CPU <b id="st-mode">—</b></span>
+    <span>Video <b id="st-video">—</b></span>
+    <span><b id="st-fps">—</b> fps</span>
+    <span><b id="st-mips">—</b> MIPS</span>
+  </div>
+</header>
+
+<main>
+  <section class="panel" id="screen-panel">
+    <div class="head">
+      <h2>Screen</h2>
+      <label class="muted"><input type="checkbox" id="mouse-fwd"> send mouse</label>
+      <button id="btn-shot" title="Open a screenshot in a new tab">Screenshot</button>
+    </div>
+    <div id="screen-wrap" tabindex="0" title="Click to type into the machine; Esc twice or click outside to stop">
+      <img id="screen" alt="The emulator's screen" draggable="false">
+      <div id="screen-hint">Click to type into the machine</div>
+    </div>
+  </section>
+
+  <section class="panel" id="dis-panel">
+    <div class="head">
+      <h2>Disassembly</h2>
+      <input type="text" id="dis-addr" placeholder="CS:EIP" title="An address: SEG:OFF (registers allowed), lin:ADDR or phys:ADDR">
+      <button id="dis-go">Go</button>
+      <button id="dis-follow" title="Follow CS:EIP">Follow</button>
+    </div>
+    <div class="body"><table id="dis" class="code"><tbody></tbody></table></div>
+  </section>
+
+  <section class="panel" id="regs-panel">
+    <div class="head">
+      <h2>Registers</h2>
+      <label class="muted"><input type="checkbox" id="regs-wide"> 32-bit</label>
+    </div>
+    <div class="body" id="regs-body"><div class="empty">Pause the machine to see its registers.</div></div>
+  </section>
+
+  <section class="panel" id="mem-panel">
+    <div class="head">
+      <h2>Memory</h2>
+      <input type="text" id="mem-addr" value="DS:0000" title="SEG:OFF (registers allowed, e.g. DS:SI), lin:ADDR or phys:ADDR">
+      <button id="mem-go">Go</button>
+      <button id="mem-prev" title="Back 256 bytes">◀</button>
+      <button id="mem-next" title="On 256 bytes">▶</button>
+      <label class="muted"><input type="checkbox" id="mem-auto"> refresh while running</label>
+    </div>
+    <div class="body"><table id="mem" class="code"><tbody></tbody></table></div>
+  </section>
+
+  <section class="panel" id="side-panel">
+    <div class="head">
+      <div class="tabs" data-tabs="side">
+        <button class="tab active" data-pane="pane-stack">Stack</button>
+        <button class="tab" data-pane="pane-bp">Breakpoints</button>
+        <button class="tab" data-pane="pane-wp">Watch</button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="tabpane active" id="pane-stack"><ul class="list" id="stack"></ul></div>
+      <div class="tabpane" id="pane-bp">
+        <ul class="list" id="bps"></ul>
+        <div class="addrow">
+          <input type="text" id="bp-addr" placeholder="1234:0100">
+          <button id="bp-add">Add</button>
+        </div>
+        <div class="subhead">Pause on</div>
+        <div class="checks" id="exc-checks"></div>
+      </div>
+      <div class="tabpane" id="pane-wp">
+        <ul class="list" id="wps"></ul>
+        <div class="addrow">
+          <input type="text" id="wp-addr" placeholder="DS:0100">
+          <select id="wp-len"><option value="1">byte</option><option value="2">word</option><option value="4">dword</option></select>
+          <button id="wp-add">Add</button>
+        </div>
+        <div class="empty">The machine pauses after an instruction changes a watched value.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="bottom-panel">
+    <div class="head">
+      <div class="tabs" data-tabs="bottom">
+        <button class="tab active" data-pane="pane-log">Log</button>
+        <button class="tab" data-pane="pane-trace">Trace</button>
+        <button class="tab" data-pane="pane-tables">Tables</button>
+        <button class="tab" data-pane="pane-status">Status</button>
+      </div>
+      <span id="bottom-tools" style="margin-left:auto; display:flex; gap:6px; align-items:center;"></span>
+    </div>
+    <div class="body" id="bottom-body">
+      <div class="tabpane active" id="pane-log"><div id="log"></div></div>
+      <div class="tabpane" id="pane-trace"><table id="trace"><thead></thead><tbody></tbody></table></div>
+      <div class="tabpane" id="pane-tables"><div id="tables"></div></div>
+      <div class="tabpane" id="pane-status"><pre class="json" id="status-json"></pre></div>
+    </div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<template id="tools-log">
+  <input type="text" id="log-filter" placeholder="filter">
+  <label class="muted"><input type="checkbox" id="log-follow" checked> follow</label>
+  <button id="log-clear">Clear</button>
+</template>
+<template id="tools-trace">
+  <button id="trace-toggle">Start tracing</button>
+  <button id="trace-refresh">Last 200</button>
+  <button id="trace-clear">Clear</button>
+</template>
+<template id="tools-tables">
+  <select id="table-kind">
+    <option value="ivt">Interrupt vectors</option>
+    <option value="gdt">GDT</option>
+    <option value="ldt">LDT</option>
+    <option value="idt">IDT</option>
+    <option value="tss">TSS</option>
+    <option value="exceptions">Exceptions</option>
+    <option value="xms">XMS</option>
+    <option value="drive">Drives</option>
+    <option value="gus">Ultrasound</option>
+    <option value="pagewalk">Page walk…</option>
+  </select>
+  <input type="text" id="table-addr" placeholder="lin:00401000" style="display:none">
+  <button id="table-load">Load</button>
+</template>
+<template id="tools-status">
+  <button id="status-refresh">Refresh</button>
+</template>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Plumbing
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const el = (tag, props = {}, ...children) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") e.className = v;
+    else if (k === "dataset") Object.assign(e.dataset, v);
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e[k] = v;
+  }
+  for (const c of children) e.append(c);
+  return e;
+};
+const hex = (n, digits) => (n >>> 0).toString(16).toUpperCase().padStart(digits, "0");
+
+let toastTimer;
+function toast(message, info = false) {
+  const t = $("#toast");
+  t.textContent = message;
+  t.classList.toggle("info", info);
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), info ? 2000 : 4000);
+}
+
+async function api(path, { method = "GET", body, text = false } = {}) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.body = JSON.stringify(body);
+    opts.headers["content-type"] = "application/json";
+  }
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let msg = `${r.status} ${r.statusText}`;
+    try { msg = (await r.json()).error || msg; } catch (_) {}
+    throw new Error(msg);
+  }
+  return text ? r.text() : r.json();
+}
+
+// Run an action, reporting a failure instead of throwing.
+function act(fn) {
+  return async (...args) => {
+    try { await fn(...args); } catch (e) { toast(e.message); }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// State
+
+const st = {
+  online: false,
+  paused: false,
+  regs: null,
+  // The registers at the stop before, to show what changed.
+  prevRegs: null,
+  wide: false,
+  wideTouched: false,
+  dis: { follow: true, addr: null, rows: [] },
+  mem: { base: null, data: null, prev: null, prevKey: null },
+  bps: [],
+  exceptions: [],
+  modeSwitch: false,
+  wps: [],
+  tracing: false,
+};
+
+// ---------------------------------------------------------------------------
+// Execution control
+
+function setPaused(paused) {
+  st.paused = paused;
+  const s = $("#state");
+  s.className = st.online ? (paused ? "paused" : "") : "offline";
+  s.textContent = !st.online ? "offline" : paused ? "paused" : "running";
+  $("#btn-run").textContent = paused ? "Resume" : "Pause";
+  $("#btn-step").disabled = !paused;
+  $("#btn-over").disabled = !paused;
+}
+
+const togglePause = act(async () => {
+  if (st.paused) {
+    await api("/api/control/resume", { method: "POST" });
+    setPaused(false);
+  } else {
+    await api("/api/control/pause", { method: "POST" });
+  }
+});
+
+const step = act(async () => {
+  if (!st.paused) return;
+  await api("/api/control/step", { method: "POST", body: { count: 1 } });
+});
+
+const stepOver = act(async () => {
+  if (!st.paused) return;
+  // A call that doesn't come back leaves the machine running; the pause
+  // event says when it stops.
+  try {
+    await api("/api/control/step_over", { method: "POST", body: { timeout_ms: 1500 } });
+  } catch (e) {
+    if (!/timed out/.test(e.message)) throw e;
+    setPaused(false);
+    toast("Still running: the call hasn't returned yet", true);
+  }
+});
+
+const runTo = act(async (addr) => {
+  if (addr === undefined) {
+    addr = prompt("Resume until the instruction at (SEG:OFF, lin:ADDR or phys:ADDR):", "");
+    if (!addr) return;
+  }
+  await api("/api/control/resume", { method: "POST", body: { until: addr } });
+  setPaused(false);
+});
+
+const reboot = act(async () => {
+  if (!confirm("End the running program and return to the DOS prompt?")) return;
+  await api("/api/control/reboot_shell", { method: "POST" });
+  setPaused(false);
+});
+
+// ---------------------------------------------------------------------------
+// Registers
+
+const REGS16 = [["ax", "bx"], ["cx", "dx"], ["si", "di"], ["bp", "sp"], ["cs", "ds"], ["es", "ss"], ["fs", "gs"], ["ip", "flags"]];
+const REGS32 = [["eax", "ebx"], ["ecx", "edx"], ["esi", "edi"], ["ebp", "esp"], ["cs", "ds"], ["es", "ss"], ["fs", "gs"], ["eip", "eflags"]];
+const FLAGS = [["OF", 11], ["DF", 10], ["IF", 9], ["TF", 8], ["SF", 7], ["ZF", 6], ["AF", 4], ["PF", 2], ["CF", 0]];
+
+function renderRegs() {
+  const body = $("#regs-body");
+  const r = st.regs;
+  if (!r) return;
+  if (!st.wideTouched) {
+    const upper = ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "eip"].some((n) => r[n].slice(0, 4) !== "0000");
+    st.wide = r.system.code32 || upper;
+    $("#regs-wide").checked = st.wide;
+  }
+  const p = st.prevRegs;
+  const grid = el("div", { class: "regs" });
+  for (const pair of st.wide ? REGS32 : REGS16) {
+    for (const name of pair) {
+      grid.append(el("span", { class: "name", textContent: name }));
+      const v = el("span", { class: "val", textContent: r[name], title: "Click to change" });
+      if (p && p[name] !== r[name]) v.classList.add("changed");
+      v.addEventListener("click", () => editReg(v, name));
+      grid.append(v);
+    }
+  }
+  const flags = el("div", { class: "flags" });
+  const bits = parseInt(r.flags, 16);
+  const prevBits = p ? parseInt(p.flags, 16) : bits;
+  for (const [name, bit] of FLAGS) {
+    const on = (bits >> bit) & 1;
+    const f = el("span", { class: "flag" + (on ? " on" : ""), textContent: name, title: `Click to ${on ? "clear" : "set"} ${name}` });
+    if (((prevBits >> bit) & 1) !== on) f.classList.add("changed");
+    f.addEventListener("click", act(async () => {
+      if (!st.paused) return toast("Pause the machine first");
+      await setRegs({ flags: hex(bits ^ (1 << bit), 4) });
+    }));
+    flags.append(f);
+  }
+  const sys = r.system;
+  const kv = el("div", { class: "kv" });
+  const add = (k, v) => kv.append(el("span", { textContent: k }), el("span", { textContent: v }));
+  add("mode", `${sys.mode}${sys.mode !== "real" ? `, CPL ${sys.cpl}` : ""}${sys.code32 ? ", 32-bit code" : ""}`);
+  add("cr0", r.cr0);
+  if (sys.mode !== "real") {
+    add("cr2", sys.cr2);
+    add("cr3", sys.cr3);
+    add("gdtr", `${sys.gdtr.base} / ${sys.gdtr.limit}`);
+    add("idtr", `${sys.idtr.base} / ${sys.idtr.limit}`);
+    add("ldtr", sys.ldtr.selector);
+    add("tr", sys.tr.selector);
+    for (const [seg, c] of Object.entries(sys.segments)) {
+      add(seg, `base ${c.base} limit ${c.limit}`);
+    }
+  }
+  body.replaceChildren(grid, el("div", { class: "subhead", textContent: "Flags" }), flags,
+    el("div", { class: "subhead", textContent: "System" }), kv);
+}
+
+function editReg(span, name) {
+  if (!st.paused) return toast("Pause the machine to change registers");
+  const input = el("input", { type: "text", value: span.textContent, spellcheck: false });
+  span.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = act(async (save) => {
+    if (done) return;
+    done = true;
+    if (save && input.value.trim() !== st.regs[name]) {
+      await setRegs({ [name]: input.value.trim() });
+    } else {
+      renderRegs();
+    }
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") finish(true);
+    if (e.key === "Escape") finish(false);
+    e.stopPropagation();
+  });
+  input.addEventListener("blur", () => finish(false));
+}
+
+async function setRegs(values) {
+  try {
+    st.regs = await api("/api/registers", { method: "PUT", body: values });
+  } finally {
+    renderRegs();
+  }
+  await Promise.all([refreshDisasm(), refreshMemory(), refreshStack()]);
+}
+
+// ---------------------------------------------------------------------------
+// Disassembly
+
+const DIS_ROWS = 48;
+
+async function refreshDisasm() {
+  let addr = st.dis.follow ? "CS:EIP" : st.dis.addr;
+  // Keep the listing where it is while CS:EIP stays in view, so stepping
+  // shows the instructions before it too; near the end, move it on.
+  if (st.dis.follow && st.dis.rows.length) {
+    const i = await indexOfCurrent();
+    if (i >= 0) addr = rowAddr(st.dis.rows[i < st.dis.rows.length - 8 ? 0 : Math.max(0, i - 8)]);
+  }
+  const v = await api(`/api/disasm?format=json&count=${DIS_ROWS}&addr=${encodeURIComponent(addr)}`);
+  st.dis.rows = v.rows;
+  renderDisasm();
+}
+
+// The address a row starts at, as the server takes it.
+function rowAddr(row) {
+  return row.label.includes(":") || !row.phys ? row.label : "phys:" + row.phys;
+}
+
+// Where CS:EIP is among the rows shown, by physical address.
+async function indexOfCurrent() {
+  const v = await api(`/api/disasm?format=json&count=1&addr=CS:EIP`);
+  const phys = v.rows[0] && v.rows[0].phys;
+  return st.dis.rows.findIndex((row) => row.phys === phys && phys !== null);
+}
+
+function renderDisasm() {
+  const tbody = $("#dis tbody");
+  const rows = st.dis.rows.map((row) => {
+    const tr = el("tr", { class: (row.current ? "current " : "") + (row.breakpoint ? "bp" : "") });
+    const gutter = el("td", { class: "gutter", title: "Toggle a breakpoint" });
+    gutter.addEventListener("click", act(async () => {
+      if (!row.phys) return;
+      await toggleBreakpoint("phys:" + row.phys, row.breakpoint);
+    }));
+    tr.append(gutter,
+      el("td", { class: "addr", textContent: row.label }),
+      el("td", { class: "bytes", textContent: row.bytes }),
+      el("td", { class: "asm", textContent: row.asm }));
+    tr.addEventListener("dblclick", () => row.phys && runTo("phys:" + row.phys));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
+  const cur = tbody.querySelector("tr.current");
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+async function toggleBreakpoint(addr, on) {
+  if (on) {
+    await api(`/api/breakpoints?addr=${encodeURIComponent(addr)}`, { method: "DELETE" });
+  } else {
+    await api("/api/breakpoints", { method: "POST", body: { addr } });
+  }
+  await Promise.all([refreshBreakpoints(), refreshDisasm()]);
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+
+const MEM_LEN = 256;
+
+// An address as the view keeps it: a segment and offset, or a flat
+// address with its prefix ("lin:" or "phys:").
+function parseMemAddr(text) {
+  const t = text.trim();
+  const lower = t.toLowerCase();
+  for (const prefix of ["lin:", "phys:"]) {
+    if (lower.startsWith(prefix)) return { prefix, flat: parseHexOrThrow(t.slice(prefix.length)) };
+  }
+  const colon = t.indexOf(":");
+  if (colon > 0) {
+    return { seg: resolvePart(t.slice(0, colon)), off: resolvePart(t.slice(colon + 1)) };
+  }
+  return { prefix: "phys:", flat: parseHexOrThrow(t) };
+}
+
+function parseHexOrThrow(s) {
+  const t = s.trim().replace(/^0x/i, "").replace(/h$/i, "");
+  if (!/^[0-9a-f]+$/i.test(t)) throw new Error(`'${s}' isn't a hex number`);
+  return parseInt(t, 16);
+}
+
+// A number or a register's value, from the registers last read.
+function resolvePart(s) {
+  const n = s.trim().toLowerCase();
+  if (st.regs && Object.prototype.hasOwnProperty.call(st.regs, n) && typeof st.regs[n] === "string") {
+    return parseInt(st.regs[n], 16);
+  }
+  return parseHexOrThrow(s);
+}
+
+function memAddrText(base, i) {
+  if (base.prefix) return base.prefix + hex(base.flat + i, 5);
+  const off = base.off + i;
+  return `${hex(base.seg, 4)}:${hex(off, off > 0xFFFF ? 8 : 4)}`;
+}
+
+function memKey(base) {
+  return base.prefix ? base.prefix + base.flat : `${base.seg}:${base.off}`;
+}
+
+async function refreshMemory() {
+  if (!st.mem.base) return;
+  const base = st.mem.base;
+  const v = await api(`/api/memory?format=base64&len=${MEM_LEN}&addr=${encodeURIComponent(memAddrText(base, 0))}`);
+  const bin = atob(v.base64);
+  const data = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  const key = memKey(base);
+  st.mem.prev = st.mem.prevKey === key ? st.mem.data : null;
+  st.mem.prevKey = key;
+  st.mem.data = data;
+  st.mem.phys = parseInt(v.addr, 16);
+  renderMemory();
+}
+
+function renderMemory() {
+  const { base, data, prev } = st.mem;
+  const tbody = $("#mem tbody");
+  const watched = new Set();
+  for (const w of st.wps) {
+    for (let i = 0; i < w.len; i++) watched.add(parseInt(w.addr, 16) + i);
+  }
+  const rows = [];
+  for (let row = 0; row < data.length; row += 16) {
+    const tr = el("tr", {}, el("td", { class: "addr", textContent: memAddrText(base, row) }));
+    let ascii = "";
+    for (let col = 0; col < 16; col++) {
+      const i = row + col;
+      const b = data[i];
+      const td = el("td", { class: "hex" + (col === 8 ? " sep" : ""), textContent: hex(b, 2), title: memAddrText(base, i) });
+      if (prev && prev[i] !== b) td.classList.add("changed");
+      if (!base.prefix || base.prefix === "phys:") {
+        // Physical addresses are only known for flat physical views and
+        // real-mode segments.
+        const phys = base.prefix ? base.flat + i : (st.regs && st.regs.system.mode !== "real" ? -1 : base.seg * 16 + base.off + i);
+        if (watched.has(phys)) td.classList.add("watched");
+      }
+      td.addEventListener("click", () => editByte(td, i));
+      tr.append(td);
+      ascii += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".";
+    }
+    tr.append(el("td", { class: "ascii", textContent: ascii }));
+    rows.push(tr);
+  }
+  tbody.replaceChildren(...rows);
+}
+
+function editByte(td, i) {
+  if (td.querySelector("input")) return;
+  const input = el("input", { type: "text", value: td.textContent, maxLength: 2, spellcheck: false });
+  td.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = act(async (how) => {
+    if (done) return;
+    done = true;
+    const value = input.value.trim();
+    if (how !== "cancel" && /^[0-9a-f]{1,2}$/i.test(value) && parseInt(value, 16) !== st.mem.data[i]) {
+      await api("/api/memory", { method: "PUT", body: { addr: memAddrText(st.mem.base, i), hex: value.padStart(2, "0") } });
+      st.mem.data[i] = parseInt(value, 16);
+    }
+    td.textContent = hex(st.mem.data[i], 2);
+    if (how === "next" && i + 1 < st.mem.data.length) {
+      editByte($("#mem tbody").rows[(i + 1) >> 4].cells[1 + ((i + 1) & 15)], i + 1);
+    }
+  });
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") finish("save");
+    else if (e.key === "Tab" || e.key === " ") { e.preventDefault(); finish("next"); }
+    else if (e.key === "Escape") finish("cancel");
+  });
+  input.addEventListener("input", () => { if (input.value.length === 2) finish("next"); });
+  input.addEventListener("blur", () => finish("save"));
+}
+
+const memGo = act(async () => {
+  st.mem.base = parseMemAddr($("#mem-addr").value);
+  await refreshMemory();
+});
+
+const memPage = act(async (delta) => {
+  const b = st.mem.base;
+  if (!b) return;
+  if (b.prefix) b.flat = Math.max(0, b.flat + delta);
+  else b.off = Math.max(0, b.off + delta);
+  $("#mem-addr").value = memAddrText(b, 0);
+  await refreshMemory();
+});
+
+// ---------------------------------------------------------------------------
+// Stack
+
+async function refreshStack() {
+  const r = st.regs;
+  if (!r) return;
+  const wide = r.system.code32 && r.system.mode !== "real";
+  const size = wide ? 4 : 2;
+  const sp = wide ? "ESP" : "SP";
+  const v = await api(`/api/memory?format=base64&len=${16 * size}&addr=SS:${sp}`);
+  const bin = atob(v.base64);
+  const items = [];
+  for (let i = 0; i + size <= bin.length; i += size) {
+    let value = 0;
+    for (let k = size - 1; k >= 0; k--) value = value * 256 + bin.charCodeAt(i + k);
+    items.push(el("li", {},
+      el("span", { class: "muted", textContent: `${sp}+${hex(i, 2)}` }),
+      el("span", { class: "grow", textContent: hex(value, size * 2) })));
+  }
+  $("#stack").replaceChildren(...items);
+}
+
+// ---------------------------------------------------------------------------
+// Breakpoints and watchpoints
+
+const EXCEPTIONS = [["00", "#DE"], ["06", "#UD"], ["0D", "#GP"], ["0E", "#PF"]];
+
+async function refreshBreakpoints() {
+  const v = await api("/api/breakpoints");
+  st.bps = v.breakpoints;
+  st.exceptions = v.exceptions;
+  st.modeSwitch = v.mode_switch;
+  const items = st.bps.map((phys) => el("li", {},
+    el("span", { class: "grow", textContent: "phys " + phys }),
+    el("button", { textContent: "Show", onclick: () => showCode("phys:" + phys) }),
+    el("button", { textContent: "✕", title: "Remove", onclick: act(() => toggleBreakpoint("phys:" + phys, true)) })));
+  $("#bps").replaceChildren(...(items.length ? items : [el("li", { class: "empty", textContent: "No breakpoints. Click beside an instruction to set one." })]));
+  const checks = $("#exc-checks");
+  const box = (label, checked, onchange, title) => {
+    const input = el("input", { type: "checkbox", checked, onchange });
+    return el("label", { title }, input, label);
+  };
+  const all = st.exceptions.length === 32;
+  const boxes = EXCEPTIONS.map(([vec, name]) => box(`${vec} ${name}`, st.exceptions.includes(vec),
+    act(async (e) => {
+      await api("/api/breakpoints", { method: "POST", body: { exception: vec, enabled: e.target.checked } });
+      await refreshBreakpoints();
+    }), `Pause in the handler after the CPU raises exception ${vec}h`));
+  boxes.push(box("any exception", all, act(async (e) => {
+    await api("/api/breakpoints", { method: "POST", body: { exception: "any", enabled: e.target.checked } });
+    await refreshBreakpoints();
+  }), "Pause after any exception"));
+  boxes.push(box("mode switch", st.modeSwitch, act(async (e) => {
+    await api("/api/breakpoints", { method: "POST", body: { mode_switch: e.target.checked } });
+    await refreshBreakpoints();
+  }), "Pause after the CPU enters or leaves protected mode"));
+  checks.replaceChildren(...boxes);
+}
+
+async function refreshWatchpoints() {
+  const v = await api("/api/watchpoints");
+  st.wps = v.watchpoints;
+  const items = st.wps.map((w) => el("li", {},
+    el("span", { class: "grow", textContent: `phys ${w.addr} ${["", "byte", "word", "", "dword"][w.len]}` }),
+    el("b", { textContent: w.value }),
+    el("button", { textContent: "Show", onclick: () => showMemory("phys:" + w.addr) }),
+    el("button", { textContent: "✕", title: "Remove", onclick: act(async () => {
+      await api(`/api/watchpoints?addr=phys:${w.addr}`, { method: "DELETE" });
+      await refreshWatchpoints();
+    }) })));
+  $("#wps").replaceChildren(...(items.length ? items : [el("li", { class: "empty", textContent: "Nothing watched." })]));
+  if (st.mem.data) renderMemory();
+}
+
+function showCode(addr) {
+  st.dis.follow = false;
+  st.dis.addr = addr;
+  $("#dis-addr").value = addr;
+  act(refreshDisasm)();
+}
+
+function showMemory(addr) {
+  $("#mem-addr").value = addr;
+  memGo();
+}
+
+// ---------------------------------------------------------------------------
+// Everything that shows the stopped machine
+
+async function refreshStopped() {
+  const regs = await api("/api/registers");
+  st.prevRegs = st.regs;
+  st.regs = regs;
+  renderRegs();
+  $("#st-csip").textContent = regs.eip.slice(0, 4) !== "0000" ? `${regs.cs}:${regs.eip}` : `${regs.cs}:${regs.ip}`;
+  if (!st.mem.base) {
+    try { st.mem.base = parseMemAddr($("#mem-addr").value); } catch (_) {}
+  }
+  await Promise.all([refreshDisasm(), refreshMemory(), refreshStack(), refreshBreakpoints(), refreshWatchpoints()]);
+}
+
+// ---------------------------------------------------------------------------
+// Status line
+
+async function refreshStatus() {
+  try {
+    const [s, stats] = await Promise.all([api("/api/status"), api("/api/stats")]);
+    if (!st.online) {
+      st.online = true;
+      setPaused(s.paused);
+      if (s.paused) act(refreshStopped)();
+    } else if (s.paused !== st.paused) {
+      setPaused(s.paused);
+      if (s.paused) act(refreshStopped)();
+    }
+    $("#st-csip").textContent = s.cs_ip;
+    $("#st-mode").textContent = s.cpu_mode + (s.shell_idle ? " (prompt)" : "");
+    $("#st-video").textContent = `${hex(s.video.mode, 2)}h ${s.video.width}×${s.video.height}`;
+    $("#st-fps").textContent = s.fps;
+    $("#st-mips").textContent = stats.mips.toFixed(1);
+    if ($("#pane-status").classList.contains("active")) $("#status-json").textContent = JSON.stringify(s, null, 2);
+    st.tracing = s.trace && s.trace.enabled;
+    const t = $("#trace-toggle");
+    if (t) t.textContent = st.tracing ? "Stop tracing" : "Start tracing";
+    if (!st.paused && $("#mem-auto").checked && st.mem.base) await refreshMemory();
+  } catch (e) {
+    if (st.online) {
+      st.online = false;
+      setPaused(st.paused);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Events: pauses, resumes and the log
+
+function connectEvents() {
+  const ws = new WebSocket(`ws://${location.host}/ws/events`);
+  ws.onmessage = (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data); } catch (_) { return; }
+    if (ev.type === "log") addLog(ev.t_ms, ev.line);
+    else if (ev.type === "paused") {
+      setPaused(true);
+      let why = `Paused: ${ev.reason}`;
+      if (ev.watch) why += ` (${ev.watch.addr}: ${ev.watch.old} → ${ev.watch.new})`;
+      if (ev.exception) why += ` (${ev.exception.name || ev.exception.vector})`;
+      if (ev.reason !== "step") toast(why, true);
+      st.dis.follow = true;
+      act(refreshStopped)();
+    } else if (ev.type === "resumed") setPaused(false);
+  };
+  ws.onclose = () => setTimeout(connectEvents, 1000);
+}
+
+const logLines = [];
+const LOG_MAX = 3000;
+
+function addLog(t, line) {
+  logLines.push([t, line]);
+  if (logLines.length > LOG_MAX) logLines.splice(0, logLines.length - LOG_MAX);
+  const filter = ($("#log-filter") || {}).value || "";
+  if (filter && !line.toLowerCase().includes(filter.toLowerCase())) return;
+  appendLogLine(t, line);
+}
+
+function appendLogLine(t, line) {
+  const log = $("#log");
+  log.append(el("div", {}, el("span", { class: "t", textContent: (t / 1000).toFixed(3).padStart(9) + "  " }), line));
+  while (log.childElementCount > LOG_MAX) log.firstChild.remove();
+  const follow = $("#log-follow");
+  if (!follow || follow.checked) $("#bottom-body").scrollTop = $("#bottom-body").scrollHeight;
+}
+
+function redrawLog() {
+  const filter = ($("#log-filter").value || "").toLowerCase();
+  $("#log").replaceChildren();
+  for (const [t, line] of logLines) {
+    if (!filter || line.toLowerCase().includes(filter)) appendLogLine(t, line);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The screen, and typing into the machine
+
+let screenUrl;
+
+function connectScreen() {
+  const ws = new WebSocket(`ws://${location.host}/ws/screen?fps=15`);
+  ws.binaryType = "blob";
+  ws.onmessage = (m) => {
+    if (typeof m.data === "string") return;
+    const url = URL.createObjectURL(m.data);
+    const img = $("#screen");
+    img.onload = () => { if (screenUrl && screenUrl !== url) URL.revokeObjectURL(screenUrl); screenUrl = url; };
+    img.src = url;
+  };
+  ws.onclose = () => setTimeout(connectScreen, 1000);
+}
+
+let inputSocket;
+let inputQueue = [];
+
+function connectInput() {
+  inputSocket = new WebSocket(`ws://${location.host}/ws/input`);
+  inputSocket.onopen = () => {
+    for (const msg of inputQueue) inputSocket.send(msg);
+    inputQueue = [];
+  };
+  inputSocket.onmessage = (m) => {
+    try {
+      const r = JSON.parse(m.data);
+      if (r.ok === false && r.error) toast(r.error);
+    } catch (_) {}
+  };
+  inputSocket.onclose = () => setTimeout(connectInput, 1000);
+}
+
+function sendInput(events) {
+  const msg = JSON.stringify({ events, wait: false });
+  if (inputSocket && inputSocket.readyState === WebSocket.OPEN) inputSocket.send(msg);
+  else inputQueue.push(msg);
+}
+
+// Browser key codes to the key names the debug server knows.
+const KEY_NAMES = (() => {
+  const map = {
+    Minus: "minus", Equal: "equals", BracketLeft: "leftbracket", BracketRight: "rightbracket",
+    Backslash: "backslash", IntlBackslash: "backslash", Semicolon: "semicolon", Quote: "quote",
+    Comma: "comma", Period: "period", Slash: "slash", Backquote: "backquote", Space: "space",
+    Enter: "enter", Backspace: "backspace", Tab: "tab", Escape: "escape",
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+    Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown", Insert: "insert", Delete: "delete",
+    NumpadDecimal: "kpperiod", NumpadAdd: "kpplus", NumpadSubtract: "kpminus",
+    NumpadMultiply: "kpmultiply", NumpadDivide: "kpdivide", NumpadEnter: "kpenter",
+    ShiftLeft: "lshift", ShiftRight: "rshift", ControlLeft: "lctrl", ControlRight: "rctrl",
+    AltLeft: "lalt", AltRight: "ralt",
+  };
+  for (let c = 65; c <= 90; c++) map["Key" + String.fromCharCode(c)] = String.fromCharCode(c + 32);
+  for (let d = 0; d <= 9; d++) { map["Digit" + d] = String(d); map["Numpad" + d] = "kp" + d; }
+  for (let f = 1; f <= 12; f++) map["F" + f] = "f" + f;
+  return map;
+})();
+
+const held = new Set();
+let lastEscape = 0;
+
+function releaseKeys() {
+  const events = [...held].map((key) => ({ type: "key", key, action: "up" }));
+  held.clear();
+  if (events.length) sendInput(events);
+}
+
+function setupScreen() {
+  const wrap = $("#screen-wrap");
+  const img = $("#screen");
+  wrap.addEventListener("focus", () => wrap.classList.add("captured"));
+  wrap.addEventListener("blur", () => { wrap.classList.remove("captured"); releaseKeys(); });
+  wrap.addEventListener("keydown", (e) => {
+    // Escape twice in a row lets go of the keyboard.
+    if (e.code === "Escape") {
+      const now = performance.now();
+      if (now - lastEscape < 400) { releaseKeys(); wrap.blur(); return; }
+      lastEscape = now;
+    }
+    const key = KEY_NAMES[e.code];
+    if (!key) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.repeat && held.has(key)) {
+      sendInput([{ type: "key", key, action: "down" }]);
+      return;
+    }
+    held.add(key);
+    sendInput([{ type: "key", key, action: "down" }]);
+  });
+  wrap.addEventListener("keyup", (e) => {
+    const key = KEY_NAMES[e.code];
+    if (!key) return;
+    e.preventDefault();
+    e.stopPropagation();
+    held.delete(key);
+    sendInput([{ type: "key", key, action: "up" }]);
+  });
+
+  // The mouse, in the screenshot's pixels.
+  const point = (e) => {
+    const r = img.getBoundingClientRect();
+    const w = img.naturalWidth || 640, h = img.naturalHeight || 400;
+    return {
+      x: Math.round(((e.clientX - r.left) / r.width) * w),
+      y: Math.round(((e.clientY - r.top) / r.height) * h),
+    };
+  };
+  let pending = null;
+  img.addEventListener("mousemove", (e) => {
+    if (!$("#mouse-fwd").checked) return;
+    const first = pending === null;
+    pending = point(e);
+    if (first) requestAnimationFrame(() => {
+      sendInput([{ type: "mouse", action: "move", ...pending }]);
+      pending = null;
+    });
+  });
+  const button = (e) => ["left", "middle", "right"][e.button] || "left";
+  img.addEventListener("mousedown", (e) => {
+    if (!$("#mouse-fwd").checked) return;
+    e.preventDefault();
+    wrap.focus();
+    sendInput([{ type: "mouse", action: "down", button: button(e), ...point(e) }]);
+  });
+  img.addEventListener("mouseup", (e) => {
+    if (!$("#mouse-fwd").checked) return;
+    sendInput([{ type: "mouse", action: "up", button: button(e), ...point(e) }]);
+  });
+  img.addEventListener("contextmenu", (e) => { if ($("#mouse-fwd").checked) e.preventDefault(); });
+}
+
+// ---------------------------------------------------------------------------
+// Bottom tabs: trace, tables, status
+
+async function refreshTrace() {
+  const v = await api("/api/trace?format=json&last_n=200");
+  const head = el("tr", {}, ...["icount", "CS:IP", "bytes", "instruction", "AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP", "DS", "ES", "flags"]
+    .map((h) => el("th", { textContent: h })));
+  $("#trace thead").replaceChildren(head);
+  const rows = v.entries.map((e) => {
+    const wide = e.code32;
+    const r = (n) => (wide ? e["e" + n] : e[n]);
+    return el("tr", {}, ...[e.icount, `${e.cs}:${wide ? e.eip : e.ip}`, e.bytes, e.asm,
+      r("ax"), r("bx"), r("cx"), r("dx"), r("si"), r("di"), r("bp"), r("sp"), e.ds, e.es, e.flags]
+      .map((c) => el("td", { textContent: c })));
+  });
+  $("#trace tbody").replaceChildren(...(rows.length ? rows : [el("tr", {}, el("td", { class: "empty", colSpan: 15, textContent: "The trace is empty. Start tracing, run a little, then look." }))]));
+  $("#bottom-body").scrollTop = $("#bottom-body").scrollHeight;
+}
+
+// A JSON value as a table: the first list of objects in it, or its fields.
+function renderJson(v) {
+  const cell = (x) => (x !== null && typeof x === "object" ? JSON.stringify(x) : String(x));
+  const list = Array.isArray(v) ? v : Object.values(v).find((x) => Array.isArray(x) && x.length && typeof x[0] === "object");
+  const parts = [];
+  if (v && !Array.isArray(v)) {
+    const scalars = Object.entries(v).filter(([, x]) => x !== list);
+    if (scalars.length) {
+      const kv = el("div", { class: "kv" });
+      for (const [k, x] of scalars) kv.append(el("span", { textContent: k }), el("span", { textContent: cell(x) }));
+      parts.push(kv);
+    }
+  }
+  if (list && list.length) {
+    const cols = [...new Set(list.flatMap((o) => Object.keys(o)))];
+    const table = el("table", {},
+      el("thead", {}, el("tr", {}, ...cols.map((c) => el("th", { textContent: c })))),
+      el("tbody", {}, ...list.map((o) => el("tr", {}, ...cols.map((c) => el("td", { textContent: o[c] === undefined ? "" : cell(o[c]) }))))));
+    parts.push(table);
+  }
+  return parts;
+}
+
+const loadTable = act(async () => {
+  const kind = $("#table-kind").value;
+  const path = kind === "pagewalk"
+    ? `/api/pagewalk?addr=${encodeURIComponent($("#table-addr").value || "lin:0")}`
+    : `/api/${kind}`;
+  const v = await api(path);
+  $("#tables").replaceChildren(...renderJson(v));
+});
+
+function setupTabs() {
+  for (const tabs of document.querySelectorAll("[data-tabs]")) {
+    for (const tab of tabs.querySelectorAll(".tab")) {
+      tab.addEventListener("click", () => {
+        tabs.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
+        const panel = tabs.closest(".panel");
+        panel.querySelectorAll(".tabpane").forEach((p) => p.classList.toggle("active", p.id === tab.dataset.pane));
+        if (tabs.dataset.tabs === "bottom") showBottomTools(tab.dataset.pane);
+      });
+    }
+  }
+}
+
+function showBottomTools(pane) {
+  const tools = $("#bottom-tools");
+  const tpl = $("#tools-" + pane.replace("pane-", ""));
+  tools.replaceChildren(tpl.content.cloneNode(true));
+  if (pane === "pane-log") {
+    $("#log-filter").addEventListener("input", redrawLog);
+    $("#log-clear").addEventListener("click", () => { logLines.length = 0; $("#log").replaceChildren(); });
+    redrawLog();
+  } else if (pane === "pane-trace") {
+    $("#trace-toggle").textContent = st.tracing ? "Stop tracing" : "Start tracing";
+    $("#trace-toggle").addEventListener("click", act(async () => {
+      const v = await api("/api/trace", { method: "POST", body: { enabled: !st.tracing } });
+      st.tracing = v.enabled;
+      $("#trace-toggle").textContent = st.tracing ? "Stop tracing" : "Start tracing";
+      toast(st.tracing ? "Tracing: every instruction is recorded (slower)" : "Tracing stopped", true);
+    }));
+    $("#trace-refresh").addEventListener("click", act(refreshTrace));
+    $("#trace-clear").addEventListener("click", act(async () => {
+      await api("/api/trace", { method: "POST", body: { clear: true } });
+      await refreshTrace();
+    }));
+    act(refreshTrace)();
+  } else if (pane === "pane-tables") {
+    const kind = $("#table-kind");
+    kind.addEventListener("change", () => {
+      $("#table-addr").style.display = kind.value === "pagewalk" ? "" : "none";
+      if (kind.value !== "pagewalk") loadTable();
+    });
+    $("#table-addr").addEventListener("keydown", (e) => { if (e.key === "Enter") loadTable(); });
+    $("#table-load").addEventListener("click", loadTable);
+    loadTable();
+  } else if (pane === "pane-status") {
+    $("#status-refresh").addEventListener("click", act(async () => {
+      $("#status-json").textContent = JSON.stringify(await api("/api/status"), null, 2);
+    }));
+    act(async () => { $("#status-json").textContent = JSON.stringify(await api("/api/status"), null, 2); })();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Start
+
+function setup() {
+  $("#btn-run").addEventListener("click", togglePause);
+  $("#btn-step").addEventListener("click", step);
+  $("#btn-over").addEventListener("click", stepOver);
+  $("#btn-runto").addEventListener("click", () => runTo());
+  $("#btn-reboot").addEventListener("click", reboot);
+  $("#btn-shot").addEventListener("click", () => window.open("/api/screenshot", "_blank"));
+
+  $("#regs-wide").addEventListener("change", (e) => { st.wide = e.target.checked; st.wideTouched = true; renderRegs(); });
+
+  const disGo = act(async () => {
+    const addr = $("#dis-addr").value.trim();
+    st.dis.follow = !addr;
+    st.dis.addr = addr || null;
+    st.dis.rows = [];
+    await refreshDisasm();
+  });
+  $("#dis-go").addEventListener("click", disGo);
+  $("#dis-addr").addEventListener("keydown", (e) => { if (e.key === "Enter") disGo(); });
+  $("#dis-follow").addEventListener("click", act(async () => {
+    st.dis.follow = true;
+    st.dis.rows = [];
+    $("#dis-addr").value = "";
+    await refreshDisasm();
+  }));
+
+  $("#mem-go").addEventListener("click", memGo);
+  $("#mem-addr").addEventListener("keydown", (e) => { if (e.key === "Enter") memGo(); });
+  $("#mem-prev").addEventListener("click", () => memPage(-MEM_LEN));
+  $("#mem-next").addEventListener("click", () => memPage(MEM_LEN));
+  $("#mem").addEventListener("wheel", (e) => {
+    if (!st.mem.base || $("#mem").querySelector("input")) return;
+    e.preventDefault();
+    memPage(e.deltaY > 0 ? 16 : -16);
+  }, { passive: false });
+
+  const bpAdd = act(async () => {
+    const addr = $("#bp-addr").value.trim();
+    if (!addr) return;
+    await api("/api/breakpoints", { method: "POST", body: { addr } });
+    $("#bp-addr").value = "";
+    await Promise.all([refreshBreakpoints(), st.dis.rows.length ? refreshDisasm() : null]);
+  });
+  $("#bp-add").addEventListener("click", bpAdd);
+  $("#bp-addr").addEventListener("keydown", (e) => { if (e.key === "Enter") bpAdd(); });
+
+  const wpAdd = act(async () => {
+    const addr = $("#wp-addr").value.trim();
+    if (!addr) return;
+    await api("/api/watchpoints", { method: "POST", body: { addr, len: Number($("#wp-len").value) } });
+    $("#wp-addr").value = "";
+    await refreshWatchpoints();
+  });
+  $("#wp-add").addEventListener("click", wpAdd);
+  $("#wp-addr").addEventListener("keydown", (e) => { if (e.key === "Enter") wpAdd(); });
+
+  // Debugger keys, as browsers' developer tools have them, unless typing
+  // goes to the machine or a field.
+  document.addEventListener("keydown", (e) => {
+    if (e.target.closest && e.target.closest("input, select, #screen-wrap")) return;
+    if (e.key === "F8") { e.preventDefault(); togglePause(); }
+    else if (e.key === "F10") { e.preventDefault(); stepOver(); }
+    else if (e.key === "F11") { e.preventDefault(); step(); }
+  });
+
+  setupTabs();
+  setupScreen();
+  showBottomTools("pane-log");
+  setPaused(false);
+  connectEvents();
+  connectScreen();
+  connectInput();
+
+  act(async () => {
+    const v = await api("/api/log?limit=500");
+    for (const l of v.lines) addLog(l.t_ms, l.line);
+  })();
+  act(refreshBreakpoints)();
+  act(refreshWatchpoints)();
+  refreshStatus();
+  setInterval(refreshStatus, 1000);
+}
+
+setup();
+</script>
+</body>
+</html>

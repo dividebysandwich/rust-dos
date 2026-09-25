@@ -11,8 +11,8 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post, put};
 use base64::Engine;
 use serde::Deserialize;
@@ -24,6 +24,8 @@ use super::{Cmd, InputEvent, Reply, Request, Shared, TraceQuery};
 use crate::video;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The debugger page, a single file with its styles and scripts.
+const UI: &str = include_str!("ui.html");
 const INPUT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
@@ -59,7 +61,8 @@ pub fn spawn(addr: SocketAddr, tx: mpsc::Sender<Request>, shared: Arc<Shared>) -
 
 fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(help))
+        .route("/", get(root))
+        .route("/ui", get(ui))
         .route("/api", get(help))
         .route("/api/status", get(status))
         .route("/api/stats", get(stats))
@@ -78,6 +81,7 @@ fn router(state: AppState) -> Router {
         .route("/api/memory", get(mem_get).put(mem_put))
         .route("/api/disasm", get(disasm))
         .route("/api/breakpoints", get(bp_list).post(bp_add).delete(bp_remove))
+        .route("/api/watchpoints", get(wp_list).post(wp_add).delete(wp_remove))
         .route("/api/ivt", get(ivt))
         .route("/api/gdt", get(gdt))
         .route("/api/ldt", get(ldt))
@@ -165,6 +169,24 @@ fn encode_png(frame: &video::Frame) -> Result<Vec<u8>, String> {
 
 async fn help() -> Response {
     text_response(HELP.to_string())
+}
+
+/// A browser gets the debugger page; everything else (curl, agents) the
+/// endpoint reference.
+async fn root(headers: HeaderMap) -> Response {
+    let html = headers
+        .get(header::ACCEPT)
+        .and_then(|a| a.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    if html { Redirect::to("/ui").into_response() } else { help().await }
+}
+
+async fn ui() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")],
+        UI,
+    )
+        .into_response()
 }
 
 async fn status(State(s): State<AppState>) -> ApiResult {
@@ -389,10 +411,11 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
         "pause" => s.call_json(Cmd::Pause, DEFAULT_TIMEOUT).await,
         "resume" | "continue" => s.call_json(Cmd::Resume { until: b.until }, DEFAULT_TIMEOUT).await,
         "step" => s.call_json(Cmd::Step { count: b.count.unwrap_or(1) }, timeout).await,
+        "step_over" => s.call_json(Cmd::StepOver, timeout).await,
         "reboot_shell" => s.call_json(Cmd::RebootShell, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError(
             StatusCode::NOT_FOUND,
-            format!("unknown action '{}' (pause, resume, step, reboot_shell)", action),
+            format!("unknown action '{}' (pause, resume, step, step_over, reboot_shell)", action),
         )),
     }
 }
@@ -523,6 +546,8 @@ struct BpBody {
     /// An exception vector (hex, or a number) or "any".
     exception: Option<Value>,
     mode_switch: Option<bool>,
+    /// With `exception`: false stops pausing on it.
+    enabled: Option<bool>,
 }
 
 /// The vectors an `exception` breakpoint names, as a mask.
@@ -542,8 +567,10 @@ fn exception_mask(v: &Value) -> Result<u32, ApiError> {
 async fn bp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
     let b: BpBody = from_value(parse_body(&body)?)?;
     if b.exception.is_some() || b.mode_switch.is_some() {
-        let exceptions = b.exception.as_ref().map(exception_mask).transpose()?;
-        return s.call_json(Cmd::BreakOn { exceptions, mode_switch: b.mode_switch }, DEFAULT_TIMEOUT).await;
+        let mask = b.exception.as_ref().map(exception_mask).transpose()?;
+        let (exceptions, clear_exceptions) = if b.enabled == Some(false) { (None, mask) } else { (mask, None) };
+        let cmd = Cmd::BreakOn { exceptions, clear_exceptions, mode_switch: b.mode_switch };
+        return s.call_json(cmd, DEFAULT_TIMEOUT).await;
     }
     let addr = b.addr.ok_or_else(|| bad("missing 'addr' (or 'exception' / 'mode_switch')"))?;
     s.call_json(Cmd::AddBreakpoint(addr), DEFAULT_TIMEOUT).await
@@ -552,6 +579,27 @@ async fn bp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
 async fn bp_remove(State(s): State<AppState>, Query(q): Query<BpBody>, body: Bytes) -> ApiResult {
     let b: BpBody = from_value(parse_body(&body)?)?;
     s.call_json(Cmd::RemoveBreakpoint(q.addr.or(b.addr)), DEFAULT_TIMEOUT).await
+}
+
+async fn wp_list(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::ListWatchpoints, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+struct WpBody {
+    addr: Option<String>,
+    len: Option<u8>,
+}
+
+async fn wp_add(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: WpBody = from_value(parse_body(&body)?)?;
+    let addr = b.addr.ok_or_else(|| bad("missing 'addr'"))?;
+    s.call_json(Cmd::AddWatchpoint { addr, len: b.len.unwrap_or(1) }, DEFAULT_TIMEOUT).await
+}
+
+async fn wp_remove(State(s): State<AppState>, Query(q): Query<WpBody>, body: Bytes) -> ApiResult {
+    let b: WpBody = from_value(parse_body(&body)?)?;
+    s.call_json(Cmd::RemoveWatchpoint(q.addr.or(b.addr)), DEFAULT_TIMEOUT).await
 }
 
 async fn ivt(State(s): State<AppState>) -> ApiResult {
@@ -754,6 +802,8 @@ async fn handle_ws_input(s: &AppState, text: &str) -> Result<Value, ApiError> {
 const HELP: &str = r#"rust-dos debug interface
 ========================
 All endpoints are local-only and unauthenticated. JSON in, JSON out unless noted.
+Open this address in a web browser for the debugger page (/ui): the screen,
+execution control, registers, disassembly, memory, breakpoints and the log.
 Addresses are hex: "SEG:OFF" (registers allowed, e.g. "CS:IP", "DS:SI", "B800:0")
 or a linear address ("0x12345", "B8000").
 
@@ -789,15 +839,20 @@ EXECUTION CONTROL
   POST /api/control/pause
   POST /api/control/resume   {"until":"1234:0100"}   (optional temporary breakpoint)
   POST /api/control/step     {"count":1}             returns registers after stepping
+  POST /api/control/step_over                        step, but run a CALL, INT, LOOP or
+                                                     REP string instruction to the next one
   POST /api/control/reboot_shell                     kill the running program
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64")
-  GET  /api/disasm?addr=CS:IP&count=20[&format=json]
+  GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
+                                           ({label, phys, bytes, asm, len, current, breakpoint})
   GET/POST/DELETE /api/breakpoints   {"addr":"1234:0100"}  (DELETE without addr = all)
                   also {"exception":"0D"} or {"exception":"any"}: pause in the handler
-                  after the CPU raises it; {"mode_switch":true}: pause after CR0.PE changes
+                  after the CPU raises it ({"exception":"0D","enabled":false} stops); {"mode_switch":true}: pause after CR0.PE changes
+  GET/POST/DELETE /api/watchpoints   {"addr":"DS:0100","len":2}  pause when the 1, 2 or
+                  4 bytes there change (DELETE without addr = all)
   GET  /api/ivt              interrupt vector table (real mode)
   Addresses: SEG:OFF (in protected mode SEL:OFF32 through the GDT/LDT; register
   names like CS:EIP, DS:ESI), lin:ADDR (through the page tables), phys:ADDR or ADDR.

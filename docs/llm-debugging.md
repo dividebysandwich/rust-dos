@@ -180,6 +180,21 @@ curl -s -XPOST $H/api/control/resume
   emulator stops at the breakpoint before all of the input is delivered.
 - **Run to an address:** `POST /api/control/resume {"until":"1000:0120"}`
   runs to that address once, without adding a permanent breakpoint.
+- **Step over:** `POST /api/control/step_over` runs a `CALL`, `INT`, `LOOP`
+  or `REP` string instruction through to the instruction after it, and
+  steps any other instruction. It replies when the machine stops there; a
+  call that never returns times the request out and leaves the machine
+  running.
+- **Stepping and interrupts:** a hardware interrupt that is due is taken
+  before the next instruction. A step can then run the emulator's handler
+  (an `FE 38` trap, which returns at once) and report the same CS:IP.
+- **Watchpoints:** `POST /api/watchpoints {"addr":"DS:0100","len":2}`
+  pauses right after an instruction changes those 1, 2 or 4 bytes. The
+  `paused` reply and event carry `"reason":"watchpoint"` and
+  `"watch":{"addr","len","old","new"}`. `GET` lists them with their values;
+  `DELETE ?addr=` removes one, `DELETE` without it removes all. Like
+  breakpoints they are physical addresses, and they slow the machine down
+  to the interpreter while any is set.
 - **If a wait times out,** the breakpoint wasn't hit. Check
   `/api/breakpoints` and `/api/status`, and whether the program was loaded
   at a different segment.
@@ -195,6 +210,9 @@ curl -s -XPOST $H/api/control/resume
     also invalidate the decoded-instruction cache, so patching code works.
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
+- **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
+  text `lines`, `rows` of `{label, phys, bytes, asm, len, current,
+  breakpoint}`.
 
 ### Switch to another program directory, or mount more drives
 

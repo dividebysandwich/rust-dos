@@ -115,6 +115,9 @@ pub enum Cmd {
     Pause,
     Resume { until: Option<String> },
     Step { count: u64 },
+    /// Step, but run a call, interrupt, loop or repeated string instruction
+    /// through to the instruction after it.
+    StepOver,
     WaitPause,
     RebootShell,
     GetRegs,
@@ -125,9 +128,13 @@ pub enum Cmd {
     ListBreakpoints,
     AddBreakpoint(String),
     RemoveBreakpoint(Option<String>),
+    ListWatchpoints,
+    /// Pause when the 1, 2 or 4 bytes at an address change.
+    AddWatchpoint { addr: String, len: u8 },
+    RemoveWatchpoint(Option<String>),
     /// Pause after the CPU raises one of these exceptions (bit n = vector
     /// n), or switches between real and protected mode.
-    BreakOn { exceptions: Option<u32>, mode_switch: Option<bool> },
+    BreakOn { exceptions: Option<u32>, clear_exceptions: Option<u32>, mode_switch: Option<bool> },
     Ivt,
     Gdt,
     Ldt,
@@ -352,6 +359,21 @@ enum PauseReason {
     Step,
     Exception,
     ModeSwitch,
+    Watchpoint,
+}
+
+/// Memory the debugger watches: `len` bytes at physical address `phys`,
+/// which held `value` when last looked at.
+struct Watch {
+    phys: usize,
+    len: u8,
+    value: u32,
+}
+
+impl Watch {
+    fn read(cpu: &Cpu, phys: usize, len: u8) -> u32 {
+        (0..len as usize).fold(0, |v, i| v | (cpu.bus.peek_8(phys + i) as u32) << (8 * i))
+    }
 }
 
 pub struct DebugHub {
@@ -373,6 +395,10 @@ pub struct DebugHub {
     break_mode_switch: bool,
     seen_exceptions: u64,
     seen_mode_switches: u64,
+    watchpoints: Vec<Watch>,
+    /// The watchpoint that stopped the machine: its address and length,
+    /// and the value before and after.
+    watch_hit: Option<(usize, u8, u32, u32)>,
 
     trace: TraceRing,
     trace_enabled: bool,
@@ -457,6 +483,8 @@ impl DebugHub {
             break_mode_switch: false,
             seen_exceptions: 0,
             seen_mode_switches: 0,
+            watchpoints: Vec::new(),
+            watch_hit: None,
             trace: TraceRing::new(trace_capacity),
             trace_enabled: false,
             trace_stream_max: 1000,
@@ -572,12 +600,24 @@ impl DebugHub {
             || !self.breakpoints.is_empty()
             || self.break_exceptions != 0
             || self.break_mode_switch
+            || !self.watchpoints.is_empty()
     }
 
     /// Per-instruction hook, called just before an instruction at `phys_ip`
     /// executes. Returns true if execution must stop (the hub is now paused).
     #[inline]
     fn check_before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
+        // Memory the last instruction (or an interrupt handler of the
+        // emulator's) changed.
+        for w in &mut self.watchpoints {
+            let now = Watch::read(cpu, w.phys, w.len);
+            if now != w.value {
+                self.watch_hit = Some((w.phys, w.len, w.value, now));
+                w.value = now;
+                self.enter_pause(PauseReason::Watchpoint);
+                return true;
+            }
+        }
         if cpu.exceptions != self.seen_exceptions {
             self.seen_exceptions = cpu.exceptions;
             let hit = cpu.exception_log.back().is_some_and(|e| e.vector < 32 && self.break_exceptions & (1 << e.vector) != 0);
@@ -656,12 +696,22 @@ impl DebugHub {
                 PauseReason::Step => "step",
                 PauseReason::Exception => "exception",
                 PauseReason::ModeSwitch => "mode_switch",
+                PauseReason::Watchpoint => "watchpoint",
             };
             let mut reply = json!({"paused": true, "reason": reason_str, "icount": cpu.executed, "registers": regs});
             if reason == PauseReason::Exception
                 && let Some(e) = pm::exceptions_json(cpu)["recent"].as_array().and_then(|a| a.last().cloned())
             {
                 reply["exception"] = e;
+            }
+            if let Some((phys, len, old, new)) = self.watch_hit.take() {
+                let digits = len as usize * 2;
+                reply["watch"] = json!({
+                    "addr": format!("{:05X}", phys),
+                    "len": len,
+                    "old": format!("{:0width$X}", old, width = digits),
+                    "new": format!("{:0width$X}", new, width = digits),
+                });
             }
             let mut event = reply.clone();
             event["type"] = "paused".into();
@@ -998,6 +1048,19 @@ impl DebugHub {
                 self.pause_waiters.push(req.reply);
                 return;
             }
+            Cmd::StepOver => {
+                match step_over_target(cpu) {
+                    Some(next) => self.temp_breakpoint = Some(next),
+                    None => self.step_budget = Some(1),
+                }
+                let was = self.paused;
+                self.resume();
+                if was {
+                    self.emit(json!({"type": "resumed", "icount": cpu.executed}));
+                }
+                self.pause_waiters.push(req.reply);
+                return;
+            }
             Cmd::WaitPause => {
                 if self.paused && self.pause_hit.is_none() {
                     Reply::Json(json!({"paused": true, "icount": cpu.executed, "registers": regs_json(cpu)}))
@@ -1039,6 +1102,11 @@ impl DebugHub {
                             for (p, b) in t.iter().zip(&data) {
                                 cpu.bus.write_8(*p, *b);
                             }
+                            // The debugger's own changes don't stop the
+                            // machine.
+                            for w in &mut self.watchpoints {
+                                w.value = Watch::read(cpu, w.phys, w.len);
+                            }
                             Reply::Json(json!({
                                 "ok": true,
                                 "addr": format!("{:05X}", a.phys.unwrap_or(0)),
@@ -1078,9 +1146,45 @@ impl DebugHub {
                     Err(e) => Reply::bad(e),
                 },
             },
-            Cmd::BreakOn { exceptions, mode_switch } => {
+            Cmd::ListWatchpoints => Reply::Json(self.watchpoints_json(cpu)),
+            Cmd::AddWatchpoint { addr, len } => {
+                if !matches!(len, 1 | 2 | 4) {
+                    let _ = req.reply.send(Reply::bad("len is 1, 2 or 4"));
+                    return;
+                }
+                match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
+                    Ok(phys) => {
+                        self.watchpoints.retain(|w| w.phys != phys);
+                        self.watchpoints.push(Watch { phys, len, value: Watch::read(cpu, phys, len) });
+                        Reply::Json(self.watchpoints_json(cpu))
+                    }
+                    Err(e) => Reply::bad(e),
+                }
+            }
+            Cmd::RemoveWatchpoint(addr) => match addr {
+                None => {
+                    self.watchpoints.clear();
+                    Reply::Json(self.watchpoints_json(cpu))
+                }
+                Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
+                    Ok(phys) => {
+                        let before = self.watchpoints.len();
+                        self.watchpoints.retain(|w| w.phys != phys);
+                        if self.watchpoints.len() < before {
+                            Reply::Json(self.watchpoints_json(cpu))
+                        } else {
+                            Reply::Error(404, format!("no watchpoint at {:05X}", phys))
+                        }
+                    }
+                    Err(e) => Reply::bad(e),
+                },
+            },
+            Cmd::BreakOn { exceptions, clear_exceptions, mode_switch } => {
                 if let Some(mask) = exceptions {
                     self.break_exceptions |= mask;
+                }
+                if let Some(mask) = clear_exceptions {
+                    self.break_exceptions &= !mask;
                 }
                 if let Some(m) = mode_switch {
                     self.break_mode_switch = m;
@@ -1205,6 +1309,7 @@ impl DebugHub {
             "current_drive": drive_letter(cpu.bus.disk.get_current_drive()).to_string(),
             "trace": self.trace_status(),
             "breakpoints": self.breakpoints.len(),
+            "watchpoints": self.watchpoints.len(),
             "input_queue": self.input.len(),
             "keyboard_buffer": cpu.bus.keyboard_buffer.len(),
             // The interrupt controllers: requests waiting, masked lines and
@@ -1299,6 +1404,7 @@ impl DebugHub {
         let code32 = start.segoff.is_some_and(|(sel, _)| pm::code32(cpu, sel));
         let cur = cpu.peek_translate(cpu.seg_cache(crate::cpu::Seg::CS).base.wrapping_add(cpu.eip())).map(|p| p as usize);
         let mut lines = Vec::new();
+        let mut rows = Vec::new();
         let mut at = 0usize;
         for _ in 0..count.min(1000) {
             let p = start.byte(cpu, at);
@@ -1313,7 +1419,9 @@ impl DebugHub {
                 let ip = start.segoff.map_or(at as u32, |(_, off)| off.wrapping_add(at as u32));
                 trace::disasm_one(&bytes, ip, code32)
             };
-            let marker = match (p.is_some() && p == cur, p.is_some_and(|p| self.breakpoints.contains(&p))) {
+            let current = p.is_some() && p == cur;
+            let breakpoint = p.is_some_and(|p| self.breakpoints.contains(&p));
+            let marker = match (current, breakpoint) {
                 (true, true) => "=>*",
                 (true, false) => "=> ",
                 (false, true) => "  *",
@@ -1324,10 +1432,35 @@ impl DebugHub {
                 Some((sel, off)) => format!("{:04X}:{:04X}", sel, (off as usize + at) as u16),
                 None => format!("{:08X}", start.lin.map_or(start.phys.unwrap_or(0) + at, |l| l as usize + at)),
             };
-            lines.push(format!("{} {}  {:<20} {}", marker, label, trace::hex_bytes(&bytes[..len]), text));
+            let hex = trace::hex_bytes(&bytes[..len]);
+            lines.push(format!("{} {}  {:<20} {}", marker, label, hex, text));
+            rows.push(json!({
+                "label": label,
+                "phys": p.map(|p| format!("{:05X}", p)),
+                "bytes": hex,
+                "asm": text,
+                "len": len,
+                "current": current,
+                "breakpoint": breakpoint,
+            }));
             at += len;
         }
-        Reply::Json(json!({"lines": lines}))
+        Reply::Json(json!({"lines": lines, "rows": rows}))
+    }
+
+    fn watchpoints_json(&self, cpu: &Cpu) -> Value {
+        let watches: Vec<Value> = self
+            .watchpoints
+            .iter()
+            .map(|w| {
+                json!({
+                    "addr": format!("{:05X}", w.phys),
+                    "len": w.len,
+                    "value": format!("{:0width$X}", Watch::read(cpu, w.phys, w.len), width = w.len as usize * 2),
+                })
+            })
+            .collect();
+        json!({"watchpoints": watches})
     }
 
     fn breakpoints_json(&self) -> Value {
@@ -1395,6 +1528,43 @@ fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
 // ---------------------------------------------------------------------------
 
 /// Parse a hex number with optional `0x` prefix / `h` suffix.
+/// Where stepping over the instruction at CS:EIP stops: the physical
+/// address of the next instruction, when the instruction is one that runs
+/// code or repeats before getting there (a call, an interrupt, a loop, a
+/// repeated string instruction). None for the others, which a single step
+/// does.
+fn step_over_target(cpu: &Cpu) -> Option<usize> {
+    let cs = cpu.seg_cache(crate::cpu::Seg::CS);
+    let code32 = cs.attr & crate::cpu::ATTR_DB != 0;
+    let eip = cpu.eip();
+    let bytes: Vec<u8> = (0..15u32)
+        .map(|i| cpu.peek_translate(cs.base.wrapping_add(eip.wrapping_add(i))).map_or(0xFF, |p| cpu.bus.peek_8(p as usize)))
+        .collect();
+    let len = step_over_len(&bytes, code32)?;
+    let next = eip.wrapping_add(len as u32);
+    let next = if code32 { next } else { next & 0xFFFF };
+    cpu.peek_translate(cs.base.wrapping_add(next)).map(|p| p as usize)
+}
+
+/// The length of the instruction in `bytes` if stepping over it runs to
+/// the instruction after it, else None.
+fn step_over_len(bytes: &[u8], code32: bool) -> Option<usize> {
+    use iced_x86::{Decoder, DecoderOptions, FlowControl, Mnemonic};
+    // The emulator's own interrupt handlers run in one step.
+    if bytes.len() >= 2 && bytes[0] == 0xFE && matches!(bytes[1], 0x38 | 0x39) {
+        return None;
+    }
+    let mut decoder = Decoder::new(if code32 { 32 } else { 16 }, bytes, DecoderOptions::NONE);
+    let instr = decoder.decode();
+    if instr.is_invalid() {
+        return None;
+    }
+    let over = matches!(instr.flow_control(), FlowControl::Call | FlowControl::IndirectCall | FlowControl::Interrupt)
+        || matches!(instr.mnemonic(), Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne)
+        || (instr.is_string_instruction() && (instr.has_rep_prefix() || instr.has_repe_prefix() || instr.has_repne_prefix()));
+    over.then_some(instr.len())
+}
+
 /// Where a breakpoint at an address goes: its physical address.
 fn breakpoint_phys(a: pm::DebugAddr) -> Result<usize, String> {
     a.phys.ok_or_else(|| "address is on an unmapped page".to_string())
@@ -1608,5 +1778,34 @@ impl crate::exec::ExecHook for DebugHub {
     #[inline]
     fn before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
         self.check_before_exec(cpu, phys_ip, ram)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_over_len;
+
+    #[test]
+    fn step_over_runs_calls_interrupts_loops_and_repeats() {
+        // CALL rel16, CALL [BX], INT 21h, INT3, LOOP, REP MOVSB, REPNE SCASB.
+        assert_eq!(step_over_len(&[0xE8, 0x10, 0x00, 0x90], false), Some(3));
+        assert_eq!(step_over_len(&[0xFF, 0x17, 0x90], false), Some(2));
+        assert_eq!(step_over_len(&[0xCD, 0x21, 0x90], false), Some(2));
+        assert_eq!(step_over_len(&[0xCC, 0x90], false), Some(1));
+        assert_eq!(step_over_len(&[0xE2, 0xFE, 0x90], false), Some(2));
+        assert_eq!(step_over_len(&[0xF3, 0xA4, 0x90], false), Some(2));
+        assert_eq!(step_over_len(&[0xF2, 0xAE, 0x90], false), Some(2));
+        // CALL rel32 in 32-bit code.
+        assert_eq!(step_over_len(&[0xE8, 0, 0, 0, 0, 0x90], true), Some(5));
+    }
+
+    #[test]
+    fn other_instructions_just_step() {
+        // MOV AX,1234h; JMP short; MOVSB without REP; the emulator's traps.
+        assert_eq!(step_over_len(&[0xB8, 0x34, 0x12], false), None);
+        assert_eq!(step_over_len(&[0xEB, 0xFE], false), None);
+        assert_eq!(step_over_len(&[0xA4], false), None);
+        assert_eq!(step_over_len(&[0xFE, 0x38, 0x21], false), None);
+        assert_eq!(step_over_len(&[0xFE, 0x39, 0x08], false), None);
     }
 }
