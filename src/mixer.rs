@@ -118,7 +118,8 @@ pub struct MixerSettings {
     /// speaker of a PC (`speaker_filter`).
     pub speaker_filter: bool,
     pub sb_filter: SbFilter,
-    /// The reverb and chorus the FM synthesizer and MIDI are sent to.
+    /// The reverb and chorus the FM synthesizer, the Gravis Ultrasound and
+    /// MIDI are sent to.
     pub reverb: ReverbPreset,
     pub chorus: ChorusPreset,
 }
@@ -206,12 +207,13 @@ impl Default for Mixer {
     }
 }
 
-/// The sends of a preset: the FM synthesizer and MIDI at `level`, the
-/// other sources dry.
+/// The sends of a preset: the synthesizers, FM, the Gravis Ultrasound and
+/// MIDI, at `level`, the other sources dry.
 fn synth_sends(level: f32) -> [f32; CHANNELS] {
     let mut sends = [0.0; CHANNELS];
-    sends[Channel::Fm.index()] = level;
-    sends[Channel::Midi.index()] = level;
+    for channel in [Channel::Fm, Channel::Gus, Channel::Midi] {
+        sends[channel.index()] = level;
+    }
     sends
 }
 
@@ -429,8 +431,10 @@ mod tests {
         settings.chorus = ChorusPreset::Light;
         mixer.set(settings);
         assert_eq!(mixer.reverb_send(Channel::Fm), 0.70);
+        assert_eq!(mixer.reverb_send(Channel::Gus), 0.70);
         assert_eq!(mixer.reverb_send(Channel::Midi), 0.70);
         assert_eq!(mixer.reverb_send(Channel::Sb), 0.0);
+        assert_eq!(mixer.chorus_send(Channel::Gus), 0.33);
         assert_eq!(mixer.chorus_send(Channel::Midi), 0.33);
         // Sends set by hand stay while the preset does.
         mixer.set_reverb_send(Channel::Sb, 0.2);

@@ -199,10 +199,11 @@ D:
     filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
     on an SB Pro and half the sample rate on an SB16; `off` leaves the
     sound as the card makes it.
-  * `reverb` adds a room to the FM synthesizer and MIDI music: `off` (the
-    default), `tiny`, `small`, `medium`, `large` or `huge`. `chorus`
-    thickens them: `off` (the default), `light`, `normal` or `strong`. The
-    presets and how much of the music they get follow DOSBox Staging's.
+  * `reverb` adds a room to the music of the FM synthesizer, the Gravis
+    Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
+    `large` or `huge`. `chorus` thickens them: `off` (the default),
+    `light`, `normal` or `strong`. The presets and how much of the music
+    they get follow DOSBox Staging's.
   * The `MIXER` command shows the mixer and changes it at the prompt, or
     from `[autoexec]`, in DOSBox Staging's syntax:
     `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,

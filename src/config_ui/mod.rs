@@ -362,8 +362,8 @@ impl Item {
             Deadzone => "  Deadzone",
             SpeakerFilter => "PC speaker filter",
             SbFilter => "Sound Blaster filter",
-            Reverb => "Reverb (FM, MIDI)",
-            Chorus => "Chorus (FM, MIDI)",
+            Reverb => "Reverb (FM, GUS, MIDI)",
+            Chorus => "Chorus (FM, GUS, MIDI)",
             LptDac => "Parallel port DAC",
         }
     }

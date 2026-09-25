@@ -232,8 +232,8 @@ impl ReverbPreset {
         }
     }
 
-    /// How much of the FM synthesizer and MIDI goes into the reverb, as
-    /// DOSBox Staging's presets send.
+    /// How much of the FM synthesizer, the Gravis Ultrasound and MIDI goes
+    /// into the reverb, as DOSBox Staging's presets send.
     pub fn synth_send(self) -> f32 {
         match self {
             ReverbPreset::Off => 0.0,
@@ -341,8 +341,8 @@ impl ChorusPreset {
         }
     }
 
-    /// How much of the FM synthesizer and MIDI goes into the chorus, as
-    /// DOSBox Staging's presets send.
+    /// How much of the FM synthesizer, the Gravis Ultrasound and MIDI goes
+    /// into the chorus, as DOSBox Staging's presets send.
     pub fn synth_send(self) -> f32 {
         match self {
             ChorusPreset::Off => 0.0,
