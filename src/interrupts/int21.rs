@@ -18,6 +18,26 @@ const CASE_MAP_ROUTINE: usize = 0xFF0FF;
 /// Volume serial number of drive A:; each drive's is its number more.
 pub const VOLUME_SERIAL: u32 = 0x1234_0000;
 
+/// What DOS does on entry to INT 21h: save the caller's registers on its
+/// stack (AX, BX, CX, DX, SI, DI, BP, DS, ES, below the interrupt's return
+/// frame) and SS:SP in the running process's PSP (2Eh), where they are
+/// when the process a program makes from it ends (`Cpu::terminate`).
+fn save_caller(cpu: &mut Cpu) {
+    let psp = cpu.current_psp;
+    if psp == 0 || cpu.pe() {
+        return;
+    }
+    let (ss, sp) = (cpu.ss(), cpu.sp().wrapping_sub(18));
+    let registers = [cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx(), cpu.si(), cpu.di(), cpu.bp(), cpu.ds(), cpu.es()];
+    for (i, value) in registers.into_iter().enumerate() {
+        let at = ss as usize * 16 + sp.wrapping_add(2 * i as u16) as usize;
+        cpu.bus.write_16(at, value);
+    }
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x2E, sp);
+    cpu.bus.write_16(base + 0x30, ss);
+}
+
 /// The open file (its System File Table entry) handle `handle` of the
 /// running process refers to.
 fn file_of(cpu: &Cpu, handle: u16) -> Option<u16> {
@@ -255,6 +275,7 @@ fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    save_caller(cpu);
     dispatch(cpu, ah);
     // Remember the error of a failed handle or file call for AH=59h. The
     // calls in this range that don't report through CF leave it as the
@@ -702,6 +723,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 };
 
                 if cpu.load_executable(&target_filename, Some(load_segment)) {
+                    if let Some(context) = cpu.process_stack.last_mut() {
+                        context.child = load_segment;
+                    }
                     // Patch the MCB we allocated above with placeholder owner
                     // 0xFFFF so it reflects the child's real PSP segment.
                     let mcb_seg = load_segment.wrapping_sub(1);
@@ -1520,8 +1544,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             ));
 
             // Kept for the parent to retrieve, or as the ERRORLEVEL. High
-            // byte = termination type 0 (normal).
-            if cpu.terminate(exit_code) {
+            // byte = termination type 0 (normal). A process a program made
+            // returns with the registers its parent saved.
+            if !cpu.started_by_exec(cpu.current_psp) {
+                cpu.terminate(exit_code);
+            } else if cpu.terminate(exit_code) {
                 cpu.bus.log_string("[DOS] Returning to Parent Process");
                 cpu.set_ax(exit_code as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);

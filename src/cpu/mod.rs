@@ -349,6 +349,9 @@ pub struct CpuSnapshot {
 pub struct ProcessContext {
     pub regs: CpuSnapshot,
     pub psp: u16,
+    /// The PSP of the process EXEC started in its place, which returns
+    /// here when it ends (0 before it is loaded).
+    pub child: u16,
     pub heap_pointer: u16,
     /// The parent's DTA (segment, offset), which the child's replaces.
     pub dta: (u16, u16),
@@ -567,6 +570,7 @@ impl Cpu {
         let context = ProcessContext {
             regs: self.snapshot(),
             psp: self.current_psp,
+            child: 0,
             heap_pointer: self.heap_pointer,
             dta: (self.bus.dta_segment, self.bus.dta_offset),
             program: self.program.clone(),
@@ -585,6 +589,10 @@ impl Cpu {
     /// Returns whether it went back to a parent.
     pub fn terminate(&mut self, code: u8) -> bool {
         self.last_child_exit = code as u16;
+        if !self.started_by_exec(self.current_psp) {
+            self.end_made_process(self.current_psp);
+            return true;
+        }
         crate::dos_files::close_all(&mut self.bus, self.current_psp);
         crate::mcb::free_owned_by(&mut self.bus, self.current_psp);
         if self.return_to_parent() {
@@ -593,6 +601,61 @@ impl Cpu {
         self.errorlevel = code;
         self.state = CpuState::RebootShell;
         false
+    }
+
+    /// Whether the process `psp` is one EXEC or the shell started, whose
+    /// parent's context the emulator keeps, rather than a PSP a program
+    /// made itself (INT 21h AH=26h or 55h), as Windows does its tasks'.
+    pub fn started_by_exec(&self, psp: u16) -> bool {
+        match self.process_stack.last() {
+            Some(context) => context.child == 0 || context.child == psp,
+            None => {
+                let parent = self.bus.read_16(psp as usize * 16 + 0x16);
+                psp == 0 || parent == 0 || parent == psp
+            }
+        }
+    }
+
+    /// End the process `psp`, a PSP a program made, as DOS ends any: its
+    /// files closed and its memory freed, the INT 22h, 23h and 24h vectors
+    /// it keeps put back, and its parent (PSP 16h) the current process
+    /// again, back on the stack of the parent's last INT 21h call (PSP 2Eh)
+    /// with the registers it saved there, returning to the ended process's
+    /// terminate address (PSP 0Ah) with them. Windows' tasks end so, into
+    /// its DOS extender.
+    fn end_made_process(&mut self, psp: u16) {
+        let base = psp as usize * 16;
+        crate::dos_files::close_all(&mut self.bus, psp);
+        crate::mcb::free_owned_by(&mut self.bus, psp);
+        for (i, vector) in [0x22usize, 0x23, 0x24].into_iter().enumerate() {
+            let handler = self.bus.read_32(base + 0x0A + 4 * i);
+            self.bus.write_32(vector * 4, handler);
+        }
+        let (terminate_ip, terminate_cs) = (self.bus.read_16(base + 0x0A), self.bus.read_16(base + 0x0C));
+        let parent = self.bus.read_16(base + 0x16);
+        self.current_psp = parent;
+        let parent_base = parent as usize * 16;
+        let (sp, ss) = (self.bus.read_16(parent_base + 0x2E), self.bus.read_16(parent_base + 0x30));
+        let at = |i: u16| ss as usize * 16 + sp.wrapping_add(2 * i) as usize;
+        let saved: Vec<u16> = (0..9).map(|i| self.bus.read_16(at(i))).collect();
+        self.set_ax(saved[0]);
+        self.set_bx(saved[1]);
+        self.set_cx(saved[2]);
+        self.set_dx(saved[3]);
+        self.set_si(saved[4]);
+        self.set_di(saved[5]);
+        self.set_bp(saved[6]);
+        self.set_ds(saved[7]);
+        self.set_es(saved[8]);
+        self.set_ss(ss);
+        self.set_sp(sp.wrapping_add(18));
+        // The INT 21h returns to the terminate address.
+        self.bus.write_16(at(9), terminate_ip);
+        self.bus.write_16(at(10), terminate_cs);
+        self.bus.log_string(&format!(
+            "[DOS] Process {:04X} ended: back to {:04X} at {:04X}:{:04X}",
+            psp, parent, terminate_cs, terminate_ip
+        ));
     }
 
     /// End the current process: back to the parent's context, returning

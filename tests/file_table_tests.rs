@@ -184,3 +184,38 @@ fn a_bigger_handle_table_moves_out_of_the_psp() {
     let handles: Vec<u16> = (0..30).map(|_| open(&mut cpu, "DATA.TXT", 0).unwrap()).collect();
     assert_eq!(handles.last(), Some(&35));
 }
+
+#[test]
+fn a_psp_a_program_made_ends_back_in_its_parent_at_its_terminate_address() {
+    // As Windows ends a task: its PSP made with AH=55h, then AH=4Ch with
+    // it current.
+    let mut cpu = machine("made_psp_exit");
+    let parent = cpu.current_psp;
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    let sft = slot(&cpu, parent, h);
+    cpu.set_sp(0xF000);
+    let (ss, sp) = (cpu.ss(), cpu.sp());
+    // The parent's last INT 21h call leaves its registers on its stack.
+    let child = parent + 0x100;
+    cpu.set_si(0x10);
+    cpu.set_bp(0x1234);
+    dos(&mut cpu, 0x5500, 0xABCD, 0, child).unwrap();
+    // Where the child returns to when it ends.
+    let base = child as usize * 16;
+    cpu.bus.write_16(base + 0x0A, 0x0300);
+    cpu.bus.write_16(base + 0x0C, 0x5000);
+
+    // The child runs on a stack of its own, and ends.
+    cpu.set_sp(sp - 0x40);
+    cpu.set_bp(0);
+    assert_eq!(refs(&mut cpu, sft), 2);
+    let _ = dos(&mut cpu, 0x4C00, 0, 0, 0);
+    assert_eq!(cpu.current_psp, parent);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.dx(), cpu.bp()), (0x5500, 0xABCD, child, 0x1234), "the parent's registers");
+    assert_eq!((cpu.ss(), cpu.sp()), (ss, sp), "on the parent's stack");
+    let frame = ss as usize * 16 + sp as usize;
+    assert_eq!((cpu.bus.read_16(frame), cpu.bus.read_16(frame + 2)), (0x0300, 0x5000), "returning to the terminate address");
+    assert_eq!(cpu.bus.read_32(0x22 * 4), 0x5000_0300, "INT 22h as the child had it");
+    assert_eq!(refs(&mut cpu, sft), 1, "the child's handle closed, the parent's open");
+    assert_eq!(read(&mut cpu, h, 2).unwrap(), b"01");
+}

@@ -253,8 +253,11 @@ fn test_int21_ah4b_exec_inheritance() {
     let com_path = root_path.join("INHERIT.COM");
     fs::write(&com_path, vec![0x90, 0xCD, 0x20]).unwrap();
 
-    // Setup Parent PSP at 0x1000
+    // Setup Parent PSP at 0x1000, and the stack its INT 21h runs on,
+    // where DOS saves its registers.
     cpu.current_psp = 0x1000;
+    cpu.set_ss(0x4000);
+    cpu.set_sp(0x0100);
     let parent_psp_phys = cpu.get_physical_addr(0x1000, 0);
     // Parent Env at 0x0500
     let parent_env_seg = 0x0500;
