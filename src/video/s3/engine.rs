@@ -98,10 +98,11 @@ pub struct Engine {
     major: u16,
     pix_cntl: u16,
     /// Multifunction control miscellaneous (MULT_MISC) and its second
-    /// register, and the next register a multifunction read returns.
+    /// register, and the next register a multifunction read returns (a
+    /// cell, as reads through memory step it too).
     misc: u16,
     misc2: u16,
-    read_sel: u16,
+    read_sel: std::cell::Cell<u16>,
     transfer: Transfer,
 }
 
@@ -267,7 +268,7 @@ impl Engine {
             0x8144 => {
                 self.misc = word;
                 if len == 4 {
-                    self.read_sel = (value >> 16) as u16 & 0x07;
+                    self.read_sel.set((value >> 16) as u16 & 0x07);
                 }
             }
             0x8148 => {
@@ -300,6 +301,9 @@ impl Engine {
             0xAAE8 => self.write_mask,
             0xAEE8 => self.read_mask,
             0xB2E8 => self.color_compare,
+            // Windows 95's S3 driver reads MULT_MISC back this way to set
+            // its bit 9.
+            0xBEE8 => self.read_multifunction() as u32,
             _ => 0xFFFF_FFFF,
         };
         let value = if bytes < 4 && (0xA2E8..=0xB2E8).contains(&port) { value & 0xFFFF } else { value };
@@ -377,13 +381,13 @@ impl Engine {
             0xA => self.pix_cntl = data,
             0xD => self.misc2 = data,
             0xE => self.misc = data,
-            0xF => self.read_sel = data,
+            0xF => self.read_sel.set(data),
             _ => {}
         }
     }
 
-    fn read_multifunction(&mut self) -> u16 {
-        let value = match self.read_sel {
+    fn read_multifunction(&self) -> u16 {
+        let value = match self.read_sel.get() {
             0 => self.minor,
             1 => self.clip[1],
             2 => self.clip[0],
@@ -394,7 +398,7 @@ impl Engine {
             10 => self.misc2,
             _ => 0,
         };
-        self.read_sel += 1;
+        self.read_sel.set(self.read_sel.get().wrapping_add(1));
         value
     }
 
@@ -780,6 +784,25 @@ mod tests {
         e.write_mask = 0xFF;
         e.read_mask = 0xFF;
         e
+    }
+
+    /// Windows 95's S3 driver selects MULT_MISC for reading, reads it
+    /// through memory and writes it back with bit 9 set.
+    #[test]
+    fn multifunction_registers_read_back_through_memory() {
+        let mut vram = vec![0; 256];
+        let mut e = engine();
+        e.write(0xBEE8, 0xE010, 2, &mut surface(&mut vram));
+        e.write(0xBEE8, 0xF006, 2, &mut surface(&mut vram));
+        let misc = e.peek(0xBEE8, 2, 1);
+        assert_eq!(misc, 0x0010);
+        e.write(0x8144, (misc & 0x0FFF) | 0xE200, 2, &mut surface(&mut vram));
+        assert_eq!(e.misc & 0x0FFF, 0x0210, "no colour compare");
+        // The next read is the next register, as through the port.
+        e.write(0xBEE8, 0xF005, 2, &mut surface(&mut vram));
+        e.write(0xBEE8, 0xA0C0, 2, &mut surface(&mut vram));
+        assert_eq!(e.peek(0xBEE8, 2, 1), 0x00C0);
+        assert_eq!(e.peek(0xBEE8, 2, 1) & 0x0FFF, 0x0210);
     }
 
     #[test]
