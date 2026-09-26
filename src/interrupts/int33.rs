@@ -6,9 +6,10 @@ use iced_x86::Register;
 /// For graphics modes the driver historically reports X in pixels but rounded
 /// up to multiples that match the internal mouse resolution. We keep it simple
 /// and use the mode's native pixel grid, except for 320-wide modes where the
-/// x range is doubled (convention for the DOS mouse driver).
+/// x range is doubled (convention for the DOS mouse driver). Text modes count
+/// 8 a character (see `mouse::screen_size`).
 fn virtual_screen_dims(bus: &crate::bus::Bus) -> (i32, i32) {
-    let (w, h) = bus.display_size();
+    let (w, h) = crate::mouse::screen_size(bus);
     let virt_w = if w < 640 { 640 } else { w as i32 };
     (virt_w, h as i32)
 }

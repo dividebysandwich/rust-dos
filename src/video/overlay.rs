@@ -48,7 +48,7 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
     // The driver stores the cursor in virtual coords; map those to
     // screen pixels over the same virtual extent the host pointer spans.
     if bus.mouse.installed && bus.mouse.hide_counter <= 0 {
-        let (virt_w, virt_h) = bus.mouse.virtual_extent(bus.display_size());
+        let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
         let sx = (bus.mouse.x as i64 * width as i64 / virt_w as i64) as i32;
         let sy = (bus.mouse.y as i64 * height as i64 / virt_h as i64) as i32;
         draw_default_mouse_cursor(frame, sx, sy);
@@ -63,7 +63,7 @@ pub fn frame_to_mouse(bus: &Bus, frame: &Frame, (x, y): (i32, i32)) -> (i32, i32
     let px = x.clamp(0, w - 1);
     let py = y.clamp(0, h - 1);
 
-    let (virt_w, virt_h) = bus.mouse.virtual_extent(bus.display_size());
+    let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
 
     let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
     let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
@@ -73,7 +73,7 @@ pub fn frame_to_mouse(bus: &Bus, frame: &Frame, (x, y): (i32, i32)) -> (i32, i32
 /// A motion of (`dx`, `dy`) frame pixels in the mouse driver's virtual
 /// pixels (see `frame_to_mouse`).
 pub fn frame_motion_to_mouse(bus: &Bus, frame: &Frame, (dx, dy): (f64, f64)) -> (f64, f64) {
-    let (virt_w, virt_h) = bus.mouse.virtual_extent(bus.display_size());
+    let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
     (dx * virt_w as f64 / frame.width.max(1) as f64, dy * virt_h as f64 / frame.height.max(1) as f64)
 }
 

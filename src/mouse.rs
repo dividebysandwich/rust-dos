@@ -115,6 +115,12 @@ impl MouseState {
         (range(self.max_x, w), range(self.max_y, h))
     }
 
+    /// The virtual screen of `bus`'s current video mode (see
+    /// `virtual_extent` and `screen_size`).
+    pub fn virtual_screen(&self, bus: &crate::bus::Bus) -> (i32, i32) {
+        self.virtual_extent(screen_size(bus))
+    }
+
     /// Forget the program's event handler (AX=000Ch), whose code is gone
     /// once the shell is back.
     pub fn remove_callback(&mut self) {
@@ -240,6 +246,17 @@ impl MouseState {
         self.release_y[button] = self.y;
         // Event-mask bits: L-release=1<<2, R-release=1<<4, M-release=1<<6.
         self.pending_callback_events |= 1u16 << (2 + 2 * button as u16);
+    }
+}
+
+/// The screen the driver's coordinates cover in the current video mode:
+/// the mode's pixels in a graphics mode, and 8 a character in a text mode
+/// whatever its font (640x200 for 80x25, 640x400 for 80x50), which
+/// programs divide by 8 for the column and row.
+pub fn screen_size(bus: &crate::bus::Bus) -> (usize, usize) {
+    match crate::video::text::geometry(bus) {
+        Some(text) => (text.cols * 8, text.rows * 8),
+        None => bus.display_size(),
     }
 }
 

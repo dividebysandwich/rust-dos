@@ -1610,7 +1610,7 @@ fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
     let (w, h) = (w as i32, h as i32);
     let px = x.clamp(0, w - 1);
     let py = y.clamp(0, h - 1);
-    let (virt_w, virt_h) = cpu.bus.mouse.virtual_extent(cpu.bus.display_size());
+    let (virt_w, virt_h) = cpu.bus.mouse.virtual_screen(&cpu.bus);
     let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
     let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
