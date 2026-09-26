@@ -933,6 +933,8 @@ impl Cpu {
         self.con_pending.clear();
         self.secondary_shells.clear();
         self.secondary = None;
+        // The programs that started the one killed are gone with it.
+        self.process_stack.clear();
         self.bios_wait_until = None;
 
         // A program that ends in the prompt's own text mode leaves what it
