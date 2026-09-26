@@ -686,7 +686,7 @@ fn jcxz(instr: &Instruction, next: u32, u: &mut Vec<Uop>) -> bool {
 }
 
 fn call(instr: &Instruction, next: u32, stack32: bool, u: &mut Vec<Uop>) -> bool {
-    let Some(target) = near_target(instr) else { return false };
+    let Some(target) = near_target(instr) else { return call_indirect(instr, next, stack32, u) };
     let size = if instr.op0_kind() == OpKind::NearBranch32 { 4 } else { 2 };
     // Push the return address, then jump; a target past the limit leaves
     // the slot written but the stack pointer as it was.
@@ -695,6 +695,46 @@ fn call(instr: &Instruction, next: u32, stack32: bool, u: &mut Vec<Uop>) -> bool
     u.push(Uop::CheckLimit { src: Src::Imm(target) });
     u.push(Uop::Set { r: sp(stack32), t: T1 });
     u.push(Uop::Exit { eip: Src::Imm(target) });
+    true
+}
+
+/// CALL of a near target in a register or memory: the target first, as
+/// the handler reads it before it pushes, then the return address, and the
+/// stack pointer as `push_t0` leaves it, made again (three temporaries).
+fn call_indirect(instr: &Instruction, next: u32, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.code() {
+        Code::Call_rm16 => 2,
+        Code::Call_rm32 => 4,
+        _ => return false,
+    };
+    match instr.op0_kind() {
+        OpKind::Register => {
+            let Some(r) = gpr(instr.op0_register()) else { return false };
+            u.push(Uop::Get { t: T0, r });
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, size, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load { dst: T0, m: T2, size });
+        }
+        _ => return false,
+    }
+    let sp = sp(stack32);
+    let slot = |u: &mut Vec<Uop>| {
+        u.push(Uop::Get { t: T1, r: sp });
+        u.push(Uop::AddConst { t: T1, v: (size as u32).wrapping_neg(), size: sp.size });
+    };
+    slot(u);
+    u.push(Uop::Copy { dst: T2, src: T1 });
+    u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: true, slot: 0 });
+    u.push(Uop::Const { t: T1, v: next });
+    u.push(Uop::Store { m: T2, src: T1, size });
+    // Past the limit, the slot is written but the stack pointer as it was.
+    u.push(Uop::CheckLimit { src: Src::T(T0) });
+    slot(u);
+    u.push(Uop::Set { r: sp, t: T1 });
+    u.push(Uop::Exit { eip: Src::T(T0) });
     true
 }
 

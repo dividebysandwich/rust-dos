@@ -765,8 +765,8 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)));
                 self.flags_back();
                 if self.link {
-                    // A return: through its link to where it goes, if it
-                    // has one.
+                    // A return or indirect call: through its link to
+                    // where it goes, if it has one.
                     self.counts();
                     self.returned(t);
                 } else {
@@ -1436,9 +1436,9 @@ impl Gen<'_> {
         );
     }
 
-    /// Leave through the return link to EIP `t`, if the return has one
-    /// (see `guarded`), else to the execution loop, to be linked. RDX is
-    /// the block.
+    /// Leave through the return (or indirect call) link to EIP `t`, if
+    /// there is one (see `guarded`), else to the execution loop, to be
+    /// linked. RDX is the block.
     fn returned(&mut self, t: T) {
         let miss = *self.return_miss.get_or_insert_with(|| self.ops.new_dynamic_label());
         for slot in RETURN_LINK..LINKS {

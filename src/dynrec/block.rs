@@ -23,14 +23,16 @@ const PAGE_TAIL: u32 = 15;
 
 /// Links a block's exits can have: 0 and 1 to a known EIP (a jump's
 /// target, a conditional one's next instruction), and from `RETURN_LINK`
-/// on a return's, to the last places it returned to.
+/// on those of an exit to an EIP it only knows as it runs (a return's, an
+/// indirect call's), to the last places it went to.
 pub const LINKS: usize = RETURN_LINK + RETURN_LINKS;
-/// The first link of a return, and how many it has: a function called
-/// from two places in turn returns to each, and more rarely from more.
+/// The first link of a return or indirect call, and how many it has: a
+/// function called from two places in turn returns to each, and more
+/// rarely from more.
 pub const RETURN_LINK: usize = 2;
 pub const RETURN_LINKS: usize = 4;
-/// The index a return leaves with that goes to none of the places its
-/// links lead to.
+/// The index a return or indirect call leaves with that goes to none of
+/// the places its links lead to.
 pub const RETURN_MISS: usize = LINKS;
 
 /// A byte is watched once blocks have gone stale this often because it

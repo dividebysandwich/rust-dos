@@ -786,6 +786,78 @@ fn a_function_returning_to_two_places_in_turn_goes_back_to_each_through_its_link
 }
 
 #[test]
+fn indirect_calls_are_translated_and_linked_to_where_they_go() {
+    // A loop that calls two functions in another page in turn through a
+    // table of pointers, and one of them through a register, 1000 times:
+    // each call's link leads to the functions it went to.
+    let f = CODE + 0x1000;
+    let g = CODE + 0x1010;
+    let table = CODE + 0x800;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(f, &asm32(f, |a| {
+            a.add(ebx, 1)?;
+            a.ret()
+        }));
+        rig.load(g, &asm32(g, |a| {
+            a.add(ebx, 100)?;
+            a.ret()
+        }));
+        rig.write32(table, f);
+        rig.write32(table + 4, g);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.xor(esi, esi)?;
+            a.mov(edx, g)?;
+            a.mov(ecx, 1000u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.call(dword_ptr(esi * 4 + table))?;
+            a.xor(esi, 1)?;
+            a.call(edx)?;
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), 500 * 1 + 500 * 100 + 1000 * 100);
+    if AVAILABLE {
+        assert!(stats.runs < 200, "the calls went through the execution loop: {:?}", stats);
+    }
+}
+
+#[test]
+fn an_indirect_call_through_a_pointer_it_cant_read_pushes_nothing() {
+    // CALL [200h] in a data segment of 256 bytes: #GP before the return
+    // address is pushed, after the instructions before it in the block.
+    let before = |a: &mut CodeAssembler| {
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ebx, 1u32)?;
+        a.push(0x1234u32)
+    };
+    let faulting = CODE + 0x100 + asm32(CODE + 0x100, before).len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFF, DATA_R0, 0x4));
+        rig.load(CODE, &asm32(CODE, |a| a.jmp(CODE as u64 + 0x100)));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            before(a)?;
+            a.call(dword_ptr(0x200))?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!(vector, GP as u32);
+    assert_eq!(stack[1], faulting, "EIP of the faulting CALL");
+    assert_eq!(b.cpu.ebx(), 1);
+    assert_eq!(b.cpu.read_linear_u16(STACK0_TOP - 4), 0x1234, "the PUSH before it happened");
+}
+
+#[test]
 fn a_ret_poked_into_an_unrolled_loop_is_run_where_it_is_not_translated_again() {
     // The Doom engine's spans: a RET poked over the first byte of one of
     // an unrolled loop's groups, the loop called, the byte put back, for
