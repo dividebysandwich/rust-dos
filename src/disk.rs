@@ -554,6 +554,12 @@ pub struct DiskController {
     current_drive: u8, // 0=A, ... 2=C, ... 25=Z
     /// Whether the expanded memory manager's EMMXXXX0 device is there.
     pub emm_device: bool,
+    /// The disks a state just loaded goes back to the checkpoints of, and
+    /// those checkpoints, once all of the state is in (`revert_disks`).
+    pub(crate) reverts: Vec<(u8, u64)>,
+    /// The state file being loaded, whose copies of disks the drives are
+    /// offered once they are mounted as it has them (savestate/disks.rs).
+    pub(crate) copies_from: Option<PathBuf>,
 }
 
 impl DiskController {
@@ -596,6 +602,8 @@ impl DiskController {
             drives,
             current_drive: DRIVE_C, // Default to C:
             emm_device: false,
+            reverts: Vec::new(),
+            copies_from: None,
         };
         disk.open_standard_devices();
         disk
@@ -994,6 +1002,29 @@ impl DiskController {
     /// The disk image of a drive mounted from one, as the BIOS reads it.
     pub fn bios_image(&self, drive: u8) -> Option<Rc<DiskImage>> {
         self.fat_volume(drive).map(|volume| volume.disk().clone())
+    }
+
+    /// Keep journals of the writes to the disk images in the drives, or
+    /// stop: a booted system's states and rewind take its disks back with
+    /// its memory (`DiskImage::revert_to`).
+    pub fn keep_journals(&self, on: bool) {
+        for drive in 0..LASTDRIVE {
+            if let Some(disk) = self.bios_image(drive) {
+                disk.keep_journal(on);
+            }
+        }
+    }
+
+    /// Take the disks back to the checkpoints of the state just loaded.
+    pub(crate) fn revert_disks(&mut self) -> Vec<String> {
+        let mut failed = Vec::new();
+        for (drive, id) in std::mem::take(&mut self.reverts) {
+            let reverted = self.bios_image(drive).ok_or_else(|| "it's gone".to_string()).and_then(|disk| disk.revert_to(id));
+            if let Err(e) = reverted {
+                failed.push(format!("drive {}: {}", drive_letter(drive), e));
+            }
+        }
+        failed
     }
 
     /// Whether another disk went in `drive` since the last time this was

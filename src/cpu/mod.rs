@@ -958,6 +958,7 @@ impl Cpu {
         // A system booted from a disk turned the machine off: DOS starts
         // over on it.
         if self.bus.boot.take().is_some() {
+            self.bus.disk.keep_journals(false);
             self.bus.restore_dos_machine();
             self.resident_end = crate::mcb::first_free(&self.bus);
             self.resident_upper.clear();

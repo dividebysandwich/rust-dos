@@ -142,6 +142,8 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     cpu.program = format!("BOOT {}:", letter);
     cpu.bus.disk.close_all_files();
     cpu.bus.boot = Some(BootState { unit, ..Default::default() });
+    // Its states and rewind take its disks back with its memory.
+    cpu.bus.disk.keep_journals(true);
 
     let bus = &mut cpu.bus;
     // All of memory cleared, as the power-on self test leaves it.

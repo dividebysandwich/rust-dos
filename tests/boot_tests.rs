@@ -160,3 +160,45 @@ fn turning_off_brings_dos_back() {
     let int21 = ((cpu.bus.read_16(0x86) as usize) << 4) + cpu.bus.read_16(0x84) as usize;
     assert_eq!(cpu.bus.read_8(int21), 0xFE);
 }
+
+/// A booted system's state takes its disks back with its memory: through
+/// the journal of the writes since, in the same run, and from the copy
+/// beside a state file when the journal doesn't reach back (another run).
+#[test]
+fn a_booted_systems_state_takes_its_disk_back() {
+    use rust_dos::savestate::{disks, machine as states};
+    let mut cpu = machine("state");
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    let disk = cpu.bus.disk.bios_image(2).unwrap();
+    let sector = |disk: &DiskImage| {
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        disk.read(1, &mut buf).unwrap();
+        buf
+    };
+    let pattern = sector(&disk);
+    let state = states::save(&cpu);
+    let file = PathBuf::from("target/test_boot/state/booted.state");
+    disks::save_copies(&cpu, &file).unwrap();
+
+    // The system writes its disk; the state brings the sector back.
+    disk.write(1, &[0xEE; SECTOR_SIZE]).unwrap();
+    states::load(&mut cpu, &state).unwrap();
+    assert_eq!(sector(&disk), pattern, "reverted through the journal");
+    assert!(cpu.bus.boot.is_some());
+
+    // In another run the journal starts again: without the copy the state
+    // is refused and the disk stays as it is.
+    disk.write(1, &[0xDD; SECTOR_SIZE]).unwrap();
+    disk.keep_journal(false);
+    disk.keep_journal(true);
+    assert!(states::load(&mut cpu, &state).is_err());
+    assert_eq!(sector(&disk)[0], 0xDD);
+    // With the copy beside the state file it comes back.
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert_eq!(sector(&disk), pattern, "put back from the copy");
+    disks::delete_copies(&file);
+}

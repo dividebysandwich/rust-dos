@@ -11,7 +11,7 @@ const RAM_VERSION: u16 = 2;
 const CORE_VERSION: u16 = 6;
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 2;
-const DOS_VERSION: u16 = 3;
+const DOS_VERSION: u16 = 4;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -309,6 +309,11 @@ impl Bus {
     /// whose FM chip, synthesizer and sound output are still those of the
     /// state.
     pub(crate) fn after_reload(&mut self) {
+        for failed in self.disk.revert_disks() {
+            self.log_string(&format!("[STATE] The disk can't go back with the state: {}", failed));
+        }
+        // A booted system's disks keep journals; the built-in DOS's don't.
+        self.disk.keep_journals(self.boot.is_some());
         self.page_gen.fill(0);
         // The PICs' requests are the state's: the Sound Blaster's interrupts
         // as it has them raise none.

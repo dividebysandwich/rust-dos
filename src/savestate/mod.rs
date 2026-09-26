@@ -14,6 +14,7 @@
 //! a version and its length, so a section a newer rust-dos changed is
 //! refused rather than misread.
 
+pub mod disks;
 pub mod machine;
 pub mod rewind;
 pub mod slots;

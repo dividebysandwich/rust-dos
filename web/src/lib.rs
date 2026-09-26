@@ -1083,8 +1083,12 @@ impl PageHost<'_> {
         format!("{}/{}", self.game.as_ref().map_or("dos", |g| g.id.as_str()), slot)
     }
 
-    /// Save the machine to slot `slot`.
+    /// Save the machine to slot `slot`. A booted system's state is only
+    /// whole with its disks, which the browser's slots don't keep.
     fn save_slot(&mut self, slot: u8) -> Result<String, String> {
+        if self.cpu.bus.boot.is_some() {
+            return Err("A booted system's state needs its disks, which the browser can't keep with it".to_string());
+        }
         let hardware = self.hardware.settings(self.settings);
         let game = self.game.as_ref().map(|g| (g.id.as_str(), g.name.as_str()));
         let header = slots::header(self.cpu, &hardware, game);

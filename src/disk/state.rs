@@ -35,7 +35,16 @@ impl DiskController {
     pub(crate) fn save_state(&self, w: &mut Writer) {
         // Whether EMMXXXX0 is there comes with the configuration.
         // The copy of the file table in memory is saved with the memory.
-        let DiskController { open_files, sft_dirty: _, position_dirty: _, drives, current_drive, emm_device: _ } = self;
+        let DiskController {
+            open_files,
+            sft_dirty: _,
+            position_dirty: _,
+            drives,
+            current_drive,
+            emm_device: _,
+            reverts: _,
+            copies_from: _,
+        } = self;
         current_drive.save(w);
         for drive in drives {
             drive.is_some().save(w);
@@ -48,6 +57,10 @@ impl DiskController {
                 image.save(w);
                 media_changed.save(w);
             }
+        }
+        // The disks that keep journals as they are now: a checkpoint each.
+        for drive in 0..LASTDRIVE {
+            self.bios_image(drive).and_then(|disk| disk.checkpoint()).save(w);
         }
         let mut entries: Vec<u16> = open_files.keys().copied().collect();
         entries.sort_unstable();
@@ -122,6 +135,34 @@ impl DiskController {
             d.media_changed = changed;
         }
         self.current_drive = if self.is_mounted(current) { current } else { DRIVE_C };
+
+        // The disks go back to the state's checkpoints once all of it is
+        // in; the journals must still reach back to them, or the state file
+        // have copies of the disks as they were.
+        if let Some(state) = &self.copies_from {
+            for drive in 0..LASTDRIVE {
+                let copy = crate::savestate::disks::copy_path(state, drive);
+                if let Some(disk) = self.bios_image(drive)
+                    && copy.is_file()
+                {
+                    disk.offer_replacement(Some(copy));
+                }
+            }
+        }
+        self.reverts.clear();
+        for drive in 0..LASTDRIVE {
+            let mut checkpoint = None::<u64>;
+            checkpoint.load(r)?;
+            if let Some(id) = checkpoint {
+                if !self.bios_image(drive).is_some_and(|disk| disk.has_checkpoint(id)) {
+                    return Err(StateError::Mismatch(format!(
+                        "the disk in drive {}: changed since, and the state is of the system booted from it",
+                        drive_letter(drive)
+                    )));
+                }
+                self.reverts.push((drive, id));
+            }
+        }
 
         self.open_files.clear();
         let mut files = Vec::new();

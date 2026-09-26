@@ -1370,6 +1370,9 @@ impl MainHost<'_, '_> {
     fn save_slot(&mut self, slot: u8) -> Result<(), String> {
         let path = slots::slot_path(&self.slot_dir()?, slot);
         let (header, picture, state) = self.capture_state();
+        // A booted system's disks as they are, beside its state.
+        savestate::disks::delete_copies(&path);
+        savestate::disks::save_copies(self.cpu, &path)?;
         let done = self.state_done.clone();
         self.cpu.bus.log_string(&format!("[STATE] Saving to {}", path.display()));
         std::thread::spawn(move || {
@@ -1383,6 +1386,8 @@ impl MainHost<'_, '_> {
     /// Save the machine to the file `path`, now.
     fn save_file(&mut self, path: &std::path::Path) -> Result<(), String> {
         let (header, picture, state) = self.capture_state();
+        savestate::disks::delete_copies(path);
+        savestate::disks::save_copies(self.cpu, path)?;
         slots::write_file(path, &slots::encode(&header, &slots::thumbnail(&picture), &state))?;
         self.cpu.bus.log_string(&format!("[STATE] Saved to {}", path.display()));
         Ok(())
@@ -1409,7 +1414,12 @@ impl MainHost<'_, '_> {
                 config_warning(self.cpu, &warning);
             }
         }
-        savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string())?;
+        // A booted system's disks come back from their copies, if the
+        // journals don't reach back to the state.
+        savestate::disks::offer_copies(self.cpu, path);
+        let loaded = savestate::machine::load(self.cpu, &state).map_err(|e| e.to_string());
+        savestate::disks::withdraw(self.cpu);
+        loaded?;
         self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
         *self.state_loaded = true;
         self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
@@ -1636,6 +1646,7 @@ impl Host for MainHost<'_, '_> {
 
     fn delete_state(&mut self, slot: u8) -> Result<(), String> {
         let path = slots::slot_path(&self.slot_dir()?, slot);
+        savestate::disks::delete_copies(&path);
         std::fs::remove_file(&path).map_err(|e| format!("{}: {}", path.display(), e))
     }
 }

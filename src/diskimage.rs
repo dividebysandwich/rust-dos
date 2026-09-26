@@ -358,6 +358,39 @@ pub struct DiskImage {
     /// Counts writes, so that what caches the disk's contents can tell
     /// when they changed underneath it.
     generation: Cell<u64>,
+    /// What the machine wrote over since its last states, while a booted
+    /// system runs (`keep_journal`).
+    journal: RefCell<Option<Journal>>,
+    /// A copy of the disk kept with a state file, for a load that goes
+    /// back further than the journal (`offer_replacement`).
+    replacement: RefCell<Option<PathBuf>>,
+}
+
+/// The contents of sectors before the machine wrote them, since each of
+/// the checkpoints of its last states: what brings the disk back to how it
+/// was at one of them (`DiskImage::revert_to`). A booted system's memory
+/// holds what it read of its disks, so a state of it is only whole with
+/// the disks as they were.
+#[derive(Default)]
+struct Journal {
+    /// Oldest first: a checkpoint, and each sector's contents before its
+    /// first write after it.
+    entries: std::collections::VecDeque<(u64, std::collections::HashMap<u64, Box<[u8]>>)>,
+    bytes: usize,
+}
+
+/// The memory a disk's journal may take; its oldest checkpoints go first.
+const JOURNAL_BUDGET: usize = 256 << 20;
+
+/// Checkpoints are numbered across the disks and never again: from the
+/// time the first was taken on, so a state file of another run can't have
+/// the number of one of this run's.
+static NEXT_CHECKPOINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FIRST_CHECKPOINT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+fn next_checkpoint() -> u64 {
+    let first = *FIRST_CHECKPOINT.get_or_init(|| (crate::hosttime::now().timestamp_micros() as u64) << 12);
+    first + NEXT_CHECKPOINT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl std::fmt::Debug for DiskImage {
@@ -449,6 +482,8 @@ impl DiskImage {
             bios_type: 0,
             writable,
             generation: Cell::new(0),
+            journal: RefCell::new(None),
+            replacement: RefCell::new(None),
         };
         let (geometry, bios_type) = if floppy {
             match geometry {
@@ -565,8 +600,160 @@ impl DiskImage {
             return Err(STATUS_WRITE_PROTECTED);
         }
         self.check(lba, data.len())?;
+        self.note_writes(lba, data.len().div_ceil(SECTOR_SIZE) as u64);
+        self.write_at(lba * SECTOR_SIZE as u64, data)
+    }
+
+    /// Keep what each sector held before its first write since the last
+    /// checkpoint, if there is a journal with one.
+    fn note_writes(&self, lba: u64, count: u64) {
+        let mut guard = self.journal.borrow_mut();
+        let Some(journal) = guard.as_mut() else { return };
+        let Some((_, sectors)) = journal.entries.back_mut() else { return };
+        for sector in lba..lba + count {
+            if sectors.contains_key(&sector) {
+                continue;
+            }
+            let mut old = vec![0u8; SECTOR_SIZE].into_boxed_slice();
+            if self.read_at(sector * SECTOR_SIZE as u64, &mut old).is_ok() {
+                sectors.insert(sector, old);
+                journal.bytes += SECTOR_SIZE;
+            }
+        }
+        while journal.bytes > JOURNAL_BUDGET && journal.entries.len() > 1 {
+            if let Some((_, gone)) = journal.entries.pop_front() {
+                journal.bytes -= gone.len() * SECTOR_SIZE;
+            }
+        }
+    }
+
+    /// Keep a journal of the writes from the next checkpoint on (the one
+    /// kept, if there is one), or none.
+    pub fn keep_journal(&self, on: bool) {
+        let mut journal = self.journal.borrow_mut();
+        match on {
+            true => {
+                journal.get_or_insert_with(Journal::default);
+            }
+            false => *journal = None,
+        }
+    }
+
+    /// A checkpoint of the disk as it is, if it keeps a journal: the
+    /// number `revert_to` brings it back to this point with.
+    pub fn checkpoint(&self) -> Option<u64> {
+        let mut guard = self.journal.borrow_mut();
+        let journal = guard.as_mut()?;
+        let id = next_checkpoint();
+        journal.entries.push_back((id, Default::default()));
+        Some(id)
+    }
+
+    /// Whether the disk keeps a journal.
+    pub fn journaling(&self) -> bool {
+        self.journal.borrow().is_some()
+    }
+
+    /// Whether the journal still reaches back to checkpoint `id`, or a
+    /// copy of the disk as it was then is offered.
+    pub fn has_checkpoint(&self, id: u64) -> bool {
+        self.replacement.borrow().is_some() || self.journal.borrow().as_ref().is_some_and(|j| j.entries.iter().any(|(c, _)| *c == id))
+    }
+
+    /// Offer the copy of the disk at `copy`, kept with the state file
+    /// being loaded, to take the disk back further than the journal goes,
+    /// or take the offer back.
+    pub fn offer_replacement(&self, copy: Option<PathBuf>) {
+        if copy.is_some() {
+            self.keep_journal(true);
+        }
+        *self.replacement.borrow_mut() = copy;
+    }
+
+    /// Write a copy of the disk as it is to `dest`, for a state file of
+    /// the system booted from it.
+    pub fn copy_to(&self, dest: &Path) -> Result<(), String> {
+        let error = |e: std::io::Error| format!("{}: {}", dest.display(), e);
+        let partial = dest.with_extension("partial");
+        match &self.backing {
+            Backing::File(_) => {
+                std::fs::copy(&self.path, &partial).map_err(error)?;
+            }
+            Backing::Memory { data, .. } => {
+                let data = data.borrow();
+                let mut out = File::create(&partial).map_err(error)?;
+                let mut buf = vec![0u8; CHUNK];
+                let mut at = 0u64;
+                while at < data.len() {
+                    let len = (data.len() - at).min(CHUNK as u64) as usize;
+                    data.read_at(at, &mut buf[..len]);
+                    out.write_all(&buf[..len]).map_err(error)?;
+                    at += len as u64;
+                }
+            }
+        }
+        std::fs::rename(&partial, dest).map_err(error)
+    }
+
+    /// Make the disk what the copy at `copy` holds.
+    fn replace_from(&self, copy: &Path) -> Result<(), String> {
+        let error = |e: std::io::Error| format!("{}: {}", copy.display(), e);
+        let mut source = File::open(copy).map_err(error)?;
+        let len = source.metadata().map_err(error)?.len();
+        if len.div_ceil(SECTOR_SIZE as u64) != self.sectors {
+            return Err(format!("{} isn't the size of the disk", copy.display()));
+        }
         self.generation.set(self.generation.get() + 1);
-        let at = lba * SECTOR_SIZE as u64;
+        match &self.backing {
+            Backing::File(file) => {
+                let mut file = file;
+                file.seek(SeekFrom::Start(0)).map_err(error)?;
+                std::io::copy(&mut source, &mut file).map_err(error)?;
+            }
+            Backing::Memory { .. } => {
+                let mut buf = vec![0u8; CHUNK];
+                let mut at = 0u64;
+                loop {
+                    let n = source.read(&mut buf).map_err(error)?;
+                    if n == 0 {
+                        break;
+                    }
+                    self.write_at(at, &buf[..n]).map_err(|_| format!("{}: can't be written", self.path.display()))?;
+                    at += n as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Put back what the sectors written since checkpoint `id` held then,
+    /// the newest writes' first, so the contents at the checkpoint win.
+    /// The checkpoints after it are gone; the disk is at `id` again. A
+    /// checkpoint the journal doesn't reach is the offered copy's.
+    pub fn revert_to(&self, id: u64) -> Result<(), String> {
+        let mut guard = self.journal.borrow_mut();
+        let journal = guard.as_mut().ok_or("the disk keeps no journal")?;
+        let replacement = self.replacement.borrow_mut().take();
+        let Some(at) = journal.entries.iter().position(|(c, _)| *c == id) else {
+            let copy = replacement.ok_or("the disk changed since")?;
+            self.replace_from(&copy)?;
+            *journal = Journal::default();
+            journal.entries.push_back((id, Default::default()));
+            return Ok(());
+        };
+        while journal.entries.len() > at {
+            let (_, sectors) = journal.entries.pop_back().expect("an entry");
+            for (sector, old) in sectors {
+                journal.bytes -= SECTOR_SIZE;
+                self.write_at(sector * SECTOR_SIZE as u64, &old).map_err(|_| "the disk can't be written")?;
+            }
+        }
+        journal.entries.push_back((id, Default::default()));
+        Ok(())
+    }
+
+    fn write_at(&self, at: u64, data: &[u8]) -> Result<(), u8> {
+        self.generation.set(self.generation.get() + 1);
         match &self.backing {
             Backing::File(file) => {
                 let mut file = file;
@@ -653,6 +840,36 @@ mod tests {
         boot[510] = 0x55;
         boot[511] = 0xAA;
         boot
+    }
+
+    /// A booted system's disk goes back to how it was at a state's
+    /// checkpoint, whatever was written after it, and again after that.
+    #[test]
+    fn the_journal_reverts_writes_since_a_checkpoint() {
+        let path = scratch("journal.img", &boot_sector(2880, 18, 2).into_iter().chain(vec![0u8; 2879 * SECTOR_SIZE]).collect::<Vec<_>>());
+        let disk = DiskImage::open(&path, true, None, false).unwrap();
+        let sector = |fill: u8| vec![fill; SECTOR_SIZE];
+        let read = |lba: u64| {
+            let mut buf = vec![0u8; SECTOR_SIZE];
+            disk.read(lba, &mut buf).unwrap();
+            buf[0]
+        };
+        assert_eq!(disk.checkpoint(), None, "no journal");
+        disk.keep_journal(true);
+        disk.write(5, &sector(0xAA)).unwrap();
+        let first = disk.checkpoint().unwrap();
+        disk.write(5, &[sector(0xBB), sector(0xCC)].concat()).unwrap();
+        let second = disk.checkpoint().unwrap();
+        disk.write(5, &sector(0xDD)).unwrap();
+        disk.revert_to(second).unwrap();
+        assert_eq!((read(5), read(6)), (0xBB, 0xCC));
+        disk.revert_to(first).unwrap();
+        assert_eq!((read(5), read(6)), (0xAA, 0x00));
+        assert!(!disk.has_checkpoint(second), "the later checkpoints are gone");
+        disk.write(5, &sector(0xEE)).unwrap();
+        disk.revert_to(first).unwrap();
+        assert_eq!(read(5), 0xAA);
+        assert!(disk.revert_to(second).is_err());
     }
 
     #[test]
