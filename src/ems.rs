@@ -82,6 +82,9 @@ pub struct Ems {
     mapped: Map,
     /// The maps saved with function 47h, by the handle they were saved for.
     saved: HashMap<u16, Map>,
+    /// Windows' 386 enhanced mode took the page frame over (`hand_over`),
+    /// and the pages mapped in it are at home until it exits.
+    handed_over: bool,
 }
 
 impl Default for Ems {
@@ -92,7 +95,7 @@ impl Default for Ems {
 
 impl Ems {
     pub fn new() -> Self {
-        Self { handles: vec![Some(Handle::default())], mapped: [None; FRAME_PAGES], saved: HashMap::new() }
+        Self { handles: vec![Some(Handle::default())], mapped: [None; FRAME_PAGES], saved: HashMap::new(), handed_over: false }
     }
 
     /// The open handles: number, logical pages and name, for debuggers.
@@ -174,6 +177,104 @@ impl Ems {
             }
         }
     }
+}
+
+/// Where the Global EMM Import record goes, which Windows' 386 enhanced mode
+/// reads as it starts: in DOS's data segment.
+const IMPORT_RECORD: usize = crate::dos_data::address(crate::dos_data::EMM_IMPORT);
+/// The record's size, its 16 KB frames of the first megabyte, and the
+/// frame of the page frame's first physical page.
+const IMPORT_SIZE: usize = 0x19D;
+const IMPORT_FRAMES: usize = 64;
+const PAGE_FRAME_FRAME: usize = FRAME / PAGE;
+
+/// IOCTL read (INT 21h AX=4402h) from EMMXXXX0 into the `size` bytes at
+/// `buffer`, the function in its first byte: 01h, the physical address and
+/// version of the Global EMM Import record Windows takes expanded memory
+/// over with; 02h, the manager's version. The bytes read, or the error.
+pub fn ioctl_read(bus: &mut Bus, buffer: usize, size: u16) -> Result<u16, u8> {
+    let Some(mut ems) = bus.ems.take() else { return Err(0x01) };
+    let result = match (bus.read_8(buffer), size) {
+        (0x01, 6) => {
+            ems.hand_over(bus);
+            bus.write_32(buffer, IMPORT_RECORD as u32);
+            bus.write_8(buffer + 4, 1); // version 1.00: expanded memory only
+            bus.write_8(buffer + 5, 0);
+            Ok(6)
+        }
+        (0x02, 2) => {
+            bus.write_8(buffer, 4);
+            bus.write_8(buffer + 1, 0);
+            Ok(2)
+        }
+        _ => Err(0x01),
+    };
+    bus.ems = Some(ems);
+    result
+}
+
+impl Ems {
+    /// Hand the page frame to Windows' 386 enhanced mode, which pages
+    /// expanded memory itself while it runs: the pages it shows go home,
+    /// and the Global EMM Import record says where the frame is, with the
+    /// rest of the first megabyte mapped as it is, as DOSBox has it. The
+    /// programs' handles stay in extended memory, which Windows' own
+    /// expanded memory leaves alone as the XMS driver lent it out.
+    fn hand_over(&mut self, bus: &mut Bus) {
+        for slot in 0..FRAME_PAGES {
+            self.write_back(bus, slot);
+        }
+        self.handed_over = true;
+        let at = IMPORT_RECORD;
+        bus.fill_ram(at..at + IMPORT_SIZE, 0);
+        bus.write_16(at, 0x0004); // flags
+        bus.write_16(at + 0x02, IMPORT_SIZE as u16);
+        bus.write_16(at + 0x04, 0x0001); // version 1.00
+        for frame in 0..IMPORT_FRAMES {
+            let record = at + 0x0A + frame * 6;
+            match frame.checked_sub(PAGE_FRAME_FRAME).filter(|&slot| slot < FRAME_PAGES) {
+                // A physical page of the page frame, showing nothing.
+                Some(slot) => {
+                    bus.write_8(record, 0x03);
+                    bus.write_8(record + 1, 0xFF);
+                    bus.write_16(record + 2, 0x7FFF);
+                    bus.write_8(record + 4, slot as u8);
+                    bus.write_8(record + 5, 0x00);
+                }
+                // Memory as it is: linear addresses are physical.
+                None => {
+                    bus.write_8(record, 0x00);
+                    bus.write_8(record + 1, 0xFF);
+                    bus.write_16(record + 2, 0xFFFF);
+                    bus.write_8(record + 4, 0xFF);
+                    bus.write_8(record + 5, 0xAA);
+                }
+            }
+        }
+        bus.write_8(at + 0x18A, 0x74);
+        bus.write_8(at + 0x18B, 0); // no UMB frames
+        // One handle, the system's, with a page of its own for Windows to
+        // find, as DOSBox's has.
+        bus.write_8(at + 0x18C, 1);
+        bus.write_16(at + 0x197, 1);
+        bus.write_32(at + 0x199, 0x0011_0000);
+    }
+}
+
+/// Windows exited (INT 2Fh AX=1606h): after it had the page frame, show
+/// the pages mapped there again.
+pub fn windows_exited(bus: &mut Bus) {
+    let Some(mut ems) = bus.ems.take() else { return };
+    if std::mem::take(&mut ems.handed_over) {
+        for (slot, target) in ems.mapped.iter().enumerate() {
+            if let Some((handle, page)) = *target
+                && let Some(&addr) = ems.handle(handle).and_then(|h| h.pages.get(page as usize))
+            {
+                bus.copy_ram(addr as usize, FRAME + slot * PAGE, PAGE);
+            }
+        }
+    }
+    bus.ems = Some(ems);
 }
 
 /// The free and total logical pages, as extended memory has room for them.
@@ -811,4 +912,4 @@ fn move_or_exchange(cpu: &mut Cpu, ems: &mut Ems, al: u8) -> u8 {
 }
 
 crate::state_fields!(Handle { pages, name });
-crate::state_fields!(Ems { handles, mapped, saved });
+crate::state_fields!(Ems { handles, mapped, saved, handed_over });

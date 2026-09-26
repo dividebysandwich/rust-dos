@@ -426,3 +426,47 @@ fn the_shell_frees_ems() {
     assert_eq!(ems(&mut cpu, 0x4200), 0);
     assert_eq!(cpu.bx(), cpu.dx());
 }
+
+#[test]
+fn windows_takes_the_page_frame_over_and_gives_it_back() {
+    let mut cpu = machine();
+    let handle = allocate(&mut cpu, 2);
+    assert_eq!(map(&mut cpu, handle, 1, 0), 0);
+    cpu.bus.fill_ram(FRAME..FRAME + PAGE, 0x5A);
+
+    // IOCTL read, function 01h: the Global EMM Import record's address
+    // and version 1.00.
+    set_name(&mut cpu, "EMMXXXX0");
+    assert!(int21(&mut cpu, 0x3D00));
+    let file = cpu.ax();
+    cpu.bus.load_bytes(0x21000, &[0x01, 0, 0, 0, 0, 0]);
+    cpu.set_bx(file);
+    cpu.set_cx(6);
+    cpu.set_ds(0x2100);
+    cpu.set_dx(0);
+    assert!(int21(&mut cpu, 0x4402));
+    assert_eq!(cpu.ax(), 6);
+    let record = cpu.bus.read_32(0x21000) as usize;
+    assert_eq!((cpu.bus.read_8(0x21004), cpu.bus.read_8(0x21005)), (1, 0));
+    assert_eq!(cpu.bus.read_16(record + 2), 0x019D, "its size");
+    // The frames: conventional memory as it is, the page frame's four
+    // physical pages showing nothing.
+    let frame = |i: usize| (0..6).map(|b| cpu.bus.read_8(record + 0x0A + i * 6 + b)).collect::<Vec<u8>>();
+    assert_eq!(frame(0), [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xAA]);
+    assert_eq!(frame(0x38), [0x03, 0xFF, 0xFF, 0x7F, 0x00, 0x00]);
+    assert_eq!(frame(0x3B), [0x03, 0xFF, 0xFF, 0x7F, 0x03, 0x00]);
+    assert_eq!(frame(0x3C), [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xAA]);
+
+    // Windows uses the frame as its own; when it exits, the page mapped
+    // there shows again, with what the program had written.
+    cpu.bus.fill_ram(FRAME..FRAME + PAGE, 0xCC);
+    cpu.set_ax(0x1606);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.bus.read_8(FRAME), 0x5A);
+    assert_eq!(cpu.bus.read_8(FRAME + PAGE - 1), 0x5A);
+    // Only once: the next exit (standard mode's) leaves the frame alone.
+    cpu.bus.write_8(FRAME, 0x11);
+    cpu.set_ax(0x1606);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.bus.read_8(FRAME), 0x11);
+}

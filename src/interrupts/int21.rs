@@ -1425,9 +1425,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_reg8(Register::AL, 0xFF);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
+                // What Windows takes expanded memory over with.
                 0x02 if device == Some(CharDevice::Emm) => {
-                    cpu.set_ax(0x01);
-                    cpu.set_cpu_flag(CpuFlags::CF, true);
+                    let (buffer, size) = (cpu.get_physical_addr(cpu.ds(), cpu.dx()), cpu.cx());
+                    let result = crate::ems::ioctl_read(&mut cpu.bus, buffer, size);
+                    set_result(cpu, result);
                 }
                 _ => {
                     // Stub other subfunctions as success

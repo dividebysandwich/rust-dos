@@ -63,7 +63,12 @@ const CDS: u16 = DPBS + LASTDRIVE as u16 * DPB_SIZE;
 const CDS_SIZE: u16 = 0x58;
 /// The one disk buffer, a 14h-byte header and a sector.
 const DISK_BUFFER: u16 = CDS + LASTDRIVE as u16 * CDS_SIZE;
-const END: u16 = DISK_BUFFER + 0x14 + 0x200;
+/// The expanded memory manager's Global EMM Import record for Windows
+/// (`ems::ioctl_read`).
+pub const EMM_IMPORT: u16 = 0x1D00;
+const END: u16 = EMM_IMPORT + 0x200;
+
+const _: () = assert!(DISK_BUFFER + 0x14 + 0x200 <= EMM_IMPORT);
 
 const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= CRIT_PATCHES);
 const _: () = assert!(
