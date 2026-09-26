@@ -48,6 +48,8 @@ pub struct Bus {
     /// Something asked for a CPU reset (8042 or port 92h); the execution
     /// loop carries it out.
     pub reset_requested: bool,
+    /// Writes to the ROMs logged so far (`note_rom_write`).
+    rom_writes: u16,
     /// The port accesses a BIOS service left for a V86 monitor to see,
     /// which the BIOS makes on its way out (`bios::PORT_ACCESSES`).
     pub port_accesses: VecDeque<crate::bios::PortAccess>,
@@ -236,6 +238,7 @@ impl Bus {
             a20_mask: !0x0010_0000,
             reset_requested: false,
             port_accesses: VecDeque::new(),
+            rom_writes: 0,
             config_ui_requested: false,
             exit_requested: false,
             cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
@@ -345,20 +348,10 @@ impl Bus {
         // The display adapter: its BIOS data and ROM.
         video::bios::install(&mut bus, video::adapter::VideoSetup::default());
 
-        // Initialize SFT at F000:E000 (Address 0xFE000)
-        // 00-02: Modes supported (All)
-        bus.write_8(0xFE000, 0xFF);
-        bus.write_8(0xFE001, 0xFF);
-        bus.write_8(0xFE002, 0xFF);
-        // 03-06: Reserved (0)
-        // 07: Scanlines supported (All?) -> Let's say FF
-        bus.write_8(0xFE007, 0xFF);
-        // 0B: Total Char Blocks (8)
-        bus.write_8(0xFE00B, 0x08);
-        // 0C: Max Active Blocks (2)
-        bus.write_8(0xFE00C, 0x02);
-        // 0D: Misc Flags (0)
-        // 10: Save Pointer Caps (0)
+        // The video BIOS's static functionality table at F000:E000: all
+        // modes (00-02), all scan line counts (07), 8 character blocks
+        // (0B), 2 of them active (0C); no further capabilities.
+        bus.write_rom(0xFE000, &[0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0x08, 0x02, 0, 0, 0, 0]);
 
 
         // BIOS ROM code and the interrupt vector table.
@@ -373,8 +366,10 @@ impl Bus {
         // The default Ultrasound's software, and the equipment word, hard
         // disk count and DPBs for the drives C:, X: and Z:.
         let _ = bus.mount_ultrasnd(crate::gus::GusConfig::default().drive);
-        // The file table, with the standard devices open.
+        // The file table, with the standard devices open, and the XMS
+        // driver's entry.
         crate::dos_files::write_table(&mut bus);
+        crate::xms::install_entry(&mut bus);
 
         bus
     }
@@ -676,6 +671,19 @@ impl Bus {
         self.bump_page_gens(addr, end);
     }
 
+    /// Whether `addr` is in a ROM, which ignores the CPU's writes: the video
+    /// BIOS's 32 KB at C0000h, and the BIOS's 64 KB at F0000h.
+    pub fn is_rom(addr: usize) -> bool {
+        (0xC0000..0xC8000).contains(&addr) || (0xF0000..0x10_0000).contains(&addr)
+    }
+
+    /// Put `data` into a ROM at `addr`, as the emulator sets its ROMs up
+    /// and keeps its services' data there.
+    pub fn write_rom(&mut self, addr: usize, data: &[u8]) {
+        debug_assert!(Self::is_rom(addr) && Self::is_rom(addr + data.len() - 1));
+        self.load_bytes(addr, data);
+    }
+
     /// Copy `len` bytes of RAM from `from` to `to`, bypassing the VGA
     /// mapping, as the expanded memory manager maps its pages.
     pub fn copy_ram(&mut self, from: usize, to: usize, len: usize) {
@@ -879,9 +887,12 @@ impl Bus {
             );
         }
 
-        // ROM / reserved area (0xC0000..0x100000 on a real PC). Still backed
-        // by our Vec<u8> so BIOS-ROM writes from initialization work.
+        // The ROMs ignore writes; the upper memory between them is RAM.
         // Writes past the end of RAM go nowhere.
+        if Self::is_rom(addr) {
+            self.note_rom_write(addr);
+            return false;
+        }
         if addr < self.ram.len() {
             self.ram[addr] = value;
             let page = addr >> GEN_SHIFT;
@@ -893,6 +904,17 @@ impl Bus {
             return true;
         }
         false
+    }
+
+    /// Log the first writes to the ROMs, which go nowhere.
+    #[cold]
+    fn note_rom_write(&mut self, addr: usize) {
+        const LOGGED: u16 = 8;
+        if self.rom_writes < LOGGED {
+            self.rom_writes += 1;
+            let more = if self.rom_writes == LOGGED { " (not logging more)" } else { "" };
+            self.log_string(&format!("[BIOS] Write to the ROM at {:05X} ignored{}", addr, more));
+        }
     }
 
     /// Write VESA video memory, marking the rows of the picture it shows

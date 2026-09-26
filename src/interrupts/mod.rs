@@ -112,6 +112,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_COMMAND => crate::command_com::service(cpu),
         crate::bios::SERVICE_PS2_REPORT => crate::mouse::ps2_report(cpu),
         crate::bios::SERVICE_PORT_ACCESS => crate::bios::next_port_access(cpu),
+        crate::bios::SERVICE_MOUSE_CALLBACK_DONE => crate::mouse::clear_callback_busy(&mut cpu.bus),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service

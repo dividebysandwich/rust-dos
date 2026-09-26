@@ -66,7 +66,10 @@ const DISK_BUFFER: u16 = CDS + LASTDRIVE as u16 * CDS_SIZE;
 /// The expanded memory manager's Global EMM Import record for Windows
 /// (`ems::ioctl_read`).
 pub const EMM_IMPORT: u16 = 0x1D00;
-const END: u16 = EMM_IMPORT + 0x200;
+/// The XMS driver's entry point (`xms::install_entry`), in low memory as
+/// HIMEM's is, where programs can hook it.
+pub const XMS_ENTRY: u16 = EMM_IMPORT + 0x200;
+const END: u16 = XMS_ENTRY + 0x10;
 
 const _: () = assert!(DISK_BUFFER + 0x14 + 0x200 <= EMM_IMPORT);
 

@@ -93,21 +93,11 @@ pub fn handle(cpu: &mut Cpu) {
             let table_off = 0xE800;
             let phys_addr = 0xFE800;
 
-            // Byte 0-1: Length (8)
-            cpu.bus.write_16(phys_addr, 0x0008);
-            // Byte 2: Model, as at F000:FFFE (FC = AT, FF = Tandy 1000, FD
-            // = PCjr)
+            // Its length (8), the model as at F000:FFFE (FCh an AT, FFh a
+            // Tandy 1000, FDh a PCjr), submodel 01h, BIOS revision 0, the
+            // features (60h: a real-time clock and a second 8259).
             let model = cpu.bus.read_8(0xFFFFE);
-            cpu.bus.write_8(phys_addr + 2, model);
-            // Byte 3: Submodel (01 = AT)
-            cpu.bus.write_8(phys_addr + 3, 0x01);
-            // Byte 4: BIOS Revision (0)
-            cpu.bus.write_8(phys_addr + 4, 0x00);
-            // Byte 5: Feature Info 1: RTC, second 8259
-            cpu.bus.write_8(phys_addr + 5, 0x60);
-            // Byte 6-9: Reserved/Features
-            cpu.bus.write_8(phys_addr + 6, 0x00);
-            cpu.bus.write_8(phys_addr + 7, 0x00);
+            cpu.bus.write_rom(phys_addr, &[0x08, 0x00, model, 0x01, 0x00, 0x60, 0x00, 0x00]);
 
             cpu.set_es(table_seg);
             cpu.set_bx(table_off);

@@ -1192,7 +1192,12 @@ impl DebugHub {
                     match targets {
                         Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || Vbe::lfb_offset(p, 1).is_some()) => {
                             for (p, b) in t.iter().zip(&data) {
-                                cpu.bus.write_8(*p, *b);
+                                // The debugger patches the ROMs too.
+                                if rust_dos::bus::Bus::is_rom(*p) {
+                                    cpu.bus.write_rom(*p, &[*b]);
+                                } else {
+                                    cpu.bus.write_8(*p, *b);
+                                }
                             }
                             // The debugger's own changes don't stop the
                             // machine.

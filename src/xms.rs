@@ -3,7 +3,8 @@
 //!
 //! Programs find the driver with INT 2Fh AX=4300h and get its entry point
 //! with AX=4310h, then far-call it with the function in AH. The entry is a
-//! ROM stub (see bios.rs) running the `FE 39` service that lands in `call`.
+//! stub in low memory (`install_entry`) running the `FE 39` service that
+//! lands in `call`.
 //!
 //! Extended memory blocks are carved out of RAM above the HMA (10FFF0h).
 //! Locking a block returns its physical address, which is how DOS
@@ -12,6 +13,16 @@
 //! memory, from the top down.
 
 use crate::cpu::Cpu;
+
+/// Write the driver's entry point into DOS's data segment: a short jump
+/// over three NOPs, so programs can hook it by patching those five bytes
+/// as the XMS specification says (Windows' standard mode does), then the
+/// driver and a RETF. Written with DOS's memory set up afresh, not while a
+/// program runs, which may have hooked it.
+pub fn install_entry(bus: &mut crate::bus::Bus) {
+    let at = crate::dos_data::address(crate::dos_data::XMS_ENTRY);
+    bus.load_bytes(at, &[0xEB, 0x03, 0x90, 0x90, 0x90, 0xFE, 0x39, crate::bios::SERVICE_XMS, 0xCB]);
+}
 
 /// First byte of extended memory for blocks: the HMA's end, rounded up.
 const XMS_BASE: u32 = 0x0011_0000;

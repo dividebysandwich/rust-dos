@@ -32,8 +32,8 @@ pub fn handle(cpu: &mut Cpu) {
         0x4300 => cpu.set_ax(0x4380),
         // XMS driver entry point in ES:BX.
         0x4310 => {
-            cpu.set_es(0xF000);
-            cpu.set_bx(crate::bios::XMS_ENTRY);
+            cpu.set_es(dos_data::SEGMENT);
+            cpu.set_bx(dos_data::XMS_ENTRY);
         }
         // DOS's data segment in DS.
         0x1203 => cpu.set_ds(dos_data::SEGMENT),

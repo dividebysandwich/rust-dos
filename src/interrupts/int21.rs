@@ -76,7 +76,7 @@ fn write_country_info(cpu: &mut Cpu, addr: usize) {
     info[16] = 2; // decimal digits
     info[17] = 0; // 12-hour clock
     // Case map routine (far pointer): a RETF.
-    cpu.bus.write_8(CASE_MAP_ROUTINE, 0xCB);
+    cpu.bus.write_rom(CASE_MAP_ROUTINE, &[0xCB]);
     let case_map = ((CASE_MAP_ROUTINE - 0xF0000) as u32) | 0xF000_0000;
     info[18..22].copy_from_slice(&case_map.to_le_bytes());
     info[22] = b',';

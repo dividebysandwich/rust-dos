@@ -339,22 +339,20 @@ pub fn free_all(bus: &mut Bus) {
 /// vector check finds no driver.
 pub fn install_device(bus: &mut Bus, nul: usize) {
     let header = DEVICE_HEADER;
-    bus.write_16(header + 0x04, 0xC000); // character device, IOCTL
-    bus.write_16(header + 0x06, DEVICE_RETF);
-    bus.write_16(header + 0x08, DEVICE_RETF);
-    bus.write_8(DEVICE_HEADER + DEVICE_RETF as usize, 0xCB);
+    // In front of whatever NUL led to.
+    let next = if bus.ems.is_some() { bus.read_32(nul) } else { 0xFFFF_FFFF };
     let name: &[u8; 8] = if bus.ems.is_some() { DEVICE_NAME } else { &[0; 8] };
-    for (i, &b) in name.iter().enumerate() {
-        bus.write_8(header + 0x0A + i, b);
-    }
+    let mut rom = [0u8; DEVICE_RETF as usize + 1];
+    rom[0x00..0x04].copy_from_slice(&next.to_le_bytes());
+    rom[0x04..0x06].copy_from_slice(&0xC000u16.to_le_bytes()); // character device, IOCTL
+    rom[0x06..0x08].copy_from_slice(&DEVICE_RETF.to_le_bytes());
+    rom[0x08..0x0A].copy_from_slice(&DEVICE_RETF.to_le_bytes());
+    rom[0x0A..0x12].copy_from_slice(name);
+    rom[DEVICE_RETF as usize] = 0xCB;
+    bus.write_rom(header, &rom);
     if bus.ems.is_some() {
-        // In front of whatever NUL led to.
-        let next = bus.read_32(nul);
-        bus.write_32(header, next);
         bus.write_16(nul, (header - 0xF0000) as u16);
         bus.write_16(nul + 2, 0xF000);
-    } else {
-        bus.write_32(header, 0xFFFF_FFFF);
     }
 }
 

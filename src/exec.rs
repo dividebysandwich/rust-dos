@@ -667,7 +667,7 @@ fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn
 /// Run translated code from CS:EIP, or the instruction there through the
 /// interpreter where there is none: outside the code window, in the shell,
 /// and in the page of the mouse driver's stub, which lets the next event
-/// handler call in by clearing a byte of RAM (see `mouse::callback_busy`):
+/// handler call in once it clears its busy byte (see `mouse::callback_busy`):
 /// the interpreter looks for one after every instruction. With `single`,
 /// translated blocks hold one instruction.
 #[inline(always)]

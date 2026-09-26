@@ -376,3 +376,15 @@ fn keys_type_in_the_keyboard_layout() {
     // The make code is the key's, whatever it types.
     assert!(cpu.bus.kbc.read_data() != 0);
 }
+
+#[test]
+fn the_system_configuration_table_is_in_the_rom() {
+    let mut cpu = cpu();
+    cpu.set_ax(0xC000);
+    int15::handle(&mut cpu);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    let table = cpu.get_physical_addr(cpu.es(), cpu.bx());
+    assert!(rust_dos::bus::Bus::is_rom(table));
+    let bytes: Vec<u8> = (0..6).map(|i| cpu.bus.read_8(table + i)).collect();
+    assert_eq!(bytes, [0x08, 0x00, 0xFC, 0x01, 0x00, 0x60], "an AT with a clock and two PICs");
+}

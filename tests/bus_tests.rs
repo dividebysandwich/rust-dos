@@ -184,3 +184,36 @@ fn loader_writes_invalidate_cached_decodes() {
     bus.fill_ram(0x20000..0x20010, 0);
     assert_ne!(bus.page_gen[block(0x20000)], before);
 }
+
+#[test]
+fn the_roms_ignore_writes() {
+    use rust_dos::cpu::Cpu;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    // A program storing over the BIOS's INT 21h trap and the video BIOS's
+    // signature, and into upper memory between them.
+    let trap = 0xF1030;
+    let before = (cpu.bus.read_32(trap), cpu.bus.read_16(0xC0000));
+    #[rustfmt::skip]
+    cpu.bus.load_bytes(0x10100, &[
+        0xB8, 0x00, 0xF0,             // MOV AX, F000h
+        0x8E, 0xC0,                   // MOV ES, AX
+        0x26, 0xC7, 0x06, 0x30, 0x10, 0xCC, 0xCC, // MOV WORD ES:[1030h], CCCCh
+        0xB8, 0x00, 0xC0,             // MOV AX, C000h
+        0x8E, 0xC0,                   // MOV ES, AX
+        0x26, 0xC6, 0x06, 0x00, 0x00, 0x00, // MOV BYTE ES:[0000h], 0
+        0xB8, 0x00, 0xD0,             // MOV AX, D000h
+        0x8E, 0xC0,                   // MOV ES, AX
+        0x26, 0xC6, 0x06, 0x00, 0x00, 0x5A, // MOV BYTE ES:[0000h], 5Ah
+        0xF4,                         // HLT
+    ]);
+    cpu.set_cs(0x1000);
+    cpu.set_ip(0x100);
+    for _ in 0..10 {
+        cpu.step();
+    }
+    assert_eq!((cpu.bus.read_32(trap), cpu.bus.read_16(0xC0000)), before, "the ROMs as they were");
+    assert_eq!(cpu.bus.read_8(0xD0000), 0x5A, "upper memory is RAM");
+    // The emulator's own services still keep their data there.
+    cpu.bus.write_rom(0xF1030, &[0x90]);
+    assert_eq!(cpu.bus.read_8(trap), 0x90);
+}

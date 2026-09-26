@@ -224,11 +224,18 @@ fn xms_driver_is_found_and_called_through_int_2fh() {
     run_to_hlt(&mut cpu);
 
     assert_eq!(cpu.bus.read_8(0x600), 0x80, "driver installed");
-    assert_eq!(cpu.bus.read_16(0x606), 0xF000, "entry in the BIOS ROM");
     assert_eq!(cpu.bus.read_16(0x608), 1, "allocation succeeded");
     let base = cpu.bus.read_16(0x60A) as u32 | (cpu.bus.read_16(0x60C) as u32) << 16;
     assert!(base >= 0x11_0000, "block above the HMA: {:08X}", base);
     assert_eq!(cpu.ip(), 0x100 + code.len() as u16 - 1, "back from the far calls");
+
+    // The entry is in low memory, as HIMEM's is, starting with a short
+    // jump over three NOPs that a program hooking the driver patches.
+    let entry = cpu.get_physical_addr(cpu.bus.read_16(0x606), cpu.bus.read_16(0x604));
+    assert!(entry < 0x1_0000, "entry at {entry:05X}");
+    assert_eq!(cpu.bus.read_16(entry), 0x03EB);
+    cpu.bus.write_8(entry, 0xEA);
+    assert_eq!(cpu.bus.read_8(entry), 0xEA, "hooked");
 }
 
 fn xms_call(cpu: &mut Cpu, ah: u8) -> bool {

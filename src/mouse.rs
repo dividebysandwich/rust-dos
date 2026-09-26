@@ -346,7 +346,8 @@ pub fn screen_size(bus: &crate::bus::Bus) -> (usize, usize) {
 /// the registers and IRET to the interrupted code.
 pub const CALLBACK_STUB: usize = 0xFF200;
 /// The stub's data: AX, BX, CX, DX, SI, DI for the handler, the handler's
-/// far address, then a busy byte the stub clears when the handler returns.
+/// far address, then a busy byte the stub has cleared when the handler
+/// returns (`bios::SERVICE_MOUSE_CALLBACK_DONE`).
 const CALLBACK_DATA: usize = 0xFF240;
 const CALLBACK_BUSY: usize = CALLBACK_DATA + 0x10;
 
@@ -364,12 +365,9 @@ pub fn install_callback_stub(bus: &mut crate::bus::Bus) {
     code.extend([0x2E, 0xFF, 0x1E]); // call far cs:[d+12]
     code.extend(at(12));
     code.extend([0x58, 0x5B, 0x59, 0x5A, 0x5E, 0x5F, 0x5D, 0x07, 0x1F]); // pop ax..ds
-    code.extend([0x2E, 0xC6, 0x06]); // mov byte cs:[busy],0
-    code.extend(at(0x10));
-    code.extend([0x00, 0xCF]); // iret
-    for (i, b) in code.into_iter().enumerate() {
-        bus.write_8(CALLBACK_STUB + i, b);
-    }
+    code.extend([0xFE, 0x39, crate::bios::SERVICE_MOUSE_CALLBACK_DONE]); // not busy
+    code.extend([0xCF]); // iret
+    bus.write_rom(CALLBACK_STUB, &code);
     clear_callback_busy(bus);
 }
 
@@ -380,7 +378,7 @@ pub fn callback_busy(bus: &crate::bus::Bus) -> bool {
 
 /// Forget a handler call that never returned, e.g. after a driver reset.
 pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
-    bus.write_8(CALLBACK_BUSY, 0);
+    bus.write_rom(CALLBACK_BUSY, &[0]);
 }
 
 /// Mouse event callback: INT 33h AX=000C registers a far pointer that the
@@ -414,12 +412,9 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     ];
     let (handler_cs, handler_ip) = (mouse.callback_cs, mouse.callback_ip);
 
-    for (i, r) in regs.into_iter().enumerate() {
-        cpu.bus.write_16(CALLBACK_DATA + i * 2, r);
-    }
-    cpu.bus.write_16(CALLBACK_DATA + 12, handler_ip);
-    cpu.bus.write_16(CALLBACK_DATA + 14, handler_cs);
-    cpu.bus.write_8(CALLBACK_BUSY, 1);
+    let mut data: Vec<u8> = regs.into_iter().chain([handler_ip, handler_cs]).flat_map(u16::to_le_bytes).collect();
+    data.push(1); // busy
+    cpu.bus.write_rom(CALLBACK_DATA, &data);
 
     cpu.push(cpu.flags16());
     cpu.push(cpu.cs());
@@ -639,8 +634,7 @@ pub fn ps2_report(cpu: &mut crate::cpu::Cpu) {
     let (status, x, y) = (packet[0] as u16, packet[1] as u16, packet[2] as u16);
     let (segment, offset) = mouse.ps2.handler;
     let at = 0xF0000 + crate::bios::PS2_HANDLER_ADDRESS as usize;
-    cpu.bus.write_16(at, offset);
-    cpu.bus.write_16(at + 2, segment);
+    cpu.bus.write_rom(at, &[offset.to_le_bytes(), segment.to_le_bytes()].concat());
     cpu.set_ax(status);
     cpu.set_bx(x);
     cpu.set_cx(y);

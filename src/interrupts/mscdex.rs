@@ -533,21 +533,17 @@ pub fn install_device(bus: &mut Bus, nul: usize) {
     let cd_drives = bus.disk.drives_of_kind(DriveKind::CdRom);
     // In front of whatever NUL led to.
     let next = bus.read_32(nul);
-    bus.write_32(header, next);
-    bus.write_16(header + 0x04, 0xC800); // character device, IOCTL, open/close
-    bus.write_16(header + 0x06, STRATEGY_ENTRY);
-    bus.write_16(header + 0x08, INTERRUPT_ENTRY);
-    for (i, &b) in b"MSCD001 ".iter().enumerate() {
-        bus.write_8(header + 0x0A + i, b);
-    }
-    bus.write_16(header + 0x12, 0);
-    bus.write_8(header + 0x14, cd_drives.first().map_or(0, |d| d + 1));
-    bus.write_8(header + 0x15, cd_drives.len() as u8);
+    let mut rom = [0u8; 0x16];
+    rom[0x00..0x04].copy_from_slice(&next.to_le_bytes());
+    rom[0x04..0x06].copy_from_slice(&0xC800u16.to_le_bytes()); // character device, IOCTL, open/close
+    rom[0x06..0x08].copy_from_slice(&STRATEGY_ENTRY.to_le_bytes());
+    rom[0x08..0x0A].copy_from_slice(&INTERRUPT_ENTRY.to_le_bytes());
+    rom[0x0A..0x12].copy_from_slice(b"MSCD001 ");
+    rom[0x14] = cd_drives.first().map_or(0, |d| d + 1);
+    rom[0x15] = cd_drives.len() as u8;
+    bus.write_rom(header, &rom);
     for (entry, service) in [(STRATEGY_ENTRY, crate::bios::SERVICE_CD_STRATEGY), (INTERRUPT_ENTRY, crate::bios::SERVICE_CD_INTERRUPT)] {
-        let at = 0xF0000 + entry as usize;
-        for (i, b) in [0xFE, 0x39, service, 0xCB].into_iter().enumerate() {
-            bus.write_8(at + i, b);
-        }
+        bus.write_rom(0xF0000 + entry as usize, &[0xFE, 0x39, service, 0xCB]);
     }
     if !cd_drives.is_empty() {
         bus.write_16(nul, DEVICE_HEADER);

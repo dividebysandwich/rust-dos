@@ -39,13 +39,13 @@ fn rom(offset: u16) -> usize {
 /// Write the VBE data into the video BIOS.
 pub fn install_rom(bus: &mut Bus) {
     for (offset, text) in [(OEM_STRING, OEM), (VENDOR_NAME, VENDOR), (PRODUCT_NAME, PRODUCT), (PRODUCT_REVISION, REVISION)] {
-        bus.load_bytes(rom(offset), text);
+        bus.write_rom(rom(offset), text);
     }
     let mut list: Vec<u8> = MODES.iter().flat_map(|m| m.number.to_le_bytes()).collect();
     list.extend([0xFF, 0xFF]);
-    bus.load_bytes(rom(MODE_LIST), &list);
-    bus.load_bytes(rom(WINDOW_FUNCTION), &[0xFE, 0x39, crate::bios::SERVICE_VBE_WINDOW, 0xCB]);
-    bus.load_bytes(rom(PM_TABLE), &pm_table());
+    bus.write_rom(rom(MODE_LIST), &list);
+    bus.write_rom(rom(WINDOW_FUNCTION), &[0xFE, 0x39, crate::bios::SERVICE_VBE_WINDOW, 0xCB]);
+    bus.write_rom(rom(PM_TABLE), &pm_table());
 }
 
 /// Set Window in protected mode: bank DX of window BL (only A exists)

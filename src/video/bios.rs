@@ -115,12 +115,12 @@ pub fn gray_summing(bus: &Bus) -> bool {
 /// Write the fonts into the ROMs.
 fn install_fonts(bus: &mut Bus) {
     let rom = |offset: u16| ((ROM_SEGMENT as usize) << 4) + offset as usize;
-    bus.load_bytes(rom(FONT_8X8), super::font_8x8());
-    bus.load_bytes(rom(FONT_8X16), super::font_8x16());
-    bus.load_bytes(rom(FONT_8X14), super::font_8x14());
-    bus.load_bytes(rom(FONT_9X14), super::FONT_9X14_ALTERNATE);
-    bus.load_bytes(rom(FONT_9X16), super::FONT_9X16_ALTERNATE);
-    bus.load_bytes(PC_FONT_8X8, &super::font_8x8()[..128 * 8]);
+    bus.write_rom(rom(FONT_8X8), super::font_8x8());
+    bus.write_rom(rom(FONT_8X16), super::font_8x16());
+    bus.write_rom(rom(FONT_8X14), super::font_8x14());
+    bus.write_rom(rom(FONT_9X14), super::FONT_9X14_ALTERNATE);
+    bus.write_rom(rom(FONT_9X16), super::FONT_9X16_ALTERNATE);
+    bus.write_rom(PC_FONT_8X8, &super::font_8x8()[..128 * 8]);
 }
 
 /// Put the adapter of `setup` in place: the card, and what the BIOS data
@@ -154,7 +154,7 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         for addr in 0x0484..=0x048A {
             bus.write_8(addr, 0);
         }
-        bus.load_bytes(0xC0000, &[0xFF; 3]);
+        bus.write_rom(0xC0000, &[0xFF; 3]);
         bus.load_bytes(0xC001E, &[0xFF; 7]);
         install_fonts(bus);
         return;
@@ -181,7 +181,7 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         bus.write_8(0x0489, 0x00);
         bus.write_8(0x048A, 0x00);
         // The EGA BIOS ROM: 16 KB (32 blocks), without the VGA's name.
-        bus.load_bytes(0xC0000, &[0x55, 0xAA, 0x20]);
+        bus.write_rom(0xC0000, &[0x55, 0xAA, 0x20]);
         bus.load_bytes(0xC001E, b"IBM EGA");
         install_fonts(bus);
         return;
@@ -203,7 +203,7 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
 
     // The video BIOS ROM: its signature and size (64 blocks of 512 bytes),
     // and the name that programs look for.
-    bus.load_bytes(0xC0000, &[0x55, 0xAA, 0x40]);
+    bus.write_rom(0xC0000, &[0x55, 0xAA, 0x40]);
     bus.load_bytes(0xC001E, b"IBM VGA");
     install_fonts(bus);
 }

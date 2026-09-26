@@ -40,6 +40,9 @@ pub const SERVICE_COMMAND: u8 = 0x1D;
 pub const SERVICE_PS2_REPORT: u8 = 0x1E;
 /// The next port access a service left to `PORT_ACCESSES` (`next_port_access`).
 pub const SERVICE_PORT_ACCESS: u8 = 0x1F;
+/// The INT 33h event handler the mouse's stub called has returned
+/// (`mouse::clear_callback_busy`).
+pub const SERVICE_MOUSE_CALLBACK_DONE: u8 = 0x20;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.
@@ -47,8 +50,6 @@ const TIMER_HANDLER: u16 = 0x1100;
 const MASTER_EOI_HANDLER: u16 = 0x1110;
 const SLAVE_EOI_HANDLER: u16 = 0x1120;
 const IRQ9_HANDLER: u16 = 0x1130;
-/// The XMS driver entry point (INT 2Fh AX=4310h).
-pub const XMS_ENTRY: u16 = 0x1140;
 /// The diskette parameter table INT 1Eh points to, for 1.44 MB drives.
 pub const DISKETTE_PARAMS: u16 = 0x1150;
 /// Where disk services wait for slow disk access to end, after the CD-ROM
@@ -100,7 +101,7 @@ pub fn set_machine_id(bus: &mut Bus) {
 }
 
 fn write_rom(bus: &mut Bus, offset: u16, code: &[u8]) {
-    bus.load_bytes(ROM + offset as usize, code);
+    bus.write_rom(ROM + offset as usize, code);
 }
 
 /// The vector table the BIOS sets up: service traps, the timer and IRQ
@@ -161,13 +162,6 @@ pub fn install(bus: &mut Bus) {
         bus,
         IRQ9_HANDLER,
         &[0x50, 0xB0, 0x20, 0xE6, 0xA0, 0x58, 0xCD, 0x0A, 0xCF],
-    );
-    // The XMS entry starts with a short jump over three NOPs, so programs
-    // can hook it, as the XMS spec requires; then the driver, then RETF.
-    write_rom(
-        bus,
-        XMS_ENTRY,
-        &[0xEB, 0x03, 0x90, 0x90, 0x90, 0xFE, 0x39, SERVICE_XMS, 0xCB],
     );
     // Step rate and head unload, head load, motor off delay, 512-byte
     // sectors, 18 per track, gap length, data length, format gap length,
