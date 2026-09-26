@@ -855,6 +855,7 @@ impl DebugHub {
                 "deadline": d.deadline,
                 "stale": d.stale,
                 "smc": d.smc,
+                "watched": d.watched,
             },
             // Host speed while executing guest code, excluding idle skips,
             // rendering and frame pacing.

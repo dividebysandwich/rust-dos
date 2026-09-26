@@ -71,6 +71,9 @@ pub struct DynStats {
     pub deadline: u64,
     pub stale: u64,
     pub smc: u64,
+    /// Blocks that stopped at an instruction whose watched bytes had
+    /// changed.
+    pub watched: u64,
 }
 
 /// What `DynState::run` did.
@@ -183,7 +186,7 @@ mod engine {
     use std::collections::HashMap;
     use std::ptr::NonNull;
 
-    use super::block::{BlockData, Guard, LINKS, RETURN_LINK};
+    use super::block::{BlockData, Guard, LINKS, RETURN_LINK, WATCH_AFTER};
     use crate::cpu::{CR0_PG, Seg};
     use super::codemem::CodeMemory;
     use super::helpers::*;
@@ -306,6 +309,10 @@ mod engine {
         none: Box<[Option<(Key, u32)>]>,
         /// Block index + 1 for a key's slot, 0 for none.
         front: Box<[u32]>,
+        /// Per physical page, how often each byte was poked: changed where
+        /// a block went stale or wrote over itself (see
+        /// `block::WATCH_AFTER`).
+        pokes: HashMap<u32, Box<[u8]>>,
         /// The CPU model the blocks' handlers were chosen for.
         model: CpuModel,
     }
@@ -329,6 +336,7 @@ mod engine {
                 map: KeyMap::default(),
                 none: vec![None; 1 << NONE_BITS].into_boxed_slice(),
                 front: vec![0; 1 << FRONT_BITS].into_boxed_slice(),
+                pokes: HashMap::new(),
                 model,
             })
         }
@@ -339,6 +347,7 @@ mod engine {
             self.map.clear();
             self.none.fill(None);
             self.front.fill(0);
+            self.pokes.clear();
             self.mem.clear();
             stats.flushes += 1;
             stats.live_blocks = 0;
@@ -384,7 +393,8 @@ mod engine {
         /// Translate the block at `at`. None if no block starts there.
         fn translate(&mut self, cpu: &Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
             let single = key.mode & 2 != 0;
-            let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK })?;
+            let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
+            let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK }, pokes)?;
             let stack32 = key.mode & 4 != 0;
             let items: Vec<_> = (0..data.count())
                 .map(|ix| {
@@ -505,6 +515,17 @@ mod engine {
             }
         }
 
+        /// Note the bytes of a block that were poked since it was
+        /// translated, before it is dropped.
+        fn note_pokes(&mut self, ram: &[u8], data: &BlockData) {
+            let Some(poked) = data.poked(ram) else { return };
+            let counts = self.pokes.entry(data.phys >> 12).or_insert_with(|| vec![0; 0x1000].into_boxed_slice());
+            for i in poked {
+                let n = &mut counts[(data.phys as usize & 0xFFF) + i];
+                *n = n.saturating_add(1).min(WATCH_AFTER);
+            }
+        }
+
         /// Drop a block whose bytes changed, and the links to it. Its code's
         /// place goes to blocks translated later: code that rewrites
         /// itself all the time (a RET poked into an unrolled loop and put
@@ -583,13 +604,13 @@ mod engine {
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.
                 let data = unsafe { &*self.ctx.exit_data };
-                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC) {
+                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED) {
                     // Instruction ix stopped the block: it counts as executed
                     // (the interpreter counts it before running it) but not in
                     // the instruction count, which this adds once it has dealt
-                    // with it.
+                    // with it. One whose watched bytes changed didn't run.
                     cpu.bus.clock.icount += data.lag[ix] as u64;
-                    cpu.executed += ix as u64 + 1;
+                    cpu.executed += ix as u64 + (kind != EXIT_WATCHED) as u64;
                     if ret as u32 & EXIT_FLAGS != 0 {
                         cpu.set_flag_bits(crate::cpu::alu::ARITH, self.ctx.flags);
                     }
@@ -612,6 +633,7 @@ mod engine {
                     }
                     EXIT_STALE => {
                         stats.stale += 1;
+                        self.note_pokes(cpu.bus.ram(), data);
                         self.retire(exited, stats);
                         if !none_ran {
                             return Run::Ran { page };
@@ -674,8 +696,16 @@ mod engine {
                         // The instruction is done; the rest of the block
                         // changed under it.
                         cpu.bus.clock.icount += 1;
+                        self.note_pokes(cpu.bus.ram(), data);
                         self.retire(exited, stats);
                         Run::Ran { page }
+                    }
+                    EXIT_WATCHED => {
+                        // The interpreter runs whatever is there now; the
+                        // block stays for when the bytes are back.
+                        stats.watched += 1;
+                        cpu.set_eip(data.eips[ix]);
+                        if none_ran { Run::Interpret } else { Run::Ran { page } }
                     }
                     _ => unreachable!("exit code {:X}", ret),
                 };

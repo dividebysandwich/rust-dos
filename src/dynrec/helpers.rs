@@ -31,8 +31,12 @@ pub const EXIT_UNLINKED: u32 = 9;
 /// An instruction raised #DE (a division by 0, or a quotient that
 /// doesn't fit).
 pub const EXIT_DE: u32 = 10;
-/// With EXIT_FAULT, EXIT_GP0, EXIT_DE and EXIT_SMC: the guest's arithmetic
-/// flags are in the context's `flags`, not yet in the CPU.
+/// A watched byte of the instruction differs from what was translated:
+/// the instruction didn't run (see `block::WATCH_AFTER`).
+pub const EXIT_WATCHED: u32 = 11;
+/// With EXIT_FAULT, EXIT_GP0, EXIT_DE, EXIT_SMC and EXIT_WATCHED: the
+/// guest's arithmetic flags are in the context's `flags`, not yet in the
+/// CPU.
 pub const EXIT_FLAGS: u32 = 1 << 16;
 
 /// A memory operand handle at or above this is `SLOW + slot`: the operand

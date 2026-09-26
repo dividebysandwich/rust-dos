@@ -663,11 +663,27 @@ fn changing_a_linked_block_unlinks_it() {
     }
 }
 
+/// Code that writes CL into every byte of the immediates of `add ebx,
+/// imm32` and `add edx, imm32` at `at`: new code each time CL changes
+/// (eight bytes of it), not a poke.
+fn rewrite_immediates(a: &mut CodeAssembler, at: u32) -> Result<(), IcedError> {
+    a.movzx(eax, cl)?;
+    a.imul_3(eax, eax, 0x0101_0101)?;
+    a.mov(dword_ptr(at as u64 + 2), eax)?;
+    a.mov(dword_ptr(at as u64 + 8), eax)
+}
+
+/// What EBX sums to after `add ebx, imm32` with CL in every byte of the
+/// immediate, for CL of `count` down to 1.
+fn replicated_sum(count: u32) -> u32 {
+    (1..=count).fold(0u32, |sum, i| sum.wrapping_add((i & 0xFF).wrapping_mul(0x0101_0101)))
+}
+
 #[test]
 fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
-    // A loop that rewrites the ADD's immediate in the block it jumps to on
-    // each of its 1000 passes, CL, as the Doom engine pokes its drawing
-    // loops: 1000 translations of that block, in room for far fewer.
+    // A loop that rewrites two immediates in the block it jumps to on each
+    // of its 1000 passes: 1000 translations of that block, in room for far
+    // fewer.
     let b_at = CODE + 0x80;
     let top = CODE + 0x40;
     let (mut a, mut b) = twins(|rig| {
@@ -677,11 +693,12 @@ fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
             a.jmp(top as u64)
         }));
         rig.load(top, &asm32(top, |a| {
-            a.mov(byte_ptr(b_at as u64 + 2), cl)?;
+            rewrite_immediates(a, b_at)?;
             a.jmp(b_at as u64)
         }));
         rig.load(b_at, &asm32(b_at, |a| {
             a.db(&[0x81, 0xC3, 0, 0, 0, 0])?; // add ebx, imm32
+            a.db(&[0x81, 0xC2, 0, 0, 0, 0])?; // add edx, imm32
             a.dec(ecx)?;
             a.jnz(top as u64)?;
             a.hlt()
@@ -689,7 +706,7 @@ fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
     });
     b.cpu.dynrec.set_code_size(16 << 10);
     let stats = run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.ebx(), (1..=1000u32).map(|i| i & 0xFF).sum::<u32>());
+    assert_eq!(b.cpu.ebx(), replicated_sum(1000));
     if AVAILABLE {
         assert!(stats.stale >= 900, "{:?}", stats);
         assert_eq!(stats.flushes, 0, "{:?}", stats);
@@ -700,23 +717,24 @@ fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
 fn a_return_linked_to_one_place_after_another_leaves_none_behind() {
     // A function in another page returns to two places in turn, 500 times
     // each, so its return is linked to each in turn; and the loop rewrites
-    // the function's ADD immediate, CL, on every pass, so its block is
-    // translated again every time. Neither the links made before nor the
-    // blocks thrown away may stay in the backlinks of the places.
+    // the function's immediates on every pass, so its block is translated
+    // again every time. Neither the links made before nor the blocks
+    // thrown away may stay in the backlinks of the places.
     let f = CODE + 0x1000;
     let top = CODE + 0x40;
     let (mut a, mut b) = twins(|rig| {
         rig.load(f, &asm32(f, |a| {
-            a.db(&[0x81, 0xC7, 0, 0, 0, 0])?; // add edi, imm32
+            a.db(&[0x81, 0xC3, 0, 0, 0, 0])?; // add ebx, imm32
+            a.db(&[0x81, 0xC2, 0, 0, 0, 0])?; // add edx, imm32
             a.ret()
         }));
         rig.load(CODE, &asm32(CODE, |a| {
-            a.xor(edi, edi)?;
+            a.xor(ebx, ebx)?;
             a.mov(ecx, 500u32)?;
             a.jmp(top as u64)
         }));
         rig.load(top, &asm32(top, |a| {
-            a.mov(byte_ptr(f as u64 + 2), cl)?;
+            rewrite_immediates(a, f)?;
             a.call(f as u64)?;
             a.call(f as u64)?;
             a.dec(ecx)?;
@@ -725,11 +743,59 @@ fn a_return_linked_to_one_place_after_another_leaves_none_behind() {
         }));
     });
     let stats = run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.edi(), 2 * (1..=500u32).map(|i| i & 0xFF).sum::<u32>());
+    assert_eq!(b.cpu.ebx(), replicated_sum(500).wrapping_mul(2));
     if AVAILABLE {
         assert!(stats.stale >= 450, "{:?}", stats);
         // At most three links from each block: none left from before.
         assert!(stats.links <= 3 * stats.live_blocks, "{:?}", stats);
+    }
+}
+
+#[test]
+fn a_ret_poked_into_an_unrolled_loop_is_run_where_it_is_not_translated_again() {
+    // The Doom engine's spans: a RET poked over the first byte of one of
+    // an unrolled loop's groups, the loop called, the byte put back, for
+    // each group in turn, 50 times over. After a few translations the
+    // blocks watch those bytes instead: they stop where the RET is, and
+    // the interpreter runs it.
+    const GROUPS: u32 = 32;
+    let unrolled = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(unrolled, &asm32(unrolled, |a| {
+            for _ in 0..GROUPS {
+                a.add(eax, ebx)?; // 01 D8
+                a.inc(ebx)?;
+            }
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(eax, eax)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 50u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            let mut inner = a.create_label();
+            a.xor(esi, esi)?;
+            a.set_label(&mut inner)?;
+            a.mov(byte_ptr(esi + unrolled), 0xC3)?;
+            a.call(unrolled as u64)?;
+            a.mov(byte_ptr(esi + unrolled), 0x01)?;
+            a.add(esi, 3)?;
+            a.cmp(esi, (GROUPS * 3) as i32)?;
+            a.jb(inner)?;
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    // Each call runs 0 to 31 groups: EBX counts them.
+    assert_eq!(b.cpu.ebx(), 50 * (0..GROUPS).sum::<u32>());
+    if AVAILABLE {
+        assert!(stats.watched > 1000, "{:?}", stats);
+        assert!(stats.blocks < 300, "translated again and again: {:?}", stats);
     }
 }
 

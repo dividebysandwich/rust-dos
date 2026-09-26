@@ -94,7 +94,8 @@ Each block's prologue checks three things:
    (`Bus::page_gen`, one per 64-byte chunk, bumped by every RAM write) of
    its chunks is the one it was translated with. If the sum differs,
    `jit_revalidate` compares the bytes, and the block goes on if only
-   something else in its chunks was written.
+   something else in its chunks was written, or only its watched bytes
+   (see [Poked code](#poked-code)).
 
 If any check fails, the block stops before its first instruction.
 
@@ -114,6 +115,27 @@ Other exactness rules:
   physical address with those bytes; instructions run through their
   handlers compare the code generations and then the bytes. The block is
   translated again next time.
+
+### Poked code
+
+Some programs change a byte of their code over and over and put it back:
+Doom-engine games poke a RET into an unrolled loop at the end of every
+span they draw. Translating every block over that byte again each time
+would take more time than the drawing. So where a block goes stale or
+writes over itself with at most four of its bytes changed (a poke, not
+new code), the engine counts those bytes, per physical page
+(`Engine::pokes`). Once a byte has been counted twice
+(`block::WATCH_AFTER`), blocks translated over it watch it:
+
+- The instruction the byte is in compares it with the byte it was
+  translated from before it runs. If they differ, the block leaves before
+  the instruction (`EXIT_WATCHED`), with the instructions before it done,
+  and the interpreter runs whatever is there now.
+- The block's own checks leave the watched bytes out, so it stays valid
+  while only they change.
+- A watched instruction that ends the block where it is now (the poked
+  RET itself) isn't put in a block: the block stops before it and goes
+  on through a link, and the interpreter runs it.
 
 ### Translation
 
@@ -241,11 +263,11 @@ the next timer event.
 
 Blocks are assembled with dynasm-rs into a buffer and copied in, into
 the smallest space a thrown-away block left that they fit, else after
-everything. A block whose bytes changed gives its space back: Doom-engine
-games poke a RET into an unrolled loop for every span they draw and put
-the byte back, and hundreds of blocks a frame are translated again. When
-nothing fits, everything is thrown away and translation starts over. So it
-is at the shell prompt (`load_shell`), and when the CPU model changes.
+everything. A block whose bytes changed gives its space back: code that
+is rewritten with new code over and over would otherwise fill the memory.
+When nothing fits, everything is thrown away (with the counts of poked
+bytes) and translation starts over. So it is at the shell prompt
+(`load_shell`), and when the CPU model changes.
 
 ## Statistics
 
@@ -262,6 +284,7 @@ now) and `dynrec`:
 | `deadline` | Blocks that stopped at once for the timer |
 | `stale` | Blocks that stopped at once because their bytes changed |
 | `smc` | Blocks whose later bytes an instruction changed |
+| `watched` | Blocks that stopped at an instruction whose watched bytes had changed |
 
 The settings window's Stats page says whether the instructions are
 recompiled or interpreted.
@@ -281,7 +304,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, timer reads, a full code memory, the auto latch, rewriting a linked block, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

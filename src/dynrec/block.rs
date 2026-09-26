@@ -27,6 +27,12 @@ pub const LINKS: usize = 3;
 /// The link of a return.
 pub const RETURN_LINK: usize = 2;
 
+/// A byte is watched once blocks have gone stale this often because it
+/// changed, each time with at most `POKE_BYTES` of their bytes changed
+/// (a poke, not new code over the old).
+pub const WATCH_AFTER: u8 = 2;
+pub const POKE_BYTES: usize = 4;
+
 /// What a link to another page was made under. Translated code takes it
 /// only while fetching its target would go the same way, as the
 /// interpreter's instruction fetch would without the link: the same CS
@@ -68,6 +74,10 @@ pub struct BlockData {
     pub writes: Box<[bool]>,
     /// The block's bytes as they were translated.
     pub bytes: Box<[u8]>,
+    /// Offsets in `bytes` of the watched ones, in order: the instructions
+    /// they are in check them before they run, and the block stays valid
+    /// while only they change.
+    pub watched: Box<[u16]>,
     /// The CS limit the block needs: the interpreter fetches every one of
     /// its instructions through the code window only if the limit is at
     /// least this.
@@ -89,16 +99,17 @@ pub struct BlockData {
 
 impl BlockData {
     /// Decode a block from the instruction at `at`, which is in the code
-    /// window, with at most `max` instructions. None if no block can start
+    /// window, with at most `max` instructions, and `watch` the changes of
+    /// its page's bytes (see `WATCH_AFTER`). None if no block can start
     /// there: the interpreter runs that instruction itself.
-    pub fn build(at: &At, ram: &[u8], page_gen: &[u32], max: usize) -> Option<BlockData> {
+    pub fn build(at: &At, ram: &[u8], page_gen: &[u32], max: usize, watch: Option<&[u8]>) -> Option<BlockData> {
         // Linear and physical addresses are the same within a page.
         let page_off = at.phys_ip as u32 & 0xFFF;
         let page_phys = at.phys_ip - page_off as usize;
         let page = &ram[page_phys..page_phys + 0x1000];
         let mut decoder = Decoder::new(if at.code32 { 32 } else { 16 }, page, DecoderOptions::NONE);
         let mut info = InstructionInfoFactory::new();
-        let (mut instrs, mut eips, mut writes) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut instrs, mut eips, mut writes, mut watched) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut off, mut eip) = (page_off, at.eip);
         while off <= 0x1000 - 16 && eip as u64 + PAGE_TAIL as u64 - 1 <= at.cs_limit as u64 {
             decoder.set_position(off as usize).unwrap();
@@ -108,6 +119,18 @@ impl BlockData {
                 break;
             }
             let ends = ends_block(&instr);
+            let bytes = off as usize..off as usize + instr.len();
+            if let Some(watch) = watch
+                && watch[bytes.clone()].iter().any(|&n| n >= WATCH_AFTER)
+            {
+                // A RET poked over an instruction ends the blocks translated
+                // while it is there: the block stops before it instead, and
+                // the interpreter runs whichever is there.
+                if ends && watch[off as usize] >= WATCH_AFTER {
+                    break;
+                }
+                watched.extend(bytes.filter(|&i| watch[i] >= WATCH_AFTER).map(|i| (i - page_off as usize) as u16));
+            }
             writes.push(!ends && writes_memory(&mut info, &instr));
             instrs.push(instr);
             eips.push(eip);
@@ -141,6 +164,7 @@ impl BlockData {
             eips: eips.into_boxed_slice(),
             writes: writes.into_boxed_slice(),
             bytes: ram[phys as usize..(phys + len) as usize].into(),
+            watched: watched.into_boxed_slice(),
         };
         data.gen_sum = data.gens_now(page_gen);
         Some(data)
@@ -181,14 +205,46 @@ impl BlockData {
     }
 
     /// Whether the block's bytes from instruction `ix` on (all of them for
-    /// 0) are still what was translated.
+    /// 0) are still what was translated, but for the watched ones, which
+    /// their instructions check.
     pub fn unchanged_from(&self, ram: &[u8], ix: usize) -> bool {
         if ix >= self.count() {
             return true;
         }
-        let from = self.offset(ix);
-        let phys = self.phys as usize;
-        ram[phys + from..phys + self.len as usize] == self.bytes[from..]
+        let now = &ram[self.phys as usize..][..self.len as usize];
+        let mut from = self.offset(ix);
+        for &w in &self.watched {
+            let w = w as usize;
+            if w >= from {
+                if now[from..w] != self.bytes[from..w] {
+                    return false;
+                }
+                from = w + 1;
+            }
+        }
+        now[from..] == self.bytes[from..]
+    }
+
+    /// Offsets in `bytes` of the watched bytes of instruction `ix`.
+    pub fn watched_in(&self, ix: usize) -> impl Iterator<Item = usize> + '_ {
+        let range = self.offset(ix)..self.offset(ix) + self.instrs[ix].len();
+        self.watched.iter().map(|&w| w as usize).filter(move |w| range.contains(w))
+    }
+
+    /// Offsets in `bytes` of the bytes that changed since the block was
+    /// translated, if they are few enough to be a poke (`POKE_BYTES`).
+    pub fn poked(&self, ram: &[u8]) -> Option<Vec<usize>> {
+        let now = &ram[self.phys as usize..][..self.len as usize];
+        let mut changed = Vec::new();
+        for (i, (a, b)) in now.iter().zip(&self.bytes[..]).enumerate() {
+            if a != b {
+                if changed.len() == POKE_BYTES {
+                    return None;
+                }
+                changed.push(i);
+            }
+        }
+        (!changed.is_empty()).then_some(changed)
     }
 }
 

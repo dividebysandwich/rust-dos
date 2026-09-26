@@ -260,11 +260,13 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
                 g.synced[ix] = synced;
                 g.flags_back();
                 g.dirty = false;
+                g.check_watched();
                 g.fallback(ix as u32);
             }
             Some(uops) => {
                 g.synced[ix] = synced;
                 g.dirty_at[ix] = g.dirty;
+                g.check_watched();
                 for (k, uop) in uops.iter().enumerate() {
                     g.live_after = g.live[ix][k];
                     g.uop(uop);
@@ -610,8 +612,26 @@ impl Gen<'_> {
         }
     }
 
+    /// Leave the block before the instruction being translated if any of
+    /// its watched bytes differ from what was translated.
+    fn check_watched(&mut self) {
+        let data = self.data;
+        let mut changed = None;
+        for w in data.watched_in(self.ix) {
+            let at = *changed.get_or_insert_with(|| self.fault_exit(EXIT_WATCHED));
+            self.mov32(0, data.phys + w as u32);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; ldrb w0, [x21, x0]
+                ; cmp w0, data.bytes[w] as u32
+                ; b.ne =>at
+            );
+        }
+    }
+
     /// Where the instruction being translated raises a fault that has an
-    /// exit code of its own (`EXIT_GP0`, `EXIT_DE`).
+    /// exit code of its own (`EXIT_GP0`, `EXIT_DE`), or leaves the block
+    /// before it runs (`EXIT_WATCHED`).
     fn fault_exit(&mut self, code: u32) -> DynamicLabel {
         let at = self.ops.new_dynamic_label();
         let fail = self.fail();
