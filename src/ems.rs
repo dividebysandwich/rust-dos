@@ -334,6 +334,14 @@ pub fn free_all(bus: &mut Bus) {
     bus.ems = Some(Ems::new());
 }
 
+/// Take the driver's name out of its device header, for a system booted
+/// from a disk (`boot::power_on`), whose memory managers take a name there
+/// (at INT 67h's segment:000Ah, the ROM's) for a driver already installed.
+/// The built-in DOS puts it back as it sets its devices up.
+pub fn hide_device(bus: &mut Bus) {
+    bus.write_rom(DEVICE_HEADER + 0x0A, &[0; 8]);
+}
+
 /// Put the driver's device header in the ROM, and chain it after NUL (at
 /// `nul`) while EMS is there. Without EMS, the name is gone, so the
 /// vector check finds no driver.

@@ -163,6 +163,7 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     crate::mouse::clear_callback_busy(bus);
     bus.mouse.ps2 = crate::mouse::Ps2Mouse::default();
     bus.xms = crate::xms::Xms::new();
+    crate::ems::hide_device(bus);
     bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
 
     // The BIOS's vector table and data area.
