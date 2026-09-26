@@ -120,7 +120,7 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `esc`. While it is open the machine is paused, `/api/status` shows
   `"settings_window": true`, screenshots show the window, and keys and
   mouse clicks go to the window instead of the machine. Recordings leave
-  it out.
+  it out, unless `record_ui` is on.
 
 ## 4. Recipes
 

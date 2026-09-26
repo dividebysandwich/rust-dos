@@ -235,7 +235,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, Autoexec,
+                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, Autoexec,
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -355,8 +355,10 @@ enum Item {
     FloppyDiskNoise,
     /// A volume in the host's mixer.
     Volume(Channel),
-    /// Where screenshots and recordings go.
+    /// Where screenshots and recordings go, and whether recordings show
+    /// the settings window and the performance overlay.
     CaptureDir,
+    RecordUi,
     /// What the game port has plugged in, and the controllers' deadzone.
     Joystick,
     Deadzone,
@@ -490,6 +492,7 @@ impl Item {
             FloppyDiskNoise => "Floppy disk noise",
             Volume(channel) => channel.label(),
             CaptureDir => "Capture folder",
+            RecordUi => "Record window & overlay",
             Joystick => "Joystick",
             Deadzone => "  Deadzone",
             SpeakerFilter => "PC speaker filter",
@@ -510,7 +513,8 @@ impl Item {
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             Item::MidiPort => host_midi(frontend),
-            Item::CaptureDir => frontend.host_files,
+            // The page records the canvas as it shows.
+            Item::CaptureDir | Item::RecordUi => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
@@ -538,7 +542,9 @@ impl Item {
             }
             Cycles | Core | KeyboardLayout | Rewind | RewindMemory => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
-            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
+            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi => {
+                Applies::Now
+            }
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Memsize | Autoexec => Applies::NextStart,
             _ => Applies::AtPrompt,
@@ -637,6 +643,7 @@ impl Item {
             FloppyDiskNoise => s.disk.floppy_disk_noise.name().to_string(),
             Volume(channel) => percent_bar(s.mixer.level(channel), MAX_LEVEL),
             CaptureDir => contract_home(&s.capture_dir, home),
+            RecordUi => if s.record_ui { "on (window and overlay)" } else { "off (the picture alone)" }.to_string(),
             Joystick => s.joystick.kind.describe().to_string(),
             Deadzone => format!("{}%", s.joystick.deadzone),
             SpeakerFilter => on_off(s.mixer.speaker_filter),
@@ -694,6 +701,7 @@ impl Item {
             Umb => s.umb = !s.umb,
             KeyboardLayout => s.keyboard_layout = cycle(&crate::keylayout::LayoutSetting::all(), s.keyboard_layout, dir),
             Rewind => s.rewind = !s.rewind,
+            RecordUi => s.record_ui = !s.record_ui,
             RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory as u32, dir) as usize,
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];

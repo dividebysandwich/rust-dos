@@ -127,6 +127,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `capture` (the default) in the directory rust-dos started in, or a
   path of your own. Screenshots show the picture as the recordings do:
   with the monochrome look, without a CRT shader or the settings window.
+  With `record_ui=true`, video and animation recordings show the
+  settings window and the performance overlay (Ctrl+Shift+F12) as well
+  while they are open, but not the messages at the top; screenshots stay
+  the picture alone. `false` is the default.
   Video recordings are AVI files in DOSBox's lossless ZMBV codec, which
   ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
   with its sound, so they keep in step through pauses and fast forward;
@@ -320,8 +324,9 @@ Esc closes it.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
-  size, expanded and upper memory, the disk speeds, the joystick and
-  rewind. *Edit the [autoexec] commands...* opens the configuration file's
+  size, expanded and upper memory, the disk speeds, the joystick, rewind,
+  the capture folder and whether recordings show the settings window and
+  the performance overlay. *Edit the [autoexec] commands...* opens the configuration file's
   `[autoexec]` (a game's profile's while it plays) in an editor, comments
   included; F2 writes it into the file, for the next start, and Esc leaves
   the file as it was.

@@ -984,18 +984,27 @@ fn main() -> Result<(), String> {
         video::mono::apply(&mut screen, settings.monochrome);
         let frame_w = width as usize;
 
-        // Recordings show the machine alone. Debug clients see the
-        // settings window as well, but not the recording indicator.
-        recorder.capture(&screen);
-        if let Some(video) = &mut video_recording {
-            if !video.record(&screen, samples.clone(), cpu.bus.clock.now_ns()) {
-                if let Some(video) = video_recording.take() {
-                    match video.stop() {
-                        Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
-                        Err(e) => osd.show(format!("The video recording failed: {}", e)),
+        // Recordings show the machine alone, or with the settings window
+        // and the performance overlay (`record_ui`); screenshots show it
+        // alone. Debug clients see the window, the overlay and the
+        // messages as well, but not the recording indicator.
+        macro_rules! record {
+            () => {
+                recorder.capture(&screen);
+                if let Some(video) = &mut video_recording {
+                    if !video.record(&screen, samples.clone(), cpu.bus.clock.now_ns()) {
+                        if let Some(video) = video_recording.take() {
+                            match video.stop() {
+                                Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
+                                Err(e) => osd.show(format!("The video recording failed: {}", e)),
+                            }
+                        }
                     }
                 }
-            }
+            };
+        }
+        if !settings.record_ui {
+            record!();
         }
         if std::mem::take(&mut screenshot) {
             let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
@@ -1013,6 +1022,9 @@ fn main() -> Result<(), String> {
         }
         ui.draw(&mut screen);
         ui.draw_overlay(&mut screen);
+        if settings.record_ui {
+            record!();
+        }
         osd.draw(&mut screen);
         dbg.capture_frame(&screen);
 
