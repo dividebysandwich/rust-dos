@@ -96,6 +96,14 @@ pub fn trampoline() -> Trampoline {
     Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit }
 }
 
+/// Whether the host has LAHF in 64-bit mode.
+fn has_lahf() -> bool {
+    static LAHF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[allow(unused_unsafe)]
+    // SAFETY: CPUID leaf 8000_0001h is there on every x86-64 processor.
+    *LAHF.get_or_init(|| unsafe { std::arch::x86_64::__cpuid(0x8000_0001) }.ecx & 1 != 0)
+}
+
 /// Host register of a temporary.
 fn r(t: T) -> u8 {
     8 + t.0
@@ -910,9 +918,26 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch x64 ; pushfq ; pop rax);
     }
 
-    /// The host's flags are the guest's arithmetic flags: into EBP.
+    /// The host's flags are the guest's arithmetic flags: into EBP. LAHF
+    /// has all but OF, which SETO adds where it is live; PUSHF takes
+    /// several times as long. (Some early 64-bit Pentium 4s have no LAHF
+    /// in 64-bit mode.) RAX and RCX are changed.
     fn host_flags_ebp(&mut self) {
-        dynasm!(self.ops ; .arch x64 ; pushfq ; pop rbp);
+        if !has_lahf() {
+            dynasm!(self.ops ; .arch x64 ; pushfq ; pop rbp);
+        } else if self.wanted(OF) {
+            dynasm!(self.ops
+                ; .arch x64
+                ; lahf
+                ; seto cl
+                ; movzx ebp, ah
+                ; movzx ecx, cl
+                ; shl ecx, 11
+                ; or ebp, ecx
+            );
+        } else {
+            dynasm!(self.ops ; .arch x64 ; lahf ; movzx ebp, ah);
+        }
         self.dirty = true;
     }
 
