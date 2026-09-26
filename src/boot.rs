@@ -21,9 +21,11 @@ pub struct BootState {
     /// The BIOS unit it booted from: 00h for A:, 80h for the first hard
     /// disk. Restarts boot from it again.
     pub unit: u8,
+    /// How the system connected to the APM BIOS (`apm`).
+    pub apm: crate::apm::Connection,
 }
 
-crate::state_fields!(BootState { unit });
+crate::state_fields!(BootState { unit, apm });
 
 /// The floppy units of a booted machine, A: and B:, which are there with
 /// or without a disk.
@@ -139,7 +141,7 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     let letter = unit_drive(&cpu.bus, unit).map_or('?', drive_letter);
     cpu.program = format!("BOOT {}:", letter);
     cpu.bus.disk.close_all_files();
-    cpu.bus.boot = Some(BootState { unit });
+    cpu.bus.boot = Some(BootState { unit, ..Default::default() });
 
     let bus = &mut cpu.bus;
     // All of memory cleared, as the power-on self test leaves it.
@@ -185,7 +187,6 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
 fn start(cpu: &mut Cpu, unit: u8, sector: &[u8; SECTOR_SIZE]) {
     cpu.bus.load_bytes(BOOT_SECTOR, sector);
     cpu.set_ds(0);
-    cpu.set_es(0);
     cpu.set_fs(0);
     cpu.set_gs(0);
     cpu.set_eax(0);
@@ -193,7 +194,11 @@ fn start(cpu: &mut Cpu, unit: u8, sector: &[u8; SECTOR_SIZE]) {
     cpu.set_ecx(1);
     cpu.set_edx(unit as u32);
     cpu.set_esi(0);
-    cpu.set_edi(0);
+    // ES:DI: the Plug and Play BIOS's installation structure, which a boot
+    // sector may look for there.
+    let (segment, offset) = crate::pnpbios::header_pointer();
+    cpu.set_es(segment);
+    cpu.set_edi(offset as u32);
     cpu.set_ebp(0);
     // The stack the IBM BIOS starts the boot sector with.
     cpu.set_ss(0x0030);

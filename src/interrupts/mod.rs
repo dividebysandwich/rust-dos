@@ -140,6 +140,16 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
     }
 }
 
+/// Services (`FE 3A vv`) at the far entry points of the ROM, which RETF
+/// after them, called in real or protected mode.
+pub fn handle_far_service(cpu: &mut Cpu, service: u8) {
+    match service {
+        crate::bios::FAR_PNP => crate::pnpbios::entry(cpu),
+        crate::bios::FAR_APM => crate::apm::pm_entry(cpu),
+        _ => cpu.bus.log_string(&format!("[CPU] Unknown far emulator service {:02X}", service)),
+    }
+}
+
 pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
     match vector {
         0x00 => int00::handle(cpu),

@@ -923,12 +923,23 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
 ///   interrupt vector table; returns with a simulated IRET, or in
 ///   virtual-8086 mode through the BIOS's own (`return_from_hle`).
 /// * `FE 39 vv`: an inline service vv; execution continues after it.
+/// * `FE 3A vv`: a service the ROM's code calls in any mode, its RETF
+///   after it (the Plug and Play BIOS's and APM's entry points).
 fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    if cpu.pm() || phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
+    if phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
         return false;
     }
     let vector = ram[phys_ip + 2];
-    if !matches!(ram[phys_ip + 1], 0x38 | 0x39) {
+    // The far-call services work in any mode, from the ROM (the Plug and
+    // Play BIOS's and APM's protected-mode entry points); the others in
+    // real and virtual-8086 mode.
+    let kind = ram[phys_ip + 1];
+    let allowed = match kind {
+        0x38 | 0x39 => !cpu.pm(),
+        0x3A => crate::bus::Bus::is_rom(phys_ip),
+        _ => false,
+    };
+    if !allowed {
         return false;
     }
     // With paging on (under Windows, whose virtual machines have memory of
@@ -943,7 +954,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         });
         (cpu.snapshot(), cpu.bus.port_accesses.len())
     });
-    match ram[phys_ip + 1] {
+    match kind {
         0x38 => {
             cpu.bus.disk_io.clear();
             crate::interrupts::enter_hle(cpu, vector);
@@ -972,9 +983,18 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
                 crate::interrupts::return_from_hle(cpu, vector);
             }
         }
-        _ => {
+        0x39 => {
             cpu.set_ip(cpu.ip().wrapping_add(3));
             crate::interrupts::handle_inline_bop(cpu, vector);
+            if let Some(before) = &before
+                && guest_page_fault(cpu, before)
+            {
+                return true;
+            }
+        }
+        _ => {
+            cpu.set_eip(cpu.eip().wrapping_add(3));
+            crate::interrupts::handle_far_service(cpu, vector);
             if let Some(before) = &before
                 && guest_page_fault(cpu, before)
             {

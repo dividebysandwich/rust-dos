@@ -50,6 +50,11 @@ pub const SERVICE_KBD_SCAN: u8 = 0x21;
 pub const SERVICE_KBD_PAUSED: u8 = 0x22;
 pub const SERVICE_POST: u8 = 0xF0;
 
+/// Far-call services (`FE 3A nn`, then RETF) at the ROM's entry points for
+/// real and protected mode: the Plug and Play BIOS's and APM's.
+pub const FAR_PNP: u8 = 0x01;
+pub const FAR_APM: u8 = 0x02;
+
 /// Offsets in the F000 segment.
 const TIMER_HANDLER: u16 = 0x1100;
 const MASTER_EOI_HANDLER: u16 = 0x1110;
@@ -317,6 +322,11 @@ pub fn install(bus: &mut Bus) {
         ],
     );
     write_rom(bus, KBD_HANDLER, &keyboard_handler());
+    // The Plug and Play BIOS's and APM's entry points: the service, then a
+    // far return (32-bit in APM's 32-bit code segment).
+    write_rom(bus, crate::pnpbios::ENTRY, &[0xFE, 0x3A, FAR_PNP, 0xCB]);
+    write_rom(bus, crate::apm::ENTRY, &[0xFE, 0x3A, FAR_APM, 0xCB]);
+    crate::pnpbios::install(bus);
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);
     // BIOS date, the model byte and the base memory.

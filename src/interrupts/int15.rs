@@ -117,6 +117,8 @@ pub fn handle(cpu: &mut Cpu) {
         }
         // The PS/2 pointing device.
         0xC2 => crate::mouse::ps2_bios(cpu),
+        // Advanced Power Management, on a booted system.
+        0x53 if cpu.bus.boot.is_some() => crate::apm::call(cpu),
         _ => unsupported(cpu),
     }
 }

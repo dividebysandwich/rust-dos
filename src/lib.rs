@@ -1,3 +1,4 @@
+pub mod apm;
 pub mod asm16;
 pub mod audio;
 pub mod batch;
@@ -59,6 +60,7 @@ pub mod mpu401;
 pub mod mt32;
 pub mod opl;
 pub mod pic;
+pub mod pnpbios;
 pub mod recorder;
 pub mod savestate;
 pub mod sb;
