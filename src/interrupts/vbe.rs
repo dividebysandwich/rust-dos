@@ -168,7 +168,7 @@ pub fn handle(cpu: &mut Cpu) {
         0x03 => {
             let mode = match (cpu.bus.video_mode, cpu.bus.vbe.mode) {
                 (VideoMode::Vesa, Some(mode)) => mode.number | if cpu.bus.vbe.lfb { 0x4000 } else { 0 },
-                _ => cpu.bus.read_8(0x0449) as u16,
+                _ => cpu.bus.guest_read_8(0x0449) as u16,
             };
             cpu.set_bx(mode);
             SUCCESS
@@ -195,7 +195,7 @@ pub fn handle(cpu: &mut Cpu) {
 /// buffer, where protected-mode programs can reach them; others get the
 /// 256 bytes of VBE 1.x pointing into the ROM.
 fn controller_info(cpu: &mut Cpu, addr: usize) -> u16 {
-    let vbe2 = (0..4).map(|i| cpu.bus.read_8(addr + i)).eq(*b"VBE2");
+    let vbe2 = (0..4).map(|i| cpu.bus.guest_read_8((addr + i) as u32)).eq(*b"VBE2");
     let (seg, off) = (cpu.es(), cpu.di());
     let far = |offset: u16| (ROM_SEGMENT as u32) << 16 | offset as u32;
     let mut block = vec![0u8; if vbe2 { 512 } else { 256 }];
@@ -284,11 +284,11 @@ fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
     enter_mode(&mut cpu.bus, mode, bx & 0x4000 != 0, keep);
     // BIOS data area: the mode byte S3 BIOSes use (68h-80h), and the text
     // grid of 8x16 characters.
-    cpu.bus.write_8(0x0449, (mode.number - 0x98) as u8);
-    cpu.bus.write_16(0x044A, mode.width / 8);
-    cpu.bus.write_8(0x0484, (mode.height / 16 - 1) as u8);
-    cpu.bus.write_16(0x0485, 16);
-    cpu.bus.write_8(0x0462, 0);
+    cpu.bus.guest_write_8(0x0449, (mode.number - 0x98) as u8);
+    cpu.bus.guest_write_16(0x044A, mode.width / 8);
+    cpu.bus.guest_write_8(0x0484, (mode.height / 16 - 1) as u8);
+    cpu.bus.guest_write_16(0x0485, 16);
+    cpu.bus.guest_write_8(0x0462, 0);
     SUCCESS
 }
 
@@ -316,20 +316,20 @@ fn save_restore_state(cpu: &mut Cpu) -> u16 {
             let vbe = &cpu.bus.vbe;
             let mode = vbe.mode.map_or(0, |m| m.number) | if vbe.lfb { 0x4000 } else { 0 };
             let (bank, pitch, start) = (vbe.bank, vbe.pitch, vbe.start);
-            cpu.bus.write_16(addr, mode);
-            cpu.bus.write_32(addr + 2, bank);
-            cpu.bus.write_32(addr + 6, pitch);
-            cpu.bus.write_32(addr + 10, start);
+            cpu.bus.guest_write_16((addr) as u32, mode);
+            cpu.bus.guest_write_32((addr + 2) as u32, bank);
+            cpu.bus.guest_write_32((addr + 6) as u32, pitch);
+            cpu.bus.guest_write_32((addr + 10) as u32, start);
         }
         0x02 => {
-            let mode = cpu.bus.read_16(addr);
+            let mode = cpu.bus.guest_read_16((addr) as u32);
             if let Some(m) = vbe::find_mode(mode).filter(|_| mode != 0) {
                 if cpu.bus.vbe.mode != Some(m) {
                     enter_mode(&mut cpu.bus, m, mode & 0x4000 != 0, true);
                 }
-                cpu.bus.vbe.bank = cpu.bus.read_32(addr + 2) % (VRAM_SIZE / WINDOW_SIZE) as u32;
-                cpu.bus.vbe.pitch = cpu.bus.read_32(addr + 6);
-                cpu.bus.vbe.start = cpu.bus.read_32(addr + 10);
+                cpu.bus.vbe.bank = cpu.bus.guest_read_32((addr + 2) as u32) % (VRAM_SIZE / WINDOW_SIZE) as u32;
+                cpu.bus.vbe.pitch = cpu.bus.guest_read_32((addr + 6) as u32);
+                cpu.bus.vbe.start = cpu.bus.guest_read_32((addr + 10) as u32);
                 cpu.bus.vga.mark_dirty_full();
             }
         }
@@ -484,7 +484,7 @@ fn palette(cpu: &mut Cpu, addr: usize) -> u16 {
         0x00 | 0x80 => {
             for i in 0..count {
                 let entry = addr + i * 4;
-                let (b, g, r) = (cpu.bus.read_8(entry), cpu.bus.read_8(entry + 1), cpu.bus.read_8(entry + 2));
+                let (b, g, r) = (cpu.bus.guest_read_8((entry) as u32), cpu.bus.guest_read_8((entry + 1) as u32), cpu.bus.guest_read_8((entry + 2) as u32));
                 let at = (start + i) * 3;
                 cpu.bus.vga.palette[at..at + 3].copy_from_slice(&[r & mask, g & mask, b & mask]);
             }

@@ -61,12 +61,12 @@ fn display_combination(cpu: &Cpu) -> u8 {
 
 /// Point an interrupt vector (INT 1Fh, 43h) at the far pointer `pointer`.
 fn set_vector(cpu: &mut Cpu, vector: usize, pointer: u32) {
-    cpu.bus.write_16(vector * 4, pointer as u16);
-    cpu.bus.write_16(vector * 4 + 2, (pointer >> 16) as u16);
+    cpu.bus.guest_write_16((vector * 4) as u32, pointer as u16);
+    cpu.bus.guest_write_16((vector * 4 + 2) as u32, (pointer >> 16) as u16);
 }
 
-fn get_vector(cpu: &Cpu, vector: usize) -> (u16, u16) {
-    (cpu.bus.read_16(vector * 4 + 2), cpu.bus.read_16(vector * 4))
+fn get_vector(cpu: &mut Cpu, vector: usize) -> (u16, u16) {
+    (cpu.bus.guest_read_16((vector * 4 + 2) as u32), cpu.bus.guest_read_16((vector * 4) as u32))
 }
 
 /// The scanlines the text modes have, over which a font's rows go: the
@@ -82,14 +82,14 @@ fn text_scanlines(cpu: &Cpu) -> u16 {
 /// scanlines, and a cursor at the bottom of the cell.
 fn text_font(cpu: &mut Cpu, height: u16) {
     let rows = text_scanlines(cpu) / height;
-    cpu.bus.write_8(0x0484, (rows - 1) as u8);
-    cpu.bus.write_16(0x0485, height);
+    cpu.bus.guest_write_8(0x0484, (rows - 1) as u8);
+    cpu.bus.guest_write_16(0x0485, height);
     let cursor = match height {
         8 => 0x0607,
         14 => 0x0B0C,
         _ => 0x0D0E,
     };
-    cpu.bus.write_16(0x0460, cursor);
+    cpu.bus.guest_write_16(0x0460, cursor);
     cpu.bus.vga.crtc_regs[0x09] = (cpu.bus.vga.crtc_regs[0x09] & 0xE0) | (height - 1) as u8;
     cpu.bus.vga.mark_dirty_full();
 }
@@ -98,7 +98,7 @@ fn text_font(cpu: &mut Cpu, height: u16) {
 /// DL of them, 1 14, 2 25, 3 43.
 fn graphics_font(cpu: &mut Cpu, pointer: u32, height: u16) {
     set_vector(cpu, 0x43, pointer);
-    cpu.bus.write_16(0x0485, height);
+    cpu.bus.guest_write_16(0x0485, height);
     let rows = match cpu.get_reg8(Register::BL) {
         0 => cpu.get_reg8(Register::DL),
         1 => 14,
@@ -106,20 +106,20 @@ fn graphics_font(cpu: &mut Cpu, pointer: u32, height: u16) {
         3 => 43,
         _ => return,
     };
-    cpu.bus.write_8(0x0484, rows.saturating_sub(1));
+    cpu.bus.guest_write_8(0x0484, rows.saturating_sub(1));
 }
 
 /// The address of the character at (`col`, `row`) of text page `page`,
 /// each page `page_size` (BDA 044Ch) bytes on from the last.
-fn cell_addr(cpu: &Cpu, page: u8, col: usize, row: usize) -> usize {
+fn cell_addr(cpu: &mut Cpu, page: u8, col: usize, row: usize) -> usize {
     let (base, _, wrap) = cpu.bus.vga.text_window();
-    let page_offset = page as usize * cpu.bus.read_16(0x044C) as usize;
+    let page_offset = page as usize * cpu.bus.guest_read_16(0x044C) as usize;
     base + ((page_offset + (row * text_cols(cpu) + col) * 2) & wrap)
 }
 
 /// The active display page (BDA 0462h).
-fn active_page(cpu: &Cpu) -> u8 {
-    cpu.bus.read_8(0x0462)
+fn active_page(cpu: &mut Cpu) -> u8 {
+    cpu.bus.guest_read_8(0x0462)
 }
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
@@ -183,7 +183,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         let (base, size) = cpu.bus.vga.crt_range();
         if mode <= 0x03 {
             for addr in (base..base + size).step_by(2) {
-                cpu.bus.write_16(addr, 0x0720);
+                cpu.bus.guest_write_16((addr) as u32, 0x0720);
             }
         } else {
             cpu.bus.fill_ram(base..base + size, 0);
@@ -202,22 +202,22 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     }
 
     cpu.bus.vga.mark_dirty_full();
-    cpu.bus.write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
-    cpu.bus.write_8(0x0462, 0); // Update BDA Active Page to 0
-    cpu.bus.write_16(0x044C, page_size(mode));
-    cpu.bus.write_16(0x044E, 0);
+    cpu.bus.guest_write_8(0x0449, cpu.bus.video_mode as u8); // Update BDA Current Video Mode
+    cpu.bus.guest_write_8(0x0462, 0); // Update BDA Active Page to 0
+    cpu.bus.guest_write_16(0x044C, page_size(mode));
+    cpu.bus.guest_write_16(0x044E, 0);
     // The CGA's mode and colour registers as its BIOS sets them: palette 1
     // at high intensity, and in mode 6 white on black.
     if let Some(&control) = MODE_CONTROL.get(mode as usize) {
-        cpu.bus.write_8(0x0465, control);
+        cpu.bus.guest_write_8(0x0465, control);
     }
-    cpu.bus.write_8(0x0466, if mode == 0x06 { 0x3F } else { 0x30 });
+    cpu.bus.guest_write_8(0x0466, if mode == 0x06 { 0x3F } else { 0x30 });
     if adapter.gate_array() {
         // The Tandy's and PCjr's registers as the mode set them: Mode
         // Control, Color Select and the CRT/processor page register.
-        cpu.bus.write_8(0x0465, cpu.bus.vga.cga_mode);
-        cpu.bus.write_8(0x0466, cpu.bus.vga.cga_color);
-        cpu.bus.write_8(0x048A, cpu.bus.vga.tandy.page);
+        cpu.bus.guest_write_8(0x0465, cpu.bus.vga.cga_mode);
+        cpu.bus.guest_write_8(0x0466, cpu.bus.vga.cga_color);
+        cpu.bus.guest_write_8(0x048A, cpu.bus.vga.tandy.page);
     }
     let cols: u16 = match mode {
         0x08 => 20,
@@ -225,7 +225,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         0x13 => 40, // Mode 13h uses 40 columns text
         _ => 80,
     };
-    cpu.bus.write_16(0x044A, cols);
+    cpu.bus.guest_write_16(0x044A, cols);
 
     // Update BDA 0x0484 (Rows on Screen minus 1) and 0x0485 (char height).
     // Mode set always resets the cell size to the mode's default.
@@ -246,7 +246,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     };
     if mode <= 0x03 || mode == 0x07 {
         let height = if adapter.mono_only() { 14 } else { char_height };
-        cpu.bus.write_16(0x0460, video_bios::cursor_shape(adapter, height));
+        cpu.bus.guest_write_16(0x0460, video_bios::cursor_shape(adapter, height));
     }
     // A monochrome monitor's VGA sums the colours it loads to grey.
     if video_bios::gray_summing(&cpu.bus) {
@@ -254,8 +254,8 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     }
     // The CGA's BIOS keeps neither these nor the graphics font.
     if adapter.ega_bios() {
-        cpu.bus.write_8(0x0484, rows);
-        cpu.bus.write_16(0x0485, char_height);
+        cpu.bus.guest_write_8(0x0484, rows);
+        cpu.bus.guest_write_16(0x0485, char_height);
         // The graphics modes draw characters with the font INT 43h points to.
         let (font, _) = video_bios::graphics_font(mode);
         set_vector(cpu, 0x43, rom_pointer(font));
@@ -268,7 +268,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
 /// them all the same.
 fn gate_array_pages(cpu: &mut Cpu) {
     let (al, bh, bl) = (cpu.get_al(), cpu.get_reg8(Register::BH), cpu.get_reg8(Register::BL));
-    let mut page = cpu.bus.read_8(0x048A);
+    let mut page = cpu.bus.guest_read_8(0x048A);
     match al {
         0x80 => {
             cpu.set_reg8(Register::BH, page & 7);
@@ -284,7 +284,7 @@ fn gate_array_pages(cpu: &mut Cpu) {
         cpu.set_reg8(Register::BL, (page >> 3) & 7);
     }
     cpu.bus.io_write(0x3DF, page);
-    cpu.bus.write_8(0x048A, page);
+    cpu.bus.guest_write_8(0x048A, page);
 }
 
 /// INT 10h AH=0Bh on a Tandy or PCjr: the Tandy has the CGA's Color Select
@@ -292,7 +292,7 @@ fn gate_array_pages(cpu: &mut Cpu) {
 /// palette register 0; the PCjr sets its palette registers: the background
 /// (and the border), and mode 4's three colours or mode 6's one.
 fn gate_array_color_select(cpu: &mut Cpu, bh: u8, bl: u8, select: u8) {
-    let mode = cpu.bus.read_8(0x0449);
+    let mode = cpu.bus.guest_read_8(0x0449);
     let graphics = !matches!(mode, 0x00..=0x03);
     let tandy = cpu.bus.vga.adapter == Adapter::Tandy;
     if tandy {
@@ -333,12 +333,12 @@ fn gate_array_color_select(cpu: &mut Cpu, bh: u8, bl: u8, select: u8) {
 fn gate_array_palette_function(cpu: &mut Cpu) {
     let (al, bh, bl) = (cpu.get_al(), cpu.get_reg8(Register::BH), cpu.get_reg8(Register::BL));
     let tandy = cpu.bus.vga.adapter == Adapter::Tandy;
-    let mode = cpu.bus.read_8(0x0449);
+    let mode = cpu.bus.guest_read_8(0x0449);
     match al {
         0x00 => {
             let reg = match (tandy, mode, bl & 0x0F) {
                 (true, 0x04 | 0x05, reg @ 1..=3) => {
-                    reg * 2 + 8 + (cpu.bus.read_8(0x0466) >> 5 & 1)
+                    reg * 2 + 8 + (cpu.bus.guest_read_8(0x0466) >> 5 & 1)
                 }
                 (true, 0x06, 1) => cpu.bus.vga.cga_color & 0x0F,
                 (_, _, reg) => reg,
@@ -349,9 +349,9 @@ fn gate_array_palette_function(cpu: &mut Cpu) {
         _ => {
             let addr = cpu.get_physical_addr(cpu.es(), cpu.dx());
             for i in 0..16 {
-                cpu.bus.vga.tandy.palette[i] = cpu.bus.read_8(addr + i) & 0x0F;
+                cpu.bus.vga.tandy.palette[i] = cpu.bus.guest_read_8((addr + i) as u32) & 0x0F;
             }
-            cpu.bus.vga.tandy.border = cpu.bus.read_8(addr + 16);
+            cpu.bus.vga.tandy.border = cpu.bus.guest_read_8((addr + 16) as u32);
         }
     }
     cpu.bus.vga.mark_dirty_full();
@@ -392,7 +392,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 01h: Set Cursor Type
         0x01 => {
             let cx = cpu.cx();
-            cpu.bus.write_16(0x0460, cx);
+            cpu.bus.guest_write_16(0x0460, cx);
         }
 
         // AH = 02h: Set Cursor Position
@@ -403,8 +403,8 @@ pub fn handle(cpu: &mut Cpu) {
 
             if page < 8 {
                 let cursor_addr = 0x450 + (page * 2);
-                cpu.bus.write_8(cursor_addr, col);
-                cpu.bus.write_8(cursor_addr + 1, row);
+                cpu.bus.guest_write_8((cursor_addr) as u32, col);
+                cpu.bus.guest_write_8((cursor_addr + 1) as u32, row);
             }
         }
 
@@ -413,12 +413,12 @@ pub fn handle(cpu: &mut Cpu) {
             let page = cpu.get_reg8(Register::BH) as usize;
             if page < 8 {
                 let cursor_addr = 0x450 + (page * 2);
-                let col = cpu.bus.read_8(cursor_addr);
-                let row = cpu.bus.read_8(cursor_addr + 1);
+                let col = cpu.bus.guest_read_8((cursor_addr) as u32);
+                let row = cpu.bus.guest_read_8((cursor_addr + 1) as u32);
                 cpu.set_reg8(Register::DL, col);
                 cpu.set_reg8(Register::DH, row);
                 // Also return Cursor Mode (Start/End Scanlines)
-                let cursor_shape = cpu.bus.read_16(BDA_CURSOR_MODE);
+                let cursor_shape = cpu.bus.guest_read_16((BDA_CURSOR_MODE) as u32);
                 cpu.set_reg16(Register::CX, cursor_shape);
             }
         }
@@ -437,9 +437,9 @@ pub fn handle(cpu: &mut Cpu) {
         0x05 if adapter.gate_array() && cpu.get_al() & 0x80 != 0 => gate_array_pages(cpu),
         0x05 => {
             let page = cpu.get_reg8(Register::AL);
-            let offset = page as usize * cpu.bus.read_16(0x044C) as usize;
-            cpu.bus.write_8(0x0462, page);
-            cpu.bus.write_16(0x044E, offset as u16);
+            let offset = page as usize * cpu.bus.guest_read_16(0x044C) as usize;
+            cpu.bus.guest_write_8(0x0462, page);
+            cpu.bus.guest_write_16(0x044E, offset as u16);
             let start = if text_mode(cpu) { offset / 2 } else { offset };
             cpu.bus.vga.crtc_regs[0x0C] = (start >> 8) as u8;
             cpu.bus.vga.crtc_regs[0x0D] = start as u8;
@@ -549,13 +549,13 @@ pub fn handle(cpu: &mut Cpu) {
         0x0B => {
             let bh = cpu.get_reg8(Register::BH);
             let bl = cpu.get_reg8(Register::BL);
-            let mut select = cpu.bus.read_8(0x0466);
+            let mut select = cpu.bus.guest_read_8(0x0466);
             match bh {
                 0x00 => select = (select & 0xE0) | (bl & 0x1F),
                 0x01 => select = (select & 0xDF) | if bl & 1 != 0 { 0x20 } else { 0 },
                 _ => return,
             }
-            cpu.bus.write_8(0x0466, select);
+            cpu.bus.guest_write_8(0x0466, select);
             if cpu.bus.vga.adapter.gate_array() {
                 gate_array_color_select(cpu, bh, bl, select);
                 return;
@@ -565,7 +565,7 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.bus.io_write(0x3D9, select);
                 return;
             }
-            let graphics = cpu.bus.read_8(0x0449) > 3;
+            let graphics = cpu.bus.guest_read_8(0x0449) > 3;
             let regs = &mut cpu.bus.vga.attribute_regs;
             if bh == 0x00 {
                 // An RGBI color: intensity in bit 4 of a palette register.
@@ -649,9 +649,9 @@ pub fn handle(cpu: &mut Cpu) {
         // AH = 0Fh: Get Video Mode
         0x0F => {
             // Probably safer to use current state from BDA
-            let mode = cpu.bus.read_8(0x0449);
-            let cols = cpu.bus.read_16(0x044A) as u8;
-            let page = cpu.bus.read_8(0x0462);
+            let mode = cpu.bus.guest_read_8(0x0449);
+            let cols = cpu.bus.guest_read_16(0x044A) as u8;
+            let page = cpu.bus.guest_read_8(0x0462);
 
             cpu.set_reg8(Register::AL, mode);
             cpu.set_reg8(Register::AH, cols);
@@ -710,10 +710,10 @@ pub fn handle(cpu: &mut Cpu) {
                     let addr = cpu.get_physical_addr(es, dx);
 
                     for i in 0..16 {
-                        let val = cpu.bus.read_8(addr + i);
+                        let val = cpu.bus.guest_read_8((addr + i) as u32);
                         cpu.bus.vga.attribute_regs[i as usize] = val;
                     }
-                    let border = cpu.bus.read_8(addr + 16);
+                    let border = cpu.bus.guest_read_8((addr + 16) as u32);
                     cpu.bus.vga.attribute_regs[0x11] = border;
                     cpu.bus.vga.mark_dirty_full();
                 }
@@ -751,10 +751,10 @@ pub fn handle(cpu: &mut Cpu) {
                     let addr = cpu.get_physical_addr(es, dx);
                     for i in 0..16 {
                         let val = cpu.bus.vga.attribute_regs[i];
-                        cpu.bus.write_8(addr + i, val);
+                        cpu.bus.guest_write_8((addr + i) as u32, val);
                     }
                     let border = cpu.bus.vga.attribute_regs[0x11];
-                    cpu.bus.write_8(addr + 16, border);
+                    cpu.bus.guest_write_8((addr + 16) as u32, border);
                 }
                 0x10 => {
                     // Set Individual DAC Register
@@ -794,9 +794,9 @@ pub fn handle(cpu: &mut Cpu) {
                             break;
                         }
                         let src = addr + i * 3;
-                        cpu.bus.vga.palette[base] = cpu.bus.read_8(src) & mask;
-                        cpu.bus.vga.palette[base + 1] = cpu.bus.read_8(src + 1) & mask;
-                        cpu.bus.vga.palette[base + 2] = cpu.bus.read_8(src + 2) & mask;
+                        cpu.bus.vga.palette[base] = cpu.bus.guest_read_8((src) as u32) & mask;
+                        cpu.bus.vga.palette[base + 1] = cpu.bus.guest_read_8((src + 1) as u32) & mask;
+                        cpu.bus.vga.palette[base + 2] = cpu.bus.guest_read_8((src + 2) as u32) & mask;
                     }
                     cpu.bus.vga.mark_dirty_full();
                     if video_bios::gray_summing(&cpu.bus) {
@@ -852,9 +852,9 @@ pub fn handle(cpu: &mut Cpu) {
                         let g = cpu.bus.vga.palette[base + 1];
                         let b = cpu.bus.vga.palette[base + 2];
                         let dst = addr + i * 3;
-                        cpu.bus.write_8(dst, r);
-                        cpu.bus.write_8(dst + 1, g);
-                        cpu.bus.write_8(dst + 2, b);
+                        cpu.bus.guest_write_8((dst) as u32, r);
+                        cpu.bus.guest_write_8((dst + 1) as u32, g);
+                        cpu.bus.guest_write_8((dst + 2) as u32, b);
                     }
                 }
                 0x18 => {
@@ -950,9 +950,10 @@ pub fn handle(cpu: &mut Cpu) {
                     //      5: ROM 9x14 alternate font
                     //      6: ROM 8x16 font (VGA)
                     //      7: ROM 9x16 alternate font (VGA)
-                    let current_rows_minus_1 = cpu.bus.read_8(0x0484);
+                    let current_rows_minus_1 = cpu.bus.guest_read_8(0x0484);
                     cpu.set_reg8(Register::DL, current_rows_minus_1);
-                    cpu.set_cx(cpu.bus.read_16(0x0485));
+                    let height = cpu.bus.guest_read_16(0x0485);
+                    cpu.set_cx(height);
                     let rom = |offset| (video_bios::ROM_SEGMENT, offset);
                     let (segment, offset) = match cpu.get_reg8(Register::BH) {
                         0x00 => get_vector(cpu, 0x1F),
@@ -983,8 +984,8 @@ pub fn handle(cpu: &mut Cpu) {
                     // Get Configuration: BH 0 for a color CRTC at 3D4h, BL
                     // the memory (3: 256 KB), CL the switches and CH the
                     // feature bits, from BDA 0488h.
-                    let switches = cpu.bus.read_8(0x0488);
-                    let mono = cpu.bus.read_16(0x0463) == 0x3B4;
+                    let switches = cpu.bus.guest_read_8(0x0488);
+                    let mono = cpu.bus.guest_read_16(0x0463) == 0x3B4;
                     cpu.set_reg8(Register::BH, mono as u8);
                     cpu.set_reg8(Register::BL, 3);
                     cpu.set_reg8(Register::CL, switches & 0x0F);
@@ -998,9 +999,9 @@ pub fn handle(cpu: &mut Cpu) {
                 0x33 => {
                     // Gray-Scale Summing: AL 0 on, 1 off, for the palettes
                     // the BIOS loads (BDA 0489h bit 1).
-                    let flags = cpu.bus.read_8(0x0489);
+                    let flags = cpu.bus.guest_read_8(0x0489);
                     let flags = if cpu.get_al() == 0 { flags | 0x02 } else { flags & !0x02 };
-                    cpu.bus.write_8(0x0489, flags);
+                    cpu.bus.guest_write_8(0x0489, flags);
                     cpu.set_reg8(Register::AL, 0x12);
                 }
                 0x34 => {
@@ -1142,15 +1143,15 @@ pub fn handle(cpu: &mut Cpu) {
 
             // Clear buffer (64 bytes)
             for i in 0..64 {
-                cpu.bus.write_8(addr + i, 0);
+                cpu.bus.guest_write_8((addr + i) as u32, 0);
             }
 
             // Populate Fields
 
             // 00: Static Func Table. We point to F000:E000 (Dummy)
             // Storing Offset (E000) then Segment (F000)
-            cpu.bus.write_16(addr, 0xE000);
-            cpu.bus.write_16(addr + 2, 0xF000);
+            cpu.bus.guest_write_16((addr) as u32, 0xE000);
+            cpu.bus.guest_write_16((addr + 2) as u32, 0xF000);
 
             // 04: Video Mode
             let mode = match cpu.bus.video_mode {
@@ -1158,18 +1159,18 @@ pub fn handle(cpu: &mut Cpu) {
                 VideoMode::Graphics320x200 => 0x13,
                 _ => 3,
             };
-            cpu.bus.write_8(addr + 4, mode);
+            cpu.bus.guest_write_8((addr + 4) as u32, mode);
 
             // 05: Columns (80)
-            cpu.bus.write_16(addr + 5, 80);
+            cpu.bus.guest_write_16((addr + 5) as u32, 80);
 
             // 07: Regen Buffer Length (32KB for VGA Text? B8000-BFFFF)
             // In Mode 13h, this should technically be 64KB?
             // The caller is likely in Text Mode when querying.
-            cpu.bus.write_16(addr + 7, 0x8000);
+            cpu.bus.guest_write_16((addr + 7) as u32, 0x8000);
 
             // 09: Regen Buffer Start Offset (0)
-            cpu.bus.write_16(addr + 9, 0);
+            cpu.bus.guest_write_16((addr + 9) as u32, 0);
 
             // 0B: Cursor Pos (Page 0)
             let (col, row) = get_cursor(cpu, 0);
@@ -1177,39 +1178,39 @@ pub fn handle(cpu: &mut Cpu) {
                 .write_16(addr + 0x0B, (row as u16) << 8 | (col as u16));
 
             // 1B: Cursor Type
-            cpu.bus.write_16(addr + 0x1B, 0x0607);
+            cpu.bus.guest_write_16((addr + 0x1B) as u32, 0x0607);
 
             // 1D: Active Page
-            cpu.bus.write_8(addr + 0x1D, 0);
+            cpu.bus.guest_write_8((addr + 0x1D) as u32, 0);
 
             // 1E: CRT Port
-            cpu.bus.write_16(addr + 0x1E, 0x3D4);
+            cpu.bus.guest_write_16((addr + 0x1E) as u32, 0x3D4);
 
             // 22: Rows on Screen (25)
-            cpu.bus.write_8(addr + 0x22, 25);
+            cpu.bus.guest_write_8((addr + 0x22) as u32, 25);
 
             // 23: Char Height (16)
-            cpu.bus.write_16(addr + 0x23, 16);
+            cpu.bus.guest_write_16((addr + 0x23) as u32, 16);
 
             // 25: Active Display Combination Code (DCC)
-            cpu.bus.write_8(addr + 0x25, display_combination(cpu));
+            cpu.bus.guest_write_8((addr + 0x25) as u32, display_combination(cpu));
 
             // 26: Alternate DCC (00 = None)
-            cpu.bus.write_8(addr + 0x26, 0x00);
+            cpu.bus.guest_write_8((addr + 0x26) as u32, 0x00);
 
             // 27: Colors supported (Word)
-            cpu.bus.write_16(addr + 0x27, 16);
+            cpu.bus.guest_write_16((addr + 0x27) as u32, 16);
 
             // 29: Max Pages
-            cpu.bus.write_8(addr + 0x29, 8);
+            cpu.bus.guest_write_8((addr + 0x29) as u32, 8);
 
             // 2A: Scan Lines (0=200, 1=350, 2=400, 3=480)
             // VGA Text is 400. Mode 13h is 200.
             let scan_code = if mode == 0x13 { 0 } else { 2 };
-            cpu.bus.write_8(addr + 0x2A, scan_code);
+            cpu.bus.guest_write_8((addr + 0x2A) as u32, scan_code);
 
             // 31: Video Mem (3=256K)
-            cpu.bus.write_8(addr + 0x31, 3);
+            cpu.bus.guest_write_8((addr + 0x31) as u32, 3);
 
             // Return Success
             cpu.set_reg8(Register::AL, 0x1B);
@@ -1256,8 +1257,8 @@ fn set_cursor(cpu: &mut Cpu, col: u8, row: u8, page: u8) {
     if page < 8 {
         // Update BDA (The Source of Truth for BIOS)
         let addr = BDA_CURSOR_POS + (page as usize * 2);
-        cpu.bus.write_8(addr, col);
-        cpu.bus.write_8(addr + 1, row);
+        cpu.bus.guest_write_8((addr) as u32, col);
+        cpu.bus.guest_write_8((addr + 1) as u32, row);
 
         // Update Internal State (If Active Page)
         // This fixes the desync where renderer looked at old internal state
@@ -1269,11 +1270,11 @@ fn set_cursor(cpu: &mut Cpu, col: u8, row: u8, page: u8) {
 }
 
 /// Reads the cursor position from BDA
-fn get_cursor(cpu: &Cpu, page: u8) -> (u8, u8) {
+fn get_cursor(cpu: &mut Cpu, page: u8) -> (u8, u8) {
     if page < 8 {
         let addr = BDA_CURSOR_POS + (page as usize * 2);
-        let col = cpu.bus.read_8(addr);
-        let row = cpu.bus.read_8(addr + 1);
+        let col = cpu.bus.guest_read_8((addr) as u32);
+        let row = cpu.bus.guest_read_8((addr + 1) as u32);
         (col, row)
     } else {
         (0, 0)
@@ -1297,21 +1298,21 @@ fn write_page_char(cpu: &mut Cpu, page: u8, col: u8, row: u8, char_code: u8, att
         return;
     }
     let addr = cell_addr(cpu, page, col as usize, row as usize);
-    cpu.bus.write_8(addr, char_code);
-    cpu.bus.write_8(addr + 1, attr);
+    cpu.bus.guest_write_8((addr) as u32, char_code);
+    cpu.bus.guest_write_8((addr + 1) as u32, attr);
 }
 
 /// Reads a character and attribute from text page `page`.
-fn read_page_char(cpu: &Cpu, page: u8, col: u8, row: u8) -> (u8, u8) {
+fn read_page_char(cpu: &mut Cpu, page: u8, col: u8, row: u8) -> (u8, u8) {
     if !text_mode(cpu) {
         return (0, 0);
     }
     let addr = cell_addr(cpu, page, col as usize, row as usize);
-    (cpu.bus.read_8(addr), cpu.bus.read_8(addr + 1))
+    (cpu.bus.guest_read_8((addr) as u32), cpu.bus.guest_read_8((addr + 1) as u32))
 }
 
 /// Reads a character and attribute from VRAM (Text Mode)
-fn read_char_at(cpu: &Cpu, col: u8, row: u8, page: u8) -> (u8, u8) {
+fn read_char_at(cpu: &mut Cpu, col: u8, row: u8, page: u8) -> (u8, u8) {
     read_page_char(cpu, page, col, row)
 }
 
