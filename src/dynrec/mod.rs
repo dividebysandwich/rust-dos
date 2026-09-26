@@ -186,7 +186,7 @@ mod engine {
     use std::collections::HashMap;
     use std::ptr::NonNull;
 
-    use super::block::{BlockData, Guard, LINKS, RETURN_LINK, WATCH_AFTER};
+    use super::block::{BlockData, Guard, LINKS, RETURN_LINK, RETURN_MISS, WATCH_AFTER};
     use crate::cpu::{CR0_PG, Seg};
     use super::codemem::CodeMemory;
     use super::helpers::*;
@@ -258,6 +258,9 @@ mod engine {
         /// that block, once.
         backlinks: Vec<(u32, u8)>,
         targets: [Option<u32>; LINKS],
+        /// The return link a return to none of their places takes over
+        /// next, once all are made.
+        next_return: u8,
     }
 
     impl Drop for Block {
@@ -447,6 +450,7 @@ mod engine {
                 data,
                 backlinks: Vec::new(),
                 targets: [None; LINKS],
+                next_return: 0,
             };
             if index as usize == self.blocks.len() {
                 self.blocks.push(Some(block));
@@ -650,14 +654,28 @@ mod engine {
                             None => Run::Interpret,
                         }
                     }
-                    EXIT_UNLINKED if ix == RETURN_LINK || !data.in_page(cpu.eip()) => {
+                    EXIT_UNLINKED if ix >= RETURN_LINK || !data.in_page(cpu.eip()) => {
                         // A block left for another page, or returned: the
                         // execution loop finds the block there, as its fetch
-                        // may go through the page tables, and links it.
+                        // may go through the page tables, and links it. A
+                        // return to a new place takes a link not made yet,
+                        // or else the one after the one it took last.
+                        let block = self.blocks[exited as usize].as_mut().unwrap();
+                        let slot = if ix == RETURN_MISS {
+                            match (RETURN_LINK..LINKS).find(|&k| block.targets[k].is_none()) {
+                                Some(k) => k,
+                                None => {
+                                    block.next_return = (block.next_return + 1) % (LINKS - RETURN_LINK) as u8;
+                                    RETURN_LINK + block.next_return as usize
+                                }
+                            }
+                        } else {
+                            ix
+                        };
                         self.pending = Some(Pending {
                             from: exited,
-                            serial: self.blocks[exited as usize].as_ref().unwrap().serial,
-                            slot: ix as u8,
+                            serial: block.serial,
+                            slot: slot as u8,
                             eip: cpu.eip(),
                             mode,
                             flushes: stats.flushes,

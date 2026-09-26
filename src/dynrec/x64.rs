@@ -15,7 +15,7 @@ use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use iced_x86::ConditionCode;
 
-use super::block::{BlockData, LINKS, RETURN_LINK};
+use super::block::{BlockData, LINKS, RETURN_LINK, RETURN_MISS};
 use super::helpers::*;
 use super::uop::*;
 use crate::cpu::Seg;
@@ -148,6 +148,8 @@ struct Gen<'a> {
     /// stubs of the links used.
     link: bool,
     stubs: [Option<DynamicLabel>; LINKS],
+    /// The way out of a return to none of the places its links lead to.
+    return_miss: Option<DynamicLabel>,
     /// The instruction being translated.
     ix: usize,
     /// The flags live after each operation (`flags::live`), and after the
@@ -205,6 +207,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         slow: Vec::new(),
         link,
         stubs: [None; LINKS],
+        return_miss: None,
         ix: 0,
         live: super::flags::live(items),
         live_after: 0,
@@ -383,15 +386,14 @@ impl Gen<'_> {
             ; jmp QWORD [r12 + CTX_EXIT]
         );
         // The links' stubs: back to the execution loop to be linked.
-        for (k, stub) in self.stubs.iter().enumerate() {
-            if let Some(stub) = *stub {
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; =>stub
-                    ; mov eax, (EXIT_UNLINKED | (k as u32) << 8) as i32
-                    ; jmp QWORD [r12 + CTX_EXIT]
-                );
-            }
+        let misses = self.return_miss.map(|miss| (RETURN_MISS, miss));
+        for (k, stub) in self.stubs.iter().copied().enumerate().filter_map(|(k, s)| Some((k, s?))).chain(misses) {
+            dynasm!(self.ops
+                ; .arch x64
+                ; =>stub
+                ; mov eax, (EXIT_UNLINKED | (k as u32) << 8) as i32
+                ; jmp QWORD [r12 + CTX_EXIT]
+            );
         }
         // An instruction stopped the block: the exit code gets its index,
         // and whether the flags are in EBP, and the execution loop counts
@@ -724,10 +726,10 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)));
                 self.flags_back();
                 if self.link {
-                    // A return: through its link if it goes where the link
-                    // was made to.
+                    // A return: through its link to where it goes, if it
+                    // has one.
                     self.counts();
-                    self.guarded(RETURN_LINK, Some(t));
+                    self.returned(t);
                 } else {
                     let tail = self.tail;
                     dynasm!(self.ops ; .arch x64 ; jmp =>tail);
@@ -1354,7 +1356,7 @@ impl Gen<'_> {
                 self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
                 dynasm!(self.ops ; .arch x64 ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]);
             }
-            Some(_) if self.link => self.guarded(slot, None),
+            Some(_) if self.link => self.guarded(slot),
             _ => dynasm!(self.ops ; .arch x64 ; mov eax, EXIT_NEXT as i32 ; jmp QWORD [r12 + CTX_EXIT]),
         }
     }
@@ -1373,17 +1375,29 @@ impl Gen<'_> {
         );
     }
 
+    /// Leave through the return link to EIP `t`, if the return has one
+    /// (see `guarded`), else to the execution loop, to be linked. RDX is
+    /// the block.
+    fn returned(&mut self, t: T) {
+        let miss = *self.return_miss.get_or_insert_with(|| self.ops.new_dynamic_label());
+        for slot in RETURN_LINK..LINKS {
+            let next = self.ops.new_dynamic_label();
+            let g = DATA_GUARDS + slot as i32 * GUARD_SIZE;
+            dynasm!(self.ops ; .arch x64 ; cmp Rd(r(t)), DWORD [rdx + g + GUARD_EIP] ; jne =>next);
+            self.guarded(slot);
+            dynasm!(self.ops ; .arch x64 ; =>next);
+        }
+        dynasm!(self.ops ; .arch x64 ; jmp =>miss);
+    }
+
     /// Leave through link `slot` to another page, if fetching its target
-    /// goes as when the link was made (its `Guard`): the same EIP for a
-    /// return (in `eip`), CS base, A20 gate and paging, and with paging
-    /// the target page's translation still in the TLB. Otherwise through
-    /// the stub, to the execution loop. RDX is the block.
-    fn guarded(&mut self, slot: usize, eip: Option<T>) {
+    /// goes as when the link was made (its `Guard`): the same CS base, A20
+    /// gate and paging, and with paging the target page's translation
+    /// still in the TLB (a return's link has checked the EIP). Otherwise
+    /// through the stub, to the execution loop. RDX is the block.
+    fn guarded(&mut self, slot: usize) {
         let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
         let g = DATA_GUARDS + slot as i32 * GUARD_SIZE;
-        if let Some(t) = eip {
-            dynasm!(self.ops ; .arch x64 ; cmp Rd(r(t)), DWORD [rdx + g + GUARD_EIP] ; jne =>stub);
-        }
         dynasm!(self.ops
             ; .arch x64
             ; mov ecx, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]

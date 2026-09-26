@@ -746,8 +746,42 @@ fn a_return_linked_to_one_place_after_another_leaves_none_behind() {
     assert_eq!(b.cpu.ebx(), replicated_sum(500).wrapping_mul(2));
     if AVAILABLE {
         assert!(stats.stale >= 450, "{:?}", stats);
-        // At most three links from each block: none left from before.
-        assert!(stats.links <= 3 * stats.live_blocks, "{:?}", stats);
+        // At most six links from each block: none left from before.
+        assert!(stats.links <= 6 * stats.live_blocks, "{:?}", stats);
+    }
+}
+
+#[test]
+fn a_function_returning_to_two_places_in_turn_goes_back_to_each_through_its_links() {
+    // A function in another page called from two places in a loop, 1000
+    // times each: its return is linked to both, so the translated code
+    // runs the loop without the execution loop.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(f, &asm32(f, |a| {
+            a.add(ebx, eax)?;
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.mov(eax, 1u32)?;
+            a.mov(ecx, 1000u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.call(f as u64)?;
+            a.inc(eax)?;
+            a.call(f as u64)?;
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), (1..=1000u32).map(|i| 2 * i + 1).sum::<u32>());
+    if AVAILABLE {
+        assert!(stats.runs < 200, "the returns went through the execution loop: {:?}", stats);
     }
 }
 

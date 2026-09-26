@@ -219,8 +219,9 @@ code never touches X18, which macOS reserves.
 
 A block leaves to another block without the execution loop through its
 links (`BlockData::links`): two for exits to a known EIP (a jump's target,
-a conditional jump's next instruction), and one for a return. Links are
-data, not code:
+a conditional jump's next instruction), and four for a return, to the
+last places it returned to: a function called from two places in turn
+returns to each through its own link. Links are data, not code:
 
 - A link starts at a stub that returns to the execution loop.
 - The execution loop then finds or translates the block at the target and
@@ -246,6 +247,9 @@ takes more care:
   - The execution loop makes these links when the block it runs next is
     at the stub's target (`Pending`): its own fetch just found the target,
     under the translation the guard records.
+  - A return to none of the EIPs its links were made to leaves through a
+    stub of its own (`RETURN_MISS`), and the execution loop links one it
+    hasn't made yet, or else the one after the one it made last.
   - After a chain that crossed pages, the execution loop's code window is
     moved to the page the last instruction was in, as the interpreter's
     would have been (`CodeWindow::moved`).

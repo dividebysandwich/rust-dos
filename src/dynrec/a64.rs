@@ -21,7 +21,7 @@ use dynasmrt::aarch64::Aarch64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use iced_x86::ConditionCode;
 
-use super::block::{BlockData, LINKS, RETURN_LINK};
+use super::block::{BlockData, LINKS, RETURN_LINK, RETURN_MISS};
 use super::helpers::*;
 use super::uop::*;
 use crate::cpu::Seg;
@@ -195,6 +195,8 @@ struct Gen<'a> {
     /// stubs of the links used.
     link: bool,
     stubs: [Option<DynamicLabel>; LINKS],
+    /// The way out of a return to none of the places its links lead to.
+    return_miss: Option<DynamicLabel>,
     /// The instruction being translated.
     ix: usize,
     /// The flags live after each operation, and after the one being
@@ -241,6 +243,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         slow: Vec::new(),
         link,
         stubs: [None; LINKS],
+        return_miss: None,
         ix: 0,
         live: super::flags::live(items),
         live_after: 0,
@@ -486,12 +489,11 @@ impl Gen<'_> {
         self.exit();
         // The links' stubs: back to the execution loop to be linked (X1 is
         // the block, from `leave`).
-        for (k, stub) in self.stubs.into_iter().enumerate() {
-            if let Some(stub) = stub {
-                dynasm!(self.ops ; .arch aarch64 ; =>stub);
-                mov32(&mut self.ops, 0, EXIT_UNLINKED | (k as u32) << 8);
-                self.exit();
-            }
+        let misses = self.return_miss.map(|miss| (RETURN_MISS, miss));
+        for (k, stub) in self.stubs.into_iter().enumerate().filter_map(|(k, s)| Some((k, s?))).chain(misses) {
+            dynasm!(self.ops ; .arch aarch64 ; =>stub);
+            mov32(&mut self.ops, 0, EXIT_UNLINKED | (k as u32) << 8);
+            self.exit();
         }
         // An instruction stopped the block: the exit code gets its index,
         // and whether the flags are in W28, and the execution loop counts
@@ -815,10 +817,10 @@ impl Gen<'_> {
                 self.field(Access::Str32, r(t), layout::EIP);
                 self.flags_back();
                 if self.link {
-                    // A return: through its link if it goes where the link
-                    // was made to.
+                    // A return: through its link to where it goes, if it
+                    // has one.
                     self.counts();
-                    self.guarded(RETURN_LINK, Some(t));
+                    self.returned(t);
                 } else {
                     let tail = self.tail;
                     dynasm!(self.ops ; .arch aarch64 ; b =>tail);
@@ -1635,7 +1637,7 @@ impl Gen<'_> {
                 let at = DATA_LINKS as u32 + slot as u32 * 8;
                 dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x1, at] ; br x16);
             }
-            Some(_) if self.link => self.guarded(slot, None),
+            Some(_) if self.link => self.guarded(slot),
             _ => {
                 dynasm!(self.ops ; .arch aarch64 ; movz w0, EXIT_NEXT);
                 self.exit();
@@ -1653,23 +1655,34 @@ impl Gen<'_> {
         self.data_x1();
     }
 
+    /// Leave through the return link to EIP `t`, if the return has one
+    /// (see `guarded`), else to the execution loop, to be linked. X1 is
+    /// the block.
+    fn returned(&mut self, t: T) {
+        let miss = *self.return_miss.get_or_insert_with(|| self.ops.new_dynamic_label());
+        for slot in RETURN_LINK..LINKS {
+            let next = self.ops.new_dynamic_label();
+            let g_eip = DATA_GUARDS as u32 + slot as u32 * GUARD_SIZE as u32 + GUARD_EIP as u32;
+            dynasm!(self.ops ; .arch aarch64 ; ldr w2, [x1, g_eip] ; cmp W(r(t)), w2 ; b.ne =>next);
+            self.guarded(slot);
+            dynasm!(self.ops ; .arch aarch64 ; =>next);
+        }
+        dynasm!(self.ops ; .arch aarch64 ; b =>miss);
+    }
+
     /// Leave through link `slot` to another page, if fetching its target
     /// goes as when the link was made (see `x64::Gen::guarded`), else
     /// through the stub. X1 is the block.
-    fn guarded(&mut self, slot: usize, eip: Option<T>) {
+    fn guarded(&mut self, slot: usize) {
         let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
         let g = DATA_GUARDS as u32 + slot as u32 * GUARD_SIZE as u32;
-        let (g_eip, g_cs, g_a20, g_paging, g_page, g_phys) = (
-            g + GUARD_EIP as u32,
+        let (g_cs, g_a20, g_paging, g_page, g_phys) = (
             g + GUARD_CS_BASE as u32,
             g + GUARD_A20 as u32,
             g + GUARD_PAGING as u32,
             g + GUARD_PAGE as u32,
             g + GUARD_PHYS as u32,
         );
-        if let Some(t) = eip {
-            dynasm!(self.ops ; .arch aarch64 ; ldr w2, [x1, g_eip] ; cmp W(r(t)), w2 ; b.ne =>stub);
-        }
         self.field(Access::Ldr32, 2, seg_field(Seg::CS, layout::SEG_BASE));
         dynasm!(self.ops ; .arch aarch64 ; ldr w3, [x1, g_cs] ; cmp w2, w3 ; b.ne =>stub);
         self.field(Access::Ldr32, 2, layout::A20_MASK);
