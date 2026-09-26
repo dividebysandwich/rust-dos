@@ -76,11 +76,8 @@ pub fn handle(cpu: &mut Cpu) {
             }
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
-        // The PCI BIOS: there is no PCI bus.
-        0xB1 => {
-            cpu.set_reg8(Register::AH, 0x81);
-            cpu.set_cpu_flag(CpuFlags::CF, true);
-        }
+        // The PCI BIOS, on a machine with a PCI bus.
+        0xB1 => crate::pci::bios(cpu),
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 1A AH={:02X}", ah)),
     }
 }

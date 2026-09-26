@@ -29,7 +29,6 @@ use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
 use rust_dos::keylayout::Layout;
 use crate::mount::{display_host_path, parse_drive_letter, parse_kind};
-use crate::video::vbe::Vbe;
 use crate::video::{self, VideoMode};
 use keys::PcKey;
 pub use pm::{parse_addr, parse_hex};
@@ -1179,8 +1178,8 @@ impl DebugHub {
                     let len = match (a.lin, a.phys) {
                         (Some(_), _) => len,
                         // The linear frame buffer, up to its end.
-                        (None, Some(p)) if Vbe::lfb_offset(p, 1).is_some() => {
-                            len.min(video::vbe::LFB_BASE + video::vbe::VRAM_SIZE - p)
+                        (None, Some(p)) if cpu.bus.vbe.lfb_offset(p, 1).is_some() => {
+                            len.min(cpu.bus.vbe.lfb_base.unwrap_or(0) as usize + video::vbe::VRAM_SIZE - p)
                         }
                         (None, p) => len.min(cpu.bus.ram().len().saturating_sub(p.unwrap_or(0))),
                     };
@@ -1193,7 +1192,7 @@ impl DebugHub {
                 Ok(a) => {
                     let targets: Option<Vec<usize>> = (0..data.len()).map(|i| a.byte(cpu, i)).collect();
                     match targets {
-                        Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || Vbe::lfb_offset(p, 1).is_some()) => {
+                        Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some()) => {
                             for (p, b) in t.iter().zip(&data) {
                                 // The debugger patches the ROMs too.
                                 if rust_dos::bus::Bus::is_rom(*p) {

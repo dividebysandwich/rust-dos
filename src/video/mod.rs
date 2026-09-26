@@ -13,6 +13,7 @@ pub mod mono;
 pub mod overlay;
 pub mod palette;
 pub mod pixels;
+pub mod s3;
 pub mod shader;
 pub mod tandy;
 pub mod text;
@@ -375,6 +376,49 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
             let rgb = pixel(row + x * bytes);
             for dx in 0..scale {
                 let i = dst + (x * scale + dx) * 3;
+                canvas[i] = rgb.0;
+                canvas[i + 1] = rgb.1;
+                canvas[i + 2] = rgb.2;
+            }
+        }
+        // An S3's hardware cursor over the row.
+        if let Some(cursor) = bus.vga.s3.cursor().filter(|_| bus.vga.adapter == adapter::Adapter::S3 && scale == 1) {
+            let y = fy as u32;
+            if y < cursor.y || y >= cursor.y + 64 - cursor.skip_y {
+                continue;
+            }
+            let cy = y - cursor.y + cursor.skip_y;
+            let s3 = &bus.vga.s3;
+            let color = |stack: &[u8; 4]| -> (u8, u8, u8) {
+                match mode.bpp {
+                    8 => colors[stack[0] as usize],
+                    15 | 16 => {
+                        let v = u16::from_le_bytes([stack[0], stack[1]]);
+                        let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
+                        if mode.bpp == 15 {
+                            (five(v >> 10 & 31), five(v >> 5 & 31), five(v & 31))
+                        } else {
+                            let g = v >> 5 & 63;
+                            (five(v >> 11), ((g << 2) | (g >> 4)) as u8, five(v & 31))
+                        }
+                    }
+                    _ => (stack[2], stack[1], stack[0]),
+                }
+            };
+            let (fg, bg) = (color(&s3.cursor_fg), color(&s3.cursor_bg));
+            for cx in cursor.skip_x..64 {
+                let x = (cursor.x + cx - cursor.skip_x) as usize;
+                if x >= mode.width as usize || x >= canvas_w {
+                    break;
+                }
+                let i = dst + x * 3;
+                let rgb = match cursor.pixel(vram, cx, cy) {
+                    s3::CursorPixel::Transparent => continue,
+                    s3::CursorPixel::Foreground => fg,
+                    s3::CursorPixel::Background => bg,
+                    s3::CursorPixel::Invert if mode.bpp == 8 => colors[!vram[(row + x) & wrap] as usize],
+                    s3::CursorPixel::Invert => (!canvas[i], !canvas[i + 1], !canvas[i + 2]),
+                };
                 canvas[i] = rgb.0;
                 canvas[i + 1] = rgb.1;
                 canvas[i + 2] = rgb.2;

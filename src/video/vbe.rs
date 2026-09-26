@@ -61,10 +61,25 @@ pub fn find_mode(number: u16) -> Option<&'static VbeMode> {
     MODES.iter().find(|m| m.number == number & 0x1FF)
 }
 
+/// The display timing of a mode `height` lines high, as the modes of the
+/// list have theirs.
+pub fn timing_for(height: u16) -> CrtTiming {
+    match height {
+        ..=400 => CrtTiming::VGA_400,
+        ..=480 => CrtTiming::VESA_480,
+        ..=600 => CrtTiming::VESA_600,
+        _ => CrtTiming::VESA_768,
+    }
+}
+
 pub struct Vbe {
     pub vram: Vec<u8>,
-    /// The VBE mode set, if one is.
-    pub mode: Option<&'static VbeMode>,
+    /// The VBE mode set, if one is, or on an S3 the mode its registers
+    /// describe (`video::s3`).
+    pub mode: Option<VbeMode>,
+    /// Where the linear frame buffer is, if it is: always at `LFB_BASE`,
+    /// but where an S3's registers put it.
+    pub lfb_base: Option<u32>,
     /// The mode was set with the linear frame buffer (bit 14).
     pub lfb: bool,
     /// Window A's position in video memory, in 64 KB units.
@@ -91,6 +106,7 @@ impl Vbe {
         Self {
             vram: vec![0; VRAM_SIZE],
             mode: None,
+            lfb_base: Some(LFB_BASE as u32),
             lfb: false,
             bank: 0,
             pitch: 0,
@@ -101,8 +117,8 @@ impl Vbe {
     }
 
     /// Switch to `mode`, clearing video memory unless `keep` is set.
-    pub fn set_mode(&mut self, mode: &'static VbeMode, lfb: bool, keep: bool) {
-        self.mode = Some(mode);
+    pub fn set_mode(&mut self, mode: &VbeMode, lfb: bool, keep: bool) {
+        self.mode = Some(*mode);
         self.lfb = lfb;
         self.bank = 0;
         self.pitch = mode.width as u32 * mode.bytes_per_pixel() as u32;
@@ -129,8 +145,8 @@ impl Vbe {
     /// Where `len` bytes at physical address `addr` are in the linear
     /// frame buffer, if they are all there.
     #[inline]
-    pub fn lfb_offset(addr: usize, len: usize) -> Option<usize> {
-        let offset = addr.checked_sub(LFB_BASE)?;
+    pub fn lfb_offset(&self, addr: usize, len: usize) -> Option<usize> {
+        let offset = addr.checked_sub(self.lfb_base? as usize)?;
         (offset + len <= VRAM_SIZE).then_some(offset)
     }
 
@@ -173,20 +189,28 @@ impl Vbe {
 /// The mode is saved by its number, and found again among the modes.
 impl crate::savestate::State for Vbe {
     fn save(&self, w: &mut crate::savestate::Writer) {
-        let Vbe { vram, mode, lfb, bank, pitch, start, latched_start, start_high } = self;
+        let Vbe { vram, mode, lfb_base, lfb, bank, pitch, start, latched_start, start_high } = self;
         vram.save(w);
         mode.map_or(0, |m| m.number).save(w);
+        mode.map_or((0, 0, 0), |m| (m.width, m.height, m.bpp)).save(w);
+        lfb_base.save(w);
         crate::savestate::State::save(&(*lfb, *bank, *pitch), w);
         crate::savestate::State::save(&(*start, *latched_start, *start_high), w);
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
-        let Vbe { vram, mode, lfb, bank, pitch, start, latched_start, start_high } = self;
+        let Vbe { vram, mode, lfb_base, lfb, bank, pitch, start, latched_start, start_high } = self;
         vram.load(r)?;
         let mut number = 0u16;
         number.load(r)?;
-        *mode = match number {
-            0 => None,
-            n => Some(find_mode(n).ok_or_else(|| crate::savestate::StateError::Invalid(format!("VESA mode {:X}h", n)))?),
+        let mut size = (0u16, 0u16, 0u8);
+        size.load(r)?;
+        lfb_base.load(r)?;
+        // A mode of the list, or one an S3's registers made.
+        *mode = match (number, size) {
+            (_, (0, _, _)) => None,
+            (n, (width, height, bpp)) => {
+                Some(find_mode(n).copied().unwrap_or(VbeMode { number: n, width, height, bpp, timing: timing_for(height) }))
+            }
         };
         lfb.load(r)?;
         bank.load(r)?;

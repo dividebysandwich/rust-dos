@@ -205,5 +205,9 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     // and the name that programs look for.
     bus.write_rom(0xC0000, &[0x55, 0xAA, 0x40]);
     bus.load_bytes(0xC001E, b"IBM VGA");
+    // An S3's BIOS says which chip it is for.
+    let s3 = setup.adapter == Adapter::S3;
+    bus.write_rom(0xC003F, if s3 { b"S3 86C764\0" } else { &[0; 10] });
+    bus.vbe.lfb_base = if s3 { None } else { Some(super::vbe::LFB_BASE as u32) };
     install_fonts(bus);
 }

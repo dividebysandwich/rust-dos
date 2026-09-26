@@ -22,6 +22,10 @@ pub const WINDOW_FUNCTION: u16 = 0x01C0;
 pub const PM_TABLE: u16 = 0x0200;
 
 const OEM: &[u8] = b"rust-dos VBE 2.0\0";
+/// The S3's OEM string, as its BIOS (and DOSBox-X's) has it, for drivers
+/// that look for the chip there.
+const S3_OEM: &[u8] = b"S3 Incorporated. Trio64\0";
+const S3_OEM_STRING: u16 = 0x0150;
 const VENDOR: &[u8] = b"rust-dos\0";
 const PRODUCT: &[u8] = b"rust-dos SVGA\0";
 const REVISION: &[u8] = b"2.0\0";
@@ -38,7 +42,13 @@ fn rom(offset: u16) -> usize {
 
 /// Write the VBE data into the video BIOS.
 pub fn install_rom(bus: &mut Bus) {
-    for (offset, text) in [(OEM_STRING, OEM), (VENDOR_NAME, VENDOR), (PRODUCT_NAME, PRODUCT), (PRODUCT_REVISION, REVISION)] {
+    for (offset, text) in [
+        (OEM_STRING, OEM),
+        (S3_OEM_STRING, S3_OEM),
+        (VENDOR_NAME, VENDOR),
+        (PRODUCT_NAME, PRODUCT),
+        (PRODUCT_REVISION, REVISION),
+    ] {
         bus.write_rom(rom(offset), text);
     }
     let mut list: Vec<u8> = MODES.iter().flat_map(|m| m.number.to_le_bytes()).collect();
@@ -198,6 +208,8 @@ fn controller_info(cpu: &mut Cpu, addr: usize) -> u16 {
     let vbe2 = (0..4).map(|i| cpu.bus.guest_read_8((addr + i) as u32)).eq(*b"VBE2");
     let (seg, off) = (cpu.es(), cpu.di());
     let far = |offset: u16| (ROM_SEGMENT as u32) << 16 | offset as u32;
+    let s3 = cpu.bus.vga.adapter == crate::video::adapter::Adapter::S3;
+    let (oem, oem_string) = if s3 { (S3_OEM, S3_OEM_STRING) } else { (OEM, OEM_STRING) };
     let mut block = vec![0u8; if vbe2 { 512 } else { 256 }];
     block[0..4].copy_from_slice(b"VESA");
     block[4..6].copy_from_slice(&0x0200u16.to_le_bytes());
@@ -213,13 +225,13 @@ fn controller_info(cpu: &mut Cpu, addr: usize) -> u16 {
         block[14..18].copy_from_slice(&in_buffer(34).to_le_bytes());
         block[20..22].copy_from_slice(&0x0200u16.to_le_bytes());
         let mut at = 256;
-        for (field, text) in [(6, OEM), (22, VENDOR), (26, PRODUCT), (30, REVISION)] {
+        for (field, text) in [(6, oem), (22, VENDOR), (26, PRODUCT), (30, REVISION)] {
             block[at..at + text.len()].copy_from_slice(text);
             block[field..field + 4].copy_from_slice(&in_buffer(at).to_le_bytes());
             at += text.len();
         }
     } else {
-        block[6..10].copy_from_slice(&far(OEM_STRING).to_le_bytes());
+        block[6..10].copy_from_slice(&far(oem_string).to_le_bytes());
         block[14..18].copy_from_slice(&far(MODE_LIST).to_le_bytes());
     }
     write_bytes(&mut cpu.bus, addr, &block);
@@ -265,6 +277,8 @@ fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
     block[29] = (pages - 1).min(255) as u8;
     block[30] = 1;
     block[31..39].copy_from_slice(&color_masks(mode.bpp));
+    // The S3's frame buffer is where its registers put it for the mode
+    // (`s3_program_mode`).
     block[40..44].copy_from_slice(&(LFB_BASE as u32).to_le_bytes());
     write_bytes(&mut cpu.bus, addr, &block);
     SUCCESS
@@ -293,7 +307,7 @@ fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
 }
 
 /// Switch the card to a VESA mode.
-pub fn enter_mode(bus: &mut Bus, mode: &'static VbeMode, lfb: bool, keep: bool) {
+pub fn enter_mode(bus: &mut Bus, mode: &VbeMode, lfb: bool, keep: bool) {
     bus.log_string(&format!(
         "[BIOS] Switch to VESA mode {:03X}h ({}x{}, {} bits per pixel)",
         mode.number, mode.width, mode.height, mode.bpp
@@ -304,6 +318,10 @@ pub fn enter_mode(bus: &mut Bus, mode: &'static VbeMode, lfb: bool, keep: bool) 
     bus.vga.set_video_mode(VideoMode::Vesa);
     bus.vga.set_fixed_timing(Some(mode.timing));
     bus.vga.mark_dirty_full();
+    // An S3's own registers say the same, as its BIOS sets them.
+    if bus.vga.adapter == crate::video::adapter::Adapter::S3 {
+        bus.s3_program_mode(mode);
+    }
 }
 
 /// Function 04h: the size of the state buffer (DL=0), and saving (DL=1)
@@ -324,7 +342,7 @@ fn save_restore_state(cpu: &mut Cpu) -> u16 {
         0x02 => {
             let mode = cpu.bus.guest_read_16((addr) as u32);
             if let Some(m) = vbe::find_mode(mode).filter(|_| mode != 0) {
-                if cpu.bus.vbe.mode != Some(m) {
+                if cpu.bus.vbe.mode != Some(*m) {
                     enter_mode(&mut cpu.bus, m, mode & 0x4000 != 0, true);
                 }
                 cpu.bus.vbe.bank = cpu.bus.guest_read_32((addr + 2) as u32) % (VRAM_SIZE / WINDOW_SIZE) as u32;

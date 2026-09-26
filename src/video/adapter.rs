@@ -8,6 +8,9 @@ pub enum Adapter {
     /// 1024x768.
     #[default]
     Svga,
+    /// An S3 Trio64 with 4 MB: the Super VGA's modes, and the chip's own
+    /// registers and graphics engine that S3's drivers (Windows') use.
+    S3,
     /// IBM's VGA, without VESA modes.
     Vga,
     /// IBM's Enhanced Graphics Adapter with an Enhanced Color Display: 16
@@ -28,15 +31,24 @@ pub enum Adapter {
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 7] =
-        [Adapter::Svga, Adapter::Vga, Adapter::Ega, Adapter::Cga, Adapter::Tandy, Adapter::Pcjr, Adapter::Hercules];
+    pub const ALL: [Adapter; 8] = [
+        Adapter::Svga,
+        Adapter::S3,
+        Adapter::Vga,
+        Adapter::Ega,
+        Adapter::Cga,
+        Adapter::Tandy,
+        Adapter::Pcjr,
+        Adapter::Hercules,
+    ];
 
     /// The adapter a `machine` value names, DOSBox's names included.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "svga" | "svga_s3" | "svga_et4000" | "svga_et3000" | "svga_paradise" | "vesa_nolfb" | "vesa_oldvbe" => {
+            "svga" | "svga_et4000" | "svga_et3000" | "svga_paradise" | "vesa_nolfb" | "vesa_oldvbe" => {
                 Some(Adapter::Svga)
             }
+            "svga_s3" | "s3" | "s3trio" => Some(Adapter::S3),
             "vga" | "vgaonly" => Some(Adapter::Vga),
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
@@ -50,6 +62,7 @@ impl Adapter {
     pub fn name(self) -> &'static str {
         match self {
             Adapter::Svga => "svga",
+            Adapter::S3 => "svga_s3",
             Adapter::Vga => "vga",
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
@@ -63,6 +76,7 @@ impl Adapter {
     pub fn describe(self) -> &'static str {
         match self {
             Adapter::Svga => "Super VGA (VESA)",
+            Adapter::S3 => "S3 Trio64",
             Adapter::Vga => "VGA",
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
@@ -74,13 +88,13 @@ impl Adapter {
 
     /// Whether the BIOS has the VESA extensions (INT 10h AH=4Fh).
     pub fn has_vbe(self) -> bool {
-        self == Adapter::Svga
+        matches!(self, Adapter::Svga | Adapter::S3)
     }
 
     /// Whether the BIOS has the VGA's functions: the display combination
     /// code (INT 10h AH=1Ah), the state information (AH=1Bh) and the DAC.
     pub fn vga_bios(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::Vga)
+        matches!(self, Adapter::Svga | Adapter::S3 | Adapter::Vga)
     }
 
     /// Whether the BIOS has the EGA's functions: the palette registers

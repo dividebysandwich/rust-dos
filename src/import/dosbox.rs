@@ -112,7 +112,10 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             f if f.starts_with("486") || f.starts_with("pentium") || f == "auto" => imported.set("emulator", "cpu", "486"),
             _ => unknown(imported),
         },
+        // DOSBox's default, svga_s3, is what DOS games get from it: the
+        // plain Super VGA, not the S3 whose registers Windows' drivers use.
         ("dosbox", "machine") => match crate::video::adapter::Adapter::parse(first) {
+            Some(crate::video::adapter::Adapter::S3) => imported.set("emulator", "machine", "svga"),
             Some(adapter) => imported.set("emulator", "machine", adapter.name()),
             None => unknown(imported),
         },

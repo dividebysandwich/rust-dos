@@ -241,24 +241,25 @@ pub fn port_in(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let dest = instr.op0_register();
     let port = port(cpu, instr, 1);
     cpu.check_io(port, dest.size() as u8)?;
-    let mut value = 0;
-    for i in 0..dest.size() as u16 {
-        value |= (cpu.bus.io_read(port.wrapping_add(i)) as u32) << (8 * i);
-    }
+    let value = match dest.size() {
+        1 => cpu.bus.io_read(port) as u32,
+        size => cpu.bus.io_read_wide(port, size as u8),
+    };
     cpu.set_reg(dest, value);
     Ok(())
 }
 
 /// OUT AL/AX/EAX. Wider writes go to consecutive byte ports, low byte
 /// first: EGA/VGA code programs index and data registers with one
-/// OUT DX, AX.
+/// OUT DX, AX. (An S3's graphics engine takes them whole, `io_write_wide`.)
 pub fn port_out(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let src = instr.op1_register();
     let port = port(cpu, instr, 0);
     cpu.check_io(port, src.size() as u8)?;
     let value = cpu.reg(src);
-    for i in 0..src.size() as u16 {
-        cpu.bus.io_write(port.wrapping_add(i), (value >> (8 * i)) as u8);
+    match src.size() {
+        1 => cpu.bus.io_write(port, value as u8),
+        size => cpu.bus.io_write_wide(port, value, size as u8),
     }
     Ok(())
 }

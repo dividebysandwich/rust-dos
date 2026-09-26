@@ -7,6 +7,8 @@ use std::cell::Cell;
 pub struct VgaCard {
     /// The adapter programs see (`machine`).
     pub adapter: super::adapter::Adapter,
+    /// The S3 Trio64's own registers, on `Adapter::S3`.
+    pub s3: super::s3::S3,
     pub sequencer_index: u8,
     pub sequencer_regs: [u8; 5],
     pub graphics_index: u8,
@@ -134,6 +136,7 @@ impl VgaCard {
     pub fn new() -> Self {
         let mut vga = Self {
             adapter: super::adapter::Adapter::default(),
+            s3: super::s3::S3::new(),
             sequencer_index: 0,
             sequencer_regs: [0; 5],
             graphics_index: 0,
@@ -981,7 +984,7 @@ crate::state_fields!(VgaCard {
     palette, vram_graphics, vram_text, latches,
     attribute_index, attribute_regs, attribute_flip_flop, latched_start_addr,
     good_timing, fixed_timing, retraces, rebase, drawn, flipped,
-    cga_mode, cga_color, tandy, herc_mode, herc_config,
+    cga_mode, cga_color, tandy, herc_mode, herc_config, s3,
 } skip {
     // Set from the configuration, which a state carries in its header.
     adapter, composite, switches, mono_monitor,

@@ -6,9 +6,9 @@
 //! The devices are DOSBox-X's (bios.cpp, `ISAPNP_sysdev_*`), with the same
 //! handles, for the Windows 95 installed on it: Windows knows a device by
 //! its handle (Enum\BIOS\*PNP0303\00), and one it finds under another
-//! handle, or a `$PnP` at another address, it installs again. The PCI bus,
-//! serial ports and IDE controllers DOSBox-X had are left out, as rust-dos
-//! has none, so the handles skip theirs.
+//! handle, or a `$PnP` at another address, it installs again. The serial
+//! ports and IDE controllers DOSBox-X had are left out, as rust-dos has
+//! none, and the PCI bus but on the S3 machine, so the handles skip theirs.
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, Seg};
@@ -99,9 +99,14 @@ fn nodes(bus: &Bus) -> Vec<(u8, Vec<u8>)> {
         (0x07, node(b"PNP0C01", [0x08, 0x80, 0x00], &[Io(0x24, 4, 4)])),
         (0x08, node(b"PNP0C02", [0x08, 0x80, 0x00], &[Io(0x208, 4, 4)])),
         (0x09, node(b"PNP0A00", [0x06, 0x04, 0x00], &[])),
+        (0x0A, node(b"PNP0A03", [0x06, 0x04, 0x00], &[])),
         (0x0B, node(b"PNP0C04", [0x0B, 0x80, 0x00], &[Io(0xF0, 0x10, 0x10), Irq(13)])),
         (0x0C, node(b"PNP0C01", [0x05, 0x00, 0x00], &ram)),
     ]
+    .into_iter()
+    // The PCI bus, where there is one.
+    .filter(|(handle, _)| *handle != 0x0A || bus.pci_present())
+    .collect()
 }
 
 /// Put the installation structure in the ROM: signature, version 1.0,

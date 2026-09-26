@@ -1745,7 +1745,8 @@ mod tests {
         let config = parse("[emulator]\nmachine=VGAonly\n", Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(config.machine, Some(Adapter::Vga));
-        assert_eq!(parse("[emulator]\nmachine=svga_s3\n", Path::new("/cfg"), None).machine, Some(Adapter::Svga));
+        assert_eq!(parse("[emulator]\nmachine=svga_s3\n", Path::new("/cfg"), None).machine, Some(Adapter::S3));
+        assert_eq!(parse("[emulator]\nmachine=svga_et4000\n", Path::new("/cfg"), None).machine, Some(Adapter::Svga));
         assert_eq!(parse("[emulator]\nmachine=PCjr\n", Path::new("/cfg"), None).machine, Some(Adapter::Pcjr));
         assert_eq!(parse("[emulator]\nmachine=tandy\n", Path::new("/cfg"), None).machine, Some(Adapter::Tandy));
         let config = parse("[emulator]\nmachine=mcga\n", Path::new("/cfg"), None);

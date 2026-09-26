@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use web_time::Instant;
 
 use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
-use crate::video::vbe::Vbe;
 use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
+pub mod s3;
 mod state;
 
 pub trait Device {
@@ -150,6 +150,10 @@ pub struct Bus {
     pub vga: crate::video::vga::VgaCard,
     /// The Super VGA side of the card: VESA modes and their memory.
     pub vbe: crate::video::vbe::Vbe,
+    /// The S3 Trio64's graphics engine, on `Adapter::S3`.
+    pub s3_engine: crate::video::s3::engine::Engine,
+    /// The PCI bus's configuration address, on `Adapter::S3`.
+    pub pci: crate::pci::Pci,
     pub search_handles: std::collections::HashMap<u32, String>,
     /// The search ID FindFirst handed out last (the key of
     /// `search_handles`, kept in the program's DTA).
@@ -300,6 +304,8 @@ impl Bus {
             dta_offset: 0x0000,
             vga: crate::video::vga::VgaCard::new(),
             vbe: crate::video::vbe::Vbe::new(),
+            s3_engine: crate::video::s3::engine::Engine::new(),
+            pci: crate::pci::Pci::default(),
             search_handles: std::collections::HashMap::new(),
             search_serial: 0,
             mouse: crate::mouse::MouseState::new(),
@@ -827,6 +833,9 @@ impl Bus {
 
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
+        if let Some(port) = self.s3_mmio(addr) {
+            return self.s3_peek(port, 1) as u8;
+        }
         if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS && addr >= ADDR_VGA_GRAPHICS {
             // VESA modes: the window onto the bank of video memory.
             if self.video_mode == VideoMode::Vesa {
@@ -847,7 +856,7 @@ impl Bus {
         if addr < self.ram.len() {
             return self.ram[addr];
         }
-        if let Some(offset) = Vbe::lfb_offset(addr, 1) {
+        if let Some(offset) = self.vbe.lfb_offset(addr, 1) {
             return self.vbe.vram[offset];
         }
         if addr >= 0xFFFE_0000 {
@@ -890,6 +899,10 @@ impl Bus {
                 *g = g.wrapping_add(1);
             }
             return false;
+        }
+        if let Some(port) = self.s3_mmio(addr) {
+            self.engine_write(port, value as u32, 1);
+            return true;
         }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
             if self.video_mode == VideoMode::Vesa {
@@ -962,7 +975,7 @@ impl Bus {
             self.page_gen[page] = self.page_gen[page].wrapping_add(1);
             return false;
         }
-        if let Some(offset) = Vbe::lfb_offset(addr, 1) {
+        if let Some(offset) = self.vbe.lfb_offset(addr, 1) {
             self.write_vram(offset, &[value]);
             return true;
         }
@@ -1009,8 +1022,12 @@ impl Bus {
             }
             return false;
         }
-        if let Some(offset) = Vbe::lfb_offset(addr, 2) {
+        if let Some(offset) = self.vbe.lfb_offset(addr, 2) {
             self.write_vram(offset, &value.to_le_bytes());
+            return true;
+        }
+        if let Some(port) = self.s3_mmio(addr) {
+            self.engine_write(port, value as u32, 2);
             return true;
         }
         // Low byte
@@ -1032,8 +1049,11 @@ impl Bus {
                 ])
             };
         }
-        if let Some(offset) = Vbe::lfb_offset(addr, 2) {
+        if let Some(offset) = self.vbe.lfb_offset(addr, 2) {
             return u16::from_le_bytes([self.vbe.vram[offset], self.vbe.vram[offset + 1]]);
+        }
+        if let Some(port) = self.s3_mmio(addr) {
+            return self.s3_peek(port, 2) as u16;
         }
         let low = self.read_8(addr) as u16;
         let high = self.read_8(addr + 1) as u16;
@@ -1053,9 +1073,12 @@ impl Bus {
                 ])
             };
         }
-        if let Some(offset) = Vbe::lfb_offset(addr, 4) {
+        if let Some(offset) = self.vbe.lfb_offset(addr, 4) {
             let v = &self.vbe.vram[offset..offset + 4];
             return u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
+        }
+        if let Some(port) = self.s3_mmio(addr) {
+            return self.s3_peek(port, 4);
         }
         let low = self.read_16(addr) as u32;
         let high = self.read_16(addr + 2) as u32;
@@ -1071,8 +1094,12 @@ impl Bus {
             self.page_gen[last] = self.page_gen[last].wrapping_add(1);
             return;
         }
-        if let Some(offset) = Vbe::lfb_offset(addr, 4) {
+        if let Some(offset) = self.vbe.lfb_offset(addr, 4) {
             self.write_vram(offset, &value.to_le_bytes());
+            return;
+        }
+        if let Some(port) = self.s3_mmio(addr) {
+            self.engine_write(port, value, 4);
             return;
         }
         self.write_16(addr, (value & 0xFFFF) as u16);
@@ -1827,6 +1854,13 @@ impl Bus {
             0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 && self.vga.decodes(port) => {
                 self.ext_crtc_write(self.vga.crtc_index, value)
             }
+            // The S3's sequencer registers, from 08h, and its graphics
+            // engine's ports.
+            0x3C5 if self.s3() && self.vga.sequencer_index >= 0x08 => {
+                self.vga.s3.write_seq(self.vga.sequencer_index, value)
+            }
+            p if self.s3() && s3::is_engine_port(p) => self.engine_write(p, value as u32, 1),
+            0xCFC..=0xCFF if self.pci_present() => self.pci_write(port, value),
 
             _ => {
                 if self.vga.ports().contains(&port) {
@@ -1839,6 +1873,10 @@ impl Bus {
                     self.vga.io_write(port, value);
                     if matches!(port, 0x3D5 | 0x3B5) && matches!(self.vga.crtc_index, 0x0C | 0x0D) {
                         self.update_vbe_start();
+                    }
+                    // What the S3 shows depends on the VGA's registers too.
+                    if self.s3() && !matches!(port, 0x3C6..=0x3C9 | 0x3DA | 0x3BA) {
+                        self.s3_settle();
                     }
                     // Suppress the per-write log for DAC ports (0x3C6..0x3C9):
                     // a full 256-color palette update is 1024 writes, which
@@ -2050,6 +2088,9 @@ impl Bus {
             0x3D5 | 0x3B5 if self.vga.crtc_index >= 0x19 && self.vga.decodes(port) => {
                 self.ext_crtc_read(self.vga.crtc_index)
             }
+            0x3C5 if self.s3() && self.vga.sequencer_index >= 0x08 => self.vga.s3.read_seq(self.vga.sequencer_index),
+            p if self.s3() && s3::is_engine_port(p) => self.engine_read(p, 1) as u8,
+            0xCFC..=0xCFF if self.pci_present() => self.pci_read(port),
 
             _ => {
                 if self.vga.ports().contains(&port) {
@@ -2169,6 +2210,9 @@ impl Bus {
     /// bits of the display start; the VBE protected-mode interface uses
     /// them.
     fn ext_crtc_write(&mut self, index: u8, value: u8) {
+        if self.s3() {
+            return self.s3_crtc_write(index, value);
+        }
         match index {
             0x69 => {
                 self.vbe.start_high = value;
@@ -2179,7 +2223,10 @@ impl Bus {
         }
     }
 
-    fn ext_crtc_read(&self, index: u8) -> u8 {
+    fn ext_crtc_read(&mut self, index: u8) -> u8 {
+        if self.s3() {
+            return self.s3_crtc_read(index);
+        }
         match index {
             0x69 => self.vbe.start_high,
             0x6A => self.vbe.bank as u8,

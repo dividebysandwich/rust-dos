@@ -135,6 +135,9 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     }
     cpu.bus.vbe.reset();
     let adapter = cpu.bus.vga.adapter;
+    if adapter == Adapter::S3 {
+        cpu.bus.s3_program_standard();
+    }
 
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);
