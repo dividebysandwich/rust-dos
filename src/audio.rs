@@ -124,9 +124,12 @@ pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
         let target = device.target_frames();
         let rate = crate::opl::RATE as usize;
         let frames = samples.len() / 2;
-        // Running dry: silence up to the target.
+        // Run dry: silence up to the target. A queue that is low but still
+        // playing gets none, as silence there would be a gap: the sound
+        // coming now keeps it going, and the sound of a slow frame comes
+        // with the frame after it, when emulated time catches up.
         let mut pad = 0;
-        if queued < target / 4 {
+        if queued == 0 {
             pad = target - queued;
             if !idle {
                 bus.audio_underruns += 1;
@@ -241,6 +244,16 @@ mod tests {
             pump(&mut bus, &device, 735, 735);
         }
         assert_eq!(device.borrow().queued, 1400 + 735);
+
+        // A frame 25 ms late: the device nearly runs dry, the frame brings a
+        // frame's sound, as emulated time ran to where the wall clock was
+        // when it began, and the frame after it the 25 ms. The sound goes
+        // on without silence.
+        pump(&mut bus, &device, 735, 1102 + 735);
+        pump(&mut bus, &device, 735 + 1102, 735);
+        assert_eq!(device.borrow().queued, 1400 + 735);
+        assert_eq!(bus.audio_underruns, 1);
+        assert!(device.borrow().played[1400 * 2..].iter().all(|&s| s == 100));
 
         // A frame 100 ms late: the device plays what it had, then waits,
         // and the sound of those 100 ms comes at once.
