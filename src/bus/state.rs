@@ -7,11 +7,11 @@ use super::Bus;
 use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, save_device};
 
 /// The sections' versions, changed with what a section holds.
-const RAM_VERSION: u16 = 1;
-const CORE_VERSION: u16 = 2;
+const RAM_VERSION: u16 = 2;
+const CORE_VERSION: u16 = 3;
 const VIDEO_VERSION: u16 = 1;
 const SOUND_VERSION: u16 = 1;
-const DOS_VERSION: u16 = 2;
+const DOS_VERSION: u16 = 3;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
