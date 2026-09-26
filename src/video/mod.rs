@@ -117,6 +117,14 @@ pub enum VideoMode {
 }
 
 impl VideoMode {
+    /// A text mode.
+    pub fn is_text(self) -> bool {
+        matches!(
+            self,
+            VideoMode::Text40x25 | VideoMode::Text40x25Color | VideoMode::Text80x25 | VideoMode::Text80x25Color | VideoMode::Mono80x25
+        )
+    }
+
     pub fn is_planar(self) -> bool {
         matches!(
             self,

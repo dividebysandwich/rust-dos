@@ -1981,6 +1981,7 @@ impl Bus {
     pub fn sync_display(&mut self) {
         let now = self.clock.now_ns();
         if self.vga.retrace_began(now) {
+            self.settle_register_mode();
             self.vga.latch_start_address();
             if self.vbe.latched_start != self.vbe.start {
                 self.vbe.latched_start = self.vbe.start;
@@ -1991,6 +1992,23 @@ impl Bus {
                 self.compare_gate_array();
             }
             self.count_frame();
+        }
+    }
+
+    /// After a switch between text and graphics made through the attribute
+    /// controller, as Windows' VDD makes one restoring a machine's display
+    /// or showing a message: show the mode the registers describe now that
+    /// the writes are done.
+    pub fn settle_register_mode(&mut self) {
+        if !std::mem::take(&mut self.vga.mode_switched) || self.video_mode == VideoMode::Vesa {
+            return;
+        }
+        if let Some(mode) = self.vga.register_mode()
+            && mode.is_text() != self.video_mode.is_text()
+        {
+            self.log_string(&format!("[VGA] Switch to {:?} through the registers", mode));
+            self.video_mode = mode;
+            self.vga.mark_dirty_full();
         }
     }
 

@@ -144,6 +144,35 @@ fn the_index_registers_read_back() {
 }
 
 #[test]
+fn text_and_graphics_switched_through_the_registers_show_at_the_retrace() {
+    let mut cpu = machine(0x12);
+    let attribute = |cpu: &mut Cpu, index: u8, value: u8| {
+        cpu.bus.io_read(0x3DA);
+        cpu.bus.io_write(0x3C0, index);
+        cpu.bus.io_write(0x3C0, value);
+    };
+    // Text through the attribute controller, as Windows' VDD shows its
+    // messages: the rest of the registers first, the mode at the retrace.
+    attribute(&mut cpu, 0x10, 0x0C);
+    cpu.bus.io_write(0x3D4, 0x01);
+    cpu.bus.io_write(0x3D5, 0x4F);
+    assert_eq!(cpu.bus.video_mode, video::VideoMode::Vga640x480);
+    cpu.bus.settle_register_mode();
+    assert_eq!(cpu.bus.video_mode, video::VideoMode::Text80x25Color);
+    // And back to its 640x480.
+    attribute(&mut cpu, 0x10, 0x01);
+    cpu.bus.settle_register_mode();
+    assert_eq!(cpu.bus.video_mode, video::VideoMode::Vga640x480);
+    // Nothing switched, nothing changes: a program's own tweak of a
+    // graphics mode stays what the BIOS set.
+    let mut cpu = machine(0x10);
+    cpu.bus.io_write(0x3D4, 0x12);
+    cpu.bus.io_write(0x3D5, 0xDF);
+    cpu.bus.settle_register_mode();
+    assert_eq!(cpu.bus.video_mode, video::VideoMode::Ega640x350);
+}
+
+#[test]
 fn text_colours_come_through_the_palette_registers_and_the_dac() {
     let mut cpu = machine(0x03);
     // Dark grey on black: palette register 8 holds 38h.

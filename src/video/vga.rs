@@ -30,6 +30,10 @@ pub struct VgaCard {
     pub attribute_index: u8,
     pub attribute_regs: [u8; 21],  // 0-0xF: Palette, 0x10-0x14: Control
     pub attribute_flip_flop: bool, // false = Address, true = Data
+    /// The attribute controller's mode register switched between text and
+    /// graphics: the mode the registers describe takes over at the next
+    /// retrace (`Bus::settle_register_mode`).
+    pub mode_switched: bool,
 
     /// Display-latched Start Address (byte offset after byte/word scaling).
     /// Real CRTCs sample the Start Address register at vertical retrace,
@@ -150,6 +154,7 @@ impl VgaCard {
             attribute_index: 0,
             attribute_regs: [0; 21],
             attribute_flip_flop: false,
+            mode_switched: false,
             latched_start_addr: 0,
             timing_cache: None,
             good_timing: CrtTiming::VGA_400,
@@ -344,6 +349,41 @@ impl VgaCard {
     /// color CRTC is mode 13h or one of its unchained "mode X" variants,
     /// whichever mode the program started from. Some games start from mode
     /// 12h for its 480-line timing and switch to 256 colors themselves.
+    /// The mode the registers describe, as far as the renderer tells modes
+    /// apart: text or graphics by the attribute controller, the 256-colour
+    /// and CGA modes by the graphics controller, and the planar ones by the
+    /// lines shown.
+    pub fn register_mode(&self) -> Option<super::VideoMode> {
+        use super::VideoMode;
+        if !self.adapter.ega_bios() {
+            return None;
+        }
+        let crtc = &self.crtc_regs;
+        let narrow = crtc[0x01] < 40;
+        if self.attribute_regs[0x10] & 0x01 == 0 {
+            return Some(match (self.misc_output_reg & 0x01 != 0, narrow) {
+                (false, _) => VideoMode::Mono80x25,
+                (true, true) => VideoMode::Text40x25Color,
+                (true, false) => VideoMode::Text80x25Color,
+            });
+        }
+        let (mode, map) = (self.graphics_regs[0x05], (self.graphics_regs[0x06] >> 2) & 0x03);
+        if mode & 0x40 != 0 {
+            return Some(VideoMode::Graphics320x200);
+        }
+        if map == 0x03 {
+            return Some(if mode & 0x20 != 0 { VideoMode::Cga320x200Color } else { VideoMode::Cga640x200 });
+        }
+        let end = crtc[0x12] as u32 | (crtc[0x07] as u32 & 0x02) << 7 | (crtc[0x07] as u32 & 0x40) << 3;
+        let scan = ((crtc[0x09] & 0x1F) as u32 + 1) << (crtc[0x09] >> 7);
+        Some(match (end + 1) / scan {
+            480 => VideoMode::Vga640x480,
+            350 => VideoMode::Ega640x350,
+            _ if narrow => VideoMode::Ega320x200,
+            _ => VideoMode::Ega640x200,
+        })
+    }
+
     pub fn check_video_mode(&self) -> Option<super::VideoMode> {
         if !self.adapter.vga_bios() {
             return None;
@@ -810,6 +850,9 @@ impl Device for VgaCard {
                 } else {
                     // Data Mode
                     if (self.attribute_index as usize) < self.attribute_regs.len() {
+                        if self.attribute_index == 0x10 && (self.attribute_regs[0x10] ^ value) & 0x01 != 0 {
+                            self.mode_switched = true;
+                        }
                         self.attribute_regs[self.attribute_index as usize] = value;
                         // println!("[VGA] Attr Reg {:02X} = {:02X}", self.attribute_index, value);
                         self.mark_dirty_full();
@@ -932,6 +975,8 @@ crate::state_fields!(VgaCard {
     adapter, composite, switches, mono_monitor,
     // Worked out again after a load (`after_load`).
     timing_cache, composite_decoder, dirty, dirty_y_min, dirty_y_max,
+    // Settled at the next retrace.
+    mode_switched,
     // The front end's.
     blink_on,
 });
