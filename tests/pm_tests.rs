@@ -783,6 +783,22 @@ fn lar_lsl_verr_verw_and_arpl() {
     assert_eq!(rig.cpu.si(), 0x000B);
 }
 
+/// A 32-bit LAR reads the limit's bits 16-19 as well as the flags, which
+/// Windows 95 writes back to set a descriptor's AVL bit.
+#[test]
+fn lar_reads_the_high_limit_bits() {
+    let mut rig = Rig::new();
+    rig.set_gdt(FREE, seg_desc(0x8040_0000, 0x3_64DF, 0xF3, 0x1));
+    rig.run(|a| {
+        a.mov(ecx, FREE as u32 | 3)?;
+        a.lar(eax, ecx)?;
+        a.lar(bx, cx)?;
+        a.hlt()
+    });
+    assert_eq!(rig.cpu.eax(), 0x0013_F300);
+    assert_eq!(rig.cpu.bx(), 0xF300);
+}
+
 #[test]
 fn back_to_real_mode_with_a_flat_ds() {
     let mut rig = Rig::new();

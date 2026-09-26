@@ -324,7 +324,10 @@ pub fn load_access(cpu: &mut Cpu, instr: &Instruction, limit: bool) -> CpuResult
         let value = if limit {
             desc.limit()
         } else {
-            ((desc.0 >> 32) as u32) & if dest.size() == 4 { 0x00F0_FF00 } else { 0xFF00 }
+            // With the limit's bits 16-19, as the processors (and DOSBox)
+            // give them: Windows 95's KRNL386 sets a huge block's first
+            // selector's AVL bit by writing back what LAR read, limit and all.
+            ((desc.0 >> 32) as u32) & if dest.size() == 4 { 0x00FF_FF00 } else { 0xFF00 }
         };
         cpu.set_reg(dest, value);
     }
