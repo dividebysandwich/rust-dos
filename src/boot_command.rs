@@ -1,0 +1,147 @@
+//! BOOT: start an operating system from a disk image, with DOSBox
+//! Staging's syntax. The images given on the command line go on A: (or the
+//! drive -l names) as MOUNT puts them there; a hard disk image mounted
+//! with MOUNT or IMGMOUNT boots with -l and its drive.
+
+use crate::command::ShellCommand;
+use crate::cpu::Cpu;
+use crate::disk::{DriveKind, drive_letter};
+use crate::mount::{MountCmd, PathContext, parse_mount_tokens, tokenize};
+use crate::video::print_string;
+
+pub const BOOT_USAGE: &str = "Boots an operating system from a disk image.\r\n\
+\r\n\
+BOOT [image [image ...]] [-l drive]\r\n\
+\r\n\
+  image     Floppy disk images to put in A: and boot from; Ctrl+F4 changes\r\n\
+            to the next one\r\n\
+  -l drive  The drive to boot from: A: or B:, or a hard disk image mounted\r\n\
+            with MOUNT or IMGMOUNT\r\n\
+\r\n\
+The system has the machine until it turns it off. Examples:\r\n\
+  IMGMOUNT C win95.img\r\n\
+  BOOT -l C\r\n";
+
+/// What BOOT was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+enum Request {
+    Help,
+    /// Boot from `drive` (A: unless -l says otherwise), after putting the
+    /// images there.
+    Boot { drive: u8, images: Vec<String> },
+}
+
+fn parse(tokens: &[String]) -> Result<Request, String> {
+    let mut drive = None;
+    let mut images = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        match token.to_ascii_lowercase().as_str() {
+            "/?" | "-?" | "-h" | "--help" => return Ok(Request::Help),
+            "-l" => {
+                i += 1;
+                let letter = tokens.get(i).ok_or("-l needs a drive letter")?;
+                drive = Some(parse_letter(letter)?);
+            }
+            t if t.starts_with("-l") && t.len() > 2 => drive = Some(parse_letter(&token[2..])?),
+            t if t.starts_with('-') => return Err(format!("Unknown option '{}'", token)),
+            _ => images.push(token.clone()),
+        }
+        i += 1;
+    }
+    if drive.is_none() && images.is_empty() {
+        return Ok(Request::Help);
+    }
+    Ok(Request::Boot { drive: drive.unwrap_or(0), images })
+}
+
+fn parse_letter(text: &str) -> Result<u8, String> {
+    let text = text.strip_suffix(':').unwrap_or(text);
+    match text.as_bytes() {
+        [c] if c.is_ascii_alphabetic() => Ok(c.to_ascii_uppercase() - b'A'),
+        _ => Err(format!("'{}' isn't a drive letter", text)),
+    }
+}
+
+/// BOOT [image ...] [-l drive]
+pub struct BootCommand;
+
+impl ShellCommand for BootCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let request = tokenize(args).and_then(|tokens| parse(&tokens));
+        let (drive, images) = match request {
+            Ok(Request::Help) => {
+                print_string(cpu, BOOT_USAGE);
+                return;
+            }
+            Ok(Request::Boot { drive, images }) => (drive, images),
+            Err(e) => {
+                print_string(cpu, &format!("{}\r\n", e));
+                return;
+            }
+        };
+        if !cpu.process_stack.is_empty() || cpu.secondary.is_some() {
+            print_string(cpu, "BOOT can't start a system while a program runs\r\n");
+            return;
+        }
+        if !images.is_empty()
+            && let Err(e) = mount_images(cpu, drive, images)
+        {
+            print_string(cpu, &format!("{}\r\n", e));
+            return;
+        }
+        let Some(unit) = crate::boot::drive_unit(&cpu.bus, drive) else {
+            let msg = format!("Drive {}: can't be booted: it isn't a disk image\r\n", drive_letter(drive));
+            print_string(cpu, &msg);
+            return;
+        };
+        if let Err(e) = crate::boot::boot(cpu, unit) {
+            print_string(cpu, &format!("{}\r\n", e));
+        }
+    }
+}
+
+/// Put `images` in `drive` as MOUNT does: floppy images in A: and B:, hard
+/// disk images elsewhere.
+fn mount_images(cpu: &mut Cpu, drive: u8, images: Vec<String>) -> Result<(), String> {
+    let kind = if drive < 2 { "floppy" } else { "hdd" };
+    let mut tokens = vec![drive_letter(drive).to_string()];
+    tokens.extend(images);
+    tokens.extend(["-t".to_string(), kind.to_string()]);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let home = dirs::home_dir();
+    let disk = &cpu.bus.disk;
+    let locate = |path: &str| disk.resolve_path(path);
+    let paths =
+        PathContext { base: &cwd, config_dir: cpu.bus.config_dir.as_deref(), home: home.as_deref(), locate: &locate };
+    let spec = match parse_mount_tokens(&tokens, &paths)? {
+        MountCmd::Mount(spec) => spec,
+        _ => return Err("BOOT needs disk images".to_string()),
+    };
+    let replace = spec.path.is_file() && cpu.bus.disk.drive_kind(drive) != Some(DriveKind::Virtual);
+    cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, replace).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(line: &str) -> Vec<String> {
+        tokenize(line).unwrap()
+    }
+
+    #[test]
+    fn boots_a_drive_or_images() {
+        assert_eq!(parse(&tokens("-l C")), Ok(Request::Boot { drive: 2, images: vec![] }));
+        assert_eq!(parse(&tokens("-lc:")), Ok(Request::Boot { drive: 2, images: vec![] }));
+        assert_eq!(
+            parse(&tokens("disk1.img disk2.img")),
+            Ok(Request::Boot { drive: 0, images: vec!["disk1.img".into(), "disk2.img".into()] })
+        );
+        assert_eq!(parse(&tokens("")), Ok(Request::Help));
+        assert_eq!(parse(&tokens("/?")), Ok(Request::Help));
+        assert!(parse(&tokens("-l")).is_err());
+        assert!(parse(&tokens("-x")).is_err());
+    }
+}

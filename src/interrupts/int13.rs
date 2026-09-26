@@ -33,6 +33,10 @@ const STATUS_CHANGED: u8 = 0x06;
 /// in drive-letter order. Anything else (including probes like DL=FFh, which
 /// F117's DSWAP.EXE uses to find where the BIOS rejects drives) is absent.
 fn bios_drive(cpu: &Cpu, dl: u8) -> Option<u8> {
+    // A booted system's units are the disk images (`boot::unit_drive`).
+    if cpu.bus.boot.is_some() {
+        return crate::boot::unit_drive(&cpu.bus, dl);
+    }
     if dl < 0x80 {
         (dl < FLOPPY_DRIVES && cpu.bus.disk.drive_kind(dl) == Some(DriveKind::Floppy)).then_some(dl)
     } else {
@@ -47,7 +51,16 @@ fn bios_drive(cpu: &Cpu, dl: u8) -> Option<u8> {
 /// Floppy units the BIOS has, whether or not a disk is in them: a mount on
 /// B: alone makes an empty A: unit too.
 fn floppy_count(cpu: &Cpu) -> u8 {
-    cpu.bus.disk.floppy_units()
+    if cpu.bus.boot.is_some() { crate::boot::FLOPPY_UNITS } else { cpu.bus.disk.floppy_units() }
+}
+
+/// The hard disk units the BIOS has, 80h up.
+fn hard_disk_count(cpu: &Cpu) -> usize {
+    if cpu.bus.boot.is_some() {
+        crate::boot::hard_disk_drives(&cpu.bus).len()
+    } else {
+        cpu.bus.disk.drives_of_kind(DriveKind::HardDisk).len()
+    }
 }
 
 /// Finish a call with `status` in AH (and the BIOS data area, for AH=01h):
@@ -83,23 +96,8 @@ fn transfer(cpu: &mut Cpu, dl: u8, drive: u8, disk: &Rc<DiskImage>, ah: u8) {
         _ if count == 0 => Err(STATUS_BAD_COMMAND),
         None => Err(STATUS_SECTOR_NOT_FOUND),
         Some(lba) => {
-            let addr = cpu.get_physical_addr(cpu.es(), cpu.bx());
-            let mut data = vec![0u8; count * SECTOR_SIZE];
-            match ah {
-                0x02 => disk.read(lba, &mut data).map(|()| {
-                    for (i, &b) in data.iter().enumerate() {
-                        cpu.bus.write_8(addr + i, b);
-                    }
-                }),
-                0x03 => {
-                    for (i, b) in data.iter_mut().enumerate() {
-                        *b = cpu.bus.read_8(addr + i);
-                    }
-                    disk.write(lba, &data)
-                }
-                _ => disk.read(lba, &mut data),
-            }
-            .map(|()| lba)
+            let buffer = cpu.real_linear(cpu.es(), cpu.bx());
+            move_sectors(cpu, disk, lba, count, buffer, ah == 0x03, ah == 0x04).map(|()| lba)
         }
     };
     match result {
@@ -117,6 +115,102 @@ fn transfer(cpu: &mut Cpu, dl: u8, drive: u8, disk: &Rc<DiskImage>, ah: u8) {
     }
 }
 
+/// Read `count` sectors from `lba` into the buffer at linear address
+/// `buffer`, or with `write` write them from it; with `verify` just read
+/// them.
+fn move_sectors(cpu: &mut Cpu, disk: &DiskImage, lba: u64, count: usize, buffer: u32, write: bool, verify: bool) -> Result<(), u8> {
+    let mut data = vec![0u8; count * SECTOR_SIZE];
+    if write {
+        cpu.bus.guest_read_bytes(buffer, &mut data);
+        disk.write(lba, &data)
+    } else {
+        disk.read(lba, &mut data)?;
+        if !verify {
+            cpu.bus.guest_write_bytes(buffer, &data);
+        }
+        Ok(())
+    }
+}
+
+/// AH=41h, 42h-44h, 47h and 48h: the extensions (EDD 1.1) of the hard
+/// disks with images, which address sectors by number. DOSBox-X's
+/// bios_disk.cpp has them the same.
+fn extensions(cpu: &mut Cpu, dl: u8, drive: Option<u8>, image: Option<&Rc<DiskImage>>, ah: u8) {
+    let (Some(drive), Some(disk), true) = (drive, image, dl >= 0x80) else {
+        finish(cpu, dl, 0x01);
+        return;
+    };
+    let packet = cpu.real_linear(cpu.ds(), cpu.si());
+    match ah {
+        // Installation check: version 2.1 (EDD 1.1) with the disk access
+        // functions.
+        0x41 if cpu.bx() == 0x55AA => {
+            cpu.set_bx(0xAA55);
+            cpu.set_cx(0x0001);
+            cpu.set_reg8(Register::AH, 0x21);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+        0x41 => finish(cpu, dl, 0x01),
+        // Read, write and verify with the disk address packet at DS:SI:
+        // its sectors, the buffer and the first sector's number.
+        0x42..=0x44 => {
+            let count = cpu.bus.guest_read_16(packet + 2) as usize;
+            let (offset, segment) = (cpu.bus.guest_read_16(packet + 4), cpu.bus.guest_read_16(packet + 6));
+            let lba = cpu.bus.guest_read_32(packet + 8) as u64 | (cpu.bus.guest_read_32(packet + 12) as u64) << 32;
+            let buffer = if (offset, segment) == (0xFFFF, 0xFFFF) && cpu.bus.guest_read_8(packet) >= 0x18 {
+                cpu.bus.guest_read_32(packet + 16)
+            } else {
+                cpu.real_linear(segment, offset)
+            };
+            let result = if ah == 0x43 && !disk.writable() {
+                Err(0x03)
+            } else if lba + count as u64 > disk.sectors() {
+                Err(STATUS_SECTOR_NOT_FOUND)
+            } else {
+                move_sectors(cpu, disk, lba, count, buffer, ah == 0x43, ah == 0x44)
+            };
+            match result {
+                Ok(()) => {
+                    if ah != 0x44 && count > 0 {
+                        cpu.bus.sector_activity(drive, lba, count as u32, ah == 0x43);
+                    }
+                    finish(cpu, dl, 0);
+                }
+                Err(status) => {
+                    cpu.bus.guest_write_16(packet + 2, 0);
+                    finish(cpu, dl, status);
+                }
+            }
+        }
+        // Seek: nothing to do.
+        0x47 => finish(cpu, dl, 0),
+        // The drive's parameters, in the buffer at DS:SI, whose size the
+        // caller puts in its first word.
+        0x48 => {
+            let size = cpu.bus.guest_read_16(packet);
+            if size < 0x1A {
+                finish(cpu, dl, 0x01);
+                return;
+            }
+            let g = disk.geometry();
+            let mut info = Vec::with_capacity(0x1E);
+            info.extend_from_slice(&(if size >= 0x1E { 0x1Eu16 } else { 0x1A }).to_le_bytes());
+            info.extend_from_slice(&0x0002u16.to_le_bytes()); // the geometry is valid
+            info.extend_from_slice(&g.cylinders.to_le_bytes());
+            info.extend_from_slice(&g.heads.to_le_bytes());
+            info.extend_from_slice(&g.sectors.to_le_bytes());
+            info.extend_from_slice(&disk.sectors().to_le_bytes());
+            info.extend_from_slice(&(SECTOR_SIZE as u16).to_le_bytes());
+            if size >= 0x1E {
+                info.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // no EDD configuration
+            }
+            cpu.bus.guest_write_bytes(packet, &info);
+            finish(cpu, dl, 0);
+        }
+        _ => finish(cpu, dl, 0x01),
+    }
+}
+
 /// AH=08h on a disk image: its geometry, with the cylinder count cut to
 /// what CHS can address.
 fn image_parameters(cpu: &mut Cpu, dl: u8, disk: &DiskImage) {
@@ -131,7 +225,7 @@ fn image_parameters(cpu: &mut Cpu, dl: u8, disk: &DiskImage) {
         cpu.set_es(0xF000);
         cpu.set_di(crate::bios::DISKETTE_PARAMS);
     } else {
-        let count = cpu.bus.disk.drives_of_kind(DriveKind::HardDisk).len();
+        let count = hard_disk_count(cpu);
         cpu.set_reg8(Register::DL, count as u8);
     }
     cpu.set_reg8(Register::AL, 0);
@@ -162,6 +256,8 @@ pub fn handle(cpu: &mut Cpu) {
         0x02..=0x04 => match (drive, &image) {
             (Some(drive), Some(disk)) => transfer(cpu, dl, drive, disk, ah),
             (None, _) => finish(cpu, dl, not_present_status(dl)),
+            // A booted system's floppy unit without a disk.
+            (Some(_), None) if cpu.bus.boot.is_some() => finish(cpu, dl, not_present_status(dl)),
             // A read-only mount looks like a write-protected disk.
             (Some(d), None) if ah == 0x03 && !cpu.bus.disk.is_writable(d) => finish(cpu, dl, 0x03),
             (Some(_), None) => {
@@ -213,7 +309,7 @@ pub fn handle(cpu: &mut Cpu) {
                     finish(cpu, dl, 0x01);
                     return;
                 }
-                let count = cpu.bus.disk.drives_of_kind(DriveKind::HardDisk).len();
+                let count = hard_disk_count(cpu);
                 cpu.set_reg8(Register::CH, 0xFF);
                 cpu.set_reg8(Register::CL, 0x3F | 0xC0);
                 cpu.set_reg8(Register::DH, 15);
@@ -261,6 +357,8 @@ pub fn handle(cpu: &mut Cpu) {
                 finish(cpu, dl, status);
             }
         },
+
+        0x41..=0x44 | 0x47 | 0x48 => extensions(cpu, dl, drive, image.as_ref(), ah),
 
         _ => {
             cpu.bus.log_string(&format!(

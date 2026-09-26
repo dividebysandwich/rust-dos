@@ -1087,7 +1087,7 @@ impl DebugHub {
             Cmd::Input { events, wait } => {
                 let mut low = Vec::new();
                 for ev in &events {
-                    if let Err(e) = expand_input(ev, cpu.bus.kbd.layout, &mut low) {
+                    if let Err(e) = expand_input(ev, cpu.bus.typing_layout(), &mut low) {
                         let _ = req.reply.send(Reply::bad(e));
                         return;
                     }

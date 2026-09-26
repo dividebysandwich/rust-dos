@@ -8,7 +8,7 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 4;
+const CORE_VERSION: u16 = 5;
 const VIDEO_VERSION: u16 = 1;
 const SOUND_VERSION: u16 = 1;
 const DOS_VERSION: u16 = 3;
@@ -26,6 +26,7 @@ impl Bus {
     pub(crate) fn save_state(&self, w: &mut Writer) {
         let Bus {
             ram,
+            boot,
             keyboard_buffer,
             kbd,
             kbc,
@@ -129,6 +130,7 @@ impl Bus {
                 pit0, clock, pic, dma, joystick,
                 dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
                 post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
+                boot,
             );
         });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
@@ -157,6 +159,7 @@ impl Bus {
     pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
         let Bus {
             ram,
+            boot,
             keyboard_buffer,
             kbd,
             kbc,
@@ -260,6 +263,7 @@ impl Bus {
             pit0, clock, pic, dma, joystick,
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
             post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
+                boot,
         );
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);

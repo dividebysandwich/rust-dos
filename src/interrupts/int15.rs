@@ -38,9 +38,18 @@ pub fn handle(cpu: &mut Cpu) {
         // this reports none, as with HIMEM.SYS loaded: programs that took
         // the memory this way would overwrite XMS blocks.
         0x88 => {
-            cpu.set_ax(0);
+            // A booted system's own HIMEM.SYS asks here what there is.
+            let kb = if cpu.bus.boot.is_some() { extended_kb(cpu).min(0xFFFF) as u16 } else { 0 };
+            cpu.set_ax(kb);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
+        // AX=E820h: the memory map, an entry at a time into ES:DI.
+        0xE8 if al == 0x20 && cpu.edx() == SMAP => memory_map(cpu),
+        // The keyboard interrupt's intercept (AH=4Fh): the key goes on as
+        // it is. SysRq (85h) and the multitaskers' device busy (90h) and
+        // interrupt complete (91h) hooks: nothing to do.
+        0x4F => cpu.set_cpu_flag(CpuFlags::CF, true),
+        0x85 | 0x90 | 0x91 => ok(cpu),
         0x87 => block_move(cpu),
         // The BIOS's joystick: DX=0 reads the buttons into bits 4-7 of AL,
         // DX=1 the axes of joysticks A and B into AX, BX, CX and DX.
@@ -95,9 +104,11 @@ pub fn handle(cpu: &mut Cpu) {
 
             // Its length (8), the model as at F000:FFFE (FCh an AT, FFh a
             // Tandy 1000, FDh a PCjr), submodel 01h, BIOS revision 0, the
-            // features (60h: a real-time clock and a second 8259).
+            // features (60h: a real-time clock and a second 8259; 10h: the
+            // keyboard interrupt calls AH=4Fh, as a booted system's does).
             let model = cpu.bus.read_8(0xFFFFE);
-            cpu.bus.write_rom(phys_addr, &[0x08, 0x00, model, 0x01, 0x00, 0x60, 0x00, 0x00]);
+            let features = if cpu.bus.boot.is_some() { 0x70 } else { 0x60 };
+            cpu.bus.write_rom(phys_addr, &[0x08, 0x00, model, 0x01, 0x00, features, 0x00, 0x00]);
 
             cpu.set_es(table_seg);
             cpu.set_bx(table_off);
@@ -117,12 +128,38 @@ fn unsupported(cpu: &mut Cpu) {
     cpu.set_cpu_flag(CpuFlags::CF, true);
 }
 
+/// "SMAP", the signature of AX=E820h in EDX and EAX.
+const SMAP: u32 = 0x534D_4150;
+
+/// AX=E820h: the entry EBX of the memory map into the 20 bytes at ES:DI,
+/// with EBX the next one's (0 after the last): conventional memory and
+/// extended memory to use, and the BIOS ROM reserved.
+fn memory_map(cpu: &mut Cpu) {
+    let top = cpu.bus.ram().len() as u64;
+    let entries: [(u64, u64, u32); 3] = [(0, 0xA0000, 1), (0xF0000, 0x10000, 2), (0x10_0000, top - 0x10_0000, 1)];
+    let Some(&(base, len, kind)) = entries.get(cpu.ebx() as usize) else {
+        unsupported(cpu);
+        return;
+    };
+    let buffer = cpu.real_linear(cpu.es(), cpu.di());
+    let mut entry = [0u8; 20];
+    entry[0..8].copy_from_slice(&base.to_le_bytes());
+    entry[8..16].copy_from_slice(&len.to_le_bytes());
+    entry[16..20].copy_from_slice(&kind.to_le_bytes());
+    cpu.bus.guest_write_bytes(buffer, &entry);
+    let next = cpu.ebx() + 1;
+    cpu.set_ebx(if (next as usize) < entries.len() { next } else { 0 });
+    cpu.set_eax(SMAP);
+    cpu.set_ecx(20);
+    cpu.set_cpu_flag(CpuFlags::CF, false);
+}
+
 /// AH=87h: copy CX words between two physical addresses described by the
 /// source and destination descriptors of the GDT at ES:SI.
 fn block_move(cpu: &mut Cpu) {
-    let gdt = cpu.get_physical_addr(cpu.es(), cpu.si());
-    let base = |cpu: &Cpu, desc: usize| -> usize {
-        let b = |i| cpu.bus.read_8(desc + i) as usize;
+    let gdt = cpu.real_linear(cpu.es(), cpu.si());
+    let base = |cpu: &mut Cpu, desc: u32| -> usize {
+        let mut b = |i| cpu.bus.guest_read_8(desc + i) as usize;
         b(2) | b(3) << 8 | b(4) << 16 | b(7) << 24
     };
     let source = base(cpu, gdt + 0x10);

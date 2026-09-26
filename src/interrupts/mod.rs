@@ -131,6 +131,8 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_PS2_REPORT => crate::mouse::ps2_report(cpu),
         crate::bios::SERVICE_PORT_ACCESS => crate::bios::next_port_access(cpu),
         crate::bios::SERVICE_MOUSE_CALLBACK_DONE => crate::mouse::clear_callback_busy(&mut cpu.bus),
+        crate::bios::SERVICE_KBD_SCAN => crate::keyboard::bios_scan(cpu),
+        crate::bios::SERVICE_KBD_PAUSED => crate::keyboard::bios_paused(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service
@@ -176,6 +178,20 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             cpu.set_reg8(iced_x86::Register::AH, 0x29);
         } // IO Error, Selected, Out of Paper
         0x2F => int2f::handle(cpu),
+        // No bootable disk (ROM BASIC on an IBM PC): a booted machine turns
+        // off, back to the built-in DOS.
+        0x18 => {
+            if cpu.bus.boot.is_some() {
+                crate::video::print_string(cpu, "No bootable disk\r\n");
+                crate::boot::power_off(cpu, "INT 18h, no bootable disk");
+            }
+        }
+        // The bootstrap loader: start over from the disk, as a reset does
+        // (the built-in DOS's shell starts again).
+        0x19 => {
+            cpu.bus.log_string("[BIOS] INT 19h: restarting");
+            cpu.bus.reset_requested = true;
+        }
         0x67 => crate::ems::handle(cpu),
         0x33 => int33::handle(cpu),
         0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F => {
@@ -196,6 +212,8 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         }
     }
     // The files the call opened, closed or moved in, in the file table in
-    // DOS memory.
-    crate::dos_files::flush(&mut cpu.bus);
+    // DOS memory (which a booted system doesn't have).
+    if cpu.bus.boot.is_none() {
+        crate::dos_files::flush(&mut cpu.bus);
+    }
 }

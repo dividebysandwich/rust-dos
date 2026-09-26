@@ -2,6 +2,8 @@ pub mod asm16;
 pub mod audio;
 pub mod batch;
 pub mod bios;
+pub mod boot;
+pub mod boot_command;
 pub mod bus;
 pub mod capture;
 pub mod cheats;

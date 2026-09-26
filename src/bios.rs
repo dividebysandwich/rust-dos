@@ -9,9 +9,9 @@ use crate::cpu::Cpu;
 /// Vectors handled by emulator services (`FE 38 vv` traps). Their traps sit
 /// four bytes apart from F000:1000 in this order; new vectors go at the end
 /// because programs may remember the addresses of the older ones.
-pub const HLE_VECTORS: [u8; 20] = [
+pub const HLE_VECTORS: [u8; 22] = [
     0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33, 0x00,
-    0x06, 0x25, 0x26, 0x67,
+    0x06, 0x25, 0x26, 0x67, 0x18, 0x19,
 ];
 const TRAP_BASE: u16 = 0x1000;
 
@@ -43,6 +43,11 @@ pub const SERVICE_PORT_ACCESS: u8 = 0x1F;
 /// The INT 33h event handler the mouse's stub called has returned
 /// (`mouse::clear_callback_busy`).
 pub const SERVICE_MOUSE_CALLBACK_DONE: u8 = 0x20;
+/// The scan code the keyboard interrupt of a booted system read, for the
+/// BIOS to keep in its buffer (`keyboard::bios_scan`).
+pub const SERVICE_KBD_SCAN: u8 = 0x21;
+/// Whether Pause still holds the machine (`keyboard::bios_paused`).
+pub const SERVICE_KBD_PAUSED: u8 = 0x22;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.
@@ -63,6 +68,12 @@ pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
 /// hardware a V86 monitor follows through the ports it traps: it makes the
 /// port accesses that make the changes (`Bus::port_accesses`), then IRETs.
 pub const PORT_ACCESSES: u16 = 0x11F0;
+/// The keyboard interrupt (IRQ 1) of a booted system, which keeps the
+/// keystrokes in the BIOS data area as a PC's BIOS does.
+const KBD_HANDLER: u16 = 0x1230;
+/// The fixed disk parameter tables of the first two hard disks, which
+/// INT 41h and 46h point to.
+const FIXED_DISK_PARAMS: u16 = 0x12C0;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 pub const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -127,6 +138,87 @@ pub fn default_ivt() -> [u32; 256] {
     ivt[0x1F] = rom_pointer(FONT_8X8_HIGH);
     ivt[0x43] = rom_pointer(FONT_8X8);
     ivt
+}
+
+/// The vector table the BIOS leaves an operating system it boots
+/// (`boot::power_on`): the default one without the built-in DOS's and its
+/// drivers' services, with a keyboard interrupt that keeps the keystrokes
+/// in the BIOS data area, and the fixed disk parameter tables.
+pub fn boot_ivt() -> [u32; 256] {
+    let mut ivt = default_ivt();
+    for vector in [0x00, 0x20, 0x21, 0x25, 0x26, 0x2F, 0x33, 0x67] {
+        ivt[vector] = far(IRET_HANDLER);
+    }
+    ivt[0x09] = far(KBD_HANDLER);
+    ivt[0x41] = far(FIXED_DISK_PARAMS);
+    ivt[0x46] = far(FIXED_DISK_PARAMS + 16);
+    ivt
+}
+
+fn write_ivt(bus: &mut Bus, ivt: &[u32; 256]) {
+    for (vector, &entry) in ivt.iter().enumerate() {
+        bus.write_16(vector * 4, entry as u16);
+        bus.write_16(vector * 4 + 2, (entry >> 16) as u16);
+    }
+}
+
+/// Set up the vector table and the BIOS data area as a PC's BIOS leaves
+/// them for the operating system it boots, in memory cleared to zeros,
+/// with `hard_disks` the geometries of the hard disks as INT 13h has them.
+pub fn install_for_boot(bus: &mut Bus, hard_disks: &[crate::diskimage::Chs]) {
+    write_ivt(bus, &boot_ivt());
+    // The fixed disk parameter tables: cylinders, heads, no reduced write
+    // current, no write precompensation, the control byte (8: more than
+    // eight heads), the landing zone and the sectors per track.
+    for i in 0..2 {
+        let mut table = [0u8; 16];
+        if let Some(chs) = hard_disks.get(i) {
+            let cylinders = chs.cylinders.clamp(1, 1024) as u16;
+            table[0..2].copy_from_slice(&cylinders.to_le_bytes());
+            table[2] = chs.heads as u8;
+            table[5..7].copy_from_slice(&0xFFFFu16.to_le_bytes());
+            table[8] = if chs.heads > 8 { 0x08 } else { 0 };
+            table[12..14].copy_from_slice(&cylinders.to_le_bytes());
+            table[14] = chs.sectors as u8;
+        }
+        write_rom(bus, FIXED_DISK_PARAMS + 16 * i as u16, &table);
+    }
+
+    // The serial ports (none) and the parallel port (with a DAC on it).
+    if bus.lpt_dac.is_some() {
+        bus.write_16(0x0408, crate::lpt_dac::LPT1);
+    }
+    // The equipment word: two floppy drives (bits 0 and 6-7), the
+    // coprocessor (bit 1), a PS/2 mouse (bit 2), the video adapter's
+    // initial mode (bits 4-5, from `video::bios::install`), the game port
+    // (bit 12) and the parallel port (bits 14-15).
+    let mut equipment = 0x0047;
+    equipment |= if bus.vga.setup().mono() { 0x0030 } else { 0x0020 };
+    if bus.joystick.present() {
+        equipment |= 0x1000;
+    }
+    if bus.lpt_dac.is_some() {
+        equipment |= 0x4000;
+    }
+    bus.write_16(0x0410, equipment);
+    set_machine_id(bus);
+    // The keyboard: Num Lock on, an enhanced keyboard, and the buffer
+    // from 40:1E to 40:3E, empty.
+    bus.write_8(0x0417, 0x20);
+    bus.write_8(0x0496, crate::keyboard::ENHANCED_KEYBOARD);
+    bus.write_8(0x0497, 0x02);
+    bus.write_16(0x041A, 0x001E);
+    bus.write_16(0x041C, 0x001E);
+    bus.write_16(0x0480, 0x001E);
+    bus.write_16(0x0482, 0x003E);
+    // The hard disks.
+    bus.write_8(0x0475, hard_disks.len().min(0xFF) as u8);
+    // The ticks since midnight, from the real-time clock.
+    let now = bus.cmos.now();
+    let seconds = chrono::Timelike::num_seconds_from_midnight(&now) as u64;
+    let ticks = seconds * crate::timer::PIT_HZ / 65536;
+    bus.write_16(0x046C, ticks as u16);
+    bus.write_16(0x046E, (ticks >> 16) as u16);
 }
 
 /// Write the ROM code and data, and the default vector table.
@@ -224,19 +316,55 @@ pub fn install(bus: &mut Bus) {
             0xEB, 0xDF, // JMP next
         ],
     );
+    write_rom(bus, KBD_HANDLER, &keyboard_handler());
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);
     // BIOS date, the model byte and the base memory.
     write_rom(bus, 0xFFF5, b"01/10/92");
     set_machine_id(bus);
 
-    let ivt = default_ivt();
-    for (vector, &entry) in ivt.iter().enumerate() {
-        bus.write_16(vector * 4, entry as u16);
-        bus.write_16(vector * 4 + 2, (entry >> 16) as u16);
-    }
+    write_ivt(bus, &default_ivt());
     // The video BIOS's VESA data.
     crate::interrupts::vbe::install_rom(bus);
+}
+
+/// The keyboard interrupt of a booted system, as a PC's BIOS runs it:
+/// read the scan code, let INT 15h AH=4Fh take it or change it, keep the
+/// keystroke (`keyboard::bios_scan`), and acknowledge the interrupt.
+/// Ctrl+Break calls INT 1Bh, Print Screen INT 05h, and Pause holds the
+/// machine here until another key.
+fn keyboard_handler() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(KBD_HANDLER);
+    a.op(&[0x50]); // PUSH AX
+    a.op(&[0xE4, 0x60]); // IN AL, 60h
+    a.op(&[0xB4, 0x4F, 0xF9, 0xCD, 0x15]); // MOV AH, 4Fh; STC; INT 15h
+    a.jump(0x73, "eoi"); // JNC eoi: the hook took the key
+    a.op(&[0xFE, 0x39, SERVICE_KBD_SCAN]); // AH: what else to do
+    a.op(&[0x80, 0xFC, 0x01]); // CMP AH, 1
+    a.jump(0x75, "not_break");
+    a.op(&[0xCD, 0x1B]); // INT 1Bh
+    a.jump(0xEB, "eoi");
+    a.label("not_break");
+    a.op(&[0x80, 0xFC, 0x02]); // CMP AH, 2
+    a.jump(0x75, "not_print");
+    a.op(&[0xCD, 0x05]); // INT 05h
+    a.jump(0xEB, "eoi");
+    a.label("not_print");
+    a.op(&[0x80, 0xFC, 0x03]); // CMP AH, 3
+    a.jump(0x75, "eoi");
+    // Pause: acknowledge, then wait with interrupts on for the key that
+    // ends it.
+    a.op(&[0xB0, 0x20, 0xE6, 0x20]); // MOV AL, 20h; OUT 20h, AL
+    a.label("pause");
+    a.op(&[0xFB, 0xF4]); // STI; HLT
+    a.op(&[0xFE, 0x39, SERVICE_KBD_PAUSED]); // AH=3 while paused
+    a.op(&[0x80, 0xFC, 0x03]); // CMP AH, 3
+    a.jump(0x74, "pause");
+    a.op(&[0xFA, 0x58, 0xCF]); // CLI; POP AX; IRET
+    a.label("eoi");
+    a.op(&[0xFA, 0xB0, 0x20, 0xE6, 0x20]); // CLI; MOV AL, 20h; OUT 20h, AL
+    a.op(&[0x58, 0xCF]); // POP AX; IRET
+    a.finish()
 }
 
 /// Put the default vectors back, except those pointing into `keep`
@@ -278,6 +406,8 @@ pub fn post(cpu: &mut Cpu) {
             cpu.set_cs(segment);
             cpu.set_ip(offset);
         }
+        // A booted system starts over from its disk.
+        _ if cpu.bus.boot.is_some() => crate::boot::restart(cpu),
         _ => {
             cpu.bus.log_string(&format!(
                 "[BIOS] CPU reset (shutdown code {:02X}h): ending the program",

@@ -5,6 +5,9 @@ const BDA_SHIFT_FLAGS: usize = 0x0417;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    if cpu.bus.boot.is_some() {
+        return booted(cpu, ah);
+    }
     match ah {
         // AH = 00h: Read Key (Blocking)
         // AH = 10h: Read Extended Key (Blocking)
@@ -105,5 +108,55 @@ fn plain_keystroke(key: u16) -> u16 {
 fn drop_enhanced_keys(cpu: &mut Cpu) {
     while cpu.bus.keyboard_buffer.front().is_some_and(|&key| is_enhanced(key)) {
         cpu.bus.keyboard_buffer.pop_front();
+    }
+}
+
+/// INT 16h on a booted system, from the keystrokes its keyboard interrupt
+/// keeps in the BIOS data area (`keyboard::BiosBuffer`).
+fn booted(cpu: &mut Cpu, ah: u8) {
+    use crate::keyboard::BiosBuffer;
+    let bus = &mut cpu.bus;
+    let old = ah < 0x10;
+    // The older functions skip the enhanced keyboard's keystrokes.
+    if old && matches!(ah, 0x00 | 0x01) {
+        while BiosBuffer::peek(bus).is_some_and(is_enhanced) {
+            BiosBuffer::pop(bus);
+        }
+    }
+    let convert = |key: u16| if old { plain_keystroke(key) } else { key };
+    match ah {
+        0x00 | 0x10 => match BiosBuffer::pop(bus) {
+            Some(key) => cpu.set_ax(convert(key)),
+            None => cpu.hle_wait(),
+        },
+        0x01 | 0x11 => match BiosBuffer::peek(bus) {
+            Some(key) => {
+                cpu.set_ax(convert(key));
+                cpu.set_cpu_flag(CpuFlags::ZF, false);
+            }
+            None => cpu.set_cpu_flag(CpuFlags::ZF, true),
+        },
+        0x02 => {
+            let flags = bus.guest_read_8(BDA_SHIFT_FLAGS as u32);
+            cpu.set_reg8(iced_x86::Register::AL, flags);
+        }
+        0x12 => {
+            let (flags, flags2, flags3) =
+                (bus.guest_read_8(BDA_SHIFT_FLAGS as u32), bus.guest_read_8(0x0418), bus.guest_read_8(0x0496));
+            let high = (flags2 & 0x03) | (flags3 & 0x0C) | (flags2 & 0x70) | ((flags2 & 0x04) << 5);
+            cpu.set_ax((high as u16) << 8 | flags as u16);
+        }
+        // Set the typematic rate: the host's keyboard repeats.
+        0x03 => {}
+        0x05 => {
+            let key = cpu.cx();
+            let full = !BiosBuffer::push(&mut cpu.bus, key);
+            cpu.set_reg8(iced_x86::Register::AL, full as u8);
+        }
+        // The functions there are: AH=0Ah and 10h-12h.
+        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
+        // The keyboard's ID: an MF2 keyboard, translated.
+        0x0A => cpu.set_bx(0x41AB),
+        _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
     }
 }

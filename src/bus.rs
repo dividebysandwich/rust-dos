@@ -5,6 +5,7 @@ use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
 use crate::video::vbe::Vbe;
 use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
+mod guest;
 mod state;
 
 pub trait Device {
@@ -34,6 +35,9 @@ pub struct Bus {
     ram: Vec<u8>, // System RAM, allocated once
     pub video_mode: VideoMode, // Current State
     pub disk: DiskController,
+    /// The operating system booted from a disk image (BOOT), which has the
+    /// machine to itself: None while the built-in DOS runs.
+    pub boot: Option<crate::boot::BootState>,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
     /// The keyboard's layout and the keys held (see keyboard.rs).
     pub kbd: crate::keyboard::KeyboardState,
@@ -235,6 +239,7 @@ impl Bus {
             ram: vec![0; ram_len],
             video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
             disk: DiskController::new(root_path),
+            boot: None,
             keyboard_buffer: VecDeque::new(),
             kbd: crate::keyboard::KeyboardState::default(),
             kbc: crate::kbc::Kbc::new(),
@@ -318,54 +323,7 @@ impl Bus {
             log_hook: None,
             audio_hook: None,
         };
-        // BIOS Data Area (BDA) Initialization
-        // 0x0449: Current Video Mode (03 = 80x25 Color)
-        bus.write_8(0x0449, 0x03);
-        // 0x044A: Number of Columns (80 = 0x50)
-        bus.write_16(0x044A, 80);
-        // 0x044C: Video Page Size (80x25 text: 4000 bytes, rounded to 4 KB),
-        // 0x044E: the offset of the active page.
-        bus.write_16(0x044C, 0x1000);
-        bus.write_16(0x044E, 0);
-        // 0x0460: Cursor Shape (Start Line 13, End Line 14 for VGA)
-        bus.write_16(0x0460, 0x0D0E);
-        // 0x0462: Active Page (0)
-        bus.write_8(0x0462, 0);
-        // 0x0463: CRT Controller Base Address (0x3D4 for Color)
-        bus.write_16(0x0463, 0x03D4);
-
-        // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
-        // the video adapter's bits come with it below. Bit 2: a PS/2 mouse
-        // (INT 15h AH=C2h).
-        bus.write_16(0x0410, 0x0005);
-
-        // 0x0417: Num Lock on, as the BIOS leaves it; 0x0496: an enhanced
-        // (101-key) keyboard.
-        bus.write_8(0x0417, 0x20);
-        bus.write_8(0x0496, crate::keyboard::ENHANCED_KEYBOARD);
-
-        // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
-        bus.write_8(0x0484, 24);
-        // 0x0485: Character height in scan lines. 16 = VGA 8x16 default.
-        bus.write_16(0x0485, 16);
-
-        // The display adapter: its BIOS data and ROM.
-        video::bios::install(&mut bus, video::adapter::VideoSetup::default());
-
-        // The video BIOS's static functionality table at F000:E000: all
-        // modes (00-02), all scan line counts (07), 8 character blocks
-        // (0B), 2 of them active (0C); no further capabilities.
-        bus.write_rom(0xFE000, &[0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0x08, 0x02, 0, 0, 0, 0]);
-
-
-        // BIOS ROM code and the interrupt vector table.
-        crate::bios::install(&mut bus);
-        crate::mouse::install_callback_stub(&mut bus);
-
-        // Build a baseline MCB chain — one large free block covering
-        // conventional memory. load_shell / load_exe rebuild as needed, but we
-        // still want mcb::alloc to work for tests and any early allocation.
-        crate::mcb::init_empty(&mut bus);
+        bus.init_dos_machine(video::adapter::VideoSetup::default());
 
         // The default Ultrasound's software, and the equipment word, hard
         // disk count and DPBs for the drives C:, X: and Z:.
@@ -376,6 +334,82 @@ impl Bus {
         crate::xms::install_entry(&mut bus);
 
         bus
+    }
+
+    /// The BIOS data area, the ROMs' code and the vector table, and an
+    /// empty chain of DOS memory, as the built-in DOS starts with them on
+    /// the display adapter `setup`.
+    fn init_dos_machine(&mut self, setup: video::adapter::VideoSetup) {
+        // BIOS Data Area (BDA) Initialization
+        // 0x0449: Current Video Mode (03 = 80x25 Color)
+        self.write_8(0x0449, 0x03);
+        // 0x044A: Number of Columns (80 = 0x50)
+        self.write_16(0x044A, 80);
+        // 0x044C: Video Page Size (80x25 text: 4000 bytes, rounded to 4 KB),
+        // 0x044E: the offset of the active page.
+        self.write_16(0x044C, 0x1000);
+        self.write_16(0x044E, 0);
+        // 0x0460: Cursor Shape (Start Line 13, End Line 14 for VGA)
+        self.write_16(0x0460, 0x0D0E);
+        // 0x0462: Active Page (0)
+        self.write_8(0x0462, 0);
+        // 0x0463: CRT Controller Base Address (0x3D4 for Color)
+        self.write_16(0x0463, 0x03D4);
+
+        // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
+        // the video adapter's bits come with it below. Bit 2: a PS/2 mouse
+        // (INT 15h AH=C2h).
+        self.write_16(0x0410, 0x0005);
+
+        // 0x0417: Num Lock on, as the BIOS leaves it; 0x0496: an enhanced
+        // (101-key) keyboard.
+        self.write_8(0x0417, 0x20);
+        self.write_8(0x0496, crate::keyboard::ENHANCED_KEYBOARD);
+
+        // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
+        self.write_8(0x0484, 24);
+        // 0x0485: Character height in scan lines. 16 = VGA 8x16 default.
+        self.write_16(0x0485, 16);
+
+        // The display adapter: its BIOS data and ROM.
+        video::bios::install(self, setup);
+
+        // The video BIOS's static functionality table at F000:E000: all
+        // modes (00-02), all scan line counts (07), 8 character blocks
+        // (0B), 2 of them active (0C); no further capabilities.
+        self.write_rom(0xFE000, &[0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0x08, 0x02, 0, 0, 0, 0]);
+
+        // BIOS ROM code and the interrupt vector table.
+        crate::bios::install(self);
+        crate::mouse::install_callback_stub(self);
+
+        // Build a baseline MCB chain — one large free block covering
+        // conventional memory. load_shell / load_exe rebuild as needed, but we
+        // still want mcb::alloc to work for tests and any early allocation.
+        crate::mcb::init_empty(self);
+    }
+
+    /// Start the built-in DOS again after the system booted from a disk
+    /// turned the machine off (`boot::power_off`): the BIOS's data and
+    /// vectors, DOS's tables and an empty memory chain as at rust-dos's
+    /// start, for the drives and devices there are now.
+    pub fn restore_dos_machine(&mut self) {
+        self.fill_ram(0..0x500, 0);
+        self.pic = crate::pic::Pic::new();
+        self.init_dos_machine(self.vga.setup());
+        if self.lpt_dac.is_some() {
+            self.write_16(0x0408, crate::lpt_dac::LPT1);
+            let equipment = self.read_16(0x0410);
+            self.write_16(0x0410, equipment | 0x4000);
+        }
+        if self.joystick.present() {
+            let equipment = self.read_16(0x0410);
+            self.write_16(0x0410, equipment | 0x1000);
+        }
+        crate::mcb::build_upper(self);
+        self.sync_drive_bda();
+        crate::dos_files::write_table(self);
+        crate::xms::install_entry(self);
     }
 
     /// Mount a host directory as a DOS drive and refresh the BIOS view of
@@ -451,6 +485,12 @@ impl Bus {
         result
     }
 
+    /// The layout text typed in from the host goes in as: the keyboard's,
+    /// or on a booted system, whose BIOS has none but the US one, that.
+    pub fn typing_layout(&self) -> &'static crate::keylayout::Layout {
+        if self.boot.is_some() { crate::keylayout::Layout::us() } else { self.kbd.layout }
+    }
+
     /// Take the disk speed and noise settings.
     pub fn set_disk_settings(&mut self, settings: crate::diskio::DiskSettings) {
         self.audio_catch_up();
@@ -507,6 +547,9 @@ impl Bus {
         self.audio_catch_up();
         let present = kind != crate::lpt_dac::LptDacType::None;
         self.lpt_dac = present.then(|| crate::lpt_dac::LptDac::new(kind));
+        if self.boot.is_some() {
+            return;
+        }
         self.write_16(0x0408, if present { crate::lpt_dac::LPT1 } else { 0 });
         // Equipment word bits 14-15: the parallel ports.
         let equipment = self.read_16(0x0410) & !0xC000;
@@ -517,6 +560,9 @@ impl Bus {
     /// and whether there is one, which bit 12 of the equipment word says.
     pub fn set_joystick(&mut self, settings: crate::joystick::JoystickSettings) {
         self.joystick.set_settings(settings);
+        if self.boot.is_some() {
+            return;
+        }
         let equipment = self.read_16(0x0410) & !0x1000;
         self.write_16(0x0410, equipment | if self.joystick.present() { 0x1000 } else { 0 });
     }
@@ -582,6 +628,11 @@ impl Bus {
     /// Mirror the mounted drives into the BIOS data area and DOS's data
     /// segment (`dos_data`). Must run whenever the drive set changes.
     pub fn sync_drive_bda(&mut self) {
+        // A booted system's BIOS has its units from the start, and no
+        // built-in DOS.
+        if self.boot.is_some() {
+            return;
+        }
         // Equipment word: bit 0 = floppy present, bits 6-7 = floppy count - 1.
         // Only A: and B: are BIOS floppy units. Other bits are left alone.
         let floppies = self.disk.floppy_units();

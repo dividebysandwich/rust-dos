@@ -1,4 +1,5 @@
 use crate::bus::Bus;
+use crate::cpu::Cpu;
 use crate::keylayout::{Layout, Mods, Typed, compose, spacing_accent};
 
 /// Keystrokes the BIOS keyboard buffer at 40:1E holds.
@@ -21,6 +22,10 @@ fn send_scan(bus: &mut Bus, scan: u8, extended: bool) {
 /// programs that read port 60h or install their own INT 09h ISR.
 pub fn deliver_key_down(bus: &mut Bus, code: u16, extended: bool) {
     let scan = (code >> 8) as u8;
+    if bus.boot.is_some() {
+        send_scan(bus, scan, extended);
+        return;
+    }
     // The BIOS buffer holds 15 keystrokes; when it's full (a program that
     // reads the keyboard itself never empties it) new ones are dropped.
     if bus.keyboard_buffer.len() < BIOS_BUFFER_KEYS {
@@ -188,6 +193,13 @@ fn set_bit(byte: &mut u8, bit: u8, on: bool) {
 /// keyboard themselves.
 pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char: Option<u8>) {
     let id = key_id(scan, extended);
+    // A booted system's BIOS makes the keystrokes of the scan codes
+    // itself, in its keyboard interrupt (`bios_scan`).
+    if bus.boot.is_some() {
+        bus.kbd.set_held(id, down);
+        send_scan(bus, if down { scan } else { scan | 0x80 }, extended);
+        return;
+    }
     let repeat = down && bus.kbd.is_held(id);
     bus.kbd.set_held(id, down);
     let (mut flags, mut flags2, mut flags3) = (bus.read_8(FLAGS), bus.read_8(FLAGS2), bus.read_8(FLAGS3));
@@ -512,4 +524,255 @@ impl crate::savestate::State for KeyboardState {
         self.held.load(r)?;
         self.dead.load(r)
     }
+}
+
+/// BDA 40:19h: the character code typed so far with Alt and the keypad.
+const ALT_KEYPAD: u32 = 0x0419;
+/// BDA 40:71h: bit 7 set by Ctrl+Break.
+const BREAK_FLAG: u32 = 0x0471;
+/// BDA 40:72h: 1234h for a warm boot (Ctrl+Alt+Del).
+const RESET_FLAG: u32 = 0x0472;
+/// BDA 40:97h: the keyboard's LEDs (bits 0-2: Scroll, Num and Caps Lock).
+const LEDS: u32 = 0x0497;
+
+/// What the ROM's keyboard interrupt does after `bios_scan`, in AH.
+const AFTER_NOTHING: u8 = 0;
+const AFTER_BREAK: u8 = 1;
+const AFTER_PRINT_SCREEN: u8 = 2;
+const AFTER_PAUSE: u8 = 3;
+
+/// The keyboard buffer of a booted system: the keystrokes between the head
+/// (40:1Ah) and the tail (40:1Ch), in the ring from 40:80h to 40:82h, which
+/// the BIOS's services reach through the system's memory.
+pub struct BiosBuffer;
+
+impl BiosBuffer {
+    fn bounds(bus: &mut Bus) -> (u16, u16) {
+        let (start, end) = (bus.guest_read_16(0x0480), bus.guest_read_16(0x0482));
+        if start < end && end - start >= 4 { (start, end) } else { (0x1E, 0x3E) }
+    }
+
+    /// The keystroke at the head, if there is one.
+    pub fn peek(bus: &mut Bus) -> Option<u16> {
+        let (head, tail) = (bus.guest_read_16(0x041A), bus.guest_read_16(0x041C));
+        (head != tail).then(|| bus.guest_read_16(0x0400 + head as u32))
+    }
+
+    /// Take the keystroke at the head, if there is one.
+    pub fn pop(bus: &mut Bus) -> Option<u16> {
+        let key = Self::peek(bus)?;
+        let (start, end) = Self::bounds(bus);
+        let mut head = bus.guest_read_16(0x041A) + 2;
+        if head >= end {
+            head = start;
+        }
+        bus.guest_write_16(0x041A, head);
+        Some(key)
+    }
+
+    /// Add a keystroke at the tail; false if the buffer is full.
+    pub fn push(bus: &mut Bus, key: u16) -> bool {
+        let (start, end) = Self::bounds(bus);
+        let (head, tail) = (bus.guest_read_16(0x041A), bus.guest_read_16(0x041C));
+        let mut next = tail + 2;
+        if next >= end {
+            next = start;
+        }
+        if next == head {
+            return false;
+        }
+        bus.guest_write_16(0x0400 + tail as u32, key);
+        bus.guest_write_16(0x041C, next);
+        true
+    }
+
+    /// Empty the buffer.
+    pub fn clear(bus: &mut Bus) {
+        let tail = bus.guest_read_16(0x041C);
+        bus.guest_write_16(0x041A, tail);
+    }
+}
+
+/// The digit a key of the keypad types with Alt held, for a character code.
+fn keypad_digit(scan: u8) -> Option<u8> {
+    match scan {
+        0x47..=0x49 => Some(scan - 0x47 + 7),
+        0x4B..=0x4D => Some(scan - 0x4B + 4),
+        0x4F..=0x51 => Some(scan - 0x4F + 1),
+        0x52 => Some(0),
+        _ => None,
+    }
+}
+
+/// The keyboard interrupt of a booted system (`bios::KBD_HANDLER`), as a
+/// PC's BIOS runs it for the scan code in AL: the shift keys' and the
+/// locks' state at 40:17h, 40:18h and 40:96h, and the keystrokes a key
+/// types in the buffer (`BiosBuffer`), from the US layout. Ctrl+Alt+Del
+/// restarts the machine. AH returns what the ROM does next: call INT 1Bh
+/// (Ctrl+Break) or INT 05h (Print Screen), or wait (Pause). DOSBox-X's
+/// `IRQ1_Handler` (bios_keyboard.cpp) does the same.
+pub fn bios_scan(cpu: &mut Cpu) {
+    let code = cpu.get_al();
+    let after = bios_key(&mut cpu.bus, code);
+    cpu.set_reg8(iced_x86::Register::AH, after);
+}
+
+fn bios_key(bus: &mut Bus, code: u8) -> u8 {
+    let mut flags = bus.guest_read_8(FLAGS as u32);
+    let mut flags2 = bus.guest_read_8(FLAGS2 as u32);
+    let mut flags3 = bus.guest_read_8(FLAGS3 as u32);
+    let mut leds = bus.guest_read_8(LEDS);
+    let e0 = flags3 & 0x02 != 0;
+    let e1 = flags3 & 0x01 != 0;
+    let (scan, make) = (code & 0x7F, code & 0x80 == 0);
+    let mut after = AFTER_NOTHING;
+    let mut keystroke: Option<u16> = None;
+    let mut pausing = false;
+    match code {
+        // The keyboard's answers to commands, not keys.
+        0x00 | 0xEE | 0xFA | 0xFE | 0xFF => {}
+        0xE0 => flags3 |= 0x02,
+        0xE1 => flags3 |= 0x01,
+        // The shifts the keyboard sends around some grey keys.
+        0x2A | 0xAA | 0x36 | 0xB6 if e0 => {}
+        0x2A | 0xAA => set_bit(&mut flags, 0x02, make),
+        0x36 | 0xB6 => set_bit(&mut flags, 0x01, make),
+        // Ctrl, or the first half of Pause (E1 1D 45).
+        0x1D | 0x9D => {
+            if !e1 {
+                if e0 { set_bit(&mut flags3, 0x04, make) } else { set_bit(&mut flags2, 0x01, make) }
+                set_bit(&mut flags, 0x04, flags2 & 0x01 != 0 || flags3 & 0x04 != 0);
+            }
+        }
+        0x38 | 0xB8 => {
+            if e0 { set_bit(&mut flags3, 0x08, make) } else { set_bit(&mut flags2, 0x02, make) }
+            let alt = flags2 & 0x02 != 0 || flags3 & 0x08 != 0;
+            set_bit(&mut flags, 0x08, alt);
+            // A character code typed on the keypad with Alt comes when Alt
+            // is let go.
+            if !alt {
+                let typed = bus.guest_read_8(ALT_KEYPAD);
+                if typed != 0 {
+                    keystroke = Some(typed as u16);
+                    bus.guest_write_8(ALT_KEYPAD, 0);
+                }
+            }
+        }
+        0x3A | 0xBA => {
+            if make && flags2 & 0x40 == 0 {
+                flags ^= 0x40;
+            }
+            set_bit(&mut flags2, 0x40, make);
+        }
+        // Pause (E1 1D 45), or Num Lock.
+        0x45 | 0xC5 if e1 => {
+            flags3 &= !0x01;
+            if make && flags2 & 0x08 == 0 {
+                flags2 |= 0x08;
+                pausing = true;
+                after = AFTER_PAUSE;
+            }
+        }
+        0x45 | 0xC5 => {
+            if make && flags2 & 0x20 == 0 {
+                flags ^= 0x20;
+            }
+            set_bit(&mut flags2, 0x20, make);
+        }
+        // Ctrl+Break (E0 46), or Scroll Lock.
+        0x46 if e0 => {
+            flags3 &= !0x02;
+            bus.guest_write_8(BREAK_FLAG, 0x80);
+            BiosBuffer::clear(bus);
+            keystroke = Some(0);
+            after = AFTER_BREAK;
+        }
+        0xC6 if e0 => {}
+        0x46 | 0xC6 => {
+            if make && flags2 & 0x10 == 0 {
+                flags ^= 0x10;
+            }
+            set_bit(&mut flags2, 0x10, make);
+        }
+        // Print Screen (E0 37), or the keypad's *.
+        0x37 if e0 => after = AFTER_PRINT_SCREEN,
+        0xB7 if e0 => {}
+        _ if !make => {
+            if scan == 0x52 {
+                flags2 &= !0x80;
+            }
+        }
+        _ => {
+            let ctrl_alt = flags & 0x0C == 0x0C;
+            if scan == 0x53 && ctrl_alt {
+                // Ctrl+Alt+Del: a warm boot.
+                bus.guest_write_16(RESET_FLAG, 0x1234);
+                bus.reset_requested = true;
+            } else if scan == 0x52 && (e0 || (flags & 0x20 == 0) == (flags & 0x03 == 0)) {
+                // Insert switches the insert mode.
+                if flags2 & 0x80 == 0 {
+                    flags ^= 0x80;
+                }
+                flags2 |= 0x80;
+                keystroke = Some(grey_keystroke(scan, e0, flags));
+            } else if let (Some(digit), false, true) = (keypad_digit(scan), e0, flags & 0x08 != 0) {
+                let typed = bus.guest_read_8(ALT_KEYPAD);
+                bus.guest_write_8(ALT_KEYPAD, typed.wrapping_mul(10).wrapping_add(digit));
+            } else {
+                keystroke = Some(if e0 { grey_keystroke(scan, true, flags) } else { plain_keystroke(scan, flags) });
+            }
+        }
+    }
+    if code != 0xE0 {
+        flags3 &= !0x02;
+    }
+    // Any key ends a pause.
+    if make && code != 0xE0 && code != 0xE1 && !pausing && !e1 {
+        flags2 &= !0x08;
+    }
+    leds = (leds & !0x07) | (flags >> 4) & 0x07;
+    bus.guest_write_8(FLAGS as u32, flags);
+    bus.guest_write_8(FLAGS2 as u32, flags2);
+    bus.guest_write_8(FLAGS3 as u32, flags3);
+    bus.guest_write_8(LEDS, leds);
+    if let Some(key) = keystroke {
+        BiosBuffer::push(bus, key);
+    }
+    after
+}
+
+/// The keystroke of a key without the E0 prefix, from the US layout, as the
+/// BIOS's tables have it.
+fn plain_keystroke(scan: u8, flags: u8) -> u16 {
+    let mods = Mods { shift: flags & 0x03 != 0, caps: flags & 0x40 != 0, num: flags & 0x20 != 0, altgr: false };
+    let ascii = match Layout::us().translate(scan, false, mods).0 {
+        Typed::Char(c) => c,
+        _ => 0,
+    };
+    bios_keystroke(scan, ascii, flags)
+}
+
+/// The keystroke of a grey key (E0 first): the enhanced keyboard's E0h in
+/// place of the character, keypad Enter and / as their own.
+fn grey_keystroke(scan: u8, e0: bool, flags: u8) -> u16 {
+    let (alt, ctrl) = (flags & 0x08 != 0, flags & 0x04 != 0);
+    match scan {
+        _ if !e0 => plain_keystroke(scan, flags),
+        0x1C if alt => 0xA600,
+        0x1C if ctrl => 0xE00A,
+        0x1C => 0xE00D,
+        0x35 if alt => 0xA400,
+        0x35 if ctrl => 0x9500,
+        0x35 => 0xE02F,
+        _ if alt => bios_keystroke(scan, 0, flags),
+        _ if ctrl => bios_keystroke(scan, 0, flags) & 0xFF00 | 0xE0,
+        _ => (scan as u16) << 8 | 0xE0,
+    }
+}
+
+/// Whether Pause still holds a booted system: AH=3 while it does, for the
+/// ROM's keyboard interrupt to wait on.
+pub fn bios_paused(cpu: &mut Cpu) {
+    let paused = cpu.bus.guest_read_8(FLAGS2 as u32) & 0x08 != 0;
+    cpu.set_reg8(iced_x86::Register::AH, if paused { AFTER_PAUSE } else { AFTER_NOTHING });
 }

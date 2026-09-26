@@ -1683,6 +1683,10 @@ fn release_input(cpu: &mut Cpu, held: &mut HashMap<Scancode, (u8, bool)>) {
 
 /// Caps Lock and Num Lock as the host's keyboard has them.
 fn sync_locks(cpu: &mut Cpu, mods: Mod) {
+    // A booted system's BIOS keeps its own locks, from the keys.
+    if cpu.bus.boot.is_some() {
+        return;
+    }
     let mut flags = cpu.bus.read_8(0x0417) & !0x60;
     if mods.contains(Mod::CAPSMOD) {
         flags |= 0x40;

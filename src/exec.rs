@@ -285,15 +285,16 @@ impl Cpu {
 
     /// Whether the shell's code runs: at SHELL_SEGMENT, in real mode. In
     /// protected mode the same number is a selector of a DOS extender's
-    /// (DOS/4GW's code is 0070h), whose program is anything but idle.
+    /// (DOS/4GW's code is 0070h), whose program is anything but idle. On a
+    /// booted system there is no shell (and IO.SYS runs at 0070h).
     pub fn in_shell_code(&self) -> bool {
-        !self.pe() && self.cs() == SHELL_SEGMENT
+        !self.pe() && self.cs() == SHELL_SEGMENT && self.bus.boot.is_none()
     }
 
     /// True while no program runs: the shell is at its prompt, or in the
     /// BIOS waiting for the keystroke it asked for.
     pub fn shell_idle(&self) -> bool {
-        if !self.process_stack.is_empty() {
+        if !self.process_stack.is_empty() || self.bus.boot.is_some() {
             return false;
         }
         let caller_cs = || {

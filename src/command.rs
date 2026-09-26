@@ -53,6 +53,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("LOADHIGH", &LoadHighCommand),
     ("LH", &LoadHighCommand),
     ("MIXER", &crate::mixer_command::MixerCommand),
+    ("BOOT", &crate::boot_command::BootCommand),
 ];
 
 /// The built-in command called `name`, in any case.

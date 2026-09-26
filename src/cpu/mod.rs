@@ -793,6 +793,13 @@ impl Cpu {
         self.set_cpu_flag(CpuFlags::DF, val)
     }
 
+    /// The linear address of `segment:offset` in real or virtual-8086
+    /// mode, where a BIOS service's caller has its data, for the
+    /// `Bus::guest_*` accessors.
+    pub fn real_linear(&self, segment: u16, offset: u16) -> u32 {
+        ((segment as u32) << 4) + offset as u32
+    }
+
     // Calculate Physical Address from Segment:Offset
     pub fn get_physical_addr(&self, segment: u16, offset: u16) -> usize {
         let addr = ((segment as usize) << 4) + offset as usize;
@@ -948,6 +955,14 @@ impl Cpu {
     }
 
     pub fn load_shell(&mut self) {
+        // A system booted from a disk turned the machine off: DOS starts
+        // over on it.
+        if self.bus.boot.take().is_some() {
+            self.bus.restore_dos_machine();
+            self.resident_end = crate::mcb::first_free(&self.bus);
+            self.resident_upper.clear();
+            self.bus.log_string("[BOOT] The booted system is off; DOS starts again");
+        }
         // No program runs: `core=auto` is back on the interpreter, and the
         // dynamic recompiler's code for the last program goes.
         self.dyn_latched = false;

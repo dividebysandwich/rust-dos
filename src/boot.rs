@@ -1,0 +1,204 @@
+//! Booting an operating system from a disk image, as a PC's BIOS does
+//! (BOOT): the machine starts over as at power-on, with the BIOS's services
+//! and no built-in DOS, and runs the boot sector of the disk in the unit it
+//! boots from. DOSBox's BOOT does the same (DOSBox-X dos_programs.cpp).
+//!
+//! The BIOS units of a booted machine are the disk images: 00h and 01h the
+//! floppy drives A: and B:, with or without a disk in them, and 80h up the
+//! hard disk images in drive-letter order. Host directories and CD-ROM
+//! drives are the built-in DOS's alone. The operating system has the
+//! machine until it turns it off or its disk can't be booted any more;
+//! then the built-in DOS starts again (`Cpu::load_shell`).
+
+use crate::bus::Bus;
+use crate::cpu::{Cpu, CpuFlags, CpuState};
+use crate::diskimage::SECTOR_SIZE;
+use crate::disk::{DriveKind, drive_letter};
+
+/// A machine an operating system booted on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BootState {
+    /// The BIOS unit it booted from: 00h for A:, 80h for the first hard
+    /// disk. Restarts boot from it again.
+    pub unit: u8,
+}
+
+crate::state_fields!(BootState { unit });
+
+/// The floppy units of a booted machine, A: and B:, which are there with
+/// or without a disk.
+pub const FLOPPY_UNITS: u8 = 2;
+
+/// Where the boot sector goes, and where its code starts.
+const BOOT_SECTOR: usize = 0x7C00;
+
+/// The drives with hard disk images, which are BIOS units 80h up in this
+/// order.
+pub fn hard_disk_drives(bus: &Bus) -> Vec<u8> {
+    bus.disk
+        .drives_of_kind(DriveKind::HardDisk)
+        .into_iter()
+        .filter(|&drive| bus.disk.bios_image(drive).is_some())
+        .collect()
+}
+
+/// The drive behind BIOS unit `unit` of a booted machine, if it has one:
+/// A: or B: for 00h and 01h (which may be empty), a hard disk image's for
+/// 80h up.
+pub fn unit_drive(bus: &Bus, unit: u8) -> Option<u8> {
+    if unit < 0x80 {
+        (unit < FLOPPY_UNITS).then_some(unit)
+    } else {
+        hard_disk_drives(bus).get((unit - 0x80) as usize).copied()
+    }
+}
+
+/// The BIOS unit a drive is, if it is one.
+pub fn drive_unit(bus: &Bus, drive: u8) -> Option<u8> {
+    if drive < FLOPPY_UNITS {
+        return Some(drive);
+    }
+    let index = hard_disk_drives(bus).iter().position(|&d| d == drive)?;
+    Some(0x80 + index as u8)
+}
+
+/// The boot sector of the disk in `unit`, if it can boot: a floppy's first
+/// sector, or a hard disk's master boot record with its signature.
+fn boot_sector(bus: &Bus, unit: u8) -> Result<[u8; SECTOR_SIZE], String> {
+    let letter = unit_drive(bus, unit).map_or('?', drive_letter);
+    let image = unit_drive(bus, unit)
+        .and_then(|drive| bus.disk.bios_image(drive))
+        .ok_or_else(|| format!("There is no disk image in drive {}:", letter))?;
+    let mut sector = [0u8; SECTOR_SIZE];
+    image.read(0, &mut sector).map_err(|_| format!("Can't read the boot sector of drive {}:", letter))?;
+    if unit >= 0x80 && sector[510..512] != [0x55, 0xAA] {
+        return Err(format!("The disk in drive {}: isn't bootable", letter));
+    }
+    Ok(sector)
+}
+
+/// Boot the operating system on the disk in BIOS unit `unit`. The machine
+/// starts over and runs its boot sector; an error says why it can't, with
+/// the machine as it was.
+pub fn boot(cpu: &mut Cpu, unit: u8) -> Result<(), String> {
+    let sector = boot_sector(&cpu.bus, unit)?;
+    let letter = unit_drive(&cpu.bus, unit).map_or('?', drive_letter);
+    cpu.bus.log_string(&format!("[BOOT] Booting from drive {}: (unit {:02X}h)", letter, unit));
+    power_on(cpu, unit);
+    start(cpu, unit, &sector);
+    Ok(())
+}
+
+/// Start the booted system over from its disk, as after a reset or
+/// INT 19h. If the disk can't boot any more, the machine is turned off.
+pub fn restart(cpu: &mut Cpu) {
+    let Some(unit) = cpu.bus.boot.as_ref().map(|b| b.unit) else {
+        return;
+    };
+    match boot_sector(&cpu.bus, unit) {
+        Ok(sector) => {
+            cpu.bus.log_string("[BOOT] Restarting");
+            power_on(cpu, unit);
+            start(cpu, unit, &sector);
+        }
+        Err(e) => power_off(cpu, &e),
+    }
+}
+
+/// Turn the booted machine off: the built-in DOS starts again, as the
+/// execution loop reloads the shell (`Cpu::load_shell`).
+pub fn power_off(cpu: &mut Cpu, why: &str) {
+    cpu.bus.log_string(&format!("[BOOT] Turning the machine off: {}", why));
+    cpu.state = CpuState::RebootShell;
+}
+
+/// Put the machine in the state a PC's BIOS leaves it in for the system it
+/// boots from `unit`: nothing of the built-in DOS left, memory cleared, the
+/// BIOS's vector table and data area, the devices reset and the screen in
+/// text mode.
+pub fn power_on(cpu: &mut Cpu, unit: u8) {
+    // No program, batch file or prompt of the built-in DOS goes on.
+    cpu.batch.clear();
+    cpu.pending_command = None;
+    cpu.shell_wait = None;
+    cpu.shell_prompt_at = None;
+    cpu.shell_completion = None;
+    cpu.secondary_shells.clear();
+    cpu.secondary = None;
+    cpu.stdout_capture = None;
+    cpu.process_stack.clear();
+    cpu.current_psp = 0;
+    cpu.bios_wait_until = None;
+    cpu.con_pending_scan = None;
+    cpu.con_line = None;
+    cpu.con_pending.clear();
+    cpu.hle_retry = false;
+    cpu.idle = false;
+    cpu.dyn_latched = false;
+    cpu.dynrec.flush();
+    let letter = unit_drive(&cpu.bus, unit).map_or('?', drive_letter);
+    cpu.program = format!("BOOT {}:", letter);
+    cpu.bus.disk.close_all_files();
+    cpu.bus.boot = Some(BootState { unit });
+
+    let bus = &mut cpu.bus;
+    // All of memory cleared, as the power-on self test leaves it.
+    let len = bus.ram().len();
+    bus.fill_ram(0..crate::video::ADDR_VGA_GRAPHICS, 0);
+    bus.fill_ram(0xC8000..0xF0000, 0);
+    bus.fill_ram(0x10_0000..len, 0);
+    bus.freezes.clear();
+
+    // The devices as they come up.
+    bus.pic = crate::pic::Pic::new();
+    bus.dma = crate::dma::Dma::new();
+    bus.kbc = crate::kbc::Kbc::new();
+    bus.set_a20(false);
+    bus.reset_requested = false;
+    bus.port_accesses.clear();
+    bus.keyboard_buffer.clear();
+    bus.reset_timers();
+    bus.reset_sound();
+    bus.mouse.remove_callback();
+    crate::mouse::clear_callback_busy(bus);
+    bus.mouse.ps2 = crate::mouse::Ps2Mouse::default();
+    bus.xms = crate::xms::Xms::new();
+    bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
+
+    // The BIOS's vector table and data area.
+    let hard_disks: Vec<_> = hard_disk_drives(bus)
+        .into_iter()
+        .filter_map(|drive| bus.disk.bios_image(drive).map(|image| image.geometry()))
+        .collect();
+    crate::bios::install_for_boot(bus, &hard_disks);
+    bus.refresh_irq();
+
+    // The processor as after a reset, and the screen in text mode.
+    cpu.reset_to_real_mode();
+    crate::instructions::fpu::control::fninit(cpu);
+    crate::interrupts::int10::set_mode(cpu, 0x03);
+}
+
+/// Run the boot sector `sector` of `unit`: at 0000:7C00 with the unit in
+/// DL, as a BIOS's INT 19h leaves it.
+fn start(cpu: &mut Cpu, unit: u8, sector: &[u8; SECTOR_SIZE]) {
+    cpu.bus.load_bytes(BOOT_SECTOR, sector);
+    cpu.set_ds(0);
+    cpu.set_es(0);
+    cpu.set_fs(0);
+    cpu.set_gs(0);
+    cpu.set_eax(0);
+    cpu.set_ebx(BOOT_SECTOR as u32);
+    cpu.set_ecx(1);
+    cpu.set_edx(unit as u32);
+    cpu.set_esi(0);
+    cpu.set_edi(0);
+    cpu.set_ebp(0);
+    // The stack the IBM BIOS starts the boot sector with.
+    cpu.set_ss(0x0030);
+    cpu.set_esp(0x0100);
+    cpu.set_cs(0x0000);
+    cpu.set_eip(BOOT_SECTOR as u32);
+    cpu.set_cpu_flags(CpuFlags::from_bits_truncate(0x0202));
+    cpu.state = CpuState::Running;
+}
