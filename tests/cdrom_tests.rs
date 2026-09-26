@@ -62,13 +62,11 @@ fn check_files(cpu: &mut Cpu, big: &[u8]) {
     assert_eq!(cpu.bus.disk.seek_file(h, 4000, 0), Ok(4000));
     assert_eq!(cpu.bus.disk.read_file(h, 100_000).unwrap(), big[4000..]);
     assert_eq!(cpu.bus.disk.read_file(h, 10).unwrap(), Vec::<u8>::new());
-    let dup = cpu.bus.disk.duplicate_handle(h, None).unwrap();
-    assert_eq!(cpu.bus.disk.seek_file(dup, -10, 2), Ok(big.len() as u64 - 10));
+    assert_eq!(cpu.bus.disk.seek_file(h, -10, 2), Ok(big.len() as u64 - 10));
     assert_eq!(cpu.bus.disk.read_file(h, 10).unwrap(), big[big.len() - 10..]);
     assert_eq!(cpu.bus.disk.write_file(h, b"x"), Err(0x05));
     assert_eq!(cpu.bus.disk.file_time(h), Ok((12 << 11, (15 << 9) | (10 << 5) | 31)));
     cpu.bus.disk.close_file(h);
-    cpu.bus.disk.close_file(dup);
     assert_eq!(cpu.bus.disk.open_file("D:\\NOPE.TXT", 0, PSP), Err(0x02));
     assert_eq!(cpu.bus.disk.open_file("D:\\NOPE\\X.TXT", 0, PSP), Err(0x03));
     assert_eq!(cpu.bus.disk.open_file("D:\\LONGNAME.TEXT", 0, PSP).map(|_| ()), Err(0x02));

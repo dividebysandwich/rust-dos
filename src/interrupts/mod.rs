@@ -125,4 +125,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             ));
         }
     }
+    // The files the call opened, closed or moved in, in the file table in
+    // DOS memory.
+    crate::dos_files::flush(&mut cpu.bus);
 }

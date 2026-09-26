@@ -16,6 +16,7 @@ pub mod disk;
 pub mod diskimage;
 pub mod diskio;
 pub mod disknoise;
+pub mod dos_files;
 pub mod dosstr;
 pub mod dma;
 pub mod dsp;

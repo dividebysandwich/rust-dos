@@ -5,9 +5,10 @@ use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
 use crate::bus::{DOS_LIST_OF_LISTS, DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
 use crate::cpu::{Cpu, CpuFlags, CpuState};
-use crate::disk::{DriveKind, FIRST_USER_HANDLE, parse_drive_prefix};
+use crate::disk::{CharDevice, DriveKind, parse_drive_prefix};
 use crate::diskio;
 use crate::disknoise::Access;
+use crate::dos_files;
 use crate::video::print_char;
 
 /// The InDOS flag (AH=34h), with the critical error flag before it.
@@ -16,6 +17,17 @@ const INDOS_FLAG: usize = 0xFF101;
 const CASE_MAP_ROUTINE: usize = 0xFF0FF;
 /// Volume serial number of drive A:; each drive's is its number more.
 pub const VOLUME_SERIAL: u32 = 0x1234_0000;
+
+/// The open file (its System File Table entry) handle `handle` of the
+/// running process refers to.
+fn file_of(cpu: &Cpu, handle: u16) -> Option<u16> {
+    dos_files::sft_of(&cpu.bus, cpu.current_psp, handle)
+}
+
+/// A handle of the running process for the file just opened at `sft`.
+fn attach(cpu: &mut Cpu, sft: u16) -> Result<u16, u8> {
+    dos_files::attach(&mut cpu.bus, cpu.current_psp, sft)
+}
 
 /// Return a result the DOS way: AX and CF clear, or the error code in AX
 /// and CF set.
@@ -175,8 +187,8 @@ fn con_read(cpu: &mut Cpu) -> Option<u8> {
 /// functions do: to the screen (a bell beeps), or to where the command
 /// line redirected it.
 fn stdout_char(cpu: &mut Cpu, byte: u8) {
-    if cpu.bus.disk.is_open(1) && cpu.bus.disk.handle_device(1) != Some(crate::disk::CharDevice::Con) {
-        let _ = cpu.bus.disk.write_file(1, &[byte]);
+    if let Some(sft) = file_of(cpu, 1).filter(|&sft| cpu.bus.disk.handle_device(sft) != Some(CharDevice::Con)) {
+        let _ = cpu.bus.disk.write_file(sft, &[byte]);
     } else if byte == 0x07 {
         play_sdl_beep(&mut cpu.bus);
     } else {
@@ -247,7 +259,7 @@ pub fn handle(cpu: &mut Cpu) {
     // Remember the error of a failed handle or file call for AH=59h. The
     // calls in this range that don't report through CF leave it as the
     // caller had it.
-    let reports_cf = !matches!(ah, 0x4C | 0x4D | 0x50 | 0x51 | 0x54 | 0x59 | 0x62);
+    let reports_cf = !matches!(ah, 0x4C | 0x4D | 0x50 | 0x51 | 0x54 | 0x55 | 0x59 | 0x62);
     if (0x39..=0x6C).contains(&ah) && reports_cf && cpu.get_cpu_flag(CpuFlags::CF) {
         cpu.last_dos_error = cpu.ax();
     }
@@ -876,6 +888,25 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.current_psp = cpu.bx();
         }
 
+        // AH = 26h: A new PSP at DX, a copy of the running process's with
+        // its handle table as it is.
+        0x26 => {
+            let parent = cpu.current_psp;
+            let (segment, top) = (cpu.dx(), cpu.bus.read_16(parent as usize * 16 + 2));
+            dos_files::new_psp(&mut cpu.bus, segment, parent, top, false);
+        }
+
+        // AH = 55h: A PSP at DX for a child of the running process, which
+        // inherits its handles as EXEC's children do, with SI paragraphs
+        // of memory. It becomes the current process (Windows makes its
+        // tasks' PSPs so).
+        0x55 => {
+            let (segment, parent, paras) = (cpu.dx(), cpu.current_psp, cpu.si());
+            dos_files::new_psp(&mut cpu.bus, segment, parent, segment.wrapping_add(paras), true);
+            cpu.current_psp = segment;
+            cpu.set_reg8(Register::AL, 0xF0);
+        }
+
         // AH = 51h / 62h: Get current PSP into BX
         0x51 | 0x62 => {
             cpu.set_bx(cpu.current_psp);
@@ -1040,9 +1071,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&cpu.bus, addr);
             // Attributes in CX are ignored for now (TODO)
-            match cpu.bus.disk.create_file(&filename, cpu.current_psp) {
-                Ok(handle) => {
-                    file_io(cpu, handle, diskio::CREATE_BYTES, None);
+            let opened = cpu.bus.disk.create_file(&filename, cpu.current_psp);
+            match opened.and_then(|sft| attach(cpu, sft).map(|handle| (sft, handle))) {
+                Ok((sft, handle)) => {
+                    file_io(cpu, sft, diskio::CREATE_BYTES, None);
                     cpu.set_ax(handle);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
@@ -1063,9 +1095,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let filename = read_asciiz_string(&cpu.bus, addr);
             let mode = cpu.get_al();
 
-            match cpu.bus.disk.open_file(&filename, mode, cpu.current_psp) {
-                Ok(handle) => {
-                    file_io(cpu, handle, diskio::OPEN_BYTES, None);
+            let opened = cpu.bus.disk.open_file(&filename, mode, cpu.current_psp);
+            match opened.and_then(|sft| attach(cpu, sft).map(|handle| (sft, handle))) {
+                Ok((sft, handle)) => {
+                    file_io(cpu, sft, diskio::OPEN_BYTES, None);
                     cpu.set_ax(handle);
                     // In real CPU, clear CF here
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1085,13 +1118,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 3Eh: Close File
         0x3E => {
             let handle = cpu.bx();
-            // The standard devices (handles 0-4) are not in the file table;
-            // closing them always succeeds.
-            if cpu.bus.disk.close_file(handle) || handle < FIRST_USER_HANDLE {
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-            } else {
-                cpu.set_ax(0x06); // Invalid handle
-                cpu.set_cpu_flag(CpuFlags::CF, true);
+            match dos_files::close(&mut cpu.bus, cpu.current_psp, handle) {
+                Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
+                Err(code) => set_result(cpu, Err(code)),
             }
         }
 
@@ -1101,8 +1130,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let count = cpu.cx() as usize;
             let mut buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
-            if handle == 0 && !cpu.bus.disk.is_open(0) {
-                // STDIN, the console: read a line at a time as DOS does,
+            let Some(sft) = file_of(cpu, handle) else {
+                return set_result(cpu, Err(0x06));
+            };
+            if cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con) {
+                // The console: read a line at a time as DOS does,
                 // waiting for Enter, and hand out the line with its CR LF
                 // over as many reads as it takes.
                 if cpu.con_pending.is_empty() && count > 0 {
@@ -1116,9 +1148,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
-                match cpu.bus.disk.read_file(handle, count) {
+                match cpu.bus.disk.read_file(sft, count) {
                     Ok(bytes) => {
-                        file_io(cpu, handle, bytes.len() as u32, Some(false));
+                        file_io(cpu, sft, bytes.len() as u32, Some(false));
                         for b in &bytes {
                             cpu.bus.write_8(buf_addr, *b);
                             buf_addr += 1;
@@ -1151,7 +1183,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let count = cpu.cx() as usize;
             let buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
 
-            if count == 0 && handle != 1 && handle != 2 {
+            let Some(sft) = file_of(cpu, handle) else {
+                return set_result(cpu, Err(0x06));
+            };
+            // Handles 1 and 2 are the screen unless the command line
+            // redirected them.
+            let console = cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con);
+            if count == 0 && !console {
                 cpu.bus.log_string(&format!(
                     "[DOS] AH=40h CX=0 on handle {:04X} — truncate-at-pos NOT performed (safety)",
                     handle
@@ -1166,10 +1204,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 data.push(cpu.bus.read_8(buf_addr + i));
             }
 
-            // Handles 1 and 2 are the screen unless the command line
-            // redirected them.
-            let console = cpu.bus.disk.handle_device(handle) == Some(crate::disk::CharDevice::Con)
-                || ((handle == 1 || handle == 2) && !cpu.bus.disk.is_open(handle));
             if console {
                 // STDOUT/STDERR, or CON opened by name
                 for &byte in &data {
@@ -1182,9 +1216,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 crate::video::print_string(cpu, &visual_s);
                 cpu.set_ax(count as u16);
             } else {
-                match cpu.bus.disk.write_file(handle, &data) {
+                match cpu.bus.disk.write_file(sft, &data) {
                     Ok(written) => {
-                        file_io(cpu, handle, written as u32, Some(true));
+                        file_io(cpu, sft, written as u32, Some(true));
                         cpu.set_ax(written);
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
@@ -1209,9 +1243,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let offset = ((offset_high << 16) | offset_low) as i32;
             let whence = cpu.get_al();
 
-            match cpu.bus.disk.seek_file(handle, offset as i64, whence) {
+            let Some(sft) = file_of(cpu, handle) else {
+                return set_result(cpu, Err(0x06));
+            };
+            match cpu.bus.disk.seek_file(sft, offset as i64, whence) {
                 Ok(new_pos) => {
-                    file_io(cpu, handle, diskio::SEEK_BYTES, None);
+                    file_io(cpu, sft, diskio::SEEK_BYTES, None);
                     cpu.set_dx(((new_pos >> 16) & 0xFFFF) as u16);
                     cpu.set_ax((new_pos & 0xFFFF) as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1264,7 +1301,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 44h: IOCTL (I/O Control)
         0x44 => {
             let al = cpu.get_al();
-            let bx = cpu.bx(); // Handle
+            // The open file of the handle in BX, for the calls that take one.
+            let sft = file_of(cpu, cpu.bx());
+            let device = sft.and_then(|sft| cpu.bus.disk.handle_device(sft));
 
             // cpu.bus.log_string(&format!(
             //     "[DOS] IOCTL AH=44h AL={:02X} Handle={:04X}",
@@ -1276,15 +1315,20 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 0x00 => {
                     // Bit 7=1 (Char Dev), Bit 6=0 (EOF), Bit 0=1 (Console Input)
                     // For STDIN(0), STDOUT(1), STDERR(2), return 0x80D3 or similar.
-                    let device = cpu.bus.disk.handle_device(bx);
-                    if device == Some(crate::disk::CharDevice::Nul) {
+                    let Some(sft) = sft else {
+                        return set_result(cpu, Err(0x06));
+                    };
+                    if sft == crate::disk::SFT_AUX || sft == crate::disk::SFT_PRN {
+                        // AUX and PRN: character devices, not EOF.
+                        cpu.set_dx(0x80C0);
+                    } else if device == Some(CharDevice::Nul) {
                         // Character device, NUL.
                         cpu.set_dx(0x8084);
-                    } else if device == Some(crate::disk::CharDevice::Emm) {
+                    } else if device == Some(CharDevice::Emm) {
                         // The expanded memory manager: a character device
                         // taking IOCTL.
                         cpu.set_dx(0xC080);
-                    } else if bx <= 2 || device == Some(crate::disk::CharDevice::Con) {
+                    } else if device == Some(CharDevice::Con) {
                         // 1000 0000 1101 0011 = 80D3
                         // Bit 7: Char device
                         // Bit 6: EOF (0) - meaningful for files?
@@ -1300,7 +1344,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         let drive = cpu
                             .bus
                             .disk
-                            .handle_drive(bx)
+                            .handle_drive(sft)
                             .unwrap_or(cpu.bus.disk.get_current_drive());
                         cpu.set_dx(drive as u16);
                     }
@@ -1348,11 +1392,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // The expanded memory manager is always ready, which is
                 // how programs tell EMMXXXX0 from a file of that name; it
                 // hands no control data to programs.
-                0x06 | 0x07 if cpu.bus.disk.handle_device(bx) == Some(crate::disk::CharDevice::Emm) => {
+                0x06 | 0x07 if device == Some(CharDevice::Emm) => {
                     cpu.set_reg8(Register::AL, 0xFF);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
-                0x02 if cpu.bus.disk.handle_device(bx) == Some(crate::disk::CharDevice::Emm) => {
+                0x02 if device == Some(CharDevice::Emm) => {
                     cpu.set_ax(0x01);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
@@ -1755,16 +1799,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 45h: Duplicate handle BX. AH = 46h: make handle CX refer to
         // the file of handle BX.
         0x45 | 0x46 => {
-            let handle = cpu.bx();
-            let target = (ah == 0x46).then(|| cpu.cx());
-            let result = if handle < FIRST_USER_HANDLE {
-                // The standard devices aren't in the file table: hand back
-                // the device handle, which closing leaves alone.
-                Ok(target.unwrap_or(handle))
+            let (psp, handle, target, ax) = (cpu.current_psp, cpu.bx(), cpu.cx(), cpu.ax());
+            let result = if ah == 0x46 {
+                dos_files::force_duplicate(&mut cpu.bus, psp, handle, target).map(|()| ax)
             } else {
-                cpu.bus.disk.duplicate_handle(handle, target)
+                dos_files::duplicate(&mut cpu.bus, psp, handle)
             };
-            let result = result.map(|h| if ah == 0x46 { cpu.ax() } else { h });
             set_result(cpu, result);
         }
 
@@ -1778,7 +1818,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 57h: Get (AL=0) or set (AL=1) a file's date and time.
         0x57 => {
-            let handle = cpu.bx();
+            let Some(handle) = file_of(cpu, cpu.bx()) else {
+                return set_result(cpu, Err(0x06));
+            };
             if cpu.get_al() == 0 {
                 match cpu.bus.disk.file_time(handle) {
                     Ok((time, date)) => {
@@ -1844,9 +1886,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             if !dir.is_empty() && !dir.ends_with('\\') {
                 dir.push('\\');
             }
-            match cpu.bus.disk.create_temp_file(&dir, cpu.current_psp) {
-                Ok((handle, name)) => {
-                    file_io(cpu, handle, diskio::CREATE_BYTES, None);
+            let created = cpu.bus.disk.create_temp_file(&dir, cpu.current_psp);
+            match created.and_then(|(sft, name)| attach(cpu, sft).map(|handle| (sft, handle, name))) {
+                Ok((sft, handle, name)) => {
+                    file_io(cpu, sft, diskio::CREATE_BYTES, None);
                     for (i, b) in name.bytes().chain(std::iter::once(0)).enumerate() {
                         cpu.bus.write_8(addr + i, b);
                     }
@@ -1859,11 +1902,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 5Bh: Create a new file (fails if it exists).
         0x5B => {
             let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
-            let result = cpu.bus.disk.create_new_file(&filename, cpu.current_psp);
-            if let Ok(handle) = result {
-                file_io(cpu, handle, diskio::CREATE_BYTES, None);
+            let created = cpu.bus.disk.create_new_file(&filename, cpu.current_psp);
+            let result = created.and_then(|sft| attach(cpu, sft).map(|handle| (sft, handle)));
+            if let Ok((sft, _)) = result {
+                file_io(cpu, sft, diskio::CREATE_BYTES, None);
             }
-            set_result(cpu, result);
+            set_result(cpu, result.map(|(_, handle)| handle));
         }
 
         // AH = 60h: Canonical ("true") name of DS:SI into ES:DI.
@@ -1925,8 +1969,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
-        // AH = 67h: Set handle count, AH = 68h: commit file. Nothing to do.
-        0x67 | 0x68 | 0x6A => cpu.set_cpu_flag(CpuFlags::CF, false),
+        // AH = 67h: Room for BX handles in the running process's table.
+        0x67 => {
+            let (psp, count) = (cpu.current_psp, cpu.bx());
+            let result = dos_files::set_handle_count(&mut cpu.bus, psp, count);
+            set_result(cpu, result.map(|()| cpu.ax()));
+        }
+
+        // AH = 68h / 6Ah: Commit file. Nothing to do.
+        0x68 | 0x6A => cpu.set_cpu_flag(CpuFlags::CF, false),
 
         // AX = 6C00h: Extended open/create. BL = access mode, DL = action
         // (low nibble: file exists, 0 fail / 1 open / 2 replace; high
@@ -1945,10 +1996,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 (false, _, 1) => cpu.bus.disk.create_file(&filename, psp).map(|h| (h, 2)),
                 (false, _, _) => Err(0x02),
             };
-            match result {
-                Ok((handle, taken)) => {
+            match result.and_then(|(sft, taken)| attach(cpu, sft).map(|handle| (sft, handle, taken))) {
+                Ok((sft, handle, taken)) => {
                     let bytes = if taken == 1 { diskio::OPEN_BYTES } else { diskio::CREATE_BYTES };
-                    file_io(cpu, handle, bytes, None);
+                    file_io(cpu, sft, bytes, None);
                     cpu.set_cx(taken);
                     set_result(cpu, Ok(handle));
                 }

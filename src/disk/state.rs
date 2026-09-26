@@ -8,16 +8,18 @@
 use super::{CharDevice, DRIVE_C, DiskController, Drive, LASTDRIVE, OpenData, OpenFile, drive_letter};
 use crate::mount::{mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
-use std::collections::HashMap;
 use std::io::Seek;
 
 crate::state_enum!(CharDevice { CharDevice::Nul, CharDevice::Con, CharDevice::Emm });
 
-/// An open handle as saved.
+/// An open file as saved: its entry in the file table and how many
+/// handles refer to it. The handles themselves are in the processes'
+/// PSPs, in memory.
 #[derive(Default)]
 struct SavedFile {
-    handle: u16,
-    group: u64,
+    sft: u16,
+    refs: u16,
+    fcb: bool,
     drive: u8,
     owner: u16,
     key: u64,
@@ -27,12 +29,13 @@ struct SavedFile {
     position: u64,
 }
 
-crate::state_fields!(SavedFile { handle, group, drive, owner, key, path, mode, device, position });
+crate::state_fields!(SavedFile { sft, refs, fcb, drive, owner, key, path, mode, device, position });
 
 impl DiskController {
     pub(crate) fn save_state(&self, w: &mut Writer) {
         // Whether EMMXXXX0 is there comes with the configuration.
-        let DiskController { open_files, next_group, drives, current_drive, emm_device: _ } = self;
+        // The copy of the file table in memory is saved with the memory.
+        let DiskController { open_files, sft_dirty: _, position_dirty: _, drives, current_drive, emm_device: _ } = self;
         current_drive.save(w);
         for drive in drives {
             drive.is_some().save(w);
@@ -46,19 +49,20 @@ impl DiskController {
                 media_changed.save(w);
             }
         }
-        let mut handles: Vec<u16> = open_files.keys().copied().collect();
-        handles.sort_unstable();
-        handles.len().save(w);
-        for handle in handles {
-            let OpenFile { data, drive, owner, key, path, mode, group } = &open_files[&handle];
+        let mut entries: Vec<u16> = open_files.keys().copied().collect();
+        entries.sort_unstable();
+        entries.len().save(w);
+        for sft in entries {
+            let OpenFile { data, drive, owner, key, path, mode, refs, fcb } = &open_files[&sft];
             let (device, position) = match data {
                 OpenData::Host(file) => (None, (&*file).stream_position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
                 OpenData::Device(device) => (Some(*device), 0),
             };
             let saved = SavedFile {
-                handle,
-                group: *group,
+                sft,
+                refs: *refs,
+                fcb: *fcb,
                 drive: *drive,
                 owner: *owner,
                 key: *key,
@@ -69,7 +73,6 @@ impl DiskController {
             };
             saved.save(w);
         }
-        next_group.save(w);
     }
 
     /// Mount the drives as the state has them, where they differ, and open
@@ -127,51 +130,34 @@ impl DiskController {
             file.load(r)?;
             files.push(file);
         }
-        self.next_group.load(r)?;
 
-        // Each open again once, with the handles duplicated from it
-        // duplicated again.
-        let mut opened: HashMap<u64, Option<u16>> = HashMap::new();
+        // Each open again, in its entry.
         let mut lost = Vec::new();
         for file in files {
-            let handle = match opened.get(&file.group) {
-                Some(Some(first)) => self.duplicate_handle(*first, Some(file.handle)).ok(),
-                Some(None) => None,
-                None => {
-                    let reopened = match file.device {
-                        Some(device) => {
-                            let handle = self.free_handle().ok();
-                            if let Some(handle) = handle {
-                                let open = self.opened(OpenData::Device(device), file.drive, file.owner, 0, &file.path, file.mode);
-                                self.open_files.insert(handle, open);
-                            }
-                            handle
-                        }
-                        None => self.open_or_create(&file.path, file.mode, file.owner, false).ok(),
-                    };
-                    let moved = reopened.map(|at| {
-                        let open = self.open_files.remove(&at).expect("just opened");
-                        self.open_files.insert(file.handle, open);
-                        file.handle
-                    });
-                    if let Some(handle) = moved {
-                        let _ = self.seek_file(handle, file.position as i64, 0);
-                    } else {
-                        lost.push(file.path.clone());
-                    }
-                    opened.insert(file.group, moved);
-                    moved
+            let reopened = match file.device {
+                Some(device) => {
+                    Some(self.opened(OpenData::Device(device), file.drive, file.owner, 0, &file.path, file.mode))
                 }
+                None => match self.open_or_create(&file.path, file.mode, file.owner, false) {
+                    Ok(at) => self.open_files.remove(&at),
+                    Err(_) => None,
+                },
             };
-            if let Some(open) = handle.and_then(|h| self.open_files.get_mut(&h)) {
-                open.drive = file.drive;
-                open.owner = file.owner;
-                open.key = file.key;
-                open.path = file.path;
-                open.mode = file.mode;
-                open.group = file.group;
-            }
+            let Some(mut open) = reopened else {
+                lost.push(file.path.clone());
+                continue;
+            };
+            open.drive = file.drive;
+            open.owner = file.owner;
+            open.key = file.key;
+            open.path = file.path;
+            open.mode = file.mode;
+            open.refs = file.refs;
+            open.fcb = file.fcb;
+            self.open_files.insert(file.sft, open);
+            let _ = self.seek_file(file.sft, file.position as i64, 0);
         }
+        self.sft_dirty = u128::MAX;
         Ok(lost)
     }
 }

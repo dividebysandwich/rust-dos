@@ -585,8 +585,8 @@ impl Cpu {
     /// Returns whether it went back to a parent.
     pub fn terminate(&mut self, code: u8) -> bool {
         self.last_child_exit = code as u16;
+        crate::dos_files::close_all(&mut self.bus, self.current_psp);
         crate::mcb::free_owned_by(&mut self.bus, self.current_psp);
-        self.bus.disk.close_process_files(self.current_psp);
         if self.return_to_parent() {
             return true;
         }
@@ -1005,6 +1005,7 @@ impl Cpu {
         self.bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
 
         self.bus.disk.close_all_files();
+        crate::dos_files::write_table(&mut self.bus);
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }
@@ -1347,6 +1348,10 @@ impl Cpu {
         self.bus.write_16(psp_phys + 0x2C, 0);
         // Offset 0x80: empty command tail, filled in by the caller.
         self.set_command_tail(load_segment, "");
+        // The handle table: the parent's handles for a program EXEC
+        // starts, the standard ones for one the shell starts.
+        let parent = matches!(placement, Placement::Child(_)).then_some(self.current_psp);
+        crate::dos_files::init_psp(&mut self.bus, load_segment, parent);
         self.current_psp = load_segment;
 
         self.bus.log_string(&format!(
@@ -1390,6 +1395,7 @@ impl Cpu {
             self.bus.fill_ram(0x500..first_mcb, 0);
             let end = crate::mcb::low_end(&self.bus) as usize * 16;
             self.bus.fill_ram(self.resident_end as usize * 16..end, 0);
+            crate::dos_files::write_table(&mut self.bus);
         }
 
         // Re-install the HLE Interrupt Vectors — only for the top-level load.
@@ -1546,6 +1552,10 @@ impl Cpu {
         // Offset 0x2C: environment segment, set by whoever started the
         // program (load_executable or EXEC).
         self.bus.write_16(psp_phys + 0x2C, 0);
+        // The handle table: the parent's handles for a program EXEC
+        // starts, the standard ones for one the shell starts.
+        let parent = matches!(placement, Placement::Child(_)).then_some(self.current_psp);
+        crate::dos_files::init_psp(&mut self.bus, load_segment, parent);
         self.current_psp = load_segment;
 
         self.bus.log_string(&format!(

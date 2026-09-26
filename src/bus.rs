@@ -379,6 +379,8 @@ impl Bus {
         // The default Ultrasound's software, and the equipment word, hard
         // disk count and DPBs for the drives C:, X: and Z:.
         let _ = bus.mount_ultrasnd(crate::gus::GusConfig::default().drive);
+        // The file table, with the standard devices open.
+        crate::dos_files::write_table(&mut bus);
 
         bus
     }
@@ -625,7 +627,7 @@ impl Bus {
 
     /// Fill in the DOS 5 List of Lists for INT 21h AH=52h. Programs mostly
     /// read the first MCB segment at offset -2 to walk the memory chain.
-    /// Structures the emulator doesn't keep in DOS memory (SFTs, CDS, disk
+    /// Structures the emulator doesn't keep in DOS memory (CDS, disk
     /// buffers, CLOCK$/CON drivers) are left as null pointers.
     fn write_list_of_lists(&mut self, with_dpb: &[(u8, DriveKind)]) {
         let base = DOS_LIST_OF_LISTS;
@@ -641,6 +643,9 @@ impl Bus {
             }
             None => self.write_32(base, 0xFFFF_FFFF),
         }
+        // 04: far pointer to the System File Table (dos_files.rs)
+        self.write_16(base + 0x04, 0);
+        self.write_16(base + 0x06, crate::dos_files::SFT_SEGMENT);
         let max_sector = with_dpb.iter().filter_map(|&(d, _)| self.disk.layout(d)).map(|l| l.bytes_per_sector).max();
         self.write_16(base + 0x10, max_sector.unwrap_or(512)); // 10: max bytes per sector
         self.write_8(base + 0x20, with_dpb.len() as u8); // 20: block devices

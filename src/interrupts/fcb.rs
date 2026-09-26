@@ -286,6 +286,7 @@ pub fn open(cpu: &mut Cpu, create: bool) {
     }
     match cpu.bus.disk.open_file(&path, 0x02, owner) {
         Ok(handle) => {
+            cpu.bus.disk.set_fcb(handle);
             set_up_fcb(cpu, fcb, handle);
             cpu.set_reg8(Register::AL, 0x00);
         }

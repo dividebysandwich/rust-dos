@@ -15,10 +15,17 @@ use crate::mount::MountSpec;
 
 mod state;
 
-// DOS defines standard handles: 0=Stdin, 1=Stdout, 2=Stderr, 3=Aux, 4=Printer
-pub const FIRST_USER_HANDLE: u16 = 5;
-/// A job file table has at most 255 slots (0xFF marks an unused one).
-const HANDLE_LIMIT: u16 = 0xFF;
+/// The open files are numbered as DOS numbers the entries of its System
+/// File Table (see dos_files.rs), which the handles of each process refer
+/// to: the first three are the standard devices, AUX, CON and PRN, which
+/// are always open; the files opened come after them.
+pub const SFT_AUX: u16 = 0;
+pub const SFT_CON: u16 = 1;
+pub const SFT_PRN: u16 = 2;
+pub const FIRST_FILE: u16 = 3;
+/// The number of entries in the System File Table (FILES=), as DOSBox
+/// has them. At most 128, for `DiskController::sft_dirty`.
+pub const FILES: u16 = 127;
 
 // Drive numbers are 0-based (0=A:, 2=C:, 25=Z:).
 pub const DRIVE_C: u8 = 2;
@@ -398,6 +405,22 @@ impl Drive {
     }
 }
 
+/// An open file as the System File Table has it (`DiskController::sft_entry`).
+pub struct SftEntry {
+    pub refs: u16,
+    /// The access mode it was opened with, and 8000h for an FCB's.
+    pub mode: u16,
+    pub device: Option<CharDevice>,
+    pub drive: u8,
+    /// The PSP of the process that opened it.
+    pub owner: u16,
+    /// Its name as in a directory entry: 8 characters and 3 of extension.
+    pub name: [u8; 11],
+    pub size: u32,
+    pub time: u16,
+    pub date: u16,
+}
+
 struct OpenFile {
     data: OpenData,
     drive: u8,
@@ -407,11 +430,14 @@ struct OpenFile {
     /// Tells the file apart from others (`DiskController::file_key`).
     key: u64,
     /// The file as it was opened, for a save state to open it again: its
-    /// full DOS path and access mode, and the open it came from, which
-    /// the handles duplicated from it share with it.
+    /// full DOS path and access mode.
     path: String,
     mode: u8,
-    group: u64,
+    /// The handles and FCBs that refer to it: it is closed when the last
+    /// of them is.
+    refs: u16,
+    /// Opened for an FCB rather than a handle.
+    fcb: bool,
 }
 
 /// What an open handle reads and writes.
@@ -516,10 +542,12 @@ pub struct DosDirEntry {
 }
 
 pub struct DiskController {
-    // Map DOS Handle (u16) -> Rust File Object
+    /// The open files by their System File Table entry.
     open_files: HashMap<u16, OpenFile>,
-    /// The number the next open gets (`OpenFile::group`).
-    next_group: u64,
+    /// The entries whose copy in DOS memory is out of date: all of it, or
+    /// only the position (`dos_files::flush`).
+    sft_dirty: u128,
+    position_dirty: u128,
 
     // File System State
     drives: [Option<Drive>; 26],
@@ -561,13 +589,38 @@ impl DiskController {
         });
         drives[DRIVE_Z as usize] = Some(Self::memory_drive(z_files, DEFAULT_LABEL));
 
-        Self {
+        let mut disk = Self {
             open_files: HashMap::new(),
-            next_group: 0,
+            sft_dirty: 0,
+            position_dirty: 0,
             drives,
             current_drive: DRIVE_C, // Default to C:
             emm_device: false,
+        };
+        disk.open_standard_devices();
+        disk
+    }
+
+    /// AUX, CON and PRN in the first entries of the file table, where DOS
+    /// opens them at startup and the handles 0 to 4 of every process
+    /// start out referring to.
+    fn open_standard_devices(&mut self) {
+        for (sft, name, device) in
+            [(SFT_AUX, "AUX", CharDevice::Nul), (SFT_CON, "CON", CharDevice::Con), (SFT_PRN, "PRN", CharDevice::Nul)]
+        {
+            let file = OpenFile {
+                data: OpenData::Device(device),
+                drive: DRIVE_C,
+                owner: 0,
+                key: 0,
+                path: name.to_string(),
+                mode: 0x02,
+                refs: 0,
+                fcb: false,
+            };
+            self.open_files.insert(sft, file);
         }
+        self.sft_dirty = u128::MAX;
     }
 
     fn memory_drive(files: MemFs, label: &str) -> Drive {
@@ -896,7 +949,16 @@ impl DiskController {
     }
 
     fn close_drive_files(&mut self, drive: u8) {
-        self.open_files.retain(|_, f| f.drive != drive);
+        let gone: Vec<u16> = self
+            .open_files
+            .iter()
+            .filter(|&(&sft, f)| sft >= FIRST_FILE && f.drive == drive)
+            .map(|(&sft, _)| sft)
+            .collect();
+        for sft in gone {
+            self.open_files.remove(&sft);
+            self.mark_dirty(sft);
+        }
     }
 
     fn drive(&self, drive: u8) -> Option<&Drive> {
@@ -1010,6 +1072,52 @@ impl DiskController {
         match self.open_files.get(&handle)?.data {
             OpenData::Device(device) => Some(device),
             _ => None,
+        }
+    }
+
+    /// What DOS keeps in the file table entry `sft` about the file open
+    /// there, but its position (`position`).
+    pub fn sft_entry(&self, sft: u16) -> Option<SftEntry> {
+        let open = self.open_files.get(&sft)?;
+        let size = match &open.data {
+            OpenData::Host(file) => file.metadata().map_or(0, |m| m.len()),
+            OpenData::Memory(data, _) => data.len() as u64,
+            OpenData::Image(_, extent, _) => extent.size as u64,
+            OpenData::Fat { volume, at, .. } => volume.reload(*at).map_or(0, |entry| entry.size as u64),
+            OpenData::Device(_) => 0,
+        };
+        let (time, date) = self.file_time(sft).unwrap_or((0, 0));
+        let leaf = open.path.rsplit(['\\', '/', ':']).next().unwrap_or("");
+        let (stem, ext) = match open.data {
+            OpenData::Device(_) => (leaf.split('.').next().unwrap_or(""), ""),
+            _ => leaf.rsplit_once('.').unwrap_or((leaf, "")),
+        };
+        let mut name = [b' '; 11];
+        for (slot, b) in name[..8].iter_mut().zip(stem.trim().bytes()) {
+            *slot = b.to_ascii_uppercase();
+        }
+        for (slot, b) in name[8..].iter_mut().zip(ext.bytes()) {
+            *slot = b.to_ascii_uppercase();
+        }
+        Some(SftEntry {
+            refs: open.refs,
+            mode: open.mode as u16 | if open.fcb { 0x8000 } else { 0 },
+            device: self.handle_device(sft),
+            drive: open.drive,
+            owner: open.owner,
+            name,
+            size: size.min(u32::MAX as u64) as u32,
+            time,
+            date,
+        })
+    }
+
+    /// Where in the open file `sft` the next read or write goes.
+    pub fn position(&self, sft: u16) -> Option<u64> {
+        match &self.open_files.get(&sft)?.data {
+            OpenData::Host(file) => (&*file).stream_position().ok(),
+            OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => Some(pos.get()),
+            OpenData::Device(_) => Some(0),
         }
     }
 
@@ -1328,21 +1436,39 @@ impl DiskController {
         }
     }
 
-    /// Lowest unused handle, like DOS taking the first free job file table
-    /// slot. Programs expect small numbers: the Microsoft C runtime rejects
-    /// handles at or above its 20-entry file table.
-    /// A file just opened as `filename` with access `mode`, from an open
-    /// of its own.
+    /// A file just opened as `filename` with access `mode`, with the one
+    /// reference of whoever opened it.
     fn opened(&mut self, data: OpenData, drive: u8, owner: u16, key: u64, filename: &str, mode: u8) -> OpenFile {
         let path = self.qualify_path(filename).unwrap_or_else(|| filename.to_ascii_uppercase());
-        self.next_group += 1;
-        OpenFile { data, drive, owner, key, path, mode, group: self.next_group }
+        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false }
     }
 
+    /// The lowest unused entry of the file table.
     fn free_handle(&self) -> Result<u16, u8> {
-        (FIRST_USER_HANDLE..HANDLE_LIMIT)
+        (FIRST_FILE..FILES)
             .find(|h| !self.open_files.contains_key(h))
             .ok_or(0x04) // Too many open files
+    }
+
+    /// Put an open file in the table at `sft`.
+    fn insert(&mut self, sft: u16, file: OpenFile) {
+        self.open_files.insert(sft, file);
+        self.mark_dirty(sft);
+    }
+
+    fn mark_dirty(&mut self, sft: u16) {
+        self.sft_dirty |= 1u128.checked_shl(sft as u32).unwrap_or(0);
+    }
+
+    fn mark_moved(&mut self, sft: u16) {
+        self.position_dirty |= 1u128.checked_shl(sft as u32).unwrap_or(0);
+    }
+
+    /// The entries whose copy in DOS memory is out of date since the last
+    /// call, and those of them whose position only.
+    pub fn take_dirty(&mut self) -> (u128, u128) {
+        let whole = std::mem::take(&mut self.sft_dirty);
+        (whole, std::mem::take(&mut self.position_dirty) & !whole)
     }
 
     /// The character device `filename` names, EMMXXXX0 among them while
@@ -1371,7 +1497,7 @@ impl DiskController {
         if let Some(device) = self.device(filename) {
             let handle = self.free_handle()?;
             let file = self.opened(OpenData::Device(device), self.current_drive, owner, 0, filename, mode);
-            self.open_files.insert(handle, file);
+            self.insert(handle, file);
             return Ok(handle);
         }
         // Files held in memory are read-only: read/write opens are
@@ -1395,7 +1521,7 @@ impl DiskController {
             let handle = self.free_handle()?;
             let key = self.file_key(filename);
             let file = self.opened(data, drive, owner, key, filename, mode);
-            self.open_files.insert(handle, file);
+            self.insert(handle, file);
             return Ok(handle);
         }
 
@@ -1426,7 +1552,7 @@ impl DiskController {
             let data = OpenData::Fat { volume, at, pos: Rc::new(Cell::new(0)), write };
             let key = self.file_key(filename);
             let file = self.opened(data, drive, owner, key, filename, mode);
-            self.open_files.insert(handle, file);
+            self.insert(handle, file);
             return Ok(handle);
         }
 
@@ -1466,7 +1592,7 @@ impl DiskController {
             Ok(file) => {
                 let key = self.file_key(filename);
                 let file = self.opened(OpenData::Host(file), drive, owner, key, filename, mode);
-                self.open_files.insert(handle, file);
+                self.insert(handle, file);
                 Ok(handle)
             }
             Err(_) => Err(0x02),
@@ -1600,38 +1726,6 @@ impl DiskController {
         fs::rename(source, parent.join(leaf.to_uppercase())).map_err(|_| 0x05)
     }
 
-    /// INT 21h, AH=45h/46h: a second handle for the file behind `handle`,
-    /// sharing its position. `new_handle` picks the number (AH=46h, which
-    /// closes a file already open there).
-    pub fn duplicate_handle(&mut self, handle: u16, new_handle: Option<u16>) -> Result<u16, u8> {
-        let open = self.open_files.get(&handle).ok_or(0x06)?;
-        let data = match &open.data {
-            OpenData::Host(f) => OpenData::Host(f.try_clone().map_err(|_| 0x04)?),
-            OpenData::Memory(data, pos) => OpenData::Memory(data.clone(), pos.clone()),
-            OpenData::Image(image, extent, pos) => OpenData::Image(image.clone(), *extent, pos.clone()),
-            OpenData::Fat { volume, at, pos, write } => {
-                OpenData::Fat { volume: volume.clone(), at: *at, pos: pos.clone(), write: *write }
-            }
-            OpenData::Device(device) => OpenData::Device(*device),
-        };
-        let copy = OpenFile {
-            data,
-            drive: open.drive,
-            owner: open.owner,
-            key: open.key,
-            path: open.path.clone(),
-            mode: open.mode,
-            group: open.group,
-        };
-        let target = match new_handle {
-            Some(h) if h < HANDLE_LIMIT => h,
-            Some(_) => return Err(0x06),
-            None => self.free_handle()?,
-        };
-        self.open_files.insert(target, copy);
-        Ok(target)
-    }
-
     /// INT 21h, AX=5700h: the DOS time and date of a file's last change.
     pub fn file_time(&self, handle: u16) -> Result<(u16, u16), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06)?;
@@ -1661,28 +1755,66 @@ impl DiskController {
         }
     }
 
-    /// True if `handle` is open.
-    pub fn is_open(&self, handle: u16) -> bool {
-        self.open_files.contains_key(&handle)
+    /// True if the file table entry `sft` is an open file.
+    pub fn is_open(&self, sft: u16) -> bool {
+        self.open_files.contains_key(&sft)
     }
 
-    // INT 21h, AH=3Eh: Close File
-    pub fn close_file(&mut self, handle: u16) -> bool {
-        self.open_files.remove(&handle).is_some()
+    /// One more handle (or FCB) refers to the open file `sft`.
+    pub fn add_ref(&mut self, sft: u16) -> bool {
+        let Some(open) = self.open_files.get_mut(&sft) else { return false };
+        open.refs = open.refs.saturating_add(1);
+        self.mark_dirty(sft);
+        true
     }
 
-    /// Close the files a terminating process opened, as DOS does on exit.
-    pub fn close_process_files(&mut self, owner: u16) {
-        self.open_files.retain(|_, f| f.owner != owner);
+    /// A handle (or FCB) that referred to the open file `sft` is closed
+    /// (INT 21h AH=3Eh): the file closes with the last of them, but the
+    /// standard devices stay. False if it isn't open.
+    pub fn close_file(&mut self, sft: u16) -> bool {
+        let Some(open) = self.open_files.get_mut(&sft) else { return false };
+        open.refs = open.refs.saturating_sub(1);
+        if open.refs == 0 && sft >= FIRST_FILE {
+            self.open_files.remove(&sft);
+        }
+        self.mark_dirty(sft);
+        true
+    }
+
+    /// Whether a process started now gets a handle for the open file
+    /// `sft`: unless it was opened with the no-inherit bit (80h).
+    pub fn inheritable(&self, sft: u16) -> bool {
+        self.open_files.get(&sft).is_some_and(|f| f.mode & 0x80 == 0 && !f.fcb)
+    }
+
+    /// The open file `sft` is an FCB's.
+    pub fn set_fcb(&mut self, sft: u16) {
+        if let Some(open) = self.open_files.get_mut(&sft) {
+            open.fcb = true;
+            self.mark_dirty(sft);
+        }
+    }
+
+    /// Close the files a terminating process opened for FCBs, which no
+    /// handle refers to.
+    pub fn close_fcb_files(&mut self, owner: u16) {
+        let gone: Vec<u16> =
+            self.open_files.iter().filter(|(_, f)| f.fcb && f.owner == owner).map(|(&sft, _)| sft).collect();
+        for sft in gone {
+            self.open_files.remove(&sft);
+            self.mark_dirty(sft);
+        }
     }
 
     /// Close every open file, for when the shell is reloaded.
     pub fn close_all_files(&mut self) {
         self.open_files.clear();
+        self.open_standard_devices();
     }
 
     // INT 21h, AH=3Fh: Read from File
     pub fn read_file(&mut self, handle: u16, count: usize) -> Result<Vec<u8>, u16> {
+        self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
                 OpenData::Host(file) => file,
@@ -1724,6 +1856,7 @@ impl DiskController {
 
     // INT 21h, AH=40h: Write to File
     pub fn write_file(&mut self, handle: u16, data: &[u8]) -> Result<u16, u8> {
+        self.mark_dirty(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
                 OpenData::Host(file) => file,
@@ -1761,6 +1894,7 @@ impl DiskController {
 
     // INT 21h, AH=42h: Seek
     pub fn seek_file(&mut self, handle: u16, offset: i64, origin: u8) -> Result<u64, u16> {
+        self.mark_moved(handle);
         if let Some(open) = self.open_files.get_mut(&handle) {
             let file = match &mut open.data {
                 OpenData::Host(file) => file,
@@ -1793,7 +1927,9 @@ impl DiskController {
     pub fn set_file_size(&mut self, handle: u16, size: u64) -> Result<(), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06u8)?;
         if let OpenData::Host(file) = &open.data {
-            return file.set_len(size).map_err(|_| 0x05);
+            let result = file.set_len(size).map_err(|_| 0x05);
+            self.mark_dirty(handle);
+            return result;
         }
         let end = self.seek_file(handle, 0, 2).map_err(|_| 0x05u8)?;
         if end > size {
@@ -2520,25 +2656,37 @@ mod tests {
     }
 
     #[test]
-    fn handles_are_reused_and_closed_with_their_process() {
+    fn file_table_entries_are_reused_and_closed_with_their_last_reference() {
         let base = scratch("handle_reuse");
         fs::write(base.join("F.TXT"), b"1").unwrap();
         let mut disk = DiskController::new(base);
-        let child = 0x2000;
-        let parent_h = disk.open_file("F.TXT", 0, PSP).unwrap();
-        assert_eq!(parent_h, FIRST_USER_HANDLE);
-        let a = disk.open_file("F.TXT", 0, child).unwrap();
-        let b = disk.open_file("F.TXT", 0, child).unwrap();
+        let first = disk.open_file("F.TXT", 0, PSP).unwrap();
+        assert_eq!(first, FIRST_FILE);
+        let a = disk.open_file("F.TXT", 0, PSP).unwrap();
+        // A second handle for it: the file stays open until both close.
+        assert!(disk.add_ref(a));
+        assert!(disk.close_file(a));
+        assert_eq!(disk.read_file(a, 1).unwrap(), b"1");
         assert!(disk.close_file(a));
         assert!(!disk.close_file(a));
-        assert_eq!(disk.open_file("F.TXT", 0, child), Ok(a));
-
-        disk.close_process_files(child);
-        assert!(disk.read_file(a, 1).is_err());
-        assert!(disk.read_file(b, 1).is_err());
-        assert_eq!(disk.read_file(parent_h, 1).unwrap(), b"1");
-        assert_eq!(disk.open_file("Z:\\COMMAND.COM", 0, child), Ok(a));
+        assert_eq!(disk.open_file("Z:\\COMMAND.COM", 0, PSP), Ok(a));
         assert_eq!(disk.handle_drive(a), Some(DRIVE_Z));
+
+        // The standard devices stay open, whatever closes them.
+        assert!(disk.close_file(SFT_CON));
+        assert_eq!(disk.handle_device(SFT_CON), Some(CharDevice::Con));
+
+        // A process's FCB files close when it ends; its other files are
+        // closed through its handles.
+        let child = 0x2000;
+        let f = disk.open_file("F.TXT", 0, child).unwrap();
+        disk.set_fcb(f);
+        assert!(!disk.inheritable(f));
+        disk.close_fcb_files(child);
+        assert!(!disk.is_open(f));
+        assert_eq!(disk.read_file(first, 1).unwrap(), b"1");
+        let entry = disk.sft_entry(first).unwrap();
+        assert_eq!((&entry.name, entry.refs, entry.size, entry.owner), (b"F       TXT", 1, 1, PSP));
     }
 
     #[test]
@@ -2707,16 +2855,16 @@ mod tests {
         assert_eq!(disk.qualify_path("X:PIANO.PAT").as_deref(), Some("X:\\GUS\\MIDI\\PIANO.PAT"));
         assert!(matches!(disk.file_data("X:..\\README.TXT"), Some(FileData::Memory(d)) if &d[..] == b"hi"));
 
-        // Read-only files, read with a position duplicated handles share.
+        // Read-only files, read from where the last read ended.
         let h = disk.open_file("X:PIANO.PAT", 2, PSP).unwrap();
         assert_eq!(disk.handle_drive(h), Some(23));
         assert_eq!(disk.read_file(h, 4).unwrap(), b"0123");
-        let dup = disk.duplicate_handle(h, None).unwrap();
-        assert_eq!(disk.read_file(dup, 2).unwrap(), b"45");
+        assert_eq!(disk.read_file(h, 2).unwrap(), b"45");
         assert_eq!(disk.read_file(h, 100).unwrap(), b"6789");
         assert_eq!(disk.read_file(h, 1).unwrap(), b"");
         assert_eq!(disk.seek_file(h, -3, 2), Ok(7));
-        assert_eq!(disk.read_file(dup, 5).unwrap(), b"789");
+        assert_eq!(disk.position(h), Some(7));
+        assert_eq!(disk.read_file(h, 5).unwrap(), b"789");
         assert_eq!(disk.seek_file(h, 20, 0), Ok(20));
         assert_eq!(disk.read_file(h, 1).unwrap(), b"");
         assert_eq!(disk.seek_file(h, -21, 1), Err(0x19));

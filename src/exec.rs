@@ -539,27 +539,26 @@ fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
 /// Give a program started from the shell the files its command line
 /// redirected: its handle 1 (standard output) and 0 (standard input).
 fn redirect_program(cpu: &mut Cpu, redirect: &Redirections) {
-    let owner = cpu.current_psp;
-    let disk = &mut cpu.bus.disk;
+    let psp = cpu.current_psp;
+    let bus = &mut cpu.bus;
     if let Some((path, append)) = &redirect.output {
         let is_device = crate::disk::char_device(path).is_some();
-        if !is_device && (!append || !disk.exists(path)) {
-            let _ = disk.write_whole_file(path, &[], None);
+        if !is_device && (!append || !bus.disk.exists(path)) {
+            let _ = bus.disk.write_whole_file(path, &[], None);
         }
-        if let Ok(handle) = disk.open_file(path, 0x01, owner) {
+        if let Ok(sft) = bus.disk.open_file(path, 0x01, psp) {
             if *append {
-                let _ = disk.seek_file(handle, 0, 2);
+                let _ = bus.disk.seek_file(sft, 0, 2);
             }
-            let _ = disk.duplicate_handle(handle, Some(1));
-            disk.close_file(handle);
+            crate::dos_files::replace(bus, psp, 1, sft);
         }
     }
     if let Some(path) = &redirect.input
-        && let Ok(handle) = disk.open_file(path, 0x00, owner)
+        && let Ok(sft) = bus.disk.open_file(path, 0x00, psp)
     {
-        let _ = disk.duplicate_handle(handle, Some(0));
-        disk.close_file(handle);
+        crate::dos_files::replace(bus, psp, 0, sft);
     }
+    crate::dos_files::flush(bus);
 }
 
 /// Start a program or batch file from the shell with its command line

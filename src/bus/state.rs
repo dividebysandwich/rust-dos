@@ -11,7 +11,7 @@ const RAM_VERSION: u16 = 1;
 const CORE_VERSION: u16 = 1;
 const VIDEO_VERSION: u16 = 1;
 const SOUND_VERSION: u16 = 1;
-const DOS_VERSION: u16 = 1;
+const DOS_VERSION: u16 = 2;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
