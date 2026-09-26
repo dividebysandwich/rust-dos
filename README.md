@@ -154,7 +154,7 @@ and Ctrl+C gives up the line being typed.
 | Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |
 | Ctrl+F10 | Capture the mouse for the program, and let it go; a click captures it too once a program uses the mouse |
 | Alt+Enter | Switch between the window and fullscreen |
-| Ctrl+F5 | Save a screenshot (PNG) |
+| Ctrl+F5 | Save a screenshot (PNG), with the settings window and the performance overlay if they show |
 | Ctrl+F6 | Start and stop recording the sound (WAV) |
 | Ctrl+F7 | Start and stop recording video with sound (AVI) |
 | PrintScreen | Start and stop recording an animation (GIF) |

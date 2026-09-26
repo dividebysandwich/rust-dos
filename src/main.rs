@@ -985,8 +985,9 @@ fn main() -> Result<(), String> {
 
         // Recordings show the machine alone, or with the settings window
         // and the performance overlay (`record_ui`); screenshots show it
-        // alone. Debug clients see the window, the overlay and the
-        // messages as well, but not the recording indicator.
+        // with them, as the screen does. Neither shows the messages at the
+        // top; debug clients see those as well, but not the recording
+        // indicator.
         macro_rules! record {
             () => {
                 recorder.capture(&screen);
@@ -1005,14 +1006,6 @@ fn main() -> Result<(), String> {
         if !settings.record_ui {
             record!();
         }
-        if std::mem::take(&mut screenshot) {
-            let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
-                .and_then(|path| capture::png::save(&screen, &path).map(|()| path));
-            match saved {
-                Ok(path) => osd.show(format!("Screenshot saved to {}", path.display())),
-                Err(e) => osd.show(e),
-            }
-        }
         if ui.is_open() {
             ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
         }
@@ -1023,6 +1016,14 @@ fn main() -> Result<(), String> {
         ui.draw_overlay(&mut screen);
         if settings.record_ui {
             record!();
+        }
+        if std::mem::take(&mut screenshot) {
+            let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
+                .and_then(|path| capture::png::save(&screen, &path).map(|()| path));
+            match saved {
+                Ok(path) => osd.show(format!("Screenshot saved to {}", path.display())),
+                Err(e) => osd.show(e),
+            }
         }
         osd.draw(&mut screen);
         dbg.capture_frame(&screen);

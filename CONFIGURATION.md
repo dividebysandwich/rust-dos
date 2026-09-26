@@ -125,12 +125,13 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   colours, and the PCjr's cartridges.
 * `capture_dir` is the folder screenshots and recordings go in:
   `capture` (the default) in the directory rust-dos started in, or a
-  path of your own. Screenshots show the picture as the recordings do:
-  with the monochrome look, without a CRT shader or the settings window.
-  With `record_ui=true`, video and animation recordings show the
-  settings window and the performance overlay (Ctrl+Shift+F12) as well
-  while they are open, but not the messages at the top; screenshots stay
-  the picture alone. `false` is the default.
+  path of your own. Screenshots (Ctrl+F5, in the settings window too)
+  show the screen as it is, with the monochrome look, the settings window
+  and the performance overlay (Ctrl+Shift+F12) while they show, but
+  without a CRT shader or the messages at the top. Recordings show the
+  picture alone, or with `record_ui=true` the settings window and the
+  performance overlay as well while they are open. `false` is the
+  default.
   Video recordings are AVI files in DOSBox's lossless ZMBV codec, which
   ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
   with its sound, so they keep in step through pauses and fast forward;

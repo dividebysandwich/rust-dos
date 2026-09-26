@@ -490,12 +490,16 @@ impl Machine {
         });
     }
 
-    /// The picture as a PNG image: as the screen shows it, with the cursors
-    /// and a monochrome monitor's colour, without the settings window.
-    pub fn screenshot_png(&self) -> Vec<u8> {
+    /// The picture as a PNG image: as the screen shows it, with the cursors,
+    /// a monochrome monitor's colour, and the settings window and the
+    /// performance overlay while they show, but without the messages at
+    /// the top.
+    pub fn screenshot_png(&mut self) -> Vec<u8> {
         let mut frame = self.picture.clone();
         video::overlay::draw_cursors(&mut frame, &self.cpu.bus, self.cursor_visible);
         video::mono::apply(&mut frame, self.settings.monochrome);
+        self.ui.draw(&mut frame);
+        self.ui.draw_overlay(&mut frame);
         rust_dos::capture::png::encode(&frame).unwrap_or_default()
     }
 
