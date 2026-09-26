@@ -423,6 +423,18 @@ impl VgaCard {
         }
         self.latches.set(new_latches);
 
+        // Read mode 1 (GR05 bit 3): a bit for each of the byte's pixels,
+        // set where its colour matches Color Compare (GR02) in the planes
+        // Color Don't Care (GR07) selects.
+        if !chain4 && self.graphics_regs[0x05] & 0x08 != 0 {
+            let compare = self.graphics_regs[0x02];
+            let care = self.graphics_regs[0x07];
+            return (0..4).filter(|p| care >> p & 1 != 0).fold(0xFF, |result, p| {
+                let want = if compare >> p & 1 != 0 { 0xFF } else { 0x00 };
+                result & !(new_latches[p] ^ want)
+            });
+        }
+
         let final_index: usize;
 
         if chain4 {
@@ -988,5 +1000,32 @@ impl VgaCard {
         self.timing_cache = None;
         self.refresh_composite();
         self.mark_dirty_full();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_mode_1_compares_the_pixels_colours() {
+        let mut vga = VgaCard::new();
+        // Planar, all planes, read mode 1.
+        vga.sequencer_regs[0x04] = 0x06;
+        vga.sequencer_regs[0x02] = 0x0F;
+        vga.graphics_regs[0x05] = 0x08;
+        // Pixels 0-3 in colour 5 (planes 0 and 2), pixels 4-7 in colour 0.
+        vga.vram_graphics[0] = 0xF0;
+        vga.vram_graphics[2 * 65536] = 0xF0;
+        vga.graphics_regs[0x07] = 0x0F;
+        vga.graphics_regs[0x02] = 0x05;
+        assert_eq!(vga.read_graphics(0), 0xF0);
+        vga.graphics_regs[0x02] = 0x00;
+        assert_eq!(vga.read_graphics(0), 0x0F);
+        // Planes Color Don't Care leaves out match whatever they hold.
+        vga.graphics_regs[0x07] = 0x00;
+        assert_eq!(vga.read_graphics(0), 0xFF);
+        // The latches load as in read mode 0.
+        assert_eq!(vga.latches.get(), [0xF0, 0, 0xF0, 0]);
     }
 }
