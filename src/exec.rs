@@ -10,7 +10,7 @@ use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 use crate::bus::GEN_SHIFT;
 use crate::command::{CommandDispatcher, split_command};
-use crate::cpu::{ATTR_DB, CR0_PE, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
+use crate::cpu::{ATTR_DB, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
 use crate::dynrec::{DynState, Run};
 use crate::instr_cache::InstrCache;
 use crate::instructions::Handler;
@@ -882,13 +882,14 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
 }
 
 /// Run the emulator service ("BOP") at `phys_ip`, if there is one. BOPs use
-/// the invalid FE /7 encodings and only work in real mode:
+/// the invalid FE /7 encodings and only work in real and virtual-8086 mode:
 ///
 /// * `FE 38 vv`: the HLE handler of interrupt vv, entered through the
-///   interrupt vector table; returns with a simulated IRET.
+///   interrupt vector table; returns with a simulated IRET, or in
+///   virtual-8086 mode through the BIOS's own (`return_from_hle`).
 /// * `FE 39 vv`: an inline service vv; execution continues after it.
 fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    if cpu.cr0 & CR0_PE != 0 || phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
+    if cpu.pm() || phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
         return false;
     }
     let vector = ram[phys_ip + 2];

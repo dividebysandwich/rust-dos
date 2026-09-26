@@ -22,7 +22,7 @@ pub const VOLUME_SERIAL: u32 = 0x1234_0000;
 /// when the process a program makes from it ends (`Cpu::terminate`).
 fn save_caller(cpu: &mut Cpu) {
     let psp = cpu.current_psp;
-    if psp == 0 || cpu.pe() {
+    if psp == 0 || cpu.pm() {
         return;
     }
     let (ss, sp) = (cpu.ss(), cpu.sp().wrapping_sub(18));

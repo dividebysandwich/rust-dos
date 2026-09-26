@@ -28,9 +28,41 @@ pub mod utils;
 ///
 /// INT 25h/26h return with a RETF instead, leaving the caller's flags on
 /// the stack for it to pop, with interrupts enabled as DOS leaves them.
+///
+/// In virtual-8086 mode the service returns through the BIOS's IRET, with
+/// its results in the flags on the stack: the monitor (Windows' WIN386)
+/// sees the IRET a BIOS does and keeps the flags it owns, IF and IOPL.
 pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
     let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
     let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
+
+    if cpu.v86() {
+        if matches!(vector, 0x25 | 0x26) {
+            let ip = cpu.pop();
+            cpu.set_ip(ip);
+            let cs = cpu.pop();
+            cpu.set_cs(cs);
+            cpu.set_cpu_flag(CpuFlags::DF, false);
+            return;
+        }
+        if !(0x08..=0x0F).contains(&vector) {
+            let at = cpu.sp().wrapping_add(4) as u32;
+            if let Ok(stacked) = cpu.read_u16(crate::cpu::Seg::SS, at) {
+                let results = (CpuFlags::CF | CpuFlags::ZF | CpuFlags::DF).bits() as u16;
+                let mut flags = stacked & !results;
+                if hle_cf {
+                    flags |= CpuFlags::CF.bits() as u16;
+                }
+                if hle_zf {
+                    flags |= CpuFlags::ZF.bits() as u16;
+                }
+                let _ = cpu.write_u16(crate::cpu::Seg::SS, at, flags);
+            }
+        }
+        cpu.set_cs(0xF000);
+        cpu.set_ip(crate::bios::IRET_HANDLER);
+        return;
+    }
 
     let ip = cpu.pop();
 

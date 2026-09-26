@@ -56,7 +56,7 @@ pub const IO_WAIT: u16 = 0x1190;
 const PS2_HANDLER: u16 = 0x11A0;
 pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
-const IRET_HANDLER: u16 = 0xFF53;
+pub const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
 
 const ROM: usize = 0xF0000;

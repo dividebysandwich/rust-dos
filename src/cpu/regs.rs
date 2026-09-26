@@ -226,10 +226,15 @@ macro_rules! seg_accessors {
             pub fn $get(&self) -> u16 {
                 self.seg[Seg::$seg as usize].selector
             }
-            /// Load the register as a real-mode segment.
+            /// Load the register as a real-mode segment (or in
+            /// virtual-8086 mode, as that does).
             #[inline(always)]
             pub fn $set(&mut self, value: u16) {
-                self.load_seg_real(Seg::$seg, value);
+                if self.v86() {
+                    self.load_seg_v86(Seg::$seg, value);
+                } else {
+                    self.load_seg_real(Seg::$seg, value);
+                }
             }
         )*
     };

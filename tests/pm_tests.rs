@@ -607,6 +607,58 @@ fn virtual_8086_mode_with_iopl_0_traps_cli() {
 }
 
 #[test]
+fn a_bios_service_called_in_virtual_8086_mode_returns_through_the_bios_iret() {
+    let mut rig = Rig::new();
+    // As a monitor reflects INT 21h: flags, CS and IP on the stack and on
+    // to the vector's handler, the DOS service at F000:1030 (AH=30h, the
+    // version).
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ah, 0x30u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x30, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1030
+        a.mov(word_ptr(0x100), ax)?;
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    assert_eq!(rig.cpu.bus.read_16(0x30100), 0x0005, "DOS 5.0");
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[1]), (0x40, 0x3000), "back in the V86 code");
+}
+
+#[test]
+fn a_bios_service_in_virtual_8086_mode_with_iopl_0_leaves_its_iret_to_the_monitor() {
+    let mut rig = Rig::new();
+    // The frame the monitor built at 2000:FFF0 returns to 3000:0000 with
+    // CF set; the service runs at F000:1030 (AH=30h).
+    for (i, v) in [0x0000u16, 0x3000, 0x0003].into_iter().enumerate() {
+        rig.write16(0x2FFF0 + 2 * i as u32, v);
+    }
+    rig.record(GP);
+    rig.run(|a| {
+        a.mov(eax, 0x3000u32)?;
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFF0, 0x0002_0002, 0xF000, 0x1030] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    // The BIOS's IRET faults, for the monitor to carry out, with the
+    // service's result in AX and its CF in the flags it pops.
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[1], stack[2]), (GP as u32, 0xFF53, 0xF000));
+    assert_eq!(rig.cpu.ax(), 0x0005);
+    assert_eq!(rig.cpu.bus.read_16(0x2FFF4), 0x0002, "CF clear");
+}
+
+#[test]
 fn lar_lsl_verr_verw_and_arpl() {
     let mut rig = Rig::new();
     rig.set_gdt(FREE, seg_desc(DATA, 0x1234, 0x90, 0x4));
