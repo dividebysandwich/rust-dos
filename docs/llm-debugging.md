@@ -244,7 +244,40 @@ to it, as the Ctrl+F1 and Ctrl+F2 slots do. Save before a step that is
 slow to reach (a menu path, a level) and load to try it again. The load's
 reply has the state's header: when it was saved, the program, and the
 hardware settings it applies first. The files and disk images on the host
-aren't part of a state: what a program wrote since stays written.
+aren't part of a state: what a program wrote since stays written, except
+for a booted system's disks (next section).
+
+### Booted systems (Windows 95)
+
+`IMGMOUNT C /abs/copy.img` then `BOOT -l C` starts the system on the
+image (see CONFIGURATION.md's "Booting a disk image"). Work on a copy:
+the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
+
+- **Status:** `/api/status` has `cpu_mode` `v86` while a DOS box or the
+  BIOS runs under Windows, `video.s3` with the S3's extended CRTC
+  registers and hardware cursor position (with `machine=svga_s3`),
+  `video.vga.crtc` with the standard CRTC registers, and `kbc` with the
+  keyboard controller's output buffer and queues.
+- **The mouse:** Windows reads the PS/2 mouse's motion and accelerates
+  it, so move in small relative steps (`{"action":"move","dx":10,"dy":-6}`)
+  a few tenths of a second apart and read where the pointer went from
+  `video.s3.cursor`. Absolute `x`/`y` moves go to the built-in DOS's
+  driver, which a booted system doesn't use.
+- **Faults:** Windows handles most exceptions itself (#GP for trapped
+  port I/O and in 16-bit code, #PF for paging, #NP for segments loaded
+  on demand), so `/api/exceptions` is busy. A "fatal exception" screen or
+  an "illegal operation" names where Windows gave up, not always the
+  first fault: break on the vector (`{"exception":"0D"}`) and look for the
+  fault in the application's own code (CS with RPL 3, not in V86 mode),
+  then read the descriptors (`/api/ldt`) of the segments it used.
+- **Memory:** `lin:` addresses go through the current page tables, which
+  are those of the machine (DOS box) running at that moment; a breakpoint
+  at a BIOS entry (`phys:F1008` for INT 10h) stops in the caller's
+  context. Watchpoints on physical addresses find who writes a page table
+  entry or descriptor.
+- **Save states** of a booted system bring its disks back with it: in a
+  run through a journal of the writes, and from the `.C.img` copies
+  beside a state file in another.
 
 ### Protected-mode programs (DOS extenders)
 

@@ -226,7 +226,26 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
             Some(layout) => imported.set("emulator", "keyboard_layout", layout.name()),
             None => imported.warnings.push(format!("[autoexec] {} isn't imported", line)),
         },
-        "exit" | "rescan" | "config" | "mixer" | "loadfix" | "boot" | "ipxnet" | "serial" | "intro" => {
+        // BOOT runs as it is, with the images it names by their host paths.
+        "boot" => {
+            let mut line = vec![tokens[0].clone()];
+            let mut args = tokens[1..].iter();
+            while let Some(arg) = args.next() {
+                if arg.starts_with('-') {
+                    line.push(arg.clone());
+                    if arg.eq_ignore_ascii_case("-l")
+                        && let Some(drive) = args.next()
+                    {
+                        line.push(drive.clone());
+                    }
+                } else {
+                    let path = image_path(arg, bases, roots).display().to_string();
+                    line.push(if path.contains(' ') { format!("\"{}\"", path) } else { path });
+                }
+            }
+            imported.autoexec.push(line.join(" "));
+        }
+        "exit" | "rescan" | "config" | "mixer" | "loadfix" | "ipxnet" | "serial" | "intro" => {
             if !matches!(verb.as_str(), "exit" | "rescan") {
                 imported.warnings.push(format!("[autoexec] {} isn't imported", line));
             }
@@ -312,6 +331,18 @@ mod tests {
         assert_eq!(get("lpt_dac"), Some("disney"));
         assert_eq!(get("sbtype"), None);
         assert!(imported.warnings[0].contains("sbtype=gb"), "{:?}", imported.warnings);
+    }
+
+    /// A system booted from a disk image, as DOSBox runs Windows 95.
+    #[test]
+    fn boot_runs_with_its_images_found() {
+        let dir = scratch("boot");
+        fs::write(dir.join("floppy.img"), "").unwrap();
+        let conf = "[autoexec]\nimgmount c win95.img\nboot -l c\nboot floppy.img\n";
+        let imported = import(&[conf], std::slice::from_ref(&dir), "x", None);
+        assert_eq!(imported.drives[0].path, dir.join("win95.img"));
+        assert_eq!(imported.autoexec, ["boot -l c".to_string(), format!("boot {}", dir.join("floppy.img").display())]);
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
     }
 
     #[test]

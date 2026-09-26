@@ -22,8 +22,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   [DOS prompt](#the-dos-prompt) with batch files and a `COMMAND.COM`
   programs can shell out to
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
-  Mode X, VESA VBE 2.0 up to 1024x768, Hercules, and the Tandy 1000's and
-  IBM PCjr's 16-colour modes
+  Mode X, VESA VBE 2.0 up to 1024x768, an S3 Trio64 with its 2D
+  accelerator, Hercules, and the Tandy 1000's and IBM PCjr's 16-colour
+  modes
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
   the Ultrasound patches, a Roland MT-32 (via munt) or the host's MIDI
@@ -33,6 +34,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO) and FAT12/FAT16
   disk images, with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
   disk speeds and noises
+* **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
+  (`BOOT`): MS-DOS, Windows 95 and other systems of their own, with a Plug
+  and Play BIOS, APM and a PCI bus
 * **Display:** CRT shaders (scanlines, aperture grille, curved shadow mask)
   and monochrome monitors (white, amber, green)
 * **Settings window** (Ctrl+F12) that changes most settings without a
@@ -124,6 +128,7 @@ programs, the prompt has these commands:
 | `CLS`, `VER`, `ECHO`, `SET`, `PATH`, `PROMPT` | as in DOS |
 | `MOUNT`, `IMGMOUNT` | see [Mounting drives](CONFIGURATION.md#mounting-drives) |
 | `MAKEIMG` | make a new floppy or hard disk image, as in DOSBox Staging; see [New disk images](CONFIGURATION.md#new-disk-images) |
+| `BOOT [image ...] [-l drive]` | start a system from a disk image; see [Booting a disk image](CONFIGURATION.md#booting-a-disk-image) |
 | `MIXER` | see [`[mixer]`](CONFIGURATION.md#mixer) |
 | `LOADHIGH` (`LH`) | load a program into upper memory |
 | `DOSCONFIG` | open the settings window |
@@ -177,7 +182,9 @@ A [game profile](CONFIGURATION.md#game-profiles) has slots of its own, in
 * Loading a state puts its hardware settings back first. A state of a
   machine with another memory size (`memsize`) isn't loaded.
 * Files on the host and in disk images aren't part of a state: what a
-  program wrote since stays written, as in DOSBox.
+  program wrote since stays written, as in DOSBox. A system [booted from a
+  disk image](CONFIGURATION.md#booting-a-disk-image) is the exception: its
+  disks go back with its state.
 * The FM chip and MIDI synthesizers are told their registers and
   instruments again, so notes that were playing start again.
 

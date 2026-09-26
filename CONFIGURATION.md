@@ -106,7 +106,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   [docs/dynrec.md](docs/dynrec.md).
 * `machine` is the display adapter programs find when they look for
   one, and so the graphics they choose: `svga` (the default, a VGA with
-  VESA modes up to 1024x768), `vga` (an IBM VGA, without VESA modes),
+  VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,
+  with its VESA modes, 2D accelerator and hardware cursor, for systems
+  [booted from disk images](#booting-a-disk-image) whose drivers program
+  it), `vga` (an IBM VGA, without VESA modes),
   `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
   640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
@@ -580,6 +583,59 @@ noises, with DOSBox Staging's recordings: `seek-only` plays the heads
 moving on each access, and `on` adds a hard disk spinning up and humming
 and a floppy's motor running while it is in use. They sound best with a
 disk speed below `maximum`.
+
+## Booting a disk image
+
+`BOOT` starts a system of its own from a disk image, as DOSBox's command
+does: MS-DOS, Windows 95 or another system a PC boots.
+
+```
+IMGMOUNT C ~/images/win95.img    the hard disk
+BOOT -l C                        boot from it
+BOOT disk1.img disk2.img         floppies in A:, Ctrl+F4 changes them
+```
+
+The built-in DOS steps aside: memory is cleared, the BIOS is all that is
+left, and the boot sector of the disk in the drive `-l` names (A: by
+default) runs. The BIOS has what such systems look for: the disks through
+INT 13h with its extensions, the keyboard's buffer, the memory map (INT 15h
+E820h), a Plug and Play BIOS, APM 1.2, and with `machine=svga_s3` a PCI
+BIOS. BIOS services work in virtual-8086 mode and through the page tables of
+the system that calls them. The first two floppy drives are always there,
+empty or not; hard disk images are the drives C: and D:.
+
+Turning the machine off (Windows' **Shut Down**) brings back the DOS prompt;
+restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again.
+Changes to the hardware settings wait for the prompt.
+
+What the system writes goes into the image, so try things on a copy (on
+btrfs or XFS, `cp --reflink=auto` takes no room). [Save
+states](README.md#save-states) and rewind keep the disks in step with the
+system's memory: in a run, the disks go back with a state through a journal
+of what the system wrote over (the last 256 MB of it), and a state file has
+a copy of each disk beside it (`slot1.C.img` for `slot1.state`, which takes
+no room where the filesystem shares data between files) that loading it puts
+back. The browser's slots can't hold disks and refuse a booted system's
+state.
+
+### Windows 95
+
+A Windows 95 installed in DOSBox-X on its S3 card (`machine=svga_s3`)
+starts as it would there, with the settings it was installed with:
+
+```ini
+[emulator]
+machine=svga_s3
+memsize=64
+```
+
+The S3 driver shows the desktop up to 1024x768 in 32 bits per pixel with
+its accelerated drawing and hardware cursor; the Sound Blaster 16 plays
+Windows' sounds and FM music; the PS/2 mouse and APM work (Shut Down turns
+the machine off). MS-DOS Prompts run in a window or full screen
+(Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
+hardware it was installed on in its registry, so an image installed on
+other hardware may look for devices this machine hasn't.
 
 ## CRT shaders
 
