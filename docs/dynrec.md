@@ -72,10 +72,25 @@ between instructions:
 | Instructions | What they can change |
 |---|---|
 | Control transfers: jumps, calls, returns, INT, IRET, LOOP, JCXZ | Where execution goes |
-| Port I/O (IN, OUT, INS, OUTS) | Devices, their interrupts, the timer deadline, the A20 gate, the reset line |
-| STI, POPF | IF and the interrupt shadow |
+| String port I/O (INS, OUTS) | Devices, their interrupts, the timer deadline, the A20 gate, the reset line |
+| POPF, IRET | IF and the interrupt shadow |
 | MOV SS, POP SS, LSS | The interrupt shadow, the stack's width |
 | Writes to CR0, CR3, DRn, TRn, LMSW, CLTS, INVLPG, LGDT, LIDT, LLDT, LTR | The mode, paging, the TLB, the descriptor tables |
+
+IN, OUT and STI can change the same, but programs run them so often (a
+timer read, a sound driver's status, a CLI and STI around each) that the
+block goes on after them where they changed none of it. Their handlers
+run in the block, and `jit_fallback` stops it after the instruction
+(`EXIT_AFTER`) only if:
+
+- after IN or OUT, an interrupt can be delivered (a device raised one, or
+  the PIC let one through, with IF set), the timer deadline or the A20
+  gate changed, the rest of the block no longer fits before the deadline
+  (a port access takes emulated time), a reset was asked for, or the CPU
+  no longer runs;
+- after STI, an interrupt waits: the execution loop runs the next
+  instruction, in the interrupt shadow, and delivers it. Where none waits
+  the shadow ends in the block, at the next instruction.
 
 Because of this, whether an interrupt can be delivered never changes
 inside a block, or in a chain of linked blocks: the execution loop has

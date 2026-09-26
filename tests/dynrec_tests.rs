@@ -548,6 +548,35 @@ fn interrupts_wait_out_the_shadows_of_sti_and_mov_ss() {
 }
 
 #[test]
+fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
+    // Blocks go on past IN, OUT and STI where they change nothing the
+    // execution loop checks. Here the loop masks IRQ 0 and unmasks it in
+    // the middle of a block, and reads the mask, in turn: once IRQ 0 is
+    // waiting, the unmasking OUT lets it in before the next instruction,
+    // as the interpreter does, and the IN in its shadow changes nothing.
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            a.mov(al, 0xFF)?;
+            a.out(0x21, al)?;
+            a.inc(esi)?;
+            a.inc(esi)?;
+            a.mov(al, 0xFE)?;
+            a.out(0x21, al)?;
+            a.mov(ebx, edi)?;
+            a.in_(al, 0x21)?;
+            a.add(ebp, ebx)
+        });
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+    if AVAILABLE {
+        // Going back to the execution loop at every IN and OUT would take
+        // over 9000 runs.
+        assert!(stats.runs < 2000, "{:?}", stats);
+    }
+}
+
+#[test]
 fn timer_reads_and_reprogramming_between_blocks_keep_the_time() {
     let (mut a, mut b) = twins(|rig| {
         with_timer(rig, |a| {

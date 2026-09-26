@@ -34,6 +34,10 @@ pub const EXIT_DE: u32 = 10;
 /// A watched byte of the instruction differs from what was translated:
 /// the instruction didn't run (see `block::WATCH_AFTER`).
 pub const EXIT_WATCHED: u32 = 11;
+/// The instruction ran and changed what the execution loop checks
+/// between instructions (see `block::ends_block`): the block stops after
+/// it.
+pub const EXIT_AFTER: u32 = 12;
 /// With EXIT_FAULT, EXIT_GP0, EXIT_DE, EXIT_SMC and EXIT_WATCHED: the
 /// guest's arithmetic flags are in the context's `flags`, not yet in the
 /// CPU.
@@ -160,7 +164,8 @@ jit_fn! {
     /// the interpreter's `execute_at` does: EIP on the next instruction
     /// while it runs, and back on this one with ESP as it was if it faults
     /// (the execution loop sets EIP). Returns 0 to go on, or EXIT_FAULT,
-    /// EXIT_SMC if it wrote over the rest of the block, or EXIT_PANIC.
+    /// EXIT_SMC if it wrote over the rest of the block, EXIT_AFTER if it
+    /// changed what the execution loop checks, or EXIT_PANIC.
     fn jit_fallback(cpu: *mut Cpu, ctx: *mut JitCtx, data: *mut BlockData, ix: u32) -> u32 {
         // SAFETY: translated code passes the CPU and context the execution
         // loop entered it with, and its own block, which outlive the call.
@@ -170,12 +175,35 @@ jit_fn! {
         let handler = data.handlers[ix];
         let start_esp = cpu.esp();
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
-        let writes = data.writes[ix];
+        let port = super::block::port_io(instr);
+        let sti = instr.mnemonic() == iced_x86::Mnemonic::Sti;
+        // A device may write RAM (by DMA) as well.
+        let writes = data.writes[ix] || port;
         let before = if writes { data.gens_now(&cpu.bus.page_gen) } else { 0 };
+        let time = (cpu.bus.clock.deadline, cpu.bus.a20_mask());
         match catch_unwind(AssertUnwindSafe(|| handler(cpu, instr))) {
             Ok(Ok(())) => {
                 if writes && data.gens_now(&cpu.bus.page_gen) != before {
-                    return written(cpu, data, ix);
+                    let code = written(cpu, data, ix);
+                    if code != 0 {
+                        return code;
+                    }
+                }
+                if port && loop_would_act(cpu, time, (data.count() - ix) as u64) {
+                    return EXIT_AFTER;
+                }
+                if sti {
+                    // Interrupts are recognized after the next instruction:
+                    // with one waiting the execution loop runs that. Else no
+                    // interrupt can become deliverable in the rest of the
+                    // block, where the next instruction runs, but after port
+                    // I/O, which checks for one.
+                    if cpu.bus.irq_ready {
+                        return EXIT_AFTER;
+                    }
+                    if ix + 1 < data.count() {
+                        cpu.irq_shadow = false;
+                    }
                 }
                 0
             }
@@ -190,6 +218,20 @@ jit_fn! {
             }
         }
     }
+}
+
+/// Whether port I/O changed what the execution loop checks before the
+/// next instruction: an interrupt to deliver, the next timer event (the
+/// block checked it would end before the old one, but a port access takes
+/// time: the `left` instructions of the block from this one on must still
+/// fit), the A20 gate (the code window), a reset, or a CPU no longer
+/// running. `time` is the timer deadline and A20 mask before it.
+fn loop_would_act(cpu: &Cpu, time: (u64, u32), left: u64) -> bool {
+    (cpu.bus.irq_ready && cpu.get_cpu_flag(crate::cpu::CpuFlags::IF))
+        || (cpu.bus.clock.deadline, cpu.bus.a20_mask()) != time
+        || cpu.bus.clock.icount + left > cpu.bus.clock.deadline
+        || cpu.bus.reset_requested
+        || cpu.state != crate::cpu::CpuState::Running
 }
 
 /// Instruction `ix` wrote into the chunks of the block's bytes. If the

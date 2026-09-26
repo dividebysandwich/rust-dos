@@ -608,7 +608,7 @@ mod engine {
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.
                 let data = unsafe { &*self.ctx.exit_data };
-                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED) {
+                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED | EXIT_AFTER) {
                     // Instruction ix stopped the block: it counts as executed
                     // (the interpreter counts it before running it) but not in
                     // the instruction count, which this adds once it has dealt
@@ -716,6 +716,11 @@ mod engine {
                         cpu.bus.clock.icount += 1;
                         self.note_pokes(cpu.bus.ram(), data);
                         self.retire(exited, stats);
+                        Run::Ran { page }
+                    }
+                    EXIT_AFTER => {
+                        // The instruction is done (its handler set EIP).
+                        cpu.bus.clock.icount += 1;
                         Run::Ran { page }
                     }
                     EXIT_WATCHED => {

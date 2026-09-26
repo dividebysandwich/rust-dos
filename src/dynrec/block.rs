@@ -264,10 +264,13 @@ pub fn ends_block(instr: &Instruction) -> bool {
         return true;
     }
     match instr.mnemonic() {
-        // Port I/O: the devices, their interrupts and the timer deadline.
-        In | Out | Insb | Insw | Insd | Outsb | Outsw | Outsd => true,
+        // String port I/O: the devices, their interrupts and the timer
+        // deadline. IN, OUT and STI stop the block after them only where
+        // they change what the execution loop checks (see
+        // `helpers::jit_fallback`).
+        Insb | Insw | Insd | Outsb | Outsw | Outsd => true,
         // IF and the interrupt shadow.
-        Sti | Popf | Popfd | Iret | Iretd => true,
+        Popf | Popfd | Iret | Iretd => true,
         // SS (the interrupt shadow and the stack's size).
         Lss => true,
         Mov | Pop if instr.op0_register() == Register::SS => true,
@@ -276,6 +279,12 @@ pub fn ends_block(instr: &Instruction) -> bool {
         Lmsw | Clts | Invlpg | Lgdt | Lidt | Lldt | Ltr => true,
         _ => false,
     }
+}
+
+/// Whether `instr` is IN or OUT, which may change the devices, their
+/// interrupts, the timer deadline, the A20 gate and the reset line.
+pub fn port_io(instr: &Instruction) -> bool {
+    matches!(instr.mnemonic(), Mnemonic::In | Mnemonic::Out)
 }
 
 /// Whether `instr` may write memory.
