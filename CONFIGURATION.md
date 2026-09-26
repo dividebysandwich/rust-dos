@@ -295,7 +295,8 @@ The game port, which programs read joysticks from.
 
 ### `[drives]`
 
-Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`.
+Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`,
+the options as `MOUNT` takes them.
 
 * PATH is a directory, or a disk or CD image (see [Mounting drives](#mounting-drives)).
 * Relative paths are relative to the configuration file, and `~` is your
@@ -448,15 +449,27 @@ MOUNT                                     list drives
 MOUNT A ~/dos/floppy                      mount a host directory
 MOUNT D ~/dos/cd -t cdrom -label GAMECD   same, with -t for the type
 MOUNT D ~/dos/game.cue                    mount a CD image
-IMGMOUNT D C:\GAME\CD\GAME.CUE -t cdrom   the same, as DOSBox writes it
-IMGMOUNT A disk1.img disk2.img            floppy images; Ctrl+F4 changes disks
-IMGMOUNT C ~/dos/hdd.img                  a hard disk image as C:
-MOUNT -u A                                unmount
+MOUNT D C:\GAME\CD\GAME.CUE               the same, by its DOS path
+MOUNT A disk1.img disk2.img               floppy images; Ctrl+F4 changes disks
+MOUNT A disk*.img                         the same, with a wildcard
+MOUNT C ~/dos/hdd.img                     a hard disk image as C:
+MOUNT -u A                                unmount (MOUNT A -u too)
 A:                                        switch to drive A:
 ```
 
-Relative `MOUNT` paths are relative to the emulator's working directory.
-Each drive keeps its own current directory, as in DOS.
+`MOUNT` takes DOSBox Staging's syntax, in which MOUNT took in `IMGMOUNT`:
+the options can go anywhere on the line, and `IMGMOUNT` is the same
+command, so the batch files made for either work unchanged. An image is
+looked for by its DOS path first (`C:\GAME\CD\GAME.CUE`, or `GAME.CUE` in
+the current directory) and then as a host path, and a directory on the host
+first. A wildcard in the last part of a path (`disk*.img`, `CD\*.CUE`)
+mounts the files that match as a list, in natural order (`DISK2` before
+`DISK10`). Relative host paths are relative to the emulator's working
+directory, or with `-pr` to the configuration file's folder. DOSBox's
+`-freesize`, `-ide` and CD-ROM access options are taken and ignored;
+overlays (`-t overlay`) and the drive numbers of images to boot
+(`MOUNT 0 boot.img -fs none`) aren't supported. `MOUNT /?` lists the
+options. Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
@@ -465,19 +478,16 @@ and gaps) or a bare image of an ISO 9660 data track in 2048, 2336 or
 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). Audio tracks can
 be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
 many sheets call them), and WAVE files at other rates: they are decoded to
-CD audio as they play. `IMGMOUNT` takes DOSBox's syntax, so the batch files
-made for DOSBox work unchanged: it looks for the image by its DOS path first
-(`C:\GAME\CD\GAME.CUE`) and then as a host path. Programs run from the
-image as from any other drive.
+CD audio as they play. Programs run from the image as from any other drive.
 
 The type of a drive is the word after the path in `[drives]`, or `-t` at
 the prompt:
 
 | Type | Behaves like |
 |---|---|
-| `hdd` (default) | A fixed disk. BIOS unit 80h and up. |
-| `floppy` | A removable 1.44 MB disk whose free space reflects its files. |
-| `cdrom` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. From a CD image it is a whole disc: raw and cooked sector reads, the volume descriptors, the table of contents, and audio tracks that play through the Sound Blaster mixer's CD volume. From a directory, only its files are available. |
+| `hdd` or `dir` (default) | A fixed disk. BIOS unit 80h and up. |
+| `floppy` or `fdd` | A removable 1.44 MB disk whose free space reflects its files. |
+| `cdrom` or `iso` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. From a CD image it is a whole disc: raw and cooked sector reads, the volume descriptors, the table of contents, and audio tracks that play through the Sound Blaster mixer's CD volume. From a directory, only its files are available. |
 
 `-ro` makes any drive read-only.
 
@@ -500,13 +510,14 @@ long and the short name open the file.
 A floppy or hard disk image holds a FAT12 or FAT16 file system that
 programs read and write like any other drive's; what they write goes into
 the image file. An image whose size is a floppy disk's (160 KB to 2.88 MB,
-as in DOSBox's table) is a floppy, anything else a hard disk: an image of a
+as in DOSBox's table), or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or
+`.1440`, is a floppy, anything else a hard disk: an image of a
 whole disk with a partition table, whose first FAT partition is the drive,
 or of a single volume. The hard disk's geometry comes from its partition
 table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
 `-size 512,S,H,C`) gives it. `-t floppy` or `-t hdd` overrides the choice,
 and an image file that can't be written, or `-ro`, makes a write-protected
-disk. `IMGMOUNT C` puts a hard disk image in place of C:'s directory.
+disk. `MOUNT C hdd.img` puts a hard disk image in place of C:'s directory.
 
 The BIOS sees the images as disks: INT 13h reads and writes their sectors by
 cylinder, head and sector and reports their real geometry, and DOS's absolute
@@ -515,11 +526,12 @@ that check for their original disk with these find what's on the image.
 Drives from host directories have no sectors; INT 13h reports success for
 them without reading anything, which passes simple presence checks.
 
-A list of images (`IMGMOUNT A disk1.img disk2.img disk3.img`, or the same
-in `[drives]`) puts the first disk in the drive. **Ctrl+F4** changes every
-drive with a list to its next disk, as in DOSBox; files a program has open
-keep reading the disk they were opened on, and INT 13h's disk change line
-tells the program another disk went in. CD image lists work the same way.
+A list of images (`MOUNT A disk1.img disk2.img disk3.img`, `MOUNT A
+disk*.img`, or the same in `[drives]`) puts the first disk in the drive.
+**Ctrl+F4** changes every drive with a list to its next disk, as in DOSBox;
+files a program has open keep reading the disk they were opened on, and
+INT 13h's disk change line tells the program another disk went in. CD image
+lists work the same way.
 
 ### New disk images
 
@@ -530,7 +542,7 @@ once you answer Y to where it will go:
 MAKEIMG floppy.img -t fd_1440kb -label MYDISK   a 1.44 MB floppy
 MAKEIMG hdd.img -t hd -size 500                 a 500 MB hard disk
 MAKEIMG C:\IMAGES\HDD120.IMG -t hd_120mb -d     in a DOS directory
-IMGMOUNT D hdd.img                              then mount it
+MOUNT D hdd.img                                 then mount it
 ```
 
 `-t` is the kind of disk: a floppy (`fd_160kb`, `fd_180kb`, `fd_320kb`,

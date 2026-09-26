@@ -58,6 +58,9 @@ pub struct Bus {
     pub config_ui_requested: bool,
     /// The EXIT command asked to turn the machine off; the frontend quits.
     pub exit_requested: bool,
+    /// The folder of the configuration file (or game profile) whose startup
+    /// commands run, which MOUNT -pr takes relative paths from.
+    pub config_dir: Option<std::path::PathBuf>,
     pub cmos: crate::cmos::Cmos,
     /// The XMS driver's allocations and A20 state.
     pub xms: crate::xms::Xms,
@@ -241,6 +244,7 @@ impl Bus {
             rom_writes: 0,
             config_ui_requested: false,
             exit_requested: false,
+            config_dir: None,
             cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),
             post_code: 0,
             debug_console: Vec::new(),

@@ -1,5 +1,5 @@
 //! MAKEIMG at the prompt: it asks, makes the image DOSBox Staging would,
-//! which IMGMOUNT mounts, and refuses what it can't do; and the images'
+//! which MOUNT mounts, and refuses what it can't do; and the images'
 //! boot code runs on the machine's BIOS.
 
 use iced_x86::Register;
@@ -51,7 +51,7 @@ fn screen(cpu: &Cpu) -> String {
 }
 
 #[test]
-fn makeimg_asks_then_makes_an_image_imgmount_mounts() {
+fn makeimg_asks_then_makes_an_image_mount_mounts() {
     let dir = scratch("ask");
     let mut cpu = machine(&dir);
     command(&mut cpu, "MAKEIMG C:\\FLOPPY.IMG -t fd_1440kb -label TestDisk -d");
@@ -71,14 +71,14 @@ fn makeimg_asks_then_makes_an_image_imgmount_mounts() {
     assert!(text.contains("Y\nCreated C:\\FLOPPY.IMG [CHS: 80, 2, 18]\nFormatted as FAT12"), "{}", text);
     assert_eq!(fs::metadata(dir.join("FLOPPY.IMG")).unwrap().len(), 1_474_560);
 
-    command(&mut cpu, "IMGMOUNT A C:\\FLOPPY.IMG");
+    command(&mut cpu, "MOUNT A C:\\FLOPPY.IMG");
     command(&mut cpu, "DIR A:");
     let text = screen(&cpu);
     assert!(text.contains("TESTDISK"), "the label: {}", text);
 
     // Not over a mounted image, nor another file without -force.
     command(&mut cpu, "MAKEIMG C:\\FLOPPY.IMG -t fd_720kb -d -force");
-    assert!(screen(&cpu).contains("is mounted as drive A: (IMGMOUNT -u A unmounts it)"), "{}", screen(&cpu));
+    assert!(screen(&cpu).contains("is mounted as drive A: (MOUNT -u A unmounts it)"), "{}", screen(&cpu));
     command(&mut cpu, "IMGMOUNT -u A");
     command(&mut cpu, "MAKEIMG C:\\FLOPPY.IMG -t fd_720kb -d");
     assert!(screen(&cpu).contains("already exists. Use -force to overwrite."), "{}", screen(&cpu));

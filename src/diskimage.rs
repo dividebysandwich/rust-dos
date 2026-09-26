@@ -143,7 +143,7 @@ fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
     if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin" | "gog" | "ins") {
         return Some(ImageKind::Cd);
     }
-    if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp") {
+    if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp" | "360" | "720" | "1200" | "1440") {
         return Some(ImageKind::Floppy);
     }
     None

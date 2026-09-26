@@ -1,7 +1,7 @@
 use crate::cpu::Cpu;
 use crate::disk::{DRIVE_C, DriveKind, drive_letter, parse_drive_prefix};
 use crate::mount::{
-    IMGMOUNT_USAGE, MOUNT_USAGE, MountCmd, MountSpec, display_host_path, parse_imgmount_command, parse_mount_command,
+    MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
 };
 use crate::video::{print_cp437, print_string};
 
@@ -45,7 +45,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("DATE", &crate::time_commands::DateCommand),
     ("TIME", &crate::time_commands::TimeCommand),
     ("MOUNT", &MountCommand),
-    ("IMGMOUNT", &ImgMountCommand),
+    ("IMGMOUNT", &MountCommand),
     ("MAKEIMG", &crate::makeimg_command::MakeImgCommand),
     ("SET", &SetCommand),
     ("PATH", &PathCommand),
@@ -825,15 +825,27 @@ impl ShellCommand for CdCommand {
     }
 }
 
-/// MOUNT                          list drives
-/// MOUNT d path [type] [options]  mount a host directory or a disk or CD image
-/// MOUNT -u d                     unmount
+/// MOUNT                              list drives
+/// MOUNT d path [path ...] [options]  mount a host directory, or disk or CD
+///                                    images on the host or a DOS drive
+/// MOUNT -u d                         unmount
+///
+/// DOSBox Staging's command, which took in IMGMOUNT. IMGMOUNT is the same
+/// command, for the batch files made for DOSBox (see the `mount` module).
 struct MountCommand;
 impl ShellCommand for MountCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let home = dirs::home_dir();
-        match parse_mount_command(args, &cwd, home.as_deref()) {
+        let disk = &cpu.bus.disk;
+        let locate = |path: &str| disk.resolve_path(path);
+        let paths = PathContext {
+            base: &cwd,
+            config_dir: cpu.bus.config_dir.as_deref(),
+            home: home.as_deref(),
+            locate: &locate,
+        };
+        match parse_mount_command(args, &paths) {
             Ok(MountCmd::List) => {
                 print_string(cpu, "Drive Type    Label       Host path\r\n");
                 for info in cpu.bus.disk.mounted_drives() {
@@ -858,35 +870,12 @@ impl ShellCommand for MountCommand {
                     print_string(cpu, &line);
                 }
             }
+            Ok(MountCmd::Help) => print_string(cpu, MOUNT_USAGE),
             Ok(MountCmd::Mount(spec)) => mount(cpu, spec),
             Ok(MountCmd::Unmount(drive)) => unmount(cpu, drive),
             Err(e) => {
                 print_string(cpu, &format!("{}\r\n", e));
                 print_string(cpu, MOUNT_USAGE);
-            }
-        }
-    }
-}
-
-/// IMGMOUNT d image [image ...] [options]   mount disk or CD images
-/// IMGMOUNT -u d                            unmount
-///
-/// DOSBox's command, for the batch files made for it. The image is found
-/// by its DOS path first.
-struct ImgMountCommand;
-impl ShellCommand for ImgMountCommand {
-    fn execute(&self, cpu: &mut Cpu, args: &str) {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let home = dirs::home_dir();
-        let disk = &cpu.bus.disk;
-        let locate = |path: &str| disk.resolve_path(path).filter(|p| p.is_file());
-        match parse_imgmount_command(args, &locate, &cwd, home.as_deref()) {
-            Ok(MountCmd::Mount(spec)) => mount(cpu, spec),
-            Ok(MountCmd::Unmount(drive)) => unmount(cpu, drive),
-            Ok(MountCmd::List) => {}
-            Err(e) => {
-                print_string(cpu, &format!("{}\r\n", e));
-                print_string(cpu, IMGMOUNT_USAGE);
             }
         }
     }

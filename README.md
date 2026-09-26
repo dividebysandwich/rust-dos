@@ -31,7 +31,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   audio
 * **Drives:** host directories as floppy, hard disk and CD-ROM drives, CD
   images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO) and FAT12/FAT16
-  disk images, with DOSBox's `IMGMOUNT`, and emulated disk speeds and noises
+  disk images, with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
+  disk speeds and noises
 * **Display:** CRT shaders (scanlines, aperture grille, curved shadow mask)
   and monochrome monitors (white, amber, green)
 * **Settings window** (Ctrl+F12) that changes most settings without a

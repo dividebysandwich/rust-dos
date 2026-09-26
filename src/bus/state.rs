@@ -102,6 +102,7 @@ impl Bus {
             exit_requested: _,
             mixer_changed: _,
             // The host's: its output, its settings and what it shows.
+            config_dir: _,
             freezes: _,
             frames_drawn: _,
             debug_console: _,
@@ -223,6 +224,7 @@ impl Bus {
             config_ui_requested: _,
             exit_requested: _,
             mixer_changed: _,
+            config_dir: _,
             freezes: _,
             frames_drawn: _,
             debug_console: _,

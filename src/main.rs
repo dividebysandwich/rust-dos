@@ -241,6 +241,7 @@ fn main() -> Result<(), String> {
     // Startup commands: the config's [autoexec] lines, then AUTOEXEC.BAT
     // from the C: root if there is one, like the startup sequence a real PC
     // would run. Each line runs as if typed at the prompt.
+    cpu.bus.config_dir = config_dir(config.source.as_deref());
     cpu.queue_batch_lines(&config.autoexec);
     cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
 
@@ -1134,8 +1135,8 @@ fn mounted_drives(cpu: &Cpu) -> BTreeMap<u8, MountSpec> {
 }
 
 /// The drives the startup commands (`[autoexec]` and C:\AUTOEXEC.BAT)
-/// mount with MOUNT or IMGMOUNT.
-fn startup_mounts(cpu: &Cpu, autoexec: &[String]) -> Vec<MountSpec> {
+/// mount with MOUNT or IMGMOUNT, in the configuration file in `config_dir`.
+fn startup_mounts(cpu: &Cpu, autoexec: &[String], config_dir: Option<&std::path::Path>) -> Vec<MountSpec> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = dirs::home_dir();
     let mut lines = autoexec.to_vec();
@@ -1145,19 +1146,16 @@ fn startup_mounts(cpu: &Cpu, autoexec: &[String]) -> Vec<MountSpec> {
         lines.extend(String::from_utf8_lossy(&bytes).lines().map(str::to_string));
     }
     let disk = &cpu.bus.disk;
-    let locate = |path: &str| disk.resolve_path(path).filter(|p| p.is_file());
+    let locate = |path: &str| disk.resolve_path(path);
+    let paths = mount::PathContext { base: &cwd, config_dir, home: home.as_deref(), locate: &locate };
     lines
         .iter()
         .filter_map(|line| {
             let (command, args) = line.trim().trim_start_matches('@').split_once(char::is_whitespace)?;
-            let parsed = if command.eq_ignore_ascii_case("MOUNT") {
-                mount::parse_mount_command(args, &cwd, home.as_deref())
-            } else if command.eq_ignore_ascii_case("IMGMOUNT") {
-                mount::parse_imgmount_command(args, &locate, &cwd, home.as_deref())
-            } else {
+            if !command.eq_ignore_ascii_case("MOUNT") && !command.eq_ignore_ascii_case("IMGMOUNT") {
                 return None;
-            };
-            match parsed {
+            }
+            match mount::parse_mount_command(args, &paths) {
                 Ok(MountCmd::Mount(spec)) => Some(spec),
                 _ => None,
             }
@@ -1169,7 +1167,7 @@ fn startup_mounts(cpu: &Cpu, autoexec: &[String]) -> Vec<MountSpec> {
 /// saved, but for those the startup commands mount.
 fn drive_changes(cpu: &Cpu, saved: &Saved) -> Vec<config::DriveChange> {
     let current = mounted_drives(cpu);
-    let startup = startup_mounts(cpu, &saved.autoexec);
+    let startup = startup_mounts(cpu, &saved.autoexec, config_dir(saved.file.as_deref()).as_deref());
     let same_place = |a: &MountSpec, b: &MountSpec| {
         a.drive == b.drive && std::fs::canonicalize(&a.path).ok() == std::fs::canonicalize(&b.path).ok()
     };
@@ -1206,6 +1204,12 @@ fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<
 /// file `config`.
 fn games_dir(config: Option<&std::path::Path>) -> Option<PathBuf> {
     config?.parent().map(|dir| dir.join("games"))
+}
+
+/// The folder of a configuration file, which MOUNT -pr takes relative paths
+/// from.
+fn config_dir(config: Option<&std::path::Path>) -> Option<PathBuf> {
+    std::path::absolute(config?).ok()?.parent().map(std::path::Path::to_path_buf)
 }
 
 /// The game profile `query` names: its entry, its text and its folder.
@@ -1276,6 +1280,7 @@ impl MainHost<'_, '_> {
                 Err(e) => config_warning(self.cpu, &format!("games/{}.conf: drive {}: {}", id, disk::drive_letter(spec.drive), e)),
             }
         }
+        self.cpu.bus.config_dir = std::path::absolute(dir).ok();
         self.cpu.queue_batch_lines(&prepared.autoexec);
         self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} (games/{}.conf)", prepared.name, id));
         let message = format!("Starting {}", prepared.name);
@@ -1419,6 +1424,7 @@ impl MainHost<'_, '_> {
 
     fn end_game(&mut self, game: ActiveGame) {
         self.cpu.bus.log_string(&format!("[CONFIG] The game {} has ended", game.name));
+        self.cpu.bus.config_dir = config_dir(self.saved.file.as_deref());
         if let Err(e) = self.apply(&game.base) {
             config_warning(self.cpu, &e);
         }

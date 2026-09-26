@@ -5,7 +5,7 @@
 
 use super::{Imported, host_path};
 use crate::keylayout::LayoutSetting;
-use crate::mount::{MountCmd, parse_drive_letter, parse_imgmount_command, parse_mount_spec, tokenize};
+use crate::mount::{MountCmd, PathContext, parse_drive_letter, parse_mount_tokens, tokenize};
 use std::path::{Path, PathBuf};
 
 /// A configuration file: its settings (section and key in lower case) and
@@ -202,39 +202,16 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
     let verb = tokens.first().map(|t| t.to_ascii_lowercase()).unwrap_or_default();
     let verb = verb.rsplit(['\\', ':']).next().unwrap_or(&verb).trim_end_matches(".com").to_string();
     match verb.as_str() {
-        "mount" if tokens.get(1).is_some_and(|t| t.eq_ignore_ascii_case("-u")) => {}
-        "mount" => {
-            let Some(drive) = tokens.get(1).and_then(|t| parse_drive_letter(t)) else {
-                imported.warnings.push(format!("[autoexec] {} isn't imported", line));
-                return;
-            };
-            let mut rest = tokens[2..].to_vec();
-            if let Some(path) = rest.first_mut() {
-                *path = resolve(bases, path).to_string_lossy().into_owned();
-            }
-            match parse_mount_spec(drive, &rest, working_dir, home) {
-                Ok(spec) => {
-                    roots.push((drive, spec.path.clone()));
-                    imported.drives.retain(|d| d.drive != drive);
-                    imported.drives.push(spec);
-                }
-                Err(e) => imported.warnings.push(format!("[autoexec] {}: {}", line, e)),
-            }
-        }
-        "imgmount" if tokens.get(1).is_some_and(|t| t.eq_ignore_ascii_case("-u")) => {}
-        "imgmount" => {
-            let mut args = Vec::new();
-            let mut option_value = false;
-            for (i, token) in tokens.iter().enumerate().skip(1) {
-                // The images: host paths, or DOS paths on drives mounted
-                // before.
-                let image = i >= 2 && !option_value && !token.starts_with('-');
-                option_value = token.starts_with('-') && !matches!(token.to_ascii_lowercase().as_str(), "-ro" | "-ioctl" | "-noioctl");
-                let token = if image { image_path(token, bases, roots).to_string_lossy().into_owned() } else { token.clone() };
-                args.push(if token.contains(char::is_whitespace) { format!("\"{}\"", token) } else { token });
-            }
-            match parse_imgmount_command(&args.join(" "), &|_| None, working_dir, home) {
+        // DOSBox Staging's MOUNT took in IMGMOUNT; both take images, by
+        // their host paths or their DOS paths on drives mounted before.
+        "mount" | "imgmount" => {
+            let locate = |path: &str| Some(image_path(path, bases, roots));
+            let paths = PathContext { base: working_dir, config_dir: None, home, locate: &locate };
+            match parse_mount_tokens(&tokens[1..], &paths) {
                 Ok(MountCmd::Mount(spec)) => {
+                    if !spec.path.is_file() {
+                        roots.push((spec.drive, spec.path.clone()));
+                    }
                     imported.drives.retain(|d| d.drive != spec.drive);
                     imported.drives.push(spec);
                 }
@@ -255,7 +232,7 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
     }
 }
 
-/// An image IMGMOUNT names: a DOS path on a drive the lines before mounted
+/// A path MOUNT names: a DOS path on a drive the lines before mounted
 /// ("C:\GAME\CD.CUE"), or a host path from the working directory.
 fn image_path(token: &str, bases: &[PathBuf], roots: &[(u8, PathBuf)]) -> PathBuf {
     if let (Some(drive), Some(rest)) = (token.get(..2).and_then(parse_drive_letter), token.get(2..))
@@ -339,9 +316,13 @@ mod tests {
         let dir = scratch("dospath");
         fs::create_dir_all(dir.join("cd")).unwrap();
         fs::write(dir.join("cd/game.cue"), "").unwrap();
-        let conf = "[autoexec]\nmount c .\nimgmount d c:\\cd\\GAME.CUE -t cdrom\nkeyb fr\n";
+        let conf = "[autoexec]\nmount c .\nimgmount d c:\\cd\\GAME.CUE -t cdrom\nmount -t cdrom e c:\\cd\\GAME.CUE\nkeyb fr\n";
         let imported = import(&[conf], std::slice::from_ref(&dir), "x", None);
+        assert_eq!(imported.drives[0].path, dir);
         assert_eq!(imported.drives[1].path, dir.join("cd/game.cue"));
+        // DOSBox Staging's MOUNT, which took in IMGMOUNT.
+        assert_eq!((imported.drives[2].drive, &imported.drives[2].path), (4, &dir.join("cd/game.cue")));
+        assert_eq!(imported.drives[2].opts.kind, DriveKind::CdRom);
         assert!(imported.settings.iter().any(|(_, k, v)| *k == "keyboard_layout" && v == "fr"));
         assert!(imported.autoexec.is_empty());
     }

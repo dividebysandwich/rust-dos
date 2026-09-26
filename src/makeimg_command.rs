@@ -39,7 +39,7 @@ MAKEIMG [FILE] -t TYPE [-size MB | -chs C,H,S] [-fat 12|16|32] [-spc N]\r\n\
 Examples: MAKEIMG floppy.img -t fd_1440kb -label MYDISK\r\n\
 \x20         MAKEIMG hdd.img -t hd -size 500\r\n\
 \x20         MAKEIMG C:\\IMAGES\\HDD120.IMG -t hd_120mb -d\r\n\
-IMGMOUNT mounts FAT12 and FAT16 images; FAT32 ones are for other systems.\r\n";
+MOUNT mounts FAT12 and FAT16 images; FAT32 ones are for other systems.\r\n";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq)]
@@ -142,7 +142,7 @@ fn prepare(cpu: &Cpu, args: &str) -> Result<Option<Target>, String> {
     // A mounted image stays as it is.
     let same = |image: &PathBuf| image.canonicalize().ok().is_some_and(|p| Some(p) == target.path.canonicalize().ok());
     if let Some(info) = disk.mounted_drives().iter().find(|i| i.images.iter().chain(&i.image).any(same)) {
-        return Err(format!("{} is mounted as drive {}: (IMGMOUNT -u {} unmounts it)", target.shown(), info.letter(), info.letter()));
+        return Err(format!("{} is mounted as drive {}: (MOUNT -u {} unmounts it)", target.shown(), info.letter(), info.letter()));
     }
     Ok(Some(target))
 }

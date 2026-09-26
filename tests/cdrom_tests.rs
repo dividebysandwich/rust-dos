@@ -149,3 +149,24 @@ fn imgmount_finds_images_by_their_dos_path() {
     run(&mut cpu, "IMGMOUNT F GAME.BIN -t hdd");
     assert!(!cpu.bus.disk.is_mounted(5));
 }
+
+#[test]
+fn mount_takes_images_the_way_dosbox_staging_does() {
+    let (mut cpu, dir) = machine("mount_images");
+    fs::create_dir_all(dir.join("c/CDS")).unwrap();
+    let big = pattern(5000);
+    mixed_disc(&dir.join("c/CDS"), &iso("TESTDISC", &files(&big)), 1);
+    fs::copy(dir.join("c/CDS/GAME.CUE"), dir.join("c/CDS/DISC2.CUE")).unwrap();
+
+    // The options anywhere, and the image by its DOS path.
+    run(&mut cpu, "MOUNT -t cdrom d C:\\CDS\\GAME.CUE -label MYDISC");
+    assert_eq!(cpu.bus.disk.volume_label(D).as_deref(), Some("MYDISC"));
+    run(&mut cpu, "MOUNT d -u");
+    assert!(!cpu.bus.disk.is_mounted(D));
+
+    // A wildcard makes a list, in natural order.
+    run(&mut cpu, "MOUNT D C:\\CDS\\*.CUE");
+    let info = cpu.bus.disk.drive_info(D).expect("mounted");
+    assert_eq!(info.images.len(), 2);
+    assert!(info.images[0].ends_with("DISC2.CUE"), "{:?}", info.images);
+}
