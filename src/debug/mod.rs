@@ -836,17 +836,18 @@ impl DebugHub {
             "recompiler": cpu.dynamic_active(),
             // The recompiler's counts since start: blocks translated and
             // their instructions (native: into host code; the others call
-            // their interpreter handlers), blocks translated now and their
-            // host code, flushes of all of it, blocks entered from the
-            // execution loop, and blocks that stopped at once for the timer
-            // deadline, or because their code had changed (stale) or
-            // changed under them (smc).
+            // their interpreter handlers), blocks translated now, their
+            // host code and the links between them, flushes of all of it,
+            // blocks entered from the execution loop, and blocks that
+            // stopped at once for the timer deadline, or because their code
+            // had changed (stale) or changed under them (smc).
             "dynrec": {
                 "blocks": d.blocks,
                 "instructions": d.instructions,
                 "native": d.native,
                 "live_blocks": d.live_blocks,
                 "code_bytes": d.code_bytes,
+                "links": d.links,
                 "flushes": d.flushes,
                 "runs": d.runs,
                 "deadline": d.deadline,

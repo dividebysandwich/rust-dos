@@ -39,9 +39,13 @@ pub const AVAILABLE: bool = cfg!(dynrec);
 /// Most instructions in a block.
 #[cfg(dynrec)]
 const MAX_BLOCK: usize = 64;
-/// Bytes of host code for translated blocks.
+/// Bytes of host code for translated blocks: room for games like the
+/// Doom engine's, whose unrolled drawing loops are entered at every row
+/// and column they can start at, a chain of blocks from each (Heretic's
+/// translated code comes to about 60 MB). Only the pages code was written
+/// to take memory.
 #[cfg(dynrec)]
-const CODE_SIZE: usize = 32 << 20;
+const CODE_SIZE: usize = 128 << 20;
 
 /// Counts for the statistics.
 #[derive(Clone, Copy, Debug, Default)]
@@ -51,9 +55,11 @@ pub struct DynStats {
     pub blocks: u64,
     pub instructions: u64,
     pub native: u64,
-    /// Blocks translated now, and their host code's bytes.
+    /// Blocks translated now, their host code's bytes, and the links
+    /// between them.
     pub live_blocks: u64,
     pub code_bytes: u64,
+    pub links: u64,
     /// Times all translated code was thrown away.
     pub flushes: u64,
     /// Blocks run from the execution loop.
@@ -114,10 +120,14 @@ impl DynState {
     }
 
     pub fn stats(&self) -> DynStats {
+        #[cfg(dynrec)]
+        if let Some(engine) = &self.engine {
+            return DynStats { links: engine.links(), ..self.stats };
+        }
         self.stats
     }
 
-    /// Reserve `bytes` for host code from now on, instead of 32 MB: the
+    /// Reserve `bytes` for host code from now on, instead of 128 MB: the
     /// tests fill a small one. Forgets all translated code.
     pub fn set_code_size(&mut self, bytes: usize) {
         #[cfg(dynrec)]
@@ -160,7 +170,7 @@ mod engine {
     use std::collections::HashMap;
     use std::ptr::NonNull;
 
-    use super::block::{BlockData, Guard, RETURN_LINK};
+    use super::block::{BlockData, Guard, LINKS, RETURN_LINK};
     use crate::cpu::{CR0_PG, Seg};
     use super::codemem::CodeMemory;
     use super::helpers::*;
@@ -221,9 +231,17 @@ mod engine {
     struct Block {
         key: Key,
         code: *const u8,
+        /// Bytes of the code.
+        len: usize,
+        /// Which translation this is: the index and the code's place are
+        /// reused when blocks go.
+        serial: u64,
         data: NonNull<BlockData>,
-        /// Blocks (index, link) whose link may lead here.
+        /// Blocks (index, link) whose link leads here, and the block each
+        /// of this one's links leads to: each link is in the backlinks of
+        /// that block, once.
         backlinks: Vec<(u32, u8)>,
+        targets: [Option<u32>; LINKS],
     }
 
     impl Drop for Block {
@@ -247,14 +265,14 @@ mod engine {
     }
 
     /// A link to another page (or a return's) that the execution loop
-    /// makes when it runs the block at `eip` next: the block `from` (whose
-    /// code is at `code`, in case the index has been reused) left through
-    /// link `slot` for it. Links are made while nothing was thrown away
-    /// (`flushes`), between blocks of one `mode`.
+    /// makes when it runs the block at `eip` next: the block `from` (the
+    /// translation `serial`, in case the index has been reused) left
+    /// through link `slot` for it. Links are made while nothing was thrown
+    /// away (`flushes`), between blocks of one `mode`.
     #[derive(Clone, Copy)]
     struct Pending {
         from: u32,
-        code: *const u8,
+        serial: u64,
         slot: u8,
         eip: u32,
         mode: u8,
@@ -312,6 +330,11 @@ mod engine {
             stats.flushes += 1;
             stats.live_blocks = 0;
             stats.code_bytes = 0;
+        }
+
+        /// Links between blocks now.
+        pub fn links(&self) -> u64 {
+            self.blocks.iter().flatten().map(|b| b.backlinks.len() as u64).sum()
         }
 
         /// The block for `key`, if there is one.
@@ -393,7 +416,15 @@ mod engine {
                 stats.live_blocks += 1;
                 stats.code_bytes = self.mem.used() as u64;
             }
-            let block = Block { key, code: base, data, backlinks: Vec::new() };
+            let block = Block {
+                key,
+                code: base,
+                len: code.bytes.len(),
+                serial: stats.blocks,
+                data,
+                backlinks: Vec::new(),
+                targets: [None; LINKS],
+            };
             if index as usize == self.blocks.len() {
                 self.blocks.push(Some(block));
             } else {
@@ -426,24 +457,63 @@ mod engine {
                 page,
                 phys,
             };
-            let to_code = self.blocks[to as usize].as_ref().unwrap().code;
-            let Some(source) = self.blocks[p.from as usize].as_mut().filter(|b| b.code == p.code) else { return };
+            let Some(source) = self.blocks[p.from as usize].as_mut().filter(|b| b.serial == p.serial) else { return };
             // SAFETY: owned by the block, and not in use.
-            let data = unsafe { source.data.as_mut() };
-            data.guards[p.slot as usize] = guard;
-            data.links[p.slot as usize] = to_code as usize;
-            self.blocks[to as usize].as_mut().unwrap().backlinks.push((p.from, p.slot));
+            unsafe { source.data.as_mut() }.guards[p.slot as usize] = guard;
+            self.link(p.from, p.slot as usize, to);
         }
 
-        /// Drop a block whose bytes changed, and the links to it.
+        /// Point link `slot` of block `from` at block `to`. A link made
+        /// again for another block (a return's, for every other place it
+        /// returns to) leaves the backlinks of the one it led to: blocks
+        /// that live long would otherwise gather millions of them.
+        fn link(&mut self, from: u32, slot: usize, to: u32) {
+            let to_code = self.blocks[to as usize].as_ref().unwrap().code;
+            let source = self.blocks[from as usize].as_mut().unwrap();
+            // SAFETY: owned by the block, and not in use.
+            unsafe { source.data.as_mut() }.links[slot] = to_code as usize;
+            let old = source.targets[slot].replace(to);
+            if old == Some(to) {
+                return;
+            }
+            if let Some(old) = old {
+                self.drop_backlink(old, from, slot);
+            }
+            self.blocks[to as usize].as_mut().unwrap().backlinks.push((from, slot as u8));
+        }
+
+        /// Take link `slot` of block `from` out of the backlinks of block
+        /// `to`.
+        fn drop_backlink(&mut self, to: u32, from: u32, slot: usize) {
+            if let Some(block) = self.blocks[to as usize].as_mut()
+                && let Some(i) = block.backlinks.iter().position(|&l| l == (from, slot as u8))
+            {
+                block.backlinks.swap_remove(i);
+            }
+        }
+
+        /// Drop a block whose bytes changed, and the links to it. Its code's
+        /// place goes to blocks translated later: code that rewrites
+        /// itself all the time (a RET poked into an unrolled loop and put
+        /// back, for every span of a floor) would otherwise fill the
+        /// memory, and translating everything again after it is thrown
+        /// away takes long enough to hold up a video frame.
         fn retire(&mut self, index: u32, stats: &mut DynStats) {
             let Some(block) = self.blocks[index as usize].take() else { return };
+            self.mem.remove(block.code, block.len);
+            stats.code_bytes = self.mem.used() as u64;
+            for (slot, to) in block.targets.iter().enumerate() {
+                if let Some(to) = *to {
+                    self.drop_backlink(to, index, slot);
+                }
+            }
             for &(from, k) in &block.backlinks {
                 if let Some(source) = self.blocks[from as usize].as_mut() {
                     // SAFETY: owned by the block, and not in use.
                     let data = unsafe { source.data.as_mut() };
                     if data.links[k as usize] == block.code as usize {
                         data.links[k as usize] = data.stubs[k as usize];
+                        source.targets[k as usize] = None;
                     }
                 }
             }
@@ -551,7 +621,7 @@ mod engine {
                         // may go through the page tables, and links it.
                         self.pending = Some(Pending {
                             from: exited,
-                            code: self.blocks[exited as usize].as_ref().unwrap().code,
+                            serial: self.blocks[exited as usize].as_ref().unwrap().serial,
                             slot: ix as u8,
                             eip: cpu.eip(),
                             mode,
@@ -572,11 +642,7 @@ mod engine {
                         // (Translating it may have made room by throwing all
                         // blocks away, the one to link from with them.)
                         if stats.flushes == flushes {
-                            let t_code = self.blocks[t as usize].as_ref().unwrap().code;
-                            let source = self.blocks[exited as usize].as_mut().unwrap();
-                            // SAFETY: owned by the block, and not in use.
-                            unsafe { source.data.as_mut() }.links[ix] = t_code as usize;
-                            self.blocks[t as usize].as_mut().unwrap().backlinks.push((exited, ix as u8));
+                            self.link(exited, ix, t);
                         }
                         index = t;
                         continue;

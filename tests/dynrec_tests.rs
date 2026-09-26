@@ -634,6 +634,76 @@ fn changing_a_linked_block_unlinks_it() {
 }
 
 #[test]
+fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
+    // A loop that rewrites the ADD's immediate in the block it jumps to on
+    // each of its 1000 passes, CL, as the Doom engine pokes its drawing
+    // loops: 1000 translations of that block, in room for far fewer.
+    let b_at = CODE + 0x80;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 1000u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.mov(byte_ptr(b_at as u64 + 2), cl)?;
+            a.jmp(b_at as u64)
+        }));
+        rig.load(b_at, &asm32(b_at, |a| {
+            a.db(&[0x81, 0xC3, 0, 0, 0, 0])?; // add ebx, imm32
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    b.cpu.dynrec.set_code_size(16 << 10);
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), (1..=1000u32).map(|i| i & 0xFF).sum::<u32>());
+    if AVAILABLE {
+        assert!(stats.stale >= 900, "{:?}", stats);
+        assert_eq!(stats.flushes, 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn a_return_linked_to_one_place_after_another_leaves_none_behind() {
+    // A function in another page returns to two places in turn, 500 times
+    // each, so its return is linked to each in turn; and the loop rewrites
+    // the function's ADD immediate, CL, on every pass, so its block is
+    // translated again every time. Neither the links made before nor the
+    // blocks thrown away may stay in the backlinks of the places.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(f, &asm32(f, |a| {
+            a.db(&[0x81, 0xC7, 0, 0, 0, 0])?; // add edi, imm32
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(edi, edi)?;
+            a.mov(ecx, 500u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.mov(byte_ptr(f as u64 + 2), cl)?;
+            a.call(f as u64)?;
+            a.call(f as u64)?;
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edi(), 2 * (1..=500u32).map(|i| i & 0xFF).sum::<u32>());
+    if AVAILABLE {
+        assert!(stats.stale >= 450, "{:?}", stats);
+        // At most three links from each block: none left from before.
+        assert!(stats.links <= 3 * stats.live_blocks, "{:?}", stats);
+    }
+}
+
+#[test]
 fn a_smaller_cs_limit_stops_a_linked_block() {
     // A loop of two linked blocks runs under a flat code segment, then
     // the same code under one whose limit ends inside the JNZ: #GP(0)

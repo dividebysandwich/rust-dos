@@ -233,15 +233,19 @@ the next timer event.
 
 ### Code memory
 
-`codemem.rs` reserves 32 MB:
+`codemem.rs` reserves 128 MB:
 
 - read, write and execute where the host allows it;
 - otherwise executable, with the pages made writable for each copy;
 - MAP_JIT and `pthread_jit_write_protect_np` on Apple Silicon.
 
-Blocks are assembled with dynasm-rs into a buffer and copied in. When the
-memory is full, everything is thrown away and translation starts over. So
-it is at the shell prompt (`load_shell`), and when the CPU model changes.
+Blocks are assembled with dynasm-rs into a buffer and copied in, into
+the smallest space a thrown-away block left that they fit, else after
+everything. A block whose bytes changed gives its space back: Doom-engine
+games poke a RET into an unrolled loop for every span they draw and put
+the byte back, and hundreds of blocks a frame are translated again. When
+nothing fits, everything is thrown away and translation starts over. So it
+is at the shell prompt (`load_shell`), and when the CPU model changes.
 
 ## Statistics
 
@@ -252,7 +256,7 @@ now) and `dynrec`:
 |---|---|
 | `blocks`, `instructions` | Blocks translated and their instructions |
 | `native` | Instructions translated into host code (the rest call handlers) |
-| `live_blocks`, `code_bytes` | Blocks translated now, and their host code |
+| `live_blocks`, `code_bytes`, `links` | Blocks translated now, their host code, and the links between them |
 | `flushes` | Times all translated code was thrown away |
 | `runs` | Blocks entered from the execution loop |
 | `deadline` | Blocks that stopped at once for the timer |
