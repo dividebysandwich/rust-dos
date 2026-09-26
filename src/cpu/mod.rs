@@ -1017,6 +1017,7 @@ impl Cpu {
         self.bus.mouse.remove_callback();
         crate::mouse::clear_callback_busy(&mut self.bus);
         self.bus.mouse.ps2 = crate::mouse::Ps2Mouse::default();
+        crate::keyboard::drop_unseen_keys(&mut self.bus);
         match kept_cursor {
             Some((col, row)) => {
                 self.bus.write_8(0x0450, col);

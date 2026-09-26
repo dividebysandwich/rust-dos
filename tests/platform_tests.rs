@@ -123,6 +123,22 @@ fn keyboard_controller_queues_every_scan_code_byte() {
 }
 
 #[test]
+fn keys_the_bios_never_handled_go_when_the_shell_takes_over() {
+    use rust_dos::keyboard::{bios_saw_keys, drop_unseen_keys, key_event};
+    let mut bus = Bus::new(PathBuf::from("."));
+    // A typed while the BIOS's INT 09h runs: typed ahead for the prompt.
+    key_event(&mut bus, 0x1E, false, true, None);
+    key_event(&mut bus, 0x1E, false, false, None);
+    bios_saw_keys(&mut bus);
+    // S typed into a program that reads the keyboard itself.
+    key_event(&mut bus, 0x1F, false, true, None);
+    key_event(&mut bus, 0x1F, false, false, None);
+    assert_eq!(bus.keyboard_buffer.len(), 2);
+    drop_unseen_keys(&mut bus);
+    assert_eq!(bus.keyboard_buffer.iter().copied().collect::<Vec<_>>(), [0x1E61]);
+}
+
+#[test]
 fn keyboard_acknowledges_commands() {
     let mut bus = Bus::new(PathBuf::from("."));
     bus.io_write(0x60, 0xED); // set LEDs

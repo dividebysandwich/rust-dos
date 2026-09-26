@@ -130,11 +130,14 @@ pub struct KeyboardState {
     /// One bit for each key held, by `key_id`.
     held: [u64; 8],
     dead: Option<char>,
+    /// The keystrokes last queued for INT 16h that the BIOS's keyboard
+    /// interrupt (INT 09h) hasn't run for since (`drop_unseen_keys`).
+    unseen: usize,
 }
 
 impl Default for KeyboardState {
     fn default() -> Self {
-        Self { layout: Layout::us(), held: [0; 8], dead: None }
+        Self { layout: Layout::us(), held: [0; 8], dead: None, unseen: 0 }
     }
 }
 
@@ -278,9 +281,27 @@ pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char:
         // dropped.
         if bus.keyboard_buffer.len() < BIOS_BUFFER_KEYS {
             bus.keyboard_buffer.push_back(keystroke);
+            bus.kbd.unseen += 1;
         }
     }
     send_scan(bus, scan, extended);
+}
+
+/// The BIOS's keyboard interrupt ran: the keystrokes queued are ones it
+/// handled.
+pub fn bios_saw_keys(bus: &mut Bus) {
+    bus.kbd.unseen = 0;
+}
+
+/// Forget the keystrokes the BIOS's keyboard interrupt never ran for: keys
+/// typed into a program that reads the keyboard itself and doesn't pass
+/// them on (Windows, many games), which on a PC never reach the BIOS's
+/// buffer, so the shell doesn't take them as typed at its prompt once the
+/// program ends. Keys typed ahead through the BIOS stay.
+pub fn drop_unseen_keys(bus: &mut Bus) {
+    let keep = bus.keyboard_buffer.len().saturating_sub(bus.kbd.unseen);
+    bus.keyboard_buffer.truncate(keep);
+    bus.kbd.unseen = 0;
 }
 
 /// Let go of every key the machine holds, as the host takes the keyboard
