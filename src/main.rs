@@ -1197,6 +1197,16 @@ struct MainHost<'m, 'd> {
 }
 
 impl MainHost<'_, '_> {
+    /// The file the settings window saves to: the game's profile while one
+    /// plays, else the configuration file.
+    fn config_path(&self) -> Result<PathBuf, String> {
+        let file = self.saved.file.as_deref().ok_or("No configuration file")?;
+        Ok(match self.game.as_ref() {
+            Some(game) => games_dir(Some(file)).ok_or("No games folder")?.join(format!("{}.conf", game.id)),
+            None => file.to_path_buf(),
+        })
+    }
+
     /// Launch the game `id` from its profile `text` in the folder `dir`:
     /// its settings over these, its drives over theirs, and the commands
     /// that start it.
@@ -1449,6 +1459,17 @@ impl Host for MainHost<'_, '_> {
             return Ok(());
         }
         save_config(self.cpu, self.saved, settings)
+    }
+
+    fn autoexec(&self) -> Result<Vec<String>, String> {
+        config::load_autoexec(&self.config_path()?)
+    }
+
+    fn save_autoexec(&mut self, lines: &[String]) -> Result<(), String> {
+        let path = self.config_path()?;
+        config::save_autoexec(&path, lines)?;
+        self.cpu.bus.log_string(&format!("[CONFIG] Saved the [autoexec] commands to {}", path.display()));
+        Ok(())
     }
 
     fn games(&self) -> Vec<GameEntry> {

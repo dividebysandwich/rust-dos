@@ -6,6 +6,7 @@
 //! it keys, typed text and clicks, and carries out what it asks for through
 //! `Host`. What the frontend doesn't have (`Frontend`) isn't offered.
 
+mod autoexec;
 mod browser;
 mod cheats;
 mod dialog;
@@ -14,6 +15,7 @@ mod games;
 pub mod osd;
 mod states;
 
+use autoexec::AutoexecEditor;
 use browser::{Browser, IMAGES, MT32_ROMS, Row, SOUNDFONTS};
 use dialog::{Event, Field, MountDialog, TextField};
 use draw::{Grid, Layout, Rgb};
@@ -169,6 +171,16 @@ pub trait Host {
         let _ = slot;
         Err("There are no save states here".to_string())
     }
+    /// The lines of the `[autoexec]` section of the file `save` writes to,
+    /// comments and blank lines too.
+    fn autoexec(&self) -> Result<Vec<String>, String> {
+        Err("There is no configuration file here".to_string())
+    }
+    /// Make `lines` that file's `[autoexec]` section.
+    fn save_autoexec(&mut self, lines: &[String]) -> Result<(), String> {
+        let _ = lines;
+        Err("There is no configuration file here".to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,7 +232,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir,
+                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, Autoexec,
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -282,6 +294,8 @@ enum Input {
     Text,
     /// Enter picks a host file.
     File,
+    /// Enter opens an editor of its own.
+    Link,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,6 +370,8 @@ enum Item {
     LptDac,
     /// The Tandy's and PCjr's sound chip.
     TandySound,
+    /// The configuration file's `[autoexec]` commands (autoexec.rs).
+    Autoexec,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -480,6 +496,7 @@ impl Item {
             ReverbMix | ChorusMix => "  Dry/wet mix",
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
+            Autoexec => "Edit the [autoexec] commands...",
         }
     }
 
@@ -520,7 +537,7 @@ impl Item {
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
-            Memsize => Applies::NextStart,
+            Memsize | Autoexec => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
     }
@@ -531,6 +548,7 @@ impl Item {
             Item::CrtCurvature | Item::CrtGlow => Input::ChoiceOrText,
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::SoundFont | Item::Mt32Roms => Input::File,
+            Item::Autoexec => Input::Link,
             _ => Input::Choice,
         }
     }
@@ -630,6 +648,7 @@ impl Item {
             ChorusMix => percent_bar(s.mixer.chorus_mix, MAX_MIX),
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
+            Autoexec => String::new(),
         }
     }
 
@@ -753,7 +772,7 @@ impl Item {
                 let fives = if dir > 0 { dz / 5 + 1 } else { (dz + 4) / 5 - 1 };
                 s.joystick.deadzone = (fives * 5).clamp(0, MAX_DEADZONE as isize) as u8;
             }
-            UltraDir | SoundFont | Mt32Roms | CaptureDir => {}
+            UltraDir | SoundFont | Mt32Roms | CaptureDir | Autoexec => {}
         }
     }
 
@@ -857,6 +876,8 @@ enum Target {
     Field(Field),
     GameField(GameField),
     BrowserRow(usize),
+    /// A line of the `[autoexec]` editor.
+    EditorLine(usize),
 }
 
 struct Hit {
@@ -912,6 +933,8 @@ pub struct ConfigUi {
     states: Vec<SlotView>,
     states_available: bool,
     pictures: Vec<((usize, usize), Frame)>,
+    /// The `[autoexec]` commands being edited.
+    autoexec: Option<AutoexecEditor>,
 }
 
 /// A graph for `draw::plot`.
@@ -966,6 +989,7 @@ impl ConfigUi {
             states: Vec::new(),
             states_available: false,
             pictures: Vec::new(),
+            autoexec: None,
         }
     }
 
@@ -1018,6 +1042,7 @@ impl ConfigUi {
         self.dialog = None;
         self.browser = None;
         self.game_dialog = None;
+        self.autoexec = None;
         self.confirm_delete = None;
         self.cheats.edit = None;
         self.cheats.refresh(host);
@@ -1084,6 +1109,8 @@ impl ConfigUi {
             self.dialog_key(key, host);
         } else if self.game_dialog.is_some() {
             self.game_dialog_key(key, host);
+        } else if self.autoexec.is_some() {
+            self.autoexec_key(key, host);
         } else if self.cheats.edit.is_some() {
             self.cheats_edit_key(key, host);
         } else if self.edit.is_some() {
@@ -1104,18 +1131,18 @@ impl ConfigUi {
     /// A left click at frame pixel (`x`, `y`).
     pub fn click(&mut self, x: i32, y: i32, host: &mut dyn Host) {
         let Some((col, row)) = self.layout.and_then(|l| l.cell_at(x, y)) else { return };
-        let Some(target) = self
+        let Some((target, into)) = self
             .hits
             .iter()
             .rev()
             .find(|h| h.row == row && (h.col..h.col + h.width).contains(&col))
-            .map(|h| h.target)
+            .map(|h| (h.target, col - h.col))
         else {
             return;
         };
         match target {
             Target::Tab(page) => {
-                if self.dialog.is_none() && self.browser.is_none() && self.game_dialog.is_none() {
+                if self.dialog.is_none() && self.browser.is_none() && self.game_dialog.is_none() && self.autoexec.is_none() {
                     self.edit = None;
                     self.cheats.edit = None;
                     self.show_page(page);
@@ -1155,6 +1182,7 @@ impl ConfigUi {
                     }
                 }
             }
+            Target::EditorLine(i) => self.autoexec_clicked(i, into),
         }
     }
 
@@ -1231,6 +1259,7 @@ impl ConfigUi {
             }
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
+            (UiKey::Enter | UiKey::Right, Input::Link) => self.open_autoexec(host),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}
         }
@@ -1521,6 +1550,8 @@ impl ConfigUi {
             self.draw_dialog(&mut g, content);
         } else if self.game_dialog.is_some() {
             self.draw_game_dialog(&mut g, content);
+        } else if self.autoexec.is_some() {
+            self.draw_autoexec(&mut g, content);
         } else if self.page == Page::Drives {
             self.draw_drives(&mut g, content);
         } else if self.page == Page::Games {
@@ -1746,7 +1777,11 @@ impl ConfigUi {
                 self.select_row(g, row);
             }
             self.hits.push(Hit { row, col: 1, width: cols - 2, target: Target::Row(i) });
-            g.text_to(2, row, item.label(), if selected { draw::BRIGHT } else { draw::TEXT }, value_col - 1);
+            if item.input() == Input::Link {
+                g.text_to(2, row, item.label(), draw::KEY, note_col - 1);
+            } else {
+                g.text_to(2, row, item.label(), if selected { draw::BRIGHT } else { draw::TEXT }, value_col - 1);
+            }
             let note = match item.applies() {
                 Applies::Now => "",
                 Applies::AtPrompt => "at prompt",
@@ -1764,6 +1799,9 @@ impl ConfigUi {
             }
 
             let end = note_col.saturating_sub(1);
+            if item.input() == Input::Link {
+                continue;
+            }
             if selected && let Some(field) = &self.edit {
                 let width = end.saturating_sub(value_col);
                 let (text, cursor) = field.view(width);
@@ -1923,6 +1961,8 @@ impl ConfigUi {
             vec![("Tab", "Next", Tab), ("Enter", "Mount", Enter), ("Esc", "Cancel", Esc)]
         } else if self.game_dialog.is_some() {
             vec![("Tab", "Next", Tab), ("Enter", "Create", Enter), ("Esc", "Cancel", Esc)]
+        } else if self.autoexec.is_some() {
+            vec![("F2", "Save", Save), ("Esc", "Cancel", Esc)]
         } else if self.confirm_delete.is_some() {
             vec![("Enter", "Delete", Enter), ("Esc", "Keep", Esc)]
         } else if self.page == Page::States {
@@ -1963,6 +2003,7 @@ impl ConfigUi {
             match self.item().map(Item::input) {
                 Some(Input::ChoiceOrText | Input::Text) => hints.push(("Enter", "Type", Enter)),
                 Some(Input::File) => hints.extend([("Enter", "Pick", Enter), ("Del", "None", Delete)]),
+                Some(Input::Link) => hints = vec![("Enter", "Edit", Enter)],
                 _ => {}
             }
             hints.extend([("Tab", "Page", Tab), ("F2", "Save", Save), ("Esc", "Close", Esc)]);

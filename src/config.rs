@@ -1267,11 +1267,7 @@ pub fn save(
     home: Option<&Path>,
     saving: Saving,
 ) -> Result<(), String> {
-    let original = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
-        Err(e) => return Err(format!("cannot read {}: {}", path.display(), e)),
-    };
+    let original = read_or_template(path)?;
     let text = match saving {
         Saving::All => {
             let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1280,6 +1276,92 @@ pub fn save(
         }
         Saving::Changes => update_text(&original, baseline, settings, drives, home),
     };
+    replace_file(path, &text)
+}
+
+/// The lines of `text`'s `[autoexec]` sections as they are written,
+/// comments and blank lines too, without the blank lines at the end.
+pub fn autoexec_lines(text: &str) -> Vec<String> {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut autoexec = Vec::new();
+    for ((section, line), text) in classify(&lines).into_iter().zip(lines) {
+        if matches!(line, Line::Header(_)) {
+            trim_blank_end(&mut autoexec);
+        } else if section == Section::Autoexec {
+            autoexec.push(text);
+        }
+    }
+    trim_blank_end(&mut autoexec);
+    autoexec
+}
+
+fn trim_blank_end(lines: &mut Vec<String>) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+}
+
+/// Make `autoexec` the lines of the `[autoexec]` section: the first one's,
+/// with any later ones taken out, or a new section at the end.
+fn replace_autoexec(lines: &mut Vec<String>, autoexec: &[String]) {
+    let mut autoexec = autoexec.to_vec();
+    trim_blank_end(&mut autoexec);
+    let layout = classify(lines);
+    let Some(header) = layout.iter().position(|(_, l)| *l == Line::Header(Section::Autoexec)) else {
+        if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("[{}]", Section::Autoexec.name()));
+        lines.extend(autoexec);
+        return;
+    };
+    let rest: Vec<String> = lines
+        .drain(header + 1..)
+        .zip(&layout[header + 1..])
+        .filter(|(_, (section, _))| *section != Section::Autoexec)
+        .map(|(line, _)| line)
+        .collect();
+    lines.append(&mut autoexec);
+    // A blank line before the section after it.
+    if rest.first().is_some_and(|l| !l.trim().is_empty()) {
+        lines.push(String::new());
+    }
+    lines.extend(rest);
+}
+
+/// `original` with `autoexec` as the lines of its `[autoexec]` section,
+/// and everything else as it is.
+pub fn with_autoexec(original: &str, autoexec: &[String]) -> String {
+    edit_text(original, &[], None, |lines| replace_autoexec(lines, autoexec))
+}
+
+/// The `[autoexec]` lines of the configuration file at `path` (see
+/// `autoexec_lines`), which has the template's text if it isn't there yet.
+pub fn load_autoexec(path: &Path) -> Result<Vec<String>, String> {
+    read_or_template(path).map(|text| autoexec_lines(&text))
+}
+
+/// Make `autoexec` the `[autoexec]` section of the configuration file at
+/// `path` (see `load_autoexec`).
+pub fn save_autoexec(path: &Path, autoexec: &[String]) -> Result<(), String> {
+    let original = read_or_template(path)?;
+    replace_file(path, &with_autoexec(&original, autoexec))
+}
+
+/// The text of the configuration file at `path`, or the template's if it
+/// isn't there yet.
+fn read_or_template(path: &Path) -> Result<String, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TEMPLATE.to_string()),
+        Err(e) => Err(format!("cannot read {}: {}", path.display(), e)),
+    }
+}
+
+/// Replace the file at `path` with `text` in one step, so a failed write
+/// leaves the old one.
+fn replace_file(path: &Path, text: &str) -> Result<(), String> {
     // Write through a symbolic link rather than replacing it, and keep the
     // file's permissions.
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1850,6 +1932,26 @@ mod tests {
             // its lines; a new one goes after the other drives.
             "\u{FEFF}[Emulator]\r\nScale = 4\r\ncycles=max\r\n[sound]\r\n#soundfont=gm.sf2\r\n\r\n[drives]\r\nc: = /new\r\nE=/e\r\n# keep\r\n[autoexec]\r\nC:\r\n"
         );
+    }
+
+    #[test]
+    fn the_autoexec_section_is_edited_as_written() {
+        let text = "\u{FEFF}[emulator]\r\nscale=2\r\n[AUTOEXEC]\r\n# mine\r\nMOUNT D ~/d\r\n\r\nD:\r\n\r\n[sound]\r\nopl=opl3\r\n[autoexec]\r\nDIR\r\n";
+        assert_eq!(autoexec_lines(text), ["# mine", "MOUNT D ~/d", "", "D:", "DIR"]);
+
+        // In the first section, the header as written, the later one gone.
+        let lines = ["# mine".to_string(), "C:".to_string(), String::new()];
+        assert_eq!(
+            with_autoexec(text, &lines),
+            "\u{FEFF}[emulator]\r\nscale=2\r\n[AUTOEXEC]\r\n# mine\r\nC:\r\n\r\n[sound]\r\nopl=opl3\r\n"
+        );
+        // Emptied, it stays; without one, it goes at the end.
+        assert_eq!(with_autoexec("[autoexec]\nDIR\n", &[]), "[autoexec]\n");
+        assert_eq!(with_autoexec("[emulator]\nscale=2\n", &["DIR".to_string()]), "[emulator]\nscale=2\n\n[autoexec]\nDIR\n");
+        assert_eq!(with_autoexec("", &["DIR".to_string()]), "[autoexec]\nDIR\n");
+
+        // The template's commented examples are there to edit.
+        assert_eq!(autoexec_lines(TEMPLATE).last().map(String::as_str), Some("#CD GAMES"));
     }
 
     #[test]

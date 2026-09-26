@@ -347,7 +347,10 @@ as you set them, and the Stats page, which shows it running. Ctrl+F12 or Esc clo
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
   size, expanded and upper memory, the disk speeds, the joystick and
-  rewind.
+  rewind. *Edit the [autoexec] commands...* opens the configuration file's
+  `[autoexec]` (a game's profile's while it plays) in an editor, comments
+  included; F2 writes it into the file, for the next start, and Esc leaves
+  the file as it was.
 * **Sound:** everything in `[sound]`, and the disk noises.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays, and the filters,

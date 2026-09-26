@@ -1214,6 +1214,27 @@ impl Host for PageHost<'_> {
         Ok(())
     }
 
+    /// The `[autoexec]` of the text `save` writes to.
+    fn autoexec(&self) -> Result<Vec<String>, String> {
+        Ok(config::autoexec_lines(match self.game.as_ref() {
+            Some(game) => self.games.get(&game.id).map_or("", String::as_str),
+            None => &self.saved.text,
+        }))
+    }
+
+    fn save_autoexec(&mut self, lines: &[String]) -> Result<(), String> {
+        if let Some(game) = self.game.as_ref() {
+            let text = self.games.get(&game.id).cloned().unwrap_or_default();
+            self.games.insert(game.id.clone(), config::with_autoexec(&text, lines));
+            self.requests.games = true;
+            return Ok(());
+        }
+        self.saved.text = config::with_autoexec(&self.saved.text, lines);
+        self.requests.config = Some(self.saved.text.clone());
+        self.cpu.bus.log_string("[CONFIG] Saved the [autoexec] commands");
+        Ok(())
+    }
+
     fn choose_image(&mut self, drive: Option<u8>) -> Result<(), String> {
         if drive == Some(DRIVE_C) {
             return Err("C: is kept in this browser: Drives on the page downloads or erases it".to_string());

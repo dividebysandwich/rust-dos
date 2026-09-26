@@ -40,6 +40,8 @@ struct FakeHost {
     states: Vec<SlotView>,
     slot: u8,
     loaded: Vec<u8>,
+    /// The configuration file's `[autoexec]`.
+    autoexec: Vec<String>,
 }
 
 impl FakeHost {
@@ -64,6 +66,7 @@ impl FakeHost {
             states: vec![],
             slot: 1,
             loaded: vec![],
+            autoexec: vec![],
         }
     }
 }
@@ -184,6 +187,15 @@ impl Host for FakeHost {
 
     fn delete_state(&mut self, slot: u8) -> Result<(), String> {
         self.states.retain(|s| s.slot != slot);
+        Ok(())
+    }
+
+    fn autoexec(&self) -> Result<Vec<String>, String> {
+        Ok(self.autoexec.clone())
+    }
+
+    fn save_autoexec(&mut self, lines: &[String]) -> Result<(), String> {
+        self.autoexec = lines.to_vec();
         Ok(())
     }
 }
@@ -964,4 +976,59 @@ fn the_states_page_saves_loads_and_empties_slots() {
     assert_eq!(host.loaded, [4]);
     assert!(!ui.is_open());
     assert_eq!(ui.take_notice().as_deref(), Some("Loaded slot 4"));
+}
+
+#[test]
+fn the_emulator_page_edits_the_autoexec_commands() {
+    let mut host = FakeHost::new();
+    host.autoexec = vec!["# mine".into(), "MOUNT D ~/d".into()];
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Autoexec).unwrap();
+    ui.key(Enter, &mut host);
+    assert!(ui.autoexec.is_some());
+
+    // A command after the last line, the comment made a command, and a
+    // line joined to the one above and split again. Tab stays here.
+    keys(&mut ui, &mut host, &[Down, End, Enter]);
+    ui.text("D:", &mut host);
+    keys(&mut ui, &mut host, &[Up, Up, Home, Delete, Delete, Down, Home, Backspace, Enter, Tab]);
+    assert_eq!(ui.page, Page::Emulator);
+    ui.key(Save, &mut host);
+    assert!(ui.autoexec.is_none());
+    assert_eq!(host.autoexec, ["mine", "MOUNT D ~/d", "D:"]);
+    assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
+
+    // Esc with changes asks first; without, it just closes.
+    ui.key(Enter, &mut host);
+    ui.text("x", &mut host);
+    ui.key(Esc, &mut host);
+    assert!(ui.autoexec.is_some() && status(&ui).1, "{:?}", status(&ui));
+    ui.key(Esc, &mut host);
+    assert!(ui.autoexec.is_none());
+    assert_eq!(host.autoexec, ["mine", "MOUNT D ~/d", "D:"]);
+    keys(&mut ui, &mut host, &[Enter, Esc]);
+    assert!(ui.autoexec.is_none() && ui.is_open());
+
+    // A click puts the cursor there; a long line scrolls to show it.
+    ui.key(Enter, &mut host);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    let layout = ui.layout.unwrap();
+    let line = ui.hits.iter().find(|h| matches!(h.target, Target::EditorLine(1))).unwrap();
+    let (x, y) = ((layout.x + (line.col + 6) * 8 + 4) as i32, (layout.y + line.row * layout.cell_h + 4) as i32);
+    ui.click(x, y, &mut host);
+    ui.text(&"y".repeat(200), &mut host);
+    ui.draw(&mut frame);
+    ui.key(Save, &mut host);
+    assert_eq!(host.autoexec[1], format!("MOUNT {}D ~/d", "y".repeat(200)));
+
+    // Without a configuration file there is none to edit.
+    let mut ui = ConfigUi::new();
+    ui.open(&Settings::default(), None, &host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Autoexec).unwrap();
+    ui.key(Enter, &mut host);
+    assert!(ui.autoexec.is_none() && status(&ui).1, "{:?}", status(&ui));
 }
