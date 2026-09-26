@@ -7,6 +7,7 @@
 mod dyndiff;
 mod pmrig;
 
+use chrono::NaiveDate;
 use dyndiff::lockstep_with;
 use iced_x86::code_asm::*;
 use pmrig::*;
@@ -17,8 +18,10 @@ const GP: u8 = 13;
 const PF: u8 = 14;
 
 /// Two rigs set up by `setup`, the second on the recompiler, both in
-/// protected mode at CODE.
+/// protected mode at CODE. They see the same fixed time: DOS stamps its
+/// file table with it, so rigs made a moment apart could differ.
 fn twins(setup: impl Fn(&mut Rig)) -> (Rig, Rig) {
+    rust_dos::hosttime::fix(NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56));
     let mut a = Rig::new();
     let mut b = Rig::new();
     a.cpu.core = CoreMode::Normal;

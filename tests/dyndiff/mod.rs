@@ -133,8 +133,10 @@ pub fn lockstep_with(
 ) -> Result<Run, String> {
     let start = State::of(a);
     let other = State::of(b);
-    if start != other {
-        return Err(format!("the machines differ before they start:\n{}", start.diff(&other)));
+    let memory = memory_difference(a, b);
+    if start != other || memory.is_some() {
+        let memory = memory.map_or(String::new(), |m| format!("\n  {}", m));
+        return Err(format!("the machines differ before they start:\n{}{}", start.diff(&other), memory));
     }
     let mut run = Run { batches, a_time: Default::default(), b_time: Default::default() };
     for n in 0..batches {
