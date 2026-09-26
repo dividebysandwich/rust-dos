@@ -264,8 +264,10 @@ impl<'a> Display<'a> {
     }
 
     /// Show `frame`, which must be as big as the last `set_frame_size`,
-    /// if it differs from the one shown or the window needs drawing.
-    pub fn present(&mut self, frame: &Frame) -> Result<(), String> {
+    /// if it differs from the one shown or the window needs drawing. The
+    /// display keeps the picture to compare the next one with, and leaves
+    /// the one it showed before in `frame` instead, which saves copying it.
+    pub fn present(&mut self, frame: &mut Frame) -> Result<(), String> {
         let row_bytes = frame.width as usize * 3;
         let rows = if self.redraw || self.shown.len() != frame.rgb.len() {
             0..frame.height as usize
@@ -276,13 +278,7 @@ impl<'a> Display<'a> {
             }
         };
         self.redraw = false;
-        if self.shown.len() != frame.rgb.len() {
-            self.shown.clone_from(&frame.rgb);
-        } else {
-            let bytes = rows.start * row_bytes..rows.end * row_bytes;
-            self.shown[bytes.clone()].copy_from_slice(&frame.rgb[bytes]);
-        }
-        match &mut self.out {
+        let shown = match &mut self.out {
             Output::Gl(gl) => {
                 gl.present(frame, rows, display_size(frame.width, frame.height, self.aspect));
                 Ok(())
@@ -298,7 +294,13 @@ impl<'a> Display<'a> {
                 canvas.present();
                 Ok(())
             }
+        };
+        if self.shown.len() == frame.rgb.len() {
+            std::mem::swap(&mut self.shown, &mut frame.rgb);
+        } else {
+            self.shown.clone_from(&frame.rgb);
         }
+        shown
     }
 
     /// The frame pixel under a mouse position: in logical pixels from

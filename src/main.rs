@@ -1062,7 +1062,7 @@ fn main() -> Result<(), String> {
                 }
             }
         }
-        display.present(&screen)?;
+        display.present(&mut screen)?;
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
         if let Some(cycles) = pacer.end_frame(&cpu.bus.clock, executed, exec_time, overhead) {
