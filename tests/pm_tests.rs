@@ -717,6 +717,48 @@ fn enabling_the_ps2_mouse_in_virtual_8086_mode_unmasks_irq_12_through_the_ports(
 }
 
 #[test]
+fn exec_refuses_a_virtual_machine_whose_memory_is_elsewhere() {
+    let mut rig = Rig::new();
+    // Paging with conventional memory where its addresses say but for the
+    // page at 20000h, as a DOS machine of Windows' 386 enhanced mode has
+    // memory of its own.
+    page_tables(&mut rig);
+    rig.write32(0x80000, 0x81000 | 0x7);
+    for i in 0..1024u32 {
+        rig.write32(0x81000 + 4 * i, (i << 12) | 0x7);
+    }
+    rig.write32(0x81000 + 4 * 0x20, (0x300 << 12) | 0x7);
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(ds, ax)?;
+        a.mov(es, ax)?;
+        a.mov(dx, 0x200u32)?;
+        a.mov(bx, 0x210u32)?;
+        a.mov(ax, 0x4B00u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x30, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1030, INT 21h
+        a.mov(word_ptr(0x100), ax)?;
+        a.pushf()?;
+        a.pop(ax)?;
+        a.mov(word_ptr(0x102), ax)?;
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+    rig.load(0x30200, b"X.COM\0");
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    rig.run(|a| {
+        enable_paging(a)?;
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    assert_eq!(rig.recorded().0, 0x40);
+    assert_eq!(rig.cpu.bus.read_16(0x30100), 0x0008, "insufficient memory");
+    assert_ne!(rig.cpu.bus.read_16(0x30102) & 0x0001, 0, "CF");
+}
+
+#[test]
 fn lar_lsl_verr_verw_and_arpl() {
     let mut rig = Rig::new();
     rig.set_gdt(FREE, seg_desc(DATA, 0x1234, 0x90, 0x4));

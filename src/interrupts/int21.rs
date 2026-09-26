@@ -541,6 +541,14 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // the exit code the parent expects. F117.COM tests `AL != 0` after
             // DSWAP, so we return 1 there; it doesn't inspect PLAYER's exit
             // code at all so 0 is fine.
+            // Programs load by physical address here, where a DOS machine
+            // of Windows' 386 enhanced mode wouldn't see them: it has
+            // conventional memory of its own.
+            if matches!(mode, 0x00 | 0x01) && cpu.v86() && !cpu.conventional_memory_in_place() {
+                cpu.bus.log_string(&format!("[DOS] EXEC of '{}' in a virtual machine with memory of its own refused", filename));
+                set_result(cpu, Err(0x08));
+                return;
+            }
             let upper = filename.to_ascii_uppercase();
             let short = upper.rsplit(&['\\', '/', ':'][..]).next().unwrap_or("");
             if mode == 0x00 {
