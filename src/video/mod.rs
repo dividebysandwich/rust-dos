@@ -161,16 +161,59 @@ impl VideoMode {
 }
 
 /// A picture as the screen shows it: RGB24 pixels, row by row.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+    /// What the rows were drawn from, where the renderer keeps it (see
+    /// `DrawnFrom`).
+    drawn_from: DrawnFrom,
+}
+
+/// A copy is the picture: what the rows were drawn from stays with the
+/// frame the renderer draws into, as anything may be drawn over a copy.
+impl Clone for Frame {
+    fn clone(&self) -> Self {
+        Self::from_rgb(self.width, self.height, self.rgb.clone())
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        (self.width, self.height) = (source.width, source.height);
+        self.rgb.clone_from(&source.rgb);
+        self.drawn_from = DrawnFrom::default();
+    }
+}
+
+/// Frames are the same picture if their pixels are.
+impl PartialEq for Frame {
+    fn eq(&self, other: &Self) -> bool {
+        (self.width, self.height) == (other.width, other.height) && self.rgb == other.rgb
+    }
+}
+
+impl Eq for Frame {}
+
+/// What the 256-color renderer drew a frame's rows from: the colors and
+/// the shape, and each row's color indices as the CRTC scanned them out.
+/// Rows it would draw the same again are left as they are, which spares
+/// converting a picture a program keeps writing without changing what
+/// shows, as DOSBox's renderer compares its lines. Empty where the frame
+/// holds anything else.
+#[derive(Clone, Debug, Default)]
+struct DrawnFrom {
+    key: Vec<u8>,
+    rows: Vec<u8>,
 }
 
 impl Frame {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height, rgb: vec![0; (width * height * 3) as usize] }
+        Self { width, height, rgb: vec![0; (width * height * 3) as usize], drawn_from: DrawnFrom::default() }
+    }
+
+    /// A frame of `width` x `height` pixels `rgb`.
+    pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>) -> Self {
+        Self { width, height, rgb, drawn_from: DrawnFrom::default() }
     }
 
     /// Make the frame `width` x `height`. True if that changed its size;
@@ -233,6 +276,14 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         return;
     }
 
+    // The 256-color renderer covers every pixel, and leaves the rows it
+    // would draw the same as they are.
+    if bus.video_mode == VideoMode::Graphics320x200 && !bus.vga.adapter.gate_array() {
+        render_graphics_mode(&mut frame.rgb, width, &bus.vga.vram_graphics, bus, &mut frame.drawn_from);
+        return;
+    }
+    frame.drawn_from = DrawnFrom::default();
+
     // Black-fill just the dirty band. Renderers either fully cover this band
     // or leave a sub-row gap that we want to appear black.
     let row_bytes = width * 3;
@@ -249,7 +300,8 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
     }
 
     match bus.video_mode {
-        VideoMode::Graphics320x200 => render_graphics_mode(canvas, width, &bus.vga.vram_graphics, bus),
+        // Drawn above.
+        VideoMode::Graphics320x200 => {}
         VideoMode::Cga320x200Color | VideoMode::Cga320x200 => {
             render_cga_mode4(canvas, &bus.vga.vram_text, bus)
         }
@@ -402,7 +454,7 @@ fn planar_pixel(vram: &[u8], bytes_per_row: usize, x: usize, y: usize, base: usi
 /// 256-color modes: mode 13h and the unchained "mode X" family (320x240,
 /// 360x480, ...), whatever size the CRTC registers give them, scaled to
 /// the canvas, `canvas_w` pixels wide.
-pub fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
+fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, drawn_from: &mut DrawnFrom) {
     // The CRTC scans the 4 planes in parallel: pixel x of a row is in plane
     // x % 4 at Start Address + row * stride + x / 4. With Chain 4 (plain
     // mode 13h) that is where CPU address y * 320 + x lands. Unchained
@@ -420,29 +472,51 @@ pub fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus
     let pan = bus.vga.pixel_panning();
     let split_pan = if bus.vga.attribute_regs[0x10] & 0x20 != 0 { 0 } else { pan };
     // VGA hardware ANDs each pixel with the PEL mask before the DAC lookup.
-    let colors: Vec<(u8, u8, u8)> = (0..=255u8).map(|i| bus.vga.get_rgb(i & bus.vga.dac_mask)).collect();
+    let colors: Vec<[u8; 3]> = (0..=255u8)
+        .map(|i| {
+            let (r, g, b) = bus.vga.get_rgb(i & bus.vga.dac_mask);
+            [r, g, b]
+        })
+        .collect();
     let canvas_h = canvas.len() / (canvas_w * 3);
     let row_bytes = canvas_w * 3;
-    let mut last_y = usize::MAX;
-    for ty in 0..canvas_h {
-        let y = ty * rows / canvas_h;
-        let dst = ty * row_bytes;
-        if y == last_y {
-            canvas.copy_within(dst - row_bytes..dst, dst);
+
+    // The rows drawn before are still there if the colors and the shape
+    // are the same.
+    let mut key = colors.concat();
+    key.extend([width, rows, canvas_w, canvas_h].iter().flat_map(|v| (*v as u32).to_le_bytes()));
+    if drawn_from.key != key || drawn_from.rows.len() != width * rows {
+        drawn_from.key = key;
+        drawn_from.rows = Vec::new();
+    }
+    let known = !drawn_from.rows.is_empty();
+    drawn_from.rows.resize(width * rows, 0);
+
+    // The source pixel of each column of the canvas.
+    let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
+    let mut line = vec![0u8; width];
+    for y in 0..rows {
+        // The canvas rows showing row y.
+        let (first, end) = ((y * canvas_h).div_ceil(rows), ((y + 1) * canvas_h).div_ceil(rows).min(canvas_h));
+        if first >= end {
             continue;
         }
-        last_y = y;
         let (row, pan) = if y >= split { ((y - split) * stride, split_pan) } else { (start + y * stride, pan) };
-        for tx in 0..canvas_w {
-            let px = tx * width / canvas_w + pan;
-            let plane = px & 3;
-            let offset = (row + (px >> 2)) & 0xFFFF;
-            let color_idx = vram.get(plane * 65536 + offset).copied().unwrap_or(0);
-            let rgb = colors[color_idx as usize];
-            let idx = dst + tx * 3;
-            canvas[idx] = rgb.0;
-            canvas[idx + 1] = rgb.1;
-            canvas[idx + 2] = rgb.2;
+        for (x, index) in line.iter_mut().enumerate() {
+            let px = x + pan;
+            *index = vram[(px & 3) * 65536 + ((row + (px >> 2)) & 0xFFFF)];
+        }
+        let drawn = &mut drawn_from.rows[y * width..(y + 1) * width];
+        if known && *drawn == line[..] {
+            continue;
+        }
+        drawn.copy_from_slice(&line);
+        let dst = &mut canvas[first * row_bytes..(first + 1) * row_bytes];
+        for (pixel, &x) in dst.chunks_exact_mut(3).zip(&columns) {
+            pixel.copy_from_slice(&colors[line[x] as usize]);
+        }
+        for ty in first + 1..end {
+            canvas.copy_within(first * row_bytes..(first + 1) * row_bytes, ty * row_bytes);
         }
     }
 }

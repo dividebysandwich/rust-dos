@@ -93,3 +93,59 @@ fn split_screen_shows_address_0_below_the_line_compare() {
     cpu.bus.io_write(0x3C0, 0x04);
     assert_eq!(pixel(&cpu, 2, 10), cpu.bus.vga.get_rgb(7));
 }
+
+/// Render into `frame` as the main loop does, and check it shows what a
+/// fresh render of the whole screen does.
+fn render_again(cpu: &mut Cpu, frame: &mut video::Frame) {
+    cpu.bus.sync_display();
+    let (width, height) = video::frame_size(&cpu.bus);
+    if frame.resize(width, height) {
+        cpu.bus.vga.mark_dirty_full();
+    }
+    if cpu.bus.vga.dirty {
+        video::render_screen(frame, &cpu.bus);
+    }
+    let mut fresh = video::Frame::new(width, height);
+    cpu.bus.vga.mark_dirty_full();
+    video::render_screen(&mut fresh, &cpu.bus);
+    cpu.bus.vga.clear_dirty();
+    assert!(*frame == fresh, "a render over the last differs from a fresh one");
+}
+
+#[test]
+fn rows_drawn_again_over_the_last_picture_are_the_new_picture() {
+    let mut cpu = mode_13h();
+    let mut frame = video::Frame::new(1, 1);
+    for x in 0..320 {
+        cpu.bus.write_8(0xA0000 + 50 * 320 + x, x as u8);
+    }
+    render_again(&mut cpu, &mut frame);
+
+    // A picture of text in between doesn't stay.
+    let pixels = cpu.bus.vga.vram_graphics.clone();
+    cpu.set_ax(0x0003);
+    int10::handle(&mut cpu);
+    render_again(&mut cpu, &mut frame);
+    cpu.set_ax(0x0013);
+    int10::handle(&mut cpu);
+    cpu.bus.vga.vram_graphics = pixels;
+    cpu.bus.vga.mark_dirty_full();
+    render_again(&mut cpu, &mut frame);
+
+    // A pixel, a color, the PEL mask, a page flip, and a write that leaves
+    // the pixel as it was.
+    cpu.bus.write_8(0xA0000 + 199 * 320 + 319, 7);
+    render_again(&mut cpu, &mut frame);
+    cpu.bus.io_write(0x3C8, 7);
+    for v in [63, 0, 32] {
+        cpu.bus.io_write(0x3C9, v);
+    }
+    render_again(&mut cpu, &mut frame);
+    cpu.bus.io_write(0x3C6, 0x0F);
+    render_again(&mut cpu, &mut frame);
+    out(&mut cpu, 0x3D4, 0x0C, 0x01);
+    cpu.bus.vga.latch_start_address();
+    render_again(&mut cpu, &mut frame);
+    cpu.bus.write_8(0xA0000 + 50 * 320 + 3, 3);
+    render_again(&mut cpu, &mut frame);
+}

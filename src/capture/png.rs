@@ -26,7 +26,7 @@ pub fn decode(bytes: &[u8]) -> Option<Frame> {
         return None;
     }
     pixels.truncate(info.buffer_size());
-    Some(Frame { width: info.width, height: info.height, rgb: pixels })
+    Some(Frame::from_rgb(info.width, info.height, pixels))
 }
 
 /// Save `frame` as a PNG file at `path`.
