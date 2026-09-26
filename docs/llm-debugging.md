@@ -267,6 +267,10 @@ access rights.
   (or `"any"`) pauses at the first instruction of the handler after the CPU
   raises it; the pause reply includes the exception. `{"mode_switch":true}`
   pauses after each switch between real and protected mode.
+- **Single-step traps:** a program that sets TF (some loaders decrypt
+  themselves this way) gets an INT 1 after every instruction. These traps
+  aren't in `/api/exceptions`, the log or exception breakpoints. To stop in
+  the handler, find it in `/api/ivt` (or `/api/idt`) and set a breakpoint.
 - **Tables:** `/api/gdt`, `/api/ldt` and `/api/idt` decode descriptors and
   gates; `/api/tss` shows the ring stacks and saved registers;
   `/api/pagewalk?addr=lin:00401000` shows the page directory and table

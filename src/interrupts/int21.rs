@@ -932,12 +932,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         }
 
         // AH = 55h: A PSP at DX for a child of the running process, which
-        // inherits its handles as EXEC's children do, with SI paragraphs
-        // of memory. It becomes the current process (Windows makes its
-        // tasks' PSPs so).
+        // inherits its handles as EXEC's children do, with SI the segment
+        // its memory ends at (PSP:0002). It becomes the current process
+        // (Windows makes its tasks' PSPs so, and Second Reality its parts').
         0x55 => {
-            let (segment, parent, paras) = (cpu.dx(), cpu.current_psp, cpu.si());
-            dos_files::new_psp(&mut cpu.bus, segment, parent, segment.wrapping_add(paras), true);
+            let (segment, parent, top) = (cpu.dx(), cpu.current_psp, cpu.si());
+            dos_files::new_psp(&mut cpu.bus, segment, parent, top, true);
             cpu.current_psp = segment;
             cpu.set_reg8(Register::AL, 0xF0);
         }

@@ -151,14 +151,15 @@ fn a_child_psp_inherits_handles_but_not_those_opened_not_to_be() {
     let shared = open(&mut cpu, "DATA.TXT", 0x00).unwrap();
     let private = open(&mut cpu, "DATA.TXT", 0x80).unwrap();
     let sft = slot(&cpu, parent, shared);
-    // AH=55h: the child's PSP at DX, SI paragraphs, and it runs now.
+    // AH=55h: the child's PSP at DX, its memory ending at SI, and it runs
+    // now.
     let child = parent + 0x100;
-    cpu.set_si(0x10);
+    cpu.set_si(child + 0x10);
     dos(&mut cpu, 0x5500, 0, 0, child).unwrap();
     assert_eq!(cpu.current_psp, child);
     let base = child as usize * 16;
     assert_eq!(cpu.bus.read_16(base + 0x16), parent);
-    assert_eq!(cpu.bus.read_16(base + 0x02), child + 0x10);
+    assert_eq!(cpu.bus.read_16(base + 0x02), child + 0x10, "the end of its memory, as SI says");
     assert_eq!(slot(&cpu, child, shared), sft);
     assert_eq!(slot(&cpu, child, private), 0xFF);
     assert_eq!(slot(&cpu, child, 1), 1, "standard output");
@@ -197,7 +198,7 @@ fn a_psp_a_program_made_ends_back_in_its_parent_at_its_terminate_address() {
     let (ss, sp) = (cpu.ss(), cpu.sp());
     // The parent's last INT 21h call leaves its registers on its stack.
     let child = parent + 0x100;
-    cpu.set_si(0x10);
+    cpu.set_si(child + 0x10);
     cpu.set_bp(0x1234);
     dos(&mut cpu, 0x5500, 0xABCD, 0, child).unwrap();
     // Where the child returns to when it ends.

@@ -548,6 +548,51 @@ fn interrupts_wait_out_the_shadows_of_sti_and_mov_ss() {
 }
 
 #[test]
+fn code_traced_with_tf_takes_a_single_step_trap_after_every_instruction() {
+    // A loop runs translated, then traced by a #DB handler that counts
+    // the traps, as programs that decrypt themselves step by step do.
+    let (mut a, mut b) = twins(|rig| {
+        rig.handler(1, 0, |a| {
+            a.inc(esi)?;
+            a.iretd()
+        });
+        let code = asm32(CODE, |a| {
+            a.xor(esi, esi)?;
+            a.mov(edx, 2u32)?;
+            let mut pass = a.create_label();
+            a.set_label(&mut pass)?;
+            a.mov(ecx, 50u32)?;
+            let mut untraced = a.create_label();
+            a.set_label(&mut untraced)?;
+            a.inc(ebx)?;
+            a.dec(ecx)?;
+            a.jnz(untraced)?;
+            // TF on: the trap comes after the MOV after the POPFD.
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x100)?;
+            a.popfd()?;
+            a.mov(ecx, 50u32)?;
+            let mut traced = a.create_label();
+            a.set_label(&mut traced)?;
+            a.inc(ebx)?;
+            a.dec(ecx)?;
+            a.jnz(traced)?;
+            // TF off: the POPFD that clears it still traps.
+            a.pushfd()?;
+            a.and(dword_ptr(esp), !0x100)?;
+            a.popfd()?;
+            a.dec(edx)?;
+            a.jnz(pass)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    // Per pass: the MOV, 50 times around the loop, and PUSHFD, AND, POPFD.
+    assert_eq!(b.cpu.esi(), 2 * (1 + 150 + 3));
+}
+
+#[test]
 fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
     // Blocks go on past IN, OUT and STI where they change nothing the
     // execution loop checks. Here the loop masks IRQ 0 and unmasks it in

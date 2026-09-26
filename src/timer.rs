@@ -169,6 +169,9 @@ pub struct Pit0 {
     pending_reload: Option<u32>,
     /// False after a control word until the first count is written.
     counting: bool,
+    /// Where a control word stopped the count: reads return it until a
+    /// count is written.
+    stopped: u16,
     /// Whether the counter will raise IRQ 0 at `next_tc`. One-shot modes
     /// disarm after firing until a new count is written.
     armed: bool,
@@ -190,6 +193,7 @@ impl Pit0 {
             reload: 0x10000,
             pending_reload: None,
             counting: true,
+            stopped: 0,
             armed: true,
             period_start: 0,
             next_tc: 0x10000,
@@ -215,9 +219,11 @@ impl Pit0 {
         (self.counting && self.armed).then_some(self.next_tc)
     }
 
-    /// Control word for channel 0: set the mode and stop counting until a
-    /// count is written.
-    pub fn set_mode(&mut self, mode: u8) {
+    /// Control word for channel 0 at `now`: set the mode and stop counting
+    /// until a count is written. The count stays where it got to (Future
+    /// Crew's demos time a frame by stopping the counter so and reading it).
+    pub fn set_mode(&mut self, mode: u8, now: u64) {
+        self.stopped = self.count(now);
         self.mode = if mode >= 6 { mode - 4 } else { mode };
         self.counting = false;
         self.armed = false;
@@ -263,16 +269,19 @@ impl Pit0 {
     }
 
     /// The value a counter read returns at `now`. The count runs down from
-    /// the reload value; periodic modes restart at each terminal count, the
-    /// one-shot modes wrap to FFFFh and go on.
+    /// the reload value; periodic modes restart at each terminal count (the
+    /// square wave of mode 3 counts down by two, twice a period, once for
+    /// each half of the wave), the one-shot modes wrap to FFFFh and go on.
     pub fn count(&self, now: u64) -> u16 {
         if !self.counting {
-            return self.reload as u16;
+            return self.stopped;
         }
         let elapsed = now.saturating_sub(self.period_start);
         if self.periodic() {
             let reload = self.reload as u64;
-            (reload - elapsed % reload) as u16
+            let into = elapsed % reload;
+            let down = if self.mode == 3 { 2 * into % reload } else { into };
+            (reload - down) as u16
         } else {
             // One-shot counters keep counting down through zero.
             (self.reload as u64).wrapping_sub(elapsed) as u16
@@ -447,7 +456,7 @@ impl Pacer {
     }
 }
 
-crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, armed, period_start, next_tc });
+crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns });
 
 #[cfg(test)]

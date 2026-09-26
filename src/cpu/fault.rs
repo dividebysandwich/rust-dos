@@ -15,6 +15,9 @@ use super::{Cpu, CpuFlags, Seg, SegCache};
 /// event from outside the program (a hardware interrupt or an exception).
 pub const EXT: u32 = 1;
 
+/// DR6.BS: the debug exception was the single-step trap.
+pub const DR6_BS: u32 = 0x4000;
+
 /// An exception: its vector and, for the exceptions that have one, the error
 /// code pushed with it (protected mode only).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,6 +406,20 @@ impl Cpu {
         }
         self.mark_accessed(selector, &mut desc)?;
         Ok(desc.cache(selector))
+    }
+
+    /// The single-step trap after an instruction that began with TF set:
+    /// DR6.BS, and the debug exception's handler entered with EIP at the
+    /// next instruction. It stays out of the exception log, as a program
+    /// that traces itself raises one for every instruction it runs.
+    pub fn single_step_trap(&mut self) {
+        self.dr[6] |= DR6_BS;
+        let (eip, esp) = (self.eip, self.esp());
+        if let Err(fault) = self.deliver_interrupt(Fault::DB.vector, IntSource::Exception, None) {
+            self.eip = eip;
+            self.set_esp(esp);
+            self.raise(fault);
+        }
     }
 
     /// Deliver the exception raised by an instruction. When its delivery

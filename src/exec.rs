@@ -230,8 +230,10 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         }
 
         // An instruction in an interrupt shadow runs on its own, as the
-        // loop checks for interrupts again after it.
-        let stop = if DYN && !cpu.irq_shadow && cpu.dynamic_active() {
+        // loop checks for interrupts again after it, and traced code (TF)
+        // on the interpreter, which raises the single-step traps. (POPF and
+        // IRET, which can set TF, end translated blocks.)
+        let stop = if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
             dynamic::<HOT>(cpu, fetch, hook, false)
         } else {
             instruction::<HOT>(cpu, fetch, hook)
@@ -267,7 +269,7 @@ impl Cpu {
             return;
         }
         let mut fetch = Fetch::new(self);
-        if self.dynamic_active() && !self.irq_shadow {
+        if self.dynamic_active() && !self.irq_shadow && !self.get_cpu_flag(CpuFlags::TF) {
             dynamic::<false>(self, &mut fetch, &mut NoHook, true);
         } else {
             instruction::<false>(self, &mut fetch, &mut NoHook);
@@ -780,25 +782,57 @@ fn execute_at<const HOOK: bool>(
         return None;
     }
     let start_esp = cpu.esp();
+    // TF as the instruction begins: the single-step trap follows it.
+    let traced = cpu.get_cpu_flag(CpuFlags::TF);
     cpu.set_eip(next_eip);
-    if let Err(fault) = handler(cpu, instr) {
-        // A fault leaves the instruction undone: EIP back on it, and ESP as
-        // it was (the handlers commit everything else last).
-        cpu.set_eip(eip);
-        cpu.set_esp(start_esp);
-        after_fault(cpu, fault, fetch.ram, phys_ip);
+    match handler(cpu, instr) {
+        Ok(()) => {
+            if traced {
+                trap_after(cpu, instr);
+            }
+        }
+        Err(fault) => {
+            // A fault leaves the instruction undone: EIP back on it, and ESP
+            // as it was (the handlers commit everything else last).
+            cpu.set_eip(eip);
+            cpu.set_esp(start_esp);
+            if after_fault(cpu, fault, fetch.ram, phys_ip) && traced {
+                // An emulator service counts as one instruction.
+                cpu.single_step_trap();
+            }
+        }
     }
     cpu.bus.clock.icount += 1;
     finish_instruction(cpu);
     None
 }
 
+/// The single-step trap after `instr`, which began with TF set, unless the
+/// instruction entered an interrupt handler (INT n, INT3, INT1 and INTO
+/// clear TF and drop the trap; the handler's IRET brings TF back for the
+/// instruction after them), or loaded SS, whose trap waits for the
+/// instruction after it, as the interrupts do.
+#[cold]
+fn trap_after(cpu: &mut Cpu, instr: &Instruction) {
+    use iced_x86::{Mnemonic, Register};
+    let entered = matches!(instr.mnemonic(), Mnemonic::Int | Mnemonic::Int3 | Mnemonic::Int1 | Mnemonic::Into)
+        && !cpu.get_cpu_flag(CpuFlags::TF);
+    let loads_ss =
+        matches!(instr.mnemonic(), Mnemonic::Mov | Mnemonic::Pop) && instr.op0_register() == Register::SS;
+    if !entered && !loads_ss {
+        cpu.single_step_trap();
+    }
+}
+
 /// An instruction at `phys_ip` faulted and was undone: deliver the fault,
 /// unless it is the #UD of an emulator service trap, which runs instead.
-pub(crate) fn after_fault(cpu: &mut Cpu, fault: Fault, ram: &[u8], phys_ip: usize) {
-    if !(fault == Fault::UD && service_trap(cpu, ram, phys_ip)) {
+/// Returns true for a service trap.
+pub(crate) fn after_fault(cpu: &mut Cpu, fault: Fault, ram: &[u8], phys_ip: usize) -> bool {
+    let service = fault == Fault::UD && service_trap(cpu, ram, phys_ip);
+    if !service {
         cpu.raise(fault);
     }
+    service
 }
 
 /// After an instruction has run (or faulted): carry out a reset the
@@ -896,6 +930,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     match ram[phys_ip + 1] {
         0x38 => {
             cpu.bus.disk_io.clear();
+            crate::interrupts::enter_hle(cpu, vector);
             crate::interrupts::handle_hle(cpu, vector);
             let disk_time = cpu.bus.disk_io.take_pending();
             if cpu.hle_retry {

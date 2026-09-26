@@ -1418,8 +1418,9 @@ impl Bus {
     /// them behind for the shell and the next program.
     pub fn reset_timers(&mut self) {
         // Mode 3, count 65536, counting from now.
-        self.pit0.set_mode(3);
-        self.pit0.write_count(0, self.clock.now_ticks());
+        let now = self.clock.now_ticks();
+        self.pit0.set_mode(3, now);
+        self.pit0.write_count(0, now);
         self.pit0_divisor = 0;
         self.pit0_write_msb = false;
         self.pit0_read_msb = false;
@@ -1671,7 +1672,7 @@ impl Bus {
                             self.pit0_write_msb = false;
                             self.pit0_read_msb = false;
                             self.pit0_access = access;
-                            self.pit0.set_mode((value >> 1) & 0x07);
+                            self.pit0.set_mode((value >> 1) & 0x07, self.clock.now_ticks());
                             self.clock.schedule(self.next_event());
                         }
                         2 => self.pit_write_msb = false, // Reset Channel 2 LSB/MSB

@@ -140,6 +140,9 @@ pub fn string(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuRes
 
     let counter = if a32 { Register::ECX } else { Register::CX };
     let compares = matches!(op, StrOp::Cmps | StrOp::Scas);
+    // Traced (TF), the single-step trap follows every iteration, and comes
+    // back to the instruction while iterations remain.
+    let traced = cpu.get_cpu_flag(CpuFlags::TF);
     loop {
         let count = cpu.reg(counter);
         if count == 0 {
@@ -152,6 +155,10 @@ pub fn string(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuRes
             if (repe && !zf) || (repne && zf) {
                 return Ok(());
             }
+        }
+        if traced && count != 1 {
+            cpu.set_eip(cpu.eip().wrapping_sub(instr.len() as u32));
+            return Ok(());
         }
     }
 }

@@ -638,13 +638,15 @@ fn a_bios_service_called_in_virtual_8086_mode_returns_through_the_bios_iret() {
 fn a_bios_service_in_virtual_8086_mode_with_iopl_0_leaves_its_iret_to_the_monitor() {
     let mut rig = Rig::new();
     // The frame the monitor built at 2000:FFF0 returns to 3000:0000 with
-    // CF set; the service runs at F000:1030 (AH=30h).
-    for (i, v) in [0x0000u16, 0x3000, 0x0003].into_iter().enumerate() {
+    // CF clear; the service runs at F000:1030 (AH=3Eh, a handle that isn't
+    // open).
+    for (i, v) in [0x0000u16, 0x3000, 0x0002].into_iter().enumerate() {
         rig.write16(0x2FFF0 + 2 * i as u32, v);
     }
     rig.record(GP);
     rig.run(|a| {
-        a.mov(eax, 0x3000u32)?;
+        a.mov(eax, 0x3E00u32)?;
+        a.mov(ebx, 0xFFFFu32)?;
         for v in [0u32, 0, 0, 0, 0x2000, 0xFFF0, 0x0002_0002, 0xF000, 0x1030] {
             a.push(v)?;
         }
@@ -654,8 +656,8 @@ fn a_bios_service_in_virtual_8086_mode_with_iopl_0_leaves_its_iret_to_the_monito
     // service's result in AX and its CF in the flags it pops.
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[1], stack[2]), (GP as u32, 0xFF53, 0xF000));
-    assert_eq!(rig.cpu.ax(), 0x0005);
-    assert_eq!(rig.cpu.bus.read_16(0x2FFF4), 0x0002, "CF clear");
+    assert_eq!(rig.cpu.ax(), 0x0006, "invalid handle");
+    assert_eq!(rig.cpu.bus.read_16(0x2FFF4), 0x0003, "CF set");
 }
 
 #[test]

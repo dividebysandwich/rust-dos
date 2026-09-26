@@ -282,12 +282,17 @@ pub fn write_table(bus: &mut Bus) {
 
 /// Bring the entries of the files opened, closed, read or written since
 /// the last call up to date in memory, after the DOS call that did it.
+/// Runs after every emulator service, most of which touch no file: only
+/// the dirty entries are visited.
 pub fn flush(bus: &mut Bus) {
-    let (whole, moved) = bus.disk.take_dirty();
-    for sft in (0..FILES).filter(|&sft| whole >> sft & 1 != 0) {
-        write_entry(bus, sft);
+    let (mut whole, mut moved) = bus.disk.take_dirty();
+    while whole != 0 {
+        write_entry(bus, whole.trailing_zeros() as u16);
+        whole &= whole - 1;
     }
-    for sft in (0..FILES).filter(|&sft| moved >> sft & 1 != 0) {
+    while moved != 0 {
+        let sft = moved.trailing_zeros() as u16;
+        moved &= moved - 1;
         let position = bus.disk.position(sft).unwrap_or(0);
         bus.write_32(entry_address(sft) + 0x15, position.min(u32::MAX as u64) as u32);
     }

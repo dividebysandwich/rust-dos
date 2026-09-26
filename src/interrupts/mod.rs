@@ -20,6 +20,24 @@ pub mod mscdex;
 pub mod vbe;
 pub mod utils;
 
+/// Enter an HLE handler with the CF and ZF its caller's INT pushed, so a
+/// service that doesn't return a result in them hands them back as they
+/// were, as DOS and the BIOS do. A hook chained to the handler with a far
+/// jump reaches it with flags of its own (Second Reality's loader compares
+/// AH first, and its Microsoft C parts took the carry of that for a failed
+/// AH=25h). The hardware interrupts' handlers keep the flags as they are.
+pub fn enter_hle(cpu: &mut Cpu, vector: u8) {
+    if (0x08..=0x0F).contains(&vector) {
+        return;
+    }
+    let at = cpu.sp().wrapping_add(4) as u32;
+    if let Ok(stacked) = cpu.read_u16(crate::cpu::Seg::SS, at) {
+        let stacked = CpuFlags::from_bits_truncate(stacked as u32);
+        cpu.set_cpu_flag(CpuFlags::CF, stacked.contains(CpuFlags::CF));
+        cpu.set_cpu_flag(CpuFlags::ZF, stacked.contains(CpuFlags::ZF));
+    }
+}
+
 /// Return from an HLE handler as its IRET would. Service interrupts hand
 /// their results back in CF and ZF (and clear DF), but the handlers of the
 /// hardware interrupts (IRQ 0-7, vectors 08h-0Fh) must restore the

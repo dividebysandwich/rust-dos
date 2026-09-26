@@ -150,6 +150,43 @@ fn control_word_stops_the_timer_until_a_count_is_written() {
 }
 
 #[test]
+fn a_control_word_stops_the_count_where_it_got_to() {
+    // Second Reality times a frame so: count FFFFh in mode 3 from one
+    // retrace, and at the next the control word again, and read the count.
+    let mut bus = bus_at(1000);
+    program_pit0(&mut bus, 0x36, 0xFFFF);
+    let start = bus.clock.now_ticks();
+    bus.clock.icount += 10_000;
+    bus.io_write(0x43, 0x36);
+    let elapsed = bus.clock.now_ticks() - start;
+    let read = |bus: &mut Bus| bus.io_read(0x40) as u16 | (bus.io_read(0x40) as u16) << 8;
+    let stopped = read(&mut bus);
+    assert_eq!(stopped as u64, 0xFFFF - 2 * elapsed);
+    bus.clock.icount += 10_000;
+    assert_eq!(read(&mut bus), stopped, "still where it stopped");
+}
+
+#[test]
+fn mode_3_counts_down_by_two_twice_a_period() {
+    let mut bus = bus_at(1000);
+    program_pit0(&mut bus, 0x36, 1000);
+    let start = bus.clock.now_ticks();
+    for wait in [100, 400, 700] {
+        bus.clock.icount += wait;
+        bus.io_write(0x43, 0x00); // latch channel 0
+        let elapsed = bus.clock.now_ticks() - start;
+        let count = bus.io_read(0x40) as u16 | (bus.io_read(0x40) as u16) << 8;
+        assert_eq!(count as u64, 1000 - 2 * elapsed % 1000, "after {} ticks", elapsed);
+    }
+    // Still one IRQ 0 a period: 1000 ticks is 838 instructions at this speed.
+    let edges = run_timer(&mut bus, 100_000);
+    for pair in edges.windows(2) {
+        let gap = pair[1] - pair[0];
+        assert!((838..=839).contains(&gap), "gap {}", gap);
+    }
+}
+
+#[test]
 fn counter_reads_follow_emulated_time() {
     let mut bus = bus_at(1000);
     program_pit0(&mut bus, 0x34, 50_000);
