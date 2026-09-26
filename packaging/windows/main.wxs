@@ -36,6 +36,7 @@
                 <Component Id="Docs" Guid="6F2EB829-9BFC-4A1D-946B-D20FCC688BC9">
                     <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
                     <File Id="ReadmeMd" Source="README.md" />
+                    <File Id="ConfigurationMd" Source="CONFIGURATION.md" />
                 </Component>
                 <!-- So rust-dos can be started from a command prompt with
                      its options, e.g. rust-dos -d C:\dos. -->

@@ -202,7 +202,7 @@ jobs:
         run: |
           strip target/release/rust-dos
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos README.md LICENSE stage/rust-dos/
+          cp target/release/rust-dos README.md CONFIGURATION.md LICENSE stage/rust-dos/
           tar czf "out/$PKG.tar.gz" -C stage rust-dos
           cargo install cargo-deb --locked
           cargo deb --no-build -o "out/$PKG.deb"
@@ -211,7 +211,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md stage/rust-dos/
+          cp target/release/rust-dos.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
           dotnet tool install --global wix --version 5.0.2
@@ -230,10 +230,10 @@ jobs:
             echo "::error::No .app in $APP_DIR"
             exit 1
           fi
-          # README and LICENSE beside the app, so the zip has clean paths.
-          cp README.md LICENSE "$APP_DIR/"
+          # The docs and LICENSE beside the app, so the zip has clean paths.
+          cp README.md CONFIGURATION.md LICENSE "$APP_DIR/"
           mkdir -p out
-          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" README.md LICENSE)
+          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" README.md CONFIGURATION.md LICENSE)
 
       - uses: actions/upload-artifact@v7
         with:
