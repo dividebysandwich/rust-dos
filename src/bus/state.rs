@@ -10,7 +10,7 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 const RAM_VERSION: u16 = 2;
 const CORE_VERSION: u16 = 5;
 const VIDEO_VERSION: u16 = 1;
-const SOUND_VERSION: u16 = 1;
+const SOUND_VERSION: u16 = 2;
 const DOS_VERSION: u16 = 3;
 
 /// Save or load each of a list of fields.

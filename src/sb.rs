@@ -159,6 +159,12 @@ pub struct SoundBlaster {
     pending_left: Option<i16>,
     mixer_index: u8,
     mixer: [u8; 256],
+    /// The SB16's Advanced Signal Processor socket, empty: its mode and
+    /// registers (commands 04h, 0Eh and 0Fh), which drivers probe for it.
+    asp_mode: u8,
+    asp_regs: [u8; 256],
+    /// The SB16's 8051 microcontroller's memory (commands F9h and FAh).
+    mem8051: [u8; 256],
 }
 
 /// Frames `out` keeps at most (about a second), for when nobody drains it.
@@ -190,6 +196,9 @@ impl SoundBlaster {
             pending_left: None,
             mixer_index: 0,
             mixer: [0; 256],
+            asp_mode: 0,
+            asp_regs: [0; 256],
+            mem8051: [0; 256],
         };
         sb.reset_mixer();
         sb
@@ -468,6 +477,10 @@ impl SoundBlaster {
         }
         let sb16 = self.config.model == SbModel::Sb16;
         let needs = match value {
+            // The SB16's ASP and 8051 commands (DOSBox-X's
+            // DSP_cmd_len_sb16).
+            0x04 | 0x08 | 0x0F | 0xF9 if sb16 => 1,
+            0x05 | 0x0E | 0xFA if sb16 => 2,
             0x10 | 0x38 | 0x40 | 0xE0 | 0xE4 => 1,
             0x14 | 0x16 | 0x17 | 0x24 | 0x48 | 0x74..=0x77 | 0x80 => 2,
             0x41 | 0x42 if sb16 => 2,
@@ -592,6 +605,23 @@ impl SoundBlaster {
             0xF2 => self.irq8 = true,
             0xF3 if self.config.model == SbModel::Sb16 => self.irq16 = true,
             0xF8 => self.read_buf.push_back(0),
+            // The SB16's ASP socket, empty, as Windows' driver probes it:
+            // the mode (04h), a codec parameter (05h), the chip's version
+            // (08h 03h: none, FFh as a card without one says) and its
+            // registers (0Eh, 0Fh). DOSBox-X's sblaster.cpp answers the same.
+            0x04 if self.config.model == SbModel::Sb16 => self.asp_mode = self.params[0],
+            0x04 => self.read_buf.push_back(if self.config.model == SbModel::Sb2 { 0x88 } else { 0x7B }),
+            0x05 => {}
+            0x08 => {
+                if self.params[0] == 0x03 {
+                    self.read_buf.push_back(0xFF);
+                }
+            }
+            0x0E => self.asp_regs[self.params[0] as usize] = self.params[1],
+            0x0F => self.read_buf.push_back(self.asp_regs[self.params[0] as usize]),
+            // The 8051's memory.
+            0xF9 => self.read_buf.push_back(self.mem8051[self.params[0] as usize]),
+            0xFA => self.mem8051[self.params[0] as usize] = self.params[1],
             _ => log.push(format!("[SB] Unhandled DSP command {:02X}h", cmd)),
         }
     }
@@ -601,7 +631,7 @@ crate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block,
 crate::state_fields!(SoundBlaster {
     reset_stage, in_command, params, params_needed, read_buf, test_reg, speaker_on, tc_rate, sb16_rate,
     block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
-    mixer_index, mixer,
+    mixer_index, mixer, asp_mode, asp_regs, mem8051,
 } skip {
     config,
 });
