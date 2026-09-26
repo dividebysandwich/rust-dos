@@ -1403,7 +1403,6 @@ impl Cpu {
             Placement::Shell => self.transient_segment(),
             Placement::Child(segment) | Placement::High(segment) => segment,
         };
-        let relocation_base_segment = load_segment + 0x10;
 
         // Load Binary
         // Safety check: ensure header doesn't point past EOF
@@ -1426,6 +1425,63 @@ impl Cpu {
         };
         let image_end = module_len.clamp(header_size, bytes.len());
         let image_data = &bytes[header_size..image_end];
+
+        // Determine the child's memory block size. Two paths:
+        //
+        //  * Fresh boot (segment == None): rebuild the MCB chain from scratch
+        //    giving the program min(max_alloc, available) paragraphs per the
+        //    MZ header, then init a trailing free block.
+        //
+        //  * Nested EXEC (segment == Some): the caller has already allocated
+        //    an MCB for us via mcb::alloc. We simply read its size and leave
+        //    the chain alone so the parent's allocations stay intact.
+        //
+        // A header asking for no memory at all, MINALLOC and MAXALLOC both
+        // 0, means "load high": the program gets the whole block, its PSP at
+        // the bottom as always, and its image at the top (KRNL386.EXE, which
+        // builds Windows' first heap in the memory between the two).
+        let load_high = min_alloc == 0 && max_alloc == 0;
+        let image_paras = image_data.len().div_ceil(16) as u16;
+        let min_program_paras = 0x10 + image_paras + min_alloc;
+
+        let program_paras = if placement == Placement::Shell {
+            let available = crate::mcb::low_end(&self.bus).saturating_sub(load_segment);
+            let desired = if load_high {
+                u16::MAX
+            } else if max_alloc == 0 {
+                min_program_paras
+            } else {
+                min_program_paras.saturating_add(max_alloc - min_alloc.min(max_alloc))
+            };
+            let paras = if desired >= available {
+                available.saturating_sub(1).max(min_program_paras)
+            } else {
+                desired.max(min_program_paras)
+            };
+            crate::mcb::init_for_program(&mut self.bus, load_segment, paras);
+            paras
+        } else {
+            // The caller allocated an MCB for us; trust its size.
+            let mcb = crate::mcb::read_mcb(&self.bus, load_segment.wrapping_sub(1));
+            if !mcb.is_valid() {
+                self.bus
+                    .log_string("[DOS] Nested load_exe: MCB at load_segment-1 is invalid");
+                return false;
+            }
+            if mcb.size < min_program_paras {
+                self.bus.log_string(&format!(
+                    "[DOS] Nested load_exe: MCB size {:04X} < required {:04X}",
+                    mcb.size, min_program_paras
+                ));
+                return false;
+            }
+            mcb.size
+        };
+        let relocation_base_segment = if load_high {
+            load_segment + program_paras - image_paras
+        } else {
+            load_segment + 0x10
+        };
 
         // Standard loader
         // DOS behavior: Skip the header, load the rest to CS:0000 (after PSP)
@@ -1497,49 +1553,6 @@ impl Cpu {
             self.cs(), self.ip()
         ));
 
-        // Determine the child's memory block size. Two paths:
-        //
-        //  * Fresh boot (segment == None): rebuild the MCB chain from scratch
-        //    giving the program min(max_alloc, available) paragraphs per the
-        //    MZ header, then init a trailing free block.
-        //
-        //  * Nested EXEC (segment == Some): the caller has already allocated
-        //    an MCB for us via mcb::alloc. We simply read its size and leave
-        //    the chain alone so the parent's allocations stay intact.
-        let image_paras = image_data.len().div_ceil(16) as u16;
-        let min_program_paras = 0x10 + image_paras + min_alloc;
-
-        let program_paras = if placement == Placement::Shell {
-            let available = crate::mcb::low_end(&self.bus).saturating_sub(load_segment);
-            let desired = if max_alloc == 0 {
-                min_program_paras
-            } else {
-                min_program_paras.saturating_add(max_alloc - min_alloc.min(max_alloc))
-            };
-            let paras = if desired >= available {
-                available.saturating_sub(1).max(min_program_paras)
-            } else {
-                desired.max(min_program_paras)
-            };
-            crate::mcb::init_for_program(&mut self.bus, load_segment, paras);
-            paras
-        } else {
-            // The caller allocated an MCB for us; trust its size.
-            let mcb = crate::mcb::read_mcb(&self.bus, load_segment.wrapping_sub(1));
-            if !mcb.is_valid() {
-                self.bus
-                    .log_string("[DOS] Nested load_exe: MCB at load_segment-1 is invalid");
-                return false;
-            }
-            if mcb.size < min_program_paras {
-                self.bus.log_string(&format!(
-                    "[DOS] Nested load_exe: MCB size {:04X} < required {:04X}",
-                    mcb.size, min_program_paras
-                ));
-                return false;
-            }
-            mcb.size
-        };
         self.heap_pointer = load_segment + program_paras + 1;
 
         self.bus
