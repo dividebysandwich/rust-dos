@@ -761,7 +761,7 @@ impl FatVolume {
     }
 
     /// A new directory entry.
-    fn new_entry(name: &[u8; 11], attr: u8, cluster: u16) -> [u8; ENTRY_SIZE] {
+    pub(crate) fn new_entry(name: &[u8; 11], attr: u8, cluster: u16) -> [u8; ENTRY_SIZE] {
         let (time, date) = dos_now();
         let mut raw = [0u8; ENTRY_SIZE];
         raw[..11].copy_from_slice(name);

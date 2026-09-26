@@ -313,8 +313,9 @@ fn drives_mount_and_unmount() {
     assert_eq!(host.unmounts, [3]);
     assert_eq!(ui.drives.len(), 2);
 
-    // An empty path is refused.
-    keys(&mut ui, &mut host, &[End, Enter, Enter]);
+    // An empty path is refused. ("+ Mount a drive..." is above "+ Create
+    // a disk image...".)
+    keys(&mut ui, &mut host, &[End, Up, Enter, Enter]);
     assert!(status(&ui).1);
     assert!(ui.dialog.is_some());
     ui.key(Esc, &mut host);
@@ -853,6 +854,61 @@ fn recordings_show_the_window_and_overlay_when_asked() {
     assert!(host.applied.last().unwrap().record_ui);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on (window and overlay)"));
     assert_eq!(Item::RecordUi.applies(), Applies::Now);
+}
+
+#[test]
+fn the_drives_page_makes_and_mounts_new_disk_images() {
+    let dir = std::env::temp_dir().join(format!("rust-dos-ui-makeimg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    // The last row, after "+ Mount a drive...".
+    assert_eq!(ui.row_count(), 4);
+    keys(&mut ui, &mut host, &[End, Enter]);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    assert!(ui.image_dialog.is_some());
+    assert!(ui.hits.iter().any(|h| matches!(h.target, Target::ImageField(ImageField::Create))), "its buttons can be clicked");
+
+    // A 720 KB floppy, labelled, on A:.
+    let path = dir.join("disk1.img");
+    let dialog = ui.image_dialog.as_mut().unwrap();
+    dialog.path = TextField::new(&path.display().to_string());
+    dialog.focus = ImageField::Kind;
+    keys(&mut ui, &mut host, &[Left, Left, Tab]);
+    ui.text("Saves", &mut host);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert!(ui.image_dialog.is_none(), "{:?}", status(&ui));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 737_280);
+    let (spec, replace) = host.mounts.last().unwrap();
+    assert_eq!((spec.drive, spec.opts.kind, spec.path.as_path(), *replace), (0, DriveKind::Floppy, path.as_path(), false));
+    assert!(status(&ui).0.ends_with("disk1.img has been made and mounted as A:"), "{:?}", status(&ui));
+    assert_eq!(ui.drives[ui.row].drive, 0, "the new drive is selected");
+
+    // Not over a file, and not a FAT32 disk to mount.
+    keys(&mut ui, &mut host, &[End, Enter]);
+    let dialog = ui.image_dialog.as_mut().unwrap();
+    dialog.path = TextField::new(&path.display().to_string());
+    keys(&mut ui, &mut host, &[Enter]);
+    assert_eq!(status(&ui), (format!("{} already exists: pick another name", path.display()).as_str(), true));
+    let dialog = ui.image_dialog.as_mut().unwrap();
+    dialog.path = TextField::new(&dir.join("big.img").display().to_string());
+    dialog.kind = crate::makeimg::PRESETS.len();
+    dialog.size = TextField::new("3000");
+    dialog.mount = Some(3);
+    ui.draw(&mut frame);
+    keys(&mut ui, &mut host, &[Enter]);
+    assert!(status(&ui).0.contains("FAT32"), "{:?}", status(&ui));
+    assert!(!dir.join("big.img").exists());
+    keys(&mut ui, &mut host, &[Esc]);
+    assert!(ui.image_dialog.is_none());
+
+    // The browser doesn't offer it: it has no host files.
+    let mut browser = ConfigUi::for_frontend(Frontend { window: false, host_files: false });
+    browser.open(&Settings::default(), None, &host);
+    assert_eq!(browser.row_count(), browser.drives.len() + 1);
 }
 
 #[test]

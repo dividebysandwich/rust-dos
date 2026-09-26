@@ -46,6 +46,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("TIME", &crate::time_commands::TimeCommand),
     ("MOUNT", &MountCommand),
     ("IMGMOUNT", &ImgMountCommand),
+    ("MAKEIMG", &crate::makeimg_command::MakeImgCommand),
     ("SET", &SetCommand),
     ("PATH", &PathCommand),
     ("DOSCONFIG", &DosConfigCommand),

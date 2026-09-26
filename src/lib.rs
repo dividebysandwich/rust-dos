@@ -40,6 +40,8 @@ pub mod log;
 #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
 pub mod midiout;
 pub mod lpt_dac;
+pub mod makeimg;
+pub mod makeimg_command;
 pub mod instructions;
 pub mod interrupts;
 pub mod joystick;

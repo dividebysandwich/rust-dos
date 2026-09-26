@@ -122,6 +122,7 @@ programs, the prompt has these commands:
 | `DATE [mm-dd-yy]`, `TIME [hh:mm[:ss]]` | set the machine's date or time, or show it |
 | `CLS`, `VER`, `ECHO`, `SET`, `PATH`, `PROMPT` | as in DOS |
 | `MOUNT`, `IMGMOUNT` | see [Mounting drives](CONFIGURATION.md#mounting-drives) |
+| `MAKEIMG` | make a new floppy or hard disk image, as in DOSBox Staging; see [New disk images](CONFIGURATION.md#new-disk-images) |
 | `MIXER` | see [`[mixer]`](CONFIGURATION.md#mixer) |
 | `LOADHIGH` (`LH`) | load a program into upper memory |
 | `DOSCONFIG` | open the settings window |

@@ -12,6 +12,7 @@ mod cheats;
 mod dialog;
 mod draw;
 mod games;
+mod image;
 pub mod osd;
 mod perf;
 mod states;
@@ -22,6 +23,7 @@ use dialog::{Event, Field, MountDialog, TextField};
 use draw::{Grid, Layout, Rgb};
 pub use draw::cp437;
 use games::{GameDialog, GameField};
+use image::{ImageDialog, ImageField};
 pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
@@ -868,6 +870,8 @@ pub(super) enum Pick {
     Mt32Roms,
     /// A game set up for DOSBox, to import.
     ImportGame,
+    /// Where a new disk image goes.
+    ImagePath,
 }
 
 struct Status {
@@ -886,6 +890,7 @@ enum Target {
     Key(UiKey),
     Field(Field),
     GameField(GameField),
+    ImageField(ImageField),
     BrowserRow(usize),
     /// A line of the `[autoexec]` editor.
     EditorLine(usize),
@@ -913,6 +918,8 @@ pub struct ConfigUi {
     /// The selected setting's value being typed.
     edit: Option<TextField>,
     dialog: Option<MountDialog>,
+    /// Making a new disk image.
+    image_dialog: Option<ImageDialog>,
     browser: Option<(Browser, Pick)>,
     browser_scroll: usize,
     /// Where the last frame put the panel, and what can be clicked on it.
@@ -985,6 +992,7 @@ impl ConfigUi {
             status: None,
             edit: None,
             dialog: None,
+            image_dialog: None,
             browser: None,
             browser_scroll: 0,
             layout: None,
@@ -1056,6 +1064,7 @@ impl ConfigUi {
         self.status = None;
         self.edit = None;
         self.dialog = None;
+        self.image_dialog = None;
         self.browser = None;
         self.game_dialog = None;
         self.autoexec = None;
@@ -1080,7 +1089,9 @@ impl ConfigUi {
 
     fn row_count(&self) -> usize {
         match self.page {
-            Page::Drives => self.drives.len() + 1,
+            // "+ Mount a drive", and "+ Create a disk image" with the
+            // host's files.
+            Page::Drives => self.drives.len() + 1 + self.frontend.host_files as usize,
             Page::Games => self.games.len() + 1 + self.frontend.host_files as usize,
             Page::States => self.states.len(),
             Page::Cheats => self.cheats.rows().len(),
@@ -1125,6 +1136,8 @@ impl ConfigUi {
             self.browser_key(key, host);
         } else if self.dialog.is_some() {
             self.dialog_key(key, host);
+        } else if self.image_dialog.is_some() {
+            self.image_dialog_key(key, host);
         } else if self.game_dialog.is_some() {
             self.game_dialog_key(key, host);
         } else if self.autoexec.is_some() {
@@ -1160,7 +1173,12 @@ impl ConfigUi {
         };
         match target {
             Target::Tab(page) => {
-                if self.dialog.is_none() && self.browser.is_none() && self.game_dialog.is_none() && self.autoexec.is_none() {
+                if self.dialog.is_none()
+                    && self.image_dialog.is_none()
+                    && self.browser.is_none()
+                    && self.game_dialog.is_none()
+                    && self.autoexec.is_none()
+                {
                     self.edit = None;
                     self.cheats.edit = None;
                     self.show_page(page);
@@ -1191,6 +1209,7 @@ impl ConfigUi {
                 }
             }
             Target::GameField(field) => self.game_field_clicked(field, host),
+            Target::ImageField(field) => self.image_field_clicked(field, host),
             Target::BrowserRow(i) => {
                 if let Some((browser, _)) = &mut self.browser {
                     if browser.selected == i {
@@ -1340,6 +1359,8 @@ impl ConfigUi {
     fn drives_key(&mut self, key: UiKey, host: &mut dyn Host) {
         let selected = self.drives.get(self.row).cloned();
         match (key, selected) {
+            // The row after "+ Mount a drive".
+            (UiKey::Enter, None) if self.row == self.drives.len() + 1 => self.open_image_dialog(),
             (UiKey::Insert, _) | (UiKey::Enter, None) => self.new_drive(host),
             (UiKey::Enter, Some(info)) if info.kind == DriveKind::Virtual => {
                 self.info(format!("Drive {}: is built into Rust-DOS", info.letter()));
@@ -1464,6 +1485,12 @@ impl ConfigUi {
                 MT32_ROMS,
             ),
             Pick::ImportGame => ("Pick a GOG game's folder or a DOSBox .conf", String::new(), true, &["conf"][..]),
+            Pick::ImagePath => (
+                "Pick the directory for the new image",
+                self.image_dialog.as_ref().map(|d| d.path.text()).unwrap_or_default(),
+                true,
+                IMAGES,
+            ),
         };
         let start = if current.trim().is_empty() {
             self.config_file.as_deref().and_then(Path::parent).map_or(cwd.clone(), Path::to_path_buf)
@@ -1501,6 +1528,11 @@ impl ConfigUi {
                 match pick {
                     Pick::MountPath => {
                         if let Some(dialog) = &mut self.dialog {
+                            dialog.picked(&path, self.home.as_deref());
+                        }
+                    }
+                    Pick::ImagePath => {
+                        if let Some(dialog) = &mut self.image_dialog {
                             dialog.picked(&path, self.home.as_deref());
                         }
                     }
@@ -1566,6 +1598,8 @@ impl ConfigUi {
             self.draw_browser(&mut g, content);
         } else if self.dialog.is_some() {
             self.draw_dialog(&mut g, content);
+        } else if self.image_dialog.is_some() {
+            self.draw_image_dialog(&mut g, content);
         } else if self.game_dialog.is_some() {
             self.draw_game_dialog(&mut g, content);
         } else if self.autoexec.is_some() {
@@ -1704,7 +1738,11 @@ impl ConfigUi {
             }
             self.hits.push(Hit { row, col: 1, width: cols - 2, target: Target::Row(i) });
             let Some(info) = self.drives.get(i) else {
-                let text = if self.frontend.host_files { "+ Mount a drive..." } else { "+ Insert a disk or CD image..." };
+                let text = match i - self.drives.len() {
+                    0 if self.frontend.host_files => "+ Mount a drive...",
+                    0 => "+ Insert a disk or CD image...",
+                    _ => "+ Create a disk image...",
+                };
                 g.text(2, row, text, draw::KEY);
                 continue;
             };
@@ -1923,7 +1961,7 @@ impl ConfigUi {
             vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace), ("Esc", "Cancel", Esc)]
         } else if self.dialog.is_some() {
             vec![("Tab", "Next", Tab), ("Enter", "Mount", Enter), ("Esc", "Cancel", Esc)]
-        } else if self.game_dialog.is_some() {
+        } else if self.game_dialog.is_some() || self.image_dialog.is_some() {
             vec![("Tab", "Next", Tab), ("Enter", "Create", Enter), ("Esc", "Cancel", Esc)]
         } else if self.autoexec.is_some() {
             vec![("F2", "Save", Save), ("Esc", "Cancel", Esc)]

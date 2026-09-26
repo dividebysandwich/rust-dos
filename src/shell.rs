@@ -469,6 +469,8 @@ pub enum ShellWait {
     /// DATE or TIME: a line with the new date or time, typed at the
     /// prompt's line editor without the prompt.
     Line(crate::time_commands::LinePurpose),
+    /// MAKEIMG: Y or N, to make the image its arguments ask for.
+    MakeImg(String),
 }
 
 /// A CHOICE waiting for a key.
@@ -490,7 +492,7 @@ impl Choice {
     }
 }
 
-/// Have the shell wait for a key for PAUSE or CHOICE, from the command
+/// Have the shell wait for a key for PAUSE, CHOICE or MAKEIMG, from the command
 /// that asks: its code goes to SHELL_WAIT, where the timers and interrupts
 /// run on, and the key comes to `key_ready`. For a line (DATE, TIME) it
 /// goes to the line editor, without the prompt, and the line to
@@ -512,9 +514,9 @@ pub fn enter_wait(cpu: &mut Cpu, wait: ShellWait) {
     cpu.shell_wait = Some(wait);
 }
 
-/// A key for what PAUSE or CHOICE waits for: Ctrl+C ends the batch files,
-/// and a key CHOICE doesn't take beeps and it waits on. Whether the wait
-/// is over.
+/// A key for what PAUSE, CHOICE or MAKEIMG waits for: Ctrl+C ends the
+/// batch files, a key CHOICE doesn't take beeps and it waits on, and
+/// MAKEIMG waits on for Y or N. Whether the wait is over.
 pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
     let Some(wait) = cpu.shell_wait.take() else { return true };
     if key == 0x03 {
@@ -525,6 +527,12 @@ pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
     match wait {
         ShellWait::Pause => video::print_string(cpu, "\r\n"),
         ShellWait::Line(_) => {}
+        ShellWait::MakeImg(args) => {
+            if !crate::makeimg_command::answer(cpu, &args, key) {
+                cpu.shell_wait = Some(ShellWait::MakeImg(args));
+                return false;
+            }
+        }
         ShellWait::Choice(choice) => match choice.index(key) {
             Some(i) => {
                 video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));
@@ -614,6 +622,10 @@ impl crate::savestate::State for ShellWait {
                 2u8.save(w);
                 purpose.save(w);
             }
+            ShellWait::MakeImg(args) => {
+                3u8.save(w);
+                args.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -630,6 +642,11 @@ impl crate::savestate::State for ShellWait {
                 let mut purpose = crate::time_commands::LinePurpose::Date;
                 purpose.load(r)?;
                 ShellWait::Line(purpose)
+            }
+            3 => {
+                let mut args = String::new();
+                args.load(r)?;
+                ShellWait::MakeImg(args)
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

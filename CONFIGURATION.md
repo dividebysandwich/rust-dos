@@ -320,7 +320,9 @@ Esc closes it.
 * **Drives:** mount a host directory or a disk or CD image (Ins), change or
   swap the one a drive shows (Enter; this is how to change discs in the
   middle of a game), or unmount it (Del). **Browse...** picks directories
-  and images from the host.
+  and images from the host. **Create a disk image...** makes a new, empty
+  floppy or hard disk image, as [MAKEIMG](#new-disk-images) does, and
+  mounts it on the drive picked (a floppy on A: or B:, where free).
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
@@ -517,6 +519,36 @@ in `[drives]`) puts the first disk in the drive. **Ctrl+F4** changes every
 drive with a list to its next disk, as in DOSBox; files a program has open
 keep reading the disk they were opened on, and INT 13h's disk change line
 tells the program another disk went in. CD image lists work the same way.
+
+### New disk images
+
+`MAKEIMG` makes an empty disk image, as DOSBox Staging's command does,
+once you answer Y to where it will go:
+
+```
+MAKEIMG floppy.img -t fd_1440kb -label MYDISK   a 1.44 MB floppy
+MAKEIMG hdd.img -t hd -size 500                 a 500 MB hard disk
+MAKEIMG C:\IMAGES\HDD120.IMG -t hd_120mb -d     in a DOS directory
+IMGMOUNT D hdd.img                              then mount it
+```
+
+`-t` is the kind of disk: a floppy (`fd_160kb`, `fd_180kb`, `fd_320kb`,
+`fd_360kb`, `fd_720kb`, `fd_1200kb`, `fd_1440kb`, `fd_2880kb`), a hard
+disk of a preset size (`hd_20mb`, `hd_40mb`, `hd_80mb`, `hd_120mb`,
+`hd_250mb`, `hd_520mb`, `hd_1gb`, `hd_2gb`), or `hd` with `-size` in MB
+or `-chs C,H,S`. A floppy gets the layout DOS's FORMAT gives it; a hard
+disk a partition table with one active partition from its second track,
+whose file system is FAT12 up to 16 MB, FAT16 up to 2 GB and FAT32 above,
+with clusters as small as that allows. `-fat 12`, `-fat 16` or `-fat 32`
+and `-spc` (sectors per cluster) choose for themselves, `-label` names the
+volume, and `-noformat` leaves the image all zeros. The file is a host
+path (relative to the directory rust-dos started in, `~` for the home
+directory), or with `-d` (`-writetodos`) a DOS path on a drive mounted
+from a host directory. An existing file stays unless `-force` is given,
+and one a drive has mounted always does. Rust-DOS mounts the FAT12 and
+FAT16 images; FAT32 ones are for systems that read FAT32. The boot code
+says the disk has no system until one is put on it; a hard disk's loads
+its active partition's boot sector, as FDISK's does.
 
 ### Disk speed and noises
 
