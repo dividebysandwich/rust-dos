@@ -62,8 +62,10 @@ pub struct DynStats {
     pub links: u64,
     /// Times all translated code was thrown away.
     pub flushes: u64,
-    /// Blocks run from the execution loop.
+    /// Blocks run from the execution loop, and the instructions the
+    /// translated code ran.
     pub runs: u64,
+    pub executed: u64,
     /// Blocks that didn't fit before the timer deadline, whose bytes had
     /// changed, and that wrote over their own instructions.
     pub deadline: u64,
@@ -127,6 +129,12 @@ impl DynState {
         self.stats
     }
 
+    /// The counts but for the links, which take counting: for every
+    /// frame.
+    pub fn counts(&self) -> DynStats {
+        self.stats
+    }
+
     /// Reserve `bytes` for host code from now on, instead of 128 MB: the
     /// tests fill a small one. Forgets all translated code.
     pub fn set_code_size(&mut self, bytes: usize) {
@@ -156,7 +164,12 @@ impl DynState {
             }
         }
         let engine = self.engine.as_mut().unwrap();
-        engine.run(cpu, at, single, &mut self.stats)
+        // The translated code counts its instructions as it returns, as
+        // the interpreter counts each.
+        let before = cpu.executed;
+        let run = engine.run(cpu, at, single, &mut self.stats);
+        self.stats.executed += cpu.executed.wrapping_sub(before);
+        run
     }
 
     #[cfg(not(dynrec))]

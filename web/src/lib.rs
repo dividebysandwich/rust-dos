@@ -407,7 +407,7 @@ impl Machine {
         }
         let busy = frame_start.elapsed();
         // The browser has no recompiler: the interpreter runs everything.
-        let times = FrameTimes { wall: busy, busy, render, executed, interpreted: executed, halted, ..FrameTimes::default() };
+        let times = FrameTimes { wall: busy, busy, render, executed, halted, ..FrameTimes::default() };
         self.last_frame = Some((frame_start, times));
         changed
     }

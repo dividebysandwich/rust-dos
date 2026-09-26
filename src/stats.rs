@@ -17,17 +17,17 @@ pub const HISTORY: usize = 120;
 /// One of the frontend's frames: how long it was, how long the emulator
 /// worked in it (running the machine and drawing the picture, not waiting
 /// for the next frame), how long of that drawing the picture took, the
-/// instructions it ran and how many of those the interpreter ran (the
-/// rest ran as the dynamic recompiler's code), the instructions' worth of
-/// time the CPU sat halted, and the recompiler's translated blocks and
-/// their bytes of host code after it.
+/// instructions it ran and how many of those ran as the dynamic
+/// recompiler's code (the rest the interpreter ran), the instructions'
+/// worth of time the CPU sat halted, and the recompiler's translated
+/// blocks and their bytes of host code after it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameTimes {
     pub wall: Duration,
     pub busy: Duration,
     pub render: Duration,
     pub executed: u64,
-    pub interpreted: u64,
+    pub translated: u64,
     pub halted: u64,
     pub blocks: u64,
     pub code_bytes: u64,
@@ -67,7 +67,7 @@ pub struct Stats {
     busy: Duration,
     render: Duration,
     executed: u64,
-    interpreted: u64,
+    translated: u64,
     halted: u64,
     frames: u32,
     drawn: u64,
@@ -91,7 +91,7 @@ impl Stats {
         self.busy += times.busy;
         self.render += times.render;
         self.executed += times.executed;
-        self.interpreted += times.interpreted.min(times.executed);
+        self.translated += times.translated.min(times.executed);
         self.halted += times.halted;
         self.frames += 1;
         self.view.refresh_hz = bus.vga.peek_timing().hz() as f32;
@@ -106,7 +106,7 @@ impl Stats {
         self.view.cpu_use = (self.busy.as_secs_f32() / seconds * 100.0).min(100.0);
         self.view.mips = self.executed as f32 / seconds / 1e6;
         let share = |part: u64, whole: u64| if whole == 0 { 0.0 } else { part as f32 * 100.0 / whole as f32 };
-        self.view.recompiled = share(self.executed - self.interpreted, self.executed);
+        self.view.recompiled = share(self.translated, self.executed);
         self.view.halted = share(self.halted, self.executed + self.halted);
         self.view.render_ms = self.render.as_secs_f32() * 1000.0 / self.frames as f32;
         for (history, value) in [(&mut self.fps_history, self.view.fps), (&mut self.cpu_history, self.view.cpu_use)] {
@@ -119,7 +119,7 @@ impl Stats {
         self.busy = Duration::ZERO;
         self.render = Duration::ZERO;
         self.executed = 0;
-        self.interpreted = 0;
+        self.translated = 0;
         self.halted = 0;
         self.frames = 0;
         self.drawn = 0;
@@ -145,7 +145,7 @@ mod tests {
             busy: Duration::from_millis(busy_ms),
             render: Duration::from_micros(500),
             executed: 100_000,
-            interpreted: 25_000,
+            translated: 75_000,
             halted: 100_000,
             blocks: 40,
             code_bytes: 4096,

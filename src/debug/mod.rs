@@ -838,9 +838,10 @@ impl DebugHub {
             // their instructions (native: into host code; the others call
             // their interpreter handlers), blocks translated now, their
             // host code and the links between them, flushes of all of it,
-            // blocks entered from the execution loop, and blocks that
-            // stopped at once for the timer deadline, or because their code
-            // had changed (stale) or changed under them (smc).
+            // blocks entered from the execution loop and the instructions
+            // the translated code ran, and blocks that stopped at once for
+            // the timer deadline, or because their code had changed
+            // (stale) or changed under them (smc).
             "dynrec": {
                 "blocks": d.blocks,
                 "instructions": d.instructions,
@@ -850,6 +851,7 @@ impl DebugHub {
                 "links": d.links,
                 "flushes": d.flushes,
                 "runs": d.runs,
+                "executed": d.executed,
                 "deadline": d.deadline,
                 "stale": d.stale,
                 "smc": d.smc,

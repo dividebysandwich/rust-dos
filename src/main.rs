@@ -839,16 +839,15 @@ fn main() -> Result<(), String> {
         let batch_icount = cpu.bus.clock.icount;
         let batch_stalled = cpu.bus.clock.stalled;
         let batch_idle = cpu.bus.clock.idle;
-        // The interpreter counts the instructions it runs; the rest ran
-        // as the dynamic recompiler's code.
-        let batch_interpreted = cpu.executed;
+        // The instructions the dynamic recompiler's code runs, of all.
+        let batch_translated = cpu.dynrec.counts().executed;
 
         // Per-instruction debug hook (breakpoints / stepping / tracing) is
         // only consulted when something actually needs it.
         let dbg_hot = dbg.begin_batch(&cpu);
         exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
         dbg.end_batch(&cpu);
-        let interpreted = cpu.executed.saturating_sub(batch_interpreted);
+        let translated = cpu.dynrec.counts().executed.saturating_sub(batch_translated);
 
         // Rewind: its states start over for another game or other
         // hardware, and go when it is turned off; a state is taken every
@@ -1056,7 +1055,7 @@ fn main() -> Result<(), String> {
             cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed();
-        let code = cpu.dynrec.stats();
+        let code = cpu.dynrec.counts();
         last_frame = Some((
             frame_start,
             rust_dos::stats::FrameTimes {
@@ -1064,7 +1063,7 @@ fn main() -> Result<(), String> {
                 busy,
                 render: render_time,
                 executed,
-                interpreted,
+                translated,
                 halted: idle,
                 blocks: code.live_blocks,
                 code_bytes: code.code_bytes,

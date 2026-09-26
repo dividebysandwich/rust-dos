@@ -77,6 +77,33 @@ fn a_store_into_the_rest_of_its_block_is_seen() {
 }
 
 #[test]
+fn the_translated_code_counts_the_instructions_it_runs() {
+    // A loop of 3 instructions, 10000 times: the Stats page's share of
+    // them the recompiler ran.
+    let (mut a, mut b) = twins(|rig| {
+        let code = asm32(CODE, |a| {
+            a.xor(eax, eax)?;
+            a.mov(ecx, 10000u32)?;
+            a.jmp(CODE as u64 + 0x100)
+        });
+        rig.load(CODE, &code);
+        let lp = asm32(CODE + 0x100, |a| {
+            a.add(eax, ecx)?;
+            a.dec(ecx)?;
+            a.jnz(CODE as u64 + 0x100)?;
+            a.hlt()
+        });
+        rig.load(CODE + 0x100, &lp);
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(a.cpu.dynrec.counts().executed, 0, "the interpreter ran them all");
+    if AVAILABLE {
+        let translated = b.cpu.dynrec.counts().executed;
+        assert!(translated > 29_000 && translated <= b.cpu.executed, "{} of {}", translated, b.cpu.executed);
+    }
+}
+
+#[test]
 fn rep_stos_over_the_next_instruction_is_seen() {
     // REP STOSB turns the MOV BL after it into NOPs.
     let (mut a, mut b) = twins(|rig| {
