@@ -48,6 +48,9 @@ pub struct Bus {
     /// Something asked for a CPU reset (8042 or port 92h); the execution
     /// loop carries it out.
     pub reset_requested: bool,
+    /// The port writes left of a video BIOS service's register changes,
+    /// which the BIOS makes again for a V86 monitor to see (`video::echo`).
+    pub video_echo: VecDeque<video::echo::PortAccess>,
     /// The DOSCONFIG command asked for the settings window; the frontend
     /// opens it.
     pub config_ui_requested: bool,
@@ -232,6 +235,7 @@ impl Bus {
             kbc: crate::kbc::Kbc::new(),
             a20_mask: !0x0010_0000,
             reset_requested: false,
+            video_echo: VecDeque::new(),
             config_ui_requested: false,
             exit_requested: false,
             cmos: crate::cmos::Cmos::new(((ram_len >> 10) - 1024) as u32),

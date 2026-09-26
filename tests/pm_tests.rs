@@ -659,6 +659,35 @@ fn a_bios_service_in_virtual_8086_mode_with_iopl_0_leaves_its_iret_to_the_monito
 }
 
 #[test]
+fn a_video_mode_set_in_virtual_8086_mode_makes_its_register_writes_through_the_ports() {
+    let mut rig = Rig::new();
+    // INT 10h AX=0012h, as a monitor reflects it. With no I/O permission
+    // bitmap every port access in V86 mode traps, as the VGA's do to
+    // Windows' VDD.
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x0012u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x08, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1008
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+    rig.record(GP);
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    // The first, the Miscellaneous Output register's 640x480 clock, faults
+    // in the BIOS's replay.
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[2]), (GP as u32, 0xF000));
+    assert!((rust_dos::bios::VIDEO_PORTS as u32..rust_dos::bios::VIDEO_PORTS as u32 + 0x20).contains(&stack[1]));
+    assert_eq!((rig.cpu.dx(), rig.cpu.get_al()), (0x3C2, 0xE3));
+    assert!(!rig.cpu.bus.video_echo.is_empty(), "more to write");
+}
+
+#[test]
 fn lar_lsl_verr_verw_and_arpl() {
     let mut rig = Rig::new();
     rig.set_gdt(FREE, seg_desc(DATA, 0x1234, 0x90, 0x4));

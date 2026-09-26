@@ -6,6 +6,7 @@ pub mod bios;
 pub mod cga;
 pub mod composite;
 pub mod crt;
+pub mod echo;
 pub mod hercules;
 pub mod modes;
 pub mod mono;

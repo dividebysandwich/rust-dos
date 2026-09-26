@@ -37,6 +37,9 @@ pub const SERVICE_SHELL_TICK: u8 = 0x1C;
 pub const SERVICE_COMMAND: u8 = 0x1D;
 /// The PS/2 mouse's next report, for the IRQ 12 handler (`mouse::ps2_report`).
 pub const SERVICE_PS2_REPORT: u8 = 0x1E;
+/// The next port write of a video service's register changes, for
+/// `VIDEO_PORTS` (`video::echo::next_access`).
+pub const SERVICE_VIDEO_PORT: u8 = 0x1F;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.
@@ -55,6 +58,9 @@ pub const IO_WAIT: u16 = 0x1190;
 /// address of the program's handler (INT 15h AX=C207h).
 const PS2_HANDLER: u16 = 0x11A0;
 pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
+/// Where video services in virtual-8086 mode return through, making the
+/// port writes of their register changes (`video::echo`) before the IRET.
+pub const VIDEO_PORTS: u16 = 0x11F0;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 pub const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -193,6 +199,25 @@ pub fn install(bus: &mut Bus) {
             0xE6, 0x20, // OUT 20h, AL
             0x07, 0x5D, 0x5F, 0x5E, 0x5A, 0x59, 0x5B, 0x58, 0x1F, // POP ES, BP, DI, SI, DX, CX, BX, AX, DS
             0xCF, // IRET
+        ],
+    );
+    // Video services in V86 mode: write each port the service changed,
+    // or read one, until there are none, then return.
+    write_rom(
+        bus,
+        VIDEO_PORTS,
+        &[
+            0x50, 0x52, // PUSH AX, DX
+            0xFE, 0x39, SERVICE_VIDEO_PORT, // next: DX the port, AL the value, AH 0 write, 1 read, FFh done
+            0x80, 0xFC, 0x01, // CMP AH, 1
+            0x72, 0x05, // JB write
+            0x74, 0x06, // JE read
+            0x5A, 0x58, // POP DX, AX
+            0xCF, // IRET
+            0xEE, // write: OUT DX, AL
+            0xEB, 0xF0, // JMP next
+            0xEC, // read: IN AL, DX
+            0xEB, 0xED, // JMP next
         ],
     );
     write_rom(bus, IRET_HANDLER, &[0xCF]);

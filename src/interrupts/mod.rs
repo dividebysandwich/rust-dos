@@ -31,7 +31,9 @@ pub mod utils;
 ///
 /// In virtual-8086 mode the service returns through the BIOS's IRET, with
 /// its results in the flags on the stack: the monitor (Windows' WIN386)
-/// sees the IRET a BIOS does and keeps the flags it owns, IF and IOPL.
+/// sees the IRET a BIOS does and keeps the flags it owns, IF and IOPL. A
+/// video service that changed the VGA's registers goes through the port
+/// writes that make the changes first (`video::echo`).
 pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
     let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
     let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
@@ -60,7 +62,11 @@ pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
             }
         }
         cpu.set_cs(0xF000);
-        cpu.set_ip(crate::bios::IRET_HANDLER);
+        cpu.set_ip(if vector == 0x10 && !cpu.bus.video_echo.is_empty() {
+            crate::bios::VIDEO_PORTS
+        } else {
+            crate::bios::IRET_HANDLER
+        });
         return;
     }
 
@@ -104,6 +110,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_SHELL_TICK => crate::shell::tick(cpu),
         crate::bios::SERVICE_COMMAND => crate::command_com::service(cpu),
         crate::bios::SERVICE_PS2_REPORT => crate::mouse::ps2_report(cpu),
+        crate::bios::SERVICE_VIDEO_PORT => crate::video::echo::next_access(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service
@@ -117,7 +124,17 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         0x06 => int06::handle(cpu),
         0x08 => int08::handle(cpu),
         0x09 => int09::handle(cpu),
-        0x10 => int10::handle(cpu),
+        0x10 => {
+            // Under a V86 monitor, the BIOS makes its register changes
+            // through the ports again on the way out (`return_from_hle`).
+            let echo = cpu.v86() && cpu.bus.vga.adapter.ega_bios();
+            let before = echo.then(|| crate::video::echo::Registers::of(&cpu.bus.vga));
+            int10::handle(cpu);
+            if let Some(before) = before {
+                let after = crate::video::echo::Registers::of(&cpu.bus.vga);
+                cpu.bus.video_echo = crate::video::echo::writes(&before, &after).into();
+            }
+        }
         0x11 => int11::handle(cpu),
         0x12 => int12::handle(cpu),
         0x15 => int15::handle(cpu),
