@@ -18,18 +18,20 @@ pub fn handle(cpu: &mut Cpu) {
         0x00 => {
             // The tick count the timer interrupt maintains, as a real BIOS
             // does, so it agrees with programs reading 0040:006C directly.
-            cpu.set_cx(cpu.bus.read_16(0x046E));
-            cpu.set_dx(cpu.bus.read_16(0x046C));
+            let (high, low) = (cpu.bus.guest_read_16(0x046E), cpu.bus.guest_read_16(0x046C));
+            cpu.set_cx(high);
+            cpu.set_dx(low);
             // AL = midnight flag, cleared by the read
-            let midnight = cpu.bus.read_8(0x0470);
-            cpu.bus.write_8(0x0470, 0);
+            let midnight = cpu.bus.guest_read_8(0x0470);
+            cpu.bus.guest_write_8(0x0470, 0);
             cpu.set_reg8(Register::AL, midnight);
         }
         0x01 => {
             // Set the tick count to CX:DX.
-            cpu.bus.write_16(0x046E, cpu.cx());
-            cpu.bus.write_16(0x046C, cpu.dx());
-            cpu.bus.write_8(0x0470, 0);
+            let (high, low) = (cpu.cx(), cpu.dx());
+            cpu.bus.guest_write_16(0x046E, high);
+            cpu.bus.guest_write_16(0x046C, low);
+            cpu.bus.guest_write_8(0x0470, 0);
         }
         0x02 => {
             // The real-time clock's time: CH hours, CL minutes, DH seconds

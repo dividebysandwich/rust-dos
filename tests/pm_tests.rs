@@ -966,3 +966,111 @@ fn batched_code_sees_its_own_changes() {
     assert_eq!(rig.cpu.ebx() & 0xFF, 0);
     assert_eq!(rig.cpu.eax() & 0xFF, 0x42);
 }
+
+/// Page tables as `page_tables` makes them, but open to ring 3 (and so to
+/// virtual-8086 mode).
+fn user_page_tables(rig: &mut Rig) {
+    page_tables(rig);
+    rig.write32(0x80000, 0x81000 | 0x7);
+    for i in 0..1024u32 {
+        rig.write32(0x81000 + 4 * i, (i << 12) | 0x7);
+    }
+}
+
+/// V86 code at 3000:0000 that asks INT 1Ah for the ticks and INT 15h
+/// AX=E820h for the first entry of the memory map into 3100:0000, calling
+/// the BIOS's services as a monitor reflects them, then stores the ticks
+/// (CX:DX) and EAX at 3000:0100 and raises INT 40h.
+fn v86_calls_the_bios(rig: &mut Rig) {
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ah, 0u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x28, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1028 (INT 1Ah)
+        a.mov(word_ptr(0x100), dx)?;
+        a.mov(word_ptr(0x102), cx)?;
+        a.mov(ax, 0x3100u32)?;
+        a.mov(es, ax)?;
+        a.xor(di, di)?;
+        a.mov(eax, 0xE820u32)?;
+        a.mov(edx, 0x534D_4150u32)?;
+        a.xor(ebx, ebx)?;
+        a.mov(ecx, 20u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x1C, 0x10, 0x00, 0xF0])?; // CALL FAR F000:101C (INT 15h)
+        a.mov(dword_ptr(0x104), eax)?;
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+}
+
+/// Enter V86 mode at 3000:0000 with paging on.
+fn enter_v86_with_paging(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    enable_paging(a)?;
+    for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+        a.push(v)?;
+    }
+    a.iretd()
+}
+
+#[test]
+fn bios_services_in_virtual_8086_mode_reach_memory_through_the_page_tables() {
+    let mut rig = Rig::new();
+    user_page_tables(&mut rig);
+    // The machine's page 0 (vectors and BIOS data) and its buffer at 31000h
+    // are elsewhere in physical memory, as a Windows VM's are.
+    for i in 0..0x1000u32 {
+        let byte = rig.cpu.bus.read_8(i as usize);
+        rig.cpu.bus.write_8(0x90000 + i as usize, byte);
+    }
+    rig.write32(0x9046C, 0x0012_3456);
+    rig.write32(0x046C, 0x0077_7777);
+    rig.write32(0x81000, 0x90000 | 0x7);
+    rig.write32(0x81000 + 0x31 * 4, 0x92000 | 0x7);
+    v86_calls_the_bios(&mut rig);
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    rig.run(enter_v86_with_paging);
+    assert_eq!(rig.recorded().0, 0x40, "back in the V86 code");
+    assert_eq!(rig.read32(0x30100), 0x0012_3456, "the machine's own ticks");
+    assert_eq!(rig.read32(0x30104), 0x534D_4150, "SMAP");
+    assert_eq!(rig.read32(0x92008), 0xA0000, "the map's first entry, in the buffer's page");
+    assert_eq!(rig.read32(0x31008), 0, "not at its linear address");
+    assert_eq!(rig.read32(0x81000 + 0x31 * 4) & 0x60, 0x60, "accessed and dirty");
+}
+
+#[test]
+fn a_bios_service_that_finds_a_page_missing_faults_and_runs_again() {
+    let mut rig = Rig::new();
+    user_page_tables(&mut rig);
+    // The buffer's page isn't there; the page fault handler puts it at
+    // 92000h and returns to the service, which runs again.
+    rig.write32(0x81000 + 0x31 * 4, 0);
+    v86_calls_the_bios(&mut rig);
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    rig.handler(PF, 0, |a| {
+        a.push(eax)?;
+        // Coming from V86 mode, DS is null.
+        a.mov(ax, DATA32 as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(dword_ptr(RESULT + 0x40), eax)?;
+        a.mov(eax, cr2)?;
+        a.mov(dword_ptr(RESULT + 0x44), eax)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(RESULT + 0x48), eax)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(RESULT + 0x4C), eax)?;
+        a.mov(dword_ptr(0x81000 + 0x31 * 4), 0x92000u32 | 0x7)?;
+        a.pop(eax)?;
+        a.add(esp, 4)?;
+        a.iretd()
+    });
+    rig.run(enter_v86_with_paging);
+    assert_eq!(rig.read32(RESULT + 0x40), 0x6, "a user write to a page not there");
+    assert_eq!(rig.read32(RESULT + 0x44), 0x31000, "CR2");
+    assert_eq!((rig.read32(RESULT + 0x4C), rig.read32(RESULT + 0x48)), (0xF000, 0x101C), "on the INT 15h trap");
+    assert_eq!(rig.recorded().0, 0x40, "back in the V86 code");
+    assert_eq!(rig.read32(0x30104), 0x534D_4150, "the service ran again");
+    assert_eq!(rig.read32(0x92008), 0xA0000);
+}

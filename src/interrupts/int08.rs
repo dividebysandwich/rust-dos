@@ -13,8 +13,8 @@ pub fn handle(cpu: &mut Cpu) {
 pub fn tick(cpu: &mut Cpu) {
     // Increment System Timer Count (0040:006C)
     // 32-bit value at 0x046C
-    let mut ticks = cpu.bus.read_16(0x046C) as u32;
-    let high = cpu.bus.read_16(0x046E) as u32;
+    let mut ticks = cpu.bus.guest_read_16(0x046C) as u32;
+    let high = cpu.bus.guest_read_16(0x046E) as u32;
     ticks |= high << 16;
 
     ticks = ticks.wrapping_add(1);
@@ -24,11 +24,11 @@ pub fn tick(cpu: &mut Cpu) {
     if ticks >= 1573040 {
         ticks = 0;
         // set byte at 0040:0070 to 1 (Midnight Flag)
-        cpu.bus.write_8(0x0470, 1);
+        cpu.bus.guest_write_8(0x0470, 1);
     }
 
     // Write back
-    cpu.bus.write_16(0x046C, (ticks & 0xFFFF) as u16);
-    cpu.bus.write_16(0x046E, (ticks >> 16) as u16);
+    cpu.bus.guest_write_16(0x046C, (ticks & 0xFFFF) as u16);
+    cpu.bus.guest_write_16(0x046E, (ticks >> 16) as u16);
 
 }

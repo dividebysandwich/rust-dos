@@ -72,7 +72,7 @@ fn finish(cpu: &mut Cpu, dl: u8, status: u8) {
     cpu.set_reg8(Register::AH, status);
     cpu.set_cpu_flag(CpuFlags::CF, status != 0);
     let slot = if dl < 0x80 { BDA_FLOPPY_STATUS } else { BDA_DISK_STATUS };
-    cpu.bus.write_8(slot, status);
+    cpu.bus.guest_write_8(slot as u32, status);
 }
 
 fn not_present_status(dl: u8) -> u8 {
@@ -122,6 +122,11 @@ fn move_sectors(cpu: &mut Cpu, disk: &DiskImage, lba: u64, count: usize, buffer:
     let mut data = vec![0u8; count * SECTOR_SIZE];
     if write {
         cpu.bus.guest_read_bytes(buffer, &mut data);
+        // A page of the buffer isn't there: the service runs again once it
+        // is, and nothing goes to the disk before.
+        if cpu.bus.guest_faulted() {
+            return Ok(());
+        }
         disk.write(lba, &data)
     } else {
         disk.read(lba, &mut data)?;
@@ -246,7 +251,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AH=01h Get Status of Last Operation.
         0x01 => {
             let slot = if dl < 0x80 { BDA_FLOPPY_STATUS } else { BDA_DISK_STATUS };
-            let status = cpu.bus.read_8(slot);
+            let status = cpu.bus.guest_read_8(slot as u32);
             cpu.set_reg8(Register::AL, 0);
             cpu.set_reg8(Register::AH, status);
             cpu.set_cpu_flag(CpuFlags::CF, status != 0);

@@ -38,6 +38,12 @@ pub struct Bus {
     /// The operating system booted from a disk image (BOOT), which has the
     /// machine to itself: None while the built-in DOS runs.
     pub boot: Option<crate::boot::BootState>,
+    /// The page tables the BIOS's services reach memory through while a
+    /// service runs with paging on, and the first page they found missing
+    /// (its linear address and the page fault's error code): see
+    /// `guest.rs`.
+    pub guest_paging: Option<crate::cpu::paging::GuestPaging>,
+    pub guest_fault: Option<(u32, u32)>,
     pub keyboard_buffer: VecDeque<u16>, // Stores (Scancode << 8) | ASCII
     /// The keyboard's layout and the keys held (see keyboard.rs).
     pub kbd: crate::keyboard::KeyboardState,
@@ -240,6 +246,8 @@ impl Bus {
             video_mode: VideoMode::Text80x25, // Start in Text Mode (BIOS default)
             disk: DiskController::new(root_path),
             boot: None,
+            guest_paging: None,
+            guest_fault: None,
             keyboard_buffer: VecDeque::new(),
             kbd: crate::keyboard::KeyboardState::default(),
             kbc: crate::kbc::Kbc::new(),

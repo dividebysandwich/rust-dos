@@ -100,6 +100,69 @@ impl Tlb {
     }
 }
 
+/// How an access walks the page tables: those at `cr3`, at privilege
+/// level 3 (`user`) or not, with CR0.WP (486) protecting read-only pages
+/// from supervisor writes. The BIOS's services reach memory so too while
+/// paging is on (`Bus::guest_*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuestPaging {
+    pub cr3: u32,
+    pub user: bool,
+    pub write_protect: bool,
+}
+
+/// What a walk of the page tables found for an access that they allow.
+pub struct Walked {
+    /// The physical address of the page.
+    pub page: u32,
+    user_ok: bool,
+    write_ok: bool,
+    /// The page's dirty bit, after the access.
+    dirty: bool,
+}
+
+/// Whether the page tables allow an access. Supervisor code may write
+/// read-only pages, unless CR0.WP (486) says otherwise.
+#[inline(always)]
+fn allows(user_ok: bool, write_ok: bool, write: bool, paging: GuestPaging) -> bool {
+    if paging.user && !user_ok {
+        return false;
+    }
+    !write || write_ok || (!paging.user && !paging.write_protect)
+}
+
+/// Walk the page tables for an access to `lin` as the processor does,
+/// setting the accessed bits, and the dirty bit for a write: the page it
+/// reaches, or the page fault's error code.
+pub fn walk_tables(bus: &mut crate::bus::Bus, paging: GuestPaging, lin: u32, write: bool) -> Result<Walked, u32> {
+    let mut error = if write { PF_WRITE } else { 0 } | if paging.user { PF_USER } else { 0 };
+    let a20 = bus.a20_mask();
+    let pde_addr = (((paging.cr3 & 0xFFFF_F000) | ((lin >> 20) & 0xFFC)) & a20) as usize;
+    let pde = bus.read_32(pde_addr);
+    if pde & PTE_P == 0 {
+        return Err(error);
+    }
+    let pte_addr = (((pde & 0xFFFF_F000) | ((lin >> 10) & 0xFFC)) & a20) as usize;
+    let pte = bus.read_32(pte_addr);
+    if pte & PTE_P == 0 {
+        return Err(error);
+    }
+    let user_ok = pde & pte & PTE_US != 0;
+    let write_ok = pde & pte & PTE_RW != 0;
+    if !allows(user_ok, write_ok, write, paging) {
+        error |= PF_PROTECTION;
+        return Err(error);
+    }
+    if pde & PTE_A == 0 {
+        bus.write_32(pde_addr, pde | PTE_A);
+    }
+    let new_pte = pte | PTE_A | if write { PTE_D } else { 0 };
+    if new_pte != pte {
+        bus.write_32(pte_addr, new_pte);
+    }
+    Ok(Walked { page: pte & 0xFFFF_F000, user_ok, write_ok, dirty: new_pte & PTE_D != 0 })
+}
+
 impl Cpu {
     /// Physical address of a linear one with paging off: the A20 gate
     /// decides whether address line 20 follows or is held at 0.
@@ -125,55 +188,25 @@ impl Cpu {
         self.walk(lin, write, user)
     }
 
-    /// Whether the page tables allow an access. Supervisor code may write
-    /// read-only pages, unless CR0.WP (486) says otherwise.
-    #[inline(always)]
-    fn allows(&self, user_ok: bool, write_ok: bool, write: bool, user: bool) -> bool {
-        if user && !user_ok {
-            return false;
-        }
-        !write || write_ok || (!user && !self.write_protect())
-    }
-
-    fn write_protect(&self) -> bool {
+    pub(crate) fn write_protect(&self) -> bool {
         self.model == CpuModel::I486 && self.cr0 & CR0_WP != 0
     }
 
     /// Walk the page tables for `lin`, setting the accessed and dirty bits
     /// and filling the TLB, or raise a page fault with CR2 = `lin`.
     fn walk(&mut self, lin: u32, write: bool, user: bool) -> CpuResult<u32> {
-        let mut error = if write { PF_WRITE } else { 0 } | if user { PF_USER } else { 0 };
-        let pde_addr = self.translate((self.cr3 & 0xFFFF_F000) | ((lin >> 20) & 0xFFC)) as usize;
-        let pde = self.bus.read_32(pde_addr);
-        if pde & PTE_P == 0 {
-            return Err(self.page_fault(lin, error));
-        }
-        let pte_addr = self.translate((pde & 0xFFFF_F000) | ((lin >> 10) & 0xFFC)) as usize;
-        let pte = self.bus.read_32(pte_addr);
-        if pte & PTE_P == 0 {
-            return Err(self.page_fault(lin, error));
-        }
-        let user_ok = pde & pte & PTE_US != 0;
-        let write_ok = pde & pte & PTE_RW != 0;
-        if !self.allows(user_ok, write_ok, write, user) {
-            error |= PF_PROTECTION;
-            return Err(self.page_fault(lin, error));
-        }
-        if pde & PTE_A == 0 {
-            self.bus.write_32(pde_addr, pde | PTE_A);
-        }
-        let new_pte = pte | PTE_A | if write { PTE_D } else { 0 };
-        if new_pte != pte {
-            self.bus.write_32(pte_addr, new_pte);
-        }
+        let paging = GuestPaging { cr3: self.cr3, user, write_protect: self.write_protect() };
+        let walked = match walk_tables(&mut self.bus, paging, lin, write) {
+            Ok(walked) => walked,
+            Err(error) => return Err(self.page_fault(lin, error)),
+        };
         let page = lin >> 12;
-        let phys = pte & 0xFFFF_F000;
         // Writes go through the TLB only once the page is dirty, so the
         // first write to it still sets the bit.
-        let writable = new_pte & PTE_D != 0 && self.allows(user_ok, write_ok, true, user);
+        let writable = walked.dirty && allows(walked.user_ok, walked.write_ok, true, paging);
         self.tlb.entries[Tlb::slot(page, user)] =
-            TlbEntry { read_tag: page + 1, write_tag: if writable { page + 1 } else { 0 }, phys };
-        Ok(self.translate(phys | (lin & 0xFFF)))
+            TlbEntry { read_tag: page + 1, write_tag: if writable { page + 1 } else { 0 }, phys: walked.page };
+        Ok(self.translate(walked.page | (lin & 0xFFF)))
     }
 
     fn page_fault(&mut self, lin: u32, error: u32) -> Fault {

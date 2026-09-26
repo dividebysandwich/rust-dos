@@ -928,11 +928,31 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         return false;
     }
     let vector = ram[phys_ip + 2];
+    if !matches!(ram[phys_ip + 1], 0x38 | 0x39) {
+        return false;
+    }
+    // With paging on (under Windows, whose virtual machines have memory of
+    // their own), the service reaches memory through the page tables, and
+    // runs again once the system has put a page it found missing there.
+    let paged = cpu.cr0 & crate::cpu::CR0_PG != 0;
+    let before = paged.then(|| {
+        cpu.bus.guest_paging = Some(crate::cpu::paging::GuestPaging {
+            cr3: cpu.cr3,
+            user: cpu.cpl == 3,
+            write_protect: cpu.write_protect(),
+        });
+        (cpu.snapshot(), cpu.bus.port_accesses.len())
+    });
     match ram[phys_ip + 1] {
         0x38 => {
             cpu.bus.disk_io.clear();
             crate::interrupts::enter_hle(cpu, vector);
             crate::interrupts::handle_hle(cpu, vector);
+            if let Some(before) = &before
+                && guest_page_fault(cpu, before)
+            {
+                return true;
+            }
             let disk_time = cpu.bus.disk_io.take_pending();
             if cpu.hle_retry {
                 cpu.hle_retry = false;
@@ -952,12 +972,17 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
                 crate::interrupts::return_from_hle(cpu, vector);
             }
         }
-        0x39 => {
+        _ => {
             cpu.set_ip(cpu.ip().wrapping_add(3));
             crate::interrupts::handle_inline_bop(cpu, vector);
+            if let Some(before) = &before
+                && guest_page_fault(cpu, before)
+            {
+                return true;
+            }
         }
-        _ => return false,
     }
+    cpu.bus.guest_paging = None;
     if cpu.idle {
         // A BIOS service is waiting for input: skip ahead to the next
         // timer event instead of spinning on the retry.
@@ -966,6 +991,32 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     }
     // Services change what may interrupt (INT 33h's mouse event mask).
     cpu.bus.refresh_irq();
+    true
+}
+
+/// After a service that ran with paging on: if it found a page missing,
+/// undo it (the registers as they were, the port accesses it queued) and
+/// raise the page fault on its trap, which runs again once the system's
+/// handler has put the page there. True if it did.
+fn guest_page_fault(cpu: &mut Cpu, before: &(crate::cpu::CpuSnapshot, usize)) -> bool {
+    cpu.bus.guest_paging = None;
+    let Some((lin, error)) = cpu.bus.guest_fault.take() else {
+        return false;
+    };
+    let (regs, ports) = before;
+    cpu.restore(regs);
+    cpu.bus.port_accesses.truncate(*ports);
+    cpu.hle_retry = false;
+    cpu.idle = false;
+    cpu.bus.log_string(&format!(
+        "[HLE] Page fault at {:08X} (error {:X}) in a service at {:04X}:{:04X}: it runs again",
+        lin,
+        error,
+        cpu.cs(),
+        cpu.ip()
+    ));
+    cpu.cr2 = lin;
+    cpu.raise(crate::cpu::fault::Fault::pf(error));
     true
 }
 
