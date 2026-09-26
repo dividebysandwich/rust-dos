@@ -90,9 +90,9 @@ impl Bus {
             sb_irq: _,
             irq_ready: _,
             page_gen: _,
-            // A video service's port writes for a V86 monitor, made within
-            // the instructions after it.
-            video_echo: _,
+            // A service's port accesses for a V86 monitor, made within the
+            // instructions after it.
+            port_accesses: _,
             // Requests to the front end, which it carries out before a
             // state can be saved.
             reset_requested: _,
@@ -216,7 +216,7 @@ impl Bus {
             irq_ready: _,
             page_gen: _,
             reset_requested: _,
-            video_echo: _,
+            port_accesses: _,
             config_ui_requested: _,
             exit_requested: _,
             mixer_changed: _,

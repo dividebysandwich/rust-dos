@@ -32,6 +32,11 @@ pub struct Ps2Mouse {
     last_position: Option<(i32, i32)>,
     /// When the next report may go, in emulated microseconds.
     pub next_report: u64,
+    /// A command to the mouse (through the controller's D4h) waiting for
+    /// its parameter: F3h (rate) or E8h (resolution).
+    pending_command: Option<u8>,
+    /// The bytes of the report the BIOS's IRQ 12 handler has read so far.
+    packet: Vec<u8>,
 }
 
 impl Ps2Mouse {
@@ -58,6 +63,8 @@ impl Default for Ps2Mouse {
             reported_buttons: 0,
             last_position: None,
             next_report: 0,
+            pending_command: None,
+            packet: Vec::new(),
         };
         ps2.reset();
         ps2
@@ -66,6 +73,7 @@ impl Default for Ps2Mouse {
 
 crate::state_fields!(Ps2Mouse {
     enabled, handler, rate, resolution, scaling, dx, dy, reported_buttons, last_position, next_report,
+    pending_command, packet,
 });
 
 /// Mouse button bits used by INT 33h.
@@ -424,21 +432,18 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
 }
 
 impl MouseState {
-    /// Whether the PS/2 device has a report for its handler at `now`
-    /// (emulated microseconds): motion or buttons changed, and its rate
-    /// lets it report again.
+    /// Whether the PS/2 device has a report to send at `now` (emulated
+    /// microseconds): reporting is on, motion or buttons changed, and its
+    /// rate lets it report again.
     pub fn ps2_report_due(&self, now: u64) -> bool {
         let ps2 = &self.ps2;
-        ps2.enabled
-            && ps2.handler != (0, 0)
-            && now >= ps2.next_report
-            && (ps2.dx != 0 || ps2.dy != 0 || self.buttons != ps2.reported_buttons)
+        ps2.enabled && now >= ps2.next_report && (ps2.dx != 0 || ps2.dy != 0 || self.buttons != ps2.reported_buttons)
     }
 
-    /// The next PS/2 report: the status (the buttons, and the signs of the
-    /// motion), X and Y (up positive) of at most 255 counts each; motion
-    /// beyond that goes in the next.
-    fn take_ps2_report(&mut self, now: u64) -> (u16, u16, u16) {
+    /// The next PS/2 report, its three bytes: the status (the buttons, and
+    /// the signs of the motion), X and Y (up positive) of at most 255
+    /// counts each; motion beyond that goes in the next.
+    pub fn take_ps2_packet(&mut self, now: u64) -> [u8; 3] {
         let ps2 = &mut self.ps2;
         let x = ps2.dx.clamp(-255, 255);
         let y = (-ps2.dy).clamp(-255, 255);
@@ -446,8 +451,64 @@ impl MouseState {
         ps2.dy += y;
         ps2.reported_buttons = self.buttons;
         ps2.next_report = now + 1_000_000 / ps2.rate.max(10) as u64;
-        let status = 0x08 | (self.buttons & 0x07) as u16 | ((x < 0) as u16) << 4 | ((y < 0) as u16) << 5;
-        (status, x as u8 as u16, y as u8 as u16)
+        let status = 0x08 | (self.buttons & 0x07) | ((x < 0) as u8) << 4 | ((y < 0) as u8) << 5;
+        [status, x as u8, y as u8]
+    }
+
+    /// A byte for the PS/2 mouse, sent through the keyboard controller's
+    /// command D4h: its answer, an ACK (FAh) and what the command returns.
+    pub fn ps2_command(&mut self, byte: u8, now: u64) -> Vec<u8> {
+        const ACK: u8 = 0xFA;
+        if let Some(command) = self.ps2.pending_command.take() {
+            match command {
+                0xF3 => self.ps2.rate = byte as u16,
+                _ => self.ps2.resolution = byte & 0x03,
+            }
+            return vec![ACK];
+        }
+        match byte {
+            // Reset: passed its test, a mouse.
+            0xFF => {
+                self.ps2.reset();
+                vec![ACK, 0xAA, 0x00]
+            }
+            // Defaults.
+            0xF6 => {
+                self.ps2.reset();
+                vec![ACK]
+            }
+            0xF5 | 0xF4 => {
+                self.ps2.enabled = byte == 0xF4;
+                vec![ACK]
+            }
+            0xF3 | 0xE8 => {
+                self.ps2.pending_command = Some(byte);
+                vec![ACK]
+            }
+            // Identify: a standard mouse.
+            0xF2 => vec![ACK, 0x00],
+            // Status: the mode, buttons and scaling, the resolution, the rate.
+            0xE9 => {
+                let ps2 = &self.ps2;
+                let status = (self.buttons & BUTTON_RIGHT != 0) as u8
+                    | ((self.buttons & BUTTON_MIDDLE != 0) as u8) << 1
+                    | ((self.buttons & BUTTON_LEFT != 0) as u8) << 2
+                    | (ps2.scaling as u8) << 4
+                    | (ps2.enabled as u8) << 5;
+                vec![ACK, status, ps2.resolution, ps2.rate as u8]
+            }
+            0xE6 | 0xE7 => {
+                self.ps2.scaling = byte == 0xE7;
+                vec![ACK]
+            }
+            // Read data: a report now.
+            0xEB => {
+                let mut answer = vec![ACK];
+                answer.extend(self.take_ps2_packet(now));
+                answer
+            }
+            _ => vec![ACK],
+        }
     }
 }
 
@@ -463,13 +524,23 @@ pub fn ps2_bios(cpu: &mut crate::cpu::Cpu) {
         0x00 => match bh {
             0 => {
                 cpu.bus.mouse.ps2.enabled = false;
+                cpu.bus.mouse.ps2.packet.clear();
+                cpu.bus.kbc.flush_aux();
                 Ok(())
             }
             1 if cpu.bus.mouse.ps2.handler == (0, 0) => Err(0x05),
             1 => {
                 cpu.bus.mouse.ps2.enabled = true;
-                cpu.bus.pic.slave.imr &= !0x10;
-                cpu.bus.pic.master.imr &= !0x04;
+                if cpu.v86() {
+                    // Through the ports, for a V86 monitor that keeps
+                    // the machine's masks, as Windows' VPICD does.
+                    use crate::bios::PortAccess::Update;
+                    cpu.bus.port_accesses.push_back(Update { port: 0xA1, keep: !0x10, set: 0 });
+                    cpu.bus.port_accesses.push_back(Update { port: 0x21, keep: !0x04, set: 0 });
+                } else {
+                    cpu.bus.pic.slave.imr &= !0x10;
+                    cpu.bus.pic.master.imr &= !0x04;
+                }
                 Ok(())
             }
             _ => Err(0x02),
@@ -477,6 +548,8 @@ pub fn ps2_bios(cpu: &mut crate::cpu::Cpu) {
         // Reset: BH the device ID (0, a mouse), BL AAh (passed its test).
         0x01 => {
             cpu.bus.mouse.ps2.reset();
+            cpu.bus.mouse.ps2.packet.clear();
+            cpu.bus.kbc.flush_aux();
             cpu.set_reg8(Register::BH, 0x00);
             cpu.set_reg8(Register::BL, 0xAA);
             Ok(())
@@ -503,6 +576,8 @@ pub fn ps2_bios(cpu: &mut crate::cpu::Cpu) {
         // Initialize for packets of BH bytes: reset.
         0x05 if (1..=8).contains(&bh) => {
             cpu.bus.mouse.ps2.reset();
+            cpu.bus.mouse.ps2.packet.clear();
+            cpu.bus.kbc.flush_aux();
             Ok(())
         }
         0x05 => Err(0x02),
@@ -541,18 +616,27 @@ pub fn ps2_bios(cpu: &mut crate::cpu::Cpu) {
     cpu.set_cpu_flag(crate::cpu::CpuFlags::CF, result.is_err());
 }
 
-/// The BIOS's IRQ 12 handler (`bios::PS2_HANDLER`) takes a report here
-/// (`bios::SERVICE_PS2_REPORT`): the status, X and Y in AX, BX and CX,
-/// and DX 1 with the program's handler at `bios::PS2_HANDLER_ADDRESS` for
-/// it to call; DX 0 when there is no handler to call.
+/// The BIOS's IRQ 12 handler (`bios::PS2_HANDLER`) hands the byte it read
+/// from port 60h in AL here (`bios::SERVICE_PS2_REPORT`). With the last of
+/// a report's three: the status, X and Y in AX, BX and CX, and DX 1 with
+/// the program's handler at `bios::PS2_HANDLER_ADDRESS` for it to call;
+/// DX 0 otherwise. A report starts with a byte with bit 3 set.
 pub fn ps2_report(cpu: &mut crate::cpu::Cpu) {
-    let now = cpu.bus.clock.now_micros();
+    let byte = cpu.get_al();
+    cpu.set_dx(0);
     let mouse = &mut cpu.bus.mouse;
-    if !mouse.ps2.enabled || mouse.ps2.handler == (0, 0) {
-        cpu.set_dx(0);
+    if mouse.ps2.packet.is_empty() && byte & 0x08 == 0 {
         return;
     }
-    let (status, x, y) = mouse.take_ps2_report(now);
+    mouse.ps2.packet.push(byte);
+    if mouse.ps2.packet.len() < 3 {
+        return;
+    }
+    let packet = std::mem::take(&mut mouse.ps2.packet);
+    if !mouse.ps2.enabled || mouse.ps2.handler == (0, 0) {
+        return;
+    }
+    let (status, x, y) = (packet[0] as u16, packet[1] as u16, packet[2] as u16);
     let (segment, offset) = mouse.ps2.handler;
     let at = 0xF0000 + crate::bios::PS2_HANDLER_ADDRESS as usize;
     cpu.bus.write_16(at, offset);

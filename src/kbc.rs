@@ -5,6 +5,8 @@
 //! and stays at port 60h until the CPU reads it, then the next one moves
 //! in. Programs with their own INT 09h handler therefore see every byte of
 //! a burst of key events, including the E0 prefixes of the extended keys.
+//! The PS/2 mouse's bytes (the auxiliary device's) come the same way, with
+//! status bit 5 set and IRQ 12, after the keyboard's.
 //!
 //! The controller also owns the A20 gate and the CPU reset line through its
 //! output port (command D1h), which DOS extenders and HIMEM-style code use.
@@ -13,8 +15,10 @@ use std::collections::VecDeque;
 
 /// Command byte bits.
 const CMD_KBD_IRQ: u8 = 0x01;
+const CMD_AUX_IRQ: u8 = 0x02;
 const CMD_SYSTEM_FLAG: u8 = 0x04;
 const CMD_KBD_DISABLED: u8 = 0x10;
+const CMD_AUX_DISABLED: u8 = 0x20;
 const CMD_TRANSLATE: u8 = 0x40;
 
 /// Output port bits.
@@ -26,6 +30,7 @@ const STATUS_OBF: u8 = 0x01;
 const STATUS_SYSTEM: u8 = 0x04;
 const STATUS_COMMAND: u8 = 0x08;
 const STATUS_UNLOCKED: u8 = 0x10;
+const STATUS_AUX: u8 = 0x20;
 
 /// What the controller asks the rest of the machine to do after a port
 /// write.
@@ -35,6 +40,8 @@ pub struct Effects {
     pub a20: Option<bool>,
     /// The CPU reset line was pulsed.
     pub reset: bool,
+    /// A byte for the mouse (command D4h), which answers with `push_aux`.
+    pub aux: Option<u8>,
 }
 
 pub struct Kbc {
@@ -54,6 +61,12 @@ pub struct Kbc {
     last_was_command: bool,
     /// A byte just entered the output buffer and IRQ 1 should fire.
     irq: bool,
+    /// Bytes from the mouse waiting for the output buffer, oldest first.
+    aux: VecDeque<u8>,
+    /// The byte in the output buffer came from the mouse (status bit 5).
+    output_aux: bool,
+    /// A mouse byte just entered the output buffer and IRQ 12 should fire.
+    aux_irq: bool,
 }
 
 impl Default for Kbc {
@@ -68,13 +81,33 @@ impl Kbc {
             queue: VecDeque::new(),
             output: None,
             last: 0,
-            command_byte: CMD_KBD_IRQ | CMD_SYSTEM_FLAG | CMD_TRANSLATE,
+            command_byte: CMD_KBD_IRQ | CMD_AUX_IRQ | CMD_SYSTEM_FLAG | CMD_TRANSLATE,
             output_port: OUT_RESET,
             pending_command: None,
             pending_kbd: None,
             last_was_command: false,
             irq: false,
+            aux: VecDeque::new(),
+            output_aux: false,
+            aux_irq: false,
         }
+    }
+
+    /// Queue bytes from the mouse.
+    pub fn push_aux(&mut self, bytes: &[u8]) {
+        self.aux.extend(bytes);
+        self.refill();
+    }
+
+    /// Whether no byte from the mouse waits, in the output buffer or
+    /// behind it: the mouse can send its next report.
+    pub fn aux_idle(&self) -> bool {
+        self.aux.is_empty() && !(self.output.is_some() && self.output_aux)
+    }
+
+    /// Drop the mouse's bytes not yet in the output buffer.
+    pub fn flush_aux(&mut self) {
+        self.aux.clear();
     }
 
     /// Queue scan code bytes from the keyboard.
@@ -90,32 +123,52 @@ impl Kbc {
         self.refill();
     }
 
-    /// Move the next queued byte into an empty output buffer.
+    /// Move the next queued byte into an empty output buffer: the
+    /// keyboard's, else the mouse's.
     fn refill(&mut self) {
-        if self.output.is_none() && self.command_byte & CMD_KBD_DISABLED == 0 {
-            if let Some(byte) = self.queue.pop_front() {
-                self.output = Some(byte);
-                self.last = byte;
-                if self.command_byte & CMD_KBD_IRQ != 0 {
-                    self.irq = true;
-                }
+        if self.output.is_some() {
+            return;
+        }
+        if self.command_byte & CMD_KBD_DISABLED == 0
+            && let Some(byte) = self.queue.pop_front()
+        {
+            self.output = Some(byte);
+            self.output_aux = false;
+            self.last = byte;
+            if self.command_byte & CMD_KBD_IRQ != 0 {
+                self.irq = true;
+            }
+        } else if self.command_byte & CMD_AUX_DISABLED == 0
+            && let Some(byte) = self.aux.pop_front()
+        {
+            self.output = Some(byte);
+            self.output_aux = true;
+            self.last = byte;
+            if self.command_byte & CMD_AUX_IRQ != 0 {
+                self.aux_irq = true;
             }
         }
     }
 
-    /// True once per byte entering the output buffer: raise IRQ 1.
+    /// True once per keyboard byte entering the output buffer: raise IRQ 1.
     pub fn take_irq(&mut self) -> bool {
         std::mem::take(&mut self.irq)
     }
 
+    /// True once per mouse byte entering the output buffer: raise IRQ 12.
+    pub fn take_aux_irq(&mut self) -> bool {
+        std::mem::take(&mut self.aux_irq)
+    }
+
     /// Bytes not yet read by the CPU, including the output buffer.
     pub fn pending(&self) -> usize {
-        self.queue.len() + self.output.is_some() as usize
+        self.queue.len() + (self.output.is_some() && !self.output_aux) as usize
     }
 
     /// Port 60h read.
     pub fn read_data(&mut self) -> u8 {
         let byte = self.output.take().unwrap_or(self.last);
+        self.output_aux = false;
         self.refill();
         byte
     }
@@ -125,6 +178,9 @@ impl Kbc {
         let mut status = STATUS_UNLOCKED;
         if self.output.is_some() {
             status |= STATUS_OBF;
+            if self.output_aux {
+                status |= STATUS_AUX;
+            }
         }
         if self.command_byte & CMD_SYSTEM_FLAG != 0 {
             status |= STATUS_SYSTEM;
@@ -142,7 +198,11 @@ impl Kbc {
         match command {
             0x20 => self.reply(self.command_byte),
             0x60 | 0xD1 | 0xD2 | 0xD3 | 0xD4 => self.pending_command = Some(command),
-            0xA7 | 0xA8 => {} // disable / enable the aux (mouse) port
+            0xA7 => self.command_byte |= CMD_AUX_DISABLED,
+            0xA8 => {
+                self.command_byte &= !CMD_AUX_DISABLED;
+                self.refill();
+            }
             0xA9 => self.reply(0x00), // aux interface test: OK
             0xAA => self.reply(0x55), // self test passed
             0xAB => self.reply(0x00), // keyboard interface test: OK
@@ -185,10 +245,15 @@ impl Kbc {
                     effects.a20 = Some(self.set_output_port(value));
                     effects.reset = value & OUT_RESET == 0;
                 }
-                // Write the keyboard (or aux) output buffer, as if the byte
-                // had come from the device.
-                0xD2 | 0xD3 => self.reply(value),
-                _ => {} // D4: a byte for the mouse; there is none
+                // Write the keyboard's or the mouse's output buffer, as if
+                // the byte had come from the device.
+                0xD2 => self.reply(value),
+                0xD3 => {
+                    self.aux.push_front(value);
+                    self.refill();
+                }
+                // D4: a byte for the mouse.
+                _ => effects.aux = Some(value),
             }
             return effects;
         }
@@ -221,4 +286,7 @@ impl Kbc {
     }
 }
 
-crate::state_fields!(Kbc { queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq });
+crate::state_fields!(Kbc {
+    queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq,
+    aux, output_aux, aux_irq,
+});

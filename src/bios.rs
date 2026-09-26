@@ -35,11 +35,11 @@ pub const SERVICE_SHELL_KEY_READY: u8 = 0x1B;
 pub const SERVICE_SHELL_TICK: u8 = 0x1C;
 /// A secondary COMMAND.COM asking what to do next (`command_com::service`).
 pub const SERVICE_COMMAND: u8 = 0x1D;
-/// The PS/2 mouse's next report, for the IRQ 12 handler (`mouse::ps2_report`).
+/// The PS/2 mouse's byte the IRQ 12 handler read, and the report once it
+/// has them all (`mouse::ps2_report`).
 pub const SERVICE_PS2_REPORT: u8 = 0x1E;
-/// The next port write of a video service's register changes, for
-/// `VIDEO_PORTS` (`video::echo::next_access`).
-pub const SERVICE_VIDEO_PORT: u8 = 0x1F;
+/// The next port access a service left to `PORT_ACCESSES` (`next_port_access`).
+pub const SERVICE_PORT_ACCESS: u8 = 0x1F;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.
@@ -58,9 +58,10 @@ pub const IO_WAIT: u16 = 0x1190;
 /// address of the program's handler (INT 15h AX=C207h).
 const PS2_HANDLER: u16 = 0x11A0;
 pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
-/// Where video services in virtual-8086 mode return through, making the
-/// port writes of their register changes (`video::echo`) before the IRET.
-pub const VIDEO_PORTS: u16 = 0x11F0;
+/// Where services in virtual-8086 mode return through when they changed
+/// hardware a V86 monitor follows through the ports it traps: it makes the
+/// port accesses that make the changes (`Bus::port_accesses`), then IRETs.
+pub const PORT_ACCESSES: u16 = 0x11F0;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 pub const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -179,14 +180,16 @@ pub fn install(bus: &mut Bus) {
     // Disk services wait here for slow disk access (`diskio::wait`).
     write_rom(bus, IO_WAIT, &[0xFE, 0x39, SERVICE_IO_WAIT]);
     // The PS/2 mouse (IRQ 12), as an IBM PS/2 BIOS runs it: save the
-    // registers, take the report, and with a handler installed push the
-    // status, X, Y and a 0 word and CALL FAR it; then acknowledge both PICs.
+    // registers, read the mouse's byte, and with a report's last and a
+    // handler installed push the status, X, Y and a 0 word and CALL FAR
+    // it; then acknowledge both PICs.
     let [handler_lo, handler_hi] = PS2_HANDLER_ADDRESS.to_le_bytes();
     write_rom(
         bus,
         PS2_HANDLER,
         &[
             0x1E, 0x50, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55, 0x06, // PUSH DS, AX, BX, CX, DX, SI, DI, BP, ES
+            0xE4, 0x60, // IN AL, 60h
             0xFE, 0x39, SERVICE_PS2_REPORT, // AX, BX, CX: the report; DX: call the handler
             0x85, 0xD2, // TEST DX, DX
             0x74, 0x0E, // JZ done
@@ -201,23 +204,30 @@ pub fn install(bus: &mut Bus) {
             0xCF, // IRET
         ],
     );
-    // Video services in V86 mode: write each port the service changed,
-    // or read one, until there are none, then return.
+    // Services in V86 mode: make each port access the service left, then
+    // return.
     write_rom(
         bus,
-        VIDEO_PORTS,
+        PORT_ACCESSES,
         &[
-            0x50, 0x52, // PUSH AX, DX
-            0xFE, 0x39, SERVICE_VIDEO_PORT, // next: DX the port, AL the value, AH 0 write, 1 read, FFh done
+            0x50, 0x51, 0x52, // PUSH AX, CX, DX
+            0xFE, 0x39, SERVICE_PORT_ACCESS, // next: DX the port, AH what to do
             0x80, 0xFC, 0x01, // CMP AH, 1
-            0x72, 0x05, // JB write
-            0x74, 0x06, // JE read
-            0x5A, 0x58, // POP DX, AX
+            0x72, 0x0B, // JB write
+            0x74, 0x0C, // JE read
+            0x80, 0xFC, 0x02, // CMP AH, 2
+            0x74, 0x0A, // JE update
+            0x5A, 0x59, 0x58, // POP DX, CX, AX
             0xCF, // IRET
             0xEE, // write: OUT DX, AL
-            0xEB, 0xF0, // JMP next
+            0xEB, 0xEA, // JMP next
             0xEC, // read: IN AL, DX
-            0xEB, 0xED, // JMP next
+            0xEB, 0xE7, // JMP next
+            0xEC, // update: IN AL, DX
+            0x22, 0xC1, // AND AL, CL
+            0x0A, 0xC5, // OR AL, CH
+            0xEE, // OUT DX, AL
+            0xEB, 0xDF, // JMP next
         ],
     );
     write_rom(bus, IRET_HANDLER, &[0xCF]);
@@ -281,5 +291,42 @@ pub fn post(cpu: &mut Cpu) {
             ));
             cpu.state = crate::cpu::CpuState::RebootShell;
         }
+    }
+}
+
+/// A port access a service leaves for a V86 monitor to see (`PORT_ACCESSES`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortAccess {
+    Out(u16, u8),
+    /// A read, for what it does: 3DAh's resets the attribute flip-flop.
+    In(u16),
+    /// Read, keep the bits of `keep`, add those of `set` and write back, as
+    /// a BIOS changes a mask register.
+    Update { port: u16, keep: u8, set: u8 },
+}
+
+/// The ROM's loop (`FE 39 SERVICE_PORT_ACCESS`): the next port access in
+/// DX, with AH 00h and the value in AL for a write, 01h for a read, 02h
+/// with the bits to keep in CL and to set in CH for an update, and FFh when
+/// there are no more.
+pub fn next_port_access(cpu: &mut Cpu) {
+    use iced_x86::Register::{AH, AL, CH, CL};
+    match cpu.bus.port_accesses.pop_front() {
+        Some(PortAccess::Out(port, value)) => {
+            cpu.set_dx(port);
+            cpu.set_reg8(AL, value);
+            cpu.set_reg8(AH, 0x00);
+        }
+        Some(PortAccess::In(port)) => {
+            cpu.set_dx(port);
+            cpu.set_reg8(AH, 0x01);
+        }
+        Some(PortAccess::Update { port, keep, set }) => {
+            cpu.set_dx(port);
+            cpu.set_reg8(CL, keep);
+            cpu.set_reg8(CH, set);
+            cpu.set_reg8(AH, 0x02);
+        }
+        None => cpu.set_reg8(AH, 0xFF),
     }
 }

@@ -32,8 +32,9 @@ pub mod utils;
 /// In virtual-8086 mode the service returns through the BIOS's IRET, with
 /// its results in the flags on the stack: the monitor (Windows' WIN386)
 /// sees the IRET a BIOS does and keeps the flags it owns, IF and IOPL. A
-/// video service that changed the VGA's registers goes through the port
-/// writes that make the changes first (`video::echo`).
+/// service that changed hardware the monitor follows through its ports
+/// goes through the port accesses that make the changes first
+/// (`bios::PORT_ACCESSES`).
 pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
     let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
     let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
@@ -62,8 +63,8 @@ pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
             }
         }
         cpu.set_cs(0xF000);
-        cpu.set_ip(if vector == 0x10 && !cpu.bus.video_echo.is_empty() {
-            crate::bios::VIDEO_PORTS
+        cpu.set_ip(if !cpu.bus.port_accesses.is_empty() {
+            crate::bios::PORT_ACCESSES
         } else {
             crate::bios::IRET_HANDLER
         });
@@ -110,7 +111,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_SHELL_TICK => crate::shell::tick(cpu),
         crate::bios::SERVICE_COMMAND => crate::command_com::service(cpu),
         crate::bios::SERVICE_PS2_REPORT => crate::mouse::ps2_report(cpu),
-        crate::bios::SERVICE_VIDEO_PORT => crate::video::echo::next_access(cpu),
+        crate::bios::SERVICE_PORT_ACCESS => crate::bios::next_port_access(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service
@@ -132,7 +133,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             int10::handle(cpu);
             if let Some(before) = before {
                 let after = crate::video::echo::Registers::of(&cpu.bus.vga);
-                cpu.bus.video_echo = crate::video::echo::writes(&before, &after).into();
+                cpu.bus.port_accesses.extend(crate::video::echo::writes(&before, &after));
             }
         }
         0x11 => int11::handle(cpu),

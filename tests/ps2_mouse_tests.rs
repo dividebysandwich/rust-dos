@@ -108,3 +108,47 @@ fn the_handler_gets_the_motion_and_buttons_on_irq_12() {
     run(&mut cpu, 20);
     assert_eq!(cpu.bus.read_16(0x20106), 3);
 }
+
+#[test]
+fn the_mouse_talks_through_the_keyboard_controller() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let bus = &mut cpu.bus;
+    // A byte for the mouse (D4h): enable reporting. Its ACK comes with the
+    // mouse's status bit and IRQ 12.
+    bus.io_write(0x64, 0xD4);
+    bus.io_write(0x60, 0xF4);
+    assert_eq!(bus.io_read(0x64) & 0x21, 0x21, "a mouse byte waits");
+    assert!(bus.pic.busy(12));
+    assert_eq!(bus.io_read(0x60), 0xFA);
+    assert_eq!(bus.io_read(0x64) & 0x01, 0);
+    assert!(bus.mouse.ps2.enabled);
+
+    // Motion: a report of three bytes, one IRQ 12 each, as each moves in.
+    bus.pic.slave.isr = 0;
+    bus.pic.slave.irr = 0;
+    bus.mouse.move_by(3.0, 4.0);
+    bus.start_batch(bus.clock.icount + 1000);
+    let mut report = Vec::new();
+    for _ in 0..3 {
+        assert!(bus.pic.busy(12), "IRQ 12 for byte {}", report.len());
+        assert_eq!(bus.io_read(0x64) & 0x21, 0x21);
+        bus.pic.slave.irr = 0;
+        report.push(bus.io_read(0x60));
+    }
+    assert_eq!(report, [0x28, 3, (-4i8) as u8], "X right, Y down");
+    assert!(!bus.pic.busy(12));
+
+    // Identify, through the controller: the ACK, then a standard mouse.
+    bus.io_write(0x64, 0xD4);
+    bus.io_write(0x60, 0xF2);
+    assert_eq!((bus.io_read(0x60), bus.io_read(0x60)), (0xFA, 0x00));
+
+    // A key already in the output buffer goes first, with no mouse bit.
+    bus.kbc.push_scancodes(&[0x1E]);
+    bus.io_write(0x64, 0xD4);
+    bus.io_write(0x60, 0xF5);
+    assert_eq!(bus.io_read(0x64) & 0x21, 0x01);
+    assert_eq!(bus.io_read(0x60), 0x1E);
+    assert_eq!(bus.io_read(0x64) & 0x21, 0x21);
+    assert_eq!(bus.io_read(0x60), 0xFA);
+}

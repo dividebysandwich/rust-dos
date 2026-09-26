@@ -3,19 +3,11 @@
 //! directly, but a virtual-8086 monitor such as Windows' VDD keeps its own
 //! copy of them from the port writes it traps, as a real BIOS makes them.
 //! After a service in V86 mode the BIOS writes the changes to the ports
-//! once more (`bios::VIDEO_PORTS`, which takes them one by one from
-//! `Bus::video_echo`), for the monitor to see; to the VGA they are the
-//! values it already holds.
+//! once more (`bios::PORT_ACCESSES`), for the monitor to see; to the VGA
+//! they are the values it already holds.
 
 use super::vga::VgaCard;
-
-/// One port access of the replay.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PortAccess {
-    Out(u16, u8),
-    /// A read, for what it does: 3DAh's resets the attribute flip-flop.
-    In(u16),
-}
+use crate::bios::PortAccess;
 
 /// The VGA's registers, as a program reaches them through the ports.
 #[derive(Clone)]
@@ -130,25 +122,6 @@ fn indexed(out: &mut Vec<PortAccess>, port: u16, before: &[u8], after: &[u8], in
     }
     if any {
         out.push(PortAccess::Out(port, index));
-    }
-}
-
-/// The ROM's replay loop (`FE 39 SERVICE_VIDEO_PORT`): the next port access
-/// in DX and AL, with AH 00h for a write, 01h for a read and FFh when
-/// there are no more.
-pub fn next_access(cpu: &mut crate::cpu::Cpu) {
-    use iced_x86::Register::{AH, AL};
-    match cpu.bus.video_echo.pop_front() {
-        Some(PortAccess::Out(port, value)) => {
-            cpu.set_dx(port);
-            cpu.set_reg8(AL, value);
-            cpu.set_reg8(AH, 0x00);
-        }
-        Some(PortAccess::In(port)) => {
-            cpu.set_dx(port);
-            cpu.set_reg8(AH, 0x01);
-        }
-        None => cpu.set_reg8(AH, 0xFF),
     }
 }
 

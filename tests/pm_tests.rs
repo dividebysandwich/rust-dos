@@ -682,9 +682,38 @@ fn a_video_mode_set_in_virtual_8086_mode_makes_its_register_writes_through_the_p
     // in the BIOS's replay.
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[2]), (GP as u32, 0xF000));
-    assert!((rust_dos::bios::VIDEO_PORTS as u32..rust_dos::bios::VIDEO_PORTS as u32 + 0x20).contains(&stack[1]));
+    assert!((rust_dos::bios::PORT_ACCESSES as u32..rust_dos::bios::PORT_ACCESSES as u32 + 0x20).contains(&stack[1]));
     assert_eq!((rig.cpu.dx(), rig.cpu.get_al()), (0x3C2, 0xE3));
-    assert!(!rig.cpu.bus.video_echo.is_empty(), "more to write");
+    assert!(!rig.cpu.bus.port_accesses.is_empty(), "more to write");
+}
+
+#[test]
+fn enabling_the_ps2_mouse_in_virtual_8086_mode_unmasks_irq_12_through_the_ports() {
+    let mut rig = Rig::new();
+    // INT 15h AX=C200h BH=1 with a handler, as a monitor reflects it:
+    // the PIC's mask changes by port, where a monitor that keeps the
+    // masks (Windows' VPICD) traps it.
+    rig.cpu.bus.mouse.ps2.handler = (0x1234, 0x5678);
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0xC200u32)?;
+        a.mov(bx, 0x0100u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x1C, 0x10, 0x00, 0xF0])?; // CALL FAR F000:101C
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+    rig.record(GP);
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[2]), (GP as u32, 0xF000));
+    assert_eq!(rig.cpu.dx(), 0xA1, "reading the slave's mask");
+    assert_eq!(rig.cpu.bus.pic.slave.imr & 0x10, 0x10, "not unmasked behind the monitor's back");
+    assert!(rig.cpu.bus.mouse.ps2.enabled);
 }
 
 #[test]
