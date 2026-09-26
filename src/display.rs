@@ -34,6 +34,15 @@ pub fn display_size(width: u32, height: u32, aspect: bool) -> (u32, u32) {
     }
 }
 
+/// The rows (of `row_bytes` each) from the first to the last that differ
+/// between two pictures of the same size, if any do.
+fn changed_rows(old: &[u8], new: &[u8], row_bytes: usize) -> Option<std::ops::Range<usize>> {
+    let pairs = || old.chunks_exact(row_bytes).zip(new.chunks_exact(row_bytes));
+    let first = pairs().position(|(a, b)| a != b)?;
+    let last = pairs().rposition(|(a, b)| a != b)?;
+    Some(first..last + 1)
+}
+
 /// A coordinate in logical pixels (`logical` of them across the picture)
 /// as the frame pixel under it (`frame` of them). Positions in the black
 /// bars around the picture fall outside `0..frame`.
@@ -55,6 +64,11 @@ pub struct Display<'a> {
     renderer: String,
     /// Why the shader the settings ask for isn't shown, if it isn't.
     warning: Option<String>,
+    /// The picture as last shown, and whether the window must be drawn
+    /// again whatever the picture: frames that show nothing new aren't
+    /// uploaded or drawn, and those that do upload the rows that changed.
+    shown: Vec<u8>,
+    redraw: bool,
 }
 
 /// What draws the picture.
@@ -144,6 +158,8 @@ impl<'a> Display<'a> {
             crt: settings.crt,
             renderer,
             warning,
+            shown: Vec::new(),
+            redraw: true,
         };
         // For the window managers and taskbars that take the icon from the
         // window rather than from rust-dos.desktop. The test below keeps
@@ -163,12 +179,19 @@ impl<'a> Display<'a> {
         self.warning.as_deref()
     }
 
+    /// Draw the window again at the next frame, whatever the picture: it
+    /// was resized or uncovered.
+    pub fn redraw(&mut self) {
+        self.redraw = true;
+    }
+
     /// Follow the picture's size, which the video mode sets.
     pub fn set_frame_size(&mut self, width: u32, height: u32) -> Result<(), String> {
         if (width, height) == self.frame {
             return Ok(());
         }
         self.frame = (width, height);
+        self.redraw = true;
         if let Output::Sdl { creator, texture, .. } = &mut self.out {
             *texture = create_texture(creator, self.frame, self.filter)?;
         }
@@ -181,6 +204,7 @@ impl<'a> Display<'a> {
     /// setting stays, to be saved.
     pub fn apply(&mut self, settings: &Settings) -> Result<(), String> {
         let mut problem = None;
+        self.redraw = true;
         self.crt = settings.crt;
         if let Output::Gl(gl) = &mut self.out {
             gl.set_color_mask(settings.monochrome == Monochrome::Off);
@@ -228,6 +252,7 @@ impl<'a> Display<'a> {
     /// size. SDL's renderer letterboxes it through its logical size;
     /// OpenGL does at each frame.
     fn layout(&mut self) -> Result<(), String> {
+        self.redraw = true;
         let (w, h) = display_size(self.frame.0, self.frame.1, self.aspect);
         if let Output::Sdl { canvas, .. } = &mut self.out {
             canvas.set_logical_size(w, h).map_err(|e| e.to_string())?;
@@ -238,15 +263,34 @@ impl<'a> Display<'a> {
         Ok(())
     }
 
-    /// Show `frame`, which must be as big as the last `set_frame_size`.
+    /// Show `frame`, which must be as big as the last `set_frame_size`,
+    /// if it differs from the one shown or the window needs drawing.
     pub fn present(&mut self, frame: &Frame) -> Result<(), String> {
+        let row_bytes = frame.width as usize * 3;
+        let rows = if self.redraw || self.shown.len() != frame.rgb.len() {
+            0..frame.height as usize
+        } else {
+            match changed_rows(&self.shown, &frame.rgb, row_bytes) {
+                Some(rows) => rows,
+                None => return Ok(()),
+            }
+        };
+        self.redraw = false;
+        if self.shown.len() != frame.rgb.len() {
+            self.shown.clone_from(&frame.rgb);
+        } else {
+            let bytes = rows.start * row_bytes..rows.end * row_bytes;
+            self.shown[bytes.clone()].copy_from_slice(&frame.rgb[bytes]);
+        }
         match &mut self.out {
             Output::Gl(gl) => {
-                gl.present(frame, display_size(frame.width, frame.height, self.aspect));
+                gl.present(frame, rows, display_size(frame.width, frame.height, self.aspect));
                 Ok(())
             }
             Output::Sdl { canvas, texture, .. } => {
-                texture.update(None, &frame.rgb, frame.width as usize * 3).map_err(|e| e.to_string())?;
+                let rect = sdl2::rect::Rect::new(0, rows.start as i32, frame.width, (rows.end - rows.start) as u32);
+                let pixels = &frame.rgb[rows.start * row_bytes..rows.end * row_bytes];
+                texture.update(Some(rect), pixels, row_bytes).map_err(|e| e.to_string())?;
                 canvas.clear();
                 // Stretched over the whole logical size: that is the 4:3
                 // correction.

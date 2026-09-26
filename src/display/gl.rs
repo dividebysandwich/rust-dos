@@ -39,6 +39,8 @@ pub struct GlScreen {
     texture: glow::Texture,
     /// The texture's size; nothing before the first frame.
     texture_size: (u32, u32),
+    /// The rows uploaded, four bytes a pixel.
+    rgba: Vec<u8>,
     /// The looks compiled so far, or why one doesn't compile.
     programs: HashMap<Shader, Result<Program, String>>,
     /// The look drawn with: the one chosen, or none if it doesn't compile.
@@ -104,8 +106,8 @@ impl GlScreen {
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-                // Frame rows are packed, three bytes a pixel.
-                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                // Frame rows are packed, four bytes a pixel.
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
                 Ok((vao, texture))
             })
         };
@@ -135,6 +137,7 @@ impl GlScreen {
             vao,
             texture,
             texture_size: (0, 0),
+            rgba: Vec::new(),
             programs: HashMap::from([(Shader::None, Ok(plain))]),
             active: Shader::None,
             mask: 1.0,
@@ -201,12 +204,26 @@ impl GlScreen {
         self.crt = crt;
     }
 
-    /// Show `frame`, letterboxed at `display` proportions.
-    pub fn present(&mut self, frame: &Frame, display: (u32, u32)) {
+    /// Show `frame`, letterboxed at `display` proportions, of which `rows`
+    /// changed since the last.
+    pub fn present(&mut self, frame: &Frame, rows: std::ops::Range<usize>, display: (u32, u32)) {
         let gl = &self.gl;
         let size = (frame.width, frame.height);
         let (width, height) = (frame.width as i32, frame.height as i32);
         let (dw, dh) = self.window.drawable_size();
+        let rows = if size != self.texture_size { 0..frame.height as usize } else { rows };
+        // Four bytes a pixel, which the texture has: drivers convert three
+        // byte pixels one by one, which takes longer than the rest of a
+        // frame.
+        let row_bytes = frame.width as usize * 3;
+        self.rgba.clear();
+        self.rgba.extend(
+            frame.rgb[rows.start * row_bytes..rows.end * row_bytes]
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .flat_map(|&[r, g, b]| [r, g, b, 0xFF]),
+        );
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
@@ -215,18 +232,19 @@ impl GlScreen {
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
                     0,
-                    glow::RGB8 as i32,
+                    glow::RGBA8 as i32,
                     width,
                     height,
                     0,
-                    glow::RGB,
+                    glow::RGBA,
                     glow::UNSIGNED_BYTE,
                     none,
                 );
                 self.texture_size = size;
             }
-            let pixels = glow::PixelUnpackData::Slice(Some(&frame.rgb));
-            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width, height, glow::RGB, glow::UNSIGNED_BYTE, pixels);
+            let pixels = glow::PixelUnpackData::Slice(Some(&self.rgba));
+            let (y, h) = (rows.start as i32, (rows.end - rows.start) as i32);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, y, width, h, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
             if shader::needs_mipmaps(self.active) {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }

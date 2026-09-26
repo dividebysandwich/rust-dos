@@ -375,6 +375,19 @@ fn main() -> Result<(), String> {
                     sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
                     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
                 }
+                // Uncovered, resized or moved to another display: the
+                // picture is drawn again.
+                Event::Window {
+                    win_event:
+                        WindowEvent::Exposed
+                        | WindowEvent::Shown
+                        | WindowEvent::Restored
+                        | WindowEvent::Maximized
+                        | WindowEvent::Resized(..)
+                        | WindowEvent::SizeChanged(..)
+                        | WindowEvent::DisplayChanged(..),
+                    ..
+                } => display.redraw(),
                 Event::Window { win_event: WindowEvent::FocusLost, .. } => {
                     release_input(&mut cpu, &mut held);
                     capture_mouse!(false);
