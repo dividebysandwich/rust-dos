@@ -499,6 +499,13 @@ impl Machine {
         rust_dos::capture::png::encode(&frame).unwrap_or_default()
     }
 
+    /// Show or hide the performance overlay (Ctrl+Shift+F12).
+    pub fn toggle_overlay(&mut self) {
+        if let Some(message) = self.ui.overlay_key() {
+            self.osd.show(message);
+        }
+    }
+
     /// Run the machine fast while Alt+F12 is held, or at its speed again.
     pub fn set_fast_forward(&mut self, on: bool) {
         if on == self.pacer.fast_forward() || (on && self.paused) {
@@ -1027,9 +1034,12 @@ impl Machine {
         video::mono::apply(&mut self.next, self.settings.monochrome);
         if self.ui.is_open() {
             self.ui.set_mixer_status(bus.mixer.muted, bus.mixer.take_peaks());
+        }
+        if self.ui.is_open() || self.ui.overlay_shown() {
             self.ui.set_stats(self.stats.view());
         }
         self.ui.draw(&mut self.next);
+        self.ui.draw_overlay(&mut self.next);
         self.osd.draw(&mut self.next);
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
             && self.next.rgb == self.screen.rgb;

@@ -674,8 +674,16 @@ window.addEventListener('keydown', (event) => {
     return;
   }
   speaker.start();
-  // Ctrl+F12 opens and closes the settings window and Ctrl+F10 lets go of
-  // the mouse, as in the rust-dos program and DOSBox.
+  // Ctrl+F12 opens and closes the settings window, Ctrl+Shift+F12 shows
+  // and hides the performance overlay, and Ctrl+F10 lets go of the mouse,
+  // as in the rust-dos program (and DOSBox).
+  if (event.ctrlKey && event.shiftKey && !event.altKey && event.code === 'F12') {
+    event.preventDefault();
+    if (!event.repeat) {
+      guard(() => machine.toggle_overlay());
+    }
+    return;
+  }
   if (event.ctrlKey && !event.altKey && event.code === 'F12') {
     event.preventDefault();
     if (!event.repeat) {

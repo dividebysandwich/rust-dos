@@ -138,6 +138,7 @@ and Ctrl+C gives up the line being typed.
 | Key | Action |
 |---|---|
 | Ctrl+F12 | Open or close the [settings window](CONFIGURATION.md#settings-window) |
+| Ctrl+Shift+F12 | Show or hide the performance overlay: the frames a second and the host's CPU use, with small graphs, at the bottom right |
 | Ctrl+F1 | Save the machine to the current [save state](#save-states) slot |
 | Ctrl+F2 | Load the current slot |
 | Ctrl+F3 | Pick the next slot (it says what is in it) |

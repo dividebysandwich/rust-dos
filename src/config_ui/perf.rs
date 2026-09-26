@@ -1,10 +1,13 @@
 //! The Stats page: the frames a second the program draws and the host's
 //! CPU use in big digits, each in a panel with a graph of its last half
-//! minute, and the emulated CPU's numbers below them.
+//! minute, and the emulated CPU's numbers below them. And the performance
+//! overlay: the two numbers and small graphs of them at the bottom right
+//! of the picture while the window is closed (Ctrl+Shift+F12).
 
-use super::draw::{self, BigFont, Grid, Rgb};
+use super::draw::{self, BigFont, Grid, Layout, Rgb};
 use super::{ConfigUi, Plot};
-use crate::stats::StatsView;
+use crate::stats::{HISTORY, StatsView};
+use crate::video::Frame;
 
 /// The colour the host's CPU use shows in: green, yellow from 75%, red
 /// from 90%, where the emulator is close to not keeping up.
@@ -61,7 +64,74 @@ struct Panel {
     unit: &'static str,
 }
 
+/// Draw the performance overlay at the bottom right of `frame`: the
+/// frames a second and the host's CPU use, each over a small graph of its
+/// last half minute, side by side on a panel like the window's.
+fn draw_overlay(frame: &mut Frame, view: &StatsView) {
+    let (width, height) = (frame.width as usize, frame.height as usize);
+    let cell_h = if height >= 300 { 16 } else { 8 };
+    let graph = (width / 64).clamp(8, 12);
+    let (cols, rows) = (2 * graph + 3, 3);
+    if cols * 8 + 16 > width || (rows + 1) * cell_h > height {
+        return;
+    }
+    let layout = Layout { x: width - cols * 8 - 8, y: height - rows * cell_h - cell_h / 2, cell_h, cols, rows };
+    let panels = [
+        ("FPS", format!("{:.0}", view.fps), draw::GOOD, &view.fps_history, fps_scale(view), draw::GOOD),
+        ("CPU", format!("{:.0}%", view.cpu_use), load_color(view.cpu_use), &view.cpu_history, 100.0, draw::KEY),
+    ];
+    let mut grid = Grid::new(cols, rows);
+    for (i, (label, value, color, ..)) in panels.iter().enumerate() {
+        let col = 1 + i * (graph + 1);
+        grid.text(col, 0, label, draw::TEXT);
+        grid.text(col + graph - value.len(), 0, value, *color);
+    }
+    draw::render(&grid, &layout, frame);
+    for (i, (.., history, max, color)) in panels.into_iter().enumerate() {
+        draw::plot(frame, &layout, (1 + i * (graph + 1), 1, graph, rows - 1), history, HISTORY, max, color);
+    }
+}
+
 impl ConfigUi {
+    /// Show or hide the performance overlay. Returns whether it shows.
+    pub fn toggle_overlay(&mut self) -> bool {
+        self.overlay = !self.overlay;
+        self.overlay
+    }
+
+    /// Whether the performance overlay is on: it shows while the window
+    /// is closed, and needs the stats every frame (`set_stats`).
+    pub fn overlay_shown(&self) -> bool {
+        self.overlay
+    }
+
+    /// Ctrl+Shift+F12, or its hint on the Stats page: show or hide the
+    /// performance overlay. Returns what to tell the user over the
+    /// picture while the window is closed; open, its status line says it.
+    pub fn overlay_key(&mut self) -> Option<&'static str> {
+        let on = self.toggle_overlay();
+        if self.open {
+            self.info(if on {
+                "The performance overlay shows while this window is closed"
+            } else {
+                "The performance overlay is off"
+            });
+            return None;
+        }
+        Some(if on { "Performance overlay on (Ctrl+Shift+F12 hides it)" } else { "Performance overlay off" })
+    }
+
+    /// Draw the performance overlay over `frame`, if it is on and the
+    /// window closed.
+    pub fn draw_overlay(&self, frame: &mut Frame) {
+        if self.overlay
+            && !self.open
+            && let Some(view) = &self.stats
+        {
+            draw_overlay(frame, view);
+        }
+    }
+
     pub(super) fn draw_stats(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
         let cols = g.cols;
         let Some(view) = self.stats.clone() else {
@@ -230,6 +300,36 @@ impl ConfigUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overlay_shows_at_the_bottom_right_while_the_window_is_closed() {
+        let mut ui = ConfigUi::new();
+        let view = StatsView { fps: 70.0, refresh_hz: 70.0, cpu_use: 95.0, fps_history: vec![70.0; 120], cpu_history: vec![95.0; 120], ..Default::default() };
+        ui.set_stats(view);
+        let lit = |frame: &Frame, x: usize, y: usize| frame.rgb[(y * frame.width as usize + x) * 3..][..3] != [0, 0, 0];
+        let mut frame = Frame::new(640, 400);
+        ui.draw_overlay(&mut frame);
+        assert!(!lit(&frame, 600, 380), "off");
+
+        assert_eq!(ui.overlay_key(), Some("Performance overlay on (Ctrl+Shift+F12 hides it)"));
+        assert!(ui.overlay_shown());
+        ui.draw_overlay(&mut frame);
+        assert!(lit(&frame, 600, 380) && !lit(&frame, 400, 380) && !lit(&frame, 600, 300));
+        let has = |frame: &Frame, c: Rgb| frame.rgb.chunks(3).any(|px| px == [c.0, c.1, c.2]);
+        assert!(has(&frame, draw::GOOD) && has(&frame, draw::KEY) && has(&frame, draw::ERROR), "graphs, and the CPU use in red");
+
+        // Not over the window, and not on a picture too small for it.
+        ui.open = true;
+        let mut frame = Frame::new(640, 400);
+        ui.draw_overlay(&mut frame);
+        assert!(!lit(&frame, 600, 380));
+        assert_eq!(ui.overlay_key(), None, "the status line says it");
+        assert!(!ui.overlay_shown());
+        ui.open = false;
+        ui.toggle_overlay();
+        ui.draw_overlay(&mut Frame::new(100, 20));
+        ui.draw_overlay(&mut Frame::new(320, 200));
+    }
 
     #[test]
     fn the_cpu_use_shows_how_close_it_is_to_the_limit() {

@@ -397,8 +397,17 @@ fn main() -> Result<(), String> {
                 } => {
                     // Ctrl+F12 opens and closes the settings window. (Not
                     // with Alt: AltGr can arrive as Ctrl+Alt.)
+                    // Ctrl+Shift+F12 shows and hides the performance
+                    // overlay.
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
+                    let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                    if keycode == Keycode::F12 && ctrl && shift && !alt {
+                        if !repeat && let Some(message) = ui.overlay_key() {
+                            osd.show(message);
+                        }
+                        continue;
+                    }
                     if keycode == Keycode::F12 && ctrl && !alt {
                         if !repeat {
                             toggle_ui!();
@@ -998,9 +1007,12 @@ fn main() -> Result<(), String> {
         }
         if ui.is_open() {
             ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
+        }
+        if ui.is_open() || ui.overlay_shown() {
             ui.set_stats(stats.view());
         }
         ui.draw(&mut screen);
+        ui.draw_overlay(&mut screen);
         osd.draw(&mut screen);
         dbg.capture_frame(&screen);
 

@@ -59,6 +59,8 @@ pub enum UiKey {
     Insert,
     /// F2 or Ctrl+S.
     Save,
+    /// Show or hide the performance overlay (Ctrl+Shift+F12).
+    Overlay,
     Char(char),
 }
 
@@ -928,6 +930,9 @@ pub struct ConfigUi {
     /// frame drew as text, drawn over it in pixels.
     stats: Option<crate::stats::StatsView>,
     plots: Vec<Plot>,
+    /// Whether the performance overlay shows over the picture while the
+    /// window is closed.
+    overlay: bool,
     /// The States page: the slots, whether there is anywhere to keep
     /// states, and the pictures the last frame drew in pixels (the cell
     /// of their top left corner).
@@ -987,6 +992,7 @@ impl ConfigUi {
             cheats: cheats::Cheats::default(),
             stats: None,
             plots: Vec::new(),
+            overlay: false,
             states: Vec::new(),
             states_available: false,
             pictures: Vec::new(),
@@ -1013,8 +1019,9 @@ impl ConfigUi {
         self.row = self.row.min(self.row_count().saturating_sub(1));
     }
 
-    /// What the Stats page shows, for the frontend to hand over every
-    /// frame while the window is open.
+    /// What the Stats page and the performance overlay show, for the
+    /// frontend to hand over every frame while the window is open or the
+    /// overlay shows (`overlay_shown`).
     pub fn set_stats(&mut self, view: crate::stats::StatsView) {
         self.stats = Some(view);
     }
@@ -1104,7 +1111,9 @@ impl ConfigUi {
         if !self.open {
             return;
         }
-        if self.browser.is_some() {
+        if key == UiKey::Overlay {
+            self.overlay_key();
+        } else if self.browser.is_some() {
             self.browser_key(key, host);
         } else if self.dialog.is_some() {
             self.dialog_key(key, host);
@@ -1925,7 +1934,8 @@ impl ConfigUi {
         } else if self.page == Page::Cheats {
             self.cheats_hints()
         } else if self.page == Page::Stats {
-            vec![("Tab", "Page", Tab), ("Esc", "Close", Esc)]
+            let overlay = if self.overlay { "Hide overlay" } else { "Show overlay" };
+            vec![("Tab", "Page", Tab), ("Esc", "Close", Esc), ("Ctrl+Shift+F12", overlay, Overlay)]
         } else if self.page == Page::Games {
             vec![
                 ("Enter", "Launch", Enter),

@@ -355,7 +355,9 @@ Esc closes it.
   and in millions of instructions a second, the share of them the dynamic
   recompiler ran, the share of the time the CPU sat halted waiting for an
   interrupt, how long drawing the picture takes, and the recompiler's
-  translated code.
+  translated code. **Ctrl+Shift+F12** (here or while a program runs)
+  shows the two numbers and small graphs of them at the bottom right of
+  the picture while the window is closed, and hides them again.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the
