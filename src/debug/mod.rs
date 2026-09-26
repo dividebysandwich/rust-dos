@@ -971,10 +971,9 @@ impl DebugHub {
                     };
                     cpu.bus.mouse.set_position(vx, vy);
                 }
-                LowInput::MouseRel { dx, dy } => {
-                    let (x, y) = (cpu.bus.mouse.x, cpu.bus.mouse.y);
-                    cpu.bus.mouse.set_position(x + dx, y + dy);
-                }
+                // As a captured mouse moves: all of the motion counts, at
+                // the edges of the cursor's window too.
+                LowInput::MouseRel { dx, dy } => cpu.bus.mouse.move_by(dx as f64, dy as f64),
                 LowInput::Button { idx, down } => {
                     if down {
                         cpu.bus.mouse.button_down(idx);

@@ -104,6 +104,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 
 - **Mouse coordinates** are pixels of the screenshot by default.
   Pass `"coords":"virtual"` to use the INT 33h driver's own coordinates.
+  `"dx"` and `"dy"` instead move by that much, as a captured mouse does:
+  programs that read the PS/2 mouse themselves, such as Windows, only
+  follow motion, so steer their pointer with these.
   `/api/status` → `mouse` shows the driver's position and whether it is
   installed.
 - **Keys arrive at most one scan code per frame** (about 16 ms). A long
