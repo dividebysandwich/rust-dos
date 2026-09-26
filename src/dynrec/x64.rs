@@ -123,6 +123,10 @@ enum Slow {
     MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
     Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T },
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, lo: u32, hi: u32 },
+    /// A memory operand's linear address in EAX with paging on: its
+    /// physical address through the TLB, on to `back`, or to `miss` for
+    /// `jit_memref`.
+    Paging { at: DynamicLabel, back: DynamicLabel, miss: DynamicLabel, write: bool },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
     /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
@@ -453,6 +457,33 @@ impl Gen<'_> {
                         ; jmp =>fail
                     );
                 }
+                Slow::Paging { at, back, miss, write } => {
+                    // The entry of the page (linear address >> 12) in the
+                    // set of the privilege level: its tag must be the page
+                    // + 1.
+                    let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as i32;
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                        ; mov ecx, eax
+                        ; shr ecx, 12
+                        ; mov edx, ecx
+                        ; and edx, (layout::TLB_SET - 1) as i32
+                        ; cmp BYTE [rbx + CPL], 3
+                        ; jne >supervisor
+                        ; add edx, layout::TLB_SET as i32
+                        ; supervisor:
+                        ; imul edx, edx, layout::TLB_ENTRY_SIZE as i32
+                        ; add rdx, QWORD [r12 + CTX_TLB]
+                        ; inc ecx
+                        ; cmp ecx, DWORD [rdx + tag]
+                        ; jne =>miss
+                        ; and eax, 0xFFF
+                        ; or eax, DWORD [rdx + layout::TLB_PHYS as i32]
+                        ; and eax, DWORD [rbx + A20]
+                        ; jmp =>back
+                    );
+                }
                 Slow::Load { at, back, dst, m } => {
                     dynasm!(self.ops
                         ; .arch x64
@@ -779,9 +810,11 @@ impl Gen<'_> {
     }
 
     /// Check the operand at seg:t as `Cpu::mem_ref` does, inline for plain
-    /// RAM in one page with paging off, and leave its handle in t.
+    /// RAM in one page, through the TLB with paging on, and leave its
+    /// handle in t.
     fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8) {
         let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+        let (paging, physical) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         let t_ = r(t);
         let need = if write { layout::RIGHT_WRITE } else { layout::RIGHT_READ };
         let (lo, hi, rights, base) = (
@@ -791,64 +824,67 @@ impl Gen<'_> {
             seg_field(seg, layout::SEG_BASE),
         );
         let last = size as i32 - 1;
-        let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as i32;
+        // The segment's limit and type, as `seg_linear` checks them. A byte
+        // is its own last byte, which can't wrap around.
+        if size > 1 {
+            dynasm!(self.ops
+                ; .arch x64
+                ; lea ecx, [Rq(t_) + last]
+                ; cmp ecx, Rd(t_)
+                ; jb =>at
+                ; cmp Rd(t_), DWORD [rbx + lo]
+                ; jb =>at
+                ; cmp ecx, DWORD [rbx + hi]
+                ; ja =>at
+            );
+        } else {
+            dynasm!(self.ops
+                ; .arch x64
+                ; cmp Rd(t_), DWORD [rbx + lo]
+                ; jb =>at
+                ; cmp Rd(t_), DWORD [rbx + hi]
+                ; ja =>at
+            );
+        }
         dynasm!(self.ops
             ; .arch x64
-            // The segment's limit and type, as `seg_linear` checks them.
-            ; lea ecx, [Rq(t_) + last]
-            ; cmp ecx, Rd(t_)
-            ; jb =>at
-            ; cmp Rd(t_), DWORD [rbx + lo]
-            ; jb =>at
-            ; cmp ecx, DWORD [rbx + hi]
-            ; ja =>at
             ; test BYTE [rbx + rights], need as i8
             ; jz =>at
             ; mov eax, Rd(t_)
             ; add eax, DWORD [rbx + base]
-            // Paging on (CR0.PG is the sign bit): through the TLB.
+            // Paging on (CR0.PG is the sign bit): through the TLB, out of
+            // line.
             ; cmp DWORD [rbx + CR0], 0
-            ; jl >paging
+            ; jl =>paging
             ; and eax, DWORD [rbx + A20]
-            ; jmp >physical
-            // The entry of the page (linear address >> 12) in the set of
-            // the privilege level: its tag must be the page + 1.
-            ; paging:
-            ; mov ecx, eax
-            ; shr ecx, 12
-            ; mov edx, ecx
-            ; and edx, (layout::TLB_SET - 1) as i32
-            ; cmp BYTE [rbx + CPL], 3
-            ; jne >supervisor
-            ; add edx, layout::TLB_SET as i32
-            ; supervisor:
-            ; imul edx, edx, layout::TLB_ENTRY_SIZE as i32
-            ; add rdx, QWORD [r12 + CTX_TLB]
-            ; inc ecx
-            ; cmp ecx, DWORD [rdx + tag]
-            ; jne =>at
-            ; and eax, 0xFFF
-            ; or eax, DWORD [rdx + layout::TLB_PHYS as i32]
-            ; and eax, DWORD [rbx + A20]
-            // Within a page, in plain RAM.
-            ; physical:
-            ; mov ecx, eax
-            ; and ecx, 0xFFF
-            ; cmp ecx, 0x1000 - size as i32
-            ; ja =>at
-            ; lea rcx, [rax + size as i32]
-            ; cmp rcx, VIDEO as i32
-            ; jbe >ram
-            ; cmp eax, EXTENDED as i32
+            ; =>physical
+        );
+        // Within a page (a byte always is), in plain RAM: not in the video
+        // memory and ROMs from A0000h to FFFFFh, whose ends are on page
+        // boundaries, and not past the end of RAM.
+        if size > 1 {
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov ecx, eax
+                ; and ecx, 0xFFF
+                ; cmp ecx, 0x1000 - size as i32
+                ; ja =>at
+            );
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; lea ecx, [rax - VIDEO as i32]
+            ; cmp ecx, (EXTENDED - VIDEO) as i32
             ; jb =>at
+            ; lea rcx, [rax + size as i32]
             ; cmp rcx, QWORD [r12 + CTX_RAM_LEN]
             ; ja =>at
-            ; ram:
             ; mov Rd(t_), eax
             ; =>back
         );
         let desc = memref_desc(seg, size, write, slot);
         let fail = self.fail();
+        self.slow.push(Slow::Paging { at: paging, back: physical, miss: at, write });
         self.slow.push(Slow::MemRef { at, back, t, desc, fail });
     }
 
