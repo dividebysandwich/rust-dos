@@ -114,6 +114,8 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_reg8(Register::AH, 0);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
+        // The PS/2 pointing device.
+        0xC2 => crate::mouse::ps2_bios(cpu),
         _ => unsupported(cpu),
     }
 }

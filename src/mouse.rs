@@ -6,6 +6,68 @@
 //! and 8x the character grid for text modes. The SDL event loop converts host
 //! mouse positions into these units before storing them in MouseState.
 
+/// The PS/2 pointing device the BIOS offers through INT 15h AH=C2h, which
+/// the same motion and buttons move: packets of the motion since the last
+/// one and the buttons, which the BIOS's IRQ 12 handler (INT 74h) hands to
+/// the handler a program installed (AX=C207h), as Windows' mouse driver
+/// has it do.
+pub struct Ps2Mouse {
+    /// Reporting (AX=C200h BH=1).
+    pub enabled: bool,
+    /// The handler's far address (AX=C207h), segment and offset; 0:0 is
+    /// none.
+    pub handler: (u16, u16),
+    /// Reports per second (AX=C202h), the resolution (AX=C203h, 0-3) and
+    /// 2:1 scaling (AX=C206h).
+    pub rate: u16,
+    pub resolution: u8,
+    pub scaling: bool,
+    /// The motion not reported yet, in counts (pixels, down positive), and
+    /// the buttons last reported.
+    pub dx: i32,
+    pub dy: i32,
+    pub reported_buttons: u8,
+    /// Where the pointer was put last (`MouseState::set_position`), whose
+    /// moves count whole, where the INT 33h cursor stops at its window.
+    last_position: Option<(i32, i32)>,
+    /// When the next report may go, in emulated microseconds.
+    pub next_report: u64,
+}
+
+impl Ps2Mouse {
+    /// The state after a reset (AX=C201h): off, 100 reports a second, 4
+    /// counts per millimetre, 1:1, with its handler kept.
+    fn reset(&mut self) {
+        self.enabled = false;
+        self.rate = 100;
+        self.resolution = 2;
+        self.scaling = false;
+    }
+}
+
+impl Default for Ps2Mouse {
+    fn default() -> Self {
+        let mut ps2 = Self {
+            enabled: false,
+            handler: (0, 0),
+            rate: 0,
+            resolution: 0,
+            scaling: false,
+            dx: 0,
+            dy: 0,
+            reported_buttons: 0,
+            last_position: None,
+            next_report: 0,
+        };
+        ps2.reset();
+        ps2
+    }
+}
+
+crate::state_fields!(Ps2Mouse {
+    enabled, handler, rate, resolution, scaling, dx, dy, reported_buttons, last_position, next_report,
+});
+
 /// Mouse button bits used by INT 33h.
 pub const BUTTON_LEFT: u8 = 0x01;
 pub const BUTTON_RIGHT: u8 = 0x02;
@@ -68,6 +130,8 @@ pub struct MouseState {
     /// yet (see `move_by`).
     rest_x: f64,
     rest_y: f64,
+    /// The PS/2 pointing device of the BIOS.
+    pub ps2: Ps2Mouse,
 }
 
 impl MouseState {
@@ -100,6 +164,7 @@ impl MouseState {
             last_callback_mickey_y: 0,
             rest_x: 0.0,
             rest_y: 0.0,
+            ps2: Ps2Mouse::default(),
         }
     }
 
@@ -169,6 +234,10 @@ impl MouseState {
     /// the vertical delta. Remainders accumulate in mickey_accum_* so
     /// slow motions aren't lost to integer truncation.
     pub fn set_position(&mut self, x: i32, y: i32) {
+        if let Some((last_x, last_y)) = self.ps2.last_position.replace((x, y)) {
+            self.ps2.dx += x - last_x;
+            self.ps2.dy += y - last_y;
+        }
         let new_x = x.clamp(self.min_x, self.max_x);
         let new_y = y.clamp(self.min_y, self.max_y);
         let dx = new_x - self.x;
@@ -196,6 +265,9 @@ impl MouseState {
         if dx == 0 && dy == 0 {
             return;
         }
+        self.ps2.dx += dx;
+        self.ps2.dy += dy;
+        self.ps2.last_position = None;
         self.add_mickeys(dx, dy);
         self.pending_callback_events |= 0x01; // motion
         self.x = (self.x + dx).clamp(self.min_x, self.max_x);
@@ -351,12 +423,152 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     true
 }
 
+impl MouseState {
+    /// Whether the PS/2 device has a report for its handler at `now`
+    /// (emulated microseconds): motion or buttons changed, and its rate
+    /// lets it report again.
+    pub fn ps2_report_due(&self, now: u64) -> bool {
+        let ps2 = &self.ps2;
+        ps2.enabled
+            && ps2.handler != (0, 0)
+            && now >= ps2.next_report
+            && (ps2.dx != 0 || ps2.dy != 0 || self.buttons != ps2.reported_buttons)
+    }
+
+    /// The next PS/2 report: the status (the buttons, and the signs of the
+    /// motion), X and Y (up positive) of at most 255 counts each; motion
+    /// beyond that goes in the next.
+    fn take_ps2_report(&mut self, now: u64) -> (u16, u16, u16) {
+        let ps2 = &mut self.ps2;
+        let x = ps2.dx.clamp(-255, 255);
+        let y = (-ps2.dy).clamp(-255, 255);
+        ps2.dx -= x;
+        ps2.dy += y;
+        ps2.reported_buttons = self.buttons;
+        ps2.next_report = now + 1_000_000 / ps2.rate.max(10) as u64;
+        let status = 0x08 | (self.buttons & 0x07) as u16 | ((x < 0) as u16) << 4 | ((y < 0) as u16) << 5;
+        (status, x as u8 as u16, y as u8 as u16)
+    }
+}
+
+/// INT 15h AH=C2h, the BIOS's PS/2 pointing device services, AL the
+/// function: AH 0 and CF clear, or the error in AH (01h invalid function,
+/// 02h invalid input, 05h no handler installed) with CF set.
+pub fn ps2_bios(cpu: &mut crate::cpu::Cpu) {
+    use iced_x86::Register;
+    let bh = cpu.get_reg8(Register::BH);
+    let result = match cpu.get_al() {
+        // Enable (BH=1) or disable (BH=0) reports. Enabled, the line is
+        // unmasked, as a BIOS that found the device leaves it.
+        0x00 => match bh {
+            0 => {
+                cpu.bus.mouse.ps2.enabled = false;
+                Ok(())
+            }
+            1 if cpu.bus.mouse.ps2.handler == (0, 0) => Err(0x05),
+            1 => {
+                cpu.bus.mouse.ps2.enabled = true;
+                cpu.bus.pic.slave.imr &= !0x10;
+                cpu.bus.pic.master.imr &= !0x04;
+                Ok(())
+            }
+            _ => Err(0x02),
+        },
+        // Reset: BH the device ID (0, a mouse), BL AAh (passed its test).
+        0x01 => {
+            cpu.bus.mouse.ps2.reset();
+            cpu.set_reg8(Register::BH, 0x00);
+            cpu.set_reg8(Register::BL, 0xAA);
+            Ok(())
+        }
+        // Reports per second: 10, 20, 40, 60, 80, 100 or 200.
+        0x02 => match [10, 20, 40, 60, 80, 100, 200].get(bh as usize) {
+            Some(&rate) => {
+                cpu.bus.mouse.ps2.rate = rate;
+                Ok(())
+            }
+            None => Err(0x02),
+        },
+        // Resolution: 1, 2, 4 or 8 counts per millimetre.
+        0x03 if bh <= 3 => {
+            cpu.bus.mouse.ps2.resolution = bh;
+            Ok(())
+        }
+        0x03 => Err(0x02),
+        // The device type: a mouse.
+        0x04 => {
+            cpu.set_reg8(Register::BH, 0x00);
+            Ok(())
+        }
+        // Initialize for packets of BH bytes: reset.
+        0x05 if (1..=8).contains(&bh) => {
+            cpu.bus.mouse.ps2.reset();
+            Ok(())
+        }
+        0x05 => Err(0x02),
+        // Status (BH=0): BL the buttons (right bit 0, left bit 2), 2:1
+        // scaling and reporting, CL the resolution, DL the rate. BH=1 and
+        // 2 set 1:1 and 2:1 scaling.
+        0x06 => match bh {
+            0 => {
+                let mouse = &cpu.bus.mouse;
+                let buttons = mouse.buttons;
+                let status = (buttons & BUTTON_RIGHT != 0) as u8
+                    | ((buttons & BUTTON_MIDDLE != 0) as u8) << 1
+                    | ((buttons & BUTTON_LEFT != 0) as u8) << 2
+                    | (mouse.ps2.scaling as u8) << 4
+                    | (mouse.ps2.enabled as u8) << 5;
+                let (resolution, rate) = (mouse.ps2.resolution, mouse.ps2.rate as u8);
+                cpu.set_reg8(Register::BL, status);
+                cpu.set_reg8(Register::CL, resolution);
+                cpu.set_reg8(Register::DL, rate);
+                Ok(())
+            }
+            1 | 2 => {
+                cpu.bus.mouse.ps2.scaling = bh == 2;
+                Ok(())
+            }
+            _ => Err(0x02),
+        },
+        // The handler at ES:BX, which the IRQ 12 handler calls.
+        0x07 => {
+            cpu.bus.mouse.ps2.handler = (cpu.es(), cpu.bx());
+            Ok(())
+        }
+        _ => Err(0x01),
+    };
+    cpu.set_reg8(Register::AH, result.err().unwrap_or(0));
+    cpu.set_cpu_flag(crate::cpu::CpuFlags::CF, result.is_err());
+}
+
+/// The BIOS's IRQ 12 handler (`bios::PS2_HANDLER`) takes a report here
+/// (`bios::SERVICE_PS2_REPORT`): the status, X and Y in AX, BX and CX,
+/// and DX 1 with the program's handler at `bios::PS2_HANDLER_ADDRESS` for
+/// it to call; DX 0 when there is no handler to call.
+pub fn ps2_report(cpu: &mut crate::cpu::Cpu) {
+    let now = cpu.bus.clock.now_micros();
+    let mouse = &mut cpu.bus.mouse;
+    if !mouse.ps2.enabled || mouse.ps2.handler == (0, 0) {
+        cpu.set_dx(0);
+        return;
+    }
+    let (status, x, y) = mouse.take_ps2_report(now);
+    let (segment, offset) = mouse.ps2.handler;
+    let at = 0xF0000 + crate::bios::PS2_HANDLER_ADDRESS as usize;
+    cpu.bus.write_16(at, offset);
+    cpu.bus.write_16(at + 2, segment);
+    cpu.set_ax(status);
+    cpu.set_bx(x);
+    cpu.set_cx(y);
+    cpu.set_dx(1);
+}
+
 crate::state_fields!(MouseState {
     installed, hide_counter, x, y, buttons, min_x, max_x, min_y, max_y,
     press_count, press_x, press_y, release_count, release_x, release_y,
     mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
     callback_mask, callback_cs, callback_ip, pending_callback_events,
-    last_callback_mickey_x, last_callback_mickey_y, rest_x, rest_y,
+    last_callback_mickey_x, last_callback_mickey_y, rest_x, rest_y, ps2,
 });
 
 

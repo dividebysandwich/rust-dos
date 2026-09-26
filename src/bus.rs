@@ -335,8 +335,9 @@ impl Bus {
         bus.write_16(0x0463, 0x03D4);
 
         // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
-        // the video adapter's bits come with it below.
-        bus.write_16(0x0410, 0x0001);
+        // the video adapter's bits come with it below. Bit 2: a PS/2 mouse
+        // (INT 15h AH=C2h).
+        bus.write_16(0x0410, 0x0005);
 
         // 0x0417: Num Lock on, as the BIOS leaves it; 0x0496: an enhanced
         // (101-key) keyboard.
@@ -1123,6 +1124,11 @@ impl Bus {
     pub fn start_batch(&mut self, end: u64) {
         self.clock.set_batch_end(end);
         self.clock.schedule(self.next_event());
+        // The PS/2 mouse reports when it moved or a button changed, once
+        // its last report was taken.
+        if !self.pic.busy(12) && self.mouse.ps2_report_due(self.clock.now_micros()) {
+            self.pic.raise(12);
+        }
         self.refresh_irq();
     }
 

@@ -35,19 +35,20 @@ fn equipment_word_and_hard_disk_count_follow_mounts() {
     let base = scratch("bda", &["c", "a", "b", "d"]);
     let mut cpu = Cpu::new(base.join("c"));
 
-    // Only C: (hdd): no floppy bit, one fixed disk, video bits intact
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0020);
+    // Only C: (hdd): no floppy bit, one fixed disk, video bits intact, and
+    // the PS/2 mouse
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0024);
     assert_eq!(cpu.bus.read_8(0x0475), 1);
 
     cpu.bus
         .mount_drive(0, &base.join("a"), kind(DriveKind::Floppy), false)
         .unwrap();
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0021);
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0025);
 
     cpu.bus
         .mount_drive(1, &base.join("b"), kind(DriveKind::Floppy), false)
         .unwrap();
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0061); // bits 6-7 = 2 drives - 1
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0065); // bits 6-7 = 2 drives - 1
 
     cpu.bus
         .mount_drive(3, &base.join("d"), MountOptions::default(), false)
@@ -56,11 +57,11 @@ fn equipment_word_and_hard_disk_count_follow_mounts() {
 
     cpu.set_reg8(Register::AH, 0);
     int11::handle(&mut cpu);
-    assert_eq!(cpu.ax(), 0x0061);
+    assert_eq!(cpu.ax(), 0x0065);
 
     // Survives the shell reload, which clears RAM from 0x500 up
     cpu.load_shell();
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0061);
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0065);
     assert_eq!(cpu.bus.read_8(0x0475), 2);
     assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE), 0xF0);
     assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE + 3), 0xF8);
@@ -68,7 +69,7 @@ fn equipment_word_and_hard_disk_count_follow_mounts() {
     cpu.bus.unmount_drive(1).unwrap();
     cpu.bus.unmount_drive(0).unwrap();
     cpu.bus.unmount_drive(3).unwrap();
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0020);
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0024);
     assert_eq!(cpu.bus.read_8(0x0475), 1);
     assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE), 0);
 }
@@ -140,7 +141,7 @@ fn a_and_b_are_bios_floppies_whatever_their_type() {
     cpu.bus
         .mount_drive(1, &base.join("b"), MountOptions::default(), false)
         .unwrap();
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0061);
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0065);
     assert_eq!((cpu.bus.cmos.get(0x10), cpu.bus.cmos.get(0x14) & 0xC1), (0x44, 0x41));
     assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE + 1), 0xF0);
     assert_eq!(int13(&mut cpu, 0x15, 0x00), (false, 0x02));
@@ -163,13 +164,13 @@ fn a_and_b_are_bios_floppies_whatever_their_type() {
         .mount_drive(0, &base.join("a"), kind(DriveKind::HardDisk), false)
         .unwrap();
     assert_eq!(cpu.bus.disk.drive_kind(0), Some(DriveKind::Floppy));
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0021);
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0025);
     assert_eq!((cpu.bus.cmos.get(0x10), cpu.bus.cmos.get(0x14) & 0xC1), (0x40, 0x01));
     // Not a fixed disk: C: stays the only one.
     assert_eq!(cpu.bus.read_8(0x0475), 1);
     assert_eq!(int13(&mut cpu, 0x02, 0x81), (true, 0xAA));
     assert!(cpu.bus.mount_drive(1, &base.join("b"), kind(DriveKind::CdRom), false).is_err());
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0021);
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0025);
 }
 
 #[test]
@@ -179,7 +180,7 @@ fn floppies_on_other_letters_are_not_bios_units() {
     cpu.bus
         .mount_drive(4, &base.join("e"), kind(DriveKind::Floppy), false)
         .unwrap();
-    assert_eq!(cpu.bus.read_16(0x0410), 0x0020);
+    assert_eq!(cpu.bus.read_16(0x0410), 0x0024);
     assert_eq!(int13(&mut cpu, 0x02, 0x04), (true, 0x80));
     assert_eq!(int13(&mut cpu, 0x15, 0x04), (false, 0x00));
 }

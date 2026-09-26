@@ -717,9 +717,10 @@ fn main() -> Result<(), String> {
                 }
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
-                    // A program using the mouse gets it captured by a click,
-                    // which it doesn't see, as in DOSBox.
-                    if !mouse_captured && cpu.bus.mouse.installed {
+                    // A program using the mouse (the INT 33h driver, or the
+                    // BIOS's PS/2 mouse as Windows does) gets it captured by
+                    // a click, which it doesn't see, as in DOSBox.
+                    if !mouse_captured && (cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled) {
                         capture_mouse!(true);
                         capturing_click = Some(mouse_btn);
                         osd.show("Mouse captured (Ctrl+F10 releases)");

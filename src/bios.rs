@@ -35,6 +35,8 @@ pub const SERVICE_SHELL_KEY_READY: u8 = 0x1B;
 pub const SERVICE_SHELL_TICK: u8 = 0x1C;
 /// A secondary COMMAND.COM asking what to do next (`command_com::service`).
 pub const SERVICE_COMMAND: u8 = 0x1D;
+/// The PS/2 mouse's next report, for the IRQ 12 handler (`mouse::ps2_report`).
+pub const SERVICE_PS2_REPORT: u8 = 0x1E;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Offsets in the F000 segment.
@@ -49,6 +51,10 @@ pub const DISKETTE_PARAMS: u16 = 0x1150;
 /// Where disk services wait for slow disk access to end, after the CD-ROM
 /// driver's entries.
 pub const IO_WAIT: u16 = 0x1190;
+/// The PS/2 mouse's IRQ 12 handler (INT 74h), and where it finds the far
+/// address of the program's handler (INT 15h AX=C207h).
+const PS2_HANDLER: u16 = 0x11A0;
+pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -101,6 +107,7 @@ pub fn default_ivt() -> [u32; 256] {
         ivt[irq] = far(SLAVE_EOI_HANDLER);
     }
     ivt[0x71] = far(IRQ9_HANDLER);
+    ivt[0x74] = far(PS2_HANDLER);
     for (i, &vector) in HLE_VECTORS.iter().enumerate() {
         ivt[vector as usize] = far(TRAP_BASE + 4 * i as u16);
     }
@@ -165,6 +172,29 @@ pub fn install(bus: &mut Bus) {
     );
     // Disk services wait here for slow disk access (`diskio::wait`).
     write_rom(bus, IO_WAIT, &[0xFE, 0x39, SERVICE_IO_WAIT]);
+    // The PS/2 mouse (IRQ 12), as an IBM PS/2 BIOS runs it: save the
+    // registers, take the report, and with a handler installed push the
+    // status, X, Y and a 0 word and CALL FAR it; then acknowledge both PICs.
+    let [handler_lo, handler_hi] = PS2_HANDLER_ADDRESS.to_le_bytes();
+    write_rom(
+        bus,
+        PS2_HANDLER,
+        &[
+            0x1E, 0x50, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55, 0x06, // PUSH DS, AX, BX, CX, DX, SI, DI, BP, ES
+            0xFE, 0x39, SERVICE_PS2_REPORT, // AX, BX, CX: the report; DX: call the handler
+            0x85, 0xD2, // TEST DX, DX
+            0x74, 0x0E, // JZ done
+            0x50, 0x53, 0x51, // PUSH AX, BX, CX
+            0x31, 0xC0, 0x50, // XOR AX, AX; PUSH AX
+            0x2E, 0xFF, 0x1E, handler_lo, handler_hi, // CALL FAR CS:[handler]
+            0x83, 0xC4, 0x08, // ADD SP, 8
+            0xB0, 0x20, // done: MOV AL, 20h
+            0xE6, 0xA0, // OUT A0h, AL
+            0xE6, 0x20, // OUT 20h, AL
+            0x07, 0x5D, 0x5F, 0x5E, 0x5A, 0x59, 0x5B, 0x58, 0x1F, // POP ES, BP, DI, SI, DX, CX, BX, AX, DS
+            0xCF, // IRET
+        ],
+    );
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);
     // BIOS date, the model byte and the base memory.

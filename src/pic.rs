@@ -172,6 +172,12 @@ impl Pic {
         }
     }
 
+    /// Whether `irq` is requested or in service.
+    pub fn busy(&self, irq: u8) -> bool {
+        let (chip, bit) = if irq < 8 { (&self.master, irq) } else { (&self.slave, irq - 8) };
+        (chip.irr | chip.isr) & (1 << bit) != 0
+    }
+
     /// Withdraw a request for `irq` that hasn't been delivered.
     pub fn lower(&mut self, irq: u8) {
         if irq < 8 {
