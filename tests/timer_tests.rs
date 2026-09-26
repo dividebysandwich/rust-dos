@@ -405,6 +405,39 @@ fn sound_blaster_irq_stays_raised_until_the_driver_acks_it() {
 }
 
 #[test]
+fn sound_blaster_irq_ended_only_at_the_pic_comes_once() {
+    // DMX finds the card's IRQ with a handler that notes the IRQ and sends
+    // the EOI, leaving the card unacknowledged: the PICs are edge-triggered.
+    let mut bus = bus_at(1000);
+    bus.io_write(0x21, 0x01); // mask the timer
+    bus.io_write(0x22C, 0xF2);
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+    bus.pic_acknowledge(7);
+    bus.io_write(0x20, 0x20);
+    assert_eq!(bus.pic_pending_irq(), None);
+    // Another interrupt of the same kind before the acknowledge: the line
+    // is up already.
+    bus.io_write(0x22C, 0xF2);
+    assert_eq!(bus.pic_pending_irq(), None);
+    // Acknowledged, the next one comes.
+    bus.io_read(0x22E);
+    bus.io_write(0x22C, 0xF2);
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+}
+
+#[test]
+fn sound_blaster_irq_acknowledged_before_it_is_taken_is_withdrawn() {
+    let mut bus = bus_at(1000);
+    bus.io_write(0x21, 0x81); // mask the timer and IRQ 7
+    bus.io_write(0x22C, 0xF2);
+    assert_eq!(bus.pic.master.irr & 0x80, 0x80);
+    // The driver polls the card and acknowledges it.
+    bus.io_read(0x22E);
+    bus.io_write(0x21, 0x01);
+    assert_eq!(bus.pic_pending_irq(), None);
+}
+
+#[test]
 fn bios_wait_passes_emulated_time_with_interrupts_enabled() {
     use rust_dos::cpu::CpuFlags;
     use rust_dos::exec::{self, NoHook};

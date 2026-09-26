@@ -189,10 +189,9 @@ pub struct Bus {
     pub beep_frames: u32,
     /// The host's volumes for each source (`[mixer]`) and the mute.
     pub mixer: crate::mixer::Mixer,
-    /// Level-triggered interrupt request lines (bit n = IRQ n): the Sound
-    /// Blaster holds its line until the driver acknowledges. Kept up to
-    /// date by `update_irq_levels`, as the CPU tests it every instruction.
-    irq_levels: u16,
+    /// The Sound Blaster's IRQ and whether its 8-bit and 16-bit interrupts
+    /// wait for the driver, as `sync_sb_irq` last saw them.
+    sb_irq: (Option<u8>, bool, bool),
     /// `interrupt_requested` as of the last change to the interrupt lines,
     /// the PICs or the mouse event handler, so the CPU tests one flag
     /// before each instruction. `refresh_irq` works it out again; it runs
@@ -310,7 +309,7 @@ impl Bus {
             sb_frame: (0, 0),
             beep_frames: 0,
             mixer: crate::mixer::Mixer::default(),
-            irq_levels: 0,
+            sb_irq: (None, false, false),
             irq_ready: false,
             audio_peak: 0,
             audio_underruns: 0,
@@ -1164,7 +1163,7 @@ impl Bus {
         let now = self.clock.now_ticks();
         if let Some(sb) = &mut self.sb {
             sb.advance(now, &mut self.dma, &self.ram);
-            self.update_irq_levels();
+            self.sync_sb_irq();
         }
     }
 
@@ -1404,7 +1403,7 @@ impl Bus {
     pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
         self.sb = sb.map(crate::sb::SoundBlaster::new);
         self.opl = crate::opl::Opl::new(opl3);
-        self.update_irq_levels();
+        self.sync_sb_irq();
         self.clock.schedule(self.next_event());
     }
 
@@ -1452,7 +1451,7 @@ impl Bus {
                 for line in log {
                     self.log_string(&line);
                 }
-                self.update_irq_levels();
+                self.sync_sb_irq();
                 self.clock.schedule(self.next_event());
             }
         }
@@ -1464,7 +1463,7 @@ impl Bus {
             _ => {
                 self.sb_advance();
                 let value = self.sb.as_mut().map_or(0xFF, |sb| sb.read(offset));
-                self.update_irq_levels();
+                self.sync_sb_irq();
                 self.clock.schedule(self.next_event());
                 value
             }
@@ -1499,20 +1498,34 @@ impl Bus {
         self.clock.schedule(self.next_event());
     }
 
-    /// Level-triggered request lines (bit n = IRQ n): the Sound Blaster
-    /// holds its line until the driver acknowledges at port 22Eh.
-    #[inline(always)]
-    fn irq_levels(&self) -> u16 {
-        self.irq_levels
+    /// The Sound Blaster's IRQ and whether its 8-bit and 16-bit interrupts
+    /// wait for the driver.
+    fn sb_irq_now(&self) -> (Option<u8>, bool, bool) {
+        self.sb.as_ref().map_or((None, false, false), |sb| (Some(sb.config.irq), sb.irq8, sb.irq16))
     }
 
-    /// Recompute the level-triggered request lines after a device changed
-    /// its interrupt output.
-    fn update_irq_levels(&mut self) {
-        self.irq_levels = match &self.sb {
-            Some(sb) if sb.irq_pending() => 1 << sb.config.irq,
-            _ => 0,
-        };
+    /// Drive the Sound Blaster's interrupt request, edge-triggered as the
+    /// PC's PICs are: raise it when the DSP has a new 8-bit or 16-bit
+    /// interrupt, withdraw it when the driver has acknowledged them all
+    /// before the CPU took it. An interrupt the driver ends at the PIC
+    /// without acknowledging at the card doesn't come again, as DMX's
+    /// search for the card's IRQ has it.
+    fn sync_sb_irq(&mut self) {
+        let (irq, irq8, irq16) = self.sb_irq_now();
+        let (old_irq, old8, old16) = self.sb_irq;
+        let up = irq8 || irq16;
+        if let Some(old) = old_irq
+            && (old8 || old16)
+            && (!up || irq != old_irq)
+        {
+            self.pic.lower(old);
+        }
+        if let Some(line) = irq
+            && ((irq8 && !old8) || (irq16 && !old16) || (up && irq != old_irq))
+        {
+            self.pic.raise(line);
+        }
+        self.sb_irq = (irq, irq8, irq16);
         self.refresh_irq();
     }
 
@@ -1521,7 +1534,7 @@ impl Bus {
     /// service.
     #[inline(always)]
     pub fn pic_pending_irq(&self) -> Option<u8> {
-        self.pic.pending(self.irq_levels())
+        self.pic.pending()
     }
 
     /// Whether any device requests an interrupt on a line its PIC doesn't
@@ -1532,9 +1545,8 @@ impl Bus {
     /// latched for as long as it runs.
     #[inline(always)]
     pub fn interrupt_requested(&self) -> bool {
-        let levels = self.irq_levels();
-        let master = (self.pic.master.irr | levels as u8) & !self.pic.master.imr;
-        let slave = (self.pic.slave.irr | (levels >> 8) as u8) & !self.pic.slave.imr;
+        let master = self.pic.master.irr & !self.pic.master.imr;
+        let slave = self.pic.slave.irr & !self.pic.slave.imr;
         master | slave != 0 || self.mouse.pending_callback_events & self.mouse.callback_mask != 0
     }
 
@@ -1561,7 +1573,7 @@ impl Bus {
             sb.irq8 = false;
             sb.irq16 = false;
         }
-        self.update_irq_levels();
+        self.sync_sb_irq();
     }
 
     /// Raise IRQ 1 if a byte just entered the keyboard controller's output
@@ -1904,7 +1916,7 @@ impl Bus {
             // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
             // 0x21 the interrupt mask. Programs read-modify-write the mask
             // to unmask their IRQ without disturbing the others.
-            0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.read(port, self.irq_levels()),
+            0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.read(port),
 
             // Port 0x40 — PIT channel 0 (system timer) data. The counter
             // decrements at 1.193 MHz of emulated time. Programs that need

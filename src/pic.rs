@@ -6,9 +6,9 @@
 //! 70h after the BIOS), mask lines with OCW1, acknowledge interrupts with an
 //! EOI (OCW2), and read the request or in-service register (OCW3).
 //!
-//! Devices raise edge-triggered requests with `Pic::raise`; the Sound
-//! Blaster's line is level-triggered and passed in by the bus when it asks
-//! for the next interrupt. Protected-mode DOS extenders that don't remap the
+//! Devices raise edge-triggered requests with `Pic::raise`, as the PC's
+//! 8259s are programmed, and withdraw one whose line drops before the CPU
+//! takes it with `Pic::lower`. Protected-mode DOS extenders that don't remap the
 //! PIC read the in-service register to tell IRQ 0-7 from CPU exceptions at
 //! the same vectors, so the ISR bits are set at acknowledge time as on
 //! hardware.
@@ -181,32 +181,23 @@ impl Pic {
         }
     }
 
-    /// Requests of the slave, including level-triggered lines 8-15 in
-    /// `levels`.
-    fn slave_requests(&self, levels: u16) -> u8 {
-        self.slave.irr | (levels >> 8) as u8
-    }
-
-    /// Requests of the master, including level-triggered lines 0-7 in
-    /// `levels` and the slave's output on the cascade line.
-    fn master_requests(&self, levels: u16) -> u8 {
-        let mut requests = self.master.irr | levels as u8;
-        if self.slave.highest(self.slave_requests(levels)).is_some() {
+    /// Requests of the master, including the slave's output on the cascade
+    /// line.
+    fn master_requests(&self) -> u8 {
+        let mut requests = self.master.irr;
+        if self.slave.highest(self.slave.irr).is_some() {
             requests |= 1 << CASCADE;
         }
         requests
     }
 
-    /// The IRQ (0-15) the CPU would receive now. `levels` are the
-    /// level-triggered request lines (bit n = IRQ n).
-    pub fn pending(&self, levels: u16) -> Option<u8> {
-        let line = self.master.highest(self.master_requests(levels))?;
+    /// The IRQ (0-15) the CPU would receive now.
+    pub fn pending(&self) -> Option<u8> {
+        let line = self.master.highest(self.master_requests())?;
         if line != CASCADE {
             return Some(line);
         }
-        self.slave
-            .highest(self.slave_requests(levels))
-            .map(|l| l + 8)
+        self.slave.highest(self.slave.irr).map(|l| l + 8)
     }
 
     /// The CPU takes interrupt `irq`: it goes in service (on both chips for
@@ -236,11 +227,11 @@ impl Pic {
         }
     }
 
-    pub fn read(&self, port: u16, levels: u16) -> u8 {
+    pub fn read(&self, port: u16) -> u8 {
         match port {
-            0x20 => self.master.read_command(self.master_requests(levels)),
+            0x20 => self.master.read_command(self.master_requests()),
             0x21 => self.master.imr,
-            0xA0 => self.slave.read_command(self.slave_requests(levels)),
+            0xA0 => self.slave.read_command(self.slave.irr),
             _ => self.slave.imr,
         }
     }

@@ -87,7 +87,7 @@ impl Bus {
             tandy_mode: _,
             ultrasnd_drive: _,
             // Worked out again after a load.
-            irq_levels: _,
+            sb_irq: _,
             irq_ready: _,
             page_gen: _,
             // Requests to the front end, which it carries out before a
@@ -209,7 +209,7 @@ impl Bus {
             disk_io,
             tandy_mode: _,
             ultrasnd_drive: _,
-            irq_levels: _,
+            sb_irq: _,
             irq_ready: _,
             page_gen: _,
             reset_requested: _,
@@ -289,7 +289,10 @@ impl Bus {
     /// state.
     pub(crate) fn after_reload(&mut self) {
         self.page_gen.fill(0);
-        self.update_irq_levels();
+        // The PICs' requests are the state's: the Sound Blaster's interrupts
+        // as it has them raise none.
+        self.sb_irq = self.sb_irq_now();
+        self.refresh_irq();
         self.vga.after_load();
     }
 }
