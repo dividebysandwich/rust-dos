@@ -1639,7 +1639,7 @@ impl ConfigUi {
 
         draw::render(&g, &layout, frame);
         for plot in std::mem::take(&mut self.plots) {
-            draw::plot(frame, &layout, plot.cells, &plot.values, crate::stats::HISTORY, plot.max, plot.color);
+            draw::plot(frame, &layout, plot.cells, &plot.values, plot.max, plot.color, draw::OPAQUE);
         }
         self.draw_pictures(frame, &layout);
         self.layout = Some(layout);

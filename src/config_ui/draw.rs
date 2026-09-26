@@ -20,7 +20,15 @@ pub const SELECT: Rgb = Rgb(0x1C, 0x78, 0xA8);
 pub const FIELD: Rgb = Rgb(0x08, 0x10, 0x2C);
 /// The panel, blended over the picture at `PANEL_ALPHA`/256.
 const PANEL: Rgb = Rgb(0x10, 0x20, 0x50);
-const PANEL_ALPHA: u32 = 216;
+pub const PANEL_ALPHA: u32 = 216;
+/// How opaque something drawn over the picture is, of 256: wholly.
+pub const OPAQUE: u32 = 256;
+
+/// `over` over `under`, `alpha`/256 opaque.
+fn blend(under: [u8; 3], over: Rgb, alpha: u32) -> [u8; 3] {
+    let mix = |d: u8, c: u8| ((d as u32 * (256 - alpha) + c as u32 * alpha) >> 8) as u8;
+    [mix(under[0], over.0), mix(under[1], over.1), mix(under[2], over.2)]
+}
 
 /// Most cells the panel takes, and the margin it leaves around it.
 const MAX_COLS: usize = 96;
@@ -142,9 +150,13 @@ impl Layout {
 /// Draw `grid` onto `frame` at `layout`: the panel blended over the
 /// picture, then the cells' backgrounds and characters.
 pub fn render(grid: &Grid, layout: &Layout, frame: &mut Frame) {
+    render_blended(grid, layout, frame, PANEL_ALPHA);
+}
+
+/// `render` with the panel `alpha`/256 opaque.
+pub fn render_blended(grid: &Grid, layout: &Layout, frame: &mut Frame, alpha: u32) {
     let font = if layout.cell_h == 16 { video::font_8x16() } else { video::font_8x8() };
     let width = frame.width as usize;
-    let blend = |d: u8, c: u8| ((d as u32 * (256 - PANEL_ALPHA) + c as u32 * PANEL_ALPHA) >> 8) as u8;
     for row in 0..grid.rows.min(layout.rows) {
         for col in 0..grid.cols.min(layout.cols) {
             let cell = grid.cells[row * grid.cols + col];
@@ -159,7 +171,7 @@ pub fn render(grid: &Grid, layout: &Layout, frame: &mut Frame) {
                     } else if let Some(bg) = cell.bg {
                         [bg.0, bg.1, bg.2]
                     } else {
-                        [blend(px[0], PANEL.0), blend(px[1], PANEL.1), blend(px[2], PANEL.2)]
+                        blend(*px, PANEL, alpha)
                     };
                 }
             }
@@ -168,38 +180,41 @@ pub fn render(grid: &Grid, layout: &Layout, frame: &mut Frame) {
 }
 
 /// A graph of `values`, oldest first, the newest at the right edge and
-/// `history` of them across the whole width, on a scale from 0 to `max`,
-/// in the cells from (`col`, `row`), `cols` wide and `rows` high, drawn
-/// onto `frame` where `layout` put the panel.
-pub fn plot(frame: &mut Frame, layout: &Layout, cells: (usize, usize, usize, usize), values: &[f32], history: usize, max: f32, color: Rgb) {
+/// the stats' `HISTORY` of them across the whole width, on a scale from
+/// 0 to `max`, in the cells from (`col`, `row`), `cols` wide and `rows`
+/// high, drawn onto `frame` where `layout` put the panel. Its background,
+/// its lines at each quarter of the scale and what is below the values
+/// are `alpha`/256 opaque, the values' line wholly.
+pub fn plot(frame: &mut Frame, layout: &Layout, cells: (usize, usize, usize, usize), values: &[f32], max: f32, color: Rgb, alpha: u32) {
     let (col, row, cols, rows) = cells;
     let (x0, y0) = (layout.x + col * 8, layout.y + row * layout.cell_h);
     let (w, h) = (cols * 8, rows * layout.cell_h);
     let (width, height) = (frame.width as usize, frame.height as usize);
-    let mut put = |x: usize, y: usize, c: Rgb| {
-        if x < width && y < height {
-            let i = (y * width + x) * 3;
-            frame.rgb[i..i + 3].copy_from_slice(&[c.0, c.1, c.2]);
-        }
-    };
+    let history = crate::stats::HISTORY;
     let faint = Rgb(color.0 / 3, color.1 / 3, color.2 / 3);
-    for y in y0..y0 + h {
-        for x in x0..x0 + w {
+    for i in 0..w {
+        // The sample this column shows, counting from the newest, and the
+        // height of its bar.
+        let back = (w - 1 - i) * history / w;
+        let value = values.len().checked_sub(back + 1).and_then(|at| values.get(at)).filter(|_| max > 0.0);
+        let bar = value.map_or(0, |&v| ((v / max).clamp(0.0, 1.0) * h as f32).round() as usize);
+        let x = x0 + i;
+        for dy in 0..h {
+            let y = y0 + h - 1 - dy;
+            if x >= width || y >= height {
+                continue;
+            }
             // A dotted line at each quarter of the scale.
             let quarter = (1..4).any(|q| y == y0 + h - h * q / 4) && x % 2 == 0;
-            put(x, y, if quarter { DIM } else { FIELD });
-        }
-    }
-    if values.is_empty() || w == 0 || h == 0 || max <= 0.0 {
-        return;
-    }
-    for i in 0..w {
-        // The sample this column shows, counting from the newest.
-        let back = (w - 1 - i) * history.max(1) / w;
-        let Some(&value) = values.len().checked_sub(back + 1).and_then(|at| values.get(at)) else { continue };
-        let bar = ((value / max).clamp(0.0, 1.0) * h as f32).round() as usize;
-        for dy in 0..bar {
-            put(x0 + i, y0 + h - 1 - dy, if dy + 1 == bar { color } else { faint });
+            let (c, a) = match dy + 1 {
+                top if top == bar => (color, OPAQUE),
+                top if top < bar => (faint, alpha),
+                _ if quarter => (DIM, alpha),
+                _ => (FIELD, alpha),
+            };
+            let at = (y * width + x) * 3;
+            let px = &mut frame.rgb[at..at + 3];
+            px.copy_from_slice(&blend([px[0], px[1], px[2]], c, a));
         }
     }
 }
@@ -324,7 +339,7 @@ mod tests {
     fn plots_draw_inside_their_cells() {
         let mut frame = Frame::new(640, 400);
         let layout = Layout::for_frame(640, 400);
-        plot(&mut frame, &layout, (2, 10, 20, 4), &[0.0, 50.0, 100.0], 120, 100.0, GOOD);
+        plot(&mut frame, &layout, (2, 10, 20, 4), &[0.0, 50.0, 100.0], 100.0, GOOD, OPAQUE);
         let px = |x: usize, y: usize| {
             let i = (y * 640 + x) * 3;
             Rgb(frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2])
@@ -338,6 +353,16 @@ mod tests {
         assert_eq!(px(x0 + w, y0 + h - 1), Rgb(0, 0, 0));
         // The oldest columns are empty: there were only three samples.
         assert_eq!(px(x0, y0 + h - 1), FIELD);
+
+        // Half opaque, over a white picture: the picture shows through
+        // but for the values' line.
+        let mut frame = Frame::new(640, 400);
+        frame.rgb.fill(0xFF);
+        plot(&mut frame, &layout, (2, 10, 20, 4), &[100.0], 100.0, GOOD, OPAQUE / 2);
+        let px = |x: usize, y: usize| frame.rgb[(y * 640 + x) * 3..][..3].to_vec();
+        assert_eq!(px(x0 + w - 1, y0), [GOOD.0, GOOD.1, GOOD.2]);
+        assert_eq!(px(x0, y0 + h - 1), blend([0xFF; 3], FIELD, 128));
+        assert_eq!(px(x0, y0 + h - 1), [0x83, 0x87, 0x95]);
     }
 
     #[test]

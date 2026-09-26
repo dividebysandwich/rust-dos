@@ -6,7 +6,7 @@
 
 use super::draw::{self, BigFont, Grid, Layout, Rgb};
 use super::{ConfigUi, Plot};
-use crate::stats::{HISTORY, StatsView};
+use crate::stats::StatsView;
 use crate::video::Frame;
 
 /// The colour the host's CPU use shows in: green, yellow from 75%, red
@@ -66,7 +66,8 @@ struct Panel {
 
 /// Draw the performance overlay at the bottom right of `frame`: the
 /// frames a second and the host's CPU use, each over a small graph of its
-/// last half minute, side by side on a panel like the window's.
+/// last half minute, side by side on a panel like the window's, but half
+/// as opaque, so the picture shows through.
 fn draw_overlay(frame: &mut Frame, view: &StatsView) {
     let (width, height) = (frame.width as usize, frame.height as usize);
     let cell_h = if height >= 300 { 16 } else { 8 };
@@ -86,9 +87,9 @@ fn draw_overlay(frame: &mut Frame, view: &StatsView) {
         grid.text(col, 0, label, draw::TEXT);
         grid.text(col + graph - value.len(), 0, value, *color);
     }
-    draw::render(&grid, &layout, frame);
+    draw::render_blended(&grid, &layout, frame, draw::PANEL_ALPHA / 2);
     for (i, (.., history, max, color)) in panels.into_iter().enumerate() {
-        draw::plot(frame, &layout, (1 + i * (graph + 1), 1, graph, rows - 1), history, HISTORY, max, color);
+        draw::plot(frame, &layout, (1 + i * (graph + 1), 1, graph, rows - 1), history, max, color, draw::OPAQUE / 2);
     }
 }
 
@@ -317,6 +318,17 @@ mod tests {
         assert!(lit(&frame, 600, 380) && !lit(&frame, 400, 380) && !lit(&frame, 600, 300));
         let has = |frame: &Frame, c: Rgb| frame.rgb.chunks(3).any(|px| px == [c.0, c.1, c.2]);
         assert!(has(&frame, draw::GOOD) && has(&frame, draw::KEY) && has(&frame, draw::ERROR), "graphs, and the CPU use in red");
+
+        // Half as opaque as the window: over white, its panel is lighter.
+        let mut white = Frame::new(640, 400);
+        white.rgb.fill(0xFF);
+        ui.draw_overlay(&mut white);
+        let mut window = Frame::new(640, 400);
+        window.rgb.fill(0xFF);
+        let layout = Layout { x: 0, y: 0, cell_h: 16, cols: 1, rows: 1 };
+        draw::render(&Grid::new(1, 1), &layout, &mut window);
+        let (overlay, panel) = (&white.rgb[(390 * 640 + 630) * 3..][..3], &window.rgb[..3]);
+        assert!(overlay.iter().zip(panel).all(|(o, p)| o > p), "{:?} over {:?}", overlay, panel);
 
         // Not over the window, and not on a picture too small for it.
         ui.open = true;
