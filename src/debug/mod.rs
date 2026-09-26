@@ -1382,6 +1382,7 @@ impl DebugHub {
                     "crtc_offset": format!("{:02X}", crtc[0x13]),
                     "crtc_underline": format!("{:02X}", crtc[0x14]),
                     "crtc_mode_control": format!("{:02X}", crtc[0x17]),
+                    "crtc": crtc.iter().map(|r| format!("{:02X}", r)).collect::<Vec<_>>().join(" "),
                 },
                 // The VESA mode, when one is set.
                 "vbe": cpu.bus.vbe.mode.filter(|_| cpu.bus.video_mode == VideoMode::Vesa).map(|mode| json!({
@@ -1456,6 +1457,8 @@ impl DebugHub {
                     })
                 }),
             },
+            // The keyboard controller: its output buffer and queues.
+            "kbc": cpu.bus.kbc.debug_json(),
             "mouse": {
                 "installed": cpu.bus.mouse.installed,
                 "x": cpu.bus.mouse.x, "y": cpu.bus.mouse.y,

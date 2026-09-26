@@ -76,6 +76,21 @@ impl Default for Kbc {
 }
 
 impl Kbc {
+    /// The controller's state for debuggers.
+    pub fn debug_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "output": self.output.map(|b| format!("{:02X}", b)),
+            "output_aux": self.output_aux,
+            "queue": self.queue.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>(),
+            "aux_queue": self.aux.len(),
+            "command_byte": format!("{:02X}", self.command_byte),
+            "pending_command": self.pending_command.map(|b| format!("{:02X}", b)),
+            "pending_kbd": self.pending_kbd.map(|b| format!("{:02X}", b)),
+            "irq": self.irq,
+            "aux_irq": self.aux_irq,
+        })
+    }
+
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
