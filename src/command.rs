@@ -815,7 +815,10 @@ impl ShellCommand for CdCommand {
                 Some(cwd) => print_string(cpu, &format!("{}:\\{}\r\n", drive_letter(drive), cwd)),
                 None => print_string(cpu, "Invalid drive specification\r\n"),
             }
-        } else if !cpu.bus.disk.set_current_directory(path) {
+        } else if cpu.bus.disk.set_current_directory(path) {
+            let drive = drive_spec.unwrap_or(cpu.bus.disk.get_current_drive());
+            crate::dos_data::write_cds(&mut cpu.bus, drive);
+        } else {
             print_string(cpu, "Invalid directory\r\n");
         }
     }

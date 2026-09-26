@@ -2,7 +2,7 @@
 //! frame, handles, maps, moves, and the extended memory it shares with XMS.
 
 use iced_x86::Register;
-use rust_dos::bus::DOS_LIST_OF_LISTS;
+use rust_dos::dos_data::{NUL_DEVICE, address};
 use rust_dos::cpu::{Cpu, CpuFlags};
 use rust_dos::ems;
 use rust_dos::interrupts::int21;
@@ -111,10 +111,14 @@ fn ems_is_found_by_vector_and_by_device() {
     assert!(int21(&mut cpu, 0x3E00));
 
     // In the device chain, after NUL.
-    let nul = DOS_LIST_OF_LISTS + 0x22;
+    assert_eq!(&after_nul(&cpu), b"EMMXXXX0");
+}
+
+/// The name of the device driver after NUL.
+fn after_nul(cpu: &Cpu) -> Vec<u8> {
+    let nul = address(NUL_DEVICE);
     let next = cpu.get_physical_addr(cpu.bus.read_16(nul + 2), cpu.bus.read_16(nul));
-    let name: Vec<u8> = (0..8).map(|i| cpu.bus.read_8(next + 0x0A + i)).collect();
-    assert_eq!(&name, b"EMMXXXX0");
+    (0..8).map(|i| cpu.bus.read_8(next + 0x0A + i)).collect()
 }
 
 #[test]
@@ -127,7 +131,7 @@ fn without_ems_int67_says_84_and_the_device_is_gone() {
     assert_ne!(&name, b"EMMXXXX0");
     set_name(&mut cpu, "EMMXXXX0");
     assert!(!int21(&mut cpu, 0x3D00));
-    assert_eq!(cpu.bus.read_16(DOS_LIST_OF_LISTS + 0x22), 0xFFFF, "NUL ends the chain again");
+    assert_eq!(&after_nul(&cpu), b"CON     ", "NUL leads to DOS's own devices again");
 }
 
 #[test]

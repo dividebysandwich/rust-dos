@@ -531,7 +531,9 @@ fn ioctl_output(cpu: &mut Cpu, drive: u8, buf: usize) -> u16 {
 pub fn install_device(bus: &mut Bus, nul: usize) {
     let header = 0xF0000 + DEVICE_HEADER as usize;
     let cd_drives = bus.disk.drives_of_kind(DriveKind::CdRom);
-    bus.write_32(header, 0xFFFF_FFFF);
+    // In front of whatever NUL led to.
+    let next = bus.read_32(nul);
+    bus.write_32(header, next);
     bus.write_16(header + 0x04, 0xC800); // character device, IOCTL, open/close
     bus.write_16(header + 0x06, STRATEGY_ENTRY);
     bus.write_16(header + 0x08, INTERRUPT_ENTRY);

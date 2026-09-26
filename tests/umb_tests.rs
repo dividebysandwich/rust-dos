@@ -3,7 +3,7 @@
 //! strategies, and LOADHIGH with a TSR staying there.
 
 use iced_x86::Register;
-use rust_dos::bus::DOS_LIST_OF_LISTS;
+use rust_dos::dos_data::{SYSVARS, address};
 use rust_dos::command::CommandDispatcher;
 use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
 use rust_dos::interrupts::int21;
@@ -56,8 +56,8 @@ fn upper_memory_is_chained_at_9fff() {
     assert_eq!(upper.len(), 1);
     assert_eq!((upper[0].0, upper[0].1.size, upper[0].1.is_free()), (UMB_START, 0x1FFF, true));
     // The List of Lists has them, unlinked.
-    assert_eq!(cpu.bus.read_16(DOS_LIST_OF_LISTS + 0x66), UMB_COVER_SEG);
-    assert_eq!(cpu.bus.read_8(DOS_LIST_OF_LISTS + 0x63), 0);
+    assert_eq!(cpu.bus.read_16(address(SYSVARS) + 0x66), UMB_COVER_SEG);
+    assert_eq!(cpu.bus.read_8(address(SYSVARS) + 0x63), 0);
     // Programs see a byte less of conventional memory, and XMS has no UMBs.
     let mut cpu = cpu;
     cpu.set_reg8(Register::AH, 0x10);
@@ -76,7 +76,7 @@ fn ems_shrinks_upper_memory_to_d000_dfff() {
     cpu.set_upper_memory(true, false).unwrap();
     let &(last, m) = walk(&cpu.bus).last().unwrap();
     assert_eq!(last + 1 + m.size, 0xA000);
-    assert_eq!(cpu.bus.read_16(DOS_LIST_OF_LISTS + 0x66), 0xFFFF);
+    assert_eq!(cpu.bus.read_16(address(SYSVARS) + 0x66), 0xFFFF);
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn link_state_and_strategies() {
     assert!(int21(&mut cpu, 0x5803));
     assert!(int21(&mut cpu, 0x5802));
     assert_eq!(cpu.get_al(), 1);
-    assert_eq!(cpu.bus.read_8(DOS_LIST_OF_LISTS + 0x63), 1);
+    assert_eq!(cpu.bus.read_8(address(SYSVARS) + 0x63), 1);
     let chain = walk(&cpu.bus);
     assert!(chain.iter().any(|&(s, _)| s == UMB_COVER_SEG));
     assert!(chain.iter().any(|&(s, _)| s == UMB_START));

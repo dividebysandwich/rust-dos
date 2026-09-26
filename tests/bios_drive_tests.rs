@@ -1,10 +1,15 @@
 use iced_x86::Register;
-use rust_dos::bus::MEDIA_ID_TABLE;
+use rust_dos::dos_data;
 use rust_dos::cpu::{Cpu, CpuFlags};
 use rust_dos::disk::{DriveKind, MountOptions};
 use rust_dos::interrupts::{int11, int13};
 use std::fs;
 use std::path::PathBuf;
+
+/// The media ID byte in drive `drive`'s DPB.
+fn media_id(cpu: &Cpu, drive: u8) -> u8 {
+    cpu.bus.read_8(dos_data::address(dos_data::dpb(drive)) + 0x17)
+}
 
 fn scratch(name: &str, dirs: &[&str]) -> PathBuf {
     let base = PathBuf::from("target/test_bios_drive").join(name);
@@ -63,15 +68,15 @@ fn equipment_word_and_hard_disk_count_follow_mounts() {
     cpu.load_shell();
     assert_eq!(cpu.bus.read_16(0x0410), 0x0065);
     assert_eq!(cpu.bus.read_8(0x0475), 2);
-    assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE), 0xF0);
-    assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE + 3), 0xF8);
+    assert_eq!(media_id(&cpu, 0), 0xF0);
+    assert_eq!(media_id(&cpu, 3), 0xF8);
 
     cpu.bus.unmount_drive(1).unwrap();
     cpu.bus.unmount_drive(0).unwrap();
     cpu.bus.unmount_drive(3).unwrap();
     assert_eq!(cpu.bus.read_16(0x0410), 0x0024);
     assert_eq!(cpu.bus.read_8(0x0475), 1);
-    assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE), 0);
+    assert_eq!(media_id(&cpu, 0), 0);
 }
 
 #[test]
@@ -143,7 +148,7 @@ fn a_and_b_are_bios_floppies_whatever_their_type() {
         .unwrap();
     assert_eq!(cpu.bus.read_16(0x0410), 0x0065);
     assert_eq!((cpu.bus.cmos.get(0x10), cpu.bus.cmos.get(0x14) & 0xC1), (0x44, 0x41));
-    assert_eq!(cpu.bus.read_8(MEDIA_ID_TABLE + 1), 0xF0);
+    assert_eq!(media_id(&cpu, 1), 0xF0);
     assert_eq!(int13(&mut cpu, 0x15, 0x00), (false, 0x02));
     assert_eq!(int13(&mut cpu, 0x02, 0x00), (true, 0x80));
     assert_eq!(int13(&mut cpu, 0x02, 0x01), (false, 0x00));

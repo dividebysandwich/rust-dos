@@ -1073,6 +1073,7 @@ impl Cpu {
 
         self.bus.disk.close_all_files();
         crate::dos_files::write_table(&mut self.bus);
+        crate::dos_data::write(&mut self.bus);
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }
@@ -1463,6 +1464,7 @@ impl Cpu {
             let end = crate::mcb::low_end(&self.bus) as usize * 16;
             self.bus.fill_ram(self.resident_end as usize * 16..end, 0);
             crate::dos_files::write_table(&mut self.bus);
+            crate::dos_data::write(&mut self.bus);
         }
 
         // Re-install the HLE Interrupt Vectors — only for the top-level load.

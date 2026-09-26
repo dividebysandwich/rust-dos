@@ -7,17 +7,6 @@ use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod state;
 
-/// ROM table of media descriptor bytes, one per drive letter. INT 21h
-/// AH=1Bh/1Ch return a far pointer (F000:E900+drive) into it.
-pub const MEDIA_ID_TABLE: usize = 0xFE900;
-/// ROM table of DOS Drive Parameter Blocks for INT 21h AH=1Fh/32h, one
-/// `DPB_SIZE` slot per drive letter.
-pub const DPB_TABLE: usize = 0xFEA00;
-pub const DPB_SIZE: usize = 0x40;
-/// ROM copy of the DOS List of Lists (SYSVARS) that INT 21h AH=52h points
-/// ES:BX at. The word just below it holds the first MCB segment.
-pub const DOS_LIST_OF_LISTS: usize = 0xFF110;
-
 pub trait Device {
     /// Return the set of I/O ports this device owns.
     ///
@@ -587,8 +576,8 @@ impl Bus {
         result
     }
 
-    /// Mirror the mounted drives into the BIOS data area and the ROM tables
-    /// DOS hands out pointers to. Must run whenever the drive set changes.
+    /// Mirror the mounted drives into the BIOS data area and DOS's data
+    /// segment (`dos_data`). Must run whenever the drive set changes.
     pub fn sync_drive_bda(&mut self) {
         // Equipment word: bit 0 = floppy present, bits 6-7 = floppy count - 1.
         // Only A: and B: are BIOS floppy units. Other bits are left alone.
@@ -604,109 +593,7 @@ impl Bus {
         let hard_disks = self.disk.drives_of_kind(DriveKind::HardDisk).len();
         self.write_8(0x0475, hard_disks.min(0xFF) as u8);
 
-        // CD-ROMs are redirector drives and have no DPB.
-        let with_dpb: Vec<(u8, DriveKind)> = (0..LASTDRIVE)
-            .filter_map(|d| self.disk.drive_kind(d).map(|k| (d, k)))
-            .filter(|&(_, k)| k != DriveKind::CdRom)
-            .collect();
-        for drive in 0..LASTDRIVE {
-            let media = self.disk.media_descriptor(drive);
-            self.write_8(MEDIA_ID_TABLE + drive as usize, media);
-            let base = DPB_TABLE + drive as usize * DPB_SIZE;
-            for i in 0..DPB_SIZE {
-                self.write_8(base + i, 0);
-            }
-        }
-        for (i, &(drive, _)) in with_dpb.iter().enumerate() {
-            let next = with_dpb.get(i + 1).map(|&(d, _)| d);
-            if let Some(layout) = self.disk.layout(drive) {
-                self.write_dpb(drive, layout, next);
-            }
-        }
-        self.write_list_of_lists(&with_dpb);
-    }
-
-    /// Fill in the DOS 5 List of Lists for INT 21h AH=52h. Programs mostly
-    /// read the first MCB segment at offset -2 to walk the memory chain.
-    /// Structures the emulator doesn't keep in DOS memory (CDS, disk
-    /// buffers, CLOCK$/CON drivers) are left as null pointers.
-    fn write_list_of_lists(&mut self, with_dpb: &[(u8, DriveKind)]) {
-        let base = DOS_LIST_OF_LISTS;
-        for i in 0..0x6C {
-            self.write_8(base + i, 0);
-        }
-        self.write_16(base - 2, crate::mcb::FIRST_MCB_SEG); // -2: first MCB
-        // 00: far pointer to the first DPB
-        match with_dpb.first() {
-            Some(&(d, _)) => {
-                self.write_16(base, (DPB_TABLE + d as usize * DPB_SIZE - 0xF0000) as u16);
-                self.write_16(base + 0x02, 0xF000);
-            }
-            None => self.write_32(base, 0xFFFF_FFFF),
-        }
-        // 04: far pointer to the System File Table (dos_files.rs)
-        self.write_16(base + 0x04, 0);
-        self.write_16(base + 0x06, crate::dos_files::SFT_SEGMENT);
-        let max_sector = with_dpb.iter().filter_map(|&(d, _)| self.disk.layout(d)).map(|l| l.bytes_per_sector).max();
-        self.write_16(base + 0x10, max_sector.unwrap_or(512)); // 10: max bytes per sector
-        self.write_8(base + 0x20, with_dpb.len() as u8); // 20: block devices
-        self.write_8(base + 0x21, LASTDRIVE); // 21: LASTDRIVE
-        // 22: NUL device header, the last driver in the chain
-        let nul = base + 0x22;
-        self.write_32(nul, 0xFFFF_FFFF); // next driver
-        self.write_16(nul + 0x04, 0x8004); // character device, NUL
-        let retf = (base + 0x6C - 0xF0000) as u16;
-        self.write_16(nul + 0x06, retf); // strategy entry
-        self.write_16(nul + 0x08, retf); // interrupt entry
-        // The CD-ROM driver follows NUL when there are CD drives, and the
-        // expanded memory manager's device comes before it.
-        crate::interrupts::mscdex::install_device(self, nul);
-        crate::ems::install_device(self, nul);
-        for (i, &b) in b"NUL     ".iter().enumerate() {
-            self.write_8(nul + 0x0A + i, b);
-        }
-        self.write_8(base + 0x43, 3); // 43: boot drive C:
-        // 63: whether upper memory is linked; 66: its first MCB, the one
-        // that covers the memory below it; 68: where allocations search from.
-        self.write_8(base + 0x63, self.umb.is_some_and(|u| u.linked) as u8);
-        self.write_16(base + 0x66, if self.umb.is_some() { crate::mcb::umb_cover_seg(self) } else { 0xFFFF });
-        self.write_16(base + 0x68, crate::mcb::FIRST_MCB_SEG);
-        self.write_8(base + 0x6C, 0xCB); // RETF for the NUL driver entries, past the table
-    }
-
-    /// Fill in a DOS 4+ style Drive Parameter Block with the drive's FAT
-    /// layout: a disk image's own, or a plausible one for its geometry.
-    fn write_dpb(&mut self, drive: u8, layout: crate::disk::FatLayout, next: Option<u8>) {
-        let spc = layout.sectors_per_cluster;
-        let base = DPB_TABLE + drive as usize * DPB_SIZE;
-
-        self.write_8(base, drive); // 00: drive number (0=A)
-        self.write_8(base + 0x01, drive); // 01: unit within driver
-        self.write_16(base + 0x02, layout.bytes_per_sector); // 02: bytes per sector
-        self.write_8(base + 0x04, (spc - 1) as u8); // 04: sectors per cluster - 1
-        self.write_8(base + 0x05, spc.trailing_zeros() as u8); // 05: cluster shift
-        self.write_16(base + 0x06, layout.reserved_sectors); // 06: reserved sectors
-        self.write_8(base + 0x08, layout.fats as u8); // 08: number of FATs
-        self.write_16(base + 0x09, layout.root_entries); // 09: root directory entries
-        self.write_16(base + 0x0B, layout.first_data_sector()); // 0B: first data sector
-        self.write_16(base + 0x0D, layout.clusters.saturating_add(1)); // 0D: highest cluster
-        self.write_16(base + 0x0F, layout.sectors_per_fat); // 0F: sectors per FAT
-        self.write_16(base + 0x11, layout.first_dir_sector()); // 11: first directory sector
-        self.write_8(base + 0x17, layout.media); // 17: media ID
-        self.write_8(base + 0x18, 0x00); // 18: disk accessed
-        // 19: far pointer to the next DPB, FFFF:FFFF ends the chain
-        match next {
-            Some(n) => {
-                self.write_16(base + 0x19, (DPB_TABLE + n as usize * DPB_SIZE - 0xF0000) as u16);
-                self.write_16(base + 0x1B, 0xF000);
-            }
-            None => {
-                self.write_16(base + 0x19, 0xFFFF);
-                self.write_16(base + 0x1B, 0xFFFF);
-            }
-        }
-        self.write_16(base + 0x1D, 2); // 1D: cluster to start free search
-        self.write_16(base + 0x1F, 0xFFFF); // 1F: free clusters unknown
+        crate::dos_data::write(self);
     }
 
     /// Installs a Magic Trap (FE 38 <Vector> CF) at the given Physical Address

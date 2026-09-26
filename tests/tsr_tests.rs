@@ -42,9 +42,40 @@ fn list_of_lists_points_at_first_mcb_and_dpb() {
     let dpb = cpu.get_physical_addr(cpu.bus.read_16(lol + 2), cpu.bus.read_16(lol));
     assert_eq!(cpu.bus.read_8(dpb), 2);
     assert_eq!(cpu.bus.read_8(lol + 0x21), 26); // LASTDRIVE
-    let nul: Vec<u8> = (0..8).map(|i| cpu.bus.read_8(lol + 0x2C + i)).collect();
-    assert_eq!(&nul, b"NUL     ");
-    assert_eq!(cpu.bus.read_16(lol + 0x22), 0xFFFF); // end of the driver chain
+    // In the first 64 KB, where Windows' DOSMGR requires DOS's data.
+    assert!(lol < 0x10000);
+
+    // The driver chain from NUL: DOS's own devices, the disk driver among
+    // them, to the end.
+    let far = |cpu: &Cpu, at: usize| cpu.get_physical_addr(cpu.bus.read_16(at + 2), cpu.bus.read_16(at));
+    let name = |cpu: &Cpu, at: usize| String::from_utf8((0..8).map(|i| cpu.bus.read_8(at + 0x0A + i)).collect()).unwrap();
+    let mut names = Vec::new();
+    let mut at = lol + 0x22;
+    loop {
+        if cpu.bus.read_16(at + 4) & 0x8000 == 0 {
+            // A block device: the number of drives it serves.
+            assert_eq!(cpu.bus.read_8(at + 0x0A), cpu.bus.read_8(lol + 0x20));
+            names.push("(disks)".to_string());
+        } else {
+            names.push(name(&cpu, at).trim_end().to_string());
+        }
+        if cpu.bus.read_16(at) == 0xFFFF {
+            break;
+        }
+        at = far(&cpu, at);
+    }
+    assert_eq!(names, ["NUL", "CON", "AUX", "PRN", "CLOCK$", "(disks)", "COM1", "LPT1"]);
+    // The CLOCK$ and CON devices, the FCB table (one block), and C:'s
+    // current directory structure.
+    assert_eq!(name(&cpu, far(&cpu, lol + 0x08)), "CLOCK$  ");
+    assert_eq!(name(&cpu, far(&cpu, lol + 0x0C)), "CON     ");
+    let fcbs = far(&cpu, lol + 0x1A);
+    assert_eq!((cpu.bus.read_16(fcbs), cpu.bus.read_16(fcbs + 4)), (0xFFFF, 4));
+    let cds = far(&cpu, lol + 0x16) + 2 * 0x58;
+    let path: Vec<u8> = (0..4).map(|i| cpu.bus.read_8(cds + i)).collect();
+    assert_eq!(&path, b"C:\\\0");
+    assert_eq!(cpu.bus.read_16(cds + 0x43), 0x4000);
+    assert_eq!(far(&cpu, cds + 0x45), dpb);
 }
 
 #[test]

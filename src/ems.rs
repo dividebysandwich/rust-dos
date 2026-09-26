@@ -28,6 +28,8 @@ pub const DEVICE_NAME: &[u8; 8] = b"EMMXXXX0";
 /// Where the device header is, in the BIOS ROM at F000:0000, so the name
 /// is at F000:000A, INT 67h's segment.
 const DEVICE_HEADER: usize = 0xF0000;
+/// The device's header as a far pointer, for the file table.
+pub const DEVICE_POINTER: u32 = 0xF000_0000;
 /// A RETF for the device's strategy and interrupt entries, after its header.
 const DEVICE_RETF: u16 = 0x0012;
 /// Handles, the system's handle 0 among them.

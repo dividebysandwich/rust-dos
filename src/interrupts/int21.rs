@@ -3,16 +3,14 @@ use iced_x86::Register;
 
 use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
-use crate::bus::{DOS_LIST_OF_LISTS, DPB_SIZE, DPB_TABLE, MEDIA_ID_TABLE};
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{CharDevice, DriveKind, parse_drive_prefix};
 use crate::diskio;
 use crate::disknoise::Access;
+use crate::dos_data;
 use crate::dos_files;
 use crate::video::print_char;
 
-/// The InDOS flag (AH=34h), with the critical error flag before it.
-const INDOS_FLAG: usize = 0xFF101;
 /// A RETF for the case map routine of the country information.
 const CASE_MAP_ROUTINE: usize = 0xFF0FF;
 /// Volume serial number of drive A:; each drive's is its number more.
@@ -276,7 +274,10 @@ fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
     save_caller(cpu);
+    let (ax, bx, ds) = (cpu.ax(), cpu.bx(), cpu.ds());
+    dos_data::enter_dos(&mut cpu.bus, ax, bx, ds);
     dispatch(cpu, ah);
+    dos_data::leave_dos(&mut cpu.bus, cpu.current_psp);
     // Remember the error of a failed handle or file call for AH=59h. The
     // calls in this range that don't report through CF leave it as the
     // caller had it.
@@ -331,8 +332,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_reg8(Register::AL, spc as u8);
                     cpu.set_cx(bps);
                     cpu.set_dx(total);
-                    cpu.set_ds(0xF000);
-                    cpu.set_bx((MEDIA_ID_TABLE - 0xF0000 + drive as usize) as u16);
+                    let media = cpu.bus.disk.media_descriptor(drive);
+                    cpu.bus.write_8(dos_data::address(dos_data::MEDIA_ID), media);
+                    cpu.set_ds(dos_data::SEGMENT);
+                    cpu.set_bx(dos_data::MEDIA_ID);
                 }
                 None => cpu.set_reg8(Register::AL, 0xFF), // Invalid drive
             }
@@ -347,8 +350,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             match cpu.bus.disk.drive_kind(drive) {
                 Some(kind) if kind != DriveKind::CdRom => {
                     cpu.set_reg8(Register::AL, 0x00);
-                    cpu.set_ds(0xF000);
-                    cpu.set_bx((DPB_TABLE - 0xF0000 + drive as usize * DPB_SIZE) as u16);
+                    cpu.set_ds(dos_data::SEGMENT);
+                    cpu.set_bx(dos_data::dpb(drive));
                 }
                 _ => cpu.set_reg8(Register::AL, 0xFF),
             }
@@ -938,8 +941,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 52h: Get List of Lists. ES:BX -> SYSVARS, first MCB at ES:[BX-2]
         0x52 => {
-            cpu.set_es(0xF000);
-            cpu.set_bx((DOS_LIST_OF_LISTS - 0xF0000) as u16);
+            cpu.set_es(dos_data::SEGMENT);
+            cpu.set_bx(dos_data::SYSVARS);
         }
 
         // AH = 31h: Terminate and Stay Resident
@@ -1074,6 +1077,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let path = read_asciiz_string(&cpu.bus, addr);
             if cpu.bus.disk.set_current_directory(&path) {
+                let drive = cpu.bus.disk.drive_of(&path).unwrap_or(cpu.bus.disk.get_current_drive());
+                dos_data::write_cds(&mut cpu.bus, drive);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 cpu.set_cpu_flag(CpuFlags::CF, true);
@@ -1790,9 +1795,18 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 34h: Address of the InDOS flag. DOS services run in one step
         // here, so it's never set when a program looks.
         0x34 => {
-            cpu.bus.write_8(INDOS_FLAG, 0);
-            cpu.set_es(0xF000);
-            cpu.set_bx((INDOS_FLAG - 0xF0000) as u16);
+            cpu.set_es(dos_data::SEGMENT);
+            cpu.set_bx(dos_data::INDOS);
+        }
+
+        // AX = 5D06h: The swappable data area in DS:SI, its size in CX and
+        // the size of the part always swapped in DX.
+        0x5D if cpu.get_al() == 0x06 => {
+            cpu.set_ds(dos_data::SEGMENT);
+            cpu.set_si(dos_data::SDA);
+            cpu.set_cx(dos_data::SDA_SIZE);
+            cpu.set_dx(dos_data::SDA_ALWAYS);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
         // AH = 37h: Get (AL=00h) or set (AL=01h) the switch character,

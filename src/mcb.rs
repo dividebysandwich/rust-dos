@@ -310,7 +310,7 @@ pub fn link_upper(bus: &mut Bus, on: bool) -> Result<(), ()> {
     }
     write_mcb(bus, last, &Mcb { signature: if on { MCB_M } else { MCB_Z }, ..m });
     bus.umb = Some(Umb { linked: on, ..umb });
-    bus.write_8(crate::bus::DOS_LIST_OF_LISTS + 0x63, on as u8);
+    crate::dos_data::set_upper_linked(bus, on);
     Ok(())
 }
 
