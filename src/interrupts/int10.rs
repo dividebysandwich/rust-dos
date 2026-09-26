@@ -191,10 +191,34 @@ fn emulated_cursor(cpu: &mut Cpu, mut first: u8, mut last: u8) -> (u8, u8) {
     (first, last)
 }
 
-/// The mode a machine's BIOS data area says it is in (0449h): what the
-/// BIOS's services work in for a DOS box whose display Windows keeps.
-pub fn bda_mode(cpu: &mut Cpu) -> Option<VideoMode> {
-    standard_mode(cpu.bus.guest_read_8(0x0449) & 0x7F).map(|(mode, _)| mode)
+/// Program the card as a machine's BIOS data area describes its display,
+/// for a service to a DOS box whose display Windows keeps (the card shows
+/// Windows' desktop): the standard registers of its mode (0449h), with the
+/// font's height (0485h), the start of the active page (044Eh) and the
+/// cursor's shape (0460h) and place (0450h).
+pub fn assume_machine_display(cpu: &mut Cpu) {
+    let Some((mode, _)) = standard_mode(cpu.bus.guest_read_8(0x0449) & 0x7F) else { return };
+    cpu.bus.vbe.reset();
+    cpu.bus.video_mode = mode;
+    cpu.bus.vga.set_video_mode(mode);
+    if text_mode(cpu) {
+        let height = cpu.bus.guest_read_8(0x0485);
+        if (1..=32).contains(&height) {
+            let crtc = &mut cpu.bus.vga.crtc_regs;
+            crtc[0x09] = (crtc[0x09] & 0xE0) | (height - 1);
+        }
+    }
+    let offset = cpu.bus.guest_read_16(0x044E) as usize;
+    let start = if text_mode(cpu) { offset / 2 } else { offset };
+    cpu.bus.vga.crtc_regs[0x0C] = (start >> 8) as u8;
+    cpu.bus.vga.crtc_regs[0x0D] = start as u8;
+    let shape = cpu.bus.guest_read_16(BDA_CURSOR_MODE as u32);
+    let (first, last) = emulated_cursor(cpu, (shape >> 8) as u8, shape as u8);
+    cpu.bus.vga.crtc_regs[0x0A] = first;
+    cpu.bus.vga.crtc_regs[0x0B] = last;
+    let page = active_page(cpu);
+    let (col, row) = get_cursor(cpu, page);
+    set_cursor(cpu, col, row, page);
 }
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the

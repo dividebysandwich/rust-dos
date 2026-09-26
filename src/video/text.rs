@@ -79,7 +79,10 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
     let (_, _, wrap) = bus.vga.text_window();
     // The CRTC counts the Start Address in characters: two bytes each.
     let start = (bus.vga.latched_start_addr * 2) & wrap;
-    let rows = bus.text_rows();
+    let rows = match crtc_shape(bus) {
+        Some((rows, _)) => rows,
+        None => bus.text_rows(),
+    };
     match bus.video_mode {
         VideoMode::Text80x25 | VideoMode::Text80x25Color => {
             let (font, font_h) = font_of_height(bus);
@@ -158,11 +161,33 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
 /// Commander switch to 80x50 by loading the 8x8 font (INT 10h AH=11h
 /// AL=12h), and the EGA's text is in its 8x14.
 fn font_of_height(bus: &Bus) -> (&'static [u8], usize) {
-    match bus.read_16(0x0485) {
+    let height = match crtc_shape(bus) {
+        Some((_, height)) => height as u16,
+        None => bus.read_16(0x0485),
+    };
+    match height {
         1..=10 => (FONT_8X8, 8),
         11..=14 => (FONT_8X14, 14),
         _ => (FONT_8X16, 16),
     }
+}
+
+/// The rows and the character height of an EGA's or VGA's text screen as
+/// the CRTC has them, on a booted machine: its BIOS data area may not be
+/// the one of the machine on the screen (a DOS box's under Windows). The
+/// cells are Maximum Scan Line (09h) + 1 lines high, in the lines the
+/// Vertical Display End (12h and the Overflow's bits) shows.
+fn crtc_shape(bus: &Bus) -> Option<(usize, usize)> {
+    if bus.boot.is_none() || !bus.vga.adapter.ega_bios() {
+        return None;
+    }
+    let crtc = &bus.vga.crtc_regs;
+    let height = (crtc[0x09] & 0x1F) as usize + 1;
+    let mut lines = (crtc[0x12] as usize | (crtc[0x07] as usize & 0x02) << 7 | (crtc[0x07] as usize & 0x40) << 3) + 1;
+    if crtc[0x09] & 0x80 != 0 {
+        lines /= 2;
+    }
+    Some(((lines / height).clamp(1, 60), height))
 }
 
 /// The CGA's text screen, as its 6845 has it: R1 characters a row, R6

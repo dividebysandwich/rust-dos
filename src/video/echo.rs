@@ -61,11 +61,14 @@ impl Registers {
         r
     }
 
-    /// Have the CRTC registers `indices` written whatever the card held,
-    /// as a DOS box Windows keeps has its own.
-    pub fn forget_crtc(&mut self, after: &Registers, indices: &[usize]) {
-        for &i in indices {
-            self.crtc[i] = !after.crtc[i];
+    /// Have the attribute controller's palette and the DAC's written
+    /// whatever they held, which a machine's BIOS data area doesn't tell.
+    pub fn forget_palette(&mut self, after: &Registers) {
+        for (old, new) in self.attributes.iter_mut().zip(&after.attributes) {
+            *old = !*new;
+        }
+        for (old, new) in self.palette.iter_mut().zip(&after.palette) {
+            *old = !*new & 0x3F;
         }
     }
 
