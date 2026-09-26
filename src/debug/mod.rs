@@ -1393,6 +1393,20 @@ impl DebugHub {
                     "display_start": format!("{:X}", cpu.bus.vbe.latched_start),
                     "dac_bits": if cpu.bus.vga.dac_8bit { 8 } else { 6 },
                 })),
+                // An S3's extended CRTC registers (30h-6Fh, a row of 16
+                // each) and its hardware cursor.
+                "s3": (cpu.bus.vga.adapter == crate::video::adapter::Adapter::S3).then(|| {
+                    let s3 = &cpu.bus.vga.s3;
+                    json!({
+                        "crtc": (0x30..0x70usize).step_by(16).map(|row| {
+                            (row..row + 16).map(|i| format!("{:02X}", s3.crtc(i as u8))).collect::<Vec<_>>().join(" ")
+                        }).collect::<Vec<_>>(),
+                        "cursor": s3.cursor().map(|c| json!({
+                            "x": c.x, "y": c.y, "skip_x": c.skip_x, "skip_y": c.skip_y,
+                            "address": format!("{:X}", c.address), "x11": c.x11,
+                        })),
+                    })
+                }),
                 // The display timing programs see through port 3DAh.
                 "crt": {
                     "hz": (timing.hz() * 100.0).round() / 100.0,
