@@ -11,6 +11,7 @@ use crate::instructions::operand::{addr_size, mem_seg};
 
 /// Flags bits the flag instructions change.
 const CF: u32 = 0x0001;
+const IF: u32 = 0x0200;
 const DF: u32 = 0x0400;
 
 /// The operations for `instr`, or None if it runs through its handler.
@@ -47,6 +48,11 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool) -> Option<Vec<Uo
         Stc => flag(CF, Some(true), &mut u),
         Cmc => flag(CF, None, &mut u),
         Cld => flag(DF, Some(false), &mut u),
+        Cli => {
+            // (Clearing IF makes no interrupt deliverable: the block goes on.)
+            u.push(Uop::CheckIopl);
+            flag(IF, Some(false), &mut u)
+        }
         Std => flag(DF, Some(true), &mut u),
         Nop => instr.op_count() == 0,
         Imul => imul(instr, &mut u),
@@ -180,6 +186,12 @@ fn imm(instr: &Instruction, size: u8) -> u32 {
 }
 
 fn mov(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    if instr.op_count() == 2
+        && instr.op1_kind() == OpKind::Register
+        && let Some(seg) = Seg::from_register(instr.op1_register())
+    {
+        return mov_from_seg(instr, seg, u);
+    }
     let Some((form, size)) = form(instr) else { return false };
     let r0 = gpr(instr.op0_register());
     let r1 = gpr(instr.op1_register());
@@ -564,6 +576,9 @@ fn push_t0(size: u8, stack32: bool, u: &mut Vec<Uop>) {
 }
 
 fn push(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    if instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() {
+        return push_seg(instr, stack32, u);
+    }
     let size = match instr.code() {
         Code::Push_r16 | Code::Push_imm16 | Code::Pushw_imm8 => 2,
         Code::Push_r32 | Code::Pushd_imm32 | Code::Pushd_imm8 => 4,
@@ -602,6 +617,46 @@ fn pop(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     // The stack pointer first: POP ESP loads the popped value.
     u.push(Uop::Set { r: sp(stack32), t: T1 });
     u.push(Uop::Set { r, t: T0 });
+    true
+}
+
+/// MOV r/m16, Sreg: the selector into a word of memory, or a register,
+/// zero-extended into a 32-bit one.
+fn mov_from_seg(instr: &Instruction, seg: Seg, u: &mut Vec<Uop>) -> bool {
+    match instr.op0_kind() {
+        OpKind::Register => {
+            let Some(r) = gpr(instr.op0_register()).filter(|r| r.size > 1) else { return false };
+            u.push(Uop::GetSeg { t: T0, seg });
+            u.push(Uop::Set { r, t: T0 });
+        }
+        OpKind::Memory => {
+            if mem(instr, T1, 2, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::GetSeg { t: T0, seg });
+            u.push(Uop::Store { m: T1, src: T0, size: 2 });
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// PUSH Sreg: with a 32-bit operand size, a 386 or 486 writes the selector
+/// into the low word of the dword slot, as `transfer::push` does.
+fn push_seg(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(seg) = Seg::from_register(instr.op0_register()) else { return false };
+    let sp = sp(stack32);
+    u.push(Uop::GetSeg { t: T0, seg });
+    if instr.stack_pointer_increment() == -2 {
+        push_t0(2, stack32, u);
+    } else {
+        u.push(Uop::Get { t: T1, r: sp });
+        u.push(Uop::AddConst { t: T1, v: 4u32.wrapping_neg(), size: sp.size });
+        u.push(Uop::Copy { dst: T2, src: T1 });
+        u.push(Uop::MemRef { t: T2, seg: Seg::SS, size: 2, write: true, slot: 0 });
+        u.push(Uop::Store { m: T2, src: T0, size: 2 });
+    }
+    u.push(Uop::Set { r: sp, t: T1 });
     true
 }
 

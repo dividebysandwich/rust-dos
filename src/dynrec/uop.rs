@@ -146,6 +146,10 @@ pub enum Uop {
     SetCond { t: T, cc: ConditionCode },
     /// #GP(0) if the value is past the CS limit (a near jump's target).
     CheckLimit { src: Src },
+    /// #GP(0) in protected mode if CPL is above IOPL (CLI).
+    CheckIopl,
+    /// t = the segment register's selector.
+    GetSeg { t: T, seg: Seg },
     /// Leave the block with EIP = the value.
     Exit { eip: Src },
     /// Leave the block at `taken` if the condition holds (#GP(0) if that

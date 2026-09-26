@@ -13,6 +13,7 @@ pub const FLAGS: usize = offset_of!(Cpu, flags);
 /// The segment registers' caches, ES, CS, SS, DS, FS, GS.
 pub const SEG: usize = offset_of!(Cpu, seg);
 pub const SEG_SIZE: usize = size_of::<SegCache>();
+pub const SEG_SELECTOR: usize = offset_of!(SegCache, selector);
 pub const SEG_BASE: usize = offset_of!(SegCache, base);
 pub const SEG_LIMIT: usize = offset_of!(SegCache, limit);
 pub const SEG_LO: usize = offset_of!(SegCache, lo);

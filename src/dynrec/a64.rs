@@ -806,6 +806,21 @@ impl Gen<'_> {
                     self.flag_op(arith, set, self.dirty);
                 }
             }
+            Uop::CheckIopl => {
+                let (gp, ok) = (self.fault_exit(EXIT_GP0), self.ops.new_dynamic_label());
+                self.field(Access::Ldr32, 0, layout::CR0);
+                dynasm!(self.ops ; .arch aarch64 ; tbz w0, 0, =>ok);
+                self.field(Access::Ldr8, 1, layout::CPL);
+                self.field(Access::Ldr32, 2, layout::FLAGS);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ubfx w2, w2, 12, 2
+                    ; cmp w1, w2
+                    ; b.hi =>gp
+                    ; =>ok
+                );
+            }
+            Uop::GetSeg { t, seg } => self.field(Access::Ldr16, r(t), seg_field(seg, layout::SEG_SELECTOR)),
             Uop::CheckLimit { src } => {
                 self.value_w0(src);
                 let gp = self.fault_exit(EXIT_GP0);

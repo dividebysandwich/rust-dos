@@ -63,9 +63,12 @@ impl Uop {
             Uop::ShiftVar { op, .. } => shift_flags(op),
             Uop::DoubleShiftVar { .. } => CF | OF | SZP,
             Uop::Bail { .. } => ARITH,
-            Uop::MemRef { .. } | Uop::CheckLimit { .. } | Uop::DivWide { .. } | Uop::Exit { .. } | Uop::ExitIf { .. } => {
-                ARITH
-            }
+            Uop::MemRef { .. }
+            | Uop::CheckLimit { .. }
+            | Uop::CheckIopl
+            | Uop::DivWide { .. }
+            | Uop::Exit { .. }
+            | Uop::ExitIf { .. } => ARITH,
             _ => 0,
         }
     }

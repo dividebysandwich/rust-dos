@@ -151,6 +151,7 @@ Each instruction becomes one of two things:
   - LEA, MOVZX, MOVSX, XCHG of registers, CBW, CWD, CWDE and CDQ;
   - the flag instructions, and SETcc;
   - PUSH and POP of registers and constants, PUSHA and POPA;
+  - MOV and PUSH of segment registers (reading their selectors), and CLI;
   - near JMP, CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ.
 

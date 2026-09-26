@@ -888,11 +888,7 @@ fn pushad_and_popad_are_translated() {
     let stats = run_both(&mut a, &mut b);
     assert_eq!((b.cpu.eax(), b.cpu.ebx(), b.cpu.esp()), (1001, 2, STACK0_TOP));
     if AVAILABLE {
-        // No more instructions through their handlers than getting to
-        // protected mode takes.
-        let (mut a, mut b) = twins(|rig| rig.load(CODE, &asm32(CODE, |a| a.nop().and_then(|_| a.hlt()))));
-        let setup = run_both(&mut a, &mut b);
-        assert_eq!(stats.instructions - stats.native, setup.instructions - setup.native, "{:?}", stats);
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
     }
 }
 
@@ -944,6 +940,80 @@ fn a_popad_past_the_stack_limit_loads_the_registers_below_it() {
     let (vector, _) = b.recorded();
     assert_eq!(vector, 12);
     assert_eq!((b.cpu.ebp(), b.cpu.ebx(), b.cpu.edx()), (0xA2, 0x44, 0x33));
+}
+
+/// How many instructions of a run went through their handlers beyond
+/// what getting to protected mode takes.
+fn untranslated(stats: &DynStats) -> u64 {
+    let (mut a, mut b) = twins(|rig| rig.load(CODE, &asm32(CODE, |a| a.nop().and_then(|_| a.hlt()))));
+    let setup = run_both(&mut a, &mut b);
+    (stats.instructions - stats.native) - (setup.instructions - setup.native)
+}
+
+#[test]
+fn selectors_are_read_and_pushed_in_translated_code() {
+    // MOV r/m, Sreg and PUSH Sreg of both sizes (a 32-bit push writes the
+    // selector's word of the slot), and CLI, 100 times.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ecx, 100u32)?;
+            a.mov(ebx, 0xFFFF_FFFFu32)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            a.mov(word_ptr(DATA), ds)?;
+            a.mov(ebx, ss)?;
+            a.mov(si, es)?;
+            a.push(0xFFFF_FFFFu32)?;
+            a.pop(eax)?;
+            a.push(fs)?; // PUSHD FS over the slot of FFFFFFFFh
+            a.pop(eax)?;
+            a.db(&[0x66, 0x0F, 0xA8])?; // PUSHW GS
+            a.pop(dx)?;
+            a.cli()?;
+            a.dec(ecx)?;
+            a.jnz(CODE as u64 + 0x100)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.eax(), 0xFFFF_0000 | DATA32 as u32, "PUSHD FS writes the low word");
+    assert_eq!((b.cpu.ebx(), b.cpu.esi() & 0xFFFF), (DATA32 as u32, DATA32 as u32));
+    assert_eq!(b.read32(DATA) & 0xFFFF, DATA32 as u32);
+    if AVAILABLE {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+}
+
+/// Ring 3 code that runs CLI with IOPL `iopl`, and the #GP it may raise
+/// recorded.
+fn cli_at_ring_3(iopl: u32) -> Rig {
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.pushfd()?;
+            a.or(dword_ptr(esp), (iopl << 12) as i32)?;
+            a.popfd()?;
+            to_ring3(a)
+        }));
+        rig.ring3(|a| {
+            a.mov(ebx, 1u32)?;
+            a.cli()?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        });
+    });
+    run_both(&mut a, &mut b);
+    b
+}
+
+#[test]
+fn cli_above_iopl_is_a_general_protection_fault() {
+    let b = cli_at_ring_3(3);
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (0, 2), "no fault");
+    let b = cli_at_ring_3(0);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[1], b.cpu.ebx()), (GP as u32, RING3 + 5, 1), "#GP at the CLI");
 }
 
 #[test]

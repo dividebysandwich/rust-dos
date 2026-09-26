@@ -755,6 +755,24 @@ impl Gen<'_> {
                     self.flag_op(arith, set, self.dirty);
                 }
             }
+            Uop::CheckIopl => {
+                let (gp, ok) = (self.fault_exit(EXIT_GP0), self.ops.new_dynamic_label());
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test BYTE [rbx + CR0], crate::cpu::CR0_PE as i8
+                    ; jz =>ok
+                    ; movzx eax, BYTE [rbx + CPL]
+                    ; mov ecx, DWORD [rbx + FLAGS]
+                    ; shr ecx, 12
+                    ; and ecx, 3
+                    ; cmp eax, ecx
+                    ; ja =>gp
+                    ; =>ok
+                );
+            }
+            Uop::GetSeg { t, seg } => {
+                dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + seg_field(seg, layout::SEG_SELECTOR)]);
+            }
             Uop::CheckLimit { src } => {
                 self.value_eax(src);
                 let gp = self.fault_exit(EXIT_GP0);
