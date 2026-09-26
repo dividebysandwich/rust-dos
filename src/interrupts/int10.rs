@@ -122,6 +122,81 @@ fn active_page(cpu: &mut Cpu) -> u8 {
     cpu.bus.guest_read_8(0x0462)
 }
 
+/// A standard mode by its number, and its name.
+fn standard_mode(mode: u8) -> Option<(VideoMode, &'static str)> {
+    match mode {
+        0x00 => Some((VideoMode::Text40x25, "Text Mode (40x25)")),
+        0x01 => Some((VideoMode::Text40x25Color, "Text Mode (40x25 Color)")),
+        0x02 => Some((VideoMode::Text80x25, "Text Mode (80x25)")),
+        0x03 => Some((VideoMode::Text80x25Color, "Text Mode (80x25 Color)")),
+        0x04 => Some((VideoMode::Cga320x200Color, "CGA Graphics Mode (320x200 Color)")),
+        0x05 => Some((VideoMode::Cga320x200, "CGA Graphics Mode (320x200)")),
+        0x06 => Some((VideoMode::Cga640x200, "CGA Graphics Mode (640x200)")),
+        0x07 => Some((VideoMode::Mono80x25, "Monochrome Text Mode (80x25)")),
+        0x08 => Some((VideoMode::Tandy160x200x16, "Tandy/PCjr Graphics Mode (160x200 16-color)")),
+        0x09 => Some((VideoMode::Tandy320x200x16, "Tandy/PCjr Graphics Mode (320x200 16-color)")),
+        0x0A => Some((VideoMode::Tandy640x200x4, "Tandy/PCjr Graphics Mode (640x200 4-color)")),
+        0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
+        0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
+        0x0F => Some((VideoMode::Ega640x350Mono, "EGA Graphics Mode (640x350 monochrome)")),
+        0x10 => Some((VideoMode::Ega640x350, "EGA Graphics Mode (640x350 16-color)")),
+        0x11 => Some((VideoMode::Vga640x480Mono, "VGA Graphics Mode (640x480 2-color)")),
+        0x12 => Some((VideoMode::Vga640x480, "VGA Graphics Mode (640x480 16-color)")),
+        0x13 => Some((VideoMode::Graphics320x200, "Graphics Mode (320x200)")),
+        _ => None,
+    }
+}
+
+/// The cursor lines an EGA's or VGA's BIOS gives the CRTC for the shape
+/// `first` to `last` a program asks for (AH=01h): unless the BIOS data
+/// area's video control byte (0487h) turns it off, a CGA's shape (in 8
+/// lines) as the same one in the font's lines (0485h). DOSBox-X's
+/// `INT10_SetCursorShape`, after IBM's VGA BIOS.
+fn emulated_cursor(cpu: &mut Cpu, mut first: u8, mut last: u8) -> (u8, u8) {
+    let control = cpu.bus.guest_read_8(0x0487);
+    if control & 0x08 != 0 {
+        return (first, last);
+    }
+    // Invisible, CGA style.
+    if first & 0x60 == 0x20 {
+        return (0x3E, 0x00);
+    }
+    if control & 0x01 != 0 || first & 0xE0 != 0 || last & 0xE0 != 0 {
+        return (first, last);
+    }
+    let height = cpu.bus.guest_read_8(0x0485).wrapping_sub(1);
+    if last < first {
+        if last != 0 {
+            first = last;
+            last = height;
+        }
+    } else if (first | last) >= height || last != height.wrapping_sub(1) || first != height {
+        if last <= 3 {
+            return (first, last);
+        }
+        if first + 2 < last {
+            if first > 2 {
+                first = (height + 1) / 2;
+            }
+            last = height;
+        } else {
+            first = first.wrapping_sub(last).wrapping_add(height);
+            last = height;
+            if height > 0x0C {
+                first = first.wrapping_sub(1);
+                last -= 1;
+            }
+        }
+    }
+    (first, last)
+}
+
+/// The mode a machine's BIOS data area says it is in (0449h): what the
+/// BIOS's services work in for a DOS box whose display Windows keeps.
+pub fn bda_mode(cpu: &mut Cpu) -> Option<VideoMode> {
+    standard_mode(cpu.bus.guest_read_8(0x0449) & 0x7F).map(|(mode, _)| mode)
+}
+
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the
 /// contents of video memory). This also leaves a VESA mode.
 pub fn set_mode(cpu: &mut Cpu, al: u8) {
@@ -142,27 +217,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);
 
-    let new_mode = match mode {
-        0x00 => Some((VideoMode::Text40x25, "Text Mode (40x25)")),
-        0x01 => Some((VideoMode::Text40x25Color, "Text Mode (40x25 Color)")),
-        0x02 => Some((VideoMode::Text80x25, "Text Mode (80x25)")),
-        0x03 => Some((VideoMode::Text80x25Color, "Text Mode (80x25 Color)")),
-        0x04 => Some((VideoMode::Cga320x200Color, "CGA Graphics Mode (320x200 Color)")),
-        0x05 => Some((VideoMode::Cga320x200, "CGA Graphics Mode (320x200)")),
-        0x06 => Some((VideoMode::Cga640x200, "CGA Graphics Mode (640x200)")),
-        0x07 => Some((VideoMode::Mono80x25, "Monochrome Text Mode (80x25)")),
-        0x08 => Some((VideoMode::Tandy160x200x16, "Tandy/PCjr Graphics Mode (160x200 16-color)")),
-        0x09 => Some((VideoMode::Tandy320x200x16, "Tandy/PCjr Graphics Mode (320x200 16-color)")),
-        0x0A => Some((VideoMode::Tandy640x200x4, "Tandy/PCjr Graphics Mode (640x200 4-color)")),
-        0x0D => Some((VideoMode::Ega320x200, "EGA Graphics Mode (320x200 16-color)")),
-        0x0E => Some((VideoMode::Ega640x200, "EGA Graphics Mode (640x200 16-color)")),
-        0x0F => Some((VideoMode::Ega640x350Mono, "EGA Graphics Mode (640x350 monochrome)")),
-        0x10 => Some((VideoMode::Ega640x350, "EGA Graphics Mode (640x350 16-color)")),
-        0x11 => Some((VideoMode::Vga640x480Mono, "VGA Graphics Mode (640x480 2-color)")),
-        0x12 => Some((VideoMode::Vga640x480, "VGA Graphics Mode (640x480 16-color)")),
-        0x13 => Some((VideoMode::Graphics320x200, "Graphics Mode (320x200)")),
-        _ => None,
-    };
+    let new_mode = standard_mode(mode);
     match new_mode {
         Some((new_mode, name)) => {
             cpu.bus.log_string(&format!("[BIOS] Switch to {}", name));
@@ -191,6 +246,16 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         } else {
             cpu.bus.fill_ram(base..base + size, 0);
         }
+    } else if !keep && cpu.v86() {
+        // Under a V86 monitor the BIOS clears the memory the machine has
+        // where it maps it, on its way out (Windows gives a DOS box in a
+        // window a copy of it, and maps it in a page at a time).
+        let (segment, words, value) = match mode {
+            0x00..=0x03 | 0x07 => ((cpu.bus.vga.text_window().0 >> 4) as u16, 0x4000, 0x0720),
+            0x04..=0x06 => (0xB800, 0x2000, 0),
+            _ => (0xA000, 0x8000, 0),
+        };
+        cpu.bus.port_accesses.push_back(crate::bios::PortAccess::Fill { segment, words, value });
     } else if !keep {
         let vga = &mut cpu.bus.vga;
         match mode {
@@ -396,6 +461,13 @@ pub fn handle(cpu: &mut Cpu) {
         0x01 => {
             let cx = cpu.cx();
             cpu.bus.guest_write_16(0x0460, cx);
+            // The CRTC's Cursor Start and End, a CGA's shape made the
+            // font's.
+            if adapter.ega_bios() {
+                let (first, last) = emulated_cursor(cpu, (cx >> 8) as u8, cx as u8);
+                cpu.bus.vga.crtc_regs[0x0A] = first;
+                cpu.bus.vga.crtc_regs[0x0B] = last;
+            }
         }
 
         // AH = 02h: Set Cursor Position
@@ -404,11 +476,7 @@ pub fn handle(cpu: &mut Cpu) {
             let row = cpu.get_reg8(Register::DH);
             let col = cpu.get_reg8(Register::DL);
 
-            if page < 8 {
-                let cursor_addr = 0x450 + (page * 2);
-                cpu.bus.guest_write_8((cursor_addr) as u32, col);
-                cpu.bus.guest_write_8((cursor_addr + 1) as u32, row);
-            }
+            set_cursor(cpu, col, row, page as u8);
         }
 
         // AH = 03h: Get Cursor Position
@@ -1262,6 +1330,15 @@ fn set_cursor(cpu: &mut Cpu, col: u8, row: u8, page: u8) {
         let addr = BDA_CURSOR_POS + (page as usize * 2);
         cpu.bus.guest_write_8((addr) as u32, col);
         cpu.bus.guest_write_8((addr + 1) as u32, row);
+        // The CRTC's cursor, for the page on the screen in a text mode:
+        // its cell from the start of video memory (the page's start, BDA
+        // 044Eh, counts bytes).
+        if cpu.bus.vga.adapter.ega_bios() && text_mode(cpu) && page == active_page(cpu) {
+            let start = cpu.bus.guest_read_16(0x044E) as usize / 2;
+            let location = start + row as usize * text_cols(cpu) + col as usize;
+            cpu.bus.vga.crtc_regs[0x0E] = (location >> 8) as u8;
+            cpu.bus.vga.crtc_regs[0x0F] = location as u8;
+        }
 
         // Update Internal State (If Active Page)
         // This fixes the desync where renderer looked at old internal state

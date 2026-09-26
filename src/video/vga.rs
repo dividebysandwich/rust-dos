@@ -660,6 +660,11 @@ impl VgaCard {
         DacTable::for_mode(mode).load(&mut self.palette);
     }
 
+    /// The timing given the display instead of the registers', if any.
+    pub fn fixed_timing(&self) -> Option<CrtTiming> {
+        self.fixed_timing
+    }
+
     /// Give the display a timing the registers don't describe (a VESA
     /// mode's), or with None go back to the registers'.
     pub fn set_fixed_timing(&mut self, timing: Option<CrtTiming>) {

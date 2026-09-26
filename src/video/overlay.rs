@@ -17,10 +17,12 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
     // 0450h, two bytes a page) and with the shape in BDA 0460h, whose
     // scanlines count in the font's rows.
     if let Some(geometry) = super::text::geometry(bus) {
-        let page = bus.read_8(0x0462).min(7) as usize;
-        let cursor_col = bus.read_8(0x0450 + page * 2) as usize;
-        let cursor_row = bus.read_8(0x0451 + page * 2) as usize;
-        let cursor_shape = bus.read_16(0x0460);
+        let (cursor_col, cursor_row, cursor_shape) = if bus.boot.is_some() && bus.vga.adapter.ega_bios() {
+            crtc_cursor(bus, geometry.cols)
+        } else {
+            let page = bus.read_8(0x0462).min(7) as usize;
+            (bus.read_8(0x0450 + page * 2) as usize, bus.read_8(0x0451 + page * 2) as usize, bus.read_16(0x0460))
+        };
         let start_scan = (cursor_shape >> 8) as u8;
         let end_scan = (cursor_shape & 0xFF) as u8;
         // Bit 5 of Start Scanline indicates "Invisible" in VGA hardware
@@ -53,6 +55,20 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
         let sy = (bus.mouse.y as i64 * height as i64 / virt_h as i64) as i32;
         draw_default_mouse_cursor(frame, sx, sy);
     }
+}
+
+/// The cursor as the CRTC has it on a booted machine, whose BIOS data area
+/// may not be the one the machine on the screen has (a DOS box's under
+/// Windows): its column and row from the Cursor Location registers (0Eh,
+/// 0Fh) less the Start Address (0Ch, 0Dh), and its shape (0Ah, 0Bh) as BDA
+/// 0460h keeps it.
+fn crtc_cursor(bus: &Bus, cols: usize) -> (usize, usize, u16) {
+    let crtc = &bus.vga.crtc_regs;
+    let location = (crtc[0x0E] as usize) << 8 | crtc[0x0F] as usize;
+    let start = (crtc[0x0C] as usize) << 8 | crtc[0x0D] as usize;
+    let offset = location.wrapping_sub(start) & 0x3FFF;
+    let cols = cols.max(1);
+    (offset % cols, offset / cols, (crtc[0x0A] as u16) << 8 | (crtc[0x0B] & 0x1F) as u16)
 }
 
 /// Convert mouse coordinates in the picture's pixels (`frame`'s, as the

@@ -161,10 +161,42 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             // through the ports again on the way out (`return_from_hle`).
             let echo = cpu.v86() && cpu.bus.vga.adapter.ega_bios();
             let before = echo.then(|| crate::video::echo::Registers::of(&cpu.bus.vga));
+            // One whose ports it traps (a DOS box in a window) doesn't
+            // reach the card at all: the monitor keeps that machine's
+            // display from the port writes, or passes them on.
+            let display = (echo && cpu.check_io(0x3D4, 1).is_err()).then(|| crate::video::echo::Display::of(&cpu.bus));
+            // Its services work in the mode the machine is in, not the
+            // card's (Windows' desktop).
+            if display.is_some()
+                && let Some(mode) = int10::bda_mode(cpu)
+            {
+                cpu.bus.video_mode = mode;
+            }
+            let queued = cpu.bus.port_accesses.len();
+            let ah = cpu.get_reg8(iced_x86::Register::AH);
             int10::handle(cpu);
-            if let Some(before) = before {
+            if let Some(mut before) = before {
+                // The registers first, then what the service left (a mode
+                // set's clearing of the memory the new mode maps).
                 let after = crate::video::echo::Registers::of(&cpu.bus.vga);
+                if display.is_some() {
+                    // What the card held isn't what the machine's registers
+                    // hold: the registers the service sets are written
+                    // whatever the card had, all of them for a mode.
+                    match ah {
+                        0x00 | 0x11 | 0x12 | 0x1C => before = crate::video::echo::Registers::unknown(&after),
+                        0x01 => before.forget_crtc(&after, &[0x0A, 0x0B]),
+                        0x02 | 0x0E | 0x13 => before.forget_crtc(&after, &[0x0E, 0x0F]),
+                        0x05 => before.forget_crtc(&after, &[0x0C, 0x0D, 0x0E, 0x0F]),
+                        _ => {}
+                    }
+                }
+                let service = cpu.bus.port_accesses.split_off(queued);
                 cpu.bus.port_accesses.extend(crate::video::echo::writes(&before, &after));
+                cpu.bus.port_accesses.extend(service);
+            }
+            if let Some(display) = display {
+                display.restore(&mut cpu.bus);
             }
         }
         0x11 => int11::handle(cpu),

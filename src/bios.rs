@@ -297,30 +297,7 @@ pub fn install(bus: &mut Bus) {
     );
     // Services in V86 mode: make each port access the service left, then
     // return.
-    write_rom(
-        bus,
-        PORT_ACCESSES,
-        &[
-            0x50, 0x51, 0x52, // PUSH AX, CX, DX
-            0xFE, 0x39, SERVICE_PORT_ACCESS, // next: DX the port, AH what to do
-            0x80, 0xFC, 0x01, // CMP AH, 1
-            0x72, 0x0B, // JB write
-            0x74, 0x0C, // JE read
-            0x80, 0xFC, 0x02, // CMP AH, 2
-            0x74, 0x0A, // JE update
-            0x5A, 0x59, 0x58, // POP DX, CX, AX
-            0xCF, // IRET
-            0xEE, // write: OUT DX, AL
-            0xEB, 0xEA, // JMP next
-            0xEC, // read: IN AL, DX
-            0xEB, 0xE7, // JMP next
-            0xEC, // update: IN AL, DX
-            0x22, 0xC1, // AND AL, CL
-            0x0A, 0xC5, // OR AL, CH
-            0xEE, // OUT DX, AL
-            0xEB, 0xDF, // JMP next
-        ],
-    );
+    write_rom(bus, PORT_ACCESSES, &port_access_loop());
     write_rom(bus, KBD_HANDLER, &keyboard_handler());
     // The Plug and Play BIOS's and APM's entry points: the service, then a
     // far return (32-bit in APM's 32-bit code segment).
@@ -336,6 +313,41 @@ pub fn install(bus: &mut Bus) {
     write_ivt(bus, &default_ivt());
     // The video BIOS's VESA data.
     crate::interrupts::vbe::install_rom(bus);
+}
+
+/// The way out of services in V86 mode (`PORT_ACCESSES`): each port access
+/// or memory fill the service left (`next_port_access`), made by the
+/// processor as a BIOS makes it, then IRET. A fill is a REP STOSW, which
+/// goes on after a page fault from where it stopped: a V86 monitor maps a
+/// machine's video memory a page at a time.
+fn port_access_loop() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(PORT_ACCESSES);
+    a.op(&[0x50, 0x53, 0x51, 0x52, 0x57, 0x06]); // PUSH AX, BX, CX, DX, DI, ES
+    a.label("next");
+    a.op(&[0xFE, 0x39, SERVICE_PORT_ACCESS]); // BL: what to do
+    a.op(&[0x80, 0xFB, 0x01]); // CMP BL, 1
+    a.jump(0x72, "write");
+    a.jump(0x74, "read");
+    a.op(&[0x80, 0xFB, 0x02]); // CMP BL, 2
+    a.jump(0x74, "update");
+    a.op(&[0x80, 0xFB, 0x03]); // CMP BL, 3
+    a.jump(0x74, "fill");
+    a.op(&[0x07, 0x5F, 0x5A, 0x59, 0x5B, 0x58, 0xCF]); // POP ES, DI, DX, CX, BX, AX; IRET
+    a.label("write");
+    a.op(&[0xEE]); // OUT DX, AL
+    a.jump(0xEB, "next");
+    a.label("read");
+    a.op(&[0xEC]); // IN AL, DX
+    a.jump(0xEB, "next");
+    a.label("update");
+    a.op(&[0xEC, 0x22, 0xC1, 0x0A, 0xC5, 0xEE]); // IN AL, DX; AND AL, CL; OR AL, CH; OUT DX, AL
+    a.jump(0xEB, "next");
+    a.label("fill");
+    a.op(&[0xFC, 0xF3, 0xAB]); // CLD; REP STOSW
+    a.jump(0xEB, "next");
+    let code = a.finish();
+    assert!(PORT_ACCESSES as usize + code.len() <= KBD_HANDLER as usize);
+    code
 }
 
 /// The keyboard interrupt of a booted system, as a PC's BIOS runs it:
@@ -437,30 +449,40 @@ pub enum PortAccess {
     /// Read, keep the bits of `keep`, add those of `set` and write back, as
     /// a BIOS changes a mask register.
     Update { port: u16, keep: u8, set: u8 },
+    /// Fill `words` words of memory at `segment`:0 with `value`, as a mode
+    /// set clears video memory.
+    Fill { segment: u16, words: u16, value: u16 },
 }
 
 /// The ROM's loop (`FE 39 SERVICE_PORT_ACCESS`): the next port access in
-/// DX, with AH 00h and the value in AL for a write, 01h for a read, 02h
-/// with the bits to keep in CL and to set in CH for an update, and FFh when
-/// there are no more.
+/// DX, with BL 00h and the value in AL for a write, 01h for a read, 02h
+/// with the bits to keep in CL and to set in CH for an update, 03h for a
+/// fill of CX words of AX at ES:DI, and FFh when there are no more.
 pub fn next_port_access(cpu: &mut Cpu) {
-    use iced_x86::Register::{AH, AL, CH, CL};
+    use iced_x86::Register::{AL, BL, CH, CL};
     match cpu.bus.port_accesses.pop_front() {
         Some(PortAccess::Out(port, value)) => {
             cpu.set_dx(port);
             cpu.set_reg8(AL, value);
-            cpu.set_reg8(AH, 0x00);
+            cpu.set_reg8(BL, 0x00);
         }
         Some(PortAccess::In(port)) => {
             cpu.set_dx(port);
-            cpu.set_reg8(AH, 0x01);
+            cpu.set_reg8(BL, 0x01);
         }
         Some(PortAccess::Update { port, keep, set }) => {
             cpu.set_dx(port);
             cpu.set_reg8(CL, keep);
             cpu.set_reg8(CH, set);
-            cpu.set_reg8(AH, 0x02);
+            cpu.set_reg8(BL, 0x02);
         }
-        None => cpu.set_reg8(AH, 0xFF),
+        Some(PortAccess::Fill { segment, words, value }) => {
+            cpu.set_es(segment);
+            cpu.set_di(0);
+            cpu.set_cx(words);
+            cpu.set_ax(value);
+            cpu.set_reg8(BL, 0x03);
+        }
+        None => cpu.set_reg8(BL, 0xFF),
     }
 }

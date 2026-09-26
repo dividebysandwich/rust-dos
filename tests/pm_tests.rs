@@ -674,6 +674,7 @@ fn a_video_mode_set_in_virtual_8086_mode_makes_its_register_writes_through_the_p
     });
     rig.load(0x30000, &v86);
     rig.record(GP);
+    let before = rig.cpu.bus.video_mode;
     rig.run(|a| {
         for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
             a.push(v)?;
@@ -684,9 +685,16 @@ fn a_video_mode_set_in_virtual_8086_mode_makes_its_register_writes_through_the_p
     // in the BIOS's replay.
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[2]), (GP as u32, 0xF000));
-    assert!((rust_dos::bios::PORT_ACCESSES as u32..rust_dos::bios::PORT_ACCESSES as u32 + 0x20).contains(&stack[1]));
+    assert!((rust_dos::bios::PORT_ACCESSES as u32..rust_dos::bios::PORT_ACCESSES as u32 + 0x40).contains(&stack[1]));
     assert_eq!((rig.cpu.dx(), rig.cpu.get_al()), (0x3C2, 0xE3));
     assert!(!rig.cpu.bus.port_accesses.is_empty(), "more to write");
+    // The ports trap, so the card is as it was: the machine's display is
+    // the monitor's to keep. Its memory is cleared last, by the processor.
+    assert_eq!(rig.cpu.bus.video_mode, before);
+    assert_eq!(
+        rig.cpu.bus.port_accesses.back(),
+        Some(&rust_dos::bios::PortAccess::Fill { segment: 0xA000, words: 0x8000, value: 0 })
+    );
 }
 
 #[test]

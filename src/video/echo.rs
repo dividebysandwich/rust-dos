@@ -49,6 +49,96 @@ impl Registers {
     }
 }
 
+impl Registers {
+    /// Registers that differ from `after` in every value, for writing all
+    /// of `after`'s: a DOS box's registers Windows keeps aren't the card's.
+    pub fn unknown(after: &Registers) -> Registers {
+        let mut r = after.clone();
+        r.misc = !r.misc;
+        r.sequencer.iter_mut().chain(&mut r.graphics).chain(&mut r.crtc).chain(&mut r.attributes).for_each(|v| *v = !*v);
+        r.dac_mask = !r.dac_mask;
+        r.palette.iter_mut().for_each(|v| *v = !*v & 0x3F);
+        r
+    }
+
+    /// Have the CRTC registers `indices` written whatever the card held,
+    /// as a DOS box Windows keeps has its own.
+    pub fn forget_crtc(&mut self, after: &Registers, indices: &[usize]) {
+        for &i in indices {
+            self.crtc[i] = !after.crtc[i];
+        }
+    }
+
+    /// Put the registers back as they were.
+    fn restore(&self, vga: &mut VgaCard) {
+        vga.misc_output_reg = self.misc;
+        vga.sequencer_regs = self.sequencer;
+        vga.sequencer_index = self.sequencer_index;
+        vga.graphics_regs = self.graphics;
+        vga.graphics_index = self.graphics_index;
+        vga.crtc_regs = self.crtc;
+        vga.crtc_index = self.crtc_index;
+        vga.attribute_regs = self.attributes;
+        vga.attribute_flip_flop = self.attribute_flip_flop;
+        vga.dac_mask = self.dac_mask;
+        vga.palette.clone_from(&self.palette);
+        vga.dac_write_index = self.dac_write_index;
+        vga.dac_read_index = self.dac_read_index;
+    }
+}
+
+/// All of the display but its memory: the VGA's registers, the S3's, the
+/// VESA mode and what the screen shows. A video BIOS service for a DOS box
+/// whose video ports Windows traps (one in a window) leaves the card as it
+/// was: Windows keeps that machine's display itself, from the port writes
+/// the service makes (`writes`).
+pub struct Display {
+    registers: Registers,
+    attribute_index: u8,
+    dac_state: u8,
+    dac_step: u8,
+    dac_8bit: bool,
+    latched_start_addr: usize,
+    fixed_timing: Option<super::crt::CrtTiming>,
+    s3: super::s3::S3,
+    vbe: (Option<super::vbe::VbeMode>, Option<u32>, bool, u32, u32, u32, u32, u8),
+    video_mode: super::VideoMode,
+}
+
+impl Display {
+    pub fn of(bus: &crate::bus::Bus) -> Self {
+        let (vga, vbe) = (&bus.vga, &bus.vbe);
+        Display {
+            registers: Registers::of(vga),
+            attribute_index: vga.attribute_index,
+            dac_state: vga.dac_state,
+            dac_step: vga.dac_step,
+            dac_8bit: vga.dac_8bit,
+            latched_start_addr: vga.latched_start_addr,
+            fixed_timing: vga.fixed_timing(),
+            s3: vga.s3.clone(),
+            vbe: (vbe.mode, vbe.lfb_base, vbe.lfb, vbe.bank, vbe.pitch, vbe.start, vbe.latched_start, vbe.start_high),
+            video_mode: bus.video_mode,
+        }
+    }
+
+    pub fn restore(self, bus: &mut crate::bus::Bus) {
+        let vga = &mut bus.vga;
+        self.registers.restore(vga);
+        vga.attribute_index = self.attribute_index;
+        vga.dac_state = self.dac_state;
+        vga.dac_step = self.dac_step;
+        vga.dac_8bit = self.dac_8bit;
+        vga.latched_start_addr = self.latched_start_addr;
+        vga.set_fixed_timing(self.fixed_timing);
+        vga.s3 = self.s3;
+        vga.mark_dirty_full();
+        let vbe = &mut bus.vbe;
+        (vbe.mode, vbe.lfb_base, vbe.lfb, vbe.bank, vbe.pitch, vbe.start, vbe.latched_start, vbe.start_high) = self.vbe;
+        bus.video_mode = self.video_mode;
+    }
+}
+
 /// The port accesses that set the registers that differ between `before`
 /// and `after` to their values in `after`, in the order a BIOS's mode set
 /// makes them, leaving the index registers, the attribute flip-flop and
