@@ -858,6 +858,95 @@ fn an_indirect_call_through_a_pointer_it_cant_read_pushes_nothing() {
 }
 
 #[test]
+fn pushad_and_popad_are_translated() {
+    // A loop that saves the registers, changes them and loads them back,
+    // 1000 times, with PUSHA and POPA of 16 bits once.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, 1u32)?;
+            a.mov(ebx, 2u32)?;
+            a.mov(edx, 3u32)?;
+            a.mov(ebp, 4u32)?;
+            a.mov(esi, 5u32)?;
+            a.mov(edi, 6u32)?;
+            a.mov(ecx, 1000u32)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            a.pushad()?;
+            a.add(dword_ptr(esp + 28), 1)?; // EAX's slot
+            a.xor(eax, eax)?;
+            a.xor(ebx, ebx)?;
+            a.popad()?;
+            a.pusha()?;
+            a.popa()?;
+            a.dec(ecx)?;
+            a.jnz(CODE as u64 + 0x100)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.eax(), b.cpu.ebx(), b.cpu.esp()), (1001, 2, STACK0_TOP));
+    if AVAILABLE {
+        // No more instructions through their handlers than getting to
+        // protected mode takes.
+        let (mut a, mut b) = twins(|rig| rig.load(CODE, &asm32(CODE, |a| a.nop().and_then(|_| a.hlt()))));
+        let setup = run_both(&mut a, &mut b);
+        assert_eq!(stats.instructions - stats.native, setup.instructions - setup.native, "{:?}", stats);
+    }
+}
+
+/// Ring 3 code on a stack of `limit` + 1 bytes at 50000h from ESP
+/// `stack_top`, which runs `body` with the registers set to 11h, 22h, ...,
+/// and the #SS it raises recorded.
+fn on_a_small_stack(limit: u32, stack_top: u32, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) -> (Rig, Rig) {
+    twins(|rig| {
+        rig.record(12);
+        rig.set_gdt(FREE, seg_desc(0x50000, limit, DATA_R3, 0x4));
+        for i in 0..16u32 {
+            rig.write32(0x50FF0 + 4 * i, 0xA0 + i);
+        }
+        rig.load(CODE, &asm32(CODE, to_ring3));
+        rig.ring3(|a| {
+            a.mov(ax, (FREE | 3) as u32)?;
+            a.mov(ss, ax)?;
+            a.mov(esp, stack_top)?;
+            a.mov(eax, 0x11u32)?;
+            a.mov(ecx, 0x22u32)?;
+            a.mov(edx, 0x33u32)?;
+            a.mov(ebx, 0x44u32)?;
+            a.mov(ebp, 0x66u32)?;
+            a.mov(esi, 0x77u32)?;
+            a.mov(edi, 0x88u32)?;
+            body(a)?;
+            a.hlt()
+        });
+    })
+}
+
+#[test]
+fn a_pushad_past_the_stack_limit_writes_the_slots_below_it() {
+    // Slots from EDI's at FF0h up; ECX's at 1008h is past the limit.
+    let (mut a, mut b) = on_a_small_stack(0x1007, 0x1010, |a| a.pushad());
+    run_both(&mut a, &mut b);
+    let (vector, _) = b.recorded();
+    assert_eq!(vector, 12);
+    assert_eq!((b.read32(0x50FF0), b.read32(0x51004)), (0x88, 0x33), "EDI's and EDX's slots");
+    assert_eq!(b.read32(0x51008), 0xA6, "ECX's slot isn't written");
+}
+
+#[test]
+fn a_popad_past_the_stack_limit_loads_the_registers_below_it() {
+    // EDI, ESI, EBP and ESP's image from FF0h up, EBX's at 1000h is past
+    // the limit. (The recording handler changes EAX, ECX, ESI and EDI.)
+    let (mut a, mut b) = on_a_small_stack(0xFFF, 0xFF0, |a| a.popad());
+    run_both(&mut a, &mut b);
+    let (vector, _) = b.recorded();
+    assert_eq!(vector, 12);
+    assert_eq!((b.cpu.ebp(), b.cpu.ebx(), b.cpu.edx()), (0xA2, 0x44, 0x33));
+}
+
+#[test]
 fn a_ret_poked_into_an_unrolled_loop_is_run_where_it_is_not_translated_again() {
     // The Doom engine's spans: a RET poked over the first byte of one of
     // an unrolled loop's groups, the loop called, the byte put back, for

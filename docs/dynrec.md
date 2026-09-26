@@ -150,7 +150,7 @@ Each instruction becomes one of two things:
   - MUL and IMUL in all their forms, DIV and IDIV;
   - LEA, MOVZX, MOVSX, XCHG of registers, CBW, CWD, CWDE and CDQ;
   - the flag instructions, and SETcc;
-  - PUSH and POP of registers and constants;
+  - PUSH and POP of registers and constants, PUSHA and POPA;
   - near JMP, CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ.
 
@@ -311,7 +311,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

@@ -62,6 +62,8 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool) -> Option<Vec<Uo
         Ror => shift(instr, ShiftOp::Ror, &mut u),
         Push => push(instr, stack32, &mut u),
         Pop => pop(instr, stack32, &mut u),
+        Pusha | Pushad => pusha(instr, stack32, &mut u),
+        Popa | Popad => popa(instr, stack32, &mut u),
         Jmp => jmp(instr, &mut u),
         Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge | Jle | Jg => jcc(instr, next, &mut u),
         Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
@@ -600,6 +602,60 @@ fn pop(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     // The stack pointer first: POP ESP loads the popped value.
     u.push(Uop::Set { r: sp(stack32), t: T1 });
     u.push(Uop::Set { r, t: T0 });
+    true
+}
+
+/// The general-purpose registers in the order PUSHA pushes them (its
+/// stack pointer is the one before it).
+const PUSHA_ORDER: [u8; 8] = [0, 1, 2, 3, ESP, 5, 6, 7];
+
+/// PUSHA and PUSHAD, as `transfer::pusha`: each slot checked and written
+/// in turn from the lowest, EDI's, so a fault leaves those below it
+/// written, then the stack pointer moved.
+fn pusha(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = if instr.code() == Code::Pushad { 4 } else { 2 };
+    let sp = sp(stack32);
+    let total = 8 * size as u32;
+    for (i, &index) in PUSHA_ORDER.iter().enumerate().rev() {
+        let below = (i as u32 + 1) * size as u32;
+        u.push(Uop::Get { t: T1, r: sp });
+        u.push(Uop::AddConst { t: T1, v: below.wrapping_neg(), size: sp.size });
+        u.push(Uop::Copy { dst: T2, src: T1 });
+        u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: true, slot: 0 });
+        let r = if size == 4 { Gpr::dword(index) } else { Gpr::word(index) };
+        u.push(Uop::Get { t: T0, r });
+        u.push(Uop::Store { m: T2, src: T0, size });
+    }
+    u.push(Uop::Get { t: T1, r: sp });
+    u.push(Uop::AddConst { t: T1, v: total.wrapping_neg(), size: sp.size });
+    u.push(Uop::Set { r: sp, t: T1 });
+    true
+}
+
+/// POPA and POPAD, as `transfer::popa`: the registers loaded one by one
+/// from EDI's slot up, skipping the stack pointer's (which is still read),
+/// then the stack pointer moved. POPAD on a 16-bit stack loads the upper
+/// half of ESP on a 386 only: its handler runs it.
+fn popa(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = if instr.code() == Code::Popad { 4 } else { 2 };
+    if size == 4 && !stack32 {
+        return false;
+    }
+    let sp = sp(stack32);
+    for (i, &index) in PUSHA_ORDER.iter().rev().enumerate() {
+        u.push(Uop::Get { t: T1, r: sp });
+        u.push(Uop::AddConst { t: T1, v: i as u32 * size as u32, size: sp.size });
+        u.push(Uop::Copy { dst: T2, src: T1 });
+        u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: false, slot: 0 });
+        u.push(Uop::Load { dst: T0, m: T2, size });
+        if index != ESP {
+            let r = if size == 4 { Gpr::dword(index) } else { Gpr::word(index) };
+            u.push(Uop::Set { r, t: T0 });
+        }
+    }
+    u.push(Uop::Get { t: T1, r: sp });
+    u.push(Uop::AddConst { t: T1, v: 8 * size as u32, size: sp.size });
+    u.push(Uop::Set { r: sp, t: T1 });
     true
 }
 
