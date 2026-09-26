@@ -1,6 +1,6 @@
 # Rust-DOS
 
-<img width="640" height="400" alt="image" src="https://img.playspoon.com/cgyo2w.gif" />
+<img width="640" height="400" alt="image" src="https://rust-dos.com/assets/images/rust-dos-descent-tour.gif" />
 
 ## Introduction
 
