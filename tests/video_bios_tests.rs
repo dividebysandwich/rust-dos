@@ -122,6 +122,28 @@ fn a_colour_vga_has_no_crtc_at_3b4() {
 }
 
 #[test]
+fn the_index_registers_read_back() {
+    let mut cpu = machine(0x12);
+    for (port, index) in [(0x3C4, 0x02), (0x3CE, 0x08), (0x3D4, 0x0E)] {
+        cpu.bus.io_write(port, index);
+        assert_eq!(cpu.bus.io_read(port), index, "port {port:03X}");
+    }
+    // The attribute controller's, with the palette address source bit.
+    cpu.bus.io_read(0x3DA);
+    cpu.bus.io_write(0x3C0, 0x31);
+    assert_eq!(cpu.bus.io_read(0x3C0), 0x31);
+    // Saving the sequencer's index around a read of its registers, as
+    // Windows' VDD does, leaves the next data write where it was going.
+    cpu.bus.io_write(0x3C4, 0x02);
+    let saved = cpu.bus.io_read(0x3C4);
+    cpu.bus.io_write(0x3C4, 0x04);
+    cpu.bus.io_read(0x3C5);
+    cpu.bus.io_write(0x3C4, saved);
+    cpu.bus.io_write(0x3C5, 0x0F);
+    assert_eq!(cpu.bus.vga.sequencer_regs[2], 0x0F);
+}
+
+#[test]
 fn text_colours_come_through_the_palette_registers_and_the_dac() {
     let mut cpu = machine(0x03);
     // Dark grey on black: palette register 8 holds 38h.

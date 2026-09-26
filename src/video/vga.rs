@@ -735,6 +735,14 @@ impl Device for VgaCard {
                 val
             }
             0x3CC => self.misc_output_reg,
+            // The index registers read back, as a VGA's do: Windows' VDD
+            // saves and restores them around its own accesses. The
+            // attribute controller's has the palette address source bit,
+            // on while the screen shows.
+            0x3C0 => self.attribute_index | 0x20,
+            0x3C4 => self.sequencer_index,
+            0x3CE => self.graphics_index,
+            0x3D4 => self.crtc_index,
             0x3C5 => {
                 let val = if (self.sequencer_index as usize) < self.sequencer_regs.len() {
                     self.sequencer_regs[self.sequencer_index as usize]
