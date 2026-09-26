@@ -646,17 +646,42 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
         refresh_hz: 70.0,
         cycles_per_ms: 100_000,
         mips: 98.5,
-        recompiler: true,
+        recompiled: 97.0,
+        halted: 12.0,
         cpu_use: 40.0,
         render_ms: 0.4,
+        blocks: 3456,
+        code_bytes: 2 << 20,
         fps_history: vec![30.0, 35.0, 70.0],
         cpu_history: vec![40.0; 120],
     });
-    for (width, height) in [(640, 400), (320, 200), (1024, 768)] {
+    let has = |frame: &Frame, c: Rgb| frame.rgb.chunks(3).any(|px| px == [c.0, c.1, c.2]);
+    for (width, height) in [(640, 400), (640, 350), (320, 200), (1024, 768)] {
         let mut frame = Frame::new(width, height);
         ui.draw(&mut frame);
-        assert!(frame.rgb.chunks(3).any(|px| px == [draw::GOOD.0, draw::GOOD.1, draw::GOOD.2]), "the frames graph at {}x{}", width, height);
+        assert!(has(&frame, draw::GOOD), "the frames graph and digits at {}x{}", width, height);
+        assert!(has(&frame, draw::KEY), "the CPU graph at {}x{}", width, height);
     }
+
+    // The values in big digits, labelled, and the details below them.
+    let mut g = Grid::new(76, 23);
+    ui.draw_stats(&mut g, 3..19);
+    let row = |g: &Grid, r: usize| (0..g.cols).map(|c| g.cell(c, r) as char).collect::<String>();
+    assert!(row(&g, 3).contains(" FPS ") && row(&g, 3).contains(" CPU ") && row(&g, 3).contains("70 Hz display"));
+    assert!((4..8).any(|r| (0..g.cols).any(|c| g.cell(c, r) == 0xDB)), "block digits");
+    if let Ok(dir) = std::env::var("RUST_DOS_UI_SHOTS") {
+        for (width, height) in [(640, 400), (640, 350), (320, 200), (1024, 768)] {
+            let mut frame = Frame::new(width, height);
+            for (i, px) in frame.rgb.chunks_mut(3).enumerate() {
+                px.copy_from_slice(&[(i % 97) as u8, 40, 90]);
+            }
+            ui.draw(&mut frame);
+            crate::capture::png::save(&frame, std::path::Path::new(&format!("{}/stats_{}x{}.png", dir, width, height))).unwrap();
+        }
+    }
+    assert!(row(&g, 4).contains("avg 45"), "{}", row(&g, 4));
+    assert!(row(&g, 17).contains("Cycles") && row(&g, 17).contains("100000/ms") && row(&g, 17).contains("98.5"));
+    assert!(row(&g, 18).contains("Render") && row(&g, 18).contains("0.4 ms"));
 }
 
 #[test]

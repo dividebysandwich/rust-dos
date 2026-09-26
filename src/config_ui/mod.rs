@@ -13,6 +13,7 @@ mod dialog;
 mod draw;
 mod games;
 pub mod osd;
+mod perf;
 mod states;
 
 use autoexec::AutoexecEditor;
@@ -1591,60 +1592,6 @@ impl ConfigUi {
         }
         self.draw_pictures(frame, &layout);
         self.layout = Some(layout);
-    }
-
-    /// The Stats page: the numbers, and a graph each of the frames the
-    /// program draws and of the host's time the emulator takes.
-    fn draw_stats(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
-        let cols = g.cols;
-        let Some(view) = &self.stats else {
-            g.text(2, content.start, "Measuring...", draw::DIM);
-            return;
-        };
-        let value_col = 27.min(cols / 2);
-        let lines = [
-            ("Frames drawn", format!("{:.0} a second, on a {:.0} Hz display", view.fps, view.refresh_hz)),
-            (
-                "Emulated CPU",
-                format!(
-                    "{} cycles/ms, {:.1} MIPS{}",
-                    view.cycles_per_ms,
-                    view.mips,
-                    match (crate::dynrec::AVAILABLE, view.recompiler) {
-                        (false, _) => "",
-                        (true, true) => ", recompiled",
-                        (true, false) => ", interpreted",
-                    }
-                ),
-            ),
-            ("Host CPU use", format!("{:.0}%, frametime {:.1} ms", view.cpu_use, view.render_ms)),
-        ];
-        for (i, (label, value)) in lines.iter().enumerate() {
-            let row = content.start + i;
-            if row < content.end {
-                g.text_to(2, row, label, draw::TEXT, value_col - 1);
-                g.text_to(value_col, row, value, draw::BRIGHT, cols - 2);
-            }
-        }
-        // Two graphs, each with its title above it, in what is left.
-        let first = content.start + lines.len() + 1;
-        let left = content.end.saturating_sub(first);
-        if left < 4 {
-            return;
-        }
-        let height = left / 2 - 1;
-        let fps_max = view.fps_history.iter().copied().fold(view.refresh_hz, f32::max).max(1.0);
-        let fps_max = (fps_max / 10.0).ceil() * 10.0;
-        let graphs = [
-            ("Frames a second, the last 30 s", format!("{:.0}", fps_max), view.fps_history.clone(), fps_max, draw::GOOD),
-            ("Host CPU use, the last 30 s", "100%".to_string(), view.cpu_history.clone(), 100.0, draw::KEY),
-        ];
-        for (i, (title, scale, values, max, color)) in graphs.into_iter().enumerate() {
-            let top = first + i * (height + 1);
-            g.text(2, top, title, draw::TEXT);
-            g.text(cols - 2 - scale.len(), top, &scale, draw::DIM);
-            self.plots.push(Plot { cells: (2, top + 1, cols - 4, height), values, max, color });
-        }
     }
 
     /// The page tabs on row 1: with a space around each title where they

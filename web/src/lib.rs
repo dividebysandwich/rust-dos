@@ -364,7 +364,8 @@ impl Machine {
         exec::run_batch(cpu, &mut NoHook, false);
         let exec_time = batch_start.elapsed();
         let clock = &cpu.bus.clock;
-        let executed = clock.icount - icount - (clock.idle - idle) - (clock.stalled - stalled);
+        let halted = clock.idle - idle;
+        let executed = clock.icount - icount - halted - (clock.stalled - stalled);
 
         // DOSCONFIG asks for the settings window.
         if std::mem::take(&mut self.cpu.bus.config_ui_requested) && !self.ui.is_open() {
@@ -405,7 +406,9 @@ impl Machine {
             self.cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed();
-        self.last_frame = Some((frame_start, FrameTimes { wall: busy, busy, render, executed, recompiler: false }));
+        // The browser has no recompiler: the interpreter runs everything.
+        let times = FrameTimes { wall: busy, busy, render, executed, interpreted: executed, halted, ..FrameTimes::default() };
+        self.last_frame = Some((frame_start, times));
         changed
     }
 

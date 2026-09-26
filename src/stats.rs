@@ -1,8 +1,9 @@
-//! What the settings window's Stats page shows: the frames per second the
-//! program draws (`Bus::frames_drawn`), the display's refresh rate, the
-//! emulated CPU's speed, and how much of the host's time the emulator
-//! takes, now and over the last half minute. The frontends record each of
-//! their frames here, with the page open or not.
+//! What the settings window's Stats page and the performance overlay show:
+//! the frames per second the program draws (`Bus::frames_drawn`), the
+//! display's refresh rate, the emulated CPU's speed, how much of it the
+//! dynamic recompiler runs and how much it sits halted, and how much of the
+//! host's time the emulator takes, now and over the last half minute. The
+//! frontends record each of their frames here, with the page open or not.
 
 use crate::bus::Bus;
 use std::collections::VecDeque;
@@ -15,15 +16,21 @@ pub const HISTORY: usize = 120;
 
 /// One of the frontend's frames: how long it was, how long the emulator
 /// worked in it (running the machine and drawing the picture, not waiting
-/// for the next frame), how long of that drawing the picture took, and
-/// the instructions it ran, and whether the dynamic recompiler ran them.
+/// for the next frame), how long of that drawing the picture took, the
+/// instructions it ran and how many of those the interpreter ran (the
+/// rest ran as the dynamic recompiler's code), the instructions' worth of
+/// time the CPU sat halted, and the recompiler's translated blocks and
+/// their bytes of host code after it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameTimes {
     pub wall: Duration,
     pub busy: Duration,
     pub render: Duration,
     pub executed: u64,
-    pub recompiler: bool,
+    pub interpreted: u64,
+    pub halted: u64,
+    pub blocks: u64,
+    pub code_bytes: u64,
 }
 
 /// The numbers and graphs of the Stats page.
@@ -34,14 +41,20 @@ pub struct StatsView {
     pub fps: f32,
     pub refresh_hz: f32,
     pub cycles_per_ms: u32,
-    /// Emulated instructions a second, in millions, and whether the
-    /// dynamic recompiler ran them (else the interpreter).
+    /// Emulated instructions a second, in millions, and the share of them
+    /// the dynamic recompiler's code ran, in percent.
     pub mips: f32,
-    pub recompiler: bool,
+    pub recompiled: f32,
+    /// The share of the emulated time the CPU sat halted (HLT), waiting
+    /// for an interrupt, in percent.
+    pub halted: f32,
     /// The share of the host's time the emulator takes, in percent.
     pub cpu_use: f32,
     /// Drawing the picture, in ms a frame.
     pub render_ms: f32,
+    /// The recompiler's translated blocks, and their bytes of host code.
+    pub blocks: u64,
+    pub code_bytes: u64,
     /// The last half minute of `fps` and `cpu_use`, oldest first.
     pub fps_history: Vec<f32>,
     pub cpu_history: Vec<f32>,
@@ -54,6 +67,8 @@ pub struct Stats {
     busy: Duration,
     render: Duration,
     executed: u64,
+    interpreted: u64,
+    halted: u64,
     frames: u32,
     drawn: u64,
     last_drawn: Option<u64>,
@@ -76,10 +91,13 @@ impl Stats {
         self.busy += times.busy;
         self.render += times.render;
         self.executed += times.executed;
+        self.interpreted += times.interpreted.min(times.executed);
+        self.halted += times.halted;
         self.frames += 1;
         self.view.refresh_hz = bus.vga.peek_timing().hz() as f32;
         self.view.cycles_per_ms = bus.clock.cycles_per_ms();
-        self.view.recompiler = times.recompiler;
+        self.view.blocks = times.blocks;
+        self.view.code_bytes = times.code_bytes;
         if self.wall < WINDOW {
             return;
         }
@@ -87,6 +105,9 @@ impl Stats {
         self.view.fps = self.drawn as f32 / seconds;
         self.view.cpu_use = (self.busy.as_secs_f32() / seconds * 100.0).min(100.0);
         self.view.mips = self.executed as f32 / seconds / 1e6;
+        let share = |part: u64, whole: u64| if whole == 0 { 0.0 } else { part as f32 * 100.0 / whole as f32 };
+        self.view.recompiled = share(self.executed - self.interpreted, self.executed);
+        self.view.halted = share(self.halted, self.executed + self.halted);
         self.view.render_ms = self.render.as_secs_f32() * 1000.0 / self.frames as f32;
         for (history, value) in [(&mut self.fps_history, self.view.fps), (&mut self.cpu_history, self.view.cpu_use)] {
             if history.len() == HISTORY {
@@ -98,6 +119,8 @@ impl Stats {
         self.busy = Duration::ZERO;
         self.render = Duration::ZERO;
         self.executed = 0;
+        self.interpreted = 0;
+        self.halted = 0;
         self.frames = 0;
         self.drawn = 0;
     }
@@ -122,7 +145,10 @@ mod tests {
             busy: Duration::from_millis(busy_ms),
             render: Duration::from_micros(500),
             executed: 100_000,
-            recompiler: false,
+            interpreted: 25_000,
+            halted: 100_000,
+            blocks: 40,
+            code_bytes: 4096,
         }
     }
 
@@ -143,6 +169,9 @@ mod tests {
         assert!((view.cpu_use - 50.0).abs() < 0.1);
         assert!((view.mips - 10.0).abs() < 0.5);
         assert!((view.render_ms - 0.5).abs() < 0.05);
+        assert!((view.recompiled - 75.0).abs() < 0.1, "a quarter interpreted");
+        assert!((view.halted - 50.0).abs() < 0.1, "as long halted as running");
+        assert_eq!((view.blocks, view.code_bytes), (40, 4096));
         assert!(view.refresh_hz > 69.0 && view.refresh_hz < 71.0, "text mode at 70 Hz");
         assert_eq!((view.fps_history.len(), view.cpu_history.len()), (1, 1));
     }

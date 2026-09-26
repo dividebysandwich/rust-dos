@@ -85,6 +85,12 @@ impl Grid {
         }
     }
 
+    /// The character in a cell.
+    #[cfg(test)]
+    pub fn cell(&self, col: usize, row: usize) -> u8 {
+        self.cells[row * self.cols + col].ch
+    }
+
     /// Give `width` cells from (`col`, `row`) an opaque background.
     pub fn background(&mut self, col: usize, row: usize, width: usize, bg: Rgb) {
         if row < self.rows {
@@ -198,9 +204,121 @@ pub fn plot(frame: &mut Frame, layout: &Layout, cells: (usize, usize, usize, usi
     }
 }
 
+/// A pixel font for big numbers, drawn with the half block characters: a
+/// cell is two pixels, one above the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BigFont {
+    /// 5x7 pixels, four cells high.
+    Large,
+    /// 3x5 pixels, three cells high.
+    Small,
+}
+
+impl BigFont {
+    /// A glyph's width and height in pixels.
+    fn size(self) -> (usize, usize) {
+        match self {
+            BigFont::Large => (5, 7),
+            BigFont::Small => (3, 5),
+        }
+    }
+
+    /// The rows of `c`'s pixels, top first, the leftmost pixel in the
+    /// highest of the glyph's bits: the digits, '%', '.' and '-'.
+    fn glyph(self, c: char) -> Option<&'static [u8]> {
+        const LARGE: [(char, [u8; 7]); 13] = [
+            ('0', [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]),
+            ('1', [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]),
+            ('2', [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111]),
+            ('3', [0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110]),
+            ('4', [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010]),
+            ('5', [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110]),
+            ('6', [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110]),
+            ('7', [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]),
+            ('8', [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]),
+            ('9', [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100]),
+            ('%', [0b11000, 0b11001, 0b00010, 0b00100, 0b01000, 0b10011, 0b00011]),
+            ('.', [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100]),
+            ('-', [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000]),
+        ];
+        const SMALL: [(char, [u8; 5]); 13] = [
+            ('0', [0b111, 0b101, 0b101, 0b101, 0b111]),
+            ('1', [0b010, 0b110, 0b010, 0b010, 0b111]),
+            ('2', [0b111, 0b001, 0b111, 0b100, 0b111]),
+            ('3', [0b111, 0b001, 0b011, 0b001, 0b111]),
+            ('4', [0b101, 0b101, 0b111, 0b001, 0b001]),
+            ('5', [0b111, 0b100, 0b111, 0b001, 0b111]),
+            ('6', [0b111, 0b100, 0b111, 0b101, 0b111]),
+            ('7', [0b111, 0b001, 0b001, 0b010, 0b010]),
+            ('8', [0b111, 0b101, 0b111, 0b101, 0b111]),
+            ('9', [0b111, 0b101, 0b111, 0b001, 0b111]),
+            ('%', [0b101, 0b001, 0b010, 0b100, 0b101]),
+            ('.', [0b000, 0b000, 0b000, 0b000, 0b010]),
+            ('-', [0b000, 0b000, 0b111, 0b000, 0b000]),
+        ];
+        match self {
+            BigFont::Large => LARGE.iter().find(|(g, _)| *g == c).map(|(_, rows)| &rows[..]),
+            BigFont::Small => SMALL.iter().find(|(g, _)| *g == c).map(|(_, rows)| &rows[..]),
+        }
+    }
+
+    /// The cells `text` takes across, with a column between the glyphs.
+    pub fn width(self, text: &str) -> usize {
+        (text.chars().count() * (self.size().0 + 1)).saturating_sub(1)
+    }
+
+    /// The cells it takes down.
+    pub fn height(self) -> usize {
+        self.size().1.div_ceil(2)
+    }
+}
+
+/// Write `text` in `font` from (`col`, `row`), clipped at the grid's edge;
+/// characters the font doesn't have are left blank. Returns the column
+/// after it.
+pub fn big_text(g: &mut Grid, col: usize, row: usize, text: &str, font: BigFont, fg: Rgb) -> usize {
+    let (width, height) = font.size();
+    let mut x = col;
+    for c in text.chars() {
+        if let Some(rows) = font.glyph(c) {
+            for cell in 0..font.height() {
+                let pixel = |y: usize, bit: usize| y < height && rows[y] & (1 << (width - 1 - bit)) != 0;
+                for bit in 0..width {
+                    let ch = match (pixel(cell * 2, bit), pixel(cell * 2 + 1, bit)) {
+                        (true, true) => 0xDB,
+                        (true, false) => 0xDF,
+                        (false, true) => 0xDC,
+                        (false, false) => continue,
+                    };
+                    g.char(x + bit, row + cell, ch, fg);
+                }
+            }
+        }
+        x += width + 1;
+    }
+    x.saturating_sub(1).max(col)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_text_draws_half_blocks() {
+        let mut g = Grid::new(20, 5);
+        let end = big_text(&mut g, 1, 0, "1%", BigFont::Large, GOOD);
+        assert_eq!((end, BigFont::Large.width("1%"), BigFont::Large.height()), (12, 11, 4));
+        let at = |g: &Grid, col: usize, row: usize| g.cells[row * g.cols + col].ch;
+        // The 1's stem: its top pixel alone, then both halves, and its
+        // foot's last pixel row in the fourth cell's upper half.
+        assert_eq!((at(&g, 3, 0), at(&g, 3, 1), at(&g, 3, 3)), (0xDB, 0xDB, 0xDF));
+        assert_eq!(at(&g, 2, 0), 0xDC, "the flag's lower pixel");
+        assert_eq!(at(&g, 1, 0), b' ');
+        assert_eq!(g.cells[3].fg, GOOD);
+        // Small digits are three cells high, and wider text is clipped.
+        assert_eq!(BigFont::Small.height(), 3);
+        big_text(&mut g, 15, 3, "888", BigFont::Small, GOOD);
+    }
 
     #[test]
     fn plots_draw_inside_their_cells() {

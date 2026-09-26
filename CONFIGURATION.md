@@ -345,11 +345,17 @@ Esc closes it.
   or 32 bits, typed in decimal or hex (`0x1F`, `$1F`, `1Fh`), and the
   search covers conventional memory, or all of it for games with DOS
   extenders.
-* **Stats:** how the machine runs: the frames a second the program draws
-  (a retrace after which the picture changed, or for a game that flips
-  pages, each flip) and the display's refresh rate, the emulated CPU's
-  speed, and how much of the host's CPU time the emulator takes, with a
-  graph of the frames and of the host's CPU over the last 30 seconds.
+* **Stats:** how the machine runs, in two big numbers: **FPS**, the
+  frames a second the program draws (a retrace after which the picture
+  changed, or for a game that flips pages, each flip), beside the
+  display's refresh rate, and **CPU**, how much of one host core the
+  emulator takes (yellow from 75%, red from 90%, where it is close to not
+  keeping up). Each has a graph of the last 30 seconds, with their
+  average, least and most. Below them: the emulated CPU's speed in cycles
+  and in millions of instructions a second, the share of them the dynamic
+  recompiler ran, the share of the time the CPU sat halted waiting for an
+  interrupt, how long drawing the picture takes, and the recompiler's
+  translated code.
 
 Left and Right change a setting, Enter types or picks a value, Tab switches
 pages, and the mouse works too. The display settings, the CPU speed, the
