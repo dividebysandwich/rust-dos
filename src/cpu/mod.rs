@@ -369,6 +369,9 @@ pub struct Cpu {
     /// (`instructions::string`). Off, they go one at a time, which tests
     /// compare them with.
     pub string_bulk: bool,
+    /// Data segment loads in protected mode that went through, to load the
+    /// same selectors again quickly (see `seg::SegLoad`).
+    pub(crate) seg_loads: [seg::SegLoad; seg::SEG_LOADS],
     /// The dynamic recompiler's translated code, see `dynrec`.
     pub dynrec: crate::dynrec::DynState,
 }
@@ -499,6 +502,7 @@ impl Cpu {
             core: CoreMode::initial(),
             dyn_latched: false,
             string_bulk: true,
+            seg_loads: [seg::SegLoad::NONE; seg::SEG_LOADS],
             dynrec: crate::dynrec::DynState::default(),
         }
     }

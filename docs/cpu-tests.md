@@ -259,7 +259,10 @@ gates with parameter copying, interrupts and IRET across privilege levels,
 the I/O permission bitmap, paging with accessed and dirty bits, page faults,
 the TLB and INVLPG, double faults and triple faults, hardware interrupts in
 protected mode, task switches, virtual-8086 mode, LAR/LSL/VERR/VERW/ARPL,
-and the return to real mode with a 4 GB DS.
+the return to real mode with a 4 GB DS, and loads of a segment register
+again after its descriptor, table or mapping, the privilege level or the
+register changed, which `Cpu::seg_loads` must not take from its earlier
+loads.
 
 ## On the dynamic recompiler
 

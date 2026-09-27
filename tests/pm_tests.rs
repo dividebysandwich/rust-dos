@@ -1132,3 +1132,135 @@ fn fpu_operands_across_a_page_boundary_follow_the_page_tables() {
     ]);
     assert_eq!(dword, expected, "the load reads the same split bytes back");
 }
+
+#[test]
+fn a_segment_loaded_again_sees_its_descriptor_as_it_is_now() {
+    // DS loaded with the same selector again and again, while its
+    // descriptor changes: a new base, the accessed bit cleared, the
+    // table moved (LGDT of a copy with another base), and not present.
+    let mut rig = Rig::new();
+    rig.record(NP);
+    let desc = |base: u32| seg_desc(base, 0xFFF, DATA_R0, 0x4);
+    rig.set_gdt(FREE, desc(DATA));
+    for (at, v) in [(DATA, 0x1111_1111u32), (DATA + 0x100, 0x2222_2222), (DATA + 0x200, 0x3333_3333)] {
+        rig.write32(at, v);
+    }
+    // A copy of the GDT at 3000h, where FREE's base is DATA + 200h.
+    let copy = 0x3000;
+    for i in (0..0x800).step_by(4) {
+        let v = rig.read32(GDT + i);
+        rig.write32(copy + i, v);
+    }
+    let free = desc(DATA + 0x200);
+    rig.write32(copy + FREE as u32, free as u32);
+    rig.write32(copy + FREE as u32 + 4, (free >> 32) as u32);
+    rig.write16(0x7B10, 0x07FF);
+    rig.write32(0x7B12, copy);
+    let entry = GDT + FREE as u32;
+    let moved = desc(DATA + 0x100);
+    rig.run(|a| {
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ebx, dword_ptr(0))?;
+        // A new base.
+        a.mov(ax, DATA32 as u32)?;
+        a.mov(es, ax)?;
+        a.mov(dword_ptr(entry as u64).es(), moved as u32)?;
+        a.mov(dword_ptr(entry as u64 + 4).es(), (moved >> 32) as u32)?;
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(edx, dword_ptr(0))?;
+        // Not accessed any more: the load marks it again.
+        a.and(byte_ptr(entry as u64 + 5).es(), 0xFEu32)?;
+        a.mov(ds, ax)?;
+        // Another table.
+        a.lgdt(ptr(0x7B10).es())?;
+        a.mov(ds, ax)?;
+        a.mov(ebp, dword_ptr(0))?;
+        // Not present.
+        a.and(byte_ptr(copy as u64 + FREE as u64 + 5).es(), 0x7Fu32)?;
+        a.mov(ds, ax)?;
+        a.hlt()
+    });
+    assert_eq!((rig.cpu.ebx(), rig.cpu.edx(), rig.cpu.ebp()), (0x1111_1111, 0x2222_2222, 0x3333_3333));
+    assert_eq!(rig.gdt(FREE) >> 40 & 1, 1, "accessed again");
+    let (vector, stack) = rig.recorded();
+    assert_eq!(vector, NP as u32);
+    assert_eq!(stack[0], FREE as u32, "error code");
+}
+
+#[test]
+fn a_segment_loaded_again_after_its_table_was_mapped_elsewhere_uses_the_new_page() {
+    // With paging, the GDT's page mapped to a copy of it where DS's
+    // descriptor has another base (INVLPG after): loading DS again reads
+    // the copy.
+    let mut rig = Rig::new();
+    page_tables(&mut rig);
+    rig.set_gdt(FREE, seg_desc(DATA, 0xFFF, DATA_R0, 0x4));
+    rig.write32(DATA, 0x1111_1111);
+    rig.write32(DATA + 0x100, 0x2222_2222);
+    let copy = 0x9_0000;
+    for i in (0..0x1000).step_by(4) {
+        let v = rig.read32(i);
+        rig.write32(copy + i, v);
+    }
+    let moved = seg_desc(DATA + 0x100, 0xFFF, DATA_R0, 0x4) | 1 << 40;
+    rig.write32(copy + GDT + FREE as u32, moved as u32);
+    rig.write32(copy + GDT + FREE as u32 + 4, (moved >> 32) as u32);
+    rig.run(|a| {
+        enable_paging(a)?;
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ebx, dword_ptr(0))?;
+        a.mov(ax, DATA32 as u32)?;
+        a.mov(es, ax)?;
+        a.mov(dword_ptr(0x81000u64).es(), (copy | 3) as u32)?;
+        a.invlpg(ptr(GDT).es())?;
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(edx, dword_ptr(0))?;
+        a.hlt()
+    });
+    assert_eq!((rig.cpu.ebx(), rig.cpu.edx()), (0x1111_1111, 0x2222_2222));
+}
+
+#[test]
+fn a_segment_loaded_again_at_another_privilege_level_is_checked_again() {
+    // DS loaded with a DPL 0 selector at ring 0, then with the same
+    // selector (RPL 0) at ring 3: #GP(selector) there.
+    let mut rig = Rig::new();
+    rig.record(GP);
+    rig.set_gdt(FREE, seg_desc(DATA, 0xFFF, DATA_R0, 0x4));
+    rig.ring3(|a| {
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.int3()
+    });
+    rig.run(|a| {
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ax, DATA32 as u32)?;
+        a.mov(ds, ax)?;
+        to_ring3(a)
+    });
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[0]), (GP as u32, FREE as u32));
+    assert_eq!(stack[2], CODE32_R3 as u32);
+}
+
+#[test]
+fn a_segment_loaded_into_ds_is_checked_again_for_ss() {
+    // A read-only data selector loads into DS, and then not into SS, which
+    // must be writable: #GP(selector).
+    let mut rig = Rig::new();
+    rig.record(GP);
+    rig.set_gdt(FREE, seg_desc(DATA, 0xFFF, DATA_R0 & !2, 0x4));
+    rig.run(|a| {
+        a.mov(ax, FREE as u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ss, ax)?;
+        a.hlt()
+    });
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[0]), (GP as u32, FREE as u32));
+}

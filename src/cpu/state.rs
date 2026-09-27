@@ -63,7 +63,7 @@ crate::state_fields!(Cpu {
     // Set from the configuration, which a state carries in its header.
     model, core, string_bulk,
     // Caches, emptied after a load.
-    tlb, decode_cache, dynrec,
+    tlb, decode_cache, dynrec, seg_loads,
     // The host's: the lines typed at the prompt stay the user's, and the
     // counts and logs are the debugger's.
     shell_history, shell_completion, null_interrupts, mode_switches, exceptions, exception_log,
@@ -79,6 +79,7 @@ impl Cpu {
     pub(crate) fn forget_caches(&mut self) {
         self.tlb.flush();
         self.decode_cache = crate::instr_cache::InstrCache::new(16);
+        self.seg_loads = [super::seg::SegLoad::NONE; super::seg::SEG_LOADS];
         self.dynrec.flush();
     }
 }

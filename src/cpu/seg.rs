@@ -132,6 +132,45 @@ impl Descriptor {
     }
 }
 
+/// How many protected-mode data segment loads `Cpu::seg_loads` keeps, by
+/// the selector's index.
+pub(crate) const SEG_LOADS: usize = 16;
+
+/// A protected-mode load of a data segment register that went through:
+/// the selector, whether into SS (whose checks differ) and at which CPL,
+/// its descriptor table's base and limit, the descriptor's linear and
+/// physical address and bytes, and the cache it gave.
+#[derive(Clone, Copy)]
+pub(crate) struct SegLoad {
+    selector: u16,
+    ss: bool,
+    cpl: u8,
+    table: (u32, u32),
+    lin: u32,
+    phys: u32,
+    desc: u64,
+    cache: SegCache,
+}
+
+impl SegLoad {
+    /// None: a null selector, which isn't kept.
+    pub(crate) const NONE: SegLoad = SegLoad {
+        selector: 0,
+        ss: false,
+        cpl: 0,
+        table: (0, 0),
+        lin: 0,
+        phys: 0,
+        desc: 0,
+        cache: SegCache::null(0),
+    };
+
+    #[inline(always)]
+    fn slot(selector: u16) -> usize {
+        (selector >> 3) as usize % SEG_LOADS
+    }
+}
+
 impl Cpu {
     /// True in protected mode (CR0.PE), including virtual-8086 mode.
     #[inline(always)]
@@ -214,15 +253,71 @@ impl Cpu {
             self.load_seg_real(seg, selector);
         } else if self.v86() {
             self.load_seg_v86(seg, selector);
+        } else if let Some(cache) = self.loaded_again(seg, selector) {
+            self.set_seg_cache(seg, cache);
         } else {
             let cache = self.check_data_segment(seg, selector)?;
             self.set_seg_cache(seg, cache);
+            self.note_load(seg, selector, cache);
         }
         if seg == Seg::SS {
             // Interrupts wait for the instruction after a stack switch.
             self.irq_shadow = true;
         }
         Ok(())
+    }
+
+    /// The table a selector's descriptor is in: its base and limit, or None
+    /// for the LDT with a null LDTR.
+    #[inline(always)]
+    fn table_of(&self, selector: u16) -> Option<(u32, u32)> {
+        if selector & 4 == 0 {
+            Some((self.gdtr.base, self.gdtr.limit as u32))
+        } else {
+            (self.ldtr.attr & 0x80 != 0).then_some((self.ldtr.base, self.ldtr.limit))
+        }
+    }
+
+    /// The cache a protected-mode load of `selector` into `seg` gives, if
+    /// it went through before (`SegLoad`) and everything it depends on is
+    /// as it was: the CPL, the descriptor table's register, where its
+    /// descriptor is (through the TLB, without walking the page tables)
+    /// and the descriptor's bytes, accessed bit included. The checks and
+    /// the cache come from those alone, so the load would go through with
+    /// the same cache, and change nothing else.
+    #[inline(always)]
+    fn loaded_again(&self, seg: Seg, selector: u16) -> Option<SegCache> {
+        let e = &self.seg_loads[SegLoad::slot(selector)];
+        if e.selector != selector || e.ss != (seg == Seg::SS) || e.cpl != self.cpl || self.table_of(selector) != Some(e.table) {
+            return None;
+        }
+        let phys = self.translated(e.lin, false)?;
+        if phys != e.phys {
+            return None;
+        }
+        let bytes: [u8; 8] = self.bus.ram().get(phys as usize..phys as usize + 8)?.try_into().unwrap();
+        (u64::from_le_bytes(bytes) == e.desc).then_some(e.cache)
+    }
+
+    /// Note a protected-mode load of `selector` into `seg` that went
+    /// through with `cache`, for `loaded_again`: where its descriptor is in
+    /// one page of plain RAM, as it is now (accessed).
+    fn note_load(&mut self, seg: Seg, selector: u16, cache: SegCache) {
+        if is_null(selector) {
+            return;
+        }
+        let Some(table) = self.table_of(selector) else { return };
+        let lin = table.0.wrapping_add((selector & 0xFFF8) as u32);
+        if lin & 0xFFF > 0x1000 - 8 {
+            return;
+        }
+        let Some(phys) = self.translated(lin, false) else { return };
+        if !self.bus.is_plain_ram(phys as usize, 8) {
+            return;
+        }
+        let bytes: [u8; 8] = self.bus.ram()[phys as usize..phys as usize + 8].try_into().unwrap();
+        self.seg_loads[SegLoad::slot(selector)] =
+            SegLoad { selector, ss: seg == Seg::SS, cpl: self.cpl, table, lin, phys, desc: u64::from_le_bytes(bytes), cache };
     }
 
     /// Protected mode: check a selector for `seg` and return the cache to

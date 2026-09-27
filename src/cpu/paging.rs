@@ -240,6 +240,18 @@ impl Cpu {
         self.walk(lin, write, user)
     }
 
+    /// The physical address a read at `lin` goes to as the TLB has it now
+    /// (or with paging off), without walking the page tables: None where
+    /// the TLB doesn't hold the page.
+    pub(crate) fn translated(&self, lin: u32, user: bool) -> Option<u32> {
+        if self.cr0 & CR0_PG == 0 {
+            return Some(self.translate(lin));
+        }
+        let page = lin >> 12;
+        let e = self.tlb.entries[Tlb::slot(page, user)];
+        (e.read_tag == page + 1).then(|| self.translate(e.phys | (lin & 0xFFF)))
+    }
+
     pub(crate) fn write_protect(&self) -> bool {
         self.model >= CpuModel::I486 && self.cr0 & CR0_WP != 0
     }
