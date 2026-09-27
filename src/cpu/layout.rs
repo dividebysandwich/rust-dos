@@ -41,7 +41,11 @@ pub const TLB_READ_TAG: usize = super::paging::TLB_READ_TAG;
 pub const TLB_WRITE_TAG: usize = super::paging::TLB_WRITE_TAG;
 pub const TLB_PHYS: usize = super::paging::TLB_PHYS;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-pub const TLB_JIT_PHYS: usize = super::paging::TLB_JIT_PHYS;
+pub const TLB_JIT_READ: usize = super::paging::TLB_JIT_READ;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const TLB_JIT_WRITE: usize = super::paging::TLB_JIT_WRITE;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const TLB_JIT_DELTA: usize = super::paging::TLB_JIT_DELTA;
 pub const TLB_ENTRY_SIZE: usize = super::paging::TLB_ENTRY_SIZE;
 pub const TLB_SET: usize = super::paging::TLB_SET;
 /// The TLB's entries, supervisor then user (`Tlb::entries_ptr`).

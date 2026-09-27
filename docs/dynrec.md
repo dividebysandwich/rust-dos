@@ -326,16 +326,15 @@ The x86-64 code generator leaves out what the environment makes
 unnecessary: the limit checks and base of flat segments, the TLB lookup
 with paging off, the A20 mask with the gate open, and then the check
 for an operand in two pages, whose RAM is contiguous. With paging on, it
-looks the page up in the TLB's set for the CPL, whose 16-byte entries it
-indexes with the linear address shifted and masked. It compares the
-entry's tag with the page of the operand's last byte, which an entry of
-the first byte's page never holds for an operand in two pages, and takes
-the physical address from a copy of it with bit 31 set where the page
-isn't plain RAM (`TlbEntry::jit_phys`), which the check for the end of
-RAM then catches. A link to another page checks the TLB's translation of
-its target, but not the A20 gate and paging, which are as when the link
-was made. The ARM64 one
-checks everything at run time.
+looks the page up in the TLB's set for the CPL, whose 32-byte entries (in
+the `Cpu`) it indexes with the linear address shifted and masked. It
+compares the entry's tag for its code with the page of the operand's last
+byte, which an entry of the first byte's page never holds for an operand
+in two pages, nor one of a page that isn't plain RAM (`TlbEntry::jit_read`
+and `jit_write`), and adds the entry's difference between the physical
+and linear page to the address. A link to another page checks the TLB's
+translation of its target, but not the A20 gate and paging, which are as
+when the link was made. The ARM64 one checks everything at run time.
 
 ### Linking
 

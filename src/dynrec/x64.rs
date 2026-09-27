@@ -45,7 +45,7 @@ const SZP: u32 = SF | ZF | PF;
 
 /// A TLB entry's size, and its log2.
 const TLB_ENTRY: i32 = layout::TLB_ENTRY_SIZE as i32;
-const TLB_ENTRY_SHIFT: i8 = 4;
+const TLB_ENTRY_SHIFT: i8 = 5;
 /// Where the TLB's entries are in the CPU.
 const TLB: i32 = layout::TLB as i32;
 const _: () = assert!(1 << TLB_ENTRY_SHIFT == TLB_ENTRY);
@@ -1273,11 +1273,11 @@ impl Gen<'_> {
         let entry = set * TLB_ENTRY;
         if paging && a20 {
             // The TLB entry of the first byte's page (linear address >> 12)
-            // in the set of the privilege level, whose tag must be the last
-            // byte's page + 1: an operand in two pages misses, as the entry
-            // can't hold the next page. Its physical address with bit 31
-            // set where the page isn't plain RAM, which the check for the
-            // end of RAM then catches.
+            // in the set of the privilege level, whose tag for this code
+            // must be the last byte's page: an operand in two pages misses,
+            // as the entry can't hold the next page, and so does a page that
+            // isn't plain RAM. The entry's delta takes the address to RAM.
+            let jit_tag = (if write { layout::TLB_JIT_WRITE } else { layout::TLB_JIT_READ }) as i32;
             if size > 1 {
                 dynasm!(self.ops ; .arch x64 ; lea ecx, [rax + last]);
             } else {
@@ -1285,17 +1285,13 @@ impl Gen<'_> {
             }
             dynasm!(self.ops
                 ; .arch x64
-                ; shr ecx, 12
-                ; inc ecx
+                ; and ecx, !0xFFF
                 ; mov edx, eax
                 ; shr edx, 12 - TLB_ENTRY_SHIFT
                 ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
-                ; cmp ecx, DWORD [rbx + rdx + TLB + entry + tag]
+                ; cmp ecx, DWORD [rbx + rdx + TLB + entry + jit_tag]
                 ; jne =>at
-                ; and eax, 0xFFF
-                ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_JIT_PHYS as i32]
-                ; cmp eax, self.env.ram_len.wrapping_sub(size as u32) as i32
-                ; ja =>at
+                ; add eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_JIT_DELTA as i32]
                 ; mov Rd(t_), eax
                 ; =>back
             );

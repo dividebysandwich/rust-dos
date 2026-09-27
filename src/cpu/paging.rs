@@ -24,31 +24,37 @@ const TLB_ENTRIES: usize = 1024;
 /// A translation, valid for reads when `read_tag` is the linear page number
 /// + 1, and for writes when `write_tag` is: a page that may not be written,
 /// or whose dirty bit isn't set yet, has a write tag of 0, so writes to it
-/// walk the page tables. `repr(C)`, and 16 bytes: the dynamic recompiler's
+/// walk the page tables. `repr(C)`, and 32 bytes: the dynamic recompiler's
 /// code looks translations up itself (see `layout`), at the linear address
-/// shifted right by 8 and masked.
+/// shifted right by 7 and masked.
 #[derive(Clone, Copy)]
-#[repr(C, align(16))]
+#[repr(C, align(32))]
 pub(crate) struct TlbEntry {
     read_tag: u32,
     write_tag: u32,
     /// Physical address of the page.
     phys: u32,
-    /// The same, with bit 31 set where the page isn't plain RAM (see
-    /// `Bus::is_plain_ram`): the recompiler's code compares an address in it
-    /// with the end of RAM alone.
-    jit_phys: u32,
+    /// For the x86-64 recompiler's code, where the page is plain RAM (see
+    /// `Bus::is_plain_ram`): the linear address of the page, for reads and
+    /// for writes as the tags allow them, and what to add to a linear
+    /// address in it for the physical one. Elsewhere the tags are 1, which
+    /// no page's address is, so the code takes its slow path.
+    jit_read: u32,
+    jit_write: u32,
+    jit_delta: u32,
 }
 
-const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0, jit_phys: 0 };
-const _: () = assert!(std::mem::size_of::<TlbEntry>() == 16);
+const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0, jit_read: 1, jit_write: 1, jit_delta: 0 };
+const _: () = assert!(std::mem::size_of::<TlbEntry>() == 32);
 
 /// Where an entry's fields are, its size, and the entries in each set,
 /// for `layout`.
 pub(crate) const TLB_READ_TAG: usize = std::mem::offset_of!(TlbEntry, read_tag);
 pub(crate) const TLB_WRITE_TAG: usize = std::mem::offset_of!(TlbEntry, write_tag);
 pub(crate) const TLB_PHYS: usize = std::mem::offset_of!(TlbEntry, phys);
-pub(crate) const TLB_JIT_PHYS: usize = std::mem::offset_of!(TlbEntry, jit_phys);
+pub(crate) const TLB_JIT_READ: usize = std::mem::offset_of!(TlbEntry, jit_read);
+pub(crate) const TLB_JIT_WRITE: usize = std::mem::offset_of!(TlbEntry, jit_write);
+pub(crate) const TLB_JIT_DELTA: usize = std::mem::offset_of!(TlbEntry, jit_delta);
 pub(crate) const TLB_ENTRY_SIZE: usize = std::mem::size_of::<TlbEntry>();
 pub(crate) const TLB_SET: usize = TLB_ENTRIES;
 /// Where the entries are in the TLB.
@@ -263,11 +269,14 @@ impl Cpu {
         // first write to it still sets the bit.
         let writable = walked.dirty && allows(walked.user_ok, walked.write_ok, true, paging);
         let plain = self.bus.is_plain_ram(walked.page as usize, 0x1000);
+        let at = lin & !0xFFF;
         self.tlb.entries[Tlb::slot(page, user)] = TlbEntry {
             read_tag: page + 1,
             write_tag: if writable { page + 1 } else { 0 },
             phys: walked.page,
-            jit_phys: walked.page | if plain { 0 } else { 0x8000_0000 },
+            jit_read: if plain { at } else { 1 },
+            jit_write: if plain && writable { at } else { 1 },
+            jit_delta: walked.page.wrapping_sub(at),
         };
         Ok(self.translate(walked.page | (lin & 0xFFF)))
     }
