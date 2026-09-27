@@ -494,6 +494,22 @@ impl VgaCard {
             }
         }
 
+        // The plain write of write mode 0, without set/reset, rotation or a
+        // logical operation, of all bits (as mode 13h and mode X draw): the
+        // byte into each plane written.
+        let g = &self.graphics_regs;
+        if g[0x05] & 0x03 == 0 && g[0x01] & 0x0F == 0 && g[0x03] == 0 && g[0x08] == 0xFF {
+            for p in 0..4 {
+                if planes_to_write & (1 << p) != 0
+                    && let Some(byte) = self.vram_graphics.get_mut(p * 65536 + plane_offset)
+                {
+                    *byte = value;
+                }
+            }
+            self.mark_dirty_full();
+            return;
+        }
+
         let mode_reg = self.graphics_regs[0x05];
         let write_mode = mode_reg & 0x03;
         let set_reset = self.graphics_regs[0x00] & 0x0F;

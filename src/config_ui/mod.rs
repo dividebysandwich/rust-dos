@@ -293,7 +293,8 @@ pub fn pending_note(video: crate::video::adapter::VideoSetup, new: &Settings) ->
 /// How a setting is changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
-    /// Left and right step through the values.
+    /// Left and right step through the values, and Enter lists them to
+    /// pick one (`Item::choices`).
     Choice,
     /// Steps, and Enter types a value.
     ChoiceOrText,
@@ -394,13 +395,25 @@ enum Item {
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
-fn cycle<T: PartialEq + Copy>(values: &[T], current: T, dir: isize) -> T {
-    let at = match values.iter().position(|&v| v == current) {
+fn cycle<T: PartialEq + Clone>(values: &[T], current: &T, dir: isize) -> T {
+    let at = match values.iter().position(|v| v == current) {
         Some(i) => i as isize,
         None if dir > 0 => -1,
         None => 0,
     };
-    values[(at + dir).rem_euclid(values.len() as isize) as usize]
+    values[(at + dir).rem_euclid(values.len() as isize) as usize].clone()
+}
+
+/// `s` with each of `values` put in by `set`, in turn.
+fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut Settings, T)) -> Vec<Settings> {
+    values
+        .into_iter()
+        .map(|value| {
+            let mut s = s.clone();
+            set(&mut s, value);
+            s
+        })
+        .collect()
 }
 
 /// The next of the ascending `values` above (or below) `current`.
@@ -702,76 +715,60 @@ impl Item {
         }
     }
 
-    /// Step the setting left (-1) or right (1). `drives` are the mounted
+    /// The values the setting is picked from, in order, each as the
+    /// settings `s` with it; none for one that is typed or picked some
+    /// other way, and for a row of several. `drives` are the mounted
     /// drives, which the Ultrasound's drive can't take.
-    fn step(self, s: &mut Settings, dir: isize, drives: &[DriveInfo], frontend: Frontend) {
+    fn choices(self, s: &Settings, drives: &[DriveInfo], frontend: Frontend) -> Vec<Settings> {
         use Item::*;
-        let sound = &mut s.sound;
-        let (sb, gus) = (&mut sound.sb, &mut sound.gus);
+        let on_off = |set: fn(&mut Settings, bool)| each(s, [false, true], set);
         match self {
-            Scale => s.scale = (s.scale as isize + dir).clamp(1, 16) as u32,
-            Fullscreen => s.fullscreen = !s.fullscreen,
-            Aspect => s.aspect = !s.aspect,
-            Filter => s.filter = cycle(&[crate::config::Filter::Nearest, crate::config::Filter::Linear], s.filter, dir),
-            Shader => s.shader = cycle(&crate::video::shader::Shader::ALL, s.shader, dir),
-            CrtCurvature => s.crt.curvature = step_tens(s.crt.curvature, dir, MAX_AMOUNT),
-            CrtGlow => s.crt.glow = step_tens(s.crt.glow, dir, MAX_AMOUNT),
-            Monochrome => s.monochrome = cycle(&crate::video::mono::Monochrome::ALL, s.monochrome, dir),
-            Composite => {
-                s.composite.mode = cycle(&crate::video::composite::CompositeMode::ALL, s.composite.mode, dir)
-            }
-            CompositeEra => {
-                s.composite.era = cycle(&crate::video::composite::CompositeEra::ALL, s.composite.era, dir)
-            }
-            Cycles => {
-                let current = match s.cycles {
-                    CpuSpeed::Max => u32::MAX,
-                    CpuSpeed::Fixed(n) => n,
-                };
-                s.cycles = match step_number(&CYCLES, current, dir) {
-                    u32::MAX => CpuSpeed::Max,
-                    n => CpuSpeed::Fixed(n),
-                };
-            }
-            Core => s.core = cycle(&[CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], s.core, dir),
-            Cpu => s.cpu = cycle(&[CpuModel::I386, CpuModel::I486, CpuModel::Pentium], s.cpu, dir),
-            Machine => s.machine = cycle(&crate::video::adapter::Adapter::ALL, s.machine, dir),
-            Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
-            Voodoo => s.voodoo.enabled = !s.voodoo.enabled,
+            Scale => each(s, 1..=16, |s, scale| s.scale = scale),
+            Fullscreen => on_off(|s, on| s.fullscreen = on),
+            Aspect => on_off(|s, on| s.aspect = on),
+            Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
+            Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
+            Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
+            Composite => each(s, crate::video::composite::CompositeMode::ALL, |s, mode| s.composite.mode = mode),
+            CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
+            Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
+            Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium], |s, cpu| s.cpu = cpu),
+            Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
+            Memsize => each(s, MEMSIZES, |s, mb| s.memsize = mb as usize),
+            Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
-                s.voodoo.board = cycle(&[crate::voodoo::Board::Standard, crate::voodoo::Board::Max], s.voodoo.board, dir)
+                each(s, [crate::voodoo::Board::Standard, crate::voodoo::Board::Max], |s, board| s.voodoo.board = board)
             }
-            VoodooRenderer => {
-                s.voodoo.renderer =
-                    cycle(&[crate::voodoo::Renderer::Software, crate::voodoo::Renderer::OpenGl], s.voodoo.renderer, dir)
-            }
-            VoodooScale => s.voodoo.scale = cycle(&[1, 2, 3, 4], s.voodoo.scale, dir),
-            Ems => s.ems = !s.ems,
-            Umb => s.umb = !s.umb,
-            KeyboardLayout => s.keyboard_layout = cycle(&crate::keylayout::LayoutSetting::all(), s.keyboard_layout, dir),
-            Rewind => s.rewind = !s.rewind,
-            RecordUi => s.record_ui = !s.record_ui,
-            RecordShader => s.record_shader = !s.record_shader,
-            RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory as u32, dir) as usize,
+            VoodooRenderer => each(s, [crate::voodoo::Renderer::Software, crate::voodoo::Renderer::OpenGl], |s, r| {
+                s.voodoo.renderer = r
+            }),
+            VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
+            Ems => on_off(|s, on| s.ems = on),
+            Umb => on_off(|s, on| s.umb = on),
+            KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
+            Rewind => on_off(|s, on| s.rewind = on),
+            RecordUi => on_off(|s, on| s.record_ui = on),
+            RecordShader => on_off(|s, on| s.record_shader = on),
+            RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb as usize),
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
-                match cycle(&models, sound.sb_installed.then_some(sb.model), dir) {
+                each(s, models, |s, model| match model {
                     Some(model) => {
-                        sb.model = model;
-                        sound.sb_installed = true;
+                        s.sound.sb.model = model;
+                        s.sound.sb_installed = true;
                     }
-                    None => sound.sb_installed = false,
-                }
+                    None => s.sound.sb_installed = false,
+                })
             }
-            SbBase => sb.base = cycle(&[0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x270, 0x280], sb.base, dir),
-            SbIrq => sb.irq = cycle(&[2, 3, 5, 7, 9, 10, 11, 12, 15], sb.irq, dir),
-            SbDma => sb.dma8 = cycle(&[0, 1, 3], sb.dma8, dir),
-            SbHdma => sb.dma16 = cycle(&[5, 6, 7], sb.dma16, dir),
-            Opl => sound.opl3 = !sound.opl3,
-            Gus => gus.enabled = !gus.enabled,
-            GusBase => gus.base = cycle(&[0x210, 0x220, 0x240, 0x250, 0x260], gus.base, dir),
-            GusIrq => gus.irq = cycle(&[2, 3, 5, 7, 11, 12, 15], gus.irq, dir),
-            GusDma => gus.dma = cycle(&[1, 3, 5, 6, 7], gus.dma, dir),
+            SbBase => each(s, [0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x270, 0x280], |s, base| s.sound.sb.base = base),
+            SbIrq => each(s, [2, 3, 5, 7, 9, 10, 11, 12, 15], |s, irq| s.sound.sb.irq = irq),
+            SbDma => each(s, [0, 1, 3], |s, dma| s.sound.sb.dma8 = dma),
+            SbHdma => each(s, [5, 6, 7], |s, dma| s.sound.sb.dma16 = dma),
+            Opl => on_off(|s, opl3| s.sound.opl3 = opl3),
+            Gus => on_off(|s, on| s.sound.gus.enabled = on),
+            GusBase => each(s, [0x210, 0x220, 0x240, 0x250, 0x260], |s, base| s.sound.gus.base = base),
+            GusIrq => each(s, [2, 3, 5, 7, 11, 12, 15], |s, irq| s.sound.gus.irq = irq),
+            GusDma => each(s, [1, 3, 5, 6, 7], |s, dma| s.sound.gus.dma = dma),
             GusDrive => {
                 // D: to Y:, where no drive of the user's own is.
                 let mut letters = vec![None];
@@ -780,7 +777,7 @@ impl Item {
                         .filter(|&d| drives.iter().all(|i| i.drive != d || i.kind == DriveKind::Virtual))
                         .map(Some),
                 );
-                gus.drive = cycle(&letters, gus.drive, dir);
+                each(s, letters, |s, drive| s.sound.gus.drive = drive)
             }
             Midi => {
                 let mut synths = vec![MidiSynth::Auto];
@@ -795,46 +792,69 @@ impl Item {
                     synths.push(MidiSynth::Host);
                 }
                 synths.push(MidiSynth::None);
-                sound.midisynth = cycle(&synths, sound.midisynth, dir);
+                each(s, synths, |s, synth| s.sound.midisynth = synth)
             }
-            Mt32Model => sound.mt32model = cycle(&crate::config::Mt32Model::ALL, sound.mt32model, dir),
+            Mt32Model => each(s, crate::config::Mt32Model::ALL, |s, model| s.sound.mt32model = model),
             // The ports there are now, and the first of them (empty).
-            MidiPort => {
-                let mut ports = vec![String::new()];
-                ports.extend(midi_ports());
-                let at = ports.iter().position(|p| *p == sound.midiport);
-                let next = match at {
-                    Some(i) => (i as isize + dir).rem_euclid(ports.len() as isize) as usize,
-                    None => 0,
-                };
-                sound.midiport = ports.swap_remove(next);
+            MidiPort => each(s, std::iter::once(String::new()).chain(midi_ports()), |s, port| s.sound.midiport = port),
+            HardDiskSpeed => each(s, DiskSpeed::ALL, |s, speed| s.disk.hard_disk_speed = speed),
+            FloppyDiskSpeed => each(s, DiskSpeed::ALL, |s, speed| s.disk.floppy_disk_speed = speed),
+            HardDiskNoise => each(s, NoiseMode::ALL, |s, noise| s.disk.hard_disk_noise = noise),
+            FloppyDiskNoise => each(s, NoiseMode::ALL, |s, noise| s.disk.floppy_disk_noise = noise),
+            Joystick => each(s, JoystickType::ALL, |s, kind| s.joystick.kind = kind),
+            SpeakerFilter => on_off(|s, on| s.mixer.speaker_filter = on),
+            Item::SbFilter => {
+                use crate::mixer::SbFilter as Filter;
+                each(s, [Filter::Auto, Filter::Off], |s, filter| s.mixer.sb_filter = filter)
             }
-            HardDiskSpeed => s.disk.hard_disk_speed = cycle(&DiskSpeed::ALL, s.disk.hard_disk_speed, dir),
-            FloppyDiskSpeed => s.disk.floppy_disk_speed = cycle(&DiskSpeed::ALL, s.disk.floppy_disk_speed, dir),
-            HardDiskNoise => s.disk.hard_disk_noise = cycle(&NoiseMode::ALL, s.disk.hard_disk_noise, dir),
-            FloppyDiskNoise => s.disk.floppy_disk_noise = cycle(&NoiseMode::ALL, s.disk.floppy_disk_noise, dir),
+            Reverb => each(s, ReverbPreset::ALL, |s, preset| s.mixer.reverb = preset),
+            Chorus => each(s, ChorusPreset::ALL, |s, preset| s.mixer.chorus = preset),
+            LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
+            TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
+            // Typed, picked from the host's files or edited, and a row of
+            // several, whose fields have their own.
+            Cycles | CrtCurvature | CrtGlow | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir | SoundFont
+            | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts => Vec::new(),
+        }
+    }
+
+    /// Step the setting left (-1) or right (1).
+    fn step(self, s: &mut Settings, dir: isize, drives: &[DriveInfo], frontend: Frontend) {
+        use Item::*;
+        match self {
+            Scale => s.scale = (s.scale as isize + dir).clamp(1, 16) as u32,
+            CrtCurvature => s.crt.curvature = step_tens(s.crt.curvature, dir, MAX_AMOUNT),
+            CrtGlow => s.crt.glow = step_tens(s.crt.glow, dir, MAX_AMOUNT),
+            Cycles => {
+                let current = match s.cycles {
+                    CpuSpeed::Max => u32::MAX,
+                    CpuSpeed::Fixed(n) => n,
+                };
+                s.cycles = match step_number(&CYCLES, current, dir) {
+                    u32::MAX => CpuSpeed::Max,
+                    n => CpuSpeed::Fixed(n),
+                };
+            }
+            Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
+            RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory as u32, dir) as usize,
             // In tens of percent, from a value in between to the next ten.
             Volume(channel) => s.mixer.set_level(channel, step_tens(s.mixer.level(channel), dir, MAX_LEVEL)),
             ReverbMix => s.mixer.reverb_mix = step_tens(s.mixer.reverb_mix, dir, MAX_MIX),
             ChorusMix => s.mixer.chorus_mix = step_tens(s.mixer.chorus_mix, dir, MAX_MIX),
-            Joystick => s.joystick.kind = cycle(&JoystickType::ALL, s.joystick.kind, dir),
-            SpeakerFilter => s.mixer.speaker_filter = !s.mixer.speaker_filter,
-            Item::SbFilter => {
-                use crate::mixer::SbFilter as Filter;
-                s.mixer.sb_filter = cycle(&[Filter::Auto, Filter::Off], s.mixer.sb_filter, dir)
-            }
-            Reverb => s.mixer.reverb = cycle(&ReverbPreset::ALL, s.mixer.reverb, dir),
-            Chorus => s.mixer.chorus = cycle(&ChorusPreset::ALL, s.mixer.chorus, dir),
-            LptDac => sound.lpt_dac = cycle(&crate::lpt_dac::LptDacType::ALL, sound.lpt_dac, dir),
-            TandySound => sound.tandy = cycle(&crate::sn76489::TandySound::ALL, sound.tandy, dir),
             // In fives of percent.
             Deadzone => {
                 let dz = s.joystick.deadzone as isize;
                 let fives = if dir > 0 { dz / 5 + 1 } else { (dz + 4) / 5 - 1 };
                 s.joystick.deadzone = (fives * 5).clamp(0, MAX_DEADZONE as isize) as u8;
             }
-            // A row of several steps the field chosen (`ConfigUi::field`).
-            UltraDir | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts => {}
+            // Around the values it is picked from. A row of several steps
+            // the field chosen (`ConfigUi::field`).
+            _ => {
+                let choices = self.choices(s, drives, frontend);
+                if !choices.is_empty() {
+                    *s = cycle(&choices, s, dir);
+                }
+            }
         }
     }
 
@@ -942,6 +962,18 @@ struct Status {
     error: bool,
 }
 
+/// A setting's values listed over the page, for one to be picked.
+struct Popup {
+    /// The setting, or the field of a row of several.
+    item: Item,
+    /// The settings with each value (`Item::choices`), the one selected,
+    /// the first one shown and how many the last frame showed.
+    choices: Vec<Settings>,
+    selected: usize,
+    scroll: usize,
+    visible: usize,
+}
+
 /// Something on the window a click acts on.
 #[derive(Clone, Copy, Debug)]
 enum Target {
@@ -960,6 +992,9 @@ enum Target {
     BrowserRow(usize),
     /// A line of the `[autoexec]` editor.
     EditorLine(usize),
+    /// A value of the popup list, and the rest of it.
+    PopupRow(usize),
+    Popup,
 }
 
 struct Hit {
@@ -983,8 +1018,9 @@ pub struct ConfigUi {
     config_file: Option<PathBuf>,
     home: Option<PathBuf>,
     status: Option<Status>,
-    /// The selected setting's value being typed.
+    /// The selected setting's value being typed, or picked from a list.
     edit: Option<TextField>,
+    popup: Option<Popup>,
     dialog: Option<MountDialog>,
     /// Making a new disk image.
     image_dialog: Option<ImageDialog>,
@@ -1060,6 +1096,7 @@ impl ConfigUi {
             home: None,
             status: None,
             edit: None,
+            popup: None,
             dialog: None,
             image_dialog: None,
             browser: None,
@@ -1100,8 +1137,10 @@ impl ConfigUi {
     /// command): show them as they are now, and change them from there.
     pub fn sync_mixer(&mut self, mixer: crate::mixer::MixerSettings) {
         self.settings.mixer = mixer;
-        // An effect turned off takes its mix off the page.
+        // An effect turned off takes its mix off the page, and a list open
+        // has the mixer as it was.
         self.row = self.row.min(self.row_count().saturating_sub(1));
+        self.popup = None;
     }
 
     /// What the Stats page and the performance overlay show, for the
@@ -1132,6 +1171,7 @@ impl ConfigUi {
         self.home = dirs::home_dir();
         self.status = None;
         self.edit = None;
+        self.popup = None;
         self.dialog = None;
         self.image_dialog = None;
         self.browser = None;
@@ -1213,6 +1253,8 @@ impl ConfigUi {
             self.autoexec_key(key, host);
         } else if self.cheats.edit.is_some() {
             self.cheats_edit_key(key, host);
+        } else if self.popup.is_some() {
+            self.popup_key(key, host);
         } else if self.edit.is_some() {
             self.edit_key(key, host);
         } else {
@@ -1230,16 +1272,19 @@ impl ConfigUi {
 
     /// A left click at frame pixel (`x`, `y`).
     pub fn click(&mut self, x: i32, y: i32, host: &mut dyn Host) {
-        let Some((col, row)) = self.layout.and_then(|l| l.cell_at(x, y)) else { return };
-        let Some((target, into)) = self
-            .hits
-            .iter()
-            .rev()
-            .find(|h| h.row == row && (h.col..h.col + h.width).contains(&col))
-            .map(|h| (h.target, col - h.col))
-        else {
+        let hit = self.layout.and_then(|l| l.cell_at(x, y)).and_then(|(col, row)| {
+            self.hits
+                .iter()
+                .rev()
+                .find(|h| h.row == row && (h.col..h.col + h.width).contains(&col))
+                .map(|h| (h.target, col - h.col))
+        });
+        // A click off the popup list closes it, and does nothing else.
+        if self.popup.is_some() && !matches!(hit, Some((Target::PopupRow(_) | Target::Popup, _))) {
+            self.popup = None;
             return;
-        };
+        }
+        let Some((target, into)) = hit else { return };
         match target {
             Target::Tab(page) => {
                 if self.dialog.is_none()
@@ -1259,6 +1304,7 @@ impl ConfigUi {
                 self.cheats.edit = None;
                 self.select(i);
             }
+            Target::RowField(i, field) if i == self.row && field == self.field => self.key(UiKey::Enter, host),
             Target::RowField(i, field) => {
                 self.select(i);
                 self.field = field;
@@ -1298,6 +1344,13 @@ impl ConfigUi {
                 }
             }
             Target::EditorLine(i) => self.autoexec_clicked(i, into),
+            Target::PopupRow(i) => {
+                if let Some(popup) = &mut self.popup {
+                    popup.selected = i;
+                }
+                self.key(UiKey::Enter, host);
+            }
+            Target::Popup => {}
         }
     }
 
@@ -1372,24 +1425,26 @@ impl ConfigUi {
 
     fn setting_key(&mut self, key: UiKey, host: &mut dyn Host) {
         let Some(item) = self.item() else { return };
-        // A row of several: Left and Right change a field, Enter goes on
-        // to the next.
+        // A row of several: Left and Right change a field, Enter lists its
+        // values.
         let fields = item.fields(&self.settings);
         if !fields.is_empty() {
             let field = self.field.min(fields.len() - 1);
             match key {
                 UiKey::Left => self.step(fields[field], -1, host),
                 UiKey::Right => self.step(fields[field], 1, host),
-                UiKey::Enter => self.field = (field + 1) % fields.len(),
+                UiKey::Enter => {
+                    self.field = field;
+                    self.open_popup(fields[field]);
+                }
                 _ => {}
             }
             return;
         }
         match (key, item.input()) {
             (UiKey::Left, Input::Choice | Input::ChoiceOrText) => self.step(item, -1, host),
-            (UiKey::Right | UiKey::Enter, Input::Choice) | (UiKey::Right, Input::ChoiceOrText) => {
-                self.step(item, 1, host)
-            }
+            (UiKey::Right, Input::Choice | Input::ChoiceOrText) => self.step(item, 1, host),
+            (UiKey::Enter, Input::Choice) => self.open_popup(item),
             (UiKey::Enter, Input::ChoiceOrText | Input::Text) => {
                 self.edit = Some(TextField::new(&item.text(&self.settings)));
             }
@@ -1404,6 +1459,57 @@ impl ConfigUi {
     fn step(&mut self, item: Item, dir: isize, host: &mut dyn Host) {
         item.step(&mut self.settings, dir, &self.drives, self.frontend);
         self.changed(item, host);
+    }
+
+    /// List `item`'s values over the page, the one it has selected.
+    fn open_popup(&mut self, item: Item) {
+        let choices = item.choices(&self.settings, &self.drives, self.frontend);
+        if choices.is_empty() {
+            return;
+        }
+        let selected = choices.iter().position(|c| *c == self.settings).unwrap_or(0);
+        self.popup = Some(Popup { item, choices, selected, scroll: 0, visible: self.visible });
+    }
+
+    /// A setting's values listed: Enter picks the one selected, a letter
+    /// selects the next one starting with it, and in a row of several,
+    /// Left and Right go on to the next field's.
+    fn popup_key(&mut self, key: UiKey, host: &mut dyn Host) {
+        let home = self.home.as_deref();
+        let Some(popup) = &mut self.popup else { return };
+        if let Some(i) = Self::navigate(key, popup.selected, popup.choices.len(), popup.visible) {
+            popup.selected = i;
+            return;
+        }
+        match key {
+            UiKey::Esc => self.popup = None,
+            UiKey::Enter => {
+                let Some(Popup { item, mut choices, selected, .. }) = self.popup.take() else { return };
+                let chosen = choices.swap_remove(selected);
+                if chosen != self.settings {
+                    self.settings = chosen;
+                    self.changed(item, host);
+                }
+            }
+            UiKey::Left | UiKey::Right => {
+                let fields = self.item().map_or(Vec::new(), |item| item.fields(&self.settings));
+                if !fields.is_empty() {
+                    let dir = if key == UiKey::Left { -1 } else { 1 };
+                    let field = self.field.min(fields.len() - 1) as isize + dir;
+                    self.field = field.rem_euclid(fields.len() as isize) as usize;
+                    self.open_popup(fields[self.field]);
+                }
+            }
+            UiKey::Char(c) => {
+                let c = c.to_lowercase().next().unwrap_or(c);
+                let n = popup.choices.len();
+                let starts = |i: &usize| popup.item.value(&popup.choices[*i], home).to_lowercase().starts_with(c);
+                if let Some(i) = (1..=n).map(|k| (popup.selected + k) % n).find(starts) {
+                    popup.selected = i;
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Hand changed settings to the emulator and say when they take effect.
@@ -1871,6 +1977,8 @@ impl ConfigUi {
         Self::keep_visible(&mut self.scroll, self.row, content.len());
         let value_col = 27.min(cols / 2);
         let note_col = cols - 13;
+        // Where the selected setting's value is, for its popup list.
+        let mut anchor = None;
         for (i, row) in (self.scroll..items.len()).zip(content.clone()) {
             let item = items[i];
             let selected = i == self.row;
@@ -1903,9 +2011,16 @@ impl ConfigUi {
             if item.input() == Input::Link {
                 continue;
             }
+            if selected {
+                anchor = Some((value_col, row));
+            }
             let fields = item.fields(&self.settings);
             if !fields.is_empty() {
-                self.draw_fields(g, row, i, &fields, (value_col, end), selected);
+                // Its list's values under the field's.
+                let focus = self.draw_fields(g, row, i, &fields, (value_col, end), selected);
+                if selected && let Some(col) = focus {
+                    anchor = Some((col - 1, row));
+                }
                 continue;
             }
             if selected && let Some(field) = &self.edit {
@@ -1927,16 +2042,93 @@ impl ConfigUi {
                 g.text_to(value_col + 2, row, &value, draw::BRIGHT, end);
             }
         }
-        self.draw_scrollbar(g, content, self.scroll, items.len());
+        self.draw_scrollbar(g, content.clone(), self.scroll, items.len());
+        if let Some(anchor) = anchor {
+            self.draw_popup(g, content, anchor);
+        }
+    }
+
+    /// The popup list of values from (`col`, `row`), where the value it
+    /// picks is: below it, or above it where it doesn't fit below, else as
+    /// low in the rows `content` as it fits, scrolled where it is longer
+    /// than they are.
+    fn draw_popup(&mut self, g: &mut Grid, content: std::ops::Range<usize>, (col, row): (usize, usize)) {
+        let home = self.home.as_deref();
+        let Some(popup) = &mut self.popup else { return };
+        let labels: Vec<String> = popup.choices.iter().map(|s| popup.item.value(s, home)).collect();
+        let height = (labels.len() + 2).min(content.len());
+        let top = if row + 1 + height <= content.end {
+            row + 1
+        } else if row >= content.start + height {
+            row - height
+        } else {
+            content.end - height
+        };
+        let list = height.saturating_sub(2);
+        if list == 0 {
+            return;
+        }
+        popup.visible = list;
+        Self::keep_visible(&mut popup.scroll, popup.selected, list);
+
+        // Framed, with a space either side of the values, left of the
+        // window's right border.
+        let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let width = (longest + 4).min(g.cols - 2);
+        let left = col.min(g.cols - 1 - width);
+        let right = left + width - 1;
+        let bottom = top + height - 1;
+        for r in top..=bottom {
+            g.background(left, r, width, draw::FIELD);
+            g.text_to(left, r, &" ".repeat(width), draw::TEXT, right + 1);
+            g.char(left, r, 0xB3, draw::BORDER);
+            g.char(right, r, 0xB3, draw::BORDER);
+            self.hits.push(Hit { row: r, col: left, width, target: Target::Popup });
+        }
+        for x in left + 1..right {
+            g.char(x, top, 0xC4, draw::BORDER);
+            g.char(x, bottom, 0xC4, draw::BORDER);
+        }
+        g.char(left, top, 0xDA, draw::BORDER);
+        g.char(right, top, 0xBF, draw::BORDER);
+        g.char(left, bottom, 0xC0, draw::BORDER);
+        g.char(right, bottom, 0xD9, draw::BORDER);
+        // ▲ and ▼ where there are more above and below.
+        if popup.scroll > 0 {
+            g.char(right - 2, top, 0x1E, draw::KEY);
+        }
+        if popup.scroll + list < labels.len() {
+            g.char(right - 2, bottom, 0x1F, draw::KEY);
+        }
+
+        for (i, r) in (popup.scroll..labels.len()).zip(top + 1..bottom) {
+            let selected = i == popup.selected;
+            if selected {
+                g.background(left + 1, r, width - 2, draw::SELECT);
+            }
+            let text = fit(&labels[i], width.saturating_sub(4));
+            g.text_to(left + 2, r, &text, if selected { draw::BRIGHT } else { draw::TEXT }, right - 1);
+            self.hits.push(Hit { row: r, col: left + 1, width: width - 2, target: Target::PopupRow(i) });
+        }
     }
 
     /// The fields of row `i`, a row of several, side by side in the
     /// columns `cols` of grid row `row`: each by its name with its value
     /// between its own ◄ and ►, the one Left and Right change marked
-    /// while the row is selected.
-    fn draw_fields(&mut self, g: &mut Grid, row: usize, i: usize, fields: &[Item], cols: (usize, usize), selected: bool) {
+    /// while the row is selected. Returns the column of that one's ◄, if
+    /// it fit.
+    fn draw_fields(
+        &mut self,
+        g: &mut Grid,
+        row: usize,
+        i: usize,
+        fields: &[Item],
+        cols: (usize, usize),
+        selected: bool,
+    ) -> Option<usize> {
         let (mut x, end) = cols;
         let focus = self.field.min(fields.len() - 1);
+        let mut focus_col = None;
         for (f, field) in fields.iter().enumerate() {
             if f > 0 {
                 x += 2;
@@ -1951,8 +2143,11 @@ impl ConfigUi {
             }
             g.char(x, row, 0x11, draw::KEY);
             self.hits.push(Hit { row, col: x, width: 1, target: Target::RowFieldStep(i, f, -1) });
-            if selected && f == focus {
-                g.background(x + 1, row, value.chars().count(), draw::FIELD);
+            if f == focus {
+                focus_col = Some(x);
+                if selected {
+                    g.background(x + 1, row, value.chars().count(), draw::FIELD);
+                }
             }
             let after = g.text_to(x + 1, row, &value, draw::BRIGHT, end);
             self.hits.push(Hit { row, col: x + 1, width: after - x - 1, target: Target::RowField(i, f) });
@@ -1960,6 +2155,7 @@ impl ConfigUi {
             self.hits.push(Hit { row, col: after, width: 1, target: Target::RowFieldStep(i, f, 1) });
             x = after + 1;
         }
+        focus_col
     }
 
     /// A level meter of `METER` cells at (`col`, `row`): 6 dB a cell
@@ -2111,6 +2307,12 @@ impl ConfigUi {
                 ("Tab", "Page", Tab),
                 ("Esc", "Close", Esc),
             ]
+        } else if self.popup.is_some() {
+            let mut hints = vec![("\u{2191}\u{2193}", "Select", Down), ("Enter", "OK", Enter), ("Esc", "Cancel", Esc)];
+            if self.item().is_some_and(|item| !item.fields(&self.settings).is_empty()) {
+                hints.insert(1, ("\u{2190}\u{2192}", "Field", Right));
+            }
+            hints
         } else if self.edit.is_some() || self.cheats.edit.is_some() {
             vec![("Enter", "OK", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::Cheats {
@@ -2139,9 +2341,9 @@ impl ConfigUi {
             ]
         } else {
             let mut hints = vec![("\u{2190}\u{2192}", "Change", Right)];
-            let several = self.item().is_some_and(|item| !item.fields(&self.settings).is_empty());
             match self.item().map(Item::input) {
-                _ if several => hints.push(("Enter", "Next", Enter)),
+                // A row of several lists its field's.
+                Some(Input::Choice) => hints.push(("Enter", "List", Enter)),
                 Some(Input::ChoiceOrText | Input::Text) => hints.push(("Enter", "Type", Enter)),
                 Some(Input::File) => hints.extend([("Enter", "Pick", Enter), ("Del", "None", Delete)]),
                 Some(Input::Link) => hints = vec![("Enter", "Edit", Enter)],

@@ -221,8 +221,8 @@ fn settings_change_live() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
     use UiKey::*;
-    // Display: scale up twice, fullscreen on.
-    keys(&mut ui, &mut host, &[Tab, Right, Right, Down, Enter]);
+    // Display: scale up twice, fullscreen on from its list.
+    keys(&mut ui, &mut host, &[Tab, Right, Right, Down, Enter, Down, Enter]);
     let last = host.applied.last().unwrap();
     assert_eq!((last.scale, last.fullscreen), (3, true));
     assert_eq!(host.applied.len(), 3);
@@ -292,14 +292,18 @@ fn a_cards_port_irq_and_dma_share_a_row() {
     let value = |ui: &ConfigUi| ui.item().map(|i| i.value(&ui.settings, None)).unwrap();
     assert_eq!(value(&ui), "220h, IRQ 7, DMA 1, HDMA 5");
 
-    // Left and Right change the field chosen, and Enter goes on to the next.
+    // Left and Right change the field chosen, and Enter lists its values,
+    // where Left and Right go on to the next field's.
     keys(&mut ui, &mut host, &[Right]);
     assert_eq!(host.applied.last().unwrap().sound.sb.base, 0x230);
-    keys(&mut ui, &mut host, &[Enter, Right]);
-    assert_eq!(host.applied.last().unwrap().sound.sb.irq, 9);
-    keys(&mut ui, &mut host, &[Enter, Enter, Right, Enter]);
-    assert_eq!(host.applied.last().unwrap().sound.sb.dma16, 6);
+    keys(&mut ui, &mut host, &[Enter, Right, Down, Enter]);
+    assert_eq!((ui.field, host.applied.last().unwrap().sound.sb.irq), (1, 9));
+    keys(&mut ui, &mut host, &[Enter, Right, Right, Down, Enter]);
+    assert_eq!((ui.field, host.applied.last().unwrap().sound.sb.dma16), (3, 6));
+    let applied = host.applied.len();
+    keys(&mut ui, &mut host, &[Enter, Right, Esc]);
     assert_eq!(ui.field, 0, "round to the port again");
+    assert_eq!(host.applied.len(), applied);
 
     // The high DMA channel is the SB16's alone.
     ui.settings.sound.sb.model = SbModel::SbPro2;
@@ -319,10 +323,96 @@ fn a_cards_port_irq_and_dma_share_a_row() {
     let (x, y) = hit(&ui, |t| matches!(t, Target::RowField(_, 1)));
     ui.click(x, y, &mut host);
     assert_eq!(ui.field, 1);
+    // Clicked again, it lists its values, and a click picks one: IRQ 5.
+    ui.click(x, y, &mut host);
+    assert_eq!(ui.popup.as_ref().map(|p| p.item), Some(Item::SbIrq));
+    ui.draw(&mut frame);
+    let (x, y) = hit(&ui, |t| matches!(t, Target::PopupRow(2)));
+    ui.click(x, y, &mut host);
+    assert!(ui.popup.is_none());
+    assert_eq!(host.applied.last().unwrap().sound.sb.irq, 5);
 
     // Another row starts at its first field.
     keys(&mut ui, &mut host, &[Down, Up]);
     assert_eq!(ui.field, 0);
+}
+
+#[test]
+fn enter_lists_a_settings_values_to_pick_from() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Sound);
+    ui.row = ui.items().iter().position(|&i| i == Item::Midi).unwrap();
+
+    // Enter lists the synthesizers, the one set selected; moving about and
+    // Esc leave it as it was.
+    ui.key(Enter, &mut host);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!((popup.item, popup.selected), (Item::Midi, 0));
+    keys(&mut ui, &mut host, &[Down, Esc]);
+    assert!(ui.popup.is_none() && host.applied.is_empty());
+
+    // Enter picks the one selected; a letter selects the next that starts
+    // with it.
+    keys(&mut ui, &mut host, &[Enter, End, Enter]);
+    assert_eq!(host.applied.last().unwrap().sound.midisynth, MidiSynth::None);
+    ui.key(Enter, &mut host);
+    ui.text("u", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().sound.midisynth, MidiSynth::Gus);
+    // Picking the value it has changes nothing.
+    keys(&mut ui, &mut host, &[Enter, Enter]);
+    assert_eq!(host.applied.len(), 2);
+    // The CPU speed is still typed.
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Cycles).unwrap();
+    ui.key(Enter, &mut host);
+    assert!(ui.popup.is_none() && ui.edit.is_some());
+    ui.key(Esc, &mut host);
+
+    // A list longer than the page has room for scrolls, in the page's rows.
+    let layouts = crate::keylayout::LayoutSetting::all();
+    ui.row = ui.items().iter().position(|&i| i == Item::KeyboardLayout).unwrap();
+    ui.key(Enter, &mut host);
+    let mut frame = Frame::new(640, 350);
+    ui.draw(&mut frame);
+    let layout = ui.layout.unwrap();
+    let at = |col: usize, row: usize| ((layout.x + col * 8 + 4) as i32, (layout.y + row * layout.cell_h + 4) as i32);
+    let shown = |ui: &ConfigUi| -> Vec<(usize, usize, usize)> {
+        ui.hits
+            .iter()
+            .filter_map(|h| match h.target {
+                Target::PopupRow(i) => Some((i, h.col, h.row)),
+                _ => None,
+            })
+            .collect()
+    };
+    let rows = shown(&ui);
+    assert!(rows.len() < layouts.len() && rows.len() == ui.popup.as_ref().unwrap().visible);
+    assert!(rows.iter().all(|&(_, _, row)| (4..layout.rows - 5).contains(&row)), "{:?}", rows);
+    ui.key(End, &mut host);
+    ui.draw(&mut frame);
+    assert_eq!(shown(&ui).last().unwrap().0, layouts.len() - 1);
+    // The wheel moves the selection, and a click picks a value.
+    ui.wheel(2, &mut host);
+    assert_eq!(ui.popup.as_ref().unwrap().selected, layouts.len() - 3);
+    ui.draw(&mut frame);
+    let (i, col, row) = shown(&ui)[0];
+    let (x, y) = at(col + 1, row);
+    ui.click(x, y, &mut host);
+    assert!(ui.popup.is_none());
+    assert_eq!(host.applied.last().unwrap().keyboard_layout, layouts[i]);
+
+    // A click off the list closes it, and does nothing else.
+    ui.key(Enter, &mut host);
+    ui.draw(&mut frame);
+    let applied = host.applied.len();
+    let tab = ui.hits.iter().find(|h| matches!(h.target, Target::Tab(Page::Sound))).unwrap();
+    let (x, y) = at(tab.col, tab.row);
+    ui.click(x, y, &mut host);
+    assert!(ui.popup.is_none());
+    assert_eq!((ui.page, host.applied.len()), (Page::Emulator, applied));
 }
 
 #[test]
@@ -402,6 +492,16 @@ fn every_page_draws_and_clicks() {
         for page in PAGES {
             ui.show_page(page);
             ui.draw(&mut frame);
+            // And every setting picked from values lists them.
+            for row in 0..ui.items().len() {
+                if ui.items()[row].input() == Input::Choice {
+                    ui.row = row;
+                    ui.key(UiKey::Enter, &mut host);
+                    assert!(ui.popup.is_some(), "{:?}", ui.items()[row]);
+                    ui.draw(&mut frame);
+                    ui.key(UiKey::Esc, &mut host);
+                }
+            }
         }
         ui.show_page(Page::Drives);
         ui.key(UiKey::Insert, &mut host);

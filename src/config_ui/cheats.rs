@@ -79,14 +79,14 @@ impl ConfigUi {
         };
         match (row, key) {
             (CheatRow::Width, UiKey::Left | UiKey::Right | UiKey::Enter) => {
-                cheats.width = super::cycle(&Width::ALL, cheats.width, if dir == 0 { 1 } else { dir });
+                cheats.width = super::cycle(&Width::ALL, &cheats.width, if dir == 0 { 1 } else { dir });
                 // Another size is another search.
                 cheats.search = None;
                 cheats.refresh(host);
                 self.status = None;
             }
             (CheatRow::Area, UiKey::Left | UiKey::Right | UiKey::Enter) => {
-                cheats.area = super::cycle(&Area::ALL, cheats.area, if dir == 0 { 1 } else { dir });
+                cheats.area = super::cycle(&Area::ALL, &cheats.area, if dir == 0 { 1 } else { dir });
             }
             (CheatRow::Search, UiKey::Enter) => cheats.edit = Some((row, TextField::default())),
             (CheatRow::Narrow, UiKey::Left | UiKey::Right) => {
