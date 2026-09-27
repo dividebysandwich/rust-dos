@@ -60,6 +60,7 @@ pub mod mount;
 pub mod mouse;
 pub mod midi_shadow;
 pub mod mpu401;
+pub mod net;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mt32;
 pub mod opl;

@@ -26,6 +26,9 @@ nuked-opl3 = "0.1"
 rustysynth = { version = "1.3", optional = true }
 # std::time::Instant and SystemTime, which panic in the browser (web/).
 web-time = "1"
+# The LAN tunnel's password proofs and cookies (src/net/tunnel/auth.rs).
+hmac = "0.13"
+sha2 = "0.11"
 # Compressed audio tracks of CD images (Ogg Vorbis, FLAC, MP3).
 symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
 
@@ -46,6 +49,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "
 libloading = "0.9.0"
 # MIDI out of the host's MIDI ports (src/midiout.rs).
 midir = { version = "0.11", optional = true }
+# Random tokens, secrets and network addresses (src/net).
+getrandom = "0.3"
 
 # The dynamic recompiler's code generator and its executable memory
 # (src/dynrec).
