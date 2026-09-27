@@ -116,6 +116,7 @@ impl SegCache {
     }
 
     /// A register loaded from a segment descriptor.
+    #[inline(always)]
     pub fn from_descriptor(selector: u16, base: u32, limit: u32, attr: u16) -> Self {
         let mut cache = Self { selector, base, limit, attr, lo: 0, hi: 0, rights: 0 };
         cache.update_checks();
@@ -123,6 +124,7 @@ impl SegCache {
     }
 
     /// Work out `lo`, `hi` and `rights` from the limit and access rights.
+    #[inline(always)]
     pub fn update_checks(&mut self) {
         let typ = self.attr & 0x0F;
         let code = typ & 0x08 != 0;

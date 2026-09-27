@@ -126,6 +126,7 @@ impl Descriptor {
 
     /// The segment register cache for this descriptor loaded with
     /// `selector`.
+    #[inline(always)]
     pub fn cache(&self, selector: u16) -> SegCache {
         SegCache::from_descriptor(selector, self.base(), self.limit(), self.attr())
     }
@@ -213,7 +214,10 @@ impl Cpu {
     }
 
     /// Protected mode: check a selector for `seg` and return the cache to
-    /// load, marking the descriptor accessed.
+    /// load, marking the descriptor accessed. (Inlined where it is loaded:
+    /// a cache returned through memory, and read back as a whole, waits
+    /// for the stores of its fields.)
+    #[inline(always)]
     pub fn check_data_segment(&mut self, seg: Seg, selector: u16) -> CpuResult<SegCache> {
         let cpl = self.cpl;
         if is_null(selector) {
