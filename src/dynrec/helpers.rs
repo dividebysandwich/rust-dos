@@ -66,6 +66,8 @@ pub struct JitCtx {
     pub page_gen: *const u32,
     /// `Bus::code_blocks`.
     pub code_blocks: *const u8,
+    /// The `ENV_FLAT` bits the running blocks were translated for.
+    pub flat: u32,
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
     /// `jit_memref`, `jit_read` and `jit_write`.
@@ -133,6 +135,7 @@ impl JitCtx {
             ram: std::ptr::null(),
             page_gen: std::ptr::null(),
             code_blocks: std::ptr::null(),
+            flat: 0,
             exit_data: std::ptr::null_mut(),
             memref: jit_memref as *const () as usize,
             read: jit_read as *const () as usize,
@@ -183,6 +186,7 @@ jit_fn! {
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
         let port = super::block::port_io(instr);
         let sti = instr.mnemonic() == iced_x86::Mnemonic::Sti;
+        let seg_load = super::block::loads_segment(instr);
         // A device may write RAM (by DMA) as well.
         let writes = data.writes[ix] || port;
         let before = if writes { data.gens_now(&cpu.bus.page_gen) } else { 0 };
@@ -196,6 +200,11 @@ jit_fn! {
                     }
                 }
                 if port && loop_would_act(cpu, time, (data.count() - ix) as u64) {
+                    return EXIT_AFTER;
+                }
+                if seg_load && super::flat_bits(cpu) != ctx.flat {
+                    // The rest of the block, and the blocks linked to it,
+                    // were translated for the segments as they were.
                     return EXIT_AFTER;
                 }
                 if sti {

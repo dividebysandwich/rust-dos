@@ -220,7 +220,7 @@ pub struct Code {
 /// call of its interpreter handler (None). With `link`, exits to a known
 /// EIP in the block's page go through its links. See `x64::block`, which
 /// this follows.
-pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, _ram_len: u32) -> Code {
+pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, _env: super::Env) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();
     let mut labels = || ops.new_dynamic_label();

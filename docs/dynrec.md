@@ -232,8 +232,11 @@ first instruction in a block that changes them:
   TLB as `Cpu::lin_to_phys` does. Plain RAM within a page is then read and
   written directly, with the code generations bumped as the bus bumps
   them where the chunk holds code (see [Code chunks](#code-chunks)). The
-  x86-64 code compares the address with the end of RAM as a constant: the
-  code is translated for the machine's size of RAM.
+  x86-64 code is translated for what the block runs under (see
+  [Environments](#environments)): through a flat segment, with paging
+  off and the A20 gate open, an operand is plain RAM if none of its bytes
+  is in the video memory or ROMs and it ends before the end of RAM, two
+  compares with constants.
 - Anything else (a TLB miss, video memory, page-crossing operands, a
   fault) goes through `jit_memref`, which runs the real `Cpu::mem_ref`. It
   returns the physical address when the operand turns out to be plain
@@ -255,6 +258,32 @@ Registers while translated code runs:
 On x86-64, calls into Rust use the System V convention, which Rust offers
 on every x86-64 host, Windows included; on ARM64 the platform's own. ARM64
 code never touches X18, which macOS reserves.
+
+### Environments
+
+Blocks are translated for what their memory operands go through, which
+is part of their key (`Key::mode`, the `ENV_*` bits of `dynrec::Env`)
+along with the code and stack sizes:
+
+- paging, and with it CPL 3 (the TLB's user entries);
+- the A20 gate;
+- which segment registers are flat: base 0, every offset within their
+  limits, readable and writable, as DOS extenders' data and stack
+  segments are. Such a segment's offset is the linear address, and it
+  needs no limit check but for a wraparound past 4 GB, which the check
+  for the end of RAM catches.
+
+The execution loop finds the block for the environment it runs in, and
+none of it changes within a block or a chain of linked blocks: paging
+and CPL change only in instructions that end the block without a link,
+the A20 gate stops the block after the port access that changed it
+(`EXIT_AFTER`), and so does a segment load (MOV, POP, LDS, LES, LFS or
+LGS) after which the segments are flat differently (`jit_fallback`).
+The x86-64 code generator leaves out what the environment makes
+unnecessary: the limit checks and base of flat segments, the TLB lookup
+with paging off, the A20 mask with the gate open, and then the check
+for an operand in two pages, whose RAM is contiguous. The ARM64 one
+checks everything at run time.
 
 ### Linking
 

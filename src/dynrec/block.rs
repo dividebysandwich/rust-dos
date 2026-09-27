@@ -281,6 +281,16 @@ pub fn ends_block(instr: &Instruction) -> bool {
     }
 }
 
+/// Whether `instr` loads a segment register without ending the block: MOV,
+/// POP, LDS, LES, LFS and LGS. (SS ends the block, as do far transfers.)
+pub fn loads_segment(instr: &Instruction) -> bool {
+    match instr.mnemonic() {
+        Mnemonic::Mov | Mnemonic::Pop => instr.op0_kind() == iced_x86::OpKind::Register && instr.op0_register().is_segment_register(),
+        Mnemonic::Lds | Mnemonic::Les | Mnemonic::Lfs | Mnemonic::Lgs => true,
+        _ => false,
+    }
+}
+
 /// Whether `instr` is IN or OUT, which may change the devices, their
 /// interrupts, the timer deadline, the A20 gate and the reset line.
 pub fn port_io(instr: &Instruction) -> bool {

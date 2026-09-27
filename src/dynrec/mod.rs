@@ -76,6 +76,67 @@ pub struct DynStats {
     pub watched: u64,
 }
 
+/// What a block's code is translated for besides its instructions, which
+/// the execution loop finds as the blocks it runs were translated: the size
+/// of RAM, and `bits`, the block's mode with the `ENV_*` bits. None of
+/// these change within a block or a chain of linked blocks: paging (CR0)
+/// and CPL change only in instructions that end a block without a link,
+/// the A20 gate stops the block after the port access that changed it, and
+/// a segment register loaded in a block that is no longer flat (or became
+/// flat) stops it after the load (`helpers::jit_fallback`).
+#[cfg(dynrec)]
+#[derive(Clone, Copy, Debug)]
+pub struct Env {
+    pub ram_len: u32,
+    pub bits: u32,
+}
+
+/// Paging is on.
+#[cfg(dynrec)]
+pub const ENV_PAGING: u32 = 1 << 3;
+/// The A20 gate is open.
+#[cfg(dynrec)]
+pub const ENV_A20: u32 = 1 << 4;
+/// CPL is 3 (the TLB's user entries).
+#[cfg(dynrec)]
+pub const ENV_USER: u32 = 1 << 5;
+/// Segment register `seg` is flat (bit 8 + `seg as u32`): base 0, every
+/// offset in its limits, readable and writable.
+#[cfg(dynrec)]
+pub const ENV_FLAT: u32 = 1 << 8;
+#[cfg(dynrec)]
+pub const ENV_FLAT_ALL: u32 = 0x3F << 8;
+
+/// The `ENV_*` bits of the CPU now.
+#[cfg(dynrec)]
+pub fn env_bits(cpu: &Cpu) -> u32 {
+    let mut bits = flat_bits(cpu);
+    if cpu.cr0 & crate::cpu::CR0_PG != 0 {
+        bits |= ENV_PAGING;
+    }
+    if cpu.bus.a20() {
+        bits |= ENV_A20;
+    }
+    if cpu.cpl == 3 {
+        bits |= ENV_USER;
+    }
+    bits
+}
+
+/// The `ENV_FLAT` bits of the segment registers now.
+#[cfg(dynrec)]
+pub fn flat_bits(cpu: &Cpu) -> u32 {
+    use crate::cpu::layout::{RIGHT_READ, RIGHT_WRITE};
+    let mut bits = 0;
+    for seg in crate::cpu::Seg::ALL {
+        let c = cpu.seg_cache(seg);
+        if c.base == 0 && c.lo == 0 && c.hi == u32::MAX && c.rights & (RIGHT_READ | RIGHT_WRITE) == RIGHT_READ | RIGHT_WRITE {
+            bits |= ENV_FLAT << seg as u32;
+        }
+    }
+    bits
+}
+
 /// What `DynState::run` did.
 #[cfg_attr(not(dynrec), allow(dead_code))]
 pub(crate) enum Run {
@@ -203,13 +264,14 @@ mod engine {
         phys: u32,
         eip: u32,
         /// Bit 0: 32-bit code; bit 1: one instruction (`Cpu::step`); bit 2:
-        /// a 32-bit stack.
-        mode: u8,
+        /// a 32-bit stack; and the `Env` bits.
+        mode: u32,
     }
 
     impl std::hash::Hash for Key {
         fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-            state.write_u64((self.phys as u64) << 32 | self.eip as u64 ^ (self.mode as u64) << 60);
+            state.write_u64((self.phys as u64) << 32 | self.eip as u64);
+            state.write_u64(self.mode as u64);
         }
     }
 
@@ -237,7 +299,8 @@ mod engine {
 
     impl Key {
         fn index(&self) -> usize {
-            (self.phys ^ self.eip.rotate_left(13) ^ (self.mode as u32) << 20).wrapping_mul(0x9E37_79B1) as usize
+            (self.phys ^ self.eip.rotate_left(13) ^ self.mode.wrapping_mul(0x85EB_CA6B)).wrapping_mul(0x9E37_79B1)
+                as usize
                 >> (32 - FRONT_BITS)
         }
     }
@@ -294,7 +357,7 @@ mod engine {
         serial: u64,
         slot: u8,
         eip: u32,
-        mode: u8,
+        mode: u32,
         flushes: u64,
     }
 
@@ -415,7 +478,8 @@ mod engine {
             let native = items.iter().filter(|i| i.is_some()).count() as u64;
             let mut data = NonNull::from(Box::leak(Box::new(data)));
             // SAFETY: just made, and owned by the block from here on.
-            let code = backend::block(unsafe { data.as_ref() }, &items, !single, self.ram_len);
+            let env = Env { ram_len: self.ram_len, bits: key.mode };
+            let code = backend::block(unsafe { data.as_ref() }, &items, !single, env);
             let base = match self.mem.add(&code.bytes) {
                 Some(base) => base,
                 None => {
@@ -579,7 +643,7 @@ mod engine {
                 self.model = cpu.model;
                 self.ram_len = cpu.bus.ram().len() as u32;
             }
-            let mode = at.code32 as u8 | (single as u8) << 1 | (cpu.stack32() as u8) << 2;
+            let mode = at.code32 as u32 | (single as u32) << 1 | (cpu.stack32() as u32) << 2 | env_bits(cpu);
             let key = Key { phys: at.phys_ip as u32, eip: at.eip, mode };
             let pending = self.pending.take();
             let Some(mut index) = self.find(cpu, at, key, stats) else { return Run::Interpret };
@@ -604,6 +668,7 @@ mod engine {
                 self.ctx.tlb = cpu.tlb.entries_ptr() as *const u8;
                 self.ctx.page_gen = cpu.bus.page_gen.as_ptr();
                 self.ctx.code_blocks = cpu.bus.code_blocks.as_ptr();
+                self.ctx.flat = mode & ENV_FLAT_ALL;
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and
                 // gets the CPU and context it expects.
