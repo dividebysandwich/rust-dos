@@ -969,6 +969,61 @@ fn indirect_calls_are_translated_and_linked_to_where_they_go() {
 }
 
 #[test]
+fn indirect_jumps_are_translated_and_linked_to_where_they_go() {
+    // A loop that jumps through a table of three places in another page,
+    // in turn, and from each back through a register, 1000 times; one
+    // jump is past the CS limit at the end: #GP, with the instructions
+    // before it done.
+    let cases = CODE + 0x1000;
+    let table = CODE + 0x800;
+    let top = CODE + 0x40;
+    let back = CODE + 0x80;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..3u32 {
+            let at = cases + 0x10 * k;
+            rig.load(at, &asm32(at, |a| {
+                a.add(ebx, 1 << (8 * k))?;
+                a.jmp(edx)
+            }));
+            rig.write32(table + 4 * k, at);
+        }
+        rig.write32(table + 12, 0xFFFF_0000);
+        rig.record(13);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.xor(esi, esi)?;
+            a.mov(edx, back)?;
+            a.mov(ecx, 1000u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.jmp(dword_ptr(esi * 4 + table))
+        }));
+        rig.load(back, &asm32(back, |a| {
+            let mut next = a.create_label();
+            a.inc(esi)?;
+            a.cmp(esi, 3)?;
+            a.jne(next)?;
+            a.xor(esi, esi)?;
+            a.set_label(&mut next)?;
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.mov(esi, 3u32)?;
+            a.mov(ebp, 7u32)?;
+            a.jmp(dword_ptr(esi * 4 + table))
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), 334 + (333 << 8) + (333 << 16));
+    let (vector, _) = b.recorded();
+    assert_eq!(vector, 13);
+    assert_eq!(b.cpu.ebp(), 7);
+    if AVAILABLE {
+        assert!(stats.runs < 200, "the jumps went through the execution loop: {:?}", stats);
+    }
+}
+
+#[test]
 fn an_indirect_call_through_a_pointer_it_cant_read_pushes_nothing() {
     // CALL [200h] in a data segment of 256 bytes: #GP before the return
     // address is pushed, after the instructions before it in the block.

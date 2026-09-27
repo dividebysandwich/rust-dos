@@ -812,9 +812,44 @@ fn near_target(instr: &Instruction) -> Option<u32> {
 }
 
 fn jmp(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
-    let Some(target) = near_target(instr) else { return false };
+    let Some(target) = near_target(instr) else { return jmp_indirect(instr, u) };
     u.push(Uop::CheckLimit { src: Src::Imm(target) });
     u.push(Uop::Exit { eip: Src::Imm(target) });
+    true
+}
+
+/// JMP to a near target in a register or memory, which leaves the block
+/// through the links a return's does (a jump table's targets).
+fn jmp_indirect(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.code() {
+        Code::Jmp_rm16 => 2,
+        Code::Jmp_rm32 => 4,
+        _ => return false,
+    };
+    if !near_rm(instr, size, u) {
+        return false;
+    }
+    u.push(Uop::CheckLimit { src: Src::T(T0) });
+    u.push(Uop::Exit { eip: Src::T(T0) });
+    true
+}
+
+/// T0 = the near target in the register or memory of a CALL or JMP, zero-
+/// extended from `size` bytes.
+fn near_rm(instr: &Instruction, size: u8, u: &mut Vec<Uop>) -> bool {
+    match instr.op0_kind() {
+        OpKind::Register => {
+            let Some(r) = gpr(instr.op0_register()) else { return false };
+            u.push(Uop::Get { t: T0, r });
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, size, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load { dst: T0, m: T2, size });
+        }
+        _ => return false,
+    }
     true
 }
 
@@ -906,18 +941,8 @@ fn call_indirect(instr: &Instruction, next: u32, stack32: bool, u: &mut Vec<Uop>
         Code::Call_rm32 => 4,
         _ => return false,
     };
-    match instr.op0_kind() {
-        OpKind::Register => {
-            let Some(r) = gpr(instr.op0_register()) else { return false };
-            u.push(Uop::Get { t: T0, r });
-        }
-        OpKind::Memory => {
-            if mem(instr, T2, size, false, u).is_none() {
-                return false;
-            }
-            u.push(Uop::Load { dst: T0, m: T2, size });
-        }
-        _ => return false,
+    if !near_rm(instr, size, u) {
+        return false;
     }
     let sp = sp(stack32);
     let slot = |u: &mut Vec<Uop>| {
