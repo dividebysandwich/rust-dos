@@ -51,6 +51,7 @@ pub mod instructions;
 pub mod interrupts;
 pub mod joystick;
 pub mod mcb;
+pub mod mem_command;
 pub mod memfs;
 pub mod mixer;
 pub mod mixer_command;

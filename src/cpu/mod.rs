@@ -1287,6 +1287,7 @@ impl Cpu {
             return false;
         }
         crate::mcb::write_mcb(&mut self.bus, mcb_seg, &crate::mcb::Mcb { owner: psp, size, ..block });
+        crate::mcb::name_program(&mut self.bus, psp, filename);
         true
     }
 
@@ -1320,6 +1321,9 @@ impl Cpu {
             self.bus.guest_write_bytes(env_phys, &block);
             let psp_phys = self.get_physical_addr(self.current_psp, 0) as u32;
             self.bus.guest_write_16(psp_phys + 0x2C, ENV_SEGMENT);
+        }
+        if loaded && placement == Placement::Shell {
+            crate::mcb::name_program(&mut self.bus, self.current_psp, filename);
         }
         loaded
     }

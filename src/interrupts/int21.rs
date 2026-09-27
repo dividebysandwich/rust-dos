@@ -789,6 +789,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                             size: m.size,
                         },
                     );
+                    crate::mcb::name_program(&mut cpu.bus, load_segment, &target_filename);
 
                     let psp_phys = cpu.get_physical_addr(load_segment, 0) as u32;
 

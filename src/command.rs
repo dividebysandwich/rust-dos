@@ -53,6 +53,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("LOADHIGH", &LoadHighCommand),
     ("LH", &LoadHighCommand),
     ("MIXER", &crate::mixer_command::MixerCommand),
+    ("MEM", &crate::mem_command::MemCommand),
     ("BOOT", &crate::boot_command::BootCommand),
 ];
 
@@ -355,7 +356,7 @@ fn format_dos_timestamp(date: u16, time: u16) -> String {
 }
 
 /// Format u64 as string with commas (e.g. 1,024)
-fn format_size(n: u64) -> String {
+pub(crate) fn format_size(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
     let mut count = 0;

@@ -134,6 +134,7 @@ programs, the prompt has these commands:
 | `BOOT [image ...] [-l drive]` | start a system from a disk image; see [Booting a disk image](CONFIGURATION.md#booting-a-disk-image) |
 | `MIXER` | see [`[mixer]`](CONFIGURATION.md#mixer) |
 | `LOADHIGH` (`LH`) | load a program into upper memory |
+| `MEM [/C\|/D\|/F\|/M name]` | the memory used and free, as in MS-DOS 6.22; `/C` lists the programs in memory, `/F` the free blocks, `/M` one program's blocks and `/D` all of them |
 | `DOSCONFIG` | open the settings window |
 | `EXIT` | quit Rust-DOS, or go back from `COMMAND` |
 | `COMMAND [/C command \| /K command]` | a second prompt, until `EXIT`; `/C` runs the command and goes back, `/K` runs it and stays |

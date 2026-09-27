@@ -126,8 +126,9 @@ impl Xms {
         gaps
     }
 
-    /// Largest free block and total free memory, in KB.
-    fn free_kb(&self, memory_end: u32) -> (u32, u32) {
+    /// Largest free block and total free memory, in KB, of the extended
+    /// memory up to `memory_end`.
+    pub fn free_kb(&self, memory_end: u32) -> (u32, u32) {
         let gaps = self.gaps(memory_end);
         let largest = gaps.iter().map(|&(_, kb)| kb).max().unwrap_or(0);
         let total = gaps.iter().map(|&(_, kb)| kb).sum();

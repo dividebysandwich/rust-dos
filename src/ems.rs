@@ -279,6 +279,11 @@ pub fn windows_exited(bus: &mut Bus) {
     bus.ems = Some(ems);
 }
 
+/// The free and total logical pages, with expanded memory on.
+pub fn pages(bus: &Bus) -> Option<(u16, u16)> {
+    bus.ems.as_ref().map(|_| page_counts(bus))
+}
+
 /// The free and total logical pages, as extended memory has room for them.
 fn page_counts(bus: &Bus) -> (u16, u16) {
     let end = bus.ram().len() as u32;

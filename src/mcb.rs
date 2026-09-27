@@ -139,14 +139,41 @@ pub fn read_mcb(bus: &mut Bus, seg: u16) -> Mcb {
     }
 }
 
+/// Write the MCB at `seg`. Its name stays while the block keeps its owner,
+/// as DOS keeps a program's over the program's resizes; for another owner
+/// the reserved bytes and the name are zeroed, so the chain looks clean in
+/// memory-dump utilities.
 pub fn write_mcb(bus: &mut Bus, seg: u16, mcb: &Mcb) {
     let base = header_addr(seg);
+    let old = read_mcb(bus, seg);
+    let keep_name = old.is_valid() && old.owner == mcb.owner && !mcb.is_free();
     bus.guest_write_8(base, mcb.signature);
     bus.guest_write_16(base + 1, mcb.owner);
     bus.guest_write_16(base + 3, mcb.size);
-    // Zero the reserved bytes and owner-name fields so the chain looks clean
-    // in memory-dump utilities.
-    bus.guest_fill(base + 5, 11, 0);
+    bus.guest_fill(base + 5, if keep_name { 3 } else { 11 }, 0);
+}
+
+/// The name in the MCB at `seg` (DOS 4+): up to 8 characters, ending at
+/// the first NUL. Empty if it has none, or anything but a file name's
+/// characters.
+pub fn read_name(bus: &mut Bus, seg: u16) -> String {
+    let base = header_addr(seg) + 8;
+    let bytes: Vec<u8> = (0..8).map(|i| bus.guest_read_8(base + i)).take_while(|&b| b != 0).collect();
+    let valid = bytes.iter().all(|&b| b > b' ' && b < 0x7F && !b"\"*+,./:;<=>?[\\]|".contains(&b));
+    if valid { String::from_utf8_lossy(&bytes).into_owned() } else { String::new() }
+}
+
+/// Name the block of the program whose PSP is at `psp` after the program
+/// file `path`, as EXEC does (DOS 4+): the file's name without its
+/// extension, which MEM and the like show.
+pub fn name_program(bus: &mut Bus, psp: u16, path: &str) {
+    let file = path.rsplit(['\\', '/', ':']).next().unwrap_or(path);
+    let stem = file.split('.').next().unwrap_or(file).to_ascii_uppercase();
+    let mut name = [0u8; 8];
+    for (to, from) in name.iter_mut().zip(stem.bytes()) {
+        *to = from;
+    }
+    bus.guest_write_bytes(header_addr(psp.wrapping_sub(1)) + 8, &name);
 }
 
 /// Where conventional memory's blocks end: the paragraph of the upper
