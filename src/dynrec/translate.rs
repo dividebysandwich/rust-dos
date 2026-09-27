@@ -17,11 +17,25 @@ const DF: u32 = 0x0400;
 /// The operations for `instr`, or None if it runs through its handler.
 /// `next` is the EIP after it (which, as the interpreter has it, doesn't
 /// wrap in 16-bit code), and `stack32` the stack's width (SS's B flag),
-/// which blocks are translated for.
-pub fn translate(instr: &Instruction, next: u32, stack32: bool) -> Option<Vec<Uop>> {
+/// which blocks are translated for. With `system`, the code generator has
+/// the operations of segment loads, port I/O and STI.
+pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
     let ok = match instr.mnemonic() {
+        Mov if system && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+            mov_to_seg(instr, &mut u)
+        }
+        Pop if system && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+            pop_seg(instr, stack32, &mut u)
+        }
+        In if system => port_in(instr, &mut u),
+        Out if system => port_out(instr, &mut u),
+        Sti if system => {
+            u.push(Uop::CheckIopl);
+            u.push(Uop::Sti);
+            true
+        }
         Mov => mov(instr, &mut u),
         Add => alu(instr, AluOp::Add, &mut u),
         Or => alu(instr, AluOp::Or, &mut u),
@@ -638,6 +652,80 @@ fn mov_from_seg(instr: &Instruction, seg: Seg, u: &mut Vec<Uop>) -> bool {
         }
         _ => return false,
     }
+    true
+}
+
+/// The segment register a MOV or POP loads, but CS and SS: CS can't be
+/// loaded so, and SS ends the block.
+fn loaded_seg(instr: &Instruction) -> Option<Seg> {
+    Seg::from_register(instr.op0_register()).filter(|&s| s != Seg::CS && s != Seg::SS)
+}
+
+/// MOV Sreg, r/m16: the selector from a register's low word or memory.
+fn mov_to_seg(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let Some(seg) = loaded_seg(instr) else { return false };
+    match instr.op1_kind() {
+        OpKind::Register => {
+            let Some(r) = gpr(instr.op1_register()).filter(|r| r.size > 1) else { return false };
+            u.push(Uop::Get { t: T0, r: Gpr::word(r.index) });
+        }
+        OpKind::Memory => {
+            if mem(instr, T1, 2, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load { dst: T0, m: T1, size: 2 });
+        }
+        _ => return false,
+    }
+    u.push(Uop::LoadSeg { seg, t: T0 });
+    true
+}
+
+/// POP Sreg, as `transfer::pop`: only the selector's word read, the
+/// segment loaded, then the stack pointer moved by the operand's size.
+fn pop_seg(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(seg) = loaded_seg(instr) else { return false };
+    let size = match instr.stack_pointer_increment() {
+        2 => 2,
+        4 => 4,
+        _ => return false,
+    };
+    let sp = sp(stack32);
+    u.push(Uop::Get { t: T1, r: sp });
+    u.push(Uop::Copy { dst: T2, src: T1 });
+    u.push(Uop::MemRef { t: T2, seg: Seg::SS, size: 2, write: false, slot: 0 });
+    u.push(Uop::Load { dst: T0, m: T2, size: 2 });
+    u.push(Uop::LoadSeg { seg, t: T0 });
+    u.push(Uop::AddConst { t: T1, v: size, size: sp.size });
+    u.push(Uop::Set { r: sp, t: T1 });
+    true
+}
+
+/// The port of IN or OUT operand `i`: DX into T1, or the immediate.
+fn port_src(instr: &Instruction, i: u32, u: &mut Vec<Uop>) -> Src {
+    if instr.op_kind(i) == OpKind::Register {
+        u.push(Uop::Get { t: T1, r: Gpr::word(2) });
+        Src::T(T1)
+    } else {
+        Src::Imm(instr.immediate8() as u32)
+    }
+}
+
+/// IN AL/AX/EAX, from an immediate port or DX.
+fn port_in(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let Some(dest) = gpr(instr.op0_register()) else { return false };
+    let port = port_src(instr, 1, u);
+    u.push(Uop::In { size: dest.size, port, t: T0 });
+    u.push(Uop::Set { r: dest, t: T0 });
+    true
+}
+
+/// OUT to an immediate port or DX from AL/AX/EAX.
+fn port_out(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let Some(src) = gpr(instr.op1_register()) else { return false };
+    let port = port_src(instr, 0, u);
+    u.push(Uop::Get { t: T0, r: src });
+    u.push(Uop::Out { size: src.size, port, t: T0 });
     true
 }
 

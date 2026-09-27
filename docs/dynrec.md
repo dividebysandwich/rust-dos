@@ -91,9 +91,10 @@ between instructions:
 
 IN, OUT and STI can change the same, but programs run them so often (a
 timer read, a sound driver's status, a CLI and STI around each) that the
-block goes on after them where they changed none of it. Their handlers
-run in the block, and `jit_fallback` stops it after the instruction
-(`EXIT_AFTER`) only if:
+block goes on after them where they changed none of it. They run in the
+block (on x86-64 hosts translated, with IN and OUT through `jit_port`;
+elsewhere through their handlers and `jit_fallback`), which stops after
+the instruction (`EXIT_AFTER`) only if:
 
 - after IN or OUT, an interrupt can be delivered (a device raised one, or
   the PIC let one through, with IF set), the timer deadline or the A20
@@ -200,6 +201,10 @@ Each instruction becomes one of two things:
   - the flag instructions, and SETcc;
   - PUSH and POP of registers and constants, PUSHA and POPA;
   - MOV and PUSH of segment registers (reading their selectors), and CLI;
+  - on x86-64 hosts, MOV and POP into segment registers but CS and SS
+    (through `jit_load_seg`, which runs `Cpu::load_segment`), IN and OUT
+    (through `jit_port`, see [What a block holds](#what-a-block-holds)),
+    and STI;
   - near JMP, CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ.
 

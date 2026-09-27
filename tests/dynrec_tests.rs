@@ -1345,3 +1345,37 @@ fn a_segment_load_that_changes_which_segments_are_flat_goes_on_in_its_block() {
     assert_eq!(b.read32(0x43F00), (1..50).filter(|n| n % 2 == 0).sum::<u32>());
     assert_eq!(b.read32(0x3F00), 50 + (1..50).filter(|n| n % 2 == 1).sum::<u32>());
 }
+
+#[test]
+fn a_segment_load_that_faults_leaves_the_instructions_before_it_done() {
+    // A selector past the GDT's limit (7FFh): #GP with the selector.
+    const BAD: u32 = 0x0FF8;
+    for pop in [false, true] {
+        let (mut a, mut b) = twins(|rig| {
+            rig.record(GP);
+            let code = asm32(CODE, |a| {
+                a.mov(ebx, 1u32)?;
+                a.mov(eax, BAD)?;
+                if pop {
+                    a.push(eax)?;
+                    a.mov(ebx, 2u32)?;
+                    a.pop(ds)?;
+                } else {
+                    a.mov(ds, ax)?;
+                }
+                a.mov(ebx, 3u32)?;
+                a.hlt()
+            });
+            rig.load(CODE, &code);
+        });
+        run_both(&mut a, &mut b);
+        let (vector, stack) = b.recorded();
+        assert_eq!((vector, stack[0]), (GP as u32, BAD));
+        assert_eq!(b.cpu.ebx(), 1 + pop as u32);
+        if pop {
+            // Above the fault's frame (error code, EIP, CS, EFLAGS): ESP
+            // didn't move past the selector.
+            assert_eq!(stack[4], BAD, "the selector still on the stack");
+        }
+    }
+}

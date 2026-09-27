@@ -83,6 +83,12 @@ pub struct JitCtx {
     pub memref: usize,
     pub read: usize,
     pub write: usize,
+    /// `jit_load_seg` and `jit_port`.
+    pub load_seg: usize,
+    pub port: usize,
+    /// Where `jit_port` asks for the block to stop after the instruction:
+    /// EXIT_AFTER, or EXIT_SMC where a device wrote its later bytes.
+    pub after: u8,
     /// Bytes of RAM.
     pub ram_len: u64,
     /// The TLB's entries.
@@ -120,6 +126,12 @@ pub const CTX_EXIT_DATA: i32 = offset_of!(JitCtx, exit_data) as i32;
 pub const CTX_MEMREF: i32 = offset_of!(JitCtx, memref) as i32;
 pub const CTX_READ: i32 = offset_of!(JitCtx, read) as i32;
 pub const CTX_WRITE: i32 = offset_of!(JitCtx, write) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_LOAD_SEG: i32 = offset_of!(JitCtx, load_seg) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_PORT: i32 = offset_of!(JitCtx, port) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_AFTER: i32 = offset_of!(JitCtx, after) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
 pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
@@ -156,6 +168,9 @@ impl JitCtx {
             memref: jit_memref as *const () as usize,
             read: jit_read as *const () as usize,
             write: jit_write as *const () as usize,
+            load_seg: jit_load_seg as *const () as usize,
+            port: jit_port as *const () as usize,
+            after: 0,
             ram_len: 0,
             tlb: std::ptr::null(),
             smc_lo: 0,
@@ -247,6 +262,85 @@ jit_fn! {
             Err(payload) => {
                 ctx.panic = Some(payload);
                 EXIT_PANIC
+            }
+        }
+    }
+}
+
+jit_fn! {
+    /// Load segment register `seg` (a `Seg`) with `selector` for a
+    /// translated MOV or POP, noting which segments are flat after it (see
+    /// `JitCtx::flat`). Returns 0, or EXIT_FAULT with the fault in the
+    /// context (or EXIT_PANIC).
+    fn jit_load_seg(cpu: *mut Cpu, ctx: *mut JitCtx, seg: u32, selector: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        match catch_unwind(AssertUnwindSafe(|| cpu.load_segment(Seg::ALL[seg as usize], selector as u16))) {
+            Ok(Ok(())) => {
+                ctx.flat = super::flat_bits(cpu);
+                0
+            }
+            Ok(Err(fault)) => {
+                ctx.fault = fault;
+                EXIT_FAULT
+            }
+            Err(payload) => {
+                ctx.panic = Some(payload);
+                EXIT_PANIC
+            }
+        }
+    }
+}
+
+jit_fn! {
+    /// A translated IN or OUT of instruction `desc >> 8 & 0xFF` of the block
+    /// (bit 0 of `desc` set for OUT, bits 1-3 the size), as `port_in` and
+    /// `port_out` do it and `jit_fallback` runs them: EIP on the next
+    /// instruction while it runs, and the block asked to stop after it
+    /// (`JitCtx::after`) where a device wrote its later bytes or the port
+    /// access changed what the execution loop checks. Returns the value
+    /// read, with EXIT_FAULT or EXIT_PANIC in bits 32 and up where it
+    /// didn't run.
+    fn jit_port(cpu: *mut Cpu, ctx: *mut JitCtx, data: *mut BlockData, desc: u32, port: u32, value: u32) -> u64 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx, data) = unsafe { (&mut *cpu, &mut *ctx, &mut *data) };
+        let (out, size, ix) = (desc & 1 != 0, (desc >> 1 & 7) as u8, (desc >> 8 & 0xFF) as usize);
+        let port = port as u16;
+        cpu.set_eip(data.eips[ix].wrapping_add(data.instrs[ix].len() as u32));
+        // A device may write RAM (by DMA).
+        let before = data.gens_now(&cpu.bus.page_gen);
+        let time = (cpu.bus.clock.deadline, cpu.bus.a20_mask());
+        let access = || -> Result<u32, Fault> {
+            cpu.check_io(port, size)?;
+            Ok(match (out, size) {
+                (true, 1) => {
+                    cpu.bus.io_write(port, value as u8);
+                    0
+                }
+                (true, _) => {
+                    cpu.bus.io_write_wide(port, value, size);
+                    0
+                }
+                (false, 1) => cpu.bus.io_read(port) as u32,
+                (false, _) => cpu.bus.io_read_wide(port, size),
+            })
+        };
+        match catch_unwind(AssertUnwindSafe(access)) {
+            Ok(Ok(read)) => {
+                if data.gens_now(&cpu.bus.page_gen) != before && written(cpu, data, ix) != 0 {
+                    ctx.after = EXIT_SMC as u8;
+                } else if loop_would_act(cpu, time, (data.count() - ix) as u64) {
+                    ctx.after = EXIT_AFTER as u8;
+                }
+                read as u64
+            }
+            Ok(Err(fault)) => {
+                ctx.fault = fault;
+                (EXIT_FAULT as u64) << 32
+            }
+            Err(payload) => {
+                ctx.panic = Some(payload);
+                (EXIT_PANIC as u64) << 32
             }
         }
     }

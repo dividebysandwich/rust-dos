@@ -29,6 +29,11 @@ pub const EXECUTED: usize = offset_of!(Cpu, executed);
 pub const ICOUNT: usize = offset_of!(Cpu, bus.clock.icount);
 pub const DEADLINE: usize = offset_of!(Cpu, bus.clock.deadline);
 pub const A20_MASK: usize = offset_of!(Cpu, bus) + crate::bus::A20_MASK_OFFSET;
+/// `Bus::irq_ready` (a bool) and `Cpu::irq_shadow`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const IRQ_READY: usize = offset_of!(Cpu, bus) + crate::bus::IRQ_READY_OFFSET;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const IRQ_SHADOW: usize = offset_of!(Cpu, irq_shadow);
 /// A TLB entry (`Tlb::entries_ptr`): its tags and physical page, its size,
 /// and the entries of each set (supervisor, then user), which a page
 /// number modulo it indexes.

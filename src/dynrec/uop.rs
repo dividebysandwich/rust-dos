@@ -152,6 +152,18 @@ pub enum Uop {
     GetSeg { t: T, seg: Seg },
     /// Leave the block with EIP = the value.
     Exit { eip: Src },
+    /// Load segment register `seg` (not CS or SS) with the selector in t,
+    /// as `Cpu::load_segment` does (it may fault).
+    LoadSeg { seg: Seg, t: T },
+    /// IN of `size` bytes from the port into t, or OUT of t, with the
+    /// instruction count up to date: the I/O permission may fault, and the
+    /// block stops after the instruction where the port access changed what
+    /// the execution loop checks (see `helpers::jit_port`).
+    In { size: u8, port: Src, t: T },
+    Out { size: u8, port: Src, t: T },
+    /// STI after its `CheckIopl`: IF set, the interrupt shadow where it was
+    /// clear, and the block stopped after it where an interrupt waits.
+    Sti,
     /// Leave the block at `taken` if the condition holds (#GP(0) if that
     /// is past the CS limit), else at `next`; either way first set `commit`
     /// (LOOP's counter).

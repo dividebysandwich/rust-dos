@@ -474,7 +474,7 @@ mod engine {
             let items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    super::translate::translate(&data.instrs[ix], next, stack32)
+                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM)
                 })
                 .collect();
             let native = items.iter().filter(|i| i.is_some()).count() as u64;

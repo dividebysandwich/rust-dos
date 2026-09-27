@@ -223,6 +223,9 @@ pub struct Code {
 /// Whether blocks go on into the last 15 bytes of their page (see
 /// `BlockData::in_tail`): not in this code generator's.
 pub const TAIL: bool = false;
+/// Whether it has the operations of segment loads, port I/O and STI: no,
+/// their handlers run them.
+pub const SYSTEM: bool = false;
 
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, _env: super::Env) -> Code {
     let mut ops = Asm::new(0);
@@ -846,6 +849,9 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
+            Uop::LoadSeg { .. } | Uop::In { .. } | Uop::Out { .. } | Uop::Sti => {
+                unreachable!("not translated for this host (SYSTEM)")
+            }
         }
     }
 

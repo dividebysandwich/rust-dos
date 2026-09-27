@@ -197,6 +197,9 @@ enum Slow {
     CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
+    /// The instruction is done and stops the block after it with `code`:
+    /// EIP on `next`.
+    After { at: DynamicLabel, next: u32, code: u32, fail: DynamicLabel },
     /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
     /// with the flags in EBP there (`dirty`), and goes on at `end`.
     /// The cached guest registers in `wb` go back into the CPU before the
@@ -280,6 +283,8 @@ pub struct Code {
 /// Blocks go on into the last 15 bytes of their page (see
 /// `BlockData::in_tail`), with paging checking the TLB holds the next page.
 pub const TAIL: bool = true;
+/// It has the operations of segment loads, port I/O and STI.
+pub const SYSTEM: bool = true;
 
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
@@ -341,6 +346,13 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 }
             }
             Some(uops) => {
+                let port = uops.iter().any(|u| matches!(u, Uop::In { .. } | Uop::Out { .. }));
+                if port && ix as i32 > synced {
+                    // Devices read the time from the instruction count.
+                    let d = ix as i32 - synced;
+                    dynasm!(g.ops ; .arch x64 ; add QWORD [rbx + ICOUNT], d);
+                    synced = ix as i32;
+                }
                 g.synced[ix] = synced;
                 // Operations check what can fault before they change the
                 // flags: they are as at the instruction's start there.
@@ -357,6 +369,23 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.end_dirty[ix] = g.dirty;
                 if let Some(end) = g.end.take() {
                     dynasm!(g.ops ; .arch x64 ; =>end);
+                }
+                if port {
+                    // The port access asked for the block to stop after it.
+                    let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32) as i32;
+                    let fail = g.fail();
+                    let flags = if g.dirty { EXIT_FLAGS } else { 0 } as i32;
+                    dynasm!(g.ops
+                        ; .arch x64
+                        ; movzx eax, BYTE [r12 + CTX_AFTER]
+                        ; test eax, eax
+                        ; jz >go_on
+                        ; mov BYTE [r12 + CTX_AFTER], 0
+                        ; mov DWORD [rbx + EIP], next
+                        ; or eax, flags
+                        ; jmp =>fail
+                        ; go_on:
+                    );
                 }
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
                     // A store hit the rest of the block: leave after this
@@ -624,6 +653,15 @@ impl Gen<'_> {
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
+                        ; mov eax, code as i32
+                        ; jmp =>fail
+                    );
+                }
+                Slow::After { at, next, code, fail } => {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                        ; mov DWORD [rbx + EIP], next as i32
                         ; mov eax, code as i32
                         ; jmp =>fail
                     );
@@ -945,6 +983,114 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
+            Uop::LoadSeg { seg, t } => {
+                let fail = self.fail();
+                self.save_for_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov ecx, Rd(r(t))
+                    ; mov edx, seg as i32
+                    ; mov rsi, r12
+                    ; mov rdi, rbx
+                    ; call QWORD [r12 + CTX_LOAD_SEG]
+                );
+                self.restore_after_call();
+                dynasm!(self.ops ; .arch x64 ; test eax, eax ; jnz =>fail);
+                // Its accesses from here on, as if it weren't flat.
+                self.loaded_segs |= 1 << seg as u8;
+            }
+            Uop::In { size, port, t } => self.port_io(false, size, port, t),
+            Uop::Out { size, port, t } => self.port_io(true, size, port, t),
+            Uop::Sti => {
+                const IF: i32 = 0x200;
+                let data = self.data;
+                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+                let at = self.ops.new_dynamic_label();
+                let fail = self.fail();
+                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+                self.slow.push(Slow::After { at, next, code, fail });
+                // Interrupts are recognized after the next instruction: with
+                // one waiting, the execution loop runs that; else the shadow
+                // ends where the next instruction runs, in the block.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FLAGS]
+                    ; or DWORD [rbx + FLAGS], IF
+                    ; test eax, IF
+                    ; jnz >was_set
+                    ; mov BYTE [rbx + layout::IRQ_SHADOW as i32], 1
+                    ; was_set:
+                    ; cmp BYTE [rbx + layout::IRQ_READY as i32], 0
+                    ; jne =>at
+                );
+                if self.ix + 1 < data.count() {
+                    dynasm!(self.ops ; .arch x64 ; mov BYTE [rbx + layout::IRQ_SHADOW as i32], 0);
+                }
+            }
+        }
+    }
+
+    /// Keep the temporaries and the cached guest registers around a call
+    /// into Rust, which doesn't keep them (16 bytes aligned).
+    fn save_for_call(&mut self) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; push r8
+            ; push r9
+            ; push r10
+            ; push r11
+            ; push rsi
+            ; push rdi
+        );
+    }
+
+    fn restore_after_call(&mut self) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; pop rdi
+            ; pop rsi
+            ; pop r11
+            ; pop r10
+            ; pop r9
+            ; pop r8
+        );
+    }
+
+    /// IN (into t) or OUT (of t) of `size` bytes through `jit_port`, the
+    /// instruction count brought up to date before the instruction.
+    fn port_io(&mut self, out: bool, size: u8, port: Src, t: T) {
+        let fail = self.fail();
+        let desc = out as i32 | (size as i32) << 1 | (self.ix as i32) << 8;
+        let data_ptr = self.data_ptr;
+        self.save_for_call();
+        match port {
+            Src::Imm(p) => dynasm!(self.ops ; .arch x64 ; mov eax, p as i32),
+            Src::T(p) => dynasm!(self.ops ; .arch x64 ; mov eax, Rd(r(p))),
+        }
+        if out {
+            dynasm!(self.ops ; .arch x64 ; mov r9d, Rd(r(t)));
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov r8d, eax
+            ; mov ecx, desc
+            ; mov rdx, QWORD data_ptr
+            ; mov rsi, r12
+            ; mov rdi, rbx
+            ; call QWORD [r12 + CTX_PORT]
+        );
+        self.restore_after_call();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rcx, rax
+            ; shr rcx, 32
+            ; jz >done
+            ; mov eax, ecx
+            ; jmp =>fail
+            ; done:
+        );
+        if !out {
+            dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), eax);
         }
     }
 

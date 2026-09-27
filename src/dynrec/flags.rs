@@ -66,6 +66,10 @@ impl Uop {
             Uop::DoubleShiftVar { .. } => CF | OF | SZP,
             Uop::Bail { .. } => ARITH,
             Uop::MemRef { .. }
+            | Uop::LoadSeg { .. }
+            | Uop::In { .. }
+            | Uop::Out { .. }
+            | Uop::Sti
             | Uop::CheckLimit { .. }
             | Uop::CheckIopl
             | Uop::DivWide { .. }
