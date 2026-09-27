@@ -34,9 +34,13 @@ pub(crate) struct TlbEntry {
     write_tag: u32,
     /// Physical address of the page.
     phys: u32,
+    /// The same, with bit 31 set where the page isn't plain RAM (see
+    /// `Bus::is_plain_ram`): the recompiler's code compares an address in it
+    /// with the end of RAM alone.
+    jit_phys: u32,
 }
 
-const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0 };
+const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0, jit_phys: 0 };
 const _: () = assert!(std::mem::size_of::<TlbEntry>() == 16);
 
 /// Where an entry's fields are, its size, and the entries in each set,
@@ -44,6 +48,7 @@ const _: () = assert!(std::mem::size_of::<TlbEntry>() == 16);
 pub(crate) const TLB_READ_TAG: usize = std::mem::offset_of!(TlbEntry, read_tag);
 pub(crate) const TLB_WRITE_TAG: usize = std::mem::offset_of!(TlbEntry, write_tag);
 pub(crate) const TLB_PHYS: usize = std::mem::offset_of!(TlbEntry, phys);
+pub(crate) const TLB_JIT_PHYS: usize = std::mem::offset_of!(TlbEntry, jit_phys);
 pub(crate) const TLB_ENTRY_SIZE: usize = std::mem::size_of::<TlbEntry>();
 pub(crate) const TLB_SET: usize = TLB_ENTRIES;
 
@@ -253,8 +258,13 @@ impl Cpu {
         // Writes go through the TLB only once the page is dirty, so the
         // first write to it still sets the bit.
         let writable = walked.dirty && allows(walked.user_ok, walked.write_ok, true, paging);
-        self.tlb.entries[Tlb::slot(page, user)] =
-            TlbEntry { read_tag: page + 1, write_tag: if writable { page + 1 } else { 0 }, phys: walked.page };
+        let plain = self.bus.is_plain_ram(walked.page as usize, 0x1000);
+        self.tlb.entries[Tlb::slot(page, user)] = TlbEntry {
+            read_tag: page + 1,
+            write_tag: if writable { page + 1 } else { 0 },
+            phys: walked.page,
+            jit_phys: walked.page | if plain { 0 } else { 0x8000_0000 },
+        };
         Ok(self.translate(walked.page | (lin & 0xFFF)))
     }
 

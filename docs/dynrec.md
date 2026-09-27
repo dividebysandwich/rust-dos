@@ -242,6 +242,15 @@ first instruction in a block that changes them:
   returns the physical address when the operand turns out to be plain
   RAM, so the loads and stores after it are direct as well.
 
+On x86-64, the three guest registers a block's operations use most (twice
+or more) stay in host registers within it (`x64::Cache`). An instruction
+loads those it uses from the `Cpu` as it starts, if they aren't there
+yet, so where they are doesn't change within it; the changed ones go back
+into the `Cpu` where the block leaves and before a handler's call, after
+which they are loaded again, and those loaded where an instruction stops
+the block (it changes none before it may fault). The slow paths keep them
+around their calls into Rust.
+
 Registers while translated code runs:
 
 | Holds | x86-64 | ARM64 |
@@ -254,7 +263,8 @@ Registers while translated code runs:
 | set when a store hit the block's later bytes | `JitCtx::smc` | W23 |
 | the TLB's entries | R15 | |
 | the guest's arithmetic flags | EBP | W28 |
-| the operations' temporaries | R8–R11 (saved around calls) | W24–W26 (kept by calls) |
+| the operations' temporaries | R8–R10 (saved around calls) | W24–W26 (kept by calls) |
+| the guest registers the block uses most | R11, RSI, RDI (saved around calls) | |
 
 On x86-64, calls into Rust use the System V convention, which Rust offers
 on every x86-64 host, Windows included; on ARM64 the platform's own. ARM64
@@ -285,9 +295,14 @@ unnecessary: the limit checks and base of flat segments, the TLB lookup
 with paging off, the A20 mask with the gate open, and then the check
 for an operand in two pages, whose RAM is contiguous. With paging on, it
 looks the page up in the TLB's set for the CPL, whose 16-byte entries it
-indexes with the linear address shifted and masked; a link to another
-page checks the TLB's translation of its target, but not the A20 gate
-and paging, which are as when the link was made. The ARM64 one
+indexes with the linear address shifted and masked. It compares the
+entry's tag with the page of the operand's last byte, which an entry of
+the first byte's page never holds for an operand in two pages, and takes
+the physical address from a copy of it with bit 31 set where the page
+isn't plain RAM (`TlbEntry::jit_phys`), which the check for the end of
+RAM then catches. A link to another page checks the TLB's translation of
+its target, but not the A20 gate and paging, which are as when the link
+was made. The ARM64 one
 checks everything at run time.
 
 ### Linking

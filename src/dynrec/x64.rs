@@ -4,10 +4,10 @@
 //! (`JitCtx`), R13 RAM, R14 which blocks of RAM hold code
 //! (`Bus::code_blocks`), R15 the TLB's entries, EBP the guest's arithmetic
 //! flags where the code has changed them (see
-//! `Gen::dirty`); R8-R11 hold the operations' temporaries (`uop::T`), and
-//! RAX, RCX, RDX, RSI and RDI are scratch. The guest's registers stay in
-//! the CPU. Translated code calls Rust with the System V convention, which
-//! Rust offers on every x86-64 host.
+//! `Gen::dirty`); R8-R10 hold the operations' temporaries (`uop::T`), R11,
+//! RSI and RDI the guest registers a block uses most (see `Cache`), and
+//! RAX, RCX and RDX are scratch. Translated code calls Rust with the
+//! System V convention, which Rust offers on every x86-64 host.
 
 // dynasm converts the registers it is given at run time with `into`.
 #![allow(clippy::useless_conversion)]
@@ -120,6 +120,68 @@ fn gpr_offset(g: Gpr) -> i32 {
     (layout::GPR + g.index as usize * 4 + g.high as usize) as i32
 }
 
+/// Host registers that hold guest registers within a block: R11, RSI and
+/// RDI, which calls into Rust don't keep (their slow paths save them).
+const CACHE_HOSTS: [u8; 3] = [11, 6, 7];
+/// Scratch registers.
+const RAX: u8 = 0;
+const RCX: u8 = 1;
+const RDX: u8 = 2;
+
+/// The guest registers a block keeps in host registers: the ones its
+/// operations use most. An instruction loads those it uses from the CPU as
+/// it starts, if they aren't in their host registers yet, so which are
+/// there doesn't change within it; they go back into the CPU where the
+/// block leaves, before a handler's call (after which they are loaded
+/// again), and where an instruction stops it.
+#[derive(Clone, Copy, Default)]
+struct Cache {
+    /// Per guest register (EAX..EDI), its host register, or 0.
+    host: [u8; 8],
+    /// Bits per guest register: in its host register, and changed there
+    /// since.
+    loaded: u8,
+    dirty: u8,
+}
+
+/// The guest registers (bits by index) operation `u` reads or writes.
+fn uop_gprs(u: &Uop) -> u8 {
+    let bit = |g: Gpr| 1u8 << g.index;
+    match *u {
+        Uop::Get { r, .. } | Uop::Set { r, .. } => bit(r),
+        Uop::Ea { base, index, .. } => base.map_or(0, bit) | index.map_or(0, bit),
+        Uop::ShiftVar { count, .. } | Uop::DoubleShiftVar { count, .. } => bit(count),
+        Uop::MulWide { size, .. } | Uop::DivWide { size, .. } => {
+            if size == 1 {
+                1
+            } else {
+                1 | 1 << 2
+            }
+        }
+        Uop::ExitIf { commit: Some((g, _)), .. } => bit(g),
+        _ => 0,
+    }
+}
+
+/// Which guest registers a block keeps in host registers (see `Cache`):
+/// the most used, if twice or more.
+fn choose_cached(items: &[Option<Vec<Uop>>]) -> [u8; 8] {
+    let mut uses = [0u32; 8];
+    for u in items.iter().flatten().flatten() {
+        let gprs = uop_gprs(u);
+        for (i, n) in uses.iter_mut().enumerate() {
+            *n += (gprs >> i & 1) as u32;
+        }
+    }
+    let mut order: Vec<usize> = (0..8).filter(|&i| uses[i] >= 2).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(uses[i]));
+    let mut host = [0u8; 8];
+    for (&i, &h) in order.iter().zip(&CACHE_HOSTS) {
+        host[i] = h;
+    }
+    host
+}
+
 fn seg_field(seg: Seg, field: usize) -> i32 {
     (layout::SEG + seg as usize * layout::SEG_SIZE + field) as i32
 }
@@ -137,7 +199,9 @@ enum Slow {
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
     /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
     /// with the flags in EBP there (`dirty`), and goes on at `end`.
-    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool },
+    /// The cached guest registers in `wb` go back into the CPU before the
+    /// handler runs, and those in `reload` are loaded again after.
+    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, wb: u8, reload: u8 },
 }
 
 struct Gen<'a> {
@@ -184,6 +248,10 @@ struct Gen<'a> {
     /// (`EXIT_FLAGS`).
     dirty: bool,
     dirty_at: Vec<bool>,
+    /// The guest registers in host registers, and per instruction those
+    /// that go back into the CPU where it stops the block.
+    cache: Cache,
+    wb_at: Vec<u8>,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -234,6 +302,8 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         env,
         dirty: false,
         dirty_at: vec![false; n],
+        cache: Cache { host: choose_cached(items), ..Cache::default() },
+        wb_at: vec![0; n],
     };
     g.prologue();
     let mut synced = 0;
@@ -249,14 +319,21 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.synced[ix] = synced;
                 g.flags_back();
                 g.dirty = false;
+                // The handler reads and writes the registers in the CPU.
+                g.writeback(g.cache.dirty);
+                g.cache.dirty = 0;
                 g.check_watched();
                 g.fallback(ix as i32);
+                g.cache.loaded = 0;
             }
             Some(uops) => {
                 g.synced[ix] = synced;
                 // Operations check what can fault before they change the
                 // flags: they are as at the instruction's start there.
                 g.dirty_at[ix] = g.dirty;
+                let used = uops.iter().fold(0, |m, u| m | uop_gprs(u));
+                g.preload(used);
+                g.wb_at[ix] = g.cache.loaded;
                 g.check_watched();
                 for (k, uop) in uops.iter().enumerate() {
                     g.live_after = g.live[ix][k];
@@ -301,6 +378,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     // jumps here has put the flags back.
     dynasm!(g.ops ; .arch x64 ; =>tail);
     g.dirty = false;
+    g.cache.dirty = 0;
     g.leave(None, 0, false);
     g.epilogue();
     let stubs = g.stubs.map(|s| s.map(|l| g.ops.labels().resolve_dynamic(l).expect("stub").0));
@@ -422,6 +500,9 @@ impl Gen<'_> {
         for (ix, label) in self.fail.clone().into_iter().enumerate() {
             if let Some(label) = label {
                 dynasm!(self.ops ; .arch x64 ; =>label);
+                // The cached registers as the instruction left them: it
+                // changes none before it may fault.
+                self.writeback(self.wb_at[ix]);
                 let bits = (ix as u32) << 8 | if self.dirty_at[ix] { EXIT_FLAGS } else { 0 };
                 if bits != 0 {
                     dynasm!(self.ops ; .arch x64 ; or eax, bits as i32);
@@ -447,11 +528,15 @@ impl Gen<'_> {
                         ; push r9
                         ; push r10
                         ; push r11
+                        ; push rsi
+                        ; push rdi
                         ; mov rdi, rbx
                         ; mov rsi, r12
                         ; mov edx, Rd(r(t))
                         ; mov ecx, desc as i32
                         ; call QWORD [r12 + CTX_MEMREF]
+                        ; pop rdi
+                        ; pop rsi
                         ; pop r11
                         ; pop r10
                         ; pop r9
@@ -473,11 +558,15 @@ impl Gen<'_> {
                         ; push r9
                         ; push r10
                         ; push r11
+                        ; push rsi
+                        ; push rdi
                         ; mov rdi, rbx
                         ; mov rsi, r12
                         ; mov edx, Rd(r(m))
                         ; and edx, 3
                         ; call QWORD [r12 + CTX_READ]
+                        ; pop rdi
+                        ; pop rsi
                         ; pop r11
                         ; pop r10
                         ; pop r9
@@ -494,13 +583,14 @@ impl Gen<'_> {
                         ; jmp =>fail
                     );
                 }
-                Slow::Bail { at, end, ix, dirty } => {
+                Slow::Bail { at, end, ix, dirty, wb, reload } => {
                     // As a handler's call in the block, but with the
                     // instruction count put back after it, as the code on
-                    // from `end` has it. A stop leaves the flags the handler
-                    // left in the CPU.
+                    // from `end` has it. A stop leaves the flags and
+                    // registers the handler left in the CPU.
                     let lag = ix as i32 - self.synced[ix];
                     dynasm!(self.ops ; .arch x64 ; =>at);
+                    self.writeback(wb);
                     self.dirty = dirty;
                     self.flags_back();
                     if lag > 0 {
@@ -521,6 +611,7 @@ impl Gen<'_> {
                     if self.end_dirty[ix] {
                         dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
                     }
+                    self.load_cached(reload);
                     let fail_tail = self.fail_tail;
                     dynasm!(self.ops
                         ; .arch x64
@@ -576,14 +667,18 @@ impl Gen<'_> {
                         ; push r9
                         ; push r10
                         ; push r11
+                        ; push rsi
+                        ; push rdi
                         ; mov DWORD [r12 + CTX_SMC_LO], lo as i32
                         ; mov DWORD [r12 + CTX_SMC_HI], hi as i32
-                        ; mov rdi, rbx
-                        ; mov rsi, r12
+                        ; mov ecx, Rd(r(src))
                         ; mov edx, Rd(r(m))
                         ; and edx, 3
-                        ; mov ecx, Rd(r(src))
+                        ; mov rdi, rbx
+                        ; mov rsi, r12
                         ; call QWORD [r12 + CTX_WRITE]
+                        ; pop rdi
+                        ; pop rsi
                         ; pop r11
                         ; pop r10
                         ; pop r9
@@ -618,18 +713,8 @@ impl Gen<'_> {
 
     fn uop(&mut self, uop: &Uop) {
         match *uop {
-            Uop::Get { t, r: g } => {
-                let (t, off) = (r(t), gpr_offset(g));
-                match g.size {
-                    4 => dynasm!(self.ops ; .arch x64 ; mov Rd(t), DWORD [rbx + off]),
-                    2 => dynasm!(self.ops ; .arch x64 ; movzx Rd(t), WORD [rbx + off]),
-                    _ => dynasm!(self.ops ; .arch x64 ; movzx Rd(t), BYTE [rbx + off]),
-                }
-            }
-            Uop::Set { r: g, t } => {
-                dynasm!(self.ops ; .arch x64 ; mov ecx, Rd(r(t)));
-                self.set_ecx(g);
-            }
+            Uop::Get { t, r: g } => self.get_into(r(t), g),
+            Uop::Set { r: g, t } => self.set_from(g, r(t), RAX),
             Uop::Const { t, v } => dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), v as i32),
             Uop::Copy { dst, src } => dynasm!(self.ops ; .arch x64 ; mov Rd(r(dst)), Rd(r(src))),
             Uop::AddConst { t, v, size } => {
@@ -651,17 +736,35 @@ impl Gen<'_> {
             }
             Uop::Ea { t, base, index, scale, disp, a32 } => {
                 let t = r(t);
-                dynasm!(self.ops ; .arch x64 ; mov Rd(t), disp as i32);
-                if let Some(b) = base {
-                    self.load_eax(b);
-                    dynasm!(self.ops ; .arch x64 ; add Rd(t), eax);
+                match base {
+                    Some(b) => {
+                        let h = match self.cached(b.index) {
+                            Some(h) if b.size == 4 => h,
+                            _ => {
+                                self.get_into(RAX, b);
+                                RAX
+                            }
+                        };
+                        dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(h) + disp as i32]);
+                    }
+                    None => dynasm!(self.ops ; .arch x64 ; mov Rd(t), disp as i32),
                 }
                 if let Some(i) = index {
-                    self.load_eax(i);
-                    if scale > 1 {
-                        dynasm!(self.ops ; .arch x64 ; shl eax, scale.trailing_zeros() as i8);
+                    match self.cached(i.index) {
+                        Some(h) if i.size == 4 => match scale {
+                            1 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(h)]),
+                            2 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(h) * 2]),
+                            4 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(h) * 4]),
+                            _ => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(h) * 8]),
+                        },
+                        _ => {
+                            self.get_into(RAX, i);
+                            if scale > 1 {
+                                dynasm!(self.ops ; .arch x64 ; shl eax, scale.trailing_zeros() as i8);
+                            }
+                            dynasm!(self.ops ; .arch x64 ; add Rd(t), eax);
+                        }
                     }
-                    dynasm!(self.ops ; .arch x64 ; add Rd(t), eax);
                 }
                 if !a32 {
                     dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rw(t));
@@ -718,7 +821,8 @@ impl Gen<'_> {
                 let at = self.ops.new_dynamic_label();
                 dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), mask as i32 ; jnz =>at);
                 let end = self.end();
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty });
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
             }
             Uop::Imul { size, a, b } => {
                 let a = r(a);
@@ -782,6 +886,7 @@ impl Gen<'_> {
             Uop::Exit { eip: Src::Imm(target) } => self.leave(Some(target), 0, true),
             Uop::Exit { eip: Src::T(t) } => {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)));
+                self.writeback(self.cache.dirty);
                 self.flags_back();
                 if self.link {
                     // A return or indirect call: through its link to
@@ -807,27 +912,98 @@ impl Gen<'_> {
         }
     }
 
-    /// The register = the low bytes of ECX. The register's whole dword is
-    /// written, so that later loads of it are forwarded from one store:
-    /// a load of a dword written in bytes waits for the stores to finish.
-    /// EAX is changed.
-    fn set_ecx(&mut self, g: Gpr) {
-        let off = gpr_offset(Gpr::dword(g.index));
-        match (g.size, g.high) {
-            (4, _) => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + off], ecx),
-            (2, _) => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + off] ; mov ax, cx ; mov DWORD [rbx + off], eax),
-            (_, false) => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + off] ; mov al, cl ; mov DWORD [rbx + off], eax),
-            (_, true) => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + off] ; mov ah, cl ; mov DWORD [rbx + off], eax),
+    /// The host register guest register `index` is kept in, if any.
+    fn cached(&self, index: u8) -> Option<u8> {
+        let h = self.cache.host[index as usize];
+        (h != 0).then_some(h)
+    }
+
+    /// Load the cached guest registers in `mask` that aren't in their host
+    /// registers yet.
+    fn preload(&mut self, mask: u8) {
+        let missing = mask & !self.cache.loaded;
+        self.load_cached(missing);
+        self.cache.loaded |= missing;
+    }
+
+    /// Load the cached guest registers in `mask` from the CPU.
+    fn load_cached(&mut self, mask: u8) {
+        for i in 0..8u8 {
+            if let Some(h) = self.cached(i).filter(|_| mask >> i & 1 != 0) {
+                dynasm!(self.ops ; .arch x64 ; mov Rd(h), DWORD [rbx + gpr_offset(Gpr::dword(i))]);
+            }
         }
     }
 
-    /// EAX = the register, zero-extended.
-    fn load_eax(&mut self, g: Gpr) {
+    /// Put the cached guest registers in `mask` back into the CPU.
+    fn writeback(&mut self, mask: u8) {
+        for i in 0..8u8 {
+            if let Some(h) = self.cached(i).filter(|_| mask >> i & 1 != 0) {
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + gpr_offset(Gpr::dword(i))], Rd(h));
+            }
+        }
+    }
+
+    /// Host register `dst` = guest register `g`, zero-extended.
+    fn get_into(&mut self, dst: u8, g: Gpr) {
+        if let Some(h) = self.cached(g.index) {
+            debug_assert!(self.cache.loaded >> g.index & 1 != 0);
+            match (g.size, g.high) {
+                (4, _) => dynasm!(self.ops ; .arch x64 ; mov Rd(dst), Rd(h)),
+                (2, _) => dynasm!(self.ops ; .arch x64 ; movzx Rd(dst), Rw(h)),
+                (_, false) => dynasm!(self.ops ; .arch x64 ; movzx Rd(dst), Rb(h)),
+                (_, true) => dynasm!(self.ops ; .arch x64 ; movzx Rd(dst), Rw(h) ; shr Rd(dst), 8),
+            }
+            return;
+        }
         let off = gpr_offset(g);
         match g.size {
-            4 => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + off]),
-            2 => dynasm!(self.ops ; .arch x64 ; movzx eax, WORD [rbx + off]),
-            _ => dynasm!(self.ops ; .arch x64 ; movzx eax, BYTE [rbx + off]),
+            4 => dynasm!(self.ops ; .arch x64 ; mov Rd(dst), DWORD [rbx + off]),
+            2 => dynasm!(self.ops ; .arch x64 ; movzx Rd(dst), WORD [rbx + off]),
+            _ => dynasm!(self.ops ; .arch x64 ; movzx Rd(dst), BYTE [rbx + off]),
+        }
+    }
+
+    /// Guest register `g` = the low bytes of host register `src` (the rest
+    /// of its slot stays), with `scratch` (another register) changed. In
+    /// the CPU, the register's whole dword is written, so that later loads
+    /// of it are forwarded from one store: a load of a dword written in
+    /// bytes waits for the stores to finish.
+    fn set_from(&mut self, g: Gpr, src: u8, scratch: u8) {
+        if let Some(h) = self.cached(g.index) {
+            debug_assert!(self.cache.loaded >> g.index & 1 != 0);
+            self.cache.dirty |= 1 << g.index;
+            match (g.size, g.high) {
+                (4, _) => dynasm!(self.ops ; .arch x64 ; mov Rd(h), Rd(src)),
+                (2, _) => dynasm!(self.ops ; .arch x64 ; mov Rw(h), Rw(src)),
+                (_, false) => dynasm!(self.ops ; .arch x64 ; mov Rb(h), Rb(src)),
+                (_, true) => dynasm!(self.ops ; .arch x64 ; ror Rd(h), 8 ; mov Rb(h), Rb(src) ; rol Rd(h), 8),
+            }
+            return;
+        }
+        let off = gpr_offset(Gpr::dword(g.index));
+        match (g.size, g.high) {
+            (4, _) => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + off], Rd(src)),
+            (2, _) => dynasm!(self.ops
+                ; .arch x64
+                ; mov Rd(scratch), DWORD [rbx + off]
+                ; mov Rw(scratch), Rw(src)
+                ; mov DWORD [rbx + off], Rd(scratch)
+            ),
+            (_, false) => dynasm!(self.ops
+                ; .arch x64
+                ; mov Rd(scratch), DWORD [rbx + off]
+                ; mov Rb(scratch), Rb(src)
+                ; mov DWORD [rbx + off], Rd(scratch)
+            ),
+            (_, true) => dynasm!(self.ops
+                ; .arch x64
+                ; mov Rd(scratch), DWORD [rbx + off]
+                ; ror Rd(scratch), 8
+                ; mov Rb(scratch), Rb(src)
+                ; rol Rd(scratch), 8
+                ; mov DWORD [rbx + off], Rd(scratch)
+            ),
         }
     }
 
@@ -897,6 +1073,42 @@ impl Gen<'_> {
             }
             0
         };
+        let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as i32;
+        let set = if bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
+        let entry = set * TLB_ENTRY;
+        if paging && a20 {
+            // The TLB entry of the first byte's page (linear address >> 12)
+            // in the set of the privilege level, whose tag must be the last
+            // byte's page + 1: an operand in two pages misses, as the entry
+            // can't hold the next page. Its physical address with bit 31
+            // set where the page isn't plain RAM, which the check for the
+            // end of RAM then catches.
+            if size > 1 {
+                dynasm!(self.ops ; .arch x64 ; lea ecx, [rax + last]);
+            } else {
+                dynasm!(self.ops ; .arch x64 ; mov ecx, eax);
+            }
+            dynasm!(self.ops
+                ; .arch x64
+                ; shr ecx, 12
+                ; inc ecx
+                ; mov edx, eax
+                ; shr edx, 12 - TLB_ENTRY_SHIFT
+                ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
+                ; cmp ecx, DWORD [r15 + rdx + entry + tag]
+                ; jne =>at
+                ; and eax, 0xFFF
+                ; or eax, DWORD [r15 + rdx + entry + layout::TLB_JIT_PHYS as i32]
+                ; cmp eax, self.env.ram_len.wrapping_sub(size as u32) as i32
+                ; ja =>at
+                ; mov Rd(t_), eax
+                ; =>back
+            );
+            let desc = memref_desc(seg, size, write, slot);
+            let fail = self.fail();
+            self.slow.push(Slow::MemRef { at, back, t, desc, fail });
+            return;
+        }
         if paging || !a20 {
             // An operand in two pages takes two translations (or with the
             // A20 gate closed, may wrap around at a megabyte).
@@ -912,9 +1124,6 @@ impl Gen<'_> {
             if paging {
                 // The page's entry (linear address >> 12) in the TLB's set of
                 // the privilege level, whose tag must be the page + 1.
-                let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as i32;
-                let set = if bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
-                let entry = set * TLB_ENTRY;
                 dynasm!(self.ops
                     ; .arch x64
                     ; mov edx, eax
@@ -1113,7 +1322,7 @@ impl Gen<'_> {
     /// guest's flags are in EBP both ways if the shift's are live.
     fn var_count(&mut self, count: Gpr, set: u32) {
         let end = self.end();
-        dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [rbx + gpr_offset(count)]);
+        self.get_into(RCX, count);
         if self.wanted(set) && !self.dirty {
             dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
             self.dirty = true;
@@ -1276,12 +1485,7 @@ impl Gen<'_> {
     /// host's CF and OF.
     fn mul_wide(&mut self, signed: bool, size: u8, t: T) {
         let t = r(t);
-        let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
-        match size {
-            1 => dynasm!(self.ops ; .arch x64 ; movzx eax, BYTE [rbx + acc]),
-            2 => dynasm!(self.ops ; .arch x64 ; movzx eax, WORD [rbx + acc]),
-            _ => dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + acc]),
-        }
+        self.get_into(RAX, Gpr { index: 0, high: false, size });
         match (signed, size) {
             (false, 1) => dynasm!(self.ops ; .arch x64 ; mul Rb(t)),
             (false, 2) => dynasm!(self.ops ; .arch x64 ; mul Rw(t)),
@@ -1295,17 +1499,15 @@ impl Gen<'_> {
             dynasm!(self.ops ; .arch x64 ; pushfq);
         }
         match size {
-            1 => {
-                dynasm!(self.ops ; .arch x64 ; mov ecx, eax);
-                self.set_ecx(Gpr::word(0));
-            }
+            1 => self.set_from(Gpr::word(0), RAX, RCX),
             2 => {
-                dynasm!(self.ops ; .arch x64 ; mov ecx, eax ; mov esi, edx);
-                self.set_ecx(Gpr::word(0));
-                dynasm!(self.ops ; .arch x64 ; mov ecx, esi);
-                self.set_ecx(Gpr::word(2));
+                self.set_from(Gpr::word(0), RAX, RCX);
+                self.set_from(Gpr::word(2), RDX, RCX);
             }
-            _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + acc], eax ; mov DWORD [rbx + high], edx),
+            _ => {
+                self.set_from(Gpr::dword(0), RAX, RCX);
+                self.set_from(Gpr::dword(2), RDX, RCX);
+            }
         }
         if wanted {
             dynasm!(self.ops ; .arch x64 ; pop rax);
@@ -1313,13 +1515,14 @@ impl Gen<'_> {
         }
     }
 
+
     /// DIV or IDIV of AX, DX:AX or EDX:EAX by t, or #DE first where the
     /// quotient doesn't fit (the host's division would fault too, so it
     /// only runs where it can't). The flags are a 486's (`division_flags`).
     fn div_wide(&mut self, signed: bool, size: u8, t: T) {
         self.divide(signed, size, t);
         if self.wanted(ARITH) {
-            self.division_flags(size);
+            self.division_flags(size, t);
         }
     }
 
@@ -1327,14 +1530,16 @@ impl Gen<'_> {
     /// `division_flags`), from the quotient and remainder they left: ZF
     /// where the remainder is 0 and the quotient odd, CF where the
     /// remainder's low two bits are 1 or 2, PF where the two have the same
-    /// parity, and AF, SF and OF clear.
-    fn division_flags(&mut self, size: u8) {
-        let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
-        match size {
-            1 => dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [rbx + acc] ; movzx edx, BYTE [rbx + acc + 1]),
-            2 => dynasm!(self.ops ; .arch x64 ; movzx ecx, WORD [rbx + acc] ; movzx edx, WORD [rbx + high]),
-            _ => dynasm!(self.ops ; .arch x64 ; mov ecx, DWORD [rbx + acc] ; mov edx, DWORD [rbx + high]),
-        }
+    /// parity, and AF, SF and OF clear. The divisor's t is changed.
+    fn division_flags(&mut self, size: u8, t: T) {
+        let t = r(t);
+        let (quotient, remainder) = match size {
+            1 => (Gpr { index: 0, high: false, size: 1 }, Gpr { index: 0, high: true, size: 1 }),
+            2 => (Gpr::word(0), Gpr::word(2)),
+            _ => (Gpr::dword(0), Gpr::dword(2)),
+        };
+        self.get_into(RCX, quotient);
+        self.get_into(RDX, remainder);
         dynasm!(self.ops
             ; .arch x64
             ; xor eax, eax
@@ -1344,19 +1549,19 @@ impl Gen<'_> {
             ; and eax, 1
             ; shl eax, 6
             // CF: (remainder & 3) - 1 below 2.
-            ; mov esi, edx
-            ; and esi, 3
-            ; dec esi
-            ; cmp esi, 2
+            ; mov Rd(t), edx
+            ; and Rd(t), 3
+            ; dec Rd(t)
+            ; cmp Rd(t), 2
             ; adc eax, 0
             // PF: the parity of remainder ^ quotient, folded to a byte.
             ; xor edx, ecx
         );
         if size == 4 {
-            dynasm!(self.ops ; .arch x64 ; mov esi, edx ; shr esi, 16 ; xor edx, esi);
+            dynasm!(self.ops ; .arch x64 ; mov Rd(t), edx ; shr Rd(t), 16 ; xor edx, Rd(t));
         }
         if size >= 2 {
-            dynasm!(self.ops ; .arch x64 ; mov esi, edx ; shr esi, 8 ; xor edx, esi);
+            dynasm!(self.ops ; .arch x64 ; mov Rd(t), edx ; shr Rd(t), 8 ; xor edx, Rd(t));
         }
         dynasm!(self.ops
             ; .arch x64
@@ -1369,50 +1574,48 @@ impl Gen<'_> {
         self.merge(ARITH, ARITH);
     }
 
+
     fn divide(&mut self, signed: bool, size: u8, t: T) {
         let t = r(t);
         let de = self.fault_exit(EXIT_DE);
-        let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
         match (signed, size) {
             // Unsigned, the quotient fits if the dividend's upper half is
             // below the divisor, which a divisor of 0 never is.
             (false, 1) => {
+                self.get_into(RAX, Gpr::word(0));
                 dynasm!(self.ops
                     ; .arch x64
-                    ; movzx eax, WORD [rbx + acc]
                     ; movzx ecx, ah
                     ; cmp ecx, Rd(t)
                     ; jae =>de
                     ; div Rb(t)
-                    ; mov ecx, eax
                 );
-                self.set_ecx(Gpr::word(0));
+                self.set_from(Gpr::word(0), RAX, RCX);
             }
             (false, 2) => {
+                self.get_into(RAX, Gpr::word(0));
+                self.get_into(RDX, Gpr::word(2));
                 dynasm!(self.ops
                     ; .arch x64
-                    ; movzx eax, WORD [rbx + acc]
-                    ; movzx edx, WORD [rbx + high]
                     ; cmp edx, Rd(t)
                     ; jae =>de
                     ; div Rw(t)
-                    ; mov ecx, eax
-                    ; mov esi, edx
                 );
-                self.set_ecx(Gpr::word(0));
-                dynasm!(self.ops ; .arch x64 ; mov ecx, esi);
-                self.set_ecx(Gpr::word(2));
+                self.set_from(Gpr::word(0), RAX, RCX);
+                self.set_from(Gpr::word(2), RDX, RCX);
             }
-            (false, _) => dynasm!(self.ops
-                ; .arch x64
-                ; mov eax, DWORD [rbx + acc]
-                ; mov edx, DWORD [rbx + high]
-                ; cmp edx, Rd(t)
-                ; jae =>de
-                ; div Rd(t)
-                ; mov DWORD [rbx + acc], eax
-                ; mov DWORD [rbx + high], edx
-            ),
+            (false, _) => {
+                self.get_into(RAX, Gpr::dword(0));
+                self.get_into(RDX, Gpr::dword(2));
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; cmp edx, Rd(t)
+                    ; jae =>de
+                    ; div Rd(t)
+                );
+                self.set_from(Gpr::dword(0), RAX, RCX);
+                self.set_from(Gpr::dword(2), RDX, RCX);
+            }
             // Signed, the division is twice as wide as the guest's, where
             // no quotient overflows, and then the quotient must fit.
             (true, 1) => {
@@ -1421,16 +1624,19 @@ impl Gen<'_> {
                     ; movsx ecx, Rb(t)
                     ; test ecx, ecx
                     ; jz =>de
-                    ; movsx eax, WORD [rbx + acc]
+                );
+                self.get_into(RAX, Gpr::word(0));
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsx eax, ax
                     ; cdq
                     ; idiv ecx
-                    ; movsx esi, al
-                    ; cmp esi, eax
+                    ; movsx ecx, al
+                    ; cmp ecx, eax
                     ; jne =>de
                     ; mov ah, dl
-                    ; mov ecx, eax
                 );
-                self.set_ecx(Gpr::word(0));
+                self.set_from(Gpr::word(0), RAX, RCX);
             }
             (true, 2) => {
                 dynasm!(self.ops
@@ -1438,49 +1644,55 @@ impl Gen<'_> {
                     ; movsx rcx, Rw(t)
                     ; test ecx, ecx
                     ; jz =>de
-                    ; movzx eax, WORD [rbx + acc]
-                    ; movzx edx, WORD [rbx + high]
+                );
+                self.get_into(RAX, Gpr::word(0));
+                self.get_into(RDX, Gpr::word(2));
+                dynasm!(self.ops
+                    ; .arch x64
                     ; shl edx, 16
                     ; or eax, edx
                     ; movsxd rax, eax
                     ; cqo
                     ; idiv rcx
-                    ; movsx rsi, ax
-                    ; cmp rsi, rax
+                    ; movsx rcx, ax
+                    ; cmp rcx, rax
                     ; jne =>de
-                    ; mov ecx, eax
-                    ; mov esi, edx
                 );
-                self.set_ecx(Gpr::word(0));
-                dynasm!(self.ops ; .arch x64 ; mov ecx, esi);
-                self.set_ecx(Gpr::word(2));
+                self.set_from(Gpr::word(0), RAX, RCX);
+                self.set_from(Gpr::word(2), RDX, RCX);
             }
-            (true, _) => dynasm!(self.ops
-                ; .arch x64
-                ; movsxd rcx, Rd(t)
-                ; test rcx, rcx
-                ; jz =>de
-                ; mov eax, DWORD [rbx + acc]
-                ; mov edx, DWORD [rbx + high]
-                ; shl rdx, 32
-                ; or rax, rdx
-                // The one 64-bit quotient that overflows: -2^63 / -1.
-                ; cmp rcx, -1
-                ; jne >divide
-                ; mov rdx, rax
-                ; neg rdx
-                ; jo =>de
-                ; divide:
-                ; cqo
-                ; idiv rcx
-                ; movsxd rsi, eax
-                ; cmp rsi, rax
-                ; jne =>de
-                ; mov DWORD [rbx + acc], eax
-                ; mov DWORD [rbx + high], edx
-            ),
+            (true, _) => {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsxd rcx, Rd(t)
+                    ; test rcx, rcx
+                    ; jz =>de
+                );
+                self.get_into(RAX, Gpr::dword(0));
+                self.get_into(RDX, Gpr::dword(2));
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; shl rdx, 32
+                    ; or rax, rdx
+                    // The one 64-bit quotient that overflows: -2^63 / -1.
+                    ; cmp rcx, -1
+                    ; jne >divide
+                    ; mov rdx, rax
+                    ; neg rdx
+                    ; jo =>de
+                    ; divide:
+                    ; cqo
+                    ; idiv rcx
+                    ; movsxd rcx, eax
+                    ; cmp rcx, rax
+                    ; jne =>de
+                );
+                self.set_from(Gpr::dword(0), RAX, RCX);
+                self.set_from(Gpr::dword(2), RDX, RCX);
+            }
         }
     }
+
 
     fn exit_if(&mut self, cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)>) {
         let yes = self.ops.new_dynamic_label();
@@ -1507,8 +1719,10 @@ impl Gen<'_> {
             }
         }
         // Not taken.
+        let cache = self.cache;
         self.commit(commit);
         self.leave(Some(next), 1, true);
+        self.cache = cache;
         dynasm!(self.ops ; .arch x64 ; =>yes);
         // Taken: the target must be within the CS limit.
         let gp = self.fault_exit(EXIT_GP0);
@@ -1529,6 +1743,7 @@ impl Gen<'_> {
         if let (Some(eip), true) = (eip, set) {
             dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], eip as i32);
         }
+        self.writeback(self.cache.dirty);
         self.flags_back();
         self.counts();
         match eip {
@@ -1594,14 +1809,14 @@ impl Gen<'_> {
             dynasm!(self.ops
                 ; .arch x64
                 ; mov ecx, DWORD [rdx + g + GUARD_PAGE]
-                ; mov esi, ecx
+                ; mov eax, ecx
                 ; and ecx, (layout::TLB_SET - 1) as i32
                 ; shl ecx, TLB_ENTRY_SHIFT
-                ; inc esi
-                ; cmp esi, DWORD [r15 + rcx + entry + layout::TLB_READ_TAG as i32]
+                ; inc eax
+                ; cmp eax, DWORD [r15 + rcx + entry + layout::TLB_READ_TAG as i32]
                 ; jne =>stub
-                ; mov esi, DWORD [r15 + rcx + entry + layout::TLB_PHYS as i32]
-                ; cmp esi, DWORD [rdx + g + GUARD_PHYS]
+                ; mov eax, DWORD [r15 + rcx + entry + layout::TLB_PHYS as i32]
+                ; cmp eax, DWORD [rdx + g + GUARD_PHYS]
                 ; jne =>stub
             );
         }
