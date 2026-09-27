@@ -44,5 +44,8 @@ pub const TLB_PHYS: usize = super::paging::TLB_PHYS;
 pub const TLB_JIT_PHYS: usize = super::paging::TLB_JIT_PHYS;
 pub const TLB_ENTRY_SIZE: usize = super::paging::TLB_ENTRY_SIZE;
 pub const TLB_SET: usize = super::paging::TLB_SET;
+/// The TLB's entries, supervisor then user (`Tlb::entries_ptr`).
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const TLB: usize = offset_of!(Cpu, tlb) + super::paging::TLB_ENTRIES_AT;
 
 const _: () = assert!(size_of::<CpuFlags>() == 4);

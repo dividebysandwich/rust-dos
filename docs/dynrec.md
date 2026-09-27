@@ -265,7 +265,7 @@ first instruction in a block that changes them:
   returns the physical address when the operand turns out to be plain
   RAM, so the loads and stores after it are direct as well.
 
-On x86-64, the three guest registers a block's operations use most (twice
+On x86-64, the four guest registers a block's operations use most (twice
 or more) stay in host registers within it (`x64::Cache`). An instruction
 loads those it uses from the `Cpu` as it starts, if they aren't there
 yet, so where they are doesn't change within it; the changed ones go back
@@ -284,10 +284,10 @@ Registers while translated code runs:
 | the code generations | | X22 |
 | which chunks hold code (`Bus::code_blocks`) | R14 | |
 | set when a store hit the block's later bytes | `JitCtx::smc` | W23 |
-| the TLB's entries | R15 | |
+| the TLB's entries | in the `Cpu`, from RBX | |
 | the guest's arithmetic flags | EBP | W28 |
 | the operations' temporaries | R8–R10 (saved around calls) | W24–W26 (kept by calls) |
-| the guest registers the block uses most | R11, RSI, RDI (saved around calls) | |
+| the guest registers the block uses most | R11, RSI, RDI (saved around calls), R15 (kept by calls) | |
 
 On x86-64, calls into Rust use the System V convention, which Rust offers
 on every x86-64 host, Windows included; on ARM64 the platform's own. ARM64

@@ -136,6 +136,7 @@ pub const CTX_PORT: i32 = offset_of!(JitCtx, port) as i32;
 pub const CTX_AFTER: i32 = offset_of!(JitCtx, after) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_PARITY: i32 = offset_of!(JitCtx, parity) as i32;

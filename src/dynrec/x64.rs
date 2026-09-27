@@ -1,12 +1,12 @@
 //! The x86-64 code generator.
 //!
-//! Registers while translated code runs: RBX the CPU, R12 the context
-//! (`JitCtx`), R13 RAM, R14 which blocks of RAM hold code
-//! (`Bus::code_blocks`), R15 the TLB's entries, EBP the guest's arithmetic
-//! flags where the code has changed them (see
-//! `Gen::dirty`); R8-R10 hold the operations' temporaries (`uop::T`), R11,
-//! RSI and RDI the guest registers a block uses most (see `Cache`), and
-//! RAX, RCX and RDX are scratch. Translated code calls Rust with the
+//! Registers while translated code runs: RBX the CPU (and in it the TLB's
+//! entries), R12 the context (`JitCtx`), R13 RAM, R14 which blocks of RAM
+//! hold code (`Bus::code_blocks`), EBP the guest's arithmetic flags where
+//! the code has changed them (see `Gen::dirty`); R8-R10 hold the
+//! operations' temporaries (`uop::T`), R11, RSI, RDI and R15 the guest
+//! registers a block uses most (see `Cache`), and RAX, RCX and RDX are
+//! scratch. Translated code calls Rust with the
 //! System V convention, which Rust offers on every x86-64 host.
 
 // dynasm converts the registers it is given at run time with `into`.
@@ -46,6 +46,8 @@ const SZP: u32 = SF | ZF | PF;
 /// A TLB entry's size, and its log2.
 const TLB_ENTRY: i32 = layout::TLB_ENTRY_SIZE as i32;
 const TLB_ENTRY_SHIFT: i8 = 4;
+/// Where the TLB's entries are in the CPU.
+const TLB: i32 = layout::TLB as i32;
 const _: () = assert!(1 << TLB_ENTRY_SHIFT == TLB_ENTRY);
 
 /// Where the RAM below the video memory ends, and extended memory starts.
@@ -82,7 +84,6 @@ pub fn trampoline() -> Trampoline {
         ; mov r12, rsi
         ; mov r13, QWORD [r12 + CTX_RAM]
         ; mov r14, QWORD [r12 + CTX_CODE_BLOCKS]
-        ; mov r15, QWORD [r12 + CTX_TLB]
         ; mov BYTE [r12 + CTX_SMC], 0
         ; jmp rdx
     );
@@ -121,8 +122,9 @@ fn gpr_offset(g: Gpr) -> i32 {
 }
 
 /// Host registers that hold guest registers within a block: R11, RSI and
-/// RDI, which calls into Rust don't keep (their slow paths save them).
-const CACHE_HOSTS: [u8; 3] = [11, 6, 7];
+/// RDI, which calls into Rust don't keep (their slow paths save them), and
+/// R15, which they do.
+const CACHE_HOSTS: [u8; 4] = [11, 6, 7, 15];
 /// Scratch registers.
 const RAX: u8 = 0;
 const RCX: u8 = 1;
@@ -510,7 +512,7 @@ impl Gen<'_> {
             ; and edx, (layout::TLB_SET - 1) as i32
             ; shl edx, TLB_ENTRY_SHIFT
             ; inc eax
-            ; cmp eax, DWORD [r15 + rdx + entry]
+            ; cmp eax, DWORD [rbx + rdx + TLB + entry]
             ; jne =>at
         );
     }
@@ -1288,10 +1290,10 @@ impl Gen<'_> {
                 ; mov edx, eax
                 ; shr edx, 12 - TLB_ENTRY_SHIFT
                 ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
-                ; cmp ecx, DWORD [r15 + rdx + entry + tag]
+                ; cmp ecx, DWORD [rbx + rdx + TLB + entry + tag]
                 ; jne =>at
                 ; and eax, 0xFFF
-                ; or eax, DWORD [r15 + rdx + entry + layout::TLB_JIT_PHYS as i32]
+                ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_JIT_PHYS as i32]
                 ; cmp eax, self.env.ram_len.wrapping_sub(size as u32) as i32
                 ; ja =>at
                 ; mov Rd(t_), eax
@@ -1325,10 +1327,10 @@ impl Gen<'_> {
                     ; mov ecx, eax
                     ; shr ecx, 12
                     ; inc ecx
-                    ; cmp ecx, DWORD [r15 + rdx + entry + tag]
+                    ; cmp ecx, DWORD [rbx + rdx + TLB + entry + tag]
                     ; jne =>at
                     ; and eax, 0xFFF
-                    ; or eax, DWORD [r15 + rdx + entry + layout::TLB_PHYS as i32]
+                    ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_PHYS as i32]
                 );
             }
             if !a20 {
@@ -2027,9 +2029,9 @@ impl Gen<'_> {
                 ; and ecx, (layout::TLB_SET - 1) as i32
                 ; shl ecx, TLB_ENTRY_SHIFT
                 ; inc eax
-                ; cmp eax, DWORD [r15 + rcx + entry + layout::TLB_READ_TAG as i32]
+                ; cmp eax, DWORD [rbx + rcx + TLB + entry + layout::TLB_READ_TAG as i32]
                 ; jne =>stub
-                ; mov eax, DWORD [r15 + rcx + entry + layout::TLB_PHYS as i32]
+                ; mov eax, DWORD [rbx + rcx + TLB + entry + layout::TLB_PHYS as i32]
                 ; cmp eax, DWORD [rdx + g + GUARD_PHYS]
                 ; jne =>stub
             );

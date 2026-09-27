@@ -51,6 +51,8 @@ pub(crate) const TLB_PHYS: usize = std::mem::offset_of!(TlbEntry, phys);
 pub(crate) const TLB_JIT_PHYS: usize = std::mem::offset_of!(TlbEntry, jit_phys);
 pub(crate) const TLB_ENTRY_SIZE: usize = std::mem::size_of::<TlbEntry>();
 pub(crate) const TLB_SET: usize = TLB_ENTRIES;
+/// Where the entries are in the TLB.
+pub(crate) const TLB_ENTRIES_AT: usize = std::mem::offset_of!(Tlb, entries);
 
 /// Translations the CPU has walked the page tables for, direct-mapped by
 /// linear page number, in two sets: for accesses at privilege level 3,
@@ -59,7 +61,9 @@ pub(crate) const TLB_SET: usize = TLB_ENTRIES;
 /// INVLPG and task switches, so a program must flush it after changing
 /// page tables, as on a real 386.
 pub struct Tlb {
-    entries: Box<[TlbEntry]>,
+    /// In the CPU itself: the x86-64 recompiler's code reaches them from
+    /// its address (`layout::TLB`).
+    entries: [TlbEntry; 2 * TLB_ENTRIES],
     /// Counts flushes, full or of one page: a translation kept elsewhere
     /// (the execution loop's code window) holds while it doesn't change.
     pub epoch: u32,
@@ -70,7 +74,7 @@ pub struct Tlb {
 
 impl Default for Tlb {
     fn default() -> Self {
-        Self { entries: vec![EMPTY; 2 * TLB_ENTRIES].into_boxed_slice(), epoch: 0, large: false }
+        Self { entries: [EMPTY; 2 * TLB_ENTRIES], epoch: 0, large: false }
     }
 }
 
@@ -117,7 +121,7 @@ impl Tlb {
     }
 
     /// The entries, supervisor then user, `TLB_ENTRIES` each, for the
-    /// dynamic recompiler's code. The allocation never moves.
+    /// dynamic recompiler's code, while the CPU doesn't move.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn entries_ptr(&self) -> *const TlbEntry {
         self.entries.as_ptr()
