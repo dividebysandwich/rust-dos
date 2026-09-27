@@ -990,15 +990,37 @@ impl Cpu {
         f
     }
 
-    /// Put the BIOS's interrupt vectors back, except those hooked by a
-    /// resident TSR, in conventional or upper memory.
-    fn install_bios_traps(&mut self) {
+    /// The memory of the resident TSRs, in conventional and upper memory.
+    fn resident_memory(&mut self) -> Vec<std::ops::Range<usize>> {
         let mut resident = vec![(crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16];
         for &psp in &self.resident_upper {
             let block = crate::mcb::read_mcb(&mut self.bus, psp - 1);
             resident.push(psp as usize * 16..(psp as usize + block.size as usize) * 16);
         }
+        resident
+    }
+
+    /// Put the BIOS's interrupt vectors back, except those hooked by a
+    /// resident TSR, in conventional or upper memory.
+    fn install_bios_traps(&mut self) {
+        let resident = self.resident_memory();
         crate::bios::restore_ivt(&mut self.bus, &resident);
+    }
+
+    /// After the PICs were put back as the BIOS leaves them: the IRQs of
+    /// the second PIC whose handlers are resident drivers' (a packet
+    /// driver's network card) stay let through, as the drivers left them
+    /// (`slave_imr`, the mask before).
+    fn keep_resident_irqs(&mut self, slave_imr: u8) {
+        let resident = self.resident_memory();
+        for line in 0..8u8 {
+            let vector = 0x70 + line as usize;
+            let entry = (self.bus.read_16(vector * 4 + 2) as usize) << 4 | self.bus.read_16(vector * 4) as usize;
+            if slave_imr & (1 << line) == 0 && resident.iter().any(|r| r.contains(&entry)) {
+                self.bus.pic.slave.imr &= !(1 << line);
+            }
+        }
+        self.bus.arm_ipx_irq();
     }
 
     /// Turn expanded memory and upper memory blocks on or off, with no
@@ -1181,7 +1203,9 @@ impl Cpu {
         self.flags = CpuFlags::from_bits_truncate(0x0202); // Reset Flags (IF=1)
         self.state = CpuState::Running;
         self.idle = false;
+        let slave_imr = self.bus.pic.slave.imr;
         self.bus.reset_timers();
+        self.keep_resident_irqs(slave_imr);
         self.bus.reset_sound();
         self.bus.reset_network();
         // No program runs any more: its extended memory and A20 go too,
