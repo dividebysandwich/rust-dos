@@ -469,6 +469,9 @@ fn a_loaded_machine_has_its_drives_files_and_memory() {
     let mut b = machine();
     b.bus.disk.mount(4, &e_dir, Default::default(), false).unwrap();
     machine::load(&mut b, &state).unwrap();
+    // The file table is written again after the next service, without
+    // touching the shell's handles after it.
+    rust_dos::dos_files::flush(&mut b.bus);
 
     // The drives as they were: D: mounted, E: gone, SUB current on C:.
     assert!(b.bus.disk.is_mounted(3) && !b.bus.disk.is_mounted(4));

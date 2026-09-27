@@ -22,18 +22,26 @@ const SDA_FORMAT: u16 = 0x0004;
 pub const SYSVARS: u16 = 0x0026;
 /// The disk buffer information, inside the List of Lists in DOS 5.
 const BUFFER_INFO: u16 = SYSVARS + 0x47;
-/// The patch table of the DOSMGR interface (INT 2Fh AX=1607h BX=0015h).
-pub const DOSMGR_PATCHES: u16 = 0x00A0;
-/// The headers of the character devices DOS has built in, and of the
-/// disk driver, in the order DOS chains them after NUL (`DEVICES`).
-const DEVICE_HEADERS: u16 = 0x00B0;
-const DEVICE_HEADER_SIZE: u16 = 0x12;
+/// SHARE's entry points, a far pointer for each of its 15 functions, right
+/// after the List of Lists. Windows for Workgroups' VSHARE.386 puts its
+/// own there, where MS-DOS 5 and 6 have the table. DOS services here run
+/// in one step without SHARE and never call them.
+const SHARE_HOOKS: u16 = SYSVARS + 0x6A;
+const SHARE_HOOK_COUNT: u16 = 15;
 /// A RETF, the strategy and interrupt entry of every device here: the
 /// emulator does their I/O.
-const DEVICE_RETF: u16 = SYSVARS + 0x6C;
+const DEVICE_RETF: u16 = SHARE_HOOKS + SHARE_HOOK_COUNT * 4;
+/// The patch table of the DOSMGR interface (INT 2Fh AX=1607h BX=0015h).
+pub const DOSMGR_PATCHES: u16 = 0x00D0;
+/// The headers of the character devices DOS has built in, and of the
+/// disk driver, in the order DOS chains them after NUL (`DEVICES`).
+const DEVICE_HEADERS: u16 = 0x00E0;
+const DEVICE_HEADER_SIZE: u16 = 0x12;
 /// The FCB table (FCBS=4), an SFT block of its own.
-const FCB_TABLE: u16 = 0x0140;
+const FCB_TABLE: u16 = 0x0160;
 const FCBS: u16 = 4;
+/// A byte VSHARE.386 sets while Windows runs, at its MS-DOS 5 offset.
+const VSHARE_FLAG: u16 = 0x0303;
 /// The zero-terminated list of the places to patch for critical sections
 /// (INT 2Ah AH=80h), before the SDA as in DOS 4 to 6. DOS services run in
 /// one step here and need none.
@@ -71,10 +79,12 @@ const END: u16 = XMS_ENTRY + 0x10;
 
 const _: () = assert!(DISK_BUFFER + 0x14 + 0x200 <= EMM_IMPORT);
 
-const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= CRIT_PATCHES);
+const _: () = assert!(DEVICE_RETF < DOSMGR_PATCHES && DOSMGR_PATCHES + 0x0E <= DEVICE_HEADERS);
 const _: () = assert!(
     DEVICE_HEADERS + DEVICES.len() as u16 * DEVICE_HEADER_SIZE <= FCB_TABLE
 );
+const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VSHARE_FLAG);
+const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 const _: () = assert!(SEGMENT as usize * 16 + END as usize <= crate::dos_files::SFT_SEGMENT as usize * 16);
 
 /// A device DOS has built in: its name and attributes.
@@ -167,7 +177,8 @@ pub fn write(bus: &mut Bus) {
 /// Windows' DOSMGR walks the file tables and the device chain.
 fn write_list_of_lists(bus: &mut Bus, with_dpb: &[u8]) {
     let base = address(SYSVARS);
-    bus.fill_ram(base..base + 0x6C, 0);
+    // The List of Lists, and no SHARE after it.
+    bus.fill_ram(base..address(DEVICE_RETF), 0);
     bus.write_16(base - 2, crate::mcb::FIRST_MCB_SEG); // -2: first MCB
     // 00: far pointer to the first DPB
     match with_dpb.first() {
@@ -207,7 +218,7 @@ fn write_list_of_lists(bus: &mut Bus, with_dpb: &[u8]) {
     bus.write_8(base + 0x63, bus.umb.is_some_and(|u| u.linked) as u8);
     bus.write_16(base + 0x66, if bus.umb.is_some() { crate::mcb::umb_cover_seg(bus) } else { 0xFFFF });
     bus.write_16(base + 0x68, crate::mcb::FIRST_MCB_SEG);
-    bus.write_8(address(DEVICE_RETF), 0xCB); // RETF for the driver entries, past the table
+    bus.write_8(address(DEVICE_RETF), 0xCB); // RETF for the driver entries
 }
 
 /// A device driver's header: the next driver, its attributes, its

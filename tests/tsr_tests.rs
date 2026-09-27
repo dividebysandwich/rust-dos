@@ -1,6 +1,6 @@
 use iced_x86::Register;
 use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
-use rust_dos::interrupts::{int21, int33};
+use rust_dos::interrupts::{int21, int2f, int33};
 use rust_dos::mcb::{self, FIRST_MCB_SEG, MCB_M, MCB_Z, walk};
 use std::fs;
 use std::path::PathBuf;
@@ -44,6 +44,13 @@ fn list_of_lists_points_at_first_mcb_and_dpb() {
     assert_eq!(cpu.bus.read_8(lol + 0x21), 26); // LASTDRIVE
     // In the first 64 KB, where Windows' DOSMGR requires DOS's data.
     assert!(lol < 0x10000);
+    // Windows for Workgroups' VSHARE.386 puts its entry points in the 15
+    // SHARE hooks after the List of Lists and sets the byte at 0303h of the
+    // DOS data segment, where MS-DOS 5 and 6 have them. The rest stays.
+    for i in 0..15 * 4 {
+        cpu.bus.write_8(lol + 0x6A + i, 0xEE);
+    }
+    cpu.bus.write_8(cpu.es() as usize * 16 + 0x0303, 0xFF);
 
     // The driver chain from NUL: DOS's own devices, the disk driver among
     // them, to the end.
@@ -76,6 +83,14 @@ fn list_of_lists_points_at_first_mcb_and_dpb() {
     assert_eq!(&path, b"C:\\\0");
     assert_eq!(cpu.bus.read_16(cds + 0x43), 0x4000);
     assert_eq!(far(&cpu, cds + 0x45), dpb);
+    // DOSMGR's patch table, for DOS 5.
+    cpu.set_ax(0x1607);
+    cpu.set_bx(0x0015);
+    cpu.set_cx(0x0000);
+    int2f::handle(&mut cpu);
+    let patches = cpu.get_physical_addr(cpu.es(), cpu.bx());
+    assert_eq!(cpu.bus.read_16(patches), 0x0005);
+    assert_eq!(cpu.bus.read_16(patches + 0x0C), (lol + 0x66 - cpu.es() as usize * 16) as u16, "UMB_HEAD");
 }
 
 #[test]

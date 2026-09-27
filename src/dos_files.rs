@@ -27,13 +27,29 @@ const PSP_HANDLES: u16 = 20;
 /// output and error on CON, AUX and PRN.
 const STANDARD_HANDLES: [u16; 5] = [SFT_CON, SFT_CON, SFT_CON, SFT_AUX, SFT_PRN];
 
+/// The entries in the first of the two blocks, which DOS keeps in its data
+/// segment; the rest of FILES= are in a second block after it. Windows for
+/// Workgroups' VSHARE.386 walks the chain until the next block is the last,
+/// so a single block sends it past the end marker into memory forever.
+const FIRST_BLOCK_FILES: u16 = 5;
+
+/// The first block, which the List of Lists points to.
 const fn table() -> usize {
     SFT_SEGMENT as usize * 16
 }
 
+/// The second block, the last, right after the first.
+const fn second_table() -> usize {
+    table() + 6 + FIRST_BLOCK_FILES as usize * ENTRY_SIZE
+}
+
 /// The address of the entry `sft`.
 pub const fn entry_address(sft: u16) -> usize {
-    table() + 6 + sft as usize * ENTRY_SIZE
+    if sft < FIRST_BLOCK_FILES {
+        table() + 6 + sft as usize * ENTRY_SIZE
+    } else {
+        second_table() + 6 + (sft - FIRST_BLOCK_FILES) as usize * ENTRY_SIZE
+    }
 }
 
 /// The handles of code that runs with no process (PSP 0), as the shell's
@@ -265,16 +281,18 @@ pub fn set_handle_count(bus: &mut Bus, psp: u16, count: u16) -> Result<(), u8> {
 // The file table itself is DOS's, the same for every Windows virtual
 // machine, where its addresses say.
 
-/// Write the whole table into memory: its header, one block of `FILES`
-/// entries, and every entry; and give the code that runs without a
-/// process the standard handles.
+/// Write the whole table into memory: the headers of its two blocks, of
+/// `FILES` entries between them, and every entry; and give the code that
+/// runs without a process the standard handles.
 pub fn write_table(bus: &mut Bus) {
     for h in 0..PSP_HANDLES {
         let slot = STANDARD_HANDLES.get(h as usize).map_or(UNUSED, |&sft| sft as u8);
         bus.write_8(system_jft() + h as usize, slot);
     }
-    bus.write_32(table(), 0xFFFF_FFFF);
-    bus.write_16(table() + 4, FILES);
+    bus.write_32(table(), (SFT_SEGMENT as u32) << 16 | (second_table() - table()) as u32);
+    bus.write_16(table() + 4, FIRST_BLOCK_FILES);
+    bus.write_32(second_table(), 0xFFFF_FFFF);
+    bus.write_16(second_table() + 4, FILES - FIRST_BLOCK_FILES);
     for sft in 0..FILES {
         write_entry(bus, sft);
     }
@@ -286,7 +304,10 @@ pub fn write_table(bus: &mut Bus) {
 /// Runs after every emulator service, most of which touch no file: only
 /// the dirty entries are visited.
 pub fn flush(bus: &mut Bus) {
+    // All of them after a state load, and none past the table, where the
+    // system JFT is.
     let (mut whole, mut moved) = bus.disk.take_dirty();
+    whole &= (1 << FILES) - 1;
     while whole != 0 {
         write_entry(bus, whole.trailing_zeros() as u16);
         whole &= whole - 1;

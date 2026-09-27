@@ -54,17 +54,42 @@ fn slot(cpu: &Cpu, psp: u16, handle: u16) -> u8 {
     cpu.bus.read_8(at + handle as usize)
 }
 
-/// The linear address of the System File Table, from the List of Lists.
-fn sft_table(cpu: &mut Cpu) -> usize {
+/// The linear address of a far pointer's target.
+fn far(cpu: &Cpu, at: usize) -> usize {
+    cpu.bus.read_16(at + 2) as usize * 16 + cpu.bus.read_16(at) as usize
+}
+
+/// The blocks of the System File Table, from the List of Lists: where each
+/// is and how many entries it has.
+fn sft_blocks(cpu: &mut Cpu) -> Vec<(usize, u16)> {
     dos(cpu, 0x5200, 0, 0, 0).unwrap();
     let lol = cpu.es() as usize * 16 + cpu.bx() as usize;
-    cpu.bus.read_16(lol + 6) as usize * 16 + cpu.bus.read_16(lol + 4) as usize
+    let mut block = far(cpu, lol + 4);
+    let mut blocks = vec![(block, cpu.bus.read_16(block + 4))];
+    while cpu.bus.read_16(block) != 0xFFFF {
+        block = far(cpu, block);
+        blocks.push((block, cpu.bus.read_16(block + 4)));
+        assert!(blocks.len() < 10, "the chain ends");
+    }
+    blocks
+}
+
+/// The linear address of SFT entry `sft`, as DOS finds it in its blocks.
+fn sft_entry(cpu: &mut Cpu, sft: u8) -> usize {
+    let mut n = sft as usize;
+    for (block, count) in sft_blocks(cpu) {
+        if n < count as usize {
+            return block + 6 + n * 0x3B;
+        }
+        n -= count as usize;
+    }
+    panic!("no entry {sft}");
 }
 
 /// The number of handles referring to SFT entry `sft`.
 fn refs(cpu: &mut Cpu, sft: u8) -> u16 {
-    let table = sft_table(cpu);
-    cpu.bus.read_16(table + 6 + sft as usize * 0x3B)
+    let entry = sft_entry(cpu, sft);
+    cpu.bus.read_16(entry)
 }
 
 #[test]
@@ -82,27 +107,53 @@ fn a_program_starts_with_the_standard_handles() {
 
 #[test]
 fn windows_finds_the_size_of_an_entry_from_the_names_of_con() {
-    // KRNL386 opens CON a few times and looks for its entries, three at the
-    // same distance, in the first 512 KB.
+    // KRNL386 opens CON five times and looks for three of its names in a
+    // row at the same distance, in the first 512 KB.
     let mut cpu = machine("con_scan");
-    for expected in 5..8 {
+    for expected in 5..10 {
         assert_eq!(open(&mut cpu, "CON", 0), Ok(expected));
     }
-    let table = sft_table(&mut cpu);
-    assert!(table + 6 + 127 * 0x3B < 0x80000);
-    assert_eq!(cpu.bus.read_32(table), 0xFFFF_FFFF, "one block");
-    assert_eq!(cpu.bus.read_16(table + 4), 127);
     let names: Vec<usize> = (0..0x80000 - 11)
         .filter(|&at| (0..11).all(|i| cpu.bus.read_8(at + i) == b"CON        "[i]))
         .collect();
-    assert_eq!(names.len(), 4, "the standard CON and the three opened");
-    assert_eq!(names[2] - names[1], 0x3B);
-    assert_eq!(names[3] - names[2], 0x3B);
+    assert_eq!(names.len(), 6, "the standard CON and the five opened");
+    let size = names.windows(3).find(|w| w[1] - w[0] == w[2] - w[1]).map(|w| w[1] - w[0]);
+    assert_eq!(size, Some(0x3B));
     // Their entries: one handle each, a character device, the owner.
-    let entry = names[3] - 0x20;
+    let entry = names[5] - 0x20;
     assert_eq!(cpu.bus.read_16(entry), 1);
     assert_eq!(cpu.bus.read_16(entry + 0x05), 0x80D3);
     assert_eq!(cpu.bus.read_16(entry + 0x31), cpu.current_psp);
+}
+
+#[test]
+fn the_table_is_in_two_blocks_as_in_dos() {
+    // DOS's own five entries and the rest of FILES= after them, below
+    // 512 KB. VSHARE.386 stops walking at the block before the last.
+    let mut cpu = machine("blocks");
+    let blocks = sft_blocks(&mut cpu);
+    let counts: Vec<u16> = blocks.iter().map(|&(_, count)| count).collect();
+    assert_eq!(counts, [5, 122]);
+    let (last, count) = blocks[1];
+    assert_eq!(cpu.bus.read_32(last), 0xFFFF_FFFF);
+    assert!(last + 6 + count as usize * 0x3B < 0x80000);
+    // The entries of the second block are where DOS finds them.
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    for _ in 0..3 {
+        dos(&mut cpu, 0x4500, h, 0, 0).unwrap();
+        open(&mut cpu, "DATA.TXT", 0).unwrap();
+    }
+    let sft = slot(&cpu, cpu.current_psp, 11);
+    assert!(sft >= 5, "an entry in the second block");
+    let entry = sft_entry(&mut cpu, sft);
+    assert_eq!(cpu.bus.read_16(entry), 1);
+    assert_eq!(&(0..11).map(|i| cpu.bus.read_8(entry + 0x20 + i)).collect::<Vec<u8>>(), b"DATA    TXT");
+    // INT 2Fh AX=1216h gives the same address.
+    cpu.set_ax(0x1216);
+    cpu.set_bx(sft as u16);
+    handle_hle(&mut cpu, 0x2F);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.es() as usize * 16 + cpu.di() as usize, entry);
 }
 
 #[test]
@@ -116,8 +167,8 @@ fn duplicated_handles_share_the_file_until_the_last_closes() {
     // One position for both.
     assert_eq!(read(&mut cpu, h, 4).unwrap(), b"0123");
     assert_eq!(read(&mut cpu, dup, 2).unwrap(), b"45");
-    let table = sft_table(&mut cpu);
-    assert_eq!(cpu.bus.read_32(table + 6 + sft as usize * 0x3B + 0x15), 6, "the position in the entry");
+    let entry = sft_entry(&mut cpu, sft);
+    assert_eq!(cpu.bus.read_32(entry + 0x15), 6, "the position in the entry");
     assert_eq!(dos(&mut cpu, 0x3E00, h, 0, 0), Ok(0x3E00));
     assert_eq!(slot(&cpu, cpu.current_psp, h), 0xFF);
     assert_eq!(read(&mut cpu, h, 1), Err(0x06));
