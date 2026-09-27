@@ -410,14 +410,18 @@ fn file_calls_of_extender_runtimes() {
 #[test]
 fn country_date_and_indos() {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    // AH=38h: country information at DS:DX.
+    // AH=38h: country information at DS:DX, 24 bytes of it as MS-DOS
+    // copies, leaving what follows a 32-byte buffer alone.
     cpu.set_ds(0x3000);
     cpu.set_dx(0);
+    cpu.bus.load_bytes(0x30018, &[0xAA; 10]);
     int21(&mut cpu, 0x3800);
     assert!(!cf(&cpu));
-    assert_eq!(cpu.bx(), 1);
+    assert_eq!((cpu.ax(), cpu.bx()), (1, 1));
     assert_eq!(cpu.bus.read_8(0x30002), b'$');
     assert_eq!(cpu.bus.read_8(0x30009), b'.');
+    assert_eq!(cpu.bus.read_8(0x30016), b',');
+    assert!((0x30018..0x30022).all(|a| cpu.bus.read_8(a) == 0xAA));
 
     // AH=65h AL=20h: upper case of a character.
     cpu.set_dx(b'q' as u16);

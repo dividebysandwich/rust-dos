@@ -64,9 +64,11 @@ fn set_result(cpu: &mut Cpu, result: Result<u16, u8>) {
     }
 }
 
-/// The 34-byte country information of AH=38h for the USA: m/d/y dates,
-/// "$" currency, "," thousands, "." decimals, 12-hour clock.
-fn write_country_info(cpu: &mut Cpu, addr: usize) {
+/// The country information for the USA: m/d/y dates, "$" currency, ","
+/// thousands, "." decimals, 12-hour clock. Its first `len` bytes of 34:
+/// AH=38h copies the 24 before the 10 reserved ones, as MS-DOS does, so a
+/// program with a 32-byte buffer, as for DOS 2.0's, keeps what follows it.
+fn write_country_info(cpu: &mut Cpu, addr: usize, len: usize) {
     let mut info = [0u8; 34];
     info[0] = 0; // date format: USA
     info[2] = b'$';
@@ -82,7 +84,7 @@ fn write_country_info(cpu: &mut Cpu, addr: usize) {
     let case_map = ((CASE_MAP_ROUTINE - 0xF0000) as u32) | 0xF000_0000;
     info[18..22].copy_from_slice(&case_map.to_le_bytes());
     info[22] = b',';
-    cpu.bus.guest_write_bytes(addr as u32, &info);
+    cpu.bus.guest_write_bytes(addr as u32, &info[..len]);
 }
 
 /// Allocate the largest available free MCB for a child process about to be
@@ -1859,9 +1861,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x38 => {
             if cpu.dx() != 0xFFFF {
                 let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-                write_country_info(cpu, addr);
+                write_country_info(cpu, addr, 24);
             }
-            cpu.set_bx(1); // country code: USA
+            cpu.set_ax(1); // country code: USA, in AX and BX
+            cpu.set_bx(1);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
 
@@ -2020,7 +2023,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.bus.guest_write_16(at + 1, 38);
                 cpu.bus.guest_write_16(at + 3, 1);
                 cpu.bus.guest_write_16(at + 5, 437);
-                write_country_info(cpu, dest + 7);
+                write_country_info(cpu, dest + 7, 34);
                 cpu.set_cx(41);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             }
