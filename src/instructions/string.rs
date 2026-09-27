@@ -60,6 +60,87 @@ impl Addr {
     }
 }
 
+/// How many of `max` elements of `size` bytes an access at `seg:off` on
+/// (down with `backward`) reaches without a fault through the segment or
+/// the addressing, and without leaving the page the first is in. 0 where
+/// the first can't go without the checks of an iteration.
+fn span(cpu: &Cpu, seg: Seg, off: u32, size: u32, max: u32, backward: bool, mask: u32, write: bool) -> u32 {
+    use crate::cpu::layout::{RIGHT_READ, RIGHT_WRITE};
+    let c = cpu.seg_cache(seg);
+    let need = if write { RIGHT_WRITE } else { RIGHT_READ };
+    let last = off.wrapping_add(size - 1);
+    if c.rights & need == 0 || last < off || last > mask || off < c.lo || last > c.hi {
+        return 0;
+    }
+    let in_page = c.base.wrapping_add(off) & 0xFFF;
+    if in_page > 0x1000 - size {
+        return 0;
+    }
+    let shift = size.trailing_zeros();
+    let (by_limit, by_page) = if backward {
+        (((off - c.lo) >> shift) + 1, (in_page >> shift) + 1)
+    } else {
+        (((mask.min(c.hi) - last) >> shift) + 1, (0x1000 - in_page) >> shift)
+    };
+    max.min(by_limit).min(by_page)
+}
+
+/// What `bulk` did.
+enum Bulk {
+    /// These iterations.
+    Done(u32),
+    /// None: the next goes on its own.
+    One,
+    /// None, and none of the rest will: the operands aren't plain RAM.
+    Never,
+}
+
+/// The iterations of a REP MOVS or STOS from here on that stay in the pages
+/// and segment limits their first elements are in, in plain RAM, done at
+/// once: they are the iterations one at a time would do, with the first
+/// one's checks and page walks (the others' go through the TLB as they
+/// did, changing nothing).
+fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<Bulk> {
+    let backward = a.delta != size as u32;
+    let bytes = size as u32;
+    let di = a.get(cpu, Register::EDI);
+    let mut n = span(cpu, Seg::ES, di, bytes, count, backward, a.mask, true);
+    let si = a.get(cpu, Register::ESI);
+    if op == StrOp::Movs {
+        n = span(cpu, a.src_seg, si, bytes, n, backward, a.mask, false);
+    }
+    if n < 2 {
+        return Ok(Bulk::One);
+    }
+    let len = (n * bytes) as usize;
+    // The range from the first element's (up, or down).
+    let range = |phys: u32| if backward { phys as usize + bytes as usize - len } else { phys as usize };
+    match op {
+        StrOp::Movs => {
+            let src = cpu.mem_ref(a.src_seg, si, size, Access::Read)?;
+            let dst = cpu.mem_ref(Seg::ES, di, size, Access::Write)?;
+            if !cpu.bus.is_plain_ram(range(src.phys), len) || !cpu.bus.is_plain_ram(range(dst.phys), len) {
+                return Ok(Bulk::Never);
+            }
+            cpu.bus.move_elements(src.phys as usize, dst.phys as usize, n as usize, size as usize, backward);
+        }
+        _ => {
+            let dst = cpu.mem_ref(Seg::ES, di, size, Access::Write)?;
+            if !cpu.bus.is_plain_ram(range(dst.phys), len) {
+                return Ok(Bulk::Never);
+            }
+            let value = cpu.reg(accumulator(size));
+            cpu.bus.fill_elements(range(dst.phys), n as usize, size as usize, value);
+        }
+    }
+    let moved = a.delta.wrapping_mul(n);
+    for reg in if op == StrOp::Movs { &[Register::ESI, Register::EDI][..] } else { &[Register::EDI][..] } {
+        let full = cpu.reg(*reg);
+        cpu.set_reg(*reg, (full & !a.mask) | (full.wrapping_add(moved) & a.mask));
+    }
+    Ok(Bulk::Done(n))
+}
+
 /// One iteration: the memory and port accesses, then the index updates.
 fn iteration(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr) -> CpuResult {
     let (si, di) = (Register::ESI, Register::EDI);
@@ -144,10 +225,21 @@ pub fn string(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuRes
     // Traced (TF), the single-step trap follows every iteration, and comes
     // back to the instruction while iterations remain.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
+    let mut bulky = !traced && cpu.string_bulk && matches!(op, StrOp::Movs | StrOp::Stos);
     loop {
         let count = cpu.reg(counter);
         if count == 0 {
             return Ok(());
+        }
+        if bulky {
+            match bulk(cpu, op, size, &addr, count)? {
+                Bulk::Done(n) => {
+                    cpu.set_reg(counter, count - n);
+                    continue;
+                }
+                Bulk::One => {}
+                Bulk::Never => bulky = false,
+            }
         }
         iteration(cpu, op, size, &addr)?;
         cpu.set_reg(counter, count - 1);

@@ -61,7 +61,7 @@ crate::state_fields!(Cpu {
     // Saved in sections of its own.
     bus,
     // Set from the configuration, which a state carries in its header.
-    model, core,
+    model, core, string_bulk,
     // Caches, emptied after a load.
     tlb, decode_cache, dynrec,
     // The host's: the lines typed at the prompt stay the user's, and the

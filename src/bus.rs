@@ -809,6 +809,42 @@ impl Bus {
         self.bump_page_gens(range.start, end);
     }
 
+    /// Move `count` elements of `size` bytes in RAM from `src` to `dst` one
+    /// after the other, as a string move does: from the lowest up, or with
+    /// `backward` from the highest down (`src` and `dst` are the first
+    /// elements moved either way), so an element may copy one moved before
+    /// it. Bumps the code generations of what it writes. Both ranges are in
+    /// plain RAM.
+    pub(crate) fn move_elements(&mut self, src: usize, dst: usize, count: usize, size: usize, backward: bool) {
+        let len = count * size;
+        let (src_lo, dst_lo) = if backward { (src + size - len, dst + size - len) } else { (src, dst) };
+        // Where an element would read one written before it, one at a time.
+        let hazard = if backward { dst < src && dst + len > src } else { dst > src && dst < src + len };
+        if !hazard {
+            self.ram.copy_within(src_lo..src_lo + len, dst_lo);
+        } else {
+            // Each element read whole before it is written.
+            let mut element = [0u8; 4];
+            for k in 0..count {
+                let (from, to) = if backward { (src - k * size, dst - k * size) } else { (src + k * size, dst + k * size) };
+                element[..size].copy_from_slice(&self.ram[from..from + size]);
+                self.ram[to..to + size].copy_from_slice(&element[..size]);
+            }
+        }
+        self.bump_page_gens(dst_lo, dst_lo + len);
+    }
+
+    /// Fill `count` elements of `size` bytes in RAM from `dst` up with
+    /// `value`, as a string store does, and bump their code generations.
+    /// The range is in plain RAM.
+    pub(crate) fn fill_elements(&mut self, dst: usize, count: usize, size: usize, value: u32) {
+        let bytes = value.to_le_bytes();
+        for element in self.ram[dst..dst + count * size].chunks_exact_mut(size) {
+            element.copy_from_slice(&bytes[..size]);
+        }
+        self.bump_page_gens(dst, dst + count * size);
+    }
+
     /// Whether `len` bytes at `addr` reach into the video memory window,
     /// A0000h-BFFFFh.
     fn touches_video(addr: usize, len: usize) -> bool {

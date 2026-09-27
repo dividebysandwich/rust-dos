@@ -365,6 +365,10 @@ pub struct Cpu {
     /// A program switched to protected mode since it started: `core=auto`
     /// runs it on the dynamic recompiler until it ends.
     pub dyn_latched: bool,
+    /// REP MOVS and STOS do the iterations that stay in plain RAM at once
+    /// (`instructions::string`). Off, they go one at a time, which tests
+    /// compare them with.
+    pub string_bulk: bool,
     /// The dynamic recompiler's translated code, see `dynrec`.
     pub dynrec: crate::dynrec::DynState,
 }
@@ -494,6 +498,7 @@ impl Cpu {
             hle_retry: false,
             core: CoreMode::initial(),
             dyn_latched: false,
+            string_bulk: true,
             dynrec: crate::dynrec::DynState::default(),
         }
     }
