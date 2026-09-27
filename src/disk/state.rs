@@ -4,8 +4,11 @@
 //! loaded state opens them again. What the files and disk images hold is
 //! the host's and isn't saved: a file changed since the state was saved
 //! reads as it is now, and one gone leaves its handle closed.
+//!
+//! The disks mounted by number come after the rest, and only when there
+//! are any, so states of machines without them load as they did.
 
-use super::{CharDevice, DRIVE_C, DiskController, Drive, LASTDRIVE, OpenData, OpenFile, drive_letter};
+use super::{CharDevice, DRIVE_C, DRIVE_SLOTS, DiskController, Drive, LASTDRIVE, OpenData, OpenFile, drive_name};
 use crate::mount::{mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use std::io::Seek;
@@ -46,22 +49,10 @@ impl DiskController {
             copies_from: _,
         } = self;
         current_drive.save(w);
-        for drive in drives {
-            drive.is_some().save(w);
-            // The rest follows from how the drive was mounted.
-            if let Some(Drive { kind: _, storage: _, current_dir, label: _, read_only: _, mount, images: _, image, media_changed }) =
-                drive
-            {
-                mount.as_ref().map(|spec| mount_spec_value(spec, None)).save(w);
-                current_dir.save(w);
-                image.save(w);
-                media_changed.save(w);
-            }
+        for drive in &drives[..LASTDRIVE as usize] {
+            save_drive(drive, w);
         }
-        // The disks that keep journals as they are now: a checkpoint each.
-        for drive in 0..LASTDRIVE {
-            self.bios_image(drive).and_then(|disk| disk.checkpoint()).save(w);
-        }
+        self.save_checkpoints(0..LASTDRIVE, w);
         let mut entries: Vec<u16> = open_files.keys().copied().collect();
         entries.sort_unstable();
         entries.len().save(w);
@@ -86,6 +77,20 @@ impl DiskController {
             };
             saved.save(w);
         }
+        if drives[LASTDRIVE as usize..].iter().any(Option::is_some) {
+            for drive in &drives[LASTDRIVE as usize..] {
+                save_drive(drive, w);
+            }
+            self.save_checkpoints(LASTDRIVE..DRIVE_SLOTS, w);
+        }
+    }
+
+    /// The disks of `drives` that keep journals as they are now: a
+    /// checkpoint each.
+    fn save_checkpoints(&self, drives: std::ops::Range<u8>, w: &mut Writer) {
+        for drive in drives {
+            self.bios_image(drive).and_then(|disk| disk.checkpoint()).save(w);
+        }
     }
 
     /// Mount the drives as the state has them, where they differ, and open
@@ -94,75 +99,11 @@ impl DiskController {
         let mut current = 0u8;
         current.load(r)?;
         for drive in 0..LASTDRIVE {
-            let letter = drive_letter(drive);
-            let mut present = false;
-            present.load(r)?;
-            if !present {
-                // Drives the machine has of itself (Z:, the Ultrasound's)
-                // stay; mounted ones go.
-                if drive != DRIVE_C && self.drive(drive).is_some_and(|d| d.mount.is_some()) {
-                    self.unmount(drive).map_err(StateError::Mismatch)?;
-                }
-                continue;
-            }
-            let (mut mount, mut dir, mut image, mut changed) = (None::<String>, String::new(), 0usize, false);
-            mount.load(r)?;
-            dir.load(r)?;
-            image.load(r)?;
-            changed.load(r)?;
-            let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(|spec| mount_spec_value(spec, None));
-            if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
-                // Relative paths are the emulator's working directory's, as
-                // they were when the drive was mounted.
-                let tokens = tokenize(text).map_err(StateError::Invalid)?;
-                let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-                let spec = parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)?;
-                self.mount(drive, &spec.path, spec.opts, true)
-                    .map_err(|e| StateError::Mismatch(format!("drive {}: can't be mounted: {}", letter, e)))?;
-            }
-            let images = match self.drive(drive) {
-                Some(d) => d.images.len(),
-                None => return Err(StateError::Mismatch(format!("it has a drive {}: and this machine hasn't", letter))),
-            };
-            for _ in 0..images {
-                if self.drive(drive).is_some_and(|d| d.image == image) {
-                    break;
-                }
-                self.swap_image(drive).map_err(StateError::Mismatch)?;
-            }
-            let d = self.drives[drive as usize].as_mut().expect("the drive is there");
-            d.current_dir = dir;
-            d.media_changed = changed;
+            self.load_drive(drive, r)?;
         }
         self.current_drive = if self.is_mounted(current) { current } else { DRIVE_C };
-
-        // The disks go back to the state's checkpoints once all of it is
-        // in; the journals must still reach back to them, or the state file
-        // have copies of the disks as they were.
-        if let Some(state) = &self.copies_from {
-            for drive in 0..LASTDRIVE {
-                let copy = crate::savestate::disks::copy_path(state, drive);
-                if let Some(disk) = self.bios_image(drive)
-                    && copy.is_file()
-                {
-                    disk.offer_replacement(Some(copy));
-                }
-            }
-        }
         self.reverts.clear();
-        for drive in 0..LASTDRIVE {
-            let mut checkpoint = None::<u64>;
-            checkpoint.load(r)?;
-            if let Some(id) = checkpoint {
-                if !self.bios_image(drive).is_some_and(|disk| disk.has_checkpoint(id)) {
-                    return Err(StateError::Mismatch(format!(
-                        "the disk in drive {}: changed since, and the state is of the system booted from it",
-                        drive_letter(drive)
-                    )));
-                }
-                self.reverts.push((drive, id));
-            }
-        }
+        self.load_checkpoints(0..LASTDRIVE, r)?;
 
         self.open_files.clear();
         let mut files = Vec::new();
@@ -199,6 +140,109 @@ impl DiskController {
             let _ = self.seek_file(file.sft, file.position as i64, 0);
         }
         self.sft_dirty = u128::MAX;
+
+        // The disks mounted by number, if it has any.
+        for drive in LASTDRIVE..DRIVE_SLOTS {
+            if r.is_empty() {
+                if self.is_mounted(drive) {
+                    self.unmount(drive).map_err(StateError::Mismatch)?;
+                }
+            } else {
+                self.load_drive(drive, r)?;
+            }
+        }
+        if !r.is_empty() {
+            self.load_checkpoints(LASTDRIVE..DRIVE_SLOTS, r)?;
+        }
         Ok(lost)
+    }
+
+    /// Mount `drive` as the state has it, where it differs, with the disk
+    /// of its list in it that the state has.
+    fn load_drive(&mut self, drive: u8, r: &mut Reader) -> Result<()> {
+        let name = drive_name(drive);
+        let mut present = false;
+        present.load(r)?;
+        if !present {
+            // Drives the machine has of itself (Z:, the Ultrasound's)
+            // stay; mounted ones go.
+            if drive != DRIVE_C && self.drive(drive).is_some_and(|d| d.mount.is_some()) {
+                self.unmount(drive).map_err(StateError::Mismatch)?;
+            }
+            return Ok(());
+        }
+        let (mut mount, mut dir, mut image, mut changed) = (None::<String>, String::new(), 0usize, false);
+        mount.load(r)?;
+        dir.load(r)?;
+        image.load(r)?;
+        changed.load(r)?;
+        let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(|spec| mount_spec_value(spec, None));
+        if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
+            // Relative paths are the emulator's working directory's, as
+            // they were when the drive was mounted.
+            let tokens = tokenize(text).map_err(StateError::Invalid)?;
+            let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+            let spec = parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)?;
+            self.mount(drive, &spec.path, spec.opts, true)
+                .map_err(|e| StateError::Mismatch(format!("drive {} can't be mounted: {}", name, e)))?;
+        }
+        let images = match self.drive(drive) {
+            Some(d) => d.images.len(),
+            None => return Err(StateError::Mismatch(format!("it has a drive {} and this machine hasn't", name))),
+        };
+        for _ in 0..images {
+            if self.drive(drive).is_some_and(|d| d.image == image) {
+                break;
+            }
+            self.swap_image(drive).map_err(StateError::Mismatch)?;
+        }
+        let d = self.drives[drive as usize].as_mut().expect("the drive is there");
+        d.current_dir = dir;
+        d.media_changed = changed;
+        Ok(())
+    }
+
+    /// The checkpoints of the disks of `drives`, which they go back to once
+    /// all of the state is in; the journals must still reach back to them,
+    /// or the state file have copies of the disks as they were.
+    fn load_checkpoints(&mut self, drives: std::ops::Range<u8>, r: &mut Reader) -> Result<()> {
+        if let Some(state) = &self.copies_from {
+            for drive in drives.clone() {
+                let copy = crate::savestate::disks::copy_path(state, drive);
+                if let Some(disk) = self.bios_image(drive)
+                    && copy.is_file()
+                {
+                    disk.offer_replacement(Some(copy));
+                }
+            }
+        }
+        for drive in drives {
+            let mut checkpoint = None::<u64>;
+            checkpoint.load(r)?;
+            if let Some(id) = checkpoint {
+                if !self.bios_image(drive).is_some_and(|disk| disk.has_checkpoint(id)) {
+                    return Err(StateError::Mismatch(format!(
+                        "the disk in drive {} changed since, and the state is of the system booted from it",
+                        drive_name(drive)
+                    )));
+                }
+                self.reverts.push((drive, id));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A drive as a state has it: whether it is there, and how it was mounted
+/// and what the rest follows from.
+fn save_drive(drive: &Option<Drive>, w: &mut Writer) {
+    drive.is_some().save(w);
+    if let Some(Drive { kind: _, storage: _, current_dir, label: _, read_only: _, mount, images: _, image, media_changed }) =
+        drive
+    {
+        mount.as_ref().map(|spec| mount_spec_value(spec, None)).save(w);
+        current_dir.save(w);
+        image.save(w);
+        media_changed.save(w);
     }
 }

@@ -1,7 +1,9 @@
 //! INT 13h — Disk BIOS services.
 //!
 //! Units 00h/01h are the floppy drives A: and B:, 80h and up the hard-disk
-//! drives in drive-letter order. Drives mounted from disk images have
+//! drives in drive-letter order, but for the disks mounted by number, which
+//! take theirs first (`DiskController::hard_disk_units`). Drives mounted
+//! from disk images have
 //! sectors: reads and writes go to the image, by cylinder, head and sector
 //! of its geometry.
 //!
@@ -28,23 +30,21 @@ const BDA_DISK_STATUS: usize = 0x0474;
 /// Status 06h: the disk was changed (AH=16h).
 const STATUS_CHANGED: u8 = 0x06;
 
-/// Map a BIOS drive number to the DOS drive (0=A:) behind it. Units 00h/01h
-/// are the floppies mounted on A:/B:; 80h+n is the n-th hard-disk-type mount
-/// in drive-letter order. Anything else (including probes like DL=FFh, which
-/// F117's DSWAP.EXE uses to find where the BIOS rejects drives) is absent.
+/// Map a BIOS drive number to the drive (0=A:) behind it. Units 00h/01h
+/// are the floppies mounted on A:/B: or as 0/1; 80h+n is the n-th hard
+/// disk unit (`DiskController::hard_disk_units`). Anything else (including
+/// probes like DL=FFh, which F117's DSWAP.EXE uses to find where the BIOS
+/// rejects drives) is absent.
 fn bios_drive(cpu: &Cpu, dl: u8) -> Option<u8> {
     // A booted system's units are the disk images (`boot::unit_drive`).
     if cpu.bus.boot.is_some() {
         return crate::boot::unit_drive(&cpu.bus, dl);
     }
     if dl < 0x80 {
-        (dl < FLOPPY_DRIVES && cpu.bus.disk.drive_kind(dl) == Some(DriveKind::Floppy)).then_some(dl)
+        let drive = (dl < FLOPPY_DRIVES).then(|| cpu.bus.disk.floppy_unit(dl))?;
+        (cpu.bus.disk.drive_kind(drive) == Some(DriveKind::Floppy)).then_some(drive)
     } else {
-        cpu.bus
-            .disk
-            .drives_of_kind(DriveKind::HardDisk)
-            .get((dl - 0x80) as usize)
-            .copied()
+        cpu.bus.disk.hard_disk_units(|_| true).get((dl - 0x80) as usize).copied()
     }
 }
 
@@ -59,7 +59,7 @@ fn hard_disk_count(cpu: &Cpu) -> usize {
     if cpu.bus.boot.is_some() {
         crate::boot::hard_disk_drives(&cpu.bus).len()
     } else {
-        cpu.bus.disk.drives_of_kind(DriveKind::HardDisk).len()
+        cpu.bus.disk.hard_disk_units(|_| true).len()
     }
 }
 

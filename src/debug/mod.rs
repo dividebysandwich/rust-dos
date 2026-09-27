@@ -28,7 +28,7 @@ use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::disk::{DriveKind, MountOptions, drive_letter};
 use crate::keyboard;
 use rust_dos::keylayout::Layout;
-use crate::mount::{display_host_path, parse_drive_letter, parse_kind};
+use crate::mount::{display_host_path, parse_drive_name, parse_kind};
 use crate::video::{self, VideoMode};
 use keys::PcKey;
 pub use pm::{parse_addr, parse_hex};
@@ -1385,7 +1385,7 @@ impl DebugHub {
             }
             Cmd::SaveState { .. } | Cmd::LoadState { .. } => unreachable!("handed to the front end above"),
             Cmd::Unmount { drive } => {
-                let result = parse_drive_letter(&drive)
+                let result = parse_drive_name(&drive)
                     .ok_or_else(|| format!("invalid drive letter '{}'", drive))
                     .and_then(|d| cpu.bus.unmount_drive(d));
                 match result {
@@ -1891,11 +1891,11 @@ fn ivt_json(cpu: &Cpu) -> Value {
 /// BIOS trap at F000, so a trap whose caller (the CS in the IRET frame on
 /// top of the stack) is the shell counts as well.
 fn drives_json(cpu: &Cpu) -> Value {
-    let drives: Map<String, Value> = cpu
-        .bus
-        .disk
+    let disk = &cpu.bus.disk;
+    let drives: Map<String, Value> = disk
         .mounted_drives()
         .into_iter()
+        .chain(disk.numbered_drives())
         .map(|info| {
             let entry = json!({
                 "type": info.kind.name(),
@@ -1907,7 +1907,7 @@ fn drives_json(cpu: &Cpu) -> Value {
                 "read_only": info.read_only,
                 "current_dir": info.current_dir,
             });
-            (info.letter().to_string(), entry)
+            (crate::disk::drive_key(info.drive), entry)
         })
         .collect();
     json!({
@@ -1929,7 +1929,7 @@ fn mount_drive(
     images: Vec<String>,
 ) -> Result<PathBuf, String> {
     let drive =
-        parse_drive_letter(drive).ok_or_else(|| format!("invalid drive letter '{}'", drive))?;
+        parse_drive_name(drive).ok_or_else(|| format!("invalid drive letter '{}'", drive))?;
     let kind = match kind {
         Some(k) => Some(parse_kind(k).ok_or_else(|| format!("unknown drive type '{}'", k))?),
         None => None,

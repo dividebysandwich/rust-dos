@@ -35,6 +35,13 @@ pub const DRIVE_Z: u8 = 25;
 pub const FLOPPY_DRIVES: u8 = 2;
 /// Number of drive letters reported to programs (LASTDRIVE=Z).
 pub const LASTDRIVE: u8 = 26;
+/// Disks mounted by number instead of letter (`MOUNT 2 disk.img`, as in
+/// DOSBox): images the BIOS has as units without a DOS drive, 0 and 1 the
+/// floppy units 00h and 01h, 2 and 3 the hard disks 80h and 81h. The drive
+/// table has them after Z:.
+pub const NUMBERED_DRIVES: u8 = 4;
+/// The drive table's size: the lettered drives, then the numbered ones.
+pub const DRIVE_SLOTS: u8 = LASTDRIVE + NUMBERED_DRIVES;
 
 /// Volume label used when a mount doesn't specify one.
 pub const DEFAULT_LABEL: &str = "RUSTDOS";
@@ -59,6 +66,33 @@ fn canonical_path(parts: &[&str]) -> String {
 
 pub fn drive_letter(drive: u8) -> char {
     (b'A' + drive) as char
+}
+
+/// The drive table's place of the disk mounted as `number` (0 to 3).
+pub const fn numbered_drive(number: u8) -> u8 {
+    LASTDRIVE + number
+}
+
+/// The number of a disk mounted by number, None for a lettered drive.
+pub fn drive_number(drive: u8) -> Option<u8> {
+    (LASTDRIVE..DRIVE_SLOTS).contains(&drive).then(|| drive - LASTDRIVE)
+}
+
+/// A drive as MOUNT and `[drives]` name it: "C", or "2" for a disk
+/// mounted by number.
+pub fn drive_key(drive: u8) -> String {
+    match drive_number(drive) {
+        Some(number) => number.to_string(),
+        None => drive_letter(drive).to_string(),
+    }
+}
+
+/// A drive as messages name it: "C:", or "2" for a disk mounted by number.
+pub fn drive_name(drive: u8) -> String {
+    match drive_number(drive) {
+        Some(number) => number.to_string(),
+        None => format!("{}:", drive_letter(drive)),
+    }
 }
 
 /// Split an optional leading "X:" off a DOS path. Works on bytes so that a
@@ -340,6 +374,11 @@ impl DriveInfo {
     pub fn letter(&self) -> char {
         drive_letter(self.drive)
     }
+
+    /// "C:", or "2" for a disk mounted by number.
+    pub fn name(&self) -> String {
+        drive_name(self.drive)
+    }
 }
 
 /// What holds a drive's files.
@@ -351,6 +390,8 @@ enum Storage {
     Tree { files: MemFs, image: Option<Rc<CdImage>> },
     /// The FAT file system of a floppy or hard disk image.
     Fat(Rc<FatVolume>),
+    /// A disk mounted by number: its sectors for the BIOS, and no files.
+    Raw(Rc<DiskImage>),
 }
 
 struct Drive {
@@ -400,6 +441,15 @@ impl Drive {
     fn fat(&self) -> Option<&Rc<FatVolume>> {
         match &self.storage {
             Storage::Fat(volume) => Some(volume),
+            _ => None,
+        }
+    }
+
+    /// The floppy or hard disk image in the drive, as the BIOS reads it.
+    fn disk(&self) -> Option<&Rc<DiskImage>> {
+        match &self.storage {
+            Storage::Fat(volume) => Some(volume.disk()),
+            Storage::Raw(disk) => Some(disk),
             _ => None,
         }
     }
@@ -550,7 +600,8 @@ pub struct DiskController {
     position_dirty: u128,
 
     // File System State
-    drives: [Option<Drive>; 26],
+    /// The lettered drives, then the disks mounted by number.
+    drives: [Option<Drive>; DRIVE_SLOTS as usize],
     current_drive: u8, // 0=A, ... 2=C, ... 25=Z
     /// Whether the expanded memory manager's EMMXXXX0 device is there.
     pub emm_device: bool,
@@ -581,7 +632,7 @@ impl DiskController {
         let mut z_files = MemFs::new();
         z_files.insert("COMMAND.COM", crate::command_com::stub_code());
 
-        let mut drives: [Option<Drive>; 26] = std::array::from_fn(|_| None);
+        let mut drives: [Option<Drive>; DRIVE_SLOTS as usize] = std::array::from_fn(|_| None);
         drives[DRIVE_C as usize] = Some(Drive {
             kind: DriveKind::HardDisk,
             storage: Storage::Host(canonical),
@@ -661,7 +712,9 @@ impl DiskController {
     /// images (the path and `opts.more_images`) puts the first in, and
     /// Ctrl+F4 the next (`swap_image`). Unless `replace` is set, the drive
     /// must not already be mounted. Replacing closes the files open on it.
-    /// On A: and B: the drive is a floppy whatever `opts.kind` says.
+    /// On A: and B: the drive is a floppy whatever `opts.kind` says. A
+    /// numbered drive (`numbered_drive`) takes floppy or hard disk images
+    /// whatever is on them.
     pub fn mount(
         &mut self,
         drive: u8,
@@ -669,21 +722,21 @@ impl DiskController {
         opts: MountOptions,
         replace: bool,
     ) -> Result<PathBuf, String> {
-        if drive >= LASTDRIVE {
+        if drive >= DRIVE_SLOTS {
             return Err("Invalid drive letter".to_string());
         }
-        let letter = drive_letter(drive);
+        let name = drive_name(drive);
         if drive == DRIVE_Z || opts.kind == DriveKind::Virtual {
-            return Err(format!("Drive {}: is reserved", letter));
+            return Err(format!("Drive {} is reserved", name));
         }
         if self.is_mounted(drive) && !replace {
-            return Err(format!("Drive {}: is already mounted", letter));
+            return Err(format!("Drive {} is already mounted", name));
         }
         // A: and B: are floppies whatever the type asked for, but a CD
         // can't be one.
         let floppy_drive = drive < FLOPPY_DRIVES;
         if floppy_drive && opts.kind == DriveKind::CdRom {
-            return Err(format!("Drive {}: is a floppy drive and can't be a CD-ROM", letter));
+            return Err(format!("Drive {} is a floppy drive and can't be a CD-ROM", name));
         }
         let spec = MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() };
         if path.is_file() {
@@ -695,10 +748,10 @@ impl DiskController {
                 let canonical = fs::canonicalize(image).map_err(|e| e.to_string())?;
                 // Two drives on one image would each think they know
                 // what's on it.
-                let elsewhere = (0..LASTDRIVE)
+                let elsewhere = (0..DRIVE_SLOTS)
                     .find(|&d| d != drive && self.drive(d).is_some_and(|other| other.images.contains(&canonical)));
                 if let Some(other) = elsewhere {
-                    return Err(format!("{} is already mounted as {}:", image.display(), drive_letter(other)));
+                    return Err(format!("{} is already mounted as {}", image.display(), drive_name(other)));
                 }
                 images.push(canonical);
             }
@@ -719,6 +772,9 @@ impl DiskController {
         }
         if !opts.more_images.is_empty() {
             return Err("Only disk and CD images can be mounted as a list".to_string());
+        }
+        if drive_number(drive).is_some() {
+            return Err(format!("{} is not a disk image", path.display()));
         }
         if !path.is_dir() {
             return Err(format!("{} is not a directory or a disk or CD image", path.display()));
@@ -753,6 +809,9 @@ impl DiskController {
     /// Open the disk or CD image at `path` for `drive`: the drive's type,
     /// its storage, the volume label and whether the image can be written.
     fn open_image(drive: u8, path: &Path, opts: &MountOptions) -> Result<(DriveKind, Storage, String, bool), String> {
+        if let Some(number) = drive_number(drive) {
+            return Self::raw_storage(number, path, opts);
+        }
         let found = diskimage::detect(path, opts.kind)?;
         if found == ImageKind::Cd {
             Self::check_cd_drive(drive)?;
@@ -763,6 +822,21 @@ impl DiskController {
         let floppy = found == ImageKind::Floppy || drive < FLOPPY_DRIVES;
         let name = path.display().to_string();
         Self::fat_storage(drive, found, &name, || DiskImage::open(path, floppy, opts.geometry, opts.read_only))
+    }
+
+    /// The type, storage, volume label and writability of the disk mounted
+    /// as `number`: the image's sectors for the BIOS, a floppy's for 0 and 1
+    /// and a hard disk's for 2 and 3, whatever file system they hold, or
+    /// none.
+    fn raw_storage(number: u8, path: &Path, opts: &MountOptions) -> Result<(DriveKind, Storage, String, bool), String> {
+        if diskimage::detect(path, opts.kind) == Ok(ImageKind::Cd) {
+            return Err(format!("{} is a CD image, which can't be mounted by number", path.display()));
+        }
+        let floppy = number < FLOPPY_DRIVES;
+        let disk = DiskImage::open(path, floppy, opts.geometry, opts.read_only)?;
+        let kind = if floppy { DriveKind::Floppy } else { DriveKind::HardDisk };
+        let writable = disk.writable();
+        Ok((kind, Storage::Raw(Rc::new(disk)), String::new(), writable))
     }
 
     /// Whether a CD image can go in `drive`: not in a floppy drive, and not
@@ -902,10 +976,10 @@ impl DiskController {
         let path = d.images[next].clone();
         let opts = d.mount.as_ref().map(|m| m.opts.clone()).unwrap_or_default();
         let (kind, storage, volume_label, writable) = Self::open_image(drive, &path, &opts)?;
-        let letter = drive_letter(drive);
+        let name = drive_name(drive);
         let d = self.drives[drive as usize].as_mut().unwrap();
         if kind != d.kind {
-            return Err(format!("{} can't go in drive {}:, which is a {}", path.display(), letter, d.kind.name()));
+            return Err(format!("{} can't go in drive {}, which is a {}", path.display(), name, d.kind.name()));
         }
         d.storage = storage;
         d.image = next;
@@ -913,14 +987,15 @@ impl DiskController {
         d.read_only = opts.read_only || !writable;
         d.media_changed = true;
         let count = d.images.len();
-        let current = format!("{}:\\{}", letter, d.current_dir);
-        if !self.is_directory(&current)
+        let current = format!("{}\\{}", name, d.current_dir);
+        if drive < LASTDRIVE
+            && !self.is_directory(&current)
             && let Some(d) = self.drives[drive as usize].as_mut()
         {
             d.current_dir.clear();
         }
-        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-        Ok(Some(format!("Drive {}: disk {} of {}: {}", letter, next + 1, count, name)))
+        let file = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        Ok(Some(format!("Drive {} disk {} of {}: {}", name, next + 1, count, file)))
     }
 
     /// Mount `files` as the read-only drive `drive`, which must not be
@@ -939,7 +1014,7 @@ impl DiskController {
     /// Unmount `drive`, closing its open files. C: and Z: cannot be removed.
     /// If it was the current drive, C: becomes current.
     pub fn unmount(&mut self, drive: u8) -> Result<(), String> {
-        if drive >= LASTDRIVE || !self.is_mounted(drive) {
+        if drive >= DRIVE_SLOTS || !self.is_mounted(drive) {
             return Err("Drive not mounted".to_string());
         }
         if drive == DRIVE_C || drive == DRIVE_Z {
@@ -1001,14 +1076,14 @@ impl DiskController {
 
     /// The disk image of a drive mounted from one, as the BIOS reads it.
     pub fn bios_image(&self, drive: u8) -> Option<Rc<DiskImage>> {
-        self.fat_volume(drive).map(|volume| volume.disk().clone())
+        self.drive(drive)?.disk().cloned()
     }
 
     /// Keep journals of the writes to the disk images in the drives, or
     /// stop: a booted system's states and rewind take its disks back with
     /// its memory (`DiskImage::revert_to`).
     pub fn keep_journals(&self, on: bool) {
-        for drive in 0..LASTDRIVE {
+        for drive in 0..DRIVE_SLOTS {
             if let Some(disk) = self.bios_image(drive) {
                 disk.keep_journal(on);
             }
@@ -1021,7 +1096,7 @@ impl DiskController {
         for (drive, id) in std::mem::take(&mut self.reverts) {
             let reverted = self.bios_image(drive).ok_or_else(|| "it's gone".to_string()).and_then(|disk| disk.revert_to(id));
             if let Err(e) = reverted {
-                failed.push(format!("drive {}: {}", drive_letter(drive), e));
+                failed.push(format!("drive {}: {}", drive_name(drive), e));
             }
         }
         failed
@@ -1044,7 +1119,7 @@ impl DiskController {
             image: d
                 .image()
                 .map(|image| image.path().to_path_buf())
-                .or_else(|| d.fat().map(|volume| volume.disk().path().to_path_buf())),
+                .or_else(|| d.disk().map(|disk| disk.path().to_path_buf())),
             images: d.images.clone(),
             image_index: d.image,
             label: d.label.clone(),
@@ -1054,8 +1129,14 @@ impl DiskController {
         })
     }
 
+    /// The lettered drives: the ones DOS has.
     pub fn mounted_drives(&self) -> Vec<DriveInfo> {
         (0..LASTDRIVE).filter_map(|d| self.drive_info(d)).collect()
+    }
+
+    /// The disks mounted by number, which only the BIOS has.
+    pub fn numbered_drives(&self) -> Vec<DriveInfo> {
+        (LASTDRIVE..DRIVE_SLOTS).filter_map(|d| self.drive_info(d)).collect()
     }
 
     /// Floppy drives the BIOS reports: one for A:, two for B: even with A:
@@ -1063,11 +1144,33 @@ impl DiskController {
     pub fn floppy_units(&self) -> u8 {
         (0..FLOPPY_DRIVES)
             .rev()
-            .find(|&d| self.drive_kind(d) == Some(DriveKind::Floppy))
-            .map_or(0, |d| d + 1)
+            .find(|&unit| self.drive_kind(self.floppy_unit(unit)) == Some(DriveKind::Floppy))
+            .map_or(0, |unit| unit + 1)
     }
 
-    /// Mounted drives of the given kind, in drive-letter order.
+    /// The drive behind the BIOS's floppy unit `unit` (0 or 1): the disk
+    /// mounted as that number, or else A: or B:.
+    pub fn floppy_unit(&self, unit: u8) -> u8 {
+        let numbered = numbered_drive(unit);
+        if self.is_mounted(numbered) { numbered } else { unit }
+    }
+
+    /// The drives behind the BIOS's hard disk units, 80h up: the disks
+    /// mounted as 2 and 3 are 80h and 81h, and the hard disk drives that
+    /// `lettered` takes fill the units they leave, in drive-letter order.
+    pub fn hard_disk_units(&self, lettered: impl Fn(u8) -> bool) -> Vec<u8> {
+        let mut drives = self.drives_of_kind(DriveKind::HardDisk).into_iter().filter(|&d| lettered(d));
+        let mut units: Vec<u8> = (FLOPPY_DRIVES..NUMBERED_DRIVES)
+            .filter_map(|number| {
+                let numbered = numbered_drive(number);
+                if self.is_mounted(numbered) { Some(numbered) } else { drives.next() }
+            })
+            .collect();
+        units.extend(drives);
+        units
+    }
+
+    /// Mounted lettered drives of the given kind, in drive-letter order.
     pub fn drives_of_kind(&self, kind: DriveKind) -> Vec<u8> {
         (0..LASTDRIVE)
             .filter(|&d| self.drive_kind(d) == Some(kind))
@@ -2791,6 +2894,46 @@ mod tests {
         let bpb = hdd.bpb();
         assert_eq!((bpb[0x08], bpb[0x09], bpb[0x0A]), (0, 0, 0xF8));
         assert_eq!(u32::from_le_bytes(bpb[0x15..0x19].try_into().unwrap()), hdd.total_sectors());
+    }
+
+    #[test]
+    fn disks_mounted_by_number_are_the_bioses_alone() {
+        let base = scratch("numbered");
+        // A blank hard disk, and floppies without a file system.
+        fs::write(base.join("blank.img"), vec![0u8; 16 * 63 * 512 * 4]).unwrap();
+        fs::write(base.join("booter1.img"), vec![0u8; 368_640]).unwrap();
+        fs::write(base.join("booter2.img"), vec![0u8; 368_640]).unwrap();
+        fs::create_dir_all(base.join("dir")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        let image = |name: &str| base.join(name);
+        let list = MountOptions { more_images: vec![image("booter2.img")], ..MountOptions::default() };
+
+        // Lettered drives need a file system; numbered ones take the sectors.
+        assert!(disk.mount(3, &image("blank.img"), MountOptions::default(), false).is_err());
+        disk.mount(numbered_drive(2), &image("blank.img"), MountOptions::default(), false).unwrap();
+        disk.mount(numbered_drive(0), &image("booter1.img"), list, false).unwrap();
+        let hdd = disk.bios_image(numbered_drive(2)).unwrap();
+        assert_eq!((hdd.is_floppy(), hdd.geometry().heads, hdd.geometry().cylinders), (false, 16, 4));
+        assert_eq!(disk.drive_kind(numbered_drive(0)), Some(DriveKind::Floppy));
+        assert!(disk.bios_image(numbered_drive(0)).unwrap().is_floppy());
+
+        // DOS doesn't have them; they take images only, and each once.
+        assert_eq!(disk.mounted_drives().len(), 2, "C: and Z:");
+        assert_eq!(disk.numbered_drives().iter().map(DriveInfo::name).collect::<Vec<_>>(), ["0", "2"]);
+        assert!(disk.mount(numbered_drive(3), &base.join("dir"), MountOptions::default(), false).is_err());
+        let twice = disk.mount(numbered_drive(3), &image("blank.img"), MountOptions::default(), false);
+        assert!(twice.unwrap_err().contains("already mounted as 2"));
+        assert!(disk.swap_image(numbered_drive(0)).unwrap().unwrap().starts_with("Drive 0 disk 2 of 2"));
+
+        // Floppy unit 00h is disk 0 before A:; hard disk 80h is disk 2,
+        // and the hard disk drives follow in the units left.
+        assert_eq!((disk.floppy_units(), disk.floppy_unit(0), disk.floppy_unit(1)), (1, numbered_drive(0), 1));
+        assert_eq!(disk.hard_disk_units(|_| true), [numbered_drive(2), DRIVE_C]);
+        assert_eq!(disk.hard_disk_units(|d| disk.bios_image(d).is_some()), [numbered_drive(2)]);
+        disk.unmount(numbered_drive(2)).unwrap();
+        disk.mount(numbered_drive(3), &image("blank.img"), MountOptions::default(), false).unwrap();
+        assert_eq!(disk.hard_disk_units(|_| true), [DRIVE_C, numbered_drive(3)]);
+        assert_eq!(disk.hard_disk_units(|d| disk.bios_image(d).is_some()), [numbered_drive(3)]);
     }
 
     #[test]

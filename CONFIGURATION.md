@@ -315,7 +315,9 @@ The game port, which programs read joysticks from.
 ### `[drives]`
 
 Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`,
-the options as `MOUNT` takes them.
+the options as `MOUNT` takes them. A drive number 0 to 3 instead of the
+letter gives the BIOS a disk image without a DOS drive (see [Booting a disk
+image](#booting-a-disk-image)).
 
 * PATH is a directory, or a disk or CD image (see [Mounting drives](#mounting-drives)).
 * Relative paths are relative to the configuration file, and `~` is your
@@ -486,9 +488,10 @@ mounts the files that match as a list, in natural order (`DISK2` before
 `DISK10`). Relative host paths are relative to the emulator's working
 directory, or with `-pr` to the configuration file's folder. DOSBox's
 `-freesize`, `-ide` and CD-ROM access options are taken and ignored;
-overlays (`-t overlay`) and the drive numbers of images to boot
-(`MOUNT 0 boot.img -fs none`) aren't supported. `MOUNT /?` lists the
-options. Each drive keeps its own current directory, as in DOS.
+overlays (`-t overlay`) aren't supported. A drive number instead of a
+letter (`MOUNT 2 hdd.img`) mounts an image for the BIOS alone, as in
+DOSBox (see [Booting a disk image](#booting-a-disk-image)). `MOUNT /?`
+lists the options. Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
@@ -620,6 +623,23 @@ BIOS. BIOS services work in virtual-8086 mode and through the page tables of
 the system that calls them. The first two floppy drives are always there,
 empty or not; hard disk images are the drives C: and D:.
 
+A drive number instead of a letter mounts a disk image for the BIOS alone,
+as DOSBox's `IMGMOUNT 2 hdd.img` does: 0 and 1 are the floppy drives (INT 13h
+units 00h and 01h), 2 and 3 the first two hard disks (80h and 81h). The
+image needs no DOS file system: a booter game's floppy, a FAT32 or blank hard
+disk to install a system on. It has no drive letter, and takes its unit
+before A:, B: or the hard disk drives, which fill the hard disk units it
+leaves. `BOOT -l 2` boots from it, and so does `BOOT -l C` where C: isn't a
+disk image; `-fs none` with A: to D: means the numbers 0 to 3, and `MOUNT -u
+2` unmounts it. The built-in DOS's programs reach it through INT 13h too.
+`BOOT booter.img` puts a floppy without a file system in unit 0 this way.
+
+```
+IMGMOUNT 2 ~/images/win95-fat32.img    a hard disk DOS can't read
+IMGMOUNT 0 install1.img install2.img   floppies to install from
+BOOT -l A
+```
+
 A CD image mounted as a CD-ROM drive (`MOUNT D ~/dos/game.cue`) is an ATAPI
 CD-ROM drive on the secondary IDE channel of the booted machine (ports
 170h-177h and 376h, IRQ 15), as DOSBox-X's `-ide` has it. Windows 95 finds
@@ -637,7 +657,8 @@ btrfs or XFS, `cp --reflink=auto` takes no room). [Save
 states](README.md#save-states) and rewind keep the disks in step with the
 system's memory: in a run, the disks go back with a state through a journal
 of what the system wrote over (the last 256 MB of it), and a state file has
-a copy of each disk beside it (`slot1.C.img` for `slot1.state`, which takes
+a copy of each disk beside it (`slot1.C.img` for `slot1.state`, or
+`slot1.2.img` for the disk mounted as 2, which takes
 no room where the filesystem shares data between files) that loading it puts
 back. The browser's slots can't hold disks and refuse a booted system's
 state.

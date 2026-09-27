@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use web_time::Instant;
 
-use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
+use crate::disk::{DRIVE_SLOTS, DiskController, DriveKind, MountOptions};
 use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
@@ -631,7 +631,7 @@ impl Bus {
     /// Ctrl+F4 does. Returns what changed, and what went wrong.
     pub fn swap_images(&mut self) -> Vec<String> {
         let mut messages = Vec::new();
-        for drive in 0..LASTDRIVE {
+        for drive in 0..DRIVE_SLOTS {
             match self.disk.swap_image(drive) {
                 Ok(Some(message)) => {
                     self.cdaudio.stop_drive(drive);
@@ -677,7 +677,7 @@ impl Bus {
         self.cmos.set_floppies(floppies);
 
         // 0x0475: number of fixed disks (INT 13h units 80h+).
-        let hard_disks = self.disk.drives_of_kind(DriveKind::HardDisk).len();
+        let hard_disks = self.disk.hard_disk_units(|_| true).len();
         self.write_8(0x0475, hard_disks.min(0xFF) as u8);
 
         crate::dos_data::write(self);

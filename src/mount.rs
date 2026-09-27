@@ -11,12 +11,18 @@
 //! steps through. A: and B: are floppies whatever the type says. `IMGMOUNT`
 //! is the same command, for the batch files made for DOSBox.
 //!
+//! A drive number instead of a letter, as DOSBox has it, gives the BIOS a
+//! disk image without a DOS drive, whatever file system it holds: 0 and 1
+//! are the floppy units, 2 and 3 the first hard disks, for BOOT and the
+//! programs that use the BIOS's disk services. `-fs none` does the same
+//! with A: to D:.
+//!
 //! A mount spec, as `[drives]` takes it, is the same without the drive:
 //! `<host path> [more images] [type] [-t type] [-label NAME] [-ro]
 //! [-chs C,H,S]` where type is `floppy` (alias `fdd`), `hdd` (alias `dir`)
 //! or `cdrom` (alias `iso`).
 
-use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions};
+use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions, NUMBERED_DRIVES, drive_number, numbered_drive};
 use crate::diskimage::Chs;
 use std::cmp::Ordering;
 use std::path::{Component, Path, PathBuf};
@@ -25,12 +31,15 @@ pub const MOUNT_USAGE: &str = "\
 Usage: MOUNT drive directory [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                          [-chs C,H,S] [-size 512,S,H,C]\r
+       MOUNT number image [image ...] [-chs C,H,S] [-ro]\r
        MOUNT -u drive\r
        MOUNT             lists the drives\r
 An image can be on a mounted drive (C:\\GAME\\CD.CUE), and a wildcard\r
 (disk*.img) mounts the images that match. Ctrl+F4 puts the next image of a\r
 list in. -pr takes relative paths from the configuration file's folder.\r
-IMGMOUNT is the same command.\r
+A number gives BOOT and the BIOS a disk image without a DOS drive, whatever\r
+is on it: 0 and 1 are the floppies, 2 and 3 the hard disks (-fs none does\r
+the same with A: to D:). IMGMOUNT is the same command.\r
 ";
 
 /// The extensions of disk and CD images.
@@ -91,6 +100,8 @@ struct Arguments {
     unmount: bool,
     /// -pr: relative paths are from the configuration file's folder.
     config_relative: bool,
+    /// -fs none: the image is the BIOS's alone, as a numbered drive.
+    no_file_system: bool,
 }
 
 fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
@@ -100,7 +111,7 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
         let option = token.to_ascii_lowercase();
         if VALUE_OPTIONS.contains(&option.as_str()) {
             let value = iter.next_if(|value| !is_option(value)).ok_or_else(|| missing_value(&option))?;
-            option_value(&option, value, &mut args.opts)?;
+            option_value(&option, value, &mut args)?;
             continue;
         }
         match option.as_str() {
@@ -137,7 +148,8 @@ fn missing_value(option: &str) -> String {
     format!("{} needs {}", option, value)
 }
 
-fn option_value(option: &str, value: &str, opts: &mut MountOptions) -> Result<(), String> {
+fn option_value(option: &str, value: &str, args: &mut Arguments) -> Result<(), String> {
+    let opts = &mut args.opts;
     match option {
         "-t" if value.eq_ignore_ascii_case("overlay") => {
             return Err("Overlay mounts aren't supported".to_string());
@@ -146,7 +158,7 @@ fn option_value(option: &str, value: &str, opts: &mut MountOptions) -> Result<()
         "-fs" => match value.to_ascii_lowercase().as_str() {
             "fat" => {}
             "iso" => opts.kind = DriveKind::CdRom,
-            "none" => return Err("Disk images without a DOS file system can't be mounted".to_string()),
+            "none" => args.no_file_system = true,
             other => return Err(format!("Unknown file system '{}'", other)),
         },
         "-label" => opts.label = Some(value.to_string()),
@@ -241,13 +253,22 @@ pub fn parse_drive_letter(s: &str) -> Option<u8> {
         .filter(|&d| d < LASTDRIVE)
 }
 
-/// The drive a mount is for. DOSBox's drive numbers 0 to 3 are for disks
-/// to boot from, which rust-dos doesn't do.
+/// "C", "c:" or the drive number "2" -> the drive table's place of it:
+/// a letter's, or `numbered_drive`'s for 0 to 3.
+pub fn parse_drive_name(s: &str) -> Option<u8> {
+    match s.parse::<u8>() {
+        Ok(number) if s.len() == 1 && number < NUMBERED_DRIVES => Some(numbered_drive(number)),
+        Ok(_) => None,
+        Err(_) => parse_drive_letter(s),
+    }
+}
+
+/// The drive a mount is for: a letter, or a drive number.
 fn parse_drive(word: &str) -> Result<u8, String> {
-    match parse_drive_letter(word) {
+    match parse_drive_name(word) {
         Some(drive) => Ok(drive),
-        None if matches!(word, "0" | "1" | "2" | "3") => {
-            Err(format!("Drive number {} is for booting an image, which rust-dos doesn't do", word))
+        None if word.bytes().all(|b| b.is_ascii_digit()) => {
+            Err(format!("Invalid drive number {}: the numbers are 0 to {}", word, NUMBERED_DRIVES - 1))
         }
         None => Err(format!("Invalid drive letter '{}'", word)),
     }
@@ -314,11 +335,11 @@ pub fn parse_mount_tokens(tokens: &[String], paths: &PathContext) -> Result<Moun
     // MOUNT -u d, or MOUNT d -u.
     if args.unmount {
         return match args.words.as_slice() {
-            [drive] => parse_drive_letter(drive),
+            [drive] => parse_drive_name(drive),
             _ => None,
         }
         .map(MountCmd::Unmount)
-        .ok_or_else(|| "MOUNT -u needs a drive letter".to_string());
+        .ok_or_else(|| "MOUNT -u needs a drive letter or number".to_string());
     }
     if args.words.is_empty() {
         return Err("Missing drive letter".to_string());
@@ -333,7 +354,13 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
     if drive == DRIVE_Z {
         return Err("Drive Z: is reserved".to_string());
     }
-    let Arguments { words, mut opts, config_relative, .. } = args;
+    let Arguments { words, mut opts, config_relative, no_file_system, .. } = args;
+    // Without a file system, A: to D: are the BIOS's units 0 to 3.
+    let drive = match drive {
+        _ if !no_file_system || drive_number(drive).is_some() => drive,
+        _ if drive < NUMBERED_DRIVES => numbered_drive(drive),
+        _ => return Err("Only A: to D: and the drive numbers 0 to 3 can be mounted with -fs none".to_string()),
+    };
     let base = paths.config_dir.filter(|_| config_relative).unwrap_or(paths.base);
     let (first, rest) = words.split_first().ok_or("Missing host directory or disk image")?;
     let mut images = find_paths(first, base, paths)?;
@@ -532,6 +559,10 @@ mod tests {
         assert_eq!(parse_drive_letter("A:"), Some(0));
         assert_eq!(parse_drive_letter("dd"), None);
         assert_eq!(parse_drive_letter("1"), None);
+        assert_eq!(parse_drive_name("c:"), Some(2));
+        assert_eq!(parse_drive_name("1"), Some(numbered_drive(1)));
+        assert_eq!(parse_drive_name("4"), None);
+        assert_eq!(parse_drive_name("02"), None);
     }
 
     #[test]
@@ -635,7 +666,10 @@ mod tests {
         assert_eq!(spec.opts.geometry, Some(Chs { cylinders: 142, heads: 16, sectors: 63 }));
         assert!(mount("c hdd.img -size 1024,63,16,142", cwd).is_err());
         assert!(mount("c hdd.img -chs 10,16", cwd).is_err());
-        assert!(mount("a boot.img -fs none", cwd).is_err());
+        // Without a file system, A: to D: are the drive numbers 0 to 3.
+        assert_eq!(mounted(mount("a boot.img -fs none", cwd)).drive, numbered_drive(0));
+        assert_eq!(mounted(mount("2 hdd.img -fs none", cwd)).drive, numbered_drive(2));
+        assert!(mount("e x.img -fs none", cwd).is_err());
         assert!(mount("d x.img -t zip", cwd).is_err());
         assert!(is_image_name(Path::new("GAME.GOG")) && is_image_name(Path::new("disk.1440")));
     }
@@ -655,7 +689,13 @@ mod tests {
         assert_eq!(mount("a disk.img -label -ro", cwd), Err("-label needs a name".to_string()));
         assert_eq!(mounted(mount("a disks -t FDD", cwd)).opts.kind, DriveKind::Floppy);
         assert_eq!(mount("c x -t overlay", cwd), Err("Overlay mounts aren't supported".to_string()));
-        assert!(mount("0 boot.img -t floppy", cwd).unwrap_err().contains("booting"));
+        // Drive numbers give the BIOS disks without DOS drives.
+        let spec = mounted(mount("2 hdd.img -size 512,63,16,142", cwd));
+        assert_eq!((spec.drive, spec.path), (numbered_drive(2), cwd.join("hdd.img")));
+        assert_eq!(spec.opts.geometry, Some(Chs { cylinders: 142, heads: 16, sectors: 63 }));
+        assert_eq!(mounted(mount("0 boot.img -t floppy", cwd)).drive, numbered_drive(0));
+        assert_eq!(mount("-u 3", cwd), Ok(MountCmd::Unmount(numbered_drive(3))));
+        assert!(mount("4 x.img", cwd).unwrap_err().contains("0 to 3"));
         assert_eq!(mount("c x -foo", cwd), Err("Unknown option '-foo'".to_string()));
         // DOSBox's options that mean nothing here are taken.
         let spec = mounted(mount("d game.ins -t iso -ioctl -ide -freesize 100 -usecd 0", cwd));

@@ -383,6 +383,14 @@ mod tests {
         assert_eq!(imported.drives[0].path, dir.join("win95.img"));
         assert_eq!(imported.autoexec, ["boot -l c".to_string(), format!("boot {}", dir.join("floppy.img").display())]);
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+
+        // A disk mounted by number is the profile's too, by its number.
+        let conf = "[autoexec]\nimgmount 2 win95.img -size 512,63,64,520 -fs none\nboot -l c\n";
+        let imported = import(&[conf], std::slice::from_ref(&dir), "x", None);
+        assert_eq!(imported.drives[0].drive, crate::disk::numbered_drive(2));
+        let config = crate::config::parse(&imported.profile_text(None), Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.drives, imported.drives);
     }
 
     #[test]

@@ -16,7 +16,10 @@ use crate::diskio::{DiskSettings, DiskSpeed, NoiseMode};
 use crate::joystick::{JoystickSettings, JoystickType};
 use crate::keylayout::LayoutSetting;
 use crate::lpt_dac::LptDacType;
-use crate::mount::{MountSpec, contract_home, expand_host_path, mount_spec_value, parse_drive_letter, parse_mount_spec, tokenize};
+use crate::mount::{
+    MountSpec, contract_home, expand_host_path, mount_spec_value, parse_drive_letter, parse_drive_name, parse_mount_spec,
+    tokenize,
+};
 use crate::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
 use crate::timer::CpuSpeed;
 use crate::video::adapter::{Adapter, VideoSetup};
@@ -724,7 +727,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
-                let Some(drive) = parse_drive_letter(key) else {
+                let Some(drive) = parse_drive_name(key) else {
                     warn(format!("invalid drive letter '{}'", key));
                     continue;
                 };
@@ -735,10 +738,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                 }
                 match tokenize(value).and_then(|t| parse_mount_spec(drive, &t, base_dir, home)) {
                     Ok(spec) => {
+                        // -fs none makes C: the disk mounted as 2.
+                        let drive = spec.drive;
                         if config.drive(drive).is_some() {
                             warn(format!(
-                                "drive {}: defined twice, using the last one",
-                                letter
+                                "drive {} defined twice, using the last one",
+                                crate::disk::drive_name(drive)
                             ));
                             config.drives.retain(|s| s.drive != drive);
                         }
@@ -1184,12 +1189,12 @@ fn set_key(lines: &mut Vec<String>, section: Section, key: &str, value: Option<&
 fn set_drive(lines: &mut Vec<String>, drive: u8, spec: Option<&MountSpec>, home: Option<&Path>) {
     let layout = classify(lines);
     let is_drive = |(s, l): &(Section, Line)| {
-        *s == Section::Drives && matches!(l, Line::Setting(k) if parse_drive_letter(k).is_some())
+        *s == Section::Drives && matches!(l, Line::Setting(k) if parse_drive_name(k).is_some())
     };
     let existing: Vec<usize> = (0..lines.len())
         .filter(|&i| {
             is_drive(&layout[i])
-                && matches!(&layout[i].1, Line::Setting(k) if parse_drive_letter(k) == Some(drive))
+                && matches!(&layout[i].1, Line::Setting(k) if parse_drive_name(k) == Some(drive))
         })
         .collect();
     match (existing.last(), spec) {
@@ -1200,7 +1205,7 @@ fn set_drive(lines: &mut Vec<String>, drive: u8, spec: Option<&MountSpec>, home:
             }
         }
         (None, Some(spec)) => {
-            let line = format!("{}={}", crate::disk::drive_letter(drive), mount_spec_value(spec, home));
+            let line = format!("{}={}", crate::disk::drive_key(drive), mount_spec_value(spec, home));
             let at = match layout.iter().rposition(is_drive) {
                 Some(last) => last + 1,
                 None => insertion_point(lines, Section::Drives, None),

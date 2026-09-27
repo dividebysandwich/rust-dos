@@ -48,8 +48,8 @@ impl Imported {
         if !self.drives.is_empty() {
             text.push_str("\n[drives]\n");
             for spec in &self.drives {
-                let letter = crate::disk::drive_letter(spec.drive);
-                text.push_str(&format!("{}={}\n", letter, mount_spec_value(spec, home)));
+                let key = crate::disk::drive_key(spec.drive);
+                text.push_str(&format!("{}={}\n", key, mount_spec_value(spec, home)));
             }
         }
         text.push_str("\n[autoexec]\n");

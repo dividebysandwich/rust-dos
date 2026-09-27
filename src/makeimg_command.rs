@@ -141,8 +141,10 @@ fn prepare(cpu: &Cpu, args: &str) -> Result<Option<Target>, String> {
     }
     // A mounted image stays as it is.
     let same = |image: &PathBuf| image.canonicalize().ok().is_some_and(|p| Some(p) == target.path.canonicalize().ok());
-    if let Some(info) = disk.mounted_drives().iter().find(|i| i.images.iter().chain(&i.image).any(same)) {
-        return Err(format!("{} is mounted as drive {}: (MOUNT -u {} unmounts it)", target.shown(), info.letter(), info.letter()));
+    let mut mounted = disk.mounted_drives().into_iter().chain(disk.numbered_drives());
+    if let Some(info) = mounted.find(|i| i.images.iter().chain(&i.image).any(same)) {
+        let key = crate::disk::drive_key(info.drive);
+        return Err(format!("{} is mounted as drive {} (MOUNT -u {} unmounts it)", target.shown(), info.name(), key));
     }
     Ok(Some(target))
 }

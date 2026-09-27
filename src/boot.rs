@@ -5,7 +5,9 @@
 //!
 //! The BIOS units of a booted machine are the disk images: 00h and 01h the
 //! floppy drives A: and B:, with or without a disk in them, and 80h up the
-//! hard disk images in drive-letter order. Host directories are the
+//! hard disk images in drive-letter order. Disks mounted by number take
+//! their units first: 0 and 1 are 00h and 01h, 2 and 3 are 80h and 81h
+//! (`DiskController::hard_disk_units`). Host directories are the
 //! built-in DOS's alone; the first CD-ROM drive with an image is an ATAPI
 //! drive on the secondary IDE channel (`ide`). The operating system has the
 //! machine until it turns it off or its disk can't be booted any more;
@@ -14,7 +16,10 @@
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::diskimage::SECTOR_SIZE;
-use crate::disk::{DriveKind, drive_letter};
+use crate::disk::{DRIVE_C, drive_name, drive_number, numbered_drive};
+
+/// D:, which BOOT -l takes for the disk mounted as 3.
+const DRIVE_D: u8 = 3;
 
 /// A machine an operating system booted on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,19 +43,15 @@ const BOOT_SECTOR: usize = 0x7C00;
 /// The drives with hard disk images, which are BIOS units 80h up in this
 /// order.
 pub fn hard_disk_drives(bus: &Bus) -> Vec<u8> {
-    bus.disk
-        .drives_of_kind(DriveKind::HardDisk)
-        .into_iter()
-        .filter(|&drive| bus.disk.bios_image(drive).is_some())
-        .collect()
+    bus.disk.hard_disk_units(|drive| bus.disk.bios_image(drive).is_some())
 }
 
 /// The drive behind BIOS unit `unit` of a booted machine, if it has one:
-/// A: or B: for 00h and 01h (which may be empty), a hard disk image's for
-/// 80h up.
+/// the disk mounted as 0 or 1, or else A: or B:, for 00h and 01h (which
+/// may be empty), a hard disk image's for 80h up.
 pub fn unit_drive(bus: &Bus, unit: u8) -> Option<u8> {
     if unit < 0x80 {
-        (unit < FLOPPY_UNITS).then_some(unit)
+        (unit < FLOPPY_UNITS).then(|| bus.disk.floppy_unit(unit))
     } else {
         hard_disk_drives(bus).get((unit - 0x80) as usize).copied()
     }
@@ -58,24 +59,41 @@ pub fn unit_drive(bus: &Bus, unit: u8) -> Option<u8> {
 
 /// The BIOS unit a drive is, if it is one.
 pub fn drive_unit(bus: &Bus, drive: u8) -> Option<u8> {
-    if drive < FLOPPY_UNITS {
-        return Some(drive);
+    if let Some(unit) = (0..FLOPPY_UNITS).find(|&unit| bus.disk.floppy_unit(unit) == drive) {
+        return Some(unit);
     }
     let index = hard_disk_drives(bus).iter().position(|&d| d == drive)?;
     Some(0x80 + index as u8)
 }
 
+/// The BIOS unit BOOT -l `drive` boots from: A: and B: are the floppy
+/// units whatever is in them, and a drive with a disk image its unit. C:
+/// and D:, where they aren't disk images, are the disks mounted as 2 and
+/// 3, as DOSBox's `IMGMOUNT 2 disk.img` then `BOOT -l C` has it.
+pub fn boot_unit(bus: &Bus, drive: u8) -> Option<u8> {
+    if drive < FLOPPY_UNITS {
+        return Some(drive);
+    }
+    if let Some(number) = drive_number(drive).filter(|&n| n < FLOPPY_UNITS) {
+        return Some(number);
+    }
+    drive_unit(bus, drive).or_else(|| match drive {
+        DRIVE_C | DRIVE_D => drive_unit(bus, numbered_drive(drive)),
+        _ => None,
+    })
+}
+
 /// The boot sector of the disk in `unit`, if it can boot: a floppy's first
 /// sector, or a hard disk's master boot record with its signature.
 fn boot_sector(bus: &Bus, unit: u8) -> Result<[u8; SECTOR_SIZE], String> {
-    let letter = unit_drive(bus, unit).map_or('?', drive_letter);
+    let name = unit_drive(bus, unit).map_or("?".to_string(), drive_name);
     let image = unit_drive(bus, unit)
         .and_then(|drive| bus.disk.bios_image(drive))
-        .ok_or_else(|| format!("There is no disk image in drive {}:", letter))?;
+        .ok_or_else(|| format!("There is no disk image in drive {}", name))?;
     let mut sector = [0u8; SECTOR_SIZE];
-    image.read(0, &mut sector).map_err(|_| format!("Can't read the boot sector of drive {}:", letter))?;
+    image.read(0, &mut sector).map_err(|_| format!("Can't read the boot sector of drive {}", name))?;
     if unit >= 0x80 && sector[510..512] != [0x55, 0xAA] {
-        return Err(format!("The disk in drive {}: isn't bootable", letter));
+        return Err(format!("The disk in drive {} isn't bootable", name));
     }
     Ok(sector)
 }
@@ -85,8 +103,8 @@ fn boot_sector(bus: &Bus, unit: u8) -> Result<[u8; SECTOR_SIZE], String> {
 /// the machine as it was.
 pub fn boot(cpu: &mut Cpu, unit: u8) -> Result<(), String> {
     let sector = boot_sector(&cpu.bus, unit)?;
-    let letter = unit_drive(&cpu.bus, unit).map_or('?', drive_letter);
-    cpu.bus.log_string(&format!("[BOOT] Booting from drive {}: (unit {:02X}h)", letter, unit));
+    let name = unit_drive(&cpu.bus, unit).map_or("?".to_string(), drive_name);
+    cpu.bus.log_string(&format!("[BOOT] Booting from drive {} (unit {:02X}h)", name, unit));
     power_on(cpu, unit);
     start(cpu, unit, &sector);
     Ok(())
@@ -139,8 +157,8 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     cpu.idle = false;
     cpu.dyn_latched = false;
     cpu.dynrec.flush();
-    let letter = unit_drive(&cpu.bus, unit).map_or('?', drive_letter);
-    cpu.program = format!("BOOT {}:", letter);
+    let name = unit_drive(&cpu.bus, unit).map_or("?".to_string(), drive_name);
+    cpu.program = format!("BOOT {}", name);
     cpu.bus.disk.close_all_files();
     cpu.bus.boot = Some(BootState { unit, ..Default::default() });
     // Its states and rewind take its disks back with its memory.

@@ -1,12 +1,12 @@
 //! BOOT: start an operating system from a disk image, with DOSBox
 //! Staging's syntax. The images given on the command line go on A: (or the
 //! drive -l names) as MOUNT puts them there; a hard disk image mounted
-//! with MOUNT or IMGMOUNT boots with -l and its drive.
+//! with MOUNT or IMGMOUNT boots with -l and its drive, or its number.
 
 use crate::command::ShellCommand;
 use crate::cpu::Cpu;
-use crate::disk::{DriveKind, drive_letter};
-use crate::mount::{MountCmd, PathContext, parse_mount_tokens, tokenize};
+use crate::disk::{DriveKind, FLOPPY_DRIVES, drive_key, drive_name, drive_number, numbered_drive};
+use crate::mount::{MountCmd, PathContext, parse_drive_name, parse_mount_tokens, tokenize};
 use crate::video::print_string;
 
 pub const BOOT_USAGE: &str = "Boots an operating system from a disk image.\r\n\
@@ -16,7 +16,7 @@ BOOT [image [image ...]] [-l drive]\r\n\
   image     Floppy disk images to put in A: and boot from; Ctrl+F4 changes\r\n\
             to the next one\r\n\
   -l drive  The drive to boot from: A: or B:, or a hard disk image mounted\r\n\
-            with MOUNT or IMGMOUNT\r\n\
+            with MOUNT or IMGMOUNT, by its letter or number (0 to 3)\r\n\
 \r\n\
 The system has the machine until it turns it off. Examples:\r\n\
   IMGMOUNT C win95.img\r\n\
@@ -57,11 +57,7 @@ fn parse(tokens: &[String]) -> Result<Request, String> {
 }
 
 fn parse_letter(text: &str) -> Result<u8, String> {
-    let text = text.strip_suffix(':').unwrap_or(text);
-    match text.as_bytes() {
-        [c] if c.is_ascii_alphabetic() => Ok(c.to_ascii_uppercase() - b'A'),
-        _ => Err(format!("'{}' isn't a drive letter", text)),
-    }
+    parse_drive_name(text).ok_or_else(|| format!("'{}' isn't a drive letter or number", text))
 }
 
 /// BOOT [image ...] [-l drive]
@@ -91,8 +87,8 @@ impl ShellCommand for BootCommand {
             print_string(cpu, &format!("{}\r\n", e));
             return;
         }
-        let Some(unit) = crate::boot::drive_unit(&cpu.bus, drive) else {
-            let msg = format!("Drive {}: can't be booted: it isn't a disk image\r\n", drive_letter(drive));
+        let Some(unit) = crate::boot::boot_unit(&cpu.bus, drive) else {
+            let msg = format!("Drive {} can't be booted: it isn't a disk image\r\n", drive_name(drive));
             print_string(cpu, &msg);
             return;
         };
@@ -103,11 +99,24 @@ impl ShellCommand for BootCommand {
 }
 
 /// Put `images` in `drive` as MOUNT does: floppy images in A: and B:, hard
-/// disk images elsewhere.
+/// disk images elsewhere. Floppies without a DOS file system, as booter
+/// games have, go in the floppy unit by number, as do those for a unit
+/// that has a disk mounted by number.
 fn mount_images(cpu: &mut Cpu, drive: u8, images: Vec<String>) -> Result<(), String> {
-    let kind = if drive < 2 { "floppy" } else { "hdd" };
-    let mut tokens = vec![drive_letter(drive).to_string()];
-    tokens.extend(images);
+    let numbered = (drive < FLOPPY_DRIVES).then(|| numbered_drive(drive));
+    match numbered {
+        Some(numbered) if cpu.bus.disk.is_mounted(numbered) => mount_as(cpu, numbered, &images),
+        Some(numbered) => mount_as(cpu, drive, &images).or_else(|e| mount_as(cpu, numbered, &images).map_err(|_| e)),
+        None => mount_as(cpu, drive, &images),
+    }
+}
+
+/// Mount `images` as `drive`, as MOUNT does.
+fn mount_as(cpu: &mut Cpu, drive: u8, images: &[String]) -> Result<(), String> {
+    let floppy = drive < FLOPPY_DRIVES || drive_number(drive).is_some_and(|n| n < FLOPPY_DRIVES);
+    let kind = if floppy { "floppy" } else { "hdd" };
+    let mut tokens = vec![drive_key(drive)];
+    tokens.extend(images.iter().cloned());
     tokens.extend(["-t".to_string(), kind.to_string()]);
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = dirs::home_dir();

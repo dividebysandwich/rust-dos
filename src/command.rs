@@ -1,5 +1,5 @@
 use crate::cpu::Cpu;
-use crate::disk::{DRIVE_C, DriveKind, drive_letter, parse_drive_prefix};
+use crate::disk::{DRIVE_C, DriveKind, drive_letter, drive_name, parse_drive_prefix};
 use crate::mount::{
     MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
 };
@@ -849,7 +849,8 @@ impl ShellCommand for MountCommand {
         match parse_mount_command(args, &paths) {
             Ok(MountCmd::List) => {
                 print_string(cpu, "Drive Type    Label       Host path\r\n");
-                for info in cpu.bus.disk.mounted_drives() {
+                let disk = &cpu.bus.disk;
+                for info in disk.mounted_drives().into_iter().chain(disk.numbered_drives()) {
                     let host = match info.root.as_ref().or(info.image.as_ref()) {
                         Some(path) => display_host_path(path),
                         None => "(built-in)".to_string(),
@@ -860,8 +861,8 @@ impl ShellCommand for MountCommand {
                         ""
                     };
                     let line = format!(
-                        "{}:    {:<7} {:<11} {}{}{}\r\n",
-                        info.letter(),
+                        "{:<6}{:<7} {:<11} {}{}{}\r\n",
+                        info.name(),
                         info.kind.name(),
                         info.label,
                         host,
@@ -895,8 +896,8 @@ fn mount(cpu: &mut Cpu, spec: MountSpec) {
             let kind = cpu.bus.disk.drive_kind(spec.drive).map_or("", DriveKind::name);
             let count = cpu.bus.disk.drive_info(spec.drive).map_or(0, |info| info.images.len());
             let msg = format!(
-                "Drive {}: is mounted as {} {}{}\r\n",
-                drive_letter(spec.drive),
+                "Drive {} is mounted as {} {}{}\r\n",
+                drive_name(spec.drive),
                 kind,
                 display_host_path(&path),
                 disk_number(0, count)
@@ -909,7 +910,7 @@ fn mount(cpu: &mut Cpu, spec: MountSpec) {
 
 fn unmount(cpu: &mut Cpu, drive: u8) {
     match cpu.bus.unmount_drive(drive) {
-        Ok(()) => print_string(cpu, &format!("Drive {}: has been unmounted\r\n", drive_letter(drive))),
+        Ok(()) => print_string(cpu, &format!("Drive {} has been unmounted\r\n", drive_name(drive))),
         Err(e) => print_string(cpu, &format!("{}\r\n", e)),
     }
 }

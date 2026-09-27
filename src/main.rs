@@ -1276,10 +1276,10 @@ impl MainHost<'_, '_> {
         }
         let mut replaced = Vec::new();
         for spec in &prepared.drives {
-            let before = self.cpu.bus.disk.mounted_drives().into_iter().find(|d| d.drive == spec.drive).and_then(|d| d.mount);
+            let before = self.cpu.bus.disk.drive_info(spec.drive).and_then(|d| d.mount);
             match self.cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), true) {
                 Ok(_) => replaced.push((spec.drive, before)),
-                Err(e) => config_warning(self.cpu, &format!("games/{}.conf: drive {}: {}", id, disk::drive_letter(spec.drive), e)),
+                Err(e) => config_warning(self.cpu, &format!("games/{}.conf: drive {}: {}", id, disk::drive_key(spec.drive), e)),
             }
         }
         self.cpu.bus.config_dir = std::path::absolute(dir).ok();
@@ -1446,7 +1446,7 @@ impl MainHost<'_, '_> {
                 None => self.cpu.bus.unmount_drive(drive),
             };
             if let Err(e) = result {
-                config_warning(self.cpu, &format!("drive {}: {}", disk::drive_letter(drive), e));
+                config_warning(self.cpu, &format!("drive {}: {}", disk::drive_key(drive), e));
             }
         }
     }
@@ -1818,7 +1818,7 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
 /// directory (in that order), then mount the config's other drives. Opens
 /// the log file.
 fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
-    use crate::disk::{DRIVE_C, drive_letter};
+    use crate::disk::DRIVE_C;
 
     let mut warnings = config.warnings.clone();
     let mut warn = |msg: String| {
@@ -1859,7 +1859,7 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
     }
     for spec in config.drives.iter().filter(|s| s.drive != DRIVE_C) {
         if let Err(e) = cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), false) {
-            warn(format!("cannot mount {}: {}", drive_letter(spec.drive), e));
+            warn(format!("cannot mount {}: {}", disk::drive_key(spec.drive), e));
         }
     }
 
