@@ -742,6 +742,9 @@ mod engine {
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.
                 let data = unsafe { &*self.ctx.exit_data };
+                if ret as u32 & EXIT_FLAGS != 0 {
+                    cpu.set_flag_bits(crate::cpu::alu::ARITH, self.ctx.flags);
+                }
                 if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED | EXIT_AFTER | EXIT_NEXT_PAGE) {
                     // Instruction ix stopped the block: it counts as executed
                     // (the interpreter counts it before running it) but not in
@@ -749,9 +752,6 @@ mod engine {
                     // with it. One whose watched bytes changed didn't run.
                     cpu.bus.clock.icount += data.lag[ix] as u64;
                     cpu.executed += ix as u64 + !matches!(kind, EXIT_WATCHED | EXIT_NEXT_PAGE) as u64;
-                    if ret as u32 & EXIT_FLAGS != 0 {
-                        cpu.set_flag_bits(crate::cpu::alu::ARITH, self.ctx.flags);
-                    }
                 }
                 let exited = data.id;
                 let none_ran = cpu.bus.clock.icount == start;

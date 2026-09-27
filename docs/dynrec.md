@@ -231,11 +231,14 @@ arithmetic flags (CF, PF, AF, ZF, SF, OF) in a host register from the
 first instruction in a block that changes them:
 
 - **Where they go back.** The flags go back into the `Cpu` wherever
-  anything else may read them: where the block leaves (to another block
-  too) and before a handler runs. An instruction that stops the block
-  (a fault, a store into its later bytes) sets `EXIT_FLAGS` in its exit
-  code instead: the trampoline leaves the register in the `JitCtx`, and
-  the execution loop puts it back.
+  anything else may read them: where the block returns to the execution
+  loop and before a handler runs. On x86-64 hosts, blocks start with
+  them in the register (the trampoline loads it), so a block leaving
+  through a link keeps them there. An exit that may come with them only
+  there (an instruction that stops the block, a fault, a store into its
+  later bytes, and the ways out of a prologue or through a link's stub)
+  sets `EXIT_FLAGS` in its exit code instead: the trampoline leaves the
+  register in the `JitCtx`, and the execution loop puts it back.
 - **Only the live ones.** `flags.rs` finds, for each operation, which of
   the flags it sets are read before another operation sets them again:
   by a condition, a carry in, or anything outside the block, which sees
@@ -439,7 +442,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

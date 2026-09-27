@@ -84,6 +84,7 @@ pub fn trampoline() -> Trampoline {
         ; mov r12, rsi
         ; mov r13, QWORD [r12 + CTX_RAM]
         ; mov r14, QWORD [r12 + CTX_CODE_BLOCKS]
+        ; mov ebp, DWORD [rbx + FLAGS]
         ; mov BYTE [r12 + CTX_SMC], 0
         ; jmp rdx
     );
@@ -320,7 +321,9 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         live: super::flags::live(items),
         live_after: 0,
         env,
-        dirty: false,
+        // Blocks start with the flags in EBP, from the trampoline or the
+        // block before.
+        dirty: true,
         dirty_at: vec![false; n],
         cache: Cache { host: choose_cached(items), ..Cache::default() },
         wb_at: vec![0; n],
@@ -546,11 +549,11 @@ impl Gen<'_> {
         dynasm!(self.ops
             ; .arch x64
             ; =>deadline
-            ; mov eax, EXIT_DEADLINE as i32
+            ; mov eax, (EXIT_DEADLINE | EXIT_FLAGS) as i32
             ; mov rdx, QWORD data_ptr
             ; jmp QWORD [r12 + CTX_EXIT]
             ; =>limit
-            ; mov eax, EXIT_LIMIT as i32
+            ; mov eax, (EXIT_LIMIT | EXIT_FLAGS) as i32
             ; mov rdx, QWORD data_ptr
             ; jmp QWORD [r12 + CTX_EXIT]
             ; =>revalidate
@@ -559,7 +562,7 @@ impl Gen<'_> {
             ; call QWORD [r12 + CTX_REVALIDATE]
             ; test eax, eax
             ; jz =>body
-            ; mov eax, EXIT_STALE as i32
+            ; mov eax, (EXIT_STALE | EXIT_FLAGS) as i32
             ; mov rdx, QWORD data_ptr
             ; jmp QWORD [r12 + CTX_EXIT]
         );
@@ -569,7 +572,7 @@ impl Gen<'_> {
             dynasm!(self.ops
                 ; .arch x64
                 ; =>stub
-                ; mov eax, (EXIT_UNLINKED | (k as u32) << 8) as i32
+                ; mov eax, (EXIT_UNLINKED | EXIT_FLAGS | (k as u32) << 8) as i32
                 ; jmp QWORD [r12 + CTX_EXIT]
             );
         }
@@ -976,14 +979,15 @@ impl Gen<'_> {
             Uop::Exit { eip: Src::T(t) } => {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], Rd(r(t)));
                 self.writeback(self.cache.dirty);
-                self.flags_back();
                 if self.link {
                     // A return or indirect call: through its link to
                     // where it goes, if it has one.
+                    self.flags_ebp();
                     self.counts();
                     self.check_flat();
                     self.returned(t);
                 } else {
+                    self.flags_back();
                     let tail = self.tail;
                     dynasm!(self.ops ; .arch x64 ; jmp =>tail);
                 }
@@ -1411,6 +1415,15 @@ impl Gen<'_> {
                 ; or ecx, ebp
                 ; mov DWORD [rbx + FLAGS], ecx
             );
+        }
+    }
+
+    /// The guest's arithmetic flags into EBP, if they aren't there, as
+    /// blocks start with them: for a link to another block.
+    fn flags_ebp(&mut self) {
+        if !self.dirty {
+            dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
+            self.dirty = true;
         }
     }
 
@@ -1927,11 +1940,8 @@ impl Gen<'_> {
 
     fn exit_if(&mut self, cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)>) {
         let yes = self.ops.new_dynamic_label();
-        // The flags go back into the CPU for both ways out; the condition
-        // reads them where they were.
+        // The condition reads the flags where they are.
         let ebp = self.dirty;
-        self.flags_back();
-        self.dirty = false;
         match cond {
             Cond::Flags(cc) => self.condition(cc, yes, ebp),
             Cond::Zero(t) => dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jz =>yes),
@@ -1950,10 +1960,10 @@ impl Gen<'_> {
             }
         }
         // Not taken.
-        let cache = self.cache;
+        let (cache, dirty) = (self.cache, self.dirty);
         self.commit(commit);
         self.leave(Some(next), 1, true);
-        self.cache = cache;
+        (self.cache, self.dirty) = (cache, dirty);
         dynasm!(self.ops ; .arch x64 ; =>yes);
         // Taken: the target must be within the CS limit.
         let gp = self.fault_exit(EXIT_GP0);
@@ -1975,9 +1985,14 @@ impl Gen<'_> {
             dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + EIP], eip as i32);
         }
         self.writeback(self.cache.dirty);
-        self.flags_back();
+        let linked = self.link && eip.is_some();
+        if linked {
+            self.flags_ebp();
+        } else {
+            self.flags_back();
+        }
         self.counts();
-        if self.link {
+        if linked {
             self.check_flat();
         }
         match eip {
@@ -2002,7 +2017,7 @@ impl Gen<'_> {
             ; .arch x64
             ; cmp DWORD [r12 + CTX_FLAT], (self.env.bits & super::ENV_FLAT_ALL) as i32
             ; je >same
-            ; mov eax, EXIT_NEXT as i32
+            ; mov eax, (EXIT_NEXT | EXIT_FLAGS) as i32
             ; jmp QWORD [r12 + CTX_EXIT]
             ; same:
         );

@@ -1239,6 +1239,52 @@ fn translated_rep_movs_and_stos_reach_the_video_memory() {
 }
 
 #[test]
+fn flags_set_in_one_block_reach_the_blocks_linked_after_it() {
+    // Blocks that end right after setting the flags (by an instruction
+    // its handler runs, RCL, too), and blocks linked after them that start
+    // by reading them: ADC, a conditional jump in another page, and RCR,
+    // 3000 times. The timer deadline stops the chain before each of them
+    // in turn.
+    let top = CODE + 0x40;
+    let second = CODE + 0x100;
+    let third = CODE + 0x1000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.xor(esi, esi)?;
+            a.xor(ebp, ebp)?;
+            a.mov(edi, 0x9E37_79B9u32)?;
+            a.mov(ecx, 3000u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.add(edi, 0x6D2B_79F5u32)?;
+            a.rcl(edx, 1)?;
+            a.jmp(second as u64)
+        }));
+        rig.load(second, &asm32(second, |a| {
+            a.adc(ebx, 0)?;
+            a.add(esi, edi)?;
+            a.jmp(third as u64)
+        }));
+        rig.load(third, &asm32(third, |a| {
+            let mut skip = a.create_label();
+            a.jae(skip)?;
+            a.inc(ebp)?;
+            a.set_label(&mut skip)?;
+            a.rcr(eax, 1)?;
+            a.sub(ecx, 1)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    // Carries both ways.
+    assert!((1..3000).contains(&b.cpu.ebx()), "{}", b.cpu.ebx());
+    assert!((1..3000).contains(&b.cpu.ebp()), "{}", b.cpu.ebp());
+}
+
+#[test]
 fn an_indirect_call_through_a_pointer_it_cant_read_pushes_nothing() {
     // CALL [200h] in a data segment of 256 bytes: #GP before the return
     // address is pushed, after the instructions before it in the block.
