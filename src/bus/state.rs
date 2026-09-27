@@ -13,6 +13,7 @@ const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 2;
 const DOS_VERSION: u16 = 4;
 const VOODOO_VERSION: u16 = 1;
+const IDE_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -30,6 +31,7 @@ impl Bus {
             boot,
             pci,
             voodoo,
+            ide,
             keyboard_buffer,
             kbd,
             kbc,
@@ -163,6 +165,10 @@ impl Bus {
         if let Some(voodoo) = voodoo {
             w.section(b"3DFX", VOODOO_VERSION, |w| voodoo.save(w));
         }
+        // A booted system's CD-ROM drive, likewise.
+        if let Some(ide) = ide {
+            w.section(b"IDE ", IDE_VERSION, |w| ide.save(w));
+        }
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -174,6 +180,7 @@ impl Bus {
             boot,
             pci,
             voodoo,
+            ide,
             keyboard_buffer,
             kbd,
             kbc,
@@ -302,6 +309,14 @@ impl Bus {
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has a 3dfx card and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a 3dfx card and it hasn't".into())),
+        }
+        // The CD-ROM drive comes and goes with the booted system.
+        if r.next_is(b"IDE ") {
+            let mut drive = crate::ide::Ide::new(0, false);
+            drive.load(&mut r.section(b"IDE ", IDE_VERSION)?)?;
+            *ide = Some(drive);
+        } else {
+            *ide = None;
         }
         Ok(lost)
     }

@@ -7,6 +7,7 @@ use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 mod guest;
 pub mod port_log;
 pub mod s3;
+mod ide;
 mod state;
 mod voodoo;
 
@@ -161,6 +162,8 @@ pub struct Bus {
     pub pci: crate::pci::Pci,
     /// The 3dfx Voodoo Graphics card, if there is one.
     pub voodoo: Option<crate::voodoo::Voodoo>,
+    /// A booted system's ATAPI CD-ROM drive on the secondary IDE channel.
+    pub ide: Option<crate::ide::Ide>,
     pub search_handles: std::collections::HashMap<u32, String>,
     /// The search ID FindFirst handed out last (the key of
     /// `search_handles`, kept in the program's DTA).
@@ -315,6 +318,7 @@ impl Bus {
             s3_engine: crate::video::s3::engine::Engine::new(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
+            ide: None,
             search_handles: std::collections::HashMap::new(),
             search_serial: 0,
             mouse: crate::mouse::MouseState::new(),
@@ -420,6 +424,7 @@ impl Bus {
         self.fill_ram(0..0x500, 0);
         self.pic = crate::pic::Pic::new();
         self.reset_voodoo();
+        self.detach_ide();
         self.init_dos_machine(self.vga.setup());
         if self.lpt_dac.is_some() {
             self.write_16(0x0408, crate::lpt_dac::LPT1);
@@ -479,9 +484,11 @@ impl Bus {
     ) -> Result<T, String> {
         let result = mount(&mut self.disk);
         if result.is_ok() {
-            // Another disc: whatever played stops, and MSCDEX says so.
+            // Another disc: whatever played stops, and MSCDEX and a booted
+            // system's CD-ROM drive say so.
             self.cdaudio.stop_drive(drive);
             self.mscdex.disc_changed(drive);
+            self.ide_media_changed(drive);
         }
         self.sync_drive_bda();
         result
@@ -629,6 +636,7 @@ impl Bus {
                 Ok(Some(message)) => {
                     self.cdaudio.stop_drive(drive);
                     self.mscdex.disc_changed(drive);
+                    self.ide_media_changed(drive);
                     messages.push(message);
                 }
                 Ok(None) => {}
@@ -645,6 +653,7 @@ impl Bus {
     pub fn unmount_drive(&mut self, drive: u8) -> Result<(), String> {
         let result = self.disk.unmount(drive);
         self.cdaudio.stop_drive(drive);
+        self.ide_media_changed(drive);
         self.sync_drive_bda();
         result
     }
@@ -1181,7 +1190,7 @@ impl Bus {
     fn next_event(&self) -> Option<u64> {
         let sb = self.sb.as_ref().and_then(|sb| sb.next_event());
         let gus = self.gus_next_event();
-        [self.pit0.next_event(), sb, gus, self.voodoo_next_event()].into_iter().flatten().min()
+        [self.pit0.next_event(), sb, gus, self.voodoo_next_event(), self.ide_next_event()].into_iter().flatten().min()
     }
 
     fn gus_next_event(&self) -> Option<u64> {
@@ -1204,6 +1213,9 @@ impl Bus {
         }
         if self.voodoo_next_event().is_some_and(|t| t <= now) {
             self.voodoo_service();
+        }
+        if self.ide_next_event().is_some_and(|t| t <= now) {
+            self.ide_service();
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -1676,6 +1688,8 @@ impl Bus {
 
     fn write_port(&mut self, port: u16, value: u8) {
         match port {
+            // A booted system's CD-ROM drive.
+            p if self.ide_claims(p) => self.ide_write(p, value),
             // The two 8259 interrupt controllers.
             0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.write(port, value),
 
@@ -1994,6 +2008,7 @@ impl Bus {
 
     fn read_port(&mut self, port: u16) -> u8 {
         match port {
+            p if self.ide_claims(p) => self.ide_read(p),
             // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
             // 0x21 the interrupt mask. Programs read-modify-write the mask
             // to unmask their IRQ without disturbing the others.

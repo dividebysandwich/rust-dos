@@ -5,8 +5,9 @@
 //!
 //! The BIOS units of a booted machine are the disk images: 00h and 01h the
 //! floppy drives A: and B:, with or without a disk in them, and 80h up the
-//! hard disk images in drive-letter order. Host directories and CD-ROM
-//! drives are the built-in DOS's alone. The operating system has the
+//! hard disk images in drive-letter order. Host directories are the
+//! built-in DOS's alone; the first CD-ROM drive with an image is an ATAPI
+//! drive on the secondary IDE channel (`ide`). The operating system has the
 //! machine until it turns it off or its disk can't be booted any more;
 //! then the built-in DOS starts again (`Cpu::load_shell`).
 
@@ -177,6 +178,8 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
         .filter_map(|drive| bus.disk.bios_image(drive).map(|image| image.geometry()))
         .collect();
     crate::bios::install_for_boot(bus, &hard_disks);
+    // A CD image reaches the system as an IDE CD-ROM drive.
+    bus.attach_ide();
     bus.refresh_irq();
 
     // The processor as after a reset, and the screen in text mode.

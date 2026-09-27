@@ -619,6 +619,14 @@ BIOS. BIOS services work in virtual-8086 mode and through the page tables of
 the system that calls them. The first two floppy drives are always there,
 empty or not; hard disk images are the drives C: and D:.
 
+A CD image mounted as a CD-ROM drive (`MOUNT D ~/dos/game.cue`) is an ATAPI
+CD-ROM drive on the secondary IDE channel of the booted machine (ports
+170h-177h and 376h, IRQ 15), as DOSBox-X's `-ide` has it. Windows 95 finds
+it through the Plug and Play BIOS with its own driver, reads the disc and
+plays its CD audio; Ctrl+F4 or another `MOUNT` changes the disc, and Windows
+notices. With more than one, the first drive letter with an image is the
+one.
+
 Turning the machine off (Windows' **Shut Down**) brings back the DOS prompt;
 restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again.
 Changes to the hardware settings wait for the prompt.
@@ -678,7 +686,9 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
 * **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
   the card as a "PCI Multimedia Video Device", which needs no driver:
   games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it
-  `fxmemmap.vxd`).
+  `fxmemmap.vxd`). SubCulture's 3dfx version installs from its CD in the
+  [CD-ROM drive](#booting-a-disk-image) and plays with its CD music, with
+  `machine=svga_s3`, `memsize=64` and `cpu=pentium`.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real

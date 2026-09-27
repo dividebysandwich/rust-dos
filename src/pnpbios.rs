@@ -7,8 +7,10 @@
 //! handles, for the Windows 95 installed on it: Windows knows a device by
 //! its handle (Enum\BIOS\*PNP0303\00), and one it finds under another
 //! handle, or a `$PnP` at another address, it installs again. The serial
-//! ports and IDE controllers DOSBox-X had are left out, as rust-dos has
-//! none, and the PCI bus but on the S3 machine, so the handles skip theirs.
+//! ports and the primary IDE controller DOSBox-X had are left out, as
+//! rust-dos has none, the secondary IDE controller but with a booted
+//! system's CD-ROM drive on it, and the PCI bus but on a machine with one,
+//! so the handles skip theirs.
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, Seg};
@@ -45,6 +47,9 @@ enum Resource {
     /// I/O ports: 16-bit decode, first port, alignment and length.
     Io(u16, u8, u8),
     Irq(u8),
+    /// An IRQ in the two-byte form, without the flags, as DOSBox-X gives
+    /// the IDE controllers.
+    Irq2(u8),
     Dma(u8),
     /// Memory: base and length.
     Memory(u32, u32),
@@ -66,6 +71,10 @@ fn node(id: &[u8; 7], typ: [u8; 3], resources: &[Resource]) -> Vec<u8> {
             Resource::Irq(irq) => {
                 let [lo, hi] = (1u16 << irq).to_le_bytes();
                 data.extend([0x23, lo, hi, 0x09]);
+            }
+            Resource::Irq2(irq) => {
+                let [lo, hi] = (1u16 << irq).to_le_bytes();
+                data.extend([0x22, lo, hi]);
             }
             Resource::Dma(dma) => data.extend([0x2A, 1 << dma, 0x01]),
             Resource::Memory(base, len) => {
@@ -102,10 +111,16 @@ fn nodes(bus: &Bus) -> Vec<(u8, Vec<u8>)> {
         (0x0A, node(b"PNP0A03", [0x06, 0x04, 0x00], &[])),
         (0x0B, node(b"PNP0C04", [0x0B, 0x80, 0x00], &[Io(0xF0, 0x10, 0x10), Irq(13)])),
         (0x0C, node(b"PNP0C01", [0x05, 0x00, 0x00], &ram)),
+        (
+            crate::ide::PNP_HANDLE,
+            node(b"PNP0600", [0x01, 0x01, 0x00], &[Io(crate::ide::BASE, 8, 8), Io(crate::ide::ALT, 1, 2), Irq2(crate::ide::IRQ)]),
+        ),
     ]
     .into_iter()
-    // The PCI bus, where there is one.
+    // The PCI bus, where there is one, and the IDE controller with a CD-ROM
+    // drive.
     .filter(|(handle, _)| *handle != 0x0A || bus.pci_present())
+    .filter(|(handle, _)| *handle != crate::ide::PNP_HANDLE || bus.ide.is_some())
     .collect()
 }
 
@@ -278,6 +293,23 @@ mod tests {
         cpu.bus.write_8(0x0604, 0);
         assert_eq!(call(&mut cpu, &[0x01, 0x0604, 0, 0x1000, 0, 3, 0xF000]), BAD_PARAMETER);
         assert_eq!(call(&mut cpu, &[0x03]), FUNCTION_NOT_SUPPORTED);
+    }
+
+    #[test]
+    fn the_ide_controller_is_listed_while_it_has_its_drive() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        assert!(nodes(&cpu.bus).iter().all(|(handle, _)| *handle != crate::ide::PNP_HANDLE));
+        cpu.bus.ide = Some(crate::ide::Ide::new(3, true));
+        let nodes = nodes(&cpu.bus);
+        let (handle, node) = nodes.last().unwrap();
+        assert_eq!(*handle, 0x10);
+        // PNP0600, a mass storage IDE controller, with ports 170h-177h and
+        // 376h-377h and IRQ 15 in the two-byte form.
+        assert_eq!(&node[0..4], &eisa_id(b"PNP0600"));
+        assert_eq!(&node[4..7], &[0x01, 0x01, 0x00]);
+        assert_eq!(&node[9..17], &[0x47, 0x01, 0x70, 0x01, 0x70, 0x01, 0x08, 0x08]);
+        assert_eq!(&node[17..25], &[0x47, 0x01, 0x76, 0x03, 0x76, 0x03, 0x01, 0x02]);
+        assert_eq!(&node[25..28], &[0x22, 0x00, 0x80]);
     }
 
     #[test]

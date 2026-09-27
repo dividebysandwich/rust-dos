@@ -33,6 +33,7 @@ pub mod file_commands;
 pub mod games;
 pub mod hardware;
 pub mod hosttime;
+pub mod ide;
 pub mod import;
 pub mod gus;
 pub mod instr_cache;

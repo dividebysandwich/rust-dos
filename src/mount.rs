@@ -107,9 +107,18 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
             "-u" => args.unmount = true,
             "-ro" => args.opts.read_only = true,
             "-pr" => args.config_relative = true,
-            // DOSBox's IDE controller and its own CD-ROM access, which
-            // batch files made for it ask for: taken and ignored.
-            "-ide" | "-ioctl" | "-noioctl" | "-ioctl_dio" | "-ioctl_dx" | "-ioctl_mci" | "-aspi" => {}
+            // DOSBox-X's IDE slot for the image (`-ide 2m`: secondary
+            // master), which may follow: a booted system finds a CD image
+            // on the secondary channel anyway.
+            "-ide" => {
+                iter.next_if(|value| {
+                    let v = value.to_ascii_lowercase();
+                    v.len() == 2 && matches!(v.as_bytes()[0], b'1'..=b'4') && matches!(v.as_bytes()[1], b'm' | b's')
+                });
+            }
+            // DOSBox's own CD-ROM access, which batch files made for it ask
+            // for: taken and ignored.
+            "-ioctl" | "-noioctl" | "-ioctl_dio" | "-ioctl_dx" | "-ioctl_mci" | "-aspi" => {}
             _ if token.starts_with('-') => return Err(format!("Unknown option '{}'", token)),
             _ => args.words.push(token.clone()),
         }
@@ -651,6 +660,8 @@ mod tests {
         // DOSBox's options that mean nothing here are taken.
         let spec = mounted(mount("d game.ins -t iso -ioctl -ide -freesize 100 -usecd 0", cwd));
         assert_eq!((spec.path, spec.opts.kind), (cwd.join("game.ins"), DriveKind::CdRom));
+        let spec = mounted(mount("d game.ins -t iso -ide 2m", cwd));
+        assert_eq!(spec.path, cwd.join("game.ins"), "the IDE slot isn't an image");
         assert!(mount("d x.iso -freesize", cwd).is_err());
         // -pr: from the configuration file's folder.
         let paths = PathContext { base: cwd, config_dir: Some(Path::new("/cfg")), home: None, locate: &|_| None };
