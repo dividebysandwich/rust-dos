@@ -125,9 +125,10 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
         StrOp::Movs => {
             let src = cpu.mem_ref(a.src_seg, si, size, Access::Read)?;
             let dst = cpu.mem_ref(Seg::ES, di, size, Access::Write)?;
-            if cpu.bus.is_plain_ram(range(src.phys), len) && cpu.bus.is_plain_ram(range(dst.phys), len) {
+            let src_ram = cpu.bus.is_plain_ram(range(src.phys), len);
+            if src_ram && cpu.bus.is_plain_ram(range(dst.phys), len) {
                 cpu.bus.move_elements(src.phys as usize, dst.phys as usize, n as usize, size as usize, backward);
-            } else {
+            } else if !(src_ram && cpu.bus.move_to_vga(range(src.phys), range(dst.phys), len)) {
                 for k in 0..n {
                     let value = cpu.mem_read(element(src, a.delta, k));
                     cpu.mem_write(element(dst, a.delta, k), value);
@@ -139,7 +140,7 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
             let value = cpu.reg(accumulator(size));
             if cpu.bus.is_plain_ram(range(dst.phys), len) {
                 cpu.bus.fill_elements(range(dst.phys), n as usize, size as usize, value);
-            } else {
+            } else if !cpu.bus.fill_vga(range(dst.phys), n as usize, size as usize, value) {
                 for k in 0..n {
                     cpu.mem_write(element(dst, a.delta, k), value);
                 }

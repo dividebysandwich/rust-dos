@@ -836,6 +836,47 @@ impl Bus {
         self.bump_page_gens(dst_lo, dst_lo + len);
     }
 
+    /// Write the `len` bytes of plain RAM at `src` into the VGA's graphics
+    /// window at `dst`, as a string move's writes through `write_8` do,
+    /// where they are plain (`VgaCard::plain_writes`): each goes to a place
+    /// of its own, so the order they go in doesn't matter. Returns false,
+    /// having written nothing, where they aren't, or the window isn't the
+    /// VGA's (a VESA mode's, the S3's registers).
+    pub(crate) fn move_to_vga(&mut self, src: usize, dst: usize, len: usize) -> bool {
+        if !self.plain_vga_run(dst, len) {
+            return false;
+        }
+        let offset = dst - ADDR_VGA_GRAPHICS;
+        for i in 0..len {
+            self.vga.write_graphics(offset + i, self.ram[src + i]);
+        }
+        true
+    }
+
+    /// Fill `len` bytes of the VGA's graphics window at `dst` with `count`
+    /// elements of `size` bytes of `value`, as a string store's writes do,
+    /// where they are plain (see `move_to_vga`).
+    pub(crate) fn fill_vga(&mut self, dst: usize, count: usize, size: usize, value: u32) -> bool {
+        if !self.plain_vga_run(dst, count * size) {
+            return false;
+        }
+        let bytes = value.to_le_bytes();
+        let offset = dst - ADDR_VGA_GRAPHICS;
+        for i in 0..count * size {
+            self.vga.write_graphics(offset + i, bytes[i % size]);
+        }
+        true
+    }
+
+    /// Whether writes of `len` bytes at `dst` all go to the VGA's planes,
+    /// plainly.
+    fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
+        (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
+            && self.video_mode != VideoMode::Vesa
+            && self.s3_mmio(dst).is_none()
+            && self.vga.plain_writes()
+    }
+
     /// Fill `count` elements of `size` bytes in RAM from `dst` up with
     /// `value`, as a string store does, and bump their code generations.
     /// The range is in plain RAM.

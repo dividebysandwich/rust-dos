@@ -99,6 +99,34 @@ fn moves_and_stores_in_ram_are_the_iterations_one_at_a_time() {
             a.mov(edi, 0x500000u32)?;
             a.mov(ecx, 0x20u32)?;
             a.rep().movsd()?;
+            // Into the video memory chained (as mode 13h) and unchained
+            // with two planes enabled (as mode X), moved and stored.
+            a.mov(dx, 0x3C4u32)?;
+            a.mov(ax, 0x0E04u32)?;
+            a.out(dx, ax)?;
+            a.mov(esi, 0x100100u32)?;
+            a.mov(edi, 0xA1000u32)?;
+            a.mov(ecx, 0x300u32)?;
+            a.rep().movsd()?;
+            a.mov(eax, 0x1357_9BDFu32)?;
+            a.mov(ecx, 0x155u32)?;
+            a.rep().stosw()?;
+            a.mov(ax, 0x0604u32)?;
+            a.out(dx, ax)?;
+            a.mov(ax, 0x0A02u32)?;
+            a.out(dx, ax)?;
+            a.mov(esi, 0x100200u32)?;
+            a.mov(edi, 0xA3000u32)?;
+            a.mov(ecx, 0x201u32)?;
+            a.rep().movsb()?;
+            a.std()?;
+            a.mov(ecx, 0x99u32)?;
+            a.rep().stosd()?;
+            a.cld()?;
+            a.mov(ax, 0x0F02u32)?;
+            a.out(dx, ax)?;
+            a.mov(ax, 0x0204u32)?;
+            a.out(dx, ax)?;
             // Within the video memory with write mode 1, where each write
             // stores the latches the read before it loaded.
             a.mov(dx, 0x3CEu32)?;

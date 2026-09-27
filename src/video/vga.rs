@@ -461,6 +461,15 @@ impl VgaCard {
         }
     }
 
+    /// Whether a write to the graphics window is a plain one now: write
+    /// mode 0 without set/reset, rotation or a logical operation, of all
+    /// bits, which puts the byte into each plane written (see
+    /// `write_graphics`).
+    pub fn plain_writes(&self) -> bool {
+        let g = &self.graphics_regs;
+        g[0x05] & 0x03 == 0 && g[0x01] & 0x0F == 0 && g[0x03] == 0 && g[0x08] == 0xFF
+    }
+
     pub fn write_graphics(&mut self, offset: usize, value: u8) {
         let seq_mem_mode = self.sequencer_regs[0x04];
         let chain4 = (seq_mem_mode & 0x08) != 0;
