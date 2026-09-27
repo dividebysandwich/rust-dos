@@ -177,6 +177,18 @@ impl Cpu {
         let addr = self
             .descriptor_address(selector)
             .map_err(|_| Fault::gp(sel_error(selector) | ext))?;
+        if addr & 0xFFF <= 0x1000 - 8 {
+            // In one page: one translation (the second dword's would go
+            // through the TLB, changing nothing), and in plain RAM one read.
+            let r = self.lin_ref(addr, 4, super::Access::Read, false)?;
+            let phys = r.phys as usize;
+            if self.bus.is_plain_ram(phys, 8) {
+                let bytes: [u8; 8] = self.bus.ram()[phys..phys + 8].try_into().unwrap();
+                return Ok(Descriptor(u64::from_le_bytes(bytes)));
+            }
+            let high = super::MemRef { phys: r.phys + 4, ..r };
+            return Ok(Descriptor(self.mem_read(r) as u64 | (self.mem_read(high) as u64) << 32));
+        }
         let low = self.sys_read_u32(addr)? as u64;
         let high = self.sys_read_u32(addr.wrapping_add(4))? as u64;
         Ok(Descriptor(low | (high << 32)))
