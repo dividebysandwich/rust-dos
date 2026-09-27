@@ -8,7 +8,7 @@
 use iced_x86::{Instruction, OpKind, Register};
 
 use super::operand::mem_seg;
-use crate::cpu::{Access, Cpu, CpuFlags, CpuResult, Seg};
+use crate::cpu::{Access, Cpu, CpuFlags, CpuResult, MemRef, Seg};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrOp {
@@ -85,21 +85,27 @@ fn span(cpu: &Cpu, seg: Seg, off: u32, size: u32, max: u32, backward: bool, mask
     max.min(by_limit).min(by_page)
 }
 
+/// Element `k` of a run in one page from the checked first one, `delta`
+/// bytes apart.
+fn element(first: MemRef, delta: u32, k: u32) -> MemRef {
+    let step = delta.wrapping_mul(k);
+    MemRef { lin: first.lin.wrapping_add(step), phys: first.phys.wrapping_add(step), ..first }
+}
+
 /// What `bulk` did.
 enum Bulk {
     /// These iterations.
     Done(u32),
     /// None: the next goes on its own.
     One,
-    /// None, and none of the rest will: the operands aren't plain RAM.
-    Never,
 }
 
 /// The iterations of a REP MOVS or STOS from here on that stay in the pages
-/// and segment limits their first elements are in, in plain RAM, done at
-/// once: they are the iterations one at a time would do, with the first
-/// one's checks and page walks (the others' go through the TLB as they
-/// did, changing nothing).
+/// and segment limits their first elements are in, done at once: they are
+/// the iterations one at a time would do, with the first one's checks and
+/// page walks (the others' go through the TLB as they did, changing
+/// nothing). In plain RAM, the elements are moved together; elsewhere (the
+/// video memory) one by one through the bus, as each iteration would.
 fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<Bulk> {
     let backward = a.delta != size as u32;
     let bytes = size as u32;
@@ -119,18 +125,25 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
         StrOp::Movs => {
             let src = cpu.mem_ref(a.src_seg, si, size, Access::Read)?;
             let dst = cpu.mem_ref(Seg::ES, di, size, Access::Write)?;
-            if !cpu.bus.is_plain_ram(range(src.phys), len) || !cpu.bus.is_plain_ram(range(dst.phys), len) {
-                return Ok(Bulk::Never);
+            if cpu.bus.is_plain_ram(range(src.phys), len) && cpu.bus.is_plain_ram(range(dst.phys), len) {
+                cpu.bus.move_elements(src.phys as usize, dst.phys as usize, n as usize, size as usize, backward);
+            } else {
+                for k in 0..n {
+                    let value = cpu.mem_read(element(src, a.delta, k));
+                    cpu.mem_write(element(dst, a.delta, k), value);
+                }
             }
-            cpu.bus.move_elements(src.phys as usize, dst.phys as usize, n as usize, size as usize, backward);
         }
         _ => {
             let dst = cpu.mem_ref(Seg::ES, di, size, Access::Write)?;
-            if !cpu.bus.is_plain_ram(range(dst.phys), len) {
-                return Ok(Bulk::Never);
-            }
             let value = cpu.reg(accumulator(size));
-            cpu.bus.fill_elements(range(dst.phys), n as usize, size as usize, value);
+            if cpu.bus.is_plain_ram(range(dst.phys), len) {
+                cpu.bus.fill_elements(range(dst.phys), n as usize, size as usize, value);
+            } else {
+                for k in 0..n {
+                    cpu.mem_write(element(dst, a.delta, k), value);
+                }
+            }
         }
     }
     let moved = a.delta.wrapping_mul(n);
@@ -225,7 +238,7 @@ pub fn string(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuRes
     // Traced (TF), the single-step trap follows every iteration, and comes
     // back to the instruction while iterations remain.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
-    let mut bulky = !traced && cpu.string_bulk && matches!(op, StrOp::Movs | StrOp::Stos);
+    let bulky = !traced && cpu.string_bulk && matches!(op, StrOp::Movs | StrOp::Stos);
     loop {
         let count = cpu.reg(counter);
         if count == 0 {
@@ -238,7 +251,6 @@ pub fn string(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuRes
                     continue;
                 }
                 Bulk::One => {}
-                Bulk::Never => bulky = false,
             }
         }
         iteration(cpu, op, size, &addr)?;

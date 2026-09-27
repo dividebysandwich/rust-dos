@@ -99,6 +99,17 @@ fn moves_and_stores_in_ram_are_the_iterations_one_at_a_time() {
             a.mov(edi, 0x500000u32)?;
             a.mov(ecx, 0x20u32)?;
             a.rep().movsd()?;
+            // Within the video memory with write mode 1, where each write
+            // stores the latches the read before it loaded.
+            a.mov(dx, 0x3CEu32)?;
+            a.mov(ax, 0x4105u32)?;
+            a.out(dx, ax)?;
+            a.mov(esi, 0xA0000u32)?;
+            a.mov(edi, 0xA0100u32)?;
+            a.mov(ecx, 0x180u32)?;
+            a.rep().movsb()?;
+            a.mov(ax, 0x4005u32)?;
+            a.out(dx, ax)?;
             // 16-bit addressing, SI and DI wrapping around at 64 KB
             // (ADDR16 REP MOVSB, REP STOSW).
             a.mov(esi, 0x1234_FFF0u32)?;
