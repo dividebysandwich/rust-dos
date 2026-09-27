@@ -293,10 +293,13 @@ pub fn pending_note(video: crate::video::adapter::VideoSetup, new: &Settings) ->
 /// How a setting is changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
-    /// Enter lists the values to pick one (`Item::choices`).
+    /// Left and right step through the values, and Enter lists them to
+    /// pick one (`Item::choices`).
     Choice,
-    /// Left and right step the value along a bar, and Enter types one.
+    /// Left and right slide the value along a bar, and Enter types one.
     Slider,
+    /// Left and right step through some values, and Enter types any.
+    Presets,
     /// Enter types the value.
     Text,
     /// Enter picks a host file.
@@ -416,6 +419,16 @@ fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut 
         .collect()
 }
 
+/// The next of the ascending `values` above (or below) `current`.
+fn step_number<T: PartialOrd + Copy>(values: &[T], current: T, dir: isize) -> T {
+    if dir > 0 {
+        values.iter().copied().find(|&v| v > current).unwrap_or(current)
+    } else {
+        values.iter().rev().copied().find(|&v| v < current).unwrap_or(current)
+    }
+}
+
+const CYCLES: [u32; 8] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, u32::MAX];
 const REWIND_MEMORY: [usize; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 
 /// The memory's slider: a square for every 4 MB, and the deadzone's, one
@@ -589,7 +602,8 @@ impl Item {
         match self {
             Item::Volume(_) | Item::ReverbMix | Item::ChorusMix | Item::CrtCurvature | Item::CrtGlow => Input::Slider,
             Item::Memsize | Item::Deadzone => Input::Slider,
-            Item::Cycles | Item::UltraDir | Item::CaptureDir => Input::Text,
+            Item::Cycles => Input::Presets,
+            Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::SoundFont | Item::Mt32Roms => Input::File,
             Item::Autoexec => Input::Link,
             _ => Input::Choice,
@@ -819,10 +833,24 @@ impl Item {
         }
     }
 
-    /// Slide the setting left (-1) or right (1), a square of its bar.
-    fn step(self, s: &mut Settings, dir: isize) {
+    /// Step the setting left (-1) or right (1): a slider a square of its
+    /// bar. `drives` are the mounted drives, which the Ultrasound's drive
+    /// can't take.
+    fn step(self, s: &mut Settings, dir: isize, drives: &[DriveInfo], frontend: Frontend) {
         use Item::*;
         match self {
+            Scale => s.scale = (s.scale as isize + dir).clamp(1, 16) as u32,
+            Cycles => {
+                let current = match s.cycles {
+                    CpuSpeed::Max => u32::MAX,
+                    CpuSpeed::Fixed(n) => n,
+                };
+                s.cycles = match step_number(&CYCLES, current, dir) {
+                    u32::MAX => CpuSpeed::Max,
+                    n => CpuSpeed::Fixed(n),
+                };
+            }
+            RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory, dir),
             CrtCurvature => s.crt.curvature = step_units(s.crt.curvature, dir, 10, MAX_AMOUNT),
             CrtGlow => s.crt.glow = step_units(s.crt.glow, dir, 10, MAX_AMOUNT),
             Memsize => {
@@ -836,7 +864,13 @@ impl Item {
                 let dz = step_units(s.joystick.deadzone as u16, dir, DEADZONE_UNIT, MAX_DEADZONE as u16);
                 s.joystick.deadzone = dz as u8;
             }
-            _ => {}
+            // Around the values it is picked from.
+            _ => {
+                let choices = self.choices(s, drives, frontend);
+                if !choices.is_empty() {
+                    *s = cycle(&choices, s, dir);
+                }
+            }
         }
     }
 
@@ -1431,10 +1465,10 @@ impl ConfigUi {
             return;
         }
         match (key, item.input()) {
-            (UiKey::Left, Input::Slider) => self.step(item, -1, host),
-            (UiKey::Right, Input::Slider) => self.step(item, 1, host),
+            (UiKey::Left, Input::Choice | Input::Slider | Input::Presets) => self.step(item, -1, host),
+            (UiKey::Right, Input::Choice | Input::Slider | Input::Presets) => self.step(item, 1, host),
             (UiKey::Enter, Input::Choice) => self.open_popup(item),
-            (UiKey::Enter, Input::Slider | Input::Text) => {
+            (UiKey::Enter, Input::Slider | Input::Presets | Input::Text) => {
                 self.edit = Some(TextField::new(&item.text(&self.settings)));
             }
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
@@ -1446,7 +1480,7 @@ impl ConfigUi {
     }
 
     fn step(&mut self, item: Item, dir: isize, host: &mut dyn Host) {
-        item.step(&mut self.settings, dir);
+        item.step(&mut self.settings, dir, &self.drives, self.frontend);
         self.changed(item, host);
     }
 
@@ -2346,8 +2380,10 @@ impl ConfigUi {
             let several = self.item().is_some_and(|item| !item.fields(&self.settings).is_empty());
             let mut hints = match self.item().map(Item::input) {
                 _ if several => vec![("\u{2190}\u{2192}", "Field", Right), ("Enter", "List", Enter)],
-                Some(Input::Choice) => vec![("Enter", "List", Enter)],
-                Some(Input::Slider) => vec![("\u{2190}\u{2192}", "Change", Right), ("Enter", "Type", Enter)],
+                Some(Input::Choice) => vec![("\u{2190}\u{2192}", "Change", Right), ("Enter", "List", Enter)],
+                Some(Input::Slider | Input::Presets) => {
+                    vec![("\u{2190}\u{2192}", "Change", Right), ("Enter", "Type", Enter)]
+                }
                 Some(Input::Text) => vec![("Enter", "Type", Enter)],
                 Some(Input::File) => vec![("Enter", "Pick", Enter), ("Del", "None", Delete)],
                 Some(Input::Link) => vec![("Enter", "Edit", Enter)],

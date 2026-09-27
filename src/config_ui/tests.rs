@@ -242,16 +242,12 @@ fn settings_change_live() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
     use UiKey::*;
-    // Display: the scale and fullscreen, picked from their lists; Left and
-    // Right change neither.
-    ui.key(Tab, &mut host);
-    keys(&mut ui, &mut host, &[Right, Left]);
-    pick(&mut ui, &mut host, "3x");
-    keys(&mut ui, &mut host, &[Down, Right]);
+    // Display: scale up twice with Right, and fullscreen on from its list.
+    keys(&mut ui, &mut host, &[Tab, Right, Right, Down]);
     pick(&mut ui, &mut host, "on");
     let last = host.applied.last().unwrap();
     assert_eq!((last.scale, last.fullscreen), (3, true));
-    assert_eq!(host.applied.len(), 2);
+    assert_eq!(host.applied.len(), 3);
 
     // Emulator: type a speed, then a bad one.
     keys(&mut ui, &mut host, &[Tab, Enter, End]);
@@ -268,6 +264,11 @@ fn settings_change_live() {
     assert!(status(&ui).1, "{:?}", status(&ui));
     assert!(ui.edit.is_some());
     ui.key(Esc, &mut host);
+    // Left and Right step through some speeds.
+    keys(&mut ui, &mut host, &[Right]);
+    assert_eq!(host.applied.last().unwrap().cycles, CpuSpeed::Fixed(5000));
+    keys(&mut ui, &mut host, &[Left, Left, Left]);
+    assert_eq!(host.applied.last().unwrap().cycles, CpuSpeed::Fixed(1000));
 
     // The CPU core changes at once.
     ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Core).unwrap();
@@ -337,12 +338,13 @@ fn a_cards_port_irq_and_dma_share_a_row() {
     let value = |ui: &ConfigUi| ui.item().map(|i| i.value(&ui.settings, None)).unwrap();
     assert_eq!(value(&ui), "220h, IRQ 7, DMA 1, HDMA 5");
 
-    // Left and Right go to the field beside, no further than the ends, and
-    // Enter lists its values.
+    // Left and Right go to the field beside, no further than the ends,
+    // changing none, and Enter lists its values.
     pick(&mut ui, &mut host, "230h");
     assert_eq!(host.applied.last().unwrap().sound.sb.base, 0x230);
+    let applied = host.applied.len();
     keys(&mut ui, &mut host, &[Left, Right]);
-    assert_eq!(ui.field, 1);
+    assert_eq!((ui.field, host.applied.len()), (1, applied));
     pick(&mut ui, &mut host, "9");
     assert_eq!(host.applied.last().unwrap().sound.sb.irq, 9);
     // In the list, Left and Right go on to the list of the field beside.
@@ -645,6 +647,9 @@ fn the_crt_shader_steps_through_the_looks() {
     use UiKey::*;
     ui.show_page(Page::Display);
     ui.row = ui.items().iter().position(|&i| i == Item::Shader).unwrap();
+    keys(&mut ui, &mut host, &[Right, Right, Right, Right]);
+    let looks: Vec<Shader> = host.applied.iter().map(|s| s.shader).collect();
+    assert_eq!(looks, [Shader::Scanlines, Shader::Aperture, Shader::Crt, Shader::None]);
     assert_eq!(listed(&mut ui, &mut host), Shader::ALL.map(Shader::describe));
     pick(&mut ui, &mut host, "CRT");
     assert_eq!(host.applied.last().unwrap().shader, Shader::Crt);
@@ -934,6 +939,10 @@ fn the_joystick_steps_through_the_types() {
     ui.show_page(Page::Emulator);
     ui.row = ui.items().iter().position(|&i| i == Item::Joystick).unwrap();
     assert_eq!(Item::Joystick.applies(), Applies::Now);
+    keys(&mut ui, &mut host, &[Right, Right, Right, Right, Right]);
+    let kinds: Vec<JoystickType> = host.applied.iter().map(|s| s.joystick.kind).collect();
+    use JoystickType as J;
+    assert_eq!(kinds, [J::FourAxis, J::TwoAxis, J::Mouse, J::None, J::Auto]);
     assert_eq!(listed(&mut ui, &mut host), JoystickType::ALL.map(JoystickType::describe));
     pick(&mut ui, &mut host, JoystickType::FourAxis.describe());
     assert_eq!(host.applied.last().unwrap().joystick.kind, JoystickType::FourAxis);
