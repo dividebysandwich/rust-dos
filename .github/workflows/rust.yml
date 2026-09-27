@@ -88,6 +88,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Empty for every non-compat entry, which means "no container".
     container: ${{ matrix.container }}
+    # The Windows 7 build is on nightly, which may break now and then: the
+    # release goes ahead without it.
+    continue-on-error: ${{ matrix.win7 == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -111,6 +114,12 @@ jobs:
             container: ubuntu:22.04
           - label: windows-x86_64
             os: windows-latest
+          # For Windows 7: Rust's standard library for Windows needs a newer
+          # one (ProcessPrng from bcryptprimitives.dll, WaitOnAddress), except
+          # its Windows 7 target's, which nightly builds from source.
+          - label: windows-x86_64-win7
+            os: windows-latest
+            win7: true
           - label: macos-aarch64
             os: macos-latest
           - label: macos-x86_64
@@ -178,7 +187,12 @@ jobs:
         run: |
           curl -fsSL -o munt.tar.gz "https://github.com/munt/munt/archive/refs/tags/$MUNT_TAG.tar.gz"
           tar xzf munt.tar.gz
-          cmake -S "munt-$MUNT_TAG/mt32emu" -B munt-build -A x64 -Dlibmt32emu_SHARED=ON -DBUILD_TESTING=OFF
+          # For Windows 7, with the C runtime linked in, as rust-dos.exe has it.
+          STATIC_CRT=()
+          if [ "${{ matrix.win7 }}" = true ]; then
+            STATIC_CRT=(-DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded)
+          fi
+          cmake -S "munt-$MUNT_TAG/mt32emu" -B munt-build -A x64 -Dlibmt32emu_SHARED=ON -DBUILD_TESTING=OFF "${STATIC_CRT[@]}"
           cmake --build munt-build --config Release
           mkdir -p mt32emu
           DLL=$(find munt-build -name 'mt32emu-2.dll' | head -n1)
@@ -190,12 +204,27 @@ jobs:
           cp "munt-$MUNT_TAG/mt32emu/COPYING.LESSER.txt" mt32emu/mt32emu-LICENSE.txt
 
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.win7 }}
+      - uses: dtolnay/rust-toolchain@nightly
+        if: matrix.win7
+        with:
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.label }}
 
       - name: Build
+        if: ${{ !matrix.win7 }}
         run: cargo build --release --locked --verbose
+
+      # The standard library built for the Windows 7 target, and the C runtime
+      # linked in (crt-static): Windows 7 seldom has the Visual C++
+      # redistributable.
+      - name: Build (Windows 7)
+        if: matrix.win7
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build -Zbuild-std --target x86_64-win7-windows-msvc --release --locked --verbose
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -208,7 +237,7 @@ jobs:
           cargo deb --no-build -o "out/$PKG.deb"
 
       - name: Package (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !matrix.win7
         run: |
           mkdir -p out stage/rust-dos
           cp target/release/rust-dos.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
@@ -218,6 +247,15 @@ jobs:
           wix build packaging/windows/main.wxs -arch x64 \
             -d Version="$CARGO_VERSION" -d BinDir=target/release -d SdlDir=SDL2/lib/x64 -d MuntDir=mt32emu \
             -o "out/$PKG.msi"
+
+      # A .zip alone: an .msi would take the regular build's place.
+      - name: Package (Windows 7)
+        if: matrix.win7
+        run: |
+          mkdir -p out stage/rust-dos
+          cp target/x86_64-win7-windows-msvc/release/rust-dos.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
+          cp LICENSE stage/rust-dos/LICENSE.txt
+          7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
@@ -313,7 +351,10 @@ jobs:
 
           - **Windows**: the `.msi` installs rust-dos with SDL2 and munt's
             MT-32 emulation and adds it to the Start menu and PATH; the `.zip`
-            is the same, portable.
+            is the same, portable. On Windows 7, or where they refuse to start
+            with an error about `bcryptprimitives.dll`, take the
+            `windows-x86_64-win7` `.zip`, a portable build for Windows 7 and
+            later.
           - **macOS**: the `.zip` holds the app, for Apple Silicon
             (`macos-aarch64`) or Intel (`macos-x86_64`). It needs SDL2 from
             Homebrew (`brew install sdl2`). The app is unsigned: right-click →

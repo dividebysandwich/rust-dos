@@ -138,7 +138,7 @@ fn main() -> Result<(), String> {
     let imported = match &args.import {
         Some(source) => {
             let dir = games_dir(config.source.as_deref()).ok_or("--import needs a configuration file, beside which the games folder is")?;
-            let (id, name, warnings) = games::import(&dir, source, dirs::home_dir().as_deref())?;
+            let (id, name, warnings) = games::import(&dir, source, rust_dos::hostdirs::home_dir().as_deref())?;
             println!("Imported {} as the game profile {}", name, dir.join(format!("{}.conf", id)).display());
             for warning in warnings {
                 println!("  {}", warning);
@@ -153,7 +153,7 @@ fn main() -> Result<(), String> {
     };
     let memory_mb = match &startup_game {
         Some((entry, text, dir)) => {
-            games::prepare(&entry.id, &settings, text, dir, dirs::home_dir().as_deref())?.settings.memsize
+            games::prepare(&entry.id, &settings, text, dir, rust_dos::hostdirs::home_dir().as_deref())?.settings.memsize
         }
         None => settings.memsize,
     };
@@ -1154,7 +1154,7 @@ fn mounted_drives(cpu: &Cpu) -> BTreeMap<u8, MountSpec> {
 /// mount with MOUNT or IMGMOUNT, in the configuration file in `config_dir`.
 fn startup_mounts(cpu: &Cpu, autoexec: &[String], config_dir: Option<&std::path::Path>) -> Vec<MountSpec> {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let home = dirs::home_dir();
+    let home = rust_dos::hostdirs::home_dir();
     let mut lines = autoexec.to_vec();
     if let Some(file) = cpu.bus.disk.file_data("C:\\AUTOEXEC.BAT")
         && let Ok(bytes) = file.read()
@@ -1208,7 +1208,7 @@ fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<
         return Err("No configuration file".to_string());
     };
     let changes = drive_changes(cpu, saved);
-    let home = dirs::home_dir();
+    let home = rust_dos::hostdirs::home_dir();
     config::save(&path, &saved.settings, settings, &changes, home.as_deref(), config::Saving::All)?;
     cpu.bus.log_string(&format!("[CONFIG] Saved the settings to {}", path.display()));
     saved.settings = settings.clone();
@@ -1281,7 +1281,7 @@ impl MainHost<'_, '_> {
             self.end_game(previous);
         }
         let base = self.settings.clone();
-        let prepared = games::prepare(id, &base, text, dir, dirs::home_dir().as_deref())?;
+        let prepared = games::prepare(id, &base, text, dir, rust_dos::hostdirs::home_dir().as_deref())?;
         for warning in &prepared.warnings {
             config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
         }
@@ -1532,7 +1532,7 @@ impl Host for MainHost<'_, '_> {
         if let Some(game) = self.game.as_mut() {
             let dir = games_dir(self.saved.file.as_deref()).ok_or("No configuration file")?;
             let path = dir.join(format!("{}.conf", game.id));
-            config::save(&path, &game.saved, settings, &[], dirs::home_dir().as_deref(), config::Saving::Changes)?;
+            config::save(&path, &game.saved, settings, &[], rust_dos::hostdirs::home_dir().as_deref(), config::Saving::Changes)?;
             game.saved = settings.clone();
             return Ok(());
         }
@@ -1575,7 +1575,7 @@ impl Host for MainHost<'_, '_> {
         let id = games::slug(&new.name, &taken);
         let base = self.game.as_ref().map_or(&self.saved.settings, |g| &g.base);
         let drives = drive_changes(self.cpu, self.saved);
-        let text = games::profile_text(new, base, settings, &drives, dirs::home_dir().as_deref())?;
+        let text = games::profile_text(new, base, settings, &drives, rust_dos::hostdirs::home_dir().as_deref())?;
         let path = dir.join(format!("{}.conf", id));
         std::fs::create_dir_all(&dir)
             .and_then(|()| std::fs::write(&path, text))
@@ -1593,7 +1593,7 @@ impl Host for MainHost<'_, '_> {
     fn import_game(&mut self, source: &std::path::Path) -> Result<(String, String), String> {
         let dir = games_dir(self.saved.file.as_deref())
             .ok_or("Game profiles go beside the configuration file, and there is none (--no-config)")?;
-        let (id, name, warnings) = games::import(&dir, source, dirs::home_dir().as_deref())?;
+        let (id, name, warnings) = games::import(&dir, source, rust_dos::hostdirs::home_dir().as_deref())?;
         for warning in &warnings {
             self.cpu.bus.log_string(&format!("[CONFIG] Import of {}: {}", name, warning));
         }
@@ -1815,7 +1815,7 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
         args.config.as_deref(),
         &cwd,
         config::default_path(),
-        dirs::home_dir().as_deref(),
+        rust_dos::hostdirs::home_dir().as_deref(),
     )?;
     if config.created
         && let Some(path) = &config.source

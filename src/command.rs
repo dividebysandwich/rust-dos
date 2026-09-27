@@ -842,7 +842,7 @@ struct MountCommand;
 impl ShellCommand for MountCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let home = dirs::home_dir();
+        let home = crate::hostdirs::home_dir();
         let disk = &cpu.bus.disk;
         let locate = |path: &str| disk.resolve_path(path);
         let paths = PathContext {

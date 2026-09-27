@@ -24,7 +24,7 @@ pub fn default_rom_dirs() -> Vec<PathBuf> {
     if let Some(user) = crate::config::user_dir() {
         dirs.push(user.join("mt32-roms"));
     }
-    if let Some(config) = dirs::config_dir() {
+    if let Some(config) = crate::hostdirs::config_dir() {
         dirs.push(config.join("dosbox").join("mt32-roms"));
     }
     if cfg!(unix) {

@@ -119,7 +119,7 @@ fn mount_as(cpu: &mut Cpu, drive: u8, images: &[String]) -> Result<(), String> {
     tokens.extend(images.iter().cloned());
     tokens.extend(["-t".to_string(), kind.to_string()]);
     let cwd = std::env::current_dir().unwrap_or_default();
-    let home = dirs::home_dir();
+    let home = crate::hostdirs::home_dir();
     let disk = &cpu.bus.disk;
     let locate = |path: &str| disk.resolve_path(path);
     let paths =

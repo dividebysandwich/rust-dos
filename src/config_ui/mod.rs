@@ -915,7 +915,7 @@ impl Item {
             Item::UltraDir => s.sound.gus.ultradir = (!text.is_empty()).then(|| text.to_string()),
             Item::Volume(channel) => s.mixer.set_level(channel, crate::mixer::parse_level(text)?),
             Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),
-            Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), dirs::home_dir().as_deref()),
+            Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), crate::hostdirs::home_dir().as_deref()),
             Item::Memsize => s.memsize = crate::config::parse_memsize(text)?,
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
             Item::CrtCurvature => s.crt.curvature = parse_amount(text).ok_or("The curvature goes from 0 to 100%")?,
@@ -1191,7 +1191,7 @@ impl ConfigUi {
         self.settings = settings.clone();
         self.drives = host.drives();
         self.config_file = config_file;
-        self.home = dirs::home_dir();
+        self.home = crate::hostdirs::home_dir();
         self.status = None;
         self.edit = None;
         self.popup = None;

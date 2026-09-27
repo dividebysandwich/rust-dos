@@ -130,7 +130,7 @@ fn prepare(cpu: &Cpu, args: &str) -> Result<Option<Target>, String> {
         (path, Some(disk.qualify_path(&request.file).unwrap_or(request.file)))
     } else {
         let cwd = std::env::current_dir().unwrap_or_default();
-        (expand_host_path(&request.file, &cwd, dirs::home_dir().as_deref()), None)
+        (expand_host_path(&request.file, &cwd, crate::hostdirs::home_dir().as_deref()), None)
     };
     let target = Target { path, dos, plan, force: request.force };
     if target.path.is_dir() {
