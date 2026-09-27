@@ -67,13 +67,41 @@ fn program_paras(bytes: &[u8]) -> u16 {
 /// and NT.
 const FLAGS16_WRITABLE: u32 = 0x7FD5;
 
-/// The processor being emulated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The processor being emulated, in the order they came out: a later one
+/// has what an earlier one has (`model >= CpuModel::I486`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CpuModel {
     I386,
     /// A 486DX: on-chip FPU, EFLAGS.AC, BSWAP/XADD/CMPXCHG/INVD/WBINVD/
     /// INVLPG, and no CPUID.
     I486,
+    /// A Pentium as DOSBox-X has it: the 486's, CPUID (EFLAGS.ID) saying
+    /// family 5, model 1, stepping 7 with an FPU, 4 MB pages, the time
+    /// stamp counter, MSRs and CMPXCHG8B, and CR4 with its PSE and TSD
+    /// bits. It has no virtual-8086 mode extensions.
+    Pentium,
+}
+
+impl CpuModel {
+    /// The EFLAGS bits a program may change beyond the 386's: AC on a 486,
+    /// and ID too on a Pentium, whose toggling tells that CPUID is there.
+    pub fn eflags_extra(self) -> u32 {
+        match self {
+            CpuModel::I386 => 0,
+            CpuModel::I486 => CpuFlags::AC.bits(),
+            CpuModel::Pentium => CpuFlags::AC.bits() | CpuFlags::ID.bits(),
+        }
+    }
+
+    /// The family, model and stepping CPUID reports, which DX also holds
+    /// after a reset.
+    pub fn signature(self) -> u32 {
+        match self {
+            CpuModel::I386 => 0x0303,
+            CpuModel::I486 => 0x0402,
+            CpuModel::Pentium => 0x0517,
+        }
+    }
 }
 
 /// Which core runs the instructions (the `core` setting).
@@ -141,6 +169,10 @@ pub const CR0_NW: u32 = 0x2000_0000;
 pub const CR0_CD: u32 = 0x4000_0000;
 pub const CR0_PG: u32 = 0x8000_0000;
 
+/// CR4 bits (Pentium): RDTSC only at level 0 (TSD), and 4 MB pages (PSE).
+pub const CR4_TSD: u32 = 0x0000_0004;
+pub const CR4_PSE: u32 = 0x0000_0010;
+
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;
 pub const FPU_TAG_VALID: u8 = 0;
@@ -164,12 +196,14 @@ bitflags! {
         const TF = 0x0100;
         const OF = 0x0800;
         /// I/O privilege level (bits 12-13), nested task, and the 386
-        /// EFLAGS bits: resume, virtual-8086 mode, alignment check.
+        /// EFLAGS bits: resume, virtual-8086 mode, alignment check (486)
+        /// and the CPUID bit (Pentium).
         const IOPL = 0x3000;
         const NT = 0x4000;
         const RF = 0x0001_0000;
         const VM = 0x0002_0000;
         const AC = 0x0004_0000;
+        const ID = 0x0020_0000;
     }
 }
 
@@ -212,6 +246,15 @@ pub struct Cpu {
     pub cr0: u32,
     pub cr2: u32,
     pub cr3: u32,
+    /// CR4 (Pentium): `CR4_TSD` and `CR4_PSE`.
+    pub cr4: u32,
+    /// What the time stamp counter (Pentium) adds to the instruction
+    /// clock, which it counts (see `tsc`).
+    pub tsc_offset: u64,
+    /// The Pentium's performance monitoring MSRs: the control and event
+    /// select (11h) and the two counters (12h, 13h), which hold what was
+    /// written to them.
+    pub perf_msrs: [u64; 3],
     /// Debug registers; stored, but breakpoints are not implemented.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
@@ -396,6 +439,9 @@ impl Cpu {
             cr0: CR0_ET,
             cr2: 0,
             cr3: 0,
+            cr4: 0,
+            tsc_offset: 0,
+            perf_msrs: [0; 3],
             dr: [0; 8],
             gdtr: DescTable { base: 0, limit: 0xFFFF },
             idtr: DescTable { base: 0, limit: 0x3FF },
@@ -724,14 +770,23 @@ impl Cpu {
     }
 
     /// Load EFLAGS, as POPFD and IRETD do in real mode. VM and RF can't be
-    /// set this way; AC only exists on a 486.
+    /// set this way; AC only exists from the 486 on, ID on a Pentium.
     pub fn load_eflags(&mut self, value: u32) {
-        let mut writable = FLAGS16_WRITABLE;
-        if self.model == CpuModel::I486 {
-            writable |= CpuFlags::AC.bits();
-        }
+        let writable = FLAGS16_WRITABLE | self.model.eflags_extra();
         let keep = self.flags.bits() & CpuFlags::VM.bits();
         self.flags = CpuFlags::from_bits_retain(keep | (value & writable) | 0x0002);
+    }
+
+    /// The time stamp counter (Pentium): the instruction clock, which runs
+    /// at the `cycles` speed, as DOSBox-X's counts its cycles, and goes on
+    /// while the processor waits for an interrupt.
+    pub fn tsc(&self) -> u64 {
+        self.bus.clock.icount.wrapping_add(self.tsc_offset)
+    }
+
+    /// Set the time stamp counter (WRMSR 10h).
+    pub fn set_tsc(&mut self, value: u64) {
+        self.tsc_offset = value.wrapping_sub(self.bus.clock.icount);
     }
 
     /// EFLAGS as PUSHFD pushes it: VM and RF read as 0.

@@ -595,6 +595,7 @@ impl Item {
             Cpu => match s.cpu {
                 CpuModel::I386 => "386",
                 CpuModel::I486 => "486",
+                CpuModel::Pentium => "Pentium",
             }
             .to_string(),
             Machine => s.machine.describe().to_string(),
@@ -696,7 +697,7 @@ impl Item {
                 };
             }
             Core => s.core = cycle(&[CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], s.core, dir),
-            Cpu => s.cpu = cycle(&[CpuModel::I386, CpuModel::I486], s.cpu, dir),
+            Cpu => s.cpu = cycle(&[CpuModel::I386, CpuModel::I486, CpuModel::Pentium], s.cpu, dir),
             Machine => s.machine = cycle(&crate::video::adapter::Adapter::ALL, s.machine, dir),
             Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
             Ems => s.ems = !s.ems,

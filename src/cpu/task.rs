@@ -193,11 +193,8 @@ impl Cpu {
 
     /// EFLAGS bits a task switch loads.
     fn eflags_mask(&self) -> u32 {
-        let mut mask = 0x0003_7FD5; // up to NT, RF and VM
-        if self.model == super::CpuModel::I486 {
-            mask |= CpuFlags::AC.bits();
-        }
-        mask
+        // Up to NT, RF and VM, and the model's AC and ID.
+        0x0003_7FD5 | self.model.eflags_extra()
     }
 
     /// Load LDTR and the segment registers of a new task, checking each

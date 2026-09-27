@@ -1,20 +1,20 @@
 //! Flag instructions, HLT, and the system instructions: descriptor table
 //! registers, the machine status word, control, debug and test registers,
 //! the LDT and task registers, the protected-mode segment inspection
-//! instructions (LAR, LSL, VERR, VERW, ARPL), and the 486 cache and TLB
-//! instructions.
+//! instructions (LAR, LSL, VERR, VERW, ARPL), the 486 cache and TLB
+//! instructions, and the Pentium's CPUID, time stamp counter and MSRs.
 
 use iced_x86::{Code, Instruction, Register};
 
 use super::operand::{effective_offset, loc, mem_operand, mem_operand_at, mem_seg, op_size, read_op};
-use super::transfer::require_486;
+use super::transfer::{require_486, require_pentium};
 use crate::cpu::seg::{
     CALL_GATE16, CALL_GATE32, LDT, TASK_GATE, TSS16_AVAILABLE, TSS16_BUSY, TSS32_AVAILABLE, TSS32_BUSY, is_null,
     rpl, sel_error,
 };
 use crate::cpu::{
-    Access, CR0_AM, CR0_CD, CR0_EM, CR0_ET, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, Cpu,
-    CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Descriptor, Fault, SegCache,
+    Access, CR0_AM, CR0_CD, CR0_EM, CR0_ET, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_PSE,
+    CR4_TSD, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Descriptor, Fault, SegCache,
 };
 
 /// Instructions only privilege level 0 may run: in protected and
@@ -129,17 +129,17 @@ pub fn lmsw(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     set_cr0(cpu, cr0)
 }
 
-/// Write CR0. ET is hardwired on a 486, which has the NE, WP, AM, NW and
-/// CD bits a 386 lacks. Paging needs protected mode.
+/// Write CR0. ET is hardwired from the 486 on, which has the NE, WP, AM,
+/// NW and CD bits a 386 lacks. Paging needs protected mode.
 fn set_cr0(cpu: &mut Cpu, value: u32) -> CpuResult {
     let mut writable = CR0_PE | CR0_MP | CR0_EM | CR0_TS | CR0_PG;
-    if cpu.model == CpuModel::I486 {
+    if cpu.model >= CpuModel::I486 {
         writable |= CR0_NE | CR0_WP | CR0_AM | CR0_NW | CR0_CD;
     } else {
         writable |= CR0_ET;
     }
     let mut value = (value & writable) | (cpu.cr0 & !writable);
-    if cpu.model == CpuModel::I486 {
+    if cpu.model >= CpuModel::I486 {
         value |= CR0_ET;
         if value & CR0_NW != 0 && value & CR0_CD == 0 {
             return Err(Fault::gp(0));
@@ -164,7 +164,22 @@ fn set_cr0(cpu: &mut Cpu, value: u32) -> CpuResult {
     Ok(())
 }
 
-/// MOV CRn/DRn/TRn, r32.
+/// Write CR4 (Pentium). This Pentium has its TSD and PSE bits; the
+/// others, among them the virtual-8086 mode extensions, debugging
+/// extensions and machine checks CPUID doesn't report, are reserved: #GP(0).
+fn set_cr4(cpu: &mut Cpu, value: u32) -> CpuResult {
+    if value & !(CR4_TSD | CR4_PSE) != 0 {
+        return Err(Fault::gp(0));
+    }
+    // The translations change with the page size.
+    if (cpu.cr4 ^ value) & CR4_PSE != 0 {
+        cpu.tlb.flush();
+    }
+    cpu.cr4 = value;
+    Ok(())
+}
+
+/// MOV CRn/DRn/TRn, r32. CR4 is a Pentium's.
 pub fn mov_to_system(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     require_cpl0(cpu)?;
     let dest = instr.op0_register();
@@ -176,6 +191,7 @@ pub fn mov_to_system(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             cpu.cr3 = value;
             cpu.tlb.flush();
         }
+        Register::CR4 if cpu.model >= CpuModel::Pentium => set_cr4(cpu, value)?,
         r if r.is_dr() => cpu.dr[r as usize - Register::DR0 as usize] = value,
         // TR6/TR7 (TLB test registers): accepted and ignored.
         r if r.is_tr() => {}
@@ -191,6 +207,7 @@ pub fn mov_from_system(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Register::CR0 => cpu.cr0,
         Register::CR2 => cpu.cr2,
         Register::CR3 => cpu.cr3,
+        Register::CR4 if cpu.model >= CpuModel::Pentium => cpu.cr4,
         r if r.is_dr() => cpu.dr[r as usize - Register::DR0 as usize],
         r if r.is_tr() => 0,
         _ => return Err(Fault::UD),
@@ -222,6 +239,72 @@ pub fn invlpg(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let base = cpu.seg_cache(mem_seg(instr)).base;
     let lin = base.wrapping_add(effective_offset(cpu, instr));
     cpu.tlb.flush_page(lin);
+    Ok(())
+}
+
+/// The features CPUID reports in EDX, as DOSBox-X's Pentium does: an FPU,
+/// 4 MB pages, the time stamp counter, MSRs and CMPXCHG8B.
+const CPUID_FEATURES: u32 = 0x0001 | 0x0008 | 0x0010 | 0x0020 | 0x0100;
+
+/// CPUID (Pentium): leaf 0 gives the highest leaf, 1, and "GenuineIntel",
+/// leaf 1 the family, model and stepping and the features. Leaves past it
+/// give zeros.
+pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
+    require_pentium(cpu)?;
+    let text = |s: &[u8; 4]| u32::from_le_bytes(*s);
+    let (eax, ebx, ecx, edx) = match cpu.eax() {
+        0 => (1, text(b"Genu"), text(b"ntel"), text(b"ineI")),
+        1 => (cpu.model.signature(), 0, 0, CPUID_FEATURES),
+        _ => (0, 0, 0, 0),
+    };
+    cpu.set_eax(eax);
+    cpu.set_ebx(ebx);
+    cpu.set_ecx(ecx);
+    cpu.set_edx(edx);
+    Ok(())
+}
+
+/// RDTSC (Pentium): the time stamp counter into EDX:EAX. CR4.TSD keeps it
+/// to level 0.
+pub fn rdtsc(cpu: &mut Cpu) -> CpuResult {
+    require_pentium(cpu)?;
+    if cpu.cr4 & CR4_TSD != 0 {
+        require_cpl0(cpu)?;
+    }
+    let tsc = cpu.tsc();
+    cpu.set_eax(tsc as u32);
+    cpu.set_edx((tsc >> 32) as u32);
+    Ok(())
+}
+
+/// RDMSR and WRMSR (Pentium): the model-specific register ECX names into
+/// or from EDX:EAX, at level 0. A Pentium has the machine check address
+/// and type (0 and 1, which read 0, as nothing checks the machine), the
+/// time stamp counter (10h) and the performance monitoring control and
+/// counters (11h to 13h, which don't count); any other raises #GP(0).
+pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
+    require_pentium(cpu)?;
+    require_cpl0(cpu)?;
+    let msr = cpu.ecx();
+    if !matches!(msr, 0x00 | 0x01 | 0x10..=0x13) {
+        return Err(Fault::gp(0));
+    }
+    if write {
+        let value = (cpu.edx() as u64) << 32 | cpu.eax() as u64;
+        match msr {
+            0x10 => cpu.set_tsc(value),
+            0x11..=0x13 => cpu.perf_msrs[msr as usize - 0x11] = value,
+            _ => {}
+        }
+    } else {
+        let value = match msr {
+            0x10 => cpu.tsc(),
+            0x11..=0x13 => cpu.perf_msrs[msr as usize - 0x11],
+            _ => 0,
+        };
+        cpu.set_eax(value as u32);
+        cpu.set_edx((value >> 32) as u32);
+    }
     Ok(())
 }
 

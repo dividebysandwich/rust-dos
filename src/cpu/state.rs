@@ -50,7 +50,7 @@ impl Default for ProcessContext {
 }
 
 crate::state_fields!(Cpu {
-    gpr, eip, seg, cr0, cr2, cr3, dr, gdtr, idtr, ldtr, tr, cpl, flags, state,
+    gpr, eip, seg, cr0, cr2, cr3, cr4, tsc_offset, perf_msrs, dr, gdtr, idtr, ldtr, tr, cpl, flags, state,
     pending_command, shell_wait, shell_prompt_at, secondary_shells, batch,
     environment, current_psp, heap_pointer, resident_end, resident_upper,
     last_child_exit, errorlevel, program, last_dos_error, con_pending_scan, con_line,

@@ -947,11 +947,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // runs again once the system has put a page it found missing there.
     let paged = cpu.cr0 & crate::cpu::CR0_PG != 0;
     let before = paged.then(|| {
-        cpu.bus.guest_paging = Some(crate::cpu::paging::GuestPaging {
-            cr3: cpu.cr3,
-            user: cpu.cpl == 3,
-            write_protect: cpu.write_protect(),
-        });
+        cpu.bus.guest_paging = Some(cpu.guest_paging(cpu.cpl == 3));
         (cpu.snapshot(), cpu.bus.port_accesses.len())
     });
     match kind {

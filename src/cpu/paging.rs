@@ -1,8 +1,9 @@
 //! Paging: linear to physical translation through the two-level page
-//! tables at CR3, the TLB that caches it, and page faults.
+//! tables at CR3, or the page directory alone for the Pentium's 4 MB
+//! pages, the TLB that caches it, and page faults.
 
 use super::fault::{CpuResult, Fault};
-use super::{CR0_PG, CR0_WP, Cpu, CpuModel};
+use super::{CR0_PG, CR0_WP, CR4_PSE, Cpu, CpuModel};
 
 /// Page table entry bits.
 const PTE_P: u32 = 0x001;
@@ -10,6 +11,8 @@ const PTE_RW: u32 = 0x002;
 const PTE_US: u32 = 0x004;
 const PTE_A: u32 = 0x020;
 const PTE_D: u32 = 0x040;
+/// A page directory entry that maps a 4 MB page itself (with CR4.PSE).
+const PDE_PS: u32 = 0x080;
 
 /// #PF error code bits.
 const PF_PROTECTION: u32 = 0x1;
@@ -53,11 +56,14 @@ pub struct Tlb {
     /// Counts flushes, full or of one page: a translation kept elsewhere
     /// (the execution loop's code window) holds while it doesn't change.
     pub epoch: u32,
+    /// Whether an entry has come from a 4 MB page since the last flush.
+    /// The entries are of 4 KB pieces of it.
+    large: bool,
 }
 
 impl Default for Tlb {
     fn default() -> Self {
-        Self { entries: vec![EMPTY; 2 * TLB_ENTRIES].into_boxed_slice(), epoch: 0 }
+        Self { entries: vec![EMPTY; 2 * TLB_ENTRIES].into_boxed_slice(), epoch: 0, large: false }
     }
 }
 
@@ -65,12 +71,23 @@ impl Tlb {
     pub fn flush(&mut self) {
         self.entries.fill(EMPTY);
         self.epoch = self.epoch.wrapping_add(1);
+        self.large = false;
     }
 
-    /// Drop the translations of the page holding `lin` (INVLPG).
+    /// Drop the translations of the page holding `lin` (INVLPG). Where 4 MB
+    /// pages may be cached, that page may be one, so the pieces of all of
+    /// the 4 MB around `lin` go.
     pub fn flush_page(&mut self, lin: u32) {
         self.epoch = self.epoch.wrapping_add(1);
         let page = lin >> 12;
+        if self.large {
+            for e in self.entries.iter_mut() {
+                if e.read_tag != 0 && (e.read_tag - 1) >> 10 == page >> 10 {
+                    *e = EMPTY;
+                }
+            }
+            return;
+        }
         for set in 0..2 {
             let e = &mut self.entries[set * TLB_ENTRIES + page as usize % TLB_ENTRIES];
             if e.read_tag == page + 1 {
@@ -102,23 +119,27 @@ impl Tlb {
 
 /// How an access walks the page tables: those at `cr3`, at privilege
 /// level 3 (`user`) or not, with CR0.WP (486) protecting read-only pages
-/// from supervisor writes. The BIOS's services reach memory so too while
-/// paging is on (`Bus::guest_*`).
+/// from supervisor writes, and with CR4.PSE (Pentium) 4 MB pages. The
+/// BIOS's services reach memory so too while paging is on (`Bus::guest_*`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GuestPaging {
     pub cr3: u32,
     pub user: bool,
     pub write_protect: bool,
+    pub pse: bool,
 }
 
 /// What a walk of the page tables found for an access that they allow.
 pub struct Walked {
-    /// The physical address of the page.
+    /// The physical address of the 4 KB page, of a 4 MB one the piece of
+    /// it the access is in.
     pub page: u32,
     user_ok: bool,
     write_ok: bool,
     /// The page's dirty bit, after the access.
     dirty: bool,
+    /// Whether it is a 4 MB page.
+    large: bool,
 }
 
 /// Whether the page tables allow an access. Supervisor code may write
@@ -142,6 +163,20 @@ pub fn walk_tables(bus: &mut crate::bus::Bus, paging: GuestPaging, lin: u32, wri
     if pde & PTE_P == 0 {
         return Err(error);
     }
+    if paging.pse && pde & PDE_PS != 0 {
+        // A 4 MB page: the directory entry has its address, protection
+        // and accessed and dirty bits.
+        let (user_ok, write_ok) = (pde & PTE_US != 0, pde & PTE_RW != 0);
+        if !allows(user_ok, write_ok, write, paging) {
+            return Err(error | PF_PROTECTION);
+        }
+        let new_pde = pde | PTE_A | if write { PTE_D } else { 0 };
+        if new_pde != pde {
+            bus.write_32(pde_addr, new_pde);
+        }
+        let page = (pde & 0xFFC0_0000) | (lin & 0x003F_F000);
+        return Ok(Walked { page, user_ok, write_ok, dirty: new_pde & PTE_D != 0, large: true });
+    }
     let pte_addr = (((pde & 0xFFFF_F000) | ((lin >> 10) & 0xFFC)) & a20) as usize;
     let pte = bus.read_32(pte_addr);
     if pte & PTE_P == 0 {
@@ -160,7 +195,7 @@ pub fn walk_tables(bus: &mut crate::bus::Bus, paging: GuestPaging, lin: u32, wri
     if new_pte != pte {
         bus.write_32(pte_addr, new_pte);
     }
-    Ok(Walked { page: pte & 0xFFFF_F000, user_ok, write_ok, dirty: new_pte & PTE_D != 0 })
+    Ok(Walked { page: pte & 0xFFFF_F000, user_ok, write_ok, dirty: new_pte & PTE_D != 0, large: false })
 }
 
 impl Cpu {
@@ -189,18 +224,30 @@ impl Cpu {
     }
 
     pub(crate) fn write_protect(&self) -> bool {
-        self.model == CpuModel::I486 && self.cr0 & CR0_WP != 0
+        self.model >= CpuModel::I486 && self.cr0 & CR0_WP != 0
+    }
+
+    /// Whether page directory entries can map 4 MB pages (CR4.PSE).
+    pub(crate) fn pse(&self) -> bool {
+        self.model >= CpuModel::Pentium && self.cr4 & CR4_PSE != 0
+    }
+
+    /// How the processor's accesses at privilege level 3 (`user`) or the
+    /// others walk the page tables.
+    pub(crate) fn guest_paging(&self, user: bool) -> GuestPaging {
+        GuestPaging { cr3: self.cr3, user, write_protect: self.write_protect(), pse: self.pse() }
     }
 
     /// Walk the page tables for `lin`, setting the accessed and dirty bits
     /// and filling the TLB, or raise a page fault with CR2 = `lin`.
     fn walk(&mut self, lin: u32, write: bool, user: bool) -> CpuResult<u32> {
-        let paging = GuestPaging { cr3: self.cr3, user, write_protect: self.write_protect() };
+        let paging = self.guest_paging(user);
         let walked = match walk_tables(&mut self.bus, paging, lin, write) {
             Ok(walked) => walked,
             Err(error) => return Err(self.page_fault(lin, error)),
         };
         let page = lin >> 12;
+        self.tlb.large |= walked.large;
         // Writes go through the TLB only once the page is dirty, so the
         // first write to it still sets the bit.
         let writable = walked.dirty && allows(walked.user_ok, walked.write_ok, true, paging);
@@ -224,6 +271,9 @@ impl Cpu {
         if pde & PTE_P == 0 {
             return None;
         }
+        if self.pse() && pde & PDE_PS != 0 {
+            return Some(self.translate((pde & 0xFFC0_0000) | (lin & 0x003F_FFFF)));
+        }
         let pte = self.bus.read_32(self.translate((pde & 0xFFFF_F000) | ((lin >> 10) & 0xFFC)) as usize);
         if pte & PTE_P == 0 {
             return None;
@@ -242,11 +292,12 @@ impl Cpu {
     }
 
     /// The page directory and page table entries for `lin`, for debuggers:
-    /// (PDE address, PDE, PTE address and PTE if the table is present).
+    /// (PDE address, PDE, PTE address and PTE if the table is present; a
+    /// 4 MB page has none).
     pub fn page_walk(&self, lin: u32) -> (u32, u32, Option<(u32, u32)>) {
         let pde_addr = self.translate((self.cr3 & 0xFFFF_F000) | ((lin >> 20) & 0xFFC));
         let pde = self.bus.read_32(pde_addr as usize);
-        if pde & PTE_P == 0 {
+        if pde & PTE_P == 0 || (self.pse() && pde & PDE_PS != 0) {
             return (pde_addr, pde, None);
         }
         let pte_addr = self.translate((pde & 0xFFFF_F000) | ((lin >> 10) & 0xFFC));

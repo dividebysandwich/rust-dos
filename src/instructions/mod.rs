@@ -92,6 +92,7 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Bswap => transfer::bswap(cpu, instr),
         Xadd => transfer::xadd(cpu, instr),
         Cmpxchg => transfer::cmpxchg(cpu, instr),
+        Cmpxchg8b => transfer::cmpxchg8b(cpu, instr),
         Cbw => arith::cbw(cpu),
         Cwde => arith::cwde(cpu),
         Cwd => arith::cwd(cpu),
@@ -212,6 +213,10 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         Verr => system::verify(cpu, instr, false),
         Verw => system::verify(cpu, instr, true),
         Arpl => system::arpl(cpu, instr),
+        Cpuid => system::cpuid(cpu),
+        Rdtsc => system::rdtsc(cpu),
+        Rdmsr => system::msr(cpu, false),
+        Wrmsr => system::msr(cpu, true),
 
         // --- FPU ---
         Fadd | Faddp | Fiadd | Fsub | Fsubp | Fsubr | Fsubrp | Fisub | Fisubr | Fmul | Fmulp

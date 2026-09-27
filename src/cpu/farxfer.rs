@@ -277,10 +277,8 @@ impl Cpu {
             *s = self.stack_read(16 + 4 * i as u32, 2)? as u16;
         }
         let [ss, es, ds, fs, gs] = sels;
-        let mut writable = 0x0003_7FD5; // everything up to VM
-        if self.model == super::CpuModel::I486 {
-            writable |= CpuFlags::AC.bits();
-        }
+        // Everything up to VM, and the model's AC and ID.
+        let writable = 0x0003_7FD5 | self.model.eflags_extra();
         self.flags = CpuFlags::from_bits_retain((flags & writable) | 0x0002);
         self.load_seg_v86(Seg::CS, cs);
         self.load_seg_v86(Seg::SS, ss);
@@ -303,9 +301,7 @@ impl Cpu {
             if iret {
                 writable |= CpuFlags::RF.bits();
             }
-            if self.model == super::CpuModel::I486 {
-                writable |= CpuFlags::AC.bits();
-            }
+            writable |= self.model.eflags_extra();
         }
         let iopl = self.iopl();
         if self.cpl == 0 && !self.v86() {

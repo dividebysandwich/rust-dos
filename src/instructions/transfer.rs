@@ -1,9 +1,9 @@
 //! Data transfer: MOV and friends, the stack, far pointer loads, port I/O,
-//! and the 486 exchange instructions.
+//! and the 486's and the Pentium's exchange instructions.
 
 use iced_x86::{Instruction, OpKind, Register};
 
-use super::operand::{effective_offset, loc, mem_operand, mem_operand_at, op_size, read_op};
+use super::operand::{effective_offset, loc, mem_operand, mem_operand_at, mem_seg, op_size, read_op};
 use crate::cpu::alu::{AF, CF, PF, SF, ZF, sign_extend, size_mask};
 use crate::cpu::{Access, Cpu, CpuFlags, CpuModel, CpuResult, Fault, Seg};
 
@@ -296,7 +296,12 @@ pub fn salc(cpu: &mut Cpu) -> CpuResult {
 
 /// Raise #UD for 486 instructions on a 386.
 pub fn require_486(cpu: &Cpu) -> CpuResult {
-    if cpu.model == CpuModel::I386 { Err(Fault::UD) } else { Ok(()) }
+    if cpu.model < CpuModel::I486 { Err(Fault::UD) } else { Ok(()) }
+}
+
+/// Raise #UD for Pentium instructions on a 386 or 486.
+pub fn require_pentium(cpu: &Cpu) -> CpuResult {
+    if cpu.model < CpuModel::Pentium { Err(Fault::UD) } else { Ok(()) }
 }
 
 /// BSWAP r32 (486).
@@ -345,5 +350,33 @@ pub fn cmpxchg(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         dest.write(cpu, d);
         cpu.set_reg(acc, d);
     }
+    Ok(())
+}
+
+/// CMPXCHG8B m64 (Pentium): if EDX:EAX equals the quadword, ZF is set and
+/// ECX:EBX written there, otherwise ZF is cleared and EDX:EAX loaded from
+/// it. The processor writes the quadword either way (back as it was when
+/// they differ), so it must be writable.
+pub fn cmpxchg8b(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    require_pentium(cpu)?;
+    if instr.op0_kind() != OpKind::Memory {
+        return Err(Fault::UD);
+    }
+    cpu.check_span(mem_seg(instr), effective_offset(cpu, instr), 8, Access::Write)?;
+    let lo_ref = mem_operand(cpu, instr, 4, Access::Write)?;
+    let hi_ref = mem_operand_at(cpu, instr, 4, 4, Access::Write)?;
+    let (lo, hi) = (cpu.mem_read(lo_ref), cpu.mem_read(hi_ref));
+    let equal = (lo, hi) == (cpu.eax(), cpu.edx());
+    if equal {
+        let (ebx, ecx) = (cpu.ebx(), cpu.ecx());
+        cpu.mem_write(lo_ref, ebx);
+        cpu.mem_write(hi_ref, ecx);
+    } else {
+        cpu.mem_write(lo_ref, lo);
+        cpu.mem_write(hi_ref, hi);
+        cpu.set_eax(lo);
+        cpu.set_edx(hi);
+    }
+    cpu.set_cpu_flag(CpuFlags::ZF, equal);
     Ok(())
 }

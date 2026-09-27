@@ -614,7 +614,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "cpu" => match value.to_ascii_lowercase().as_str() {
                             "386" => config.cpu = Some(CpuModel::I386),
                             "486" => config.cpu = Some(CpuModel::I486),
-                            _ => warn(format!("invalid cpu '{}' (386 or 486)", value)),
+                            "pentium" | "586" => config.cpu = Some(CpuModel::Pentium),
+                            _ => warn(format!("invalid cpu '{}' (386, 486 or pentium)", value)),
                         },
                         "hard_disk_speed" | "floppy_disk_speed" => match DiskSpeed::parse(value) {
                             Some(speed) if key.eq_ignore_ascii_case("hard_disk_speed") => {
@@ -964,6 +965,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
             Some(match settings.cpu {
                 CpuModel::I386 => "386",
                 CpuModel::I486 => "486",
+                CpuModel::Pentium => "pentium",
             }
             .to_string()),
         ),
@@ -1681,6 +1683,8 @@ mod tests {
     fn cpu_model() {
         let config = parse("[emulator]\ncpu=386\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::I386));
+        let config = parse("[emulator]\ncpu=Pentium\n", Path::new("/cfg"), None);
+        assert_eq!(config.cpu, Some(crate::cpu::CpuModel::Pentium));
         let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, None);
         assert!(config.warnings[0].contains("invalid cpu '8086'"));

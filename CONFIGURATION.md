@@ -91,8 +91,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   default, runs as fast as the host keeps up with in real time. Use a
   number such as `3000` for old games that run too fast. `--cycles`
   overrides it.
-* `cpu` is the emulated processor: `486` (the default, a 486DX with FPU)
-  or `386`.
+* `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
+  `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
+  GenuineIntel family 5), the time stamp counter, which counts the
+  instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
+  4 MB pages, without the virtual-8086 mode extensions. A DOSBox
+  configuration's `cputype` of a Pentium or later imports as `pentium`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's

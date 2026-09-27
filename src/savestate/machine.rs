@@ -5,7 +5,7 @@ use super::{Reader, Result, State, Writer};
 use crate::cpu::Cpu;
 use std::sync::OnceLock;
 
-const CPU_VERSION: u16 = 1;
+const CPU_VERSION: u16 = 2;
 
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {

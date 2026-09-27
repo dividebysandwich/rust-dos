@@ -504,12 +504,13 @@ impl Cpu {
     /// CMOS shutdown code whether to resume a program or start over.
     pub fn reset(&mut self) {
         self.gpr = [0; 8];
-        // DX holds the processor signature: family and stepping.
-        self.gpr[super::regs::EDX] = match self.model {
-            super::CpuModel::I386 => 0x0303,
-            super::CpuModel::I486 => 0x0402,
-        };
+        // DX holds the processor signature: family, model and stepping.
+        self.gpr[super::regs::EDX] = self.model.signature();
         self.flags = CpuFlags::R1;
+        // The time stamp counter starts from 0, and the performance
+        // counters are cleared.
+        self.tsc_offset = self.bus.clock.icount.wrapping_neg();
+        self.perf_msrs = [0; 3];
         self.reset_to_real_mode();
         self.seg[Seg::CS as usize] = super::SegCache::real(0xF000);
         self.eip = 0xFFF0;
@@ -524,6 +525,7 @@ impl Cpu {
         self.cr0 = super::CR0_ET;
         self.cr2 = 0;
         self.cr3 = 0;
+        self.cr4 = 0;
         self.gdtr = super::DescTable { base: 0, limit: 0xFFFF };
         self.idtr = super::DescTable { base: 0, limit: 0x3FF };
         self.ldtr = super::SegCache::null(0);

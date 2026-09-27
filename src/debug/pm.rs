@@ -211,6 +211,7 @@ pub fn system_regs(cpu: &Cpu) -> Value {
         "code32": cpu.seg_cache(Seg::CS).attr & ATTR_DB != 0,
         "cr2": h32(cpu.cr2),
         "cr3": h32(cpu.cr3),
+        "cr4": h32(cpu.cr4),
         "gdtr": {"base": h32(cpu.gdtr.base), "limit": format!("{:04X}", cpu.gdtr.limit)},
         "idtr": {"base": h32(cpu.idtr.base), "limit": format!("{:04X}", cpu.idtr.limit)},
         "ldtr": cache(&cpu.ldtr),
@@ -386,10 +387,11 @@ pub fn tss_json(cpu: &Cpu) -> Value {
 
 /// The page directory and table entries for a linear address.
 pub fn pagewalk_json(cpu: &Cpu, lin: u32) -> Value {
-    let flags = |e: u32| {
+    // PS, in a directory entry: a 4 MB page (with CR4.PSE).
+    let flags = |e: u32, dir: bool| {
         let mut f = Vec::new();
-        for (bit, name) in [(1, "P"), (2, "RW"), (4, "US"), (0x20, "A"), (0x40, "D")] {
-            if e & bit != 0 {
+        for (bit, name) in [(1, "P"), (2, "RW"), (4, "US"), (0x20, "A"), (0x40, "D"), (0x80, "PS")] {
+            if e & bit != 0 && (bit != 0x80 || dir) {
                 f.push(name);
             }
         }
@@ -401,11 +403,11 @@ pub fn pagewalk_json(cpu: &Cpu, lin: u32) -> Value {
         "linear": format!("{:08X}", lin),
         "paging": paging,
         "cr3": format!("{:08X}", cpu.cr3),
-        "pde": {"addr": format!("{:08X}", pde_addr), "value": format!("{:08X}", pde), "flags": flags(pde)},
+        "pde": {"addr": format!("{:08X}", pde_addr), "value": format!("{:08X}", pde), "flags": flags(pde, true)},
         "physical": cpu.peek_translate(lin).map(|p| format!("{:08X}", p)),
     });
     if let Some((addr, e)) = pte {
-        v["pte"] = json!({"addr": format!("{:08X}", addr), "value": format!("{:08X}", e), "flags": flags(e)});
+        v["pte"] = json!({"addr": format!("{:08X}", addr), "value": format!("{:08X}", e), "flags": flags(e, false)});
     }
     v
 }
