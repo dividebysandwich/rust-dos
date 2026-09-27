@@ -260,6 +260,18 @@ impl MouseState {
         self.y = new_y;
     }
 
+    /// Put the cursor at (`x`, `y`) within the range, as the program asks
+    /// with INT 33h AX=0004h, or by setting a range the cursor is outside
+    /// of. The mouse didn't move: a driver counts no mickeys and calls no
+    /// event handler for it. The Incredible Machine 2 sets the position
+    /// with interrupts off and then calls its own handler, which enables
+    /// them before it marks itself busy; a motion event there enters the
+    /// handler again on its own stack, and it returns into garbage.
+    pub fn warp(&mut self, x: i32, y: i32) {
+        self.x = x.clamp(self.min_x, self.max_x);
+        self.y = y.clamp(self.min_y, self.max_y);
+    }
+
     /// Move the cursor by (`dx`, `dy`) virtual pixels, as a captured mouse
     /// does: the mickeys count all of the motion, at the edges of the
     /// clipping window too, where the cursor stops, so a game that turns
@@ -674,5 +686,15 @@ mod tests {
             mouse.move_by(0.25, -0.5);
         }
         assert_eq!((mouse.x, mouse.y), (321, 98));
+    }
+
+    #[test]
+    fn a_warped_cursor_is_no_motion() {
+        let mut mouse = MouseState::new();
+        mouse.reset(640, 200);
+        mouse.warp(700, 50);
+        assert_eq!((mouse.x, mouse.y), (639, 50), "the range clamps it");
+        assert_eq!((mouse.mickey_x, mouse.mickey_y), (0, 0));
+        assert_eq!(mouse.pending_callback_events, 0);
     }
 }

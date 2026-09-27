@@ -59,7 +59,7 @@ pub fn handle(cpu: &mut Cpu) {
             // Set cursor position. CX = X, DX = Y.
             let x = cpu.cx() as i16 as i32;
             let y = cpu.dx() as i16 as i32;
-            cpu.bus.mouse.set_position(x, y);
+            cpu.bus.mouse.warp(x, y);
         }
 
         0x0005 => {
@@ -96,7 +96,7 @@ pub fn handle(cpu: &mut Cpu) {
             // Also clamp current position.
             let cx = cpu.bus.mouse.x;
             let cy = cpu.bus.mouse.y;
-            cpu.bus.mouse.set_position(cx, cy);
+            cpu.bus.mouse.warp(cx, cy);
         }
 
         0x0008 => {
@@ -108,7 +108,7 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.mouse.max_y = max;
             let cx = cpu.bus.mouse.x;
             let cy = cpu.bus.mouse.y;
-            cpu.bus.mouse.set_position(cx, cy);
+            cpu.bus.mouse.warp(cx, cy);
         }
 
         0x0009 => {
