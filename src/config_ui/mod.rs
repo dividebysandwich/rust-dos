@@ -28,7 +28,7 @@ pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
 
-use crate::config::{MidiSynth, Settings};
+use crate::config::{MAX_MEMSIZE, MIN_MEMSIZE, MidiSynth, Settings};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
@@ -293,11 +293,11 @@ pub fn pending_note(video: crate::video::adapter::VideoSetup, new: &Settings) ->
 /// How a setting is changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
-    /// Left and right step through the values, and Enter lists them to
-    /// pick one (`Item::choices`).
+    /// Enter lists the values to pick one (`Item::choices`).
     Choice,
-    /// Steps, and Enter types a value.
-    ChoiceOrText,
+    /// Left and right step the value along a bar, and Enter types one.
+    Slider,
+    /// Enter types the value.
     Text,
     /// Enter picks a host file.
     File,
@@ -416,32 +416,31 @@ fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut 
         .collect()
 }
 
-/// The next of the ascending `values` above (or below) `current`.
-fn step_number(values: &[u32], current: u32, dir: isize) -> u32 {
-    if dir > 0 {
-        values.iter().copied().find(|&v| v > current).unwrap_or(current)
-    } else {
-        values.iter().rev().copied().find(|&v| v < current).unwrap_or(current)
-    }
-}
+const REWIND_MEMORY: [usize; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 
-const CYCLES: [u32; 8] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, u32::MAX];
-const MEMSIZES: [u32; 6] = [2, 4, 8, 16, 32, 64];
-const REWIND_MEMORY: [u32; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
+/// The memory's slider: a square for every 4 MB, and the deadzone's, one
+/// for every 5%.
+const MEMSIZE_UNIT: u16 = 4;
+const DEADZONE_UNIT: u16 = 5;
 
-/// A percentage of up to `max` as a number and a bar of small squares, one
-/// for every 10%, which stay apart from the next row's:
+/// A value of up to `max` as `text` and a bar of small squares, one for
+/// every `unit`, which stay apart from the next row's:
 /// "120% ■■■■■■■■■■■■········".
-fn percent_bar(percent: u16, max: u16) -> String {
-    let (full, cells) = ((percent.min(max) / 10) as usize, (max / 10) as usize);
-    format!("{:>3}% {}{}", percent, "■".repeat(full), "·".repeat(cells - full))
+fn bar(text: String, value: u16, max: u16, unit: u16) -> String {
+    let (full, cells) = ((value.min(max) / unit) as usize, (max / unit) as usize);
+    format!("{} {}{}", text, "■".repeat(full), "·".repeat(cells - full))
 }
 
-/// A percentage stepped left or right to the next ten, from a value in
-/// between to the ten on that side, within 0 to `max`.
-fn step_tens(percent: u16, dir: isize, max: u16) -> u16 {
-    let tens = if dir > 0 { percent / 10 + 1 } else { percent.div_ceil(10).saturating_sub(1) };
-    (tens * 10).min(max)
+/// A percentage's bar, a square for every 10%.
+fn percent_bar(percent: u16, max: u16) -> String {
+    bar(format!("{:>3}%", percent), percent, max, 10)
+}
+
+/// A value stepped left or right to the next multiple of `unit`, from a
+/// value in between to the multiple on that side, within 0 to `max`.
+fn step_units(value: u16, dir: isize, unit: u16, max: u16) -> u16 {
+    let units = if dir > 0 { value / unit + 1 } else { value.div_ceil(unit).saturating_sub(1) };
+    (units * unit).min(max)
 }
 
 fn on_off(on: bool) -> String {
@@ -588,9 +587,9 @@ impl Item {
 
     fn input(self) -> Input {
         match self {
-            Item::Cycles | Item::Volume(_) | Item::Deadzone | Item::ReverbMix | Item::ChorusMix => Input::ChoiceOrText,
-            Item::CrtCurvature | Item::CrtGlow => Input::ChoiceOrText,
-            Item::UltraDir | Item::CaptureDir => Input::Text,
+            Item::Volume(_) | Item::ReverbMix | Item::ChorusMix | Item::CrtCurvature | Item::CrtGlow => Input::Slider,
+            Item::Memsize | Item::Deadzone => Input::Slider,
+            Item::Cycles | Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::SoundFont | Item::Mt32Roms => Input::File,
             Item::Autoexec => Input::Link,
             _ => Input::Choice,
@@ -632,7 +631,7 @@ impl Item {
             }
             .to_string(),
             Machine => s.machine.describe().to_string(),
-            Memsize => format!("{} MB", s.memsize),
+            Memsize => bar(format!("{:>2} MB", s.memsize), s.memsize as u16, MAX_MEMSIZE as u16, MEMSIZE_UNIT),
             Voodoo => on_off(s.voodoo.enabled),
             VoodooMemory => match s.voodoo.board {
                 crate::voodoo::Board::Standard => "4 MB (one texture unit)".to_string(),
@@ -698,7 +697,10 @@ impl Item {
             RecordUi => if s.record_ui { "on (window and overlay)" } else { "off (the picture alone)" }.to_string(),
             RecordShader => if s.record_shader { "on (as the window shows it)" } else { "off (the plain picture)" }.to_string(),
             Joystick => s.joystick.kind.describe().to_string(),
-            Deadzone => format!("{}%", s.joystick.deadzone),
+            Deadzone => {
+                let dz = s.joystick.deadzone as u16;
+                bar(format!("{:>3}%", dz), dz, MAX_DEADZONE as u16, DEADZONE_UNIT)
+            }
             SpeakerFilter => on_off(s.mixer.speaker_filter),
             Item::SbFilter => match s.mixer.sb_filter {
                 crate::mixer::SbFilter::Auto => "auto (model-dependent)",
@@ -734,7 +736,6 @@ impl Item {
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
             Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium], |s, cpu| s.cpu = cpu),
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
-            Memsize => each(s, MEMSIZES, |s, mb| s.memsize = mb as usize),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
                 each(s, [crate::voodoo::Board::Standard, crate::voodoo::Board::Max], |s, board| s.voodoo.board = board)
@@ -749,7 +750,7 @@ impl Item {
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),
-            RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb as usize),
+            RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb),
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
                 each(s, models, |s, model| match model {
@@ -811,55 +812,36 @@ impl Item {
             Chorus => each(s, ChorusPreset::ALL, |s, preset| s.mixer.chorus = preset),
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
-            // Typed, picked from the host's files or edited, and a row of
-            // several, whose fields have their own.
-            Cycles | CrtCurvature | CrtGlow | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir | SoundFont
-            | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts => Vec::new(),
+            // Slid, typed, picked from the host's files or edited, and a
+            // row of several, whose fields have their own.
+            Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
+            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts => Vec::new(),
         }
     }
 
-    /// Step the setting left (-1) or right (1).
-    fn step(self, s: &mut Settings, dir: isize, drives: &[DriveInfo], frontend: Frontend) {
+    /// Slide the setting left (-1) or right (1), a square of its bar.
+    fn step(self, s: &mut Settings, dir: isize) {
         use Item::*;
         match self {
-            Scale => s.scale = (s.scale as isize + dir).clamp(1, 16) as u32,
-            CrtCurvature => s.crt.curvature = step_tens(s.crt.curvature, dir, MAX_AMOUNT),
-            CrtGlow => s.crt.glow = step_tens(s.crt.glow, dir, MAX_AMOUNT),
-            Cycles => {
-                let current = match s.cycles {
-                    CpuSpeed::Max => u32::MAX,
-                    CpuSpeed::Fixed(n) => n,
-                };
-                s.cycles = match step_number(&CYCLES, current, dir) {
-                    u32::MAX => CpuSpeed::Max,
-                    n => CpuSpeed::Fixed(n),
-                };
+            CrtCurvature => s.crt.curvature = step_units(s.crt.curvature, dir, 10, MAX_AMOUNT),
+            CrtGlow => s.crt.glow = step_units(s.crt.glow, dir, 10, MAX_AMOUNT),
+            Memsize => {
+                let mb = step_units(s.memsize as u16, dir, MEMSIZE_UNIT, MAX_MEMSIZE as u16);
+                s.memsize = (mb as usize).max(MIN_MEMSIZE);
             }
-            Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
-            RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory as u32, dir) as usize,
-            // In tens of percent, from a value in between to the next ten.
-            Volume(channel) => s.mixer.set_level(channel, step_tens(s.mixer.level(channel), dir, MAX_LEVEL)),
-            ReverbMix => s.mixer.reverb_mix = step_tens(s.mixer.reverb_mix, dir, MAX_MIX),
-            ChorusMix => s.mixer.chorus_mix = step_tens(s.mixer.chorus_mix, dir, MAX_MIX),
-            // In fives of percent.
+            Volume(channel) => s.mixer.set_level(channel, step_units(s.mixer.level(channel), dir, 10, MAX_LEVEL)),
+            ReverbMix => s.mixer.reverb_mix = step_units(s.mixer.reverb_mix, dir, 10, MAX_MIX),
+            ChorusMix => s.mixer.chorus_mix = step_units(s.mixer.chorus_mix, dir, 10, MAX_MIX),
             Deadzone => {
-                let dz = s.joystick.deadzone as isize;
-                let fives = if dir > 0 { dz / 5 + 1 } else { (dz + 4) / 5 - 1 };
-                s.joystick.deadzone = (fives * 5).clamp(0, MAX_DEADZONE as isize) as u8;
+                let dz = step_units(s.joystick.deadzone as u16, dir, DEADZONE_UNIT, MAX_DEADZONE as u16);
+                s.joystick.deadzone = dz as u8;
             }
-            // Around the values it is picked from. A row of several steps
-            // the field chosen (`ConfigUi::field`).
-            _ => {
-                let choices = self.choices(s, drives, frontend);
-                if !choices.is_empty() {
-                    *s = cycle(&choices, s, dir);
-                }
-            }
+            _ => {}
         }
     }
 
-    /// The settings a row of several shows side by side, each with its own
-    /// ◄ and ►; none for a row of one. The high DMA channel is the SB16's
+    /// The settings a row of several shows side by side, each a button of
+    /// its own; none for a row of one. The high DMA channel is the SB16's
     /// alone.
     fn fields(self, s: &Settings) -> Vec<Item> {
         match self {
@@ -882,6 +864,7 @@ impl Item {
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),
+            Item::Memsize => s.memsize.to_string(),
             Item::Deadzone => s.joystick.deadzone.to_string(),
             Item::CrtCurvature => s.crt.curvature.to_string(),
             Item::CrtGlow => s.crt.glow.to_string(),
@@ -899,6 +882,7 @@ impl Item {
             Item::Volume(channel) => s.mixer.set_level(channel, crate::mixer::parse_level(text)?),
             Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),
             Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), dirs::home_dir().as_deref()),
+            Item::Memsize => s.memsize = crate::config::parse_memsize(text)?,
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
             Item::CrtCurvature => s.crt.curvature = parse_amount(text).ok_or("The curvature goes from 0 to 100%")?,
             Item::CrtGlow => s.crt.glow = parse_amount(text).ok_or("The glow goes from 0 to 100%")?,
@@ -924,6 +908,10 @@ impl Item {
                 let changed = s.mixer.level(channel) != 100;
                 s.mixer.set_level(channel, 100);
                 changed
+            }
+            Item::Memsize => {
+                let default = Settings::default().memsize;
+                std::mem::replace(&mut s.memsize, default) != default
             }
             Item::Deadzone => {
                 let default = crate::joystick::JoystickSettings::default().deadzone;
@@ -980,11 +968,12 @@ enum Target {
     Tab(Page),
     /// A row of the page's list (absolute, not scrolled).
     Row(usize),
-    /// The ◄ or ► of a setting.
+    /// The ◄ or ► of a slider.
     Step(usize, isize),
-    /// A field of a row of several (`Item::fields`), and its ◄ or ►.
+    /// The button of a setting that Enter changes, and of a field of a
+    /// row of several (`Item::fields`).
+    Button(usize),
     RowField(usize, usize),
-    RowFieldStep(usize, usize, isize),
     Key(UiKey),
     Field(Field),
     GameField(GameField),
@@ -1304,15 +1293,16 @@ impl ConfigUi {
                 self.cheats.edit = None;
                 self.select(i);
             }
-            Target::RowField(i, field) if i == self.row && field == self.field => self.key(UiKey::Enter, host),
+            Target::Button(i) => {
+                self.edit = None;
+                self.cheats.edit = None;
+                self.select(i);
+                self.key(UiKey::Enter, host);
+            }
             Target::RowField(i, field) => {
                 self.select(i);
                 self.field = field;
-            }
-            Target::RowFieldStep(i, field, dir) => {
-                self.select(i);
-                self.field = field;
-                self.key(if dir < 0 { UiKey::Left } else { UiKey::Right }, host);
+                self.key(UiKey::Enter, host);
             }
             Target::Step(i, dir) => {
                 self.edit = None;
@@ -1425,14 +1415,13 @@ impl ConfigUi {
 
     fn setting_key(&mut self, key: UiKey, host: &mut dyn Host) {
         let Some(item) = self.item() else { return };
-        // A row of several: Left and Right change a field, Enter lists its
-        // values.
+        // A row of several: Left and Right go to the field beside, Enter
+        // lists its values.
         let fields = item.fields(&self.settings);
         if !fields.is_empty() {
             let field = self.field.min(fields.len() - 1);
             match key {
-                UiKey::Left => self.step(fields[field], -1, host),
-                UiKey::Right => self.step(fields[field], 1, host),
+                UiKey::Left | UiKey::Right => self.field = self.field_beside(fields.len(), key),
                 UiKey::Enter => {
                     self.field = field;
                     self.open_popup(fields[field]);
@@ -1442,23 +1431,30 @@ impl ConfigUi {
             return;
         }
         match (key, item.input()) {
-            (UiKey::Left, Input::Choice | Input::ChoiceOrText) => self.step(item, -1, host),
-            (UiKey::Right, Input::Choice | Input::ChoiceOrText) => self.step(item, 1, host),
+            (UiKey::Left, Input::Slider) => self.step(item, -1, host),
+            (UiKey::Right, Input::Slider) => self.step(item, 1, host),
             (UiKey::Enter, Input::Choice) => self.open_popup(item),
-            (UiKey::Enter, Input::ChoiceOrText | Input::Text) => {
+            (UiKey::Enter, Input::Slider | Input::Text) => {
                 self.edit = Some(TextField::new(&item.text(&self.settings)));
             }
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
-            (UiKey::Enter | UiKey::Right, Input::Link) => self.open_autoexec(host),
+            (UiKey::Enter, Input::Link) => self.open_autoexec(host),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}
         }
     }
 
     fn step(&mut self, item: Item, dir: isize, host: &mut dyn Host) {
-        item.step(&mut self.settings, dir, &self.drives, self.frontend);
+        item.step(&mut self.settings, dir);
         self.changed(item, host);
+    }
+
+    /// The field beside the one chosen that Left or Right goes to, in a
+    /// row of `fields`; none past the ends.
+    fn field_beside(&self, fields: usize, key: UiKey) -> usize {
+        let field = self.field.min(fields - 1);
+        if key == UiKey::Left { field.saturating_sub(1) } else { (field + 1).min(fields - 1) }
     }
 
     /// List `item`'s values over the page, the one it has selected.
@@ -1494,10 +1490,11 @@ impl ConfigUi {
             UiKey::Left | UiKey::Right => {
                 let fields = self.item().map_or(Vec::new(), |item| item.fields(&self.settings));
                 if !fields.is_empty() {
-                    let dir = if key == UiKey::Left { -1 } else { 1 };
-                    let field = self.field.min(fields.len() - 1) as isize + dir;
-                    self.field = field.rem_euclid(fields.len() as isize) as usize;
-                    self.open_popup(fields[self.field]);
+                    let field = self.field_beside(fields.len(), key);
+                    if field != self.field {
+                        self.field = field;
+                        self.open_popup(fields[field]);
+                    }
                 }
             }
             UiKey::Char(c) => {
@@ -2011,12 +2008,12 @@ impl ConfigUi {
             if item.input() == Input::Link {
                 continue;
             }
+            // Its list's values under the button's.
             if selected {
-                anchor = Some((value_col, row));
+                anchor = Some((value_col - 1, row));
             }
             let fields = item.fields(&self.settings);
             if !fields.is_empty() {
-                // Its list's values under the field's.
                 let focus = self.draw_fields(g, row, i, &fields, (value_col, end), selected);
                 if selected && let Some(col) = focus {
                     anchor = Some((col - 1, row));
@@ -2032,14 +2029,15 @@ impl ConfigUi {
                 continue;
             }
             let value = fit(&item.value(&self.settings, self.home.as_deref()), end.saturating_sub(value_col + 4));
-            if matches!(item.input(), Input::Choice | Input::ChoiceOrText) {
+            if item.input() == Input::Slider {
                 g.char(value_col, row, 0x11, draw::KEY);
                 self.hits.push(Hit { row, col: value_col, width: 1, target: Target::Step(i, -1) });
                 let after = g.text_to(value_col + 2, row, &value, draw::BRIGHT, end);
                 g.char(after + 1, row, 0x10, draw::KEY);
                 self.hits.push(Hit { row, col: after + 1, width: 1, target: Target::Step(i, 1) });
             } else {
-                g.text_to(value_col + 2, row, &value, draw::BRIGHT, end);
+                let after = Self::draw_button(g, value_col, row, &value, end, false);
+                self.hits.push(Hit { row, col: value_col, width: after - value_col, target: Target::Button(i) });
             }
         }
         self.draw_scrollbar(g, content.clone(), self.scroll, items.len());
@@ -2112,11 +2110,23 @@ impl ConfigUi {
         }
     }
 
+    /// A button at (`col`, `row`), up to the column `end`: `value` in
+    /// brackets, which Enter or a click changes. Returns the column after
+    /// it.
+    fn draw_button(g: &mut Grid, col: usize, row: usize, value: &str, end: usize, focused: bool) -> usize {
+        if focused {
+            g.background(col, row, (value.chars().count() + 2).min(end.saturating_sub(col)), draw::FIELD);
+        }
+        let after = g.text_to(col, row, "[", draw::KEY, end);
+        let after = g.text_to(after, row, value, draw::BRIGHT, end);
+        g.text_to(after, row, "]", draw::KEY, end)
+    }
+
     /// The fields of row `i`, a row of several, side by side in the
     /// columns `cols` of grid row `row`: each by its name with its value
-    /// between its own ◄ and ►, the one Left and Right change marked
-    /// while the row is selected. Returns the column of that one's ◄, if
-    /// it fit.
+    /// on a button of its own, the one Left and Right go to marked while
+    /// the row is selected. Returns the column of that one's button, if it
+    /// fit.
     fn draw_fields(
         &mut self,
         g: &mut Grid,
@@ -2135,25 +2145,18 @@ impl ConfigUi {
             }
             let name = field.label();
             if !name.is_empty() {
-                x = g.text_to(x, row, name, draw::TEXT, end);
+                x = g.text_to(x, row, name, draw::TEXT, end) + 1;
             }
             let value = field.value(&self.settings, self.home.as_deref());
             if x + value.chars().count() + 2 > end {
                 break;
             }
-            g.char(x, row, 0x11, draw::KEY);
-            self.hits.push(Hit { row, col: x, width: 1, target: Target::RowFieldStep(i, f, -1) });
             if f == focus {
                 focus_col = Some(x);
-                if selected {
-                    g.background(x + 1, row, value.chars().count(), draw::FIELD);
-                }
             }
-            let after = g.text_to(x + 1, row, &value, draw::BRIGHT, end);
-            self.hits.push(Hit { row, col: x + 1, width: after - x - 1, target: Target::RowField(i, f) });
-            g.char(after, row, 0x10, draw::KEY);
-            self.hits.push(Hit { row, col: after, width: 1, target: Target::RowFieldStep(i, f, 1) });
-            x = after + 1;
+            let after = Self::draw_button(g, x, row, &value, end, selected && f == focus);
+            self.hits.push(Hit { row, col: x, width: after - x, target: Target::RowField(i, f) });
+            x = after;
         }
         focus_col
     }
@@ -2340,15 +2343,16 @@ impl ConfigUi {
                 ("Esc", "Close", Esc),
             ]
         } else {
-            let mut hints = vec![("\u{2190}\u{2192}", "Change", Right)];
-            match self.item().map(Item::input) {
-                // A row of several lists its field's.
-                Some(Input::Choice) => hints.push(("Enter", "List", Enter)),
-                Some(Input::ChoiceOrText | Input::Text) => hints.push(("Enter", "Type", Enter)),
-                Some(Input::File) => hints.extend([("Enter", "Pick", Enter), ("Del", "None", Delete)]),
-                Some(Input::Link) => hints = vec![("Enter", "Edit", Enter)],
-                _ => {}
-            }
+            let several = self.item().is_some_and(|item| !item.fields(&self.settings).is_empty());
+            let mut hints = match self.item().map(Item::input) {
+                _ if several => vec![("\u{2190}\u{2192}", "Field", Right), ("Enter", "List", Enter)],
+                Some(Input::Choice) => vec![("Enter", "List", Enter)],
+                Some(Input::Slider) => vec![("\u{2190}\u{2192}", "Change", Right), ("Enter", "Type", Enter)],
+                Some(Input::Text) => vec![("Enter", "Type", Enter)],
+                Some(Input::File) => vec![("Enter", "Pick", Enter), ("Del", "None", Delete)],
+                Some(Input::Link) => vec![("Enter", "Edit", Enter)],
+                None => Vec::new(),
+            };
             hints.extend([("Tab", "Page", Tab), ("F2", "Save", Save), ("Esc", "Close", Esc)]);
             hints
         };

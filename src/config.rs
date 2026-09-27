@@ -505,6 +505,19 @@ impl SoundConfig {
     }
 }
 
+/// The least and the most RAM there is, in MB (`memsize`).
+pub const MIN_MEMSIZE: usize = 2;
+pub const MAX_MEMSIZE: usize = 64;
+
+/// A memory size as written: a number of MB, with or without the MB.
+pub fn parse_memsize(value: &str) -> Result<usize, String> {
+    let lower = value.trim().to_ascii_lowercase();
+    match lower.strip_suffix("mb").unwrap_or(&lower).trim_end().parse::<usize>() {
+        Ok(mb) if (MIN_MEMSIZE..=MAX_MEMSIZE).contains(&mb) => Ok(mb),
+        _ => Err(format!("invalid memsize '{}' ({} to {} MB)", value.trim(), MIN_MEMSIZE, MAX_MEMSIZE)),
+    }
+}
+
 /// Parse config text. Relative drive paths resolve against `base_dir`.
 pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
@@ -608,9 +621,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(speed) => config.cycles = Some(speed),
                             Err(e) => warn(e),
                         },
-                        "memsize" => match value.parse::<usize>() {
-                            Ok(mb) if (2..=64).contains(&mb) => config.memsize = Some(mb),
-                            _ => warn(format!("invalid memsize '{}' (2 to 64 MB)", value)),
+                        "memsize" => match parse_memsize(value) {
+                            Ok(mb) => config.memsize = Some(mb),
+                            Err(e) => warn(e),
                         },
                         "ems" | "umb" => match parse_bool(value) {
                             Some(on) if key.eq_ignore_ascii_case("ems") => config.ems = Some(on),

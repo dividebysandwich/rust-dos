@@ -212,6 +212,27 @@ fn keys(ui: &mut ConfigUi, host: &mut FakeHost, keys: &[UiKey]) {
     }
 }
 
+/// The values the list Enter opens shows, closed again.
+fn listed(ui: &mut ConfigUi, host: &mut FakeHost) -> Vec<String> {
+    ui.key(UiKey::Enter, host);
+    let popup = ui.popup.as_ref().expect("Enter lists the values");
+    let values = popup.choices.iter().map(|s| popup.item.value(s, None)).collect();
+    ui.key(UiKey::Esc, host);
+    values
+}
+
+/// Pick `value`, as the window shows it, from the list Enter opens.
+fn pick(ui: &mut ConfigUi, host: &mut FakeHost, value: &str) {
+    let values = listed(ui, host);
+    let at = values.iter().position(|v| v == value).unwrap_or_else(|| panic!("{:?} isn't in {:?}", value, values));
+    ui.key(UiKey::Enter, host);
+    ui.key(UiKey::Home, host);
+    for _ in 0..at {
+        ui.key(UiKey::Down, host);
+    }
+    ui.key(UiKey::Enter, host);
+}
+
 fn status(ui: &ConfigUi) -> (&str, bool) {
     ui.status.as_ref().map_or(("", false), |s| (s.text.as_str(), s.error))
 }
@@ -221,11 +242,16 @@ fn settings_change_live() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
     use UiKey::*;
-    // Display: scale up twice, fullscreen on from its list.
-    keys(&mut ui, &mut host, &[Tab, Right, Right, Down, Enter, Down, Enter]);
+    // Display: the scale and fullscreen, picked from their lists; Left and
+    // Right change neither.
+    ui.key(Tab, &mut host);
+    keys(&mut ui, &mut host, &[Right, Left]);
+    pick(&mut ui, &mut host, "3x");
+    keys(&mut ui, &mut host, &[Down, Right]);
+    pick(&mut ui, &mut host, "on");
     let last = host.applied.last().unwrap();
     assert_eq!((last.scale, last.fullscreen), (3, true));
-    assert_eq!(host.applied.len(), 3);
+    assert_eq!(host.applied.len(), 2);
 
     // Emulator: type a speed, then a bad one.
     keys(&mut ui, &mut host, &[Tab, Enter, End]);
@@ -245,19 +271,38 @@ fn settings_change_live() {
 
     // The CPU core changes at once.
     ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Core).unwrap();
-    keys(&mut ui, &mut host, &[Right]);
+    pick(&mut ui, &mut host, "dynamic recompiler");
     assert_eq!(host.applied.last().unwrap().core, crate::cpu::CoreMode::Dynamic);
     assert!(!status(&ui).0.contains("prompt"), "{:?}", status(&ui));
 
-    // Memory waits for the next start.
+    // Memory slides in fours of MB and waits for the next start.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("16 MB ■■■■············"));
     keys(&mut ui, &mut host, &[Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 32);
+    assert_eq!(host.applied.last().unwrap().memsize, 20);
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
+    // Typed, no further than 2 and 64 MB, and back to 16 with Delete.
+    keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace]);
+    ui.text("1", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(status(&ui), ("invalid memsize '1' (2 to 64 MB)", true));
+    keys(&mut ui, &mut host, &[End, Backspace]);
+    ui.text("62", &mut host);
+    keys(&mut ui, &mut host, &[Enter, Right, Right]);
+    assert_eq!(host.applied.last().unwrap().memsize, 64);
+    for _ in 0..15 {
+        ui.key(Left, &mut host);
+    }
+    assert_eq!(host.applied.last().unwrap().memsize, 4);
+    keys(&mut ui, &mut host, &[Left, Left]);
+    assert_eq!(host.applied.last().unwrap().memsize, 2);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 2 MB ················"));
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().memsize, 16);
 
     // The disk speed changes at once.
     ui.row = ui.items().iter().position(|&i| i == Item::FloppyDiskSpeed).unwrap();
-    keys(&mut ui, &mut host, &[Left]);
+    pick(&mut ui, &mut host, "slow (~30 kB/s)");
     assert_eq!(host.applied.last().unwrap().disk.floppy_disk_speed, crate::diskio::DiskSpeed::Slow);
     assert!(status(&ui).0.is_empty() || !status(&ui).0.contains("next time"), "{:?}", status(&ui));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("slow (~30 kB/s)"));
@@ -267,18 +312,18 @@ fn settings_change_live() {
 fn sound_conflicts_are_reported() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
-    use UiKey::*;
     ui.show_page(Page::Sound);
     // The Ultrasound's base port onto the Sound Blaster's 220h.
     ui.row = Page::Sound.items().iter().position(|&i| i == Item::GusPorts).unwrap();
-    keys(&mut ui, &mut host, &[Left]);
+    pick(&mut ui, &mut host, "220h");
     assert_eq!(host.applied.last().unwrap().sound.gus.base, 0x220);
     assert!(status(&ui).1 && status(&ui).0.contains("gusbase 220"), "{:?}", status(&ui));
 
     // The Ultrasound's drive skips the letters that are taken.
     ui.row = Page::Sound.items().iter().position(|&i| i == Item::GusDrive).unwrap();
     ui.settings.sound.gus.drive = None;
-    keys(&mut ui, &mut host, &[Right]);
+    assert_eq!(listed(&mut ui, &mut host)[..3], ["none", "D:", "E:"]);
+    pick(&mut ui, &mut host, "D:");
     assert_eq!(ui.settings.sound.gus.drive, Some(3));
 }
 
@@ -292,45 +337,45 @@ fn a_cards_port_irq_and_dma_share_a_row() {
     let value = |ui: &ConfigUi| ui.item().map(|i| i.value(&ui.settings, None)).unwrap();
     assert_eq!(value(&ui), "220h, IRQ 7, DMA 1, HDMA 5");
 
-    // Left and Right change the field chosen, and Enter lists its values,
-    // where Left and Right go on to the next field's.
-    keys(&mut ui, &mut host, &[Right]);
+    // Left and Right go to the field beside, no further than the ends, and
+    // Enter lists its values.
+    pick(&mut ui, &mut host, "230h");
     assert_eq!(host.applied.last().unwrap().sound.sb.base, 0x230);
-    keys(&mut ui, &mut host, &[Enter, Right, Down, Enter]);
-    assert_eq!((ui.field, host.applied.last().unwrap().sound.sb.irq), (1, 9));
+    keys(&mut ui, &mut host, &[Left, Right]);
+    assert_eq!(ui.field, 1);
+    pick(&mut ui, &mut host, "9");
+    assert_eq!(host.applied.last().unwrap().sound.sb.irq, 9);
+    // In the list, Left and Right go on to the list of the field beside.
     keys(&mut ui, &mut host, &[Enter, Right, Right, Down, Enter]);
     assert_eq!((ui.field, host.applied.last().unwrap().sound.sb.dma16), (3, 6));
     let applied = host.applied.len();
-    keys(&mut ui, &mut host, &[Enter, Right, Esc]);
-    assert_eq!(ui.field, 0, "round to the port again");
-    assert_eq!(host.applied.len(), applied);
+    keys(&mut ui, &mut host, &[Right, Enter, Right, Esc]);
+    assert_eq!((ui.field, host.applied.len()), (3, applied));
 
     // The high DMA channel is the SB16's alone.
     ui.settings.sound.sb.model = SbModel::SbPro2;
     assert_eq!(value(&ui), "230h, IRQ 9, DMA 1");
 
-    // Each field's arrows can be clicked, and its value picks it.
+    // A click on a field's button lists its values, and a click picks one.
     let mut frame = Frame::new(640, 400);
-    ui.draw(&mut frame);
-    let hit = |ui: &ConfigUi, target: fn(&Target) -> bool| {
+    let mut hit = |ui: &mut ConfigUi, target: fn(&Target) -> bool| {
+        ui.draw(&mut frame);
         let h = ui.hits.iter().find(|h| target(&h.target)).unwrap();
         let layout = Layout::for_frame(640, 400);
         ((layout.x + h.col * 8 + 4) as i32, (layout.y + h.row * layout.cell_h + 4) as i32)
     };
-    let (x, y) = hit(&ui, |t| matches!(t, Target::RowFieldStep(_, 2, 1)));
+    let (x, y) = hit(&mut ui, |t| matches!(t, Target::RowField(_, 2)));
     ui.click(x, y, &mut host);
-    assert_eq!((ui.field, host.applied.last().unwrap().sound.sb.dma8), (2, 3));
-    let (x, y) = hit(&ui, |t| matches!(t, Target::RowField(_, 1)));
+    assert_eq!((ui.field, ui.popup.as_ref().map(|p| p.item)), (2, Some(Item::SbDma)));
+    let (x, y) = hit(&mut ui, |t| matches!(t, Target::PopupRow(2)));
     ui.click(x, y, &mut host);
-    assert_eq!(ui.field, 1);
-    // Clicked again, it lists its values, and a click picks one: IRQ 5.
+    assert_eq!(host.applied.last().unwrap().sound.sb.dma8, 3);
+    let (x, y) = hit(&mut ui, |t| matches!(t, Target::RowField(_, 1)));
     ui.click(x, y, &mut host);
-    assert_eq!(ui.popup.as_ref().map(|p| p.item), Some(Item::SbIrq));
-    ui.draw(&mut frame);
-    let (x, y) = hit(&ui, |t| matches!(t, Target::PopupRow(2)));
+    let (x, y) = hit(&mut ui, |t| matches!(t, Target::PopupRow(2)));
     ui.click(x, y, &mut host);
     assert!(ui.popup.is_none());
-    assert_eq!(host.applied.last().unwrap().sound.sb.irq, 5);
+    assert_eq!((ui.field, host.applied.last().unwrap().sound.sb.irq), (1, 5));
 
     // Another row starts at its first field.
     keys(&mut ui, &mut host, &[Down, Up]);
@@ -466,9 +511,9 @@ fn save_and_close() {
     // What changed on every page is saved, whichever page F2 is pressed on.
     use UiKey::*;
     ui.show_page(Page::Display);
-    keys(&mut ui, &mut host, &[Right]);
+    pick(&mut ui, &mut host, "2x");
     ui.show_page(Page::Sound);
-    keys(&mut ui, &mut host, &[Right]);
+    pick(&mut ui, &mut host, "SB Pro 2");
     ui.show_page(Page::Games);
     ui.key(Save, &mut host);
     let saved = host.saved.last().unwrap();
@@ -509,7 +554,8 @@ fn every_page_draws_and_clicks() {
         ui.key(UiKey::Esc, &mut host);
     }
 
-    // Clicking the Sound tab, then the ► of its first setting.
+    // Clicking the Sound tab, then the button of its first setting and a
+    // value in its list.
     let mut frame = Frame::new(640, 400);
     ui.show_page(Page::Drives);
     ui.draw(&mut frame);
@@ -520,10 +566,23 @@ fn every_page_draws_and_clicks() {
     ui.click(x, y, &mut host);
     assert_eq!(ui.page, Page::Sound);
     ui.draw(&mut frame);
+    let button = ui.hits.iter().find(|h| matches!(h.target, Target::Button(0))).unwrap();
+    let (x, y) = at(button.col, button.row);
+    ui.click(x, y, &mut host);
+    assert_eq!(ui.popup.as_ref().map(|p| p.item), Some(Item::SbType));
+    ui.draw(&mut frame);
+    let value = ui.hits.iter().find(|h| matches!(h.target, Target::PopupRow(1))).unwrap();
+    let (x, y) = at(value.col, value.row);
+    ui.click(x, y, &mut host);
+    assert_eq!(ui.settings.sound.sb.model, SbModel::SbPro2);
+
+    // And the ► of the Mixer page's first slider.
+    ui.show_page(Page::Mixer);
+    ui.draw(&mut frame);
     let step = ui.hits.iter().find(|h| matches!(h.target, Target::Step(0, 1))).unwrap();
     let (x, y) = at(step.col, step.row);
     ui.click(x, y, &mut host);
-    assert_eq!(ui.settings.sound.sb.model, SbModel::SbPro2);
+    assert_eq!(ui.settings.mixer.level(Channel::Master), 110);
 }
 
 #[test]
@@ -586,10 +645,8 @@ fn the_crt_shader_steps_through_the_looks() {
     use UiKey::*;
     ui.show_page(Page::Display);
     ui.row = ui.items().iter().position(|&i| i == Item::Shader).unwrap();
-    keys(&mut ui, &mut host, &[Right, Right, Right, Right]);
-    let looks: Vec<Shader> = host.applied.iter().map(|s| s.shader).collect();
-    assert_eq!(looks, [Shader::Scanlines, Shader::Aperture, Shader::Crt, Shader::None]);
-    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(listed(&mut ui, &mut host), Shader::ALL.map(Shader::describe));
+    pick(&mut ui, &mut host, "CRT");
     assert_eq!(host.applied.last().unwrap().shader, Shader::Crt);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("CRT"));
 
@@ -624,18 +681,18 @@ fn the_crt_shader_steps_through_the_looks() {
     assert_eq!(Item::CrtGlow.applies(), Applies::Now);
     keys(&mut ui, &mut host, &[Save]);
     assert_eq!(host.saved.last().unwrap().crt, crate::video::shader::CrtSettings { curvature: 30, glow: 90 });
-    keys(&mut ui, &mut host, &[Up, Up, Left]);
+    keys(&mut ui, &mut host, &[Up, Up]);
+    pick(&mut ui, &mut host, "aperture grille");
     assert_eq!(host.applied.last().unwrap().shader, Shader::Aperture);
     assert!(!ui.items().contains(&Item::CrtCurvature));
-    keys(&mut ui, &mut host, &[Right]);
 
     // Without shaders the window says so, and keeps the setting to save.
     host.no_shaders = true;
-    keys(&mut ui, &mut host, &[Left]);
+    pick(&mut ui, &mut host, "scanlines");
     assert_eq!(status(&ui), ("CRT shaders need OpenGL 3", true));
-    assert_eq!(ui.settings.shader, Shader::Aperture);
+    assert_eq!(ui.settings.shader, Shader::Scanlines);
     keys(&mut ui, &mut host, &[Save]);
-    assert_eq!(host.saved.last().unwrap().shader, Shader::Aperture);
+    assert_eq!(host.saved.last().unwrap().shader, Shader::Scanlines);
 }
 
 #[test]
@@ -647,10 +704,10 @@ fn the_monochrome_monitor_steps_through_the_phosphors() {
     ui.show_page(Page::Display);
     ui.row = ui.items().iter().position(|&i| i == Item::Monochrome).unwrap();
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("off (colour)"));
-    keys(&mut ui, &mut host, &[Right, Right, Right, Right, Left]);
-    let phosphors: Vec<Monochrome> = host.applied.iter().map(|s| s.monochrome).collect();
+    assert_eq!(listed(&mut ui, &mut host), Monochrome::ALL.map(Monochrome::describe));
+    pick(&mut ui, &mut host, "green");
     use Monochrome::*;
-    assert_eq!(phosphors, [White, Amber, Green, Off, Green]);
+    assert_eq!(host.applied.last().unwrap().monochrome, Green);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("green"));
     keys(&mut ui, &mut host, &[Save]);
     assert_eq!(host.saved.last().unwrap().monochrome, Green);
@@ -725,13 +782,15 @@ fn the_mixer_page_switches_filters_and_effects() {
     ui.show_page(Page::Mixer);
     ui.row = ui.items().iter().position(|&i| i == Item::SpeakerFilter).unwrap();
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on"));
-    keys(&mut ui, &mut host, &[Right]);
+    pick(&mut ui, &mut host, "off");
     assert!(!host.applied.last().unwrap().mixer.speaker_filter);
-    keys(&mut ui, &mut host, &[Down, Right]);
+    ui.key(Down, &mut host);
+    pick(&mut ui, &mut host, "off");
     assert_eq!(host.applied.last().unwrap().mixer.sb_filter, SbFilter::Off);
     // The effects' mixes show while they are on.
     assert!(!ui.items().contains(&Item::ReverbMix) && !ui.items().contains(&Item::ChorusMix));
-    keys(&mut ui, &mut host, &[Down, Right, Right, Right]);
+    ui.key(Down, &mut host);
+    pick(&mut ui, &mut host, ReverbPreset::Medium.name());
     assert_eq!(host.applied.last().unwrap().mixer.reverb, ReverbPreset::Medium);
     keys(&mut ui, &mut host, &[Down]);
     assert_eq!(ui.item(), Some(Item::ReverbMix));
@@ -744,7 +803,8 @@ fn the_mixer_page_switches_filters_and_effects() {
     assert_eq!(host.applied.last().unwrap().mixer.reverb_mix, 35);
     keys(&mut ui, &mut host, &[Left]);
     assert_eq!(host.applied.last().unwrap().mixer.reverb_mix, 30);
-    keys(&mut ui, &mut host, &[Down, Left]);
+    ui.key(Down, &mut host);
+    pick(&mut ui, &mut host, ChorusPreset::Strong.name());
     assert_eq!(host.applied.last().unwrap().mixer.chorus, ChorusPreset::Strong);
     keys(&mut ui, &mut host, &[Down, Left, Left]);
     assert_eq!(host.applied.last().unwrap().mixer.chorus_mix, 30);
@@ -858,8 +918,9 @@ fn the_video_card_changes_at_the_prompt() {
     ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
     assert_eq!(Item::Machine.applies(), Applies::AtPrompt);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("Super VGA (VESA)"));
+    assert_eq!(listed(&mut ui, &mut host), Adapter::ALL.map(Adapter::describe));
     for adapter in [Adapter::S3, Adapter::Vga, Adapter::Ega, Adapter::Cga, Adapter::Tandy, Adapter::Pcjr, Adapter::Hercules, Adapter::Svga] {
-        keys(&mut ui, &mut host, &[UiKey::Right]);
+        pick(&mut ui, &mut host, adapter.describe());
         assert_eq!(host.applied.last().unwrap().machine, adapter);
     }
 }
@@ -873,12 +934,11 @@ fn the_joystick_steps_through_the_types() {
     ui.show_page(Page::Emulator);
     ui.row = ui.items().iter().position(|&i| i == Item::Joystick).unwrap();
     assert_eq!(Item::Joystick.applies(), Applies::Now);
-    keys(&mut ui, &mut host, &[Right, Right, Right, Right, Right]);
-    let kinds: Vec<JoystickType> = host.applied.iter().map(|s| s.joystick.kind).collect();
-    use JoystickType as J;
-    assert_eq!(kinds, [J::FourAxis, J::TwoAxis, J::Mouse, J::None, J::Auto]);
+    assert_eq!(listed(&mut ui, &mut host), JoystickType::ALL.map(JoystickType::describe));
+    pick(&mut ui, &mut host, JoystickType::FourAxis.describe());
+    assert_eq!(host.applied.last().unwrap().joystick.kind, JoystickType::FourAxis);
 
-    // The deadzone in fives, typed, and back to 10 with Delete.
+    // The deadzone slides in fives, is typed, and back to 10 with Delete.
     keys(&mut ui, &mut host, &[Down, Right]);
     assert_eq!(host.applied.last().unwrap().joystick.deadzone, 15);
     keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace]);
@@ -886,7 +946,7 @@ fn the_joystick_steps_through_the_types() {
     ui.key(Enter, &mut host);
     assert_eq!(host.applied.last().unwrap().joystick.deadzone, 12);
     keys(&mut ui, &mut host, &[Left]);
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("10%"));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 10% ■■················"));
     keys(&mut ui, &mut host, &[Left, Left, Left]);
     assert_eq!(host.applied.last().unwrap().joystick.deadzone, 0);
     keys(&mut ui, &mut host, &[Delete]);
@@ -901,9 +961,10 @@ fn expanded_memory_changes_at_the_prompt() {
     ui.row = ui.items().iter().position(|&i| i == Item::Ems).unwrap();
     assert_eq!(Item::Ems.applies(), Applies::AtPrompt);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on"));
-    keys(&mut ui, &mut host, &[UiKey::Right]);
+    pick(&mut ui, &mut host, "off");
     assert!(!host.applied.last().unwrap().ems);
-    keys(&mut ui, &mut host, &[UiKey::Down, UiKey::Right]);
+    ui.key(UiKey::Down, &mut host);
+    pick(&mut ui, &mut host, "off");
     assert_eq!(ui.item(), Some(Item::Umb));
     assert_eq!(Item::Umb.applies(), Applies::AtPrompt);
     assert!(!host.applied.last().unwrap().umb);
@@ -917,7 +978,7 @@ fn the_parallel_port_dac_changes_at_the_prompt() {
     ui.show_page(Page::Sound);
     ui.row = ui.items().iter().position(|&i| i == Item::LptDac).unwrap();
     assert_eq!(Item::LptDac.applies(), Applies::AtPrompt);
-    keys(&mut ui, &mut host, &[UiKey::Right, UiKey::Right]);
+    pick(&mut ui, &mut host, "Covox Speech Thing");
     assert_eq!(host.applied.last().unwrap().sound.lpt_dac, LptDacType::Covox);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("Covox Speech Thing"));
     ui.show_page(Page::Mixer);
@@ -957,14 +1018,14 @@ fn a_browser_gets_what_it_has() {
         ui.items(),
         [Item::Aspect, Item::Filter, Item::Shader, Item::Monochrome, Item::Composite, Item::CompositeEra]
     );
-    keys(&mut ui, &mut host, &[Right]);
+    pick(&mut ui, &mut host, "on");
     assert!(host.applied.last().unwrap().aspect);
     ui.show_page(Page::Sound);
     assert!(!ui.items().contains(&Item::SoundFont));
     ui.row = ui.items().iter().position(|&i| i == Item::Midi).unwrap();
-    keys(&mut ui, &mut host, &[Right, Right, Right]);
-    let synths: Vec<MidiSynth> = host.applied.iter().rev().take(3).map(|s| s.sound.midisynth).collect();
-    assert_eq!(synths, [MidiSynth::Auto, MidiSynth::None, MidiSynth::Gus]);
+    assert_eq!(listed(&mut ui, &mut host), ["auto", "Ultrasound patches", "none"]);
+    pick(&mut ui, &mut host, "none");
+    assert_eq!(host.applied.last().unwrap().sound.midisynth, MidiSynth::None);
     // The page records the canvas, into files of its own.
     ui.show_page(Page::Emulator);
     assert!(![Item::CaptureDir, Item::RecordUi, Item::RecordShader].iter().any(|i| ui.items().contains(i)));
@@ -995,14 +1056,14 @@ fn captures_show_the_window_overlay_and_shader_when_asked() {
     ui.show_page(Page::Emulator);
     ui.row = ui.items().iter().position(|&i| i == Item::RecordUi).unwrap();
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("off (the picture alone)"));
-    keys(&mut ui, &mut host, &[UiKey::Right]);
+    pick(&mut ui, &mut host, "on (window and overlay)");
     assert!(host.applied.last().unwrap().record_ui);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on (window and overlay)"));
     assert_eq!(Item::RecordUi.applies(), Applies::Now);
 
     ui.row = ui.items().iter().position(|&i| i == Item::RecordShader).unwrap();
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("off (the plain picture)"));
-    keys(&mut ui, &mut host, &[UiKey::Right]);
+    pick(&mut ui, &mut host, "on (as the window shows it)");
     assert!(host.applied.last().unwrap().record_shader);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on (as the window shows it)"));
     assert_eq!(Item::RecordShader.applies(), Applies::Now);

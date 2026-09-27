@@ -361,8 +361,8 @@ Esc closes it.
   included; F2 writes it into the file, for the next start, and Esc leaves
   the file as it was.
 * **Sound:** everything in `[sound]`, and the disk noises. A card's port,
-  IRQ and DMA channels share a row: Left and Right change the one marked,
-  and Enter moves on to the next.
+  IRQ and DMA channels share a row: Left and Right move between them, and
+  Enter lists the values of the one marked.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays, and the filters,
   reverb and chorus with their dry/wet mixes.
@@ -396,8 +396,12 @@ Esc closes it.
   shows the two numbers and small graphs of them at the bottom right of
   the picture while the window is closed, and hides them again.
 
-Left and Right change a setting, Enter types or picks a value, Tab switches
-pages, and the mouse works too. The display settings, the CPU speed, the
+Enter (or a click on a setting's `[button]`) lists the values to pick
+from, or types or picks one: the list takes Up and Down, and a letter
+jumps to the next value starting with it. The sliders (the volumes, the
+effects' mixes, the CRT's curvature and glow, the memory size and the
+joystick's deadzone) move with Left and Right, and Enter types a value.
+Tab switches pages, and the mouse works too. The display settings, the CPU speed, the
 disk speeds and noises, the joystick and the volumes take effect at once.
 The processor, the video card, expanded and upper memory and the sound
 hardware change once no program is running, so a game isn't left without
