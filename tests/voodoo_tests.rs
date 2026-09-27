@@ -847,3 +847,57 @@ fn benchmark_rasterizer() {
         println!("{} workers: {:?} a frame ({} pixels)", workers, per_frame, r(&bus, FBI_PIXELS_OUT) / frames);
     }
 }
+
+/// DOSBox-X's card and this one, given the same writes, hold the same
+/// frame buffer at every swap: a trace recorded by a DOSBox-X built with
+/// a `VOODOO_TRACE` hook (13-byte records: kind, then three
+/// little-endian dwords; `P` a PCI configuration byte written, `W` a
+/// dword written with its mask, `R` a dword read, `S` a swap with the
+/// FNV-1a hash of the frame buffer after it) replayed here. Local only:
+/// `RUST_DOS_VOODOO_TRACE=path cargo test --release --test voodoo_tests
+/// dosbox_x -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn replays_a_dosbox_x_trace() {
+    let Ok(path) = std::env::var("RUST_DOS_VOODOO_TRACE") else { return };
+    let data = std::fs::read(path).unwrap();
+    let mut v = rust_dos::voodoo::Voodoo::with_workers(Board::Max, 4);
+    let now = rust_dos::voodoo::Now::default();
+    let fnv = |bytes: &[u8]| bytes.iter().fold(2166136261u32, |h, &b| (h ^ b as u32).wrapping_mul(16777619));
+    let (mut swaps, mut bad_swaps, mut reads, mut bad_reads) = (0, 0, 0, 0);
+    for (i, record) in data.chunks_exact(13).enumerate() {
+        let word = |n: usize| u32::from_le_bytes(record[1 + 4 * n..5 + 4 * n].try_into().unwrap());
+        match record[0] {
+            b'P' => {
+                v.config_write(word(0) as u8, word(1) as u8);
+            }
+            b'W' => {
+                v.write(word(0) << 2, word(1), word(2), now);
+            }
+            // Frame buffer reads; the registers' depend on time.
+            b'R' if word(0) & (0xC0_0000 / 4) != 0 => {
+                reads += 1;
+                let got = v.read(word(0) << 2, now);
+                if got != word(1) {
+                    if bad_reads < 5 {
+                        println!("record {}: LFB read {:06X} = {:08X}, DOSBox-X {:08X}", i, word(0) << 2, got, word(1));
+                    }
+                    bad_reads += 1;
+                }
+            }
+            b'S' => {
+                swaps += 1;
+                let hash = fnv(&v.frame_buffer().to_bytes());
+                if hash != word(1) {
+                    if bad_swaps < 5 {
+                        println!("record {}: swap {} differs", i, swaps);
+                    }
+                    bad_swaps += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    println!("{} swaps, {} differ; {} LFB reads, {} differ", swaps, bad_swaps, reads, bad_reads);
+    assert_eq!((bad_swaps, bad_reads), (0, 0));
+}
