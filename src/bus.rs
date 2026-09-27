@@ -8,6 +8,7 @@ mod guest;
 pub mod port_log;
 pub mod s3;
 mod state;
+mod voodoo;
 
 pub trait Device {
     /// Return the set of I/O ports this device owns.
@@ -155,8 +156,11 @@ pub struct Bus {
     pub vbe: crate::video::vbe::Vbe,
     /// The S3 Trio64's graphics engine, on `Adapter::S3`.
     pub s3_engine: crate::video::s3::engine::Engine,
-    /// The PCI bus's configuration address, on `Adapter::S3`.
+    /// The PCI bus's configuration address, on `Adapter::S3` or with the
+    /// 3dfx card.
     pub pci: crate::pci::Pci,
+    /// The 3dfx Voodoo Graphics card, if there is one.
+    pub voodoo: Option<crate::voodoo::Voodoo>,
     pub search_handles: std::collections::HashMap<u32, String>,
     /// The search ID FindFirst handed out last (the key of
     /// `search_handles`, kept in the program's DTA).
@@ -310,6 +314,7 @@ impl Bus {
             vbe: crate::video::vbe::Vbe::new(),
             s3_engine: crate::video::s3::engine::Engine::new(),
             pci: crate::pci::Pci::default(),
+            voodoo: None,
             search_handles: std::collections::HashMap::new(),
             search_serial: 0,
             mouse: crate::mouse::MouseState::new(),
@@ -414,6 +419,7 @@ impl Bus {
     pub fn restore_dos_machine(&mut self) {
         self.fill_ram(0..0x500, 0);
         self.pic = crate::pic::Pic::new();
+        self.reset_voodoo();
         self.init_dos_machine(self.vga.setup());
         if self.lpt_dac.is_some() {
             self.write_16(0x0408, crate::lpt_dac::LPT1);
@@ -876,6 +882,9 @@ impl Bus {
     /// but VGA plane latches are restored afterwards so inspecting video
     /// memory can't disturb a program's read-modify-write sequences.
     pub fn peek_8(&self, addr: usize) -> u8 {
+        if let Some(dword) = self.voodoo_peek_32(addr) {
+            return dword as u8;
+        }
         if addr >= self.ram.len() {
             return self.read_8_mapped(addr);
         }
@@ -983,6 +992,9 @@ impl Bus {
             self.write_vram(offset, &[value]);
             return true;
         }
+        if self.voodoo_at(addr).is_some() {
+            self.voodoo_write_8();
+        }
         false
     }
 
@@ -1034,6 +1046,10 @@ impl Bus {
             self.engine_write(port, value as u32, 2);
             return true;
         }
+        if let Some(offset) = self.voodoo_at(addr) {
+            self.voodoo_write_16(offset, value);
+            return true;
+        }
         // Low byte
         let d1 = self.write_8(addr, (value & 0xFF) as u8);
         // High byte
@@ -1058,6 +1074,9 @@ impl Bus {
         }
         if let Some(port) = self.s3_mmio(addr) {
             return self.s3_peek(port, 2) as u16;
+        }
+        if let Some(offset) = self.voodoo_at(addr) {
+            return self.voodoo_read_16(offset);
         }
         let low = self.read_8(addr) as u16;
         let high = self.read_8(addr + 1) as u16;
@@ -1084,6 +1103,9 @@ impl Bus {
         if let Some(port) = self.s3_mmio(addr) {
             return self.s3_peek(port, 4);
         }
+        if let Some(offset) = self.voodoo_at(addr) {
+            return self.voodoo_read_32(offset);
+        }
         let low = self.read_16(addr) as u32;
         let high = self.read_16(addr + 2) as u32;
         (high << 16) | low
@@ -1104,6 +1126,10 @@ impl Bus {
         }
         if let Some(port) = self.s3_mmio(addr) {
             self.engine_write(port, value, 4);
+            return;
+        }
+        if let Some(offset) = self.voodoo_at(addr) {
+            self.voodoo_write_32(offset, value);
             return;
         }
         self.write_16(addr, (value & 0xFFFF) as u16);
@@ -1149,12 +1175,13 @@ impl Bus {
     }
 
     /// The next time (PIT ticks) a device needs attention: the timer's
-    /// next IRQ 0, the end of the Sound Blaster's current block, or the
-    /// Ultrasound's next timer, DMA or voice interrupt.
+    /// next IRQ 0, the end of the Sound Blaster's current block, the
+    /// Ultrasound's next timer, DMA or voice interrupt, or the retrace a
+    /// 3dfx card's swap waits for.
     fn next_event(&self) -> Option<u64> {
         let sb = self.sb.as_ref().and_then(|sb| sb.next_event());
         let gus = self.gus_next_event();
-        [self.pit0.next_event(), sb, gus].into_iter().flatten().min()
+        [self.pit0.next_event(), sb, gus, self.voodoo_next_event()].into_iter().flatten().min()
     }
 
     fn gus_next_event(&self) -> Option<u64> {
@@ -1174,6 +1201,9 @@ impl Bus {
         }
         if self.gus_next_event().is_some_and(|t| t <= now) {
             self.gus_advance();
+        }
+        if self.voodoo_next_event().is_some_and(|t| t <= now) {
+            self.voodoo_service();
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -2120,6 +2150,13 @@ impl Bus {
     /// start of a vertical retrace since it was last latched, as the CRTC
     /// does at every retrace.
     pub fn sync_display(&mut self) {
+        // The 3dfx card's picture changed, or it took or gave back the
+        // monitor: draw the screen anew.
+        if let Some(v) = &mut self.voodoo
+            && v.prepare_display()
+        {
+            self.vga.mark_dirty_full();
+        }
         let now = self.clock.now_ns();
         if self.vga.retrace_began(now) {
             self.settle_register_mode();
@@ -2263,6 +2300,12 @@ impl Bus {
     /// The size of the screen in the mode's own pixels: the VESA mode's
     /// size, or what the standard mode has.
     pub fn display_size(&self) -> (usize, usize) {
+        if let Some(v) = &self.voodoo
+            && v.output()
+        {
+            let (w, h) = v.size();
+            return (w as usize, h as usize);
+        }
         match (self.video_mode, self.vbe.mode) {
             (VideoMode::Vesa, Some(mode)) => (mode.width as usize, mode.height as usize),
             (mode, _) => mode.dimensions(),

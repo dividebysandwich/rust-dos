@@ -146,6 +146,16 @@ impl Clock {
         self.stalled += n;
     }
 
+    /// Let emulated time pass without executing anything until PIT tick
+    /// `ticks`, for a device that holds the bus that long.
+    pub fn stall_to(&mut self, ticks: u64) {
+        let target = self.icount_at(ticks);
+        if target > self.icount {
+            self.stalled += target - self.icount;
+            self.icount = target;
+        }
+    }
+
     /// Fast-forward to the deadline, for a CPU that is waiting for an
     /// interrupt. Returns the number of instructions skipped.
     pub fn skip_to_deadline(&mut self) -> u64 {

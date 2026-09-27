@@ -113,6 +113,7 @@ pub fn machine_settings(text: &str, settings: &Settings) -> Settings {
 fn with_machine(base: &Settings, from: &Settings) -> Settings {
     Settings {
         machine: from.machine,
+        voodoo: crate::voodoo::VoodooSettings { enabled: from.voodoo.enabled, board: from.voodoo.board, ..base.voodoo },
         monochrome: from.monochrome,
         cycles: from.cycles,
         cpu: from.cpu,

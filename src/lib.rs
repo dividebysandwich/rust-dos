@@ -72,4 +72,5 @@ pub mod stats;
 pub mod time_commands;
 pub mod timer;
 pub mod video;
+pub mod voodoo;
 pub mod xms;

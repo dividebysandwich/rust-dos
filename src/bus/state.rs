@@ -12,6 +12,7 @@ const CORE_VERSION: u16 = 6;
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 2;
 const DOS_VERSION: u16 = 4;
+const VOODOO_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -28,6 +29,7 @@ impl Bus {
             ram,
             boot,
             pci,
+            voodoo,
             keyboard_buffer,
             kbd,
             kbc,
@@ -156,6 +158,11 @@ impl Bus {
             save_device(lpt_dac, w);
             cdaudio.save_state(w);
         });
+        // A 3dfx card, whose memory comes first, and only on a machine
+        // with one, so states of machines without load as they did.
+        if let Some(voodoo) = voodoo {
+            w.section(b"3DFX", VOODOO_VERSION, |w| voodoo.save(w));
+        }
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -166,6 +173,7 @@ impl Bus {
             ram,
             boot,
             pci,
+            voodoo,
             keyboard_buffer,
             kbd,
             kbc,
@@ -289,6 +297,12 @@ impl Bus {
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
+        match (r.next_is(b"3DFX"), voodoo) {
+            (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => return Err(StateError::Mismatch("it has a 3dfx card and this machine hasn't".into())),
+            (false, Some(_)) => return Err(StateError::Mismatch("this machine has a 3dfx card and it hasn't".into())),
+        }
         Ok(lost)
     }
 

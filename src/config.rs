@@ -103,6 +103,12 @@ pub struct Config {
     pub composite_era: Option<CompositeEra>,
     /// The display adapter (`machine`).
     pub machine: Option<Adapter>,
+    /// The 3dfx card (`voodoo`), its memory (`voodoo_memory`), what draws
+    /// for it (`voodoo_renderer`) and at what size (`voodoo_scale`).
+    pub voodoo: Option<bool>,
+    pub voodoo_memory: Option<crate::voodoo::Board>,
+    pub voodoo_renderer: Option<crate::voodoo::Renderer>,
+    pub voodoo_scale: Option<u32>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// recordings show the settings window and the performance overlay
     /// (`record_ui`).
@@ -564,7 +570,23 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         }
                         "machine" => match Adapter::parse(value) {
                             Some(adapter) => config.machine = Some(adapter),
-                            None => warn(format!("invalid machine '{}' (svga, vga, ega, cga, tandy, pcjr or hercules)", value)),
+                            None => warn(format!("invalid machine '{}' (svga, svga_s3, vga, ega, cga, tandy, pcjr or hercules)", value)),
+                        },
+                        "voodoo" => match parse_bool(value) {
+                            Some(on) => config.voodoo = Some(on),
+                            None => warn(format!("invalid voodoo '{}' (true or false)", value)),
+                        },
+                        "voodoo_memory" => match crate::voodoo::Board::parse(value) {
+                            Some(board) => config.voodoo_memory = Some(board),
+                            None => warn(format!("invalid voodoo_memory '{}' (4 or 12)", value)),
+                        },
+                        "voodoo_renderer" => match crate::voodoo::Renderer::parse(value) {
+                            Some(renderer) => config.voodoo_renderer = Some(renderer),
+                            None => warn(format!("invalid voodoo_renderer '{}' (software or opengl)", value)),
+                        },
+                        "voodoo_scale" => match value.parse::<u32>() {
+                            Ok(n) if (1..=4).contains(&n) => config.voodoo_scale = Some(n),
+                            _ => warn(format!("invalid voodoo_scale '{}' (1 to 4)", value)),
                         },
                         "monochrome" => match Monochrome::parse(value) {
                             Some(mono) => config.monochrome = Some(mono),
@@ -823,6 +845,8 @@ pub struct Settings {
     /// The CGA's composite monitor.
     pub composite: CompositeSettings,
     pub machine: Adapter,
+    /// The 3dfx card.
+    pub voodoo: crate::voodoo::VoodooSettings,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
@@ -860,6 +884,7 @@ impl Default for Settings {
             monochrome: Monochrome::Off,
             composite: CompositeSettings::default(),
             machine: Adapter::Svga,
+            voodoo: Default::default(),
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             cycles: CpuSpeed::Max,
@@ -909,6 +934,12 @@ impl Settings {
                 era: config.composite_era.unwrap_or(default.composite.era),
             },
             machine: config.machine.unwrap_or(default.machine),
+            voodoo: crate::voodoo::VoodooSettings {
+                enabled: config.voodoo.unwrap_or(default.voodoo.enabled),
+                board: config.voodoo_memory.unwrap_or(default.voodoo.board),
+                renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
+                scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
+            },
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
             cycles: config.cycles.unwrap_or(default.cycles),
@@ -949,6 +980,10 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "composite", Some(settings.composite.mode.name().to_string())),
         (Emulator, "composite_era", Some(settings.composite.era.name().to_string())),
         (Emulator, "machine", Some(settings.machine.name().to_string())),
+        (Emulator, "voodoo", yes_no(settings.voodoo.enabled)),
+        (Emulator, "voodoo_memory", Some(settings.voodoo.board.megabytes().to_string())),
+        (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
+        (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (
@@ -1841,6 +1876,12 @@ mod tests {
             monochrome: Monochrome::Green,
             composite: CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New },
             machine: Adapter::Vga,
+            voodoo: crate::voodoo::VoodooSettings {
+                enabled: true,
+                board: crate::voodoo::Board::Standard,
+                renderer: crate::voodoo::Renderer::OpenGl,
+                scale: 3,
+            },
             capture_dir: PathBuf::from("/home/u/dos captures"),
             record_ui: true,
             cycles: CpuSpeed::Fixed(3000),

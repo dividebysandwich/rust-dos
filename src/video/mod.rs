@@ -233,6 +233,12 @@ impl Frame {
 /// direction where it is small (mode 13h's 320x200 is 640x400, mode 12h
 /// 640x480, a 320x240 "mode X" 640x480).
 pub fn frame_size(bus: &Bus) -> (u32, u32) {
+    // A 3dfx card showing its picture instead of the VGA's.
+    if let Some(v) = &bus.voodoo
+        && v.output()
+    {
+        return v.size();
+    }
     match bus.video_mode {
         VideoMode::Graphics320x200
         | VideoMode::Ega320x200
@@ -266,6 +272,13 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
 /// Draw the rows the VGA marked dirty into `frame`, which must be
 /// `frame_size` big.
 pub fn render_screen(frame: &mut Frame, bus: &Bus) {
+    if let Some(v) = &bus.voodoo
+        && v.output()
+    {
+        frame.drawn_from = DrawnFrom::default();
+        v.render(&mut frame.rgb, frame.width as usize);
+        return;
+    }
     // Re-render only the rows the VGA has marked dirty since the last call.
     // For the common case of a shell prompt blinking or one line of output,
     // this is one or two character rows out of 25 — orders of magnitude less

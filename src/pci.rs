@@ -1,15 +1,21 @@
-//! The PCI bus of `machine=svga_s3`, through configuration mechanism #1
-//! (the address at CF8h, the data at CFCh-CFFh) and the PCI BIOS (INT 1Ah
-//! AH=B1h): the S3 Trio64 as device 1 of bus 0, where DOSBox-X had it and
-//! Windows 95 installed on it knows it (PCI\VEN_5333&DEV_8811, BUS_00&
-//! DEV_01&FUNC_00). Its BAR0 is the chip's linear frame buffer address,
-//! the same register as CR59/CR5Ah. The other machines have no PCI bus.
+//! The PCI bus, through configuration mechanism #1 (the address at CF8h,
+//! the data at CFCh-CFFh) and the PCI BIOS (INT 1Ah AH=B1h), with the
+//! cards DOSBox-X had where it had them, so that a Windows 95 installed
+//! there knows them (BUS_00&DEV_00&FUNC_00 and BUS_00&DEV_01&FUNC_00):
+//!
+//! * device 0: the 3dfx Voodoo Graphics (`voodoo`), when there is one;
+//! * device 1: the S3 Trio64 of `machine=svga_s3` (PCI\VEN_5333&DEV_8811),
+//!   whose BAR0 is the chip's linear frame buffer address, the same
+//!   register as CR59/CR5Ah.
+//!
+//! A machine with neither has no PCI bus.
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuFlags};
 use iced_x86::Register;
 
-/// Where the S3 is.
+/// Where the cards are.
+const VOODOO_DEVICE: u32 = 0;
 const S3_DEVICE: u32 = 1;
 
 /// The configuration address latch (CF8h).
@@ -30,18 +36,33 @@ impl Default for Pci {
 
 crate::state_fields!(Pci { address, command });
 
+/// The card a configuration access reaches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Voodoo,
+    S3,
+}
+
 impl Bus {
-    /// Whether the machine has a PCI bus: the S3's.
+    /// Whether the machine has a PCI bus: an S3 or a 3dfx card on it.
     pub fn pci_present(&self) -> bool {
-        self.s3()
+        self.s3() || self.voodoo.is_some()
     }
 
-    /// The device, function and register the address latch selects, if
-    /// it is enabled and names the S3.
-    fn pci_target(&self) -> Option<u8> {
+    /// The card and register the address latch selects, if it is enabled
+    /// and names one.
+    fn pci_target(&self) -> Option<(Target, u8)> {
         let a = self.pci.address;
         let (enabled, bus, device, function) = (a & 0x8000_0000 != 0, a >> 16 & 0xFF, a >> 11 & 0x1F, a >> 8 & 7);
-        (enabled && self.pci_present() && bus == 0 && device == S3_DEVICE && function == 0).then_some(a as u8 & 0xFC)
+        if !enabled || bus != 0 || function != 0 {
+            return None;
+        }
+        let target = match device {
+            VOODOO_DEVICE if self.voodoo.is_some() => Target::Voodoo,
+            S3_DEVICE if self.s3() => Target::S3,
+            _ => return None,
+        };
+        Some((target, a as u8 & 0xFC))
     }
 
     /// A byte of the S3's configuration space: an S3 Trio64 (5333h:8811h),
@@ -63,17 +84,26 @@ impl Bus {
     /// A configuration data port (CFCh-CFFh) read.
     pub(crate) fn pci_read(&self, port: u16) -> u8 {
         match self.pci_target() {
-            Some(reg) => self.s3_config(reg + (port & 3) as u8),
+            Some((Target::S3, reg)) => self.s3_config(reg + (port & 3) as u8),
+            Some((Target::Voodoo, reg)) => self.voodoo.as_ref().map_or(0xFF, |v| v.config_read(reg + (port & 3) as u8)),
             None => 0xFF,
         }
     }
 
-    /// A configuration data port written: the command register's memory
-    /// and I/O enables and palette snoop, and BAR0, which moves the frame
-    /// buffer.
+    /// A configuration data port written: for the S3, the command
+    /// register's memory and I/O enables and palette snoop, and BAR0,
+    /// which moves the frame buffer; for the 3dfx card, its registers.
     pub(crate) fn pci_write(&mut self, port: u16, value: u8) {
-        let Some(reg) = self.pci_target() else { return };
+        let Some((target, reg)) = self.pci_target() else { return };
         let reg = reg + (port & 3) as u8;
+        if target == Target::Voodoo {
+            if let Some(v) = &mut self.voodoo
+                && v.config_write(reg, value)
+            {
+                self.voodoo_moved();
+            }
+            return;
+        }
         match reg {
             0x04 => self.pci.command = (self.pci.command & 0xFF00) | (value & 0x23) as u16,
             // Base bits 23-31: CR5Ah bit 7, CR59h.

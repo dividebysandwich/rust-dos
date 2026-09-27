@@ -120,6 +120,12 @@ impl<'a> Reader<'a> {
         Ok(Reader::new(self.take(len as usize)?))
     }
 
+    /// Whether the next section is `tag`, for a section a state has only
+    /// with the hardware it is for.
+    pub fn next_is(&self, tag: &[u8; 4]) -> bool {
+        self.data.get(self.pos..self.pos + 4) == Some(&tag[..])
+    }
+
     /// A count of things to read, which can't be more than the bytes left.
     pub fn count(&mut self) -> Result<usize> {
         let mut n = 0u64;
@@ -448,6 +454,16 @@ impl<K: State + Default + Ord, V: State + Default> State for BTreeMap<K, V> {
             self.insert(k, v);
         }
         Ok(())
+    }
+}
+
+/// Shared state, copied first if something else holds it too.
+impl<T: State + Clone> State for std::sync::Arc<T> {
+    fn save(&self, w: &mut Writer) {
+        (**self).save(w);
+    }
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        std::sync::Arc::make_mut(self).load(r)
     }
 }
 

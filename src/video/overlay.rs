@@ -9,6 +9,10 @@ use crate::bus::Bus;
 /// mouse pointer while the driver shows it over `frame`, which is the
 /// picture of `bus`'s current video mode.
 pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
+    // The 3dfx card's picture has neither.
+    if bus.voodoo_output() {
+        return;
+    }
     let (width, height) = (frame.width, frame.height);
     let buffer = &mut frame.rgb[..];
     let frame_w = width as usize;

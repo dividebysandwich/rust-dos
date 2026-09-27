@@ -203,6 +203,7 @@ impl Machine {
         // (The browser has no recompiler: every core is the interpreter.)
         cpu.core = settings.core;
         video::bios::install(&mut cpu.bus, settings.video_setup());
+        cpu.bus.configure_voodoo(settings.voodoo.board());
         cpu.bus.set_disk_settings(settings.disk);
         cpu.bus.set_mixer(settings.mixer);
         cpu.bus.set_joystick(settings.joystick);

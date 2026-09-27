@@ -15,6 +15,8 @@ pub struct Hardware {
     pub video: VideoSetup,
     /// Expanded memory and upper memory blocks.
     pub memory: (bool, bool),
+    /// The 3dfx card.
+    pub voodoo: Option<crate::voodoo::Board>,
 }
 
 impl Hardware {
@@ -26,6 +28,7 @@ impl Hardware {
             sound: settings.sound.clone(),
             video: settings.video_setup(),
             memory: (settings.ems, settings.umb),
+            voodoo: settings.voodoo.board(),
         }
     }
 
@@ -43,6 +46,11 @@ impl Hardware {
             monochrome,
             ems: self.memory.0,
             umb: self.memory.1,
+            voodoo: crate::voodoo::VoodooSettings {
+                enabled: self.voodoo.is_some(),
+                board: self.voodoo.unwrap_or(settings.voodoo.board),
+                ..settings.voodoo
+            },
             ..settings.clone()
         }
     }
@@ -71,6 +79,14 @@ impl Hardware {
                 monitor
             ));
             crate::video::bios::switch(cpu, setup);
+        }
+        let voodoo = settings.voodoo.board();
+        if voodoo != self.voodoo {
+            match voodoo {
+                Some(board) => cpu.bus.log_string(&format!("[CONFIG] A 3dfx Voodoo Graphics with {} MB", board.megabytes())),
+                None => cpu.bus.log_string("[CONFIG] No 3dfx card"),
+            }
+            cpu.bus.configure_voodoo(voodoo);
         }
         if (settings.ems, settings.umb) != self.memory {
             let on_off = |on| if on { "on" } else { "off" };
