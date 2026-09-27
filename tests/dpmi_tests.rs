@@ -591,3 +591,36 @@ fn an_exception_the_client_does_not_handle_ends_it() {
     assert_eq!(cpu.errorlevel, 0xFF);
     assert!(!cpu.bus.dpmi.active());
 }
+
+#[test]
+fn a_client_moves_to_and_from_debug_and_control_registers() {
+    // In protected mode, with a #GP handler that ends the program: DR3 set
+    // and read back, and CR0 read (DOS/4GW Professional's NULLP option
+    // sets the debug registers itself).
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, false, fail)?;
+        a.mov(ax, 0x0203)?;
+        a.mov(bl, 0x0D)?;
+        a.mov(cx, cs)?;
+        a.mov(dx, EXC_HANDLER as u32)?;
+        a.int(0x31)?;
+        step(a, 4)?;
+        a.mov(eax, 0x1234_5678)?;
+        a.mov(dr3, eax)?;
+        a.xor(ebx, ebx)?;
+        a.mov(ebx, dr3)?;
+        a.mov(dword_ptr(R), ebx)?;
+        a.mov(ecx, cr0)?;
+        a.mov(word_ptr(R + 4), cx)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let exc = asm16(EXC_HANDLER, |a| exit(a, 0xDD));
+    let (mut cpu, psp) = machine("movsystem", &[("T.COM", com(&[(0x100, main), (EXC_HANDLER, exc)]))], "T.COM");
+    assert!(run_to_exit(&mut cpu, 200), "the program didn't end (step {})", word(&cpu, psp, STEP));
+    assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", word(&cpu, psp, STEP));
+    assert_eq!(cpu.bus.read_32(psp as usize * 16 + R as usize), 0x1234_5678);
+    assert_eq!(word(&cpu, psp, R + 4) & 1, 1);
+}

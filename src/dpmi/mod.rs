@@ -911,7 +911,7 @@ fn gate_context(cpu: &mut Cpu) -> Option<(Context, Option<u32>)> {
 
 /// An interrupt or exception through the IDT.
 fn idt(cpu: &mut Cpu, vector: u8) {
-    let Some((ctx, error)) = gate_context(cpu) else {
+    let Some((mut ctx, error)) = gate_context(cpu) else {
         // Not from the client's level: the host's own IRET failed.
         cpu.bus.log_string(&format!("[DPMI] Exception {:02X}h in the host", vector));
         abort(cpu, "exception in the host");
@@ -920,11 +920,53 @@ fn idt(cpu: &mut Cpu, vector: u8) {
     // The vectors of exceptions 8-15 are the first PIC's too; exceptions
     // there push an error code (#DF, #TS, #NP, #SS, #GP, #PF).
     let exception = (vector < 8 && vector != 2) || ((8..16).contains(&vector) && error.is_some());
-    if exception {
+    if vector == 13 && error == Some(0) && emulate_mov_system(cpu, &mut ctx) {
+        resume(cpu, &ctx);
+    } else if exception {
         exception_entry(cpu, vector, error.unwrap_or(0), ctx);
     } else {
         interrupt(cpu, vector, ctx);
     }
+}
+
+/// A MOV to or from a control or debug register (0F 20h-23h), which level 3
+/// may not run, in the client's context `ctx`: the host does it for the
+/// client before its exception handler sees the #GP, as Windows does.
+/// Clients read the control registers as they are and can't change them;
+/// the debug registers are theirs to set (DOS/4GW Professional's NULLP
+/// option sets DR0-DR3 and DR7 itself), with no breakpoints behind them.
+/// Returns whether the instruction was one.
+fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
+    let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else { return false };
+    let byte = |i: u32| cpu.bus.read_8(base.wrapping_add(ctx.eip).wrapping_add(i) as usize);
+    // Operand and address size prefixes change nothing.
+    let mut at = 0;
+    while at < 4 && matches!(byte(at), 0x66 | 0x67) {
+        at += 1;
+    }
+    let (escape, opcode, modrm) = (byte(at), byte(at + 1), byte(at + 2));
+    if escape != 0x0F || !(0x20..=0x23).contains(&opcode) {
+        return false;
+    }
+    let (n, reg) = ((modrm >> 3 & 7) as usize, (modrm & 7) as usize);
+    let pentium = cpu.model >= CpuModel::Pentium;
+    match opcode {
+        0x20 => {
+            ctx.gpr[reg] = match n {
+                0 => cpu.cr0,
+                2 => cpu.cr2,
+                3 => cpu.cr3,
+                4 if pentium => cpu.cr4,
+                _ => return false,
+            }
+        }
+        0x22 if !matches!(n, 0 | 2 | 3) && !(n == 4 && pentium) => return false,
+        0x22 => {}
+        0x21 => ctx.gpr[reg] = cpu.dr[n],
+        _ => cpu.dr[n] = ctx.gpr[reg],
+    }
+    ctx.eip = ctx.eip.wrapping_add(at + 3);
+    true
 }
 
 /// Interrupt `vector` in the client's context `ctx`: to its handler, or
