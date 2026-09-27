@@ -74,6 +74,7 @@
 #core=auto
 # The display adapter, which programs look for to pick their graphics:
 #   svga  a VGA with VESA modes up to 1024x768 (the default)
+#   svga_s3  an S3 Trio64 on the PCI bus, for booted systems' drivers
 #   vga   an IBM VGA, without VESA modes
 #   ega   an IBM EGA with an Enhanced Color Display: 16 of 64 colours
 #   cga   an IBM CGA: 4 colours at 320x200, 2 at 640x200
@@ -84,6 +85,15 @@
 #         720x348 graphics
 # A change takes effect at the DOS prompt.
 #machine=svga
+# A 3dfx Voodoo Graphics for games that draw with Glide, in DOS or in a
+# booted Windows 95, with 12 MB (4 MB frame buffer, two texture units) or
+# 4 MB (2 MB, one texture unit). Changes take effect at the DOS prompt.
+#voodoo=false
+#voodoo_memory=12
+# What draws the card's triangles: software (rust-dos) or opengl, which
+# draws them at voodoo_scale (1 to 4) times the card's resolution.
+#voodoo_renderer=software
+#voodoo_scale=2
 # Where screenshots (Ctrl+F5) and sound (Ctrl+F6), video (Ctrl+F7) and
 # animation (PrintScreen) recordings go: a folder, relative to the
 # directory rust-dos started in.

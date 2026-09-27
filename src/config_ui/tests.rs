@@ -250,7 +250,7 @@ fn settings_change_live() {
     assert!(!status(&ui).0.contains("prompt"), "{:?}", status(&ui));
 
     // Memory waits for the next start.
-    ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
     keys(&mut ui, &mut host, &[Right]);
     assert_eq!(host.applied.last().unwrap().memsize, 32);
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));

@@ -187,6 +187,21 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             _ => unknown(imported),
         },
         ("speaker", "disney") if bool_value() == Some("true") => imported.set("sound", "lpt_dac", "disney"),
+        // DOSBox-X's 3dfx card. Its default, auto, is in every config it
+        // writes, so only a card asked for by name is put in.
+        ("voodoo", "voodoo_card") | ("pci", "voodoo") => match first {
+            "software" | "opengl" => {
+                imported.set("emulator", "voodoo", "true");
+                imported.set("emulator", "voodoo_renderer", first);
+            }
+            "auto" | "false" | "off" | "none" => {}
+            _ => unknown(imported),
+        },
+        ("voodoo", "voodoo_maxmem") | ("pci", "voodoo_maxmem") => match bool_value() {
+            Some("true") => imported.set("emulator", "voodoo_memory", "12"),
+            Some(_) => imported.set("emulator", "voodoo_memory", "4"),
+            None => unknown(imported),
+        },
         ("joystick", "joysticktype") => match first {
             "auto" | "2axis" | "4axis" | "none" => imported.set("joystick", "joysticktype", first),
             "4axis_2" | "fcs" | "ch" => imported.set("joystick", "joysticktype", "4axis"),
@@ -337,6 +352,25 @@ mod tests {
         assert_eq!(get("lpt_dac"), Some("disney"));
         assert_eq!(get("sbtype"), None);
         assert!(imported.warnings[0].contains("sbtype=gb"), "{:?}", imported.warnings);
+    }
+
+    #[test]
+    fn a_3dfx_card_asked_for_by_name_is_put_in() {
+        let get = |conf: &str, key: &str| {
+            let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+            imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.clone())
+        };
+        let x = "[voodoo]\nvoodoo_card=software\nvoodoo_maxmem=false\n";
+        assert_eq!(get(x, "voodoo").as_deref(), Some("true"));
+        assert_eq!(get(x, "voodoo_renderer").as_deref(), Some("software"));
+        assert_eq!(get(x, "voodoo_memory").as_deref(), Some("4"));
+        assert_eq!(get("[pci]\nvoodoo=opengl\n", "voodoo_renderer").as_deref(), Some("opengl"));
+        // DOSBox-X's default, auto, doesn't.
+        assert_eq!(get("[voodoo]\nvoodoo_card=auto\n", "voodoo"), None);
+        let text = import(&[x], &[PathBuf::from("/")], "x", None).profile_text(None);
+        let config = crate::config::parse(&text, Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.voodoo_memory, Some(crate::voodoo::Board::Standard));
     }
 
     /// A system booted from a disk image, as DOSBox runs Windows 95.

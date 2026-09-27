@@ -279,6 +279,24 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
   run through a journal of the writes, and from the `.C.img` copies
   beside a state file in another.
 
+### 3dfx (Glide) games
+
+With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),
+`/api/status` → `video.voodoo` shows the card: `output` (true while its
+picture is on the screen instead of the VGA's; `/api/screenshot` then
+shows it), `clock` (the video clock Glide turns on first), `base` (BAR0),
+`width`/`height`, the `front` and `back` buffers, `pending_swaps` (swaps
+waiting for the retrace), `fifo_writes` behind them, `triangles` drawn,
+the `fbiInit` registers and `init_enable`. A game that detects no card
+usually left `fbiInit` at their power-on values (`00000410 00201102
+80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
+
+- **Memory:** `/api/mem` reads the card's window (`phys:D0000000`, 16 MB):
+  registers at +0, the frame buffer at +400000h (2048 bytes a row of
+  16-bit pixels), texture memory at +800000h (write-only; reads give FFh).
+- **Speed:** the triangles are drawn on worker threads; `cycles_per_ms`
+  shows what is left for the game's own code.
+
 ### Protected-mode programs (DOS extenders)
 
 Programs built with DOS/4GW, DOS/32A, PMODE or Borland's RTM switch the CPU

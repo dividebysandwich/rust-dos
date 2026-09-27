@@ -236,7 +236,8 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Cpu, Machine, Memsize, Ems, Umb, HardDiskSpeed, FloppyDiskSpeed, Joystick,
+                Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb,
+                HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, Autoexec,
             ],
             Page::Sound => &[
@@ -324,6 +325,11 @@ enum Item {
     Cpu,
     /// The display adapter.
     Machine,
+    /// The 3dfx card, its memory, and how the host draws for it.
+    Voodoo,
+    VoodooMemory,
+    VoodooRenderer,
+    VoodooScale,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -466,6 +472,10 @@ impl Item {
             Cpu => "Processor",
             Machine => "Video card",
             Memsize => "Memory",
+            Voodoo => "3dfx Voodoo Graphics",
+            VoodooMemory => "3dfx memory",
+            VoodooRenderer => "3dfx drawn by",
+            VoodooScale => "3dfx OpenGL size",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             KeyboardLayout => "Keyboard layout",
@@ -518,6 +528,8 @@ impl Item {
             // The page records the canvas as it shows.
             Item::CaptureDir | Item::RecordUi => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
+            // The browser draws with the emulator's own rasterizer only.
+            Item::VoodooRenderer | Item::VoodooScale => frontend.window,
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             _ => true,
@@ -532,6 +544,8 @@ impl Item {
             Item::ReverbMix => s.mixer.reverb != ReverbPreset::Off,
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
+            Item::VoodooMemory | Item::VoodooRenderer => s.voodoo.enabled,
+            Item::VoodooScale => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
             _ => true,
         }
     }
@@ -542,7 +556,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | KeyboardLayout | Rewind | RewindMemory => Applies::Now,
+            Cycles | Core | KeyboardLayout | Rewind | RewindMemory | VoodooRenderer | VoodooScale => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi => {
                 Applies::Now
@@ -600,6 +614,16 @@ impl Item {
             .to_string(),
             Machine => s.machine.describe().to_string(),
             Memsize => format!("{} MB", s.memsize),
+            Voodoo => on_off(s.voodoo.enabled),
+            VoodooMemory => match s.voodoo.board {
+                crate::voodoo::Board::Standard => "4 MB (one texture unit)".to_string(),
+                crate::voodoo::Board::Max => "12 MB (two texture units)".to_string(),
+            },
+            VoodooRenderer => match s.voodoo.renderer {
+                crate::voodoo::Renderer::Software => "Rust-DOS".to_string(),
+                crate::voodoo::Renderer::OpenGl => "OpenGL".to_string(),
+            },
+            VoodooScale => format!("{}x", s.voodoo.scale),
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
             KeyboardLayout => s.keyboard_layout.describe(),
@@ -700,6 +724,15 @@ impl Item {
             Cpu => s.cpu = cycle(&[CpuModel::I386, CpuModel::I486, CpuModel::Pentium], s.cpu, dir),
             Machine => s.machine = cycle(&crate::video::adapter::Adapter::ALL, s.machine, dir),
             Memsize => s.memsize = step_number(&MEMSIZES, s.memsize as u32, dir) as usize,
+            Voodoo => s.voodoo.enabled = !s.voodoo.enabled,
+            VoodooMemory => {
+                s.voodoo.board = cycle(&[crate::voodoo::Board::Standard, crate::voodoo::Board::Max], s.voodoo.board, dir)
+            }
+            VoodooRenderer => {
+                s.voodoo.renderer =
+                    cycle(&[crate::voodoo::Renderer::Software, crate::voodoo::Renderer::OpenGl], s.voodoo.renderer, dir)
+            }
+            VoodooScale => s.voodoo.scale = cycle(&[1, 2, 3, 4], s.voodoo.scale, dir),
             Ems => s.ems = !s.ems,
             Umb => s.umb = !s.umb,
             KeyboardLayout => s.keyboard_layout = cycle(&crate::keylayout::LayoutSetting::all(), s.keyboard_layout, dir),

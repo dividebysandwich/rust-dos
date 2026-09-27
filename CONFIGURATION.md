@@ -130,6 +130,17 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   and starts above 144 KB on a PCjr, as DOSBox has it for Sierra's
   games. Not there: the Tandy 1000 SL/TL's DAC and 640x200 in 16
   colours, and the PCjr's cartridges.
+* `voodoo=true` adds a 3dfx Voodoo Graphics card to any of the display
+  adapters, for games that draw with Glide (see
+  [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)); `false` is the default.
+  `voodoo_memory` is `12` (the default: 4 MB of frame buffer and two
+  texture units with 4 MB each, as DOSBox-X's card has) or `4` (a retail
+  board: 2 MB and one texture unit with 2 MB). Both take effect at the DOS
+  prompt. `voodoo_renderer` is what draws the card's triangles:
+  `software` (the default, rust-dos's own rasterizer) or `opengl`, which
+  draws them at `voodoo_scale` (1 to 4, 2 by default) times the card's
+  resolution; without OpenGL (in the browser, or with SDL's dummy video
+  driver) the software rasterizer draws.
 * `capture_dir` is the folder screenshots and recordings go in:
   `capture` (the default) in the directory rust-dos started in, or a
   path of your own. Screenshots (Ctrl+F5, in the settings window too)
@@ -640,6 +651,42 @@ the machine off). MS-DOS Prompts run in a window or full screen
 (Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
 hardware it was installed on in its registry, so an image installed on
 other hardware may look for devices this machine hasn't.
+
+## 3dfx Voodoo Graphics
+
+`voodoo=true` in `[emulator]` puts a 3dfx Voodoo Graphics in the machine,
+the 3D card DOS and Windows 95 games of 1996-1998 draw with through Glide:
+
+```ini
+[emulator]
+voodoo=true
+cpu=pentium
+```
+
+The card is on the PCI bus as device 0, where DOSBox-X has it, with its
+16 MB of registers, frame buffer and texture memory at D0000000h (BAR0).
+Glide finds it through the PCI BIOS or ports CF8h/CFCh, programs it, and
+turns its output on: from then on the screen shows the card's picture
+instead of the VGA's, as a monitor on its pass-through cable does, until
+the game ends or turns the output off. The picture goes through the
+card's gamma table, which games set brighter than DOSBox-X shows them.
+
+* **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
+  the game) and run under a DOS extender such as DOS/4GW, which maps the
+  card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
+  Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`.
+* **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
+  the card as a "PCI Multimedia Video Device", which needs no driver:
+  games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it
+  `fxmemmap.vxd`).
+
+The card swaps its buffers at the vertical retrace a game asks it to wait
+for, and reports the swaps still waiting and its busy state as the real
+one does, so games that pace themselves by it run at its 60 Hz. The
+triangles are drawn on up to four threads of their own: rust-dos keeps
+running the game meanwhile, and the picture is the same however many
+there are. Save states and rewind keep the card with everything in its
+memory.
 
 ## CRT shaders
 
