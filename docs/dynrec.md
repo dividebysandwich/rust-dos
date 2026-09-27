@@ -383,7 +383,7 @@ takes more care:
   - A return, indirect call or jump to none of the EIPs its links were made to
     looks in the engine's table of places returns went to (`Return`, by
     the EIP's low bits), made as its links are, in the block's mode, and
-    goes there where the guard holds (on x86-64 hosts). Otherwise it
+    goes there where the guard holds. Otherwise it
     leaves through a stub of its own (`RETURN_MISS`), and the execution
     loop links one it hasn't made yet, or else the one after the one it
     made last, and puts the place in the table. A block that goes takes

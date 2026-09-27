@@ -21,7 +21,7 @@ use dynasmrt::aarch64::Aarch64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use iced_x86::ConditionCode;
 
-use super::block::{BlockData, LINKS, RETURN_LINK, RETURN_MISS};
+use super::block::{BlockData, LINKS, RETURN_BITS, RETURN_LINK, RETURN_MISS};
 use super::helpers::*;
 use super::uop::*;
 use crate::cpu::Seg;
@@ -206,6 +206,8 @@ struct Gen<'a> {
     live_after: u32,
     dirty: bool,
     dirty_at: Vec<bool>,
+    /// What the code is translated for.
+    env: super::Env,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -227,7 +229,7 @@ pub const TAIL: bool = false;
 /// their handlers run them.
 pub const SYSTEM: bool = false;
 
-pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, _env: super::Env) -> Code {
+pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();
     let mut labels = || ops.new_dynamic_label();
@@ -256,6 +258,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, _env: sup
         live_after: 0,
         dirty: false,
         dirty_at: vec![false; n],
+        env,
     };
     g.prologue(items);
     let mut synced = 0;
@@ -1760,7 +1763,63 @@ impl Gen<'_> {
             self.guarded(slot);
             dynasm!(self.ops ; .arch aarch64 ; =>next);
         }
-        dynasm!(self.ops ; .arch aarch64 ; b =>miss);
+        // The engine's place for the EIP (see `Return`), made in this
+        // block's mode, with its guard checked as a link's (see
+        // `x64::Gen::returned`: the mode has the A20 gate, paging and
+        // CPL the guard was made under).
+        let g = RETURN_GUARD as u32;
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; and w2, W(r(t)), (1 << RETURN_BITS) - 1
+            ; add w2, w2, w2, lsl 2
+            ; ldr x3, [x20, CTX_RETURNS as u32]
+            ; add x2, x3, x2, lsl 3
+            ; ldr w3, [x2, g + GUARD_EIP as u32]
+            ; cmp W(r(t)), w3
+            ; b.ne =>miss
+            ; ldr w3, [x2, RETURN_MODE as u32]
+        );
+        self.mov32(4, self.env.bits);
+        dynasm!(self.ops ; .arch aarch64 ; cmp w3, w4 ; b.ne =>miss);
+        self.field(Access::Ldr32, 3, seg_field(Seg::CS, layout::SEG_BASE));
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; ldr w4, [x2, g + GUARD_CS_BASE as u32]
+            ; cmp w3, w4
+            ; b.ne =>miss
+        );
+        if self.env.bits & super::ENV_PAGING != 0 {
+            // The TLB entry of the page in the set of the privilege level.
+            let set = if self.env.bits & super::ENV_USER != 0 { layout::TLB_SET as u32 } else { 0 };
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; ldr w4, [x2, g + GUARD_PAGE as u32]
+                ; and w3, w4, (layout::TLB_SET - 1) as u32
+            );
+            if set != 0 {
+                dynasm!(self.ops ; .arch aarch64 ; add w3, w3, set);
+            }
+            self.mov32(5, layout::TLB_ENTRY_SIZE as u32);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; umull x3, w3, w5
+                ; ldr x6, [x20, CTX_TLB as u32]
+                ; add x6, x6, x3
+                ; add w4, w4, 1
+                ; ldr w5, [x6, layout::TLB_READ_TAG as u32]
+                ; cmp w4, w5
+                ; b.ne =>miss
+                ; ldr w5, [x6, layout::TLB_PHYS as u32]
+                ; ldr w3, [x2, g + GUARD_PHYS as u32]
+                ; cmp w5, w3
+                ; b.ne =>miss
+            );
+        }
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; ldr x16, [x2, RETURN_CODE as u32]
+            ; br x16
+        );
     }
 
     /// Leave through link `slot` to another page, if fetching its target

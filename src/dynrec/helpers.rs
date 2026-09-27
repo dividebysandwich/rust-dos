@@ -157,15 +157,11 @@ pub const GUARD_A20: i32 = offset_of!(Guard, a20) as i32;
 pub const GUARD_PAGING: i32 = offset_of!(Guard, paging) as i32;
 pub const GUARD_PAGE: i32 = offset_of!(Guard, page) as i32;
 pub const GUARD_PHYS: i32 = offset_of!(Guard, phys) as i32;
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_RETURNS: i32 = offset_of!(JitCtx, returns) as i32;
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const RETURN_GUARD: i32 = offset_of!(Return, guard) as i32;
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const RETURN_MODE: i32 = offset_of!(Return, mode) as i32;
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const RETURN_CODE: i32 = offset_of!(Return, code) as i32;
-/// (The x86-64 code indexes the table with LEA's scale of 5, then 8.)
+/// (The code indexes the table with a scale of 5, then 8.)
 const _: () = assert!(std::mem::size_of::<Return>() == 40);
 
 impl JitCtx {
