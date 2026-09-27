@@ -153,6 +153,26 @@ fn test_fxch_swap() {
 }
 
 #[test]
+fn test_undocumented_fstp_and_ffreep() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    for value in [1.0, 2.0, 3.0] {
+        let mut f = F80::new();
+        f.set_f64(value);
+        cpu.fpu_push(f);
+    }
+
+    // D9 D9: FSTP ST(1) in its undocumented form (TFX pops with D9 D8)
+    run_cpu_code(&mut cpu, &[0xD9, 0xD9]);
+    assert_top_f64(&cpu, 3.0);
+    assert_eq!(cpu.fpu_get(1).get_f64(), 1.0);
+
+    // DF C0: FFREEP ST(0), free and pop
+    run_cpu_code(&mut cpu, &[0xDF, 0xC0]);
+    assert_top_f64(&cpu, 1.0);
+    assert_eq!(cpu.fpu_tags[cpu.fpu_get_phys_index(7)], FPU_TAG_EMPTY);
+}
+
+#[test]
 fn test_fild_integer_load() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     let addr = 0x1000;

@@ -31,6 +31,12 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         // No-ops or Wait in HLE
         Mnemonic::Fnop => {}
         Mnemonic::Ffree => control::ffree(cpu, instr),
+        // FFREEP (DF C0+i), undocumented but there since the 287: FFREE,
+        // then pop.
+        Mnemonic::Ffreep => {
+            control::ffree(cpu, instr);
+            cpu.fpu_pop();
+        }
 
         // DATA TRANSFER
         // -------------
@@ -45,7 +51,9 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
 
         // Store Float
         Mnemonic::Fst => data::fst(cpu, instr),
-        Mnemonic::Fstp => data::fstp(cpu, instr),
+        // D9 D8+i (iced's FSTPNCE) is an undocumented alias of FSTP ST(i)
+        // that 387s and later run as one: code such as TFX's pops with it.
+        Mnemonic::Fstp | Mnemonic::Fstpnce => data::fstp(cpu, instr),
         Mnemonic::Fbstp => data::fbstp(cpu, instr),
 
         // Exchange

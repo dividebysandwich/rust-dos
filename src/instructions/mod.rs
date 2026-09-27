@@ -227,7 +227,9 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         | Fcompp | Ficom | Ficomp | Ftst | Fxam | Fcomi | Fcomip | Fucomi | Fucomip | Finit
         | Fninit | Fldcw | Fstcw | Fnstcw | Fstsw | Fnstsw | Fclex | Fnclex | Fsave | Fnsave
         | Frstor | Fstenv | Fnstenv | Fldenv | Fnop | Ffree | Fincstp | Fdecstp | Fucom | Fucomp
-        | Fucompp | Fneni | Fndisi | Fnsetpm | Feni | Fdisi | Fsetpm => fpu_instruction(cpu, instr),
+        | Fucompp | Fneni | Fndisi | Fnsetpm | Feni | Fdisi | Fsetpm | Fstpnce | Ffreep => {
+            fpu_instruction(cpu, instr)
+        }
 
         _ => Err(Fault::UD),
     }
