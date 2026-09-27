@@ -258,6 +258,14 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         0x21 => int21::handle(cpu),
         0x25 => int25::handle(cpu, false),
         0x26 => int25::handle(cpu, true),
+        // Terminate and stay resident, keeping the first DX bytes from the
+        // PSP: AH=31h with them in paragraphs and exit code 0, as MS-DOS's
+        // handler goes on into INT 21h.
+        0x27 => {
+            cpu.set_dx(((cpu.dx() as u32 + 15) >> 4) as u16);
+            cpu.set_ax(0x3100);
+            int21::handle(cpu);
+        }
         0x28 => { /* Idle Interrupt - Do nothing */ }
         0x2A => { /* DOS Timer Tick - Do nothing for now */ }
         0x13 => int13::handle(cpu),

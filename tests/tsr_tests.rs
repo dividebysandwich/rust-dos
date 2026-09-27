@@ -180,6 +180,29 @@ fn tsr_started_from_shell_stays_resident() {
 }
 
 #[test]
+fn int_27h_keeps_dx_bytes_resident() {
+    // MOV DX,0201h ; INT 27h ; MOV AH,4Ch ; INT 21h, as Microsoft's
+    // MOUSE.COM 6.24 stays resident: the bytes up to DX, in paragraphs.
+    let base = scratch("int27", &[("TSR.COM", &[0xBA, 0x01, 0x02, 0xCD, 0x27, 0xB4, 0x4C, 0xCD, 0x21])]);
+    let mut cpu = Cpu::new(base);
+    cpu.load_shell();
+    assert!(cpu.load_executable("TSR.COM", None));
+    let tsr = cpu.current_psp;
+    for _ in 0..10 {
+        if cpu.state == CpuState::RebootShell {
+            break;
+        }
+        cpu.step();
+    }
+    assert_eq!(cpu.state, CpuState::RebootShell);
+    assert_eq!(cpu.resident_end, tsr + 0x21);
+    assert_eq!(cpu.errorlevel, 0);
+    cpu.load_shell();
+    let chain = walk(&mut cpu.bus);
+    assert_eq!((chain[0].1.owner, chain[0].1.size), (tsr, 0x21));
+}
+
+#[test]
 fn mouse_handler_is_far_called_and_registers_survive() {
     let mut cpu = Cpu::new(scratch("mouse", &[]));
     // Handler at 2000:0000 stores AX, CX, DX, clobbers AX and returns with RETF.
