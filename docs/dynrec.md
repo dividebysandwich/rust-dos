@@ -370,9 +370,15 @@ takes more care:
     at the stub's target (`Pending`): its own fetch just found the target,
     under the translation the guard records.
   - A return or indirect call to none of the EIPs its links were made to
+    looks in the engine's table of places returns went to (`Return`, by
+    the EIP's low bits), made as its links are, in the block's mode, and
+    goes there where the guard holds (on x86-64 hosts). Otherwise it
     leaves through a stub of its own (`RETURN_MISS`), and the execution
     loop links one it hasn't made yet, or else the one after the one it
-    made last.
+    made last, and puts the place in the table. A block that goes takes
+    its places in the table with it. So a function called from more
+    places in turn than its return has links goes back to each without
+    the execution loop.
   - After a chain that crossed pages, the execution loop's code window is
     moved to the page the last instruction was in, as the interpreter's
     would have been (`CodeWindow::moved`).
@@ -430,7 +436,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

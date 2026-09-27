@@ -60,6 +60,32 @@ pub struct Guard {
     pub phys: u32,
 }
 
+/// log2 of the places returns and indirect calls went to that the
+/// engine keeps for all blocks (`Return`).
+pub const RETURN_BITS: u32 = 10;
+
+/// A place a return or indirect call went to, in a table for all blocks
+/// indexed by its EIP's low bits: the x86-64 code of one whose own links
+/// lead elsewhere (a function called from many places in turn) goes there
+/// without the execution loop where its guard holds as a link's would,
+/// in the same mode (`Key::mode`, which no block has where `mode` is
+/// `u32::MAX`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Return {
+    pub guard: Guard,
+    pub mode: u32,
+    pub code: usize,
+}
+
+impl Return {
+    pub const NONE: Return = Return {
+        guard: Guard { eip: 0, cs_base: 0, a20: 0, paging: 0, page: 0, phys: 0 },
+        mode: u32::MAX,
+        code: 0,
+    };
+}
+
 /// A block of guest code. The translated code reads `gen_sum` and passes
 /// the block to the helpers, so it lives at a fixed address (boxed) for
 /// as long as the code can run.

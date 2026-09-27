@@ -1994,7 +1994,49 @@ impl Gen<'_> {
             self.guarded(slot);
             dynasm!(self.ops ; .arch x64 ; =>next);
         }
-        dynasm!(self.ops ; .arch x64 ; jmp =>miss);
+        // The engine's place for the EIP (see `Return`), made in this
+        // block's mode, with its guard checked as a link's.
+        let g = RETURN_GUARD;
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov ecx, Rd(r(t))
+            ; and ecx, (1 << super::block::RETURN_BITS) - 1
+            ; lea ecx, [rcx + rcx * 4]
+            ; mov rax, QWORD [r12 + CTX_RETURNS]
+            ; lea rcx, [rax + rcx * 8]
+            ; cmp Rd(r(t)), DWORD [rcx + g + GUARD_EIP]
+            ; jne =>miss
+            ; cmp DWORD [rcx + RETURN_MODE], self.env.bits as i32
+            ; jne =>miss
+            ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
+            ; cmp eax, DWORD [rcx + g + GUARD_CS_BASE]
+            ; jne =>miss
+        );
+        if self.env.bits & super::ENV_PAGING != 0 {
+            // (RDX is the block again on the way out.)
+            let set = if self.env.bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
+            let entry = set * TLB_ENTRY;
+            let data_ptr = self.data_ptr;
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov edx, DWORD [rcx + g + GUARD_PAGE]
+                ; mov eax, edx
+                ; and edx, (layout::TLB_SET - 1) as i32
+                ; shl edx, TLB_ENTRY_SHIFT
+                ; inc eax
+                ; cmp eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_READ_TAG as i32]
+                ; jne >not
+                ; mov eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_PHYS as i32]
+                ; cmp eax, DWORD [rcx + g + GUARD_PHYS]
+                ; jne >not
+                ; jmp QWORD [rcx + RETURN_CODE]
+                ; not:
+                ; mov rdx, QWORD data_ptr
+                ; jmp =>miss
+            );
+        } else {
+            dynasm!(self.ops ; .arch x64 ; jmp QWORD [rcx + RETURN_CODE]);
+        }
     }
 
     /// Leave through link `slot` to another page, if fetching its target

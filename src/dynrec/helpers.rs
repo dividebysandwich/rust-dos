@@ -5,7 +5,7 @@ use std::any::Any;
 use std::mem::offset_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use super::block::{BlockData, Guard};
+use super::block::{BlockData, Guard, Return};
 use crate::cpu::{Access, Cpu, Fault, MemRef, Seg};
 
 /// How translated code returned to the execution loop: the low byte of
@@ -95,6 +95,8 @@ pub struct JitCtx {
     pub ram_len: u64,
     /// The TLB's entries.
     pub tlb: *const u8,
+    /// The engine's places returns went to (`Return`).
+    pub returns: *const Return,
     /// The bytes of the running block after the instruction that stores,
     /// as physical addresses `lo..hi`, for `jit_write`.
     pub smc_lo: u32,
@@ -155,6 +157,16 @@ pub const GUARD_A20: i32 = offset_of!(Guard, a20) as i32;
 pub const GUARD_PAGING: i32 = offset_of!(Guard, paging) as i32;
 pub const GUARD_PAGE: i32 = offset_of!(Guard, page) as i32;
 pub const GUARD_PHYS: i32 = offset_of!(Guard, phys) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_RETURNS: i32 = offset_of!(JitCtx, returns) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const RETURN_GUARD: i32 = offset_of!(Return, guard) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const RETURN_MODE: i32 = offset_of!(Return, mode) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const RETURN_CODE: i32 = offset_of!(Return, code) as i32;
+/// (The x86-64 code indexes the table with LEA's scale of 5, then 8.)
+const _: () = assert!(std::mem::size_of::<Return>() == 40);
 
 impl JitCtx {
     pub fn new(exit: usize) -> Self {
@@ -177,6 +189,7 @@ impl JitCtx {
             after: 0,
             ram_len: 0,
             tlb: std::ptr::null(),
+            returns: std::ptr::null(),
             smc_lo: 0,
             smc_hi: 0,
             fault: Fault::UD,

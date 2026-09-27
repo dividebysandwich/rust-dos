@@ -256,7 +256,7 @@ mod engine {
     use std::collections::HashMap;
     use std::ptr::NonNull;
 
-    use super::block::{BlockData, Guard, LINKS, RETURN_LINK, RETURN_MISS, WATCH_AFTER};
+    use super::block::{BlockData, Guard, LINKS, RETURN_BITS, RETURN_LINK, RETURN_MISS, Return, WATCH_AFTER};
     use crate::cpu::{CR0_PG, Seg};
     use super::codemem::CodeMemory;
     use super::helpers::*;
@@ -333,6 +333,8 @@ mod engine {
         /// The return link a return to none of their places takes over
         /// next, once all are made.
         next_return: u8,
+        /// Whether the table of places returns went to may lead here.
+        returned_to: bool,
     }
 
     impl Drop for Block {
@@ -398,6 +400,11 @@ mod engine {
         none: Box<[Option<(Key, u32)>]>,
         /// The blocks of keys' slots.
         front: Box<[Front]>,
+        /// Places returns and indirect calls went to, for all blocks
+        /// (`Return`, at a fixed address the code has), and the index + 1
+        /// of the block each leads to (0 for none).
+        returns: Box<[Return]>,
+        return_blocks: Box<[u32]>,
         /// Per physical page, how often each byte was poked: changed where
         /// a block went stale or wrote over itself (see
         /// `block::WATCH_AFTER`).
@@ -417,16 +424,21 @@ mod engine {
             // SAFETY: `enter` is the trampoline's entry, whose signature
             // `Enter` is.
             let enter = unsafe { std::mem::transmute::<usize, backend::Enter>(base + tramp.enter) };
+            let returns = vec![Return::NONE; 1 << RETURN_BITS].into_boxed_slice();
+            let mut ctx = Box::new(JitCtx::new(base + tramp.exit));
+            ctx.returns = returns.as_ptr();
             Ok(Engine {
                 mem,
                 pending: None,
                 enter,
-                ctx: Box::new(JitCtx::new(base + tramp.exit)),
+                ctx,
                 blocks: Vec::new(),
                 free: Vec::new(),
                 map: KeyMap::default(),
                 none: vec![None; 1 << NONE_BITS].into_boxed_slice(),
                 front: vec![Front::EMPTY; 1 << FRONT_BITS].into_boxed_slice(),
+                returns,
+                return_blocks: vec![0; 1 << RETURN_BITS].into_boxed_slice(),
                 pokes: HashMap::new(),
                 model,
                 ram_len,
@@ -439,6 +451,8 @@ mod engine {
             self.map.clear();
             self.none.fill(None);
             self.front.fill(Front::EMPTY);
+            self.returns.fill(Return::NONE);
+            self.return_blocks.fill(0);
             self.pokes.clear();
             self.mem.clear();
             stats.flushes += 1;
@@ -547,6 +561,7 @@ mod engine {
                 backlinks: Vec::new(),
                 targets: [None; LINKS],
                 next_return: 0,
+                returned_to: false,
             };
             if index as usize == self.blocks.len() {
                 self.blocks.push(Some(block));
@@ -584,6 +599,15 @@ mod engine {
             // SAFETY: owned by the block, and not in use.
             unsafe { source.data.as_mut() }.guards[p.slot as usize] = guard;
             self.link(p.from, p.slot as usize, to);
+            if p.slot as usize >= RETURN_LINK {
+                // For the other returns there, and this one when its own
+                // links lead elsewhere.
+                let target = self.blocks[to as usize].as_mut().unwrap();
+                target.returned_to = true;
+                let i = at.eip as usize & ((1 << RETURN_BITS) - 1);
+                self.returns[i] = Return { guard, mode: p.mode, code: target.code as usize };
+                self.return_blocks[i] = to + 1;
+            }
         }
 
         /// Point link `slot` of block `from` at block `to`. A link made
@@ -648,6 +672,14 @@ mod engine {
                     if data.links[k as usize] == block.code as usize {
                         data.links[k as usize] = data.stubs[k as usize];
                         source.targets[k as usize] = None;
+                    }
+                }
+            }
+            if block.returned_to {
+                for (i, to) in self.return_blocks.iter_mut().enumerate() {
+                    if *to == index + 1 {
+                        *to = 0;
+                        self.returns[i] = Return::NONE;
                     }
                 }
             }

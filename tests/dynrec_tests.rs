@@ -865,6 +865,67 @@ fn a_function_returning_to_two_places_in_turn_goes_back_to_each_through_its_link
 }
 
 #[test]
+fn a_function_returning_to_many_places_goes_back_through_the_engines_table() {
+    // A function in another page called from twelve places in a loop, 500
+    // times each: more places than its return has links, so it goes back
+    // to them through the engine's table of places (`Return`), without the
+    // execution loop. The instruction at the sixth place is rewritten on
+    // every pass, an ADD and an IMUL in turn (too many bytes for a poke),
+    // so the block there is translated again each time, to another place
+    // in the code memory: its place in the table must go with it.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    // The instruction after the sixth call: after the stores (40 bytes),
+    // five calls and INCs (6 bytes each) and the call (5).
+    let at = top + 40 + 5 * 6 + 5;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(f, &asm32(f, |a| {
+            a.add(ebx, eax)?;
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebx, ebx)?;
+            a.mov(edx, 1u32)?;
+            a.mov(eax, 1u32)?;
+            a.mov(ecx, 500u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            // movzx esi, cl; imul esi, esi, 01010101h; mov [at + 2], esi
+            a.db(&[0x0F, 0xB6, 0xF1, 0x69, 0xF6, 1, 1, 1, 1, 0x89, 0x35])?;
+            a.db(&(at + 2).to_le_bytes())?;
+            // movzx edi, cl; and edi, 1; imul edi, edi, 0FE8h;
+            // add edi, 0C281h: 81 C2 (add edx) or 69 D2 (imul edx, edx)
+            a.db(&[0x0F, 0xB6, 0xF9, 0x83, 0xE7, 0x01, 0x69, 0xFF, 0xE8, 0x0F, 0, 0, 0x81, 0xC7, 0x81, 0xC2, 0, 0])?;
+            // mov [at], di
+            a.db(&[0x66, 0x89, 0x3D])?;
+            a.db(&at.to_le_bytes())?;
+            for k in 0..12 {
+                a.call(f as u64)?;
+                if k == 5 {
+                    a.db(&[0x81, 0xC2, 0, 0, 0, 0])?; // add edx, imm32
+                }
+                a.db(&[0x40])?; // inc eax
+            }
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), (1..=6000u32).sum::<u32>());
+    let product = (1..=500u32).rev().fold(1u32, |sum, i| {
+        let v = (i & 0xFF).wrapping_mul(0x0101_0101);
+        if i & 1 != 0 { sum.wrapping_mul(v) } else { sum.wrapping_add(v) }
+    });
+    assert_eq!(b.cpu.edx(), product);
+    if AVAILABLE {
+        assert!(stats.stale >= 450, "{:?}", stats);
+        assert!(stats.runs < 2500, "the returns went through the execution loop: {:?}", stats);
+    }
+}
+
+#[test]
 fn indirect_calls_are_translated_and_linked_to_where_they_go() {
     // A loop that calls two functions in another page in turn through a
     // table of pointers, and one of them through a register, 1000 times:
