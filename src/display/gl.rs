@@ -1,5 +1,6 @@
 //! The picture drawn with OpenGL 3, as it is or through a CRT look.
 
+use super::voodoo_gl::VoodooGl;
 use crate::config::Filter;
 use crate::video::Frame;
 use crate::video::shader::{self, CrtSettings, Glsl, Shader};
@@ -50,7 +51,12 @@ pub struct GlScreen {
     mask: f32,
     /// The CRT look's own settings.
     crt: CrtSettings,
+    /// The scaling filter without a look.
+    filter: Filter,
     renderer: String,
+    /// The 3dfx card drawn with OpenGL, and why it can't be if it can't.
+    voodoo: Option<VoodooGl>,
+    voodoo_failed: Option<String>,
 }
 
 impl GlScreen {
@@ -142,7 +148,10 @@ impl GlScreen {
             active: Shader::None,
             mask: 1.0,
             crt: CrtSettings::default(),
+            filter: Filter::Nearest,
             renderer,
+            voodoo: None,
+            voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
         })
     }
 
@@ -174,23 +183,32 @@ impl GlScreen {
             Err(e) => Err(format!("The {} shader doesn't work here: {}", shader.describe(), e)),
         };
         self.active = if result.is_ok() { shader } else { Shader::None };
+        self.filter = filter;
         let mipmaps = shader::needs_mipmaps(self.active);
-        let (min, mag) = match (mipmaps, filter) {
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            self.set_filter();
+            // Without its mipmap the texture would read as black.
+            if mipmaps && self.texture_size != (0, 0) {
+                self.gl.generate_mipmap(glow::TEXTURE_2D);
+            }
+        }
+        result
+    }
+
+    /// Scale the bound texture as the look and the filter want.
+    fn set_filter(&self) {
+        let (min, mag) = match (shader::needs_mipmaps(self.active), self.filter) {
             (true, _) => (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR),
             (false, Filter::Nearest) => (glow::NEAREST, glow::NEAREST),
             (false, Filter::Linear) => (glow::LINEAR, glow::LINEAR),
         };
         // SAFETY: see `GlScreen`.
         unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, min as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, mag as i32);
-            // Without its mipmap the texture would read as black.
-            if mipmaps && self.texture_size != (0, 0) {
-                gl.generate_mipmap(glow::TEXTURE_2D);
-            }
+            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, min as i32);
+            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, mag as i32);
         }
-        result
     }
 
     /// Whether the CRT looks put a colour tube's mask in front of the
@@ -210,7 +228,6 @@ impl GlScreen {
         let gl = &self.gl;
         let size = (frame.width, frame.height);
         let (width, height) = (frame.width as i32, frame.height as i32);
-        let (dw, dh) = self.window.drawable_size();
         let rows = if size != self.texture_size { 0..frame.height as usize } else { rows };
         // Four bytes a pixel, which the texture has: drivers convert three
         // byte pixels one by one, which takes longer than the rest of a
@@ -248,7 +265,77 @@ impl GlScreen {
             if shader::needs_mipmaps(self.active) {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
+        }
+        self.draw(self.texture, size, display);
+    }
 
+    /// Whether the 3dfx card can be drawn with OpenGL here, or why not.
+    pub fn voodoo_problem(&self) -> Option<&str> {
+        self.voodoo_failed.as_deref()
+    }
+
+    /// The scale the 3dfx card is drawn at, if it is.
+    pub fn voodoo_scale(&self) -> Option<u32> {
+        self.voodoo.as_ref().map(|v| v.scale())
+    }
+
+    /// Stop drawing the 3dfx card.
+    pub fn drop_voodoo(&mut self) {
+        if let Some(voodoo) = self.voodoo.take() {
+            voodoo.destroy(&self.gl);
+        }
+    }
+
+    /// Draw what the 3dfx card recorded, at `scale` times its size. The
+    /// error says why OpenGL can't.
+    pub fn run_voodoo(&mut self, recording: rust_dos::voodoo::mirror::Frame, scale: u32) -> Result<(), String> {
+        if self.voodoo.as_ref().is_some_and(|v| v.scale() != scale) {
+            self.drop_voodoo();
+        }
+        if self.voodoo.is_none() {
+            if let Some(problem) = &self.voodoo_failed {
+                return Err(problem.clone());
+            }
+            match VoodooGl::new(&self.gl, self.glsl, scale) {
+                Ok(voodoo) => self.voodoo = Some(voodoo),
+                Err(e) => {
+                    eprintln!("[DISPLAY] {}", e);
+                    self.voodoo_failed = Some(e.clone());
+                    return Err(e);
+                }
+            }
+        }
+        if let Some(voodoo) = &mut self.voodoo {
+            voodoo.run(&self.gl, recording);
+        }
+        Ok(())
+    }
+
+    /// Show the 3dfx card's picture, with what `screen` has over `base`
+    /// (the settings window, messages) on it, letterboxed at `display`
+    /// proportions. False if it has none to show.
+    pub fn present_voodoo(&mut self, screen: &Frame, base: &Frame, display: (u32, u32)) -> bool {
+        let Some(voodoo) = &mut self.voodoo else { return false };
+        let Some((texture, size)) = voodoo.composite(&self.gl, screen, base) else { return false };
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.set_filter();
+            if shader::needs_mipmaps(self.active) {
+                self.gl.generate_mipmap(glow::TEXTURE_2D);
+            }
+        }
+        self.draw(texture, size, display);
+        true
+    }
+
+    /// Draw `texture`, a picture of `size` pixels, into the window with the
+    /// look, letterboxed at `display` proportions, and show it.
+    fn draw(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32)) {
+        let gl = &self.gl;
+        let (dw, dh) = self.window.drawable_size();
+        // SAFETY: see `GlScreen`.
+        unsafe {
             gl.viewport(0, 0, dw as i32, dh as i32);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -261,12 +348,14 @@ impl GlScreen {
                 // OpenGL counts rows from the bottom.
                 gl.viewport(x as i32, (dh - y - h) as i32, w as i32, h as i32);
                 gl.use_program(Some(program.program));
-                gl.uniform_2_f32(program.source.as_ref(), frame.width as f32, frame.height as f32);
+                gl.uniform_2_f32(program.source.as_ref(), size.0 as f32, size.1 as f32);
                 gl.uniform_2_f32(program.output.as_ref(), w as f32, h as f32);
                 gl.uniform_1_f32(program.mask.as_ref(), self.mask);
                 let [cx, cy] = self.active.curvature(self.crt);
                 gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
                 gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 gl.bind_vertex_array(Some(self.vao));
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }

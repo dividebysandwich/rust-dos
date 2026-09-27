@@ -926,3 +926,113 @@ fn replays_a_dosbox_x_trace() {
     println!("{} swaps, {} differ; {} LFB reads, {} differ", swaps, bad_swaps, reads, bad_reads);
     assert_eq!((bad_swaps, bad_reads), (0, 0));
 }
+
+/// The OpenGL renderer's recording since it last took it.
+fn take_mirror(bus: &mut Bus) -> rust_dos::voodoo::mirror::Frame {
+    bus.voodoo.as_mut().unwrap().take_mirror().expect("recording")
+}
+
+#[test]
+fn the_opengl_renderer_gets_what_is_drawn() {
+    use rust_dos::voodoo::mirror::{Command, Fill, Pixels};
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    bus.voodoo.as_mut().unwrap().set_mirror(true);
+    // First the buffers as they are.
+    let frame = take_mirror(&mut bus);
+    assert!(frame.output);
+    assert_eq!((frame.width, frame.height, frame.front), (640, 480, Some(0)));
+    let [Command::Resync(snapshot)] = &frame.commands[..] else { panic!("{:?}", frame.commands) };
+    assert_eq!((snapshot.layout.width, snapshot.layout.height), (640, 480));
+    assert_eq!(snapshot.layout.color, [0, 150 * 0x1000 / 2]);
+    assert_eq!(snapshot.layout.aux, Some(2 * 150 * 0x1000 / 2));
+    assert_eq!(snapshot.color[0].len(), 640 * 480);
+
+    // A fastfill, two Gouraud triangles and a frame buffer write.
+    w(&mut bus, COLOR1, 0x0012_3456);
+    w(&mut bus, ZA_COLOR, 0x1234);
+    w(&mut bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | CLIPPING);
+    w(&mut bus, FASTFILL_CMD, 0);
+    flat(&mut bus, 100, 0, 0, 255);
+    w(&mut bus, D_R_DX, 2 << 12);
+    w(&mut bus, FBZ_COLOR_PATH, 0);
+    triangle(&mut bus, [(10.0, 10.0), (50.0, 10.0), (10.0, 50.0)]);
+    triangle(&mut bus, [(50.0, 10.0), (50.0, 50.0), (10.0, 50.0)]);
+    w(&mut bus, LFB_MODE, 0);
+    bus.write_32(BASE + 0x40_0000 + 5 * 2048 + 4 * 2, 0xF800_07E0);
+    let frame = take_mirror(&mut bus);
+    let [Command::Fill(fill), Command::Draw(draw), Command::Pixels(pixels)] = &frame.commands[..] else {
+        panic!("{:?}", frame.commands)
+    };
+    assert_eq!(
+        *fill,
+        Fill { dest: 0, rect: [0, 640, 0, 480], color: Some(0x12_3456), aux: Some(0x1234), alpha_planes: false }
+    );
+    assert_eq!(draw.vertices.len(), 6, "the same state: one draw");
+    assert_eq!(draw.state.clip, Some([0, 640, 0, 480]));
+    // The card samples pixel 10 at its left edge, where red is 100: at
+    // the vertex, half a pixel left of the pixel's centre, it is 99.
+    let a = draw.vertices[0];
+    assert_eq!(a.pos, [10.0, 10.0]);
+    assert_eq!(a.color, [99.0, 0.0, 0.0, 255.0]);
+    assert_eq!(draw.vertices[1].color[0], 179.0);
+    assert_eq!(*pixels, Pixels { dest: Some(0), x: 4, y: 5, values: vec![0x07E0, 0xF800] });
+    // The software drew the same.
+    assert_eq!(pixel(&bus, 0, 4, 5), 0x07E0);
+}
+
+#[test]
+fn the_opengl_renderer_gets_the_textures_as_the_card_reads_them() {
+    use rust_dos::voodoo::mirror::Command;
+    let textures = |frame: &rust_dos::voodoo::mirror::Frame| -> Vec<rust_dos::voodoo::mirror::Texture> {
+        frame.commands.iter().filter_map(|c| if let Command::Texture(t) = c { Some((**t).clone()) } else { None }).collect()
+    };
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    bus.voodoo.as_mut().unwrap().set_mirror(true);
+    take_mirror(&mut bus);
+    textured_square(&mut bus, 10, false, |x, y| (x * 4) << 11 | y * 4);
+    let frame = take_mirror(&mut bus);
+    let decoded = textures(&frame);
+    assert_eq!(decoded.len(), 1, "one texture for both triangles");
+    let level = &decoded[0].levels[0];
+    assert_eq!((level.width, level.height), (8, 8), "level 5 of a 256x256 texture");
+    // Texel (3, 2): red 12 and blue 8 of 5-6-5, widened to 8 bits.
+    assert_eq!(level.argb[2 * 8 + 3], 0xFF63_0042);
+    let draw = frame.commands.iter().find_map(|c| if let Command::Draw(d) = c { Some(d) } else { None }).unwrap();
+    let unit = draw.state.tmu[0].unwrap();
+    assert_eq!((unit.texture, unit.first_level, unit.width, unit.height), (decoded[0].id, 5, 256, 256));
+    assert!(draw.state.tmu[1].is_none());
+
+    // Drawn with again: nothing new to decode.
+    triangle(&mut bus, [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)]);
+    assert!(textures(&take_mirror(&mut bus)).is_empty());
+    // Its texels written: the same texture again, as it is now.
+    bus.write_32(BASE + 0x80_0000 + (5 << 17), 0xFFFF_FFFF);
+    triangle(&mut bus, [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)]);
+    let again = textures(&take_mirror(&mut bus));
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].id, decoded[0].id);
+    assert_eq!(again[0].levels[0].argb[0], 0xFFFF_FFFF);
+}
+
+#[test]
+fn a_loaded_state_gives_the_opengl_renderer_the_buffers_again() {
+    use rust_dos::voodoo::mirror::Command;
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    w(&mut bus, COLOR1, 0x0000_FF00);
+    w(&mut bus, FBZ_MODE, RGB_WRITE);
+    w(&mut bus, FASTFILL_CMD, 0);
+    let mut cpu = rust_dos::cpu::Cpu::new(PathBuf::from("."));
+    cpu.bus = bus;
+    let state = rust_dos::savestate::machine::save(&cpu);
+    cpu.bus.voodoo.as_mut().unwrap().set_mirror(true);
+    take_mirror(&mut cpu.bus);
+    w(&mut cpu.bus, COLOR1, 0);
+    w(&mut cpu.bus, FASTFILL_CMD, 0);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    let frame = take_mirror(&mut cpu.bus);
+    let [Command::Resync(snapshot)] = &frame.commands[..] else { panic!("{:?}", frame.commands) };
+    assert_eq!(snapshot.color[0][3 * 640 + 3], 0x07E0);
+}

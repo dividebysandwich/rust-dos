@@ -27,6 +27,8 @@ pub struct Ncc {
     qb: [i32; 4],
     pub texel: Arc<[u32; 256]>,
     dirty: bool,
+    /// Counts the changes to the table (`Tmu::lookup_key`).
+    pub changes: u32,
 }
 
 impl Default for Ncc {
@@ -41,11 +43,12 @@ impl Default for Ncc {
             qb: [0; 4],
             texel: Arc::new([0; 256]),
             dirty: true,
+            changes: 0,
         }
     }
 }
 
-crate::state_fields!(Ncc { y, ir, ig, ib, qr, qg, qb } skip { texel, dirty });
+crate::state_fields!(Ncc { y, ir, ig, ib, qr, qg, qb } skip { texel, dirty, changes });
 
 impl Ncc {
     /// Register `n` (0-11) of the table was written with `data`, which the
@@ -65,6 +68,7 @@ impl Ncc {
             }
         }
         self.dirty = true;
+        self.changes = self.changes.wrapping_add(1);
     }
 
     /// Work the 256 colours out again if the table changed.
@@ -87,6 +91,7 @@ impl Ncc {
     /// Everything worked out from the registers again, after a load.
     fn rebuild(&mut self) {
         self.dirty = true;
+        self.changes = self.changes.wrapping_add(1);
         self.update();
     }
 }
@@ -130,13 +135,24 @@ pub struct Tmu {
     /// The 256 colours of the P8 and AP88 formats, written through the
     /// NCC table registers with bit 31 set.
     pub palette: Arc<[u32; 256]>,
+
+    /// For the OpenGL renderer's decoded textures: the palette's changes,
+    /// the writes to the RAM, and for each 4 KB page of it the count of
+    /// writes at its last.
+    pub palette_changes: u32,
+    pub writes: u32,
+    pub page_writes: Vec<u32>,
 }
+
+/// The pages `Tmu::page_writes` counts in.
+pub const PAGE_SHIFT: u32 = 12;
 
 crate::state_fields!(Tmu {
     starts, startt, startw, dsdx, dtdx, dwdx, dsdy, dtdy, dwdy, ncc, palette,
 } skip {
     ram, mask, base, regdirty,
     lodmin, lodmax, lodbias, lodmask, lodoffset, detailmax, detailbias, detailscale, wmask, hmask,
+    palette_changes, writes, page_writes,
 });
 
 impl Tmu {
@@ -167,13 +183,28 @@ impl Tmu {
             hmask: 0,
             ncc: [Ncc::default(), Ncc::default()],
             palette: Arc::new([0; 256]),
+            palette_changes: 0,
+            writes: 0,
+            page_writes: vec![0; bytes.div_ceil(1 << PAGE_SHIFT)],
         }
     }
 
-    /// As at power-on, keeping what the RAM holds.
+    /// As at power-on, keeping what the RAM holds. The palette and the
+    /// NCC tables count on from their changes before.
     pub fn reset(&mut self) {
-        let fresh = Self { ram: self.ram.clone(), mask: self.mask, base: self.base, ..Self::new(2, self.base) };
+        let changes = [self.ncc[0].changes, self.ncc[1].changes, self.palette_changes].map(|c| c.wrapping_add(1));
+        let fresh = Self {
+            ram: self.ram.clone(),
+            mask: self.mask,
+            base: self.base,
+            palette_changes: changes[2],
+            writes: self.writes,
+            page_writes: std::mem::take(&mut self.page_writes),
+            ..Self::new(2, self.base)
+        };
         *self = fresh;
+        self.ncc[0].changes = changes[0];
+        self.ncc[1].changes = changes[1];
     }
 
     pub fn mark_dirty(&mut self) {
@@ -186,6 +217,10 @@ impl Tmu {
         for ncc in &mut self.ncc {
             ncc.rebuild();
         }
+        // The RAM and the palette came from the state.
+        self.palette_changes = self.palette_changes.wrapping_add(1);
+        self.writes = self.writes.wrapping_add(1);
+        self.page_writes.fill(self.writes);
     }
 
     /// A write to NCC table register `n` (0-23: table 0's twelve, then
@@ -198,6 +233,7 @@ impl Tmu {
             let color = 0xFF00_0000 | data;
             if self.palette[entry] != color {
                 Arc::make_mut(&mut self.palette)[entry] = color;
+                self.palette_changes = self.palette_changes.wrapping_add(1);
             }
             return;
         }
@@ -255,6 +291,17 @@ impl Tmu {
         self.detailbias = ((((detail >> 8) & 0x3F) << 2) as u8 as i8 as i32) << 6;
         self.detailscale = (detail >> 14) & 7;
         self.regdirty = false;
+    }
+
+    /// Which colours `lookup` gives for `mode`, as they are now: the same
+    /// key, the same colours.
+    pub fn lookup_key(&self, mode: u32) -> u64 {
+        let table = (mode >> 5) & 1;
+        match (mode >> 8) & 0xF {
+            1 | 9 => 1 << 40 | (table as u64) << 32 | self.ncc[table as usize].changes as u64,
+            5 | 14 => 2 << 40 | self.palette_changes as u64,
+            _ => 0,
+        }
     }
 
     /// The colours the texel values of the current format stand for.
@@ -322,12 +369,24 @@ impl Tmu {
             for i in 0..4 {
                 self.ram.set_byte((at.wrapping_add(i) & self.mask) as usize, (data >> (8 * i)) as u8);
             }
+            self.count_write(at, at.wrapping_add(3) & self.mask);
         } else {
             let ts = (offset << 1) & 0xFE;
             let at = (self.lodoffset[lod].wrapping_add(2 * (tt * width + ts)) & self.mask) >> 1;
             let words = self.mask >> 1;
             self.ram.set((at & words) as usize, data as u16);
             self.ram.set((at.wrapping_add(1) & words) as usize, (data >> 16) as u16);
+            self.count_write((at & words) * 2, (at.wrapping_add(1) & words) * 2 + 1);
+        }
+    }
+
+    /// The bytes `first` and `last` were written.
+    fn count_write(&mut self, first: u32, last: u32) {
+        self.writes = self.writes.wrapping_add(1);
+        for at in [first, last] {
+            if let Some(page) = self.page_writes.get_mut((at >> PAGE_SHIFT) as usize) {
+                *page = self.writes;
+            }
         }
     }
 }

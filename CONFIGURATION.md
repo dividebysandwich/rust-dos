@@ -136,11 +136,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `voodoo_memory` is `12` (the default: 4 MB of frame buffer and two
   texture units with 4 MB each, as DOSBox-X's card has) or `4` (a retail
   board: 2 MB and one texture unit with 2 MB). Both take effect at the DOS
-  prompt. `voodoo_renderer` is what draws the card's triangles:
-  `software` (the default, rust-dos's own rasterizer) or `opengl`, which
-  draws them at `voodoo_scale` (1 to 4, 2 by default) times the card's
-  resolution; without OpenGL (in the browser, or with SDL's dummy video
-  driver) the software rasterizer draws.
+  prompt. `voodoo_renderer` is what draws the card's picture in the
+  window: `software` (the default, rust-dos's own rasterizer) or `opengl`,
+  which draws it again at `voodoo_scale` (1 to 4, 2 by default) times the
+  card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics));
+  without OpenGL 3 (in the browser, or with SDL's dummy video driver) the
+  software rasterizer's picture shows. Both change at once.
 * `capture_dir` is the folder screenshots and recordings go in:
   `capture` (the default) in the directory rust-dos started in, or a
   path of your own. Screenshots (Ctrl+F5, in the settings window too)
@@ -697,6 +698,17 @@ triangles are drawn on up to four threads of their own: rust-dos keeps
 running the game meanwhile, and the picture is the same however many
 there are. Save states and rewind keep the card with everything in its
 memory.
+
+With `voodoo_renderer=opengl` the window shows the card's picture drawn
+again with OpenGL, at `voodoo_scale` times the card's resolution: the same
+triangles through the same pixel pipeline (textures, fog, blending, the
+depth buffer and the gamma table), with sharper edges and textures and 8
+bits a colour without the card's dithering. What games write into the
+frame buffer themselves (menus, movies) stays at the card's resolution.
+The software rasterizer goes on drawing the card's memory, which games
+read back and save states keep, so it costs no less of the host's CPU;
+screenshots and recordings show its picture, at the card's resolution.
+The CRT shaders draw their scanlines over the bigger picture.
 
 ## CRT shaders
 

@@ -23,6 +23,7 @@
 
 pub mod lfb;
 pub mod mem;
+pub mod mirror;
 pub mod raster;
 pub mod register;
 pub mod regs;
@@ -355,6 +356,8 @@ pub struct Voodoo {
     /// they last finished.
     pool: workers::Pool,
     drawn_to: Vec<usize>,
+    /// The drawing recorded for the OpenGL renderer, while it draws.
+    mirror: Option<Box<mirror::Mirror>>,
     /// Messages already logged once.
     logged: u32,
     /// Lines for the log, which the bus writes out.
@@ -398,6 +401,7 @@ impl Voodoo {
             palette_dirty: true,
             pool: workers::Pool::new(workers),
             drawn_to: Vec::new(),
+            mirror: None,
             logged: 0,
             log: Vec::new(),
         };
@@ -439,6 +443,9 @@ impl Voodoo {
         self.timing = CrtTiming::VESA_480;
         self.palette_dirty = true;
         self.display_dirty = true;
+        if let Some(mirror) = &mut self.mirror {
+            mirror.forget_textures();
+        }
     }
 
     // --- PCI ---
@@ -683,28 +690,15 @@ impl Voodoo {
     /// scaled to 8 bits and interpolated between the table's 33 entries
     /// (MAME's `screen_update`).
     fn build_palette(&mut self) {
-        let mut clut = self.clut;
-        // Some programs write 0 to the last entry and mean white.
-        if clut[32] & 0xFF_FFFF == 0 && clut[31] & 0xFF_FFFF != 0 {
-            clut[32] = 0x20FF_FFFF;
-        }
-        let comp = |y: usize, shift: u32| -> u8 {
-            let lo = (clut[y >> 3] >> shift) & 0xFF;
-            let hi = (clut[(y >> 3) + 1] >> shift) & 0xFF;
-            ((lo * (8 - (y as u32 & 7)) + hi * (y as u32 & 7)) >> 3) as u8
-        };
-        let mut rt = [0u8; 32];
-        let mut bt = [0u8; 32];
-        let mut gt = [0u8; 64];
+        let table = gamma_table(&self.clut);
+        let (mut rt, mut gt, mut bt) = ([0u8; 32], [0u8; 64], [0u8; 32]);
         for x in 0..32usize {
             let y = (x << 3) | (x >> 2);
-            rt[x] = comp(y, 16);
-            bt[x] = comp(y, 0);
-            for i in 0..2 {
-                let v = x * 2 + i;
-                let y = (v << 2) | (v >> 4);
-                gt[v] = comp(y, 8);
-            }
+            rt[x] = table[y][0];
+            bt[x] = table[y][2];
+        }
+        for (v, g) in gt.iter_mut().enumerate() {
+            *g = table[(v << 2) | (v >> 4)][1];
         }
         for (pixel, out) in self.palette.iter_mut().enumerate() {
             *out = [rt[pixel >> 11], gt[(pixel >> 5) & 0x3F], bt[pixel & 0x1F]];
@@ -853,6 +847,101 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
+        if let Some(mirror) = &mut self.mirror {
+            mirror.invalidate();
+            mirror.forget_textures();
+        }
+    }
+
+    // --- The OpenGL renderer's recording ---
+
+    /// Record the drawing for the OpenGL renderer, or stop.
+    pub fn set_mirror(&mut self, on: bool) {
+        if on != self.mirror.is_some() {
+            self.mirror = on.then(|| Box::new(mirror::Mirror::new()));
+        }
+    }
+
+    pub fn mirror_attached(&self) -> bool {
+        self.mirror.is_some()
+    }
+
+    /// Take the buffers' pixels for the recording if their layout changed
+    /// since it last did, or it wants them.
+    pub(crate) fn mirror_sync(&mut self) {
+        let Some(mirror) = &self.mirror else { return };
+        let layout = self.mirror_layout();
+        if !mirror.needs_snapshot(&layout) {
+            return;
+        }
+        self.flush();
+        let snapshot = self.snapshot(layout);
+        if let Some(mirror) = &mut self.mirror {
+            mirror.resync(snapshot);
+        }
+    }
+
+    fn mirror_layout(&self) -> mirror::Layout {
+        let fbi = &self.fbi;
+        mirror::Layout {
+            width: fbi.width,
+            height: fbi.height,
+            rowpixels: fbi.rowpixels,
+            color: fbi.rgboffs.iter().filter(|&&offs| offs != NONE).map(|&offs| offs / 2).collect(),
+            aux: (fbi.auxoffs != NONE).then_some(fbi.auxoffs / 2),
+        }
+    }
+
+    fn snapshot(&self, layout: mirror::Layout) -> mirror::Snapshot {
+        let ram = &self.fbi.ram;
+        let (width, height, rowpixels) = (layout.width as usize, layout.height as usize, layout.rowpixels as usize);
+        let pixels = |base: u32| -> Vec<u16> {
+            let mut out = Vec::with_capacity(width * height);
+            for y in 0..height {
+                let row = base as usize + y * rowpixels;
+                out.extend((row..row + width).map(|at| if at < ram.len() { ram.get(at) } else { 0 }));
+            }
+            out
+        };
+        mirror::Snapshot { color: layout.color.iter().map(|&offs| pixels(offs)).collect(), aux: layout.aux.map(pixels), layout }
+    }
+
+    /// The drawing recorded since the last frame, and what the card shows.
+    pub fn take_mirror(&mut self) -> Option<mirror::Frame> {
+        self.mirror_sync();
+        let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
+        let output = self.output();
+        let commands = self.mirror.as_mut()?.take();
+        Some(mirror::Frame {
+            commands,
+            front: (front != NONE).then_some(front / 2),
+            output,
+            width: self.fbi.width,
+            height: self.fbi.height,
+            clut: self.clut,
+        })
+    }
+
+    /// Pixel `x` of buffer row `y` changed through the frame buffer: tell
+    /// the recording, the colour of buffer `dest` (a word offset) and with
+    /// `aux` the auxiliary buffer's value.
+    pub(crate) fn mirror_pixel(&mut self, dest: usize, x: i32, y: i32, aux: bool) {
+        let Some(mirror) = &mut self.mirror else { return };
+        let fbi = &self.fbi;
+        if x < 0 || y < 0 || x as u32 >= fbi.width || y as u32 >= fbi.height {
+            return;
+        }
+        let at = y as usize * fbi.rowpixels as usize + x as usize;
+        let word = |offs: usize| (offs + at < fbi.ram.len()).then(|| fbi.ram.get(offs + at));
+        if let Some(value) = word(dest) {
+            mirror.pixel(Some(dest as u32), x as u32, y as u32, value);
+        }
+        if aux
+            && fbi.auxoffs != NONE
+            && let Some(value) = word(fbi.auxoffs as usize / 2)
+        {
+            mirror.pixel(None, x as u32, y as u32, value);
+        }
     }
 
     /// For the debugger: what the card is doing.
@@ -874,8 +963,26 @@ impl Voodoo {
             "triangles": self.reg[FBI_TRIANGLES_OUT],
             "fbiInit": init,
             "init_enable": format!("{:08X}", self.pci.init_enable),
+            "opengl": self.mirror.is_some(),
         })
     }
+}
+
+/// What the gamma table (clutData, 33 entries of RGB) makes of each 8-bit
+/// value of red, green and blue: between two of its entries, as the card
+/// interpolates (MAME's `screen_update`).
+pub fn gamma_table(clut: &[u32; 33]) -> [[u8; 3]; 256] {
+    let mut clut = *clut;
+    // Some programs write 0 to the last entry and mean white.
+    if clut[32] & 0xFF_FFFF == 0 && clut[31] & 0xFF_FFFF != 0 {
+        clut[32] = 0x20FF_FFFF;
+    }
+    let comp = |y: usize, shift: u32| -> u8 {
+        let lo = (clut[y >> 3] >> shift) & 0xFF;
+        let hi = (clut[(y >> 3) + 1] >> shift) & 0xFF;
+        ((lo * (8 - (y as u32 & 7)) + hi * (y as u32 & 7)) >> 3) as u8
+    };
+    std::array::from_fn(|y| [comp(y, 16), comp(y, 8), comp(y, 0)])
 }
 
 /// The gamma table at power-on: 5-bit values scaled to 8 bits, white at

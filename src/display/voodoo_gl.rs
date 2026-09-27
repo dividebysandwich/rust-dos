@@ -1,0 +1,809 @@
+//! The 3dfx card drawn again with OpenGL at `voodoo_scale` times its
+//! resolution, for the window (`voodoo_renderer=opengl`). The card records
+//! what it draws (`rust_dos::voodoo::mirror`); here each of its colour
+//! buffers is the texture of a framebuffer object, all sharing one depth
+//! texture, the triangles go through the card's pixel pipeline in a shader
+//! (voodoo/triangle.frag) with OpenGL's depth test and blending, and the
+//! front buffer through the card's gamma table is the picture the window
+//! shows. The software rasterizer's picture stays what screenshots,
+//! recordings and the debugger see, and what the game reads back.
+
+use glow::HasContext;
+use rust_dos::video::Frame;
+use rust_dos::video::shader::Glsl;
+use rust_dos::voodoo::mirror::{Command, Draw, Fill, Frame as Recording, Pixels, Snapshot, Texture, Vertex};
+use std::collections::HashMap;
+
+const TRIANGLE_VERT: &str = include_str!("voodoo/triangle.vert");
+const TRIANGLE_FRAG: &str = include_str!("voodoo/triangle.frag");
+const QUAD_VERT: &str = include_str!("voodoo/quad.vert");
+const PIXELS_FRAG: &str = include_str!("voodoo/pixels.frag");
+const DEPTH_FRAG: &str = include_str!("voodoo/depth.frag");
+const CLUT_FRAG: &str = include_str!("voodoo/clut.frag");
+
+const TRIANGLE_UNIFORMS: &[&str] = &[
+    "u_size", "u_fbzcp", "u_fbz", "u_alpha", "u_fog", "u_color0", "u_color1", "u_chroma", "u_zacolor", "u_fogcolor",
+    "u_stipple", "u_yorigin", "u_fogblend", "u_fogdelta", "u_scale", "u_units", "u_config", "u_tmode0", "u_tmode1",
+    "u_tsize0", "u_tsize1", "u_tlod0", "u_tlod1", "u_tdetail0", "u_tdetail1",
+];
+const QUAD_UNIFORMS: &[&str] = &["u_rect", "u_size", "u_scale"];
+
+/// The card's depth functions as OpenGL's.
+const DEPTH_FUNCS: [u32; 8] =
+    [glow::NEVER, glow::LESS, glow::EQUAL, glow::LEQUAL, glow::GREATER, glow::NOTEQUAL, glow::GEQUAL, glow::ALWAYS];
+
+/// A linked program and its uniforms.
+struct Program {
+    program: glow::Program,
+    uniforms: HashMap<&'static str, glow::UniformLocation>,
+}
+
+impl Program {
+    fn at(&self, name: &str) -> Option<&glow::UniformLocation> {
+        self.uniforms.get(name)
+    }
+}
+
+/// A colour buffer: its texture and the framebuffer object drawing into it.
+struct Target {
+    fbo: glow::Framebuffer,
+    color: glow::Texture,
+}
+
+/// Pixels frame buffer writes left, waiting to go into a buffer: RGBA of
+/// the card's size, alpha where there is one, and the rectangle they are
+/// in (left, right, top, bottom).
+struct Staging {
+    rgba: Vec<u8>,
+    dirty: Option<[u32; 4]>,
+}
+
+/// A texture of the card's, and the sampling it was last set up for.
+struct GlTexture {
+    texture: glow::Texture,
+    params: Option<[u32; 4]>,
+    lod: Option<[f32; 2]>,
+}
+
+// Every `unsafe` below is a call into OpenGL on the context `GlScreen`
+// keeps current.
+pub struct VoodooGl {
+    scale: u32,
+    /// The buffers' size in the card's pixels.
+    width: u32,
+    height: u32,
+    /// The colour buffers by word offset in the card's memory, and the
+    /// depth texture they share if the card has an auxiliary buffer.
+    targets: HashMap<u32, Target>,
+    depth: Option<glow::Texture>,
+    /// Frame buffer writes waiting: a colour buffer's, or with None the
+    /// auxiliary buffer's.
+    staging: HashMap<Option<u32>, Staging>,
+    staging_texture: glow::Texture,
+    textures: HashMap<u32, GlTexture>,
+    /// The gamma table as 256 entries a component, and the table it is.
+    lut: glow::Texture,
+    lut_of: Option<[u32; 33]>,
+    /// The picture shown, and its size.
+    composite: Option<(Target, (u32, u32))>,
+    triangle: Program,
+    pixels: Program,
+    depth_program: Program,
+    clut_program: Program,
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    /// No attributes: the quads make their corners from the vertex number.
+    quad_vao: glow::VertexArray,
+    /// What the card shows: its front buffer, and its gamma table.
+    front: Option<u32>,
+    clut: [u32; 33],
+}
+
+impl VoodooGl {
+    pub fn new(gl: &glow::Context, glsl: Glsl, scale: u32) -> Result<Self, String> {
+        if glsl == Glsl::Es300 {
+            return Err("OpenGL ES has no noperspective interpolation".to_string());
+        }
+        let attributes = [(0, "a_pos"), (1, "a_color"), (2, "a_zw"), (3, "a_tex0"), (4, "a_tex1")];
+        let triangle = compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes, TRIANGLE_UNIFORMS)?;
+        let pixels = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[], QUAD_UNIFORMS)?;
+        let depth_program = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[], QUAD_UNIFORMS)?;
+        let clut_program = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[], QUAD_UNIFORMS)?;
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            for (program, samplers) in [
+                (&triangle, &[("u_tex0", 1), ("u_tex1", 2)][..]),
+                (&pixels, &[("u_src", 0)][..]),
+                (&depth_program, &[("u_src", 0)][..]),
+                (&clut_program, &[("u_src", 0), ("u_lut", 1)][..]),
+            ] {
+                gl.use_program(Some(program.program));
+                for &(name, unit) in samplers {
+                    gl.uniform_1_i32(gl.get_uniform_location(program.program, name).as_ref(), unit);
+                }
+            }
+            gl.use_program(None);
+
+            let vao = gl.create_vertex_array()?;
+            let vbo = gl.create_buffer()?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            let stride = std::mem::size_of::<Vertex>() as i32;
+            for (index, size, offset) in [(0, 2, 0), (1, 4, 8), (2, 2, 24), (3, 3, 32), (4, 3, 44)] {
+                gl.enable_vertex_attrib_array(index);
+                gl.vertex_attrib_pointer_f32(index, size, glow::FLOAT, false, stride, offset);
+            }
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            let quad_vao = gl.create_vertex_array()?;
+            let staging_texture = texture(gl, glow::NEAREST)?;
+            let lut = texture(gl, glow::NEAREST)?;
+            Ok(Self {
+                scale: scale.max(1),
+                width: 0,
+                height: 0,
+                targets: HashMap::new(),
+                depth: None,
+                staging: HashMap::new(),
+                staging_texture,
+                textures: HashMap::new(),
+                lut,
+                lut_of: None,
+                composite: None,
+                triangle,
+                pixels,
+                depth_program,
+                clut_program,
+                vao,
+                vbo,
+                quad_vao,
+                front: None,
+                clut: [0; 33],
+            })
+        }
+    }
+
+    pub fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    /// Give everything back to OpenGL.
+    pub fn destroy(mut self, gl: &glow::Context) {
+        self.drop_targets(gl);
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            for (_, t) in self.textures.drain() {
+                gl.delete_texture(t.texture);
+            }
+            if let Some((target, _)) = self.composite.take() {
+                gl.delete_framebuffer(target.fbo);
+                gl.delete_texture(target.color);
+            }
+            gl.delete_texture(self.staging_texture);
+            gl.delete_texture(self.lut);
+            for program in [&self.triangle, &self.pixels, &self.depth_program, &self.clut_program] {
+                gl.delete_program(program.program);
+            }
+            gl.delete_vertex_array(self.vao);
+            gl.delete_vertex_array(self.quad_vao);
+            gl.delete_buffer(self.vbo);
+        }
+    }
+
+    fn drop_targets(&mut self, gl: &glow::Context) {
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            for (_, target) in self.targets.drain() {
+                gl.delete_framebuffer(target.fbo);
+                gl.delete_texture(target.color);
+            }
+            if let Some(depth) = self.depth.take() {
+                gl.delete_texture(depth);
+            }
+        }
+    }
+
+    /// Draw what the card recorded.
+    pub fn run(&mut self, gl: &glow::Context, recording: Recording) {
+        for command in &recording.commands {
+            match command {
+                Command::Resync(snapshot) => self.resync(gl, snapshot),
+                Command::Draw(draw) => {
+                    self.flush_staging(gl, Some(draw.state.dest));
+                    self.flush_staging(gl, None);
+                    self.draw(gl, draw);
+                }
+                Command::Fill(fill) => {
+                    self.flush_staging(gl, Some(fill.dest));
+                    self.flush_staging(gl, None);
+                    self.fill(gl, fill);
+                }
+                Command::Pixels(pixels) => self.stage(pixels),
+                Command::Texture(texture) => self.upload(gl, texture),
+                Command::FreeTexture(id) => {
+                    if let Some(t) = self.textures.remove(id) {
+                        // SAFETY: see `VoodooGl`.
+                        unsafe { gl.delete_texture(t.texture) };
+                    }
+                }
+            }
+        }
+        let keys: Vec<_> = self.staging.keys().copied().collect();
+        for key in keys {
+            self.flush_staging(gl, key);
+        }
+        self.front = recording.front;
+        self.clut = recording.clut;
+        restore(gl);
+    }
+
+    /// The buffers as they are in the card's memory, in its layout.
+    fn resync(&mut self, gl: &glow::Context, snapshot: &Snapshot) {
+        self.drop_targets(gl);
+        self.staging.clear();
+        let layout = &snapshot.layout;
+        (self.width, self.height) = (layout.width.max(1), layout.height.max(1));
+        let (w, h) = self.scaled();
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            self.depth = layout.aux.and_then(|_| {
+                let depth = texture(gl, glow::NEAREST).ok()?;
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::DEPTH_COMPONENT24 as i32,
+                    w,
+                    h,
+                    0,
+                    glow::DEPTH_COMPONENT,
+                    glow::UNSIGNED_INT,
+                    glow::PixelUnpackData::Slice(None),
+                );
+                Some(depth)
+            });
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(true);
+            for &offs in &layout.color {
+                if self.targets.contains_key(&offs) {
+                    continue;
+                }
+                if let Ok(target) = target(gl, (w, h), self.depth) {
+                    gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                    gl.clear_depth_f64(1.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+                    self.targets.insert(offs, target);
+                }
+            }
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.staging_texture));
+            let none = glow::PixelUnpackData::Slice(None);
+            let (w, h) = (self.width as i32, self.height as i32);
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE, none);
+        }
+        for (&offs, pixels) in layout.color.iter().zip(&snapshot.color) {
+            self.stage_rows(Some(offs), pixels);
+            self.flush_staging(gl, Some(offs));
+        }
+        if let Some(aux) = &snapshot.aux {
+            self.stage_rows(None, aux);
+            self.flush_staging(gl, None);
+        }
+    }
+
+    fn scaled(&self) -> (i32, i32) {
+        ((self.width * self.scale) as i32, (self.height * self.scale) as i32)
+    }
+
+    /// The staging area of a buffer.
+    fn staging(&mut self, key: Option<u32>) -> &mut Staging {
+        let size = (self.width * self.height * 4) as usize;
+        self.staging.entry(key).or_insert_with(|| Staging { rgba: vec![0; size], dirty: None })
+    }
+
+    /// The whole of a buffer's pixels, `width * height` of them.
+    fn stage_rows(&mut self, key: Option<u32>, pixels: &[u16]) {
+        let (w, h) = (self.width, self.height);
+        let staging = self.staging(key);
+        for (out, &value) in staging.rgba.chunks_exact_mut(4).zip(pixels) {
+            out.copy_from_slice(&rgba(key, value));
+        }
+        staging.dirty = Some([0, w, 0, h]);
+    }
+
+    fn stage(&mut self, pixels: &Pixels) {
+        let (w, h) = (self.width, self.height);
+        if pixels.y >= h || pixels.x >= w {
+            return;
+        }
+        let key = pixels.dest;
+        let x1 = (pixels.x + pixels.values.len() as u32).min(w);
+        let staging = self.staging(key);
+        let row = (pixels.y * w) as usize;
+        for (x, &value) in (pixels.x..x1).zip(&pixels.values) {
+            let at = (row + x as usize) * 4;
+            staging.rgba[at..at + 4].copy_from_slice(&rgba(key, value));
+        }
+        let rect = [pixels.x, x1, pixels.y, pixels.y + 1];
+        staging.dirty = Some(match staging.dirty {
+            None => rect,
+            Some([l, r, t, b]) => [l.min(rect[0]), r.max(rect[1]), t.min(rect[2]), b.max(rect[3])],
+        });
+    }
+
+    /// Draw the staged pixels of a buffer into it.
+    fn flush_staging(&mut self, gl: &glow::Context, key: Option<u32>) {
+        let w = self.width;
+        let scale = self.scale;
+        let fbo = match key {
+            Some(offs) => self.targets.get(&offs).map(|t| t.fbo),
+            None => self.depth.and(self.targets.values().next().map(|t| t.fbo)),
+        };
+        let Some(staging) = self.staging.get_mut(&key) else { return };
+        let Some([x0, x1, y0, y1]) = staging.dirty.take() else { return };
+        let Some(fbo) = fbo else { return };
+        let program = if key.is_some() { &self.pixels } else { &self.depth_program };
+        let (sw, sh) = ((self.width * scale) as i32, (self.height * scale) as i32);
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.staging_texture));
+            let rows = &staging.rgba[(y0 * w * 4) as usize..(y1 * w * 4) as usize];
+            let pixels = glow::PixelUnpackData::Slice(Some(rows));
+            let (y, h) = (y0 as i32, (y1 - y0) as i32);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, y, w as i32, h, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.viewport(0, 0, sw, sh);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::SCISSOR_TEST);
+            if key.is_some() {
+                gl.disable(glow::DEPTH_TEST);
+                gl.color_mask(true, true, true, false);
+            } else {
+                gl.enable(glow::DEPTH_TEST);
+                gl.depth_func(glow::ALWAYS);
+                gl.depth_mask(true);
+                gl.color_mask(false, false, false, false);
+            }
+            gl.use_program(Some(program.program));
+            gl.uniform_4_f32(program.at("u_rect"), x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+            gl.uniform_2_f32(program.at("u_size"), self.width as f32, self.height as f32);
+            gl.uniform_1_f32(program.at("u_scale"), scale as f32);
+            gl.bind_vertex_array(Some(self.quad_vao));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+        for y in y0..y1 {
+            for x in x0..x1 {
+                staging.rgba[((y * w + x) * 4 + 3) as usize] = 0;
+            }
+        }
+    }
+
+    fn upload(&mut self, gl: &glow::Context, texture: &Texture) {
+        if !self.textures.contains_key(&texture.id) {
+            let Ok(t) = self::texture(gl, glow::NEAREST) else { return };
+            self.textures.insert(texture.id, GlTexture { texture: t, params: None, lod: None });
+        }
+        let Some(entry) = self.textures.get_mut(&texture.id) else { return };
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(entry.texture));
+            for (i, level) in texture.levels.iter().enumerate() {
+                let bytes: Vec<u8> =
+                    level.argb.iter().flat_map(|&c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]).collect();
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    i as i32,
+                    glow::RGBA8 as i32,
+                    level.width as i32,
+                    level.height as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&bytes)),
+                );
+            }
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, texture.levels.len() as i32 - 1);
+            entry.params = None;
+            entry.lod = None;
+        }
+    }
+
+    fn draw(&mut self, gl: &glow::Context, draw: &Draw) {
+        let s = &draw.state;
+        let Some(target) = self.targets.get(&s.dest) else { return };
+        let fbz = s.fbz_mode;
+        let depth_test = fbz & (1 << 4) != 0;
+        let func = ((fbz >> 5) & 7) as usize;
+        if depth_test && func == 0 {
+            return;
+        }
+        let alpha_planes = fbz & (1 << 18) != 0;
+        let has_depth = s.aux && !alpha_planes && self.depth.is_some();
+        let depth_write = has_depth && fbz & (1 << 10) != 0;
+        let rgb = fbz & (1 << 9) != 0;
+        let (w, h) = self.scaled();
+        let scale = self.scale as f32;
+        let p = &self.triangle;
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+            gl.viewport(0, 0, w, h);
+            self.clip(gl, s.clip);
+            if has_depth && (depth_test || depth_write) {
+                gl.enable(glow::DEPTH_TEST);
+                gl.depth_func(if depth_test { DEPTH_FUNCS[func] } else { glow::ALWAYS });
+                gl.depth_mask(depth_write);
+            } else {
+                gl.disable(glow::DEPTH_TEST);
+            }
+            gl.color_mask(rgb, rgb, rgb, alpha_planes && fbz & (1 << 10) != 0);
+            let am = s.alpha_mode;
+            if am & (1 << 4) != 0 {
+                let alpha = |f: u32| if f == 4 { glow::ONE } else { glow::ZERO };
+                gl.enable(glow::BLEND);
+                gl.blend_func_separate(
+                    source_factor((am >> 8) & 15),
+                    dest_factor((am >> 12) & 15),
+                    alpha((am >> 16) & 15),
+                    alpha((am >> 20) & 15),
+                );
+            } else {
+                gl.disable(glow::BLEND);
+            }
+
+            gl.use_program(Some(p.program));
+            gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
+            for (name, value) in [
+                ("u_fbzcp", s.fbz_color_path),
+                ("u_fbz", s.fbz_mode),
+                ("u_alpha", s.alpha_mode),
+                ("u_fog", s.fog_mode),
+                ("u_color0", s.color0),
+                ("u_color1", s.color1),
+                ("u_chroma", s.chroma_key),
+                ("u_zacolor", s.za_color),
+                ("u_fogcolor", s.fog_color),
+                ("u_stipple", s.stipple),
+                ("u_yorigin", s.yorigin),
+                ("u_config", s.send_config.unwrap_or(0)),
+            ] {
+                gl.uniform_1_i32(p.at(name), value as i32);
+            }
+            gl.uniform_1_i32_slice(p.at("u_fogblend"), &s.fogblend.map(|v| v as i32));
+            gl.uniform_1_i32_slice(p.at("u_fogdelta"), &s.fogdelta.map(|v| v as i32));
+            gl.uniform_1_f32(p.at("u_scale"), scale);
+            let mut units = 0;
+            for (unit, t) in s.tmu.iter().enumerate() {
+                let Some(t) = t else { continue };
+                let Some(texture) = self.textures.get_mut(&t.texture) else { continue };
+                units |= 1 << unit;
+                gl.active_texture(glow::TEXTURE1 + unit as u32);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture.texture));
+                let wrap = |clamp: bool| if clamp { glow::CLAMP_TO_EDGE } else { glow::REPEAT };
+                let min = if t.mode & 2 != 0 { glow::LINEAR_MIPMAP_NEAREST } else { glow::NEAREST_MIPMAP_NEAREST };
+                let mag = if t.mode & 4 != 0 { glow::LINEAR } else { glow::NEAREST };
+                let params = [wrap(t.mode & 0x40 != 0), wrap(t.mode & 0x80 != 0), min, mag];
+                if texture.params != Some(params) {
+                    let names = [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T, glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER];
+                    for (name, value) in names.into_iter().zip(params) {
+                        gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+                    }
+                    texture.params = Some(params);
+                }
+                let first = t.first_level as f32;
+                let lod = [t.lodmin as f32 / 256.0 - first, t.lodmax as f32 / 256.0 - first];
+                if texture.lod != Some(lod) {
+                    gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MIN_LOD, lod[0]);
+                    gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LOD, lod[1]);
+                    texture.lod = Some(lod);
+                }
+                let [mode, size, lods, detail] = if unit == 0 {
+                    ["u_tmode0", "u_tsize0", "u_tlod0", "u_tdetail0"]
+                } else {
+                    ["u_tmode1", "u_tsize1", "u_tlod1", "u_tdetail1"]
+                };
+                gl.uniform_1_i32(p.at(mode), t.mode as i32);
+                gl.uniform_3_f32(p.at(size), t.width as f32, t.height as f32, t.lodbias as f32 / 256.0);
+                gl.uniform_3_i32(p.at(lods), t.lodmin, t.lodmax, t.lodbias);
+                gl.uniform_3_i32(p.at(detail), t.detailbias, t.detailmax, t.detailscale as i32);
+            }
+            if s.send_config.is_some() && units & 1 != 0 {
+                units |= 4;
+            }
+            gl.uniform_1_i32(p.at("u_units"), units);
+
+            gl.bind_vertex_array(Some(self.vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, vertex_bytes(&draw.vertices), glow::STREAM_DRAW);
+            gl.draw_arrays(glow::TRIANGLES, 0, draw.vertices.len() as i32);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            gl.active_texture(glow::TEXTURE0);
+        }
+    }
+
+    /// Draw only into `clip` (left, right, top, bottom in the card's
+    /// pixels), or everywhere.
+    fn clip(&self, gl: &glow::Context, clip: Option<[u32; 4]>) {
+        let s = self.scale as i32;
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            match clip {
+                Some([l, r, t, b]) => {
+                    let (l, r) = (l.min(self.width) as i32, r.min(self.width) as i32);
+                    let (t, b) = (t.min(self.height) as i32, b.min(self.height) as i32);
+                    gl.enable(glow::SCISSOR_TEST);
+                    gl.scissor(l * s, t * s, (r - l).max(0) * s, (b - t).max(0) * s);
+                }
+                None => gl.disable(glow::SCISSOR_TEST),
+            }
+        }
+    }
+
+    fn fill(&mut self, gl: &glow::Context, fill: &Fill) {
+        let [l, r, t, b] = fill.rect;
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.disable(glow::BLEND);
+            self.clip(gl, Some([l, r, t, b]));
+            let target = self.targets.get(&fill.dest).or_else(|| self.targets.values().next());
+            let Some(target) = target else { return };
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+            if let Some(color) = fill.color {
+                gl.color_mask(true, true, true, false);
+                let c = |shift: u32| ((color >> shift) & 0xFF) as f32 / 255.0;
+                gl.clear_color(c(16), c(8), c(0), 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            }
+            if let Some(aux) = fill.aux {
+                if fill.alpha_planes {
+                    gl.color_mask(false, false, false, true);
+                    gl.clear_color(0.0, 0.0, 0.0, (aux & 0xFF) as f32 / 255.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                } else if self.depth.is_some() {
+                    gl.depth_mask(true);
+                    gl.clear_depth_f64(aux as f64 / 65535.0);
+                    gl.clear(glow::DEPTH_BUFFER_BIT);
+                }
+            }
+        }
+    }
+
+    /// The picture the card shows, with `screen`'s pixels over it where
+    /// they differ from `base` (the settings window, messages): a texture
+    /// and its size, or None if the card shows nothing.
+    pub fn composite(&mut self, gl: &glow::Context, screen: &Frame, base: &Frame) -> Option<(glow::Texture, (u32, u32))> {
+        let front = self.targets.get(&self.front?)?.color;
+        let (w, h) = self.scaled();
+        let size = (w as u32, h as u32);
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            if self.composite.as_ref().is_none_or(|(_, s)| *s != size) {
+                if let Some((old, _)) = self.composite.take() {
+                    gl.delete_framebuffer(old.fbo);
+                    gl.delete_texture(old.color);
+                }
+                self.composite = Some((target(gl, size_i32(size), None).ok()?, size));
+            }
+            if self.lut_of != Some(self.clut) {
+                let table = lut(&self.clut);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.lut));
+                let pixels = glow::PixelUnpackData::Slice(Some(&table));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, 256, 1, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+                self.lut_of = Some(self.clut);
+            }
+            let (composite, _) = self.composite.as_ref()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(composite.fbo));
+            gl.viewport(0, 0, w, h);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            let p = &self.clut_program;
+            gl.use_program(Some(p.program));
+            gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, self.width as f32, self.height as f32);
+            gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.lut));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(front));
+            gl.bind_vertex_array(Some(self.quad_vao));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            // What is drawn over the machine's picture.
+            let fits = (screen.width, screen.height) == (self.width, self.height)
+                && (base.width, base.height) == (self.width, self.height);
+            if fits && screen.rgb != base.rgb {
+                let over: Vec<u8> = screen
+                    .rgb
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(base.rgb.as_chunks::<3>().0)
+                    .flat_map(|(&[r, g, b], old)| if [r, g, b] != *old { [r, g, b, 0xFF] } else { [0; 4] })
+                    .collect();
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.staging_texture));
+                let pixels = glow::PixelUnpackData::Slice(Some(&over));
+                let (nw, nh) = (self.width as i32, self.height as i32);
+                gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, nw, nh, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+                let p = &self.pixels;
+                gl.use_program(Some(p.program));
+                gl.uniform_4_f32(p.at("u_rect"), 0.0, 0.0, self.width as f32, self.height as f32);
+                gl.uniform_2_f32(p.at("u_size"), self.width as f32, self.height as f32);
+                gl.uniform_1_f32(p.at("u_scale"), self.scale as f32);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            restore(gl);
+            Some((composite.color, size))
+        }
+    }
+}
+
+fn size_i32((w, h): (u32, u32)) -> (i32, i32) {
+    (w as i32, h as i32)
+}
+
+/// The card's source blend factors as OpenGL's.
+fn source_factor(f: u32) -> u32 {
+    match f {
+        1 => glow::SRC_ALPHA,
+        2 => glow::DST_COLOR,
+        3 => glow::DST_ALPHA,
+        4 => glow::ONE,
+        5 => glow::ONE_MINUS_SRC_ALPHA,
+        6 => glow::ONE_MINUS_DST_COLOR,
+        7 => glow::ONE_MINUS_DST_ALPHA,
+        15 => glow::SRC_ALPHA_SATURATE,
+        _ => glow::ZERO,
+    }
+}
+
+/// The card's destination blend factors as OpenGL's. 15, the colour
+/// before fog, OpenGL hasn't: the colour after it stands in.
+fn dest_factor(f: u32) -> u32 {
+    match f {
+        1 => glow::SRC_ALPHA,
+        2 | 15 => glow::SRC_COLOR,
+        3 => glow::DST_ALPHA,
+        4 => glow::ONE,
+        5 => glow::ONE_MINUS_SRC_ALPHA,
+        6 => glow::ONE_MINUS_SRC_COLOR,
+        7 => glow::ONE_MINUS_DST_ALPHA,
+        _ => glow::ZERO,
+    }
+}
+
+/// A staged pixel: a 5-6-5 colour as RGB, or a depth as its low and high
+/// bytes.
+fn rgba(key: Option<u32>, value: u16) -> [u8; 4] {
+    match key {
+        Some(_) => {
+            let (r, g, b) = ((value >> 11) as u8, (value >> 5 & 0x3F) as u8, (value & 0x1F) as u8);
+            [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 0xFF]
+        }
+        None => [value as u8, (value >> 8) as u8, 0, 0xFF],
+    }
+}
+
+/// The gamma table as 256 RGBA entries a component takes its value from.
+fn lut(clut: &[u32; 33]) -> Vec<u8> {
+    rust_dos::voodoo::gamma_table(clut).iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]).collect()
+}
+
+fn vertex_bytes(vertices: &[Vertex]) -> &[u8] {
+    // SAFETY: a Vertex is repr(C) and all f32, so it has no padding, and
+    // any bytes may be read as u8.
+    unsafe { std::slice::from_raw_parts(vertices.as_ptr().cast::<u8>(), std::mem::size_of_val(vertices)) }
+}
+
+/// Put back what the rest of the display expects of OpenGL's state.
+fn restore(gl: &glow::Context) {
+    // SAFETY: see `VoodooGl`.
+    unsafe {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.disable(glow::BLEND);
+        gl.disable(glow::DEPTH_TEST);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.color_mask(true, true, true, true);
+        gl.depth_mask(true);
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_vertex_array(None);
+        gl.use_program(None);
+    }
+}
+
+/// A texture with `filter`, clamped at its edges, bound.
+fn texture(gl: &glow::Context, filter: u32) -> Result<glow::Texture, String> {
+    // SAFETY: see `VoodooGl`.
+    unsafe {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        Ok(texture)
+    }
+}
+
+/// A colour buffer of `size` with `depth` attached, its framebuffer bound.
+fn target(gl: &glow::Context, (w, h): (i32, i32), depth: Option<glow::Texture>) -> Result<Target, String> {
+    // SAFETY: see `VoodooGl`.
+    unsafe {
+        let color = texture(gl, glow::NEAREST)?;
+        let none = glow::PixelUnpackData::Slice(None);
+        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE, none);
+        let fbo = gl.create_framebuffer()?;
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(color), 0);
+        if depth.is_some() {
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, depth, 0);
+        }
+        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        if status != glow::FRAMEBUFFER_COMPLETE {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.delete_framebuffer(fbo);
+            gl.delete_texture(color);
+            return Err(format!("the framebuffer is incomplete ({:04X}h)", status));
+        }
+        gl.viewport(0, 0, w, h);
+        Ok(Target { fbo, color })
+    }
+}
+
+/// Compile and link a program with its attributes at their locations, and
+/// find its uniforms.
+fn compile(
+    gl: &glow::Context,
+    glsl: Glsl,
+    vertex: &str,
+    fragment: &str,
+    attributes: &[(u32, &str)],
+    uniforms: &[&'static str],
+) -> Result<Program, String> {
+    // SAFETY: see `VoodooGl`.
+    unsafe {
+        let program = gl.create_program()?;
+        let mut stages = Vec::new();
+        let mut problem = None;
+        for (kind, source) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
+            let stage = gl.create_shader(kind)?;
+            gl.shader_source(stage, &format!("{}{}", glsl.preamble(), source));
+            gl.compile_shader(stage);
+            gl.attach_shader(program, stage);
+            stages.push(stage);
+            if !gl.get_shader_compile_status(stage) {
+                problem = Some(format!("a 3dfx shader doesn't compile: {}", gl.get_shader_info_log(stage)));
+                break;
+            }
+        }
+        if problem.is_none() {
+            for &(index, name) in attributes {
+                gl.bind_attrib_location(program, index, name);
+            }
+            gl.bind_frag_data_location(program, 0, "o_color");
+            gl.link_program(program);
+            if !gl.get_program_link_status(program) {
+                problem = Some(format!("a 3dfx shader doesn't link: {}", gl.get_program_info_log(program)));
+            }
+        }
+        for stage in stages {
+            gl.detach_shader(program, stage);
+            gl.delete_shader(stage);
+        }
+        if let Some(problem) = problem {
+            gl.delete_program(program);
+            return Err(problem);
+        }
+        let mut found = HashMap::new();
+        for &name in uniforms {
+            let location =
+                gl.get_uniform_location(program, name).or_else(|| gl.get_uniform_location(program, &format!("{}[0]", name)));
+            if let Some(location) = location {
+                found.insert(name, location);
+            }
+        }
+        Ok(Program { program, uniforms: found })
+    }
+}

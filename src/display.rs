@@ -1,15 +1,19 @@
 //! The window and how the emulated picture fills it: the scale factor,
 //! fullscreen, 4:3 aspect correction, the scaling filter and the CRT
 //! shader. OpenGL 3 draws it (gl.rs), or where there is none SDL's own
-//! renderer, without the shaders.
+//! renderer, without the shaders. With OpenGL, the 3dfx card's picture
+//! can be drawn at a higher resolution (voodoo_gl.rs).
 
 mod gl;
+mod voodoo_gl;
 
 use crate::config::{Filter, Settings};
 use crate::video::mono::Monochrome;
 use crate::video::shader::{CrtSettings, Shader};
 use crate::video::{self, Frame};
 use gl::{GlScreen, NoGl};
+use rust_dos::bus::Bus;
+use rust_dos::voodoo::{Renderer, VoodooSettings};
 use sdl2::VideoSubsystem;
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{ScaleMode, Texture, TextureCreator, WindowCanvas};
@@ -69,6 +73,11 @@ pub struct Display<'a> {
     /// uploaded or drawn, and those that do upload the rows that changed.
     shown: Vec<u8>,
     redraw: bool,
+    /// Why OpenGL doesn't draw the 3dfx card although the settings ask for
+    /// it, once said; and whether the last picture shown was the card's
+    /// OpenGL drew, which the texture of `shown` isn't.
+    voodoo_said: bool,
+    voodoo_shown: bool,
 }
 
 /// What draws the picture.
@@ -160,6 +169,8 @@ impl<'a> Display<'a> {
             warning,
             shown: Vec::new(),
             redraw: true,
+            voodoo_said: false,
+            voodoo_shown: false,
         };
         // For the window managers and taskbars that take the icon from the
         // window rather than from rust-dos.desktop. The test below keeps
@@ -263,13 +274,63 @@ impl<'a> Display<'a> {
         Ok(())
     }
 
+    /// With `voodoo_renderer=opengl`, draw what the 3dfx card recorded
+    /// with OpenGL; true if its picture is the one to show
+    /// (`present`'s `voodoo`). Otherwise the card stops recording.
+    pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings) -> bool {
+        let want = settings.renderer == Renderer::OpenGl;
+        let problem = match &mut self.out {
+            Output::Gl(gl) => {
+                let Some(card) = bus.voodoo.as_mut() else {
+                    gl.drop_voodoo();
+                    return false;
+                };
+                if !want || gl.voodoo_problem().is_some() {
+                    card.set_mirror(false);
+                    gl.drop_voodoo();
+                    gl.voodoo_problem().filter(|_| want).map(str::to_string)
+                } else {
+                    // A new card or a new scale: start again from its
+                    // memory.
+                    if !card.mirror_attached() || gl.voodoo_scale() != Some(settings.scale) {
+                        card.set_mirror(false);
+                        card.set_mirror(true);
+                        gl.drop_voodoo();
+                        self.redraw = true;
+                    }
+                    let Some(recording) = card.take_mirror() else { return false };
+                    let shown = recording.output && recording.front.is_some();
+                    match gl.run_voodoo(recording, settings.scale) {
+                        Ok(()) => return shown,
+                        Err(e) => {
+                            card.set_mirror(false);
+                            Some(e)
+                        }
+                    }
+                }
+            }
+            Output::Sdl { .. } => {
+                (want && bus.voodoo.is_some()).then(|| "there is no OpenGL 3 here".to_string())
+            }
+        };
+        if let Some(problem) = problem
+            && !std::mem::replace(&mut self.voodoo_said, true)
+        {
+            bus.log_string(&format!("[3DFX] voodoo_renderer=opengl: {}; the software renderer draws", problem));
+        }
+        false
+    }
+
     /// Show `frame`, which must be as big as the last `set_frame_size`,
     /// if it differs from the one shown or the window needs drawing. The
     /// display keeps the picture to compare the next one with, and leaves
     /// the one it showed before in `frame` instead, which saves copying it.
-    pub fn present(&mut self, frame: &mut Frame) -> Result<(), String> {
+    /// With `voodoo`, the machine's picture without what is drawn over it,
+    /// OpenGL shows the 3dfx card's picture it drew instead
+    /// (`run_voodoo`), with what `frame` has over it.
+    pub fn present(&mut self, frame: &mut Frame, voodoo: Option<&Frame>) -> Result<(), String> {
         let row_bytes = frame.width as usize * 3;
-        let rows = if self.redraw || self.shown.len() != frame.rgb.len() {
+        let rows = if self.redraw || self.shown.len() != frame.rgb.len() || self.voodoo_shown && voodoo.is_none() {
             0..frame.height as usize
         } else {
             match changed_rows(&self.shown, &frame.rgb, row_bytes) {
@@ -278,9 +339,13 @@ impl<'a> Display<'a> {
             }
         };
         self.redraw = false;
+        let display = display_size(frame.width, frame.height, self.aspect);
         let shown = match &mut self.out {
             Output::Gl(gl) => {
-                gl.present(frame, rows, display_size(frame.width, frame.height, self.aspect));
+                self.voodoo_shown = voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
+                if !self.voodoo_shown {
+                    gl.present(frame, rows, display);
+                }
                 Ok(())
             }
             Output::Sdl { canvas, texture, .. } => {

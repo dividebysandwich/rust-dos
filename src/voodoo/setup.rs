@@ -153,6 +153,12 @@ impl Voodoo {
             };
         }
         let st = self.raster_state(dest, texcount);
+        if self.mirror.is_some() {
+            self.mirror_sync();
+            if let Some(mirror) = &mut self.mirror {
+                mirror.triangle(&st, &p, verts, texcount, &self.tmu, self.reg[STIPPLE]);
+            }
+        }
         let job = Job::Triangle { st, p, verts, texcount };
         if self.reg[FBZ_MODE] & (1 << 2 | 1 << 12) == 1 << 2 {
             // Stippling in rotate mode goes on from pixel to pixel across
@@ -219,6 +225,12 @@ impl Voodoo {
             }
         }
         let st = self.raster_state(dest, 0);
+        if self.mirror.is_some() {
+            self.mirror_sync();
+            if let Some(mirror) = &mut self.mirror {
+                mirror.fastfill(&st, (sx, ex, sy, ey), rgb, aux);
+            }
+        }
         self.pool.submit(Job::Fastfill { st, dither, x0: sx, x1: ex, y0: sy, y1: ey });
         if rgb {
             self.mark_drawn(dest);

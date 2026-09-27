@@ -4,7 +4,7 @@
 //! From DOSBox-X's voodoo_def.h (MAME's SST-1 emulation by Aaron Giles).
 
 // FBI registers.
-pub const STATUS: usize = 0x000 / 4;
+pub const STATUS: usize = 0; // 000h
 pub const VERTEX_AX: usize = 0x008 / 4;
 pub const VERTEX_AY: usize = 0x00C / 4;
 pub const VERTEX_BX: usize = 0x010 / 4;
@@ -182,7 +182,7 @@ pub const ACCESS: [u8; 0x100] = {
 /// triangle setup writes them (`register_alias_map`).
 #[rustfmt::skip]
 pub const ALIAS: [u8; 0x40] = [
-    STATUS as u8, 0x004 / 4, VERTEX_AX as u8, VERTEX_AY as u8,
+    STATUS as u8, 1, VERTEX_AX as u8, VERTEX_AY as u8,
     VERTEX_BX as u8, VERTEX_BY as u8, VERTEX_CX as u8, VERTEX_CY as u8,
     START_R as u8, D_R_DX as u8, D_R_DY as u8, START_G as u8,
     D_G_DX as u8, D_G_DY as u8, START_B as u8, D_B_DX as u8,

@@ -978,6 +978,7 @@ fn main() -> Result<(), String> {
         // The CRTC picks up the Start Address the program flipped to at the
         // vertical retraces that passed, whether or not it polled port 3DAh.
         cpu.bus.sync_display();
+        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
         let (width, height) = video::frame_size(&cpu.bus);
         if cached_frame.resize(width, height) {
             cpu.bus.vga.mark_dirty_full();
@@ -1064,7 +1065,7 @@ fn main() -> Result<(), String> {
                 }
             }
         }
-        display.present(&mut screen)?;
+        display.present(&mut screen, voodoo_gl.then_some(&cached_frame))?;
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
         if let Some(cycles) = pacer.end_frame(&cpu.bus.clock, executed, exec_time, overhead) {

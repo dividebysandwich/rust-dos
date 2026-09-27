@@ -21,6 +21,7 @@ impl Voodoo {
     /// of which `mem_mask` selects the halves written (`lfb_w`).
     pub(crate) fn lfb_write(&mut self, offset: u32, mut data: u32, mut mem_mask: u32) {
         self.flush();
+        self.mirror_sync();
         let lfb_mode = self.reg[LFB_MODE];
         if lfb_mode & (1 << 12) != 0 {
             data = data.swap_bytes();
@@ -146,6 +147,10 @@ impl Voodoo {
         }
         let dest = offs as usize / 2;
         let fbz = self.reg[FBZ_MODE];
+        // The pixels written, for the OpenGL renderer: X, the buffer row,
+        // and whether the auxiliary buffer's changed too.
+        let mut written = [(0i32, 0i32, false); 2];
+        let mut count = 0;
 
         if lfb_mode & (1 << 8) == 0 {
             // Straight into the buffers.
@@ -187,6 +192,8 @@ impl Voodoo {
                         }
                     }
                     self.stats.pixels_out += 1;
+                    written[count] = (x, scry, has_alpha || has_depth);
+                    count += 1;
                 }
                 bufoffs += 1;
                 x += 1;
@@ -199,10 +206,13 @@ impl Voodoo {
             let mut stipple = self.reg[STIPPLE];
             let mut stats = self.stats;
             let mut pix = 0;
+            let scry = raster::screen_y(&st, y, fbz & (1 << 17) != 0);
             while mask != 0 {
                 if mask & 0x0F != 0 {
                     let color = sa[pix] << 24 | sr[pix] << 16 | sg[pix] << 8 | sb[pix];
                     raster::lfb_pixel(&st, x, y, color, sw[pix], &mut stipple, &mut stats);
+                    written[count] = (x, scry, fbz & (1 << 10) != 0);
+                    count += 1;
                 }
                 x += 1;
                 mask >>= 4;
@@ -210,6 +220,9 @@ impl Voodoo {
             }
             self.reg[STIPPLE] = stipple;
             self.stats = stats;
+        }
+        for &(x, y, aux) in &written[..count] {
+            self.mirror_pixel(dest, x, y, aux);
         }
         self.mark_drawn(dest);
     }

@@ -90,8 +90,9 @@
 # 4 MB (2 MB, one texture unit). Changes take effect at the DOS prompt.
 #voodoo=false
 #voodoo_memory=12
-# What draws the card's triangles: software (rust-dos) or opengl, which
-# draws them at voodoo_scale (1 to 4) times the card's resolution.
+# What draws the card's picture in the window: software (rust-dos) or
+# opengl, which draws it again at voodoo_scale (1 to 4) times the card's
+# resolution. Screenshots show the software picture either way.
 #voodoo_renderer=software
 #voodoo_scale=2
 # Where screenshots (Ctrl+F5) and sound (Ctrl+F6), video (Ctrl+F7) and

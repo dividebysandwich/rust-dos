@@ -511,6 +511,24 @@ impl<'a> Row<'a> {
     }
 }
 
+/// The ARGB colour of texel `s`, `tc` of the level at `texbase`, which is
+/// `smax + 1` texels wide.
+#[inline(always)]
+pub(crate) fn fetch_texel(t: &TmuRaster, texbase: u32, smax: i32, s: i32, tc: i32) -> u32 {
+    let format = (t.mode >> 8) & 0xF;
+    let index = (tc as u32).wrapping_mul(smax as u32 + 1).wrapping_add(s as u32);
+    if format < 8 {
+        t.lookup[t.ram.byte((texbase.wrapping_add(index) & t.mask) as usize) as usize]
+    } else {
+        let texel = t.ram.get(((texbase.wrapping_add(index.wrapping_mul(2)) & t.mask) >> 1) as usize) as u32;
+        if (10..=12).contains(&format) {
+            t.lookup[texel as usize]
+        } else {
+            (t.lookup[(texel & 0xFF) as usize] & 0xFF_FFFF) | ((texel & 0xFF00) << 16)
+        }
+    }
+}
+
 /// A texture unit's colour for a pixel, combined with `cother`, the
 /// colour of the unit before it (`TEXTURE_PIPELINE`).
 #[inline(always)]
@@ -554,22 +572,7 @@ fn texture(t: &TmuRaster, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: 
     let texbase = t.lodoffset[ilod as usize];
     let smax = t.wmask >> ilod;
     let tmax = t.hmask >> ilod;
-    let format = (mode >> 8) & 0xF;
-    let wide = format >= 8;
-    let full = (10..=12).contains(&format);
-    let fetch = |s: i32, tc: i32| -> u32 {
-        let index = (tc as u32).wrapping_mul(smax as u32 + 1).wrapping_add(s as u32);
-        if !wide {
-            t.lookup[t.ram.byte((texbase.wrapping_add(index) & t.mask) as usize) as usize]
-        } else {
-            let texel = t.ram.get(((texbase.wrapping_add(index.wrapping_mul(2)) & t.mask) >> 1) as usize) as u32;
-            if full {
-                t.lookup[texel as usize]
-            } else {
-                (t.lookup[(texel & 0xFF) as usize] & 0xFF_FFFF) | ((texel & 0xFF00) << 16)
-            }
-        }
-    };
+    let fetch = |s: i32, tc: i32| fetch_texel(t, texbase, smax, s, tc);
 
     let point = (lod == t.lodmin && !bit(mode, 2)) || (lod != t.lodmin && !bit(mode, 1));
     let c_local = if point {

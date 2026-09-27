@@ -26,7 +26,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   Mode X, VESA VBE 2.0 up to 1024x768, an S3 Trio64 with its 2D
   accelerator, Hercules, the Tandy 1000's and IBM PCjr's 16-colour
   modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
-  for Glide games in DOS and Windows 95
+  for Glide games in DOS and Windows 95, drawn by rust-dos or again by
+  OpenGL at up to four times its resolution
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
   the Ultrasound patches, a Roland MT-32 (via munt) or the host's MIDI

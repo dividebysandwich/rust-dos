@@ -222,7 +222,8 @@ impl Glsl {
         }
     }
 
-    fn preamble(self) -> &'static str {
+    /// The first lines of a shader for this version.
+    pub fn preamble(self) -> &'static str {
         match self {
             Glsl::Gl130 => "#version 130\n",
             Glsl::Gl150 => "#version 150\n",

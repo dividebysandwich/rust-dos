@@ -287,8 +287,12 @@ picture is on the screen instead of the VGA's; `/api/screenshot` then
 shows it), `clock` (the video clock Glide turns on first), `base` (BAR0),
 `width`/`height` and `hz`, the `front` and `back` buffers, `pending_swaps`
 (swaps waiting for the retrace), `fifo_writes` behind them, `triangles`
-drawn, the `fbiInit` registers and `init_enable`. While it shows, `fps`
-counts its buffer swaps. A game that detects no card
+drawn, the `fbiInit` registers and `init_enable`, and `opengl` (true
+while `voodoo_renderer=opengl` draws the window's picture again). While it
+shows, `fps` counts its buffer swaps. `/api/screenshot` is the software
+rasterizer's picture at the card's resolution even with OpenGL; to see
+OpenGL's, run rust-dos in a headless compositor and capture that (for
+sway: `WLR_BACKENDS=headless sway`, then `grim`). A game that detects no card
 usually left `fbiInit` at their power-on values (`00000410 00201102
 80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
 
