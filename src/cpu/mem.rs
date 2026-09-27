@@ -196,11 +196,23 @@ impl Cpu {
         self.bus.read_8(p)
     }
 
+    /// An operand within one page is read as one access of its size, as
+    /// the CPU's bus cycle has it: memory-mapped devices (a 3dfx card's
+    /// registers, which Glide loads and stores with FLD and FSTP) take no
+    /// bytes. One across pages is read byte by byte.
     pub fn lin_read_16(&mut self, lin: usize) -> u16 {
+        if lin & 0xFFF <= 0x1000 - 2 {
+            let p = self.span_byte(lin, false);
+            return self.bus.read_16(p);
+        }
         u16::from_le_bytes([self.lin_read_8(lin), self.lin_read_8(lin + 1)])
     }
 
     pub fn lin_read_32(&mut self, lin: usize) -> u32 {
+        if lin & 0xFFF <= 0x1000 - 4 {
+            let p = self.span_byte(lin, false);
+            return self.bus.read_32(p);
+        }
         self.lin_read_16(lin) as u32 | (self.lin_read_16(lin + 2) as u32) << 16
     }
 
@@ -214,12 +226,23 @@ impl Cpu {
         self.bus.write_8(p, value);
     }
 
+    /// Written as `lin_read_16` reads.
     pub fn lin_write_16(&mut self, lin: usize, value: u16) {
+        if lin & 0xFFF <= 0x1000 - 2 {
+            let p = self.span_byte(lin, true);
+            self.bus.write_16(p, value);
+            return;
+        }
         self.lin_write_8(lin, value as u8);
         self.lin_write_8(lin + 1, (value >> 8) as u8);
     }
 
     pub fn lin_write_32(&mut self, lin: usize, value: u32) {
+        if lin & 0xFFF <= 0x1000 - 4 {
+            let p = self.span_byte(lin, true);
+            self.bus.write_32(p, value);
+            return;
+        }
         self.lin_write_16(lin, value as u16);
         self.lin_write_16(lin + 2, (value >> 16) as u16);
     }

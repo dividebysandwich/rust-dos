@@ -1098,3 +1098,37 @@ fn a_bios_service_that_finds_a_page_missing_faults_and_runs_again() {
     assert_eq!(rig.read32(0x30104), 0x534D_4150, "the service ran again");
     assert_eq!(rig.read32(0x92008), 0xA0000);
 }
+
+#[test]
+fn fpu_operands_across_a_page_boundary_follow_the_page_tables() {
+    // Linear pages 50h and 51h map to physical 90000h and 93000h, so an
+    // operand at the end of the first continues on a page that isn't next
+    // to it physically.
+    let mut rig = Rig::new();
+    page_tables(&mut rig);
+    rig.write32(0x81000 + 0x50 * 4, 0x90000 | 0x3);
+    rig.write32(0x81000 + 0x51 * 4, 0x93000 | 0x3);
+    rig.write32(DATA, 1.5f32.to_bits());
+    rig.run(|a| {
+        enable_paging(a)?;
+        a.fld(dword_ptr(DATA))?;
+        // A dword split 2 + 2, and a qword split 3 + 5.
+        a.fst(dword_ptr(0x50FFE))?;
+        a.fstp(qword_ptr(0x50FFD))?;
+        a.fld(dword_ptr(0x50FFE))?;
+        a.fstp(dword_ptr(DATA + 4))?;
+        a.hlt()
+    });
+    // The qword store overwrote the dword; read what's there byte by byte.
+    let bytes: Vec<u8> = (0..3).map(|i| rig.cpu.bus.read_8(0x90FFD + i)).chain((0..5).map(|i| rig.cpu.bus.read_8(0x93000 + i))).collect();
+    assert_eq!(f64::from_le_bytes(bytes.try_into().unwrap()), 1.5);
+    assert_eq!(rig.read32(0x51000), 0, "nothing at the physical page after the first");
+    let dword = rig.read32(DATA + 4);
+    let expected = u32::from_le_bytes([
+        rig.cpu.bus.read_8(0x90FFE),
+        rig.cpu.bus.read_8(0x90FFF),
+        rig.cpu.bus.read_8(0x93000),
+        rig.cpu.bus.read_8(0x93001),
+    ]);
+    assert_eq!(dword, expected, "the load reads the same split bytes back");
+}
