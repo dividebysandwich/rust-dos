@@ -913,9 +913,14 @@ impl Device for VgaCard {
                     // if self.graphics_index == 0x04 {
                     //    val &= 0x03;
                     // }
-                    // Mask Mode Register (Index 5)
+                    // The Graphics Mode register's bits: all but bit 2,
+                    // which the VGA doesn't have. Bit 3 is the read mode.
                     if self.graphics_index == 0x05 {
-                        val &= 0x73;
+                        val &= 0x7B;
+                        // 256 colours on or off: another kind of mode.
+                        if (self.graphics_regs[0x05] ^ val) & 0x40 != 0 {
+                            self.mode_switched = true;
+                        }
                     }
 
                     self.graphics_regs[self.graphics_index as usize] = val;
@@ -1015,13 +1020,32 @@ impl VgaCard {
 mod tests {
     use super::*;
 
+    /// Leaving 256 colours through the Graphics Mode register, as Windows'
+    /// VDD passes on a mode set from mode 13h to 12h, is a change of mode
+    /// the bus follows (`Bus::settle_register_mode`).
+    #[test]
+    fn the_256_colour_bit_switches_the_mode() {
+        let mut vga = VgaCard::new();
+        vga.io_write(0x3CE, 0x05);
+        vga.io_write(0x3CF, 0x40);
+        vga.mode_switched = false;
+        vga.io_write(0x3CF, 0x40);
+        assert!(!vga.mode_switched, "the same mode");
+        vga.io_write(0x3CF, 0x00);
+        assert!(vga.mode_switched);
+    }
+
     #[test]
     fn read_mode_1_compares_the_pixels_colours() {
         let mut vga = VgaCard::new();
         // Planar, all planes, read mode 1.
         vga.sequencer_regs[0x04] = 0x06;
         vga.sequencer_regs[0x02] = 0x0F;
-        vga.graphics_regs[0x05] = 0x08;
+        // Selected through the ports, as Windows' VGA driver does (GR05
+        // 0Bh: read mode 1, write mode 3).
+        vga.io_write(0x3CE, 0x05);
+        vga.io_write(0x3CF, 0x0B);
+        assert_eq!(vga.graphics_regs[0x05], 0x0B);
         // Pixels 0-3 in colour 5 (planes 0 and 2), pixels 4-7 in colour 0.
         vga.vram_graphics[0] = 0xF0;
         vga.vram_graphics[2 * 65536] = 0xF0;

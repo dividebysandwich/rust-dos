@@ -2137,15 +2137,17 @@ impl Bus {
     }
 
     /// After a switch between text and graphics made through the attribute
-    /// controller, as Windows' VDD makes one restoring a machine's display
-    /// or showing a message: show the mode the registers describe now that
-    /// the writes are done.
+    /// controller, or between 256 colours and 16 through the Graphics Mode
+    /// register, as Windows' VDD makes one restoring a machine's display or
+    /// passing on a video BIOS service's writes: show the mode the
+    /// registers describe now that the writes are done.
     pub fn settle_register_mode(&mut self) {
         if !std::mem::take(&mut self.vga.mode_switched) || self.video_mode == VideoMode::Vesa {
             return;
         }
+        let colours256 = |mode: VideoMode| mode == VideoMode::Graphics320x200;
         if let Some(mode) = self.vga.register_mode()
-            && mode.is_text() != self.video_mode.is_text()
+            && (mode.is_text() != self.video_mode.is_text() || colours256(mode) != colours256(self.video_mode))
         {
             self.log_string(&format!("[VGA] Switch to {:?} through the registers", mode));
             self.video_mode = mode;
