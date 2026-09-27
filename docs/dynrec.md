@@ -341,8 +341,9 @@ when the link was made. The ARM64 one checks everything at run time.
 A block leaves to another block without the execution loop through its
 links (`BlockData::links`): two for exits to a known EIP (a jump's target,
 a conditional jump's next instruction), and four for a return or a call
-through a register or memory, to the last places it went to: a function
-called from two places in turn returns to each through its own link.
+or jump through a register or memory, to the last places it went to: a
+function called from two places in turn returns to each through its own
+link.
 Links are data, not code:
 
 - A link starts at a stub that returns to the execution loop.
@@ -369,7 +370,7 @@ takes more care:
   - The execution loop makes these links when the block it runs next is
     at the stub's target (`Pending`): its own fetch just found the target,
     under the translation the guard records.
-  - A return or indirect call to none of the EIPs its links were made to
+  - A return, indirect call or jump to none of the EIPs its links were made to
     looks in the engine's table of places returns went to (`Return`, by
     the EIP's low bits), made as its links are, in the block's mode, and
     goes there where the guard holds (on x86-64 hosts). Otherwise it
@@ -436,7 +437,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:
