@@ -20,6 +20,7 @@ impl Voodoo {
     /// A write to the frame buffer at dword `offset` of the window: `data`,
     /// of which `mem_mask` selects the halves written (`lfb_w`).
     pub(crate) fn lfb_write(&mut self, offset: u32, mut data: u32, mut mem_mask: u32) {
+        self.flush();
         let lfb_mode = self.reg[LFB_MODE];
         if lfb_mode & (1 << 12) != 0 {
             data = data.swap_bytes();
@@ -216,6 +217,7 @@ impl Voodoo {
     /// A read of the frame buffer at dword `offset` of the window: two
     /// 16-bit pixels of the buffer lfbMode selects (`lfb_r`).
     pub(crate) fn lfb_read(&self, offset: u32) -> u32 {
+        self.pool.flush();
         let lfb_mode = self.reg[LFB_MODE];
         let x = ((offset << 1) & 0x3FE) as usize;
         let y = ((offset >> 9) & 0x3FF) as i32;

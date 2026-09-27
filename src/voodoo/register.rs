@@ -277,6 +277,8 @@ impl Voodoo {
     }
 
     fn reset_counters(&mut self) {
+        self.flush();
+        self.pool.reset_stats();
         for r in [FBI_PIXELS_IN, FBI_CHROMA_FAIL, FBI_ZFUNC_FAIL, FBI_AFUNC_FAIL, FBI_PIXELS_OUT] {
             self.reg[r] = 0;
         }
@@ -289,18 +291,18 @@ impl Voodoo {
         if ACCESS[regnum] & READ == 0 {
             return 0xFFFF_FFFF;
         }
-        let s = &self.stats;
+        let counted = || self.counted();
         let counter = |r: usize, n: i32| self.reg[r].wrapping_add(n as u32) & 0xFF_FFFF;
         match regnum {
             STATUS => self.status(now),
             V_RETRACE => self.scanline(now) & 0x1FFF,
             // initEnable bit 2 reads the DAC through fbiInit2.
             FBI_INIT2 if self.pci.init_enable & 4 != 0 => self.dac_read as u32,
-            FBI_PIXELS_IN => counter(regnum, s.pixels_in),
-            FBI_CHROMA_FAIL => counter(regnum, s.chroma_fail),
-            FBI_ZFUNC_FAIL => counter(regnum, s.zfunc_fail),
-            FBI_AFUNC_FAIL => counter(regnum, s.afunc_fail),
-            FBI_PIXELS_OUT => counter(regnum, s.pixels_out),
+            FBI_PIXELS_IN => counter(regnum, counted().pixels_in),
+            FBI_CHROMA_FAIL => counter(regnum, counted().chroma_fail),
+            FBI_ZFUNC_FAIL => counter(regnum, counted().zfunc_fail),
+            FBI_AFUNC_FAIL => counter(regnum, counted().afunc_fail),
+            FBI_PIXELS_OUT => counter(regnum, counted().pixels_out),
             _ => self.reg[regnum],
         }
     }

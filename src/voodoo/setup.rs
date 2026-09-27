@@ -4,7 +4,8 @@
 //! rectangle. From DOSBox-X's `triangle`, `triangle_create_work_item`,
 //! `poly_render_triangle` and `fastfill` (voodoo_emu.cpp).
 
-use super::raster::{self, RasterState, TmuParams, TmuRaster, TriParams};
+use super::raster::{RasterState, TmuParams, TmuRaster, TriParams};
+use super::workers::Job;
 use super::regs::*;
 use super::{NONE, Voodoo};
 
@@ -152,15 +153,19 @@ impl Voodoo {
             };
         }
         let st = self.raster_state(dest, texcount);
-        let mut stipple = self.reg[STIPPLE];
-        let mut stats = self.stats;
-        match texcount {
-            0 => render_triangle(verts, |y, x0, x1| raster::scanline::<0>(&st, &p, y, x0, x1, &mut stipple, &mut stats)),
-            1 => render_triangle(verts, |y, x0, x1| raster::scanline::<1>(&st, &p, y, x0, x1, &mut stipple, &mut stats)),
-            _ => render_triangle(verts, |y, x0, x1| raster::scanline::<2>(&st, &p, y, x0, x1, &mut stipple, &mut stats)),
+        let job = Job::Triangle { st, p, verts, texcount };
+        if self.reg[FBZ_MODE] & (1 << 2 | 1 << 12) == 1 << 2 {
+            // Stippling in rotate mode goes on from pixel to pixel across
+            // the triangle, so it is drawn here, whole.
+            self.flush();
+            let mut stipple = self.reg[STIPPLE];
+            let mut stats = self.stats;
+            job.run_all(&mut stipple, &mut stats);
+            self.reg[STIPPLE] = stipple;
+            self.stats = stats;
+        } else {
+            self.pool.submit(job);
         }
-        self.reg[STIPPLE] = stipple;
-        self.stats = stats;
         self.reg[FBI_TRIANGLES_OUT] = self.reg[FBI_TRIANGLES_OUT].wrapping_add(1);
         self.mark_drawn(dest);
     }
@@ -170,6 +175,9 @@ impl Voodoo {
     pub(crate) fn mark_drawn(&mut self, dest: usize) {
         if self.color_buffer(0) == Some(dest) {
             self.display_dirty = true;
+        }
+        if !self.drawn_to.contains(&dest) {
+            self.drawn_to.push(dest);
         }
     }
 
@@ -211,11 +219,7 @@ impl Voodoo {
             }
         }
         let st = self.raster_state(dest, 0);
-        let mut stats = self.stats;
-        for y in sy..ey {
-            raster::fastfill_row(&st, &dither, y, sx, ex, &mut stats);
-        }
-        self.stats = stats;
+        self.pool.submit(Job::Fastfill { st, dither, x0: sx, x1: ex, y0: sy, y1: ey });
         if rgb {
             self.mark_drawn(dest);
         }
@@ -225,7 +229,7 @@ impl Voodoo {
 /// Scan-convert a triangle: for each scanline whose centre it covers, the
 /// pixels from its left to its right edge, sampled at the pixel centres
 /// (`poly_render_triangle`).
-fn render_triangle(verts: [(f32, f32); 3], mut scanline: impl FnMut(i32, i32, i32)) {
+pub(crate) fn render_triangle(verts: [(f32, f32); 3], mut scanline: impl FnMut(i32, i32, i32)) {
     // Sorted by Y as the original sorts, keeping equal Ys in their order.
     let (mut v1, mut v2, mut v3) = (verts[0], verts[1], verts[2]);
     if v2.1 < v1.1 {

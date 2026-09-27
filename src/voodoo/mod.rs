@@ -29,6 +29,7 @@ pub mod regs;
 pub mod setup;
 pub mod tables;
 pub mod texture;
+pub mod workers;
 
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use crate::timer::PIT_HZ;
@@ -346,6 +347,10 @@ pub struct Voodoo {
     /// changes.
     palette: Vec<[u8; 3]>,
     palette_dirty: bool,
+    /// The workers that draw, and the colour buffers drawn into since
+    /// they last finished.
+    pool: workers::Pool,
+    drawn_to: Vec<usize>,
     /// Messages already logged once.
     logged: u32,
     /// Lines for the log, which the bus writes out.
@@ -359,6 +364,11 @@ const LOG_DIRECT: u32 = 4;
 
 impl Voodoo {
     pub fn new(board: Board) -> Self {
+        Self::with_workers(board, workers::Pool::default_workers())
+    }
+
+    /// A card that draws with `workers` threads (0: none).
+    pub fn with_workers(board: Board, workers: usize) -> Self {
         let units = board.texture_units();
         let mut v = Self {
             board,
@@ -380,6 +390,8 @@ impl Voodoo {
             timing: CrtTiming::VESA_480,
             palette: vec![[0; 3]; 65536],
             palette_dirty: true,
+            pool: workers::Pool::new(workers),
+            drawn_to: Vec::new(),
             logged: 0,
             log: Vec::new(),
         };
@@ -390,6 +402,8 @@ impl Voodoo {
     /// A PCI reset: the power-on registers, the monitor given back to the
     /// VGA, nothing pending. The memory keeps what it had.
     pub fn reset(&mut self) {
+        self.flush();
+        self.pool.reset_stats();
         self.reg.fill(0);
         self.pci = PciConfig::default();
         self.dac = [0; 8];
@@ -522,7 +536,28 @@ impl Voodoo {
         }
     }
 
+    /// The frame buffer's memory, with everything drawn into it.
+    pub fn frame_buffer(&self) -> &Vram {
+        self.pool.flush();
+        &self.fbi.ram
+    }
+
+    /// Wait until the workers drew everything given to them.
+    pub fn flush(&mut self) {
+        self.pool.flush();
+        self.drawn_to.clear();
+    }
+
+    /// The pixel counters, the workers' included.
+    fn counted(&self) -> Stats {
+        self.pool.flush();
+        let mut stats = self.stats;
+        stats.add(&self.pool.stats());
+        stats
+    }
+
     fn texture_write(&mut self, index: u32, data: u32) {
+        self.flush();
         let unit = ((index >> 19) & 3) as usize;
         if self.chipmask & (2 << unit) == 0 || unit >= self.tmu.len() {
             return;
@@ -595,6 +630,11 @@ impl Voodoo {
     /// take the flag that it changed or that the card took or gave back
     /// the monitor.
     pub fn prepare_display(&mut self) -> bool {
+        // Jobs may still be drawing into the buffer shown.
+        let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
+        if front != NONE && self.drawn_to.contains(&(front as usize / 2)) {
+            self.flush();
+        }
         if self.palette_dirty {
             self.build_palette();
         }
@@ -836,6 +876,8 @@ fn default_clut() -> [u32; 33] {
 /// it stays in place for rewind's deltas.
 impl State for Voodoo {
     fn save(&self, w: &mut Writer) {
+        // Everything drawn before its memory is saved.
+        self.pool.flush();
         self.board.save(w);
         self.fbi.ram.save(w);
         for tmu in &self.tmu {
@@ -850,7 +892,7 @@ impl State for Voodoo {
             tmu.save(w);
         }
         self.send_config.save(w);
-        self.stats.save(w);
+        self.counted().save(w);
         self.clut.save(w);
         self.swaps.save(w);
         self.last_swap.save(w);
@@ -858,6 +900,7 @@ impl State for Voodoo {
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
+        self.flush();
         let mut board = Board::default();
         board.load(r)?;
         if board != self.board {
@@ -883,6 +926,7 @@ impl State for Voodoo {
         }
         self.send_config.load(r)?;
         self.stats.load(r)?;
+        self.pool.reset_stats();
         self.clut.load(r)?;
         self.swaps.load(r)?;
         self.last_swap.load(r)?;

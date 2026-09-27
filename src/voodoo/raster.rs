@@ -272,6 +272,7 @@ impl<'a> Row<'a> {
     /// Stippling, the depth value and the depth test
     /// (`PIXEL_PIPELINE_BEGIN`). The depth value, or None to skip the
     /// pixel.
+    #[inline(always)]
     fn begin(&self, x: i32, y: i32, iterz: i32, iterw: i64, stipple: &mut u32, stats: &mut Stats) -> Option<i32> {
         let st = self.st;
         let fbz = st.fbz_mode;
@@ -373,6 +374,7 @@ impl<'a> Row<'a> {
     /// Fog, alpha blending and the writes (`PIXEL_PIPELINE_MODIFY`,
     /// `PIXEL_PIPELINE_FINISH`). `iter_a` is the iterated alpha fog can
     /// use.
+    #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn finish(&self, x: i32, color: (i32, i32, i32, i32), depthval: i32, iterz: i32, iterw: i64, iter_a: i32, stats: &mut Stats) {
         let st = self.st;
@@ -511,7 +513,7 @@ impl<'a> Row<'a> {
 
 /// A texture unit's colour for a pixel, combined with `cother`, the
 /// colour of the unit before it (`TEXTURE_PIPELINE`).
-#[inline]
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn texture(t: &TmuRaster, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: i32, iters: i64, itert: i64, iterw: i64) -> u32 {
     let mode = t.mode;
@@ -680,6 +682,7 @@ fn texture(t: &TmuRaster, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: 
 /// The colour combine unit: c_other and c_local, chosen by fbzColorPath,
 /// subtracted, blended, added and clamped. The ARGB result, or None if the
 /// chroma key, alpha mask or alpha test rejects the pixel.
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn color_combine(row: &Row, iterargb: u32, texel: u32, iterz: i32, iterw: i64, stats: &mut Stats) -> Option<(i32, i32, i32, i32)> {
     let st = row.st;
@@ -725,6 +728,7 @@ fn color_combine(row: &Row, iterargb: u32, texel: u32, iterz: i32, iterw: i64, s
 }
 
 /// The arithmetic of the colour combine unit on c_other and c_local.
+#[inline(always)]
 fn combine(cp: u32, c_other: u32, c_local: u32, texel: u32) -> (i32, i32, i32, i32) {
     let (mut r, mut g, mut b) = if !bit(cp, 8) { (r_of(c_other), g_of(c_other), b_of(c_other)) } else { (0, 0, 0) };
     let mut a = if !bit(cp, 17) { a_of(c_other) } else { 0 };
@@ -816,7 +820,7 @@ impl Row<'_> {
 
 /// The screen row scanline `y` draws into: flipped with the Y origin at
 /// the bottom (fbzMode bit 17).
-fn screen_y(st: &RasterState, y: i32, flip: bool) -> i32 {
+pub(crate) fn screen_y(st: &RasterState, y: i32, flip: bool) -> i32 {
     if flip { (st.yorigin as i32 - y) & 0x3FF } else { y }
 }
 

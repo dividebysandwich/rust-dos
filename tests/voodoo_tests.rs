@@ -134,13 +134,13 @@ fn init(bus: &mut Bus) {
 /// A pixel of the colour buffer `buffer` (0 or 1 of the two 640x480 ones).
 fn pixel(bus: &Bus, buffer: usize, x: usize, y: usize) -> u16 {
     let v = bus.voodoo.as_ref().unwrap();
-    v.fbi.ram.get(buffer * 150 * 0x1000 / 2 + y * 640 + x)
+    v.frame_buffer().get(buffer * 150 * 0x1000 / 2 + y * 640 + x)
 }
 
 /// A pixel of the auxiliary (depth) buffer.
 fn depth(bus: &Bus, x: usize, y: usize) -> u16 {
     let v = bus.voodoo.as_ref().unwrap();
-    v.fbi.ram.get(2 * 150 * 0x1000 / 2 + y * 640 + x)
+    v.frame_buffer().get(2 * 150 * 0x1000 / 2 + y * 640 + x)
 }
 
 /// A triangle with vertices in pixels.
@@ -744,4 +744,106 @@ fn the_debugger_reads_the_window() {
     let status = bus.voodoo_status().unwrap();
     assert_eq!(status["output"], true);
     assert_eq!(status["width"], 640);
+}
+
+/// Draw a bit of everything: a fastfill, textured, blended, fogged and
+/// depth-tested triangles in many strips, frame buffer writes between
+/// them, and a stippled triangle.
+fn scene(bus: &mut Bus) {
+    init(bus);
+    w(bus, ZA_COLOR, 0xFFFF);
+    w(bus, COLOR1, 0x0020_4060);
+    w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | 1 << 8);
+    w(bus, FASTFILL_CMD, 0);
+    textured_square(bus, 10, true, |x, y| (x * 7 + y * 3) << 11 | (y * 5) << 5 | x * 3);
+    for i in 0..40 {
+        let y = (i * 11 % 400) as f32;
+        let x = (i * 37 % 500) as f32;
+        w(bus, FBZ_COLOR_PATH, if i % 3 == 0 { 1 | 1 << 27 } else { 0 });
+        w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | DEPTH_TEST | 3 << 5 | 1 << 8);
+        w(bus, ALPHA_MODE, if i % 2 == 0 { 1 << 4 | 1 << 8 | 5 << 12 } else { 0 });
+        w(bus, FOG_MODE, (i % 4 == 0) as u32);
+        flat(bus, i * 6 % 256, i * 13 % 256, 255 - i * 5 % 256, 90 + i);
+        w(bus, D_R_DX, 3 << 11);
+        w(bus, D_R_DY, 2 << 11);
+        w(bus, START_Z, (0x4000 + i * 100) << 12);
+        w(bus, D_S_DX, (i % 5 + 1) << 17);
+        triangle(bus, [(x, y), (x + 120.0, y + 17.0), (x + 30.0, y + 90.0)]);
+        if i % 7 == 0 {
+            w(bus, LFB_MODE, 0);
+            bus.write_32(BASE + 0x40_0000 + (y as usize + 5) * 2048 + (x as usize + 6) * 2, 0x1234_5678);
+        }
+    }
+    for i in 0..32 {
+        w(bus, FOG_TABLE + 4 * i, (i * 8) << 24 | (i * 8 + 4) << 8);
+    }
+    w(bus, FOG_MODE, 1);
+    w(bus, FBZ_COLOR_PATH, 0);
+    w(bus, 0x140, 0xAAAA_5555);
+    w(bus, FBZ_MODE, RGB_WRITE | 1 << 2);
+    triangle(bus, [(300.0, 300.0), (400.0, 310.0), (320.0, 420.0)]);
+    w(bus, FBZ_MODE, RGB_WRITE | 1 << 2 | 1 << 12);
+    triangle(bus, [(100.0, 300.0), (200.0, 310.0), (120.0, 420.0)]);
+}
+
+#[test]
+fn any_number_of_workers_draws_the_same_picture() {
+    let pictures: Vec<(Vec<u8>, u32)> = [0, 1, 4]
+        .into_iter()
+        .map(|workers| {
+            let mut bus = bus(Board::Max);
+            bus.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Max, workers));
+            scene(&mut bus);
+            let v = bus.voodoo.as_ref().unwrap();
+            (v.frame_buffer().to_bytes(), r(&bus, FBI_PIXELS_OUT))
+        })
+        .collect();
+    assert!(pictures[0].1 > 10_000, "the scene draws ({} pixels)", pictures[0].1);
+    for (i, p) in pictures.iter().enumerate().skip(1) {
+        assert_eq!(p.1, pictures[0].1, "pixel counts, {} workers", [0, 1, 4][i]);
+        assert!(p.0 == pictures[0].0, "frame buffer differs with {} workers", [0, 1, 4][i]);
+    }
+}
+
+#[test]
+fn frame_buffer_reads_see_what_was_just_drawn() {
+    let mut bus = bus(Board::Standard);
+    bus.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Standard, 3));
+    init(&mut bus);
+    w(&mut bus, FBZ_MODE, RGB_WRITE);
+    flat(&mut bus, 255, 0, 0, 0);
+    triangle(&mut bus, [(0.0, 0.0), (64.0, 0.0), (0.0, 64.0)]);
+    w(&mut bus, LFB_MODE, 0);
+    assert_eq!(bus.read_32(BASE + 0x40_0000 + 10 * 2048 + 4 * 2), 0xF800_F800);
+}
+
+/// Rasterizer speed: 2000 textured, bilinear, fogged triangles a frame.
+/// `cargo test --release --test voodoo_tests benchmark -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn benchmark_rasterizer() {
+    for workers in [0, 1, 2, 4] {
+        let mut bus = bus(Board::Standard);
+        bus.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Standard, workers));
+        init(&mut bus);
+        textured_square(&mut bus, 10, true, |x, y| (x * 7 + y * 3) << 11 | x * 3);
+        w(&mut bus, FOG_MODE, 1);
+        w(&mut bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | DEPTH_TEST | 7 << 5 | 1 << 8);
+        w(&mut bus, D_S_DX, 1 << 17);
+        w(&mut bus, D_T_DY, 1 << 17);
+        let start = std::time::Instant::now();
+        let frames = 10;
+        for frame in 0..frames {
+            for i in 0..2000u32 {
+                let x = ((i * 53 + frame * 7) % 560) as f32;
+                let y = ((i * 29) % 420) as f32;
+                triangle(&mut bus, [(x, y), (x + 60.0, y + 8.0), (x + 12.0, y + 50.0)]);
+            }
+            w(&mut bus, SWAPBUFFER_CMD, 0);
+        }
+        let _ = bus.voodoo.as_ref().unwrap().frame_buffer();
+        let per_frame = start.elapsed() / frames;
+        println!("{} workers: {:?} a frame ({} pixels)", workers, per_frame, r(&bus, FBI_PIXELS_OUT) / frames);
+    }
 }
