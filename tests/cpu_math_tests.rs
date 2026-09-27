@@ -52,6 +52,22 @@ fn test_math_mul_div() {
     assert_eq!(cpu.get_reg8(Register::AH), 0);
 }
 
+/// A DIV changes the flags on an Intel 486, where a Cyrix leaves them:
+/// the test Cyrix's own notes give, which Windows 95 makes (and otherwise
+/// calls the CPU a Cyrix). The flags are DOSBox-X's.
+#[test]
+fn div_changes_the_flags_as_an_intel_486_does() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    // XOR AX, AX; SAHF; MOV AX, 5; MOV BL, 2; DIV BL; LAHF
+    run_cpu_code(&mut cpu, &[0x31, 0xC0, 0x9E, 0xB8, 0x05, 0x00, 0xB3, 0x02, 0xF6, 0xF3, 0x9F]);
+    assert_ne!(cpu.get_reg8(Register::AH), 0x02, "the flags changed: not a Cyrix");
+    // 5 / 2: remainder 1 (CF), quotient 2 and remainder 1 of odd parity
+    // each (PF), no ZF.
+    assert_eq!(cpu.get_reg8(Register::AH), 0x02 | 0x01 | 0x04);
+    assert_eq!(rust_dos::instructions::arith::division_flags(3, 0, 8), CpuFlags::ZF.bits() | CpuFlags::PF.bits());
+    assert_eq!(rust_dos::instructions::arith::division_flags(0x100, 3, 16), 0);
+}
+
 #[test]
 fn test_math_imul_idiv() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));

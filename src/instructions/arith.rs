@@ -151,6 +151,35 @@ pub fn imul(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     Ok(())
 }
 
+/// The flags a 486 leaves after DIV and IDIV, which Intel documents as
+/// undefined, as DOSBox-X has them: ZF where the remainder is 0 and the
+/// quotient odd, CF where the remainder's low two bits are 1 or 2, PF where
+/// remainder and quotient (`bits` wide) have the same parity, and AF, SF and
+/// OF clear. A Cyrix leaves the flags as they were, which is how programs
+/// tell (Windows 95 among them, which otherwise calls the CPU a Cyrix).
+pub fn division_flags(quotient: u32, remainder: u32, bits: u32) -> u32 {
+    let mask = if bits == 32 { u32::MAX } else { (1 << bits) - 1 };
+    let (q, r) = (quotient & mask, remainder & mask);
+    let mut flags = 0;
+    if r == 0 && q & 1 != 0 {
+        flags |= CpuFlags::ZF.bits();
+    }
+    if matches!(r & 3, 1 | 2) {
+        flags |= CpuFlags::CF.bits();
+    }
+    if (q ^ r).count_ones() % 2 == 0 {
+        flags |= CpuFlags::PF.bits();
+    }
+    flags
+}
+
+/// Put the flags DIV and IDIV leave (`division_flags`).
+fn set_division_flags(cpu: &mut Cpu, quotient: u32, remainder: u32, bits: u32) {
+    let arith = CpuFlags::CF | CpuFlags::PF | CpuFlags::AF | CpuFlags::ZF | CpuFlags::SF | CpuFlags::OF;
+    let flags = (cpu.get_cpu_flags() & !arith) | CpuFlags::from_bits_truncate(division_flags(quotient, remainder, bits));
+    cpu.set_cpu_flags(flags);
+}
+
 /// DIV: AX, DX:AX or EDX:EAX divided by the operand. A zero divisor or a
 /// quotient that doesn't fit raises #DE.
 pub fn div(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
@@ -168,6 +197,7 @@ pub fn div(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             }
             cpu.set_reg(Register::AL, q as u32);
             cpu.set_reg(Register::AH, (dividend % divisor) as u32);
+            set_division_flags(cpu, q as u32, (dividend % divisor) as u32, 8);
         }
         2 => {
             let dividend = ((cpu.dx() as u64) << 16) | cpu.ax() as u64;
@@ -177,6 +207,7 @@ pub fn div(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             }
             cpu.set_ax(q as u16);
             cpu.set_dx((dividend % divisor) as u16);
+            set_division_flags(cpu, q as u32, (dividend % divisor) as u32, 16);
         }
         _ => {
             let dividend = ((cpu.edx() as u64) << 32) | cpu.eax() as u64;
@@ -186,6 +217,7 @@ pub fn div(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             }
             cpu.set_eax(q as u32);
             cpu.set_edx((dividend % divisor) as u32);
+            set_division_flags(cpu, q as u32, (dividend % divisor) as u32, 32);
         }
     }
     Ok(())
@@ -227,6 +259,7 @@ pub fn idiv(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
             cpu.set_edx(r as u32);
         }
     }
+    set_division_flags(cpu, q as u32, r as u32, bits);
     Ok(())
 }
 

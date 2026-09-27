@@ -327,9 +327,14 @@ fn divisions_and_their_faults_are_the_interpreters() {
             a.mov(edx, eax)?;
             a.sar(edx, 7)?;
             a.add(ebp, eax)?;
+            // The flags each leaves count too (a 486's, which the code
+            // generators work out only where they are read).
             let div = |a: &mut CodeAssembler, len: u32, f: &dyn Fn(&mut CodeAssembler) -> Result<(), IcedError>| {
                 a.mov(esi, len)?;
                 f(a)?;
+                a.pushfd()?;
+                a.pop(edi)?;
+                a.add(ebp, edi)?;
                 a.xor(ebp, eax)?;
                 a.add(ebp, edx)
             };

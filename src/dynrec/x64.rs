@@ -1267,8 +1267,61 @@ impl Gen<'_> {
 
     /// DIV or IDIV of AX, DX:AX or EDX:EAX by t, or #DE first where the
     /// quotient doesn't fit (the host's division would fault too, so it
-    /// only runs where it can't). The flags stay.
+    /// only runs where it can't). The flags are a 486's (`division_flags`).
     fn div_wide(&mut self, signed: bool, size: u8, t: T) {
+        self.divide(signed, size, t);
+        if self.wanted(ARITH) {
+            self.division_flags(size);
+        }
+    }
+
+    /// The flags DIV and IDIV leave (instructions/arith.rs
+    /// `division_flags`), from the quotient and remainder they left: ZF
+    /// where the remainder is 0 and the quotient odd, CF where the
+    /// remainder's low two bits are 1 or 2, PF where the two have the same
+    /// parity, and AF, SF and OF clear.
+    fn division_flags(&mut self, size: u8) {
+        let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
+        match size {
+            1 => dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [rbx + acc] ; movzx edx, BYTE [rbx + acc + 1]),
+            2 => dynasm!(self.ops ; .arch x64 ; movzx ecx, WORD [rbx + acc] ; movzx edx, WORD [rbx + high]),
+            _ => dynasm!(self.ops ; .arch x64 ; mov ecx, DWORD [rbx + acc] ; mov edx, DWORD [rbx + high]),
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; xor eax, eax
+            ; test edx, edx
+            ; setz al
+            ; and eax, ecx
+            ; and eax, 1
+            ; shl eax, 6
+            // CF: (remainder & 3) - 1 below 2.
+            ; mov esi, edx
+            ; and esi, 3
+            ; dec esi
+            ; cmp esi, 2
+            ; adc eax, 0
+            // PF: the parity of remainder ^ quotient, folded to a byte.
+            ; xor edx, ecx
+        );
+        if size == 4 {
+            dynasm!(self.ops ; .arch x64 ; mov esi, edx ; shr esi, 16 ; xor edx, esi);
+        }
+        if size >= 2 {
+            dynasm!(self.ops ; .arch x64 ; mov esi, edx ; shr esi, 8 ; xor edx, esi);
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; test edx, 0xFF
+            ; setp dl
+            ; movzx edx, dl
+            ; shl edx, 2
+            ; or eax, edx
+        );
+        self.merge(ARITH, ARITH);
+    }
+
+    fn divide(&mut self, signed: bool, size: u8, t: T) {
         let t = r(t);
         let de = self.fault_exit(EXIT_DE);
         let (acc, high) = (gpr_offset(Gpr::dword(0)), gpr_offset(Gpr::dword(2)));
