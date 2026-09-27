@@ -14,7 +14,9 @@
 //! (default `dynamic`; `normal` checks that the comparison itself is
 //! deterministic). `DYNDIFF_KEYS` presses keys before given batches, as
 //! `BATCH:KEY` pairs (`600:enter,700:down`), which get a program to the
-//! part to test.
+//! part to test. `DYNDIFF_EMS=1` gives the machines expanded memory and
+//! upper memory blocks, as the front ends have them by default: DOS
+//! extenders then switch modes through VCPI, with paging on.
 
 mod dyndiff;
 mod pmrig;
@@ -134,6 +136,9 @@ fn copy_dir(src: &Path, dest: &Path) {
 
 fn program_machine(dir: &str, machine: &str, command: &str, core: CoreMode) -> Cpu {
     let mut cpu = Cpu::new(program_copy(dir, machine));
+    if std::env::var("DYNDIFF_EMS").is_ok_and(|v| v == "1") {
+        cpu.set_upper_memory(true, true).unwrap();
+    }
     cpu.core = core;
     cpu.load_shell();
     cpu.pending_command = Some(command.to_string());

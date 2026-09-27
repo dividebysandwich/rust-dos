@@ -401,7 +401,9 @@ DYNDIFF_PROGRAMS=Descent:DESCENTR DYNDIFF_BATCHES=9000 \
   DYNDIFF_KEYS="3600:enter,3800:down,3820:down,3840:down,3860:down,3880:down,3950:enter,4150:enter"
 ```
 
-which plays from about batch 4500.
+which plays from about batch 4500. `DYNDIFF_EMS=1` gives the machines
+expanded memory and upper memory blocks, as the front ends have them by
+default: DOS extenders then switch modes through VCPI, with paging on.
 
 **The whole suite on the recompiler.** `RUST_DOS_CORE=dynamic cargo test`
 runs every test on the recompiler. `Cpu::step` translates one-instruction

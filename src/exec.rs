@@ -771,9 +771,23 @@ fn execute_at<const HOOK: bool>(
             }
         })
     } else {
-        match fetch_slow(cpu, lin_ip, eip, code32) {
-            Ok(i) => {
-                slow = i;
+        match fetch_slow(cpu, lin_ip, phys_ip) {
+            // All 16 bytes: the decode is kept with them.
+            Ok((bytes, 16)) => fetch.cache.get_or_decode_bytes(phys_ip, eip, code32, &bytes, || {
+                Decoder::with_ip(if code32 { 32 } else { 16 }, &bytes, eip as u64, DecoderOptions::NONE).decode()
+            }),
+            Ok((bytes, len)) => {
+                let mut decoder =
+                    Decoder::with_ip(if code32 { 32 } else { 16 }, &bytes[..len], eip as u64, DecoderOptions::NONE);
+                slow = decoder.decode();
+                // The instruction needs bytes from a page that can't be
+                // fetched.
+                if decoder.last_error() == iced_x86::DecoderError::NoMoreBytes
+                    && let Err(fault) = fetch_second_page(cpu, lin_ip)
+                {
+                    cpu.raise(fault);
+                    return None;
+                }
                 (&slow, crate::instructions::execute_instruction as Handler)
             }
             Err(fault) => {
@@ -1060,38 +1074,43 @@ fn next_page_follows(cpu: &mut Cpu, lin_ip: u32, phys_ip: usize) -> bool {
     }
 }
 
-/// Decode the instruction at `lin_ip` from bytes fetched one at a time:
-/// at the end of RAM, or where the instruction may cross into another
-/// page. A page that can't be fetched faults only if the instruction
-/// needs bytes from it.
-fn fetch_slow(cpu: &mut Cpu, lin_ip: u32, eip: u32, code32: bool) -> Result<Instruction, Fault> {
-    let user = cpu.cpl == 3;
+/// Fetch the 16 bytes an instruction at `lin_ip` (physical `phys_ip`) may
+/// have, one at a time: at the end of RAM, or where the instruction may
+/// cross into another page. Returns them and how many could be fetched:
+/// the bytes of a next page that can't be translated are missing, and the
+/// instruction faults only if it needs them (`fetch_second_page`).
+fn fetch_slow(cpu: &mut Cpu, lin_ip: u32, phys_ip: usize) -> Result<([u8; 16], usize), Fault> {
     let mut bytes = [0u8; 16];
-    let mut len = 0;
-    let mut missing = None;
+    let in_first = (0x1000 - (lin_ip & 0xFFF) as usize).min(16);
+    for (i, byte) in bytes[..in_first].iter_mut().enumerate() {
+        *byte = cpu.bus.read_8(phys_ip + i);
+    }
+    if in_first == 16 {
+        return Ok((bytes, 16));
+    }
     // Looking at a page the instruction turns out not to need doesn't
     // change CR2.
     let cr2 = cpu.cr2;
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        let lin = lin_ip.wrapping_add(i as u32);
-        match cpu.lin_to_phys(lin, false, user) {
-            Ok(p) => *byte = cpu.bus.read_8(p as usize),
-            Err(fault) => {
-                missing = Some(fault);
-                break;
+    let user = cpu.cpl == 3;
+    match cpu.lin_to_phys(lin_ip.wrapping_add(in_first as u32), false, user) {
+        Ok(p) => {
+            for (i, byte) in bytes[in_first..].iter_mut().enumerate() {
+                *byte = cpu.bus.read_8(p as usize + i);
             }
+            Ok((bytes, 16))
         }
-        len += 1;
+        Err(_) => {
+            cpu.cr2 = cr2;
+            Ok((bytes, in_first))
+        }
     }
-    let mut decoder = Decoder::with_ip(if code32 { 32 } else { 16 }, &bytes[..len], eip as u64, DecoderOptions::NONE);
-    let instr = decoder.decode();
-    if decoder.last_error() == iced_x86::DecoderError::NoMoreBytes
-        && let Some(fault) = missing
-    {
-        return Err(fault);
-    }
-    cpu.cr2 = cr2;
-    Ok(instr)
+}
+
+/// Translate the page after the one `lin_ip` is in for an instruction
+/// fetch, for its fault.
+fn fetch_second_page(cpu: &mut Cpu, lin_ip: u32) -> Result<u32, Fault> {
+    let user = cpu.cpl == 3;
+    cpu.lin_to_phys((lin_ip | 0xFFF).wrapping_add(1), false, user)
 }
 
 fn report_tripwire(cpu: &mut Cpu) {

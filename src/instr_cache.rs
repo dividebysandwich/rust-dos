@@ -53,6 +53,21 @@ impl Slot {
     }
 }
 
+/// A decode of an instruction fetched a byte at a time (`exec::fetch_slow`),
+/// which may run on into a page elsewhere in physical memory that no
+/// generation covers: it is kept with the 16 bytes it was decoded from.
+#[derive(Clone, Copy)]
+struct BytesSlot {
+    bytes: [u8; 16],
+    /// The instruction pointer, and whether it's 32-bit code (bit 32).
+    ip: u64,
+    handler: Handler,
+    instr: Instruction,
+}
+
+/// Slots for instructions fetched a byte at a time.
+const BYTES_SLOTS: usize = 256;
+
 /// Direct-mapped decoded-instruction cache. On collision the old entry is
 /// simply overwritten — an LRU would add bookkeeping cost on the hot path and
 /// empirically direct-mapped behaves well for typical DOS workloads where the
@@ -60,6 +75,7 @@ impl Slot {
 pub struct InstrCache {
     slots: Box<[Slot]>,
     mask: usize,
+    bytes_slots: Box<[BytesSlot]>,
     /// Lookups served from the cache, and lookups that had to decode.
     pub hits: u64,
     pub misses: u64,
@@ -72,6 +88,7 @@ impl Default for InstrCache {
         Self {
             slots: Box::new([]),
             mask: 0,
+            bytes_slots: Box::new([]),
             hits: 0,
             misses: 0,
         }
@@ -85,9 +102,11 @@ impl InstrCache {
     pub fn new(capacity_log2: u32) -> Self {
         let n = 1usize << capacity_log2;
         let slots = vec![Slot::empty(); n].into_boxed_slice();
+        let empty = BytesSlot { bytes: [0; 16], ip: u64::MAX, handler: execute_instruction, instr: Instruction::default() };
         Self {
             slots,
             mask: n - 1,
+            bytes_slots: vec![empty; BYTES_SLOTS].into_boxed_slice(),
             hits: 0,
             misses: 0,
         }
@@ -124,6 +143,30 @@ impl InstrCache {
             slot.handler = handler(&slot.instr);
             slot.addr = addr;
             slot.version = version;
+            self.misses += 1;
+        } else {
+            self.hits += 1;
+        }
+        (&slot.instr, slot.handler)
+    }
+
+    /// The instruction decoded from `bytes` at `ip` as 16 or 32-bit code,
+    /// fetched a byte at a time from `phys_ip` on, and its handler.
+    pub fn get_or_decode_bytes(
+        &mut self,
+        phys_ip: usize,
+        ip: u32,
+        code32: bool,
+        bytes: &[u8; 16],
+        decode: impl FnOnce() -> Instruction,
+    ) -> (&Instruction, Handler) {
+        let slot = &mut self.bytes_slots[phys_ip % BYTES_SLOTS];
+        let key = (code32 as u64) << 32 | ip as u64;
+        if slot.ip != key || slot.bytes != *bytes {
+            slot.instr = decode();
+            slot.handler = handler(&slot.instr);
+            slot.ip = key;
+            slot.bytes = *bytes;
             self.misses += 1;
         } else {
             self.hits += 1;
