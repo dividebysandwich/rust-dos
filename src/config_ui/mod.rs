@@ -236,7 +236,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb,
+                Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, Dpmi,
                 HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
             ],
@@ -338,6 +338,8 @@ enum Item {
     /// Expanded memory and upper memory blocks.
     Ems,
     Umb,
+    /// The DPMI host for DOS extenders.
+    Dpmi,
     KeyboardLayout,
     /// Rewind (held Alt+F11) and the memory it takes.
     Rewind,
@@ -509,6 +511,7 @@ impl Item {
             VoodooScale => "3dfx OpenGL size",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
+            Dpmi => "DPMI host",
             KeyboardLayout => "Keyboard layout",
             Rewind => "Rewind (Alt+F11)",
             RewindMemory => "  Rewind memory",
@@ -588,7 +591,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | KeyboardLayout | Rewind | RewindMemory | VoodooRenderer | VoodooScale => Applies::Now,
+            Cycles | Core | Dpmi | KeyboardLayout | Rewind | RewindMemory | VoodooRenderer | VoodooScale => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -658,6 +661,7 @@ impl Item {
             VoodooScale => format!("{}x", s.voodoo.scale),
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
+            Dpmi => on_off(s.dpmi),
             KeyboardLayout => s.keyboard_layout.describe(),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
@@ -760,6 +764,7 @@ impl Item {
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             Ems => on_off(|s, on| s.ems = on),
             Umb => on_off(|s, on| s.umb = on),
+            Dpmi => on_off(|s, on| s.dpmi = on),
             KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),

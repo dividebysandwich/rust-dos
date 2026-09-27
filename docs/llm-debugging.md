@@ -314,6 +314,16 @@ access rights.
   for every DOS or BIOS call and for hardware interrupts it reflects, so a
   paused program in real mode inside the extender is normal. A crash back
   to DOS shows as `shell_idle: true` or a text mode.
+- **The DPMI host.** With `dpmi` on (the default), extenders that look for
+  a DPMI host (DOS/4GW, PMODE/W, DOS/32A, Tran's PMODE, DJGPP) run their
+  programs as its clients, at CPL 3 with LDT selectors (`/api/ldt`), and
+  go to real mode through the host's code in the ROM at F000:2000 (level
+  0 selector 0008h there is its IDT's handlers). The log's `[DPMI]` lines
+  say when a client enters and ends, INT 31h functions it doesn't have,
+  and why it ended a program (`DPMI host: exception 0Dh ...` on the
+  screen too): an exception the program didn't handle. `--no-config`
+  has the host on; `dpmi=false` in a configuration file turns it off, to
+  compare with an extender's own mode switching.
 - **Exceptions:** `GET /api/exceptions` lists the last 64 (vector, error
   code, `CS:EIP`, CR2 for page faults). Page faults (`#PF`, vector 0E) are
   normal under DOS/4GW, whose virtual memory manager loads pages on demand.

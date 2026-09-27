@@ -214,6 +214,7 @@ fn main() -> Result<(), String> {
     if let Err(e) = cpu.set_upper_memory(settings.ems, settings.umb) {
         config_warning(&mut cpu, &e);
     }
+    cpu.bus.dpmi.enabled = settings.dpmi;
     for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
@@ -1483,6 +1484,8 @@ impl Host for MainHost<'_, '_> {
         if new.core != old.core {
             self.cpu.core = new.core;
         }
+        // Programs look for the host as they start.
+        self.cpu.bus.dpmi.enabled = new.dpmi;
         if new.disk != old.disk {
             self.cpu.bus.set_disk_settings(new.disk);
         }

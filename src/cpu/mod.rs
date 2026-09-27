@@ -649,6 +649,8 @@ impl Cpu {
     pub fn terminate(&mut self, code: u8) -> bool {
         self.last_child_exit = code as u16;
         let psp = self.current_psp;
+        // Its DPMI clients end with it.
+        crate::dpmi::process_ended(self, psp);
         if !self.started_by_exec(psp) {
             self.end_made_process(psp);
             return true;
@@ -1181,6 +1183,7 @@ impl Cpu {
         // No program runs any more: its extended memory and A20 go too,
         // and a reset from now on is a cold boot.
         self.bus.xms = crate::xms::Xms::new();
+        self.bus.dpmi.reset();
         // The addresses of its values mean nothing to the next program.
         self.bus.freezes.clear();
         if self.bus.ems.is_some() {

@@ -947,6 +947,8 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
 /// * `FE 39 vv`: an inline service vv; execution continues after it.
 /// * `FE 3A vv`: a service the ROM's code calls in any mode, its RETF
 ///   after it (the Plug and Play BIOS's and APM's entry points).
+/// * `FE 3B vv`: the DPMI host's entry points in the ROM (`dpmi::service`),
+///   in the modes and at the privilege levels each is for.
 fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
         return false;
@@ -959,6 +961,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     let allowed = match kind {
         0x38 | 0x39 => !cpu.pm(),
         0x3A => crate::bus::Bus::is_rom(phys_ip),
+        0x3B => crate::bus::Bus::is_rom(phys_ip) && crate::dpmi::accepts(cpu, vector),
         _ => false,
     };
     if !allowed {
@@ -1005,6 +1008,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
                 crate::interrupts::return_from_hle(cpu, vector);
             }
         }
+        0x3B => crate::dpmi::service(cpu, vector),
         0x39 => {
             cpu.set_ip(cpu.ip().wrapping_add(3));
             crate::interrupts::handle_inline_bop(cpu, vector);

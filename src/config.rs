@@ -130,6 +130,8 @@ pub struct Config {
     pub ems: Option<bool>,
     /// Upper memory blocks (`umb`).
     pub umb: Option<bool>,
+    /// The DPMI host (`dpmi`).
+    pub dpmi: Option<bool>,
     /// The keyboard layout (`keyboard_layout`).
     pub keyboard_layout: Option<LayoutSetting>,
     /// Rewind (`rewind`), and the memory its states may take in MB
@@ -625,9 +627,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(mb) => config.memsize = Some(mb),
                             Err(e) => warn(e),
                         },
-                        "ems" | "umb" => match parse_bool(value) {
+                        "ems" | "umb" | "dpmi" => match parse_bool(value) {
                             Some(on) if key.eq_ignore_ascii_case("ems") => config.ems = Some(on),
-                            Some(on) => config.umb = Some(on),
+                            Some(on) if key.eq_ignore_ascii_case("umb") => config.umb = Some(on),
+                            Some(on) => config.dpmi = Some(on),
                             None => warn(format!("invalid {} '{}' (true or false)", key, value)),
                         },
                         "core" => match CoreMode::parse(value) {
@@ -888,6 +891,8 @@ pub struct Settings {
     pub ems: bool,
     /// Upper memory blocks.
     pub umb: bool,
+    /// The DPMI host for DOS extenders.
+    pub dpmi: bool,
     pub keyboard_layout: LayoutSetting,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
@@ -920,6 +925,7 @@ impl Default for Settings {
             memsize: crate::bus::DEFAULT_MEMORY_MB,
             ems: true,
             umb: true,
+            dpmi: true,
             keyboard_layout: LayoutSetting::Auto,
             rewind: false,
             rewind_memory: 256,
@@ -976,6 +982,7 @@ impl Settings {
             memsize: config.memsize.unwrap_or(default.memsize),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
+            dpmi: config.dpmi.unwrap_or(default.dpmi),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
@@ -1037,6 +1044,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "memsize", Some(settings.memsize.to_string())),
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
+        (Emulator, "dpmi", yes_no(settings.dpmi)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
@@ -1733,12 +1741,12 @@ mod tests {
 
     #[test]
     fn memory_settings() {
-        let config = parse("[emulator]\nems=off\nUMB=no\n", Path::new("/cfg"), None);
-        assert_eq!((config.ems, config.umb), (Some(false), Some(false)));
+        let config = parse("[emulator]\nems=off\nUMB=no\ndpmi=false\n", Path::new("/cfg"), None);
+        assert_eq!((config.ems, config.umb, config.dpmi), (Some(false), Some(false), Some(false)));
         let settings = Settings::from_config(&config);
-        assert!(!settings.ems && !settings.umb);
+        assert!(!settings.ems && !settings.umb && !settings.dpmi);
         let settings = Settings::from_config(&parse("", Path::new("/cfg"), None));
-        assert!(settings.ems && settings.umb);
+        assert!(settings.ems && settings.umb && settings.dpmi);
         let config = parse("[emulator]\nems=lots\n", Path::new("/cfg"), None);
         assert_eq!((config.ems, config.warnings.len()), (None, 1));
     }
@@ -1920,6 +1928,7 @@ mod tests {
             memsize: 32,
             ems: false,
             umb: false,
+            dpmi: false,
             keyboard_layout: LayoutSetting::Named("gr"),
             rewind: true,
             rewind_memory: 512,

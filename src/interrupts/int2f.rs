@@ -1,13 +1,13 @@
 //! INT 2Fh — DOS multiplex interrupt.
 //!
-//! Only the XMS driver (AX=43xxh), the MSCDEX CD-ROM extensions (AH=15h,
-//! see `mscdex.rs`), the DOS internal calls that find DOS's data segment
-//! and file tables (AX=1203h, 1216h, 1220h), DOS's interface for Windows'
-//! DOSMGR (AX=1607h BX=0015h) and the expanded memory manager's part of
-//! Windows' exit (AX=1606h) are there. Every other function
-//! leaves the registers untouched, which callers read as "not installed"
-//! (AL stays 00h for the usual install checks, AX stays 1687h for the DPMI
-//! check, ...).
+//! Only the XMS driver (AX=43xxh), the DPMI host (AX=1687h, see dpmi.rs),
+//! the MSCDEX CD-ROM extensions (AH=15h, see `mscdex.rs`), the DOS internal
+//! calls that find DOS's data segment and file tables (AX=1203h, 1216h,
+//! 1220h), DOS's interface for Windows' DOSMGR (AX=1607h BX=0015h) and the
+//! expanded memory manager's part of Windows' exit (AX=1606h) are there.
+//! Every other function leaves the registers untouched, which callers read
+//! as "not installed" (AL stays 00h for the usual install checks, AX stays
+//! 1687h for the DPMI check with the host off, ...).
 
 use crate::cpu::{Cpu, CpuFlags};
 use crate::dos_data;
@@ -65,9 +65,13 @@ pub fn handle(cpu: &mut Cpu) {
             let at = dos_files::slot_address(&mut cpu.bus, psp, handle);
             point_es_di(cpu, at);
         }
+        // The DPMI host (dpmi.rs): its entry point.
+        0x1687 => {
+            crate::dpmi::installation_check(cpu);
+        }
         _ if cpu.get_ah() == 0x15 => super::mscdex::handle(cpu, cpu.get_al()),
-        // Everything else (DPMI 1687h, Windows 16xxh, ...) is not installed:
-        // the registers come back unchanged.
+        // Everything else (Windows 16xxh, ...) is not installed: the
+        // registers come back unchanged.
         _ => {}
     }
 }

@@ -330,6 +330,7 @@ pub fn install(bus: &mut Bus) {
     write_rom(bus, crate::pnpbios::ENTRY, &[0xFE, 0x3A, FAR_PNP, 0xCB]);
     write_rom(bus, crate::apm::ENTRY, &[0xFE, 0x3A, FAR_APM, 0xCB]);
     crate::pnpbios::install(bus);
+    crate::dpmi::install_rom(bus);
     write_rom(bus, IRET_HANDLER, &[0xCF]);
     write_rom(bus, RESET_VECTOR, &[0xFE, 0x39, SERVICE_POST]);
     // BIOS date, the model byte and the base memory.

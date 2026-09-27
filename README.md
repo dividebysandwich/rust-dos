@@ -18,10 +18,10 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   virtual-8086 mode for DOS extenders such as DOS/4GW (Descent, Heretic),
   and a dynamic recompiler for x86-64 and ARM64 hosts (see
   [docs/dynrec.md](docs/dynrec.md))
-* **DOS built in:** no DOS or BIOS images needed. XMS, EMS and upper memory
-  (`LOADHIGH`), a mouse driver, keyboard layouts, and a
-  [DOS prompt](#the-dos-prompt) with batch files and a `COMMAND.COM`
-  programs can shell out to
+* **DOS built in:** no DOS or BIOS images needed. XMS, EMS, a DPMI host
+  for DOS extenders, upper memory (`LOADHIGH`), a mouse driver, keyboard
+  layouts, and a [DOS prompt](#the-dos-prompt) with batch files and a
+  `COMMAND.COM` programs can shell out to
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, an S3 Trio64 with its 2D
   accelerator, Hercules, the Tandy 1000's and IBM PCjr's 16-colour

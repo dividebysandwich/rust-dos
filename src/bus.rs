@@ -83,6 +83,8 @@ pub struct Bus {
     pub xms: crate::xms::Xms,
     /// The expanded memory manager (INT 67h), if EMS is on.
     pub ems: Option<crate::ems::Ems>,
+    /// The DPMI host (INT 2Fh AX=1687h, INT 31h) and its clients.
+    pub dpmi: crate::dpmi::Dpmi,
     /// Upper memory blocks, if DOS has them (see mcb.rs).
     pub umb: Option<crate::mcb::Umb>,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
@@ -288,6 +290,7 @@ impl Bus {
             debug_console: Vec::new(),
             xms: crate::xms::Xms::new(),
             ems: None,
+            dpmi: crate::dpmi::Dpmi::default(),
             umb: None,
             lpt_dac: None,
             tandy_sound: crate::sn76489::Sn76489::new(crate::sn76489::Variant::Ncr8496),

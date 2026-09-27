@@ -166,8 +166,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   many games of the early 1990s want: `true` (the default) or `false`.
   As with EMM386, 16 KB pages of extended memory show through a page
   frame at E000h, and EMS and XMS share the same memory. There is no
-  VCPI: DOS extenders run as they do without EMM386. A change takes
-  effect at the DOS prompt.
+  VCPI: DOS extenders use the DPMI host (`dpmi`), or run as they do
+  without EMM386. A change takes effect at the DOS prompt.
 * `umb` gives DOS upper memory blocks between 640 KB and 1 MB, from
   D000h to EFFFh (to DFFFh with EMS), as DOS 5 with EMM386 has them:
   `true` (the default) or `false`. `LOADHIGH` (or `LH`) at the prompt
@@ -175,6 +175,14 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   out of the conventional memory games need, and programs can allocate
   upper memory themselves (INT 21h AH=58h). A change takes effect at the
   DOS prompt.
+* `dpmi` gives DOS extenders a DPMI 0.9 host, as a memory manager or
+  Windows provides one: `true` (the default) or `false`. DOS/4GW,
+  PMODE/W, DOS/32A, Tran's PMODE and DJGPP's programs then run their
+  programs as its clients rather than switching the processor
+  themselves, and take extended memory from it as they need it, so a
+  DOS/4GW program can start another DOS extender's (demos such as Scoop's
+  Luminous do). Off, they run as they do on plain DOS with HIMEM. A
+  change takes effect for the programs started after it.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and

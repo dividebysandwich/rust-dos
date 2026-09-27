@@ -14,6 +14,7 @@ const SOUND_VERSION: u16 = 2;
 const DOS_VERSION: u16 = 4;
 const VOODOO_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 1;
+const DPMI_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -84,6 +85,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            dpmi,
             umb,
             mouse,
             mscdex,
@@ -170,6 +172,10 @@ impl Bus {
         if let Some(ide) = ide {
             w.section(b"IDE ", IDE_VERSION, |w| ide.save(w));
         }
+        // The DPMI host, while it has clients.
+        if dpmi.active() {
+            w.section(b"DPMI", DPMI_VERSION, |w| dpmi.save(w));
+        }
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -234,6 +240,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            dpmi,
             umb,
             mouse,
             mscdex,
@@ -320,6 +327,12 @@ impl Bus {
         } else {
             *ide = None;
         }
+        dpmi.reset();
+        if r.next_is(b"DPMI") {
+            dpmi.load(&mut r.section(b"DPMI", DPMI_VERSION)?)?;
+        }
+        // The extended memory it holds.
+        xms.dpmi = dpmi.reservations();
         Ok(lost)
     }
 

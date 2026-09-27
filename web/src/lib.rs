@@ -211,6 +211,7 @@ impl Machine {
         // With auto the page hands over what the browser's layout types.
         cpu.bus.kbd.layout = settings.keyboard_layout.layout(Layout::us());
         warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
+        cpu.bus.dpmi.enabled = settings.dpmi;
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
@@ -1175,6 +1176,8 @@ impl Host for PageHost<'_> {
         if new.core != old.core {
             self.cpu.core = new.core;
         }
+        // Programs look for the host as they start.
+        self.cpu.bus.dpmi.enabled = new.dpmi;
         if new.keyboard_layout != old.keyboard_layout {
             self.cpu.bus.kbd.layout = new.keyboard_layout.layout(Layout::us());
         }

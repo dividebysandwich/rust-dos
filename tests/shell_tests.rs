@@ -173,13 +173,13 @@ fn only_the_private_trap_queues_commands() {
     cpu.set_ds(0x2000);
     cpu.set_dx(0);
 
-    // A program's INT 2Fh (here the DPMI check) must not run as a command
-    // or eat typed keys.
+    // A program's INT 2Fh (here Windows' install check) must not run as a
+    // command or eat typed keys.
     cpu.bus.keyboard_buffer.push_back(b'k' as u16);
-    cpu.set_ax(0x1687);
+    cpu.set_ax(0x1600);
     handle_hle(&mut cpu, 0x2F);
     assert!(cpu.pending_command.is_none());
-    assert_eq!(cpu.ax(), 0x1687);
+    assert_eq!(cpu.ax(), 0x1600);
     assert_eq!(cpu.bus.keyboard_buffer.len(), 1);
 
     handle_hle(&mut cpu, SHELL_COMMAND_BOP);

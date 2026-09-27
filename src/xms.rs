@@ -10,7 +10,8 @@
 //! Locking a block returns its physical address, which is how DOS
 //! extenders take the memory over for their protected-mode programs. The
 //! expanded memory manager (ems.rs) takes its 16 KB pages from the same
-//! memory, from the top down.
+//! memory, from the top down, and the DPMI host (dpmi.rs) its tables and
+//! its clients' memory blocks.
 
 use crate::cpu::Cpu;
 
@@ -32,6 +33,8 @@ const KB: u32 = 1024;
 const MAX_HANDLES: usize = 64;
 /// The expanded memory manager's pages, in bytes.
 const EMS_PAGE: u32 = 0x4000;
+/// The DPMI host's memory comes in pages of 4 KB.
+const PAGE: u32 = 0x1000;
 
 /// XMS error codes (returned in BL).
 const ERR_NOT_IMPLEMENTED: u8 = 0x80;
@@ -69,6 +72,10 @@ pub struct Xms {
     a20_global: bool,
     /// The expanded memory manager's pages, by address.
     ems_pages: Vec<u32>,
+    /// What the DPMI host holds, as (address, bytes) in whole 4 KB pages.
+    /// The host keeps its own record of them, which states carry
+    /// (`dpmi::Dpmi::reservations`).
+    pub(crate) dpmi: Vec<(u32, u32)>,
 }
 
 impl Xms {
@@ -110,6 +117,7 @@ impl Xms {
             .flatten()
             .map(|b| (b.base, b.base + b.size_kb * KB))
             .chain(self.ems_pages.iter().map(|&page| (page, page + EMS_PAGE)))
+            .chain(self.dpmi.iter().map(|&(base, len)| (base, base + len)))
             .collect();
         used.sort();
         let mut gaps = Vec::new();
@@ -159,6 +167,47 @@ impl Xms {
     /// How many expanded memory pages all of extended memory has room for.
     pub(crate) fn total_pages(&self, memory_end: u32) -> u32 {
         memory_end.saturating_sub(XMS_BASE) / EMS_PAGE
+    }
+
+    /// Free memory for the DPMI host, as page-aligned (address, bytes):
+    /// the gaps' whole pages.
+    fn dpmi_gaps(&self, memory_end: u32) -> impl Iterator<Item = (u32, u32)> {
+        self.gaps(memory_end).into_iter().filter_map(|(base, kb)| {
+            let start = base.checked_add(PAGE - 1)? & !(PAGE - 1);
+            let end = (base as u64 + (kb * KB) as u64) as u32 & !(PAGE - 1);
+            (end > start).then(|| (start, end - start))
+        })
+    }
+
+    /// Take `bytes` of free memory, in whole pages, for the DPMI host.
+    /// Returns the address.
+    pub(crate) fn take_dpmi(&mut self, bytes: u32, memory_end: u32) -> Option<u32> {
+        let len = bytes.checked_add(PAGE - 1)? & !(PAGE - 1);
+        let (base, _) = self.dpmi_gaps(memory_end).find(|&(_, free)| free >= len)?;
+        self.dpmi.push((base, len));
+        Some(base)
+    }
+
+    /// Give back the DPMI host's memory at `base`.
+    pub(crate) fn release_dpmi(&mut self, base: u32) {
+        self.dpmi.retain(|&(b, _)| b != base);
+    }
+
+    /// Make the DPMI host's memory at `base` `bytes` long (in whole pages)
+    /// where it is, if the memory after it is free. False if it isn't.
+    pub(crate) fn resize_dpmi(&mut self, base: u32, bytes: u32, memory_end: u32) -> bool {
+        let Some(i) = self.dpmi.iter().position(|&(b, _)| b == base) else { return false };
+        let Some(len) = bytes.checked_add(PAGE - 1).map(|n| n & !(PAGE - 1)) else { return false };
+        let old = self.dpmi.remove(i);
+        let fits = self.dpmi_gaps(memory_end).any(|(start, free)| start <= base && base as u64 + len as u64 <= start as u64 + free as u64);
+        self.dpmi.push(if fits { (base, len) } else { old });
+        fits
+    }
+
+    /// The largest block the DPMI host could take and all its free
+    /// memory, in bytes.
+    pub(crate) fn dpmi_free(&self, memory_end: u32) -> (u32, u32) {
+        self.dpmi_gaps(memory_end).fold((0, 0), |(largest, total), (_, free)| (largest.max(free), total + free))
     }
 
     /// Allocate `size_kb` KB. Returns the handle.
@@ -455,4 +504,4 @@ fn move_block(cpu: &mut Cpu) {
 }
 
 crate::state_fields!(Block { base, size_kb, locks });
-crate::state_fields!(Xms { blocks, hma_allocated, a20_local, a20_global, ems_pages });
+crate::state_fields!(Xms { blocks, hma_allocated, a20_local, a20_global, ems_pages } skip { dpmi });

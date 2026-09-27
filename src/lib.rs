@@ -22,6 +22,7 @@ pub mod disknoise;
 pub mod dos_data;
 pub mod dos_files;
 pub mod dosstr;
+pub mod dpmi;
 pub mod dma;
 pub mod dsp;
 pub mod dynrec;
