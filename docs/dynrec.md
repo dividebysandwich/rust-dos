@@ -247,13 +247,15 @@ first instruction in a block that changes them:
   by a condition, a carry in, or anything outside the block, which sees
   all of them wherever the block may leave, a fault included. The
   others aren't computed.
-- **On x86-64** they come from the host's own flags (PUSHF), from host
+- **On x86-64** they come from the host's own flags, from host
   instructions of the operand's size, where they match the interpreter's
-  (`cpu::alu`). They are fixed up where the interpreter defines what the
-  host leaves undefined: AF of the logic operations, OF of shifts by more
-  than 1, and the 386's AF of SHL and SHR. ADD, SUB, CMP, ADC, SBB and
-  NEG, whose flags are the host's, are two instructions (`pushfq; pop
-  rbp`); INC and DEC get the guest's CF into the host's first.
+  (`cpu::alu`): LAHF takes SF, ZF, AF, PF and CF, and SETO OF where it is
+  live (PUSHF takes several times as long, and only hosts without LAHF in
+  64-bit mode use it). They are fixed up where the interpreter defines
+  what the host leaves undefined: AF of the logic operations, OF of
+  shifts (worked out from the result), and the 386's AF of SHL and SHR.
+  The multiplications' CF and OF are both the host's OF. INC and DEC get
+  the guest's CF into the host's first.
 - **On ARM64**, which has neither a parity nor an auxiliary carry flag,
   they are computed as `cpu::alu` defines them, one by one: the carry
   from a 64-bit sum or difference of the operands, PF from a table in the

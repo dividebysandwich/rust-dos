@@ -926,7 +926,7 @@ impl Gen<'_> {
                 }
                 // CF and OF: the product doesn't fit.
                 if self.wanted(CF | OF) {
-                    self.host_flags();
+                    self.host_carry_overflow(RAX);
                     self.merge(CF | OF, CF | OF);
                 }
             }
@@ -1449,13 +1449,18 @@ impl Gen<'_> {
         }
     }
 
-    /// Merge the host's flags (in EAX, from PUSHF) into the guest's in EBP:
-    /// the bits in `mask` become those of EAX & `bits`. The others stay,
-    /// from the CPU if they aren't in EBP yet and are live.
+    /// Merge the host's flags (in EAX, see `host_flags`) into the guest's
+    /// in EBP: the bits in `mask` become those of EAX & `bits`. The others
+    /// stay, from the CPU if they aren't in EBP yet and are live.
     fn merge(&mut self, mask: u32, bits: u32) {
-        dynasm!(self.ops ; .arch x64 ; and eax, bits as i32);
+        self.merge_from(RAX, mask, bits);
+    }
+
+    /// `merge` from host register `reg`.
+    fn merge_from(&mut self, reg: u8, mask: u32, bits: u32) {
+        dynasm!(self.ops ; .arch x64 ; and Rd(reg), bits as i32);
         if ARITH & !mask & self.live_after == 0 {
-            dynasm!(self.ops ; .arch x64 ; mov ebp, eax);
+            dynasm!(self.ops ; .arch x64 ; mov ebp, Rd(reg));
         } else {
             if !self.dirty {
                 dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
@@ -1463,14 +1468,32 @@ impl Gen<'_> {
             dynasm!(self.ops
                 ; .arch x64
                 ; and ebp, !mask as i32
-                ; or ebp, eax
+                ; or ebp, Rd(reg)
             );
         }
         self.dirty = true;
     }
 
+    /// EAX = the host's SF, ZF, AF, PF and CF, where the guest's go (LAHF;
+    /// with PUSHF, which takes several times as long, OF too, where the
+    /// host has no LAHF in 64-bit mode). Callers work out OF themselves.
     fn host_flags(&mut self) {
-        dynasm!(self.ops ; .arch x64 ; pushfq ; pop rax);
+        if has_lahf() {
+            dynasm!(self.ops ; .arch x64 ; lahf ; movzx eax, ah);
+        } else {
+            dynasm!(self.ops ; .arch x64 ; pushfq ; pop rax);
+        }
+    }
+
+    /// `reg` = CF and OF, both set where the host's OF is (a product that
+    /// doesn't fit, where they are the same).
+    fn host_carry_overflow(&mut self, reg: u8) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; seto Rb(reg)
+            ; movzx Rd(reg), Rb(reg)
+            ; neg Rd(reg)
+        );
     }
 
     /// The host's flags are the guest's arithmetic flags: into EBP. LAHF
@@ -1629,11 +1652,10 @@ impl Gen<'_> {
                 // OF is the original sign for a count of 1, else 0 (the
                 // result's bit below its top); AF set.
                 match count {
-                    Some(c) => {
-                        let of = if c == 1 { OF } else { 0 };
-                        dynasm!(self.ops ; .arch x64 ; and eax, (CF | SZP | of) as i32);
+                    Some(c) if c > 1 => {
+                        dynasm!(self.ops ; .arch x64 ; and eax, (CF | SZP) as i32);
                     }
-                    None => dynasm!(self.ops
+                    _ => dynasm!(self.ops
                         ; .arch x64
                         ; mov ecx, Rd(t)
                         ; shr ecx, top - 1
@@ -1757,9 +1779,11 @@ impl Gen<'_> {
             (true, 2) => dynasm!(self.ops ; .arch x64 ; imul Rw(t)),
             (true, _) => dynasm!(self.ops ; .arch x64 ; imul Rd(t)),
         }
-        let wanted = self.wanted(CF | OF);
-        if wanted {
-            dynasm!(self.ops ; .arch x64 ; pushfq);
+        if self.wanted(CF | OF) {
+            // Into EBP before the product goes into the registers, which
+            // changes the host's flags.
+            self.host_carry_overflow(RCX);
+            self.merge_from(RCX, CF | OF, CF | OF);
         }
         match size {
             1 => self.set_from(Gpr::word(0), RAX, RCX),
@@ -1771,10 +1795,6 @@ impl Gen<'_> {
                 self.set_from(Gpr::dword(0), RAX, RCX);
                 self.set_from(Gpr::dword(2), RDX, RCX);
             }
-        }
-        if wanted {
-            dynasm!(self.ops ; .arch x64 ; pop rax);
-            self.merge(CF | OF, CF | OF);
         }
     }
 
