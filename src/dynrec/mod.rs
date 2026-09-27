@@ -127,15 +127,17 @@ pub fn env_bits(cpu: &Cpu) -> u32 {
 /// The `ENV_FLAT` bits of the segment registers now.
 #[cfg(dynrec)]
 pub fn flat_bits(cpu: &Cpu) -> u32 {
+    crate::cpu::Seg::ALL.iter().fold(0, |bits, &seg| bits | flat_bit(cpu, seg))
+}
+
+/// The `ENV_FLAT` bit of segment register `seg` now.
+#[cfg(dynrec)]
+#[inline]
+pub fn flat_bit(cpu: &Cpu, seg: crate::cpu::Seg) -> u32 {
     use crate::cpu::layout::{RIGHT_READ, RIGHT_WRITE};
-    let mut bits = 0;
-    for seg in crate::cpu::Seg::ALL {
-        let c = cpu.seg_cache(seg);
-        if c.base == 0 && c.lo == 0 && c.hi == u32::MAX && c.rights & (RIGHT_READ | RIGHT_WRITE) == RIGHT_READ | RIGHT_WRITE {
-            bits |= ENV_FLAT << seg as u32;
-        }
-    }
-    bits
+    let c = cpu.seg_cache(seg);
+    let flat = c.base == 0 && c.lo == 0 && c.hi == u32::MAX && c.rights & (RIGHT_READ | RIGHT_WRITE) == RIGHT_READ | RIGHT_WRITE;
+    (flat as u32) << (8 + seg as u32)
 }
 
 /// What `DynState::run` did.
@@ -335,6 +337,20 @@ mod engine {
         }
     }
 
+    /// A slot of the direct-mapped table in front of the map: a block's key,
+    /// its index + 1 (0 for none) and its code, so that finding it takes one
+    /// cache line.
+    #[derive(Clone, Copy)]
+    struct Front {
+        key: Key,
+        index: u32,
+        code: *const u8,
+    }
+
+    impl Front {
+        const EMPTY: Front = Front { key: Key { phys: u32::MAX, eip: 0, mode: 0 }, index: 0, code: std::ptr::null() };
+    }
+
     /// log2 of the slots of the direct-mapped table in front of the map,
     /// and of the table of places where no block starts.
     const FRONT_BITS: u32 = 14;
@@ -374,8 +390,8 @@ mod engine {
         /// instruction: an emulator service trap, HLT), with the code
         /// generations of the instruction's chunks then, direct-mapped.
         none: Box<[Option<(Key, u32)>]>,
-        /// Block index + 1 for a key's slot, 0 for none.
-        front: Box<[u32]>,
+        /// The blocks of keys' slots.
+        front: Box<[Front]>,
         /// Per physical page, how often each byte was poked: changed where
         /// a block went stale or wrote over itself (see
         /// `block::WATCH_AFTER`).
@@ -404,7 +420,7 @@ mod engine {
                 free: Vec::new(),
                 map: KeyMap::default(),
                 none: vec![None; 1 << NONE_BITS].into_boxed_slice(),
-                front: vec![0; 1 << FRONT_BITS].into_boxed_slice(),
+                front: vec![Front::EMPTY; 1 << FRONT_BITS].into_boxed_slice(),
                 pokes: HashMap::new(),
                 model,
                 ram_len,
@@ -416,7 +432,7 @@ mod engine {
             self.free.clear();
             self.map.clear();
             self.none.fill(None);
-            self.front.fill(0);
+            self.front.fill(Front::EMPTY);
             self.pokes.clear();
             self.mem.clear();
             stats.flushes += 1;
@@ -429,24 +445,25 @@ mod engine {
             self.blocks.iter().flatten().map(|b| b.backlinks.len() as u64).sum()
         }
 
-        /// The block for `key`, if there is one.
+        /// The block for `key` and its code, if there is one.
         #[inline(always)]
-        fn lookup(&mut self, key: Key) -> Option<u32> {
+        fn lookup(&mut self, key: Key) -> Option<(u32, *const u8)> {
             let slot = key.index();
             let front = self.front[slot];
-            if front != 0 && self.blocks[front as usize - 1].as_ref().is_some_and(|b| b.key == key) {
-                return Some(front - 1);
+            if front.index != 0 && front.key == key {
+                return Some((front.index - 1, front.code));
             }
             let index = *self.map.get(&key)?;
-            self.front[slot] = index + 1;
-            Some(index)
+            let code = self.blocks[index as usize].as_ref().unwrap().code;
+            self.front[slot] = Front { key, index: index + 1, code };
+            Some((index, code))
         }
 
-        /// The block for `key` at `at`, translating it if need be; None if
-        /// no block starts there.
-        fn find(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
-            if let Some(index) = self.lookup(key) {
-                return Some(index);
+        /// The block for `key` at `at` and its code, translating it if need
+        /// be; None if no block starts there.
+        fn find(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<(u32, *const u8)> {
+            if let Some(found) = self.lookup(key) {
+                return Some(found);
             }
             // Writes to the instruction's blocks must bump their generations
             // from now on (see `Bus::code_blocks`), for `none` too.
@@ -460,7 +477,7 @@ mod engine {
             if found.is_none() {
                 self.none[none] = Some((key, gens));
             }
-            found
+            found.map(|index| (index, self.blocks[index as usize].as_ref().unwrap().code))
         }
 
         /// Translate the block at `at`. None if no block starts there.
@@ -531,7 +548,7 @@ mod engine {
                 self.blocks[index as usize] = Some(block);
             }
             self.map.insert(key, index);
-            self.front[key.index()] = index + 1;
+            self.front[key.index()] = Front { key, index: index + 1, code: base };
             Some(index)
         }
 
@@ -630,8 +647,8 @@ mod engine {
             }
             self.map.remove(&block.key);
             let slot = block.key.index();
-            if self.front[slot] == index + 1 {
-                self.front[slot] = 0;
+            if self.front[slot].index == index + 1 {
+                self.front[slot] = Front::EMPTY;
             }
             self.free.push(index);
             stats.live_blocks -= 1;
@@ -648,7 +665,7 @@ mod engine {
             let mode = at.code32 as u32 | (single as u32) << 1 | (cpu.stack32() as u32) << 2 | env_bits(cpu);
             let key = Key { phys: at.phys_ip as u32, eip: at.eip, mode };
             let pending = self.pending.take();
-            let Some(mut index) = self.find(cpu, at, key, stats) else { return Run::Interpret };
+            let Some((index, mut code)) = self.find(cpu, at, key, stats) else { return Run::Interpret };
             if let Some(p) = pending
                 && !single
                 && (p.eip, p.mode, p.flushes) == (at.eip, mode, stats.flushes)
@@ -663,18 +680,19 @@ mod engine {
             // the execution loop, which checks the deadline first.
             let start = cpu.bus.clock.icount;
             let mut retried = false;
+            self.ctx.ram = cpu.bus.ram().as_ptr();
+            self.ctx.ram_len = cpu.bus.ram().len() as u64;
+            self.ctx.tlb = cpu.tlb.entries_ptr() as *const u8;
+            self.ctx.page_gen = cpu.bus.page_gen.as_ptr();
+            self.ctx.code_blocks = cpu.bus.code_blocks.as_ptr();
+            // (A chain goes on through the execution loop only as the
+            // segments are flat as when it started.)
+            self.ctx.flat = mode & ENV_FLAT_ALL;
             loop {
-                let block = self.blocks[index as usize].as_ref().unwrap();
-                self.ctx.ram = cpu.bus.ram().as_ptr();
-                self.ctx.ram_len = cpu.bus.ram().len() as u64;
-                self.ctx.tlb = cpu.tlb.entries_ptr() as *const u8;
-                self.ctx.page_gen = cpu.bus.page_gen.as_ptr();
-                self.ctx.code_blocks = cpu.bus.code_blocks.as_ptr();
-                self.ctx.flat = mode & ENV_FLAT_ALL;
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and
                 // gets the CPU and context it expects.
-                let ret = unsafe { (self.enter)(cpu, &mut *self.ctx, block.code) };
+                let ret = unsafe { (self.enter)(cpu, &mut *self.ctx, code) };
                 if let Some(payload) = self.ctx.panic.take() {
                     // Rust code the block called panicked (it went on with
                     // made-up values): nothing it did counts.
@@ -725,7 +743,7 @@ mod engine {
                         retried = true;
                         match self.translate(cpu, at, key, stats) {
                             Some(i) => {
-                                index = i;
+                                code = self.blocks[i as usize].as_ref().unwrap().code;
                                 continue;
                             }
                             None => Run::Interpret,
@@ -768,13 +786,13 @@ mod engine {
                         let t_at = At { eip: target, phys_ip: data.phys_in_page(target) as usize, ..*at };
                         let t_key = Key { phys: t_at.phys_ip as u32, eip: target, mode };
                         let flushes = stats.flushes;
-                        let Some(t) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran { page } };
+                        let Some((t, t_code)) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran { page } };
                         // (Translating it may have made room by throwing all
                         // blocks away, the one to link from with them.)
                         if stats.flushes == flushes {
                             self.link(exited, ix, t);
                         }
-                        index = t;
+                        code = t_code;
                         continue;
                     }
                     EXIT_FAULT | EXIT_GP0 | EXIT_DE => {

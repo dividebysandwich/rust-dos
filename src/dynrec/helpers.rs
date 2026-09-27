@@ -217,7 +217,7 @@ jit_fn! {
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
         let port = super::block::port_io(instr);
         let sti = instr.mnemonic() == iced_x86::Mnemonic::Sti;
-        let seg_load = super::block::loads_segment(instr);
+        let seg_load = super::block::loaded_segment(instr);
         // A device may write RAM (by DMA) as well.
         let writes = data.writes[ix] || port;
         let before = if writes { data.gens_now(&cpu.bus.page_gen) } else { 0 };
@@ -233,11 +233,11 @@ jit_fn! {
                 if port && loop_would_act(cpu, time, (data.count() - ix) as u64) {
                     return EXIT_AFTER;
                 }
-                if seg_load {
+                if let Some(seg) = seg_load {
                     // The rest of the block checks the segment's accesses as
                     // it does a segment's that isn't flat, and follows its
                     // links only where the segments are flat as they were.
-                    ctx.flat = super::flat_bits(cpu);
+                    ctx.flat = ctx.flat & !(super::ENV_FLAT << seg as u32) | super::flat_bit(cpu, seg);
                 }
                 if sti {
                     // Interrupts are recognized after the next instruction:
@@ -275,9 +275,10 @@ jit_fn! {
     fn jit_load_seg(cpu: *mut Cpu, ctx: *mut JitCtx, seg: u32, selector: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
-        match catch_unwind(AssertUnwindSafe(|| cpu.load_segment(Seg::ALL[seg as usize], selector as u16))) {
+        let seg = Seg::ALL[seg as usize];
+        match catch_unwind(AssertUnwindSafe(|| cpu.load_segment(seg, selector as u16))) {
             Ok(Ok(())) => {
-                ctx.flat = super::flat_bits(cpu);
+                ctx.flat = ctx.flat & !(super::ENV_FLAT << seg as u32) | super::flat_bit(cpu, seg);
                 0
             }
             Ok(Err(fault)) => {

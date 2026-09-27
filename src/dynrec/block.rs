@@ -293,13 +293,9 @@ pub fn ends_block(instr: &Instruction) -> bool {
     }
 }
 
-/// Whether `instr` loads a segment register without ending the block: MOV,
-/// POP, LDS, LES, LFS and LGS. (SS ends the block, as do far transfers.)
-pub fn loads_segment(instr: &Instruction) -> bool {
-    loaded_segment(instr).is_some()
-}
-
-/// The segment register `instr` loads without ending the block, if any.
+/// The segment register `instr` loads without ending the block, if any:
+/// MOV, POP, LDS, LES, LFS and LGS. (SS ends the block, as do far
+/// transfers.)
 pub fn loaded_segment(instr: &Instruction) -> Option<crate::cpu::Seg> {
     use crate::cpu::Seg;
     match instr.mnemonic() {
