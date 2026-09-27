@@ -18,7 +18,7 @@ use sdl2::VideoSubsystem;
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{ScaleMode, Texture, TextureCreator, WindowCanvas};
 use sdl2::surface::Surface;
-use sdl2::video::{FullscreenType, Window, WindowContext};
+use sdl2::video::{FullscreenType, Window, WindowContext, WindowPos};
 use std::cell::OnceCell;
 
 /// The window's icon: packaging/linux/rust-dos.svg drawn at 128x128 with
@@ -505,17 +505,50 @@ fn create_texture<'a>(
     Ok(texture)
 }
 
-/// Make the window `scale` times the picture's size, or the largest whole
-/// multiple of it that fits the desktop.
+/// Make the window `scale` times the picture's size, or as big as fits the
+/// desktop with its frame, and move it where all of it is on the desktop.
 fn fit_window(video: &VideoSubsystem, window: &mut Window, width: u32, height: u32, scale: u32) {
-    let bounds = window.display_index().and_then(|display| video.display_usable_bounds(display));
-    let mut scale = scale.max(1);
-    if let Ok(bounds) = bounds {
-        while scale > 1 && (width * scale > bounds.width() || height * scale > bounds.height()) {
-            scale -= 1;
-        }
+    let Ok(bounds) = window.display_index().and_then(|display| video.display_usable_bounds(display)) else {
+        let _ = window.set_size(width * scale.max(1), height * scale.max(1));
+        return;
+    };
+    let (top, left, bottom, right) = window.border_size().unwrap_or((0, 0, 0, 0));
+    let (top, left, bottom, right) = (top as i32, left as i32, bottom as i32, right as i32);
+    let room = (
+        (bounds.width() as i32 - left - right).max(0) as u32,
+        (bounds.height() as i32 - top - bottom).max(0) as u32,
+    );
+    let (w, h) = window_fit((width, height), scale, room);
+    let _ = window.set_size(w, h);
+    let (x, y) = window.position();
+    let inside = |at: i32, low: i32, high: i32| at.min(high).max(low);
+    let moved = (
+        inside(x, bounds.x() + left, bounds.right() - right - w as i32),
+        inside(y, bounds.y() + top, bounds.bottom() - bottom - h as i32),
+    );
+    if moved != (x, y) {
+        window.set_position(WindowPos::Positioned(moved.0), WindowPos::Positioned(moved.1));
     }
-    let _ = window.set_size(width * scale, height * scale);
+}
+
+/// The window's size for a picture `size` big at `scale` in `room`: the
+/// picture `scale` times over if that fits, else the largest of its shape
+/// that does, but never smaller than the picture. Dropping to the next
+/// whole scale instead would leave a 1366x768 desktop, or 1920x1080 at
+/// 150%, with 1x whatever the scale.
+fn window_fit((width, height): Size, scale: u32, room: Size) -> Size {
+    let scale = scale.max(1);
+    let wanted = (width * scale, height * scale);
+    if wanted.0 <= room.0 && wanted.1 <= room.1 {
+        return wanted;
+    }
+    let (w, h) = (width as u64, height as u64);
+    let fit = if room.0 as u64 * h <= room.1 as u64 * w {
+        (room.0, (room.0 as u64 * h / w) as u32)
+    } else {
+        ((room.1 as u64 * w / h) as u32, room.1)
+    };
+    if fit.0 < width || fit.1 < height { (width, height) } else { fit }
 }
 
 #[cfg(test)]
@@ -543,6 +576,22 @@ mod tests {
         assert_eq!(display_size(1024, 768, true), (1024, 768));
         // Taller than 4:3 widens instead.
         assert_eq!(display_size(640, 512, true), (683, 512));
+    }
+
+    #[test]
+    fn window_takes_the_scale_or_as_much_as_fits() {
+        // 2x fits a 1920x1080 desktop.
+        assert_eq!(window_fit((640, 400), 2, (1920, 1040)), (1280, 800));
+        // Not 1366x768's (less the taskbar and the title bar): as big as
+        // fits, not back to 1x.
+        assert_eq!(window_fit((640, 400), 2, (1366, 697)), (1115, 697));
+        assert_eq!(window_fit((640, 400), 4, (1366, 697)), (1115, 697));
+        // Wider than tall room fits the width.
+        assert_eq!(window_fit((640, 480), 3, (1000, 2000)), (1000, 750));
+        // Never less than 1x, even where that doesn't fit.
+        assert_eq!(window_fit((640, 400), 1, (600, 300)), (640, 400));
+        assert_eq!(window_fit((640, 400), 2, (600, 300)), (640, 400));
+        assert_eq!(window_fit((640, 400), 0, (1920, 1040)), (640, 400));
     }
 
     #[test]
