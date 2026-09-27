@@ -1285,6 +1285,57 @@ fn flags_set_in_one_block_reach_the_blocks_linked_after_it() {
 }
 
 #[test]
+fn translated_stack_operations_that_fault_leave_the_stack_pointer_as_it_was() {
+    // After a few instructions in the block: POP into memory past DS's
+    // limit, PUSH of memory there, ENTER with a frame past SS's limit
+    // (after pushing, where the fault's frame then goes), and LEAVE with a
+    // frame pointer past it. The fault's handler keeps EBP and ESP.
+    for case in 0..4 {
+        let (mut a, mut b) = twins(|rig| {
+            // DS: 4 KB at DATA; SS: 64 KB at 60000h.
+            rig.set_gdt(FREE, seg_desc(DATA, 0xFFF, DATA_R0, 0x4));
+            rig.set_gdt(FREE + 8, seg_desc(0x60000, 0xFFFF, DATA_R0, 0x4));
+            for vector in [GP, 12] {
+                rig.handler(vector, 0, |a| {
+                    a.mov(ax, DATA32 as u32)?;
+                    a.mov(es, ax)?;
+                    a.mov(dword_ptr(RESULT + 0x40).es(), ebp)?;
+                    a.mov(dword_ptr(RESULT + 0x44).es(), esp)?;
+                    record_code(a, vector)
+                });
+            }
+            rig.load(CODE, &asm32(CODE, |a| {
+                a.mov(ax, FREE as u32)?;
+                a.mov(ds, ax)?;
+                a.mov(ax, (FREE + 8) as u32)?;
+                a.mov(ss, ax)?;
+                a.mov(esp, 0x100u32)?;
+                a.mov(ebp, 0x80u32)?;
+                a.push(0x1234_5678u32)?;
+                a.inc(ebx)?;
+                match case {
+                    0 => a.pop(dword_ptr(0xFFE))?,
+                    1 => a.push(dword_ptr(0xFFE))?,
+                    2 => a.enter(0x200u32, 0u32)?,
+                    _ => {
+                        a.mov(ebp, 0x1_0000u32)?;
+                        a.leave()?
+                    }
+                }
+                a.hlt()
+            }));
+        });
+        run_both(&mut a, &mut b);
+        let (vector, _) = b.recorded();
+        assert_eq!(vector, if case < 2 { GP } else { 12 } as u32, "case {}", case);
+        // The handler's ESP: the faulting one less the frame (EFLAGS, CS,
+        // EIP, error code).
+        let frame = if case == 3 { 0x1_0000 } else { 0x80 };
+        assert_eq!((b.read32(RESULT + 0x40), b.read32(RESULT + 0x44)), (frame, 0xFC - 16), "case {}", case);
+    }
+}
+
+#[test]
 fn an_indirect_call_through_a_pointer_it_cant_read_pushes_nothing() {
     // CALL [200h] in a data segment of 256 bytes: #GP before the return
     // address is pushed, after the instructions before it in the block.

@@ -37,6 +37,11 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool) ->
             true
         }
         Movsb | Movsw | Movsd | Stosb | Stosw | Stosd if system => string(instr, &mut u),
+        Lodsb | Lodsw | Lodsd if system => lods(instr, &mut u),
+        Rcl if system => rotate_carry(instr, ShiftOp::Rcl, &mut u),
+        Rcr if system => rotate_carry(instr, ShiftOp::Rcr, &mut u),
+        Enter => enter(instr, stack32, &mut u),
+        Leave => leave(instr, stack32, &mut u),
         Mov => mov(instr, &mut u),
         Add => alu(instr, AluOp::Add, &mut u),
         Or => alu(instr, AluOp::Or, &mut u),
@@ -354,6 +359,23 @@ fn movx(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
 }
 
 fn xchg(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let reg_mem = match (instr.op0_kind(), instr.op1_kind()) {
+        (OpKind::Memory, OpKind::Register) => Some(instr.op1_register()),
+        (OpKind::Register, OpKind::Memory) => Some(instr.op0_register()),
+        _ => None,
+    };
+    if let Some(reg) = reg_mem {
+        // With memory: both read, then the memory and the register written.
+        let Some(r) = gpr(reg) else { return false };
+        if mem(instr, T2, r.size, true, u).is_none() {
+            return false;
+        }
+        u.push(Uop::Load { dst: T0, m: T2, size: r.size });
+        u.push(Uop::Get { t: T1, r });
+        u.push(Uop::Store { m: T2, src: T1, size: r.size });
+        u.push(Uop::Set { r, t: T0 });
+        return true;
+    }
     if instr.op0_kind() != OpKind::Register || instr.op1_kind() != OpKind::Register {
         return false;
     }
@@ -595,11 +617,17 @@ fn push(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
         return push_seg(instr, stack32, u);
     }
     let size = match instr.code() {
-        Code::Push_r16 | Code::Push_imm16 | Code::Pushw_imm8 => 2,
-        Code::Push_r32 | Code::Pushd_imm32 | Code::Pushd_imm8 => 4,
+        Code::Push_r16 | Code::Push_imm16 | Code::Pushw_imm8 | Code::Push_rm16 => 2,
+        Code::Push_r32 | Code::Pushd_imm32 | Code::Pushd_imm8 | Code::Push_rm32 => 4,
         _ => return false,
     };
-    if instr.op0_kind() == OpKind::Register {
+    if instr.op0_kind() == OpKind::Memory {
+        // The operand first, its address with the stack pointer as it was.
+        if mem(instr, T2, size, false, u).is_none() {
+            return false;
+        }
+        u.push(Uop::Load { dst: T0, m: T2, size });
+    } else if instr.op0_kind() == OpKind::Register {
         let Some(r) = gpr(instr.op0_register()) else { return false };
         u.push(Uop::Get { t: T0, r });
     } else {
@@ -623,10 +651,26 @@ fn pop_t0(size: u8, stack32: bool, u: &mut Vec<Uop>) {
 
 fn pop(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     let size = match instr.code() {
-        Code::Pop_r16 => 2,
-        Code::Pop_r32 => 4,
+        Code::Pop_r16 | Code::Pop_rm16 => 2,
+        Code::Pop_r32 | Code::Pop_rm32 => 4,
         _ => return false,
     };
+    if instr.op0_kind() == OpKind::Memory {
+        // Into memory addressed without ESP (with it, the address is that
+        // after the pop, which the handler works out): the stack's top,
+        // then the operand's checks, the store and the stack pointer.
+        let esp = |r: Register| matches!(r, Register::ESP | Register::SP);
+        if esp(instr.memory_base()) || esp(instr.memory_index()) {
+            return false;
+        }
+        pop_t0(size, stack32, u);
+        if mem(instr, T2, size, true, u).is_none() {
+            return false;
+        }
+        u.push(Uop::Store { m: T2, src: T0, size });
+        u.push(Uop::Set { r: sp(stack32), t: T1 });
+        return true;
+    }
     let Some(r) = gpr(instr.op0_register()) else { return false };
     pop_t0(size, stack32, u);
     // The stack pointer first: POP ESP loads the popped value.
@@ -851,6 +895,95 @@ fn near_rm(instr: &Instruction, size: u8, u: &mut Vec<Uop>) -> bool {
         }
         _ => return false,
     }
+    true
+}
+
+/// LODS without REP, going up (DF clear): the element into AL, AX or EAX,
+/// then SI or ESI moved past it.
+fn lods(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.code() {
+        Code::Lodsb_AL_m8 => 1,
+        Code::Lodsw_AX_m16 => 2,
+        Code::Lodsd_EAX_m32 => 4,
+        _ => return false,
+    };
+    if instr.has_rep_prefix() || instr.has_repne_prefix() {
+        return false;
+    }
+    let a32 = (0..instr.op_count()).any(|i| instr.op_kind(i) == OpKind::MemorySegESI);
+    let (si, width) = if a32 { (Gpr::dword(6), 4) } else { (Gpr::word(6), 2) };
+    u.push(Uop::Forward);
+    u.push(Uop::Get { t: T2, r: si });
+    u.push(Uop::MemRef { t: T2, seg: mem_seg(instr), size, write: false, slot: 0 });
+    u.push(Uop::Load { dst: T0, m: T2, size });
+    u.push(Uop::Set { r: Gpr { index: 0, high: false, size }, t: T0 });
+    u.push(Uop::Get { t: T2, r: si });
+    u.push(Uop::AddConst { t: T2, v: size as u32, size: width });
+    u.push(Uop::Set { r: si, t: T2 });
+    true
+}
+
+/// RCL and RCR of a register or memory by 1, through CF.
+fn rotate_carry(instr: &Instruction, op: ShiftOp, u: &mut Vec<Uop>) -> bool {
+    if !is_imm(instr.op1_kind()) || instr.immediate(1) & 0x1F != 1 {
+        return false;
+    }
+    let size = match instr.op0_kind() {
+        OpKind::Register => match gpr(instr.op0_register()) {
+            Some(r) => r.size,
+            None => return false,
+        },
+        OpKind::Memory => instr.memory_size().size() as u8,
+        _ => return false,
+    };
+    if !matches!(size, 1 | 2 | 4) {
+        return false;
+    }
+    modify(instr, size, Uop::Shift { op, size, t: T0, count: 1 }, u)
+}
+
+/// ENTER with nesting level 0: push the frame pointer, which then becomes
+/// the stack pointer, and move that down by the frame's size, which must
+/// be writable at its bottom (see `control::enter`). A 32-bit frame
+/// pointer on a 16-bit stack (the upper half of ESP with it) runs through
+/// the handler.
+fn enter(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.code() {
+        Code::Enterw_imm16_imm8 => 2,
+        Code::Enterd_imm16_imm8 => 4,
+        _ => return false,
+    };
+    if instr.immediate8_2nd() & 0x1F != 0 || (size == 4 && !stack32) {
+        return false;
+    }
+    let sp = sp(stack32);
+    u.push(Uop::Get { t: T0, r: Gpr::dword(5) });
+    push_t0(size, stack32, u);
+    u.push(Uop::Copy { dst: T0, src: T1 });
+    u.push(Uop::AddConst { t: T1, v: (instr.immediate16() as u32).wrapping_neg(), size: sp.size });
+    u.push(Uop::Copy { dst: T2, src: T1 });
+    u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: true, slot: 1 });
+    u.push(Uop::Set { r: Gpr { index: 5, high: false, size }, t: T0 });
+    u.push(Uop::Set { r: sp, t: T1 });
+    true
+}
+
+/// LEAVE: the frame pointer's top of the stack popped into it, the stack
+/// pointer then past it.
+fn leave(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.code() {
+        Code::Leavew => 2,
+        Code::Leaved => 4,
+        _ => return false,
+    };
+    let sp = sp(stack32);
+    u.push(Uop::Get { t: T1, r: Gpr { index: 5, high: false, size: sp.size } });
+    u.push(Uop::Copy { dst: T2, src: T1 });
+    u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: false, slot: 0 });
+    u.push(Uop::Load { dst: T0, m: T2, size });
+    u.push(Uop::AddConst { t: T1, v: size as u32, size: sp.size });
+    u.push(Uop::Set { r: sp, t: T1 });
+    u.push(Uop::Set { r: Gpr { index: 5, high: false, size }, t: T0 });
     true
 }
 

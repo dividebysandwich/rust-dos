@@ -1579,6 +1579,10 @@ impl Gen<'_> {
     /// undefined.
     fn shift(&mut self, op: ShiftOp, size: u8, t: T, count: Option<u8>) {
         let t = r(t);
+        if matches!(op, ShiftOp::Rcl | ShiftOp::Rcr) {
+            // (By 1, see `translate::rotate_carry`.)
+            self.carry_in();
+        }
         macro_rules! op {
             ($m:ident) => {
                 match (size, count) {
@@ -1597,7 +1601,8 @@ impl Gen<'_> {
             ShiftOp::Sar => op!(sar),
             ShiftOp::Rol => op!(rol),
             ShiftOp::Ror => op!(ror),
-            ShiftOp::Rcl | ShiftOp::Rcr => unreachable!("not translated"),
+            ShiftOp::Rcl => op!(rcl),
+            ShiftOp::Rcr => op!(rcr),
         }
         if !self.wanted(super::flags::shift_flags(op)) {
             return;
@@ -1657,8 +1662,22 @@ impl Gen<'_> {
                 );
                 self.merge(CF | OF, CF | OF);
             }
+            ShiftOp::Rcl => {
+                // OF = the result's top bit ^ CF.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov ecx, Rd(t)
+                    ; shr ecx, top
+                    ; xor ecx, eax
+                    ; and ecx, 1
+                    ; shl ecx, 11
+                    ; and eax, CF as i32
+                    ; or eax, ecx
+                );
+                self.merge(CF | OF, CF | OF);
+            }
             _ => {
-                // ROR: OF = the result's top two bits differ.
+                // ROR and RCR: OF = the result's top two bits differ.
                 dynasm!(self.ops
                     ; .arch x64
                     ; mov ecx, Rd(t)

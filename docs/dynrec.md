@@ -200,19 +200,22 @@ Each instruction becomes one of two things:
   (`uop.rs`), which the code generator turns into host code:
   - MOV, the ALU operations, INC, DEC, NEG and NOT;
   - shifts and rotates but RCL and RCR, by a constant or CL, of registers
-    and memory;
+    and memory (RCL and RCR by 1 on x86-64 hosts);
   - SHLD and SHRD by a constant or CL;
   - MUL and IMUL in all their forms, DIV and IDIV;
-  - LEA, MOVZX, MOVSX, XCHG of registers, CBW, CWD, CWDE and CDQ;
+  - LEA, MOVZX, MOVSX, XCHG, CBW, CWD, CWDE and CDQ;
   - the flag instructions, and SETcc;
-  - PUSH and POP of registers and constants, PUSHA and POPA;
+  - PUSH and POP of registers, memory (not addressed through ESP, for POP)
+    and constants, PUSHA and POPA, ENTER with nesting level 0 (but a 32-bit
+    frame pointer on a 16-bit stack) and LEAVE;
   - MOV and PUSH of segment registers (reading their selectors), and CLI;
   - on x86-64 hosts, MOV and POP into segment registers but CS and SS
     (through `jit_load_seg`, which runs `Cpu::load_segment`), IN and OUT
     (through `jit_port`, see [What a block holds](#what-a-block-holds)),
-    STI, and MOVS and STOS going up, with REP a loop of the iterations
-    where the count is at most 16 (programs copy and fill in small pieces
-    often, and the handler does more at once, see `instructions::string`);
+    STI, LODS without REP going up, and MOVS and STOS going up, with REP a
+    loop of the iterations where the count is at most 16 (programs copy
+    and fill in small pieces often, and the handler does more at once, see
+    `instructions::string`);
   - near JMP and CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ.
 
@@ -442,7 +445,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

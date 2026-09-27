@@ -59,6 +59,7 @@ impl Uop {
     pub fn flags_used(&self) -> u32 {
         match *self {
             Uop::Alu { op: AluOp::Adc | AluOp::Sbb, .. } => CF,
+            Uop::Shift { op: ShiftOp::Rcl | ShiftOp::Rcr, .. } => CF,
             Uop::Flag { mask, set: None } => mask & ARITH,
             Uop::SetCond { cc, .. } => cond_flags(cc),
             // A count of 0 leaves the flags as they were.
