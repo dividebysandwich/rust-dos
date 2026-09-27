@@ -304,27 +304,29 @@ pub fn table(cpu: &Cpu) -> Vec<(String, Channel)> {
     active_channels(cpu).into_iter().map(|c| (row(c), c)).collect()
 }
 
-const HELP: &str = "Displays or changes the sound mixer settings.\r\n\
-\r\n\
-MIXER [CHANNEL] COMMANDS [/NOSHOW]\r\n\
-\r\n\
-  CHANNEL   the channel to change: MASTER, PCSPEAKER, SB, OPL, GUS, MIDI,\r\n\
-            CDAUDIO, DISKNOISE or LPTDAC\r\n\
-  COMMANDS  one or more of these:\r\n\
-    Volume     0 to 200 percent, or decibels after a D (D-6); L:R sets the\r\n\
-               two sides, which have one volume here: their average\r\n\
-    Line-out   STEREO or REVERSE (stereo channels only)\r\n\
-    Crossfeed  X0 to X100 (stereo channels only)\r\n\
-    Reverb     R0 to R100\r\n\
-    Chorus     C0 to C100\r\n\
-  /NOSHOW   makes the changes without showing the mixer\r\n\
-\r\n\
-MIXER alone shows the mixer. Several channels can change at once, and X, R\r\n\
-and C without a channel change them all.\r\n\
-\r\n\
-Examples:\r\n\
-  MIXER CDAUDIO 50 SB REVERSE /NOSHOW\r\n\
-  MIXER X30 MASTER 40 OPL 150 R50 C30 SB X10\r\n";
+const HELP: &str = concat!(
+    "Displays or changes the sound mixer settings.\r\n",
+    "\r\n",
+    "MIXER [CHANNEL] COMMANDS [/NOSHOW]\r\n",
+    "\r\n",
+    "  CHANNEL   the channel to change: MASTER, PCSPEAKER, SB, OPL, GUS, MIDI,\r\n",
+    "            CDAUDIO, DISKNOISE or LPTDAC\r\n",
+    "  COMMANDS  one or more of these:\r\n",
+    "    Volume     0 to 200 percent, or decibels after a D (D-6); L:R sets the\r\n",
+    "               two sides, which have one volume here: their average\r\n",
+    "    Line-out   STEREO or REVERSE (stereo channels only)\r\n",
+    "    Crossfeed  X0 to X100 (stereo channels only)\r\n",
+    "    Reverb     R0 to R100\r\n",
+    "    Chorus     C0 to C100\r\n",
+    "  /NOSHOW   makes the changes without showing the mixer\r\n",
+    "\r\n",
+    "MIXER alone shows the mixer. Several channels can change at once, and X, R\r\n",
+    "and C without a channel change them all.\r\n",
+    "\r\n",
+    "Examples:\r\n",
+    "  MIXER CDAUDIO 50 SB REVERSE /NOSHOW\r\n",
+    "  MIXER X30 MASTER 40 OPL 150 R50 C30 SB X10\r\n",
+);
 
 /// Show the mixer's table: the heading in white, the channels' names in
 /// light cyan.

@@ -9,18 +9,20 @@ use crate::disk::{DriveKind, FLOPPY_DRIVES, drive_key, drive_name, drive_number,
 use crate::mount::{MountCmd, PathContext, parse_drive_name, parse_mount_tokens, tokenize};
 use crate::video::print_string;
 
-pub const BOOT_USAGE: &str = "Boots an operating system from a disk image.\r\n\
-\r\n\
-BOOT [image [image ...]] [-l drive]\r\n\
-\r\n\
-  image     Floppy disk images to put in A: and boot from; Ctrl+F4 changes\r\n\
-            to the next one\r\n\
-  -l drive  The drive to boot from: A: or B:, or a hard disk image mounted\r\n\
-            with MOUNT or IMGMOUNT, by its letter or number (0 to 3)\r\n\
-\r\n\
-The system has the machine until it turns it off. Examples:\r\n\
-  IMGMOUNT C win95.img\r\n\
-  BOOT -l C\r\n";
+pub const BOOT_USAGE: &str = concat!(
+    "Boots an operating system from a disk image.\r\n",
+    "\r\n",
+    "BOOT [image [image ...]] [-l drive]\r\n",
+    "\r\n",
+    "  image     Floppy disk images to put in A: and boot from; Ctrl+F4 changes\r\n",
+    "            to the next one\r\n",
+    "  -l drive  The drive to boot from: A: or B:, or a hard disk image mounted\r\n",
+    "            with MOUNT or IMGMOUNT, by its letter or number (0 to 3)\r\n",
+    "\r\n",
+    "The system has the machine until it turns it off. Examples:\r\n",
+    "  IMGMOUNT C win95.img\r\n",
+    "  BOOT -l C\r\n",
+);
 
 /// What BOOT was asked to do.
 #[derive(Debug, PartialEq, Eq)]

@@ -223,16 +223,18 @@ fn search_spec(cpu: &Cpu, arg: &str) -> Option<(u8, String)> {
     Some((drive, spec))
 }
 
-const LS_USAGE: &str = "Lists the files and directories in wide format.\r\n\
-\r\n\
-LS [/A] [pattern|path ...]\r\n\
-\r\n\
-  pattern  file names, with the wildcards * and ?\r\n\
-  path     a directory to list the contents of\r\n\
-  /A       also list hidden and system files\r\n\
-\r\n\
-Directories are shown in blue, programs and batch files (*.COM, *.EXE,\r\n\
-*.BAT) in green.\r\n";
+const LS_USAGE: &str = concat!(
+    "Lists the files and directories in wide format.\r\n",
+    "\r\n",
+    "LS [/A] [pattern|path ...]\r\n",
+    "\r\n",
+    "  pattern  file names, with the wildcards * and ?\r\n",
+    "  path     a directory to list the contents of\r\n",
+    "  /A       also list hidden and system files\r\n",
+    "\r\n",
+    "Directories are shown in blue, programs and batch files (*.COM, *.EXE,\r\n",
+    "*.BAT) in green.\r\n",
+);
 
 /// LS [/A] [pattern|path ...]: the names in a directory in as many
 /// columns as fit, as DOSBox Staging's LS lists them. Directories come
