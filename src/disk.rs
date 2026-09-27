@@ -1288,12 +1288,18 @@ impl DiskController {
 
     /// Logical path components of `rest` on `drive`, applying the drive's
     /// current directory for relative paths and folding "." / "..".
+    /// Trailing spaces are the padding of a name DOS packs into 8 and 3
+    /// characters, and go: Comanche opens "LH66.RLE    ".
     fn logical_components<'a>(drive: &'a Drive, rest: &'a str) -> Vec<&'a str> {
         let mut components: Vec<&str> = Vec::new();
         if !rest.starts_with('\\') {
             components.extend(drive.current_dir.split('\\').filter(|p| !p.is_empty()));
         }
         for part in rest.split('\\') {
+            let part = match part.trim_end_matches(' ') {
+                "" => part,
+                trimmed => trimmed,
+            };
             match part {
                 "" | "." => {}
                 ".." => {
@@ -2318,6 +2324,14 @@ impl DiskController {
         // Split filename and pattern by '.'
         let (f_name, f_ext) = filename.split_once('.').unwrap_or((filename, ""));
         let (p_name, p_ext) = pattern.split_once('.').unwrap_or((pattern, ""));
+        // DOS packs the pattern into a name of 8 and an extension of 3,
+        // padded with spaces, so what goes past them is dropped and
+        // trailing spaces are padding: Comanche looks for "LH66.RLE    ".
+        let field = |part: &'_ str, len: usize| {
+            let end = part.char_indices().nth(len).map_or(part.len(), |(i, _)| i);
+            part[..end].trim_end_matches(' ').to_string()
+        };
+        let (p_name, p_ext) = (field(p_name, 8), field(p_ext, 3));
 
         let match_part = |f: &str, p: &str| -> bool {
             if p == "*" {
@@ -2353,7 +2367,7 @@ impl DiskController {
             }
         };
 
-        match_part(f_name, p_name) && match_part(f_ext, p_ext)
+        match_part(f_name, &p_name) && match_part(f_ext, &p_ext)
     }
 
     /// The attributes of an entry of a tree held in memory (None for a
@@ -2749,6 +2763,22 @@ mod tests {
 
         let entries = disk.list_directory("D:\\*.*", 0x10).unwrap();
         assert!(entries.iter().all(|e| e.attr & 0x01 != 0));
+    }
+
+    #[test]
+    fn names_padded_with_spaces_are_found_and_opened() {
+        let base = scratch("pattern_padding");
+        fs::write(base.join("LH66.RLE"), b"x").unwrap();
+        let mut disk = DiskController::new(base);
+        for spec in ["lh66.rle    ", "LH66    .RLE", "LH66.RLEX", "C:\\LH66.RLE  "] {
+            let found = disk.list_directory(spec, 0).unwrap();
+            assert_eq!(found.len(), 1, "{spec:?}");
+            assert_eq!(found[0].filename, "LH66.RLE");
+        }
+        assert!(disk.list_directory("LH66.R  ", 0).unwrap().is_empty());
+        assert!(disk.is_file("lh66.rle    "));
+        let h = disk.open_file("C:\\LH66.RLE  ", 0, PSP).unwrap();
+        assert_eq!(disk.read_file(h, 1).unwrap(), b"x");
     }
 
     #[test]
