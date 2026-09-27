@@ -26,7 +26,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   Mode X, VESA VBE 2.0 up to 1024x768, an S3 Trio64 with its 2D
   accelerator, Hercules, the Tandy 1000's and IBM PCjr's 16-colour
   modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
-  for Glide games in DOS and Windows 95, drawn by rust-dos or again by
+  for Glide games in DOS and Windows 95, drawn by Rust-DOS or again by
   OpenGL at up to four times its resolution
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
@@ -56,7 +56,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## Getting started
 
-Download rust-dos for Windows, macOS, Linux or the browser from the
+Download Rust-DOS for Windows, macOS, Linux or the browser from the
 [releases page](https://github.com/dividebysandwich/rust-dos/releases);
 its notes say which file to take.
 
@@ -135,7 +135,7 @@ programs, the prompt has these commands:
 | `MIXER` | see [`[mixer]`](CONFIGURATION.md#mixer) |
 | `LOADHIGH` (`LH`) | load a program into upper memory |
 | `DOSCONFIG` | open the settings window |
-| `EXIT` | quit rust-dos, or go back from `COMMAND` |
+| `EXIT` | quit Rust-DOS, or go back from `COMMAND` |
 | `COMMAND [/C command \| /K command]` | a second prompt, until `EXIT`; `/C` runs the command and goes back, `/K` runs it and stays |
 
 `>file`, `>>file` and `<file` redirect a command's output and a program's
@@ -169,7 +169,7 @@ and Ctrl+C gives up the line being typed.
 | PrintScreen | Start and stop recording an animation (GIF) |
 
 Screenshots and recordings go in `capture_dir` (`capture` in the directory
-rust-dos started in).
+Rust-DOS started in).
 
 ## Save states
 
@@ -257,11 +257,27 @@ using it.
 
 ## Log file
 
-rust-dos logs what it does to `rust-dos.log` in the
+Rust-DOS logs what it does to `Rust-DOS.log` in the
 [per-user configuration directory](CONFIGURATION.md#configuration-file): the
 programs it runs, DOS and BIOS functions and I/O ports it doesn't emulate,
 failed file operations, CPU exceptions and configuration warnings. Attach it
 to bug reports. It is replaced on every start and stops growing at 64 MB.
+
+## Acknowledgements
+
+Rust-DOS is standing on the shoulders of giants. This would not have been possible 
+without the incredible work of these open-source projects:
+
+* **[Dosbox](https://www.dosbox.com/)** - The original that paved the way and laid the foundations. A lot of
+knowledge was preserved in it that would otherwise be forgotten now.
+* **[Dosbox Staging](https://github.com/dosbox-staging/)** - The modern
+continuation where a lot of care and attention was given to staying authentic to
+the era and provide a stable emulator used by GOG and others. Staging was and is a
+major source of foundational knowledge and advanced concepts such as dynamic
+recompilation.
+* **[Dosbox-X](https://github.com/joncampbell123/dosbox-x)** - Many innovations
+and new features were spearheaded here: More processors, Win9X, a built-in UI. This
+project did a lot of the hard work Rust-DOS now benefits from.
 
 ## Contributing, LLM Usage, Licensing
 
