@@ -988,8 +988,9 @@ fn leave(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 }
 
 /// REP counts up to which a translated loop does the iterations: the
-/// handler does more at once (see `instructions::string`).
-const REP_INLINE: u32 = 16;
+/// handler does more at once, and counts their time (see
+/// `instructions::string`).
+const REP_INLINE: u32 = crate::instructions::string::REP_ONE_INSTRUCTION;
 
 /// MOVS or STOS, with or without REP, going up (DF clear), an iteration as
 /// the handler does it: the source's and destination's checks, the

@@ -219,7 +219,29 @@ fn iteration(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr) -> CpuResult {
     Ok(())
 }
 
+/// REP string instructions of up to this many elements take the time of
+/// one instruction, as the recompiler runs them inline
+/// (`dynrec::translate`); longer ones take an instruction's time for each
+/// element, as in DOSBox, so a loop of full-screen copies and fills takes
+/// the time the copies do, not that of the few instructions around them.
+pub(crate) const REP_ONE_INSTRUCTION: u32 = 16;
+
 pub fn string(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResult {
+    if !instr.has_repe_prefix() && !instr.has_repne_prefix() {
+        return repeated(cpu, instr, op, size);
+    }
+    let counter = if addr32(instr) { Register::ECX } else { Register::CX };
+    let count = cpu.reg(counter);
+    let result = repeated(cpu, instr, op, size);
+    if count > REP_ONE_INSTRUCTION {
+        let done = count.wrapping_sub(cpu.reg(counter));
+        cpu.bus.clock.icount += done.saturating_sub(1) as u64;
+    }
+    result
+}
+
+/// The string instruction, with its REP prefix's iterations.
+fn repeated(cpu: &mut Cpu, instr: &Instruction, op: StrOp, size: u8) -> CpuResult {
     let a32 = addr32(instr);
     let addr = Addr {
         mask: if a32 { 0xFFFF_FFFF } else { 0xFFFF },

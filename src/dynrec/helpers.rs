@@ -229,6 +229,8 @@ jit_fn! {
         let start_esp = cpu.esp();
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
         let port = super::block::port_io(instr);
+        // Port I/O and long string instructions take time of their own.
+        let timed = port || super::block::repeated_string(instr);
         let sti = instr.mnemonic() == iced_x86::Mnemonic::Sti;
         let popf = matches!(instr.mnemonic(), iced_x86::Mnemonic::Popf | iced_x86::Mnemonic::Popfd);
         let seg_load = super::block::loaded_segment(instr);
@@ -244,7 +246,7 @@ jit_fn! {
                         return code;
                     }
                 }
-                if port && loop_would_act(cpu, time, (data.count() - ix) as u64) {
+                if timed && loop_would_act(cpu, time, (data.count() - ix) as u64) {
                     return EXIT_AFTER;
                 }
                 if let Some(seg) = seg_load {
@@ -381,11 +383,11 @@ jit_fn! {
     }
 }
 
-/// Whether port I/O changed what the execution loop checks before the
-/// next instruction: an interrupt to deliver, the next timer event (the
-/// block checked it would end before the old one, but a port access takes
-/// time: the `left` instructions of the block from this one on must still
-/// fit), the A20 gate (the code window), a reset, or a CPU no longer
+/// Whether port I/O (or a long string instruction) changed what the
+/// execution loop checks before the next instruction: an interrupt to
+/// deliver, the next timer event (the block checked it would end before the
+/// old one, but a port access or a string's elements take time: the `left`
+/// instructions of the block from this one on must still fit), the A20 gate (the code window), a reset, or a CPU no longer
 /// running. `time` is the timer deadline and A20 mask before it.
 fn loop_would_act(cpu: &Cpu, time: (u64, u32), left: u64) -> bool {
     (cpu.bus.irq_ready && cpu.get_cpu_flag(crate::cpu::CpuFlags::IF))

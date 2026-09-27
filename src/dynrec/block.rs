@@ -344,6 +344,12 @@ pub fn port_io(instr: &Instruction) -> bool {
     matches!(instr.mnemonic(), Mnemonic::In | Mnemonic::Out)
 }
 
+/// Whether `instr` is a REP string instruction, whose time grows with its
+/// count (`instructions::string`).
+pub fn repeated_string(instr: &Instruction) -> bool {
+    instr.is_string_instruction() && (instr.has_rep_prefix() || instr.has_repne_prefix())
+}
+
 /// Whether `instr` may write memory.
 fn writes_memory(info: &mut InstructionInfoFactory, instr: &Instruction) -> bool {
     info.info(instr).used_memory().iter().any(|m| {
