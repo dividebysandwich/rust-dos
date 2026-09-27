@@ -108,9 +108,11 @@ pub struct BlockData {
 impl BlockData {
     /// Decode a block from the instruction at `at`, which is in the code
     /// window, with at most `max` instructions, and `watch` the changes of
-    /// its page's bytes (see `WATCH_AFTER`). None if no block can start
-    /// there: the interpreter runs that instruction itself.
-    pub fn build(at: &At, ram: &[u8], page_gen: &[u32], max: usize, watch: Option<&[u8]>) -> Option<BlockData> {
+    /// its page's bytes (see `WATCH_AFTER`). With `tail`, the block may go
+    /// on into the page's last 15 bytes, with instructions that end in the
+    /// page (see `in_tail`). None if no block can start there: the
+    /// interpreter runs that instruction itself.
+    pub fn build(at: &At, ram: &[u8], page_gen: &[u32], max: usize, watch: Option<&[u8]>, tail: bool) -> Option<BlockData> {
         // Linear and physical addresses are the same within a page.
         let page_off = at.phys_ip as u32 & 0xFFF;
         let page_phys = at.phys_ip - page_off as usize;
@@ -119,7 +121,8 @@ impl BlockData {
         let mut info = InstructionInfoFactory::new();
         let (mut instrs, mut eips, mut writes, mut watched) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut off, mut eip) = (page_off, at.eip);
-        while off <= 0x1000 - 16 && eip as u64 + PAGE_TAIL as u64 - 1 <= at.cs_limit as u64 {
+        let end = if tail { 0x1000 } else { 0x1000 - PAGE_TAIL };
+        while off < end && eip as u64 + PAGE_TAIL as u64 - 1 <= at.cs_limit as u64 {
             decoder.set_position(off as usize).unwrap();
             decoder.set_ip(eip as u64);
             let instr = decoder.decode();
@@ -176,6 +179,15 @@ impl BlockData {
         };
         data.gen_sum = data.gens_now(page_gen);
         Some(data)
+    }
+
+    /// Whether instruction `ix` starts in the page's last 15 bytes, where the
+    /// interpreter's fetch looks at the next page too (with paging, its
+    /// translation), in case the instruction runs on into it. The decoder
+    /// found the instruction ends in the page.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    pub fn in_tail(&self, ix: usize) -> bool {
+        self.phys_of(ix) & 0xFFF >= 0x1000 - PAGE_TAIL as usize
     }
 
     /// Instructions in the block.

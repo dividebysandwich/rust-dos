@@ -272,6 +272,10 @@ pub struct Code {
 /// handler call the instruction count is brought up to date, as devices
 /// read the time from it; the count of executed instructions is only
 /// brought up to date where the code returns.
+/// Blocks go on into the last 15 bytes of their page (see
+/// `BlockData::in_tail`), with paging checking the TLB holds the next page.
+pub const TAIL: bool = true;
+
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();
@@ -323,6 +327,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.writeback(g.cache.dirty);
                 g.cache.dirty = 0;
                 g.check_watched();
+                g.check_next_page();
                 g.fallback(ix as i32);
                 g.cache.loaded = 0;
             }
@@ -335,6 +340,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.preload(used);
                 g.wb_at[ix] = g.cache.loaded;
                 g.check_watched();
+                g.check_next_page();
                 for (k, uop) in uops.iter().enumerate() {
                     g.live_after = g.live[ix][k];
                     g.uop(uop);
@@ -439,6 +445,36 @@ impl Gen<'_> {
             let phys = (data.phys as usize + w) as i32;
             dynasm!(self.ops ; .arch x64 ; cmp BYTE [r13 + phys], data.bytes[w] as i8 ; jne =>at);
         }
+    }
+
+    /// Leave the block before the instruction being translated if it is in
+    /// its page's last 15 bytes, paging is on and the TLB doesn't hold the
+    /// next page (the linear address of CS:EIP's page + 1000h): the
+    /// interpreter's fetch looks that up, and may walk the page tables for
+    /// it, for such an instruction. Where the TLB holds it, the lookup
+    /// changes nothing.
+    fn check_next_page(&mut self) {
+        let data = self.data;
+        if !data.in_tail(self.ix) || self.env.bits & super::ENV_PAGING == 0 {
+            return;
+        }
+        let at = self.fault_exit(EXIT_NEXT_PAGE);
+        let set = if self.env.bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
+        let entry = set * TLB_ENTRY + layout::TLB_READ_TAG as i32;
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
+            ; add eax, data.eips[self.ix] as i32
+            ; or eax, 0xFFF
+            ; inc eax
+            ; shr eax, 12
+            ; mov edx, eax
+            ; and edx, (layout::TLB_SET - 1) as i32
+            ; shl edx, TLB_ENTRY_SHIFT
+            ; inc eax
+            ; cmp eax, DWORD [r15 + rdx + entry]
+            ; jne =>at
+        );
     }
 
     /// Run instruction `ix` through its handler.

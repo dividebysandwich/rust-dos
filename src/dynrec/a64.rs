@@ -220,6 +220,10 @@ pub struct Code {
 /// call of its interpreter handler (None). With `link`, exits to a known
 /// EIP in the block's page go through its links. See `x64::block`, which
 /// this follows.
+/// Whether blocks go on into the last 15 bytes of their page (see
+/// `BlockData::in_tail`): not in this code generator's.
+pub const TAIL: bool = false;
+
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, _env: super::Env) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();

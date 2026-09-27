@@ -38,6 +38,11 @@ pub const EXIT_WATCHED: u32 = 11;
 /// between instructions (see `block::ends_block`): the block stops after
 /// it.
 pub const EXIT_AFTER: u32 = 12;
+/// The instruction starts in the page's last 15 bytes, and with paging the
+/// TLB doesn't hold the next page, which the interpreter's fetch looks up
+/// (and may walk the page tables for): the instruction didn't run (see
+/// `BlockData::in_tail`).
+pub const EXIT_NEXT_PAGE: u32 = 13;
 /// With EXIT_FAULT, EXIT_GP0, EXIT_DE, EXIT_SMC and EXIT_WATCHED: the
 /// guest's arithmetic flags are in the context's `flags`, not yet in the
 /// CPU.

@@ -1237,3 +1237,59 @@ fn links_to_another_page_follow_its_remapping() {
     assert_eq!(remapped_callee(true), 50 + 5000);
     assert_eq!(remapped_callee(false), 100, "the TLB keeps the old translation");
 }
+
+/// A loop whose block runs on into the last 15 bytes of its page, where
+/// the interpreter's fetch looks the next page up, which walks the page
+/// tables the first time (setting its accessed bit), or every time where it
+/// isn't there. Translated code must leave that to the interpreter where
+/// the TLB doesn't hold the page. (The loop ends before the first batch
+/// does, where the interpreter would run some of its instructions and look
+/// the page up anyway.) Returns the next page's table entry.
+fn loop_in_a_page_tail(next_present: bool) -> u32 {
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        if !next_present {
+            rig.write32(table + 0x31 * 4, 0);
+        }
+        // From 30FE8h to the page's last byte: the tail's instructions from
+        // 30FF1h on, and the jump back at its end.
+        let body = asm32(0x30FE8, |a| {
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.mov(eax, 0x1234_5678u32)?;
+            a.add(ebx, 1)?;
+            a.inc(edx)?;
+            a.add(esi, 2)?;
+            a.add(edi, 3)?;
+            a.dec(ecx)?;
+            a.jz(CODE as u64 + 0x100)?;
+            a.jmp(top)
+        });
+        assert_eq!(body.len(), 0x31000 - 0x30FE8, "the loop ends at the page's end");
+        rig.load(0x30FE8, &body);
+        let code = asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.mov(ecx, 20u32)?;
+            a.jmp(0x30FE8u64)
+        });
+        rig.load(CODE, &code);
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| a.hlt()));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.ebx(), b.cpu.edx(), b.cpu.edi()), (20, 20, 60));
+    b.read32(table + 0x31 * 4)
+}
+
+#[test]
+fn a_block_into_its_pages_tail_looks_the_next_page_up_as_the_interpreter_does() {
+    assert_eq!(loop_in_a_page_tail(true), 0x31023, "the fetch set the next page's accessed bit");
+    assert_eq!(loop_in_a_page_tail(false), 0);
+}

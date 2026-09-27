@@ -51,13 +51,25 @@ A block (`block.rs`) is a run of instructions in one page, at most 64 of
 them. It holds exactly the instructions the interpreter would fetch
 through its code window (`exec::CodeWindow`):
 
-- none starting in the last 15 bytes of the page;
+- none starting in the last 15 bytes of the page, but on x86-64 hosts
+  (see below);
 - none less than 15 bytes before the CS limit;
 - never linear page 0, where the interpreter watches for jumps into the
   interrupt table.
 
 Everything else goes through `locate`, whose page walks, Accessed bits,
-CR2 and tripwire the recompiler never needs to reproduce. Blocks aren't
+CR2 and tripwire the recompiler never needs to reproduce.
+
+On x86-64 hosts a block goes on into the page's last 15 bytes, with the
+instructions that end in the page (`BlockData::in_tail`). There
+`locate` looks the next page up for an instruction, in case it runs on
+into it, which with paging may walk the page tables (setting their
+Accessed bits and filling the TLB). With paging on, the code leaves the
+block before such an instruction (`EXIT_NEXT_PAGE`) unless the TLB holds
+the next page, where the lookup changes nothing, and the interpreter runs
+it. Code at the end of a page then runs in blocks and their links rather
+than in the interpreter, where DOS extenders map a program's pages apart
+from each other in physical memory, as through VCPI. Blocks aren't
 made in the shell's code, or in the page of the mouse driver's stub, which
 clears a byte of RAM that decides whether the next mouse event can be
 delivered.

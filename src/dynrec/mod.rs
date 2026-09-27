@@ -466,7 +466,8 @@ mod engine {
         fn translate(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
             let single = key.mode & 2 != 0;
             let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
-            let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK }, pokes)?;
+            let data =
+                BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK }, pokes, backend::TAIL)?;
             cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
             let stack32 = key.mode & 4 != 0;
             let items: Vec<_> = (0..data.count())
@@ -683,13 +684,13 @@ mod engine {
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.
                 let data = unsafe { &*self.ctx.exit_data };
-                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED | EXIT_AFTER) {
+                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED | EXIT_AFTER | EXIT_NEXT_PAGE) {
                     // Instruction ix stopped the block: it counts as executed
                     // (the interpreter counts it before running it) but not in
                     // the instruction count, which this adds once it has dealt
                     // with it. One whose watched bytes changed didn't run.
                     cpu.bus.clock.icount += data.lag[ix] as u64;
-                    cpu.executed += ix as u64 + (kind != EXIT_WATCHED) as u64;
+                    cpu.executed += ix as u64 + !matches!(kind, EXIT_WATCHED | EXIT_NEXT_PAGE) as u64;
                     if ret as u32 & EXIT_FLAGS != 0 {
                         cpu.set_flag_bits(crate::cpu::alu::ARITH, self.ctx.flags);
                     }
@@ -798,10 +799,13 @@ mod engine {
                         cpu.bus.clock.icount += 1;
                         Run::Ran { page }
                     }
-                    EXIT_WATCHED => {
-                        // The interpreter runs whatever is there now; the
-                        // block stays for when the bytes are back.
-                        stats.watched += 1;
+                    EXIT_WATCHED | EXIT_NEXT_PAGE => {
+                        // The interpreter runs whatever is there now (the
+                        // block stays for when the bytes are back), or looks
+                        // the next page up for the instruction itself.
+                        if kind == EXIT_WATCHED {
+                            stats.watched += 1;
+                        }
                         cpu.set_eip(data.eips[ix]);
                         if none_ran { Run::Interpret } else { Run::Ran { page } }
                     }
