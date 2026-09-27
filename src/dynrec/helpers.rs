@@ -73,6 +73,8 @@ pub struct JitCtx {
     pub code_blocks: *const u8,
     /// Set where a store hit the running block's later bytes (x86-64).
     pub smc: u8,
+    /// The stack's width the running blocks were translated for.
+    pub stack32: bool,
     /// The `ENV_FLAT` and `ENV_PLAIN` bits now: the running blocks were translated for
     /// them, and a segment load in a block changes them (see
     /// `block::loaded_segment`).
@@ -164,6 +166,7 @@ impl JitCtx {
             code_blocks: std::ptr::null(),
             smc: 0,
             flat: 0,
+            stack32: false,
             exit_data: std::ptr::null_mut(),
             memref: jit_memref as *const () as usize,
             read: jit_read as *const () as usize,
@@ -217,6 +220,7 @@ jit_fn! {
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
         let port = super::block::port_io(instr);
         let sti = instr.mnemonic() == iced_x86::Mnemonic::Sti;
+        let popf = matches!(instr.mnemonic(), iced_x86::Mnemonic::Popf | iced_x86::Mnemonic::Popfd);
         let seg_load = super::block::loaded_segment(instr);
         // A device may write RAM (by DMA) as well.
         let writes = data.writes[ix] || port;
@@ -238,6 +242,26 @@ jit_fn! {
                     // it does a segment's that isn't flat, and follows its
                     // links only where the segments are flat as they were.
                     ctx.flat = ctx.flat & !((super::ENV_FLAT | super::ENV_PLAIN) << seg as u32) | super::flat_bit(cpu, seg);
+                }
+                if popf
+                    && (cpu.get_cpu_flag(crate::cpu::CpuFlags::TF)
+                        || cpu.bus.irq_ready && cpu.get_cpu_flag(crate::cpu::CpuFlags::IF))
+                {
+                    // A single-step trap to come, or an interrupt POPF let
+                    // through: the execution loop takes them.
+                    return EXIT_AFTER;
+                }
+                if seg_load == Some(Seg::SS) {
+                    // The rest of the block, and the blocks linked to it, were
+                    // translated for the stack's width as it was.
+                    if cpu.stack32() != ctx.stack32 {
+                        return EXIT_AFTER;
+                    }
+                    // Interrupts wait for the instruction after a stack
+                    // switch, which runs in the block (as after STI).
+                    if ix + 1 < data.count() {
+                        cpu.irq_shadow = false;
+                    }
                 }
                 if sti {
                     // Interrupts are recognized after the next instruction:

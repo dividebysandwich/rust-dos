@@ -694,6 +694,7 @@ mod engine {
             // (A chain goes on through the execution loop only as the
             // segments are flat as when it started.)
             self.ctx.flat = mode & ENV_FLAT_ALL;
+            self.ctx.stack32 = mode & 4 != 0;
             loop {
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and

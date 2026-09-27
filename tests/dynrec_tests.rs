@@ -1379,3 +1379,82 @@ fn a_segment_load_that_faults_leaves_the_instructions_before_it_done() {
         }
     }
 }
+
+#[test]
+fn an_interrupt_popf_lets_through_comes_right_after_it() {
+    // The handler adds EBP, which the loop counts up, so where the
+    // interrupts come shows in EDI.
+    let (mut a, mut b) = twins(|rig| {
+        rig.handler(0x08, 0, |a| {
+            a.push(eax)?;
+            a.add(edi, ebp)?;
+            a.mov(al, 0x20)?;
+            a.out(0x20, al)?;
+            a.pop(eax)?;
+            a.iretd()
+        });
+        let code = asm32(CODE, |a| {
+            a.mov(al, 0xFE)?;
+            a.out(0x21, al)?;
+            a.mov(al, 0x34)?;
+            a.out(0x43, al)?;
+            a.mov(al, 0x61)?;
+            a.out(0x40, al)?;
+            a.mov(al, 0x00)?;
+            a.out(0x40, al)?;
+            a.xor(edi, edi)?;
+            a.xor(ebp, ebp)?;
+            a.mov(ecx, 3000u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.cli()?;
+            a.inc(ebp)?;
+            a.inc(ebp)?;
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x200)?;
+            // IF from 0 to 1: a timer interrupt that waits comes now.
+            a.popfd()?;
+            a.inc(ebp)?;
+            a.inc(ebp)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.cli()?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 100, "EDI {}", b.cpu.edi());
+}
+
+#[test]
+fn a_stack_switch_to_another_width_stops_the_block_after_it() {
+    let (mut a, mut b) = twins(|rig| {
+        let code = asm32(CODE, |a| {
+            // ESP above 64 KB: a 16-bit stack pushes at SS:SP.
+            a.mov(esp, 0x18000u32)?;
+            a.mov(ecx, 100u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.mov(ax, DATA16 as u32)?;
+            a.mov(ss, ax)?;
+            a.push(ax)?;
+            a.push(cx)?;
+            a.pop(bx)?;
+            a.pop(dx)?;
+            a.mov(ax, DATA32 as u32)?;
+            a.mov(ss, ax)?;
+            a.push(ecx)?;
+            a.pop(esi)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.esp(), 0x18000);
+    // The 16-bit pushes of AX (the selector) and CX (1, the last time) at
+    // SS:SP.
+    assert_eq!(b.read32(0x7FFC), (DATA16 as u32) << 16 | 1);
+}

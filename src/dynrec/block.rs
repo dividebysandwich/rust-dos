@@ -11,7 +11,7 @@
 //! can be delivered, the mode, CS, SS, the page tables or CR0, I/O ports
 //! (and with them the timer deadline), or where execution goes on.
 
-use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, Register};
+use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess};
 
 use crate::bus::GEN_SHIFT;
 use crate::exec::At;
@@ -281,11 +281,9 @@ pub fn ends_block(instr: &Instruction) -> bool {
         // they change what the execution loop checks (see
         // `helpers::jit_fallback`).
         Insb | Insw | Insd | Outsb | Outsw | Outsd => true,
-        // IF and the interrupt shadow.
-        Popf | Popfd | Iret | Iretd => true,
-        // SS (the interrupt shadow and the stack's size).
-        Lss => true,
-        Mov | Pop if instr.op0_register() == Register::SS => true,
+        // (POPF, and MOV, POP and LSS into SS, stop the block after them
+        // only where they set IF with an interrupt waiting, set TF, or
+        // change the stack's width, see `helpers::jit_fallback`.)
         // CR0 and the TLB, the descriptor tables and the task register.
         Mov if instr.op0_register().is_cr() || instr.op0_register().is_dr() || instr.op0_register().is_tr() => true,
         Lmsw | Clts | Invlpg | Lgdt | Lidt | Lldt | Ltr => true,
@@ -294,14 +292,14 @@ pub fn ends_block(instr: &Instruction) -> bool {
 }
 
 /// The segment register `instr` loads without ending the block, if any:
-/// MOV, POP, LDS, LES, LFS and LGS. (SS ends the block, as do far
-/// transfers.)
+/// MOV, POP, LDS, LES, LFS, LGS and LSS. (Far transfers end the block.)
 pub fn loaded_segment(instr: &Instruction) -> Option<crate::cpu::Seg> {
     use crate::cpu::Seg;
     match instr.mnemonic() {
         Mnemonic::Mov | Mnemonic::Pop if instr.op0_kind() == iced_x86::OpKind::Register => {
             Seg::from_register(instr.op0_register())
         }
+        Mnemonic::Lss => Some(Seg::SS),
         Mnemonic::Lds => Some(Seg::DS),
         Mnemonic::Les => Some(Seg::ES),
         Mnemonic::Lfs => Some(Seg::FS),

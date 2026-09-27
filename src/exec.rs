@@ -231,8 +231,9 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
 
         // An instruction in an interrupt shadow runs on its own, as the
         // loop checks for interrupts again after it, and traced code (TF)
-        // on the interpreter, which raises the single-step traps. (POPF and
-        // IRET, which can set TF, end translated blocks.)
+        // on the interpreter, which raises the single-step traps. (IRET,
+        // which can set TF, ends translated blocks, and POPF stops one
+        // where it sets TF.)
         let stop = if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
             dynamic::<HOT>(cpu, fetch, hook, false)
         } else {

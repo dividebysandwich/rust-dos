@@ -85,16 +85,17 @@ between instructions:
 |---|---|
 | Control transfers: jumps, calls, returns, INT, IRET, LOOP, JCXZ | Where execution goes |
 | String port I/O (INS, OUTS) | Devices, their interrupts, the timer deadline, the A20 gate, the reset line |
-| POPF, IRET | IF and the interrupt shadow |
-| MOV SS, POP SS, LSS | The interrupt shadow, the stack's width |
+| IRET | IF and the interrupt shadow |
 | Writes to CR0, CR3, DRn, TRn, LMSW, CLTS, INVLPG, LGDT, LIDT, LLDT, LTR | The mode, paging, the TLB, the descriptor tables |
 
-IN, OUT and STI can change the same, but programs run them so often (a
-timer read, a sound driver's status, a CLI and STI around each) that the
-block goes on after them where they changed none of it. They run in the
-block (on x86-64 hosts translated, with IN and OUT through `jit_port`;
-elsewhere through their handlers and `jit_fallback`), which stops after
-the instruction (`EXIT_AFTER`) only if:
+IN, OUT, STI, POPF, MOV SS, POP SS and LSS can change the same, but
+programs run them so often (a timer read, a sound driver's status, a CLI
+and STI or a PUSHF and POPF around each, a switch to a stack of its own)
+that the block goes on after them where they changed none of it. They run
+in the block (IN, OUT and STI translated on x86-64 hosts, with IN and OUT
+through `jit_port`; the others, and all of them elsewhere, through their
+handlers and `jit_fallback`), which stops after the instruction
+(`EXIT_AFTER`) only if:
 
 - after IN or OUT, an interrupt can be delivered (a device raised one, or
   the PIC let one through, with IF set), the timer deadline or the A20
@@ -103,7 +104,12 @@ the instruction (`EXIT_AFTER`) only if:
   no longer runs;
 - after STI, an interrupt waits: the execution loop runs the next
   instruction, in the interrupt shadow, and delivers it. Where none waits
-  the shadow ends in the block, at the next instruction.
+  the shadow ends in the block, at the next instruction;
+- after POPF (through its handler), TF is set, or IF is set with an
+  interrupt waiting;
+- after a load of SS (through its handler), the stack's width changed,
+  which the block was translated for (its key's stack bit). Otherwise the
+  interrupt shadow ends in the block, at the next instruction.
 
 Because of this, whether an interrupt can be delivered never changes
 inside a block, or in a chain of linked blocks: the execution loop has
@@ -425,7 +431,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:
