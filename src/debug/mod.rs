@@ -110,6 +110,11 @@ pub enum Cmd {
     ScreenText,
     TraceQuery(TraceQuery),
     TraceControl { enabled: Option<bool>, clear: bool, stream_max: Option<usize> },
+    /// Turn the port log on or off, empty it or size it (`/api/ports`).
+    PortsControl { enabled: Option<bool>, clear: bool, capacity: Option<usize>, ports: Option<(u16, u16)> },
+    /// The port log's accesses to ports `from..=to`, reads or writes or
+    /// both, the last `last_n`.
+    PortsQuery { from: u16, to: u16, write: Option<bool>, last_n: usize },
     Input { events: Vec<InputEvent>, wait: bool },
     InputClear,
     Pause,
@@ -1083,6 +1088,52 @@ impl DebugHub {
                 }
                 Reply::Json(self.trace_status())
             }
+            Cmd::PortsControl { enabled, clear, capacity, ports } => {
+                let log = &mut cpu.bus.port_log;
+                if let Some(capacity) = capacity {
+                    *log = Some(rust_dos::bus::port_log::PortLog::new(capacity.clamp(1, 10_000_000)));
+                }
+                match enabled {
+                    Some(true) if log.is_none() => *log = Some(rust_dos::bus::port_log::PortLog::new(100_000)),
+                    Some(false) => *log = None,
+                    _ => {}
+                }
+                if let Some(log) = log {
+                    if clear {
+                        log.clear();
+                    }
+                    if let Some(ports) = ports {
+                        log.ports = ports;
+                    }
+                }
+                Reply::Json(json!({
+                    "enabled": log.is_some(),
+                    "entries": log.as_ref().map_or(0, |l| l.len()),
+                    "capacity": log.as_ref().map_or(0, |l| l.capacity()),
+                    "ports": log.as_ref().map(|l| format!("{:04X}-{:04X}", l.ports.0, l.ports.1)),
+                }))
+            }
+            Cmd::PortsQuery { from, to, write, last_n } => match &cpu.bus.port_log {
+                None => Reply::bad("the port log is off: POST /api/ports {\"enabled\":true} first"),
+                Some(log) => {
+                    let mut picked: Vec<Value> = log
+                        .iter()
+                        .rev()
+                        .filter(|a| (from..=to).contains(&a.port) && write.is_none_or(|w| w == a.write))
+                        .take(last_n)
+                        .map(|a| {
+                            json!({
+                                "icount": a.icount,
+                                "port": format!("{:04X}", a.port),
+                                "dir": if a.write { "out" } else { "in" },
+                                "value": format!("{:0width$X}", a.value, width = a.len as usize * 2),
+                            })
+                        })
+                        .collect();
+                    picked.reverse();
+                    Reply::Json(json!({"count": picked.len(), "accesses": picked}))
+                }
+            },
             Cmd::Input { events, wait } => {
                 let mut low = Vec::new();
                 for ev in &events {
@@ -1383,6 +1434,9 @@ impl DebugHub {
                     "crtc_underline": format!("{:02X}", crtc[0x14]),
                     "crtc_mode_control": format!("{:02X}", crtc[0x17]),
                     "crtc": crtc.iter().map(|r| format!("{:02X}", r)).collect::<Vec<_>>().join(" "),
+                    "attribute": cpu.bus.vga.attribute_regs.iter().map(|r| format!("{:02X}", r)).collect::<Vec<_>>().join(" "),
+                    // The DAC's first 64 colours, six bits a component.
+                    "dac": cpu.bus.vga.palette[..192].chunks(3).map(|c| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2])).collect::<Vec<_>>().join(" "),
                 },
                 // The VESA mode, when one is set.
                 "vbe": cpu.bus.vbe.mode.filter(|_| cpu.bus.video_mode == VideoMode::Vesa).map(|mode| json!({

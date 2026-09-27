@@ -70,6 +70,7 @@ fn router(state: AppState) -> Router {
         .route("/api/screen/text", get(screen_text))
         .route("/api/trace", get(trace_get).post(trace_post))
         .route("/api/log", get(log_get))
+        .route("/api/ports", get(ports_get).post(ports_post))
         .route("/api/input", axum::routing::delete(input_clear))
         .route("/api/input/{kind}", post(input_post))
         .route("/api/drive", get(drives))
@@ -265,6 +266,55 @@ fn format_trace(entries: &[TraceEntry], json: bool) -> Response {
         }
         text_response(out)
     }
+}
+
+#[derive(Deserialize)]
+struct PortsPost {
+    enabled: Option<bool>,
+    #[serde(default)]
+    clear: bool,
+    capacity: Option<usize>,
+    /// The ports to keep, hex: `3C9` or `3C0-3CF` (all of them to begin with).
+    ports: Option<String>,
+}
+
+/// A port or a range of them, hex: `3C9` or `3C0-3CF`.
+fn port_range(range: &str) -> Result<(u16, u16), ApiError> {
+    let hex = |t: &str| u16::from_str_radix(t.trim().trim_start_matches("0x").trim_end_matches(['h', 'H']), 16);
+    let (a, b) = range.split_once('-').unwrap_or((range, range));
+    match (hex(a), hex(b)) {
+        (Ok(a), Ok(b)) => Ok((a, b)),
+        _ => Err(bad("ports: hex, as 3C9 or 3C0-3CF")),
+    }
+}
+
+async fn ports_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let p: PortsPost = from_value(parse_body(&body)?)?;
+    let ports = p.ports.as_deref().map(port_range).transpose()?;
+    s.call_json(Cmd::PortsControl { enabled: p.enabled, clear: p.clear, capacity: p.capacity, ports }, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+struct PortsQuery {
+    /// A port or a range of them, hex: `3C9` or `3C0-3CF`.
+    port: Option<String>,
+    /// `in` or `out`.
+    dir: Option<String>,
+    last_n: Option<usize>,
+}
+
+async fn ports_get(State(s): State<AppState>, Query(q): Query<PortsQuery>) -> ApiResult {
+    let (from, to) = match q.port.as_deref() {
+        None => (0, 0xFFFF),
+        Some(range) => port_range(range)?,
+    };
+    let write = match q.dir.as_deref() {
+        None => None,
+        Some("out") => Some(true),
+        Some("in") => Some(false),
+        Some(_) => return Err(bad("dir: in or out")),
+    };
+    s.call_json(Cmd::PortsQuery { from, to, write, last_n: q.last_n.unwrap_or(200) }, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -832,6 +882,8 @@ STATUS / SCREEN
                                            bytes, size in x-width/x-height)
   GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode)
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines
+  POST /api/ports {"enabled":true, "clear":true, "capacity":100000, "ports":"3C0-3CF"}  log port accesses
+  GET  /api/ports[?port=3C0-3CF&dir=in|out&last_n=200]  the logged accesses, oldest first
 
 TRACE
   POST /api/trace  {"enabled":true, "clear":false, "stream_max":1000}

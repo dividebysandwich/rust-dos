@@ -5,6 +5,7 @@ use crate::disk::{DiskController, DriveKind, LASTDRIVE, MountOptions};
 use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
+pub mod port_log;
 pub mod s3;
 mod state;
 
@@ -63,6 +64,8 @@ pub struct Bus {
     /// The port accesses a BIOS service left for a V86 monitor to see,
     /// which the BIOS makes on its way out (`bios::PORT_ACCESSES`).
     pub port_accesses: VecDeque<crate::bios::PortAccess>,
+    /// The port accesses made, while a debugger keeps a log of them.
+    pub port_log: Option<port_log::PortLog>,
     /// The DOSCONFIG command asked for the settings window; the frontend
     /// opens it.
     pub config_ui_requested: bool,
@@ -258,6 +261,7 @@ impl Bus {
             a20_mask: !0x0010_0000,
             reset_requested: false,
             port_accesses: VecDeque::new(),
+            port_log: None,
             rom_writes: 0,
             config_ui_requested: false,
             exit_requested: false,
@@ -1625,10 +1629,19 @@ impl Bus {
     /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
         self.clock.stall(crate::timer::IO_WRITE_NS);
+        self.log_port(port, value as u32, 1, true);
         self.write_port(port, value);
         // The write may have programmed the PICs or made a device raise or
         // withdraw its interrupt.
         self.refresh_irq();
+    }
+
+    /// Keep a port access in the debugger's log, if there is one.
+    #[inline]
+    pub(crate) fn log_port(&mut self, port: u16, value: u32, len: u8, write: bool) {
+        if let Some(log) = &mut self.port_log {
+            log.push(port_log::PortAccess { icount: self.clock.icount, port, value, len, write });
+        }
     }
 
     fn write_port(&mut self, port: u16, value: u8) {
@@ -1942,6 +1955,7 @@ impl Bus {
     pub fn io_read(&mut self, port: u16) -> u8 {
         self.clock.stall(crate::timer::IO_READ_NS);
         let value = self.read_port(port);
+        self.log_port(port, value as u32, 1, false);
         // Reads acknowledge interrupts of some devices (the Sound Blaster's
         // at 22Eh, the Ultrasound's status).
         self.refresh_irq();

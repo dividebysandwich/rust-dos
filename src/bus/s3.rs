@@ -139,11 +139,13 @@ impl Bus {
     /// anything else a byte at a time, low byte first.
     pub fn io_write_wide(&mut self, port: u16, value: u32, len: u8) {
         if self.s3() && is_engine_port(port) {
+            self.log_port(port, value, len, true);
             self.engine_write(port, value, len);
             return;
         }
         // The PCI configuration address, a doubleword.
         if port == 0xCF8 && len == 4 && self.pci_present() {
+            self.log_port(port, value, len, true);
             self.pci.address = value;
             return;
         }
@@ -154,9 +156,12 @@ impl Bus {
 
     pub fn io_read_wide(&mut self, port: u16, len: u8) -> u32 {
         if self.s3() && is_engine_port(port) {
-            return self.engine_read(port, len);
+            let value = self.engine_read(port, len);
+            self.log_port(port, value, len, false);
+            return value;
         }
         if port == 0xCF8 && len == 4 && self.pci_present() {
+            self.log_port(port, self.pci.address, len, false);
             return self.pci.address;
         }
         let mut value = 0;

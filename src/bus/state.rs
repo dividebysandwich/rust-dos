@@ -96,6 +96,7 @@ impl Bus {
             // A service's port accesses for a V86 monitor, made within the
             // instructions after it.
             port_accesses: _,
+            port_log: _,
             guest_paging: _,
             guest_fault: _,
             // How many ignored ROM writes were logged.
@@ -229,6 +230,7 @@ impl Bus {
             page_gen: _,
             reset_requested: _,
             port_accesses: _,
+            port_log: _,
             guest_paging: _,
             guest_fault: _,
             rom_writes: _,
