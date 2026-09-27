@@ -569,8 +569,16 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
         }
         drawn.copy_from_slice(&line);
         let dst = &mut canvas[first * row_bytes..(first + 1) * row_bytes];
-        for (pixel, &x) in dst.chunks_exact_mut(3).zip(&columns) {
-            pixel.copy_from_slice(&colors[line[x] as usize]);
+        if canvas_w == 2 * width {
+            // Each pixel twice: its color looked up once.
+            for (pair, &index) in dst.as_chunks_mut::<6>().0.iter_mut().zip(&line) {
+                let [r, g, b] = colors[index as usize];
+                *pair = [r, g, b, r, g, b];
+            }
+        } else {
+            for (pixel, &x) in dst.chunks_exact_mut(3).zip(&columns) {
+                pixel.copy_from_slice(&colors[line[x] as usize]);
+            }
         }
         for ty in first + 1..end {
             canvas.copy_within(first * row_bytes..(first + 1) * row_bytes, ty * row_bytes);

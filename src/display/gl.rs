@@ -249,14 +249,11 @@ impl GlScreen {
         // byte pixels one by one, which takes longer than the rest of a
         // frame.
         let row_bytes = frame.width as usize * 3;
-        self.rgba.clear();
-        self.rgba.extend(
-            frame.rgb[rows.start * row_bytes..rows.end * row_bytes]
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .flat_map(|&[r, g, b]| [r, g, b, 0xFF]),
-        );
+        let rgb = frame.rgb[rows.start * row_bytes..rows.end * row_bytes].as_chunks::<3>().0;
+        self.rgba.resize(rgb.len() * 4, 0);
+        for (rgba, &[r, g, b]) in self.rgba.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
+            *rgba = [r, g, b, 0xFF];
+        }
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
