@@ -113,10 +113,11 @@ pub struct Config {
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_scale: Option<u32>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
-    /// recordings show the settings window and the performance overlay
-    /// (`record_ui`).
+    /// they show the settings window and the performance overlay
+    /// (`record_ui`) and the CRT shader (`record_shader`).
     pub capture_dir: Option<PathBuf>,
     pub record_ui: Option<bool>,
+    pub record_shader: Option<bool>,
     /// Emulated CPU speed (`cycles`).
     pub cycles: Option<CpuSpeed>,
     /// Emulated processor (`cpu`).
@@ -628,6 +629,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.record_ui = Some(on),
                             None => warn(format!("invalid record_ui '{}' (true or false)", value)),
                         },
+                        "record_shader" => match parse_bool(value) {
+                            Some(on) => config.record_shader = Some(on),
+                            None => warn(format!("invalid record_shader '{}' (true or false)", value)),
+                        },
                         "rewind_memory" => match value.parse::<usize>() {
                             Ok(mb) if (16..=4096).contains(&mb) => config.rewind_memory = Some(mb),
                             _ => warn(format!("invalid rewind_memory '{}' (16 to 4096 MB)", value)),
@@ -855,9 +860,12 @@ pub struct Settings {
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
-    /// Whether video and animation recordings show the settings window
-    /// and the performance overlay, or the picture alone.
+    /// Whether screenshots and video and animation recordings show the
+    /// settings window and the performance overlay, or the picture alone.
     pub record_ui: bool,
+    /// Whether screenshots and video recordings show the picture through
+    /// the CRT shader, as the window does, or plain.
+    pub record_shader: bool,
     pub cycles: CpuSpeed,
     pub cpu: CpuModel,
     pub core: CoreMode,
@@ -892,6 +900,7 @@ impl Default for Settings {
             voodoo: Default::default(),
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
+            record_shader: false,
             cycles: CpuSpeed::Max,
             cpu: CpuModel::I486,
             core: CoreMode::Auto,
@@ -947,6 +956,7 @@ impl Settings {
             },
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
+            record_shader: config.record_shader.unwrap_or(default.record_shader),
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             core: config.core.unwrap_or(default.core),
@@ -991,6 +1001,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
+        (Emulator, "record_shader", yes_no(settings.record_shader)),
         (
             Emulator,
             "cycles",
@@ -1889,6 +1900,7 @@ mod tests {
             },
             capture_dir: PathBuf::from("/home/u/dos captures"),
             record_ui: true,
+            record_shader: true,
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
             core: CoreMode::Dynamic,
@@ -1965,6 +1977,7 @@ mod tests {
         assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
         assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);
         assert!(text.contains("#record_ui=false\nrecord_ui=true\n"), "{}", text);
+        assert!(text.contains("#record_shader=false\nrecord_shader=true\n"), "{}", text);
         assert!(text.contains("#master=100\nmaster=5\n"), "{}", text);
         assert!(text.contains("#disknoise=100\ndisknoise=75\n"), "{}", text);
         assert!(text.contains("#joysticktype=auto\njoysticktype=2axis\n"), "{}", text);

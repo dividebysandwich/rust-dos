@@ -57,6 +57,21 @@ pub struct GlScreen {
     /// The 3dfx card drawn with OpenGL, and why it can't be if it can't.
     voodoo: Option<VoodooGl>,
     voodoo_failed: Option<String>,
+    /// What screenshots and recordings of the look are drawn with, made
+    /// the first time one is (`capture`).
+    capture: Option<Capture>,
+}
+
+/// A picture to draw through the look away from the window, and the
+/// framebuffer it is drawn into and read back from.
+struct Capture {
+    source: glow::Texture,
+    target: glow::Texture,
+    framebuffer: glow::Framebuffer,
+    /// The target's size; nothing before the first capture.
+    size: (u32, u32),
+    /// The pixels read back, four bytes a pixel, bottom row first.
+    rgba: Vec<u8>,
 }
 
 impl GlScreen {
@@ -152,6 +167,7 @@ impl GlScreen {
             renderer,
             voodoo: None,
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
+            capture: None,
         })
     }
 
@@ -339,28 +355,129 @@ impl GlScreen {
             gl.viewport(0, 0, dw as i32, dh as i32);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
-            // `select` compiled the active look.
-            if let Some(Ok(program)) = self.programs.get(&self.active)
-                && dw > 0
-                && dh > 0
-            {
-                let (x, y, w, h) = super::letterbox((dw, dh), display);
-                // OpenGL counts rows from the bottom.
-                gl.viewport(x as i32, (dh - y - h) as i32, w as i32, h as i32);
-                gl.use_program(Some(program.program));
-                gl.uniform_2_f32(program.source.as_ref(), size.0 as f32, size.1 as f32);
-                gl.uniform_2_f32(program.output.as_ref(), w as f32, h as f32);
-                gl.uniform_1_f32(program.mask.as_ref(), self.mask);
-                let [cx, cy] = self.active.curvature(self.crt);
-                gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
-                gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                gl.bind_vertex_array(Some(self.vao));
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
-            }
+        }
+        if dw > 0 && dh > 0 {
+            let (x, y, w, h) = super::letterbox((dw, dh), display);
+            // OpenGL counts rows from the bottom.
+            self.draw_look(texture, size, (x as i32, (dh - y - h) as i32, w, h));
         }
         self.window.gl_swap_window();
+    }
+
+    /// Draw `texture`, a picture of `size` pixels, with the look into the
+    /// `x, y, width, height` of the framebuffer bound (y from the bottom).
+    fn draw_look(&self, texture: glow::Texture, size: (u32, u32), (x, y, w, h): (i32, i32, u32, u32)) {
+        let gl = &self.gl;
+        // `select` compiled the active look.
+        let Some(Ok(program)) = self.programs.get(&self.active) else { return };
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            gl.viewport(x, y, w as i32, h as i32);
+            gl.use_program(Some(program.program));
+            gl.uniform_2_f32(program.source.as_ref(), size.0 as f32, size.1 as f32);
+            gl.uniform_2_f32(program.output.as_ref(), w as f32, h as f32);
+            gl.uniform_1_f32(program.mask.as_ref(), self.mask);
+            let [cx, cy] = self.active.curvature(self.crt);
+            gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
+            gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.bind_vertex_array(Some(self.vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        }
+    }
+
+    /// The size the window shows a picture of `display` proportions at,
+    /// without the black bars around it, if it shows it through a look.
+    pub fn capture_size(&self, display: (u32, u32)) -> Option<(u32, u32)> {
+        let (_, _, w, h) = super::letterbox(self.window.drawable_size(), display);
+        (self.active != Shader::None && w > 0 && h > 0).then_some((w, h))
+    }
+
+    /// `frame` drawn with the look as the window shows a picture of
+    /// `display` proportions, at the size it shows it (`capture_size`),
+    /// for a screenshot or a recording. None without a look, or if OpenGL
+    /// can't draw it away from the window. It costs drawing the picture
+    /// again and reading it back, so only captures ask for it.
+    pub fn capture(&mut self, frame: &Frame, display: (u32, u32)) -> Option<Frame> {
+        let (w, h) = self.capture_size(display)?;
+        if self.capture.is_none() {
+            match self.make_capture() {
+                Ok(capture) => self.capture = Some(capture),
+                Err(e) => eprintln!("[DISPLAY] Captures can't show the shader: {}", e),
+            }
+        }
+        let mut capture = self.capture.take()?;
+        let gl = &self.gl;
+        let pixels = &frame.rgb[..frame.height as usize * frame.width as usize * 3];
+        self.rgba.resize(pixels.len() / 3 * 4, 0);
+        for (rgba, &[r, g, b]) in self.rgba.as_chunks_mut::<4>().0.iter_mut().zip(pixels.as_chunks::<3>().0) {
+            *rgba = [r, g, b, 0xFF];
+        }
+        capture.rgba.resize(w as usize * h as usize * 4, 0);
+        // SAFETY: see `GlScreen`.
+        let complete = unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(capture.source));
+            let pixels = glow::PixelUnpackData::Slice(Some(&self.rgba));
+            let (fw, fh) = (frame.width as i32, frame.height as i32);
+            let rgba8 = glow::RGBA8 as i32;
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, rgba8, fw, fh, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            self.set_filter();
+            if shader::needs_mipmaps(self.active) {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(capture.framebuffer));
+            if capture.size != (w, h) {
+                gl.bind_texture(glow::TEXTURE_2D, Some(capture.target));
+                let none = glow::PixelUnpackData::Slice(None);
+                let (tw, th) = (w as i32, h as i32);
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, rgba8, tw, th, 0, glow::RGBA, glow::UNSIGNED_BYTE, none);
+                let target = Some(capture.target);
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, target, 0);
+                capture.size = (w, h);
+            }
+            let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            if complete {
+                self.draw_look(capture.source, (frame.width, frame.height), (0, 0, w, h));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                let pixels = glow::PixelPackData::Slice(Some(&mut capture.rgba));
+                gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            complete
+        };
+        // Rows from the top, three bytes a pixel.
+        let shaded = complete.then(|| {
+            let mut frame = Frame::new(w, h);
+            let rows = frame.rgb.chunks_exact_mut(w as usize * 3).zip(capture.rgba.chunks_exact(w as usize * 4).rev());
+            for (to, from) in rows {
+                for (pixel, rgba) in to.as_chunks_mut::<3>().0.iter_mut().zip(from.as_chunks::<4>().0) {
+                    *pixel = [rgba[0], rgba[1], rgba[2]];
+                }
+            }
+            frame
+        });
+        self.capture = Some(capture);
+        shaded
+    }
+
+    /// The textures and framebuffer of captures of the look.
+    fn make_capture(&self) -> Result<Capture, String> {
+        let gl = &self.gl;
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            let source = gl.create_texture()?;
+            let target = gl.create_texture()?;
+            for texture in [source, target] {
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            }
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            let framebuffer = gl.create_framebuffer()?;
+            Ok(Capture { source, target, framebuffer, size: (0, 0), rgba: Vec::new() })
+        }
     }
 }
 

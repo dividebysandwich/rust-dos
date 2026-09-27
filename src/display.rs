@@ -368,6 +368,27 @@ impl<'a> Display<'a> {
         shown
     }
 
+    /// The size screenshots and recordings of a `width` x `height` picture
+    /// through the CRT shader are: the size the window shows it at. None
+    /// where the window shows it without a shader.
+    pub fn shaded_size(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+        match &self.out {
+            Output::Gl(gl) => gl.capture_size(display_size(width, height, self.aspect)),
+            Output::Sdl { .. } => None,
+        }
+    }
+
+    /// `frame` through the CRT shader, as the window shows it, for a
+    /// screenshot or a recording; None where the window shows it without
+    /// one. Drawing it again and reading it back takes time, so only
+    /// captures that show the shader ask for it.
+    pub fn shaded(&mut self, frame: &Frame) -> Option<Frame> {
+        match &mut self.out {
+            Output::Gl(gl) => gl.capture(frame, display_size(frame.width, frame.height, self.aspect)),
+            Output::Sdl { .. } => None,
+        }
+    }
+
     /// The frame pixel under a mouse position: in logical pixels from
     /// SDL's renderer, in window coordinates with OpenGL. Outside the
     /// picture (the black bars of fullscreen, the bezel of a curved

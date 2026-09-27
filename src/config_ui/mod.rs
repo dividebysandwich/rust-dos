@@ -238,7 +238,7 @@ impl Page {
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb,
                 HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, Autoexec,
+                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
             ],
             Page::Sound => &[
                 SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
@@ -363,10 +363,11 @@ enum Item {
     FloppyDiskNoise,
     /// A volume in the host's mixer.
     Volume(Channel),
-    /// Where screenshots and recordings go, and whether recordings show
-    /// the settings window and the performance overlay.
+    /// Where screenshots and recordings go, and whether they show the
+    /// settings window and the performance overlay, and the CRT shader.
     CaptureDir,
     RecordUi,
+    RecordShader,
     /// What the game port has plugged in, and the controllers' deadzone.
     Joystick,
     Deadzone,
@@ -504,7 +505,8 @@ impl Item {
             FloppyDiskNoise => "Floppy disk noise",
             Volume(channel) => channel.label(),
             CaptureDir => "Capture folder",
-            RecordUi => "Record window & overlay",
+            RecordUi => "Capture window & overlay",
+            RecordShader => "Capture CRT shader",
             Joystick => "Joystick",
             Deadzone => "  Deadzone",
             SpeakerFilter => "PC speaker filter",
@@ -526,7 +528,7 @@ impl Item {
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             Item::MidiPort => host_midi(frontend),
             // The page records the canvas as it shows.
-            Item::CaptureDir | Item::RecordUi => frontend.host_files,
+            Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
             Item::VoodooRenderer | Item::VoodooScale => frontend.window,
@@ -558,9 +560,8 @@ impl Item {
             }
             Cycles | Core | KeyboardLayout | Rewind | RewindMemory | VoodooRenderer | VoodooScale => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
-            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi => {
-                Applies::Now
-            }
+            HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
+            | RecordShader => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             Memsize | Autoexec => Applies::NextStart,
             _ => Applies::AtPrompt,
@@ -671,6 +672,7 @@ impl Item {
             Volume(channel) => percent_bar(s.mixer.level(channel), MAX_LEVEL),
             CaptureDir => contract_home(&s.capture_dir, home),
             RecordUi => if s.record_ui { "on (window and overlay)" } else { "off (the picture alone)" }.to_string(),
+            RecordShader => if s.record_shader { "on (as the window shows it)" } else { "off (the plain picture)" }.to_string(),
             Joystick => s.joystick.kind.describe().to_string(),
             Deadzone => format!("{}%", s.joystick.deadzone),
             SpeakerFilter => on_off(s.mixer.speaker_filter),
@@ -738,6 +740,7 @@ impl Item {
             KeyboardLayout => s.keyboard_layout = cycle(&crate::keylayout::LayoutSetting::all(), s.keyboard_layout, dir),
             Rewind => s.rewind = !s.rewind,
             RecordUi => s.record_ui = !s.record_ui,
+            RecordShader => s.record_shader = !s.record_shader,
             RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory as u32, dir) as usize,
             SbType => {
                 let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];

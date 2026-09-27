@@ -99,10 +99,15 @@
 # animation (PrintScreen) recordings go: a folder, relative to the
 # directory rust-dos started in.
 #capture_dir=capture
-# Whether video and animation recordings show the settings window and the
-# performance overlay (Ctrl+Shift+F12) while they are open: false (the
-# default, the picture alone) or true. Screenshots always show them.
+# Whether screenshots and video and animation recordings show the settings
+# window and the performance overlay (Ctrl+Shift+F12) while they are open:
+# false (the default, the picture alone) or true.
 #record_ui=false
+# Whether screenshots and video recordings show the picture through the CRT
+# shader, at the size the window shows it: false (the default, the plain
+# picture) or true. Animations stay plain. It costs a little time a frame
+# while a video records.
+#record_shader=false
 # RAM in MB, 2 to 64. Memory above the first megabyte is extended memory
 # for DOS extenders and XMS.
 #memsize=16

@@ -591,7 +591,12 @@ fn main() -> Result<(), String> {
                                     Err(e) => osd.show(format!("The video recording failed: {}", e)),
                                 },
                                 None => {
-                                    let (w, h) = (cached_frame.width as usize, cached_frame.height as usize);
+                                    // Through the shader, at the size the
+                                    // window shows the picture.
+                                    let (w, h) = (cached_frame.width, cached_frame.height);
+                                    let shaded = settings.record_shader.then(|| display.shaded_size(w, h)).flatten();
+                                    let (w, h) = shaded.unwrap_or((w, h));
+                                    let (w, h) = (w as usize, h as usize);
                                     let now = cpu.bus.clock.now_ns();
                                     match capture::capture_path(&settings.capture_dir, "video", "avi")
                                         .and_then(|path| VideoRecorder::start(&path, w, h, now).map(|v| (path, v)))
@@ -999,16 +1004,24 @@ fn main() -> Result<(), String> {
         video::mono::apply(&mut screen, settings.monochrome);
         let frame_w = width as usize;
 
-        // Recordings show the machine alone, or with the settings window
-        // and the performance overlay (`record_ui`); screenshots show it
-        // with them, as the screen does. Neither shows the messages at the
-        // top; debug clients see those as well, but not the recording
-        // indicator.
-        macro_rules! record {
+        // Screenshots and recordings show the machine alone, or with the
+        // settings window and the performance overlay (`record_ui`), and
+        // plain or through the CRT shader (`record_shader`). None shows the
+        // messages at the top; debug clients see those as well, but not
+        // the recording indicator. Animations stay plain: a GIF's 256
+        // colours can't hold the shader's, and quantizing a picture the
+        // window's size would hold up the machine.
+        macro_rules! capture {
             () => {
+                // Drawing the shader's picture again and reading it back
+                // takes time, so only when a capture wants it.
+                let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
+                    .then(|| display.shaded(&screen))
+                    .flatten();
+                let picture = shaded.as_ref().unwrap_or(&screen);
                 recorder.capture(&screen);
                 if let Some(video) = &mut video_recording {
-                    if !video.record(&screen, samples.clone(), cpu.bus.clock.now_ns()) {
+                    if !video.record(picture, samples.clone(), cpu.bus.clock.now_ns()) {
                         if let Some(video) = video_recording.take() {
                             match video.stop() {
                                 Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
@@ -1017,10 +1030,19 @@ fn main() -> Result<(), String> {
                         }
                     }
                 }
+                if std::mem::take(&mut screenshot) {
+                    let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
+                        .and_then(|path| capture::png::save(picture, &path).map(|()| path));
+                    match saved {
+                        Ok(path) => osd.show(format!("Screenshot saved to {}", path.display())),
+                        Err(e) => osd.show(e),
+                    }
+                }
             };
         }
-        if !settings.record_ui {
-            record!();
+        let capturing = screenshot || recorder.is_active() || video_recording.is_some();
+        if capturing && !settings.record_ui {
+            capture!();
         }
         if ui.is_open() {
             ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
@@ -1030,16 +1052,8 @@ fn main() -> Result<(), String> {
         }
         ui.draw(&mut screen);
         ui.draw_overlay(&mut screen);
-        if settings.record_ui {
-            record!();
-        }
-        if std::mem::take(&mut screenshot) {
-            let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
-                .and_then(|path| capture::png::save(&screen, &path).map(|()| path));
-            match saved {
-                Ok(path) => osd.show(format!("Screenshot saved to {}", path.display())),
-                Err(e) => osd.show(e),
-            }
+        if capturing && settings.record_ui {
+            capture!();
         }
         osd.draw(&mut screen);
         dbg.capture_frame(&screen);

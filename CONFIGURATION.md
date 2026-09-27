@@ -145,12 +145,17 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `capture_dir` is the folder screenshots and recordings go in:
   `capture` (the default) in the directory rust-dos started in, or a
   path of your own. Screenshots (Ctrl+F5, in the settings window too)
-  show the screen as it is, with the monochrome look, the settings window
-  and the performance overlay (Ctrl+Shift+F12) while they show, but
-  without a CRT shader or the messages at the top. Recordings show the
-  picture alone, or with `record_ui=true` the settings window and the
-  performance overlay as well while they are open. `false` is the
-  default.
+  and recordings show the picture with the monochrome look but without
+  the messages at the top. With `record_ui=true` they show the settings
+  window and the performance overlay (Ctrl+Shift+F12) as well while they
+  are open; `false`, the default, shows the picture alone.
+  `record_shader=true` has screenshots and video recordings show the
+  picture through the CRT shader, as the window does and at the size it
+  shows it (without the black bars around it); `false`, the default,
+  shows it plain. Drawing the picture again for them and reading it back
+  takes the host some time a frame while a video records, and none
+  otherwise. Animations (GIF) stay plain, as their 256 colours can't
+  hold the shader's.
   Video recordings are AVI files in DOSBox's lossless ZMBV codec, which
   ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
   with its sound, so they keep in step through pauses and fast forward;
@@ -728,7 +733,8 @@ bits a colour without the card's dithering. What games write into the
 frame buffer themselves (menus, movies) stays at the card's resolution.
 The software rasterizer goes on drawing the card's memory, which games
 read back and save states keep, so it costs no less of the host's CPU;
-screenshots and recordings show its picture, at the card's resolution.
+screenshots and recordings show its picture, at the card's resolution (or
+through the CRT shader at the window's size, with `record_shader=true`).
 The CRT shaders draw their scanlines over the bigger picture.
 
 ## CRT shaders
@@ -759,7 +765,9 @@ correction the scanlines are sharpest.
 The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
 `SDL_VIDEODRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
 before and says why at startup; the log names what draws the picture.
-Recordings and debug-server screenshots always show the plain picture.
+Screenshots and video recordings show the shader with `record_shader=true`
+(see `capture_dir` in [`[emulator]`](#emulator)); animations and
+debug-server screenshots always show the plain picture.
 
 ## Command-line options
 

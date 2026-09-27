@@ -822,7 +822,7 @@ fn a_browser_gets_what_it_has() {
     assert_eq!(synths, [MidiSynth::Auto, MidiSynth::None, MidiSynth::Gus]);
     // The page records the canvas, into files of its own.
     ui.show_page(Page::Emulator);
-    assert!(!ui.items().contains(&Item::CaptureDir) && !ui.items().contains(&Item::RecordUi));
+    assert!(![Item::CaptureDir, Item::RecordUi, Item::RecordShader].iter().any(|i| ui.items().contains(i)));
 
     // Drives come from images the frontend picks, not a dialog of host paths.
     ui.show_page(Page::Drives);
@@ -844,7 +844,7 @@ fn a_browser_gets_what_it_has() {
 }
 
 #[test]
-fn recordings_show_the_window_and_overlay_when_asked() {
+fn captures_show_the_window_overlay_and_shader_when_asked() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
     ui.show_page(Page::Emulator);
@@ -854,6 +854,13 @@ fn recordings_show_the_window_and_overlay_when_asked() {
     assert!(host.applied.last().unwrap().record_ui);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on (window and overlay)"));
     assert_eq!(Item::RecordUi.applies(), Applies::Now);
+
+    ui.row = ui.items().iter().position(|&i| i == Item::RecordShader).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("off (the plain picture)"));
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    assert!(host.applied.last().unwrap().record_shader);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on (as the window shows it)"));
+    assert_eq!(Item::RecordShader.applies(), Applies::Now);
 }
 
 #[test]
