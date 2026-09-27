@@ -397,7 +397,7 @@ impl Relay {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{RelayServer, RelayStatus};
+pub use server::{RelayServer, RelayStatus, serve};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod server {
@@ -461,6 +461,23 @@ mod server {
                 let _ = thread.join();
             }
         }
+    }
+
+    /// Relay on `bind` until the process ends, printing what happens: the
+    /// relay program, and `rust-dos --relay`.
+    pub fn serve(bind: SocketAddr, config: RelayConfig) -> Result<(), String> {
+        let stamp = || chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let password = config.password.as_deref().is_some_and(|p| !p.is_empty());
+        let server = RelayServer::start(bind, config, Box::new(move |line| println!("{} {}", stamp(), line)))
+            .map_err(|e| format!("Can't relay on {}: {}", bind, e))?;
+        println!(
+            "{} Relaying LAN rooms on UDP {}{}; stop with Ctrl+C",
+            stamp(),
+            server.local_addr(),
+            if password { ", with a password" } else { "" }
+        );
+        server.wait();
+        Ok(())
     }
 
     impl Drop for RelayServer {

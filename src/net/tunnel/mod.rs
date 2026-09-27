@@ -9,6 +9,8 @@
 
 pub mod auth;
 pub mod client;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod discover;
 pub mod frag;
 pub mod relay;
 pub mod wire;

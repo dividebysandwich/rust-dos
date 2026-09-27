@@ -86,6 +86,15 @@ struct Args {
     /// and launch it
     #[arg(long, value_name = "PATH")]
     import: Option<std::path::PathBuf>,
+
+    /// Relay LAN rooms for other rust-dos instances on this UDP port,
+    /// without starting the emulator
+    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "21213")]
+    relay: Option<u16>,
+
+    /// The password members need to join the rooms of --relay
+    #[arg(long, value_name = "PASSWORD", requires = "relay")]
+    relay_password: Option<String>,
 }
 
 /// The SDL sound device, where the mixed output goes.
@@ -122,6 +131,15 @@ struct Saved {
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
+    if let Some(port) = args.relay {
+        let bind = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let name = "rust-dos relay".to_string();
+        return rust_dos::net::tunnel::relay::serve(bind, rust_dos::net::tunnel::relay::RelayConfig {
+            name,
+            password: args.relay_password,
+            port,
+        });
+    }
     let config = load_config(&args)?;
     let mut settings = Settings::from_config(&config);
     if let Some(scale) = args.scale {
