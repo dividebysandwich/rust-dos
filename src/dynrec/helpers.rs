@@ -73,7 +73,9 @@ pub struct JitCtx {
     pub code_blocks: *const u8,
     /// Set where a store hit the running block's later bytes (x86-64).
     pub smc: u8,
-    /// The `ENV_FLAT` bits the running blocks were translated for.
+    /// The `ENV_FLAT` bits now: the running blocks were translated for
+    /// them, and a segment load in a block changes them (see
+    /// `block::loaded_segment`).
     pub flat: u32,
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
@@ -112,6 +114,8 @@ pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
 pub const CTX_CODE_BLOCKS: i32 = offset_of!(JitCtx, code_blocks) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_SMC: i32 = offset_of!(JitCtx, smc) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_FLAT: i32 = offset_of!(JitCtx, flat) as i32;
 pub const CTX_EXIT_DATA: i32 = offset_of!(JitCtx, exit_data) as i32;
 pub const CTX_MEMREF: i32 = offset_of!(JitCtx, memref) as i32;
 pub const CTX_READ: i32 = offset_of!(JitCtx, read) as i32;
@@ -214,10 +218,11 @@ jit_fn! {
                 if port && loop_would_act(cpu, time, (data.count() - ix) as u64) {
                     return EXIT_AFTER;
                 }
-                if seg_load && super::flat_bits(cpu) != ctx.flat {
-                    // The rest of the block, and the blocks linked to it,
-                    // were translated for the segments as they were.
-                    return EXIT_AFTER;
+                if seg_load {
+                    // The rest of the block checks the segment's accesses as
+                    // it does a segment's that isn't flat, and follows its
+                    // links only where the segments are flat as they were.
+                    ctx.flat = super::flat_bits(cpu);
                 }
                 if sti {
                     // Interrupts are recognized after the next instruction:

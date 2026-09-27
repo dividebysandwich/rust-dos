@@ -299,9 +299,15 @@ along with the code and stack sizes:
 The execution loop finds the block for the environment it runs in, and
 none of it changes within a block or a chain of linked blocks: paging
 and CPL change only in instructions that end the block without a link,
-the A20 gate stops the block after the port access that changed it
-(`EXIT_AFTER`), and so does a segment load (MOV, POP, LDS, LES, LFS or
-LGS) after which the segments are flat differently (`jit_fallback`).
+and the A20 gate stops the block after the port access that changed it
+(`EXIT_AFTER`). A segment load (MOV, POP, LDS, LES, LFS or LGS) doesn't
+stop the block: `jit_fallback` notes which segments are flat after it
+(`JitCtx::flat`), the rest of the block checks the segment's accesses as
+it does a segment's that isn't flat, and its links are taken only where
+the segments are flat as the block's environment has them; elsewhere it
+returns to the execution loop. Code that loads a data segment and puts
+it back within a block or chain (as 16-bit drivers do) goes on in
+translated code.
 The x86-64 code generator leaves out what the environment makes
 unnecessary: the limit checks and base of flat segments, the TLB lookup
 with paging off, the A20 mask with the gate open, and then the check

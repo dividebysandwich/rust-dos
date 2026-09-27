@@ -252,6 +252,11 @@ struct Gen<'a> {
     /// that go back into the CPU where it stops the block.
     cache: Cache,
     wb_at: Vec<u8>,
+    /// The segment registers loaded in the block so far (bits by `Seg`):
+    /// their accesses are checked as if they weren't flat, and the block's
+    /// links are only taken where the segments are flat as the block's
+    /// environment has them.
+    loaded_segs: u8,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -308,6 +313,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         dirty_at: vec![false; n],
         cache: Cache { host: choose_cached(items), ..Cache::default() },
         wb_at: vec![0; n],
+        loaded_segs: 0,
     };
     g.prologue();
     let mut synced = 0;
@@ -330,6 +336,9 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.check_next_page();
                 g.fallback(ix as i32);
                 g.cache.loaded = 0;
+                if let Some(seg) = super::block::loaded_segment(&data.instrs[ix]) {
+                    g.loaded_segs |= 1 << seg as u8;
+                }
             }
             Some(uops) => {
                 g.synced[ix] = synced;
@@ -928,6 +937,7 @@ impl Gen<'_> {
                     // A return or indirect call: through its link to
                     // where it goes, if it has one.
                     self.counts();
+                    self.check_flat();
                     self.returned(t);
                 } else {
                     let tail = self.tail;
@@ -1059,7 +1069,7 @@ impl Gen<'_> {
         let t_ = r(t);
         let bits = self.env.bits;
         let (paging, a20) = (bits & super::ENV_PAGING != 0, bits & super::ENV_A20 != 0);
-        let flat = bits & super::ENV_FLAT << seg as u32 != 0;
+        let flat = bits & super::ENV_FLAT << seg as u32 != 0 && self.loaded_segs >> seg as u8 & 1 == 0;
         let last = size as i32 - 1;
         // The linear address: a flat segment's is the offset, whose wrapping
         // around past a dword the check for the end of RAM below catches (it
@@ -1782,6 +1792,9 @@ impl Gen<'_> {
         self.writeback(self.cache.dirty);
         self.flags_back();
         self.counts();
+        if self.link {
+            self.check_flat();
+        }
         match eip {
             Some(eip) if self.link && self.data.in_page(eip) => {
                 self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
@@ -1790,6 +1803,24 @@ impl Gen<'_> {
             Some(_) if self.link => self.guarded(slot),
             _ => dynasm!(self.ops ; .arch x64 ; mov eax, EXIT_NEXT as i32 ; jmp QWORD [r12 + CTX_EXIT]),
         }
+    }
+
+    /// After a segment load in the block, go back to the execution loop
+    /// instead of taking a link where the segments aren't flat as the
+    /// block's environment has them: the blocks it leads to were translated
+    /// for it. RDX is the block.
+    fn check_flat(&mut self) {
+        if self.loaded_segs == 0 {
+            return;
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; cmp DWORD [r12 + CTX_FLAT], (self.env.bits & super::ENV_FLAT_ALL) as i32
+            ; je >same
+            ; mov eax, EXIT_NEXT as i32
+            ; jmp QWORD [r12 + CTX_EXIT]
+            ; same:
+        );
     }
 
     /// Bring the counts up to date for leaving the block after its last

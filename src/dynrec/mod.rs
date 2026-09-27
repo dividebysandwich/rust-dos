@@ -81,9 +81,10 @@ pub struct DynStats {
 /// of RAM, and `bits`, the block's mode with the `ENV_*` bits. None of
 /// these change within a block or a chain of linked blocks: paging (CR0)
 /// and CPL change only in instructions that end a block without a link,
-/// the A20 gate stops the block after the port access that changed it, and
-/// a segment register loaded in a block that is no longer flat (or became
-/// flat) stops it after the load (`helpers::jit_fallback`).
+/// and the A20 gate stops the block after the port access that changed it.
+/// A block goes on after a segment load, checking the segment's accesses as
+/// if it weren't flat, and takes its links only where the segments are
+/// flat as they were (`helpers::jit_fallback` notes them in `JitCtx::flat`).
 #[cfg(dynrec)]
 #[derive(Clone, Copy, Debug)]
 pub struct Env {

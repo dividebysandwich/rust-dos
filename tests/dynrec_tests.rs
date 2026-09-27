@@ -1293,3 +1293,55 @@ fn a_block_into_its_pages_tail_looks_the_next_page_up_as_the_interpreter_does() 
     assert_eq!(loop_in_a_page_tail(true), 0x31023, "the fetch set the next page's accessed bit");
     assert_eq!(loop_in_a_page_tail(false), 0);
 }
+
+#[test]
+fn a_segment_load_that_changes_which_segments_are_flat_goes_on_in_its_block() {
+    let (mut a, mut b) = twins(|rig| {
+        // DS for 64 KB at 40000h: not flat.
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFFFF, DATA_R0, 0x4));
+        let code = asm32(CODE, |a| {
+            // DS loaded and put back within the block: its accesses between
+            // go through its base, and the loop's link is taken.
+            a.mov(ecx, 100u32)?;
+            a.xor(ebx, ebx)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.push(ds)?;
+            a.mov(ax, FREE as u32)?;
+            a.mov(ds, ax)?;
+            a.mov(dword_ptr(0x10), ecx)?;
+            a.add(ebx, dword_ptr(0x10))?;
+            a.pop(ds)?;
+            a.mov(dword_ptr(0x50000), ebx)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            // DS flat or not, as the iteration before left it: the loop's
+            // block runs in both, and leaves through its link only where
+            // they are as it was entered with.
+            a.mov(ecx, 50u32)?;
+            let (mut top2, mut even, mut set) = (a.create_label(), a.create_label(), a.create_label());
+            a.set_label(&mut top2)?;
+            a.add(dword_ptr(0x3F00), ecx)?;
+            a.test(ecx, 1)?;
+            a.jz(even)?;
+            a.mov(ax, FREE as u32)?;
+            a.jmp(set)?;
+            a.set_label(&mut even)?;
+            a.mov(ax, DATA32 as u32)?;
+            a.set_label(&mut set)?;
+            a.mov(ds, ax)?;
+            a.dec(ecx)?;
+            a.jnz(top2)?;
+            a.mov(ax, DATA32 as u32)?;
+            a.mov(ds, ax)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.read32(0x50000), (1..=100).sum::<u32>());
+    assert_eq!(b.read32(0x40010), 1);
+    // An iteration after an odd one runs with DS at 40000h.
+    assert_eq!(b.read32(0x43F00), (1..50).filter(|n| n % 2 == 0).sum::<u32>());
+    assert_eq!(b.read32(0x3F00), 50 + (1..50).filter(|n| n % 2 == 1).sum::<u32>());
+}
