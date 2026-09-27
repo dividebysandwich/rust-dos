@@ -73,7 +73,7 @@ pub struct JitCtx {
     pub code_blocks: *const u8,
     /// Set where a store hit the running block's later bytes (x86-64).
     pub smc: u8,
-    /// The `ENV_FLAT` bits now: the running blocks were translated for
+    /// The `ENV_FLAT` and `ENV_PLAIN` bits now: the running blocks were translated for
     /// them, and a segment load in a block changes them (see
     /// `block::loaded_segment`).
     pub flat: u32,
@@ -237,7 +237,7 @@ jit_fn! {
                     // The rest of the block checks the segment's accesses as
                     // it does a segment's that isn't flat, and follows its
                     // links only where the segments are flat as they were.
-                    ctx.flat = ctx.flat & !(super::ENV_FLAT << seg as u32) | super::flat_bit(cpu, seg);
+                    ctx.flat = ctx.flat & !((super::ENV_FLAT | super::ENV_PLAIN) << seg as u32) | super::flat_bit(cpu, seg);
                 }
                 if sti {
                     // Interrupts are recognized after the next instruction:
@@ -278,7 +278,7 @@ jit_fn! {
         let seg = Seg::ALL[seg as usize];
         match catch_unwind(AssertUnwindSafe(|| cpu.load_segment(seg, selector as u16))) {
             Ok(Ok(())) => {
-                ctx.flat = ctx.flat & !(super::ENV_FLAT << seg as u32) | super::flat_bit(cpu, seg);
+                ctx.flat = ctx.flat & !((super::ENV_FLAT | super::ENV_PLAIN) << seg as u32) | super::flat_bit(cpu, seg);
                 0
             }
             Ok(Err(fault)) => {

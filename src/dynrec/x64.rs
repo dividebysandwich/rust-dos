@@ -1215,13 +1215,16 @@ impl Gen<'_> {
         let t_ = r(t);
         let bits = self.env.bits;
         let (paging, a20) = (bits & super::ENV_PAGING != 0, bits & super::ENV_A20 != 0);
-        let flat = bits & super::ENV_FLAT << seg as u32 != 0 && self.loaded_segs >> seg as u8 & 1 == 0;
+        let unloaded = self.loaded_segs >> seg as u8 & 1 == 0;
+        let flat = bits & super::ENV_FLAT << seg as u32 != 0 && unloaded;
+        let plain = bits & super::ENV_PLAIN << seg as u32 != 0 && unloaded;
         let last = size as i32 - 1;
         // The linear address: a flat segment's is the offset, whose wrapping
         // around past a dword the check for the end of RAM below catches (it
         // takes it to `jit_memref`, which faults). Otherwise the segment's
         // limit and type, as `seg_linear` checks them (a byte is its own
-        // last byte, which can't wrap around), and its base.
+        // last byte, which can't wrap around), and its base; a plain
+        // segment's offsets start at 0, and it may be read and written.
         let addr = if flat && !paging && a20 {
             t_
         } else {
@@ -1241,24 +1244,22 @@ impl Gen<'_> {
                         ; lea ecx, [Rq(t_) + last]
                         ; cmp ecx, Rd(t_)
                         ; jb =>at
-                        ; cmp Rd(t_), DWORD [rbx + lo]
-                        ; jb =>at
-                        ; cmp ecx, DWORD [rbx + hi]
-                        ; ja =>at
                     );
+                    if !plain {
+                        dynasm!(self.ops ; .arch x64 ; cmp Rd(t_), DWORD [rbx + lo] ; jb =>at);
+                    }
+                    dynasm!(self.ops ; .arch x64 ; cmp ecx, DWORD [rbx + hi] ; ja =>at);
                 } else {
-                    dynasm!(self.ops
-                        ; .arch x64
-                        ; cmp Rd(t_), DWORD [rbx + lo]
-                        ; jb =>at
-                        ; cmp Rd(t_), DWORD [rbx + hi]
-                        ; ja =>at
-                    );
+                    if !plain {
+                        dynasm!(self.ops ; .arch x64 ; cmp Rd(t_), DWORD [rbx + lo] ; jb =>at);
+                    }
+                    dynasm!(self.ops ; .arch x64 ; cmp Rd(t_), DWORD [rbx + hi] ; ja =>at);
+                }
+                if !plain {
+                    dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + rights], need as i8 ; jz =>at);
                 }
                 dynasm!(self.ops
                     ; .arch x64
-                    ; test BYTE [rbx + rights], need as i8
-                    ; jz =>at
                     ; mov eax, Rd(t_)
                     ; add eax, DWORD [rbx + base]
                 );

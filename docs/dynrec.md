@@ -299,7 +299,10 @@ along with the code and stack sizes:
   limits, readable and writable, as DOS extenders' data and stack
   segments are. Such a segment's offset is the linear address, and it
   needs no limit check but for a wraparound past 4 GB, which the check
-  for the end of RAM catches.
+  for the end of RAM catches;
+- which are plain: expand-up, readable and writable, with any base and
+  limit, as a texture's segment is. An access through one checks only
+  the end of the limit (and a wraparound), and adds the base.
 
 The execution loop finds the block for the environment it runs in, and
 none of it changes within a block or a chain of linked blocks: paging
