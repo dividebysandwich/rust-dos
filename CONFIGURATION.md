@@ -360,7 +360,9 @@ Esc closes it.
   `[autoexec]` (a game's profile's while it plays) in an editor, comments
   included; F2 writes it into the file, for the next start, and Esc leaves
   the file as it was.
-* **Sound:** everything in `[sound]`, and the disk noises.
+* **Sound:** everything in `[sound]`, and the disk noises. A card's port,
+  IRQ and DMA channels share a row: Left and Right change the one marked,
+  and Enter moves on to the next.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays, and the filters,
   reverb and chorus with their dry/wet mixes.

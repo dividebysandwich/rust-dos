@@ -241,7 +241,7 @@ impl Page {
                 Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
             ],
             Page::Sound => &[
-                SbType, SbBase, SbIrq, SbDma, SbHdma, Opl, Gus, GusBase, GusIrq, GusDma, GusDrive, UltraDir, Midi,
+                SbType, SbPorts, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
                 SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
@@ -339,12 +339,17 @@ enum Item {
     Rewind,
     RewindMemory,
     SbType,
+    /// The Sound Blaster's port, IRQ and DMA channels on one row, each a
+    /// field of it (`fields`): the settings after it.
+    SbPorts,
     SbBase,
     SbIrq,
     SbDma,
     SbHdma,
     Opl,
     Gus,
+    /// The Ultrasound's, likewise.
+    GusPorts,
     GusBase,
     GusIrq,
     GusDma,
@@ -483,15 +488,15 @@ impl Item {
             Rewind => "Rewind (Alt+F11)",
             RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
-            SbBase => "  Base port",
-            SbIrq => "  IRQ",
-            SbDma => "  DMA",
-            SbHdma => "  High DMA (SB16)",
+            // The fields of a row of several go by their names, after
+            // the port the row's label names.
+            SbPorts | GusPorts => "  Port",
+            SbBase | GusBase => "",
+            SbIrq | GusIrq => "IRQ",
+            SbDma | GusDma => "DMA",
+            SbHdma => "HDMA",
             Opl => "FM synthesizer",
             Gus => "Gravis Ultrasound",
-            GusBase => "  Base port",
-            GusIrq => "  IRQ",
-            GusDma => "  DMA",
             GusDrive => "  Software drive",
             UltraDir => "  ULTRADIR",
             Midi => "MIDI synthesizer",
@@ -637,6 +642,12 @@ impl Item {
                 SbModel::Sb2 => "SB 2.0",
             }
             .to_string(),
+            SbPorts | GusPorts => self
+                .fields(s)
+                .iter()
+                .map(|field| format!("{} {}", field.label(), field.value(s, home)).trim_start().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             SbBase => format!("{:X}h", sb.base),
             SbIrq => sb.irq.to_string(),
             SbDma => sb.dma8.to_string(),
@@ -822,7 +833,22 @@ impl Item {
                 let fives = if dir > 0 { dz / 5 + 1 } else { (dz + 4) / 5 - 1 };
                 s.joystick.deadzone = (fives * 5).clamp(0, MAX_DEADZONE as isize) as u8;
             }
-            UltraDir | SoundFont | Mt32Roms | CaptureDir | Autoexec => {}
+            // A row of several steps the field chosen (`ConfigUi::field`).
+            UltraDir | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts => {}
+        }
+    }
+
+    /// The settings a row of several shows side by side, each with its own
+    /// ◄ and ►; none for a row of one. The high DMA channel is the SB16's
+    /// alone.
+    fn fields(self, s: &Settings) -> Vec<Item> {
+        match self {
+            Item::SbPorts if s.sound.sb.model == SbModel::Sb16 => {
+                vec![Item::SbBase, Item::SbIrq, Item::SbDma, Item::SbHdma]
+            }
+            Item::SbPorts => vec![Item::SbBase, Item::SbIrq, Item::SbDma],
+            Item::GusPorts => vec![Item::GusBase, Item::GusIrq, Item::GusDma],
+            _ => Vec::new(),
         }
     }
 
@@ -924,6 +950,9 @@ enum Target {
     Row(usize),
     /// The ◄ or ► of a setting.
     Step(usize, isize),
+    /// A field of a row of several (`Item::fields`), and its ◄ or ►.
+    RowField(usize, usize),
+    RowFieldStep(usize, usize, isize),
     Key(UiKey),
     Field(Field),
     GameField(GameField),
@@ -947,6 +976,8 @@ pub struct ConfigUi {
     /// Selected row of the page and the first one shown.
     row: usize,
     scroll: usize,
+    /// The field of a row of several that Left and Right change.
+    field: usize,
     settings: Settings,
     drives: Vec<DriveInfo>,
     config_file: Option<PathBuf>,
@@ -1022,6 +1053,7 @@ impl ConfigUi {
             page: Page::Drives,
             row: 0,
             scroll: 0,
+            field: 0,
             settings: Settings::default(),
             drives: Vec::new(),
             config_file: None,
@@ -1225,7 +1257,16 @@ impl ConfigUi {
             Target::Row(i) => {
                 self.edit = None;
                 self.cheats.edit = None;
-                self.row = i;
+                self.select(i);
+            }
+            Target::RowField(i, field) => {
+                self.select(i);
+                self.field = field;
+            }
+            Target::RowFieldStep(i, field, dir) => {
+                self.select(i);
+                self.field = field;
+                self.key(if dir < 0 { UiKey::Left } else { UiKey::Right }, host);
             }
             Target::Step(i, dir) => {
                 self.edit = None;
@@ -1263,9 +1304,17 @@ impl ConfigUi {
     fn show_page(&mut self, page: Page) {
         if page != self.page {
             self.page = page;
-            self.row = 0;
+            self.select(0);
             self.scroll = 0;
             self.confirm_delete = None;
+        }
+    }
+
+    /// Select row `row`, at its first field.
+    fn select(&mut self, row: usize) {
+        if row != self.row {
+            self.row = row;
+            self.field = 0;
         }
     }
 
@@ -1291,7 +1340,7 @@ impl ConfigUi {
             return self.games_key(key, host);
         }
         if let Some(row) = Self::navigate(key, self.row, self.row_count(), self.visible) {
-            self.row = row;
+            self.select(row);
             return;
         }
         let at = PAGES.iter().position(|&p| p == self.page).unwrap_or(0);
@@ -1323,6 +1372,19 @@ impl ConfigUi {
 
     fn setting_key(&mut self, key: UiKey, host: &mut dyn Host) {
         let Some(item) = self.item() else { return };
+        // A row of several: Left and Right change a field, Enter goes on
+        // to the next.
+        let fields = item.fields(&self.settings);
+        if !fields.is_empty() {
+            let field = self.field.min(fields.len() - 1);
+            match key {
+                UiKey::Left => self.step(fields[field], -1, host),
+                UiKey::Right => self.step(fields[field], 1, host),
+                UiKey::Enter => self.field = (field + 1) % fields.len(),
+                _ => {}
+            }
+            return;
+        }
         match (key, item.input()) {
             (UiKey::Left, Input::Choice | Input::ChoiceOrText) => self.step(item, -1, host),
             (UiKey::Right | UiKey::Enter, Input::Choice) | (UiKey::Right, Input::ChoiceOrText) => {
@@ -1841,6 +1903,11 @@ impl ConfigUi {
             if item.input() == Input::Link {
                 continue;
             }
+            let fields = item.fields(&self.settings);
+            if !fields.is_empty() {
+                self.draw_fields(g, row, i, &fields, (value_col, end), selected);
+                continue;
+            }
             if selected && let Some(field) = &self.edit {
                 let width = end.saturating_sub(value_col);
                 let (text, cursor) = field.view(width);
@@ -1861,6 +1928,38 @@ impl ConfigUi {
             }
         }
         self.draw_scrollbar(g, content, self.scroll, items.len());
+    }
+
+    /// The fields of row `i`, a row of several, side by side in the
+    /// columns `cols` of grid row `row`: each by its name with its value
+    /// between its own ◄ and ►, the one Left and Right change marked
+    /// while the row is selected.
+    fn draw_fields(&mut self, g: &mut Grid, row: usize, i: usize, fields: &[Item], cols: (usize, usize), selected: bool) {
+        let (mut x, end) = cols;
+        let focus = self.field.min(fields.len() - 1);
+        for (f, field) in fields.iter().enumerate() {
+            if f > 0 {
+                x += 2;
+            }
+            let name = field.label();
+            if !name.is_empty() {
+                x = g.text_to(x, row, name, draw::TEXT, end);
+            }
+            let value = field.value(&self.settings, self.home.as_deref());
+            if x + value.chars().count() + 2 > end {
+                break;
+            }
+            g.char(x, row, 0x11, draw::KEY);
+            self.hits.push(Hit { row, col: x, width: 1, target: Target::RowFieldStep(i, f, -1) });
+            if selected && f == focus {
+                g.background(x + 1, row, value.chars().count(), draw::FIELD);
+            }
+            let after = g.text_to(x + 1, row, &value, draw::BRIGHT, end);
+            self.hits.push(Hit { row, col: x + 1, width: after - x - 1, target: Target::RowField(i, f) });
+            g.char(after, row, 0x10, draw::KEY);
+            self.hits.push(Hit { row, col: after, width: 1, target: Target::RowFieldStep(i, f, 1) });
+            x = after + 1;
+        }
     }
 
     /// A level meter of `METER` cells at (`col`, `row`): 6 dB a cell
@@ -2040,7 +2139,9 @@ impl ConfigUi {
             ]
         } else {
             let mut hints = vec![("\u{2190}\u{2192}", "Change", Right)];
+            let several = self.item().is_some_and(|item| !item.fields(&self.settings).is_empty());
             match self.item().map(Item::input) {
+                _ if several => hints.push(("Enter", "Next", Enter)),
                 Some(Input::ChoiceOrText | Input::Text) => hints.push(("Enter", "Type", Enter)),
                 Some(Input::File) => hints.extend([("Enter", "Pick", Enter), ("Del", "None", Delete)]),
                 Some(Input::Link) => hints = vec![("Enter", "Edit", Enter)],

@@ -270,7 +270,7 @@ fn sound_conflicts_are_reported() {
     use UiKey::*;
     ui.show_page(Page::Sound);
     // The Ultrasound's base port onto the Sound Blaster's 220h.
-    ui.row = Page::Sound.items().iter().position(|&i| i == Item::GusBase).unwrap();
+    ui.row = Page::Sound.items().iter().position(|&i| i == Item::GusPorts).unwrap();
     keys(&mut ui, &mut host, &[Left]);
     assert_eq!(host.applied.last().unwrap().sound.gus.base, 0x220);
     assert!(status(&ui).1 && status(&ui).0.contains("gusbase 220"), "{:?}", status(&ui));
@@ -280,6 +280,49 @@ fn sound_conflicts_are_reported() {
     ui.settings.sound.gus.drive = None;
     keys(&mut ui, &mut host, &[Right]);
     assert_eq!(ui.settings.sound.gus.drive, Some(3));
+}
+
+#[test]
+fn a_cards_port_irq_and_dma_share_a_row() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Sound);
+    ui.row = ui.items().iter().position(|&i| i == Item::SbPorts).unwrap();
+    let value = |ui: &ConfigUi| ui.item().map(|i| i.value(&ui.settings, None)).unwrap();
+    assert_eq!(value(&ui), "220h, IRQ 7, DMA 1, HDMA 5");
+
+    // Left and Right change the field chosen, and Enter goes on to the next.
+    keys(&mut ui, &mut host, &[Right]);
+    assert_eq!(host.applied.last().unwrap().sound.sb.base, 0x230);
+    keys(&mut ui, &mut host, &[Enter, Right]);
+    assert_eq!(host.applied.last().unwrap().sound.sb.irq, 9);
+    keys(&mut ui, &mut host, &[Enter, Enter, Right, Enter]);
+    assert_eq!(host.applied.last().unwrap().sound.sb.dma16, 6);
+    assert_eq!(ui.field, 0, "round to the port again");
+
+    // The high DMA channel is the SB16's alone.
+    ui.settings.sound.sb.model = SbModel::SbPro2;
+    assert_eq!(value(&ui), "230h, IRQ 9, DMA 1");
+
+    // Each field's arrows can be clicked, and its value picks it.
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    let hit = |ui: &ConfigUi, target: fn(&Target) -> bool| {
+        let h = ui.hits.iter().find(|h| target(&h.target)).unwrap();
+        let layout = Layout::for_frame(640, 400);
+        ((layout.x + h.col * 8 + 4) as i32, (layout.y + h.row * layout.cell_h + 4) as i32)
+    };
+    let (x, y) = hit(&ui, |t| matches!(t, Target::RowFieldStep(_, 2, 1)));
+    ui.click(x, y, &mut host);
+    assert_eq!((ui.field, host.applied.last().unwrap().sound.sb.dma8), (2, 3));
+    let (x, y) = hit(&ui, |t| matches!(t, Target::RowField(_, 1)));
+    ui.click(x, y, &mut host);
+    assert_eq!(ui.field, 1);
+
+    // Another row starts at its first field.
+    keys(&mut ui, &mut host, &[Down, Up]);
+    assert_eq!(ui.field, 0);
 }
 
 #[test]
@@ -402,14 +445,16 @@ fn long_pages_have_a_scroll_bar() {
             .collect()
     };
 
-    // The Display page fits.
-    ui.show_page(Page::Display);
-    ui.draw(&mut frame);
-    assert!(bar(&ui).is_empty());
+    // The Display and Sound pages fit.
+    for page in [Page::Display, Page::Sound] {
+        ui.show_page(page);
+        ui.draw(&mut frame);
+        assert!(bar(&ui).is_empty(), "{:?}", page);
+    }
 
-    // The Sound page doesn't: the thumb is at the top, and below it the
+    // The Emulator page doesn't: the thumb is at the top, and below it the
     // bar pages down.
-    ui.show_page(Page::Sound);
+    ui.show_page(Page::Emulator);
     ui.draw(&mut frame);
     let (visible, total) = (ui.visible, ui.items().len());
     assert!(total > visible, "{} rows in {}", total, visible);
