@@ -513,11 +513,15 @@ mod server {
             if now >= last_tick + 1000 {
                 last_tick = now;
                 relay.tick(now);
-                if let Ok(mut status) = status.lock() {
-                    *status = RelayStatus { rooms: relay.rooms(), members: relay.member_count() };
-                }
             }
-            for event in relay.take_events() {
+            let events = relay.take_events();
+            // Members came or went: the rooms are told as it happens.
+            if (!events.is_empty() || now == last_tick)
+                && let Ok(mut status) = status.lock()
+            {
+                *status = RelayStatus { rooms: relay.rooms(), members: relay.member_count() };
+            }
+            for event in events {
                 log(event);
             }
         }

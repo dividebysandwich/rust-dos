@@ -91,6 +91,7 @@ fn router(state: AppState) -> Router {
         .route("/api/tss", get(tss))
         .route("/api/pagewalk", get(pagewalk))
         .route("/api/xms", get(xms))
+        .route("/api/net", get(net))
         .route("/api/gus", get(gus))
         .route("/api/exceptions", get(exceptions))
         .route("/ws/trace", get(ws_trace))
@@ -701,6 +702,10 @@ async fn xms(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Xms, DEFAULT_TIMEOUT).await
 }
 
+async fn net(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Net, DEFAULT_TIMEOUT).await
+}
+
 async fn gus(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Gus, DEFAULT_TIMEOUT).await
 }
@@ -932,6 +937,7 @@ PROTECTED MODE
   GET  /api/pagewalk?addr=lin:00401000   page directory/table entries and flags
   GET  /api/exceptions       the last 64 exceptions (vector, error code, CS:EIP, CR2)
   GET  /api/xms              XMS handles, A20 and the HMA
+  GET  /api/net              The IPX driver's sockets, ECBs and packets, and the LAN
 
 SOUND
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,

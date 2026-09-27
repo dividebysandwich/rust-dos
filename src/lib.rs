@@ -51,6 +51,7 @@ pub mod makeimg_command;
 pub mod instructions;
 pub mod interrupts;
 pub mod joystick;
+pub mod lan_command;
 pub mod mcb;
 pub mod mem_command;
 pub mod memfs;

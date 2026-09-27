@@ -361,6 +361,13 @@ impl Default for Dpmi {
 }
 
 impl Dpmi {
+    /// What the real-mode vector `vector` held before the host's stub took
+    /// it over for a client's handler, if it did: where the interrupt goes
+    /// on when the client passes it down.
+    pub(crate) fn hooked_original_mut(&mut self, vector: u8) -> Option<&mut u32> {
+        self.hooks.iter_mut().find(|(v, _)| *v == vector).map(|(_, original)| original)
+    }
+
     /// No clients: as after a program ends. The setting stays.
     pub fn reset(&mut self) {
         *self = Dpmi { enabled: self.enabled, ..Dpmi::default() };

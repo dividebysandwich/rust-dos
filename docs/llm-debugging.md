@@ -341,6 +341,14 @@ access rights.
   gates; `/api/tss` shows the ring stacks and saved registers;
   `/api/pagewalk?addr=lin:00401000` shows the page directory and table
   entries; `/api/xms` lists XMS handles (where extenders put their memory).
+- **Network:** `/api/net` shows the IPX driver (node, IRQ, open sockets,
+  listening ECBs, events, completions waiting for its IRQ, held packets and
+  counts of what became of packets) and the LAN (state, room, frames in and
+  out). Completions that stay there mean the driver's IRQ doesn't reach its
+  handler: look at the PICs in `/api/status` and the vector in `/api/ivt`.
+  Two instances on one machine make a LAN: `LAN HOST 29931` in one and
+  `LAN JOIN 127.0.0.1:29931` in the other, each with a debug port of its
+  own. Stop each by its PID.
 - **Disassembly and traces** use the code segment's size (16 or 32-bit), and
   the trace records it per instruction.
 

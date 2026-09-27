@@ -8,6 +8,7 @@ mod guest;
 pub mod port_log;
 pub mod s3;
 mod ide;
+mod net;
 mod state;
 mod voodoo;
 
@@ -189,6 +190,8 @@ pub struct Bus {
     pub gus: Option<crate::gus::Gus>,
     /// The IRQ the Ultrasound's interrupt line holds up, if any.
     gus_line: Option<u8>,
+    /// The network: the IPX driver, and the thread with the sockets.
+    pub net: crate::net::Net,
     /// The drive with the built-in Ultrasound software, if any.
     ultrasnd_drive: Option<u8>,
     /// The CD drive playing audio tracks, for MSCDEX.
@@ -341,6 +344,7 @@ impl Bus {
             mpu: crate::mpu401::Mpu401::new(),
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
             gus_line: None,
+            net: crate::net::Net::new(),
             ultrasnd_drive: None,
             cdaudio: crate::cdrom::audio::CdPlayer::new(),
             disk_io: crate::diskio::DiskIo::default(),
@@ -1284,6 +1288,8 @@ impl Bus {
             self.kbc.push_aux(&packet);
             self.sync_keyboard_irq();
         }
+        // Frames the network passed on since the last batch.
+        self.net_poll();
         self.refresh_irq();
     }
 
@@ -1300,7 +1306,10 @@ impl Bus {
     fn next_event(&self) -> Option<u64> {
         let sb = self.sb.as_ref().and_then(|sb| sb.next_event());
         let gus = self.gus_next_event();
-        [self.pit0.next_event(), sb, gus, self.voodoo_next_event(), self.ide_next_event()].into_iter().flatten().min()
+        [self.pit0.next_event(), sb, gus, self.voodoo_next_event(), self.ide_next_event(), self.net_next_event()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn gus_next_event(&self) -> Option<u64> {
@@ -1326,6 +1335,9 @@ impl Bus {
         }
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
+        }
+        if self.net_next_event().is_some_and(|t| t <= now) {
+            self.net_service();
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();

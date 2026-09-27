@@ -12,4 +12,5 @@ change which drives exist or what runs at startup.
 
 For the full endpoint reference, query the running server: `curl localhost:8086/`.
 
-When you are done, stop the emulator you started: `kill $(pgrep -x rust-dos)`.
+When you are done, stop the emulator you started, by its own PID (`kill <pid>`), not
+with `pkill` or `pgrep -x rust-dos`, which would stop other sessions' emulators too.

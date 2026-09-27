@@ -236,6 +236,10 @@ fn main() -> Result<(), String> {
     for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
+    cpu.bus.configure_network(&settings.network);
+    for warning in cpu.bus.start_lan() {
+        config_warning(&mut cpu, &warning);
+    }
     cpu.bus.audio_device = Some(Box::new(SdlAudio(audio_device)));
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
@@ -953,6 +957,11 @@ fn main() -> Result<(), String> {
             osd.show(format!("{} has ended: your settings are back", name));
         }
         if let Some(notice) = ui.take_notice() {
+            osd.show(notice);
+        }
+        // What happened on the LAN.
+        for notice in cpu.bus.net.take_notices() {
+            cpu.bus.log_string(&format!("[LAN] {}", notice));
             osd.show(notice);
         }
         // Save states written.

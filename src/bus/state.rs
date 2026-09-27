@@ -15,6 +15,7 @@ const DOS_VERSION: u16 = 4;
 const VOODOO_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 1;
+const NET_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -33,6 +34,7 @@ impl Bus {
             pci,
             voodoo,
             ide,
+            net,
             keyboard_buffer,
             kbd,
             kbc,
@@ -176,6 +178,11 @@ impl Bus {
         if dpmi.active() {
             w.section(b"DPMI", DPMI_VERSION, |w| dpmi.save(w));
         }
+        // The IPX driver, once installed. The LAN isn't part of the
+        // machine: frames in flight are lost with a load.
+        if let Some(ipx) = &net.ipx {
+            w.section(b"NET ", NET_VERSION, |w| ipx.save(w));
+        }
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -188,6 +195,7 @@ impl Bus {
             pci,
             voodoo,
             ide,
+            net,
             keyboard_buffer,
             kbd,
             kbc,
@@ -333,6 +341,13 @@ impl Bus {
         }
         // The extended memory it holds.
         xms.dpmi = dpmi.reservations();
+        if r.next_is(b"NET ") {
+            let mut ipx = net.ipx.take().unwrap_or_default();
+            ipx.load(&mut r.section(b"NET ", NET_VERSION)?)?;
+            net.ipx = Some(ipx);
+        } else {
+            net.ipx = None;
+        }
         Ok(lost)
     }
 
@@ -349,6 +364,10 @@ impl Bus {
         self.mpu.after_load();
         self.mixer.clear_tails();
         self.audio_out.clear();
+        // The frames that came for the machine before the load are gone,
+        // and the IPX driver's node is the state's.
+        self.net.ipx_queue.clear();
+        self.net.ipx_installed();
     }
 
     /// `after_load` for a state loaded into the machine that saved it,

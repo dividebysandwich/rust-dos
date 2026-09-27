@@ -1,6 +1,6 @@
 //! The rust-dos configuration file: a DOSBox-style INI file with
-//! `[emulator]`, `[sound]`, `[mixer]`, `[joystick]`, `[drives]` and
-//! `[autoexec]` sections. See
+//! `[emulator]`, `[sound]`, `[mixer]`, `[joystick]`, `[network]`,
+//! `[drives]` and `[autoexec]` sections. See
 //! `rust-dos.conf.example` for the format.
 //!
 //! Lookup order, first match wins: `--config FILE`, `./rust-dos.conf`, then
@@ -148,6 +148,8 @@ pub struct Config {
     pub mixer: MixerSettings,
     /// `[joystick]`: what the game port has plugged in.
     pub joystick: JoystickSettings,
+    /// `[network]`: the IPX driver and the LAN.
+    pub network: crate::net::NetSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -171,6 +173,7 @@ enum Section {
     Sound,
     Mixer,
     Joystick,
+    Network,
     Drives,
     Autoexec,
     /// A game profile's (games.rs).
@@ -185,6 +188,7 @@ impl Section {
             "sound" => Section::Sound,
             "mixer" => Section::Mixer,
             "joystick" => Section::Joystick,
+            "network" => Section::Network,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
@@ -198,6 +202,7 @@ impl Section {
             Section::Sound => "sound",
             Section::Mixer => "mixer",
             Section::Joystick => "joystick",
+            Section::Network => "network",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",
@@ -547,7 +552,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             Section::Autoexec => config.autoexec.push(line.to_string()),
             Section::Unknown => {}
             Section::None => warn("setting outside of a section".to_string()),
-            Section::Emulator | Section::Drives | Section::Sound | Section::Mixer | Section::Joystick | Section::Game => {
+            Section::Emulator
+            | Section::Drives
+            | Section::Sound
+            | Section::Mixer
+            | Section::Joystick
+            | Section::Network
+            | Section::Game => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -734,6 +745,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Network {
+                    if let Err(e) = config.network.set(key, value) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
                 if section == Section::Sound {
                     let lower = key.to_ascii_lowercase();
                     if matches!(lower.as_str(), "hard_disk_noise" | "floppy_disk_noise") {
@@ -901,6 +919,8 @@ pub struct Settings {
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
     pub joystick: JoystickSettings,
+    /// `[network]`: the IPX driver and the LAN.
+    pub network: crate::net::NetSettings,
 }
 
 impl Default for Settings {
@@ -933,6 +953,7 @@ impl Default for Settings {
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
             joystick: JoystickSettings::default(),
+            network: crate::net::NetSettings::default(),
         }
     }
 }
@@ -990,6 +1011,7 @@ impl Settings {
             disk: config.disk,
             mixer: config.mixer,
             joystick: config.joystick,
+            network: config.network.clone(),
         }
     }
 }
@@ -1091,6 +1113,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Section::Joystick, "joysticktype", Some(settings.joystick.kind.name().to_string())),
         (Section::Joystick, "deadzone", Some(settings.joystick.deadzone.to_string())),
     ]);
+    entries.extend(settings.network.entries().into_iter().map(|(key, value)| (Section::Network, key, value)));
     entries
 }
 
@@ -1123,7 +1146,12 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 return (section, Line::Header(section));
             }
             let kind = match section {
-                Section::Emulator | Section::Sound | Section::Mixer | Section::Joystick | Section::Drives => {
+                Section::Emulator
+                | Section::Sound
+                | Section::Mixer
+                | Section::Joystick
+                | Section::Network
+                | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(comment.trim_start_matches(['#', ';']).trim_start())
                             .map_or(Line::Other, Line::Example)
@@ -1953,6 +1981,11 @@ mod tests {
                 mixer
             },
             joystick: JoystickSettings { kind: JoystickType::TwoAxis, deadzone: 20 },
+            network: crate::net::NetSettings {
+                lan: Some("relay.example.com".into()),
+                room: "doom".into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -2113,14 +2146,16 @@ mod tests {
         // Every setting has a line, the lines that were there stay as they
         // were written, and the command line's speed isn't kept.
         for (section, key, _) in entries(&settings, Some(home)) {
-            // (The file's SoundFont; no Ultrasound directory or MT-32 of its own.)
-            let wanted = !matches!(key, "ultradir" | "mt32roms" | "mt32lib" | "midiport");
+            // (The file's SoundFont; no Ultrasound directory, MT-32 or
+            // LAN password of its own.)
+            let wanted = !matches!(key, "ultradir" | "mt32roms" | "mt32lib" | "midiport" | "password");
             assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);
         }
         assert!(saved.starts_with("[emulator]\nscale = 2\ncycles=max\nfullscreen=false\n"), "{}", saved);
         assert!(saved.contains("shader=aperture\n") && saved.contains("gus=false\n"), "{}", saved);
         assert!(saved.contains("soundfont=sf/gm.sf2\n"), "{}", saved);
-        assert!(saved.contains("\n[joystick]\njoysticktype=auto\ndeadzone=10\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\n[joystick]\njoysticktype=auto\ndeadzone=10\n\n[network]\nipx=auto\n"), "{}", saved);
+        assert!(saved.contains("\nroom=lobby\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

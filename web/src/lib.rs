@@ -213,6 +213,7 @@ impl Machine {
         warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         cpu.bus.dpmi.enabled = settings.dpmi;
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
+        cpu.bus.configure_network(&settings.network);
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
         }

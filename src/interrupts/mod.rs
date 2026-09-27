@@ -133,6 +133,8 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_MOUSE_CALLBACK_DONE => crate::mouse::clear_callback_busy(&mut cpu.bus),
         crate::bios::SERVICE_KBD_SCAN => crate::keyboard::bios_scan(cpu),
         crate::bios::SERVICE_KBD_PAUSED => crate::keyboard::bios_paused(cpu),
+        crate::bios::SERVICE_IPX => crate::net::ipx::api(cpu),
+        crate::bios::SERVICE_IPX_ESR => crate::net::ipx::esr(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service
@@ -301,6 +303,8 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         }
         0x67 => crate::ems::handle(cpu),
         0x33 => int33::handle(cpu),
+        // The IPX driver's older interface.
+        0x7A => crate::net::ipx::api(cpu),
         0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F => {
             /* FPU Vector - IRET */
             // TODO: Implement FPU

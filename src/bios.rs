@@ -9,9 +9,9 @@ use crate::cpu::Cpu;
 /// Vectors handled by emulator services (`FE 38 vv` traps). Their traps sit
 /// four bytes apart from F000:1000 in this order; new vectors go at the end
 /// because programs may remember the addresses of the older ones.
-pub const HLE_VECTORS: [u8; 23] = [
+pub const HLE_VECTORS: [u8; 24] = [
     0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x1A, 0x20, 0x21, 0x2F, 0x33, 0x00,
-    0x06, 0x25, 0x26, 0x67, 0x18, 0x19, 0x27,
+    0x06, 0x25, 0x26, 0x67, 0x18, 0x19, 0x27, 0x7A,
 ];
 const TRAP_BASE: u16 = 0x1000;
 
@@ -48,6 +48,10 @@ pub const SERVICE_MOUSE_CALLBACK_DONE: u8 = 0x20;
 pub const SERVICE_KBD_SCAN: u8 = 0x21;
 /// Whether Pause still holds the machine (`keyboard::bios_paused`).
 pub const SERVICE_KBD_PAUSED: u8 = 0x22;
+/// A call of the IPX driver at its entry point (`net::ipx::api`).
+pub const SERVICE_IPX: u8 = 0x23;
+/// The IPX IRQ handler's next completed ECB (`net::ipx::esr`).
+pub const SERVICE_IPX_ESR: u8 = 0x24;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Far-call services (`FE 3A nn`, then RETF) at the ROM's entry points for
@@ -85,6 +89,10 @@ const FIXED_DISK_PARAMS: u16 = 0x12C0;
 /// them, for a V86 monitor to see the machine idle, then the INT 21h trap
 /// again.
 pub const DOS_IDLE: u16 = 0x1310;
+/// The IPX driver's entry point, which INT 2Fh AX=7A00h hands out, and
+/// its IRQ handler, which calls the ESRs of completed ECBs.
+pub const IPX_ENTRY: u16 = 0x1400;
+pub const IPX_IRQ: u16 = 0x1410;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 pub const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -157,7 +165,7 @@ pub fn default_ivt() -> [u32; 256] {
 /// in the BIOS data area, and the fixed disk parameter tables.
 pub fn boot_ivt() -> [u32; 256] {
     let mut ivt = default_ivt();
-    for vector in [0x00, 0x20, 0x21, 0x25, 0x26, 0x27, 0x2F, 0x33, 0x67] {
+    for vector in [0x00, 0x20, 0x21, 0x25, 0x26, 0x27, 0x2F, 0x33, 0x67, 0x7A] {
         ivt[vector] = far(IRET_HANDLER);
     }
     ivt[0x09] = far(KBD_HANDLER);
@@ -171,6 +179,8 @@ fn write_ivt(bus: &mut Bus, ivt: &[u32; 256]) {
         bus.write_16(vector * 4, entry as u16);
         bus.write_16(vector * 4 + 2, (entry >> 16) as u16);
     }
+    // The IPX driver's IRQ is its own while it is installed.
+    bus.arm_ipx_irq();
 }
 
 /// Set up the vector table and the BIOS data area as a PC's BIOS leaves
@@ -321,6 +331,10 @@ pub fn install(bus: &mut Bus) {
             0xCF, // IRET
         ],
     );
+    // The IPX driver: its entry point, and its IRQ, which hands each
+    // completed ECB with an event service routine to it.
+    write_rom(bus, IPX_ENTRY, &[0xFE, 0x39, SERVICE_IPX, 0xCB]);
+    write_rom(bus, IPX_IRQ, &ipx_irq_handler());
     // Services in V86 mode: make each port access the service left, then
     // return.
     write_rom(bus, PORT_ACCESSES, &port_access_loop());
@@ -375,6 +389,33 @@ fn port_access_loop() -> Vec<u8> {
     let code = a.finish();
     assert!(PORT_ACCESSES as usize + code.len() <= KBD_HANDLER as usize);
     code
+}
+
+/// The IPX driver's IRQ: save the registers, and while the driver hands
+/// out a completed ECB (ES:SI, AL FFh or 00h), CALL FAR its event service
+/// routine; then acknowledge both PICs.
+fn ipx_irq_handler() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(IPX_IRQ);
+    a.op(&[0x1E, 0x06, 0x50, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55]); // PUSH DS, ES, AX, BX, CX, DX, SI, DI, BP
+    a.label("next");
+    a.op(&[0xFE, 0x39, SERVICE_IPX_ESR]); // CF: none left
+    a.jump(0x72, "done");
+    a.op(&[0x26, 0xFF, 0x5C, 0x04]); // CALL FAR ES:[SI+4]
+    a.jump(0xEB, "next");
+    a.label("done");
+    a.op(&[0xB0, 0x20, 0xE6, 0xA0, 0xE6, 0x20]); // MOV AL, 20h; OUT A0h, AL; OUT 20h, AL
+    a.op(&[0x5D, 0x5F, 0x5E, 0x5A, 0x59, 0x5B, 0x58, 0x07, 0x1F]); // POP BP, DI, SI, DX, CX, BX, AX, ES, DS
+    a.op(&[0xCF]); // IRET
+    let code = a.finish();
+    assert!(IPX_IRQ as usize + code.len() <= 0x1500);
+    code
+}
+
+/// Whether the vector table entry `entry` (segment:offset) is one of the
+/// BIOS's own IRQ handlers that only acknowledge the interrupt, or the
+/// IPX driver's, which a device may take the IRQ over from.
+pub fn is_default_irq_handler(entry: u32) -> bool {
+    [MASTER_EOI_HANDLER, SLAVE_EOI_HANDLER, IRQ9_HANDLER, IRET_HANDLER, IPX_IRQ].into_iter().any(|h| far(h) == entry)
 }
 
 /// The keyboard interrupt of a booted system, as a PC's BIOS runs it:

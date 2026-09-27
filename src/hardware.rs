@@ -17,6 +17,8 @@ pub struct Hardware {
     pub memory: (bool, bool),
     /// The 3dfx card.
     pub voodoo: Option<crate::voodoo::Board>,
+    /// The IPX driver and the LAN.
+    pub network: crate::net::NetSettings,
 }
 
 impl Hardware {
@@ -29,6 +31,7 @@ impl Hardware {
             video: settings.video_setup(),
             memory: (settings.ems, settings.umb),
             voodoo: settings.voodoo.board(),
+            network: settings.network.clone(),
         }
     }
 
@@ -51,6 +54,7 @@ impl Hardware {
                 board: self.voodoo.unwrap_or(settings.voodoo.board),
                 ..settings.voodoo
             },
+            network: self.network.clone(),
             ..settings.clone()
         }
     }
@@ -92,6 +96,10 @@ impl Hardware {
             let on_off = |on| if on { "on" } else { "off" };
             cpu.bus.log_string(&format!("[CONFIG] EMS {}, upper memory {}", on_off(settings.ems), on_off(settings.umb)));
             warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
+        }
+        if settings.network != self.network {
+            cpu.bus.log_string("[CONFIG] The network settings changed");
+            cpu.bus.configure_network(&settings.network);
         }
         *self = Self::of(settings);
         warnings

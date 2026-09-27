@@ -262,6 +262,28 @@
 # 90), so a controller at rest reads as centred.
 #deadzone=10
 
+[network]
+# The IPX driver of the built-in DOS, for games that play over a network:
+# auto (the default: from the first LAN HOST or LAN JOIN on), true or
+# false.
+#ipx=auto
+# Its IRQ: auto (the first of 11, 15, 10 and 9 no sound card has), or 3,
+# 4, 5, 7, 9, 10, 11 or 15.
+#ipxirq=auto
+# How its packets go into Ethernet frames: ethernet_ii (the default),
+# 802.3, 802.2 or snap. A booted Windows 95 on another instance should use
+# the same frame type for its IPX/SPX protocol.
+#ipxframe=ethernet_ii
+# A LAN room to join at startup, as LAN JOIN does: off, discover (the
+# first relay that answers on this network) or a relay's host[:port].
+#lan=off
+# Relay LAN rooms for other instances from startup, on this UDP port (and
+# join one), as LAN HOST does: off or a port (21213 is the usual one).
+#lanhost=off
+# The room to join, and the password the relay's rooms need.
+#room=lobby
+#password=
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

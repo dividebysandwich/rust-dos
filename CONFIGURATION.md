@@ -6,11 +6,13 @@ of their own. See the [README](README.md) for everything else.
 
 * [Configuration file](#configuration-file): where it is, and every setting in
   [`[emulator]`](#emulator), [`[sound]`](#sound), [`[mixer]`](#mixer),
-  [`[joystick]`](#joystick), [`[drives]`](#drives) and [`[autoexec]`](#autoexec)
+  [`[joystick]`](#joystick), [`[network]`](#network), [`[drives]`](#drives) and
+  [`[autoexec]`](#autoexec)
 * [Settings window](#settings-window)
 * [Game profiles](#game-profiles)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
+* [Playing over a LAN](#playing-over-a-lan)
 * [CRT shaders](#crt-shaders)
 * [Command-line options](#command-line-options)
 
@@ -324,6 +326,28 @@ The game port, which programs read joysticks from.
 * `deadzone` is how far a stick moves, in percent of its travel (0 to 90,
   default 10), before it counts, so a controller at rest reads as
   centred.
+
+### `[network]`
+
+The IPX driver of the built-in DOS and the LAN of rust-dos instances (see
+[Playing over a LAN](#playing-over-a-lan)).
+
+* `ipx` installs the IPX driver: `auto` (the default) from the first
+  `LAN HOST` or `LAN JOIN` on, `true` from the start, or `false` never.
+* `ipxirq` is the IRQ its completions come in: `auto` (the default: the
+  first of 11, 15, 10 and 9 that no sound card has) or 3, 4, 5, 7, 9, 10,
+  11 or 15.
+* `ipxframe` is how its packets go into Ethernet frames: `ethernet_ii`
+  (the default), `802.3`, `802.2` or `snap`. It matters only for talking
+  to the IPX protocol of a system booted on another instance.
+* `lan` joins a room at startup, as `LAN JOIN` does: `off` (the default),
+  `discover` (the first relay that answers on this network) or a relay's
+  `host[:port]`.
+* `lanhost` relays rooms from startup on a UDP port, and joins one there,
+  as `LAN HOST` does: `off` (the default) or a port.
+* `room` is the room to join (default `lobby`), and `password` the
+  password the relay's rooms need. The password is kept in the file as
+  it is written.
 
 ### `[drives]`
 
@@ -751,6 +775,57 @@ screenshots and recordings show its picture, at the card's resolution (or
 through the CRT shader at the window's size, with `record_shader=true`).
 The CRT shaders draw their scanlines over the bigger picture.
 
+## Playing over a LAN
+
+rust-dos instances on different computers play DOS games over IPX as PCs
+on one network would. The instances join a room of a relay, which passes
+the network traffic of each on to the others over UDP; no network driver
+or special privileges are needed on the host. One instance hosts the
+relay, or a server does:
+
+```text
+LAN HOST                      on one computer
+LAN JOIN                      on the others, on the same network
+LAN JOIN 203.0.113.7          or at the host's address, over the internet
+```
+
+Then start the game's network play as usual (for Doom and Heretic,
+`IPXSETUP -nodes 2`). `LAN` shows where the instance is: the IPX driver,
+the room, the members in it and the round trip to the relay.
+
+* **The IPX driver** is Novell's interface in the built-in DOS (INT 2Fh
+  AX=7A00h), installed with the first `LAN HOST` or `LAN JOIN` unless
+  `ipx` in [`[network]`](#network) says otherwise. It works for DOS
+  programs and for protected-mode games that call it through their DOS
+  extender, such as Descent (Doom and Heretic reach it through
+  IPXSETUP); it is not there for systems booted from a disk image, nor
+  inside Windows.
+* **`LAN HOST [port]`** relays rooms on a UDP port (21213 unless given)
+  and joins one. `LAN STOP` stops relaying. Over the internet, that port
+  has to reach the host through its router.
+* **`LAN JOIN [host[:port]]`** joins a room at a relay, or without an
+  address the first relay that answers on this network. It waits a few
+  seconds for the room (a key stops waiting; joining goes on). The
+  instance keeps its place with keepalives, and joins again when the
+  relay comes back after a restart. `LAN LEAVE` leaves.
+* **Rooms** keep several games on one relay apart: `/ROOM:name`, or `room`
+  in `[network]` (default `lobby`). `/PASSWORD:text` (or `password`)
+  gives a relay's rooms a password, which the joining instances prove they
+  know without sending it. Nothing else crossing the relay is encrypted.
+* **A relay on a server** for playing over the internet without any
+  player's router set up: `rust-dos --relay [PORT]` relays without
+  starting the emulator, and so does `rust-dos-relay` (`--port`,
+  `--bind`, `--password`, `--name`), a small program of its own that
+  needs neither SDL nor a sound library:
+  `cargo build --release --no-default-features --bin rust-dos-relay`.
+* **What goes over the relay** is Ethernet frames, so the IPX driver
+  plays with the IPX protocol of a system booted on another instance's
+  network card, set to the same frame type (`ipxframe`, Ethernet II by
+  default).
+
+rust-dos's LAN is its own protocol: it doesn't reach DOSBox's IPX servers,
+and `IPXNET` lines in imported DOSBox configurations are left out.
+
 ## CRT shaders
 
 `shader` in `[emulator]`, or the settings window's Display page, shows the
@@ -801,3 +876,5 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--import PATH` | Import a game set up for DOSBox as a game profile, and launch it |
 | `--debug-server [ADDR]` | Start the [debug server](README.md#debug--remote-control-server) (default `127.0.0.1:8086`) |
 | `--trace-capacity N` | Entries in the debug server's instruction trace (default 1,000,000) |
+| `--relay [PORT]` | Relay [LAN](#playing-over-a-lan) rooms on this UDP port (default 21213) instead of starting the emulator |
+| `--relay-password TEXT` | The password the rooms of `--relay` need |

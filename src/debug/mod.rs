@@ -147,6 +147,7 @@ pub enum Cmd {
     Tss,
     PageWalk(String),
     Xms,
+    Net,
     Exceptions,
     Gus,
     Drives,
@@ -1357,6 +1358,7 @@ impl DebugHub {
                 Err(e) => Reply::bad(e),
             },
             Cmd::Xms => Reply::Json(pm::xms_json(cpu)),
+            Cmd::Net => Reply::Json(net_json(cpu)),
             Cmd::Gus => Reply::Json(match &cpu.bus.gus {
                 Some(gus) => gus.snapshot(),
                 None => serde_json::json!({ "installed": false }),
@@ -1962,6 +1964,51 @@ impl crate::exec::ExecHook for DebugHub {
     }
 }
 
+/// `/api/net`: the IPX driver's sockets, ECBs and packets, and the LAN.
+fn net_json(cpu: &Cpu) -> serde_json::Value {
+    let far = |(segment, offset): (u16, u16)| format!("{:04X}:{:04X}", segment, offset);
+    let ipx = cpu.bus.net.ipx.as_ref().map(|ipx| {
+        use rust_dos::net::ipx::Done;
+        json!({
+            "node": ipx.node.to_string(),
+            "irq": ipx.irq,
+            "frame_type": ipx.frame_type.name(),
+            "sockets": ipx.sockets.iter().map(|s| json!({
+                "socket": format!("{:04X}", s.number),
+                "long_lived": s.long_lived,
+                "owner": format!("{:04X}", s.owner),
+            })).collect::<Vec<_>>(),
+            "listening": ipx.listens.iter().map(|l| json!({"ecb": far(l.ecb), "socket": format!("{:04X}", l.socket)})).collect::<Vec<_>>(),
+            "events": ipx.events.iter().map(|e| json!({"ecb": far(e.ecb), "due": e.due})).collect::<Vec<_>>(),
+            "completions": ipx.completions.iter().map(|c| json!({
+                "ecb": far(c.ecb),
+                "done": match &c.done {
+                    Done::Sent => "sent".to_string(),
+                    Done::Event => "event".to_string(),
+                    Done::Received { packet, from } => format!("received {} bytes from {}", packet.len(), from),
+                },
+            })).collect::<Vec<_>>(),
+            "held": ipx.held.iter().map(|h| json!({"socket": format!("{:04X}", h.socket), "bytes": h.packet.len(), "from": h.from.to_string()})).collect::<Vec<_>>(),
+            "stats": {
+                "sent": ipx.stats.sent,
+                "received": ipx.stats.received,
+                "not_ours": ipx.stats.not_ours,
+                "closed_socket": ipx.stats.closed_socket,
+                "unheard": ipx.stats.unheard,
+            },
+        })
+    });
+    let lan = cpu.bus.net.status().hub.map(|h| json!({
+        "state": format!("{:?}", h.lan),
+        "room": h.room,
+        "hosting": h.hosting.map(|a| a.to_string()),
+        "hosted_rooms": h.hosted_rooms.iter().map(|r| json!({"room": r.name, "members": r.members})).collect::<Vec<_>>(),
+        "frames_out": h.frames_out,
+        "frames_in": h.frames_in,
+    }));
+    json!({ "settings": format!("{:?}", cpu.bus.net.settings), "ipx": ipx, "lan": lan })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LowInput, keys_for_char, step_over_len};
@@ -2016,3 +2063,4 @@ mod tests {
         assert_eq!(step_over_len(&[0xFE, 0x39, 0x08], false), None);
     }
 }
+

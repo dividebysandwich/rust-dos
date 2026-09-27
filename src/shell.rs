@@ -476,6 +476,9 @@ pub enum ShellWait {
     Line(crate::time_commands::LinePurpose),
     /// MAKEIMG: Y or N, to make the image its arguments ask for.
     MakeImg(String),
+    /// LAN HOST or LAN JOIN: the room joined, or the join failing, until
+    /// a PIT tick; a key stops waiting.
+    Lan { until: u64 },
 }
 
 /// A CHOICE waiting for a key.
@@ -532,6 +535,7 @@ pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
     match wait {
         ShellWait::Pause => video::print_string(cpu, "\r\n"),
         ShellWait::Line(_) => {}
+        ShellWait::Lan { .. } => crate::lan_command::wait_ended(cpu, key),
         ShellWait::MakeImg(args) => {
             if !crate::makeimg_command::answer(cpu, &args, key) {
                 cpu.shell_wait = Some(ShellWait::MakeImg(args));
@@ -553,10 +557,12 @@ pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
     true
 }
 
-/// The key a CHOICE takes once its time is up, if it is.
+/// The key a CHOICE takes once its time is up, if it is, and 0 once what
+/// LAN waits for happened.
 pub fn timed_out_key(cpu: &Cpu) -> Option<u8> {
     match cpu.shell_wait {
         Some(ShellWait::Choice(Choice { timeout: Some((key, at)), .. })) if cpu.bus.clock.now_ticks() >= at => Some(key),
+        Some(ShellWait::Lan { until }) if crate::lan_command::wait_over(cpu, until) => Some(0),
         _ => None,
     }
 }
@@ -631,6 +637,10 @@ impl crate::savestate::State for ShellWait {
                 3u8.save(w);
                 args.save(w);
             }
+            ShellWait::Lan { until } => {
+                4u8.save(w);
+                until.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -652,6 +662,11 @@ impl crate::savestate::State for ShellWait {
                 let mut args = String::new();
                 args.load(r)?;
                 ShellWait::MakeImg(args)
+            }
+            4 => {
+                let mut until = 0u64;
+                until.load(r)?;
+                ShellWait::Lan { until }
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

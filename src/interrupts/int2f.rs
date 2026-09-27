@@ -69,6 +69,13 @@ pub fn handle(cpu: &mut Cpu) {
         0x1687 => {
             crate::dpmi::installation_check(cpu);
         }
+        // The IPX driver (net/ipx.rs), when installed: AL=FFh and its
+        // entry point in ES:DI.
+        0x7A00 if cpu.bus.net.ipx.is_some() => {
+            cpu.set_reg8(iced_x86::Register::AL, 0xFF);
+            cpu.set_es(0xF000);
+            cpu.set_di(crate::bios::IPX_ENTRY);
+        }
         _ if cpu.get_ah() == 0x15 => super::mscdex::handle(cpu, cpu.get_al()),
         // Everything else (Windows 16xxh, ...) is not installed: the
         // registers come back unchanged.
