@@ -66,6 +66,8 @@ pub struct JitCtx {
     pub page_gen: *const u32,
     /// `Bus::code_blocks`.
     pub code_blocks: *const u8,
+    /// Set where a store hit the running block's later bytes (x86-64).
+    pub smc: u8,
     /// The `ENV_FLAT` bits the running blocks were translated for.
     pub flat: u32,
     /// The block the code returned from.
@@ -103,6 +105,8 @@ pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
 pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_CODE_BLOCKS: i32 = offset_of!(JitCtx, code_blocks) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_SMC: i32 = offset_of!(JitCtx, smc) as i32;
 pub const CTX_EXIT_DATA: i32 = offset_of!(JitCtx, exit_data) as i32;
 pub const CTX_MEMREF: i32 = offset_of!(JitCtx, memref) as i32;
 pub const CTX_READ: i32 = offset_of!(JitCtx, read) as i32;
@@ -121,7 +125,9 @@ pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
 pub const GUARD_SIZE: i32 = std::mem::size_of::<Guard>() as i32;
 pub const GUARD_EIP: i32 = offset_of!(Guard, eip) as i32;
 pub const GUARD_CS_BASE: i32 = offset_of!(Guard, cs_base) as i32;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const GUARD_A20: i32 = offset_of!(Guard, a20) as i32;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const GUARD_PAGING: i32 = offset_of!(Guard, paging) as i32;
 pub const GUARD_PAGE: i32 = offset_of!(Guard, page) as i32;
 pub const GUARD_PHYS: i32 = offset_of!(Guard, phys) as i32;
@@ -135,6 +141,7 @@ impl JitCtx {
             ram: std::ptr::null(),
             page_gen: std::ptr::null(),
             code_blocks: std::ptr::null(),
+            smc: 0,
             flat: 0,
             exit_data: std::ptr::null_mut(),
             memref: jit_memref as *const () as usize,

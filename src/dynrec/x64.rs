@@ -2,8 +2,8 @@
 //!
 //! Registers while translated code runs: RBX the CPU, R12 the context
 //! (`JitCtx`), R13 RAM, R14 which blocks of RAM hold code
-//! (`Bus::code_blocks`), R15 set when a store hit the block's later bytes,
-//! EBP the guest's arithmetic flags where the code has changed them (see
+//! (`Bus::code_blocks`), R15 the TLB's entries, EBP the guest's arithmetic
+//! flags where the code has changed them (see
 //! `Gen::dirty`); R8-R11 hold the operations' temporaries (`uop::T`), and
 //! RAX, RCX, RDX, RSI and RDI are scratch. The guest's registers stay in
 //! the CPU. Translated code calls Rust with the System V convention, which
@@ -31,7 +31,6 @@ const EXECUTED: i32 = layout::EXECUTED as i32;
 const EIP: i32 = layout::EIP as i32;
 const FLAGS: i32 = layout::FLAGS as i32;
 const CR0: i32 = layout::CR0 as i32;
-const A20: i32 = layout::A20_MASK as i32;
 const CPL: i32 = layout::CPL as i32;
 
 /// Flag bits.
@@ -43,6 +42,11 @@ const SF: u32 = 0x080;
 const OF: u32 = 0x800;
 const ARITH: u32 = CF | PF | AF | ZF | SF | OF;
 const SZP: u32 = SF | ZF | PF;
+
+/// A TLB entry's size, and its log2.
+const TLB_ENTRY: i32 = layout::TLB_ENTRY_SIZE as i32;
+const TLB_ENTRY_SHIFT: i8 = 4;
+const _: () = assert!(1 << TLB_ENTRY_SHIFT == TLB_ENTRY);
 
 /// Where the RAM below the video memory ends, and extended memory starts.
 const VIDEO: u32 = 0xA0000;
@@ -78,6 +82,8 @@ pub fn trampoline() -> Trampoline {
         ; mov r12, rsi
         ; mov r13, QWORD [r12 + CTX_RAM]
         ; mov r14, QWORD [r12 + CTX_CODE_BLOCKS]
+        ; mov r15, QWORD [r12 + CTX_TLB]
+        ; mov BYTE [r12 + CTX_SMC], 0
         ; jmp rdx
     );
     let exit = ops.offset().0;
@@ -229,7 +235,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         dirty: false,
         dirty_at: vec![false; n],
     };
-    g.prologue(items);
+    g.prologue();
     let mut synced = 0;
     for (ix, item) in items.iter().enumerate() {
         g.ix = ix;
@@ -269,9 +275,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                     let skip = g.ops.new_dynamic_label();
                     dynasm!(g.ops
                         ; .arch x64
-                        ; test r15d, r15d
-                        ; jz =>skip
+                        ; cmp BYTE [r12 + CTX_SMC], 0
+                        ; je =>skip
                         ; =>smc
+                        ; mov BYTE [r12 + CTX_SMC], 0
                         ; mov DWORD [rbx + EIP], next
                         ; mov eax, (EXIT_SMC | if g.dirty { EXIT_FLAGS } else { 0 }) as i32
                         ; jmp =>fail
@@ -302,7 +309,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
 }
 
 impl Gen<'_> {
-    fn prologue(&mut self, items: &[Option<Vec<Uop>>]) {
+    fn prologue(&mut self) {
         let data = self.data;
         let n = data.count() as i32;
         let (deadline, revalidate, body) = (self.deadline, self.revalidate, self.body);
@@ -329,9 +336,6 @@ impl Gen<'_> {
             ; jne =>revalidate
             ; =>body
         );
-        if items.iter().flatten().flatten().any(|u| matches!(u, Uop::Store { .. })) {
-            dynasm!(self.ops ; .arch x64 ; xor r15d, r15d);
-        }
     }
 
     /// Where the instruction being translated stops the block, with the
@@ -530,9 +534,12 @@ impl Gen<'_> {
                     // The code generations of the first and last byte's
                     // blocks, as the bus's writes bump them, and a store into
                     // the block's later bytes noted.
-                    dynasm!(self.ops ; .arch x64 ; =>at);
-                    self.store_ram(m, src, size);
                     let m_ = r(m);
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                    );
+                    self.store_ram(m, src, size);
                     dynasm!(self.ops
                         ; .arch x64
                         ; mov rdx, QWORD [r12 + CTX_PAGE_GEN]
@@ -556,7 +563,7 @@ impl Gen<'_> {
                             ; lea eax, [Rq(m_) + size as i32]
                             ; cmp eax, lo as i32
                             ; jbe =>back
-                            ; mov r15d, 1
+                            ; mov BYTE [r12 + CTX_SMC], 1
                         );
                     }
                     dynasm!(self.ops ; .arch x64 ; jmp =>back);
@@ -581,7 +588,7 @@ impl Gen<'_> {
                         ; pop r10
                         ; pop r9
                         ; pop r8
-                        ; or r15d, eax
+                        ; or BYTE [r12 + CTX_SMC], al
                         ; jmp =>back
                     );
                 }
@@ -907,19 +914,19 @@ impl Gen<'_> {
                 // the privilege level, whose tag must be the page + 1.
                 let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as i32;
                 let set = if bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
+                let entry = set * TLB_ENTRY;
                 dynasm!(self.ops
                     ; .arch x64
+                    ; mov edx, eax
+                    ; shr edx, 12 - TLB_ENTRY_SHIFT
+                    ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
                     ; mov ecx, eax
                     ; shr ecx, 12
-                    ; mov edx, ecx
-                    ; and edx, (layout::TLB_SET - 1) as i32
-                    ; imul edx, edx, layout::TLB_ENTRY_SIZE as i32
-                    ; add rdx, QWORD [r12 + CTX_TLB]
                     ; inc ecx
-                    ; cmp ecx, DWORD [rdx + set * layout::TLB_ENTRY_SIZE as i32 + tag]
+                    ; cmp ecx, DWORD [r15 + rdx + entry + tag]
                     ; jne =>at
                     ; and eax, 0xFFF
-                    ; or eax, DWORD [rdx + set * layout::TLB_ENTRY_SIZE as i32 + layout::TLB_PHYS as i32]
+                    ; or eax, DWORD [r15 + rdx + entry + layout::TLB_PHYS as i32]
                 );
             }
             if !a20 {
@@ -1576,32 +1583,30 @@ impl Gen<'_> {
             ; mov ecx, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
             ; cmp ecx, DWORD [rdx + g + GUARD_CS_BASE]
             ; jne =>stub
-            ; mov ecx, DWORD [rbx + A20]
-            ; cmp ecx, DWORD [rdx + g + GUARD_A20]
-            ; jne =>stub
-            ; mov ecx, DWORD [rbx + CR0]
-            ; shr ecx, 31
-            ; cmp ecx, DWORD [rdx + g + GUARD_PAGING]
-            ; jne =>stub
-            ; test ecx, ecx
-            ; jz >go
+        );
+        // The A20 gate and paging are as the link was made: the block runs
+        // only in the environment it was translated for, and its links were
+        // made in it.
+        if self.env.bits & super::ENV_PAGING != 0 {
             // The TLB entry of the page in the set of the privilege level.
-            ; mov ecx, DWORD [rdx + g + GUARD_PAGE]
-            ; and ecx, (layout::TLB_SET - 1) as i32
-            ; cmp BYTE [rbx + CPL], 3
-            ; jne >supervisor
-            ; add ecx, layout::TLB_SET as i32
-            ; supervisor:
-            ; imul ecx, ecx, layout::TLB_ENTRY_SIZE as i32
-            ; add rcx, QWORD [r12 + CTX_TLB]
-            ; mov esi, DWORD [rdx + g + GUARD_PAGE]
-            ; inc esi
-            ; cmp esi, DWORD [rcx + layout::TLB_READ_TAG as i32]
-            ; jne =>stub
-            ; mov esi, DWORD [rcx + layout::TLB_PHYS as i32]
-            ; cmp esi, DWORD [rdx + g + GUARD_PHYS]
-            ; jne =>stub
-            ; go:
+            let set = if self.env.bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
+            let entry = set * TLB_ENTRY;
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov ecx, DWORD [rdx + g + GUARD_PAGE]
+                ; mov esi, ecx
+                ; and ecx, (layout::TLB_SET - 1) as i32
+                ; shl ecx, TLB_ENTRY_SHIFT
+                ; inc esi
+                ; cmp esi, DWORD [r15 + rcx + entry + layout::TLB_READ_TAG as i32]
+                ; jne =>stub
+                ; mov esi, DWORD [r15 + rcx + entry + layout::TLB_PHYS as i32]
+                ; cmp esi, DWORD [rdx + g + GUARD_PHYS]
+                ; jne =>stub
+            );
+        }
+        dynasm!(self.ops
+            ; .arch x64
             ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]
         );
     }

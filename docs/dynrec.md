@@ -251,7 +251,8 @@ Registers while translated code runs:
 | RAM | R13 | X21 |
 | the code generations | | X22 |
 | which chunks hold code (`Bus::code_blocks`) | R14 | |
-| set when a store hit the block's later bytes | R15 | W23 |
+| set when a store hit the block's later bytes | `JitCtx::smc` | W23 |
+| the TLB's entries | R15 | |
 | the guest's arithmetic flags | EBP | W28 |
 | the operations' temporaries | R8–R11 (saved around calls) | W24–W26 (kept by calls) |
 
@@ -282,7 +283,11 @@ LGS) after which the segments are flat differently (`jit_fallback`).
 The x86-64 code generator leaves out what the environment makes
 unnecessary: the limit checks and base of flat segments, the TLB lookup
 with paging off, the A20 mask with the gate open, and then the check
-for an operand in two pages, whose RAM is contiguous. The ARM64 one
+for an operand in two pages, whose RAM is contiguous. With paging on, it
+looks the page up in the TLB's set for the CPL, whose 16-byte entries it
+indexes with the linear address shifted and masked; a link to another
+page checks the TLB's translation of its target, but not the A20 gate
+and paging, which are as when the link was made. The ARM64 one
 checks everything at run time.
 
 ### Linking

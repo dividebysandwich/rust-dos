@@ -24,10 +24,11 @@ const TLB_ENTRIES: usize = 1024;
 /// A translation, valid for reads when `read_tag` is the linear page number
 /// + 1, and for writes when `write_tag` is: a page that may not be written,
 /// or whose dirty bit isn't set yet, has a write tag of 0, so writes to it
-/// walk the page tables. `repr(C)`: the dynamic recompiler's code looks
-/// translations up itself (see `layout`).
+/// walk the page tables. `repr(C)`, and 16 bytes: the dynamic recompiler's
+/// code looks translations up itself (see `layout`), at the linear address
+/// shifted right by 8 and masked.
 #[derive(Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub(crate) struct TlbEntry {
     read_tag: u32,
     write_tag: u32,
@@ -36,6 +37,7 @@ pub(crate) struct TlbEntry {
 }
 
 const EMPTY: TlbEntry = TlbEntry { read_tag: 0, write_tag: 0, phys: 0 };
+const _: () = assert!(std::mem::size_of::<TlbEntry>() == 16);
 
 /// Where an entry's fields are, its size, and the entries in each set,
 /// for `layout`.
