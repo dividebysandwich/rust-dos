@@ -94,7 +94,10 @@ impl Stats {
         self.translated += times.translated.min(times.executed);
         self.halted += times.halted;
         self.frames += 1;
-        self.view.refresh_hz = bus.vga.peek_timing().hz() as f32;
+        self.view.refresh_hz = match &bus.voodoo {
+            Some(v) if v.output() => v.refresh_hz(),
+            _ => bus.vga.peek_timing().hz(),
+        } as f32;
         self.view.cycles_per_ms = bus.clock.cycles_per_ms();
         self.view.blocks = times.blocks;
         self.view.code_bytes = times.code_bytes;

@@ -341,6 +341,10 @@ pub struct Voodoo {
     /// The picture changed since the display last looked, or the card
     /// took or gave back the monitor.
     display_dirty: bool,
+    /// Whether the display last saw the card's picture on the screen.
+    showing: bool,
+    /// Buffer swaps since the bus last counted them as frames drawn.
+    pub swapped: u64,
     /// The video timing the card's registers describe.
     timing: CrtTiming,
     /// RGB of each 5-6-5 pixel through the gamma table, rebuilt when it
@@ -387,6 +391,8 @@ impl Voodoo {
             last_swap: 0,
             fifo_writes: 0,
             display_dirty: true,
+            showing: false,
+            swapped: 0,
             timing: CrtTiming::VESA_480,
             palette: vec![[0; 3]; 65536],
             palette_dirty: true,
@@ -626,10 +632,21 @@ impl Voodoo {
         (self.fbi.width.max(1), self.fbi.height.max(1))
     }
 
+    /// The refresh rate of its picture.
+    pub fn refresh_hz(&self) -> f64 {
+        self.timing.hz()
+    }
+
     /// Get the picture ready to be drawn (the gamma table's colours), and
-    /// take the flag that it changed or that the card took or gave back
-    /// the monitor.
+    /// say whether the screen changed: the picture shown did, or the card
+    /// took or gave back the monitor.
     pub fn prepare_display(&mut self) -> bool {
+        let output = self.output();
+        let switched = std::mem::replace(&mut self.showing, output) != output;
+        let changed = std::mem::take(&mut self.display_dirty);
+        if !output {
+            return switched;
+        }
         // Jobs may still be drawing into the buffer shown.
         let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
         if front != NONE && self.drawn_to.contains(&(front as usize / 2)) {
@@ -638,7 +655,7 @@ impl Voodoo {
         if self.palette_dirty {
             self.build_palette();
         }
-        std::mem::take(&mut self.display_dirty)
+        changed || switched
     }
 
     /// Draw the front buffer into `rgb` (RGB24, `width` pixels a row, the
@@ -760,6 +777,7 @@ impl Voodoo {
             fbi.backbuf = (fbi.frontbuf + 1) % 3;
         }
         self.display_dirty = true;
+        self.swapped += 1;
     }
 
     /// Swaps still pending at `ticks`.
@@ -848,6 +866,7 @@ impl Voodoo {
             "output": self.output(),
             "width": self.fbi.width,
             "height": self.fbi.height,
+            "hz": (self.refresh_hz() * 100.0).round() / 100.0,
             "front": self.fbi.frontbuf,
             "back": self.fbi.backbuf,
             "pending_swaps": self.pending_swaps(now.ticks),
@@ -857,7 +876,6 @@ impl Voodoo {
             "init_enable": format!("{:08X}", self.pci.init_enable),
         })
     }
-
 }
 
 /// The gamma table at power-on: 5-bit values scaled to 8 bits, white at

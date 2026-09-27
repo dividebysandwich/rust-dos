@@ -681,6 +681,31 @@ fn swaps_that_wait_for_the_retrace() {
 }
 
 #[test]
+fn its_swaps_are_the_frames_drawn_while_it_shows() {
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    let start = bus.frames_drawn;
+    for _ in 0..10 {
+        w(&mut bus, SWAPBUFFER_CMD, 1 << 1 | 1);
+        wait_ms(&mut bus, 17.0);
+        bus.sync_display();
+    }
+    wait_ms(&mut bus, 17.0);
+    bus.sync_display();
+    assert_eq!(bus.frames_drawn - start, 10);
+    // With the output off, the VGA's picture shows again, which is a frame,
+    // and the swaps don't count.
+    cfg_write(&mut bus, 0, 0x40, 1);
+    w(&mut bus, FBI_INIT0, 0);
+    for _ in 0..3 {
+        w(&mut bus, SWAPBUFFER_CMD, 0);
+        wait_ms(&mut bus, 17.0);
+        bus.sync_display();
+    }
+    assert_eq!(bus.frames_drawn - start, 11);
+}
+
+#[test]
 fn a_full_fifo_waits_for_the_swap() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);

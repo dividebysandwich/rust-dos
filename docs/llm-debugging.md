@@ -285,9 +285,10 @@ With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),
 `/api/status` → `video.voodoo` shows the card: `output` (true while its
 picture is on the screen instead of the VGA's; `/api/screenshot` then
 shows it), `clock` (the video clock Glide turns on first), `base` (BAR0),
-`width`/`height`, the `front` and `back` buffers, `pending_swaps` (swaps
-waiting for the retrace), `fifo_writes` behind them, `triangles` drawn,
-the `fbiInit` registers and `init_enable`. A game that detects no card
+`width`/`height` and `hz`, the `front` and `back` buffers, `pending_swaps`
+(swaps waiting for the retrace), `fifo_writes` behind them, `triangles`
+drawn, the `fbiInit` registers and `init_enable`. While it shows, `fps`
+counts its buffer swaps. A game that detects no card
 usually left `fbiInit` at their power-on values (`00000410 00201102
 80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
 

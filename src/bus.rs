@@ -2260,10 +2260,19 @@ impl Bus {
     /// A retrace began: count a frame if the program drew one. A program
     /// that flips pages draws the next frame out of sight, so while it
     /// flips (a flip within the last second or so) only the flips count.
+    /// The 3dfx card only ever flips.
     fn count_frame(&mut self) {
         self.retraces += 1;
         let flipped = std::mem::take(&mut self.vga.flipped);
         let drawn = std::mem::take(&mut self.vga.drawn);
+        // While the 3dfx card shows, its buffer swaps are the frames.
+        if let Some(v) = &mut self.voodoo {
+            let swapped = std::mem::take(&mut v.swapped);
+            if v.output() {
+                self.frames_drawn += swapped;
+                return;
+            }
+        }
         if flipped {
             self.last_flip = Some(self.retraces);
         }
