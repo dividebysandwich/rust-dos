@@ -22,6 +22,7 @@ impl Bus {
     /// out, and takes a changed IRQ or frame type while no socket is open.
     pub fn configure_network(&mut self, settings: &NetSettings) {
         self.net.settings = settings.clone();
+        self.configure_ne2000();
         let idle = self.net.ipx.as_ref().is_none_or(|ipx| ipx.sockets.is_empty());
         match settings.ipx {
             IpxMode::Off if idle => self.remove_ipx(),
@@ -64,7 +65,8 @@ impl Bus {
         }
         let sb = self.sb.as_ref().map(|sb| sb.config.irq);
         let gus = self.gus.as_ref().and_then(|gus| gus.irq());
-        IPX_IRQS.into_iter().find(|&irq| Some(irq) != sb && Some(irq) != gus).unwrap_or(IPX_IRQS[0])
+        let nic = self.net.settings.ne2000.then_some(self.net.settings.nic_irq);
+        IPX_IRQS.into_iter().find(|&irq| ![sb, gus, nic].contains(&Some(irq))).unwrap_or(IPX_IRQS[0])
     }
 
     /// Install the IPX driver if it isn't.
@@ -104,8 +106,14 @@ impl Bus {
         }
     }
 
-    /// Hand the IPX driver the frames the network thread has for it.
+    /// Hand the IPX driver and the network card the frames the network
+    /// thread has for them.
     pub(crate) fn net_poll(&mut self) {
+        if self.net.nic.is_some() {
+            self.ne2000_service();
+        } else {
+            self.net.nic_queue.clear();
+        }
         let now = self.clock.now_ticks();
         match &mut self.net.ipx {
             Some(ipx) => {
@@ -122,7 +130,7 @@ impl Bus {
     pub(crate) fn net_next_event(&self) -> Option<u64> {
         let poll = self.net.active().then(|| self.clock.now_ticks() + POLL_TICKS);
         let ipx = self.net.ipx.as_ref().and_then(|ipx| ipx.next_event());
-        [poll, ipx].into_iter().flatten().min()
+        [poll, ipx, self.ne2000_next_event()].into_iter().flatten().min()
     }
 
     /// Complete the IPX events that came due, and take the frames that
@@ -187,5 +195,149 @@ impl Bus {
             self.pic.master.imr &= !0x04;
         }
         self.refresh_irq();
+    }
+}
+
+/// The NE2000's data port, a word at a time, as the DP8390's remote DMA
+/// moves it: 150 ns an ISA access.
+const NIC_DATA_NS: u64 = 150;
+
+impl Bus {
+    /// The NE2000 as the settings have it: put in, taken out, or put in
+    /// anew with other ports, IRQ or address.
+    fn configure_ne2000(&mut self) {
+        let settings = &self.net.settings;
+        let wanted = settings.ne2000.then(|| (settings.nic_base, settings.nic_irq, settings.mac));
+        let current = self.net.nic.as_ref().map(|nic| (nic.base, nic.irq, nic.mac));
+        let same = match (wanted, current) {
+            (None, None) => true,
+            (Some((base, irq, mac)), Some((b, i, m))) => base == b && irq == i && mac.is_none_or(|mac| mac == m),
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        if let Some(nic) = self.net.nic.take()
+            && nic.pic_line
+        {
+            self.pic.lower(nic.irq);
+        }
+        if let Some((base, irq, mac)) = wanted {
+            let mac = mac.unwrap_or_else(crate::net::frame::Mac::random_local);
+            self.log_string(&format!("[NE2000] At {:X}h, IRQ {}, address {}", base, irq, mac));
+            self.net.nic = Some(crate::net::ne2000::Ne2000::new(base, irq, mac));
+        } else {
+            self.log_string("[NE2000] Taken out");
+        }
+        self.net.nic_changed();
+        self.refresh_irq();
+    }
+
+    /// A system boots: the card comes up as after a reset.
+    pub fn reset_ne2000(&mut self) {
+        if let Some(nic) = &mut self.net.nic {
+            nic.reset();
+        }
+        self.sync_ne2000();
+    }
+
+    /// Whether `port` is the NE2000's.
+    #[inline]
+    pub(crate) fn ne2000_claims(&self, port: u16) -> bool {
+        self.net
+            .nic
+            .as_ref()
+            .is_some_and(|nic| port.wrapping_sub(nic.base) < crate::net::ne2000::PORTS)
+    }
+
+    /// Whether `port` is the NE2000's data port, which takes words.
+    #[inline]
+    pub(crate) fn ne2000_data_port(&self, port: u16) -> bool {
+        self.net.nic.as_ref().is_some_and(|nic| port == nic.base + crate::net::ne2000::DATA)
+    }
+
+    pub(crate) fn ne2000_read(&mut self, port: u16) -> u8 {
+        let Some(nic) = &mut self.net.nic else { return 0xFF };
+        let value = nic.read(port - nic.base);
+        self.sync_ne2000();
+        value
+    }
+
+    pub(crate) fn ne2000_write(&mut self, port: u16, value: u8) {
+        let now = self.clock.now_ticks();
+        let Some(nic) = &mut self.net.nic else { return };
+        nic.write(port - nic.base, value, now);
+        self.sync_ne2000();
+    }
+
+    /// The data port, 2 or 4 bytes at a time (a doubleword is two words).
+    pub(crate) fn ne2000_read_wide(&mut self, port: u16, len: u8) -> u32 {
+        self.clock.stall(NIC_DATA_NS * (len as u64 / 2));
+        let Some(nic) = &mut self.net.nic else { return 0xFFFF_FFFF };
+        let mut value = nic.read_word() as u32;
+        if len == 4 {
+            value |= (nic.read_word() as u32) << 16;
+        }
+        self.sync_ne2000();
+        self.log_port(port, value, len, false);
+        value
+    }
+
+    pub(crate) fn ne2000_write_wide(&mut self, port: u16, value: u32, len: u8) {
+        self.clock.stall(NIC_DATA_NS * (len as u64 / 2));
+        self.log_port(port, value, len, true);
+        let Some(nic) = &mut self.net.nic else { return };
+        nic.write_word(value as u16);
+        if len == 4 {
+            nic.write_word((value >> 16) as u16);
+        }
+        self.sync_ne2000();
+    }
+
+    pub(crate) fn ne2000_next_event(&self) -> Option<u64> {
+        self.net.nic.as_ref().and_then(|nic| nic.next_event())
+    }
+
+    /// After the card did something: send its frames, put waiting frames
+    /// into its ring, log what it has to say, and follow its IRQ line.
+    fn sync_ne2000(&mut self) {
+        let Some(nic) = &mut self.net.nic else { return };
+        if nic.has_waiting() {
+            nic.drain_waiting();
+        }
+        let frames = std::mem::take(&mut nic.outgoing);
+        let log = std::mem::take(&mut nic.log);
+        let line = nic.irq_line();
+        let irq = nic.irq;
+        let changed = line != nic.pic_line;
+        nic.pic_line = line;
+        for frame in frames {
+            self.net.send(Port::Nic, frame);
+        }
+        for line in log {
+            self.log_string(&line);
+        }
+        if changed {
+            if line {
+                self.pic.raise(irq);
+            } else {
+                self.pic.lower(irq);
+            }
+            self.refresh_irq();
+        }
+        self.clock.schedule(self.next_event());
+    }
+
+    /// The card's frame is on the wire, and the frames that came are
+    /// handed to it.
+    pub(crate) fn ne2000_service(&mut self) {
+        let now = self.clock.now_ticks();
+        if let Some(nic) = &mut self.net.nic {
+            nic.advance(now);
+            while let Some(frame) = self.net.nic_queue.pop() {
+                nic.deliver(frame);
+            }
+        }
+        self.sync_ne2000();
     }
 }

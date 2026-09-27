@@ -14,6 +14,7 @@ pub mod frame;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod hub;
 pub mod ipx;
+pub mod ne2000;
 pub mod port;
 pub mod switch;
 pub mod tunnel;
@@ -87,6 +88,12 @@ pub struct NetSettings {
     pub ipx: IpxMode,
     /// The IPX driver's IRQ, or None to take the first one free.
     pub ipx_irq: Option<u8>,
+    /// The NE2000 network card, its ports and IRQ, and its address (None
+    /// for a random one each start).
+    pub ne2000: bool,
+    pub nic_base: u16,
+    pub nic_irq: u8,
+    pub mac: Option<frame::Mac>,
     pub ipx_frame: ipx::FrameType,
     /// A LAN room to join at startup: None, or a relay (`host[:port]`),
     /// or `Some("")` for the first relay that answers on the LAN.
@@ -102,6 +109,10 @@ impl Default for NetSettings {
         Self {
             ipx: IpxMode::Auto,
             ipx_irq: None,
+            ne2000: false,
+            nic_base: 0x300,
+            nic_irq: 10,
+            mac: None,
             ipx_frame: ipx::FrameType::EthernetII,
             lan: None,
             lan_host: None,
@@ -127,6 +138,37 @@ impl NetSettings {
                         Ok(irq) if matches!(irq, 3..=5 | 7 | 9..=11 | 15) => Some(irq),
                         _ => return Err(format!("invalid ipxirq '{}' (auto, 3, 4, 5, 7, 9, 10, 11 or 15)", value)),
                     },
+                }
+            }
+            "ne2000" => {
+                self.ne2000 = match value.trim().to_ascii_lowercase().as_str() {
+                    "true" | "on" | "yes" | "1" => true,
+                    "false" | "off" | "no" | "0" => false,
+                    _ => return Err(format!("invalid ne2000 '{}' (true or false)", value)),
+                }
+            }
+            "nicbase" => {
+                self.nic_base = u16::from_str_radix(value.trim().trim_start_matches("0x"), 16)
+                    .ok()
+                    .filter(|base| NIC_BASES.contains(base))
+                    .ok_or_else(|| format!("invalid nicbase '{}' (240, 260, 280, 2A0, 2C0, 300, 320, 340 or 360)", value))?
+            }
+            "nicirq" => {
+                self.nic_irq = value
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|irq| matches!(irq, 3..=5 | 7 | 9..=11 | 15))
+                    .ok_or_else(|| format!("invalid nicirq '{}' (3, 4, 5, 7, 9, 10, 11 or 15)", value))?
+            }
+            "macaddr" => {
+                self.mac = match value.trim() {
+                    v if v.eq_ignore_ascii_case("auto") => None,
+                    v => Some(
+                        frame::Mac::parse(v)
+                            .filter(|mac| !mac.is_group())
+                            .ok_or_else(|| format!("invalid macaddr '{}' (auto, or like 02:00:5E:12:34:56)", value))?,
+                    ),
                 }
             }
             "ipxframe" => {
@@ -169,6 +211,10 @@ impl NetSettings {
             ("ipx", Some(self.ipx.name().to_string())),
             ("ipxirq", Some(self.ipx_irq.map_or("auto".to_string(), |irq| irq.to_string()))),
             ("ipxframe", Some(self.ipx_frame.name().to_string())),
+            ("ne2000", Some(self.ne2000.to_string())),
+            ("nicbase", Some(format!("{:X}", self.nic_base))),
+            ("nicirq", Some(self.nic_irq.to_string())),
+            ("macaddr", Some(self.mac.map_or("auto".to_string(), |mac| mac.to_string()))),
             (
                 "lan",
                 Some(match &self.lan {
@@ -183,6 +229,10 @@ impl NetSettings {
         ]
     }
 }
+
+/// Where the NE2000 may be: 20h ports that no sound card's standard
+/// ports overlap.
+pub const NIC_BASES: [u16; 9] = [0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x300, 0x320, 0x340, 0x360];
 
 /// The room LAN HOST and LAN JOIN use unless told another.
 pub const DEFAULT_ROOM: &str = "lobby";
@@ -201,6 +251,9 @@ pub struct Net {
     pub ipx: Option<ipx::Ipx>,
     /// The frames the network thread has for the IPX driver.
     pub ipx_queue: Arc<PortQueue>,
+    /// The NE2000, if the machine has one, and the frames for it.
+    pub nic: Option<ne2000::Ne2000>,
+    pub nic_queue: Arc<PortQueue>,
     #[cfg(not(target_arch = "wasm32"))]
     hub: Option<hub::Hub>,
     /// What the screen should show.
@@ -219,6 +272,8 @@ impl Net {
             settings: NetSettings::default(),
             ipx: None,
             ipx_queue: Arc::new(PortQueue::default()),
+            nic: None,
+            nic_queue: Arc::new(PortQueue::default()),
             #[cfg(not(target_arch = "wasm32"))]
             hub: None,
             notices: Vec::new(),
@@ -243,6 +298,9 @@ impl Net {
             if let Some(ipx) = &self.ipx {
                 hub.send(hub::Command::Attach { port: Port::Ipx, mac: ipx.node, queue: self.ipx_queue.clone() });
             }
+            if let Some(nic) = &self.nic {
+                hub.send(hub::Command::Attach { port: Port::Nic, mac: nic.mac, queue: self.nic_queue.clone() });
+            }
             self.hub = Some(hub);
         }
         Ok(self.hub.as_ref().unwrap())
@@ -254,6 +312,26 @@ impl Net {
         if let (Some(hub), Some(ipx)) = (&self.hub, &self.ipx) {
             hub.send(hub::Command::Attach { port: Port::Ipx, mac: ipx.node, queue: self.ipx_queue.clone() });
         }
+    }
+
+    /// The network card came, went or changed: the network thread, which
+    /// it needs, runs, and passes it its frames.
+    pub fn nic_changed(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        match &self.nic {
+            Some(nic) => {
+                let (mac, queue) = (nic.mac, self.nic_queue.clone());
+                if let Ok(hub) = self.hub() {
+                    hub.send(hub::Command::Attach { port: Port::Nic, mac, queue });
+                }
+            }
+            None => {
+                if let Some(hub) = &self.hub {
+                    hub.send(hub::Command::Detach(Port::Nic));
+                }
+            }
+        }
+        self.nic_queue.clear();
     }
 
     /// Send a frame from the device on `port`.
@@ -347,6 +425,10 @@ mod tests {
             ("ipx", "true"),
             ("ipxirq", "10"),
             ("ipxframe", "802.2"),
+            ("ne2000", "true"),
+            ("nicbase", "280"),
+            ("nicirq", "5"),
+            ("macaddr", "02:00:5e:12:34:56"),
             ("lan", "relay.example.com:4000"),
             ("lanhost", "21300"),
             ("room", "doom"),
@@ -359,6 +441,10 @@ mod tests {
             NetSettings {
                 ipx: IpxMode::On,
                 ipx_irq: Some(10),
+                ne2000: true,
+                nic_base: 0x280,
+                nic_irq: 5,
+                mac: frame::Mac::parse("02:00:5E:12:34:56"),
                 ipx_frame: ipx::FrameType::Llc8022,
                 lan: Some("relay.example.com:4000".into()),
                 lan_host: Some(21300),
@@ -373,11 +459,14 @@ mod tests {
         assert_eq!(again, n);
         n.set("lan", "discover").unwrap();
         assert_eq!(n.lan, Some(String::new()));
-        assert_eq!(n.entries()[3].1.as_deref(), Some("discover"));
+        assert_eq!(n.entries().iter().find(|e| e.0 == "lan").unwrap().1.as_deref(), Some("discover"));
         n.set("lan", "off").unwrap();
         n.set("lanhost", "on").unwrap();
         assert_eq!((n.lan.clone(), n.lan_host), (None, Some(tunnel::wire::DEFAULT_PORT)));
         assert!(n.set("ipxirq", "12").is_err());
+        assert!(n.set("nicbase", "330").is_err());
+        assert!(n.set("nicirq", "12").is_err());
+        assert!(n.set("macaddr", "01:00:5e:00:00:01").is_err(), "a group address");
         assert!(n.set("ipxframe", "token-ring").is_err());
         assert!(n.set("lanhost", "x").is_err());
         assert!(n.set("room", "").is_err());

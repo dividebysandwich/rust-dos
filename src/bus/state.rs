@@ -15,7 +15,7 @@ const DOS_VERSION: u16 = 4;
 const VOODOO_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 1;
-const NET_VERSION: u16 = 1;
+const NET_VERSION: u16 = 2;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -178,10 +178,13 @@ impl Bus {
         if dpmi.active() {
             w.section(b"DPMI", DPMI_VERSION, |w| dpmi.save(w));
         }
-        // The IPX driver, once installed. The LAN isn't part of the
-        // machine: frames in flight are lost with a load.
-        if let Some(ipx) = &net.ipx {
-            w.section(b"NET ", NET_VERSION, |w| ipx.save(w));
+        // The IPX driver, once installed, and the network card. The LAN
+        // isn't part of the machine: frames in flight are lost with a load.
+        if net.ipx.is_some() || net.nic.is_some() {
+            w.section(b"NET ", NET_VERSION, |w| {
+                net.ipx.save(w);
+                save_device(&net.nic, w);
+            });
         }
     }
 
@@ -341,10 +344,13 @@ impl Bus {
         }
         // The extended memory it holds.
         xms.dpmi = dpmi.reservations();
+        // The IPX driver and the network card come and go with the state.
         if r.next_is(b"NET ") {
-            let mut ipx = net.ipx.take().unwrap_or_default();
-            ipx.load(&mut r.section(b"NET ", NET_VERSION)?)?;
-            net.ipx = Some(ipx);
+            let mut section = r.section(b"NET ", NET_VERSION)?;
+            net.ipx.load(&mut section)?;
+            load_device(&mut net.nic, "NE2000", &mut section)?;
+        } else if net.nic.is_some() {
+            return Err(StateError::Mismatch("this machine has an NE2000 and it hasn't".into()));
         } else {
             net.ipx = None;
         }
@@ -368,6 +374,7 @@ impl Bus {
         // and the IPX driver's node is the state's.
         self.net.ipx_queue.clear();
         self.net.ipx_installed();
+        self.net.nic_changed();
     }
 
     /// `after_load` for a state loaded into the machine that saved it,

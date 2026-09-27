@@ -1812,6 +1812,7 @@ impl Bus {
         match port {
             // A booted system's CD-ROM drive.
             p if self.ide_claims(p) => self.ide_write(p, value),
+            p if self.ne2000_claims(p) => self.ne2000_write(p, value),
             // The two 8259 interrupt controllers.
             0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.write(port, value),
 
@@ -2131,6 +2132,7 @@ impl Bus {
     fn read_port(&mut self, port: u16) -> u8 {
         match port {
             p if self.ide_claims(p) => self.ide_read(p),
+            p if self.ne2000_claims(p) => self.ne2000_read(p),
             // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
             // 0x21 the interrupt mask. Programs read-modify-write the mask
             // to unmask their IRQ without disturbing the others.

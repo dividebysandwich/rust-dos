@@ -143,6 +143,11 @@ impl Bus {
             self.ide_write_wide(value, len);
             return;
         }
+        // The network card's data port, likewise.
+        if self.ne2000_data_port(port) {
+            self.ne2000_write_wide(port, value, len);
+            return;
+        }
         if self.s3() && is_engine_port(port) {
             self.log_port(port, value, len, true);
             self.engine_write(port, value, len);
@@ -162,6 +167,9 @@ impl Bus {
     pub fn io_read_wide(&mut self, port: u16, len: u8) -> u32 {
         if port == crate::ide::BASE && self.ide.is_some() {
             return self.ide_read_wide(len);
+        }
+        if self.ne2000_data_port(port) {
+            return self.ne2000_read_wide(port, len);
         }
         if self.s3() && is_engine_port(port) {
             let value = self.engine_read(port, len);

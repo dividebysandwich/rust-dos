@@ -274,6 +274,16 @@
 # 802.3, 802.2 or snap. A booted Windows 95 on another instance should use
 # the same frame type for its IPX/SPX protocol.
 #ipxframe=ethernet_ii
+# An NE2000 network card, for packet drivers (Crynwr NE2000.COM),
+# Windows for Workgroups and Windows 95: true or false (the default). It
+# is on the LAN rust-dos instances join with LAN HOST and LAN JOIN.
+#ne2000=false
+# Its ports (240, 260, 280, 2A0, 2C0, 300, 320, 340 or 360; 300 is the
+# usual one), its IRQ (3, 4, 5, 7, 9, 10, 11 or 15), and its Ethernet
+# address: auto (a new one each start) or one like 02:00:5E:12:34:56.
+#nicbase=300
+#nicirq=10
+#macaddr=auto
 # A LAN room to join at startup, as LAN JOIN does: off, discover (the
 # first relay that answers on this network) or a relay's host[:port].
 #lan=off

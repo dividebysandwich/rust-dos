@@ -340,6 +340,12 @@ The IPX driver of the built-in DOS and the LAN of rust-dos instances (see
 * `ipxframe` is how its packets go into Ethernet frames: `ethernet_ii`
   (the default), `802.3`, `802.2` or `snap`. It matters only for talking
   to the IPX protocol of a system booted on another instance.
+* `ne2000` puts an NE2000 network card in the machine: `false` (the
+  default) or `true`. `nicbase` is its ports (default `300`; also 240,
+  260, 280, 2A0, 2C0, 320, 340 or 360), `nicirq` its IRQ (default 10;
+  also 3, 4, 5, 7, 9, 11 or 15), and `macaddr` its Ethernet address:
+  `auto` (the default, a new one each start) or one like
+  `02:00:5E:12:34:56`. See [Network card](#network-card).
 * `lan` joins a room at startup, as `LAN JOIN` does: `off` (the default),
   `discover` (the first relay that answers on this network) or a relay's
   `host[:port]`.
@@ -822,6 +828,26 @@ the room, the members in it and the round trip to the relay.
   plays with the IPX protocol of a system booted on another instance's
   network card, set to the same frame type (`ipxframe`, Ethernet II by
   default).
+
+### Network card
+
+`ne2000=true` in [`[network]`](#network) puts an NE2000 in the machine,
+the network card every DOS packet driver, Windows for Workgroups and
+Windows 95 know, at ports 300h and IRQ 10 unless set otherwise. It is on
+the same LAN as the IPX driver: the cards of instances in one room see
+each other's frames, as cards on one Ethernet would.
+
+* **DOS:** load the Crynwr packet driver, `NE2000 0x60 10 0x300`
+  (software interrupt, IRQ, ports), from the Crynwr packet driver
+  collection or FreeDOS's `crynwr` package. Programs that use a packet
+  driver, such as mTCP, then reach the other instances; with static
+  addresses (`IPADDR` in mTCP's configuration) two instances in one room
+  ping each other and make TCP connections.
+* **Booted systems** use their own drivers for the card: Windows 95's
+  "Novell/Anthem NE2000" at 300h, IRQ 10; Windows for Workgroups' NE2000
+  driver; or a packet driver and WINPKT for Trumpet Winsock.
+* The card's frames go only to the LAN for now: without a room joined,
+  what it sends goes nowhere.
 
 rust-dos's LAN is its own protocol: it doesn't reach DOSBox's IPX servers,
 and `IPXNET` lines in imported DOSBox configurations are left out.

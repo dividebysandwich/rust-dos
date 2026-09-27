@@ -183,6 +183,7 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     bus.reset_timers();
     bus.reset_sound();
     bus.reset_network();
+    bus.reset_ne2000();
     bus.reset_voodoo();
     bus.mouse.remove_callback();
     crate::mouse::clear_callback_busy(bus);

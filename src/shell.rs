@@ -570,6 +570,10 @@ pub fn timed_out_key(cpu: &Cpu) -> Option<u8> {
 /// The shell's code at KEY_READY (SERVICE_SHELL_KEY_READY), with the key
 /// PAUSE or CHOICE waited for in AX (`take_key`).
 pub fn key_ready(cpu: &mut Cpu) {
+    // A key that stops LAN waiting is typed at the prompt as well.
+    if matches!(cpu.shell_wait, Some(ShellWait::Lan { .. })) && cpu.ax() != 0 && cpu.ax() as u8 != 0x03 {
+        cpu.bus.keyboard_buffer.push_front(cpu.ax());
+    }
     if !take_key(cpu, cpu.ax() as u8) {
         cpu.set_ip(labels().shell_wait);
     }
