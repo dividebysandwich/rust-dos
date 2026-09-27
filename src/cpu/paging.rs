@@ -243,6 +243,7 @@ impl Cpu {
     /// The physical address a read at `lin` goes to as the TLB has it now
     /// (or with paging off), without walking the page tables: None where
     /// the TLB doesn't hold the page.
+    #[inline(always)]
     pub(crate) fn translated(&self, lin: u32, user: bool) -> Option<u32> {
         if self.cr0 & CR0_PG == 0 {
             return Some(self.translate(lin));

@@ -97,9 +97,14 @@ pub struct BlockData {
     /// First and last chunk.
     pub chunk_first: u32,
     pub chunk_last: u32,
-    /// Physical address and length of the block's bytes.
+    /// Physical address and length of the block's bytes, and the EIP of
+    /// its first instruction.
     pub phys: u32,
     pub len: u32,
+    pub eip: u32,
+    /// The block's index in the translator's table. (These first fields
+    /// share a cache line, which the execution loop reads after a block.)
+    pub id: u32,
     /// The instructions, their EIPs and handlers, and whether each may
     /// write memory (and with it the block's own bytes).
     pub instrs: Box<[Instruction]>,
@@ -123,8 +128,6 @@ pub struct BlockData {
     pub links: [usize; LINKS],
     pub stubs: [usize; LINKS],
     pub guards: [Guard; LINKS],
-    /// The block's index in the translator's table.
-    pub id: u32,
     /// Per instruction, how many instructions the instruction count is
     /// behind while it runs: the translated code brings it up to date
     /// only before handlers and where the block ends.
@@ -189,6 +192,7 @@ impl BlockData {
             chunk_last,
             phys,
             len,
+            eip: at.eip,
             handlers: instrs.iter().map(handler).collect(),
             // (The code window has checked this doesn't overflow.)
             limit_need: *eips.last().unwrap() + PAGE_TAIL - 1,
@@ -230,7 +234,7 @@ impl BlockData {
 
     /// Where instruction `ix` starts in the block's bytes.
     pub fn offset(&self, ix: usize) -> usize {
-        self.eips[ix].wrapping_sub(self.eips[0]) as usize
+        self.eips[ix].wrapping_sub(self.eip) as usize
     }
 
     /// Physical address of instruction `ix`.
@@ -241,13 +245,13 @@ impl BlockData {
     /// Whether `eip` is in the block's page (linearly, which is also
     /// physically): translated code links an exit to a block there.
     pub fn in_page(&self, eip: u32) -> bool {
-        let at = (self.phys & 0xFFF) as i64 + eip.wrapping_sub(self.eips[0]) as i32 as i64;
+        let at = (self.phys & 0xFFF) as i64 + eip.wrapping_sub(self.eip) as i32 as i64;
         (0..0x1000).contains(&at)
     }
 
     /// The physical address of `eip`, in the block's page.
     pub fn phys_in_page(&self, eip: u32) -> u32 {
-        self.phys.wrapping_add(eip.wrapping_sub(self.eips[0]))
+        self.phys.wrapping_add(eip.wrapping_sub(self.eip))
     }
 
     /// Whether the block's bytes from instruction `ix` on (all of them for

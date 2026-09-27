@@ -755,7 +755,7 @@ mod engine {
                 }
                 let exited = data.id;
                 let none_ran = cpu.bus.clock.icount == start;
-                let page = Page { lin: cs_base.wrapping_add(data.eips[0]) & !0xFFF, phys: data.phys as usize & !0xFFF };
+                let page = Page { lin: cs_base.wrapping_add(data.eip) & !0xFFF, phys: data.phys as usize & !0xFFF };
                 return match kind {
                     EXIT_NEXT => Run::Ran { page },
                     EXIT_DEADLINE | EXIT_LIMIT => {
