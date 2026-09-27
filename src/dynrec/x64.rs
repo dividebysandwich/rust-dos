@@ -1,12 +1,13 @@
 //! The x86-64 code generator.
 //!
 //! Registers while translated code runs: RBX the CPU, R12 the context
-//! (`JitCtx`), R13 RAM, R14 RAM's code generations, R15 set when a store
-//! hit the block's later bytes, EBP the guest's arithmetic flags where the
-//! code has changed them (see `Gen::dirty`); R8-R11 hold the operations'
-//! temporaries (`uop::T`), and RAX, RCX, RDX, RSI and RDI are scratch. The
-//! guest's registers stay in the CPU. Translated code calls Rust with the
-//! System V convention, which Rust offers on every x86-64 host.
+//! (`JitCtx`), R13 RAM, R14 which blocks of RAM hold code
+//! (`Bus::code_blocks`), R15 set when a store hit the block's later bytes,
+//! EBP the guest's arithmetic flags where the code has changed them (see
+//! `Gen::dirty`); R8-R11 hold the operations' temporaries (`uop::T`), and
+//! RAX, RCX, RDX, RSI and RDI are scratch. The guest's registers stay in
+//! the CPU. Translated code calls Rust with the System V convention, which
+//! Rust offers on every x86-64 host.
 
 // dynasm converts the registers it is given at run time with `into`.
 #![allow(clippy::useless_conversion)]
@@ -76,7 +77,7 @@ pub fn trampoline() -> Trampoline {
         ; mov rbx, rdi
         ; mov r12, rsi
         ; mov r13, QWORD [r12 + CTX_RAM]
-        ; mov r14, QWORD [r12 + CTX_PAGE_GEN]
+        ; mov r14, QWORD [r12 + CTX_CODE_BLOCKS]
         ; jmp rdx
     );
     let exit = ops.offset().0;
@@ -123,6 +124,9 @@ enum Slow {
     MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
     Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T },
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, lo: u32, hi: u32 },
+    /// A store into a block of RAM with code (`Bus::code_blocks`): its
+    /// generations bumped, and a store into the rest of the block noted.
+    CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// A memory operand's linear address in EAX with paging on: its
     /// physical address through the TLB, on to `back`, or to `miss` for
     /// `jit_memref`.
@@ -168,6 +172,8 @@ struct Gen<'a> {
     /// one being translated.
     live: Vec<Vec<u32>>,
     live_after: u32,
+    /// Bytes of RAM, which the code is translated for.
+    ram_len: u32,
     /// The guest's arithmetic flags are in EBP, not yet in the CPU (whose
     /// other flags are right). They go back into the CPU where anything
     /// else may read them: where the block leaves and before a handler.
@@ -196,7 +202,7 @@ pub struct Code {
 /// handler call the instruction count is brought up to date, as devices
 /// read the time from it; the count of executed instructions is only
 /// brought up to date where the code returns.
-pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
+pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, ram_len: u32) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();
     let (tail, deadline, revalidate, body) =
@@ -223,6 +229,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool) -> Code {
         ix: 0,
         live: super::flags::live(items),
         live_after: 0,
+        ram_len,
         dirty: false,
         dirty_at: vec![false; n],
     };
@@ -314,10 +321,11 @@ impl Gen<'_> {
             ; cmp DWORD [rbx + seg_field(Seg::CS, layout::SEG_LIMIT)], data.limit_need as i32
             ; jb =>limit
             ; mov rdx, QWORD data_ptr
-            ; mov eax, DWORD [r14 + (data.chunk_first * 4) as i32]
+            ; mov rcx, QWORD [r12 + CTX_PAGE_GEN]
+            ; mov eax, DWORD [rcx + (data.chunk_first * 4) as i32]
         );
         for chunk in data.chunk_first + 1..=data.chunk_last {
-            dynasm!(self.ops ; .arch x64 ; add eax, DWORD [r14 + (chunk * 4) as i32]);
+            dynasm!(self.ops ; .arch x64 ; add eax, DWORD [rcx + (chunk * 4) as i32]);
         }
         dynasm!(self.ops
             ; .arch x64
@@ -549,6 +557,41 @@ impl Gen<'_> {
                         ; jmp =>fail_tail
                     );
                 }
+                Slow::CodeStore { at, back, m, src, size, lo, hi } => {
+                    // The code generations of the first and last byte's
+                    // blocks, as the bus's writes bump them, and a store into
+                    // the block's later bytes noted.
+                    dynasm!(self.ops ; .arch x64 ; =>at);
+                    self.store_ram(m, src, size);
+                    let m_ = r(m);
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov rdx, QWORD [r12 + CTX_PAGE_GEN]
+                        ; mov eax, Rd(m_)
+                        ; shr eax, crate::bus::GEN_SHIFT as i8
+                        ; add DWORD [rdx + rax * 4], 1
+                    );
+                    if size > 1 {
+                        dynasm!(self.ops
+                            ; .arch x64
+                            ; lea eax, [Rq(m_) + (size - 1) as i32]
+                            ; shr eax, crate::bus::GEN_SHIFT as i8
+                            ; add DWORD [rdx + rax * 4], 1
+                        );
+                    }
+                    if lo < hi {
+                        dynasm!(self.ops
+                            ; .arch x64
+                            ; cmp Rd(m_), hi as i32
+                            ; jae =>back
+                            ; lea eax, [Rq(m_) + size as i32]
+                            ; cmp eax, lo as i32
+                            ; jbe =>back
+                            ; mov r15d, 1
+                        );
+                    }
+                    dynasm!(self.ops ; .arch x64 ; jmp =>back);
+                }
                 Slow::Store { at, back, m, src, lo, hi } => {
                     dynasm!(self.ops
                         ; .arch x64
@@ -663,43 +706,25 @@ impl Gen<'_> {
             }
             Uop::Store { m, src, size } => {
                 let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
-                let (m_, s) = (r(m), r(src));
-                dynasm!(self.ops ; .arch x64 ; cmp Rd(m_), SLOW as i32 ; jae =>at);
-                match size {
-                    1 => dynasm!(self.ops ; .arch x64 ; mov BYTE [r13 + Rq(m_)], Rb(s)),
-                    2 => dynasm!(self.ops ; .arch x64 ; mov WORD [r13 + Rq(m_)], Rw(s)),
-                    _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [r13 + Rq(m_)], Rd(s)),
-                }
-                // The code generations of the first and last byte's chunks,
-                // as the bus's writes bump them.
+                let m_ = r(m);
+                // RAM of a block without code is written as it is, without
+                // bumping its generation, which nothing reads (see
+                // `Bus::code_blocks`).
+                let code = self.ops.new_dynamic_label();
                 dynasm!(self.ops
                     ; .arch x64
-                    ; mov eax, Rd(m_)
-                    ; shr eax, crate::bus::GEN_SHIFT as i8
-                    ; add DWORD [r14 + rax * 4], 1
+                    ; cmp Rd(m_), SLOW as i32
+                    ; jae =>at
+                    ; mov ecx, Rd(m_)
+                    ; shr ecx, crate::bus::GEN_SHIFT as i8
+                    ; cmp BYTE [r14 + rcx], 0
+                    ; jne =>code
                 );
-                if size > 1 {
-                    dynasm!(self.ops
-                        ; .arch x64
-                        ; lea eax, [Rq(m_) + (size - 1) as i32]
-                        ; shr eax, crate::bus::GEN_SHIFT as i8
-                        ; add DWORD [r14 + rax * 4], 1
-                    );
-                }
-                let (lo, hi) = self.rest();
-                if lo < hi {
-                    dynasm!(self.ops
-                        ; .arch x64
-                        ; cmp Rd(m_), hi as i32
-                        ; jae =>back
-                        ; lea eax, [Rq(m_) + size as i32]
-                        ; cmp eax, lo as i32
-                        ; jbe =>back
-                        ; mov r15d, 1
-                    );
-                }
+                self.store_ram(m, src, size);
                 dynasm!(self.ops ; .arch x64 ; =>back);
+                let (lo, hi) = self.rest();
                 self.slow.push(Slow::Store { at, back, m, src, lo, hi });
+                self.slow.push(Slow::CodeStore { at: code, back, m, src, size, lo, hi });
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
@@ -793,6 +818,16 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
+        }
+    }
+
+    /// Store `size` bytes of src into RAM at handle m.
+    fn store_ram(&mut self, m: T, src: T, size: u8) {
+        let (m_, s) = (r(m), r(src));
+        match size {
+            1 => dynasm!(self.ops ; .arch x64 ; mov BYTE [r13 + Rq(m_)], Rb(s)),
+            2 => dynasm!(self.ops ; .arch x64 ; mov WORD [r13 + Rq(m_)], Rw(s)),
+            _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [r13 + Rq(m_)], Rd(s)),
         }
     }
 
@@ -894,8 +929,7 @@ impl Gen<'_> {
             ; lea ecx, [rax - VIDEO as i32]
             ; cmp ecx, (EXTENDED - VIDEO) as i32
             ; jb =>at
-            ; lea rcx, [rax + size as i32]
-            ; cmp rcx, QWORD [r12 + CTX_RAM_LEN]
+            ; cmp eax, self.ram_len.wrapping_sub(size as u32) as i32
             ; ja =>at
             ; mov Rd(t_), eax
             ; =>back

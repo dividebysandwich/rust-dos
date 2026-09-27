@@ -1,7 +1,9 @@
 //! Lockstep comparison of two machines: the same program runs on both in
 //! batches of emulated time, and after every batch everything a program
 //! can see or change must be equal: the registers, the system registers,
-//! the instruction count, RAM, video memory and the code generations. With
+//! the instruction count, RAM and video memory. (Not the code generations:
+//! the recompiler's code writes pages no code runs from without bumping
+//! theirs, see `Bus::page_kind`.) With
 //! one machine on the interpreter and the other on the dynamic recompiler,
 //! this checks that the recompiler is exact.
 
@@ -55,8 +57,8 @@ impl State {
     }
 }
 
-/// Where the machines' memories differ, if they do: RAM, the code
-/// generations, video memory, the palette and the debug console.
+/// Where the machines' memories differ, if they do: RAM, video memory, the
+/// palette and the debug console.
 pub fn memory_difference(a: &Cpu, b: &Cpu) -> Option<String> {
     fn first<T: PartialEq + std::fmt::Debug>(name: &str, x: &[T], y: &[T]) -> Option<String> {
         if x == y {
@@ -69,7 +71,6 @@ pub fn memory_difference(a: &Cpu, b: &Cpu) -> Option<String> {
     }
     let (p, q) = (&a.bus, &b.bus);
     first("RAM", p.ram(), q.ram())
-        .or_else(|| first("page_gen", &p.page_gen, &q.page_gen))
         .or_else(|| first("VGA memory", &p.vga.vram_graphics, &q.vga.vram_graphics))
         .or_else(|| first("text memory", &p.vga.vram_text, &q.vga.vram_text))
         .or_else(|| first("palette", &p.vga.palette, &q.vga.palette))

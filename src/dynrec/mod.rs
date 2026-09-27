@@ -157,7 +157,7 @@ impl DynState {
             if self.unavailable {
                 return Run::Interpret;
             }
-            match engine::Engine::new(cpu.model, self.code_size.unwrap_or(CODE_SIZE)) {
+            match engine::Engine::new(cpu.model, cpu.bus.ram().len() as u32, self.code_size.unwrap_or(CODE_SIZE)) {
                 Ok(engine) => self.engine = Some(Box::new(engine)),
                 Err(e) => {
                     cpu.bus.log_string(&format!("[DYNREC] No memory for translated code ({}), interpreting", e));
@@ -316,12 +316,14 @@ mod engine {
         /// a block went stale or wrote over itself (see
         /// `block::WATCH_AFTER`).
         pokes: HashMap<u32, Box<[u8]>>,
-        /// The CPU model the blocks' handlers were chosen for.
+        /// The CPU model the blocks' handlers were chosen for, and the size
+        /// of the RAM their code was translated for.
         model: CpuModel,
+        ram_len: u32,
     }
 
     impl Engine {
-        pub fn new(model: CpuModel, code_size: usize) -> std::io::Result<Self> {
+        pub fn new(model: CpuModel, ram_len: u32, code_size: usize) -> std::io::Result<Self> {
             let mut mem = CodeMemory::new(code_size)?;
             let tramp = backend::trampoline();
             let base = mem.add(&tramp.bytes).expect("room for the trampoline") as usize;
@@ -341,6 +343,7 @@ mod engine {
                 front: vec![0; 1 << FRONT_BITS].into_boxed_slice(),
                 pokes: HashMap::new(),
                 model,
+                ram_len,
             })
         }
 
@@ -377,10 +380,13 @@ mod engine {
 
         /// The block for `key` at `at`, translating it if need be; None if
         /// no block starts there.
-        fn find(&mut self, cpu: &Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
+        fn find(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
             if let Some(index) = self.lookup(key) {
                 return Some(index);
             }
+            // Writes to the instruction's blocks must bump their generations
+            // from now on (see `Bus::code_blocks`), for `none` too.
+            cpu.bus.mark_code(key.phys as usize, key.phys as usize + 15);
             let none = key.index() >> (FRONT_BITS - NONE_BITS);
             let gens = instr_gens(&cpu.bus.page_gen, key.phys);
             if self.none[none] == Some((key, gens)) {
@@ -394,10 +400,11 @@ mod engine {
         }
 
         /// Translate the block at `at`. None if no block starts there.
-        fn translate(&mut self, cpu: &Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
+        fn translate(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
             let single = key.mode & 2 != 0;
             let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
             let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK }, pokes)?;
+            cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
             let stack32 = key.mode & 4 != 0;
             let items: Vec<_> = (0..data.count())
                 .map(|ix| {
@@ -408,7 +415,7 @@ mod engine {
             let native = items.iter().filter(|i| i.is_some()).count() as u64;
             let mut data = NonNull::from(Box::leak(Box::new(data)));
             // SAFETY: just made, and owned by the block from here on.
-            let code = backend::block(unsafe { data.as_ref() }, &items, !single);
+            let code = backend::block(unsafe { data.as_ref() }, &items, !single, self.ram_len);
             let base = match self.mem.add(&code.bytes) {
                 Some(base) => base,
                 None => {
@@ -565,10 +572,12 @@ mod engine {
         }
 
         pub fn run(&mut self, cpu: &mut Cpu, at: &At, single: bool, stats: &mut DynStats) -> Run {
-            if cpu.model != self.model {
-                // The handlers were chosen for the other model.
+            if cpu.model != self.model || cpu.bus.ram().len() as u32 != self.ram_len {
+                // The handlers were chosen for the other model, or the code
+                // for another size of RAM.
                 self.flush(stats);
                 self.model = cpu.model;
+                self.ram_len = cpu.bus.ram().len() as u32;
             }
             let mode = at.code32 as u8 | (single as u8) << 1 | (cpu.stack32() as u8) << 2;
             let key = Key { phys: at.phys_ip as u32, eip: at.eip, mode };
@@ -594,6 +603,7 @@ mod engine {
                 self.ctx.ram_len = cpu.bus.ram().len() as u64;
                 self.ctx.tlb = cpu.tlb.entries_ptr() as *const u8;
                 self.ctx.page_gen = cpu.bus.page_gen.as_ptr();
+                self.ctx.code_blocks = cpu.bus.code_blocks.as_ptr();
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and
                 // gets the CPU and context it expects.

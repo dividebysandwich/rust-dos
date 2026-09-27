@@ -48,6 +48,10 @@ pub struct Machine {
     /// `bus.page_gen` before the test: pages whose generation moved were
     /// written and get cleared afterwards.
     gen_before: Vec<u32>,
+    /// The 4 KiB pages of the test's initial and final RAM, which get
+    /// cleared afterwards too: the recompiler writes pages it runs no code
+    /// from without moving their generations (see `Bus::page_kind`).
+    test_pages: Vec<usize>,
 }
 
 impl Machine {
@@ -80,6 +84,7 @@ impl Machine {
             cpu,
             log,
             gen_before,
+            test_pages: Vec::new(),
         }
     }
 
@@ -125,6 +130,12 @@ impl Machine {
         self.reset_platform();
         self.log.borrow_mut().clear();
         self.gen_before.copy_from_slice(&self.cpu.bus.page_gen);
+        self.test_pages.clear();
+        for &(addr, _) in test.initial_ram.iter().chain(&test.final_ram) {
+            self.test_pages.push(addr as usize >> 12);
+        }
+        self.test_pages.sort_unstable();
+        self.test_pages.dedup();
 
         let bus = &mut self.cpu.bus;
         for &(addr, value) in &test.initial_ram {
@@ -227,11 +238,17 @@ impl Machine {
         RunEnd::NoHalt
     }
 
-    /// Clear everything the test wrote: the 4 KiB pages whose generation
-    /// moved (the test's own bytes and any stray writes) and, if touched,
-    /// the VGA memory.
+    /// Clear everything the test wrote: the 4 KiB pages of its initial and
+    /// final RAM, those whose generation moved (the test's own bytes and
+    /// any stray writes) and, if touched, the VGA memory.
     pub fn clean(&mut self) {
         let len = self.cpu.bus.ram().len();
+        for &page in &self.test_pages {
+            let start = page << 12;
+            if start < len {
+                self.cpu.bus.fill_ram(start..(start + 4096).min(len), 0);
+            }
+        }
         let pages = self.gen_before.len();
         for index in 0..pages {
             if self.cpu.bus.page_gen[index] == self.gen_before[index] {

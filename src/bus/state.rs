@@ -97,6 +97,7 @@ impl Bus {
             sb_irq: _,
             irq_ready: _,
             page_gen: _,
+            code_blocks: _,
             // A service's port accesses for a V86 monitor, made within the
             // instructions after it.
             port_accesses: _,
@@ -243,6 +244,7 @@ impl Bus {
             sb_irq: _,
             irq_ready: _,
             page_gen: _,
+            code_blocks: _,
             reset_requested: _,
             port_accesses: _,
             port_log: _,

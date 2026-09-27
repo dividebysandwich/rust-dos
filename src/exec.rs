@@ -757,11 +757,18 @@ fn execute_at<const HOOK: bool>(
             gens.get_unchecked(phys_ip >> GEN_SHIFT).wrapping_add(*gens.get_unchecked((phys_ip + 14) >> GEN_SHIFT))
         };
         let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
+        let code_blocks = &mut cpu.bus.code_blocks;
         fetch.cache.get_or_decode(phys_ip, eip, code32, page_gen, |slot| {
             let decoder = if code32 { decoder32 } else { decoder16 };
             decoder.set_position(phys_ip).unwrap();
             decoder.set_ip(eip as u64);
             decoder.decode_out(slot);
+            // Writes to the blocks the instruction is in must bump their
+            // generations from now on (see `Bus::code_blocks`).
+            let last = if slot.is_invalid() { 14 } else { slot.len() - 1 };
+            for block in (phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT {
+                code_blocks[block] = 1;
+            }
         })
     } else {
         match fetch_slow(cpu, lin_ip, eip, code32) {

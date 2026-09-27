@@ -64,6 +64,8 @@ pub struct JitCtx {
     /// RAM and its code generations.
     pub ram: *const u8,
     pub page_gen: *const u32,
+    /// `Bus::code_blocks`.
+    pub code_blocks: *const u8,
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
     /// `jit_memref`, `jit_read` and `jit_write`.
@@ -97,10 +99,13 @@ pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
 pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
 pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CODE_BLOCKS: i32 = offset_of!(JitCtx, code_blocks) as i32;
 pub const CTX_EXIT_DATA: i32 = offset_of!(JitCtx, exit_data) as i32;
 pub const CTX_MEMREF: i32 = offset_of!(JitCtx, memref) as i32;
 pub const CTX_READ: i32 = offset_of!(JitCtx, read) as i32;
 pub const CTX_WRITE: i32 = offset_of!(JitCtx, write) as i32;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
 pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
@@ -127,6 +132,7 @@ impl JitCtx {
             exit,
             ram: std::ptr::null(),
             page_gen: std::ptr::null(),
+            code_blocks: std::ptr::null(),
             exit_data: std::ptr::null_mut(),
             memref: jit_memref as *const () as usize,
             read: jit_read as *const () as usize,

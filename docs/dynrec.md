@@ -106,8 +106,8 @@ Each block's prologue checks three things:
 2. **The CS limit:** it is at least what the block needs to be fetched
    through the code window.
 3. **The code:** its bytes are unchanged. The sum of the code generations
-   (`Bus::page_gen`, one per 64-byte chunk, bumped by every RAM write) of
-   its chunks is the one it was translated with. If the sum differs,
+   (`Bus::page_gen`, one per 64-byte chunk, see [Code chunks](#code-chunks))
+   of its chunks is the one it was translated with. If the sum differs,
    `jit_revalidate` compares the bytes, and the block goes on if only
    something else in its chunks was written, or only its watched bytes
    (see [Poked code](#poked-code)).
@@ -126,10 +126,31 @@ Other exactness rules:
   execution loop sets EIP, delivers the fault through the interpreter's
   own tail (`exec::after_fault`), and counts it.
 - **Self-modifying code.** A store that hits the block's later bytes stops
-  the block after the storing instruction. Native stores compare their
-  physical address with those bytes; instructions run through their
-  handlers compare the code generations and then the bytes. The block is
-  translated again next time.
+  the block after the storing instruction. Native stores into a chunk with
+  code compare their physical address with those bytes; instructions run
+  through their handlers compare the code generations and then the bytes.
+  The block is translated again next time.
+
+### Code chunks
+
+The code generations only matter for RAM that code was decoded from:
+the interpreter's decoded-instruction cache and the blocks check the
+generations of the chunks their bytes are in. So the bus marks those
+chunks (`Bus::code_blocks`) where the interpreter decodes an instruction
+and where the recompiler translates a block or finds none can start, and
+a chunk stays marked. The chunk before one with code is marked as well:
+a write of up to 4 bytes that reaches into a chunk with code starts in it
+or in the chunk before.
+
+The bus bumps the generations of every chunk it writes. The x86-64 code
+generator's stores check the mark of the chunk their first byte is in,
+and write a chunk without code directly, without bumping its generation:
+the stores of programs that keep their data apart from their code (the
+pixels a texture mapper draws, the stack) cost one byte's test. A store
+into a chunk with code goes out of line, bumping the generations and
+checking for a store into the block's later bytes. The code generations
+of the two cores therefore differ, and the lockstep test doesn't compare
+them.
 
 ### Poked code
 
@@ -210,7 +231,9 @@ first instruction in a block that changes them:
   limits and rights. With paging on, the code looks the page up in the
   TLB as `Cpu::lin_to_phys` does. Plain RAM within a page is then read and
   written directly, with the code generations bumped as the bus bumps
-  them.
+  them where the chunk holds code (see [Code chunks](#code-chunks)). The
+  x86-64 code compares the address with the end of RAM as a constant: the
+  code is translated for the machine's size of RAM.
 - Anything else (a TLB miss, video memory, page-crossing operands, a
   fault) goes through `jit_memref`, which runs the real `Cpu::mem_ref`. It
   returns the physical address when the operand turns out to be plain
@@ -223,7 +246,8 @@ Registers while translated code runs:
 | the `Cpu` | RBX | X19, and X27 for its fields past X19's offsets' reach |
 | the `JitCtx` | R12 | X20 |
 | RAM | R13 | X21 |
-| the code generations | R14 | X22 |
+| the code generations | | X22 |
+| which chunks hold code (`Bus::code_blocks`) | R14 | |
 | set when a store hit the block's later bytes | R15 | W23 |
 | the guest's arithmetic flags | EBP | W28 |
 | the operations' temporaries | R8–R11 (saved around calls) | W24–W26 (kept by calls) |
@@ -319,8 +343,7 @@ and compares them after each:
 
 - the registers, CR0, CR2, CR3 and CPL;
 - the instruction counts and exceptions;
-- RAM, the code generations, video memory, the palette and the debug
-  console.
+- RAM, video memory, the palette and the debug console.
 
 The host's time is fixed for both (`hosttime::fix`).
 
