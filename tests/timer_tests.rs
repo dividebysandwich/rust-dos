@@ -284,6 +284,22 @@ fn bios_timer_handler_sends_eoi() {
 }
 
 #[test]
+fn bios_timer_handler_counts_down_the_diskette_motor() {
+    // Lightspeed sets the motor-off count to 1 and waits for a tick to
+    // clear it; when it runs out, the motors are off.
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.write_8(0x0440, 2);
+    cpu.bus.write_8(0x043F, 0x81);
+    rust_dos::interrupts::handle_hle(&mut cpu, 0x08);
+    assert_eq!((cpu.bus.read_8(0x0440), cpu.bus.read_8(0x043F)), (1, 0x81));
+    rust_dos::interrupts::handle_hle(&mut cpu, 0x08);
+    assert_eq!((cpu.bus.read_8(0x0440), cpu.bus.read_8(0x043F)), (0, 0x80));
+    // Run out, it stays at 0.
+    rust_dos::interrupts::handle_hle(&mut cpu, 0x08);
+    assert_eq!(cpu.bus.read_8(0x0440), 0);
+}
+
+#[test]
 fn bios_timer_handler_returns_with_the_interrupted_flags() {
     use rust_dos::cpu::CpuFlags;
     // A program's ISR chained to ours: the IRET must restore the flags of

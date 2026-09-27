@@ -31,4 +31,15 @@ pub fn tick(cpu: &mut Cpu) {
     cpu.bus.guest_write_16(0x046C, (ticks & 0xFFFF) as u16);
     cpu.bus.guest_write_16(0x046E, (ticks >> 16) as u16);
 
+    // Count down the diskette motor-off count (0040:0040); when it runs
+    // out, the motors are off (0040:003F). Programs set it to 1 and wait
+    // for the next tick to clear it (Lightspeed).
+    let motor_count = cpu.bus.guest_read_8(0x0440);
+    if motor_count != 0 {
+        cpu.bus.guest_write_8(0x0440, motor_count - 1);
+        if motor_count == 1 {
+            let motor_status = cpu.bus.guest_read_8(0x043F);
+            cpu.bus.guest_write_8(0x043F, motor_status & 0xF0);
+        }
+    }
 }
