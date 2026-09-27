@@ -10,8 +10,8 @@ pub const MANTISSA_MASK: u128 = (1u128 << 64) - 1;
 pub const MANTISSA_MASK_NOINT: u128 = 0x7FFF_FFFF_FFFF_FFFF;
 pub const INT_BIT_MASK: u128 = 1 << 63;
 pub const INT_BIT_MASK64: u64 = 1 << 63;
-pub const BCD_SIGN_POSITIVE: u8 = 0x0A;
-pub const BCD_SIGN_NEGATIVE: u8 = 0x0B;
+// Packed BCD keeps its sign in the top bit of the last byte.
+pub const BCD_SIGN: u8 = 0x80;
 pub const F64_EXP_BIAS: i32 = 1023;
 pub const F80_EXP_BIAS: i32 = 16383;
 #[allow(dead_code)]
@@ -367,34 +367,26 @@ impl F80 {
             bcd[i] = (hi << 4) | lo;
         }
 
-        bcd[9] = if self.is_negative() {
-            BCD_SIGN_NEGATIVE
-        } else {
-            BCD_SIGN_POSITIVE
-        };
+        bcd[9] = if self.is_negative() { BCD_SIGN } else { 0 };
 
         bcd
     }
 
-    #[allow(dead_code)]
     pub fn from_bcd_packed(&mut self, bcd: &[u8; 10]) {
         let mut value: u128 = 0;
 
+        // Digits above 9 give undefined results on an FPU: take them at
+        // face value rather than fault.
         for i in (0..9).rev() {
             let byte = bcd[i];
             let hi = (byte >> 4) & 0x0F;
             let lo = byte & 0x0F;
 
-            assert!(hi <= 9 && lo <= 9, "Invalid BCD digit");
-
             value = value * 100 + (hi as u128) * 10 + (lo as u128);
         }
 
-        let is_negative = match bcd[9] & 0x0F {
-            BCD_SIGN_NEGATIVE => true,
-            BCD_SIGN_POSITIVE => false,
-            _ => panic!("Invalid BCD sign"),
-        };
+        // The other bits of the sign byte are ignored.
+        let is_negative = bcd[9] & BCD_SIGN != 0;
 
         self.st = F80::encode_from_u128(value, is_negative);
     }

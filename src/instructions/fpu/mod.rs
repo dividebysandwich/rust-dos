@@ -48,6 +48,7 @@ pub fn handle(cpu: &mut Cpu, instr: &Instruction) {
         Mnemonic::Fild => data::fild(cpu, instr),
         Mnemonic::Fist => data::fist(cpu, instr),
         Mnemonic::Fistp => data::fistp(cpu, instr),
+        Mnemonic::Fbld => data::fbld(cpu, instr),
 
         // Store Float
         Mnemonic::Fst => data::fst(cpu, instr),

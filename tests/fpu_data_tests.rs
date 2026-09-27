@@ -203,12 +203,52 @@ fn test_fbstp_bcd_store() {
     // Packed BCD: 2 digits per byte. Little Endian.
     // Byte 0: 0x23
     // Byte 1: 0x01
-    // Byte 9: Sign (0x00 or 0x0A for +?) - F80 implementation specific
-    // Usually 0x23, 0x01, 0x00...
+    // Byte 9: Sign in bit 7, 0x00 for +
     
     let b0 = cpu.bus.read_8(addr);
     let b1 = cpu.bus.read_8(addr + 1);
+    let b9 = cpu.bus.read_8(addr + 9);
     
     assert_eq!(b0, 0x23);
     assert_eq!(b1, 0x01);
+    assert_eq!(b9, 0x00);
+}
+
+#[test]
+fn test_fbld_bcd_load() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let addr = 0x1000;
+
+    // -1234567890 as packed BCD: sign in bit 7 of byte 9
+    let bcd = [0x90, 0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x80];
+    for (i, b) in bcd.iter().enumerate() {
+        cpu.bus.write_8(addr + i, *b);
+    }
+
+    // DF 26 00 10: FBLD TBYTE PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDF, 0x26, 0x00, 0x10]);
+
+    assert_top_f64(&cpu, -1234567890.0);
+}
+
+#[test]
+fn test_fbld_fbstp_round_trip() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let addr = 0x1000;
+
+    // -999999999999999999: 18 digits, more than an f64 holds exactly
+    let bcd = [0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x80];
+    for (i, b) in bcd.iter().enumerate() {
+        cpu.bus.write_8(addr + i, *b);
+    }
+
+    // DF 26 00 10: FBLD TBYTE PTR [1000]
+    run_cpu_code(&mut cpu, &[0xDF, 0x26, 0x00, 0x10]);
+    // DF 36 10 10: FBSTP TBYTE PTR [1010]
+    run_cpu_code(&mut cpu, &[0xDF, 0x36, 0x10, 0x10]);
+
+    for (i, b) in bcd.iter().enumerate() {
+        assert_eq!(cpu.bus.read_8(addr + 0x10 + i), *b, "byte {}", i);
+    }
+    assert_eq!(cpu.fpu_tags[cpu.fpu_get_phys_index(0)], FPU_TAG_EMPTY);
 }

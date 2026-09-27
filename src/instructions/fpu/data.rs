@@ -49,6 +49,18 @@ pub fn fild(cpu: &mut Cpu, instr: &Instruction) {
     cpu.fpu_push(f);
 }
 
+// FBLD: Load BCD Integer (Convert to Float and Push)
+pub fn fbld(cpu: &mut Cpu, instr: &Instruction) {
+    let addr = calculate_addr(cpu, instr);
+    let mut bcd = [0u8; 10];
+    for i in 0..10 {
+        bcd[i] = cpu.lin_read_8(addr + i as usize);
+    }
+    let mut f = F80::new();
+    f.from_bcd_packed(&bcd);
+    cpu.fpu_push(f);
+}
+
 fn x87_round(f_val: f64, rc: u16) -> f64 {
     match rc {
         0 => {
