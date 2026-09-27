@@ -4,8 +4,8 @@
 //!
 //! The samples are DOSBox Staging's (`assets/disknoise`), 16-bit mono at
 //! 22050 Hz, played at twice that for the mixer's 44.1 kHz. Seeks sound
-//! different for sequential access (the same file as the last access, or a
-//! nearby track) and random access.
+//! different for sequential access (the same file as the last access on a
+//! hard disk, or a nearby track) and random access.
 
 use std::io::Cursor;
 
@@ -234,6 +234,12 @@ impl Device {
             return;
         }
         match access {
+            // A floppy's heads go back to the FAT and the directory between
+            // a file's clusters, which the file's own accesses don't show:
+            // its seeks are random, as DOSBox Staging plays its floppy
+            // images', mostly the first two samples and now and then the
+            // others.
+            Access::File { .. } if self.class == DiskClass::Floppy => self.sequential = false,
             Access::File { write, key } => {
                 let last = &mut self.last_file[write as usize];
                 self.sequential = *last == Some(key);
@@ -469,5 +475,26 @@ mod tests {
         }
         device.io(Access::File { write: false, key: 6 }, 0, &mut rng);
         assert!(!device.sequential);
+    }
+
+    #[test]
+    fn floppy_file_access_plays_every_seek() {
+        let mut device = Device::new(DiskClass::Floppy, Sounds::floppy());
+        device.set_mode(NoiseMode::SeekOnly);
+        let mut rng = Rng(1);
+        let mut picks = [0; 9];
+        for _ in 0..1000 {
+            device.io(Access::File { write: false, key: 5 }, 0, &mut rng);
+            assert!(!device.sequential);
+            picks[device.seek_index(&mut rng)] += 1;
+        }
+        // Mostly the first two, and each of the others now and then.
+        assert!(picks[..2].iter().sum::<i32>() > 700, "{:?}", picks);
+        assert!(picks[2..].iter().all(|&n| n > 0), "{:?}", picks);
+
+        // Tracks next to each other are the heads stepping on.
+        device.io(Access::Track(10), 0, &mut rng);
+        device.io(Access::Track(11), 0, &mut rng);
+        assert!(device.sequential);
     }
 }
