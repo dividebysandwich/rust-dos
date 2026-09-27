@@ -398,15 +398,15 @@ Esc closes it.
 
 Left and Right step a setting through its values, and move a slider (the
 volumes, the effects' mixes, the CRT's curvature and glow, the memory size
-and the joystick's deadzone) along its bar. Enter (or a click on a
-setting's `[button]`) lists the values to pick from, or types or picks
-one: the list takes Up and Down, and a letter jumps to the next value
-starting with it. Tab switches pages, and the mouse works too. The display settings, the CPU speed, the
-disk speeds and noises, the joystick and the volumes take effect at once.
-The processor, the video card, expanded and upper memory and the sound
-hardware change once no program is running, so a game isn't left without
-the card it set up. The memory size takes effect the next time rust-dos
-starts.
+and the joystick's deadzone) along its bar, as do their ◄ and ►. Enter (or
+a click on a setting's value) lists the values to pick from, or types or
+picks one: the list takes Up and Down, and a letter jumps to the next
+value starting with it. Tab switches pages, and the mouse works too. The
+display settings, the CPU speed, the disk speeds and noises, the joystick
+and the volumes take effect at once. The processor, the video card,
+expanded and upper memory and the sound hardware change once no program is
+running, so a game isn't left without the card it set up. The memory size
+takes effect the next time rust-dos starts.
 
 **F2** (or Ctrl+S) saves the settings of every page and the drives to the
 configuration file in use. Each setting gets a line: those you changed get

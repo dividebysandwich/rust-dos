@@ -1002,10 +1002,10 @@ enum Target {
     Tab(Page),
     /// A row of the page's list (absolute, not scrolled).
     Row(usize),
-    /// The ◄ or ► of a slider.
+    /// The ◄ or ► of a setting.
     Step(usize, isize),
-    /// The button of a setting that Enter changes, and of a field of a
-    /// row of several (`Item::fields`).
+    /// A setting's value, which a click changes as Enter does, and the
+    /// button of a field of a row of several (`Item::fields`).
     Button(usize),
     RowField(usize, usize),
     Key(UiKey),
@@ -2042,9 +2042,9 @@ impl ConfigUi {
             if item.input() == Input::Link {
                 continue;
             }
-            // Its list's values under the button's.
+            // Its list's values under its value.
             if selected {
-                anchor = Some((value_col - 1, row));
+                anchor = Some((value_col, row));
             }
             let fields = item.fields(&self.settings);
             if !fields.is_empty() {
@@ -2063,10 +2063,15 @@ impl ConfigUi {
                 continue;
             }
             let value = fit(&item.value(&self.settings, self.home.as_deref()), end.saturating_sub(value_col + 4));
-            if item.input() == Input::Slider {
+            // What Left and Right step has their arrows; a value picked
+            // from a list or typed is a button too.
+            if matches!(item.input(), Input::Choice | Input::Slider | Input::Presets) {
                 g.char(value_col, row, 0x11, draw::KEY);
                 self.hits.push(Hit { row, col: value_col, width: 1, target: Target::Step(i, -1) });
                 let after = g.text_to(value_col + 2, row, &value, draw::BRIGHT, end);
+                if item.input() != Input::Slider {
+                    self.hits.push(Hit { row, col: value_col + 2, width: after - value_col - 2, target: Target::Button(i) });
+                }
                 g.char(after + 1, row, 0x10, draw::KEY);
                 self.hits.push(Hit { row, col: after + 1, width: 1, target: Target::Step(i, 1) });
             } else {
