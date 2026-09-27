@@ -157,10 +157,10 @@ fn pm_table() -> Vec<u8> {
     table
 }
 
+/// Write `bytes` to the caller's buffer at `addr`, through the page tables
+/// of a Windows virtual machine.
 fn write_bytes(bus: &mut Bus, addr: usize, bytes: &[u8]) {
-    for (i, &b) in bytes.iter().enumerate() {
-        bus.write_8(addr + i, b);
-    }
+    bus.guest_write_bytes(addr as u32, bytes);
 }
 
 /// INT 10h AH=4Fh.

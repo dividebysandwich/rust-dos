@@ -40,9 +40,19 @@ pub fn handle(cpu: &mut Cpu) {
         // Windows' DOS manager asking about DOS's data, which the DOS 5
         // kernel answers itself.
         0x1607 if cpu.bx() == 0x0015 => dosmgr(cpu),
+        // Windows' 386 enhanced mode (DX bit 0 clear) starts: the keys
+        // reach its virtual machines through their BIOS. The registers
+        // come back as they were.
+        0x1605 if cpu.dx() & 1 == 0 => crate::bios::windows_keyboard(&mut cpu.bus, true),
         // Windows exited: expanded memory's page frame is the manager's
-        // again. The registers come back as they were.
-        0x1606 => crate::ems::windows_exited(&mut cpu.bus),
+        // again, and the keys are the built-in DOS's. The registers come
+        // back as they were.
+        0x1606 => {
+            if cpu.dx() & 1 == 0 {
+                crate::bios::windows_keyboard(&mut cpu.bus, false);
+            }
+            crate::ems::windows_exited(&mut cpu.bus);
+        }
         // The System File Table entry BX in ES:DI.
         0x1216 => {
             let sft = cpu.bx();
@@ -51,7 +61,8 @@ pub fn handle(cpu: &mut Cpu) {
         // The slot of handle BX in the running process's job file table
         // in ES:DI, which holds the handle's System File Table entry.
         0x1220 => {
-            let at = dos_files::slot_address(&cpu.bus, cpu.current_psp, cpu.bx());
+            let (psp, handle) = (cpu.current_psp, cpu.bx());
+            let at = dos_files::slot_address(&mut cpu.bus, psp, handle);
             point_es_di(cpu, at);
         }
         _ if cpu.get_ah() == 0x15 => super::mscdex::handle(cpu, cpu.get_al()),

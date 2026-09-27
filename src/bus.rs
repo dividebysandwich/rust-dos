@@ -403,6 +403,13 @@ impl Bus {
         // (101-key) keyboard.
         self.write_8(0x0417, 0x20);
         self.write_8(0x0496, crate::keyboard::ENHANCED_KEYBOARD);
+        // The keyboard buffer, from 40:1E to 40:3E, empty: DOS's keys are
+        // the host's (`keyboard_buffer`), but the machines of Windows' 386
+        // enhanced mode keep theirs there (`keyboard::bios_keystrokes`).
+        self.write_16(0x041A, 0x001E);
+        self.write_16(0x041C, 0x001E);
+        self.write_16(0x0480, 0x001E);
+        self.write_16(0x0482, 0x003E);
 
         // 0x0484: Rows on Screen (minus 1). 24 = 25-row default.
         self.write_8(0x0484, 24);

@@ -179,7 +179,7 @@ fn exec_gives_the_child_its_own_environment() {
     let (vars, path) = environment(&cpu, env_seg);
     assert!(vars.contains(&"BLASTER=A220 I7 D1".to_string()), "{:?}", vars);
     assert_eq!(path, "C:\\CHILD.COM");
-    let env_mcb = rust_dos::mcb::read_mcb(&cpu.bus, env_seg - 1);
+    let env_mcb = rust_dos::mcb::read_mcb(&mut cpu.bus, env_seg - 1);
     assert_eq!(env_mcb.owner, child, "the child owns its environment");
 }
 

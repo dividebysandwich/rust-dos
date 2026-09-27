@@ -145,7 +145,7 @@ fn tsr_started_from_shell_stays_resident() {
 
     assert_eq!(ivt(&cpu, 0x08), (tsr, 0x0180));
     assert_eq!(ivt(&cpu, 0x16).0, 0xF000);
-    let chain = walk(&cpu.bus);
+    let chain = walk(&mut cpu.bus);
     assert_eq!((chain[0].1.owner, chain[0].1.size), (tsr, 0x20));
     assert!(chain[1].1.is_free() && chain[1].1.is_last());
 
@@ -161,7 +161,7 @@ fn tsr_started_from_shell_stays_resident() {
     int21(&mut cpu, 0x4C);
     cpu.load_shell();
     assert_eq!(cpu.transient_segment(), tsr + 0x21);
-    assert_eq!(walk(&cpu.bus).len(), 2);
+    assert_eq!(walk(&mut cpu.bus).len(), 2);
 }
 
 #[test]
@@ -259,7 +259,7 @@ fn tsr_loaded_by_a_program_gives_back_the_rest_of_its_memory() {
     cpu.set_reg8(Register::AL, 0);
     int21(&mut cpu, 0x31);
     assert_eq!(cpu.current_psp, parent);
-    let block = walk(&cpu.bus).into_iter().find(|(seg, _)| seg + 1 == driver).unwrap().1;
+    let block = walk(&mut cpu.bus).into_iter().find(|(seg, _)| seg + 1 == driver).unwrap().1;
     assert_eq!(block.size, 0x20);
 
     // The parent can allocate what the driver didn't keep.

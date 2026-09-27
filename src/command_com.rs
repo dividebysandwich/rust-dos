@@ -87,10 +87,13 @@ enum Asked {
     Line,
 }
 
-/// A COMMAND.COM that runs, by the PSP of its program.
+/// A COMMAND.COM that runs, by the PSP of its program and where that is
+/// in physical memory (`Cpu::psp_address`): the DOS machines of Windows'
+/// 386 enhanced mode each run one at the same segment.
 #[derive(Clone, Debug)]
 pub struct SecondaryShell {
     psp: u16,
+    at: u32,
     batch: Batch,
     errorlevel: u8,
     wait: Option<ShellWait>,
@@ -119,6 +122,7 @@ impl SecondaryShell {
     fn new(psp: u16, tail: &str) -> Self {
         let mut shell = Self {
             psp,
+            at: psp as u32 * 16,
             batch: Batch::default(),
             errorlevel: 0,
             wait: None,
@@ -154,21 +158,36 @@ impl SecondaryShell {
 /// SERVICE_COMMAND: take the result of what the program did last and tell
 /// it what to do next, in AL (and the exit code in BL).
 pub fn service(cpu: &mut Cpu) {
-    let psp = cpu.current_psp;
-    if cpu.secondary_shells.last().map(|s| s.psp) != Some(psp) {
-        let base = psp as usize * 16;
-        let len = cpu.bus.read_8(base + 0x80) as usize;
-        let tail: Vec<u8> = (0..len.min(126)).map(|i| cpu.bus.read_8(base + 0x81 + i)).collect();
-        let shell = SecondaryShell::new(psp, &crate::dosstr::from_bytes(&tail));
-        // The program keeps the memory it needs; the rest is for the
-        // programs it runs.
-        let _ = crate::mcb::resize(&mut cpu.bus, psp, PARAGRAPHS);
-        if shell.command.is_none() {
-            print_string(cpu, &format!("\r\nRust-DOS {}. Type EXIT to go back.\r\n", env!("CARGO_PKG_VERSION")));
-        }
-        cpu.secondary_shells.push(shell);
+    // The running process is the machine's own under Windows; the screen
+    // the command line writes is there before it runs, as it runs again
+    // from the start after a fault.
+    crate::dos_data::load_process_state(cpu);
+    if !crate::video::console_ready(cpu) {
+        return;
     }
-    let mut shell = cpu.secondary_shells.pop().expect("pushed above");
+    let psp = cpu.current_psp;
+    let at = cpu.psp_address(psp);
+    let found = cpu.secondary_shells.iter().rposition(|s| s.psp == psp && s.at == at);
+    let mut shell = match found {
+        Some(index) => cpu.secondary_shells.remove(index),
+        None => {
+            let base = psp as u32 * 16;
+            let len = cpu.bus.guest_read_8(base + 0x80) as usize;
+            let mut tail = vec![0u8; len.min(126)];
+            cpu.bus.guest_read_bytes(base + 0x81, &mut tail);
+            if cpu.bus.guest_faulted() {
+                return;
+            }
+            let shell = SecondaryShell { at, ..SecondaryShell::new(psp, &crate::dosstr::from_bytes(&tail)) };
+            // The program keeps the memory it needs; the rest is for the
+            // programs it runs.
+            let _ = crate::mcb::resize(&mut cpu.bus, psp, PARAGRAPHS);
+            if shell.command.is_none() {
+                print_string(cpu, &format!("\r\nRust-DOS {}. Type EXIT to go back.\r\n", env!("CARGO_PKG_VERSION")));
+            }
+            shell
+        }
+    };
     shell.swap(cpu);
     let next = step(cpu, &mut shell);
     shell.swap(cpu);
@@ -182,12 +201,13 @@ pub fn service(cpu: &mut Cpu) {
             cpu.set_reg8(iced_x86::Register::BL, code);
         }
     }
+    crate::dos_data::store_process_state(cpu);
 }
 
 /// With the shell's state in the machine's place: what the program does
 /// next, or Err(exit code).
 fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
-    let base = shell.psp as usize * 16;
+    let base = shell.psp as u32 * 16;
     match std::mem::replace(&mut shell.asked, Asked::Nothing) {
         Asked::Nothing => {}
         Asked::Exec => {
@@ -213,8 +233,9 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
             }
         }
         Asked::Line => {
-            let len = cpu.bus.read_8(base + LINE as usize + 1) as usize;
-            let line: Vec<u8> = (0..len).map(|i| cpu.bus.read_8(base + LINE as usize + 2 + i)).collect();
+            let len = cpu.bus.guest_read_8(base + LINE as u32 + 1) as usize;
+            let mut line = vec![0u8; len];
+            cpu.bus.guest_read_bytes(base + LINE as u32 + 2, &mut line);
             let line = crate::dosstr::from_bytes(&line);
             print_string(cpu, "\r\n");
             match cpu.shell_wait.take() {
@@ -253,7 +274,7 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
     if cpu.batch.echo {
         crate::shell::show_prompt(cpu);
     }
-    cpu.bus.write_8(base + LINE as usize, 128);
+    cpu.bus.guest_write_8(base + LINE as u32, 128);
     shell.asked = Asked::Line;
     Ok(READ_LINE)
 }
@@ -303,32 +324,32 @@ fn wait_action(shell: &mut SecondaryShell, wait: &ShellWait) -> u8 {
 /// Write what EXEC needs into the program's memory: the path, the command
 /// tail, the FCBs of the first two parameters and the parameter block.
 fn set_up_exec(cpu: &mut Cpu, psp: u16, path: &str, args: &str) {
-    let base = psp as usize * 16;
+    let base = psp as u32 * 16;
     let bus = &mut cpu.bus;
     let mut name = crate::dosstr::to_bytes(path);
     name.truncate(127);
     name.push(0);
-    bus.load_bytes(base + PATH as usize, &name);
+    bus.guest_write_bytes(base + PATH as u32, &name);
     let args = crate::dosstr::to_bytes(args.trim());
     let mut tail = Vec::new();
     if !args.is_empty() {
         tail.push(b' ');
         tail.extend(args.iter().take(125));
     }
-    bus.write_8(base + TAIL as usize, tail.len() as u8);
-    bus.load_bytes(base + TAIL as usize + 1, &tail);
-    bus.write_8(base + TAIL as usize + 1 + tail.len(), 0x0D);
-    crate::interrupts::fcb::set_fcbs(bus, base + FCB1 as usize, base + FCB2 as usize, &args);
-    let params = base + PARAMS as usize;
-    bus.write_16(params, 0);
+    tail.insert(0, tail.len() as u8);
+    tail.push(0x0D);
+    bus.guest_write_bytes(base + TAIL as u32, &tail);
+    crate::interrupts::fcb::set_fcbs(bus, base + FCB1 as u32, base + FCB2 as u32, &args);
+    let params = base + PARAMS as u32;
+    bus.guest_write_16(params, 0);
     for (i, offset) in [TAIL, FCB1, FCB2].into_iter().enumerate() {
-        bus.write_16(params + 2 + 4 * i, offset);
-        bus.write_16(params + 4 + 4 * i, psp);
+        bus.guest_write_16(params + 2 + 4 * i as u32, offset);
+        bus.guest_write_16(params + 4 + 4 * i as u32, psp);
     }
 }
 
 crate::state_enum!(Asked { Asked::Nothing, Asked::Exec, Asked::Key, Asked::Line });
-crate::state_fields!(SecondaryShell { psp, batch, errorlevel, wait, once, command, asked });
+crate::state_fields!(SecondaryShell { psp, at, batch, errorlevel, wait, once, command, asked });
 
 impl Default for SecondaryShell {
     fn default() -> Self {

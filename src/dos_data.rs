@@ -9,6 +9,7 @@
 //! BX=0015h hands it.
 
 use crate::bus::Bus;
+use crate::cpu::Cpu;
 use crate::disk::{DriveKind, LASTDRIVE};
 
 /// Where it is: above the shell's stack (`cpu::SHELL_STACK`), below the
@@ -44,9 +45,6 @@ pub const SDA_SIZE: u16 = 0x078C;
 pub const SDA_ALWAYS: u16 = 0x001A;
 /// The InDOS flag (AH=34h), after the critical error flag.
 pub const INDOS: u16 = SDA + 0x01;
-const SDA_DTA: u16 = SDA + 0x0C;
-const SDA_PSP: u16 = SDA + 0x10;
-const SDA_DRIVE: u16 = SDA + 0x16;
 const SDA_AX: u16 = SDA + 0x1A;
 /// The machine number SHARE tells processes apart by.
 const SDA_USER_ID: u16 = SDA + 0x1E;
@@ -250,17 +248,17 @@ fn write_disk_buffer(bus: &mut Bus, first_drive: Option<u8>) {
 }
 
 /// Drive `drive`'s current directory structure: its current directory,
-/// what kind of drive it is and its DPB.
+/// what kind of drive it is and its DPB. Written as DOS writes it, through
+/// the page tables while a service runs with paging on, where Windows'
+/// DOSMGR may keep the structures of each virtual machine apart.
 pub fn write_cds(bus: &mut Bus, drive: u8) {
-    let at = address(CDS + drive as u16 * CDS_SIZE);
-    bus.fill_ram(at..at + CDS_SIZE as usize, 0);
+    let at = address(CDS + drive as u16 * CDS_SIZE) as u32;
+    bus.guest_fill(at, CDS_SIZE as usize, 0);
     let letter = crate::disk::drive_letter(drive) as u8;
     let dir = bus.disk.get_current_directory_of(drive).unwrap_or_default();
     let mut path = vec![letter, b':', b'\\'];
-    path.extend(dir.bytes().take(0x43 - 4));
-    for (i, &b) in path.iter().enumerate() {
-        bus.write_8(at + i, b);
-    }
+    path.extend(crate::dosstr::to_bytes(&dir).into_iter().take(0x43 - 4));
+    bus.guest_write_bytes(at, &path);
     // 43: physical drive; with the network redirector's bit and
     // MSCDEX's for a CD-ROM; nothing for a drive that isn't there.
     let attributes = match bus.disk.drive_kind(drive) {
@@ -268,19 +266,19 @@ pub fn write_cds(bus: &mut Bus, drive: u8) {
         Some(DriveKind::CdRom) => 0xC080,
         Some(_) => 0x4000,
     };
-    bus.write_16(at + 0x43, attributes);
+    bus.guest_write_16(at + 0x43, attributes);
     if attributes == 0x4000 {
-        bus.write_32(at + 0x45, far(dpb(drive))); // 45: DPB
+        bus.guest_write_32(at + 0x45, far(dpb(drive))); // 45: DPB
     }
-    bus.write_16(at + 0x49, 0xFFFF); // 49: current directory's cluster unknown
-    bus.write_16(at + 0x4B, 0xFFFF);
-    bus.write_16(at + 0x4D, 0xFFFF);
-    bus.write_16(at + 0x4F, 2); // 4F: the backslash of the root
+    bus.guest_write_16(at + 0x49, 0xFFFF); // 49: current directory's cluster unknown
+    bus.guest_write_16(at + 0x4B, 0xFFFF);
+    bus.guest_write_16(at + 0x4D, 0xFFFF);
+    bus.guest_write_16(at + 0x4F, 2); // 4F: the backslash of the root
 }
 
 /// Say in the List of Lists whether upper memory is linked.
 pub fn set_upper_linked(bus: &mut Bus, linked: bool) {
-    bus.write_8(address(SYSVARS + 0x63), linked as u8);
+    bus.guest_write_8(address(SYSVARS + 0x63) as u32, linked as u8);
 }
 
 /// Fill in a DOS 4+ style Drive Parameter Block with the drive's FAT
@@ -324,20 +322,86 @@ fn write_dosmgr_patches(bus: &mut Bus) {
 
 /// What DOS's INT 21h dispatcher keeps in the SDA on entry: the caller's
 /// AX, BX and DS.
-pub fn enter_dos(bus: &mut Bus, ax: u16, bx: u16, ds: u16) {
-    bus.write_16(address(SDA_AX), ax);
-    bus.write_16(address(SDA_SAVE_BX), bx);
-    bus.write_16(address(SDA_SAVE_DS), ds);
+pub fn enter_dos(cpu: &mut Cpu) {
+    load_process_state(cpu);
+    let (ax, bx, ds) = (cpu.ax(), cpu.bx(), cpu.ds());
+    let bus = &mut cpu.bus;
+    bus.guest_write_16(address(SDA_AX) as u32, ax);
+    bus.guest_write_16(address(SDA_SAVE_BX) as u32, bx);
+    bus.guest_write_16(address(SDA_SAVE_DS) as u32, ds);
 }
 
 /// The state of DOS the SDA holds, as it is after a DOS call: the DTA, the
-/// running process and the current drive, with DOS left (InDOS 0).
-pub fn leave_dos(bus: &mut Bus, psp: u16) {
+/// running process and the current drive, the last error and the return
+/// code of the last process that ended, with DOS left (InDOS 0).
+pub fn leave_dos(cpu: &mut Cpu) {
+    store_process_state(cpu);
+    cpu.bus.guest_write_8(address(INDOS) as u32, 0);
+}
+
+/// Keep the state of DOS in the SDA, where `load_process_state` finds it:
+/// the DTA, the running process and the current drive, the last error and
+/// the return code of the last process that ended.
+pub fn store_process_state(cpu: &mut Cpu) {
+    let (psp, returned, error) = (cpu.current_psp, cpu.last_child_exit, cpu.last_dos_error);
+    let bus = &mut cpu.bus;
     let (segment, offset) = (bus.dta_segment, bus.dta_offset);
-    bus.write_16(address(SDA_DTA), offset);
-    bus.write_16(address(SDA_DTA + 2), segment);
-    bus.write_16(address(SDA_PSP), psp);
     let drive = bus.disk.get_current_drive();
-    bus.write_8(address(SDA_DRIVE), drive);
-    bus.write_8(address(INDOS), 0);
+    let sda = address(SDA) as u32;
+    bus.guest_write_16(sda + 0x04, error);
+    bus.guest_write_16(sda + 0x0C, offset);
+    bus.guest_write_16(sda + 0x0E, segment);
+    bus.guest_write_16(sda + 0x10, psp);
+    bus.guest_write_16(sda + 0x14, returned);
+    bus.guest_write_8(sda + 0x16, drive);
+}
+
+/// Take the state of DOS the SDA holds as the one to work on, while a
+/// service runs with paging on: in Windows' 386 enhanced mode each virtual
+/// machine has an SDA of its own (DOSMGR swaps it with the machine), and
+/// with it its own running process, DTA, current drive, last error and
+/// return code, which the emulator's copies are of the machine that
+/// called DOS last. Without paging the emulator's copies are the ones.
+pub fn load_process_state(cpu: &mut Cpu) {
+    if cpu.bus.guest_paging.is_none() {
+        return;
+    }
+    let sda = address(SDA) as u32;
+    let bus = &mut cpu.bus;
+    let error = bus.guest_read_16(sda + 0x04);
+    let (offset, segment) = (bus.guest_read_16(sda + 0x0C), bus.guest_read_16(sda + 0x0E));
+    let psp = bus.guest_read_16(sda + 0x10);
+    let returned = bus.guest_read_16(sda + 0x14);
+    let drive = bus.guest_read_8(sda + 0x16);
+    if bus.guest_faulted() {
+        return;
+    }
+    (bus.dta_segment, bus.dta_offset) = (segment, offset);
+    bus.disk.set_current_drive(drive);
+    cpu.current_psp = psp;
+    cpu.last_child_exit = returned;
+    cpu.last_dos_error = error;
+    load_current_directories(&mut cpu.bus);
+}
+
+/// Take each drive's current directory from its current directory
+/// structure, which CHDIR writes (`write_cds`) and Windows' DOSMGR keeps
+/// for each virtual machine: another machine's CD leaves this one's where
+/// it was.
+fn load_current_directories(bus: &mut Bus) {
+    let drives: Vec<u8> = (0..LASTDRIVE).filter(|&d| bus.disk.is_mounted(d)).collect();
+    for drive in drives {
+        let mut path = [0u8; 0x43];
+        bus.guest_read_bytes(address(CDS + drive as u16 * CDS_SIZE) as u32, &mut path);
+        if bus.guest_faulted() {
+            return;
+        }
+        let path = &path[..path.iter().position(|&b| b == 0).unwrap_or(path.len())];
+        let letter = crate::disk::drive_letter(drive) as u8;
+        let Some(dir) = path.strip_prefix(&[letter, b':', b'\\'][..]) else { continue };
+        let dir = crate::dosstr::from_bytes(dir);
+        if bus.disk.get_current_directory_of(drive).is_some_and(|current| current != dir) {
+            bus.disk.set_current_directory(&format!("{}:\\{}", letter as char, dir));
+        }
+    }
 }

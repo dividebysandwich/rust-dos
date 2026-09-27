@@ -160,7 +160,7 @@ fn test_int21_ah4b_exec() {
     let env_seg_ptr_phys = cpu.get_physical_addr(psp_seg, 0x2C);
     let new_env_seg = cpu.bus.read_16(env_seg_ptr_phys);
     assert_ne!(new_env_seg, 0);
-    let env_mcb = rust_dos::mcb::read_mcb(&cpu.bus, new_env_seg - 1);
+    let env_mcb = rust_dos::mcb::read_mcb(&mut cpu.bus, new_env_seg - 1);
     assert_eq!(env_mcb.owner, psp_seg);
 
     fs::remove_dir_all(&root_path).unwrap();

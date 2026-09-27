@@ -9,7 +9,7 @@ use crate::diskio;
 use crate::disknoise::Access;
 use crate::dos_data;
 use crate::dos_files;
-use crate::video::print_char;
+use crate::video::console_write;
 
 /// A RETF for the case map routine of the country information.
 const CASE_MAP_ROUTINE: usize = 0xFF0FF;
@@ -28,23 +28,25 @@ fn save_caller(cpu: &mut Cpu) {
     let (ss, sp) = (cpu.ss(), cpu.sp().wrapping_sub(18));
     let registers = [cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx(), cpu.si(), cpu.di(), cpu.bp(), cpu.ds(), cpu.es()];
     for (i, value) in registers.into_iter().enumerate() {
-        let at = ss as usize * 16 + sp.wrapping_add(2 * i as u16) as usize;
-        cpu.bus.write_16(at, value);
+        let at = ss as u32 * 16 + sp.wrapping_add(2 * i as u16) as u32;
+        cpu.bus.guest_write_16(at, value);
     }
-    let base = psp as usize * 16;
-    cpu.bus.write_16(base + 0x2E, sp);
-    cpu.bus.write_16(base + 0x30, ss);
+    let base = psp as u32 * 16;
+    cpu.bus.guest_write_16(base + 0x2E, sp);
+    cpu.bus.guest_write_16(base + 0x30, ss);
 }
 
 /// The open file (its System File Table entry) handle `handle` of the
 /// running process refers to.
-fn file_of(cpu: &Cpu, handle: u16) -> Option<u16> {
-    dos_files::sft_of(&cpu.bus, cpu.current_psp, handle)
+fn file_of(cpu: &mut Cpu, handle: u16) -> Option<u16> {
+    let psp = cpu.current_psp;
+    dos_files::sft_of(&mut cpu.bus, psp, handle)
 }
 
 /// A handle of the running process for the file just opened at `sft`.
 fn attach(cpu: &mut Cpu, sft: u16) -> Result<u16, u8> {
-    dos_files::attach(&mut cpu.bus, cpu.current_psp, sft)
+    let psp = cpu.current_psp;
+    dos_files::attach(&mut cpu.bus, psp, sft)
 }
 
 /// Return a result the DOS way: AX and CF clear, or the error code in AX
@@ -80,7 +82,7 @@ fn write_country_info(cpu: &mut Cpu, addr: usize) {
     let case_map = ((CASE_MAP_ROUTINE - 0xF0000) as u32) | 0xF000_0000;
     info[18..22].copy_from_slice(&case_map.to_le_bytes());
     info[22] = b',';
-    cpu.bus.load_bytes(addr, &info);
+    cpu.bus.guest_write_bytes(addr as u32, &info);
 }
 
 /// Allocate the largest available free MCB for a child process about to be
@@ -92,7 +94,7 @@ fn find_child_load_segment(cpu: &mut Cpu) -> Option<u16> {
     // Walk the chain to find the largest free block: in conventional
     // memory, unless the program asked for upper memory and linked it.
     let upper = cpu.alloc_strategy & 0xC0 != 0 && cpu.bus.umb.is_some_and(|u| u.linked);
-    let chain = crate::mcb::walk(&cpu.bus);
+    let chain = crate::mcb::walk(&mut cpu.bus);
     let largest = chain
         .iter()
         .filter(|(s, m)| m.is_free() && (upper || *s < crate::mcb::umb_cover_seg(&cpu.bus)))
@@ -133,7 +135,7 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
         (Some(kind), Some(layout)) => (kind, layout),
         _ => return set_result(cpu, Err(0x0F)), // invalid drive
     };
-    let block = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+    let block = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
     match cpu.cx() {
         0x0860 => {
             // 00: special functions, which the caller sets.
@@ -145,24 +147,21 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
                 (DriveKind::Floppy, _) => 0x07,                                // 1.44 MB
                 _ => 0x05,                                                     // fixed disk
             };
-            cpu.bus.write_8(block + 0x01, device_type);
-            cpu.bus.write_16(block + 0x02, if kind.is_removable() { 0 } else { 1 }); // 02: bit 0 = fixed
-            cpu.bus.write_16(block + 0x04, layout.cylinders());
-            cpu.bus.write_8(block + 0x06, 0); // 06: media type, the drive's own
-            for (i, &b) in layout.bpb().iter().enumerate() {
-                cpu.bus.write_8(block + 0x07 + i, b);
-            }
+            cpu.bus.guest_write_8(block + 0x01, device_type);
+            cpu.bus.guest_write_16(block + 0x02, if kind.is_removable() { 0 } else { 1 }); // 02: bit 0 = fixed
+            cpu.bus.guest_write_16(block + 0x04, layout.cylinders());
+            cpu.bus.guest_write_8(block + 0x06, 0); // 06: media type, the drive's own
+            cpu.bus.guest_write_bytes(block + 0x07, &layout.bpb());
         }
         0x0866 => {
-            cpu.bus.write_16(block, 0); // 00: info level
+            cpu.bus.guest_write_16(block, 0); // 00: info level
             let serial = cpu.bus.disk.volume_serial(drive).unwrap_or(VOLUME_SERIAL + drive as u32);
-            cpu.bus.write_32(block + 0x02, serial);
+            cpu.bus.guest_write_32(block + 0x02, serial);
             let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
             let label = if label.is_empty() { "NO NAME".to_string() } else { label };
             let padded = label.bytes().chain(std::iter::repeat(b' ')).take(11);
-            for (i, b) in padded.chain(layout.fs_type().iter().copied()).enumerate() {
-                cpu.bus.write_8(block + 0x06 + i, b);
-            }
+            let bytes: Vec<u8> = padded.chain(layout.fs_type().iter().copied()).collect();
+            cpu.bus.guest_write_bytes(block + 0x06, &bytes);
         }
         _ => {}
     }
@@ -192,7 +191,7 @@ fn con_read(cpu: &mut Cpu) -> Option<u8> {
     if let Some(scan) = cpu.con_pending_scan.take() {
         return Some(scan);
     }
-    let key = cpu.bus.keyboard_buffer.pop_front()?;
+    let key = crate::keyboard::take_keystroke(&mut cpu.bus)?;
     let (scan, ascii) = ((key >> 8) as u8, key as u8);
     if ascii == 0 || (ascii == 0xE0 && scan != 0) {
         cpu.con_pending_scan = Some(scan);
@@ -205,13 +204,22 @@ fn con_read(cpu: &mut Cpu) -> Option<u8> {
 /// functions do: to the screen (a bell beeps), or to where the command
 /// line redirected it.
 fn stdout_char(cpu: &mut Cpu, byte: u8) {
+    stdout_bytes(cpu, &[byte]);
+}
+
+/// Write `bytes` to standard output as `stdout_char` does.
+fn stdout_bytes(cpu: &mut Cpu, bytes: &[u8]) {
     if let Some(sft) = file_of(cpu, 1).filter(|&sft| cpu.bus.disk.handle_device(sft) != Some(CharDevice::Con)) {
-        let _ = cpu.bus.disk.write_file(sft, &[byte]);
-    } else if byte == 0x07 {
-        play_sdl_beep(&mut cpu.bus);
-    } else {
-        print_char(&mut cpu.bus, byte);
+        let _ = cpu.bus.disk.write_file(sft, bytes);
+        return;
     }
+    let mut rest = bytes;
+    while let Some(bell) = rest.iter().position(|&b| b == 0x07) {
+        console_write(cpu, &rest[..bell]);
+        play_sdl_beep(&mut cpu.bus);
+        rest = &rest[bell + 1..];
+    }
+    console_write(cpu, rest);
 }
 
 /// A line being typed at the keyboard for INT 21h AH=0Ah or a read of
@@ -226,9 +234,7 @@ pub struct ConLine {
 
 /// Echo a character read from the console at the cursor, as DOS does.
 fn con_echo(cpu: &mut Cpu, text: &[u8]) {
-    for &b in text {
-        print_char(&mut cpu.bus, b);
-    }
+    console_write(cpu, text);
 }
 
 /// Edit a line from the keyboard as DOS's console does, for AH=0Ah and
@@ -240,12 +246,9 @@ fn con_echo(cpu: &mut Cpu, text: &[u8]) {
 fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
     let buffer = (cpu.ds(), cpu.dx());
     let mut line = cpu.con_line.take().filter(|l| l.buffer == buffer).unwrap_or(ConLine { buffer, text: Vec::new() });
-    loop {
-        let Some(c) = con_read(cpu) else {
-            cpu.con_line = Some(line);
-            cpu.hle_wait();
-            return None;
-        };
+    // The keys typed so far, as many as a BIOS buffer holds at a time.
+    for _ in 0..BIOS_KEYS {
+        let Some(c) = con_read(cpu) else { break };
         match c {
             0x0D => return Some(line.text),
             0x08 => {
@@ -269,21 +272,46 @@ fn edit_line(cpu: &mut Cpu, max: usize) -> Option<Vec<u8>> {
             _ => play_sdl_beep(&mut cpu.bus),
         }
     }
+    cpu.con_line = Some(line);
+    cpu.hle_wait();
+    None
 }
+
+/// The keystrokes a BIOS keyboard buffer holds: what a call reading the
+/// console takes at most before it waits again.
+const BIOS_KEYS: usize = 16;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    dos_data::enter_dos(cpu);
+    // The screen a console function writes is there before it takes a key
+    // or writes anything, as it runs again from the start after a fault.
+    if writes_console(cpu, ah) && !crate::video::console_ready(cpu) {
+        return;
+    }
     save_caller(cpu);
-    let (ax, bx, ds) = (cpu.ax(), cpu.bx(), cpu.ds());
-    dos_data::enter_dos(&mut cpu.bus, ax, bx, ds);
     dispatch(cpu, ah);
-    dos_data::leave_dos(&mut cpu.bus, cpu.current_psp);
     // Remember the error of a failed handle or file call for AH=59h. The
     // calls in this range that don't report through CF leave it as the
     // caller had it.
     let reports_cf = !matches!(ah, 0x4C | 0x4D | 0x50 | 0x51 | 0x54 | 0x55 | 0x59 | 0x62);
     if (0x39..=0x6C).contains(&ah) && reports_cf && cpu.get_cpu_flag(CpuFlags::CF) {
         cpu.last_dos_error = cpu.ax();
+    }
+    dos_data::leave_dos(cpu);
+}
+
+/// Whether the function AH writes to the screen: the console functions
+/// that echo or write, and reads and writes of the console by handle.
+fn writes_console(cpu: &mut Cpu, ah: u8) -> bool {
+    match ah {
+        0x01 | 0x02 | 0x09 | 0x0A | 0x0C => true,
+        0x06 => cpu.get_dl() != 0xFF,
+        0x3F | 0x40 => {
+            let handle = cpu.bx();
+            file_of(cpu, handle).is_some_and(|sft| cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con))
+        }
+        _ => false,
     }
 }
 
@@ -333,7 +361,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_cx(bps);
                     cpu.set_dx(total);
                     let media = cpu.bus.disk.media_descriptor(drive);
-                    cpu.bus.write_8(dos_data::address(dos_data::MEDIA_ID), media);
+                    cpu.bus.guest_write_8(dos_data::address(dos_data::MEDIA_ID) as u32, media);
                     cpu.set_ds(dos_data::SEGMENT);
                     cpu.set_bx(dos_data::MEDIA_ID);
                 }
@@ -396,7 +424,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             if let Some(ascii) = con_read(cpu) {
                 cpu.set_reg8(Register::AL, ascii);
                 if ascii != 0 && !pending {
-                    print_char(&mut cpu.bus, ascii);
+                    console_write(cpu, &[ascii]);
                 }
             } else {
                 cpu.hle_wait();
@@ -426,22 +454,23 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // byte) - 1 characters, their count at DS:DX+1, and the line with
         // its CR from DS:DX+2. Only the CR is echoed at the end.
         0x0A => {
-            let buffer = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let max = cpu.bus.read_8(buffer) as usize;
+            let buffer = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
+            let max = cpu.bus.guest_read_8(buffer) as usize;
             if max > 0
+                && cpu.bus.guest_probe(buffer, max + 2, true)
                 && let Some(line) = edit_line(cpu, max - 1)
             {
                 con_echo(cpu, b"\r");
-                cpu.bus.write_8(buffer + 1, line.len() as u8);
-                cpu.bus.load_bytes(buffer + 2, &line);
-                cpu.bus.write_8(buffer + 2 + line.len(), 0x0D);
+                cpu.bus.guest_write_8(buffer + 1, line.len() as u8);
+                cpu.bus.guest_write_bytes(buffer + 2, &line);
+                cpu.bus.guest_write_8(buffer + 2 + line.len() as u32, 0x0D);
             }
         }
 
         // AH = 0Bh: Check Standard Input Status
         // Returns AL = 0xFF if a character is ready, 0x00 if not.
         0x0B => {
-            if cpu.bus.keyboard_buffer.is_empty() && cpu.con_pending_scan.is_none() {
+            if crate::keyboard::peek_keystroke(&mut cpu.bus).is_none() && cpu.con_pending_scan.is_none() {
                 cpu.set_reg8(Register::AL, 0x00);
             } else {
                 cpu.set_reg8(Register::AL, 0xFF);
@@ -450,14 +479,19 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 09h: Print String (Ends in '$')
         0x09 => {
+            let mut text = Vec::new();
             let mut offset = cpu.dx();
             loop {
-                let char_byte = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds(), offset));
-                if char_byte == b'$' {
+                let at = cpu.get_physical_addr(cpu.ds(), offset) as u32;
+                let char_byte = cpu.bus.guest_read_8(at);
+                if char_byte == b'$' || cpu.bus.guest_faulted() || text.len() == 0x10000 {
                     break;
                 }
-                stdout_char(cpu, char_byte);
-                offset += 1;
+                text.push(char_byte);
+                offset = offset.wrapping_add(1);
+            }
+            if !cpu.bus.guest_faulted() {
+                stdout_bytes(cpu, &text);
             }
         }
 
@@ -466,7 +500,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x0C => {
             let next_fn = cpu.get_al();
 
-            cpu.bus.keyboard_buffer.clear();
+            crate::keyboard::clear_keystrokes(&mut cpu.bus);
             cpu.con_pending_scan = None;
             cpu.con_pending.clear();
 
@@ -504,22 +538,18 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 25h: Set Interrupt Vector
         0x25 => {
-            let int_num = cpu.get_al() as usize;
-            let new_off = cpu.dx();
-            let new_seg = cpu.ds();
-            let phys_addr = int_num * 4;
-
-            cpu.bus.write_8(phys_addr, (new_off & 0xFF) as u8);
-            cpu.bus.write_8(phys_addr + 1, (new_off >> 8) as u8);
-            cpu.bus.write_8(phys_addr + 2, (new_seg & 0xFF) as u8);
-            cpu.bus.write_8(phys_addr + 3, (new_seg >> 8) as u8);
+            // The vector table of the caller's machine.
+            let vector = cpu.get_al() as u32 * 4;
+            let (new_off, new_seg) = (cpu.dx(), cpu.ds());
+            cpu.bus.guest_write_16(vector, new_off);
+            cpu.bus.guest_write_16(vector + 2, new_seg);
         }
 
         // AH = 4Bh: Load and Execute Program (EXEC)
         0x4B => {
             let mode = cpu.get_al();
             let name_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let filename = read_asciiz_string(&cpu.bus, name_addr);
+            let filename = read_asciiz_string(&mut cpu.bus, name_addr);
 
             // --- Stub out copy-protection / disk-swap helpers ---
             // MicroProse games (F-117, F-19, Gunship, Covert Action) ship two
@@ -541,14 +571,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // the exit code the parent expects. F117.COM tests `AL != 0` after
             // DSWAP, so we return 1 there; it doesn't inspect PLAYER's exit
             // code at all so 0 is fine.
-            // Programs load by physical address here, where a DOS machine
-            // of Windows' 386 enhanced mode wouldn't see them: it has
-            // conventional memory of its own.
-            if matches!(mode, 0x00 | 0x01) && cpu.v86() && !cpu.conventional_memory_in_place() {
-                cpu.bus.log_string(&format!("[DOS] EXEC of '{}' in a virtual machine with memory of its own refused", filename));
-                set_result(cpu, Err(0x08));
-                return;
-            }
             let upper = filename.to_ascii_uppercase();
             let short = upper.rsplit(&['\\', '/', ':'][..]).next().unwrap_or("");
             if mode == 0x00 {
@@ -592,14 +614,14 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
                 let param_block = cpu.bx(); // Offset in ES
                 let param_seg = cpu.es();
-                let param_phys = cpu.get_physical_addr(param_seg, param_block);
+                let param_phys = cpu.get_physical_addr(param_seg, param_block) as u32;
 
                 // Read Environment Segment
-                let env_seg = cpu.bus.read_16(param_phys);
+                let env_seg = cpu.bus.guest_read_16(param_phys);
 
                 // Read Command Line Pointer
-                let cmd_off = cpu.bus.read_16(param_phys + 2);
-                let cmd_seg = cpu.bus.read_16(param_phys + 4);
+                let cmd_off = cpu.bus.guest_read_16(param_phys + 2);
+                let cmd_seg = cpu.bus.guest_read_16(param_phys + 4);
 
                 // Read Enviroment Block
                 // If EnvSeg is 0, we should inherit from parent (which means reading *current* PSP's env).
@@ -613,8 +635,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         // Startup case: No parent. Use 0.
                         0
                     } else {
-                        let env_ptr = cpu.get_physical_addr(current_psp, 0x2C);
-                        cpu.bus.read_16(env_ptr)
+                        let env_ptr = cpu.get_physical_addr(current_psp, 0x2C) as u32;
+                        cpu.bus.guest_read_16(env_ptr)
                     }
                 } else {
                     env_seg
@@ -623,9 +645,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let mut env_block = Vec::new();
 
                 if actual_env_seg != 0 {
-                    let mut env_phys = cpu.get_physical_addr(actual_env_seg, 0);
+                    let mut env_phys = cpu.get_physical_addr(actual_env_seg, 0) as u32;
                     loop {
-                        let b = cpu.bus.read_8(env_phys);
+                        let b = cpu.bus.guest_read_8(env_phys);
                         env_block.push(b);
                         env_phys += 1;
 
@@ -651,13 +673,26 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
 
                 // Read Command Line Content BEFORE we nuke RAM
-                let cmd_phys = cpu.get_physical_addr(cmd_seg, cmd_off);
+                let cmd_phys = cpu.get_physical_addr(cmd_seg, cmd_off) as u32;
                 let mut cmd_tail = Vec::new();
 
                 // Command tail format: [LEN][String...][CR]
-                let len = cpu.bus.read_8(cmd_phys);
+                let len = cpu.bus.guest_read_8(cmd_phys);
                 for i in 0..len {
-                    cmd_tail.push(cpu.bus.read_8(cmd_phys + 1 + i as usize));
+                    cmd_tail.push(cpu.bus.guest_read_8(cmd_phys + 1 + i as u32));
+                }
+
+                // The two FCBs of the parameter block (at +06h and +0Ah).
+                let mut fcbs = [[0u8; 16]; 2];
+                for (i, fcb) in fcbs.iter_mut().enumerate() {
+                    let pointer = param_phys + 6 + 4 * i as u32;
+                    let (off, seg) = (cpu.bus.guest_read_16(pointer), cpu.bus.guest_read_16(pointer + 2));
+                    cpu.bus.guest_read_bytes(cpu.get_physical_addr(seg, off) as u32, fcb);
+                }
+                // A page of what the call hands DOS isn't there: it runs
+                // again once it is, and nothing is done before.
+                if cpu.bus.guest_faulted() {
+                    return;
                 }
 
                 let cmd_str = String::from_utf8_lossy(&cmd_tail);
@@ -713,8 +748,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // so the BOP trap's IRET-pop finds the parent's saved flags/CS/IP.
                 cpu.save_process_context();
                 // The child returns where the parent's INT 21h would.
-                let frame = cpu.get_physical_addr(cpu.ss(), cpu.sp());
-                let return_address = (cpu.bus.read_16(frame), cpu.bus.read_16(frame + 2));
+                let frame = cpu.get_physical_addr(cpu.ss(), cpu.sp()) as u32;
+                let return_address = (cpu.bus.guest_read_16(frame), cpu.bus.guest_read_16(frame + 2));
 
                 let parent_psp_before = cpu.current_psp;
                 // Allocate the largest free MCB for the child. DOS gives the
@@ -734,13 +769,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 };
 
                 if cpu.load_executable(&target_filename, Some(load_segment)) {
+                    let child_at = cpu.psp_address(load_segment);
                     if let Some(context) = cpu.process_stack.last_mut() {
                         context.child = load_segment;
+                        context.child_at = child_at;
                     }
                     // Patch the MCB we allocated above with placeholder owner
                     // 0xFFFF so it reflects the child's real PSP segment.
                     let mcb_seg = load_segment.wrapping_sub(1);
-                    let m = crate::mcb::read_mcb(&cpu.bus, mcb_seg);
+                    let m = crate::mcb::read_mcb(&mut cpu.bus, mcb_seg);
                     crate::mcb::write_mcb(
                         &mut cpu.bus,
                         mcb_seg,
@@ -751,12 +788,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         },
                     );
 
-                    let psp_phys = cpu.get_physical_addr(load_segment, 0);
+                    let psp_phys = cpu.get_physical_addr(load_segment, 0) as u32;
 
                     // The environment, owned by the child.
-                    let env_phys = cpu.get_physical_addr(env_seg, 0);
-                    cpu.bus.load_bytes(env_phys, &env_block);
-                    let env_mcb = crate::mcb::read_mcb(&cpu.bus, env_seg - 1);
+                    let env_phys = cpu.get_physical_addr(env_seg, 0) as u32;
+                    cpu.bus.guest_write_bytes(env_phys, &env_block);
+                    let env_mcb = crate::mcb::read_mcb(&mut cpu.bus, env_seg - 1);
                     crate::mcb::write_mcb(
                         &mut cpu.bus,
                         env_seg - 1,
@@ -765,36 +802,30 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                             ..env_mcb
                         },
                     );
-                    cpu.bus.write_16(psp_phys + 0x2C, env_seg);
+                    cpu.bus.guest_write_16(psp_phys + 0x2C, env_seg);
 
                     // Update PSP offset 0x16 (Parent PSP Segment)
-                    cpu.bus.write_16(psp_phys + 0x16, parent_psp_before);
+                    cpu.bus.guest_write_16(psp_phys + 0x16, parent_psp_before);
                     // Terminate address (INT 22h).
-                    cpu.bus.write_16(psp_phys + 0x0A, return_address.0);
-                    cpu.bus.write_16(psp_phys + 0x0C, return_address.1);
+                    cpu.bus.guest_write_16(psp_phys + 0x0A, return_address.0);
+                    cpu.bus.guest_write_16(psp_phys + 0x0C, return_address.1);
 
-                    // The two FCBs of the parameter block (at +06h and
-                    // +0Ah), and the AX the child starts with: AL (AH) FFh
-                    // if the first (second) names a drive that isn't there.
+                    // The two FCBs, and the AX the child starts with: AL
+                    // (AH) FFh if the first (second) names a drive that
+                    // isn't there.
                     let mut child_ax = 0u16;
-                    for (i, pointer) in [param_phys + 6, param_phys + 0x0A].into_iter().enumerate() {
-                        let (off, seg) = (cpu.bus.read_16(pointer), cpu.bus.read_16(pointer + 2));
-                        let from = cpu.get_physical_addr(seg, off);
-                        let fcb: Vec<u8> = (0..16).map(|j| cpu.bus.read_8(from + j)).collect();
-                        cpu.bus.load_bytes(psp_phys + 0x5C + 0x10 * i, &fcb);
+                    for (i, fcb) in fcbs.iter().enumerate() {
+                        cpu.bus.guest_write_bytes(psp_phys + 0x5C + 0x10 * i as u32, fcb);
                         if fcb[0] != 0 && !cpu.bus.disk.is_mounted(fcb[0].wrapping_sub(1)) {
                             child_ax |= 0xFF << (8 * i);
                         }
                     }
 
                     // Write Command Tail to PSP+0x80
-                    cpu.bus
-                        .write_8(psp_phys + 0x80, target_cmd_tail_bytes.len() as u8);
-                    for (i, &b) in target_cmd_tail_bytes.iter().enumerate() {
-                        cpu.bus.write_8(psp_phys + 0x81 + i, b);
-                    }
-                    cpu.bus
-                        .write_8(psp_phys + 0x81 + target_cmd_tail_bytes.len(), 0x0D);
+                    let tail_len = target_cmd_tail_bytes.len() as u32;
+                    cpu.bus.guest_write_8(psp_phys + 0x80, tail_len as u8);
+                    cpu.bus.guest_write_bytes(psp_phys + 0x81, &target_cmd_tail_bytes);
+                    cpu.bus.guest_write_8(psp_phys + 0x81 + tail_len, 0x0D);
 
                     if mode == 0x01 {
                         // Hand the child's entry point and stack, with the
@@ -803,11 +834,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         // current. The parent's context stays saved for when
                         // the child terminates.
                         let (entry, stack) = ((cpu.cs(), cpu.ip()), (cpu.ss(), cpu.sp().wrapping_sub(2)));
-                        cpu.bus.write_16(cpu.get_physical_addr(stack.0, stack.1), child_ax);
-                        cpu.bus.write_16(param_phys + 0x0E, stack.1);
-                        cpu.bus.write_16(param_phys + 0x10, stack.0);
-                        cpu.bus.write_16(param_phys + 0x12, entry.1);
-                        cpu.bus.write_16(param_phys + 0x14, entry.0);
+                        let top = cpu.get_physical_addr(stack.0, stack.1) as u32;
+                        cpu.bus.guest_write_16(top, child_ax);
+                        cpu.bus.guest_write_16(param_phys + 0x0E, stack.1);
+                        cpu.bus.guest_write_16(param_phys + 0x10, stack.0);
+                        cpu.bus.guest_write_16(param_phys + 0x12, entry.1);
+                        cpu.bus.guest_write_16(param_phys + 0x14, entry.0);
                         let parent = cpu.process_stack.last().expect("context saved above").regs.clone();
                         let heap_pointer = cpu.heap_pointer;
                         cpu.restore(&parent);
@@ -867,9 +899,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 //   +2 (word): relocation factor added to relocation targets
                 let param_block = cpu.bx();
                 let param_seg = cpu.es();
-                let param_phys = cpu.get_physical_addr(param_seg, param_block);
-                let overlay_seg = cpu.bus.read_16(param_phys);
-                let reloc_factor = cpu.bus.read_16(param_phys + 2);
+                let param_phys = cpu.get_physical_addr(param_seg, param_block) as u32;
+                let overlay_seg = cpu.bus.guest_read_16(param_phys);
+                let reloc_factor = cpu.bus.guest_read_16(param_phys + 2);
+                if cpu.bus.guest_faulted() {
+                    return;
+                }
 
                 if cpu.load_overlay(&filename, overlay_seg, reloc_factor) {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -927,7 +962,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // its handle table as it is.
         0x26 => {
             let parent = cpu.current_psp;
-            let (segment, top) = (cpu.dx(), cpu.bus.read_16(parent as usize * 16 + 2));
+            let (segment, top) = (cpu.dx(), cpu.bus.guest_read_16(parent as u32 * 16 + 2));
             dos_files::new_psp(&mut cpu.bus, segment, parent, top, false);
         }
 
@@ -1018,16 +1053,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 35h: Get Interrupt Vector
         0x35 => {
-            let int_num = cpu.get_al() as usize;
-            let phys_addr = int_num * 4;
-
-            let off_low = cpu.bus.read_8(phys_addr) as u16;
-            let off_high = cpu.bus.read_8(phys_addr + 1) as u16;
-            cpu.set_bx((off_high << 8) | off_low);
-
-            let seg_low = cpu.bus.read_8(phys_addr + 2) as u16;
-            let seg_high = cpu.bus.read_8(phys_addr + 3) as u16;
-            cpu.set_es((seg_high << 8) | seg_low);
+            let vector = cpu.get_al() as u32 * 4;
+            let (offset, segment) = (cpu.bus.guest_read_16(vector), cpu.bus.guest_read_16(vector + 2));
+            cpu.set_bx(offset);
+            cpu.set_es(segment);
         }
 
         // AH=36h: Get Disk Free Space
@@ -1052,7 +1081,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // DS:DX -> ASCIZ directory name
         0x39 => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let path = read_asciiz_string(&cpu.bus, addr);
+            let path = read_asciiz_string(&mut cpu.bus, addr);
             match cpu.bus.disk.create_directory(&path) {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(code) => {
@@ -1068,7 +1097,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // DS:DX -> ASCIZ directory name
         0x3A => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let path = read_asciiz_string(&cpu.bus, addr);
+            let path = read_asciiz_string(&mut cpu.bus, addr);
             match cpu.bus.disk.remove_directory(&path) {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(code) => {
@@ -1083,7 +1112,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH=3Bh: Set Current Directory (CHDIR)
         0x3B => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let path = read_asciiz_string(&cpu.bus, addr);
+            let path = read_asciiz_string(&mut cpu.bus, addr);
             if cpu.bus.disk.set_current_directory(&path) {
                 let drive = cpu.bus.disk.drive_of(&path).unwrap_or(cpu.bus.disk.get_current_drive());
                 dos_data::write_cds(&mut cpu.bus, drive);
@@ -1106,9 +1135,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // CX=0 once they have real data to write.
         0x3C => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let filename = read_asciiz_string(&cpu.bus, addr);
+            let filename = read_asciiz_string(&mut cpu.bus, addr);
             // Attributes in CX are ignored for now (TODO)
-            let opened = cpu.bus.disk.create_file(&filename, cpu.current_psp);
+            let psp = cpu.current_psp;
+            let opened = cpu.bus.disk.create_file(&filename, psp);
             match opened.and_then(|sft| attach(cpu, sft).map(|handle| (sft, handle))) {
                 Ok((sft, handle)) => {
                     file_io(cpu, sft, diskio::CREATE_BYTES, None);
@@ -1129,10 +1159,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH=3Dh: Open File
         0x3D => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let filename = read_asciiz_string(&cpu.bus, addr);
+            let filename = read_asciiz_string(&mut cpu.bus, addr);
             let mode = cpu.get_al();
 
-            let opened = cpu.bus.disk.open_file(&filename, mode, cpu.current_psp);
+            let psp = cpu.current_psp;
+            let opened = cpu.bus.disk.open_file(&filename, mode, psp);
             match opened.and_then(|sft| attach(cpu, sft).map(|handle| (sft, handle))) {
                 Ok((sft, handle)) => {
                     file_io(cpu, sft, diskio::OPEN_BYTES, None);
@@ -1154,8 +1185,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 3Eh: Close File
         0x3E => {
-            let handle = cpu.bx();
-            match dos_files::close(&mut cpu.bus, cpu.current_psp, handle) {
+            let (psp, handle) = (cpu.current_psp, cpu.bx());
+            match dos_files::close(&mut cpu.bus, psp, handle) {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(code) => set_result(cpu, Err(code)),
             }
@@ -1165,11 +1196,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x3F => {
             let handle = cpu.bx();
             let count = cpu.cx() as usize;
-            let mut buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+            let buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
 
             let Some(sft) = file_of(cpu, handle) else {
                 return set_result(cpu, Err(0x06));
             };
+            // The buffer is all there before the file moves on.
+            if !cpu.bus.guest_probe(buf_addr, count, true) {
+                return;
+            }
             if cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con) {
                 // The console: read a line at a time as DOS does,
                 // waiting for Enter, and hand out the line with its CR LF
@@ -1181,17 +1216,14 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.con_pending.extend([0x0D, 0x0A]);
                 }
                 let taken: Vec<u8> = cpu.con_pending.drain(..count.min(cpu.con_pending.len())).collect();
-                cpu.bus.load_bytes(buf_addr, &taken);
+                cpu.bus.guest_write_bytes(buf_addr, &taken);
                 cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 match cpu.bus.disk.read_file(sft, count) {
                     Ok(bytes) => {
                         file_io(cpu, sft, bytes.len() as u32, Some(false));
-                        for b in &bytes {
-                            cpu.bus.write_8(buf_addr, *b);
-                            buf_addr += 1;
-                        }
+                        cpu.bus.guest_write_bytes(buf_addr, &bytes);
                         cpu.set_ax(bytes.len() as u16);
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
@@ -1218,7 +1250,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x40 => {
             let handle = cpu.bx();
             let count = cpu.cx() as usize;
-            let buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+            let buf_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
 
             let Some(sft) = file_of(cpu, handle) else {
                 return set_result(cpu, Err(0x06));
@@ -1236,9 +1268,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return;
             }
 
-            let mut data = Vec::with_capacity(count);
-            for i in 0..count {
-                data.push(cpu.bus.read_8(buf_addr + i));
+            let mut data = vec![0u8; count];
+            cpu.bus.guest_read_bytes(buf_addr, &mut data);
+            if cpu.bus.guest_faulted() {
+                return;
             }
 
             if console {
@@ -1248,9 +1281,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                         play_sdl_beep(&mut cpu.bus);
                     }
                 }
-                let s = String::from_utf8_lossy(&data);
-                let visual_s = s.replace('\x07', "");
-                crate::video::print_string(cpu, &visual_s);
+                let visible: Vec<u8> = data.iter().copied().filter(|&b| b != 0x07).collect();
+                crate::video::print_cp437(cpu, &visible, 0x07);
                 cpu.set_ax(count as u16);
             } else {
                 match cpu.bus.disk.write_file(sft, &data) {
@@ -1304,7 +1336,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x43 => {
             let al = cpu.get_reg8(Register::AL);
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let filename = read_asciiz_string(&cpu.bus, addr);
+            let filename = read_asciiz_string(&mut cpu.bus, addr);
             match al {
                 0x00 => match cpu.bus.disk.get_file_attribute(&filename) {
                     Ok(attr) => {
@@ -1451,7 +1483,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let dl = cpu.get_dl(); // Drive (0=Default, 1=A, ...)
             let ds = cpu.ds();
             let si = cpu.get_reg16(Register::SI);
-            let addr = cpu.get_physical_addr(ds, si);
+            let addr = cpu.get_physical_addr(ds, si) as u32;
             let drive = dos_drive_number(cpu, dl);
             let Some(cwd) = cpu.bus.disk.get_current_directory_of(drive) else {
                 cpu.set_ax(0x0F); // Invalid drive
@@ -1459,18 +1491,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return;
             };
 
-            // Write string to DS:SI
-            let bytes = cwd.as_bytes();
-            for (i, &b) in bytes.iter().enumerate() {
-                cpu.bus.write_8(addr + i, b);
-            }
-            // Null Terminate
-            cpu.bus.write_8(addr + bytes.len(), 0x00);
-
-            // Zero out the rest of the 64-byte buffer for safety
-            for i in (bytes.len() + 1)..64 {
-                cpu.bus.write_8(addr + i, 0x00);
-            }
+            // Write string to DS:SI, the rest of the 64-byte buffer zeros
+            let mut path = cwd.into_bytes();
+            path.push(0);
+            path.resize(path.len().max(64), 0);
+            cpu.bus.guest_write_bytes(addr, &path);
             cpu.set_reg16(Register::AX, 0x0100); // Success
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
@@ -1584,13 +1609,17 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let dta_seg = cpu.bus.dta_segment;
             let dta_off = cpu.bus.dta_offset;
             let dta_phys = cpu.get_physical_addr(dta_seg, dta_off);
+            // The DTA is all there before a search starts or moves on.
+            if !cpu.bus.guest_probe(dta_phys as u32, 43, true) {
+                return;
+            }
 
             const OFFSET_ATTR_SEARCH: usize = 12;
             const OFFSET_INDEX: usize = 13;
 
             let (index, search_attr, raw_pattern, search_id) = if ah == 0x4E {
                 let name_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-                let mut pattern = read_asciiz_string(&cpu.bus, name_addr);
+                let mut pattern = read_asciiz_string(&mut cpu.bus, name_addr);
 
                 // Heuristic Fix for d.com (and potentially others):
                 // If the search pattern ends with the Current Directory name followed by a wildcard
@@ -1648,14 +1677,14 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let sid = cpu.bus.search_serial;
                 (0, cpu.cx(), pattern, sid)
             } else {
-                let idx = cpu.bus.read_16(dta_phys + OFFSET_INDEX) as usize;
-                let attr = cpu.bus.read_8(dta_phys + OFFSET_ATTR_SEARCH) as u16;
+                let idx = cpu.bus.guest_read_16((dta_phys + OFFSET_INDEX) as u32) as usize;
+                let attr = cpu.bus.guest_read_8((dta_phys + OFFSET_ATTR_SEARCH) as u32) as u16;
                 // Read Search ID
-                let sid_lo = cpu.bus.read_16(dta_phys + 15) as u32;
-                let sid_hi = cpu.bus.read_16(dta_phys + 17) as u32;
+                let sid_lo = cpu.bus.guest_read_16((dta_phys + 15) as u32) as u32;
+                let sid_hi = cpu.bus.guest_read_16((dta_phys + 17) as u32) as u32;
                 let sid = (sid_hi << 16) | sid_lo;
 
-                let filename_pattern = read_dta_template(&cpu.bus, dta_phys);
+                let filename_pattern = read_dta_template(&mut cpu.bus, dta_phys);
 
                 // Retrieve Directory from Bus
                 let dir_prefix = cpu
@@ -1693,11 +1722,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let search_drive = parse_drive_prefix(&search_pattern)
                         .0
                         .unwrap_or(cpu.bus.disk.get_current_drive());
-                    cpu.bus.write_8(dta_phys + 0, search_drive + 1);
-                    cpu.bus
-                        .write_8(dta_phys + OFFSET_ATTR_SEARCH, search_attr as u8);
-                    cpu.bus
-                        .write_16(dta_phys + OFFSET_INDEX, (index + 1) as u16);
+                    cpu.bus.guest_write_8((dta_phys + 0) as u32, search_drive + 1);
+                    cpu.bus.guest_write_8((dta_phys + OFFSET_ATTR_SEARCH) as u32, search_attr as u8);
+                    cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, (index + 1) as u16);
 
                     // Only write Search Pattern to DTA on FindFirst (AH=4E)
                     // FindNext must NOT overwrite the pattern it uses for searching!
@@ -1713,15 +1740,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
                         let fcb_bytes = pattern_to_fcb(filename_part);
                         for i in 0..11 {
-                            cpu.bus.write_8(dta_phys + 1 + i, fcb_bytes[i]);
+                            cpu.bus.guest_write_8((dta_phys + 1 + i) as u32, fcb_bytes[i]);
                         }
                     }
 
                     // Unique ID / Search Handle generation for FindNext tracking
                     // We store the Search ID in bytes 15-18 (4 bytes)
                     let unique_id = search_id;
-                    cpu.bus.write_16(dta_phys + 15, (unique_id & 0xFFFF) as u16);
-                    cpu.bus.write_16(dta_phys + 17, (unique_id >> 16) as u16);
+                    cpu.bus.guest_write_16((dta_phys + 15) as u32, (unique_id & 0xFFFF) as u16);
+                    cpu.bus.guest_write_16((dta_phys + 17) as u32, (unique_id >> 16) as u16);
 
                     // Store Directory Context if FindFirst (AH=4E), fully
                     // qualified with drive and current directory.
@@ -1730,27 +1757,25 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                             cpu.bus.search_handles.insert(unique_id, dir);
                         }
                     }
-                    cpu.bus
-                        .write_16(dta_phys + 19, (index as u16).wrapping_mul(3));
+                    cpu.bus.guest_write_16((dta_phys + 19) as u32, (index as u16).wrapping_mul(3));
 
                     // File Attributes
-                    cpu.bus.write_8(dta_phys + 21, entry.attr);
+                    cpu.bus.guest_write_8((dta_phys + 21) as u32, entry.attr);
 
-                    cpu.bus.write_16(dta_phys + 22, entry.dos_time);
-                    cpu.bus.write_16(dta_phys + 24, entry.dos_date);
-                    cpu.bus
-                        .write_16(dta_phys + 26, (entry.size & 0xFFFF) as u16);
-                    cpu.bus.write_16(dta_phys + 28, (entry.size >> 16) as u16);
+                    cpu.bus.guest_write_16((dta_phys + 22) as u32, entry.dos_time);
+                    cpu.bus.guest_write_16((dta_phys + 24) as u32, entry.dos_date);
+                    cpu.bus.guest_write_16((dta_phys + 26) as u32, (entry.size & 0xFFFF) as u16);
+                    cpu.bus.guest_write_16((dta_phys + 28) as u32, (entry.size >> 16) as u16);
 
                     // Filename at Offset 30
                     let name_start = dta_phys + 30;
                     for i in 0..13 {
-                        cpu.bus.write_8(name_start + i, 0x00);
+                        cpu.bus.guest_write_8((name_start + i) as u32, 0x00);
                     }
                     let name_bytes = entry.filename.as_bytes();
                     let len = std::cmp::min(name_bytes.len(), 12);
                     for i in 0..len {
-                        cpu.bus.write_8(name_start + i, name_bytes[i]);
+                        cpu.bus.guest_write_8((name_start + i) as u32, name_bytes[i]);
                     }
 
                     cpu.set_reg16(Register::AX, 0);
@@ -1842,7 +1867,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 41h: Delete file (DS:DX).
         0x41 => {
-            let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+            let filename = read_asciiz_string(&mut cpu.bus, addr);
             let result = cpu.bus.disk.delete_file(&filename).map(|_| cpu.ax());
             set_result(cpu, result);
         }
@@ -1861,8 +1887,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 56h: Rename file DS:DX to ES:DI.
         0x56 => {
-            let from = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
-            let to = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.es(), cpu.di()));
+            let (from, to) = (cpu.get_physical_addr(cpu.ds(), cpu.dx()), cpu.get_physical_addr(cpu.es(), cpu.di()));
+            let (from, to) = (read_asciiz_string(&mut cpu.bus, from), read_asciiz_string(&mut cpu.bus, to));
             let result = cpu.bus.disk.rename_file(&from, &to).map(|_| cpu.ax());
             set_result(cpu, result);
         }
@@ -1933,17 +1959,21 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // whose name is appended there.
         0x5A => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-            let mut dir = read_asciiz_string(&cpu.bus, addr);
+            let mut dir = read_asciiz_string(&mut cpu.bus, addr);
             if !dir.is_empty() && !dir.ends_with('\\') {
                 dir.push('\\');
             }
-            let created = cpu.bus.disk.create_temp_file(&dir, cpu.current_psp);
+            // The name goes after the directory's in the caller's buffer.
+            if !cpu.bus.guest_probe(addr as u32, dir.len() + 13, true) {
+                return;
+            }
+            let psp = cpu.current_psp;
+            let created = cpu.bus.disk.create_temp_file(&dir, psp);
             match created.and_then(|(sft, name)| attach(cpu, sft).map(|handle| (sft, handle, name))) {
                 Ok((sft, handle, name)) => {
                     file_io(cpu, sft, diskio::CREATE_BYTES, None);
-                    for (i, b) in name.bytes().chain(std::iter::once(0)).enumerate() {
-                        cpu.bus.write_8(addr + i, b);
-                    }
+                    let name: Vec<u8> = name.bytes().chain(std::iter::once(0)).collect();
+                    cpu.bus.guest_write_bytes(addr as u32, &name);
                     set_result(cpu, Ok(handle));
                 }
                 Err(e) => set_result(cpu, Err(e)),
@@ -1952,8 +1982,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 5Bh: Create a new file (fails if it exists).
         0x5B => {
-            let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.dx()));
-            let created = cpu.bus.disk.create_new_file(&filename, cpu.current_psp);
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+            let filename = read_asciiz_string(&mut cpu.bus, addr);
+            let psp = cpu.current_psp;
+            let created = cpu.bus.disk.create_new_file(&filename, psp);
             let result = created.and_then(|sft| attach(cpu, sft).map(|handle| (sft, handle)));
             if let Ok((sft, _)) = result {
                 file_io(cpu, sft, diskio::CREATE_BYTES, None);
@@ -1963,13 +1995,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 60h: Canonical ("true") name of DS:SI into ES:DI.
         0x60 => {
-            let name = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.si()));
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.si());
+            let name = read_asciiz_string(&mut cpu.bus, addr);
             match cpu.bus.disk.qualify_path(&name) {
                 Some(full) => {
-                    let dest = cpu.get_physical_addr(cpu.es(), cpu.di());
-                    for (i, b) in full.bytes().take(127).chain(std::iter::once(0)).enumerate() {
-                        cpu.bus.write_8(dest + i, b);
-                    }
+                    let dest = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
+                    let full: Vec<u8> = full.bytes().take(127).chain(std::iter::once(0)).collect();
+                    cpu.bus.guest_write_bytes(dest, &full);
                     set_result(cpu, Ok(cpu.ax()));
                 }
                 None => set_result(cpu, Err(0x03)),
@@ -1983,10 +2015,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // Info ID 1, length, country 1, code page 437, then the
                 // country information of AH=38h.
                 let dest = cpu.get_physical_addr(cpu.es(), cpu.di());
-                cpu.bus.write_8(dest, 0x01);
-                cpu.bus.write_16(dest + 1, 38);
-                cpu.bus.write_16(dest + 3, 1);
-                cpu.bus.write_16(dest + 5, 437);
+                let at = dest as u32;
+                cpu.bus.guest_write_8(at, 0x01);
+                cpu.bus.guest_write_16(at + 1, 38);
+                cpu.bus.guest_write_16(at + 3, 1);
+                cpu.bus.guest_write_16(at + 5, 437);
                 write_country_info(cpu, dest + 7);
                 cpu.set_cx(41);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
@@ -1997,14 +2030,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             }
             0x21 | 0x22 => {
-                let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+                let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
                 let len = if cpu.get_al() == 0x21 { cpu.cx() as usize } else { usize::MAX };
                 for i in 0..len {
-                    let b = cpu.bus.read_8(addr + i);
-                    if len == usize::MAX && b == 0 {
+                    let at = addr.wrapping_add(i as u32);
+                    let b = cpu.bus.guest_read_8(at);
+                    if (len == usize::MAX && b == 0) || cpu.bus.guest_faulted() {
                         break;
                     }
-                    cpu.bus.write_8(addr + i, b.to_ascii_uppercase());
+                    cpu.bus.guest_write_8(at, b.to_ascii_uppercase());
                 }
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             }
@@ -2035,7 +2069,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // nibble: file missing, 0 fail / 1 create), DS:SI = name. Returns
         // the handle in AX and the action taken in CX.
         0x6C => {
-            let filename = read_asciiz_string(&cpu.bus, cpu.get_physical_addr(cpu.ds(), cpu.si()));
+            let addr = cpu.get_physical_addr(cpu.ds(), cpu.si());
+            let filename = read_asciiz_string(&mut cpu.bus, addr);
             let mode = cpu.get_reg8(Register::BL);
             let action = cpu.get_dl();
             let exists = cpu.bus.disk.is_file(&filename);
@@ -2086,3 +2121,4 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 }
 
 crate::state_fields!(ConLine { buffer, text });
+

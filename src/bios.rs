@@ -79,6 +79,12 @@ const KBD_HANDLER: u16 = 0x1230;
 /// The fixed disk parameter tables of the first two hard disks, which
 /// INT 41h and 46h point to.
 const FIXED_DISK_PARAMS: u16 = 0x12C0;
+/// Where a DOS service in virtual-8086 mode that waits for a key goes
+/// between its tries (`exec::service_trap`): the keyboard busy loop (INT
+/// 2Ah AX=8400h) and the idle interrupt (INT 28h), as DOS's own loop calls
+/// them, for a V86 monitor to see the machine idle, then the INT 21h trap
+/// again.
+pub const DOS_IDLE: u16 = 0x1310;
 /// Where the IBM PC BIOS keeps its dummy interrupt handler (an IRET).
 pub const IRET_HANDLER: u16 = 0xFF53;
 const RESET_VECTOR: u16 = 0xFFF0;
@@ -226,6 +232,12 @@ pub fn install_for_boot(bus: &mut Bus, hard_disks: &[crate::diskimage::Chs]) {
     bus.write_16(0x046E, (ticks >> 16) as u16);
 }
 
+/// The offset in F000 of the trap of the HLE vector `vector`.
+fn hle_trap(vector: u8) -> u16 {
+    let i = HLE_VECTORS.iter().position(|&v| v == vector).expect("an HLE vector");
+    TRAP_BASE + 4 * i as u16
+}
+
 /// Write the ROM code and data, and the default vector table.
 pub fn install(bus: &mut Bus) {
     for (i, &vector) in HLE_VECTORS.iter().enumerate() {
@@ -270,6 +282,20 @@ pub fn install(bus: &mut Bus) {
     );
     // Disk services wait here for slow disk access (`diskio::wait`).
     write_rom(bus, IO_WAIT, &[0xFE, 0x39, SERVICE_IO_WAIT]);
+    let [trap_lo, trap_hi] = hle_trap(0x21).to_le_bytes();
+    write_rom(
+        bus,
+        DOS_IDLE,
+        &[
+            0xFB, // STI
+            0x50, // PUSH AX
+            0xB8, 0x00, 0x84, // MOV AX, 8400h
+            0xCD, 0x2A, // INT 2Ah
+            0x58, // POP AX
+            0xCD, 0x28, // INT 28h
+            0xEA, trap_lo, trap_hi, 0x00, 0xF0, // JMP FAR F000:trap
+        ],
+    );
     // The PS/2 mouse (IRQ 12), as an IBM PS/2 BIOS runs it: save the
     // registers, read the mouse's byte, and with a report's last and a
     // handler installed push the status, X, Y and a 0 word and CALL FAR
@@ -387,6 +413,32 @@ fn keyboard_handler() -> Vec<u8> {
     a.op(&[0xFA, 0xB0, 0x20, 0xE6, 0x20]); // CLI; MOV AL, 20h; OUT 20h, AL
     a.op(&[0x58, 0xCF]); // POP AX; IRET
     a.finish()
+}
+
+/// Windows' 386 enhanced mode starts (`on`) or ends: while it runs, its
+/// keyboard driver hands each virtual machine its keys through the
+/// keyboard controller, and the machine's BIOS makes the keystrokes from
+/// the scan codes in its own buffer (`keyboard::bios_keystrokes`), its
+/// keyboard interrupt's trap going on to the one a booted system has (the
+/// vector table, and a TSR's hook, still lead there), the buffer empty.
+/// Keys typed ahead for the program that started Windows are dropped.
+pub fn windows_keyboard(bus: &mut Bus, on: bool) {
+    if bus.kbd.windows == on {
+        return;
+    }
+    bus.kbd.windows = on;
+    bus.keyboard_buffer.clear();
+    if on {
+        crate::keyboard::BiosBuffer::reset(bus);
+    }
+    let trap = hle_trap(0x09);
+    let code = if on {
+        let [lo, hi] = KBD_HANDLER.wrapping_sub(trap + 3).to_le_bytes();
+        [0xE9, lo, hi, 0xCF] // JMP near KBD_HANDLER
+    } else {
+        [0xFE, 0x38, 0x09, 0xCF]
+    };
+    write_rom(bus, trap, &code);
 }
 
 /// Put the default vectors back, except those pointing into `keep`

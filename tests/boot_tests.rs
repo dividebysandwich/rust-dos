@@ -202,3 +202,39 @@ fn a_booted_systems_state_takes_its_disk_back() {
     assert_eq!(sector(&disk), pattern, "put back from the copy");
     disks::delete_copies(&file);
 }
+
+#[test]
+fn windows_hands_its_machines_their_keys_through_their_bios() {
+    use rust_dos::interrupts::int2f;
+    let base = PathBuf::from("target/test_boot").join("windows");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.load_shell();
+    // Windows' 386 enhanced mode starts (INT 2Fh AX=1605h, DX bit 0
+    // clear): its keyboard driver hands each machine its keys through the
+    // keyboard controller, and the machine's BIOS makes the keystrokes.
+    cpu.set_ax(0x1605);
+    cpu.set_dx(0);
+    int2f::handle(&mut cpu);
+    assert!(cpu.bus.kbd.windows);
+    // STI; DS=0; INT 16h AH=00h; MOV [KEY], AX; JMP $
+    let code = [0xFB, 0x31, 0xC0, 0x8E, 0xD8, 0xB4, 0x00, 0xCD, 0x16, 0xA3, KEY as u8, (KEY >> 8) as u8, 0xEB, 0xFE];
+    cpu.bus.load_bytes(0x20000, &code);
+    cpu.set_cs(0x2000);
+    cpu.set_ip(0);
+    press(&mut cpu, 0x1E, false);
+    release(&mut cpu, 0x1E, false);
+    assert!(cpu.bus.keyboard_buffer.is_empty(), "the host's keys go to the controller alone");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_16(KEY) != 0), "INT 16h returns the key");
+    assert_eq!(cpu.bus.read_16(KEY), 0x1E61);
+    // Windows exits (AX=1606h): the keys are the built-in DOS's again.
+    cpu.set_ax(0x1606);
+    cpu.set_dx(0);
+    int2f::handle(&mut cpu);
+    assert!(!cpu.bus.kbd.windows);
+    assert_eq!((0..4).map(|i| cpu.bus.read_8(0xF1004 + i)).collect::<Vec<_>>(), [0xFE, 0x38, 0x09, 0xCF]);
+    press(&mut cpu, 0x1E, false);
+    assert_eq!(cpu.bus.keyboard_buffer.front(), Some(&0x1E61));
+}

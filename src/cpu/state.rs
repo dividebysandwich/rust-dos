@@ -10,7 +10,7 @@ use crate::savestate::{Reader, Result, State, Writer};
 crate::state_fields!(DescTable { base, limit });
 crate::state_enum!(CpuState { CpuState::Running, CpuState::Halted, CpuState::RebootShell });
 crate::state_fields!(CpuSnapshot { gpr, eip, flags, seg });
-crate::state_fields!(ProcessContext { regs, psp, child, heap_pointer, dta, program });
+crate::state_fields!(ProcessContext { regs, psp, child, child_at, heap_pointer, dta, program });
 
 impl State for CpuFlags {
     fn save(&self, w: &mut Writer) {
@@ -42,6 +42,7 @@ impl Default for ProcessContext {
             regs: CpuSnapshot { gpr: [0; 8], eip: 0, flags: CpuFlags::empty(), seg: [SegCache::real(0); 6] },
             psp: 0,
             child: 0,
+            child_at: 0,
             heap_pointer: 0,
             dta: (0, 0),
             program: String::new(),

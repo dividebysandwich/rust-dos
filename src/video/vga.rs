@@ -116,6 +116,9 @@ pub struct VgaCard {
 /// The memory text and CGA modes show: 32 KB at B8000h (or B0000h for a
 /// monochrome mode), and 64 KB for the Hercules card's two pages.
 pub const TEXT_VRAM_SIZE: usize = 64 * 1024;
+/// The part of planes 0 and 1 that is an EGA's or VGA's text memory (see
+/// `Vga::plane_index`): the 32 KB at B8000h.
+const TEXT_PLANE_SIZE: usize = 0x4000;
 
 /// The ports of the VGA with its CRTC at 3D4h (Miscellaneous Output bit 0
 /// set, a colour mode) and at 3B4h (a monochrome mode). The other CRTC
@@ -418,11 +421,8 @@ impl VgaCard {
         };
 
         let mut new_latches = [0u8; 4];
-        for p in 0..4 {
-            let idx = (p * 65536) + plane_offset;
-            if idx < self.vram_graphics.len() {
-                new_latches[p] = self.vram_graphics[idx];
-            }
+        for (p, latch) in new_latches.iter_mut().enumerate() {
+            *latch = self.plane_byte(p, plane_offset).unwrap_or(0);
         }
         self.latches.set(new_latches);
 
@@ -438,26 +438,71 @@ impl VgaCard {
             });
         }
 
-        let final_index: usize;
-
-        if chain4 {
-            let plane = offset & 3;
-            final_index = (plane * 65536) + plane_offset;
+        let read_map = (self.graphics_regs[0x04] & 0x03) as usize;
+        let plane = if chain4 {
+            offset & 3
+        } else if odd_even {
+            // In odd/even mode the address's low bit picks the even or odd
+            // plane of the pair Read Map Select names, as it does for
+            // writes: a text screen read at A0000h has its attributes at
+            // the odd addresses.
+            (read_map & 0x02) | (offset & 1)
         } else {
-            // Read Map Select
-            let read_map = self.graphics_regs[0x04] & 0x03;
-            // In Odd/Even mode, typically Read Map selects the plane,
-            // but the offset is shifted. Address LSB doesn't force plane selection for READs
-            // the same way it does for WRITEs (usually).
-            // Exception: "Two Way" or "Chain 2" modes.
-            // For now, respect Read Map.
-            final_index = (read_map as usize * 65536) + plane_offset;
+            read_map
+        };
+        self.plane_byte(plane, plane_offset).unwrap_or(0xFF)
+    }
+
+    /// Where the byte of plane `plane` at `offset` in it is kept: in the
+    /// text modes' memory (`vram_text`, where the processor sees a
+    /// character and its attribute after each other) for the first 16 KB
+    /// of planes 0 and 1, which hold them, while the attribute controller
+    /// shows text; in the planes otherwise. Windows' VDD saves and
+    /// restores a machine's text screen through the planes so.
+    #[inline]
+    fn plane_index(&self, plane: usize, offset: usize) -> Option<(bool, usize)> {
+        if plane < 2 && offset < TEXT_PLANE_SIZE && self.text_in_planes() {
+            return Some((true, offset * 2 + plane));
         }
+        let index = plane * 65536 + offset;
+        (index < self.vram_graphics.len()).then_some((false, index))
+    }
 
-        if final_index < self.vram_graphics.len() {
-            self.vram_graphics[final_index]
-        } else {
-            0xFF
+    fn plane_byte(&self, plane: usize, offset: usize) -> Option<u8> {
+        self.plane_index(plane, offset).map(|(text, i)| if text { self.vram_text[i] } else { self.vram_graphics[i] })
+    }
+
+    fn set_plane_byte(&mut self, plane: usize, offset: usize, value: u8) {
+        match self.plane_index(plane, offset) {
+            Some((true, i)) => self.vram_text[i] = value,
+            Some((false, i)) => self.vram_graphics[i] = value,
+            None => {}
+        }
+    }
+
+    /// Whether planes 0 and 1 are the text modes' memory now: the
+    /// attribute controller shows text, on an EGA or VGA.
+    #[inline]
+    fn text_in_planes(&self) -> bool {
+        self.attribute_regs[0x10] & 0x01 == 0 && self.adapter.ega_bios()
+    }
+
+    /// The attribute controller switched between text and graphics: what
+    /// planes 0 and 1 held is where the other kind of mode finds it, as on
+    /// a VGA, whose memory the two share.
+    fn move_text_planes(&mut self, to_text: bool) {
+        if !self.adapter.ega_bios() {
+            return;
+        }
+        for offset in 0..TEXT_PLANE_SIZE {
+            for plane in 0..2 {
+                let (text, graphics) = (offset * 2 + plane, plane * 65536 + offset);
+                if to_text {
+                    self.vram_text[text] = self.vram_graphics[graphics];
+                } else {
+                    self.vram_graphics[graphics] = self.vram_text[text];
+                }
+            }
         }
     }
 
@@ -509,10 +554,8 @@ impl VgaCard {
         let g = &self.graphics_regs;
         if g[0x05] & 0x03 == 0 && g[0x01] & 0x0F == 0 && g[0x03] == 0 && g[0x08] == 0xFF {
             for p in 0..4 {
-                if planes_to_write & (1 << p) != 0
-                    && let Some(byte) = self.vram_graphics.get_mut(p * 65536 + plane_offset)
-                {
-                    *byte = value;
+                if planes_to_write & (1 << p) != 0 {
+                    self.set_plane_byte(p, plane_offset, value);
                 }
             }
             self.mark_dirty_full();
@@ -579,10 +622,7 @@ impl VgaCard {
 
         for p in 0..4 {
             if (planes_to_write & (1 << p)) != 0 {
-                let idx = (p * 65536) + plane_offset;
-                if idx < self.vram_graphics.len() {
-                    self.vram_graphics[idx] = per_plane[p];
-                }
+                self.set_plane_byte(p, plane_offset, per_plane[p]);
             }
         }
         self.mark_dirty_full();
@@ -897,6 +937,7 @@ impl Device for VgaCard {
                     if (self.attribute_index as usize) < self.attribute_regs.len() {
                         if self.attribute_index == 0x10 && (self.attribute_regs[0x10] ^ value) & 0x01 != 0 {
                             self.mode_switched = true;
+                            self.move_text_planes(value & 0x01 == 0);
                         }
                         self.attribute_regs[self.attribute_index as usize] = value;
                         // println!("[VGA] Attr Reg {:02X} = {:02X}", self.attribute_index, value);
@@ -1060,10 +1101,57 @@ mod tests {
         assert!(vga.mode_switched);
     }
 
+    /// A text screen, read through the planes as Windows' VDD saves a
+    /// machine's screen: characters in plane 0, attributes in plane 1.
+    #[test]
+    fn a_text_screen_reads_through_the_planes() {
+        let mut vga = VgaCard::new();
+        vga.vram_text[..4].copy_from_slice(&[b'A', 0x1F, b'B', 0x2E]);
+        // Planar, read map 1: the attributes.
+        vga.sequencer_regs[0x04] = 0x06;
+        vga.graphics_regs[0x05] = 0x00;
+        vga.graphics_regs[0x04] = 0x01;
+        assert_eq!((vga.read_graphics(0), vga.read_graphics(1)), (0x1F, 0x2E));
+        vga.graphics_regs[0x04] = 0x00;
+        assert_eq!((vga.read_graphics(0), vga.read_graphics(1)), (b'A', b'B'));
+        // Odd/even, as the text mode has it: the odd addresses are plane 1.
+        vga.sequencer_regs[0x04] = 0x02;
+        vga.graphics_regs[0x05] = 0x10;
+        assert_eq!((vga.read_graphics(0), vga.read_graphics(1)), (b'A', 0x1F));
+        // Written through the planes, they are the text.
+        vga.sequencer_regs[0x04] = 0x06;
+        vga.sequencer_regs[0x02] = 0x02;
+        vga.graphics_regs[0x05] = 0x00;
+        vga.graphics_regs[0x08] = 0xFF;
+        vga.write_graphics(1, 0x4E);
+        assert_eq!(vga.vram_text[3], 0x4E);
+    }
+
+    /// Planes 0 and 1 are the text modes' memory: a switch between text
+    /// and graphics through the attribute controller keeps what they hold.
+    #[test]
+    fn the_text_is_in_the_planes_across_a_switch() {
+        let mut vga = VgaCard::new();
+        let set_mode = |vga: &mut VgaCard, value: u8| {
+            vga.attribute_flip_flop = false;
+            vga.io_write(0x3C0, 0x10);
+            vga.io_write(0x3C0, value);
+        };
+        set_mode(&mut vga, 0x01);
+        vga.vram_graphics[0] = b'X';
+        vga.vram_graphics[65536] = 0x07;
+        set_mode(&mut vga, 0x00);
+        assert_eq!(vga.vram_text[..2], [b'X', 0x07]);
+        vga.vram_text[2] = b'Y';
+        set_mode(&mut vga, 0x01);
+        assert_eq!(vga.vram_graphics[1], b'Y');
+    }
+
     #[test]
     fn read_mode_1_compares_the_pixels_colours() {
         let mut vga = VgaCard::new();
-        // Planar, all planes, read mode 1.
+        // A graphics mode, planar, all planes, read mode 1.
+        vga.attribute_regs[0x10] = 0x01;
         vga.sequencer_regs[0x04] = 0x06;
         vga.sequencer_regs[0x02] = 0x0F;
         // Selected through the ports, as Windows' VGA driver does (GR05

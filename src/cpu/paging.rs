@@ -319,16 +319,6 @@ impl Cpu {
         Some(self.translate((pte & 0xFFFF_F000) | (lin & 0xFFF)))
     }
 
-    /// Whether conventional memory, from the first MCB up, is at the
-    /// physical addresses its linear ones name, as DOS reaches it here: so
-    /// without paging, and in Windows' System VM, but not in the DOS
-    /// machines of its 386 enhanced mode, which have memory of their own.
-    pub fn conventional_memory_in_place(&self) -> bool {
-        let first = (crate::mcb::FIRST_MCB_SEG as u32 * 16) >> 12;
-        let end = crate::mcb::END_OF_CONVENTIONAL as u32 * 16 >> 12;
-        (first..end).all(|page| self.peek_translate(page << 12) == Some(page << 12))
-    }
-
     /// The page directory and page table entries for `lin`, for debuggers:
     /// (PDE address, PDE, PTE address and PTE if the table is present; a
     /// 4 MB page has none).

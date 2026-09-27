@@ -988,6 +988,10 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
                 if vector == 0x16 && crate::shell::abandon_input(cpu) {
                     // Batch lines came while the prompt waited for a key.
                     cpu.idle = false;
+                } else if vector == 0x21 && cpu.v86() {
+                    // DOS waiting for a key under a V86 monitor: its idle
+                    // calls between the tries, for the monitor to see.
+                    cpu.set_ip(crate::bios::DOS_IDLE);
                 } else {
                     // Stay on the trap, with interrupts on as the BIOS's own
                     // wait loops have them; the caller's flags come back with

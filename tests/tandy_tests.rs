@@ -215,8 +215,8 @@ fn the_cga_modes_look_as_on_a_cga() {
 #[test]
 fn dos_memory_keeps_clear_of_the_video_memory() {
     // The Tandy's ends at 9C00h.
-    let cpu = machine(Adapter::Tandy, 0x03);
-    let chain = mcb::walk(&cpu.bus);
+    let mut cpu = machine(Adapter::Tandy, 0x03);
+    let chain = mcb::walk(&mut cpu.bus);
     let &(last, m) = chain.last().unwrap();
     assert!(m.is_free() && m.is_last());
     assert_eq!(last + 1 + m.size, 0x9C00);
@@ -224,13 +224,13 @@ fn dos_memory_keeps_clear_of_the_video_memory() {
     // The PCjr's first block for programs is above its video memory, and
     // mode 9 clearing that memory leaves the chain whole.
     let mut cpu = machine(Adapter::Pcjr, 0x03);
-    let chain = mcb::walk(&cpu.bus);
+    let chain = mcb::walk(&mut cpu.bus);
     assert_eq!(chain[0].1.owner, mcb::DOS_OWNER);
     assert_eq!(chain[1].0, 0x2400);
     assert_eq!(cpu.resident_end, 0x2400);
     assert_eq!(cpu.transient_segment(), 0x2401);
     int10::set_mode(&mut cpu, 0x09);
-    let chain = mcb::walk(&cpu.bus);
+    let chain = mcb::walk(&mut cpu.bus);
     assert_eq!(chain.len(), 2);
     assert_eq!(chain[1].0 + 1 + chain[1].1.size, 0xA000);
 }
@@ -241,12 +241,12 @@ fn switching_machine_at_the_prompt_lays_memory_out_again() {
     cpu.load_shell();
     video::print_string(&mut cpu, "C:\\>");
     bios::switch(&mut cpu, VideoSetup { adapter: Adapter::Tandy, ..Default::default() });
-    let &(last, m) = mcb::walk(&cpu.bus).last().unwrap();
+    let &(last, m) = mcb::walk(&mut cpu.bus).last().unwrap();
     assert_eq!(last + 1 + m.size, 0x9C00);
     // The prompt came along into the Tandy's memory.
     assert_eq!(cpu.bus.read_8(0x9C000 + 4), b'\\');
     bios::switch(&mut cpu, VideoSetup::default());
-    let &(last, m) = mcb::walk(&cpu.bus).last().unwrap();
+    let &(last, m) = mcb::walk(&mut cpu.bus).last().unwrap();
     assert_eq!(last + 1 + m.size, 0xA000);
     assert_eq!(cpu.bus.read_8(0xB8004), b'\\');
 }

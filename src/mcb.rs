@@ -123,29 +123,30 @@ impl Mcb {
     }
 }
 
-fn header_addr(seg: u16) -> usize {
-    (seg as usize) * 16
+fn header_addr(seg: u16) -> u32 {
+    (seg as u32) * 16
 }
 
-pub fn read_mcb(bus: &Bus, seg: u16) -> Mcb {
+/// The MCB at `seg`, read as DOS reads it: through the page tables while
+/// a service runs with paging on, where the chain of a Windows virtual
+/// machine goes on into memory of its own.
+pub fn read_mcb(bus: &mut Bus, seg: u16) -> Mcb {
     let base = header_addr(seg);
     Mcb {
-        signature: bus.read_8(base),
-        owner: bus.read_16(base + 1),
-        size: bus.read_16(base + 3),
+        signature: bus.guest_read_8(base),
+        owner: bus.guest_read_16(base + 1),
+        size: bus.guest_read_16(base + 3),
     }
 }
 
 pub fn write_mcb(bus: &mut Bus, seg: u16, mcb: &Mcb) {
     let base = header_addr(seg);
-    bus.write_8(base, mcb.signature);
-    bus.write_16(base + 1, mcb.owner);
-    bus.write_16(base + 3, mcb.size);
+    bus.guest_write_8(base, mcb.signature);
+    bus.guest_write_16(base + 1, mcb.owner);
+    bus.guest_write_16(base + 3, mcb.size);
     // Zero the reserved bytes and owner-name fields so the chain looks clean
     // in memory-dump utilities.
-    for i in 5..16 {
-        bus.write_8(base + i, 0);
-    }
+    bus.guest_fill(base + 5, 11, 0);
 }
 
 /// Where conventional memory's blocks end: the paragraph of the upper
@@ -158,13 +159,13 @@ pub fn low_end(bus: &Bus) -> u16 {
 /// Walk the MCB chain from FIRST_MCB_SEG to the 'Z' sentinel. Returns the
 /// list of (segment, mcb) pairs encountered. Stops early on a corrupt chain.
 /// With upper memory linked, the chain goes on through it.
-pub fn walk(bus: &Bus) -> Vec<(u16, Mcb)> {
+pub fn walk(bus: &mut Bus) -> Vec<(u16, Mcb)> {
     walk_from(bus, FIRST_MCB_SEG)
 }
 
 /// The upper memory blocks' chain, from `UMB_START`: empty without upper
 /// memory.
-pub fn walk_upper(bus: &Bus) -> Vec<(u16, Mcb)> {
+pub fn walk_upper(bus: &mut Bus) -> Vec<(u16, Mcb)> {
     if bus.umb.is_none() {
         return Vec::new();
     }
@@ -172,7 +173,7 @@ pub fn walk_upper(bus: &Bus) -> Vec<(u16, Mcb)> {
 }
 
 /// Every block, in conventional and upper memory, linked or not.
-pub fn walk_all(bus: &Bus) -> Vec<(u16, Mcb)> {
+pub fn walk_all(bus: &mut Bus) -> Vec<(u16, Mcb)> {
     let mut chain = walk(bus);
     if bus.umb.is_some_and(|u| !u.linked) {
         chain.extend(walk_upper(bus));
@@ -181,11 +182,11 @@ pub fn walk_all(bus: &Bus) -> Vec<(u16, Mcb)> {
 }
 
 /// The chain the block whose MCB is at `seg` is in.
-fn chain_of(bus: &Bus, seg: u16) -> Vec<(u16, Mcb)> {
+fn chain_of(bus: &mut Bus, seg: u16) -> Vec<(u16, Mcb)> {
     if bus.umb.is_some() && seg >= UMB_START { walk_upper(bus) } else { walk(bus) }
 }
 
-fn walk_from(bus: &Bus, start: u16) -> Vec<(u16, Mcb)> {
+fn walk_from(bus: &mut Bus, start: u16) -> Vec<(u16, Mcb)> {
     let limit = if bus.umb.is_some() { UMB_END } else { conventional_end(bus) };
     let mut out = Vec::new();
     let mut seg = start;
@@ -220,9 +221,7 @@ pub fn init_empty(bus: &mut Bus) {
     if first > FIRST_MCB_SEG {
         // The PCjr's: DOS keeps the memory up to it.
         write_mcb(bus, FIRST_MCB_SEG, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: first - FIRST_MCB_SEG - 1 });
-        for (i, &b) in b"SC".iter().enumerate() {
-            bus.write_8(header_addr(FIRST_MCB_SEG) + 8 + i, b);
-        }
+        bus.guest_write_bytes(header_addr(FIRST_MCB_SEG) + 8, b"SC");
     }
     let free_paras = low_end(bus) - first - 1;
     write_mcb(
@@ -287,9 +286,7 @@ pub fn build_upper(bus: &mut Bus) {
     let Some(umb) = bus.umb else { return };
     let cover = umb_cover_seg(bus);
     write_mcb(bus, cover, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: UMB_START - cover - 1 });
-    for (i, &b) in b"SC".iter().enumerate() {
-        bus.write_8(header_addr(cover) + 8 + i, b);
-    }
+    bus.guest_write_bytes(header_addr(cover) + 8, b"SC");
     write_mcb(bus, UMB_START, &Mcb { signature: MCB_Z, owner: FREE_OWNER, size: umb.size - 1 });
     bus.umb = Some(Umb { linked: false, ..umb });
 }
@@ -337,7 +334,7 @@ pub fn release_upper(bus: &mut Bus, keep: &[u16]) -> bool {
 }
 
 /// The largest free upper memory block: its MCB's segment and its size.
-pub fn largest_free_upper(bus: &Bus) -> Option<(u16, u16)> {
+pub fn largest_free_upper(bus: &mut Bus) -> Option<(u16, u16)> {
     walk_upper(bus).into_iter().filter(|(_, m)| m.is_free()).max_by_key(|(_, m)| m.size).map(|(s, m)| (s, m.size))
 }
 

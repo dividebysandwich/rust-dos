@@ -117,6 +117,26 @@ fn cell_addr(cpu: &mut Cpu, page: u8, col: usize, row: usize) -> usize {
     base + ((page_offset + (row * text_cols(cpu) + col) * 2) & wrap)
 }
 
+/// Whether the teletype output can write what it may write: the BIOS
+/// data area, and in a text mode the active page, as the machine's BIOS
+/// data area describes them. False when a page of them isn't there (the
+/// fault is kept for `exec::service_trap`), which a V86 monitor's video
+/// driver keeps a machine in a window from to see its writes, so a service
+/// can stop before it takes input it couldn't echo.
+pub fn output_ready(cpu: &mut Cpu) -> bool {
+    if !cpu.bus.guest_probe(0x0400, 0x100, true) {
+        return false;
+    }
+    let mode = cpu.bus.guest_read_8(0x0449) & 0x7F;
+    if !matches!(mode, 0x00..=0x03 | 0x07) {
+        return true;
+    }
+    let base = if mode == 0x07 { 0xB0000 } else { 0xB8000 };
+    let size = cpu.bus.guest_read_16(0x044C).clamp(2000, 0x8000) as u32;
+    let start = active_page(cpu) as u32 * size;
+    cpu.bus.guest_probe(base + start, size as usize, true)
+}
+
 /// The active display page (BDA 0462h).
 fn active_page(cpu: &mut Cpu) -> u8 {
     cpu.bus.guest_read_8(0x0462)

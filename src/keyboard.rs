@@ -22,7 +22,7 @@ fn send_scan(bus: &mut Bus, scan: u8, extended: bool) {
 /// programs that read port 60h or install their own INT 09h ISR.
 pub fn deliver_key_down(bus: &mut Bus, code: u16, extended: bool) {
     let scan = (code >> 8) as u8;
-    if bus.boot.is_some() {
+    if bios_keystrokes(bus) {
         send_scan(bus, scan, extended);
         return;
     }
@@ -138,11 +138,43 @@ pub struct KeyboardState {
     /// The keystrokes last queued for INT 16h that the BIOS's keyboard
     /// interrupt (INT 09h) hasn't run for since (`drop_unseen_keys`).
     unseen: usize,
+    /// Windows' 386 enhanced mode runs (`bios::windows_keyboard`): its
+    /// keyboard driver hands each virtual machine its keys through the
+    /// keyboard controller, and the machine's BIOS makes its keystrokes
+    /// from the scan codes in its own buffer, as a booted system's does.
+    pub windows: bool,
 }
 
 impl Default for KeyboardState {
     fn default() -> Self {
-        Self { layout: Layout::us(), held: [0; 8], dead: None, unseen: 0 }
+        Self { layout: Layout::us(), held: [0; 8], dead: None, unseen: 0, windows: false }
+    }
+}
+
+/// Whether the BIOS's keyboard interrupt makes the keystrokes, in the
+/// buffer in the BIOS data area (`BiosBuffer`): on a booted system, and
+/// while Windows' 386 enhanced mode runs. Otherwise they come from the
+/// host's key events, in `Bus::keyboard_buffer`.
+pub fn bios_keystrokes(bus: &Bus) -> bool {
+    bus.boot.is_some() || bus.kbd.windows
+}
+
+/// Take the next keystroke from where the BIOS keeps them.
+pub fn take_keystroke(bus: &mut Bus) -> Option<u16> {
+    if bios_keystrokes(bus) { BiosBuffer::pop(bus) } else { bus.keyboard_buffer.pop_front() }
+}
+
+/// The next keystroke, left where it is.
+pub fn peek_keystroke(bus: &mut Bus) -> Option<u16> {
+    if bios_keystrokes(bus) { BiosBuffer::peek(bus) } else { bus.keyboard_buffer.front().copied() }
+}
+
+/// Throw the keystrokes typed ahead away.
+pub fn clear_keystrokes(bus: &mut Bus) {
+    if bios_keystrokes(bus) {
+        BiosBuffer::clear(bus);
+    } else {
+        bus.keyboard_buffer.clear();
     }
 }
 
@@ -194,8 +226,9 @@ fn set_bit(byte: &mut u8, bit: u8, on: bool) {
 pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char: Option<u8>) {
     let id = key_id(scan, extended);
     // A booted system's BIOS makes the keystrokes of the scan codes
-    // itself, in its keyboard interrupt (`bios_scan`).
-    if bus.boot.is_some() {
+    // itself, in its keyboard interrupt (`bios_scan`), as the BIOS of a
+    // virtual machine of Windows' 386 enhanced mode does.
+    if bios_keystrokes(bus) {
         bus.kbd.set_held(id, down);
         send_scan(bus, if down { scan } else { scan | 0x80 }, extended);
         return;
@@ -509,20 +542,22 @@ pub fn names() -> Vec<&'static str> {
     KEYS.iter().map(|(n, _)| *n).collect()
 }
 
-/// The layout is saved by its code; the keys held and the dead key's accent
-/// as they are.
+/// The layout is saved by its code; the keys held, the dead key's accent
+/// and whether Windows runs as they are.
 impl crate::savestate::State for KeyboardState {
     fn save(&self, w: &mut crate::savestate::Writer) {
         self.layout.code.to_string().save(w);
         self.held.save(w);
         self.dead.save(w);
+        self.windows.save(w);
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
         let mut code = String::new();
         code.load(r)?;
         self.layout = Layout::by_code(&code).unwrap_or(self.layout);
         self.held.load(r)?;
-        self.dead.load(r)
+        self.dead.load(r)?;
+        self.windows.load(r)
     }
 }
 
@@ -552,10 +587,19 @@ impl BiosBuffer {
         if start < end && end - start >= 4 { (start, end) } else { (0x1E, 0x3E) }
     }
 
-    /// The keystroke at the head, if there is one.
+    /// The keystroke at the head, if there is one. Pointers outside the
+    /// ring (a program's, or none set up) hold none.
     pub fn peek(bus: &mut Bus) -> Option<u16> {
         let (head, tail) = (bus.guest_read_16(0x041A), bus.guest_read_16(0x041C));
-        (head != tail).then(|| bus.guest_read_16(0x0400 + head as u32))
+        if head == tail {
+            return None;
+        }
+        let (start, end) = Self::bounds(bus);
+        let in_ring = |p: u16| (start..end).contains(&p) && (p - start) % 2 == 0;
+        if !in_ring(head) || !in_ring(tail) {
+            return None;
+        }
+        Some(bus.guest_read_16(0x0400 + head as u32))
     }
 
     /// Take the keystroke at the head, if there is one.
@@ -584,6 +628,13 @@ impl BiosBuffer {
         bus.guest_write_16(0x0400 + tail as u32, key);
         bus.guest_write_16(0x041C, next);
         true
+    }
+
+    /// The BIOS's ring, from 40:1E to 40:3E, empty.
+    pub fn reset(bus: &mut Bus) {
+        for (at, value) in [(0x041A, 0x1E), (0x041C, 0x1E), (0x0480, 0x1E), (0x0482, 0x3E)] {
+            bus.guest_write_16(at, value);
+        }
     }
 
     /// Empty the buffer.

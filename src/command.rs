@@ -418,6 +418,11 @@ fn type_text(bytes: &[u8]) -> Vec<u8> {
 struct ClsCommand;
 impl ShellCommand for ClsCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
+        // In a Windows virtual machine, the machine's own screen.
+        if cpu.v86() && cpu.bus.guest_paging.is_some() {
+            crate::interrupts::clear_screen(cpu);
+            return;
+        }
         // Direct VRAM clear to avoid circular dependency on int10.rs:
         // Space (0x20) with Gray-on-Black (0x07) on every cell of the text
         // screen, wherever the adapter keeps it (B8000h, B0000h).

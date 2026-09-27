@@ -1,17 +1,16 @@
 use crate::bus::Bus;
 
 /// Helper to read a string from memory (DS:DX) until 0x00 (ASCIIZ)
-pub fn read_asciiz_string(bus: &Bus, addr: usize) -> String {
+pub fn read_asciiz_string(bus: &mut Bus, addr: usize) -> String {
     String::from_utf8_lossy(&read_asciiz_bytes(bus, addr)).to_string()
 }
 
-/// The bytes of the ASCIIZ string at `addr`, without its 0, as they are:
-/// code page 437 text that `read_asciiz_string` would mangle above 7Fh.
-pub fn read_asciiz_bytes(bus: &Bus, addr: usize) -> Vec<u8> {
-    let ram = bus.ram();
-    let tail = ram.get(addr..).unwrap_or_default();
-    let len = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
-    tail[..len].to_vec()
+/// The bytes of the ASCIIZ string at `addr` (a caller's address, through
+/// the page tables while a service runs with paging on), without its 0,
+/// as they are: code page 437 text that `read_asciiz_string` would mangle
+/// above 7Fh.
+pub fn read_asciiz_bytes(bus: &mut Bus, addr: usize) -> Vec<u8> {
+    bus.guest_read_asciiz(addr as u32, 0x10000)
 }
 
 /// Converts a filename pattern (e.g., "*.*", "FILE.TXT") to DOS FCB format (11 bytes).
@@ -53,13 +52,13 @@ pub fn pattern_to_fcb(pattern: &str) -> [u8; 11] {
 }
 
 /// Helper: Reconstruct "NAME.EXT" from the DTA's fixed-width 11-byte template
-pub fn read_dta_template(bus: &Bus, dta_phys: usize) -> String {
+pub fn read_dta_template(bus: &mut Bus, dta_phys: usize) -> String {
     let mut name = String::new();
     let mut ext = String::new();
 
     // Read Name (Offsets 1-8)
     for i in 0..8 {
-        let c = bus.read_8(dta_phys + 1 + i);
+        let c = bus.guest_read_8((dta_phys + 1 + i) as u32);
         // DOS uses 0x20 (Space) for padding. 0x3F is '?'.
         if c > 0x20 { 
             name.push(c as char); 
@@ -70,7 +69,7 @@ pub fn read_dta_template(bus: &Bus, dta_phys: usize) -> String {
 
     // Read Extension (Offsets 9-11)
     for i in 0..3 {
-        let c = bus.read_8(dta_phys + 9 + i);
+        let c = bus.guest_read_8((dta_phys + 9 + i) as u32);
         if c > 0x20 { 
             ext.push(c as char); 
         } else if c == b'?' {

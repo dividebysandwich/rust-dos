@@ -28,7 +28,7 @@ fn test_vram_mapping() {
     assert_eq!(bus.read_8(text_addr), 0x41);
     // Verify it DID NOT go to RAM or Graphics VRAM
     assert_eq!(bus.ram()[text_addr], 0x00);
-    assert_eq!(bus.vga.read_graphics(0), 0x00);
+    assert_eq!(bus.vga.vram_graphics[0], 0x00);
 
     // Test Graphics Mode VRAM (0xA0000)
     let graph_addr = ADDR_VGA_GRAPHICS; // 0xA0000

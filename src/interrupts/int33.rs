@@ -157,15 +157,20 @@ pub fn handle(cpu: &mut Cpu) {
         0x0016 | 0x0017 => {
             // Save the driver state to ES:DX, or restore it from there: the
             // event handler, the cursor's visibility and position.
-            let addr = cpu.get_physical_addr(cpu.es(), cpu.dx());
+            // The buffer is the caller's, through the page tables of a
+            // Windows virtual machine.
+            let addr = cpu.get_physical_addr(cpu.es(), cpu.dx()) as u32;
             if func == 0x0016 {
                 let m = &cpu.bus.mouse;
                 let words = [m.callback_mask, m.callback_cs, m.callback_ip, m.hide_counter as u16, m.x as u16, m.y as u16];
                 for (i, w) in words.into_iter().enumerate() {
-                    cpu.bus.write_16(addr + i * 2, w);
+                    cpu.bus.guest_write_16(addr + i as u32 * 2, w);
                 }
             } else {
-                let w: Vec<u16> = (0..6).map(|i| cpu.bus.read_16(addr + i * 2)).collect();
+                let w: Vec<u16> = (0..6).map(|i| cpu.bus.guest_read_16(addr + i * 2)).collect();
+                if cpu.bus.guest_faulted() {
+                    return;
+                }
                 let m = &mut cpu.bus.mouse;
                 (m.callback_mask, m.callback_cs, m.callback_ip) = (w[0], w[1], w[2]);
                 m.hide_counter = w[3] as i16 as i32;

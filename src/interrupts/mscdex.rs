@@ -103,9 +103,9 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
         // each drive.
         0x01 => {
             for (unit, _) in cd_drives.iter().enumerate() {
-                cpu.bus.write_8(es_bx + unit * 5, unit as u8);
-                cpu.bus.write_16(es_bx + unit * 5 + 1, DEVICE_HEADER);
-                cpu.bus.write_16(es_bx + unit * 5 + 3, 0xF000);
+                cpu.bus.guest_write_8((es_bx + unit * 5) as u32, unit as u8);
+                cpu.bus.guest_write_16((es_bx + unit * 5 + 1) as u32, DEVICE_HEADER);
+                cpu.bus.guest_write_16((es_bx + unit * 5 + 3) as u32, 0xF000);
             }
         }
         // Copyright, abstract and bibliographic file names from the
@@ -115,9 +115,9 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                 Ok(pvd) => {
                     let at = 702 + (function as usize - 2) * 37;
                     for (i, &b) in pvd[at..at + 37].iter().enumerate() {
-                        cpu.bus.write_8(es_bx + i, b);
+                        cpu.bus.guest_write_8((es_bx + i) as u32, b);
                     }
-                    cpu.bus.write_8(es_bx + 37, 0);
+                    cpu.bus.guest_write_8((es_bx + 37) as u32, 0);
                     clear_error(cpu);
                 }
                 Err(_) => set_error(cpu, NOT_READY),
@@ -135,7 +135,7 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                     return;
                 }
                 for (i, &b) in sector.iter().enumerate() {
-                    cpu.bus.write_8(es_bx + i, b);
+                    cpu.bus.guest_write_8((es_bx + i) as u32, b);
                 }
                 cpu.set_ax(match sector[0] {
                     1 => 1,
@@ -160,7 +160,7 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                     }
                     let at = es_bx + i as usize * DATA_SECTOR;
                     for (j, &b) in sector.iter().enumerate() {
-                        cpu.bus.write_8(at + j, b);
+                        cpu.bus.guest_write_8((at + j) as u32, b);
                     }
                 }
                 clear_error(cpu);
@@ -184,7 +184,7 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
         // Get CD-ROM drive letters: one byte (0=A) per drive at ES:BX
         0x0D => {
             for (i, &drive) in cd_drives.iter().enumerate() {
-                cpu.bus.write_8(es_bx + i, drive);
+                cpu.bus.guest_write_8((es_bx + i) as u32, drive);
             }
         }
         // Volume descriptor preference: always the primary one.
@@ -201,7 +201,7 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
         0x10 => {
             let drive = u8::try_from(cpu.cx()).ok().filter(|d| cd_drives.contains(d));
             if let Some(unit) = drive.and_then(|d| cd_drives.iter().position(|&x| x == d)) {
-                cpu.bus.write_8(es_bx + 1, unit as u8);
+                cpu.bus.guest_write_8((es_bx + 1) as u32, unit as u8);
             }
             device_request(cpu, drive, es_bx);
         }
@@ -219,7 +219,7 @@ fn get_directory_entry(cpu: &mut Cpu, path_addr: usize) {
     };
     let mut path = String::new();
     for i in 0..128 {
-        match cpu.bus.read_8(path_addr + i) {
+        match cpu.bus.guest_read_8((path_addr + i) as u32) {
             0 => break,
             b => path.push(b as char),
         }
@@ -232,7 +232,7 @@ fn get_directory_entry(cpu: &mut Cpu, path_addr: usize) {
         Some(record) => {
             let buffer = cpu.get_physical_addr(cpu.si(), cpu.di());
             for (i, &b) in record.iter().take(255).enumerate() {
-                cpu.bus.write_8(buffer + i, b);
+                cpu.bus.guest_write_8((buffer + i) as u32, b);
             }
             cpu.set_ax(1);
             clear_error(cpu);
@@ -251,7 +251,7 @@ pub fn strategy(cpu: &mut Cpu) {
 pub fn interrupt(cpu: &mut Cpu) {
     let (seg, off) = cpu.bus.mscdex.request;
     let req = cpu.get_physical_addr(seg, off);
-    let unit = cpu.bus.read_8(req + 1) as usize;
+    let unit = cpu.bus.guest_read_8((req + 1) as u32) as usize;
     let drive = cpu.bus.disk.drives_of_kind(DriveKind::CdRom).get(unit).copied();
     device_request(cpu, drive, req);
 }
@@ -263,8 +263,9 @@ fn sector(mode: u8, address: u32) -> u32 {
 }
 
 /// The real-mode far pointer at `at`, as a physical address.
-fn far(cpu: &Cpu, at: usize) -> usize {
-    cpu.get_physical_addr(cpu.bus.read_16(at + 2), cpu.bus.read_16(at))
+fn far(cpu: &mut Cpu, at: usize) -> usize {
+    let (segment, offset) = (cpu.bus.guest_read_16((at + 2) as u32), cpu.bus.guest_read_16(at as u32));
+    cpu.get_physical_addr(segment, offset)
 }
 
 /// Carry out the device driver request at `req` for CD drive `drive`.
@@ -279,29 +280,29 @@ fn device_request(cpu: &mut Cpu, drive: Option<u8>, req: usize) {
         },
     };
     let busy = drive.is_some_and(|d| cpu.bus.cdaudio.is_busy(d));
-    cpu.bus.write_16(req + 3, status | if busy { BUSY } else { 0 });
+    cpu.bus.guest_write_16((req + 3) as u32, status | if busy { BUSY } else { 0 });
 }
 
 /// A drive backed by a host directory: it opens and closes, and answers
 /// the IOCTL queries that need no sectors.
 fn folder_request(cpu: &mut Cpu, req: usize) -> u16 {
-    match cpu.bus.read_8(req + 2) {
+    match cpu.bus.guest_read_8((req + 2) as u32) {
         0x03 => {
             let buf = far(cpu, req + 0x0E);
-            match cpu.bus.read_8(buf) {
+            match cpu.bus.guest_read_8(buf as u32) {
                 0x06 => {
-                    cpu.bus.write_32(buf + 1, DEVICE_STATUS | UNLOCKED);
+                    cpu.bus.guest_write_32((buf + 1) as u32, DEVICE_STATUS | UNLOCKED);
                 }
                 0x07 => {
-                    cpu.bus.write_8(buf + 1, 0); // cooked mode
-                    cpu.bus.write_16(buf + 2, DATA_SECTOR as u16);
+                    cpu.bus.guest_write_8((buf + 1) as u32, 0); // cooked mode
+                    cpu.bus.guest_write_16((buf + 2) as u32, DATA_SECTOR as u16);
                 }
                 0x08 => {
-                    cpu.bus.write_32(buf + 1, FOLDER_SECTORS);
+                    cpu.bus.guest_write_32((buf + 1) as u32, FOLDER_SECTORS);
                 }
                 // Media not changed.
                 0x09 => {
-                    cpu.bus.write_8(buf + 1, 1);
+                    cpu.bus.guest_write_8((buf + 1) as u32, 1);
                 }
                 _ => return UNKNOWN_COMMAND,
             }
@@ -314,19 +315,25 @@ fn folder_request(cpu: &mut Cpu, req: usize) -> u16 {
 }
 
 fn image_request(cpu: &mut Cpu, drive: u8, image: &Rc<CdImage>, req: usize) -> u16 {
-    let command = cpu.bus.read_8(req + 2);
-    let mode = cpu.bus.read_8(req + 0x0D);
+    let command = cpu.bus.guest_read_8((req + 2) as u32);
+    let mode = cpu.bus.guest_read_8((req + 0x0D) as u32);
     match command {
-        0x03 => ioctl_input(cpu, drive, image, far(cpu, req + 0x0E)),
-        0x0C => ioctl_output(cpu, drive, far(cpu, req + 0x0E)),
+        0x03 => {
+            let buf = far(cpu, req + 0x0E);
+            ioctl_input(cpu, drive, image, buf)
+        }
+        0x0C => {
+            let buf = far(cpu, req + 0x0E);
+            ioctl_output(cpu, drive, buf)
+        }
         // Input flush, device open, device close, output flush.
         0x07 | 0x0B | 0x0D | 0x0E => DONE,
         // Read Long: sectors cooked (2048 bytes) or raw (2352).
         0x80 => {
             let buffer = far(cpu, req + 0x0E);
-            let count = cpu.bus.read_16(req + 0x12) as u32;
-            let start = sector(mode, cpu.bus.read_32(req + 0x14));
-            let raw = cpu.bus.read_8(req + 0x18) != 0;
+            let count = cpu.bus.guest_read_16((req + 0x12) as u32) as u32;
+            let start = sector(mode, cpu.bus.guest_read_32((req + 0x14) as u32));
+            let raw = cpu.bus.guest_read_8((req + 0x18) as u32) != 0;
             read_long(cpu, image, buffer, start, count, raw)
         }
         // Read Long Prefetch: a hint.
@@ -338,8 +345,8 @@ fn image_request(cpu: &mut Cpu, drive: u8, image: &Rc<CdImage>, req: usize) -> u
         }
         // Play Audio: from a sector, for a number of sectors.
         0x84 => {
-            let start = sector(mode, cpu.bus.read_32(req + 0x0E));
-            let count = cpu.bus.read_32(req + 0x12);
+            let start = sector(mode, cpu.bus.guest_read_32((req + 0x0E) as u32));
+            let count = cpu.bus.guest_read_32((req + 0x12) as u32);
             cpu.bus.log_string(&format!(
                 "[MSCDEX] Play audio on {}: sector {} for {}",
                 crate::disk::drive_letter(drive),
@@ -386,7 +393,7 @@ fn read_long(cpu: &mut Cpu, image: &CdImage, buffer: usize, start: u32, count: u
         }
         let at = buffer + i as usize * size;
         for (j, &b) in data[..size].iter().enumerate() {
-            cpu.bus.write_8(at + j, b);
+            cpu.bus.guest_write_8((at + j) as u32, b);
         }
     }
     DONE
@@ -407,63 +414,63 @@ fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
         _ => 0,
     };
     let bus = &mut cpu.bus;
-    match bus.read_8(buf) {
+    match bus.guest_read_8(buf as u32) {
         // Address of the device header.
         0x00 => {
-            bus.write_16(buf + 1, DEVICE_HEADER);
-            bus.write_16(buf + 3, 0xF000);
+            bus.guest_write_16((buf + 1) as u32, DEVICE_HEADER);
+            bus.guest_write_16((buf + 3) as u32, 0xF000);
         }
         // Location of the head, in the addressing mode asked for.
         0x01 => {
-            let address = if bus.read_8(buf + 1) == 1 { cdrom::redbook(position) } else { position };
-            bus.write_32(buf + 2, address);
+            let address = if bus.guest_read_8((buf + 1) as u32) == 1 { cdrom::redbook(position) } else { position };
+            bus.guest_write_32((buf + 2) as u32, address);
         }
         // Audio channel info: input channel and volume per output.
         0x04 => {
             let channels = bus.cdaudio.channels;
             for (i, (input, volume)) in channels.into_iter().chain([(2, 0), (3, 0)]).enumerate() {
-                bus.write_8(buf + 1 + i * 2, input);
-                bus.write_8(buf + 2 + i * 2, volume);
+                bus.guest_write_8((buf + 1 + i * 2) as u32, input);
+                bus.guest_write_8((buf + 2 + i * 2) as u32, volume);
             }
         }
         // Drive bytes: none.
         0x05 => {
-            bus.write_8(buf + 1, 0);
+            bus.guest_write_8((buf + 1) as u32, 0);
         }
         0x06 => {
             let unlocked = if bus.mscdex.locked[drive as usize] { 0 } else { UNLOCKED };
-            bus.write_32(buf + 1, DEVICE_STATUS | unlocked);
+            bus.guest_write_32((buf + 1) as u32, DEVICE_STATUS | unlocked);
         }
         // Sector size in the read mode asked for.
         0x07 => {
-            let size = if bus.read_8(buf + 1) == 1 { RAW_SECTOR } else { DATA_SECTOR };
-            bus.write_16(buf + 2, size as u16);
+            let size = if bus.guest_read_8((buf + 1) as u32) == 1 { RAW_SECTOR } else { DATA_SECTOR };
+            bus.guest_write_16((buf + 2) as u32, size as u16);
         }
         // Volume size: the sectors up to the lead-out.
         0x08 => {
-            bus.write_32(buf + 1, image.leadout());
+            bus.guest_write_32((buf + 1) as u32, image.leadout());
         }
         // Media changed: once after a new disc, then not.
         0x09 => {
             let changed = std::mem::take(&mut bus.mscdex.changed[drive as usize]);
-            bus.write_8(buf + 1, if changed { 0xFF } else { 1 });
+            bus.guest_write_8((buf + 1) as u32, if changed { 0xFF } else { 1 });
         }
         // Audio disk info: first and last track, lead-out address.
         0x0A => {
             let tracks = image.tracks();
-            bus.write_8(buf + 1, tracks.first().map_or(1, |t| t.number));
-            bus.write_8(buf + 2, tracks.last().map_or(1, |t| t.number));
-            bus.write_32(buf + 3, cdrom::redbook(image.leadout()));
+            bus.guest_write_8((buf + 1) as u32, tracks.first().map_or(1, |t| t.number));
+            bus.guest_write_8((buf + 2) as u32, tracks.last().map_or(1, |t| t.number));
+            bus.guest_write_32((buf + 3) as u32, cdrom::redbook(image.leadout()));
         }
         // Audio track info: where a track starts and its control bits
         // (40h for data).
         0x0B => {
-            let number = bus.read_8(buf + 1);
+            let number = bus.guest_read_8((buf + 1) as u32);
             let Some(track) = image.tracks().iter().find(|t| t.number == number) else {
                 return SECTOR_NOT_FOUND;
             };
-            bus.write_32(buf + 2, cdrom::redbook(track.start));
-            bus.write_8(buf + 6, if track.is_audio() { 0x00 } else { 0x40 });
+            bus.guest_write_32((buf + 2) as u32, cdrom::redbook(track.start));
+            bus.guest_write_8((buf + 6) as u32, if track.is_audio() { 0x00 } else { 0x40 });
         }
         // Q channel: the track, index and times at the head.
         0x0C => {
@@ -473,32 +480,32 @@ fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
                 Some(t) => (t.is_audio(), t.number, 1, position - t.start),
                 None => (false, 0, 0, 0),
             };
-            bus.write_8(buf + 1, if control { 0x01 } else { 0x41 });
-            bus.write_8(buf + 2, number);
-            bus.write_8(buf + 3, index);
+            bus.guest_write_8((buf + 1) as u32, if control { 0x01 } else { 0x41 });
+            bus.guest_write_8((buf + 2) as u32, number);
+            bus.guest_write_8((buf + 3) as u32, index);
             for (i, b) in duration_msf(relative).into_iter().enumerate() {
-                bus.write_8(buf + 4 + i, b);
+                bus.guest_write_8((buf + 4 + i) as u32, b);
             }
-            bus.write_8(buf + 7, 0);
+            bus.guest_write_8((buf + 7) as u32, 0);
             let (m, s, f) = cdrom::lba_to_msf(position);
             for (i, b) in [m, s, f].into_iter().enumerate() {
-                bus.write_8(buf + 8 + i, b);
+                bus.guest_write_8((buf + 8 + i) as u32, b);
             }
         }
         // UPC/EAN code: the disc has none.
         0x0E => {
-            bus.write_8(buf + 1, 0x02);
+            bus.guest_write_8((buf + 1) as u32, 0x02);
             for i in 2..11 {
-                bus.write_8(buf + i, 0);
+                bus.guest_write_8((buf + i) as u32, 0);
             }
         }
         // Audio status: paused, and the range of the last Play.
         0x0F => {
             let paused = bus.cdaudio.drive() == Some(drive) && bus.cdaudio.state() == PlayState::Paused;
             let (start, end) = bus.cdaudio.range();
-            bus.write_16(buf + 1, paused as u16);
-            bus.write_32(buf + 3, cdrom::redbook(start));
-            bus.write_32(buf + 7, cdrom::redbook(end));
+            bus.guest_write_16((buf + 1) as u32, paused as u16);
+            bus.guest_write_32((buf + 3) as u32, cdrom::redbook(start));
+            bus.guest_write_32((buf + 7) as u32, cdrom::redbook(end));
         }
         _ => return UNKNOWN_COMMAND,
     }
@@ -508,15 +515,15 @@ fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
 /// IOCTL output: the control block at `buf` starts with its code.
 fn ioctl_output(cpu: &mut Cpu, drive: u8, buf: usize) -> u16 {
     let bus = &mut cpu.bus;
-    match bus.read_8(buf) {
+    match bus.guest_read_8(buf as u32) {
         // Eject, reset: the drive stops playing.
         0x00 | 0x02 => bus.cdaudio.stop_drive(drive),
         // Lock or unlock the door.
-        0x01 => bus.mscdex.locked[drive as usize] = bus.read_8(buf + 1) != 0,
+        0x01 => bus.mscdex.locked[drive as usize] = bus.guest_read_8((buf + 1) as u32) != 0,
         // Audio channel control: input channel and volume per output.
         0x03 => {
             for i in 0..2 {
-                bus.cdaudio.channels[i] = (bus.read_8(buf + 1 + i * 2), bus.read_8(buf + 2 + i * 2));
+                bus.cdaudio.channels[i] = (bus.guest_read_8((buf + 1 + i * 2) as u32), bus.guest_read_8((buf + 2 + i * 2) as u32));
             }
         }
         // Close the tray.

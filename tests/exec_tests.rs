@@ -324,6 +324,6 @@ fn int_20h_frees_the_memory_of_a_child_program() {
     let child_psp = child_psp.expect("the child ran");
     assert_eq!(cpu.current_psp, psp, "back in the parent");
     assert_eq!(cpu.last_child_exit, 0);
-    let owned: Vec<u16> = rust_dos::mcb::walk(&cpu.bus).into_iter().filter(|(_, m)| m.owner == child_psp).map(|(seg, _)| seg).collect();
+    let owned: Vec<u16> = rust_dos::mcb::walk(&mut cpu.bus).into_iter().filter(|(_, m)| m.owner == child_psp).map(|(seg, _)| seg).collect();
     assert!(owned.is_empty(), "the child's blocks are free: {:X?}", owned);
 }

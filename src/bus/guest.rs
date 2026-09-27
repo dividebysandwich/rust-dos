@@ -1,10 +1,10 @@
-//! Memory as the BIOS's services reach it: by the linear address their
-//! caller's segment and offset make (`Cpu::real_linear`), as a BIOS's own
-//! code would read and write it. With paging on, as under Windows, whose
-//! virtual machines have memory of their own at those addresses, that goes
-//! through the page tables (`guest_paging`); a page that isn't there ends
-//! the service, which runs again once the system has put it there
-//! (`exec::service_trap`).
+//! Memory as the BIOS's and DOS's services reach it: by the linear address
+//! their caller's segment and offset make (`Cpu::get_physical_addr`), as a
+//! BIOS's or DOS's own code would read and write it. With paging on, as
+//! under Windows, whose virtual machines have memory of their own at those
+//! addresses, that goes through the page tables (`guest_paging`); a page
+//! that isn't there ends the service, which runs again once the system has
+//! put it there (`exec::service_trap`).
 
 use super::Bus;
 use crate::cpu::paging::walk_tables;
@@ -89,6 +89,48 @@ impl Bus {
                 *byte = self.read_8(addr + i);
             }
         }
+    }
+
+    /// Whether the `len` bytes at `lin` can be read, or written with
+    /// `write`: false when a page isn't there, which the service's access
+    /// would have found, so it can stop before it does anything it can't
+    /// do again when it runs again.
+    pub fn guest_probe(&mut self, lin: u32, len: usize, write: bool) -> bool {
+        for (offset, _) in Self::page_runs(lin, len) {
+            if self.guest_physical(lin.wrapping_add(offset as u32), write).is_none() {
+                return false;
+            }
+        }
+        !self.guest_faulted()
+    }
+
+    /// Set the `len` bytes at `lin` to `value`.
+    pub fn guest_fill(&mut self, lin: u32, len: usize, value: u8) {
+        for (offset, run) in Self::page_runs(lin, len) {
+            let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), true) else {
+                return;
+            };
+            if self.is_plain_ram(addr, run) {
+                self.fill_ram(addr..addr + run, value);
+            } else {
+                for i in 0..run {
+                    self.write_8(addr + i, value);
+                }
+            }
+        }
+    }
+
+    /// The string at `lin` up to its 0 (without it), at most `max` bytes.
+    pub fn guest_read_asciiz(&mut self, lin: u32, max: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        while bytes.len() < max {
+            let b = self.guest_read_8(lin.wrapping_add(bytes.len() as u32));
+            if b == 0 || self.guest_faulted() {
+                break;
+            }
+            bytes.push(b);
+        }
+        bytes
     }
 
     /// Write `data` to the memory at `lin`.

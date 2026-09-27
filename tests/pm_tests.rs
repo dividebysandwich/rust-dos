@@ -727,34 +727,53 @@ fn enabling_the_ps2_mouse_in_virtual_8086_mode_unmasks_irq_12_through_the_ports(
 }
 
 #[test]
-fn exec_refuses_a_virtual_machine_whose_memory_is_elsewhere() {
+fn exec_loads_a_program_into_a_virtual_machines_own_memory() {
+    use rust_dos::mcb::{self, DOS_OWNER, FIRST_MCB_SEG, FREE_OWNER, MCB_M, MCB_Z, Mcb};
     let mut rig = Rig::new();
-    // Paging with conventional memory where its addresses say but for the
-    // page at 20000h, as a DOS machine of Windows' 386 enhanced mode has
-    // memory of its own.
+    let dir = std::path::PathBuf::from("target/test_pm/vm_exec");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = [0xB4, 0x4C, 0xCD, 0x21];
+    std::fs::write(dir.join("X.COM"), program).unwrap();
+    rig.cpu.bus.mount_drive(3, &dir, Default::default(), false).unwrap();
+    // DOS's memory up to 90000h, and the free memory above it in pages at
+    // 300000h, as a DOS machine of Windows' 386 enhanced mode has memory of
+    // its own.
+    let bus = &mut rig.cpu.bus;
+    mcb::write_mcb(bus, FIRST_MCB_SEG, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: 0x9000 - 0x1000 });
+    rig.load(0x30_0000, &[MCB_Z, FREE_OWNER as u8, 0, 0xFF, 0x0F]);
     page_tables(&mut rig);
     rig.write32(0x80000, 0x81000 | 0x7);
-    for i in 0..1024u32 {
-        rig.write32(0x81000 + 4 * i, (i << 12) | 0x7);
+    for page in 0..1024u32 {
+        let at = if (0x90..0xA0).contains(&page) { 0x300 + page - 0x90 } else { page };
+        rig.write32(0x81000 + 4 * page, (at << 12) | 0x7);
     }
-    rig.write32(0x81000 + 4 * 0x20, (0x300 << 12) | 0x7);
+    // EXEC D:\X.COM to load it (AL=01h), and the running process after.
     let v86 = asm16(0x30000, |a| {
         a.mov(ax, 0x3000u32)?;
         a.mov(ds, ax)?;
         a.mov(es, ax)?;
         a.mov(dx, 0x200u32)?;
         a.mov(bx, 0x210u32)?;
-        a.mov(ax, 0x4B00u32)?;
+        a.mov(ax, 0x4B01u32)?;
         a.pushf()?;
         a.db(&[0x9A, 0x30, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1030, INT 21h
         a.mov(word_ptr(0x100), ax)?;
         a.pushf()?;
         a.pop(ax)?;
         a.mov(word_ptr(0x102), ax)?;
+        a.mov(ah, 0x62u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x30, 0x10, 0x00, 0xF0])?;
+        a.mov(word_ptr(0x104), bx)?;
         a.int(0x40)
     });
     rig.load(0x30000, &v86);
-    rig.load(0x30200, b"X.COM\0");
+    rig.load(0x30200, b"D:\\X.COM\0");
+    // The parameter block: the parent's environment, an empty command tail
+    // and two blank FCBs.
+    rig.load(0x30210, &[0, 0, 0x20, 0x02, 0x00, 0x30, 0x30, 0x02, 0x00, 0x30, 0x40, 0x02, 0x00, 0x30]);
+    rig.load(0x30220, &[0, 0x0D]);
     rig.handler(0x40, 3, |a| record_code(a, 0x40));
     rig.run(|a| {
         enable_paging(a)?;
@@ -764,8 +783,152 @@ fn exec_refuses_a_virtual_machine_whose_memory_is_elsewhere() {
         a.iretd()
     });
     assert_eq!(rig.recorded().0, 0x40);
-    assert_eq!(rig.cpu.bus.read_16(0x30100), 0x0008, "insufficient memory");
-    assert_ne!(rig.cpu.bus.read_16(0x30102) & 0x0001, 0, "CF");
+    assert_eq!(rig.cpu.bus.read_16(0x30102) & 0x0001, 0, "CF, error {:04X}", rig.cpu.bus.read_16(0x30100));
+    let psp = rig.cpu.bus.read_16(0x30104) as usize;
+    assert!((0x9000..0xA000).contains(&psp), "PSP {:04X}", psp);
+    // The program, its PSP and its memory block are in the machine's pages.
+    let at = 0x30_0000 + psp * 16 - 0x9_0000;
+    let bytes = |rig: &Rig, at: usize, len: usize| (0..len).map(|i| rig.cpu.bus.read_8(at + i)).collect::<Vec<u8>>();
+    assert_eq!(bytes(&rig, at + 0x100, 4), program);
+    assert_eq!(bytes(&rig, at, 2), [0xCD, 0x20]);
+    assert_eq!(rig.cpu.bus.read_16(at - 16 + 1), psp as u16, "the block's owner");
+    assert_eq!(bytes(&rig, psp * 16 + 0x100, 4), [0; 4], "memory where its addresses say");
+}
+
+/// CALL FAR F000:1030, the INT 21h trap, after a PUSHF: INT 21h as a
+/// monitor reflects it.
+const INT21: [u8; 5] = [0x9A, 0x30, 0x10, 0x00, 0xF0];
+
+/// Page tables as `user_page_tables` makes them, but with the linear
+/// pages `moved` (page, physical page) elsewhere, as a Windows virtual
+/// machine has memory of its own.
+fn vm_page_tables(rig: &mut Rig, moved: &[(u32, u32)]) {
+    user_page_tables(rig);
+    for &(page, at) in moved {
+        rig.write32(0x81000 + 4 * page, (at << 12) | 0x7);
+    }
+}
+
+/// Run `v86` at 3000:0000 in virtual-8086 mode with IOPL 3 and paging on,
+/// its stack at 2000:FFFE.
+fn run_v86_paged(rig: &mut Rig, v86: &[u8]) {
+    rig.load(0x30000, v86);
+    rig.run(|a| {
+        enable_paging(a)?;
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+}
+
+#[test]
+fn dos_takes_the_running_process_from_the_machines_sda() {
+    use rust_dos::dos_data::{SDA, address};
+    let mut rig = Rig::new();
+    // Under Windows each virtual machine has an SDA of its own, which
+    // DOSMGR swaps in with the machine: its running process is there,
+    // whatever the machine that called DOS before had.
+    vm_page_tables(&mut rig, &[]);
+    let psp_field = address(SDA) + 0x10;
+    rig.cpu.bus.write_16(psp_field, 0x1234);
+    rig.cpu.current_psp = 0x0777;
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(ds, ax)?;
+        a.mov(ah, 0x62u32)?;
+        a.pushf()?;
+        a.db(&INT21)?;
+        a.mov(word_ptr(0x100), bx)?;
+        a.mov(ah, 0x50u32)?;
+        a.mov(bx, 0x4567u32)?;
+        a.pushf()?;
+        a.db(&INT21)?;
+        a.int(0x40)
+    });
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    run_v86_paged(&mut rig, &v86);
+    assert_eq!(rig.recorded().0, 0x40);
+    assert_eq!(rig.cpu.bus.read_16(0x30100), 0x1234, "AH=62h");
+    assert_eq!(rig.cpu.bus.read_16(psp_field), 0x4567, "AH=50h, kept in the SDA");
+}
+
+#[test]
+fn dos_takes_the_current_directory_from_the_machines_cds() {
+    let mut rig = Rig::new();
+    // The machine's current directory structure has C:\SRC, which DOSMGR
+    // keeps for it, whatever another machine changed to since.
+    vm_page_tables(&mut rig, &[]);
+    assert!(rig.cpu.bus.disk.set_current_directory("C:\\SRC"));
+    rust_dos::dos_data::write_cds(&mut rig.cpu.bus, 2);
+    assert!(rig.cpu.bus.disk.set_current_directory("C:\\"));
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(ds, ax)?;
+        a.mov(si, 0x200u32)?;
+        a.mov(dl, 3u32)?;
+        a.mov(ah, 0x47u32)?;
+        a.pushf()?;
+        a.db(&INT21)?;
+        a.int(0x40)
+    });
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    run_v86_paged(&mut rig, &v86);
+    assert_eq!(rig.recorded().0, 0x40);
+    let dir: Vec<u8> = (0..4).map(|i| rig.cpu.bus.read_8(0x30200 + i)).collect();
+    assert_eq!(dir, b"SRC\0");
+}
+
+#[test]
+fn the_keyboard_interrupt_reads_its_scan_code_through_the_ports_in_virtual_8086_mode() {
+    let mut rig = Rig::new();
+    // IRQ 1 as a monitor reflects it (Windows' VKD): the scan code is read,
+    // and the interrupt acknowledged, where the monitor traps them, as it
+    // hands the machine its keys one at a time.
+    let v86 = asm16(0x30000, |a| {
+        a.pushf()?;
+        a.db(&[0x9A, 0x04, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1004, INT 09h
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+    rig.record(GP);
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[2]), (GP as u32, 0xF000));
+    assert_eq!(rig.cpu.dx(), 0x60, "reading the scan code");
+}
+
+#[test]
+fn dos_writes_on_a_virtual_machines_own_screen() {
+    let mut rig = Rig::new();
+    // The machine's text screen is in memory of its own at 310000h, as
+    // Windows keeps a DOS box's in a window.
+    vm_page_tables(&mut rig, &[(0xB8, 0x310)]);
+    let (col, row) = (rig.cpu.bus.read_8(0x0450) as usize, rig.cpu.bus.read_8(0x0451) as usize);
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(ds, ax)?;
+        a.mov(dx, 0x200u32)?;
+        a.mov(ah, 0x09u32)?;
+        a.pushf()?;
+        a.db(&INT21)?;
+        a.int(0x40)
+    });
+    rig.load(0x30200, b"Hi$");
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    // The cursor's CRTC registers, made through the ports on the way out.
+    rig.record(GP);
+    run_v86_paged(&mut rig, &v86);
+    let cell = (row * 80 + col) * 2;
+    let at = |rig: &Rig, base: usize| [rig.cpu.bus.read_8(base + cell), rig.cpu.bus.read_8(base + cell + 2)];
+    assert_eq!(at(&rig, 0x31_0000), *b"Hi");
+    assert_ne!(at(&rig, 0xB_8000), *b"Hi", "the card's memory");
+    assert_eq!(rig.cpu.bus.read_8(0x0450) as usize, col + 2, "the machine's cursor");
 }
 
 #[test]

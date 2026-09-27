@@ -150,6 +150,91 @@ pub fn handle_far_service(cpu: &mut Cpu, service: u8) {
     }
 }
 
+/// Run `service`, the video BIOS's function AH `ah` (AL `al`), as the
+/// ROM's INT 10h handler does. Under a V86 monitor, the BIOS makes its
+/// register changes through the ports again on the way out
+/// (`return_from_hle`).
+fn video_bios(cpu: &mut Cpu, ah: u8, al: u8, service: impl FnOnce(&mut Cpu)) {
+    let echo = cpu.v86() && cpu.bus.vga.adapter.ega_bios();
+    if echo {
+        // The service works in the mode the registers describe, which
+        // Windows' VDD may have just set restoring the machine's display,
+        // not the one the screen shows until the next retrace.
+        cpu.bus.settle_register_mode();
+    }
+    // One whose ports it traps (a DOS box in a window) doesn't reach the
+    // card at all: the monitor keeps that machine's display from the port
+    // writes, or passes them on. The service works on the card as the
+    // machine's display is, and the card is put back after.
+    let display = (echo && cpu.check_io(0x3D4, 1).is_err()).then(|| crate::video::echo::Display::of(&cpu.bus));
+    if display.is_some() {
+        int10::assume_machine_display(cpu);
+    }
+    let before = echo.then(|| crate::video::echo::Registers::of(&cpu.bus.vga));
+    let queued = cpu.bus.port_accesses.len();
+    service(cpu);
+    if let Some(mut before) = before {
+        // The registers first, then what the service left (a mode set's
+        // clearing of the memory the new mode maps).
+        let after = crate::video::echo::Registers::of(&cpu.bus.vga);
+        if display.is_some() {
+            // Registers the machine's BIOS data area doesn't tell, all of
+            // them after a mode set or a state restored, the palette's
+            // after a palette service.
+            match (ah, al) {
+                (0x00, _) | (0x1C, 0x02) => before = crate::video::echo::Registers::unknown(&after),
+                (0x10, _) => before.forget_palette(&after),
+                _ => {}
+            }
+        }
+        let service = cpu.bus.port_accesses.split_off(queued);
+        cpu.bus.port_accesses.extend(crate::video::echo::writes(&before, &after));
+        cpu.bus.port_accesses.extend(service);
+    }
+    if let Some(display) = display {
+        display.restore(&mut cpu.bus);
+    }
+}
+
+/// Write `text` with the video BIOS's teletype output (INT 10h AH=0Eh) on
+/// the active page, as DOS's console driver does, keeping the caller's
+/// registers: DOS's and the shell's output in a virtual machine of
+/// Windows' 386 enhanced mode, whose screen, BIOS data area and cursor are
+/// the machine's own.
+pub fn teletype(cpu: &mut Cpu, text: &[u8]) {
+    let saved = cpu.snapshot();
+    video_bios(cpu, 0x0E, 0, |cpu| {
+        for &b in text {
+            cpu.set_ax(0x0E00 | b as u16);
+            cpu.set_bx(0x0007);
+            int10::handle(cpu);
+        }
+    });
+    cpu.restore(&saved);
+}
+
+/// Clear the screen as CLS does, through the video BIOS (INT 10h AH=06h
+/// over all of it, and the cursor home), keeping the caller's registers:
+/// for a Windows virtual machine, whose screen is its own.
+pub fn clear_screen(cpu: &mut Cpu) {
+    let saved = cpu.snapshot();
+    video_bios(cpu, 0x06, 0, |cpu| {
+        let rows = cpu.bus.guest_read_8(0x0484).max(24) as u16;
+        let cols = cpu.bus.guest_read_16(0x044A).max(40);
+        cpu.set_ax(0x0600);
+        cpu.set_bx(0x0700);
+        cpu.set_cx(0);
+        cpu.set_dx(rows << 8 | (cols - 1));
+        int10::handle(cpu);
+        let page = cpu.bus.guest_read_8(0x0462) as u16;
+        cpu.set_ax(0x0200);
+        cpu.set_bx(page << 8);
+        cpu.set_dx(0);
+        int10::handle(cpu);
+    });
+    cpu.restore(&saved);
+}
+
 pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
     match vector {
         0x00 => int00::handle(cpu),
@@ -157,50 +242,19 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         0x08 => int08::handle(cpu),
         0x09 => int09::handle(cpu),
         0x10 => {
-            // Under a V86 monitor, the BIOS makes its register changes
-            // through the ports again on the way out (`return_from_hle`).
-            let echo = cpu.v86() && cpu.bus.vga.adapter.ega_bios();
-            // One whose ports it traps (a DOS box in a window) doesn't
-            // reach the card at all: the monitor keeps that machine's
-            // display from the port writes, or passes them on. The service
-            // works on the card as the machine's display is, and the card
-            // is put back after.
-            let display = (echo && cpu.check_io(0x3D4, 1).is_err()).then(|| crate::video::echo::Display::of(&cpu.bus));
-            if display.is_some() {
-                int10::assume_machine_display(cpu);
-            }
-            let before = echo.then(|| crate::video::echo::Registers::of(&cpu.bus.vga));
-            let queued = cpu.bus.port_accesses.len();
             let (ah, al) = (cpu.get_reg8(iced_x86::Register::AH), cpu.get_al());
-            int10::handle(cpu);
-            if let Some(mut before) = before {
-                // The registers first, then what the service left (a mode
-                // set's clearing of the memory the new mode maps).
-                let after = crate::video::echo::Registers::of(&cpu.bus.vga);
-                if display.is_some() {
-                    // Registers the machine's BIOS data area doesn't tell,
-                    // all of them after a mode set or a state restored,
-                    // the palette's after a palette service.
-                    match (ah, al) {
-                        (0x00, _) | (0x1C, 0x02) => before = crate::video::echo::Registers::unknown(&after),
-                        (0x10, _) => before.forget_palette(&after),
-                        _ => {}
-                    }
-                }
-                let service = cpu.bus.port_accesses.split_off(queued);
-                cpu.bus.port_accesses.extend(crate::video::echo::writes(&before, &after));
-                cpu.bus.port_accesses.extend(service);
-            }
-            if let Some(display) = display {
-                display.restore(&mut cpu.bus);
-            }
+            video_bios(cpu, ah, al, int10::handle);
         }
         0x11 => int11::handle(cpu),
         0x12 => int12::handle(cpu),
         0x15 => int15::handle(cpu),
         0x16 => int16::handle(cpu),
         0x1A => int1a::handle(cpu),
-        0x20 => int20::handle(cpu),
+        0x20 => {
+            crate::dos_data::load_process_state(cpu);
+            int20::handle(cpu);
+            crate::dos_data::store_process_state(cpu);
+        }
         0x21 => int21::handle(cpu),
         0x25 => int25::handle(cpu, false),
         0x26 => int25::handle(cpu, true),
@@ -215,7 +269,14 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             cpu.bus.log_string("[BIOS] Unhandled INT 17h (Printer)");
             cpu.set_reg8(iced_x86::Register::AH, 0x29);
         } // IO Error, Selected, Out of Paper
-        0x2F => int2f::handle(cpu),
+        0x2F => {
+            // The running process's handle table (AX=1220h) is the
+            // machine's own under Windows.
+            if cpu.ax() == 0x1220 {
+                crate::dos_data::load_process_state(cpu);
+            }
+            int2f::handle(cpu);
+        }
         // No bootable disk (ROM BASIC on an IBM PC): a booted machine turns
         // off, back to the built-in DOS.
         0x18 => {

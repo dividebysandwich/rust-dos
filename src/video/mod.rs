@@ -800,10 +800,41 @@ pub fn print_cp437(cpu: &mut Cpu, text: &[u8], attr: u8) {
     print_cells(cpu, text.iter().copied(), attr);
 }
 
+/// Whether console output goes through the video BIOS: in a virtual
+/// machine of Windows' 386 enhanced mode (a service in virtual-8086 mode
+/// with paging on), whose screen is the machine's own, which the monitor
+/// may keep in memory of its own for a window.
+fn through_video_bios(cpu: &Cpu) -> bool {
+    cpu.v86() && cpu.bus.guest_paging.is_some()
+}
+
+/// Whether console output in a Windows virtual machine can be written
+/// (`int10::output_ready`); always elsewhere.
+pub fn console_ready(cpu: &mut Cpu) -> bool {
+    !through_video_bios(cpu) || crate::interrupts::int10::output_ready(cpu)
+}
+
+/// Write DOS's console output, as `print_char` does, or through the video
+/// BIOS in a Windows virtual machine.
+pub fn console_write(cpu: &mut Cpu, text: &[u8]) {
+    if through_video_bios(cpu) {
+        crate::interrupts::teletype(cpu, text);
+    } else {
+        for &b in text {
+            print_char(&mut cpu.bus, b);
+        }
+    }
+}
+
 fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
     // A built-in command's output redirected to a file.
     if let Some(captured) = cpu.stdout_capture.as_mut() {
         captured.extend(text);
+        return;
+    }
+    if through_video_bios(cpu) {
+        let text: Vec<u8> = text.collect();
+        crate::interrupts::teletype(cpu, &text);
         return;
     }
     let mut col = cpu.bus.cursor_x;

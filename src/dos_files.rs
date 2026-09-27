@@ -46,24 +46,25 @@ const fn system_jft() -> usize {
 const _: () = assert!(system_jft() + PSP_HANDLES as usize <= crate::cpu::ENV_SEGMENT as usize * 16);
 
 /// The JFT of the process `psp`: where it is and how many handles it has
-/// room for.
-fn jft(bus: &Bus, psp: u16) -> Option<(usize, u16)> {
+/// room for. The PSPs and their tables are reached as DOS's code does,
+/// through the page tables while a service runs with paging on.
+fn jft(bus: &mut Bus, psp: u16) -> Option<(u32, u16)> {
     if psp == 0 {
-        return Some((system_jft(), PSP_HANDLES));
+        return Some((system_jft() as u32, PSP_HANDLES));
     }
-    let base = psp as usize * 16;
-    let (offset, segment) = (bus.read_16(base + 0x34), bus.read_16(base + 0x36));
-    Some((segment as usize * 16 + offset as usize, bus.read_16(base + 0x32)))
+    let base = psp as u32 * 16;
+    let (offset, segment) = (bus.guest_read_16(base + 0x34), bus.guest_read_16(base + 0x36));
+    Some((segment as u32 * 16 + offset as u32, bus.guest_read_16(base + 0x32)))
 }
 
 /// The SFT entry that handle `handle` of the process `psp` refers to, if
 /// it refers to an open file.
-pub fn sft_of(bus: &Bus, psp: u16, handle: u16) -> Option<u16> {
+pub fn sft_of(bus: &mut Bus, psp: u16, handle: u16) -> Option<u16> {
     let (at, size) = jft(bus, psp)?;
     if handle >= size {
         return None;
     }
-    let sft = bus.read_8(at + handle as usize) as u16;
+    let sft = bus.guest_read_8(at + handle as u32) as u16;
     (sft != UNUSED as u16 && bus.disk.is_open(sft)).then_some(sft)
 }
 
@@ -71,14 +72,14 @@ fn set_slot(bus: &mut Bus, psp: u16, handle: u16, sft: u8) {
     if let Some((at, size)) = jft(bus, psp)
         && handle < size
     {
-        bus.write_8(at + handle as usize, sft);
+        bus.guest_write_8(at + handle as u32, sft);
     }
 }
 
 /// The lowest handle of `psp` that refers to nothing.
-fn free_handle(bus: &Bus, psp: u16) -> Option<u16> {
+fn free_handle(bus: &mut Bus, psp: u16) -> Option<u16> {
     let (at, size) = jft(bus, psp)?;
-    (0..size).find(|&h| bus.read_8(at + h as usize) == UNUSED)
+    (0..size).find(|&h| bus.guest_read_8(at + h as u32) == UNUSED)
 }
 
 /// Give the process `psp` a handle for the file just opened at `sft`,
@@ -166,7 +167,7 @@ pub fn close_all(bus: &mut Bus, psp: u16) {
 /// bit), or without one, the standard handles of a program the shell
 /// starts. Either way the files get a reference for each.
 pub fn init_psp(bus: &mut Bus, psp: u16, parent: Option<u16>) {
-    let base = psp as usize * 16;
+    let base = psp as u32 * 16;
     let handles: Vec<Option<u16>> = (0..PSP_HANDLES)
         .map(|h| match parent {
             Some(parent) => sft_of(bus, parent, h).filter(|&sft| bus.disk.inheritable(sft)),
@@ -181,7 +182,7 @@ pub fn init_psp(bus: &mut Bus, psp: u16, parent: Option<u16>) {
             }
             None => UNUSED,
         };
-        bus.write_8(base + 0x18 + h, slot);
+        bus.guest_write_8(base + 0x18 + h as u32, slot);
     }
     psp_fields(bus, psp);
 }
@@ -189,17 +190,15 @@ pub fn init_psp(bus: &mut Bus, psp: u16, parent: Option<u16>) {
 /// The fields of a PSP that say where its JFT is, and the ones DOS fills
 /// in the same for every process.
 fn psp_fields(bus: &mut Bus, psp: u16) {
-    let base = psp as usize * 16;
-    bus.write_16(base + 0x32, PSP_HANDLES);
-    bus.write_16(base + 0x34, 0x18);
-    bus.write_16(base + 0x36, psp);
+    let base = psp as u32 * 16;
+    bus.guest_write_16(base + 0x32, PSP_HANDLES);
+    bus.guest_write_16(base + 0x34, 0x18);
+    bus.guest_write_16(base + 0x36, psp);
     // No previous PSP (for SHARE), the DOS version, and the INT 21h RETF
     // that CP/M style calls of PSP:0050 go through.
-    bus.write_32(base + 0x38, 0xFFFF_FFFF);
-    bus.write_16(base + 0x40, 0x0005);
-    for (i, &b) in [0xCD, 0x21, 0xCB].iter().enumerate() {
-        bus.write_8(base + 0x50 + i, b);
-    }
+    bus.guest_write_32(base + 0x38, 0xFFFF_FFFF);
+    bus.guest_write_16(base + 0x40, 0x0005);
+    bus.guest_write_bytes(base + 0x50, &[0xCD, 0x21, 0xCB]);
 }
 
 /// INT 21h AH=26h (`inherit` false) and AH=55h (true): a PSP at `segment`
@@ -207,35 +206,34 @@ fn psp_fields(bus: &mut Bus, psp: u16) {
 /// ends at `top`. AH=55h's child inherits its parent's handles as EXEC's
 /// does; AH=26h's gets its parent's table as it is.
 pub fn new_psp(bus: &mut Bus, segment: u16, parent: u16, top: u16, inherit: bool) {
-    let (from, to) = (parent as usize * 16, segment as usize * 16);
+    let (from, to) = (parent as u32 * 16, segment as u32 * 16);
     let table: Vec<u8> = (0..PSP_HANDLES)
         .map(|h| match jft(bus, parent) {
-            Some((at, size)) if h < size => bus.read_8(at + h as usize),
+            Some((at, size)) if h < size => bus.guest_read_8(at + h as u32),
             _ => UNUSED,
         })
         .collect();
     if parent != 0 {
-        bus.copy_ram(from, to, 0x100);
+        let mut copy = [0u8; 0x100];
+        bus.guest_read_bytes(from, &mut copy);
+        bus.guest_write_bytes(to, &copy);
     }
     if inherit {
         init_psp(bus, segment, Some(parent));
     } else {
         // The table as it is, without references of its own.
-        for (h, &slot) in table.iter().enumerate() {
-            bus.write_8(to + 0x18 + h, slot);
-        }
+        bus.guest_write_bytes(to + 0x18, &table);
         psp_fields(bus, segment);
     }
-    bus.write_8(to, 0xCD);
-    bus.write_8(to + 1, 0x20);
-    bus.write_16(to + 0x02, top);
+    bus.guest_write_bytes(to, &[0xCD, 0x20]);
+    bus.guest_write_16(to + 0x02, top);
     // Where it returns to, Ctrl-Break and critical errors go: the vectors
     // as they are now.
-    for (i, vector) in [0x22, 0x23, 0x24].into_iter().enumerate() {
-        let handler = bus.read_32(vector * 4);
-        bus.write_32(to + 0x0A + 4 * i, handler);
+    for (i, vector) in [0x22u32, 0x23, 0x24].into_iter().enumerate() {
+        let handler = bus.guest_read_32(vector * 4);
+        bus.guest_write_32(to + 0x0A + 4 * i as u32, handler);
     }
-    bus.write_16(to + 0x16, parent);
+    bus.guest_write_16(to + 0x16, parent);
 }
 
 /// INT 21h AH=67h: room for `count` handles in the JFT of `psp`. A table
@@ -247,22 +245,25 @@ pub fn set_handle_count(bus: &mut Bus, psp: u16, count: u16) -> Result<(), u8> {
         return Ok(());
     }
     let segment = crate::mcb::alloc(bus, psp, count.div_ceil(16)).map_err(|_| 0x08u8)?;
-    let to = segment as usize * 16;
-    for h in 0..count as usize {
-        let slot = if h < size as usize { bus.read_8(at + h) } else { UNUSED };
-        bus.write_8(to + h, slot);
+    let to = segment as u32 * 16;
+    for h in 0..count as u32 {
+        let slot = if h < size as u32 { bus.guest_read_8(at + h) } else { UNUSED };
+        bus.guest_write_8(to + h, slot);
     }
-    let base = psp as usize * 16;
-    let (old_offset, old_segment) = (bus.read_16(base + 0x34), bus.read_16(base + 0x36));
+    let base = psp as u32 * 16;
+    let (old_offset, old_segment) = (bus.guest_read_16(base + 0x34), bus.guest_read_16(base + 0x36));
     if old_offset == 0 && old_segment != psp {
         // A table this call made before.
         let _ = crate::mcb::free(bus, old_segment);
     }
-    bus.write_16(base + 0x32, count);
-    bus.write_16(base + 0x34, 0);
-    bus.write_16(base + 0x36, segment);
+    bus.guest_write_16(base + 0x32, count);
+    bus.guest_write_16(base + 0x34, 0);
+    bus.guest_write_16(base + 0x36, segment);
     Ok(())
 }
+
+// The file table itself is DOS's, the same for every Windows virtual
+// machine, where its addresses say.
 
 /// Write the whole table into memory: its header, one block of `FILES`
 /// entries, and every entry; and give the code that runs without a
@@ -338,7 +339,7 @@ fn write_entry(bus: &mut Bus, sft: u16) {
 
 /// The address of handle `handle`'s slot in the JFT of `psp` (INT 2Fh
 /// AX=1220h).
-pub fn slot_address(bus: &Bus, psp: u16, handle: u16) -> Option<usize> {
+pub fn slot_address(bus: &mut Bus, psp: u16, handle: u16) -> Option<usize> {
     let (at, size) = jft(bus, psp)?;
-    (handle < size).then_some(at + handle as usize)
+    (handle < size).then_some(at as usize + handle as usize)
 }

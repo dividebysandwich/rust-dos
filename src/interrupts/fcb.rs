@@ -100,24 +100,24 @@ pub fn parse_name(text: &[u8], skip_separators: bool) -> ParsedName {
 /// 3 and 2 leave the FCB's alone, else it gets the default drive and
 /// blanks. Returns AL: FFh for a drive that isn't there, 01h for
 /// wildcards, else 00h.
-pub fn fill_fcb(bus: &mut Bus, fcb: usize, parsed: &ParsedName, flags: u8) -> u8 {
+pub fn fill_fcb(bus: &mut Bus, fcb: u32, parsed: &ParsedName, flags: u8) -> u8 {
     match parsed.drive {
         Some(d) => {
-            bus.write_8(fcb, d + 1);
+            bus.guest_write_8(fcb, d + 1);
         }
         None if flags & 0x02 == 0 => {
-            bus.write_8(fcb, 0);
+            bus.guest_write_8(fcb, 0);
         }
         None => {}
     }
     match parsed.name {
-        Some(name) => bus.load_bytes(fcb + 1, &name),
-        None if flags & 0x08 == 0 => bus.load_bytes(fcb + 1, &[b' '; 8]),
+        Some(name) => bus.guest_write_bytes(fcb + 1, &name),
+        None if flags & 0x08 == 0 => bus.guest_write_bytes(fcb + 1, &[b' '; 8]),
         None => {}
     }
     match parsed.ext {
-        Some(ext) => bus.load_bytes(fcb + 9, &ext),
-        None if flags & 0x04 == 0 => bus.load_bytes(fcb + 9, &[b' '; 3]),
+        Some(ext) => bus.guest_write_bytes(fcb + 9, &ext),
+        None if flags & 0x04 == 0 => bus.guest_write_bytes(fcb + 9, &[b' '; 3]),
         None => {}
     }
     if parsed.drive.is_some_and(|d| !bus.disk.is_mounted(d)) {
@@ -133,10 +133,11 @@ pub fn fill_fcb(bus: &mut Bus, fcb: usize, parsed: &ParsedName, flags: u8) -> u8
 /// the option bits in AL. SI ends after it.
 pub fn parse_filename(cpu: &mut Cpu) {
     let flags = cpu.get_al();
-    let at = cpu.get_physical_addr(cpu.ds(), cpu.si());
-    let text: Vec<u8> = (0..128).map(|i| cpu.bus.read_8(at + i)).collect();
+    let at = cpu.get_physical_addr(cpu.ds(), cpu.si()) as u32;
+    let mut text = [0u8; 128];
+    cpu.bus.guest_read_bytes(at, &mut text);
     let parsed = parse_name(&text, flags & 0x01 != 0);
-    let fcb = cpu.get_physical_addr(cpu.es(), cpu.di());
+    let fcb = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
     let al = fill_fcb(&mut cpu.bus, fcb, &parsed, flags);
     cpu.set_reg8(Register::AL, al);
     cpu.set_si(cpu.si().wrapping_add(parsed.consumed as u16));
@@ -147,20 +148,20 @@ pub fn parse_filename(cpu: &mut Cpu) {
 /// starts with: AL FFh if the first names a drive that isn't there, AH if
 /// the second does.
 pub fn set_psp_fcbs(bus: &mut Bus, psp: u16, args: &[u8]) -> u16 {
-    let base = psp as usize * 16;
+    let base = psp as u32 * 16;
     set_fcbs(bus, base + 0x5C, base + 0x6C, args)
 }
 
 /// The FCBs of the first two parameters in `args` at `fcb1` and `fcb2`, as
 /// `set_psp_fcbs` makes them.
-pub fn set_fcbs(bus: &mut Bus, fcb1: usize, fcb2: usize, args: &[u8]) -> u16 {
+pub fn set_fcbs(bus: &mut Bus, fcb1: u32, fcb2: u32, args: &[u8]) -> u16 {
     let mut ax = 0;
     let mut words = args
         .split(|&b| b == b' ' || b == b'\t')
         .filter(|w| !w.is_empty() && !w.starts_with(b"/"));
     for (i, fcb) in [fcb1, fcb2].into_iter().enumerate() {
-        bus.load_bytes(fcb, &[0; 12]);
-        bus.load_bytes(fcb + 1, &[b' '; 11]);
+        bus.guest_write_bytes(fcb, &[0; 12]);
+        bus.guest_write_bytes(fcb + 1, &[b' '; 11]);
         let parsed = words.next().map(|w| parse_name(w, true)).unwrap_or_default();
         if fill_fcb(bus, fcb, &parsed, 0) == 0xFF {
             ax |= 0xFF << (8 * i);
@@ -171,18 +172,18 @@ pub fn set_fcbs(bus: &mut Bus, fcb1: usize, fcb2: usize, args: &[u8]) -> u16 {
 
 /// Where an FCB's name is, and the attributes to search with: an extended
 /// FCB's, or normal files for a plain one.
-fn fcb_at(cpu: &Cpu) -> (usize, bool, u16) {
-    let input = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-    if cpu.bus.read_8(input) == 0xFF {
-        (input + 7, true, cpu.bus.read_8(input + 6) as u16)
+fn fcb_at(cpu: &mut Cpu) -> (u32, bool, u16) {
+    let input = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
+    if cpu.bus.guest_read_8(input) == 0xFF {
+        (input + 7, true, cpu.bus.guest_read_8(input + 6) as u16)
     } else {
         (input, false, 0)
     }
 }
 
 /// The drive an FCB's drive byte stands for (0 the default).
-fn fcb_drive(cpu: &Cpu, fcb: usize) -> u8 {
-    match cpu.bus.read_8(fcb) {
+fn fcb_drive(cpu: &mut Cpu, fcb: u32) -> u8 {
+    match cpu.bus.guest_read_8(fcb) {
         0 => cpu.bus.disk.get_current_drive(),
         d => d - 1,
     }
@@ -195,10 +196,14 @@ fn fcb_drive(cpu: &Cpu, fcb: usize) -> u8 {
 /// The search goes on from where the FCB's current block field (0Ch)
 /// says.
 pub fn find(cpu: &mut Cpu, first: bool) {
-    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset);
+    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset) as u32;
     let (fcb, extended, attr) = fcb_at(cpu);
-    let index = if first { 0 } else { cpu.bus.read_16(fcb + 0x0C) as usize };
-    let name = read_dta_template(&cpu.bus, fcb);
+    let index = if first { 0 } else { cpu.bus.guest_read_16(fcb + 0x0C) as usize };
+    let name = read_dta_template(&mut cpu.bus, fcb as usize);
+    // The DTA is all there before the search moves on.
+    if !cpu.bus.guest_probe(dta, 7 + 33, true) {
+        return;
+    }
     let drive = fcb_drive(cpu, fcb);
     let result = if cpu.bus.disk.is_mounted(drive) {
         let pattern = format!("{}:{}", drive_letter(drive), name);
@@ -212,66 +217,66 @@ pub fn find(cpu: &mut Cpu, first: bool) {
     };
     cpu.set_reg8(Register::AL, 0x00);
     let out = if extended {
-        cpu.bus.load_bytes(dta, &[0xFF, 0, 0, 0, 0, 0, attr as u8]);
+        cpu.bus.guest_write_bytes(dta, &[0xFF, 0, 0, 0, 0, 0, attr as u8]);
         dta + 7
     } else {
         dta
     };
-    cpu.bus.write_8(out, drive + 1);
+    cpu.bus.guest_write_8(out, drive + 1);
     let mut dir_entry = [0u8; 32];
     dir_entry[..11].copy_from_slice(&super::utils::pattern_to_fcb(&entry.filename));
     dir_entry[0x0B] = entry.attr;
     dir_entry[0x16..0x18].copy_from_slice(&entry.dos_time.to_le_bytes());
     dir_entry[0x18..0x1A].copy_from_slice(&entry.dos_date.to_le_bytes());
     dir_entry[0x1C..0x20].copy_from_slice(&entry.size.to_le_bytes());
-    cpu.bus.load_bytes(out + 1, &dir_entry);
-    cpu.bus.write_16(fcb + 0x0C, (index + 1) as u16);
+    cpu.bus.guest_write_bytes(out + 1, &dir_entry);
+    cpu.bus.guest_write_16(fcb + 0x0C, (index + 1) as u16);
 }
 
 /// Where the file functions keep the DOS handle of an FCB's open file:
 /// in its reserved bytes (18h-1Fh), with a mark that says it is one.
-const HANDLE_FIELD: usize = 0x18;
+const HANDLE_FIELD: u32 = 0x18;
 const HANDLE_MARK: u16 = 0x4346;
 
 /// Where an FCB's fields are for the file functions (after an extended
 /// FCB's header).
-fn fcb_start(cpu: &Cpu) -> usize {
+fn fcb_start(cpu: &mut Cpu) -> u32 {
     fcb_at(cpu).0
 }
 
 /// The DOS path an FCB names: its drive, name and extension.
-fn fcb_path(cpu: &Cpu, fcb: usize) -> String {
-    format!("{}:{}", drive_letter(fcb_drive(cpu, fcb)), read_dta_template(&cpu.bus, fcb))
+fn fcb_path(cpu: &mut Cpu, fcb: u32) -> String {
+    let drive = fcb_drive(cpu, fcb);
+    format!("{}:{}", drive_letter(drive), read_dta_template(&mut cpu.bus, fcb as usize))
 }
 
-fn record_size(bus: &Bus, fcb: usize) -> u16 {
-    bus.read_16(fcb + 0x0E)
+fn record_size(bus: &mut Bus, fcb: u32) -> u16 {
+    bus.guest_read_16(fcb + 0x0E)
 }
 
 /// The FCB's open file, if the file functions opened one for it.
-fn fcb_handle(cpu: &Cpu, fcb: usize) -> Option<u16> {
-    (cpu.bus.read_16(fcb + HANDLE_FIELD + 2) == HANDLE_MARK)
-        .then(|| cpu.bus.read_16(fcb + HANDLE_FIELD))
-        .filter(|&h| cpu.bus.disk.is_open(h))
+fn fcb_handle(cpu: &mut Cpu, fcb: u32) -> Option<u16> {
+    let (handle, mark) = (cpu.bus.guest_read_16(fcb + HANDLE_FIELD), cpu.bus.guest_read_16(fcb + HANDLE_FIELD + 2));
+    (mark == HANDLE_MARK && cpu.bus.disk.is_open(handle)).then_some(handle)
 }
 
 /// Fill in an FCB for the file just opened as `handle`: its drive, a
 /// record size of 128 bytes, the file's size, date and time, block 0 and
 /// the handle.
-fn set_up_fcb(cpu: &mut Cpu, fcb: usize, handle: u16) {
+fn set_up_fcb(cpu: &mut Cpu, fcb: u32, handle: u16) {
     let drive = fcb_drive(cpu, fcb);
     let size = cpu.bus.disk.seek_file(handle, 0, 2).unwrap_or(0) as u32;
     let _ = cpu.bus.disk.seek_file(handle, 0, 0);
     let (time, date) = cpu.bus.disk.file_time(handle).unwrap_or((0, 0));
     let bus = &mut cpu.bus;
-    bus.write_8(fcb, drive + 1);
-    bus.write_16(fcb + 0x0C, 0);
-    bus.write_16(fcb + 0x0E, 128);
-    bus.write_32(fcb + 0x10, size);
-    bus.write_16(fcb + 0x14, date);
-    bus.write_16(fcb + 0x16, time);
-    bus.write_16(fcb + HANDLE_FIELD, handle);
-    bus.write_16(fcb + HANDLE_FIELD + 2, HANDLE_MARK);
+    bus.guest_write_8(fcb, drive + 1);
+    bus.guest_write_16(fcb + 0x0C, 0);
+    bus.guest_write_16(fcb + 0x0E, 128);
+    bus.guest_write_32(fcb + 0x10, size);
+    bus.guest_write_16(fcb + 0x14, date);
+    bus.guest_write_16(fcb + 0x16, time);
+    bus.guest_write_16(fcb + HANDLE_FIELD, handle);
+    bus.guest_write_16(fcb + HANDLE_FIELD + 2, HANDLE_MARK);
 }
 
 /// INT 21h AH=0Fh: open the file the FCB names, read/write where the
@@ -299,7 +304,7 @@ pub fn close(cpu: &mut Cpu) {
     let fcb = fcb_start(cpu);
     let closed = match fcb_handle(cpu, fcb) {
         Some(handle) => {
-            cpu.bus.write_16(fcb + HANDLE_FIELD + 2, 0);
+            cpu.bus.guest_write_16(fcb + HANDLE_FIELD + 2, 0);
             cpu.bus.disk.close_file(handle)
         }
         None => false,
@@ -321,7 +326,7 @@ pub fn delete(cpu: &mut Cpu) {
 pub fn rename(cpu: &mut Cpu) {
     let fcb = fcb_start(cpu);
     let path = fcb_path(cpu, fcb);
-    let template = read_dta_template(&cpu.bus, fcb + 0x10);
+    let template = read_dta_template(&mut cpu.bus, fcb as usize + 0x10);
     let dir = format!("{}:", drive_letter(fcb_drive(cpu, fcb)));
     let files = cpu.bus.disk.matching_files(&path).unwrap_or_default();
     let mut renamed = 0;
@@ -346,42 +351,42 @@ pub fn file_size(cpu: &mut Cpu) {
     };
     let size = cpu.bus.disk.seek_file(handle, 0, 2).unwrap_or(0);
     cpu.bus.disk.close_file(handle);
-    let record = record_size(&cpu.bus, fcb).max(1) as u64;
-    cpu.bus.write_32(fcb + 0x21, size.div_ceil(record) as u32);
+    let record = record_size(&mut cpu.bus, fcb).max(1) as u64;
+    cpu.bus.guest_write_32(fcb + 0x21, size.div_ceil(record) as u32);
     cpu.set_reg8(Register::AL, 0x00);
 }
 
 /// The sequential record of an FCB: its current block (0Ch) and record in
 /// it (20h).
-fn current_record(bus: &Bus, fcb: usize) -> u32 {
-    bus.read_16(fcb + 0x0C) as u32 * 128 + bus.read_8(fcb + 0x20) as u32
+fn current_record(bus: &mut Bus, fcb: u32) -> u32 {
+    bus.guest_read_16(fcb + 0x0C) as u32 * 128 + bus.guest_read_8(fcb + 0x20) as u32
 }
 
-fn set_current_record(bus: &mut Bus, fcb: usize, record: u32) {
-    bus.write_16(fcb + 0x0C, (record / 128) as u16);
-    bus.write_8(fcb + 0x20, (record % 128) as u8);
+fn set_current_record(bus: &mut Bus, fcb: u32, record: u32) {
+    bus.guest_write_16(fcb + 0x0C, (record / 128) as u16);
+    bus.guest_write_8(fcb + 0x20, (record % 128) as u8);
 }
 
 /// The random record field (21h): four bytes, three for records of 64
 /// bytes or more.
-fn random_record(bus: &Bus, fcb: usize) -> u32 {
-    let value = bus.read_32(fcb + 0x21);
+fn random_record(bus: &mut Bus, fcb: u32) -> u32 {
+    let value = bus.guest_read_32(fcb + 0x21);
     if record_size(bus, fcb) >= 64 { value & 0x00FF_FFFF } else { value }
 }
 
-fn set_random_record(bus: &mut Bus, fcb: usize, record: u32) {
+fn set_random_record(bus: &mut Bus, fcb: u32, record: u32) {
     if record_size(bus, fcb) >= 64 {
-        bus.write_16(fcb + 0x21, record as u16);
-        bus.write_8(fcb + 0x23, (record >> 16) as u8);
+        bus.guest_write_16(fcb + 0x21, record as u16);
+        bus.guest_write_8(fcb + 0x23, (record >> 16) as u8);
     } else {
-        bus.write_32(fcb + 0x21, record);
+        bus.guest_write_32(fcb + 0x21, record);
     }
 }
 
 /// INT 21h AH=24h: set the random record field to the sequential record.
 pub fn set_random(cpu: &mut Cpu) {
     let fcb = fcb_start(cpu);
-    let record = current_record(&cpu.bus, fcb);
+    let record = current_record(&mut cpu.bus, fcb);
     set_random_record(&mut cpu.bus, fcb, record);
 }
 
@@ -389,16 +394,20 @@ pub fn set_random(cpu: &mut Cpu) {
 /// Returns the records read (a partial last one, padded with zeros,
 /// counts) and AL: 00h, 01h at the end of the file with nothing read, 02h
 /// if they don't fit in the DTA's segment, 03h for a partial record.
-fn read_records(cpu: &mut Cpu, fcb: usize, record: u32, count: u32) -> (u32, u8) {
+fn read_records(cpu: &mut Cpu, fcb: u32, record: u32, count: u32) -> (u32, u8) {
     let Some(handle) = fcb_handle(cpu, fcb) else { return (0, 0x01) };
-    let size = record_size(&cpu.bus, fcb).max(1) as u32;
+    let size = record_size(&mut cpu.bus, fcb).max(1) as u32;
     if cpu.bus.dta_offset as u32 + size * count > 0x1_0000 {
         return (0, 0x02);
+    }
+    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset) as u32;
+    // The DTA is all there before the file moves on.
+    if !cpu.bus.guest_probe(dta, (size * count) as usize, true) {
+        return (0, 0);
     }
     if cpu.bus.disk.seek_file(handle, record as i64 * size as i64, 0).is_err() {
         return (0, 0x01);
     }
-    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset);
     let data = cpu.bus.disk.read_file(handle, (size * count) as usize).unwrap_or_default();
     if data.is_empty() {
         return (0, 0x01);
@@ -407,7 +416,7 @@ fn read_records(cpu: &mut Cpu, fcb: usize, record: u32, count: u32) -> (u32, u8)
     let partial = !(data.len() as u32).is_multiple_of(size);
     let mut padded = data;
     padded.resize(padded.len().next_multiple_of(size as usize), 0);
-    cpu.bus.load_bytes(dta, &padded);
+    cpu.bus.guest_write_bytes(dta, &padded);
     if partial { (whole + 1, 0x03) } else { (whole, if whole < count { 0x01 } else { 0x00 }) }
 }
 
@@ -415,27 +424,31 @@ fn read_records(cpu: &mut Cpu, fcb: usize, record: u32, count: u32) -> (u32, u8)
 /// with no records, make the file end there. Returns the records written
 /// and AL: 00h, 01h if the disk is full, 02h if they don't fit in the
 /// DTA's segment.
-fn write_records(cpu: &mut Cpu, fcb: usize, record: u32, count: u32) -> (u32, u8) {
+fn write_records(cpu: &mut Cpu, fcb: u32, record: u32, count: u32) -> (u32, u8) {
     let Some(handle) = fcb_handle(cpu, fcb) else { return (0, 0x01) };
-    let size = record_size(&cpu.bus, fcb).max(1) as u32;
+    let size = record_size(&mut cpu.bus, fcb).max(1) as u32;
     if cpu.bus.dta_offset as u32 + size * count > 0x1_0000 {
         return (0, 0x02);
     }
     let at = record as u64 * size as u64;
     if count == 0 {
         let al = if cpu.bus.disk.set_file_size(handle, at).is_ok() { 0x00 } else { 0x01 };
-        cpu.bus.write_32(fcb + 0x10, at as u32);
+        cpu.bus.guest_write_32(fcb + 0x10, at as u32);
         return (0, al);
+    }
+    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset) as u32;
+    let mut data = vec![0u8; (size * count) as usize];
+    cpu.bus.guest_read_bytes(dta, &mut data);
+    if cpu.bus.guest_faulted() {
+        return (0, 0);
     }
     if cpu.bus.disk.seek_file(handle, at as i64, 0).is_err() {
         return (0, 0x01);
     }
-    let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset);
-    let data: Vec<u8> = (0..(size * count) as usize).map(|i| cpu.bus.read_8(dta + i)).collect();
     let written = cpu.bus.disk.write_file(handle, &data).unwrap_or(0) as u32;
     let end = at + written as u64;
-    if end > cpu.bus.read_32(fcb + 0x10) as u64 {
-        cpu.bus.write_32(fcb + 0x10, end as u32);
+    if end > cpu.bus.guest_read_32(fcb + 0x10) as u64 {
+        cpu.bus.guest_write_32(fcb + 0x10, end as u32);
     }
     (written / size, if written < size * count { 0x01 } else { 0x00 })
 }
@@ -444,7 +457,7 @@ fn write_records(cpu: &mut Cpu, fcb: usize, record: u32, count: u32) -> (u32, u8
 /// and go on to the next.
 pub fn sequential(cpu: &mut Cpu, write: bool) {
     let fcb = fcb_start(cpu);
-    let record = current_record(&cpu.bus, fcb);
+    let record = current_record(&mut cpu.bus, fcb);
     let (done, al) = if write { write_records(cpu, fcb, record, 1) } else { read_records(cpu, fcb, record, 1) };
     set_current_record(&mut cpu.bus, fcb, record + done);
     cpu.set_reg8(Register::AL, al);
@@ -454,7 +467,7 @@ pub fn sequential(cpu: &mut Cpu, write: bool) {
 /// which becomes the sequential one.
 pub fn random(cpu: &mut Cpu, write: bool) {
     let fcb = fcb_start(cpu);
-    let record = random_record(&cpu.bus, fcb);
+    let record = random_record(&mut cpu.bus, fcb);
     set_current_record(&mut cpu.bus, fcb, record);
     let (_, al) = if write { write_records(cpu, fcb, record, 1) } else { read_records(cpu, fcb, record, 1) };
     cpu.set_reg8(Register::AL, al);
@@ -465,7 +478,7 @@ pub fn random(cpu: &mut Cpu, write: bool) {
 /// on after them.
 pub fn random_block(cpu: &mut Cpu, write: bool) {
     let fcb = fcb_start(cpu);
-    let record = random_record(&cpu.bus, fcb);
+    let record = random_record(&mut cpu.bus, fcb);
     let count = cpu.cx() as u32;
     let (done, al) = if write { write_records(cpu, fcb, record, count) } else { read_records(cpu, fcb, record, count) };
     set_random_record(&mut cpu.bus, fcb, record + done);

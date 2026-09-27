@@ -194,17 +194,19 @@ const PAGE_FRAME_FRAME: usize = FRAME / PAGE;
 /// over with; 02h, the manager's version. The bytes read, or the error.
 pub fn ioctl_read(bus: &mut Bus, buffer: usize, size: u16) -> Result<u16, u8> {
     let Some(mut ems) = bus.ems.take() else { return Err(0x01) };
-    let result = match (bus.read_8(buffer), size) {
-        (0x01, 6) => {
+    // The caller's buffer, through the page tables of a Windows virtual
+    // machine, where Windows has the expanded memory already: the import
+    // record is only handed over without paging.
+    let buffer = buffer as u32;
+    let result = match (bus.guest_read_8(buffer), size) {
+        (0x01, 6) if bus.guest_paging.is_none() => {
             ems.hand_over(bus);
-            bus.write_32(buffer, IMPORT_RECORD as u32);
-            bus.write_8(buffer + 4, 1); // version 1.00: expanded memory only
-            bus.write_8(buffer + 5, 0);
+            bus.guest_write_32(buffer, IMPORT_RECORD as u32);
+            bus.guest_write_bytes(buffer + 4, &[1, 0]); // version 1.00: expanded memory only
             Ok(6)
         }
         (0x02, 2) => {
-            bus.write_8(buffer, 4);
-            bus.write_8(buffer + 1, 0);
+            bus.guest_write_bytes(buffer, &[4, 0]);
             Ok(2)
         }
         _ => Err(0x01),

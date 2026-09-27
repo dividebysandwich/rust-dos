@@ -400,8 +400,11 @@ pub struct ProcessContext {
     pub regs: CpuSnapshot,
     pub psp: u16,
     /// The PSP of the process EXEC started in its place, which returns
-    /// here when it ends (0 before it is loaded).
+    /// here when it ends (0 before it is loaded), and where that PSP is in
+    /// physical memory (`Cpu::psp_address`): the processes of Windows'
+    /// virtual machines can have their PSPs at the same segment.
     pub child: u16,
+    pub child_at: u32,
     pub heap_pointer: u16,
     /// The parent's DTA (segment, offset), which the child's replaces.
     pub dta: (u16, u16),
@@ -581,7 +584,7 @@ impl Cpu {
             return;
         }
         // The last block of conventional memory in use.
-        let chain = crate::mcb::walk(&self.bus);
+        let chain = crate::mcb::walk(&mut self.bus);
         let end = chain
             .iter()
             .take_while(|(s, _)| *s < cover)
@@ -626,6 +629,7 @@ impl Cpu {
             regs: self.snapshot(),
             psp: self.current_psp,
             child: 0,
+            child_at: 0,
             heap_pointer: self.heap_pointer,
             dta: (self.bus.dta_segment, self.bus.dta_offset),
             program: self.program.clone(),
@@ -644,12 +648,13 @@ impl Cpu {
     /// Returns whether it went back to a parent.
     pub fn terminate(&mut self, code: u8) -> bool {
         self.last_child_exit = code as u16;
-        if !self.started_by_exec(self.current_psp) {
-            self.end_made_process(self.current_psp);
+        let psp = self.current_psp;
+        if !self.started_by_exec(psp) {
+            self.end_made_process(psp);
             return true;
         }
-        crate::dos_files::close_all(&mut self.bus, self.current_psp);
-        crate::mcb::free_owned_by(&mut self.bus, self.current_psp);
+        crate::dos_files::close_all(&mut self.bus, psp);
+        crate::mcb::free_owned_by(&mut self.bus, psp);
         if self.return_to_parent() {
             return true;
         }
@@ -658,17 +663,33 @@ impl Cpu {
         false
     }
 
+    /// Where the PSP at segment `psp` is in physical memory, through the
+    /// page tables of the machine that runs: in Windows' 386 enhanced mode
+    /// the processes of different virtual machines can have their PSPs at
+    /// the same segment, in memory of their own.
+    pub fn psp_address(&self, psp: u16) -> u32 {
+        let lin = psp as u32 * 16;
+        self.peek_translate(lin).unwrap_or(lin)
+    }
+
+    /// The context EXEC kept for the parent of the process `psp`: its
+    /// place in `process_stack`. The latest, as under Windows the
+    /// processes of other virtual machines can start and end in between.
+    pub fn exec_context(&self, psp: u16) -> Option<usize> {
+        let at = self.psp_address(psp);
+        self.process_stack.iter().rposition(|c| c.child == psp && c.child_at == at)
+    }
+
     /// Whether the process `psp` is one EXEC or the shell started, whose
-    /// parent's context the emulator keeps, rather than a PSP a program
-    /// made itself (INT 21h AH=26h or 55h), as Windows does its tasks'.
-    pub fn started_by_exec(&self, psp: u16) -> bool {
-        match self.process_stack.last() {
-            Some(context) => context.child == 0 || context.child == psp,
-            None => {
-                let parent = self.bus.read_16(psp as usize * 16 + 0x16);
-                psp == 0 || parent == 0 || parent == psp
-            }
+    /// parent's context the emulator keeps (or that goes back to the
+    /// shell), rather than a PSP a program made itself (INT 21h AH=26h or
+    /// 55h), as Windows does its tasks'.
+    pub fn started_by_exec(&mut self, psp: u16) -> bool {
+        if self.exec_context(psp).is_some() {
+            return true;
         }
+        let parent = self.bus.guest_read_16(psp as u32 * 16 + 0x16);
+        psp == 0 || parent == 0 || parent == psp
     }
 
     /// End the process `psp`, a PSP a program made, as DOS ends any: its
@@ -679,20 +700,20 @@ impl Cpu {
     /// terminate address (PSP 0Ah) with them. Windows' tasks end so, into
     /// its DOS extender.
     fn end_made_process(&mut self, psp: u16) {
-        let base = psp as usize * 16;
+        let base = psp as u32 * 16;
         crate::dos_files::close_all(&mut self.bus, psp);
         crate::mcb::free_owned_by(&mut self.bus, psp);
-        for (i, vector) in [0x22usize, 0x23, 0x24].into_iter().enumerate() {
-            let handler = self.bus.read_32(base + 0x0A + 4 * i);
-            self.bus.write_32(vector * 4, handler);
+        for (i, vector) in [0x22u32, 0x23, 0x24].into_iter().enumerate() {
+            let handler = self.bus.guest_read_32(base + 0x0A + 4 * i as u32);
+            self.bus.guest_write_32(vector * 4, handler);
         }
-        let (terminate_ip, terminate_cs) = (self.bus.read_16(base + 0x0A), self.bus.read_16(base + 0x0C));
-        let parent = self.bus.read_16(base + 0x16);
+        let (terminate_ip, terminate_cs) = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
+        let parent = self.bus.guest_read_16(base + 0x16);
         self.current_psp = parent;
-        let parent_base = parent as usize * 16;
-        let (sp, ss) = (self.bus.read_16(parent_base + 0x2E), self.bus.read_16(parent_base + 0x30));
-        let at = |i: u16| ss as usize * 16 + sp.wrapping_add(2 * i) as usize;
-        let saved: Vec<u16> = (0..9).map(|i| self.bus.read_16(at(i))).collect();
+        let parent_base = parent as u32 * 16;
+        let (sp, ss) = (self.bus.guest_read_16(parent_base + 0x2E), self.bus.guest_read_16(parent_base + 0x30));
+        let at = |i: u16| ss as u32 * 16 + sp.wrapping_add(2 * i) as u32;
+        let saved: Vec<u16> = (0..9).map(|i| self.bus.guest_read_16(at(i))).collect();
         self.set_ax(saved[0]);
         self.set_bx(saved[1]);
         self.set_cx(saved[2]);
@@ -705,8 +726,8 @@ impl Cpu {
         self.set_ss(ss);
         self.set_sp(sp.wrapping_add(18));
         // The INT 21h returns to the terminate address.
-        self.bus.write_16(at(9), terminate_ip);
-        self.bus.write_16(at(10), terminate_cs);
+        self.bus.guest_write_16(at(9), terminate_ip);
+        self.bus.guest_write_16(at(10), terminate_cs);
         self.bus.log_string(&format!(
             "[DOS] Process {:04X} ended: back to {:04X} at {:04X}:{:04X}",
             psp, parent, terminate_cs, terminate_ip
@@ -718,37 +739,52 @@ impl Cpu {
     /// EXEC set to the parent's return address and debuggers change. The
     /// parent's stack holds the interrupt frame the return pops.
     pub fn return_to_parent(&mut self) -> bool {
-        let psp = self.current_psp as usize * 16;
-        let terminate = (self.bus.read_16(psp + 0x0A), self.bus.read_16(psp + 0x0C));
-        if !self.restore_process_context() {
+        let psp = self.current_psp;
+        let base = psp as u32 * 16;
+        let terminate = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
+        let Some(index) = self.exec_context(psp) else {
+            self.bus.log_string(if self.process_stack.is_empty() {
+                "[CPU] Restore Failed: Stack Empty"
+            } else {
+                "[CPU] Restore Failed: no parent's context for the process"
+            });
             return false;
-        }
+        };
+        // Contexts kept after it are those of other virtual machines'
+        // processes, which go on.
+        let context = self.process_stack.remove(index);
+        self.restore_context(context);
         if terminate != (0, 0) {
-            let frame = self.get_physical_addr(self.ss(), self.sp());
-            self.bus.write_16(frame, terminate.0);
-            self.bus.write_16(frame + 2, terminate.1);
+            let frame = self.get_physical_addr(self.ss(), self.sp()) as u32;
+            self.bus.guest_write_16(frame, terminate.0);
+            self.bus.guest_write_16(frame + 2, terminate.1);
         }
         true
     }
 
     pub fn restore_process_context(&mut self) -> bool {
         if let Some(context) = self.process_stack.pop() {
-            // The program ended: `core=auto` goes back to the interpreter.
-            self.dyn_latched = false;
-            self.restore(&context.regs);
-            self.current_psp = context.psp;
-            self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
-            (self.bus.dta_segment, self.bus.dta_offset) = context.dta;
-            self.program = context.program;
-            self.bus.log_string(&format!(
-                "[CPU] Context Restored. Stack Depth: {}",
-                self.process_stack.len()
-            ));
+            self.restore_context(context);
             true
         } else {
             self.bus.log_string("[CPU] Restore Failed: Stack Empty");
             false
         }
+    }
+
+    /// Back to the parent's context `context`, taken off `process_stack`.
+    fn restore_context(&mut self, context: ProcessContext) {
+        // The program ended: `core=auto` goes back to the interpreter.
+        self.dyn_latched = false;
+        self.restore(&context.regs);
+        self.current_psp = context.psp;
+        self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
+        (self.bus.dta_segment, self.bus.dta_offset) = context.dta;
+        self.program = context.program;
+        self.bus.log_string(&format!(
+            "[CPU] Context Restored. Stack Depth: {}",
+            self.process_stack.len()
+        ));
     }
 
     // Helper to get a flag state
@@ -954,7 +990,7 @@ impl Cpu {
     fn install_bios_traps(&mut self) {
         let mut resident = vec![(crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16];
         for &psp in &self.resident_upper {
-            let block = crate::mcb::read_mcb(&self.bus, psp - 1);
+            let block = crate::mcb::read_mcb(&mut self.bus, psp - 1);
             resident.push(psp as usize * 16..(psp as usize + block.size as usize) * 16);
         }
         crate::bios::restore_ivt(&mut self.bus, &resident);
@@ -1019,6 +1055,8 @@ impl Cpu {
     }
 
     pub fn load_shell(&mut self) {
+        // Windows' keyboard ends with it.
+        crate::bios::windows_keyboard(&mut self.bus, false);
         // A system booted from a disk turned the machine off: DOS starts
         // over on it.
         if self.bus.boot.take().is_some() {
@@ -1234,14 +1272,14 @@ impl Cpu {
         let Some(bytes) = self.read_program_file(filename) else {
             return false;
         };
-        let block = crate::mcb::largest_free_upper(&self.bus).filter(|&(_, size)| size >= program_paras(&bytes));
+        let block = crate::mcb::largest_free_upper(&mut self.bus).filter(|&(_, size)| size >= program_paras(&bytes));
         let Some((mcb_seg, size)) = block else {
             self.bus.log_string(&format!("[DOS] LOADHIGH: {} doesn't fit in upper memory, loading it low", filename));
             return self.load_program_bytes(filename, &bytes, Placement::Shell);
         };
         // The whole block, as EXEC gives a child all of one; the program
         // gives back what it doesn't need.
-        let block = crate::mcb::read_mcb(&self.bus, mcb_seg);
+        let block = crate::mcb::read_mcb(&mut self.bus, mcb_seg);
         crate::mcb::write_mcb(&mut self.bus, mcb_seg, &crate::mcb::Mcb { owner: 0xFFFF, ..block });
         let psp = mcb_seg + 1;
         if !self.load_program_bytes(filename, &bytes, Placement::High(psp)) {
@@ -1278,10 +1316,10 @@ impl Cpu {
             // copy of the parent's environment.)
             let path = self.program_path(filename);
             let block = self.environment_block(&path);
-            let env_phys = self.get_physical_addr(ENV_SEGMENT, 0);
-            self.bus.load_bytes(env_phys, &block);
-            let psp_phys = self.get_physical_addr(self.current_psp, 0);
-            self.bus.write_16(psp_phys + 0x2C, ENV_SEGMENT);
+            let env_phys = self.get_physical_addr(ENV_SEGMENT, 0) as u32;
+            self.bus.guest_write_bytes(env_phys, &block);
+            let psp_phys = self.get_physical_addr(self.current_psp, 0) as u32;
+            self.bus.guest_write_16(psp_phys + 0x2C, ENV_SEGMENT);
         }
         loaded
     }
@@ -1348,10 +1386,10 @@ impl Cpu {
             tail.push(b' ');
             tail.extend(crate::dosstr::to_bytes(args).into_iter().take(125));
         }
-        let psp_phys = self.get_physical_addr(psp, 0);
-        self.bus.write_8(psp_phys + 0x80, tail.len() as u8);
-        self.bus.load_bytes(psp_phys + 0x81, &tail);
-        self.bus.write_8(psp_phys + 0x81 + tail.len(), 0x0D);
+        let psp_phys = self.get_physical_addr(psp, 0) as u32;
+        self.bus.guest_write_8(psp_phys + 0x80, tail.len() as u8);
+        self.bus.guest_write_bytes(psp_phys + 0x81, &tail);
+        self.bus.guest_write_8(psp_phys + 0x81 + tail.len() as u32, 0x0D);
     }
 
     /// INT 21h AH=4Bh AL=03h — Load Overlay.
@@ -1385,8 +1423,8 @@ impl Cpu {
 
         // COM-style overlay (no MZ header, no relocations)
         if bytes.len() < 0x1C || &bytes[0..2] != b"MZ" {
-            let phys = self.get_physical_addr(load_segment, 0);
-            self.bus.load_bytes(phys, &bytes);
+            let phys = self.get_physical_addr(load_segment, 0) as u32;
+            self.bus.guest_write_bytes(phys, &bytes);
             return true;
         }
 
@@ -1402,8 +1440,8 @@ impl Cpu {
         let reloc_offset = u16::from_le_bytes([bytes[24], bytes[25]]) as usize;
 
         // Copy image bytes directly at load_segment:0000 — no PSP, no offset.
-        let image_phys = self.get_physical_addr(load_segment, 0);
-        self.bus.load_bytes(image_phys, &bytes[header_size..]);
+        let image_phys = self.get_physical_addr(load_segment, 0) as u32;
+        self.bus.guest_write_bytes(image_phys, &bytes[header_size..]);
 
         // Apply relocations: each entry is (offset, segment); the 16-bit word
         // at (load_segment + segment):offset gets `reloc_factor` added to it.
@@ -1414,11 +1452,9 @@ impl Cpu {
                 let rel_seg = u16::from_le_bytes([bytes[e + 2], bytes[e + 3]]);
 
                 let target_seg = load_segment.wrapping_add(rel_seg);
-                let phys = self.get_physical_addr(target_seg, rel_offset);
-                if phys + 2 <= self.bus.ram().len() {
-                    let cur = self.bus.read_16(phys);
-                    self.bus.write_16(phys, cur.wrapping_add(reloc_factor));
-                }
+                let at = self.get_physical_addr(target_seg, rel_offset) as u32;
+                let cur = self.bus.guest_read_16(at);
+                self.bus.guest_write_16(at, cur.wrapping_add(reloc_factor));
             }
         }
 
@@ -1427,9 +1463,9 @@ impl Cpu {
 
     /// The top of a program's memory, for its PSP: the end of conventional
     /// memory, or of its upper memory block.
-    fn memory_top(&self, placement: Placement, load_segment: u16) -> u16 {
+    fn memory_top(&mut self, placement: Placement, load_segment: u16) -> u16 {
         match placement {
-            Placement::High(psp) => psp + crate::mcb::read_mcb(&self.bus, psp - 1).size,
+            Placement::High(psp) => psp + crate::mcb::read_mcb(&mut self.bus, psp - 1).size,
             Placement::Shell => crate::mcb::low_end(&self.bus),
             Placement::Child(_) => crate::mcb::conventional_end(&self.bus),
         }
@@ -1452,8 +1488,8 @@ impl Cpu {
         };
 
         // Clear 64KB of RAM segment for safety (simulating clean load)
-        let phys_start_seg = self.get_physical_addr(load_segment, 0);
-        self.bus.fill_ram(phys_start_seg..phys_start_seg + segment_bytes, 0);
+        let phys_start_seg = self.get_physical_addr(load_segment, 0) as u32;
+        self.bus.guest_fill(phys_start_seg, segment_bytes, 0);
 
         // Re-install the HLE Interrupt Vectors — but ONLY for the top-level
         // load. A nested EXEC (segment.is_some()) must preserve the parent's
@@ -1467,8 +1503,8 @@ impl Cpu {
         }
 
         // Load the file data at offset 0x100
-        let phys_code_start = self.get_physical_addr(load_segment, start_offset);
-        self.bus.load_bytes(phys_code_start, bytes);
+        let phys_code_start = self.get_physical_addr(load_segment, start_offset) as u32;
+        self.bus.guest_write_bytes(phys_code_start, bytes);
 
         // COM State
         self.set_cs(load_segment);
@@ -1479,23 +1515,21 @@ impl Cpu {
         self.set_sp((segment_bytes - 2) as u16); // End of segment (64KB - 2)
 
         // Setup PSP (Program Segment Prefix) at CS:0000
-        let psp_phys = self.get_physical_addr(load_segment, 0);
+        let psp_phys = self.get_physical_addr(load_segment, 0) as u32;
 
         // Offset 0x00: INT 20h (Exit Program)
-        self.bus.write_8(psp_phys, 0xCD);
-        self.bus.write_8(psp_phys + 1, 0x20);
+        self.bus.guest_write_bytes(psp_phys, &[0xCD, 0x20]);
 
         // Offset 0x02: Top of Memory (Segment): the end of conventional
         // memory (640 KB), or of the upper memory block.
-        self.bus.write_16(psp_phys + 2, top);
+        self.bus.guest_write_16(psp_phys + 2, top);
 
         // [0x06] Bytes in Segment (CP/M compatibility)
-        self.bus.write_8(psp_phys + 6, 0x03);
-        self.bus.write_8(psp_phys + 7, 0x00);
+        self.bus.guest_write_bytes(psp_phys + 6, &[0x03, 0x00]);
 
         // Offset 0x2C: environment segment, set by whoever started the
         // program (load_executable or EXEC).
-        self.bus.write_16(psp_phys + 0x2C, 0);
+        self.bus.guest_write_16(psp_phys + 0x2C, 0);
         // Offset 0x80: empty command tail, filled in by the caller.
         self.set_command_tail(load_segment, "");
         // The handle table: the parent's handles for a program EXEC
@@ -1620,7 +1654,7 @@ impl Cpu {
             paras
         } else {
             // The caller allocated an MCB for us; trust its size.
-            let mcb = crate::mcb::read_mcb(&self.bus, load_segment.wrapping_sub(1));
+            let mcb = crate::mcb::read_mcb(&mut self.bus, load_segment.wrapping_sub(1));
             if !mcb.is_valid() {
                 self.bus
                     .log_string("[DOS] Nested load_exe: MCB at load_segment-1 is invalid");
@@ -1643,8 +1677,8 @@ impl Cpu {
 
         // Standard loader
         // DOS behavior: Skip the header, load the rest to CS:0000 (after PSP)
-        let image_start_phys = self.get_physical_addr(relocation_base_segment, 0);
-        self.bus.load_bytes(image_start_phys, image_data);
+        let image_start_phys = self.get_physical_addr(relocation_base_segment, 0) as u32;
+        self.bus.guest_write_bytes(image_start_phys, image_data);
 
         // Relocations
         // The file contains a table of pointers (Segment:Offset).
@@ -1660,20 +1694,11 @@ impl Cpu {
                 // Calculate physical address of the value we need to patch
                 // The target segment in the table is relative to the Image Start
                 let target_seg = relocation_base_segment.wrapping_add(rel_seg);
-                let phys_addr = self.get_physical_addr(target_seg, rel_offset);
+                let at = self.get_physical_addr(target_seg, rel_offset) as u32;
 
-                if phys_addr + 2 <= self.bus.ram().len() {
-                    // Read the existing 16-bit value
-                    let val_low = self.bus.ram()[phys_addr] as u16;
-                    let val_high = self.bus.ram()[phys_addr + 1] as u16;
-                    let mut val = (val_high << 8) | val_low;
-
-                    // PATCH: Add the actual start segment to the value
-                    val = val.wrapping_add(relocation_base_segment);
-
-                    // Write it back
-                    self.bus.load_bytes(phys_addr, &val.to_le_bytes());
-                }
+                // PATCH: Add the actual start segment to the value
+                let val = self.bus.guest_read_16(at).wrapping_add(relocation_base_segment);
+                self.bus.guest_write_16(at, val);
             }
         }
 
@@ -1687,23 +1712,22 @@ impl Cpu {
         self.set_ip(init_ip);
         self.set_sp(init_sp);
 
-        let psp_phys = self.get_physical_addr(load_segment, 0);
+        let psp_phys = self.get_physical_addr(load_segment, 0) as u32;
 
         // Offset 0x00: INT 20h (Exit Program Instruction)
-        self.bus.write_8(psp_phys, 0xCD);
-        self.bus.write_8(psp_phys + 1, 0x20);
+        self.bus.guest_write_bytes(psp_phys, &[0xCD, 0x20]);
 
         // Offset 0x02: Top of Memory (Segment)
         // Programs read this to know how much RAM they have: the end of
         // conventional memory (640KB), or of their upper memory block.
         let top = self.memory_top(placement, load_segment);
-        self.bus.write_16(psp_phys + 2, top);
+        self.bus.guest_write_16(psp_phys + 2, top);
 
         // Offset 0x80: empty command tail, filled in by the caller.
         self.set_command_tail(load_segment, "");
         // Offset 0x2C: environment segment, set by whoever started the
         // program (load_executable or EXEC).
-        self.bus.write_16(psp_phys + 0x2C, 0);
+        self.bus.guest_write_16(psp_phys + 0x2C, 0);
         // The handle table: the parent's handles for a program EXEC
         // starts, the standard ones for one the shell starts.
         let parent = matches!(placement, Placement::Child(_)).then_some(self.current_psp);

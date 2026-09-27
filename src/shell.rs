@@ -338,7 +338,7 @@ pub fn handle_command_bop(cpu: &mut Cpu) {
     // characters, code page 437 ones included, without control characters.
     let phys_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
     let mut clean = Vec::new();
-    for b in read_asciiz_bytes(&cpu.bus, phys_addr) {
+    for b in read_asciiz_bytes(&mut cpu.bus, phys_addr) {
         match b {
             0x08 => {
                 clean.pop();
@@ -426,6 +426,11 @@ pub fn render_prompt(cpu: &Cpu) -> Vec<u8> {
 /// page shown, as the shell's own code prints; the registers stay as they
 /// were.
 fn teletype(cpu: &mut Cpu, text: &[u8]) {
+    // In a Windows virtual machine, on the machine's own screen.
+    if cpu.v86() && cpu.bus.guest_paging.is_some() {
+        crate::interrupts::teletype(cpu, text);
+        return;
+    }
     let saved = (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx());
     let page = cpu.bus.read_8(0x0462) as u16;
     for &b in text {

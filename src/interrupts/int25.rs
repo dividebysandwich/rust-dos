@@ -26,10 +26,10 @@ pub fn handle(cpu: &mut Cpu, write: bool) {
     let packet = cpu.cx() == 0xFFFF;
     let (start, count, buffer) = if packet {
         let p = cpu.get_physical_addr(cpu.ds(), cpu.bx());
-        let start = cpu.bus.read_32(p) as u64;
-        let count = cpu.bus.read_16(p + 4);
-        let offset = cpu.bus.read_16(p + 6);
-        let segment = cpu.bus.read_16(p + 8);
+        let start = cpu.bus.guest_read_32(p as u32) as u64;
+        let count = cpu.bus.guest_read_16((p + 4) as u32);
+        let offset = cpu.bus.guest_read_16((p + 6) as u32);
+        let segment = cpu.bus.guest_read_16((p + 8) as u32);
         (start, count, cpu.get_physical_addr(segment, offset))
     } else {
         (cpu.dx() as u64, cpu.cx(), cpu.get_physical_addr(cpu.ds(), cpu.bx()))
@@ -42,18 +42,17 @@ pub fn handle(cpu: &mut Cpu, write: bool) {
                 Err(BAD_REQUEST)
             } else if write {
                 if cpu.bus.disk.is_writable(drive) {
-                    let data: Vec<u8> = (0..data_len).map(|i| cpu.bus.read_8(buffer + i)).collect();
-                    volume.write_sectors(start, &data)
+                    let mut data = vec![0u8; data_len];
+                    cpu.bus.guest_read_bytes(buffer as u32, &mut data);
+                    // A page of the buffer isn't there: the call runs
+                    // again once it is, and nothing goes to the disk before.
+                    if cpu.bus.guest_faulted() { Ok(()) } else { volume.write_sectors(start, &data) }
                 } else {
                     Err(WRITE_PROTECTED)
                 }
             } else {
                 let mut data = vec![0u8; data_len];
-                volume.read_sectors(start, &mut data).map(|()| {
-                    for (i, &b) in data.iter().enumerate() {
-                        cpu.bus.write_8(buffer + i, b);
-                    }
-                })
+                volume.read_sectors(start, &mut data).map(|()| cpu.bus.guest_write_bytes(buffer as u32, &data))
             }
             .inspect(|()| {
                 let lba = volume.start() + start;
@@ -65,7 +64,7 @@ pub fn handle(cpu: &mut Cpu, write: bool) {
             // hidden sectors of its BPB.
             if !write && drive >= 2 && !packet && count == 1 && start == 0 {
                 let hidden = cpu.get_physical_addr(cpu.ds(), cpu.bx().wrapping_add(0x1C));
-                cpu.bus.write_16(hidden, 0x3F);
+                cpu.bus.guest_write_16(hidden as u32, 0x3F);
             }
             Ok(())
         }

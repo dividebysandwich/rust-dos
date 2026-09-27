@@ -5,7 +5,7 @@ const BDA_SHIFT_FLAGS: usize = 0x0417;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
-    if cpu.bus.boot.is_some() {
+    if crate::keyboard::bios_keystrokes(&cpu.bus) {
         return booted(cpu, ah);
     }
     match ah {
@@ -112,8 +112,9 @@ fn drop_enhanced_keys(cpu: &mut Cpu) {
     }
 }
 
-/// INT 16h on a booted system, from the keystrokes its keyboard interrupt
-/// keeps in the BIOS data area (`keyboard::BiosBuffer`).
+/// INT 16h on a booted system, and in Windows' virtual machines, from the
+/// keystrokes the keyboard interrupt keeps in the BIOS data area
+/// (`keyboard::BiosBuffer`).
 fn booted(cpu: &mut Cpu, ah: u8) {
     use crate::keyboard::BiosBuffer;
     let bus = &mut cpu.bus;

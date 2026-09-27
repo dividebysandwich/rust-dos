@@ -10,7 +10,7 @@ fn fresh_bus() -> Bus {
 fn init_empty_single_free_block() {
     let mut bus = fresh_bus();
     mcb::init_empty(&mut bus);
-    let chain = walk(&bus);
+    let chain = walk(&mut bus);
     assert_eq!(chain.len(), 1);
     let (seg, m) = chain[0];
     assert_eq!(seg, FIRST_MCB_SEG);
@@ -27,7 +27,7 @@ fn alloc_split_updates_chain() {
     let seg = mcb::alloc(&mut bus, 0x1234, 0x100).expect("alloc should succeed");
     assert_eq!(seg, FIRST_MCB_SEG + 1); // First usable paragraph
 
-    let chain = walk(&bus);
+    let chain = walk(&mut bus);
     assert_eq!(chain.len(), 2);
     assert_eq!(chain[0].1.owner, 0x1234);
     assert_eq!(chain[0].1.size, 0x100);
@@ -59,7 +59,7 @@ fn free_then_coalesce() {
     mcb::free(&mut bus, a).unwrap();
     mcb::free(&mut bus, c).unwrap();
 
-    let chain = walk(&bus);
+    let chain = walk(&mut bus);
     assert_eq!(chain.len(), 1, "chain should collapse back to single free block, got {:?}", chain);
     assert!(chain[0].1.is_free());
     assert_eq!(chain[0].1.signature, MCB_Z);
@@ -70,11 +70,11 @@ fn resize_shrink_creates_free_block() {
     let mut bus = fresh_bus();
     mcb::init_empty(&mut bus);
     let seg = mcb::alloc(&mut bus, 0x1000, 0x400).unwrap();
-    let chain_before = walk(&bus);
+    let chain_before = walk(&mut bus);
     assert_eq!(chain_before.len(), 2);
 
     mcb::resize(&mut bus, seg, 0x100).unwrap();
-    let chain = walk(&bus);
+    let chain = walk(&mut bus);
     // We split a free block out of the shrink, which then coalesces with the
     // tail free block => still 2 blocks.
     assert_eq!(chain.len(), 2);
@@ -90,7 +90,7 @@ fn resize_grow_into_adjacent_free() {
 
     // Growing beyond the block should succeed while the tail is free.
     mcb::resize(&mut bus, seg, 0x200).unwrap();
-    let chain = walk(&bus);
+    let chain = walk(&mut bus);
     assert_eq!(chain[0].1.size, 0x200);
 }
 
@@ -115,7 +115,7 @@ fn free_owned_by_releases_chain_blocks() {
     let _c = mcb::alloc(&mut bus, 0x1234, 0x100).unwrap();
 
     mcb::free_owned_by(&mut bus, 0x1234);
-    let chain = walk(&bus);
+    let chain = walk(&mut bus);
     // Owner 0x5678 still has its block; everything else coalesced into frees.
     let owned_by_1234 = chain.iter().filter(|(_, m)| m.owner == 0x1234).count();
     assert_eq!(owned_by_1234, 0);
@@ -142,7 +142,7 @@ fn allocation_strategies_pick_first_best_or_last_block() {
     // A last fit comes from the top of conventional memory.
     let top = mcb::alloc_fit(&mut bus, 0x1234, 0x21D, Fit::Last).unwrap();
     assert_eq!(top + 0x21D, END_OF_CONVENTIONAL);
-    let chain = walk(&bus);
+    let chain = walk(&mut bus);
     let (last_seg, last) = chain[chain.len() - 1];
     assert_eq!((last_seg + 1, last.signature, last.owner), (top, MCB_Z, 0x1234));
     let (_, below) = chain[chain.len() - 2];

@@ -42,17 +42,17 @@ fn ivt(cpu: &Cpu, vector: usize) -> (u16, u16) {
 
 #[test]
 fn upper_memory_is_chained_at_9fff() {
-    let cpu = machine("chain", &[], false);
+    let mut cpu = machine("chain", &[], false);
     // Conventional memory ends a paragraph short, at the cover MCB.
-    let low = walk(&cpu.bus);
+    let low = walk(&mut cpu.bus);
     let &(last, m) = low.last().unwrap();
     assert!(m.is_free() && m.signature == MCB_Z);
     assert_eq!(last + 1 + m.size, UMB_COVER_SEG);
-    let cover = mcb::read_mcb(&cpu.bus, UMB_COVER_SEG);
+    let cover = mcb::read_mcb(&mut cpu.bus, UMB_COVER_SEG);
     assert_eq!((cover.signature, cover.owner, cover.size), (MCB_M, 8, UMB_START - UMB_COVER_SEG - 1));
     assert_eq!(cpu.bus.read_8(UMB_COVER_SEG as usize * 16 + 8), b'S');
     // D000h to EFFFh, one free block.
-    let upper = walk_upper(&cpu.bus);
+    let upper = walk_upper(&mut cpu.bus);
     assert_eq!(upper.len(), 1);
     assert_eq!((upper[0].0, upper[0].1.size, upper[0].1.is_free()), (UMB_START, 0x1FFF, true));
     // The List of Lists has them, unlinked.
@@ -68,13 +68,13 @@ fn upper_memory_is_chained_at_9fff() {
 
 #[test]
 fn ems_shrinks_upper_memory_to_d000_dfff() {
-    let cpu = machine("with_ems", &[], true);
-    let upper = walk_upper(&cpu.bus);
+    let mut cpu = machine("with_ems", &[], true);
+    let upper = walk_upper(&mut cpu.bus);
     assert_eq!((upper[0].0, upper[0].1.size), (UMB_START, 0x0FFF));
     // Turned off again at the prompt, conventional memory is whole.
     let mut cpu = cpu;
     cpu.set_upper_memory(true, false).unwrap();
-    let &(last, m) = walk(&cpu.bus).last().unwrap();
+    let &(last, m) = walk(&mut cpu.bus).last().unwrap();
     assert_eq!(last + 1 + m.size, 0xA000);
     assert_eq!(cpu.bus.read_16(address(SYSVARS) + 0x66), 0xFFFF);
 }
@@ -93,7 +93,7 @@ fn link_state_and_strategies() {
     assert!(int21(&mut cpu, 0x4800));
     let high = cpu.ax();
     assert_eq!(high, UMB_START + 1);
-    assert_eq!(mcb::read_mcb(&cpu.bus, high - 1).owner, 0x1234);
+    assert_eq!(mcb::read_mcb(&mut cpu.bus, high - 1).owner, 0x1234);
     // More than upper memory has: from conventional memory instead, but
     // not with upper memory only (40h), which says how much it has.
     cpu.set_bx(0x3000);
@@ -116,7 +116,7 @@ fn link_state_and_strategies() {
     assert!(int21(&mut cpu, 0x5802));
     assert_eq!(cpu.get_al(), 1);
     assert_eq!(cpu.bus.read_8(address(SYSVARS) + 0x63), 1);
-    let chain = walk(&cpu.bus);
+    let chain = walk(&mut cpu.bus);
     assert!(chain.iter().any(|&(s, _)| s == UMB_COVER_SEG));
     assert!(chain.iter().any(|&(s, _)| s == UMB_START));
     // Freeing an upper block merges it there, linked or not.
@@ -124,9 +124,9 @@ fn link_state_and_strategies() {
     assert!(int21(&mut cpu, 0x4900));
     cpu.set_bx(0);
     assert!(int21(&mut cpu, 0x5803));
-    let upper = walk_upper(&cpu.bus);
+    let upper = walk_upper(&mut cpu.bus);
     assert_eq!((upper.len(), upper[0].1.size, upper[0].1.is_free()), (1, 0x1FFF, true));
-    assert_eq!(walk(&cpu.bus).last().unwrap().1.signature, MCB_Z);
+    assert_eq!(walk(&mut cpu.bus).last().unwrap().1.signature, MCB_Z);
 
     // The shell unlinks it, and frees what programs left there.
     cpu.set_bx(0x80);
@@ -138,7 +138,7 @@ fn link_state_and_strategies() {
     cpu.load_shell();
     assert!(int21(&mut cpu, 0x5802));
     assert_eq!(cpu.get_al(), 0);
-    assert!(walk_upper(&cpu.bus)[0].1.is_free());
+    assert!(walk_upper(&mut cpu.bus)[0].1.is_free());
     assert_eq!(cpu.alloc_strategy, 0);
 
     // Without upper memory there is nothing to link.
@@ -155,9 +155,9 @@ fn programs_started_from_the_shell_stay_below_upper_memory() {
     assert!(psp < UMB_COVER_SEG);
     // Its block ends at the cover MCB, which it can't overwrite.
     assert_eq!(cpu.bus.read_16(psp as usize * 16 + 2), UMB_COVER_SEG);
-    let cover = mcb::read_mcb(&cpu.bus, UMB_COVER_SEG);
+    let cover = mcb::read_mcb(&mut cpu.bus, UMB_COVER_SEG);
     assert_eq!((cover.signature, cover.owner), (MCB_M, 8));
-    assert_eq!(walk_upper(&cpu.bus).len(), 1);
+    assert_eq!(walk_upper(&mut cpu.bus).len(), 1);
 }
 
 /// A small EXE that loops.
@@ -183,7 +183,7 @@ fn loadhigh_keeps_a_tsr_and_its_hooks_in_upper_memory() {
     let tsr = cpu.current_psp;
     assert_eq!(tsr, UMB_START + 1, "loaded high");
     assert_eq!(cpu.cs(), tsr);
-    assert_eq!(mcb::read_mcb(&cpu.bus, tsr - 1).owner, tsr);
+    assert_eq!(mcb::read_mcb(&mut cpu.bus, tsr - 1).owner, tsr);
     assert_eq!(cpu.bus.read_16(tsr as usize * 16 + 2), 0xF000, "its memory ends with upper memory");
     assert!(cpu.sp() > 0xFF00, "a whole segment's stack");
     // It hooks INT 60h and stays resident with 20h paragraphs.
@@ -194,7 +194,7 @@ fn loadhigh_keeps_a_tsr_and_its_hooks_in_upper_memory() {
     assert_eq!(cpu.state, CpuState::RebootShell);
     assert_eq!(cpu.resident_end, FIRST_MCB_SEG, "conventional memory stays free");
     cpu.load_shell();
-    let upper = walk_upper(&cpu.bus);
+    let upper = walk_upper(&mut cpu.bus);
     assert_eq!((upper[0].1.owner, upper[0].1.size), (tsr, 0x20));
     assert!(upper[1].1.is_free() && upper[1].1.is_last());
 
@@ -205,7 +205,7 @@ fn loadhigh_keeps_a_tsr_and_its_hooks_in_upper_memory() {
     int21(&mut cpu, 0x4C00);
     cpu.load_shell();
     assert_eq!(ivt(&cpu, 0x60), (tsr, 0x0180));
-    assert_eq!(walk_upper(&cpu.bus)[0].1.owner, tsr);
+    assert_eq!(walk_upper(&mut cpu.bus)[0].1.owner, tsr);
 
     // With upper memory full, LOADHIGH loads low.
     let mut cpu = machine("loadhigh_full", &[("TSR.COM", &[0xEB, 0xFE])], false);
