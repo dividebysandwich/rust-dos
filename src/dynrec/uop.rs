@@ -168,4 +168,15 @@ pub enum Uop {
     /// is past the CS limit), else at `next`; either way first set `commit`
     /// (LOOP's counter).
     ExitIf { cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)> },
+    /// The start of a REP MOVS or STOS: t = the `count` register. Where DF
+    /// or TF is set (iterations going down, or a trap after each) or the
+    /// count is above `max`, the instruction's handler runs it instead, all
+    /// at once; with a count of 0 the instruction ends here. The operations
+    /// up to `RepEnd` are an iteration, which leaves the count left in t.
+    RepStart { t: T, count: Gpr, max: u32 },
+    /// Back to the iteration after `RepStart` while t isn't 0.
+    RepEnd { t: T },
+    /// MOVS or STOS without REP: where DF is set, the instruction's handler
+    /// runs it instead of the operations after this one.
+    Forward,
 }

@@ -849,7 +849,13 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
-            Uop::LoadSeg { .. } | Uop::In { .. } | Uop::Out { .. } | Uop::Sti => {
+            Uop::LoadSeg { .. }
+            | Uop::In { .. }
+            | Uop::Out { .. }
+            | Uop::Sti
+            | Uop::RepStart { .. }
+            | Uop::RepEnd { .. }
+            | Uop::Forward => {
                 unreachable!("not translated for this host (SYSTEM)")
             }
         }

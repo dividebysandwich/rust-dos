@@ -64,7 +64,7 @@ impl Uop {
             // A count of 0 leaves the flags as they were.
             Uop::ShiftVar { op, .. } => shift_flags(op),
             Uop::DoubleShiftVar { .. } => CF | OF | SZP,
-            Uop::Bail { .. } => ARITH,
+            Uop::Bail { .. } | Uop::RepStart { .. } | Uop::Forward => ARITH,
             Uop::MemRef { .. }
             | Uop::LoadSeg { .. }
             | Uop::In { .. }

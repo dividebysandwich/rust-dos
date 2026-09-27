@@ -161,6 +161,7 @@ fn uop_gprs(u: &Uop) -> u8 {
             }
         }
         Uop::ExitIf { commit: Some((g, _)), .. } => bit(g),
+        Uop::RepStart { count, .. } => bit(count),
         _ => 0,
     }
 }
@@ -237,6 +238,8 @@ struct Gen<'a> {
     stubs: [Option<DynamicLabel>; LINKS],
     /// The way out of a return to none of the places its links lead to.
     return_miss: Option<DynamicLabel>,
+    /// Where the iteration of a REP string instruction starts.
+    rep_top: Option<DynamicLabel>,
     /// The instruction being translated.
     ix: usize,
     /// The flags live after each operation (`flags::live`), and after the
@@ -312,6 +315,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         link,
         stubs: [None; LINKS],
         return_miss: None,
+        rep_top: None,
         ix: 0,
         live: super::flags::live(items),
         live_after: 0,
@@ -1003,6 +1007,42 @@ impl Gen<'_> {
             }
             Uop::In { size, port, t } => self.port_io(false, size, port, t),
             Uop::Out { size, port, t } => self.port_io(true, size, port, t),
+            Uop::RepStart { t, count, max } => {
+                const TF: i32 = 0x100;
+                const DF: i32 = 0x400;
+                self.get_into(r(t), count);
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test DWORD [rbx + FLAGS], TF | DF
+                    ; jnz =>at
+                    ; cmp Rd(r(t)), max as i32
+                    ; ja =>at
+                );
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
+                let top = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test Rd(r(t)), Rd(r(t))
+                    ; jz =>end
+                    ; =>top
+                );
+                self.rep_top = Some(top);
+            }
+            Uop::RepEnd { t } => {
+                let top = self.rep_top.take().expect("RepStart before RepEnd");
+                dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jnz =>top);
+            }
+            Uop::Forward => {
+                const DF: i32 = 0x400;
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + FLAGS], DF ; jnz =>at);
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
+            }
             Uop::Sti => {
                 const IF: i32 = 0x200;
                 let data = self.data;

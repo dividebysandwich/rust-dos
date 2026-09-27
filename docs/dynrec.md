@@ -210,15 +210,17 @@ Each instruction becomes one of two things:
   - on x86-64 hosts, MOV and POP into segment registers but CS and SS
     (through `jit_load_seg`, which runs `Cpu::load_segment`), IN and OUT
     (through `jit_port`, see [What a block holds](#what-a-block-holds)),
-    and STI;
-  - near JMP, CALL (of a register or memory too), RET, Jcc, LOOPcc and
+    STI, and MOVS and STOS going up, with REP a loop of the iterations
+    where the count is at most 16 (programs copy and fill in small pieces
+    often, and the handler does more at once, see `instructions::string`);
+  - near JMP and CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ.
 
   Each does what the instruction's interpreter handler does, in the same
   order, flags included. Where a form has rare cases the operations don't
   cover (a byte or word shifted by CL past its width), a `Bail` operation
   checks for them first and runs the instruction through its handler
-  instead.
+  instead (so does a REP with DF or TF set, or a larger count).
 - **A call of its interpreter handler.** Everything else runs through
   `jit_fallback`, which does what `exec::execute_at` does. Every
   instruction works in a block from the start; translating more forms only
@@ -437,7 +439,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

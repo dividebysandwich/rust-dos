@@ -1024,6 +1024,221 @@ fn indirect_jumps_are_translated_and_linked_to_where_they_go() {
 }
 
 #[test]
+fn rep_movs_and_stos_of_a_few_elements_run_as_translated_loops() {
+    // REP MOVS and STOS of each size with counts of 0 to 17 (the last more
+    // than a translated loop does, which the handler runs), overlapping
+    // moves, MOVS and STOS without REP, going down (DF set, which the
+    // handler runs), and with 16-bit addressing wrapping around at 64 KB,
+    // 100 times over.
+    let (mut a, mut b) = twins(|rig| {
+        let bytes: Vec<u8> = (0..0x800u32).map(|i| (i * 7 + 3) as u8).collect();
+        rig.load(DATA, &bytes);
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut top = a.create_label();
+            let mut inner = a.create_label();
+            a.xor(ebx, ebx)?;
+            a.mov(ebp, 100u32)?;
+            a.set_label(&mut top)?;
+            a.xor(edx, edx)?;
+            a.set_label(&mut inner)?;
+            a.mov(esi, DATA + 0x100)?;
+            a.mov(edi, DATA + 0x2000)?;
+            a.mov(ecx, edx)?;
+            a.rep().movsb()?;
+            a.mov(esi, DATA + 0x100)?;
+            a.mov(edi, DATA + 0x3001)?;
+            a.mov(ecx, edx)?;
+            a.rep().movsd()?;
+            a.mov(ecx, edx)?;
+            a.rep().movsw()?;
+            // Each byte onto the next.
+            a.mov(esi, DATA + 0x400)?;
+            a.lea(edi, dword_ptr(esi + 1))?;
+            a.mov(ecx, edx)?;
+            a.rep().movsb()?;
+            a.mov(edi, DATA + 0x5000)?;
+            a.imul_3(eax, edx, 0x0101_0101)?;
+            a.mov(ecx, edx)?;
+            a.rep().stosw()?;
+            a.mov(ecx, edx)?;
+            a.rep().stosd()?;
+            a.mov(ecx, edx)?;
+            a.rep().stosb()?;
+            a.movsd()?;
+            a.stosb()?;
+            a.movsb()?;
+            a.add(ebx, esi)?;
+            a.add(ebx, edi)?;
+            a.add(ebx, ecx)?;
+            a.inc(edx)?;
+            a.cmp(edx, 18)?;
+            a.jb(inner)?;
+            // Going down.
+            a.std()?;
+            a.mov(esi, DATA + 0x10F)?;
+            a.mov(edi, DATA + 0x600F)?;
+            a.mov(ecx, 5u32)?;
+            a.rep().movsb()?;
+            a.movsw()?;
+            a.stosb()?;
+            a.cld()?;
+            // 16-bit addressing: ADDR16 REP MOVSB, REP STOSW.
+            a.mov(esi, 0x1234_FFFAu32)?;
+            a.mov(edi, 0x5678_FFFCu32)?;
+            a.mov(ecx, 0xABCD_0009u32)?;
+            a.db(&[0x67, 0xF3, 0xA4])?;
+            a.mov(edi, 0xFFFBu32)?;
+            a.mov(ecx, 3u32)?;
+            a.db(&[0x67, 0xF3, 0x66, 0xAB])?;
+            a.add(ebx, esi)?;
+            a.add(ebx, edi)?;
+            a.dec(ebp)?;
+            a.jnz(top)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    // The first bytes moved, and the first byte over and over.
+    assert_eq!(b.read32(DATA + 0x2000), a.read32(DATA + 0x100));
+    assert_eq!(b.read32(DATA + 0x400), u32::from_le_bytes([b.read32(DATA + 0x400) as u8; 4]));
+}
+
+/// A handler for `vector` that keeps ECX, ESI and EDI at RESULT + 40h, 44h
+/// and 48h, then records it (`Rig::record`).
+fn record_indexes(rig: &mut Rig, vector: u8) {
+    rig.handler(vector, 0, |a| {
+        a.mov(dword_ptr(RESULT + 0x40), ecx)?;
+        a.mov(dword_ptr(RESULT + 0x44), esi)?;
+        a.mov(dword_ptr(RESULT + 0x48), edi)?;
+        record_code(a, vector)
+    });
+}
+
+/// ECX, ESI and EDI as `record_indexes` kept them.
+fn recorded_indexes(rig: &Rig) -> (u32, u32, u32) {
+    (rig.read32(RESULT + 0x40), rig.read32(RESULT + 0x44), rig.read32(RESULT + 0x48))
+}
+
+#[test]
+fn a_translated_rep_stos_past_the_segment_limit_faults_where_it_is_reached() {
+    // REP STOSD of 8 dwords from 1FF0h in an ES of 8 KB: #GP in the fifth
+    // iteration, with the four before it done and counted.
+    let (mut a, mut b) = twins(|rig| {
+        rig.set_gdt(FREE, seg_desc(0x60000, 0x1FFF, DATA_R0, 0x4));
+        record_indexes(rig, GP);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(es, ax)?;
+            a.mov(esi, 0x1234u32)?;
+            a.mov(edi, 0x1FF0u32)?;
+            a.mov(ecx, 8u32)?;
+            a.mov(eax, 0x5555_AAAAu32)?;
+            a.rep().stosd()?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.recorded().0, GP as u32);
+    assert_eq!(recorded_indexes(&b), (4, 0x1234, 0x2000));
+    assert_eq!((b.read32(0x61FFC), b.read32(0x62000)), (0x5555_AAAA, 0));
+}
+
+#[test]
+fn a_translated_rep_movs_into_a_missing_page_faults_where_it_is_reached() {
+    // REP MOVSD of 8 dwords from 54FF0h with page 55000h not present: #PF
+    // in the fifth iteration, with CR2 on it.
+    let (mut a, mut b) = twins(|rig| {
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x55 * 4, 0);
+        record_indexes(rig, PF);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.mov(esi, 0x53000u32)?;
+            a.mov(edi, 0x54FF0u32)?;
+            a.mov(ecx, 8u32)?;
+            a.rep().movsd()?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.recorded().0, PF as u32);
+    assert_eq!(b.cpu.cr2, 0x55000);
+    assert_eq!(recorded_indexes(&b), (4, 0x53010, 0x55000));
+}
+
+#[test]
+fn a_translated_rep_stos_over_the_rest_of_its_block_leaves_after_it() {
+    // REP STOSB of 5 NOPs over the MOV EAX, 1 after it in the block: the
+    // MOV doesn't run.
+    let at = CODE + 0x200;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, 7u32)?;
+            a.jmp(at as u64)
+        }));
+        let mut code = vec![0xBF];
+        code.extend((at + 14).to_le_bytes()); // mov edi, at + 14
+        code.extend([0xB0, 0x90]); // mov al, 90h
+        code.extend([0xB9, 5, 0, 0, 0]); // mov ecx, 5
+        code.extend([0xF3, 0xAA]); // rep stosb
+        code.extend([0xB8, 1, 0, 0, 0]); // mov eax, 1
+        code.push(0xF4);
+        rig.load(at, &code);
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.eax() & 0xFFFF_FF00, 0);
+    assert_eq!(b.cpu.eax(), 0x90);
+}
+
+#[test]
+fn translated_rep_movs_and_stos_reach_the_video_memory() {
+    // REP STOSB and MOVSD into the video memory (chained, at A0000h as
+    // mode 13h has it), and REP MOVSB back out of it into RAM, a few
+    // elements at a time.
+    let (mut a, mut b) = twins(|rig| {
+        let bytes: Vec<u8> = (0..0x100u32).map(|i| (i * 5 + 1) as u8).collect();
+        rig.load(DATA, &bytes);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(dx, 0x3C4u32)?;
+            a.mov(ax, 0x0F02u32)?;
+            a.out(dx, ax)?;
+            a.mov(ax, 0x0E04u32)?;
+            a.out(dx, ax)?;
+            a.mov(dx, 0x3CEu32)?;
+            a.mov(ax, 0x0506u32)?;
+            a.out(dx, ax)?;
+            a.mov(ax, 0x4005u32)?;
+            a.out(dx, ax)?;
+            a.mov(edi, 0xA0000u32)?;
+            a.mov(ecx, 9u32)?;
+            a.mov(al, 0x3Cu32)?;
+            a.rep().stosb()?;
+            a.mov(esi, DATA)?;
+            a.mov(ecx, 5u32)?;
+            a.rep().movsd()?;
+            a.mov(esi, 0xA0000u32)?;
+            a.mov(edi, DATA + 0x200)?;
+            a.mov(ecx, 16u32)?;
+            a.rep().movsb()?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    // Nine bytes stored, then the dwords moved after them.
+    assert_eq!((b.read32(DATA + 0x200), b.read32(DATA + 0x204)), (0x3C3C_3C3C, 0x3C3C_3C3C));
+    assert_eq!(b.read32(DATA + 0x208) & 0xFF, 0x3C);
+    assert_eq!(b.read32(DATA + 0x209), b.read32(DATA));
+}
+
+#[test]
 fn an_indirect_call_through_a_pointer_it_cant_read_pushes_nothing() {
     // CALL [200h] in a data segment of 256 bytes: #GP before the return
     // address is pushed, after the instructions before it in the block.

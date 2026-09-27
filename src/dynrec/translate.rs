@@ -18,7 +18,7 @@ const DF: u32 = 0x0400;
 /// `next` is the EIP after it (which, as the interpreter has it, doesn't
 /// wrap in 16-bit code), and `stack32` the stack's width (SS's B flag),
 /// which blocks are translated for. With `system`, the code generator has
-/// the operations of segment loads, port I/O and STI.
+/// the operations of segment loads, port I/O, STI and REP string loops.
 pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
@@ -36,6 +36,7 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool) ->
             u.push(Uop::Sti);
             true
         }
+        Movsb | Movsw | Movsd | Stosb | Stosw | Stosd if system => string(instr, &mut u),
         Mov => mov(instr, &mut u),
         Add => alu(instr, AluOp::Add, &mut u),
         Or => alu(instr, AluOp::Or, &mut u),
@@ -849,6 +850,62 @@ fn near_rm(instr: &Instruction, size: u8, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Load { dst: T0, m: T2, size });
         }
         _ => return false,
+    }
+    true
+}
+
+/// REP counts up to which a translated loop does the iterations: the
+/// handler does more at once (see `instructions::string`).
+const REP_INLINE: u32 = 16;
+
+/// MOVS or STOS, with or without REP, going up (DF clear), an iteration as
+/// the handler does it: the source's and destination's checks, the
+/// element moved, then the indexes and the count.
+fn string(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let (size, stos) = match instr.code() {
+        Code::Movsb_m8_m8 => (1, false),
+        Code::Movsw_m16_m16 => (2, false),
+        Code::Movsd_m32_m32 => (4, false),
+        Code::Stosb_m8_AL => (1, true),
+        Code::Stosw_m16_AX => (2, true),
+        Code::Stosd_m32_EAX => (4, true),
+        _ => return false,
+    };
+    let a32 = (0..instr.op_count()).any(|i| matches!(instr.op_kind(i), OpKind::MemorySegESI | OpKind::MemoryESEDI));
+    let (reg, width) = if a32 { (Gpr::dword as fn(u8) -> Gpr, 4) } else { (Gpr::word as fn(u8) -> Gpr, 2) };
+    const ESI: u8 = 6;
+    const EDI: u8 = 7;
+    let rep = instr.has_rep_prefix() || instr.has_repne_prefix();
+    if rep {
+        u.push(Uop::RepStart { t: T0, count: reg(ECX), max: REP_INLINE });
+    } else {
+        u.push(Uop::Forward);
+    }
+    u.push(Uop::Get { t: T1, r: reg(EDI) });
+    if stos {
+        u.push(Uop::MemRef { t: T1, seg: Seg::ES, size, write: true, slot: 0 });
+        u.push(Uop::Get { t: T0, r: Gpr { index: 0, high: false, size } });
+    } else {
+        u.push(Uop::Get { t: T2, r: reg(ESI) });
+        u.push(Uop::MemRef { t: T2, seg: mem_seg(instr), size, write: false, slot: 0 });
+        u.push(Uop::MemRef { t: T1, seg: Seg::ES, size, write: true, slot: 1 });
+        u.push(Uop::Load { dst: T0, m: T2, size });
+    }
+    u.push(Uop::Store { m: T1, src: T0, size });
+    let step = |i: u8, u: &mut Vec<Uop>| {
+        u.push(Uop::Get { t: T2, r: reg(i) });
+        u.push(Uop::AddConst { t: T2, v: size as u32, size: width });
+        u.push(Uop::Set { r: reg(i), t: T2 });
+    };
+    if !stos {
+        step(ESI, u);
+    }
+    step(EDI, u);
+    if rep {
+        u.push(Uop::Get { t: T0, r: reg(ECX) });
+        u.push(Uop::AddConst { t: T0, v: u32::MAX, size: width });
+        u.push(Uop::Set { r: reg(ECX), t: T0 });
+        u.push(Uop::RepEnd { t: T0 });
     }
     true
 }
