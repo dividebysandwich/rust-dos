@@ -7,10 +7,10 @@
 //! handles, for the Windows 95 installed on it: Windows knows a device by
 //! its handle (Enum\BIOS\*PNP0303\00), and one it finds under another
 //! handle, or a `$PnP` at another address, it installs again. The serial
-//! ports and the primary IDE controller DOSBox-X had are left out, as
-//! rust-dos has none, the secondary IDE controller but with a booted
-//! system's CD-ROM drive on it, and the PCI bus but on a machine with one,
-//! so the handles skip theirs.
+//! ports DOSBox-X had are left out, as rust-dos has none, the IDE
+//! controllers but with a booted system's hard disks or CD-ROM drive on
+//! them, and the PCI bus but on a machine with one, so the handles skip
+//! theirs.
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, Seg};
@@ -111,16 +111,15 @@ fn nodes(bus: &Bus) -> Vec<(u8, Vec<u8>)> {
         (0x0A, node(b"PNP0A03", [0x06, 0x04, 0x00], &[])),
         (0x0B, node(b"PNP0C04", [0x0B, 0x80, 0x00], &[Io(0xF0, 0x10, 0x10), Irq(13)])),
         (0x0C, node(b"PNP0C01", [0x05, 0x00, 0x00], &ram)),
-        (
-            crate::ide::PNP_HANDLE,
-            node(b"PNP0600", [0x01, 0x01, 0x00], &[Io(crate::ide::BASE, 8, 8), Io(crate::ide::ALT, 1, 2), Irq2(crate::ide::IRQ)]),
-        ),
     ]
     .into_iter()
-    // The PCI bus, where there is one, and the IDE controller with a CD-ROM
-    // drive.
+    // The PCI bus, where there is one.
     .filter(|(handle, _)| *handle != 0x0A || bus.pci_present())
-    .filter(|(handle, _)| *handle != crate::ide::PNP_HANDLE || bus.ide.is_some())
+    // The IDE controllers a booted system has.
+    .chain(crate::ide::ChannelId::ALL.into_iter().filter(|id| bus.ide[id.index()].is_some()).map(|id| {
+        let resources = [Io(id.base(), 8, 8), Io(id.alt(), 1, 2), Irq2(id.irq())];
+        (id.pnp_handle(), node(b"PNP0600", [0x01, 0x01, 0x00], &resources))
+    }))
     .collect()
 }
 
@@ -298,8 +297,8 @@ mod tests {
     #[test]
     fn the_ide_controller_is_listed_while_it_has_its_drive() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-        assert!(nodes(&cpu.bus).iter().all(|(handle, _)| *handle != crate::ide::PNP_HANDLE));
-        cpu.bus.ide = Some(crate::ide::Ide::new(3, true));
+        assert!(nodes(&cpu.bus).iter().all(|(handle, _)| *handle < 0x0F));
+        cpu.bus.ide[1] = Some(crate::ide::Channel::new(crate::ide::ChannelId::Secondary));
         let nodes = nodes(&cpu.bus);
         let (handle, node) = nodes.last().unwrap();
         assert_eq!(*handle, 0x10);
@@ -310,6 +309,15 @@ mod tests {
         assert_eq!(&node[9..17], &[0x47, 0x01, 0x70, 0x01, 0x70, 0x01, 0x08, 0x08]);
         assert_eq!(&node[17..25], &[0x47, 0x01, 0x76, 0x03, 0x76, 0x03, 0x01, 0x02]);
         assert_eq!(&node[25..28], &[0x22, 0x00, 0x80]);
+        // The primary, with hard disks: 1F0h-1F7h, 3F6h-3F7h and IRQ 14,
+        // ahead of the secondary as in DOSBox-X.
+        cpu.bus.ide[0] = Some(crate::ide::Channel::new(crate::ide::ChannelId::Primary));
+        let nodes = super::nodes(&cpu.bus);
+        let (handle, node) = &nodes[nodes.len() - 2];
+        assert_eq!(*handle, 0x0F);
+        assert_eq!(&node[9..17], &[0x47, 0x01, 0xF0, 0x01, 0xF0, 0x01, 0x08, 0x08]);
+        assert_eq!(&node[17..25], &[0x47, 0x01, 0xF6, 0x03, 0xF6, 0x03, 0x01, 0x02]);
+        assert_eq!(&node[25..28], &[0x22, 0x00, 0x40]);
     }
 
     #[test]

@@ -138,9 +138,9 @@ impl Bus {
     /// A port access 2 or 4 bytes wide: to the graphics engine whole, to
     /// anything else a byte at a time, low byte first.
     pub fn io_write_wide(&mut self, port: u16, value: u32, len: u8) {
-        // A booted system's CD-ROM drive's data port, a word at a time.
-        if port == crate::ide::BASE && self.ide.is_some() {
-            self.ide_write_wide(value, len);
+        // A booted system's IDE data ports, a word at a time.
+        if let Some(id) = self.ide_data_port(port) {
+            self.ide_write_wide(id, value, len);
             return;
         }
         // The network card's data port, likewise.
@@ -165,8 +165,8 @@ impl Bus {
     }
 
     pub fn io_read_wide(&mut self, port: u16, len: u8) -> u32 {
-        if port == crate::ide::BASE && self.ide.is_some() {
-            return self.ide_read_wide(len);
+        if let Some(id) = self.ide_data_port(port) {
+            return self.ide_read_wide(id, len);
         }
         if self.ne2000_data_port(port) {
             return self.ne2000_read_wide(port, len);

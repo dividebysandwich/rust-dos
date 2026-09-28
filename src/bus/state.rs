@@ -13,7 +13,7 @@ const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 2;
 const DOS_VERSION: u16 = 4;
 const VOODOO_VERSION: u16 = 1;
-const IDE_VERSION: u16 = 1;
+const IDE_VERSION: u16 = 2;
 const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
 
@@ -171,8 +171,8 @@ impl Bus {
         if let Some(voodoo) = voodoo {
             w.section(b"3DFX", VOODOO_VERSION, |w| voodoo.save(w));
         }
-        // A booted system's CD-ROM drive, likewise.
-        if let Some(ide) = ide {
+        // A booted system's IDE channels, likewise.
+        if ide.iter().any(Option::is_some) {
             w.section(b"IDE ", IDE_VERSION, |w| ide.save(w));
         }
         // The DPMI host, while it has clients.
@@ -332,13 +332,10 @@ impl Bus {
             (true, None) => return Err(StateError::Mismatch("it has a 3dfx card and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a 3dfx card and it hasn't".into())),
         }
-        // The CD-ROM drive comes and goes with the booted system.
+        // The IDE channels come and go with the booted system.
+        *ide = [None, None];
         if r.next_is(b"IDE ") {
-            let mut drive = crate::ide::Ide::new(0, false);
-            drive.load(&mut r.section(b"IDE ", IDE_VERSION)?)?;
-            *ide = Some(drive);
-        } else {
-            *ide = None;
+            ide.load(&mut r.section(b"IDE ", IDE_VERSION)?)?;
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {

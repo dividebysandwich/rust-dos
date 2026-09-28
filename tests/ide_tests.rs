@@ -325,13 +325,13 @@ fn a_state_saved_mid_transfer_goes_on() {
 #[test]
 fn the_channel_comes_with_a_cd_image_and_goes() {
     let (mut bus, _) = drive("pnp");
-    assert!(bus.ide.is_some());
+    assert!(bus.ide[1].is_some());
     bus.detach_ide();
-    assert!(bus.ide.is_none());
+    assert!(bus.ide[1].is_none());
     // Without a CD image, no drive.
     let mut plain = Bus::new(std::path::PathBuf::from("."));
     plain.attach_ide();
-    assert!(plain.ide.is_none());
+    assert!(plain.ide[1].is_none());
 }
 
 #[test]
@@ -339,9 +339,9 @@ fn a_sound_card_on_irq_15_keeps_the_channel_out() {
     let (mut bus, _) = drive("irq15");
     bus.configure_sound(Some(rust_dos::sb::SbConfig { irq: 15, ..Default::default() }), true);
     bus.attach_ide();
-    assert!(bus.ide.is_none());
+    assert!(bus.ide[1].is_none());
     assert_eq!(bus.io_read(COMMAND), 0xFF, "the ports are nobody's");
     bus.configure_sound(Some(rust_dos::sb::SbConfig::default()), true);
     bus.attach_ide();
-    assert!(bus.ide.is_some());
+    assert!(bus.ide[1].is_some());
 }

@@ -1,9 +1,7 @@
-//! An ATAPI CD-ROM drive on the secondary IDE channel (ports 170h-177h
-//! and 376h/377h, IRQ 15), for systems booted from a disk image: Windows
-//! 95's protected-mode IDE driver (ESDI_506.PDR) and CDFS, or a DOS ATAPI
-//! driver, find the CD image of the machine's CD-ROM drive there. Booted
-//! hard disks stay on INT 13h, so the channel has the CD drive alone, as
-//! master.
+//! An ATAPI CD-ROM drive on an IDE channel, the secondary's master by
+//! default, for systems booted from a disk image: Windows 95's
+//! protected-mode IDE driver (ESDI_506.PDR) and CDFS, or a DOS ATAPI
+//! driver, find the CD image of the machine's CD-ROM drive there.
 //!
 //! A port of the ATAPI half of DOSBox-X's ide.cpp: the task file and its
 //! status bits, the packet protocol with its data blocks and interrupts,
@@ -14,25 +12,9 @@
 //! lead-out), sense data for unknown commands, and the relative address of
 //! READ SUB-CHANNEL.
 
-use crate::cdrom::audio::{CdPlayer, PlayState};
-use crate::cdrom::image::CdImage;
+use super::{BSY, DRDY, DRQ, DSC, ERR, Env, ticks};
+use crate::cdrom::audio::PlayState;
 use crate::cdrom::{DATA_SECTOR, LBA_OFFSET, RAW_SECTOR, lba_to_msf};
-use crate::timer::PIT_HZ;
-use std::rc::Rc;
-
-/// The channel's ports, interrupt and Plug and Play node handle (where
-/// DOSBox-X has the secondary channel, so an installed Windows 95 knows
-/// it).
-pub const BASE: u16 = 0x170;
-pub const ALT: u16 = 0x376;
-pub const IRQ: u8 = 15;
-pub const PNP_HANDLE: u8 = 0x10;
-
-const BSY: u8 = 0x80;
-const DRDY: u8 = 0x40;
-const DSC: u8 = 0x10;
-const DRQ: u8 = 0x08;
-const ERR: u8 = 0x01;
 
 /// The largest data block, as DOSBox-X's buffer.
 const BUFFER: usize = 512 * 128;
@@ -96,25 +78,11 @@ crate::state_enum!(Loading {
     Loading::Ready,
 });
 
-/// What a command works with: the disc, the CD audio player, the time.
-pub struct Env<'a> {
-    pub image: Option<Rc<CdImage>>,
-    pub player: &'a mut CdPlayer,
-    /// PIT ticks.
-    pub now: u64,
-}
-
-/// The channel and its drive.
+/// The CD-ROM drive.
 #[derive(Clone, Debug)]
-pub struct Ide {
+pub struct Atapi {
     /// The DOS drive whose CD image the drive has.
     pub drive: u8,
-    // The controller: the selected device, interrupts disabled (nIEN),
-    // the soft reset and the interrupt line.
-    select: u8,
-    nien: bool,
-    host_reset: bool,
-    line: bool,
     // The drive's task file.
     feature: u8,
     count: u8,
@@ -147,24 +115,17 @@ pub struct Ide {
     /// The disc's next change of state (insertion done, spun up, spun
     /// down).
     loading_at: Option<u64>,
-    /// The level of IRQ 15 the bus last passed to the interrupt
-    /// controller.
-    pub pic_line: bool,
     /// Messages for the log.
     pub log: Vec<String>,
 }
 
-crate::state_fields!(Ide {
-    drive, select, nien, host_reset, line,
+crate::state_fields!(Atapi {
+    drive,
     feature, count, lba, drivehead, command, status, state, allow_writing, irq_signal,
     cdb, cdb_len, max_bytes, buf, buf_pos, buf_len,
     lba_next, remaining, xfer, sector_size, sense, loading, has_changed,
-    delayed, delayed_at, loading_at, pic_line,
+    delayed, delayed_at, loading_at,
 } skip { log });
-
-fn ticks(ms: f64) -> u64 {
-    (ms * PIT_HZ as f64 / 1000.0).ceil() as u64
-}
 
 fn be16(b: &[u8]) -> u32 {
     (b[0] as u32) << 8 | b[1] as u32
@@ -200,16 +161,12 @@ const READ_CD_SIZE: [[u16; 32]; 5] = [
     ],
 ];
 
-impl Ide {
-    /// The channel as a booted machine's BIOS leaves it, with the CD of
-    /// `drive` in the drive (`has_disc`), standing still.
+impl Atapi {
+    /// The drive as a booted machine's BIOS leaves it, with the CD of
+    /// `drive` in it (`has_disc`), standing still.
     pub fn new(drive: u8, has_disc: bool) -> Self {
         let mut ide = Self {
             drive,
-            select: 0,
-            nien: false,
-            host_reset: false,
-            line: false,
             feature: 0,
             count: 0,
             lba: [0; 3],
@@ -235,19 +192,27 @@ impl Ide {
             delayed: Delayed::None,
             delayed_at: 0,
             loading_at: None,
-            pic_line: false,
             log: Vec::new(),
         };
         ide.set_sense(0, 0, 0);
         ide
     }
 
-    /// The interrupt line (IRQ 15).
-    pub fn irq(&self) -> bool {
-        self.line
+    /// The drive's interrupt request, which the channel passes on while
+    /// the drive is selected.
+    pub fn irq_signal(&self) -> bool {
+        self.irq_signal
     }
 
-    /// When the channel next needs attention (PIT ticks).
+    pub fn status(&self) -> u8 {
+        self.status
+    }
+
+    pub fn drivehead(&self) -> u8 {
+        self.drivehead
+    }
+
+    /// When the drive next needs attention (PIT ticks).
     pub fn next_event(&self) -> Option<u64> {
         let delayed = (self.delayed != Delayed::None).then_some(self.delayed_at);
         [delayed, self.loading_at].into_iter().flatten().min()
@@ -301,30 +266,18 @@ impl Ide {
 
     fn raise_irq(&mut self) {
         self.irq_signal = true;
-        self.check_irq();
     }
 
     fn lower_irq(&mut self) {
         self.irq_signal = false;
-        self.check_irq();
     }
 
-    fn check_irq(&mut self) {
-        self.line = self.select == 0 && self.irq_signal && !self.nien;
-    }
+    // --- Registers ---
 
-    // --- Ports ---
-
-    /// A byte read at `port` (170h-177h, 376h-377h).
-    pub fn read(&mut self, port: u16, env: &mut Env) -> u8 {
-        if port == ALT || port == ALT + 1 {
-            return self.read_alt(port);
-        }
-        if self.select != 0 {
-            // No slave.
-            return if port == BASE { 0xFF } else { 0 };
-        }
-        let reg = if self.status & BSY != 0 { 7 } else { port - BASE };
+    /// A byte read from task file register `reg` (0-7) while the drive is
+    /// selected.
+    pub fn read_register(&mut self, reg: u16, env: &mut Env) -> u8 {
+        let reg = if self.status & BSY != 0 { 7 } else { reg };
         match reg {
             0 => self.data_read(1, env) as u8,
             1 => self.feature,
@@ -343,113 +296,59 @@ impl Ide {
         }
     }
 
-    fn read_alt(&self, port: u16) -> u8 {
-        let present = self.select == 0;
-        if port == ALT {
-            // The status, leaving the interrupt alone.
-            if present { self.status } else { 0 }
-        } else {
-            // The drive address register.
-            let heads = if present { ((self.drivehead & 0xF) ^ 0xF) << 2 } else { 0x3C };
-            0x80 | (self.select != 0) as u8 | ((self.select != 1) as u8) << 1 | heads
-        }
-    }
-
-    /// The data port read 2 or 4 bytes wide. A 32-bit read is split on
-    /// the ISA bus, as DOSBox-X has it: the data port, then 172h.
-    pub fn read_wide(&mut self, len: u8, env: &mut Env) -> u32 {
-        if len == 4 {
-            let low = self.read_wide(2, env);
-            return low | (self.read(BASE + 2, env) as u32) << 16;
-        }
-        if self.select != 0 {
-            return 0xFFFF;
-        }
+    /// The data port read a word at a time.
+    pub fn read_data(&mut self, env: &mut Env) -> u32 {
         if self.status & BSY != 0 {
-            return self.read(BASE + 7, env) as u32;
+            return self.read_register(7, env) as u32;
         }
         self.data_read(2, env)
     }
 
-    /// A byte written at `port`.
-    pub fn write(&mut self, port: u16, value: u8, env: &mut Env) {
-        if port == ALT {
-            self.write_control(value);
-            return;
-        }
-        if port == ALT + 1 {
-            return;
-        }
-        let reg = port - BASE;
-        if self.select == 0 && self.status & BSY != 0 {
-            // Busy: drivers that select the same drive again are let be;
-            // anything else is dropped.
-            return;
-        }
+    /// A byte written to task file register `reg` (0-5, 7) while the drive
+    /// is selected and not busy.
+    pub fn write_register(&mut self, reg: u16, value: u8, env: &mut Env) {
         match reg {
-            0 => {
-                if self.select == 0 {
-                    self.data_write(value as u32, 1, env);
-                }
-            }
-            1..=5 => {
-                if self.select == 0 && self.allow_writing {
-                    match reg {
-                        1 => self.feature = value,
-                        2 => self.count = value,
-                        _ => self.lba[(reg - 3) as usize] = value,
-                    }
-                }
-            }
-            6 => {
-                self.select = (value >> 4) & 1;
-                if self.select == 0 && self.allow_writing {
-                    self.drivehead = value;
-                }
-                self.check_irq();
-            }
-            _ => {
-                if self.select == 0 {
-                    self.command(value, env);
-                }
-            }
+            0 => self.data_write(value as u32, 1, env),
+            1..=5 if self.allow_writing => match reg {
+                1 => self.feature = value,
+                2 => self.count = value,
+                _ => self.lba[(reg - 3) as usize] = value,
+            },
+            7 => self.command(value, env),
+            _ => {}
         }
     }
 
-    /// The data port written 2 or 4 bytes wide (4: the data port, then
-    /// 172h).
-    pub fn write_wide(&mut self, value: u32, len: u8, env: &mut Env) {
-        if len == 4 {
-            self.write_wide(value & 0xFFFF, 2, env);
-            self.write(BASE + 2, (value >> 16) as u8, env);
-            return;
+    /// The drive/head register written, selecting this drive.
+    pub fn select(&mut self, value: u8) {
+        if self.allow_writing {
+            self.drivehead = value;
         }
-        if self.select == 0 && self.status & BSY == 0 {
+    }
+
+    /// The data port written a word at a time.
+    pub fn write_data(&mut self, value: u32, env: &mut Env) {
+        if self.status & BSY == 0 {
             self.data_write(value, 2, env);
         }
     }
 
-    /// The device control register (376h): nIEN, and SRST, the soft reset
-    /// that puts the ATAPI signature in the task file.
-    fn write_control(&mut self, value: u8) {
-        self.nien = value & 2 != 0;
-        self.check_irq();
-        let reset = value & 4 != 0;
-        if reset && !self.host_reset {
-            self.status = 0xFF;
-            self.allow_writing = true;
-            self.state = State::Busy;
-            self.delayed = Delayed::None;
-            self.host_reset = true;
-        } else if !reset && self.host_reset {
-            self.allow_writing = true;
-            self.state = State::Ready;
-            // Diagnostics passed, and the signature of a packet device.
-            self.feature = 0x01;
-            self.signature();
-            self.status = DRDY | DSC;
-            self.host_reset = false;
-        }
+    /// The soft reset (SRST) begins.
+    pub fn reset_begin(&mut self) {
+        self.status = 0xFF;
+        self.allow_writing = true;
+        self.state = State::Busy;
+        self.delayed = Delayed::None;
+    }
+
+    /// The soft reset ends: diagnostics passed, and the signature of a
+    /// packet device.
+    pub fn reset_complete(&mut self) {
+        self.allow_writing = true;
+        self.state = State::Ready;
+        self.feature = 0x01;
+        self.signature();
+        self.status = DRDY | DSC;
     }
 
     fn signature(&mut self) {
@@ -691,7 +590,7 @@ impl Ide {
             Loading::Ready if trigger => self.loading_at = Some(env.now + ticks(SPINDOWN)),
             _ => {}
         }
-        if env.image.is_none() {
+        if env.cd(self.drive).is_none() {
             self.set_sense(0x02, 0x3A, 0);
             return false;
         }
@@ -821,7 +720,7 @@ impl Ide {
             }
             0x25 => {
                 // The last sector's address, and the sector size.
-                let last = env.image.as_ref().map_or(0, |i| i.leadout().saturating_sub(1));
+                let last = env.cd(self.drive).as_ref().map_or(0, |i| i.leadout().saturating_sub(1));
                 self.buf[..4].copy_from_slice(&last.to_be_bytes());
                 self.buf[4..8].copy_from_slice(&(DATA_SECTOR as u32).to_be_bytes());
                 self.prepare_read(8.min(self.max_bytes as usize));
@@ -872,7 +771,7 @@ impl Ide {
     /// The commands without data: start/stop, lock, seek, play, pause.
     fn no_data_command(&mut self, env: &mut Env) {
         let cdb = self.cdb;
-        let image = env.image.clone();
+        let image = env.cd(self.drive);
         match cdb[0] {
             0x1B => {
                 if cdb[4] & 3 == 2 {
@@ -954,9 +853,9 @@ impl Ide {
         let raw = self.cdb[0] == 0xBE && self.sector_size == RAW_SECTOR as u32;
         let size = if raw { RAW_SECTOR } else { DATA_SECTOR };
         let supported = self.cdb[0] != 0xBE || matches!(self.sector_size as usize, DATA_SECTOR | RAW_SECTOR);
-        let mut ok = supported && env.image.is_some();
+        let mut ok = supported && env.cd(self.drive).is_some();
         if ok {
-            let image = env.image.clone().unwrap();
+            let image = env.cd(self.drive).unwrap();
             for i in 0..self.xfer as usize {
                 let lba = self.lba_next + i as u32;
                 let at = i * size;
@@ -974,7 +873,7 @@ impl Ide {
             }
         }
         if !ok {
-            if env.image.is_none() {
+            if env.cd(self.drive).is_none() {
                 self.set_sense(0x02, 0x3A, 0);
             } else {
                 self.set_sense(0x03, 0x11, 0);
@@ -1014,7 +913,7 @@ impl Ide {
             _ => 0x13,
         };
         let position = if playing { env.player.position() } else { 0 };
-        let track = env.image.as_ref().and_then(|i| i.track_at(position).cloned());
+        let track = env.cd(self.drive).as_ref().and_then(|i| i.track_at(position).cloned());
         let (audio, number, index, relative) = match &track {
             Some(t) if position < t.start => (t.is_audio(), t.number, 0u8, 0),
             Some(t) => (t.is_audio(), t.number, 1u8, position - t.start),
@@ -1053,7 +952,7 @@ impl Ide {
         let first_track = cdb[6];
         let msf = cdb[1] & 2 != 0;
         self.buf[..8].fill(0);
-        let Some(image) = env.image.clone() else {
+        let Some(image) = env.cd(self.drive) else {
             self.prepare_read(8.min(self.max_bytes as usize));
             return;
         };
@@ -1184,7 +1083,7 @@ mod tests {
 
     #[test]
     fn identify_carries_its_checksum_and_model() {
-        let mut ide = Ide::new(3, true);
+        let mut ide = Atapi::new(3, true);
         ide.identify();
         assert_eq!(u16::from_le_bytes([ide.buf[0], ide.buf[1]]), 0x85C0);
         assert_eq!(ide.buf[..512].iter().fold(0u8, |s, &x| s.wrapping_add(x)), 0);

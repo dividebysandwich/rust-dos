@@ -169,8 +169,9 @@ pub struct Bus {
     pub pci: crate::pci::Pci,
     /// The 3dfx Voodoo Graphics card, if there is one.
     pub voodoo: Option<crate::voodoo::Voodoo>,
-    /// A booted system's ATAPI CD-ROM drive on the secondary IDE channel.
-    pub ide: Option<crate::ide::Ide>,
+    /// A booted system's IDE channels, primary and secondary, with its
+    /// hard disks and CD-ROM drive.
+    pub ide: [Option<crate::ide::Channel>; 2],
     pub search_handles: std::collections::HashMap<u32, String>,
     /// The search ID FindFirst handed out last (the key of
     /// `search_handles`, kept in the program's DTA).
@@ -337,7 +338,7 @@ impl Bus {
             s3_engine: crate::video::s3::engine::Engine::new(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
-            ide: None,
+            ide: [None, None],
             search_handles: std::collections::HashMap::new(),
             search_serial: 0,
             mouse: crate::mouse::MouseState::new(),
@@ -1813,7 +1814,7 @@ impl Bus {
 
     fn write_port(&mut self, port: u16, value: u8) {
         match port {
-            // A booted system's CD-ROM drive.
+            // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
             // The two 8259 interrupt controllers.
