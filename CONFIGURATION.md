@@ -347,11 +347,12 @@ The IPX driver of the built-in DOS and the LAN of rust-dos instances (see
   also 3, 4, 5, 7, 9, 11 or 15), and `macaddr` its Ethernet address:
   `auto` (the default, a new one each start) or one like
   `02:00:5E:12:34:56`. See [Network card](#network-card).
-* `relay` is the relay `LAN JOIN` and `LAN LIST` go to without an
-  address, and whose rooms the settings window lists: a `host[:port]`,
-  by default `relay.rust-dos.com`, a public relay where anyone can find
-  and make rooms; or `discover`, the first relay that answers on this
-  network.
+* `online` says where the rooms of `LAN JOIN` and `LAN LIST` without an
+  address, and of the settings window's room browser, are: `false` (the
+  default) on this network, where a room made in the browser is hosted in
+  this instance, or `true` online, at `relay`: a `host[:port]`, by default
+  `relay.rust-dos.com`, a public relay where anyone can find and make
+  rooms.
 * `lan` joins a room at startup, as `LAN JOIN` does: `off` (the default),
   `discover` (the first relay that answers on this network) or a relay's
   `host[:port]`.
@@ -797,25 +798,29 @@ The CRT shaders draw their scanlines over the bigger picture.
 rust-dos instances on different computers play DOS games over IPX as PCs
 on one network would. The instances join a room of a relay, which passes
 the network traffic of each on to the others over UDP; no network driver
-or special privileges are needed on the host. The public relay at
-`relay.rust-dos.com` is there for anyone; one instance can host a relay
-itself, or a server can:
+or special privileges are needed on the host. One instance on the
+network can host the relay, or the public relay at `relay.rust-dos.com`
+can, or a server of your own:
 
 ```text
-LAN JOIN /ROOM:doom           on every computer, at the public relay
-LAN HOST                      or on one computer
-LAN JOIN /LOCAL               and on the others, on the same network
+LAN HOST                      on one computer
+LAN JOIN                      and on the others, on the same network
+LAN JOIN /ONLINE /ROOM:doom   or on every computer, at the public relay
 LAN JOIN 203.0.113.7          or at the host's address, over the internet
 ```
 
 The settings window (Ctrl+F12) finds rooms too: *Find or make a LAN
-room* on its Network page lists the rooms of the relay `relay` names, the
-fullest first, narrowed down as a search is typed. Enter joins the room
-selected, asking for its password if it has one; *Make room* (or Ins)
-makes one, with a password or open to all, and joins it. While the
-instance hosts the room it is in, the browser shows that room instead:
-its players, *Leave*, after which the one there longest hosts it, and
-*Disband*, which ends it for everyone.
+room* on its Network page lists the rooms on this network (those of
+every instance there that hosts a relay), or with Tab those online at
+the relay `relay` names, the fullest first, narrowed down as a search is
+typed. Which one it shows is *LAN rooms* on the page (`online`), on this
+network unless set otherwise. Enter joins the room selected, asking for
+its password if it has one; *Make room* (or Ins) makes one, with a
+password or open to all, and joins it: on this network, on a relay this
+instance hosts, as `LAN HOST` does. While the instance hosts the room it
+is in, the browser shows that room instead: its players, *Leave*, after
+which the one there longest hosts it, and *Disband*, which ends it for
+everyone.
 
 Then start the game's network play as usual (for Doom and Heretic,
 `IPXSETUP -nodes 2`). `LAN` shows where the instance is: the IPX driver,
@@ -831,16 +836,18 @@ the room, the members in it and the round trip to the relay.
 * **`LAN HOST [port]`** relays rooms on a UDP port (21213 unless given)
   and joins one. `LAN STOP` stops relaying. Over the internet, that port
   has to reach the host through its router.
-* **`LAN JOIN [host[:port] | /LOCAL]`** joins a room at a relay, and
-  makes the room if it isn't there: at the relay `relay` in
-  [`[network]`](#network) names without an address (`relay.rust-dos.com`
-  unless set), or with `/LOCAL` at the first relay that answers on this
-  network. It waits a few seconds for the room (a key stops waiting;
+* **`LAN JOIN [host[:port] | /LOCAL | /ONLINE]`** joins a room at a
+  relay, and makes the room if it isn't there. Without an address it is
+  where `online` in [`[network]`](#network) says: at the first relay that
+  answers on this network (the default), or at the relay `relay` names
+  (`relay.rust-dos.com` unless set); `/LOCAL` and `/ONLINE` ask for one
+  or the other. It waits a few seconds for the room (a key stops waiting;
   joining goes on). The instance keeps its place with keepalives, and
   joins again when the relay comes back after a restart. `LAN LEAVE`
   leaves.
-* **`LAN LIST [host[:port] | /LOCAL] [/ROOM:text]`** lists a relay's
-  rooms, the fullest first, with their players and whether they want a
+* **`LAN LIST [host[:port] | /LOCAL | /ONLINE] [/ROOM:text]`** lists the
+  rooms of a relay, or on this network those of every relay that
+  answers, the fullest first, with their players and whether they want a
   password; with `/ROOM:text`, those with the text in their names.
 * **Rooms** keep several games on one relay apart: `/ROOM:name`, or `room`
   in `[network]` (default `lobby`); a name with spaces goes in quotes,

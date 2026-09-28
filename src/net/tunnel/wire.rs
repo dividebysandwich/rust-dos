@@ -168,10 +168,13 @@ pub struct Roster {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Discover,
-    /// A relay's answer to DISCOVER: the port it listens on, whether all
-    /// its rooms want its password, its name and its first rooms.
+    /// A relay's answer to DISCOVER: the port it listens on, a number it
+    /// picked at random, which tells its answers by two ways apart from
+    /// another's, whether all its rooms want its password, its name and
+    /// its first rooms.
     Offer {
         port: u16,
+        id: u64,
         password: bool,
         name: String,
         rooms: Vec<RoomInfo>,
@@ -285,8 +288,9 @@ pub fn encode(token: u64, message: &Message) -> Vec<u8> {
     out.extend_from_slice(&token.to_be_bytes());
     match message {
         Message::Discover => out.resize(DISCOVER_SIZE, 0),
-        Message::Offer { port, password, name, rooms } => {
+        Message::Offer { port, id, password, name, rooms } => {
             out.extend_from_slice(&port.to_be_bytes());
+            out.extend_from_slice(&id.to_be_bytes());
             out.push(*password as u8);
             put_name(&mut out, name);
             // As many rooms as fit in the size of a DISCOVER.
@@ -508,10 +512,9 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, DecodeError> {
             Message::Discover
         }
         OFFER => {
-            let port = body.u16()?;
-            let password = body.bool()?;
+            let (port, id, password) = (body.u16()?, body.u64()?, body.bool()?);
             let name = body.name()?;
-            Message::Offer { port, password, name, rooms: body.rooms()? }
+            Message::Offer { port, id, password, name, rooms: body.rooms()? }
         }
         LIST => {
             if bytes.len() < LIST_SIZE {
@@ -601,7 +604,8 @@ mod tests {
             RoomInfo { name: "".into(), members: 0, password: false },
         ];
         round_trip(0, Message::Discover);
-        round_trip(0, Message::Offer { port: 21213, password: true, name: "den".into(), rooms: rooms.clone() });
+        let offer = Message::Offer { port: 21213, id: 77, password: true, name: "den".into(), rooms: rooms.clone() };
+        round_trip(0, offer);
         round_trip(0, Message::List { start: 30, filter: "doo".into() });
         round_trip(0, Message::Rooms { name: "den".into(), password: false, total: 40, start: 30, rooms });
         round_trip(0, Message::Hello { client_id: 0x0123_4567_89AB_CDEF, room: "doom".into() });
@@ -642,7 +646,8 @@ mod tests {
     fn requests_are_as_long_as_their_answers() {
         let many: Vec<RoomInfo> =
             (0..100).map(|i| RoomInfo { name: format!("room number {:>20}", i), members: i, password: true }).collect();
-        let offer = encode(0, &Message::Offer { port: 1, password: true, name: "x".repeat(40), rooms: many.clone() });
+        let offer = Message::Offer { port: 1, id: 2, password: true, name: "x".repeat(40), rooms: many.clone() };
+        let offer = encode(0, &offer);
         assert!(offer.len() <= encode(0, &Message::Discover).len());
         let Ok(Packet { message: Message::Offer { name, rooms, .. }, .. }) = decode(&offer) else { panic!() };
         assert_eq!(name.len(), MAX_NAME);

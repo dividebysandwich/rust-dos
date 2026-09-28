@@ -1603,6 +1603,11 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.net.disband();
     }
 
+    fn host_room(&mut self, room: &str, password: &str) -> Result<(), String> {
+        self.cpu.bus.install_ipx();
+        self.cpu.bus.net.make_room(room, password)
+    }
+
     fn games(&self) -> Vec<GameEntry> {
         games_dir(self.saved.file.as_deref()).map_or_else(Vec::new, |dir| games::list(&dir).into_iter().map(|(e, _)| e).collect())
     }

@@ -107,10 +107,11 @@ pub struct NetSettings {
     pub lan_host: Option<u16>,
     pub room: String,
     pub password: String,
-    /// The relay (`host[:port]`) LAN JOIN, LAN LIST and the room browser
-    /// go to unless told another, or None for the first relay that
-    /// answers on the LAN.
-    pub relay: Option<String>,
+    /// Whether LAN JOIN, LAN LIST and the room browser go to the relay
+    /// online (`relay`, `host[:port]`) unless told another, or look on
+    /// this network, where making a room in the browser hosts it here.
+    pub online: bool,
+    pub relay: String,
     /// The name this instance's player goes by in LAN rooms, empty for
     /// none (the others see "Player" and the member's number).
     pub player: String,
@@ -130,13 +131,20 @@ impl Default for NetSettings {
             lan_host: None,
             room: DEFAULT_ROOM.into(),
             password: String::new(),
-            relay: Some(DEFAULT_RELAY.into()),
+            online: false,
+            relay: DEFAULT_RELAY.into(),
             player: String::new(),
         }
     }
 }
 
 impl NetSettings {
+    /// The relay rooms are at without another given: the one online, or
+    /// None for those on this network.
+    pub fn rooms_relay(&self) -> Option<&str> {
+        self.online.then_some(self.relay.as_str())
+    }
+
     /// Take `key=value` of the `[network]` section.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
         let off = |v: &str| matches!(v.to_ascii_lowercase().as_str(), "off" | "none" | "false" | "no" | "");
@@ -220,11 +228,17 @@ impl NetSettings {
                 }
                 self.player = player.to_string();
             }
+            "online" => {
+                self.online = match value.trim().to_ascii_lowercase().as_str() {
+                    "true" | "on" | "yes" | "1" => true,
+                    "false" | "off" | "no" | "0" => false,
+                    _ => return Err(format!("invalid online '{}' (true or false)", value)),
+                }
+            }
             "relay" => {
                 self.relay = match value.trim() {
-                    v if v.eq_ignore_ascii_case("discover") => None,
-                    v if !v.is_empty() && !v.contains(char::is_whitespace) => Some(v.to_string()),
-                    _ => return Err(format!("invalid relay '{}' (discover, or a host[:port])", value)),
+                    v if !v.is_empty() && !v.contains(char::is_whitespace) => v.to_string(),
+                    _ => return Err(format!("invalid relay '{}' (a host[:port])", value)),
                 }
             }
             _ => return Err(format!("unknown setting '{}'", key)),
@@ -243,7 +257,8 @@ impl NetSettings {
             ("nicbase", Some(format!("{:X}", self.nic_base))),
             ("nicirq", Some(self.nic_irq.to_string())),
             ("macaddr", Some(self.mac.map_or("auto".to_string(), |mac| mac.to_string()))),
-            ("relay", Some(self.relay.clone().unwrap_or_else(|| "discover".to_string()))),
+            ("online", Some(self.online.to_string())),
+            ("relay", Some(self.relay.clone())),
             ("player", Some(self.player.clone())),
             (
                 "lan",
@@ -284,13 +299,15 @@ pub struct RoomList {
     pub total: usize,
 }
 
-/// The rooms asked of a relay (`Net::browse`), and what came back.
+/// The rooms asked of a relay, or of those on this network
+/// (`Net::browse`), and what came back.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listing {
     /// A question is out.
     pub asking: bool,
-    /// What the last answer found, or why there was none.
-    pub result: Option<Result<RoomList, String>>,
+    /// What the last answer found, a list for each relay, or why there
+    /// was none.
+    pub result: Option<Result<Vec<RoomList>, String>>,
 }
 
 /// What the room browser shows of the LAN.
@@ -489,12 +506,38 @@ impl Net {
                 password: (!password.is_empty()).then(|| password.to_string()),
                 player: self.settings.player.clone(),
             };
-            self.hub()?.send(hub::Command::Host { port, join });
+            self.hub()?.send(hub::Command::Host { port, join, share: false });
             Ok(())
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (port, room, password);
+            Err(NO_NETWORK.into())
+        }
+    }
+
+    /// Make `room` on this network and join it: on the relay this
+    /// instance runs, which it starts on the relay port if it runs none,
+    /// or with that port taken by another instance on this machine, on
+    /// that one's.
+    pub fn make_room(&mut self, room: &str, password: &str) -> Result<(), String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(local) = self.status().hub.and_then(|h| h.hosting) {
+                return self.join(Some(&format!("127.0.0.1:{}", local.port())), room, password);
+            }
+            let join = hub::JoinRequest {
+                relay: None,
+                room: room.into(),
+                password: (!password.is_empty()).then(|| password.to_string()),
+                player: self.settings.player.clone(),
+            };
+            self.hub()?.send(hub::Command::Host { port: tunnel::wire::DEFAULT_PORT, join, share: true });
+            Ok(())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (room, password);
             Err(NO_NETWORK.into())
         }
     }
@@ -549,8 +592,8 @@ impl Net {
         }
     }
 
-    /// Ask `relay` (`host[:port]`, or None for the first relay that
-    /// answers on the LAN) for its rooms whose names contain `filter`, in a
+    /// Ask `relay` (`host[:port]`, or None for each relay that answers on
+    /// the LAN) for its rooms whose names contain `filter`, in a
     /// thread of its own: `listing` has the answer once it comes. The
     /// network thread needn't run for it.
     pub fn browse(&mut self, relay: Option<&str>, filter: &str) -> Result<(), String> {
@@ -632,6 +675,7 @@ mod tests {
             ("lanhost", "21300"),
             ("room", "doom"),
             ("password", "swordfish"),
+            ("online", "true"),
             ("relay", "relay.example.com:4000"),
             ("player", " Toumal "),
         ] {
@@ -651,7 +695,8 @@ mod tests {
                 lan_host: Some(21300),
                 room: "doom".into(),
                 password: "swordfish".into(),
-                relay: Some("relay.example.com:4000".into()),
+                online: true,
+                relay: "relay.example.com:4000".into(),
                 player: "Toumal".into(),
             }
         );
@@ -675,10 +720,11 @@ mod tests {
         assert!(n.set("room", "").is_err());
         assert!(n.set("relay", "").is_err() && n.set("relay", "a b").is_err());
         assert!(n.set("player", &"x".repeat(33)).is_err() && n.set("player", "a\tb").is_err());
-        n.set("relay", "DISCOVER").unwrap();
-        assert_eq!(n.relay, None);
-        assert_eq!(n.entries().iter().find(|e| e.0 == "relay").unwrap().1.as_deref(), Some("discover"));
-        assert_eq!(NetSettings::default().relay.as_deref(), Some(DEFAULT_RELAY));
+        assert!(n.set("online", "maybe").is_err());
+        assert_eq!(n.rooms_relay(), Some("relay.example.com:4000"));
+        // Rooms are on this network unless set otherwise.
+        let default = NetSettings::default();
+        assert_eq!((default.rooms_relay(), default.relay.as_str()), (None, DEFAULT_RELAY));
         assert!(n.set("modem", "on").is_err());
         assert_eq!(NetSettings::default().entries().iter().find(|e| e.0 == "password").unwrap().1, None);
     }
@@ -712,7 +758,7 @@ mod tests {
         let view = net.view();
         assert_eq!(view.joined, Some((relay, "doom".to_string())));
         assert!(view.state.contains("member 1 of 1"), "{}", view.state);
-        let list = view.listing.result.unwrap().unwrap();
+        let list = view.listing.result.unwrap().unwrap().remove(0);
         assert_eq!((list.relay, list.name.as_str(), list.total), (relay, "den", 1));
         assert_eq!(list.rooms, vec![RoomInfo { name: "doom".into(), members: 1, password: true }]);
         // A relay that doesn't answer.

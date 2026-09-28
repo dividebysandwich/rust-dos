@@ -4,16 +4,17 @@
 //!
 //! ```text
 //! LAN HOST [port] [/ROOM:name] [/PASSWORD:text]
-//! LAN JOIN [host[:port] | /LOCAL] [/ROOM:name] [/PASSWORD:text]
-//! LAN LIST [host[:port] | /LOCAL] [/ROOM:text]
+//! LAN JOIN [host[:port] | /LOCAL | /ONLINE] [/ROOM:name] [/PASSWORD:text]
+//! LAN LIST [host[:port] | /LOCAL | /ONLINE] [/ROOM:text]
 //! LAN LEAVE | DISBAND | STOP | STATUS
 //! ```
 //!
-//! JOIN and LIST go to the relay `relay` in `[network]` names (the public
-//! one unless set) without an address, and to the first relay that
-//! answers on this network with /LOCAL. HOST and JOIN install the IPX
-//! driver (with `ipx=auto`), and wait a few seconds for the room to be
-//! joined, as LIST does for the rooms, which a key cuts short.
+//! Without an address, JOIN and LIST look on this network (JOIN at the
+//! first relay that answers, LIST at all of them), or go online to the
+//! relay `relay` in `[network]` names, as `online` there says or /LOCAL
+//! and /ONLINE ask. HOST and JOIN install the IPX driver (with
+//! `ipx=auto`), and wait a few seconds for the room to be joined, as LIST
+//! does for the rooms, which a key cuts short.
 
 use crate::command::ShellCommand;
 use crate::cpu::Cpu;
@@ -22,8 +23,8 @@ use crate::video::{print_cp437, print_string};
 const HELP: &str = "Joins rust-dos instances into a LAN, for games that play over IPX.\r\n\
 \r\n\
 LAN HOST [port] [/ROOM:name] [/PASSWORD:text]\r\n\
-LAN JOIN [host[:port] | /LOCAL] [/ROOM:name] [/PASSWORD:text]\r\n\
-LAN LIST [host[:port] | /LOCAL] [/ROOM:text]\r\n\
+LAN JOIN [host[:port] | /LOCAL | /ONLINE] [/ROOM:name] [/PASSWORD:text]\r\n\
+LAN LIST [host[:port] | /LOCAL | /ONLINE] [/ROOM:text]\r\n\
 LAN LEAVE | DISBAND | STOP | STATUS\r\n\
 \r\n\
   HOST     Relays rooms for others on a UDP port (21213 unless given), and\r\n\
@@ -34,8 +35,10 @@ LAN LEAVE | DISBAND | STOP | STATUS\r\n\
   DISBAND  Ends the room for everyone in it, as its host (who made it).\r\n\
   STOP     Stops relaying.\r\n\
   STATUS   Shows the IPX driver and the LAN (LAN alone does too).\r\n\
-  host     The relay: relay in [network] unless given (relay.rust-dos.com).\r\n\
-  /LOCAL   The first relay that answers on this network.\r\n\
+  host     A relay. Without one, online in [network] says where rooms are:\r\n\
+           on this network (the default), or online at relay.\r\n\
+  /LOCAL   On this network: the first relay that answers (LIST: them all).\r\n\
+  /ONLINE  Online, at relay in [network] (relay.rust-dos.com unless set).\r\n\
   /ROOM    The room, \"lobby\" unless given or set in [network]; in quotes\r\n\
            for a name with spaces.\r\n\
   /PASSWORD  The room's password, which the one who makes it gives it.\r\n\
@@ -58,6 +61,7 @@ struct Parsed {
     room: Option<String>,
     password: Option<String>,
     local: bool,
+    online: bool,
 }
 
 /// The words of `args`, split at spaces outside double quotes, which go.
@@ -91,6 +95,7 @@ fn parse(args: &str) -> Result<Parsed, String> {
                 "ROOM" if !value.is_empty() => parsed.room = Some(value.to_string()),
                 "PASSWORD" | "PW" => parsed.password = Some(value.to_string()),
                 "LOCAL" if value.is_empty() => parsed.local = true,
+                "ONLINE" if value.is_empty() => parsed.online = true,
                 "?" => parsed.verb = "HELP".into(),
                 _ => return Err(format!("Invalid switch - {}", word)),
             }
@@ -102,8 +107,11 @@ fn parse(args: &str) -> Result<Parsed, String> {
             return Err(format!("Too many parameters - {}", word));
         }
     }
-    if parsed.local && parsed.target.is_some() {
-        return Err("/LOCAL looks for a relay: it takes no address".into());
+    if (parsed.local || parsed.online) && parsed.target.is_some() {
+        return Err("/LOCAL and /ONLINE take no address".into());
+    }
+    if parsed.local && parsed.online {
+        return Err("/LOCAL or /ONLINE, not both".into());
     }
     Ok(parsed)
 }
@@ -133,12 +141,13 @@ impl ShellCommand for LanCommand {
         if room.len() > crate::net::tunnel::wire::MAX_NAME {
             return error(cpu, "the room's name is too long");
         }
-        // The relay: the one given, the first on this network, or the
-        // one the settings name.
-        let relay = match (&parsed.target, parsed.local) {
-            (Some(target), _) => Some(target.clone()),
-            (None, true) => None,
-            (None, false) => settings.relay.clone(),
+        // The relay: the one given, those on this network (None), or the
+        // one online.
+        let relay = match (&parsed.target, parsed.local, parsed.online) {
+            (Some(target), ..) => Some(target.clone()),
+            (None, true, _) => None,
+            (None, _, true) => Some(settings.relay.clone()),
+            (None, false, false) => settings.rooms_relay().map(String::from),
         };
         let started = match parsed.verb.as_str() {
             "" | "STATUS" => return show(cpu),
@@ -163,8 +172,10 @@ impl ShellCommand for LanCommand {
                 let filter = parsed.room.clone().unwrap_or_default();
                 match cpu.bus.net.browse(relay.as_deref(), &filter) {
                     Ok(()) => {
-                        let at = relay.as_deref().unwrap_or("the first relay on this network");
-                        print_string(cpu, &format!("Asking {} for its rooms...\r\n", at));
+                        match relay.as_deref() {
+                            Some(at) => print_string(cpu, &format!("Asking {} for its rooms...\r\n", at)),
+                            None => print_string(cpu, "Looking for rooms on this network...\r\n"),
+                        }
                         let until = cpu.bus.clock.now_ticks() + WAIT_TICKS;
                         crate::shell::enter_wait(cpu, crate::shell::ShellWait::LanList { until });
                     }
@@ -259,25 +270,31 @@ pub fn list_over(cpu: &Cpu, until: u64) -> bool {
 /// LIST stopped waiting: the rooms, or why there are none.
 pub fn list_ended(cpu: &mut Cpu) {
     let listing = cpu.bus.net.listing();
-    let list = match listing.result {
-        _ if listing.asking => return print_string(cpu, "No answer yet from the relay\r\n"),
+    let lists = match listing.result {
+        _ if listing.asking => return print_string(cpu, "No answer yet\r\n"),
         None => return,
         Some(Err(e)) => return error(cpu, &e),
-        Some(Ok(list)) => list,
+        Some(Ok(lists)) => lists,
     };
-    let locked = if list.password { ", every room with its password" } else { "" };
-    let name = if list.name.is_empty() { String::new() } else { format!(" (\"{}\"{})", list.name, locked) };
-    print_line(cpu, &format!("Rooms at {}{}:", list.relay, name));
-    if !list.rooms.is_empty() {
-        print_line(cpu, &format!("  {:<32} {:>7}", "Room", "Players"));
+    if lists.is_empty() {
+        return print_string(cpu, "No relay answered on this network (LAN HOST starts one)\r\n");
     }
-    for room in &list.rooms {
-        let lock = if room.password && !list.password { "  password" } else { "" };
-        print_line(cpu, &format!("  {:<32} {:>7}{}", room.name, room.members, lock));
+    for list in &lists {
+        let locked = if list.password { ", every room with its password" } else { "" };
+        let name = if list.name.is_empty() { String::new() } else { format!(" (\"{}\"{})", list.name, locked) };
+        print_line(cpu, &format!("Rooms at {}{}:", list.relay, name));
+        if !list.rooms.is_empty() {
+            print_line(cpu, &format!("  {:<32} {:>7}", "Room", "Players"));
+        }
+        for room in &list.rooms {
+            let lock = if room.password && !list.password { "  password" } else { "" };
+            print_line(cpu, &format!("  {:<32} {:>7}{}", room.name, room.members, lock));
+        }
     }
-    let shown = match list.rooms.len() {
+    let (listed, total) = lists.iter().fold((0, 0), |(n, t), l| (n + l.rooms.len(), t + l.total));
+    let shown = match listed {
         0 => "No rooms yet".to_string(),
-        n if n < list.total => format!("{} rooms of {} (/ROOM:text finds the others)", n, list.total),
+        n if n < total => format!("{} rooms of {} (/ROOM:text finds the others)", n, total),
         1 => "1 room".to_string(),
         n => format!("{} rooms", n),
     };
@@ -323,8 +340,11 @@ fn show(cpu: &mut Cpu) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let relay = cpu.bus.net.settings.relay.as_deref().unwrap_or("the first on this network").to_string();
-        print_string(cpu, &format!("Relay: {} (without an address)\r\n", relay));
+        let rooms = match cpu.bus.net.settings.rooms_relay() {
+            Some(relay) => format!("Rooms: online, at {} (without an address)\r\n", relay),
+            None => "Rooms: on this network (without an address)\r\n".to_string(),
+        };
+        print_string(cpu, &rooms);
         let Some(status) = lan.hub else { return };
         if status.frames_out + status.frames_in > 0 {
             print_string(cpu, &format!("     {} frames sent, {} received\r\n", status.frames_out, status.frames_in));
@@ -353,6 +373,7 @@ mod tests {
                 room: Some("doom".into()),
                 password: Some("x".into()),
                 local: false,
+                online: false,
             }
         );
         assert_eq!(parse("HOST 2000").unwrap().target.as_deref(), Some("2000"));
@@ -365,5 +386,7 @@ mod tests {
         assert_eq!(parsed.password.as_deref(), Some(""));
         assert_eq!(parse(r#"join "/ROOM:a b""#).unwrap().room.as_deref(), Some("a b"));
         assert!(parse("join 192.0.2.1 /local").is_err());
+        assert!(parse("list /online").unwrap().online);
+        assert!(parse("list /online /local").is_err() && parse("join a /online").is_err());
     }
 }

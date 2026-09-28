@@ -112,6 +112,8 @@ struct Closure {
 
 pub struct Relay {
     config: RelayConfig,
+    /// OFFER's number for this relay.
+    id: u64,
     secret: [u8; 32],
     members: HashMap<u64, Member>,
     rooms: HashMap<String, Room>,
@@ -129,6 +131,7 @@ impl Relay {
         crate::net::fill_random(&mut secret);
         Self {
             config,
+            id: crate::net::random_u64(),
             secret,
             members: HashMap::new(),
             rooms: HashMap::new(),
@@ -237,6 +240,7 @@ impl Relay {
             Message::Discover => {
                 let offer = Message::Offer {
                     port: self.config.port,
+                    id: self.id,
                     password: self.password().is_some(),
                     name: self.config.name.clone(),
                     rooms: self.rooms(),
@@ -1132,7 +1136,7 @@ mod tests {
         relay.handle(0, addr(7), &discover, &mut out);
         let offer = one(&mut out);
         assert!(offer.bytes.len() <= discover.len());
-        let Message::Offer { port, password, name, rooms } = message(&offer.bytes).message else { panic!() };
+        let Message::Offer { port, password, name, rooms, .. } = message(&offer.bytes).message else { panic!() };
         assert_eq!((port, password, name.as_str()), (21213, false, "den"));
         assert_eq!(rooms, vec![RoomInfo { name: "doom".into(), members: 1, password: false }]);
         // Garbage gets nothing; another version gets a short refusal.

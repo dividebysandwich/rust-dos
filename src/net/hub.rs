@@ -51,10 +51,12 @@ pub enum Command {
     /// End the room for everyone in it, as its host, and leave it.
     Disband,
     /// Relay rooms on `port` (0 for any), and join the room of `join`
-    /// (whose relay is this one) there.
+    /// (whose relay is this one) there; with `share`, at the relay of
+    /// another instance on this machine if that has the port.
     Host {
         port: u16,
         join: JoinRequest,
+        share: bool,
     },
     StopHost,
     /// Where the relay of join number `generation` is.
@@ -173,6 +175,17 @@ impl Drop for Hub {
             let _ = thread.join();
         }
     }
+}
+
+/// This machine's name, from the environment or, on Linux, its hostname
+/// file.
+fn machine_name() -> Option<String> {
+    ["HOSTNAME", "COMPUTERNAME"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// Where the relay of `request` is (`discover::find`).
@@ -310,7 +323,7 @@ impl State {
                 self.leave(false);
                 self.shared.notice(format!("Ended LAN room \"{}\"", room));
             }
-            Command::Host { port, join } => self.host(port, join),
+            Command::Host { port, join, share } => self.host(port, join, share),
             Command::StopHost => {
                 if let Some(relay) = self.relay.take() {
                     let local = relay.local_addr();
@@ -426,14 +439,12 @@ impl State {
         });
     }
 
-    fn host(&mut self, port: u16, join: JoinRequest) {
+    fn host(&mut self, port: u16, join: JoinRequest, share: bool) {
         let password = join.password.clone();
         self.relay = None;
-        let name = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .map(|h| format!("rust-dos on {}", h))
-            .unwrap_or_else(|_| "rust-dos".into());
-        let config = RelayConfig { name, password: password.clone(), port };
+        // What room browsers show as its host: the player, or this machine.
+        let name = Some(join.player.clone()).filter(|p| !p.is_empty()).or_else(machine_name);
+        let config = RelayConfig { name: name.unwrap_or_else(|| "rust-dos".into()), password: password.clone(), port };
         let shared = self.shared.clone();
         let log = Box::new(move |line: String| shared.notice(format!("Relay: {}", line)));
         match RelayServer::start((Ipv4Addr::UNSPECIFIED, port).into(), config, log) {
@@ -443,6 +454,10 @@ impl State {
                 self.shared.notice(format!("Hosting LAN rooms on UDP port {}", local.port()));
                 self.shared.update(|s| s.hosting = Some(local));
                 let relay = Some(format!("127.0.0.1:{}", local.port()));
+                self.join(JoinRequest { relay, ..join });
+            }
+            Err(e) if share && e.kind() == io::ErrorKind::AddrInUse => {
+                let relay = Some(format!("127.0.0.1:{}", port));
                 self.join(JoinRequest { relay, ..join });
             }
             Err(e) => {
@@ -599,7 +614,7 @@ mod tests {
         a.send(Command::Attach { port: Port::Ipx, mac: ma, queue: qa.clone() });
         b.send(Command::Attach { port: Port::Ipx, mac: mb, queue: qb.clone() });
         let join = JoinRequest { relay: None, room: "doom".into(), password: Some("pw".into()), player: "A".into() };
-        a.send(Command::Host { port: 0, join });
+        a.send(Command::Host { port: 0, join, share: false });
         assert!(wait_for(|| matches!(a.status().lan, LanState::Joined { .. })), "{:?}", a.status());
         let port = a.status().hosting.unwrap().port();
         b.send(Command::Join(JoinRequest {
@@ -637,6 +652,28 @@ mod tests {
         assert_eq!((a.status().lan, a.status().roster), (LanState::Off, None));
         b.send(Command::Leave);
         assert!(wait_for(|| b.status().lan == LanState::Off));
+    }
+
+    #[test]
+    fn a_room_made_where_another_instance_relays_goes_on_its_relay() {
+        let join = |room: &str, player: &str| JoinRequest {
+            relay: None,
+            room: room.into(),
+            password: None,
+            player: player.into(),
+        };
+        let a = Hub::start().unwrap();
+        a.send(Command::Host { port: 0, join: join("doom", "Ranger"), share: true });
+        assert!(wait_for(|| matches!(a.status().lan, LanState::Joined { .. })), "{:?}", a.status());
+        let port = a.status().hosting.unwrap().port();
+        let b = Hub::start().unwrap();
+        b.send(Command::Host { port, join: join("duke", "Kate"), share: true });
+        assert!(wait_for(|| matches!(b.status().lan, LanState::Joined { .. })), "{:?}", b.status());
+        assert_eq!(b.status().hosting, None);
+        assert!(wait_for(|| a.status().hosted_rooms.len() == 2), "{:?}", a.status());
+        // The relay goes by its player's name on the LAN.
+        let found = discover::discover(port, Duration::from_millis(500)).unwrap();
+        assert_eq!(found.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Ranger"]);
     }
 
     /// The address the router of `hub` offers a card's guest.
@@ -677,7 +714,7 @@ mod tests {
         b.send(Command::Attach { port: Port::Nic, mac: mb, queue: qb.clone() });
         assert_eq!(offered(&a, &qa, ma), Some(nat::GUEST));
         let join = JoinRequest { relay: None, room: "net".into(), password: None, player: String::new() };
-        a.send(Command::Host { port: 0, join });
+        a.send(Command::Host { port: 0, join, share: false });
         assert!(wait_for(|| matches!(a.status().lan, LanState::Joined { .. })));
         let port = a.status().hosting.unwrap().port();
         b.send(Command::Join(JoinRequest {

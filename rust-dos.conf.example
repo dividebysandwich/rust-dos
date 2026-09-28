@@ -284,10 +284,12 @@
 #nicbase=300
 #nicirq=10
 #macaddr=auto
-# The relay LAN JOIN and LAN LIST go to without an address, whose rooms
-# the settings window's room browser lists: a host[:port], or discover
-# (the first relay that answers on this network). relay.rust-dos.com is a
+# Where the rooms of LAN JOIN and LAN LIST without an address, and of the
+# settings window's room browser, are: false (the default) on this
+# network, where a room made in the browser is hosted in this instance,
+# or true online, at the relay (a host[:port]). relay.rust-dos.com is a
 # public relay, where anyone can find and make rooms.
+#online=false
 #relay=relay.rust-dos.com
 # The name the others in a LAN room see your player by. Without one they
 # see "Player" and a number.

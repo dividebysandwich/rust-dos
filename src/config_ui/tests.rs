@@ -49,6 +49,8 @@ struct FakeHost {
     joined: Vec<(Option<String>, String, String)>,
     left: usize,
     disbanded: usize,
+    /// The rooms made on this network, and their passwords.
+    hosted: Vec<(String, String)>,
 }
 
 impl FakeHost {
@@ -79,6 +81,7 @@ impl FakeHost {
             joined: vec![],
             left: 0,
             disbanded: 0,
+            hosted: vec![],
         }
     }
 }
@@ -234,6 +237,11 @@ impl Host for FakeHost {
 
     fn disband_room(&mut self) {
         self.disbanded += 1;
+    }
+
+    fn host_room(&mut self, room: &str, password: &str) -> Result<(), String> {
+        self.hosted.push((room.to_string(), password.to_string()));
+        Ok(())
     }
 }
 
@@ -1406,27 +1414,27 @@ fn the_network_page_finds_joins_and_makes_rooms() {
     host.lan = Some(LanView { state: "not joined".into(), ..Default::default() });
     let mut ui = opened(&host);
     ui.show_page(Page::Network);
+    let at = |ui: &ConfigUi, item: Item| ui.items().iter().position(|&i| i == item);
 
-    // The relay is the public one unless typed, and Delete brings it back.
-    ui.row = ui.items().iter().position(|&i| i == Item::Relay).unwrap();
+    // Rooms are on this network unless online is picked, which shows the
+    // relay: the public one unless typed, and Delete brings it back.
+    ui.row = at(&ui, Item::Online).unwrap();
+    assert_eq!(ui.item().unwrap().value(&ui.settings, None), "on this network");
+    assert_eq!(at(&ui, Item::Relay), None);
+    pick(&mut ui, &mut host, "online, at the relay");
+    assert!(host.applied.last().unwrap().network.online);
+    ui.row = at(&ui, Item::Relay).unwrap();
     assert_eq!(ui.item().unwrap().value(&ui.settings, None), "relay.rust-dos.com");
-    let type_relay = |ui: &mut ConfigUi, host: &mut FakeHost, text: &str| {
-        ui.key(Enter, host);
-        keys(ui, host, &[Backspace; 40]);
-        ui.text(text, host);
-        ui.key(Enter, host);
-    };
-    type_relay(&mut ui, &mut host, "192.0.2.9:4000");
-    assert_eq!(host.applied.last().unwrap().network.relay.as_deref(), Some("192.0.2.9:4000"));
-    type_relay(&mut ui, &mut host, "discover");
-    assert_eq!(ui.settings.network.relay, None);
-    assert_eq!(ui.item().unwrap().value(&ui.settings, None), "discover (on this network)");
+    ui.key(Enter, &mut host);
+    keys(&mut ui, &mut host, &[Backspace; 40]);
+    ui.text("192.0.2.9:4000", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(host.applied.last().unwrap().network.relay, "192.0.2.9:4000");
     ui.key(Delete, &mut host);
-    assert_eq!(ui.settings.network.relay.as_deref(), Some("relay.rust-dos.com"));
+    assert_eq!(ui.settings.network.relay, "relay.rust-dos.com");
 
-    // The browser, first on the page, asks the relay for its rooms.
-    ui.row = 0;
-    assert_eq!(ui.item(), Some(Item::Rooms));
+    // The browser asks the relay online for its rooms.
+    ui.row = at(&ui, Item::Rooms).unwrap();
     ui.key(Enter, &mut host);
     assert!(ui.rooms.is_some());
     ui.poll(&mut host);
@@ -1441,7 +1449,7 @@ fn the_network_page_finds_joins_and_makes_rooms() {
         rooms: vec![room("doom2 dm", 3, true), room("duke", 1, false)],
         total: 2,
     };
-    host.lan.as_mut().unwrap().listing = Listing { asking: false, result: Some(Ok(list.clone())) };
+    host.lan.as_mut().unwrap().listing = Listing { asking: false, result: Some(Ok(vec![list.clone()])) };
     ui.poll(&mut host);
     ui.draw(&mut frame);
     assert_eq!(ui.rooms.as_ref().unwrap().rows().len(), 3);
@@ -1450,22 +1458,23 @@ fn the_network_page_finds_joins_and_makes_rooms() {
     // A search narrows them down at once, and is asked for soon after.
     ui.text("du", &mut host);
     let rows = ui.rooms.as_ref().unwrap().rows();
-    assert_eq!(rows, [Row::Room(room("duke", 1, false)), Row::Make(Some("du".into()))]);
+    assert_eq!(rows, [Row::Room(room("duke", 1, false), relay), Row::Make(Some("du".into()))]);
     ui.poll(&mut host);
     assert_eq!(host.browsed.len(), 1, "not while it is typed");
     ui.rooms.as_mut().unwrap().age_last_question();
     ui.poll(&mut host);
     assert_eq!(host.browsed.last().unwrap().1, "du");
 
-    // Enter joins an open room, and the window says when it is in it.
+    // Enter joins an open room where it was listed, and the window says
+    // when it is in it.
     ui.key(Enter, &mut host);
-    assert_eq!(host.joined.last().unwrap(), &(Some("relay.rust-dos.com".into()), "duke".into(), String::new()));
+    assert_eq!(host.joined.last().unwrap(), &(Some("203.0.113.5:21213".into()), "duke".into(), String::new()));
     assert!(status(&ui).0.starts_with("Joining room \"duke\""), "{:?}", status(&ui));
     {
         let lan = host.lan.as_mut().unwrap();
         lan.joined = Some((relay, "duke".into()));
         lan.state = "room \"duke\" at 203.0.113.5:21213, member 2 of 2".into();
-        lan.listing = Listing { asking: false, result: Some(Ok(list.clone())) };
+        lan.listing = Listing { asking: false, result: Some(Ok(vec![list.clone()])) };
     }
     ui.poll(&mut host);
     assert_eq!(status(&ui), ("In room \"duke\": start the game's network play", false));
@@ -1482,11 +1491,10 @@ fn the_network_page_finds_joins_and_makes_rooms() {
     ui.draw(&mut frame);
     ui.text("pw", &mut host);
     ui.key(Enter, &mut host);
-    assert_eq!(host.joined.last().unwrap().1, "doom2 dm");
-    assert_eq!(host.joined.last().unwrap().2, "pw");
+    assert_eq!(host.joined.last().unwrap(), &(Some("203.0.113.5:21213".into()), "doom2 dm".into(), "pw".into()));
     assert!(ui.rooms.as_ref().unwrap().prompt.is_none());
 
-    // Ins makes a room, which needs a name.
+    // Ins makes a room, which needs a name, at the relay online.
     ui.key(Insert, &mut host);
     ui.draw(&mut frame);
     keys(&mut ui, &mut host, &[Char(' '), Enter, Enter]);
@@ -1509,45 +1517,71 @@ fn the_network_page_finds_joins_and_makes_rooms() {
     keys(&mut ui, &mut host, &[Backspace; 8]);
     ui.draw(&mut frame);
     let layout = ui.layout.unwrap();
-    let hit = ui.hits.iter().find(|h| matches!(h.target, Target::RoomRow(2))).unwrap();
-    let (x, y) = ((layout.x + hit.col * 8 + 4) as i32, (layout.y + hit.row * layout.cell_h + 4) as i32);
-    ui.click(x, y, &mut host);
+    let click = |ui: &mut ConfigUi, host: &mut FakeHost, target: fn(&Target) -> bool| {
+        let hit = ui.hits.iter().find(|h| target(&h.target)).unwrap();
+        let (x, y) = ((layout.x + hit.col * 8 + 4) as i32, (layout.y + hit.row * layout.cell_h + 4) as i32);
+        ui.click(x, y, host);
+    };
+    click(&mut ui, &mut host, |t| matches!(t, Target::RoomRow(2)));
     assert_eq!(ui.rooms.as_ref().unwrap().selected, 2);
     assert!(ui.rooms.as_ref().unwrap().prompt.is_none());
-    ui.click(x, y, &mut host);
+    click(&mut ui, &mut host, |t| matches!(t, Target::RoomRow(2)));
     assert!(ui.rooms.as_ref().unwrap().prompt.as_ref().is_some_and(|p| p.making));
     ui.key(Esc, &mut host);
     assert!(ui.rooms.as_ref().unwrap().prompt.is_none());
 
-    // A relay that can't be reached says so; Esc goes back to the page.
+    // A relay that can't be reached says so.
     host.lan.as_mut().unwrap().listing = Listing { asking: false, result: Some(Err("can't find relay".into())) };
     ui.rooms.as_mut().unwrap().age_last_question();
     ui.poll(&mut host);
     host.lan.as_mut().unwrap().listing.asking = false;
     ui.poll(&mut host);
     ui.draw(&mut frame);
-    ui.key(Esc, &mut host);
-    assert!(ui.rooms.is_none() && ui.is_open());
-    assert_eq!(ui.page, Page::Network);
 
-    // A relay found on this network is joined where it was found.
-    ui.settings.network.relay = None;
-    ui.row = 0;
-    ui.key(Enter, &mut host);
+    // Tab goes to the rooms on this network, and the settings with it.
+    let asked = host.browsed.len();
+    ui.key(Tab, &mut host);
+    assert!(!ui.settings.network.online && !host.applied.last().unwrap().network.online);
     ui.poll(&mut host);
+    assert_eq!(host.browsed.len(), asked + 1);
     assert_eq!(host.browsed.last().unwrap(), &(None, String::new()));
-    host.lan.as_mut().unwrap().listing = Listing { asking: false, result: Some(Ok(list)) };
+    ui.draw(&mut frame);
+    assert_eq!(ui.room_hints()[2].1, "Online");
+    // Those found there are joined where they were found, and made here.
+    let local = RoomList { relay, name: "Ranger".into(), password: false, rooms: list.rooms.clone(), total: 2 };
+    host.lan.as_mut().unwrap().listing = Listing { asking: false, result: Some(Ok(vec![local])) };
     ui.poll(&mut host);
+    ui.draw(&mut frame);
     ui.key(Enter, &mut host);
     ui.text("pw", &mut host);
     ui.key(Enter, &mut host);
-    assert_eq!(host.joined.last().unwrap().0.as_deref(), Some("203.0.113.5:21213"));
+    assert_eq!(host.joined.last().unwrap(), &(Some("203.0.113.5:21213".into()), "doom2 dm".into(), "pw".into()));
+    ui.key(Insert, &mut host);
+    ui.text("lan party", &mut host);
+    keys(&mut ui, &mut host, &[Enter, Enter]);
+    assert_eq!(host.hosted, [("lan party".to_string(), String::new())]);
+    // None found yet: the list says how to make one.
+    host.lan.as_mut().unwrap().listing = Listing { asking: false, result: Some(Ok(vec![])) };
+    ui.rooms.as_mut().unwrap().age_last_question();
+    ui.poll(&mut host);
+    host.lan.as_mut().unwrap().listing.asking = false;
+    ui.poll(&mut host);
+    ui.draw(&mut frame);
+    assert_eq!(ui.rooms.as_ref().unwrap().rows().len(), 2, "making one, and leaving duke");
+    // A click on the Online tab goes back there.
+    ui.draw(&mut frame);
+    click(&mut ui, &mut host, |t| matches!(t, Target::RoomsOnline(true)));
+    assert!(ui.settings.network.online);
     for (width, height) in [(400, 300), (1024, 768)] {
         ui.draw(&mut Frame::new(width, height));
         ui.key(Insert, &mut host);
         ui.draw(&mut Frame::new(width, height));
         ui.key(Esc, &mut host);
     }
+    // Esc goes back to the page.
+    ui.key(Esc, &mut host);
+    assert!(ui.rooms.is_none() && ui.is_open());
+    assert_eq!(ui.page, Page::Network);
 }
 
 #[test]
@@ -1571,11 +1605,11 @@ fn the_room_this_instance_hosts_shows_who_is_in_it() {
         joined: Some((relay, "doom".into())),
         index: Some(1),
         roster: Some(roster.clone()),
-        listing: Listing { asking: false, result: Some(Ok(list)) },
+        listing: Listing { asking: false, result: Some(Ok(vec![list])) },
     });
     let mut ui = opened(&host);
     ui.show_page(Page::Network);
-    ui.row = 0;
+    ui.row = ui.items().iter().position(|&i| i == Item::Rooms).unwrap();
     ui.key(Enter, &mut host);
     ui.poll(&mut host);
     host.lan.as_mut().unwrap().listing.asking = false;

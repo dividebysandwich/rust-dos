@@ -1,6 +1,6 @@
 //! Finding relays and their rooms. DISCOVER is broadcast to the relay port
 //! (and sent to this machine, whose own broadcasts some systems don't loop
-//! back), and each relay that hears it answers with an OFFER. LIST asks one
+//! back), and each relay that hears it answers with an OFFER. LIST asks a
 //! relay for its rooms, a page at a time.
 
 use super::wire::{self, DEFAULT_PORT, DecodeError, Message, Packet, RoomInfo};
@@ -21,8 +21,9 @@ const MAX_PAGES: usize = 8;
 /// A relay that answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
-    /// Where to join it.
+    /// Where to join it, and the number it answers with.
     pub relay: SocketAddr,
+    pub id: u64,
     pub name: String,
     pub password: bool,
     pub rooms: Vec<RoomInfo>,
@@ -54,21 +55,18 @@ pub fn discover(port: u16, wait: Duration) -> io::Result<Vec<Found>> {
         socket.set_read_timeout(Some(left))?;
         let Ok((len, from)) = socket.recv_from(&mut buf) else { continue };
         let Ok(packet) = wire::decode(&buf[..len]) else { continue };
-        let Message::Offer { port, password, name, rooms } = packet.message else { continue };
+        let Message::Offer { port, id, password, name, rooms } = packet.message else { continue };
         let relay = SocketAddr::new(from.ip(), if port == 0 { from.port() } else { port });
         // A relay on this machine answers both on the loopback and on the
-        // LAN; one answer is enough.
-        if !found.iter().any(|f| f.relay.port() == relay.port() && f.name == name && same_host(f.relay, relay)) {
-            found.push(Found { relay, name, password, rooms });
+        // LAN; one answer is enough, and the loopback is where this
+        // instance joins a relay of its own.
+        match found.iter_mut().find(|f| f.id == id && f.relay.port() == relay.port()) {
+            Some(f) if relay.ip().is_loopback() => f.relay = relay,
+            Some(_) => {}
+            None => found.push(Found { relay, id, name, password, rooms }),
         }
     }
     Ok(found)
-}
-
-/// Whether two answers came from one host: the same address, or this
-/// machine by the loopback and by a LAN address.
-fn same_host(a: SocketAddr, b: SocketAddr) -> bool {
-    a.ip() == b.ip() || a.ip().is_loopback() || b.ip().is_loopback()
 }
 
 /// `host`, `host:port` or an address, with the relay port unless given.
@@ -102,10 +100,15 @@ pub fn find(relay: Option<&str>) -> Result<SocketAddr, String> {
     addrs.first().copied().ok_or_else(|| format!("{} has no address", host))
 }
 
-/// The rooms whose names contain `filter` at the relay `relay`, as `find`
-/// has it.
-pub fn rooms(relay: Option<&str>, filter: &str) -> Result<RoomList, String> {
-    list(find(relay)?, filter)
+/// The rooms whose names contain `filter` at the relay `relay`, or with
+/// None, at each relay that answers on the LAN.
+pub fn rooms(relay: Option<&str>, filter: &str) -> Result<Vec<RoomList>, String> {
+    if relay.is_some() {
+        return Ok(vec![list(find(relay)?, filter)?]);
+    }
+    let found = discover(DEFAULT_PORT, DISCOVER_WAIT).map_err(|e| format!("can't look for relays on the LAN: {}", e))?;
+    // One that stopped answering since is left out.
+    Ok(found.iter().filter_map(|f| list(f.relay, filter).ok()).collect())
 }
 
 /// The rooms whose names contain `filter` at the relay at `relay`, asked
@@ -185,6 +188,9 @@ mod tests {
         assert_eq!(found.len(), 1, "{:?}", found);
         assert_eq!(found[0].relay.port(), port);
         assert_eq!((found[0].name.as_str(), found[0].password), ("den", true));
+        // Heard by the LAN and by the loopback, it is where this machine
+        // reaches it best.
+        assert!(found[0].relay.ip().is_loopback(), "{:?}", found);
     }
 
     #[test]
@@ -224,7 +230,7 @@ mod tests {
             socket.send_to(&wire::encode(0, &join), relay).unwrap();
             assert!(matches!(answer(), Message::Welcome { .. }));
         }
-        let all = rooms(Some(&relay.to_string()), "").unwrap();
+        let all = rooms(Some(&relay.to_string()), "").unwrap().remove(0);
         assert_eq!((all.relay, all.name.as_str(), all.password, all.total), (relay, "den", false, 70));
         assert_eq!(all.rooms.len(), 70);
         assert!(all.rooms.iter().find(|r| r.name.ends_with(" 05")).unwrap().password);

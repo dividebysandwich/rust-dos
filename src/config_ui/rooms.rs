@@ -1,11 +1,13 @@
 //! The settings window's room browser, opened from the Network page: the
-//! rooms of the relay the settings name (the public one unless set),
-//! narrowed down as a search is typed, joined with Enter and made with Ins,
-//! with a password or open to all. While this instance hosts the room it
-//! is in, it shows that room instead: who is in it, and buttons to leave
+//! rooms on this network (those of every relay that answers there), or
+//! online at the relay the settings name, which Tab switches between. They
+//! are narrowed down as a search is typed, joined with Enter and made with
+//! Ins, with a password or open to all; a room made on this network is
+//! hosted in this instance. While this instance hosts the room it is in,
+//! the browser shows that room instead: who is in it, and buttons to leave
 //! it or end it for everyone. The frontend hands it the LAN every frame
-//! (`ConfigUi::poll`), and it asks the relay again as the search changes
-//! and every few seconds.
+//! (`ConfigUi::poll`), and it asks for the rooms again as the search
+//! changes and every few seconds.
 
 use super::dialog::TextField;
 use super::draw::{self, Grid};
@@ -13,6 +15,7 @@ use super::{ConfigUi, Hit, Host, Target, UiKey, fit};
 use crate::net::tunnel::relay::MAX_ROOM;
 use crate::net::tunnel::wire::{self, RoomInfo};
 use crate::net::{LanView, RoomList};
+use std::net::SocketAddr;
 use web_time::{Duration, Instant};
 
 /// How often the rooms are asked for again, and how soon after the last
@@ -36,12 +39,13 @@ pub enum RoomField {
     Cancel,
 }
 
-/// Making a room, or joining one that wants a password.
+/// Making a room, or joining one that wants a password, at its relay.
 pub struct RoomPrompt {
     pub making: bool,
     pub name: TextField,
     pub password: TextField,
     pub focus: RoomField,
+    relay: Option<SocketAddr>,
 }
 
 impl RoomPrompt {
@@ -71,7 +75,8 @@ impl RoomPrompt {
 /// A row of the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Row {
-    Room(RoomInfo),
+    /// A room, and the relay it is at.
+    Room(RoomInfo, SocketAddr),
     /// Making a room: the one searched for, if it may be one.
     Make(Option<String>),
     /// Leaving the room this instance is in.
@@ -79,9 +84,10 @@ pub(super) enum Row {
 }
 
 pub struct RoomBrowser {
-    /// The relay, as the settings name it (None: the first that answers on
-    /// this network).
-    relay: Option<String>,
+    /// Whether the rooms are online, at the relay the settings name, or
+    /// on this network.
+    pub(super) online: bool,
+    relay: String,
     search: TextField,
     /// The row selected and the first one shown.
     pub(super) selected: usize,
@@ -89,7 +95,7 @@ pub struct RoomBrowser {
     /// The LAN as the frontend showed it last, and the last rooms that
     /// came, which show while the next are asked for.
     view: LanView,
-    list: Option<Result<RoomList, String>>,
+    list: Option<Result<Vec<RoomList>, String>>,
     /// The search last asked for, when, and whether its answer is still
     /// to come.
     asked: Option<(String, Instant)>,
@@ -104,8 +110,9 @@ pub struct RoomBrowser {
 }
 
 impl RoomBrowser {
-    fn new(relay: Option<String>) -> Self {
+    fn new(online: bool, relay: String) -> Self {
         Self {
+            online,
             relay,
             search: TextField::default(),
             selected: 0,
@@ -121,22 +128,35 @@ impl RoomBrowser {
         }
     }
 
-    /// The rooms the search finds, then making one, then leaving the one
-    /// this instance is in.
+    /// The relay the rooms are at: the one online, or None for those on
+    /// this network.
+    fn relay(&self) -> Option<&str> {
+        self.online.then_some(self.relay.as_str())
+    }
+
+    /// The relays that answered.
+    fn lists(&self) -> &[RoomList] {
+        match &self.list {
+            Some(Ok(lists)) => lists,
+            _ => &[],
+        }
+    }
+
+    /// The rooms the search finds, the fullest first, then making one,
+    /// then leaving the one this instance is in.
     pub(super) fn rows(&self) -> Vec<Row> {
         let search = self.search.text();
         let wanted = search.to_lowercase();
-        let mut rows: Vec<Row> = match &self.list {
-            Some(Ok(list)) => list
-                .rooms
-                .iter()
-                .filter(|r| r.name.to_lowercase().contains(&wanted))
-                .map(|r| Row::Room(r.clone()))
-                .collect(),
-            _ => Vec::new(),
-        };
+        let mut rooms: Vec<(RoomInfo, SocketAddr)> = self
+            .lists()
+            .iter()
+            .flat_map(|list| list.rooms.iter().map(|r| (r.clone(), list.relay)))
+            .filter(|(r, _)| r.name.to_lowercase().contains(&wanted))
+            .collect();
+        rooms.sort_by(|a, b| b.0.members.cmp(&a.0.members).then_with(|| a.0.name.cmp(&b.0.name)));
+        let mut rows: Vec<Row> = rooms.into_iter().map(|(room, relay)| Row::Room(room, relay)).collect();
         let name = search.trim();
-        let listed = rows.iter().any(|r| matches!(r, Row::Room(room) if room.name == name));
+        let listed = rows.iter().any(|r| matches!(r, Row::Room(room, _) if room.name == name));
         rows.push(Row::Make((wire::valid_room(name) && !listed).then(|| name.to_string())));
         if let Some((_, room)) = &self.view.joined {
             rows.push(Row::Leave(room.clone()));
@@ -150,29 +170,20 @@ impl RoomBrowser {
     }
 
     /// What the room this instance is in was last listed as.
-    fn listed(&self, room: &str) -> Option<&RoomInfo> {
-        match &self.list {
-            Some(Ok(list)) => list.rooms.iter().find(|r| r.name == room),
-            _ => None,
-        }
+    fn listed(&self) -> Option<&RoomInfo> {
+        let (relay, room) = self.view.joined.as_ref()?;
+        let list = self.lists().iter().find(|l| l.relay == *relay)?;
+        list.rooms.iter().find(|r| r.name == *room)
     }
 
-    /// Whether this instance is in `room` of the relay listed.
-    fn in_room(&self, room: &str) -> bool {
-        match (&self.view.joined, &self.list) {
-            (Some((relay, joined)), Some(Ok(list))) => joined == room && *relay == list.relay,
-            _ => false,
-        }
+    /// Whether this instance is in `room` at `relay`.
+    fn in_room(&self, room: &str, relay: SocketAddr) -> bool {
+        self.view.joined.as_ref().is_some_and(|(at, joined)| joined == room && *at == relay)
     }
 
-    /// The relay to join a room at: the one listed if it was found on
-    /// this network, so the same one is joined.
-    fn join_relay(&self) -> Option<String> {
-        match (&self.relay, &self.list) {
-            (Some(relay), _) => Some(relay.clone()),
-            (None, Some(Ok(list))) => Some(list.relay.to_string()),
-            (None, _) => None,
-        }
+    /// The name of the relay at `relay`, as it gave it.
+    fn relay_name(&self, relay: SocketAddr) -> &str {
+        self.lists().iter().find(|l| l.relay == relay).map_or("", |l| l.name.as_str())
     }
 }
 
@@ -206,7 +217,23 @@ impl RoomBrowser {
 impl ConfigUi {
     pub(super) fn open_rooms(&mut self) {
         self.status = None;
-        self.rooms = Some(RoomBrowser::new(self.settings.network.relay.clone()));
+        let network = &self.settings.network;
+        self.rooms = Some(RoomBrowser::new(network.online, network.relay.clone()));
+    }
+
+    /// Switch between the rooms on this network and those online, which
+    /// the settings keep.
+    fn switch_rooms(&mut self, online: bool, host: &mut dyn Host) {
+        let Some(browser) = &mut self.rooms else { return };
+        if browser.online == online {
+            return;
+        }
+        let joining = browser.joining.take();
+        *browser = RoomBrowser { joining, ..RoomBrowser::new(online, browser.relay.clone()) };
+        self.settings.network.online = online;
+        // The LAN commands go by it at the prompt, when it is in place.
+        let _ = host.apply(&self.settings);
+        self.status = None;
     }
 
     /// What the window keeps up to date while it is open, for the frontend
@@ -226,7 +253,7 @@ impl ConfigUi {
             Some((_, at)) => !browser.waiting && at.elapsed() >= REFRESH,
         };
         if due {
-            match host.browse_rooms(browser.relay.as_deref(), &search) {
+            match host.browse_rooms(browser.relay(), &search) {
                 Ok(()) => browser.waiting = true,
                 Err(e) => browser.list = Some(Err(e)),
             }
@@ -273,13 +300,17 @@ impl ConfigUi {
                 self.rooms = None;
                 self.status = None;
             }
+            UiKey::Tab | UiKey::BackTab => {
+                let online = !browser.online;
+                self.switch_rooms(online, host);
+            }
             UiKey::Insert => self.open_room_prompt(None),
             UiKey::Enter => match rows.get(browser.selected.min(rows.len() - 1)).cloned() {
-                Some(Row::Room(room)) if browser.in_room(&room.name) => {
+                Some(Row::Room(room, relay)) if browser.in_room(&room.name, relay) => {
                     self.info(format!("This instance is in room \"{}\"", room.name));
                 }
-                Some(Row::Room(room)) if room.password => self.open_room_prompt(Some(room.name)),
-                Some(Row::Room(room)) => self.join_room(&room.name, "", host),
+                Some(Row::Room(room, relay)) if room.password => self.open_room_prompt(Some((room.name, relay))),
+                Some(Row::Room(room, relay)) => self.join_room(&room.name, "", Some(relay), host),
                 Some(Row::Make(name)) => self.open_room_prompt_to_make(name),
                 Some(Row::Leave(room)) => {
                     host.leave_room();
@@ -339,21 +370,24 @@ impl ConfigUi {
         }
     }
 
-    /// Ask for the password of `room`, or with None, for a room to make.
-    fn open_room_prompt(&mut self, room: Option<String>) {
+    /// Ask for the password of `room` at its relay, or with None, for a
+    /// room to make.
+    fn open_room_prompt(&mut self, room: Option<(String, SocketAddr)>) {
         let Some(browser) = &mut self.rooms else { return };
         browser.prompt = Some(match room {
-            Some(room) => RoomPrompt {
+            Some((room, relay)) => RoomPrompt {
                 making: false,
                 name: TextField::new(&room),
                 password: TextField::default(),
                 focus: RoomField::Password,
+                relay: Some(relay),
             },
             None => RoomPrompt {
                 making: true,
                 name: TextField::default(),
                 password: TextField::default(),
                 focus: RoomField::Name,
+                relay: None,
             },
         });
         self.status = None;
@@ -387,8 +421,13 @@ impl ConfigUi {
                 if !wire::valid_room(&name) {
                     return self.error("A room's name is 1 to 32 printable characters");
                 }
+                let (making, relay) = (prompt.making, prompt.relay);
                 self.close_room_prompt();
-                self.join_room(&name, &password, host);
+                match relay {
+                    Some(relay) => self.join_room(&name, &password, Some(relay), host),
+                    None if making => self.make_room(&name, &password, host),
+                    None => self.join_room(&name, &password, None, host),
+                }
             }
             _ => {}
         }
@@ -401,10 +440,29 @@ impl ConfigUi {
         self.status = None;
     }
 
-    /// Join `room` at the relay listed, making it if it isn't there.
-    fn join_room(&mut self, room: &str, password: &str, host: &mut dyn Host) {
+    /// Join `room` at `relay`, or at the relay online.
+    fn join_room(&mut self, room: &str, password: &str, relay: Option<SocketAddr>, host: &mut dyn Host) {
         let Some(browser) = &mut self.rooms else { return };
-        match host.join_room(browser.join_relay().as_deref(), room, password) {
+        let relay = relay.map(|r| r.to_string()).or_else(|| browser.relay().map(String::from));
+        let joined = host.join_room(relay.as_deref(), room, password);
+        self.joined_room(room, joined);
+    }
+
+    /// Make `room` and join it: online at the relay, or on this network
+    /// on a relay this instance hosts.
+    fn make_room(&mut self, room: &str, password: &str, host: &mut dyn Host) {
+        let Some(browser) = &self.rooms else { return };
+        let made = match browser.relay() {
+            Some(relay) => host.join_room(Some(relay), room, password),
+            None => host.host_room(room, password),
+        };
+        self.joined_room(room, made);
+    }
+
+    /// Joining `room` went out, or couldn't.
+    fn joined_room(&mut self, room: &str, joined: Result<(), String>) {
+        let Some(browser) = &mut self.rooms else { return };
+        match joined {
             Ok(()) => {
                 browser.joining = Some(room.to_string());
                 self.info(format!("Joining room \"{}\"...", room));
@@ -431,6 +489,7 @@ impl ConfigUi {
                 browser.button = button;
                 self.key(UiKey::Enter, host);
             }
+            Target::RoomsOnline(online) if browser.prompt.is_none() => self.switch_rooms(online, host),
             _ => {}
         }
     }
@@ -449,7 +508,15 @@ impl ConfigUi {
                 let press = if browser.button == RoomButton::Leave { "Leave" } else { "Disband" };
                 vec![("Enter", press, UiKey::Enter), ("Tab", "Next", UiKey::Tab), ("Esc", "Back", UiKey::Esc)]
             }
-            None => vec![("Enter", "Join", UiKey::Enter), ("Ins", "New room", UiKey::Insert), ("Esc", "Back", UiKey::Esc)],
+            None => {
+                let other = if browser.online { "This network" } else { "Online" };
+                vec![
+                    ("Enter", "Join", UiKey::Enter),
+                    ("Ins", "New room", UiKey::Insert),
+                    ("Tab", other, UiKey::Tab),
+                    ("Esc", "Back", UiKey::Esc),
+                ]
+            }
         }
     }
 
@@ -457,15 +524,28 @@ impl ConfigUi {
         let Some(browser) = &mut self.rooms else { return };
         let cols = g.cols;
         let top = content.start;
-        let relay = browser.relay.clone().unwrap_or_else(|| "the first relay on this network".to_string());
         let hosting = browser.view.hosting() && browser.prompt.is_none();
-        let mut title = format!("{} at {}", if hosting { "Your room" } else { "Rooms" }, relay);
-        if let Some(Ok(list)) = &browser.list
-            && !list.name.is_empty()
-        {
-            title = format!("{} ({})", title, list.name);
+
+        // The rooms on this network and online, as tabs, and where those
+        // shown are.
+        let mut hits = Vec::new();
+        let mut x = 2;
+        for (online, label) in [(false, " This network "), (true, " Online ")] {
+            let selected = browser.online == online;
+            if selected {
+                g.background(x, top, label.len().min(cols - 2 - x), draw::SELECT);
+            }
+            let after = g.text_to(x, top, label, if selected { draw::BRIGHT } else { draw::TEXT }, cols - 2);
+            hits.push(Hit { row: top, col: x, width: after - x, target: Target::RoomsOnline(online) });
+            x = after + 1;
         }
-        g.text_to(2, top, &fit(&title, cols - 4), draw::BRIGHT, cols - 2);
+        let at = match browser.lists() {
+            [list] if browser.online && !list.name.is_empty() => format!("at {} ({})", browser.relay, list.name),
+            _ if browser.online => format!("at {}", browser.relay),
+            _ => String::new(),
+        };
+        g.text_to(x + 1, top, &fit(&at, cols.saturating_sub(x + 3)), draw::DIM, cols - 2);
+        self.hits.extend(hits);
 
         // Where this instance is, at the bottom.
         let lan_row = content.end - 1;
@@ -483,7 +563,7 @@ impl ConfigUi {
             return;
         }
         if hosting {
-            let hits = Self::draw_hosted_room(browser, g, top + 1..lan_row);
+            let hits = Self::draw_hosted_room(browser, g, top + 2..lan_row);
             self.hits.extend(hits);
             return;
         }
@@ -492,11 +572,12 @@ impl ConfigUi {
         let search_row = top + 1;
         g.text(2, search_row, "Search", draw::TEXT);
         let search = browser.search.text();
+        let total: usize = browser.lists().iter().map(|l| l.total).sum();
         let count = match &browser.list {
             None if browser.waiting => "asking...".to_string(),
-            Some(Ok(list)) if !search.is_empty() => format!("{} found", list.total),
-            Some(Ok(list)) if list.total == 1 => "1 room".to_string(),
-            Some(Ok(list)) => format!("{} rooms", list.total),
+            Some(Ok(_)) if !search.is_empty() => format!("{} found", total),
+            Some(Ok(_)) if total == 1 => "1 room".to_string(),
+            Some(Ok(_)) => format!("{} rooms", total),
             _ => String::new(),
         };
         let count_col = cols.saturating_sub(count.len() + 3);
@@ -511,17 +592,24 @@ impl ConfigUi {
         g.text(count_col, search_row, &count, draw::DIM);
 
         // The rooms, or why there are none, and the rows after them.
+        // On this network, whose each room is: the relay's name.
         let rows = browser.rows();
         let members_col = cols.saturating_sub(24);
+        let host_col = (!browser.online).then(|| members_col.saturating_sub(18)).filter(|&c| c > 20);
         g.text(4, top + 2, "Room", draw::DIM);
+        if let Some(col) = host_col {
+            g.text(col, top + 2, "Host", draw::DIM);
+        }
         g.text_to(members_col, top + 2, "Players", draw::DIM, cols - 2);
         let mut list_rows = top + 3..lan_row.saturating_sub(1);
         let message = match &browser.list {
-            None => Some(("Asking the relay for its rooms...".to_string(), draw::DIM)),
+            None if browser.online => Some(("Asking the relay for its rooms...".to_string(), draw::DIM)),
+            None => Some(("Looking for rooms on this network...".to_string(), draw::DIM)),
             Some(Err(e)) => Some((format!("Can't list the rooms: {}", e), draw::ERROR)),
-            _ if rows.iter().any(|r| matches!(r, Row::Room(_))) => None,
-            _ if search.is_empty() => Some(("No rooms yet: Ins makes one".to_string(), draw::DIM)),
-            _ => Some((format!("No room has \"{}\" in its name", search), draw::DIM)),
+            _ if rows.iter().any(|r| matches!(r, Row::Room(..))) => None,
+            _ if !search.is_empty() => Some((format!("No room has \"{}\" in its name", search), draw::DIM)),
+            _ if browser.online => Some(("No rooms yet: Ins makes one".to_string(), draw::DIM)),
+            _ => Some(("No rooms on this network yet: Ins makes one here".to_string(), draw::DIM)),
         };
         if let Some((text, color)) = message {
             for line in wrap(&text, cols - 4, 2) {
@@ -541,10 +629,14 @@ impl ConfigUi {
             }
             hits.push(Hit { row, col: 1, width: cols - 2, target: Target::RoomRow(i) });
             match &rows[i] {
-                Row::Room(room) => {
-                    let here = browser.in_room(&room.name);
+                Row::Room(room, relay) => {
+                    let here = browser.in_room(&room.name, *relay);
                     let color = if here { draw::GOOD } else { draw::BRIGHT };
-                    g.text_to(4, row, &room.name, color, members_col.saturating_sub(1));
+                    let end = host_col.unwrap_or(members_col).saturating_sub(1);
+                    g.text_to(4, row, &room.name, color, end);
+                    if let Some(col) = host_col {
+                        g.text_to(col, row, browser.relay_name(*relay), draw::TEXT, members_col.saturating_sub(1));
+                    }
                     let after = g.text_to(members_col, row, &format!("{:>7}", room.members), draw::TEXT, cols - 2);
                     if here {
                         g.text_to(after + 2, row, "you", draw::GOOD, cols - 2);
@@ -576,7 +668,7 @@ impl ConfigUi {
         let room = browser.joined_room();
         let top = rows.start;
         let after = g.text_to(2, top, &fit(&room, cols - 20), draw::GOOD, cols - 2);
-        match browser.listed(&room) {
+        match browser.listed() {
             Some(listed) if listed.password => g.text_to(after + 2, top, "password", draw::NOTE, cols - 2),
             Some(_) => g.text_to(after + 2, top, "open to all", draw::DIM, cols - 2),
             None => after,

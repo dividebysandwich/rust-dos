@@ -208,6 +208,12 @@ pub trait Host {
     fn leave_room(&mut self) {}
     /// End the room this instance hosts for everyone in it, and leave it.
     fn disband_room(&mut self) {}
+    /// Make `room` on this network, on a relay this instance runs, and
+    /// join it.
+    fn host_room(&mut self, room: &str, password: &str) -> Result<(), String> {
+        let _ = (room, password);
+        Err("There is no network here".to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -288,7 +294,7 @@ impl Page {
                 ChorusMix,
             ],
             Page::Network => {
-                &[Rooms, Relay, Player, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
+                &[Online, Relay, Rooms, Player, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
             }
         }
     }
@@ -434,10 +440,12 @@ enum Item {
     NicBase,
     NicIrq,
     MacAddr,
-    /// The room browser (rooms.rs), and the relay it lists, which LAN
-    /// JOIN and LAN LIST go to without an address.
-    Rooms,
+    /// Whether LAN rooms are on this network or online, at the relay,
+    /// for the room browser (rooms.rs), and LAN JOIN and LAN LIST without
+    /// an address.
+    Online,
     Relay,
+    Rooms,
     /// The name the player goes by in LAN rooms.
     Player,
     /// The LAN joined or hosted at startup, its room and password.
@@ -606,7 +614,8 @@ impl Item {
             NicIrq => "  IRQ",
             MacAddr => "  Ethernet address",
             Rooms => "Find or make a LAN room...",
-            Relay => "LAN relay",
+            Online => "LAN rooms",
+            Relay => "  Relay",
             Player => "LAN player name",
             Lan => "Join a LAN at startup",
             LanHost => "Host a LAN at startup",
@@ -630,9 +639,8 @@ impl Item {
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The browser has no sockets for a LAN.
-            Item::Rooms | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
-                frontend.window
-            }
+            Item::Online | Item::Rooms | Item::Relay | Item::Player => frontend.window,
+            Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
             _ => true,
         }
     }
@@ -647,6 +655,7 @@ impl Item {
             Item::RewindMemory => s.rewind,
             Item::VoodooMemory | Item::VoodooRenderer => s.voodoo.enabled,
             Item::VoodooScale => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
+            Item::Relay => s.network.online,
             _ => true,
         }
     }
@@ -820,7 +829,8 @@ impl Item {
             NicBase => format!("{:X}h", s.network.nic_base),
             NicIrq => s.network.nic_irq.to_string(),
             MacAddr => s.network.mac.map_or("auto (new each start)".to_string(), |mac| mac.to_string()),
-            Relay => s.network.relay.clone().unwrap_or_else(|| "discover (on this network)".to_string()),
+            Online => if s.network.online { "online, at the relay" } else { "on this network" }.to_string(),
+            Relay => s.network.relay.clone(),
             Player if s.network.player.is_empty() => "none (\"Player\" and a number)".to_string(),
             Player => s.network.player.clone(),
             Lan => match &s.network.lan {
@@ -938,6 +948,7 @@ impl Item {
             Ne2000 => on_off(|s, on| s.network.ne2000 = on),
             NicBase => each(s, crate::net::NIC_BASES, |s, base| s.network.nic_base = base),
             NicIrq => each(s, [3, 4, 5, 7, 9, 10, 11, 15], |s, irq| s.network.nic_irq = irq),
+            Online => on_off(|s, on| s.network.online = on),
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
@@ -1018,7 +1029,7 @@ impl Item {
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             Item::MacAddr => s.network.mac.map_or(String::new(), |mac| mac.to_string()),
-            Item::Relay => s.network.relay.clone().unwrap_or_else(|| "discover".to_string()),
+            Item::Relay => s.network.relay.clone(),
             Item::Player => s.network.player.clone(),
             Item::Lan => Item::Lan.value(s, None),
             Item::LanHost => s.network.lan_host.map_or("off".to_string(), |port| port.to_string()),
@@ -1044,7 +1055,7 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
             Item::MacAddr if text.is_empty() => s.network.mac = None,
             Item::MacAddr => s.network.set("macaddr", text)?,
-            Item::Relay if text.is_empty() => s.network.relay = Some(crate::net::DEFAULT_RELAY.into()),
+            Item::Relay if text.is_empty() => s.network.relay = crate::net::DEFAULT_RELAY.into(),
             Item::Relay => s.network.set("relay", text)?,
             Item::Player => s.network.set("player", text)?,
             Item::Lan => s.network.set("lan", text)?,
@@ -1091,10 +1102,7 @@ impl Item {
             Item::ReverbMix => std::mem::replace(&mut s.mixer.reverb_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::ChorusMix => std::mem::replace(&mut s.mixer.chorus_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::MacAddr => s.network.mac.take().is_some(),
-            Item::Relay => {
-                let default = Some(crate::net::DEFAULT_RELAY.to_string());
-                std::mem::replace(&mut s.network.relay, default.clone()) != default
-            }
+            Item::Relay => std::mem::replace(&mut s.network.relay, crate::net::DEFAULT_RELAY.into()) != crate::net::DEFAULT_RELAY,
             Item::Player => !std::mem::take(&mut s.network.player).is_empty(),
             Item::Lan => s.network.lan.take().is_some(),
             Item::LanHost => s.network.lan_host.take().is_some(),
@@ -1159,6 +1167,8 @@ enum Target {
     RoomRow(usize),
     RoomField(RoomField),
     RoomButton(RoomButton),
+    /// The room browser's tab of the rooms online (or on this network).
+    RoomsOnline(bool),
     /// A value of the popup list, and the rest of it.
     PopupRow(usize),
     Popup,
@@ -1519,7 +1529,9 @@ impl ConfigUi {
                 }
             }
             Target::EditorLine(i) => self.autoexec_clicked(i, into),
-            Target::RoomRow(_) | Target::RoomField(_) | Target::RoomButton(_) => self.room_clicked(target, host),
+            Target::RoomRow(_) | Target::RoomField(_) | Target::RoomButton(_) | Target::RoomsOnline(_) => {
+                self.room_clicked(target, host)
+            }
             Target::PopupRow(i) => {
                 if let Some(popup) = &mut self.popup {
                     popup.selected = i;

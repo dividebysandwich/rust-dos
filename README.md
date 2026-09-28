@@ -53,10 +53,10 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * **Joysticks** from game controllers, or the mouse as one
 * **[Networking](CONFIGURATION.md#playing-over-a-lan):** IPX games between
   rust-dos instances on a LAN or over the internet (`LAN HOST`, `LAN
-  JOIN`, a public relay whose rooms the settings window finds and makes,
-  and a relay for servers of your own), and an NE2000 network card behind a
-  router to the internet, for DOS packet drivers, Windows 3.x with Trumpet
-  Winsock and Windows 95
+  JOIN`, a room browser in the settings window for rooms on the LAN or on
+  a public relay, and a relay for servers of your own), and an NE2000
+  network card behind a router to the internet, for DOS packet drivers,
+  Windows 3.x with Trumpet Winsock and Windows 95
 * Runs in a **[web browser](#running-in-a-browser)** as WebAssembly
 * A web-based **[debugger](#debug--remote-control-server)** and HTTP API
 
