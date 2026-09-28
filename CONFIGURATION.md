@@ -826,10 +826,10 @@ the room, the members in it and the round trip to the relay.
   `--bind`, `--password`, `--name`), a small program of its own that
   needs neither SDL nor a sound library:
   `cargo build --release --no-default-features --bin rust-dos-relay`.
-* **What goes over the relay** is Ethernet frames, so the IPX driver
-  plays with the IPX protocol of a system booted on another instance's
-  network card, set to the same frame type (`ipxframe`, Ethernet II by
-  default).
+* **What goes over the relay** is Ethernet frames: the IPX driver's
+  packets are on the same LAN as the network cards of other instances, in
+  the frame type `ipxframe` sets (Ethernet II by default), where the IPX
+  protocol of a system booted with a card can take them.
 
 ### Network card
 
@@ -869,9 +869,10 @@ each other's frames, as cards on one Ethernet would.
   the interrupt 10, as rust-dos has them. Windows copies its drivers from
   its setup files (CD or `C:\WINDOWS\OPTIONS\CABS`), restarts, gets its
   address from the router (`winipcfg` shows it), and Internet Explorer and
-  the other programs reach the internet. Its IPX/SPX protocol plays with
-  the IPX driver of other instances in the same LAN room, set to Ethernet
-  II frames.
+  the other programs reach the internet. Its IPX/SPX-compatible protocol
+  is on the LAN of the room too; the built-in DOS's IPX driver sends
+  Ethernet II frames, the frame type to give Windows' protocol for the two
+  to meet.
 * **Windows for Workgroups** has its own NE2000 driver for its network
   and for Microsoft's TCP/IP-32.
 * **Web browsers** of the time speak plain HTTP and SSL 3.0 at most, which
