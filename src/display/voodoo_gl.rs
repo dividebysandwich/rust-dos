@@ -5,8 +5,9 @@
 //! texture, the triangles go through the card's pixel pipeline in a shader
 //! (voodoo/triangle.frag) with OpenGL's depth test and blending, and the
 //! front buffer through the card's gamma table is the picture the window
-//! shows. The software rasterizer's picture stays what screenshots,
-//! recordings and the debugger see, and what the game reads back.
+//! shows. The software rasterizer's memory stays what screenshots,
+//! recordings and the debugger see, and what the game reads back; it only
+//! draws what those can still see (`rust_dos::voodoo::backlog`).
 
 use glow::HasContext;
 use rust_dos::video::Frame;

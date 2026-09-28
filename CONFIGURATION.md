@@ -830,11 +830,19 @@ triangles through the same pixel pipeline (textures, fog, blending, the
 depth buffer and the gamma table), with sharper edges and textures and 8
 bits a colour without the card's dithering. What games write into the
 frame buffer themselves (menus, movies) stays at the card's resolution.
-The software rasterizer goes on drawing the card's memory, which games
-read back and save states keep, so it costs no less of the host's CPU;
-screenshots and recordings show its picture, at the card's resolution (or
-through the CRT shader at the window's size, with `record_shader=true`).
-The CRT shaders draw their scanlines over the bigger picture.
+The software rasterizer keeps the card's memory, which games read back
+and save states keep, but it only draws what can still be seen there:
+until something reads the memory, the drawing waits, and what a later
+fastfill covers before anything read it is never drawn, so the host's CPU
+only draws the frames something looks at. Frame buffer reads, save
+states, screenshots and recordings see the memory as if everything had
+been drawn; screenshots and recordings show the software picture, at the
+card's resolution (or through the CRT shader at the window's size, with
+`record_shader=true`). Drawing that is never drawn isn't counted by the
+card's pixel counters, until a game reads them: from then on everything
+is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
+everything from the start). The CRT shaders draw their scanlines over the
+bigger picture.
 
 ## Playing over a LAN
 
