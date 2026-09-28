@@ -715,8 +715,8 @@ impl ConfigUi {
             col += text.len() + 2;
         }
         let note = match browser.button {
-            RoomButton::Leave => "the one there longest hosts it next",
-            RoomButton::Disband => "ends the room for everyone",
+            RoomButton::Leave => "Leave without disbanding",
+            RoomButton::Disband => "Disband the room for everyone",
         };
         g.text_to(col, buttons_row, note, draw::DIM, cols - 2);
         hits
