@@ -239,6 +239,20 @@ pub const NIC_BASES: [u16; 9] = [0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x300, 0x320
 /// The room LAN HOST and LAN JOIN use unless told another.
 pub const DEFAULT_ROOM: &str = "lobby";
 
+/// The rooms a relay listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomList {
+    /// Where the relay is, its name, and whether all its rooms want its
+    /// password.
+    pub relay: std::net::SocketAddr,
+    pub name: String,
+    pub password: bool,
+    /// The rooms, the fullest first, and how many the relay has: more when
+    /// they didn't all fit in the pages asked for.
+    pub rooms: Vec<tunnel::wire::RoomInfo>,
+    pub total: usize,
+}
+
 /// What the LAN command shows: where this instance is with the LAN.
 #[derive(Clone, Debug, Default)]
 pub struct LanStatus {

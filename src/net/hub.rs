@@ -12,7 +12,7 @@ use super::switch::{Port, Switch};
 use super::tunnel::client::{Client, ClientConfig, ClientEvent};
 use super::tunnel::discover;
 use super::tunnel::relay::{RelayConfig, RelayServer};
-use super::tunnel::wire::{DEFAULT_PORT, RoomInfo};
+use super::tunnel::wire::RoomInfo;
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -22,8 +22,6 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender, unbounded_channel};
 
-/// How long LAN JOIN without an address listens for relays.
-const DISCOVER_WAIT: Duration = Duration::from_millis(1500);
 /// How often the tunnel's retries and keepalives are looked at.
 const TICK: Duration = Duration::from_millis(200);
 
@@ -172,42 +170,9 @@ impl Drop for Hub {
     }
 }
 
-/// `host`, `host:port` or an address, with the relay port unless given.
-fn split_relay(relay: &str) -> (String, u16) {
-    let relay = relay.trim();
-    if let Ok(addr) = relay.parse::<SocketAddr>() {
-        return (addr.ip().to_string(), addr.port());
-    }
-    if let Some((host, port)) = relay.rsplit_once(':')
-        && !host.contains(':')
-        && let Ok(port) = port.parse()
-    {
-        return (host.trim_matches(['[', ']']).to_string(), port);
-    }
-    (relay.trim_matches(['[', ']']).to_string(), DEFAULT_PORT)
-}
-
-/// Where the relay of `request` is.
+/// Where the relay of `request` is (`discover::find`).
 async fn resolve(request: Option<String>) -> Result<SocketAddr, String> {
-    match request {
-        None => {
-            let found = tokio::task::spawn_blocking(|| discover::discover(DEFAULT_PORT, DISCOVER_WAIT))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| format!("can't look for relays on the LAN: {}", e))?;
-            found.first().map(|f| f.relay).ok_or_else(|| "no relay answered on the LAN".to_string())
-        }
-        Some(relay) => {
-            let (host, port) = split_relay(&relay);
-            let mut addrs = tokio::net::lookup_host((host.as_str(), port))
-                .await
-                .map_err(|e| format!("can't find {}: {}", host, e))?
-                .collect::<Vec<_>>();
-            // IPv4 first: a relay's IPv6 address may not be reachable.
-            addrs.sort_by_key(|a| !a.is_ipv4());
-            addrs.first().copied().ok_or_else(|| format!("{} has no address", host))
-        }
-    }
+    tokio::task::spawn_blocking(move || discover::find(request.as_deref())).await.map_err(|e| e.to_string())?
 }
 
 struct Uplink {
@@ -586,16 +551,6 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splits_relay_addresses() {
-        assert_eq!(split_relay("relay.example.com"), ("relay.example.com".into(), DEFAULT_PORT));
-        assert_eq!(split_relay("relay.example.com:4000"), ("relay.example.com".into(), 4000));
-        assert_eq!(split_relay(" 192.0.2.1:5 "), ("192.0.2.1".into(), 5));
-        assert_eq!(split_relay("192.0.2.1"), ("192.0.2.1".into(), DEFAULT_PORT));
-        assert_eq!(split_relay("[2001:db8::1]:7"), ("2001:db8::1".into(), 7));
-        assert_eq!(split_relay("2001:db8::1"), ("2001:db8::1".into(), DEFAULT_PORT));
-    }
 
     /// Wait up to 5 s for `f` to hold.
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {

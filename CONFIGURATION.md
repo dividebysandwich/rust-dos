@@ -817,9 +817,15 @@ the room, the members in it and the round trip to the relay.
   instance keeps its place with keepalives, and joins again when the
   relay comes back after a restart. `LAN LEAVE` leaves.
 * **Rooms** keep several games on one relay apart: `/ROOM:name`, or `room`
-  in `[network]` (default `lobby`). `/PASSWORD:text` (or `password`)
-  gives a relay's rooms a password, which the joining instances prove they
-  know without sending it. Nothing else crossing the relay is encrypted.
+  in `[network]` (default `lobby`). A room is there while anyone is in
+  it. The instance that makes a room gives it a password with
+  `/PASSWORD:text` (or `password`), and everyone joining after has to know
+  it; a relay with a password of its own (`LAN HOST /PASSWORD:text`,
+  `rust-dos-relay --password`) wants that one for all its rooms instead.
+  Instances prove they know a password without sending it, and a relay
+  keeps only a key made from it, never the password itself. Nothing else
+  crossing the relay is encrypted: whoever can watch the traffic of the
+  instance that made a room can join it.
 * **A relay on a server** for playing over the internet without any
   player's router set up: `rust-dos --relay [PORT]` relays without
   starting the emulator, and so does `rust-dos-relay` (`--port`,

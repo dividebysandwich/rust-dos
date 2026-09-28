@@ -1,6 +1,12 @@
 //! Joining a relay: the cookie a relay hands out without keeping any state,
 //! and the proof that a client knows the room's password, which never
 //! crosses the network itself.
+//!
+//! What a relay checks the proof against is the room's key, made from the
+//! password and the room's name. A relay with a password of its own makes
+//! each room's key from it; on a relay without one, the member who makes a
+//! room hands its key over, so even the relay never learns the password,
+//! which may be one its owner uses elsewhere.
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -34,15 +40,21 @@ pub fn cookie_is_good(secret: &[u8; 32], addr: SocketAddr, client_id: u64, now: 
     [slot, slot.wrapping_sub(1)].into_iter().any(|s| equal(&self::cookie(secret, addr, client_id, s), cookie))
 }
 
-/// What JOIN carries to show the client knows `password`. Zeros for a room
-/// without one.
-pub fn proof(password: Option<&str>, room: &str, client_id: u64, cookie: &[u8; 16]) -> [u8; 32] {
+/// The key of `room` with `password`. Zeros without a password.
+pub fn room_key(password: Option<&str>, room: &str) -> [u8; 32] {
     match password {
-        Some(password) if !password.is_empty() => {
-            hmac(password.as_bytes(), &[b"rust-dos lan v1", room.as_bytes(), &client_id.to_be_bytes(), cookie])
-        }
+        Some(password) if !password.is_empty() => hmac(password.as_bytes(), &[b"rust-dos room key v1", room.as_bytes()]),
         _ => [0; 32],
     }
+}
+
+/// What JOIN carries to show the client has the room's `key`. Zeros for a
+/// room without one.
+pub fn proof(key: &[u8; 32], room: &str, client_id: u64, cookie: &[u8; 16]) -> [u8; 32] {
+    if *key == [0; 32] {
+        return [0; 32];
+    }
+    hmac(key, &[b"rust-dos lan v1", room.as_bytes(), &client_id.to_be_bytes(), cookie])
 }
 
 /// Compare without leaking where the first difference is.
@@ -72,15 +84,20 @@ mod tests {
     #[test]
     fn proofs_need_the_password() {
         let c = [5; 16];
-        let p = proof(Some("swordfish"), "doom", 1, &c);
+        let key = |password, room| room_key(Some(password), room);
+        let p = proof(&key("swordfish", "doom"), "doom", 1, &c);
         assert_ne!(p, [0; 32]);
-        assert_eq!(p, proof(Some("swordfish"), "doom", 1, &c));
-        assert_ne!(p, proof(Some("swordfisH"), "doom", 1, &c));
-        assert_ne!(p, proof(Some("swordfish"), "duke", 1, &c));
-        assert_ne!(p, proof(Some("swordfish"), "doom", 2, &c));
-        assert_ne!(p, proof(Some("swordfish"), "doom", 1, &[6; 16]));
-        assert_eq!(proof(None, "doom", 1, &c), [0; 32]);
-        assert_eq!(proof(Some(""), "doom", 1, &c), [0; 32]);
+        assert_eq!(p, proof(&key("swordfish", "doom"), "doom", 1, &c));
+        assert_ne!(p, proof(&key("swordfisH", "doom"), "doom", 1, &c));
+        assert_ne!(p, proof(&key("swordfish", "duke"), "doom", 1, &c));
+        assert_ne!(p, proof(&key("swordfish", "doom"), "duke", 1, &c));
+        assert_ne!(p, proof(&key("swordfish", "doom"), "doom", 2, &c));
+        assert_ne!(p, proof(&key("swordfish", "doom"), "doom", 1, &[6; 16]));
+        // A room's key is of its password and its name alone.
+        assert_ne!(key("swordfish", "doom"), key("swordfish", "duke"));
+        assert_eq!(room_key(None, "doom"), [0; 32]);
+        assert_eq!(room_key(Some(""), "doom"), [0; 32]);
+        assert_eq!(proof(&[0; 32], "doom", 1, &c), [0; 32]);
         assert!(equal(&p, &p) && !equal(&p, &[0; 32]) && !equal(&p, &p[..31]));
     }
 }

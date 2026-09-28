@@ -4,6 +4,11 @@
 //! address to that member only, and floods broadcasts, multicasts and
 //! frames for unknown addresses to the whole room.
 //!
+//! A room is made by the first member to join it and goes when the last
+//! one leaves. On a relay without a password of its own, the member who
+//! makes a room decides whether it wants a password (`auth`). Anyone may
+//! list the rooms (LIST), which is how a room browser finds them.
+//!
 //! `Relay` is the protocol alone, fed datagrams and the time and handing
 //! back datagrams to send, so it can be tested without sockets.
 //! `RelayServer` runs one on a UDP socket in a thread of its own.
@@ -23,8 +28,11 @@ pub const MEMBER_TIMEOUT_MS: u64 = 30_000;
 pub const RESERVE_MS: u64 = 60_000;
 /// Members in one room: their indexes are 1 to this.
 pub const MAX_ROOM: usize = 200;
-/// Members in all rooms together.
+/// Members in all rooms together, and from one IP address other than the
+/// relay's own machine: a public relay can't be filled by one stranger,
+/// and a LAN party behind one NAT still fits.
 pub const MAX_MEMBERS: usize = 1000;
+pub const MAX_PER_ADDRESS: usize = 32;
 /// Source addresses one member may send from: its network card and its
 /// IPX driver, and a little more.
 pub const MAX_MACS: usize = 4;
@@ -32,7 +40,8 @@ pub const MAX_MACS: usize = 4;
 const RATE_PER_S: f64 = 5000.0;
 const BURST: f64 = 10_000.0;
 
-/// What a relay is: its name in OFFER and the password of its rooms.
+/// What a relay is: its name in OFFER and ROOMS, and the password all its
+/// rooms want, if it has one.
 #[derive(Clone, Debug, Default)]
 pub struct RelayConfig {
     pub name: String,
@@ -62,12 +71,17 @@ struct Member {
     warned: bool,
 }
 
+/// The key of a room without a password.
+const NO_KEY: [u8; 32] = [0; 32];
+
 #[derive(Default)]
 struct Room {
     /// Tokens of the members, in order of joining.
     members: Vec<u64>,
     /// Which member each learnt address belongs to.
     macs: HashMap<Mac, u64>,
+    /// What joining takes (`auth::room_key`), `NO_KEY` for nothing.
+    key: [u8; 32],
 }
 
 /// A left member's index, kept for it a while.
@@ -108,15 +122,29 @@ impl Relay {
         std::mem::take(&mut self.events)
     }
 
-    /// The rooms and how many are in each.
+    /// The rooms and how many are in each, the fullest first.
     pub fn rooms(&self) -> Vec<RoomInfo> {
         let mut rooms: Vec<RoomInfo> = self
             .rooms
             .iter()
-            .map(|(name, room)| RoomInfo { name: name.clone(), members: room.members.len() as u16 })
+            .map(|(name, room)| RoomInfo {
+                name: name.clone(),
+                members: room.members.len() as u16,
+                password: room.key != NO_KEY,
+            })
             .collect();
         rooms.sort_by(|a, b| b.members.cmp(&a.members).then_with(|| a.name.cmp(&b.name)));
         rooms
+    }
+
+    /// How many rooms have `filter` in their names, ignoring case, and
+    /// those from the `start`th on.
+    pub fn list(&self, filter: &str, start: usize) -> (usize, Vec<RoomInfo>) {
+        let filter = filter.to_lowercase();
+        let mut rooms = self.rooms();
+        rooms.retain(|r| r.name.to_lowercase().contains(&filter));
+        let total = rooms.len();
+        (total, rooms.into_iter().skip(start).take(u8::MAX as usize).collect())
     }
 
     pub fn member_count(&self) -> usize {
@@ -148,13 +176,29 @@ impl Relay {
                 };
                 out.push(Outgoing { to: from, bytes: wire::encode(0, &offer) });
             }
-            Message::Hello { client_id } => {
+            Message::List { start, filter } => {
+                let (total, rooms) = self.list(&filter, start as usize);
+                let page = Message::Rooms {
+                    name: self.config.name.clone(),
+                    password: self.password().is_some(),
+                    total: total.min(u16::MAX as usize) as u16,
+                    start,
+                    rooms,
+                };
+                out.push(Outgoing { to: from, bytes: wire::encode(0, &page) });
+            }
+            Message::Hello { client_id, room } => {
                 let cookie = auth::cookie(&self.secret, from, client_id, now / auth::COOKIE_SLOT_MS);
-                let challenge = Message::Challenge { cookie, password: self.password().is_some() };
+                let existing = self.rooms.get(&room);
+                let challenge = Message::Challenge {
+                    cookie,
+                    password: self.password().is_some() || existing.is_some_and(|r| r.key != NO_KEY),
+                    fresh: self.password().is_none() && existing.is_none(),
+                };
                 out.push(Outgoing { to: from, bytes: wire::encode(0, &challenge) });
             }
-            Message::Join { client_id, cookie, room, proof } => {
-                self.join(now, from, client_id, &cookie, room, &proof, out);
+            Message::Join { client_id, cookie, room, proof, key } => {
+                self.join(now, from, client_id, &cookie, room, &proof, &key, out);
             }
             Message::Data { seq, fragment, count, payload, .. } => {
                 if !self.heard(now, token, from) || !self.allow(now, token) {
@@ -180,6 +224,7 @@ impl Relay {
             }
             // What only a relay sends.
             Message::Offer { .. }
+            | Message::Rooms { .. }
             | Message::Challenge { .. }
             | Message::Welcome { .. }
             | Message::Reject { .. }
@@ -219,14 +264,37 @@ impl Relay {
         cookie: &[u8; 16],
         room: String,
         proof: &[u8; 32],
+        key: &[u8; 32],
         out: &mut Vec<Outgoing>,
     ) {
         let reject = |reason| Outgoing { to: from, bytes: wire::encode(0, &Message::Reject { reason }) };
+        if !wire::valid_room(&room) {
+            out.push(reject(RejectReason::Name));
+            return;
+        }
         if !auth::cookie_is_good(&self.secret, from, client_id, now, cookie) {
             out.push(reject(RejectReason::Cookie));
             return;
         }
-        if !auth::equal(&auth::proof(self.password(), &room, client_id, cookie), proof) {
+        // What the room wants: the relay's password, else what the room
+        // was made with, else, for a room this join makes, the key it
+        // brings.
+        let wanted = match (self.password(), self.rooms.get(&room)) {
+            (Some(password), _) => auth::room_key(Some(password), &room),
+            (None, Some(existing)) => existing.key,
+            // Told the room was there, the client kept its key; the room
+            // has gone since. It starts over, and is told it is fresh.
+            (None, None) if *key == NO_KEY && *proof != NO_KEY => {
+                out.push(reject(RejectReason::Cookie));
+                return;
+            }
+            (None, None) => *key,
+        };
+        if wanted == NO_KEY && *proof != NO_KEY {
+            out.push(reject(RejectReason::Open));
+            return;
+        }
+        if !auth::equal(&auth::proof(&wanted, &room, client_id, cookie), proof) {
             self.events.push(format!("{} gave a wrong password for room \"{}\"", from, room));
             out.push(reject(RejectReason::Password));
             return;
@@ -242,7 +310,10 @@ impl Relay {
             out.push(reject(RejectReason::Full));
             return;
         };
-        if members_in_room >= MAX_ROOM || self.members.len() >= MAX_MEMBERS {
+        // Instances on the relay's own machine are no strangers.
+        let from_there = self.members.values().filter(|m| m.addr.ip() == from.ip()).count();
+        let crowded = from_there >= MAX_PER_ADDRESS && !from.ip().is_loopback();
+        if members_in_room >= MAX_ROOM || self.members.len() >= MAX_MEMBERS || crowded {
             out.push(reject(RejectReason::Full));
             return;
         }
@@ -267,7 +338,7 @@ impl Relay {
                 warned: false,
             },
         );
-        let entry = self.rooms.entry(room.clone()).or_default();
+        let entry = self.rooms.entry(room.clone()).or_insert_with(|| Room { key: wanted, ..Default::default() });
         entry.members.push(token);
         let members = entry.members.len() as u16;
         self.events.push(format!("{} joined room \"{}\" as member {} ({} in the room)", from, room, index, members));
@@ -559,13 +630,27 @@ mod tests {
         room: &str,
         password: Option<&str>,
     ) -> Result<(u64, u8), RejectReason> {
+        join_from(relay, now, addr(n), n as u64, room, password)
+    }
+
+    /// Join `room` from `from` as client `id`, as `Client` does.
+    fn join_from(
+        relay: &mut Relay,
+        now: u64,
+        from: SocketAddr,
+        id: u64,
+        room: &str,
+        password: Option<&str>,
+    ) -> Result<(u64, u8), RejectReason> {
         let mut out = Vec::new();
-        let hello = wire::encode(0, &Message::Hello { client_id: n as u64 });
-        relay.handle(now, addr(n), &hello, &mut out);
-        let Message::Challenge { cookie, .. } = message(&one(&mut out).bytes).message else { panic!() };
-        let proof = auth::proof(password, room, n as u64, &cookie);
-        let join = Message::Join { client_id: n as u64, cookie, room: room.into(), proof };
-        relay.handle(now, addr(n), &wire::encode(0, &join), &mut out);
+        let hello = wire::encode(0, &Message::Hello { client_id: id, room: room.into() });
+        relay.handle(now, from, &hello, &mut out);
+        let Message::Challenge { cookie, fresh, .. } = message(&one(&mut out).bytes).message else { panic!() };
+        let key = auth::room_key(password, room);
+        let proof = auth::proof(&key, room, id, &cookie);
+        let join =
+            Message::Join { client_id: id, cookie, room: room.into(), proof, key: if fresh { key } else { NO_KEY } };
+        relay.handle(now, from, &wire::encode(0, &join), &mut out);
         let reply = message(&one(&mut out).bytes);
         match reply.message {
             Message::Welcome { index, .. } => Ok((reply.token, index)),
@@ -629,7 +714,10 @@ mod tests {
         assert!(send(&mut relay, 6, addr(9), 12345, 1, &ipx_frame(Mac::BROADCAST, mac(9))).is_empty());
         assert_eq!(
             relay.rooms(),
-            vec![RoomInfo { name: "doom".into(), members: 3 }, RoomInfo { name: "duke".into(), members: 1 }]
+            vec![
+                RoomInfo { name: "doom".into(), members: 3, password: false },
+                RoomInfo { name: "duke".into(), members: 1, password: false },
+            ]
         );
     }
 
@@ -641,16 +729,128 @@ mod tests {
         assert_eq!(join(&mut relay, 0, 1, "doom", Some("sword")), Err(RejectReason::Password));
         assert!(join(&mut relay, 0, 1, "doom", Some("swordfish")).is_ok());
         assert!(relay.take_events().iter().any(|e| e.contains("wrong password")));
+        // Every room wants it, fresh or not.
+        assert_eq!(join(&mut relay, 0, 2, "duke", None), Err(RejectReason::Password));
+        assert!(join(&mut relay, 0, 2, "duke", Some("swordfish")).is_ok());
+        assert!(relay.rooms().iter().all(|r| r.password));
+    }
+
+    #[test]
+    fn rooms_want_the_password_they_were_made_with() {
+        let mut relay = Relay::new(RelayConfig::default());
+        let (a, _) = join(&mut relay, 0, 1, "doom", Some("pw")).unwrap();
+        assert_eq!(join(&mut relay, 0, 2, "doom", None), Err(RejectReason::Password));
+        assert_eq!(join(&mut relay, 0, 2, "doom", Some("nope")), Err(RejectReason::Password));
+        assert!(join(&mut relay, 0, 2, "doom", Some("pw")).is_ok());
+        // A room made without one takes no password, and says so.
+        assert!(join(&mut relay, 0, 3, "duke", None).is_ok());
+        assert_eq!(join(&mut relay, 0, 4, "duke", Some("pw")), Err(RejectReason::Open));
+        assert_eq!(
+            relay.rooms(),
+            vec![
+                RoomInfo { name: "doom".into(), members: 2, password: true },
+                RoomInfo { name: "duke".into(), members: 1, password: false },
+            ]
+        );
+        // The password goes with the room's last member.
+        let mut out = Vec::new();
+        relay.handle(1, addr(1), &wire::encode(a, &Message::Leave), &mut out);
+        let b = relay.members.iter().find(|(_, m)| m.client_id == 2).map(|(t, _)| *t).unwrap();
+        relay.handle(1, addr(2), &wire::encode(b, &Message::Leave), &mut out);
+        assert!(join(&mut relay, 2, 5, "doom", None).is_ok());
+    }
+
+    #[test]
+    fn a_room_gone_since_the_challenge_is_joined_afresh() {
+        let mut relay = Relay::new(RelayConfig::default());
+        let (a, _) = join(&mut relay, 0, 1, "doom", Some("pw")).unwrap();
+        let mut out = Vec::new();
+        relay.handle(0, addr(2), &wire::encode(0, &Message::Hello { client_id: 2, room: "doom".into() }), &mut out);
+        let Message::Challenge { cookie, password, fresh } = message(&one(&mut out).bytes).message else { panic!() };
+        assert!(password && !fresh);
+        relay.handle(0, addr(1), &wire::encode(a, &Message::Leave), &mut out);
+        // Its JOIN brings no key for the room, which would be made open.
+        let key = auth::room_key(Some("pw"), "doom");
+        let proof = auth::proof(&key, "doom", 2, &cookie);
+        let join = Message::Join { client_id: 2, cookie, room: "doom".into(), proof, key: NO_KEY };
+        relay.handle(0, addr(2), &wire::encode(0, &join), &mut out);
+        assert_eq!(message(&one(&mut out).bytes).message, Message::Reject { reason: RejectReason::Cookie });
+        assert!(join_from(&mut relay, 0, addr(2), 2, "doom", Some("pw")).is_ok());
+        assert!(relay.rooms()[0].password);
+    }
+
+    #[test]
+    fn refuses_bad_names_and_crowds() {
+        let mut relay = Relay::new(RelayConfig::default());
+        assert_eq!(join(&mut relay, 0, 1, "", None), Err(RejectReason::Name));
+        assert_eq!(join(&mut relay, 0, 1, "  ", None), Err(RejectReason::Name));
+        assert_eq!(join(&mut relay, 0, 1, "a\nb", None), Err(RejectReason::Name));
+        // One address fills only so much of the relay.
+        for n in 0..MAX_PER_ADDRESS as u16 {
+            assert!(join(&mut relay, 0, 100 + n, &format!("room {}", n % 3), None).is_ok());
+        }
+        assert_eq!(join(&mut relay, 0, 999, "room 0", None), Err(RejectReason::Full));
+        let elsewhere = SocketAddr::from(([198, 51, 100, 1], 4000));
+        assert!(join_from(&mut relay, 0, elsewhere, 999, "room 0", None).is_ok());
+    }
+
+    #[test]
+    fn lists_rooms_a_page_at_a_time() {
+        let mut relay = Relay::new(RelayConfig { name: "den".into(), ..Default::default() });
+        let far = |i: u64| SocketAddr::from(([198, 51, 100, i as u8], 5000));
+        // Names as long as they go, so that the rooms take pages.
+        let name = |i: u64| format!("Room {:02} {}", i, "-".repeat(wire::MAX_NAME - 8));
+        for i in 0..50 {
+            join_from(&mut relay, 0, far(i), 1000 + i, &name(i), None).unwrap();
+        }
+        join_from(&mut relay, 0, far(7), 2000, &name(7), Some("pw")).unwrap_err();
+        join_from(&mut relay, 0, far(60), 2000, &name(7), None).unwrap();
+        let page = |relay: &mut Relay, start: u16, filter: &str| {
+            let mut out = Vec::new();
+            relay.handle(0, addr(9), &wire::encode(0, &Message::List { start, filter: filter.into() }), &mut out);
+            let reply = one(&mut out);
+            assert!(reply.bytes.len() <= wire::LIST_SIZE);
+            let Message::Rooms { name, password, total, start: from, rooms } = message(&reply.bytes).message else {
+                panic!()
+            };
+            assert_eq!((name.as_str(), password, from), ("den", false, start));
+            (total, rooms)
+        };
+        let (total, first) = page(&mut relay, 0, "");
+        assert_eq!(total, 50);
+        assert!(first.len() > 20 && first.len() < 50, "{}", first.len());
+        assert_eq!(first[0], RoomInfo { name: name(7), members: 2, password: false });
+        let mut all = first.clone();
+        while all.len() < total as usize {
+            let (_, more) = page(&mut relay, all.len() as u16, "");
+            assert!(!more.is_empty());
+            all.extend(more);
+        }
+        let mut names: Vec<&str> = all.iter().map(|r| r.name.as_str()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 50);
+        // A filter, in any case; past the end, nothing.
+        let (total, rooms) = page(&mut relay, 0, "room 1");
+        assert_eq!((total, rooms.len()), (10, 10));
+        assert!(rooms.iter().all(|r| r.name.starts_with("Room 1")));
+        assert_eq!(page(&mut relay, 60, ""), (50, vec![]));
+        // A LIST shorter than its answer could be gets none.
+        let mut out = Vec::new();
+        let list = wire::encode(0, &Message::List { start: 0, filter: String::new() });
+        relay.handle(0, addr(9), &list[..100], &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]
     fn wants_a_fresh_cookie_from_the_same_address() {
         let mut relay = Relay::new(RelayConfig::default());
         let mut out = Vec::new();
-        relay.handle(0, addr(1), &wire::encode(0, &Message::Hello { client_id: 1 }), &mut out);
-        let Message::Challenge { cookie, password } = message(&one(&mut out).bytes).message else { panic!() };
-        assert!(!password);
-        let join = wire::encode(0, &Message::Join { client_id: 1, cookie, room: "x".into(), proof: [0; 32] });
+        relay.handle(0, addr(1), &wire::encode(0, &Message::Hello { client_id: 1, room: "x".into() }), &mut out);
+        let Message::Challenge { cookie, password, fresh } = message(&one(&mut out).bytes).message else { panic!() };
+        assert!(!password && fresh);
+        let join = Message::Join { client_id: 1, cookie, room: "x".into(), proof: NO_KEY, key: NO_KEY };
+        let join = wire::encode(0, &join);
         let rejected = |relay: &mut Relay, now, from| {
             let mut out = Vec::new();
             relay.handle(now, from, &join, &mut out);
@@ -711,7 +911,7 @@ mod tests {
         assert_eq!((i1, i2, relay.member_count()), (1, 1, 1));
         // Moving to another room.
         join(&mut relay, 2, 1, "duke", None).unwrap();
-        assert_eq!(relay.rooms(), vec![RoomInfo { name: "duke".into(), members: 1 }]);
+        assert_eq!(relay.rooms(), vec![RoomInfo { name: "duke".into(), members: 1, password: false }]);
     }
 
     #[test]
@@ -744,11 +944,11 @@ mod tests {
         assert!(offer.bytes.len() <= discover.len());
         let Message::Offer { port, password, name, rooms } = message(&offer.bytes).message else { panic!() };
         assert_eq!((port, password, name.as_str()), (21213, false, "den"));
-        assert_eq!(rooms, vec![RoomInfo { name: "doom".into(), members: 1 }]);
+        assert_eq!(rooms, vec![RoomInfo { name: "doom".into(), members: 1, password: false }]);
         // Garbage gets nothing; another version gets a short refusal.
         relay.handle(0, addr(7), b"GET / HTTP/1.0\r\n\r\n", &mut out);
         assert!(out.is_empty());
-        let mut hello = wire::encode(0, &Message::Hello { client_id: 1 });
+        let mut hello = wire::encode(0, &Message::Hello { client_id: 1, room: "doom".into() });
         hello[4] = 2;
         relay.handle(0, addr(7), &hello, &mut out);
         let reply = one(&mut out);
@@ -765,11 +965,11 @@ mod tests {
         let relay = server.local_addr();
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        socket.send_to(&wire::encode(0, &Message::Hello { client_id: 1 }), relay).unwrap();
+        socket.send_to(&wire::encode(0, &Message::Hello { client_id: 1, room: "doom".into() }), relay).unwrap();
         let mut buf = [0; 2048];
         let (len, _) = socket.recv_from(&mut buf).unwrap();
         let Message::Challenge { cookie, .. } = message(&buf[..len]).message else { panic!() };
-        let join = Message::Join { client_id: 1, cookie, room: "doom".into(), proof: [0; 32] };
+        let join = Message::Join { client_id: 1, cookie, room: "doom".into(), proof: NO_KEY, key: NO_KEY };
         socket.send_to(&wire::encode(0, &join), relay).unwrap();
         let (len, _) = socket.recv_from(&mut buf).unwrap();
         assert!(matches!(message(&buf[..len]).message, Message::Welcome { index: 1, .. }));

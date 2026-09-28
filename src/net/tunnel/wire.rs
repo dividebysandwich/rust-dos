@@ -4,10 +4,11 @@
 //! member has joined). All numbers are big-endian.
 //!
 //! A client finds a relay with DISCOVER (broadcast on the LAN) and OFFER,
-//! is handed a cookie with HELLO and CHALLENGE, and joins a room with JOIN,
-//! answered by WELCOME or REJECT. Members then exchange DATA, which carries
-//! an Ethernet frame in one or more fragments, and keep their place and
-//! their NAT's mapping with KEEPALIVE and ACK, until LEAVE.
+//! lists a relay's rooms a page at a time with LIST and ROOMS, is handed a
+//! cookie with HELLO and CHALLENGE, and joins a room with JOIN, answered by
+//! WELCOME or REJECT. Members then exchange DATA, which carries an Ethernet
+//! frame in one or more fragments, and keep their place and their NAT's
+//! mapping with KEEPALIVE and ACK, until LEAVE.
 //!
 //! Requests that a relay answers before knowing the sender are at least as
 //! long as the answer, so a relay can't be used to amplify traffic towards
@@ -26,6 +27,8 @@ pub const MAX_FRAGMENT: usize = 1200;
 /// CHALLENGE take.
 pub const DISCOVER_SIZE: usize = 256;
 pub const HELLO_SIZE: usize = 64;
+/// The length LIST is padded to, the most a page of ROOMS takes.
+pub const LIST_SIZE: usize = 1200;
 /// The longest room or relay name.
 pub const MAX_NAME: usize = 32;
 
@@ -40,6 +43,8 @@ const DATA: u8 = 8;
 const KEEPALIVE: u8 = 9;
 const ACK: u8 = 10;
 const LEAVE: u8 = 11;
+const LIST: u8 = 12;
+const ROOMS: u8 = 13;
 
 /// Why a relay turned a client away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +60,10 @@ pub enum RejectReason {
     /// The relay doesn't know the token: it restarted, or dropped the
     /// member for being silent too long.
     Unknown,
+    /// A password was given for a room that has none.
+    Open,
+    /// The room's name is blank or has control characters.
+    Name,
 }
 
 impl RejectReason {
@@ -65,6 +74,8 @@ impl RejectReason {
             RejectReason::Cookie => 3,
             RejectReason::Version => 4,
             RejectReason::Unknown => 5,
+            RejectReason::Open => 6,
+            RejectReason::Name => 7,
         }
     }
 
@@ -75,6 +86,8 @@ impl RejectReason {
             3 => RejectReason::Cookie,
             4 => RejectReason::Version,
             5 => RejectReason::Unknown,
+            6 => RejectReason::Open,
+            7 => RejectReason::Name,
             _ => return None,
         })
     }
@@ -82,47 +95,81 @@ impl RejectReason {
     pub fn describe(self) -> &'static str {
         match self {
             RejectReason::Password => "wrong password",
-            RejectReason::Full => "the room is full",
+            RejectReason::Full => "the room or the relay is full",
             RejectReason::Cookie => "the join took too long",
             RejectReason::Version => "the relay runs another version of rust-dos",
             RejectReason::Unknown => "the relay no longer knows this member",
+            RejectReason::Open => "the room has no password: join it without one",
+            RejectReason::Name => "a room's name is 1 to 32 printable characters",
         }
     }
 }
 
-/// A room as an OFFER lists it: its name and how many are in it.
+/// A room as OFFER and ROOMS list it: its name, how many are in it, and
+/// whether joining it takes a password.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomInfo {
     pub name: String,
     pub members: u16,
+    pub password: bool,
+}
+
+/// Whether `room` may be a room's name: not blank, and without control
+/// characters, so a list of rooms shows each on a line of its own.
+pub fn valid_room(room: &str) -> bool {
+    !room.trim().is_empty() && room.len() <= MAX_NAME && !room.chars().any(char::is_control)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Discover,
-    /// A relay's answer to DISCOVER: the port it listens on, whether it
-    /// wants a password, its name and its rooms.
+    /// A relay's answer to DISCOVER: the port it listens on, whether all
+    /// its rooms want its password, its name and its first rooms.
     Offer {
         port: u16,
         password: bool,
         name: String,
         rooms: Vec<RoomInfo>,
     },
+    /// The relay's rooms whose names contain `filter` (ignoring case),
+    /// from the `start`th on.
+    List {
+        start: u16,
+        filter: String,
+    },
+    /// A page of the rooms LIST asked for: as many from `start` on as fit,
+    /// of `total`, the fullest first. `name` and `password` are the
+    /// relay's, as in OFFER.
+    Rooms {
+        name: String,
+        password: bool,
+        total: u16,
+        start: u16,
+        rooms: Vec<RoomInfo>,
+    },
     /// `client_id` is random and kept for the life of the process, so a
-    /// relay can give a member that comes back its old place.
+    /// relay can give a member that comes back its old place. `room` is
+    /// the room it is going to join.
     Hello {
         client_id: u64,
+        room: String,
     },
+    /// `password`: the room wants one. `fresh`: there is no such room yet,
+    /// so JOIN makes it, with the key it carries.
     Challenge {
         cookie: [u8; 16],
         password: bool,
+        fresh: bool,
     },
-    /// `proof` is `auth::proof` of the password, zeros without one.
+    /// `proof` is `auth::proof` of the room's key, zeros without one.
+    /// `key` is `auth::room_key` of the password for a fresh room, which
+    /// then wants it of everyone who joins; zeros otherwise.
     Join {
         client_id: u64,
         cookie: [u8; 16],
         room: String,
         proof: [u8; 32],
+        key: [u8; 32],
     },
     /// The member's index in its room (1-200), how often it should send
     /// KEEPALIVE, in seconds, and how many are in the room. The header
@@ -186,33 +233,36 @@ pub fn encode(token: u64, message: &Message) -> Vec<u8> {
             out.push(*password as u8);
             put_name(&mut out, name);
             // As many rooms as fit in the size of a DISCOVER.
-            let count_at = out.len();
-            out.push(0);
-            let mut count = 0u8;
-            for room in rooms {
-                let name = truncate(&room.name);
-                if out.len() + 1 + name.len() + 2 > DISCOVER_SIZE || count == u8::MAX {
-                    break;
-                }
-                put_name(&mut out, name);
-                out.extend_from_slice(&room.members.to_be_bytes());
-                count += 1;
-            }
-            out[count_at] = count;
+            put_rooms(&mut out, rooms, DISCOVER_SIZE);
         }
-        Message::Hello { client_id } => {
+        Message::List { start, filter } => {
+            out.extend_from_slice(&start.to_be_bytes());
+            put_name(&mut out, filter);
+            out.resize(LIST_SIZE, 0);
+        }
+        Message::Rooms { name, password, total, start, rooms } => {
+            put_name(&mut out, name);
+            out.push(*password as u8);
+            out.extend_from_slice(&total.to_be_bytes());
+            out.extend_from_slice(&start.to_be_bytes());
+            put_rooms(&mut out, rooms, LIST_SIZE);
+        }
+        Message::Hello { client_id, room } => {
             out.extend_from_slice(&client_id.to_be_bytes());
+            put_name(&mut out, room);
             out.resize(HELLO_SIZE, 0);
         }
-        Message::Challenge { cookie, password } => {
+        Message::Challenge { cookie, password, fresh } => {
             out.extend_from_slice(cookie);
             out.push(*password as u8);
+            out.push(*fresh as u8);
         }
-        Message::Join { client_id, cookie, room, proof } => {
+        Message::Join { client_id, cookie, room, proof, key } => {
             out.extend_from_slice(&client_id.to_be_bytes());
             out.extend_from_slice(cookie);
             put_name(&mut out, room);
             out.extend_from_slice(proof);
+            out.extend_from_slice(key);
         }
         Message::Welcome { index, keepalive, members } => {
             out.push(*index);
@@ -241,6 +291,8 @@ fn kind(message: &Message) -> u8 {
     match message {
         Message::Discover => DISCOVER,
         Message::Offer { .. } => OFFER,
+        Message::List { .. } => LIST,
+        Message::Rooms { .. } => ROOMS,
         Message::Hello { .. } => HELLO,
         Message::Challenge { .. } => CHALLENGE,
         Message::Join { .. } => JOIN,
@@ -266,6 +318,24 @@ fn put_name(out: &mut Vec<u8>, name: &str) {
     let name = truncate(name);
     out.push(name.len() as u8);
     out.extend_from_slice(name.as_bytes());
+}
+
+/// A count and as many of `rooms` as fit in a datagram of `size`.
+fn put_rooms(out: &mut Vec<u8>, rooms: &[RoomInfo], size: usize) {
+    let count_at = out.len();
+    out.push(0);
+    let mut count = 0u8;
+    for room in rooms {
+        let name = truncate(&room.name);
+        if out.len() + 1 + name.len() + 3 > size || count == u8::MAX {
+            break;
+        }
+        put_name(out, name);
+        out.extend_from_slice(&room.members.to_be_bytes());
+        out.push(room.password as u8);
+        count += 1;
+    }
+    out[count_at] = count;
 }
 
 /// Reads the body of a datagram.
@@ -319,6 +389,15 @@ impl<'a> Body<'a> {
         String::from_utf8(self.take(len)?.to_vec()).map_err(|_| DecodeError::Malformed)
     }
 
+    fn rooms(&mut self) -> Result<Vec<RoomInfo>, DecodeError> {
+        let count = self.u8()?;
+        let mut rooms = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            rooms.push(RoomInfo { name: self.name()?, members: self.u16()?, password: self.bool()? });
+        }
+        Ok(rooms)
+    }
+
     fn rest(&mut self) -> &'a [u8] {
         std::mem::take(&mut self.bytes)
     }
@@ -351,27 +430,39 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, DecodeError> {
             let port = body.u16()?;
             let password = body.bool()?;
             let name = body.name()?;
-            let count = body.u8()?;
-            let mut rooms = Vec::with_capacity(count as usize);
-            for _ in 0..count {
-                let name = body.name()?;
-                let members = body.u16()?;
-                rooms.push(RoomInfo { name, members });
-            }
-            Message::Offer { port, password, name, rooms }
+            Message::Offer { port, password, name, rooms: body.rooms()? }
         }
+        LIST => {
+            if bytes.len() < LIST_SIZE {
+                return Err(DecodeError::Malformed);
+            }
+            let message = Message::List { start: body.u16()?, filter: body.name()? };
+            body.rest();
+            message
+        }
+        ROOMS => Message::Rooms {
+            name: body.name()?,
+            password: body.bool()?,
+            total: body.u16()?,
+            start: body.u16()?,
+            rooms: body.rooms()?,
+        },
         HELLO => {
             if bytes.len() < HELLO_SIZE {
                 return Err(DecodeError::Malformed);
             }
-            let client_id = body.u64()?;
+            let message = Message::Hello { client_id: body.u64()?, room: body.name()? };
             body.rest();
-            Message::Hello { client_id }
+            message
         }
-        CHALLENGE => Message::Challenge { cookie: body.array()?, password: body.bool()? },
-        JOIN => {
-            Message::Join { client_id: body.u64()?, cookie: body.array()?, room: body.name()?, proof: body.array()? }
-        }
+        CHALLENGE => Message::Challenge { cookie: body.array()?, password: body.bool()?, fresh: body.bool()? },
+        JOIN => Message::Join {
+            client_id: body.u64()?,
+            cookie: body.array()?,
+            room: body.name()?,
+            proof: body.array()?,
+            key: body.array()?,
+        },
         WELCOME => Message::Welcome { index: body.u8()?, keepalive: body.u8()?, members: body.u16()? },
         REJECT => Message::Reject { reason: RejectReason::from_code(body.u8()?).ok_or(DecodeError::Malformed)? },
         DATA => {
@@ -412,12 +503,18 @@ mod tests {
 
     #[test]
     fn every_message_round_trips() {
-        let rooms = vec![RoomInfo { name: "doom".into(), members: 3 }, RoomInfo { name: "".into(), members: 0 }];
+        let rooms = vec![
+            RoomInfo { name: "doom".into(), members: 3, password: true },
+            RoomInfo { name: "".into(), members: 0, password: false },
+        ];
         round_trip(0, Message::Discover);
-        round_trip(0, Message::Offer { port: 21213, password: true, name: "den".into(), rooms });
-        round_trip(0, Message::Hello { client_id: 0x0123_4567_89AB_CDEF });
-        round_trip(0, Message::Challenge { cookie: [7; 16], password: false });
-        round_trip(0, Message::Join { client_id: 5, cookie: [9; 16], room: "duke".into(), proof: [3; 32] });
+        round_trip(0, Message::Offer { port: 21213, password: true, name: "den".into(), rooms: rooms.clone() });
+        round_trip(0, Message::List { start: 30, filter: "doo".into() });
+        round_trip(0, Message::Rooms { name: "den".into(), password: false, total: 40, start: 30, rooms });
+        round_trip(0, Message::Hello { client_id: 0x0123_4567_89AB_CDEF, room: "doom".into() });
+        round_trip(0, Message::Challenge { cookie: [7; 16], password: false, fresh: true });
+        let join = Message::Join { client_id: 5, cookie: [9; 16], room: "duke".into(), proof: [3; 32], key: [4; 32] };
+        round_trip(0, join);
         round_trip(42, Message::Welcome { index: 7, keepalive: 5, members: 2 });
         for reason in [
             RejectReason::Password,
@@ -425,6 +522,8 @@ mod tests {
             RejectReason::Cookie,
             RejectReason::Version,
             RejectReason::Unknown,
+            RejectReason::Open,
+            RejectReason::Name,
         ] {
             round_trip(0, Message::Reject { reason });
         }
@@ -436,14 +535,22 @@ mod tests {
 
     #[test]
     fn requests_are_as_long_as_their_answers() {
-        let many = (0..100).map(|i| RoomInfo { name: format!("room number {:>20}", i), members: i }).collect();
-        let offer = encode(0, &Message::Offer { port: 1, password: true, name: "x".repeat(40), rooms: many });
+        let many: Vec<RoomInfo> =
+            (0..100).map(|i| RoomInfo { name: format!("room number {:>20}", i), members: i, password: true }).collect();
+        let offer = encode(0, &Message::Offer { port: 1, password: true, name: "x".repeat(40), rooms: many.clone() });
         assert!(offer.len() <= encode(0, &Message::Discover).len());
         let Ok(Packet { message: Message::Offer { name, rooms, .. }, .. }) = decode(&offer) else { panic!() };
         assert_eq!(name.len(), MAX_NAME);
         assert!(!rooms.is_empty());
-        let challenge = encode(0, &Message::Challenge { cookie: [0; 16], password: true });
-        assert!(challenge.len() <= encode(0, &Message::Hello { client_id: 0 }).len());
+        let page = Message::Rooms { name: "x".repeat(40), password: true, total: 100, start: 0, rooms: many };
+        let page = encode(0, &page);
+        assert!(page.len() <= encode(0, &Message::List { start: 0, filter: "x".repeat(40) }).len());
+        let Ok(Packet { message: Message::Rooms { rooms, .. }, .. }) = decode(&page) else { panic!() };
+        assert!(rooms.len() > 20, "{}", rooms.len());
+        let challenge = encode(0, &Message::Challenge { cookie: [0; 16], password: true, fresh: true });
+        let hello = encode(0, &Message::Hello { client_id: 0, room: "x".repeat(40) });
+        assert!(challenge.len() <= hello.len());
+        assert_eq!(hello.len(), HELLO_SIZE);
     }
 
     #[test]
@@ -468,11 +575,21 @@ mod tests {
         assert!(decode(&data(0, 1, 0)).is_err());
         assert!(decode(&data(0, 1, MAX_FRAGMENT + 1)).is_err());
         assert!(decode(&data(0, 1, MAX_FRAGMENT)).is_ok());
-        let mut bytes = encode(0, &Message::Challenge { cookie: [0; 16], password: true });
+        let mut bytes = encode(0, &Message::Challenge { cookie: [0; 16], password: true, fresh: false });
         *bytes.last_mut().unwrap() = 2;
         assert!(decode(&bytes).is_err());
         let mut bytes = encode(0, &Message::Reject { reason: RejectReason::Full });
         *bytes.last_mut().unwrap() = 0;
         assert!(decode(&bytes).is_err());
+        // A LIST that isn't padded would be answered with more than it is.
+        let list = encode(0, &Message::List { start: 0, filter: String::new() });
+        assert!(decode(&list[..LIST_SIZE - 1]).is_err());
+    }
+
+    #[test]
+    fn room_names() {
+        assert!(valid_room("doom") && valid_room("Doom II deathmatch") && valid_room("été"));
+        assert!(!valid_room("") && !valid_room("   ") && !valid_room("a\tb") && !valid_room("a\nb"));
+        assert!(!valid_room(&"x".repeat(MAX_NAME + 1)));
     }
 }

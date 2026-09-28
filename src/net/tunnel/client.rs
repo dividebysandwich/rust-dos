@@ -57,6 +57,8 @@ pub enum ClientEvent {
 
 pub struct Client {
     config: ClientConfig,
+    /// The room's key with the password (`auth::room_key`).
+    key: [u8; 32],
     client_id: u64,
     phase: Phase,
     last_sent: u64,
@@ -74,6 +76,7 @@ impl Client {
     /// Start joining, with `out` taking the first HELLO.
     pub fn new(config: ClientConfig, client_id: u64, now: u64, out: &mut Vec<Vec<u8>>) -> Self {
         let mut client = Self {
+            key: auth::room_key(config.password.as_deref(), &config.room),
             config,
             client_id,
             phase: Phase::Hello,
@@ -112,15 +115,18 @@ impl Client {
     fn send_hello(&mut self, now: u64, out: &mut Vec<Vec<u8>>) {
         self.phase = Phase::Hello;
         self.last_sent = now;
-        out.push(wire::encode(0, &Message::Hello { client_id: self.client_id }));
+        let hello = Message::Hello { client_id: self.client_id, room: self.config.room.clone() };
+        out.push(wire::encode(0, &hello));
     }
 
-    fn send_join(&mut self, now: u64, cookie: [u8; 16], out: &mut Vec<Vec<u8>>) {
+    /// JOIN, with the room's key if this makes the room (`fresh`).
+    fn send_join(&mut self, now: u64, cookie: [u8; 16], fresh: bool, out: &mut Vec<Vec<u8>>) {
         self.phase = Phase::Joining { cookie };
         self.last_sent = now;
         let room = &self.config.room;
-        let proof = auth::proof(self.config.password.as_deref(), room, self.client_id, &cookie);
-        let join = Message::Join { client_id: self.client_id, cookie, room: room.clone(), proof };
+        let proof = auth::proof(&self.key, room, self.client_id, &cookie);
+        let key = if fresh { self.key } else { [0; 32] };
+        let join = Message::Join { client_id: self.client_id, cookie, room: room.clone(), proof, key };
         out.push(wire::encode(0, &join));
     }
 
@@ -130,9 +136,9 @@ impl Client {
         let from_relay = from == self.config.relay;
         let mut events = Vec::new();
         match (self.phase, packet.message) {
-            (Phase::Hello, Message::Challenge { cookie, .. }) if from_relay => {
+            (Phase::Hello, Message::Challenge { cookie, fresh, .. }) if from_relay => {
                 self.last_heard = now;
-                self.send_join(now, cookie, out);
+                self.send_join(now, cookie, fresh, out);
             }
             (Phase::Joining { .. }, Message::Welcome { index, keepalive, members }) if from_relay => {
                 self.phase = Phase::Joined { token: packet.token, index };
@@ -318,6 +324,22 @@ mod tests {
         assert!(lan.take(a).is_empty() && lan.take(b).is_empty());
         assert_eq!(lan.clients[a].members(), 2);
         assert_eq!(lan.clients[a].rtt_ms(), Some(0));
+    }
+
+    #[test]
+    fn the_first_member_sets_the_room_password() {
+        let mut lan = Lan::new(None);
+        let a = lan.add(0, "doom", Some("pw"));
+        let b = lan.add(0, "doom", Some("pw"));
+        let c = lan.add(0, "doom", None);
+        let d = lan.add(0, "duke", None);
+        let e = lan.add(0, "duke", Some("pw"));
+        assert_eq!(lan.take(a), vec![ClientEvent::Joined { index: 1, members: 1 }]);
+        assert_eq!(lan.take(b), vec![ClientEvent::Joined { index: 2, members: 2 }]);
+        assert_eq!(lan.take(c), vec![ClientEvent::Rejected(RejectReason::Password)]);
+        assert_eq!(lan.take(d), vec![ClientEvent::Joined { index: 1, members: 1 }]);
+        assert_eq!(lan.take(e), vec![ClientEvent::Rejected(RejectReason::Open)]);
+        assert!(lan.relay.rooms().iter().any(|r| r.name == "doom" && r.password));
     }
 
     #[test]
