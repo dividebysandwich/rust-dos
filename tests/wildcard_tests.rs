@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[test]
 fn test_root_dir_search() {
     // Initialize Bus with current directory as root
-    let mut bus = Bus::new(PathBuf::from("."));
+    let bus = Bus::new(PathBuf::from("."));
 
     // Test finding any file with *.* pattern
     // We know there are files in the root (e.g. Cargo.toml)
@@ -73,7 +73,7 @@ fn test_specific_file_search_in_root() {
 
 #[test]
 fn test_dos_path_handling() {
-    let mut bus = Bus::new(PathBuf::from("."));
+    let bus = Bus::new(PathBuf::from("."));
 
     // Test specific DOS path style: C:\*.*
     // This previously failed because Path::new usage on Linux treated "C:\*.*" as a filename.

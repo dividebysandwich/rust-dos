@@ -1,5 +1,5 @@
 use iced_x86::Register;
-use rust_dos::cpu::{Cpu, CpuState};
+use rust_dos::cpu::Cpu;
 use rust_dos::interrupts::int21;
 use std::path::PathBuf;
 
