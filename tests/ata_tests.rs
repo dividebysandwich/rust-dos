@@ -320,3 +320,39 @@ fn a_state_saved_mid_transfer_goes_on() {
     let all: Vec<u8> = first.into_iter().chain(rest).collect();
     assert_eq!(all, (200..202).flat_map(pattern).collect::<Vec<u8>>());
 }
+
+/// Windows for Workgroups' WDCTRL calls INT 13h and reads the task file
+/// back: the BIOS leaves it pointing at the sector it read, and resets
+/// the disk for AH=00h.
+#[test]
+fn int13_leaves_the_task_file_as_a_bios_does() {
+    use iced_x86::Register;
+    let dir = scratch("int13");
+    let image = dir.join("hdd.img");
+    fs::write(&image, (0..SECTORS).flat_map(pattern).collect::<Vec<u8>>()).unwrap();
+    let mut cpu = rust_dos::cpu::Cpu::new(dir.join("c"));
+    let opts = MountOptions { geometry: Some(GEOMETRY), ..Default::default() };
+    cpu.bus.mount_drive(numbered_drive(2), &image, opts, false).unwrap();
+    cpu.bus.boot = Some(Default::default());
+    cpu.bus.attach_ide();
+    // Cylinder 1, head 2, sector 5: 2 sectors to 5000:0000.
+    cpu.set_es(0x5000);
+    cpu.set_bx(0);
+    cpu.set_ax(0x0202);
+    cpu.set_cx(0x0105);
+    cpu.set_dx(0x0280);
+    rust_dos::interrupts::int13::handle(&mut cpu);
+    assert!(!cpu.get_cpu_flag(rust_dos::cpu::CpuFlags::CF));
+    let first = (4 + 2) * 17 + 4;
+    assert_eq!(cpu.bus.read_8(0x50000), pattern(first)[0]);
+    let bus = &mut cpu.bus;
+    // The second sector's address, by the disk's own geometry.
+    let regs: Vec<u8> = [ERROR, COUNT, SECTOR, CYL_LOW, CYL_HIGH, SELECT].iter().map(|&p| bus.io_read(p)).collect();
+    assert_eq!(regs, [0, 0, 6, 1, 0, 0xA2]);
+    assert_eq!(bus.io_read(COMMAND), 0x50);
+    // AH=00h: DEVICE RESET, its interrupt taken.
+    cpu.set_reg8(Register::AH, 0x00);
+    rust_dos::interrupts::int13::handle(&mut cpu);
+    assert_eq!((cpu.bus.io_read(COUNT), cpu.bus.io_read(SECTOR)), (1, 1));
+    assert!(!irq14(&mut cpu.bus));
+}

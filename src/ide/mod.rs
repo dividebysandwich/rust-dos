@@ -12,6 +12,7 @@
 
 pub mod ata;
 pub mod atapi;
+pub mod int13;
 
 use crate::cdrom::audio::CdPlayer;
 use crate::cdrom::image::CdImage;
@@ -43,6 +44,9 @@ pub struct Env<'a> {
     /// How long a hard disk takes for a sector at `hard_disk_speed`, in
     /// nanoseconds; 0 at the maximum.
     pub hard_disk_ns_per_sector: u64,
+    /// The commands are the BIOS's show for a V86 monitor, which the disks
+    /// carry out at once (DOSBox-X's `faked_command`).
+    pub faked: bool,
 }
 
 impl Env<'_> {
@@ -316,6 +320,46 @@ impl Channel {
     /// one.
     pub fn cd_drive(&mut self, drive: u8) -> Option<&mut Atapi> {
         self.devices.iter_mut().flatten().find_map(|d| d.cd_drive(drive))
+    }
+
+    /// What a BIOS's INT 13h did to disk `slot` (0 master, 1 slave), done
+    /// to the channel at once (DOSBox-X's `int13fakeio`): the devices
+    /// selected in turn up to it, then the disk reset, or its task file
+    /// left as after reading a sector.
+    pub fn bios_access(&mut self, slot: usize, access: int13::BiosAccess, env: &mut Env) {
+        // Not in the middle of a command of the system's own driver.
+        if self.devices.iter().flatten().any(|d| d.status() & (BSY | DRQ) != 0) {
+            return;
+        }
+        let base = self.id.base();
+        for s in 0..=slot {
+            if self.devices[s].is_some() {
+                self.read(base + 7, env);
+                self.write(base + 6, (s as u8) << 4, env);
+            }
+        }
+        match access {
+            int13::BiosAccess::Reset => {
+                self.write(base + 7, 0x08, env);
+                if let Some(Device::Ata(d)) = &mut self.devices[slot] {
+                    d.clear_irq();
+                }
+            }
+            int13::BiosAccess::Read { lba, drivehead } => {
+                if let Some(Device::Ata(d)) = &mut self.devices[slot] {
+                    d.bios_read(lba, drivehead);
+                }
+            }
+        }
+    }
+
+    /// The hard disk of drive slot `drive` on the channel: its slot and
+    /// the geometry its CHS addresses go by.
+    pub fn disk_of(&self, drive: u8) -> Option<(usize, ata::Geometry)> {
+        self.devices.iter().enumerate().find_map(|(slot, device)| match device {
+            Some(Device::Ata(d)) if d.drive == drive => Some((slot, d.logical_geometry())),
+            _ => None,
+        })
     }
 
     // --- Ports ---

@@ -127,7 +127,8 @@ impl Bus {
         let channel = self.ide[id.index()].as_mut()?;
         let class = crate::diskio::DiskClass::HardDisk;
         let hard_disk_ns_per_sector = self.disk_io.cost_ns(class, crate::diskimage::SECTOR_SIZE as u32);
-        let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now, hard_disk_ns_per_sector };
+        let faked = self.ide_faked;
+        let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now, hard_disk_ns_per_sector, faked };
         let result = f(channel, &mut env);
         self.sync_ide(id);
         Some(result)
@@ -185,6 +186,12 @@ impl Bus {
         self.clock.stall(DATA_PORT_NS * (len as u64 / 2));
         self.log_port(id.base(), value, len, true);
         self.with_ide(id, |channel, env| channel.write_wide(value, len, env));
+    }
+
+    /// What the BIOS's INT 13h did to the disk in `slot` of channel `id`,
+    /// done to it at once (`ide::int13`).
+    pub(crate) fn ide_bios_access(&mut self, id: ChannelId, slot: usize, access: crate::ide::int13::BiosAccess) {
+        self.with_ide(id, |channel, env| channel.bios_access(slot, access, env));
     }
 
     pub(crate) fn ide_next_event(&self) -> Option<u64> {

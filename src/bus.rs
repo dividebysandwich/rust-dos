@@ -175,6 +175,9 @@ pub struct Bus {
     /// A booted system's IDE channels, primary and secondary, with its
     /// hard disks and CD-ROM drive.
     pub ide: [Option<crate::ide::Channel>; 2],
+    /// The port accesses going on are the BIOS's show of driving an IDE
+    /// disk for a V86 monitor (`ide::int13`): the disks answer at once.
+    pub ide_faked: bool,
     pub search_handles: std::collections::HashMap<u32, String>,
     /// The search ID FindFirst handed out last (the key of
     /// `search_handles`, kept in the program's DTA).
@@ -343,6 +346,7 @@ impl Bus {
             pci: crate::pci::Pci::default(),
             voodoo: None,
             ide: [None, None],
+            ide_faked: false,
             search_handles: std::collections::HashMap::new(),
             search_serial: 0,
             mouse: crate::mouse::MouseState::new(),

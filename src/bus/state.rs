@@ -107,6 +107,7 @@ impl Bus {
             // A service's port accesses for a V86 monitor, made within the
             // instructions after it.
             port_accesses: _,
+            ide_faked: _,
             port_log: _,
             guest_paging: _,
             guest_fault: _,
@@ -269,6 +270,7 @@ impl Bus {
             code_blocks: _,
             reset_requested: _,
             port_accesses: _,
+            ide_faked: _,
             port_log: _,
             guest_paging: _,
             guest_fault: _,

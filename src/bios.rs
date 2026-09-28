@@ -77,6 +77,9 @@ pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
 /// hardware a V86 monitor follows through the ports it traps: it makes the
 /// port accesses that make the changes (`Bus::port_accesses`), then IRETs.
 pub const PORT_ACCESSES: u16 = 0x11F0;
+/// The rest of the port accesses' kinds (`port_access_more`), which don't
+/// fit the loop.
+const PORT_ACCESSES_MORE: u16 = 0x1500;
 /// The keyboard interrupt (IRQ 1) of a booted system, which keeps the
 /// keystrokes in the BIOS data area as a PC's BIOS does.
 const KBD_HANDLER: u16 = 0x1230;
@@ -338,6 +341,7 @@ pub fn install(bus: &mut Bus) {
     // Services in V86 mode: make each port access the service left, then
     // return.
     write_rom(bus, PORT_ACCESSES, &port_access_loop());
+    write_rom(bus, PORT_ACCESSES_MORE, &port_access_more());
     write_rom(bus, KBD_HANDLER, &keyboard_handler());
     // The Plug and Play BIOS's and APM's entry points: the service, then a
     // far return (32-bit in APM's 32-bit code segment).
@@ -369,10 +373,11 @@ fn port_access_loop() -> Vec<u8> {
     a.op(&[0x80, 0xFB, 0x01]); // CMP BL, 1
     a.jump(0x72, "write");
     a.jump(0x74, "read");
-    a.op(&[0x80, 0xFB, 0x02]); // CMP BL, 2
-    a.jump(0x74, "update");
     a.op(&[0x80, 0xFB, 0x03]); // CMP BL, 3
+    a.jump(0x72, "update");
     a.jump(0x74, "fill");
+    a.op(&[0x80, 0xFB, 0xFF]); // CMP BL, FFh
+    a.jump(0x75, "more");
     a.op(&[0x07, 0x5F, 0x5A, 0x59, 0x5B, 0x58, 0xCF]); // POP ES, DI, DX, CX, BX, AX; IRET
     a.label("write");
     a.op(&[0xEE]); // OUT DX, AL
@@ -386,8 +391,40 @@ fn port_access_loop() -> Vec<u8> {
     a.label("fill");
     a.op(&[0xFC, 0xF3, 0xAB]); // CLD; REP STOSW
     a.jump(0xEB, "next");
+    a.label("more");
+    let [lo, hi] = PORT_ACCESSES_MORE.to_le_bytes();
+    a.op(&[0xEA, lo, hi, 0x00, 0xF0]); // JMP FAR F000:PORT_ACCESSES_MORE
     let code = a.finish();
     assert!(PORT_ACCESSES as usize + code.len() <= KBD_HANDLER as usize);
+    code
+}
+
+/// The port accesses a BIOS makes driving an IDE disk (`ide::int13`),
+/// from the loop: 04h CLI, 05h a status read at DX until the bits of BH
+/// clear (at most FFFFh times), 06h CX word reads of DX; then back to the
+/// loop for the next.
+fn port_access_more() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(PORT_ACCESSES_MORE);
+    a.op(&[0x80, 0xFB, 0x04]); // CMP BL, 4
+    a.jump(0x75, "wait");
+    a.op(&[0xFA]); // CLI
+    a.jump(0xEB, "back");
+    a.label("wait");
+    a.op(&[0x80, 0xFB, 0x05]); // CMP BL, 5
+    a.jump(0x75, "words");
+    a.op(&[0xB9, 0xFF, 0xFF]); // MOV CX, FFFFh
+    a.label("busy");
+    a.op(&[0xEC, 0x84, 0xF8]); // IN AL, DX; TEST AL, BH
+    a.jump(0xE0, "busy"); // LOOPNZ
+    a.jump(0xEB, "back");
+    a.label("words");
+    a.op(&[0xED]); // IN AX, DX
+    a.jump(0xE2, "words"); // LOOP
+    a.label("back");
+    let [lo, hi] = (PORT_ACCESSES + 6).to_le_bytes();
+    a.op(&[0xEA, lo, hi, 0x00, 0xF0]); // JMP FAR F000:next
+    let code = a.finish();
+    assert!(PORT_ACCESSES_MORE as usize + code.len() <= 0x1600);
     code
 }
 
@@ -546,6 +583,15 @@ pub enum PortAccess {
     /// Fill `words` words of memory at `segment`:0 with `value`, as a mode
     /// set clears video memory.
     Fill { segment: u16, words: u16, value: u16 },
+    /// CLI, as a BIOS's disk code does before it reads a sector.
+    Cli,
+    /// Read the status at `port` until the bits of `mask` clear.
+    WaitWhile { port: u16, mask: u8 },
+    /// Read `count` words at `port`: a sector's data.
+    InWords { port: u16, count: u16 },
+    /// The accesses after are (true) or aren't a BIOS's show for a V86
+    /// monitor, which the IDE disks answer at once (`Bus::ide_faked`).
+    Faked(bool),
 }
 
 /// The ROM's loop (`FE 39 SERVICE_PORT_ACCESS`): the next port access in
@@ -553,8 +599,13 @@ pub enum PortAccess {
 /// with the bits to keep in CL and to set in CH for an update, 03h for a
 /// fill of CX words of AX at ES:DI, and FFh when there are no more.
 pub fn next_port_access(cpu: &mut Cpu) {
-    use iced_x86::Register::{AL, BL, CH, CL};
-    match cpu.bus.port_accesses.pop_front() {
+    use iced_x86::Register::{AL, BH, BL, CH, CL};
+    let mut next = cpu.bus.port_accesses.pop_front();
+    while let Some(PortAccess::Faked(on)) = next {
+        cpu.bus.ide_faked = on;
+        next = cpu.bus.port_accesses.pop_front();
+    }
+    match next {
         Some(PortAccess::Out(port, value)) => {
             cpu.set_dx(port);
             cpu.set_reg8(AL, value);
@@ -577,6 +628,21 @@ pub fn next_port_access(cpu: &mut Cpu) {
             cpu.set_ax(value);
             cpu.set_reg8(BL, 0x03);
         }
-        None => cpu.set_reg8(BL, 0xFF),
+        Some(PortAccess::Cli) => cpu.set_reg8(BL, 0x04),
+        Some(PortAccess::WaitWhile { port, mask }) => {
+            cpu.set_dx(port);
+            cpu.set_reg8(BH, mask);
+            cpu.set_reg8(BL, 0x05);
+        }
+        Some(PortAccess::InWords { port, count }) => {
+            cpu.set_dx(port);
+            cpu.set_cx(count);
+            cpu.set_reg8(BL, 0x06);
+        }
+        Some(PortAccess::Faked(_)) => unreachable!(),
+        None => {
+            cpu.bus.ide_faked = false;
+            cpu.set_reg8(BL, 0xFF);
+        }
     }
 }

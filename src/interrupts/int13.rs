@@ -105,6 +105,9 @@ fn transfer(cpu: &mut Cpu, dl: u8, drive: u8, disk: &Rc<DiskImage>, ah: u8) {
             if ah != 0x04 {
                 cpu.bus.sector_activity(drive, lba, count as u32, ah == 0x03);
             }
+            if ah == 0x02 {
+                crate::ide::int13::read(cpu, dl, lba, count, true);
+            }
             cpu.set_reg8(Register::AL, count as u8);
             finish(cpu, dl, 0);
         }
@@ -179,6 +182,9 @@ fn extensions(cpu: &mut Cpu, dl: u8, drive: Option<u8>, image: Option<&Rc<DiskIm
                     if ah != 0x44 && count > 0 {
                         cpu.bus.sector_activity(drive, lba, count as u32, ah == 0x43);
                     }
+                    if ah == 0x42 {
+                        crate::ide::int13::read(cpu, dl, lba, count, false);
+                    }
                     finish(cpu, dl, 0);
                 }
                 Err(status) => {
@@ -246,7 +252,10 @@ pub fn handle(cpu: &mut Cpu) {
     match ah {
         // AH=00h Reset Disk System — always succeed, even for invalid drives
         // (real BIOS resets the whole controller, not a specific drive).
-        0x00 => finish(cpu, dl, 0),
+        0x00 => {
+            crate::ide::int13::reset(cpu, dl);
+            finish(cpu, dl, 0);
+        }
 
         // AH=01h Get Status of Last Operation.
         0x01 => {

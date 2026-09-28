@@ -1427,3 +1427,130 @@ fn a_segment_loaded_into_ds_is_checked_again_for_ss() {
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[0]), (GP as u32, FREE as u32));
 }
+
+/// A booted machine whose hard disk is on the primary IDE channel, with
+/// INT 13h called in virtual-8086 mode as a monitor reflects it, with the
+/// IDE ports trapped (no I/O permission bitmap).
+fn int13_in_v86(function: u8) -> Rig {
+    use rust_dos::diskimage::DiskImage;
+    let mut rig = Rig::new();
+    let disk = DiskImage::blank_hard_disk("ide.img", 8 << 20, None).unwrap();
+    rig.cpu.bus.mount_disk_image(2, disk, rust_dos::disk::MountOptions::default()).unwrap();
+    rig.cpu.bus.boot = Some(Default::default());
+    rig.cpu.bus.attach_ide();
+    assert!(rig.cpu.bus.ide[0].is_some());
+    // INT 13h: one sector from 0/0/1 to 3000:0200.
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(es, ax)?;
+        a.mov(bx, 0x0200u32)?;
+        a.mov(ax, (function as u32) << 8 | 1)?;
+        a.mov(cx, 0x0001u32)?;
+        a.mov(dx, 0x0080u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x14, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1014
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+    rig.record(GP);
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    rig.run(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    rig
+}
+
+/// Windows 9x's IDE driver watches the ports the BIOS drives for INT 13h:
+/// a read's accesses go through the BIOS's replay, where the trapped
+/// ports fault for the monitor.
+#[test]
+fn int13_in_virtual_8086_mode_drives_the_ide_ports_for_a_monitor_to_see() {
+    use rust_dos::bios::PortAccess;
+    let rig = int13_in_v86(0x02);
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[2]), (GP as u32, 0xF000), "the first access faults in the ROM");
+    assert!((rust_dos::bios::PORT_ACCESSES as u32..rust_dos::bios::PORT_ACCESSES as u32 + 0x40).contains(&stack[1]));
+    assert_eq!(rig.cpu.dx(), 0x1F7, "reading the status");
+    let queue: Vec<PortAccess> = rig.cpu.bus.port_accesses.iter().copied().collect();
+    assert_eq!(queue[0], PortAccess::Out(0x1F6, 0x00), "the master selected");
+    assert!(queue.contains(&PortAccess::Cli));
+    assert!(queue.contains(&PortAccess::Out(0x1F3, 1)), "sector 1");
+    assert!(queue.contains(&PortAccess::Out(0x1F7, 0x20)), "READ SECTORS");
+    assert!(queue.contains(&PortAccess::WaitWhile { port: 0x3F6, mask: 0x80 }));
+    assert!(queue.contains(&PortAccess::InWords { port: 0x1F0, count: 256 }));
+    assert_eq!(&queue[queue.len() - 2..], [PortAccess::Out(0xA0, 0x66), PortAccess::Faked(false)]);
+    assert_eq!(rig.cpu.bus.read_16(0x301FE + 0x200), 0xAA55, "the sector was read all the same");
+}
+
+/// A reset (AH=00h) too: DEVICE RESET.
+#[test]
+fn int13_reset_in_virtual_8086_mode_resets_the_ide_disk_for_a_monitor_to_see() {
+    use rust_dos::bios::PortAccess;
+    let rig = int13_in_v86(0x00);
+    let queue: Vec<PortAccess> = rig.cpu.bus.port_accesses.iter().copied().collect();
+    assert!(queue.contains(&PortAccess::Out(0x1F7, 0x08)));
+    assert!(!queue.contains(&PortAccess::Cli));
+}
+
+/// The replay runs to its end where the monitor lets the ports through
+/// after the first: the ROM's loop reads the sector from the IDE disk
+/// with CLI, the wait for BSY and the words of data, then the IRET.
+#[test]
+fn the_bios_replay_of_an_ide_read_runs_through() {
+    use rust_dos::diskimage::DiskImage;
+    let mut rig = Rig::new();
+    let disk = DiskImage::blank_hard_disk("ide.img", 8 << 20, None).unwrap();
+    rig.cpu.bus.mount_disk_image(2, disk, rust_dos::disk::MountOptions::default()).unwrap();
+    rig.cpu.bus.boot = Some(Default::default());
+    rig.cpu.bus.attach_ide();
+    // An I/O permission bitmap that traps 1F7h alone; the monitor lets it
+    // through at its first fault.
+    rig.set_gdt(TSS_SEL, sys_desc(TSS, 0x68 + 0x80, TSS32, 0));
+    for i in 0..0x80 {
+        rig.cpu.bus.write_8((TSS + 0x68 + i) as usize, 0);
+    }
+    rig.cpu.bus.write_8((TSS + 0x68 + 0x80) as usize, 0xFF);
+    rig.cpu.bus.write_8((TSS + 0x68 + 0x1F7 / 8) as usize, 0x80);
+    rig.handler(GP, 0, |a| {
+        a.push(eax)?;
+        a.mov(ax, DATA32 as u32)?;
+        a.mov(ds, ax)?;
+        a.and(byte_ptr(TSS + 0x68 + 0x1F7 / 8), 0x7F)?;
+        a.pop(eax)?;
+        a.add(esp, 4)?;
+        a.iretd()
+    });
+    let v86 = asm16(0x30000, |a| {
+        a.mov(ax, 0x3000u32)?;
+        a.mov(es, ax)?;
+        a.mov(bx, 0x0200u32)?;
+        a.mov(ax, 0x0201u32)?;
+        a.mov(cx, 0x0001u32)?;
+        a.mov(dx, 0x0080u32)?;
+        a.pushf()?;
+        a.db(&[0x9A, 0x14, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1014
+        a.int(0x40)
+    });
+    rig.load(0x30000, &v86);
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    // In batches, as the emulator runs programs: the disk's timed commands
+    // come due.
+    rig.run_batched(|a| {
+        for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3202, 0x3000, 0] {
+            a.push(v)?;
+        }
+        a.iretd()
+    });
+    let (vector, stack) = rig.recorded();
+    assert_eq!((vector, stack[1]), (0x40, 0x3000), "back in the V86 code after the replay");
+    assert!(rig.cpu.bus.port_accesses.is_empty());
+    assert!(!rig.cpu.bus.ide_faked);
+    assert!(stack[2] & 0x200 != 0, "the caller's IF, back from the IRET");
+    // The disk read the sector for the replay and is done.
+    let status = rig.cpu.bus.io_read(0x3F6);
+    assert_eq!(status & 0x89, 0, "not busy, no data left, no error: {:02X}", status);
+    assert_eq!((rig.cpu.bus.io_read(0x1F3), rig.cpu.bus.io_read(0x1F2)), (1, 0));
+}

@@ -157,6 +157,31 @@ impl Ata {
         self.physical
     }
 
+    /// The geometry CHS addresses go by now (INITIALIZE DEVICE
+    /// PARAMETERS').
+    pub fn logical_geometry(&self) -> Geometry {
+        self.logical
+    }
+
+    /// The task file as a BIOS leaves it after reading the sector the
+    /// address registers `lba` and drive/head `drivehead` point at, at
+    /// once (DOSBox-X's `int13fakeio`): Windows for Workgroups' WDCTRL
+    /// reads it back after INT 13h to see the BIOS drives the disk.
+    pub fn bios_read(&mut self, lba: [u8; 3], drivehead: u8) {
+        self.feature = 0;
+        self.count = 0;
+        self.lba = lba;
+        self.drivehead = drivehead;
+        self.state = State::Ready;
+        self.status = DRDY | DSC;
+        self.allow_writing = true;
+    }
+
+    /// Withdraw the interrupt request, as a BIOS's handler does.
+    pub fn clear_irq(&mut self) {
+        self.lower_irq();
+    }
+
     pub fn irq_signal(&self) -> bool {
         self.irq_signal
     }
@@ -182,9 +207,9 @@ impl Ata {
         }
     }
 
-    fn schedule(&mut self, ms: f64, now: u64) {
+    fn schedule(&mut self, ms: f64, env: &Env) {
         self.delayed = true;
-        self.delayed_at = now + ticks(ms);
+        self.delayed_at = env.now + if env.faked { 1 } else { ticks(ms) };
     }
 
     fn raise_irq(&mut self) {
@@ -349,7 +374,7 @@ impl Ata {
                 self.progress = 0;
                 self.state = State::Busy;
                 self.status = BSY;
-                self.schedule(COMMAND_DELAY, env.now);
+                self.schedule(COMMAND_DELAY, env);
             }
             // The data first, without an interrupt.
             0x30 | 0x31 | 0xC5 => {
@@ -412,7 +437,7 @@ impl Ata {
             0xEC => {
                 self.state = State::Busy;
                 self.status = BSY;
-                self.schedule(IDENTIFY_DELAY, env.now);
+                self.schedule(IDENTIFY_DELAY, env);
             }
             // SET FEATURES: transfer modes, power-on defaults, the write
             // cache and read look-ahead.
@@ -686,13 +711,13 @@ impl Ata {
                 self.state = State::Busy;
                 self.status = BSY;
                 let next = self.block_sectors();
-                self.schedule(Self::transfer_ms(env, next, BLOCK_DELAY), env.now);
+                self.schedule(Self::transfer_ms(env, next, BLOCK_DELAY), env);
             }
             0x30 | 0x31 | 0xC5 => {
                 self.state = State::Busy;
                 self.status = BSY;
                 let least = if self.progress == 0 { COMMAND_DELAY } else { BLOCK_DELAY };
-                self.schedule(Self::transfer_ms(env, self.buf_len / SECTOR_SIZE, least), env.now);
+                self.schedule(Self::transfer_ms(env, self.buf_len / SECTOR_SIZE, least), env);
             }
             _ => {
                 // IDENTIFY's data.
