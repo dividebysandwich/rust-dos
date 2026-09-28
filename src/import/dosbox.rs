@@ -202,6 +202,21 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             Some(_) => imported.set("emulator", "voodoo_memory", "4"),
             None => unknown(imported),
         },
+        ("ipx", "ipx") => match bool_value() {
+            Some(b) => imported.set("network", "ipx", b),
+            None => unknown(imported),
+        },
+        // DOSBox-X's NE2000, and DOSBox Staging's.
+        ("ne2000" | "ethernet", "ne2000") => match bool_value() {
+            Some(b) => imported.set("network", "ne2000", b),
+            None => unknown(imported),
+        },
+        ("ne2000" | "ethernet", "nicbase") => imported.set("network", "nicbase", first.to_ascii_uppercase()),
+        ("ne2000" | "ethernet", "nicirq") => imported.set("network", "nicirq", first),
+        // DOSBox's default address would be every imported game's.
+        ("ne2000" | "ethernet", "macaddr") if !first.eq_ignore_ascii_case("ac:de:48:88:99:aa") => {
+            imported.set("network", "macaddr", first)
+        }
         ("joystick", "joysticktype") => match first {
             "auto" | "2axis" | "4axis" | "none" => imported.set("joystick", "joysticktype", first),
             "4axis_2" | "fcs" | "ch" => imported.set("joystick", "joysticktype", "4axis"),
@@ -264,7 +279,11 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
             }
             imported.autoexec.push(line.join(" "));
         }
-        "exit" | "rescan" | "config" | "mixer" | "loadfix" | "ipxnet" | "serial" | "intro" => {
+        // DOSBox's IPX network is another protocol than rust-dos's LAN.
+        "ipxnet" => imported
+            .warnings
+            .push(format!("[autoexec] {} isn't imported: rust-dos joins a LAN with LAN HOST and LAN JOIN", line)),
+        "exit" | "rescan" | "config" | "mixer" | "loadfix" | "serial" | "intro" => {
             if !matches!(verb.as_str(), "exit" | "rescan") {
                 imported.warnings.push(format!("[autoexec] {} isn't imported", line));
             }
@@ -333,6 +352,25 @@ mod tests {
         assert_eq!(config.drives.len(), 2);
         let prepared = crate::games::prepare("the-game", &crate::config::Settings::default(), &text, Path::new("/"), None).unwrap();
         assert_eq!(prepared.settings.cycles, crate::timer::CpuSpeed::Fixed(12000));
+    }
+
+    #[test]
+    fn network_settings_map_onto_rust_dos_s() {
+        let conf = "[ipx]\nipx=true\n[ne2000]\nne2000=true\nnicbase=280\nnicirq=5\nmacaddr=AC:DE:48:88:99:AA\n[autoexec]\nipxnet connect 10.0.0.1\n";
+        let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+        let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(s, _, v)| (*s, v.as_str()));
+        assert_eq!(get("ipx"), Some(("network", "true")));
+        assert_eq!(get("ne2000"), Some(("network", "true")));
+        assert_eq!(get("nicbase"), Some(("network", "280")));
+        assert_eq!(get("nicirq"), Some(("network", "5")));
+        assert_eq!(get("macaddr"), None, "DOSBox's default address");
+        assert!(imported.warnings.iter().any(|w| w.contains("LAN JOIN")), "{:?}", imported.warnings);
+        let staging = import(&["[ethernet]\nne2000=true\nmacaddr=02:00:5e:00:00:01\n"], &[PathBuf::from("/")], "x", None);
+        let text = staging.profile_text(None);
+        let config = crate::config::parse(&text, Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}\n{}", config.warnings, text);
+        assert!(config.network.ne2000);
+        assert_eq!(config.network.mac.map(|m| m.to_string()).as_deref(), Some("02:00:5E:00:00:01"));
     }
 
     #[test]

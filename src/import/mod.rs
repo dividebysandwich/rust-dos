@@ -37,7 +37,7 @@ impl Imported {
     /// ones it was set up with.
     pub fn profile_text(&self, home: Option<&Path>) -> String {
         let mut text = format!("[game]\nname={}\n", self.name);
-        for section in ["emulator", "sound", "joystick"] {
+        for section in ["emulator", "sound", "joystick", "network"] {
             let lines: Vec<String> =
                 self.settings.iter().filter(|(s, _, _)| *s == section).map(|(_, k, v)| format!("{}={}\n", k, v)).collect();
             if !lines.is_empty() {

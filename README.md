@@ -51,6 +51,11 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * **Cheats:** find a game's values in memory, and change or freeze them
 * **Capture:** screenshots, and sound, video and GIF recordings
 * **Joysticks** from game controllers, or the mouse as one
+* **[Networking](CONFIGURATION.md#playing-over-a-lan):** IPX games between
+  rust-dos instances on a LAN or over the internet (`LAN HOST`, `LAN
+  JOIN`, and a relay for servers), and an NE2000 network card behind a
+  router to the internet, for DOS packet drivers, Windows 3.x with Trumpet
+  Winsock and Windows 95
 * Runs in a **[web browser](#running-in-a-browser)** as WebAssembly
 * A web-based **[debugger](#debug--remote-control-server)** and HTTP API
 
@@ -133,6 +138,7 @@ programs, the prompt has these commands:
 | `MAKEIMG` | make a new floppy or hard disk image, as in DOSBox Staging; see [New disk images](CONFIGURATION.md#new-disk-images) |
 | `BOOT [image ...] [-l drive]` | start a system from a disk image; see [Booting a disk image](CONFIGURATION.md#booting-a-disk-image) |
 | `MIXER` | see [`[mixer]`](CONFIGURATION.md#mixer) |
+| `LAN [HOST\|JOIN\|LEAVE\|STOP]` | join rust-dos instances into a LAN; see [Playing over a LAN](CONFIGURATION.md#playing-over-a-lan) |
 | `LOADHIGH` (`LH`) | load a program into upper memory |
 | `MEM [/C\|/D\|/F\|/M name]` | the memory used and free, as in MS-DOS 6.22; `/C` lists the programs in memory, `/F` the free blocks, `/M` one program's blocks and `/D` all of them |
 | `DOSCONFIG` | open the settings window |

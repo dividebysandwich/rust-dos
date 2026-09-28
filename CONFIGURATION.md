@@ -404,6 +404,8 @@ Esc closes it.
 * **Mixer:** the volume of each sound source and the master volume
   (`[mixer]`), with a meter of how loud each one plays, and the filters,
   reverb and chorus with their dry/wet mixes.
+* **Network:** everything in [`[network]`](#network): the IPX driver, the
+  NE2000 network card, and the LAN to join or host at startup.
 * **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
   makes one from the settings as they are, Del deletes one.
 * **States:** the [save state](README.md#save-states) slots of the game playing,
@@ -850,14 +852,38 @@ each other's frames, as cards on one Ethernet would.
   collection or FreeDOS's `crynwr` package. Programs that use a packet
   driver then work; with mTCP, `DHCP` sets it up, and `HTGET`, `TELNET`,
   `FTP` and `IRCJR` reach the internet.
-* **Booted systems** use their own drivers for the card: Windows 95's
-  "Novell/Anthem NE2000" at 300h, IRQ 10; Windows for Workgroups' NE2000
-  driver; or a packet driver and WINPKT for Trumpet Winsock.
+* **Windows 3.x with Trumpet Winsock:** before Windows, load the packet
+  driver and the Crynwr collection's WINPKT (`NE2000 0x60 10 0x300`, then
+  `WINPKT 0x60`). In Trumpet's setup, turn off its dialler's SLIP and PPP,
+  set the packet vector to 60 and the IP address to `bootp` (in
+  TRUMPWSK.INI: `ppp-enabled=0`, `slip-enabled=0`, `vector=60`,
+  `ip=bootp`). Trumpet then gets its address from the router, and
+  Netscape and the other Winsock programs reach the internet. A browser
+  set up for a proxy of a dial-up service goes through that proxy, so
+  turn it off in the browser's options if the proxy is gone. Trumpet
+  doesn't give the packet driver back when Windows ends: to start Windows
+  again with it, start rust-dos again first.
+* **Windows 95:** in Control Panel, Network, add the adapter "Novell/Anthem",
+  "NE2000 Compatible", and the protocol "Microsoft", "TCP/IP". In the
+  adapter's properties (Resources), set the I/O address range 300-31F and
+  the interrupt 10, as rust-dos has them. Windows copies its drivers from
+  its setup files (CD or `C:\WINDOWS\OPTIONS\CABS`), restarts, gets its
+  address from the router (`winipcfg` shows it), and Internet Explorer and
+  the other programs reach the internet. Its IPX/SPX protocol plays with
+  the IPX driver of other instances in the same LAN room, set to Ethernet
+  II frames.
+* **Windows for Workgroups** has its own NE2000 driver for its network
+  and for Microsoft's TCP/IP-32.
 * **Web browsers** of the time speak plain HTTP and SSL 3.0 at most, which
   today's sites refuse: sites made for them, such as frogfind.com and
   theoldnet.com, and plain `http://` ones work.
 * Instances in one [LAN](#playing-over-a-lan) room reach each other's
-  cards as well.
+  cards as well, as PCs on one Ethernet do: TCP/IP between them (DirectPlay
+  games, sharing files), and IPX/SPX. In a room, each router hands out an
+  address of its own, 10.0.2.20 and the instance's member number (member
+  2 gets 10.0.2.22), so the guests don't clash; a guest that got its
+  address before joining gets the new one at its next start, or with
+  `winipcfg` (Release, then Renew).
 
 rust-dos's LAN is its own protocol: it doesn't reach DOSBox's IPX servers,
 and `IPXNET` lines in imported DOSBox configurations are left out.

@@ -195,18 +195,20 @@ enum Page {
     Emulator,
     Sound,
     Mixer,
+    Network,
     Games,
     States,
     Cheats,
     Stats,
 }
 
-const PAGES: [Page; 9] = [
+const PAGES: [Page; 10] = [
     Page::Drives,
     Page::Display,
     Page::Emulator,
     Page::Sound,
     Page::Mixer,
+    Page::Network,
     Page::Games,
     Page::States,
     Page::Cheats,
@@ -221,6 +223,7 @@ impl Page {
             Page::Emulator => "Emulator",
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
+            Page::Network => "Network",
             Page::Games => "Games",
             Page::States => "States",
             Page::Cheats => "Cheats",
@@ -262,6 +265,7 @@ impl Page {
                 Chorus,
                 ChorusMix,
             ],
+            Page::Network => &[Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password],
         }
     }
 }
@@ -397,6 +401,20 @@ enum Item {
     TandySound,
     /// The configuration file's `[autoexec]` commands (autoexec.rs).
     Autoexec,
+    /// The IPX driver, its IRQ and its frame type.
+    Ipx,
+    IpxIrq,
+    IpxFrame,
+    /// The NE2000 network card, its ports, IRQ and address.
+    Ne2000,
+    NicBase,
+    NicIrq,
+    MacAddr,
+    /// The LAN joined or hosted at startup, its room and password.
+    Lan,
+    LanHost,
+    Room,
+    Password,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -550,6 +568,17 @@ impl Item {
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
             Autoexec => "Edit the [autoexec] commands...",
+            Ipx => "IPX driver",
+            IpxIrq => "  IRQ",
+            IpxFrame => "  Frame type",
+            Ne2000 => "NE2000 network card",
+            NicBase => "  Port",
+            NicIrq => "  IRQ",
+            MacAddr => "  Ethernet address",
+            Lan => "Join a LAN at startup",
+            LanHost => "Host a LAN at startup",
+            Room => "LAN room",
+            Password => "LAN password",
         }
     }
 
@@ -567,6 +596,8 @@ impl Item {
             Item::VoodooRenderer | Item::VoodooScale => frontend.window,
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
+            // The browser has no sockets for a LAN.
+            Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
             _ => true,
         }
     }
@@ -596,7 +627,7 @@ impl Item {
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
-            Memsize | Autoexec => Applies::NextStart,
+            Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
     }
@@ -607,6 +638,7 @@ impl Item {
             Item::Memsize | Item::Deadzone => Input::Slider,
             Item::Cycles => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
+            Item::MacAddr | Item::Lan | Item::LanHost | Item::Room | Item::Password => Input::Text,
             Item::SoundFont | Item::Mt32Roms => Input::File,
             Item::Autoexec => Input::Link,
             _ => Input::Choice,
@@ -732,6 +764,32 @@ impl Item {
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
             Autoexec => String::new(),
+            Ipx => match s.network.ipx {
+                crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",
+                crate::net::IpxMode::On => "on",
+                crate::net::IpxMode::Off => "off",
+            }
+            .to_string(),
+            IpxIrq => s.network.ipx_irq.map_or("auto".to_string(), |irq| irq.to_string()),
+            IpxFrame => match s.network.ipx_frame {
+                crate::net::ipx::FrameType::EthernetII => "Ethernet II",
+                crate::net::ipx::FrameType::Raw8023 => "802.3 (raw)",
+                crate::net::ipx::FrameType::Llc8022 => "802.2",
+                crate::net::ipx::FrameType::Snap => "SNAP",
+            }
+            .to_string(),
+            Ne2000 => on_off(s.network.ne2000),
+            NicBase => format!("{:X}h", s.network.nic_base),
+            NicIrq => s.network.nic_irq.to_string(),
+            MacAddr => s.network.mac.map_or("auto (new each start)".to_string(), |mac| mac.to_string()),
+            Lan => match &s.network.lan {
+                None => "off".to_string(),
+                Some(relay) if relay.is_empty() => "discover".to_string(),
+                Some(relay) => relay.clone(),
+            },
+            LanHost => s.network.lan_host.map_or("off".to_string(), |port| format!("UDP port {}", port)),
+            Room => s.network.room.clone(),
+            Password => if s.network.password.is_empty() { "none" } else { "(set)" }.to_string(),
         }
     }
 
@@ -831,10 +889,19 @@ impl Item {
             Chorus => each(s, ChorusPreset::ALL, |s, preset| s.mixer.chorus = preset),
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
+            Ipx => each(s, crate::net::IpxMode::ALL, |s, mode| s.network.ipx = mode),
+            IpxIrq => each(s, [None, Some(3), Some(4), Some(5), Some(7), Some(9), Some(10), Some(11), Some(15)], |s, irq| {
+                s.network.ipx_irq = irq
+            }),
+            IpxFrame => each(s, crate::net::ipx::FrameType::ALL, |s, kind| s.network.ipx_frame = kind),
+            Ne2000 => on_off(|s, on| s.network.ne2000 = on),
+            NicBase => each(s, crate::net::NIC_BASES, |s, base| s.network.nic_base = base),
+            NicIrq => each(s, [3, 4, 5, 7, 9, 10, 11, 15], |s, irq| s.network.nic_irq = irq),
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
-            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts => Vec::new(),
+            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr | Lan | LanHost | Room
+            | Password => Vec::new(),
         }
     }
 
@@ -909,6 +976,11 @@ impl Item {
             Item::CrtGlow => s.crt.glow.to_string(),
             Item::ReverbMix => s.mixer.reverb_mix.to_string(),
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
+            Item::MacAddr => s.network.mac.map_or(String::new(), |mac| mac.to_string()),
+            Item::Lan => Item::Lan.value(s, None),
+            Item::LanHost => s.network.lan_host.map_or("off".to_string(), |port| port.to_string()),
+            Item::Room => s.network.room.clone(),
+            Item::Password => s.network.password.clone(),
             _ => String::new(),
         }
     }
@@ -927,6 +999,12 @@ impl Item {
             Item::CrtGlow => s.crt.glow = parse_amount(text).ok_or("The glow goes from 0 to 100%")?,
             Item::ReverbMix => s.mixer.reverb_mix = crate::mixer::parse_mix(text)?,
             Item::ChorusMix => s.mixer.chorus_mix = crate::mixer::parse_mix(text)?,
+            Item::MacAddr if text.is_empty() => s.network.mac = None,
+            Item::MacAddr => s.network.set("macaddr", text)?,
+            Item::Lan => s.network.set("lan", text)?,
+            Item::LanHost => s.network.set("lanhost", text)?,
+            Item::Room => s.network.set("room", text)?,
+            Item::Password => s.network.set("password", text)?,
             _ => {}
         }
         Ok(())
@@ -966,6 +1044,11 @@ impl Item {
             }
             Item::ReverbMix => std::mem::replace(&mut s.mixer.reverb_mix, DEFAULT_MIX) != DEFAULT_MIX,
             Item::ChorusMix => std::mem::replace(&mut s.mixer.chorus_mix, DEFAULT_MIX) != DEFAULT_MIX,
+            Item::MacAddr => s.network.mac.take().is_some(),
+            Item::Lan => s.network.lan.take().is_some(),
+            Item::LanHost => s.network.lan_host.take().is_some(),
+            Item::Room => std::mem::replace(&mut s.network.room, crate::net::DEFAULT_ROOM.into()) != crate::net::DEFAULT_ROOM,
+            Item::Password => !std::mem::take(&mut s.network.password).is_empty(),
             _ => false,
         }
     }
