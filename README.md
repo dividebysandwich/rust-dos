@@ -84,9 +84,9 @@ archive, or a CD or disk image onto the window to mount, import or run it.
 ## Configuration
 
 Rust-DOS reads `rust-dos.conf`, a DOSBox-style configuration file, from the
-current directory or the per-user configuration directory
-(`~/.config/rust-dos/` on Linux), and writes a commented template there on
-first start. The settings window (**Ctrl+F12**, or `DOSCONFIG` at the prompt)
+current directory, the executable's directory (for a portable install) or the
+per-user configuration directory (`~/.config/rust-dos/` on Linux), and writes
+a commented template there on first start. The settings window (**Ctrl+F12**, or `DOSCONFIG` at the prompt)
 changes most settings without a restart, and F2 saves them to the file.
 
 **[CONFIGURATION.md](CONFIGURATION.md)** describes it all:

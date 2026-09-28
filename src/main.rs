@@ -45,8 +45,8 @@ struct Args {
     #[arg(short, long)]
     dir: Option<String>,
 
-    /// Configuration file to use instead of ./rust-dos.conf or the
-    /// per-user default
+    /// Configuration file to use instead of ./rust-dos.conf, the one next
+    /// to the executable or the per-user default
     #[arg(short, long, value_name = "FILE", conflicts_with = "no_config")]
     config: Option<std::path::PathBuf>,
 
@@ -1914,6 +1914,7 @@ fn load_config(args: &Args) -> Result<config::Config, String> {
     let config = config::load(
         args.config.as_deref(),
         &cwd,
+        config::exe_dir().as_deref(),
         config::default_path(),
         rust_dos::hostdirs::home_dir().as_deref(),
     )?;

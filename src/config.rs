@@ -3,7 +3,8 @@
 //! `[drives]` and `[autoexec]` sections. See
 //! `rust-dos.conf.example` for the format.
 //!
-//! Lookup order, first match wins: `--config FILE`, `./rust-dos.conf`, then
+//! Lookup order, first match wins: `--config FILE`, `./rust-dos.conf`,
+//! `rust-dos.conf` next to the executable (a portable install), then
 //! `rust-dos.conf` in the per-user configuration directory, where a
 //! commented template is written on first start.
 //!
@@ -50,6 +51,7 @@ pub fn default_path() -> Option<PathBuf> {
 pub enum ConfigSource {
     CommandLine,
     WorkingDir,
+    ExeDir,
     UserDefault,
 }
 
@@ -62,8 +64,21 @@ pub enum Located {
     },
 }
 
+/// The directory holding the rust-dos executable, where a
+/// `rust-dos.conf` makes the install portable.
+pub fn exe_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = fs::canonicalize(&exe).unwrap_or(exe);
+    exe.parent().map(Path::to_path_buf)
+}
+
 /// Find the config file to use. An explicitly requested file must exist.
-pub fn locate(cli: Option<&Path>, cwd: &Path, default: Option<PathBuf>) -> Result<Located, String> {
+pub fn locate(
+    cli: Option<&Path>,
+    cwd: &Path,
+    exe_dir: Option<&Path>,
+    default: Option<PathBuf>,
+) -> Result<Located, String> {
     if let Some(path) = cli {
         let path = cwd.join(path);
         if path.is_file() {
@@ -74,6 +89,12 @@ pub fn locate(cli: Option<&Path>, cwd: &Path, default: Option<PathBuf>) -> Resul
     let local = cwd.join(FILE_NAME);
     if local.is_file() {
         return Ok(Located::Found(local, ConfigSource::WorkingDir));
+    }
+    if let Some(dir) = exe_dir {
+        let portable = dir.join(FILE_NAME);
+        if portable.is_file() {
+            return Ok(Located::Found(portable, ConfigSource::ExeDir));
+        }
     }
     match default {
         Some(path) if path.is_file() => Ok(Located::Found(path, ConfigSource::UserDefault)),
@@ -883,10 +904,11 @@ pub fn write_template(path: &Path) -> std::io::Result<()> {
 pub fn load(
     cli: Option<&Path>,
     cwd: &Path,
+    exe_dir: Option<&Path>,
     default: Option<PathBuf>,
     home: Option<&Path>,
 ) -> Result<Config, String> {
-    let (path, source) = match locate(cli, cwd, default)? {
+    let (path, source) = match locate(cli, cwd, exe_dir, default)? {
         Located::Found(path, source) => (path, source),
         Located::NotFound { default: None } => return Ok(Config::default()),
         Located::NotFound {
@@ -1577,14 +1599,16 @@ mod tests {
     fn locate_priority() {
         let base = scratch("locate");
         let cwd = base.join("work");
+        let exe = base.join("bin");
         let default = base.join("home/rust-dos/rust-dos.conf");
         fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&exe).unwrap();
         fs::create_dir_all(default.parent().unwrap()).unwrap();
         fs::write(base.join("custom.conf"), "").unwrap();
 
         // Nothing yet: the default path is where the template goes
         assert_eq!(
-            locate(None, &cwd, Some(default.clone())),
+            locate(None, &cwd, None, Some(default.clone())),
             Ok(Located::NotFound {
                 default: Some(default.clone())
             })
@@ -1592,13 +1616,20 @@ mod tests {
 
         fs::write(&default, "").unwrap();
         assert_eq!(
-            locate(None, &cwd, Some(default.clone())),
+            locate(None, &cwd, None, Some(default.clone())),
             Ok(Located::Found(default.clone(), ConfigSource::UserDefault))
+        );
+
+        // A file next to the executable beats the per-user one
+        fs::write(exe.join(FILE_NAME), "").unwrap();
+        assert_eq!(
+            locate(None, &cwd, Some(&exe), Some(default.clone())),
+            Ok(Located::Found(exe.join(FILE_NAME), ConfigSource::ExeDir))
         );
 
         fs::write(cwd.join(FILE_NAME), "").unwrap();
         assert_eq!(
-            locate(None, &cwd, Some(default.clone())),
+            locate(None, &cwd, Some(&exe), Some(default.clone())),
             Ok(Located::Found(
                 cwd.join(FILE_NAME),
                 ConfigSource::WorkingDir
@@ -1610,6 +1641,7 @@ mod tests {
             locate(
                 Some(Path::new("../custom.conf")),
                 &cwd,
+                None,
                 Some(default.clone())
             ),
             Ok(Located::Found(
@@ -1617,7 +1649,7 @@ mod tests {
                 ConfigSource::CommandLine
             ))
         );
-        assert!(locate(Some(Path::new("missing.conf")), &cwd, Some(default)).is_err());
+        assert!(locate(Some(Path::new("missing.conf")), &cwd, None, Some(default)).is_err());
     }
 
     #[test]
@@ -2263,26 +2295,26 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
         let default = base.join("cfg/rust-dos/rust-dos.conf");
 
-        let config = load(None, &cwd, Some(default.clone()), None).unwrap();
+        let config = load(None, &cwd, None, Some(default.clone()), None).unwrap();
         assert!(config.created);
         assert_eq!(config.source.as_deref(), Some(default.as_path()));
         assert_eq!(fs::read_to_string(&default).unwrap(), TEMPLATE);
 
         // Second start uses the (edited) file and doesn't rewrite it
         fs::write(&default, "[emulator]\nscale=2\n").unwrap();
-        let config = load(None, &cwd, Some(default.clone()), None).unwrap();
+        let config = load(None, &cwd, None, Some(default.clone()), None).unwrap();
         assert!(!config.created);
         assert_eq!(config.scale, Some(2));
 
         // A file in the working directory wins, with paths relative to it
         fs::write(cwd.join(FILE_NAME), "[drives]\nA=disks/a floppy\nscale=9\n").unwrap();
-        let config = load(None, &cwd, Some(default.clone()), None).unwrap();
+        let config = load(None, &cwd, None, Some(default.clone()), None).unwrap();
         assert_eq!(config.scale, None);
         assert_eq!(config.drive(0).unwrap().path, cwd.join("disks/a"));
         assert_eq!(config.warnings.len(), 1);
         assert!(config.warnings[0].contains("rust-dos.conf: line 3"));
 
-        assert!(load(Some(Path::new("nope.conf")), &cwd, Some(default), None).is_err());
+        assert!(load(Some(Path::new("nope.conf")), &cwd, None, Some(default), None).is_err());
     }
 
     #[test]
@@ -2291,7 +2323,7 @@ mod tests {
         let blocker = base.join("file");
         fs::write(&blocker, "").unwrap();
         // The parent "directory" is a file, so creating it fails
-        let config = load(None, &base, Some(blocker.join("rust-dos.conf")), None).unwrap();
+        let config = load(None, &base, None, Some(blocker.join("rust-dos.conf")), None).unwrap();
         assert!(!config.created);
         assert_eq!(config.warnings.len(), 1);
         assert!(config.drives.is_empty());

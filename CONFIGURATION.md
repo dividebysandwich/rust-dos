@@ -25,7 +25,9 @@ finds, and never merges files:
 1. The file given with `-c/--config FILE`. If that file doesn't exist,
    rust-dos exits with an error.
 2. `rust-dos.conf` in the current working directory.
-3. `rust-dos.conf` in the per-user configuration directory:
+3. `rust-dos.conf` in the directory holding the rust-dos executable. Put one
+   there to make a portable install that leaves the user profile alone.
+4. `rust-dos.conf` in the per-user configuration directory:
 
    | Platform | Directory |
    |---|---|
