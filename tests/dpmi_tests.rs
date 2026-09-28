@@ -552,6 +552,297 @@ fn a_client_runs_a_child_that_is_a_client_too() {
     assert!(!cpu.bus.dpmi.active());
 }
 
+/// Where the DOS program keeps things: results (a word each), the "MS-DOS"
+/// entry point, handles and blocks, names, EXEC's parameter block, the DTA
+/// and a buffer DOS reads into directly.
+const D: u16 = 0x2200;
+const MSDOS_ENTRY: u16 = 0x2280;
+const HANDLE: u16 = 0x2288;
+const BLOCK_A: u16 = 0x228A;
+const BLOCK_B: u16 = 0x228C;
+const BLOCK_C: u16 = 0x228E;
+const VENDOR: u16 = 0x2410;
+const CHILD_NAME: u16 = 0x2460;
+const MESSAGE: u16 = 0x2470;
+const DTA: u16 = 0x2480;
+const DIRECT: u16 = 0x24F0;
+const FILE_SIZE: u32 = 20000;
+
+/// A client that calls DOS with selectors (INT 21h in protected mode) and
+/// uses the "MS-DOS" extensions, as Borland's RTM does. It ends with code
+/// 2Ah.
+fn dos_program(bits32: bool) -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, bits32, fail)?;
+        // The "MS-DOS" extensions, and the LDT through their selector: the
+        // descriptor of CS has the base INT 31h AX=0006h gives.
+        step(a, 30)?;
+        a.mov(ax, 0x168A)?;
+        a.mov(esi, VENDOR as u32)?;
+        a.int(0x2F)?;
+        a.mov(word_ptr(D), ax)?;
+        a.mov(dword_ptr(MSDOS_ENTRY), edi)?;
+        a.mov(word_ptr(MSDOS_ENTRY + if bits32 { 4 } else { 2 }), es)?;
+        a.mov(ax, 0x0100)?;
+        // CALL FAR [MSDOS_ENTRY], with a 48-bit pointer for a 32-bit client.
+        if bits32 {
+            a.db(&[0x66])?;
+        }
+        a.db(&[0xFF, 0x1E])?;
+        a.dw(&[MSDOS_ENTRY])?;
+        a.jc(fail)?;
+        a.mov(word_ptr(D + 2), ax)?;
+        a.mov(es, ax)?;
+        a.mov(bx, cs)?;
+        a.and(bx, 0xFFF8)?;
+        a.mov(ax, word_ptr(bx + 2).es())?;
+        a.mov(word_ptr(D + 4), ax)?;
+        a.mov(ax, 0x0006)?;
+        a.mov(bx, cs)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(D + 6), dx)?;
+        // A data alias of a data segment.
+        a.mov(ax, 0x000A)?;
+        a.mov(bx, ds)?;
+        a.int(0x31)?;
+        a.setb(byte_ptr(D + 8))?;
+        // Two blocks of memory for the file, and a file written from one
+        // (more than the transfer buffer holds) and read back into the
+        // other.
+        step(a, 31)?;
+        for block in [BLOCK_A, BLOCK_B] {
+            a.mov(ah, 0x48)?;
+            a.mov(ebx, FILE_SIZE.div_ceil(16))?;
+            a.int(0x21)?;
+            a.jc(fail)?;
+            a.mov(word_ptr(block as u32), ax)?;
+        }
+        a.mov(es, word_ptr(BLOCK_A as u32))?;
+        a.xor(di, di)?;
+        a.mov(cx, FILE_SIZE)?;
+        a.xor(al, al)?;
+        a.cld()?;
+        let mut fill = a.create_label();
+        a.set_label(&mut fill)?;
+        a.stosb()?;
+        a.add(al, 7)?;
+        a.loop_(fill)?;
+        step(a, 32)?;
+        a.mov(ah, 0x3C)?;
+        a.xor(cx, cx)?;
+        a.mov(edx, NAME as u32)?;
+        a.int(0x21)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(HANDLE), ax)?;
+        a.mov(word_ptr(D + 10), ax)?;
+        a.mov(ah, 0x40)?;
+        a.mov(bx, word_ptr(HANDLE))?;
+        a.mov(ecx, FILE_SIZE)?;
+        a.xor(edx, edx)?;
+        a.push(ds)?;
+        a.mov(ds, word_ptr(BLOCK_A as u32))?;
+        a.int(0x21)?;
+        a.pop(ds)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(D + 12), ax)?;
+        a.mov(ax, 0x4200)?;
+        a.xor(cx, cx)?;
+        a.xor(dx, dx)?;
+        a.int(0x21)?;
+        a.mov(ah, 0x3F)?;
+        a.mov(ecx, FILE_SIZE)?;
+        a.xor(edx, edx)?;
+        a.push(ds)?;
+        a.mov(ds, word_ptr(BLOCK_B as u32))?;
+        a.int(0x21)?;
+        a.pop(ds)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(D + 14), ax)?;
+        a.push(ds)?;
+        a.mov(es, word_ptr(BLOCK_B as u32))?;
+        a.mov(ds, word_ptr(BLOCK_A as u32))?;
+        a.xor(si, si)?;
+        a.xor(di, di)?;
+        a.mov(cx, FILE_SIZE)?;
+        a.repe().cmpsb()?;
+        a.pop(ds)?;
+        a.setne(byte_ptr(D + 16))?;
+        // Its start again, read into conventional memory.
+        a.mov(ax, 0x4200)?;
+        a.xor(cx, cx)?;
+        a.xor(dx, dx)?;
+        a.int(0x21)?;
+        a.mov(ah, 0x3F)?;
+        a.mov(ecx, 16)?;
+        a.mov(edx, DIRECT as u32)?;
+        a.int(0x21)?;
+        a.jc(fail)?;
+        a.mov(ax, word_ptr(DIRECT))?;
+        a.mov(word_ptr(D + 18), ax)?;
+        a.mov(ah, 0x3E)?;
+        a.int(0x21)?;
+        // A search with a DTA of its own, which INT 21h AH=2Fh gives back.
+        step(a, 33)?;
+        a.mov(ah, 0x1A)?;
+        a.mov(edx, DTA as u32)?;
+        a.int(0x21)?;
+        a.mov(ah, 0x4E)?;
+        a.xor(cx, cx)?;
+        a.mov(edx, NAME as u32)?;
+        a.int(0x21)?;
+        a.setb(byte_ptr(D + 20))?;
+        a.mov(ax, word_ptr(DTA + 0x1A))?;
+        a.mov(word_ptr(D + 22), ax)?;
+        a.mov(ah, 0x2F)?;
+        a.int(0x21)?;
+        a.mov(word_ptr(D + 24), es)?;
+        a.mov(word_ptr(D + 26), bx)?;
+        // Protected-mode vectors.
+        step(a, 34)?;
+        a.mov(ax, 0x2560)?;
+        a.push(ds)?;
+        a.push(cs)?;
+        a.pop(ds)?;
+        a.mov(edx, 0x1234)?;
+        a.int(0x21)?;
+        a.pop(ds)?;
+        a.mov(ax, 0x3560)?;
+        a.int(0x21)?;
+        a.mov(word_ptr(D + 28), bx)?;
+        a.mov(word_ptr(D + 30), es)?;
+        // Segments DOS returns, as selectors: the InDOS flag's and the
+        // PSP.
+        step(a, 35)?;
+        a.mov(ah, 0x34)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x0006)?;
+        a.mov(bx, es)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(D + 32), dx)?;
+        a.mov(word_ptr(D + 34), cx)?;
+        a.mov(ah, 0x62)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x0006)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(D + 36), dx)?;
+        a.mov(word_ptr(D + 38), cx)?;
+        // A block of more than 64 KB: its limit, shrunk, then freed.
+        step(a, 36)?;
+        a.mov(ah, 0x48)?;
+        a.mov(ebx, 0x1100)?;
+        a.int(0x21)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(BLOCK_C), ax)?;
+        a.db(&[0x66])?;
+        a.lsl(ax, word_ptr(BLOCK_C))?;
+        a.mov(dword_ptr(D + 40), eax)?;
+        a.mov(ah, 0x4A)?;
+        a.mov(es, word_ptr(BLOCK_C))?;
+        a.mov(ebx, 0x100)?;
+        a.int(0x21)?;
+        a.setb(byte_ptr(D + 44))?;
+        a.db(&[0x66])?;
+        a.lsl(ax, word_ptr(BLOCK_C))?;
+        a.mov(dword_ptr(D + 46), eax)?;
+        a.mov(ah, 0x49)?;
+        a.int(0x21)?;
+        a.setb(byte_ptr(D + 50))?;
+        a.mov(ax, 0x0006)?;
+        a.mov(bx, word_ptr(BLOCK_C))?;
+        a.int(0x31)?;
+        a.setb(byte_ptr(D + 52))?;
+        // EXEC, with the parameter block in the client's format.
+        step(a, 37)?;
+        a.push(ds)?;
+        a.pop(es)?;
+        a.mov(di, PARAMS as u32)?;
+        a.mov(cx, 16)?;
+        a.xor(ax, ax)?;
+        a.rep().stosw()?;
+        let pointers: [(u16, u16); 3] = if bits32 { [(0, TAIL), (8, FCB), (16, FCB)] } else { [(2, TAIL), (6, FCB), (10, FCB)] };
+        for (at, target) in pointers {
+            a.mov(word_ptr(PARAMS + at), target as u32)?;
+            a.mov(word_ptr(PARAMS + at + if bits32 { 4 } else { 2 }), ds)?;
+        }
+        a.mov(ax, 0x4B00)?;
+        a.mov(edx, CHILD_NAME as u32)?;
+        a.mov(ebx, PARAMS as u32)?;
+        a.int(0x21)?;
+        a.setb(byte_ptr(D + 54))?;
+        a.mov(ah, 0x4D)?;
+        a.int(0x21)?;
+        a.mov(word_ptr(D + 56), ax)?;
+        // A string to the screen.
+        step(a, 38)?;
+        a.mov(ah, 0x09)?;
+        a.mov(edx, MESSAGE as u32)?;
+        a.int(0x21)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let mut image = com(&[(0x100, main)]);
+    let at = |offset: u16| (offset - 0x100) as usize;
+    for (offset, text) in [
+        (NAME, &b"OUT.DAT\0"[..]),
+        (VENDOR, b"MS-DOS\0"),
+        (CHILD_NAME, b"CHILD.COM\0"),
+        (MESSAGE, b"TRANSLATED$"),
+        (TAIL, &[0x00, 0x0D]),
+    ] {
+        image[at(offset)..at(offset) + text.len()].copy_from_slice(text);
+    }
+    image
+}
+
+fn check_dos(bits32: bool) {
+    let test = if bits32 { "dos32" } else { "dos16" };
+    let (mut cpu, psp) = machine(test, &[("T.COM", dos_program(bits32)), ("CHILD.COM", child_program())], "T.COM");
+    assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
+    let w = |offset: u16| word(&cpu, psp, offset);
+    assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", w(STEP));
+    // The extensions are there, with a selector for the LDT.
+    assert_eq!(w(D) & 0xFF, 0);
+    assert_eq!(w(D + 2) & 7, 7);
+    assert_eq!(w(D + 4), w(D + 6));
+    assert_eq!(w(D + 8) & 0xFF, 0);
+    // The file went through the transfer buffer in pieces, both ways.
+    let file = fs::read(PathBuf::from("target/test_dpmi").join(test).join("OUT.DAT")).unwrap();
+    assert_eq!(file.len(), FILE_SIZE as usize);
+    assert!(file.iter().enumerate().all(|(i, &b)| b == (i * 7) as u8));
+    assert_eq!((w(D + 12), w(D + 14), w(D + 16) & 0xFF), (FILE_SIZE as u16, FILE_SIZE as u16, 0));
+    assert_eq!(w(D + 18), 0x0700);
+    // The search filled the client's DTA.
+    assert_eq!((w(D + 20) & 0xFF, w(D + 22)), (0, FILE_SIZE as u16));
+    let name = psp as usize * 16 + DTA as usize + 0x1E;
+    assert_eq!(&cpu.bus.ram()[name..name + 8], b"OUT.DAT\0");
+    assert_eq!((w(D + 24), w(D + 26)), (w(DSSEL), DTA));
+    assert_eq!((w(D + 28), w(D + 30)), (0x1234, w(CSSEL)));
+    let base = |low: u16| (w(low + 2) as u32) << 16 | w(low) as u32;
+    assert_eq!(base(D + 32), rust_dos::dos_data::SEGMENT as u32 * 16);
+    assert_eq!(base(D + 36), psp as u32 * 16);
+    // One selector for all of it for a 32-bit client; a 16-bit one's are
+    // 64 KB each.
+    let limits = if bits32 { (0x10FFF, 0xFFF) } else { (0xFFFF, 0xFFF) };
+    assert_eq!((base(D + 40), base(D + 46)), limits);
+    assert_eq!((w(D + 44) & 0xFF, w(D + 50) & 0xFF, w(D + 52) & 0xFF), (0, 0, 1));
+    assert_eq!((w(D + 54) & 0xFF, w(D + 56)), (0, 0x33));
+    let screen: Vec<u8> = (0..4000).step_by(2).map(|i| cpu.bus.read_8(0xB8000 + i)).collect();
+    assert!(screen.windows(10).any(|w| w == b"TRANSLATED"));
+    assert!(!cpu.bus.dpmi.active());
+}
+
+#[test]
+fn a_16_bit_client_calls_dos_with_selectors() {
+    check_dos(false);
+}
+
+#[test]
+fn a_32_bit_client_calls_dos_with_selectors() {
+    check_dos(true);
+}
+
 #[test]
 fn a_client_goes_on_after_a_state_is_loaded() {
     let (mut cpu, psp) = machine("state", &[("T.COM", services_program(true))], "T.COM");

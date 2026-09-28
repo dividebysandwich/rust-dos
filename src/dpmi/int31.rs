@@ -55,7 +55,7 @@ pub(super) fn call(cpu: &mut Cpu, mut ctx: Context) {
 
 /// An offset in the register `reg`: 32 bits for a 32-bit client, 16
 /// otherwise.
-fn offset(ctx: &Context, reg: usize, bits32: bool) -> u32 {
+pub(super) fn offset(ctx: &Context, reg: usize, bits32: bool) -> u32 {
     if bits32 { ctx.gpr[reg] } else { ctx.gpr[reg] & 0xFFFF }
 }
 
@@ -71,7 +71,7 @@ fn set_pair(ctx: &mut Context, high: usize, low: usize, value: u32) {
 
 /// Set an offset register: all of it for a 32-bit client, the low half
 /// otherwise.
-fn set_offset(ctx: &mut Context, reg: usize, bits32: bool, value: u32) {
+pub(super) fn set_offset(ctx: &mut Context, reg: usize, bits32: bool, value: u32) {
     if bits32 {
         ctx.gpr[reg] = value;
     } else {
@@ -128,18 +128,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
         },
         // A descriptor for the real-mode segment BX, the same one each time.
         0x0002 => {
-            let segment = ctx.reg16(EBX);
-            let known = client(cpu).segments.iter().find(|&&(s, _)| s == segment).map(|&(_, sel)| sel);
-            let selector = match known {
-                Some(selector) => selector,
-                None => {
-                    let desc = descriptor((segment as u32) << 4, 0xFFFF, DATA3, 0);
-                    let index = allocate(cpu, 1, desc, LDT_FIXED).ok_or(DESCRIPTOR_UNAVAILABLE)?;
-                    let selector = Client::selector(index);
-                    client(cpu).segments.push((segment, selector));
-                    selector
-                }
-            };
+            let selector = segment_selector(cpu, ctx.reg16(EBX)).ok_or(DESCRIPTOR_UNAVAILABLE)?;
             ctx.set_reg16(EAX, selector);
         }
         // The selector increment.
@@ -173,15 +162,14 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             }
             with_desc(cpu, ctx.reg16(EBX), |d| (d & !0x00D0_FF00_0000_0000) | rights)?;
         }
-        // A data descriptor for the code segment BX.
+        // A data descriptor for the segment BX: for code, a writable one;
+        // data stays as it is. DPMI 0.9 says BX is code, but DPMI 1.0
+        // calls that a mistake, and Borland's RTM aliases data with it.
         0x000A => {
             let (index, _) = own(cpu, ctx.reg16(EBX))?;
             let ldt = client(cpu).block;
             let desc = read_desc(&cpu.bus, ldt, index);
-            if !Descriptor(desc).is_code() {
-                return Err(INVALID_SELECTOR);
-            }
-            let alias = (desc & !(0xFu64 << 40)) | 0x2u64 << 40;
+            let alias = if Descriptor(desc).is_code() { (desc & !(0xFu64 << 40)) | 0x2u64 << 40 } else { desc };
             let index = allocate(cpu, 1, alias, LDT_CLIENT).ok_or(DESCRIPTOR_UNAVAILABLE)?;
             ctx.set_reg16(EAX, Client::selector(index));
         }
@@ -224,8 +212,13 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             write_desc(&mut cpu.bus, ldt, index, descriptor(0, 0, DATA3, if bits32 { BIG } else { 0 }));
         }
         0x0100 => dos_allocate(cpu, ctx)?,
-        0x0101 => dos_free(cpu, ctx)?,
-        0x0102 => dos_resize(cpu, ctx)?,
+        0x0101 => dos_free(cpu, ctx.reg16(EDX))?,
+        0x0102 => {
+            if let Err((code, largest)) = dos_resize(cpu, ctx.reg16(EDX), ctx.reg16(EBX)) {
+                ctx.set_reg16(EBX, largest);
+                return Err(code);
+            }
+        }
         // The real-mode vector BL in CX:DX.
         0x0200 => {
             let vector = super::read_ivt(&cpu.bus, ctx.gpr[EBX] as u8);
@@ -363,21 +356,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
                 return Err(INVALID_VALUE);
             }
             let i = client(cpu).memory.iter().position(|&(h, _, _)| h == handle).ok_or(INVALID_HANDLE)?;
-            let (_, base, old) = client(cpu).memory[i];
-            let len = size.div_ceil(0x1000) * 0x1000;
-            let base = if cpu.bus.xms.resize_dpmi(base, len, end) {
-                if len > old {
-                    cpu.bus.fill_ram((base + old) as usize..(base + len) as usize, 0);
-                }
-                base
-            } else {
-                let new = cpu.bus.xms.take_dpmi(len, end).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?;
-                cpu.bus.fill_ram(new as usize..(new + len) as usize, 0);
-                cpu.bus.copy_ram(base as usize, new as usize, old.min(len) as usize);
-                cpu.bus.xms.release_dpmi(base);
-                new
-            };
-            client(cpu).memory[i] = (handle, base, len);
+            let base = resize_memory(cpu, i, size)?;
             set_pair(ctx, EBX, ECX, base);
         }
         // Locking and unlocking memory, and demand paging: the memory is
@@ -410,6 +389,41 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
     Ok(())
 }
 
+/// The selector of INT 31h AX=0002h for the real-mode segment `segment`:
+/// the same one each time.
+pub(super) fn segment_selector(cpu: &mut Cpu, segment: u16) -> Option<u16> {
+    let known = client(cpu).segments.iter().find(|&&(s, _)| s == segment).map(|&(_, sel)| sel);
+    if known.is_some() {
+        return known;
+    }
+    let desc = descriptor((segment as u32) << 4, 0xFFFF, DATA3, 0);
+    let selector = Client::selector(allocate(cpu, 1, desc, LDT_FIXED)?);
+    client(cpu).segments.push((segment, selector));
+    Some(selector)
+}
+
+/// Resize the memory block `memory[i]` to `size` bytes, where it is or
+/// elsewhere, with what it held. Returns its address.
+pub(super) fn resize_memory(cpu: &mut Cpu, i: usize, size: u32) -> std::result::Result<u32, u16> {
+    let end = cpu.bus.ram().len() as u32;
+    let (handle, base, old) = client(cpu).memory[i];
+    let len = size.div_ceil(0x1000) * 0x1000;
+    let base = if cpu.bus.xms.resize_dpmi(base, len, end) {
+        if len > old {
+            cpu.bus.fill_ram((base + old) as usize..(base + len) as usize, 0);
+        }
+        base
+    } else {
+        let new = cpu.bus.xms.take_dpmi(len, end).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?;
+        cpu.bus.fill_ram(new as usize..(new + len) as usize, 0);
+        cpu.bus.copy_ram(base as usize, new as usize, old.min(len) as usize);
+        cpu.bus.xms.release_dpmi(base);
+        new
+    };
+    client(cpu).memory[i] = (handle, base, len);
+    Ok(base)
+}
+
 /// Write `bytes` at ES:`at`, through the client's ES.
 fn write_buffer(cpu: &mut Cpu, at: u32, bytes: &[u8]) -> CpuResult {
     for (i, &byte) in bytes.iter().enumerate() {
@@ -437,7 +451,7 @@ fn dos_allocate(cpu: &mut Cpu, ctx: &mut Context) -> Result {
         let _ = crate::mcb::free(&mut cpu.bus, segment);
         return Err(DESCRIPTOR_UNAVAILABLE);
     };
-    set_dos_descriptors(cpu, first, segment, paras);
+    set_tiles(cpu, first, (segment as u32) << 4, paras as u32 * 16);
     client(cpu).dos_blocks.push((segment, Client::selector(first), count as u16));
     ctx.set_reg16(EAX, segment);
     ctx.set_reg16(EDX, Client::selector(first));
@@ -446,30 +460,33 @@ fn dos_allocate(cpu: &mut Cpu, ctx: &mut Context) -> Result {
 
 /// The selectors a DOS block of `paras` paragraphs has: one per 64 KB.
 fn dos_selectors(paras: u16) -> usize {
-    (paras as usize * 16).div_ceil(0x10000).max(1)
+    tiles(paras as u32 * 16)
 }
 
-/// The descriptors of a DOS block at `segment`, from LDT index `first`:
+/// The selectors of `bytes` of memory tiled in 64 KB pieces.
+pub(super) fn tiles(bytes: u32) -> usize {
+    (bytes as usize).div_ceil(0x10000).max(1)
+}
+
+/// The descriptors of `bytes` of memory at `base`, from LDT index `first`:
 /// each 64 KB of it, or what is left.
-fn set_dos_descriptors(cpu: &mut Cpu, first: usize, segment: u16, paras: u16) {
+pub(super) fn set_tiles(cpu: &mut Cpu, first: usize, base: u32, bytes: u32) {
     let ldt = client(cpu).block;
-    let bytes = paras as u32 * 16;
-    for i in 0..dos_selectors(paras) {
+    for i in 0..tiles(bytes) {
         let offset = i as u32 * 0x10000;
         let limit = (bytes - offset).min(0x10000).max(1) - 1;
-        write_desc(&mut cpu.bus, ldt, first + i, descriptor(((segment as u32) << 4) + offset, limit, DATA3, 0));
+        write_desc(&mut cpu.bus, ldt, first + i, descriptor(base + offset, limit, DATA3, 0));
     }
 }
 
-/// The DOS block with the selector DX: its place in `dos_blocks`.
-fn dos_block(cpu: &mut Cpu, ctx: &Context) -> std::result::Result<usize, u16> {
-    let selector = ctx.reg16(EDX) | 3;
-    client(cpu).dos_blocks.iter().position(|&(_, sel, _)| sel == selector).ok_or(INVALID_SELECTOR)
+/// The DOS block with the selector `selector`: its place in `dos_blocks`.
+pub(super) fn dos_block(cpu: &mut Cpu, selector: u16) -> Option<usize> {
+    client(cpu).dos_blocks.iter().position(|&(_, sel, _)| sel == selector | 3)
 }
 
-/// Free the DOS block with the selector DX, and its selectors.
-fn dos_free(cpu: &mut Cpu, ctx: &mut Context) -> Result {
-    let i = dos_block(cpu, ctx)?;
+/// Free the DOS block with the selector `selector`, and its selectors.
+pub(super) fn dos_free(cpu: &mut Cpu, selector: u16) -> Result {
+    let i = dos_block(cpu, selector).ok_or(INVALID_SELECTOR)?;
     let (segment, selector, count) = client(cpu).dos_blocks[i];
     crate::mcb::free(&mut cpu.bus, segment).map_err(|e| e as u16)?;
     client(cpu).dos_blocks.remove(i);
@@ -480,33 +497,42 @@ fn dos_free(cpu: &mut Cpu, ctx: &mut Context) -> Result {
     Ok(())
 }
 
-/// Resize the DOS block with the selector DX to BX paragraphs, with the
-/// selectors it then needs (after its first, which don't have to be free
-/// when it shrinks).
-fn dos_resize(cpu: &mut Cpu, ctx: &mut Context) -> Result {
-    let i = dos_block(cpu, ctx)?;
-    let paras = ctx.reg16(EBX);
+/// Resize the DOS block with the selector `selector` to `paras`
+/// paragraphs, with the selectors it then needs (`retile`). A failure has
+/// the paragraphs there are with its error code.
+pub(super) fn dos_resize(cpu: &mut Cpu, selector: u16, paras: u16) -> std::result::Result<(), (u16, u16)> {
+    let i = dos_block(cpu, selector).ok_or((INVALID_SELECTOR, paras))?;
     let (segment, selector, count) = client(cpu).dos_blocks[i];
     let (first, count) = ((selector >> 3) as usize, count as usize);
-    let needed = dos_selectors(paras);
+    if !can_retile(cpu, first, count, dos_selectors(paras)) {
+        return Err((DESCRIPTOR_UNAVAILABLE, paras));
+    }
+    crate::mcb::resize(&mut cpu.bus, segment, paras).map_err(|largest| (DOS_NO_MEMORY, largest))?;
+    client(cpu).dos_blocks[i].2 = retile(cpu, first, count, (segment as u32) << 4, paras as u32 * 16) as u16;
+    Ok(())
+}
+
+/// Whether memory tiled with `count` selectors from LDT index `first` can
+/// have `needed` instead: the ones after it must be free.
+pub(super) fn can_retile(cpu: &mut Cpu, first: usize, count: usize, needed: usize) -> bool {
     let c = client(cpu);
-    if needed > count && (first + count..first + needed).any(|index| c.ldt.get(index) != Some(&LDT_FREE)) {
-        return Err(DESCRIPTOR_UNAVAILABLE);
-    }
-    if let Err(largest) = crate::mcb::resize(&mut cpu.bus, segment, paras) {
-        ctx.set_reg16(EBX, largest);
-        return Err(DOS_NO_MEMORY);
-    }
+    needed <= count || (first + count..first + needed).all(|index| c.ldt.get(index) == Some(&LDT_FREE))
+}
+
+/// Tile `bytes` of memory at `base` with the selectors from LDT index
+/// `first`, which were `count` (`can_retile`): those it needs no more are
+/// freed. Returns how many it has.
+pub(super) fn retile(cpu: &mut Cpu, first: usize, count: usize, base: u32, bytes: u32) -> usize {
+    let needed = tiles(bytes);
     let c = client(cpu);
     for index in first + count..first + needed {
         c.ldt[index] = LDT_FIXED;
     }
-    c.dos_blocks[i].2 = needed as u16;
     for index in first + needed..first + count {
         free_entry(cpu, index);
     }
-    set_dos_descriptors(cpu, first, segment, paras);
-    Ok(())
+    set_tiles(cpu, first, base, bytes);
+    needed
 }
 
 /// The call structure of INT 31h AX=0300h-0302h and the callbacks, at

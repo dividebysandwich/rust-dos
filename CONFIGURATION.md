@@ -180,11 +180,14 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   DOS prompt.
 * `dpmi` gives DOS extenders a DPMI 0.9 host, as a memory manager or
   Windows provides one: `true` (the default) or `false`. DOS/4GW,
-  PMODE/W, DOS/32A, Tran's PMODE and DJGPP's programs then run their
+  PMODE/W, DOS/32A, Tran's PMODE, DJGPP and Borland's RTM (protected-mode
+  Borland Pascal and C++ programs such as Jazz Jackrabbit) then run their
   programs as its clients rather than switching the processor
-  themselves, and take extended memory from it as they need it, so a
-  DOS/4GW program can start another DOS extender's (demos such as Scoop's
-  Luminous do). Off, they run as they do on plain DOS with HIMEM. A
+  themselves or bringing a host of their own, and take extended memory
+  from it as they need it, so a DOS/4GW program can start another DOS
+  extender's (demos such as Scoop's Luminous do). As under Windows, its
+  clients can call DOS with INT 21h in protected mode, with selectors
+  for their buffers. Off, they run as they do on plain DOS with HIMEM. A
   change takes effect for the programs started after it.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of

@@ -26,7 +26,11 @@
 //! (`hook`). Clients nest: a DOS/4GW program's child becomes a client of
 //! its own while the parent waits in real mode for EXEC to return, and
 //! the host forgets a client when DOS ends its process (`process_ended`).
+//! DOS calls a client makes with INT 21h in protected mode reach DOS
+//! through the host's translation of their pointers (dos.rs), as under
+//! Windows.
 
+mod dos;
 mod int31;
 
 use crate::bus::Bus;
@@ -61,6 +65,8 @@ const RET_EXCEPTION: u16 = 0x2028;
 const RAW_TO_RM: u16 = 0x202C;
 /// Saving and restoring the state (INT 31h AX=0305h), far-called.
 const SAVE_PM: u16 = 0x2030;
+/// The "MS-DOS" extensions' entry point (INT 2Fh AX=168Ah), far-called.
+const MSDOS_API: u16 = 0x2034;
 /// Per vector: the host's handler in the real-mode vector table for the
 /// interrupts it takes to protected mode (`hook`).
 const RM_INT: u16 = 0x2400;
@@ -91,6 +97,7 @@ const T_RET_CALLBACK: u8 = 0x14;
 const T_RET_EXCEPTION: u8 = 0x15;
 const T_RAW_TO_RM: u8 = 0x16;
 const T_SAVE_PM: u8 = 0x17;
+const T_MSDOS_API: u8 = 0x18;
 
 /// The host's GDT: its code at level 0 (the IDT's gates lead there), a
 /// flat data segment for its stack, the TSS, the running client's LDT, its
@@ -124,9 +131,9 @@ const CLIENT_BLOCK: u32 = LDT_SIZE + LPMS_SIZE;
 /// above them.
 const RESERVED_LDT: usize = 16;
 /// The paragraphs of conventional memory a client gives the host (INT
-/// 2Fh AX=1687h's SI): the real-mode stack the host calls real-mode code
-/// on for it.
-const PRIVATE_PARAS: u16 = 0x0100;
+/// 2Fh AX=1687h's SI): the transfer buffer of its DOS calls (dos.rs), and
+/// above it the real-mode stack the host calls real-mode code on for it.
+const PRIVATE_PARAS: u16 = 0x0300;
 
 /// What an LDT entry is used for.
 const LDT_FREE: u8 = 0;
@@ -235,6 +242,14 @@ pub struct Client {
     /// The environment's segment, which PSP:2Ch holds as a selector while
     /// the client runs.
     env: u16,
+    /// The DTA the client set in protected mode (INT 21h AH=1Ah), if it
+    /// did: DOS's own is somewhere else.
+    dta: Option<(u16, u32)>,
+    /// The selector of its LDT the "MS-DOS" extensions gave it, or 0.
+    ldt_alias: u16,
+    /// Memory blocks of INT 21h AH=48h: the first of their selectors, how
+    /// many, and their handle in `memory`.
+    blocks: Vec<(u16, u16, u32)>,
 }
 
 impl Client {
@@ -307,22 +322,26 @@ pub struct Frame {
     ctx: Context,
     vector: u8,
     /// `F_TRANSLATE`: the real-mode call structure (selector, offset).
-    /// `F_CALLBACK`: the slot.
+    /// `F_CALLBACK`: the slot. `F_DOS`: `dos::DIRECT` or
+    /// `dos::SWAPPED_DTA`, and the bytes read or written so far.
     sel: u16,
     off: u32,
-    /// The client's `rm_sp`, `lpms_esp` and callback stack base before.
+    /// The client's `rm_sp`, `lpms_esp` and callback stack base before;
+    /// for `F_DOS`, `base` is DOS's DTA before a search (segment:offset).
     rm_sp: u32,
     lpms: u32,
     base: u32,
 }
 
-/// Frame kinds. In real mode: an interrupt reflected there, and a real-mode
-/// call for INT 31h AX=0300h-0302h. In protected mode: a handler called
-/// for an interrupt in real mode, and a callback's procedure.
+/// Frame kinds. In real mode: an interrupt reflected there, a real-mode
+/// call for INT 31h AX=0300h-0302h, and a DOS call translated (dos.rs). In
+/// protected mode: a handler called for an interrupt in real mode, and a
+/// callback's procedure.
 const F_REFLECT: u8 = 0;
 const F_TRANSLATE: u8 = 1;
 const F_HWINT: u8 = 2;
 const F_CALLBACK: u8 = 3;
+const F_DOS: u8 = 4;
 
 /// The host's state.
 #[derive(Debug)]
@@ -399,7 +418,9 @@ impl Dpmi {
 /// but TERMINATE's.
 pub fn install_rom(bus: &mut Bus) {
     let at = |offset: u16| ROM_BASE as usize + offset as usize;
-    if bus.read_8(at(PM_DEFAULT_EXC + 4 * (EXCEPTIONS as u16 - 1)) + 2) == T_DEFAULT_EXC {
+    if bus.read_8(at(PM_DEFAULT_EXC + 4 * (EXCEPTIONS as u16 - 1)) + 2) == T_DEFAULT_EXC
+        && bus.read_8(at(MSDOS_API) + 2) == T_MSDOS_API
+    {
         return;
     }
     let trap = |kind: u8| [0xFE, 0x3B, kind, 0x90];
@@ -413,6 +434,7 @@ pub fn install_rom(bus: &mut Bus) {
         (RET_EXCEPTION, T_RET_EXCEPTION),
         (RAW_TO_RM, T_RAW_TO_RM),
         (SAVE_PM, T_SAVE_PM),
+        (MSDOS_API, T_MSDOS_API),
     ] {
         bus.write_rom(at(offset), &trap(kind));
     }
@@ -464,7 +486,7 @@ pub fn accepts(cpu: &Cpu, kind: u8) -> bool {
         T_RAW_TO_PM | T_SAVE_RM => !cpu.pe() && active,
         T_IDT => cpu.pm() && cpu.cpl == 0 && active,
         T_DEFAULT_INT | T_DEFAULT_EXC | T_RET_HWINT | T_RET_CALLBACK | T_RET_EXCEPTION | T_RAW_TO_RM
-        | T_SAVE_PM => cpu.pm() && cpu.cpl == 3 && active,
+        | T_SAVE_PM | T_MSDOS_API => cpu.pm() && cpu.cpl == 3 && active,
         _ => false,
     }
 }
@@ -512,6 +534,7 @@ pub fn service(cpu: &mut Cpu, kind: u8) {
                 cpu.raise(fault);
             }
         }
+        T_MSDOS_API => msdos_api(cpu),
         _ => {}
     }
 }
@@ -761,6 +784,9 @@ fn enter(cpu: &mut Cpu) {
         cb_sel: 0,
         segs: [0; 4],
         env: 0,
+        dta: None,
+        ldt_alias: 0,
+        blocks: Vec::new(),
     });
     let real = |segment: u16, access: u8, limit: u32| descriptor((segment as u32) << 4, limit, access, 0);
     let (ds, ss) = (cpu.ds(), cpu.ss());
@@ -1049,10 +1075,54 @@ fn default_interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
             ctx.set_reg16(EAX, 0);
             resume(cpu, &ctx);
         }
-        // Vendor extensions: none (AL stays 8Ah).
-        (0x2F, 0x168A) => resume(cpu, &ctx),
+        // Vendor extensions: Windows' "MS-DOS" ones, which Borland's RTM
+        // needs; for another vendor AL stays 8Ah.
+        (0x2F, 0x168A) => {
+            if vendor(cpu, &ctx) == b"MS-DOS" {
+                let bits32 = client(cpu).bits32;
+                ctx.gpr[EAX] &= !0xFF;
+                ctx.set_sel(Seg::ES, HOST_CODE3);
+                ctx.gpr[EDI] = if bits32 { MSDOS_API as u32 } else { (ctx.gpr[EDI] & !0xFFFF) | MSDOS_API as u32 };
+            }
+            resume(cpu, &ctx);
+        }
+        (0x21, _) if !is_irq(cpu, 0x21) => dos::int21(cpu, ctx),
         _ => reflect(cpu, vector, ctx),
     }
+}
+
+/// The vendor name at DS:(E)SI in the client's context `ctx`, without its
+/// terminating zero (at most 32 bytes of it).
+fn vendor(cpu: &Cpu, ctx: &Context) -> Vec<u8> {
+    let bits32 = cpu.bus.dpmi.clients.last().is_some_and(|c| c.bits32);
+    let Some(base) = selector_base(cpu, ctx.sel(Seg::DS)) else { return Vec::new() };
+    let at = base.wrapping_add(if bits32 { ctx.gpr[ESI] } else { ctx.gpr[ESI] & 0xFFFF });
+    (0..32).map(|i| cpu.bus.read_8(at.wrapping_add(i) as usize)).take_while(|&b| b != 0).collect()
+}
+
+/// The "MS-DOS" extensions' entry point, far-called: AX=0100h gives the
+/// client a selector for its LDT in AX, with which it changes descriptors
+/// itself, as Windows lets it; there is nothing else (CF set).
+fn msdos_api(cpu: &mut Cpu) {
+    let alias = if cpu.ax() == 0x0100 { ldt_alias(cpu) } else { None };
+    if let Some(selector) = alias {
+        cpu.set_ax(selector);
+    }
+    cpu.set_cpu_flag(CpuFlags::CF, alias.is_none());
+    if let Err(fault) = cpu.ret_far_pm(frame_size(cpu) as u8, 0) {
+        cpu.raise(fault);
+    }
+}
+
+/// The running client's selector for its LDT, made the first time.
+fn ldt_alias(cpu: &mut Cpu) -> Option<u16> {
+    let c = client(cpu);
+    if c.ldt_alias == 0 {
+        let desc = descriptor(c.block, LDT_SIZE - 1, DATA3, 0);
+        let index = allocate(cpu, 1, desc, LDT_FIXED)?;
+        client(cpu).ldt_alias = Client::selector(index);
+    }
+    Some(client(cpu).ldt_alias)
 }
 
 /// The running client's context `ctx` in protected mode goes on after
@@ -1077,26 +1147,30 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
         resume(cpu, &ctx);
         return;
     }
+    let ss = client(cpu).rm_stack;
+    let mut rm = ctx;
+    rm.seg = [ss, 0, ss, ss, 0, 0];
+    call_real(cpu, Frame { kind: F_REFLECT, ctx, vector, ..Frame::default() }, target, rm);
+}
+
+/// Call the real-mode interrupt handler at `target` for the running client
+/// in `frame.ctx`, with the registers and data segments of `rm`, on the
+/// client's real-mode stack: when it returns, `rm_return` goes on as
+/// `frame` says.
+fn call_real(cpu: &mut Cpu, mut frame: Frame, target: u32, mut rm: Context) {
     let client = client(cpu);
-    let frame = Frame {
-        kind: F_REFLECT,
-        client: client.id,
-        ctx,
-        vector,
-        rm_sp: client.rm_sp,
-        lpms: client.lpms_esp,
-        ..Frame::default()
-    };
-    keep_lpms(client, &ctx);
+    frame.client = client.id;
+    frame.rm_sp = client.rm_sp;
+    frame.lpms = client.lpms_esp;
+    keep_lpms(client, &frame.ctx);
     let (ss, sp) = (client.rm_stack, client.rm_sp);
     cpu.bus.dpmi.frames.push(frame);
-    let flags = ctx.eflags & 0xFFFF & !IOPL3;
-    let sp = push_real(cpu, ss, sp, &[flags as u16, ROM_SEG, RM_RETURN]);
-    let mut rm = ctx;
-    rm.gpr[ESP] = sp;
+    let flags = frame.ctx.eflags & 0xFFFF & !IOPL3;
+    rm.gpr[ESP] = push_real(cpu, ss, sp, &[flags as u16, ROM_SEG, RM_RETURN]);
     rm.eip = target & 0xFFFF;
     rm.eflags = flags & !(CpuFlags::IF | CpuFlags::TF).bits();
-    rm.seg = [ss, (target >> 16) as u16, ss, ss, 0, 0];
+    rm.set_sel(Seg::CS, (target >> 16) as u16);
+    rm.set_sel(Seg::SS, ss);
     enter_rm(cpu, &rm);
 }
 
@@ -1114,10 +1188,12 @@ fn push_real(cpu: &mut Cpu, ss: u16, sp: u32, values: &[u16]) -> u32 {
 
 /// Real-mode code the host called for a client returned (to `RM_RETURN`).
 fn rm_return(cpu: &mut Cpu) {
-    let Some(frame) = take_frame(cpu, &[F_REFLECT, F_TRANSLATE]) else { return };
+    let Some(frame) = take_frame(cpu, &[F_REFLECT, F_TRANSLATE, F_DOS]) else { return };
     let rm = Context::of(cpu);
     let mut ctx = frame.ctx;
-    if frame.kind == F_TRANSLATE {
+    if frame.kind == F_DOS {
+        return dos::returned(cpu, frame, &rm);
+    } else if frame.kind == F_TRANSLATE {
         int31::store_call_structure(cpu, frame.sel, frame.off, &rm);
         ctx.set_cf(false);
     } else if !is_irq(cpu, frame.vector) {
@@ -1502,7 +1578,7 @@ fn stop_host(cpu: &mut Cpu) {
 crate::state_fields!(Context { gpr, eip, eflags, seg });
 crate::state_fields!(Client {
     id, psp, bits32, block, ldt, segments, vectors, exceptions, memory, dos_blocks,
-    rm_stack, rm_sp, lpms_sel, lpms_esp, cb_sel, segs, env,
+    rm_stack, rm_sp, lpms_sel, lpms_esp, cb_sel, segs, env, dta, ldt_alias, blocks,
 });
 crate::state_fields!(Callback { client, proc_sel, proc_off, struct_sel, struct_off });
 crate::state_fields!(Frame { kind, client, ctx, vector, sel, off, rm_sp, lpms, base });

@@ -14,7 +14,7 @@ const SOUND_VERSION: u16 = 2;
 const DOS_VERSION: u16 = 4;
 const VOODOO_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 1;
-const DPMI_VERSION: u16 = 1;
+const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
 
 /// Save or load each of a list of fields.
