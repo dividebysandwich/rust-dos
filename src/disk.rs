@@ -235,20 +235,38 @@ impl DriveKind {
         let mut layout = FatLayout {
             bytes_per_sector,
             sectors_per_cluster,
-            clusters,
+            clusters: clusters as u32,
             reserved_sectors: 1,
             fats: 2,
             root_entries,
-            sectors_per_fat: fat_bytes.div_ceil(bytes_per_sector as u32) as u16,
+            sectors_per_fat: fat_bytes.div_ceil(bytes_per_sector as u32),
             sectors_per_track,
             heads,
             hidden_sectors,
             media: self.media_descriptor(),
             sectors: 0,
+            fat32: None,
         };
-        layout.sectors = layout.first_data_sector() as u32 + clusters as u32 * sectors_per_cluster as u32;
+        layout.sectors = layout.first_data_sector() + clusters as u32 * sectors_per_cluster as u32;
         layout
     }
+}
+
+/// The free space of a drive as the functions of before FAT32 (INT 21h
+/// AH=1Bh, 1Ch and 36h) can tell it: (sectors per cluster, free clusters,
+/// bytes per sector, total clusters) in 16 bits and never more than just
+/// under 2 GB, which programs keep in signed 32-bit numbers. Bigger
+/// clusters make up for fewer of them, as long as a cluster stays under
+/// 32 KB (FORMAT divides by it), as MS-DOS 7.1 and DOSBox-X report them.
+pub fn old_space(spc: u32, free: u32, bps: u32, total: u32) -> (u16, u16, u16, u16) {
+    let mut factor = 1;
+    while (total > 0xFFFF || free > 0xFFFF) && spc * factor <= 64 && bps * spc * factor < 0x8000 {
+        factor *= 2;
+    }
+    let spc = spc * factor;
+    let under_2gb = 0x7FFF_8000 / bps.max(1) / spc.max(1);
+    let fit = |n: u32| (n / factor).min(under_2gb).min(0xFFFF) as u16;
+    (spc as u16, fit(free), bps as u16, fit(total))
 }
 
 /// Volumes with fewer clusters than this have 12-bit FATs.
@@ -260,27 +278,40 @@ const FAT12_MAX_CLUSTERS: u16 = 4085;
 pub struct FatLayout {
     pub bytes_per_sector: u16,
     pub sectors_per_cluster: u16,
-    pub clusters: u16,
+    pub clusters: u32,
     pub reserved_sectors: u16,
     pub fats: u16,
     pub root_entries: u16,
-    pub sectors_per_fat: u16,
+    pub sectors_per_fat: u32,
     pub sectors_per_track: u16,
     pub heads: u16,
     pub hidden_sectors: u32,
     pub media: u8,
     /// Sectors in the volume, which may run on past the last cluster.
     pub sectors: u32,
+    /// A FAT32 volume's own fields.
+    pub fat32: Option<Fat32Layout>,
+}
+
+/// The fields of a FAT32 volume's BPB that FAT12 and FAT16 don't have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fat32Layout {
+    pub root_cluster: u32,
+    pub fsinfo: u16,
+    pub backup_boot: u16,
+    pub ext_flags: u16,
 }
 
 impl FatLayout {
-    pub fn first_dir_sector(&self) -> u16 {
-        self.reserved_sectors + self.fats * self.sectors_per_fat
+    /// The first sector of the root directory: FAT32's first data sector,
+    /// its root directory being a chain of clusters.
+    pub fn first_dir_sector(&self) -> u32 {
+        self.reserved_sectors as u32 + self.fats as u32 * self.sectors_per_fat
     }
 
-    pub fn first_data_sector(&self) -> u16 {
+    pub fn first_data_sector(&self) -> u32 {
         let root_sectors = (self.root_entries as u32 * 32).div_ceil(self.bytes_per_sector as u32);
-        self.first_dir_sector() + root_sectors as u16
+        self.first_dir_sector() + root_sectors
     }
 
     pub fn total_sectors(&self) -> u32 {
@@ -289,20 +320,25 @@ impl FatLayout {
 
     pub fn cylinders(&self) -> u16 {
         let per_cylinder = self.sectors_per_track as u32 * self.heads as u32;
-        (self.hidden_sectors + self.total_sectors()).div_ceil(per_cylinder) as u16
+        (self.hidden_sectors as u64 + self.total_sectors() as u64).div_ceil(per_cylinder.max(1) as u64).min(u16::MAX as u64) as u16
     }
 
-    /// "FAT12   " or "FAT16   ", as the boot sector names it.
+    /// "FAT12   ", "FAT16   " or "FAT32   ", as the boot sector names it.
     pub fn fs_type(&self) -> &'static [u8; 8] {
-        if self.clusters < FAT12_MAX_CLUSTERS { b"FAT12   " } else { b"FAT16   " }
+        match (self.fat32, self.clusters) {
+            (Some(_), _) => b"FAT32   ",
+            (None, n) if n < FAT12_MAX_CLUSTERS as u32 => b"FAT12   ",
+            _ => b"FAT16   ",
+        }
     }
 
     /// The DOS 4 BIOS parameter block, as a boot sector has it from offset
-    /// 0Bh and IOCTL 440Dh/0860h returns it.
+    /// 0Bh and IOCTL 440Dh/0860h returns it. FAT32's has no FAT size here.
     pub fn bpb(&self) -> [u8; 31] {
         let mut bpb = [0u8; 31];
         let total = self.total_sectors();
-        let small_total = if total > 0xFFFF { 0 } else { total as u16 };
+        let small_total = if total > 0xFFFF || self.fat32.is_some() { 0 } else { total as u16 };
+        let small_fat = if self.fat32.is_some() { 0 } else { self.sectors_per_fat.min(0xFFFF) as u16 };
         bpb[0x00..0x02].copy_from_slice(&self.bytes_per_sector.to_le_bytes());
         bpb[0x02] = self.sectors_per_cluster as u8;
         bpb[0x03..0x05].copy_from_slice(&self.reserved_sectors.to_le_bytes());
@@ -310,7 +346,7 @@ impl FatLayout {
         bpb[0x06..0x08].copy_from_slice(&self.root_entries.to_le_bytes());
         bpb[0x08..0x0A].copy_from_slice(&small_total.to_le_bytes());
         bpb[0x0A] = self.media;
-        bpb[0x0B..0x0D].copy_from_slice(&self.sectors_per_fat.to_le_bytes());
+        bpb[0x0B..0x0D].copy_from_slice(&small_fat.to_le_bytes());
         bpb[0x0D..0x0F].copy_from_slice(&self.sectors_per_track.to_le_bytes());
         bpb[0x0F..0x11].copy_from_slice(&self.heads.to_le_bytes());
         bpb[0x11..0x15].copy_from_slice(&self.hidden_sectors.to_le_bytes());
@@ -2083,10 +2119,15 @@ impl DiskController {
     // FILESYSTEM METADATA & SEARCH
     // ========================================================================
 
-    /// Allocation geometry of `drive` (0-based): (sectors per cluster, bytes
-    /// per sector, total clusters).
+    /// Allocation geometry of `drive` (0-based) for INT 21h AH=1Bh/1Ch:
+    /// (sectors per cluster, bytes per sector, total clusters), as the old
+    /// functions can tell it (`old_space`).
     pub fn drive_geometry(&self, drive: u8) -> Option<(u16, u16, u16)> {
-        self.layout(drive).map(|l| (l.sectors_per_cluster, l.bytes_per_sector, l.clusters))
+        self.layout(drive).map(|l| {
+            let (spc, _, bps, total) =
+                old_space(l.sectors_per_cluster as u32, 0, l.bytes_per_sector as u32, l.clusters);
+            (spc, bps, total)
+        })
     }
 
     /// Where `drive`'s FAT, directory and data are: a disk image's own, or
@@ -2106,10 +2147,18 @@ impl DiskController {
         self.fat_volume(drive)?.serial()
     }
 
-    // INT 21h, AH=36h: Get Disk Free Space
-    // Input DL: 0=Default, 1=A, 2=B, 3=C, ...
-    // Returns (sectors per cluster, free clusters, bytes per sector, total clusters)
+    /// INT 21h AH=36h: (sectors per cluster, free clusters, bytes per
+    /// sector, total clusters) of `drive` (0 the current one, 1 A:), as
+    /// the old function can tell them (`old_space`).
     pub fn get_disk_free_space(&self, drive: u8) -> Result<(u16, u16, u16, u16), u16> {
+        let (spc, free, bps, total) = self.get_disk_free_space32(drive)?;
+        Ok(old_space(spc, free, bps, total))
+    }
+
+    /// The free space of `drive` (0 the current one, 1 A:) as AX=7303h
+    /// tells it: (sectors per cluster, free clusters, bytes per sector,
+    /// total clusters), whatever their size.
+    pub fn get_disk_free_space32(&self, drive: u8) -> Result<(u32, u32, u32, u32), u16> {
         let target_drive = if drive == 0 {
             self.current_drive
         } else {
@@ -2119,8 +2168,8 @@ impl DiskController {
         let d = self.drive(target_drive).ok_or(0x0Fu16)?; // Invalid Drive
         if let Some(volume) = d.fat() {
             let layout = volume.layout();
-            let free = volume.free_clusters().min(layout.clusters as u32) as u16;
-            return Ok((layout.sectors_per_cluster, free, layout.bytes_per_sector, layout.clusters));
+            let free = volume.free_clusters().min(layout.clusters);
+            return Ok((layout.sectors_per_cluster as u32, free, layout.bytes_per_sector as u32, layout.clusters));
         }
         let (spc, bps, total) = d.kind.geometry();
         let free = match d.kind {
@@ -2135,7 +2184,7 @@ impl DiskController {
             DriveKind::CdRom => 0,
             DriveKind::Virtual => 1000,
         };
-        Ok((spc, free, bps, total))
+        Ok((spc as u32, free as u32, bps as u32, total as u32))
     }
 
     /// Clusters occupied by the tree under `root` (one per directory plus

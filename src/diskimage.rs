@@ -170,15 +170,32 @@ pub struct Bpb {
     pub root_entries: u16,
     pub total_sectors: u32,
     pub media: u8,
-    pub sectors_per_fat: u16,
+    /// FAT32's at 24h, the others' at 16h.
+    pub sectors_per_fat: u32,
     pub sectors_per_track: u16,
     pub heads: u16,
     pub hidden_sectors: u32,
+    /// The fields of a FAT32 BPB, which has them.
+    pub fat32: Option<Fat32Bpb>,
+}
+
+/// The fields a FAT32 boot sector has after the DOS 3.31 BPB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fat32Bpb {
+    /// Bit 7: only the FAT in bits 0-3 is in use, the others aren't
+    /// mirrored.
+    pub ext_flags: u16,
+    pub root_cluster: u32,
+    /// The sectors of the FSInfo sector and the boot sector's backup.
+    pub fsinfo: u16,
+    pub backup_boot: u16,
 }
 
 impl Bpb {
-    /// The BPB of a boot sector, if it has a plausible one for a FAT12/16
-    /// volume with 512-byte sectors.
+    /// The BPB of a boot sector, if it has a plausible one for a FAT12,
+    /// FAT16 or FAT32 volume with 512-byte sectors. FAT32's has no root
+    /// directory entries, no 16-bit sector counts and its FAT size at 24h,
+    /// as DOSBox-X tells them apart.
     pub fn parse(boot: &[u8]) -> Option<Self> {
         if boot.len() < SECTOR_SIZE || !matches!(boot[0], 0xEB | 0xE9) {
             return None;
@@ -186,6 +203,12 @@ impl Bpb {
         let word = |i: usize| u16::from_le_bytes([boot[i], boot[i + 1]]);
         let dword = |i: usize| u32::from_le_bytes([boot[i], boot[i + 1], boot[i + 2], boot[i + 3]]);
         let small_total = word(0x13);
+        let fat32 = (word(0x11) == 0 && small_total == 0 && word(0x16) == 0).then(|| Fat32Bpb {
+            ext_flags: word(0x28),
+            root_cluster: dword(0x2C),
+            fsinfo: word(0x30),
+            backup_boot: word(0x32),
+        });
         let bpb = Bpb {
             bytes_per_sector: word(0x0B),
             sectors_per_cluster: boot[0x0D],
@@ -194,16 +217,17 @@ impl Bpb {
             root_entries: word(0x11),
             total_sectors: if small_total != 0 { small_total as u32 } else { dword(0x20) },
             media: boot[0x15],
-            sectors_per_fat: word(0x16),
+            sectors_per_fat: if fat32.is_some() { dword(0x24) } else { word(0x16) as u32 },
             sectors_per_track: word(0x18),
             heads: word(0x1A),
             hidden_sectors: dword(0x1C),
+            fat32,
         };
         let valid = bpb.bytes_per_sector as usize == SECTOR_SIZE
             && bpb.sectors_per_cluster.is_power_of_two()
             && bpb.reserved_sectors >= 1
             && (1..=2).contains(&bpb.fats)
-            && bpb.root_entries > 0
+            && (bpb.root_entries > 0 || fat32.is_some_and(|f| f.root_cluster >= 2))
             && bpb.sectors_per_fat > 0
             && bpb.total_sectors > 0
             && bpb.media >= 0xF0;
@@ -776,7 +800,8 @@ impl DiskImage {
 
     /// Where the FAT volume on the disk is: (first sector, sectors). A
     /// floppy is one volume; a hard disk is a volume from its boot sector
-    /// on, or has one in its first FAT12/16 primary partition.
+    /// on, or has one in its first FAT12/16 primary partition, or else its
+    /// first FAT32 one.
     pub fn fat_volume(&self) -> Result<(u64, u64), String> {
         let mut boot = [0u8; SECTOR_SIZE];
         self.read(0, &mut boot).map_err(|_| "Can't read the boot sector".to_string())?;
@@ -784,13 +809,11 @@ impl DiskImage {
             return Ok((0, self.sectors));
         }
         let parts = partitions(&boot, self.sectors).ok_or("No partition table or boot sector")?;
-        if let Some(p) = parts.iter().find(|p| matches!(p.kind, 0x01 | 0x04 | 0x06 | 0x0E)) {
-            return Ok((p.start, p.sectors));
-        }
-        if parts.iter().any(|p| matches!(p.kind, 0x0B | 0x0C)) {
-            return Err("FAT32 partitions aren't supported".to_string());
-        }
-        Err("No FAT12 or FAT16 partition".to_string())
+        let fat = [[0x01, 0x04, 0x06, 0x0E].as_slice(), &[0x0B, 0x0C]];
+        fat.iter()
+            .find_map(|kinds| parts.iter().find(|p| kinds.contains(&p.kind)))
+            .map(|p| (p.start, p.sectors))
+            .ok_or_else(|| "No FAT partition".to_string())
     }
 }
 
@@ -1012,8 +1035,22 @@ mod tests {
         let forced = Chs { cylinders: 2, heads: 8, sectors: 17 };
         assert_eq!(DiskImage::open(&path, false, Some(forced), false).unwrap().geometry(), forced);
 
+        // A FAT32 partition, and a FAT16 one ahead of it in the table.
         disk[e + 4] = 0x0C;
         let fat32 = scratch("fat32.img", &disk);
-        assert!(DiskImage::open(&fat32, false, None, false).unwrap().fat_volume().unwrap_err().contains("FAT32"));
+        assert_eq!(DiskImage::open(&fat32, false, None, false).unwrap().fat_volume(), Ok((17, sectors as u64 - 17)));
+        disk.copy_within(e..e + 16, e + 16);
+        disk[e + 16 + 4] = 0x06;
+        disk[e + 16 + 8..e + 16 + 12].copy_from_slice(&100u32.to_le_bytes());
+        disk[e + 16 + 12..e + 16 + 16].copy_from_slice(&((sectors - 100) as u32).to_le_bytes());
+        disk[e + 12..e + 16].copy_from_slice(&83u32.to_le_bytes());
+        let both = scratch("both.img", &disk);
+        assert_eq!(DiskImage::open(&both, false, None, false).unwrap().fat_volume(), Ok((100, sectors as u64 - 100)));
+        disk[e + 16 + 4] = 0x83;
+        let linux = scratch("linux.img", &disk);
+        assert_eq!(DiskImage::open(&linux, false, None, false).unwrap().fat_volume(), Ok((17, 83)));
+        disk[e + 4] = 0x83;
+        let none = scratch("none.img", &disk);
+        assert!(DiskImage::open(&none, false, None, false).unwrap().fat_volume().is_err());
     }
 }

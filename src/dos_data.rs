@@ -306,10 +306,15 @@ fn write_dpb(bus: &mut Bus, drive: u8, layout: crate::disk::FatLayout, next: Opt
     bus.write_16(base + 0x06, layout.reserved_sectors); // 06: reserved sectors
     bus.write_8(base + 0x08, layout.fats as u8); // 08: number of FATs
     bus.write_16(base + 0x09, layout.root_entries); // 09: root directory entries
-    bus.write_16(base + 0x0B, layout.first_data_sector()); // 0B: first data sector
-    bus.write_16(base + 0x0D, layout.clusters.saturating_add(1)); // 0D: highest cluster
-    bus.write_16(base + 0x0F, layout.sectors_per_fat); // 0F: sectors per FAT
-    bus.write_16(base + 0x11, layout.first_dir_sector()); // 11: first directory sector
+    // FAT32's don't fit: MS-DOS 7.1 has 0 sectors per FAT in the DPB of a
+    // FAT32 drive, which programs of before it can't use (AX=7302h has
+    // the whole of it).
+    let word = |n: u32| n.min(0xFFFF) as u16;
+    let per_fat = if layout.fat32.is_some() { 0 } else { word(layout.sectors_per_fat) };
+    bus.write_16(base + 0x0B, word(layout.first_data_sector())); // 0B: first data sector
+    bus.write_16(base + 0x0D, word(layout.clusters + 1)); // 0D: highest cluster
+    bus.write_16(base + 0x0F, per_fat); // 0F: sectors per FAT
+    bus.write_16(base + 0x11, word(layout.first_dir_sector())); // 11: first directory sector
     bus.write_8(base + 0x17, layout.media); // 17: media ID
     bus.write_8(base + 0x18, 0x00); // 18: disk accessed
     // 19: far pointer to the next DPB, FFFF:FFFF ends the chain
