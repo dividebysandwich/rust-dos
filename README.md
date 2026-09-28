@@ -139,7 +139,7 @@ programs, the prompt has these commands:
 | `MAKEIMG` | make a new floppy or hard disk image, as in DOSBox Staging; see [New disk images](CONFIGURATION.md#new-disk-images) |
 | `BOOT [image ...] [-l drive]` | start a system from a disk image; see [Booting a disk image](CONFIGURATION.md#booting-a-disk-image) |
 | `MIXER` | see [`[mixer]`](CONFIGURATION.md#mixer) |
-| `LAN [HOST\|JOIN\|LIST\|LEAVE\|STOP]` | join rust-dos instances into a LAN; see [Playing over a LAN](CONFIGURATION.md#playing-over-a-lan) |
+| `LAN [HOST\|JOIN\|LIST\|LEAVE\|DISBAND\|STOP]` | join rust-dos instances into a LAN; see [Playing over a LAN](CONFIGURATION.md#playing-over-a-lan) |
 | `LOADHIGH` (`LH`) | load a program into upper memory |
 | `MEM [/C\|/D\|/F\|/M name]` | the memory used and free, as in MS-DOS 6.22; `/C` lists the programs in memory, `/F` the free blocks, `/M` one program's blocks and `/D` all of them |
 | `DOSCONFIG` | open the settings window |

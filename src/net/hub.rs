@@ -12,7 +12,7 @@ use super::switch::{Port, Switch};
 use super::tunnel::client::{Client, ClientConfig, ClientEvent};
 use super::tunnel::discover;
 use super::tunnel::relay::{RelayConfig, RelayServer};
-use super::tunnel::wire::RoomInfo;
+use super::tunnel::wire::{RejectReason, RoomInfo, Roster};
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -32,6 +32,8 @@ pub struct JoinRequest {
     pub relay: Option<String>,
     pub room: String,
     pub password: Option<String>,
+    /// The name the player goes by in the room, empty for none.
+    pub player: String,
 }
 
 pub enum Command {
@@ -46,19 +48,20 @@ pub enum Command {
     Frame(Port, Vec<u8>),
     Join(JoinRequest),
     Leave,
-    /// Relay rooms on `port` (0 for any), and join `room` there.
+    /// End the room for everyone in it, as its host, and leave it.
+    Disband,
+    /// Relay rooms on `port` (0 for any), and join the room of `join`
+    /// (whose relay is this one) there.
     Host {
         port: u16,
-        room: String,
-        password: Option<String>,
+        join: JoinRequest,
     },
     StopHost,
     /// Where the relay of join number `generation` is.
     Resolved {
         generation: u64,
         relay: Result<SocketAddr, String>,
-        room: String,
-        password: Option<String>,
+        request: JoinRequest,
     },
     /// What happened to the router's connections on the host.
     Nat(nat::Event),
@@ -92,6 +95,8 @@ pub enum LanState {
 pub struct HubStatus {
     pub lan: LanState,
     pub room: String,
+    /// Who is in the room, once joined, as the relay last said.
+    pub roster: Option<Roster>,
     /// The relay this instance hosts, and its rooms.
     pub hosting: Option<SocketAddr>,
     pub hosted_rooms: Vec<RoomInfo>,
@@ -296,7 +301,16 @@ impl State {
             Command::Frame(from, frame) => self.route(from, frame),
             Command::Join(request) => self.join(request),
             Command::Leave => self.leave(true),
-            Command::Host { port, room, password } => self.host(port, room, password),
+            Command::Disband => {
+                let Some(uplink) = &mut self.uplink else { return };
+                let room = uplink.client.config().room.clone();
+                let mut out = Vec::new();
+                uplink.client.disband(&mut out);
+                self.flush(out);
+                self.leave(false);
+                self.shared.notice(format!("Ended LAN room \"{}\"", room));
+            }
+            Command::Host { port, join } => self.host(port, join),
             Command::StopHost => {
                 if let Some(relay) = self.relay.take() {
                     let local = relay.local_addr();
@@ -315,9 +329,9 @@ impl State {
                     s.hosted_rooms.clear();
                 });
             }
-            Command::Resolved { generation, relay, room, password } => {
+            Command::Resolved { generation, relay, request } => {
                 if generation == self.generation {
-                    self.connect(relay, room, password);
+                    self.connect(relay, request);
                 }
             }
             Command::Nat(event) => {
@@ -351,15 +365,14 @@ impl State {
         });
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let relay = resolve(request.relay).await;
+            let relay = resolve(request.relay.clone()).await;
             if let Some(tx) = tx.upgrade() {
-                let _ =
-                    tx.send(Command::Resolved { generation, relay, room: request.room, password: request.password });
+                let _ = tx.send(Command::Resolved { generation, relay, request });
             }
         });
     }
 
-    fn connect(&mut self, relay: Result<SocketAddr, String>, room: String, password: Option<String>) {
+    fn connect(&mut self, relay: Result<SocketAddr, String>, request: JoinRequest) {
         let bound = relay.and_then(|relay| {
             let local: SocketAddr =
                 if relay.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
@@ -378,7 +391,8 @@ impl State {
             }
         };
         let mut out = Vec::new();
-        let config = ClientConfig { relay, room, password };
+        let JoinRequest { room, password, player, .. } = request;
+        let config = ClientConfig { relay, room, password, player };
         let client = Client::new(config, self.client_id, self.now(), &mut out);
         let socket = Arc::new(socket);
         for datagram in out {
@@ -406,10 +420,14 @@ impl State {
                 self.shared.notice("Left the LAN".into());
             }
         }
-        self.shared.update(|s| s.lan = LanState::Off);
+        self.shared.update(|s| {
+            s.lan = LanState::Off;
+            s.roster = None;
+        });
     }
 
-    fn host(&mut self, port: u16, room: String, password: Option<String>) {
+    fn host(&mut self, port: u16, join: JoinRequest) {
+        let password = join.password.clone();
         self.relay = None;
         let name = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -425,7 +443,7 @@ impl State {
                 self.shared.notice(format!("Hosting LAN rooms on UDP port {}", local.port()));
                 self.shared.update(|s| s.hosting = Some(local));
                 let relay = Some(format!("127.0.0.1:{}", local.port()));
-                self.join(JoinRequest { relay, room, password });
+                self.join(JoinRequest { relay, ..join });
             }
             Err(e) => {
                 self.shared.notice(format!("Can't host on UDP port {}: {}", port, e));
@@ -502,10 +520,18 @@ impl State {
                         router.guest_ip = nat::lan_guest(index);
                     }
                 }
+                ClientEvent::Rejected(RejectReason::Closed) => {
+                    self.shared.notice(format!("LAN room \"{}\" was ended by its host", room));
+                    self.shared.update(|s| {
+                        s.lan = LanState::Failed(RejectReason::Closed.describe().into());
+                        s.roster = None;
+                    });
+                }
                 ClientEvent::Rejected(reason) => {
                     self.shared.notice(format!("The relay at {} turned us away: {}", relay, reason.describe()));
                     self.shared.update(|s| s.lan = LanState::Failed(reason.describe().into()));
                 }
+                ClientEvent::Roster(roster) => self.shared.update(|s| s.roster = Some(roster)),
                 ClientEvent::Lost => {
                     self.shared.notice(format!("Lost the relay at {}; joining it again", relay));
                     self.shared.update(|s| s.lan = LanState::Rejoining { relay });
@@ -572,13 +598,15 @@ mod tests {
         let (ma, mb) = (Mac([2, 0, 0, 0, 0, 0xA]), Mac([2, 0, 0, 0, 0, 0xB]));
         a.send(Command::Attach { port: Port::Ipx, mac: ma, queue: qa.clone() });
         b.send(Command::Attach { port: Port::Ipx, mac: mb, queue: qb.clone() });
-        a.send(Command::Host { port: 0, room: "doom".into(), password: Some("pw".into()) });
+        let join = JoinRequest { relay: None, room: "doom".into(), password: Some("pw".into()), player: "A".into() };
+        a.send(Command::Host { port: 0, join });
         assert!(wait_for(|| matches!(a.status().lan, LanState::Joined { .. })), "{:?}", a.status());
         let port = a.status().hosting.unwrap().port();
         b.send(Command::Join(JoinRequest {
             relay: Some(format!("localhost:{}", port)),
             room: "doom".into(),
             password: Some("pw".into()),
+            player: String::new(),
         }));
         assert!(wait_for(|| matches!(b.status().lan, LanState::Joined { index: 2, .. })), "{:?}", b.status());
         let frame = crate::net::frame::build(Mac::BROADCAST, ma, crate::net::frame::ETHERTYPE_IPX, &[1; 100]);
@@ -595,8 +623,18 @@ mod tests {
             relay: Some(format!("127.0.0.1:{}", port)),
             room: "doom".into(),
             password: None,
+            player: String::new(),
         }));
         assert!(wait_for(|| matches!(c.status().lan, LanState::Failed(_))), "{:?}", c.status());
+        // Both know who is there: A made the room, and hosts it.
+        assert!(wait_for(|| b.status().roster.is_some_and(|r| r.total == 2)), "{:?}", b.status());
+        let roster = b.status().roster.unwrap();
+        assert_eq!((roster.host, roster.members[0].name.as_str()), (1, "A"));
+        // A ends it, for B too.
+        a.send(Command::Disband);
+        assert!(wait_for(|| matches!(b.status().lan, LanState::Failed(_))), "{:?}", b.status());
+        assert!(b.take_notices().iter().any(|n| n.contains("ended by its host")));
+        assert_eq!((a.status().lan, a.status().roster), (LanState::Off, None));
         b.send(Command::Leave);
         assert!(wait_for(|| b.status().lan == LanState::Off));
     }
@@ -638,13 +676,15 @@ mod tests {
         a.send(Command::Attach { port: Port::Nic, mac: ma, queue: qa.clone() });
         b.send(Command::Attach { port: Port::Nic, mac: mb, queue: qb.clone() });
         assert_eq!(offered(&a, &qa, ma), Some(nat::GUEST));
-        a.send(Command::Host { port: 0, room: "net".into(), password: None });
+        let join = JoinRequest { relay: None, room: "net".into(), password: None, player: String::new() };
+        a.send(Command::Host { port: 0, join });
         assert!(wait_for(|| matches!(a.status().lan, LanState::Joined { .. })));
         let port = a.status().hosting.unwrap().port();
         b.send(Command::Join(JoinRequest {
             relay: Some(format!("127.0.0.1:{}", port)),
             room: "net".into(),
             password: None,
+            player: String::new(),
         }));
         assert!(wait_for(|| matches!(b.status().lan, LanState::Joined { .. })));
         assert_eq!(offered(&a, &qa, ma), Some(nat::lan_guest(1)));

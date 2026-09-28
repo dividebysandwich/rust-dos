@@ -1,13 +1,16 @@
 //! The settings window's room browser, opened from the Network page: the
 //! rooms of the relay the settings name (the public one unless set),
 //! narrowed down as a search is typed, joined with Enter and made with Ins,
-//! with a password or open to all. The frontend hands it the LAN every
-//! frame (`ConfigUi::poll`), and it asks the relay again as the search
-//! changes and every few seconds.
+//! with a password or open to all. While this instance hosts the room it
+//! is in, it shows that room instead: who is in it, and buttons to leave
+//! it or end it for everyone. The frontend hands it the LAN every frame
+//! (`ConfigUi::poll`), and it asks the relay again as the search changes
+//! and every few seconds.
 
 use super::dialog::TextField;
 use super::draw::{self, Grid};
 use super::{ConfigUi, Hit, Host, Target, UiKey, fit};
+use crate::net::tunnel::relay::MAX_ROOM;
 use crate::net::tunnel::wire::{self, RoomInfo};
 use crate::net::{LanView, RoomList};
 use web_time::{Duration, Instant};
@@ -16,6 +19,13 @@ use web_time::{Duration, Instant};
 /// time while the search is typed.
 const REFRESH: Duration = Duration::from_secs(3);
 const TYPING: Duration = Duration::from_millis(300);
+
+/// The buttons of the room this instance hosts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomButton {
+    Leave,
+    Disband,
+}
 
 /// The controls of the room being made, or of the password being given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +97,10 @@ pub struct RoomBrowser {
     /// The room joined from here, until it is joined or can't be.
     joining: Option<String>,
     pub(super) prompt: Option<RoomPrompt>,
+    /// The button of the room this instance hosts that Enter presses, and
+    /// whether ending the room waits for Enter once more.
+    pub(super) button: RoomButton,
+    pub(super) confirm_disband: bool,
 }
 
 impl RoomBrowser {
@@ -102,6 +116,8 @@ impl RoomBrowser {
             waiting: false,
             joining: None,
             prompt: None,
+            button: RoomButton::Leave,
+            confirm_disband: false,
         }
     }
 
@@ -126,6 +142,19 @@ impl RoomBrowser {
             rows.push(Row::Leave(room.clone()));
         }
         rows
+    }
+
+    /// The room this instance is in, by name.
+    fn joined_room(&self) -> String {
+        self.view.joined.as_ref().map_or(String::new(), |(_, room)| room.clone())
+    }
+
+    /// What the room this instance is in was last listed as.
+    fn listed(&self, room: &str) -> Option<&RoomInfo> {
+        match &self.list {
+            Some(Ok(list)) => list.rooms.iter().find(|r| r.name == room),
+            _ => None,
+        }
     }
 
     /// Whether this instance is in `room` of the relay listed.
@@ -231,6 +260,9 @@ impl ConfigUi {
         if browser.prompt.is_some() {
             return self.room_prompt_key(key, host);
         }
+        if browser.view.hosting() {
+            return self.hosted_room_key(key, host);
+        }
         let rows = browser.rows();
         match key {
             UiKey::Up | UiKey::Down | UiKey::PageUp | UiKey::PageDown => {
@@ -262,6 +294,48 @@ impl ConfigUi {
                     browser.scroll = 0;
                 }
             }
+        }
+    }
+
+    /// The room this instance hosts: Left, Right and Tab go between Leave
+    /// and Disband, Enter presses one, and Disband wants Enter once more.
+    fn hosted_room_key(&mut self, key: UiKey, host: &mut dyn Host) {
+        let Some(browser) = &mut self.rooms else { return };
+        let room = browser.joined_room();
+        if std::mem::take(&mut browser.confirm_disband) {
+            if key == UiKey::Enter {
+                host.disband_room();
+                self.info(format!("Ended room \"{}\" for everyone in it", room));
+            } else {
+                self.status = None;
+            }
+            return;
+        }
+        match key {
+            UiKey::Left | UiKey::Right | UiKey::Up | UiKey::Down | UiKey::Tab | UiKey::BackTab => {
+                browser.button = match browser.button {
+                    RoomButton::Leave => RoomButton::Disband,
+                    RoomButton::Disband => RoomButton::Leave,
+                };
+            }
+            UiKey::Esc => {
+                self.rooms = None;
+                self.status = None;
+            }
+            UiKey::Enter if browser.button == RoomButton::Leave => {
+                // The one there longest after this instance hosts it next.
+                let next = browser.view.roster.as_ref().and_then(|r| r.members.get(1).map(wire::Member::shown));
+                host.leave_room();
+                match next {
+                    Some(next) => self.info(format!("Left room \"{}\": {} hosts it now", room, next)),
+                    None => self.info(format!("Left room \"{}\", which went with its last player", room)),
+                }
+            }
+            UiKey::Enter => {
+                browser.confirm_disband = true;
+                self.error(format!("End room \"{}\" for everyone in it?", room));
+            }
+            _ => {}
         }
     }
 
@@ -353,15 +427,27 @@ impl ConfigUi {
                     }
                 }
             }
+            Target::RoomButton(button) => {
+                browser.button = button;
+                self.key(UiKey::Enter, host);
+            }
             _ => {}
         }
     }
 
     pub(super) fn room_hints(&self) -> Vec<(&'static str, &'static str, UiKey)> {
-        match self.rooms.as_ref().and_then(|b| b.prompt.as_ref()) {
+        let Some(browser) = &self.rooms else { return Vec::new() };
+        match &browser.prompt {
             Some(prompt) => {
                 let ok = if prompt.making { "Make" } else { "Join" };
                 vec![("Tab", "Next", UiKey::Tab), ("Enter", ok, UiKey::Enter), ("Esc", "Cancel", UiKey::Esc)]
+            }
+            None if browser.view.hosting() && browser.confirm_disband => {
+                vec![("Enter", "End it", UiKey::Enter), ("Esc", "Keep it", UiKey::Esc)]
+            }
+            None if browser.view.hosting() => {
+                let press = if browser.button == RoomButton::Leave { "Leave" } else { "Disband" };
+                vec![("Enter", press, UiKey::Enter), ("Tab", "Next", UiKey::Tab), ("Esc", "Back", UiKey::Esc)]
             }
             None => vec![("Enter", "Join", UiKey::Enter), ("Ins", "New room", UiKey::Insert), ("Esc", "Back", UiKey::Esc)],
         }
@@ -372,7 +458,8 @@ impl ConfigUi {
         let cols = g.cols;
         let top = content.start;
         let relay = browser.relay.clone().unwrap_or_else(|| "the first relay on this network".to_string());
-        let mut title = format!("Rooms at {}", relay);
+        let hosting = browser.view.hosting() && browser.prompt.is_none();
+        let mut title = format!("{} at {}", if hosting { "Your room" } else { "Rooms" }, relay);
         if let Some(Ok(list)) = &browser.list
             && !list.name.is_empty()
         {
@@ -392,6 +479,11 @@ impl ConfigUi {
 
         if browser.prompt.is_some() {
             let hits = Self::draw_room_prompt(browser, g, top + 2..lan_row);
+            self.hits.extend(hits);
+            return;
+        }
+        if hosting {
+            let hits = Self::draw_hosted_room(browser, g, top + 1..lan_row);
             self.hits.extend(hits);
             return;
         }
@@ -420,6 +512,9 @@ impl ConfigUi {
 
         // The rooms, or why there are none, and the rows after them.
         let rows = browser.rows();
+        let members_col = cols.saturating_sub(24);
+        g.text(4, top + 2, "Room", draw::DIM);
+        g.text_to(members_col, top + 2, "Players", draw::DIM, cols - 2);
         let mut list_rows = top + 3..lan_row.saturating_sub(1);
         let message = match &browser.list {
             None => Some(("Asking the relay for its rooms...".to_string(), draw::DIM)),
@@ -439,7 +534,6 @@ impl ConfigUi {
         }
         browser.selected = browser.selected.min(rows.len() - 1);
         Self::keep_visible(&mut browser.scroll, browser.selected, list_rows.len());
-        let members_col = cols.saturating_sub(24);
         let mut hits = Vec::new();
         for (i, row) in (browser.scroll..rows.len()).zip(list_rows.clone()) {
             if i == browser.selected {
@@ -451,8 +545,7 @@ impl ConfigUi {
                     let here = browser.in_room(&room.name);
                     let color = if here { draw::GOOD } else { draw::BRIGHT };
                     g.text_to(4, row, &room.name, color, members_col.saturating_sub(1));
-                    let members = if room.members == 1 { "1 in it".to_string() } else { format!("{} in it", room.members) };
-                    let after = g.text_to(members_col, row, &format!("{:>8}", members), draw::TEXT, cols - 2);
+                    let after = g.text_to(members_col, row, &format!("{:>7}", room.members), draw::TEXT, cols - 2);
                     if here {
                         g.text_to(after + 2, row, "you", draw::GOOD, cols - 2);
                     } else if room.password {
@@ -473,6 +566,68 @@ impl ConfigUi {
         let (scroll, total) = (browser.scroll, rows.len());
         self.hits.extend(hits);
         self.draw_scrollbar(g, list_rows, scroll, total);
+    }
+
+    /// The room this instance hosts, in `rows`: its name, who is in it,
+    /// and the buttons to leave it or end it.
+    fn draw_hosted_room(browser: &RoomBrowser, g: &mut Grid, rows: std::ops::Range<usize>) -> Vec<Hit> {
+        let Some(roster) = &browser.view.roster else { return Vec::new() };
+        let cols = g.cols;
+        let room = browser.joined_room();
+        let top = rows.start;
+        let after = g.text_to(2, top, &fit(&room, cols - 20), draw::GOOD, cols - 2);
+        match browser.listed(&room) {
+            Some(listed) if listed.password => g.text_to(after + 2, top, "password", draw::NOTE, cols - 2),
+            Some(_) => g.text_to(after + 2, top, "open to all", draw::DIM, cols - 2),
+            None => after,
+        };
+
+        // Who is in it, and the buttons below.
+        let buttons_row = rows.end.saturating_sub(2).max(top + 3);
+        let players = top + 3..buttons_row.saturating_sub(1);
+        let role_col = cols.saturating_sub(24);
+        g.text(4, top + 2, "Players", draw::DIM);
+        g.text_to(role_col, top + 2, &format!("{} of {}", roster.total, MAX_ROOM), draw::DIM, cols - 2);
+        let hidden = roster.total as usize - roster.members.len().min(roster.total as usize);
+        let fits = if roster.members.len() > players.len() || hidden > 0 {
+            players.len().saturating_sub(1)
+        } else {
+            players.len()
+        };
+        for (member, row) in roster.members.iter().take(fits).zip(players.clone()) {
+            let me = browser.view.index == Some(member.index);
+            let name = format!("{:>3}  {}", member.index, member.shown());
+            g.text_to(4, row, &name, if me { draw::GOOD } else { draw::BRIGHT }, role_col.saturating_sub(1));
+            let role = match (member.index == roster.host, me) {
+                (true, true) => "host, you",
+                (true, false) => "host",
+                (false, true) => "you",
+                (false, false) => "",
+            };
+            g.text_to(role_col, row, role, draw::NOTE, cols - 2);
+        }
+        let more = roster.total as usize - fits.min(roster.total as usize);
+        if more > 0 && fits < players.len() {
+            g.text(9, players.start + fits, &format!("and {} more", more), draw::DIM);
+        }
+
+        let mut hits = Vec::new();
+        let mut col = 4;
+        for (button, text) in [(RoomButton::Leave, "[ Leave ]"), (RoomButton::Disband, "[ Disband ]")] {
+            let focused = browser.button == button;
+            if focused {
+                g.background(col, buttons_row, text.len(), draw::SELECT);
+            }
+            g.text(col, buttons_row, text, if focused { draw::BRIGHT } else { draw::KEY });
+            hits.push(Hit { row: buttons_row, col, width: text.len(), target: Target::RoomButton(button) });
+            col += text.len() + 2;
+        }
+        let note = match browser.button {
+            RoomButton::Leave => "the one there longest hosts it next",
+            RoomButton::Disband => "ends the room for everyone",
+        };
+        g.text_to(col, buttons_row, note, draw::DIM, cols - 2);
+        hits
     }
 
     /// The room being made, or the password being given, in `rows`.

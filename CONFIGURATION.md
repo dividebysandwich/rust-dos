@@ -360,6 +360,9 @@ The IPX driver of the built-in DOS and the LAN of rust-dos instances (see
 * `room` is the room to join (default `lobby`), and `password` the
   password to join it with, or to give it when joining makes it. The
   password is kept in the file as it is written.
+* `player` is the name the others in a room see this instance's player
+  by, up to 32 characters. Without one (the default) they see "Player"
+  and its member number.
 
 ### `[drives]`
 
@@ -809,7 +812,10 @@ The settings window (Ctrl+F12) finds rooms too: *Find or make a LAN
 room* on its Network page lists the rooms of the relay `relay` names, the
 fullest first, narrowed down as a search is typed. Enter joins the room
 selected, asking for its password if it has one; *Make room* (or Ins)
-makes one, with a password or open to all, and joins it.
+makes one, with a password or open to all, and joins it. While the
+instance hosts the room it is in, the browser shows that room instead:
+its players, *Leave*, after which the one there longest hosts it, and
+*Disband*, which ends it for everyone.
 
 Then start the game's network play as usual (for Doom and Heretic,
 `IPXSETUP -nodes 2`). `LAN` shows where the instance is: the IPX driver,
@@ -834,19 +840,24 @@ the room, the members in it and the round trip to the relay.
   joins again when the relay comes back after a restart. `LAN LEAVE`
   leaves.
 * **`LAN LIST [host[:port] | /LOCAL] [/ROOM:text]`** lists a relay's
-  rooms, the fullest first, with how many are in each and whether it
-  wants a password; with `/ROOM:text`, those with the text in their
-  names.
+  rooms, the fullest first, with their players and whether they want a
+  password; with `/ROOM:text`, those with the text in their names.
 * **Rooms** keep several games on one relay apart: `/ROOM:name`, or `room`
   in `[network]` (default `lobby`); a name with spaces goes in quotes,
-  `/ROOM:"doom 2 dm"`. A room is there while anyone is in it. The instance that makes a room gives it a password with
-  `/PASSWORD:text` (or `password`), and everyone joining after has to know
-  it; a relay with a password of its own (`LAN HOST /PASSWORD:text`,
-  `rust-dos-relay --password`) wants that one for all its rooms instead.
-  Instances prove they know a password without sending it, and a relay
-  keeps only a key made from it, never the password itself. Nothing else
-  crossing the relay is encrypted: whoever can watch the traffic of the
-  instance that made a room can join it.
+  `/ROOM:"doom 2 dm"`. A room is there while anyone is in it. The instance
+  that makes a room gives it a password with `/PASSWORD:text` (or
+  `password`), and everyone joining after has to know it; a relay with a
+  password of its own (`LAN HOST /PASSWORD:text`, `rust-dos-relay
+  --password`) wants that one for all its rooms instead. Instances prove
+  they know a password without sending it, and a relay keeps only a key
+  made from it, never the password itself. Nothing else crossing the relay
+  is encrypted: whoever can watch the traffic of the instance that made a
+  room can join it.
+* **The host** of a room is the instance that made it, and once that one
+  leaves, the one there longest. `LAN DISBAND` ends the room for everyone
+  in it, who aren't let back in for a minute; only the host can. `LAN`
+  shows who is in the room, by `player` in [`[network]`](#network), or as
+  "Player" and a number without one.
 * **What goes over the relay** is Ethernet frames: the IPX driver's
   packets are on the same LAN as the network cards of other instances, in
   the frame type `ipxframe` sets (Ethernet II by default), where the IPX

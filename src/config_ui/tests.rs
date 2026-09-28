@@ -48,6 +48,7 @@ struct FakeHost {
     browsed: Vec<(Option<String>, String)>,
     joined: Vec<(Option<String>, String, String)>,
     left: usize,
+    disbanded: usize,
 }
 
 impl FakeHost {
@@ -77,6 +78,7 @@ impl FakeHost {
             browsed: vec![],
             joined: vec![],
             left: 0,
+            disbanded: 0,
         }
     }
 }
@@ -228,6 +230,10 @@ impl Host for FakeHost {
 
     fn leave_room(&mut self) {
         self.left += 1;
+    }
+
+    fn disband_room(&mut self) {
+        self.disbanded += 1;
     }
 }
 
@@ -1542,4 +1548,75 @@ fn the_network_page_finds_joins_and_makes_rooms() {
         ui.draw(&mut Frame::new(width, height));
         ui.key(Esc, &mut host);
     }
+}
+
+#[test]
+fn the_room_this_instance_hosts_shows_who_is_in_it() {
+    use crate::net::tunnel::wire::{Member, RoomInfo, Roster};
+    use crate::net::{LanView, Listing, RoomList};
+    use UiKey::*;
+    let relay: std::net::SocketAddr = "203.0.113.5:21213".parse().unwrap();
+    let member = |index, name: &str| Member { index, name: name.into() };
+    let roster = Roster { version: 3, host: 1, total: 3, members: vec![member(1, "Toumal"), member(2, ""), member(3, "kate")] };
+    let list = RoomList {
+        relay,
+        name: "rust-dos public relay".into(),
+        password: false,
+        rooms: vec![RoomInfo { name: "doom".into(), members: 3, password: true }],
+        total: 1,
+    };
+    let mut host = FakeHost::new();
+    host.lan = Some(LanView {
+        state: "room \"doom\" at 203.0.113.5:21213, member 1 of 3".into(),
+        joined: Some((relay, "doom".into())),
+        index: Some(1),
+        roster: Some(roster.clone()),
+        listing: Listing { asking: false, result: Some(Ok(list)) },
+    });
+    let mut ui = opened(&host);
+    ui.show_page(Page::Network);
+    ui.row = 0;
+    ui.key(Enter, &mut host);
+    ui.poll(&mut host);
+    host.lan.as_mut().unwrap().listing.asking = false;
+    ui.poll(&mut host);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    // The room instead of the list: its buttons, and no rooms to pick.
+    assert!(ui.hits.iter().any(|h| matches!(h.target, Target::RoomButton(RoomButton::Disband))));
+    assert!(!ui.hits.iter().any(|h| matches!(h.target, Target::RoomRow(_))));
+    assert_eq!(ui.room_hints()[0].1, "Leave");
+
+    // Disband asks first; anything but Enter keeps the room.
+    keys(&mut ui, &mut host, &[Tab, Enter]);
+    assert!(status(&ui).1 && status(&ui).0.starts_with("End room \"doom\""), "{:?}", status(&ui));
+    assert_eq!(ui.room_hints()[0].1, "End it");
+    ui.key(Esc, &mut host);
+    assert_eq!((host.disbanded, status(&ui).0), (0, ""));
+    assert!(ui.rooms.is_some(), "Esc only kept the room");
+    keys(&mut ui, &mut host, &[Enter, Enter]);
+    assert_eq!(host.disbanded, 1);
+    assert_eq!(status(&ui), ("Ended room \"doom\" for everyone in it", false));
+    // Leave says who hosts it next.
+    keys(&mut ui, &mut host, &[Left, Enter]);
+    assert_eq!(host.left, 1);
+    assert_eq!(status(&ui), ("Left room \"doom\": Player 2 hosts it now", false));
+    // A click on a button presses it.
+    ui.draw(&mut frame);
+    let layout = ui.layout.unwrap();
+    let hit = ui.hits.iter().find(|h| matches!(h.target, Target::RoomButton(RoomButton::Disband))).unwrap();
+    let (x, y) = ((layout.x + hit.col * 8 + 4) as i32, (layout.y + hit.row * layout.cell_h + 4) as i32);
+    ui.click(x, y, &mut host);
+    assert!(ui.rooms.as_ref().unwrap().confirm_disband);
+    ui.key(Esc, &mut host);
+    for (width, height) in [(400, 300), (1024, 768)] {
+        ui.draw(&mut Frame::new(width, height));
+    }
+
+    // In a room someone else hosts, the list shows, with the room in it.
+    host.lan.as_mut().unwrap().roster = Some(Roster { host: 2, ..roster });
+    ui.poll(&mut host);
+    ui.draw(&mut frame);
+    assert!(ui.hits.iter().any(|h| matches!(h.target, Target::RoomRow(0))));
+    assert!(!ui.hits.iter().any(|h| matches!(h.target, Target::RoomButton(_))));
 }

@@ -8,7 +8,9 @@
 //! cookie with HELLO and CHALLENGE, and joins a room with JOIN, answered by
 //! WELCOME or REJECT. Members then exchange DATA, which carries an Ethernet
 //! frame in one or more fragments, and keep their place and their NAT's
-//! mapping with KEEPALIVE and ACK, until LEAVE.
+//! mapping with KEEPALIVE and ACK, until LEAVE. The relay tells a room's
+//! members who is in it with ROSTER as that changes, and again when they
+//! ask with WHO; the room's host can end it for everyone with DISBAND.
 //!
 //! Requests that a relay answers before knowing the sender are at least as
 //! long as the answer, so a relay can't be used to amplify traffic towards
@@ -27,9 +29,10 @@ pub const MAX_FRAGMENT: usize = 1200;
 /// CHALLENGE take.
 pub const DISCOVER_SIZE: usize = 256;
 pub const HELLO_SIZE: usize = 64;
-/// The length LIST is padded to, the most a page of ROOMS takes.
+/// The length LIST is padded to, the most a page of ROOMS takes, and the
+/// most a ROSTER takes.
 pub const LIST_SIZE: usize = 1200;
-/// The longest room or relay name.
+/// The longest room, relay or player name.
 pub const MAX_NAME: usize = 32;
 
 const DISCOVER: u8 = 1;
@@ -45,6 +48,9 @@ const ACK: u8 = 10;
 const LEAVE: u8 = 11;
 const LIST: u8 = 12;
 const ROOMS: u8 = 13;
+const ROSTER: u8 = 14;
+const WHO: u8 = 15;
+const DISBAND: u8 = 16;
 
 /// Why a relay turned a client away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +70,8 @@ pub enum RejectReason {
     Open,
     /// The room's name is blank or has control characters.
     Name,
+    /// The room's host ended it.
+    Closed,
 }
 
 impl RejectReason {
@@ -76,6 +84,7 @@ impl RejectReason {
             RejectReason::Unknown => 5,
             RejectReason::Open => 6,
             RejectReason::Name => 7,
+            RejectReason::Closed => 8,
         }
     }
 
@@ -88,6 +97,7 @@ impl RejectReason {
             5 => RejectReason::Unknown,
             6 => RejectReason::Open,
             7 => RejectReason::Name,
+            8 => RejectReason::Closed,
             _ => return None,
         })
     }
@@ -101,6 +111,7 @@ impl RejectReason {
             RejectReason::Unknown => "the relay no longer knows this member",
             RejectReason::Open => "the room has no password: join it without one",
             RejectReason::Name => "a room's name is 1 to 32 printable characters",
+            RejectReason::Closed => "the room's host closed it",
         }
     }
 }
@@ -117,7 +128,41 @@ pub struct RoomInfo {
 /// Whether `room` may be a room's name: not blank, and without control
 /// characters, so a list of rooms shows each on a line of its own.
 pub fn valid_room(room: &str) -> bool {
-    !room.trim().is_empty() && room.len() <= MAX_NAME && !room.chars().any(char::is_control)
+    !room.trim().is_empty() && valid_player(room)
+}
+
+/// Whether `player` may be a player's name, which may be empty.
+pub fn valid_player(player: &str) -> bool {
+    player.len() <= MAX_NAME && !player.chars().any(char::is_control)
+}
+
+/// A member of a room as ROSTER lists it: its index and its player's name,
+/// empty if it gave none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    pub index: u8,
+    pub name: String,
+}
+
+impl Member {
+    /// Its name as a room shows it: its player's, or "Player" and its
+    /// index.
+    pub fn shown(&self) -> String {
+        if self.name.is_empty() { format!("Player {}", self.index) } else { self.name.clone() }
+    }
+}
+
+/// Who is in a room: its members in the order they joined, as many as fit
+/// in a datagram, of `total`. `host` is the index of the room's host, the
+/// one who made it or, once it left, the one there longest. `version`
+/// changes with each change, and ACK carries it, so a member can tell it
+/// missed one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Roster {
+    pub version: u16,
+    pub host: u8,
+    pub total: u16,
+    pub members: Vec<Member>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,13 +206,15 @@ pub enum Message {
         password: bool,
         fresh: bool,
     },
-    /// `proof` is `auth::proof` of the room's key, zeros without one.
-    /// `key` is `auth::room_key` of the password for a fresh room, which
-    /// then wants it of everyone who joins; zeros otherwise.
+    /// `player` is the name the member goes by in the room, empty for
+    /// none. `proof` is `auth::proof` of the room's key, zeros without
+    /// one. `key` is `auth::room_key` of the password for a fresh room,
+    /// which then wants it of everyone who joins; zeros otherwise.
     Join {
         client_id: u64,
         cookie: [u8; 16],
         room: String,
+        player: String,
         proof: [u8; 32],
         key: [u8; 32],
     },
@@ -196,10 +243,20 @@ pub enum Message {
     Keepalive {
         stamp: u32,
     },
+    /// `roster` is the version of the room's ROSTER.
     Ack {
         stamp: u32,
         members: u16,
+        roster: u16,
     },
+    /// Who is in the room, to each of its members, whose token the header
+    /// carries.
+    Roster(Roster),
+    /// A member asking for the ROSTER.
+    Who,
+    /// The room's host ending it: every member is turned away (REJECT with
+    /// `Closed`).
+    Disband,
     Leave,
 }
 
@@ -257,10 +314,11 @@ pub fn encode(token: u64, message: &Message) -> Vec<u8> {
             out.push(*password as u8);
             out.push(*fresh as u8);
         }
-        Message::Join { client_id, cookie, room, proof, key } => {
+        Message::Join { client_id, cookie, room, player, proof, key } => {
             out.extend_from_slice(&client_id.to_be_bytes());
             out.extend_from_slice(cookie);
             put_name(&mut out, room);
+            put_name(&mut out, player);
             out.extend_from_slice(proof);
             out.extend_from_slice(key);
         }
@@ -278,11 +336,31 @@ pub fn encode(token: u64, message: &Message) -> Vec<u8> {
             out.extend_from_slice(payload);
         }
         Message::Keepalive { stamp } => out.extend_from_slice(&stamp.to_be_bytes()),
-        Message::Ack { stamp, members } => {
+        Message::Ack { stamp, members, roster } => {
             out.extend_from_slice(&stamp.to_be_bytes());
             out.extend_from_slice(&members.to_be_bytes());
+            out.extend_from_slice(&roster.to_be_bytes());
         }
-        Message::Leave => {}
+        Message::Roster(roster) => {
+            out.extend_from_slice(&roster.version.to_be_bytes());
+            out.push(roster.host);
+            out.extend_from_slice(&roster.total.to_be_bytes());
+            // As many as fit in a datagram below the path MTU.
+            let count_at = out.len();
+            out.push(0);
+            let mut count = 0u8;
+            for member in &roster.members {
+                let name = truncate(&member.name);
+                if out.len() + 2 + name.len() > LIST_SIZE || count == u8::MAX {
+                    break;
+                }
+                out.push(member.index);
+                put_name(&mut out, name);
+                count += 1;
+            }
+            out[count_at] = count;
+        }
+        Message::Leave | Message::Who | Message::Disband => {}
     }
     out
 }
@@ -302,6 +380,9 @@ fn kind(message: &Message) -> u8 {
         Message::Keepalive { .. } => KEEPALIVE,
         Message::Ack { .. } => ACK,
         Message::Leave => LEAVE,
+        Message::Roster(_) => ROSTER,
+        Message::Who => WHO,
+        Message::Disband => DISBAND,
     }
 }
 
@@ -460,6 +541,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, DecodeError> {
             client_id: body.u64()?,
             cookie: body.array()?,
             room: body.name()?,
+            player: body.name()?,
             proof: body.array()?,
             key: body.array()?,
         },
@@ -477,8 +559,19 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, DecodeError> {
             Message::Data { source, seq, fragment, count, payload }
         }
         KEEPALIVE => Message::Keepalive { stamp: body.u32()? },
-        ACK => Message::Ack { stamp: body.u32()?, members: body.u16()? },
+        ACK => Message::Ack { stamp: body.u32()?, members: body.u16()?, roster: body.u16()? },
         LEAVE => Message::Leave,
+        ROSTER => {
+            let (version, host, total) = (body.u16()?, body.u8()?, body.u16()?);
+            let count = body.u8()?;
+            let mut members = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                members.push(Member { index: body.u8()?, name: body.name()? });
+            }
+            Message::Roster(Roster { version, host, total, members })
+        }
+        WHO => Message::Who,
+        DISBAND => Message::Disband,
         _ => return Err(DecodeError::Malformed),
     };
     body.end()?;
@@ -513,7 +606,14 @@ mod tests {
         round_trip(0, Message::Rooms { name: "den".into(), password: false, total: 40, start: 30, rooms });
         round_trip(0, Message::Hello { client_id: 0x0123_4567_89AB_CDEF, room: "doom".into() });
         round_trip(0, Message::Challenge { cookie: [7; 16], password: false, fresh: true });
-        let join = Message::Join { client_id: 5, cookie: [9; 16], room: "duke".into(), proof: [3; 32], key: [4; 32] };
+        let join = Message::Join {
+            client_id: 5,
+            cookie: [9; 16],
+            room: "duke".into(),
+            player: "Toumal".into(),
+            proof: [3; 32],
+            key: [4; 32],
+        };
         round_trip(0, join);
         round_trip(42, Message::Welcome { index: 7, keepalive: 5, members: 2 });
         for reason in [
@@ -524,12 +624,17 @@ mod tests {
             RejectReason::Unknown,
             RejectReason::Open,
             RejectReason::Name,
+            RejectReason::Closed,
         ] {
             round_trip(0, Message::Reject { reason });
         }
         round_trip(42, Message::Data { source: 3, seq: 65535, fragment: 1, count: 2, payload: vec![1, 2, 3] });
         round_trip(42, Message::Keepalive { stamp: 123_456 });
-        round_trip(42, Message::Ack { stamp: 123_456, members: 4 });
+        round_trip(42, Message::Ack { stamp: 123_456, members: 4, roster: 9 });
+        let members = vec![Member { index: 1, name: "Toumal".into() }, Member { index: 3, name: String::new() }];
+        round_trip(42, Message::Roster(Roster { version: 9, host: 3, total: 2, members }));
+        round_trip(42, Message::Who);
+        round_trip(42, Message::Disband);
         round_trip(42, Message::Leave);
     }
 
@@ -547,6 +652,12 @@ mod tests {
         assert!(page.len() <= encode(0, &Message::List { start: 0, filter: "x".repeat(40) }).len());
         let Ok(Packet { message: Message::Rooms { rooms, .. }, .. }) = decode(&page) else { panic!() };
         assert!(rooms.len() > 20, "{}", rooms.len());
+        // A roster of a full room stays below the path MTU.
+        let members = (1..=200).map(|i| Member { index: i, name: "x".repeat(40) }).collect();
+        let roster = encode(1, &Message::Roster(Roster { version: 1, host: 1, total: 200, members }));
+        assert!(roster.len() <= LIST_SIZE);
+        let Ok(Packet { message: Message::Roster(Roster { members, total, .. }), .. }) = decode(&roster) else { panic!() };
+        assert!(members.len() > 20 && total == 200, "{}", members.len());
         let challenge = encode(0, &Message::Challenge { cookie: [0; 16], password: true, fresh: true });
         let hello = encode(0, &Message::Hello { client_id: 0, room: "x".repeat(40) });
         assert!(challenge.len() <= hello.len());
@@ -591,5 +702,6 @@ mod tests {
         assert!(valid_room("doom") && valid_room("Doom II deathmatch") && valid_room("été"));
         assert!(!valid_room("") && !valid_room("   ") && !valid_room("a\tb") && !valid_room("a\nb"));
         assert!(!valid_room(&"x".repeat(MAX_NAME + 1)));
+        assert!(valid_player("") && valid_player("Toumal") && !valid_player("a\nb"));
     }
 }

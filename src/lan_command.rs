@@ -6,7 +6,7 @@
 //! LAN HOST [port] [/ROOM:name] [/PASSWORD:text]
 //! LAN JOIN [host[:port] | /LOCAL] [/ROOM:name] [/PASSWORD:text]
 //! LAN LIST [host[:port] | /LOCAL] [/ROOM:text]
-//! LAN LEAVE | STOP | STATUS
+//! LAN LEAVE | DISBAND | STOP | STATUS
 //! ```
 //!
 //! JOIN and LIST go to the relay `relay` in `[network]` names (the public
@@ -24,13 +24,14 @@ const HELP: &str = "Joins rust-dos instances into a LAN, for games that play ove
 LAN HOST [port] [/ROOM:name] [/PASSWORD:text]\r\n\
 LAN JOIN [host[:port] | /LOCAL] [/ROOM:name] [/PASSWORD:text]\r\n\
 LAN LIST [host[:port] | /LOCAL] [/ROOM:text]\r\n\
-LAN LEAVE | STOP | STATUS\r\n\
+LAN LEAVE | DISBAND | STOP | STATUS\r\n\
 \r\n\
   HOST     Relays rooms for others on a UDP port (21213 unless given), and\r\n\
            joins one.\r\n\
   JOIN     Joins a room at a relay, making it if it isn't there.\r\n\
   LIST     Lists a relay's rooms, those with text in their names with /ROOM.\r\n\
-  LEAVE    Leaves the room.\r\n\
+  LEAVE    Leaves the room; the one there longest hosts it next.\r\n\
+  DISBAND  Ends the room for everyone in it, as its host (who made it).\r\n\
   STOP     Stops relaying.\r\n\
   STATUS   Shows the IPX driver and the LAN (LAN alone does too).\r\n\
   host     The relay: relay in [network] unless given (relay.rust-dos.com).\r\n\
@@ -175,6 +176,18 @@ impl ShellCommand for LanCommand {
                 cpu.bus.net.leave();
                 return;
             }
+            "DISBAND" => {
+                let lan = cpu.bus.net.status();
+                match (lan.roster(), lan.joined()) {
+                    (Some((index, roster)), Some((_, room))) if roster.host == index => {
+                        cpu.bus.net.disband();
+                        print_line(cpu, &format!("Ended room \"{}\" for everyone in it", room));
+                    }
+                    (Some(_), _) => error(cpu, "only the room's host can end it (LAN LEAVE leaves it)"),
+                    _ => error(cpu, "not in a room"),
+                }
+                return;
+            }
             "STOP" => {
                 cpu.bus.net.stop_hosting();
                 return;
@@ -255,9 +268,12 @@ pub fn list_ended(cpu: &mut Cpu) {
     let locked = if list.password { ", every room with its password" } else { "" };
     let name = if list.name.is_empty() { String::new() } else { format!(" (\"{}\"{})", list.name, locked) };
     print_line(cpu, &format!("Rooms at {}{}:", list.relay, name));
+    if !list.rooms.is_empty() {
+        print_line(cpu, &format!("  {:<32} {:>7}", "Room", "Players"));
+    }
     for room in &list.rooms {
         let lock = if room.password && !list.password { "  password" } else { "" };
-        print_line(cpu, &format!("  {:<32} {:>3} in it{}", room.name, room.members, lock));
+        print_line(cpu, &format!("  {:<32} {:>7}{}", room.name, room.members, lock));
     }
     let shown = match list.rooms.len() {
         0 => "No rooms yet".to_string(),
@@ -290,6 +306,21 @@ fn show(cpu: &mut Cpu) {
     print_string(cpu, &ipx);
     let lan = cpu.bus.net.status();
     print_line(cpu, &format!("LAN: {}", lan.describe()));
+    if let Some((index, roster)) = lan.roster() {
+        print_string(cpu, "Players:\r\n");
+        for member in &roster.members {
+            let role = match (member.index == roster.host, member.index == index) {
+                (true, true) => "host, you",
+                (true, false) => "host",
+                (false, true) => "you",
+                (false, false) => "",
+            };
+            print_line(cpu, &format!("  {:>3}  {:<32} {}", member.index, member.shown(), role));
+        }
+        if (roster.total as usize) > roster.members.len() {
+            print_line(cpu, &format!("       and {} more", roster.total as usize - roster.members.len()));
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let relay = cpu.bus.net.settings.relay.as_deref().unwrap_or("the first on this network").to_string();

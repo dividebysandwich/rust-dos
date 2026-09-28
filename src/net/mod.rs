@@ -111,6 +111,9 @@ pub struct NetSettings {
     /// go to unless told another, or None for the first relay that
     /// answers on the LAN.
     pub relay: Option<String>,
+    /// The name this instance's player goes by in LAN rooms, empty for
+    /// none (the others see "Player" and the member's number).
+    pub player: String,
 }
 
 impl Default for NetSettings {
@@ -128,6 +131,7 @@ impl Default for NetSettings {
             room: DEFAULT_ROOM.into(),
             password: String::new(),
             relay: Some(DEFAULT_RELAY.into()),
+            player: String::new(),
         }
     }
 }
@@ -209,6 +213,13 @@ impl NetSettings {
                 self.room = room.to_string();
             }
             "password" => self.password = value.trim().to_string(),
+            "player" => {
+                let player = value.trim();
+                if !tunnel::wire::valid_player(player) {
+                    return Err(format!("invalid player '{}' (up to {} characters)", value, tunnel::wire::MAX_NAME));
+                }
+                self.player = player.to_string();
+            }
             "relay" => {
                 self.relay = match value.trim() {
                     v if v.eq_ignore_ascii_case("discover") => None,
@@ -233,6 +244,7 @@ impl NetSettings {
             ("nicirq", Some(self.nic_irq.to_string())),
             ("macaddr", Some(self.mac.map_or("auto".to_string(), |mac| mac.to_string()))),
             ("relay", Some(self.relay.clone().unwrap_or_else(|| "discover".to_string()))),
+            ("player", Some(self.player.clone())),
             (
                 "lan",
                 Some(match &self.lan {
@@ -288,7 +300,18 @@ pub struct LanView {
     /// room it is in, once it is.
     pub state: String,
     pub joined: Option<(SocketAddr, String)>,
+    /// This instance's member index in the room, and who is in it, as the
+    /// relay last said.
+    pub index: Option<u8>,
+    pub roster: Option<tunnel::wire::Roster>,
     pub listing: Listing,
+}
+
+impl LanView {
+    /// Whether this instance hosts the room it is in.
+    pub fn hosting(&self) -> bool {
+        matches!((self.index, &self.roster), (Some(index), Some(roster)) if roster.host == index)
+    }
 }
 
 /// What the LAN command shows: where this instance is with the LAN.
@@ -323,6 +346,19 @@ impl LanStatus {
         }
         #[cfg(target_arch = "wasm32")]
         NO_NETWORK.to_string()
+    }
+
+    /// This instance's member index in the room it is in, and who is in
+    /// it, as the relay last said.
+    pub fn roster(&self) -> Option<(u8, tunnel::wire::Roster)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(status) = &self.hub
+            && let hub::LanState::Joined { index, .. } = status.lan
+            && let Some(roster) = &status.roster
+        {
+            return Some((index, roster.clone()));
+        }
+        None
     }
 
     /// The relay and the room this instance is in, once joined.
@@ -447,8 +483,13 @@ impl Net {
     pub fn host(&mut self, port: u16, room: &str, password: &str) -> Result<(), String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let password = (!password.is_empty()).then(|| password.to_string());
-            self.hub()?.send(hub::Command::Host { port, room: room.into(), password });
+            let join = hub::JoinRequest {
+                relay: None,
+                room: room.into(),
+                password: (!password.is_empty()).then(|| password.to_string()),
+                player: self.settings.player.clone(),
+            };
+            self.hub()?.send(hub::Command::Host { port, join });
             Ok(())
         }
         #[cfg(target_arch = "wasm32")]
@@ -467,6 +508,7 @@ impl Net {
                 relay: relay.map(String::from),
                 room: room.into(),
                 password: (!password.is_empty()).then(|| password.to_string()),
+                player: self.settings.player.clone(),
             };
             self.hub()?.send(hub::Command::Join(request));
             Ok(())
@@ -475,6 +517,14 @@ impl Net {
         {
             let _ = (relay, room, password);
             Err(NO_NETWORK.into())
+        }
+    }
+
+    /// End the room for everyone in it, as its host, and leave it.
+    pub fn disband(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(hub) = &self.hub {
+            hub.send(hub::Command::Disband);
         }
     }
 
@@ -545,7 +595,8 @@ impl Net {
     /// What the room browser shows.
     pub fn view(&self) -> LanView {
         let status = self.status();
-        LanView { state: status.describe(), joined: status.joined(), listing: self.listing() }
+        let (index, roster) = status.roster().unzip();
+        LanView { state: status.describe(), joined: status.joined(), index, roster, listing: self.listing() }
     }
 
     /// What happened on the LAN since the last call, for the screen.
@@ -582,6 +633,7 @@ mod tests {
             ("room", "doom"),
             ("password", "swordfish"),
             ("relay", "relay.example.com:4000"),
+            ("player", " Toumal "),
         ] {
             n.set(key, value).unwrap();
         }
@@ -600,6 +652,7 @@ mod tests {
                 room: "doom".into(),
                 password: "swordfish".into(),
                 relay: Some("relay.example.com:4000".into()),
+                player: "Toumal".into(),
             }
         );
         let mut again = NetSettings::default();
@@ -621,6 +674,7 @@ mod tests {
         assert!(n.set("lanhost", "x").is_err());
         assert!(n.set("room", "").is_err());
         assert!(n.set("relay", "").is_err() && n.set("relay", "a b").is_err());
+        assert!(n.set("player", &"x".repeat(33)).is_err() && n.set("player", "a\tb").is_err());
         n.set("relay", "DISCOVER").unwrap();
         assert_eq!(n.relay, None);
         assert_eq!(n.entries().iter().find(|e| e.0 == "relay").unwrap().1.as_deref(), Some("discover"));
@@ -644,9 +698,14 @@ mod tests {
         let server = RelayServer::start("127.0.0.1:0".parse().unwrap(), config, Box::new(|_| {})).unwrap();
         let relay = server.local_addr();
         let mut net = Net::new();
+        net.settings.player = "Toumal".into();
         assert_eq!(net.view().state, "not joined");
         net.join(Some(&relay.to_string()), "doom", "pw").unwrap();
-        wait(&mut || net.view().joined.is_some());
+        wait(&mut || net.view().roster.is_some());
+        // Who made the room hosts it.
+        let view = net.view();
+        assert!(view.hosting(), "{:?}", view);
+        assert_eq!(view.roster.unwrap().members, [tunnel::wire::Member { index: 1, name: "Toumal".into() }]);
         net.browse(Some(&relay.to_string()), "").unwrap();
         assert!(net.listing().asking);
         wait(&mut || !net.listing().asking);

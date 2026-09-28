@@ -1599,6 +1599,10 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.net.leave();
     }
 
+    fn disband_room(&mut self) {
+        self.cpu.bus.net.disband();
+    }
+
     fn games(&self) -> Vec<GameEntry> {
         games_dir(self.saved.file.as_deref()).map_or_else(Vec::new, |dir| games::list(&dir).into_iter().map(|(e, _)| e).collect())
     }

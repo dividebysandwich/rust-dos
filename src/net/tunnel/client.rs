@@ -1,11 +1,12 @@
 //! A member of a relay's room: joins it, keeps its place with keepalives,
-//! joins again when the relay forgets it or stops answering, and sends and
-//! receives the room's frames. Like `Relay`, it is the protocol alone:
-//! datagrams and the time in, datagrams for the relay out.
+//! joins again when the relay forgets it or stops answering, sends and
+//! receives the room's frames, and knows who else is in the room. Like
+//! `Relay`, it is the protocol alone: datagrams and the time in, datagrams
+//! for the relay out.
 
 use super::auth;
 use super::frag::{self, Reassembler};
-use super::wire::{self, Message, RejectReason};
+use super::wire::{self, Message, RejectReason, Roster};
 use std::net::SocketAddr;
 
 /// How often HELLO and JOIN are sent again while the relay doesn't answer,
@@ -22,6 +23,8 @@ pub struct ClientConfig {
     pub relay: SocketAddr,
     pub room: String,
     pub password: Option<String>,
+    /// The name the player goes by in the room, empty for none.
+    pub player: String,
 }
 
 /// Where the client is with the relay.
@@ -52,6 +55,8 @@ pub enum ClientEvent {
     Rejected(RejectReason),
     /// The relay stopped answering; the client is joining again.
     Lost,
+    /// Who is in the room changed.
+    Roster(Roster),
     Frame(Vec<u8>),
 }
 
@@ -68,6 +73,7 @@ pub struct Client {
     keepalive_ms: u64,
     members: u16,
     rtt_ms: Option<u32>,
+    roster: Option<Roster>,
     seq: u16,
     reassembler: Reassembler<(u8, u16)>,
 }
@@ -87,6 +93,7 @@ impl Client {
             keepalive_ms: 5000,
             members: 0,
             rtt_ms: None,
+            roster: None,
             seq: 0,
             reassembler: Reassembler::new(),
         };
@@ -112,8 +119,14 @@ impl Client {
         self.rtt_ms
     }
 
+    /// Who is in the room, as the relay last said.
+    pub fn roster(&self) -> Option<&Roster> {
+        self.roster.as_ref()
+    }
+
     fn send_hello(&mut self, now: u64, out: &mut Vec<Vec<u8>>) {
         self.phase = Phase::Hello;
+        self.roster = None;
         self.last_sent = now;
         let hello = Message::Hello { client_id: self.client_id, room: self.config.room.clone() };
         out.push(wire::encode(0, &hello));
@@ -126,7 +139,8 @@ impl Client {
         let room = &self.config.room;
         let proof = auth::proof(&self.key, room, self.client_id, &cookie);
         let key = if fresh { self.key } else { [0; 32] };
-        let join = Message::Join { client_id: self.client_id, cookie, room: room.clone(), proof, key };
+        let player = self.config.player.clone();
+        let join = Message::Join { client_id: self.client_id, cookie, room: room.clone(), player, proof, key };
         out.push(wire::encode(0, &join));
     }
 
@@ -161,10 +175,25 @@ impl Client {
             (Phase::Joined { .. }, Message::Reject { reason: RejectReason::Unknown }) if from_relay => {
                 self.send_hello(now, out);
             }
-            (Phase::Joined { token, .. }, Message::Ack { stamp, members }) if packet.token == token => {
+            (Phase::Joined { .. }, Message::Reject { reason: RejectReason::Closed }) if from_relay => {
+                self.phase = Phase::Rejected(RejectReason::Closed);
+                self.roster = None;
+                events.push(ClientEvent::Rejected(RejectReason::Closed));
+            }
+            (Phase::Joined { token, .. }, Message::Ack { stamp, members, roster }) if packet.token == token => {
                 self.last_heard = now;
                 self.members = members;
                 self.rtt_ms = Some((now as u32).wrapping_sub(stamp));
+                // A roster that went missing.
+                if self.roster.as_ref().is_none_or(|r| r.version != roster) {
+                    out.push(wire::encode(token, &Message::Who));
+                }
+            }
+            (Phase::Joined { token, .. }, Message::Roster(roster)) if packet.token == token => {
+                self.last_heard = now;
+                self.members = roster.total;
+                self.roster = Some(roster.clone());
+                events.push(ClientEvent::Roster(roster));
             }
             (Phase::Joined { token, .. }, Message::Data { source, seq, fragment, count, payload })
                 if packet.token == token =>
@@ -227,6 +256,16 @@ impl Client {
             out.push(wire::encode(token, &Message::Leave));
         }
         self.phase = Phase::Hello;
+        self.roster = None;
+    }
+
+    /// End the room for everyone in it, if this is its host, and leave it.
+    pub fn disband(&mut self, out: &mut Vec<Vec<u8>>) {
+        if let Phase::Joined { token, .. } = self.phase {
+            out.push(wire::encode(token, &Message::Disband));
+        }
+        self.phase = Phase::Hello;
+        self.roster = None;
     }
 }
 
@@ -258,7 +297,9 @@ mod tests {
         }
 
         fn add(&mut self, now: u64, room: &str, password: Option<&str>) -> usize {
-            let config = ClientConfig { relay: addr(RELAY), room: room.into(), password: password.map(String::from) };
+            let player = format!("player {}", self.clients.len());
+            let config =
+                ClientConfig { relay: addr(RELAY), room: room.into(), password: password.map(String::from), player };
             let mut out = Vec::new();
             let n = self.clients.len();
             self.clients.push(Client::new(config, 100 + n as u64, now, &mut out));
@@ -276,6 +317,11 @@ mod tests {
                     self.relay.handle(now, addr(n as u16 + 1), &d, &mut to_clients);
                 }
             }
+            self.pass(now, to_clients);
+        }
+
+        /// Pass datagrams from the relay to its clients.
+        fn pass(&mut self, now: u64, to_clients: Vec<Outgoing>) {
             for o in to_clients {
                 let m = (o.to.port() - 4001) as usize;
                 let mut out = Vec::new();
@@ -286,7 +332,9 @@ mod tests {
         }
 
         fn tick(&mut self, now: u64) {
-            self.relay.tick(now);
+            let mut to_clients = Vec::new();
+            self.relay.tick(now, &mut to_clients);
+            self.pass(now, to_clients);
             for n in 0..self.clients.len() {
                 let mut out = Vec::new();
                 let events = self.clients[n].tick(now, &mut out);
@@ -301,9 +349,54 @@ mod tests {
             self.deliver(now, n, out);
         }
 
+        /// What happened to client `n`, but for rosters.
         fn take(&mut self, n: usize) -> Vec<ClientEvent> {
-            std::mem::take(&mut self.events[n])
+            let mut events = std::mem::take(&mut self.events[n]);
+            events.retain(|e| !matches!(e, ClientEvent::Roster(_)));
+            events
         }
+
+        /// Who client `n` sees in its room: the host, and the players.
+        fn roster(&self, n: usize) -> (u8, Vec<(u8, String)>) {
+            let roster = self.clients[n].roster().expect("a roster");
+            (roster.host, roster.members.iter().map(|m| (m.index, m.name.clone())).collect())
+        }
+    }
+
+    #[test]
+    fn members_know_who_is_in_the_room_and_the_host_can_end_it() {
+        let mut lan = Lan::new(None);
+        let a = lan.add(0, "doom", None);
+        let b = lan.add(0, "doom", None);
+        let c = lan.add(0, "doom", None);
+        let players = |names: &[(u8, &str)]| names.iter().map(|(i, n)| (*i, n.to_string())).collect::<Vec<_>>();
+        let all = players(&[(1, "player 0"), (2, "player 1"), (3, "player 2")]);
+        for n in [a, b, c] {
+            assert_eq!(lan.roster(n), (1, all.clone()));
+            lan.take(n);
+        }
+        // The host leaving makes the one there longest the host.
+        let mut out = Vec::new();
+        lan.clients[a].leave(&mut out);
+        lan.deliver(1, a, out);
+        assert_eq!(lan.roster(b), (2, players(&[(2, "player 1"), (3, "player 2")])));
+        assert_eq!(lan.roster(c), lan.roster(b));
+        // A roster that went missing is asked for with the next keepalive.
+        lan.clients[c].roster = None;
+        let mut out = Vec::new();
+        lan.clients[c].tick(6000, &mut out);
+        lan.deliver(6000, c, out);
+        assert_eq!(lan.roster(c), lan.roster(b));
+        // The host ends the room; the others are told, for good.
+        let mut out = Vec::new();
+        lan.clients[b].disband(&mut out);
+        lan.deliver(8000, b, out);
+        assert_eq!(lan.take(c), vec![ClientEvent::Rejected(RejectReason::Closed)]);
+        assert_eq!(lan.clients[c].phase(), Phase::Rejected(RejectReason::Closed));
+        assert!(lan.relay.rooms().is_empty());
+        // Anyone may make the room anew.
+        let d = lan.add(9000, "doom", None);
+        assert!(matches!(lan.take(d)[..], [ClientEvent::Joined { .. }]));
     }
 
     #[test]

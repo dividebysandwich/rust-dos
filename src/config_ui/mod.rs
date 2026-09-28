@@ -25,7 +25,7 @@ use draw::{Grid, Layout, Rgb};
 pub use draw::cp437;
 use games::{GameDialog, GameField};
 use image::{ImageDialog, ImageField};
-use rooms::{RoomBrowser, RoomField};
+use rooms::{RoomBrowser, RoomButton, RoomField};
 pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
@@ -206,6 +206,8 @@ pub trait Host {
         Err("There is no network here".to_string())
     }
     fn leave_room(&mut self) {}
+    /// End the room this instance hosts for everyone in it, and leave it.
+    fn disband_room(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,7 +288,7 @@ impl Page {
                 ChorusMix,
             ],
             Page::Network => {
-                &[Rooms, Relay, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
+                &[Rooms, Relay, Player, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
             }
         }
     }
@@ -436,6 +438,8 @@ enum Item {
     /// JOIN and LAN LIST go to without an address.
     Rooms,
     Relay,
+    /// The name the player goes by in LAN rooms.
+    Player,
     /// The LAN joined or hosted at startup, its room and password.
     Lan,
     LanHost,
@@ -603,6 +607,7 @@ impl Item {
             MacAddr => "  Ethernet address",
             Rooms => "Find or make a LAN room...",
             Relay => "LAN relay",
+            Player => "LAN player name",
             Lan => "Join a LAN at startup",
             LanHost => "Host a LAN at startup",
             Room => "LAN room",
@@ -625,7 +630,9 @@ impl Item {
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The browser has no sockets for a LAN.
-            Item::Rooms | Item::Relay | Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
+            Item::Rooms | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
+                frontend.window
+            }
             _ => true,
         }
     }
@@ -667,7 +674,9 @@ impl Item {
             Item::Memsize | Item::Deadzone => Input::Slider,
             Item::Cycles => Input::Presets,
             Item::UltraDir | Item::CaptureDir => Input::Text,
-            Item::MacAddr | Item::Relay | Item::Lan | Item::LanHost | Item::Room | Item::Password => Input::Text,
+            Item::MacAddr | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
+                Input::Text
+            }
             Item::SoundFont | Item::Mt32Roms => Input::File,
             Item::Autoexec | Item::Rooms => Input::Link,
             _ => Input::Choice,
@@ -812,6 +821,8 @@ impl Item {
             NicIrq => s.network.nic_irq.to_string(),
             MacAddr => s.network.mac.map_or("auto (new each start)".to_string(), |mac| mac.to_string()),
             Relay => s.network.relay.clone().unwrap_or_else(|| "discover (on this network)".to_string()),
+            Player if s.network.player.is_empty() => "none (\"Player\" and a number)".to_string(),
+            Player => s.network.player.clone(),
             Lan => match &s.network.lan {
                 None => "off".to_string(),
                 Some(relay) if relay.is_empty() => "discover".to_string(),
@@ -930,8 +941,8 @@ impl Item {
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
-            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr | Rooms | Relay | Lan
-            | LanHost | Room | Password => Vec::new(),
+            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr | Rooms | Relay | Player
+            | Lan | LanHost | Room | Password => Vec::new(),
         }
     }
 
@@ -1008,6 +1019,7 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus_mix.to_string(),
             Item::MacAddr => s.network.mac.map_or(String::new(), |mac| mac.to_string()),
             Item::Relay => s.network.relay.clone().unwrap_or_else(|| "discover".to_string()),
+            Item::Player => s.network.player.clone(),
             Item::Lan => Item::Lan.value(s, None),
             Item::LanHost => s.network.lan_host.map_or("off".to_string(), |port| port.to_string()),
             Item::Room => s.network.room.clone(),
@@ -1034,6 +1046,7 @@ impl Item {
             Item::MacAddr => s.network.set("macaddr", text)?,
             Item::Relay if text.is_empty() => s.network.relay = Some(crate::net::DEFAULT_RELAY.into()),
             Item::Relay => s.network.set("relay", text)?,
+            Item::Player => s.network.set("player", text)?,
             Item::Lan => s.network.set("lan", text)?,
             Item::LanHost => s.network.set("lanhost", text)?,
             Item::Room => s.network.set("room", text)?,
@@ -1082,6 +1095,7 @@ impl Item {
                 let default = Some(crate::net::DEFAULT_RELAY.to_string());
                 std::mem::replace(&mut s.network.relay, default.clone()) != default
             }
+            Item::Player => !std::mem::take(&mut s.network.player).is_empty(),
             Item::Lan => s.network.lan.take().is_some(),
             Item::LanHost => s.network.lan_host.take().is_some(),
             Item::Room => std::mem::replace(&mut s.network.room, crate::net::DEFAULT_ROOM.into()) != crate::net::DEFAULT_ROOM,
@@ -1140,9 +1154,11 @@ enum Target {
     BrowserRow(usize),
     /// A line of the `[autoexec]` editor.
     EditorLine(usize),
-    /// A row of the room browser, and a control of its prompt.
+    /// A row of the room browser, a control of its prompt, and a button of
+    /// the room this instance hosts.
     RoomRow(usize),
     RoomField(RoomField),
+    RoomButton(RoomButton),
     /// A value of the popup list, and the rest of it.
     PopupRow(usize),
     Popup,
@@ -1503,7 +1519,7 @@ impl ConfigUi {
                 }
             }
             Target::EditorLine(i) => self.autoexec_clicked(i, into),
-            Target::RoomRow(_) | Target::RoomField(_) => self.room_clicked(target, host),
+            Target::RoomRow(_) | Target::RoomField(_) | Target::RoomButton(_) => self.room_clicked(target, host),
             Target::PopupRow(i) => {
                 if let Some(popup) = &mut self.popup {
                     popup.selected = i;

@@ -205,18 +205,24 @@ mod tests {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut buf = [0; 2048];
+        // The next datagram that isn't a room's roster.
+        let mut answer = || loop {
+            let (len, _) = socket.recv_from(&mut buf).unwrap();
+            match wire::decode(&buf[..len]).unwrap().message {
+                Message::Roster(_) => continue,
+                message => break message,
+            }
+        };
         // Enough rooms for several pages, one of them with a password.
         for i in 0..70u64 {
             let room = format!("a room with a long name {:02}", i);
             socket.send_to(&wire::encode(0, &Message::Hello { client_id: i, room: room.clone() }), relay).unwrap();
-            let (len, _) = socket.recv_from(&mut buf).unwrap();
-            let Message::Challenge { cookie, .. } = wire::decode(&buf[..len]).unwrap().message else { panic!() };
+            let Message::Challenge { cookie, .. } = answer() else { panic!() };
             let key = crate::net::tunnel::auth::room_key((i == 5).then_some("pw"), &room);
             let proof = crate::net::tunnel::auth::proof(&key, &room, i, &cookie);
-            let join = Message::Join { client_id: i, cookie, room, proof, key };
+            let join = Message::Join { client_id: i, cookie, room, player: String::new(), proof, key };
             socket.send_to(&wire::encode(0, &join), relay).unwrap();
-            let (len, _) = socket.recv_from(&mut buf).unwrap();
-            assert!(matches!(wire::decode(&buf[..len]).unwrap().message, Message::Welcome { .. }));
+            assert!(matches!(answer(), Message::Welcome { .. }));
         }
         let all = rooms(Some(&relay.to_string()), "").unwrap();
         assert_eq!((all.relay, all.name.as_str(), all.password, all.total), (relay, "den", false, 70));

@@ -289,6 +289,9 @@
 # (the first relay that answers on this network). relay.rust-dos.com is a
 # public relay, where anyone can find and make rooms.
 #relay=relay.rust-dos.com
+# The name the others in a LAN room see your player by. Without one they
+# see "Player" and a number.
+#player=
 # A LAN room to join at startup, as LAN JOIN does: off, discover (the
 # first relay that answers on this network) or a relay's host[:port].
 #lan=off

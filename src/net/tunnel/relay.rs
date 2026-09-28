@@ -9,13 +9,18 @@
 //! makes a room decides whether it wants a password (`auth`). Anyone may
 //! list the rooms (LIST), which is how a room browser finds them.
 //!
+//! The member there longest, which is the one who made the room until it
+//! leaves, is the room's host: it can end the room for everyone
+//! (DISBAND). Every member is told who is in its room (ROSTER) whenever
+//! that changes.
+//!
 //! `Relay` is the protocol alone, fed datagrams and the time and handing
 //! back datagrams to send, so it can be tested without sockets.
 //! `RelayServer` runs one on a UDP socket in a thread of its own.
 
 use super::auth;
 use super::frag::{self, Reassembler};
-use super::wire::{self, DecodeError, Message, RejectReason, RoomInfo};
+use super::wire::{self, DecodeError, Message, RejectReason, RoomInfo, Roster};
 use crate::net::frame::{self, Mac};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -24,7 +29,8 @@ use std::net::SocketAddr;
 pub const KEEPALIVE_S: u8 = 5;
 /// A member not heard from for this long is dropped.
 pub const MEMBER_TIMEOUT_MS: u64 = 30_000;
-/// How long a dropped member's index is kept for it.
+/// How long a dropped member's index is kept for it, and how long the
+/// members of a room its host ended are kept from joining it again.
 pub const RESERVE_MS: u64 = 60_000;
 /// Members in one room: their indexes are 1 to this.
 pub const MAX_ROOM: usize = 200;
@@ -61,6 +67,8 @@ struct Member {
     client_id: u64,
     room: String,
     index: u8,
+    /// The name its player goes by, empty for none.
+    player: String,
     addr: SocketAddr,
     last_seen: u64,
     macs: Vec<Mac>,
@@ -82,6 +90,8 @@ struct Room {
     macs: HashMap<Mac, u64>,
     /// What joining takes (`auth::room_key`), `NO_KEY` for nothing.
     key: [u8; 32],
+    /// The version of its roster, which changes with it.
+    version: u16,
 }
 
 /// A left member's index, kept for it a while.
@@ -92,12 +102,23 @@ struct Reservation {
     until: u64,
 }
 
+/// A member of a room its host ended, which may not join it again for a
+/// while: an instance that missed being told would make it anew.
+struct Closure {
+    room: String,
+    client_id: u64,
+    until: u64,
+}
+
 pub struct Relay {
     config: RelayConfig,
     secret: [u8; 32],
     members: HashMap<u64, Member>,
     rooms: HashMap<String, Room>,
     reserved: Vec<Reservation>,
+    closed: Vec<Closure>,
+    /// The rooms whose members are to be told who is in them.
+    changed: Vec<String>,
     reassembler: Reassembler<(u64, u16)>,
     events: Vec<String>,
 }
@@ -112,6 +133,8 @@ impl Relay {
             members: HashMap::new(),
             rooms: HashMap::new(),
             reserved: Vec::new(),
+            closed: Vec::new(),
+            changed: Vec::new(),
             reassembler: Reassembler::new(),
             events: Vec::new(),
         }
@@ -151,8 +174,52 @@ impl Relay {
         self.members.len()
     }
 
+    /// Who is in `room`, first the host.
+    fn roster(&self, room: &Room) -> Roster {
+        let members: Vec<wire::Member> = room
+            .members
+            .iter()
+            .filter_map(|t| self.members.get(t))
+            .map(|m| wire::Member { index: m.index, name: m.player.clone() })
+            .collect();
+        Roster {
+            version: room.version,
+            host: members.first().map_or(0, |m| m.index),
+            total: members.len() as u16,
+            members,
+        }
+    }
+
+    /// Who is in `room` changed.
+    fn touch(&mut self, room: &str) {
+        if let Some(entry) = self.rooms.get_mut(room) {
+            entry.version = entry.version.wrapping_add(1);
+            if !self.changed.iter().any(|r| r == room) {
+                self.changed.push(room.to_string());
+            }
+        }
+    }
+
+    /// Tell the members of the rooms that changed who is in them.
+    fn send_rosters(&mut self, out: &mut Vec<Outgoing>) {
+        for name in std::mem::take(&mut self.changed) {
+            let Some(room) = self.rooms.get(&name) else { continue };
+            let roster = Message::Roster(self.roster(room));
+            for token in &room.members {
+                if let Some(member) = self.members.get(token) {
+                    out.push(Outgoing { to: member.addr, bytes: wire::encode(*token, &roster) });
+                }
+            }
+        }
+    }
+
     /// Take datagram `bytes` from `from` at `now` (ms).
     pub fn handle(&mut self, now: u64, from: SocketAddr, bytes: &[u8], out: &mut Vec<Outgoing>) {
+        self.take(now, from, bytes, out);
+        self.send_rosters(out);
+    }
+
+    fn take(&mut self, now: u64, from: SocketAddr, bytes: &[u8], out: &mut Vec<Outgoing>) {
         let packet = match wire::decode(bytes) {
             Ok(packet) => packet,
             Err(DecodeError::Version(_)) => {
@@ -197,8 +264,8 @@ impl Relay {
                 };
                 out.push(Outgoing { to: from, bytes: wire::encode(0, &challenge) });
             }
-            Message::Join { client_id, cookie, room, proof, key } => {
-                self.join(now, from, client_id, &cookie, room, &proof, &key, out);
+            Message::Join { client_id, cookie, room, player, proof, key } => {
+                self.join(now, from, client_id, &cookie, room, player, &proof, &key, out);
             }
             Message::Data { seq, fragment, count, payload, .. } => {
                 if !self.heard(now, token, from) || !self.allow(now, token) {
@@ -210,8 +277,9 @@ impl Relay {
             }
             Message::Keepalive { stamp } => {
                 if self.heard(now, token, from) {
-                    let members = self.room_of(token).map_or(0, |r| r.members.len()) as u16;
-                    out.push(Outgoing { to: from, bytes: wire::encode(token, &Message::Ack { stamp, members }) });
+                    let (members, roster) = self.room_of(token).map_or((0, 0), |r| (r.members.len() as u16, r.version));
+                    let ack = Message::Ack { stamp, members, roster };
+                    out.push(Outgoing { to: from, bytes: wire::encode(token, &ack) });
                 } else {
                     let reply = Message::Reject { reason: RejectReason::Unknown };
                     out.push(Outgoing { to: from, bytes: wire::encode(0, &reply) });
@@ -222,18 +290,54 @@ impl Relay {
                     self.remove(now, token, "left");
                 }
             }
+            Message::Who => {
+                if self.heard(now, token, from)
+                    && let Some(room) = self.room_of(token)
+                {
+                    let roster = Message::Roster(self.roster(room));
+                    out.push(Outgoing { to: from, bytes: wire::encode(token, &roster) });
+                }
+            }
+            Message::Disband => {
+                if self.heard(now, token, from) {
+                    self.disband(now, token, out);
+                }
+            }
             // What only a relay sends.
             Message::Offer { .. }
             | Message::Rooms { .. }
             | Message::Challenge { .. }
             | Message::Welcome { .. }
             | Message::Reject { .. }
-            | Message::Ack { .. } => {}
+            | Message::Ack { .. }
+            | Message::Roster(_) => {}
         }
     }
 
-    /// Drop the members that went silent and forget old reservations.
-    pub fn tick(&mut self, now: u64) {
+    /// End the room of `token`, if it is the room's host: its members are
+    /// told, and kept from making it again at once.
+    fn disband(&mut self, now: u64, token: u64, out: &mut Vec<Outgoing>) {
+        let Some(name) = self.members.get(&token).map(|m| m.room.clone()) else { return };
+        if self.rooms.get(&name).and_then(|r| r.members.first()) != Some(&token) {
+            return;
+        }
+        let Some(room) = self.rooms.remove(&name) else { return };
+        let closed = wire::encode(0, &Message::Reject { reason: RejectReason::Closed });
+        for t in &room.members {
+            let Some(member) = self.members.remove(t) else { continue };
+            if *t != token {
+                out.push(Outgoing { to: member.addr, bytes: closed.clone() });
+                self.closed.push(Closure { room: name.clone(), client_id: member.client_id, until: now + RESERVE_MS });
+            }
+        }
+        self.reserved.retain(|r| r.room != name);
+        self.changed.retain(|r| *r != name);
+        self.events.push(format!("room \"{}\" was ended by its host ({} in it)", name, room.members.len()));
+    }
+
+    /// Drop the members that went silent and forget old reservations, and
+    /// tell the rooms that changed.
+    pub fn tick(&mut self, now: u64, out: &mut Vec<Outgoing>) {
         let silent: Vec<u64> = self
             .members
             .iter()
@@ -244,7 +348,9 @@ impl Relay {
             self.remove(now, token, "timed out");
         }
         self.reserved.retain(|r| r.until > now);
+        self.closed.retain(|c| c.until > now);
         self.reassembler.expire(now);
+        self.send_rosters(out);
     }
 
     fn password(&self) -> Option<&str> {
@@ -263,6 +369,7 @@ impl Relay {
         client_id: u64,
         cookie: &[u8; 16],
         room: String,
+        player: String,
         proof: &[u8; 32],
         key: &[u8; 32],
         out: &mut Vec<Outgoing>,
@@ -276,6 +383,11 @@ impl Relay {
             out.push(reject(RejectReason::Cookie));
             return;
         }
+        if self.closed.iter().any(|c| c.room == room && c.client_id == client_id && c.until > now) {
+            out.push(reject(RejectReason::Closed));
+            return;
+        }
+        let player = if wire::valid_player(player.trim()) { player.trim().to_string() } else { String::new() };
         // What the room wants: the relay's password, else what the room
         // was made with, else, for a room this join makes, the key it
         // brings.
@@ -330,6 +442,7 @@ impl Relay {
                 client_id,
                 room: room.clone(),
                 index,
+                player: player.clone(),
                 addr: from,
                 last_seen: now,
                 macs: Vec::new(),
@@ -341,9 +454,14 @@ impl Relay {
         let entry = self.rooms.entry(room.clone()).or_insert_with(|| Room { key: wanted, ..Default::default() });
         entry.members.push(token);
         let members = entry.members.len() as u16;
-        self.events.push(format!("{} joined room \"{}\" as member {} ({} in the room)", from, room, index, members));
+        let named = if player.is_empty() { String::new() } else { format!(" \"{}\"", player) };
+        self.events.push(format!(
+            "{} joined room \"{}\" as member {}{} ({} in the room)",
+            from, room, index, named, members
+        ));
         let welcome = Message::Welcome { index, keepalive: KEEPALIVE_S, members };
         out.push(Outgoing { to: from, bytes: wire::encode(token, &welcome) });
+        self.touch(&room);
     }
 
     /// The index for `client_id` in `room`: the one kept for it, else the
@@ -449,14 +567,20 @@ impl Relay {
 
     fn remove(&mut self, now: u64, token: u64, why: &str) {
         let Some(member) = self.members.remove(&token) else { return };
+        self.events.push(format!("member {} of room \"{}\" ({}) {}", member.index, member.room, member.addr, why));
         if let Some(room) = self.rooms.get_mut(&member.room) {
+            let was_host = room.members.first() == Some(&token);
             room.members.retain(|t| *t != token);
             room.macs.retain(|_, t| *t != token);
             if room.members.is_empty() {
                 self.rooms.remove(&member.room);
+            } else {
+                if was_host && let Some(host) = self.members.get(&room.members[0]) {
+                    self.events.push(format!("member {} is the host of room \"{}\" now", host.index, member.room));
+                }
+                self.touch(&member.room);
             }
         }
-        self.events.push(format!("member {} of room \"{}\" ({}) {}", member.index, member.room, member.addr, why));
         self.reserved.retain(|r| !(r.room == member.room && r.client_id == member.client_id));
         self.reserved.push(Reservation {
             room: member.room,
@@ -578,12 +702,12 @@ mod server {
             if let Ok((len, from)) = socket.recv_from(&mut buf) {
                 relay.handle(now, from, &buf[..len], &mut out);
             }
-            for datagram in out.drain(..) {
-                let _ = socket.send_to(&datagram.bytes, datagram.to);
-            }
             if now >= last_tick + 1000 {
                 last_tick = now;
-                relay.tick(now);
+                relay.tick(now, &mut out);
+            }
+            for datagram in out.drain(..) {
+                let _ = socket.send_to(&datagram.bytes, datagram.to);
             }
             let events = relay.take_events();
             // Members came or went: the rooms are told as it happens.
@@ -648,10 +772,11 @@ mod tests {
         let Message::Challenge { cookie, fresh, .. } = message(&one(&mut out).bytes).message else { panic!() };
         let key = auth::room_key(password, room);
         let proof = auth::proof(&key, room, id, &cookie);
-        let join =
-            Message::Join { client_id: id, cookie, room: room.into(), proof, key: if fresh { key } else { NO_KEY } };
+        let key = if fresh { key } else { NO_KEY };
+        let join = Message::Join { client_id: id, cookie, room: room.into(), player: format!("p{}", id), proof, key };
         relay.handle(now, from, &wire::encode(0, &join), &mut out);
-        let reply = message(&one(&mut out).bytes);
+        // Its answer, before the rosters that follow a join.
+        let reply = message(&out.iter().find(|o| o.to == from).unwrap().bytes);
         match reply.message {
             Message::Welcome { index, .. } => Ok((reply.token, index)),
             Message::Reject { reason } => Err(reason),
@@ -761,6 +886,70 @@ mod tests {
     }
 
     #[test]
+    fn members_are_told_who_is_in_their_room() {
+        let mut relay = Relay::new(RelayConfig::default());
+        let (a, _) = join(&mut relay, 0, 1, "doom", None).unwrap();
+        let mut out = Vec::new();
+        let hello = wire::encode(0, &Message::Hello { client_id: 2, room: "doom".into() });
+        relay.handle(0, addr(2), &hello, &mut out);
+        let Message::Challenge { cookie, .. } = message(&one(&mut out).bytes).message else { panic!() };
+        let player = "Toumal\u{7}".to_string();
+        let join = Message::Join { client_id: 2, cookie, room: "doom".into(), player, proof: NO_KEY, key: NO_KEY };
+        relay.handle(0, addr(2), &wire::encode(0, &join), &mut out);
+        // B is welcomed, then both hear who is in the room: A hosts it,
+        // and B's name, which it can't have with a bell in it, is none.
+        let (welcome, rosters) = out.split_first().unwrap();
+        let b = message(&welcome.bytes).token;
+        let who = |i: u8, n: &str| wire::Member { index: i, name: n.into() };
+        let roster = Roster { version: 2, host: 1, total: 2, members: vec![who(1, "p1"), who(2, "")] };
+        let told: Vec<(SocketAddr, Packet)> = rosters.iter().map(|o| (o.to, message(&o.bytes))).collect();
+        assert_eq!(
+            told,
+            [
+                (addr(1), Packet { token: a, message: Message::Roster(roster.clone()) }),
+                (addr(2), Packet { token: b, message: Message::Roster(roster.clone()) }),
+            ]
+        );
+        // WHO asks again; A leaving makes B the host, and B is told.
+        let mut out = Vec::new();
+        relay.handle(1, addr(2), &wire::encode(b, &Message::Who), &mut out);
+        assert_eq!(message(&one(&mut out).bytes).message, Message::Roster(roster));
+        relay.handle(2, addr(1), &wire::encode(a, &Message::Leave), &mut out);
+        let roster = Roster { version: 3, host: 2, total: 1, members: vec![who(2, "")] };
+        assert_eq!(message(&one(&mut out).bytes), Packet { token: b, message: Message::Roster(roster) });
+        // A stranger's WHO gets nothing.
+        relay.handle(3, addr(9), &wire::encode(4242, &Message::Who), &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_host_ends_its_room_for_everyone() {
+        let mut relay = Relay::new(RelayConfig::default());
+        let (a, _) = join(&mut relay, 0, 1, "doom", None).unwrap();
+        let (b, _) = join(&mut relay, 0, 2, "doom", None).unwrap();
+        join(&mut relay, 0, 3, "doom", None).unwrap();
+        join(&mut relay, 0, 4, "duke", None).unwrap();
+        // Only the host can.
+        let mut out = Vec::new();
+        relay.handle(1, addr(2), &wire::encode(b, &Message::Disband), &mut out);
+        assert!(out.is_empty());
+        assert_eq!(relay.member_count(), 4);
+        relay.handle(1, addr(1), &wire::encode(a, &Message::Disband), &mut out);
+        let told: Vec<(SocketAddr, Message)> = out.iter().map(|o| (o.to, message(&o.bytes).message)).collect();
+        let closed = Message::Reject { reason: RejectReason::Closed };
+        assert_eq!(told, [(addr(2), closed.clone()), (addr(3), closed)]);
+        assert_eq!(relay.rooms(), vec![RoomInfo { name: "duke".into(), members: 1, password: false }]);
+        assert!(relay.take_events().iter().any(|e| e.contains("ended by its host")));
+        // Its members can't make it again for a while, as one that missed
+        // being told would; the host and anyone else can.
+        assert_eq!(join(&mut relay, 2, 2, "doom", None), Err(RejectReason::Closed));
+        assert!(join(&mut relay, 2, 5, "doom", None).is_ok());
+        assert!(join(&mut relay, 2, 1, "doom", None).is_ok());
+        relay.tick(RESERVE_MS + 10, &mut out);
+        assert!(join(&mut relay, RESERVE_MS + 10, 2, "doom", None).is_ok());
+    }
+
+    #[test]
     fn a_room_gone_since_the_challenge_is_joined_afresh() {
         let mut relay = Relay::new(RelayConfig::default());
         let (a, _) = join(&mut relay, 0, 1, "doom", Some("pw")).unwrap();
@@ -772,7 +961,7 @@ mod tests {
         // Its JOIN brings no key for the room, which would be made open.
         let key = auth::room_key(Some("pw"), "doom");
         let proof = auth::proof(&key, "doom", 2, &cookie);
-        let join = Message::Join { client_id: 2, cookie, room: "doom".into(), proof, key: NO_KEY };
+        let join = Message::Join { client_id: 2, cookie, room: "doom".into(), player: "".into(), proof, key: NO_KEY };
         relay.handle(0, addr(2), &wire::encode(0, &join), &mut out);
         assert_eq!(message(&one(&mut out).bytes).message, Message::Reject { reason: RejectReason::Cookie });
         assert!(join_from(&mut relay, 0, addr(2), 2, "doom", Some("pw")).is_ok());
@@ -849,12 +1038,12 @@ mod tests {
         relay.handle(0, addr(1), &wire::encode(0, &Message::Hello { client_id: 1, room: "x".into() }), &mut out);
         let Message::Challenge { cookie, password, fresh } = message(&one(&mut out).bytes).message else { panic!() };
         assert!(!password && fresh);
-        let join = Message::Join { client_id: 1, cookie, room: "x".into(), proof: NO_KEY, key: NO_KEY };
+        let join = Message::Join { client_id: 1, cookie, room: "x".into(), player: "".into(), proof: NO_KEY, key: NO_KEY };
         let join = wire::encode(0, &join);
         let rejected = |relay: &mut Relay, now, from| {
             let mut out = Vec::new();
             relay.handle(now, from, &join, &mut out);
-            message(&one(&mut out).bytes).message == Message::Reject { reason: RejectReason::Cookie }
+            message(&out[0].bytes).message == Message::Reject { reason: RejectReason::Cookie }
         };
         assert!(rejected(&mut relay, 0, addr(2)));
         assert!(rejected(&mut relay, 3 * auth::COOKIE_SLOT_MS, addr(1)));
@@ -871,7 +1060,8 @@ mod tests {
         relay.handle(10, addr(20), &wire::encode(b, &Message::Keepalive { stamp: 99 }), &mut out);
         let ack = one(&mut out);
         assert_eq!(ack.to, addr(20));
-        assert_eq!(message(&ack.bytes), Packet { token: b, message: Message::Ack { stamp: 99, members: 2 } });
+        let acked = Message::Ack { stamp: 99, members: 2, roster: 2 };
+        assert_eq!(message(&ack.bytes), Packet { token: b, message: acked });
         let out = send(&mut relay, 11, addr(1), a, 1, &ipx_frame(Mac::BROADCAST, mac(1)));
         assert_eq!(receivers(&out), vec![(addr(20), b, 1)]);
         // A keepalive with a token the relay doesn't know is told so.
@@ -889,7 +1079,7 @@ mod tests {
         // A keeps talking, B goes quiet and is dropped.
         let mut out = Vec::new();
         relay.handle(MEMBER_TIMEOUT_MS, addr(1), &wire::encode(a, &Message::Keepalive { stamp: 0 }), &mut out);
-        relay.tick(MEMBER_TIMEOUT_MS + 1);
+        relay.tick(MEMBER_TIMEOUT_MS + 1, &mut out);
         assert_eq!(relay.member_count(), 1);
         assert!(relay.take_events().iter().any(|e| e.contains("timed out")));
         // A newcomer doesn't get B's index while it is kept, and B gets it
@@ -969,7 +1159,8 @@ mod tests {
         let mut buf = [0; 2048];
         let (len, _) = socket.recv_from(&mut buf).unwrap();
         let Message::Challenge { cookie, .. } = message(&buf[..len]).message else { panic!() };
-        let join = Message::Join { client_id: 1, cookie, room: "doom".into(), proof: NO_KEY, key: NO_KEY };
+        let join =
+            Message::Join { client_id: 1, cookie, room: "doom".into(), player: "".into(), proof: NO_KEY, key: NO_KEY };
         socket.send_to(&wire::encode(0, &join), relay).unwrap();
         let (len, _) = socket.recv_from(&mut buf).unwrap();
         assert!(matches!(message(&buf[..len]).message, Message::Welcome { index: 1, .. }));
