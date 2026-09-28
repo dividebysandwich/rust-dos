@@ -6,11 +6,14 @@
 //! and the picture is the same for any number of workers: save states,
 //! rewind and tests stay deterministic.
 //!
-//! The emulator waits for the workers (`flush`) before anything that
-//! reads or writes what they draw: frame buffer reads and writes, texture
-//! writes, the pixel counters, and a save state. With no workers (the
-//! browser, a single core) jobs run at once.
+//! Frame buffer writes that come while jobs are queued are jobs too, so
+//! they land in their turn without waiting. The emulator waits for the
+//! workers (`flush`) before anything that reads what they draw: frame
+//! buffer reads, texture writes the queued triangles may read, the pixel
+//! counters, and a save state. With no workers (the browser, a single
+//! core) jobs run at once.
 
+use super::mem::Vram;
 use super::raster::{self, RasterState, Stats, TriParams};
 use super::setup::render_triangle;
 use std::collections::VecDeque;
@@ -24,9 +27,21 @@ pub enum Job {
     /// A fastfill of rows `y0..y1`, columns `x0..x1`, with the dither
     /// pattern of its colour.
     Fastfill { st: RasterState, dither: [u16; 16], x0: i32, x1: i32, y0: i32, y1: i32 },
+    /// Words frame buffer writes left, in order.
+    Pixels { fb: Vram, words: Vec<Word> },
     /// A job that fails, for the tests.
     #[cfg(test)]
     Panic,
+}
+
+/// A word of the frame buffer written: the buffer row it is on (the
+/// worker that owns the row writes it, as it draws the triangles there),
+/// its index in the frame buffer, and its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Word {
+    pub row: u16,
+    pub at: u32,
+    pub value: u16,
 }
 
 impl Job {
@@ -58,6 +73,13 @@ impl Job {
                 for y in *y0..*y1 {
                     if owns(raster::screen_y(st, y, flip)) {
                         raster::fastfill_row(st, dither, y, *x0, *x1, stats);
+                    }
+                }
+            }
+            Job::Pixels { fb, words } => {
+                for w in words {
+                    if owns(w.row as i32) && (w.at as usize) < fb.len() {
+                        fb.set(w.at as usize, w.value);
                     }
                 }
             }
@@ -164,9 +186,11 @@ impl Pool {
             self.shared.queue.lock().unwrap().stats.add(&stats);
             return;
         }
+        // Frame buffer writes go out at once: they come in big jobs.
+        let now = matches!(job, Job::Pixels { .. });
         let mut pending = self.pending.lock().unwrap();
         pending.push(job);
-        if pending.len() >= BATCH {
+        if now || pending.len() >= BATCH {
             let batch = std::mem::take(&mut *pending);
             drop(pending);
             self.publish(batch);

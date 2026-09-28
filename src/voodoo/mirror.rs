@@ -114,6 +114,18 @@ pub struct Layout {
     pub aux: Option<u32>,
 }
 
+/// What the layout is worked out from, which the card compares on every
+/// command without building a `Layout`: the size, the row length and the
+/// byte offsets of the colour buffers and the auxiliary buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayoutKey {
+    pub width: u32,
+    pub height: u32,
+    pub rowpixels: u32,
+    pub color: [u32; 3],
+    pub aux: u32,
+}
+
 /// The buffers' pixels, `width * height` each, in `Layout` order.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -193,6 +205,16 @@ struct Cached {
     used: u64,
 }
 
+/// The texture a unit drew with last, while its memory stays as it was:
+/// the next triangle with the same one needs no look-up.
+#[derive(Clone, Copy)]
+struct LastTexture {
+    key: TexKey,
+    writes: u32,
+    id: u32,
+    frame: u64,
+}
+
 /// The recording.
 pub struct Mirror {
     commands: Vec<Command>,
@@ -200,7 +222,12 @@ pub struct Mirror {
     next_id: u32,
     frame: u64,
     /// The layout of the last snapshot; None to take one.
-    layout: Option<Layout>,
+    layout: Option<LayoutKey>,
+    /// The `Pixels` command each buffer's frame buffer writes go on
+    /// adding to (the colour buffer's offset, None for the auxiliary
+    /// buffer), until something draws.
+    open: Vec<(Option<u32>, usize)>,
+    last_texture: [Option<LastTexture>; 2],
 }
 
 impl Default for Mirror {
@@ -211,19 +238,28 @@ impl Default for Mirror {
 
 impl Mirror {
     pub fn new() -> Self {
-        Self { commands: Vec::new(), textures: HashMap::new(), next_id: 1, frame: 0, layout: None }
+        Self {
+            commands: Vec::new(),
+            textures: HashMap::new(),
+            next_id: 1,
+            frame: 0,
+            layout: None,
+            open: Vec::new(),
+            last_texture: [None; 2],
+        }
     }
 
     /// The layout the next command is in: a snapshot first if it is new,
     /// or if one is wanted.
-    pub(crate) fn needs_snapshot(&self, layout: &Layout) -> bool {
+    pub(crate) fn needs_snapshot(&self, layout: &LayoutKey) -> bool {
         self.layout.as_ref() != Some(layout)
     }
 
-    pub(crate) fn resync(&mut self, snapshot: Snapshot) {
+    pub(crate) fn resync(&mut self, snapshot: Snapshot, key: LayoutKey) {
         // What was recorded before is drawn over.
         self.commands.retain(|c| matches!(c, Command::Texture(_) | Command::FreeTexture(_)));
-        self.layout = Some(snapshot.layout.clone());
+        self.open.clear();
+        self.layout = Some(key);
         self.commands.push(Command::Resync(Box::new(snapshot)));
     }
 
@@ -235,6 +271,7 @@ impl Mirror {
 
     /// Forget the decoded textures: the TMUs start over.
     pub(crate) fn forget_textures(&mut self) {
+        self.last_texture = [None; 2];
         for (_, cached) in self.textures.drain() {
             self.commands.push(Command::FreeTexture(cached.id));
         }
@@ -245,8 +282,13 @@ impl Mirror {
             // Nobody draws them: start over from the pixels when someone
             // does.
             self.commands.clear();
+            self.open.clear();
             self.forget_textures();
             self.layout = None;
+        }
+        // Frame buffer writes after a drawing go on top of it.
+        if matches!(command, Command::Draw(_) | Command::Fill(_) | Command::Resync(_)) {
+            self.open.clear();
         }
         self.commands.push(command);
     }
@@ -332,8 +374,9 @@ impl Mirror {
     /// Pixel `x` of buffer row `y` is `value` after a frame buffer write:
     /// in colour buffer `dest`, or with None in the auxiliary buffer.
     pub(crate) fn pixel(&mut self, dest: Option<u32>, x: u32, y: u32, value: u16) {
-        if let Some(Command::Pixels(p)) = self.commands.last_mut()
-            && p.dest == dest
+        let open = self.open.iter().position(|&(d, _)| d == dest);
+        if let Some(i) = open
+            && let Some(Command::Pixels(p)) = self.commands.get_mut(self.open[i].1)
             && p.y == y
             && p.x + p.values.len() as u32 == x
         {
@@ -341,6 +384,11 @@ impl Mirror {
             return;
         }
         self.push(Command::Pixels(Pixels { dest, x, y, values: vec![value] }));
+        let at = self.commands.len() - 1;
+        match open {
+            Some(i) => self.open[i].1 = at,
+            None => self.open.push((dest, at)),
+        }
     }
 
     /// The texture unit `unit` draws with, decoded if it isn't yet or its
@@ -360,6 +408,31 @@ impl Mirror {
             lookup: tmu.lookup_key(t.mode),
         };
         let frame = self.frame;
+        let unit_info = |id: u32| TexUnit {
+            texture: id,
+            mode: t.mode,
+            width: t.wmask as u32 + 1,
+            height: t.hmask as u32 + 1,
+            first_level: first,
+            lodmin: t.lodmin,
+            lodmax: t.lodmax,
+            lodbias: t.lodbias,
+            detailmax: t.detailmax,
+            detailbias: t.detailbias,
+            detailscale: t.detailscale,
+        };
+        if let Some(last) = &mut self.last_texture[unit]
+            && last.key == key
+            && last.writes == tmu.writes
+        {
+            if last.frame != frame {
+                last.frame = frame;
+                if let Some(cached) = self.textures.get_mut(&key) {
+                    cached.used = frame;
+                }
+            }
+            return unit_info(last.id);
+        }
         let existing = self.textures.get(&key).map(|cached| cached.id);
         let good = match self.textures.get_mut(&key) {
             Some(cached) if cached.good_at == tmu.writes => true,
@@ -395,19 +468,8 @@ impl Mirror {
                 id
             }
         };
-        TexUnit {
-            texture: id,
-            mode: t.mode,
-            width: t.wmask as u32 + 1,
-            height: t.hmask as u32 + 1,
-            first_level: first,
-            lodmin: t.lodmin,
-            lodmax: t.lodmax,
-            lodbias: t.lodbias,
-            detailmax: t.detailmax,
-            detailbias: t.detailbias,
-            detailscale: t.detailscale,
-        }
+        self.last_texture[unit] = Some(LastTexture { key, writes: tmu.writes, id, frame });
+        unit_info(id)
     }
 
     /// What was recorded since the last frame, the textures not drawn
@@ -423,7 +485,13 @@ impl Mirror {
             }
             keep
         });
+        for last in &mut self.last_texture {
+            if last.is_some_and(|l| unused.contains(&l.id)) {
+                *last = None;
+            }
+        }
         self.commands.extend(unused.into_iter().map(Command::FreeTexture));
+        self.open.clear();
         std::mem::take(&mut self.commands)
     }
 }

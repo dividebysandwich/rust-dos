@@ -1002,6 +1002,81 @@ fn the_opengl_renderer_gets_what_is_drawn() {
 }
 
 #[test]
+fn frame_buffer_writes_are_recorded_a_row_a_buffer() {
+    use rust_dos::voodoo::mirror::{Command, Pixels};
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    bus.voodoo.as_mut().unwrap().set_mirror(true);
+    take_mirror(&mut bus);
+    w(&mut bus, FBZ_MODE, RGB_WRITE);
+    // Format 12: depth and a 5-6-5 colour, a pixel a dword.
+    w(&mut bus, LFB_MODE, 12);
+    for y in 7..9u32 {
+        for x in 3..7u32 {
+            bus.write_32(BASE + 0x40_0000 + (y * 4096 + x * 4) as usize, (0x1000 + x) << 16 | (0x20 + y));
+        }
+    }
+    // Format 15: two depths a dword, no colour.
+    w(&mut bus, LFB_MODE, 15);
+    bus.write_32(BASE + 0x40_0000 + 20 * 2048 + 8 * 2, 0x0002_0001);
+    let frame = take_mirror(&mut bus);
+    let pixels: Vec<&Pixels> = frame
+        .commands
+        .iter()
+        .map(|c| match c {
+            Command::Pixels(p) => p,
+            other => panic!("{:?}", other),
+        })
+        .collect();
+    let colour = |y| Pixels { dest: Some(0), x: 3, y, values: vec![0x20 + y as u16; 4] };
+    let depth = |y| Pixels { dest: None, x: 3, y, values: (3..7).map(|x| 0x1000 + x).collect() };
+    assert_eq!(
+        pixels,
+        [&colour(7), &depth(7), &colour(8), &depth(8), &Pixels { dest: None, x: 8, y: 20, values: vec![1, 2] }]
+    );
+    // A drawing after them breaks the rows: what comes then goes on top.
+    w(&mut bus, LFB_MODE, 0);
+    bus.write_32(BASE + 0x40_0000 + 30 * 2048, 0x0001_0001);
+    w(&mut bus, FASTFILL_CMD, 0);
+    bus.write_32(BASE + 0x40_0000 + 30 * 2048 + 4, 0x0001_0001);
+    let frame = take_mirror(&mut bus);
+    assert!(
+        matches!(&frame.commands[..], [Command::Pixels(_), Command::Fill(_), Command::Pixels(p)] if p.x == 2),
+        "{:?}",
+        frame.commands
+    );
+}
+
+#[test]
+fn lfb_writes_keep_their_order_among_queued_triangles() {
+    let pictures: Vec<Vec<u8>> = [0, 1, 3]
+        .into_iter()
+        .map(|workers| {
+            let mut bus = bus(Board::Max);
+            bus.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Max, workers));
+            init(&mut bus);
+            w(&mut bus, FBZ_MODE, RGB_WRITE | AUX_WRITE);
+            for i in 0..40u32 {
+                flat(&mut bus, i * 6, 255 - i * 6, i * 3, 0);
+                w(&mut bus, START_Z, (i * 100) << 12);
+                triangle(&mut bus, [(0.0, 0.0), (300.0, (i * 10) as f32), (10.0, 200.0 + i as f32)]);
+                // Frame buffer writes over the triangles, colour and depth.
+                w(&mut bus, LFB_MODE, if i % 2 == 0 { 0 } else { 12 });
+                for y in i * 4..i * 4 + 30 {
+                    for x in (i..i + 120).step_by(2) {
+                        let at = if i % 2 == 0 { y * 2048 + x * 2 } else { y * 4096 + x * 4 };
+                        bus.write_32(BASE + 0x40_0000 + at as usize, i << 24 | y << 8 | x);
+                    }
+                }
+            }
+            bus.voodoo.as_ref().unwrap().frame_buffer().to_bytes()
+        })
+        .collect();
+    assert!(pictures[0] == pictures[1], "1 worker");
+    assert!(pictures[0] == pictures[2], "3 workers");
+}
+
+#[test]
 fn the_opengl_renderer_gets_the_textures_as_the_card_reads_them() {
     use rust_dos::voodoo::mirror::Command;
     let textures = |frame: &rust_dos::voodoo::mirror::Frame| -> Vec<rust_dos::voodoo::mirror::Texture> {

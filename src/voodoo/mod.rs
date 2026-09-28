@@ -38,8 +38,10 @@ use crate::video::crt::CrtTiming;
 use mem::Vram;
 use raster::Stats;
 use regs::*;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use texture::Tmu;
+use workers::{Job, Word};
 
 /// The size of the card's memory window.
 pub const WINDOW: u32 = 16 << 20;
@@ -356,6 +358,12 @@ pub struct Voodoo {
     /// they last finished.
     pool: workers::Pool,
     drawn_to: Vec<usize>,
+    /// Jobs were given to the workers since they last finished, and the
+    /// texture units queued triangles read.
+    outstanding: Cell<bool>,
+    tmu_in_use: Cell<u8>,
+    /// Frame buffer writes behind queued jobs, not yet a job themselves.
+    words: RefCell<Vec<Word>>,
     /// The drawing recorded for the OpenGL renderer, while it draws.
     mirror: Option<Box<mirror::Mirror>>,
     /// Messages already logged once.
@@ -363,6 +371,9 @@ pub struct Voodoo {
     /// Lines for the log, which the bus writes out.
     pub log: Vec<String>,
 }
+
+/// Frame buffer writes that go out to the workers together.
+const WORDS_A_JOB: usize = 4096;
 
 /// One-time log messages.
 const LOG_BYTE: u32 = 1;
@@ -401,6 +412,9 @@ impl Voodoo {
             palette_dirty: true,
             pool: workers::Pool::new(workers),
             drawn_to: Vec::new(),
+            outstanding: Cell::new(false),
+            tmu_in_use: Cell::new(0),
+            words: RefCell::new(Vec::new()),
             mirror: None,
             logged: 0,
             log: Vec::new(),
@@ -551,29 +565,88 @@ impl Voodoo {
 
     /// The frame buffer's memory, with everything drawn into it.
     pub fn frame_buffer(&self) -> &Vram {
-        self.pool.flush();
+        self.catch_up();
         &self.fbi.ram
     }
 
     /// Wait until the workers drew everything given to them.
     pub fn flush(&mut self) {
-        self.pool.flush();
+        self.catch_up();
         self.drawn_to.clear();
+    }
+
+    /// Draw everything queued, and wait for it.
+    pub(crate) fn catch_up(&self) {
+        self.submit_words();
+        self.pool.flush();
+        self.outstanding.set(false);
+        self.tmu_in_use.set(0);
+    }
+
+    /// Give the workers `job`, after the frame buffer writes before it.
+    pub(crate) fn submit(&self, job: Job) {
+        self.submit_words();
+        if let Job::Triangle { texcount, .. } = &job {
+            self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
+        }
+        self.outstanding.set(self.pool.workers() > 0);
+        self.pool.submit(job);
+    }
+
+    /// The frame buffer writes queued behind jobs, as a job of their own.
+    fn submit_words(&self) {
+        let words = std::mem::take(&mut *self.words.borrow_mut());
+        if !words.is_empty() {
+            self.outstanding.set(self.pool.workers() > 0);
+            self.pool.submit(Job::Pixels { fb: self.fbi.ram.clone(), words });
+        }
+    }
+
+    /// Whether frame buffer writes have to wait their turn behind jobs.
+    pub(crate) fn writes_queue(&self) -> bool {
+        self.outstanding.get() || !self.words.borrow().is_empty()
+    }
+
+    /// Frame buffer writes for the queue (`writes_queue`). Every so many
+    /// they go out as a job, or straight into memory when the workers are
+    /// done by then.
+    pub(crate) fn queue_words(&self, new: &[Word]) {
+        let mut words = self.words.borrow_mut();
+        words.extend_from_slice(new);
+        if words.len() < WORDS_A_JOB {
+            return;
+        }
+        if self.pool.busy() {
+            drop(words);
+            self.submit_words();
+        } else {
+            let ram = &self.fbi.ram;
+            for w in words.drain(..) {
+                if (w.at as usize) < ram.len() {
+                    ram.set(w.at as usize, w.value);
+                }
+            }
+            self.outstanding.set(false);
+            self.tmu_in_use.set(0);
+        }
     }
 
     /// The pixel counters, the workers' included.
     fn counted(&self) -> Stats {
-        self.pool.flush();
+        self.catch_up();
         let mut stats = self.stats;
         stats.add(&self.pool.stats());
         stats
     }
 
     fn texture_write(&mut self, index: u32, data: u32) {
-        self.flush();
         let unit = ((index >> 19) & 3) as usize;
         if self.chipmask & (2 << unit) == 0 || unit >= self.tmu.len() {
             return;
+        }
+        // Queued triangles read the texture memory as they draw.
+        if self.tmu_in_use.get() & (1 << unit) != 0 {
+            self.flush();
         }
         if self.reg[self.tmu[unit].base + T_LOD] & (1 << 27) != 0 {
             self.log_once(LOG_DIRECT, "[3DFX] Direct texture writes (a Voodoo 2's) are ignored");
@@ -870,14 +943,15 @@ impl Voodoo {
     /// since it last did, or it wants them.
     pub(crate) fn mirror_sync(&mut self) {
         let Some(mirror) = &self.mirror else { return };
-        let layout = self.mirror_layout();
-        if !mirror.needs_snapshot(&layout) {
+        let fbi = &self.fbi;
+        let key = mirror::LayoutKey { width: fbi.width, height: fbi.height, rowpixels: fbi.rowpixels, color: fbi.rgboffs, aux: fbi.auxoffs };
+        if !mirror.needs_snapshot(&key) {
             return;
         }
         self.flush();
-        let snapshot = self.snapshot(layout);
+        let snapshot = self.snapshot(self.mirror_layout());
         if let Some(mirror) = &mut self.mirror {
-            mirror.resync(snapshot);
+            mirror.resync(snapshot, key);
         }
     }
 
@@ -922,26 +996,35 @@ impl Voodoo {
         })
     }
 
-    /// Pixel `x` of buffer row `y` changed through the frame buffer: tell
-    /// the recording, the colour of buffer `dest` (a word offset) and with
-    /// `aux` the auxiliary buffer's value.
-    pub(crate) fn mirror_pixel(&mut self, dest: usize, x: i32, y: i32, aux: bool) {
+    /// Pixel `x` of buffer row `y` written through the frame buffer: tell
+    /// the recording its colour in buffer `dest` (a word offset) and its
+    /// auxiliary buffer's value, those written.
+    pub(crate) fn mirror_pixel(&mut self, dest: usize, x: i32, y: i32, color: Option<u16>, aux: Option<u16>) {
         let Some(mirror) = &mut self.mirror else { return };
         let fbi = &self.fbi;
         if x < 0 || y < 0 || x as u32 >= fbi.width || y as u32 >= fbi.height {
             return;
         }
-        let at = y as usize * fbi.rowpixels as usize + x as usize;
-        let word = |offs: usize| (offs + at < fbi.ram.len()).then(|| fbi.ram.get(offs + at));
-        if let Some(value) = word(dest) {
+        if let Some(value) = color {
             mirror.pixel(Some(dest as u32), x as u32, y as u32, value);
         }
-        if aux
-            && fbi.auxoffs != NONE
-            && let Some(value) = word(fbi.auxoffs as usize / 2)
-        {
+        if let Some(value) = aux {
             mirror.pixel(None, x as u32, y as u32, value);
         }
+    }
+
+    /// The same for a write through the pixel pipeline, whose results are
+    /// in memory: the colour, and with `aux` the auxiliary buffer's value.
+    pub(crate) fn mirror_written(&mut self, dest: usize, x: i32, y: i32, aux: bool) {
+        if self.mirror.is_none() || x < 0 || y < 0 {
+            return;
+        }
+        let fbi = &self.fbi;
+        let at = y as usize * fbi.rowpixels as usize + x as usize;
+        let word = |offs: usize| (offs + at < fbi.ram.len()).then(|| fbi.ram.get(offs + at));
+        let color = word(dest);
+        let aux = if aux && fbi.auxoffs != NONE { word(fbi.auxoffs as usize / 2) } else { None };
+        self.mirror_pixel(dest, x, y, color, aux);
     }
 
     /// For the debugger: what the card is doing.
@@ -1002,7 +1085,7 @@ fn default_clut() -> [u32; 33] {
 impl State for Voodoo {
     fn save(&self, w: &mut Writer) {
         // Everything drawn before its memory is saved.
-        self.pool.flush();
+        self.catch_up();
         self.board.save(w);
         self.fbi.ram.save(w);
         for tmu in &self.tmu {

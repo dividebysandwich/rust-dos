@@ -171,7 +171,7 @@ impl Voodoo {
             self.reg[STIPPLE] = stipple;
             self.stats = stats;
         } else {
-            self.pool.submit(job);
+            self.submit(job);
         }
         self.reg[FBI_TRIANGLES_OUT] = self.reg[FBI_TRIANGLES_OUT].wrapping_add(1);
         self.mark_drawn(dest);
@@ -232,7 +232,7 @@ impl Voodoo {
                 mirror.fastfill(&st, (sx, ex, sy, ey), rgb, aux);
             }
         }
-        self.pool.submit(Job::Fastfill { st, dither, x0: sx, x1: ex, y0: sy, y1: ey });
+        self.submit(Job::Fastfill { st, dither, x0: sx, x1: ex, y0: sy, y1: ey });
         if rgb {
             self.mark_drawn(dest);
         }

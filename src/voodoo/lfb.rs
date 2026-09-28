@@ -6,6 +6,7 @@
 use super::raster;
 use super::regs::*;
 use super::tables::{extract_1555, extract_555x, extract_565, extract_5551, extract_x555};
+use super::workers::Word;
 use super::{LOG_RESERVED, NONE, Voodoo};
 
 /// What a write carries for each of its (up to) two pixels, four bits a
@@ -20,7 +21,6 @@ impl Voodoo {
     /// A write to the frame buffer at dword `offset` of the window: `data`,
     /// of which `mem_mask` selects the halves written (`lfb_w`).
     pub(crate) fn lfb_write(&mut self, offset: u32, mut data: u32, mut mem_mask: u32) {
-        self.flush();
         self.mirror_sync();
         let lfb_mode = self.reg[LFB_MODE];
         if lfb_mode & (1 << 12) != 0 {
@@ -147,14 +147,17 @@ impl Voodoo {
         }
         let dest = offs as usize / 2;
         let fbz = self.reg[FBZ_MODE];
-        // The pixels written, for the OpenGL renderer: X, the buffer row,
-        // and whether the auxiliary buffer's changed too.
-        let mut written = [(0i32, 0i32, false); 2];
-        let mut count = 0;
 
         if lfb_mode & (1 << 8) == 0 {
-            // Straight into the buffers.
+            // Straight into the buffers, or behind the jobs queued.
             let scry = if lfb_mode & (1 << 13) != 0 { (self.fbi.yorigin as i32 - y) & 0x3FF } else { y };
+            let queue = self.writes_queue();
+            let mut words = [Word { row: scry as u16, at: 0, value: 0 }; 4];
+            let mut queued = 0;
+            // The pixels written, for the OpenGL renderer: X, and the
+            // colour and auxiliary values.
+            let mut written = [(0i32, None, None); 2];
+            let mut count = 0;
             let ram = &self.fbi.ram;
             let destmax = (self.fbi.mask as usize + 1 - offs as usize) / 2;
             let aux = self.fbi.auxoffs;
@@ -170,9 +173,19 @@ impl Voodoo {
                     let has_rgb = mask & RGB != 0;
                     let has_alpha = mask & ALPHA != 0 && alpha_planes;
                     let has_depth = mask & (DEPTH | DEPTH_MSW) != 0 && !alpha_planes;
+                    let mut put = |at: usize, value: u16| {
+                        if queue {
+                            words[queued].at = at as u32;
+                            words[queued].value = value;
+                            queued += 1;
+                        } else {
+                            ram.set(at, value);
+                        }
+                    };
+                    let mut color = None;
                     if has_rgb && bufoffs < destmax {
                         let (r, g, b) = (sr[pix], sg[pix], sb[pix]);
-                        let color = if dither {
+                        let value = if dither {
                             let at = ((y & 3) as usize) << 11 | ((x & 3) as usize) << 1;
                             (lookup[at | (r as usize) << 3] as u16) << 11
                                 | (lookup[at | (g as usize) << 3 | 1] as u16) << 5
@@ -180,19 +193,17 @@ impl Voodoo {
                         } else {
                             ((r >> 3) << 11 | (g >> 2) << 5 | b >> 3) as u16
                         };
-                        ram.set(dest + bufoffs, color);
+                        put(dest + bufoffs, value);
+                        color = Some(value);
                     }
-                    if aux != NONE && bufoffs < depthmax {
-                        let depth = aux as usize / 2 + bufoffs;
-                        if has_alpha {
-                            ram.set(depth, sa[pix] as u16);
-                        }
-                        if has_depth {
-                            ram.set(depth, sw[pix] as u16);
-                        }
+                    let mut auxval = None;
+                    if aux != NONE && bufoffs < depthmax && (has_alpha || has_depth) {
+                        let value = if has_alpha { sa[pix] as u16 } else { sw[pix] as u16 };
+                        put(aux as usize / 2 + bufoffs, value);
+                        auxval = Some(value);
                     }
                     self.stats.pixels_out += 1;
-                    written[count] = (x, scry, has_alpha || has_depth);
+                    written[count] = (x, color, auxval);
                     count += 1;
                 }
                 bufoffs += 1;
@@ -200,18 +211,27 @@ impl Voodoo {
                 mask >>= 4;
                 pix += 1;
             }
+            if queued > 0 {
+                self.queue_words(&words[..queued]);
+            }
+            for &(x, color, auxval) in &written[..count] {
+                self.mirror_pixel(dest, x, scry, color, auxval);
+            }
         } else {
-            // Through the pixel pipeline.
+            // Through the pixel pipeline, which reads the buffers.
+            self.flush();
             let st = self.raster_state(dest, 0);
             let mut stipple = self.reg[STIPPLE];
             let mut stats = self.stats;
             let mut pix = 0;
             let scry = raster::screen_y(&st, y, fbz & (1 << 17) != 0);
+            let mut written = [0i32; 2];
+            let mut count = 0;
             while mask != 0 {
                 if mask & 0x0F != 0 {
                     let color = sa[pix] << 24 | sr[pix] << 16 | sg[pix] << 8 | sb[pix];
                     raster::lfb_pixel(&st, x, y, color, sw[pix], &mut stipple, &mut stats);
-                    written[count] = (x, scry, fbz & (1 << 10) != 0);
+                    written[count] = x;
                     count += 1;
                 }
                 x += 1;
@@ -220,9 +240,10 @@ impl Voodoo {
             }
             self.reg[STIPPLE] = stipple;
             self.stats = stats;
-        }
-        for &(x, y, aux) in &written[..count] {
-            self.mirror_pixel(dest, x, y, aux);
+            // What the pipeline left, from the memory.
+            for &x in &written[..count] {
+                self.mirror_written(dest, x, scry, fbz & (1 << 10) != 0);
+            }
         }
         self.mark_drawn(dest);
     }
@@ -230,7 +251,7 @@ impl Voodoo {
     /// A read of the frame buffer at dword `offset` of the window: two
     /// 16-bit pixels of the buffer lfbMode selects (`lfb_r`).
     pub(crate) fn lfb_read(&self, offset: u32) -> u32 {
-        self.pool.flush();
+        self.catch_up();
         let lfb_mode = self.reg[LFB_MODE];
         let x = ((offset << 1) & 0x3FE) as usize;
         let y = ((offset >> 9) & 0x3FF) as i32;
