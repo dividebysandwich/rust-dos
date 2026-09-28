@@ -680,3 +680,135 @@ fn fcb_files_work_on_disk_images() {
     assert_eq!(&(0..14).map(|i| cpu.bus.read_8(dta + i)).collect::<Vec<u8>>(), b"hello floppy\0\0");
     int21(&mut cpu, 0x1000);
 }
+
+#[test]
+fn fat32_images_from_mkfs_and_checked_by_fsck() {
+    if !tool("mkfs.fat") || !tool("fsck.fat") {
+        eprintln!("mkfs.fat or fsck.fat is missing: skipped");
+        return;
+    }
+    let dir = fatimage::scratch("dosfstools32");
+    let image = dir.join("mkfs32.img");
+    // 70 MB of 512-byte clusters: cluster numbers past 65535.
+    let status = std::process::Command::new("mkfs.fat")
+        .args(["-F", "32", "-s", "1", "-n", "MKFS32", "-C", image.to_str().unwrap(), "70000"])
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_D, &image);
+    assert_eq!(cpu.bus.disk.volume_label(DRIVE_D).as_deref(), Some("MKFS32"));
+    for d in ["D:\\ONE", "D:\\ONE\\TWO"] {
+        name(&mut cpu, d);
+        int21(&mut cpu, 0x3900);
+        assert!(!cf(&cpu));
+    }
+    // The root directory and a subdirectory grow past their first
+    // clusters.
+    for i in 0..40 {
+        for folder in ["D:\\", "D:\\ONE\\"] {
+            let handle = create(&mut cpu, &format!("{}F{}.DAT", folder, i)).unwrap();
+            write(&mut cpu, handle, &pattern(1000 + i * 100, i as u8)).unwrap();
+            close(&mut cpu, handle);
+        }
+    }
+    for i in (0..40).step_by(3) {
+        name(&mut cpu, &format!("D:\\ONE\\F{}.DAT", i));
+        int21(&mut cpu, 0x4100);
+        assert!(!cf(&cpu));
+    }
+    let handle = create(&mut cpu, "D:\\ONE\\TWO\\BIG.BIN").unwrap();
+    for _ in 0..10 {
+        write(&mut cpu, handle, &pattern(30_000, 5)).unwrap();
+    }
+    close(&mut cpu, handle);
+    cpu.bus.unmount_drive(DRIVE_D).unwrap();
+
+    let check = std::process::Command::new("fsck.fat").args(["-n", "-v", image.to_str().unwrap()]).output().unwrap();
+    let report = String::from_utf8_lossy(&check.stdout).to_string() + &String::from_utf8_lossy(&check.stderr);
+    assert!(check.status.success() && !report.contains("wrong"), "fsck.fat: {}", report);
+    mount(&mut cpu, DRIVE_D, &image);
+    assert_eq!(read_file(&mut cpu, "D:\\F39.DAT"), pattern(4900, 39));
+    assert_eq!(read_file(&mut cpu, "D:\\ONE\\F4.DAT"), pattern(1400, 4));
+    assert_eq!(read_file(&mut cpu, "D:\\ONE\\TWO\\BIG.BIN").len(), 300_000);
+}
+
+/// A 3 GB FAT32 disk from MAKEIMG, mounted as D:, and what DOS tells of
+/// it: AH=36h no more than 2 GB, the FAT32 functions from DOS 7.
+#[test]
+fn fat32_drives_through_dos() {
+    use rust_dos::config::DosVersion;
+    let dir = fatimage::scratch("fat32dos");
+    let image = dir.join("big.img");
+    let spec = rust_dos::makeimg::ImageSpec { size_mb: Some(3000), ..Default::default() };
+    let plan = rust_dos::makeimg::plan(&spec).unwrap();
+    assert_eq!(plan.volume.as_ref().map(|v| v.bits), Some(32));
+    rust_dos::makeimg::write(&image, &plan, true).unwrap();
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_D, &image);
+    let handle = create(&mut cpu, "D:\\HELLO.TXT").unwrap();
+    write(&mut cpu, handle, b"hello FAT32").unwrap();
+    close(&mut cpu, handle);
+    assert_eq!(read_file(&mut cpu, "D:\\HELLO.TXT"), b"hello FAT32");
+
+    // AH=36h: just under 2 GB of 32 KB clusters.
+    cpu.set_dx(4);
+    int21(&mut cpu, 0x3600);
+    let (spc, free, bps, total) = (cpu.ax() as u64, cpu.bx() as u64, cpu.cx() as u64, cpu.dx() as u64);
+    assert_eq!((spc, bps), (64, 512));
+    assert!(total * spc * bps < 2 << 30 && total > 60_000, "{} clusters", total);
+    assert!(free <= total);
+
+    // DOS 5 has no AX=73xxh.
+    int21(&mut cpu, 0x7303);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+
+    rust_dos::dos_data::set_version(&mut cpu.bus, DosVersion::new(7, 10));
+    // AX=7303h: the whole of it, in 32 bits.
+    name(&mut cpu, "D:\\");
+    cpu.set_es(0x5000);
+    cpu.set_di(0);
+    cpu.set_cx(0x2C);
+    int21(&mut cpu, 0x7303);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    let dword = |cpu: &Cpu, at: usize| cpu.bus.read_32(BUFFER + at);
+    let layout = cpu.bus.disk.layout(DRIVE_D).unwrap();
+    assert_eq!((cpu.bus.read_16(BUFFER), dword(&cpu, 4), dword(&cpu, 8)), (0x2C, 8, 512));
+    assert_eq!(dword(&cpu, 0x10), layout.clusters);
+    assert_eq!(dword(&cpu, 0x0C), layout.clusters - 2, "the root's and HELLO.TXT's are taken");
+
+    // AX=7302h: the extended DPB.
+    cpu.set_dx(4);
+    cpu.set_cx(0x3F);
+    int21(&mut cpu, 0x7302);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    let dpb = BUFFER + 2;
+    assert_eq!(cpu.bus.read_16(BUFFER), 0x3D);
+    assert_eq!((cpu.bus.read_8(dpb), cpu.bus.read_16(dpb + 2), cpu.bus.read_16(dpb + 0x0F)), (DRIVE_D, 512, 0));
+    assert_eq!(cpu.bus.read_32(dpb + 0x1F), layout.clusters - 2);
+    assert_eq!((cpu.bus.read_16(dpb + 0x25), cpu.bus.read_16(dpb + 0x27)), (1, 6));
+    assert_eq!(cpu.bus.read_32(dpb + 0x2D), layout.clusters + 1);
+    assert_eq!(cpu.bus.read_32(dpb + 0x31), layout.sectors_per_fat);
+    assert_eq!(cpu.bus.read_32(dpb + 0x35), 2);
+    cpu.set_cx(0x20);
+    int21(&mut cpu, 0x7302);
+    assert!(cf(&cpu), "too small a buffer");
+
+    // INT 25h refuses FAT32 from DOS 7.10 on; AX=7305h reads its boot
+    // sector.
+    cpu.bus.load_bytes(0x60000, &[0, 0, 0, 0, 1, 0, 0x00, 0x00, 0x00, 0x50]);
+    cpu.set_ds(0x6000);
+    cpu.set_bx(0);
+    cpu.set_cx(0xFFFF);
+    cpu.set_reg8(Register::AL, DRIVE_D);
+    rust_dos::interrupts::int25::handle(&mut cpu, false);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x0207));
+    cpu.bus.load_bytes(BUFFER, &[0; SECTOR]);
+    cpu.set_cx(0xFFFF);
+    cpu.set_dx(4);
+    cpu.set_si(0);
+    int21(&mut cpu, 0x7305);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
+}

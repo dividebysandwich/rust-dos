@@ -576,7 +576,9 @@ impl FatVolume {
         if let Some(sector) = state.fsinfo.filter(|_| changed) {
             let mut info = [0u8; SECTOR_SIZE];
             self.read_sector(sector, &mut info)?;
-            info[FSINFO_FREE..FSINFO_FREE + 4].copy_from_slice(&state.free.unwrap_or(u32::MAX).to_le_bytes());
+            // Counted once, then kept up to date as the FAT changes.
+            let free = state.free_clusters();
+            info[FSINFO_FREE..FSINFO_FREE + 4].copy_from_slice(&free.to_le_bytes());
             info[FSINFO_NEXT..FSINFO_NEXT + 4].copy_from_slice(&state.next_free.to_le_bytes());
             if self.write_sector(sector, &info).is_err() {
                 result = Err(WRITE_FAULT);

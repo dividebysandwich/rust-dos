@@ -10,11 +10,13 @@
 //!
 //! Drives mounted from disk images read and write their sectors. The
 //! others follow DOSBox: floppies and CD-ROMs fail, as if unreadable, and
-//! hard disks pretend to succeed.
+//! hard disks pretend to succeed. From DOS 7.10 on, FAT32 drives take
+//! INT 21h AX=7305h instead, as MS-DOS 7.1 has it.
 
 use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::DriveKind;
 use crate::diskimage::SECTOR_SIZE;
+use crate::fat::FatType;
 
 /// Error AX values.
 const NOT_READY: u16 = 0x8002;
@@ -23,6 +25,23 @@ const WRITE_PROTECTED: u16 = 0x0300;
 
 pub fn handle(cpu: &mut Cpu, write: bool) {
     let drive = cpu.get_al();
+    let result = sector_access(cpu, drive, write, false);
+    match result {
+        Ok(()) => {
+            cpu.set_ax(0);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+        Err(error) => {
+            cpu.set_ax(error);
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+        }
+    }
+}
+
+/// Read or write the sectors of `drive` (0 = A:) that CX, DX and DS:BX
+/// ask for, as INT 25h/26h do, or (`fat32`) as INT 21h AX=7305h does with
+/// its packet, which FAT32 drives take.
+pub fn sector_access(cpu: &mut Cpu, drive: u8, write: bool, fat32: bool) -> Result<(), u16> {
     let packet = cpu.cx() == 0xFFFF;
     let (start, count, buffer) = if packet {
         let p = cpu.get_physical_addr(cpu.ds(), cpu.bx());
@@ -35,10 +54,11 @@ pub fn handle(cpu: &mut Cpu, write: bool) {
         (cpu.dx() as u64, cpu.cx(), cpu.get_physical_addr(cpu.ds(), cpu.bx()))
     };
 
-    let result = match (cpu.bus.disk.fat_volume(drive), cpu.bus.disk.drive_kind(drive)) {
+    match (cpu.bus.disk.fat_volume(drive), cpu.bus.disk.drive_kind(drive)) {
         (Some(volume), _) => {
             let data_len = count as usize * SECTOR_SIZE;
-            if !packet && volume.layout().total_sectors() > 0xFFFF {
+            let refused = !fat32 && volume.fat_type() == FatType::Fat32 && cpu.bus.dos_version.at_least(7, 10);
+            if refused || (!packet && volume.layout().total_sectors() > 0xFFFF) {
                 Err(BAD_REQUEST)
             } else if write {
                 if cpu.bus.disk.is_writable(drive) {
@@ -69,16 +89,5 @@ pub fn handle(cpu: &mut Cpu, write: bool) {
             Ok(())
         }
         _ => Err(NOT_READY),
-    };
-
-    match result {
-        Ok(()) => {
-            cpu.set_ax(0);
-            cpu.set_cpu_flag(CpuFlags::CF, false);
-        }
-        Err(error) => {
-            cpu.set_ax(error);
-            cpu.set_cpu_flag(CpuFlags::CF, true);
-        }
     }
 }

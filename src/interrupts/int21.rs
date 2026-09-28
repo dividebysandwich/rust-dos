@@ -2105,6 +2105,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_cpu_flag(CpuFlags::CF, true);
         }
 
+        // AX = 73xxh: MS-DOS 7's FAT32 functions, from DOS 7.00 on.
+        0x73 => fat32_function(cpu, cpu.get_al()),
+
         _ => {
             // Match DOSBox's default behaviour for unknown INT 21h
             // functions: clear AL, leave AH and CF alone. This keeps
@@ -2127,3 +2130,105 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
 crate::state_fields!(ConLine { buffer, text });
 
+
+/// INT 21h AX=73xxh, the FAT32 functions of MS-DOS 7: AL=00h locks and
+/// flushes a drive, 02h fills in its extended drive parameter block, 03h
+/// its free space in 32-bit numbers, and (from 7.10) 05h reads or writes
+/// its sectors as INT 25h/26h do. Below DOS 7, AX=7300h and CF set, as
+/// DOS 6 answers, and 0018h for what isn't there.
+fn fat32_function(cpu: &mut Cpu, al: u8) {
+    let version = cpu.bus.dos_version;
+    let drive = |cpu: &Cpu, dl: u8| if dl == 0 { cpu.bus.disk.get_current_drive() } else { dl - 1 };
+    let result: Result<(), u16> = match al {
+        _ if !version.at_least(7, 0) => Err(0x7300),
+        0x00 if cpu.get_reg8(Register::CL) < 2 => {
+            let cl = cpu.get_reg8(Register::CL);
+            cpu.set_ax(cl as u16);
+            Ok(())
+        }
+        0x02 => {
+            let drive = drive(cpu, cpu.get_reg8(Register::DL));
+            extended_dpb(cpu, drive)
+        }
+        0x03 => extended_free_space(cpu),
+        0x05 if cpu.cx() == 0xFFFF && version.at_least(7, 10) => {
+            let drive = drive(cpu, cpu.get_reg8(Register::DL));
+            super::int25::sector_access(cpu, drive, cpu.si() & 1 != 0, true)
+        }
+        _ => Err(0x0018),
+    };
+    match result {
+        Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
+        Err(error) => {
+            cpu.set_ax(error);
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+        }
+    }
+}
+
+/// AX=7302h: the extended DPB of `drive` (0 = A:) at ES:DI, CX bytes of
+/// room: its length (3Dh), the DPB of DOS 4, and FAT32's fields after it.
+fn extended_dpb(cpu: &mut Cpu, drive: u8) -> Result<(), u16> {
+    const SIZE: u16 = 0x3D;
+    if cpu.cx() < SIZE + 2 {
+        return Err(0x0018);
+    }
+    if matches!(cpu.bus.disk.drive_kind(drive), None | Some(crate::disk::DriveKind::CdRom)) {
+        return Err(0x000F);
+    }
+    let layout = cpu.bus.disk.layout(drive).ok_or(0x000Fu16)?;
+    let (free, next_free) = match cpu.bus.disk.fat_volume(drive) {
+        Some(volume) => (volume.free_clusters(), volume.next_free()),
+        None => (cpu.bus.disk.get_disk_free_space32(drive + 1).map_or(u32::MAX, |space| space.1), 2),
+    };
+    let mut dpb = [0u8; SIZE as usize + 2];
+    dpb[..2].copy_from_slice(&SIZE.to_le_bytes());
+    let base = crate::dos_data::address(crate::dos_data::dpb(drive));
+    for (i, byte) in dpb[2..2 + 0x18].iter_mut().enumerate() {
+        *byte = cpu.bus.read_8(base + i);
+    }
+    let fat32 = layout.fat32;
+    let mut put = |at: usize, bytes: &[u8]| dpb[2 + at..2 + at + bytes.len()].copy_from_slice(bytes);
+    put(0x18, &[0]); // accessed
+    put(0x19, &u32::MAX.to_le_bytes()); // next DPB
+    put(0x1D, &(next_free.min(0xFFFF) as u16).to_le_bytes());
+    put(0x1F, &free.to_le_bytes());
+    put(0x23, &fat32.map_or(0, |f| f.ext_flags).to_le_bytes());
+    put(0x25, &fat32.map_or(0xFFFF, |f| f.fsinfo).to_le_bytes());
+    put(0x27, &fat32.map_or(0xFFFF, |f| f.backup_boot).to_le_bytes());
+    put(0x29, &layout.first_data_sector().to_le_bytes());
+    put(0x2D, &(layout.clusters + 1).to_le_bytes());
+    put(0x31, &layout.sectors_per_fat.to_le_bytes());
+    put(0x35, &fat32.map_or(0, |f| f.root_cluster).to_le_bytes());
+    put(0x39, &next_free.to_le_bytes());
+    let at = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
+    cpu.bus.guest_write_bytes(at, &dpb);
+    Ok(())
+}
+
+/// AX=7303h: the free space of the drive DS:DX names ("C:\\") into the
+/// structure at ES:DI, CX bytes of room, in 32-bit numbers.
+fn extended_free_space(cpu: &mut Cpu) -> Result<(), u16> {
+    const SIZE: usize = 0x2C;
+    if (cpu.cx() as usize) < SIZE {
+        return Err(0x0018);
+    }
+    let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+    let path = read_asciiz_string(&mut cpu.bus, addr);
+    let drive = match path.as_bytes() {
+        [letter, b':', ..] if letter.is_ascii_alphabetic() => letter.to_ascii_uppercase() - b'A' + 1,
+        [b'\\', ..] | [] => 0,
+        _ => return Err(0x000F),
+    };
+    let (spc, free, bps, total) = cpu.bus.disk.get_disk_free_space32(drive)?;
+    let mut info = [0u8; SIZE];
+    let fields = [spc, bps, free, total, free.saturating_mul(spc), total.saturating_mul(spc), free, total];
+    info[..2].copy_from_slice(&(SIZE as u16).to_le_bytes());
+    for (i, value) in fields.into_iter().enumerate() {
+        info[4 + 4 * i..8 + 4 * i].copy_from_slice(&value.to_le_bytes());
+    }
+    let at = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
+    cpu.bus.guest_write_bytes(at, &info);
+    cpu.set_ax(0);
+    Ok(())
+}
