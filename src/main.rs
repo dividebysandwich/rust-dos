@@ -1074,6 +1074,7 @@ fn main() -> Result<(), String> {
         }
         if ui.is_open() {
             ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
+            ui.poll(&mut host!());
         }
         if ui.is_open() || ui.overlay_shown() {
             ui.set_stats(stats.view());
@@ -1578,6 +1579,24 @@ impl Host for MainHost<'_, '_> {
         config::save_autoexec(&path, lines)?;
         self.cpu.bus.log_string(&format!("[CONFIG] Saved the [autoexec] commands to {}", path.display()));
         Ok(())
+    }
+
+    fn lan(&self) -> Option<rust_dos::net::LanView> {
+        Some(self.cpu.bus.net.view())
+    }
+
+    fn browse_rooms(&mut self, relay: Option<&str>, filter: &str) -> Result<(), String> {
+        self.cpu.bus.net.browse(relay, filter)
+    }
+
+    fn join_room(&mut self, relay: Option<&str>, room: &str, password: &str) -> Result<(), String> {
+        // As LAN JOIN does, for the games started next.
+        self.cpu.bus.install_ipx();
+        self.cpu.bus.net.join(relay, room, password)
+    }
+
+    fn leave_room(&mut self) {
+        self.cpu.bus.net.leave();
     }
 
     fn games(&self) -> Vec<GameEntry> {

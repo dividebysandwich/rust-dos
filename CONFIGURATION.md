@@ -804,6 +804,12 @@ LAN JOIN /LOCAL               and on the others, on the same network
 LAN JOIN 203.0.113.7          or at the host's address, over the internet
 ```
 
+The settings window (Ctrl+F12) finds rooms too: *Find or make a LAN
+room* on its Network page lists the rooms of the relay `relay` names, the
+fullest first, narrowed down as a search is typed. Enter joins the room
+selected, asking for its password if it has one; *Make room* (or Ins)
+makes one, with a password or open to all, and joins it.
+
 Then start the game's network play as usual (for Doom and Heretic,
 `IPXSETUP -nodes 2`). `LAN` shows where the instance is: the IPX driver,
 the room, the members in it and the round trip to the relay.

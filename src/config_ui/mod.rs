@@ -15,6 +15,7 @@ mod games;
 mod image;
 pub mod osd;
 mod perf;
+mod rooms;
 mod states;
 
 use autoexec::AutoexecEditor;
@@ -24,6 +25,7 @@ use draw::{Grid, Layout, Rgb};
 pub use draw::cp437;
 use games::{GameDialog, GameField};
 use image::{ImageDialog, ImageField};
+use rooms::{RoomBrowser, RoomField};
 pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
@@ -186,6 +188,24 @@ pub trait Host {
         let _ = lines;
         Err("There is no configuration file here".to_string())
     }
+    /// The LAN, as the room browser shows it, if there is a network.
+    fn lan(&self) -> Option<crate::net::LanView> {
+        None
+    }
+    /// Ask `relay` (`host[:port]`, None for the first that answers on this
+    /// network) for its rooms with `filter` in their names; `lan` has them
+    /// once they come.
+    fn browse_rooms(&mut self, relay: Option<&str>, filter: &str) -> Result<(), String> {
+        let _ = (relay, filter);
+        Err("There is no network here".to_string())
+    }
+    /// Join `room` at `relay` with `password` (empty for none), making the
+    /// room if it isn't there.
+    fn join_room(&mut self, relay: Option<&str>, room: &str, password: &str) -> Result<(), String> {
+        let _ = (relay, room, password);
+        Err("There is no network here".to_string())
+    }
+    fn leave_room(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,7 +286,7 @@ impl Page {
                 ChorusMix,
             ],
             Page::Network => {
-                &[Relay, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
+                &[Rooms, Relay, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
             }
         }
     }
@@ -412,7 +432,9 @@ enum Item {
     NicBase,
     NicIrq,
     MacAddr,
-    /// The relay LAN JOIN and LAN LIST go to without an address.
+    /// The room browser (rooms.rs), and the relay it lists, which LAN
+    /// JOIN and LAN LIST go to without an address.
+    Rooms,
     Relay,
     /// The LAN joined or hosted at startup, its room and password.
     Lan,
@@ -579,6 +601,7 @@ impl Item {
             NicBase => "  Port",
             NicIrq => "  IRQ",
             MacAddr => "  Ethernet address",
+            Rooms => "Find or make a LAN room...",
             Relay => "LAN relay",
             Lan => "Join a LAN at startup",
             LanHost => "Host a LAN at startup",
@@ -602,7 +625,7 @@ impl Item {
             // A thread of its own packs rewind's states.
             Item::Rewind | Item::RewindMemory => frontend.window,
             // The browser has no sockets for a LAN.
-            Item::Relay | Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
+            Item::Rooms | Item::Relay | Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
             _ => true,
         }
     }
@@ -632,6 +655,7 @@ impl Item {
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
             Joystick | Deadzone | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
+            Rooms => Applies::Now,
             Memsize | Autoexec | Lan | LanHost => Applies::NextStart,
             _ => Applies::AtPrompt,
         }
@@ -645,7 +669,7 @@ impl Item {
             Item::UltraDir | Item::CaptureDir => Input::Text,
             Item::MacAddr | Item::Relay | Item::Lan | Item::LanHost | Item::Room | Item::Password => Input::Text,
             Item::SoundFont | Item::Mt32Roms => Input::File,
-            Item::Autoexec => Input::Link,
+            Item::Autoexec | Item::Rooms => Input::Link,
             _ => Input::Choice,
         }
     }
@@ -768,7 +792,7 @@ impl Item {
             ChorusMix => percent_bar(s.mixer.chorus_mix, MAX_MIX),
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
-            Autoexec => String::new(),
+            Autoexec | Rooms => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",
                 crate::net::IpxMode::On => "on",
@@ -906,8 +930,8 @@ impl Item {
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
-            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr | Relay | Lan | LanHost
-            | Room | Password => Vec::new(),
+            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr | Rooms | Relay | Lan
+            | LanHost | Room | Password => Vec::new(),
         }
     }
 
@@ -1116,6 +1140,9 @@ enum Target {
     BrowserRow(usize),
     /// A line of the `[autoexec]` editor.
     EditorLine(usize),
+    /// A row of the room browser, and a control of its prompt.
+    RoomRow(usize),
+    RoomField(RoomField),
     /// A value of the popup list, and the rest of it.
     PopupRow(usize),
     Popup,
@@ -1184,6 +1211,8 @@ pub struct ConfigUi {
     pictures: Vec<((usize, usize), Frame)>,
     /// The `[autoexec]` commands being edited.
     autoexec: Option<AutoexecEditor>,
+    /// The LAN's rooms being browsed.
+    rooms: Option<RoomBrowser>,
 }
 
 /// A graph for `draw::plot`.
@@ -1243,6 +1272,7 @@ impl ConfigUi {
             states_available: false,
             pictures: Vec::new(),
             autoexec: None,
+            rooms: None,
         }
     }
 
@@ -1301,6 +1331,7 @@ impl ConfigUi {
         self.browser = None;
         self.game_dialog = None;
         self.autoexec = None;
+        self.rooms = None;
         self.confirm_delete = None;
         self.cheats.edit = None;
         self.cheats.refresh(host);
@@ -1375,6 +1406,8 @@ impl ConfigUi {
             self.game_dialog_key(key, host);
         } else if self.autoexec.is_some() {
             self.autoexec_key(key, host);
+        } else if self.rooms.is_some() {
+            self.rooms_key(key, host);
         } else if self.cheats.edit.is_some() {
             self.cheats_edit_key(key, host);
         } else if self.popup.is_some() {
@@ -1416,6 +1449,7 @@ impl ConfigUi {
                     && self.browser.is_none()
                     && self.game_dialog.is_none()
                     && self.autoexec.is_none()
+                    && self.rooms.is_none()
                 {
                     self.edit = None;
                     self.cheats.edit = None;
@@ -1469,6 +1503,7 @@ impl ConfigUi {
                 }
             }
             Target::EditorLine(i) => self.autoexec_clicked(i, into),
+            Target::RoomRow(_) | Target::RoomField(_) => self.room_clicked(target, host),
             Target::PopupRow(i) => {
                 if let Some(popup) = &mut self.popup {
                     popup.selected = i;
@@ -1574,6 +1609,7 @@ impl ConfigUi {
             }
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
+            (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
             (UiKey::Enter, Input::Link) => self.open_autoexec(host),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}
@@ -1941,6 +1977,8 @@ impl ConfigUi {
             self.draw_game_dialog(&mut g, content);
         } else if self.autoexec.is_some() {
             self.draw_autoexec(&mut g, content);
+        } else if self.rooms.is_some() {
+            self.draw_rooms(&mut g, content);
         } else if self.page == Page::Drives {
             self.draw_drives(&mut g, content);
         } else if self.page == Page::Games {
@@ -2440,6 +2478,8 @@ impl ConfigUi {
             vec![("Tab", "Next", Tab), ("Enter", "Create", Enter), ("Esc", "Cancel", Esc)]
         } else if self.autoexec.is_some() {
             vec![("F2", "Save", Save), ("Esc", "Cancel", Esc)]
+        } else if self.rooms.is_some() {
+            self.room_hints()
         } else if self.confirm_delete.is_some() {
             vec![("Enter", "Delete", Enter), ("Esc", "Keep", Esc)]
         } else if self.page == Page::States {
@@ -2492,6 +2532,7 @@ impl ConfigUi {
                 }
                 Some(Input::Text) => vec![("Enter", "Type", Enter)],
                 Some(Input::File) => vec![("Enter", "Pick", Enter), ("Del", "None", Delete)],
+                Some(Input::Link) if self.item() == Some(Item::Rooms) => vec![("Enter", "Open", Enter)],
                 Some(Input::Link) => vec![("Enter", "Edit", Enter)],
                 None => Vec::new(),
             };
