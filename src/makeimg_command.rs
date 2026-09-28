@@ -39,7 +39,8 @@ MAKEIMG [FILE] -t TYPE [-size MB | -chs C,H,S] [-fat 12|16|32] [-spc N]\r\n\
 Examples: MAKEIMG floppy.img -t fd_1440kb -label MYDISK\r\n\
 \x20         MAKEIMG hdd.img -t hd -size 500\r\n\
 \x20         MAKEIMG C:\\IMAGES\\HDD120.IMG -t hd_120mb -d\r\n\
-MOUNT mounts FAT12 and FAT16 images; FAT32 ones are for other systems.\r\n";
+FAT32 disks (2 GB or more) mount at any DOS version; MS-DOS itself\r\n\
+needs 7.10 for them (DOSCONFIG's DOS version, dos_version).\r\n";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq)]

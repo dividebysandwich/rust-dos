@@ -278,10 +278,6 @@ impl ConfigUi {
             Ok(plan) => plan,
             Err(e) => return self.error(e),
         };
-        let fat32 = plan.volume.as_ref().is_some_and(|v| v.bits == 32);
-        if fat32 && dialog.mount.is_some() {
-            return self.error("A disk of 2 GB or more is FAT32, which Rust-DOS can't mount: don't mount it");
-        }
         if let Err(e) = makeimg::write(&path, &plan, false) {
             return self.error(e);
         }

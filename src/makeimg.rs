@@ -198,10 +198,11 @@ pub fn plan(spec: &ImageSpec) -> Result<Plan, String> {
         None if volume_sectors >= 2 << 21 => 32,
         None => 16,
     };
+    // Clusters of 64 KB or more are more than DOS takes.
     if let Some(spc) = spec.sectors_per_cluster
-        && !(spc.is_power_of_two() && spc <= 128)
+        && !(spc.is_power_of_two() && spc <= 64)
     {
-        return Err(format!("Invalid -spc {} (1, 2, 4, 8 ... 128)", spc));
+        return Err(format!("Invalid -spc {} (1, 2, 4, 8 ... 64)", spc));
     }
     let label = match spec.label.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
         Some(label) => Some(volume_label(label)?),
@@ -251,7 +252,7 @@ pub fn plan(spec: &ImageSpec) -> Result<Plan, String> {
         _ if volume_sectors > 4085 * 8 => 4,
         _ => 1,
     });
-    while spc < 128 && data / spc as u64 > most {
+    while spc < 64 && data / spc as u64 > most {
         spc <<= 1;
     }
     // FAT32 on a smaller disk: smaller clusters, enough for FAT32.
@@ -382,9 +383,12 @@ fn master_boot_record(plan: &Plan, v: &Volume) -> [u8; SECTOR_SIZE] {
     let entry = &mut sector[0x1BE..0x1CE];
     entry[0] = 0x80;
     entry[1..4].copy_from_slice(&chs_bytes(v.start, plan.chs));
+    // FAT32 within the BIOS's cylinders (8 GB) is 0Bh, beyond them 0Ch,
+    // which the system reads with INT 13h's extensions.
     entry[4] = match v.bits {
         12 => 0x01,
-        32 => 0x0C,
+        32 if plan.bytes / SECTOR > 1024 * 255 * 63 => 0x0C,
+        32 => 0x0B,
         _ if v.sectors < 65536 => 0x04,
         _ if plan.bytes > 528 * MB => 0x0E,
         _ => 0x06,
@@ -426,7 +430,7 @@ fn boot_sector(plan: &Plan, v: &Volume) -> [u8; SECTOR_SIZE] {
     // The code after the BPB, whose size tells where it starts.
     let code_at = if fat32 { 0x5A } else { 0x3E };
     s[..3].copy_from_slice(&[0xEB, code_at as u8 - 2, 0x90]);
-    s[3..11].copy_from_slice(b"RUST-DOS");
+    s[3..11].copy_from_slice(b"MSWIN4.1");
     s[11..13].copy_from_slice(&(SECTOR_SIZE as u16).to_le_bytes());
     s[13] = v.sectors_per_cluster as u8;
     s[14..16].copy_from_slice(&(v.reserved as u16).to_le_bytes());
@@ -632,6 +636,7 @@ mod tests {
             ("floppy.img", ImageSpec { label: Some("disk1".into()), ..spec("fd_720kb") }),
             ("hdd.img", ImageSpec { label: Some("HARDDISK".into()), ..spec("hd_20mb") }),
             ("small.img", ImageSpec { size_mb: Some(4), ..Default::default() }),
+            ("fat32.img", ImageSpec { fat: Some(32), label: Some("BIG".into()), ..spec("hd_40mb") }),
         ] {
             let path = scratch(name);
             let plan = plan(&spec).unwrap();
@@ -649,10 +654,33 @@ mod tests {
             assert_eq!((start, sectors), (v.start, v.sectors), "{}", name);
             let volume = FatVolume::open(std::rc::Rc::new(image), start, sectors).unwrap();
             assert_eq!(volume.label(), spec.label.as_ref().map(|l| l.to_uppercase()), "{}", name);
-            assert_eq!(volume.free_clusters() as u64, v.clusters, "{}", name);
+            // FAT32's root directory has its cluster.
+            let root = (v.bits == 32) as u64;
+            assert_eq!(volume.free_clusters() as u64, v.clusters - root, "{}", name);
             volume.put_file(&["README.TXT"], b"hello", 0, 0).unwrap();
             assert!(volume.find(&["README.TXT"]).is_ok(), "{}", name);
-            assert_eq!(volume.free_clusters() as u64, v.clusters - 1, "{}", name);
+            assert_eq!(volume.free_clusters() as u64, v.clusters - root - 1, "{}", name);
+        }
+    }
+
+    /// A disk of 2 GB or more is FAT32, which mounts; its partition's type
+    /// tells whether the BIOS's cylinders reach its end.
+    #[test]
+    fn big_disks_are_fat32() {
+        for (mb, kind) in [(3000, 0x0B), (9000, 0x0C)] {
+            let path = scratch(&format!("big{}.img", mb));
+            let plan = plan(&ImageSpec { size_mb: Some(mb), ..Default::default() }).unwrap();
+            write(&path, &plan, true).unwrap();
+            let image = DiskImage::open(&path, false, None, false).unwrap();
+            let mut mbr = [0u8; SECTOR_SIZE];
+            image.read(0, &mut mbr).unwrap();
+            assert_eq!(mbr[0x1C2], kind, "{} MB", mb);
+            let (start, sectors) = image.fat_volume().unwrap();
+            let volume = FatVolume::open(std::rc::Rc::new(image), start, sectors).unwrap();
+            assert_eq!(volume.fat_type(), crate::fat::FatType::Fat32);
+            volume.put_file(&["GAMES", "README.TXT"], b"hello", 0, 0).unwrap();
+            assert_eq!(volume.list(&["GAMES"]).unwrap().len(), 3);
+            std::fs::remove_file(&path).unwrap();
         }
     }
 

@@ -602,13 +602,17 @@ long and the short name open the file.
 
 ### Disk images
 
-A floppy or hard disk image holds a FAT12 or FAT16 file system that
-programs read and write like any other drive's; what they write goes into
-the image file. An image whose size is a floppy disk's (160 KB to 2.88 MB,
+A floppy or hard disk image holds a FAT12, FAT16 or FAT32 file system
+that programs read and write like any other drive's; what they write goes
+into the image file. A FAT32 drive mounts at any `dos_version`, as
+programs reach its files through DOS; the functions of before FAT32
+(INT 21h AH=36h, 1Ch) report no more than just under 2 GB of it, as
+MS-DOS 7.1 does, and from DOS 7.00 on the FAT32 functions tell the rest
+(see `dos_version`). An image whose size is a floppy disk's (160 KB to 2.88 MB,
 as in DOSBox's table), or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or
 `.1440`, is a floppy, anything else a hard disk: an image of a
-whole disk with a partition table, whose first FAT partition is the drive,
-or of a single volume. The hard disk's geometry comes from its partition
+whole disk with a partition table, whose first FAT12 or FAT16 partition
+(else its first FAT32 one) is the drive, or of a single volume. The hard disk's geometry comes from its partition
 table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
 `-size 512,S,H,C`) gives it. `-t floppy` or `-t hdd` overrides the choice,
 and an image file that can't be written, or `-ro`, makes a write-protected
@@ -653,8 +657,9 @@ volume, and `-noformat` leaves the image all zeros. The file is a host
 path (relative to the directory rust-dos started in, `~` for the home
 directory), or with `-d` (`-writetodos`) a DOS path on a drive mounted
 from a host directory. An existing file stays unless `-force` is given,
-and one a drive has mounted always does. Rust-DOS mounts the FAT12 and
-FAT16 images; FAT32 ones are for systems that read FAT32. The boot code
+and one a drive has mounted always does. A FAT32 partition is of type 0Bh
+within the BIOS's 1024 cylinders (8 GB) and 0Ch past them; MS-DOS reads it
+from version 7.10 (Windows 95 OSR2) on. The boot code
 says the disk has no system until one is put on it; a hard disk's loads
 its active partition's boot sector, as FDISK's does.
 
@@ -699,8 +704,8 @@ empty or not; hard disk images are the drives C: and D:.
 A drive number instead of a letter mounts a disk image for the BIOS alone,
 as DOSBox's `IMGMOUNT 2 hdd.img` does: 0 and 1 are the floppy drives (INT 13h
 units 00h and 01h), 2 and 3 the first two hard disks (80h and 81h). The
-image needs no DOS file system: a booter game's floppy, a FAT32 or blank hard
-disk to install a system on. It has no drive letter, and takes its unit
+image needs no DOS file system: a booter game's floppy, a blank hard disk
+to install a system on, or one with a file system DOS doesn't read. It has no drive letter, and takes its unit
 before A:, B: or the hard disk drives, which fill the hard disk units it
 leaves. `BOOT -l 2` boots from it, and so does `BOOT -l C` where C: isn't a
 disk image; `-fs none` with A: to D: means the numbers 0 to 3, and `MOUNT -u
@@ -708,7 +713,7 @@ disk image; `-fs none` with A: to D: means the numbers 0 to 3, and `MOUNT -u
 `BOOT booter.img` puts a floppy without a file system in unit 0 this way.
 
 ```
-IMGMOUNT 2 ~/images/win95-fat32.img    a hard disk DOS can't read
+IMGMOUNT 2 ~/images/linux.img          a hard disk DOS can't read
 IMGMOUNT 0 install1.img install2.img   floppies to install from
 BOOT -l A
 ```

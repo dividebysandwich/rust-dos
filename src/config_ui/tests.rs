@@ -1160,7 +1160,7 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     assert!(status(&ui).0.ends_with("disk1.img has been made and mounted as A:"), "{:?}", status(&ui));
     assert_eq!(ui.drives[ui.row].drive, 0, "the new drive is selected");
 
-    // Not over a file, and not a FAT32 disk to mount.
+    // Not over a file; a FAT32 disk mounts.
     keys(&mut ui, &mut host, &[End, Enter]);
     let dialog = ui.image_dialog.as_mut().unwrap();
     dialog.path = TextField::new(&path.display().to_string());
@@ -1173,9 +1173,8 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     dialog.mount = Some(3);
     ui.draw(&mut frame);
     keys(&mut ui, &mut host, &[Enter]);
-    assert!(status(&ui).0.contains("FAT32"), "{:?}", status(&ui));
-    assert!(!dir.join("big.img").exists());
-    keys(&mut ui, &mut host, &[Esc]);
+    assert!(status(&ui).0.ends_with("big.img has been made and mounted as D:"), "{:?}", status(&ui));
+    assert_eq!(host.mounts.last().map(|(spec, _)| (spec.drive, spec.opts.kind)), Some((3, DriveKind::HardDisk)));
     assert!(ui.image_dialog.is_none());
 
     // The browser doesn't offer it: it has no host files.

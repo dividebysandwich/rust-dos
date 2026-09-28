@@ -34,8 +34,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   ports, Covox and Disney Sound Source, the Tandy/PCjr sound chip, and CD
   audio
 * **Drives:** host directories as floppy, hard disk and CD-ROM drives, CD
-  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO) and FAT12/FAT16
-  disk images, with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
+  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO) and FAT12, FAT16
+  and FAT32 disk images, with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
   disk speeds and noises
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
   (`BOOT`): MS-DOS, Windows 95 and other systems of their own, with a Plug
