@@ -275,8 +275,11 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
     if let Some(v) = &bus.voodoo
         && v.output()
     {
-        frame.drawn_from = DrawnFrom::default();
-        v.render(&mut frame.rgb, frame.width as usize);
+        // Unless the OpenGL renderer draws it.
+        if v.picture_wanted() {
+            frame.drawn_from = DrawnFrom::default();
+            v.render(&mut frame.rgb, frame.width as usize);
+        }
         return;
     }
     // Re-render only the rows the VGA has marked dirty since the last call.

@@ -1,11 +1,12 @@
 //! What the OpenGL renderer draws (`voodoo_renderer=opengl`). The software
-//! rasterizer goes on drawing into the card's memory, which games read
-//! back, save states keep and screenshots show; the mirror records the
-//! same drawing for the front end to do again with OpenGL, at a higher
-//! resolution, for the window: triangles as vertices carrying the values
-//! the card iterates, fastfills, the pixels frame buffer writes left, the
-//! textures the triangles use decoded to ARGB as the card reads them, and
-//! the buffers' pixels whenever their layout changes or a state loads.
+//! rasterizer goes on keeping the card's memory, which games read back,
+//! save states keep and screenshots show (drawing only what they can still
+//! see, `backlog`); the mirror records the same drawing for the front end
+//! to do again with OpenGL, at a higher resolution, for the window:
+//! triangles as vertices carrying the values the card iterates, fastfills,
+//! the pixels frame buffer writes left, the textures the triangles use
+//! decoded to ARGB as the card reads them, and the buffers' pixels whenever
+//! their layout changes or a state loads.
 
 use super::raster::{RasterState, TmuRaster, TriParams, fetch_texel};
 use super::texture::{PAGE_SHIFT, Tmu};
@@ -223,10 +224,11 @@ pub struct Mirror {
     frame: u64,
     /// The layout of the last snapshot; None to take one.
     layout: Option<LayoutKey>,
-    /// The `Pixels` command each buffer's frame buffer writes go on
-    /// adding to (the colour buffer's offset, None for the auxiliary
-    /// buffer), until something draws.
-    open: Vec<(Option<u32>, usize)>,
+    /// The row of pixels each buffer's frame buffer writes go on adding
+    /// to, one a buffer, and the one written last: commands once the
+    /// writes go elsewhere or something draws.
+    open: Vec<Pixels>,
+    last_open: usize,
     last_texture: [Option<LastTexture>; 2],
 }
 
@@ -245,6 +247,7 @@ impl Mirror {
             frame: 0,
             layout: None,
             open: Vec::new(),
+            last_open: 0,
             last_texture: [None; 2],
         }
     }
@@ -278,6 +281,14 @@ impl Mirror {
     }
 
     fn push(&mut self, command: Command) {
+        // The frame buffer writes before a drawing come before it.
+        if matches!(command, Command::Draw(_) | Command::Fill(_)) {
+            self.close_rows();
+        }
+        self.push_command(command);
+    }
+
+    fn push_command(&mut self, command: Command) {
         if self.commands.len() >= MAX_COMMANDS {
             // Nobody draws them: start over from the pixels when someone
             // does.
@@ -286,11 +297,14 @@ impl Mirror {
             self.forget_textures();
             self.layout = None;
         }
-        // Frame buffer writes after a drawing go on top of it.
-        if matches!(command, Command::Draw(_) | Command::Fill(_) | Command::Resync(_)) {
-            self.open.clear();
-        }
         self.commands.push(command);
+    }
+
+    /// The rows of pixels being written, as commands.
+    fn close_rows(&mut self) {
+        for row in std::mem::take(&mut self.open) {
+            self.push_command(Command::Pixels(row));
+        }
     }
 
     /// A triangle the software rasterizer draws with `st` and `p`, from
@@ -372,22 +386,38 @@ impl Mirror {
     }
 
     /// Pixel `x` of buffer row `y` is `value` after a frame buffer write:
-    /// in colour buffer `dest`, or with None in the auxiliary buffer.
-    pub(crate) fn pixel(&mut self, dest: Option<u32>, x: u32, y: u32, value: u16) {
-        let open = self.open.iter().position(|&(d, _)| d == dest);
-        if let Some(i) = open
-            && let Some(Command::Pixels(p)) = self.commands.get_mut(self.open[i].1)
-            && p.y == y
-            && p.x + p.values.len() as u32 == x
+    /// in colour buffer `dest`, or with None in the auxiliary buffer, of
+    /// `width` pixels.
+    pub(crate) fn pixel(&mut self, dest: Option<u32>, x: u32, y: u32, value: u16, width: u32) {
+        let goes_on = |p: &Pixels| p.dest == dest && p.y == y && p.x + p.values.len() as u32 == x;
+        if let Some(p) = self.open.get_mut(self.last_open)
+            && goes_on(p)
         {
             p.values.push(value);
             return;
         }
-        self.push(Command::Pixels(Pixels { dest, x, y, values: vec![value] }));
-        let at = self.commands.len() - 1;
-        match open {
-            Some(i) => self.open[i].1 = at,
-            None => self.open.push((dest, at)),
+        let at = self.open.iter().position(|p| p.dest == dest);
+        if let Some(i) = at
+            && goes_on(&self.open[i])
+        {
+            self.open[i].values.push(value);
+            self.last_open = i;
+            return;
+        }
+        // Room for the rest of the row, which writes usually go on to.
+        let mut values = Vec::with_capacity(width.saturating_sub(x).max(1) as usize);
+        values.push(value);
+        let row = Pixels { dest, x, y, values };
+        match at {
+            Some(i) => {
+                let done = std::mem::replace(&mut self.open[i], row);
+                self.push_command(Command::Pixels(done));
+                self.last_open = i;
+            }
+            None => {
+                self.open.push(row);
+                self.last_open = self.open.len() - 1;
+            }
         }
     }
 
@@ -490,8 +520,8 @@ impl Mirror {
                 *last = None;
             }
         }
+        self.close_rows();
         self.commands.extend(unused.into_iter().map(Command::FreeTexture));
-        self.open.clear();
         std::mem::take(&mut self.commands)
     }
 }

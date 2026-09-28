@@ -1020,7 +1020,7 @@ fn frame_buffer_writes_are_recorded_a_row_a_buffer() {
     w(&mut bus, LFB_MODE, 15);
     bus.write_32(BASE + 0x40_0000 + 20 * 2048 + 8 * 2, 0x0002_0001);
     let frame = take_mirror(&mut bus);
-    let pixels: Vec<&Pixels> = frame
+    let mut pixels: Vec<&Pixels> = frame
         .commands
         .iter()
         .map(|c| match c {
@@ -1028,6 +1028,8 @@ fn frame_buffer_writes_are_recorded_a_row_a_buffer() {
             other => panic!("{:?}", other),
         })
         .collect();
+    // In any order: each buffer's rows go on top of their own.
+    pixels.sort_by_key(|p| (p.y, p.dest.is_none()));
     let colour = |y| Pixels { dest: Some(0), x: 3, y, values: vec![0x20 + y as u16; 4] };
     let depth = |y| Pixels { dest: None, x: 3, y, values: (3..7).map(|x| 0x1000 + x).collect() };
     assert_eq!(
@@ -1130,4 +1132,288 @@ fn a_loaded_state_gives_the_opengl_renderer_the_buffers_again() {
     let frame = take_mirror(&mut cpu.bus);
     let [Command::Resync(snapshot)] = &frame.commands[..] else { panic!("{:?}", frame.commands) };
     assert_eq!(snapshot.color[0][3 * 640 + 3], 0x07E0);
+}
+
+// --- Held-back drawing while the OpenGL renderer draws ---
+
+/// A card that records for the OpenGL renderer with `workers` threads,
+/// its software picture not wanted: what it draws is held back.
+fn gl_bus(board: Board, workers: usize) -> Bus {
+    let mut bus = bus(board);
+    let mut v = rust_dos::voodoo::Voodoo::with_workers(board, workers);
+    v.set_mirror(true);
+    v.set_software_picture(false);
+    bus.voodoo = Some(v);
+    init(&mut bus);
+    bus
+}
+
+fn status_of(bus: &Bus) -> serde_json::Value {
+    bus.voodoo.as_ref().unwrap().describe(rust_dos::voodoo::Now::default())
+}
+
+/// Frames of a clear and triangles, drawing into the back buffer.
+fn frames(bus: &mut Bus, count: u32) {
+    for frame in 0..count {
+        w(bus, ZA_COLOR, 0xFFFF);
+        w(bus, COLOR1, 0x0010_2030 + frame);
+        w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | DRAW_BACK);
+        w(bus, FASTFILL_CMD, 0);
+        w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | DEPTH_TEST | 3 << 5 | CLIPPING | DRAW_BACK);
+        for i in 0..50u32 {
+            flat(bus, (i * 5 + frame) % 256, i * 3, 200, 255);
+            w(bus, START_Z, ((i * 331 + frame * 7) % 0xFFFF) << 12);
+            let (x, y) = (((i * 37 + frame * 11) % 560) as f32, ((i * 23) % 400) as f32);
+            triangle(bus, [(x, y), (x + 70.0, y + 9.0), (x + 12.0, y + 60.0)]);
+        }
+        w(bus, SWAPBUFFER_CMD, 0);
+    }
+}
+
+#[test]
+fn frames_nothing_reads_are_not_drawn() {
+    let mut gl = gl_bus(Board::Max, 2);
+    let mut sw = bus(Board::Max);
+    init(&mut sw);
+    frames(&mut gl, 10);
+    frames(&mut sw, 10);
+    let status = status_of(&gl);
+    assert!(status["pruned_jobs"].as_u64().unwrap() > 300, "{}", status);
+    assert!(gl.voodoo.as_ref().unwrap().frame_buffer().to_bytes() == sw.voodoo.as_ref().unwrap().frame_buffer().to_bytes());
+}
+
+#[test]
+fn counters_stay_exact_once_read() {
+    let mut gl = gl_bus(Board::Standard, 2);
+    let mut sw = bus(Board::Standard);
+    init(&mut sw);
+    for bus in [&mut gl, &mut sw] {
+        frames(bus, 2);
+        // Reading them stops the dropping; resetting starts the count.
+        r(bus, FBI_PIXELS_OUT);
+        w(bus, NOP_CMD, 1);
+        frames(bus, 3);
+    }
+    assert_eq!(r(&gl, FBI_PIXELS_OUT), r(&sw, FBI_PIXELS_OUT));
+    assert_eq!(status_of(&gl)["counters_read"], true);
+}
+
+#[test]
+fn texture_writes_wait_for_held_back_triangles() {
+    let mut gl = gl_bus(Board::Standard, 2);
+    let mut sw = bus(Board::Standard);
+    init(&mut sw);
+    for bus in [&mut gl, &mut sw] {
+        textured_square(bus, 10, false, |_, _| 0xF800);
+        // The square's texture changes after it: it keeps the red.
+        bus.write_32(BASE + 0x80_0000 + (5 << 17), 0x07E0_07E0);
+        w(bus, FBZ_MODE, RGB_WRITE);
+        triangle(bus, [(20.0, 0.0), (28.0, 0.0), (20.0, 8.0)]);
+    }
+    assert_eq!(pixel(&gl, 0, 0, 0), 0xF800);
+    assert_eq!(pixel(&gl, 0, 20, 0), 0x07E0);
+    assert!(gl.voodoo.as_ref().unwrap().frame_buffer().to_bytes() == sw.voodoo.as_ref().unwrap().frame_buffer().to_bytes());
+}
+
+#[test]
+fn the_picture_comes_back_when_wanted() {
+    let mut bus = gl_bus(Board::Standard, 2);
+    frames(&mut bus, 1);
+    w(&mut bus, COLOR1, 0x0000_FF00);
+    w(&mut bus, FBZ_MODE, RGB_WRITE);
+    w(&mut bus, FASTFILL_CMD, 0);
+    let v = bus.voodoo.as_mut().unwrap();
+    v.prepare_display();
+    assert!(!v.picture_wanted());
+    assert!(status_of(&bus)["held_jobs"].as_u64().unwrap() > 0, "nothing drew the fill");
+    let v = bus.voodoo.as_mut().unwrap();
+    v.set_software_picture(true);
+    assert!(v.prepare_display(), "the picture changed");
+    let mut rgb = vec![0u8; 640 * 480 * 3];
+    v.render(&mut rgb, 640);
+    assert_eq!(&rgb[..3], &[0, 255, 0]);
+    assert_eq!(status_of(&bus)["held_jobs"], 0);
+}
+
+#[test]
+fn a_state_saved_while_held_back_has_everything() {
+    let mut gl = gl_bus(Board::Standard, 2);
+    frames(&mut gl, 3);
+    let mut sw = bus(Board::Standard);
+    init(&mut sw);
+    frames(&mut sw, 3);
+    let save = |bus: Bus| {
+        let mut cpu = rust_dos::cpu::Cpu::new(PathBuf::from("."));
+        cpu.bus = bus;
+        let state = rust_dos::savestate::machine::save(&cpu);
+        let mut other = rust_dos::cpu::Cpu::new(PathBuf::from("."));
+        other.bus.configure_voodoo(Some(Board::Standard));
+        rust_dos::savestate::machine::load(&mut other, &state).unwrap();
+        other.bus.voodoo.as_ref().unwrap().frame_buffer().to_bytes()
+    };
+    assert!(save(gl) == save(sw));
+}
+
+#[test]
+fn a_depth_test_keeps_the_depths_it_reads() {
+    let mut gl = gl_bus(Board::Standard, 2);
+    let mut sw = bus(Board::Standard);
+    init(&mut sw);
+    for bus in [&mut gl, &mut sw] {
+        w(bus, ZA_COLOR, 0xFFFF);
+        w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE);
+        w(bus, FASTFILL_CMD, 0);
+        // Near depths, drawn into the front buffer...
+        w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE);
+        flat(bus, 255, 0, 0, 0);
+        w(bus, START_Z, 0x100 << 12);
+        triangle(bus, [(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]);
+        // ...hide what the back buffer's triangle draws behind them...
+        w(bus, FBZ_MODE, RGB_WRITE | DEPTH_TEST | 1 << 5 | DRAW_BACK);
+        flat(bus, 0, 255, 0, 0);
+        w(bus, START_Z, 0x8000 << 12);
+        triangle(bus, [(0.0, 0.0), (200.0, 0.0), (0.0, 200.0)]);
+        // ...though the front buffer and the depths are cleared after.
+        w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE);
+        w(bus, FASTFILL_CMD, 0);
+    }
+    assert_eq!(pixel(&gl, 1, 150, 10), 0x07E0);
+    assert_eq!(pixel(&gl, 1, 10, 10), 0, "behind the depths");
+    assert!(gl.voodoo.as_ref().unwrap().frame_buffer().to_bytes() == sw.voodoo.as_ref().unwrap().frame_buffer().to_bytes());
+}
+
+/// Random drawing, frame buffer writes and reads, texture writes, layout
+/// changes and swaps on a card that holds its drawing back and one that
+/// draws at once: every read and the memory at the end agree.
+#[test]
+fn held_back_drawing_leaves_the_memory_as_drawing_at_once() {
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut rand = move |n: u32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as u32
+    };
+    let mut gl = gl_bus(Board::Max, 2);
+    let mut sw = bus(Board::Max);
+    sw.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Max, 0));
+    init(&mut sw);
+    for bus in [&mut gl, &mut sw] {
+        cfg_write(bus, 0, 0x40, 1);
+        w(bus, FBI_INIT3, 479 << 22);
+        cfg_write(bus, 0, 0x40, 0);
+        textured_square(bus, 10, true, |x, y| (x * 7 + y * 3) << 11 | x * 3);
+    }
+    for step in 0..6000 {
+        let op = rand(100);
+        let (a, b, c, d) = (rand(700), rand(520), rand(0x1_0000), rand(0x1_0000));
+        let fbz_bits = rand(1 << 8);
+        let mut read = None;
+        for bus in [&mut gl, &mut sw] {
+            match op {
+                // Clears: whole, a viewport, or depth only.
+                0..=7 => {
+                    let (lr, ly) = if op < 4 { (640, 480) } else { ((a / 2) << 16 | (a / 2 + 200).min(640), (b / 2) << 16 | (b / 2 + 150).min(480)) };
+                    w(bus, CLIP_LEFT_RIGHT, lr);
+                    w(bus, CLIP_LOW_Y_HIGH_Y, ly);
+                    w(bus, COLOR1, c);
+                    w(bus, ZA_COLOR, d);
+                    let masks = if op >= 6 { AUX_WRITE } else { RGB_WRITE | AUX_WRITE };
+                    w(bus, FBZ_MODE, masks | (fbz_bits & 1) << 14 | (fbz_bits >> 1 & 1) << 17);
+                    w(bus, FASTFILL_CMD, 0);
+                    w(bus, CLIP_LEFT_RIGHT, 640);
+                    w(bus, CLIP_LOW_Y_HIGH_Y, 480);
+                }
+                // Triangles, in every combination of the bits that decide
+                // what they read and write.
+                8..=84 => {
+                    let mut fbz = RGB_WRITE;
+                    if fbz_bits & 1 != 0 { fbz |= AUX_WRITE; }
+                    if fbz_bits & 2 != 0 { fbz |= DEPTH_TEST | (fbz_bits >> 5 & 7) << 5; }
+                    if fbz_bits & 4 != 0 { fbz |= CLIPPING; }
+                    if fbz_bits & 8 != 0 { fbz |= Y_ORIGIN; }
+                    if fbz_bits & 16 != 0 { fbz |= 1 << 18; }
+                    if fbz_bits & 32 != 0 { fbz |= DRAW_BACK; }
+                    if fbz_bits & 64 == 0 && fbz_bits & 128 != 0 { fbz &= !RGB_WRITE; }
+                    w(bus, FBZ_MODE, fbz | 1 << 8);
+                    w(bus, ALPHA_MODE, if fbz_bits & 64 != 0 { 1 << 4 | 1 << 8 | 5 << 12 } else { 0 });
+                    w(bus, FBZ_COLOR_PATH, if c & 1 != 0 { 1 | 1 << 27 } else { 0 });
+                    flat(bus, c & 0xFF, c >> 8, d & 0xFF, d >> 8);
+                    w(bus, START_Z, d << 12);
+                    let (x, y) = (a as f32 - 30.0, b as f32 - 20.0);
+                    let size = if c & 2 != 0 { 400.0 } else { 40.0 };
+                    triangle(bus, [(x, y), (x + size, y + (c % 17) as f32), (x + (d % 13) as f32, y + size * 0.7)]);
+                }
+                // Frame buffer writes: 16-bit colours, depth and colour,
+                // two depths, and through the pixel pipeline.
+                85..=92 => {
+                    let format = [0, 12, 15][(c % 3) as usize];
+                    w(bus, LFB_MODE, format | (d & 1) << 4 | (d >> 1 & 1) << 13 | if op == 92 { 1 << 8 } else { 0 });
+                    w(bus, FBZ_MODE, RGB_WRITE | AUX_WRITE | (fbz_bits & 1) << 18);
+                    for k in 0..(c % 40) {
+                        let at = if format == 12 { (b % 480) * 4096 + ((a + k) % 700) * 4 } else { (b % 480) * 2048 + ((a + 2 * k) % 700) * 2 };
+                        bus.write_32(BASE + 0x40_0000 + at as usize, c.wrapping_mul(k + 1) ^ d << 16);
+                    }
+                }
+                // Reads of the front, back and depth buffers.
+                93..=94 => {
+                    w(bus, LFB_MODE, (c % 3) << 6 | (d & 1) << 13);
+                    let value = bus.read_32(BASE + 0x40_0000 + ((b % 480) * 2048 + (a % 640) * 2) as usize);
+                    match read {
+                        None => read = Some(value),
+                        Some(first) => assert_eq!(value, first, "read at step {}", step),
+                    }
+                }
+                // Texture writes.
+                95 => bus.write_32(BASE + 0x80_0000 + (5 << 17) + ((c % 64) << 2) as usize, d << 16 | c),
+                // A layout change: other buffer sizes.
+                96 => {
+                    cfg_write(bus, 0, 0x40, 1);
+                    w(bus, FBI_INIT2, [150, 160, 100][(c % 3) as usize] << 11);
+                    cfg_write(bus, 0, 0x40, 0);
+                }
+                _ => w(bus, SWAPBUFFER_CMD, 0),
+            }
+        }
+        if step % 97 == 0 {
+            take_mirror(&mut gl);
+        }
+    }
+    let status = status_of(&gl);
+    assert!(status["pruned_jobs"].as_u64().unwrap() > 0, "{}", status);
+    assert!(
+        gl.voodoo.as_ref().unwrap().frame_buffer().to_bytes() == sw.voodoo.as_ref().unwrap().frame_buffer().to_bytes(),
+        "{}",
+        status
+    );
+}
+
+/// Frame buffer write speed, with and without the OpenGL renderer's
+/// recording: `cargo test --release --test voodoo_tests benchmark_lfb --
+/// --ignored --nocapture`.
+#[test]
+#[ignore]
+fn benchmark_lfb_writes() {
+    for mirror in [false, true] {
+        let mut bus = bus(Board::Standard);
+        init(&mut bus);
+        bus.voodoo.as_mut().unwrap().set_mirror(mirror);
+        w(&mut bus, LFB_MODE, 1 << 4);
+        let start = std::time::Instant::now();
+        let frames = 60u32;
+        let mut commands = 0;
+        for frame in 0..frames {
+            for y in 0..480u32 {
+                for x in (0..640u32).step_by(2) {
+                    bus.write_32(BASE + 0x40_0000 + (y * 2048 + x * 2) as usize, frame.wrapping_mul(0x0021_0021) ^ y);
+                }
+            }
+            w(&mut bus, SWAPBUFFER_CMD, 0);
+            if mirror {
+                commands += take_mirror(&mut bus).commands.len();
+            }
+        }
+        let per_frame = start.elapsed() / frames;
+        println!("mirror {}: {:?} a frame, {} commands a frame", mirror, per_frame, commands as u32 / frames);
+    }
 }

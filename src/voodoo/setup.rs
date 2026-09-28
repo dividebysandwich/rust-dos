@@ -5,6 +5,7 @@
 //! `poly_render_triangle` and `fastfill` (voodoo_emu.cpp).
 
 use super::raster::{RasterState, TmuParams, TmuRaster, TriParams};
+use super::backlog;
 use super::workers::Job;
 use super::regs::*;
 use super::{NONE, Voodoo};
@@ -160,18 +161,24 @@ impl Voodoo {
                 mirror.triangle(&st, &p, verts, texcount, &self.tmu, self.reg[STIPPLE]);
             }
         }
+        let access = self.access(|layout| backlog::triangle(layout, &st, &verts));
+        let rotate = self.reg[FBZ_MODE] & (1 << 2 | 1 << 12) == 1 << 2;
+        let spills = backlog::spills(&st, &verts, self.fbi.height);
         let job = Job::Triangle { st, p, verts, texcount };
-        if self.reg[FBZ_MODE] & (1 << 2 | 1 << 12) == 1 << 2 {
+        if rotate || spills {
             // Stippling in rotate mode goes on from pixel to pixel across
-            // the triangle, so it is drawn here, whole.
+            // the triangle, and pixels right of the rows land in the next
+            // row, which another worker draws: drawn here, whole.
             self.flush();
             let mut stipple = self.reg[STIPPLE];
             let mut stats = self.stats;
             job.run_all(&mut stipple, &mut stats);
-            self.reg[STIPPLE] = stipple;
+            if rotate {
+                self.reg[STIPPLE] = stipple;
+            }
             self.stats = stats;
         } else {
-            self.submit(job);
+            self.submit(job, access);
         }
         self.reg[FBI_TRIANGLES_OUT] = self.reg[FBI_TRIANGLES_OUT].wrapping_add(1);
         self.mark_drawn(dest);
@@ -232,7 +239,18 @@ impl Voodoo {
                 mirror.fastfill(&st, (sx, ex, sy, ey), rgb, aux);
             }
         }
-        self.submit(Job::Fastfill { st, dither, x0: sx, x1: ex, y0: sy, y1: ey });
+        let access = self.access(|layout| backlog::fastfill(layout, &st, (sx, ex, sy, ey)));
+        let spills = backlog::fill_spills(&st, ex, sy, ey, self.fbi.height);
+        let job = Job::Fastfill { st, dither, x0: sx, x1: ex, y0: sy, y1: ey };
+        if spills {
+            // Into the next rows' memory, which other workers draw.
+            self.flush();
+            let mut stats = self.stats;
+            job.run_all(&mut 0, &mut stats);
+            self.stats = stats;
+        } else {
+            self.submit(job, access);
+        }
         if rgb {
             self.mark_drawn(dest);
         }

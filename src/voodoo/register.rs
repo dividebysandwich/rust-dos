@@ -181,6 +181,7 @@ impl Voodoo {
                         if (width, height) != (self.fbi.width, self.fbi.height) {
                             (self.fbi.width, self.fbi.height) = (width, height);
                             self.display_dirty = true;
+                            self.update_tiles();
                         }
                         if regnum == VIDEO_DIMENSIONS {
                             self.recompute_video_memory();
@@ -291,7 +292,12 @@ impl Voodoo {
         if ACCESS[regnum] & READ == 0 {
             return 0xFFFF_FFFF;
         }
-        let counted = || self.counted();
+        // A program that reads the counters wants every pixel counted:
+        // no more dropping held-back jobs.
+        let counted = || {
+            self.counters_read.set(true);
+            self.counted()
+        };
         let counter = |r: usize, n: i32| self.reg[r].wrapping_add(n as u32) & 0xFF_FFFF;
         match regnum {
             STATUS => self.status(now),

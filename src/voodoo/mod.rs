@@ -21,6 +21,7 @@
 //! buffer and two texture units with 4 MB each, or a retail board's 2 MB
 //! frame buffer and one texture unit with 2 MB.
 
+pub mod backlog;
 pub mod lfb;
 pub mod mem;
 pub mod mirror;
@@ -41,6 +42,7 @@ use regs::*;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use texture::Tmu;
+use backlog::{Access, Backlog, TileLayout};
 use workers::{Job, Word};
 
 /// The size of the card's memory window.
@@ -364,6 +366,18 @@ pub struct Voodoo {
     tmu_in_use: Cell<u8>,
     /// Frame buffer writes behind queued jobs, not yet a job themselves.
     words: RefCell<Vec<Word>>,
+    /// While the OpenGL renderer draws the picture: the jobs held back
+    /// until something reads the memory (`backlog`), whether they may be
+    /// (`RUST_DOS_VOODOO_PRUNE=0` says no), whether a program read the
+    /// pixel counters, which dropped jobs would miss, and how often
+    /// something made them draw.
+    backlog: RefCell<Backlog>,
+    prune: bool,
+    counters_read: Cell<bool>,
+    catch_ups: Cell<u64>,
+    /// Whether the display wants the card's picture from its memory,
+    /// which it doesn't while the OpenGL renderer draws it.
+    software_picture: bool,
     /// The drawing recorded for the OpenGL renderer, while it draws.
     mirror: Option<Box<mirror::Mirror>>,
     /// Messages already logged once.
@@ -415,6 +429,11 @@ impl Voodoo {
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
             words: RefCell::new(Vec::new()),
+            backlog: RefCell::new(Backlog::default()),
+            prune: std::env::var("RUST_DOS_VOODOO_PRUNE").map_or(true, |v| v != "0"),
+            counters_read: Cell::new(false),
+            catch_ups: Cell::new(0),
+            software_picture: true,
             mirror: None,
             logged: 0,
             log: Vec::new(),
@@ -428,6 +447,7 @@ impl Voodoo {
     pub fn reset(&mut self) {
         self.flush();
         self.pool.reset_stats();
+        self.counters_read.set(false);
         self.reg.fill(0);
         self.pci = PciConfig::default();
         self.dac = [0; 8];
@@ -577,26 +597,73 @@ impl Voodoo {
 
     /// Draw everything queued, and wait for it.
     pub(crate) fn catch_up(&self) {
+        if !self.backlog.borrow().is_empty() {
+            self.catch_ups.set(self.catch_ups.get() + 1);
+        }
         self.submit_words();
+        self.release_backlog();
         self.pool.flush();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
     }
 
-    /// Give the workers `job`, after the frame buffer writes before it.
-    pub(crate) fn submit(&self, job: Job) {
+    /// Whether jobs are held back (`backlog`): while the OpenGL renderer
+    /// draws, unless a program reads the pixel counters or the buffers'
+    /// layout gives the tiles no meaning.
+    fn deferring(&self) -> bool {
+        self.mirror.is_some() && self.prune && !self.counters_read.get() && self.backlog.borrow().layout.prunable
+    }
+
+    /// What a job does to the tiles, when jobs are held back.
+    pub(crate) fn access(&self, f: impl FnOnce(&TileLayout) -> Access) -> Option<Access> {
+        self.deferring().then(|| f(&self.backlog.borrow().layout))
+    }
+
+    /// Queue `job` after the frame buffer writes before it: held back
+    /// with its `access`, or given to the workers.
+    pub(crate) fn submit(&self, job: Job, access: Option<Access>) {
         self.submit_words();
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
         }
-        self.outstanding.set(self.pool.workers() > 0);
-        self.pool.submit(job);
+        match access {
+            Some(access) if self.deferring() => {
+                let out = self.backlog.borrow_mut().push(job, access);
+                self.hand_over(out);
+            }
+            _ => self.hand_over([job]),
+        }
     }
 
-    /// The frame buffer writes queued behind jobs, as a job of their own.
+    /// Give the workers `jobs`, after those held back.
+    fn hand_over(&self, jobs: impl IntoIterator<Item = Job>) {
+        if !self.backlog.borrow().is_empty() && !self.deferring() {
+            self.release_backlog();
+        }
+        for job in jobs {
+            self.outstanding.set(self.pool.workers() > 0);
+            self.pool.submit(job);
+        }
+    }
+
+    /// The jobs held back, pruned, to the workers without waiting.
+    fn release_backlog(&self) {
+        if self.backlog.borrow().is_empty() {
+            return;
+        }
+        let held = self.backlog.borrow_mut().take();
+        for job in held {
+            self.outstanding.set(self.pool.workers() > 0);
+            self.pool.submit(job);
+        }
+    }
+
+    /// The frame buffer writes queued behind jobs, as a job of their own,
+    /// after the jobs held back.
     fn submit_words(&self) {
         let words = std::mem::take(&mut *self.words.borrow_mut());
         if !words.is_empty() {
+            self.release_backlog();
             self.outstanding.set(self.pool.workers() > 0);
             self.pool.submit(Job::Pixels { fb: self.fbi.ram.clone(), words });
         }
@@ -604,13 +671,19 @@ impl Voodoo {
 
     /// Whether frame buffer writes have to wait their turn behind jobs.
     pub(crate) fn writes_queue(&self) -> bool {
-        self.outstanding.get() || !self.words.borrow().is_empty()
+        self.outstanding.get() || !self.words.borrow().is_empty() || !self.backlog.borrow().is_empty()
     }
 
-    /// Frame buffer writes for the queue (`writes_queue`). Every so many
-    /// they go out as a job, or straight into memory when the workers are
-    /// done by then.
+    /// Frame buffer writes for the queue (`writes_queue`): held back with
+    /// the jobs, or every so many out as a job, or straight into memory
+    /// when the workers are done by then.
     pub(crate) fn queue_words(&self, new: &[Word]) {
+        if self.deferring() && self.words.borrow().is_empty() {
+            let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, new);
+            self.hand_over(out);
+            return;
+        }
+        self.release_backlog();
         let mut words = self.words.borrow_mut();
         words.extend_from_slice(new);
         if words.len() < WORDS_A_JOB {
@@ -699,6 +772,20 @@ impl Voodoo {
                 fbi.backbuf = 0;
             }
         }
+        self.update_tiles();
+    }
+
+    /// The tiles held-back jobs are worked out on, for the buffers where
+    /// they are now. Jobs held back for the old ones go to the workers.
+    pub(crate) fn update_tiles(&mut self) {
+        let fbi = &self.fbi;
+        let word = |offs: u32| (offs != NONE).then_some(offs as usize / 2);
+        let bases = [word(fbi.rgboffs[0]), word(fbi.rgboffs[1]), word(fbi.rgboffs[2]), word(fbi.auxoffs)];
+        let layout = TileLayout::new(bases, fbi.width, fbi.height, fbi.rowpixels, fbi.ram.len());
+        if layout != self.backlog.borrow().layout {
+            self.release_backlog();
+            self.backlog.borrow_mut().layout = layout;
+        }
     }
 
     /// Whether the card drives the monitor: its video clock runs and
@@ -725,6 +812,11 @@ impl Voodoo {
         let switched = std::mem::replace(&mut self.showing, output) != output;
         let changed = std::mem::take(&mut self.display_dirty);
         if !output {
+            return switched;
+        }
+        if !self.picture_wanted() {
+            // The OpenGL renderer draws it: nothing needs the memory.
+            self.display_dirty |= changed;
             return switched;
         }
         // Jobs may still be drawing into the buffer shown.
@@ -932,7 +1024,23 @@ impl Voodoo {
     pub fn set_mirror(&mut self, on: bool) {
         if on != self.mirror.is_some() {
             self.mirror = on.then(|| Box::new(mirror::Mirror::new()));
+            self.release_backlog();
         }
+    }
+
+    /// Whether the display wants the card's picture from its memory (the
+    /// OpenGL renderer draws it otherwise): screenshots and recordings,
+    /// the debugger, overlays that mix with it.
+    pub fn set_software_picture(&mut self, on: bool) {
+        if on && !self.software_picture {
+            self.display_dirty = true;
+        }
+        self.software_picture = on;
+    }
+
+    /// Whether the display draws the card's picture from its memory.
+    pub fn picture_wanted(&self) -> bool {
+        self.mirror.is_none() || self.software_picture
     }
 
     pub fn mirror_attached(&self) -> bool {
@@ -1006,10 +1114,10 @@ impl Voodoo {
             return;
         }
         if let Some(value) = color {
-            mirror.pixel(Some(dest as u32), x as u32, y as u32, value);
+            mirror.pixel(Some(dest as u32), x as u32, y as u32, value, fbi.width);
         }
         if let Some(value) = aux {
-            mirror.pixel(None, x as u32, y as u32, value);
+            mirror.pixel(None, x as u32, y as u32, value, fbi.width);
         }
     }
 
@@ -1047,6 +1155,11 @@ impl Voodoo {
             "fbiInit": init,
             "init_enable": format!("{:08X}", self.pci.init_enable),
             "opengl": self.mirror.is_some(),
+            "held_jobs": self.backlog.borrow().len(),
+            "pruned_jobs": self.backlog.borrow().pruned,
+            "catch_ups": self.catch_ups.get(),
+            "counters_read": self.counters_read.get(),
+            "software_picture": self.picture_wanted(),
         })
     }
 }

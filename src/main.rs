@@ -278,6 +278,8 @@ fn main() -> Result<(), String> {
     // frame cost drops from "640×400×3 zero fill + per-pixel palette/planar
     // lookup" to "one memcpy of the cached buffer + a tiny overlay pass".
     let mut cached_frame = video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
+    // Whether the OpenGL renderer drew the 3dfx card's picture last frame.
+    let mut voodoo_gl_shown = false;
     // The cached render with the cursors on top, as the screen shows it.
     let mut screen = cached_frame.clone();
 
@@ -1012,8 +1014,30 @@ fn main() -> Result<(), String> {
         // `cached_frame` and just overlay the cursor/mouse/recording pip.
         // The CRTC picks up the Start Address the program flipped to at the
         // vertical retraces that passed, whether or not it polled port 3DAh.
+        // The 3dfx card's picture from its memory, unless the OpenGL
+        // renderer draws it and nothing looks at it: screenshots,
+        // recordings, the debugger, and overlays that mix with it.
+        let voodoo_picture = !voodoo_gl_shown
+            || screenshot
+            || recorder.is_active()
+            || video_recording.is_some()
+            || ui.is_open()
+            || ui.overlay_shown()
+            || dbg.wants_frame()
+            || settings.monochrome.phosphor().is_some();
+        if let Some(v) = &mut cpu.bus.voodoo {
+            v.set_software_picture(voodoo_picture);
+        }
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
+        if !voodoo_gl
+            && !voodoo_picture
+            && let Some(v) = &mut cpu.bus.voodoo
+        {
+            v.set_software_picture(true);
+            cpu.bus.sync_display();
+        }
+        voodoo_gl_shown = voodoo_gl;
         let (width, height) = video::frame_size(&cpu.bus);
         if cached_frame.resize(width, height) {
             cpu.bus.vga.mark_dirty_full();
@@ -1405,11 +1429,23 @@ impl MainHost<'_, '_> {
     }
 
     /// The machine's state now, with its header and picture.
-    fn capture_state(&self) -> (slots::Header, video::Frame, Vec<u8>) {
+    fn capture_state(&mut self) -> (slots::Header, video::Frame, Vec<u8>) {
         let game = self.game.as_ref().map(|g| (g.id.as_str(), g.name.as_str()));
         // The hardware in place, not a change waiting for the program to end.
         let hardware = self.machine.settings(self.settings);
-        (slots::header(self.cpu, &hardware, game), self.picture.clone(), savestate::machine::save(self.cpu))
+        let mut picture = self.picture.clone();
+        // The OpenGL renderer draws the 3dfx card's picture: the one in its
+        // memory for the thumbnail.
+        if let Some(v) = &mut self.cpu.bus.voodoo
+            && v.output()
+            && !v.picture_wanted()
+        {
+            v.set_software_picture(true);
+            v.prepare_display();
+            v.render(&mut picture.rgb, picture.width as usize);
+            v.set_software_picture(false);
+        }
+        (slots::header(self.cpu, &hardware, game), picture, savestate::machine::save(self.cpu))
     }
 
     /// Save the machine to slot `slot`. Its state is taken now; a thread

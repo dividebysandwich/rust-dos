@@ -151,6 +151,11 @@ impl Voodoo {
         if lfb_mode & (1 << 8) == 0 {
             // Straight into the buffers, or behind the jobs queued.
             let scry = if lfb_mode & (1 << 13) != 0 { (self.fbi.yorigin as i32 - y) & 0x3FF } else { y };
+            // Right of the row or below the buffer, in other rows' memory,
+            // which other workers draw: after them.
+            if (x + 2 > self.fbi.rowpixels as i32 || scry >= self.fbi.height as i32) && self.writes_queue() {
+                self.flush();
+            }
             let queue = self.writes_queue();
             let mut words = [Word { row: scry as u16, at: 0, value: 0 }; 4];
             let mut queued = 0;
