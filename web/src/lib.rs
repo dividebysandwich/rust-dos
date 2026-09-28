@@ -212,6 +212,7 @@ impl Machine {
         cpu.bus.kbd.layout = settings.keyboard_layout.layout(Layout::us());
         warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         cpu.bus.dpmi.enabled = settings.dpmi;
+        rust_dos::dos_data::set_version(&mut cpu.bus, settings.dos_version);
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         cpu.bus.configure_network(&settings.network);
         for warning in &warnings {
@@ -1179,6 +1180,9 @@ impl Host for PageHost<'_> {
         }
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
+        if new.dos_version != old.dos_version {
+            rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
+        }
         if new.keyboard_layout != old.keyboard_layout {
             self.cpu.bus.kbd.layout = new.keyboard_layout.layout(Layout::us());
         }

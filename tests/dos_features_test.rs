@@ -94,3 +94,25 @@ fn test_regression_acquire_panic() {
     // SI should advance by 2.
     assert_eq!(cpu.si(), 3);
 }
+
+/// `dos_version` is what AH=30h, AX=3306h and a new PSP tell programs.
+#[test]
+fn the_reported_dos_version_is_the_setting() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let version = |cpu: &mut Cpu| {
+        cpu.set_reg16(Register::AX, 0x3000);
+        rust_dos::interrupts::int21::handle(cpu);
+        let ah30 = cpu.get_reg16(Register::AX);
+        cpu.set_reg16(Register::AX, 0x3306);
+        rust_dos::interrupts::int21::handle(cpu);
+        (ah30, cpu.get_reg16(Register::BX))
+    };
+    assert_eq!(version(&mut cpu), (0x0005, 0x0005));
+    rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
+    assert_eq!(version(&mut cpu), (0x0A07, 0x0A07));
+    // A PSP made now carries it too (AH=26h).
+    cpu.set_reg8(Register::AH, 0x26);
+    cpu.set_reg16(Register::DX, 0x5000);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.bus.read_16(0x50000 + 0x40), 0x0A07);
+}

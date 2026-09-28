@@ -132,6 +132,11 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             "false" => imported.set("emulator", "ems", "false"),
             _ => unknown(imported),
         },
+        ("dos", "ver") => match crate::config::DosVersion::parse(first) {
+            Some(version) => imported.set("emulator", "dos_version", version.name()),
+            None if first.is_empty() => {}
+            None => unknown(imported),
+        },
         ("dos", "umb") => match bool_value() {
             Some(b) => imported.set("emulator", "umb", b),
             None => unknown(imported),
@@ -375,7 +380,7 @@ mod tests {
 
     #[test]
     fn settings_map_onto_rust_dos_s() {
-        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\n[sblaster]\nsbtype=gb\n";
+        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\nver=7.1\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\n[sblaster]\nsbtype=gb\n";
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
         let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
         assert_eq!(get("cycles"), Some("max"));
@@ -385,6 +390,7 @@ mod tests {
         assert_eq!(pentium.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some("pentium"));
         assert_eq!(get("keyboard_layout"), Some("gr"));
         assert_eq!(get("umb"), Some("false"));
+        assert_eq!(get("dos_version"), Some("7.10"));
         assert_eq!(get("gus"), Some("true"));
         assert_eq!(get("joysticktype"), Some("4axis"));
         assert_eq!(get("lpt_dac"), Some("disney"));

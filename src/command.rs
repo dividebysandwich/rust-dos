@@ -377,7 +377,8 @@ struct VerCommand;
 impl ShellCommand for VerCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
         let version = env!("CARGO_PKG_VERSION");
-        print_string(cpu, &format!("Rust-DOS v{}\r\n", version));
+        let dos = cpu.bus.dos_version.name();
+        print_string(cpu, &format!("Rust-DOS v{}\r\nReported DOS version {}\r\n", version, dos));
     }
 }
 

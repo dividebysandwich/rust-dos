@@ -950,8 +950,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 30h: Get DOS Version
         0x30 => {
-            cpu.set_reg8(Register::AL, 5); // Major: 5
-            cpu.set_reg8(Register::AH, 0); // Minor: .00
+            cpu.set_reg8(Register::AL, cpu.bus.dos_version.major);
+            cpu.set_reg8(Register::AH, cpu.bus.dos_version.minor);
             cpu.set_bx(0xFF00); // OEM ID
             cpu.set_cx(0x0000); // Serial
         }
@@ -1048,7 +1048,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // Ignore setting, just return
             } else if al == 0x06 {
                 // Get MS-DOS Version (True version)
-                cpu.set_reg16(Register::BX, 0x3205); // 5.50
+                let version = cpu.bus.dos_version;
+                cpu.set_reg16(Register::BX, u16::from_le_bytes([version.major, version.minor]));
                 cpu.set_reg8(Register::DL, 0); // Revision 0
                 cpu.set_reg8(Register::DH, 0); // DOS in HMA?
             }

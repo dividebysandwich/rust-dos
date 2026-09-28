@@ -233,6 +233,7 @@ fn main() -> Result<(), String> {
         config_warning(&mut cpu, &e);
     }
     cpu.bus.dpmi.enabled = settings.dpmi;
+    rust_dos::dos_data::set_version(&mut cpu.bus, settings.dos_version);
     for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
         config_warning(&mut cpu, &warning);
     }
@@ -1514,6 +1515,9 @@ impl Host for MainHost<'_, '_> {
         }
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
+        if new.dos_version != old.dos_version {
+            rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
+        }
         if new.disk != old.disk {
             self.cpu.bus.set_disk_settings(new.disk);
         }

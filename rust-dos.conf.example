@@ -126,6 +126,11 @@
 # clients and share extended memory through it. true (the default) or
 # false.
 #dpmi=true
+# The DOS version programs are told, such as 5.00 (the default), 6.22 or
+# 7.10. The FAT32 functions of MS-DOS 7 (INT 21h AX=7302h to 7305h), which
+# disk utilities use, answer from 7.00 on; FAT32 drives mount at any
+# version. A change takes effect at once.
+#dos_version=5.00
 # Rewind: holding Alt+F11 goes back in time, half a second a step. It keeps
 # the machine's states of the last minutes, which take memory and a little
 # of the host's time: true or false (the default).

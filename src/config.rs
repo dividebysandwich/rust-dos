@@ -132,6 +132,8 @@ pub struct Config {
     pub umb: Option<bool>,
     /// The DPMI host (`dpmi`).
     pub dpmi: Option<bool>,
+    /// The DOS version programs are told (`dos_version`).
+    pub dos_version: Option<DosVersion>,
     /// The keyboard layout (`keyboard_layout`).
     pub keyboard_layout: Option<LayoutSetting>,
     /// Rewind (`rewind`), and the memory its states may take in MB
@@ -235,6 +237,52 @@ impl Filter {
             Filter::Nearest => "nearest",
             Filter::Linear => "linear",
         }
+    }
+}
+
+/// The DOS version the built-in DOS reports (`dos_version`): INT 21h
+/// AH=30h, AX=3306h and the PSP's, and the version the FAT32 functions of
+/// MS-DOS 7 (AX=7302h to 7305h) need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DosVersion {
+    pub major: u8,
+    pub minor: u8,
+}
+
+impl Default for DosVersion {
+    fn default() -> Self {
+        Self::new(5, 0)
+    }
+}
+
+impl DosVersion {
+    /// The versions the settings window offers.
+    pub const PRESETS: [DosVersion; 4] = [Self::new(5, 0), Self::new(6, 22), Self::new(7, 0), Self::new(7, 10)];
+
+    pub const fn new(major: u8, minor: u8) -> Self {
+        Self { major, minor }
+    }
+
+    /// "5", "5.0", "6.22" or "7.1", as DOSBox's `ver`: a minor of one
+    /// digit is tenths (7.1 is 7.10). 2.00 to 9.99.
+    pub fn parse(s: &str) -> Option<Self> {
+        let (major, minor) = s.trim().split_once('.').unwrap_or((s.trim(), "00"));
+        let major: u8 = major.parse().ok().filter(|m| (2..=9).contains(m))?;
+        if !(1..=2).contains(&minor.len()) || !minor.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let tenths = minor.len() == 1;
+        let minor: u8 = minor.parse().ok()?;
+        Some(Self::new(major, if tenths { minor * 10 } else { minor }))
+    }
+
+    /// "7.10".
+    pub fn name(self) -> String {
+        format!("{}.{:02}", self.major, self.minor)
+    }
+
+    pub fn at_least(self, major: u8, minor: u8) -> bool {
+        self >= Self::new(major, minor)
     }
 }
 
@@ -644,6 +692,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.dpmi = Some(on),
                             None => warn(format!("invalid {} '{}' (true or false)", key, value)),
                         },
+                        "dos_version" => match DosVersion::parse(value) {
+                            Some(version) => config.dos_version = Some(version),
+                            None => warn(format!("invalid dos_version '{}' (such as 5.00, 6.22 or 7.10)", value)),
+                        },
                         "core" => match CoreMode::parse(value) {
                             Ok(core) => config.core = Some(core),
                             Err(e) => warn(e),
@@ -911,6 +963,8 @@ pub struct Settings {
     pub umb: bool,
     /// The DPMI host for DOS extenders.
     pub dpmi: bool,
+    /// The DOS version programs are told.
+    pub dos_version: DosVersion,
     pub keyboard_layout: LayoutSetting,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
@@ -946,6 +1000,7 @@ impl Default for Settings {
             ems: true,
             umb: true,
             dpmi: true,
+            dos_version: DosVersion::default(),
             keyboard_layout: LayoutSetting::Auto,
             rewind: false,
             rewind_memory: 256,
@@ -1004,6 +1059,7 @@ impl Settings {
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
+            dos_version: config.dos_version.unwrap_or(default.dos_version),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
@@ -1067,6 +1123,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "dpmi", yes_no(settings.dpmi)),
+        (Emulator, "dos_version", Some(settings.dos_version.name())),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
@@ -1780,6 +1837,25 @@ mod tests {
     }
 
     #[test]
+    fn dos_versions() {
+        let version = |s: &str| DosVersion::parse(s).map(DosVersion::name);
+        assert_eq!(version("5"), Some("5.00".to_string()));
+        assert_eq!(version("5.0"), Some("5.00".to_string()));
+        assert_eq!(version("7.1"), Some("7.10".to_string()));
+        assert_eq!(version("7.10"), Some("7.10".to_string()));
+        assert_eq!(version(" 6.22 "), Some("6.22".to_string()));
+        for bad in ["", "1.0", "10", "7.", "7.100", "7.x", "seven"] {
+            assert_eq!(version(bad), None, "{}", bad);
+        }
+        assert!(DosVersion::new(7, 10).at_least(7, 0) && !DosVersion::new(6, 22).at_least(7, 0));
+        let config = parse("[emulator]\ndos_version=7.1\n", Path::new("/cfg"), None);
+        assert_eq!(Settings::from_config(&config).dos_version, DosVersion::new(7, 10));
+        assert_eq!(Settings::from_config(&parse("", Path::new("/cfg"), None)).dos_version, DosVersion::new(5, 0));
+        let config = parse("[emulator]\ndos_version=12\n", Path::new("/cfg"), None);
+        assert_eq!((config.dos_version, config.warnings.len()), (None, 1));
+    }
+
+    #[test]
     fn cpu_model() {
         let config = parse("[emulator]\ncpu=386\n", Path::new("/cfg"), None);
         assert_eq!(config.cpu, Some(crate::cpu::CpuModel::I386));
@@ -1957,6 +2033,7 @@ mod tests {
             ems: false,
             umb: false,
             dpmi: false,
+            dos_version: DosVersion::new(7, 10),
             keyboard_layout: LayoutSetting::Named("gr"),
             rewind: true,
             rewind_memory: 512,

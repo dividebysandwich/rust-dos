@@ -318,14 +318,23 @@ fn write_dpb(bus: &mut Bus, drive: u8, layout: crate::disk::FatLayout, next: Opt
     bus.write_16(base + 0x1F, 0xFFFF); // 1F: free clusters unknown
 }
 
+/// Tell programs the DOS version `version` from now on (`dos_version`).
+/// A booted system's memory is its own DOS's.
+pub fn set_version(bus: &mut Bus, version: crate::config::DosVersion) {
+    bus.dos_version = version;
+    if bus.boot.is_none() {
+        write_dosmgr_patches(bus);
+    }
+}
+
 /// The patch table of MS-DOS 5's DOSMGR interface: the DOS version and
 /// where in the DOS data segment the INT 21h dispatcher saves the
 /// caller's DS and BX, the InDOS flag, the user ID, the critical section
 /// patches and the last MCB of conventional memory (UMB_HEAD) are.
 fn write_dosmgr_patches(bus: &mut Bus) {
     let at = address(DOSMGR_PATCHES);
-    bus.write_8(at, 5);
-    bus.write_8(at + 0x01, 0);
+    bus.write_8(at, bus.dos_version.major);
+    bus.write_8(at + 0x01, bus.dos_version.minor);
     for (i, offset) in [SDA_SAVE_DS, SDA_SAVE_BX, INDOS, SDA_USER_ID, CRIT_PATCHES, SYSVARS + 0x66].into_iter().enumerate() {
         bus.write_16(at + 0x02 + 2 * i, offset);
     }

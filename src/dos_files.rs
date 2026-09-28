@@ -213,7 +213,7 @@ fn psp_fields(bus: &mut Bus, psp: u16) {
     // No previous PSP (for SHARE), the DOS version, and the INT 21h RETF
     // that CP/M style calls of PSP:0050 go through.
     bus.guest_write_32(base + 0x38, 0xFFFF_FFFF);
-    bus.guest_write_16(base + 0x40, 0x0005);
+    bus.guest_write_16(base + 0x40, u16::from_le_bytes([bus.dos_version.major, bus.dos_version.minor]));
     bus.guest_write_bytes(base + 0x50, &[0xCD, 0x21, 0xCB]);
 }
 

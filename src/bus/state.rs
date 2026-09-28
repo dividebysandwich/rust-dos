@@ -97,6 +97,7 @@ impl Bus {
             // header.
             tandy_mode: _,
             ultrasnd_drive: _,
+            dos_version: _,
             // Worked out again after a load.
             sb_irq: _,
             irq_ready: _,
@@ -259,6 +260,7 @@ impl Bus {
             disk_io,
             tandy_mode: _,
             ultrasnd_drive: _,
+            dos_version: _,
             sb_irq: _,
             irq_ready: _,
             page_gen: _,

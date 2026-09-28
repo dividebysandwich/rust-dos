@@ -189,6 +189,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   clients can call DOS with INT 21h in protected mode, with selectors
   for their buffers. Off, they run as they do on plain DOS with HIMEM. A
   change takes effect for the programs started after it.
+* `dos_version` is the DOS version programs are told (INT 21h AH=30h,
+  AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
+  `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS
+  has the FAT32 functions of MS-DOS 7 that disk utilities use: the
+  extended drive parameter block and free space (INT 21h AX=7302h and
+  7303h) and, from 7.10, absolute disk reads and writes (AX=7305h), and
+  INT 25h and 26h refuse FAT32 drives as MS-DOS 7.1 does. FAT32 drives
+  mount at any version, as programs reach their files through DOS. A
+  change takes effect at once.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and
