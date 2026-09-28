@@ -631,10 +631,14 @@ impl Bus {
     /// drive's speed, and make its noise.
     pub fn disk_activity(&mut self, class: crate::diskio::DiskClass, bytes: u32, access: crate::disknoise::Access) {
         let pending = self.disk_io.charge(class, bytes);
+        self.disk_noise(class, access, pending);
+    }
+
+    /// The noise of a drive of `class` that goes on for `ns` from now.
+    pub fn disk_noise(&mut self, class: crate::diskio::DiskClass, access: crate::disknoise::Access, ns: u64) {
         if self.disknoise.enabled(class) {
-            // The noise starts now and goes on while the access does.
             self.audio_catch_up();
-            let frames = (pending as u128 * crate::opl::RATE as u128 / 1_000_000_000) as u64;
+            let frames = (ns as u128 * crate::opl::RATE as u128 / 1_000_000_000) as u64;
             self.disknoise.io(class, access, frames);
         }
     }

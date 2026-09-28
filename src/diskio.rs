@@ -147,10 +147,14 @@ impl DiskIo {
     /// Charge moving `bytes` on a `class` drive. Returns the time charged
     /// so far, in nanoseconds.
     pub fn charge(&mut self, class: DiskClass, bytes: u32) -> u64 {
-        if let Some(kb) = self.settings.speed(class).kb_per_second(class) {
-            self.pending_ns += bytes as u64 * 1_000_000_000 / (kb * 1024);
-        }
+        self.pending_ns += self.cost_ns(class, bytes);
         self.pending_ns
+    }
+
+    /// How long moving `bytes` on a `class` drive takes, in nanoseconds:
+    /// what a device that takes its own time (an IDE hard disk) waits.
+    pub fn cost_ns(&self, class: DiskClass, bytes: u32) -> u64 {
+        self.settings.speed(class).kb_per_second(class).map_or(0, |kb| bytes as u64 * 1_000_000_000 / (kb * 1024))
     }
 
     pub fn take_pending(&mut self) -> u64 {

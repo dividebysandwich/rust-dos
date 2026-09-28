@@ -90,7 +90,9 @@ impl Bus {
     fn with_ide<T>(&mut self, id: ChannelId, f: impl FnOnce(&mut Channel, &mut Env) -> T) -> Option<T> {
         let now = self.clock.now_ticks();
         let channel = self.ide[id.index()].as_mut()?;
-        let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now };
+        let class = crate::diskio::DiskClass::HardDisk;
+        let hard_disk_ns_per_sector = self.disk_io.cost_ns(class, crate::diskimage::SECTOR_SIZE as u32);
+        let mut env = Env { disks: &self.disk, player: &mut self.cdaudio, now, hard_disk_ns_per_sector };
         let result = f(channel, &mut env);
         self.sync_ide(id);
         Some(result)
@@ -100,6 +102,7 @@ impl Bus {
         let Some(channel) = &mut self.ide[id.index()] else { return };
         let line = channel.irq();
         let log = channel.take_log();
+        let activity = channel.take_activity();
         if line != channel.pic_line {
             channel.pic_line = line;
             if line {
@@ -111,6 +114,16 @@ impl Bus {
         }
         for line in log {
             self.log_string(&line);
+        }
+        // A hard disk's noise and light, for the time its sectors took.
+        for (drive, transfers) in activity {
+            self.drives_active |= 1 << drive;
+            let per_track = self.disk.bios_image(drive).map_or(1, |disk| disk.geometry().sectors.max(1) as u64);
+            for (lba, sectors) in transfers {
+                let class = crate::diskio::DiskClass::HardDisk;
+                let ns = self.disk_io.cost_ns(class, sectors * crate::diskimage::SECTOR_SIZE as u32);
+                self.disk_noise(class, crate::disknoise::Access::Track(lba / per_track), ns);
+            }
         }
         self.clock.schedule(self.next_event());
     }

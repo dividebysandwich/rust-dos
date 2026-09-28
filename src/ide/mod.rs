@@ -10,6 +10,7 @@
 //! channel's while nIEN is clear; a device that isn't there reads 0, and
 //! the soft reset (SRST) resets both.
 
+pub mod ata;
 pub mod atapi;
 
 use crate::cdrom::audio::CdPlayer;
@@ -19,6 +20,7 @@ use crate::savestate::{Reader, State, Writer};
 use crate::timer::PIT_HZ;
 use std::rc::Rc;
 
+pub use ata::Ata;
 pub use atapi::Atapi;
 
 pub(crate) const BSY: u8 = 0x80;
@@ -38,6 +40,9 @@ pub struct Env<'a> {
     pub player: &'a mut CdPlayer,
     /// PIT ticks.
     pub now: u64,
+    /// How long a hard disk takes for a sector at `hard_disk_speed`, in
+    /// nanoseconds; 0 at the maximum.
+    pub hard_disk_ns_per_sector: u64,
 }
 
 impl Env<'_> {
@@ -110,6 +115,7 @@ impl ChannelId {
 #[derive(Clone, Debug)]
 pub enum Device {
     Atapi(Atapi),
+    Ata(Ata),
 }
 
 /// The same for either kind of device.
@@ -117,6 +123,7 @@ macro_rules! each {
     ($device:expr, $d:ident => $e:expr) => {
         match $device {
             Device::Atapi($d) => $e,
+            Device::Ata($d) => $e,
         }
     };
 }
@@ -150,6 +157,15 @@ impl Device {
         each!(self, d => std::mem::take(&mut d.log))
     }
 
+    /// The hard disk's drive slot and the sectors it read or wrote since
+    /// last asked.
+    fn take_activity(&mut self) -> Option<(u8, Vec<(u64, u32)>)> {
+        match self {
+            Device::Ata(d) if !d.activity.is_empty() => Some((d.drive, std::mem::take(&mut d.activity))),
+            _ => None,
+        }
+    }
+
     /// The CD-ROM drive of DOS drive `drive`, if this is it.
     pub fn cd_drive(&mut self, drive: u8) -> Option<&mut Atapi> {
         match self {
@@ -172,6 +188,10 @@ impl State for Device {
                 0u8.save(w);
                 d.save(w);
             }
+            Device::Ata(d) => {
+                1u8.save(w);
+                d.save(w);
+            }
         }
     }
 
@@ -180,6 +200,7 @@ impl State for Device {
         kind.load(r)?;
         *self = match kind {
             0 => Device::Atapi(Atapi::new(0, false)),
+            1 => Device::Ata(Ata::new(0, crate::diskimage::Chs { cylinders: 1, heads: 1, sectors: 1 }, 1)),
             _ => return Err(crate::savestate::StateError::Invalid("an IDE device it doesn't know".into())),
         };
         each!(self, d => d.load(r))
@@ -239,6 +260,12 @@ impl Channel {
     /// The devices' messages for the log.
     pub fn take_log(&mut self) -> Vec<String> {
         self.devices.iter_mut().flatten().flat_map(Device::take_log).collect()
+    }
+
+    /// What the hard disks read and wrote since last asked: their drive
+    /// slots and (first sector, sectors).
+    pub fn take_activity(&mut self) -> Vec<(u8, Vec<(u64, u32)>)> {
+        self.devices.iter_mut().flatten().filter_map(Device::take_activity).collect()
     }
 
     /// The CD-ROM drive of DOS drive `drive` on the channel, if there is
