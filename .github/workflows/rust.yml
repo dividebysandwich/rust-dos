@@ -226,12 +226,18 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build -Zbuild-std --target x86_64-win7-windows-msvc --release --locked --verbose
 
+      # rust-dos-relay, the LAN relay for servers, goes in every package
+      # beside rust-dos (the .deb takes every program the build made).
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          strip target/release/rust-dos
+          strip target/release/rust-dos target/release/rust-dos-relay
+          # The relay runs on servers without a display or sound.
+          if ldd target/release/rust-dos-relay | grep -Ei 'sdl|asound'; then
+            echo "::warning::rust-dos-relay links SDL2 or ALSA"
+          fi
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos README.md CONFIGURATION.md LICENSE stage/rust-dos/
+          cp target/release/rust-dos target/release/rust-dos-relay README.md CONFIGURATION.md LICENSE stage/rust-dos/
           tar czf "out/$PKG.tar.gz" -C stage rust-dos
           cargo install cargo-deb --locked
           cargo deb --no-build -o "out/$PKG.deb"
@@ -240,7 +246,7 @@ jobs:
         if: runner.os == 'Windows' && !matrix.win7
         run: |
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
+          cp target/release/rust-dos.exe target/release/rust-dos-relay.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
           dotnet tool install --global wix --version 5.0.2
@@ -253,7 +259,8 @@ jobs:
         if: matrix.win7
         run: |
           mkdir -p out stage/rust-dos
-          cp target/x86_64-win7-windows-msvc/release/rust-dos.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
+          BIN=target/x86_64-win7-windows-msvc/release
+          cp $BIN/rust-dos.exe $BIN/rust-dos-relay.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
 
@@ -268,10 +275,14 @@ jobs:
             echo "::error::No .app in $APP_DIR"
             exit 1
           fi
-          # The docs and LICENSE beside the app, so the zip has clean paths.
-          cp README.md CONFIGURATION.md LICENSE "$APP_DIR/"
+          # The relay, the docs and LICENSE beside the app, so the zip has
+          # clean paths.
+          if otool -L target/release/rust-dos-relay | grep -i sdl; then
+            echo "::warning::rust-dos-relay links SDL2"
+          fi
+          cp target/release/rust-dos-relay README.md CONFIGURATION.md LICENSE "$APP_DIR/"
           mkdir -p out
-          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" README.md CONFIGURATION.md LICENSE)
+          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" rust-dos-relay README.md CONFIGURATION.md LICENSE)
 
       - uses: actions/upload-artifact@v7
         with:
@@ -372,6 +383,11 @@ jobs:
           - **Browser**: the `-web.zip` is a web site that runs rust-dos in the
             browser. Put its files on a web server; see *Running in a browser*
             in the README.
+          - **A LAN relay of your own**: every package but the browser's has
+            `rust-dos-relay` beside rust-dos (in `/usr/bin` with the `.deb`),
+            which relays LAN rooms on a server without a display and needs
+            neither SDL nor a sound library. See *A relay on a server* in
+            CONFIGURATION.md.
           EOF
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \

@@ -6,7 +6,8 @@
 
      rust-dos.exe links SDL2 dynamically, so SDL2.dll is installed beside
      it, and munt's MT-32 emulation, mt32emu-2.dll, which it loads for
-     midisynth=mt32, with the library's licence (LGPL 2.1). -->
+     midisynth=mt32, with the library's licence (LGPL 2.1). The LAN relay,
+     rust-dos-relay.exe, needs neither. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
     <Package Name="rust-dos"
              Manufacturer="dividebysandwich"
@@ -26,6 +27,9 @@
                 <Component Id="MainExe" Guid="1373D50B-35B4-4C27-9837-AB0FEC4A04B4">
                     <File Id="RustDosExe" Source="$(var.BinDir)/rust-dos.exe" KeyPath="yes" />
                 </Component>
+                <Component Id="RelayExe" Guid="A67BA8C6-48EC-4E59-9A33-608E8141E887">
+                    <File Id="RustDosRelayExe" Source="$(var.BinDir)/rust-dos-relay.exe" KeyPath="yes" />
+                </Component>
                 <Component Id="SdlDll" Guid="1E10BA41-1628-43F6-AAFC-A0DE6E00E2B0">
                     <File Id="Sdl2Dll" Source="$(var.SdlDir)/SDL2.dll" KeyPath="yes" />
                 </Component>
@@ -39,7 +43,8 @@
                     <File Id="ConfigurationMd" Source="CONFIGURATION.md" />
                 </Component>
                 <!-- So rust-dos can be started from a command prompt with
-                     its options, e.g. rust-dos -d C:\dos. -->
+                     its options, e.g. rust-dos -d C:\dos, and so can
+                     rust-dos-relay. -->
                 <Component Id="PathEnv" Guid="A1A8CDA9-9D83-4327-ADE2-034A1E7CFE02">
                     <RegistryValue Root="HKLM" Key="Software\rust-dos" Name="PathEnv" Type="integer" Value="1" KeyPath="yes" />
                     <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
@@ -60,6 +65,7 @@
 
         <Feature Id="Main">
             <ComponentRef Id="MainExe" />
+            <ComponentRef Id="RelayExe" />
             <ComponentRef Id="SdlDll" />
             <ComponentRef Id="MuntDll" />
             <ComponentRef Id="Docs" />

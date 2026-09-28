@@ -1,6 +1,7 @@
 //! The LAN relay on its own, for a server without a display: rust-dos
-//! instances anywhere join its rooms (`LAN JOIN host`) and play over it as
-//! over one Ethernet. It needs neither SDL nor a sound library.
+//! instances anywhere list and join its rooms (`LAN JOIN host`, and the
+//! settings window's room browser) and play over it as over one Ethernet.
+//! It needs neither SDL nor a sound library.
 
 use clap::Parser;
 use rust_dos::net::tunnel::relay::{self, RelayConfig};
@@ -18,11 +19,12 @@ struct Args {
     #[arg(short, long, value_name = "ADDR")]
     bind: Option<IpAddr>,
 
-    /// The password members need to join a room
+    /// One password for all rooms [default: whoever makes a room gives it
+    /// one, or none]
     #[arg(long)]
     password: Option<String>,
 
-    /// The relay's name, as LAN JOIN lists it
+    /// The relay's name, as room browsers and LAN LIST show it
     #[arg(long, default_value = "rust-dos relay")]
     name: String,
 }

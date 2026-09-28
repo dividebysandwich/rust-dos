@@ -12,7 +12,8 @@ of their own. See the [README](README.md) for everything else.
 * [Game profiles](#game-profiles)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
-* [Playing over a LAN](#playing-over-a-lan)
+* [Playing over a LAN](#playing-over-a-lan) and [a relay on a
+  server](#a-relay-on-a-server)
 * [CRT shaders](#crt-shaders)
 * [Command-line options](#command-line-options)
 
@@ -846,16 +847,48 @@ the room, the members in it and the round trip to the relay.
   keeps only a key made from it, never the password itself. Nothing else
   crossing the relay is encrypted: whoever can watch the traffic of the
   instance that made a room can join it.
-* **A relay on a server** for playing over the internet without any
-  player's router set up: `rust-dos --relay [PORT]` relays without
-  starting the emulator, and so does `rust-dos-relay` (`--port`,
-  `--bind`, `--password`, `--name`), a small program of its own that
-  needs neither SDL nor a sound library:
-  `cargo build --release --no-default-features --bin rust-dos-relay`.
 * **What goes over the relay** is Ethernet frames: the IPX driver's
   packets are on the same LAN as the network cards of other instances, in
   the frame type `ipxframe` sets (Ethernet II by default), where the IPX
   protocol of a system booted with a card can take them.
+
+### A relay on a server
+
+A relay on a server lets players meet over the internet without setting
+up their routers, as the public one at `relay.rust-dos.com` does.
+`rust-dos-relay` is a small program of its own, in every release package
+beside rust-dos, that needs neither a display nor SDL or a sound library
+(to build it alone: `cargo build --release --no-default-features --bin
+rust-dos-relay`, which needs SDL2's development files but not ALSA's).
+`rust-dos --relay [PORT]` does the same without starting the emulator.
+
+* `--port` is its UDP port (default 21213), which the server's firewall
+  has to let in, and `--bind` the address it listens on (default all).
+* `--name` is the name room browsers and `LAN LIST` show.
+* `--password` gives all its rooms one password, for a relay of your
+  own. Without it, the one who makes a room decides whether it has a
+  password.
+* It prints joins, leaves and wrong passwords with the time. It holds up
+  to 1000 members, 200 in a room and 32 from one IP address.
+
+On Linux with systemd, a service keeps it running
+(`/etc/systemd/system/rust-dos-relay.service`, then `systemctl enable
+--now rust-dos-relay`):
+
+```ini
+[Unit]
+Description=rust-dos LAN relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/rust-dos-relay --name "rust-dos public relay"
+DynamicUser=yes
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ### Network card
 
@@ -966,4 +999,4 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--debug-server [ADDR]` | Start the [debug server](README.md#debug--remote-control-server) (default `127.0.0.1:8086`) |
 | `--trace-capacity N` | Entries in the debug server's instruction trace (default 1,000,000) |
 | `--relay [PORT]` | Relay [LAN](#playing-over-a-lan) rooms on this UDP port (default 21213) instead of starting the emulator |
-| `--relay-password TEXT` | The password the rooms of `--relay` need |
+| `--relay-password TEXT` | One password for all the rooms of `--relay` (without it, whoever makes a room gives it one or none) |

@@ -92,7 +92,7 @@ struct Args {
     #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "21213")]
     relay: Option<u16>,
 
-    /// The password members need to join the rooms of --relay
+    /// One password for all the rooms of --relay
     #[arg(long, value_name = "PASSWORD", requires = "relay")]
     relay_password: Option<String>,
 }
