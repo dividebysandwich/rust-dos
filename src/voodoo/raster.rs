@@ -85,6 +85,8 @@ pub struct RasterState {
     /// With trexInit1 bit 18, TMU 0 hands out its configuration (how
     /// Glide counts the texture units) rather than texels.
     pub send_config: Option<u32>,
+    /// The stipple register, which pattern-mode stippling reads.
+    pub stipple: u32,
     pub tmu: [Option<TmuRaster>; 2],
 }
 
@@ -286,7 +288,7 @@ impl<'a> Row<'a> {
                 }
             } else {
                 let index = ((y & 3) << 3) | (!x & 7);
-                if (*stipple >> index) & 1 == 0 {
+                if (st.stipple >> index) & 1 == 0 {
                     return None;
                 }
             }

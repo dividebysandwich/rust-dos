@@ -459,6 +459,26 @@ fn the_chroma_key_and_alpha_test_drop_pixels() {
 }
 
 #[test]
+fn pattern_stipple_draws_the_pattern() {
+    // On the workers too: the pattern is the stipple register's.
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    let pattern = 0xAAAA_5555u32;
+    w(&mut bus, 0x140, pattern);
+    w(&mut bus, FBZ_MODE, RGB_WRITE | 1 << 2 | 1 << 12);
+    flat(&mut bus, 255, 255, 255, 0);
+    triangle(&mut bus, [(0.0, 0.0), (16.0, 0.0), (0.0, 16.0)]);
+    triangle(&mut bus, [(16.0, 0.0), (16.0, 16.0), (0.0, 16.0)]);
+    for y in 0..16usize {
+        for x in 0..16usize {
+            let index = (y & 3) << 3 | (!x & 7);
+            let want = if pattern >> index & 1 != 0 { 0xFFFF } else { 0 };
+            assert_eq!(pixel(&bus, 0, x, y), want, "pixel ({}, {})", x, y);
+        }
+    }
+}
+
+#[test]
 fn clipping_and_the_y_origin() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);

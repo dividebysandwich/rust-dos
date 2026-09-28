@@ -74,6 +74,7 @@ impl Voodoo {
             fogblend: self.fbi.fogblend,
             fogdelta: self.fbi.fogdelta,
             send_config: self.send_config.then_some(self.tmu_config),
+            stipple: reg[STIPPLE],
             tmu: [tmu(0), tmu(1)],
         }
     }
