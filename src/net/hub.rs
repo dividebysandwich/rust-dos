@@ -6,6 +6,7 @@
 //! LAN as a `HubStatus`.
 
 use super::frame::Mac;
+use super::nat::{self, Router};
 use super::port::PortQueue;
 use super::switch::{Port, Switch};
 use super::tunnel::client::{Client, ClientConfig, ClientEvent};
@@ -61,6 +62,8 @@ pub enum Command {
         room: String,
         password: Option<String>,
     },
+    /// What happened to the router's connections on the host.
+    Nat(nat::Event),
 }
 
 /// Where this instance is with the LAN.
@@ -97,6 +100,8 @@ pub struct HubStatus {
     /// Frames to and from the LAN.
     pub frames_out: u64,
     pub frames_in: u64,
+    /// The network card's router: its TCP connections and UDP flows.
+    pub nat: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -223,13 +228,16 @@ struct State {
     start: Instant,
     /// Counts joins, so the answer to an old one is ignored.
     generation: u64,
+    /// The router to the internet of the network card's guest, while
+    /// there is a card, and its sockets on the host.
+    router: Option<Router>,
+    nat: nat::host::NatHost,
 }
 
 impl State {
     fn new(shared: Arc<Shared>, tx: WeakUnboundedSender<Command>) -> Self {
         Self {
             shared,
-            tx,
             switch: Switch::default(),
             queues: HashMap::new(),
             uplink: None,
@@ -237,6 +245,9 @@ impl State {
             client_id: super::random_u64(),
             start: Instant::now(),
             generation: 0,
+            router: None,
+            nat: nat::host::NatHost::new(tx.clone()),
+            tx,
         }
     }
 
@@ -249,7 +260,21 @@ impl State {
         let mut ticker = tokio::time::interval(TICK);
         loop {
             let socket = self.uplink.as_ref().map(|u| u.socket.clone());
+            // When the router's TCP has something to do next.
+            let now = self.now();
+            let router_due = self
+                .router
+                .as_mut()
+                .and_then(|r| r.poll_delay(now))
+                .map(|ms| Duration::from_millis(ms.min(TICK.as_millis() as u64)));
             tokio::select! {
+                _ = tokio::time::sleep(router_due.unwrap_or(TICK)), if router_due.is_some() => {
+                    let now = self.now();
+                    if let Some(router) = &mut self.router {
+                        router.poll(now);
+                    }
+                    self.router_actions();
+                }
                 command = rx.recv() => match command {
                     Some(command) => self.command(command),
                     None => break,
@@ -276,7 +301,13 @@ impl State {
         match command {
             Command::Attach { port, mac, queue } => {
                 match port {
-                    Port::Nic => self.switch.nic = Some(mac),
+                    Port::Nic => {
+                        self.switch.nic = Some(mac);
+                        if self.router.is_none() {
+                            self.router = Some(Router::new(self.now()));
+                            self.switch.router = Some(nat::ROUTER_MAC);
+                        }
+                    }
                     Port::Ipx => self.switch.ipx = Some(mac),
                     Port::Router => self.switch.router = Some(mac),
                     Port::Uplink => return,
@@ -285,7 +316,12 @@ impl State {
             }
             Command::Detach(port) => {
                 match port {
-                    Port::Nic => self.switch.nic = None,
+                    Port::Nic => {
+                        self.switch.nic = None;
+                        self.switch.router = None;
+                        self.router = None;
+                        self.nat.clear();
+                    }
                     Port::Ipx => self.switch.ipx = None,
                     Port::Router => self.switch.router = None,
                     Port::Uplink => {}
@@ -318,6 +354,24 @@ impl State {
                 if generation == self.generation {
                     self.connect(relay, room, password);
                 }
+            }
+            Command::Nat(event) => {
+                let now = self.now();
+                if let Some(router) = &mut self.router {
+                    router.event(event, now);
+                }
+                self.router_actions();
+            }
+        }
+    }
+
+    /// Pass on what the router has for the card and for the host.
+    fn router_actions(&mut self) {
+        let Some(router) = &mut self.router else { return };
+        for action in router.take_actions() {
+            match action {
+                nat::Action::ToGuest(frame) => self.route(Port::Router, frame),
+                action => self.nat.run(action),
             }
         }
     }
@@ -443,6 +497,12 @@ impl State {
             let rooms = relay.status().rooms;
             self.shared.update(|s| s.hosted_rooms = rooms);
         }
+        if let Some(router) = &mut self.router {
+            router.poll(now);
+            let counts = router.counts();
+            self.shared.update(|s| s.nat = Some(counts));
+        }
+        self.router_actions();
     }
 
     fn flush(&mut self, out: Vec<Vec<u8>>) {
@@ -497,6 +557,13 @@ impl State {
                         self.shared.update(|s| s.frames_out += 1);
                     }
                     self.flush(out);
+                }
+                Port::Router => {
+                    let now = self.now();
+                    if let Some(router) = &mut self.router {
+                        router.from_guest(&frame, now);
+                    }
+                    self.router_actions();
                 }
                 port => {
                     if let Some(queue) = self.queues.get(&port) {

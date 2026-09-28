@@ -53,6 +53,8 @@ libloading = "0.9.0"
 midir = { version = "0.11", optional = true }
 # Random tokens, secrets and network addresses (src/net).
 getrandom = "0.3"
+# The TCP of the network card's router to the internet (src/net/nat).
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
 
 # The dynamic recompiler's code generator and its executable memory
 # (src/dynrec).

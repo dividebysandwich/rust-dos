@@ -14,6 +14,8 @@ pub mod frame;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod hub;
 pub mod ipx;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod nat;
 pub mod ne2000;
 pub mod port;
 pub mod switch;

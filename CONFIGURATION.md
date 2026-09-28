@@ -837,17 +837,27 @@ Windows 95 know, at ports 300h and IRQ 10 unless set otherwise. It is on
 the same LAN as the IPX driver: the cards of instances in one room see
 each other's frames, as cards on one Ethernet would.
 
+* **The internet:** the card sits behind a router of its own, as a PC
+  behind a home router does. It hands out the address by DHCP (or BOOTP):
+  the guest is 10.0.2.15, the router 10.0.2.2 and the name server
+  10.0.2.3, which looks names up with the host's resolver. The guest's TCP
+  connections and UDP traffic become the host's own, so it needs no
+  special rights, and no setting. 10.0.2.2 is the host itself: a server on
+  the host's port 8080 is `http://10.0.2.2:8080/` in the guest. The router
+  answers pings to its own addresses only.
 * **DOS:** load the Crynwr packet driver, `NE2000 0x60 10 0x300`
   (software interrupt, IRQ, ports), from the Crynwr packet driver
   collection or FreeDOS's `crynwr` package. Programs that use a packet
-  driver, such as mTCP, then reach the other instances; with static
-  addresses (`IPADDR` in mTCP's configuration) two instances in one room
-  ping each other and make TCP connections.
+  driver then work; with mTCP, `DHCP` sets it up, and `HTGET`, `TELNET`,
+  `FTP` and `IRCJR` reach the internet.
 * **Booted systems** use their own drivers for the card: Windows 95's
   "Novell/Anthem NE2000" at 300h, IRQ 10; Windows for Workgroups' NE2000
   driver; or a packet driver and WINPKT for Trumpet Winsock.
-* The card's frames go only to the LAN for now: without a room joined,
-  what it sends goes nowhere.
+* **Web browsers** of the time speak plain HTTP and SSL 3.0 at most, which
+  today's sites refuse: sites made for them, such as frogfind.com and
+  theoldnet.com, and plain `http://` ones work.
+* Instances in one [LAN](#playing-over-a-lan) room reach each other's
+  cards as well.
 
 rust-dos's LAN is its own protocol: it doesn't reach DOSBox's IPX servers,
 and `IPXNET` lines in imported DOSBox configurations are left out.

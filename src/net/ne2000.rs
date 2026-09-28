@@ -233,7 +233,11 @@ impl Ne2000 {
     }
 
     fn command(&self) -> u8 {
-        (self.page << 6) | (self.rdma_cmd << 3) | ((self.tx_due.is_some() as u8) << 2) | ((self.start as u8) << 1) | self.stop as u8
+        (self.page << 6)
+            | (self.rdma_cmd << 3)
+            | ((self.tx_due.is_some() as u8) << 2)
+            | ((self.start as u8) << 1)
+            | self.stop as u8
     }
 
     /// A byte from port `offset` of the card.
@@ -590,9 +594,12 @@ impl Ne2000 {
             return false;
         }
         let len = frame.len().max(frame::MIN_FRAME);
-        let pages = (len + 4 + 4 + 255) / 256;
-        let avail =
-            if curr < self.boundary { (self.boundary - curr) as usize } else { (stop - start) as usize - (curr - self.boundary) as usize };
+        let pages = (len + 4 + 4).div_ceil(256);
+        let avail = if curr < self.boundary {
+            (self.boundary - curr) as usize
+        } else {
+            (stop - start) as usize - (curr - self.boundary) as usize
+        };
         // A full ring would look empty, as CURR would meet BNRY.
         if avail <= pages {
             return false;
@@ -671,8 +678,8 @@ mod tests {
         // The PROM, a word at a time in word mode: each address byte twice.
         remote_dma(&mut c, 0, 32, 0x0A);
         let prom: Vec<u16> = (0..16).map(|_| c.read_word()).collect();
-        for i in 0..6 {
-            assert_eq!(prom[i], u16::from_le_bytes([MAC.0[i], MAC.0[i]]));
+        for (word, byte) in prom.iter().zip(MAC.0) {
+            assert_eq!(*word, u16::from_le_bytes([byte, byte]));
         }
         assert_eq!(prom[7], 0x5757, "WW: an NE2000");
         assert_eq!(c.read(0x07) & ISR_RDC, ISR_RDC, "the remote DMA completed");

@@ -207,7 +207,7 @@ impl Bus {
     /// anew with other ports, IRQ or address.
     fn configure_ne2000(&mut self) {
         let settings = &self.net.settings;
-        let wanted = settings.ne2000.then(|| (settings.nic_base, settings.nic_irq, settings.mac));
+        let wanted = settings.ne2000.then_some((settings.nic_base, settings.nic_irq, settings.mac));
         let current = self.net.nic.as_ref().map(|nic| (nic.base, nic.irq, nic.mac));
         let same = match (wanted, current) {
             (None, None) => true,
