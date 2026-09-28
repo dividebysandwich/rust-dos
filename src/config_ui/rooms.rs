@@ -638,7 +638,7 @@ impl ConfigUi {
         let value_col = 14.min(cols / 3);
         let width = (cols - 3).saturating_sub(value_col).min(34);
         let title = if prompt.making {
-            "A new room, which this instance joins".to_string()
+            "Create new room".to_string()
         } else {
             format!("Room \"{}\" wants a password", prompt.name.text())
         };
@@ -682,8 +682,8 @@ impl ConfigUi {
         }
         let notes = if prompt.making {
             [
-                "Everyone who joins after has to know its password. The room goes",
-                "when the last one leaves. Nothing crossing the relay is encrypted.",
+                "The room will exist as long as at least one player is inside.",
+                "Traffic is not encrypted.",
             ]
         } else {
             ["The one who made the room gave it its password.", ""]
