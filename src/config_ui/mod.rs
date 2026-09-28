@@ -829,7 +829,7 @@ impl Item {
             NicBase => format!("{:X}h", s.network.nic_base),
             NicIrq => s.network.nic_irq.to_string(),
             MacAddr => s.network.mac.map_or("auto (new each start)".to_string(), |mac| mac.to_string()),
-            Online => if s.network.online { "online, at the relay" } else { "on this network" }.to_string(),
+            Online => if s.network.online { "via Internet" } else { "on this network" }.to_string(),
             Relay => s.network.relay.clone(),
             Player if s.network.player.is_empty() => "none (\"Player\" and a number)".to_string(),
             Player => s.network.player.clone(),

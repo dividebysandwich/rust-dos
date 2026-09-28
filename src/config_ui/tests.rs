@@ -1421,7 +1421,7 @@ fn the_network_page_finds_joins_and_makes_rooms() {
     ui.row = at(&ui, Item::Online).unwrap();
     assert_eq!(ui.item().unwrap().value(&ui.settings, None), "on this network");
     assert_eq!(at(&ui, Item::Relay), None);
-    pick(&mut ui, &mut host, "online, at the relay");
+    pick(&mut ui, &mut host, "via Internet");
     assert!(host.applied.last().unwrap().network.online);
     ui.row = at(&ui, Item::Relay).unwrap();
     assert_eq!(ui.item().unwrap().value(&ui.settings, None), "relay.rust-dos.com");
