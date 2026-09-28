@@ -22,6 +22,9 @@ pub mod switch;
 pub mod tunnel;
 
 use port::PortQueue;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use switch::Port;
 
@@ -104,6 +107,10 @@ pub struct NetSettings {
     pub lan_host: Option<u16>,
     pub room: String,
     pub password: String,
+    /// The relay (`host[:port]`) LAN JOIN, LAN LIST and the room browser
+    /// go to unless told another, or None for the first relay that
+    /// answers on the LAN.
+    pub relay: Option<String>,
 }
 
 impl Default for NetSettings {
@@ -120,6 +127,7 @@ impl Default for NetSettings {
             lan_host: None,
             room: DEFAULT_ROOM.into(),
             password: String::new(),
+            relay: Some(DEFAULT_RELAY.into()),
         }
     }
 }
@@ -201,6 +209,13 @@ impl NetSettings {
                 self.room = room.to_string();
             }
             "password" => self.password = value.trim().to_string(),
+            "relay" => {
+                self.relay = match value.trim() {
+                    v if v.eq_ignore_ascii_case("discover") => None,
+                    v if !v.is_empty() && !v.contains(char::is_whitespace) => Some(v.to_string()),
+                    _ => return Err(format!("invalid relay '{}' (discover, or a host[:port])", value)),
+                }
+            }
             _ => return Err(format!("unknown setting '{}'", key)),
         }
         Ok(())
@@ -217,6 +232,7 @@ impl NetSettings {
             ("nicbase", Some(format!("{:X}", self.nic_base))),
             ("nicirq", Some(self.nic_irq.to_string())),
             ("macaddr", Some(self.mac.map_or("auto".to_string(), |mac| mac.to_string()))),
+            ("relay", Some(self.relay.clone().unwrap_or_else(|| "discover".to_string()))),
             (
                 "lan",
                 Some(match &self.lan {
@@ -239,12 +255,15 @@ pub const NIC_BASES: [u16; 9] = [0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x300, 0x320
 /// The room LAN HOST and LAN JOIN use unless told another.
 pub const DEFAULT_ROOM: &str = "lobby";
 
+/// The public relay, where anyone can find and make rooms.
+pub const DEFAULT_RELAY: &str = "relay.rust-dos.com";
+
 /// The rooms a relay listed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomList {
     /// Where the relay is, its name, and whether all its rooms want its
     /// password.
-    pub relay: std::net::SocketAddr,
+    pub relay: SocketAddr,
     pub name: String,
     pub password: bool,
     /// The rooms, the fullest first, and how many the relay has: more when
@@ -253,11 +272,69 @@ pub struct RoomList {
     pub total: usize,
 }
 
+/// The rooms asked of a relay (`Net::browse`), and what came back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// A question is out.
+    pub asking: bool,
+    /// What the last answer found, or why there was none.
+    pub result: Option<Result<RoomList, String>>,
+}
+
+/// What the room browser shows of the LAN.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LanView {
+    /// Where this instance is with the LAN, in words, and the relay and
+    /// room it is in, once it is.
+    pub state: String,
+    pub joined: Option<(SocketAddr, String)>,
+    pub listing: Listing,
+}
+
 /// What the LAN command shows: where this instance is with the LAN.
 #[derive(Clone, Debug, Default)]
 pub struct LanStatus {
     #[cfg(not(target_arch = "wasm32"))]
     pub hub: Option<hub::HubStatus>,
+}
+
+impl LanStatus {
+    /// Where this instance is with the LAN, in words.
+    pub fn describe(&self) -> String {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use hub::LanState;
+            let Some(status) = &self.hub else { return "not joined".to_string() };
+            match &status.lan {
+                LanState::Off => "not joined".to_string(),
+                LanState::Looking => format!("looking for the relay of room \"{}\"", status.room),
+                LanState::Joining { relay } => format!("joining room \"{}\" at {}", status.room, relay),
+                LanState::Rejoining { relay } => format!("joining room \"{}\" at {} again", status.room, relay),
+                LanState::Failed(e) => format!("not joined: {}", e),
+                LanState::Joined { relay, index, members, rtt_ms } => format!(
+                    "room \"{}\" at {}, member {} of {}{}",
+                    status.room,
+                    relay,
+                    index,
+                    members,
+                    rtt_ms.map_or(String::new(), |ms| format!(", {} ms to the relay", ms))
+                ),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        NO_NETWORK.to_string()
+    }
+
+    /// The relay and the room this instance is in, once joined.
+    pub fn joined(&self) -> Option<(SocketAddr, String)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(status) = &self.hub
+            && let hub::LanState::Joined { relay, .. } = status.lan
+        {
+            return Some((relay, status.room.clone()));
+        }
+        None
+    }
 }
 
 /// The network as the emulator keeps it on its bus.
@@ -272,6 +349,10 @@ pub struct Net {
     pub nic_queue: Arc<PortQueue>,
     #[cfg(not(target_arch = "wasm32"))]
     hub: Option<hub::Hub>,
+    /// The rooms asked of a relay last, and how many were asked for, so
+    /// the answer to one asked before the last is dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    listing: Arc<Mutex<(u64, Listing)>>,
     /// What the screen should show.
     notices: Vec<String>,
 }
@@ -292,6 +373,8 @@ impl Net {
             nic_queue: Arc::new(PortQueue::default()),
             #[cfg(not(target_arch = "wasm32"))]
             hub: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            listing: Arc::default(),
             notices: Vec::new(),
         }
     }
@@ -416,6 +499,55 @@ impl Net {
         }
     }
 
+    /// Ask `relay` (`host[:port]`, or None for the first relay that
+    /// answers on the LAN) for its rooms whose names contain `filter`, in a
+    /// thread of its own: `listing` has the answer once it comes. The
+    /// network thread needn't run for it.
+    pub fn browse(&mut self, relay: Option<&str>, filter: &str) -> Result<(), String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let shared = self.listing.clone();
+            let Ok(mut asked) = shared.lock() else { return Err("can't ask the relay".into()) };
+            asked.0 += 1;
+            asked.1.asking = true;
+            let generation = asked.0;
+            drop(asked);
+            let (relay, filter) = (relay.map(String::from), filter.to_string());
+            std::thread::Builder::new()
+                .name("rust-dos-rooms".into())
+                .spawn(move || {
+                    let result = tunnel::discover::rooms(relay.as_deref(), &filter);
+                    if let Ok(mut asked) = shared.lock()
+                        && asked.0 == generation
+                    {
+                        asked.1 = Listing { asking: false, result: Some(result) };
+                    }
+                })
+                .map(|_| ())
+                .map_err(|e| format!("can't ask the relay: {}", e))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (relay, filter);
+            Err(NO_NETWORK.into())
+        }
+    }
+
+    /// The rooms `browse` asked for, as far as they came.
+    pub fn listing(&self) -> Listing {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(asked) = self.listing.lock() {
+            return asked.1.clone();
+        }
+        Listing::default()
+    }
+
+    /// What the room browser shows.
+    pub fn view(&self) -> LanView {
+        let status = self.status();
+        LanView { state: status.describe(), joined: status.joined(), listing: self.listing() }
+    }
+
     /// What happened on the LAN since the last call, for the screen.
     pub fn take_notices(&mut self) -> Vec<String> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -449,6 +581,7 @@ mod tests {
             ("lanhost", "21300"),
             ("room", "doom"),
             ("password", "swordfish"),
+            ("relay", "relay.example.com:4000"),
         ] {
             n.set(key, value).unwrap();
         }
@@ -466,6 +599,7 @@ mod tests {
                 lan_host: Some(21300),
                 room: "doom".into(),
                 password: "swordfish".into(),
+                relay: Some("relay.example.com:4000".into()),
             }
         );
         let mut again = NetSettings::default();
@@ -486,7 +620,46 @@ mod tests {
         assert!(n.set("ipxframe", "token-ring").is_err());
         assert!(n.set("lanhost", "x").is_err());
         assert!(n.set("room", "").is_err());
+        assert!(n.set("relay", "").is_err() && n.set("relay", "a b").is_err());
+        n.set("relay", "DISCOVER").unwrap();
+        assert_eq!(n.relay, None);
+        assert_eq!(n.entries().iter().find(|e| e.0 == "relay").unwrap().1.as_deref(), Some("discover"));
+        assert_eq!(NetSettings::default().relay.as_deref(), Some(DEFAULT_RELAY));
         assert!(n.set("modem", "on").is_err());
         assert_eq!(NetSettings::default().entries().iter().find(|e| e.0 == "password").unwrap().1, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lists_the_rooms_of_a_relay_and_the_one_joined() {
+        use tunnel::relay::{RelayConfig, RelayServer};
+        use tunnel::wire::RoomInfo;
+        let wait = |f: &mut dyn FnMut() -> bool| {
+            let deadline = web_time::Instant::now() + std::time::Duration::from_secs(5);
+            while !f() && web_time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let config = RelayConfig { name: "den".into(), password: None, port: 0 };
+        let server = RelayServer::start("127.0.0.1:0".parse().unwrap(), config, Box::new(|_| {})).unwrap();
+        let relay = server.local_addr();
+        let mut net = Net::new();
+        assert_eq!(net.view().state, "not joined");
+        net.join(Some(&relay.to_string()), "doom", "pw").unwrap();
+        wait(&mut || net.view().joined.is_some());
+        net.browse(Some(&relay.to_string()), "").unwrap();
+        assert!(net.listing().asking);
+        wait(&mut || !net.listing().asking);
+        let view = net.view();
+        assert_eq!(view.joined, Some((relay, "doom".to_string())));
+        assert!(view.state.contains("member 1 of 1"), "{}", view.state);
+        let list = view.listing.result.unwrap().unwrap();
+        assert_eq!((list.relay, list.name.as_str(), list.total), (relay, "den", 1));
+        assert_eq!(list.rooms, vec![RoomInfo { name: "doom".into(), members: 1, password: true }]);
+        // A relay that doesn't answer.
+        drop(server);
+        net.browse(Some(&relay.to_string()), "").unwrap();
+        wait(&mut || !net.listing().asking);
+        assert!(net.listing().result.unwrap().is_err());
     }
 }

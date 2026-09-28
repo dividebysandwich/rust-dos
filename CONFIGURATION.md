@@ -346,14 +346,19 @@ The IPX driver of the built-in DOS and the LAN of rust-dos instances (see
   also 3, 4, 5, 7, 9, 11 or 15), and `macaddr` its Ethernet address:
   `auto` (the default, a new one each start) or one like
   `02:00:5E:12:34:56`. See [Network card](#network-card).
+* `relay` is the relay `LAN JOIN` and `LAN LIST` go to without an
+  address, and whose rooms the settings window lists: a `host[:port]`,
+  by default `relay.rust-dos.com`, a public relay where anyone can find
+  and make rooms; or `discover`, the first relay that answers on this
+  network.
 * `lan` joins a room at startup, as `LAN JOIN` does: `off` (the default),
   `discover` (the first relay that answers on this network) or a relay's
   `host[:port]`.
 * `lanhost` relays rooms from startup on a UDP port, and joins one there,
   as `LAN HOST` does: `off` (the default) or a port.
 * `room` is the room to join (default `lobby`), and `password` the
-  password the relay's rooms need. The password is kept in the file as
-  it is written.
+  password to join it with, or to give it when joining makes it. The
+  password is kept in the file as it is written.
 
 ### `[drives]`
 
@@ -788,12 +793,14 @@ The CRT shaders draw their scanlines over the bigger picture.
 rust-dos instances on different computers play DOS games over IPX as PCs
 on one network would. The instances join a room of a relay, which passes
 the network traffic of each on to the others over UDP; no network driver
-or special privileges are needed on the host. One instance hosts the
-relay, or a server does:
+or special privileges are needed on the host. The public relay at
+`relay.rust-dos.com` is there for anyone; one instance can host a relay
+itself, or a server can:
 
 ```text
-LAN HOST                      on one computer
-LAN JOIN                      on the others, on the same network
+LAN JOIN /ROOM:doom           on every computer, at the public relay
+LAN HOST                      or on one computer
+LAN JOIN /LOCAL               and on the others, on the same network
 LAN JOIN 203.0.113.7          or at the host's address, over the internet
 ```
 
@@ -811,14 +818,21 @@ the room, the members in it and the round trip to the relay.
 * **`LAN HOST [port]`** relays rooms on a UDP port (21213 unless given)
   and joins one. `LAN STOP` stops relaying. Over the internet, that port
   has to reach the host through its router.
-* **`LAN JOIN [host[:port]]`** joins a room at a relay, or without an
-  address the first relay that answers on this network. It waits a few
-  seconds for the room (a key stops waiting; joining goes on). The
-  instance keeps its place with keepalives, and joins again when the
-  relay comes back after a restart. `LAN LEAVE` leaves.
+* **`LAN JOIN [host[:port] | /LOCAL]`** joins a room at a relay, and
+  makes the room if it isn't there: at the relay `relay` in
+  [`[network]`](#network) names without an address (`relay.rust-dos.com`
+  unless set), or with `/LOCAL` at the first relay that answers on this
+  network. It waits a few seconds for the room (a key stops waiting;
+  joining goes on). The instance keeps its place with keepalives, and
+  joins again when the relay comes back after a restart. `LAN LEAVE`
+  leaves.
+* **`LAN LIST [host[:port] | /LOCAL] [/ROOM:text]`** lists a relay's
+  rooms, the fullest first, with how many are in each and whether it
+  wants a password; with `/ROOM:text`, those with the text in their
+  names.
 * **Rooms** keep several games on one relay apart: `/ROOM:name`, or `room`
-  in `[network]` (default `lobby`). A room is there while anyone is in
-  it. The instance that makes a room gives it a password with
+  in `[network]` (default `lobby`); a name with spaces goes in quotes,
+  `/ROOM:"doom 2 dm"`. A room is there while anyone is in it. The instance that makes a room gives it a password with
   `/PASSWORD:text` (or `password`), and everyone joining after has to know
   it; a relay with a password of its own (`LAN HOST /PASSWORD:text`,
   `rust-dos-relay --password`) wants that one for all its rooms instead.

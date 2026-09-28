@@ -284,13 +284,20 @@
 #nicbase=300
 #nicirq=10
 #macaddr=auto
+# The relay LAN JOIN and LAN LIST go to without an address, whose rooms
+# the settings window's room browser lists: a host[:port], or discover
+# (the first relay that answers on this network). relay.rust-dos.com is a
+# public relay, where anyone can find and make rooms.
+#relay=relay.rust-dos.com
 # A LAN room to join at startup, as LAN JOIN does: off, discover (the
 # first relay that answers on this network) or a relay's host[:port].
 #lan=off
 # Relay LAN rooms for other instances from startup, on this UDP port (and
 # join one), as LAN HOST does: off or a port (21213 is the usual one).
 #lanhost=off
-# The room to join, and the password the relay's rooms need.
+# The room to join, and its password: the one joining gives a room that
+# isn't there yet its password, and a relay with a password of its own
+# wants that one.
 #room=lobby
 #password=
 

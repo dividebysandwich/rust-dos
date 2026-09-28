@@ -479,6 +479,8 @@ pub enum ShellWait {
     /// LAN HOST or LAN JOIN: the room joined, or the join failing, until
     /// a PIT tick; a key stops waiting.
     Lan { until: u64 },
+    /// LAN LIST: the relay's rooms, likewise.
+    LanList { until: u64 },
 }
 
 /// A CHOICE waiting for a key.
@@ -536,6 +538,7 @@ pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
         ShellWait::Pause => video::print_string(cpu, "\r\n"),
         ShellWait::Line(_) => {}
         ShellWait::Lan { .. } => crate::lan_command::wait_ended(cpu, key),
+        ShellWait::LanList { .. } => crate::lan_command::list_ended(cpu),
         ShellWait::MakeImg(args) => {
             if !crate::makeimg_command::answer(cpu, &args, key) {
                 cpu.shell_wait = Some(ShellWait::MakeImg(args));
@@ -563,6 +566,7 @@ pub fn timed_out_key(cpu: &Cpu) -> Option<u8> {
     match cpu.shell_wait {
         Some(ShellWait::Choice(Choice { timeout: Some((key, at)), .. })) if cpu.bus.clock.now_ticks() >= at => Some(key),
         Some(ShellWait::Lan { until }) if crate::lan_command::wait_over(cpu, until) => Some(0),
+        Some(ShellWait::LanList { until }) if crate::lan_command::list_over(cpu, until) => Some(0),
         _ => None,
     }
 }
@@ -571,7 +575,10 @@ pub fn timed_out_key(cpu: &Cpu) -> Option<u8> {
 /// PAUSE or CHOICE waited for in AX (`take_key`).
 pub fn key_ready(cpu: &mut Cpu) {
     // A key that stops LAN waiting is typed at the prompt as well.
-    if matches!(cpu.shell_wait, Some(ShellWait::Lan { .. })) && cpu.ax() != 0 && cpu.ax() as u8 != 0x03 {
+    if matches!(cpu.shell_wait, Some(ShellWait::Lan { .. } | ShellWait::LanList { .. }))
+        && cpu.ax() != 0
+        && cpu.ax() as u8 != 0x03
+    {
         cpu.bus.keyboard_buffer.push_front(cpu.ax());
     }
     if !take_key(cpu, cpu.ax() as u8) {
@@ -645,6 +652,10 @@ impl crate::savestate::State for ShellWait {
                 4u8.save(w);
                 until.save(w);
             }
+            ShellWait::LanList { until } => {
+                5u8.save(w);
+                until.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -667,10 +678,10 @@ impl crate::savestate::State for ShellWait {
                 args.load(r)?;
                 ShellWait::MakeImg(args)
             }
-            4 => {
+            4 | 5 => {
                 let mut until = 0u64;
                 until.load(r)?;
-                ShellWait::Lan { until }
+                if kind == 4 { ShellWait::Lan { until } } else { ShellWait::LanList { until } }
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };
