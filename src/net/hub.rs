@@ -427,6 +427,9 @@ impl State {
     fn leave(&mut self, tell: bool) {
         self.generation += 1;
         self.switch.uplink = false;
+        if let Some(router) = &mut self.router {
+            router.guest_ip = nat::GUEST;
+        }
         if let Some(mut uplink) = self.uplink.take() {
             let mut out = Vec::new();
             uplink.client.leave(&mut out);
@@ -528,6 +531,11 @@ impl State {
                     self.shared
                         .notice(format!("Joined LAN room \"{}\" at {} as member {}, {}", room, relay, index, others));
                     self.shared.update(|s| s.lan = LanState::Joined { relay, index, members, rtt_ms: None });
+                    // On a LAN shared with other instances' guests, the
+                    // card's guest has an address of its own.
+                    if let Some(router) = &mut self.router {
+                        router.guest_ip = nat::lan_guest(index);
+                    }
                 }
                 ClientEvent::Rejected(reason) => {
                     self.shared.notice(format!("The relay at {} turned us away: {}", relay, reason.describe()));
@@ -636,5 +644,58 @@ mod tests {
         assert!(wait_for(|| matches!(c.status().lan, LanState::Failed(_))), "{:?}", c.status());
         b.send(Command::Leave);
         assert!(wait_for(|| b.status().lan == LanState::Off));
+    }
+
+    /// The address the router of `hub` offers a card's guest.
+    fn offered(hub: &Hub, queue: &PortQueue, mac: Mac) -> Option<std::net::Ipv4Addr> {
+        let mut discover = vec![0u8; 240];
+        discover[0..3].copy_from_slice(&[1, 1, 6]);
+        discover[28..34].copy_from_slice(&mac.0);
+        discover[236..240].copy_from_slice(&[99, 130, 83, 99]);
+        discover.extend_from_slice(&[53, 1, 1, 255]);
+        let ip = nat::packet::build_udp(Ipv4Addr::UNSPECIFIED, 68, Ipv4Addr::BROADCAST, 67, &discover);
+        let frame = crate::net::frame::build(Mac::BROADCAST, mac, crate::net::frame::ETHERTYPE_IPV4, &ip);
+        while queue.pop().is_some() {}
+        hub.send(Command::Frame(Port::Nic, frame));
+        let mut offer = None;
+        wait_for(|| {
+            while let Some(frame) = queue.pop() {
+                let ip = &frame[crate::net::frame::HEADER..];
+                if let Some(header) = nat::packet::parse_ipv4(ip)
+                    && let Some(udp) = nat::packet::parse_udp(&ip[header.header_len..header.total_len])
+                    && udp.src_port == 67
+                {
+                    let y = &udp.payload[16..20];
+                    offer = Some(Ipv4Addr::new(y[0], y[1], y[2], y[3]));
+                }
+            }
+            offer.is_some()
+        });
+        offer
+    }
+
+    #[test]
+    fn guests_on_a_shared_lan_get_addresses_of_their_own() {
+        let a = Hub::start().unwrap();
+        let b = Hub::start().unwrap();
+        let (qa, qb) = (Arc::new(PortQueue::default()), Arc::new(PortQueue::default()));
+        let (ma, mb) = (Mac([2, 0, 0, 0, 1, 0xA]), Mac([2, 0, 0, 0, 1, 0xB]));
+        a.send(Command::Attach { port: Port::Nic, mac: ma, queue: qa.clone() });
+        b.send(Command::Attach { port: Port::Nic, mac: mb, queue: qb.clone() });
+        assert_eq!(offered(&a, &qa, ma), Some(nat::GUEST));
+        a.send(Command::Host { port: 0, room: "net".into(), password: None });
+        assert!(wait_for(|| matches!(a.status().lan, LanState::Joined { .. })));
+        let port = a.status().hosting.unwrap().port();
+        b.send(Command::Join(JoinRequest {
+            relay: Some(format!("127.0.0.1:{}", port)),
+            room: "net".into(),
+            password: None,
+        }));
+        assert!(wait_for(|| matches!(b.status().lan, LanState::Joined { .. })));
+        assert_eq!(offered(&a, &qa, ma), Some(nat::lan_guest(1)));
+        assert_eq!(offered(&b, &qb, mb), Some(nat::lan_guest(2)));
+        b.send(Command::Leave);
+        assert!(wait_for(|| b.status().lan == LanState::Off));
+        assert_eq!(offered(&b, &qb, mb), Some(nat::GUEST));
     }
 }

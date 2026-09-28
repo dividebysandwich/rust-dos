@@ -38,6 +38,13 @@ pub const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 pub const NAMESERVER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
 pub const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 pub const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
+/// The guest's address while its instance is member `index` (1-200) of a
+/// LAN room: every instance's router has the same addresses, but the
+/// guests on the shared LAN need their own.
+pub fn lan_guest(index: u8) -> Ipv4Addr {
+    Ipv4Addr::new(10, 0, 2, 20u8.saturating_add(index.min(200)))
+}
+
 /// How long the guest keeps its address before asking again: a day, as
 /// home routers give, and more than the hour mTCP's programs want left.
 const LEASE_SECONDS: u32 = 86_400;
