@@ -39,7 +39,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   disk speeds and noises
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
   (`BOOT`): MS-DOS, Windows 95 and other systems of their own, with a Plug
-  and Play BIOS, APM and a PCI bus
+  and Play BIOS, APM, a PCI bus and IDE hard disks and CD-ROM drive (for
+  Windows' 32-bit disk access)
 * **Display:** CRT shaders (scanlines, aperture grille, curved shadow mask)
   and monochrome monitors (white, amber, green)
 * **Settings window** (Ctrl+F12) that changes most settings without a

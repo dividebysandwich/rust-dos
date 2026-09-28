@@ -741,6 +741,17 @@ the fourth place, or on a channel whose IRQ a sound or network card has,
 stays with INT 13h alone. `ide_hard_disks=false` in `[emulator]` leaves all
 hard disks to INT 13h, as before rust-dos had IDE disks.
 
+Windows 95 and 98 take a disk over with their 32-bit disk access only once
+they have seen the BIOS drive it through the IDE ports: starting, they trap
+the ports and call INT 13h. So INT 13h's reads and resets, where the ports
+are trapped, go through the port accesses a BIOS makes (select the drive,
+READ SECTORS, wait, read the data) on their way out, as DOSBox-X's
+`int13fakev86io` has them, and otherwise leave the disk's registers as
+such a BIOS does, which Windows for Workgroups' 32-bit disk access checks.
+The first start of a Windows installed without the IDE controller finds it
+as new hardware and asks to restart; after that, **System Properties** →
+**Performance** shows the hard disk without "MS-DOS compatibility mode".
+
 Turning the machine off (Windows' **Shut Down**) brings back the DOS prompt;
 restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again.
 Changes to the hardware settings wait for the prompt.

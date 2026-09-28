@@ -278,6 +278,12 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
 - **Save states** of a booted system bring its disks back with it: in a
   run through a journal of the writes, and from the `.C.img` copies
   beside a state file in another.
+- **IDE:** the log's `[IDE]` lines at the boot say which hard disk and
+  CD-ROM drive are on which channel, and name unknown commands. The
+  system's own driver's traffic shows in the port log
+  (`{"enabled":true,"ports":"1F0-1F7"}` for the primary channel): READ
+  SECTORS (20h) and WRITE SECTORS (30h) at 1F7h, the address at 1F3h-1F6h
+  (1F6h's bit 6 set for LBA), the data words at 1F0h.
 
 ### 3dfx (Glide) games
 
