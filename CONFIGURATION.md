@@ -559,8 +559,10 @@ the current directory) and then as a host path, and a directory on the host
 first. A wildcard in the last part of a path (`disk*.img`, `CD\*.CUE`)
 mounts the files that match as a list, in natural order (`DISK2` before
 `DISK10`). Relative host paths are relative to the emulator's working
-directory, or with `-pr` to the configuration file's folder. DOSBox's
-`-freesize`, `-ide` and CD-ROM access options are taken and ignored;
+directory, or with `-pr` to the configuration file's folder. `-ide 1m`
+to `2s` puts the image on an IDE channel of a booted system (see [Booting
+a disk image](#booting-a-disk-image)). DOSBox's `-freesize` and CD-ROM
+access options are taken and ignored;
 overlays (`-t overlay`) aren't supported. A drive number instead of a
 letter (`MOUNT 2 hdd.img`) mounts an image for the BIOS alone, as in
 DOSBox (see [Booting a disk image](#booting-a-disk-image)). `MOUNT /?`
@@ -718,13 +720,26 @@ IMGMOUNT 0 install1.img install2.img   floppies to install from
 BOOT -l A
 ```
 
-A CD image mounted as a CD-ROM drive (`MOUNT D ~/dos/game.cue`) is an ATAPI
-CD-ROM drive on the secondary IDE channel of the booted machine (ports
-170h-177h and 376h, IRQ 15), as DOSBox-X's `-ide` has it. Windows 95 finds
-it through the Plug and Play BIOS with its own driver, reads the disc and
-plays its CD audio; Ctrl+F4 or another `MOUNT` changes the disc, and Windows
-notices. With more than one, the first drive letter with an image is the
-one.
+The hard disks are ATA disks on the IDE channels of the booted machine as
+well, the same images INT 13h reads and writes: the first (80h) the
+primary channel's master (ports 1F0h-1F7h and 3F6h, IRQ 14), the second
+its slave. A system's own IDE driver (Windows 9x's 32-bit disk access,
+Linux, a DOS ATA driver) finds them there, by LBA or by cylinder, head and
+sector with no more than 16 heads (1024/64/63 for INT 13h is 4096/16/63),
+and the CMOS lists them as the user-defined type 47. A CD image mounted as a
+CD-ROM drive (`MOUNT D ~/dos/game.cue`) is an ATAPI CD-ROM drive on the
+secondary channel's master (ports 170h-177h and 376h, IRQ 15). Windows 95
+finds the channels through the Plug and Play BIOS with its own driver,
+reads the disc and plays its CD audio; Ctrl+F4 or another `MOUNT` changes
+the disc, and Windows notices. With more than one CD-ROM drive, the first
+drive letter with an image is the one.
+
+MOUNT's (and IMGMOUNT's) `-ide 1m`, `1s`, `2m` or `2s` puts the disk or CD-ROM
+drive on the primary or secondary channel's master or slave instead, as
+DOSBox-X's `-ide` does; the others take the free places. A hard disk past
+the fourth place, or on a channel whose IRQ a sound or network card has,
+stays with INT 13h alone. `ide_hard_disks=false` in `[emulator]` leaves all
+hard disks to INT 13h, as before rust-dos had IDE disks.
 
 Turning the machine off (Windows' **Shut Down**) brings back the DOS prompt;
 restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again.

@@ -88,6 +88,9 @@ pub struct Bus {
     pub dpmi: crate::dpmi::Dpmi,
     /// The DOS version programs are told (`dos_version`).
     pub dos_version: crate::config::DosVersion,
+    /// A booted system's hard disks are ATA disks on the IDE channels too
+    /// (`ide_hard_disks`).
+    pub ide_hard_disks: bool,
     /// Upper memory blocks, if DOS has them (see mcb.rs).
     pub umb: Option<crate::mcb::Umb>,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
@@ -298,6 +301,7 @@ impl Bus {
             ems: None,
             dpmi: crate::dpmi::Dpmi::default(),
             dos_version: crate::config::DosVersion::default(),
+            ide_hard_disks: true,
             umb: None,
             lpt_dac: None,
             tandy_sound: crate::sn76489::Sn76489::new(crate::sn76489::Variant::Ncr8496),
@@ -454,6 +458,7 @@ impl Bus {
         self.pic = crate::pic::Pic::new();
         self.reset_voodoo();
         self.detach_ide();
+        self.cmos.set_hard_disks(&[]);
         self.init_dos_machine(self.vga.setup());
         if self.lpt_dac.is_some() {
             self.write_16(0x0408, crate::lpt_dac::LPT1);

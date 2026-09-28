@@ -134,6 +134,8 @@ pub struct Config {
     pub dpmi: Option<bool>,
     /// The DOS version programs are told (`dos_version`).
     pub dos_version: Option<DosVersion>,
+    /// A booted system's hard disks on the IDE channels (`ide_hard_disks`).
+    pub ide_hard_disks: Option<bool>,
     /// The keyboard layout (`keyboard_layout`).
     pub keyboard_layout: Option<LayoutSetting>,
     /// Rewind (`rewind`), and the memory its states may take in MB
@@ -692,6 +694,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.dpmi = Some(on),
                             None => warn(format!("invalid {} '{}' (true or false)", key, value)),
                         },
+                        "ide_hard_disks" => match parse_bool(value) {
+                            Some(on) => config.ide_hard_disks = Some(on),
+                            None => warn(format!("invalid ide_hard_disks '{}' (true or false)", value)),
+                        },
                         "dos_version" => match DosVersion::parse(value) {
                             Some(version) => config.dos_version = Some(version),
                             None => warn(format!("invalid dos_version '{}' (such as 5.00, 6.22 or 7.10)", value)),
@@ -965,6 +971,8 @@ pub struct Settings {
     pub dpmi: bool,
     /// The DOS version programs are told.
     pub dos_version: DosVersion,
+    /// A booted system's hard disks are ATA disks on the IDE channels too.
+    pub ide_hard_disks: bool,
     pub keyboard_layout: LayoutSetting,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
@@ -1001,6 +1009,7 @@ impl Default for Settings {
             umb: true,
             dpmi: true,
             dos_version: DosVersion::default(),
+            ide_hard_disks: true,
             keyboard_layout: LayoutSetting::Auto,
             rewind: false,
             rewind_memory: 256,
@@ -1060,6 +1069,7 @@ impl Settings {
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
+            ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
@@ -1124,6 +1134,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "dpmi", yes_no(settings.dpmi)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
+        (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
@@ -2034,6 +2045,7 @@ mod tests {
             umb: false,
             dpmi: false,
             dos_version: DosVersion::new(7, 10),
+            ide_hard_disks: false,
             keyboard_layout: LayoutSetting::Named("gr"),
             rewind: true,
             rewind_memory: 512,

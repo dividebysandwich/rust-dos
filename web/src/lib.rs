@@ -213,6 +213,7 @@ impl Machine {
         warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         cpu.bus.dpmi.enabled = settings.dpmi;
         rust_dos::dos_data::set_version(&mut cpu.bus, settings.dos_version);
+        cpu.bus.ide_hard_disks = settings.ide_hard_disks;
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         cpu.bus.configure_network(&settings.network);
         for warning in &warnings {
@@ -1180,6 +1181,7 @@ impl Host for PageHost<'_> {
         }
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
+        self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         if new.dos_version != old.dos_version {
             rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
         }

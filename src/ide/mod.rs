@@ -111,6 +111,50 @@ impl ChannelId {
     }
 }
 
+/// Where on the channels a device goes: MOUNT's `-ide 1m` (primary
+/// master), `1s`, `2m` or `2s`, as DOSBox-X has it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdeSlot {
+    pub channel: ChannelId,
+    pub slave: bool,
+}
+
+impl IdeSlot {
+    /// The slots in the order a hard disk takes the free ones; a CD-ROM
+    /// drive takes them from the secondary master on.
+    pub const HARD_DISK_ORDER: [IdeSlot; 4] =
+        [Self::new(ChannelId::Primary, false), Self::new(ChannelId::Primary, true), Self::new(ChannelId::Secondary, true), Self::new(ChannelId::Secondary, false)];
+    pub const CD_ORDER: [IdeSlot; 4] =
+        [Self::new(ChannelId::Secondary, false), Self::new(ChannelId::Secondary, true), Self::new(ChannelId::Primary, true), Self::new(ChannelId::Primary, false)];
+
+    pub const fn new(channel: ChannelId, slave: bool) -> Self {
+        Self { channel, slave }
+    }
+
+    /// "1m", "1s", "2m" or "2s", in any case.
+    pub fn parse(s: &str) -> Option<Self> {
+        let channel = match s.as_bytes().first()? {
+            b'1' => ChannelId::Primary,
+            b'2' => ChannelId::Secondary,
+            _ => return None,
+        };
+        match s.get(1..)?.to_ascii_lowercase().as_str() {
+            "m" => Some(Self::new(channel, false)),
+            "s" => Some(Self::new(channel, true)),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> String {
+        format!("{}{}", self.channel.index() + 1, if self.slave { 's' } else { 'm' })
+    }
+
+    /// "the primary master".
+    pub fn describe(self) -> String {
+        format!("the {} {}", self.channel.name(), if self.slave { "slave" } else { "master" })
+    }
+}
+
 /// A device on a channel.
 #[derive(Clone, Debug)]
 pub enum Device {

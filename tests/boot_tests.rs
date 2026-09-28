@@ -238,3 +238,90 @@ fn windows_hands_its_machines_their_keys_through_their_bios() {
     press(&mut cpu, 0x1E, false);
     assert_eq!(cpu.bus.keyboard_buffer.front(), Some(&0x1E61));
 }
+
+/// Run the machine until the primary channel's status has `want` in
+/// `mask`.
+fn wait_disk(cpu: &mut Cpu, mask: u8, want: u8) {
+    for _ in 0..10 {
+        if cpu.bus.io_read(0x3F6) & mask == want {
+            return;
+        }
+        run_until(cpu, 1, |_| false);
+    }
+    panic!("the disk's status stays {:02X}", cpu.bus.io_read(0x3F6));
+}
+
+/// The hard disk of a booted machine is an ATA disk on the primary IDE
+/// channel too, the same image INT 13h reads, and the CMOS says it's
+/// there.
+#[test]
+fn booted_hard_disks_are_ata_disks_on_the_primary_channel() {
+    use rust_dos::ide::Device;
+    let mut cpu = machine("ata");
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    let channel = cpu.bus.ide[0].as_ref().expect("the primary channel");
+    assert!(matches!(channel.devices, [Some(Device::Ata(_)), None]));
+    assert!(cpu.bus.ide[1].is_none(), "no CD-ROM drive");
+    let cmos = |cpu: &mut Cpu, reg: u8| {
+        cpu.bus.io_write(0x70, reg);
+        cpu.bus.io_read(0x71)
+    };
+    assert_eq!((cmos(&mut cpu, 0x12), cmos(&mut cpu, 0x19), cmos(&mut cpu, 0x1A)), (0xF0, 47, 0));
+
+    // Sector 1 through the ports, by LBA.
+    let bus = &mut cpu.bus;
+    bus.io_write(0x1F6, 0xE0);
+    bus.io_write(0x1F2, 1);
+    bus.io_write(0x1F3, 1);
+    bus.io_write(0x1F4, 0);
+    bus.io_write(0x1F5, 0);
+    bus.io_write(0x1F7, 0x20);
+    wait_disk(&mut cpu, 0x88, 0x08);
+    let sector: Vec<u8> = (0..256).flat_map(|_| (cpu.bus.io_read_wide(0x1F0, 2) as u16).to_le_bytes()).collect();
+    assert_eq!(sector, (0..SECTOR_SIZE).map(|i| i as u8).collect::<Vec<_>>());
+    // Written through the ports, INT 13h's disk has it.
+    let bus = &mut cpu.bus;
+    bus.io_write(0x1F2, 1);
+    bus.io_write(0x1F3, 1);
+    bus.io_write(0x1F7, 0x30);
+    for _ in 0..256 {
+        bus.io_write_wide(0x1F0, 0xBEEF, 2);
+    }
+    wait_disk(&mut cpu, 0x80, 0);
+    let mut buf = [0u8; SECTOR_SIZE];
+    cpu.bus.disk.bios_image(2).unwrap().read(1, &mut buf).unwrap();
+    assert_eq!(&buf[..2], &[0xEF, 0xBE]);
+
+    // Back at the built-in DOS, the channels and the CMOS's disks go.
+    cpu.load_shell();
+    assert!(!cpu.bus.has_ide());
+    assert_eq!(cmos(&mut cpu, 0x12), 0);
+}
+
+/// `ide_hard_disks=false` leaves the hard disks to INT 13h alone, and
+/// MOUNT's `-ide` puts one where it says.
+#[test]
+fn hard_disks_go_where_they_are_asked_to() {
+    use rust_dos::ide::{ChannelId, Device, IdeSlot};
+    let mut cpu = machine("ide_off");
+    cpu.bus.ide_hard_disks = false;
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    assert!(!cpu.bus.has_ide());
+
+    // The disk from a file, as MOUNT has it, and a slot for it.
+    let mut cpu = machine("ide_slot");
+    let disk = cpu.bus.disk.bios_image(2).unwrap();
+    let mut bytes = vec![0u8; disk.sectors() as usize * SECTOR_SIZE];
+    disk.read(0, &mut bytes).unwrap();
+    let path = std::fs::canonicalize("target/test_boot/ide_slot").unwrap().join("slave.img");
+    std::fs::write(&path, bytes).unwrap();
+    let opts = MountOptions { ide: Some(IdeSlot::new(ChannelId::Secondary, true)), ..Default::default() };
+    cpu.bus.mount_drive(2, &path, opts, true).unwrap();
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    assert!(cpu.bus.ide[0].is_none());
+    let channel = cpu.bus.ide[1].as_ref().expect("the secondary channel");
+    assert!(matches!(channel.devices, [None, Some(Device::Ata(_))]));
+}

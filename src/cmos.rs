@@ -60,6 +60,31 @@ impl Cmos {
         self.update_checksum();
     }
 
+    /// Report the first two of `disks` (cylinders, heads, sectors) as hard
+    /// disks of the user-defined type 47, as DOSBox-X's CMOS has them for
+    /// a booted system's Windows 95: 12h's high nibble the first, low the
+    /// second, the types at 19h and 1Ah, and their parameters at 1Bh and
+    /// 24h (no write precompensation, landing zone the last cylinder).
+    pub fn set_hard_disks(&mut self, disks: &[crate::diskimage::Chs]) {
+        self.ram[0x12] = 0;
+        self.ram[0x19..=0x2C].fill(0);
+        for (i, chs) in disks.iter().take(2).enumerate() {
+            self.ram[0x12] |= if i == 0 { 0xF0 } else { 0x0F };
+            self.ram[0x19 + i] = 47;
+            let cylinders = chs.cylinders.min(1024) as u16;
+            let heads = chs.heads.min(255) as u8;
+            let at = if i == 0 { 0x1B } else { 0x24 };
+            let p = &mut self.ram[at..at + 9];
+            p[0..2].copy_from_slice(&cylinders.to_le_bytes());
+            p[2] = heads;
+            p[3..5].copy_from_slice(&0xFFFFu16.to_le_bytes());
+            p[5] = 0xC0 | ((heads > 8) as u8) << 3;
+            p[6..8].copy_from_slice(&cylinders.to_le_bytes());
+            p[8] = chs.sectors.min(63) as u8;
+        }
+        self.update_checksum();
+    }
+
     /// Checksum of registers 10h-2Dh at 2Eh (high) and 2Fh (low).
     fn update_checksum(&mut self) {
         let sum: u16 = self.ram[0x10..=0x2D].iter().map(|&b| b as u16).sum();

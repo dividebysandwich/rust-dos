@@ -198,7 +198,9 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
         .filter_map(|drive| bus.disk.bios_image(drive).map(|image| image.geometry()))
         .collect();
     crate::bios::install_for_boot(bus, &hard_disks);
-    // A CD image reaches the system as an IDE CD-ROM drive.
+    bus.cmos.set_hard_disks(&hard_disks);
+    // The hard disks and a CD image reach the system on the IDE channels
+    // too.
     bus.attach_ide();
     bus.refresh_irq();
 

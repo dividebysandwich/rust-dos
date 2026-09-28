@@ -39,7 +39,8 @@ An image can be on a mounted drive (C:\\GAME\\CD.CUE), and a wildcard\r
 list in. -pr takes relative paths from the configuration file's folder.\r
 A number gives BOOT and the BIOS a disk image without a DOS drive, whatever\r
 is on it: 0 and 1 are the floppies, 2 and 3 the hard disks (-fs none does\r
-the same with A: to D:). IMGMOUNT is the same command.\r
+the same with A: to D:). -ide 1m, 1s, 2m or 2s puts a hard disk or CD image\r
+on a booted system's IDE channel. IMGMOUNT is the same command.\r
 ";
 
 /// The extensions of disk and CD images.
@@ -119,13 +120,16 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
             "-ro" => args.opts.read_only = true,
             "-pr" => args.config_relative = true,
             // DOSBox-X's IDE slot for the image (`-ide 2m`: secondary
-            // master), which may follow: a booted system finds a CD image
-            // on the secondary channel anyway.
+            // master), which may follow; without one, or `auto`, it goes
+            // where a booted system has it by default. There are two
+            // channels: 3m to 4s go by default too.
             "-ide" => {
-                iter.next_if(|value| {
+                let slot = iter.next_if(|value| {
                     let v = value.to_ascii_lowercase();
-                    v.len() == 2 && matches!(v.as_bytes()[0], b'1'..=b'4') && matches!(v.as_bytes()[1], b'm' | b's')
+                    v == "auto"
+                        || (v.len() == 2 && matches!(v.as_bytes()[0], b'1'..=b'4') && matches!(v.as_bytes()[1], b'm' | b's'))
                 });
+                args.opts.ide = slot.and_then(|s| crate::ide::IdeSlot::parse(s));
             }
             // DOSBox's own CD-ROM access, which batch files made for it ask
             // for: taken and ignored.
@@ -533,6 +537,10 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
     if let Some(chs) = spec.opts.geometry {
         value.push_str(&format!(" -chs {},{},{}", chs.cylinders, chs.heads, chs.sectors));
     }
+    if let Some(slot) = spec.opts.ide {
+        value.push_str(" -ide ");
+        value.push_str(&slot.name());
+    }
     value
 }
 
@@ -700,8 +708,14 @@ mod tests {
         // DOSBox's options that mean nothing here are taken.
         let spec = mounted(mount("d game.ins -t iso -ioctl -ide -freesize 100 -usecd 0", cwd));
         assert_eq!((spec.path, spec.opts.kind), (cwd.join("game.ins"), DriveKind::CdRom));
-        let spec = mounted(mount("d game.ins -t iso -ide 2m", cwd));
+        assert_eq!(spec.opts.ide, None);
+        let spec = mounted(mount("d game.ins -t iso -ide 2S", cwd));
         assert_eq!(spec.path, cwd.join("game.ins"), "the IDE slot isn't an image");
+        let slot = Some(crate::ide::IdeSlot::new(crate::ide::ChannelId::Secondary, true));
+        assert_eq!(spec.opts.ide, slot);
+        assert!(mount_spec_value(&spec, None).ends_with(" -ide 2s"));
+        assert_eq!(mounted(mount("2 hdd.img -ide 3m", cwd)).opts.ide, None, "two channels");
+        assert_eq!(mounted(mount("2 hdd.img -ide auto", cwd)).path, cwd.join("hdd.img"));
         assert!(mount("d x.iso -freesize", cwd).is_err());
         // -pr: from the configuration file's folder.
         let paths = PathContext { base: cwd, config_dir: Some(Path::new("/cfg")), home: None, locate: &|_| None };

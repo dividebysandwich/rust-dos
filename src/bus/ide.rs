@@ -4,36 +4,69 @@
 
 use super::Bus;
 use crate::disk::DriveKind;
-use crate::ide::{Atapi, Channel, ChannelId, Device, Env};
+use crate::ide::{Ata, Atapi, Channel, ChannelId, Device, Env, IdeSlot};
 
 /// A data port access takes a PIO mode 4 cycle.
 const DATA_PORT_NS: u64 = 120;
 
 impl Bus {
-    /// At a boot: the secondary IDE channel with the CD-ROM drive, when a
-    /// CD-ROM drive has an image and IRQ 15 isn't a sound card's.
+    /// At a boot: the IDE channels with the machine's hard disks (with
+    /// `ide_hard_disks`), BIOS units 80h and 81h the primary master and
+    /// slave, and its CD-ROM drive with a CD image, the secondary master,
+    /// or where their MOUNT's `-ide` puts them. A channel whose IRQ is a
+    /// sound or network card's isn't there.
     pub fn attach_ide(&mut self) {
         self.detach_ide();
-        let Some(drive) =
+        // The devices, with the slots they ask for.
+        let mut wanted: Vec<(Option<IdeSlot>, &[IdeSlot; 4], Device, String)> = Vec::new();
+        if let Some(drive) =
             self.disk.drives_of_kind(DriveKind::CdRom).into_iter().find(|&d| self.disk.cd_image(d).is_some())
-        else {
-            return;
-        };
-        let letter = crate::disk::drive_letter(drive);
-        let id = ChannelId::Secondary;
-        if let Some(owner) = self.irq_owner(id.irq()) {
-            self.log_string(&format!(
-                "[IDE] IRQ {} is the {}'s: no IDE channel for the CD-ROM drive {}:",
-                id.irq(),
-                owner,
-                letter
-            ));
+        {
+            let what = format!("{}: is the CD-ROM drive", crate::disk::drive_letter(drive));
+            let device = Device::Atapi(Atapi::new(drive, true));
+            wanted.push((self.disk.ide_slot(drive), &IdeSlot::CD_ORDER, device, what));
+        }
+        if self.ide_hard_disks {
+            for (i, drive) in crate::boot::hard_disk_drives(self).into_iter().enumerate() {
+                let Some(image) = self.disk.bios_image(drive) else { continue };
+                let what = format!("Hard disk {:02X}h is the ATA disk", 0x80 + i);
+                let device = Device::Ata(Ata::new(drive, image.geometry(), image.sectors()));
+                wanted.push((self.disk.ide_slot(drive), &IdeSlot::HARD_DISK_ORDER, device, what));
+            }
+        }
+        if wanted.is_empty() {
             return;
         }
-        let mut channel = Channel::new(id);
-        channel.devices[0] = Some(Device::Atapi(Atapi::new(drive, true)));
-        self.ide[id.index()] = Some(channel);
-        self.log_string(&format!("[IDE] {}: is the CD-ROM drive on the secondary IDE channel", letter));
+        // The slots asked for first, then the others in order.
+        let mut slots: [[Option<(Device, String)>; 2]; 2] = Default::default();
+        let (asked, rest): (Vec<_>, Vec<_>) = wanted.into_iter().partition(|(slot, ..)| slot.is_some());
+        for (slot, order, device, what) in asked.into_iter().chain(rest) {
+            let free = |slot: &IdeSlot| slots[slot.channel.index()][slot.slave as usize].is_none();
+            match slot.filter(free).or_else(|| order.iter().copied().find(free)) {
+                Some(s) => slots[s.channel.index()][s.slave as usize] = Some((device, format!("{} on {}", what, s.describe()))),
+                None => self.log_string(&format!("[IDE] No IDE slot is left: {} of none", what)),
+            }
+        }
+        for id in ChannelId::ALL {
+            let [master, slave] = std::mem::take(&mut slots[id.index()]);
+            if master.is_none() && slave.is_none() {
+                continue;
+            }
+            if let Some(owner) = self.irq_owner(id.irq()) {
+                for (_, what) in [master, slave].into_iter().flatten() {
+                    self.log_string(&format!("[IDE] IRQ {} is the {}'s: {} of no {} channel", id.irq(), owner, what, id.name()));
+                }
+                continue;
+            }
+            let mut channel = Channel::new(id);
+            for (i, placed) in [master, slave].into_iter().enumerate() {
+                if let Some((device, what)) = placed {
+                    self.log_string(&format!("[IDE] {}", what));
+                    channel.devices[i] = Some(device);
+                }
+            }
+            self.ide[id.index()] = Some(channel);
+        }
     }
 
     /// The device configured on IRQ `irq`, which an IDE channel can't
@@ -43,6 +76,8 @@ impl Bus {
             Some("Sound Blaster")
         } else if self.gus.as_ref().and_then(|gus| gus.irq()) == Some(irq) {
             Some("Ultrasound")
+        } else if self.net.nic.as_ref().is_some_and(|nic| nic.irq == irq) {
+            Some("NE2000")
         } else {
             None
         }

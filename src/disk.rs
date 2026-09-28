@@ -369,6 +369,9 @@ pub struct MountOptions {
     /// A hard disk image's geometry, where it can't be found from the
     /// image.
     pub geometry: Option<Chs>,
+    /// Where a booted system finds the disk or CD-ROM drive on the IDE
+    /// channels (`-ide`); None where it goes by default.
+    pub ide: Option<crate::ide::IdeSlot>,
 }
 
 impl Default for MountOptions {
@@ -379,6 +382,7 @@ impl Default for MountOptions {
             read_only: false,
             more_images: Vec::new(),
             geometry: None,
+            ide: None,
         }
     }
 }
@@ -1113,6 +1117,11 @@ impl DiskController {
     /// The disk image of a drive mounted from one, as the BIOS reads it.
     pub fn bios_image(&self, drive: u8) -> Option<Rc<DiskImage>> {
         self.drive(drive)?.disk().cloned()
+    }
+
+    /// The IDE slot `drive` was mounted for (`-ide`), if any.
+    pub fn ide_slot(&self, drive: u8) -> Option<crate::ide::IdeSlot> {
+        self.drive(drive)?.mount.as_ref()?.opts.ide
     }
 
     /// Keep journals of the writes to the disk images in the drives, or

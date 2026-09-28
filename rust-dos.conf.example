@@ -131,6 +131,10 @@
 # disk utilities use, answer from 7.00 on; FAT32 drives mount at any
 # version. A change takes effect at once.
 #dos_version=5.00
+# A system booted from a disk image (BOOT) finds its hard disks as ATA disks
+# on the IDE channels as well as through INT 13h, for its own IDE driver
+# (Windows 9x's 32-bit disk access, Linux): true (the default) or false.
+#ide_hard_disks=true
 # Rewind: holding Alt+F11 goes back in time, half a second a step. It keeps
 # the machine's states of the last minutes, which take memory and a little
 # of the host's time: true or false (the default).

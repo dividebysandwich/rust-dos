@@ -102,6 +102,8 @@ pub struct MountDialog {
     original: String,
     more_images: Vec<PathBuf>,
     geometry: Option<Chs>,
+    /// Its IDE slot for a booted system, which stays too.
+    ide: Option<crate::ide::IdeSlot>,
 }
 
 impl MountDialog {
@@ -123,6 +125,7 @@ impl MountDialog {
             original: String::new(),
             more_images: Vec::new(),
             geometry: None,
+            ide: None,
         })
     }
 
@@ -148,6 +151,7 @@ impl MountDialog {
             original: path,
             more_images: opts.more_images,
             geometry: opts.geometry,
+            ide: opts.ide,
         }
     }
 
@@ -287,6 +291,7 @@ impl MountDialog {
                 read_only: self.read_only,
                 more_images: if unchanged { self.more_images.clone() } else { Vec::new() },
                 geometry: if unchanged { self.geometry } else { None },
+                ide: self.ide,
             },
         })
     }
@@ -384,6 +389,7 @@ mod tests {
             read_only: true,
             more_images: vec!["/y".into()],
             geometry: None,
+            ide: None,
         };
         let mut d = MountDialog::change(&info, None);
         assert_eq!((d.path.text(), d.label.text(), d.read_only, d.kind), ("/x".into(), "D1".into(), true, DriveKind::Floppy));

@@ -268,7 +268,7 @@ impl Page {
             }
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, Dpmi,
-                DosVersion, HardDiskSpeed, FloppyDiskSpeed, Joystick,
+                DosVersion, IdeHardDisks, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
             ],
             Page::Sound => &[
@@ -376,6 +376,8 @@ enum Item {
     Dpmi,
     /// The DOS version programs are told.
     DosVersion,
+    /// A booted system's hard disks on the IDE channels.
+    IdeHardDisks,
     KeyboardLayout,
     /// Rewind (held Alt+F11) and the memory it takes.
     Rewind,
@@ -571,6 +573,7 @@ impl Item {
             Umb => "Upper memory (UMB)",
             Dpmi => "DPMI host",
             DosVersion => "Reported DOS version",
+            IdeHardDisks => "IDE hard disks (BOOT)",
             KeyboardLayout => "Keyboard layout",
             Rewind => "Rewind (Alt+F11)",
             RewindMemory => "  Rewind memory",
@@ -669,7 +672,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Dpmi | DosVersion | KeyboardLayout | Rewind | RewindMemory | VoodooRenderer | VoodooScale => Applies::Now,
+            Cycles | Core | Dpmi | DosVersion | IdeHardDisks | KeyboardLayout | Rewind | RewindMemory | VoodooRenderer | VoodooScale => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -745,6 +748,7 @@ impl Item {
             Umb => on_off(s.umb),
             Dpmi => on_off(s.dpmi),
             DosVersion => s.dos_version.name(),
+            IdeHardDisks => on_off(s.ide_hard_disks),
             KeyboardLayout => s.keyboard_layout.describe(),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
@@ -878,6 +882,7 @@ impl Item {
             Ems => on_off(|s, on| s.ems = on),
             Umb => on_off(|s, on| s.umb = on),
             Dpmi => on_off(|s, on| s.dpmi = on),
+            IdeHardDisks => on_off(|s, on| s.ide_hard_disks = on),
             DosVersion => {
                 let mut versions = crate::config::DosVersion::PRESETS.to_vec();
                 if !versions.contains(&s.dos_version) {
