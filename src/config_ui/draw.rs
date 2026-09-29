@@ -2,6 +2,7 @@
 //! with the VGA font onto the picture over a semi-transparent panel.
 
 use crate::video::{self, CP437, Frame};
+use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -157,10 +158,18 @@ pub fn render(grid: &Grid, layout: &Layout, frame: &mut Frame) {
 
 /// `render` with the panel `alpha`/256 opaque.
 pub fn render_blended(grid: &Grid, layout: &Layout, frame: &mut Frame, alpha: u32) {
+    render_area(grid, layout, frame, alpha, (0..grid.cols, 0..grid.rows));
+}
+
+/// `render_blended` of the cells in the columns and rows `area` alone:
+/// drawn again over what was drawn in pixels over the grid (the States
+/// page's pictures, the Stats page's graphs), they show above it.
+pub fn render_area(grid: &Grid, layout: &Layout, frame: &mut Frame, alpha: u32, area: (Range<usize>, Range<usize>)) {
     let font = if layout.cell_h == 16 { video::font_8x16() } else { video::font_8x8() };
     let width = frame.width as usize;
-    for row in 0..grid.rows.min(layout.rows) {
-        for col in 0..grid.cols.min(layout.cols) {
+    let (cols, rows) = area;
+    for row in rows.start..rows.end.min(grid.rows).min(layout.rows) {
+        for col in cols.start..cols.end.min(grid.cols).min(layout.cols) {
             let cell = grid.cells[row * grid.cols + col];
             let glyph = &font[cell.ch as usize * layout.cell_h..][..layout.cell_h];
             for (gy, bits) in glyph.iter().enumerate() {

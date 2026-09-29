@@ -1748,3 +1748,22 @@ fn f1_shows_help_on_pages_and_dialogs() {
     ui.show_page(Page::Display);
     assert_eq!(topic(&mut ui, &mut host), Some("scale"));
 }
+
+#[test]
+fn the_help_covers_the_pictures_and_graphs_drawn_in_pixels() {
+    let mut host = FakeHost::new();
+    host.save_state(1).unwrap();
+    host.states[0].picture.as_mut().unwrap().rgb.fill(0xFF);
+    let mut ui = opened(&host);
+    ui.show_page(Page::States);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    // The picture's first pixel: text is never 16 white pixels in a row.
+    let white = frame.rgb.windows(48).step_by(3).position(|run| run.iter().all(|&b| b == 0xFF)).expect("the slot's picture");
+    ui.key(UiKey::Help, &mut host);
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    assert_eq!(&frame.rgb[white * 3..][..3], [draw::FIELD.0, draw::FIELD.1, draw::FIELD.2], "the help's background");
+    // Below the help, the picture shows.
+    assert!(frame.rgb.chunks(3).skip(white).any(|px| px == [0xFF; 3]));
+}

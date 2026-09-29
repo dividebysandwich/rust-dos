@@ -2115,7 +2115,7 @@ impl ConfigUi {
         } else {
             self.draw_settings(&mut g, content.clone());
         }
-        self.draw_help(&mut g, content);
+        let help_area = self.draw_help(&mut g, content);
 
         self.draw_hints(&mut g, rows - 3);
         let status_row = rows - 2;
@@ -2141,6 +2141,9 @@ impl ConfigUi {
             draw::plot(frame, &layout, plot.cells, &plot.values, plot.max, plot.color, draw::OPAQUE);
         }
         self.draw_pictures(frame, &layout);
+        if let Some(area) = help_area {
+            draw::render_area(&g, &layout, frame, draw::PANEL_ALPHA, area);
+        }
         self.layout = Some(layout);
     }
 
@@ -2641,12 +2644,13 @@ impl ConfigUi {
 
     /// The help over the rows `content`, from their top: its topic's title
     /// in the frame, its text below, scrolled, with ▲ and ▼ where there is
-    /// more.
-    fn draw_help(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
-        let Some(help) = &mut self.help else { return };
+    /// more. Returns the columns and rows it covers, for the pictures and
+    /// graphs drawn in pixels to leave alone.
+    fn draw_help(&mut self, g: &mut Grid, content: std::ops::Range<usize>) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+        let help = self.help.as_mut()?;
         let width = (g.cols - 2).min(76);
         if content.len() < 3 || width < 12 {
-            return;
+            return None;
         }
         let left = (g.cols - width) / 2;
         let right = left + width - 1;
@@ -2689,6 +2693,7 @@ impl ConfigUi {
             g.char(right - 2, bottom, 0x1F, draw::KEY);
             self.hits.push(Hit { row: bottom, col: right - 2, width: 1, target: Target::Key(UiKey::PageDown) });
         }
+        Some((left..right + 1, top..bottom + 1))
     }
 
     /// The key hints for what is showing, each clickable.
