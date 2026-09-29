@@ -26,6 +26,8 @@ const RING_TICKS: u64 = 6 * PIT_HZ;
 const RI_TICKS: u64 = 2 * PIT_HZ;
 /// The longest command line.
 const LINE: usize = 80;
+/// How much longer the answering modem takes to have the carrier.
+const ANSWER_TICKS: u64 = PIT_HZ * 3 / 10;
 /// What starts a command, or comes between them: all else a program sends
 /// in command mode with another player in the room goes to them.
 const COMMAND_START: &[u8] = b"Aa\r\n +~";
@@ -74,6 +76,12 @@ pub enum Call {
     Dialing(u64),
     /// Ringing here.
     Ringing,
+    /// Answered: the carrier is there at the tick given, as the answering
+    /// modem's handshake takes a while longer than the caller's. (Two
+    /// emulated machines alike otherwise would see the same time when the
+    /// call goes through, where games like DOOM's SERSETUP take their
+    /// player's number from it.)
+    Answering(u64),
     Connected,
 }
 
@@ -108,6 +116,8 @@ pub struct Modem {
     plus: u8,
     last_data: u64,
     escape_due: Option<u64>,
+    /// What came from the other end before the carrier was there here.
+    held: Vec<u8>,
 }
 
 impl Default for Modem {
@@ -132,6 +142,7 @@ impl Default for Modem {
             plus: 0,
             last_data: 0,
             escape_due: None,
+            held: Vec::new(),
         }
     }
 }
@@ -139,7 +150,7 @@ impl Default for Modem {
 // The call is the network's, not the machine's: it stays as it is.
 crate::state_fields!(Modem {
     echo, verbose, quiet, s, amp_c, amp_d, line, last, dtr
-} skip { call, online, direct, peer, ring_due, ri_off, ri, plus, last_data, escape_due });
+} skip { call, online, direct, peer, ring_due, ri_off, ri, plus, last_data, escape_due, held });
 
 impl Modem {
     /// The guard time of the escape: S12, in fiftieths of a second.
@@ -200,11 +211,12 @@ impl Modem {
         self.ri = false;
         self.escape_due = None;
         self.plus = 0;
+        self.held.clear();
     }
 
     /// End the call there is, telling the network.
     fn hang_up(&mut self, link: &mut Vec<LinkCmd>) {
-        if matches!(self.call, Call::Dialing(_) | Call::Connected | Call::Ringing) {
+        if matches!(self.call, Call::Dialing(_) | Call::Connected | Call::Ringing | Call::Answering(_)) {
             link.push(LinkCmd::Hangup);
         }
         self.drop_call();
@@ -468,22 +480,19 @@ impl Modem {
                     self.result(uart, Result::NoCarrier, now);
                 }
             }
-            LinkEvent::Connected => {
-                if matches!(self.call, Call::Dialing(_) | Call::Ringing) {
-                    self.call = Call::Connected;
-                    self.online = true;
-                    self.direct = false;
+            LinkEvent::Connected => match self.call {
+                Call::Dialing(_) => self.connect(uart, now),
+                Call::Ringing => {
+                    self.call = Call::Answering(now + ANSWER_TICKS);
                     self.ring_due = None;
                     self.ri_off = None;
                     self.ri = false;
-                    self.last_data = now;
-                    self.plus = 0;
-                    self.result(uart, Result::Connect, now);
                 }
-            }
+                _ => {}
+            },
             LinkEvent::NoCarrier => match self.call {
                 Call::Ringing => self.drop_call(),
-                Call::Dialing(_) | Call::Connected => {
+                Call::Dialing(_) | Call::Connected | Call::Answering(_) => {
                     self.drop_call();
                     self.result(uart, Result::NoCarrier, now);
                 }
@@ -508,6 +517,8 @@ impl Modem {
                 }
                 if self.carrier() {
                     uart.receive(&bytes, now);
+                } else if matches!(self.call, Call::Answering(_)) && self.held.len() < 64 * 1024 {
+                    self.held.extend_from_slice(&bytes);
                 }
             }
             LinkEvent::Lines { .. } => {}
@@ -515,9 +526,34 @@ impl Modem {
         uart.set_lines(self.lines());
     }
 
+    /// The call is through: CONNECT, and online.
+    fn connect(&mut self, uart: &mut Uart, now: u64) {
+        self.call = Call::Connected;
+        self.online = true;
+        self.direct = false;
+        self.ring_due = None;
+        self.ri_off = None;
+        self.ri = false;
+        self.last_data = now;
+        self.plus = 0;
+        self.result(uart, Result::Connect, now);
+        let held = std::mem::take(&mut self.held);
+        uart.receive(&held, now);
+    }
+
+    /// The program ended: online to the other player without a call ends
+    /// with it (a call stays, as a modem's does).
+    pub fn program_ended(&mut self, uart: &mut Uart) {
+        if self.direct {
+            self.drop_call();
+            self.line.clear();
+            uart.set_lines(self.lines());
+        }
+    }
+
     pub fn next_event(&self) -> Option<u64> {
         let dialing = match self.call {
-            Call::Dialing(until) => Some(until),
+            Call::Dialing(until) | Call::Answering(until) => Some(until),
             _ => None,
         };
         [self.ring_due, self.ri_off, self.escape_due, dialing].into_iter().flatten().min()
@@ -551,6 +587,11 @@ impl Modem {
             self.plus = 0;
             self.online = false;
             self.result(uart, Result::Ok, now);
+        }
+        if let Call::Answering(due) = self.call
+            && due <= now
+        {
+            self.connect(uart, now);
         }
         if let Call::Dialing(until) = self.call
             && until <= now
@@ -673,7 +714,11 @@ mod tests {
         rig.wait(RING_TICKS);
         assert_eq!(rig.link, [LinkCmd::Answer]);
         rig.event(LinkEvent::Connected);
-        assert!(rig.output().ends_with("CONNECT 9600\r\n"));
+        // What the caller sends before the carrier is there here waits.
+        rig.event(LinkEvent::Bytes(b"early".to_vec()));
+        assert!(rig.output().ends_with("RING\r\n"));
+        rig.wait(ANSWER_TICKS);
+        assert_eq!(rig.output(), "\r\nCONNECT 9600\r\nearly");
         rig.event(LinkEvent::Bytes(b"x".to_vec()));
         assert_eq!(rig.output(), "x");
         rig.event(LinkEvent::NoCarrier);
@@ -698,7 +743,13 @@ mod tests {
         rig.event(LinkEvent::Peer(true));
         rig.event(LinkEvent::Bytes(b"abc".to_vec()));
         assert_eq!(rig.output(), "abc");
-        // A game that dials calls them.
+        // A game that dials calls them; one that went online without a
+        // call leaves the modem in command mode when it ends.
+        rig.event(LinkEvent::Peer(true));
+        rig.send("x");
+        assert!(rig.modem.direct);
+        rig.modem.program_ended(&mut rig.uart);
+        assert!(!rig.modem.online && !rig.modem.direct);
         let mut rig = Rig::new();
         rig.event(LinkEvent::Peer(true));
         rig.link.clear();

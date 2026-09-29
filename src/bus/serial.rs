@@ -211,10 +211,13 @@ impl Bus {
         let now = self.clock.now_ticks();
         for n in 0..4 {
             let Some(irq) = self.serial.ports[n].as_ref().map(|p| p.uart.irq) else { continue };
-            if !resident(self, irq)
-                && let Some(p) = &mut self.serial.ports[n]
-            {
+            let resident = resident(self, irq);
+            let Some(p) = &mut self.serial.ports[n] else { continue };
+            if !resident {
                 p.uart.write(1, 0, now);
+            }
+            if let crate::serial::Backend::Modem(modem) = &mut p.backend {
+                modem.program_ended(&mut p.uart);
             }
         }
         self.serial.pic_lines = 0;
