@@ -1,6 +1,8 @@
-# Rust-DOS
-
-<img width="640" height="400" alt="image" src="https://rust-dos.com/assets/images/rust-dos-descent-tour.gif" />
+<center><img width="467" height="173" alt="image" src="https://github.com/user-attachments/assets/eea40654-bd61-4251-b377-13c28ee5724f" /></center>
+<br/>
+<hr/>
+<br/>
+<center><img width="640" height="400" alt="image" src="https://rust-dos.com/assets/images/rust-dos-descent-tour.gif" /></center>
 
 ## Introduction
 
