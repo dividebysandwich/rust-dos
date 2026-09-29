@@ -498,7 +498,10 @@ volumes, the effects' mixes, the CRT's curvature and glow, the memory size
 and the joystick's deadzone) along its bar, as do their ◄ and ►. Enter (or
 a click on a setting's value) lists the values to pick from, or types or
 picks one: the list takes Up and Down, and a letter jumps to the next
-value starting with it. Tab switches pages, and the mouse works too. The
+value starting with it. Tab switches pages, and the mouse works too.
+**F1** explains the setting under the cursor, or the page or dialog open,
+in a short help for getting games going; Up and Down scroll it, and Esc
+or F1 closes it. The
 display settings, the CPU speed, the disk speeds and noises, the joystick
 and the volumes take effect at once. The processor, the video card,
 expanded and upper memory and the sound hardware change once no program is

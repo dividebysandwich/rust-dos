@@ -1688,6 +1688,7 @@ fn ui_key(key: PcKey, ascii: u8, mods: u8) -> Option<UiKey> {
         0x0E => Backspace,
         0x53 => Delete,
         0x52 => Insert,
+        0x3B if !ctrl => Help,
         0x3C => Save,
         0x1F if ctrl => Save,
         _ if (0x20..0x7F).contains(&ascii) => Char(ascii as char),

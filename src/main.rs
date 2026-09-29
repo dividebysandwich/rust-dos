@@ -1789,6 +1789,7 @@ fn ui_key(keycode: Keycode, keymod: Mod) -> Option<UiKey> {
         Keycode::Backspace => UiKey::Backspace,
         Keycode::Delete => UiKey::Delete,
         Keycode::Insert => UiKey::Insert,
+        Keycode::F1 => UiKey::Help,
         Keycode::F2 => UiKey::Save,
         Keycode::S if ctrl => UiKey::Save,
         _ => return None,

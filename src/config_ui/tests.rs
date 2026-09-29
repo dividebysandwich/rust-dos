@@ -1655,3 +1655,96 @@ fn the_room_this_instance_hosts_shows_who_is_in_it() {
     assert!(ui.hits.iter().any(|h| matches!(h.target, Target::RoomRow(0))));
     assert!(!ui.hits.iter().any(|h| matches!(h.target, Target::RoomButton(_))));
 }
+
+#[test]
+fn every_setting_page_and_dialog_has_help() {
+    let mut used = vec!["mount", "new-image", "new-game", "autoexec", "rooms"];
+    for page in PAGES {
+        used.extend(page.help());
+        for &item in page.items() {
+            used.push(item.help());
+            used.extend(item.fields(&Settings::default()).into_iter().map(Item::help));
+        }
+    }
+    for pick in [Pick::MountPath, Pick::SoundFont, Pick::Mt32Roms, Pick::ImportGame, Pick::ImagePath] {
+        used.push(pick.help());
+    }
+    for id in &used {
+        assert!(help::topic(id).is_some(), "no help on {}", id);
+    }
+    for topic in help::topics() {
+        assert!(used.contains(&topic.id), "nothing shows the help on {}", topic.id);
+    }
+}
+
+#[test]
+fn f1_shows_help_on_the_setting_under_the_cursor() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    let mut frame = Frame::new(640, 350);
+    ui.show_page(Page::Sound);
+    let midi = ui.items().iter().position(|&i| i == Item::Midi).unwrap();
+    ui.select(midi);
+    ui.key(UiKey::Help, &mut host);
+    assert_eq!(ui.help.as_ref().map(|h| h.topic.id), Some("midi"));
+    ui.draw(&mut frame);
+
+    // It scrolls, and takes the keys: Tab doesn't change the page.
+    let help = ui.help.as_ref().unwrap();
+    assert!(help.max_scroll() > 0, "a long topic scrolls in a small window");
+    ui.key(UiKey::Down, &mut host);
+    ui.key(UiKey::Tab, &mut host);
+    assert_eq!((ui.help.as_ref().unwrap().scroll, ui.page, ui.row), (1, Page::Sound, midi));
+    ui.key(UiKey::End, &mut host);
+    ui.key(UiKey::Down, &mut host);
+    let help = ui.help.as_ref().unwrap();
+    let last = help.max_scroll();
+    assert_eq!(help.scroll, last);
+    ui.wheel(1, &mut host);
+    assert_eq!(ui.help.as_ref().unwrap().scroll, last - 1);
+
+    // Esc closes the help alone, and F1 opens and closes it.
+    ui.key(UiKey::Esc, &mut host);
+    assert!(ui.help.is_none() && ui.is_open());
+    ui.key(UiKey::Help, &mut host);
+    ui.key(UiKey::Help, &mut host);
+    assert!(ui.help.is_none());
+
+    // A click off it closes it; one on it doesn't.
+    ui.key(UiKey::Help, &mut host);
+    ui.draw(&mut frame);
+    let layout = ui.layout.unwrap();
+    let at = |col: usize, row: usize| ((layout.x + col * 8 + 4) as i32, (layout.y + row * layout.cell_h + 4) as i32);
+    let inside = ui.hits.iter().rev().find(|h| matches!(h.target, Target::Help)).unwrap();
+    let (x, y) = at(inside.col + 3, inside.row);
+    ui.click(x, y, &mut host);
+    assert!(ui.help.is_some());
+    ui.click(layout.x as i32 + 4, layout.y as i32 + 4, &mut host);
+    assert!(ui.help.is_none());
+    assert_eq!(host.applied.len(), 0, "nothing changed underneath");
+}
+
+#[test]
+fn f1_shows_help_on_pages_and_dialogs() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    let mut frame = Frame::new(640, 400);
+    let mut topic = |ui: &mut ConfigUi, host: &mut FakeHost| {
+        ui.key(UiKey::Help, host);
+        ui.draw(&mut frame);
+        let id = ui.help.as_ref().map(|h| h.topic.id);
+        ui.key(UiKey::Esc, host);
+        id
+    };
+    ui.show_page(Page::Drives);
+    assert_eq!(topic(&mut ui, &mut host), Some("drives"));
+    ui.key(UiKey::Insert, &mut host);
+    assert!(ui.dialog.is_some());
+    assert_eq!(topic(&mut ui, &mut host), Some("mount"));
+    assert!(ui.dialog.is_some(), "Esc closed the help, not the dialog");
+    ui.key(UiKey::Esc, &mut host);
+    ui.show_page(Page::Stats);
+    assert_eq!(topic(&mut ui, &mut host), Some("stats"));
+    ui.show_page(Page::Display);
+    assert_eq!(topic(&mut ui, &mut host), Some("scale"));
+}

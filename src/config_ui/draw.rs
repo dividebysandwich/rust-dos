@@ -14,6 +14,8 @@ pub const KEY: Rgb = Rgb(0xFF, 0xD8, 0x60);
 pub const NOTE: Rgb = Rgb(0xC8, 0xB0, 0x68);
 pub const ERROR: Rgb = Rgb(0xFF, 0x70, 0x70);
 pub const GOOD: Rgb = Rgb(0x80, 0xE0, 0x90);
+/// Commands and file names in the help.
+pub const CODE: Rgb = Rgb(0x78, 0xDC, 0xE8);
 /// Background of the selected row and the focused control.
 pub const SELECT: Rgb = Rgb(0x1C, 0x78, 0xA8);
 /// Background of text fields.

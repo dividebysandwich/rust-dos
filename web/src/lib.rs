@@ -1390,6 +1390,7 @@ fn ui_key(key: &str, ctrl: bool, shift: bool) -> Option<UiKey> {
         "Backspace" => UiKey::Backspace,
         "Delete" => UiKey::Delete,
         "Insert" => UiKey::Insert,
+        "F1" => UiKey::Help,
         "F2" => UiKey::Save,
         _ if ctrl && key.eq_ignore_ascii_case("s") => UiKey::Save,
         _ if ctrl => return None,
@@ -1563,6 +1564,7 @@ mod tests {
         assert_eq!(ui_key("Tab", false, true), Some(UiKey::BackTab));
         assert_eq!(ui_key("Escape", false, false), Some(UiKey::Esc));
         assert_eq!((ui_key("F2", false, false), ui_key("S", true, true)), (Some(UiKey::Save), Some(UiKey::Save)));
+        assert_eq!(ui_key("F1", false, false), Some(UiKey::Help));
         // What the layout types, AltGr's too; not Ctrl combinations or
         // keys that type nothing.
         assert_eq!(ui_key("ö", false, false), Some(UiKey::Char('ö')));

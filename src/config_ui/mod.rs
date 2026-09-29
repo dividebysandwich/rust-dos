@@ -12,6 +12,7 @@ mod cheats;
 mod dialog;
 mod draw;
 mod games;
+mod help;
 mod image;
 pub mod osd;
 mod perf;
@@ -65,6 +66,8 @@ pub enum UiKey {
     Save,
     /// Show or hide the performance overlay (Ctrl+Shift+F12).
     Overlay,
+    /// Show or hide the help on what is under the cursor (F1).
+    Help,
     Char(char),
 }
 
@@ -1249,6 +1252,8 @@ enum Target {
     /// A value of the popup list, and the rest of it.
     PopupRow(usize),
     Popup,
+    /// The help's text.
+    Help,
 }
 
 struct Hit {
@@ -1316,6 +1321,8 @@ pub struct ConfigUi {
     autoexec: Option<AutoexecEditor>,
     /// The LAN's rooms being browsed.
     rooms: Option<RoomBrowser>,
+    /// The help shown over everything (F1).
+    help: Option<help::HelpView>,
 }
 
 /// A graph for `draw::plot`.
@@ -1376,6 +1383,7 @@ impl ConfigUi {
             pictures: Vec::new(),
             autoexec: None,
             rooms: None,
+            help: None,
         }
     }
 
@@ -1435,6 +1443,7 @@ impl ConfigUi {
         self.game_dialog = None;
         self.autoexec = None;
         self.rooms = None;
+        self.help = None;
         self.confirm_delete = None;
         self.cheats.edit = None;
         self.cheats.refresh(host);
@@ -1499,6 +1508,10 @@ impl ConfigUi {
         }
         if key == UiKey::Overlay {
             self.overlay_key();
+        } else if key == UiKey::Help {
+            self.toggle_help();
+        } else if self.help.is_some() {
+            self.help_key(key);
         } else if self.browser.is_some() {
             self.browser_key(key, host);
         } else if self.dialog.is_some() {
@@ -1539,7 +1552,12 @@ impl ConfigUi {
                 .find(|h| h.row == row && (h.col..h.col + h.width).contains(&col))
                 .map(|h| (h.target, col - h.col))
         });
-        // A click off the popup list closes it, and does nothing else.
+        // A click off the help closes it, as one off the popup list does,
+        // and does nothing else; the key hints still work.
+        if self.help.is_some() && !matches!(hit, Some((Target::Help | Target::Key(_), _))) {
+            self.help = None;
+            return;
+        }
         if self.popup.is_some() && !matches!(hit, Some((Target::PopupRow(_) | Target::Popup, _))) {
             self.popup = None;
             return;
@@ -1615,7 +1633,7 @@ impl ConfigUi {
                 }
                 self.key(UiKey::Enter, host);
             }
-            Target::Popup => {}
+            Target::Popup | Target::Help => {}
         }
     }
 
@@ -2073,30 +2091,31 @@ impl ConfigUi {
         let content = 3..rows - 4;
         self.visible = content.len();
         if self.browser.is_some() {
-            self.draw_browser(&mut g, content);
+            self.draw_browser(&mut g, content.clone());
         } else if self.dialog.is_some() {
-            self.draw_dialog(&mut g, content);
+            self.draw_dialog(&mut g, content.clone());
         } else if self.image_dialog.is_some() {
-            self.draw_image_dialog(&mut g, content);
+            self.draw_image_dialog(&mut g, content.clone());
         } else if self.game_dialog.is_some() {
-            self.draw_game_dialog(&mut g, content);
+            self.draw_game_dialog(&mut g, content.clone());
         } else if self.autoexec.is_some() {
-            self.draw_autoexec(&mut g, content);
+            self.draw_autoexec(&mut g, content.clone());
         } else if self.rooms.is_some() {
-            self.draw_rooms(&mut g, content);
+            self.draw_rooms(&mut g, content.clone());
         } else if self.page == Page::Drives {
-            self.draw_drives(&mut g, content);
+            self.draw_drives(&mut g, content.clone());
         } else if self.page == Page::Games {
-            self.draw_games(&mut g, content);
+            self.draw_games(&mut g, content.clone());
         } else if self.page == Page::States {
-            self.draw_states(&mut g, content);
+            self.draw_states(&mut g, content.clone());
         } else if self.page == Page::Cheats {
-            self.draw_cheats(&mut g, content);
+            self.draw_cheats(&mut g, content.clone());
         } else if self.page == Page::Stats {
-            self.draw_stats(&mut g, content);
+            self.draw_stats(&mut g, content.clone());
         } else {
-            self.draw_settings(&mut g, content);
+            self.draw_settings(&mut g, content.clone());
         }
+        self.draw_help(&mut g, content);
 
         self.draw_hints(&mut g, rows - 3);
         let status_row = rows - 2;
@@ -2572,10 +2591,112 @@ impl ConfigUi {
         self.draw_scrollbar(g, list, scroll, total);
     }
 
+    /// The help topic on what is under the cursor: the setting selected,
+    /// or the page, or the dialog open over it.
+    fn help_topic(&self) -> Option<&'static str> {
+        if let Some((_, pick)) = &self.browser {
+            return Some(pick.help());
+        }
+        if self.dialog.is_some() {
+            Some("mount")
+        } else if self.image_dialog.is_some() {
+            Some("new-image")
+        } else if self.game_dialog.is_some() {
+            Some("new-game")
+        } else if self.autoexec.is_some() {
+            Some("autoexec")
+        } else if self.rooms.is_some() {
+            Some("rooms")
+        } else {
+            self.page.help().or_else(|| self.item().map(Item::help))
+        }
+    }
+
+    /// F1: show the help on what is under the cursor, or close it.
+    fn toggle_help(&mut self) {
+        if self.help.take().is_none() {
+            self.help = self.help_topic().and_then(help::topic).map(help::HelpView::new);
+        }
+    }
+
+    /// The help's keys: Up, Down and the rest scroll it, and Esc, Enter
+    /// and F1 close it.
+    fn help_key(&mut self, key: UiKey) {
+        let Some(help) = &mut self.help else { return };
+        let (last, page) = (help.max_scroll(), help.visible.saturating_sub(1).max(1));
+        help.scroll = match key {
+            UiKey::Up => help.scroll.saturating_sub(1),
+            UiKey::Down => (help.scroll + 1).min(last),
+            UiKey::PageUp => help.scroll.saturating_sub(page),
+            UiKey::PageDown | UiKey::Char(' ') => (help.scroll + page).min(last),
+            UiKey::Home => 0,
+            UiKey::End => last,
+            UiKey::Esc | UiKey::Enter | UiKey::Backspace => {
+                self.help = None;
+                return;
+            }
+            _ => return,
+        };
+    }
+
+    /// The help over the rows `content`, from their top: its topic's title
+    /// in the frame, its text below, scrolled, with ▲ and ▼ where there is
+    /// more.
+    fn draw_help(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
+        let Some(help) = &mut self.help else { return };
+        let width = (g.cols - 2).min(76);
+        if content.len() < 3 || width < 12 {
+            return;
+        }
+        let left = (g.cols - width) / 2;
+        let right = left + width - 1;
+        // As high as its text, up to the page's rows.
+        let lines = help::layout(help.topic.body, width - 4);
+        let top = content.start;
+        let bottom = (top + lines.len() + 1).min(content.end - 1);
+        for r in top..=bottom {
+            g.background(left, r, width, draw::FIELD);
+            g.text_to(left, r, &" ".repeat(width), draw::TEXT, right + 1);
+            g.char(left, r, 0xB3, draw::BORDER);
+            g.char(right, r, 0xB3, draw::BORDER);
+            self.hits.push(Hit { row: r, col: left, width, target: Target::Help });
+        }
+        for x in left + 1..right {
+            g.char(x, top, 0xC4, draw::BORDER);
+            g.char(x, bottom, 0xC4, draw::BORDER);
+        }
+        g.char(left, top, 0xDA, draw::BORDER);
+        g.char(right, top, 0xBF, draw::BORDER);
+        g.char(left, bottom, 0xC0, draw::BORDER);
+        g.char(right, bottom, 0xD9, draw::BORDER);
+        let title = fit(&format!(" {} ", help.topic.title), width.saturating_sub(8));
+        g.text(left + 2, top, &title, draw::BRIGHT);
+
+        help.lines = lines.len();
+        help.visible = bottom - top - 1;
+        help.scroll = help.scroll.min(help.max_scroll());
+        for (line, r) in lines.iter().skip(help.scroll).zip(top + 1..bottom) {
+            let mut x = left + 2;
+            for span in line {
+                x = g.text_to(x, r, &span.text, span.color, right - 1);
+            }
+        }
+        if help.scroll > 0 {
+            g.char(right - 2, top, 0x1E, draw::KEY);
+            self.hits.push(Hit { row: top, col: right - 2, width: 1, target: Target::Key(UiKey::PageUp) });
+        }
+        if help.scroll < help.max_scroll() {
+            g.char(right - 2, bottom, 0x1F, draw::KEY);
+            self.hits.push(Hit { row: bottom, col: right - 2, width: 1, target: Target::Key(UiKey::PageDown) });
+        }
+    }
+
     /// The key hints for what is showing, each clickable.
     fn draw_hints(&mut self, g: &mut Grid, row: usize) {
         use UiKey::*;
-        let hints: Vec<(&str, &str, UiKey)> = if self.browser.is_some() {
+        let mut hints: Vec<(&str, &str, UiKey)> = if self.help.is_some() {
+            vec![("\u{2191}\u{2193}", "Scroll", Down), ("Esc", "Close", Esc)]
+        } else if self.browser.is_some() {
             vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace), ("Esc", "Cancel", Esc)]
         } else if self.dialog.is_some() {
             vec![("Tab", "Next", Tab), ("Enter", "Mount", Enter), ("Esc", "Cancel", Esc)]
@@ -2644,6 +2765,9 @@ impl ConfigUi {
             hints.extend([("Tab", "Page", Tab), ("F2", "Save", Save), ("Esc", "Close", Esc)]);
             hints
         };
+        if self.help.is_none() && self.help_topic().is_some() {
+            hints.push(("F1", "Help", Help));
+        }
         let end = g.cols - 2;
         let mut x = 2;
         for (key, action, ui_key) in hints {
