@@ -2224,11 +2224,12 @@ impl ConfigUi {
         let width = |pad: usize, pages: &[&str]| pages.iter().map(|t| t.len() + 2 * pad + 1).sum::<usize>().saturating_sub(1);
         let pad = if width(1, &titles) <= room { 1 } else { 0 };
         let selected = PAGES.iter().position(|&p| p == self.page).unwrap_or(0);
-        // The first tab shown: the selected one fits after it, with room
-        // for the arrows.
+        // The first tab shown: the selected one and the one after it (so
+        // it shows there are more) fit after it, with room for the arrows.
+        let last = (selected + 1).min(titles.len() - 1);
         let mut first = 0;
         if width(pad, &titles) > room {
-            while first < selected && width(pad, &titles[first..=selected]) + 4 > room {
+            while first < selected && width(pad, &titles[first..=last]) + 4 > room {
                 first += 1;
             }
         }

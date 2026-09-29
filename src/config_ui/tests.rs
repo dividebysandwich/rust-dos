@@ -1260,6 +1260,12 @@ fn the_tabs_fit_or_scroll() {
             }
             let tab = ui.hits.iter().find(|h| matches!(h.target, Target::Tab(p) if p == page));
             assert!(tab.is_some(), "{:?} has its tab at {}x{}", page, width, height);
+            // And the next one shows, so it's clear there are more.
+            let at = PAGES.iter().position(|&p| p == page).unwrap();
+            if let Some(&next) = PAGES.get(at + 1) {
+                let tab = ui.hits.iter().find(|h| matches!(h.target, Target::Tab(p) if p == next));
+                assert!(tab.is_some(), "{:?} shows the next tab, {:?}, at {}x{}", page, next, width, height);
+            }
             assert!(ui.hits.iter().filter(|h| h.row == 1).all(|h| h.col + h.width < ui.layout.unwrap().cols));
         }
     }
