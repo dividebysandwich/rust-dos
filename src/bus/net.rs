@@ -124,6 +124,7 @@ impl Bus {
             None => self.net.ipx_queue.clear(),
         }
         self.sync_ipx();
+        self.serial_link_poll();
     }
 
     /// The next PIT tick the network needs attention at.

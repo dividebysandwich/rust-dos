@@ -12,6 +12,8 @@ use super::switch::{Port, Switch};
 use super::tunnel::client::{Client, ClientConfig, ClientEvent};
 use super::tunnel::discover;
 use super::tunnel::relay::{RelayConfig, RelayServer};
+use super::serial::SerialCommand;
+use super::serial::station::Station;
 use super::tunnel::wire::{RejectReason, RoomInfo, Roster};
 use std::collections::HashMap;
 use std::io;
@@ -67,6 +69,8 @@ pub enum Command {
     },
     /// What happened to the router's connections on the host.
     Nat(nat::Event),
+    /// The serial ports' links.
+    Serial(super::serial::SerialCommand),
 }
 
 /// Where this instance is with the LAN.
@@ -107,6 +111,8 @@ pub struct HubStatus {
     pub frames_in: u64,
     /// The network card's router: its TCP connections and UDP flows.
     pub nat: Option<(usize, usize)>,
+    /// The serial link to the other player.
+    pub serial: super::serial::station::SerialStatus,
 }
 
 #[derive(Default)]
@@ -215,6 +221,8 @@ struct State {
     /// there is a card, and its sockets on the host.
     router: Option<Router>,
     nat: nat::host::NatHost,
+    /// The serial ports' links and calls.
+    serial: Station,
 }
 
 impl State {
@@ -230,6 +238,7 @@ impl State {
             generation: 0,
             router: None,
             nat: nat::host::NatHost::new(tx.clone()),
+            serial: Station::new(tx.clone()),
             tx,
         }
     }
@@ -250,7 +259,14 @@ impl State {
                 .as_mut()
                 .and_then(|r| r.poll_delay(now))
                 .map(|ms| Duration::from_millis(ms.min(TICK.as_millis() as u64)));
+            // When the serial link has something to do next.
+            let serial_due = self.serial.next_due().map(|due| Duration::from_millis(due.saturating_sub(now)));
             tokio::select! {
+                _ = tokio::time::sleep(serial_due.unwrap_or(TICK)), if serial_due.is_some() => {
+                    let now = self.now();
+                    self.serial.poll(now);
+                    self.serial_flush();
+                }
                 _ = tokio::time::sleep(router_due.unwrap_or(TICK)), if router_due.is_some() => {
                     let now = self.now();
                     if let Some(router) = &mut self.router {
@@ -354,7 +370,53 @@ impl State {
                 }
                 self.router_actions();
             }
+            Command::Serial(command) => {
+                let now = self.now();
+                match command {
+                    SerialCommand::Setup(setup, queue) => {
+                        self.serial.setup(queue, setup, now);
+                        self.serial_roster();
+                    }
+                    SerialCommand::Port(port, command) => self.serial.command(port, command, now),
+                    SerialCommand::Tcp(event) => self.serial.tcp_event(event),
+                    SerialCommand::ListenFailed(notice) => self.serial.listen_failed(notice),
+                }
+                self.serial_flush();
+            }
         }
+    }
+
+    /// Pair the serial link up with the room as it is now.
+    fn serial_roster(&mut self) {
+        let now = self.now();
+        match &self.uplink {
+            Some(uplink) => {
+                let client = &uplink.client;
+                let roster = client.roster().cloned();
+                self.serial.roster(client.index(), roster.as_ref(), client.relay_serial(), now);
+            }
+            None => self.serial.roster(None, None, false, now),
+        }
+        self.serial_flush();
+    }
+
+    /// Send the serial link's datagrams, and tell what it has to say.
+    fn serial_flush(&mut self) {
+        let datagrams = std::mem::take(&mut self.serial.out);
+        if !datagrams.is_empty()
+            && let Some(uplink) = &mut self.uplink
+        {
+            let mut out = Vec::new();
+            for (peer, payload) in datagrams {
+                uplink.client.send_serial(peer, &payload, &mut out);
+            }
+            self.flush(out);
+        }
+        for notice in std::mem::take(&mut self.serial.notices) {
+            self.shared.notice(notice);
+        }
+        let status = self.serial.status();
+        self.shared.update(|s| s.serial = status);
     }
 
     /// Pass on what the router has for the card and for the host.
@@ -437,6 +499,7 @@ impl State {
             s.lan = LanState::Off;
             s.roster = None;
         });
+        self.serial_roster();
     }
 
     fn host(&mut self, port: u16, join: JoinRequest, share: bool) {
@@ -504,6 +567,8 @@ impl State {
             self.shared.update(|s| s.nat = Some(counts));
         }
         self.router_actions();
+        self.serial.poll(now);
+        self.serial_flush();
     }
 
     fn flush(&mut self, out: Vec<Vec<u8>>) {
@@ -541,12 +606,21 @@ impl State {
                         s.lan = LanState::Failed(RejectReason::Closed.describe().into());
                         s.roster = None;
                     });
+                    self.serial_roster();
                 }
                 ClientEvent::Rejected(reason) => {
                     self.shared.notice(format!("The relay at {} turned us away: {}", relay, reason.describe()));
                     self.shared.update(|s| s.lan = LanState::Failed(reason.describe().into()));
                 }
-                ClientEvent::Roster(roster) => self.shared.update(|s| s.roster = Some(roster)),
+                ClientEvent::Roster(roster) => {
+                    self.shared.update(|s| s.roster = Some(roster));
+                    self.serial_roster();
+                }
+                ClientEvent::Serial { from, payload } => {
+                    let now = self.now();
+                    self.serial.datagram(from, &payload, now);
+                    self.serial_flush();
+                }
                 ClientEvent::Lost => {
                     self.shared.notice(format!("Lost the relay at {}; joining it again", relay));
                     self.shared.update(|s| s.lan = LanState::Rejoining { relay });

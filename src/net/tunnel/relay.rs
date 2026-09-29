@@ -79,6 +79,10 @@ struct Member {
     warned: bool,
 }
 
+/// What this relay can do, as the header of its WELCOME, ACK and ROSTER
+/// says.
+const FEATURES: u8 = wire::FEATURE_SERIAL;
+
 /// The key of a room without a password.
 const NO_KEY: [u8; 32] = [0; 32];
 
@@ -210,7 +214,7 @@ impl Relay {
             let roster = Message::Roster(self.roster(room));
             for token in &room.members {
                 if let Some(member) = self.members.get(token) {
-                    out.push(Outgoing { to: member.addr, bytes: wire::encode(*token, &roster) });
+                    out.push(Outgoing { to: member.addr, bytes: wire::encode_with(*token, &roster, FEATURES) });
                 }
             }
         }
@@ -279,11 +283,16 @@ impl Relay {
                     self.forward(token, seq, &frame, out);
                 }
             }
+            Message::Serial { peer, payload } => {
+                if self.heard(now, token, from) && self.allow(now, token) {
+                    self.pass_serial(token, peer, payload, out);
+                }
+            }
             Message::Keepalive { stamp } => {
                 if self.heard(now, token, from) {
                     let (members, roster) = self.room_of(token).map_or((0, 0), |r| (r.members.len() as u16, r.version));
                     let ack = Message::Ack { stamp, members, roster };
-                    out.push(Outgoing { to: from, bytes: wire::encode(token, &ack) });
+                    out.push(Outgoing { to: from, bytes: wire::encode_with(token, &ack, FEATURES) });
                 } else {
                     let reply = Message::Reject { reason: RejectReason::Unknown };
                     out.push(Outgoing { to: from, bytes: wire::encode(0, &reply) });
@@ -299,7 +308,7 @@ impl Relay {
                     && let Some(room) = self.room_of(token)
                 {
                     let roster = Message::Roster(self.roster(room));
-                    out.push(Outgoing { to: from, bytes: wire::encode(token, &roster) });
+                    out.push(Outgoing { to: from, bytes: wire::encode_with(token, &roster, FEATURES) });
                 }
             }
             Message::Disband => {
@@ -464,7 +473,7 @@ impl Relay {
             from, room, index, named, members
         ));
         let welcome = Message::Welcome { index, keepalive: KEEPALIVE_S, members };
-        out.push(Outgoing { to: from, bytes: wire::encode(token, &welcome) });
+        out.push(Outgoing { to: from, bytes: wire::encode_with(token, &welcome, FEATURES) });
         self.touch(&room);
     }
 
@@ -509,6 +518,22 @@ impl Relay {
         }
         member.allowance -= 1.0;
         true
+    }
+
+    /// Pass a serial link's datagram from `sender` on to member `peer` of
+    /// its room, saying whom it is from.
+    fn pass_serial(&mut self, sender: u64, peer: u8, payload: Vec<u8>, out: &mut Vec<Outgoing>) {
+        let Some(member) = self.members.get(&sender) else { return };
+        let Some(room) = self.rooms.get(&member.room) else { return };
+        let index = member.index;
+        let target = room.members.iter().filter(|t| **t != sender).find_map(|t| {
+            let m = self.members.get(t)?;
+            (m.index == peer).then_some((*t, m.addr))
+        });
+        if let Some((token, addr)) = target {
+            let message = Message::Serial { peer: index, payload };
+            out.push(Outgoing { to: addr, bytes: wire::encode(token, &message) });
+        }
     }
 
     /// Learn the source of the frame `sender` sent and pass the frame on.
@@ -848,6 +873,33 @@ mod tests {
                 RoomInfo { name: "duke".into(), members: 1, password: false },
             ]
         );
+    }
+
+    #[test]
+    fn passes_serial_links_to_one_member() {
+        let mut relay = Relay::new(RelayConfig::default());
+        let (a, _) = join(&mut relay, 0, 1, "doom", None).unwrap();
+        let (b, _) = join(&mut relay, 0, 2, "doom", None).unwrap();
+        join(&mut relay, 0, 3, "doom", None).unwrap();
+        let (d, _) = join(&mut relay, 0, 4, "duke", None).unwrap();
+        let serial = |relay: &mut Relay, from: u16, token: u64, peer: u8| {
+            let mut out = Vec::new();
+            let message = Message::Serial { peer, payload: vec![1, 2, 3] };
+            relay.handle(1, addr(from), &wire::encode(token, &message), &mut out);
+            out
+        };
+        let out = serial(&mut relay, 1, a, 2);
+        let delivered = one(&mut out.clone());
+        assert_eq!(delivered.to, addr(2));
+        assert_eq!(message(&delivered.bytes), Packet { token: b, message: Message::Serial { peer: 1, payload: vec![1, 2, 3] } });
+        // Not to itself, nor into another room, nor to no one.
+        assert!(serial(&mut relay, 1, a, 1).is_empty());
+        assert!(serial(&mut relay, 4, d, 1).is_empty());
+        assert!(serial(&mut relay, 1, a, 9).is_empty());
+        // The relay says it passes them on.
+        let mut out = Vec::new();
+        relay.handle(2, addr(1), &wire::encode(a, &Message::Keepalive { stamp: 1 }), &mut out);
+        assert_eq!(wire::features(&one(&mut out).bytes), wire::FEATURE_SERIAL);
     }
 
     #[test]

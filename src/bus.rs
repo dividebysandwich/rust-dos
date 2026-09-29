@@ -1313,8 +1313,8 @@ impl Bus {
         }
         // Frames the network passed on since the last batch.
         self.net_poll();
-        // The serial mouse's motion, and what came for the serial link.
-        self.serial_poll();
+        // The serial mouse's motion.
+        self.serial_mouse_poll();
         self.refresh_irq();
     }
 

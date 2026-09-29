@@ -458,6 +458,7 @@ impl Net {
                 hub.send(hub::Command::Attach { port: Port::Nic, mac: nic.mac, queue: self.nic_queue.clone() });
             }
             self.hub = Some(hub);
+            self.send_serial_setup();
         }
         Ok(self.hub.as_ref().unwrap())
     }

@@ -62,7 +62,7 @@ const MSR_TERI: u8 = 0x04;
 /// Characters a FIFO holds.
 const FIFO: usize = 16;
 /// Characters waiting outside the chip for its receive FIFO, at most.
-const WAITING: usize = 64 * 1024;
+const WAITING: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Uart {

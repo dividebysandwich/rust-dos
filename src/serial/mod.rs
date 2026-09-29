@@ -147,11 +147,11 @@ impl SerialSettings {
         const PORTS: [&str; 4] = ["serial1", "serial2", "serial3", "serial4"];
         const IRQ_KEYS: [&str; 4] = ["serial1irq", "serial2irq", "serial3irq", "serial4irq"];
         let mut entries = Vec::new();
-        for n in 0..4 {
-            entries.push((PORTS[n], Some(self.ports[n].name().to_string())));
+        for (key, port) in PORTS.into_iter().zip(self.ports) {
+            entries.push((key, Some(port.name().to_string())));
         }
-        for n in 0..4 {
-            entries.push((IRQ_KEYS[n], Some(self.irqs[n].to_string())));
+        for (key, irq) in IRQ_KEYS.into_iter().zip(self.irqs) {
+            entries.push((key, Some(irq.to_string())));
         }
         entries.push(("uart", Some(if self.chip == Chip::Ns8250 { "8250" } else { "16550" }.into())));
         entries.push(("mousetype", Some(self.mouse.name().into())));

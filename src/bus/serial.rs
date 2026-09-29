@@ -54,7 +54,7 @@ impl Bus {
             }
         }
         self.serial.settings = settings.clone();
-        self.net.set_serial(settings.linked_port(), settings.modem_listen, settings.modem_telnet);
+        self.net.set_serial(settings);
         self.sync_serial_irqs();
         if self.boot.is_none() {
             self.write_serial_bda();
@@ -117,9 +117,8 @@ impl Bus {
     }
 
     /// At the start of a batch: the host mouse's motion and buttons to a
-    /// serial mouse in use, and what the network has for the port that
-    /// goes to another machine.
-    pub(crate) fn serial_poll(&mut self) {
+    /// serial mouse in use.
+    pub(crate) fn serial_mouse_poll(&mut self) {
         if !self.serial.any() {
             return;
         }
@@ -140,6 +139,16 @@ impl Bus {
             self.mouse.serial_dx = 0;
             self.mouse.serial_dy = 0;
         }
+    }
+
+    /// With the network's frames: the characters the ports sent go out,
+    /// and what came for them goes in.
+    pub(crate) fn serial_link_poll(&mut self) {
+        if !self.serial.any() {
+            return;
+        }
+        let now = self.clock.now_ticks();
+        self.net.serial_flush();
         for (n, event) in self.net.serial_events() {
             if let Some(p) = &mut self.serial.ports[n] {
                 p.link_event(event, now);

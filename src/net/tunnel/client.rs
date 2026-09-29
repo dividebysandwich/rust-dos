@@ -58,6 +58,11 @@ pub enum ClientEvent {
     /// Who is in the room changed.
     Roster(Roster),
     Frame(Vec<u8>),
+    /// A serial link's datagram from member `from`.
+    Serial {
+        from: u8,
+        payload: Vec<u8>,
+    },
 }
 
 pub struct Client {
@@ -74,6 +79,8 @@ pub struct Client {
     members: u16,
     rtt_ms: Option<u32>,
     roster: Option<Roster>,
+    /// What the relay can do (`wire::FEATURE_*`), as it last said.
+    features: u8,
     seq: u16,
     reassembler: Reassembler<(u8, u16)>,
 }
@@ -94,6 +101,7 @@ impl Client {
             members: 0,
             rtt_ms: None,
             roster: None,
+            features: 0,
             seq: 0,
             reassembler: Reassembler::new(),
         };
@@ -124,6 +132,19 @@ impl Client {
         self.roster.as_ref()
     }
 
+    /// This member's index in the room, once joined.
+    pub fn index(&self) -> Option<u8> {
+        match self.phase {
+            Phase::Joined { index, .. } => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Whether the relay passes serial links on.
+    pub fn relay_serial(&self) -> bool {
+        self.features & wire::FEATURE_SERIAL != 0
+    }
+
     fn send_hello(&mut self, now: u64, out: &mut Vec<Vec<u8>>) {
         self.phase = Phase::Hello;
         self.roster = None;
@@ -148,6 +169,7 @@ impl Client {
     pub fn handle(&mut self, now: u64, from: SocketAddr, bytes: &[u8], out: &mut Vec<Vec<u8>>) -> Vec<ClientEvent> {
         let Ok(packet) = wire::decode(bytes) else { return Vec::new() };
         let from_relay = from == self.config.relay;
+        let features = wire::features(bytes);
         let mut events = Vec::new();
         match (self.phase, packet.message) {
             (Phase::Hello, Message::Challenge { cookie, fresh, .. }) if from_relay => {
@@ -161,6 +183,7 @@ impl Client {
                 self.tries = 0;
                 self.keepalive_ms = (keepalive.max(1) as u64) * 1000;
                 self.members = members;
+                self.features = features;
                 events.push(ClientEvent::Joined { index, members });
             }
             (Phase::Hello | Phase::Joining { .. }, Message::Reject { reason }) if from_relay => match reason {
@@ -183,6 +206,7 @@ impl Client {
             (Phase::Joined { token, .. }, Message::Ack { stamp, members, roster }) if packet.token == token => {
                 self.last_heard = now;
                 self.members = members;
+                self.features = features;
                 self.rtt_ms = Some((now as u32).wrapping_sub(stamp));
                 // A roster that went missing.
                 if self.roster.as_ref().is_none_or(|r| r.version != roster) {
@@ -192,8 +216,13 @@ impl Client {
             (Phase::Joined { token, .. }, Message::Roster(roster)) if packet.token == token => {
                 self.last_heard = now;
                 self.members = roster.total;
+                self.features = features;
                 self.roster = Some(roster.clone());
                 events.push(ClientEvent::Roster(roster));
+            }
+            (Phase::Joined { token, .. }, Message::Serial { peer, payload }) if packet.token == token => {
+                self.last_heard = now;
+                events.push(ClientEvent::Serial { from: peer, payload });
             }
             (Phase::Joined { token, .. }, Message::Data { source, seq, fragment, count, payload })
                 if packet.token == token =>
@@ -248,6 +277,16 @@ impl Client {
             };
             out.push(wire::encode(token, &data));
         }
+    }
+
+    /// Send a serial link's datagram to member `peer` (at most
+    /// `wire::MAX_FRAGMENT` bytes), if joined.
+    pub fn send_serial(&mut self, peer: u8, payload: &[u8], out: &mut Vec<Vec<u8>>) {
+        let Phase::Joined { token, .. } = self.phase else { return };
+        if payload.is_empty() || payload.len() > wire::MAX_FRAGMENT {
+            return;
+        }
+        out.push(wire::encode(token, &Message::Serial { peer, payload: payload.to_vec() }));
     }
 
     /// Say goodbye, if joined.

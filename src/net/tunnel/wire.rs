@@ -11,6 +11,12 @@
 //! mapping with KEEPALIVE and ACK, until LEAVE. The relay tells a room's
 //! members who is in it with ROSTER as that changes, and again when they
 //! ask with WHO; the room's host can end it for everyone with DISBAND.
+//! SERIAL carries a serial port's link from one member to another, which
+//! the relay passes on as it is.
+//!
+//! The first reserved byte of the header holds what the sender can do
+//! (`FEATURE_*`), for what was added since version 1: a relay says so in
+//! WELCOME, ACK and ROSTER. Older ones leave it 0, and ignore it.
 //!
 //! Requests that a relay answers before knowing the sender are at least as
 //! long as the answer, so a relay can't be used to amplify traffic towards
@@ -51,6 +57,10 @@ const ROOMS: u8 = 13;
 const ROSTER: u8 = 14;
 const WHO: u8 = 15;
 const DISBAND: u8 = 16;
+const SERIAL: u8 = 17;
+
+/// The relay passes SERIAL on.
+pub const FEATURE_SERIAL: u8 = 0x01;
 
 /// Why a relay turned a client away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +271,12 @@ pub enum Message {
     /// `Closed`).
     Disband,
     Leave,
+    /// A serial link's datagram: to member `peer` from a member, from
+    /// member `peer` (filled in by the relay) to one.
+    Serial {
+        peer: u8,
+        payload: Vec<u8>,
+    },
 }
 
 /// A decoded datagram.
@@ -276,6 +292,19 @@ pub enum DecodeError {
     Malformed,
     /// A tunnel datagram of another protocol version.
     Version(u8),
+}
+
+/// What the sender of datagram `bytes` can do (`FEATURE_*`).
+pub fn features(bytes: &[u8]) -> u8 {
+    bytes.get(6).copied().unwrap_or(0)
+}
+
+/// The datagram of `message` with `token` and the sender's `features` in
+/// its header.
+pub fn encode_with(token: u64, message: &Message, features: u8) -> Vec<u8> {
+    let mut out = encode(token, message);
+    out[6] = features;
+    out
 }
 
 /// The datagram of `message` with `token` in its header.
@@ -339,6 +368,10 @@ pub fn encode(token: u64, message: &Message) -> Vec<u8> {
             out.push(*count);
             out.extend_from_slice(payload);
         }
+        Message::Serial { peer, payload } => {
+            out.push(*peer);
+            out.extend_from_slice(payload);
+        }
         Message::Keepalive { stamp } => out.extend_from_slice(&stamp.to_be_bytes()),
         Message::Ack { stamp, members, roster } => {
             out.extend_from_slice(&stamp.to_be_bytes());
@@ -387,6 +420,7 @@ fn kind(message: &Message) -> u8 {
         Message::Roster(_) => ROSTER,
         Message::Who => WHO,
         Message::Disband => DISBAND,
+        Message::Serial { .. } => SERIAL,
     }
 }
 
@@ -561,6 +595,14 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, DecodeError> {
             }
             Message::Data { source, seq, fragment, count, payload }
         }
+        SERIAL => {
+            let peer = body.u8()?;
+            let payload = body.rest().to_vec();
+            if payload.is_empty() || payload.len() > MAX_FRAGMENT {
+                return Err(DecodeError::Malformed);
+            }
+            Message::Serial { peer, payload }
+        }
         KEEPALIVE => Message::Keepalive { stamp: body.u32()? },
         ACK => Message::Ack { stamp: body.u32()?, members: body.u16()?, roster: body.u16()? },
         LEAVE => Message::Leave,
@@ -591,8 +633,13 @@ mod tests {
         // Anything cut short is refused.
         for len in 0..bytes.len() {
             if let Ok(packet) = decode(&bytes[..len]) {
-                // Only DATA may lose bytes and still be one.
-                assert!(matches!(packet.message, Message::Data { .. }), "{:?} cut to {}", message, len);
+                // Only DATA and SERIAL may lose bytes and still be one.
+                assert!(
+                    matches!(packet.message, Message::Data { .. } | Message::Serial { .. }),
+                    "{:?} cut to {}",
+                    message,
+                    len
+                );
             }
         }
     }
@@ -640,6 +687,19 @@ mod tests {
         round_trip(42, Message::Who);
         round_trip(42, Message::Disband);
         round_trip(42, Message::Leave);
+        round_trip(42, Message::Serial { peer: 2, payload: vec![0, 1, 0xFF] });
+    }
+
+    #[test]
+    fn features_ride_in_the_header() {
+        let welcome = Message::Welcome { index: 1, keepalive: 5, members: 1 };
+        let bytes = encode_with(7, &welcome, FEATURE_SERIAL);
+        assert_eq!(features(&bytes), FEATURE_SERIAL);
+        assert_eq!(decode(&bytes), Ok(Packet { token: 7, message: welcome.clone() }));
+        assert_eq!(features(&encode(7, &welcome)), 0);
+        let serial = |len| encode(1, &Message::Serial { peer: 1, payload: vec![0; len] });
+        assert!(decode(&serial(0)).is_err());
+        assert!(decode(&serial(MAX_FRAGMENT + 1)).is_err());
     }
 
     #[test]
