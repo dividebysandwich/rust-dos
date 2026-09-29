@@ -1,3 +1,4 @@
+pub mod achievements;
 pub mod apm;
 pub mod asm16;
 pub mod audio;

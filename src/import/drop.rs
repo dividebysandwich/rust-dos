@@ -44,7 +44,7 @@ pub fn drop_action(path: &Path) -> DropAction {
     match ext.as_str() {
         "conf" => return DropAction::ImportGame(path),
         "exe" | "com" | "bat" => return DropAction::Run(path),
-        "zip" => return DropAction::Zip(path),
+        "zip" | "dosz" => return DropAction::Zip(path),
         _ => {}
     }
     match diskimage::detect(&path, DriveKind::HardDisk) {

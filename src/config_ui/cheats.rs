@@ -71,6 +71,9 @@ impl ConfigUi {
 
     pub(super) fn cheats_key(&mut self, key: UiKey, host: &mut dyn Host) {
         let Some(row) = self.cheat_row() else { return };
+        if let Err(e) = host.cheats_allowed() {
+            return self.error(e);
+        }
         let cheats = &mut self.cheats;
         let dir = match key {
             UiKey::Left => -1,
@@ -151,6 +154,10 @@ impl ConfigUi {
     }
 
     pub(super) fn cheats_edit_key(&mut self, key: UiKey, host: &mut dyn Host) {
+        if let Err(e) = host.cheats_allowed() {
+            self.cheats.edit = None;
+            return self.error(e);
+        }
         let Some((row, field)) = &mut self.cheats.edit else { return };
         if field.key(key) {
             return;

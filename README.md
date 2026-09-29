@@ -50,6 +50,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   import of GOG and DOSBox games
 * **[Save states](#save-states)** (nine slots per game) and rewind
 * **Cheats:** find a game's values in memory, and change or freeze them
+* **[RetroAchievements](CONFIGURATION.md#retroachievements):**
+  achievements, leaderboards and rich presence, hardcore mode included
 * **Capture:** screenshots, and sound, video and GIF recordings
 * **Joysticks** from game controllers, or the mouse as one
 * **[Networking](CONFIGURATION.md#playing-over-a-lan):** IPX games between

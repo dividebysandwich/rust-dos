@@ -236,10 +236,9 @@ impl ConfigUi {
         self.status = None;
     }
 
-    /// What the window keeps up to date while it is open, for the frontend
-    /// to call every frame: the room browser's LAN and rooms, asked for
-    /// again as the search changes and every few seconds.
-    pub fn poll(&mut self, host: &mut dyn Host) {
+    /// The room browser's LAN and rooms, asked for again as the search
+    /// changes and every few seconds.
+    pub(super) fn poll_rooms(&mut self, host: &mut dyn Host) {
         let Some(browser) = &mut self.rooms else { return };
         let Some(view) = host.lan() else { return };
         if browser.waiting && !view.listing.asking {

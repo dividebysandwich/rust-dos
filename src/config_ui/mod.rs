@@ -6,6 +6,7 @@
 //! it keys, typed text and clicks, and carries out what it asks for through
 //! `Host`. What the frontend doesn't have (`Frontend`) isn't offered.
 
+mod achievements;
 mod autoexec;
 mod browser;
 mod cheats;
@@ -145,12 +146,35 @@ pub trait Host {
     fn poke(&mut self, addr: usize, bytes: &[u8]) {
         let _ = (addr, bytes);
     }
+    /// Whether cheats may be used now: not in RetroAchievements' hardcore
+    /// mode.
+    fn cheats_allowed(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// The values the machine keeps frozen, and new ones.
     fn freezes(&self) -> Vec<crate::cheats::Freeze> {
         Vec::new()
     }
     fn set_freezes(&mut self, freezes: Vec<crate::cheats::Freeze>) {
         let _ = freezes;
+    }
+    /// RetroAchievements, as the Achievements page shows it; None where
+    /// there is none.
+    fn achievements(&self) -> Option<crate::achievements::AchievementsView> {
+        None
+    }
+    /// Log in to RetroAchievements; how it goes shows in `achievements`.
+    fn achievements_login(&mut self, username: &str, password: &str) -> Result<(), String> {
+        let _ = (username, password);
+        Err("There is no RetroAchievements here".to_string())
+    }
+    fn achievements_logout(&mut self) {}
+    /// Tell RetroAchievements which version the game playing is: the zip
+    /// or .dosz `archive` it came in, whose hash its profile keeps.
+    /// Returns what to tell the user.
+    fn identify_game(&mut self, archive: &Path) -> Result<String, String> {
+        let _ = archive;
+        Err("There is no RetroAchievements here".to_string())
     }
     /// Whether save states can be kept (there is somewhere to keep them).
     fn states_available(&self) -> bool {
@@ -231,10 +255,11 @@ enum Page {
     Games,
     States,
     Cheats,
+    Achievements,
     Stats,
 }
 
-const PAGES: [Page; 11] = [
+const PAGES: [Page; 12] = [
     Page::Drives,
     Page::Display,
     Page::Emulator,
@@ -245,6 +270,7 @@ const PAGES: [Page; 11] = [
     Page::Games,
     Page::States,
     Page::Cheats,
+    Page::Achievements,
     Page::Stats,
 ];
 
@@ -261,6 +287,7 @@ impl Page {
             Page::Games => "Games",
             Page::States => "States",
             Page::Cheats => "Cheats",
+            Page::Achievements => "Achievements",
             Page::Stats => "Stats",
         }
     }
@@ -268,7 +295,7 @@ impl Page {
     fn items(self) -> &'static [Item] {
         use Item::*;
         match self {
-            Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Stats => &[],
+            Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
             Page::Display => {
                 &[Scale, Fullscreen, Aspect, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
@@ -1204,6 +1231,8 @@ pub(super) enum Pick {
     ImportGame,
     /// Where a new disk image goes.
     ImagePath,
+    /// The archive a game came in, for RetroAchievements.
+    AchievementsArchive,
 }
 
 struct Status {
@@ -1304,6 +1333,8 @@ pub struct ConfigUi {
     notice: Option<String>,
     /// The Cheats page's search.
     cheats: cheats::Cheats,
+    /// The Achievements page.
+    achievements: achievements::Achievements,
     /// What the Stats page shows (`set_stats`), and the graphs the last
     /// frame drew as text, drawn over it in pixels.
     stats: Option<crate::stats::StatsView>,
@@ -1375,6 +1406,7 @@ impl ConfigUi {
             confirm_delete: None,
             notice: None,
             cheats: cheats::Cheats::default(),
+            achievements: achievements::Achievements::default(),
             stats: None,
             plots: Vec::new(),
             overlay: false,
@@ -1396,6 +1428,20 @@ impl ConfigUi {
     /// Stats page, which shows it running.
     pub fn pauses_machine(&self) -> bool {
         self.open && !matches!(self.page, Page::Mixer | Page::Stats)
+    }
+
+    /// What the window keeps up to date while it is open, for the frontend
+    /// to call every frame: the room browser and the Achievements page.
+    pub fn poll(&mut self, host: &mut dyn Host) {
+        self.poll_rooms(host);
+        self.poll_achievements(host);
+    }
+
+    /// RetroAchievements' account changed outside the window (logging in
+    /// gave a token): the settings have it, to show and save.
+    pub fn sync_achievements(&mut self, username: &str, token: &str) {
+        self.settings.achievements.username = username.to_string();
+        self.settings.achievements.token = token.to_string();
     }
 
     /// The mixer's settings changed outside the window (the MIXER
@@ -1446,7 +1492,10 @@ impl ConfigUi {
         self.help = None;
         self.confirm_delete = None;
         self.cheats.edit = None;
+        self.achievements.edit = None;
         self.cheats.refresh(host);
+        self.achievements.edit = None;
+        self.achievements.refresh(host);
         self.refresh_games(host);
         self.refresh_states(host);
     }
@@ -1471,6 +1520,7 @@ impl ConfigUi {
             Page::Games => self.games.len() + 1 + self.frontend.host_files as usize,
             Page::States => self.states.len(),
             Page::Cheats => self.cheats.rows().len(),
+            Page::Achievements => self.achievements.rows(self.active_game.is_some()).len(),
             Page::Stats => 0,
             _ => self.items().len(),
         }
@@ -1526,6 +1576,8 @@ impl ConfigUi {
             self.rooms_key(key, host);
         } else if self.cheats.edit.is_some() {
             self.cheats_edit_key(key, host);
+        } else if self.achievements.edit.is_some() {
+            self.achievements_edit_key(key, host);
         } else if self.popup.is_some() {
             self.popup_key(key, host);
         } else if self.edit.is_some() {
@@ -1574,6 +1626,7 @@ impl ConfigUi {
                 {
                     self.edit = None;
                     self.cheats.edit = None;
+                    self.achievements.edit = None;
                     self.show_page(page);
                 }
             }
@@ -1581,11 +1634,13 @@ impl ConfigUi {
             Target::Row(i) => {
                 self.edit = None;
                 self.cheats.edit = None;
+                self.achievements.edit = None;
                 self.select(i);
             }
             Target::Button(i) => {
                 self.edit = None;
                 self.cheats.edit = None;
+                self.achievements.edit = None;
                 self.select(i);
                 self.key(UiKey::Enter, host);
             }
@@ -1597,6 +1652,7 @@ impl ConfigUi {
             Target::Step(i, dir) => {
                 self.edit = None;
                 self.cheats.edit = None;
+                self.achievements.edit = None;
                 self.row = i;
                 self.key(if dir < 0 { UiKey::Left } else { UiKey::Right }, host);
             }
@@ -1689,6 +1745,7 @@ impl ConfigUi {
             _ if self.page == Page::Games => self.games_key(key, host),
             _ if self.page == Page::States => self.states_key(key, host),
             _ if self.page == Page::Cheats => self.cheats_key(key, host),
+            _ if self.page == Page::Achievements => self.achievements_key(key, host),
             _ if self.page == Page::Stats => {}
             _ => self.setting_key(key, host),
         }
@@ -1981,6 +2038,7 @@ impl ConfigUi {
                 MT32_ROMS,
             ),
             Pick::ImportGame => ("Pick a GOG game's folder or a DOSBox .conf", String::new(), true, &["conf"][..]),
+            Pick::AchievementsArchive => ("Pick the zip or .dosz the game came in", String::new(), false, &["zip", "dosz"][..]),
             Pick::ImagePath => (
                 "Pick the directory for the new image",
                 self.image_dialog.as_ref().map(|d| d.path.text()).unwrap_or_default(),
@@ -2036,6 +2094,13 @@ impl ConfigUi {
                         self.settings.sound.soundfont = Some(path);
                         self.changed(Item::SoundFont, host);
                     }
+                    Pick::AchievementsArchive => match host.identify_game(&path) {
+                        Ok(message) => {
+                            self.info(message);
+                            self.achievements.refresh(host);
+                        }
+                        Err(e) => self.error(e),
+                    },
                     Pick::ImportGame => match host.import_game(&path) {
                         Ok((id, message)) => {
                             self.refresh_games(host);
@@ -2110,6 +2175,8 @@ impl ConfigUi {
             self.draw_states(&mut g, content.clone());
         } else if self.page == Page::Cheats {
             self.draw_cheats(&mut g, content.clone());
+        } else if self.page == Page::Achievements {
+            self.draw_achievements(&mut g, content.clone());
         } else if self.page == Page::Stats {
             self.draw_stats(&mut g, content.clone());
         } else {
@@ -2727,10 +2794,12 @@ impl ConfigUi {
                 hints.insert(1, ("\u{2190}\u{2192}", "Field", Right));
             }
             hints
-        } else if self.edit.is_some() || self.cheats.edit.is_some() {
+        } else if self.edit.is_some() || self.cheats.edit.is_some() || self.achievements.edit.is_some() {
             vec![("Enter", "OK", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::Cheats {
             self.cheats_hints()
+        } else if self.page == Page::Achievements {
+            self.achievements_hints()
         } else if self.page == Page::Stats {
             let overlay = if self.overlay { "Hide overlay" } else { "Show overlay" };
             vec![("Tab", "Page", Tab), ("Esc", "Close", Esc), ("Ctrl+Shift+F12", overlay, Overlay)]

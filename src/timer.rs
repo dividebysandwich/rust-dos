@@ -44,6 +44,11 @@ fn duration_to_ticks(d: Duration) -> u64 {
     (d.as_nanos() * PIT_HZ as u128 / 1_000_000_000) as u64
 }
 
+/// A video frame (1/60 s) in PIT ticks.
+pub fn frame_ticks() -> u64 {
+    duration_to_ticks(FRAME)
+}
+
 /// Instruction counter and the mapping between instructions and emulated
 /// time. The main loop advances `icount` and calls `Bus::service_timers`
 /// whenever it reaches `deadline`.

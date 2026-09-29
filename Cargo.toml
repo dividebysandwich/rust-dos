@@ -31,6 +31,9 @@ web-time = "1"
 # The LAN tunnel's password proofs and cookies (src/net/tunnel/auth.rs).
 hmac = "0.13"
 sha2 = "0.11"
+# The hashes RetroAchievements knows games by, and signs unlocks with
+# (src/achievements).
+md-5 = "0.11"
 # Compressed audio tracks of CD images (Ogg Vorbis, FLAC, MP3).
 symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
 
@@ -55,6 +58,8 @@ midir = { version = "0.11", optional = true }
 getrandom = "0.3"
 # The TCP of the network card's router to the internet (src/net/nat).
 smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
+# HTTPS to retroachievements.org (src/achievements/http.rs).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 # The dynamic recompiler's code generator and its executable memory
 # (src/dynrec).

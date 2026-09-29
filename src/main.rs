@@ -30,6 +30,7 @@ use rust_dos::{
     audio, capture, config, config_ui, cpu, disk, exec, games, joystick, keyboard, mount, recorder, shell, sound, timer,
     video,
 };
+use rust_dos::achievements::{Achievements, http::HttpTransport};
 use rust_dos::games::{ActiveGame, GameEntry, NewGame};
 use rust_dos::hardware::Hardware;
 use rust_dos::savestate::{self, slots};
@@ -260,6 +261,12 @@ fn main() -> Result<(), String> {
         None => debug::DebugHub::disabled(),
     };
     let mut event_pump = sdl_context.event_pump()?;
+    // RetroAchievements: the session with the site, and when the game's
+    // logic is checked next (emulated PIT ticks, every 1/60 s). Hardcore
+    // mode needs the debug server off, which could change memory.
+    let mut achievements = Achievements::new(Box::new(HttpTransport::start()), settings.achievements.clone());
+    achievements.hardcore_allowed = args.debug_server.is_none();
+    let mut next_check = 0u64;
 
     // Load Shell Code into Memory
     cpu.load_shell();
@@ -359,6 +366,7 @@ fn main() -> Result<(), String> {
                 state_done: &state_done,
                 slot: &mut slot,
                 state_loaded: &mut state_loaded,
+                achievements: &mut achievements,
             }
         };
     }
@@ -540,7 +548,9 @@ fn main() -> Result<(), String> {
                     // third frame, until F11 comes up.
                     if keycode == Keycode::F11 && alt && !ctrl {
                         if !repeat && !paused && !ui.is_open() && rewinding.is_none() {
-                            if settings.rewind {
+                            if achievements.hardcore_active() {
+                                osd.show("Hardcore mode: no rewind while RetroAchievements plays");
+                            } else if settings.rewind {
                                 release_input(&mut cpu, &mut held);
                                 let now = cpu.bus.clock.now_ns();
                                 rewinder.push(now, savestate::machine::save(&cpu));
@@ -696,6 +706,9 @@ fn main() -> Result<(), String> {
                     }
                     // The machine goes on from where rewinding got to.
                     if keycode == Keycode::F11 && rewinding.take().is_some() {
+                        // The game's achievements wait for their conditions
+                        // to be false again.
+                        achievements.reset();
                         pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
                         osd.clear_lasting();
                         next_capture = (cpu.bus.clock.now_ns() + REWIND_INTERVAL_NS, std::time::Instant::now());
@@ -838,6 +851,7 @@ fn main() -> Result<(), String> {
         // stops, as its time would jump.
         if std::mem::take(&mut state_loaded) {
             rewinder.clear();
+            achievements.reset();
             release_input(&mut cpu, &mut held);
             dbg.release_keys(&mut cpu);
             if let Some(video) = video_recording.take() {
@@ -893,7 +907,26 @@ fn main() -> Result<(), String> {
         // Per-instruction debug hook (breakpoints / stepping / tracing) is
         // only consulted when something actually needs it.
         let dbg_hot = dbg.begin_batch(&cpu);
-        exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
+        if achievements.checking() && !waiting {
+            // A game's achievements are checked every 1/60 s of emulated
+            // time, as in the emulators the sets are made with, fast
+            // forwarding or not: the batch runs to each check.
+            loop {
+                cpu.bus.start_batch(batch_end.min(cpu.bus.clock.icount_at(next_check)));
+                let reason = exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
+                let now = cpu.bus.clock.now_ticks();
+                if now >= next_check {
+                    achievements.do_frame(cpu.bus.ram(), cpu.bus.boot.is_some());
+                    let frame = timer::frame_ticks();
+                    next_check = if next_check + frame <= now { now + frame } else { next_check + frame };
+                }
+                if reason != exec::StopReason::BatchEnd || cpu.bus.clock.icount >= batch_end {
+                    break;
+                }
+            }
+        } else {
+            exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
+        }
         dbg.end_batch(&cpu);
         let translated = cpu.dynrec.counts().executed.saturating_sub(batch_translated);
 
@@ -968,6 +1001,25 @@ fn main() -> Result<(), String> {
         for notice in cpu.bus.net.take_notices() {
             cpu.bus.log_string(&format!("[LAN] {}", notice));
             osd.show(notice);
+        }
+        // RetroAchievements: the site's answers, what to tell the player,
+        // the leaderboards being attempted, and a token to keep.
+        achievements.poll();
+        for notice in achievements.take_notices() {
+            cpu.bus.log_string(&format!("[ACHIEVEMENTS] {}: {}", notice.title, notice.detail));
+            osd.notify(notice.title, notice.detail, notice.big);
+        }
+        osd.set_corner(achievements.trackers());
+        if let Some((username, token)) = achievements.take_new_token() {
+            ui.sync_achievements(&username, &token);
+            if let Err(e) = host!().keep_token(&username, &token) {
+                osd.show(format!("The RetroAchievements login can't be saved: {}", e));
+            }
+        }
+        // No cheats in hardcore mode.
+        if achievements.hardcore_active() && !cpu.bus.freezes.is_empty() {
+            cpu.bus.freezes.clear();
+            osd.show("Hardcore mode: the frozen values are free again");
         }
         // Save states written.
         for result in state_results.try_iter() {
@@ -1316,6 +1368,7 @@ struct MainHost<'m, 'd> {
     /// machine's keys and a video recording go).
     slot: &'m mut u8,
     state_loaded: &'m mut bool,
+    achievements: &'m mut Achievements,
 }
 
 impl MainHost<'_, '_> {
@@ -1355,6 +1408,17 @@ impl MainHost<'_, '_> {
         self.cpu.bus.config_dir = std::path::absolute(dir).ok();
         self.cpu.queue_batch_lines(&prepared.autoexec);
         self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} (games/{}.conf)", prepared.name, id));
+        // What RetroAchievements knows the game by.
+        let hash = prepared.achievements.as_deref().and_then(|value| {
+            games::achievements_hash(value, dir, rust_dos::hostdirs::home_dir().as_deref())
+                .map_err(|e| {
+                    if self.settings.achievements.enabled {
+                        config_warning(self.cpu, &format!("games/{}.conf: achievements: {}", id, e));
+                    }
+                })
+                .ok()
+        });
+        self.achievements.game_started(hash, &prepared.name);
         let message = format!("Starting {}", prepared.name);
         *self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced });
         Ok(message)
@@ -1481,6 +1545,9 @@ impl MainHost<'_, '_> {
     /// first, as the settings have it, then the machine. Memory can't
     /// change its size, so a state of another memsize is refused.
     fn load_file(&mut self, path: &std::path::Path) -> Result<slots::Header, String> {
+        if self.achievements.hardcore_active() {
+            return Err("hardcore mode: no save states while RetroAchievements plays".to_string());
+        }
         let data = std::fs::read(path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => "empty".to_string(),
             _ => format!("{}: {}", path.display(), e),
@@ -1516,8 +1583,28 @@ impl MainHost<'_, '_> {
         self.load_file(&path)
     }
 
+    /// RetroAchievements' login: kept in the settings, and in the
+    /// configuration file (not a game's profile), without the password.
+    fn keep_token(&mut self, username: &str, token: &str) -> Result<(), String> {
+        let set = |s: &mut Settings| {
+            s.achievements.username = username.to_string();
+            s.achievements.token = token.to_string();
+        };
+        set(self.settings);
+        if let Some(game) = self.game.as_mut() {
+            set(&mut game.base);
+            set(&mut game.saved);
+        }
+        let before = self.saved.settings.clone();
+        set(&mut self.saved.settings);
+        let Some(path) = self.saved.file.clone() else { return Ok(()) };
+        let home = rust_dos::hostdirs::home_dir();
+        config::save(&path, &before, &self.saved.settings, &[], home.as_deref(), config::Saving::Changes)
+    }
+
     fn end_game(&mut self, game: ActiveGame) {
         self.cpu.bus.log_string(&format!("[CONFIG] The game {} has ended", game.name));
+        self.achievements.game_ended();
         self.cpu.bus.config_dir = config_dir(self.saved.file.as_deref());
         if let Err(e) = self.apply(&game.base) {
             config_warning(self.cpu, &e);
@@ -1571,6 +1658,9 @@ impl Host for MainHost<'_, '_> {
         }
         if new.keyboard_layout != old.keyboard_layout {
             apply_keyboard_layout(self.cpu, new.keyboard_layout);
+        }
+        if new.achievements != old.achievements {
+            self.achievements.apply(&new.achievements);
         }
         if !self.machine.differs(new) {
             return Ok(None);
@@ -1711,6 +1801,40 @@ impl Host for MainHost<'_, '_> {
 
     fn memory(&self) -> &[u8] {
         self.cpu.bus.ram()
+    }
+
+    fn cheats_allowed(&self) -> Result<(), String> {
+        if self.achievements.hardcore_active() {
+            return Err("Hardcore mode: no cheats while RetroAchievements plays".to_string());
+        }
+        Ok(())
+    }
+
+    fn achievements(&self) -> Option<rust_dos::achievements::AchievementsView> {
+        Some(self.achievements.view())
+    }
+
+    fn achievements_login(&mut self, username: &str, password: &str) -> Result<(), String> {
+        self.achievements.login(username, password);
+        Ok(())
+    }
+
+    fn achievements_logout(&mut self) {
+        self.achievements.logout();
+    }
+
+    fn identify_game(&mut self, archive: &std::path::Path) -> Result<String, String> {
+        let Some(game) = self.game.as_ref() else {
+            return Err("Launch the game from its profile first (the Games page)".to_string());
+        };
+        let hash = rust_dos::achievements::hash::hash_archive(archive)?;
+        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
+        let path = dir.join(format!("{}.conf", game.id));
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        std::fs::write(&path, games::set_achievements(&text, &hash)).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let name = game.name.clone();
+        self.achievements.game_started(Some(hash.clone()), &name);
+        Ok(format!("{} is known by {} now (hash {})", name, archive.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), hash))
     }
 
     fn poke(&mut self, addr: usize, bytes: &[u8]) {

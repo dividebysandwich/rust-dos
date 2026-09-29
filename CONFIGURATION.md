@@ -7,9 +7,10 @@ of their own. See the [README](README.md) for everything else.
 * [Configuration file](#configuration-file): where it is, and every setting in
   [`[emulator]`](#emulator), [`[sound]`](#sound), [`[mixer]`](#mixer),
   [`[joystick]`](#joystick), [`[network]`](#network), [`[serial]`](#serial),
-  [`[drives]`](#drives) and [`[autoexec]`](#autoexec)
+  [`[achievements]`](#achievements), [`[drives]`](#drives) and
+  [`[autoexec]`](#autoexec)
 * [Settings window](#settings-window)
-* [Game profiles](#game-profiles)
+* [Game profiles](#game-profiles) and [RetroAchievements](#retroachievements)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
 * [Playing over a LAN](#playing-over-a-lan), [serial and modem
@@ -409,6 +410,17 @@ games](#serial-and-modem-games)). Changes take effect at the DOS prompt.
   `off` (the default: the characters as they are, as DOSBox's modem sends
   them) or `on`.
 
+### `[achievements]`
+
+[RetroAchievements](#retroachievements).
+
+* `enabled` turns it on: `false` (the default) or `true`.
+* `hardcore` is hardcore mode, for the games started from then on:
+  `false` (the default) or `true`.
+* `username` and `token` are the account, which the settings window's
+  Achievements page fills in when you log in. The token is what the site
+  gives for your password, which isn't kept.
+
 ### `[drives]`
 
 Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`,
@@ -479,6 +491,9 @@ Esc closes it.
   or 32 bits, typed in decimal or hex (`0x1F`, `$1F`, `1Fh`), and the
   search covers conventional memory, or all of it for games with DOS
   extenders.
+* **Achievements:** [RetroAchievements](#retroachievements): on or off,
+  hardcore mode, logging in, the game's archive, and the game's
+  achievements and leaderboards.
 * **Stats:** how the machine runs, in two big numbers: **FPS**, the
   frames a second the program draws (a retrace after which the picture
   changed, or for a game that flips pages, each flip), beside the
@@ -559,6 +574,46 @@ since, go in it, with the game's name, its directory and the command that
 starts it. While a game plays, F2 saves the settings window's changes to
 its profile. `--game NAME` launches a game at startup, by its file name
 (`keen4`) or its name, and so does `?game=NAME` in the browser.
+
+## RetroAchievements
+
+[RetroAchievements](https://retroachievements.org) has achievements,
+leaderboards and rich presence (the line the site shows of what you are
+doing) for many DOS games. Turn it on and log in on the settings window's
+**Achievements** page; it keeps the site's token in `[achievements]`,
+never your password. The page lists the game's achievements, which are
+unlocked and how far along the others are, and its leaderboards.
+Unlocks, leaderboards started and entries submitted show at the bottom of
+the picture, and the value of a leaderboard being attempted in the
+corner.
+
+The site knows a game by the files of the zip (or DOSBox Pure `.dosz`)
+it came in, so achievements are for games launched from their
+[profiles](#game-profiles), and the profile says which version of the game
+it is, in `[game]`:
+
+```ini
+[game]
+name=Commander Keen 4
+achievements=~/dos/archives/keen4.zip
+```
+
+`achievements` is the archive, relative to the `games` folder, or its hash
+(32 hex digits). A zip dropped onto the window is unpacked with a profile
+that has its hash already; for other games, the Achievements page's
+**Game's archive** row picks the archive and puts its hash in the profile.
+The sets are made with DOSBox Pure, and Rust-DOS lays out the memory they
+read as DOSBox Pure does: the game's memory from 120h bytes below the
+first program's PSP, so a game run from the prompt is where the sets
+expect it. A game that isn't the first program (a TSR loaded before it)
+may not be.
+
+**Hardcore mode** (`hardcore`) takes effect when the next game starts:
+states can't be loaded, rewind and the Cheats page are off, and unlocks
+and leaderboard entries count as hardcore. Leaderboards only run in
+hardcore mode, as in RetroArch. It is off while the debug server runs.
+Loading a state or rewinding in softcore mode starts the achievements'
+logic over, as they wait for their conditions to be false again.
 
 ## Mounting drives
 

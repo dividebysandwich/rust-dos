@@ -21,6 +21,10 @@
 //! Launching a game layers its settings over the configuration's, mounts
 //! its drives and runs its commands; once they are done and the prompt is
 //! back, the configuration's settings and drives are.
+//!
+//! `[game]`'s `achievements=` says which version of the game it is for
+//! RetroAchievements: the hash of its archive, or the archive (a zip or a
+//! DOSBox Pure .dosz, relative to the games folder).
 
 use crate::config::{self, DriveChange, Settings};
 use crate::cpu::Cpu;
@@ -141,6 +145,8 @@ pub struct Prepared {
     pub settings: Settings,
     pub drives: Vec<MountSpec>,
     pub autoexec: Vec<String>,
+    /// What RetroAchievements knows the game by (`achievements=`).
+    pub achievements: Option<String>,
     /// Problems in the profile.
     pub warnings: Vec<String>,
 }
@@ -161,8 +167,44 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
         settings,
         drives: own.drives,
         autoexec: own.autoexec,
+        achievements: own.game_achievements,
         warnings: own.warnings,
     })
+}
+
+/// The profile `text` with `achievements=value` in its `[game]` section,
+/// in place of one there was.
+pub fn set_achievements(text: &str, value: &str) -> String {
+    let line = format!("achievements={}", value);
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let header = |l: &str| l.trim().starts_with('[');
+    let Some(start) = lines.iter().position(|l| l.trim().eq_ignore_ascii_case("[game]")) else {
+        return format!("[game]\n{}\n\n{}", line, text);
+    };
+    let end = lines[start + 1..].iter().position(|l| header(l)).map_or(lines.len(), |p| start + 1 + p);
+    let key = |l: &str| l.split_once('=').map(|(k, _)| k.trim().to_ascii_lowercase());
+    match (start + 1..end).find(|&i| key(&lines[i]).as_deref() == Some("achievements")) {
+        Some(i) => lines[i] = line,
+        None => {
+            // After the section's last setting.
+            let at = (start + 1..end).rev().find(|&i| key(&lines[i]).is_some()).map_or(start + 1, |i| i + 1);
+            lines.insert(at, line);
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// The hash RetroAchievements knows a game by, from its profile's
+/// `achievements=`: the hash itself, or the archive's, found from `dir`
+/// (the games folder).
+pub fn achievements_hash(value: &str, dir: &Path, home: Option<&Path>) -> Result<String, String> {
+    let value = value.trim();
+    if crate::achievements::hash::is_hash(value) {
+        return Ok(value.to_ascii_lowercase());
+    }
+    crate::achievements::hash::hash_archive(&crate::mount::expand_host_path(value, dir, home))
 }
 
 /// The profiles in the directory `dir`: each one's entry and text, by
@@ -240,7 +282,9 @@ pub fn unpack(dir: &Path, archive: &Path) -> Result<(std::path::PathBuf, Option<
     let Some(program) = crate::import::zip::start_program(&files) else {
         return Ok((folder, None));
     };
-    let text = format!("[game]\nname={}\n\n[drives]\nC={}\n\n[autoexec]\nC:\n{}\n", name, id, program);
+    // RetroAchievements knows the game by its archive's hash.
+    let hash = crate::achievements::hash::hash_archive(archive).map(|h| format!("achievements={}\n", h)).unwrap_or_default();
+    let text = format!("[game]\nname={}\n{}\n[drives]\nC={}\n\n[autoexec]\nC:\n{}\n", name, hash, id, program);
     let path = dir.join(format!("{}.conf", id));
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
     Ok((folder, Some((id, name))))
@@ -309,6 +353,17 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_gets_the_hash_retroachievements_knows_it_by() {
+        let text = "[game]\nname=Keen\n\n[autoexec]\nKEEN4E\n";
+        let with = set_achievements(text, "abc");
+        assert_eq!(with, "[game]\nname=Keen\nachievements=abc\n\n[autoexec]\nKEEN4E\n");
+        assert_eq!(set_achievements(&with, "def"), "[game]\nname=Keen\nachievements=def\n\n[autoexec]\nKEEN4E\n");
+        assert_eq!(set_achievements("[autoexec]\nX\n", "abc"), "[game]\nachievements=abc\n\n[autoexec]\nX\n");
+        let prepared = prepare("keen", &Settings::default(), &with, Path::new("/"), None).unwrap();
+        assert_eq!(prepared.achievements.as_deref(), Some("abc"));
+    }
+
+    #[test]
     fn slugs_are_file_names_and_unique() {
         assert_eq!(slug("Commander Keen 4: Secret of the Oracle", &[]), "commander-keen-4-secret-of-the-o");
         assert_eq!(slug("  Stunts  ", &[]), "stunts");
@@ -341,6 +396,12 @@ mod tests {
         assert_eq!((id.as_str(), name.as_str()), ("commander-keen", "Commander Keen"));
         let text = std::fs::read_to_string(games.join("commander-keen.conf")).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        // RetroAchievements knows it by the archive's hash.
+        let hash = crate::achievements::hash::hash_archive(&archive).unwrap();
+        assert_eq!(prepared.achievements.as_deref(), Some(hash.as_str()));
+        assert_eq!(achievements_hash(&hash.to_uppercase(), &games, None).unwrap(), hash);
+        assert_eq!(achievements_hash("../Commander Keen.zip", &games, None).unwrap(), hash);
+        assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
         assert_eq!(prepared.drives[0].path, folder, "C: is the folder, next to the profile");
         assert_eq!(prepared.autoexec, ["C:", "KEEN4E.EXE"]);
         // Again: a folder and profile of its own.

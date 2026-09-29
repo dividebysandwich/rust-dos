@@ -177,12 +177,17 @@ pub struct Config {
     pub network: crate::net::NetSettings,
     /// `[serial]`: the serial ports.
     pub serial: crate::serial::SerialSettings,
+    /// `[achievements]`: RetroAchievements.
+    pub achievements: crate::achievements::AchievementSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
     pub autoexec: Vec<String>,
     /// A game profile's name (`[game]`, see games.rs).
     pub game_name: Option<String>,
+    /// The version of the game RetroAchievements knows (`[game]`'s
+    /// `achievements`): its hash, or its zip or DOSZ archive.
+    pub game_achievements: Option<String>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -202,6 +207,7 @@ enum Section {
     Joystick,
     Network,
     Serial,
+    Achievements,
     Drives,
     Autoexec,
     /// A game profile's (games.rs).
@@ -218,6 +224,7 @@ impl Section {
             "joystick" => Section::Joystick,
             "network" => Section::Network,
             "serial" => Section::Serial,
+            "achievements" => Section::Achievements,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
@@ -233,6 +240,7 @@ impl Section {
             Section::Joystick => "joystick",
             Section::Network => "network",
             Section::Serial => "serial",
+            Section::Achievements => "achievements",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",
@@ -635,6 +643,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Joystick
             | Section::Network
             | Section::Serial
+            | Section::Achievements
             | Section::Game => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
@@ -810,6 +819,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     match key.to_ascii_lowercase().as_str() {
                         "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
                         "name" => warn("the game's name is empty".to_string()),
+                        "achievements" if !value.is_empty() => config.game_achievements = Some(value.to_string()),
+                        "achievements" => {}
                         _ => warn(format!("unknown setting '{}'", key)),
                     }
                     continue;
@@ -839,6 +850,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
 
                 if section == Section::Serial {
                     if let Err(e) = config.serial.set(key, value) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
+                if section == Section::Achievements {
+                    if let Err(e) = config.achievements.set(key, value) {
                         warn(e);
                     }
                     continue;
@@ -1020,6 +1038,8 @@ pub struct Settings {
     pub network: crate::net::NetSettings,
     /// `[serial]`: the serial ports.
     pub serial: crate::serial::SerialSettings,
+    /// `[achievements]`: RetroAchievements.
+    pub achievements: crate::achievements::AchievementSettings,
 }
 
 impl Default for Settings {
@@ -1056,6 +1076,7 @@ impl Default for Settings {
             joystick: JoystickSettings::default(),
             network: crate::net::NetSettings::default(),
             serial: crate::serial::SerialSettings::default(),
+            achievements: Default::default(),
         }
     }
 }
@@ -1117,6 +1138,7 @@ impl Settings {
             joystick: config.joystick,
             network: config.network.clone(),
             serial: config.serial.clone(),
+            achievements: config.achievements.clone(),
         }
     }
 }
@@ -1222,6 +1244,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
     ]);
     entries.extend(settings.network.entries().into_iter().map(|(key, value)| (Section::Network, key, value)));
     entries.extend(settings.serial.entries().into_iter().map(|(key, value)| (Section::Serial, key, value)));
+    entries.extend(settings.achievements.entries().into_iter().map(|(key, value)| (Section::Achievements, key, value)));
     entries
 }
 
@@ -1260,6 +1283,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Joystick
                 | Section::Network
                 | Section::Serial
+                | Section::Achievements
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(comment.trim_start_matches(['#', ';']).trim_start())
@@ -2136,6 +2160,12 @@ mod tests {
                 modem_listen: Some(2323),
                 ..Default::default()
             },
+            achievements: crate::achievements::AchievementSettings {
+                enabled: true,
+                username: "Player".to_string(),
+                token: "abc123".to_string(),
+                hardcore: true,
+            },
         }
     }
 
@@ -2296,9 +2326,9 @@ mod tests {
         // Every setting has a line, the lines that were there stay as they
         // were written, and the command line's speed isn't kept.
         for (section, key, _) in entries(&settings, Some(home)) {
-            // (The file's SoundFont; no Ultrasound directory, MT-32 or
-            // LAN password of its own.)
-            let wanted = !matches!(key, "ultradir" | "mt32roms" | "mt32lib" | "midiport" | "password");
+            // (The file's SoundFont; no Ultrasound directory, MT-32, LAN
+            // password or RetroAchievements account of its own.)
+            let wanted = !matches!(key, "ultradir" | "mt32roms" | "mt32lib" | "midiport" | "password" | "username" | "token");
             assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);
         }
         assert!(saved.starts_with("[emulator]\nscale = 2\ncycles=max\nfullscreen=false\n"), "{}", saved);
@@ -2306,7 +2336,7 @@ mod tests {
         assert!(saved.contains("soundfont=sf/gm.sf2\n"), "{}", saved);
         assert!(saved.contains("\n[joystick]\njoysticktype=auto\ndeadzone=10\n\n[network]\nipx=auto\n"), "{}", saved);
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
-        assert!(saved.contains("\nmodemtelnet=off\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nmodemtelnet=off\n\n[achievements]\nenabled=false\nhardcore=false\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

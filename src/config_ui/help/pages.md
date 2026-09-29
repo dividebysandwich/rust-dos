@@ -96,6 +96,29 @@ it:
 For a bar without a number (energy), search with no value, then narrow
 down by *decreased* or *increased* as the bar changes.
 
+# RetroAchievements {#achievements}
+
+Achievements, leaderboards and rich presence from
+retroachievements.org, for games launched from their profiles.
+
+- Turn *RetroAchievements* on, type your user name and password, and
+  pick *Log in*. The site's token is kept in the configuration file,
+  not your password.
+- Launch the game on the Games page. A zip dropped on the window gets a
+  profile that says which version it is; for other games, pick the
+  zip or `.dosz` the game came in at *Game's archive*.
+- The list shows the game's achievements: **√** unlocked, and the
+  progress of those that count something.
+
+*Hardcore mode*, from the next game on: no save states, rewind or
+cheats, and the unlocks count as hardcore.
+
+# The game's archive {#achievements-archive}
+
+The zip or `.dosz` the game came in, as RetroAchievements knows it
+(the files in it, not how they are packed). Its hash goes into the
+game's profile, as `achievements=` in `[game]`.
+
 # Stats {#stats}
 
 How well the game runs: **FPS**, the frames a second it draws, and

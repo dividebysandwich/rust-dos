@@ -360,6 +360,7 @@ impl Page {
             Page::Games => "games",
             Page::States => "states",
             Page::Cheats => "cheats",
+            Page::Achievements => "achievements",
             Page::Stats => "stats",
             _ => return None,
         })
@@ -375,6 +376,7 @@ impl Pick {
             Pick::Mt32Roms => "mt32-roms",
             Pick::ImportGame => "import",
             Pick::ImagePath => "new-image",
+            Pick::AchievementsArchive => "achievements-archive",
         }
     }
 }
