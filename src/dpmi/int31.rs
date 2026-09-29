@@ -635,7 +635,11 @@ fn call_real_mode(cpu: &mut Cpu, mut ctx: Context, function: u16) {
         sp = push_real(cpu, ss, sp, &params.iter().rev().copied().collect::<Vec<u16>>());
     }
     let flags = rm.eflags & 0xFFFF;
-    let pushed: &[u16] = if function == 0x0301 { &[ROM_SEG, RM_RETURN] } else { &[flags as u16, ROM_SEG, RM_RETURN] };
+    // The IRET frame's flags are the structure's, but for TF: set there
+    // (Descent's serial driver passes FFFFh), the handler's IRET would trap
+    // on the host's return, which DOS/4GW takes for a debug exception.
+    let frame_flags = (flags & !CpuFlags::TF.bits()) as u16;
+    let pushed: &[u16] = if function == 0x0301 { &[ROM_SEG, RM_RETURN] } else { &[frame_flags, ROM_SEG, RM_RETURN] };
     sp = push_real(cpu, ss, sp, pushed);
     cpu.bus.dpmi.frames.push(frame);
     rm.gpr[ESP] = sp;
