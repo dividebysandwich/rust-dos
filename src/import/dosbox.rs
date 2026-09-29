@@ -110,10 +110,12 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("cpu", "cputype") => match first {
             f if f.starts_with("386") => imported.set("emulator", "cpu", "386"),
             f if f.starts_with("486") || f == "auto" => imported.set("emulator", "cpu", "486"),
-            // The Pentium, and the later ones as the nearest there is.
-            f if f.starts_with("pentium") || f.starts_with("ppro") || f == "experimental" => {
-                imported.set("emulator", "cpu", "pentium")
+            // The Pentium MMX, and the later ones with MMX as the nearest
+            // there is; the Pentium Pro had none.
+            f if f.starts_with("pentium_mmx") || f.starts_with("pentium_ii") || f == "experimental" => {
+                imported.set("emulator", "cpu", "pentium_mmx")
             }
+            f if f.starts_with("pentium") || f.starts_with("ppro") => imported.set("emulator", "cpu", "pentium"),
             _ => unknown(imported),
         },
         // DOSBox's default, svga_s3, is what DOS games get from it: the
@@ -388,6 +390,8 @@ mod tests {
         assert_eq!(get("core"), Some("normal"));
         let pentium = import(&["[cpu]\ncputype=pentium_slow\n"], &[PathBuf::from("/")], "x", None);
         assert_eq!(pentium.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some("pentium"));
+        let mmx = import(&["[cpu]\ncputype=pentium_mmx\n"], &[PathBuf::from("/")], "x", None);
+        assert_eq!(mmx.settings.iter().find(|(_, k, _)| *k == "cpu").map(|(_, _, v)| v.as_str()), Some("pentium_mmx"));
         assert_eq!(get("keyboard_layout"), Some("gr"));
         assert_eq!(get("umb"), Some("false"));
         assert_eq!(get("dos_version"), Some("7.10"));

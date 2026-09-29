@@ -14,7 +14,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## Features
 
-* **CPU:** 386, 486 and Pentium with FPU, protected mode, paging and
+* **CPU:** 386, 486, Pentium and Pentium MMX with FPU, protected mode, paging and
   virtual-8086 mode for DOS extenders such as DOS/4GW (Descent, Heretic),
   and a dynamic recompiler for x86-64 and ARM64 hosts (see
   [docs/dynrec.md](docs/dynrec.md))

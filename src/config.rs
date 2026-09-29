@@ -766,7 +766,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "386" => config.cpu = Some(CpuModel::I386),
                             "486" => config.cpu = Some(CpuModel::I486),
                             "pentium" | "586" => config.cpu = Some(CpuModel::Pentium),
-                            _ => warn(format!("invalid cpu '{}' (386, 486 or pentium)", value)),
+                            "pentium_mmx" | "pentiummmx" | "mmx" => config.cpu = Some(CpuModel::PentiumMmx),
+                            _ => warn(format!("invalid cpu '{}' (386, 486, pentium or pentium_mmx)", value)),
                         },
                         "hard_disk_speed" | "floppy_disk_speed" => match DiskSpeed::parse(value) {
                             Some(speed) if key.eq_ignore_ascii_case("hard_disk_speed") => {
@@ -1186,6 +1187,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
                 CpuModel::I386 => "386",
                 CpuModel::I486 => "486",
                 CpuModel::Pentium => "pentium",
+                CpuModel::PentiumMmx => "pentium_mmx",
             }
             .to_string()),
         ),

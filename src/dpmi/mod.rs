@@ -460,12 +460,7 @@ pub fn installation_check(cpu: &mut Cpu) -> bool {
     cpu.set_ax(0);
     // 32-bit programs are supported.
     cpu.set_bx(1);
-    let processor = match cpu.model {
-        CpuModel::I386 => 3,
-        CpuModel::I486 => 4,
-        CpuModel::Pentium => 5,
-    };
-    cpu.set_cx((cpu.cx() & 0xFF00) | processor);
+    cpu.set_cx((cpu.cx() & 0xFF00) | cpu.model.family() as u16);
     // Version 0.90.
     cpu.set_dx(0x005A);
     cpu.set_si(PRIVATE_PARAS);

@@ -80,6 +80,9 @@ pub enum CpuModel {
     /// stamp counter, MSRs and CMPXCHG8B, and CR4 with its PSE and TSD
     /// bits. It has no virtual-8086 mode extensions.
     Pentium,
+    /// A Pentium MMX (P55C): the Pentium's, MMX, and CPUID saying family
+    /// 5, model 4, stepping 3.
+    PentiumMmx,
 }
 
 impl CpuModel {
@@ -89,7 +92,7 @@ impl CpuModel {
         match self {
             CpuModel::I386 => 0,
             CpuModel::I486 => CpuFlags::AC.bits(),
-            CpuModel::Pentium => CpuFlags::AC.bits() | CpuFlags::ID.bits(),
+            CpuModel::Pentium | CpuModel::PentiumMmx => CpuFlags::AC.bits() | CpuFlags::ID.bits(),
         }
     }
 
@@ -100,7 +103,13 @@ impl CpuModel {
             CpuModel::I386 => 0x0303,
             CpuModel::I486 => 0x0402,
             CpuModel::Pentium => 0x0517,
+            CpuModel::PentiumMmx => 0x0543,
         }
+    }
+
+    /// The family: 3, 4 or 5.
+    pub fn family(self) -> u8 {
+        (self.signature() >> 8) as u8
     }
 }
 

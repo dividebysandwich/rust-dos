@@ -246,6 +246,9 @@ pub fn invlpg(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 /// 4 MB pages, the time stamp counter, MSRs and CMPXCHG8B.
 const CPUID_FEATURES: u32 = 0x0001 | 0x0008 | 0x0010 | 0x0020 | 0x0100;
 
+/// The CPUID feature bit of MMX, which a Pentium MMX adds.
+const CPUID_MMX: u32 = 0x0080_0000;
+
 /// CPUID (Pentium): leaf 0 gives the highest leaf, 1, and "GenuineIntel",
 /// leaf 1 the family, model and stepping and the features. Leaves past it
 /// give zeros.
@@ -254,7 +257,10 @@ pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
     let text = |s: &[u8; 4]| u32::from_le_bytes(*s);
     let (eax, ebx, ecx, edx) = match cpu.eax() {
         0 => (1, text(b"Genu"), text(b"ntel"), text(b"ineI")),
-        1 => (cpu.model.signature(), 0, 0, CPUID_FEATURES),
+        1 => {
+            let mmx = if cpu.model >= CpuModel::PentiumMmx { CPUID_MMX } else { 0 };
+            (cpu.model.signature(), 0, 0, CPUID_FEATURES | mmx)
+        }
         _ => (0, 0, 0, 0),
     };
     cpu.set_eax(eax);

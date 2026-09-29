@@ -28,10 +28,12 @@ game misbehaves.
 
 # Processor {#cpu}
 
-The processor games find: **386**, **486** or **Pentium**.
+The processor games find: **386**, **486**, **Pentium** or **Pentium
+MMX**.
 
 **486** suits almost everything. Pick **Pentium** for late-1990s games
-that ask for one, and for 3dfx games. Takes effect at the DOS prompt.
+that ask for one, and for 3dfx games; **Pentium MMX** for those that
+need MMX. Takes effect at the DOS prompt.
 
 # Video card {#machine}
 

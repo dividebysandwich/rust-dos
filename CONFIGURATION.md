@@ -102,8 +102,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the
   instructions and so runs at the `cycles` speed, its MSRs, CMPXCHG8B and
-  4 MB pages, without the virtual-8086 mode extensions. A DOSBox
-  configuration's `cputype` of a Pentium or later imports as `pentium`.
+  4 MB pages, without the virtual-8086 mode extensions; or `pentium_mmx`,
+  that Pentium with MMX (CPUID family 5, model 4), whose eight MM
+  registers are the FPU's. A DOSBox configuration's `cputype` of a
+  Pentium or Pentium Pro imports as `pentium`, of a Pentium MMX or later
+  as `pentium_mmx`.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's

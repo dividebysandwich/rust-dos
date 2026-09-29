@@ -799,6 +799,7 @@ impl Item {
                 CpuModel::I386 => "386",
                 CpuModel::I486 => "486",
                 CpuModel::Pentium => "Pentium",
+                CpuModel::PentiumMmx => "Pentium MMX",
             }
             .to_string(),
             Machine => s.machine.describe().to_string(),
@@ -948,7 +949,7 @@ impl Item {
             Composite => each(s, crate::video::composite::CompositeMode::ALL, |s, mode| s.composite.mode = mode),
             CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
-            Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium], |s, cpu| s.cpu = cpu),
+            Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium, CpuModel::PentiumMmx], |s, cpu| s.cpu = cpu),
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {

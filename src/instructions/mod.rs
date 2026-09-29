@@ -12,6 +12,7 @@ pub mod control;
 pub mod fast;
 pub mod fpu;
 pub mod logic;
+pub mod mmx;
 pub mod operand;
 pub mod string;
 pub mod system;
@@ -230,6 +231,13 @@ pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
         | Fucompp | Fneni | Fndisi | Fnsetpm | Feni | Fdisi | Fsetpm | Fstpnce | Ffreep => {
             fpu_instruction(cpu, instr)
         }
+
+        // --- MMX ---
+        Emms | Movd | Movq | Paddb | Paddw | Paddd | Paddsb | Paddsw | Paddusb | Paddusw | Psubb | Psubw
+        | Psubd | Psubsb | Psubsw | Psubusb | Psubusw | Pmullw | Pmulhw | Pmaddwd | Pcmpeqb | Pcmpeqw
+        | Pcmpeqd | Pcmpgtb | Pcmpgtw | Pcmpgtd | Pand | Pandn | Por | Pxor | Psllw | Pslld | Psllq
+        | Psrlw | Psrld | Psrlq | Psraw | Psrad | Packsswb | Packssdw | Packuswb | Punpcklbw
+        | Punpcklwd | Punpckldq | Punpckhbw | Punpckhwd | Punpckhdq => mmx::mmx(cpu, instr),
 
         _ => Err(Fault::UD),
     }

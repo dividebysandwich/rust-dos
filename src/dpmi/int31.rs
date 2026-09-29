@@ -295,12 +295,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
         0x0400 => {
             ctx.set_reg16(EAX, 0x005A);
             ctx.set_reg16(EBX, 0x0003);
-            let processor = match cpu.model {
-                crate::cpu::CpuModel::I386 => 3,
-                crate::cpu::CpuModel::I486 => 4,
-                crate::cpu::CpuModel::Pentium => 5,
-            };
-            ctx.set_reg16(ECX, (ctx.reg16(ECX) & 0xFF00) | processor);
+            ctx.set_reg16(ECX, (ctx.reg16(ECX) & 0xFF00) | cpu.model.family() as u16);
             ctx.set_reg16(EDX, (cpu.bus.pic.vector(0) as u16) << 8 | cpu.bus.pic.vector(8) as u16);
         }
         // Free memory, into the 30h bytes at ES:(E)DI.

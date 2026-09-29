@@ -57,8 +57,9 @@
 # host keeps up with in real time. Lower it for old games that run too
 # fast. --cycles overrides it.
 #cycles=max
-# Processor: 486 (the default, a 486DX with FPU), 386, or pentium (with
-# CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages).
+# Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
+# CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages), or
+# pentium_mmx (that Pentium with MMX).
 #cpu=486
 # What runs the programs' instructions:
 #   auto     the interpreter, and the dynamic recompiler for a program
