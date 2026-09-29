@@ -314,11 +314,10 @@ jobs:
             cargo install wasm-bindgen-cli --version "$VERSION" --locked
           fi
 
-      # The tests run on the host, where the rust-dos library brings SDL2.
+      # The tests run on the host, with the library without SDL (the `sdl`
+      # feature).
       - name: Test
-        run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev
-          cd web && cargo test --locked
+        run: cd web && cargo test --locked
 
       - name: Build
         run: ./web/build.sh
@@ -339,10 +338,103 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  # The libretro core (libretro/), for RetroArch and the other frontends:
+  # the library without SDL or ALSA, which the frontend has in their place.
+  libretro:
+    name: libretro (${{ matrix.label }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            lib: librust_dos_libretro.so
+            core: rust_dos_libretro.so
+          - label: linux-aarch64
+            os: ubuntu-24.04-arm
+            lib: librust_dos_libretro.so
+            core: rust_dos_libretro.so
+          # Built against glibc 2.35, as the -compat builds of the program.
+          - label: linux-x86_64-compat
+            os: ubuntu-latest
+            container: ubuntu:22.04
+            lib: librust_dos_libretro.so
+            core: rust_dos_libretro.so
+          - label: windows-x86_64
+            os: windows-latest
+            lib: rust_dos_libretro.dll
+            core: rust_dos_libretro.dll
+          - label: macos-aarch64
+            os: macos-latest
+            lib: librust_dos_libretro.dylib
+            core: rust_dos_libretro.dylib
+          - label: macos-x86_64
+            os: macos-15-intel
+            lib: librust_dos_libretro.dylib
+            core: rust_dos_libretro.dylib
+    steps:
+      - name: Install build environment (compat container)
+        if: matrix.container
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl zstd build-essential pkg-config zip
+
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: libretro-${{ matrix.label }}
+          workspaces: libretro
+
+      - name: Test
+        run: cd libretro && cargo test --locked
+
+      - name: Build
+        run: cd libretro && cargo build --release --locked
+
+      # The core must load in a frontend without SDL or a sound library.
+      - name: Check the libraries it needs (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ldd "libretro/target/release/${{ matrix.lib }}"
+          if ldd "libretro/target/release/${{ matrix.lib }}" | grep -Ei 'sdl|asound'; then
+            echo "The core links SDL or ALSA" >&2
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_VERSION="$GITHUB_REF_NAME"
+          else
+            RELEASE_VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          PKG="rust-dos-$RELEASE_VERSION-libretro-${{ matrix.label }}"
+          mkdir -p "$PKG" out
+          # The name frontends look for: without the lib prefix.
+          cp "libretro/target/release/${{ matrix.lib }}" "$PKG/${{ matrix.core }}"
+          cp libretro/rust_dos_libretro.info libretro/README.md LICENSE "$PKG/"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            7z a -tzip "out/$PKG.zip" "$PKG" > /dev/null
+          else
+            zip -r -q "out/$PKG.zip" "$PKG"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-libretro-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
   release:
     name: create release
     if: github.ref_type == 'tag'
-    needs: [build, web]
+    needs: [build, web, libretro]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -383,6 +475,10 @@ jobs:
           - **Browser**: the `-web.zip` is a web site that runs rust-dos in the
             browser. Put its files on a web server; see *Running in a browser*
             in the README.
+          - **RetroArch** and other libretro frontends: the `-libretro-` `.zip`
+            for your system has the core (`rust_dos_libretro.so`, `.dll` or
+            `.dylib`) for the frontend's cores folder, and
+            `rust_dos_libretro.info` for its info folder. See its README.
           - **A LAN relay of your own**: every package but the browser's has
             `rust-dos-relay` beside rust-dos (in `/usr/bin` with the `.deb`),
             which relays LAN rooms on a server without a display and needs

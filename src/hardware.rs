@@ -23,6 +23,31 @@ pub struct Hardware {
     pub serial: crate::serial::SerialSettings,
 }
 
+/// Set up a new machine's hardware as `settings` ask for it: the
+/// processor, display adapter, 3dfx card, disks, mixer, game port,
+/// keyboard layout (with `host_layout` the host keyboard's for auto),
+/// expanded and upper memory, DPMI, DOS version, sound cards, network and
+/// serial ports. Returns the problems with the settings.
+pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate::keylayout::Layout) -> Vec<String> {
+    cpu.model = settings.cpu;
+    cpu.core = settings.core;
+    crate::video::bios::install(&mut cpu.bus, settings.video_setup());
+    cpu.bus.configure_voodoo(settings.voodoo.board());
+    cpu.bus.set_disk_settings(settings.disk);
+    cpu.bus.set_mixer(settings.mixer);
+    cpu.bus.set_joystick(settings.joystick);
+    cpu.bus.vga.set_composite(settings.composite);
+    cpu.bus.kbd.layout = settings.keyboard_layout.layout(host_layout);
+    let mut warnings: Vec<String> = cpu.set_upper_memory(settings.ems, settings.umb).err().into_iter().collect();
+    cpu.bus.dpmi.enabled = settings.dpmi;
+    crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);
+    cpu.bus.ide_hard_disks = settings.ide_hard_disks;
+    warnings.extend(crate::sound::apply_config(cpu, &settings.sound, None));
+    cpu.bus.configure_network(&settings.network);
+    cpu.bus.configure_serial(&settings.serial);
+    warnings
+}
+
 impl Hardware {
     /// The hardware `settings` ask for, as a machine started with them has
     /// it.

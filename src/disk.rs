@@ -1033,17 +1033,33 @@ impl DiskController {
         let Some(d) = self.drive(drive).filter(|d| d.images.len() > 1) else {
             return Ok(None);
         };
-        let next = (d.image + 1) % d.images.len();
-        let path = d.images[next].clone();
+        self.select_image(drive, (d.image + 1) % d.images.len())
+    }
+
+    /// The images of a drive mounted from images, and which one is in.
+    pub fn images(&self, drive: u8) -> Option<(&[PathBuf], usize)> {
+        self.drive(drive).filter(|d| !d.images.is_empty()).map(|d| (d.images.as_slice(), d.image))
+    }
+
+    /// Put image `index` of a drive mounted from images in, as `swap_image`
+    /// does the next. Returns what changed, or None if it is in already.
+    pub fn select_image(&mut self, drive: u8, index: usize) -> Result<Option<String>, String> {
+        let name = drive_name(drive);
+        let Some(d) = self.drive(drive).filter(|d| index < d.images.len()) else {
+            return Err(format!("Drive {} has no disk {}", name, index + 1));
+        };
+        if d.image == index {
+            return Ok(None);
+        }
+        let path = d.images[index].clone();
         let opts = d.mount.as_ref().map(|m| m.opts.clone()).unwrap_or_default();
         let (kind, storage, volume_label, writable) = Self::open_image(drive, &path, &opts)?;
-        let name = drive_name(drive);
         let d = self.drives[drive as usize].as_mut().unwrap();
         if kind != d.kind {
             return Err(format!("{} can't go in drive {}, which is a {}", path.display(), name, d.kind.name()));
         }
         d.storage = storage;
-        d.image = next;
+        d.image = index;
         d.label = Self::label_for(&opts, &volume_label);
         d.read_only = opts.read_only || !writable;
         d.media_changed = true;
@@ -1056,7 +1072,52 @@ impl DiskController {
             d.current_dir.clear();
         }
         let file = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-        Ok(Some(format!("Drive {} disk {} of {}: {}", name, next + 1, count, file)))
+        Ok(Some(format!("Drive {} disk {} of {}: {}", name, index + 1, count, file)))
+    }
+
+    /// Add `path` to the end of the images of a drive mounted from images,
+    /// for `select_image` or Ctrl+F4 to put in later.
+    pub fn add_image(&mut self, drive: u8, path: &Path) -> Result<(), String> {
+        if !path.is_file() {
+            return Err(format!("{} is not a disk or CD image", path.display()));
+        }
+        let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        let elsewhere = (0..DRIVE_SLOTS).find(|&d| self.drive(d).is_some_and(|other| other.images.contains(&canonical)));
+        if let Some(other) = elsewhere {
+            return Err(format!("{} is already mounted as {}", path.display(), drive_name(other)));
+        }
+        let Some(d) = self.drives.get_mut(drive as usize).and_then(Option::as_mut).filter(|d| !d.images.is_empty())
+        else {
+            return Err(format!("Drive {} isn't mounted from disk images", drive_name(drive)));
+        };
+        // The mount as saved states have it lists them all.
+        if let Some(mount) = d.mount.as_mut() {
+            mount.opts.more_images.push(canonical.clone());
+        }
+        d.images.push(canonical);
+        Ok(())
+    }
+
+    /// Take image `index`, which must not be the one in, out of the images
+    /// of a drive mounted from images.
+    pub fn remove_image(&mut self, drive: u8, index: usize) -> Result<(), String> {
+        let name = drive_name(drive);
+        let Some(d) = self.drives.get_mut(drive as usize).and_then(Option::as_mut).filter(|d| index < d.images.len())
+        else {
+            return Err(format!("Drive {} has no disk {}", name, index + 1));
+        };
+        if d.image == index {
+            return Err(format!("Disk {} is in drive {}", index + 1, name));
+        }
+        d.images.remove(index);
+        if d.image > index {
+            d.image -= 1;
+        }
+        if let Some(mount) = d.mount.as_mut() {
+            mount.path = d.images[0].clone();
+            mount.opts.more_images = d.images[1..].to_vec();
+        }
+        Ok(())
     }
 
     /// Mount `files` as the read-only drive `drive`, which must not be
@@ -3033,6 +3094,18 @@ mod tests {
         let twice = disk.mount(numbered_drive(3), &image("blank.img"), MountOptions::default(), false);
         assert!(twice.unwrap_err().contains("already mounted as 2"));
         assert!(disk.swap_image(numbered_drive(0)).unwrap().unwrap().starts_with("Drive 0 disk 2 of 2"));
+        // Disk control picks any of them, and adds to and takes from them.
+        fs::write(base.join("booter3.img"), vec![0u8; 368_640]).unwrap();
+        disk.add_image(numbered_drive(0), &image("booter3.img")).unwrap();
+        assert!(disk.add_image(numbered_drive(0), &image("booter3.img")).is_err(), "each image once");
+        assert_eq!(disk.images(numbered_drive(0)).map(|(list, i)| (list.len(), i)), Some((3, 1)));
+        assert!(disk.select_image(numbered_drive(0), 2).unwrap().unwrap().starts_with("Drive 0 disk 3 of 3"));
+        assert_eq!(disk.select_image(numbered_drive(0), 2), Ok(None));
+        assert!(disk.select_image(numbered_drive(0), 3).is_err());
+        assert!(disk.remove_image(numbered_drive(0), 2).is_err(), "it is in");
+        disk.remove_image(numbered_drive(0), 0).unwrap();
+        assert_eq!(disk.images(numbered_drive(0)).map(|(list, i)| (list.len(), i)), Some((2, 1)));
+        assert!(disk.images(DRIVE_C).is_none());
 
         // Floppy unit 00h is disk 0 before A:; hard disk 80h is disk 2,
         // and the hard disk drives follow in the units left.

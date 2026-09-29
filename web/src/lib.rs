@@ -199,24 +199,9 @@ impl Machine {
             warnings.push("[drives]: there are no host directories in the browser; add files to C: instead".into());
         }
         let mut cpu = Cpu::with_memory(PathBuf::from("/"), settings.memsize);
-        cpu.model = settings.cpu;
         // (The browser has no recompiler: every core is the interpreter.)
-        cpu.core = settings.core;
-        video::bios::install(&mut cpu.bus, settings.video_setup());
-        cpu.bus.configure_voodoo(settings.voodoo.board());
-        cpu.bus.set_disk_settings(settings.disk);
-        cpu.bus.set_mixer(settings.mixer);
-        cpu.bus.set_joystick(settings.joystick);
-        cpu.bus.vga.set_composite(settings.composite);
         // With auto the page hands over what the browser's layout types.
-        cpu.bus.kbd.layout = settings.keyboard_layout.layout(Layout::us());
-        warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
-        cpu.bus.dpmi.enabled = settings.dpmi;
-        rust_dos::dos_data::set_version(&mut cpu.bus, settings.dos_version);
-        cpu.bus.ide_hard_disks = settings.ide_hard_disks;
-        warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
-        cpu.bus.configure_network(&settings.network);
-        cpu.bus.configure_serial(&settings.serial);
+        warnings.extend(rust_dos::hardware::configure(&mut cpu, &settings, Layout::us()));
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
         }
@@ -326,7 +311,7 @@ impl Machine {
     /// `commands`.
     pub fn boot(&mut self, notes: Vec<String>, commands: Vec<String>) {
         self.cpu.load_shell();
-        print_banner(&mut self.cpu, &notes);
+        video::print_banner(&mut self.cpu, &notes);
         self.cpu.queue_batch_lines(&self.autoexec);
         self.cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
         self.cpu.queue_batch_lines(&commands);
@@ -1485,49 +1470,6 @@ fn cp437(c: char) -> Option<u8> {
         return Some(c as u8);
     }
     video::CP437[0x80..].iter().position(|&x| x == c).map(|i| (0x80 + i) as u8)
-}
-
-/// The box above the first DOS prompt: the emulator and its version, then
-/// `notes`, then the way to the settings.
-fn print_banner(cpu: &mut Cpu, notes: &[String]) {
-    // Bright cyan, white and yellow on blue, as the rust-dos program has it.
-    const FRAME: u8 = 0x1B;
-    const TEXT: u8 = 0x1F;
-    const HIGHLIGHT: u8 = 0x1E;
-    // The widest text inside the frame: a line of 80 would wrap.
-    const MAX_WIDTH: usize = 74;
-
-    let title = format!("Rust-DOS v{}", env!("CARGO_PKG_VERSION"));
-    let description = " - An x86 DOS emulator written in Rust";
-    let mut lines: Vec<Vec<(String, u8)>> = vec![vec![(title, HIGHLIGHT), (description.to_string(), TEXT)], vec![]];
-    lines.extend(notes.iter().map(|note| vec![(note.chars().take(MAX_WIDTH).collect(), TEXT)]));
-    lines.push(vec![
-        ("Press ".to_string(), TEXT),
-        ("Ctrl+F12".to_string(), HIGHLIGHT),
-        (" or type ".to_string(), TEXT),
-        ("DOSCONFIG".to_string(), HIGHLIGHT),
-        (" to open the settings.".to_string(), TEXT),
-    ]);
-    let len = |line: &[(String, u8)]| line.iter().map(|(text, _)| text.chars().count()).sum::<usize>();
-    let width = lines.iter().map(|line| len(line)).max().unwrap_or(0);
-
-    fn put(cpu: &mut Cpu, text: &str, attr: u8) {
-        let cells: Vec<u8> = text.chars().map(|c| cp437(c).unwrap_or(b'?')).collect();
-        video::print_cp437(cpu, &cells, attr);
-    }
-    put(cpu, &format!("╔{}╗", "═".repeat(width + 2)), FRAME);
-    video::print_string(cpu, "\r\n");
-    for line in &lines {
-        put(cpu, "║ ", FRAME);
-        for (text, attr) in line {
-            put(cpu, text, *attr);
-        }
-        put(cpu, &" ".repeat(width - len(line)), TEXT);
-        put(cpu, " ║", FRAME);
-        video::print_string(cpu, "\r\n");
-    }
-    put(cpu, &format!("╚{}╝", "═".repeat(width + 2)), FRAME);
-    video::print_string(cpu, "\r\n\r\n");
 }
 
 #[cfg(test)]

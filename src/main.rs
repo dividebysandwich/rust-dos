@@ -27,7 +27,7 @@ mod sdl_keys;
 // window's display are private to the binary. These re-exports let the
 // binary's modules refer to the library modules as `crate::...`.
 use rust_dos::{
-    audio, capture, config, config_ui, cpu, disk, exec, games, joystick, keyboard, mount, recorder, shell, sound, timer,
+    audio, capture, config, config_ui, cpu, disk, exec, games, joystick, keyboard, mount, recorder, shell, timer,
     video,
 };
 use rust_dos::achievements::{Achievements, http::HttpTransport};
@@ -220,27 +220,11 @@ fn main() -> Result<(), String> {
     text_input.stop();
 
     let mut cpu = create_cpu(&args, &config, memory_mb);
-    cpu.model = settings.cpu;
-    cpu.core = settings.core;
-    video::bios::install(&mut cpu.bus, settings.video_setup());
-    cpu.bus.configure_voodoo(settings.voodoo.board());
-    cpu.bus.set_disk_settings(settings.disk);
-    cpu.bus.set_mixer(settings.mixer);
-    cpu.bus.set_joystick(settings.joystick);
-    cpu.bus.vga.set_composite(settings.composite);
     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
-    sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
-    if let Err(e) = cpu.set_upper_memory(settings.ems, settings.umb) {
-        config_warning(&mut cpu, &e);
-    }
-    cpu.bus.dpmi.enabled = settings.dpmi;
-    rust_dos::dos_data::set_version(&mut cpu.bus, settings.dos_version);
-    cpu.bus.ide_hard_disks = settings.ide_hard_disks;
-    for warning in sound::apply_config(&mut cpu, &settings.sound, None) {
+    for warning in rust_dos::hardware::configure(&mut cpu, &settings, sdl_keys::detect_layout()) {
         config_warning(&mut cpu, &warning);
     }
-    cpu.bus.configure_network(&settings.network);
-    cpu.bus.configure_serial(&settings.serial);
+    sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
     for warning in cpu.bus.start_lan() {
         config_warning(&mut cpu, &warning);
     }

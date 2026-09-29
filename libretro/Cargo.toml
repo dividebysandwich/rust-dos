@@ -1,0 +1,28 @@
+[package]
+name = "rust-dos-libretro"
+description = "rust-dos as a libretro core, for RetroArch and the other libretro frontends"
+authors = ["dividebysandwich"]
+repository = "https://github.com/dividebysandwich/rust-dos"
+license = "GPL-2.0-or-later"
+version = "0.9.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "rust_dos_libretro"
+# The core the frontends load, and a library for the tests to call it as
+# one would.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Without the window (the `sdl` feature), which the frontend has, and
+# without the host's MIDI ports (`hostmidi`), which would need ALSA.
+rust-dos = { path = "..", default-features = false, features = ["midi", "cdaudio"] }
+
+# A workspace of its own, for a release profile that doesn't change the
+# rust-dos program's builds.
+[workspace]
+
+[profile.release]
+lto = true
+codegen-units = 1

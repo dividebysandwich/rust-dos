@@ -682,9 +682,7 @@ impl Bus {
         for drive in 0..DRIVE_SLOTS {
             match self.disk.swap_image(drive) {
                 Ok(Some(message)) => {
-                    self.cdaudio.stop_drive(drive);
-                    self.mscdex.disc_changed(drive);
-                    self.ide_media_changed(drive);
+                    self.image_changed(drive);
                     messages.push(message);
                 }
                 Ok(None) => {}
@@ -695,6 +693,25 @@ impl Bus {
             self.sync_drive_bda();
         }
         messages
+    }
+
+    /// Put image `index` in a drive mounted from a list of images, as
+    /// libretro's disk control does. Returns what changed, if anything.
+    pub fn select_image(&mut self, drive: u8, index: usize) -> Result<Option<String>, String> {
+        let changed = self.disk.select_image(drive, index)?;
+        if changed.is_some() {
+            self.image_changed(drive);
+            self.sync_drive_bda();
+        }
+        Ok(changed)
+    }
+
+    /// Tell the CD audio, MSCDEX and the IDE drive that another disk is in
+    /// `drive`.
+    fn image_changed(&mut self, drive: u8) {
+        self.cdaudio.stop_drive(drive);
+        self.mscdex.disc_changed(drive);
+        self.ide_media_changed(drive);
     }
 
     /// Unmount a DOS drive and refresh the BIOS view of the drive set.
@@ -787,6 +804,12 @@ impl Bus {
     #[inline(always)]
     pub fn ram(&self) -> &[u8] {
         &self.ram
+    }
+
+    /// RAM for a frontend that reads and pokes it directly (libretro's
+    /// memory maps). Writes this way bypass the decoded-instruction cache.
+    pub fn ram_mut(&mut self) -> &mut [u8] {
+        &mut self.ram
     }
 
     /// Copy `data` into RAM at `addr`, bypassing the VGA mapping, as program

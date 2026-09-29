@@ -9,6 +9,13 @@ edition = "2024"
 # `cargo run` runs the emulator, not the relay (src/bin).
 default-run = "rust-dos"
 
+# The emulator's window needs SDL (the `sdl` feature); the library, the
+# relay and the libretro core (libretro/) don't.
+[[bin]]
+name = "rust-dos"
+path = "src/main.rs"
+required-features = ["sdl"]
+
 [dependencies]
 iced-x86 = "1.21.0"
 font8x8 = "0.3.1"
@@ -45,11 +52,11 @@ dirs = "7.0.0"
 # The window, the sound device and the debug server of the rust-dos program,
 # which the browser build (web/) has in JavaScript instead.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-sdl2 = { version = "0.38" }
+sdl2 = { version = "0.38", optional = true }
 # The window's OpenGL, which draws the CRT shaders.
-glow = "0.18.0"
-axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+glow = { version = "0.18.0", optional = true }
+axum = { version = "0.8", features = ["ws"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 # munt's MT-32 emulation, loaded when the MT-32 is chosen (src/mt32.rs).
 libloading = "0.9.0"
 # MIDI out of the host's MIDI ports (src/midiout.rs).
@@ -74,7 +81,9 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["midi", "hostmidi", "cdaudio"]
+default = ["sdl", "midi", "hostmidi", "cdaudio"]
+# The rust-dos program: its window and sound device, and its debug server.
+sdl = ["dep:sdl2", "dep:glow", "dep:axum"]
 midi = ["dep:rustysynth"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]

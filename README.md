@@ -68,7 +68,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## Getting started
 
-Download Rust-DOS for Windows, macOS, Linux or the browser from the
+Download Rust-DOS for Windows, macOS, Linux, the browser or
+[RetroArch](#as-a-libretro-core) from the
 [releases page](https://github.com/dividebysandwich/rust-dos/releases);
 its notes say which file to take.
 
@@ -251,6 +252,27 @@ The page takes parameters: `?zip=URL` copies an archive to C: at startup,
 `?zip=games/keen.zip&run=cd%20keen&run=keen1`. `?persist=0` keeps C: in
 memory only, `?log` sends the log to the browser console, and
 `?renderer=2d` draws without WebGL 2 (and so without the CRT shaders).
+
+## As a libretro core
+
+`libretro/` builds Rust-DOS as a [libretro](https://www.libretro.com/) core,
+for RetroArch and the other libretro frontends. Releases include it as
+`rust-dos-<version>-libretro-<system>.zip`; to build it yourself (no SDL
+needed):
+
+```sh
+cd libretro && cargo build --release
+retroarch -L target/release/librust_dos_libretro.so ~/games/keen.zip
+```
+
+It takes a game's folder, a program, a zip archive, a
+[game profile](CONFIGURATION.md#game-profiles) or DOSBox configuration, and
+floppy, hard disk and CD images (an `.m3u` list of them for the frontend's
+disk control), or starts at the prompt without content. The core options set
+the machine, `system/rust-dos/rust-dos.conf` the rest, and the settings
+window (Ctrl+F12) is there too. Save states, rewind and
+RetroAchievements (DOSBox Pure's DOS sets) are the frontend's.
+**[libretro/README.md](libretro/README.md)** has the details.
 
 ## Debug & remote-control server
 

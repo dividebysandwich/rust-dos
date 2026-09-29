@@ -793,6 +793,49 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
     bus.write_8(0x0451, row);
 }
 
+/// The box above the first DOS prompt: the emulator and its version, then
+/// `notes`, then the way to the settings.
+pub fn print_banner(cpu: &mut Cpu, notes: &[String]) {
+    // Bright cyan, white and yellow on blue, as the rust-dos program has it.
+    const FRAME: u8 = 0x1B;
+    const TEXT: u8 = 0x1F;
+    const HIGHLIGHT: u8 = 0x1E;
+    // The widest text inside the frame: a line of 80 would wrap.
+    const MAX_WIDTH: usize = 74;
+
+    let title = format!("Rust-DOS v{}", env!("CARGO_PKG_VERSION"));
+    let description = " - An x86 DOS emulator written in Rust";
+    let mut lines: Vec<Vec<(String, u8)>> = vec![vec![(title, HIGHLIGHT), (description.to_string(), TEXT)], vec![]];
+    lines.extend(notes.iter().map(|note| vec![(note.chars().take(MAX_WIDTH).collect(), TEXT)]));
+    lines.push(vec![
+        ("Press ".to_string(), TEXT),
+        ("Ctrl+F12".to_string(), HIGHLIGHT),
+        (" or type ".to_string(), TEXT),
+        ("DOSCONFIG".to_string(), HIGHLIGHT),
+        (" to open the settings.".to_string(), TEXT),
+    ]);
+    let len = |line: &[(String, u8)]| line.iter().map(|(text, _)| text.chars().count()).sum::<usize>();
+    let width = lines.iter().map(|line| len(line)).max().unwrap_or(0);
+
+    fn put(cpu: &mut Cpu, text: &str, attr: u8) {
+        let cells: Vec<u8> = text.chars().map(|c| crate::keylayout::cp437(c).unwrap_or(b'?')).collect();
+        print_cp437(cpu, &cells, attr);
+    }
+    put(cpu, &format!("╔{}╗", "═".repeat(width + 2)), FRAME);
+    print_string(cpu, "\r\n");
+    for line in &lines {
+        put(cpu, "║ ", FRAME);
+        for (text, attr) in line {
+            put(cpu, text, *attr);
+        }
+        put(cpu, &" ".repeat(width - len(line)), TEXT);
+        put(cpu, " ║", FRAME);
+        print_string(cpu, "\r\n");
+    }
+    put(cpu, &format!("╚{}╝", "═".repeat(width + 2)), FRAME);
+    print_string(cpu, "\r\n\r\n");
+}
+
 pub fn print_string(cpu: &mut Cpu, s: &str) {
     print_cells(cpu, s.chars().map(|c| c as u8), 0x07);
 }
