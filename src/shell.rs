@@ -481,6 +481,8 @@ pub enum ShellWait {
     Lan { until: u64 },
     /// LAN LIST: the relay's rooms, likewise.
     LanList { until: u64 },
+    /// MORE: any key, for the lines after a screenful.
+    More(Vec<Vec<u8>>),
 }
 
 /// A CHOICE waiting for a key.
@@ -536,6 +538,12 @@ pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
     }
     match wait {
         ShellWait::Pause => video::print_string(cpu, "\r\n"),
+        ShellWait::More(lines) => {
+            if let Some(rest) = crate::filter_commands::more_key(cpu, lines) {
+                cpu.shell_wait = Some(ShellWait::More(rest));
+                return false;
+            }
+        }
         ShellWait::Line(_) => {}
         ShellWait::Lan { .. } => crate::lan_command::wait_ended(cpu, key),
         ShellWait::LanList { .. } => crate::lan_command::list_ended(cpu),
@@ -558,6 +566,45 @@ pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
         },
     }
     true
+}
+
+/// What a built-in whose input is redirected (`<file`, a pipe) waits for
+/// comes from `input` instead of the keyboard: PAUSE, CHOICE and MAKEIMG
+/// take its characters as keys, DATE and TIME its lines. Once it runs out
+/// they wait no longer, and the shell goes on to its prompt.
+pub fn feed_wait(cpu: &mut Cpu, input: &[u8]) {
+    let mut rest = input.split(|&b| b == 0x1A).next().unwrap_or_default();
+    let mut fed = false;
+    loop {
+        match cpu.shell_wait.clone() {
+            Some(ShellWait::Pause | ShellWait::Choice(_) | ShellWait::MakeImg(_)) => {
+                let Some((&key, after)) = rest.split_first() else { break };
+                rest = after;
+                take_key(cpu, key);
+            }
+            Some(ShellWait::Line(purpose)) => {
+                if rest.is_empty() {
+                    break;
+                }
+                let end = rest.iter().position(|&b| b == b'\n').map_or(rest.len(), |i| i + 1);
+                let line = dosstr::from_bytes(&rest[..end]);
+                rest = &rest[end..];
+                cpu.shell_wait = None;
+                video::print_string(cpu, "\r\n");
+                crate::time_commands::line_entered(cpu, purpose, line.trim_end_matches(['\r', '\n']));
+            }
+            _ => break,
+        }
+        fed = true;
+    }
+    if matches!(cpu.shell_wait, Some(ShellWait::Pause | ShellWait::Choice(_) | ShellWait::MakeImg(_) | ShellWait::Line(_))) {
+        cpu.shell_wait = None;
+        fed = true;
+    }
+    // The top-level shell's code waits where `enter_wait` sent it.
+    if fed && cpu.shell_wait.is_none() && cpu.secondary.is_none() {
+        cpu.set_ip(labels().prompt_start);
+    }
 }
 
 /// The key a CHOICE takes once its time is up, if it is, and 0 once what
@@ -656,6 +703,10 @@ impl crate::savestate::State for ShellWait {
                 5u8.save(w);
                 until.save(w);
             }
+            ShellWait::More(lines) => {
+                6u8.save(w);
+                lines.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -682,6 +733,11 @@ impl crate::savestate::State for ShellWait {
                 let mut until = 0u64;
                 until.load(r)?;
                 if kind == 4 { ShellWait::Lan { until } } else { ShellWait::LanList { until } }
+            }
+            6 => {
+                let mut lines = Vec::new();
+                lines.load(r)?;
+                ShellWait::More(lines)
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

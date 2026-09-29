@@ -10,6 +10,10 @@
 //! handed over as a list ([autoexec], AUTOEXEC.BAT after it, a game's
 //! commands) go to the bottom, to run once everything before them has.
 //!
+//! A command line with pipes (`A | B`) runs its first command and puts the
+//! others on top as a frame of their own, each reading the file the one
+//! before wrote; once they have all run, the files are deleted.
+//!
 //! Lines are kept as the file's bytes, code page 437, and come out as
 //! strings of one char per byte (`dosstr`).
 
@@ -27,6 +31,10 @@ pub enum FrameKind {
     /// The commands a FOR line runs, one per member of its set, with its
     /// variable and the file's parameters already in them.
     For,
+    /// The commands after the first of a line with pipes, with the files
+    /// between them (the frame's parameters), which are deleted after the
+    /// last has run.
+    Pipe,
 }
 
 #[derive(Clone, Debug)]
@@ -35,7 +43,8 @@ struct Frame {
     lines: Vec<Vec<u8>>,
     /// The next line to run.
     pc: usize,
-    /// `%0`, the name the file was started by, and its parameters.
+    /// `%0`, the name the file was started by, and its parameters; a
+    /// pipe's files.
     params: Vec<String>,
     /// How far SHIFT has moved the parameters along.
     shift: usize,
@@ -69,18 +78,21 @@ pub struct Batch {
     /// Set while a batch line runs: a batch file it starts takes the
     /// place of the one running.
     pub dispatching: bool,
+    /// The files of the pipes that have ended, to delete.
+    expired: Vec<String>,
 }
 
 impl Default for Batch {
     fn default() -> Self {
-        Self { frames: Vec::new(), echo: true, echo_before: true, dispatching: false }
+        Self { frames: Vec::new(), echo: true, echo_before: true, dispatching: false, expired: Vec::new() }
     }
 }
 
 impl Batch {
     /// Whether batch lines are waiting to run.
     pub fn is_active(&self) -> bool {
-        self.frames.iter().any(|f| f.pc < f.lines.len())
+        // A pipe's last command has only run once the line after it comes.
+        self.frames.iter().any(|f| f.pc < f.lines.len() || f.kind == FrameKind::Pipe)
     }
 
     /// Forget the batch files once their last line has run, and turn ECHO
@@ -95,7 +107,9 @@ impl Batch {
     /// End every batch file.
     pub fn clear(&mut self) {
         if !self.frames.is_empty() {
-            self.frames.clear();
+            while !self.frames.is_empty() {
+                self.pop();
+            }
             self.echo = self.echo_before;
         }
     }
@@ -121,9 +135,11 @@ impl Batch {
     /// (DOS chains to it), else, and always with `call`, on top of the
     /// ones running.
     pub fn start_file(&mut self, name: &str, bytes: &[u8], args: &str, call: bool) {
-        if self.dispatching && !call {
+        // One a pipe runs is CALLed, and the pipe goes on after it.
+        let piped = self.frames.last().is_some_and(|f| f.kind == FrameKind::Pipe);
+        if self.dispatching && !call && !piped {
             self.drop_for_frames();
-            self.frames.pop();
+            self.pop();
         }
         self.push(Frame::new(FrameKind::File, file_lines(bytes), params(name, args)));
     }
@@ -134,21 +150,40 @@ impl Batch {
         self.push(Frame::new(FrameKind::For, lines, Vec::new()));
     }
 
+    /// Run the commands after the first of a line with pipes next, with
+    /// `files` between them, which `take_expired` hands back once they have
+    /// run.
+    pub fn push_pipe(&mut self, lines: Vec<String>, files: Vec<String>) {
+        let lines = lines.iter().map(|l| dosstr::to_bytes(&format!("@{}", l))).collect();
+        self.push(Frame::new(FrameKind::Pipe, lines, files));
+    }
+
+    /// The files of the pipes that have ended, to delete.
+    pub fn take_expired(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.expired)
+    }
+
     /// The next line to run, if there is one: blank lines and labels are
     /// skipped, and the parameters and variables of `env` put in.
     pub fn next_line(&mut self, env: &[(String, String)]) -> Option<BatchLine> {
         loop {
             let frame = self.frames.last_mut()?;
             let Some(raw) = frame.lines.get(frame.pc) else {
-                self.frames.pop();
+                let piped = frame.kind == FrameKind::Pipe;
+                self.pop();
                 if self.frames.is_empty() {
                     self.echo = self.echo_before;
+                }
+                // An empty line, for the pipe's files to be deleted once
+                // its last command has run.
+                if piped {
+                    return Some(BatchLine { text: String::new(), echo: false });
                 }
                 continue;
             };
             frame.pc += 1;
             let text = match frame.kind {
-                FrameKind::For => dosstr::from_bytes(raw),
+                FrameKind::For | FrameKind::Pipe => dosstr::from_bytes(raw),
                 _ => expand(raw, &frame.params[frame.shift.min(frame.params.len())..], env),
             };
             let text = text.trim_start_matches([' ', '\t']);
@@ -187,7 +222,7 @@ impl Batch {
     /// End the batch file running, as a GOTO to a label it hasn't does.
     pub fn end_file(&mut self) {
         self.drop_for_frames();
-        self.frames.pop();
+        self.pop();
         if self.frames.is_empty() {
             self.echo = self.echo_before;
         }
@@ -196,7 +231,7 @@ impl Batch {
     /// SHIFT: `%1` becomes `%0`, `%2` `%1` and so on, in the batch file
     /// running.
     pub fn shift(&mut self) {
-        if let Some(frame) = self.frames.iter_mut().rev().find(|f| f.kind != FrameKind::For) {
+        if let Some(frame) = self.frames.iter_mut().rev().find(|f| !matches!(f.kind, FrameKind::For | FrameKind::Pipe)) {
             frame.shift += 1;
         }
     }
@@ -224,6 +259,15 @@ impl Batch {
             self.echo_before = self.echo;
         }
         self.frames.push(frame);
+    }
+
+    /// Take the top frame off, and a pipe's files to delete.
+    fn pop(&mut self) {
+        if let Some(frame) = self.frames.pop()
+            && frame.kind == FrameKind::Pipe
+        {
+            self.expired.extend(frame.params);
+        }
     }
 
     fn insert_bottom(&mut self, frame: Frame) {
@@ -345,10 +389,11 @@ fn label_key(label: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-crate::state_enum!(FrameKind { FrameKind::File, FrameKind::Lines, FrameKind::For });
+crate::state_enum!(FrameKind { FrameKind::File, FrameKind::Lines, FrameKind::For, FrameKind::Pipe });
 crate::state_fields!(Frame { kind, lines, pc, params, shift });
-// `dispatching` is only set while a line runs, never between.
-crate::state_fields!(Batch { frames, echo, echo_before } skip { dispatching });
+// `dispatching` is only set while a line runs, never between; a state
+// loaded leaves the files of the pipes that ended before it.
+crate::state_fields!(Batch { frames, echo, echo_before } skip { dispatching, expired });
 
 impl Default for Frame {
     fn default() -> Self {
@@ -441,5 +486,26 @@ mod tests {
         let mut batch = Batch::default();
         batch.append_file("X", b"echo \xC9\xCD\xBB %1\r\n", "\u{84}");
         assert_eq!(dosstr::to_bytes(&batch.next_line(&[]).unwrap().text), b"echo \xC9\xCD\xBB \x84");
+    }
+
+    #[test]
+    fn a_pipe_runs_its_commands_unechoed_then_hands_its_files_back() {
+        let mut batch = Batch::default();
+        batch.append_lines(["first", "last"]);
+        assert_eq!(batch.next_line(&env()).unwrap().text, "first");
+        batch.push_pipe(vec!["SORT <A".into(), "MORE <B".into()], vec!["A".into(), "B".into()]);
+        let line = batch.next_line(&env()).unwrap();
+        assert_eq!((line.text.as_str(), line.echo), ("SORT <A", false));
+        // A batch file the pipe runs comes back to it.
+        batch.dispatching = true;
+        batch.start_file("X.BAT", b"x", "", false);
+        batch.dispatching = false;
+        assert_eq!(run_all(&mut batch)[..2], ["x", "MORE <B"]);
+        assert_eq!(batch.take_expired(), ["A", "B"]);
+        assert!(!batch.is_active());
+
+        batch.push_pipe(vec!["MORE <C".into()], vec!["C".into()]);
+        batch.clear();
+        assert_eq!(batch.take_expired(), ["C"]);
     }
 }

@@ -131,6 +131,9 @@ programs, the prompt has these commands:
 | `DIR [path]`, `LS [/A] [path]` | list files, `LS` in wide columns |
 | `CD [path]`, `D:` | change the directory, or the drive |
 | `TYPE file` | show a text file |
+| `MORE [file]` | show text a screenful at a time |
+| `FIND [/V] [/C] [/N] [/I] "text" [file ...]` | the lines with the text in them (`/V` without it), numbered with `/N`, counted with `/C`, in any case with `/I`; `ERRORLEVEL` 0 if one was found, 1 if none |
+| `SORT [/R] [/+n] [file]` | lines in order, from their n-th column, backwards with `/R` |
 | `COPY source[+source...] [destination] [/A\|/B]` | copy files, with wildcards, or join them into one |
 | `DEL file`, `ERASE file` | delete files, all of a directory's when given one |
 | `REN old new`, `RENAME` | rename files, with wildcards (`REN *.TXT *.BAK`) |
@@ -150,8 +153,13 @@ programs, the prompt has these commands:
 | `EXIT` | quit Rust-DOS, or go back from `COMMAND` |
 | `COMMAND [/C command \| /K command]` | a second prompt, until `EXIT`; `/C` runs the command and goes back, `/K` runs it and stays |
 
-`>file`, `>>file` and `<file` redirect a command's output and a program's
-input; there are no pipes. `PROMPT` takes DOS's `$` codes (`$P$G` is the
+`>file`, `>>file` and `<file` redirect a command's output and input, and
+`|` pipes one command's output into the next (`TYPE README.TXT | MORE`,
+`DIR | SORT | FIND "EXE"`), as DOS does, through `PIPEn.$$$` files in `TEMP`
+or the current drive's root, deleted once the line has run. `MORE`, `FIND`
+and `SORT` read a pipe, `<file` or the file they are given; `PAUSE`,
+`CHOICE`, `DATE` and `TIME` take their keys or lines from a pipe too
+(`ECHO Y | CHOICE`). `PROMPT` takes DOS's `$` codes (`$P$G` is the
 default). At the prompt, Up and Down step through the last 100 lines typed,
 and Ctrl+C gives up the line being typed.
 

@@ -446,9 +446,18 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     cpu.bus
         .log_string(&format!("[MAIN] Processing Command: {}", cmd));
 
+    // The files of the pipes that have run.
+    for path in cpu.batch.take_expired() {
+        let _ = cpu.bus.disk.delete_file(&path);
+    }
+
     // A leading '@' (which hides a batch line's echo) means nothing here.
     let cmd = cmd.trim_start();
     let cmd = cmd.strip_prefix('@').unwrap_or(cmd);
+    let stages = split_pipes(cmd);
+    if stages.len() > 1 {
+        return start_pipe(cpu, &stages);
+    }
     let (cmd, redirect) = take_redirections(cmd);
     let (command, args) = split_command(&cmd);
     if command.is_empty() {
@@ -458,7 +467,20 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     if redirect.output.is_some() {
         cpu.stdout_capture = Some(Vec::new());
     }
+    // What a built-in reads (the command line of an IF or FOR passes it
+    // on to the command it runs).
+    let outer_input = cpu.stdin_redirect.clone();
+    if let Some(path) = &redirect.input {
+        cpu.stdin_redirect = redirected_input(cpu, path);
+    }
     let builtin = CommandDispatcher::new().dispatch(cpu, command, args);
+    if builtin
+        && redirect.input.is_some()
+        && let Some(input) = cpu.stdin_redirect.clone()
+    {
+        crate::shell::feed_wait(cpu, &input);
+    }
+    cpu.stdin_redirect = outer_input;
     if let Some(captured) = cpu.stdout_capture.take()
         && builtin
     {
@@ -476,6 +498,98 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     }
 }
 
+/// The commands of a command line with pipes (`A | B | C`), split at the
+/// '|'s outside quotes; one for a line without. A REM line's '|'s are
+/// its text.
+pub fn split_pipes(line: &str) -> Vec<String> {
+    if split_command(line).0.eq_ignore_ascii_case("REM") {
+        return vec![line.to_string()];
+    }
+    let mut stages = vec![String::new()];
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                stages.last_mut().unwrap().push(c);
+            }
+            '|' if !quoted => stages.push(String::new()),
+            _ => stages.last_mut().unwrap().push(c),
+        }
+    }
+    stages
+}
+
+/// Run a command line with pipes as COMMAND.COM does, through files: the
+/// first command writes one, which the second reads as its input and so
+/// on. The first runs now, the others as batch lines once the one before
+/// has (a program has ended), and the files are deleted after the last.
+fn start_pipe(cpu: &mut Cpu, stages: &[String]) {
+    if stages.iter().any(|stage| stage.trim().is_empty()) {
+        return crate::video::print_string(cpu, "Syntax error\r\n");
+    }
+    let Some(files) = pipe_files(cpu, stages.len() - 1) else {
+        return crate::video::print_string(cpu, "Intermediate file error during pipe\r\n");
+    };
+    // The pipe's redirections go after the command's own, and take their
+    // place.
+    let lines = (1..stages.len())
+        .map(|i| match files.get(i) {
+            Some(output) => format!("{} <{} >{}", stages[i].trim_end(), files[i - 1], output),
+            None => format!("{} <{}", stages[i].trim_end(), files[i - 1]),
+        })
+        .collect();
+    // Before the first command runs: a batch file or FOR it starts goes on
+    // top, and the pipe on after it.
+    cpu.batch.push_pipe(lines, files.clone());
+    run_command_line(cpu, &format!("{} >{}", stages[0].trim_end(), files[0]));
+}
+
+/// `count` new, empty files for a pipe, PIPEn.$$$: in the directory TEMP
+/// (or TMP) names, else at the root of the current drive, else of C:.
+/// None if they can't be made.
+fn pipe_files(cpu: &mut Cpu, count: usize) -> Option<Vec<String>> {
+    let current = crate::disk::drive_letter(cpu.bus.disk.get_current_drive());
+    let directories = [cpu.get_env("TEMP"), cpu.get_env("TMP")]
+        .into_iter()
+        .flatten()
+        .filter(|dir| cpu.bus.disk.is_directory(dir))
+        .map(|dir| dir.trim_end_matches('\\').to_string())
+        .chain([format!("{}:", current), "C:".to_string()]);
+    for directory in directories.collect::<Vec<_>>() {
+        let disk = &cpu.bus.disk;
+        let mut files = Vec::new();
+        for n in 1..1000 {
+            if files.len() == count {
+                return Some(files);
+            }
+            let path = format!("{}\\PIPE{}.$$$", directory, n);
+            if disk.exists(&path) {
+                continue;
+            }
+            if disk.write_whole_file(&path, &[], None).is_err() {
+                break;
+            }
+            files.push(path);
+        }
+        for path in &files {
+            let _ = disk.delete_file(path);
+        }
+    }
+    None
+}
+
+/// What a built-in reads from `<file`: the file, nothing from a device
+/// other than CON (or a file that isn't there), or None, the keyboard,
+/// from CON.
+fn redirected_input(cpu: &Cpu, path: &str) -> Option<Vec<u8>> {
+    match crate::disk::char_device(path) {
+        Some(crate::disk::CharDevice::Con) => None,
+        Some(_) => Some(Vec::new()),
+        None => Some(cpu.bus.disk.file_data(path).and_then(|file| file.read().ok()).map(|b| b.to_vec()).unwrap_or_default()),
+    }
+}
+
 /// Where a command line sends its output and takes its input.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Redirections {
@@ -486,7 +600,7 @@ pub struct Redirections {
 }
 
 /// A command line without its redirections (`>file`, `>>file`, `<file`),
-/// and them. What comes after a '|' is left out: there are no pipes.
+/// and them. What comes after a '|' is left out (see `split_pipes`).
 pub fn take_redirections(line: &str) -> (String, Redirections) {
     let mut redirect = Redirections::default();
     let mut rest = String::new();

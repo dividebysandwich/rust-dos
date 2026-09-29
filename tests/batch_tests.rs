@@ -569,7 +569,7 @@ fn output_and_input_can_be_redirected() {
         "@HELLO > PROG.TXT",
         "@HELLO >> PROG.TXT",
         "@ECHOIN < IN.TXT > COPY.TXT",
-        "@echo shown | nothing",
+        "@echo shown",
     ]);
     run_batch_files(&mut cpu);
     assert_eq!(fs::read(dir.join("OUT.TXT")).unwrap(), b"first\r\nsecond\r\n");
@@ -579,4 +579,99 @@ fn output_and_input_can_be_redirected() {
     let screen = screen(&cpu);
     assert!(!screen.contains("hi") && !screen.contains("Volume"), "{}", screen);
     assert!(screen.contains("shown"), "{}", screen);
+}
+
+/// A .COM program that copies up to 20 bytes of standard input to standard
+/// output.
+const ECHO_IN: [u8; 23] = [
+    0xB4, 0x3F, 0x31, 0xDB, 0xB9, 0x14, 0x00, 0xBA, 0x00, 0x02, 0xCD, 0x21,
+    0x89, 0xC1, 0xB4, 0x40, 0xBB, 0x01, 0x00, 0xCD, 0x21,
+    0xCD, 0x20,
+];
+
+/// The names in `dir` that pipes left behind.
+fn pipe_files(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.to_ascii_uppercase().ends_with(".$$$"))
+        .collect()
+}
+
+#[test]
+fn pipes_hand_output_to_the_next_command_through_files() {
+    let dir = scratch(
+        "pipes",
+        &[
+            ("ECHOIN.COM", &ECHO_IN),
+            ("IN.TXT", b"from a file"),
+            ("LIST.TXT", b"pear\r\napple\r\nBanana\r\ncherry\r\n"),
+            ("T.BAT", b"@echo off\r\ntype %1 | find \"an\"\r\necho after\r\n"),
+            ("PIPED.COM", &shell_out(" /C TYPE IN.TXT | ECHOIN > SHELL.TXT")),
+        ],
+    );
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines([
+        "@TYPE IN.TXT | ECHOIN > P1.TXT",
+        "@TYPE IN.TXT | ECHOIN | ECHOIN>P2.TXT",
+        "@TYPE LIST.TXT | SORT | FIND /V \"e\" > P3.TXT",
+        "@SORT /R < LIST.TXT > P4.TXT",
+        "@FIND /C /I \"A\" LIST.TXT > P5.TXT",
+        "@ECHO \"a|b\" > P6.TXT",
+        "@REM nothing | here",
+        "@CALL T LIST.TXT",
+        "@PIPED",
+    ]);
+    run_batch_files(&mut cpu);
+    assert_eq!(fs::read(dir.join("P1.TXT")).unwrap(), b"from a file");
+    assert_eq!(fs::read(dir.join("P2.TXT")).unwrap(), b"from a file");
+    assert_eq!(fs::read(dir.join("P3.TXT")).unwrap(), b"Banana\r\n");
+    assert_eq!(fs::read(dir.join("P4.TXT")).unwrap(), b"pear\r\ncherry\r\nBanana\r\napple\r\n");
+    assert_eq!(fs::read(dir.join("P5.TXT")).unwrap(), b"\r\n---------- LIST.TXT: 3\r\n");
+    assert_eq!(fs::read(dir.join("P6.TXT")).unwrap(), b"\"a|b\"\r\n");
+    assert_eq!(fs::read(dir.join("SHELL.TXT")).ok(), Some(b"from a file".to_vec()), "a pipe in COMMAND /C: {}", screen(&cpu));
+    assert!(screen(&cpu).contains("Banana\nafter"), "{}", screen(&cpu));
+    assert!(pipe_files(&dir).is_empty(), "the pipes' files are deleted: {:?}", pipe_files(&dir));
+}
+
+#[test]
+fn find_sets_the_errorlevel_and_input_answers_choice() {
+    let dir = scratch("find_errorlevel", &[("A.TXT", b"one\r\ntwo\r\n")]);
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines(["@FIND \"three\" A.TXT > NUL"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 1);
+    cpu.queue_batch_lines(["@FIND \"two\" < A.TXT > NUL"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 0);
+    cpu.queue_batch_lines(["@FIND \"two\" MISSING.TXT"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 2);
+    assert!(screen(&cpu).contains("File not found - MISSING.TXT"), "{}", screen(&cpu));
+
+    cpu.queue_batch_lines(["@ECHO n| CHOICE /C:yn Go on", "@ECHO done"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 2);
+    assert!(screen(&cpu).contains("Go on[Y,N]?N\ndone"), "{}", screen(&cpu));
+    assert!(pipe_files(&dir).is_empty());
+}
+
+#[test]
+fn more_shows_a_screenful_at_a_time() {
+    let text: String = (1..=30).map(|n| format!("line {}\r\n", n)).collect();
+    let dir = scratch("more", &[("LONG.TXT", text.as_bytes())]);
+    let mut cpu = machine(&dir);
+    type_line(&mut cpu, b"type long.txt | more\r");
+    run_until(&mut cpu, 200, |_| false);
+    let rows = rows(&cpu);
+    assert_eq!(rows[23], "line 24", "{:?}", rows);
+    assert_eq!(rows[24], "-- More --");
+    assert!(cpu.shell_wait.is_some());
+
+    cpu.bus.keyboard_buffer.push_back(0x3920);
+    run_batch_files(&mut cpu);
+    let text = screen(&cpu);
+    assert!(text.contains("line 24\nline 25") && text.ends_with("line 30\nC:\\>"), "{}", text);
+    assert!(!text.contains("More"), "{}", text);
+    assert!(pipe_files(&dir).is_empty());
 }

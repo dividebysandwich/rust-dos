@@ -70,7 +70,7 @@ crate::state_fields!(Cpu {
     shell_history, shell_completion, null_interrupts, mode_switches, exceptions, exception_log,
     // Only set while a command runs, never between the batches a state
     // is saved in.
-    secondary, stdout_capture,
+    secondary, stdout_capture, stdin_redirect,
 });
 
 impl Cpu {

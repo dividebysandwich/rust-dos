@@ -147,6 +147,7 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     cpu.secondary_shells.clear();
     cpu.secondary = None;
     cpu.stdout_capture = None;
+    cpu.stdin_redirect = None;
     cpu.process_stack.clear();
     cpu.current_psp = 0;
     cpu.bios_wait_until = None;

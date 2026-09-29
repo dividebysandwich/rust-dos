@@ -31,6 +31,7 @@ pub mod exec;
 pub mod f80;
 pub mod fat;
 pub mod file_commands;
+pub mod filter_commands;
 pub mod games;
 pub mod hardware;
 pub mod hostdirs;

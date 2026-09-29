@@ -291,6 +291,9 @@ pub struct Cpu {
     /// What a built-in command prints while its output is redirected
     /// (`>file`), instead of the screen.
     pub stdout_capture: Option<Vec<u8>>,
+    /// What a built-in command reads while its input is redirected
+    /// (`<file`, or a pipe); None for the keyboard.
+    pub stdin_redirect: Option<Vec<u8>>,
     /// The batch files running, whose lines are dispatched as if typed
     /// at the prompt while the shell is idle (no child program on the
     /// process_stack and CS still in shell-land), and ECHO.
@@ -470,6 +473,7 @@ impl Cpu {
             secondary_shells: Vec::new(),
             secondary: None,
             stdout_capture: None,
+            stdin_redirect: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
             fpu_stack: [F80::new(); 8],
