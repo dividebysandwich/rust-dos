@@ -645,11 +645,12 @@ fn long_pages_have_a_scroll_bar() {
     let mut frame = Frame::new(640, 400);
     let layout = Layout::for_frame(640, 400);
     let at = |col: usize, row: usize| ((layout.x + col * 8 + 4) as i32, (layout.y + row * layout.cell_h + 4) as i32);
-    // The scroll bar's rows that page up and down.
+    // The scroll bar's rows that page up and down (below the tabs, whose
+    // arrow is in the same column).
     let bar = |ui: &ConfigUi| -> Vec<(usize, UiKey)> {
         ui.hits
             .iter()
-            .filter(|h| h.col == layout.cols - 2)
+            .filter(|h| h.col == layout.cols - 2 && h.row > 1)
             .filter_map(|h| match h.target {
                 Target::Key(key) => Some((h.row, key)),
                 _ => None,
@@ -1605,6 +1606,7 @@ fn the_room_this_instance_hosts_shows_who_is_in_it() {
         index: Some(1),
         roster: Some(roster.clone()),
         listing: Listing { asking: false, result: Some(Ok(vec![list])) },
+        serial: Some((2, "COM2 linked".into())),
     });
     let mut ui = opened(&host);
     ui.show_page(Page::Network);

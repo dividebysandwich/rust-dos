@@ -54,11 +54,34 @@ impl Bus {
             }
         }
         self.serial.settings = settings.clone();
+        for line in self.serial_irq_clashes() {
+            self.log_string(&line);
+        }
         self.net.set_serial(settings);
         self.sync_serial_irqs();
         if self.boot.is_none() {
             self.write_serial_bda();
         }
+    }
+
+    /// The ports whose IRQ a card uses too, which neither can share.
+    fn serial_irq_clashes(&self) -> Vec<String> {
+        let cards = [
+            ("the Sound Blaster", self.sb.as_ref().map(|sb| sb.config.irq)),
+            ("the Gravis Ultrasound", self.gus.as_ref().and_then(|gus| gus.irq())),
+            ("the NE2000", self.net.nic.as_ref().map(|nic| nic.irq)),
+            ("the IPX driver", self.net.ipx.as_ref().map(|ipx| ipx.irq)),
+        ];
+        let mut clashes = Vec::new();
+        for (n, port) in self.serial.ports.iter().enumerate() {
+            let Some(irq) = port.as_ref().map(|p| p.uart.irq) else { continue };
+            for (card, card_irq) in cards {
+                if card_irq == Some(irq) {
+                    clashes.push(format!("[SERIAL] COM{}'s IRQ {} is {}'s too", n + 1, irq, card));
+                }
+            }
+        }
+        clashes
     }
 
     /// The serial ports in the BIOS data area (40:00-40:07) and their

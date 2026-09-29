@@ -35,6 +35,19 @@ pub enum PortType {
 crate::state_enum!(PortType { PortType::Off, PortType::Empty, PortType::Mouse, PortType::Modem, PortType::NullModem });
 
 impl PortType {
+    pub const ALL: [PortType; 5] = [PortType::Off, PortType::Mouse, PortType::Modem, PortType::NullModem, PortType::Empty];
+
+    /// What the settings window says of it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            PortType::Off => "off",
+            PortType::Empty => "port only, nothing plugged in",
+            PortType::Mouse => "serial mouse",
+            PortType::Modem => "modem (to LAN room or host)",
+            PortType::NullModem => "null modem cable to LAN room",
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" | "none" | "false" | "disabled" => Some(PortType::Off),

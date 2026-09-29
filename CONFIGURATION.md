@@ -6,13 +6,14 @@ of their own. See the [README](README.md) for everything else.
 
 * [Configuration file](#configuration-file): where it is, and every setting in
   [`[emulator]`](#emulator), [`[sound]`](#sound), [`[mixer]`](#mixer),
-  [`[joystick]`](#joystick), [`[network]`](#network), [`[drives]`](#drives) and
-  [`[autoexec]`](#autoexec)
+  [`[joystick]`](#joystick), [`[network]`](#network), [`[serial]`](#serial),
+  [`[drives]`](#drives) and [`[autoexec]`](#autoexec)
 * [Settings window](#settings-window)
 * [Game profiles](#game-profiles)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
-* [Playing over a LAN](#playing-over-a-lan) and [a relay on a
+* [Playing over a LAN](#playing-over-a-lan), [serial and modem
+  games](#serial-and-modem-games) and [a relay on a
   server](#a-relay-on-a-server)
 * [CRT shaders](#crt-shaders)
 * [Command-line options](#command-line-options)
@@ -379,6 +380,35 @@ The IPX driver of the built-in DOS and the LAN of rust-dos instances (see
   by, up to 32 characters. Without one (the default) they see "Player"
   and its member number.
 
+### `[serial]`
+
+The serial ports COM1 to COM4 (see [Serial and modem
+games](#serial-and-modem-games)). Changes take effect at the DOS prompt.
+
+* `serial1` to `serial4` say what each port has plugged in: `off` (no
+  port), `mouse` (a serial mouse, moved by the host's mouse), `modem` (a
+  Hayes modem, which calls the other player in the LAN room or a host on
+  the internet, and works as a null modem cable to the other player too),
+  `nullmodem` (a cable to the other player in the LAN room), or `empty`
+  (the port with nothing plugged in). By default COM1 has a mouse and COM2
+  a modem; COM3 and COM4 are off. The ports are at the standard addresses
+  3F8h, 2F8h, 3E8h and 2E8h, and the BIOS lists those from COM1 up to the
+  first that is off.
+* `serial1irq` to `serial4irq` are their IRQs: by default 4, 3, 4 and 3
+  (COM3 shares COM1's and COM4 COM2's, as on a PC); also 5, 7, 9, 10, 11,
+  12 or 15. The log says when a port's IRQ is a sound or network card's
+  too.
+* `uart` is the chip: `16550` (the default, with FIFOs) or `8250` (none,
+  for old programs that want one).
+* `mousetype` is the serial mouse: `microsoft` (the default, two
+  buttons) or `logitech` (three buttons).
+* `modemlisten` takes calls for the first modem on a TCP port: `off` (the
+  default) or a port. A call rings the modem; `ATA` answers it, or `ATS0=1`
+  answers the first ring.
+* `modemtelnet` makes the modem's TCP calls speak telnet, for BBSes:
+  `off` (the default: the characters as they are, as DOSBox's modem sends
+  them) or `on`.
+
 ### `[drives]`
 
 Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`,
@@ -430,6 +460,9 @@ Esc closes it.
   reverb and chorus with their dry/wet mixes.
 * **Network:** everything in [`[network]`](#network): the IPX driver, the
   NE2000 network card, and the LAN to join or host at startup.
+* **Serial:** everything in [`[serial]`](#serial): what each serial port
+  has plugged in and its IRQ, the chip, the serial mouse and the modem's
+  TCP calls.
 * **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
   makes one from the settings as they are, Del deletes one.
 * **States:** the [save state](README.md#save-states) slots of the game playing,
@@ -922,6 +955,40 @@ the room, the members in it and the round trip to the relay.
   packets are on the same LAN as the network cards of other instances, in
   the frame type `ipxframe` sets (Ethernet II by default), where the IPX
   protocol of a system booted with a card can take them.
+
+### Serial and modem games
+
+Games that play over a serial cable or a modem (Doom's and Heretic's
+SERSETUP, Descent, Warcraft, Duke Nukem 3D, Command & Conquer) play
+between the first two players in a LAN room: joining a room is all it
+takes, for IPX and serial games alike. A third player and later ones
+aren't linked; `LAN` says so. The port that goes to the other player is
+the first `modem` or `nullmodem` in [`[serial]`](#serial), COM2 by
+default; set the game up for that port, at any speed.
+
+* **Null modem games** (Doom's `SERSETUP -com2`, Descent's *Establish
+  null-modem link*) just start on both computers. On a `nullmodem` port
+  each end's DTR is the other's DSR and DCD, as over a cable. A `modem`
+  port works too: what a game sends that isn't an AT command goes to the
+  other player, and the modem is online to them until the game ends.
+* **Modem games** set the modem up with AT commands and dial. Any phone
+  number calls the other player in the room (`SERSETUP -com2 -dial 555`
+  on one computer, `-answer` on the other), whose modem rings; `ATA`
+  answers, or `ATS0=1` beforehand answers the first ring.
+* **Hosts on the internet:** a number with a dot, a colon or a letter in
+  it is a TCP address, port 23 unless given: `ATDT bbs.example.com` or
+  `ATDT 192.0.2.7:5000`. With `modemlisten` another rust-dos, or
+  DOSBox's modem, can call this one.
+* The modem knows the usual commands: `ATZ`, `AT&F`, `ATE`, `ATV`, `ATQ`,
+  `ATH`, `ATA`, `ATO`, `ATD`, `ATI`, `ATS0=`..`ATS15=` and `ATSn?`,
+  `A/`, and the escape `+++` with a second's pause before and after; it
+  answers the settings of error correction and compression with OK.
+* The link is reliable and in order over the relay's UDP, and needs a
+  relay that knows serial links (the relay of a rust-dos with serial
+  ports, or its `rust-dos-relay`); `LAN` says when the relay is older. The
+  settings window's room browser shows which player the link goes to.
+* The BIOS (INT 14h) and DOS's `COM1`-`COM4` devices go through the
+  ports too: `ECHO ATDT555 > COM2` dials.
 
 ### A relay on a server
 

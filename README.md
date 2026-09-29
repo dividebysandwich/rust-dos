@@ -58,6 +58,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   a public relay, and a relay for servers of your own), and an NE2000
   network card behind a router to the internet, for DOS packet drivers,
   Windows 3.x with Trumpet Winsock and Windows 95
+* **[Serial ports](CONFIGURATION.md#serial-and-modem-games):** a serial
+  mouse, and null modem and modem games between the first two players in
+  a LAN room; the Hayes modem also dials hosts over TCP and takes calls
 * Runs in a **[web browser](#running-in-a-browser)** as WebAssembly
 * A web-based **[debugger](#debug--remote-control-server)** and HTTP API
 

@@ -20,7 +20,9 @@ use crate::command::ShellCommand;
 use crate::cpu::Cpu;
 use crate::video::{print_cp437, print_string};
 
-const HELP: &str = "Joins rust-dos instances into a LAN, for games that play over IPX.\r\n\
+const HELP: &str = "Joins rust-dos instances into a LAN, for games that play over IPX, and\r\n\
+links the serial ports of the first two players in a room (modem or null\r\n\
+modem games; [serial]).\r\n\
 \r\n\
 LAN HOST [port] [/ROOM:name] [/PASSWORD:text]\r\n\
 LAN JOIN [host[:port] | /LOCAL | /ONLINE] [/ROOM:name] [/PASSWORD:text]\r\n\
@@ -34,7 +36,8 @@ LAN LEAVE | DISBAND | STOP | STATUS\r\n\
   LEAVE    Leaves the room; the one there longest hosts it next.\r\n\
   DISBAND  Ends the room for everyone in it, as its host (who made it).\r\n\
   STOP     Stops relaying.\r\n\
-  STATUS   Shows the IPX driver and the LAN (LAN alone does too).\r\n\
+  STATUS   Shows the IPX driver, the LAN and the serial link (LAN alone\r\n\
+           does too).\r\n\
   host     A relay. Without one, online in [network] says where rooms are:\r\n\
            on this network (the default), or online at relay.\r\n\
   /LOCAL   On this network: the first relay that answers (LIST: them all).\r\n\
@@ -301,7 +304,8 @@ pub fn list_ended(cpu: &mut Cpu) {
     print_string(cpu, &format!("{}; LAN JOIN /ROOM:name joins one, or makes it\r\n", shown));
 }
 
-/// LAN STATUS: the IPX driver, the room and the relay hosted.
+/// LAN STATUS: the IPX driver, the room, the serial link and the relay
+/// hosted.
 fn show(cpu: &mut Cpu) {
     let ipx = match &cpu.bus.net.ipx {
         Some(ipx) => format!(
@@ -345,7 +349,7 @@ fn show(cpu: &mut Cpu) {
             None => "Rooms: on this network (without an address)\r\n".to_string(),
         };
         print_string(cpu, &rooms);
-        let Some(status) = lan.hub else { return };
+        let Some(status) = &lan.hub else { return };
         if status.frames_out + status.frames_in > 0 {
             print_string(cpu, &format!("     {} frames sent, {} received\r\n", status.frames_out, status.frames_in));
         }
@@ -354,6 +358,25 @@ fn show(cpu: &mut Cpu) {
                 status.hosted_rooms.iter().map(|r| format!("{} ({})", r.name, r.members)).collect();
             let rooms = if rooms.is_empty() { "none yet".to_string() } else { rooms.join(", ") };
             print_string(cpu, &format!("Relaying on UDP port {}: rooms {}\r\n", hosting.port(), rooms));
+        }
+        let serial = &status.serial;
+        if let Some(port) = serial.port {
+            let others = lan.roster().map_or(0, |(_, roster)| roster.total.saturating_sub(1));
+            let link = match (serial.relay_serial, serial.peer, serial.up) {
+                (None, ..) => "not in a room".to_string(),
+                (Some(false), ..) => "the relay can't carry serial links; update it".to_string(),
+                (_, Some(peer), true) => match serial.rtt_ms {
+                    Some(rtt) => format!("linked to player {} ({} ms)", peer, rtt),
+                    None => format!("linked to player {}", peer),
+                },
+                (_, Some(peer), false) => format!("connecting to player {}", peer),
+                (_, None, _) if others == 0 => "waiting for another player".to_string(),
+                (_, None, _) => "not linked: only the first two players in a room are".to_string(),
+            };
+            print_line(cpu, &format!("Serial: COM{} {}", port + 1, link));
+        }
+        if let Some(port) = serial.listening {
+            print_line(cpu, &format!("The modem takes calls on TCP port {}", port));
         }
     }
 }

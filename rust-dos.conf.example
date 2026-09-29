@@ -315,6 +315,32 @@
 #room=lobby
 #password=
 
+[serial]
+# What the serial ports have plugged in: off, mouse (a serial mouse moved
+# by the host's mouse), modem (a Hayes modem: any number calls the other
+# player in the LAN room, a host[:port] a host over TCP, and it works as a
+# null modem cable to the other player too), nullmodem (a cable to the
+# other player in the LAN room) or empty (the port alone). The first two
+# players in a LAN room are linked through the first modem or nullmodem.
+#serial1=mouse
+#serial2=modem
+#serial3=off
+#serial4=off
+# Their IRQs (COM3 shares COM1's and COM4 COM2's, as on a PC).
+#serial1irq=4
+#serial2irq=3
+#serial3irq=4
+#serial4irq=3
+# The chip: 16550 (with FIFOs) or 8250.
+#uart=16550
+# The serial mouse: microsoft (two buttons) or logitech (three).
+#mousetype=microsoft
+# Take calls for the modem on this TCP port: off or a port. A call rings
+# the modem (ATA answers).
+#modemlisten=off
+# Speak telnet on the modem's TCP calls, for BBSes: off or on.
+#modemtelnet=off
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

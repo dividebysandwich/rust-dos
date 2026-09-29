@@ -323,6 +323,9 @@ pub struct LanView {
     pub index: Option<u8>,
     pub roster: Option<tunnel::wire::Roster>,
     pub listing: Listing,
+    /// The member the serial link goes to, and what it says of it
+    /// ("COM2 linked").
+    pub serial: Option<(u8, String)>,
 }
 
 impl LanView {
@@ -644,7 +647,15 @@ impl Net {
     pub fn view(&self) -> LanView {
         let status = self.status();
         let (index, roster) = status.roster().unzip();
-        LanView { state: status.describe(), joined: status.joined(), index, roster, listing: self.listing() }
+        #[cfg(not(target_arch = "wasm32"))]
+        let serial = status.hub.as_ref().and_then(|hub| {
+            let s = &hub.serial;
+            let (port, peer) = (s.port?, s.peer?);
+            Some((peer, format!("COM{} {}", port + 1, if s.up { "linked" } else { "linking" })))
+        });
+        #[cfg(target_arch = "wasm32")]
+        let serial = None;
+        LanView { state: status.describe(), joined: status.joined(), index, roster, listing: self.listing(), serial }
     }
 
     /// What happened on the LAN since the last call, for the screen.

@@ -224,19 +224,21 @@ enum Page {
     Sound,
     Mixer,
     Network,
+    Serial,
     Games,
     States,
     Cheats,
     Stats,
 }
 
-const PAGES: [Page; 10] = [
+const PAGES: [Page; 11] = [
     Page::Drives,
     Page::Display,
     Page::Emulator,
     Page::Sound,
     Page::Mixer,
     Page::Network,
+    Page::Serial,
     Page::Games,
     Page::States,
     Page::Cheats,
@@ -252,6 +254,7 @@ impl Page {
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
             Page::Network => "Network",
+            Page::Serial => "Serial",
             Page::Games => "Games",
             Page::States => "States",
             Page::Cheats => "Cheats",
@@ -296,6 +299,20 @@ impl Page {
             Page::Network => {
                 &[Online, Relay, Rooms, Player, Ipx, IpxIrq, IpxFrame, Ne2000, NicBase, NicIrq, MacAddr, Lan, LanHost, Room, Password]
             }
+            Page::Serial => &[
+                SerialPort(0),
+                SerialIrq(0),
+                SerialPort(1),
+                SerialIrq(1),
+                SerialPort(2),
+                SerialIrq(2),
+                SerialPort(3),
+                SerialIrq(3),
+                Uart,
+                MouseType,
+                ModemListen,
+                ModemTelnet,
+            ],
         }
     }
 }
@@ -457,6 +474,14 @@ enum Item {
     LanHost,
     Room,
     Password,
+    /// What each serial port has plugged in, and its IRQ.
+    SerialPort(u8),
+    SerialIrq(u8),
+    /// The ports' chip, the serial mouse, and the modem's TCP calls.
+    Uart,
+    MouseType,
+    ModemListen,
+    ModemTelnet,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -627,6 +652,15 @@ impl Item {
             LanHost => "Host a LAN at startup",
             Room => "LAN room",
             Password => "LAN password",
+            SerialPort(0) => "COM1",
+            SerialPort(1) => "COM2",
+            SerialPort(2) => "COM3",
+            SerialPort(_) => "COM4",
+            SerialIrq(_) => "  IRQ",
+            Uart => "Serial chip (UART)",
+            MouseType => "Serial mouse",
+            ModemListen => "Modem takes calls on",
+            ModemTelnet => "Modem speaks telnet",
         }
     }
 
@@ -647,6 +681,7 @@ impl Item {
             // The browser has no sockets for a LAN.
             Item::Online | Item::Rooms | Item::Relay | Item::Player => frontend.window,
             Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
+            Item::ModemListen | Item::ModemTelnet => frontend.window,
             _ => true,
         }
     }
@@ -662,6 +697,9 @@ impl Item {
             Item::VoodooMemory | Item::VoodooRenderer => s.voodoo.enabled,
             Item::VoodooScale => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
             Item::Relay => s.network.online,
+            Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
+            Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),
+            Item::ModemListen | Item::ModemTelnet => s.serial.ports.contains(&crate::serial::PortType::Modem),
             _ => true,
         }
     }
@@ -692,6 +730,7 @@ impl Item {
             Item::MacAddr | Item::Relay | Item::Player | Item::Lan | Item::LanHost | Item::Room | Item::Password => {
                 Input::Text
             }
+            Item::ModemListen => Input::Text,
             Item::SoundFont | Item::Mt32Roms => Input::File,
             Item::Autoexec | Item::Rooms => Input::Link,
             _ => Input::Choice,
@@ -849,6 +888,16 @@ impl Item {
             LanHost => s.network.lan_host.map_or("off".to_string(), |port| format!("UDP port {}", port)),
             Room => s.network.room.clone(),
             Password => if s.network.password.is_empty() { "none" } else { "(set)" }.to_string(),
+            SerialPort(n) => s.serial.ports[n as usize].describe().to_string(),
+            SerialIrq(n) => s.serial.irqs[n as usize].to_string(),
+            Uart => match s.serial.chip {
+                crate::serial::uart::Chip::Ns16550 => "16550A (FIFOs)",
+                crate::serial::uart::Chip::Ns8250 => "8250 (no FIFOs)",
+            }
+            .to_string(),
+            MouseType => s.serial.mouse.describe().to_string(),
+            ModemListen => s.serial.modem_listen.map_or("off".to_string(), |port| format!("TCP port {}", port)),
+            ModemTelnet => on_off(s.serial.modem_telnet),
         }
     }
 
@@ -966,11 +1015,19 @@ impl Item {
             NicBase => each(s, crate::net::NIC_BASES, |s, base| s.network.nic_base = base),
             NicIrq => each(s, [3, 4, 5, 7, 9, 10, 11, 15], |s, irq| s.network.nic_irq = irq),
             Online => on_off(|s, on| s.network.online = on),
+            SerialPort(n) => each(s, crate::serial::PortType::ALL, |s, kind| s.serial.ports[n as usize] = kind),
+            SerialIrq(n) => each(s, [3, 4, 5, 7, 9, 10, 11, 12, 15], |s, irq| s.serial.irqs[n as usize] = irq),
+            Uart => {
+                use crate::serial::uart::Chip;
+                each(s, [Chip::Ns16550, Chip::Ns8250], |s, chip| s.serial.chip = chip)
+            }
+            MouseType => each(s, crate::serial::mouse::MouseType::ALL, |s, kind| s.serial.mouse = kind),
+            ModemTelnet => on_off(|s, on| s.serial.modem_telnet = on),
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
             | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr | Rooms | Relay | Player
-            | Lan | LanHost | Room | Password => Vec::new(),
+            | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
     }
 
@@ -1052,6 +1109,7 @@ impl Item {
             Item::LanHost => s.network.lan_host.map_or("off".to_string(), |port| port.to_string()),
             Item::Room => s.network.room.clone(),
             Item::Password => s.network.password.clone(),
+            Item::ModemListen => s.serial.modem_listen.map_or("off".to_string(), |port| port.to_string()),
             _ => String::new(),
         }
     }
@@ -1079,6 +1137,7 @@ impl Item {
             Item::LanHost => s.network.set("lanhost", text)?,
             Item::Room => s.network.set("room", text)?,
             Item::Password => s.network.set("password", text)?,
+            Item::ModemListen => s.serial.set("modemlisten", text)?,
             _ => {}
         }
         Ok(())
@@ -1125,6 +1184,7 @@ impl Item {
             Item::LanHost => s.network.lan_host.take().is_some(),
             Item::Room => std::mem::replace(&mut s.network.room, crate::net::DEFAULT_ROOM.into()) != crate::net::DEFAULT_ROOM,
             Item::Password => !std::mem::take(&mut s.network.password).is_empty(),
+            Item::ModemListen => s.serial.modem_listen.take().is_some(),
             _ => false,
         }
     }

@@ -690,13 +690,18 @@ impl ConfigUi {
             let me = browser.view.index == Some(member.index);
             let name = format!("{:>3}  {}", member.index, member.shown());
             g.text_to(4, row, &name, if me { draw::GOOD } else { draw::BRIGHT }, role_col.saturating_sub(1));
-            let role = match (member.index == roster.host, me) {
+            let mut role = match (member.index == roster.host, me) {
                 (true, true) => "host, you",
                 (true, false) => "host",
                 (false, true) => "you",
                 (false, false) => "",
-            };
-            g.text_to(role_col, row, role, draw::NOTE, cols - 2);
+            }
+            .to_string();
+            // The player the serial link goes to.
+            if let Some((_, link)) = browser.view.serial.as_ref().filter(|(peer, _)| *peer == member.index) {
+                role = if role.is_empty() { link.clone() } else { format!("{}, {}", role, link) };
+            }
+            g.text_to(role_col, row, &role, draw::NOTE, cols - 2);
         }
         let more = roster.total as usize - fits.min(roster.total as usize);
         if more > 0 && fits < players.len() {

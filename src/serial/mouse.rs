@@ -30,6 +30,16 @@ pub enum MouseType {
 crate::state_enum!(MouseType { MouseType::Microsoft, MouseType::Logitech });
 
 impl MouseType {
+    pub const ALL: [MouseType; 2] = [MouseType::Microsoft, MouseType::Logitech];
+
+    /// What the settings window says of it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            MouseType::Microsoft => "Microsoft, 2 buttons",
+            MouseType::Logitech => "Logitech, 3 buttons",
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "microsoft" | "ms" | "2button" => Some(MouseType::Microsoft),
