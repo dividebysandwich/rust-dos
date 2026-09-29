@@ -1205,6 +1205,7 @@ impl Cpu {
         self.idle = false;
         let slave_imr = self.bus.pic.slave.imr;
         self.bus.reset_timers();
+        self.bus.reset_serial_irqs();
         self.keep_resident_irqs(slave_imr);
         self.bus.reset_sound();
         self.bus.reset_network();

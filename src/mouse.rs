@@ -140,6 +140,10 @@ pub struct MouseState {
     rest_y: f64,
     /// The PS/2 pointing device of the BIOS.
     pub ps2: Ps2Mouse,
+    /// The motion a serial mouse hasn't reported yet, in pixels (down
+    /// positive).
+    pub serial_dx: i32,
+    pub serial_dy: i32,
 }
 
 impl MouseState {
@@ -173,6 +177,8 @@ impl MouseState {
             rest_x: 0.0,
             rest_y: 0.0,
             ps2: Ps2Mouse::default(),
+            serial_dx: 0,
+            serial_dy: 0,
         }
     }
 
@@ -245,6 +251,8 @@ impl MouseState {
         if let Some((last_x, last_y)) = self.ps2.last_position.replace((x, y)) {
             self.ps2.dx += x - last_x;
             self.ps2.dy += y - last_y;
+            self.serial_dx += x - last_x;
+            self.serial_dy += y - last_y;
         }
         let new_x = x.clamp(self.min_x, self.max_x);
         let new_y = y.clamp(self.min_y, self.max_y);
@@ -288,6 +296,8 @@ impl MouseState {
         self.ps2.dx += dx;
         self.ps2.dy += dy;
         self.ps2.last_position = None;
+        self.serial_dx += dx;
+        self.serial_dy += dy;
         self.add_mickeys(dx, dy);
         self.pending_callback_events |= 0x01; // motion
         self.x = (self.x + dx).clamp(self.min_x, self.max_x);
@@ -659,7 +669,7 @@ crate::state_fields!(MouseState {
     mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
     callback_mask, callback_cs, callback_ip, pending_callback_events,
     last_callback_mickey_x, last_callback_mickey_y, rest_x, rest_y, ps2,
-});
+} skip { serial_dx, serial_dy });
 
 
 #[cfg(test)]

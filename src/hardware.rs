@@ -19,6 +19,8 @@ pub struct Hardware {
     pub voodoo: Option<crate::voodoo::Board>,
     /// The IPX driver and the LAN.
     pub network: crate::net::NetSettings,
+    /// The serial ports.
+    pub serial: crate::serial::SerialSettings,
 }
 
 impl Hardware {
@@ -32,6 +34,7 @@ impl Hardware {
             memory: (settings.ems, settings.umb),
             voodoo: settings.voodoo.board(),
             network: settings.network.clone(),
+            serial: settings.serial.clone(),
         }
     }
 
@@ -55,6 +58,7 @@ impl Hardware {
                 ..settings.voodoo
             },
             network: self.network.clone(),
+            serial: self.serial.clone(),
             ..settings.clone()
         }
     }
@@ -100,6 +104,10 @@ impl Hardware {
         if settings.network != self.network {
             cpu.bus.log_string("[CONFIG] The network settings changed");
             cpu.bus.configure_network(&settings.network);
+        }
+        if settings.serial != self.serial {
+            cpu.bus.log_string("[CONFIG] The serial ports changed");
+            cpu.bus.configure_serial(&settings.serial);
         }
         *self = Self::of(settings);
         warnings

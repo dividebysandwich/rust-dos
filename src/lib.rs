@@ -71,6 +71,7 @@ pub mod pnpbios;
 pub mod recorder;
 pub mod savestate;
 pub mod sb;
+pub mod serial;
 pub mod shell;
 pub mod sn76489;
 pub mod sound;

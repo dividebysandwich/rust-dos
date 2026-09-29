@@ -107,6 +107,7 @@ const DEVICES: [Device; 7] = [
 const CON_DEVICE: usize = 0;
 const CLOCK_DEVICE: usize = 3;
 const DISK_DEVICE: usize = 4;
+const COM1_DEVICE: usize = 5;
 
 /// The header of the built-in device `index` in `DEVICES`.
 const fn device_header(index: usize) -> u16 {
@@ -123,6 +124,7 @@ pub fn char_device(device: crate::disk::CharDevice, sft: u16) -> u32 {
         CharDevice::Nul if sft == SFT_AUX => far(device_header(1)),
         CharDevice::Nul if sft == SFT_PRN => far(device_header(2)),
         CharDevice::Nul => far(NUL_DEVICE),
+        CharDevice::Com1 | CharDevice::Com2 | CharDevice::Com3 | CharDevice::Com4 => far(device_header(COM1_DEVICE)),
     }
 }
 

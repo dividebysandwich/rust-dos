@@ -92,6 +92,7 @@ fn router(state: AppState) -> Router {
         .route("/api/pagewalk", get(pagewalk))
         .route("/api/xms", get(xms))
         .route("/api/net", get(net))
+        .route("/api/serial", get(serial))
         .route("/api/gus", get(gus))
         .route("/api/exceptions", get(exceptions))
         .route("/ws/trace", get(ws_trace))
@@ -706,6 +707,10 @@ async fn net(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Net, DEFAULT_TIMEOUT).await
 }
 
+async fn serial(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Serial, DEFAULT_TIMEOUT).await
+}
+
 async fn gus(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Gus, DEFAULT_TIMEOUT).await
 }
@@ -938,6 +943,8 @@ PROTECTED MODE
   GET  /api/exceptions       the last 64 exceptions (vector, error code, CS:EIP, CR2)
   GET  /api/xms              XMS handles, A20 and the HMA
   GET  /api/net              The IPX driver's sockets, ECBs and packets, and the LAN
+  GET  /api/serial           The serial ports: UART registers, what is plugged in,
+                             and the serial link to the other player or a host
 
 SOUND
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,

@@ -16,6 +16,7 @@ const VOODOO_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
+const SERIAL_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -35,6 +36,7 @@ impl Bus {
             voodoo,
             ide,
             net,
+            serial,
             keyboard_buffer,
             kbd,
             kbc,
@@ -189,6 +191,11 @@ impl Bus {
                 save_device(&net.nic, w);
             });
         }
+        // The serial ports. A modem's call, like the LAN, isn't part of the
+        // machine.
+        if serial.any() {
+            w.section(b"SER ", SERIAL_VERSION, |w| serial.save(w));
+        }
     }
 
     /// Read the bus's sections into it, in place: the RAM keeps its
@@ -202,6 +209,7 @@ impl Bus {
             voodoo,
             ide,
             net,
+            serial,
             keyboard_buffer,
             kbd,
             kbc,
@@ -356,6 +364,13 @@ impl Bus {
             return Err(StateError::Mismatch("this machine has an NE2000 and it hasn't".into()));
         } else {
             net.ipx = None;
+        }
+        // The serial ports come and go with the state.
+        if r.next_is(b"SER ") {
+            serial.load(&mut r.section(b"SER ", SERIAL_VERSION)?)?;
+        } else {
+            serial.ports = Default::default();
+            serial.pic_lines = 0;
         }
         Ok(lost)
     }

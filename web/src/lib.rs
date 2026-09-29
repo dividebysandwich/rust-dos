@@ -216,6 +216,7 @@ impl Machine {
         cpu.bus.ide_hard_disks = settings.ide_hard_disks;
         warnings.extend(rust_dos::sound::apply_config(&mut cpu, &settings.sound, None));
         cpu.bus.configure_network(&settings.network);
+        cpu.bus.configure_serial(&settings.serial);
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
         }

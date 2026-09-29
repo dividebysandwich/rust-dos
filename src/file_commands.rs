@@ -278,7 +278,14 @@ fn write_target(cpu: &mut Cpu, source: &str, target: &str, mut data: Vec<u8>, as
             print_cp437(cpu, &data, 0x07);
             return true;
         }
-        Some(_) => return true,
+        Some(device) => {
+            if let Some(n) = device.com_port() {
+                for &byte in &data {
+                    cpu.bus.serial_send(n, byte);
+                }
+            }
+            return true;
+        }
         None => {}
     }
     if cpu.bus.disk.qualify_path(target).as_deref() == Some(source) {

@@ -13,7 +13,10 @@ use crate::mount::{mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use std::io::Seek;
 
-crate::state_enum!(CharDevice { CharDevice::Nul, CharDevice::Con, CharDevice::Emm });
+crate::state_enum!(CharDevice {
+    CharDevice::Nul, CharDevice::Con, CharDevice::Emm, CharDevice::Com1, CharDevice::Com2, CharDevice::Com3,
+    CharDevice::Com4,
+});
 
 /// An open file as saved: its entry in the file table and how many
 /// handles refer to it. The handles themselves are in the processes'

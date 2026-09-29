@@ -524,7 +524,14 @@ fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
     let Some((path, append)) = &redirect.output else { return };
     match crate::disk::char_device(path) {
         Some(crate::disk::CharDevice::Con) => return crate::video::print_cp437(cpu, captured, 0x07),
-        Some(_) => return,
+        Some(device) => {
+            if let Some(n) = device.com_port() {
+                for &byte in captured {
+                    cpu.bus.serial_send(n, byte);
+                }
+            }
+            return;
+        }
         None => {}
     }
     let mut data = Vec::new();

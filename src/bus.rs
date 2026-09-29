@@ -9,6 +9,7 @@ pub mod port_log;
 pub mod s3;
 mod ide;
 mod net;
+mod serial;
 mod state;
 mod voodoo;
 
@@ -201,6 +202,8 @@ pub struct Bus {
     gus_line: Option<u8>,
     /// The network: the IPX driver, and the thread with the sockets.
     pub net: crate::net::Net,
+    /// The serial ports.
+    pub serial: crate::serial::Serial,
     /// The drive with the built-in Ultrasound software, if any.
     ultrasnd_drive: Option<u8>,
     /// The CD drive playing audio tracks, for MSCDEX.
@@ -357,6 +360,7 @@ impl Bus {
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
             gus_line: None,
             net: crate::net::Net::new(),
+            serial: crate::serial::Serial::default(),
             ultrasnd_drive: None,
             cdaudio: crate::cdrom::audio::CdPlayer::new(),
             disk_io: crate::diskio::DiskIo::default(),
@@ -473,6 +477,8 @@ impl Bus {
             let equipment = self.read_16(0x0410);
             self.write_16(0x0410, equipment | 0x1000);
         }
+        self.write_serial_bda();
+        self.reset_serial();
         crate::mcb::build_upper(self);
         self.sync_drive_bda();
         crate::dos_files::write_table(self);
@@ -1307,6 +1313,8 @@ impl Bus {
         }
         // Frames the network passed on since the last batch.
         self.net_poll();
+        // The serial mouse's motion, and what came for the serial link.
+        self.serial_poll();
         self.refresh_irq();
     }
 
@@ -1323,8 +1331,16 @@ impl Bus {
     fn next_event(&self) -> Option<u64> {
         let sb = self.sb.as_ref().and_then(|sb| sb.next_event());
         let gus = self.gus_next_event();
-        [self.pit0.next_event(), sb, gus, self.voodoo_next_event(), self.ide_next_event(), self.net_next_event()]
-            .into_iter()
+        [
+            self.pit0.next_event(),
+            sb,
+            gus,
+            self.voodoo_next_event(),
+            self.ide_next_event(),
+            self.net_next_event(),
+            self.serial_next_event(),
+        ]
+        .into_iter()
             .flatten()
             .min()
     }
@@ -1355,6 +1371,9 @@ impl Bus {
         }
         if self.net_next_event().is_some_and(|t| t <= now) {
             self.net_service();
+        }
+        if self.serial_next_event().is_some_and(|t| t <= now) {
+            self.serial_service();
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -1830,6 +1849,7 @@ impl Bus {
             // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
+            p if self.serial_claims(p) => self.serial_write(p, value),
             // The two 8259 interrupt controllers.
             0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.write(port, value),
 
@@ -2150,6 +2170,7 @@ impl Bus {
         match port {
             p if self.ide_claims(p) => self.ide_read(p),
             p if self.ne2000_claims(p) => self.ne2000_read(p),
+            p if self.serial_claims(p) => self.serial_read(p),
             // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
             // 0x21 the interrupt mask. Programs read-modify-write the mask
             // to unmask their IRQ without disturbing the others.

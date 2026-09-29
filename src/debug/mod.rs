@@ -148,6 +148,7 @@ pub enum Cmd {
     PageWalk(String),
     Xms,
     Net,
+    Serial,
     Exceptions,
     Gus,
     Drives,
@@ -1359,6 +1360,7 @@ impl DebugHub {
             },
             Cmd::Xms => Reply::Json(pm::xms_json(cpu)),
             Cmd::Net => Reply::Json(net_json(cpu)),
+            Cmd::Serial => Reply::Json(serial_json(cpu)),
             Cmd::Gus => Reply::Json(match &cpu.bus.gus {
                 Some(gus) => gus.snapshot(),
                 None => serde_json::json!({ "installed": false }),
@@ -1965,6 +1967,40 @@ impl crate::exec::ExecHook for DebugHub {
 }
 
 /// `/api/net`: the IPX driver's sockets, ECBs and packets, and the LAN.
+fn serial_json(cpu: &Cpu) -> serde_json::Value {
+    use rust_dos::serial::Backend;
+    let ports: Vec<_> = cpu
+        .bus
+        .serial
+        .ports
+        .iter()
+        .enumerate()
+        .map(|(n, port)| {
+            let Some(port) = port else { return json!({"port": format!("COM{}", n + 1), "present": false}) };
+            let uart: serde_json::Map<_, _> =
+                port.uart.describe().into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::String(v))).collect();
+            let backend = match &port.backend {
+                Backend::Empty => json!({"type": "empty"}),
+                Backend::Mouse(m) => json!({"type": "mouse", "kind": m.kind.name(), "powered": m.powered}),
+                Backend::NullModem(c) => json!({"type": "nullmodem", "peer": c.peer, "lines": format!("{:02X}", c.lines())}),
+                Backend::Modem(m) => json!({
+                    "type": "modem",
+                    "call": format!("{:?}", m.call),
+                    "online": m.online,
+                    "direct": m.direct,
+                    "peer": m.peer,
+                }),
+            };
+            json!({"port": format!("COM{}", n + 1), "present": true, "uart": uart, "backend": backend})
+        })
+        .collect();
+    json!({
+        "ports": ports,
+        "pic_lines": format!("{:04X}", cpu.bus.serial.pic_lines),
+        "link": cpu.bus.net.serial_status(),
+    })
+}
+
 fn net_json(cpu: &Cpu) -> serde_json::Value {
     let far = |(segment, offset): (u16, u16)| format!("{:04X}:{:04X}", segment, offset);
     let ipx = cpu.bus.net.ipx.as_ref().map(|ipx| {

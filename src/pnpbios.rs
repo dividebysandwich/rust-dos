@@ -7,10 +7,10 @@
 //! handles, for the Windows 95 installed on it: Windows knows a device by
 //! its handle (Enum\BIOS\*PNP0303\00), and one it finds under another
 //! handle, or a `$PnP` at another address, it installs again. The serial
-//! ports DOSBox-X had are left out, as rust-dos has none, the IDE
-//! controllers but with a booted system's hard disks or CD-ROM drive on
-//! them, and the PCI bus but on a machine with one, so the handles skip
-//! theirs.
+//! ports are there as the machine has them (COM1 and COM2 at DOSBox-X's
+//! handles, COM3 and COM4 after the IDE controllers), the IDE controllers
+//! but with a booted system's hard disks or CD-ROM drive on them, and the
+//! PCI bus but on a machine with one, so the handles skip theirs.
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, Seg};
@@ -89,6 +89,9 @@ fn node(id: &[u8; 7], typ: [u8; 3], resources: &[Resource]) -> Vec<u8> {
     data
 }
 
+/// The serial ports' node handles.
+const SERIAL_HANDLES: [u8; 4] = [0x0D, 0x0E, 0x11, 0x12];
+
 /// The system devices, by handle.
 fn nodes(bus: &Bus) -> Vec<(u8, Vec<u8>)> {
     use Resource::*;
@@ -120,6 +123,13 @@ fn nodes(bus: &Bus) -> Vec<(u8, Vec<u8>)> {
         let resources = [Io(id.base(), 8, 8), Io(id.alt(), 1, 2), Irq2(id.irq())];
         (id.pnp_handle(), node(b"PNP0600", [0x01, 0x01, 0x00], &resources))
     }))
+    // The serial ports.
+    .chain(bus.serial.ports.iter().zip(SERIAL_HANDLES).filter_map(|(port, handle)| {
+        let uart = &port.as_ref()?.uart;
+        Some((handle, node(b"PNP0501", [0x07, 0x00, 0x02], &[Io(uart.base, 0x10, 8), Irq(uart.irq)])))
+    }))
+    .collect::<std::collections::BTreeMap<_, _>>()
+    .into_iter()
     .collect()
 }
 

@@ -602,6 +602,25 @@ pub enum CharDevice {
     /// EMMXXXX0, the expanded memory manager, which programs open to see
     /// whether there is EMS.
     Emm,
+    /// A serial port: writes go out through it, reads take what came.
+    /// Without the port, it is NUL.
+    Com1,
+    Com2,
+    Com3,
+    Com4,
+}
+
+impl CharDevice {
+    /// The serial port's index (0 for COM1).
+    pub fn com_port(self) -> Option<usize> {
+        match self {
+            CharDevice::Com1 => Some(0),
+            CharDevice::Com2 => Some(1),
+            CharDevice::Com3 => Some(2),
+            CharDevice::Com4 => Some(3),
+            _ => None,
+        }
+    }
 }
 
 /// The character device a file name names. DOS finds devices by name in
@@ -611,9 +630,11 @@ pub fn char_device(filename: &str) -> Option<CharDevice> {
     let stem = last.split('.').next()?.trim().to_ascii_uppercase();
     match stem.as_str() {
         "CON" => Some(CharDevice::Con),
-        "NUL" | "PRN" | "AUX" | "LPT1" | "LPT2" | "LPT3" | "COM1" | "COM2" | "COM3" | "COM4" | "CLOCK$" => {
-            Some(CharDevice::Nul)
-        }
+        "COM1" => Some(CharDevice::Com1),
+        "COM2" => Some(CharDevice::Com2),
+        "COM3" => Some(CharDevice::Com3),
+        "COM4" => Some(CharDevice::Com4),
+        "NUL" | "PRN" | "AUX" | "LPT1" | "LPT2" | "LPT3" | "CLOCK$" => Some(CharDevice::Nul),
         _ => None,
     }
 }

@@ -208,15 +208,20 @@ pub fn install_for_boot(bus: &mut Bus, hard_disks: &[crate::diskimage::Chs]) {
         write_rom(bus, FIXED_DISK_PARAMS + 16 * i as u16, &table);
     }
 
-    // The serial ports (none) and the parallel port (with a DAC on it).
+    // The serial ports and the parallel port (with a DAC on it).
+    let serial = bus.serial.bios_ports();
+    for (n, base) in serial.iter().enumerate() {
+        bus.write_16(0x0400 + 2 * n, *base);
+    }
     if bus.lpt_dac.is_some() {
         bus.write_16(0x0408, crate::lpt_dac::LPT1);
     }
     // The equipment word: two floppy drives (bits 0 and 6-7), the
     // coprocessor (bit 1), a PS/2 mouse (bit 2), the video adapter's
     // initial mode (bits 4-5, from `video::bios::install`), the game port
-    // (bit 12) and the parallel port (bits 14-15).
-    let mut equipment = 0x0047;
+    // (bit 12), the serial ports (bits 9-11) and the parallel port (bits
+    // 14-15).
+    let mut equipment = 0x0047 | (serial.len() as u16) << 9;
     equipment |= if bus.vga.setup().mono() { 0x0030 } else { 0x0020 };
     if bus.joystick.present() {
         equipment |= 0x1000;

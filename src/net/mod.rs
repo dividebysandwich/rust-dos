@@ -18,6 +18,7 @@ pub mod ipx;
 pub mod nat;
 pub mod ne2000;
 pub mod port;
+pub mod serial;
 pub mod switch;
 pub mod tunnel;
 
@@ -408,6 +409,8 @@ pub struct Net {
     listing: Arc<Mutex<(u64, Listing)>>,
     /// What the screen should show.
     notices: Vec<String>,
+    /// The serial ports' links.
+    pub serial: serial::SerialNet,
 }
 
 impl Default for Net {
@@ -429,6 +432,7 @@ impl Net {
             #[cfg(not(target_arch = "wasm32"))]
             listing: Arc::default(),
             notices: Vec::new(),
+            serial: serial::SerialNet::default(),
         }
     }
 

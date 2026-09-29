@@ -239,6 +239,7 @@ fn main() -> Result<(), String> {
         config_warning(&mut cpu, &warning);
     }
     cpu.bus.configure_network(&settings.network);
+    cpu.bus.configure_serial(&settings.serial);
     for warning in cpu.bus.start_lan() {
         config_warning(&mut cpu, &warning);
     }
@@ -776,7 +777,7 @@ fn main() -> Result<(), String> {
                     // A program using the mouse (the INT 33h driver, or the
                     // BIOS's PS/2 mouse as Windows does) gets it captured by
                     // a click, which it doesn't see, as in DOSBox.
-                    if !mouse_captured && (cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled) {
+                    if !mouse_captured && (cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use()) {
                         capture_mouse!(true);
                         capturing_click = Some(mouse_btn);
                         osd.show("Mouse captured (Ctrl+F10 releases)");

@@ -175,6 +175,8 @@ pub struct Config {
     pub joystick: JoystickSettings,
     /// `[network]`: the IPX driver and the LAN.
     pub network: crate::net::NetSettings,
+    /// `[serial]`: the serial ports.
+    pub serial: crate::serial::SerialSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -199,6 +201,7 @@ enum Section {
     Mixer,
     Joystick,
     Network,
+    Serial,
     Drives,
     Autoexec,
     /// A game profile's (games.rs).
@@ -214,6 +217,7 @@ impl Section {
             "mixer" => Section::Mixer,
             "joystick" => Section::Joystick,
             "network" => Section::Network,
+            "serial" => Section::Serial,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
@@ -228,6 +232,7 @@ impl Section {
             Section::Mixer => "mixer",
             Section::Joystick => "joystick",
             Section::Network => "network",
+            Section::Serial => "serial",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",
@@ -629,6 +634,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Mixer
             | Section::Joystick
             | Section::Network
+            | Section::Serial
             | Section::Game => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
@@ -831,6 +837,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Serial {
+                    if let Err(e) = config.serial.set(key, value) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
                 if section == Section::Sound {
                     let lower = key.to_ascii_lowercase();
                     if matches!(lower.as_str(), "hard_disk_noise" | "floppy_disk_noise") {
@@ -1005,6 +1018,8 @@ pub struct Settings {
     pub joystick: JoystickSettings,
     /// `[network]`: the IPX driver and the LAN.
     pub network: crate::net::NetSettings,
+    /// `[serial]`: the serial ports.
+    pub serial: crate::serial::SerialSettings,
 }
 
 impl Default for Settings {
@@ -1040,6 +1055,7 @@ impl Default for Settings {
             mixer: MixerSettings::default(),
             joystick: JoystickSettings::default(),
             network: crate::net::NetSettings::default(),
+            serial: crate::serial::SerialSettings::default(),
         }
     }
 }
@@ -1100,6 +1116,7 @@ impl Settings {
             mixer: config.mixer,
             joystick: config.joystick,
             network: config.network.clone(),
+            serial: config.serial.clone(),
         }
     }
 }
@@ -1204,6 +1221,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Section::Joystick, "deadzone", Some(settings.joystick.deadzone.to_string())),
     ]);
     entries.extend(settings.network.entries().into_iter().map(|(key, value)| (Section::Network, key, value)));
+    entries.extend(settings.serial.entries().into_iter().map(|(key, value)| (Section::Serial, key, value)));
     entries
 }
 
@@ -1241,6 +1259,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Mixer
                 | Section::Joystick
                 | Section::Network
+                | Section::Serial
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(comment.trim_start_matches(['#', ';']).trim_start())
@@ -1707,7 +1726,7 @@ mod tests {
             D=/two\n\
             E=/x zip\n\
             nonsense\n\
-            [serial]\n\
+            [modem]\n\
             ignored=1\n";
         let config = parse(text, Path::new("/cfg"), None);
         let joined = config.warnings.join("\n");
@@ -1720,7 +1739,7 @@ mod tests {
             "line 9: drive D: defined twice",
             "line 10: drive E: Unknown option 'zip'",
             "line 11: expected key=value",
-            "line 12: unknown section [serial]",
+            "line 12: unknown section [modem]",
         ] {
             assert!(
                 joined.contains(expected),
@@ -2107,6 +2126,16 @@ mod tests {
                 room: "doom".into(),
                 ..Default::default()
             },
+            serial: crate::serial::SerialSettings {
+                ports: [
+                    crate::serial::PortType::Empty,
+                    crate::serial::PortType::NullModem,
+                    crate::serial::PortType::Mouse,
+                    crate::serial::PortType::Off,
+                ],
+                modem_listen: Some(2323),
+                ..Default::default()
+            },
         }
     }
 
@@ -2276,7 +2305,8 @@ mod tests {
         assert!(saved.contains("shader=aperture\n") && saved.contains("gus=false\n"), "{}", saved);
         assert!(saved.contains("soundfont=sf/gm.sf2\n"), "{}", saved);
         assert!(saved.contains("\n[joystick]\njoysticktype=auto\ndeadzone=10\n\n[network]\nipx=auto\n"), "{}", saved);
-        assert!(saved.contains("\nroom=lobby\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
+        assert!(saved.contains("\nmodemtelnet=off\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

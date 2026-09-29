@@ -338,6 +338,7 @@ fn write_entry(bus: &mut Bus, sft: u16) {
                 CharDevice::Emm => 0xC080,
                 CharDevice::Nul if sft == SFT_AUX || sft == SFT_PRN => 0x80C0,
                 CharDevice::Nul => 0x8084,
+                CharDevice::Com1 | CharDevice::Com2 | CharDevice::Com3 | CharDevice::Com4 => 0x80C0,
             };
             (info, crate::dos_data::char_device(device, sft))
         }

@@ -1223,6 +1223,19 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.bus.guest_write_bytes(buf_addr, &taken);
                 cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else if let Some(n) = cpu.bus.disk.handle_device(sft).and_then(|d| d.com_port())
+                && cpu.bus.serial.ports[n].is_some()
+            {
+                // A serial port: what came through its UART.
+                let mut taken = Vec::new();
+                while taken.len() < count
+                    && let Some(byte) = cpu.bus.serial_receive(n)
+                {
+                    taken.push(byte);
+                }
+                cpu.bus.guest_write_bytes(buf_addr, &taken);
+                cpu.set_ax(taken.len() as u16);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
                 match cpu.bus.disk.read_file(sft, count) {
                     Ok(bytes) => {
@@ -1278,7 +1291,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return;
             }
 
-            if console {
+            if let Some(n) = cpu.bus.disk.handle_device(sft).and_then(|d| d.com_port())
+                && cpu.bus.serial.ports[n].is_some()
+            {
+                // A serial port: out through its UART.
+                for &byte in &data {
+                    cpu.bus.serial_send(n, byte);
+                }
+                cpu.set_ax(count as u16);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else if console {
                 // STDOUT/STDERR, or CON opened by name
                 for &byte in &data {
                     if byte == 0x07 {
@@ -1391,7 +1413,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let Some(sft) = sft else {
                         return set_result(cpu, Err(0x06));
                     };
-                    if sft == crate::disk::SFT_AUX || sft == crate::disk::SFT_PRN {
+                    if sft == crate::disk::SFT_AUX
+                        || sft == crate::disk::SFT_PRN
+                        || device.is_some_and(|d| d.com_port().is_some())
+                    {
                         // AUX and PRN: character devices, not EOF.
                         cpu.set_dx(0x80C0);
                     } else if device == Some(CharDevice::Nul) {
