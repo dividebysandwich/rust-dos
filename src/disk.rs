@@ -608,6 +608,8 @@ pub enum CharDevice {
     Com2,
     Com3,
     Com4,
+    /// PRN and LPT1: writes go to the printer. Without one, it is NUL.
+    Prn,
 }
 
 impl CharDevice {
@@ -634,7 +636,8 @@ pub fn char_device(filename: &str) -> Option<CharDevice> {
         "COM2" => Some(CharDevice::Com2),
         "COM3" => Some(CharDevice::Com3),
         "COM4" => Some(CharDevice::Com4),
-        "NUL" | "PRN" | "AUX" | "LPT1" | "LPT2" | "LPT3" | "CLOCK$" => Some(CharDevice::Nul),
+        "PRN" | "LPT1" => Some(CharDevice::Prn),
+        "NUL" | "AUX" | "LPT2" | "LPT3" | "CLOCK$" => Some(CharDevice::Nul),
         _ => None,
     }
 }
@@ -726,7 +729,7 @@ impl DiskController {
     /// start out referring to.
     fn open_standard_devices(&mut self) {
         for (sft, name, device) in
-            [(SFT_AUX, "AUX", CharDevice::Nul), (SFT_CON, "CON", CharDevice::Con), (SFT_PRN, "PRN", CharDevice::Nul)]
+            [(SFT_AUX, "AUX", CharDevice::Nul), (SFT_CON, "CON", CharDevice::Con), (SFT_PRN, "PRN", CharDevice::Prn)]
         {
             let file = OpenFile {
                 data: OpenData::Device(device),

@@ -229,6 +229,15 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("ne2000" | "ethernet", "macaddr") if !first.eq_ignore_ascii_case("ac:de:48:88:99:aa") => {
             imported.set("network", "macaddr", first)
         }
+        // DOSBox-X's printer, where it differs from its defaults (on,
+        // PNG pages) and rust-dos's (on, PDF documents) alike.
+        ("printer", "printer") if bool_value() == Some("false") => imported.set("printer", "output", "none"),
+        ("printer", "printoutput") if first == "printer" => imported.set("printer", "output", "printer"),
+        ("parallel", "parallel1") => match first {
+            "disabled" | "none" => imported.set("printer", "output", "none"),
+            "file" => imported.set("printer", "output", "file"),
+            _ => {}
+        },
         ("joystick", "joysticktype") => match first {
             "auto" | "2axis" | "4axis" | "none" => imported.set("joystick", "joysticktype", first),
             "4axis_2" | "fcs" | "ch" => imported.set("joystick", "joysticktype", "4axis"),
@@ -383,6 +392,19 @@ mod tests {
         assert!(config.warnings.is_empty(), "{:?}\n{}", config.warnings, text);
         assert!(config.network.ne2000);
         assert_eq!(config.network.mac.map(|m| m.to_string()).as_deref(), Some("02:00:5E:00:00:01"));
+    }
+
+    #[test]
+    fn dosbox_x_printers_map_where_they_differ() {
+        let output = |conf: &str| {
+            let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+            imported.settings.iter().find(|(_, k, _)| *k == "output").map(|(_, _, v)| v.clone())
+        };
+        assert_eq!(output("[printer]\nprinter=true\nprintoutput=png\n[parallel]\nparallel1=printer\n"), None);
+        assert_eq!(output("[printer]\nprinter=false\n").as_deref(), Some("none"));
+        assert_eq!(output("[printer]\nprintoutput=printer\n").as_deref(), Some("printer"));
+        assert_eq!(output("[parallel]\nparallel1=file dev:lpt1\n").as_deref(), Some("file"));
+        assert_eq!(output("[parallel]\nparallel1=disabled\n").as_deref(), Some("none"));
     }
 
     #[test]

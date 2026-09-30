@@ -94,6 +94,8 @@ fn router(state: AppState) -> Router {
         .route("/api/xms", get(xms))
         .route("/api/net", get(net))
         .route("/api/serial", get(serial))
+        .route("/api/printer", get(printer))
+        .route("/api/printer/eject", post(printer_eject))
         .route("/api/gus", get(gus))
         .route("/api/exceptions", get(exceptions))
         .route("/ws/trace", get(ws_trace))
@@ -723,6 +725,14 @@ async fn serial(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Serial, DEFAULT_TIMEOUT).await
 }
 
+async fn printer(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Printer { eject: false }, DEFAULT_TIMEOUT).await
+}
+
+async fn printer_eject(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Printer { eject: true }, DEFAULT_TIMEOUT).await
+}
+
 async fn gus(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Gus, DEFAULT_TIMEOUT).await
 }
@@ -957,6 +967,10 @@ PROTECTED MODE
   GET  /api/net              The IPX driver's sockets, ECBs and packets, and the LAN
   GET  /api/serial           The serial ports: UART registers, what is plugged in,
                              and the serial link to the other player or a host
+  GET  /api/printer          The printer on LPT1: output, bytes and pages printed,
+                             whether a job is printing, the last file written
+  POST /api/printer/eject    Eject the page and end the print job; returns once
+                             its files are written
 
 SOUND
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,

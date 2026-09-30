@@ -10,6 +10,7 @@ pub mod int13;
 pub mod int14;
 pub mod int15;
 pub mod int16;
+pub mod int17;
 pub mod int1a;
 pub mod int20;
 pub mod int21;
@@ -274,10 +275,7 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
         0x2A => { /* DOS Timer Tick - Do nothing for now */ }
         0x13 => int13::handle(cpu),
         0x14 => int14::handle(cpu),
-        0x17 => {
-            cpu.bus.log_string("[BIOS] Unhandled INT 17h (Printer)");
-            cpu.set_reg8(iced_x86::Register::AH, 0x29);
-        } // IO Error, Selected, Out of Paper
+        0x17 => int17::handle(cpu),
         0x2F => {
             // The running process's handle table (AX=1220h) is the
             // machine's own under Windows.

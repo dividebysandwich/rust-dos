@@ -348,6 +348,11 @@ impl Item {
             MouseType => "mouse-type",
             ModemListen => "modem-listen",
             ModemTelnet => "modem-telnet",
+            PrinterOutput => "printer",
+            PrinterPaper => "printer-paper",
+            PrinterDpi => "printer-dpi",
+            PrinterMultipage => "printer-multipage",
+            PrinterTimeout => "printer-timeout",
         }
     }
 }

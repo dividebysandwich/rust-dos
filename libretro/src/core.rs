@@ -156,6 +156,8 @@ impl Core {
             let level = if line.contains("Warning") { RETRO_LOG_WARN } else { RETRO_LOG_DEBUG };
             log.log(level, line);
         }));
+        // Printouts go in the core's folder in the save directory.
+        cpu.bus.printer_dir = Some(dirs.data.join("printouts"));
         warnings.extend(hardware::configure(&mut cpu, &settings, Layout::us()));
 
         // rust-dos.conf's drives, those of the configuration beside the
@@ -334,6 +336,7 @@ impl Core {
         let render = render_start.elapsed();
         let m = &mut self.m;
         self.memmap.refresh(&mut m.cpu.bus, cb.env);
+        m.notices.extend(m.cpu.bus.printer_notices());
         for notice in m.notices.drain(..) {
             cb.message(&notice);
         }

@@ -284,6 +284,13 @@ fn write_target(cpu: &mut Cpu, source: &str, target: &str, mut data: Vec<u8>, as
                     cpu.bus.serial_send(n, byte);
                 }
             }
+            if device == crate::disk::CharDevice::Prn {
+                // No end-of-file mark on the paper.
+                let text = if ascii { &data[..data.len() - 1] } else { &data[..] };
+                for &byte in text {
+                    cpu.bus.printer_put(byte);
+                }
+            }
             return true;
         }
         None => {}

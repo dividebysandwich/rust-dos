@@ -646,6 +646,11 @@ fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
                     cpu.bus.serial_send(n, byte);
                 }
             }
+            if device == crate::disk::CharDevice::Prn {
+                for &byte in captured {
+                    cpu.bus.printer_put(byte);
+                }
+            }
             return;
         }
         None => {}

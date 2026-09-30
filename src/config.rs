@@ -177,6 +177,8 @@ pub struct Config {
     pub network: crate::net::NetSettings,
     /// `[serial]`: the serial ports.
     pub serial: crate::serial::SerialSettings,
+    /// `[printer]`: the printer on LPT1.
+    pub printer: crate::printer::PrinterSettings,
     /// `[achievements]`: RetroAchievements.
     pub achievements: crate::achievements::AchievementSettings,
     /// `[drives]` entries in file order, at most one per drive.
@@ -207,6 +209,7 @@ enum Section {
     Joystick,
     Network,
     Serial,
+    Printer,
     Achievements,
     Drives,
     Autoexec,
@@ -224,6 +227,7 @@ impl Section {
             "joystick" => Section::Joystick,
             "network" => Section::Network,
             "serial" => Section::Serial,
+            "printer" => Section::Printer,
             "achievements" => Section::Achievements,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
@@ -240,6 +244,7 @@ impl Section {
             Section::Joystick => "joystick",
             Section::Network => "network",
             Section::Serial => "serial",
+            Section::Printer => "printer",
             Section::Achievements => "achievements",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
@@ -643,6 +648,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Joystick
             | Section::Network
             | Section::Serial
+            | Section::Printer
             | Section::Achievements
             | Section::Game => {
                 let Some((key, value)) = line.split_once('=') else {
@@ -856,6 +862,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Printer {
+                    if let Err(e) = config.printer.set(key, value, home) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
                 if section == Section::Achievements {
                     if let Err(e) = config.achievements.set(key, value) {
                         warn(e);
@@ -1039,6 +1052,8 @@ pub struct Settings {
     pub network: crate::net::NetSettings,
     /// `[serial]`: the serial ports.
     pub serial: crate::serial::SerialSettings,
+    /// `[printer]`: the printer on LPT1.
+    pub printer: crate::printer::PrinterSettings,
     /// `[achievements]`: RetroAchievements.
     pub achievements: crate::achievements::AchievementSettings,
 }
@@ -1077,12 +1092,14 @@ impl Default for Settings {
             joystick: JoystickSettings::default(),
             network: crate::net::NetSettings::default(),
             serial: crate::serial::SerialSettings::default(),
+            printer: crate::printer::PrinterSettings::default(),
             achievements: Default::default(),
         }
     }
 }
 
 impl Settings {
+
     /// The display adapter and monitor programs see: with `monochrome`, a
     /// VGA's or EGA's monitor is monochrome too (a CGA's stays colour).
     pub fn video_setup(&self) -> VideoSetup {
@@ -1139,6 +1156,7 @@ impl Settings {
             joystick: config.joystick,
             network: config.network.clone(),
             serial: config.serial.clone(),
+            printer: config.printer.clone(),
             achievements: config.achievements.clone(),
         }
     }
@@ -1243,6 +1261,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
     ]);
     entries.extend(settings.network.entries().into_iter().map(|(key, value)| (Section::Network, key, value)));
     entries.extend(settings.serial.entries().into_iter().map(|(key, value)| (Section::Serial, key, value)));
+    entries.extend(settings.printer.entries(home).into_iter().map(|(key, value)| (Section::Printer, key, value)));
     entries.extend(settings.achievements.entries().into_iter().map(|(key, value)| (Section::Achievements, key, value)));
     entries
 }
@@ -1282,6 +1301,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Joystick
                 | Section::Network
                 | Section::Serial
+                | Section::Printer
                 | Section::Achievements
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
@@ -2159,6 +2179,13 @@ mod tests {
                 modem_listen: Some(2323),
                 ..Default::default()
             },
+            printer: crate::printer::PrinterSettings {
+                output: crate::printer::PrinterOutput::Png,
+                paper: crate::printer::Paper::A4,
+                docpath: PathBuf::from("/home/u/printouts"),
+                device: Some("Office".into()),
+                ..Default::default()
+            },
             achievements: crate::achievements::AchievementSettings {
                 enabled: true,
                 username: "Player".to_string(),
@@ -2326,8 +2353,13 @@ mod tests {
         // were written, and the command line's speed isn't kept.
         for (section, key, _) in entries(&settings, Some(home)) {
             // (The file's SoundFont; no Ultrasound directory, MT-32, LAN
-            // password or RetroAchievements account of its own.)
-            let wanted = !matches!(key, "ultradir" | "mt32roms" | "mt32lib" | "midiport" | "password" | "username" | "token");
+            // password, RetroAchievements account or printer paths and
+            // programs of its own.)
+            let wanted = !matches!(
+                key,
+                "ultradir" | "mt32roms" | "mt32lib" | "midiport" | "password" | "username" | "token" | "docpath" | "fontpath"
+                    | "device" | "print_command" | "open_with"
+            );
             assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);
         }
         assert!(saved.starts_with("[emulator]\nscale = 2\ncycles=max\nfullscreen=false\n"), "{}", saved);
@@ -2335,7 +2367,8 @@ mod tests {
         assert!(saved.contains("soundfont=sf/gm.sf2\n"), "{}", saved);
         assert!(saved.contains("\n[joystick]\njoysticktype=auto\ndeadzone=10\n\n[network]\nipx=auto\n"), "{}", saved);
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
-        assert!(saved.contains("\nmodemtelnet=off\n\n[achievements]\nenabled=false\nhardcore=false\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
+        assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

@@ -9,6 +9,7 @@ pub mod port_log;
 pub mod s3;
 mod ide;
 mod net;
+mod printer;
 mod serial;
 mod state;
 mod voodoo;
@@ -96,6 +97,13 @@ pub struct Bus {
     pub umb: Option<crate::mcb::Umb>,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
     pub lpt_dac: Option<crate::lpt_dac::LptDac>,
+    /// The printer on LPT1 (`[printer]`), while the DAC isn't there.
+    pub printer: Option<crate::printer::Printer>,
+    /// The `[printer]` settings, which the printer has when LPT1 is free.
+    pub printer_settings: crate::printer::PrinterSettings,
+    /// Where the printer's files go when `docpath` doesn't say, in place
+    /// of the capture folder (the libretro core's).
+    pub printer_dir: Option<std::path::PathBuf>,
     /// The Tandy's and PCjr's sound chip (`tandy`), heard while
     /// `tandy_sound_enabled`.
     pub tandy_sound: crate::sn76489::Sn76489,
@@ -313,6 +321,9 @@ impl Bus {
             ide_hard_disks: true,
             umb: None,
             lpt_dac: None,
+            printer: None,
+            printer_dir: None,
+            printer_settings: crate::printer::PrinterSettings { output: crate::printer::PrinterOutput::None, ..Default::default() },
             tandy_sound: crate::sn76489::Sn76489::new(crate::sn76489::Variant::Ncr8496),
             tandy_mode: crate::sn76489::TandySound::Auto,
             freezes: Vec::new(),
@@ -472,10 +483,8 @@ impl Bus {
         self.detach_ide();
         self.cmos.set_hard_disks(&[]);
         self.init_dos_machine(self.vga.setup());
-        if self.lpt_dac.is_some() {
-            self.write_16(0x0408, crate::lpt_dac::LPT1);
-            let equipment = self.read_16(0x0410);
-            self.write_16(0x0410, equipment | 0x4000);
+        if self.lpt1_present() {
+            self.write_lpt_bda();
         }
         if self.joystick.present() {
             let equipment = self.read_16(0x0410);
@@ -620,19 +629,13 @@ impl Bus {
         &mut self.tandy_sound
     }
 
-    /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the BIOS data area
-    /// has LPT1 while there is one.
+    /// Put a DAC on LPT1 (`lpt_dac`), or take it away: the printer gives
+    /// way to it, and the BIOS data area has LPT1 while either is there.
     pub fn configure_lpt_dac(&mut self, kind: crate::lpt_dac::LptDacType) {
         self.audio_catch_up();
         let present = kind != crate::lpt_dac::LptDacType::None;
         self.lpt_dac = present.then(|| crate::lpt_dac::LptDac::new(kind));
-        if self.boot.is_some() {
-            return;
-        }
-        self.write_16(0x0408, if present { crate::lpt_dac::LPT1 } else { 0 });
-        // Equipment word bits 14-15: the parallel ports.
-        let equipment = self.read_16(0x0410) & !0xC000;
-        self.write_16(0x0410, equipment | if present { 0x4000 } else { 0 });
+        self.place_printer();
     }
 
     /// Take the `[joystick]` settings: what the game port has plugged in,
@@ -1405,6 +1408,10 @@ impl Bus {
         self.net_poll();
         // The serial mouse's motion.
         self.serial_mouse_poll();
+        // A print job that has had nothing for a while ends.
+        if self.printer.is_some() {
+            self.printer_poll();
+        }
         self.refresh_irq();
     }
 
@@ -2143,6 +2150,9 @@ impl Bus {
             // Game port write: the one-shots fire.
             0x0201 => self.joystick.arm(),
 
+            // The printer on the parallel port.
+            p if self.printer_claims(p) => self.printer_write(p, value),
+
             // The DAC on the parallel port, heard from now on.
             crate::lpt_dac::DATA if self.lpt_dac.is_some() => {
                 self.audio_catch_up();
@@ -2301,6 +2311,9 @@ impl Bus {
 
             // The game port: the joysticks' axes and buttons.
             0x0201 => self.joystick.read(&self.mouse),
+
+            // The printer on the parallel port.
+            p if self.printer_claims(p) => self.printer_read(p),
 
             // The DAC on the parallel port: the Disney's FIFO empties as
             // it plays.

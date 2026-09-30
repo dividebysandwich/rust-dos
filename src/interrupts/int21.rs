@@ -394,6 +394,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_reg8(Register::AL, char_byte);
         }
 
+        // AH = 05h: Printer Output (DL = Char)
+        0x05 => {
+            let byte = cpu.get_dl();
+            cpu.bus.printer_put(byte);
+        }
+
         // AH = 06h: Direct Console I/O
         0x06 => {
             let dl = cpu.get_reg8(Register::DL);
@@ -1300,6 +1306,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
                 cpu.set_ax(count as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else if cpu.bus.disk.handle_device(sft) == Some(CharDevice::Prn) {
+                // The printer, or nowhere without one.
+                for &byte in &data {
+                    cpu.bus.printer_put(byte);
+                }
+                cpu.set_ax(count as u16);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
             } else if console {
                 // STDOUT/STDERR, or CON opened by name
                 for &byte in &data {
@@ -1415,7 +1428,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     };
                     if sft == crate::disk::SFT_AUX
                         || sft == crate::disk::SFT_PRN
-                        || device.is_some_and(|d| d.com_port().is_some())
+                        || device.is_some_and(|d| d.com_port().is_some() || d == CharDevice::Prn)
                     {
                         // AUX and PRN: character devices, not EOF.
                         cpu.set_dx(0x80C0);
@@ -1492,6 +1505,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // hands no control data to programs.
                 0x06 | 0x07 if device == Some(CharDevice::Emm) => {
                     cpu.set_reg8(Register::AL, 0xFF);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                }
+                // The printer is ready for output while there is one.
+                0x07 if device == Some(CharDevice::Prn) => {
+                    cpu.set_reg8(Register::AL, if cpu.bus.printer.is_some() { 0xFF } else { 0x00 });
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 // What Windows takes expanded memory over with.

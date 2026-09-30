@@ -268,6 +268,20 @@ fn definitions() -> Vec<Definition> {
             values: values(&[("false", "Off"), ("true", "On")]),
         },
         Definition {
+            key: "printer",
+            desc: "Printer",
+            info: "An Epson printer on LPT1 for programs to print to. Printouts go to the rust-dos folder \
+                   of the frontend's save directory, in printouts; a job ends after 3 seconds without printing.",
+            category: "system",
+            target: config("printer", "output"),
+            values: configured(&[
+                ("pdf", "PDF documents"),
+                ("png", "PNG pictures"),
+                ("file", "File (as sent)"),
+                ("none", "None"),
+            ]),
+        },
+        Definition {
             key: "boot",
             desc: "Boot disk images",
             info: "Start a floppy or hard disk image given as content from its boot sector (BOOT) \

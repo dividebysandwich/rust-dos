@@ -620,6 +620,14 @@ fn main() -> Result<(), String> {
                         }
                         continue;
                     }
+                    // Ctrl+Shift+F5 ejects the printer's page and ends the
+                    // print job.
+                    if keycode == Keycode::F5 && ctrl && shift && !alt {
+                        if !repeat {
+                            osd.show(cpu.bus.printer_eject().unwrap_or_else(|| "There is no printer".to_string()));
+                        }
+                        continue;
+                    }
                     // Ctrl+F5 saves a screenshot, and Ctrl+F6 starts and stops
                     // recording the sound, as in DOSBox.
                     if keycode == Keycode::F5 && ctrl && !alt {
@@ -1047,6 +1055,10 @@ fn main() -> Result<(), String> {
         if cpu.bus.exit_requested {
             break 'running;
         }
+        // Pages printed, and printing that failed.
+        for notice in cpu.bus.printer_notices() {
+            osd.show(notice);
+        }
 
         // DOSCONFIG asks for the settings window.
         if std::mem::take(&mut cpu.bus.config_ui_requested) && !ui.is_open() {
@@ -1284,6 +1296,10 @@ fn main() -> Result<(), String> {
         pacer.wait_for_next_frame();
     }
 
+    // The page in the printer comes out, and the job's files are written.
+    for notice in cpu.bus.finish_printing() {
+        eprintln!("[PRINTER] {}", notice);
+    }
     // Recordings still going are finished, so their files play.
     if let Some(video) = video_recording
         && let Err(e) = video.stop()

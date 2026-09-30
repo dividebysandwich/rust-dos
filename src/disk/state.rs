@@ -15,7 +15,7 @@ use std::io::Seek;
 
 crate::state_enum!(CharDevice {
     CharDevice::Nul, CharDevice::Con, CharDevice::Emm, CharDevice::Com1, CharDevice::Com2, CharDevice::Com3,
-    CharDevice::Com4,
+    CharDevice::Com4, CharDevice::Prn,
 });
 
 /// An open file as saved: its entry in the file table and how many

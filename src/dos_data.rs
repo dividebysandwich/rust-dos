@@ -123,6 +123,7 @@ pub fn char_device(device: crate::disk::CharDevice, sft: u16) -> u32 {
         CharDevice::Emm => crate::ems::DEVICE_POINTER,
         CharDevice::Nul if sft == SFT_AUX => far(device_header(1)),
         CharDevice::Nul if sft == SFT_PRN => far(device_header(2)),
+        CharDevice::Prn => far(device_header(2)),
         CharDevice::Nul => far(NUL_DEVICE),
         CharDevice::Com1 | CharDevice::Com2 | CharDevice::Com3 | CharDevice::Com4 => far(device_header(COM1_DEVICE)),
     }

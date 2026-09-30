@@ -21,6 +21,8 @@ pub struct Hardware {
     pub network: crate::net::NetSettings,
     /// The serial ports.
     pub serial: crate::serial::SerialSettings,
+    /// The printer, and the capture folder its files go in by default.
+    pub printer: (crate::printer::PrinterSettings, std::path::PathBuf),
 }
 
 /// Set up a new machine's hardware as `settings` ask for it: the
@@ -45,6 +47,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     warnings.extend(crate::sound::apply_config(cpu, &settings.sound, None));
     cpu.bus.configure_network(&settings.network);
     cpu.bus.configure_serial(&settings.serial);
+    cpu.bus.configure_printer(&settings.printer, &settings.capture_dir);
     warnings
 }
 
@@ -60,6 +63,7 @@ impl Hardware {
             voodoo: settings.voodoo.board(),
             network: settings.network.clone(),
             serial: settings.serial.clone(),
+            printer: (settings.printer.clone(), settings.capture_dir.clone()),
         }
     }
 
@@ -84,6 +88,7 @@ impl Hardware {
             },
             network: self.network.clone(),
             serial: self.serial.clone(),
+            printer: self.printer.0.clone(),
             ..settings.clone()
         }
     }
@@ -133,6 +138,10 @@ impl Hardware {
         if settings.serial != self.serial {
             cpu.bus.log_string("[CONFIG] The serial ports changed");
             cpu.bus.configure_serial(&settings.serial);
+        }
+        if (&settings.printer, &settings.capture_dir) != (&self.printer.0, &self.printer.1) {
+            cpu.bus.log_string("[CONFIG] The printer changed");
+            cpu.bus.configure_printer(&settings.printer, &settings.capture_dir);
         }
         *self = Self::of(settings);
         warnings

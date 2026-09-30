@@ -346,6 +346,41 @@
 # Speak telnet on the modem's TCP calls, for BBSes: off or on.
 #modemtelnet=off
 
+[printer]
+# A printer on the parallel port LPT1 (378h), an Epson ESC/P 2 printer as
+# DOSBox-X has one, which programs print to through the port, the BIOS
+# (INT 17h) or DOS (PRN, LPT1). What it prints goes to: pdf (the default,
+# a PDF document of each print job), png (a PNG picture of each page),
+# printer (the host's printer: lp, or on Windows the program that prints
+# PDF files), file (the bytes as sent, in a .prn file, for a printer
+# driver of the host's to take) or none (no printer, and no LPT1). A DAC
+# on LPT1 (lpt_dac) takes the port's place.
+#output=pdf
+# The pages' resolution in dots per inch (60 to 720), and the paper:
+# letter, a4, legal or <width>x<height> in inches.
+#dpi=360
+#paper=letter
+# Whether a job's pages go into one PDF document (true), or each into its
+# own (false).
+#multipage=true
+# A print job ends, and the page in the printer comes out, after this many
+# milliseconds without printing, or 0 for only when Ctrl+Shift+F5 ejects
+# the page.
+#timeout=3000
+# Where the files go (the capture folder, capture_dir, if not set).
+#docpath=
+# The printer's fonts, as DOSBox-X names them (roman.ttf, sansserif.ttf,
+# courier.ttf, script.ttf, ocra.ttf). Without them, the host's (Liberation,
+# DejaVu, the Windows and macOS ones) print, or else the VGA's ROM font.
+#fontpath=
+# The host printer (lp -d), if not the default one.
+#device=
+# A program that prints the finished PDF in place of lp, with {file} for
+# the file (after the command if it has none): lpr -P office {file}.
+#print_command=
+# A program to open each file written with: xdg-open, or a viewer.
+#open_with=
+
 [achievements]
 # RetroAchievements (retroachievements.org): achievements, leaderboards and
 # rich presence for games launched from their profiles, which say which

@@ -283,7 +283,7 @@ impl Page {
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
             Page::Network => "Network",
-            Page::Serial => "Serial",
+            Page::Serial => "Ports",
             Page::Games => "Games",
             Page::States => "States",
             Page::Cheats => "Cheats",
@@ -342,6 +342,11 @@ impl Page {
                 MouseType,
                 ModemListen,
                 ModemTelnet,
+                PrinterOutput,
+                PrinterPaper,
+                PrinterDpi,
+                PrinterMultipage,
+                PrinterTimeout,
             ],
         }
     }
@@ -512,6 +517,14 @@ enum Item {
     MouseType,
     ModemListen,
     ModemTelnet,
+    /// The printer on LPT1: where its printing goes, its paper and
+    /// resolution, whether a job's pages are one document, and how long
+    /// a job waits for more.
+    PrinterOutput,
+    PrinterPaper,
+    PrinterDpi,
+    PrinterMultipage,
+    PrinterTimeout,
 }
 
 /// The value `dir` steps away from `current` in `values`, wrapping around.
@@ -695,6 +708,11 @@ impl Item {
             MouseType => "Serial mouse",
             ModemListen => "Modem takes calls on",
             ModemTelnet => "Modem speaks telnet",
+            PrinterOutput => "Printer (LPT1)",
+            PrinterPaper => "  Paper",
+            PrinterDpi => "  Resolution",
+            PrinterMultipage => "  Pages of a job",
+            PrinterTimeout => "  Job ends after",
         }
     }
 
@@ -716,6 +734,12 @@ impl Item {
             Item::Online | Item::Rooms | Item::Relay | Item::Player => frontend.window,
             Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
             Item::ModemListen | Item::ModemTelnet => frontend.window,
+            // The browser has nowhere for printouts to go.
+            Item::PrinterOutput
+            | Item::PrinterPaper
+            | Item::PrinterDpi
+            | Item::PrinterMultipage
+            | Item::PrinterTimeout => frontend.host_files,
             _ => true,
         }
     }
@@ -734,6 +758,13 @@ impl Item {
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
             Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),
             Item::ModemListen | Item::ModemTelnet => s.serial.ports.contains(&crate::serial::PortType::Modem),
+            // The pages' settings for the pages printed; the bytes of a
+            // file are as they come.
+            Item::PrinterPaper | Item::PrinterDpi => {
+                !matches!(s.printer.output, crate::printer::PrinterOutput::None | crate::printer::PrinterOutput::File)
+            }
+            Item::PrinterMultipage => s.printer.output == crate::printer::PrinterOutput::Pdf,
+            Item::PrinterTimeout => s.printer.output != crate::printer::PrinterOutput::None,
             _ => true,
         }
     }
@@ -935,6 +966,19 @@ impl Item {
             MouseType => s.serial.mouse.describe().to_string(),
             ModemListen => s.serial.modem_listen.map_or("off".to_string(), |port| format!("TCP port {}", port)),
             ModemTelnet => on_off(s.serial.modem_telnet),
+            PrinterOutput => s.printer.output.describe().to_string(),
+            PrinterPaper => match s.printer.paper {
+                crate::printer::Paper::Letter => "Letter (8.5 x 11 in)".to_string(),
+                crate::printer::Paper::Legal => "Legal (8.5 x 14 in)".to_string(),
+                crate::printer::Paper::A4 => "A4 (210 x 297 mm)".to_string(),
+                paper => format!("{} in", paper.name()),
+            },
+            PrinterDpi => format!("{} dpi", s.printer.dpi),
+            PrinterMultipage => if s.printer.multipage { "one document" } else { "a document each" }.to_string(),
+            PrinterTimeout => match s.printer.timeout {
+                0 => "only when ejected".to_string(),
+                ms => format!("{} s without printing", ms as f64 / 1000.0),
+            },
         }
     }
 
@@ -1060,6 +1104,15 @@ impl Item {
             }
             MouseType => each(s, crate::serial::mouse::MouseType::ALL, |s, kind| s.serial.mouse = kind),
             ModemTelnet => on_off(|s, on| s.serial.modem_telnet = on),
+            PrinterOutput => {
+                use crate::printer::PrinterOutput as Output;
+                let outputs = Output::ALL.into_iter().filter(|&o| o != Output::Printer || frontend.window);
+                each(s, outputs, |s, output| s.printer.output = output)
+            }
+            PrinterPaper => each(s, crate::printer::Paper::ALL, |s, paper| s.printer.paper = paper),
+            PrinterDpi => each(s, [180, 240, 300, 360, 600], |s, dpi| s.printer.dpi = dpi),
+            PrinterMultipage => on_off(|s, on| s.printer.multipage = on),
+            PrinterTimeout => each(s, [1000, 2000, 3000, 5000, 10_000, 30_000, 0], |s, ms| s.printer.timeout = ms),
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir

@@ -149,6 +149,8 @@ pub enum Cmd {
     Xms,
     Net,
     Serial,
+    /// The printer; `eject` ends the job and waits for its files.
+    Printer { eject: bool },
     Exceptions,
     Gus,
     Drives,
@@ -1392,6 +1394,7 @@ impl DebugHub {
             Cmd::Xms => Reply::Json(pm::xms_json(cpu)),
             Cmd::Net => Reply::Json(net_json(cpu)),
             Cmd::Serial => Reply::Json(serial_json(cpu)),
+            Cmd::Printer { eject } => Reply::Json(printer_json(cpu, eject)),
             Cmd::Gus => Reply::Json(match &cpu.bus.gus {
                 Some(gus) => gus.snapshot(),
                 None => serde_json::json!({ "installed": false }),
@@ -2012,6 +2015,32 @@ impl crate::exec::ExecHook for DebugHub {
     fn before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
         self.check_before_exec(cpu, phys_ip, ram)
     }
+}
+
+/// `/api/printer`: the printer on LPT1, what it printed and where it
+/// went. With `eject`, the job ends first and its files are written.
+fn printer_json(cpu: &mut Cpu, eject: bool) -> serde_json::Value {
+    let output = cpu.bus.printer_output_settings().output;
+    let lpt_dac = cpu.bus.lpt_dac.is_some();
+    let Some(p) = &mut cpu.bus.printer else {
+        return json!({"present": false, "output": output.name(), "lpt_dac": lpt_dac});
+    };
+    if eject {
+        p.eject();
+    }
+    p.sync();
+    json!({
+        "present": true,
+        "output": p.settings.output.name(),
+        "dpi": p.settings.dpi,
+        "paper": p.settings.paper.name(),
+        "docpath": p.settings.docpath.display().to_string(),
+        "printing": p.busy(),
+        "bytes": p.bytes,
+        "pages": p.pages,
+        "jobs": p.jobs,
+        "last": p.last,
+    })
 }
 
 /// `/api/net`: the IPX driver's sockets, ECBs and packets, and the LAN.

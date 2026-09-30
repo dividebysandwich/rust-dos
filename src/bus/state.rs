@@ -133,6 +133,11 @@ impl Bus {
             disknoise: _,
             drives_active: _,
             audio_out: _,
+            // The printer is the host's: loading a state takes back no
+            // paper.
+            printer: _,
+            printer_settings: _,
+            printer_dir: _,
             audio_feed: _,
             mixer: _,
             audio_peak: _,
@@ -298,6 +303,9 @@ impl Bus {
             disknoise: _,
             drives_active: _,
             audio_out: _,
+            printer: _,
+            printer_settings: _,
+            printer_dir: _,
             audio_feed: _,
             mixer: _,
             audio_peak: _,

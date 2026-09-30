@@ -208,13 +208,10 @@ pub fn install_for_boot(bus: &mut Bus, hard_disks: &[crate::diskimage::Chs]) {
         write_rom(bus, FIXED_DISK_PARAMS + 16 * i as u16, &table);
     }
 
-    // The serial ports and the parallel port (with a DAC on it).
+    // The serial ports (the parallel port after the equipment word).
     let serial = bus.serial.bios_ports();
     for (n, base) in serial.iter().enumerate() {
         bus.write_16(0x0400 + 2 * n, *base);
-    }
-    if bus.lpt_dac.is_some() {
-        bus.write_16(0x0408, crate::lpt_dac::LPT1);
     }
     // The equipment word: two floppy drives (bits 0 and 6-7), the
     // coprocessor (bit 1), a PS/2 mouse (bit 2), the video adapter's
@@ -226,10 +223,8 @@ pub fn install_for_boot(bus: &mut Bus, hard_disks: &[crate::diskimage::Chs]) {
     if bus.joystick.present() {
         equipment |= 0x1000;
     }
-    if bus.lpt_dac.is_some() {
-        equipment |= 0x4000;
-    }
     bus.write_16(0x0410, equipment);
+    bus.write_lpt_bda();
     set_machine_id(bus);
     // The keyboard: Num Lock on, an enhanced keyboard, and the buffer
     // from 40:1E to 40:3E, empty.

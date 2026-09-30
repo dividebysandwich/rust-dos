@@ -424,6 +424,62 @@ games](#serial-and-modem-games)). Changes take effect at the DOS prompt.
   `off` (the default: the characters as they are, as DOSBox's modem sends
   them) or `on`.
 
+### `[printer]`
+
+A printer on the parallel port LPT1 (378h): an Epson ESC/P 2 dot matrix
+printer, as in DOSBox-X. Programs print to it through the port itself,
+through the BIOS (INT 17h), or through DOS (`PRN` and `LPT1`, so `COPY
+FILE.TXT PRN` and `DIR > PRN` print). Pick an Epson printer (LQ, FX or
+ESC/P 2) in a program's printer setup. The printer draws text in its
+typefaces, pitches and styles (bold, italic, underline, double width and
+height, condensed, super- and subscript, proportional), 8- and 24-pin
+bit images, and colour. Changes take effect at the DOS prompt.
+
+A print job ends when the program has printed nothing for `timeout`
+milliseconds, or when **Ctrl+Shift+F5** ejects the page. Then the page in
+the printer comes out, and the job's document is finished. The on-screen
+message and the log say where it went.
+
+* `output` is where printing goes:
+  * `pdf` (the default): a PDF document of each job,
+    `rust-dos_print_<date>_<time>.pdf`.
+  * `png`: a PNG picture of each page.
+  * `printer`: the host's printer. The job becomes a PDF that goes to
+    `lp` (CUPS, on Linux and macOS), or on Windows to the program that
+    prints PDF files. `print_command` replaces either.
+  * `file`: the bytes the program sent, as they are, in a `.prn` file:
+    for a real printer that speaks the program's printer language
+    (`lp -o raw`), or for a converter.
+  * `none`: no printer, and no LPT1 in the BIOS.
+
+  A DAC on LPT1 (`lpt_dac`) takes the printer's place.
+* `dpi` is the pages' resolution: 360 (the default, the printer's own),
+  or 60 to 720.
+* `paper` is the paper's size: `letter` (the default), `a4`, `legal`, or
+  `<width>x<height>` in inches (`8.5x12`).
+* `multipage` puts a job's pages in one PDF document (`true`, the
+  default), or each page in its own (`false`).
+* `timeout` is how long a job waits for more, in milliseconds of the
+  machine's time: 3000 by default. 0 waits until the page is ejected.
+* `docpath` is the folder the files go in. The default is the capture
+  folder (`capture_dir`).
+* `fontpath` is a folder with the printer's fonts, under DOSBox-X's
+  names: `roman.ttf`, `sansserif.ttf`, `courier.ttf`, `script.ttf` and
+  `ocra.ttf`. Without it, or for a font it doesn't have, the host's fonts
+  print: Liberation or DejaVu on Linux, and Times New Roman, Arial and
+  Courier New on Windows and macOS. Without any of those, the VGA's ROM
+  font prints, scaled up and smoothed. Box drawing and block characters
+  are always drawn with the ROM font, so they join as on a dot matrix
+  printer.
+* `device` is the printer `lp` sends to (`lp -d`). The default is the
+  system's default printer; `lpstat -p` lists the others.
+* `print_command` prints the finished PDF in place of `lp`: a command
+  line with `{file}` where the file goes, or the file goes last. For
+  example `lpr -P office {file}`, or on Windows `SumatraPDF
+  -print-to-default {file}` (with SumatraPDF's folder in the `PATH`).
+* `open_with` opens each file written with a program, such as `xdg-open`
+  or a PDF viewer.
+
 ### `[achievements]`
 
 [RetroAchievements](#retroachievements).

@@ -65,6 +65,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * **[Serial ports](CONFIGURATION.md#serial-and-modem-games):** a serial
   mouse, and null modem and modem games between the first two players in
   a LAN room; the Hayes modem also dials hosts over TCP and takes calls
+* **[Printer](CONFIGURATION.md#printer):** an Epson ESC/P 2 printer on
+  LPT1 that prints to PDF documents, PNG pictures, the host's printer or
+  a file of what the program sent
 * Runs in a **[web browser](#running-in-a-browser)** as WebAssembly
 * A web-based **[debugger](#debug--remote-control-server)** and HTTP API
 
@@ -191,6 +194,7 @@ and Ctrl+C gives up the line being typed.
 | Ctrl+Shift+V | Type the clipboard's text on the machine's keyboard (a key stops it) |
 | Alt+Enter | Switch between the window and fullscreen |
 | Ctrl+F5 | Save a screenshot (PNG), with the settings window and the performance overlay if they show and `record_ui` is on |
+| Ctrl+Shift+F5 | Eject the printer's page and end the print job |
 | Ctrl+F6 | Start and stop recording the sound (WAV) |
 | Ctrl+F7 | Start and stop recording video with sound (AVI) |
 | PrintScreen | Start and stop recording an animation (GIF) |

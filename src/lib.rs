@@ -71,6 +71,7 @@ pub mod opl;
 pub mod pci;
 pub mod pic;
 pub mod pnpbios;
+pub mod printer;
 pub mod recorder;
 pub mod savestate;
 pub mod sb;
