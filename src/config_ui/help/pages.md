@@ -8,6 +8,11 @@ mounted as **C:**, with the game in it.
 - **Enter** changes what a drive holds: this is how to put in the next
   CD or floppy when a game asks for it.
 - **Del** unmounts a drive.
+- **B** boots from a floppy or hard disk image, as `BOOT` does: for
+  Windows 95, 3.1 or a game on its own boot disk.
+
+A drive marked *boot* boots when Rust-DOS starts, in place of DOS: set
+it with *Auto-boot* under **Enter**.
 
 Mounts made here last until Rust-DOS quits; **F2** saves them for the
 next start. **Ctrl+F4** puts in the next disk of a drive mounted with
@@ -27,8 +32,12 @@ several images.
 - **Label**: the volume name. Some games check their CD's label; leave it
   empty to use the image's own.
 - **Read-only**: keeps programs from changing the files.
+- **Auto-boot**: for a floppy or hard disk image, boot from it when
+  Rust-DOS starts instead of starting DOS. Only one drive boots; **F2**
+  saves it.
 
-**Tab** goes to the next field, **Enter** mounts.
+**Tab** goes to the next field, **Enter** mounts. *[ Boot ]* mounts the
+image and boots from it right away.
 
 # Create a disk image {#new-image}
 
