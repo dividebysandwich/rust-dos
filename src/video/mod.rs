@@ -380,6 +380,19 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
     let scale = vbe.scale() as usize;
     let bytes = mode.bytes_per_pixel();
     let row_bytes = canvas_w * 3;
+    // A ViRGE's streams processor: in full streams mode the primary stream
+    // is shown from its own frame buffer address (S3D Toolkit programs flip
+    // pages with it), and the secondary stream goes over it.
+    let virge = bus.vga.adapter.is_virge();
+    let streams = &bus.virge.streams;
+    let full = virge && s3::streams::Streams::full(bus.vga.s3.crtc(0x67));
+    let start = if full { streams.primary_address() as usize } else { vbe.latched_start as usize };
+    let overlay = virge
+        .then(|| streams.overlay(bus.vga.adapter == adapter::Adapter::S3VirgeVx))
+        .flatten()
+        .filter(|o| o.y < mode.height as u32);
+    let overlay_rows = overlay.map(|o| o.rows()).unwrap_or_default();
+    let mut line = Vec::new();
     for fy in y_min..y_max.min(mode.height as usize * scale) {
         let dst = fy * row_bytes;
         // Doubled rows copy the one above.
@@ -387,9 +400,25 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
             canvas.copy_within(dst - row_bytes..dst, dst);
             continue;
         }
-        let row = vbe.latched_start as usize + fy / scale * vbe.pitch as usize;
+        let row = start + fy / scale * vbe.pitch as usize;
+        let my = (fy / scale) as u32;
+        let over = overlay.filter(|o| my >= o.y && my < o.end_y);
+        if let Some(o) = over {
+            // The mode's row with the overlay over it, then scaled.
+            line.clear();
+            line.extend((0..mode.width as usize).flat_map(|x| {
+                let (r, g, b) = pixel(row + x * bytes);
+                [r, g, b]
+            }));
+            let six_bit = mode.bpp == 8 && !bus.vga.dac_8bit;
+            o.draw_row(overlay_rows[(my - o.y) as usize], vram, &mut line, mode.width as u32, six_bit);
+        }
         for x in 0..mode.width as usize {
-            let rgb = pixel(row + x * bytes);
+            let rgb = if over.is_some() {
+                (line[x * 3], line[x * 3 + 1], line[x * 3 + 2])
+            } else {
+                pixel(row + x * bytes)
+            };
             for dx in 0..scale {
                 let i = dst + (x * scale + dx) * 3;
                 canvas[i] = rgb.0;

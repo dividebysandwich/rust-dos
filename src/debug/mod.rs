@@ -1527,7 +1527,7 @@ impl DebugHub {
                         // A ViRGE's engines: the commands they ran, and the
                         // last 3D command.
                         // A ViRGE's engines.
-                        "virge": cpu.bus.vga.adapter.is_virge().then(|| virge_status(&cpu.bus.virge)),
+                        "virge": cpu.bus.vga.adapter.is_virge().then(|| virge_status(&cpu.bus.virge, cpu.bus.vga.adapter == crate::video::adapter::Adapter::S3VirgeVx)),
                     })
                 }),
                 // The display timing programs see through port 3DAh.
@@ -2188,13 +2188,13 @@ mod tests {
 
 /// A ViRGE's engines for `/api/status`: the commands they ran, the last 3D
 /// command, the status and the overlay.
-fn virge_status(v: &crate::video::s3::virge::Virge) -> serde_json::Value {
+fn virge_status(v: &crate::video::s3::virge::Virge, vx: bool) -> serde_json::Value {
     json!({
         "bitblts": v.counts[0], "rects": v.counts[1], "lines": v.counts[2], "polygons": v.counts[3],
         "lines_3d": v.s3d.lines, "triangles": v.s3d.triangles,
         "cmd_3d": format!("{:08X}", v.s3d.tri[0x40]),
         "status": format!("{:04X}", v.status()), "advfunc": format!("{:02X}", v.advfunc),
         "transfer": v.transfer.active, "command_dma": v.dma.enable != 0,
-        "overlay": v.streams.overlay().map(|o| format!("{:?}", o)),
+        "overlay": v.streams.overlay(vx).map(|o| format!("{:?}", o)),
     })
 }

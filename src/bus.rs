@@ -2572,6 +2572,12 @@ impl Bus {
         if self.vga.retrace_began(now) {
             if self.virge() {
                 self.virge.set_status(crate::video::s3::virge::STAT_VSY);
+                // The overlay's picture and a full streams mode's primary
+                // stream are away from the rows writes mark: draw anew.
+                let streams = &self.virge.streams;
+                if crate::video::s3::streams::Streams::full(self.vga.s3.crtc(0x67)) || streams.overlay(true).is_some() {
+                    self.vga.mark_dirty_full();
+                }
             }
             let screen = crate::autospeed::screen_bytes(self);
             self.activity.set_screen(screen);
