@@ -28,10 +28,9 @@ pub fn deliver_key_down(bus: &mut Bus, code: u16, extended: bool) {
     }
     // The BIOS buffer holds 15 keystrokes; when it's full (a program that
     // reads the keyboard itself never empties it) new ones are dropped.
-    if bus.keyboard_buffer.len() < BIOS_BUFFER_KEYS {
-        let keystroke = bios_keystroke(scan, code as u8, bus.read_8(0x0417));
-        bus.keyboard_buffer.push_back(keystroke);
-    }
+    let keystroke = bios_keystroke(scan, code as u8, bus.read_8(0x0417));
+    let queued = queue_keystroke(bus, keystroke);
+    made(bus, queued as usize);
     send_scan(bus, scan, extended);
 }
 
@@ -138,6 +137,10 @@ pub struct KeyboardState {
     /// The keystrokes last queued for INT 16h that the BIOS's keyboard
     /// interrupt (INT 09h) hasn't run for since (`drop_unseen_keys`).
     unseen: usize,
+    /// How many keystrokes each make code sent to the keyboard controller
+    /// queued, oldest first: the BIOS's keyboard interrupt moves them into
+    /// its buffer as it takes the make code (`bios_took_scan`).
+    made: std::collections::VecDeque<u8>,
     /// Windows' 386 enhanced mode runs (`bios::windows_keyboard`): its
     /// keyboard driver hands each virtual machine its keys through the
     /// keyboard controller, and the machine's BIOS makes its keystrokes
@@ -147,35 +150,138 @@ pub struct KeyboardState {
 
 impl Default for KeyboardState {
     fn default() -> Self {
-        Self { layout: Layout::us(), held: [0; 8], dead: None, unseen: 0, windows: false }
+        Self { layout: Layout::us(), held: [0; 8], dead: None, unseen: 0, made: Default::default(), windows: false }
     }
 }
 
 /// Whether the BIOS's keyboard interrupt makes the keystrokes, in the
 /// buffer in the BIOS data area (`BiosBuffer`): on a booted system, and
 /// while Windows' 386 enhanced mode runs. Otherwise they come from the
-/// host's key events, in `Bus::keyboard_buffer`.
+/// host's key events, queued in `Bus::keyboard_buffer` until the BIOS's
+/// keyboard interrupt takes their make code and moves them into its buffer
+/// (`bios_took_scan`), where programs that chain to it look for the
+/// keystroke it made (HX's Win32 console). INT 16h reads that buffer
+/// first, then the queue.
 pub fn bios_keystrokes(bus: &Bus) -> bool {
     bus.boot.is_some() || bus.kbd.windows
 }
 
+/// How many make codes' keystroke counts `KeyboardState::made` keeps, for
+/// a program that reads the keyboard itself and never chains.
+const MADE_KEPT: usize = 32;
+
+/// Queue a keystroke the host typed, for the BIOS's buffer; false when
+/// the buffer would be full, and the keystroke is dropped.
+pub fn queue_keystroke(bus: &mut Bus, key: u16) -> bool {
+    if queued_keystrokes(bus) >= BIOS_BUFFER_KEYS {
+        return false;
+    }
+    bus.keyboard_buffer.push_back(key);
+    true
+}
+
+/// The keystrokes waiting for INT 16h.
+pub fn queued_keystrokes(bus: &mut Bus) -> usize {
+    if bios_keystrokes(bus) {
+        return BiosBuffer::keys(bus).len();
+    }
+    BiosBuffer::keys(bus).len() + bus.keyboard_buffer.len()
+}
+
+/// A make code sent to the keyboard controller queued `count` keystrokes.
+fn made(bus: &mut Bus, count: usize) {
+    bus.kbd.made.push_back(count as u8);
+    if bus.kbd.made.len() > MADE_KEPT {
+        bus.kbd.made.pop_front();
+    }
+}
+
+/// A queued keystroke was taken before the BIOS's keyboard interrupt
+/// moved it: its make code has one keystroke less to move.
+fn took_queued(bus: &mut Bus) {
+    if let Some(count) = bus.kbd.made.iter_mut().find(|c| **c > 0) {
+        *count -= 1;
+    }
+}
+
+/// The BIOS's keyboard interrupt took the scan code `scan` from the
+/// keyboard controller: a make code's keystrokes go into its buffer, as
+/// the BIOS makes them there.
+pub fn bios_took_scan(bus: &mut Bus, scan: u8) {
+    if bios_keystrokes(bus) || scan == 0 || scan >= 0x80 {
+        return;
+    }
+    let Some(count) = bus.kbd.made.pop_front() else { return };
+    for _ in 0..count {
+        let Some(&key) = bus.keyboard_buffer.front() else { break };
+        if !BiosBuffer::push(bus, key) {
+            break;
+        }
+        bus.keyboard_buffer.pop_front();
+    }
+}
+
 /// Take the next keystroke from where the BIOS keeps them.
 pub fn take_keystroke(bus: &mut Bus) -> Option<u16> {
-    if bios_keystrokes(bus) { BiosBuffer::pop(bus) } else { bus.keyboard_buffer.pop_front() }
+    if let Some(key) = BiosBuffer::pop(bus) {
+        return Some(key);
+    }
+    if bios_keystrokes(bus) {
+        return None;
+    }
+    let key = bus.keyboard_buffer.pop_front()?;
+    took_queued(bus);
+    Some(key)
 }
 
 /// The next keystroke, left where it is.
 pub fn peek_keystroke(bus: &mut Bus) -> Option<u16> {
-    if bios_keystrokes(bus) { BiosBuffer::peek(bus) } else { bus.keyboard_buffer.front().copied() }
+    match BiosBuffer::peek(bus) {
+        Some(key) => Some(key),
+        None if bios_keystrokes(bus) => None,
+        None => bus.keyboard_buffer.front().copied(),
+    }
+}
+
+/// Put a keystroke back in front of the others.
+pub fn unget_keystroke(bus: &mut Bus, key: u16) {
+    if bios_keystrokes(bus) || BiosBuffer::peek(bus).is_some() {
+        BiosBuffer::push_front(bus, key);
+    } else {
+        bus.keyboard_buffer.push_front(key);
+    }
+}
+
+/// Take out the first keystroke `pick` chooses, wherever it waits.
+pub fn take_keystroke_where(bus: &mut Bus, pick: impl Fn(u16) -> bool) -> Option<u16> {
+    let mut keys = BiosBuffer::keys(bus);
+    if let Some(i) = keys.iter().position(|&k| pick(k)) {
+        let key = keys.remove(i);
+        BiosBuffer::set(bus, &keys);
+        return Some(key);
+    }
+    if bios_keystrokes(bus) {
+        return None;
+    }
+    let i = bus.keyboard_buffer.iter().position(|&k| pick(k))?;
+    took_queued(bus);
+    bus.keyboard_buffer.remove(i)
 }
 
 /// Throw the keystrokes typed ahead away.
 pub fn clear_keystrokes(bus: &mut Bus) {
-    if bios_keystrokes(bus) {
-        BiosBuffer::clear(bus);
-    } else {
-        bus.keyboard_buffer.clear();
-    }
+    BiosBuffer::clear(bus);
+    bus.keyboard_buffer.clear();
+    bus.kbd.made.iter_mut().for_each(|c| *c = 0);
+}
+
+/// Start over with no keystrokes waiting and the BIOS's buffer where the
+/// BIOS sets it up (a new machine, or Windows starting or ending).
+pub fn reset_keystrokes(bus: &mut Bus) {
+    BiosBuffer::reset(bus);
+    bus.keyboard_buffer.clear();
+    bus.kbd.made.clear();
+    bus.kbd.unseen = 0;
 }
 
 fn key_id(scan: u8, extended: bool) -> usize {
@@ -277,6 +383,7 @@ pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char:
         return;
     }
     if modifier {
+        made(bus, 0);
         send_scan(bus, scan, extended);
         return;
     }
@@ -320,15 +427,17 @@ pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char:
         }
         Typed::None => keystrokes.push(bios_keystroke(scan, 0, flags)),
     }
+    let mut queued = 0;
     for keystroke in keystrokes {
         // The BIOS buffer holds 15 keystrokes; when it's full (a program
         // that reads the keyboard itself never empties it) new ones are
         // dropped.
-        if bus.keyboard_buffer.len() < BIOS_BUFFER_KEYS {
-            bus.keyboard_buffer.push_back(keystroke);
+        if queue_keystroke(bus, keystroke) {
             bus.kbd.unseen += 1;
+            queued += 1;
         }
     }
+    made(bus, queued);
     send_scan(bus, scan, extended);
 }
 
@@ -347,6 +456,7 @@ pub fn drop_unseen_keys(bus: &mut Bus) {
     let keep = bus.keyboard_buffer.len().saturating_sub(bus.kbd.unseen);
     bus.keyboard_buffer.truncate(keep);
     bus.kbd.unseen = 0;
+    bus.kbd.made.clear();
 }
 
 /// Let go of every key the machine holds, as the host takes the keyboard
@@ -628,6 +738,49 @@ impl BiosBuffer {
         bus.guest_write_16(0x0400 + tail as u32, key);
         bus.guest_write_16(0x041C, next);
         true
+    }
+
+    /// Add a keystroke at the head, to be taken next; false if the buffer
+    /// is full.
+    pub fn push_front(bus: &mut Bus, key: u16) -> bool {
+        let (start, end) = Self::bounds(bus);
+        let (head, tail) = (bus.guest_read_16(0x041A), bus.guest_read_16(0x041C));
+        let at = if head <= start { end - 2 } else { head - 2 };
+        if at == tail {
+            return false;
+        }
+        bus.guest_write_16(0x0400 + at as u32, key);
+        bus.guest_write_16(0x041A, at);
+        true
+    }
+
+    /// The keystrokes in the buffer, head first.
+    pub fn keys(bus: &mut Bus) -> Vec<u16> {
+        let (start, end) = Self::bounds(bus);
+        let (head, tail) = (bus.guest_read_16(0x041A), bus.guest_read_16(0x041C));
+        let in_ring = |p: u16| (start..end).contains(&p) && (p - start) % 2 == 0;
+        if !in_ring(head) || !in_ring(tail) {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        let mut at = head;
+        while at != tail {
+            keys.push(bus.guest_read_16(0x0400 + at as u32));
+            at += 2;
+            if at >= end {
+                at = start;
+            }
+        }
+        keys
+    }
+
+    /// Put `keys` in the buffer in place of what it holds, from its head.
+    fn set(bus: &mut Bus, keys: &[u16]) {
+        let tail = bus.guest_read_16(0x041C);
+        bus.guest_write_16(0x041A, tail);
+        for &key in keys {
+            Self::push(bus, key);
+        }
     }
 
     /// The BIOS's ring, from 40:1E to 40:3E, empty.

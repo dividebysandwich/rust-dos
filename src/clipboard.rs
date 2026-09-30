@@ -191,7 +191,7 @@ impl Clipboard {
     pub fn feed(&mut self, cpu: &mut Cpu) {
         let Some(input) = self.typing.front() else { return };
         let bios = keyboard::bios_keystrokes(&cpu.bus);
-        let full = !bios && cpu.bus.keyboard_buffer.len() >= keyboard::BIOS_BUFFER_KEYS;
+        let full = !bios && keyboard::queued_keystrokes(&mut cpu.bus) >= keyboard::BIOS_BUFFER_KEYS;
         if (cpu.bus.kbc.pending() > 0 && self.stall < KBC_STALL_FRAMES)
             || (full && matches!(input, LowInput::KeyDown { .. } | LowInput::Char(_)) && self.stall < BUFFER_STALL_FRAMES)
         {
@@ -207,7 +207,9 @@ impl Clipboard {
             Some(LowInput::KeyUp { key }) => self.release(cpu, key),
             // Typed as Alt and the keypad type it: a keystroke with no
             // scan code, for the BIOS's buffer where the host keeps it.
-            Some(LowInput::Char(byte)) if !bios && !full => cpu.bus.keyboard_buffer.push_back(byte as u16),
+            Some(LowInput::Char(byte)) if !bios && !full => {
+                keyboard::queue_keystroke(&mut cpu.bus, byte as u16);
+            }
             _ => {}
         }
     }

@@ -388,3 +388,25 @@ fn the_system_configuration_table_is_in_the_rom() {
     let bytes: Vec<u8> = (0..6).map(|i| cpu.bus.read_8(table + i)).collect();
     assert_eq!(bytes, [0x08, 0x00, 0xFC, 0x01, 0x00, 0x60], "an AT with a clock and two PICs");
 }
+
+#[test]
+fn the_bios_keyboard_interrupt_puts_the_keystroke_in_its_buffer() {
+    // HX's Win32 console chains to the BIOS's INT 09h and looks for the
+    // keystroke it made at the tail of the buffer at 40:1Eh.
+    use rust_dos::keyboard::{BiosBuffer, key_event};
+    let mut cpu = cpu();
+    let tail = cpu.bus.read_16(0x041C);
+    key_event(&mut cpu.bus, 0x1E, false, true, None);
+    assert!(BiosBuffer::keys(&mut cpu.bus).is_empty(), "not before the interrupt");
+    // A program's handler reads the scan code, then chains to the BIOS's.
+    assert_eq!(cpu.bus.io_read(0x60), 0x1E);
+    rust_dos::interrupts::int09::handle(&mut cpu);
+    assert_eq!(BiosBuffer::keys(&mut cpu.bus), [0x1E61]);
+    assert_eq!(cpu.bus.read_16(0x0400 + tail as usize), 0x1E61);
+    assert!(cpu.bus.keyboard_buffer.is_empty());
+    // INT 16h reads it from there.
+    cpu.set_ax(0x0000);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1E61);
+    assert!(BiosBuffer::keys(&mut cpu.bus).is_empty());
+}

@@ -506,10 +506,7 @@ pub fn windows_keyboard(bus: &mut Bus, on: bool) {
         return;
     }
     bus.kbd.windows = on;
-    bus.keyboard_buffer.clear();
-    if on {
-        crate::keyboard::BiosBuffer::reset(bus);
-    }
+    crate::keyboard::reset_keystrokes(bus);
     let trap = hle_trap(0x09);
     let code = if on {
         let [lo, hi] = KBD_HANDLER.wrapping_sub(trap + 3).to_le_bytes();

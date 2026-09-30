@@ -988,9 +988,7 @@ impl DebugHub {
                 // Typed as Alt and the keypad type it: a keystroke with no
                 // scan code.
                 LowInput::Char(byte) if !self.divert => {
-                    if cpu.bus.keyboard_buffer.len() < keyboard::BIOS_BUFFER_KEYS {
-                        cpu.bus.keyboard_buffer.push_back(byte as u16);
-                    }
+                    keyboard::queue_keystroke(&mut cpu.bus, byte as u16);
                 }
                 LowInput::Char(_) => {}
                 LowInput::MouseTo { x, y, coords: Coords::Screen } if self.divert => self.ui_pointer = (x, y),

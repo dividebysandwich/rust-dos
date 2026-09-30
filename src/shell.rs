@@ -331,7 +331,7 @@ fn video_call(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 /// loop to dispatch.
 pub fn handle_command_bop(cpu: &mut Cpu) {
     // Safety: Clear buffer so we don't repeat commands
-    cpu.bus.keyboard_buffer.clear();
+    crate::keyboard::clear_keystrokes(&mut cpu.bus);
     cpu.con_pending_scan = None;
 
     // Read Command from DS:DX (set by the shell code): the typed
@@ -626,7 +626,8 @@ pub fn key_ready(cpu: &mut Cpu) {
         && cpu.ax() != 0
         && cpu.ax() as u8 != 0x03
     {
-        cpu.bus.keyboard_buffer.push_front(cpu.ax());
+        let key = cpu.ax();
+        crate::keyboard::unget_keystroke(&mut cpu.bus, key);
     }
     if !take_key(cpu, cpu.ax() as u8) {
         cpu.set_ip(labels().shell_wait);

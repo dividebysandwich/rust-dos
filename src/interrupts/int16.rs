@@ -15,7 +15,7 @@ pub fn handle(cpu: &mut Cpu) {
             if ah == 0x00 {
                 drop_enhanced_keys(cpu);
             }
-            if let Some(key_code) = cpu.bus.keyboard_buffer.pop_front() {
+            if let Some(key_code) = crate::keyboard::take_keystroke(&mut cpu.bus) {
                 // Key found: Return in AX
                 cpu.set_ax(if ah == 0x00 { plain_keystroke(key_code) } else { key_code });
             } else {
@@ -28,7 +28,7 @@ pub fn handle(cpu: &mut Cpu) {
         // Returns: ZF=1 if no key, ZF=0 if key waiting (and AX=Key)
         0x01 => {
             drop_enhanced_keys(cpu);
-            if let Some(&key_code) = cpu.bus.keyboard_buffer.front() {
+            if let Some(key_code) = crate::keyboard::peek_keystroke(&mut cpu.bus) {
                 cpu.set_cpu_flag(CpuFlags::ZF, false);
                 cpu.set_ax(plain_keystroke(key_code));
             } else {
@@ -37,7 +37,7 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
         0x11 => {
-            if let Some(&key_code) = cpu.bus.keyboard_buffer.front() {
+            if let Some(key_code) = crate::keyboard::peek_keystroke(&mut cpu.bus) {
                 cpu.set_cpu_flag(CpuFlags::ZF, false); // Key available
                 cpu.set_ax(key_code); // Preview key (do not remove)
             } else {
@@ -76,9 +76,11 @@ pub fn handle(cpu: &mut Cpu) {
         // Returns AL=0 (Success), AL=1 (Buffer Full)
         0x05 => {
             let key = cpu.cx();
-            // Cap buffer at 16 keys to emulate BIOS buffer size limit
-            if cpu.bus.keyboard_buffer.len() < crate::keyboard::BIOS_BUFFER_KEYS {
-                cpu.bus.keyboard_buffer.push_back(key);
+            // Into the BIOS's buffer, after the keystrokes the keyboard
+            // interrupt put there, as the BIOS stores it.
+            if crate::keyboard::queued_keystrokes(&mut cpu.bus) < crate::keyboard::BIOS_BUFFER_KEYS
+                && crate::keyboard::BiosBuffer::push(&mut cpu.bus, key)
+            {
                 cpu.set_reg8(iced_x86::Register::AL, 0); // Success
             } else {
                 cpu.set_reg8(iced_x86::Register::AL, 1); // Full
@@ -109,8 +111,8 @@ fn plain_keystroke(key: u16) -> u16 {
 /// Throw away the enhanced keystrokes at the front of the buffer, which
 /// AH=00h and 01h skip.
 fn drop_enhanced_keys(cpu: &mut Cpu) {
-    while cpu.bus.keyboard_buffer.front().is_some_and(|&key| is_enhanced(key)) {
-        cpu.bus.keyboard_buffer.pop_front();
+    while crate::keyboard::peek_keystroke(&mut cpu.bus).is_some_and(is_enhanced) {
+        crate::keyboard::take_keystroke(&mut cpu.bus);
     }
 }
 

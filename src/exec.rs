@@ -432,14 +432,7 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
 /// Take a Ctrl+C (or Ctrl+Break) keystroke out of the keyboard buffer, if
 /// one was pressed.
 fn take_ctrl_c(cpu: &mut Cpu) -> bool {
-    let buffer = &mut cpu.bus.keyboard_buffer;
-    match buffer.iter().position(|&key| key & 0xFF == 0x03 || key == 0x0000) {
-        Some(i) => {
-            buffer.remove(i);
-            true
-        }
-        None => false,
-    }
+    crate::keyboard::take_keystroke_where(&mut cpu.bus, |key| key & 0xFF == 0x03 || key == 0x0000).is_some()
 }
 
 /// Run a command line handed over by the shell (or by IF): a built-in

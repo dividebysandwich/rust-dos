@@ -192,7 +192,7 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     bus.set_a20(false);
     bus.reset_requested = false;
     bus.port_accesses.clear();
-    bus.keyboard_buffer.clear();
+    crate::keyboard::reset_keystrokes(bus);
     bus.reset_timers();
     bus.reset_sound();
     bus.reset_network();
