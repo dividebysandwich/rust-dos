@@ -56,6 +56,10 @@ impl Default for S3 {
 /// CR36: 4 MB of fast page mode memory.
 const MEMORY_CONFIG: u8 = 0x1A;
 
+/// CR36 on the ViRGE/VX: 4 MB of VRAM in 2-cycle EDO mode (ViRGE/VX
+/// databook, Configuration 1 Register).
+const VX_MEMORY_CONFIG: u8 = 0x3A;
+
 impl S3 {
     pub fn new() -> Self {
         let mut s3 = Self {
@@ -125,7 +129,13 @@ impl S3 {
             0x2F => 0x00,
             0x30 => 0xE1,
             0x35 => self.crtc[0x35] & 0xF0 | (bank & 0x0F) as u8,
+            // The ViRGE/VX has the memory size in bits 6-5 (2, 4, 6 or 8 MB),
+            // where the Trio64's 1Ah says 2 MB.
+            0x36 if adapter == Adapter::S3VirgeVx => VX_MEMORY_CONFIG,
             0x36 => MEMORY_CONFIG,
+            // On the ViRGE/VX bits 6-5 are the DRAM of a mixed VRAM and DRAM
+            // board, taken from the total for the VRAM: none.
+            0x37 if adapter == Adapter::S3VirgeVx => 0x6B,
             0x37 => 0x2B,
             // Not interlaced.
             0x42 => 0x0D,
@@ -397,3 +407,25 @@ impl Cursor {
 }
 
 crate::state_fields!(S3 { crtc, seq, sr17, offset_high, cursor_fg, cursor_bg, fg_at, bg_at });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chip IDs and configuration straps each S3 card reads.
+    fn ids(adapter: Adapter) -> [u8; 4] {
+        let mut vga = VgaCard::new();
+        vga.adapter = adapter;
+        let s3 = S3::new();
+        [0x2D, 0x2E, 0x36, 0x37].map(|index| s3.peek_crtc(index, &vga, 0, 0))
+    }
+
+    #[test]
+    fn each_chip_has_its_ids_and_straps() {
+        assert_eq!(ids(Adapter::S3), [0x88, 0x11, 0x1A, 0x2B]);
+        assert_eq!(ids(Adapter::S3Virge), [0x56, 0x31, 0x1A, 0x2B]);
+        // The VX's memory size and DRAM straps mean other things: 4 MB,
+        // all of it VRAM. S3's driver gives up on the Trio64's values.
+        assert_eq!(ids(Adapter::S3VirgeVx), [0x88, 0x3D, 0x3A, 0x6B]);
+    }
+}
