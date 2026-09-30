@@ -6,6 +6,7 @@
 //! fault) and delivers the exception, so the handler sees the faulting
 //! instruction's address, as on a 286 and later.
 
+use std::num::NonZeroU8;
 use super::seg::{
     Descriptor, INT_GATE16, INT_GATE32, TASK_GATE, TRAP_GATE16, TRAP_GATE32, is_null, rpl, sel_error,
 };
@@ -19,14 +20,24 @@ pub const EXT: u32 = 1;
 pub const DR6_BS: u32 = 0x4000;
 
 /// An exception: its vector and, for the exceptions that have one, the error
-/// code pushed with it (protected mode only). Eight bytes, so a
-/// `CpuResult<()>` fits in a register: the handlers return one for every
-/// instruction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// code pushed with it (protected mode only). Eight bytes, whose `kind` is
+/// never 0, so a `CpuResult<()>` fits in a register and is 0 when it is
+/// `Ok`: the handlers return one for every instruction.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Fault {
     pub vector: u8,
-    has_error: bool,
+    /// `PLAIN` or `WITH_ERROR`.
+    kind: NonZeroU8,
     code: u32,
+}
+
+const PLAIN: NonZeroU8 = NonZeroU8::new(1).unwrap();
+const WITH_ERROR: NonZeroU8 = NonZeroU8::new(2).unwrap();
+
+impl std::fmt::Debug for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fault").field("vector", &self.vector).field("error", &self.error()).finish()
+    }
 }
 
 impl Fault {
@@ -46,16 +57,16 @@ impl Fault {
     pub const NM: Fault = Fault::new(7);
 
     pub const fn new(vector: u8) -> Self {
-        Fault { vector, has_error: false, code: 0 }
+        Fault { vector, kind: PLAIN, code: 0 }
     }
 
     pub const fn with_error(vector: u8, error: u32) -> Self {
-        Fault { vector, has_error: true, code: error }
+        Fault { vector, kind: WITH_ERROR, code: error }
     }
 
     /// The error code pushed with it, for the exceptions that have one.
     pub const fn error(&self) -> Option<u32> {
-        if self.has_error { Some(self.code) } else { None }
+        if self.kind.get() == WITH_ERROR.get() { Some(self.code) } else { None }
     }
 
     /// Double fault.
