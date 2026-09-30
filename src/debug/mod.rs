@@ -153,6 +153,7 @@ pub enum Cmd {
     Printer { eject: bool },
     Exceptions,
     Gus,
+    Awe32,
     Drives,
     Mount {
         drive: String,
@@ -1397,6 +1398,10 @@ impl DebugHub {
             Cmd::Printer { eject } => Reply::Json(printer_json(cpu, eject)),
             Cmd::Gus => Reply::Json(match &cpu.bus.gus {
                 Some(gus) => gus.snapshot(),
+                None => serde_json::json!({ "installed": false }),
+            }),
+            Cmd::Awe32 => Reply::Json(match &cpu.bus.awe {
+                Some(awe) => awe.snapshot(),
                 None => serde_json::json!({ "installed": false }),
             }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),

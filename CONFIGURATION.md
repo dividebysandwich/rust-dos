@@ -238,10 +238,25 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 
 ### `[sound]`
 
-* `sbtype` is the Sound Blaster: `sb16` (the default), `sbpro2`, `sb2` or
-  `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's 16-bit
-  channel) set its resources; the defaults are 220, 7, 1 and 5. The
-  `BLASTER` environment variable follows them.
+* `sbtype` is the Sound Blaster: `sb16` (the default), `awe32`, `sbpro2`,
+  `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and `hdma` (the SB16's
+  and AWE32's 16-bit channel) set its resources; the defaults are 220, 7,
+  1 and 5. The `BLASTER` environment variable follows them.
+* `awe32` is an SB16 with the AWE32's EMU8000 wavetable synthesizer at the
+  base + 400h, 800h and C00h (620h, A20h and E20h), as games with AWE32
+  music drivers expect it; `BLASTER` gets its `E620`. The card starts as
+  Creative's `AWEUTIL /S` leaves it, and the built-in `AWEUTIL` command
+  does that again. The General MIDI instruments are in the card's 1 MB
+  ROM, which is Creative's and doesn't come with rust-dos: `awe32rom` is
+  the file (`awe32.raw`, or a directory with it). Without the setting
+  rust-dos looks for `awe32.raw` in its configuration directory (also in
+  an `AWE32ROM` directory there) and in the working directory, and the
+  libretro core in the frontend's system directory. The settings
+  window's Sound page downloads it from the copy the libretro PCem core
+  keeps, checked by its SHA-256. Without the ROM the card works and plays
+  the instruments programs load into its RAM; the ROM's are silent.
+  `awe32ram` is the RAM in KB: `512` (the default, as the AWE32 came),
+  `0`, `1024`, `2048`, `4096`, `8192`, `12288`, `16384` or `28672`.
 * `opl` is the FM synthesizer: `opl3` (the default) or `opl2`.
 * `soundfont` is a General MIDI SoundFont (`.sf2`) for music programs
   send to the MPU-401 at 330h.
@@ -301,8 +316,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
-`lptdac` (the Covox or Disney Sound Source) and `tandy` (the Tandy's and
-PCjr's sound chip), and `master` for all of them together. At 100, the
+`lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
+PCjr's sound chip) and `awe32` (the AWE32's wavetable synthesizer), and
+`master` for all of them together. At 100, the
 default, a source plays as loud as its card makes it. The volumes apply on
 top of the Sound Blaster's own mixer, which programs set.
 

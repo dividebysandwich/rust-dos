@@ -97,6 +97,7 @@ fn router(state: AppState) -> Router {
         .route("/api/printer", get(printer))
         .route("/api/printer/eject", post(printer_eject))
         .route("/api/gus", get(gus))
+        .route("/api/awe32", get(awe32))
         .route("/api/exceptions", get(exceptions))
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
@@ -737,6 +738,10 @@ async fn gus(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Gus, DEFAULT_TIMEOUT).await
 }
 
+async fn awe32(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Awe32, DEFAULT_TIMEOUT).await
+}
+
 async fn exceptions(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Exceptions, DEFAULT_TIMEOUT).await
 }
@@ -975,6 +980,8 @@ PROTECTED MODE
 SOUND
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,
                              DMA and every voice's registers
+  GET  /api/awe32            the AWE32's EMU8000: ROM, RAM, configuration, effects
+                             and the sounding voices
 
 DRIVES
   GET    /api/drive                                list drives, types and paths

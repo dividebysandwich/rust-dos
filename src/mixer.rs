@@ -26,9 +26,11 @@ pub enum Channel {
     LptDac,
     /// The Tandy's and PCjr's sound chip.
     Tandy,
+    /// The AWE32's EMU8000 wavetable synthesizer.
+    Awe,
 }
 
-pub const CHANNELS: usize = 10;
+pub const CHANNELS: usize = 11;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -50,6 +52,7 @@ impl Channel {
         Channel::DiskNoise,
         Channel::LptDac,
         Channel::Tandy,
+        Channel::Awe,
     ];
 
     /// Its key in `[mixer]`.
@@ -65,6 +68,7 @@ impl Channel {
             Channel::DiskNoise => "disknoise",
             Channel::LptDac => "lptdac",
             Channel::Tandy => "tandy",
+            Channel::Awe => "awe32",
         }
     }
 
@@ -85,6 +89,7 @@ impl Channel {
             Channel::DiskNoise => "Disk noise",
             Channel::LptDac => "Covox/Disney",
             Channel::Tandy => "Tandy/PCjr",
+            Channel::Awe => "AWE32 wavetable",
         }
     }
 

@@ -211,6 +211,11 @@ pub struct Bus {
     pub gus: Option<crate::gus::Gus>,
     /// The IRQ the Ultrasound's interrupt line holds up, if any.
     gus_line: Option<u8>,
+    /// The AWE32's EMU8000, with a Sound Blaster AWE32.
+    pub awe: Option<Box<crate::awe32::Emu8000>>,
+    /// The ROM and RAM (KB) an AWE32 gets.
+    awe_rom: std::sync::Arc<[i16]>,
+    awe_ram_kb: u32,
     /// The network: the IPX driver, and the thread with the sockets.
     pub net: crate::net::Net,
     /// The serial ports.
@@ -374,6 +379,9 @@ impl Bus {
             mpu: crate::mpu401::Mpu401::new(),
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
             gus_line: None,
+            awe: None,
+            awe_rom: std::sync::Arc::from([]),
+            awe_ram_kb: crate::awe32::DEFAULT_RAM_KB,
             net: crate::net::Net::new(),
             serial: crate::serial::Serial::default(),
             ultrasnd_drive: None,
@@ -1595,7 +1603,7 @@ impl Bus {
         let (cl, cr) = self.sb.as_ref().map_or((1.0, 1.0), |sb| sb.cd_volume());
         let (sb_on, sb_step, dac) = match &self.sb {
             Some(sb) => (
-                sb.speaker_on || sb.config.model == crate::sb::SbModel::Sb16,
+                sb.speaker_on || sb.config.model.is_sb16(),
                 sb.out_rate as f64 / rate as f64,
                 sb.dac,
             ),
@@ -1610,8 +1618,8 @@ impl Bus {
                 crate::sb::SbModel::Sb2 => Some((4800.0, 2)),
                 crate::sb::SbModel::SbPro2 => Some((3200.0, 2)),
                 // The SB16 filters at half its sample rate.
-                crate::sb::SbModel::Sb16 if sb.out_rate >= 4000 => Some((sb.out_rate as f32 / 2.0, 4)),
-                crate::sb::SbModel::Sb16 => None,
+                m if m.is_sb16() && sb.out_rate >= 4000 => Some((sb.out_rate as f32 / 2.0, 4)),
+                _ => None,
             },
             _ => None,
         }
@@ -1678,6 +1686,11 @@ impl Bus {
                 let (gl, gr) = gus.pop_frame(crate::opl::RATE);
                 self.mixer.add(&mut mix, &mut peaks, Channel::Gus, (gl * GUS_GAIN, gr * GUS_GAIN));
             }
+            if let Some(awe) = &mut self.awe {
+                // The SB16 mixer's MIDI volume is the synthesizers'.
+                let (l, r) = awe.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Awe, (l * fl, r * fr));
+            }
             if let Some(dac) = &mut self.lpt_dac {
                 let s = dac.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::LptDac, (s, s));
@@ -1721,6 +1734,7 @@ impl Bus {
     pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
         self.sb = sb.map(crate::sb::SoundBlaster::new);
         self.opl = crate::opl::Opl::new(opl3);
+        self.configure_awe();
         self.sync_sb_irq();
         self.clock.schedule(self.next_event());
     }
@@ -1746,8 +1760,101 @@ impl Bus {
         if let Some(gus) = &mut self.gus {
             if hooked { gus.silence() } else { gus.power_on() }
         }
+        // The AWE32 keeps its sample RAM and settings, which drivers
+        // loaded; its voices stop.
+        if let Some(awe) = &mut self.awe {
+            awe.silence();
+        }
         self.sync_gus_irq();
         self.clock.schedule(self.next_event());
+    }
+
+    /// The AWE32's ROM and RAM size (KB), for the card from now on. A card
+    /// there is takes the ROM at once; a new RAM size makes a new card.
+    pub fn set_awe_setup(&mut self, rom: std::sync::Arc<[i16]>, ram_kb: u32) {
+        if let Some(awe) = &mut self.awe {
+            awe.set_rom(rom.clone());
+            if awe.ram_kb() != ram_kb.min(crate::awe32::MAX_RAM_KB) {
+                self.awe = None;
+            }
+        }
+        self.awe_rom = rom;
+        self.awe_ram_kb = ram_kb;
+        self.configure_awe();
+    }
+
+    /// Whether the AWE32 has its ROM.
+    pub fn awe_has_rom(&self) -> bool {
+        !self.awe_rom.is_empty()
+    }
+
+    /// The EMU8000 the Sound Blaster has: kept while the card stays an
+    /// AWE32 at the same base, made when it becomes one.
+    fn configure_awe(&mut self) {
+        let base = self.sb.as_ref().filter(|sb| sb.config.model == crate::sb::SbModel::Awe32).map(|sb| sb.config.base);
+        match base {
+            None => self.awe = None,
+            Some(base) if self.awe.as_ref().is_some_and(|awe| awe.base == base.wrapping_add(0x400)) => {}
+            Some(base) => {
+                let now = self.awe_frames();
+                self.awe = Some(Box::new(crate::awe32::Emu8000::new(base, self.awe_rom.clone(), self.awe_ram_kb, now)));
+            }
+        }
+    }
+
+    /// Initialise the EMU8000 as `AWEUTIL /S` does.
+    pub fn awe_init(&mut self) {
+        self.audio_catch_up();
+        let now = self.awe_frames();
+        if let Some(awe) = &mut self.awe {
+            awe.power_on(now);
+        }
+    }
+
+    /// Emulated time in the EMU8000's 44.1 kHz frames.
+    fn awe_frames(&self) -> u64 {
+        (self.clock.now_ticks() as u128 * 44_100 / crate::timer::PIT_HZ as u128) as u64
+    }
+
+    /// Whether `port` belongs to the AWE32's EMU8000.
+    #[inline]
+    pub(crate) fn awe_claims(&self, port: u16) -> bool {
+        self.awe.as_ref().is_some_and(|awe| awe.claims(port))
+    }
+
+    /// Write the EMU8000: a byte, a word, or a doubleword as two words.
+    /// The audio catches up first, so the change is heard from its
+    /// sample on.
+    pub(crate) fn awe_write(&mut self, port: u16, value: u32, len: u8) {
+        let Some(awe) = &self.awe else { return };
+        if !awe.latch_only(port) {
+            self.audio_catch_up();
+        }
+        let Some(awe) = &mut self.awe else { return };
+        match len {
+            1 => awe.write_byte(port, value as u8),
+            2 => awe.write_word(port, value as u16),
+            _ => {
+                awe.write_word(port, value as u16);
+                awe.write_word(port.wrapping_add(2), (value >> 16) as u16);
+            }
+        }
+    }
+
+    /// Read the EMU8000, the voices' positions and volumes brought up to
+    /// the present.
+    pub(crate) fn awe_read(&mut self, port: u16, len: u8) -> u32 {
+        let Some(awe) = &self.awe else { return 0xFFFF_FFFF };
+        if !awe.latch_only(port) && !awe.reads_clock(port) {
+            self.audio_catch_up();
+        }
+        let now = self.awe_frames();
+        let Some(awe) = &mut self.awe else { return 0xFFFF_FFFF };
+        match len {
+            1 => awe.read_byte(port, now) as u32,
+            2 => awe.read_word(port, now) as u32,
+            _ => awe.read_word(port, now) as u32 | (awe.read_word(port.wrapping_add(2), now) as u32) << 16,
+        }
     }
 
     /// Port access of the Sound Blaster at `offset` from its base: FM
@@ -2112,6 +2219,7 @@ impl Bus {
 
             // The Gravis Ultrasound, at 2X0h-2XFh and 3X0h-3X7h.
             p if self.gus_claims(p) => self.gus_write(p, value),
+            p if self.awe_claims(p) => self.awe_write(p, value as u32, 1),
 
             // MPU-401 MIDI interface.
             0x330 => {
@@ -2376,6 +2484,7 @@ impl Bus {
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
 
             p if self.gus_claims(p) => self.gus_read(p),
+            p if self.awe_claims(p) => self.awe_read(p, 1) as u8,
 
             0x330 => self.mpu.read_data(),
             0x331 => self.mpu.read_status(),

@@ -4,6 +4,11 @@ The sound card nearly every DOS game supports. **SB16** works for almost
 everything; pick **SB Pro 2** or **SB 2.0** for an older game that
 doesn't recognise the SB16, or **none** to remove the card.
 
+**SB AWE32** is an SB16 with Creative's EMU8000 wavetable synthesizer,
+which games with an *AWE32* music option (Doom, Rise of the Triad, many
+Miles and HMI games) play their music on. It needs the AWE32
+ROM for its instruments.
+
 In a game's setup program, choose *Sound Blaster* (or *Sound Blaster 16*)
 for both sound effects and music, and keep the settings it detects.
 
@@ -15,6 +20,23 @@ give it the same values as here, **220**, IRQ **7**, DMA **1** and HDMA
 
 Leave them as they are unless a game only works with other values.
 Left and Right pick a field, Enter lists its values.
+
+# AWE32 ROM {#awe32-rom}
+
+The AWE32's 1 MB sample ROM, `awe32.raw`, with the General MIDI
+instruments its music plays with. It is Creative's and doesn't come with
+Rust-DOS. Enter picks the file, Del goes back to **default**, which looks
+in Rust-DOS's configuration directory and the working directory.
+
+Without it the card still works: games that load their own instruments
+(Impulse Tracker, Cubic Player) play, but the ROM's instruments are
+silent. *Download the AWE32 ROM...* fetches the copy the libretro PCem
+core keeps, checks it, and puts it in the configuration directory.
+
+# AWE32 RAM {#awe32-ram}
+
+The sample memory on the card for instruments programs load: **512 KB**
+as the AWE32 came, up to 28 MB as it could be fitted with.
 
 # FM synthesizer {#opl}
 

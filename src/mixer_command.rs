@@ -31,6 +31,7 @@ fn channel_named(name: &str) -> Option<Channel> {
         "DISKNOISE" | "HDDNOISE" | "FDDNOISE" => Channel::DiskNoise,
         "LPTDAC" | "DISNEY" | "COVOX" => Channel::LptDac,
         "TANDY" | "PCJR" | "PSG" => Channel::Tandy,
+        "AWE32" | "AWE" | "EMU8000" => Channel::Awe,
         _ => return None,
     })
 }
@@ -48,6 +49,7 @@ fn display_name(channel: Channel) -> &'static str {
         Channel::DiskNoise => "DISKNOISE",
         Channel::LptDac => "LPTDAC",
         Channel::Tandy => "TANDY",
+        Channel::Awe => "AWE32",
     }
 }
 
@@ -65,6 +67,7 @@ pub fn active_channels(cpu: &Cpu) -> Vec<Channel> {
         .filter(|&channel| match channel {
             Channel::Sb => bus.sb.is_some(),
             Channel::Gus => bus.gus.is_some(),
+            Channel::Awe => bus.awe.is_some(),
             Channel::LptDac => bus.lpt_dac.is_some(),
             Channel::Tandy => bus.tandy_sound_enabled(),
             Channel::DiskNoise => bus.disknoise.enabled(crate::diskio::DiskClass::HardDisk)
@@ -371,7 +374,7 @@ impl ShellCommand for MixerCommand {
 mod tests {
     use super::*;
 
-    const ALL: [Channel; 10] = Channel::ALL;
+    const ALL: [Channel; crate::mixer::CHANNELS] = Channel::ALL;
 
     #[test]
     fn volumes_in_percent_decibels_and_sides() {

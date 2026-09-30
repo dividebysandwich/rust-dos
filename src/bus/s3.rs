@@ -136,7 +136,8 @@ impl Bus {
     }
 
     /// A port access 2 or 4 bytes wide: to the graphics engine whole, to
-    /// anything else a byte at a time, low byte first.
+    /// the AWE32's EMU8000 a word at a time, to anything else a byte at a
+    /// time, low byte first.
     pub fn io_write_wide(&mut self, port: u16, value: u32, len: u8) {
         // A booted system's IDE data ports, a word at a time.
         if let Some(id) = self.ide_data_port(port) {
@@ -151,6 +152,12 @@ impl Bus {
         if self.s3() && is_engine_port(port) {
             self.log_port(port, value, len, true);
             self.engine_write(port, value, len);
+            return;
+        }
+        // The AWE32's EMU8000 is accessed a word at a time.
+        if self.awe_claims(port) {
+            self.log_port(port, value, len, true);
+            self.awe_write(port, value, len);
             return;
         }
         // The PCI configuration address, a doubleword.
@@ -173,6 +180,11 @@ impl Bus {
         }
         if self.s3() && is_engine_port(port) {
             let value = self.engine_read(port, len);
+            self.log_port(port, value, len, false);
+            return value;
+        }
+        if self.awe_claims(port) {
+            let value = self.awe_read(port, len);
             self.log_port(port, value, len, false);
             return value;
         }

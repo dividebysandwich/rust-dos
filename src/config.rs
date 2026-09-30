@@ -398,6 +398,11 @@ pub struct SoundConfig {
     pub sb_installed: bool,
     /// OPL3 (as on an SB Pro 2 or SB16) rather than OPL2.
     pub opl3: bool,
+    /// The AWE32's sample ROM, a file or a directory with `awe32.raw`
+    /// (`awe32rom`); without it, the usual places (`awe32::rom::find`).
+    pub awe32rom: Option<PathBuf>,
+    /// The AWE32's sample RAM in KB (`awe32ram`).
+    pub awe32ram: u32,
     pub soundfont: Option<PathBuf>,
     /// The Gravis Ultrasound; `enabled` says whether there is one.
     pub gus: crate::gus::GusConfig,
@@ -436,6 +441,8 @@ impl Default for SoundConfig {
             sb: crate::sb::SbConfig::default(),
             sb_installed: true,
             opl3: true,
+            awe32rom: None,
+            awe32ram: crate::awe32::DEFAULT_RAM_KB,
             soundfont: None,
             gus: crate::gus::GusConfig::default(),
             midisynth: MidiSynth::Auto,
@@ -480,7 +487,7 @@ impl SoundConfig {
         if self.gus.irq == sb.irq {
             warnings.push(format!("[sound]: the Ultrasound and the Sound Blaster share IRQ {}", sb.irq));
         }
-        if self.gus.dma == sb.dma8 || (sb.model == crate::sb::SbModel::Sb16 && self.gus.dma == sb.dma16) {
+        if self.gus.dma == sb.dma8 || (sb.model.is_sb16() && self.gus.dma == sb.dma16) {
             warnings.push(format!("[sound]: the Ultrasound and the Sound Blaster share DMA {}", self.gus.dma));
         }
         warnings
@@ -498,7 +505,7 @@ impl SoundConfig {
                     self.sb_installed = false;
                 } else {
                     sb.model = crate::sb::SbModel::parse(value)
-                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sbpro2, sb2 or none)", value))?;
+                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, awe32, sbpro2, sb2 or none)", value))?;
                     self.sb_installed = true;
                 }
             }
@@ -524,6 +531,19 @@ impl SoundConfig {
                     "opl2" => false,
                     _ => return Err(format!("invalid opl '{}' (opl3 or opl2)", value)),
                 }
+            }
+            "awe32rom" => self.awe32rom = Some(expand_host_path(value, base_dir, home)),
+            "awe32ram" => {
+                self.awe32ram = value
+                    .trim()
+                    .trim_end_matches(|c: char| c.eq_ignore_ascii_case(&'k') || c.eq_ignore_ascii_case(&'b'))
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|kb| crate::awe32::RAM_SIZES.contains(kb))
+                    .ok_or_else(|| {
+                        let sizes: Vec<String> = crate::awe32::RAM_SIZES.iter().map(u32::to_string).collect();
+                        format!("invalid awe32ram '{}' (KB: {})", value, sizes.join(", "))
+                    })?;
             }
             "soundfont" => self.soundfont = Some(expand_host_path(value, base_dir, home)),
             "mt32roms" => self.mt32roms = Some(expand_host_path(value, base_dir, home)),
@@ -1224,6 +1244,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "dma", Some(sb.dma8.to_string())),
         (Sound, "hdma", Some(sb.dma16.to_string())),
         (Sound, "opl", Some(if sound.opl3 { "opl3" } else { "opl2" }.to_string())),
+        (Sound, "awe32rom", sound.awe32rom.as_deref().map(|p| contract_home(p, home))),
+        (Sound, "awe32ram", Some(sound.awe32ram.to_string())),
         (Sound, "soundfont", sound.soundfont.as_deref().map(|p| contract_home(p, home))),
         (Sound, "gus", yes_no(gus.enabled)),
         (Sound, "gusbase", Some(format!("{:X}", gus.base))),
@@ -2058,7 +2080,7 @@ mod tests {
         assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
         let mixer = Settings::from_config(&config).mixer;
         let levels = Channel::ALL.map(|channel| mixer.level(channel));
-        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100]);
+        assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100]);
         assert!(mixer.speaker_filter);
         assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -2095,6 +2117,8 @@ mod tests {
             sb: crate::sb::SbConfig { model: crate::sb::SbModel::SbPro2, base: 0x240, irq: 5, dma8: 3, dma16: 6 },
             sb_installed: true,
             opl3: false,
+            awe32rom: Some(PathBuf::from("/home/u/roms/awe32.raw")),
+            awe32ram: 2048,
             soundfont: Some(PathBuf::from("/home/u/sf/General User.sf2")),
             gus: crate::gus::GusConfig {
                 enabled: true,
@@ -2357,8 +2381,8 @@ mod tests {
             // programs of its own.)
             let wanted = !matches!(
                 key,
-                "ultradir" | "mt32roms" | "mt32lib" | "midiport" | "password" | "username" | "token" | "docpath" | "fontpath"
-                    | "device" | "print_command" | "open_with"
+                "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "midiport" | "password" | "username" | "token"
+                    | "docpath" | "fontpath" | "device" | "print_command" | "open_with"
             );
             assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);
         }

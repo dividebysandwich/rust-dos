@@ -17,6 +17,7 @@ const IDE_VERSION: u16 = 2;
 const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
+const AWE_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -84,6 +85,9 @@ impl Bus {
             mpu,
             gus,
             gus_line,
+            awe,
+            awe_rom: _,
+            awe_ram_kb: _,
             tandy_sound,
             lpt_dac,
             cdaudio,
@@ -176,6 +180,11 @@ impl Bus {
             save_device(lpt_dac, w);
             cdaudio.save_state(w);
         });
+        // The AWE32's EMU8000 (its RAM first, for rewind), only with one,
+        // so states of machines without load as they did.
+        if let Some(awe) = awe {
+            w.section(b"AWE ", AWE_VERSION, |w| awe.save(w));
+        }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
         if let Some(voodoo) = voodoo {
@@ -263,6 +272,9 @@ impl Bus {
             mpu,
             gus,
             gus_line,
+            awe,
+            awe_rom: _,
+            awe_ram_kb: _,
             tandy_sound,
             lpt_dac,
             cdaudio,
@@ -348,6 +360,12 @@ impl Bus {
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
+        match (r.next_is(b"AWE "), awe) {
+            (true, Some(awe)) => awe.load(&mut r.section(b"AWE ", AWE_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => return Err(StateError::Mismatch("it has an AWE32 and this machine hasn't".into())),
+            (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AWE32 and it hasn't".into())),
+        }
         match (r.next_is(b"3DFX"), voodoo) {
             (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,
             (false, None) => {}
@@ -420,5 +438,8 @@ impl Bus {
         self.sb_irq = self.sb_irq_now();
         self.refresh_irq();
         self.vga.after_load();
+        if let Some(awe) = &mut self.awe {
+            awe.after_load();
+        }
     }
 }

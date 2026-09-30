@@ -181,11 +181,13 @@ fn definitions() -> Vec<Definition> {
         Definition {
             key: "sbtype",
             desc: "Sound Blaster",
-            info: "Changes when no program runs.",
+            info: "Changes when no program runs. The AWE32's instruments need its ROM, awe32.raw, in the \
+                   frontend's system directory.",
             category: "audio",
             target: config("sound", "sbtype"),
             values: configured(&[
                 ("sb16", "Sound Blaster 16"),
+                ("awe32", "Sound Blaster AWE32"),
                 ("sbpro2", "Sound Blaster Pro 2"),
                 ("sb2", "Sound Blaster 2.0"),
                 ("none", "None"),

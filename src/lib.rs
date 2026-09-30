@@ -3,6 +3,7 @@ pub mod apm;
 pub mod asm16;
 pub mod audio;
 pub mod autospeed;
+pub mod awe32;
 pub mod batch;
 pub mod bios;
 pub mod boot;

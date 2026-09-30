@@ -360,13 +360,13 @@ fn sound_conflicts_are_reported() {
     let mut ui = opened(&host);
     ui.show_page(Page::Sound);
     // The Ultrasound's base port onto the Sound Blaster's 220h.
-    ui.row = Page::Sound.items().iter().position(|&i| i == Item::GusPorts).unwrap();
+    ui.row = ui.items().iter().position(|&i| i == Item::GusPorts).unwrap();
     pick(&mut ui, &mut host, "220h");
     assert_eq!(host.applied.last().unwrap().sound.gus.base, 0x220);
     assert!(status(&ui).1 && status(&ui).0.contains("gusbase 220"), "{:?}", status(&ui));
 
     // The Ultrasound's drive skips the letters that are taken.
-    ui.row = Page::Sound.items().iter().position(|&i| i == Item::GusDrive).unwrap();
+    ui.row = ui.items().iter().position(|&i| i == Item::GusDrive).unwrap();
     ui.settings.sound.gus.drive = None;
     assert_eq!(listed(&mut ui, &mut host)[..3], ["none", "D:", "E:"]);
     pick(&mut ui, &mut host, "D:");
@@ -618,7 +618,7 @@ fn every_page_draws_and_clicks() {
     ui.click(x, y, &mut host);
     assert_eq!(ui.popup.as_ref().map(|p| p.item), Some(Item::SbType));
     ui.draw(&mut frame);
-    let value = ui.hits.iter().find(|h| matches!(h.target, Target::PopupRow(1))).unwrap();
+    let value = ui.hits.iter().find(|h| matches!(h.target, Target::PopupRow(2))).unwrap();
     let (x, y) = at(value.col, value.row);
     ui.click(x, y, &mut host);
     assert_eq!(ui.settings.sound.sb.model, SbModel::SbPro2);

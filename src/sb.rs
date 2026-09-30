@@ -20,6 +20,8 @@ pub enum SbModel {
     Sb2,
     SbPro2,
     Sb16,
+    /// An SB16 with the EMU8000 wavetable synthesizer (`crate::awe32`).
+    Awe32,
 }
 
 impl SbModel {
@@ -29,7 +31,14 @@ impl SbModel {
             SbModel::Sb2 => (2, 1),
             SbModel::SbPro2 => (3, 2),
             SbModel::Sb16 => (4, 5),
+            // A CT3990's.
+            SbModel::Awe32 => (4, 13),
         }
+    }
+
+    /// Whether the card is an SB16, as the AWE32 is too.
+    pub fn is_sb16(self) -> bool {
+        matches!(self, SbModel::Sb16 | SbModel::Awe32)
     }
 
     /// The T value of the BLASTER variable.
@@ -37,7 +46,7 @@ impl SbModel {
         match self {
             SbModel::Sb2 => 3,
             SbModel::SbPro2 => 4,
-            SbModel::Sb16 => 6,
+            SbModel::Sb16 | SbModel::Awe32 => 6,
         }
     }
 
@@ -47,6 +56,7 @@ impl SbModel {
             SbModel::Sb2 => "sb2",
             SbModel::SbPro2 => "sbpro2",
             SbModel::Sb16 => "sb16",
+            SbModel::Awe32 => "awe32",
         }
     }
 
@@ -55,6 +65,7 @@ impl SbModel {
             "sb2" | "sb20" => Some(SbModel::Sb2),
             "sbpro2" | "sbpro" => Some(SbModel::SbPro2),
             "sb16" => Some(SbModel::Sb16),
+            "awe32" | "sbawe" | "awe" => Some(SbModel::Awe32),
             _ => None,
         }
     }
@@ -85,8 +96,12 @@ impl SbConfig {
     /// The BLASTER environment variable describing the card.
     pub fn blaster(&self) -> String {
         let mut s = format!("A{:X} I{} D{}", self.base, self.irq, self.dma8);
-        if self.model == SbModel::Sb16 {
+        if self.model.is_sb16() {
             s.push_str(&format!(" H{} P330", self.dma16));
+        }
+        // The EMU8000's base, before T as Creative's installer writes it.
+        if self.model == SbModel::Awe32 {
+            s.push_str(&format!(" E{:X}", self.base + 0x400));
         }
         s.push_str(&format!(" T{}", self.model.blaster_type()));
         s
@@ -180,7 +195,7 @@ impl SoundBlaster {
             params_needed: 0,
             read_buf: VecDeque::new(),
             test_reg: 0,
-            speaker_on: config.model == SbModel::Sb16,
+            speaker_on: config.model.is_sb16(),
             tc_rate: 11025,
             sb16_rate: None,
             block_size: 0x800,
@@ -217,7 +232,7 @@ impl SoundBlaster {
         self.silence = None;
         self.irq8 = false;
         self.irq16 = false;
-        self.speaker_on = self.config.model == SbModel::Sb16;
+        self.speaker_on = self.config.model.is_sb16();
         self.sb16_rate = None;
         self.pending_left = None;
         self.dac = 0;
@@ -261,7 +276,7 @@ impl SoundBlaster {
 
     /// DMA channel of a transfer.
     fn channel(&self, bits16: bool) -> usize {
-        if bits16 && self.config.model == SbModel::Sb16 { self.config.dma16 as usize } else { self.config.dma8 as usize }
+        if bits16 && self.config.model.is_sb16() { self.config.dma16 as usize } else { self.config.dma8 as usize }
     }
 
     /// Run the DSP up to emulated time `now` (PIT ticks): play the DMA
@@ -395,7 +410,7 @@ impl SoundBlaster {
                 if self.read_buf.is_empty() { 0x7F } else { 0xFF }
             }
             // SB16: acknowledges the 16-bit interrupt.
-            0xF if self.config.model == SbModel::Sb16 => {
+            0xF if self.config.model.is_sb16() => {
                 self.irq16 = false;
                 0xFF
             }
@@ -433,14 +448,14 @@ impl SoundBlaster {
         let reg = self.mixer_index;
         match (self.config.model, reg) {
             (SbModel::Sb2, _) => 0xFF,
-            (SbModel::Sb16, 0x80) => match self.config.irq {
+            (m, 0x80) if m.is_sb16() => match self.config.irq {
                 2 | 9 => 1,
                 5 => 2,
                 7 => 4,
                 10 => 8,
                 _ => 0,
             },
-            (SbModel::Sb16, 0x81) => {
+            (m, 0x81) if m.is_sb16() => {
                 let low = match self.config.dma8 {
                     0 => 1,
                     1 => 2,
@@ -455,7 +470,7 @@ impl SoundBlaster {
                 };
                 low | high
             }
-            (SbModel::Sb16, 0x82) => (self.irq8 as u8) | (self.irq16 as u8) << 1 | 0x20,
+            (m, 0x82) if m.is_sb16() => (self.irq8 as u8) | (self.irq16 as u8) << 1 | 0x20,
             _ => self.mixer[reg as usize],
         }
     }
@@ -475,7 +490,7 @@ impl SoundBlaster {
             }
             return;
         }
-        let sb16 = self.config.model == SbModel::Sb16;
+        let sb16 = self.config.model.is_sb16();
         let needs = match value {
             // The SB16's ASP and 8051 commands (DOSBox-X's
             // DSP_cmd_len_sb16).
@@ -503,7 +518,7 @@ impl SoundBlaster {
     fn start(&mut self, bits16: bool, stereo: bool, signed: bool, auto_init: bool, input: bool, units: u32) {
         let channels = if stereo { 2 } else { 1 };
         let rate = match self.sb16_rate {
-            Some(r) if self.config.model == SbModel::Sb16 => r * channels,
+            Some(r) if self.config.model.is_sb16() => r * channels,
             _ => self.tc_rate,
         };
         self.pending_left = None;
@@ -603,13 +618,13 @@ impl SoundBlaster {
             0xE8 => self.read_buf.push_back(self.test_reg),
             // Raise the 8-bit (F2h) or 16-bit (F3h) interrupt.
             0xF2 => self.irq8 = true,
-            0xF3 if self.config.model == SbModel::Sb16 => self.irq16 = true,
+            0xF3 if self.config.model.is_sb16() => self.irq16 = true,
             0xF8 => self.read_buf.push_back(0),
             // The SB16's ASP socket, empty, as Windows' driver probes it:
             // the mode (04h), a codec parameter (05h), the chip's version
             // (08h 03h: none, FFh as a card without one says) and its
             // registers (0Eh, 0Fh). DOSBox-X's sblaster.cpp answers the same.
-            0x04 if self.config.model == SbModel::Sb16 => self.asp_mode = self.params[0],
+            0x04 if self.config.model.is_sb16() => self.asp_mode = self.params[0],
             0x04 => self.read_buf.push_back(if self.config.model == SbModel::Sb2 { 0x88 } else { 0x7B }),
             0x05 => {}
             0x08 => {

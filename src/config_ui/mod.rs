@@ -305,7 +305,7 @@ impl Page {
                 Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
             ],
             Page::Sound => &[
-                SbType, SbPorts, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
+                SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
                 SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
@@ -319,6 +319,7 @@ impl Page {
                 Volume(Channel::DiskNoise),
                 Volume(Channel::LptDac),
                 Volume(Channel::Tandy),
+                Volume(Channel::Awe),
                 SpeakerFilter,
                 SbFilter,
                 Reverb,
@@ -442,6 +443,10 @@ enum Item {
     SbIrq,
     SbDma,
     SbHdma,
+    /// The AWE32's sample ROM, its download, and its RAM.
+    Awe32Rom,
+    Awe32Download,
+    Awe32Ram,
     Opl,
     Gus,
     /// The Ultrasound's, likewise.
@@ -600,6 +605,20 @@ fn soundfonts(frontend: Frontend) -> bool {
     cfg!(feature = "midi") && frontend.host_files
 }
 
+/// Whether the Sound Blaster is an AWE32.
+fn awe32(s: &Settings) -> bool {
+    s.sound.sb_installed && s.sound.sb.model == SbModel::Awe32
+}
+
+/// A memory size in KB, as the settings show it.
+fn ram_size(kb: u32) -> String {
+    match kb {
+        0 => "none".to_string(),
+        kb if kb >= 1024 => format!("{} MB", kb / 1024),
+        kb => format!("{} KB", kb),
+    }
+}
+
 /// Whether munt's MT-32 can play: its library and ROMs are the host's.
 fn mt32(frontend: Frontend) -> bool {
     cfg!(not(target_arch = "wasm32")) && frontend.host_files
@@ -657,6 +676,9 @@ impl Item {
             SbIrq | GusIrq => "IRQ",
             SbDma | GusDma => "DMA",
             SbHdma => "HDMA",
+            Awe32Rom => "  AWE32 ROM",
+            Awe32Download => "  Download the AWE32 ROM...",
+            Awe32Ram => "  AWE32 RAM",
             Opl => "FM synthesizer",
             Gus => "Gravis Ultrasound",
             GusDrive => "  Software drive",
@@ -722,6 +744,9 @@ impl Item {
             Item::Scale | Item::Fullscreen => frontend.window,
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
+            // The ROM is a host file; the program downloads it.
+            Item::Awe32Rom => frontend.host_files,
+            Item::Awe32Download => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
             Item::MidiPort => host_midi(frontend),
             // The page records the canvas as it shows.
             Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
@@ -753,6 +778,9 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
             Item::VoodooMemory | Item::VoodooRenderer => s.voodoo.enabled,
+            Item::Awe32Rom | Item::Awe32Ram => awe32(s),
+            // Until there is a ROM.
+            Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
             Item::VoodooScale => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
@@ -796,8 +824,8 @@ impl Item {
                 Input::Text
             }
             Item::ModemListen => Input::Text,
-            Item::SoundFont | Item::Mt32Roms => Input::File,
-            Item::Autoexec | Item::Rooms => Input::Link,
+            Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom => Input::File,
+            Item::Autoexec | Item::Rooms | Item::Awe32Download => Input::Link,
             _ => Input::Choice,
         }
     }
@@ -862,6 +890,7 @@ impl Item {
             SbType if !s.sound.sb_installed => "none".to_string(),
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
+                SbModel::Awe32 => "SB AWE32",
                 SbModel::SbPro2 => "SB Pro 2",
                 SbModel::Sb2 => "SB 2.0",
             }
@@ -876,6 +905,14 @@ impl Item {
             SbIrq => sb.irq.to_string(),
             SbDma => sb.dma8.to_string(),
             SbHdma => sb.dma16.to_string(),
+            Awe32Rom => match (&s.sound.awe32rom, crate::awe32::rom::find(s.sound.awe32rom.as_deref())) {
+                (Some(path), Some(_)) => contract_home(path, home),
+                (Some(path), None) => format!("{} (missing)", contract_home(path, home)),
+                (None, Some(found)) => format!("{} (default)", contract_home(&found, home)),
+                (None, None) => "none found".to_string(),
+            },
+            Awe32Download => String::new(),
+            Awe32Ram => ram_size(s.sound.awe32ram),
             Opl => if s.sound.opl3 { "OPL3" } else { "OPL2" }.to_string(),
             Gus => on_off(gus.enabled),
             GusBase => format!("{:X}h", gus.base),
@@ -1027,7 +1064,7 @@ impl Item {
             RecordShader => on_off(|s, on| s.record_shader = on),
             RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb),
             SbType => {
-                let models = [Some(SbModel::Sb16), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
+                let models = [Some(SbModel::Sb16), Some(SbModel::Awe32), Some(SbModel::SbPro2), Some(SbModel::Sb2), None];
                 each(s, models, |s, model| match model {
                     Some(model) => {
                         s.sound.sb.model = model;
@@ -1040,6 +1077,7 @@ impl Item {
             SbIrq => each(s, [2, 3, 5, 7, 9, 10, 11, 12, 15], |s, irq| s.sound.sb.irq = irq),
             SbDma => each(s, [0, 1, 3], |s, dma| s.sound.sb.dma8 = dma),
             SbHdma => each(s, [5, 6, 7], |s, dma| s.sound.sb.dma16 = dma),
+            Awe32Ram => each(s, crate::awe32::RAM_SIZES, |s, kb| s.sound.awe32ram = kb),
             Opl => on_off(|s, opl3| s.sound.opl3 = opl3),
             Gus => on_off(|s, on| s.sound.gus.enabled = on),
             GusBase => each(s, [0x210, 0x220, 0x240, 0x250, 0x260], |s, base| s.sound.gus.base = base),
@@ -1116,7 +1154,8 @@ impl Item {
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
-            | SoundFont | Mt32Roms | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr | Rooms | Relay | Player
+            | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
+            | Rooms | Relay | Player
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
     }
@@ -1173,7 +1212,7 @@ impl Item {
     /// alone.
     fn fields(self, s: &Settings) -> Vec<Item> {
         match self {
-            Item::SbPorts if s.sound.sb.model == SbModel::Sb16 => {
+            Item::SbPorts if s.sound.sb.model.is_sb16() => {
                 vec![Item::SbBase, Item::SbIrq, Item::SbDma, Item::SbHdma]
             }
             Item::SbPorts => vec![Item::SbBase, Item::SbIrq, Item::SbDma],
@@ -1242,6 +1281,7 @@ impl Item {
             Item::UltraDir => s.sound.gus.ultradir.take().is_some(),
             Item::SoundFont => s.sound.soundfont.take().is_some(),
             Item::Mt32Roms => s.sound.mt32roms.take().is_some(),
+            Item::Awe32Rom => s.sound.awe32rom.take().is_some(),
             Item::MidiPort => !std::mem::take(&mut s.sound.midiport).is_empty(),
             Item::CaptureDir => {
                 let default = Settings::default().capture_dir;
@@ -1290,6 +1330,8 @@ pub(super) enum Pick {
     SoundFont,
     /// The directory with the MT-32's ROMs.
     Mt32Roms,
+    /// The AWE32's ROM file.
+    Awe32Rom,
     /// A game set up for DOSBox, to import.
     ImportGame,
     /// Where a new disk image goes.
@@ -1369,6 +1411,8 @@ pub struct ConfigUi {
     config_file: Option<PathBuf>,
     home: Option<PathBuf>,
     status: Option<Status>,
+    /// The AWE32 ROM's download under way.
+    awe32_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// The selected setting's value being typed, or picked from a list.
     edit: Option<TextField>,
     popup: Option<Popup>,
@@ -1479,6 +1523,7 @@ impl ConfigUi {
             autoexec: None,
             rooms: None,
             help: None,
+            awe32_download: None,
         }
     }
 
@@ -1498,6 +1543,52 @@ impl ConfigUi {
     pub fn poll(&mut self, host: &mut dyn Host) {
         self.poll_rooms(host);
         self.poll_achievements(host);
+        self.poll_awe32_download(host);
+    }
+
+    /// Download the AWE32's ROM on a thread of its own, into rust-dos's
+    /// directory, where the card finds it.
+    fn download_awe32_rom(&mut self) {
+        if self.awe32_download.is_some() {
+            self.info("The AWE32 ROM is downloading...");
+            return;
+        }
+        let Some(dest) = crate::awe32::rom::download_path() else {
+            self.error("There is no directory for rust-dos's files to download the ROM into");
+            return;
+        };
+        let (done, result) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("awe32-rom".to_string()).spawn(move || {
+            let _ = done.send(crate::awe32::rom::download(&dest).map(|()| dest));
+        });
+        match spawned {
+            Ok(_) => {
+                self.awe32_download = Some(result);
+                self.info(format!("Downloading the AWE32 ROM from {}...", crate::awe32::rom::DOWNLOAD_URL));
+            }
+            Err(e) => self.error(format!("The download didn't start: {}", e)),
+        }
+    }
+
+    /// The download's result, once it has one: the card gets the ROM.
+    fn poll_awe32_download(&mut self, host: &mut dyn Host) {
+        let Some(result) = &self.awe32_download else { return };
+        let outcome = match result.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the download stopped".to_string()),
+        };
+        self.awe32_download = None;
+        match outcome {
+            Ok(path) => {
+                let shown = contract_home(&path, self.home.as_deref());
+                self.settings.sound.awe32rom = Some(path);
+                self.changed(Item::Awe32Rom, host);
+                self.info(format!("The AWE32 ROM is in {}", shown));
+                self.row = self.row.min(self.row_count().saturating_sub(1));
+            }
+            Err(e) => self.error(format!("The AWE32 ROM: {}", e)),
+        }
     }
 
     /// RetroAchievements' account changed outside the window (logging in
@@ -1851,8 +1942,10 @@ impl ConfigUi {
                 self.edit = Some(TextField::new(&item.text(&self.settings)));
             }
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
+            (UiKey::Enter, Input::File) if item == Item::Awe32Rom => self.open_browser(Pick::Awe32Rom),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
             (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
+            (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
             (UiKey::Enter, Input::Link) => self.open_autoexec(host),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}
@@ -2100,6 +2193,12 @@ impl ConfigUi {
                 true,
                 MT32_ROMS,
             ),
+            Pick::Awe32Rom => (
+                "Pick the AWE32's ROM (awe32.raw)",
+                self.settings.sound.awe32rom.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                false,
+                &["raw", "rom", "bin"][..],
+            ),
             Pick::ImportGame => ("Pick a GOG game's folder or a DOSBox .conf", String::new(), true, &["conf"][..]),
             Pick::AchievementsArchive => ("Pick the zip or .dosz the game came in", String::new(), false, &["zip", "dosz"][..]),
             Pick::ImagePath => (
@@ -2157,6 +2256,13 @@ impl ConfigUi {
                         self.settings.sound.soundfont = Some(path);
                         self.changed(Item::SoundFont, host);
                     }
+                    Pick::Awe32Rom => match crate::awe32::rom::load(&path) {
+                        Ok(_) => {
+                            self.settings.sound.awe32rom = Some(path);
+                            self.changed(Item::Awe32Rom, host);
+                        }
+                        Err(e) => self.error(e),
+                    },
                     Pick::AchievementsArchive => match host.identify_game(&path) {
                         Ok(message) => {
                             self.info(message);

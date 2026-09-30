@@ -22,6 +22,20 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     }
     let changed = |part: &dyn Fn(&SoundConfig) -> String| old.as_ref().is_none_or(|old| part(old) != part(&sound));
 
+    let awe32 = |s: &SoundConfig| s.card().is_some_and(|sb| sb.model == crate::sb::SbModel::Awe32);
+    if awe32(&sound) && changed(&|s| format!("{} {:?} {}", awe32(s), s.awe32rom, s.awe32ram)) {
+        let rom = match load_awe32_rom(&sound) {
+            Ok((rom, path)) => {
+                cpu.bus.log_string(&format!("[CONFIG] AWE32 ROM {}", path.display()));
+                rom
+            }
+            Err(e) => {
+                warnings.push(format!("awe32rom: {}", e));
+                std::sync::Arc::from([])
+            }
+        };
+        cpu.bus.set_awe_setup(rom, sound.awe32ram);
+    }
     if changed(&|s| format!("{:?} {}", s.card(), s.opl3)) {
         cpu.bus.configure_sound(sound.card(), sound.opl3);
         match &sound.card() {
@@ -118,6 +132,20 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
         }
     }
     warnings
+}
+
+/// The AWE32's ROM, from the configured place or the usual ones, and
+/// where it came from.
+fn load_awe32_rom(sound: &SoundConfig) -> Result<(std::sync::Arc<[i16]>, std::path::PathBuf), String> {
+    use crate::awe32::rom;
+    let path = rom::find(sound.awe32rom.as_deref()).ok_or_else(|| match &sound.awe32rom {
+        Some(path) => format!("no {} at {}; the ROM's General MIDI sounds are silent", rom::FILE_NAME, path.display()),
+        None => format!(
+            "no {} found; the ROM's General MIDI sounds are silent (the settings window's Sound page can download it)",
+            rom::FILE_NAME
+        ),
+    })?;
+    Ok((rom::load(&path)?, path))
 }
 
 /// Give the MPU-401 munt's MT-32 with the configured ROMs. Returns what

@@ -161,15 +161,24 @@
 #floppy_disk_speed=maximum
 
 [sound]
-# The Sound Blaster: sb16 (the default), sbpro2, sb2, or none. Programs
-# learn its settings from the BLASTER environment variable, which follows
-# these.
+# The Sound Blaster: sb16 (the default), awe32 (an SB16 with the EMU8000
+# wavetable synthesizer), sbpro2, sb2, or none. Programs learn its settings
+# from the BLASTER environment variable, which follows these.
 #sbtype=sb16
 # Base port (hex), IRQ, 8-bit DMA channel, and the SB16's 16-bit channel.
 #sbbase=220
 #irq=7
 #dma=1
 #hdma=5
+# The AWE32's 1 MB sample ROM with its General MIDI instruments, which
+# doesn't come with rust-dos. Without it rust-dos looks for awe32.raw
+# beside this file's default location and in the working directory; the
+# settings window can download it. The card works without it, but the
+# ROM's instruments are silent.
+#awe32rom=~/roms/awe32.raw
+# The AWE32's sample RAM in KB: 512 (the default), 0, 1024, 2048, 4096,
+# 8192, 12288, 16384 or 28672.
+#awe32ram=512
 # FM synthesizer: opl3 (as on an SB Pro 2 or SB16) or opl2 (AdLib, SB 2.0).
 #opl=opl3
 # A General MIDI SoundFont (.sf2) for music sent to the MPU-401 at 330h.
@@ -243,6 +252,8 @@
 #lptdac=100
 # The Tandy's and PCjr's sound chip.
 #tandy=100
+# The AWE32's wavetable synthesizer.
+#awe32=100
 # The PC speaker through a filter that gives it the sound of the small
 # speaker in a PC, without the harsh edges: on (the default) or off.
 #speaker_filter=on

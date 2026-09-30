@@ -59,6 +59,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("MORE", &crate::filter_commands::MoreCommand),
     ("FIND", &crate::filter_commands::FindCommand),
     ("SORT", &crate::filter_commands::SortCommand),
+    ("AWEUTIL", &crate::awe32::aweutil::AweUtilCommand),
 ];
 
 /// The built-in command called `name`, in any case.

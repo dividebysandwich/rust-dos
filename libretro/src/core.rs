@@ -138,6 +138,9 @@ impl Core {
         let system = directory(cb, RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY).unwrap_or_else(|| fallback.clone());
         let save = directory(cb, RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY).unwrap_or_else(|| system.clone());
         let dirs = Dirs::new(system, save);
+        // The AWE32's ROM, as frontends keep BIOS files.
+        rust_dos::awe32::rom::add_search_dir(dirs.sys.clone());
+        rust_dos::awe32::rom::add_search_dir(dirs.system.clone());
         if let Err(e) = fs::create_dir_all(dirs.drive_c()) {
             cb.log(RETRO_LOG_WARN, &format!("{}: {}", dirs.drive_c().display(), e));
         }
