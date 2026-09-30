@@ -398,7 +398,7 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
             }
         }
         // An S3's hardware cursor over the row.
-        if let Some(cursor) = bus.vga.s3.cursor().filter(|_| bus.vga.adapter == adapter::Adapter::S3 && scale == 1) {
+        if let Some(cursor) = bus.vga.s3.cursor().filter(|_| bus.vga.adapter.is_s3() && scale == 1) {
             let y = fy as u32;
             if y < cursor.y || y >= cursor.y + 64 - cursor.skip_y {
                 continue;

@@ -712,7 +712,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         }
                         "machine" => match Adapter::parse(value) {
                             Some(adapter) => config.machine = Some(adapter),
-                            None => warn(format!("invalid machine '{}' (svga, svga_s3, vga, ega, cga, tandy, pcjr or hercules)", value)),
+                            None => warn(format!("invalid machine '{}' (svga, svga_s3, svga_s3virge, svga_s3virgevx, vga, ega, cga, tandy, pcjr or hercules)", value)),
                         },
                         "voodoo" => match parse_bool(value) {
                             Some(on) => config.voodoo = Some(on),

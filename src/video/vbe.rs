@@ -57,8 +57,14 @@ pub static MODES: [VbeMode; 16] = [
     mode(0x118, 1024, 768, 32, CrtTiming::VESA_768),
 ];
 
-pub fn find_mode(number: u16) -> Option<&'static VbeMode> {
-    MODES.iter().find(|m| m.number == number & 0x1FF)
+/// Mode `number` of the list, its "24-bit" colour three bytes a pixel
+/// with `packed24`, as on an S3 ViRGE: its Windows drivers only offer
+/// packed 24-bit truecolour, and set it through the BIOS.
+pub fn find_mode(number: u16, packed24: bool) -> Option<VbeMode> {
+    MODES.iter().find(|m| m.number == number & 0x1FF).map(|m| {
+        let bpp = if packed24 && m.bpp == 32 { 24 } else { m.bpp };
+        VbeMode { bpp, ..*m }
+    })
 }
 
 /// The display timing of a mode `height` lines high, as the modes of the
@@ -209,7 +215,7 @@ impl crate::savestate::State for Vbe {
         *mode = match (number, size) {
             (_, (0, _, _)) => None,
             (n, (width, height, bpp)) => {
-                Some(find_mode(n).copied().unwrap_or(VbeMode { number: n, width, height, bpp, timing: timing_for(height) }))
+                Some(find_mode(n, bpp == 24).unwrap_or(VbeMode { number: n, width, height, bpp, timing: timing_for(height) }))
             }
         };
         lfb.load(r)?;

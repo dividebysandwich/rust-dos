@@ -11,6 +11,13 @@ pub enum Adapter {
     /// An S3 Trio64 with 4 MB: the Super VGA's modes, and the chip's own
     /// registers and graphics engine that S3's drivers (Windows') use.
     S3,
+    /// An S3 ViRGE (86C325) with 4 MB: the Trio64's registers, and the
+    /// ViRGE's own 2D engine and 3D engine (S3d) behind its memory-mapped
+    /// registers, which Windows 95's Direct3D drives through S3's driver.
+    S3Virge,
+    /// The ViRGE/VX (86C988): the ViRGE's engines, other IDs, and its
+    /// engine reset in CR63 instead of CR66.
+    S3VirgeVx,
     /// IBM's VGA, without VESA modes.
     Vga,
     /// IBM's Enhanced Graphics Adapter with an Enhanced Color Display: 16
@@ -31,9 +38,11 @@ pub enum Adapter {
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 8] = [
+    pub const ALL: [Adapter; 10] = [
         Adapter::Svga,
         Adapter::S3,
+        Adapter::S3Virge,
+        Adapter::S3VirgeVx,
         Adapter::Vga,
         Adapter::Ega,
         Adapter::Cga,
@@ -49,6 +58,8 @@ impl Adapter {
                 Some(Adapter::Svga)
             }
             "svga_s3" | "s3" | "s3trio" => Some(Adapter::S3),
+            "svga_s3virge" | "virge" | "s3virge" => Some(Adapter::S3Virge),
+            "svga_s3virgevx" | "virgevx" | "s3virgevx" => Some(Adapter::S3VirgeVx),
             "vga" | "vgaonly" => Some(Adapter::Vga),
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
@@ -63,6 +74,8 @@ impl Adapter {
         match self {
             Adapter::Svga => "svga",
             Adapter::S3 => "svga_s3",
+            Adapter::S3Virge => "svga_s3virge",
+            Adapter::S3VirgeVx => "svga_s3virgevx",
             Adapter::Vga => "vga",
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
@@ -77,6 +90,8 @@ impl Adapter {
         match self {
             Adapter::Svga => "Super VGA (VESA)",
             Adapter::S3 => "S3 Trio64",
+            Adapter::S3Virge => "S3 ViRGE (3D)",
+            Adapter::S3VirgeVx => "S3 ViRGE/VX (3D)",
             Adapter::Vga => "VGA",
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
@@ -88,13 +103,24 @@ impl Adapter {
 
     /// Whether the BIOS has the VESA extensions (INT 10h AH=4Fh).
     pub fn has_vbe(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::S3)
+        matches!(self, Adapter::Svga) || self.is_s3()
+    }
+
+    /// Whether the adapter is one of S3's chips: the Trio64's registers
+    /// and hardware cursor, and PCI.
+    pub fn is_s3(self) -> bool {
+        matches!(self, Adapter::S3 | Adapter::S3Virge | Adapter::S3VirgeVx)
+    }
+
+    /// Whether the adapter is a ViRGE, with the ViRGE's engines.
+    pub fn is_virge(self) -> bool {
+        matches!(self, Adapter::S3Virge | Adapter::S3VirgeVx)
     }
 
     /// Whether the BIOS has the VGA's functions: the display combination
     /// code (INT 10h AH=1Ah), the state information (AH=1Bh) and the DAC.
     pub fn vga_bios(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::S3 | Adapter::Vga)
+        matches!(self, Adapter::Svga | Adapter::Vga) || self.is_s3()
     }
 
     /// Whether the BIOS has the EGA's functions: the palette registers

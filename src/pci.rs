@@ -5,8 +5,9 @@
 //!
 //! * device 0: the 3dfx Voodoo Graphics (`voodoo`), when there is one;
 //! * device 1: the S3 Trio64 of `machine=svga_s3` (PCI\VEN_5333&DEV_8811),
-//!   whose BAR0 is the chip's linear frame buffer address, the same
-//!   register as CR59/CR5Ah.
+//!   or the ViRGE (DEV_5631) or ViRGE/VX (DEV_883D) of `svga_s3virge` and
+//!   `svga_s3virgevx`, whose BAR0 is the chip's linear frame buffer
+//!   address, the same register as CR59/CR5Ah.
 //!
 //! A machine with neither has no PCI bus.
 
@@ -65,13 +66,26 @@ impl Bus {
         Some((target, a as u8 & 0xFC))
     }
 
+    /// The S3's BAR0 size: 8 MB on the Trio64; 64 MB on a ViRGE, whose
+    /// window holds the frame buffer and, 16 MB up, the registers.
+    fn s3_bar_mask(&self) -> u32 {
+        if self.virge() { 0xFC00_0000 } else { 0xFF80_0000 }
+    }
+
     /// A byte of the S3's configuration space: an S3 Trio64 (5333h:8811h),
-    /// revision 0, a VGA-compatible display controller, BAR0 its linear
-    /// frame buffer (8 MB aligned, prefetchable), no interrupt.
+    /// ViRGE (5631h) or ViRGE/VX (883Dh), revision 0, a VGA-compatible
+    /// display controller, BAR0 its linear frame buffer (prefetchable), no
+    /// interrupt.
     fn s3_config(&self, reg: u8) -> u8 {
-        let bar0 = ((self.vga.s3.crtc(0x59) as u32) << 24 | (self.vga.s3.crtc(0x5A) as u32) << 16) & 0xFF80_0000 | 0x08;
+        let window = (self.vga.s3.crtc(0x59) as u32) << 24 | (self.vga.s3.crtc(0x5A) as u32) << 16;
+        let bar0 = window & self.s3_bar_mask() | 0x08;
+        let device = match self.vga.adapter {
+            crate::video::adapter::Adapter::S3Virge => 0x5631,
+            crate::video::adapter::Adapter::S3VirgeVx => 0x883D,
+            _ => 0x8811,
+        };
         let dword = match reg & 0xFC {
-            0x00 => 0x8811_5333,
+            0x00 => device << 16 | 0x5333,
             0x04 => 0x0280_0000 | self.pci.command as u32,
             0x08 => 0x0300_0000,
             0x10 => bar0,
@@ -106,12 +120,12 @@ impl Bus {
         }
         match reg {
             0x04 => self.pci.command = (self.pci.command & 0xFF00) | (value & 0x23) as u16,
-            // Base bits 23-31: CR5Ah bit 7, CR59h.
-            0x12 => {
+            // Base bits 23-31 (26-31 on a ViRGE): CR5Ah bit 7, CR59h.
+            0x12 if !self.virge() => {
                 let low = (self.vga.s3.crtc(0x5A) & 0x7F) | (value & 0x80);
                 self.s3_crtc_write(0x5A, low);
             }
-            0x13 => self.s3_crtc_write(0x59, value),
+            0x13 => self.s3_crtc_write(0x59, value & (self.s3_bar_mask() >> 24) as u8),
             _ => {}
         }
     }

@@ -6,6 +6,8 @@ use super::Bus;
 use crate::video::VideoMode;
 use crate::video::adapter::Adapter;
 use crate::video::s3::engine::Surface;
+use crate::video::s3::s3d::Target;
+use crate::video::s3::virge::{self, Effect};
 use crate::video::vbe::VbeMode;
 
 /// The graphics engine's ports: 42E8h, 46E8h, 4AE8h, 82E8h-BEE8h every
@@ -19,13 +21,28 @@ pub fn is_engine_port(port: u16) -> bool {
 }
 
 impl Bus {
-    /// Whether the card is the S3.
+    /// Whether the card is one of S3's: the Trio64 or a ViRGE.
     #[inline]
     pub(crate) fn s3(&self) -> bool {
-        self.vga.adapter == Adapter::S3
+        self.vga.adapter.is_s3()
+    }
+
+    /// Whether the card is a ViRGE, with its own engines.
+    #[inline]
+    pub(crate) fn virge(&self) -> bool {
+        self.vga.adapter.is_virge()
     }
 
     pub(crate) fn s3_crtc_write(&mut self, index: u8, value: u8) {
+        // The ViRGE's engine reset: CR66 bit 1, CR63's on the ViRGE/VX.
+        let reset = match self.vga.adapter {
+            Adapter::S3Virge => 0x66,
+            Adapter::S3VirgeVx => 0x63,
+            _ => 0,
+        };
+        if index == reset && (self.vga.s3.crtc(index) ^ value) & 0x02 != 0 {
+            self.virge.s3d.reset();
+        }
         let (mut bank, mut start_high) = (self.vbe.bank, self.vbe.start_high);
         self.vga.s3.write_crtc(index, value, &mut bank, &mut start_high);
         self.vbe.bank = bank;
@@ -53,7 +70,7 @@ impl Bus {
     /// put it. Runs after every write to a register it depends on.
     pub(crate) fn s3_settle(&mut self) {
         // The frame buffer, unless it would cover RAM.
-        self.vbe.lfb_base = self.vga.s3.lfb_base().filter(|&base| base as usize >= self.ram.len());
+        self.vbe.lfb_base = self.s3_lfb_base().filter(|&base| base as usize >= self.ram.len());
         match self.vga.s3.format(&self.vga) {
             Some(format) => {
                 let pitch = self.vga.s3.offset(&self.vga) * 8;
@@ -119,9 +136,17 @@ impl Bus {
         self.s3_engine.peek(port, len, self.vga.s3.engine_layout().1)
     }
 
+    /// The linear frame buffer's address, if it is enabled: by CR58 bit 4,
+    /// or on a ViRGE by MM850C bit 4 too.
+    pub(crate) fn s3_lfb_base(&self) -> Option<u32> {
+        self.vga.s3.lfb_base(self.virge() && self.virge.advfunc & 0x10 != 0)
+    }
+
     /// The memory-mapped register (or image transfer offset) at physical
     /// address `addr`, if the S3 maps them there: at A0000h-AFFFFh with
-    /// CR53 bit 4, 16 MB above the linear frame buffer with bit 3.
+    /// CR53 bit 4, and 16 MB above the linear frame buffer, on the Trio64
+    /// with bit 3 and on a ViRGE whenever the frame buffer is on (its "new
+    /// MMIO", 64 KB of it).
     #[inline]
     pub(crate) fn s3_mmio(&self, addr: usize) -> Option<u16> {
         if !self.s3() {
@@ -131,8 +156,109 @@ impl Bus {
         if s3.mmio() && (0xA0000..0xB0000).contains(&addr) {
             return Some((addr - 0xA0000) as u16);
         }
-        let base = s3.lfb_base()? as usize + 0x100_0000;
-        (s3.mmio_high() && (base..base + 0x10000).contains(&addr)).then(|| (addr - base) as u16)
+        if !(s3.mmio_high() || self.virge()) {
+            return None;
+        }
+        let base = self.s3_lfb_base()? as usize + 0x100_0000;
+        (base..base + 0x10000).contains(&addr).then(|| (addr - base) as u16)
+    }
+
+    /// Write the memory-mapped register at offset `port` of the S3's
+    /// window: the Trio64's graphics engine, or on a ViRGE its own engines,
+    /// the VGA's registers (83B0h-83DFh) and the Trio64's packed ones.
+    pub(crate) fn mmio_write(&mut self, port: u16, value: u32, len: u8) {
+        if !self.virge() || (0x8100..0x8180).contains(&port) || is_engine_port(port) {
+            self.engine_write(port, value, len);
+            return;
+        }
+        if (0x83B0..0x83E0).contains(&port) {
+            for i in 0..len as u16 {
+                self.io_write(port - 0x8000 + i, (value >> (8 * i)) as u8);
+            }
+            return;
+        }
+        self.virge_write(port, value, len);
+    }
+
+    /// A memory-mapped register read, without what reading it does (reads
+    /// of memory can't change the machine): the VGA's registers at
+    /// 83B0h-83DFh as they read, the attribute flip-flop reset left for
+    /// the next port access.
+    pub(crate) fn mmio_peek(&self, port: u16, len: u8) -> u32 {
+        if !self.virge() || (0x8100..0x8180).contains(&port) || is_engine_port(port) {
+            return self.s3_peek(port, len);
+        }
+        if (0x83B0..0x83E0).contains(&port) {
+            return (0..len as u16).map(|i| (self.vga_peek(port - 0x8000 + i) as u32) << (8 * i)).sum();
+        }
+        self.virge.read(port, len).unwrap_or(0xFFFF_FFFF)
+    }
+
+    /// A VGA register as a read of its port gives it, for the ViRGE's
+    /// memory-mapped copies: the CRTC, the sequencer's and graphics
+    /// controller's indexes and data, and Input Status 1.
+    fn vga_peek(&self, port: u16) -> u8 {
+        let vga = &self.vga;
+        match port {
+            0x3D4 | 0x3B4 => vga.crtc_index,
+            0x3D5 | 0x3B5 if vga.crtc_index >= 0x19 => {
+                vga.s3.peek_crtc(vga.crtc_index, vga, self.vbe.bank, self.vbe.start_high)
+            }
+            0x3D5 | 0x3B5 => vga.crtc_regs.get(vga.crtc_index as usize).copied().unwrap_or(0),
+            0x3DA | 0x3BA => {
+                self.attribute_reset.set(true);
+                vga.peek_timing().status(self.clock.now_ns())
+            }
+            0x3C4 => vga.sequencer_index,
+            0x3C5 if vga.sequencer_index >= 0x08 => vga.s3.peek_seq(vga.sequencer_index),
+            0x3C5 => vga.sequencer_regs.get(vga.sequencer_index as usize).copied().unwrap_or(0),
+            0x3CE => vga.graphics_index,
+            0x3CF => vga.graphics_regs.get(vga.graphics_index as usize).copied().unwrap_or(0),
+            0x3CC => vga.misc_output_reg,
+            _ => 0xFF,
+        }
+    }
+
+    /// Write a register of the ViRGE's engines, and do what it asks.
+    fn virge_write(&mut self, port: u16, value: u32, len: u8) {
+        let vga = &self.vga;
+        let palette = |i: u8| vga.get_rgb(i);
+        let mut target = Target { vram: &mut self.vbe.vram, palette: &palette };
+        match self.virge.write(port, value, len, &mut target) {
+            Effect::None => {}
+            Effect::Drew => {
+                if self.video_mode == VideoMode::Vesa {
+                    self.vga.mark_dirty_full();
+                }
+            }
+            Effect::Lfb => self.s3_settle(),
+            Effect::CommandDma => self.virge_command_dma(),
+        }
+    }
+
+    /// Command DMA: the register writes in its buffer in system memory,
+    /// from the read pointer to the write pointer, all at once.
+    fn virge_command_dma(&mut self) {
+        if self.virge.dma.enable == 0 {
+            return;
+        }
+        let (base, mask) = self.virge.dma_buffer();
+        let wp = self.virge.dma.wp & mask;
+        // Once round the largest buffer at most.
+        for _ in 0..0x4000 {
+            let rp = self.virge.dma.rp & mask;
+            if rp == wp {
+                break;
+            }
+            let data = self.read_32(base.wrapping_add(rp) as usize);
+            self.virge.dma.rp = (rp + 4) & mask;
+            if let Some(reg) = self.virge.dma_step(data) {
+                self.virge_write(reg, data, 4);
+            }
+        }
+        if self.virge.dma.rp & mask == wp {
+            self.virge.set_status(virge::STAT_CMD_DMA_DONE);
+        }
     }
 
     /// A port access 2 or 4 bytes wide: to the graphics engine whole, to

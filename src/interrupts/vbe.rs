@@ -208,7 +208,7 @@ fn controller_info(cpu: &mut Cpu, addr: usize) -> u16 {
     let vbe2 = (0..4).map(|i| cpu.bus.guest_read_8((addr + i) as u32)).eq(*b"VBE2");
     let (seg, off) = (cpu.es(), cpu.di());
     let far = |offset: u16| (ROM_SEGMENT as u32) << 16 | offset as u32;
-    let s3 = cpu.bus.vga.adapter == crate::video::adapter::Adapter::S3;
+    let s3 = cpu.bus.vga.adapter.is_s3();
     let (oem, oem_string) = if s3 { (S3_OEM, S3_OEM_STRING) } else { (OEM, OEM_STRING) };
     let mut block = vec![0u8; if vbe2 { 512 } else { 256 }];
     block[0..4].copy_from_slice(b"VESA");
@@ -244,6 +244,7 @@ fn color_masks(bpp: u8) -> [u8; 8] {
     match bpp {
         15 => [5, 10, 5, 5, 5, 0, 1, 15],
         16 => [5, 11, 6, 5, 5, 0, 0, 0],
+        24 => [8, 16, 8, 8, 8, 0, 0, 0],
         32 => [8, 16, 8, 8, 8, 0, 8, 24],
         _ => [0; 8],
     }
@@ -251,7 +252,7 @@ fn color_masks(bpp: u8) -> [u8; 8] {
 
 /// Function 01h: the ModeInfoBlock of mode CX.
 fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
-    let Some(mode) = vbe::find_mode(number) else {
+    let Some(mode) = vbe::find_mode(number, cpu.bus.vga.adapter.is_virge()) else {
         return FAILED;
     };
     let mut block = [0u8; 256];
@@ -292,9 +293,10 @@ fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
         super::int10::set_mode(cpu, (bx & 0x7F) as u8 | if keep { 0x80 } else { 0 });
         return SUCCESS;
     }
-    let Some(mode) = vbe::find_mode(bx) else {
+    let Some(mode) = vbe::find_mode(bx, cpu.bus.vga.adapter.is_virge()) else {
         return FAILED;
     };
+    let mode = &mode;
     enter_mode(&mut cpu.bus, mode, bx & 0x4000 != 0, keep);
     // BIOS data area: the mode byte S3 BIOSes use (68h-80h), and the text
     // grid of 8x16 characters.
@@ -319,7 +321,7 @@ pub fn enter_mode(bus: &mut Bus, mode: &VbeMode, lfb: bool, keep: bool) {
     bus.vga.set_fixed_timing(Some(mode.timing));
     bus.vga.mark_dirty_full();
     // An S3's own registers say the same, as its BIOS sets them.
-    if bus.vga.adapter == crate::video::adapter::Adapter::S3 {
+    if bus.vga.adapter.is_s3() {
         bus.s3_program_mode(mode);
     }
 }
@@ -341,7 +343,9 @@ fn save_restore_state(cpu: &mut Cpu) -> u16 {
         }
         0x02 => {
             let mode = cpu.bus.guest_read_16((addr) as u32);
-            if let Some(m) = vbe::find_mode(mode).filter(|_| mode != 0) {
+            let packed24 = cpu.bus.vga.adapter.is_virge();
+            if let Some(m) = vbe::find_mode(mode, packed24).filter(|_| mode != 0) {
+                let m = &m;
                 if cpu.bus.vbe.mode != Some(*m) {
                     enter_mode(&mut cpu.bus, m, mode & 0x4000 != 0, true);
                 }

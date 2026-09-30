@@ -179,6 +179,13 @@ pub struct Bus {
     pub vbe: crate::video::vbe::Vbe,
     /// The S3 Trio64's graphics engine, on `Adapter::S3`.
     pub s3_engine: crate::video::s3::engine::Engine,
+    /// The S3 ViRGE's own 2D and 3D engines and streams processor, on
+    /// `Adapter::S3Virge` and `S3VirgeVx`.
+    pub virge: crate::video::s3::virge::Virge,
+    /// A memory-mapped read of Input Status 1 (a ViRGE's 83DAh) happened,
+    /// whose reset of the attribute flip-flop is done at the next port
+    /// access, as memory reads can't change the machine.
+    pub attribute_reset: std::cell::Cell<bool>,
     /// The PCI bus's configuration address, on `Adapter::S3` or with the
     /// 3dfx card.
     pub pci: crate::pci::Pci,
@@ -366,6 +373,8 @@ impl Bus {
             vga: crate::video::vga::VgaCard::new(),
             vbe: crate::video::vbe::Vbe::new(),
             s3_engine: crate::video::s3::engine::Engine::new(),
+            virge: Default::default(),
+            attribute_reset: Default::default(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
             ide: [None, None],
@@ -1077,7 +1086,7 @@ impl Bus {
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
         if let Some(port) = self.s3_mmio(addr) {
-            return self.s3_peek(port, 1) as u8;
+            return self.mmio_peek(port, 1) as u8;
         }
         if addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS && addr >= ADDR_VGA_GRAPHICS {
             // VESA modes: the window onto the bank of video memory.
@@ -1147,7 +1156,7 @@ impl Bus {
             return false;
         }
         if let Some(port) = self.s3_mmio(addr) {
-            self.engine_write(port, value as u32, 1);
+            self.mmio_write(port, value as u32, 1);
             return true;
         }
         if addr >= ADDR_VGA_GRAPHICS && addr < ADDR_VGA_GRAPHICS + SIZE_GRAPHICS {
@@ -1296,7 +1305,7 @@ impl Bus {
             return true;
         }
         if let Some(port) = self.s3_mmio(addr) {
-            self.engine_write(port, value as u32, 2);
+            self.mmio_write(port, value as u32, 2);
             return true;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1326,7 +1335,7 @@ impl Bus {
             return u16::from_le_bytes([self.vbe.vram[offset], self.vbe.vram[offset + 1]]);
         }
         if let Some(port) = self.s3_mmio(addr) {
-            return self.s3_peek(port, 2) as u16;
+            return self.mmio_peek(port, 2) as u16;
         }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_16(offset);
@@ -1354,7 +1363,7 @@ impl Bus {
             return u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
         }
         if let Some(port) = self.s3_mmio(addr) {
-            return self.s3_peek(port, 4);
+            return self.mmio_peek(port, 4);
         }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_32(offset);
@@ -1378,7 +1387,7 @@ impl Bus {
             return;
         }
         if let Some(port) = self.s3_mmio(addr) {
-            self.engine_write(port, value, 4);
+            self.mmio_write(port, value, 4);
             return;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -2055,6 +2064,9 @@ impl Bus {
     }
 
     fn write_port(&mut self, port: u16, value: u8) {
+        if self.attribute_reset.take() {
+            self.vga.attribute_flip_flop = false;
+        }
         match port {
             // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
@@ -2382,6 +2394,9 @@ impl Bus {
     }
 
     fn read_port(&mut self, port: u16) -> u8 {
+        if self.attribute_reset.take() {
+            self.vga.attribute_flip_flop = false;
+        }
         match port {
             p if self.ide_claims(p) => self.ide_read(p),
             p if self.ne2000_claims(p) => self.ne2000_read(p),
@@ -2555,6 +2570,9 @@ impl Bus {
         }
         let now = self.clock.now_ns();
         if self.vga.retrace_began(now) {
+            if self.virge() {
+                self.virge.set_status(crate::video::s3::virge::STAT_VSY);
+            }
             let screen = crate::autospeed::screen_bytes(self);
             self.activity.set_screen(screen);
             self.settle_register_mode();

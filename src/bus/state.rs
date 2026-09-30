@@ -18,6 +18,7 @@ const DPMI_VERSION: u16 = 2;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
+const VIRGE_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -76,6 +77,7 @@ impl Bus {
             vga,
             vbe,
             s3_engine,
+            virge,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -147,6 +149,7 @@ impl Bus {
             audio_peak: _,
             audio_underruns: _,
             unhandled_writes: _,
+            attribute_reset: _,
             log_hook: _,
             audio_hook: _,
         } = self;
@@ -165,6 +168,11 @@ impl Bus {
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
+        // An S3 ViRGE's engines, only on one, so other states load as they
+        // did.
+        if vga.adapter.is_virge() {
+            w.section(b"VIRG", VIRGE_VERSION, |w| virge.save(w));
+        }
         w.section(b"DOS ", DOS_VERSION, |w| {
             save_all!(w; xms, mouse, mscdex, disk_io);
             save_device(ems, w);
@@ -263,6 +271,7 @@ impl Bus {
             vga,
             vbe,
             s3_engine,
+            virge,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -323,6 +332,7 @@ impl Bus {
             audio_peak: _,
             audio_underruns: _,
             unhandled_writes: _,
+            attribute_reset: _,
             log_hook: _,
             audio_hook: _,
         } = self;
@@ -348,6 +358,10 @@ impl Bus {
         );
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        *virge = Default::default();
+        if r.next_is(b"VIRG") {
+            virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;
+        }
         // The drives before the sound: the CD playing is in one.
         let mut section = r.section(b"DOS ", DOS_VERSION)?;
         load_all!(&mut section; xms, mouse, mscdex, disk_io);

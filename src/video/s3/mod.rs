@@ -9,7 +9,11 @@
 //! standard VGA modes keep the VGA's own planes, as on the plain SVGA.
 
 pub mod engine;
+pub mod s3d;
+pub mod streams;
+pub mod virge;
 
+use super::adapter::Adapter;
 use super::crt::CrtTiming;
 use super::vga::VgaCard;
 
@@ -93,13 +97,31 @@ impl S3 {
     /// Read a CRTC register from 19h up. `bank` is the window's bank and
     /// `start_high` bits 16-20 of the display start.
     pub fn read_crtc(&mut self, index: u8, vga: &VgaCard, bank: u32, start_high: u8) -> u8 {
+        // Reading the cursor mode starts both colour stacks over.
+        if index == 0x45 {
+            self.fg_at = 0;
+            self.bg_at = 0;
+        }
+        self.peek_crtc(index, vga, bank, start_high)
+    }
+
+    /// A CRTC register from 19h up as `read_crtc` reads it, without what
+    /// reading it does.
+    pub fn peek_crtc(&self, index: u8, vga: &VgaCard, bank: u32, start_high: u8) -> u8 {
+        let adapter = vga.adapter;
         match index {
             // The attribute controller's index and whether its palette
             // address source bit is set.
             0x24 | 0x26 => 0x20 | (vga.attribute_index & 0x1F),
-            // Device ID (8811h), revision, chip ID.
-            0x2D => 0x88,
-            0x2E => 0x11,
+            // Device ID (the PCI one: 8811h, 5631h for the ViRGE, 883Dh for
+            // the ViRGE/VX), revision, chip ID. S3's drivers check they
+            // match the PCI ID.
+            0x2D => if adapter == Adapter::S3Virge { 0x56 } else { 0x88 },
+            0x2E => match adapter {
+                Adapter::S3Virge => 0x31,
+                Adapter::S3VirgeVx => 0x3D,
+                _ => 0x11,
+            },
             0x2F => 0x00,
             0x30 => 0xE1,
             0x35 => self.crtc[0x35] & 0xF0 | (bank & 0x0F) as u8,
@@ -108,12 +130,7 @@ impl S3 {
             // Not interlaced.
             0x42 => 0x0D,
             0x43 => self.crtc[0x43] | (self.offset_high & 1) << 2,
-            // Reading the cursor mode starts both colour stacks over.
-            0x45 => {
-                self.fg_at = 0;
-                self.bg_at = 0;
-                self.crtc[0x45] | 0xA0
-            }
+            0x45 => self.crtc[0x45] | 0xA0,
             0x4A => self.cursor_fg[self.fg_at as usize & 3],
             0x4B => self.cursor_bg[self.bg_at as usize & 3],
             0x51 => {
@@ -197,6 +214,19 @@ impl S3 {
         }
     }
 
+    /// A sequencer register as `read_seq` reads it, without moving SR17's
+    /// sequence on.
+    pub fn peek_seq(&self, index: u8) -> u8 {
+        if index > 0x08 && self.seq[0x08] != 0x06 {
+            return if index < 0x1B { 0 } else { index };
+        }
+        match index {
+            0x17 => [0x7B, 0xC0, 0x00, 0xDA][self.sr17 as usize],
+            0x08..=0x1F => self.seq[index as usize],
+            _ => 0,
+        }
+    }
+
     pub fn write_seq(&mut self, index: u8, value: u8) {
         if index > 0x08 && self.seq[0x08] != 0x06 {
             return;
@@ -254,10 +284,11 @@ impl S3 {
         self.format(vga).is_some()
     }
 
-    /// The linear frame buffer's address, if it is enabled (CR58 bit 4):
-    /// CR59 and CR5A's, aligned to the window's size (CR58 bits 0-1).
-    pub fn lfb_base(&self) -> Option<u32> {
-        if self.crtc[0x58] & 0x10 == 0 {
+    /// The linear frame buffer's address, if it is enabled (CR58 bit 4,
+    /// or on a ViRGE `enabled`, from MM850C bit 4): CR59 and CR5A's,
+    /// aligned to the window's size (CR58 bits 0-1).
+    pub fn lfb_base(&self, enabled: bool) -> Option<u32> {
+        if self.crtc[0x58] & 0x10 == 0 && !enabled {
             return None;
         }
         let size = match self.crtc[0x58] & 0x03 {

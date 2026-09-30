@@ -1514,7 +1514,7 @@ impl DebugHub {
                 // An S3's extended CRTC registers (30h-6Fh, a row of 16
                 // each) and its hardware cursor.
                 "voodoo": cpu.bus.voodoo_status(),
-                "s3": (cpu.bus.vga.adapter == crate::video::adapter::Adapter::S3).then(|| {
+                "s3": cpu.bus.vga.adapter.is_s3().then(|| {
                     let s3 = &cpu.bus.vga.s3;
                     json!({
                         "crtc": (0x30..0x70usize).step_by(16).map(|row| {
@@ -1524,6 +1524,10 @@ impl DebugHub {
                             "x": c.x, "y": c.y, "skip_x": c.skip_x, "skip_y": c.skip_y,
                             "address": format!("{:X}", c.address), "x11": c.x11,
                         })),
+                        // A ViRGE's engines: the commands they ran, and the
+                        // last 3D command.
+                        // A ViRGE's engines.
+                        "virge": cpu.bus.vga.adapter.is_virge().then(|| virge_status(&cpu.bus.virge)),
                     })
                 }),
                 // The display timing programs see through port 3DAh.
@@ -2182,3 +2186,15 @@ mod tests {
     }
 }
 
+/// A ViRGE's engines for `/api/status`: the commands they ran, the last 3D
+/// command, the status and the overlay.
+fn virge_status(v: &crate::video::s3::virge::Virge) -> serde_json::Value {
+    json!({
+        "bitblts": v.counts[0], "rects": v.counts[1], "lines": v.counts[2], "polygons": v.counts[3],
+        "lines_3d": v.s3d.lines, "triangles": v.s3d.triangles,
+        "cmd_3d": format!("{:08X}", v.s3d.tri[0x40]),
+        "status": format!("{:04X}", v.status()), "advfunc": format!("{:02X}", v.advfunc),
+        "transfer": v.transfer.active, "command_dma": v.dma.enable != 0,
+        "overlay": v.streams.overlay().map(|o| format!("{:?}", o)),
+    })
+}

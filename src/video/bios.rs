@@ -206,8 +206,14 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     bus.write_rom(0xC0000, &[0x55, 0xAA, 0x40]);
     bus.load_bytes(0xC001E, b"IBM VGA");
     // An S3's BIOS says which chip it is for.
-    let s3 = setup.adapter == Adapter::S3;
-    bus.write_rom(0xC003F, if s3 { b"S3 86C764\0" } else { &[0; 10] });
+    let s3 = setup.adapter.is_s3();
+    let chip: &[u8; 10] = match setup.adapter {
+        Adapter::S3 => b"S3 86C764\0",
+        Adapter::S3Virge => b"S3 86C325\0",
+        Adapter::S3VirgeVx => b"S3 86C988\0",
+        _ => &[0; 10],
+    };
+    bus.write_rom(0xC003F, chip);
     bus.vbe.lfb_base = if s3 { None } else { Some(super::vbe::LFB_BASE as u32) };
     install_fonts(bus);
 }
