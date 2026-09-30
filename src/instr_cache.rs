@@ -86,6 +86,9 @@ pub struct InstrCache {
     slots: Box<[Slot]>,
     mask: usize,
     bytes_slots: Box<[BytesSlot]>,
+    /// The bytes each slot's instruction was decoded from, beside the slots
+    /// as only a miss looks at them (see `decode`).
+    code: Box<[[u8; 16]]>,
     /// Lookups served from the cache, and lookups that had to decode.
     pub hits: u64,
     pub misses: u64,
@@ -99,6 +102,7 @@ impl Default for InstrCache {
             slots: Box::new([]),
             mask: 0,
             bytes_slots: Box::new([]),
+            code: Box::new([]),
             hits: 0,
             misses: 0,
         }
@@ -117,6 +121,7 @@ impl InstrCache {
             slots,
             mask: n - 1,
             bytes_slots: vec![empty; BYTES_SLOTS].into_boxed_slice(),
+            code: vec![[0; 16]; n].into_boxed_slice(),
             hits: 0,
             misses: 0,
         }
@@ -146,9 +151,12 @@ impl InstrCache {
         Some((&slot.instr, slot.handler, slot.version & SIMPLE != 0))
     }
 
-    /// Fill the slot of the instruction at `phys_ip` (see `get`) with what
-    /// `decode` decodes, and return it. Kept out of line, off the path of
-    /// the hits.
+    /// Fill the slot of the instruction at `phys_ip` (see `get`), whose
+    /// bytes `ram` holds, with what `decode` decodes, and return it. Where
+    /// the slot has the instruction and only its page generation changed,
+    /// from a write to other bytes near it (a program's variables often
+    /// lie right beside its code), and its bytes are still the same, it is
+    /// kept as it is. Kept out of line, off the path of the hits.
     #[cold]
     #[inline(never)]
     pub fn decode(
@@ -157,14 +165,27 @@ impl InstrCache {
         ip: u32,
         code32: bool,
         page_gen: u32,
+        ram: &[u8],
         decode: impl FnOnce(&mut Instruction),
     ) -> Decoded<'_> {
         let idx = self.index(phys_ip);
         let slot = &mut self.slots[idx];
+        let addr = (phys_ip as u64) << 32 | ip as u64;
+        let len = slot.instr.len();
+        if slot.addr == addr
+            && slot.version & 1 == code32 as u64
+            && !slot.instr.is_invalid()
+            && ram[phys_ip..phys_ip + len] == self.code[idx][..len]
+        {
+            slot.version = (page_gen as u64) << 1 | slot.version & (SIMPLE | 1);
+            self.hits += 1;
+            return (&slot.instr, slot.handler, slot.version & SIMPLE != 0);
+        }
         decode(&mut slot.instr);
+        self.code[idx].copy_from_slice(&ram[phys_ip..phys_ip + 16]);
         let fast = fast::select(&slot.instr);
         slot.handler = fast.unwrap_or(execute_instruction);
-        slot.addr = (phys_ip as u64) << 32 | ip as u64;
+        slot.addr = addr;
         slot.version = (page_gen as u64) << 1 | code32 as u64 | if fast.is_some() { SIMPLE } else { 0 };
         self.misses += 1;
         (&slot.instr, slot.handler, fast.is_some())

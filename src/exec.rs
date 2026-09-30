@@ -1028,7 +1028,7 @@ fn decode_cached<'a>(
     page_gen: u32,
 ) -> crate::instr_cache::Decoded<'a> {
     let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
-    fetch.cache.decode(phys_ip, eip, code32, page_gen, |slot| {
+    fetch.cache.decode(phys_ip, eip, code32, page_gen, fetch.ram, |slot| {
         let decoder = if code32 { decoder32 } else { decoder16 };
         decoder.set_position(phys_ip).unwrap();
         decoder.set_ip(eip as u64);
