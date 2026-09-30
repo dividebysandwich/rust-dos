@@ -363,3 +363,38 @@ fn host_folders_go_in_the_cd_rom_drive_as_discs() {
     cpu.load_shell();
     assert!(cpu.bus.disk.boot_cd_image(5).is_none());
 }
+
+/// A host directory on D: is a booted system's hard disk after its own
+/// ones, and what the system wrote on it is in the directory when it's
+/// off; while it runs, the drive stays.
+#[test]
+fn host_directories_are_hard_disks_of_a_booted_system() {
+    let mut cpu = machine("shared");
+    let folder = std::fs::canonicalize("target/test_boot/shared").unwrap().join("share");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("From the host.txt"), b"host").unwrap();
+    cpu.bus.mount_drive(3, &folder, MountOptions::default(), false).unwrap();
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    assert_eq!(cpu.bus.read_8(HARD_DISKS), 2, "two hard disks");
+    assert_eq!(rust_dos::boot::unit_drive(&cpu.bus, 0x81), Some(3));
+    let channel = cpu.bus.ide[0].as_ref().expect("the primary channel");
+    assert!(matches!(channel.devices, [Some(rust_dos::ide::Device::Ata(_)), Some(rust_dos::ide::Device::Ata(_))]));
+    assert!(cpu.bus.unmount_drive(3).is_err());
+
+    // The system writes a file.
+    let disk = cpu.bus.disk.bios_image(3).unwrap();
+    let (start, sectors) = disk.fat_volume().unwrap();
+    let volume = rust_dos::fat::FatVolume::open(disk, start, sectors).unwrap();
+    let file = volume.create_long(&[], "Written by the guest.txt", 0).unwrap();
+    volume.write(file.at.unwrap(), 0, b"guest").unwrap();
+    assert!(cpu.bus.sync_shared(None)[0].ends_with("1 written"));
+    assert_eq!(std::fs::read(folder.join("Written by the guest.txt")).unwrap(), b"guest");
+    volume.remove(&["FROMTH~1.TXT"]).unwrap();
+
+    cpu.load_shell();
+    assert!(!folder.join("From the host.txt").exists());
+    assert!(!cpu.bus.disk.is_shared(3));
+    assert!(cpu.bus.disk_notices.iter().any(|n| n.contains("1 deleted")));
+    cpu.bus.unmount_drive(3).unwrap();
+}

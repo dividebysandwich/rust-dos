@@ -78,6 +78,7 @@ pub mod savestate;
 pub mod sb;
 pub mod serial;
 pub mod shell;
+pub mod shared_disk;
 pub mod sn76489;
 pub mod sound;
 pub mod stats;

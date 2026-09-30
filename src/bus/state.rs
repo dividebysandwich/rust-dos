@@ -110,6 +110,7 @@ impl Bus {
             dos_version: _,
             ide_hard_disks: _,
             boot_cdrom: _,
+            disk_notices: _,
             // Worked out again after a load.
             sb_irq: _,
             irq_ready: _,
@@ -305,6 +306,7 @@ impl Bus {
             dos_version: _,
             ide_hard_disks: _,
             boot_cdrom: _,
+            disk_notices: _,
             sb_irq: _,
             irq_ready: _,
             page_gen: _,

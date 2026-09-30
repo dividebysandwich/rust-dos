@@ -1072,6 +1072,9 @@ fn main() -> Result<(), String> {
         for notice in cpu.bus.printer_notices() {
             osd.show(notice);
         }
+        for notice in std::mem::take(&mut cpu.bus.disk_notices) {
+            osd.show(notice);
+        }
 
         // DOSCONFIG asks for the settings window.
         if std::mem::take(&mut cpu.bus.config_ui_requested) && !ui.is_open() {
@@ -1312,6 +1315,12 @@ fn main() -> Result<(), String> {
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {
         eprintln!("[PRINTER] {}", notice);
+    }
+    // A booted system still running: what it wrote on the host folders it
+    // has as disks goes into them, but for deletions, which its caches may
+    // not have finished.
+    for line in cpu.bus.sync_shared(None) {
+        eprintln!("[BOOT] {}", line);
     }
     // Recordings still going are finished, so their files play.
     if let Some(video) = video_recording

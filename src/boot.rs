@@ -7,9 +7,10 @@
 //! floppy drives A: and B:, with or without a disk in them, and 80h up the
 //! hard disk images in drive-letter order. Disks mounted by number take
 //! their units first: 0 and 1 are 00h and 01h, 2 and 3 are 80h and 81h
-//! (`DiskController::hard_disk_units`). Host directories are the
-//! built-in DOS's alone; the first CD-ROM drive with an image is an ATAPI
-//! drive on the secondary IDE channel (`ide`). The operating system has the
+//! (`DiskController::hard_disk_units`). Host directories on D: and up
+//! become hard disks after those (`shared_disk`), and the first CD-ROM
+//! drive with an image or a host directory is an ATAPI drive on the
+//! secondary IDE channel (`ide`). The operating system has the
 //! machine until it turns it off or its disk can't be booted any more;
 //! then the built-in DOS starts again (`Cpu::load_shell`).
 
@@ -41,9 +42,12 @@ pub const FLOPPY_UNITS: u8 = 2;
 const BOOT_SECTOR: usize = 0x7C00;
 
 /// The drives with hard disk images, which are BIOS units 80h up in this
-/// order.
+/// order: the images, then the disks made of shared host directories.
 pub fn hard_disk_drives(bus: &Bus) -> Vec<u8> {
-    bus.disk.hard_disk_units(|drive| bus.disk.bios_image(drive).is_some())
+    let mut drives =
+        bus.disk.hard_disk_units(|drive| bus.disk.bios_image(drive).is_some() && !bus.disk.is_shared(drive));
+    drives.extend(bus.disk.shared_drives());
+    drives
 }
 
 /// The drive behind BIOS unit `unit` of a booted machine, if it has one:
@@ -173,6 +177,11 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     let name = unit_drive(&cpu.bus, unit).map_or("?".to_string(), drive_name);
     cpu.program = format!("BOOT {}", name);
     cpu.bus.disk.close_all_files();
+    // Host directories shared with the system become hard disks, before
+    // the journals start: what goes on them isn't the system's writing.
+    for line in cpu.bus.disk.prepare_shared_disks() {
+        cpu.bus.log_string(&format!("[BOOT] {}", line));
+    }
     cpu.bus.boot = Some(BootState { unit, ..Default::default() });
     // Its states and rewind take its disks back with its memory.
     cpu.bus.disk.keep_journals(true);

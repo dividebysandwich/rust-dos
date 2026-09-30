@@ -75,6 +75,7 @@ fn router(state: AppState) -> Router {
         .route("/api/input/{kind}", post(input_post))
         .route("/api/drive", get(drives))
         .route("/api/drive/swap", post(swap_images))
+        .route("/api/drive/sync", post(sync_shared))
         .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
         .route("/api/state/{action}", post(state_file))
         .route("/api/speed", post(speed))
@@ -435,6 +436,10 @@ struct MountBody {
 
 async fn swap_images(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::SwapImages, DEFAULT_TIMEOUT).await
+}
+
+async fn sync_shared(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::SyncShared, DEFAULT_TIMEOUT).await
 }
 
 async fn mount(State(s): State<AppState>, Path(letter): Path<String>, body: Bytes) -> ApiResult {
@@ -993,7 +998,10 @@ DRIVES
                    "images":["disk2.img",...] adds images to step through.
                    Replacing closes that drive's open files; with no options
                    a remount keeps the drive's type and label.
-  POST   /api/drive/swap                           next image in every drive
+  POST   /api/drive/swap                           next image in every drive; a booted
+                   system's CD made from a host folder is made again
+  POST   /api/drive/sync                           copy what a booted system changed on
+                   the disks of shared host folders into them (no deletions)
                    mounted from a list of images (Ctrl+F4)
   DELETE /api/drive/D                              unmount (not C: or Z:)
 

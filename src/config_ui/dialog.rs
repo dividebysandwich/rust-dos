@@ -109,8 +109,10 @@ pub struct MountDialog {
     original: String,
     more_images: Vec<PathBuf>,
     geometry: Option<Chs>,
-    /// Its IDE slot for a booted system, which stays too.
+    /// Its IDE slot for a booted system, and whether a host directory is
+    /// shared with one, which stay too.
     ide: Option<crate::ide::IdeSlot>,
+    share: Option<bool>,
     /// The mount it changes.
     current: Option<MountSpec>,
 }
@@ -136,6 +138,7 @@ impl MountDialog {
             more_images: Vec::new(),
             geometry: None,
             ide: None,
+            share: None,
             current: None,
         })
     }
@@ -164,6 +167,7 @@ impl MountDialog {
             more_images: opts.more_images,
             geometry: opts.geometry,
             ide: opts.ide,
+            share: opts.share,
             current: info.mount.clone(),
         }
     }
@@ -324,6 +328,7 @@ impl MountDialog {
                 geometry: if unchanged { self.geometry } else { None },
                 ide: self.ide,
                 boot,
+                share: self.share,
             },
         })
     }
@@ -432,6 +437,7 @@ mod tests {
             geometry: None,
             ide: None,
             boot: false,
+            share: None,
         };
         let mut d = MountDialog::change(&info, None);
         assert_eq!((d.path.text(), d.label.text(), d.read_only, d.kind), ("/x".into(), "D1".into(), true, DriveKind::Floppy));

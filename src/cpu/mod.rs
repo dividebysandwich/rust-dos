@@ -1126,6 +1126,12 @@ impl Cpu {
         // A system booted from a disk turned the machine off: DOS starts
         // over on it.
         if self.bus.boot.take().is_some() {
+            // What it changed on the host folders it had as disks goes
+            // into them.
+            for line in self.bus.disk.finish_shared_disks() {
+                self.bus.log_string(&format!("[BOOT] {}", line));
+                self.bus.disk_notices.push(line);
+            }
             self.bus.disk.keep_journals(false);
             self.bus.restore_dos_machine();
             self.resident_end = crate::mcb::first_free(&self.bus);

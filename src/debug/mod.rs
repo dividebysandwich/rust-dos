@@ -165,6 +165,9 @@ pub enum Cmd {
     },
     Unmount { drive: String },
     SwapImages,
+    /// Copy what a booted system changed on its shared host folders'
+    /// disks into the folders.
+    SyncShared,
     /// Save the machine to a save state file, or load one, which the front
     /// end does (`take_state_requests`).
     SaveState { path: String },
@@ -1404,6 +1407,7 @@ impl DebugHub {
             }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
             Cmd::Drives => Reply::Json(drives_json(cpu)),
+            Cmd::SyncShared => Reply::Json(json!({"messages": cpu.bus.sync_shared(None)})),
             Cmd::SwapImages => {
                 let messages = cpu.bus.swap_images();
                 for message in &messages {

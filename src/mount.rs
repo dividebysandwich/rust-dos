@@ -121,6 +121,8 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
             "-ro" => args.opts.read_only = true,
             "-pr" => args.config_relative = true,
             "-boot" => args.opts.boot = true,
+            "-share" => args.opts.share = Some(true),
+            "-noshare" => args.opts.share = Some(false),
             // DOSBox-X's IDE slot for the image (`-ide 2m`: secondary
             // master), which may follow; without one, or `auto`, it goes
             // where a booted system has it by default. There are two
@@ -546,6 +548,11 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
     if spec.opts.boot {
         value.push_str(" -boot");
     }
+    match spec.opts.share {
+        Some(true) => value.push_str(" -share"),
+        Some(false) => value.push_str(" -noshare"),
+        None => {}
+    }
     value
 }
 
@@ -825,6 +832,8 @@ mod tests {
                 },
             },
             MountSpec { drive: 2, path: "/hd/win95.img".into(), opts: MountOptions { boot: true, ..Default::default() } },
+            MountSpec { drive: 3, path: "/home/u/share".into(), opts: MountOptions { share: Some(false), ..Default::default() } },
+            MountSpec { drive: 2, path: "/home/u/dos".into(), opts: MountOptions { share: Some(true), ..Default::default() } },
         ];
         for spec in specs {
             let value = mount_spec_value(&spec, Some(home));

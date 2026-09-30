@@ -106,6 +106,9 @@ pub struct Bus {
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,
+    /// What the user should hear of the host folders shared with a booted
+    /// system (`shared_disk`): copies back and failures, for the screen.
+    pub disk_notices: Vec<String>,
     /// Upper memory blocks, if DOS has them (see mcb.rs).
     pub umb: Option<crate::mcb::Umb>,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
@@ -347,6 +350,7 @@ impl Bus {
             dos_version: crate::config::DosVersion::default(),
             ide_hard_disks: true,
             boot_cdrom: true,
+            disk_notices: Vec::new(),
             umb: None,
             lpt_dac: None,
             printer: None,
@@ -541,6 +545,7 @@ impl Bus {
         opts: MountOptions,
         replace: bool,
     ) -> Result<std::path::PathBuf, String> {
+        self.shared_in_use(drive)?;
         let boot = opts.boot;
         // A folder mounted on the letter of a booted system's CD-ROM drive
         // goes in as a disc made from it.
@@ -798,8 +803,33 @@ impl Bus {
         self.ide_media_changed(drive);
     }
 
+    /// Copy what the booted system changed on the disks made of shared
+    /// host directories into them (`drive`'s, or every one's), as it runs.
+    /// Returns what happened, a line for each drive.
+    pub fn sync_shared(&mut self, drive: Option<u8>) -> Vec<String> {
+        let lines = self.disk.sync_shared(drive, false);
+        for line in &lines {
+            self.log_string(&format!("[BOOT] {}", line));
+        }
+        lines
+    }
+
+    /// Why `drive` can't be unmounted or mounted anew: it is a booted
+    /// system's hard disk made of a host directory.
+    fn shared_in_use(&self, drive: u8) -> Result<(), String> {
+        match crate::boot::drive_unit(self, drive) {
+            Some(unit) if self.boot.is_some() && self.disk.is_shared(drive) => Err(format!(
+                "Drive {}: is the booted system's hard disk {:02X}h; shut it down first",
+                crate::disk::drive_letter(drive),
+                unit
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Unmount a DOS drive and refresh the BIOS view of the drive set.
     pub fn unmount_drive(&mut self, drive: u8) -> Result<(), String> {
+        self.shared_in_use(drive)?;
         let result = self.disk.unmount(drive);
         self.cdaudio.stop_drive(drive);
         self.ide_media_changed(drive);

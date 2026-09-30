@@ -464,7 +464,20 @@ impl DiskImage {
         if bytes < 4 << 20 {
             return Err("The disk is too small".to_string());
         }
-        let disk = Self::from_memory(name, MemoryImage::new(bytes), false, None, false)?;
+        Self::from_memory(name, MemoryImage::new(bytes), false, None, false)?.partitioned(label)
+    }
+
+    /// An empty hard disk of the geometry `chs` held in memory, as
+    /// `blank_hard_disk` makes one.
+    pub fn blank_hard_disk_chs(name: &str, chs: Chs, label: Option<&str>) -> Result<Self, String> {
+        let bytes = chs.total() * SECTOR_SIZE as u64;
+        Self::from_memory(name, MemoryImage::new(bytes), false, Some(chs), false)?.partitioned(label)
+    }
+
+    /// The disk with a partition table with one FAT16 partition over the
+    /// whole cylinders, formatted.
+    fn partitioned(self, label: Option<&str>) -> Result<Self, String> {
+        let disk = self;
         let g = disk.geometry;
         let per_cylinder = g.heads as u64 * g.sectors as u64;
         let start = g.sectors as u64;

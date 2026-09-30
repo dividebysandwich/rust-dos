@@ -375,6 +375,10 @@ pub struct MountOptions {
     /// The disk image boots when Rust-DOS starts (`-boot`). One drive at a
     /// time has it (`DiskController::set_boot_drive`).
     pub boot: bool,
+    /// A host directory on D: to Y: is a hard disk of a booted system
+    /// (`shared_disk`) unless this says no (`-noshare`); C: only with yes
+    /// (`-share`). None goes by the letter.
+    pub share: Option<bool>,
 }
 
 impl Default for MountOptions {
@@ -387,6 +391,7 @@ impl Default for MountOptions {
             geometry: None,
             ide: None,
             boot: false,
+            share: None,
         }
     }
 }
@@ -454,6 +459,9 @@ struct Drive {
     /// For a host folder mounted as a CD, the disc made from it that a
     /// booted system's CD-ROM drive reads (`prepare_boot_cds`).
     boot_cd: Option<Rc<CdImage>>,
+    /// For a host directory shared with a booted system, the disk made of
+    /// it (`prepare_shared_disks`).
+    shared: Option<crate::shared_disk::SharedDisk>,
 }
 
 impl Drive {
@@ -492,8 +500,14 @@ impl Drive {
         }
     }
 
-    /// The floppy or hard disk image in the drive, as the BIOS reads it.
+    /// The floppy or hard disk image in the drive, as the BIOS reads it:
+    /// the one mounted, or the disk made of a shared host directory.
     fn disk(&self) -> Option<&Rc<DiskImage>> {
+        self.mounted_disk().or(self.shared.as_ref().map(|s| &s.disk))
+    }
+
+    /// The floppy or hard disk image mounted in the drive.
+    fn mounted_disk(&self) -> Option<&Rc<DiskImage>> {
         match &self.storage {
             Storage::Fat(volume) => Some(volume.disk()),
             Storage::Raw(disk) => Some(disk),
@@ -715,6 +729,7 @@ impl DiskController {
             image: 0,
             media_changed: false,
             boot_cd: None,
+            shared: None,
         });
         drives[DRIVE_Z as usize] = Some(Self::memory_drive(z_files, DEFAULT_LABEL));
 
@@ -766,6 +781,7 @@ impl DiskController {
             image: 0,
             media_changed: false,
             boot_cd: None,
+            shared: None,
         }
     }
 
@@ -841,6 +857,7 @@ impl DiskController {
                 image: 0,
                 media_changed: true,
                 boot_cd: None,
+                shared: None,
             });
             return Ok(images.swap_remove(0));
         }
@@ -868,6 +885,7 @@ impl DiskController {
             image: 0,
             media_changed: floppy_drive,
             boot_cd: None,
+            shared: None,
         });
         Ok(canonical)
     }
@@ -1037,6 +1055,7 @@ impl DiskController {
             image: 0,
             media_changed: true,
             boot_cd: None,
+            shared: None,
         });
     }
 
@@ -1287,6 +1306,80 @@ impl DiskController {
         Ok(lines)
     }
 
+    /// Whether `drive` is a host directory a booted system gets as a hard
+    /// disk: D: to Y: unless its mount says `-noshare`, C: with `-share`.
+    pub fn is_shareable(&self, drive: u8) -> bool {
+        let Some(d) = self.drive(drive).filter(|d| d.kind == DriveKind::HardDisk && d.host_root().is_some()) else {
+            return false;
+        };
+        let share = d.mount.as_ref().and_then(|m| m.opts.share);
+        share.unwrap_or((DRIVE_C + 1..DRIVE_Z).contains(&drive))
+    }
+
+    /// Whether `drive` has a disk made of its host directory for a booted
+    /// system.
+    pub fn is_shared(&self, drive: u8) -> bool {
+        self.drive(drive).is_some_and(|d| d.shared.is_some())
+    }
+
+    /// The drives with disks made of their host directories, in
+    /// drive-letter order.
+    pub fn shared_drives(&self) -> Vec<u8> {
+        (0..LASTDRIVE).filter(|&d| self.is_shared(d)).collect()
+    }
+
+    /// Make the disks of the host directories shared with a booted system
+    /// that have none yet (a restart keeps what the system wrote). Returns
+    /// what the log should say.
+    pub fn prepare_shared_disks(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for drive in 0..LASTDRIVE {
+            if !self.is_shareable(drive) || self.is_shared(drive) {
+                continue;
+            }
+            let d = self.drives[drive as usize].as_mut().expect("a shareable drive");
+            let root = d.host_root().expect("a host directory").to_path_buf();
+            match crate::shared_disk::SharedDisk::build(&root) {
+                Ok((shared, skipped)) => {
+                    lines.push(format!("Drive {}: is a hard disk made from {}", drive_letter(drive), root.display()));
+                    lines.extend(skipped.into_iter().map(|s| format!("Drive {}: left off the disk: {}", drive_letter(drive), s)));
+                    d.shared = Some(shared);
+                }
+                Err(e) => lines.push(format!("Drive {}: can't be shared: {}", drive_letter(drive), e)),
+            }
+        }
+        lines
+    }
+
+    /// Copy what a booted system changed on the shared disk of `drive`, or
+    /// of every drive, into the host directories. `last` is the copy at
+    /// its shutdown, which deletes files too. Returns a line for each.
+    pub fn sync_shared(&mut self, drive: Option<u8>, last: bool) -> Vec<String> {
+        let mut lines = Vec::new();
+        for d in 0..LASTDRIVE {
+            if drive.is_some_and(|only| only != d) {
+                continue;
+            }
+            let Some(shared) = self.drives[d as usize].as_mut().and_then(|d| d.shared.as_mut()) else { continue };
+            let report = shared.sync(last);
+            lines.push(format!("Drive {}: {} copied to {}: {}", drive_letter(d), if last { "was" } else { "is" }, shared.root.display(), report.summary()));
+            lines.extend(report.conflicts.iter().map(|c| format!("Drive {}: {} changed on both sides", drive_letter(d), c)));
+            lines.extend(report.errors.iter().map(|e| format!("Drive {}: {}", drive_letter(d), e)));
+        }
+        lines
+    }
+
+    /// At a booted system's shutdown: copy what it changed on the shared
+    /// disks into the host directories, and let go of the disks. Returns
+    /// what the log should say.
+    pub fn finish_shared_disks(&mut self) -> Vec<String> {
+        let lines = self.sync_shared(None, true);
+        for d in self.drives.iter_mut().flatten() {
+            d.shared = None;
+        }
+        lines
+    }
+
     /// Let go of the discs made from host folders: the built-in DOS reads
     /// the folders themselves.
     pub fn drop_boot_cds(&mut self) {
@@ -1350,7 +1443,7 @@ impl DiskController {
             image: d
                 .image()
                 .map(|image| image.path().to_path_buf())
-                .or_else(|| d.disk().map(|disk| disk.path().to_path_buf())),
+                .or_else(|| d.mounted_disk().map(|disk| disk.path().to_path_buf())),
             images: d.images.clone(),
             image_index: d.image,
             label: d.label.clone(),
@@ -2803,19 +2896,7 @@ impl DiskController {
                 continue;
             }
 
-            let sys_time = metadata.modified().unwrap_or(std::time::SystemTime::now());
-            let datetime: DateTime<Local> = sys_time.into();
-            let dos_time = ((datetime.hour() as u16) << 11)
-                | ((datetime.minute() as u16) << 5)
-                | ((datetime.second() as u16) / 2);
-            let year = datetime.year();
-            let dos_date = if year < 1980 {
-                0x0021
-            } else {
-                (((year - 1980) as u16) << 9)
-                    | ((datetime.month() as u16) << 5)
-                    | (datetime.day() as u16)
-            };
+            let (dos_time, dos_date) = system_time_to_dos(metadata.modified().unwrap_or(std::time::SystemTime::now()));
 
             valid_entries.push(DosDirEntry {
                 filename: final_name,
@@ -2830,6 +2911,20 @@ impl DiskController {
 
         Ok(valid_entries)
     }
+}
+
+/// The packed DOS time and date of a host file time, in local time; 1 Jan
+/// 1980 for times before it.
+pub fn system_time_to_dos(at: std::time::SystemTime) -> (u16, u16) {
+    let datetime: DateTime<Local> = at.into();
+    let time = ((datetime.hour() as u16) << 11) | ((datetime.minute() as u16) << 5) | ((datetime.second() as u16) / 2);
+    let year = datetime.year();
+    let date = match year {
+        ..1980 => return (0, 0x0021),
+        2108.. => 127 << 9 | 12 << 5 | 31,
+        _ => (((year - 1980) as u16) << 9) | ((datetime.month() as u16) << 5) | (datetime.day() as u16),
+    };
+    (time, date)
 }
 
 /// The local time a packed DOS time and date stand for.

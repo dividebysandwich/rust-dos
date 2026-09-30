@@ -328,8 +328,11 @@ fn the_channel_comes_with_a_cd_image_and_goes() {
     assert!(bus.ide[1].is_some());
     bus.detach_ide();
     assert!(bus.ide[1].is_none());
-    // Without a CD image, no drive.
+    // Without a CD image, an empty drive, or with `boot_cdrom` off none.
     let mut plain = Bus::new(std::path::PathBuf::from("."));
+    plain.attach_ide();
+    assert!(plain.ide[1].is_some());
+    plain.boot_cdrom = false;
     plain.attach_ide();
     assert!(plain.ide[1].is_none());
 }
