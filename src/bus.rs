@@ -39,6 +39,11 @@ pub const GEN_SHIFT: usize = 6;
 pub(crate) const A20_MASK_OFFSET: usize = std::mem::offset_of!(Bus, a20_mask);
 pub(crate) const IRQ_READY_OFFSET: usize = std::mem::offset_of!(Bus, irq_ready);
 
+/// How long releasing the time slice lets pass at most, in PIT ticks:
+/// about 50 us, what the mode switches of a DOS extender's call to real
+/// mode and back take.
+const IDLE_SLICE_TICKS: u64 = 60;
+
 pub struct Bus {
     ram: Vec<u8>, // System RAM, allocated once
     pub video_mode: VideoMode, // Current State
@@ -2041,6 +2046,18 @@ impl Bus {
             sb.irq16 = false;
         }
         self.sync_sb_irq();
+    }
+
+    /// A program released its time slice (INT 2Fh AX=1680h): let up to
+    /// `IDLE_SLICE_TICKS` of emulated time pass, to the next device event
+    /// at most, so the interrupts that come while it idles come here and
+    /// not in the code it runs between its calls. HX's Win32 console takes
+    /// a keystroke twice when the keyboard interrupt lands between its
+    /// check of its own queue and of the BIOS's buffer.
+    pub fn release_time_slice(&mut self) {
+        let now = self.clock.now_ticks();
+        let until = self.next_event().map_or(now + IDLE_SLICE_TICKS, |t| t.min(now + IDLE_SLICE_TICKS));
+        self.clock.stall_to(until);
     }
 
     /// Start or stop the clock's periodic interrupt as its status

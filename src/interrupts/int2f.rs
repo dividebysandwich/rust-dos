@@ -77,8 +77,13 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_di(crate::bios::IPX_ENTRY);
         }
         // Release the time slice: the program waits (for `cycles=auto`).
-        // No multitasker answers it, and the registers come back unchanged.
-        0x1680 => cpu.bus.activity.poll(),
+        // No multitasker answers it, and the registers come back unchanged,
+        // but a little time passes, as the mode switches to get here take
+        // (`Bus::release_time_slice`).
+        0x1680 => {
+            cpu.bus.activity.poll();
+            cpu.bus.release_time_slice();
+        }
         _ if cpu.get_ah() == 0x15 => super::mscdex::handle(cpu, cpu.get_al()),
         // Everything else (Windows 16xxh, ...) is not installed: the
         // registers come back unchanged.
