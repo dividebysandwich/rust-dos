@@ -915,3 +915,67 @@ fn a_client_moves_to_and_from_debug_and_control_registers() {
     assert_eq!(cpu.bus.read_32(psp as usize * 16 + R as usize), 0x1234_5678);
     assert_eq!(word(&cpu, psp, R + 4) & 1, 1);
 }
+
+#[test]
+fn a_client_allocates_linear_memory_at_an_address() {
+    // DPMI 1.0's 0504h, as HX's loader places a program whose relocations
+    // were stripped at its image base: the block at 400000h, the address
+    // taken a second time and one not page-aligned refused, the block
+    // resized with 0505h, freed, and taken again.
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, true, fail)?;
+        step(a, 4)?;
+        a.mov(ax, 0x0504)?;
+        a.mov(ebx, 0x40_0000)?;
+        a.mov(ecx, 0x1_0000)?;
+        a.mov(edx, 1)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(dword_ptr(R), ebx)?;
+        a.mov(dword_ptr(R + 4), esi)?;
+        step(a, 5)?;
+        a.mov(ax, 0x0504)?;
+        a.mov(ebx, 0x40_0000)?;
+        a.mov(ecx, 0x1000)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(R + 8), ax)?;
+        a.mov(ax, 0x0504)?;
+        a.mov(ebx, 0x50_0800)?;
+        a.mov(ecx, 0x1000)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(R + 10), ax)?;
+        step(a, 6)?;
+        a.mov(ax, 0x0505)?;
+        a.mov(esi, dword_ptr(R + 4))?;
+        a.mov(ecx, 0x2_0000)?;
+        a.xor(edx, edx)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(dword_ptr(R + 12), ebx)?;
+        step(a, 7)?;
+        a.mov(ax, 0x0502)?;
+        a.mov(di, word_ptr(R + 4))?;
+        a.mov(si, word_ptr(R + 6))?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(ax, 0x0504)?;
+        a.mov(ebx, 0x40_0000)?;
+        a.mov(ecx, 0x1000)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(dword_ptr(R + 16), ebx)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let (mut cpu, psp) = machine("linear", &[("T.COM", com(&[(0x100, main)]))], "T.COM");
+    assert!(run_to_exit(&mut cpu, 200), "the program didn't end (step {})", word(&cpu, psp, STEP));
+    assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", word(&cpu, psp, STEP));
+    let dword = |offset: u16| cpu.bus.read_32(psp as usize * 16 + offset as usize);
+    assert_eq!(dword(R), 0x40_0000);
+    assert_eq!(word(&cpu, psp, R + 8), 0x8012, "the address is taken");
+    assert_eq!(word(&cpu, psp, R + 10), 0x8025, "not page-aligned");
+    assert_eq!(dword(R + 12), 0x40_0000, "grown where it is");
+    assert_eq!(dword(R + 16), 0x40_0000);
+}

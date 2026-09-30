@@ -2,8 +2,9 @@
 //! DPMI 0.9 has them: LDT descriptors (00xxh), DOS memory (01xxh),
 //! interrupt vectors (02xxh), calls to real-mode code and callbacks from it
 //! (03xxh), the version (0400h), memory blocks (05xxh), page locking and
-//! physical mappings (06xxh-08xxh) and the virtual interrupt flag (09xxh).
-//! A failed call returns CF set and a DPMI 1.0 error code in AX.
+//! physical mappings (06xxh-08xxh) and the virtual interrupt flag (09xxh),
+//! with DPMI 1.0's linear memory blocks (0504h-0507h) on top. A failed call
+//! returns CF set and a DPMI 1.0 error code in AX.
 
 use super::{
     BIG, CALLBACKS, Callback, Client, Context, DATA3, EAX, EBX, ECX, EDI, EDX, ESI, ESP, F_TRANSLATE, Frame,
@@ -16,6 +17,7 @@ use crate::cpu::{Cpu, CpuFlags, CpuResult, Descriptor, Seg};
 /// DPMI 1.0 error codes.
 const UNSUPPORTED: u16 = 0x8001;
 const DESCRIPTOR_UNAVAILABLE: u16 = 0x8011;
+const LINEAR_MEMORY_UNAVAILABLE: u16 = 0x8012;
 const PHYSICAL_MEMORY_UNAVAILABLE: u16 = 0x8013;
 const CALLBACK_UNAVAILABLE: u16 = 0x8015;
 const HANDLE_UNAVAILABLE: u16 = 0x8016;
@@ -23,6 +25,7 @@ const INVALID_VALUE: u16 = 0x8021;
 const INVALID_SELECTOR: u16 = 0x8022;
 const INVALID_HANDLE: u16 = 0x8023;
 const INVALID_CALLBACK: u16 = 0x8024;
+const INVALID_LINEAR_ADDRESS: u16 = 0x8025;
 /// DOS's "insufficient memory".
 const DOS_NO_MEMORY: u16 = 0x0008;
 
@@ -353,6 +356,76 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             let i = client(cpu).memory.iter().position(|&(h, _, _)| h == handle).ok_or(INVALID_HANDLE)?;
             let base = resize_memory(cpu, i, size)?;
             set_pair(ctx, EBX, ECX, base);
+        }
+        // DPMI 1.0: allocate a block of ECX bytes at the linear address
+        // EBX, or anywhere for 0: its address in EBX, its handle in ESI.
+        // Without paging, linear addresses are physical ones and the
+        // memory is always committed (EDX bit 0). HX loads programs whose
+        // relocations were stripped at their image base this way.
+        0x0504 => {
+            let (at, size) = (ctx.gpr[EBX], ctx.gpr[ECX]);
+            if size == 0 {
+                return Err(INVALID_VALUE);
+            }
+            if at & 0xFFF != 0 {
+                return Err(INVALID_LINEAR_ADDRESS);
+            }
+            let base = if at == 0 {
+                cpu.bus.xms.take_dpmi(size, end).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?
+            } else if cpu.bus.xms.take_dpmi_at(at, size, end) {
+                at
+            } else {
+                return Err(LINEAR_MEMORY_UNAVAILABLE);
+            };
+            let len = size.div_ceil(0x1000) * 0x1000;
+            cpu.bus.fill_ram(base as usize..(base + len) as usize, 0);
+            let handle = cpu.bus.dpmi.next_handle;
+            cpu.bus.dpmi.next_handle = handle.wrapping_add(1).max(1);
+            client(cpu).memory.push((handle, base, len));
+            ctx.gpr[EBX] = base;
+            ctx.gpr[ESI] = handle;
+        }
+        // DPMI 1.0: resize the block ESI to ECX bytes: its address in EBX.
+        // With EDX bit 1, the EDI selectors listed at ES:EBX that pointed
+        // into the block follow it where it moved.
+        0x0505 => {
+            let (handle, size) = (ctx.gpr[ESI], ctx.gpr[ECX]);
+            if size == 0 {
+                return Err(INVALID_VALUE);
+            }
+            let i = client(cpu).memory.iter().position(|&(h, _, _)| h == handle).ok_or(INVALID_HANDLE)?;
+            let (_, old, old_len) = client(cpu).memory[i];
+            let base = resize_memory(cpu, i, size)?;
+            if base != old && ctx.gpr[EDX] & 0x02 != 0 {
+                let list = ctx.gpr[EBX];
+                for n in 0..ctx.gpr[EDI] & 0xFFFF {
+                    let selector = cpu.read_u16(Seg::ES, list.wrapping_add(n * 2)).map_err(|_| INVALID_VALUE)?;
+                    let Some(at) = selector_base(cpu, selector) else { continue };
+                    if (old..old + old_len).contains(&at) {
+                        let moved = at - old + base;
+                        with_desc(cpu, selector, |d| (d & !BASE_BITS) | (descriptor(moved, 0, 0, 0) & BASE_BITS))?;
+                    }
+                }
+            }
+            ctx.gpr[EBX] = base;
+        }
+        // DPMI 1.0: the attributes of ECX pages at offset EBX of block ESI,
+        // a word each into ES:EDX: committed and writable, all of them.
+        0x0506 => {
+            let handle = ctx.gpr[ESI];
+            if !client(cpu).memory.iter().any(|&(h, _, _)| h == handle) {
+                return Err(INVALID_HANDLE);
+            }
+            let bytes: Vec<u8> = (0..ctx.gpr[ECX]).flat_map(|_| 0x0009u16.to_le_bytes()).collect();
+            write_buffer(cpu, offset(ctx, EDX, bits32), &bytes).map_err(|_| INVALID_VALUE)?;
+        }
+        // DPMI 1.0: set page attributes: committing and write protection
+        // change nothing without paging.
+        0x0507 => {
+            let handle = ctx.gpr[ESI];
+            if !client(cpu).memory.iter().any(|&(h, _, _)| h == handle) {
+                return Err(INVALID_HANDLE);
+            }
         }
         // Locking and unlocking memory, and demand paging: the memory is
         // always there.

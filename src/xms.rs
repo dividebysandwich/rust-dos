@@ -230,6 +230,19 @@ impl Xms {
         Some(base)
     }
 
+    /// Take `bytes` of free memory, in whole pages, at the page-aligned
+    /// address `base` for the DPMI host; false if any of it is taken.
+    pub(crate) fn take_dpmi_at(&mut self, base: u32, bytes: u32, memory_end: u32) -> bool {
+        let Some(len) = bytes.checked_add(PAGE - 1).map(|n| n & !(PAGE - 1)) else { return false };
+        let fits = self
+            .dpmi_gaps(memory_end)
+            .any(|(start, free)| start <= base && base as u64 + len as u64 <= start as u64 + free as u64);
+        if fits {
+            self.dpmi.push((base, len));
+        }
+        fits
+    }
+
     /// Give back the DPMI host's memory at `base`.
     pub(crate) fn release_dpmi(&mut self, base: u32) {
         self.dpmi.retain(|&(b, _)| b != base);

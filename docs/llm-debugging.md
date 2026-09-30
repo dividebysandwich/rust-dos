@@ -340,7 +340,9 @@ access rights.
   to DOS shows as `shell_idle: true` or a text mode.
 - **The DPMI host.** With `dpmi` on (the default), extenders that look for
   a DPMI host (DOS/4GW, PMODE/W, DOS/32A, Tran's PMODE, DJGPP, Borland's
-  RTM) run their programs as its clients, at CPL 3 with LDT selectors
+  RTM, HX's DPMILD32, which places Win32 programs without relocations at
+  their image base with the DPMI 1.0 function 0504h) run their programs
+  as its clients, at CPL 3 with LDT selectors
   (`/api/ldt`), and go to real mode through the host's code in the ROM at
   F000:2000 (level 0 selector 0008h there is its IDT's handlers). An INT
   21h a client doesn't handle itself goes to DOS through the host, which
