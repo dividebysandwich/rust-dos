@@ -160,6 +160,7 @@ impl Cpu {
 
     /// Shift or rotate `value` by `count`, which the caller has already
     /// masked to 5 bits. A count of 0 changes neither the value nor flags.
+    #[inline(always)]
     pub fn alu_shift(&mut self, op: ShiftOp, size: u8, value: u32, count: u32) -> u32 {
         if count == 0 {
             return value;

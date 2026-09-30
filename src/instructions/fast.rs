@@ -179,8 +179,8 @@ fn form(instr: &Instruction) -> Option<(Form, u8)> {
 fn mov(instr: &Instruction) -> Option<Handler> {
     let (form, size) = form(instr)?;
     Some(match form {
-        Form::RegReg => mov_rr,
-        Form::RegImm => mov_ri,
+        Form::RegReg => sized!(size, mov_rr),
+        Form::RegImm => sized!(size, mov_ri),
         Form::RegMem => sized_mem!(size, mem_a32(instr)?, mov_rm),
         Form::MemReg => sized_mem!(size, mem_a32(instr)?, mov_mr),
         Form::MemImm => sized_mem!(size, mem_a32(instr)?, mov_mi),
@@ -281,10 +281,16 @@ fn jcc(instr: &Instruction) -> Option<Handler> {
 /// model-specific handling. A missing base or index register reads as 0.
 #[inline(always)]
 fn ea<const A32: bool>(cpu: &Cpu, instr: &Instruction) -> u32 {
+    // The base and index registers are general-purpose ones of the
+    // address size, or none.
+    let reg = |r: Register| {
+        let v = if A32 { cpu.gpr::<4>(r) } else { cpu.gpr::<2>(r) };
+        if r == Register::None { 0 } else { v }
+    };
     let ea = instr
         .memory_displacement32()
-        .wrapping_add(cpu.reg(instr.memory_base()))
-        .wrapping_add(cpu.reg(instr.memory_index()).wrapping_mul(instr.memory_index_scale()));
+        .wrapping_add(reg(instr.memory_base()))
+        .wrapping_add(reg(instr.memory_index()) << instr.memory_index_scale().trailing_zeros());
     if A32 { ea } else { ea & 0xFFFF }
 }
 
@@ -304,27 +310,27 @@ fn imm<const S: u8>(instr: &Instruction) -> u32 {
 
 // --- MOV ---
 
-fn mov_rr(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let value = cpu.reg(instr.op1_register());
-    cpu.set_reg(instr.op0_register(), value);
+fn mov_rr<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let value = cpu.gpr::<S>(instr.op1_register());
+    cpu.set_gpr::<S>(instr.op0_register(), value);
     Ok(())
 }
 
-fn mov_ri(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    cpu.set_reg(instr.op0_register(), instr.immediate(1) as u32);
+fn mov_ri<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    cpu.set_gpr::<S>(instr.op0_register(), instr.immediate(1) as u32);
     Ok(())
 }
 
 fn mov_rm<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let m = mem::<S, A32>(cpu, instr, Access::Read)?;
     let value = cpu.mem_read(m);
-    cpu.set_reg(instr.op0_register(), value);
+    cpu.set_gpr::<S>(instr.op0_register(), value);
     Ok(())
 }
 
 fn mov_mr<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let m = mem::<S, A32>(cpu, instr, Access::Write)?;
-    let value = cpu.reg(instr.op1_register());
+    let value = cpu.gpr::<S>(instr.op1_register());
     cpu.mem_write(m, value);
     Ok(())
 }
@@ -364,20 +370,20 @@ const fn writes(op: u8) -> bool {
 
 fn alu_rr<const OP: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let dest = instr.op0_register();
-    let (a, b) = (cpu.reg(dest), cpu.reg(instr.op1_register()));
+    let (a, b) = (cpu.gpr::<S>(dest), cpu.gpr::<S>(instr.op1_register()));
     let r = alu_op::<OP, S>(cpu, a, b);
     if writes(OP) {
-        cpu.set_reg(dest, r);
+        cpu.set_gpr::<S>(dest, r);
     }
     Ok(())
 }
 
 fn alu_ri<const OP: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let dest = instr.op0_register();
-    let a = cpu.reg(dest);
+    let a = cpu.gpr::<S>(dest);
     let r = alu_op::<OP, S>(cpu, a, imm::<S>(instr));
     if writes(OP) {
-        cpu.set_reg(dest, r);
+        cpu.set_gpr::<S>(dest, r);
     }
     Ok(())
 }
@@ -385,10 +391,10 @@ fn alu_ri<const OP: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuR
 fn alu_rm<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let m = mem::<S, A32>(cpu, instr, Access::Read)?;
     let dest = instr.op0_register();
-    let (a, b) = (cpu.reg(dest), cpu.mem_read(m));
+    let (a, b) = (cpu.gpr::<S>(dest), cpu.mem_read(m));
     let r = alu_op::<OP, S>(cpu, a, b);
     if writes(OP) {
-        cpu.set_reg(dest, r);
+        cpu.set_gpr::<S>(dest, r);
     }
     Ok(())
 }
@@ -396,7 +402,7 @@ fn alu_rm<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Ins
 fn alu_mr<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let access = if writes(OP) { Access::Write } else { Access::Read };
     let m = mem::<S, A32>(cpu, instr, access)?;
-    let (a, b) = (cpu.mem_read(m), cpu.reg(instr.op1_register()));
+    let (a, b) = (cpu.mem_read(m), cpu.gpr::<S>(instr.op1_register()));
     let r = alu_op::<OP, S>(cpu, a, b);
     if writes(OP) {
         cpu.mem_write(m, r);
@@ -417,15 +423,15 @@ fn alu_mi<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Ins
 
 fn inc_r<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let reg = instr.op0_register();
-    let r = cpu.alu_inc(S, cpu.reg(reg));
-    cpu.set_reg(reg, r);
+    let r = cpu.alu_inc(S, cpu.gpr::<S>(reg));
+    cpu.set_gpr::<S>(reg, r);
     Ok(())
 }
 
 fn dec_r<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let reg = instr.op0_register();
-    let r = cpu.alu_dec(S, cpu.reg(reg));
-    cpu.set_reg(reg, r);
+    let r = cpu.alu_dec(S, cpu.gpr::<S>(reg));
+    cpu.set_gpr::<S>(reg, r);
     Ok(())
 }
 
@@ -452,8 +458,8 @@ fn shift_reg<const OP: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction, coun
         return;
     }
     let reg = instr.op0_register();
-    let r = cpu.alu_shift(shift_op(OP), S, cpu.reg(reg), count);
-    cpu.set_reg(reg, r);
+    let r = cpu.alu_shift(shift_op(OP), S, cpu.gpr::<S>(reg), count);
+    cpu.set_gpr::<S>(reg, r);
 }
 
 fn shift_ri<const OP: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
@@ -470,13 +476,13 @@ fn shift_rcl<const OP: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> C
 // --- Stack ---
 
 fn push_r<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let value = cpu.reg(instr.op0_register());
+    let value = cpu.gpr::<S>(instr.op0_register());
     cpu.push_sized(S, value)
 }
 
 fn pop_r<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let value = cpu.pop_sized(S)?;
-    cpu.set_reg(instr.op0_register(), value);
+    cpu.set_gpr::<S>(instr.op0_register(), value);
     Ok(())
 }
 

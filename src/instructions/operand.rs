@@ -48,7 +48,9 @@ pub fn effective_offset(cpu: &Cpu, instr: &Instruction) -> u32 {
 /// default (SS for BP/EBP/ESP-based addresses, DS otherwise).
 #[inline(always)]
 pub fn mem_seg(instr: &Instruction) -> Seg {
-    Seg::from_register(instr.memory_segment()).unwrap_or(Seg::DS)
+    // iced numbers the segment registers in x86 encoding order, as `Seg`.
+    let i = (instr.memory_segment() as usize).wrapping_sub(Register::ES as usize);
+    if i < Seg::ALL.len() { Seg::ALL[i] } else { Seg::DS }
 }
 
 /// Check the memory operand for an access of `size` bytes.

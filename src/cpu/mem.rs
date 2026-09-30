@@ -352,6 +352,7 @@ impl Cpu {
 
     /// Read `size` bytes `depth` bytes above the top of the stack without
     /// popping them.
+    #[inline(always)]
     pub fn stack_read(&mut self, depth: u32, size: u8) -> CpuResult<u32> {
         let sp = self.stack_offset(depth);
         let r = self.mem_ref(Seg::SS, sp, size, Access::Read)?;

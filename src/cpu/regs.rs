@@ -341,6 +341,42 @@ impl Cpu {
         *g = (*g & !(slot.mask << slot.shift)) | ((value & slot.mask) << slot.shift);
     }
 
+    /// Value of `reg`, a general-purpose register of `S` bytes (1, 2 or
+    /// 4): `reg` for handlers that know its size, without the table
+    /// lookups. Another register reads some general-purpose register.
+    #[inline(always)]
+    pub fn gpr<const S: u8>(&self, reg: Register) -> u32 {
+        let r = reg as usize;
+        match S {
+            1 => {
+                let i = r.wrapping_sub(Register::AL as usize) & 7;
+                (self.gpr[i & 3] >> ((i & 4) * 2)) & 0xFF
+            }
+            2 => self.gpr[r.wrapping_sub(Register::AX as usize) & 7] & 0xFFFF,
+            _ => self.gpr[r.wrapping_sub(Register::EAX as usize) & 7],
+        }
+    }
+
+    /// Write `reg`, a general-purpose register of `S` bytes, as `set_reg`
+    /// does (see `gpr`).
+    #[inline(always)]
+    pub fn set_gpr<const S: u8>(&mut self, reg: Register, value: u32) {
+        let r = reg as usize;
+        match S {
+            1 => {
+                let i = r.wrapping_sub(Register::AL as usize) & 7;
+                let shift = (i & 4) * 2;
+                let g = &mut self.gpr[i & 3];
+                *g = (*g & !(0xFF << shift)) | ((value & 0xFF) << shift);
+            }
+            2 => {
+                let g = &mut self.gpr[r.wrapping_sub(Register::AX as usize) & 7];
+                *g = (*g & 0xFFFF_0000) | (value & 0xFFFF);
+            }
+            _ => self.gpr[r.wrapping_sub(Register::EAX as usize) & 7] = value,
+        }
+    }
+
     // Extract High byte (AH)
     pub fn get_ah(&self) -> u8 {
         (self.gpr[EAX] >> 8) as u8
