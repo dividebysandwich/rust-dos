@@ -103,6 +103,9 @@ pub struct Bus {
     /// A booted system's hard disks are ATA disks on the IDE channels too
     /// (`ide_hard_disks`).
     pub ide_hard_disks: bool,
+    /// A booted system has a CD-ROM drive even with no CD mounted, for one
+    /// to go in later (`boot_cdrom`).
+    pub boot_cdrom: bool,
     /// Upper memory blocks, if DOS has them (see mcb.rs).
     pub umb: Option<crate::mcb::Umb>,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
@@ -343,6 +346,7 @@ impl Bus {
             dpmi: crate::dpmi::Dpmi::default(),
             dos_version: crate::config::DosVersion::default(),
             ide_hard_disks: true,
+            boot_cdrom: true,
             umb: None,
             lpt_dac: None,
             printer: None,
@@ -510,6 +514,7 @@ impl Bus {
         self.pic = crate::pic::Pic::new();
         self.reset_voodoo();
         self.detach_ide();
+        self.disk.drop_boot_cds();
         self.cmos.set_hard_disks(&[]);
         self.init_dos_machine(self.vga.setup());
         if self.lpt1_present() {
@@ -537,6 +542,12 @@ impl Bus {
         replace: bool,
     ) -> Result<std::path::PathBuf, String> {
         let boot = opts.boot;
+        // A folder mounted on the letter of a booted system's CD-ROM drive
+        // goes in as a disc made from it.
+        let mut opts = opts;
+        if self.boot.is_some() && path.is_dir() && self.booted_cd_drive() == Some(drive) {
+            opts.kind = DriveKind::CdRom;
+        }
         let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace))?;
         // One drive boots at startup.
         if boot {
@@ -575,6 +586,14 @@ impl Bus {
         mount: impl FnOnce(&mut DiskController) -> Result<T, String>,
     ) -> Result<T, String> {
         let result = mount(&mut self.disk);
+        if result.is_ok() && self.boot.is_some() {
+            for line in self.disk.prepare_boot_cds() {
+                self.log_string(&format!("[IDE] {}", line));
+            }
+            if self.disk.boot_cd_image(drive).is_some() {
+                self.ide_cd_follows(drive);
+            }
+        }
         if result.is_ok() {
             // Another disc: whatever played stops, and MSCDEX and a booted
             // system's CD-ROM drive say so.
@@ -723,6 +742,14 @@ impl Bus {
     /// Ctrl+F4 does. Returns what changed, and what went wrong.
     pub fn swap_images(&mut self) -> Vec<String> {
         let mut messages = Vec::new();
+        // A booted system's disc made from a host folder is made again,
+        // with what the folder holds now.
+        if let Some(drive) = self.booted_cd_drive().filter(|&d| self.boot.is_some() && self.disk.is_folder_cd(d)) {
+            match self.reinsert_cd(drive) {
+                Ok(message) => messages.push(message),
+                Err(e) => messages.push(e),
+            }
+        }
         for drive in 0..DRIVE_SLOTS {
             match self.disk.swap_image(drive) {
                 Ok(Some(message)) => {
@@ -748,6 +775,19 @@ impl Bus {
             self.sync_drive_bda();
         }
         Ok(changed)
+    }
+
+    /// Make the disc of the host folder mounted as CD drive `drive` again,
+    /// with what the folder holds now, and put it in the booted system's
+    /// CD-ROM drive as a new disc. Returns what changed.
+    pub fn reinsert_cd(&mut self, drive: u8) -> Result<String, String> {
+        let lines = self.disk.make_boot_cd(drive)?;
+        for line in &lines {
+            self.log_string(&format!("[IDE] {}", line));
+        }
+        self.ide_cd_follows(drive);
+        self.image_changed(drive);
+        Ok(lines.into_iter().next().unwrap_or_default())
     }
 
     /// Tell the CD audio, MSCDEX and the IDE drive that another disk is in

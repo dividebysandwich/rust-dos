@@ -243,7 +243,7 @@ impl DiskController {
 /// and what the rest follows from.
 fn save_drive(drive: &Option<Drive>, w: &mut Writer) {
     drive.is_some().save(w);
-    if let Some(Drive { kind: _, storage: _, current_dir, label: _, read_only: _, mount, images: _, image, media_changed }) =
+    if let Some(Drive { kind: _, storage: _, current_dir, label: _, read_only: _, mount, images: _, image, media_changed, boot_cd: _ }) =
         drive
     {
         mount.as_ref().map(state_value).save(w);

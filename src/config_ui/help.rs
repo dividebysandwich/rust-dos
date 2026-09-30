@@ -293,6 +293,7 @@ impl Item {
             Dpmi => "dpmi",
             DosVersion => "dos-version",
             IdeHardDisks => "ide-hard-disks",
+            BootCdrom => "boot-cdrom",
             KeyboardLayout => "keyboard-layout",
             Rewind => "rewind",
             RewindMemory => "rewind-memory",

@@ -262,7 +262,10 @@ fn booted_hard_disks_are_ata_disks_on_the_primary_channel() {
     assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
     let channel = cpu.bus.ide[0].as_ref().expect("the primary channel");
     assert!(matches!(channel.devices, [Some(Device::Ata(_)), None]));
-    assert!(cpu.bus.ide[1].is_none(), "no CD-ROM drive");
+    // An empty CD-ROM drive on the first free letter, for a disc later.
+    let channel = cpu.bus.ide[1].as_ref().expect("the secondary channel");
+    assert!(matches!(&channel.devices, [Some(Device::Atapi(cd)), None] if cd.drive == 3));
+    assert_eq!(cpu.bus.booted_cd_drive(), Some(3));
     let cmos = |cpu: &mut Cpu, reg: u8| {
         cpu.bus.io_write(0x70, reg);
         cpu.bus.io_read(0x71)
@@ -306,12 +309,14 @@ fn hard_disks_go_where_they_are_asked_to() {
     use rust_dos::ide::{ChannelId, Device, IdeSlot};
     let mut cpu = machine("ide_off");
     cpu.bus.ide_hard_disks = false;
+    cpu.bus.boot_cdrom = false;
     exec::run_command_line(&mut cpu, "BOOT -l C");
     assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
     assert!(!cpu.bus.has_ide());
 
     // The disk from a file, as MOUNT has it, and a slot for it.
     let mut cpu = machine("ide_slot");
+    cpu.bus.boot_cdrom = false;
     let disk = cpu.bus.disk.bios_image(2).unwrap();
     let mut bytes = vec![0u8; disk.sectors() as usize * SECTOR_SIZE];
     disk.read(0, &mut bytes).unwrap();
@@ -324,4 +329,37 @@ fn hard_disks_go_where_they_are_asked_to() {
     assert!(cpu.bus.ide[0].is_none());
     let channel = cpu.bus.ide[1].as_ref().expect("the secondary channel");
     assert!(matches!(channel.devices, [None, Some(Device::Ata(_))]));
+}
+
+/// A host folder mounted as a CD is a disc made from it in a booted
+/// system's CD-ROM drive; one mounted while it runs goes in its empty
+/// drive, whatever the letter, and the built-in DOS reads the folder again.
+#[test]
+fn host_folders_go_in_the_cd_rom_drive_as_discs() {
+    use rust_dos::disk::DriveKind;
+    let mut cpu = machine("folder_cd");
+    let folder = std::fs::canonicalize("target/test_boot/folder_cd").unwrap().join("cd");
+    std::fs::create_dir_all(folder.join("Some Folder")).unwrap();
+    std::fs::write(folder.join("A long name.txt"), b"from the host").unwrap();
+    let cd = MountOptions { kind: DriveKind::CdRom, ..Default::default() };
+    cpu.bus.mount_drive(4, &folder, cd.clone(), false).unwrap();
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    assert_eq!(cpu.bus.booted_cd_drive(), Some(4));
+    let disc = cpu.bus.disk.boot_cd_image(4).expect("a disc made from the folder");
+    let volume = rust_dos::cdrom::iso9660::read_volume(&disc).unwrap();
+    assert_eq!(volume.label, "CD");
+    assert!(volume.files.file("ALONGN~1.TXT").is_some());
+    assert!(cpu.bus.disk.cd_image(4).is_none(), "MSCDEX has the folder");
+
+    // Taken out, and another folder mounted on another letter goes in.
+    cpu.bus.unmount_drive(4).unwrap();
+    assert!(cpu.bus.disk.boot_cd_image(4).is_none());
+    cpu.bus.mount_drive(5, &folder.join("Some Folder"), cd, false).unwrap();
+    assert_eq!(cpu.bus.booted_cd_drive(), Some(5));
+    assert!(cpu.bus.disk.boot_cd_image(5).is_some());
+    assert!(cpu.bus.reinsert_cd(5).is_ok());
+
+    cpu.load_shell();
+    assert!(cpu.bus.disk.boot_cd_image(5).is_none());
 }

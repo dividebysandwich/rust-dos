@@ -52,7 +52,7 @@ pub struct Env<'a> {
 impl Env<'_> {
     /// The CD image in the CD-ROM drive `drive`.
     pub fn cd(&self, drive: u8) -> Option<Rc<CdImage>> {
-        self.disks.cd_image(drive)
+        self.disks.boot_cd_image(drive)
     }
 }
 
@@ -320,6 +320,14 @@ impl Channel {
     /// one.
     pub fn cd_drive(&mut self, drive: u8) -> Option<&mut Atapi> {
         self.devices.iter_mut().flatten().find_map(|d| d.cd_drive(drive))
+    }
+
+    /// The CD-ROM drive on the channel, if there is one.
+    pub fn atapi(&mut self) -> Option<&mut Atapi> {
+        self.devices.iter_mut().flatten().find_map(|d| match d {
+            Device::Atapi(cd) => Some(cd),
+            _ => None,
+        })
     }
 
     /// What a BIOS's INT 13h did to disk `slot` (0 master, 1 slave), done

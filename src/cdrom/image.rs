@@ -54,6 +54,8 @@ enum Source {
     /// Decoded from a compressed audio file as they are read.
     #[cfg(feature = "cdaudio")]
     Decoded(RefCell<super::decoded::DecodedTrack>),
+    /// A disc made from a host folder, its files read from the host.
+    Folder(super::folder::FolderImage, RefCell<super::folder::OpenFiles>),
 }
 
 pub struct CdImage {
@@ -137,6 +139,18 @@ impl CdImage {
     pub fn from_memory(name: &str, data: MemoryImage) -> Result<Self, String> {
         let len = data.len();
         Self::bare(Path::new(name), Backing { source: Source::Memory(data), data_offset: 0, len, swap: false })
+    }
+
+    /// The disc made from the host folder `root` (`folder::build`).
+    pub fn from_folder(disc: super::folder::FolderImage, root: &Path) -> Result<Self, String> {
+        let len = disc.sectors as u64 * DATA_SECTOR as u64;
+        let source = Source::Folder(disc, RefCell::new(Default::default()));
+        Self::bare(root, Backing { source, data_offset: 0, len, swap: false })
+    }
+
+    /// Whether this disc was made from a host folder.
+    pub fn is_folder(&self) -> bool {
+        self.files.iter().any(|f| matches!(f.source, Source::Folder(..)))
     }
 
     /// Whether `data` is a bare image of one data track.
@@ -339,6 +353,10 @@ impl Backing {
             #[cfg(feature = "cdaudio")]
             Source::Decoded(track) => {
                 track.borrow_mut().read_at(at, &mut buf[..n]);
+                Ok(())
+            }
+            Source::Folder(disc, open) => {
+                disc.read_at(at, &mut buf[..n], &mut open.borrow_mut());
                 Ok(())
             }
         }

@@ -5,6 +5,7 @@ pub mod audio;
 pub mod cue;
 #[cfg(feature = "cdaudio")]
 pub mod decoded;
+pub mod folder;
 pub mod image;
 pub mod iso9660;
 

@@ -451,6 +451,9 @@ struct Drive {
     image: usize,
     /// Another disk went in since INT 13h last looked (AH=16h).
     media_changed: bool,
+    /// For a host folder mounted as a CD, the disc made from it that a
+    /// booted system's CD-ROM drive reads (`prepare_boot_cds`).
+    boot_cd: Option<Rc<CdImage>>,
 }
 
 impl Drive {
@@ -711,6 +714,7 @@ impl DiskController {
             images: Vec::new(),
             image: 0,
             media_changed: false,
+            boot_cd: None,
         });
         drives[DRIVE_Z as usize] = Some(Self::memory_drive(z_files, DEFAULT_LABEL));
 
@@ -761,6 +765,7 @@ impl DiskController {
             images: Vec::new(),
             image: 0,
             media_changed: false,
+            boot_cd: None,
         }
     }
 
@@ -835,6 +840,7 @@ impl DiskController {
                 images: images.clone(),
                 image: 0,
                 media_changed: true,
+                boot_cd: None,
             });
             return Ok(images.swap_remove(0));
         }
@@ -861,6 +867,7 @@ impl DiskController {
             images: Vec::new(),
             image: 0,
             media_changed: floppy_drive,
+            boot_cd: None,
         });
         Ok(canonical)
     }
@@ -1029,6 +1036,7 @@ impl DiskController {
             images: Vec::new(),
             image: 0,
             media_changed: true,
+            boot_cd: None,
         });
     }
 
@@ -1221,6 +1229,70 @@ impl DiskController {
     /// The CD image a drive shows.
     pub fn cd_image(&self, drive: u8) -> Option<Rc<CdImage>> {
         self.drive(drive)?.image().cloned()
+    }
+
+    /// The disc a booted system's CD-ROM drive reads for `drive`: its CD
+    /// image, or the disc made from the host folder mounted as a CD.
+    pub fn boot_cd_image(&self, drive: u8) -> Option<Rc<CdImage>> {
+        let d = self.drive(drive)?;
+        d.image().or(d.boot_cd.as_ref()).cloned()
+    }
+
+    /// Whether `drive` is a host folder mounted as a CD, which a booted
+    /// system reads as a disc made from it.
+    pub fn is_folder_cd(&self, drive: u8) -> bool {
+        self.drive(drive).is_some_and(|d| d.kind == DriveKind::CdRom && d.host_root().is_some())
+    }
+
+    /// Make the discs of the host folders mounted as CDs that have none,
+    /// for a booted system. Returns what the log should say.
+    pub fn prepare_boot_cds(&mut self) -> Vec<String> {
+        (0..LASTDRIVE)
+            .filter(|&d| self.is_folder_cd(d) && self.drive(d).is_some_and(|d| d.boot_cd.is_none()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|d| match self.make_boot_cd(d) {
+                Ok(lines) => lines,
+                Err(e) => vec![e],
+            })
+            .collect()
+    }
+
+    /// Make the disc of the host folder mounted as CD drive `drive` again,
+    /// with what the folder holds now, as a new disc in the drive. Returns
+    /// what the log should say.
+    pub fn make_boot_cd(&mut self, drive: u8) -> Result<Vec<String>, String> {
+        let letter = drive_letter(drive);
+        let Some(d) = self.drives.get_mut(drive as usize).and_then(Option::as_mut) else {
+            return Err(format!("Drive {}: is not mounted", letter));
+        };
+        let Some(root) = d.host_root().filter(|_| d.kind == DriveKind::CdRom).map(Path::to_path_buf) else {
+            return Err(format!("Drive {}: is not a folder mounted as a CD", letter));
+        };
+        // The label the mount asks for, or the folder's name.
+        let label = d.mount.as_ref().and_then(|m| m.opts.label.clone()).unwrap_or_else(|| {
+            root.file_name().map_or_else(|| d.label.clone(), |n| n.to_string_lossy().into_owned())
+        });
+        let disc = crate::cdrom::folder::build(&root, &label)
+            .map_err(|e| format!("Drive {}: can't be made a CD: {}", letter, e))?;
+        let mut lines = vec![format!(
+            "Drive {}: is a CD made from {} ({} MB)",
+            letter,
+            root.display(),
+            (disc.sectors as u64 * crate::cdrom::DATA_SECTOR as u64).div_ceil(1 << 20)
+        )];
+        lines.extend(disc.skipped.iter().map(|s| format!("Drive {}: left off the CD: {}", letter, s)));
+        d.boot_cd = Some(Rc::new(CdImage::from_folder(disc, &root)?));
+        d.media_changed = true;
+        Ok(lines)
+    }
+
+    /// Let go of the discs made from host folders: the built-in DOS reads
+    /// the folders themselves.
+    pub fn drop_boot_cds(&mut self) {
+        for d in self.drives.iter_mut().flatten() {
+            d.boot_cd = None;
+        }
     }
 
     /// The file system of a drive mounted from a disk image.

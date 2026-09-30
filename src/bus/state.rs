@@ -109,6 +109,7 @@ impl Bus {
             ultrasnd_drive: _,
             dos_version: _,
             ide_hard_disks: _,
+            boot_cdrom: _,
             // Worked out again after a load.
             sb_irq: _,
             irq_ready: _,
@@ -303,6 +304,7 @@ impl Bus {
             ultrasnd_drive: _,
             dos_version: _,
             ide_hard_disks: _,
+            boot_cdrom: _,
             sb_irq: _,
             irq_ready: _,
             page_gen: _,
@@ -456,6 +458,11 @@ impl Bus {
         }
         // A booted system's disks keep journals; the built-in DOS's don't.
         self.disk.keep_journals(self.boot.is_some());
+        if self.boot.is_some() {
+            for line in self.disk.prepare_boot_cds() {
+                self.log_string(&format!("[IDE] {}", line));
+            }
+        }
         self.page_gen.fill(0);
         // The PICs' requests are the state's: the Sound Blaster's interrupts
         // as it has them raise none.

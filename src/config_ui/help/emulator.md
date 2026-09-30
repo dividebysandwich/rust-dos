@@ -136,6 +136,15 @@ Only matters for a system booted from a disk image with `BOOT`, such as
 Windows 95: **on** lets it reach its hard disks with its own fast
 drivers. Leave it on.
 
+# CD-ROM drive (BOOT) {#boot-cdrom}
+
+Only matters for a system booted from a disk image with `BOOT`.
+**always** gives it a CD-ROM drive even when no CD is mounted, so that a
+CD image or a folder of yours can go in while it runs: mount it on a CD
+drive letter in the *Drives* page. **with a CD** gives it one only when a
+CD is mounted as it boots, as older rust-dos did; a system installed
+without a CD-ROM drive then finds no new hardware.
+
 # Hard disk speed {#hard-disk-speed}
 
 Slows the hard disk down to the speed of the time. **maximum** is as fast

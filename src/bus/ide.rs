@@ -12,18 +12,33 @@ const DATA_PORT_NS: u64 = 120;
 impl Bus {
     /// At a boot: the IDE channels with the machine's hard disks (with
     /// `ide_hard_disks`), BIOS units 80h and 81h the primary master and
-    /// slave, and its CD-ROM drive with a CD image, the secondary master,
-    /// or where their MOUNT's `-ide` puts them. A channel whose IRQ is a
-    /// sound or network card's isn't there.
+    /// slave, and its CD-ROM drive, the secondary master, or where their
+    /// MOUNT's `-ide` puts them. A channel whose IRQ is a sound or network
+    /// card's isn't there.
+    ///
+    /// The CD-ROM drive is the first CD drive with a CD image or a host
+    /// folder in it (made a disc, `DiskController::prepare_boot_cds`), or
+    /// another CD drive, or with `boot_cdrom` an empty one on the first
+    /// free letter from D:, for a disc to go in later.
     pub fn attach_ide(&mut self) {
         self.detach_ide();
+        for line in self.disk.prepare_boot_cds() {
+            self.log_string(&format!("[IDE] {}", line));
+        }
         // The devices, with the slots they ask for.
         let mut wanted: Vec<(Option<IdeSlot>, &[IdeSlot; 4], Device, String)> = Vec::new();
-        if let Some(drive) =
-            self.disk.drives_of_kind(DriveKind::CdRom).into_iter().find(|&d| self.disk.cd_image(d).is_some())
-        {
-            let what = format!("{}: is the CD-ROM drive", crate::disk::drive_letter(drive));
-            let device = Device::Atapi(Atapi::new(drive, true));
+        let cds = self.disk.drives_of_kind(DriveKind::CdRom);
+        let cd = cds.iter().copied().find(|&d| self.disk.boot_cd_image(d).is_some()).or(cds.first().copied()).or_else(|| {
+            self.boot_cdrom.then(|| (3..crate::disk::DRIVE_Z).find(|&d| !self.disk.is_mounted(d))).flatten()
+        });
+        if let Some(drive) = cd {
+            let has_disc = self.disk.boot_cd_image(drive).is_some();
+            let what = format!(
+                "{}: is the CD-ROM drive{}",
+                crate::disk::drive_letter(drive),
+                if has_disc { "" } else { ", with no disc in it" }
+            );
+            let device = Device::Atapi(Atapi::new(drive, has_disc));
             wanted.push((self.disk.ide_slot(drive), &IdeSlot::CD_ORDER, device, what));
         }
         if self.ide_hard_disks {
@@ -207,10 +222,39 @@ impl Bus {
         }
     }
 
+    /// The DOS drive a booted system's CD-ROM drive shows, if it has one.
+    pub fn booted_cd_drive(&self) -> Option<u8> {
+        self.ide.iter().flatten().find_map(|channel| {
+            channel.devices.iter().flatten().find_map(|d| match d {
+                Device::Atapi(cd) => Some(cd.drive),
+                _ => None,
+            })
+        })
+    }
+
+    /// A CD went in `drive` while a system runs: if its CD-ROM drive
+    /// shows another drive that has no disc, it shows this one from now
+    /// on, so that a CD mounted on any letter goes in.
+    pub(crate) fn ide_cd_follows(&mut self, drive: u8) {
+        let Some(current) = self.booted_cd_drive() else { return };
+        if current == drive || self.disk.boot_cd_image(current).is_some() {
+            return;
+        }
+        for channel in self.ide.iter_mut().flatten() {
+            if let Some(cd) = channel.atapi() {
+                cd.drive = drive;
+            }
+        }
+        self.log_string(&format!(
+            "[IDE] The CD-ROM drive shows {}: from now on",
+            crate::disk::drive_letter(drive)
+        ));
+    }
+
     /// The disc of `drive` changed.
     pub(crate) fn ide_media_changed(&mut self, drive: u8) {
         let now = self.clock.now_ticks();
-        let has_disc = self.disk.cd_image(drive).is_some();
+        let has_disc = self.disk.boot_cd_image(drive).is_some();
         let mut changed = false;
         for channel in self.ide.iter_mut().flatten() {
             if let Some(cd) = channel.cd_drive(drive) {
