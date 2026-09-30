@@ -187,6 +187,8 @@ and Ctrl+C gives up the line being typed.
 | Ctrl+Shift+F11 | Speed the CPU up by a tenth |
 | Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |
 | Ctrl+F10 | Capture the mouse for the program, and let it go; a click captures it too once a program uses the mouse |
+| Ctrl+Shift+C | Copy the text selected by dragging with the right mouse button (while the mouse isn't captured), or the whole text screen, to the clipboard |
+| Ctrl+Shift+V | Type the clipboard's text on the machine's keyboard (a key stops it) |
 | Alt+Enter | Switch between the window and fullscreen |
 | Ctrl+F5 | Save a screenshot (PNG), with the settings window and the performance overlay if they show and `record_ui` is on |
 | Ctrl+F6 | Start and stop recording the sound (WAV) |

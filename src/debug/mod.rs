@@ -255,7 +255,7 @@ pub enum Coords {
 }
 
 /// Low-level queued input, applied by the main loop at frame boundaries.
-enum LowInput {
+pub(crate) enum LowInput {
     KeyDown { key: PcKey, ascii: u8 },
     /// A character no key types, as Alt and the keypad type it.
     Char(u8),
@@ -301,7 +301,7 @@ fn ascii_for(key: PcKey, mods: u8) -> u8 {
 /// needs them. A character the
 /// layout has on no key (or only as a dead key's accent) is typed as the
 /// US keyboard types it, or else as Alt and the keypad type any.
-fn keys_for_char(c: char, layout: &Layout, out: &mut Vec<LowInput>) -> Result<(), String> {
+pub(crate) fn keys_for_char(c: char, layout: &Layout, out: &mut Vec<LowInput>) -> Result<(), String> {
     let special = match c {
         '\n' | '\r' => Some("enter"),
         '\t' => Some("tab"),

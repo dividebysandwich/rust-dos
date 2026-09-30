@@ -15,10 +15,12 @@ use crate::disk::{DriveInfo, DriveKind, LASTDRIVE};
 use crate::display::Display;
 use crate::mount::{MountCmd, MountSpec};
 use crate::capture::avi::VideoRecorder;
+use crate::clipboard::Clipboard;
 use crate::capture::wav::WavWriter;
 use crate::recorder::ScreenRecorder;
 use crate::timer::CpuSpeed;
 
+mod clipboard;
 mod debug;
 mod display;
 mod sdl_keys;
@@ -218,6 +220,7 @@ fn main() -> Result<(), String> {
     // Typed text is only wanted in the settings window.
     let text_input = video_subsystem.text_input();
     text_input.stop();
+    let host_clipboard = video_subsystem.clipboard();
 
     let mut cpu = create_cpu(&args, &config, memory_mb);
     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
@@ -300,6 +303,10 @@ fn main() -> Result<(), String> {
     // The button whose click captured the mouse, whose release the program
     // doesn't see either.
     let mut capturing_click: Option<MouseButton> = None;
+    // The text selected with the right button while the mouse isn't
+    // captured (Ctrl+Shift+C copies it), and the text being pasted
+    // (Ctrl+Shift+V).
+    let mut clipboard = Clipboard::new();
     // A screenshot to take of the next frame (Ctrl+F5), and the sound being
     // recorded (Ctrl+F6).
     let mut screenshot = false;
@@ -446,6 +453,42 @@ fn main() -> Result<(), String> {
                     if keycode == Keycode::F12 && ctrl && !alt {
                         if !repeat {
                             toggle_ui!();
+                        }
+                        continue;
+                    }
+                    // Ctrl+Shift+C copies the selected text, or the whole
+                    // text screen, to the host's clipboard, and
+                    // Ctrl+Shift+V types the clipboard's text on the
+                    // machine (or into the settings window's field).
+                    if keycode == Keycode::C && ctrl && shift && !alt {
+                        if !repeat && !ui.is_open() {
+                            let selected = clipboard.text(&cpu.bus);
+                            clipboard.clear();
+                            osd.show(match selected {
+                                Some(text) => match host_clipboard.set_clipboard_text(&text) {
+                                    Ok(()) => format!("Copied {} lines to the clipboard", text.lines().count().max(1)),
+                                    Err(e) => format!("The text can't be copied: {}", e),
+                                },
+                                None => "Nothing to copy: the screen shows graphics".to_string(),
+                            });
+                        }
+                        continue;
+                    }
+                    if keycode == Keycode::V && ctrl && shift && !alt {
+                        if !repeat {
+                            match host_clipboard.clipboard_text() {
+                                Ok(text) if text.is_empty() => osd.show("The clipboard has no text"),
+                                Ok(text) if ui.is_open() => ui.text(&text.replace(['\r', '\n'], " "), &mut host!()),
+                                Ok(text) => {
+                                    let (typed, skipped) = clipboard.paste(&cpu.bus, &text);
+                                    osd.show(if skipped > 0 {
+                                        format!("Pasting {} characters ({} no key types)", typed, skipped)
+                                    } else {
+                                        format!("Pasting {} characters (a key stops it)", typed)
+                                    });
+                                }
+                                Err(e) => osd.show(format!("The clipboard can't be read: {}", e)),
+                            }
                         }
                         continue;
                     }
@@ -658,6 +701,11 @@ fn main() -> Result<(), String> {
                     if repeat && !held.contains_key(&scancode) {
                         continue;
                     }
+                    // A key pressed stops a paste.
+                    if clipboard.pasting() {
+                        clipboard.stop_paste(&mut cpu);
+                        osd.show("Paste stopped");
+                    }
 
                     // Recorder Toggle
                     if keycode == Keycode::PrintScreen {
@@ -751,6 +799,28 @@ fn main() -> Result<(), String> {
                     ui.wheel(dy, &mut host!());
                 }
 
+                // The right button dragged over a text screen while the
+                // mouse isn't captured selects text; a click without a
+                // drag is a click.
+                Event::MouseButtonDown { mouse_btn: MouseButton::Right, x, y, .. }
+                    if !ui.is_open() && !mouse_captured && clipboard.start(&cpu.bus, display.to_frame(x, y)) => {}
+                Event::MouseMotion { x, y, .. } if clipboard.dragging() => clipboard.drag(&cpu.bus, display.to_frame(x, y)),
+                Event::MouseButtonUp { mouse_btn: MouseButton::Right, x, y, .. } if clipboard.dragging() => {
+                    if clipboard.finish(&cpu.bus, display.to_frame(x, y)) {
+                        osd.show("Ctrl+Shift+C copies the selected text");
+                    } else if !ui.is_open() && !paused {
+                        if cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use() {
+                            capture_mouse!(true);
+                            osd.show("Mouse captured (Ctrl+F10 releases)");
+                        } else {
+                            let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
+                            cpu.bus.mouse.set_position(vx, vy);
+                            cpu.bus.mouse.button_down(1);
+                            cpu.bus.mouse.button_up(1);
+                        }
+                    }
+                }
+
                 // The machine's mouse is still while the window is open or
                 // the machine paused.
                 Event::MouseMotion { .. } | Event::MouseButtonDown { .. } | Event::MouseButtonUp { .. }
@@ -771,6 +841,7 @@ fn main() -> Result<(), String> {
                 }
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
+                    clipboard.clear();
                     // A program using the mouse (the INT 33h driver, or the
                     // BIOS's PS/2 mouse as Windows does) gets it captured by
                     // a click, which it doesn't see, as in DOSBox.
@@ -838,6 +909,7 @@ fn main() -> Result<(), String> {
             achievements.reset();
             release_input(&mut cpu, &mut held);
             dbg.release_keys(&mut cpu);
+            clipboard.stop_paste(&mut cpu);
             if let Some(video) = video_recording.take() {
                 match video.stop() {
                     Ok(frames) => osd.show(format!("The video recording stopped at the load ({} frames)", frames)),
@@ -853,6 +925,8 @@ fn main() -> Result<(), String> {
             ui_shown = ui.is_open();
             if ui_shown {
                 release_input(&mut cpu, &mut held);
+                clipboard.stop_paste(&mut cpu);
+                clipboard.clear();
                 capture_mouse!(false);
                 dbg.release_keys(&mut cpu);
                 text_input.start();
@@ -869,6 +943,11 @@ fn main() -> Result<(), String> {
         // the right instructions however the work is batched between frames.
         let batch_start = std::time::Instant::now();
         let waiting = dbg.paused || ui.pauses_machine() || paused || rewinding.is_some();
+        // Pasted keys go once the keys held are up: the Ctrl and Shift of
+        // Ctrl+Shift+V would change them.
+        if !waiting && !ui.is_open() && held.is_empty() {
+            clipboard.feed(&mut cpu);
+        }
         // The values frozen on the Cheats page, as the program left them.
         cpu.bus.apply_freezes();
         // The controllers as they are now; at rest while the machine waits.
@@ -1093,6 +1172,7 @@ fn main() -> Result<(), String> {
         screen.clone_from(&cached_frame);
         video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
         video::mono::apply(&mut screen, settings.monochrome);
+        clipboard.draw(&mut screen, &cpu.bus);
         let frame_w = width as usize;
 
         // Screenshots and recordings show the machine alone, or with the
