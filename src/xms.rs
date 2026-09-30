@@ -72,15 +72,57 @@ pub struct Xms {
     a20_global: bool,
     /// The expanded memory manager's pages, by address.
     ems_pages: Vec<u32>,
+    /// What programs kept resident with them hold (`keep_resident`).
+    resident: Resident,
     /// What the DPMI host holds, as (address, bytes) in whole 4 KB pages.
     /// The host keeps its own record of them, which states carry
     /// (`dpmi::Dpmi::reservations`).
     pub(crate) dpmi: Vec<(u32, u32)>,
 }
 
+/// The handles, HMA and A20 enables resident programs hold: a DOS
+/// extender that stays resident (HDPMI32) keeps its tables in extended
+/// memory and relies on A20 staying on.
+#[derive(Clone, Debug, Default)]
+struct Resident {
+    handles: Vec<u16>,
+    hma: bool,
+    a20_global: bool,
+    a20_local: u32,
+}
+
 impl Xms {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A program started from the prompt stays resident: what it holds
+    /// now stays with it when the next program ends.
+    pub fn keep_resident(&mut self) {
+        self.resident = Resident {
+            handles: self.handles().into_iter().map(|(handle, ..)| handle).collect(),
+            hma: self.hma_allocated,
+            a20_global: self.a20_global,
+            a20_local: self.a20_local,
+        };
+    }
+
+    /// No program runs any more: free what it left allocated, but not
+    /// what resident programs hold, and put their A20 enables back.
+    /// Returns whether A20 is on.
+    pub fn program_ended(&mut self) -> bool {
+        let resident = std::mem::take(&mut self.resident);
+        let blocks: Vec<Option<Block>> = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| b.filter(|_| resident.handles.contains(&(i as u16 + 1))))
+            .collect();
+        *self = Self { blocks, hma_allocated: resident.hma, a20_global: resident.a20_global, a20_local: resident.a20_local, resident, ..Self::default() };
+        while self.blocks.last().is_some_and(|b| b.is_none()) {
+            self.blocks.pop();
+        }
+        self.a20_global || self.a20_local > 0
     }
 
     /// The allocated handles: (handle, base address, size in KB, lock
@@ -284,6 +326,7 @@ pub fn call(cpu: &mut Cpu) {
         0x02 => {
             if cpu.bus.xms.hma_allocated {
                 cpu.bus.xms.hma_allocated = false;
+                cpu.bus.xms.resident.hma = false;
                 ok(cpu);
             } else {
                 fail(cpu, ERR_HMA_NOT_ALLOCATED);
@@ -348,6 +391,7 @@ pub fn call(cpu: &mut Cpu) {
                 Some(b) if b.locks > 0 => fail(cpu, ERR_LOCKED),
                 Some(_) => {
                     cpu.bus.xms.blocks[handle as usize - 1] = None;
+                    cpu.bus.xms.resident.handles.retain(|&h| h != handle);
                     ok(cpu);
                 }
             }
@@ -504,4 +548,5 @@ fn move_block(cpu: &mut Cpu) {
 }
 
 crate::state_fields!(Block { base, size_kb, locks });
-crate::state_fields!(Xms { blocks, hma_allocated, a20_local, a20_global, ems_pages } skip { dpmi });
+crate::state_fields!(Resident { handles, hma, a20_global, a20_local });
+crate::state_fields!(Xms { blocks, hma_allocated, a20_local, a20_global, ems_pages, resident } skip { dpmi });

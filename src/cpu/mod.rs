@@ -594,6 +594,7 @@ impl Cpu {
         let cover = crate::mcb::umb_cover_seg(&self.bus);
         if psp > cover {
             self.resident_upper.push(psp);
+            self.bus.xms.keep_resident();
             self.bus.log_string(&format!("[DOS] TSR: resident in upper memory at {:04X}", psp));
             return;
         }
@@ -613,6 +614,7 @@ impl Cpu {
             return;
         }
         self.resident_end = end;
+        self.bus.xms.keep_resident();
         self.bus.log_string(&format!(
             "[DOS] TSR: resident up to {:04X}, programs now load at {:04X}",
             end,
@@ -1142,7 +1144,18 @@ impl Cpu {
                 self.resident_end = crate::mcb::first_free(&self.bus);
             }
         }
-        let resident: Vec<u16> = self.resident_upper.clone();
+        // Upper memory blocks stay with the programs loaded high, and with
+        // those resident in conventional memory that allocated them (HDPMI32
+        // its buffer for DOS calls).
+        let cover = crate::mcb::umb_cover_seg(&self.bus);
+        let mut resident: Vec<u16> = self.resident_upper.clone();
+        resident.extend(
+            crate::mcb::walk(&mut self.bus)
+                .iter()
+                .take_while(|(s, _)| *s < cover)
+                .map(|(_, m)| m.owner)
+                .filter(|&owner| owner > crate::mcb::DOS_OWNER),
+        );
         if !crate::mcb::release_upper(&mut self.bus, &resident) {
             self.bus.log_string("[DOS] Upper memory chain corrupt, dropping the programs loaded high");
             self.resident_upper.clear();
@@ -1225,16 +1238,21 @@ impl Cpu {
         self.bus.reset_sound();
         self.bus.reset_network();
         // No program runs any more: its extended memory and A20 go too,
-        // and a reset from now on is a cold boot.
-        self.bus.xms = crate::xms::Xms::new();
+        // but for what resident programs hold, and a reset from now on is
+        // a cold boot.
+        let a20 = self.bus.xms.program_ended();
         self.bus.dpmi.reset();
         // The addresses of its values mean nothing to the next program.
         self.bus.freezes.clear();
         if self.bus.ems.is_some() {
             self.bus.ems = Some(crate::ems::Ems::new());
         }
-        self.bus.set_a20(false);
-        self.bus.kbc.output_port &= !crate::kbc::OUT_A20;
+        self.bus.set_a20(a20);
+        if a20 {
+            self.bus.kbc.output_port |= crate::kbc::OUT_A20;
+        } else {
+            self.bus.kbc.output_port &= !crate::kbc::OUT_A20;
+        }
         self.bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
 
         self.bus.disk.close_all_files();
