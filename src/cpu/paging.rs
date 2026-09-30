@@ -253,6 +253,19 @@ impl Cpu {
         (e.read_tag == page + 1).then(|| self.translate(e.phys | (lin & 0xFFF)))
     }
 
+    /// As `translated`, for a read or a write (`write`), whose TLB tags
+    /// differ: a write needs the page's dirty bit set.
+    #[inline(always)]
+    pub(crate) fn translated_for(&self, lin: u32, write: bool, user: bool) -> Option<u32> {
+        if self.cr0 & CR0_PG == 0 {
+            return Some(self.translate(lin));
+        }
+        let page = lin >> 12;
+        let e = self.tlb.entries[Tlb::slot(page, user)];
+        let tag = if write { e.write_tag } else { e.read_tag };
+        (tag == page + 1).then(|| self.translate(e.phys | (lin & 0xFFF)))
+    }
+
     pub(crate) fn write_protect(&self) -> bool {
         self.model >= CpuModel::I486 && self.cr0 & CR0_WP != 0
     }

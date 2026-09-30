@@ -56,6 +56,89 @@ impl Cpu {
         Ok(cache.base.wrapping_add(off))
     }
 
+    /// Where an access of `S` bytes at `seg:off` goes, if the segment
+    /// allows it and it is to plain RAM (see `Bus::is_plain_ram`) within
+    /// one page the TLB holds (or with paging off): the physical address,
+    /// which `Bus::ram_read` and `Bus::ram_write` then access. That is
+    /// nearly every access; None leaves the access to `mem_ref`, which
+    /// raises any fault it takes.
+    #[inline(always)]
+    pub fn ram_ref<const S: u8>(&self, seg: Seg, off: u32, access: Access) -> Option<usize> {
+        let cache = &self.seg[seg as usize];
+        let last = off.wrapping_add(S as u32 - 1);
+        let need = if access == Access::Write { RIGHT_WRITE } else { RIGHT_READ };
+        if off < cache.lo || last > cache.hi || last < off || cache.rights & need == 0 {
+            return None;
+        }
+        let lin = cache.base.wrapping_add(off);
+        if lin & 0xFFF > 0x1000 - S as u32 {
+            return None;
+        }
+        let phys = self.translated_for(lin, access == Access::Write, self.user())? as usize;
+        self.bus.is_plain_ram(phys, S as usize).then_some(phys)
+    }
+
+    /// Read `S` bytes at `seg:off` where `ram_ref` can't: through
+    /// `mem_ref`, which raises the fault the access takes.
+    #[cold]
+    #[inline(never)]
+    pub fn read_slow(&mut self, seg: Seg, off: u32, size: u8) -> CpuResult<u32> {
+        let r = self.mem_ref(seg, off, size, Access::Read)?;
+        Ok(self.mem_read(r))
+    }
+
+    /// Write `S` bytes at `seg:off` where `ram_ref` can't, see `read_slow`.
+    #[cold]
+    #[inline(never)]
+    pub fn write_slow(&mut self, seg: Seg, off: u32, size: u8, value: u32) -> CpuResult {
+        let r = self.mem_ref(seg, off, size, Access::Write)?;
+        self.mem_write(r, value);
+        Ok(())
+    }
+
+    /// Read `S` bytes at `seg:off`.
+    #[inline(always)]
+    pub fn read_fast<const S: u8>(&mut self, seg: Seg, off: u32) -> CpuResult<u32> {
+        match self.ram_ref::<S>(seg, off, Access::Read) {
+            Some(p) => Ok(self.bus.ram_read::<S>(p)),
+            None => self.read_slow(seg, off, S),
+        }
+    }
+
+    /// Write `S` bytes at `seg:off`.
+    #[inline(always)]
+    pub fn write_fast<const S: u8>(&mut self, seg: Seg, off: u32, value: u32) -> CpuResult {
+        match self.ram_ref::<S>(seg, off, Access::Write) {
+            Some(p) => {
+                self.bus.ram_write::<S>(p, value);
+                Ok(())
+            }
+            None => self.write_slow(seg, off, S, value),
+        }
+    }
+
+    /// Replace the `S` bytes at `seg:off` with what `f` makes of them,
+    /// checking the access as a write before reading, as a
+    /// read-modify-write instruction does. `f` must be pure: it runs after
+    /// the check.
+    #[inline(always)]
+    pub fn modify_fast<const S: u8>(&mut self, seg: Seg, off: u32, f: impl FnOnce(&mut Self, u32) -> u32) -> CpuResult {
+        match self.ram_ref::<S>(seg, off, Access::Write) {
+            Some(p) => {
+                let value = self.bus.ram_read::<S>(p);
+                let value = f(self, value);
+                self.bus.ram_write::<S>(p, value);
+            }
+            None => {
+                let r = self.mem_ref(seg, off, S, Access::Write)?;
+                let value = self.mem_read(r);
+                let value = f(self, value);
+                self.mem_write(r, value);
+            }
+        }
+        Ok(())
+    }
+
     /// Check an access of `size` bytes at `seg:off`.
     #[inline(always)]
     pub fn mem_ref(&mut self, seg: Seg, off: u32, size: u8, access: Access) -> CpuResult<MemRef> {
@@ -335,8 +418,11 @@ impl Cpu {
     #[inline(always)]
     pub fn push_sized(&mut self, size: u8, value: u32) -> CpuResult {
         let sp = self.stack_offset((size as u32).wrapping_neg());
-        let r = self.mem_ref(Seg::SS, sp, size, Access::Write)?;
-        self.mem_write(r, value);
+        if size == 2 {
+            self.write_fast::<2>(Seg::SS, sp, value)?;
+        } else {
+            self.write_fast::<4>(Seg::SS, sp, value)?;
+        }
         self.set_stack_ptr(sp);
         Ok(())
     }
@@ -355,8 +441,11 @@ impl Cpu {
     #[inline(always)]
     pub fn stack_read(&mut self, depth: u32, size: u8) -> CpuResult<u32> {
         let sp = self.stack_offset(depth);
-        let r = self.mem_ref(Seg::SS, sp, size, Access::Read)?;
-        Ok(self.mem_read(r))
+        match size {
+            2 => self.read_fast::<2>(Seg::SS, sp),
+            4 => self.read_fast::<4>(Seg::SS, sp),
+            _ => self.read_slow(Seg::SS, sp, size),
+        }
     }
 
     /// Write `size` bytes `depth` bytes above the stack pointer as it will be

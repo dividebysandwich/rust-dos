@@ -998,6 +998,45 @@ impl Bus {
         addr + len <= ADDR_VGA_GRAPHICS || (addr >= 0x10_0000 && addr + len <= self.ram.len())
     }
 
+    /// Read `S` bytes (1, 2 or 4) of plain RAM at `addr`, which
+    /// `is_plain_ram` accepted.
+    #[inline(always)]
+    pub fn ram_read<const S: u8>(&self, addr: usize) -> u32 {
+        debug_assert!(self.is_plain_ram(addr, S as usize));
+        // SAFETY: plain RAM is within `ram`.
+        unsafe {
+            let p = self.ram.as_ptr().add(addr);
+            match S {
+                1 => *p as u32,
+                2 => u16::from_le_bytes(*(p as *const [u8; 2])) as u32,
+                _ => u32::from_le_bytes(*(p as *const [u8; 4])),
+            }
+        }
+    }
+
+    /// Write `S` bytes of plain RAM, as `ram_read` reads them, bumping the
+    /// generations of the blocks they are in as `write_8` does.
+    #[inline(always)]
+    pub fn ram_write<const S: u8>(&mut self, addr: usize, value: u32) {
+        debug_assert!(self.is_plain_ram(addr, S as usize));
+        // SAFETY: plain RAM is within `ram`, and there is a generation for
+        // every block of it.
+        unsafe {
+            let p = self.ram.as_mut_ptr().add(addr);
+            match S {
+                1 => *p = value as u8,
+                2 => *(p as *mut [u8; 2]) = (value as u16).to_le_bytes(),
+                _ => *(p as *mut [u8; 4]) = value.to_le_bytes(),
+            }
+            let g = self.page_gen.get_unchecked_mut(addr >> GEN_SHIFT);
+            *g = g.wrapping_add(1);
+            if S > 1 {
+                let g = self.page_gen.get_unchecked_mut((addr + S as usize - 1) >> GEN_SHIFT);
+                *g = g.wrapping_add(1);
+            }
+        }
+    }
+
     #[inline(always)]
     pub fn read_8(&self, addr: usize) -> u8 {
         // Fast path — the vast majority of memory accesses (code fetch,

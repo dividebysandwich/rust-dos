@@ -16,7 +16,7 @@ use iced_x86::{ConditionCode, Instruction, Mnemonic, OpKind, Register};
 use super::Handler;
 use super::operand::{addr_size, mem_seg};
 use crate::cpu::alu::{ShiftOp, size_mask};
-use crate::cpu::{Access, Cpu, CpuFlags, CpuResult, Fault, Seg};
+use crate::cpu::{Cpu, CpuFlags, CpuResult, Fault, Seg};
 
 // ALU operations, as const generic parameters.
 const ADD: u8 = 0;
@@ -294,11 +294,29 @@ fn ea<const A32: bool>(cpu: &Cpu, instr: &Instruction) -> u32 {
     if A32 { ea } else { ea & 0xFFFF }
 }
 
-/// Check the memory operand for an access of `S` bytes.
+/// Read the `S`-byte memory operand.
 #[inline(always)]
-fn mem<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction, access: Access) -> CpuResult<crate::cpu::MemRef> {
+fn read<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult<u32> {
     let off = ea::<A32>(cpu, instr);
-    cpu.mem_ref(mem_seg(instr), off, S, access)
+    cpu.read_fast::<S>(mem_seg(instr), off)
+}
+
+/// Write the `S`-byte memory operand.
+#[inline(always)]
+fn write<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction, value: u32) -> CpuResult {
+    let off = ea::<A32>(cpu, instr);
+    cpu.write_fast::<S>(mem_seg(instr), off, value)
+}
+
+/// Replace the `S`-byte memory operand with what `f` makes of it.
+#[inline(always)]
+fn modify<const S: u8, const A32: bool>(
+    cpu: &mut Cpu,
+    instr: &Instruction,
+    f: impl FnOnce(&mut Cpu, u32) -> u32,
+) -> CpuResult {
+    let off = ea::<A32>(cpu, instr);
+    cpu.modify_fast::<S>(mem_seg(instr), off, f)
 }
 
 /// The immediate operand (the second), sign-extended where the encoding
@@ -322,23 +340,18 @@ fn mov_ri<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 }
 
 fn mov_rm<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let m = mem::<S, A32>(cpu, instr, Access::Read)?;
-    let value = cpu.mem_read(m);
+    let value = read::<S, A32>(cpu, instr)?;
     cpu.set_gpr::<S>(instr.op0_register(), value);
     Ok(())
 }
 
 fn mov_mr<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let m = mem::<S, A32>(cpu, instr, Access::Write)?;
     let value = cpu.gpr::<S>(instr.op1_register());
-    cpu.mem_write(m, value);
-    Ok(())
+    write::<S, A32>(cpu, instr, value)
 }
 
 fn mov_mi<const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let m = mem::<S, A32>(cpu, instr, Access::Write)?;
-    cpu.mem_write(m, imm::<S>(instr));
-    Ok(())
+    write::<S, A32>(cpu, instr, imm::<S>(instr))
 }
 
 // --- ALU ---
@@ -389,9 +402,9 @@ fn alu_ri<const OP: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuR
 }
 
 fn alu_rm<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let m = mem::<S, A32>(cpu, instr, Access::Read)?;
+    let b = read::<S, A32>(cpu, instr)?;
     let dest = instr.op0_register();
-    let (a, b) = (cpu.gpr::<S>(dest), cpu.mem_read(m));
+    let a = cpu.gpr::<S>(dest);
     let r = alu_op::<OP, S>(cpu, a, b);
     if writes(OP) {
         cpu.set_gpr::<S>(dest, r);
@@ -399,26 +412,25 @@ fn alu_rm<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Ins
     Ok(())
 }
 
-fn alu_mr<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let access = if writes(OP) { Access::Write } else { Access::Read };
-    let m = mem::<S, A32>(cpu, instr, access)?;
-    let (a, b) = (cpu.mem_read(m), cpu.gpr::<S>(instr.op1_register()));
-    let r = alu_op::<OP, S>(cpu, a, b);
+/// `memory OP b`, writing the result back unless OP is CMP or TEST.
+#[inline(always)]
+fn alu_m<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction, b: u32) -> CpuResult {
     if writes(OP) {
-        cpu.mem_write(m, r);
+        modify::<S, A32>(cpu, instr, |cpu, a| alu_op::<OP, S>(cpu, a, b))
+    } else {
+        let a = read::<S, A32>(cpu, instr)?;
+        alu_op::<OP, S>(cpu, a, b);
+        Ok(())
     }
-    Ok(())
+}
+
+fn alu_mr<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let b = cpu.gpr::<S>(instr.op1_register());
+    alu_m::<OP, S, A32>(cpu, instr, b)
 }
 
 fn alu_mi<const OP: u8, const S: u8, const A32: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
-    let access = if writes(OP) { Access::Write } else { Access::Read };
-    let m = mem::<S, A32>(cpu, instr, access)?;
-    let a = cpu.mem_read(m);
-    let r = alu_op::<OP, S>(cpu, a, imm::<S>(instr));
-    if writes(OP) {
-        cpu.mem_write(m, r);
-    }
-    Ok(())
+    alu_m::<OP, S, A32>(cpu, instr, imm::<S>(instr))
 }
 
 fn inc_r<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
