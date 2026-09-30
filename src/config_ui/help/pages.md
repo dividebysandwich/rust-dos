@@ -95,12 +95,17 @@ Each game profile has slots of its own.
 Finds a number in the game's memory, such as lives or money, and changes
 it:
 
+- *Value size*: **8-bit** fits most counters; **16-bit** or **32-bit**
+  for money or scores above 255.
+- *Search in*: **conventional memory** for most games, **all memory**
+  for DOS/4GW and other protected-mode games.
 - Type the value the game shows (say, 3 lives) in *New search*, and press
   **Enter**.
 - Close the window, play until the value changes (lose a life), open it
   again, and at *Narrow down* pick *equal to* and type the new value.
 - Repeat until one or a few addresses are left. **Enter** sets one to a
-  new value; **Ins** freezes it so it never changes.
+  new value; **Ins** freezes it so it never changes, **Del** drops it or
+  unfreezes it.
 
 For a bar without a number (energy), search with no value, then narrow
 down by *decreased* or *increased* as the bar changes.

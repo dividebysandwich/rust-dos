@@ -54,6 +54,8 @@ The display card games find, which decides the graphics they choose:
   games.
 - **S3 Trio64**: for Windows 95 or 3.1 booted from a disk
   image.
+- **S3 ViRGE (3D)**, **S3 ViRGE/VX (3D)**: for Direct3D games in
+  Windows 95, with S3's driver installed there.
 - **VGA**, **EGA**, **CGA**, **Hercules**: older cards, for games that
   misbehave on newer ones, or to see a game's EGA or CGA graphics.
 - **Tandy 1000**, **IBM PCjr**: the home computers some 1980s Sierra games have
@@ -125,8 +127,9 @@ try: those games then run as on plain DOS.
 # Reported DOS version {#dos-version}
 
 The DOS version games are told. **5.00** suits nearly everything. A
-program that complains about the DOS version may want **6.22**, and disk
-tools for Windows 95's disks want **7.10**.
+program that complains about the DOS version may want **6.22**. Disk
+tools for Windows 95's disks want its DOS: **7.00** as in the first
+Windows 95, **7.10** as in the later ones with FAT32.
 
 # IDE hard disks {#ide-hard-disks}
 

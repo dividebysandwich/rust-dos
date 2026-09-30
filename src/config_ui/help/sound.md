@@ -81,7 +81,10 @@ What plays the music of games set up for *General MIDI*, *Roland* or
   General MIDI sound.
 - **MT-32 (munt)**: an emulated Roland MT-32, for Sierra, LucasArts and
   Origin games of 1988-1992, which sound best on one. Needs the MT-32 ROMs.
+- **Ultrasound patches**: the built-in Ultrasound instruments, even
+  with a SoundFont picked.
 - **host MIDI port**: a synthesizer or MIDI device of your computer.
+- **none**: no MIDI music.
 
 In the game's setup, pick *General MIDI* (or *Roland MT-32* with the
 MT-32) at port **330**.

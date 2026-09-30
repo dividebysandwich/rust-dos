@@ -17,7 +17,12 @@ loud it plays now, so you can see which source a sound comes from:
 - **Sound Blaster**: sound effects and speech.
 - **FM synthesizer**: AdLib and Sound Blaster music.
 - **Gravis Ultrasound**, **MIDI**: music.
+- **AWE32 wavetable**: the AWE32's music, apart from its Sound Blaster
+  sound.
 - **CD audio**: music played from a game's CD.
+- **Covox/Disney**, **Tandy/PCjr**: those sound devices' speech, sound
+  and music.
+- **Disk noise**: the hard and floppy disk sounds.
 
 For instance, if a game's music drowns the speech, turn down **FM synthesizer** or
 **MIDI**.
