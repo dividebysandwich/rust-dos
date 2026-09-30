@@ -64,6 +64,37 @@ pub fn handler(instr: &Instruction) -> Handler {
     fast::select(instr).unwrap_or(execute_instruction)
 }
 
+/// Whether `instr` is simple: its handler changes nothing the execution
+/// loop checks between instructions (CS, the privilege level, IF, TF, the
+/// interrupt shadow, paging and the TLB, the A20 gate, I/O ports and the
+/// CPU's state), only EIP, general-purpose registers, flags other than
+/// those, the FPU and memory, or it faults (see `exec::chain`). Every form
+/// `fast::select` has a handler for is one; `fast` says whether it did.
+pub fn simple(instr: &Instruction, fast: bool) -> bool {
+    use Mnemonic::*;
+    if fast {
+        return true;
+    }
+    // Segment, control, debug and FPU/MMX register operands.
+    let special = (0..instr.op_count())
+        .any(|i| instr.op_kind(i) == iced_x86::OpKind::Register && !instr.op_register(i).is_gpr());
+    match instr.mnemonic() {
+        Push | Pop => !special,
+        Call | Jmp => !instr.is_call_far() && !instr.is_call_far_indirect() && !instr.is_jmp_far()
+            && !instr.is_jmp_far_indirect(),
+        Mov | Movzx | Movsx | Xchg | Lea | Pusha | Pushad | Popa | Popad | Xlatb | Lahf | Sahf | Salc
+        | Bswap | Xadd | Cmpxchg | Cbw | Cwde | Cwd | Cdq | Add | Adc | Sub | Sbb | Cmp | And | Or | Xor
+        | Test | Inc | Dec | Neg | Not | Mul | Imul | Div | Idiv | Daa | Das | Aaa | Aas | Aam | Aad | Rol
+        | Ror | Rcl | Rcr | Shl | Sal | Shr | Sar | Shld | Shrd | Bt | Bts | Btr | Btc | Bsf | Bsr | Seto
+        | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
+        | Setle | Setg | Ret | Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge
+        | Jle | Jg | Jcxz | Jecxz | Loop | Loope | Loopne | Enter | Leave | Movsb | Movsw | Movsd | Cmpsb
+        | Cmpsw | Cmpsd | Scasb | Scasw | Scasd | Lodsb | Lodsw | Lodsd | Stosb | Stosw | Stosd | Clc
+        | Stc | Cmc | Cld | Std | Nop | Pause => !special,
+        _ => false,
+    }
+}
+
 pub fn execute_instruction(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     use Mnemonic::*;
     match instr.mnemonic() {

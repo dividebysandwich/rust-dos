@@ -26,7 +26,7 @@
 
 use iced_x86::Instruction;
 
-use crate::instructions::{Handler, execute_instruction, fast};
+use crate::instructions::{self, Handler, execute_instruction, fast};
 
 /// One cache slot, keyed by the physical address, the instruction pointer
 /// (iced stores absolute branch targets, so the same bytes decoded at
@@ -67,9 +67,8 @@ struct BytesSlot {
     instr: Instruction,
 }
 
-/// The bit of `Slot::version` that marks a simple instruction: one that
-/// `fast::select` has a handler for, which changes nothing the execution
-/// loop checks between instructions but EIP (see `exec::chain`).
+/// The bit of `Slot::version` that marks a simple instruction (see
+/// `instructions::simple`).
 const SIMPLE: u64 = 1 << 63;
 
 /// A decoded instruction, its handler, and whether it is simple.
@@ -184,11 +183,12 @@ impl InstrCache {
         decode(&mut slot.instr);
         self.code[idx].copy_from_slice(&ram[phys_ip..phys_ip + 16]);
         let fast = fast::select(&slot.instr);
+        let simple = instructions::simple(&slot.instr, fast.is_some());
         slot.handler = fast.unwrap_or(execute_instruction);
         slot.addr = addr;
-        slot.version = (page_gen as u64) << 1 | code32 as u64 | if fast.is_some() { SIMPLE } else { 0 };
+        slot.version = (page_gen as u64) << 1 | code32 as u64 | if simple { SIMPLE } else { 0 };
         self.misses += 1;
-        (&slot.instr, slot.handler, fast.is_some())
+        (&slot.instr, slot.handler, simple)
     }
 
     /// The instruction decoded from `bytes` at `ip` as 16 or 32-bit code,

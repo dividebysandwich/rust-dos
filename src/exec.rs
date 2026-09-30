@@ -963,7 +963,7 @@ fn execute_at<const HOOK: bool, const CHAIN: bool>(
     None
 }
 
-/// Run on from a simple instruction (see `instr_cache::SIMPLE`), which
+/// Run on from a simple instruction (see `instructions::simple`), which
 /// changed nothing the execution loop checks between instructions but EIP,
 /// so the ones after it need only what else can change looked at: the next
 /// timer event, an interrupt request, the code window, and the decoded-
