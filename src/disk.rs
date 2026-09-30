@@ -696,6 +696,10 @@ pub struct DiskController {
     /// The state file being loaded, whose copies of disks the drives are
     /// offered once they are mounted as it has them (savestate/disks.rs).
     pub(crate) copies_from: Option<PathBuf>,
+    /// The disks made of shared host directories that a state being loaded
+    /// has, with their manifests, for once the drives are mounted as it
+    /// has them (`restore_shared`).
+    pub(crate) shared_from_state: Option<Vec<(u8, String)>>,
 }
 
 impl DiskController {
@@ -742,6 +746,7 @@ impl DiskController {
             emm_device: false,
             reverts: Vec::new(),
             copies_from: None,
+            shared_from_state: None,
         };
         disk.open_standard_devices();
         disk
@@ -1369,11 +1374,42 @@ impl DiskController {
         lines
     }
 
-    /// At a booted system's shutdown: copy what it changed on the shared
-    /// disks into the host directories, and let go of the disks. Returns
-    /// what the log should say.
-    pub fn finish_shared_disks(&mut self) -> Vec<String> {
-        let lines = self.sync_shared(None, true);
+    /// The drives with disks made of shared host directories and their
+    /// manifests, as a state keeps them.
+    pub(crate) fn shared_manifests(&self) -> Vec<(u8, String)> {
+        self.shared_drives()
+            .into_iter()
+            .filter_map(|d| Some((d, self.drive(d)?.shared.as_ref()?.manifest.to_text())))
+            .collect()
+    }
+
+    /// The disks of shared host directories a state being loaded has: an
+    /// empty one for each drive that has none, which the state's
+    /// checkpoint fills from the copy beside the state file, and the
+    /// state's manifest.
+    pub(crate) fn restore_shared(&mut self) -> Result<(), String> {
+        let Some(list) = self.shared_from_state.take() else { return Ok(()) };
+        for (drive, text) in list {
+            let manifest = crate::shared_disk::Manifest::from_text(&text).ok_or("a broken manifest")?;
+            let d = self.drives.get_mut(drive as usize).and_then(Option::as_mut);
+            let Some(d) = d.filter(|d| d.kind == DriveKind::HardDisk && d.host_root().is_some()) else {
+                return Err(format!("drive {} isn't a host directory, which the system had as a disk", drive_name(drive)));
+            };
+            if d.shared.is_none() {
+                let root = d.host_root().expect("a host directory").to_path_buf();
+                d.shared = Some(crate::shared_disk::SharedDisk::empty(&root)?);
+            }
+            d.shared.as_mut().expect("a shared disk").manifest = manifest;
+        }
+        Ok(())
+    }
+
+    /// At a booted system's shutdown (`last`): copy what it changed on the
+    /// shared disks into the host directories, and let go of the disks.
+    /// Otherwise, as it goes away without one (a state of the built-in DOS
+    /// loaded over it), without deleting. Returns what the log should say.
+    pub fn finish_shared_disks(&mut self, last: bool) -> Vec<String> {
+        let lines = self.sync_shared(None, last);
         for d in self.drives.iter_mut().flatten() {
             d.shared = None;
         }

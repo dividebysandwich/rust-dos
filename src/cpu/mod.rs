@@ -1128,7 +1128,7 @@ impl Cpu {
         if self.bus.boot.take().is_some() {
             // What it changed on the host folders it had as disks goes
             // into them.
-            for line in self.bus.disk.finish_shared_disks() {
+            for line in self.bus.disk.finish_shared_disks(true) {
                 self.bus.log_string(&format!("[BOOT] {}", line));
                 self.bus.disk_notices.push(line);
             }

@@ -717,16 +717,17 @@ impl DiskImage {
                 std::fs::copy(&self.path, &partial).map_err(error)?;
             }
             Backing::Memory { data, .. } => {
+                // Pieces of zeros are holes in the file where it can have
+                // them: a big disk made in memory is mostly empty.
                 let data = data.borrow();
                 let mut out = File::create(&partial).map_err(error)?;
-                let mut buf = vec![0u8; CHUNK];
-                let mut at = 0u64;
-                while at < data.len() {
-                    let len = (data.len() - at).min(CHUNK as u64) as usize;
-                    data.read_at(at, &mut buf[..len]);
-                    out.write_all(&buf[..len]).map_err(error)?;
-                    at += len as u64;
+                for index in 0..data.chunk_count() {
+                    if let Some(chunk) = data.chunk(index) {
+                        out.seek(SeekFrom::Start((index * CHUNK) as u64)).map_err(error)?;
+                        out.write_all(chunk).map_err(error)?;
+                    }
                 }
+                out.set_len(data.len()).map_err(error)?;
             }
         }
         std::fs::rename(&partial, dest).map_err(error)

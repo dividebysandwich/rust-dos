@@ -19,6 +19,7 @@ const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
+const SHARED_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 macro_rules! save_all {
@@ -176,6 +177,19 @@ impl Bus {
         // did.
         if vga.adapter.is_virge() {
             w.section(b"VIRG", VIRGE_VERSION, |w| virge.save(w));
+        }
+        // A booted system's disks made of shared host directories, before
+        // the drives, which need them for their checkpoints; only with
+        // them, so other states load as they did.
+        let shared = disk.shared_manifests();
+        if !shared.is_empty() {
+            w.section(b"SHRD", SHARED_VERSION, |w| {
+                shared.len().save(w);
+                for (drive, manifest) in &shared {
+                    drive.save(w);
+                    manifest.save(w);
+                }
+            });
         }
         w.section(b"DOS ", DOS_VERSION, |w| {
             save_all!(w; xms, mouse, mscdex, disk_io);
@@ -370,6 +384,18 @@ impl Bus {
         if r.next_is(b"VIRG") {
             virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;
         }
+        disk.shared_from_state = None;
+        if r.next_is(b"SHRD") {
+            let mut section = r.section(b"SHRD", SHARED_VERSION)?;
+            let mut shared = Vec::new();
+            for _ in 0..section.count()? {
+                let (mut drive, mut manifest) = (0u8, String::new());
+                drive.load(&mut section)?;
+                manifest.load(&mut section)?;
+                shared.push((drive, manifest));
+            }
+            disk.shared_from_state = Some(shared);
+        }
         // The drives before the sound: the CD playing is in one.
         let mut section = r.section(b"DOS ", DOS_VERSION)?;
         load_all!(&mut section; xms, mouse, mscdex, disk_io);
@@ -460,6 +486,16 @@ impl Bus {
         }
         // A booted system's disks keep journals; the built-in DOS's don't.
         self.disk.keep_journals(self.boot.is_some());
+        // A state of the built-in DOS over a booted system: what it wrote
+        // on the host directories it had as disks goes into them, and the
+        // discs made of host folders go.
+        if self.boot.is_none() {
+            for line in self.disk.finish_shared_disks(false) {
+                self.log_string(&format!("[STATE] {}", line));
+                self.disk_notices.push(line);
+            }
+            self.disk.drop_boot_cds();
+        }
         if self.boot.is_some() {
             for line in self.disk.prepare_boot_cds() {
                 self.log_string(&format!("[IDE] {}", line));

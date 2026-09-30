@@ -52,6 +52,7 @@ impl DiskController {
             emm_device: _,
             reverts: _,
             copies_from: _,
+            shared_from_state: _,
         } = self;
         current_drive.save(w);
         for drive in &drives[..LASTDRIVE as usize] {
@@ -107,6 +108,7 @@ impl DiskController {
             self.load_drive(drive, r)?;
         }
         self.current_drive = if self.is_mounted(current) { current } else { DRIVE_C };
+        self.restore_shared().map_err(StateError::Mismatch)?;
         self.reverts.clear();
         self.load_checkpoints(0..LASTDRIVE, r)?;
 

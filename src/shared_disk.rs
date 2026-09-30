@@ -267,6 +267,15 @@ impl SharedDisk {
         Ok((SharedDisk { root: root.to_path_buf(), disk, manifest }, skipped))
     }
 
+    /// An empty disk for the folder `root`, which a state's copy of the
+    /// disk fills.
+    pub fn empty(root: &Path) -> Result<SharedDisk, String> {
+        let bytes = GEOMETRY.total() * crate::diskimage::SECTOR_SIZE as u64;
+        let data = crate::diskimage::MemoryImage::new(bytes);
+        let disk = DiskImage::from_memory(&root.display().to_string(), data, false, Some(GEOMETRY), false)?;
+        Ok(SharedDisk { root: root.to_path_buf(), disk: Rc::new(disk), manifest: Manifest::default() })
+    }
+
     /// Copy what the system changed on the disk into the folder. `last`
     /// is the copy at its shutdown; others (while it runs) delete nothing,
     /// as its caches may not have written everything yet.

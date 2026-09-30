@@ -398,3 +398,62 @@ fn host_directories_are_hard_disks_of_a_booted_system() {
     assert!(cpu.bus.disk_notices.iter().any(|n| n.contains("1 deleted")));
     cpu.bus.unmount_drive(3).unwrap();
 }
+
+/// A state of a booted system with a shared host directory takes the
+/// directory's disk back with it, and its record of what was copied back
+/// when: in the same run through the journal, in another from the copy
+/// beside the state file.
+#[test]
+fn a_booted_systems_state_takes_its_shared_disk_back() {
+    use rust_dos::savestate::{disks, machine as states};
+    let folder = std::fs::canonicalize("target/test_boot").unwrap().join("shared_state_folder");
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let boot = |name: &str| {
+        let mut cpu = machine(name);
+        cpu.bus.mount_drive(3, &folder, MountOptions::default(), false).unwrap();
+        cpu
+    };
+    let volume = |cpu: &Cpu| {
+        let disk = cpu.bus.disk.bios_image(3).unwrap();
+        let (start, sectors) = disk.fat_volume().unwrap();
+        rust_dos::fat::FatVolume::open(disk, start, sectors).unwrap()
+    };
+    let put = |cpu: &Cpu, name: &str| {
+        let file = volume(cpu).create_long(&[], name, 0).unwrap();
+        volume(cpu).write(file.at.unwrap(), 0, name.as_bytes()).unwrap();
+    };
+    let names = |cpu: &Cpu| -> Vec<String> {
+        volume(cpu).list(&[]).unwrap().into_iter().filter_map(|e| e.long_name).collect()
+    };
+
+    let mut cpu = boot("shared_state");
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    put(&cpu, "Before the state.txt");
+    let state = states::save(&cpu);
+    let file = PathBuf::from("target/test_boot/shared_state/booted.state");
+    disks::save_copies(&cpu, &file).unwrap();
+    let copy = disks::copy_path(&file, 3);
+    assert!(std::fs::metadata(&copy).unwrap().len() > 1 << 30, "the whole disk");
+
+    // Written and copied back after the state: the state takes the disk
+    // back, and the host keeps the file.
+    put(&cpu, "After the state.txt");
+    cpu.bus.sync_shared(None);
+    states::load(&mut cpu, &state).unwrap();
+    assert_eq!(names(&cpu), ["Before the state.txt"]);
+    cpu.load_shell();
+    assert!(folder.join("Before the state.txt").is_file());
+    assert!(folder.join("After the state.txt").is_file());
+
+    // Another run, with the folder mounted but no system booted.
+    let mut cpu = boot("shared_state_again");
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert!(cpu.bus.boot.is_some());
+    assert_eq!(names(&cpu), ["Before the state.txt"]);
+    disks::delete_copies(&file);
+}
