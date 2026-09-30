@@ -127,8 +127,8 @@ pub fn build(root: &Path, label: &str) -> Result<FolderImage, String> {
     let mut next = PVD + 3;
     let mut tables = [[0u32; 2]; 2];
     for tree in [Tree::Primary, Tree::Joliet] {
-        for kind in 0..2 {
-            tables[tree as usize][kind] = next;
+        for table in &mut tables[tree as usize] {
+            *table = next;
             next += table_len[tree as usize].div_ceil(DATA_SECTOR as u32).max(1);
         }
     }

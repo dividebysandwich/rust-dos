@@ -76,6 +76,9 @@ pub struct Entry {
     pub size: u32,
     /// Where the entry is; None for the root directory.
     pub at: Option<EntryRef>,
+    /// The long file name in front of the entry, as Windows 95 writes
+    /// them; `list` reads it.
+    pub long_name: Option<String>,
 }
 
 impl Entry {
@@ -84,7 +87,7 @@ impl Entry {
     }
 
     fn root() -> Self {
-        Entry { name: String::new(), attr: ATTR_DIRECTORY, time: 0, date: 0, cluster: 0, size: 0, at: None }
+        Entry { name: String::new(), attr: ATTR_DIRECTORY, time: 0, date: 0, cluster: 0, size: 0, at: None, long_name: None }
     }
 
     fn parse(raw: &[u8], at: EntryRef) -> Self {
@@ -97,6 +100,7 @@ impl Entry {
             cluster: word(26) as u32,
             size: u32::from_le_bytes([raw[28], raw[29], raw[30], raw[31]]),
             at: Some(at),
+            long_name: None,
         }
     }
 }
@@ -156,6 +160,74 @@ pub fn canonical_name(name: &str) -> Option<String> {
 /// case.
 fn same_name(raw: &[u8], want: &[u8; 11]) -> bool {
     raw[..11].iter().zip(want).all(|(a, b)| a.to_ascii_uppercase() == *b)
+}
+
+/// Where a long file name entry has its 13 UTF-16 characters.
+const LFN_OFFSETS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+
+/// The checksum of a DOS name that its long name entries carry.
+fn checksum(name: &[u8; 11]) -> u8 {
+    name.iter().fold(0u8, |sum, &b| sum.rotate_right(1).wrapping_add(b))
+}
+
+/// The long name that the long name entries `chain` (as they are on the
+/// disk, the last part first) give the entry named `name`, if they are a
+/// whole one that belongs to it.
+fn long_name(chain: &[[u8; ENTRY_SIZE]], name: &[u8; 11]) -> Option<String> {
+    let first = chain.first()?;
+    let count = (first[0] & 0x3F) as usize;
+    if first[0] & 0x40 == 0 || count != chain.len() {
+        return None;
+    }
+    let sum = checksum(name);
+    let mut units = Vec::new();
+    for (i, raw) in chain.iter().rev().enumerate() {
+        if (raw[0] & 0x3F) as usize != i + 1 || raw[13] != sum {
+            return None;
+        }
+        for &offset in &LFN_OFFSETS {
+            units.push(u16::from_le_bytes([raw[offset], raw[offset + 1]]));
+        }
+    }
+    let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+    Some(String::from_utf16_lossy(&units[..end]))
+}
+
+/// The DOS name Windows 95 makes for the long name `long`: the start of
+/// its name without spaces, with ~1, ~2 and so on, and the start of its
+/// extension, none of which are in `taken`.
+fn alias(long: &str, taken: &[[u8; 11]]) -> Option<[u8; 11]> {
+    let clean = |part: &str| -> String {
+        part.chars()
+            .filter(|&c| c != ' ' && c != '.')
+            .map(|c| {
+                let c = c.to_ascii_uppercase();
+                if c.is_ascii_alphanumeric() || "!#$%&'()-@^_`{}~".contains(c) { c } else { '_' }
+            })
+            .collect()
+    };
+    let trimmed = long.trim_start_matches('.');
+    let (stem, ext) = match trimmed.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, ext),
+        _ => (trimmed, ""),
+    };
+    let mut stem = clean(stem);
+    if stem.is_empty() {
+        stem = "_".to_string();
+    }
+    let ext: String = clean(ext).chars().take(3).collect();
+    (1..1_000_000u32).find_map(|n| {
+        let suffix = format!("~{}", n);
+        let keep = stem.len().min(8 - suffix.len()).min(if n < 10 { 6 } else { 8 });
+        let mut raw = [b' '; 11];
+        for (i, b) in stem.bytes().take(keep).chain(suffix.bytes()).enumerate() {
+            raw[i] = b;
+        }
+        for (i, b) in ext.bytes().enumerate() {
+            raw[8 + i] = b;
+        }
+        (!taken.contains(&raw)).then_some(raw)
+    })
 }
 
 /// The width of a volume's FAT entries, which its cluster count decides.
@@ -757,17 +829,169 @@ impl FatVolume {
     }
 
     /// The files and directories in the directory at `path`, in the order
-    /// they're on the disk. Volume labels, long names and deleted entries
-    /// are left out.
+    /// they're on the disk, with their long names. Volume labels and
+    /// deleted entries are left out.
     pub fn list(&self, path: &[&str]) -> Result<Vec<Entry>, u8> {
         let state = self.state();
         let dir = self.dir_in(&state, path)?;
-        Ok(self
-            .slots(&state, &dir)?
-            .into_iter()
-            .filter(|(_, raw)| raw[0] != DELETED && raw[11] != ATTR_LONG_NAME && raw[11] & ATTR_VOLUME == 0)
-            .map(|(at, raw)| state.params.entry(&raw, at))
-            .collect())
+        self.list_in(&state, &dir)
+    }
+
+    /// Create the empty file `long` in the directory at `dir` (a path of
+    /// DOS names), with a long file name entry as Windows 95 writes it
+    /// where `long` isn't a DOS name already. Returns the entry, whose
+    /// `name` is the DOS name made for it. 05h if the name is taken.
+    pub fn create_long(&self, dir: &[&str], long: &str, attr: u8) -> Result<Entry, u8> {
+        let mut state = self.state();
+        let result = (|| {
+            let dir = self.dir_in(&state, dir)?;
+            self.add_long_entry(&mut state, &dir, long, (attr & ATTR_CHANGEABLE) | ATTR_ARCHIVE, 0)
+        })();
+        let finished = self.finish(&mut state);
+        let entry = result?;
+        finished.map(|()| entry)
+    }
+
+    /// Create the directory `long` in the directory at `dir`, as
+    /// `create_long` a file.
+    pub fn mkdir_long(&self, dir: &[&str], long: &str) -> Result<Entry, u8> {
+        let mut state = self.state();
+        let result = (|| {
+            let parent = self.dir_in(&state, dir)?;
+            let cluster = state.allocate().ok_or(DISK_FULL)?;
+            let entry = match self.add_long_entry(&mut state, &parent, long, ATTR_DIRECTORY, cluster) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    state.set(cluster, 0);
+                    return Err(e);
+                }
+            };
+            let first = self.zero_cluster(&state, cluster)?;
+            let mut dots = [0u8; SECTOR_SIZE];
+            dots[..ENTRY_SIZE].copy_from_slice(&Self::new_entry(b".          ", ATTR_DIRECTORY, cluster));
+            dots[ENTRY_SIZE..2 * ENTRY_SIZE]
+                .copy_from_slice(&Self::new_entry(b"..         ", ATTR_DIRECTORY, parent.cluster));
+            self.write_sector(first, &dots)?;
+            Ok(entry)
+        })();
+        let finished = self.finish(&mut state);
+        let entry = result?;
+        finished.map(|()| entry)
+    }
+
+    /// Put an entry named `long` in `dir`: the long name entries, if it
+    /// needs them, and the entry with its DOS name.
+    fn add_long_entry(&self, state: &mut State, dir: &Entry, long: &str, attr: u8, cluster: u32) -> Result<Entry, u8> {
+        let long = long.trim_end_matches(['.', ' ']);
+        let units: Vec<u16> = long.encode_utf16().collect();
+        if units.is_empty() || units.len() > 255 || long.chars().any(|c| c < ' ' || "\\/:*?\"<>|".contains(c)) {
+            return Err(PATH_NOT_FOUND);
+        }
+        let names = self.list_in(state, dir)?;
+        let taken: Vec<[u8; 11]> = names.iter().filter_map(|e| short_name(&e.name)).collect();
+        let clash = |name: &str| {
+            names.iter().any(|e| e.name.eq_ignore_ascii_case(name) || e.long_name.as_deref().is_some_and(|l| l.to_lowercase() == name.to_lowercase()))
+        };
+        if clash(long) {
+            return Err(ACCESS_DENIED);
+        }
+        // A DOS name as it is needs no long name; one in lower case keeps
+        // its case in one.
+        let exact = short_name(long).filter(|raw| display_name(raw).eq_ignore_ascii_case(long) && raw[0] != b'.');
+        let (name, needs_long) = match exact {
+            Some(raw) if display_name(&raw) == long => (raw, false),
+            Some(raw) => (raw, true),
+            None => (alias(long, &taken).ok_or(ACCESS_DENIED)?, true),
+        };
+        let pieces = if needs_long { units.len().div_ceil(13) } else { 0 };
+        let run = self.free_run(state, dir, pieces + 1)?;
+        let sum = checksum(&name);
+        for (i, &at) in run[..pieces].iter().enumerate() {
+            let seq = pieces - i;
+            let mut raw = [0u8; ENTRY_SIZE];
+            raw[0] = seq as u8 | if i == 0 { 0x40 } else { 0 };
+            raw[11] = ATTR_LONG_NAME;
+            raw[13] = sum;
+            let part = (seq - 1) * 13;
+            for (k, &offset) in LFN_OFFSETS.iter().enumerate() {
+                let unit = match (part + k).cmp(&units.len()) {
+                    std::cmp::Ordering::Less => units[part + k],
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 0xFFFF,
+                };
+                raw[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+            self.write_raw(at, &raw)?;
+        }
+        let raw = Self::new_entry(&name, attr, cluster);
+        let at = run[pieces];
+        self.write_raw(at, &raw)?;
+        let mut entry = state.params.entry(&raw, at);
+        entry.long_name = needs_long.then(|| long.to_string());
+        Ok(entry)
+    }
+
+    /// `list` for a directory entry already found.
+    fn list_in(&self, state: &State, dir: &Entry) -> Result<Vec<Entry>, u8> {
+        let mut entries = Vec::new();
+        let mut long: Vec<[u8; ENTRY_SIZE]> = Vec::new();
+        for (at, raw) in self.slots(state, dir)? {
+            if raw[0] != DELETED && raw[11] == ATTR_LONG_NAME {
+                long.push(raw);
+                continue;
+            }
+            let chain = std::mem::take(&mut long);
+            if raw[0] == DELETED || raw[11] & ATTR_VOLUME != 0 {
+                continue;
+            }
+            let mut entry = state.params.entry(&raw, at);
+            entry.long_name = long_name(&chain, raw[..11].try_into().unwrap());
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    /// `count` free entry slots in a row in `dir`, growing a subdirectory
+    /// (or FAT32's root directory) by clusters until there are. A FAT12 or
+    /// FAT16 root directory can't grow: 05h.
+    fn free_run(&self, state: &mut State, dir: &Entry, count: usize) -> Result<Vec<EntryRef>, u8> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        let mut run: Vec<EntryRef> = Vec::new();
+        let mut ended = false;
+        for sector in self.dir_sectors(state, dir) {
+            self.read_sector(sector, &mut buf)?;
+            for index in 0..ENTRIES_PER_SECTOR {
+                let first = buf[index * ENTRY_SIZE];
+                // Everything after the end marker is free.
+                ended |= first == 0;
+                if ended || first == DELETED {
+                    run.push(EntryRef { sector, index });
+                    if run.len() == count {
+                        return Ok(run);
+                    }
+                } else {
+                    run.clear();
+                }
+            }
+        }
+        if dir.cluster == 0 && !state.params.fat32() {
+            return Err(ACCESS_DENIED);
+        }
+        let per_cluster = state.params.bpb.sectors_per_cluster as u64;
+        while run.len() < count {
+            let last = *state.chain(state.dir_cluster(dir)).last().ok_or(ACCESS_DENIED)?;
+            let cluster = state.allocate().ok_or(ACCESS_DENIED)?;
+            state.set(last, cluster);
+            let first = self.zero_cluster(state, cluster)?;
+            for sector in first..first + per_cluster {
+                for index in 0..ENTRIES_PER_SECTOR {
+                    if run.len() < count {
+                        run.push(EntryRef { sector, index });
+                    }
+                }
+            }
+        }
+        Ok(run)
     }
 
     fn raw_entry(&self, at: EntryRef) -> Result<[u8; SECTOR_SIZE], u8> {
@@ -1326,6 +1550,74 @@ mod tests {
         assert_eq!(display_name(b"README  TXT"), "README.TXT");
         assert_eq!(display_name(b"DIR        "), "DIR");
         assert_eq!(display_name(b"\x05BC     DAT"), "\u{E5}BC.DAT");
+    }
+
+    #[test]
+    fn long_names() {
+        let volume = floppy("long.img");
+        let names = [
+            "A long file name.txt",
+            "A long file name.doc",
+            "A longer file name.txt",
+            "readme.txt",
+            "ÜBER alles",
+            &"x".repeat(255),
+            "exactly 26 characters.abc",
+        ];
+        for name in names {
+            let entry = volume.create_long(&[], name, 0).unwrap();
+            volume.write(entry.at.unwrap(), 0, name.as_bytes()).unwrap();
+        }
+        assert_eq!(volume.create_long(&[], "a LONG file name.TXT", 0), Err(ACCESS_DENIED));
+        assert_eq!(volume.create_long(&[], "bad:name", 0), Err(PATH_NOT_FOUND));
+        let dir = volume.mkdir_long(&[], "My Saved Games").unwrap();
+        assert_eq!(dir.name, "MYSAVE~1");
+        let inner = volume.create_long(&["MYSAVE~1"], "Slot one.sav", 0).unwrap();
+        assert_eq!(inner.name, "SLOTON~1.SAV");
+        let plain = volume.create_long(&[], "PLAIN.TXT", 0).unwrap();
+        assert_eq!(plain.long_name, None);
+
+        let listed: Vec<(String, Option<String>)> =
+            volume.list(&[]).unwrap().into_iter().map(|e| (e.name, e.long_name)).collect();
+        let long = |s: &str| Some(s.to_string());
+        assert_eq!(listed[0], ("ALONGF~1.TXT".to_string(), long("A long file name.txt")));
+        assert_eq!(listed[1], ("ALONGF~1.DOC".to_string(), long("A long file name.doc")));
+        assert_eq!(listed[2], ("ALONGE~1.TXT".to_string(), long("A longer file name.txt")));
+        assert_eq!(listed[3], ("README.TXT".to_string(), long("readme.txt")));
+        assert_eq!(listed[4], ("_BERAL~1".to_string(), long("ÜBER alles")));
+        assert_eq!(listed[5].1.as_deref(), Some("x".repeat(255).as_str()));
+        assert_eq!(listed[6].1.as_deref(), Some("exactly 26 characters.abc"));
+        assert_eq!(listed[8], ("PLAIN.TXT".to_string(), None));
+        assert_eq!(contents(&volume, &["ALONGE~1.TXT"]), b"A longer file name.txt");
+        let inside = volume.list(&["MYSAVE~1"]).unwrap();
+        assert_eq!(inside[2].long_name.as_deref(), Some("Slot one.sav"));
+
+        // Deleting takes the long name along; a DOS rename leaves none.
+        volume.remove(&["ALONGF~1.TXT"]).unwrap();
+        volume.rename(&["ALONGF~1.DOC"], &["SHORT.DOC"]).unwrap();
+        let listed = volume.list(&[]).unwrap();
+        assert!(listed.iter().all(|e| e.long_name.as_deref() != Some("A long file name.txt")));
+        assert_eq!(listed.iter().find(|e| e.name == "SHORT.DOC").unwrap().long_name, None);
+        // A long name whose checksum isn't its entry's is none.
+        let mut chain = [[0u8; ENTRY_SIZE]];
+        chain[0][0] = 0x41;
+        chain[0][11] = ATTR_LONG_NAME;
+        assert_eq!(long_name(&chain, b"README  TXT"), None);
+        chain[0][13] = checksum(b"README  TXT");
+        assert_eq!(long_name(&chain, b"README  TXT").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_full_root_directory_takes_no_more_long_names() {
+        let volume = floppy("full_root.img");
+        let mut made = 0;
+        while volume.create_long(&[], &format!("A rather long name number {}", made), 0).is_ok() {
+            made += 1;
+        }
+        // 224 slots: the label's, and four for each (three long name
+        // entries).
+        assert_eq!(made, 223 / 4);
+        assert_eq!(volume.create_long(&[], "one more long name that has no room", 0), Err(ACCESS_DENIED));
     }
 
     #[test]
