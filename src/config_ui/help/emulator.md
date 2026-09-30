@@ -94,6 +94,12 @@ graphics card.
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few
 late games want **32** or **64 MB**.
 
+How much there can be depends on the processor, as with the motherboards
+of its day: up to **64 MB** with a 386, **128 MB** with a 486, **256 MB**
+with a Pentium and **512 MB** with a Pentium MMX. Picking a smaller
+processor brings the memory down to what it takes. Save states and rewind
+grow with the memory.
+
 Takes effect the next time Rust-DOS starts: save with **F2**, then restart.
 
 # Expanded memory (EMS) {#ems}

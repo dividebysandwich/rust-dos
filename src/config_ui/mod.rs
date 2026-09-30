@@ -32,7 +32,7 @@ pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
 
-use crate::config::{MAX_MEMSIZE, MIN_MEMSIZE, MidiSynth, Settings};
+use crate::config::{MidiSynth, Settings};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::{DRIVE_C, DriveInfo, DriveKind, drive_letter};
 use crate::diskio::{DiskClass, DiskSpeed, NoiseMode};
@@ -582,10 +582,24 @@ const CYCLES_MAX: u32 = u32::MAX - 1;
 const CYCLES_AUTO: u32 = u32::MAX;
 const REWIND_MEMORY: [usize; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 
-/// The memory's slider: a square for every 4 MB, and the deadzone's, one
-/// for every 5%.
-const MEMSIZE_UNIT: u16 = 4;
+/// The memory sizes the slider steps through, as far as the CPU takes
+/// (`CpuModel::max_memsize`).
+const MEMSIZES: [usize; 16] = [2, 4, 8, 12, 16, 20, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512];
+
+/// The deadzone's slider: a square for every 5%.
 const DEADZONE_UNIT: u16 = 5;
+
+/// The memory sizes up to what `cpu` takes.
+fn memsizes(cpu: CpuModel) -> impl DoubleEndedIterator<Item = usize> + Clone {
+    MEMSIZES.into_iter().filter(move |&mb| mb <= cpu.max_memsize())
+}
+
+/// The memory's slider: a square for every step above the least.
+fn memsize_bar(mb: usize, cpu: CpuModel) -> String {
+    let steps = memsizes(cpu);
+    let (full, cells) = (steps.clone().filter(|&m| m <= mb).count().saturating_sub(1), steps.count() - 1);
+    format!("{:>3} MB {}{}", mb, "■".repeat(full), "·".repeat(cells - full))
+}
 
 /// A value of up to `max` as `text` and a bar of small squares, one for
 /// every `unit`, which stay apart from the next row's:
@@ -872,15 +886,9 @@ impl Item {
                 CoreMode::Normal => "normal (interpreter)",
             }
             .to_string(),
-            Cpu => match s.cpu {
-                CpuModel::I386 => "386",
-                CpuModel::I486 => "486",
-                CpuModel::Pentium => "Pentium",
-                CpuModel::PentiumMmx => "Pentium MMX",
-            }
-            .to_string(),
+            Cpu => s.cpu.describe().to_string(),
             Machine => s.machine.describe().to_string(),
-            Memsize => bar(format!("{:>2} MB", s.memsize), s.memsize as u16, MAX_MEMSIZE as u16, MEMSIZE_UNIT),
+            Memsize => memsize_bar(s.memsize, s.cpu),
             Voodoo => on_off(s.voodoo.enabled),
             VoodooMemory => match s.voodoo.board {
                 crate::voodoo::Board::Standard => "4 MB (one texture unit)".to_string(),
@@ -1048,7 +1056,10 @@ impl Item {
             Composite => each(s, crate::video::composite::CompositeMode::ALL, |s, mode| s.composite.mode = mode),
             CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
-            Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium, CpuModel::PentiumMmx], |s, cpu| s.cpu = cpu),
+            Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium, CpuModel::PentiumMmx], |s, cpu| {
+                s.cpu = cpu;
+                s.memsize = s.memsize.min(cpu.max_memsize());
+            }),
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
@@ -1199,8 +1210,8 @@ impl Item {
             CrtCurvature => s.crt.curvature = step_units(s.crt.curvature, dir, 10, MAX_AMOUNT),
             CrtGlow => s.crt.glow = step_units(s.crt.glow, dir, 10, MAX_AMOUNT),
             Memsize => {
-                let mb = step_units(s.memsize as u16, dir, MEMSIZE_UNIT, MAX_MEMSIZE as u16);
-                s.memsize = (mb as usize).max(MIN_MEMSIZE);
+                let steps: Vec<usize> = memsizes(s.cpu).collect();
+                s.memsize = step_number(&steps, s.memsize, dir);
             }
             Volume(channel) => s.mixer.set_level(channel, step_units(s.mixer.level(channel), dir, 10, MAX_LEVEL)),
             ReverbMix => s.mixer.reverb_mix = step_units(s.mixer.reverb_mix, dir, 10, MAX_MIX),
@@ -1266,7 +1277,13 @@ impl Item {
             Item::Volume(channel) => s.mixer.set_level(channel, crate::mixer::parse_level(text)?),
             Item::CaptureDir if text.is_empty() => return Err("A capture folder, please".to_string()),
             Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), crate::hostdirs::home_dir().as_deref()),
-            Item::Memsize => s.memsize = crate::config::parse_memsize(text)?,
+            Item::Memsize => {
+                let mb = crate::config::parse_memsize(text)?;
+                if mb > s.cpu.max_memsize() {
+                    return Err(format!("A {} takes up to {} MB", s.cpu.describe(), s.cpu.max_memsize()));
+                }
+                s.memsize = mb;
+            }
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
             Item::CrtCurvature => s.crt.curvature = parse_amount(text).ok_or("The curvature goes from 0 to 100%")?,
             Item::CrtGlow => s.crt.glow = parse_amount(text).ok_or("The glow goes from 0 to 100%")?,
@@ -1305,7 +1322,7 @@ impl Item {
                 changed
             }
             Item::Memsize => {
-                let default = Settings::default().memsize;
+                let default = Settings::default().memsize.min(s.cpu.max_memsize());
                 std::mem::replace(&mut s.memsize, default) != default
             }
             Item::Deadzone => {

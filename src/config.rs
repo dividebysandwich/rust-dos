@@ -621,9 +621,10 @@ impl SoundConfig {
     }
 }
 
-/// The least and the most RAM there is, in MB (`memsize`).
+/// The least and the most RAM there is, in MB (`memsize`): the most with
+/// the CPU that takes the most (`CpuModel::max_memsize`).
 pub const MIN_MEMSIZE: usize = 2;
-pub const MAX_MEMSIZE: usize = 64;
+pub const MAX_MEMSIZE: usize = 512;
 
 /// A memory size as written: a number of MB, with or without the MB.
 pub fn parse_memsize(value: &str) -> Result<usize, String> {
@@ -950,6 +951,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
         ));
         config.sound.gus.drive = None;
     }
+    // More memory than the CPU's machines took is as much as they did.
+    let cpu = config.cpu.unwrap_or(Settings::default().cpu);
+    if let Some(mb) = config.memsize.filter(|&mb| mb > cpu.max_memsize()) {
+        warnings.push(format!("memsize {} MB is more than a {} takes: {} MB", mb, cpu.describe(), cpu.max_memsize()));
+    }
     config.warnings = warnings;
     config
 }
@@ -1161,7 +1167,7 @@ impl Settings {
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             core: config.core.unwrap_or(default.core),
-            memsize: config.memsize.unwrap_or(default.memsize),
+            memsize: config.memsize.unwrap_or(default.memsize).min(config.cpu.unwrap_or(default.cpu).max_memsize()),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
@@ -1937,9 +1943,24 @@ mod tests {
     fn memsize_range() {
         let config = parse("[emulator]\nmemsize=32\n", Path::new("/cfg"), None);
         assert_eq!(config.memsize, Some(32));
-        let config = parse("[emulator]\nmemsize=128\n", Path::new("/cfg"), None);
+        let config = parse("[emulator]\nmemsize=1024\n", Path::new("/cfg"), None);
         assert_eq!(config.memsize, None);
-        assert!(config.warnings[0].contains("invalid memsize '128'"));
+        assert!(config.warnings[0].contains("invalid memsize '1024'"));
+    }
+
+    #[test]
+    fn memsize_goes_as_far_as_the_cpu_takes() {
+        let config = parse("[emulator]\ncpu=pentium_mmx\nmemsize=512\n", Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config).memsize, 512);
+        let config = parse("[emulator]\ncpu=pentium\nmemsize=512\n", Path::new("/cfg"), None);
+        assert_eq!(config.warnings, ["memsize 512 MB is more than a Pentium takes: 256 MB"]);
+        assert_eq!(Settings::from_config(&config).memsize, 256);
+        // Without a cpu, the default 486's.
+        let config = parse("[emulator]\nmemsize=256\n", Path::new("/cfg"), None);
+        assert_eq!(Settings::from_config(&config).memsize, 128);
+        let config = parse("[emulator]\ncpu=386\nmemsize=128\n", Path::new("/cfg"), None);
+        assert_eq!(Settings::from_config(&config).memsize, 64);
     }
 
     #[test]

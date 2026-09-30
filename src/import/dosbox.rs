@@ -131,7 +131,7 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             None => unknown(imported),
         },
         ("dosbox", "memsize") => match first.parse::<usize>() {
-            Ok(mb) => imported.set("emulator", "memsize", mb.clamp(2, 64).to_string()),
+            Ok(mb) => imported.set("emulator", "memsize", mb.clamp(crate::config::MIN_MEMSIZE, crate::config::MAX_MEMSIZE).to_string()),
             Err(_) => unknown(imported),
         },
         ("dos", "ems") => match first {

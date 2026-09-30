@@ -185,8 +185,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
   with its sound, so they keep in step through pauses and fast forward;
   a recording stops at 1 GB.
-* `memsize` is the RAM in MB, from 2 to 64 (default 16). Memory above the
-  first megabyte is extended memory for DOS extenders and XMS.
+* `memsize` is the RAM in MB (default 16), from 2 to as much as
+  motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
+  256 MB for a Pentium and 512 MB for a Pentium MMX. More than the CPU
+  takes is warned about and cut to its most. Memory above the first
+  megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
+  functions and INT 15h E801h/E820h report all of it, HIMEM's older calls
+  and the CMOS at most 64 MB, as on a real machine. Save states and rewind
+  hold all of it, so they grow with it. Windows 95 with 512 MB may need
+  its file cache limited (`MaxFileCache` in SYSTEM.INI's `[vcache]`).
 * `ems` gives programs expanded memory (LIM EMS 4.0, INT 67h), which
   many games of the early 1990s want: `true` (the default) or `false`.
   As with EMM386, 16 KB pages of extended memory show through a page

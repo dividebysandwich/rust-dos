@@ -338,28 +338,34 @@ fn settings_change_live() {
     assert_eq!(host.applied.last().unwrap().core, crate::cpu::CoreMode::Dynamic);
     assert!(!status(&ui).0.contains("prompt"), "{:?}", status(&ui));
 
-    // Memory slides in fours of MB and waits for the next start.
+    // Memory steps up to what the 486 takes and waits for the next start.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("16 MB ■■■■············"));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■·······"));
     keys(&mut ui, &mut host, &[Right]);
     assert_eq!(host.applied.last().unwrap().memsize, 20);
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
-    // Typed, no further than 2 and 64 MB, and back to 16 with Delete.
+    // Typed, no further than 2 MB and what the CPU takes, and back to 16
+    // with Delete.
     keys(&mut ui, &mut host, &[Enter, End, Backspace, Backspace]);
     ui.text("1", &mut host);
     ui.key(Enter, &mut host);
-    assert_eq!(status(&ui), ("invalid memsize '1' (2 to 64 MB)", true));
+    assert_eq!(status(&ui), ("invalid memsize '1' (2 to 512 MB)", true));
     keys(&mut ui, &mut host, &[End, Backspace]);
+    ui.text("256", &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(status(&ui), ("A 486 takes up to 128 MB", true));
+    keys(&mut ui, &mut host, &[End, Backspace, Backspace, Backspace]);
     ui.text("62", &mut host);
-    keys(&mut ui, &mut host, &[Enter, Right, Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 64);
-    for _ in 0..15 {
+    keys(&mut ui, &mut host, &[Enter, Right, Right, Right]);
+    assert_eq!(host.applied.last().unwrap().memsize, 128);
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("128 MB ■■■■■■■■■■■"));
+    for _ in 0..10 {
         ui.key(Left, &mut host);
     }
     assert_eq!(host.applied.last().unwrap().memsize, 4);
     keys(&mut ui, &mut host, &[Left, Left]);
     assert_eq!(host.applied.last().unwrap().memsize, 2);
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 2 MB ················"));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("  2 MB ···········"));
     keys(&mut ui, &mut host, &[Delete]);
     assert_eq!(host.applied.last().unwrap().memsize, 16);
 

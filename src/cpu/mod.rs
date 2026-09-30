@@ -107,6 +107,28 @@ impl CpuModel {
         }
     }
 
+    /// The CPU's name as people know it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            CpuModel::I386 => "386",
+            CpuModel::I486 => "486",
+            CpuModel::Pentium => "Pentium",
+            CpuModel::PentiumMmx => "Pentium MMX",
+        }
+    }
+
+    /// The most RAM in MB (`memsize`) a machine with this CPU takes, as
+    /// the motherboards of its day did: 64 MB on a 386, 128 MB on a 486,
+    /// 256 MB on a Pentium (430FX/VX) and 512 MB on a Pentium MMX (430HX).
+    pub fn max_memsize(self) -> usize {
+        match self {
+            CpuModel::I386 => 64,
+            CpuModel::I486 => 128,
+            CpuModel::Pentium => 256,
+            CpuModel::PentiumMmx => 512,
+        }
+    }
+
     /// The family: 3, 4 or 5.
     pub fn family(self) -> u8 {
         (self.signature() >> 8) as u8
