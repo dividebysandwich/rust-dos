@@ -43,6 +43,7 @@ impl Bus {
             kbd,
             kbc,
             kbc_release_at: _,
+            rtc_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -238,6 +239,7 @@ impl Bus {
             kbd,
             kbc,
             kbc_release_at: _,
+            rtc_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -436,7 +438,10 @@ impl Bus {
         // and the IPX driver's node is the state's.
         self.net.ipx_queue.clear();
         self.net.ipx_installed();
-        // The keyboard's next byte at once.
+        // The clock's periodic interrupt as the state's registers have it,
+        // and the keyboard's next byte at once.
+        self.rtc_next = None;
+        self.schedule_rtc();
         self.kbc_release_at = None;
         self.kbc.release();
         self.net.nic_changed();

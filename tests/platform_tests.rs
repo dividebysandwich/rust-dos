@@ -418,3 +418,43 @@ fn the_bios_keyboard_interrupt_puts_the_keystroke_in_its_buffer() {
     assert_eq!(cpu.ax(), 0x1E61);
     assert!(BiosBuffer::keys(&mut cpu.bus).is_empty());
 }
+
+#[test]
+fn the_clock_interrupts_periodically_while_status_c_is_read() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    let wait_ms = |bus: &mut Bus, ms: u64| {
+        let target = bus.clock.icount + ms * bus.clock.cycles_per_ms() as u64;
+        while bus.clock.icount < target {
+            bus.clock.icount += 10;
+            if bus.clock.icount >= bus.clock.deadline {
+                bus.service_timers();
+            }
+        }
+    };
+    let register = |bus: &mut Bus, index: u8| {
+        bus.io_write(0x70, index);
+        bus.io_read(0x71)
+    };
+    // Status B's periodic interrupt at status A's 1024 Hz.
+    wait_ms(&mut bus, 2);
+    assert_eq!(bus.pic.slave.irr & 1, 0);
+    let b = register(&mut bus, 0x0B);
+    bus.io_write(0x71, b | 0x40);
+    wait_ms(&mut bus, 2);
+    assert_eq!(bus.pic.slave.irr & 1, 1, "IRQ 8");
+    // Until status C is read, no more come.
+    bus.pic.slave.irr &= !1;
+    wait_ms(&mut bus, 2);
+    assert_eq!(bus.pic.slave.irr & 1, 0);
+    assert_eq!(register(&mut bus, 0x0C), 0xC0);
+    wait_ms(&mut bus, 2);
+    assert_eq!(bus.pic.slave.irr & 1, 1);
+    // Turned off, it stops.
+    register(&mut bus, 0x0C);
+    bus.pic.slave.irr &= !1;
+    bus.io_write(0x70, 0x0B);
+    bus.io_write(0x71, b);
+    wait_ms(&mut bus, 2);
+    assert_eq!(bus.pic.slave.irr & 1, 0);
+    assert_eq!(bus.rtc_next, None);
+}

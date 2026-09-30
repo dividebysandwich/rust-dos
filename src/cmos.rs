@@ -8,10 +8,21 @@
 //! Register 0Fh is the shutdown status byte that tells the BIOS, after a CPU
 //! reset, whether to resume a program through the pointer at 40:67 (used by
 //! 286-era protected mode code).
+//!
+//! The periodic interrupt (status B bit 6) raises IRQ 8 at the rate in
+//! status A (1024 Hz as the BIOS sets it), which HX's Win32 emulation
+//! times its Sleep and timers with: the bus fires it (`periodic_fired`) as
+//! its `periodic_ticks` come due, and reading status C acknowledges it.
 
 use chrono::{Datelike, NaiveDateTime, TimeDelta, Timelike};
 
 pub const SHUTDOWN_STATUS: u8 = 0x0F;
+
+/// Status B: the periodic interrupt enabled.
+const PIE: u8 = 0x40;
+/// Status C: an interrupt is asserted (IRQF), and a periodic one came (PF).
+const IRQF: u8 = 0x80;
+const PF: u8 = 0x40;
 
 pub struct Cmos {
     index: u8,
@@ -105,6 +116,36 @@ impl Cmos {
     /// Set the machine's clock to `at`, a local date and time.
     pub fn set_now(&mut self, at: NaiveDateTime) {
         self.offset = at - crate::hosttime::now().naive_local();
+    }
+
+    /// The periodic interrupt's period in PIT ticks, when status B enables
+    /// it and status A has a rate.
+    pub fn periodic_ticks(&self) -> Option<u64> {
+        let rate = self.ram[0x0A] & 0x0F;
+        if self.ram[0x0B] & PIE == 0 || rate == 0 {
+            return None;
+        }
+        // Rates 1 and 2 are 256 and 128 Hz; from 3 on, 32768 Hz halved
+        // for each step past 1.
+        let hz = if rate <= 2 { 32768 >> (rate + 6) } else { 32768 >> (rate - 1) };
+        Some((crate::timer::PIT_HZ / hz).max(1))
+    }
+
+    /// A periodic interrupt came: true when it asserts IRQ 8, which it
+    /// does again only once status C was read.
+    pub fn periodic_fired(&mut self) -> bool {
+        let asserted = self.ram[0x0C] & IRQF != 0;
+        self.ram[0x0C] |= IRQF | PF;
+        !asserted
+    }
+
+    /// Port 71h read. Status C reads clear it, acknowledging the interrupt.
+    pub fn read_register(&mut self) -> u8 {
+        let value = self.read_data();
+        if self.index == 0x0C {
+            self.ram[0x0C] = 0;
+        }
+        value
     }
 
     pub fn read_data(&self) -> u8 {

@@ -62,6 +62,8 @@ pub struct Bus {
     /// When the keyboard's next byte enters the controller's output
     /// buffer (`Kbc::release`), in PIT ticks.
     pub kbc_release_at: Option<u64>,
+    /// When the clock's next periodic interrupt comes, in PIT ticks.
+    pub rtc_next: Option<u64>,
     /// The A20 gate as a mask for physical addresses: with the gate
     /// closed, address line 20 is forced to 0 and addresses wrap at 1 MB
     /// as on an 8086. See `a20()` and `set_a20()`.
@@ -319,6 +321,7 @@ impl Bus {
             kbd: crate::keyboard::KeyboardState::default(),
             kbc: crate::kbc::Kbc::new(),
             kbc_release_at: None,
+            rtc_next: None,
             a20_mask: !0x0010_0000,
             reset_requested: false,
             port_accesses: VecDeque::new(),
@@ -1464,6 +1467,7 @@ impl Bus {
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
+            self.rtc_next,
         ]
         .into_iter()
             .flatten()
@@ -1499,6 +1503,15 @@ impl Bus {
         }
         if self.serial_next_event().is_some_and(|t| t <= now) {
             self.serial_service();
+        }
+        // The clock's periodic interrupt.
+        if let Some(at) = self.rtc_next
+            && at <= now
+        {
+            self.rtc_next = self.cmos.periodic_ticks().map(|period| if at + period > now { at + period } else { now + period });
+            if self.rtc_next.is_some() && self.cmos.periodic_fired() {
+                self.pic.raise(8);
+            }
         }
         // The keyboard's next byte, once it had time to send it.
         if let Some(at) = self.kbc_release_at
@@ -2030,6 +2043,19 @@ impl Bus {
         self.sync_sb_irq();
     }
 
+    /// Start or stop the clock's periodic interrupt as its status
+    /// registers have it.
+    pub fn schedule_rtc(&mut self) {
+        match self.cmos.periodic_ticks() {
+            Some(period) if self.rtc_next.is_none() => {
+                self.rtc_next = Some(self.clock.now_ticks() + period);
+                self.clock.schedule(self.next_event());
+            }
+            Some(_) => {}
+            None => self.rtc_next = None,
+        }
+    }
+
     /// Raise IRQ 1 if a keyboard byte just entered the keyboard
     /// controller's output buffer, IRQ 12 if a mouse byte did.
     pub fn sync_keyboard_irq(&mut self) {
@@ -2104,7 +2130,10 @@ impl Bus {
 
             // CMOS RAM / real-time clock.
             0x70 => self.cmos.write_index(value),
-            0x71 => self.cmos.write_data(value),
+            0x71 => {
+                self.cmos.write_data(value);
+                self.schedule_rtc();
+            }
 
             // System control port A: bit 1 is the "fast A20" gate, bit 0
             // resets the CPU.
@@ -2512,7 +2541,7 @@ impl Bus {
             // Port 0x64 — Keyboard controller status (8042).
             0x64 => self.kbc.read_status(),
 
-            0x71 => self.cmos.read_data(),
+            0x71 => self.cmos.read_register(),
             0x92 => (self.a20() as u8) << 1,
 
             // The FM chip's status register: timer flags, which programs
