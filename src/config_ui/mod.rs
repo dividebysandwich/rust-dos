@@ -2849,14 +2849,14 @@ impl ConfigUi {
         let ro = if dialog.read_only { "yes" } else { "no" }.to_string();
         put(g, Field::ReadOnly, top + 6, "Read-only", &choice(ro, top + 6, true));
         if top + 5 < bottom {
-            g.text(value_col + 14, top + 5, "(empty: the default)", draw::DIM);
+            g.text(value_col + 14, top + 5, "(default empty)", draw::DIM);
         }
         let buttons = dialog.fields();
         if buttons.contains(&Field::BootFlag) {
             let boot = if dialog.boot { "yes" } else { "no" }.to_string();
             put(g, Field::BootFlag, top + 7, "Auto-boot", &choice(boot, top + 7, true));
             if top + 7 < bottom {
-                g.text(value_col + 10, top + 7, "(a disk image)", draw::DIM);
+                g.text(value_col + 10, top + 7, "(disk images only)", draw::DIM);
             }
         }
         let mut col = value_col;
