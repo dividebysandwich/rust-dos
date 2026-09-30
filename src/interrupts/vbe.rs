@@ -348,6 +348,7 @@ fn save_restore_state(cpu: &mut Cpu) -> u16 {
                 cpu.bus.vbe.bank = cpu.bus.guest_read_32((addr + 2) as u32) % (VRAM_SIZE / WINDOW_SIZE) as u32;
                 cpu.bus.vbe.pitch = cpu.bus.guest_read_32((addr + 6) as u32);
                 cpu.bus.vbe.start = cpu.bus.guest_read_32((addr + 10) as u32);
+                cpu.bus.note_display_start();
                 cpu.bus.vga.mark_dirty_full();
             }
         }
@@ -437,6 +438,7 @@ fn display_start(cpu: &mut Cpu) -> Option<u16> {
                 return Some(FAILED);
             }
             cpu.bus.vbe.start = start;
+            cpu.bus.note_display_start();
             if bl == 0x80 && !wait_for_retrace(cpu) {
                 return None;
             }

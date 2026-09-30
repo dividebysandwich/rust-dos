@@ -33,6 +33,7 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.set_ax(plain_keystroke(key_code));
             } else {
                 cpu.set_cpu_flag(CpuFlags::ZF, true);
+                cpu.bus.activity.poll();
             }
         }
         0x11 => {
@@ -41,6 +42,7 @@ pub fn handle(cpu: &mut Cpu) {
                 cpu.set_ax(key_code); // Preview key (do not remove)
             } else {
                 cpu.set_cpu_flag(CpuFlags::ZF, true); // No key
+                cpu.bus.activity.poll();
             }
         }
 
@@ -136,7 +138,10 @@ fn booted(cpu: &mut Cpu, ah: u8) {
                 cpu.set_ax(convert(key));
                 cpu.set_cpu_flag(CpuFlags::ZF, false);
             }
-            None => cpu.set_cpu_flag(CpuFlags::ZF, true),
+            None => {
+                cpu.bus.activity.poll();
+                cpu.set_cpu_flag(CpuFlags::ZF, true);
+            }
         },
         0x02 => {
             let flags = bus.guest_read_8(BDA_SHIFT_FLAGS as u32);

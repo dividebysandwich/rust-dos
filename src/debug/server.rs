@@ -77,6 +77,7 @@ fn router(state: AppState) -> Router {
         .route("/api/drive/swap", post(swap_images))
         .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
         .route("/api/state/{action}", post(state_file))
+        .route("/api/speed", post(speed))
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
@@ -463,6 +464,17 @@ async fn state_file(State(s): State<AppState>, Path(action): Path<String>, body:
         "load" => s.call_json(Cmd::LoadState { path: b.path }, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError(StatusCode::NOT_FOUND, format!("unknown action '{}' (save, load)", action))),
     }
+}
+
+#[derive(Deserialize)]
+struct SpeedBody {
+    /// As `cycles` in the configuration file: auto, max or a number.
+    cycles: String,
+}
+
+async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: SpeedBody = from_value(parse_body(&body)?)?;
+    s.call_json(Cmd::Speed { cycles: b.cycles }, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -968,6 +980,11 @@ SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
   POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
                    settings, then the machine (the same memsize only)
+
+SPEED
+  POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it
+                   (auto, auto 5000, max or a number); /api/status has
+                   cycles_per_ms, the speed it runs at now
 
 WEBSOCKETS
   /ws/events          JSON: log lines, paused/resumed, video_mode changes

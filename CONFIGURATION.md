@@ -45,7 +45,7 @@ configuration files.
 ```ini
 [emulator]
 scale=2
-cycles=max
+cycles=auto
 
 [drives]
 C=~/dos
@@ -94,10 +94,21 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   CGA, which the classic games were drawn for) or `new`. The decoder is
   reenigne's model of the CGA's composite output, as DOSBox Staging has
   it. It applies at once.
-* `cycles` is the CPU speed in instructions per millisecond. `max`, the
-  default, runs as fast as the host keeps up with in real time. Use a
-  number such as `3000` for old games that run too fast. `--cycles`
-  overrides it.
+* `cycles` is the CPU speed in instructions per millisecond. `auto`, the
+  default, finds the speed the running program needs from the frames it
+  draws (its page flips, or the bursts of writes that copy a finished
+  picture to video memory): it goes up while the frame rate follows it,
+  stops where the frame rate stops following (a game that caps its own
+  frame rate) or reaches the display's refresh rate (frames nobody sees,
+  and some games, such as Descent, play badly at such rates), and goes
+  down while the program waits for a key or calls DOS's idle interrupt.
+  A real-mode program with no frames to go by (most games of the 1980s,
+  which update the screen piecemeal) runs at 3000, about a 286, as in
+  DOSBox's `cycles=auto`; a protected-mode one (loading, computing,
+  Windows) runs at max. `auto 10000` makes that real-mode speed, and
+  the least `auto` goes down to, 10000. `max` runs everything as fast as
+  the host keeps up with in real time. Use a number such as `3000` for a
+  fixed speed. `--cycles` overrides it.
 * `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
   `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
   GenuineIntel family 5), the time stamp counter, which counts the
@@ -1191,7 +1202,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-c, --config FILE` | Use this configuration file (see [Configuration file](#configuration-file)) |
 | `--no-config` | Read and create no configuration file |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
-| `--cycles N\|max` | The CPU speed (`cycles`) |
+| `--cycles N\|max\|auto` | The CPU speed (`cycles`) |
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |
 | `--import PATH` | Import a game set up for DOSBox as a game profile, and launch it |

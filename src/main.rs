@@ -67,10 +67,11 @@ struct Args {
     #[arg(long, default_value_t = 1_000_000)]
     trace_capacity: usize,
 
-    /// Emulated CPU speed in instructions per millisecond, or "max" for as
-    /// fast as the host keeps up with [default: max, or the config file's
-    /// cycles]
-    #[arg(long, value_name = "N|max", value_parser = timer::CpuSpeed::parse)]
+    /// Emulated CPU speed in instructions per millisecond, "max" for as
+    /// fast as the host keeps up with, or "auto" for the speed the running
+    /// program's frames show it needs (optionally with the least speed,
+    /// "auto 5000") [default: auto, or the config file's cycles]
+    #[arg(long, value_name = "N|max|auto", value_parser = timer::CpuSpeed::parse)]
     cycles: Option<timer::CpuSpeed>,
 
     /// What runs the programs' instructions: auto (the interpreter, and the
@@ -895,6 +896,14 @@ fn main() -> Result<(), String> {
                 request.done(saved.map(|()| serde_json::json!({"saved": path})));
             }
         }
+        for request in dbg.take_speed_requests() {
+            let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
+                let new = Settings { cycles, ..settings.clone() };
+                host!().apply(&new)?;
+                Ok(serde_json::json!({"cycles": cycles.to_string()}))
+            });
+            request.done(result);
+        }
         for input in dbg.take_ui_input() {
             match input {
                 debug::UiInput::Key(key) => ui.key(key, &mut host!()),
@@ -1254,7 +1263,7 @@ fn main() -> Result<(), String> {
         display.present(&mut screen, voodoo_gl.then_some(&cached_frame))?;
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
-        if let Some(cycles) = pacer.end_frame(&cpu.bus.clock, executed, exec_time, overhead) {
+        if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {
             cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed();
@@ -1307,6 +1316,8 @@ fn speed_message(speed: CpuSpeed) -> String {
     match speed {
         CpuSpeed::Max => "CPU speed max".to_string(),
         CpuSpeed::Fixed(n) => format!("CPU speed {} cycles", n),
+        CpuSpeed::Auto(n) if n == CpuSpeed::default().initial_cycles() => "CPU speed auto".to_string(),
+        CpuSpeed::Auto(n) => format!("CPU speed auto, at least {} cycles", n),
     }
 }
 
@@ -1694,7 +1705,8 @@ impl Host for MainHost<'_, '_> {
         }
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
-            // At max, the pacer tunes the speed from the current one.
+            // At max, the pacer tunes the speed from the current one, and
+            // at auto, it picks the speed at the end of the frame.
             if let CpuSpeed::Fixed(n) = new.cycles {
                 self.cpu.bus.set_cycles_per_ms(n);
             }

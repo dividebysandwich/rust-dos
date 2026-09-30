@@ -393,7 +393,7 @@ impl Machine {
         let render = render_start.elapsed();
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
-        if let Some(cycles) = self.pacer.end_frame(&self.cpu.bus.clock, executed, exec_time, overhead) {
+        if let Some(cycles) = self.pacer.end_frame(&self.cpu.bus, self.cpu.pm_latched, executed, exec_time, overhead) {
             self.cpu.bus.set_cycles_per_ms(cycles);
         }
         let busy = frame_start.elapsed();
@@ -478,6 +478,8 @@ impl Machine {
         self.osd.show(match new.cycles {
             CpuSpeed::Max => "CPU speed max".to_string(),
             CpuSpeed::Fixed(n) => format!("CPU speed {} cycles", n),
+            CpuSpeed::Auto(n) if n == CpuSpeed::default().initial_cycles() => "CPU speed auto".to_string(),
+            CpuSpeed::Auto(n) => format!("CPU speed auto, at least {} cycles", n),
         });
     }
 
@@ -1157,7 +1159,8 @@ impl Host for PageHost<'_> {
         }
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
-            // At max, the pacer tunes the speed from the current one.
+            // At max, the pacer tunes the speed from the current one, and
+            // at auto, it picks the speed at the end of the frame.
             if let CpuSpeed::Fixed(n) = new.cycles {
                 self.cpu.bus.set_cycles_per_ms(n);
             }

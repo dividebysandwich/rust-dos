@@ -269,7 +269,8 @@ pub fn handle_hle(cpu: &mut Cpu, vector: u8) {
             cpu.set_ax(0x3100);
             int21::handle(cpu);
         }
-        0x28 => { /* Idle Interrupt - Do nothing */ }
+        // DOS's idle interrupt: the program waits (for `cycles=auto`).
+        0x28 => cpu.bus.activity.poll(),
         0x2A => { /* DOS Timer Tick - Do nothing for now */ }
         0x13 => int13::handle(cpu),
         0x14 => int14::handle(cpu),

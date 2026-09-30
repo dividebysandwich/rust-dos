@@ -375,8 +375,9 @@ pub struct Cpu {
     /// The core that runs instructions, see `dynamic_active`.
     pub core: CoreMode,
     /// A program switched to protected mode since it started: `core=auto`
-    /// runs it on the dynamic recompiler until it ends.
-    pub dyn_latched: bool,
+    /// runs it on the dynamic recompiler and `cycles=auto` at max speed
+    /// until it ends.
+    pub pm_latched: bool,
     /// REP MOVS and STOS do the iterations that stay in plain RAM at once
     /// (`instructions::string`). Off, they go one at a time, which tests
     /// compare them with.
@@ -516,7 +517,7 @@ impl Cpu {
             idle: false,
             hle_retry: false,
             core: CoreMode::initial(),
-            dyn_latched: false,
+            pm_latched: false,
             string_bulk: true,
             seg_loads: [seg::SegLoad::NONE; seg::SEG_LOADS],
             dynrec: crate::dynrec::DynState::default(),
@@ -532,7 +533,7 @@ impl Cpu {
         crate::dynrec::AVAILABLE
             && match self.core {
                 CoreMode::Dynamic => true,
-                CoreMode::Auto => self.dyn_latched,
+                CoreMode::Auto => self.pm_latched,
                 CoreMode::Normal => false,
             }
     }
@@ -555,7 +556,7 @@ impl Cpu {
     pub fn note_mode_switch(&mut self, protected: bool) {
         self.mode_switches += 1;
         if protected {
-            self.dyn_latched = true;
+            self.pm_latched = true;
         }
         if self.mode_switches <= 4 {
             self.bus.log_string(&format!(
@@ -792,8 +793,9 @@ impl Cpu {
 
     /// Back to the parent's context `context`, taken off `process_stack`.
     fn restore_context(&mut self, context: ProcessContext) {
-        // The program ended: `core=auto` goes back to the interpreter.
-        self.dyn_latched = false;
+        // The program ended: `core=auto` goes back to the interpreter and
+        // `cycles=auto` to the real-mode speed.
+        self.pm_latched = false;
         self.restore(&context.regs);
         self.current_psp = context.psp;
         self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
@@ -1108,7 +1110,7 @@ impl Cpu {
         }
         // No program runs: `core=auto` is back on the interpreter, and the
         // dynamic recompiler's code for the last program goes.
-        self.dyn_latched = false;
+        self.pm_latched = false;
         self.dynrec.flush();
         self.program.clear();
 

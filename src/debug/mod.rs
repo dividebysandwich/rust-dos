@@ -166,6 +166,9 @@ pub enum Cmd {
     /// end does (`take_state_requests`).
     SaveState { path: String },
     LoadState { path: String },
+    /// Change the CPU speed (`cycles`) as the settings window does, which
+    /// the front end does (`take_speed_requests`).
+    Speed { cycles: String },
 }
 
 /// A save state to save or load, which the front end carries out and
@@ -178,6 +181,23 @@ pub struct StateRequest {
 
 impl StateRequest {
     /// Answer the request: what was saved or loaded, or why not.
+    pub fn done(self, result: Result<Value, String>) {
+        let _ = self.reply.send(match result {
+            Ok(value) => Reply::Json(value),
+            Err(e) => Reply::bad(e),
+        });
+    }
+}
+
+/// A CPU speed to change to, which the front end carries out and answers
+/// (`done`).
+pub struct SpeedRequest {
+    pub cycles: String,
+    reply: oneshot::Sender<Reply>,
+}
+
+impl SpeedRequest {
+    /// Answer the request: the speed now, or why it can't be.
     pub fn done(self, result: Result<Value, String>) {
         let _ = self.reply.send(match result {
             Ok(value) => Reply::Json(value),
@@ -487,6 +507,7 @@ pub struct DebugHub {
     hotkey: bool,
     /// Save states to save or load, for the front end.
     state_requests: Vec<StateRequest>,
+    speed_requests: Vec<SpeedRequest>,
     /// Shift, Ctrl and Alt bits (as at 40:17h) the remote client holds.
     remote_mods: u8,
     /// Keys the remote client holds down on the machine.
@@ -568,6 +589,7 @@ impl DebugHub {
             ui_pointer: (0, 0),
             hotkey: false,
             state_requests: Vec::new(),
+            speed_requests: Vec::new(),
             remote_mods: 0,
             remote_held: Vec::new(),
             frame_waiters: Vec::new(),
@@ -1046,6 +1068,11 @@ impl DebugHub {
         std::mem::take(&mut self.state_requests)
     }
 
+    /// The CPU speeds remote clients asked for.
+    pub fn take_speed_requests(&mut self) -> Vec<SpeedRequest> {
+        std::mem::take(&mut self.speed_requests)
+    }
+
     // ----- request handling --------------------------------------------------
 
     fn handle(&mut self, cpu: &mut Cpu, req: Request) {
@@ -1060,6 +1087,10 @@ impl DebugHub {
             }
             Cmd::LoadState { path } => {
                 self.state_requests.push(StateRequest { load: true, path: PathBuf::from(path), reply: req.reply });
+                return;
+            }
+            Cmd::Speed { cycles } => {
+                self.speed_requests.push(SpeedRequest { cycles, reply: req.reply });
                 return;
             }
             cmd => cmd,
@@ -1387,7 +1418,9 @@ impl DebugHub {
                     Err(e) => Reply::bad(e),
                 }
             }
-            Cmd::SaveState { .. } | Cmd::LoadState { .. } => unreachable!("handed to the front end above"),
+            Cmd::SaveState { .. } | Cmd::LoadState { .. } | Cmd::Speed { .. } => {
+                unreachable!("handed to the front end above")
+            }
             Cmd::Unmount { drive } => {
                 let result = parse_drive_name(&drive)
                     .ok_or_else(|| format!("invalid drive letter '{}'", drive))
@@ -1413,6 +1446,20 @@ impl DebugHub {
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
             "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
+            // What `cycles=auto` goes by, counted since start: emulated
+            // time, the frames the program drew (at most one a retrace),
+            // its bursts of writes to video memory the size of a frame and
+            // its page flips (the frames it draws, however many), its
+            // checks for keys that weren't there and idle calls, and its
+            // reads of the input status register (retrace polling).
+            "activity": {
+                "emulated_ns": cpu.bus.clock.now_ns(),
+                "frames_drawn": cpu.bus.frames_drawn,
+                "bursts": cpu.bus.activity.bursts,
+                "flips": cpu.bus.activity.flips,
+                "polls": cpu.bus.activity.polls,
+                "status_reads": cpu.bus.activity.status_reads,
+            },
             "cs_ip": if cpu.eip() > 0xFFFF {
                 format!("{:04X}:{:08X}", cpu.cs(), cpu.eip())
             } else {

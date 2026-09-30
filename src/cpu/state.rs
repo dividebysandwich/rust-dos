@@ -57,7 +57,7 @@ crate::state_fields!(Cpu {
     last_child_exit, errorlevel, program, last_dos_error, con_pending_scan, con_line,
     con_pending, alloc_strategy, bios_wait_until,
     fpu_stack, fpu_top, fpu_flags, fpu_control, fpu_tags,
-    process_stack, irq_shadow, executed, idle, hle_retry, dyn_latched,
+    process_stack, irq_shadow, executed, idle, hle_retry, pm_latched,
 } skip {
     // Saved in sections of its own.
     bus,

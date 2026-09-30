@@ -170,7 +170,8 @@ impl Host for Machine {
         let old = std::mem::replace(&mut self.settings, new.clone());
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
-            // At max, the pacer tunes the speed from the current one.
+            // At max, the pacer tunes the speed from the current one, and
+            // at auto, it picks the speed at the end of the frame.
             if let CpuSpeed::Fixed(n) = new.cycles {
                 self.cpu.bus.set_cycles_per_ms(n);
             }

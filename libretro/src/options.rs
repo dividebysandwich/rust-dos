@@ -55,7 +55,10 @@ const ON_OFF: [(&str, &str); 2] = [("true", "On"), ("false", "Off")];
 
 fn definitions() -> Vec<Definition> {
     let config = |section, key| Target::Config(section, key);
-    let mut cycles = configured(&[("max", "Max (as fast as the host goes)")]);
+    let mut cycles = configured(&[
+        ("auto", "Auto (as much as the game's frames show it needs)"),
+        ("max", "Max (as fast as the host goes)"),
+    ]);
     cycles.extend(
         [300, 1000, 3000, 5000, 8000, 10_000, 15_000, 20_000, 30_000, 40_000, 50_000, 60_000, 80_000, 100_000, 150_000, 200_000]
             .map(|n| (n.to_string(), format!("{} cycles", n))),
@@ -99,7 +102,7 @@ fn definitions() -> Vec<Definition> {
         Definition {
             key: "cycles",
             desc: "CPU speed",
-            info: "Instructions a millisecond. Max runs as fast as the host goes.",
+            info: "Instructions a millisecond. Max runs as fast as the host goes; auto gives a game as much as makes its frames come faster, up to the display's refresh rate.",
             category: "system",
             target: config("emulator", "cycles"),
             values: cycles,

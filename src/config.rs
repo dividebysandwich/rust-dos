@@ -1059,7 +1059,7 @@ impl Default for Settings {
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             record_shader: false,
-            cycles: CpuSpeed::Max,
+            cycles: CpuSpeed::default(),
             cpu: CpuModel::I486,
             core: CoreMode::Auto,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
@@ -1175,10 +1175,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (
             Emulator,
             "cycles",
-            Some(match settings.cycles {
-                CpuSpeed::Max => "max".to_string(),
-                CpuSpeed::Fixed(n) => n.to_string(),
-            }),
+            Some(settings.cycles.to_string()),
         ),
         (
             Emulator,

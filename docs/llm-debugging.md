@@ -308,6 +308,20 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
 - **Speed:** the triangles are drawn on worker threads; `cycles_per_ms`
   shows what is left for the game's own code.
 
+### CPU speed (`cycles=auto`)
+
+`POST /api/speed {"cycles":"auto"}` changes the speed as the settings
+window does (`auto`, `auto 5000`, `max` or a number); `/api/status` has
+`cycles_per_ms`, the speed now. `auto` (the default) picks the speed from
+what the program does, and `/api/status` → `activity` has its counts since
+start: `bursts` (writes to video memory the size of a frame, the frames a
+program copies there), `flips` (display start changes), `polls` (key
+checks that found nothing, idle calls) and `status_reads` (port 3DAh),
+with `emulated_ns` to make rates of them. Sample it twice and divide:
+a game's frame rate at a few fixed speeds shows where it stops growing.
+Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
+and the speed it chose printed to stderr.
+
 ### Protected-mode programs (DOS extenders)
 
 Programs built with DOS/4GW, DOS/32A, PMODE or Borland's RTM switch the CPU

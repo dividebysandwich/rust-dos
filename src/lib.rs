@@ -2,6 +2,7 @@ pub mod achievements;
 pub mod apm;
 pub mod asm16;
 pub mod audio;
+pub mod autospeed;
 pub mod batch;
 pub mod bios;
 pub mod boot;

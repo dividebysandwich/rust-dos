@@ -109,6 +109,9 @@ pub struct Bus {
     /// The frames the program drew: the retraces after which the picture
     /// had changed, or while it flips pages, the flips (see `sync_display`).
     pub frames_drawn: u64,
+    /// What the program does that tells `cycles=auto` the speed it needs:
+    /// the frames it draws into video memory and flips, its polling.
+    pub activity: crate::autospeed::Activity,
     /// Retraces counted, and the one of the last page flip.
     retraces: u64,
     last_flip: Option<u64>,
@@ -315,6 +318,7 @@ impl Bus {
             freezes: Vec::new(),
             mixer_changed: false,
             frames_drawn: 0,
+            activity: crate::autospeed::Activity::new(),
             retraces: 0,
             last_flip: None,
             gate_array_shadow: Vec::new(),
@@ -645,6 +649,7 @@ impl Bus {
     /// A drive of `class` moved `bytes`: charge the time that takes at the
     /// drive's speed, and make its noise.
     pub fn disk_activity(&mut self, class: crate::diskio::DiskClass, bytes: u32, access: crate::disknoise::Access) {
+        self.activity.io_bytes += bytes as u64;
         let pending = self.disk_io.charge(class, bytes);
         self.disk_noise(class, access, pending);
     }
@@ -662,8 +667,9 @@ impl Bus {
     /// disk.
     pub fn drive_activity(&mut self, drive: u8, bytes: u32, access: crate::disknoise::Access) {
         self.drives_active |= 1 << drive;
-        if let Some(class) = self.disk.drive_kind(drive).and_then(crate::diskio::DiskClass::of) {
-            self.disk_activity(class, bytes, access);
+        match self.disk.drive_kind(drive).and_then(crate::diskio::DiskClass::of) {
+            Some(class) => self.disk_activity(class, bytes, access),
+            None => self.activity.io_bytes += bytes as u64,
         }
     }
 
@@ -907,6 +913,7 @@ impl Bus {
             return false;
         }
         let offset = dst - ADDR_VGA_GRAPHICS;
+        self.note_video_write(len as u64);
         for i in 0..len {
             self.vga.write_graphics(offset + i, self.ram[src + i]);
         }
@@ -922,6 +929,7 @@ impl Bus {
         }
         let bytes = value.to_le_bytes();
         let offset = dst - ADDR_VGA_GRAPHICS;
+        self.note_video_write((count * size) as u64);
         for i in 0..count * size {
             self.vga.write_graphics(offset + i, bytes[i % size]);
         }
@@ -1131,6 +1139,7 @@ impl Bus {
                 self.write_vram(offset, &[value]);
                 return true;
             }
+            self.note_video_write(1);
             // write_graphics already sets vga.dirty unconditionally. The
             // Return value only matters to callers that care whether the
             // write hit the active display plane, but rendering is gated
@@ -1161,6 +1170,7 @@ impl Bus {
         if (text..text + size).contains(&addr) {
             let text_off = (addr - text) & wrap;
             self.vga.vram_text[text_off] = value;
+            self.note_video_write(1);
 
             // Narrow the dirty range to just the affected character row when
             // we're in a text mode (see `text::geometry`). CGA graphics modes
@@ -1206,6 +1216,23 @@ impl Bus {
         false
     }
 
+    /// The program set the display start (CRTC registers 0Ch and 0Dh, or
+    /// the VESA BIOS's): a page flip, for `cycles=auto`.
+    pub fn note_display_start(&mut self) {
+        let start = if self.video_mode == VideoMode::Vesa {
+            self.vbe.start
+        } else {
+            (self.vga.crtc_regs[0x0C] as u32) << 8 | self.vga.crtc_regs[0x0D] as u32
+        };
+        self.activity.display_start(self.clock.icount, start);
+    }
+
+    /// The CPU wrote `bytes` bytes to video memory.
+    #[inline]
+    fn note_video_write(&mut self, bytes: u64) {
+        self.activity.video_write(self.clock.icount, bytes);
+    }
+
     /// Log the first writes to the ROMs, which go nowhere.
     #[cold]
     fn note_rom_write(&mut self, addr: usize) {
@@ -1222,6 +1249,7 @@ impl Bus {
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
         self.vbe.vram[offset..offset + bytes.len()].copy_from_slice(bytes);
+        self.note_video_write(bytes.len() as u64);
         if self.video_mode == VideoMode::Vesa {
             if let Some((first, last)) = self.vbe.frame_rows(offset, bytes.len()) {
                 self.vga.mark_dirty_rows(first, last);
@@ -2152,6 +2180,7 @@ impl Bus {
                     self.vga.io_write(port, value);
                     if matches!(port, 0x3D5 | 0x3B5) && matches!(self.vga.crtc_index, 0x0C | 0x0D) {
                         self.update_vbe_start();
+                        self.note_display_start();
                     }
                     // What the S3 shows depends on the VGA's registers too.
                     if self.s3() && !matches!(port, 0x3C6..=0x3C9 | 0x3DA | 0x3BA) {
@@ -2398,6 +2427,8 @@ impl Bus {
         }
         let now = self.clock.now_ns();
         if self.vga.retrace_began(now) {
+            let screen = crate::autospeed::screen_bytes(self);
+            self.activity.set_screen(screen);
             self.settle_register_mode();
             self.vga.latch_start_address();
             if self.vbe.latched_start != self.vbe.start {
@@ -2494,6 +2525,7 @@ impl Bus {
             let swapped = std::mem::take(&mut v.swapped);
             if v.output() {
                 self.frames_drawn += swapped;
+                self.activity.swapped(swapped);
                 return;
             }
         }
@@ -2564,6 +2596,7 @@ impl Bus {
     /// while display enable is off, from the CRT timing and emulated time.
     /// Reading it also resets the attribute controller's flip-flop.
     fn input_status_1(&mut self) -> u8 {
+        self.activity.status_reads += 1;
         self.sync_display();
         self.vga.attribute_flip_flop = false;
         self.vga.gate_array_status_read();

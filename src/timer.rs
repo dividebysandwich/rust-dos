@@ -10,6 +10,8 @@
 //!
 //! Time is measured in PIT input clock ticks (1.193182 MHz).
 
+use crate::autospeed::AutoSpeed;
+use crate::bus::Bus;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -30,6 +32,11 @@ pub const MIN_CYCLES: u32 = 100;
 pub const MAX_CYCLES: u32 = 2_000_000;
 /// Starting point for `CpuSpeed::Max` before the first adjustment.
 const MAX_INITIAL_CYCLES: u32 = 20_000;
+/// `CpuSpeed::Auto`'s least speed unless it is given one, which real-mode
+/// programs without frames to go by run at, DOSBox's: about a 286 at 12
+/// MHz, which the speed-sensitive real-mode games of the 1980s run right
+/// at.
+pub const AUTO_REAL_MODE_CYCLES: u32 = 3000;
 /// Share of each frame that `CpuSpeed::Max` gives to instruction execution.
 /// The rest is left for rendering, audio and the host.
 const MAX_BUSY_SHARE: f64 = 0.85;
@@ -312,34 +319,66 @@ pub enum CpuSpeed {
     Max,
     /// A fixed number of instructions per emulated millisecond.
     Fixed(u32),
+    /// The speed the running program needs, found from the frames it
+    /// draws and its waiting (see autospeed.rs); at least this, the speed
+    /// real-mode programs run at when they show nothing to go by.
+    Auto(u32),
+}
+
+impl Default for CpuSpeed {
+    fn default() -> Self {
+        CpuSpeed::Auto(AUTO_REAL_MODE_CYCLES)
+    }
+}
+
+impl std::fmt::Display for CpuSpeed {
+    /// As `parse` reads it.
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            CpuSpeed::Max => write!(f, "max"),
+            CpuSpeed::Fixed(n) => write!(f, "{}", n),
+            CpuSpeed::Auto(AUTO_REAL_MODE_CYCLES) => write!(f, "auto"),
+            CpuSpeed::Auto(n) => write!(f, "auto {}", n),
+        }
+    }
 }
 
 impl CpuSpeed {
-    /// Parse `max` or an instruction count per millisecond.
+    /// Parse `max`, `auto`, `auto` with its least speed (`auto 5000`), or
+    /// an instruction count per millisecond.
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = s.trim();
-        if s.eq_ignore_ascii_case("max") {
-            return Ok(CpuSpeed::Max);
-        }
-        match s.parse::<u32>() {
-            Ok(n) if (MIN_CYCLES..=MAX_CYCLES).contains(&n) => Ok(CpuSpeed::Fixed(n)),
-            _ => Err(format!(
-                "invalid cycles '{}': expected max or {}-{}",
+        let count = |n: &str| match n.parse::<u32>() {
+            Ok(n) if (MIN_CYCLES..=MAX_CYCLES).contains(&n) => Some(n),
+            _ => None,
+        };
+        let mut words = s.split_whitespace();
+        let speed = match (words.next(), words.next(), words.next()) {
+            (Some(w), None, _) if w.eq_ignore_ascii_case("max") => Some(CpuSpeed::Max),
+            (Some(w), None, _) if w.eq_ignore_ascii_case("auto") => Some(CpuSpeed::default()),
+            (Some(w), Some(n), None) if w.eq_ignore_ascii_case("auto") => count(n).map(CpuSpeed::Auto),
+            (Some(n), None, _) => count(n).map(CpuSpeed::Fixed),
+            _ => None,
+        };
+        speed.ok_or_else(|| {
+            format!(
+                "invalid cycles '{}': expected auto, max or {}-{}",
                 s, MIN_CYCLES, MAX_CYCLES
-            )),
-        }
+            )
+        })
     }
 
     pub fn initial_cycles(self) -> u32 {
         match self {
             CpuSpeed::Max => MAX_INITIAL_CYCLES,
-            CpuSpeed::Fixed(n) => n,
+            CpuSpeed::Fixed(n) | CpuSpeed::Auto(n) => n,
         }
     }
 
     /// The speed a step slower or faster (the hotkeys): 10% of the speed
-    /// the CPU runs at, `current`, rounded to hundreds. Slower from `max`
-    /// starts from the speed it reached; faster from `max` stays there.
+    /// the CPU runs at, `current`, rounded to hundreds. Slower from max or
+    /// auto starts from the speed they reached, as does faster from auto;
+    /// faster from max stays there.
     pub fn stepped(self, current: u32, faster: bool) -> CpuSpeed {
         if self == CpuSpeed::Max && faster {
             return CpuSpeed::Max;
@@ -351,9 +390,15 @@ impl CpuSpeed {
 }
 
 /// Keeps emulated time in step with the wall clock, one video frame at a
-/// time, and tunes the speed in `CpuSpeed::Max` mode.
+/// time, and tunes the speed in `CpuSpeed::Max` and `Auto` modes.
 pub struct Pacer {
     speed: CpuSpeed,
+    /// Finds `Auto`'s speed, and whether the program it measures switched
+    /// to protected mode.
+    auto: AutoSpeed,
+    protected: bool,
+    /// As fast as the host keeps up with, averaged over frames.
+    host_max: Option<f64>,
     /// Wall-clock instant that corresponds to emulated time `anchor_ticks`.
     anchor_wall: Instant,
     anchor_ticks: u64,
@@ -367,6 +412,9 @@ impl Pacer {
     pub fn new(speed: CpuSpeed, now: Instant) -> Self {
         Self {
             speed,
+            auto: AutoSpeed::new(speed.initial_cycles()),
+            protected: false,
+            host_max: None,
             anchor_wall: now,
             anchor_ticks: 0,
             next_frame: now,
@@ -389,6 +437,7 @@ impl Pacer {
     /// ahead of the wall clock would stand still until the wall clock
     /// caught up, and time behind it would race to catch up.
     pub fn rebase(&mut self, clock: &Clock, now: Instant) {
+        self.auto.reset();
         self.anchor_wall = now;
         self.anchor_ticks = clock.now_ticks();
         self.next_frame = now;
@@ -401,6 +450,9 @@ impl Pacer {
     /// Change the speed, as from the settings window. The caller sets the
     /// clock's rate (`CpuSpeed::initial_cycles`).
     pub fn set_speed(&mut self, speed: CpuSpeed) {
+        if let CpuSpeed::Auto(base) = speed {
+            self.auto = AutoSpeed::new(base);
+        }
         self.speed = speed;
     }
 
@@ -425,33 +477,65 @@ impl Pacer {
         clock.icount_at(target)
     }
 
-    /// Frame bookkeeping after a batch. In `Max` mode, retune the speed so
-    /// that executing one frame's worth of instructions plus the rest of the
-    /// frame's work (`overhead`) fits into `MAX_BUSY_SHARE` of a frame.
-    /// `executed` counts only instructions that actually ran, not ones
-    /// skipped while waiting for an interrupt.
+    /// Frame bookkeeping after a batch, on `bus` as it is after it. At max,
+    /// retune the speed so that executing one frame's worth of
+    /// instructions plus the rest of the frame's work (`overhead`) fits
+    /// into `MAX_BUSY_SHARE` of a frame. At auto, the speed the running
+    /// program needs (`AutoSpeed`), no more than that; `protected` says
+    /// whether it switched to protected mode (`Cpu::pm_latched`), and a
+    /// program starting or ending starts the search over. `executed`
+    /// counts only instructions that actually ran, not ones skipped while
+    /// waiting for an interrupt.
     /// Returns the new speed if it changed.
     pub fn end_frame(
         &mut self,
-        clock: &Clock,
+        bus: &Bus,
+        protected: bool,
         executed: u64,
         exec: Duration,
         overhead: Duration,
     ) -> Option<u32> {
-        if self.speed != CpuSpeed::Max || executed < 10_000 {
-            return None;
+        let current = bus.clock.cycles_per_ms();
+        let ideal = (executed >= 10_000).then(|| {
+            let ns_per_instr = exec.as_nanos() as f64 / executed as f64;
+            let frame_ns = FRAME.as_nanos() as f64;
+            let budget_ns =
+                (frame_ns * MAX_BUSY_SHARE - overhead.as_nanos() as f64).max(frame_ns * 0.1);
+            budget_ns / ns_per_instr / (frame_ns / 1_000_000.0)
+        });
+        match self.speed {
+            CpuSpeed::Fixed(_) => None,
+            CpuSpeed::Max => {
+                // Move gradually so one unusual frame can't swing the speed.
+                let next = ideal?.clamp(current as f64 * 0.9, current as f64 * 1.1);
+                let next = (next as u32).clamp(MIN_CYCLES, MAX_CYCLES);
+                (next != current).then_some(next)
+            }
+            CpuSpeed::Auto(_) => {
+                if let Some(ideal) = ideal {
+                    self.host_max = Some(self.host_max.map_or(ideal, |max| max * 0.9 + ideal * 0.1));
+                }
+                let host_max = self.host_max.map_or(MAX_CYCLES, |max| (max as u32).clamp(MIN_CYCLES, MAX_CYCLES));
+                if protected != self.protected {
+                    self.protected = protected;
+                    self.auto.reset();
+                    // The protected-mode program ended: whatever runs next
+                    // starts from the real-mode speed.
+                    if !protected {
+                        let base = self.auto.base();
+                        return (base != current).then_some(base);
+                    }
+                }
+                // Fast forwarding, the host's time says nothing of the
+                // program's needs.
+                let next = if self.fast_forward { None } else { self.auto.update(bus, protected, host_max) };
+                // A heavier scene than the host keeps up with at this speed.
+                match next.unwrap_or(current) {
+                    speed if speed > host_max && current > host_max => Some(host_max),
+                    speed => (speed != current).then_some(speed),
+                }
+            }
         }
-        let ns_per_instr = exec.as_nanos() as f64 / executed as f64;
-        let frame_ns = FRAME.as_nanos() as f64;
-        let budget_ns =
-            (frame_ns * MAX_BUSY_SHARE - overhead.as_nanos() as f64).max(frame_ns * 0.1);
-        let frame_ms = frame_ns / 1_000_000.0;
-        let ideal = budget_ns / ns_per_instr / frame_ms;
-        // Move gradually so one unusual frame can't swing the speed.
-        let current = clock.cycles_per_ms() as f64;
-        let next = ideal.clamp(current * 0.9, current * 1.1);
-        let next = (next as u32).clamp(MIN_CYCLES, MAX_CYCLES);
-        (next != clock.cycles_per_ms()).then_some(next)
     }
 
     /// Sleep until the next video frame is due; fast forwarding, not at all.
@@ -515,6 +599,9 @@ mod tests {
         // Slower from max starts where max got to; faster stays max.
         assert_eq!(CpuSpeed::Max.stepped(123_456, false), CpuSpeed::Fixed(111_200));
         assert_eq!(CpuSpeed::Max.stepped(50_000, true), CpuSpeed::Max);
+        // Auto goes either way from where it got to.
+        assert_eq!(CpuSpeed::Auto(3000).stepped(40_000, true), CpuSpeed::Fixed(44_000));
+        assert_eq!(CpuSpeed::Auto(3000).stepped(40_000, false), CpuSpeed::Fixed(36_000));
         // No slower than the slowest.
         assert_eq!(CpuSpeed::Fixed(150).stepped(150, false), CpuSpeed::Fixed(MIN_CYCLES));
         assert_eq!(CpuSpeed::Fixed(MIN_CYCLES).stepped(MIN_CYCLES, false), CpuSpeed::Fixed(MIN_CYCLES));

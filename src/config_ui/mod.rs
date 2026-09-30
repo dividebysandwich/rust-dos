@@ -545,7 +545,11 @@ fn step_number<T: PartialOrd + Copy>(values: &[T], current: T, dir: isize) -> T 
     }
 }
 
-const CYCLES: [u32; 8] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, u32::MAX];
+/// The speeds the slider steps through; after the fixed ones, max and then
+/// auto.
+const CYCLES: [u32; 9] = [1000, 3000, 5000, 10_000, 20_000, 50_000, 100_000, CYCLES_MAX, CYCLES_AUTO];
+const CYCLES_MAX: u32 = u32::MAX - 1;
+const CYCLES_AUTO: u32 = u32::MAX;
 const REWIND_MEMORY: [usize; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 
 /// The memory's slider: a square for every 4 MB, and the deadzone's, one
@@ -788,6 +792,8 @@ impl Item {
             Cycles => match s.cycles {
                 CpuSpeed::Max => "max".to_string(),
                 CpuSpeed::Fixed(n) => format!("{} per ms", n),
+                CpuSpeed::Auto(n) if n == CpuSpeed::default().initial_cycles() => "auto".to_string(),
+                CpuSpeed::Auto(n) => format!("auto (at least {})", n),
             },
             Core => match s.core {
                 CoreMode::Auto => "auto (recomp. in prot. mode)",
@@ -1071,13 +1077,19 @@ impl Item {
             Scale => s.scale = (s.scale as isize + dir).clamp(1, 16) as u32,
             Cycles => {
                 let current = match s.cycles {
-                    CpuSpeed::Max => u32::MAX,
+                    CpuSpeed::Max => CYCLES_MAX,
+                    CpuSpeed::Auto(_) => CYCLES_AUTO,
                     CpuSpeed::Fixed(n) => n,
                 };
-                s.cycles = match step_number(&CYCLES, current, dir) {
-                    u32::MAX => CpuSpeed::Max,
-                    n => CpuSpeed::Fixed(n),
-                };
+                // At the end, auto keeps its real-mode speed.
+                let next = step_number(&CYCLES, current, dir);
+                if next != current {
+                    s.cycles = match next {
+                        CYCLES_MAX => CpuSpeed::Max,
+                        CYCLES_AUTO => CpuSpeed::default(),
+                        n => CpuSpeed::Fixed(n),
+                    };
+                }
             }
             RewindMemory => s.rewind_memory = step_number(&REWIND_MEMORY, s.rewind_memory, dir),
             CrtCurvature => s.crt.curvature = step_units(s.crt.curvature, dir, 10, MAX_AMOUNT),
@@ -1120,10 +1132,7 @@ impl Item {
     /// The text to edit.
     fn text(self, s: &Settings) -> String {
         match self {
-            Item::Cycles => match s.cycles {
-                CpuSpeed::Max => "max".to_string(),
-                CpuSpeed::Fixed(n) => n.to_string(),
-            },
+            Item::Cycles => s.cycles.to_string(),
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),

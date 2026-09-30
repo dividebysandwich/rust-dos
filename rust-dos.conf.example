@@ -53,10 +53,14 @@
 # The CGA that makes the composite signal: old (IBM's first cards, which
 # the classic games were drawn for) or new (from 1984 on).
 #composite_era=old
-# CPU speed in instructions per millisecond, or max to run as fast as the
-# host keeps up with in real time. Lower it for old games that run too
-# fast. --cycles overrides it.
-#cycles=max
+# CPU speed in instructions per millisecond; max to run as fast as the
+# host keeps up with in real time; or auto (the default), which gives a
+# game as much speed as makes its frames come faster, up to the
+# display's refresh rate, and runs programs with no frames to go by at
+# 3000 in real mode and at max in protected mode. "auto 10000" makes
+# 10000 the least it runs at. Lower it for old games that run too fast.
+# --cycles overrides it.
+#cycles=auto
 # Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
 # CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages), or
 # pentium_mmx (that Pentium with MMX).

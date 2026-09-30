@@ -342,7 +342,7 @@ impl Core {
         // taken from it: the frame's work is what's left.
         let busy = frame_start.elapsed().saturating_sub(self.frontend);
         let overhead = busy.saturating_sub(exec_time);
-        if let Some(cycles) = m.pacer.end_frame(&m.cpu.bus.clock, executed, exec_time, overhead) {
+        if let Some(cycles) = m.pacer.end_frame(&m.cpu.bus, m.cpu.pm_latched, executed, exec_time, overhead) {
             m.cpu.bus.set_cycles_per_ms(cycles);
         }
         let render = render.saturating_sub(self.frontend - audio_wait);

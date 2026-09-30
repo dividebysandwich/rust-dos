@@ -296,7 +296,7 @@ fn settings_change_live() {
 
     // Emulator: type a speed, then a bad one.
     keys(&mut ui, &mut host, &[Tab, Enter, End]);
-    for _ in 0..3 {
+    for _ in 0.."auto".len() {
         ui.key(Backspace, &mut host);
     }
     ui.text("3000", &mut host);

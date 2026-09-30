@@ -389,13 +389,61 @@ fn pacer_drops_a_large_backlog() {
 }
 
 #[test]
+fn auto_speed_follows_the_program() {
+    let start = Instant::now();
+    let fast = Duration::from_millis(2);
+    let mut bus = bus_at(3000);
+    let mut pacer = Pacer::new(CpuSpeed::Auto(3000), start);
+    // Run `ms` of emulated time, a frame at a time, moving `io` bytes on
+    // a drive in each, returning the speed the pacer asks for last.
+    let run = |bus: &mut Bus, pacer: &mut Pacer, protected: bool, io: u64, ms: u64| {
+        let mut asked = None;
+        for _ in 0..ms / 16 {
+            bus.clock.icount += bus.clock.cycles_per_ms() as u64 * 16;
+            bus.activity.io_bytes += io;
+            if let Some(speed) = pacer.end_frame(bus, protected, 333_000, fast, Duration::ZERO) {
+                bus.set_cycles_per_ms(speed);
+                asked = Some(speed);
+            }
+        }
+        asked
+    };
+    // A real-mode program that shows nothing stays at the real-mode speed.
+    assert_eq!(run(&mut bus, &mut pacer, false, 0, 2000), None);
+    assert_eq!(bus.clock.cycles_per_ms(), 3000);
+    // A protected-mode one at work (loading) gets what the host has.
+    run(&mut bus, &mut pacer, true, 10_000, 2000);
+    assert!(bus.clock.cycles_per_ms() > 100_000, "{}", bus.clock.cycles_per_ms());
+    // One that does nothing goes down to a 486's speed.
+    run(&mut bus, &mut pacer, true, 0, 20_000);
+    assert_eq!(bus.clock.cycles_per_ms(), 20_000);
+    // Once it ends, whatever runs next starts from the real-mode speed.
+    assert_eq!(run(&mut bus, &mut pacer, false, 0, 16), Some(3000));
+}
+
+#[test]
+fn auto_speed_parses_and_prints() {
+    assert_eq!(CpuSpeed::default(), CpuSpeed::Auto(3000));
+    assert_eq!(CpuSpeed::parse("auto"), Ok(CpuSpeed::Auto(3000)));
+    assert_eq!(CpuSpeed::parse(" Auto  8000 "), Ok(CpuSpeed::Auto(8000)));
+    assert!(CpuSpeed::parse("auto 0").is_err());
+    assert!(CpuSpeed::parse("auto 3000 max").is_err());
+    assert!(CpuSpeed::parse("3000 3000").is_err());
+    for speed in [CpuSpeed::Max, CpuSpeed::Fixed(1234), CpuSpeed::Auto(3000), CpuSpeed::Auto(8000)] {
+        assert_eq!(CpuSpeed::parse(&speed.to_string()), Ok(speed));
+    }
+    assert_eq!(CpuSpeed::Auto(3000).to_string(), "auto");
+}
+
+#[test]
 fn max_speed_tracks_host_throughput() {
     let start = Instant::now();
-    let clock = Clock::new(20_000);
+    let bus = bus_at(20_000);
     let mut pacer = Pacer::new(CpuSpeed::Max, start);
     // Plenty of headroom: speed goes up, by at most 10% per frame.
     let up = pacer.end_frame(
-        &clock,
+        &bus,
+        false,
         333_000,
         Duration::from_millis(2),
         Duration::from_millis(1),
@@ -403,7 +451,8 @@ fn max_speed_tracks_host_throughput() {
     assert_eq!(up, Some(22_000));
     // Slower than real time: speed goes down.
     let down = pacer.end_frame(
-        &clock,
+        &bus,
+        false,
         333_000,
         Duration::from_millis(30),
         Duration::from_millis(1),
@@ -412,7 +461,7 @@ fn max_speed_tracks_host_throughput() {
     // Fixed speed never changes.
     let mut fixed = Pacer::new(CpuSpeed::Fixed(20_000), start);
     assert_eq!(
-        fixed.end_frame(&clock, 333_000, Duration::from_millis(2), Duration::ZERO),
+        fixed.end_frame(&bus, true, 333_000, Duration::from_millis(2), Duration::ZERO),
         None
     );
 }

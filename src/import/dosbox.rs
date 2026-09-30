@@ -91,14 +91,19 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
     match (section, key) {
         ("cpu", "cycles") => {
             let words: Vec<&str> = lower.split_whitespace().collect();
-            let fixed = match words.as_slice() {
-                ["fixed", n, ..] => n.parse::<u32>().ok(),
-                [n] => n.parse::<u32>().ok(),
+            let cycles = |n: &str| n.parse::<u32>().ok().map(|n| n.clamp(100, 2_000_000));
+            // `auto` may be followed by the real-mode speed, and like
+            // `max`, by a share of the host (90%) and a limit, which
+            // aren't imported.
+            let speed = match words.as_slice() {
+                ["fixed", n, ..] | [n] if cycles(n).is_some() => cycles(n).map(|n| n.to_string()),
+                ["auto", n, ..] if cycles(n).is_some() => cycles(n).map(|n| format!("auto {}", n)),
+                ["auto", ..] => Some("auto".to_string()),
+                ["max", ..] => Some("max".to_string()),
                 _ => None,
             };
-            match fixed {
-                Some(n) => imported.set("emulator", "cycles", n.clamp(100, 2_000_000).to_string()),
-                None if matches!(words.first(), Some(&"max" | &"auto")) => imported.set("emulator", "cycles", "max"),
+            match speed {
+                Some(speed) => imported.set("emulator", "cycles", speed),
                 None => unknown(imported),
             }
         }
@@ -386,6 +391,12 @@ mod tests {
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
         let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
         assert_eq!(get("cycles"), Some("max"));
+        for (cycles, imported) in [("auto", "auto"), ("auto 5000 max 90% limit 60000", "auto 5000"), ("auto max", "auto"), ("fixed 12000", "12000"), ("8000", "8000")] {
+            let conf = format!("[cpu]\ncycles={}\n", cycles);
+            let got = import(&[conf.as_str()], &[PathBuf::from("/")], "x", None);
+            let got = got.settings.iter().find(|(_, k, _)| *k == "cycles").map(|(_, _, v)| v.as_str());
+            assert_eq!(got, Some(imported), "cycles={}", cycles);
+        }
         assert_eq!(get("cpu"), Some("386"));
         assert_eq!(get("core"), Some("normal"));
         let pentium = import(&["[cpu]\ncputype=pentium_slow\n"], &[PathBuf::from("/")], "x", None);

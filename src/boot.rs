@@ -156,7 +156,7 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     cpu.con_pending.clear();
     cpu.hle_retry = false;
     cpu.idle = false;
-    cpu.dyn_latched = false;
+    cpu.pm_latched = false;
     cpu.dynrec.flush();
     let name = unit_drive(&cpu.bus, unit).map_or("?".to_string(), drive_name);
     cpu.program = format!("BOOT {}", name);
