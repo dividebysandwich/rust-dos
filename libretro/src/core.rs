@@ -85,6 +85,9 @@ pub struct Core {
     pub state_size: usize,
     stats: Stats,
     last_frame: Option<(Instant, FrameTimes)>,
+    /// The time the frame spent in the frontend, handing over its sound
+    /// and picture: with audio sync or vsync, it waits there.
+    frontend: std::time::Duration,
     /// The video card's picture, rendered where it changed, and with the
     /// cursors and the settings window on top, as handed over.
     picture: Frame,
@@ -211,6 +214,7 @@ impl Core {
             state_size: 0,
             stats: Stats::new(),
             last_frame: None,
+            frontend: std::time::Duration::ZERO,
             picture: blank.clone(),
             screen: blank,
             xrgb: Vec::new(),
@@ -319,7 +323,10 @@ impl Core {
         } else if m.cpu.bus.mixer.muted {
             samples.fill(0);
         }
+        let audio_start = Instant::now();
         cb.audio(&samples);
+        let audio_wait = audio_start.elapsed();
+        self.frontend = audio_wait;
 
         m.cpu.bus.flush_log();
         let render_start = Instant::now();
@@ -331,11 +338,14 @@ impl Core {
             cb.message(&notice);
         }
 
-        let overhead = frame_start.elapsed().saturating_sub(exec_time);
+        // The frontend's waits are neither the machine's work nor time
+        // taken from it: the frame's work is what's left.
+        let busy = frame_start.elapsed().saturating_sub(self.frontend);
+        let overhead = busy.saturating_sub(exec_time);
         if let Some(cycles) = m.pacer.end_frame(&m.cpu.bus.clock, executed, exec_time, overhead) {
             m.cpu.bus.set_cycles_per_ms(cycles);
         }
-        let busy = frame_start.elapsed();
+        let render = render.saturating_sub(self.frontend - audio_wait);
         let times = FrameTimes { wall: busy, busy, render, executed, halted, ..FrameTimes::default() };
         self.last_frame = Some((frame_start, times));
     }
@@ -424,7 +434,9 @@ impl Core {
         );
         self.set_geometry(cb);
         let (w, h) = (self.screen.width, self.screen.height);
+        let video_start = Instant::now();
         cb.video(&self.xrgb, w, h);
+        self.frontend += video_start.elapsed();
     }
 
     /// Tell the frontend the picture's size and shape when they change.
