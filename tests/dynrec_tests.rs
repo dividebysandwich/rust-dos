@@ -1285,6 +1285,34 @@ fn flags_set_in_one_block_reach_the_blocks_linked_after_it() {
 }
 
 #[test]
+fn the_instructions_before_a_deadline_a_block_doesnt_fit_get_no_blocks_of_their_own() {
+    // A loop of 41 instructions, 3000 times, in batches of 25 rounds: the
+    // end of each comes at the same place in it, where the block doesn't
+    // fit, and the interpreter runs the instructions up to it without a
+    // block starting at each.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut top = a.create_label();
+            a.mov(ecx, 3000u32)?;
+            a.set_label(&mut top)?;
+            for k in 0..39u32 {
+                a.add(eax, k)?;
+            }
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.hlt()
+        }));
+    });
+    lockstep_with(&mut a.cpu, &mut b.cpu, 2000, 41 * 25, true, |_, _| {}).unwrap();
+    assert!(halted(&a.cpu));
+    let stats = b.cpu.dynrec.stats();
+    if AVAILABLE {
+        assert!(stats.deadline > 100, "{:?}", stats);
+        assert!(stats.live_blocks < 30, "{:?}", stats);
+    }
+}
+
+#[test]
 fn translated_stack_operations_that_fault_leave_the_stack_pointer_as_it_was() {
     // After a few instructions in the block: POP into memory past DS's
     // limit, PUSH of memory there, ENTER with a frame past SS's limit

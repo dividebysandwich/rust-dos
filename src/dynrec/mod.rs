@@ -422,6 +422,10 @@ mod engine {
         /// a block went stale or wrote over itself (see
         /// `block::WATCH_AFTER`).
         pokes: HashMap<u32, Box<[u8]>>,
+        /// The timer deadline a block didn't fit before: the interpreter
+        /// runs the instructions up to it, and translating a block at each
+        /// would fill the memory with blocks that start anywhere.
+        stepping_to: Option<u64>,
         /// The CPU model the blocks' handlers were chosen for, and the size
         /// of the RAM their code was translated for.
         model: CpuModel,
@@ -453,6 +457,7 @@ mod engine {
                 returns,
                 return_blocks: vec![0; 1 << RETURN_BITS].into_boxed_slice(),
                 pokes: HashMap::new(),
+                stepping_to: None,
                 model,
                 ram_len,
             })
@@ -497,6 +502,9 @@ mod engine {
         fn find(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<(u32, *const u8)> {
             if let Some(found) = self.lookup(key) {
                 return Some(found);
+            }
+            if self.stepping_to == Some(cpu.bus.clock.deadline) {
+                return None;
             }
             // Writes to the instruction's blocks must bump their generations
             // from now on (see `Bus::code_blocks`), for `none` too.
@@ -774,6 +782,7 @@ mod engine {
                     EXIT_DEADLINE | EXIT_LIMIT => {
                         if kind == EXIT_DEADLINE {
                             stats.deadline += 1;
+                            self.stepping_to = Some(cpu.bus.clock.deadline);
                         }
                         // A block linked to from another page stopped before
                         // its first instruction: fetching it would have moved
