@@ -485,7 +485,9 @@ mod tests {
             assert!(CATEGORIES.iter().any(|c| c.0 == def.category), "{}", def.key);
             let Target::Config(section, key) = def.target else { continue };
             for (value, _) in def.values.iter().skip(1) {
-                let text = format!("[{}]\n{}={}\n", section, key, value);
+                // Memory past the default 486's is for a larger CPU.
+                let cpu = if key == "memsize" { "cpu=pentium_mmx\n" } else { "" };
+                let text = format!("[{}]\n{}{}={}\n", section, cpu, key, value);
                 let config = rust_dos::config::parse(&text, std::path::Path::new("/"), None);
                 assert!(config.warnings.is_empty(), "{}: {:?}", text, config.warnings);
             }
