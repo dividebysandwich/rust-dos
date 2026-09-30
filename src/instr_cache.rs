@@ -21,11 +21,12 @@
 //! address, and the code size, which decides how the bytes decode.
 //!
 //! Each slot also keeps the handler chosen for the instruction when it was
-//! decoded (`instructions::handler`), so a hit goes straight to it.
+//! decoded (`instructions::handler`), so a hit goes straight to it, and
+//! whether it is simple (see `exec::chain`).
 
 use iced_x86::Instruction;
 
-use crate::instructions::{Handler, execute_instruction, handler};
+use crate::instructions::{Handler, execute_instruction, fast};
 
 /// One cache slot, keyed by the physical address, the instruction pointer
 /// (iced stores absolute branch targets, so the same bytes decoded at
@@ -35,7 +36,8 @@ use crate::instructions::{Handler, execute_instruction, handler};
 struct Slot {
     /// The physical address (high half) and the instruction pointer.
     addr: u64,
-    /// The page generation (high half) and whether it's 32-bit code.
+    /// The page generation (bits 1-32) and whether it's 32-bit code (bit
+    /// 0); bit 63, `SIMPLE`, is set for a simple instruction.
     version: u64,
     handler: Handler,
     instr: Instruction,
@@ -64,6 +66,14 @@ struct BytesSlot {
     handler: Handler,
     instr: Instruction,
 }
+
+/// The bit of `Slot::version` that marks a simple instruction: one that
+/// `fast::select` has a handler for, which changes nothing the execution
+/// loop checks between instructions but EIP (see `exec::chain`).
+const SIMPLE: u64 = 1 << 63;
+
+/// A decoded instruction, its handler, and whether it is simple.
+pub type Decoded<'a> = (&'a Instruction, Handler, bool);
 
 /// Slots for instructions fetched a byte at a time.
 const BYTES_SLOTS: usize = 256;
@@ -122,18 +132,18 @@ impl InstrCache {
     /// generation still matches the current one. Returning a reference
     /// into the slot saves copying the instruction on every hit.
     #[inline(always)]
-    pub fn get(&mut self, phys_ip: usize, ip: u32, code32: bool, page_gen: u32) -> Option<(&Instruction, Handler)> {
+    pub fn get(&mut self, phys_ip: usize, ip: u32, code32: bool, page_gen: u32) -> Option<Decoded<'_>> {
         let idx = self.index(phys_ip);
         // SAFETY: idx is always in-bounds because we masked with `self.mask`
         // which is `len - 1` for a power-of-two-sized slots box.
         let slot = unsafe { self.slots.get_unchecked(idx) };
         let addr = (phys_ip as u64) << 32 | ip as u64;
         let version = (page_gen as u64) << 1 | code32 as u64;
-        if slot.addr != addr || slot.version != version {
+        if slot.addr != addr || slot.version & !SIMPLE != version {
             return None;
         }
         self.hits += 1;
-        Some((&slot.instr, slot.handler))
+        Some((&slot.instr, slot.handler, slot.version & SIMPLE != 0))
     }
 
     /// Fill the slot of the instruction at `phys_ip` (see `get`) with what
@@ -148,15 +158,16 @@ impl InstrCache {
         code32: bool,
         page_gen: u32,
         decode: impl FnOnce(&mut Instruction),
-    ) -> (&Instruction, Handler) {
+    ) -> Decoded<'_> {
         let idx = self.index(phys_ip);
         let slot = &mut self.slots[idx];
         decode(&mut slot.instr);
-        slot.handler = handler(&slot.instr);
+        let fast = fast::select(&slot.instr);
+        slot.handler = fast.unwrap_or(execute_instruction);
         slot.addr = (phys_ip as u64) << 32 | ip as u64;
-        slot.version = (page_gen as u64) << 1 | code32 as u64;
+        slot.version = (page_gen as u64) << 1 | code32 as u64 | if fast.is_some() { SIMPLE } else { 0 };
         self.misses += 1;
-        (&slot.instr, slot.handler)
+        (&slot.instr, slot.handler, fast.is_some())
     }
 
     /// The instruction decoded from `bytes` at `ip` as 16 or 32-bit code,
@@ -173,7 +184,7 @@ impl InstrCache {
         let key = (code32 as u64) << 32 | ip as u64;
         if slot.ip != key || slot.bytes != *bytes {
             slot.instr = decode();
-            slot.handler = handler(&slot.instr);
+            slot.handler = crate::instructions::handler(&slot.instr);
             slot.ip = key;
             slot.bytes = *bytes;
             self.misses += 1;

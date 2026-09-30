@@ -236,8 +236,10 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         // where it sets TF.)
         let stop = if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
             dynamic::<HOT>(cpu, fetch, hook, false)
+        } else if !HOT && !DYN {
+            instruction::<HOT, true>(cpu, fetch, hook)
         } else {
-            instruction::<HOT>(cpu, fetch, hook)
+            instruction::<HOT, false>(cpu, fetch, hook)
         };
         if let Some(reason) = stop {
             return reason;
@@ -273,7 +275,7 @@ impl Cpu {
         if self.dynamic_active() && !self.irq_shadow && !self.get_cpu_flag(CpuFlags::TF) {
             dynamic::<false>(self, &mut fetch, &mut NoHook, true);
         } else {
-            instruction::<false>(self, &mut fetch, &mut NoHook);
+            instruction::<false, false>(self, &mut fetch, &mut NoHook);
         }
         fetch.finish(self);
     }
@@ -778,15 +780,23 @@ pub(crate) struct At {
     /// Its bytes are all in RAM at `phys_ip`, so it can be decoded in place
     /// and cached.
     pub cacheable: bool,
+    /// It is in the code window, whose check leaves room for the longest
+    /// instruction below the CS limit.
+    pub in_window: bool,
 }
 
-/// Run one instruction or emulator service trap at CS:IP.
+/// Run one instruction or emulator service trap at CS:IP, and with
+/// `CHAIN` the ones after it that `chain` can run.
 #[inline(always)]
-fn instruction<const HOT: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> Option<StopReason> {
+fn instruction<const HOT: bool, const CHAIN: bool>(
+    cpu: &mut Cpu,
+    fetch: &mut Fetch,
+    hook: &mut dyn ExecHook,
+) -> Option<StopReason> {
     // This instruction ends the interrupt shadow of the previous one.
     cpu.irq_shadow = false;
     let at = fetch_location(cpu, fetch)?;
-    execute_at::<HOT>(cpu, fetch, hook, at)
+    execute_at::<HOT, CHAIN>(cpu, fetch, hook, at)
 }
 
 /// Run translated code from CS:EIP, or the instruction there through the
@@ -810,12 +820,12 @@ fn dynamic<const HOT: bool>(
         && at.phys_ip >> 12 != crate::mouse::CALLBACK_STUB >> 12
         && !cpu.in_shell_code();
     if !translatable {
-        return execute_at::<false>(cpu, fetch, hook, at);
+        return execute_at::<false, false>(cpu, fetch, hook, at);
     }
     // What the code window depends on, before the blocks run.
     let window = (cpu.tlb.epoch, cpu.cpl, cpu.bus.a20_mask());
     match fetch.dynrec.run(cpu, &at, single) {
-        Run::Interpret => execute_at::<false>(cpu, fetch, hook, at),
+        Run::Interpret => execute_at::<false, false>(cpu, fetch, hook, at),
         Run::Ran { page } => {
             fetch.window.moved(page, window);
             finish_instruction(cpu);
@@ -840,23 +850,27 @@ fn fetch_location(cpu: &mut Cpu, fetch: &mut Fetch) -> Option<At> {
     let eip = cpu.eip();
     let cs = cpu.seg_cache(Seg::CS);
     let (cs_limit, code32, lin_ip) = (cs.limit, cs.attr & ATTR_DB != 0, cs.base.wrapping_add(eip));
-    let (phys_ip, cacheable) = match fetch.window.phys(cpu, eip, lin_ip, cs_limit) {
-        Some(phys_ip) => (phys_ip, true),
-        None => locate(cpu, fetch, eip, lin_ip, cs_limit)?,
+    let (phys_ip, cacheable, in_window) = match fetch.window.phys(cpu, eip, lin_ip, cs_limit) {
+        Some(phys_ip) => (phys_ip, true, true),
+        None => {
+            let (phys_ip, cacheable) = locate(cpu, fetch, eip, lin_ip, cs_limit)?;
+            (phys_ip, cacheable, false)
+        }
     };
-    Some(At { eip, lin_ip, cs_limit, code32, phys_ip, cacheable })
+    Some(At { eip, lin_ip, cs_limit, code32, phys_ip, cacheable, in_window })
 }
 
 /// Run the instruction `fetch_location` found. `HOOK` calls the
-/// debugger's `before_exec` first.
+/// debugger's `before_exec` first; `CHAIN` goes on with the instructions
+/// after a simple one in `chain`.
 #[inline(always)]
-fn execute_at<const HOOK: bool>(
+fn execute_at<const HOOK: bool, const CHAIN: bool>(
     cpu: &mut Cpu,
     fetch: &mut Fetch,
     hook: &mut dyn ExecHook,
     at: At,
 ) -> Option<StopReason> {
-    let At { eip, lin_ip, cs_limit, code32, phys_ip, cacheable } = at;
+    let At { eip, lin_ip, cs_limit, code32, phys_ip, cacheable, in_window } = at;
     if HOOK && hook.before_exec(cpu, phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
@@ -868,7 +882,7 @@ fn execute_at<const HOOK: bool>(
     // memory, or runs past the end of RAM, is fetched byte by byte and not
     // cached.
     let slow;
-    let (instr, handler) = if cacheable {
+    let (instr, handler, simple) = if cacheable {
         // The generations of the blocks holding the first and last byte
         // an instruction can have: a write to either changes the sum.
         let gens = &cpu.bus.page_gen;
@@ -885,9 +899,12 @@ fn execute_at<const HOOK: bool>(
     } else {
         match fetch_slow(cpu, lin_ip, phys_ip) {
             // All 16 bytes: the decode is kept with them.
-            Ok((bytes, 16)) => fetch.cache.get_or_decode_bytes(phys_ip, eip, code32, &bytes, || {
-                Decoder::with_ip(if code32 { 32 } else { 16 }, &bytes, eip as u64, DecoderOptions::NONE).decode()
-            }),
+            Ok((bytes, 16)) => {
+                let (instr, handler) = fetch.cache.get_or_decode_bytes(phys_ip, eip, code32, &bytes, || {
+                    Decoder::with_ip(if code32 { 32 } else { 16 }, &bytes, eip as u64, DecoderOptions::NONE).decode()
+                });
+                (instr, handler, false)
+            }
             Ok((bytes, len)) => {
                 let mut decoder =
                     Decoder::with_ip(if code32 { 32 } else { 16 }, &bytes[..len], eip as u64, DecoderOptions::NONE);
@@ -900,7 +917,7 @@ fn execute_at<const HOOK: bool>(
                     cpu.raise(fault);
                     return None;
                 }
-                (&slow, crate::instructions::execute_instruction as Handler)
+                (&slow, crate::instructions::execute_instruction as Handler, false)
             }
             Err(fault) => {
                 cpu.raise(fault);
@@ -910,7 +927,7 @@ fn execute_at<const HOOK: bool>(
     };
 
     let next_eip = eip.wrapping_add(instr.len() as u32);
-    if next_eip - 1 > cs_limit {
+    if !in_window && next_eip - 1 > cs_limit {
         // The instruction's last bytes lie past the segment limit.
         cpu.raise(Fault::gp(0));
         return None;
@@ -919,6 +936,7 @@ fn execute_at<const HOOK: bool>(
     // TF as the instruction begins: the single-step trap follows it.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
     cpu.set_eip(next_eip);
+    let mut chains = CHAIN && simple && !traced;
     match handler(cpu, instr) {
         Ok(()) => {
             if traced {
@@ -926,6 +944,7 @@ fn execute_at<const HOOK: bool>(
             }
         }
         Err(fault) => {
+            chains = false;
             // A fault leaves the instruction undone: EIP back on it, and ESP
             // as it was (the handlers commit everything else last).
             cpu.set_eip(eip);
@@ -938,7 +957,62 @@ fn execute_at<const HOOK: bool>(
     }
     cpu.bus.clock.icount += 1;
     finish_instruction(cpu);
+    if chains && cpu.state == CpuState::Running && !cpu.in_shell_code() {
+        chain(cpu, fetch, code32);
+    }
     None
+}
+
+/// Run on from a simple instruction (see `instr_cache::SIMPLE`), which
+/// changed nothing the execution loop checks between instructions but EIP,
+/// so the ones after it need only what else can change looked at: the next
+/// timer event, an interrupt request, the code window, and the decoded-
+/// instruction cache. Stops after an instruction that isn't simple or
+/// faults, and before one the loop has to find or decode itself.
+#[inline(always)]
+fn chain(cpu: &mut Cpu, fetch: &mut Fetch, code32: bool) {
+    let cs = cpu.seg_cache(Seg::CS);
+    let (cs_base, cs_limit) = (cs.base, cs.limit);
+    let CodeWindow { lin: window_lin, len: window_len, phys: window_phys, .. } = fetch.window;
+    // Interrupts are only delivered with IF set, which stays as it is.
+    let interruptible = cpu.get_cpu_flag(CpuFlags::IF);
+    loop {
+        let clock = &cpu.bus.clock;
+        if clock.icount >= clock.deadline || (interruptible && cpu.bus.irq_ready) {
+            return;
+        }
+        let eip = cpu.eip();
+        let offset = cs_base.wrapping_add(eip).wrapping_sub(window_lin);
+        if offset >= window_len || eip as u64 + PAGE_TAIL as u64 - 1 > cs_limit as u64 {
+            return;
+        }
+        let phys_ip = window_phys + offset as usize;
+        let gens = &cpu.bus.page_gen;
+        // SAFETY: as in `execute_at`: the window's instructions are all in RAM.
+        let page_gen = unsafe {
+            gens.get_unchecked(phys_ip >> GEN_SHIFT).wrapping_add(*gens.get_unchecked((phys_ip + 14) >> GEN_SHIFT))
+        };
+        let Some((instr, handler, simple)) = fetch.cache.get(phys_ip, eip, code32, page_gen) else {
+            return;
+        };
+        cpu.executed += 1;
+        let start_esp = cpu.esp();
+        cpu.set_eip(eip.wrapping_add(instr.len() as u32));
+        let done = match handler(cpu, instr) {
+            Ok(()) => !simple,
+            Err(fault) => {
+                cpu.set_eip(eip);
+                cpu.set_esp(start_esp);
+                after_fault(cpu, fault, fetch.ram, phys_ip);
+                true
+            }
+        };
+        cpu.bus.clock.icount += 1;
+        if done {
+            finish_instruction(cpu);
+            return;
+        }
+    }
 }
 
 /// Decode the instruction at `phys_ip` into the decoded-instruction
@@ -952,7 +1026,7 @@ fn decode_cached<'a>(
     eip: u32,
     code32: bool,
     page_gen: u32,
-) -> (&'a Instruction, Handler) {
+) -> crate::instr_cache::Decoded<'a> {
     let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
     fetch.cache.decode(phys_ip, eip, code32, page_gen, |slot| {
         let decoder = if code32 { decoder32 } else { decoder16 };
