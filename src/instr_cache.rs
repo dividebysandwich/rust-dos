@@ -118,13 +118,30 @@ impl InstrCache {
     }
 
     /// The decoded instruction at `phys_ip`, decoded at `ip` as 16 or 32-bit
-    /// code, and its handler. The cached decode is used only when the slot
-    /// matches all three and the recorded page generation still matches
-    /// the current one; otherwise `decode` fills the slot afresh. Returning
-    /// a reference into the slot saves copying the instruction on every
-    /// hit.
+    /// code, and its handler, if the slot holds it and the recorded page
+    /// generation still matches the current one. Returning a reference
+    /// into the slot saves copying the instruction on every hit.
     #[inline(always)]
-    pub fn get_or_decode(
+    pub fn get(&mut self, phys_ip: usize, ip: u32, code32: bool, page_gen: u32) -> Option<(&Instruction, Handler)> {
+        let idx = self.index(phys_ip);
+        // SAFETY: idx is always in-bounds because we masked with `self.mask`
+        // which is `len - 1` for a power-of-two-sized slots box.
+        let slot = unsafe { self.slots.get_unchecked(idx) };
+        let addr = (phys_ip as u64) << 32 | ip as u64;
+        let version = (page_gen as u64) << 1 | code32 as u64;
+        if slot.addr != addr || slot.version != version {
+            return None;
+        }
+        self.hits += 1;
+        Some((&slot.instr, slot.handler))
+    }
+
+    /// Fill the slot of the instruction at `phys_ip` (see `get`) with what
+    /// `decode` decodes, and return it. Kept out of line, off the path of
+    /// the hits.
+    #[cold]
+    #[inline(never)]
+    pub fn decode(
         &mut self,
         phys_ip: usize,
         ip: u32,
@@ -133,20 +150,12 @@ impl InstrCache {
         decode: impl FnOnce(&mut Instruction),
     ) -> (&Instruction, Handler) {
         let idx = self.index(phys_ip);
-        // SAFETY: idx is always in-bounds because we masked with `self.mask`
-        // which is `len - 1` for a power-of-two-sized slots box.
-        let slot = unsafe { self.slots.get_unchecked_mut(idx) };
-        let addr = (phys_ip as u64) << 32 | ip as u64;
-        let version = (page_gen as u64) << 1 | code32 as u64;
-        if slot.addr != addr || slot.version != version {
-            decode(&mut slot.instr);
-            slot.handler = handler(&slot.instr);
-            slot.addr = addr;
-            slot.version = version;
-            self.misses += 1;
-        } else {
-            self.hits += 1;
-        }
+        let slot = &mut self.slots[idx];
+        decode(&mut slot.instr);
+        slot.handler = handler(&slot.instr);
+        slot.addr = (phys_ip as u64) << 32 | ip as u64;
+        slot.version = (page_gen as u64) << 1 | code32 as u64;
+        self.misses += 1;
         (&slot.instr, slot.handler)
     }
 

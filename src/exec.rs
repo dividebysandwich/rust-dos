@@ -878,20 +878,10 @@ fn execute_at<const HOOK: bool>(
         let page_gen = unsafe {
             gens.get_unchecked(phys_ip >> GEN_SHIFT).wrapping_add(*gens.get_unchecked((phys_ip + 14) >> GEN_SHIFT))
         };
-        let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
-        let code_blocks = &mut cpu.bus.code_blocks;
-        fetch.cache.get_or_decode(phys_ip, eip, code32, page_gen, |slot| {
-            let decoder = if code32 { decoder32 } else { decoder16 };
-            decoder.set_position(phys_ip).unwrap();
-            decoder.set_ip(eip as u64);
-            decoder.decode_out(slot);
-            // Writes to the blocks the instruction is in must bump their
-            // generations from now on (see `Bus::code_blocks`).
-            let last = if slot.is_invalid() { 14 } else { slot.len() - 1 };
-            for block in (phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT {
-                code_blocks[block] = 1;
-            }
-        })
+        match fetch.cache.get(phys_ip, eip, code32, page_gen) {
+            Some(hit) => hit,
+            None => decode_cached(fetch, &mut cpu.bus.code_blocks, phys_ip, eip, code32, page_gen),
+        }
     } else {
         match fetch_slow(cpu, lin_ip, phys_ip) {
             // All 16 bytes: the decode is kept with them.
@@ -949,6 +939,33 @@ fn execute_at<const HOOK: bool>(
     cpu.bus.clock.icount += 1;
     finish_instruction(cpu);
     None
+}
+
+/// Decode the instruction at `phys_ip` into the decoded-instruction
+/// cache, on a miss.
+#[cold]
+#[inline(never)]
+fn decode_cached<'a>(
+    fetch: &'a mut Fetch,
+    code_blocks: &mut [u8],
+    phys_ip: usize,
+    eip: u32,
+    code32: bool,
+    page_gen: u32,
+) -> (&'a Instruction, Handler) {
+    let (decoder16, decoder32) = (&mut fetch.decoder16, &mut fetch.decoder32);
+    fetch.cache.decode(phys_ip, eip, code32, page_gen, |slot| {
+        let decoder = if code32 { decoder32 } else { decoder16 };
+        decoder.set_position(phys_ip).unwrap();
+        decoder.set_ip(eip as u64);
+        decoder.decode_out(slot);
+        // Writes to the blocks the instruction is in must bump their
+        // generations from now on (see `Bus::code_blocks`).
+        let last = if slot.is_invalid() { 14 } else { slot.len() - 1 };
+        for block in (phys_ip >> GEN_SHIFT).saturating_sub(1)..=(phys_ip + last) >> GEN_SHIFT {
+            code_blocks[block] = 1;
+        }
+    })
 }
 
 /// The single-step trap after `instr`, which began with TF set, unless the
