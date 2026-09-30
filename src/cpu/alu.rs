@@ -256,6 +256,7 @@ impl Cpu {
 
     /// SHLD/SHRD: shift `dest` by `count` (already masked to 5 bits),
     /// filling the vacated bits from `src`.
+    #[inline(always)]
     pub fn alu_double_shift(&mut self, left: bool, size: u8, dest: u32, src: u32, count: u32) -> u32 {
         if count == 0 {
             return dest;

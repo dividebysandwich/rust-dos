@@ -88,6 +88,11 @@ pub fn select(instr: &Instruction) -> Option<Handler> {
         Ror => shift::<ROR>(instr),
         Rcl => shift::<RCL>(instr),
         Rcr => shift::<RCR>(instr),
+        Movzx => movx::<false>(instr),
+        Movsx => movx::<true>(instr),
+        Imul => imul(instr),
+        Shld => double::<true>(instr),
+        Shrd => double::<false>(instr),
         Push => push_pop(instr, true),
         Pop => push_pop(instr, false),
         Lea => lea(instr),
@@ -195,6 +200,98 @@ fn alu<const OP: u8>(instr: &Instruction) -> Option<Handler> {
         Form::RegMem => sized_mem!(size, mem_a32(instr)?, alu_rm, OP),
         Form::MemReg => sized_mem!(size, mem_a32(instr)?, alu_mr, OP),
         Form::MemImm => sized_mem!(size, mem_a32(instr)?, alu_mi, OP),
+    })
+}
+
+/// The source of MOVZX, MOVSX and two and three-operand IMUL, operand 1:
+/// a register, or memory (with its address size).
+enum Src {
+    Reg,
+    Mem(bool),
+}
+
+fn src(instr: &Instruction, size: u8) -> Option<Src> {
+    match instr.op1_kind() {
+        OpKind::Register if gpr_size(instr.op1_register()) == Some(size) => Some(Src::Reg),
+        OpKind::Memory if instr.memory_size().size() as u8 == size => Some(Src::Mem(mem_a32(instr)?)),
+        _ => None,
+    }
+}
+
+fn movx<const SIGNED: bool>(instr: &Instruction) -> Option<Handler> {
+    let dest = gpr_size(instr.op0_register())?;
+    let size = match instr.op1_kind() {
+        OpKind::Register => gpr_size(instr.op1_register())?,
+        _ => instr.memory_size().size() as u8,
+    };
+    macro_rules! pick {
+        ($d:literal, $s:literal) => {
+            match src(instr, $s)? {
+                Src::Reg => movx_rr::<SIGNED, $d, $s> as Handler,
+                Src::Mem(false) => movx_rm::<SIGNED, $d, $s, false>,
+                Src::Mem(true) => movx_rm::<SIGNED, $d, $s, true>,
+            }
+        };
+    }
+    Some(match (dest, size) {
+        (2, 1) => pick!(2, 1),
+        (4, 1) => pick!(4, 1),
+        (4, 2) => pick!(4, 2),
+        _ => return None,
+    })
+}
+
+fn imul(instr: &Instruction) -> Option<Handler> {
+    if instr.op_count() == 1 || instr.op0_kind() != OpKind::Register {
+        return None;
+    }
+    let size = gpr_size(instr.op0_register())?;
+    let three = instr.op_count() == 3;
+    if three && !is_imm(instr.op2_kind()) {
+        return None;
+    }
+    macro_rules! pick {
+        ($s:literal, $three:literal) => {
+            match src(instr, $s)? {
+                Src::Reg => imul_r::<$s, $three, false, false> as Handler,
+                Src::Mem(a32) => {
+                    if a32 {
+                        imul_r::<$s, $three, true, true>
+                    } else {
+                        imul_r::<$s, $three, true, false>
+                    }
+                }
+            }
+        };
+    }
+    Some(match (size, three) {
+        (2, false) => pick!(2, false),
+        (2, true) => pick!(2, true),
+        (4, false) => pick!(4, false),
+        (4, true) => pick!(4, true),
+        _ => return None,
+    })
+}
+
+/// SHLD and SHRD of a register by an immediate or CL.
+fn double<const LEFT: bool>(instr: &Instruction) -> Option<Handler> {
+    if instr.op0_kind() != OpKind::Register || instr.op1_kind() != OpKind::Register {
+        return None;
+    }
+    let size = gpr_size(instr.op0_register())?;
+    if !matches!(size, 2 | 4) || gpr_size(instr.op1_register()) != Some(size) {
+        return None;
+    }
+    let cl = match instr.op2_kind() {
+        OpKind::Register if instr.op2_register() == Register::CL => true,
+        k if is_imm(k) => false,
+        _ => return None,
+    };
+    Some(match (size, cl) {
+        (2, false) => double_r::<LEFT, 2, false>,
+        (2, true) => double_r::<LEFT, 2, true>,
+        (4, false) => double_r::<LEFT, 4, false>,
+        _ => double_r::<LEFT, 4, true>,
     })
 }
 
@@ -495,6 +592,58 @@ fn push_r<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 fn pop_r<const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     let value = cpu.pop_sized(S)?;
     cpu.set_gpr::<S>(instr.op0_register(), value);
+    Ok(())
+}
+
+// --- MOVZX, MOVSX, IMUL, SHLD and SHRD ---
+
+/// Extend `value`, of `S` bytes, as MOVSX (`SIGNED`) or MOVZX does.
+#[inline(always)]
+fn extend<const SIGNED: bool, const S: u8>(value: u32) -> u32 {
+    if SIGNED { crate::cpu::alu::sign_extend(S, value) } else { value }
+}
+
+fn movx_rr<const SIGNED: bool, const D: u8, const S: u8>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let value = extend::<SIGNED, S>(cpu.gpr::<S>(instr.op1_register()));
+    cpu.set_gpr::<D>(instr.op0_register(), value);
+    Ok(())
+}
+
+fn movx_rm<const SIGNED: bool, const D: u8, const S: u8, const A32: bool>(
+    cpu: &mut Cpu,
+    instr: &Instruction,
+) -> CpuResult {
+    let value = extend::<SIGNED, S>(read::<S, A32>(cpu, instr)?);
+    cpu.set_gpr::<D>(instr.op0_register(), value);
+    Ok(())
+}
+
+/// IMUL of operand 1 (a register, or memory with `MEM`) by the
+/// destination register or, with `THREE`, the immediate, into the
+/// destination, as `arith::imul` does it.
+fn imul_r<const S: u8, const THREE: bool, const MEM: bool, const A32: bool>(
+    cpu: &mut Cpu,
+    instr: &Instruction,
+) -> CpuResult {
+    let dest = instr.op0_register();
+    let a = if MEM { read::<S, A32>(cpu, instr)? } else { cpu.gpr::<S>(instr.op1_register()) };
+    let b = if THREE { instr.immediate(2) as u32 & size_mask(S) } else { cpu.gpr::<S>(dest) };
+    let sx = |v: u32| crate::cpu::alu::sign_extend(S, v) as i32 as i64;
+    let r = sx(a) * sx(b);
+    let overflow = r != sx(r as u32 & size_mask(S));
+    cpu.set_gpr::<S>(dest, r as u32);
+    let of = crate::cpu::alu::CF | crate::cpu::alu::OF;
+    cpu.set_flag_bits(of, if overflow { of } else { 0 });
+    Ok(())
+}
+
+fn double_r<const LEFT: bool, const S: u8, const CL: bool>(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
+    let count = if CL { cpu.ecx() } else { instr.immediate(2) as u32 } & 0x1F;
+    let dest = instr.op0_register();
+    let r = cpu.alu_double_shift(LEFT, S, cpu.gpr::<S>(dest), cpu.gpr::<S>(instr.op1_register()), count);
+    if count != 0 {
+        cpu.set_gpr::<S>(dest, r);
+    }
     Ok(())
 }
 
