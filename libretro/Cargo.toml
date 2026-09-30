@@ -4,7 +4,7 @@ description = "rust-dos as a libretro core, for RetroArch and the other libretro
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 publish = false
 
