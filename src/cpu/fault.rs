@@ -19,11 +19,14 @@ pub const EXT: u32 = 1;
 pub const DR6_BS: u32 = 0x4000;
 
 /// An exception: its vector and, for the exceptions that have one, the error
-/// code pushed with it (protected mode only).
+/// code pushed with it (protected mode only). Eight bytes, so a
+/// `CpuResult<()>` fits in a register: the handlers return one for every
+/// instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fault {
     pub vector: u8,
-    pub error: Option<u32>,
+    has_error: bool,
+    code: u32,
 }
 
 impl Fault {
@@ -43,14 +46,16 @@ impl Fault {
     pub const NM: Fault = Fault::new(7);
 
     pub const fn new(vector: u8) -> Self {
-        Fault { vector, error: None }
+        Fault { vector, has_error: false, code: 0 }
     }
 
     pub const fn with_error(vector: u8, error: u32) -> Self {
-        Fault {
-            vector,
-            error: Some(error),
-        }
+        Fault { vector, has_error: true, code: error }
+    }
+
+    /// The error code pushed with it, for the exceptions that have one.
+    pub const fn error(&self) -> Option<u32> {
+        if self.has_error { Some(self.code) } else { None }
     }
 
     /// Double fault.
@@ -157,6 +162,8 @@ impl Frame {
 
 /// Result of an operation that can raise an exception.
 pub type CpuResult<T = ()> = Result<T, Fault>;
+
+const _: () = assert!(size_of::<CpuResult>() == 8);
 
 /// What raised an interrupt. Protected mode treats them differently: gate
 /// privilege checks apply to software interrupts only, and external
@@ -454,7 +461,7 @@ impl Cpu {
         self.exceptions += 1;
         let record = ExceptionRecord {
             vector: fault.vector,
-            error: fault.error,
+            error: fault.error(),
             cs: self.cs(),
             eip: self.eip,
             cr2: self.cr2,
@@ -466,7 +473,7 @@ impl Cpu {
         }
         self.exception_log.push_back(record);
         if self.exceptions <= EXCEPTIONS_LOGGED {
-            let error = match (fault.error, self.pe()) {
+            let error = match (fault.error(), self.pe()) {
                 (Some(e), true) => format!("({:04X})", e),
                 _ => String::new(),
             };
@@ -485,7 +492,7 @@ impl Cpu {
 
     /// The error code an exception pushes: in protected mode only.
     fn error_code(&self, fault: Fault) -> Option<u32> {
-        if self.pe() { fault.error } else { None }
+        if self.pe() { fault.error() } else { None }
     }
 
     /// Triple fault: the processor stops, and an AT's chipset turns that
