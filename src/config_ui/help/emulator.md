@@ -2,16 +2,15 @@
 
 How fast the emulated processor runs, in instructions per millisecond.
 
-- **auto**: the default. The emulator watches the frames a game draws
-  and gives it as much speed as makes them come faster, and no more:
-  where a game caps its own frame rate (many do, at 20 or 35 frames a
-  second), where the frames come as fast as the monitor shows them, or
-  while it waits for a key. Games that draw no full frames, like most
-  of the 1980s, run at 3000, about a 286, as in DOSBox; typed as
-  **auto 10000**, they run at 10000 instead, and no game runs slower.
-  Games for DOS extenders (DOS/4GW) that show nothing, loading or
-  computing, get all the speed there is. Finding the speed takes a few
-  seconds when a game starts.
+- **auto**: the default. This setting has the emulator watch the frames 
+  a game draws and gives it as much speed as needed for the target 
+  framerate. This is either determined by the game itself (many use 
+  20, 30 or similar hardcoded fps values), the monitor, or user input.
+  Games that don't draw full frames (mostly early games from the 1980s)
+  run at 3000 cycles. Such games can be forced to a higher cycle value 
+  by typing **auto 10000**.
+  Games for DOS extenders (DOS/4GW) get all the speed there is. 
+  Finding the speed takes a few seconds when a game starts.
 - **max**: as fast as your computer allows, for every game.
 - A number: a fixed speed. **3000** is about a 286, **10000** a fast
   386, **50000** a fast 486.
