@@ -255,7 +255,11 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
 
 - **Status:** `/api/status` has `cpu_mode` `v86` while a DOS box or the
   BIOS runs under Windows, `video.s3` with the S3's extended CRTC
-  registers and hardware cursor position (with `machine=svga_s3`),
+  registers and hardware cursor position (with `machine=svga_s3`, and a
+  ViRGE's), and with `svga_s3virge`/`svga_s3virgevx` `video.s3.virge`:
+  the 2D engine's BitBLTs, rectangles, lines and polygons, the 3D
+  engine's `triangles` and `lines_3d`, the last 3D command (`cmd_3d`),
+  the subsystem status, and the overlay, if one is shown,
   `video.vga.crtc` with the standard CRTC registers, and `kbc` with the
   keyboard controller's output buffer and queues.
 - **The mouse:** Windows reads the PS/2 mouse's motion and accelerates

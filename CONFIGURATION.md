@@ -134,7 +134,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,
   with its VESA modes, 2D accelerator and hardware cursor, for systems
   [booted from disk images](#booting-a-disk-image) whose drivers program
-  it), `vga` (an IBM VGA, without VESA modes),
+  it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX on
+  the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
+  engine and streams processor, which Windows 95's Direct3D uses through
+  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `vga` (an IBM
+  VGA, without VESA modes),
   `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
   640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
@@ -881,8 +885,8 @@ The built-in DOS steps aside: memory is cleared, the BIOS is all that is
 left, and the boot sector of the disk in the drive `-l` names (A: by
 default) runs. The BIOS has what such systems look for: the disks through
 INT 13h with its extensions, the keyboard's buffer, the memory map (INT 15h
-E820h), a Plug and Play BIOS, APM 1.2, and with `machine=svga_s3` a PCI
-BIOS. BIOS services work in virtual-8086 mode and through the page tables of
+E820h), a Plug and Play BIOS, APM 1.2, and with an S3 card or a 3dfx one a
+PCI BIOS. BIOS services work in virtual-8086 mode and through the page tables of
 the system that calls them. The first two floppy drives are always there,
 empty or not; hard disk images are the drives C: and D:.
 
@@ -987,6 +991,29 @@ the machine off). MS-DOS Prompts run in a window or full screen
 (Alt+Enter), and **Restart in MS-DOS mode** works. Windows keeps the
 hardware it was installed on in its registry, so an image installed on
 other hardware may look for devices this machine hasn't.
+
+### Direct3D on an S3 ViRGE
+
+With `machine=svga_s3virge` (or `svga_s3virgevx`) the PCI card is an S3
+ViRGE (PCI\VEN_5333&DEV_5631; the VX is DEV_883D), a 2D and 3D
+accelerator with 4 MB. S3's Windows 95 driver draws the desktop with its 2D
+engine and gives DirectDraw and Direct3D a hardware device, whose
+triangles the ViRGE's 3D engine draws: Gouraud shaded or textured
+(perspective corrected, filtered and mipmapped), Z buffered, fogged and
+alpha blended, at 16 or 24 bits per pixel. Its streams processor shows
+DirectDraw's overlays and S3D Toolkit games' page flips.
+
+Windows 95 finds the card at its next start. The first release of
+Windows 95 has no driver for it; S3's (version 4.03.00.2111, "S3 ViRGE,
+VX, DX & GX v3.12.01", on the VOGONS driver library) installs with **Have
+Disk** from a folder copied onto the disk image. DirectX's own runtime
+(DirectX 5 or later) is needed for Direct3D; DxDiag's **Test Direct3D**
+shows the ViRGE drawing. Direct3D needs the desktop at 16 or 24 bits per
+pixel ("High Color" or "True Color", which the ViRGE's driver has in
+place of 32 bits).
+
+`/api/status` of the debug server shows what the card's engines did under
+`video.s3.virge`.
 
 ## 3dfx Voodoo Graphics
 

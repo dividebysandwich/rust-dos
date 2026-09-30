@@ -376,6 +376,16 @@ mod tests {
     }
 
     #[test]
+    fn a_dosbox_x_virge_stays_a_virge() {
+        let machine = |conf: &str| {
+            let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+            imported.settings.iter().find(|(_, k, _)| *k == "machine").map(|(_, _, v)| v.clone())
+        };
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3virge\n").as_deref(), Some("svga_s3virge"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_s3virgevx\n").as_deref(), Some("svga_s3virgevx"));
+    }
+
+    #[test]
     fn network_settings_map_onto_rust_dos_s() {
         let conf = "[ipx]\nipx=true\n[ne2000]\nne2000=true\nnicbase=280\nnicirq=5\nmacaddr=AC:DE:48:88:99:AA\n[autoexec]\nipxnet connect 10.0.0.1\n";
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);

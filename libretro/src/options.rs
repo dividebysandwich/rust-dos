@@ -75,6 +75,8 @@ fn definitions() -> Vec<Definition> {
             values: configured(&[
                 ("svga", "SVGA (VGA with VESA modes)"),
                 ("svga_s3", "S3 Trio64 (for booted Windows)"),
+                ("svga_s3virge", "S3 ViRGE (Direct3D in booted Windows)"),
+                ("svga_s3virgevx", "S3 ViRGE/VX (Direct3D in booted Windows)"),
                 ("vga", "VGA"),
                 ("ega", "EGA"),
                 ("cga", "CGA"),

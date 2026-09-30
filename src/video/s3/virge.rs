@@ -984,9 +984,7 @@ mod tests {
     #[test]
     fn a_bitblt_copies_video_memory_with_the_rop() {
         let mut vram = vec![0u8; 1 << 20];
-        for x in 0..4 {
-            vram[x] = 0x10 + x as u8;
-        }
+        vram[..4].copy_from_slice(&[0x10, 0x11, 0x12, 0x13]);
         vram[STRIDE as usize * 5 + 20] = 0xFF;
         let mut v = Virge::default();
         setup(&mut v, &mut vram);
