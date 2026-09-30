@@ -42,6 +42,7 @@ impl Bus {
             keyboard_buffer,
             kbd,
             kbc,
+            kbc_release_at: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -236,6 +237,7 @@ impl Bus {
             keyboard_buffer,
             kbd,
             kbc,
+            kbc_release_at: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -434,6 +436,9 @@ impl Bus {
         // and the IPX driver's node is the state's.
         self.net.ipx_queue.clear();
         self.net.ipx_installed();
+        // The keyboard's next byte at once.
+        self.kbc_release_at = None;
+        self.kbc.release();
         self.net.nic_changed();
     }
 

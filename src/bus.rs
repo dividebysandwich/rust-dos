@@ -59,6 +59,9 @@ pub struct Bus {
     /// programs that read the keyboard themselves, the A20 gate and the
     /// CPU reset line.
     pub kbc: crate::kbc::Kbc,
+    /// When the keyboard's next byte enters the controller's output
+    /// buffer (`Kbc::release`), in PIT ticks.
+    pub kbc_release_at: Option<u64>,
     /// The A20 gate as a mask for physical addresses: with the gate
     /// closed, address line 20 is forced to 0 and addresses wrap at 1 MB
     /// as on an 8086. See `a20()` and `set_a20()`.
@@ -315,6 +318,7 @@ impl Bus {
             keyboard_buffer: VecDeque::new(),
             kbd: crate::keyboard::KeyboardState::default(),
             kbc: crate::kbc::Kbc::new(),
+            kbc_release_at: None,
             a20_mask: !0x0010_0000,
             reset_requested: false,
             port_accesses: VecDeque::new(),
@@ -1459,6 +1463,7 @@ impl Bus {
             self.ide_next_event(),
             self.net_next_event(),
             self.serial_next_event(),
+            self.kbc_release_at,
         ]
         .into_iter()
             .flatten()
@@ -1494,6 +1499,14 @@ impl Bus {
         }
         if self.serial_next_event().is_some_and(|t| t <= now) {
             self.serial_service();
+        }
+        // The keyboard's next byte, once it had time to send it.
+        if let Some(at) = self.kbc_release_at
+            && at <= now
+        {
+            self.kbc_release_at = None;
+            self.kbc.release();
+            self.sync_keyboard_irq();
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -2020,6 +2033,10 @@ impl Bus {
     /// Raise IRQ 1 if a keyboard byte just entered the keyboard
     /// controller's output buffer, IRQ 12 if a mouse byte did.
     pub fn sync_keyboard_irq(&mut self) {
+        if self.kbc.holding() && self.kbc_release_at.is_none() {
+            self.kbc_release_at = Some(self.clock.now_ticks() + crate::kbc::KBD_BYTE_TICKS);
+            self.clock.schedule(self.next_event());
+        }
         if self.kbc.take_irq() {
             self.pic.raise(1);
             self.refresh_irq();
@@ -2486,7 +2503,8 @@ impl Bus {
             // their INT 09h ISR after IRQ1 fires, or poll it directly.
             0x60 => {
                 let value = self.kbc.read_data();
-                // The next queued byte, if any, moved into the buffer.
+                // The next queued byte, if any, moved into the buffer, or
+                // the keyboard's comes a little later.
                 self.sync_keyboard_irq();
                 value
             }

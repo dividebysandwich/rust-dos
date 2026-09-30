@@ -116,7 +116,14 @@ fn keyboard_controller_queues_every_scan_code_byte() {
         assert_eq!(bus.pic_pending_irq(), Some(1));
         bus.pic_acknowledge(1);
         bytes.push(bus.io_read(0x60));
+        // Read again, as a handler chaining to the BIOS's has it read: the
+        // same byte, the next one not in yet.
+        assert_eq!(bus.io_read(0x60), *bytes.last().unwrap());
+        assert_eq!(bus.io_read(0x64) & 0x01, 0);
         bus.io_write(0x20, 0x20);
+        // The keyboard sends the next byte.
+        bus.kbc.release();
+        bus.sync_keyboard_irq();
     }
     assert_eq!(bytes, [0xE0, 0x4D, 0xE0, 0xCD]);
     assert_eq!(bus.pic_pending_irq(), None);
@@ -306,6 +313,7 @@ fn f11_and_f12_send_their_make_codes_and_only_the_enhanced_reads_return_them() {
     let f12 = lookup("f12").unwrap();
     apply_key(&mut cpu.bus, f12, 0, true);
     assert_eq!(cpu.bus.kbc.read_data(), 0x58, "a game's own keyboard handler reads F12's make code");
+    cpu.bus.kbc.release();
     apply_key(&mut cpu.bus, f12, 0, false);
     assert_eq!(cpu.bus.kbc.read_data(), 0xD8);
     apply_key(&mut cpu.bus, lookup("a").unwrap(), b'a', true);

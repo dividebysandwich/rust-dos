@@ -3,8 +3,11 @@
 //! Scan code bytes from the keyboard queue up and enter the output buffer
 //! one at a time: each byte raises IRQ 1 (when the command byte enables it)
 //! and stays at port 60h until the CPU reads it, then the next one moves
-//! in. Programs with their own INT 09h handler therefore see every byte of
-//! a burst of key events, including the E0 prefixes of the extended keys.
+//! in a little later (`KBD_BYTE_TICKS`), as the keyboard sends it: a
+//! handler that reads port 60h and chains to the BIOS's, which reads it
+//! again, both see the same byte. Programs with their own INT 09h handler
+//! therefore see every byte of a burst of key events, including the E0
+//! prefixes of the extended keys.
 //! The PS/2 mouse's bytes (the auxiliary device's) come the same way, with
 //! status bit 5 set and IRQ 12, after the keyboard's.
 //!
@@ -24,6 +27,10 @@ const CMD_TRANSLATE: u8 = 0x40;
 /// Output port bits.
 pub const OUT_RESET: u8 = 0x01;
 pub const OUT_A20: u8 = 0x02;
+
+/// How long after the CPU read a keyboard byte the next one enters the
+/// output buffer, in PIT ticks: about 0.3 ms.
+pub const KBD_BYTE_TICKS: u64 = 358;
 
 /// Status register bits.
 const STATUS_OBF: u8 = 0x01;
@@ -67,6 +74,8 @@ pub struct Kbc {
     output_aux: bool,
     /// A mouse byte just entered the output buffer and IRQ 12 should fire.
     aux_irq: bool,
+    /// The CPU read a keyboard byte: the next one waits until `release`.
+    held: bool,
 }
 
 impl Default for Kbc {
@@ -105,6 +114,7 @@ impl Kbc {
             aux: VecDeque::new(),
             output_aux: false,
             aux_irq: false,
+            held: false,
         }
     }
 
@@ -135,6 +145,20 @@ impl Kbc {
     /// results go straight to the output buffer.
     fn reply(&mut self, byte: u8) {
         self.queue.push_front(byte);
+        self.held = false;
+        self.refill();
+    }
+
+    /// Whether a keyboard byte waits for `release` to enter the output
+    /// buffer.
+    pub fn holding(&self) -> bool {
+        self.held && !self.queue.is_empty()
+    }
+
+    /// The keyboard sent its next byte: it enters the output buffer if
+    /// that is empty.
+    pub fn release(&mut self) {
+        self.held = false;
         self.refill();
     }
 
@@ -145,6 +169,7 @@ impl Kbc {
             return;
         }
         if self.command_byte & CMD_KBD_DISABLED == 0
+            && !self.held
             && let Some(byte) = self.queue.pop_front()
         {
             self.output = Some(byte);
@@ -182,7 +207,15 @@ impl Kbc {
 
     /// Port 60h read.
     pub fn read_data(&mut self) -> u8 {
-        let byte = self.output.take().unwrap_or(self.last);
+        let byte = match self.output.take() {
+            Some(byte) => {
+                // The keyboard sends its next byte after a while; the
+                // mouse's can come at once.
+                self.held |= !self.output_aux;
+                byte
+            }
+            None => self.last,
+        };
         self.output_aux = false;
         self.refill();
         byte
@@ -304,4 +337,4 @@ impl Kbc {
 crate::state_fields!(Kbc {
     queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq,
     aux, output_aux, aux_irq,
-});
+} skip { held });
