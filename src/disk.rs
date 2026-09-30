@@ -372,6 +372,9 @@ pub struct MountOptions {
     /// Where a booted system finds the disk or CD-ROM drive on the IDE
     /// channels (`-ide`); None where it goes by default.
     pub ide: Option<crate::ide::IdeSlot>,
+    /// The disk image boots when Rust-DOS starts (`-boot`). One drive at a
+    /// time has it (`DiskController::set_boot_drive`).
+    pub boot: bool,
 }
 
 impl Default for MountOptions {
@@ -383,6 +386,7 @@ impl Default for MountOptions {
             more_images: Vec::new(),
             geometry: None,
             ide: None,
+            boot: false,
         }
     }
 }
@@ -1171,6 +1175,31 @@ impl DiskController {
 
     fn drive(&self, drive: u8) -> Option<&Drive> {
         self.drives.get(drive as usize).and_then(|d| d.as_ref())
+    }
+
+    /// The drive that boots when Rust-DOS starts (`MountOptions::boot`),
+    /// if one does.
+    pub fn boot_drive(&self) -> Option<u8> {
+        (0..DRIVE_SLOTS).find(|&d| self.drive(d).and_then(|d| d.mount.as_ref()).is_some_and(|spec| spec.opts.boot))
+    }
+
+    /// Make `drive` the one that boots when Rust-DOS starts, or none.
+    pub fn set_boot_drive(&mut self, drive: Option<u8>) {
+        for (d, slot) in self.drives.iter_mut().enumerate() {
+            if let Some(spec) = slot.as_mut().and_then(|d| d.mount.as_mut()) {
+                spec.opts.boot = drive == Some(d as u8);
+            }
+        }
+    }
+
+    /// Have `drive` boot when Rust-DOS starts, in place of any other, or
+    /// not.
+    pub fn set_boots(&mut self, drive: u8, boots: bool) {
+        if boots {
+            self.set_boot_drive(Some(drive));
+        } else if let Some(spec) = self.drives.get_mut(drive as usize).and_then(|d| d.as_mut()?.mount.as_mut()) {
+            spec.opts.boot = false;
+        }
     }
 
     pub fn is_mounted(&self, drive: u8) -> bool {

@@ -110,6 +110,18 @@ pub fn boot(cpu: &mut Cpu, unit: u8) -> Result<(), String> {
     Ok(())
 }
 
+/// Boot from `drive`, as BOOT -l does: the drive's BIOS unit
+/// (`boot_unit`). Not while a program of the built-in DOS runs; a system
+/// booted before starts over from the new disk, as after a reset.
+pub fn boot_drive(cpu: &mut Cpu, drive: u8) -> Result<(), String> {
+    if !cpu.process_stack.is_empty() || cpu.secondary.is_some() {
+        return Err("A system can't be booted while a program runs".to_string());
+    }
+    let unit = boot_unit(&cpu.bus, drive)
+        .ok_or_else(|| format!("Drive {} can't be booted: it isn't a disk image", drive_name(drive)))?;
+    boot(cpu, unit)
+}
+
 /// Start the booted system over from its disk, as after a reset or
 /// INT 19h. If the disk can't boot any more, the machine is turned off.
 pub fn restart(cpu: &mut Cpu) {

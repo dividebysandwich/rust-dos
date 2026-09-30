@@ -409,7 +409,7 @@
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:
 #   <letter> = <host path> [more images] [floppy|hdd|cdrom] [-label NAME]
-#              [-ro] [-chs C,H,S]
+#              [-ro] [-chs C,H,S] [-boot]
 #
 # hdd is the default type. floppy drives are removable 1.44 MB disks, cdrom
 # drives are read-only and visible to programs through MSCDEX, and -ro makes
@@ -423,12 +423,15 @@
 # image. CD images are .cue, .iso and .bin files.
 # A list of images puts the first in the drive; Ctrl+F4 changes to the
 # next, in every drive with a list.
+# -boot boots a disk image (Windows 95, MS-DOS, ...) when Rust-DOS starts,
+# after [autoexec] and instead of C:\AUTOEXEC.BAT; --no-boot skips it.
 # Quote paths that contain spaces. ~ is your home directory and relative
 # paths are relative to this file.
 # C: is the current working directory unless set here or with -d/--dir.
 #C=~/dos
 #A=~/dos/floppy floppy -label DISK1
 #B=~/dos/images/disk1.img ~/dos/images/disk2.img
+#F=~/dos/images/win95.img -boot
 #D="~/dos/My CD" cdrom -label GAMECD
 #E=~/dos/images/game.cue
 

@@ -515,7 +515,13 @@ impl Bus {
         opts: MountOptions,
         replace: bool,
     ) -> Result<std::path::PathBuf, String> {
-        self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace))
+        let boot = opts.boot;
+        let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace))?;
+        // One drive boots at startup.
+        if boot {
+            self.disk.set_boot_drive(Some(drive));
+        }
+        Ok(mounted)
     }
 
     /// Mount a disk or CD image held in memory as a DOS drive, replacing

@@ -19,7 +19,7 @@
 //!
 //! A mount spec, as `[drives]` takes it, is the same without the drive:
 //! `<host path> [more images] [type] [-t type] [-label NAME] [-ro]
-//! [-chs C,H,S]` where type is `floppy` (alias `fdd`), `hdd` (alias `dir`)
+//! [-chs C,H,S] [-boot]` where type is `floppy` (alias `fdd`), `hdd` (alias `dir`)
 //! or `cdrom` (alias `iso`).
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions, NUMBERED_DRIVES, drive_number, numbered_drive};
@@ -40,7 +40,8 @@ list in. -pr takes relative paths from the configuration file's folder.\r
 A number gives BOOT and the BIOS a disk image without a DOS drive, whatever\r
 is on it: 0 and 1 are the floppies, 2 and 3 the hard disks (-fs none does\r
 the same with A: to D:). -ide 1m, 1s, 2m or 2s puts a hard disk or CD image\r
-on a booted system's IDE channel. IMGMOUNT is the same command.\r
+on a booted system's IDE channel. -boot has the image boot when Rust-DOS\r
+starts, once the drives are saved. IMGMOUNT is the same command.\r
 ";
 
 /// The extensions of disk and CD images.
@@ -86,7 +87,7 @@ fn parse_size(value: &str) -> Result<Chs, String> {
 /// with a dash (`-label -DISK-`), but can't be one of these.
 const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-freesize", "-usecd"];
 const FLAGS: &[&str] =
-    &["-u", "-ro", "-pr", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
+    &["-u", "-ro", "-pr", "-boot", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
 
 fn is_option(token: &str) -> bool {
     VALUE_OPTIONS.iter().chain(FLAGS).any(|option| token.eq_ignore_ascii_case(option))
@@ -119,6 +120,7 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
             "-u" => args.unmount = true,
             "-ro" => args.opts.read_only = true,
             "-pr" => args.config_relative = true,
+            "-boot" => args.opts.boot = true,
             // DOSBox-X's IDE slot for the image (`-ide 2m`: secondary
             // master), which may follow; without one, or `auto`, it goes
             // where a booted system has it by default. There are two
@@ -541,6 +543,9 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
         value.push_str(" -ide ");
         value.push_str(&slot.name());
     }
+    if spec.opts.boot {
+        value.push_str(" -boot");
+    }
     value
 }
 
@@ -819,6 +824,7 @@ mod tests {
                     ..Default::default()
                 },
             },
+            MountSpec { drive: 2, path: "/hd/win95.img".into(), opts: MountOptions { boot: true, ..Default::default() } },
         ];
         for spec in specs {
             let value = mount_spec_value(&spec, Some(home));

@@ -98,6 +98,18 @@ pub trait Host {
     fn drives(&self) -> Vec<DriveInfo>;
     /// Save the settings and the drives to the configuration file.
     fn save(&mut self, settings: &Settings) -> Result<(), String>;
+    /// Boot the system on `drive`'s disk image now, as BOOT -l does.
+    /// Returns what to tell the user.
+    fn boot(&mut self, drive: u8) -> Result<String, String> {
+        let _ = drive;
+        Err("Disk images can't be booted here".to_string())
+    }
+    /// Have `drive` boot when Rust-DOS starts, or not; the drives' saving
+    /// keeps it.
+    fn set_boot(&mut self, drive: u8, boot: bool) -> Result<(), String> {
+        let _ = (drive, boot);
+        Err("Disk images can't be booted here".to_string())
+    }
     /// Without the host's files: have the user pick a disk or CD image for
     /// `drive`, or for whichever drive suits it (None). The frontend mounts
     /// it once it is picked, and tells the window (`drives_changed`).
@@ -1816,8 +1828,8 @@ impl ConfigUi {
                     let again = dialog.focus == field;
                     dialog.focus = field;
                     match field {
-                        Field::Browse | Field::Mount | Field::Unmount | Field::Cancel => self.key(UiKey::Enter, host),
-                        Field::Drive | Field::Kind | Field::ReadOnly if again => dialog.step(field, 1),
+                        Field::Browse | Field::Mount | Field::Boot | Field::Unmount | Field::Cancel => self.key(UiKey::Enter, host),
+                        Field::Drive | Field::Kind | Field::ReadOnly | Field::BootFlag if again => dialog.step(field, 1),
                         _ => {}
                     }
                 }
@@ -2083,7 +2095,23 @@ impl ConfigUi {
                 self.error(format!("Drive {}: can't be unmounted", info.letter()));
             }
             (UiKey::Delete, Some(info)) => self.unmount(info.drive, host),
+            (UiKey::Char('b' | 'B'), Some(info)) if bootable(&info) => self.boot(info.drive, host),
+            (UiKey::Char('b' | 'B'), Some(info)) => {
+                self.error(format!("Drive {}: can't be booted: it isn't a disk image", info.letter()));
+            }
             _ => {}
+        }
+    }
+
+    /// Boot from `drive` now, and close the window on the booted system.
+    fn boot(&mut self, drive: u8, host: &mut dyn Host) {
+        match host.boot(drive) {
+            Ok(message) => {
+                self.dialog = None;
+                self.close();
+                self.notice = Some(message);
+            }
+            Err(e) => self.error(e),
         }
     }
 
@@ -2149,23 +2177,48 @@ impl ConfigUi {
                 let drive = dialog.drive;
                 self.unmount(drive, host);
             }
-            Event::Submit => {
+            event @ (Event::Submit | Event::Boot) => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 let replace = dialog.existing;
                 let spec = match dialog.spec(&cwd, self.home.as_deref()) {
                     Ok(spec) => spec,
                     Err(e) => return self.error(e),
                 };
-                let drive = spec.drive;
-                match host.mount(spec, replace) {
-                    Ok(path) => {
-                        self.dialog = None;
-                        self.refresh_drives(host, Some(drive));
-                        let kind = self.drives.get(self.row).map_or("", |d| d.kind.name());
-                        let shown = contract_home(&path, self.home.as_deref());
-                        self.info(format!("Drive {}: is mounted as {} {}", drive_letter(drive), kind, shown));
+                let (drive, boots) = (spec.drive, spec.opts.boot);
+                let was_boot = self.drives.iter().any(|d| d.drive == drive && d.mount.as_ref().is_some_and(|m| m.opts.boot));
+                // Only whether it boots at startup changed, or it boots
+                // now as it is: the drive (a booted system's disk, maybe)
+                // isn't mounted again.
+                let message = if (boots != was_boot || event == Event::Boot) && dialog.same_mount(&spec) {
+                    if boots != was_boot
+                        && let Err(e) = host.set_boot(drive, boots)
+                    {
+                        return self.error(e);
                     }
-                    Err(e) => self.error(e),
+                    self.dialog = None;
+                    self.refresh_drives(host, Some(drive));
+                    if boots {
+                        format!("Drive {}: boots when Rust-DOS starts; F2 saves it", drive_letter(drive))
+                    } else {
+                        format!("Drive {}: doesn't boot at startup any more; F2 saves it", drive_letter(drive))
+                    }
+                } else {
+                    match host.mount(spec, replace) {
+                        Ok(path) => {
+                            self.dialog = None;
+                            self.refresh_drives(host, Some(drive));
+                            let kind = self.drives.get(self.row).map_or("", |d| d.kind.name());
+                            let shown = contract_home(&path, self.home.as_deref());
+                            let boot = if boots { ", booting at startup once saved (F2)" } else { "" };
+                            format!("Drive {}: is mounted as {} {}{}", drive_letter(drive), kind, shown, boot)
+                        }
+                        Err(e) => return self.error(e),
+                    }
+                };
+                if event == Event::Boot {
+                    self.boot(drive, host);
+                } else {
+                    self.info(message);
                 }
             }
         }
@@ -2469,7 +2522,7 @@ impl ConfigUi {
     fn draw_drives(&mut self, g: &mut Grid, content: std::ops::Range<usize>) {
         let cols = g.cols;
         Self::keep_visible(&mut self.scroll, self.row, content.len());
-        let label_col = cols - 16;
+        let label_col = cols - 21;
         let path_width = label_col.saturating_sub(15);
         for (i, row) in (self.scroll..self.row_count()).zip(content.clone()) {
             if i == self.row {
@@ -2497,10 +2550,15 @@ impl ConfigUi {
                 path = format!("({}/{}) {}", info.image_index + 1, info.images.len(), path);
             }
             g.text_to(14, row, &fit(&path, path_width), fg, label_col - 1);
-            g.text_to(label_col, row, &info.label, fg, cols - 4);
-            if info.read_only && !builtin {
-                g.text(cols - 4, row, "ro", fg);
-            }
+            g.text_to(label_col, row, &info.label, fg, cols - 9);
+            let boots = info.mount.as_ref().is_some_and(|m| m.opts.boot);
+            let flags = match (boots, info.read_only && !builtin) {
+                (true, true) => "boot ro",
+                (true, false) => "boot",
+                (false, true) => "ro",
+                (false, false) => "",
+            };
+            g.text(cols - 2 - flags.len(), row, flags, fg);
         }
         self.draw_scrollbar(g, content, self.scroll, self.row_count());
     }
@@ -2793,11 +2851,23 @@ impl ConfigUi {
         if top + 5 < bottom {
             g.text(value_col + 14, top + 5, "(empty: the default)", draw::DIM);
         }
-        let mut col = value_col;
         let buttons = dialog.fields();
-        for (field, text) in [(Field::Mount, "[ Mount ]"), (Field::Unmount, "[ Unmount ]"), (Field::Cancel, "[ Cancel ]")] {
+        if buttons.contains(&Field::BootFlag) {
+            let boot = if dialog.boot { "yes" } else { "no" }.to_string();
+            put(g, Field::BootFlag, top + 7, "Auto-boot", &choice(boot, top + 7, true));
+            if top + 7 < bottom {
+                g.text(value_col + 10, top + 7, "(a disk image)", draw::DIM);
+            }
+        }
+        let mut col = value_col;
+        for (field, text) in [
+            (Field::Mount, "[ Mount ]"),
+            (Field::Boot, "[ Boot ]"),
+            (Field::Unmount, "[ Unmount ]"),
+            (Field::Cancel, "[ Cancel ]"),
+        ] {
             if buttons.contains(&field) {
-                put(g, field, top + 8, "", &button(text, top + 8, col));
+                put(g, field, top + 9, "", &button(text, top + 9, col));
                 col += text.len() + 2;
             }
         }
@@ -2941,7 +3011,8 @@ impl ConfigUi {
         } else if self.browser.is_some() {
             vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace), ("Esc", "Cancel", Esc)]
         } else if self.dialog.is_some() {
-            vec![("Tab", "Next", Tab), ("Enter", "Mount", Enter), ("Esc", "Cancel", Esc)]
+            let boot = self.dialog.as_ref().is_some_and(|d| d.focus == Field::Boot);
+            vec![("Tab", "Next", Tab), ("Enter", if boot { "Boot" } else { "Mount" }, Enter), ("Esc", "Cancel", Esc)]
         } else if self.game_dialog.is_some() || self.image_dialog.is_some() {
             vec![("Tab", "Next", Tab), ("Enter", "Create", Enter), ("Esc", "Cancel", Esc)]
         } else if self.autoexec.is_some() {
@@ -2984,14 +3055,18 @@ impl ConfigUi {
             ]
         } else if self.page == Page::Drives {
             let (mount, unmount) = if self.frontend.host_files { ("Mount", "Unmount") } else { ("Insert", "Eject") };
-            vec![
+            let mut hints = vec![
                 ("Enter", "Change", Enter),
                 ("Ins", mount, Insert),
                 ("Del", unmount, Delete),
                 ("Tab", "Page", Tab),
                 ("F2", "Save", Save),
                 ("Esc", "Close", Esc),
-            ]
+            ];
+            if self.drives.get(self.row).is_some_and(bootable) {
+                hints.insert(3, ("B", "Boot", Char('b')));
+            }
+            hints
         } else {
             let several = self.item().is_some_and(|item| !item.fields(&self.settings).is_empty());
             let mut hints = match self.item().map(Item::input) {
@@ -3048,3 +3123,8 @@ fn fit(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether a drive is a disk image a system can boot from.
+fn bootable(info: &DriveInfo) -> bool {
+    info.image.is_some() && matches!(info.kind, DriveKind::HardDisk | DriveKind::Floppy)
+}

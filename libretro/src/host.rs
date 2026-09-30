@@ -229,6 +229,11 @@ impl Host for Machine {
         self.cpu.bus.disk.mounted_drives()
     }
 
+    fn boot(&mut self, drive: u8) -> Result<String, String> {
+        rust_dos::boot::boot_drive(&mut self.cpu, drive)?;
+        Ok(format!("Booting from drive {}", rust_dos::disk::drive_name(drive)))
+    }
+
     /// While a game plays, what changed into its profile; else what
     /// changed, and the drives mounted or unmounted since the start, into
     /// rust-dos.conf.

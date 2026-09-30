@@ -1,4 +1,5 @@
-//! The settings window's text fields and its dialog for mounting a drive.
+//! The settings window's text fields and its dialog for mounting a drive,
+//! and booting from it.
 
 use super::UiKey;
 use crate::disk::{DRIVE_C, DRIVE_Z, DriveInfo, DriveKind, FLOPPY_DRIVES, LASTDRIVE, MountOptions, drive_letter};
@@ -67,7 +68,11 @@ pub enum Field {
     Kind,
     Label,
     ReadOnly,
+    /// Whether the image boots when Rust-DOS starts.
+    BootFlag,
     Mount,
+    /// Mount, and boot from the drive now.
+    Boot,
     Unmount,
     Cancel,
 }
@@ -81,6 +86,7 @@ pub enum Event {
     Cancel,
     Browse,
     Submit,
+    Boot,
     Unmount,
 }
 
@@ -95,6 +101,7 @@ pub struct MountDialog {
     pub kind: DriveKind,
     pub label: TextField,
     pub read_only: bool,
+    pub boot: bool,
     pub focus: Field,
     /// What the dialog doesn't show of the mount it changes, kept while
     /// the path stays as it was: the drive's other images and a hard disk
@@ -104,6 +111,8 @@ pub struct MountDialog {
     geometry: Option<Chs>,
     /// Its IDE slot for a booted system, which stays too.
     ide: Option<crate::ide::IdeSlot>,
+    /// The mount it changes.
+    current: Option<MountSpec>,
 }
 
 impl MountDialog {
@@ -121,11 +130,13 @@ impl MountDialog {
             kind: Self::default_kind(drive),
             label: TextField::default(),
             read_only: false,
+            boot: false,
             focus: Field::Path,
             original: String::new(),
             more_images: Vec::new(),
             geometry: None,
             ide: None,
+            current: None,
         })
     }
 
@@ -147,11 +158,13 @@ impl MountDialog {
             kind: info.kind,
             label: TextField::new(opts.label.as_deref().unwrap_or("")),
             read_only: opts.read_only,
+            boot: opts.boot,
             focus: Field::Path,
             original: path,
             more_images: opts.more_images,
             geometry: opts.geometry,
             ide: opts.ide,
+            current: info.mount.clone(),
         }
     }
 
@@ -162,6 +175,11 @@ impl MountDialog {
     /// A: and B: are always floppies.
     pub fn kind_fixed(&self) -> bool {
         self.drive < FLOPPY_DRIVES
+    }
+
+    /// Only disk images boot, and a CD image doesn't.
+    pub fn can_boot(&self) -> bool {
+        self.kind != DriveKind::CdRom
     }
 
     pub fn title(&self) -> String {
@@ -183,7 +201,14 @@ impl MountDialog {
         if !self.kind_fixed() {
             fields.push(Kind);
         }
-        fields.extend([Label, ReadOnly, Mount]);
+        fields.extend([Label, ReadOnly]);
+        if self.can_boot() {
+            fields.push(BootFlag);
+        }
+        fields.push(Mount);
+        if self.can_boot() {
+            fields.push(Boot);
+        }
         if self.existing && self.drive != DRIVE_C {
             fields.push(Unmount);
         }
@@ -198,7 +223,7 @@ impl MountDialog {
     }
 
     fn is_button(field: Field) -> bool {
-        matches!(field, Field::Browse | Field::Mount | Field::Unmount | Field::Cancel)
+        matches!(field, Field::Browse | Field::Mount | Field::Boot | Field::Unmount | Field::Cancel)
     }
 
     /// Step a choice (drive letter, type, read-only) left or right.
@@ -217,6 +242,7 @@ impl MountDialog {
                 self.kind = KINDS[(at + dir).rem_euclid(KINDS.len() as isize) as usize];
             }
             Field::ReadOnly => self.read_only = !self.read_only,
+            Field::BootFlag => self.boot = !self.boot,
             _ => {}
         }
     }
@@ -237,6 +263,7 @@ impl MountDialog {
             UiKey::Enter => {
                 return match self.focus {
                     Field::Browse => Event::Browse,
+                    Field::Boot => Event::Boot,
                     Field::Unmount => Event::Unmount,
                     Field::Cancel => Event::Cancel,
                     _ => Event::Submit,
@@ -281,6 +308,10 @@ impl MountDialog {
             return Err("The configuration file can't hold a '\"'".to_string());
         }
         let path = expand_host_path(raw, cwd, home);
+        let boot = self.boot && self.can_boot();
+        if boot && path.is_dir() {
+            return Err("Only a disk image can boot".to_string());
+        }
         let unchanged = raw == self.original;
         Ok(MountSpec {
             drive: self.drive,
@@ -292,8 +323,18 @@ impl MountDialog {
                 more_images: if unchanged { self.more_images.clone() } else { Vec::new() },
                 geometry: if unchanged { self.geometry } else { None },
                 ide: self.ide,
+                boot,
             },
         })
+    }
+
+    /// Whether `spec` mounts the drive as it is, but for whether it boots
+    /// at startup: it needn't be mounted again.
+    pub fn same_mount(&self, spec: &MountSpec) -> bool {
+        let Some(current) = &self.current else { return false };
+        let same_path = current.path == spec.path
+            || std::fs::canonicalize(&current.path).is_ok_and(|p| std::fs::canonicalize(&spec.path).is_ok_and(|q| p == q));
+        same_path && MountOptions { boot: spec.opts.boot, ..current.opts.clone() } == spec.opts
     }
 }
 
@@ -390,15 +431,32 @@ mod tests {
             more_images: vec!["/y".into()],
             geometry: None,
             ide: None,
+            boot: false,
         };
         let mut d = MountDialog::change(&info, None);
         assert_eq!((d.path.text(), d.label.text(), d.read_only, d.kind), ("/x".into(), "D1".into(), true, DriveKind::Floppy));
-        assert_eq!(d.fields(), [Field::Path, Field::Browse, Field::Kind, Field::Label, Field::ReadOnly, Field::Mount, Field::Unmount, Field::Cancel]);
+        assert_eq!(
+            d.fields(),
+            [
+                Field::Path,
+                Field::Browse,
+                Field::Kind,
+                Field::Label,
+                Field::ReadOnly,
+                Field::BootFlag,
+                Field::Mount,
+                Field::Boot,
+                Field::Unmount,
+                Field::Cancel
+            ]
+        );
         // The drive's other images stay while the path does.
         assert_eq!(d.spec(Path::new("/"), None).unwrap().opts.more_images, [PathBuf::from("/y")]);
         d.path = TextField::new("/z");
         assert!(d.spec(Path::new("/"), None).unwrap().opts.more_images.is_empty());
         d.focus = Field::Mount;
+        d.key(UiKey::Right);
+        assert_eq!(d.key(UiKey::Enter), Event::Boot);
         d.key(UiKey::Right);
         assert_eq!(d.key(UiKey::Enter), Event::Unmount);
         assert_eq!(d.key(UiKey::Esc), Event::Cancel);
@@ -406,5 +464,33 @@ mod tests {
         assert!(!MountDialog::change(&drive(2, DriveKind::HardDisk), None).fields().contains(&Field::Unmount));
         d.path = TextField::default();
         assert!(d.spec(Path::new("/"), None).is_err());
+    }
+
+    #[test]
+    fn disk_images_boot_now_or_at_startup() {
+        let dir = std::env::temp_dir().join(format!("rust-dos-dialog-boot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("win95.img");
+        std::fs::write(&image, [0u8; 512]).unwrap();
+        let mut info = drive(2, DriveKind::HardDisk);
+        info.mount.as_mut().unwrap().path = image.clone();
+        let mut d = MountDialog::change(&info, None);
+        assert!(!d.boot);
+        d.focus = Field::BootFlag;
+        d.key(UiKey::Right);
+        let spec = d.spec(&dir, None).unwrap();
+        assert!(spec.opts.boot);
+        // Only whether it boots changed: the drive needn't be mounted again.
+        assert!(d.same_mount(&spec));
+        d.read_only = true;
+        assert!(!d.same_mount(&d.spec(&dir, None).unwrap()));
+
+        // A directory doesn't boot, and a CD has no say.
+        d.path = TextField::new(&dir.display().to_string());
+        assert!(d.spec(&dir, None).is_err());
+        d.kind = DriveKind::CdRom;
+        assert!(!d.fields().contains(&Field::BootFlag) && !d.fields().contains(&Field::Boot));
+        assert!(!d.spec(&dir, None).unwrap().opts.boot);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

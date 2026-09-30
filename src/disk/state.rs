@@ -8,8 +8,10 @@
 //! The disks mounted by number come after the rest, and only when there
 //! are any, so states of machines without them load as they did.
 
-use super::{CharDevice, DRIVE_C, DRIVE_SLOTS, DiskController, Drive, LASTDRIVE, OpenData, OpenFile, drive_name};
-use crate::mount::{mount_spec_value, parse_mount_spec, tokenize};
+use super::{
+    CharDevice, DRIVE_C, DRIVE_SLOTS, DiskController, Drive, LASTDRIVE, MountOptions, OpenData, OpenFile, drive_name,
+};
+use crate::mount::{MountSpec, mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use std::io::Seek;
 
@@ -179,13 +181,14 @@ impl DiskController {
         dir.load(r)?;
         image.load(r)?;
         changed.load(r)?;
-        let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(|spec| mount_spec_value(spec, None));
+        let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(state_value);
         if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
             // Relative paths are the emulator's working directory's, as
             // they were when the drive was mounted.
             let tokens = tokenize(text).map_err(StateError::Invalid)?;
             let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-            let spec = parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)?;
+            let mut spec = parse_mount_spec(drive, &tokens, &cwd, None).map_err(StateError::Invalid)?;
+            spec.opts.boot = self.boot_drive() == Some(drive);
             self.mount(drive, &spec.path, spec.opts, true)
                 .map_err(|e| StateError::Mismatch(format!("drive {} can't be mounted: {}", name, e)))?;
         }
@@ -243,9 +246,17 @@ fn save_drive(drive: &Option<Drive>, w: &mut Writer) {
     if let Some(Drive { kind: _, storage: _, current_dir, label: _, read_only: _, mount, images: _, image, media_changed }) =
         drive
     {
-        mount.as_ref().map(|spec| mount_spec_value(spec, None)).save(w);
+        mount.as_ref().map(state_value).save(w);
         current_dir.save(w);
         image.save(w);
         media_changed.save(w);
     }
+}
+
+/// A drive's mount as a state has it. Whether it boots when Rust-DOS
+/// starts is the configuration's, not the machine's: a state doesn't mount
+/// the drive again over it.
+fn state_value(spec: &MountSpec) -> String {
+    let opts = MountOptions { boot: false, ..spec.opts.clone() };
+    mount_spec_value(&MountSpec { opts, ..spec.clone() }, None)
 }

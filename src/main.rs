@@ -57,6 +57,11 @@ struct Args {
     #[arg(long)]
     no_config: bool,
 
+    /// Start at the DOS prompt, without booting the disk image that boots
+    /// at startup (`-boot` in [drives])
+    #[arg(long)]
+    no_boot: bool,
+
     /// Start the HTTP/WebSocket debug server (local-only, unauthenticated).
     /// Optionally takes the listen address.
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
@@ -265,7 +270,15 @@ fn main() -> Result<(), String> {
     // would run. Each line runs as if typed at the prompt.
     cpu.bus.config_dir = config_dir(config.source.as_deref());
     cpu.queue_batch_lines(&config.autoexec);
-    cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
+    // A disk image that boots at startup boots after the [autoexec] lines,
+    // which may mount more for it, in place of AUTOEXEC.BAT: the system on
+    // the disk has its own.
+    match startup_boot(&mut cpu, args.no_boot || startup_game.is_some()) {
+        Some(drive) => cpu.queue_batch_lines(&[format!("BOOT -l {}", disk::drive_key(drive))]),
+        None => {
+            cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
+        }
+    }
 
     // Cached render target. We re-render the full VGA surface only when
     // `cpu.bus.vga.dirty` is set — everything else (cursor blink, mouse
@@ -1415,6 +1428,22 @@ fn save_config(cpu: &mut Cpu, saved: &mut Saved, settings: &Settings) -> Result<
     Ok(())
 }
 
+/// The drive to boot from at startup: the disk image mounted with -boot,
+/// unless `skip` (--no-boot, or a game launched).
+fn startup_boot(cpu: &mut Cpu, skip: bool) -> Option<u8> {
+    let drive = cpu.bus.disk.boot_drive()?;
+    if skip {
+        cpu.bus.log_string(&format!("[BOOT] Not booting from drive {} at startup", disk::drive_name(drive)));
+        return None;
+    }
+    if cpu.bus.disk.bios_image(drive).is_none() {
+        config_warning(cpu, &format!("drive {} can't boot: it isn't a disk image", disk::drive_name(drive)));
+        return None;
+    }
+    cpu.bus.log_string(&format!("[BOOT] Booting from drive {} at startup", disk::drive_name(drive)));
+    Some(drive)
+}
+
 /// The folder of the game profiles: `games` beside the configuration
 /// file `config`.
 fn games_dir(config: Option<&std::path::Path>) -> Option<PathBuf> {
@@ -1781,6 +1810,17 @@ impl Host for MainHost<'_, '_> {
 
     fn drives(&self) -> Vec<DriveInfo> {
         self.cpu.bus.disk.mounted_drives()
+    }
+
+    fn boot(&mut self, drive: u8) -> Result<String, String> {
+        self.cpu.bus.log_string(&format!("[CONFIG] Settings window: boot {}", disk::drive_name(drive)));
+        rust_dos::boot::boot_drive(self.cpu, drive)?;
+        Ok(format!("Booting from drive {}", disk::drive_name(drive)))
+    }
+
+    fn set_boot(&mut self, drive: u8, boot: bool) -> Result<(), String> {
+        self.cpu.bus.disk.set_boots(drive, boot);
+        Ok(())
     }
 
     fn save(&mut self, settings: &Settings) -> Result<(), String> {

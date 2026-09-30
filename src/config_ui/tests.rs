@@ -7,8 +7,8 @@ fn drive_info(spec: &MountSpec) -> DriveInfo {
     DriveInfo {
         drive: spec.drive,
         kind: spec.opts.kind,
-        root: Some(spec.path.clone()),
-        image: None,
+        root: (!spec.path.is_file()).then(|| spec.path.clone()),
+        image: spec.path.is_file().then(|| spec.path.clone()),
         label: "RUSTDOS".to_string(),
         read_only: spec.opts.read_only,
         current_dir: String::new(),
@@ -24,6 +24,8 @@ struct FakeHost {
     applied: Vec<Settings>,
     mounts: Vec<(MountSpec, bool)>,
     unmounts: Vec<u8>,
+    /// The drives booted from.
+    booted: Vec<u8>,
     saved: Vec<Settings>,
     /// The drives `choose_image` was asked for.
     images: Vec<Option<u8>>,
@@ -64,6 +66,7 @@ impl FakeHost {
             applied: vec![],
             mounts: vec![],
             unmounts: vec![],
+            booted: vec![],
             saved: vec![],
             images: vec![],
             no_shaders: false,
@@ -111,6 +114,20 @@ impl Host for FakeHost {
 
     fn drives(&self) -> Vec<DriveInfo> {
         self.drives.clone()
+    }
+
+    fn boot(&mut self, drive: u8) -> Result<String, String> {
+        self.booted.push(drive);
+        Ok(format!("Booting from drive {}:", drive_letter(drive)))
+    }
+
+    fn set_boot(&mut self, drive: u8, boot: bool) -> Result<(), String> {
+        for info in &mut self.drives {
+            if let Some(spec) = &mut info.mount {
+                spec.opts.boot = if info.drive == drive { boot } else { spec.opts.boot && !boot };
+            }
+        }
+        Ok(())
     }
 
     fn save(&mut self, settings: &Settings) -> Result<(), String> {
@@ -545,6 +562,47 @@ fn drives_mount_and_unmount() {
     assert!(ui.dialog.is_some());
     ui.key(Esc, &mut host);
     assert!(ui.dialog.is_none());
+}
+
+#[test]
+fn drives_boot_now_or_at_startup() {
+    let dir = std::path::absolute("target/test_config_ui/boot").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let image = dir.join("win95.img");
+    std::fs::write(&image, [0u8; 512]).unwrap();
+    let mut host = FakeHost::new();
+    host.mount(MountSpec { drive: 3, path: image.clone(), opts: MountOptions::default() }, false).unwrap();
+    let mut ui = opened(&host);
+    use UiKey::*;
+
+    // C: is a directory, which doesn't boot.
+    ui.key(Char('b'), &mut host);
+    assert!(status(&ui).1 && host.booted.is_empty());
+
+    // The dialog's Auto-boot only marks D:, which stays mounted as it is.
+    keys(&mut ui, &mut host, &[Down, Enter]);
+    ui.dialog.as_mut().unwrap().focus = Field::BootFlag;
+    keys(&mut ui, &mut host, &[Right, Enter]);
+    assert!(ui.dialog.is_none());
+    assert_eq!(host.mounts.len(), 1);
+    assert!(host.drives[1].mount.as_ref().unwrap().opts.boot);
+    assert!(ui.drives[1].mount.as_ref().unwrap().opts.boot);
+    assert!(status(&ui).0.contains("boots when Rust-DOS starts"), "{:?}", status(&ui));
+
+    // B boots it now, and the window closes on the booted system.
+    ui.key(Char('b'), &mut host);
+    assert_eq!(host.booted, [3]);
+    assert!(!ui.is_open());
+    assert_eq!(ui.take_notice().as_deref(), Some("Booting from drive D:"));
+
+    // So does the dialog's Boot.
+    let mut ui = opened(&host);
+    keys(&mut ui, &mut host, &[Down, Enter]);
+    ui.dialog.as_mut().unwrap().focus = Field::Boot;
+    ui.key(Enter, &mut host);
+    assert_eq!(host.booted, [3, 3]);
+    assert!(!ui.is_open());
+    assert_eq!(host.mounts.len(), 1, "D: stays mounted as it is");
 }
 
 #[test]

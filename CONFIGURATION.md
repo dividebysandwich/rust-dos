@@ -509,8 +509,9 @@ message and the log say where it went.
 
 ### `[drives]`
 
-Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S]`,
-the options as `MOUNT` takes them. A drive number 0 to 3 instead of the
+Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot]`,
+the options as `MOUNT` takes them. `-boot` boots the disk image when
+Rust-DOS starts (see [Booting at startup](#booting-at-startup)). A drive number 0 to 3 instead of the
 letter gives the BIOS a disk image without a DOS drive (see [Booting a disk
 image](#booting-a-disk-image)).
 
@@ -540,7 +541,10 @@ Esc closes it.
   middle of a game), or unmount it (Del). **Browse...** picks directories
   and images from the host. **Create a disk image...** makes a new, empty
   floppy or hard disk image, as [MAKEIMG](#new-disk-images) does, and
-  mounts it on the drive picked (a floppy on A: or B:, where free).
+  mounts it on the drive picked (a floppy on A: or B:, where free). B (or
+  the mount dialog's **Boot**) [boots](#booting-a-disk-image) the disk
+  image of the selected drive now, and the dialog's **Auto-boot** has it
+  boot whenever Rust-DOS starts, once saved (F2).
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
@@ -931,6 +935,25 @@ The first start of a Windows installed without the IDE controller finds it
 as new hardware and asks to restart; after that, **System Properties** →
 **Performance** shows the hard disk without "MS-DOS compatibility mode".
 
+### Booting at startup
+
+A disk image in `[drives]` with `-boot` boots whenever Rust-DOS starts,
+after the `[autoexec]` lines (which can mount more for it) and in place of
+`C:\AUTOEXEC.BAT`, as `BOOT -l` with its drive would:
+
+```ini
+[drives]
+C=~/images/win95.img -boot
+```
+
+The settings window's Drives page sets it too: the mount dialog's
+**Auto-boot**, saved with F2 like the other drives. One drive boots at a
+time; marking another takes it from the one before. B on the Drives page,
+or the dialog's **Boot**, boots a drive's image right away instead, while
+no program runs (over a booted system, it starts over from that disk).
+`--no-boot`, or a game profile launched at startup, starts at the DOS
+prompt without booting.
+
 Turning the machine off (Windows' **Shut Down**) brings back the DOS prompt;
 restarting (Ctrl+Alt+Del, or Windows' **Restart**) boots the disk again.
 Changes to the hardware settings wait for the prompt.
@@ -1273,6 +1296,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-d, --dir DIR` | Make the host directory `DIR` drive C: (default: the configuration's C:, or the current directory) |
 | `-c, --config FILE` | Use this configuration file (see [Configuration file](#configuration-file)) |
 | `--no-config` | Read and create no configuration file |
+| `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--cycles N\|max\|auto` | The CPU speed (`cycles`) |
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |

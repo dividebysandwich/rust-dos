@@ -5,7 +5,7 @@
 
 use crate::command::ShellCommand;
 use crate::cpu::Cpu;
-use crate::disk::{DriveKind, FLOPPY_DRIVES, drive_key, drive_name, drive_number, numbered_drive};
+use crate::disk::{DriveKind, FLOPPY_DRIVES, drive_key, drive_number, numbered_drive};
 use crate::mount::{MountCmd, PathContext, parse_drive_name, parse_mount_tokens, tokenize};
 use crate::video::print_string;
 
@@ -89,12 +89,7 @@ impl ShellCommand for BootCommand {
             print_string(cpu, &format!("{}\r\n", e));
             return;
         }
-        let Some(unit) = crate::boot::boot_unit(&cpu.bus, drive) else {
-            let msg = format!("Drive {} can't be booted: it isn't a disk image\r\n", drive_name(drive));
-            print_string(cpu, &msg);
-            return;
-        };
-        if let Err(e) = crate::boot::boot(cpu, unit) {
+        if let Err(e) = crate::boot::boot_drive(cpu, drive) {
             print_string(cpu, &format!("{}\r\n", e));
         }
     }
