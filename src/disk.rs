@@ -1365,7 +1365,12 @@ impl DiskController {
             if drive.is_some_and(|only| only != d) {
                 continue;
             }
-            let Some(shared) = self.drives[d as usize].as_mut().and_then(|d| d.shared.as_mut()) else { continue };
+            let Some(drive) = self.drives[d as usize].as_mut().filter(|d| d.shared.is_some()) else { continue };
+            if drive.read_only {
+                lines.push(format!("Drive {}: is read-only: what the system wrote stays on its disk", drive_letter(d)));
+                continue;
+            }
+            let shared = drive.shared.as_mut().expect("a shared disk");
             let report = shared.sync(last);
             lines.push(format!("Drive {}: {} copied to {}: {}", drive_letter(d), if last { "was" } else { "is" }, shared.root.display(), report.summary()));
             lines.extend(report.conflicts.iter().map(|c| format!("Drive {}: {} changed on both sides", drive_letter(d), c)));

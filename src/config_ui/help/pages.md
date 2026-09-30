@@ -14,6 +14,14 @@ mounted as **C:**, with the game in it.
 A drive marked *boot* boots when Rust-DOS starts, in place of DOS: set
 it with *Auto-boot* under **Enter**.
 
+A system booted from an image, such as Windows 95, sees disks, not your
+folders. A folder on D: or later marked *share* becomes one of its hard
+disks when it boots (*81h* and so on while it runs), and what it changes
+there goes back into the folder when it shuts down. **S** copies its new
+and changed files over while it runs. A folder mounted as a **cdrom**
+goes into its CD-ROM drive as a disc (marked *CD*), at any time; **R**
+puts it in again with what the folder holds now.
+
 Mounts made here last until Rust-DOS quits; **F2** saves them for the
 next start. **Ctrl+F4** puts in the next disk of a drive mounted with
 several images.

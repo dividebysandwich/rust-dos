@@ -19,8 +19,12 @@ pub const BOOT_USAGE: &str = concat!(
     "  -l drive  The drive to boot from: A: or B:, or a hard disk image mounted\r\n",
     "            with MOUNT or IMGMOUNT, by its letter or number (0 to 3)\r\n",
     "\r\n",
-    "The system has the machine until it turns it off. Examples:\r\n",
+    "The system has the machine until it turns it off. Directories mounted as\r\n",
+    "hard disks on D: and up are its hard disks after the images, and what it\r\n",
+    "changes on them goes back into them when it shuts down; a directory\r\n",
+    "mounted as a CD-ROM drive is a disc in its CD-ROM drive. Examples:\r\n",
     "  IMGMOUNT C win95.img\r\n",
+    "  MOUNT D ~/shared\r\n",
     "  BOOT -l C\r\n",
 );
 

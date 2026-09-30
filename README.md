@@ -44,7 +44,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   (`BOOT`): MS-DOS, Windows 95 and other systems of their own, with a Plug
   and Play BIOS, APM, a PCI bus and IDE hard disks and CD-ROM drive (for
   Windows' 32-bit disk access), from the prompt, the settings window or
-  [at every start](CONFIGURATION.md#booting-at-startup)
+  [at every start](CONFIGURATION.md#booting-at-startup); your folders
+  [reach the booted system](CONFIGURATION.md#host-folders-in-a-booted-system)
+  as hard disks whose changes come back, or as CDs
 * **Display:** CRT shaders (scanlines, aperture grille, curved shadow mask)
   and monochrome monitors (white, amber, green)
 * **Settings window** (Ctrl+F12) that changes most settings without a

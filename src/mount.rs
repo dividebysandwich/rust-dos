@@ -29,6 +29,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub const MOUNT_USAGE: &str = "\
 Usage: MOUNT drive directory [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
+                             [-share|-noshare]\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                          [-chs C,H,S] [-size 512,S,H,C]\r
        MOUNT number image [image ...] [-chs C,H,S] [-ro]\r
@@ -41,7 +42,10 @@ A number gives BOOT and the BIOS a disk image without a DOS drive, whatever\r
 is on it: 0 and 1 are the floppies, 2 and 3 the hard disks (-fs none does\r
 the same with A: to D:). -ide 1m, 1s, 2m or 2s puts a hard disk or CD image\r
 on a booted system's IDE channel. -boot has the image boot when Rust-DOS\r
-starts, once the drives are saved. IMGMOUNT is the same command.\r
+starts, once the drives are saved. A booted system has a directory on D:\r
+and up as a hard disk (-noshare: not; -share: C: too), and its changes go\r
+back into it when it shuts down; a directory as a CD-ROM drive is a disc.\r
+IMGMOUNT is the same command.\r
 ";
 
 /// The extensions of disk and CD images.
@@ -87,7 +91,7 @@ fn parse_size(value: &str) -> Result<Chs, String> {
 /// with a dash (`-label -DISK-`), but can't be one of these.
 const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-freesize", "-usecd"];
 const FLAGS: &[&str] =
-    &["-u", "-ro", "-pr", "-boot", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
+    &["-u", "-ro", "-pr", "-boot", "-share", "-noshare", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
 
 fn is_option(token: &str) -> bool {
     VALUE_OPTIONS.iter().chain(FLAGS).any(|option| token.eq_ignore_ascii_case(option))

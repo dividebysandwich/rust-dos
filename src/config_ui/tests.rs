@@ -53,6 +53,10 @@ struct FakeHost {
     disbanded: usize,
     /// The rooms made on this network, and their passwords.
     hosted: Vec<(String, String)>,
+    /// A booted system, and the drives synced and discs made again.
+    boot_view: Option<BootView>,
+    synced: Vec<u8>,
+    reinserted: Vec<u8>,
 }
 
 impl FakeHost {
@@ -85,6 +89,9 @@ impl FakeHost {
             left: 0,
             disbanded: 0,
             hosted: vec![],
+            boot_view: None,
+            synced: vec![],
+            reinserted: vec![],
         }
     }
 }
@@ -114,6 +121,20 @@ impl Host for FakeHost {
 
     fn drives(&self) -> Vec<DriveInfo> {
         self.drives.clone()
+    }
+
+    fn booted(&self) -> Option<BootView> {
+        self.boot_view.clone()
+    }
+
+    fn sync_shared(&mut self, drive: u8) -> Result<String, String> {
+        self.synced.push(drive);
+        Ok(format!("Drive {}: is copied", drive_letter(drive)))
+    }
+
+    fn reinsert(&mut self, drive: u8) -> Result<String, String> {
+        self.reinserted.push(drive);
+        Ok(format!("Drive {}: is a new CD", drive_letter(drive)))
     }
 
     fn boot(&mut self, drive: u8) -> Result<String, String> {
@@ -609,6 +630,33 @@ fn drives_boot_now_or_at_startup() {
     assert_eq!(host.booted, [3, 3]);
     assert!(!ui.is_open());
     assert_eq!(host.mounts.len(), 1, "D: stays mounted as it is");
+}
+
+/// Host directories on D: and up are shared with a booted system as hard
+/// disks, which S copies back from, and a folder in its CD-ROM drive is a
+/// disc R makes again.
+#[test]
+fn a_booted_systems_drives() {
+    use UiKey::*;
+    let mut host = FakeHost::new();
+    let d = MountSpec { drive: 3, path: "/share".into(), opts: MountOptions::default() };
+    let e = MountSpec { drive: 4, path: "/cd".into(), opts: MountOptions { kind: DriveKind::CdRom, read_only: true, ..Default::default() } };
+    let f = MountSpec { drive: 5, path: "/mine".into(), opts: MountOptions { share: Some(false), ..Default::default() } };
+    host.drives.extend([drive_info(&d), drive_info(&e), drive_info(&f)]);
+    host.drives.sort_by_key(|d| d.drive);
+    let ui = opened(&host);
+    let flags: Vec<String> = ui.drives.iter().map(|d| ui.drive_flags(d)).collect();
+    assert_eq!(flags, ["", "share", "ro", "", ""]);
+
+    host.boot_view = Some(BootView { cd_drive: Some(4), shared: vec![(3, 0x81)] });
+    let mut ui = opened(&host);
+    let flags: Vec<String> = ui.drives.iter().map(|d| ui.drive_flags(d)).collect();
+    assert_eq!(flags, ["", "81h", "CD ro", "", ""]);
+    keys(&mut ui, &mut host, &[Down, Char('s')]);
+    assert_eq!(host.synced, [3]);
+    assert_eq!(status(&ui), ("Drive D: is copied", false));
+    keys(&mut ui, &mut host, &[Char('r'), Down, Char('s'), Char('r')]);
+    assert_eq!((host.synced.len(), host.reinserted.as_slice()), (1, &[4][..]));
 }
 
 #[test]

@@ -1822,6 +1822,22 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.disk.mounted_drives()
     }
 
+    fn booted(&self) -> Option<config_ui::BootView> {
+        let bus = &self.cpu.bus;
+        bus.boot.as_ref()?;
+        let shared =
+            bus.disk.shared_drives().into_iter().filter_map(|d| Some((d, rust_dos::boot::drive_unit(bus, d)?))).collect();
+        Some(config_ui::BootView { cd_drive: bus.booted_cd_drive(), shared })
+    }
+
+    fn sync_shared(&mut self, drive: u8) -> Result<String, String> {
+        self.cpu.bus.sync_shared(Some(drive)).into_iter().next().ok_or_else(|| "Nothing is shared".to_string())
+    }
+
+    fn reinsert(&mut self, drive: u8) -> Result<String, String> {
+        self.cpu.bus.reinsert_cd(drive)
+    }
+
     fn boot(&mut self, drive: u8) -> Result<String, String> {
         self.cpu.bus.log_string(&format!("[CONFIG] Settings window: boot {}", disk::drive_name(drive)));
         rust_dos::boot::boot_drive(self.cpu, drive)?;

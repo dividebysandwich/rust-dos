@@ -920,13 +920,14 @@ primary channel's master (ports 1F0h-1F7h and 3F6h, IRQ 14), the second
 its slave. A system's own IDE driver (Windows 9x's 32-bit disk access,
 Linux, a DOS ATA driver) finds them there, by LBA or by cylinder, head and
 sector with no more than 16 heads (1024/64/63 for INT 13h is 4096/16/63),
-and the CMOS lists them as the user-defined type 47. A CD image mounted as a
-CD-ROM drive (`MOUNT D ~/dos/game.cue`) is an ATAPI CD-ROM drive on the
-secondary channel's master (ports 170h-177h and 376h, IRQ 15). Windows 95
+and the CMOS lists them as the user-defined type 47. A CD image or folder mounted
+as a CD-ROM drive (`MOUNT D ~/dos/game.cue`) is an ATAPI CD-ROM drive on the
+secondary channel's master (ports 170h-177h and 376h, IRQ 15), and without
+one there is an empty drive (see below). Windows 95
 finds the channels through the Plug and Play BIOS with its own driver,
 reads the disc and plays its CD audio; Ctrl+F4 or another `MOUNT` changes
 the disc, and Windows notices. With more than one CD-ROM drive, the first
-drive letter with an image is the one.
+drive letter with a disc is the one.
 
 MOUNT's (and IMGMOUNT's) `-ide 1m`, `1s`, `2m` or `2s` puts the disk or CD-ROM
 drive on the primary or secondary channel's master or slave instead, as
@@ -945,6 +946,57 @@ such a BIOS does, which Windows for Workgroups' 32-bit disk access checks.
 The first start of a Windows installed without the IDE controller finds it
 as new hardware and asks to restart; after that, **System Properties** →
 **Performance** shows the hard disk without "MS-DOS compatibility mode".
+
+### Host folders in a booted system
+
+A booted system reads disks, not the host's folders, so a folder mounted
+as a drive reaches it as a disk made from the folder: as a CD it can have
+at any time, or as a hard disk it gets when it boots and whose changes go
+back into the folder.
+
+**As a CD.** A folder mounted on a CD-ROM drive letter goes into the
+booted system's CD-ROM drive as a disc: ISO 9660 with Joliet names, so
+Windows 95 sees the long names and DOS the 8.3 ones. Mount it while the
+system runs (the settings window's Drives page, or `MOUNT E ~/stuff -t
+cdrom` before booting), and Windows notices the new disc. The disc is what
+the folder held when it went in; Ctrl+F4, or R on the Drives page, puts it
+in again with what the folder holds now. Its files are read from the host
+as the system reads them, so a big folder takes no memory. The booted
+system has one CD-ROM drive: `boot_cdrom=true` in `[emulator]` (the
+default) gives it one even with no CD mounted at the boot, on the first
+free letter from D:, and a CD mounted on any letter later goes into it
+while it is empty. With `boot_cdrom=false` it has one only when a CD is
+mounted as it boots.
+
+**As a hard disk.** A folder mounted on D: to Y: as a hard disk
+(`MOUNT D ~/share`) is a hard disk of a system booted with it: a FAT16
+disk of 2 GB made at the boot with the folder's files on it, long names
+and all, which DOS, Windows 3.1 and Windows 95 read. It comes after the
+disk images (C: stays 80h; D: is 81h) and is an ATA disk on the IDE
+channels like them. When the system shuts down (Windows' **Shut Down**),
+what it created, changed and deleted on the disk goes into the folder;
+S on the Drives page (or `POST /api/drive/sync` of the debug server)
+copies its new and changed files while it runs, without deleting anything,
+as its caches may not have written everything yet, and so does quitting
+Rust-DOS while it runs. What the host changes in the folder while the
+system runs reaches the disk at its next boot. A file both changed keeps
+the host's version, and the system's goes beside it as `name (from
+guest).ext`; a file the host changed is never deleted. Windows' Recycle Bin
+stays on the disk. The folder may hold up to 1536 MB, which the disk holds
+in memory; files whose names FAT can't have are left off it (the log says
+which). `-noshare` keeps a folder for the built-in DOS alone, and `-share`
+shares C: too; a folder mounted `-ro` is shared, but nothing goes back into
+it. A shared drive can't be unmounted while the system runs. Save states
+and rewind keep the disk and what was copied back with the system: loading
+an older state takes the disk back, and files copied into the folder since
+stay there.
+
+```
+MOUNT D ~/share          Windows 95 has it as a hard disk
+MOUNT E ~/downloads -t cdrom
+IMGMOUNT C ~/images/win95.img
+BOOT -l C
+```
 
 ### Booting at startup
 

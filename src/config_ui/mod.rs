@@ -88,6 +88,16 @@ impl Frontend {
     pub const DESKTOP: Frontend = Frontend { window: true, host_files: true };
 }
 
+/// What a system booted from a disk image has of the drives.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BootView {
+    /// The drive its CD-ROM drive shows, if it has one.
+    pub cd_drive: Option<u8>,
+    /// The drives whose host directories it has as hard disks, with their
+    /// BIOS units.
+    pub shared: Vec<(u8, u8)>,
+}
+
 /// What the window needs the emulator to do.
 pub trait Host {
     /// Take on changed settings. Returns a note on when they take effect,
@@ -103,6 +113,23 @@ pub trait Host {
     fn boot(&mut self, drive: u8) -> Result<String, String> {
         let _ = drive;
         Err("Disk images can't be booted here".to_string())
+    }
+    /// What a system booted from a disk image has of the drives, while
+    /// one runs.
+    fn booted(&self) -> Option<BootView> {
+        None
+    }
+    /// Copy what the booted system changed on the disk of the host
+    /// directory `drive` into it. Returns what to tell the user.
+    fn sync_shared(&mut self, drive: u8) -> Result<String, String> {
+        let _ = drive;
+        Err("No system shares this drive".to_string())
+    }
+    /// Make the CD of the host folder on `drive` again, with what the
+    /// folder holds now, as a new disc in the booted system's drive.
+    fn reinsert(&mut self, drive: u8) -> Result<String, String> {
+        let _ = drive;
+        Err("No system has this drive as a CD".to_string())
     }
     /// Have `drive` boot when Rust-DOS starts, or not; the drives' saving
     /// keeps it.
@@ -1442,6 +1469,8 @@ pub struct ConfigUi {
     field: usize,
     settings: Settings,
     drives: Vec<DriveInfo>,
+    /// What a booted system has of them, while one runs.
+    booted: Option<BootView>,
     config_file: Option<PathBuf>,
     home: Option<PathBuf>,
     status: Option<Status>,
@@ -1527,6 +1556,7 @@ impl ConfigUi {
             field: 0,
             settings: Settings::default(),
             drives: Vec::new(),
+            booted: None,
             config_file: None,
             home: None,
             status: None,
@@ -1666,6 +1696,7 @@ impl ConfigUi {
         self.open = true;
         self.settings = settings.clone();
         self.drives = host.drives();
+        self.booted = host.booted();
         self.config_file = config_file;
         self.home = crate::hostdirs::home_dir();
         self.status = None;
@@ -2121,7 +2152,71 @@ impl ConfigUi {
             (UiKey::Char('b' | 'B'), Some(info)) => {
                 self.error(format!("Drive {}: can't be booted: it isn't a disk image", info.letter()));
             }
+            (UiKey::Char('s' | 'S'), Some(info)) if self.shared_unit(info.drive).is_some() => {
+                match host.sync_shared(info.drive) {
+                    Ok(message) => self.info(message),
+                    Err(e) => self.error(e),
+                }
+            }
+            (UiKey::Char('r' | 'R'), Some(info)) if self.folder_cd(&info) => {
+                let result = host.reinsert(info.drive);
+                self.refresh_drives(host, Some(info.drive));
+                match result {
+                    Ok(message) => self.info(message),
+                    Err(e) => self.error(e),
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// The BIOS unit of the booted system's hard disk made of `drive`'s
+    /// host directory, if it has one.
+    fn shared_unit(&self, drive: u8) -> Option<u8> {
+        self.booted.as_ref()?.shared.iter().find(|&&(d, _)| d == drive).map(|&(_, unit)| unit)
+    }
+
+    /// Whether `info` is a host folder in the booted system's CD-ROM drive.
+    fn folder_cd(&self, info: &DriveInfo) -> bool {
+        info.root.is_some() && self.booted.as_ref().is_some_and(|b| b.cd_drive == Some(info.drive))
+    }
+
+    /// What the drive list says of `info` after its label: whether it boots
+    /// or is read-only, and what a booted system has of it, or will have.
+    fn drive_flags(&self, info: &DriveInfo) -> String {
+        let mut flags = Vec::new();
+        if info.mount.as_ref().is_some_and(|m| m.opts.boot) {
+            flags.push("boot".to_string());
+        }
+        if let Some(unit) = self.shared_unit(info.drive) {
+            flags.push(format!("{:02X}h", unit));
+        } else if self.booted.as_ref().is_some_and(|b| b.cd_drive == Some(info.drive)) {
+            flags.push("CD".to_string());
+        } else if self.booted.is_none() && shareable(info) {
+            flags.push("share".to_string());
+        }
+        if info.read_only && info.kind != DriveKind::Virtual && flags.len() < 2 {
+            flags.push("ro".to_string());
+        }
+        flags.join(" ")
+    }
+
+    /// What mounting `drive` did for a booted system, for the message.
+    fn booted_note(&self, drive: u8) -> &'static str {
+        let Some(booted) = &self.booted else { return "" };
+        let info = self.drives.iter().find(|d| d.drive == drive);
+        if booted.cd_drive == Some(drive) {
+            if info.is_some_and(|i| i.root.is_some()) {
+                "; the booted system has it as a CD (R makes it again)"
+            } else {
+                "; the booted system has the disc"
+            }
+        } else if info.is_some_and(shareable) {
+            "; the booted system gets it as a hard disk when it boots again"
+        } else if info.is_some_and(|i| i.kind == DriveKind::CdRom) && booted.cd_drive.is_some() {
+            "; the booted system's CD-ROM drive shows another drive"
+        } else {
+            ""
         }
     }
 
@@ -2167,6 +2262,7 @@ impl ConfigUi {
 
     fn refresh_drives(&mut self, host: &dyn Host, select: Option<u8>) {
         self.drives = host.drives();
+        self.booted = host.booted();
         if let Some(drive) = select
             && let Some(i) = self.drives.iter().position(|d| d.drive == drive)
         {
@@ -2232,7 +2328,8 @@ impl ConfigUi {
                             let kind = self.drives.get(self.row).map_or("", |d| d.kind.name());
                             let shown = contract_home(&path, self.home.as_deref());
                             let boot = if boots { ", booting at startup once saved (F2)" } else { "" };
-                            format!("Drive {}: is mounted as {} {}{}", drive_letter(drive), kind, shown, boot)
+                            let note = self.booted_note(drive);
+                            format!("Drive {}: is mounted as {} {}{}{}", drive_letter(drive), kind, shown, boot, note)
                         }
                         Err(e) => return self.error(e),
                     }
@@ -2573,14 +2670,8 @@ impl ConfigUi {
             }
             g.text_to(14, row, &fit(&path, path_width), fg, label_col - 1);
             g.text_to(label_col, row, &info.label, fg, cols - 9);
-            let boots = info.mount.as_ref().is_some_and(|m| m.opts.boot);
-            let flags = match (boots, info.read_only && !builtin) {
-                (true, true) => "boot ro",
-                (true, false) => "boot",
-                (false, true) => "ro",
-                (false, false) => "",
-            };
-            g.text(cols - 2 - flags.len(), row, flags, fg);
+            let flags = self.drive_flags(info);
+            g.text(cols - 2 - flags.len(), row, &flags, fg);
         }
         self.draw_scrollbar(g, content, self.scroll, self.row_count());
     }
@@ -3085,8 +3176,14 @@ impl ConfigUi {
                 ("F2", "Save", Save),
                 ("Esc", "Close", Esc),
             ];
-            if self.drives.get(self.row).is_some_and(bootable) {
-                hints.insert(3, ("B", "Boot", Char('b')));
+            if let Some(info) = self.drives.get(self.row) {
+                if bootable(info) {
+                    hints.insert(3, ("B", "Boot", Char('b')));
+                } else if self.shared_unit(info.drive).is_some() {
+                    hints.insert(3, ("S", "Sync", Char('s')));
+                } else if self.folder_cd(info) {
+                    hints.insert(3, ("R", "Reinsert", Char('r')));
+                }
             }
             hints
         } else {
@@ -3147,6 +3244,13 @@ fn fit(text: &str, width: usize) -> String {
 mod tests;
 
 /// Whether a drive is a disk image a system can boot from.
+/// Whether a booted system gets `info`'s host directory as a hard disk:
+/// D: to Y:, unless mounted with `-noshare`, and C: with `-share`.
+fn shareable(info: &DriveInfo) -> bool {
+    let share = info.mount.as_ref().and_then(|m| m.opts.share);
+    info.kind == DriveKind::HardDisk && info.root.is_some() && share.unwrap_or((3..25).contains(&info.drive))
+}
+
 fn bootable(info: &DriveInfo) -> bool {
     info.image.is_some() && matches!(info.kind, DriveKind::HardDisk | DriveKind::Floppy)
 }
