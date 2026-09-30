@@ -446,7 +446,12 @@ pub unsafe extern "C" fn retro_load_game(game: *const retro_game_info) -> bool {
         PathBuf::from(path.to_string_lossy().into_owned())
     });
     let initial = INITIAL_IMAGE.with(|i| i.borrow_mut().take());
-    let core = catch_unwind(AssertUnwindSafe(|| Core::new(content, &cb, options::read(cb.env), initial)));
+    let values = options::read(cb.env);
+    // As Dolphin does where Apple's rules keep a JIT out.
+    if rust_dos::dynrec::AVAILABLE && !rust_dos::dynrec::usable() && values.get("core") != Some("normal") {
+        cb.message("JIT is disabled on this device: the interpreter runs everything, and protected-mode games run slower");
+    }
+    let core = catch_unwind(AssertUnwindSafe(|| Core::new(content, &cb, values, initial)));
     let mut core = match core {
         Ok(Ok(core)) => core,
         Ok(Err(e)) => {

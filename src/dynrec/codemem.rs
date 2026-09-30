@@ -13,6 +13,8 @@ use std::io;
 
 /// Code is placed at multiples of this.
 const ALIGN: usize = 16;
+/// The smallest page the hosts have.
+const PAGE: usize = 4096;
 
 pub struct CodeMemory {
     base: *mut u8,
@@ -157,7 +159,6 @@ impl Drop for CodeMemory {
 /// The page range covering `len` bytes at `at`.
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn page_span(at: *mut u8, len: usize) -> (*mut u8, usize) {
-    const PAGE: usize = 4096;
     let start = at as usize & !(PAGE - 1);
     let end = (at as usize + len).next_multiple_of(PAGE);
     (start as *mut u8, end - start)
@@ -179,6 +180,16 @@ fn map(size: usize) -> io::Result<(*mut u8, bool)> {
         let p = libc::mmap(std::ptr::null_mut(), size, PROT_READ | PROT_EXEC, flags, -1, 0);
         if p == MAP_FAILED {
             return Err(io::Error::last_os_error());
+        }
+        // Pages may be made writable and never executable again (iOS and
+        // tvOS without a debugger's JIT): `protect` would fail on the first
+        // block, so find out now, while the interpreter can take over.
+        let page = PAGE as libc::size_t;
+        if libc::mprotect(p, page, PROT_READ | PROT_WRITE) != 0 || libc::mprotect(p, page, PROT_READ | PROT_EXEC) != 0
+        {
+            let e = io::Error::last_os_error();
+            libc::munmap(p, size);
+            return Err(e);
         }
         Ok((p as *mut u8, true))
     }

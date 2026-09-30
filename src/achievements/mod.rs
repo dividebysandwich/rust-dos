@@ -13,6 +13,7 @@
 pub mod client;
 pub mod hash;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "sdl")]
 pub mod http;
 pub mod memory;
 pub mod runtime;

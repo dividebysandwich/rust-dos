@@ -36,6 +36,19 @@ mod a64;
 /// Whether this build has a code generator for its host.
 pub const AVAILABLE: bool = cfg!(dynrec);
 
+/// Whether translated code can run here: the build has a code generator
+/// and the host lets it make memory executable (iOS and tvOS do only for a
+/// JIT a debugger enabled). Where not, the interpreter runs everything.
+pub fn usable() -> bool {
+    #[cfg(dynrec)]
+    {
+        static USABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *USABLE.get_or_init(|| codemem::CodeMemory::new(1 << 16).is_ok())
+    }
+    #[cfg(not(dynrec))]
+    false
+}
+
 /// Most instructions in a block.
 #[cfg(dynrec)]
 const MAX_BLOCK: usize = 64;

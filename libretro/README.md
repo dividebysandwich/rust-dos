@@ -23,6 +23,13 @@ cargo build --release
 retroarch -L target/release/librust_dos_libretro.so <content>
 ```
 
+The libretro buildbot builds the core for RetroArch's *Online Updater* from
+[.gitlab-ci.yml](../.gitlab-ci.yml): Windows, Linux, macOS, iOS and tvOS,
+Android and webOS. The dynamic recompiler is there on x86-64 and AArch64;
+on 32-bit ARM the interpreter runs everything, as it does where the system
+allows no JIT (iOS and tvOS without a debugger's), which the core says as it
+starts.
+
 ## Content
 
 | Content | What the core does |

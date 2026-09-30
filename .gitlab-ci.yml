@@ -1,0 +1,167 @@
+# DESCRIPTION: GitLab CI/CD for libretro (NOT FOR GitLab-proper)
+#
+# The libretro buildbot's recipe for the libretro core (libretro/), which
+# RetroArch's Online Updater then offers as rust_dos_libretro.
+#
+# The jobs take the image, before_script, after_script and artifacts of the
+# Rust templates of libretro-infrastructure/ci-templates, and a script of
+# their own: the templates build the crate at the root of the repository,
+# which is the rust-dos program (SDL), while the core is libretro/, a
+# workspace of its own. Its build goes to the root's target/ (where the
+# templates look), and its library, librust_dos_libretro, is copied to the
+# name they expect, lib${CORENAME}.
+#
+# The dynamic recompiler is built for x86-64 and AArch64; the other targets
+# (armv7) run everything on the interpreter. On iOS and tvOS the core tells
+# the user when the system allows no JIT and falls back to the interpreter.
+
+.core-defs:
+  variables:
+    CORENAME: rust_dos
+    CARGO_TARGET_DIR: ${CI_PROJECT_DIR}/target
+    MANIFEST: libretro/Cargo.toml
+    LIB: rust_dos_libretro
+
+include:
+  # Windows 64-bit
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-windows-x64.yml'
+
+  # Linux 64-bit
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-linux-x64.yml'
+
+  # Linux aarch64
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-linux-aarch64.yml'
+
+  # macOS/iOS/tvOS
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-apple.yml'
+
+  # Android
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-android-jni.yml'
+
+  # webOS
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-webos.yml'
+
+stages:
+  - build-prepare
+  - build-shared
+  - build-static
+
+# Linux and Windows: the template's after_script renames and strips.
+.core-build:
+  script:
+    - cargo build --release --locked --target ${TARGET_ARCH} --manifest-path ${MANIFEST}
+    - cd target/${TARGET_ARCH}/release
+    - if [ -f lib${LIB}.so ]; then cp lib${LIB}.so lib${CORENAME}.so; fi
+    - if [ -f ${LIB}.dll ]; then cp ${LIB}.dll ${CORENAME}.dll; fi
+
+# Android: cargo-ndk puts the arm libraries in target/<abi>, the x86 ones
+# in target/<triple>/release: TARGET_DIR, where the after_script looks.
+.core-build-android:
+  script:
+    - cd libretro
+    - cargo ndk -t $ANDROID_ABI -o ../target build --release --locked
+    - cp ${CI_PROJECT_DIR}/${TARGET_DIR}/lib${LIB}.so ${CI_PROJECT_DIR}/${TARGET_DIR}/lib${CORENAME}.so
+
+# Apple: the template's script, with the core's manifest and library.
+.core-build-apple:
+  variables:
+    CARGO_BUILD: cargo build
+  script:
+    - if [ "$DSYM_CORE_LIB" -eq 1 ]; then export CARGO_PROFILE_RELEASE_DEBUG=true; fi
+    - $CARGO_BUILD --release --locked --target ${TARGET_ARCH} --manifest-path ${MANIFEST}
+    - mv target/${TARGET_ARCH}/release/lib${LIB}.dylib ${CORENAME}_libretro.dylib
+    - if [ "$DSYM_CORE_LIB" -eq 1 ]; then dsymutil-18 ${CORENAME}_libretro.dylib -o ${CORENAME}_libretro.dylib.dSYM; fi
+    - if [ "$STRIP_CORE_LIB" -eq 1 ]; then $STRIP -S ${CORENAME}_libretro.dylib; fi
+    - if [ "$DSYM_CORE_LIB" -eq 1 ]; then zip -r ${CORENAME}_libretro.dylib.dSYM.zip ${CORENAME}_libretro.dylib.dSYM; fi
+
+# webOS: the template's script, with the core's manifest and library.
+.core-build-webos:
+  script:
+    - cargo build --release --locked --target $CARGO_TARGET --manifest-path ${MANIFEST} -j $NUMPROC
+    - mv target/${CARGO_TARGET}/release/lib${LIB}.so ${LIBNAME}
+    - if [ $STRIP_CORE_LIB -eq 1 ]; then $STRIP --strip-unneeded ${LIBNAME}; fi
+
+# Windows 64-bit
+libretro-build-windows-x64:
+  extends:
+    - .libretro-rust-windows-x64-default
+    - .core-defs
+    - .core-build
+
+# Linux 64-bit
+libretro-build-linux-x64:
+  extends:
+    - .libretro-rust-linux-x64-default
+    - .core-defs
+    - .core-build
+
+# Linux aarch64
+libretro-build-linux-aarch64:
+  extends:
+    - .libretro-rust-linux-aarch64-default
+    - .core-defs
+    - .core-build
+
+# macOS 64-bit
+libretro-build-osx-x64:
+  extends:
+    - .libretro-rust-osx-x86_64-default
+    - .core-defs
+    - .core-build-apple
+
+# macOS ARM 64-bit
+libretro-build-osx-arm64:
+  extends:
+    - .libretro-rust-osx-arm64-default
+    - .core-defs
+    - .core-build-apple
+
+# iOS
+libretro-build-ios-arm64:
+  extends:
+    - .libretro-rust-ios-arm64-default
+    - .core-defs
+    - .core-build-apple
+
+# tvOS: the standard library built from source on nightly.
+libretro-build-tvos-arm64:
+  extends:
+    - .libretro-rust-tvos-arm64-default
+    - .core-defs
+    - .core-build-apple
+  variables:
+    CARGO_BUILD: cargo +nightly build -Zbuild-std
+
+# Android ARMv7a (phones, Android/Google TV)
+android-armeabi-v7a:
+  extends:
+    - .libretro-rust-android-jni-armeabi-v7a
+    - .core-defs
+    - .core-build-android
+
+# Android ARMv8a
+android-arm64-v8a:
+  extends:
+    - .libretro-rust-android-jni-arm64-v8a
+    - .core-defs
+    - .core-build-android
+
+# Android 64-bit x86
+android-x86_64:
+  extends:
+    - .libretro-rust-android-jni-x86_64
+    - .core-defs
+    - .core-build-android
+
+# webOS (LG TVs)
+libretro-build-webos-armv7a:
+  extends:
+    - .libretro-rust-webos-armv7a-default
+    - .core-defs
+    - .core-build-webos

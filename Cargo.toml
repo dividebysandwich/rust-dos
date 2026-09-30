@@ -65,8 +65,9 @@ midir = { version = "0.11", optional = true }
 getrandom = "0.3"
 # The TCP of the network card's router to the internet (src/net/nat).
 smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
-# HTTPS to retroachievements.org (src/achievements/http.rs).
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+# HTTPS to retroachievements.org (src/achievements/http.rs), which the
+# libretro core leaves to the frontend.
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 
 # The dynamic recompiler's code generator and its executable memory
 # (src/dynrec).
@@ -82,8 +83,9 @@ windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Syst
 
 [features]
 default = ["sdl", "midi", "hostmidi", "cdaudio"]
-# The rust-dos program: its window and sound device, and its debug server.
-sdl = ["dep:sdl2", "dep:glow", "dep:axum"]
+# The rust-dos program: its window and sound device, its debug server and
+# its connection to RetroAchievements.
+sdl = ["dep:sdl2", "dep:glow", "dep:axum", "dep:ureq"]
 midi = ["dep:rustysynth"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]
