@@ -55,6 +55,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * **Game profiles** with settings and start commands of their own, and
   import of GOG and DOSBox games; a game's files stay as installed, its
   saves and changes in a folder of their own, and a reset takes it back
+* **Manuals and extras:** a game's PDF manual, code wheel and maps shown
+  over the picture (Ctrl+Shift+M), for its copy protection
 * **[Save states](#save-states)** (nine slots per game) and rewind
 * **Cheats:** find a game's values in memory, and change or freeze them
 * **[RetroAchievements](CONFIGURATION.md#retroachievements):**
@@ -188,6 +190,7 @@ and Ctrl+C gives up the line being typed.
 | Ctrl+F3 | Pick the next slot (it says what is in it) |
 | Ctrl+Shift+F3 | Pick the previous slot |
 | Ctrl+F9 | Open the settings window on the save states |
+| Ctrl+Shift+M | Show the running game's [manuals and extras](CONFIGURATION.md#manuals-and-extras) over the picture, and hide them |
 | Ctrl+F4 | Put the next disk in the drives mounted from lists of images |
 | Alt+Pause | Pause the machine, and resume it |
 | Alt+F12 (held) | Fast forward: the machine runs up to eight times as fast, without sound |

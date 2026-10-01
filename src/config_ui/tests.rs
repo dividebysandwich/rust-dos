@@ -1429,12 +1429,18 @@ fn a_games_manuals_open_over_the_picture() {
     assert_eq!(pixel(&frame, 20, 200), [0x18, 0x1C, 0x24], "around it");
     assert!(ui.layer().is_none());
     // Where the frontend has more pixels, the page is a layer of its own.
-    ui.set_layer_scale(Some(2.0));
+    ui.set_display((2.0, 2.0), true);
     ui.draw(&mut frame);
     let layer = ui.layer().expect("a layer");
     assert_eq!((layer.picture.width, layer.picture.height), (368, 736), "twice the pixels");
     let (x, _, w, h) = layer.rect;
     assert!((x - 228.0).abs() < 1.0 && (w - 184.0).abs() < 1.0 && (h - 368.0).abs() < 1.0, "{:?}", layer.rect);
+    // Taller pixels: the page is as tall as it should be still.
+    ui.set_display((1.0, 1.2), false);
+    ui.draw(&mut frame);
+    let page_rows = (0..400).filter(|&y| pixel(&frame, 320, y) == [200, 0, 0]).count();
+    let page_cols = (0..640).filter(|&x| pixel(&frame, x, 200) == [200, 0, 0]).count();
+    assert!((page_rows as f32 * 1.2 / page_cols as f32 - 2.0).abs() < 0.05, "{} by {}", page_cols, page_rows);
     // A picture has one page; zoom goes as far as it goes.
     keys(&mut ui, &mut host, &[PageDown, Char('+'), Char('+'), Char('+'), Char('+')]);
     ui.draw(&mut frame);

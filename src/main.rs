@@ -518,6 +518,22 @@ fn main() -> Result<(), String> {
                         }
                         continue;
                     }
+                    // Ctrl+Shift+M shows the running game's manuals over
+                    // the picture, and hides them again.
+                    if keycode == Keycode::M && ctrl && shift && !alt {
+                        if !repeat {
+                            if ui.is_open() {
+                                ui.close();
+                            } else {
+                                toggle_ui!();
+                                if let Err(e) = ui.show_manuals(&host!()) {
+                                    ui.close();
+                                    osd.show(e);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // Ctrl+Shift+C copies the selected text, or the whole
                     // text screen, to the host's clipboard, and
                     // Ctrl+Shift+V types the clipboard's text on the
@@ -1344,6 +1360,7 @@ fn main() -> Result<(), String> {
         if ui.is_open() || ui.overlay_shown() {
             ui.set_stats(stats.view());
         }
+        ui.set_display(display.output_scale(), true);
         ui.draw(&mut screen);
         ui.draw_overlay(&mut screen);
         if capturing && settings.record_ui {
@@ -1373,7 +1390,7 @@ fn main() -> Result<(), String> {
                 }
             }
         }
-        display.present(&mut screen, voodoo_gl.then_some(&cached_frame))?;
+        display.present(&mut screen, voodoo_gl.then_some(&cached_frame), ui.layer())?;
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);
         if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {

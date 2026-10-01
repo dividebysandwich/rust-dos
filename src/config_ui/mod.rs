@@ -1542,7 +1542,8 @@ pub struct ConfigUi {
     /// (manual.rs), and the layer its page is drawn in where the frontend
     /// has one.
     manual: Option<manual::ManualView>,
-    layer_scale: Option<f64>,
+    pixel_scale: (f32, f32),
+    layered: bool,
     layer: Option<Layer>,
     layer_generation: u64,
     /// The Cheats page's search.
@@ -1622,7 +1623,8 @@ impl ConfigUi {
             confirm_reset: false,
             notice: None,
             manual: None,
-            layer_scale: None,
+            pixel_scale: (1.0, 1.0),
+            layered: false,
             layer: None,
             layer_generation: 0,
             cheats: cheats::Cheats::default(),

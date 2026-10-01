@@ -91,6 +91,9 @@ again.
   are the cursor keys, B Ctrl, A Alt, Y Space, X Shift, Start Enter, Select
   Esc, L and R Page Up and Page Down, L2 Tab and R2 Backspace.
 * **Ctrl+F4** puts the next disk in the drives mounted from lists of images.
+* **Ctrl+Shift+M** shows the running game's manuals and extras (its
+  profile's `manual=` lines and `saves/rust-dos/games/<name>.extras`) over
+  the picture.
 * **Ctrl+Shift+F12** shows the performance overlay.
 
 The program's save state, fast forward, rewind, pause and recording hotkeys

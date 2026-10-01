@@ -431,6 +431,10 @@ impl Core {
         if self.ui.is_open() || self.ui.overlay_shown() {
             self.ui.set_stats(self.stats.view());
         }
+        // The frontend shows the picture at 4:3 with `aspect`.
+        let (w, h) = (self.screen.width.max(1) as f64, self.screen.height.max(1) as f64);
+        let tall = if self.m.settings.aspect { w * 3.0 / 4.0 / h } else { 1.0 };
+        self.ui.set_display((1.0, tall), false);
         self.ui.draw(&mut self.screen);
         self.ui.draw_overlay(&mut self.screen);
 
@@ -503,6 +507,19 @@ impl Core {
         }
     }
 
+    /// Show the running game's manuals (Ctrl+Shift+M), or hide them.
+    pub fn toggle_manuals(&mut self) {
+        if self.ui.is_open() {
+            self.ui.close();
+            return;
+        }
+        self.toggle_settings();
+        if let Err(e) = self.ui.show_manuals(&self.m) {
+            self.ui.close();
+            self.m.notices.push(e);
+        }
+    }
+
     /// Put the next disk in the drives mounted from lists of them.
     pub fn swap_images(&mut self) {
         let messages = self.m.cpu.bus.swap_images();
@@ -541,6 +558,11 @@ impl Core {
         }
         if e.down && ctrl && e.keycode == key::F4 {
             self.swap_images();
+            return;
+        }
+        // Ctrl+Shift+M: the running game's manuals, over the picture.
+        if e.down && ctrl && shift && e.keycode == key::M {
+            self.toggle_manuals();
             return;
         }
         if self.ui.is_open() {

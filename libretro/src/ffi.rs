@@ -131,6 +131,7 @@ pub mod key {
     pub const RIGHTBRACKET: u32 = 93;
     pub const BACKQUOTE: u32 = 96;
     pub const A: u32 = 97;
+    pub const M: u32 = 109;
     pub const Z: u32 = 122;
     pub const DELETE: u32 = 127;
     pub const KP0: u32 = 256;

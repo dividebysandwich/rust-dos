@@ -5,9 +5,10 @@
 //! selected game's.
 //!
 //! The page is drawn into the picture, as the rest of the window is, or,
-//! where the frontend shows more pixels than the picture has
-//! (`set_layer_scale`), handed to it as a layer of its own
-//! (`ConfigUi::layer`), sharp at the window's size.
+//! where the frontend can (`set_display`), handed to it as a layer of its
+//! own (`ConfigUi::layer`), sharp at the window's size. Either way it is
+//! as wide and tall as it should be where the picture's pixels aren't
+//! square.
 
 use super::draw::{self, Grid, Layout};
 use super::{ConfigUi, Hit, Host, Pick, Target, UiKey, fit};
@@ -96,11 +97,13 @@ impl ConfigUi {
         self.help.is_none() && self.browser.is_none() && self.manual.as_ref().is_some_and(|m| m.open.is_some())
     }
 
-    /// Where the frontend shows a picture pixel as `scale` pixels, the
-    /// pages are drawn at its size, as a layer of their own (`layer`);
-    /// None draws them into the picture.
-    pub fn set_layer_scale(&mut self, scale: Option<f64>) {
-        self.layer_scale = scale.filter(|&s| s > 1.0);
+    /// How the frontend shows the picture: each of its pixels `scale`
+    /// (across, down) of the frontend's, and whether it draws the layer
+    /// (`layer`), which has the page at its pixels, rather than having it
+    /// drawn into the picture.
+    pub fn set_display(&mut self, scale: (f64, f64), layer: bool) {
+        self.pixel_scale = (scale.0.max(0.01) as f32, scale.1.max(0.01) as f32);
+        self.layered = layer;
     }
 
     /// The page shown over the picture, for the frontend to draw sharp.
@@ -229,7 +232,11 @@ impl ConfigUi {
         }
         self.layout = None;
         self.hits.clear();
-        let scale = self.layer_scale;
+        let (sx, sy) = self.pixel_scale;
+        let layered = self.layered;
+        if !layered {
+            self.layer = None;
+        }
         let Some(open) = self.manual.as_mut().and_then(|m| m.open.as_mut()) else { return };
         let area = (0usize, cell_h, width, (rows - 2) * cell_h);
         for row in frame.rgb.chunks_exact_mut(width * 3).skip(area.1).take(area.3) {
@@ -238,9 +245,10 @@ impl ConfigUi {
             }
         }
 
-        // The page's size and place, in the picture's pixels.
+        // The page's size and place in the frontend's pixels, from the
+        // top left of the area.
         let (pw, ph) = open.doc.page_size(open.page);
-        let (aw, ah) = (area.2 as f32, area.3 as f32);
+        let (aw, ah) = (area.2 as f32 * sx, area.3 as f32 * sy);
         let fit_width = aw / pw;
         let s = match open.zoom {
             0 => fit_width.min(ah / ph),
@@ -250,35 +258,42 @@ impl ConfigUi {
         };
         let (dw, dh) = (pw * s, ph * s);
         let place = |size: f32, room: f32, at: f32| if size <= room { (room - size) / 2.0 } else { -at * (size - room) };
-        let (px, py) = (area.0 as f32 + place(dw, aw, open.at.0), area.1 as f32 + place(dh, ah, open.at.1));
+        let (px, py) = (place(dw, aw, open.at.0), place(dh, ah, open.at.1));
         // What of it shows.
-        let (vx0, vy0) = (px.max(area.0 as f32), py.max(area.1 as f32));
-        let (vx1, vy1) = ((px + dw).min(area.0 as f32 + aw), (py + dh).min(area.1 as f32 + ah));
-        let k = scale.unwrap_or(1.0) as f32;
-        let size = (((dw * k).round() as u32).max(1), ((dh * k).round() as u32).max(1));
+        let (vx0, vy0, vx1, vy1) = (px.max(0.0), py.max(0.0), (px + dw).min(aw), (py + dh).min(ah));
+        // Rendered at the frontend's pixels for the layer, else at the
+        // picture's.
+        let (kx, ky) = if layered { (1.0, 1.0) } else { (1.0 / sx, 1.0 / sy) };
+        let size = (((dw * kx).round() as u32).max(1), ((dh * ky).round() as u32).max(1));
         if open.rendered.as_ref().is_none_or(|(key, _)| *key != (open.page, size.0, size.1)) {
             open.rendered = Some(((open.page, size.0, size.1), open.doc.render(open.page, size.0, size.1)));
         }
         let picture = &open.rendered.as_ref().expect("the page rendered").1;
-        // Pixels of the picture rendered to one of the page shown.
-        let q = picture.width as f32 / dw;
-        let cut = |v: f32| (v * q).round() as u32;
-        let part = (cut(vx0 - px), cut(vy0 - py), cut(vx1 - vx0), cut(vy1 - vy0));
+        // Pixels of the picture rendered to one of the frontend's.
+        let (qx, qy) = (picture.width as f32 / dw, picture.height as f32 / dh);
+        let part = (
+            ((vx0 - px) * qx).round() as u32,
+            ((vy0 - py) * qy).round() as u32,
+            ((vx1 - vx0) * qx).round() as u32,
+            ((vy1 - vy0) * qy).round() as u32,
+        );
+        // Where that is in the picture.
+        let rect = (area.0 as f32 + vx0 / sx, area.1 as f32 + vy0 / sy, (vx1 - vx0) / sx, (vy1 - vy0) / sy);
         let shown = (open.page, open.zoom, (picture.width, picture.height), part);
         if vx1 > vx0 && vy1 > vy0 {
-            if scale.is_some() {
-                if open.shown != Some(shown) || self.layer.is_none() {
+            if layered {
+                if open.shown != Some(shown) || self.layer.as_ref().is_none_or(|l| l.rect != rect) {
                     self.layer_generation += 1;
                     self.layer = Some(Layer {
-                        rect: (vx0, vy0, vx1 - vx0, vy1 - vy0),
+                        rect,
                         picture: manuals::crop(picture, part.0, part.1, part.2, part.3),
                         generation: self.layer_generation,
                     });
                 }
             } else {
                 let cropped = manuals::crop(picture, part.0, part.1, part.2, part.3);
-                let (x0, y0) = (vx0.round() as usize, vy0.round() as usize);
-                let (w, h) = ((vx1.round() as usize).saturating_sub(x0), (vy1.round() as usize).saturating_sub(y0));
+                let (x0, y0) = (rect.0.round() as usize, rect.1.round() as usize);
+                let (w, h) = (((rect.0 + rect.2).round() as usize).saturating_sub(x0), ((rect.1 + rect.3).round() as usize).saturating_sub(y0));
                 let scaled = if (cropped.width as usize, cropped.height as usize) == (w, h) {
                     cropped
                 } else {
@@ -287,7 +302,7 @@ impl ConfigUi {
                 for y in 0..h.min(height.saturating_sub(y0)) {
                     let from = y * w * 3;
                     let to = ((y0 + y) * width + x0) * 3;
-                    let n = w.min(width - x0) * 3;
+                    let n = w.min(width.saturating_sub(x0)) * 3;
                     frame.rgb[to..to + n].copy_from_slice(&scaled.rgb[from..from + n]);
                 }
             }

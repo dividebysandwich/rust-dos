@@ -730,6 +730,34 @@ how it was installed. A drive with its own `-overlay` keeps it. In the
 libretro core, `saves` is in the core's folder in the frontend's save
 directory.
 
+### Manuals and extras
+
+A game's manual, code wheel, maps and reference cards can go with its
+profile, as PDF documents or PNG, JPEG or GIF pictures, and show over the
+game without leaving it: what the copy protection asks is looked up there.
+**Ctrl+Shift+M** shows the running game's, and **M** on the Games page any
+game's: a list of them, then the one picked over the whole picture, the
+game paused. PgUp and PgDn turn the pages, Up and Down scroll, `+` and `-`
+zoom (the whole page, its width, 150% and 200%), `[` and `]` scroll
+sideways, and Esc goes back. In the window the page is drawn at the
+window's own pixels, sharper than the game's picture; in the libretro core
+it is drawn into the picture.
+
+They are the profile's `manual=` lines in `[game]`, one a file, with a
+title after `|` if it should be listed as something other than its name,
+and then the files in the extras folder beside the profile,
+`games/<profile>.extras`:
+
+```ini
+[game]
+name=Pool of Radiance
+manual=pool/Manual.pdf|Rule book
+manual=~/scans/pool-codewheel.png|Code wheel
+```
+
+Relative paths are from the `games` folder. **Ins** in the list adds a file
+to the profile.
+
 ## RetroAchievements
 
 [RetroAchievements](https://retroachievements.org) has achievements,

@@ -3,6 +3,7 @@
 use super::voodoo_gl::VoodooGl;
 use crate::config::Filter;
 use crate::video::Frame;
+use rust_dos::config_ui::Layer;
 use crate::video::shader::{self, CrtSettings, Glsl, Shader};
 use glow::HasContext;
 use sdl2::VideoSubsystem;
@@ -60,6 +61,10 @@ pub struct GlScreen {
     /// What screenshots and recordings of the look are drawn with, made
     /// the first time one is (`capture`).
     capture: Option<Capture>,
+    /// The texture of the layer over the picture (a manual's page), made
+    /// the first time there is one, and the layer in it.
+    layer: Option<glow::Texture>,
+    layer_generation: Option<u64>,
 }
 
 /// A picture to draw through the look away from the window, and the
@@ -168,6 +173,8 @@ impl GlScreen {
             voodoo: None,
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
             capture: None,
+            layer: None,
+            layer_generation: None,
         })
     }
 
@@ -240,7 +247,7 @@ impl GlScreen {
 
     /// Show `frame`, letterboxed at `display` proportions, of which `rows`
     /// changed since the last.
-    pub fn present(&mut self, frame: &Frame, rows: std::ops::Range<usize>, display: (u32, u32)) {
+    pub fn present(&mut self, frame: &Frame, rows: std::ops::Range<usize>, display: (u32, u32), layer: Option<&Layer>) {
         let gl = &self.gl;
         let size = (frame.width, frame.height);
         let (width, height) = (frame.width as i32, frame.height as i32);
@@ -279,7 +286,7 @@ impl GlScreen {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
         }
-        self.draw(self.texture, size, display);
+        self.draw(self.texture, size, display, layer);
     }
 
     /// Whether the 3dfx card can be drawn with OpenGL here, or why not.
@@ -335,13 +342,13 @@ impl GlScreen {
                 self.gl.generate_mipmap(glow::TEXTURE_2D);
             }
         }
-        self.draw(texture, size, display);
+        self.draw(texture, size, display, None);
         true
     }
 
     /// Draw `texture`, a picture of `size` pixels, into the window with the
     /// look, letterboxed at `display` proportions, and show it.
-    fn draw(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32)) {
+    fn draw(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32), layer: Option<&Layer>) {
         let gl = &self.gl;
         let (dw, dh) = self.window.drawable_size();
         // SAFETY: see `GlScreen`.
@@ -354,8 +361,66 @@ impl GlScreen {
             let (x, y, w, h) = super::letterbox((dw, dh), display);
             // OpenGL counts rows from the bottom.
             self.draw_look(texture, size, (x as i32, (dh - y - h) as i32, w, h));
+            if let Some(layer) = layer {
+                let (sx, sy) = (w as f32 / size.0.max(1) as f32, h as f32 / size.1.max(1) as f32);
+                let (lx, ly, lw, lh) = layer.rect;
+                let top = y as f32 + ly * sy;
+                let at = ((x as f32 + lx * sx) as i32, (dh as f32 - top - lh * sy) as i32);
+                self.draw_layer(layer, (at.0, at.1, (lw * sx) as u32, (lh * sy) as u32));
+            }
         }
         self.window.gl_swap_window();
+    }
+
+    /// Draw `layer` as it is, smoothly scaled, into the `x, y, width,
+    /// height` of the framebuffer (y from the bottom).
+    fn draw_layer(&mut self, layer: &Layer, rect: (i32, i32, u32, u32)) {
+        let gl = &self.gl;
+        let Some(Ok(plain)) = self.programs.get(&Shader::None) else { return };
+        let picture = &layer.picture;
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            let texture = match self.layer {
+                Some(texture) => texture,
+                None => match gl.create_texture() {
+                    Ok(texture) => {
+                        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                        for (name, value) in [
+                            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                        ] {
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+                        }
+                        self.layer = Some(texture);
+                        texture
+                    }
+                    Err(_) => return,
+                },
+            };
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            if self.layer_generation != Some(layer.generation) {
+                let mut rgba = Vec::with_capacity(picture.rgb.len() / 3 * 4);
+                for &[r, g, b] in picture.rgb.as_chunks::<3>().0 {
+                    rgba.extend([r, g, b, 0xFF]);
+                }
+                let pixels = glow::PixelUnpackData::Slice(Some(&rgba));
+                let (w, h) = (picture.width as i32, picture.height as i32);
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+                self.layer_generation = Some(layer.generation);
+            }
+            let (x, y, w, h) = rect;
+            gl.viewport(x, y, w as i32, h as i32);
+            gl.use_program(Some(plain.program));
+            gl.uniform_2_f32(plain.source.as_ref(), picture.width as f32, picture.height as f32);
+            gl.uniform_2_f32(plain.output.as_ref(), w as f32, h as f32);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_vertex_array(Some(self.vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            // The look's own texture, as `select` left it.
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+        }
     }
 
     /// Draw `texture`, a picture of `size` pixels, with the look into the

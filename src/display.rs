@@ -13,6 +13,7 @@ use crate::video::shader::{CrtSettings, Shader};
 use crate::video::{self, Frame};
 use gl::{GlScreen, NoGl};
 use rust_dos::bus::Bus;
+use rust_dos::config_ui::Layer;
 use rust_dos::voodoo::{Renderer, VoodooSettings};
 use sdl2::VideoSubsystem;
 use sdl2::pixels::PixelFormatEnum;
@@ -78,6 +79,9 @@ pub struct Display<'a> {
     /// OpenGL drew, which the texture of `shown` isn't.
     voodoo_said: bool,
     voodoo_shown: bool,
+    /// The layer over the picture last shown (a manual's page), by its
+    /// generation.
+    layer_shown: Option<u64>,
 }
 
 /// What draws the picture.
@@ -89,6 +93,9 @@ enum Output<'a> {
         canvas: WindowCanvas,
         creator: &'a TextureCreator<WindowContext>,
         texture: Texture<'a>,
+        /// The layer over the picture, and its generation, once there is
+        /// one.
+        layer: Option<(Texture<'a>, u64)>,
     },
 }
 
@@ -152,7 +159,7 @@ impl<'a> Display<'a> {
                     ));
                 }
                 let renderer = format!("SDL renderer {} (no OpenGL 3: {})", canvas.info().name, reason);
-                (Output::Sdl { canvas, creator, texture }, renderer)
+                (Output::Sdl { canvas, creator, texture, layer: None }, renderer)
             }
         };
         let mut display = Self {
@@ -171,6 +178,7 @@ impl<'a> Display<'a> {
             redraw: true,
             voodoo_said: false,
             voodoo_shown: false,
+            layer_shown: None,
         };
         // For the window managers and taskbars that take the icon from the
         // window rather than from rust-dos.desktop. The test below keeps
@@ -334,9 +342,20 @@ impl<'a> Display<'a> {
     /// With `voodoo`, the machine's picture without what is drawn over it,
     /// OpenGL shows the 3dfx card's picture it drew instead
     /// (`run_voodoo`), with what `frame` has over it.
-    pub fn present(&mut self, frame: &mut Frame, voodoo: Option<&Frame>) -> Result<(), String> {
+    ///
+    /// `layer` goes over the picture, at as many of the window's pixels as
+    /// it has (`output_scale`).
+    pub fn present(&mut self, frame: &mut Frame, voodoo: Option<&Frame>, layer: Option<&Layer>) -> Result<(), String> {
         let row_bytes = frame.width as usize * 3;
-        let rows = if self.redraw || self.shown.len() != frame.rgb.len() || self.voodoo_shown && voodoo.is_none() {
+        // The layer covers the 3dfx card's picture.
+        let voodoo = voodoo.filter(|_| layer.is_none());
+        let layer_changed = layer.map(|l| l.generation) != self.layer_shown;
+        self.layer_shown = layer.map(|l| l.generation);
+        let rows = if self.redraw
+            || layer_changed
+            || self.shown.len() != frame.rgb.len()
+            || self.voodoo_shown && voodoo.is_none()
+        {
             0..frame.height as usize
         } else {
             match changed_rows(&self.shown, &frame.rgb, row_bytes) {
@@ -350,11 +369,11 @@ impl<'a> Display<'a> {
             Output::Gl(gl) => {
                 self.voodoo_shown = voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
                 if !self.voodoo_shown {
-                    gl.present(frame, rows, display);
+                    gl.present(frame, rows, display, layer);
                 }
                 Ok(())
             }
-            Output::Sdl { canvas, texture, .. } => {
+            Output::Sdl { canvas, creator, texture, layer: layer_texture } => {
                 let rect = sdl2::rect::Rect::new(0, rows.start as i32, frame.width, (rows.end - rows.start) as u32);
                 let pixels = &frame.rgb[rows.start * row_bytes..rows.end * row_bytes];
                 texture.update(Some(rect), pixels, row_bytes).map_err(|e| e.to_string())?;
@@ -362,6 +381,28 @@ impl<'a> Display<'a> {
                 // Stretched over the whole logical size: that is the 4:3
                 // correction.
                 canvas.copy(texture, None, None)?;
+                if let Some(layer) = layer {
+                    let picture = &layer.picture;
+                    let fits = layer_texture.as_ref().is_some_and(|(t, _)| {
+                        let q = t.query();
+                        (q.width, q.height) == (picture.width, picture.height)
+                    });
+                    if !fits {
+                        let mut new = create_texture(creator, (picture.width, picture.height), Filter::Linear)?;
+                        new.set_scale_mode(ScaleMode::Linear);
+                        *layer_texture = Some((new, u64::MAX));
+                    }
+                    let (t, generation) = layer_texture.as_mut().expect("the layer's texture");
+                    if *generation != layer.generation {
+                        t.update(None, &picture.rgb, picture.width as usize * 3).map_err(|e| e.to_string())?;
+                        *generation = layer.generation;
+                    }
+                    // In logical pixels, which the picture is stretched over.
+                    let (sx, sy) = (display.0 as f32 / frame.width as f32, display.1 as f32 / frame.height as f32);
+                    let (x, y, w, h) = layer.rect;
+                    let to = sdl2::rect::Rect::new((x * sx) as i32, (y * sy) as i32, (w * sx) as u32, (h * sy) as u32);
+                    canvas.copy(t, None, Some(to))?;
+                }
                 canvas.present();
                 Ok(())
             }
@@ -399,6 +440,18 @@ impl<'a> Display<'a> {
     /// SDL's renderer, in window coordinates with OpenGL. Outside the
     /// picture (the black bars of fullscreen, the bezel of a curved
     /// shader) the result is outside the frame.
+    /// How many of the window's pixels a frame pixel is shown at, across
+    /// and down.
+    pub fn output_scale(&self) -> (f64, f64) {
+        let display = display_size(self.frame.0, self.frame.1, self.aspect);
+        let size = match &self.out {
+            Output::Gl(gl) => gl.window().drawable_size(),
+            Output::Sdl { canvas, .. } => canvas.output_size().unwrap_or(display),
+        };
+        let (_, _, w, h) = letterbox(size, display);
+        (w as f64 / self.frame.0.max(1) as f64, h as f64 / self.frame.1.max(1) as f64)
+    }
+
     /// How many frame pixels a pixel of mouse motion on the window (in
     /// its events' units) is, across and down.
     pub fn frame_scale(&self) -> (f64, f64) {
