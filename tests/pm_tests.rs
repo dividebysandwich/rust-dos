@@ -728,7 +728,7 @@ fn enabling_the_ps2_mouse_in_virtual_8086_mode_unmasks_irq_12_through_the_ports(
 
 #[test]
 fn exec_loads_a_program_into_a_virtual_machines_own_memory() {
-    use rust_dos::mcb::{self, DOS_OWNER, FIRST_MCB_SEG, FREE_OWNER, MCB_M, MCB_Z, Mcb};
+    use rust_dos::mcb::{self, DOS_OWNER, FREE_OWNER, MCB_M, MCB_Z, Mcb};
     let mut rig = Rig::new();
     let dir = std::path::PathBuf::from("target/test_pm/vm_exec");
     let _ = std::fs::remove_dir_all(&dir);
@@ -740,7 +740,8 @@ fn exec_loads_a_program_into_a_virtual_machines_own_memory() {
     // 300000h, as a DOS machine of Windows' 386 enhanced mode has memory of
     // its own.
     let bus = &mut rig.cpu.bus;
-    mcb::write_mcb(bus, FIRST_MCB_SEG, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: 0x9000 - 0x1000 });
+    let first = mcb::first_mcb(bus);
+    mcb::write_mcb(bus, first, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: 0x9000 - first - 1 });
     rig.load(0x30_0000, &[MCB_Z, FREE_OWNER as u8, 0, 0xFF, 0x0F]);
     page_tables(&mut rig);
     rig.write32(0x80000, 0x81000 | 0x7);

@@ -207,6 +207,17 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   out of the conventional memory games need, and programs can allocate
   upper memory themselves (INT 21h AH=58h). A change takes effect at the
   DOS prompt.
+* `dos_high` packs DOS's tables (its data segment, the file table and
+  the environment of programs started from the prompt) at the bottom of
+  conventional memory, as `DOS=HIGH` leaves it: `true` (the default) or
+  `false`. The first memory block is then at 05A9h, about 617 KB of
+  conventional memory are free, and programs load below 64 KB, with a
+  2 KB environment (`SET` says *Out of environment space* past it).
+  `false` spreads them up to 0FFFh, where programs start at segment 1000h
+  with 576 KB free, for an old program that fails below 64 KB ("Packed
+  file is corrupt"). DOS keeps no code in the HMA, which stays free for
+  programs through XMS. A change takes effect at the DOS prompt, unless a
+  TSR is resident in conventional memory.
 * `dpmi` gives DOS extenders a DPMI 0.9 host, as a memory manager or
   Windows provides one: `true` (the default) or `false`. DOS/4GW,
   PMODE/W, DOS/32A, Tran's PMODE, DJGPP and Borland's RTM (protected-mode

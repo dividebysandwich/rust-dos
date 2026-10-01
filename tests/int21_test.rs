@@ -144,7 +144,7 @@ fn test_int21_ah4b_exec() {
     assert_eq!(cpu.ip(), 0x100);
     let psp_seg = cpu.ds();
     assert_eq!(psp_seg, cpu.cs(), "DS should equal CS for a COM child");
-    assert!(psp_seg >= 0x1000, "PSP segment should be in conventional memory");
+    assert!(psp_seg > rust_dos::mcb::first_mcb(&cpu.bus), "PSP segment should be in conventional memory");
 
     let psp_phys = cpu.get_physical_addr(psp_seg, 0x80);
     let tail_len = cpu.bus.read_8(psp_phys);

@@ -39,8 +39,8 @@ fn test_load_executable_in_subdirectory() {
     assert!(loaded_now, "Should find TEST.COM in SUB");
 
     // Verify it loaded as a COM file
-    // CS should be 0x1000, IP should be 0x100
-    assert_eq!(cpu.cs(), 0x1000);
+    // CS should be the PSP after the first MCB, IP should be 0x100
+    assert_eq!(cpu.cs(), rust_dos::mcb::first_mcb(&cpu.bus) + 1);
     assert_eq!(cpu.ip(), 0x100);
 
     // Cleanup

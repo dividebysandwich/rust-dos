@@ -129,6 +129,12 @@
 # programs. true (the default) or false. A change takes effect at the DOS
 # prompt.
 #umb=true
+# Pack DOS's tables at the bottom of conventional memory, as DOS=HIGH
+# leaves it, so programs get about 617 KB free rather than 576 KB and load
+# below 64 KB. false spreads them up to 64 KB, where programs start at
+# segment 1000h. true (the default) or false. A change takes effect at the
+# DOS prompt.
+#dos_high=true
 # A DPMI host for DOS extenders (DOS/4GW, PMODE/W, DOS/32A, DJGPP), as a
 # memory manager or Windows has one: they run their programs as its
 # clients and share extended memory through it. true (the default) or

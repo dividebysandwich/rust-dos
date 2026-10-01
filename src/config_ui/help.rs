@@ -290,6 +290,7 @@ impl Item {
             Memsize => "memsize",
             Ems => "ems",
             Umb => "umb",
+            DosHigh => "dos-high",
             Dpmi => "dpmi",
             DosVersion => "dos-version",
             IdeHardDisks => "ide-hard-disks",

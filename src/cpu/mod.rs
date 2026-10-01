@@ -22,16 +22,16 @@ pub use mem::{Access, MemRef};
 pub use regs::{ATTR_DB, ATTR_G, Seg, SegCache};
 pub use seg::Descriptor;
 
-/// Where the environment of programs started from the shell lives. The
-/// area below the first MCB belongs to the shell.
-pub const ENV_SEGMENT: u16 = 0x0C00;
-
 /// Where the shell runs: its code at SHELL_SEGMENT:0100, its line buffers
 /// at 0200 and 0300, and its stack below SHELL_STACK, in the memory between
-/// the BIOS data area and the environment (ENV_SEGMENT), clear of the
+/// the BIOS data area and DOS's data (`dos_data::SEGMENT`), clear of the
 /// interrupt vector table, whose vectors the BIOS and programs write.
 pub const SHELL_SEGMENT: u16 = 0x0070;
 pub const SHELL_STACK: u16 = 0x0F00;
+
+/// The room an environment keeps for the program's path after it: a
+/// DOS path, its count word and its terminator.
+const MAX_PATH: usize = 128 + 3;
 
 /// Where a program goes (see `load_executable`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,7 +335,7 @@ pub struct Cpu {
     pub current_psp: u16,
     pub heap_pointer: u16,
     /// MCB segment where memory above the TSRs kept resident from the shell
-    /// begins; `FIRST_MCB_SEG` when there are none. Programs started from
+    /// begins; the first MCB when there are none. Programs started from
     /// the shell load right above it.
     pub resident_end: u16,
     /// The PSPs of the TSRs kept resident in upper memory (LOADHIGH).
@@ -476,6 +476,7 @@ impl Cpu {
     }
 
     fn with_bus(bus: Bus) -> Self {
+        let resident_end = crate::mcb::first_mcb(&bus);
         Self {
             gpr: [0; 8],
             eip: 0x100,
@@ -515,7 +516,7 @@ impl Cpu {
             fpu_tags: [FPU_TAG_EMPTY; 8],
             current_psp: 0, // Will be set by loader
             heap_pointer: 0x2000,
-            resident_end: crate::mcb::FIRST_MCB_SEG,
+            resident_end,
             resident_upper: Vec::new(),
             last_child_exit: 0,
             errorlevel: 0,
@@ -1031,7 +1032,7 @@ impl Cpu {
 
     /// The memory of the resident TSRs, in conventional and upper memory.
     fn resident_memory(&mut self) -> Vec<std::ops::Range<usize>> {
-        let mut resident = vec![(crate::mcb::FIRST_MCB_SEG as usize + 1) * 16..self.resident_end as usize * 16];
+        let mut resident = vec![(crate::mcb::first_mcb(&self.bus) as usize + 1) * 16..self.resident_end as usize * 16];
         for &psp in &self.resident_upper {
             let block = crate::mcb::read_mcb(&mut self.bus, psp - 1);
             resident.push(psp as usize * 16..(psp as usize + block.size as usize) * 16);
@@ -1157,7 +1158,7 @@ impl Cpu {
         // If we zero those, the system dies. The first MCB and resident TSRs
         // sit above.
         self.bus
-            .fill_ram(0x0500..crate::mcb::FIRST_MCB_SEG as usize * 16, 0);
+            .fill_ram(0x0500..crate::mcb::first_mcb(&self.bus) as usize * 16, 0);
 
         // No program is running: every paragraph above the resident TSRs is
         // available for allocation, and upper memory but for the TSRs loaded
@@ -1409,11 +1410,17 @@ impl Cpu {
             // in the shell's environment area. (EXEC gives a child its own
             // copy of the parent's environment.)
             let path = self.program_path(filename);
-            let block = self.environment_block(&path);
-            let env_phys = self.get_physical_addr(ENV_SEGMENT, 0) as u32;
+            let mut block = self.environment_block(&path);
+            let layout = crate::dos_data::layout(&self.bus);
+            if block.len() > layout.environment_bytes() {
+                self.bus.log_string("[DOS] The environment doesn't fit in its area, cut short");
+                block.truncate(layout.environment_bytes() - 2);
+                block.extend_from_slice(&[0, 0]);
+            }
+            let env_phys = self.get_physical_addr(layout.environment, 0) as u32;
             self.bus.guest_write_bytes(env_phys, &block);
             let psp_phys = self.get_physical_addr(self.current_psp, 0) as u32;
-            self.bus.guest_write_16(psp_phys + 0x2C, ENV_SEGMENT);
+            self.bus.guest_write_16(psp_phys + 0x2C, layout.environment);
         }
         if loaded && placement == Placement::Shell {
             crate::mcb::name_program(&mut self.bus, self.current_psp, filename);
@@ -1430,10 +1437,18 @@ impl Cpu {
     }
 
     /// Set a variable of the master environment, or remove it when `value`
-    /// is empty. Names are upper case, as COMMAND.COM stores them.
-    pub fn set_env(&mut self, name: &str, value: &str) {
+    /// is empty. Names are upper case, as COMMAND.COM stores them. Returns
+    /// false, changing nothing, when the environment would no longer fit
+    /// in its area with a program's path after it: out of environment
+    /// space.
+    pub fn set_env(&mut self, name: &str, value: &str) -> bool {
         let name = name.to_ascii_uppercase();
         let existing = self.environment.iter().position(|(n, _)| *n == name);
+        let old = existing.map_or(0, |i| name.len() + 2 + self.environment[i].1.len());
+        let new = if value.is_empty() { 0 } else { name.len() + 2 + value.len() };
+        if new > old && self.environment_block("").len() - old + new + MAX_PATH > crate::dos_data::layout(&self.bus).environment_bytes() {
+            return false;
+        }
         match (existing, value.is_empty()) {
             (Some(i), true) => {
                 self.environment.remove(i);
@@ -1442,6 +1457,35 @@ impl Cpu {
             (None, false) => self.environment.push((name, value.to_string())),
             (None, true) => {}
         }
+        true
+    }
+
+    /// Lay DOS's tables out packed below the first MCB, as DOS=HIGH has
+    /// them, or spread out up to 0FFFh, with no program running. Resident
+    /// programs keep the layout until rust-dos starts again.
+    pub fn set_dos_high(&mut self, high: bool) -> Result<(), String> {
+        if self.bus.dos_high == high {
+            return Ok(());
+        }
+        if self.resident_end != crate::mcb::first_free(&self.bus) {
+            return Err("Resident programs are in conventional memory: dos_high changes the next time rust-dos starts".to_string());
+        }
+        let layout = if high { crate::dos_data::HIGH } else { crate::dos_data::LOW };
+        if self.environment_block("").len() + MAX_PATH > layout.environment_bytes() {
+            return Err("The environment is too large for dos_high: it stays off".to_string());
+        }
+        // The shell and DOS's data segment stay; what is after it moves.
+        let from = crate::dos_data::HIGH.sft as usize * 16;
+        let to = crate::dos_data::LOW.first_mcb as usize * 16 + 16;
+        let _ = crate::mcb::link_upper(&mut self.bus, false);
+        self.bus.dos_high = high;
+        self.bus.fill_ram(from..to, 0);
+        crate::mcb::init_empty(&mut self.bus);
+        crate::mcb::build_upper(&mut self.bus);
+        self.resident_end = crate::mcb::first_free(&self.bus);
+        crate::dos_files::write_table(&mut self.bus);
+        crate::dos_data::write(&mut self.bus);
+        Ok(())
     }
 
     /// Fully qualified DOS path of a program file name.
@@ -1672,7 +1716,7 @@ impl Cpu {
         // Stop at 0xA0000 to preserve VGA VRAM, BIOS ROM signature, font tables, and
         // Static Functionality Table set up in Bus::new(). Resident TSRs survive.
         if placement == Placement::Shell {
-            let first_mcb = crate::mcb::FIRST_MCB_SEG as usize * 16;
+            let first_mcb = crate::mcb::first_mcb(&self.bus) as usize * 16;
             self.bus.fill_ram(0x500..first_mcb, 0);
             let end = crate::mcb::low_end(&self.bus) as usize * 16;
             self.bus.fill_ram(self.resident_end as usize * 16..end, 0);

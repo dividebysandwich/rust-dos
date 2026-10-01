@@ -339,7 +339,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, Dpmi,
+                Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
             ],
@@ -464,6 +464,8 @@ enum Item {
     /// Expanded memory and upper memory blocks.
     Ems,
     Umb,
+    /// DOS's tables packed low, as DOS=HIGH has them.
+    DosHigh,
     /// The DPMI host for DOS extenders.
     Dpmi,
     /// The DOS version programs are told.
@@ -717,6 +719,7 @@ impl Item {
             VoodooScale => "3dfx OpenGL size",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
+            DosHigh => "DOS high (more free memory)",
             Dpmi => "DPMI host",
             DosVersion => "Reported DOS version",
             IdeHardDisks => "IDE hard disks (BOOT)",
@@ -931,6 +934,7 @@ impl Item {
             VoodooScale => format!("{}x", s.voodoo.scale),
             Ems => on_off(s.ems),
             Umb => on_off(s.umb),
+            DosHigh => on_off(s.dos_high),
             Dpmi => on_off(s.dpmi),
             DosVersion => s.dos_version.name(),
             IdeHardDisks => on_off(s.ide_hard_disks),
@@ -1102,6 +1106,7 @@ impl Item {
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             Ems => on_off(|s, on| s.ems = on),
             Umb => on_off(|s, on| s.umb = on),
+            DosHigh => on_off(|s, on| s.dos_high = on),
             Dpmi => on_off(|s, on| s.dpmi = on),
             IdeHardDisks => on_off(|s, on| s.ide_hard_disks = on),
             BootCdrom => on_off(|s, on| s.boot_cdrom = on),

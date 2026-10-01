@@ -13,7 +13,7 @@ use crate::cpu::Cpu;
 use crate::disk::{DriveKind, LASTDRIVE};
 
 /// Where it is: above the shell's stack (`cpu::SHELL_STACK`), below the
-/// file table (`dos_files::SFT_SEGMENT`).
+/// file table (`Layout::sft`).
 pub const SEGMENT: u16 = 0x0160;
 /// Which format the SDA has, for SHARE and other DOS utilities: 01h for
 /// DOS 4.0 to 6.0.
@@ -85,7 +85,44 @@ const _: () = assert!(
 );
 const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VSHARE_FLAG);
 const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
-const _: () = assert!(SEGMENT as usize * 16 + END as usize <= crate::dos_files::SFT_SEGMENT as usize * 16);
+
+/// What DOS keeps after its data segment, below the first MCB: the file
+/// table with the system JFT after it, and the environment of programs
+/// started from the shell, up to the first MCB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    pub sft: u16,
+    pub environment: u16,
+    pub first_mcb: u16,
+}
+
+impl Layout {
+    /// The room the environment has, in bytes.
+    pub const fn environment_bytes(&self) -> usize {
+        (self.first_mcb - self.environment) as usize * 16
+    }
+}
+
+/// Spread out, with programs from 64 KB on, as rust-dos always had it.
+pub const LOW: Layout = Layout { sft: 0x0A20, environment: 0x0C00, first_mcb: 0x0FFF };
+
+/// Packed (`dos_high`), as DOS=HIGH leaves conventional memory: the file
+/// table right after the data segment and 2 KB of environment after it.
+/// The HMA stays free for programs: DOS has no code there to move.
+pub const HIGH: Layout = {
+    let sft = (address(END) as u16).div_ceil(16);
+    let environment = sft + (crate::dos_files::TABLE_BYTES as u16).div_ceil(16);
+    Layout { sft, environment, first_mcb: environment + HIGH_ENVIRONMENT_PARAS }
+};
+const HIGH_ENVIRONMENT_PARAS: u16 = 0x80;
+
+/// The layout DOS has now.
+pub fn layout(bus: &Bus) -> Layout {
+    if bus.dos_high { HIGH } else { LOW }
+}
+
+const _: () = assert!(address(END) <= LOW.sft as usize * 16);
+const _: () = assert!(LOW.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= LOW.environment as usize * 16);
 
 /// A device DOS has built in: its name and attributes.
 struct Device {
@@ -182,7 +219,7 @@ fn write_list_of_lists(bus: &mut Bus, with_dpb: &[u8]) {
     let base = address(SYSVARS);
     // The List of Lists, and no SHARE after it.
     bus.fill_ram(base..address(DEVICE_RETF), 0);
-    bus.write_16(base - 2, crate::mcb::FIRST_MCB_SEG); // -2: first MCB
+    bus.write_16(base - 2, layout(bus).first_mcb); // -2: first MCB
     // 00: far pointer to the first DPB
     match with_dpb.first() {
         Some(&d) => bus.write_32(base, far(dpb(d))),
@@ -190,7 +227,7 @@ fn write_list_of_lists(bus: &mut Bus, with_dpb: &[u8]) {
     }
     // 04: far pointer to the System File Table (dos_files.rs)
     bus.write_16(base + 0x04, 0);
-    bus.write_16(base + 0x06, crate::dos_files::SFT_SEGMENT);
+    bus.write_16(base + 0x06, layout(bus).sft);
     // 08, 0C: the CLOCK$ and CON devices
     bus.write_32(base + 0x08, far(device_header(CLOCK_DEVICE)));
     bus.write_32(base + 0x0C, far(device_header(CON_DEVICE)));
@@ -220,7 +257,7 @@ fn write_list_of_lists(bus: &mut Bus, with_dpb: &[u8]) {
     // that covers the memory below it; 68: where allocations search from.
     bus.write_8(base + 0x63, bus.umb.is_some_and(|u| u.linked) as u8);
     bus.write_16(base + 0x66, if bus.umb.is_some() { crate::mcb::umb_cover_seg(bus) } else { 0xFFFF });
-    bus.write_16(base + 0x68, crate::mcb::FIRST_MCB_SEG);
+    bus.write_16(base + 0x68, layout(bus).first_mcb);
     bus.write_8(address(DEVICE_RETF), 0xCB); // RETF for the driver entries
 }
 

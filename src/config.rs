@@ -153,6 +153,8 @@ pub struct Config {
     pub umb: Option<bool>,
     /// The DPMI host (`dpmi`).
     pub dpmi: Option<bool>,
+    /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
+    pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).
     pub dos_version: Option<DosVersion>,
     /// A booted system's hard disks on the IDE channels (`ide_hard_disks`).
@@ -753,9 +755,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(mb) => config.memsize = Some(mb),
                             Err(e) => warn(e),
                         },
-                        "ems" | "umb" | "dpmi" => match parse_bool(value) {
+                        "ems" | "umb" | "dpmi" | "dos_high" => match parse_bool(value) {
                             Some(on) if key.eq_ignore_ascii_case("ems") => config.ems = Some(on),
                             Some(on) if key.eq_ignore_ascii_case("umb") => config.umb = Some(on),
+                            Some(on) if key.eq_ignore_ascii_case("dos_high") => config.dos_high = Some(on),
                             Some(on) => config.dpmi = Some(on),
                             None => warn(format!("invalid {} '{}' (true or false)", key, value)),
                         },
@@ -1068,6 +1071,9 @@ pub struct Settings {
     pub umb: bool,
     /// The DPMI host for DOS extenders.
     pub dpmi: bool,
+    /// DOS's tables packed below the first MCB, as DOS=HIGH leaves
+    /// conventional memory, rather than spread out up to 64 KB.
+    pub dos_high: bool,
     /// The DOS version programs are told.
     pub dos_version: DosVersion,
     /// A booted system's hard disks are ATA disks on the IDE channels too.
@@ -1115,6 +1121,7 @@ impl Default for Settings {
             ems: true,
             umb: true,
             dpmi: true,
+            dos_high: true,
             dos_version: DosVersion::default(),
             ide_hard_disks: true,
             boot_cdrom: true,
@@ -1180,6 +1187,7 @@ impl Settings {
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
+            dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             boot_cdrom: config.boot_cdrom.unwrap_or(default.boot_cdrom),
@@ -1247,6 +1255,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "dpmi", yes_no(settings.dpmi)),
+        (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
@@ -2194,6 +2203,7 @@ mod tests {
             ems: false,
             umb: false,
             dpmi: false,
+            dos_high: false,
             dos_version: DosVersion::new(7, 10),
             ide_hard_disks: false,
             boot_cdrom: false,

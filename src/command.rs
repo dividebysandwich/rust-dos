@@ -466,7 +466,11 @@ impl ShellCommand for SetCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
         let args = args.trim_start();
         match args.split_once('=') {
-            Some((name, value)) => cpu.set_env(name.trim(), value),
+            Some((name, value)) => {
+                if !cpu.set_env(name.trim(), value) {
+                    print_string(cpu, "Out of environment space\r\n");
+                }
+            }
             None if args.trim().is_empty() => {
                 let lines: Vec<String> = cpu
                     .environment
@@ -495,8 +499,14 @@ impl ShellCommand for PathCommand {
                 print_string(cpu, &text);
             }
             // "PATH ;" clears the search path.
-            ";" => cpu.set_env("PATH", ""),
-            _ => cpu.set_env("PATH", &path.to_ascii_uppercase()),
+            ";" => {
+                cpu.set_env("PATH", "");
+            }
+            _ => {
+                if !cpu.set_env("PATH", &path.to_ascii_uppercase()) {
+                    print_string(cpu, "Out of environment space\r\n");
+                }
+            }
         }
     }
 }

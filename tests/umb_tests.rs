@@ -7,7 +7,10 @@ use rust_dos::dos_data::{SYSVARS, address};
 use rust_dos::command::CommandDispatcher;
 use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
 use rust_dos::interrupts::int21;
-use rust_dos::mcb::{self, FIRST_MCB_SEG, MCB_M, MCB_Z, UMB_COVER_SEG, UMB_START, walk, walk_upper};
+use rust_dos::mcb::{self, MCB_M, MCB_Z, UMB_COVER_SEG, UMB_START, walk, walk_upper};
+
+/// The first MCB of a fresh machine: DOS's tables packed below it.
+const FIRST_MCB_SEG: u16 = rust_dos::dos_data::HIGH.first_mcb;
 use rust_dos::xms;
 use std::fs;
 use std::path::PathBuf;

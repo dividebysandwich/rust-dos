@@ -17,7 +17,7 @@
 use crate::bus::Bus;
 use crate::command::{ShellCommand, format_size};
 use crate::cpu::Cpu;
-use crate::mcb::{self, DOS_OWNER, FIRST_MCB_SEG, Mcb, UMB_START};
+use crate::mcb::{self, DOS_OWNER, Mcb, UMB_START};
 use crate::video::print_string;
 
 const USAGE: &str = concat!(
@@ -165,12 +165,14 @@ impl Kind {
 }
 
 /// The memory below the first MCB, by segment, all of it MSDOS's.
-const LOW_AREAS: [(u16, u16, Kind); 4] = [
-    (0x0000, 0x0040, Kind::Vectors),
-    (0x0040, 0x0050, Kind::RomArea),
-    (0x0050, 0x0070, Kind::DosArea),
-    (0x0070, FIRST_MCB_SEG, Kind::System),
-];
+fn low_areas(first_mcb: u16) -> [(u16, u16, Kind); 4] {
+    [
+        (0x0000, 0x0040, Kind::Vectors),
+        (0x0040, 0x0050, Kind::RomArea),
+        (0x0050, 0x0070, Kind::DosArea),
+        (0x0070, first_mcb, Kind::System),
+    ]
+}
 
 /// A block of memory: where it or its MCB is, its size with the MCB in
 /// bytes, who has it and what it holds.
@@ -209,7 +211,7 @@ impl Memory {
         let conventional = mcb::conventional_end(bus) as u32 * 16;
         let block = |segment, bytes, kind| Block { segment, bytes, region: Region::Conventional, name: "MSDOS".to_string(), kind };
         let mut blocks: Vec<Block> =
-            LOW_AREAS.iter().map(|&(from, to, kind)| block(from, (to - from) as u32 * 16, kind)).collect();
+            low_areas(mcb::first_mcb(bus)).iter().map(|&(from, to, kind)| block(from, (to - from) as u32 * 16, kind)).collect();
         // The cover of the adapters' memory: its MCB is DOS's, in
         // conventional memory, and what it covers is reserved. The chain
         // reaches it only with upper memory linked.

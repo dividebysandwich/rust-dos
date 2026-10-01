@@ -115,6 +115,16 @@ Memory between 640 KB and 1 MB where drivers can go with `LH` (LOADHIGH),
 leaving more of the 640 KB for games. Leave it **on**; turn it off only
 if a game fails with it.
 
+# DOS high {#dos-high}
+
+Packs DOS's own tables at the bottom of memory, as `DOS=HIGH` in
+CONFIG.SYS does, so programs get about 40 KB more of the 640 KB: `MEM`
+shows about 617 KB free rather than 576 KB. Leave it **on**.
+
+Programs then load below 64 KB. If an old game says *Packed file is
+corrupt* or crashes at start, try it **off**. A change takes effect at the
+DOS prompt, unless a TSR is resident.
+
 # DPMI host {#dpmi}
 
 Lets protected-mode games (DOS/4GW, DOS/32A, DJGPP and Borland games, such

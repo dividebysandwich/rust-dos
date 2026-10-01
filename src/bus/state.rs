@@ -11,7 +11,7 @@ const RAM_VERSION: u16 = 2;
 const CORE_VERSION: u16 = 7;
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 2;
-const DOS_VERSION: u16 = 5;
+const DOS_VERSION: u16 = 6;
 const VOODOO_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const DPMI_VERSION: u16 = 2;
@@ -100,6 +100,7 @@ impl Bus {
             ems,
             dpmi,
             umb,
+            dos_high,
             mouse,
             mscdex,
             disk,
@@ -195,6 +196,7 @@ impl Bus {
             save_all!(w; xms, mouse, mscdex, disk_io);
             save_device(ems, w);
             save_device(umb, w);
+            dos_high.save(w);
             disk.save_state(w);
         });
         // The Ultrasound's memory first, where it stays in place for
@@ -311,6 +313,7 @@ impl Bus {
             ems,
             dpmi,
             umb,
+            dos_high,
             mouse,
             mscdex,
             disk,
@@ -401,6 +404,7 @@ impl Bus {
         load_all!(&mut section; xms, mouse, mscdex, disk_io);
         load_device(ems, "expanded memory manager", &mut section)?;
         load_device(umb, "upper memory", &mut section)?;
+        dos_high.load(&mut section)?;
         let lost = disk.load_state(&mut section)?;
         let mut section = r.section(b"SOUN", SOUND_VERSION)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;

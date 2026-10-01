@@ -111,6 +111,9 @@ pub struct Bus {
     pub disk_notices: Vec<String>,
     /// Upper memory blocks, if DOS has them (see mcb.rs).
     pub umb: Option<crate::mcb::Umb>,
+    /// Whether DOS packs its tables below the first MCB (`dos_high`), as
+    /// DOS=HIGH leaves conventional memory (`dos_data::layout`).
+    pub dos_high: bool,
     /// The Covox or Disney Sound Source on LPT1, if there is one.
     pub lpt_dac: Option<crate::lpt_dac::LptDac>,
     /// The printer on LPT1 (`[printer]`), while the DAC isn't there.
@@ -352,6 +355,7 @@ impl Bus {
             boot_cdrom: true,
             disk_notices: Vec::new(),
             umb: None,
+            dos_high: true,
             lpt_dac: None,
             printer: None,
             printer_dir: None,

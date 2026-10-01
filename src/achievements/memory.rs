@@ -17,7 +17,19 @@
 //! game, its data and what it allocates are at the addresses the sets
 //! expect. A system booted from a disk has all conventional memory at 0.
 
-use crate::mcb::{FIRST_MCB_SEG, MCB_M, MCB_Z};
+use crate::dos_data::{HIGH, LOW, SYSVARS};
+use crate::mcb::{MCB_M, MCB_Z};
+
+/// The first MCB, from the word below the List of Lists where DOS keeps
+/// it: the one of either layout DOS has (`dos_data::Layout`).
+fn first_mcb(ram: &[u8]) -> u16 {
+    let at = crate::dos_data::address(SYSVARS) - 2;
+    let word = ram.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    match word {
+        Some(seg) if seg == HIGH.first_mcb => seg,
+        _ => LOW.first_mcb,
+    }
+}
 
 /// Where DOSBox Pure's first program has its PSP, from the start of the
 /// game's memory.
@@ -49,7 +61,7 @@ impl MemoryMap {
             Some(psp) => (psp as usize * 16).saturating_sub(PSP_OFFSET),
             // No program: where one would go, with the environment DOSBox
             // Pure gives it.
-            None => FIRST_MCB_SEG as usize * 16,
+            None => first_mcb(ram) as usize * 16,
         };
         Self {
             game_start: game_start.min(CONVENTIONAL_END),
@@ -86,7 +98,7 @@ fn first_program(ram: &[u8]) -> Option<u16> {
         ram.get(at..at + 2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
     };
-    let mut seg = FIRST_MCB_SEG;
+    let mut seg = first_mcb(ram);
     for _ in 0..1000 {
         let at = seg as usize * 16;
         let signature = *ram.get(at)?;
@@ -124,8 +136,8 @@ mod tests {
     fn the_game_is_where_dosbox_pure_has_it() {
         let mut ram = vec![0u8; 0x20_0000];
         // An environment of 10 paragraphs, then the program's block.
-        let psp = FIRST_MCB_SEG + 1 + 10 + 1;
-        mcb(&mut ram, FIRST_MCB_SEG, MCB_M, psp, 10);
+        let psp = LOW.first_mcb + 1 + 10 + 1;
+        mcb(&mut ram, LOW.first_mcb, MCB_M, psp, 10);
         mcb(&mut ram, psp - 1, MCB_Z, psp, 0x9FFF - psp);
         ram[psp as usize * 16 + 0x80] = 0x42;
         ram[0x400] = 0x11;
@@ -142,7 +154,7 @@ mod tests {
 
         // At the prompt, the free block.
         let mut ram = vec![0u8; 0x10_0000];
-        mcb(&mut ram, FIRST_MCB_SEG, MCB_Z, 0, 0x9FFF - FIRST_MCB_SEG);
+        mcb(&mut ram, LOW.first_mcb, MCB_Z, 0, 0x9FFF - LOW.first_mcb);
         assert_eq!(MemoryMap::of(&ram, false).game_start, 0xFFF0);
         // A booted system's is all of it.
         let booted = MemoryMap::of(&ram, true);

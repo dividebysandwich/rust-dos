@@ -18,10 +18,12 @@ fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
     base
 }
 
-/// A machine at its prompt, with upper memory and EMS if asked.
+/// A machine at its prompt, with upper memory and EMS if asked, and DOS's
+/// tables spread up to 64 KB (`dos_high=false`), where these numbers are.
 fn machine(name: &str, ems: bool, umb: bool) -> Cpu {
     // TSR.COM just loops; the tests make the DOS calls.
     let mut cpu = Cpu::new(scratch(name, &[("TSR.COM", &[0xEB, 0xFE])]));
+    cpu.set_dos_high(false).unwrap();
     cpu.set_upper_memory(ems, umb).unwrap();
     cpu.load_shell();
     cpu
@@ -71,6 +73,23 @@ fn summary_at_the_prompt() {
     }
     // No expanded memory.
     assert!(!lines.iter().any(|l| l.contains("EMS")));
+}
+
+#[test]
+fn dos_high_packs_dos_below_the_first_block() {
+    let mut cpu = machine("high", false, false);
+    cpu.set_dos_high(true).unwrap();
+    let first = mcb::first_mcb(&cpu.bus);
+    assert_eq!(first, 0x05A9);
+    let lines = mem(&mut cpu, "");
+    assert!(has(&lines, "Conventional         640K       23K      617K"), "{}", lines.join("\n"));
+    // The List of Lists has the first MCB and the file table where they
+    // are now, and a program loads above them.
+    let lol = rust_dos::dos_data::address(rust_dos::dos_data::SYSVARS);
+    assert_eq!(cpu.bus.read_16(lol - 2), first);
+    assert_eq!(cpu.bus.read_16(lol + 6), rust_dos::dos_data::HIGH.sft);
+    load_tsr(&mut cpu, false);
+    assert!(cpu.set_dos_high(false).is_err(), "a resident program keeps the layout");
 }
 
 #[test]

@@ -38,10 +38,11 @@ pub const MCB_M: u8 = 0x4D;
 /// Signature byte for "this is the last block".
 pub const MCB_Z: u8 = 0x5A;
 
-/// Segment of the MCB header of the first block. Sits just below the usual
-/// program load segment (0x1000) so the chain can cover the full conventional
-/// memory area [0x1000, 0xA000).
-pub const FIRST_MCB_SEG: u16 = 0x0FFF;
+/// Segment of the MCB header of the first block: after DOS's tables, at
+/// 0FFFh or, with `dos_high`, packed below it (`dos_data::Layout`).
+pub fn first_mcb(bus: &Bus) -> u16 {
+    crate::dos_data::layout(bus).first_mcb
+}
 
 /// Paragraph past the end of conventional memory. A0000h is the VGA VRAM
 /// window, so we cannot allocate at or above it.
@@ -80,7 +81,7 @@ pub fn umb_cover_seg(bus: &Bus) -> u16 {
 /// The MCB of the first block programs can have: the first MCB, or on a
 /// PCjr the one after the block DOS keeps over the video memory.
 pub fn first_free(bus: &Bus) -> u16 {
-    if bus.vga.adapter == Adapter::Pcjr { PCJR_FIRST_FREE } else { FIRST_MCB_SEG }
+    if bus.vga.adapter == Adapter::Pcjr { PCJR_FIRST_FREE } else { first_mcb(bus) }
 }
 
 /// The first upper memory block's MCB, and where upper memory ends.
@@ -183,11 +184,12 @@ pub fn low_end(bus: &Bus) -> u16 {
     if bus.umb.is_some() { umb_cover_seg(bus) } else { conventional_end(bus) }
 }
 
-/// Walk the MCB chain from FIRST_MCB_SEG to the 'Z' sentinel. Returns the
+/// Walk the MCB chain from the first MCB to the 'Z' sentinel. Returns the
 /// list of (segment, mcb) pairs encountered. Stops early on a corrupt chain.
 /// With upper memory linked, the chain goes on through it.
 pub fn walk(bus: &mut Bus) -> Vec<(u16, Mcb)> {
-    walk_from(bus, FIRST_MCB_SEG)
+    let first = first_mcb(bus);
+    walk_from(bus, first)
 }
 
 /// The upper memory blocks' chain, from `UMB_START`: empty without upper
@@ -244,11 +246,11 @@ fn walk_from(bus: &mut Bus, start: u16) -> Vec<(u16, Mcb)> {
 /// conventional memory. Used when the shell is loaded and no user process owns
 /// anything yet.
 pub fn init_empty(bus: &mut Bus) {
-    let first = first_free(bus);
-    if first > FIRST_MCB_SEG {
+    let (first, dos) = (first_free(bus), first_mcb(bus));
+    if first > dos {
         // The PCjr's: DOS keeps the memory up to it.
-        write_mcb(bus, FIRST_MCB_SEG, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: first - FIRST_MCB_SEG - 1 });
-        bus.guest_write_bytes(header_addr(FIRST_MCB_SEG) + 8, b"SC");
+        write_mcb(bus, dos, &Mcb { signature: MCB_M, owner: DOS_OWNER, size: first - dos - 1 });
+        bus.guest_write_bytes(header_addr(dos) + 8, b"SC");
     }
     let free_paras = low_end(bus) - first - 1;
     write_mcb(
@@ -735,7 +737,8 @@ fn coalesce(bus: &mut Bus, mcb_seg: u16) {
 
 /// Walk the chains and merge every run of adjacent free blocks.
 fn coalesce_all(bus: &mut Bus) {
-    coalesce_chain(bus, FIRST_MCB_SEG);
+    let first = first_mcb(bus);
+    coalesce_chain(bus, first);
     if bus.umb.is_some() {
         coalesce_chain(bus, UMB_START);
     }

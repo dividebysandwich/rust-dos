@@ -56,7 +56,8 @@ pub fn handle(cpu: &mut Cpu) {
         // The System File Table entry BX in ES:DI.
         0x1216 => {
             let sft = cpu.bx();
-            point_es_di(cpu, (sft < crate::disk::FILES).then(|| dos_files::entry_address(sft)));
+            let at = dos_files::entry_address(&cpu.bus, sft);
+            point_es_di(cpu, (sft < crate::disk::FILES).then_some(at));
         }
         // The slot of handle BX in the running process's job file table
         // in ES:DI, which holds the handle's System File Table entry.

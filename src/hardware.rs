@@ -13,8 +13,8 @@ pub struct Hardware {
     pub cpu: CpuModel,
     pub sound: SoundConfig,
     pub video: VideoSetup,
-    /// Expanded memory and upper memory blocks.
-    pub memory: (bool, bool),
+    /// Expanded memory, upper memory blocks and DOS's tables packed low.
+    pub memory: (bool, bool, bool),
     /// The 3dfx card.
     pub voodoo: Option<crate::voodoo::Board>,
     /// The IPX driver and the LAN.
@@ -40,7 +40,8 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.set_joystick(settings.joystick);
     cpu.bus.vga.set_composite(settings.composite);
     cpu.bus.kbd.layout = settings.keyboard_layout.layout(host_layout);
-    let mut warnings: Vec<String> = cpu.set_upper_memory(settings.ems, settings.umb).err().into_iter().collect();
+    let mut warnings: Vec<String> = cpu.set_dos_high(settings.dos_high).err().into_iter().collect();
+    warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
     cpu.bus.dpmi.enabled = settings.dpmi;
     crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);
     cpu.bus.ide_hard_disks = settings.ide_hard_disks;
@@ -60,7 +61,7 @@ impl Hardware {
             cpu: settings.cpu,
             sound: settings.sound.clone(),
             video: settings.video_setup(),
-            memory: (settings.ems, settings.umb),
+            memory: (settings.ems, settings.umb, settings.dos_high),
             voodoo: settings.voodoo.board(),
             network: settings.network.clone(),
             serial: settings.serial.clone(),
@@ -82,6 +83,7 @@ impl Hardware {
             monochrome,
             ems: self.memory.0,
             umb: self.memory.1,
+            dos_high: self.memory.2,
             voodoo: crate::voodoo::VoodooSettings {
                 enabled: self.voodoo.is_some(),
                 board: self.voodoo.unwrap_or(settings.voodoo.board),
@@ -127,9 +129,15 @@ impl Hardware {
             }
             cpu.bus.configure_voodoo(voodoo);
         }
-        if (settings.ems, settings.umb) != self.memory {
+        if (settings.ems, settings.umb, settings.dos_high) != self.memory {
             let on_off = |on| if on { "on" } else { "off" };
-            cpu.bus.log_string(&format!("[CONFIG] EMS {}, upper memory {}", on_off(settings.ems), on_off(settings.umb)));
+            cpu.bus.log_string(&format!(
+                "[CONFIG] EMS {}, upper memory {}, DOS high {}",
+                on_off(settings.ems),
+                on_off(settings.umb),
+                on_off(settings.dos_high)
+            ));
+            warnings.extend(cpu.set_dos_high(settings.dos_high).err());
             warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
         }
         if settings.network != self.network {

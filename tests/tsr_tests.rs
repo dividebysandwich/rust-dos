@@ -1,7 +1,10 @@
 use iced_x86::Register;
 use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
 use rust_dos::interrupts::{int21, int2f, int33};
-use rust_dos::mcb::{self, FIRST_MCB_SEG, MCB_M, MCB_Z, walk};
+use rust_dos::mcb::{self, MCB_M, MCB_Z, walk};
+
+/// The first MCB of a fresh machine: DOS's tables packed below it.
+const FIRST_MCB_SEG: u16 = rust_dos::dos_data::HIGH.first_mcb;
 use std::fs;
 use std::path::PathBuf;
 

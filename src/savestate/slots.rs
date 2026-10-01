@@ -120,6 +120,7 @@ fn with_machine(base: &Settings, from: &Settings) -> Settings {
         memsize: from.memsize,
         ems: from.ems,
         umb: from.umb,
+        dos_high: from.dos_high,
         sound: from.sound.clone(),
         ..base.clone()
     }

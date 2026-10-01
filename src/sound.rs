@@ -38,10 +38,8 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     }
     if changed(&|s| format!("{:?} {}", s.card(), s.opl3)) {
         cpu.bus.configure_sound(sound.card(), sound.opl3);
-        match &sound.card() {
-            Some(sb) => cpu.set_env("BLASTER", &sb.blaster()),
-            None => cpu.set_env("BLASTER", ""),
-        }
+        let blaster = sound.card().map(|sb| sb.blaster()).unwrap_or_default();
+        cpu.set_env("BLASTER", &blaster);
     }
     let gus = sound.ultrasound();
     if changed(&|s| format!("{:?}", s.ultrasound().and_then(|g| g.drive)))

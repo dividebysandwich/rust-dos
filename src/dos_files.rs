@@ -13,10 +13,6 @@
 use crate::bus::Bus;
 use crate::disk::{CharDevice, FILES, SFT_AUX, SFT_CON, SFT_PRN};
 
-/// Where the table is: in the DOS area below the first MCB, below 512 KB
-/// where Windows looks for it, between the shell and its environment
-/// (`cpu::ENV_SEGMENT`), with the system JFT after it.
-pub const SFT_SEGMENT: u16 = 0x0A20;
 /// The size of an entry, as DOS 4 and later have them.
 pub const ENTRY_SIZE: usize = 0x3B;
 /// A JFT slot that refers to no file.
@@ -33,40 +29,44 @@ const STANDARD_HANDLES: [u16; 5] = [SFT_CON, SFT_CON, SFT_CON, SFT_AUX, SFT_PRN]
 /// so a single block sends it past the end marker into memory forever.
 const FIRST_BLOCK_FILES: u16 = 5;
 
-/// The first block, which the List of Lists points to.
-const fn table() -> usize {
-    SFT_SEGMENT as usize * 16
+/// Where the table is (`dos_data::Layout::sft`): in the DOS area below
+/// the first MCB, below 512 KB where Windows looks for it, with the system
+/// JFT after it. The first block is the one the List of Lists points to.
+fn table(bus: &Bus) -> usize {
+    crate::dos_data::layout(bus).sft as usize * 16
 }
 
-/// The second block, the last, right after the first.
-const fn second_table() -> usize {
-    table() + 6 + FIRST_BLOCK_FILES as usize * ENTRY_SIZE
+/// The second block, the last, right after the first, from the table.
+const SECOND_TABLE: usize = 6 + FIRST_BLOCK_FILES as usize * ENTRY_SIZE;
+
+/// The entry `sft`, from the table.
+const fn entry_offset(sft: u16) -> usize {
+    if sft < FIRST_BLOCK_FILES {
+        6 + sft as usize * ENTRY_SIZE
+    } else {
+        SECOND_TABLE + 6 + (sft - FIRST_BLOCK_FILES) as usize * ENTRY_SIZE
+    }
 }
 
 /// The address of the entry `sft`.
-pub const fn entry_address(sft: u16) -> usize {
-    if sft < FIRST_BLOCK_FILES {
-        table() + 6 + sft as usize * ENTRY_SIZE
-    } else {
-        second_table() + 6 + (sft - FIRST_BLOCK_FILES) as usize * ENTRY_SIZE
-    }
+pub fn entry_address(bus: &Bus, sft: u16) -> usize {
+    table(bus) + entry_offset(sft)
 }
 
 /// The handles of code that runs with no process (PSP 0), as the shell's
 /// prompt and what interrupts it have: a JFT after the file table, as
-/// COMMAND.COM's in DOS.
-const fn system_jft() -> usize {
-    entry_address(FILES).next_multiple_of(16)
-}
+/// COMMAND.COM's in DOS. From the table.
+const SYSTEM_JFT: usize = entry_offset(FILES).next_multiple_of(16);
 
-const _: () = assert!(system_jft() + PSP_HANDLES as usize <= crate::cpu::ENV_SEGMENT as usize * 16);
+/// The bytes the table takes with the system JFT.
+pub const TABLE_BYTES: usize = SYSTEM_JFT + PSP_HANDLES as usize;
 
 /// The JFT of the process `psp`: where it is and how many handles it has
 /// room for. The PSPs and their tables are reached as DOS's code does,
 /// through the page tables while a service runs with paging on.
 fn jft(bus: &mut Bus, psp: u16) -> Option<(u32, u16)> {
     if psp == 0 {
-        return Some((system_jft() as u32, PSP_HANDLES));
+        return Some(((table(bus) + SYSTEM_JFT) as u32, PSP_HANDLES));
     }
     let base = psp as u32 * 16;
     let (offset, segment) = (bus.guest_read_16(base + 0x34), bus.guest_read_16(base + 0x36));
@@ -287,12 +287,13 @@ pub fn set_handle_count(bus: &mut Bus, psp: u16, count: u16) -> Result<(), u8> {
 pub fn write_table(bus: &mut Bus) {
     for h in 0..PSP_HANDLES {
         let slot = STANDARD_HANDLES.get(h as usize).map_or(UNUSED, |&sft| sft as u8);
-        bus.write_8(system_jft() + h as usize, slot);
+        bus.write_8(table(bus) + SYSTEM_JFT + h as usize, slot);
     }
-    bus.write_32(table(), (SFT_SEGMENT as u32) << 16 | (second_table() - table()) as u32);
-    bus.write_16(table() + 4, FIRST_BLOCK_FILES);
-    bus.write_32(second_table(), 0xFFFF_FFFF);
-    bus.write_16(second_table() + 4, FILES - FIRST_BLOCK_FILES);
+    let (table, second) = (table(bus), table(bus) + SECOND_TABLE);
+    bus.write_32(table, (crate::dos_data::layout(bus).sft as u32) << 16 | SECOND_TABLE as u32);
+    bus.write_16(table + 4, FIRST_BLOCK_FILES);
+    bus.write_32(second, 0xFFFF_FFFF);
+    bus.write_16(second + 4, FILES - FIRST_BLOCK_FILES);
     for sft in 0..FILES {
         write_entry(bus, sft);
     }
@@ -316,14 +317,14 @@ pub fn flush(bus: &mut Bus) {
         let sft = moved.trailing_zeros() as u16;
         moved &= moved - 1;
         let position = bus.disk.position(sft).unwrap_or(0);
-        bus.write_32(entry_address(sft) + 0x15, position.min(u32::MAX as u64) as u32);
+        bus.write_32(entry_address(bus, sft) + 0x15, position.min(u32::MAX as u64) as u32);
     }
 }
 
 /// Write the entry `sft` into memory as DOS 4 and later have them; a
 /// free one is all zeros, with no handle referring to it.
 fn write_entry(bus: &mut Bus, sft: u16) {
-    let at = entry_address(sft);
+    let at = entry_address(bus, sft);
     for i in 0..ENTRY_SIZE {
         bus.write_8(at + i, 0);
     }

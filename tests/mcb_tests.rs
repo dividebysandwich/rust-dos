@@ -1,5 +1,8 @@
 use rust_dos::bus::Bus;
-use rust_dos::mcb::{self, END_OF_CONVENTIONAL, FIRST_MCB_SEG, MCB_Z, walk};
+use rust_dos::mcb::{self, END_OF_CONVENTIONAL, MCB_Z, walk};
+
+/// The first MCB of a fresh machine: DOS's tables packed below it.
+const FIRST_MCB_SEG: u16 = rust_dos::dos_data::HIGH.first_mcb;
 use std::path::PathBuf;
 
 fn fresh_bus() -> Bus {
