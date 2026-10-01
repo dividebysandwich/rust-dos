@@ -106,7 +106,7 @@ fn the_sierra_dac_s_command_register_turns_on_hicolor() {
     let mut cpu = machine();
     int10::set_mode(&mut cpu, 0x13);
     sierra_command(&mut cpu);
-    assert_eq!(cpu.bus.io_read(0x3C6), 0x00);
+    assert_eq!(cpu.bus.io_read(0x3C6), 0x18, "bits 3-4 are the pixel mask's");
     cpu.bus.io_write(0x3C6, 0xA0);
     assert_eq!(cpu.bus.vga.et4000.hicolor(), Some(15));
     // The pixel mask is still the pixel mask.

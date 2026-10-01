@@ -232,35 +232,46 @@ impl Et4000 {
         self.atc[0] & 0x20 != 0
     }
 
-    /// Bits a pixel in a HiColor mode (15 or 16), or None.
+    /// Bits a pixel in a HiColor mode (15 or 16), or None: bit 7 or 5 of
+    /// the command register, and bit 6 for 16 (86Box's SC11487).
     pub fn hicolor(&self) -> Option<u8> {
-        match self.dac_command & 0xC0 {
-            0x80 => Some(15),
-            0xC0 => Some(16),
-            _ => None,
+        match self.dac_command {
+            c if c & 0xA0 == 0 => None,
+            c if c & 0x40 != 0 => Some(16),
+            _ => Some(15),
         }
     }
 
-    /// A read of the DAC's pixel mask (3C6h), whose value is `mask`: the
-    /// fourth one in a row gives the command register, and leaves the
-    /// next write going to it.
+    /// A read of the DAC's pixel mask (3C6h), whose value is `mask`, as
+    /// an SC11487 answers them (86Box's `sc1148x_ramdac_in`): the mask,
+    /// then 0 three times, then the command register from the fifth read
+    /// on, its bits 3-4 the mask's.
     pub fn dac_read_mask(&mut self, mask: u8) -> u8 {
-        if self.dac_reads == 4 {
-            return self.dac_command;
+        match self.dac_reads {
+            0 => {
+                self.dac_reads = 1;
+                mask
+            }
+            1..=3 => {
+                self.dac_reads += 1;
+                0x00
+            }
+            _ => (self.dac_command & !0x18) | (mask & 0x18),
         }
-        self.dac_reads += 1;
-        mask
     }
 
     /// A write to 3C6h: to the command register after four reads (true),
-    /// or to the pixel mask.
+    /// but FFh, which goes nowhere; to the pixel mask otherwise. Bit 0 of
+    /// the command register is bit 5 without bit 7.
     pub fn dac_write_mask(&mut self, value: u8) -> bool {
-        let command = self.dac_reads == 4;
-        self.dac_reads = 0;
-        if command {
-            self.dac_command = value;
+        if self.dac_reads != 4 {
+            return false;
         }
-        command
+        self.dac_reads = 0;
+        if value != 0xFF {
+            self.dac_command = (value & !1) | (((value >> 2) ^ value) & value & 0x20) >> 5;
+        }
+        true
     }
 
     /// Any other DAC port starts the count of reads again.
@@ -509,12 +520,14 @@ mod tests {
     }
 
     #[test]
-    fn the_fourth_read_of_the_pixel_mask_is_the_command_register() {
+    fn the_fifth_read_of_the_pixel_mask_is_the_command_register() {
         let mut chip = Et4000::new();
-        for _ in 0..4 {
-            assert_eq!(chip.dac_read_mask(0xFF), 0xFF);
+        assert_eq!(chip.dac_read_mask(0xFF), 0xFF);
+        for _ in 0..3 {
+            assert_eq!(chip.dac_read_mask(0xFF), 0x00);
         }
-        assert_eq!(chip.dac_read_mask(0xFF), 0x00);
+        assert_eq!(chip.dac_read_mask(0xFF), 0x18);
+        assert_eq!(chip.dac_read_mask(0xE7), 0x00);
         assert!(chip.dac_write_mask(0xA0));
         assert_eq!(chip.hicolor(), Some(15));
         // The count starts again after a write, and after the other ports.
@@ -531,6 +544,22 @@ mod tests {
         }
         assert!(chip.dac_write_mask(0xE0));
         assert_eq!(chip.hicolor(), Some(16));
+        // FFh leaves it; bit 0 follows bits 5 and 7.
+        for _ in 0..4 {
+            chip.dac_read_mask(0x00);
+        }
+        assert!(chip.dac_write_mask(0xFF));
+        assert_eq!(chip.dac_command, 0xE0);
+        for _ in 0..4 {
+            chip.dac_read_mask(0x00);
+        }
+        chip.dac_write_mask(0x21);
+        assert_eq!(chip.dac_command, 0x21);
+        for _ in 0..4 {
+            chip.dac_read_mask(0x00);
+        }
+        chip.dac_write_mask(0xA1);
+        assert_eq!(chip.dac_command, 0xA0);
     }
 
     #[test]
