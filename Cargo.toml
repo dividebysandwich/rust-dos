@@ -45,6 +45,8 @@ sha2 = "0.11"
 md-5 = "0.11"
 # Compressed audio tracks of CD images (Ogg Vorbis, FLAC, MP3).
 symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
+# 7z archives as drives (src/archive/sevenz.rs).
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "deflate", "ppmd"], optional = true }
 
 # The user's home and configuration directories, which Windows has in the
 # environment (src/hostdirs.rs).
@@ -84,18 +86,22 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["sdl", "midi", "hostmidi", "cdaudio"]
+default = ["sdl", "midi", "hostmidi", "cdaudio", "sevenz"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
 sdl = ["dep:sdl2", "dep:glow", "dep:axum", "dep:ureq"]
 midi = ["dep:rustysynth"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]
+# 7z archives mounted as drives (zip archives are always read).
+sevenz = ["dep:sevenz-rust2"]
 # The MPU-401's MIDI out of the host's MIDI ports (ALSA on Linux, which
 # needs libasound2-dev to build).
 hostmidi = ["dep:midir"]
 
 [dev-dependencies]
+# Writes the 7z archives of src/archive's tests.
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["compress"] }
 # Reads the gzip-compressed SingleStepTests suite in tests/sst386.rs.
 flate2 = "1"
 # The assembler builds the protected-mode test programs in tests/pm_*.rs.

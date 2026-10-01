@@ -1,5 +1,6 @@
 pub mod achievements;
 pub mod apm;
+pub mod archive;
 pub mod asm16;
 pub mod audio;
 pub mod autospeed;
