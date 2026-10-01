@@ -507,6 +507,34 @@ fn parent_of(path: &Path) -> Result<Option<PathBuf>, String> {
     }))
 }
 
+/// A path into an archive, `<archive>/<path in it>`: the archive and the
+/// path in it (from the root the drive has, `/`-separated). None if no
+/// folder the path is in is an archive.
+pub fn split(path: &Path) -> Option<(PathBuf, String)> {
+    let mut archive = path.parent()?;
+    loop {
+        if is_archive_name(archive) && hostfs::is_file(archive) {
+            let inner = path.strip_prefix(archive).ok()?;
+            let inner: Vec<String> = inner.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            return Some((archive.to_path_buf(), inner.join("/")));
+        }
+        archive = archive.parent()?;
+    }
+}
+
+/// The contents of a file in an archive, by its path into the archive
+/// (`split`). None if the path isn't into one.
+pub fn read_member(path: &Path) -> Option<Result<Vec<u8>, String>> {
+    let (archive, inner) = split(path)?;
+    let read = || -> Result<Vec<u8>, String> {
+        let mut data = Vec::new();
+        let mut file = open(&archive)?.open(&inner).map_err(|e| format!("{}: {}", path.display(), e))?;
+        file.read_to_end(&mut data).map_err(|e| format!("{}: {}", path.display(), e))?;
+        Ok(data)
+    };
+    Some(read())
+}
+
 /// The program that starts the game among an archive's files (paths from
 /// its root): the one program or batch file in its root, leaving out those
 /// that set the game up or install it. None if there isn't exactly one.
@@ -576,6 +604,17 @@ mod tests {
         assert!(setup.write(b"x").is_err());
         assert_eq!(start_program(&archive.files()).as_deref(), Some("KEEN4E.EXE"), "not SETUP");
         assert!(Archive::open(&scratch("bad", "bad.zip", b"not a zip"), false).is_err());
+    }
+
+    #[test]
+    fn paths_go_into_archives() {
+        let data = zip::tests::zip(&[("GAME/EXTRAS/Manual.pdf", b"%PDF", false), ("GAME/GAME.EXE", b"MZ", false)]);
+        let path = scratch("split", "game.zip", &data);
+        assert_eq!(split(&path.join("EXTRAS/Manual.pdf")), Some((path.clone(), "EXTRAS/Manual.pdf".to_string())));
+        assert_eq!(split(&path), None);
+        assert_eq!(read_member(&path.join("extras/manual.pdf")), Some(Ok(b"%PDF".to_vec())));
+        assert!(read_member(&path.join("NONE.PDF")).unwrap().is_err());
+        assert_eq!(read_member(&path.with_file_name("other.pdf")), None);
     }
 
     #[test]

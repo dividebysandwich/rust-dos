@@ -897,15 +897,20 @@ impl DiskController {
             return Err(format!("Drive {} is a floppy drive and can't be a CD-ROM", name));
         }
         let spec = MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() };
-        // An archive: its files, or the disk or CD image in it, through an
-        // overlay; the changes go to `-overlay`'s folder.
+        // An archive: its files, or the disk or CD image in it (or the one
+        // the path names in it), through an overlay; the changes go to
+        // `-overlay`'s folder.
         let mut overlaid = None;
         let archive_path;
         let mut path = path;
-        if hostfs::is_file(path) && crate::archive::is_archive_name(path) && opts.more_images.is_empty() {
-            let canonical = hostfs::canonicalize(path).map_err(|e| e.to_string())?;
+        // A path into an archive (`game.zip/CD/GAME.CUE`): what is there.
+        let inside = if hostfs::exists(path) { None } else { crate::archive::split(path) };
+        let whole = hostfs::is_file(path) && crate::archive::is_archive_name(path);
+        if (whole || inside.is_some()) && opts.more_images.is_empty() {
+            let (archive, inner) = inside.unwrap_or_else(|| (path.to_path_buf(), String::new()));
+            let canonical = hostfs::canonicalize(&archive).map_err(|e| e.to_string())?;
             let stack = crate::archive::open(&canonical)?;
-            let image = archive_image(&stack.files());
+            let image = if inner.is_empty() { archive_image(&stack.files()) } else { Some(inner) };
             let upper = opts.overlay.clone().filter(|_| !opts.read_only && (image.is_some() || opts.kind != DriveKind::CdRom));
             let o = Self::overlaid(Box::new(stack), canonical, upper)?;
             archive_path = match image {
@@ -960,6 +965,8 @@ impl DiskController {
             return Err(format!("{} is not a directory or a disk or CD image", path.display()));
         }
         let kind = if floppy_drive { DriveKind::Floppy } else { opts.kind };
+        // In an archive, the folder of it the path names.
+        let in_archive = overlaid.as_ref().map(|_| path.to_path_buf());
         let canonical = match &overlaid {
             Some(o) => o.lower.clone(),
             None => hostfs::canonicalize(path).map_err(|e| e.to_string())?,
@@ -970,7 +977,7 @@ impl DiskController {
             let lower = Box::new(crate::overlay::Folder(canonical.clone()));
             overlaid = Some(Self::overlaid(lower, canonical.clone(), Some(upper.clone()))?);
         }
-        let root = overlaid.as_ref().map_or_else(|| canonical.clone(), |o| o.layer.root().to_path_buf());
+        let root = in_archive.unwrap_or_else(|| overlaid.as_ref().map_or_else(|| canonical.clone(), |o| o.layer.root().to_path_buf()));
         // An archive without the folder for its changes can't be written.
         let unwritable = overlaid.as_ref().is_some_and(|o| o.upper.is_none());
 
@@ -3323,6 +3330,27 @@ mod tests {
         assert_eq!(names, ["SAVES"]);
         assert_eq!(fs::read(base.join("saves/SAVES/SLOT1.SAV")).unwrap(), b"ONE");
         assert_eq!(fs::read(base.join("game.zip")).unwrap(), zip, "the archive as it was");
+    }
+
+    #[test]
+    fn a_path_into_an_archive_mounts_what_is_there() {
+        let base = scratch("archive_path");
+        fs::create_dir_all(base.join("c")).unwrap();
+        let zip = crate::archive::zip::tests::zip(&[
+            ("Game/GAME.EXE", b"MZ game", false),
+            ("Game/CD/DATA.DAT", b"cd data", false),
+            ("Game/DISKS/disk1.img", &vec![0u8; 368_640], false),
+        ]);
+        fs::write(base.join("game.zip"), &zip).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        disk.mount(3, &base.join("game.zip/CD"), cdrom(), false).unwrap();
+        let h = disk.open_file(r"D:\DATA.DAT", 0, PSP).unwrap();
+        assert_eq!(disk.read_file(h, 16).unwrap(), b"cd data");
+        assert!(disk.list_directory(r"D:\GAME.EXE", 0).unwrap().is_empty(), "only the folder");
+        disk.mount(numbered_drive(0), &base.join("game.zip/DISKS/DISK1.IMG"), MountOptions::default(), false).unwrap();
+        let archive = fs::canonicalize(base.join("game.zip")).unwrap();
+        assert_eq!(disk.drive_info(numbered_drive(0)).unwrap().image, Some(archive.join("DISKS/DISK1.IMG")));
+        assert!(disk.mount(4, &base.join("game.zip/NONE"), MountOptions::default(), false).is_err());
     }
 
     #[test]
