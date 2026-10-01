@@ -906,13 +906,26 @@ impl DiskController {
         // A path into an archive (`game.zip/CD/GAME.CUE`): what is there.
         let inside = if hostfs::exists(path) { None } else { crate::archive::split(path) };
         let whole = hostfs::is_file(path) && crate::archive::is_archive_name(path);
-        if (whole || inside.is_some()) && opts.more_images.is_empty() {
+        let mut more_images = opts.more_images.clone();
+        if (whole && more_images.is_empty()) || inside.is_some() {
             let (archive, inner) = inside.unwrap_or_else(|| (path.to_path_buf(), String::new()));
             let canonical = hostfs::canonicalize(&archive).map_err(|e| e.to_string())?;
             let stack = crate::archive::open(&canonical)?;
             let image = if inner.is_empty() { archive_image(&stack.files()) } else { Some(inner) };
             let upper = opts.overlay.clone().filter(|_| !opts.read_only && (image.is_some() || opts.kind != DriveKind::CdRom));
+            // A list of images in it: all of them in it.
+            for image in &mut more_images {
+                match crate::archive::split(image) {
+                    Some((other, inner)) if hostfs::canonicalize(&other).ok().as_ref() == Some(&canonical) => {
+                        *image = PathBuf::from(inner);
+                    }
+                    _ => return Err(format!("{} isn't in {} with the first image", image.display(), canonical.display())),
+                }
+            }
             let o = Self::overlaid(Box::new(stack), canonical, upper)?;
+            for image in &mut more_images {
+                *image = o.layer.root().join(&*image);
+            }
             archive_path = match image {
                 Some(image) => o.layer.root().join(image),
                 None => o.layer.root().to_path_buf(),
@@ -922,7 +935,7 @@ impl DiskController {
         }
         if hostfs::is_file(path) {
             let mut images = Vec::new();
-            for image in std::iter::once(path).chain(opts.more_images.iter().map(PathBuf::as_path)) {
+            for image in std::iter::once(path).chain(more_images.iter().map(PathBuf::as_path)) {
                 if !hostfs::is_file(image) {
                     return Err(format!("{} is not a disk or CD image", image.display()));
                 }
@@ -3342,6 +3355,7 @@ mod tests {
             ("Game/GAME.EXE", b"MZ game", false),
             ("Game/CD/DATA.DAT", b"cd data", false),
             ("Game/DISKS/disk1.img", &vec![0u8; 368_640], false),
+            ("Game/DISKS/disk2.img", &vec![0u8; 368_640], false),
         ]);
         fs::write(base.join("game.zip"), &zip).unwrap();
         let mut disk = DiskController::new(base.join("c"));
@@ -3349,10 +3363,39 @@ mod tests {
         let h = disk.open_file(r"D:\DATA.DAT", 0, PSP).unwrap();
         assert_eq!(disk.read_file(h, 16).unwrap(), b"cd data");
         assert!(disk.list_directory(r"D:\GAME.EXE", 0).unwrap().is_empty(), "only the folder");
-        disk.mount(numbered_drive(0), &base.join("game.zip/DISKS/DISK1.IMG"), MountOptions::default(), false).unwrap();
+        let list = MountOptions { more_images: vec![base.join("game.zip/DISKS/disk2.img")], ..MountOptions::default() };
+        disk.mount(numbered_drive(0), &base.join("game.zip/DISKS/DISK1.IMG"), list, false).unwrap();
         let archive = fs::canonicalize(base.join("game.zip")).unwrap();
-        assert_eq!(disk.drive_info(numbered_drive(0)).unwrap().image, Some(archive.join("DISKS/DISK1.IMG")));
+        let info = disk.drive_info(numbered_drive(0)).unwrap();
+        assert_eq!(info.image, Some(archive.join("DISKS/DISK1.IMG")));
+        assert_eq!(info.images, [archive.join("DISKS/DISK1.IMG"), archive.join("DISKS/disk2.img")]);
+        let elsewhere = MountOptions { more_images: vec![base.join("c/disk2.img")], ..MountOptions::default() };
+        assert!(disk.mount(numbered_drive(1), &base.join("game.zip/DISKS/disk2.img"), elsewhere, false).is_err());
         assert!(disk.mount(4, &base.join("game.zip/NONE"), MountOptions::default(), false).is_err());
+    }
+
+    #[test]
+    fn a_cue_sheet_in_an_archive_mounts_its_disc() {
+        let base = scratch("archive_cue");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir_all(base.join("disc")).unwrap();
+        fs::write(base.join("disc/DATA.DAT"), b"on the disc").unwrap();
+        let folder = CdImage::from_folder(crate::cdrom::folder::build(&base.join("disc"), "GAMECD").unwrap(), &base.join("disc")).unwrap();
+        let mut iso = Vec::new();
+        for lba in 0..folder.leadout() {
+            let mut sector = [0u8; crate::cdrom::DATA_SECTOR];
+            folder.read_data(lba, &mut sector).unwrap();
+            iso.extend_from_slice(&sector);
+        }
+        let cue = b"FILE \"GAME.ISO\" BINARY\r\n  TRACK 01 MODE1/2048\r\n    INDEX 01 00:00:00\r\n";
+        let zip = crate::archive::zip::tests::zip(&[("Game/CD/GAME.CUE", cue, false), ("Game/CD/GAME.ISO", &iso, false)]);
+        fs::write(base.join("game.zip"), &zip).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        disk.mount(3, &base.join("game.zip/CD/GAME.CUE"), MountOptions::default(), false).unwrap();
+        let info = disk.drive_info(3).unwrap();
+        assert_eq!((info.kind, info.label.as_str()), (DriveKind::CdRom, "GAMECD"));
+        let h = disk.open_file(r"D:\DATA.DAT", 0, PSP).unwrap();
+        assert_eq!(disk.read_file(h, 32).unwrap(), b"on the disc");
     }
 
     #[test]
