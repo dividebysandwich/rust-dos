@@ -20,6 +20,20 @@ pub struct CrtTiming {
     pub retrace_end: u32,
 }
 
+/// What a Super VGA adds to the VGA's timing registers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Extension {
+    /// The pixel clock the card's clock select picks, in Hz.
+    pub clock: Option<u64>,
+    /// Characters of 16 dots instead of 8 or 9.
+    pub wide_chars: bool,
+    /// Bit 8 of the Horizontal Total.
+    pub htotal_high: u32,
+    /// Bit 10 of the vertical total, display end, retrace start and line
+    /// compare.
+    pub vertical_high: [u32; 4],
+}
+
 /// The two pixel clocks of the VGA.
 const CLOCK_25MHZ: u64 = 25_175_000;
 const CLOCK_28MHZ: u64 = 28_322_000;
@@ -70,23 +84,34 @@ impl CrtTiming {
     /// registers describe no picture a monitor could show, as happens
     /// halfway through reprogramming them.
     pub fn from_registers(misc: u8, seq01: u8, crtc: &[u8]) -> Option<Self> {
-        let mut clock = match (misc >> 2) & 3 {
-            1 => CLOCK_28MHZ,
+        Self::from_extended_registers(misc, seq01, crtc, &Extension::default())
+    }
+
+    /// The timing from the registers with a Super VGA's extensions to
+    /// them (`ext`): its own clock, wider characters and more bits.
+    pub fn from_extended_registers(misc: u8, seq01: u8, crtc: &[u8], ext: &Extension) -> Option<Self> {
+        let mut clock = match ((misc >> 2) & 3, ext.clock) {
+            (_, Some(clock)) => clock,
+            (1, None) => CLOCK_28MHZ,
             _ => CLOCK_25MHZ,
         };
         if seq01 & 0x08 != 0 {
             clock /= 2;
         }
-        let dots: u64 = if seq01 & 0x01 != 0 { 8 } else { 9 };
-        let htotal = crtc[0x00] as u64 + 5;
+        let mut dots: u64 = if seq01 & 0x01 != 0 { 8 } else { 9 };
+        if ext.wide_chars {
+            dots *= 2;
+        }
+        let htotal = (crtc[0x00] as u64 | ext.htotal_high as u64) + 5;
         let hdisplay = crtc[0x01] as u64 + 1;
 
         // Bits 8 and 9 of the vertical counts are in the Overflow register.
         let overflow = crtc[0x07] as u32;
         let high = |bit8: u32, bit9: u32| ((overflow >> bit8) & 1) << 8 | ((overflow >> bit9) & 1) << 9;
-        let mut total = (crtc[0x06] as u32 | high(0, 5)) + 2;
-        let mut display = (crtc[0x12] as u32 | high(1, 6)) + 1;
-        let mut retrace_start = crtc[0x10] as u32 | high(2, 7);
+        let [total_high, display_high, retrace_high, _] = ext.vertical_high;
+        let mut total = (crtc[0x06] as u32 | high(0, 5) | total_high) + 2;
+        let mut display = (crtc[0x12] as u32 | high(1, 6) | display_high) + 1;
+        let mut retrace_start = crtc[0x10] as u32 | high(2, 7) | retrace_high;
         // The retrace ends when the low four bits of the line counter
         // match Vertical Retrace End.
         let length = match (crtc[0x11] as u32).wrapping_sub(retrace_start) & 0x0F {

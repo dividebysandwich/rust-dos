@@ -77,6 +77,7 @@ fn definitions() -> Vec<Definition> {
                 ("svga_s3", "S3 Trio64 (for booted Windows)"),
                 ("svga_s3virge", "S3 ViRGE (Direct3D in booted Windows)"),
                 ("svga_s3virgevx", "S3 ViRGE/VX (Direct3D in booted Windows)"),
+                ("svga_et4000", "Tseng ET4000 (HiColor, VBE 1.2)"),
                 ("vga", "VGA"),
                 ("ega", "EGA"),
                 ("cga", "CGA"),

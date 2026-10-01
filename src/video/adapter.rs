@@ -18,6 +18,10 @@ pub enum Adapter {
     /// The ViRGE/VX (86C988): the ViRGE's engines, other IDs, and its
     /// engine reset in CR63 instead of CR66.
     S3VirgeVx,
+    /// A Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC: Tseng's
+    /// BIOS modes up to 1024x768 in 256 colours, 32K and 64K colours, and
+    /// VBE 1.2 through the 64 KB window its segment register banks.
+    Et4000,
     /// IBM's VGA, without VESA modes.
     Vga,
     /// IBM's Enhanced Graphics Adapter with an Enhanced Color Display: 16
@@ -38,11 +42,12 @@ pub enum Adapter {
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 10] = [
+    pub const ALL: [Adapter; 11] = [
         Adapter::Svga,
         Adapter::S3,
         Adapter::S3Virge,
         Adapter::S3VirgeVx,
+        Adapter::Et4000,
         Adapter::Vga,
         Adapter::Ega,
         Adapter::Cga,
@@ -54,12 +59,13 @@ impl Adapter {
     /// The adapter a `machine` value names, DOSBox's names included.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "svga" | "svga_et4000" | "svga_et3000" | "svga_paradise" | "vesa_nolfb" | "vesa_oldvbe" => {
+            "svga" | "svga_et3000" | "svga_paradise" | "vesa_nolfb" | "vesa_oldvbe" => {
                 Some(Adapter::Svga)
             }
             "svga_s3" | "s3" | "s3trio" => Some(Adapter::S3),
             "svga_s3virge" | "virge" | "s3virge" => Some(Adapter::S3Virge),
             "svga_s3virgevx" | "virgevx" | "s3virgevx" => Some(Adapter::S3VirgeVx),
+            "svga_et4000" | "et4000" | "tseng" => Some(Adapter::Et4000),
             "vga" | "vgaonly" => Some(Adapter::Vga),
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
@@ -76,6 +82,7 @@ impl Adapter {
             Adapter::S3 => "svga_s3",
             Adapter::S3Virge => "svga_s3virge",
             Adapter::S3VirgeVx => "svga_s3virgevx",
+            Adapter::Et4000 => "svga_et4000",
             Adapter::Vga => "vga",
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
@@ -92,6 +99,7 @@ impl Adapter {
             Adapter::S3 => "S3 Trio64",
             Adapter::S3Virge => "S3 ViRGE (3D)",
             Adapter::S3VirgeVx => "S3 ViRGE/VX (3D)",
+            Adapter::Et4000 => "Tseng ET4000 (HiColor)",
             Adapter::Vga => "VGA",
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
@@ -103,13 +111,18 @@ impl Adapter {
 
     /// Whether the BIOS has the VESA extensions (INT 10h AH=4Fh).
     pub fn has_vbe(self) -> bool {
-        matches!(self, Adapter::Svga) || self.is_s3()
+        matches!(self, Adapter::Svga | Adapter::Et4000) || self.is_s3()
     }
 
     /// Whether the adapter is one of S3's chips: the Trio64's registers
     /// and hardware cursor, and PCI.
     pub fn is_s3(self) -> bool {
         matches!(self, Adapter::S3 | Adapter::S3Virge | Adapter::S3VirgeVx)
+    }
+
+    /// Whether the adapter is the Tseng ET4000.
+    pub fn is_et4000(self) -> bool {
+        self == Adapter::Et4000
     }
 
     /// Whether the adapter is a ViRGE, with the ViRGE's engines.
@@ -120,7 +133,7 @@ impl Adapter {
     /// Whether the BIOS has the VGA's functions: the display combination
     /// code (INT 10h AH=1Ah), the state information (AH=1Bh) and the DAC.
     pub fn vga_bios(self) -> bool {
-        matches!(self, Adapter::Svga | Adapter::Vga) || self.is_s3()
+        matches!(self, Adapter::Svga | Adapter::Vga | Adapter::Et4000) || self.is_s3()
     }
 
     /// Whether the BIOS has the EGA's functions: the palette registers

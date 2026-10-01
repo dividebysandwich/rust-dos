@@ -129,6 +129,12 @@ fn install_fonts(bus: &mut Bus) {
 pub fn install(bus: &mut Bus, setup: VideoSetup) {
     bus.vga.adapter = setup.adapter;
     bus.vga.mono_monitor = setup.mono_monitor;
+    // The ET4000's 1 MB are the planes, 256 KB each.
+    let plane_size = if setup.adapter.is_et4000() { 0x40000 } else { 0x10000 };
+    if bus.vga.plane_size() != plane_size {
+        bus.vga.set_memory(plane_size);
+    }
+    bus.vga.et4000 = Default::default();
 
     // Equipment word bits 4-5: the initial video mode, 10 for 80x25 in
     // colour, 11 for monochrome. The other bits are the floppies' and the
@@ -214,6 +220,10 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         _ => &[0; 10],
     };
     bus.write_rom(0xC003F, chip);
-    bus.vbe.lfb_base = if s3 { None } else { Some(super::vbe::LFB_BASE as u32) };
+    // Tseng's BIOS names the company and the chip, which programs search
+    // the ROM for.
+    let tseng: &[u8; 32] = if setup.adapter.is_et4000() { b"Tseng Laboratories, Inc. ET4000\0" } else { &[0; 32] };
+    bus.write_rom(0xC0050, tseng);
+    bus.vbe.lfb_base = if s3 || setup.adapter.is_et4000() { None } else { Some(super::vbe::LFB_BASE as u32) };
     install_fonts(bus);
 }

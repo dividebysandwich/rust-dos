@@ -383,6 +383,7 @@ mod tests {
         };
         assert_eq!(machine("[dosbox]\nmachine=svga_s3virge\n").as_deref(), Some("svga_s3virge"));
         assert_eq!(machine("[dosbox]\nmachine=svga_s3virgevx\n").as_deref(), Some("svga_s3virgevx"));
+        assert_eq!(machine("[dosbox]\nmachine=svga_et4000\n").as_deref(), Some("svga_et4000"));
     }
 
     #[test]

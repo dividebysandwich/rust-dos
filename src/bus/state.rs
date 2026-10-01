@@ -19,6 +19,7 @@ const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
+const ET4000_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -178,6 +179,10 @@ impl Bus {
         // did.
         if vga.adapter.is_virge() {
             w.section(b"VIRG", VIRGE_VERSION, |w| virge.save(w));
+        }
+        // The ET4000's registers, only on one, likewise.
+        if vga.adapter.is_et4000() {
+            w.section(b"ET4K", ET4000_VERSION, |w| vga.et4000.save(w));
         }
         // A booted system's disks made of shared host directories, before
         // the drives, which need them for their checkpoints; only with
@@ -386,6 +391,10 @@ impl Bus {
         *virge = Default::default();
         if r.next_is(b"VIRG") {
             virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;
+        }
+        vga.et4000 = Default::default();
+        if r.next_is(b"ET4K") {
+            vga.et4000.load(&mut r.section(b"ET4K", ET4000_VERSION)?)?;
         }
         disk.shared_from_state = None;
         if r.next_is(b"SHRD") {

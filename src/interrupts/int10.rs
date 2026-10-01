@@ -257,6 +257,9 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     if adapter.is_s3() {
         cpu.bus.s3_program_standard();
     }
+    if adapter.is_et4000() {
+        cpu.bus.et4000_program_standard();
+    }
 
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);

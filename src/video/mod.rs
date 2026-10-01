@@ -7,6 +7,7 @@ pub mod cga;
 pub mod composite;
 pub mod crt;
 pub mod echo;
+pub mod et4000;
 pub mod hercules;
 pub mod modes;
 pub mod mono;
@@ -295,6 +296,13 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
 
     // The 256-color renderer covers every pixel, and leaves the rows it
     // would draw the same as they are.
+    if bus.video_mode == VideoMode::Graphics320x200
+        && let Some(bpp) = bus.vga.et4000.hicolor().filter(|_| bus.vga.adapter.is_et4000())
+    {
+        frame.drawn_from = DrawnFrom::default();
+        render_hicolor(&mut frame.rgb, width, &bus.vga.vram_graphics, bus, bpp);
+        return;
+    }
     if bus.video_mode == VideoMode::Graphics320x200 && !bus.vga.adapter.gate_array() {
         render_graphics_mode(&mut frame.rgb, width, &bus.vga.vram_graphics, bus, &mut frame.drawn_from);
         return;
@@ -486,7 +494,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
     let colors: [(u8, u8, u8); 16] = std::array::from_fn(|pixel| bus.vga.attribute_rgb(pixel as u8 & planes));
     // CRTC Offset (index 0x13) holds bytes-per-scanline / 2 (i.e. words
     // per row). Fall back to width/8 if the game never touched it.
-    let offset_reg = bus.vga.crtc_regs[0x13] as usize;
+    let offset_reg = bus.vga.offset_words();
     let bytes_per_row = if offset_reg != 0 { offset_reg * 2 } else { width / 8 };
     let base = planar_base_offset(bus);
     let split = bus.vga.split_row();
@@ -514,6 +522,45 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
             canvas[idx] = rgb.0;
             canvas[idx + 1] = rgb.1;
             canvas[idx + 2] = rgb.2;
+        }
+    }
+}
+
+/// An ET4000's HiColor modes: 15 or 16 bits (`bpp`) a pixel through the
+/// Sierra DAC, two bytes of the chained planes each, the picture's size
+/// from the registers, scaled to the canvas.
+fn render_hicolor(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, bpp: u8) {
+    let (width, rows) = bus.vga.graphics_size();
+    let plane_size = vram.len() / 4;
+    // Byte `at` of the chip's linear memory.
+    let byte = |at: usize| vram[(at & 3) * plane_size + ((at >> 2) & (plane_size - 1))] as u16;
+    let start = bus.vga.latched_start_addr * 4;
+    let pitch = bus.vga.offset_words() * 8;
+    let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
+    let canvas_h = canvas.len() / (canvas_w * 3);
+    let row_bytes = canvas_w * 3;
+    let mut line = vec![[0u8; 3]; width];
+    for y in 0..rows {
+        let (first, end) = ((y * canvas_h).div_ceil(rows), ((y + 1) * canvas_h).div_ceil(rows).min(canvas_h));
+        if first >= end {
+            continue;
+        }
+        let row = start + y * pitch;
+        for (x, rgb) in line.iter_mut().enumerate() {
+            let v = byte(row + x * 2) | byte(row + x * 2 + 1) << 8;
+            *rgb = if bpp == 16 {
+                let g = v >> 5 & 63;
+                [five(v >> 11), ((g << 2) | (g >> 4)) as u8, five(v & 31)]
+            } else {
+                [five(v >> 10 & 31), five(v >> 5 & 31), five(v & 31)]
+            };
+        }
+        let dst = &mut canvas[first * row_bytes..(first + 1) * row_bytes];
+        for (tx, pixel) in dst.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            *pixel = line[tx * width / canvas_w];
+        }
+        for ty in first + 1..end {
+            canvas.copy_within(first * row_bytes..(first + 1) * row_bytes, ty * row_bytes);
         }
     }
 }
@@ -553,9 +600,9 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
     // the Start Address.
     let (width, rows) = bus.vga.graphics_size();
     let start = bus.vga.latched_start_addr;
-    let stride = match bus.vga.crtc_regs[0x13] {
+    let stride = match bus.vga.offset_words() {
         0 => 80,
-        words => words as usize * 2,
+        words => words * 2,
     };
     // Rows past the split screen's start show VRAM from address 0, and
     // unpanned when the Attribute Mode Control register says so.

@@ -719,7 +719,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         }
                         "machine" => match Adapter::parse(value) {
                             Some(adapter) => config.machine = Some(adapter),
-                            None => warn(format!("invalid machine '{}' (svga, svga_s3, svga_s3virge, svga_s3virgevx, vga, ega, cga, tandy, pcjr or hercules)", value)),
+                            None => warn(format!("invalid machine '{}' (svga, svga_s3, svga_s3virge, svga_s3virgevx, svga_et4000, vga, ega, cga, tandy, pcjr or hercules)", value)),
                         },
                         "voodoo" => match parse_bool(value) {
                             Some(on) => config.voodoo = Some(on),
@@ -2107,7 +2107,8 @@ mod tests {
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(config.machine, Some(Adapter::Vga));
         assert_eq!(parse("[emulator]\nmachine=svga_s3\n", Path::new("/cfg"), None).machine, Some(Adapter::S3));
-        assert_eq!(parse("[emulator]\nmachine=svga_et4000\n", Path::new("/cfg"), None).machine, Some(Adapter::Svga));
+        assert_eq!(parse("[emulator]\nmachine=svga_et4000\n", Path::new("/cfg"), None).machine, Some(Adapter::Et4000));
+        assert_eq!(parse("[emulator]\nmachine=svga_paradise\n", Path::new("/cfg"), None).machine, Some(Adapter::Svga));
         assert_eq!(parse("[emulator]\nmachine=PCjr\n", Path::new("/cfg"), None).machine, Some(Adapter::Pcjr));
         assert_eq!(parse("[emulator]\nmachine=tandy\n", Path::new("/cfg"), None).machine, Some(Adapter::Tandy));
         let config = parse("[emulator]\nmachine=mcga\n", Path::new("/cfg"), None);

@@ -1532,6 +1532,20 @@ impl DebugHub {
                         "virge": cpu.bus.vga.adapter.is_virge().then(|| virge_status(&cpu.bus.virge, cpu.bus.vga.adapter == crate::video::adapter::Adapter::S3VirgeVx)),
                     })
                 }),
+                // An ET4000's extended registers: CR30-3F, the KEY, the
+                // segment select (write bank low, read bank high) and the
+                // Sierra DAC's command register.
+                "et4000": cpu.bus.vga.adapter.is_et4000().then(|| {
+                    let chip = &cpu.bus.vga.et4000;
+                    json!({
+                        "crtc": (0x30..0x40u8).map(|i| format!("{:02X}", chip.crtc(i))).collect::<Vec<_>>().join(" "),
+                        "keyed": chip.keyed,
+                        "segment": format!("{:02X}", chip.segment),
+                        "dac_command": format!("{:02X}", chip.dac_command),
+                        "hicolor": chip.hicolor(),
+                        "vbe_mode": (chip.vbe_mode != 0).then(|| format!("{:03X}", chip.vbe_mode)),
+                    })
+                }),
                 // The display timing programs see through port 3DAh.
                 "crt": {
                     "hz": (timing.hz() * 100.0).round() / 100.0,

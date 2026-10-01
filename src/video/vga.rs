@@ -9,6 +9,8 @@ pub struct VgaCard {
     pub adapter: super::adapter::Adapter,
     /// The S3 Trio64's own registers, on `Adapter::S3`.
     pub s3: super::s3::S3,
+    /// The Tseng ET4000's, on `Adapter::Et4000`.
+    pub et4000: super::et4000::Et4000,
     pub sequencer_index: u8,
     pub sequencer_regs: [u8; 5],
     pub graphics_index: u8,
@@ -140,6 +142,7 @@ impl VgaCard {
         let mut vga = Self {
             adapter: super::adapter::Adapter::default(),
             s3: super::s3::S3::new(),
+            et4000: super::et4000::Et4000::new(),
             sequencer_index: 0,
             sequencer_regs: [0; 5],
             graphics_index: 0,
@@ -396,7 +399,7 @@ impl VgaCard {
         let end = crtc[0x12] as u32 | (crtc[0x07] as u32 & 0x02) << 7 | (crtc[0x07] as u32 & 0x40) << 3;
         let scan = ((crtc[0x09] & 0x1F) as u32 + 1) << (crtc[0x09] >> 7);
         Some(match (end + 1) / scan {
-            480 => VideoMode::Vga640x480,
+            480.. => VideoMode::Vga640x480,
             350 => VideoMode::Ega640x350,
             _ if narrow => VideoMode::Ega320x200,
             _ => VideoMode::Ega640x200,
@@ -651,7 +654,10 @@ impl VgaCard {
     pub fn latch_start_address(&mut self) {
         let hi = self.crtc_regs[0x0C] as usize;
         let lo = self.crtc_regs[0x0D] as usize;
-        let new_addr = (hi << 8) | lo;
+        let mut new_addr = (hi << 8) | lo;
+        if self.adapter.is_et4000() {
+            new_addr |= self.et4000.start_high() << 16;
+        }
         if new_addr != self.latched_start_addr {
             self.latched_start_addr = new_addr;
             self.mark_dirty_full();
@@ -683,7 +689,13 @@ impl VgaCard {
     /// 12h, and whatever variants games program themselves: 320x240 or
     /// 360x480 in 256 colors, 640x240 in 16.
     pub fn graphics_size(&self) -> (usize, usize) {
-        let pixels_per_char = if self.graphics_regs[0x05] & 0x40 != 0 { 4 } else { 8 };
+        let pixels_per_char = if self.adapter.is_et4000() {
+            self.et4000.pixels_per_char(self)
+        } else if self.graphics_regs[0x05] & 0x40 != 0 {
+            4
+        } else {
+            8
+        };
         let width = (self.crtc_regs[0x01] as usize + 1) * pixels_per_char;
         let mut scanlines = (self.crtc_regs[0x09] as usize & 0x1F) + 1;
         if self.crtc_regs[0x09] & 0x80 != 0 {
@@ -691,6 +703,13 @@ impl VgaCard {
         }
         let rows = self.peek_timing().display as usize / scanlines;
         (width.clamp(16, 1024), rows.clamp(1, 1024))
+    }
+
+    /// The CRTC Offset register: the words (in a plane) from one row of
+    /// the picture to the next, with an ET4000's bit 8 (CR3F bit 7).
+    pub fn offset_words(&self) -> usize {
+        let low = self.crtc_regs[0x13] as usize;
+        if self.adapter.is_et4000() { low | self.et4000.offset_high() } else { low }
     }
 
     /// Pixels the display is shifted left by (Attribute register 13h, Horizontal
@@ -755,7 +774,7 @@ impl VgaCard {
         self.timing_cache = None;
     }
 
-    pub(super) fn invalidate_timing(&mut self) {
+    pub(crate) fn invalidate_timing(&mut self) {
         self.timing_changed();
     }
 
@@ -769,6 +788,16 @@ impl VgaCard {
             super::adapter::Adapter::Hercules => self.herc_timing(),
             super::adapter::Adapter::Ega => {
                 CrtTiming::from_ega_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs)
+            }
+            super::adapter::Adapter::Et4000 => {
+                let chip = &self.et4000;
+                let ext = super::crt::Extension {
+                    clock: Some(chip.clock_hz(self.misc_output_reg)),
+                    wide_chars: chip.wide_chars(),
+                    htotal_high: chip.htotal_high(),
+                    vertical_high: chip.vertical_high(),
+                };
+                CrtTiming::from_extended_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs, &ext)
             }
             _ => CrtTiming::from_registers(self.misc_output_reg, self.sequencer_regs[1], &self.crtc_regs),
         }
@@ -863,6 +892,9 @@ impl Device for VgaCard {
 
                 switch_val << 4 // Return switch sense in Bit 4
             }
+            0x3C1 if self.adapter.is_et4000() && matches!(self.attribute_index, 0x16 | 0x17) => {
+                self.et4000.read_atc(self.attribute_index)
+            }
             0x3C1 => {
                 let val = if (self.attribute_index as usize) < self.attribute_regs.len() {
                     self.attribute_regs[self.attribute_index as usize]
@@ -947,7 +979,11 @@ impl Device for VgaCard {
                 // Note: Bit 5 (0x20) controls Video Enable, important for blinking/screen off
                 } else {
                     // Data Mode
-                    if (self.attribute_index as usize) < self.attribute_regs.len() {
+                    if self.adapter.is_et4000() && matches!(self.attribute_index, 0x16 | 0x17) {
+                        self.et4000.write_atc(self.attribute_index, value);
+                        self.timing_changed();
+                        self.mark_dirty_full();
+                    } else if (self.attribute_index as usize) < self.attribute_regs.len() {
                         if self.attribute_index == 0x10 && (self.attribute_regs[0x10] ^ value) & 0x01 != 0 {
                             self.mode_switched = true;
                             self.move_text_planes(value & 0x01 == 0);
@@ -1075,6 +1111,8 @@ crate::state_fields!(VgaCard {
     good_timing, fixed_timing, retraces, rebase, drawn, flipped,
     cga_mode, cga_color, tandy, herc_mode, herc_config, s3,
 } skip {
+    // In a section of its own, on an ET4000 (`bus::state`).
+    et4000,
     // Set from the configuration, which a state carries in its header.
     adapter, composite, switches, mono_monitor,
     // Worked out again after a load (`after_load`).

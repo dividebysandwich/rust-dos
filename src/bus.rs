@@ -7,6 +7,7 @@ use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 mod guest;
 pub mod port_log;
 pub mod s3;
+mod et4000;
 mod ide;
 mod net;
 mod printer;
@@ -1052,8 +1053,9 @@ impl Bus {
     /// the VGA's memory logic: its offset in the window, for a write or a
     /// read.
     #[inline]
-    fn vga_window(&self, addr: usize, _write: bool) -> usize {
-        addr - ADDR_VGA_GRAPHICS
+    fn vga_window(&self, addr: usize, write: bool) -> usize {
+        let offset = addr - ADDR_VGA_GRAPHICS;
+        if self.et4000() { self.et4000_window(offset, write) } else { offset }
     }
 
     /// Whether writes of `len` bytes at `dst` all go to the VGA's planes,
@@ -2214,6 +2216,9 @@ impl Bus {
             p if self.ide_claims(p) => self.ide_write(p, value),
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
             p if self.serial_claims(p) => self.serial_write(p, value),
+            // The ET4000's KEY, segment select, extended sequencer
+            // registers and DAC command register.
+            p @ (0x3BF | 0x3B8 | 0x3D8 | 0x3CD | 0x3C5..=0x3C9) if self.et4000() && self.et4000_write_port(p, value) => {}
             // The two 8259 interrupt controllers.
             0x20 | 0x21 | 0xA0 | 0xA1 => self.pic.write(port, value),
 
@@ -2546,6 +2551,11 @@ impl Bus {
             p if self.ide_claims(p) => self.ide_read(p),
             p if self.ne2000_claims(p) => self.ne2000_read(p),
             p if self.serial_claims(p) => self.serial_read(p),
+            p @ (0x3BF | 0x3CD | 0x3C5..=0x3C9) if self.et4000() => match self.et4000_read_port(p) {
+                Some(value) => value,
+                None if self.vga.ports().contains(&p) => self.vga.io_read(p),
+                None => 0xFF,
+            },
             // PIC: port 0x20 returns IRR or ISR (selected by OCW3), port
             // 0x21 the interrupt mask. Programs read-modify-write the mask
             // to unmask their IRQ without disturbing the others.
@@ -2844,6 +2854,9 @@ impl Bus {
         if self.s3() {
             return self.s3_crtc_write(index, value);
         }
+        if self.et4000() {
+            return self.et4000_crtc_write(index, value);
+        }
         match index {
             0x69 => {
                 self.vbe.start_high = value;
@@ -2857,6 +2870,9 @@ impl Bus {
     fn ext_crtc_read(&mut self, index: u8) -> u8 {
         if self.s3() {
             return self.s3_crtc_read(index);
+        }
+        if self.et4000() {
+            return self.et4000_crtc_read(index);
         }
         match index {
             0x69 => self.vbe.start_high,
@@ -2886,6 +2902,16 @@ impl Bus {
         }
         match (self.video_mode, self.vbe.mode) {
             (VideoMode::Vesa, Some(mode)) => (mode.width as usize, mode.height as usize),
+            // An ET4000's modes are the VGA's at the size its registers
+            // give them.
+            (
+                VideoMode::Graphics320x200
+                | VideoMode::Ega320x200
+                | VideoMode::Ega640x200
+                | VideoMode::Ega640x350
+                | VideoMode::Vga640x480,
+                _,
+            ) if self.et4000() => self.vga.graphics_size(),
             (mode, _) => mode.dimensions(),
         }
     }

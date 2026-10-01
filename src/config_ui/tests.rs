@@ -1088,7 +1088,7 @@ fn the_video_card_changes_at_the_prompt() {
     assert_eq!(Item::Machine.applies(), Applies::AtPrompt);
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("Super VGA (VESA)"));
     assert_eq!(listed(&mut ui, &mut host), Adapter::ALL.map(Adapter::describe));
-    for adapter in [Adapter::S3, Adapter::Vga, Adapter::Ega, Adapter::Cga, Adapter::Tandy, Adapter::Pcjr, Adapter::Hercules, Adapter::Svga] {
+    for adapter in [Adapter::S3, Adapter::Et4000, Adapter::Vga, Adapter::Ega, Adapter::Cga, Adapter::Tandy, Adapter::Pcjr, Adapter::Hercules, Adapter::Svga] {
         pick(&mut ui, &mut host, adapter.describe());
         assert_eq!(host.applied.last().unwrap().machine, adapter);
     }
