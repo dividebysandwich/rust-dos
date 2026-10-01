@@ -272,7 +272,8 @@ pub fn extras_dir(dir: &Path, id: &str) -> PathBuf {
 
 /// The manuals and extras of the game `id`, whose profile `text` is in
 /// the games folder `dir`: its `manual=` lines, then the files of its
-/// extras folder, by name.
+/// extras folder, by name, then those in the `EXTRAS` folders of its
+/// drives' packages (`package_extras`).
 pub fn manuals(dir: &Path, id: &str, text: &str, home: Option<&Path>) -> Vec<crate::manuals::Manual> {
     use crate::manuals::{Manual, is_manual_name, title_of};
     let config = config::parse(text, dir, home);
@@ -287,6 +288,16 @@ pub fn manuals(dir: &Path, id: &str, text: &str, home: Option<&Path>) -> Vec<cra
     for path in extras {
         if !manuals.iter().any(|m| m.path == path) {
             manuals.push(Manual { title: title_of(&path), path });
+        }
+    }
+    // The EXTRAS folders of its drives: of the folders and archives, and
+    // of the archives the drives are in.
+    for spec in &config.drives {
+        let root = crate::archive::split(&spec.path).map_or_else(|| spec.path.clone(), |(archive, _)| archive);
+        for manual in package_extras(&root) {
+            if !manuals.iter().any(|m| m.path == manual.path) {
+                manuals.push(manual);
+            }
         }
     }
     manuals
@@ -359,22 +370,173 @@ pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String,
     Ok((id, imported.name, imported.warnings))
 }
 
-/// A zip or 7z archive of a game as a profile in the games folder `dir`,
-/// with the archive as C: and its changes kept apart (`overlay=true`):
-/// the profile made for it before, or a new one. A new one starts the
-/// one program there is to start the game (`archive::start_program`), or
-/// leaves the prompt on C:. Returns the profile's id and name.
-pub fn add_archive(dir: &Path, archive: &Path) -> Result<(String, String), String> {
-    let archive = hostfs::canonicalize(archive).map_err(|e| format!("{}: {}", archive.display(), e))?;
+/// The name of a package's own configuration, at its root.
+pub const PACKAGE_CONF: &str = "rust-dos.conf";
+
+/// The folder of a package's manuals and extras, at its root.
+pub const PACKAGE_EXTRAS: &str = "EXTRAS";
+
+/// The name of the file or folder at the root of the package `package` (a
+/// folder, or a zip or 7z archive) that is `name` in any case.
+fn package_entry(package: &Path, name: &str) -> Option<String> {
+    let names: Vec<String> = if hostfs::is_dir(package) {
+        hostfs::read_dir(package).ok()?.into_iter().map(|e| e.name.to_string_lossy().into_owned()).collect()
+    } else {
+        let mut names: Vec<String> = crate::archive::open(package).ok()?.files();
+        // A folder of it, by the files in it.
+        for file in names.clone() {
+            if let Some((top, _)) = file.split_once('/') {
+                names.push(top.to_string());
+            }
+        }
+        names.into_iter().filter(|n| !n.contains('/')).collect()
+    };
+    names.into_iter().find(|n| n.eq_ignore_ascii_case(name))
+}
+
+/// A file of the package `package` (a folder, or a path into an archive).
+fn read_package_file(path: &Path) -> Result<String, String> {
+    let data = match hostfs::read(path) {
+        Ok(data) => data,
+        Err(e) => crate::archive::read_member(path).unwrap_or_else(|| Err(format!("{}: {}", path.display(), e)))?,
+    };
+    Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+/// The manuals and extras in the package `root` (a folder, or a zip or
+/// 7z archive): the documents and pictures in its `EXTRAS` folder, in
+/// any case, by name.
+pub fn package_extras(root: &Path) -> Vec<crate::manuals::Manual> {
+    use crate::manuals::{Manual, is_manual_name, title_of};
+    let Some(extras) = package_entry(root, PACKAGE_EXTRAS) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = if hostfs::is_dir(root) {
+        hostfs::read_dir(root.join(&extras)).into_iter().flatten().filter(|e| !e.is_dir).map(|e| e.path).collect()
+    } else {
+        let prefix = format!("{}/", extras);
+        crate::archive::open(root)
+            .map(|a| a.files())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| f.starts_with(&prefix) && !f[prefix.len()..].contains('/'))
+            .map(|f| root.join(f))
+            .collect()
+    };
+    files.retain(|p| is_manual_name(p));
+    files.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    files.into_iter().map(|path| Manual { title: title_of(&path), path }).collect()
+}
+
+/// `text` without the sections `names` (in lower case).
+fn without_sections(text: &str, names: &[&str]) -> String {
+    let mut out = String::new();
+    let mut skip = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            skip = names.contains(&trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase().as_str());
+        }
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The value of `key` in `[game]`, if `text` has it.
+fn game_value(text: &str, key: &str) -> Option<String> {
+    let mut in_game = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_game = line.eq_ignore_ascii_case("[game]");
+        } else if in_game
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim().eq_ignore_ascii_case(key)
+        {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+/// A game's package as a profile in the games folder `dir`: a zip or 7z
+/// archive, or a folder, with the game's files and maybe its own
+/// `rust-dos.conf` and `EXTRAS` folder at its root (GAME-PACKAGES.md). The
+/// package is C:, its changes kept apart (`overlay=true`). Its
+/// configuration's settings, drives, manuals and commands go in the
+/// profile, its paths taken from the package's root; without commands, the
+/// one program there is to start the game (`archive::start_program`)
+/// starts, or the prompt is left on C:. A profile made for it before is
+/// the one. Returns the profile's id and name.
+pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String), String> {
+    let package = hostfs::canonicalize(package).map_err(|e| format!("{}: {}", package.display(), e))?;
     let profiles = list(dir);
     let made_before = profiles.iter().find(|(_, text)| {
-        config::parse(text, dir, None).drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path == archive)
+        config::parse(text, dir, None).drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path.starts_with(&package))
     });
     if let Some((entry, _)) = made_before {
         return Ok((entry.id.clone(), entry.name.clone()));
     }
-    let files = crate::archive::open(&archive)?.files();
-    let name = archive.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
+    let is_archive = !hostfs::is_dir(&package);
+    let files: Vec<String> = if is_archive {
+        crate::archive::open(&package)?.files()
+    } else {
+        hostfs::read_dir(&package)
+            .map_err(|e| format!("{}: {}", package.display(), e))?
+            .into_iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.name.to_string_lossy().into_owned())
+            .collect()
+    };
+    let own = match package_entry(&package, PACKAGE_CONF) {
+        Some(name) => read_package_file(&package.join(name))?,
+        None => String::new(),
+    };
+    // Its paths are from the package's root.
+    let conf = config::parse(&own, &package, None);
+    let stem = package.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
+    let name = conf.game_name.clone().unwrap_or(stem);
+    let mut text = format!("[game]\nname={}\n", name);
+    text.push_str(&format!("overlay={}\n", game_value(&own, "overlay").unwrap_or_else(|| "true".to_string())));
+    // RetroAchievements knows the game by its archive's hash.
+    match game_value(&own, "achievements") {
+        Some(value) => text.push_str(&format!("achievements={}\n", value)),
+        None if is_archive => {
+            if let Ok(hash) = crate::achievements::hash::hash_archive(&package) {
+                text.push_str(&format!("achievements={}\n", hash));
+            }
+        }
+        None => {}
+    }
+    for value in &conf.game_manuals {
+        let manual = crate::manuals::Manual::parse(value, &package, None);
+        text.push_str(&format!("manual={}|{}\n", manual.path.display(), manual.title));
+    }
+    let settings = without_sections(&own, &["game", "drives", "autoexec"]);
+    if !settings.trim().is_empty() {
+        text.push('\n');
+        text.push_str(settings.trim_end());
+        text.push('\n');
+    }
+    let mut drives = conf.drives.clone();
+    if !drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) {
+        drives.insert(0, MountSpec { drive: crate::disk::DRIVE_C, path: package.clone(), opts: Default::default() });
+    }
+    text.push_str("\n[drives]\n");
+    for spec in &drives {
+        text.push_str(&format!("{}={}\n", crate::disk::drive_key(spec.drive), crate::mount::mount_spec_value(spec, None)));
+    }
+    text.push_str("\n[autoexec]\n");
+    let autoexec = if conf.autoexec.is_empty() {
+        std::iter::once("C:".to_string()).chain(crate::archive::start_program(&files)).collect()
+    } else {
+        conf.autoexec.clone()
+    };
+    for line in autoexec {
+        text.push_str(&line);
+        text.push('\n');
+    }
     // Neither a profile nor a folder there already.
     let taken: Vec<String> = profiles
         .into_iter()
@@ -382,22 +544,17 @@ pub fn add_archive(dir: &Path, archive: &Path) -> Result<(String, String), Strin
         .chain(hostfs::read_dir(dir).into_iter().flatten().map(|e| e.name.to_string_lossy().to_lowercase()))
         .collect();
     let id = slug(&name, &taken);
-    let mut text = format!("[game]\nname={}\noverlay=true\n", name);
-    // RetroAchievements knows the game by its archive's hash.
-    if let Ok(hash) = crate::achievements::hash::hash_archive(&archive) {
-        text.push_str(&format!("achievements={}\n", hash));
-    }
-    let c = MountSpec { drive: crate::disk::DRIVE_C, path: archive, opts: Default::default() };
-    text.push_str(&format!("\n[drives]\nC={}\n\n[autoexec]\nC:\n", crate::mount::mount_spec_value(&c, None)));
-    if let Some(program) = crate::archive::start_program(&files) {
-        text.push_str(&program);
-        text.push('\n');
-    }
     let path = dir.join(format!("{}.conf", id));
     hostfs::create_dir_all(dir)
         .and_then(|()| hostfs::write(&path, text))
         .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
     Ok((id, name))
+}
+
+/// Whether `path` is a game's package with its own configuration: a
+/// folder or an archive with a `rust-dos.conf` at its root.
+pub fn is_package(path: &Path) -> bool {
+    package_entry(path, PACKAGE_CONF).is_some()
 }
 
 /// A game that was launched and hasn't ended.
@@ -500,7 +657,7 @@ mod tests {
         let data = crate::archive::zip::tests::zip(&[("KEEN/KEEN4E.EXE", b"MZ", true), ("KEEN/SETUP.EXE", b"MZ", false)]);
         std::fs::write(&archive, data).unwrap();
         let games = dir.join("games");
-        let (id, name) = add_archive(&games, &archive).unwrap();
+        let (id, name) = add_package(&games, &archive).unwrap();
         assert_eq!((id.as_str(), name.as_str()), ("commander-keen", "Commander Keen"));
         let text = std::fs::read_to_string(games.join("commander-keen.conf")).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
@@ -524,7 +681,7 @@ mod tests {
         assert!(!saves.exists());
         reset(&saves_dir(&games), &id).unwrap();
         // Again: the same profile.
-        assert_eq!(add_archive(&games, &dir.join("Commander Keen.zip")).unwrap().0, "commander-keen");
+        assert_eq!(add_package(&games, &dir.join("Commander Keen.zip")).unwrap().0, "commander-keen");
         assert_eq!(list(&games).len(), 1);
     }
 
@@ -547,6 +704,60 @@ mod tests {
                 ("Map", games.join("keen.extras/Map.png").as_path()),
             ]
         );
+    }
+
+    #[test]
+    fn a_package_brings_its_settings_drives_and_manuals() {
+        let dir = std::path::PathBuf::from("target/test_games_package");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = "[game]\nname=Pool of Radiance\nmanual=DOCS/Rules.pdf|Rule book\n\n[emulator]\ncycles=8000\n\n\
+                    [drives]\nD=CD cdrom\n\n[autoexec]\nC:\nSTART\n";
+        let data = crate::archive::zip::tests::zip(&[
+            ("POOL/rust-dos.conf", conf.as_bytes(), false),
+            ("POOL/START.EXE", b"MZ", false),
+            ("POOL/CD/DATA.DAT", b"cd", false),
+            ("POOL/DOCS/Rules.pdf", b"%PDF", false),
+            ("POOL/Extras/Code Wheel.png", b"", false),
+            ("POOL/Extras/notes.txt", b"", false),
+        ]);
+        let package = dir.join("pool.zip");
+        std::fs::write(&package, data).unwrap();
+        let games = dir.join("games");
+        let (id, name) = add_package(&games, &package).unwrap();
+        assert_eq!((id.as_str(), name.as_str()), ("pool-of-radiance", "Pool of Radiance"));
+        let text = std::fs::read_to_string(games.join("pool-of-radiance.conf")).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert!(prepared.warnings.is_empty(), "{:?}\n{}", prepared.warnings, text);
+        let package = std::fs::canonicalize(&package).unwrap();
+        let drives: Vec<(u8, PathBuf)> = prepared.drives.iter().map(|d| (d.drive, d.path.clone())).collect();
+        assert_eq!(drives, [(2, package.clone()), (3, package.join("CD"))]);
+        assert_eq!(prepared.drives[1].opts.kind, crate::disk::DriveKind::CdRom);
+        assert_eq!(prepared.settings.cycles, crate::config::Settings::from_config(&config::parse("[emulator]\ncycles=8000\n", &dir, None)).cycles);
+        assert_eq!(prepared.autoexec, ["C:", "START"]);
+        assert!(prepared.overlay);
+        let shown: Vec<(String, PathBuf)> = manuals(&games, &id, &text, None).into_iter().map(|m| (m.title, m.path)).collect();
+        assert_eq!(
+            shown,
+            [("Rule book".to_string(), package.join("DOCS/Rules.pdf")), ("Code Wheel".to_string(), package.join("Extras/Code Wheel.png"))]
+        );
+        assert_eq!(crate::archive::read_member(&shown[0].1), Some(Ok(b"%PDF".to_vec())));
+        // Again: the same profile.
+        assert_eq!(add_package(&games, &package).unwrap().0, id);
+
+        // A folder: the same, without its conf's own overlay=false.
+        let folder = dir.join("Keen");
+        std::fs::create_dir_all(folder.join("extras")).unwrap();
+        std::fs::write(folder.join("RUST-DOS.CONF"), "[game]\noverlay=false\n").unwrap();
+        std::fs::write(folder.join("KEEN4E.EXE"), b"MZ").unwrap();
+        std::fs::write(folder.join("extras/Hint Book.pdf"), b"%PDF").unwrap();
+        assert!(is_package(&folder) && !is_package(&dir.join("games")));
+        let (id, _) = add_package(&games, &folder).unwrap();
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert_eq!((prepared.overlay, prepared.autoexec.clone()), (false, vec!["C:".to_string(), "KEEN4E.EXE".to_string()]));
+        let titles: Vec<String> = manuals(&games, &id, &text, None).into_iter().map(|m| m.title).collect();
+        assert_eq!(titles, ["Hint Book"]);
     }
 
     #[test]

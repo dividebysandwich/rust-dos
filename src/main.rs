@@ -1721,10 +1721,10 @@ impl MainHost<'_, '_> {
                     format!("Starting {} from {}:", name(&program), letter)
                 })
             }
-            DropAction::Archive(archive) => (|| {
+            DropAction::Package(package) => (|| {
                 let dir = games_dir(self.saved.file.as_deref())
-                    .ok_or("Archives become games in the games folder beside the configuration file, and there is none (--no-config)")?;
-                let (id, game) = games::add_archive(&dir, &archive)?;
+                    .ok_or("Packages become games in the games folder beside the configuration file, and there is none (--no-config)")?;
+                let (id, game) = games::add_package(&dir, &package)?;
                 Ok(self.launch_game(&id).unwrap_or_else(|e| format!("{} is a game on the Games page: {}", game, e)))
             })(),
             DropAction::Nothing(e) => Err(e),

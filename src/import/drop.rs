@@ -20,9 +20,10 @@ pub enum DropAction {
     HardDisk(PathBuf),
     /// A program or batch file: its folder mounted and it run.
     Run(PathBuf),
-    /// A zip or 7z archive: a game with the archive as C:
-    /// (`games::add_archive`).
-    Archive(PathBuf),
+    /// A game's package: a zip or 7z archive, or a folder with a
+    /// `rust-dos.conf` of its own, as a game with it as C:
+    /// (`games::add_package`).
+    Package(PathBuf),
     /// Nothing rust-dos can use.
     Nothing(String),
 }
@@ -31,6 +32,9 @@ pub enum DropAction {
 pub fn drop_action(path: &Path) -> DropAction {
     let path = path.to_path_buf();
     if crate::hostfs::is_dir(&path) {
+        if crate::games::is_package(&path) {
+            return DropAction::Package(path);
+        }
         let has_confs = crate::hostfs::read_dir(&path).into_iter().flatten().any(|e| {
             let name = e.name.to_string_lossy().to_ascii_lowercase();
             name.starts_with("dosbox") && name.ends_with(".conf")
@@ -45,7 +49,7 @@ pub fn drop_action(path: &Path) -> DropAction {
     match ext.as_str() {
         "conf" => return DropAction::ImportGame(path),
         "exe" | "com" | "bat" => return DropAction::Run(path),
-        "zip" | "dosz" | "7z" => return DropAction::Archive(path),
+        "zip" | "dosz" | "7z" => return DropAction::Package(path),
         _ => {}
     }
     match diskimage::detect(&path, DriveKind::HardDisk) {
@@ -74,11 +78,14 @@ mod tests {
         fs::write(dir.join("readme.txt"), "hello").unwrap();
         assert_eq!(drop_action(&dir.join("gog")), DropAction::ImportGame(dir.join("gog")));
         assert_eq!(drop_action(&dir.join("plain")), DropAction::MountFolder(dir.join("plain")));
+        fs::create_dir_all(dir.join("package")).unwrap();
+        fs::write(dir.join("package/rust-dos.conf"), "").unwrap();
+        assert_eq!(drop_action(&dir.join("package")), DropAction::Package(dir.join("package")));
         assert_eq!(drop_action(&dir.join("gog/dosboxGame.conf")), DropAction::ImportGame(dir.join("gog/dosboxGame.conf")));
         assert_eq!(drop_action(&dir.join("game.cue")), DropAction::Disc(dir.join("game.cue")));
         assert_eq!(drop_action(&dir.join("disk.img")), DropAction::Floppy(dir.join("disk.img")));
         assert_eq!(drop_action(&dir.join("GAME.EXE")), DropAction::Run(dir.join("GAME.EXE")));
-        assert_eq!(drop_action(&dir.join("x.zip")), DropAction::Archive(dir.join("x.zip")));
+        assert_eq!(drop_action(&dir.join("x.zip")), DropAction::Package(dir.join("x.zip")));
         assert!(matches!(drop_action(&dir.join("readme.txt")), DropAction::Nothing(_)));
     }
 }

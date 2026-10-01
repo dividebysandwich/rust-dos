@@ -272,7 +272,7 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, Str
         return Ok(plan);
     }
     match drop_action(&path) {
-        DropAction::ImportGame(source) if fs::is_dir(&path) && !fs::is_file(path.join("rust-dos.conf")) => {
+        DropAction::ImportGame(source) if fs::is_dir(&path) => {
             plan.profile = Some(imported(dirs, &source)?);
         }
         DropAction::ImportGame(_) | DropAction::MountFolder(_) => {
@@ -291,7 +291,7 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, Str
             let name = program.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
             plan.commands.extend(["C:".to_string(), "CD \\".to_string(), name]);
         }
-        DropAction::Archive(archive) => archived(dirs, &archive, &mut plan)?,
+        DropAction::Package(package) => packaged(dirs, &package, &mut plan)?,
         DropAction::Disc(image) | DropAction::Floppy(image) | DropAction::HardDisk(image) => {
             images(vec![image], boot, dirs, &mut plan)?;
         }
@@ -300,18 +300,19 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, Str
     Ok(plan)
 }
 
-/// A zip, .dosz or 7z archive: a game with the archive as C:, its profile
-/// made the first time and found after. One unpacked into the games
-/// folder before is played from there.
-fn archived(dirs: &Dirs, archive: &Path, plan: &mut Plan) -> Result<(), String> {
+/// A game's package (a zip, .dosz or 7z archive, or a folder with a
+/// rust-dos.conf): a game with the package as C:, its profile made the
+/// first time and found after (`games::add_package`). An archive unpacked
+/// into the games folder before is played from there.
+fn packaged(dirs: &Dirs, package: &Path, plan: &mut Plan) -> Result<(), String> {
     let games_dir = dirs.games();
-    let stem = archive.file_stem().map_or("Game".into(), |n| n.to_string_lossy().into_owned());
+    let stem = package.file_stem().map_or("Game".into(), |n| n.to_string_lossy().into_owned());
     let unpacked = games_dir.join(games::slug(&stem, &[]));
-    let id = if fs::is_dir(&unpacked) {
+    let id = if fs::is_file(package) && fs::is_dir(&unpacked) {
         plan.c_root = unpacked.clone();
         unpacked.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
     } else {
-        games::add_archive(&games_dir, archive)?.0
+        games::add_package(&games_dir, package)?.0
     };
     let file = games_dir.join(format!("{}.conf", id));
     if let Ok(text) = fs::read_to_string(&file) {

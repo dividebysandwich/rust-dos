@@ -1000,7 +1000,9 @@ impl DiskController {
     }
 
     /// The overlay of `lower` (`display` to show, the directory or archive)
-    /// with the changes in `upper`, as a layer.
+    /// with the changes in `upper`, as a layer. Layers are the thread's
+    /// own (`hostfs`), so theirs needn't be Send.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn overlaid(lower: Box<dyn crate::overlay::Lower>, display: PathBuf, upper: Option<PathBuf>) -> Result<Overlaid, String> {
         let overlay = crate::overlay::Overlay::new(lower, upper.clone())
             .map_err(|e| format!("{}: {}", upper.as_deref().unwrap_or(Path::new("")).display(), e))?;

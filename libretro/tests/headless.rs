@@ -621,7 +621,7 @@ fn a_folder_the_frontend_keeps_is_c() {
     fs::write(root.join("Game/README.TXT"), "read me").unwrap();
     fs::write(
         root.join("Game/rust-dos.conf"),
-        "[autoexec]\nECHO hello>NEW.TXT\nREN NEW.TXT DONE.TXT\nMD SUB\nCOPY DONE.TXT SUB\\COPY.TXT\nDEL README.TXT\nMARKER\n",
+        "[game]\noverlay=false\n[autoexec]\nECHO hello>NEW.TXT\nREN NEW.TXT DONE.TXT\nMD SUB\nCOPY DONE.TXT SUB\\COPY.TXT\nDEL README.TXT\nMARKER\n",
     )
     .unwrap();
     start(&dir, &[]);

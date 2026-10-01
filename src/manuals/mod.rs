@@ -65,7 +65,14 @@ pub struct Document {
 impl Document {
     pub fn open(path: &Path) -> Result<Document, String> {
         let error = |e: String| format!("{}: {}", path.display(), e);
-        let data = hostfs::read(path).map_err(|e| error(e.to_string()))?;
+        // A file of the host's, or one in an archive (a game's package).
+        let data = match hostfs::read(path) {
+            Ok(data) => data,
+            Err(e) => match crate::archive::read_member(path) {
+                Some(read) => read?,
+                None => return Err(error(e.to_string())),
+            },
+        };
         let extension = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         let kind = match extension.as_str() {
             "png" => Kind::Picture(decode_png(&data).map_err(error)?),
