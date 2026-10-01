@@ -202,6 +202,9 @@ pub struct Config {
     /// Whether a game profile's drives keep its changes apart, in a folder
     /// of its own (`[game]`'s `overlay`, see games.rs).
     pub game_overlay: bool,
+    /// A game profile's manuals and extras, as `[game]`'s `manual=` lines
+    /// have them (`manuals::Manual::parse`).
+    pub game_manuals: Vec<String>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -874,6 +877,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "name" => warn("the game's name is empty".to_string()),
                         "achievements" if !value.is_empty() => config.game_achievements = Some(value.to_string()),
                         "achievements" => {}
+                        "manual" if !value.is_empty() => config.game_manuals.push(value.to_string()),
+                        "manual" => {}
                         "overlay" => match parse_bool(value) {
                             Some(on) => config.game_overlay = on,
                             None => warn(format!("invalid overlay '{}' (true or false)", value)),
@@ -2026,8 +2031,9 @@ mod tests {
         assert_eq!(config.game_name.as_deref(), Some("Commander Keen 4"));
         let config = parse("[game]\nname=\nyear=1991\n", Path::new("/cfg"), None);
         assert_eq!((config.game_name, config.warnings.len()), (None, 2));
-        let config = parse("[game]\noverlay=true\n", Path::new("/cfg"), None);
+        let config = parse("[game]\noverlay=true\nmanual=a.pdf\nmanual=b.png|Map\n", Path::new("/cfg"), None);
         assert!(config.game_overlay && config.warnings.is_empty());
+        assert_eq!(config.game_manuals, ["a.pdf", "b.png|Map"]);
     }
 
     #[test]

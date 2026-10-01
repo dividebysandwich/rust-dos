@@ -218,25 +218,65 @@ pub fn reset(saves: &Path, id: &str) -> Result<(), String> {
 /// The profile `text` with `achievements=value` in its `[game]` section,
 /// in place of one there was.
 pub fn set_achievements(text: &str, value: &str) -> String {
-    let line = format!("achievements={}", value);
+    set_game_key(text, "achievements", value, false)
+}
+
+/// The profile `text` with another `manual=value` line in its `[game]`
+/// section.
+pub fn add_manual(text: &str, value: &str) -> String {
+    set_game_key(text, "manual", value, true)
+}
+
+/// The profile `text` with `key=value` in its `[game]` section: in place
+/// of one there was, or (`add`) after the others.
+fn set_game_key(text: &str, key: &str, value: &str, add: bool) -> String {
+    let line = format!("{}={}", key, value);
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let header = |l: &str| l.trim().starts_with('[');
     let Some(start) = lines.iter().position(|l| l.trim().eq_ignore_ascii_case("[game]")) else {
         return format!("[game]\n{}\n\n{}", line, text);
     };
     let end = lines[start + 1..].iter().position(|l| header(l)).map_or(lines.len(), |p| start + 1 + p);
-    let key = |l: &str| l.split_once('=').map(|(k, _)| k.trim().to_ascii_lowercase());
-    match (start + 1..end).find(|&i| key(&lines[i]).as_deref() == Some("achievements")) {
-        Some(i) => lines[i] = line,
-        None => {
+    let key_of = |l: &str| l.split_once('=').map(|(k, _)| k.trim().to_ascii_lowercase());
+    match (start + 1..end).find(|&i| key_of(&lines[i]).as_deref() == Some(key)) {
+        Some(i) if !add => lines[i] = line,
+        _ => {
             // After the section's last setting.
-            let at = (start + 1..end).rev().find(|&i| key(&lines[i]).is_some()).map_or(start + 1, |i| i + 1);
+            let at = (start + 1..end).rev().find(|&i| key_of(&lines[i]).is_some()).map_or(start + 1, |i| i + 1);
             lines.insert(at, line);
         }
     }
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// The folder of the game `id`'s extras, beside its profile in the games
+/// folder `dir`: the documents and pictures in it are its manuals.
+pub fn extras_dir(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{}.extras", id))
+}
+
+/// The manuals and extras of the game `id`, whose profile `text` is in
+/// the games folder `dir`: its `manual=` lines, then the files of its
+/// extras folder, by name.
+pub fn manuals(dir: &Path, id: &str, text: &str, home: Option<&Path>) -> Vec<crate::manuals::Manual> {
+    use crate::manuals::{Manual, is_manual_name, title_of};
+    let config = config::parse(text, dir, home);
+    let mut manuals: Vec<Manual> = config.game_manuals.iter().map(|v| Manual::parse(v, dir, home)).collect();
+    let mut extras: Vec<PathBuf> = hostfs::read_dir(extras_dir(dir, id))
+        .into_iter()
+        .flatten()
+        .filter(|e| !e.is_dir && is_manual_name(&e.path))
+        .map(|e| e.path)
+        .collect();
+    extras.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    for path in extras {
+        if !manuals.iter().any(|m| m.path == path) {
+            manuals.push(Manual { title: title_of(&path), path });
+        }
+    }
+    manuals
 }
 
 /// The hash RetroAchievements knows a game by, from its profile's
@@ -416,6 +456,8 @@ mod tests {
         assert_eq!(with, "[game]\nname=Keen\nachievements=abc\n\n[autoexec]\nKEEN4E\n");
         assert_eq!(set_achievements(&with, "def"), "[game]\nname=Keen\nachievements=def\n\n[autoexec]\nKEEN4E\n");
         assert_eq!(set_achievements("[autoexec]\nX\n", "abc"), "[game]\nachievements=abc\n\n[autoexec]\nX\n");
+        let two = add_manual(&add_manual(text, "a.pdf"), "b.png|Map");
+        assert_eq!(two, "[game]\nname=Keen\nmanual=a.pdf\nmanual=b.png|Map\n\n[autoexec]\nKEEN4E\n");
         let prepared = prepare("keen", &Settings::default(), &with, Path::new("/"), None).unwrap();
         assert_eq!(prepared.achievements.as_deref(), Some("abc"));
     }
@@ -471,6 +513,27 @@ mod tests {
         // Again: the same profile.
         assert_eq!(add_archive(&games, &dir.join("Commander Keen.zip")).unwrap().0, "commander-keen");
         assert_eq!(list(&games).len(), 1);
+    }
+
+    #[test]
+    fn a_games_manuals_are_its_lines_and_its_extras() {
+        let games = std::path::PathBuf::from("target/test_games_manuals");
+        let _ = std::fs::remove_dir_all(&games);
+        std::fs::create_dir_all(games.join("keen.extras")).unwrap();
+        for name in ["Map.png", "code wheel.JPG", "notes.txt"] {
+            std::fs::write(games.join("keen.extras").join(name), b"").unwrap();
+        }
+        let text = "[game]\nname=Keen\nmanual=keen/Manual.pdf|The manual\n[autoexec]\nKEEN4E\n";
+        let manuals = manuals(&games, "keen", text, None);
+        let shown: Vec<(&str, &Path)> = manuals.iter().map(|m| (m.title.as_str(), m.path.as_path())).collect();
+        assert_eq!(
+            shown,
+            [
+                ("The manual", games.join("keen/Manual.pdf").as_path()),
+                ("code wheel", games.join("keen.extras/code wheel.JPG").as_path()),
+                ("Map", games.join("keen.extras/Map.png").as_path()),
+            ]
+        );
     }
 
     #[test]
