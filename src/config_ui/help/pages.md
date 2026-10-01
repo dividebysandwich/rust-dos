@@ -43,9 +43,8 @@ several images.
 - **Label**: the volume name. Some games check their CD's label; leave it
   empty to use the image's own.
 - **Read-only**: keeps programs from changing the files.
-- **Changes to**: a folder for what programs write to a folder or
-  archive, which stays as it is; delete the folder to undo it all. Empty:
-  a folder is written to, an archive is read-only.
+- **Write to**: it set, any changes are written to this location; 
+  delete the folder to undo it all.
 - **Auto-boot**: for a floppy or hard disk image, boot from it when
   Rust-DOS starts instead of starting DOS. Only one drive boots; **F2**
   saves it.

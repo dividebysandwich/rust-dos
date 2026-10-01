@@ -347,7 +347,7 @@ impl MountDialog {
         let overlay = (!overlay.is_empty() && self.can_overlay()).then(|| expand_host_path(&overlay, cwd, home));
         if overlay.is_some() {
             if self.read_only {
-                return Err("A read-only drive has no changes to keep apart: leave \"Changes to\" empty".to_string());
+                return Err("A read-only drive has no changes to keep apart: leave \"Write to\" empty".to_string());
             }
             if path.is_file() && !crate::archive::is_archive_name(&path) {
                 return Err("Only a directory or a zip or 7z archive keeps its changes apart".to_string());
