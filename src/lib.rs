@@ -71,6 +71,7 @@ pub mod net;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mt32;
 pub mod opl;
+pub mod overlay;
 pub mod pci;
 pub mod pic;
 pub mod pnpbios;

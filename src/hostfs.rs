@@ -7,6 +7,10 @@
 //! backend is installed on the thread. Others go to `std::fs` as before.
 //! The backend's files have no dates or read-only flags; `modified` is
 //! None for them, and setting either does nothing.
+//!
+//! A layer (`add_layer`) is a backend of its own, with a root of its own,
+//! `layerN:/`: a drive's write overlay (`overlay`) is one. Its paths go
+//! to it whatever backend the thread has.
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -70,6 +74,13 @@ impl DirEntry {
 pub trait Handle: Read + Write + Seek + Send + Sync {
     fn len(&mut self) -> io::Result<u64>;
     fn set_len(&mut self, len: u64) -> io::Result<()>;
+    /// The file's date, where the backend has one.
+    fn modified(&mut self) -> Option<SystemTime> {
+        None
+    }
+    fn set_modified(&mut self, _time: SystemTime) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The files of the paths with a scheme.
@@ -82,10 +93,59 @@ pub trait Backend {
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     fn remove_dir(&self, path: &Path) -> io::Result<()>;
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+    fn set_readonly(&self, _path: &Path, _readonly: bool) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "read-only flags aren't kept here"))
+    }
 }
 
 thread_local! {
     static BACKEND: RefCell<Option<Arc<dyn Backend>>> = const { RefCell::new(None) };
+    /// The layers, by their scheme (`layerN`).
+    static LAYERS: RefCell<Vec<(String, Arc<dyn Backend>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The numbers of the layers' schemes, which aren't used again.
+static NEXT_LAYER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// A layer on this thread: its paths are under `root`, and go to its
+/// backend until it is dropped.
+pub struct Layer {
+    scheme: String,
+    root: PathBuf,
+}
+
+impl Layer {
+    /// `layerN:/`, the root of the layer's paths.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl std::fmt::Debug for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.scheme)
+    }
+}
+
+impl Drop for Layer {
+    fn drop(&mut self) {
+        let _ = LAYERS.try_with(|layers| layers.borrow_mut().retain(|(scheme, _)| *scheme != self.scheme));
+    }
+}
+
+/// Hand the paths under a new root to `backend`.
+pub fn add_layer(backend: Arc<dyn Backend>) -> Layer {
+    let scheme = format!("layer{}", NEXT_LAYER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    LAYERS.with(|layers| layers.borrow_mut().push((scheme.clone(), backend)));
+    Layer { root: PathBuf::from(format!("{}:/", scheme)), scheme }
+}
+
+/// The path under a layer's root, `/`-separated, without the root: ""
+/// for the root itself.
+pub fn layer_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let rest = s.split_once(':').map_or(&*s, |(_, rest)| rest);
+    rest.split(['/', '\\']).filter(|c| !c.is_empty() && *c != ".").collect::<Vec<_>>().join("/")
 }
 
 /// Install the backend for paths with a scheme on this thread, or (None)
@@ -120,6 +180,16 @@ pub fn backend_path(path: &Path) -> String {
 fn backend(path: &Path) -> Option<Arc<dyn Backend>> {
     if !has_scheme(path) {
         return None;
+    }
+    let s = path.as_os_str().as_encoded_bytes();
+    let scheme = &s[..s.iter().position(|&c| c == b':').unwrap_or(0)];
+    if scheme.starts_with(b"layer") {
+        let layer = LAYERS.with(|layers| {
+            layers.borrow().iter().find(|(name, _)| name.as_bytes() == scheme).map(|(_, b)| b.clone())
+        });
+        if layer.is_some() {
+            return layer;
+        }
     }
     BACKEND.with(|b| b.borrow().clone())
 }
@@ -177,14 +247,14 @@ impl File {
     pub fn modified(&self) -> Option<SystemTime> {
         match self {
             File::Std(file) => file.metadata().and_then(|m| m.modified()).ok(),
-            File::Foreign(_) => None,
+            File::Foreign(file) => Self::handle(file).modified(),
         }
     }
 
     pub fn set_modified(&self, time: SystemTime) -> io::Result<()> {
         match self {
             File::Std(file) => file.set_modified(time),
-            File::Foreign(_) => Ok(()),
+            File::Foreign(file) => Self::handle(file).set_modified(time),
         }
     }
 
@@ -227,6 +297,22 @@ impl Seek for &File {
             File::Std(file) => (&*file).seek(pos),
             File::Foreign(file) => File::handle(file).seek(pos),
         }
+    }
+}
+
+/// A file is a backend's handle too, for a backend over other files.
+impl Handle for File {
+    fn len(&mut self) -> io::Result<u64> {
+        File::len(self)
+    }
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        File::set_len(self, len)
+    }
+    fn modified(&mut self) -> Option<SystemTime> {
+        File::modified(self)
+    }
+    fn set_modified(&mut self, time: SystemTime) -> io::Result<()> {
+        File::set_modified(self, time)
     }
 }
 
@@ -454,13 +540,25 @@ pub fn absolute(path: impl AsRef<Path>) -> io::Result<PathBuf> {
 /// Make a file read-only or writable; the backend's stay as they are.
 pub fn set_readonly(path: impl AsRef<Path>, readonly: bool) -> io::Result<()> {
     let path = path.as_ref();
-    if backend(path).is_some() {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "read-only flags aren't kept here"));
+    if let Some(backend) = backend(path) {
+        return backend.set_readonly(path, readonly);
     }
     let mut permissions = fs::metadata(path)?.permissions();
     #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(readonly);
     fs::set_permissions(path, permissions)
+}
+
+/// Remove a folder and everything in it.
+pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    if backend(path).is_none() {
+        return fs::remove_dir_all(path);
+    }
+    for entry in read_dir(path)? {
+        if entry.is_dir { remove_dir_all(&entry.path)? } else { remove_file(&entry.path)? }
+    }
+    remove_dir(path)
 }
 
 #[cfg(test)]
