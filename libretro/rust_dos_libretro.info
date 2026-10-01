@@ -33,4 +33,4 @@ is_experimental = "true"
 firmware_count = 0
 notes = "Settings, SoundFonts and MT-32 ROMs go in system/rust-dos/rust-dos.conf. Ctrl+F12 opens the settings window (L3+R3 on a gamepad). Turn on Game Focus (Scroll Lock) for the whole keyboard."
 
-description = "rust-dos, an x86 PC emulator with a DOS of its own: 386 to Pentium MMX, CGA to SVGA and the S3 Trio64, a 3dfx Voodoo, Sound Blaster, Gravis Ultrasound, AdLib and General MIDI. Runs DOS programs and games from folders, zip archives, disk and CD images, and boots systems such as Windows 95."
+description = "rust-dos, an x86 PC emulator with a DOS of its own: 386 to Pentium MMX, CGA to SVGA, the Tseng ET4000 and the S3 Trio64, a 3dfx Voodoo, Sound Blaster, Gravis Ultrasound, AdLib and General MIDI. Runs DOS programs and games from folders, zip archives, disk and CD images, and boots systems such as Windows 95."

@@ -65,7 +65,13 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   a VESA mode (`video.name` is `Vesa`), `video.vbe` shows the VBE mode
   number, size and bits per pixel, the bank of the window at A0000h, the
   bytes per scan line, the displayed start offset and the DAC width; the
-  log has a `Switch to VESA mode` line for each mode set. `pic` shows both
+  log has a `Switch to VESA mode` line for each mode set. With
+  `machine=svga_et4000`, `video.et4000` has the chip's CR30-3Fh, whether
+  the KEY is set, Segment Select (write bank low, read bank high), the
+  Sierra DAC's command register and HiColor bits, and the VESA mode set;
+  its Super VGA modes are VGA modes (`Graphics320x200` for 256 colours or
+  HiColor, `Vga640x480` for 16) at the size `video.width`/`height` give,
+  and the log has a `Switch to Tseng mode` line for each. `pic` shows both
   interrupt controllers' vector bases and their request (`irr`), mask
   (`imr`) and in-service (`isr`) registers, master first: a request that
   stays set under a mask bit is an IRQ the program has turned off.

@@ -137,14 +137,31 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX on
   the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
   engine and streams processor, which Windows 95's Direct3D uses through
-  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `vga` (an IBM
-  VGA, without VESA modes),
+  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_et4000`
+  (a Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC, see below),
+  `vga` (an IBM VGA, without VESA modes),
   `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
   640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
   prompt.
+* With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
+  DOS games and Windows 3.x drivers made for it detect it: its KEY
+  (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,
+  the extended CRTC registers (CR33 display start, CR35 and CR3F
+  overflows, clock select) and the attribute controller's register 16h.
+  Its 1 MB is the VGA's planes, so the VGA's write modes and latches work
+  in every mode. Tseng's BIOS modes are there through INT 10h AH=00h:
+  text at 132x44, 132x25 and 132x28 (22h-24h), 80x60 (26h) and 100x40
+  (2Ah); 800x600 and 1024x768 in 16 colours (29h, 37h); 640x350,
+  640x480, 640x400, 800x600 and 1024x768 in 256 colours (2Dh, 2Eh, 2Fh,
+  30h, 38h). The Sierra SC11487 DAC adds 32K and 64K colours at 320x200,
+  640x350 to 640x480 and 800x600, through its command register (four
+  reads of 3C6h) or Tseng's INT 10h AX=10F0h-10F2h. The BIOS has VBE 1.2
+  as Tseng's later ones do: modes 100h-105h and 15 and 16-bit 10Dh,
+  10Eh, 110h, 111h, 113h and 114h, through a 64 KB window at A0000h,
+  with no linear frame buffer, 24-bit colour or VBE 2.0 functions.
 * With `tandy` and `pcjr` programs find the machine they were made for
   (the model byte, and the Tandy's BIOS name) and its video: the CGA's
   modes and 16 colours at 160x200 and 320x200 (modes 08h and 09h), and 4

@@ -82,6 +82,9 @@
 #   svga_s3  an S3 Trio64 on the PCI bus, for booted systems' drivers
 #   svga_s3virge, svga_s3virgevx  an S3 ViRGE or ViRGE/VX on the PCI bus,
 #         with its 3D engine, for Direct3D in a booted Windows 95
+#   svga_et4000  a Tseng ET4000AX with 1 MB and a Sierra HiColor DAC:
+#         Tseng's modes, 32K and 64K colours, VBE 1.2 without a linear
+#         frame buffer
 #   vga   an IBM VGA, without VESA modes
 #   ega   an IBM EGA with an Enhanced Color Display: 16 of 64 colours
 #   cga   an IBM CGA: 4 colours at 320x200, 2 at 640x200

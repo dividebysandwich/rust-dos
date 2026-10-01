@@ -59,8 +59,8 @@ aspect=true
 #cycles=max
 # Processor: 486 (a 486DX with FPU) or 386.
 #cpu=486
-# The display adapter: svga (VGA with VESA modes), vga, ega, cga or
-# hercules.
+# The display adapter: svga (VGA with VESA modes), svga_et4000 (Tseng
+# ET4000 with HiColor), vga, ega, cga or hercules.
 #machine=svga
 # RAM in MB, 2 to 64 on a 386, 128 on a 486, 256 on a Pentium, 512 on a
 # Pentium MMX.

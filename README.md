@@ -25,7 +25,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   layouts, and a [DOS prompt](#the-dos-prompt) with batch files and a
   `COMMAND.COM` programs can shell out to
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
-  Mode X, VESA VBE 2.0 up to 1024x768, an S3 Trio64 with its 2D
+  Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3 Trio64 with its 2D
   accelerator, an [S3 ViRGE](CONFIGURATION.md#direct3d-on-an-s3-virge)
   whose 3D engine draws Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's 16-colour
   modes, and a [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics)
