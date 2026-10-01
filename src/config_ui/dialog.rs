@@ -109,6 +109,8 @@ pub struct MountDialog {
     original: String,
     more_images: Vec<PathBuf>,
     geometry: Option<Chs>,
+    /// Where the drive's changes go, which it keeps with its path.
+    overlay: Option<PathBuf>,
     /// Its IDE slot for a booted system, and whether a host directory is
     /// shared with one, which stay too.
     ide: Option<crate::ide::IdeSlot>,
@@ -137,6 +139,7 @@ impl MountDialog {
             original: String::new(),
             more_images: Vec::new(),
             geometry: None,
+            overlay: None,
             ide: None,
             share: None,
             current: None,
@@ -166,6 +169,7 @@ impl MountDialog {
             original: path,
             more_images: opts.more_images,
             geometry: opts.geometry,
+            overlay: opts.overlay,
             ide: opts.ide,
             share: opts.share,
             current: info.mount.clone(),
@@ -326,6 +330,7 @@ impl MountDialog {
                 read_only: self.read_only,
                 more_images: if unchanged { self.more_images.clone() } else { Vec::new() },
                 geometry: if unchanged { self.geometry } else { None },
+                overlay: if unchanged { self.overlay.clone() } else { None },
                 ide: self.ide,
                 boot,
                 share: self.share,
@@ -367,6 +372,7 @@ mod tests {
             drive,
             kind,
             root: Some(PathBuf::from("/x")),
+            overlay: None,
             image: None,
             label: String::new(),
             read_only: false,
@@ -435,6 +441,7 @@ mod tests {
             read_only: true,
             more_images: vec!["/y".into()],
             geometry: None,
+            overlay: None,
             ide: None,
             boot: false,
             share: None,

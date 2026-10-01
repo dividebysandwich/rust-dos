@@ -273,6 +273,11 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
                     imported.drives.retain(|d| d.drive != spec.drive);
                     imported.drives.push(spec);
                 }
+                // The changes go where DOSBox had them.
+                Ok(MountCmd::Overlay(drive, dir)) => match imported.drives.iter_mut().find(|d| d.drive == drive) {
+                    Some(spec) => spec.opts.overlay = Some(dir),
+                    None => imported.warnings.push(format!("[autoexec] {}: no drive to overlay", line)),
+                },
                 Ok(_) => {}
                 Err(e) => imported.warnings.push(format!("[autoexec] {}: {}", line, e)),
             }

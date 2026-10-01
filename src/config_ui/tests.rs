@@ -8,6 +8,7 @@ fn drive_info(spec: &MountSpec) -> DriveInfo {
         drive: spec.drive,
         kind: spec.opts.kind,
         root: (!spec.path.is_file()).then(|| spec.path.clone()),
+        overlay: None,
         image: spec.path.is_file().then(|| spec.path.clone()),
         label: "RUSTDOS".to_string(),
         read_only: spec.opts.read_only,

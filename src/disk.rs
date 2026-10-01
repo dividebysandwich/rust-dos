@@ -379,6 +379,9 @@ pub struct MountOptions {
     /// (`shared_disk`) unless this says no (`-noshare`); C: only with yes
     /// (`-share`). None goes by the letter.
     pub share: Option<bool>,
+    /// The folder a host directory's changes go to, which leave the
+    /// directory as it is (`-overlay`, `overlay`).
+    pub overlay: Option<PathBuf>,
 }
 
 impl Default for MountOptions {
@@ -392,6 +395,7 @@ impl Default for MountOptions {
             ide: None,
             boot: false,
             share: None,
+            overlay: None,
         }
     }
 }
@@ -402,7 +406,10 @@ pub struct DriveInfo {
     pub drive: u8,
     pub kind: DriveKind,
     /// Host directory; `None` for the drives held in memory and images.
+    /// Under an overlay, the directory below it.
     pub root: Option<PathBuf>,
+    /// The folder a host directory's changes go to, under an overlay.
+    pub overlay: Option<PathBuf>,
     /// The disk or CD image the drive shows.
     pub image: Option<PathBuf>,
     /// All the images of a drive mounted from a list of them, and which one
@@ -432,8 +439,9 @@ impl DriveInfo {
 
 /// What holds a drive's files.
 enum Storage {
-    /// A host directory, acting as the drive's root.
-    Host(PathBuf),
+    /// A host directory, acting as the drive's root: the directory itself,
+    /// or an overlay's root (`layerN:/`), with the overlay.
+    Host(PathBuf, Option<Overlaid>),
     /// A tree held in memory, whose files are either in memory too or on
     /// the CD image.
     Tree { files: MemFs, image: Option<Rc<CdImage>> },
@@ -441,6 +449,15 @@ enum Storage {
     Fat(Rc<FatVolume>),
     /// A disk mounted by number: its sectors for the BIOS, and no files.
     Raw(Rc<DiskImage>),
+}
+
+/// A drive's write overlay (`overlay::Overlay`), as long as the drive has
+/// it.
+struct Overlaid {
+    layer: hostfs::Layer,
+    /// The directory below, and where the changes go.
+    lower: PathBuf,
+    upper: Option<PathBuf>,
 }
 
 struct Drive {
@@ -472,7 +489,7 @@ impl Drive {
     /// The host directory behind the drive, if there is one.
     fn host_root(&self) -> Option<&Path> {
         match &self.storage {
-            Storage::Host(root) => Some(root),
+            Storage::Host(root, _) => Some(root),
             _ => None,
         }
     }
@@ -724,7 +741,7 @@ impl DiskController {
         let mut drives: [Option<Drive>; DRIVE_SLOTS as usize] = std::array::from_fn(|_| None);
         drives[DRIVE_C as usize] = Some(Drive {
             kind: DriveKind::HardDisk,
-            storage: Storage::Host(canonical),
+            storage: Storage::Host(canonical, None),
             current_dir: String::new(),
             label: DEFAULT_LABEL.to_string(),
             read_only: false,
@@ -877,11 +894,19 @@ impl DiskController {
         }
         let kind = if floppy_drive { DriveKind::Floppy } else { opts.kind };
         let canonical = hostfs::canonicalize(path).map_err(|e| e.to_string())?;
+        let overlaid = match &opts.overlay {
+            Some(upper) if kind != DriveKind::CdRom && !opts.read_only => {
+                let lower = Box::new(crate::overlay::Folder(canonical.clone()));
+                Some(Self::overlaid(lower, canonical.clone(), Some(upper.clone()))?)
+            }
+            _ => None,
+        };
+        let root = overlaid.as_ref().map_or_else(|| canonical.clone(), |o| o.layer.root().to_path_buf());
 
         self.close_drive_files(drive);
         self.drives[drive as usize] = Some(Drive {
             kind,
-            storage: Storage::Host(canonical.clone()),
+            storage: Storage::Host(root, overlaid),
             current_dir: String::new(),
             label: Self::label_for(&opts, DEFAULT_LABEL),
             read_only: opts.read_only || kind == DriveKind::CdRom,
@@ -893,6 +918,14 @@ impl DiskController {
             shared: None,
         });
         Ok(canonical)
+    }
+
+    /// The overlay of `lower` (`display` to show) with the changes in
+    /// `upper`, as a layer.
+    fn overlaid(lower: Box<dyn crate::overlay::Lower>, display: PathBuf, upper: Option<PathBuf>) -> Result<Overlaid, String> {
+        let overlay = crate::overlay::Overlay::new(lower, upper.clone())
+            .map_err(|e| format!("{}: {}", upper.as_deref().unwrap_or(Path::new("")).display(), e))?;
+        Ok(Overlaid { layer: hostfs::add_layer(std::sync::Arc::new(overlay)), lower: display, upper })
     }
 
     /// The label of a drive: the one the mount asks for, or else `default`.
@@ -1480,7 +1513,14 @@ impl DiskController {
         self.drive(drive).map(|d| DriveInfo {
             drive,
             kind: d.kind,
-            root: d.host_root().map(Path::to_path_buf),
+            root: match &d.storage {
+                Storage::Host(_, Some(overlaid)) => Some(overlaid.lower.clone()),
+                _ => d.host_root().map(Path::to_path_buf),
+            },
+            overlay: match &d.storage {
+                Storage::Host(_, Some(overlaid)) => overlaid.upper.clone(),
+                _ => None,
+            },
             image: d
                 .image()
                 .map(|image| image.path().to_path_buf())
@@ -3138,6 +3178,45 @@ mod tests {
 
         let entries = disk.list_directory("D:\\*.*", 0x10).unwrap();
         assert!(entries.iter().all(|e| e.attr & 0x01 != 0));
+    }
+
+    #[test]
+    fn an_overlay_keeps_the_directory_as_it_was() {
+        let base = scratch("overlay");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir_all(base.join("game/saves")).unwrap();
+        fs::write(base.join("game/GAME.CFG"), b"old").unwrap();
+        fs::write(base.join("game/saves/slot1.sav"), b"one").unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        let opts = MountOptions { overlay: Some(base.join("upper")), ..MountOptions::default() };
+        disk.mount(3, &base.join("game"), opts, false).unwrap();
+        let info = disk.drive_info(3).unwrap();
+        assert_eq!(info.root.as_deref(), Some(fs::canonicalize(base.join("game")).unwrap().as_path()));
+        assert_eq!(info.overlay.as_deref(), Some(base.join("upper").as_path()));
+
+        let h = disk.open_file(r"D:\GAME.CFG", 2, PSP).unwrap();
+        assert_eq!(disk.write_file(h, b"new"), Ok(3));
+        disk.close_file(h);
+        let h = disk.create_file(r"D:\SAVES\SLOT2.SAV", PSP).unwrap();
+        disk.write_file(h, b"two").unwrap();
+        disk.close_file(h);
+        disk.delete_file(r"D:\SAVES\SLOT1.SAV").unwrap();
+        disk.create_directory(r"D:\NEW").unwrap();
+        disk.rename_file(r"D:\SAVES\SLOT2.SAV", r"D:\NEW\SLOT2.SAV").unwrap();
+
+        let h = disk.open_file(r"D:\GAME.CFG", 0, PSP).unwrap();
+        assert_eq!(disk.read_file(h, 3).unwrap(), b"new");
+        let names = |disk: &DiskController, spec: &str| -> Vec<String> {
+            disk.list_directory(spec, 0x10).unwrap().into_iter().map(|e| e.filename).collect()
+        };
+        assert!(names(&disk, r"D:\SAVES\*.*").iter().all(|n| n.starts_with('.')));
+        assert_eq!(names(&disk, r"D:\NEW\SLOT*.*"), ["SLOT2.SAV"]);
+        // The directory as it was.
+        assert_eq!(fs::read(base.join("game/GAME.CFG")).unwrap(), b"old");
+        assert_eq!(fs::read(base.join("game/saves/slot1.sav")).unwrap(), b"one");
+        assert_eq!(fs::read_dir(base.join("game")).unwrap().count(), 2);
+        assert_eq!(fs::read(base.join("upper/GAME.CFG")).unwrap(), b"new");
+        assert_eq!(fs::read(base.join("upper/NEW/SLOT2.SAV")).unwrap(), b"two");
     }
 
     #[test]

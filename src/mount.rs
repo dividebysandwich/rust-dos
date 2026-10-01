@@ -19,8 +19,12 @@
 //!
 //! A mount spec, as `[drives]` takes it, is the same without the drive:
 //! `<host path> [more images] [type] [-t type] [-label NAME] [-ro]
-//! [-chs C,H,S] [-boot]` where type is `floppy` (alias `fdd`), `hdd` (alias `dir`)
-//! or `cdrom` (alias `iso`).
+//! [-chs C,H,S] [-boot] [-overlay DIR]` where type is `floppy` (alias
+//! `fdd`), `hdd` (alias `dir`) or `cdrom` (alias `iso`).
+//!
+//! `-overlay DIR` leaves a host directory as it is: what DOS changes on
+//! the drive goes to DIR (`overlay`). DOSBox's `MOUNT C DIR -t overlay`
+//! gives the drive mounted as C: one.
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions, NUMBERED_DRIVES, drive_number, numbered_drive};
 use crate::diskimage::Chs;
@@ -30,7 +34,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub const MOUNT_USAGE: &str = "\
 Usage: MOUNT drive directory [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
-                             [-share|-noshare]\r
+                             [-share|-noshare] [-overlay DIR]\r
+       MOUNT drive DIR -t overlay\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                          [-chs C,H,S] [-size 512,S,H,C]\r
        MOUNT number image [image ...] [-chs C,H,S] [-ro]\r
@@ -46,6 +51,8 @@ on a booted system's IDE channel. -boot has the image boot when Rust-DOS\r
 starts, once the drives are saved. A booted system has a directory on D:\r
 and up as a hard disk (-noshare: not; -share: C: too), and its changes go\r
 back into it when it shuts down; a directory as a CD-ROM drive is a disc.\r
+-overlay DIR leaves the directory as it is: the drive's changes go to DIR\r
+(-t overlay: to the drive mounted already).\r
 IMGMOUNT is the same command.\r
 ";
 
@@ -90,7 +97,7 @@ fn parse_size(value: &str) -> Result<Chs, String> {
 
 /// The options that take a value, and those that don't. A value can start
 /// with a dash (`-label -DISK-`), but can't be one of these.
-const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-freesize", "-usecd"];
+const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-overlay", "-freesize", "-usecd"];
 const FLAGS: &[&str] =
     &["-u", "-ro", "-pr", "-boot", "-share", "-noshare", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
 
@@ -109,6 +116,11 @@ struct Arguments {
     config_relative: bool,
     /// -fs none: the image is the BIOS's alone, as a numbered drive.
     no_file_system: bool,
+    /// -overlay DIR, as given.
+    overlay: Option<String>,
+    /// -t overlay: the path is the folder for the changes of the drive
+    /// mounted already.
+    overlay_of_drive: bool,
 }
 
 fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
@@ -156,6 +168,7 @@ fn missing_value(option: &str) -> String {
         "-fs" => "a file system",
         "-label" => "a name",
         "-chs" | "-size" => "a geometry",
+        "-overlay" => "a directory",
         _ => "a number",
     };
     format!("{} needs {}", option, value)
@@ -164,9 +177,8 @@ fn missing_value(option: &str) -> String {
 fn option_value(option: &str, value: &str, args: &mut Arguments) -> Result<(), String> {
     let opts = &mut args.opts;
     match option {
-        "-t" if value.eq_ignore_ascii_case("overlay") => {
-            return Err("Overlay mounts aren't supported".to_string());
-        }
+        "-t" if value.eq_ignore_ascii_case("overlay") => args.overlay_of_drive = true,
+        "-overlay" => args.overlay = Some(value.to_string()),
         "-t" => opts.kind = parse_kind(value).ok_or_else(|| format!("Unknown drive type '{}'", value))?,
         "-fs" => match value.to_ascii_lowercase().as_str() {
             "fat" => {}
@@ -198,6 +210,8 @@ pub enum MountCmd {
     Help,
     Mount(MountSpec),
     Unmount(u8),
+    /// The drive mounted already, with its changes going to the folder.
+    Overlay(u8, PathBuf),
 }
 
 /// Where the paths a mount names are found.
@@ -328,6 +342,9 @@ pub fn parse_mount_spec(
     if args.unmount {
         return Err("Unknown option '-u'".to_string());
     }
+    if args.overlay_of_drive {
+        return Err("-t overlay is for MOUNT; a drive here takes -overlay DIR".to_string());
+    }
     mount_spec(drive, args, &PathContext { base, config_dir: None, home, locate: &|_| None })
 }
 
@@ -358,6 +375,10 @@ pub fn parse_mount_tokens(tokens: &[String], paths: &PathContext) -> Result<Moun
         return Err("Missing drive letter".to_string());
     }
     let drive = parse_drive(&args.words.remove(0))?;
+    if args.overlay_of_drive {
+        let [dir] = args.words.as_slice() else { return Err("MOUNT drive DIR -t overlay takes one directory".to_string()) };
+        return Ok(MountCmd::Overlay(drive, expand_host_path(dir, paths.base, paths.home)));
+    }
     mount_spec(drive, args, paths).map(MountCmd::Mount)
 }
 
@@ -367,7 +388,7 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
     if drive == DRIVE_Z {
         return Err("Drive Z: is reserved".to_string());
     }
-    let Arguments { words, mut opts, config_relative, no_file_system, .. } = args;
+    let Arguments { words, mut opts, config_relative, no_file_system, overlay, .. } = args;
     // Without a file system, A: to D: are the BIOS's units 0 to 3.
     let drive = match drive {
         _ if !no_file_system || drive_number(drive).is_some() => drive,
@@ -375,6 +396,7 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
         _ => return Err("Only A: to D: and the drive numbers 0 to 3 can be mounted with -fs none".to_string()),
     };
     let base = paths.config_dir.filter(|_| config_relative).unwrap_or(paths.base);
+    opts.overlay = overlay.map(|dir| expand_host_path(&dir, base, paths.home));
     let (first, rest) = words.split_first().ok_or("Missing host directory or disk image")?;
     let mut images = find_paths(first, base, paths)?;
     // The words after an image are more images, or its type.
@@ -557,6 +579,10 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
         Some(false) => value.push_str(" -noshare"),
         None => {}
     }
+    if let Some(dir) = &spec.opts.overlay {
+        value.push_str(" -overlay ");
+        value.push_str(&quote(&contract_home(dir, home)));
+    }
     value
 }
 
@@ -712,7 +738,8 @@ mod tests {
         assert_eq!(mounted(mount("a disk.img -label -DISK-", cwd)).opts.label.as_deref(), Some("-DISK-"));
         assert_eq!(mount("a disk.img -label -ro", cwd), Err("-label needs a name".to_string()));
         assert_eq!(mounted(mount("a disks -t FDD", cwd)).opts.kind, DriveKind::Floppy);
-        assert_eq!(mount("c x -t overlay", cwd), Err("Overlay mounts aren't supported".to_string()));
+        assert_eq!(mount("c x -t overlay", cwd), Ok(MountCmd::Overlay(2, cwd.join("x"))));
+        assert_eq!(mounted(mount("c game -overlay ../saves", cwd)).opts.overlay, Some(PathBuf::from("/saves")));
         // Drive numbers give the BIOS disks without DOS drives.
         let spec = mounted(mount("2 hdd.img -size 512,63,16,142", cwd));
         assert_eq!((spec.drive, spec.path), (numbered_drive(2), cwd.join("hdd.img")));
@@ -838,6 +865,11 @@ mod tests {
             MountSpec { drive: 2, path: "/hd/win95.img".into(), opts: MountOptions { boot: true, ..Default::default() } },
             MountSpec { drive: 3, path: "/home/u/share".into(), opts: MountOptions { share: Some(false), ..Default::default() } },
             MountSpec { drive: 2, path: "/home/u/dos".into(), opts: MountOptions { share: Some(true), ..Default::default() } },
+            MountSpec {
+                drive: 2,
+                path: "/games/doom".into(),
+                opts: MountOptions { overlay: Some("/home/u/saves/doom c".into()), ..Default::default() },
+            },
         ];
         for spec in specs {
             let value = mount_spec_value(&spec, Some(home));

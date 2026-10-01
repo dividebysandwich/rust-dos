@@ -413,6 +413,7 @@ mod tests {
             drive,
             kind: DriveKind::HardDisk,
             root: Some("/x".into()),
+            overlay: None,
             image: None,
             images: Vec::new(),
             image_index: 0,

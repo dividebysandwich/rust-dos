@@ -880,9 +880,11 @@ impl ShellCommand for MountCommand {
                         None => "(built-in)".to_string(),
                     };
                     let access = if info.read_only && info.kind != DriveKind::Virtual {
-                        " (read-only)"
+                        " (read-only)".to_string()
+                    } else if let Some(dir) = &info.overlay {
+                        format!(" (changes in {})", display_host_path(dir))
                     } else {
-                        ""
+                        String::new()
                     };
                     let line = format!(
                         "{:<6}{:<7} {:<11} {}{}{}\r\n",
@@ -899,6 +901,7 @@ impl ShellCommand for MountCommand {
             Ok(MountCmd::Help) => print_string(cpu, MOUNT_USAGE),
             Ok(MountCmd::Mount(spec)) => mount(cpu, spec),
             Ok(MountCmd::Unmount(drive)) => unmount(cpu, drive),
+            Ok(MountCmd::Overlay(drive, dir)) => overlay(cpu, drive, dir),
             Err(e) => {
                 print_string(cpu, &format!("{}\r\n", e));
                 print_string(cpu, MOUNT_USAGE);
@@ -928,6 +931,20 @@ fn mount(cpu: &mut Cpu, spec: MountSpec) {
             );
             print_string(cpu, &msg);
         }
+        Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+    }
+}
+
+/// The drive mounted as `drive` again, with its changes going to `dir`.
+fn overlay(cpu: &mut Cpu, drive: u8, dir: std::path::PathBuf) {
+    let info = cpu.bus.disk.drive_info(drive);
+    let Some(mut spec) = info.as_ref().filter(|i| i.root.is_some()).and_then(|i| i.mount.clone()) else {
+        print_string(cpu, &format!("Drive {} isn't a mounted host directory\r\n", drive_name(drive)));
+        return;
+    };
+    spec.opts.overlay = Some(dir.clone());
+    match cpu.bus.mount_drive(drive, &spec.path, spec.opts, true) {
+        Ok(_) => print_string(cpu, &format!("Drive {}'s changes go to {}\r\n", drive_name(drive), display_host_path(&dir))),
         Err(e) => print_string(cpu, &format!("{}\r\n", e)),
     }
 }
