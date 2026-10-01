@@ -574,3 +574,20 @@ fn a_dos_extender_s_code_at_the_shell_s_number_is_no_prompt() {
     assert!(!cpu.shell_idle());
     assert!(!cpu.at_shell_prompt());
 }
+
+#[test]
+fn xms_2_query_reports_only_memory_below_64_mb() {
+    // DOS/4GW 1.97 allocates what function 08h reports, up to FBFEh KB,
+    // and maps only the first 64 MB.
+    let mut cpu = Cpu::with_memory(PathBuf::from("."), 128);
+    xms_call(&mut cpu, 0x08);
+    assert_eq!((cpu.ax(), cpu.dx()), (0xFBC0, 0xFBC0));
+    xms_call(&mut cpu, 0x88);
+    assert_eq!(cpu.eax(), 127 * 1024 - 64);
+
+    // A block below 64 MB leaves the rest of it.
+    cpu.set_dx(0x8000);
+    assert!(xms_call(&mut cpu, 0x09));
+    xms_call(&mut cpu, 0x08);
+    assert_eq!((cpu.ax(), cpu.dx()), (0x7BC0, 0x7BC0));
+}

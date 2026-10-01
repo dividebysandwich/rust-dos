@@ -27,6 +27,8 @@ pub fn install_entry(bus: &mut crate::bus::Bus) {
 
 /// First byte of extended memory for blocks: the HMA's end, rounded up.
 const XMS_BASE: u32 = 0x0011_0000;
+/// The end of the memory XMS 2.0's functions report.
+const XMS2_END: u32 = 0x0400_0000;
 /// Blocks are allocated in KB.
 const KB: u32 = 1024;
 /// Handles the driver can hand out.
@@ -165,6 +167,7 @@ impl Xms {
         let mut gaps = Vec::new();
         let mut at = XMS_BASE;
         for (start, end) in used {
+            let start = start.min(memory_end);
             if start > at {
                 gaps.push((at, (start - at) / KB));
             }
@@ -370,9 +373,12 @@ pub fn call(cpu: &mut Cpu) {
             cpu.set_ax(a20);
             cpu.set_bx(cpu.bx() & 0xFF00);
         }
-        // Query free memory: largest block and total, in KB.
+        // Query free memory: largest block and total, in KB, below 64 MB,
+        // all an XMS 2.0 driver could see. DOS/4GW 1.97 asks for up to
+        // FBFEh KB of it and maps only the first 64 MB: a block running
+        // past that crashes it.
         0x08 => {
-            let (largest, total) = cpu.bus.xms.free_kb(end);
+            let (largest, total) = cpu.bus.xms.free_kb(end.min(XMS2_END));
             cpu.set_ax(largest.min(0xFFFF) as u16);
             cpu.set_dx(total.min(0xFFFF) as u16);
             cpu.set_bx(cpu.bx() & 0xFF00 | if total == 0 { ERR_OUT_OF_MEMORY as u16 } else { 0 });
