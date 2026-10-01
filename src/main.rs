@@ -1060,8 +1060,8 @@ fn main() -> Result<(), String> {
         }
 
         // The window opening or closing: it takes the keyboard and mouse
-        // from the machine, which pauses but for the Mixer page (see the
-        // batch below).
+        // from the machine, which pauses but for the Mixer page, or while in
+        // a LAN room (see the batch below).
         if ui.is_open() != ui_shown {
             ui_shown = ui.is_open();
             if ui_shown {
@@ -1083,7 +1083,10 @@ fn main() -> Result<(), String> {
         // counted in instructions (see timer.rs), so timer interrupts land on
         // the right instructions however the work is batched between frames.
         let batch_start = std::time::Instant::now();
-        let waiting = dbg.paused || ui.pauses_machine() || paused || rewinding.is_some();
+        // In a LAN room the machine plays on whatever the window shows:
+        // the others' games would wait for it, or drop it.
+        let ui_pauses = ui.pauses_machine() && cpu.bus.net.status().joined().is_none();
+        let waiting = dbg.paused || ui_pauses || paused || rewinding.is_some();
         // Pasted keys go once the keys held are up: the Ctrl and Shift of
         // Ctrl+Shift+V would change them.
         if !waiting && !ui.is_open() && held.is_empty() {
