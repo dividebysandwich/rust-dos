@@ -199,6 +199,9 @@ pub struct Config {
     /// The version of the game RetroAchievements knows (`[game]`'s
     /// `achievements`): its hash, or its zip or DOSZ archive.
     pub game_achievements: Option<String>,
+    /// Whether a game profile's drives keep its changes apart, in a folder
+    /// of its own (`[game]`'s `overlay`, see games.rs).
+    pub game_overlay: bool,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -871,6 +874,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "name" => warn("the game's name is empty".to_string()),
                         "achievements" if !value.is_empty() => config.game_achievements = Some(value.to_string()),
                         "achievements" => {}
+                        "overlay" => match parse_bool(value) {
+                            Some(on) => config.game_overlay = on,
+                            None => warn(format!("invalid overlay '{}' (true or false)", value)),
+                        },
                         _ => warn(format!("unknown setting '{}'", key)),
                     }
                     continue;
@@ -2019,6 +2026,8 @@ mod tests {
         assert_eq!(config.game_name.as_deref(), Some("Commander Keen 4"));
         let config = parse("[game]\nname=\nyear=1991\n", Path::new("/cfg"), None);
         assert_eq!((config.game_name, config.warnings.len()), (None, 2));
+        let config = parse("[game]\noverlay=true\n", Path::new("/cfg"), None);
+        assert!(config.game_overlay && config.warnings.is_empty());
     }
 
     #[test]

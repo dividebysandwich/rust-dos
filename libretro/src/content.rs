@@ -23,7 +23,8 @@ pub struct Dirs {
     pub system: PathBuf,
     pub sys: PathBuf,
     /// The core's folder in the frontend's save directory: the unpacked and
-    /// imported games, and the empty C: of the machine without content.
+    /// imported games, their saves, and the empty C: of the machine without
+    /// content.
     pub data: PathBuf,
 }
 
@@ -41,6 +42,11 @@ impl Dirs {
     /// the content, so loading it again finds it.
     fn imports(&self) -> PathBuf {
         self.data.join("imported")
+    }
+
+    /// The games' changes, a folder for each (`games::overlay_drives`).
+    pub fn saves(&self) -> PathBuf {
+        self.data.join("saves")
     }
 
     /// The machine's C: when the content has none.

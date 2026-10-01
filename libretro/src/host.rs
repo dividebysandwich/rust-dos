@@ -90,10 +90,11 @@ impl Machine {
             self.end_game(previous);
         }
         let base = self.settings.clone();
-        let prepared = games::prepare(id, &base, text, dir, content::home().as_deref())?;
+        let mut prepared = games::prepare(id, &base, text, dir, content::home().as_deref())?;
         for warning in &prepared.warnings {
             self.warn(&format!("{}.conf: {}", id, warning));
         }
+        games::overlay_drives(&mut prepared, id, &self.dirs.saves());
         let settings = content::frontend_settings(prepared.settings);
         if let Err(e) = self.apply(&settings) {
             self.warn(&e);

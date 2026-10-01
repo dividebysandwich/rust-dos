@@ -35,7 +35,7 @@ impl Imported {
     /// those that differ from the configuration's, so the game gets the
     /// ones it was set up with.
     pub fn profile_text(&self, home: Option<&Path>) -> String {
-        let mut text = format!("[game]\nname={}\n", self.name);
+        let mut text = format!("[game]\nname={}\noverlay=true\n", self.name);
         for section in ["emulator", "sound", "joystick", "network"] {
             let lines: Vec<String> =
                 self.settings.iter().filter(|(s, _, _)| *s == section).map(|(_, k, v)| format!("{}={}\n", k, v)).collect();

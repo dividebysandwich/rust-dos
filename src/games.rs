@@ -25,12 +25,18 @@
 //! `[game]`'s `achievements=` says which version of the game it is for
 //! RetroAchievements: the hash of its archive, or the archive (a zip or a
 //! DOSBox Pure .dosz, relative to the games folder).
+//!
+//! `[game]`'s `overlay=true`, which new profiles have, leaves the game's
+//! own drives (its `[drives]`' host directories) as they are: what the
+//! game changes on them goes to `saves/<id>/<drive letter>` beside the
+//! games folder (`saves_dir`, `overlay_drives`), and deleting that
+//! (`reset`) takes the game back to how it was installed.
 
 use crate::config::{self, DriveChange, Settings};
 use crate::cpu::Cpu;
 use crate::hostfs;
 use crate::mount::MountSpec;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A game in the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +130,7 @@ pub fn profile_text(
     if new.command.trim().is_empty() {
         return Err("The game needs a command that starts it".to_string());
     }
-    let mut text = format!("[game]\nname={}\n", new.name.trim());
+    let mut text = format!("[game]\nname={}\noverlay=true\n", new.name.trim());
     let settings = config::update_text("", base, current, drives, home);
     if !settings.is_empty() {
         text.push('\n');
@@ -148,6 +154,9 @@ pub struct Prepared {
     pub autoexec: Vec<String>,
     /// What RetroAchievements knows the game by (`achievements=`).
     pub achievements: Option<String>,
+    /// Its drives' changes go to its saves folder (`overlay=`,
+    /// `overlay_drives`).
+    pub overlay: bool,
     /// Problems in the profile.
     pub warnings: Vec<String>,
 }
@@ -169,8 +178,42 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
         drives: own.drives,
         autoexec: own.autoexec,
         achievements: own.game_achievements,
+        overlay: own.game_overlay,
         warnings: own.warnings,
     })
+}
+
+/// The folder of the games' saves, `saves` beside the games folder
+/// `games`: a folder for each game, with one for each drive in it.
+pub fn saves_dir(games: &Path) -> PathBuf {
+    games.parent().unwrap_or(games).join("saves")
+}
+
+/// With `overlay=`, each of the profile's own drives that is a host
+/// directory gets the folder for its changes in the game's saves
+/// (`saves`/`id`), unless it has one or is read-only.
+pub fn overlay_drives(prepared: &mut Prepared, id: &str, saves: &Path) {
+    if !prepared.overlay {
+        return;
+    }
+    let saves = saves.join(id);
+    for spec in &mut prepared.drives {
+        let opts = &mut spec.opts;
+        if opts.overlay.is_some() || opts.read_only || opts.kind == crate::disk::DriveKind::CdRom || !hostfs::is_dir(&spec.path) {
+            continue;
+        }
+        opts.overlay = Some(saves.join(crate::disk::drive_key(spec.drive)));
+    }
+}
+
+/// Take the game `id` back to how it was installed: its folder in the
+/// saves folder `saves` goes.
+pub fn reset(saves: &Path, id: &str) -> Result<(), String> {
+    let saves = saves.join(id);
+    match hostfs::remove_dir_all(&saves) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {}", saves.display(), e)),
+        _ => Ok(()),
+    }
 }
 
 /// The profile `text` with `achievements=value` in its `[game]` section,
@@ -285,7 +328,7 @@ pub fn unpack(dir: &Path, archive: &Path) -> Result<(std::path::PathBuf, Option<
     };
     // RetroAchievements knows the game by its archive's hash.
     let hash = crate::achievements::hash::hash_archive(archive).map(|h| format!("achievements={}\n", h)).unwrap_or_default();
-    let text = format!("[game]\nname={}\n{}\n[drives]\nC={}\n\n[autoexec]\nC:\n{}\n", name, hash, id, program);
+    let text = format!("[game]\nname={}\noverlay=true\n{}\n[drives]\nC={}\n\n[autoexec]\nC:\n{}\n", name, hash, id, program);
     let path = dir.join(format!("{}.conf", id));
     hostfs::write(&path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
     Ok((folder, Some((id, name))))
@@ -327,7 +370,7 @@ mod tests {
         let base = Settings::default();
         let current = Settings { cycles: CpuSpeed::Fixed(10000), ems: false, ..Settings::default() };
         let text = profile_text(&keen(), &base, &current, &[], None).unwrap();
-        assert_eq!(text, "[game]\nname=Commander Keen 4\n\n[emulator]\ncycles=10000\nems=false\n\n[autoexec]\nC:\nCD \\KEEN4\nKEEN4E\n");
+        assert_eq!(text, "[game]\nname=Commander Keen 4\noverlay=true\n\n[emulator]\ncycles=10000\nems=false\n\n[autoexec]\nC:\nCD \\KEEN4\nKEEN4E\n");
         let config = config::parse(&text, Path::new("/"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(entry("keen4", &text), GameEntry { id: "keen4".into(), name: "Commander Keen 4".into(), command: "KEEN4E".into() });
@@ -335,7 +378,7 @@ mod tests {
         // In the root of D:, the same settings.
         let root = NewGame { directory: "d:\\".into(), ..keen() };
         let text = profile_text(&root, &base, &base, &[], None).unwrap();
-        assert_eq!(text, "[game]\nname=Commander Keen 4\n\n[autoexec]\nD:\nKEEN4E\n");
+        assert_eq!(text, "[game]\nname=Commander Keen 4\noverlay=true\n\n[autoexec]\nD:\nKEEN4E\n");
         assert!(profile_text(&NewGame { name: " ".into(), ..keen() }, &base, &base, &[], None).is_err());
         assert!(profile_text(&NewGame { command: "".into(), ..keen() }, &base, &base, &[], None).is_err());
     }
@@ -405,6 +448,16 @@ mod tests {
         assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
         assert_eq!(prepared.drives[0].path, folder, "C: is the folder, next to the profile");
         assert_eq!(prepared.autoexec, ["C:", "KEEN4E.EXE"]);
+        // Its changes go to its saves.
+        let mut prepared = prepared;
+        assert!(prepared.overlay);
+        overlay_drives(&mut prepared, &id, &saves_dir(&games));
+        let saves = dir.join("saves/commander-keen");
+        assert_eq!(prepared.drives[0].opts.overlay.as_deref(), Some(saves.join("C").as_path()));
+        std::fs::create_dir_all(saves.join("C")).unwrap();
+        reset(&saves_dir(&games), &id).unwrap();
+        assert!(!saves.exists());
+        reset(&saves_dir(&games), &id).unwrap();
         // Again: a folder and profile of its own.
         let (again, _) = unpack(&games, &archive).unwrap();
         assert_eq!(again, games.join("commander-keen-2"));

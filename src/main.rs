@@ -1604,9 +1604,12 @@ impl MainHost<'_, '_> {
             self.end_game(previous);
         }
         let base = self.settings.clone();
-        let prepared = games::prepare(id, &base, text, dir, rust_dos::hostdirs::home_dir().as_deref())?;
+        let mut prepared = games::prepare(id, &base, text, dir, rust_dos::hostdirs::home_dir().as_deref())?;
         for warning in &prepared.warnings {
             config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
+        }
+        if let Some(saves) = self.saved.file.as_deref().and_then(|f| games_dir(Some(f))).map(|g| games::saves_dir(&g)) {
+            games::overlay_drives(&mut prepared, id, &saves);
         }
         if let Err(e) = self.apply(&prepared.settings) {
             config_warning(self.cpu, &e);
