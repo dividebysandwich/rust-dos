@@ -53,7 +53,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   restart, the display adapter included, and saves them to the configuration
   file
 * **Game profiles** with settings and start commands of their own, and
-  import of GOG and DOSBox games
+  import of GOG and DOSBox games; a game's files stay as installed, its
+  saves and changes in a folder of their own, and a reset takes it back
 * **[Save states](#save-states)** (nine slots per game) and rewind
 * **Cheats:** find a game's values in memory, and change or freeze them
 * **[RetroAchievements](CONFIGURATION.md#retroachievements):**

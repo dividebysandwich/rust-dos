@@ -562,7 +562,7 @@ message and the log say where it went.
 
 ### `[drives]`
 
-Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot]`,
+Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot] [-overlay DIR]`,
 the options as `MOUNT` takes them. `-boot` boots the disk image when
 Rust-DOS starts (see [Booting at startup](#booting-at-startup)). A drive number 0 to 3 instead of the
 letter gives the BIOS a disk image without a DOS drive (see [Booting a disk
@@ -718,6 +718,18 @@ starts it. While a game plays, F2 saves the settings window's changes to
 its profile. `--game NAME` launches a game at startup, by its file name
 (`keen4`) or its name, and so does `?game=NAME` in the browser.
 
+A profile with `overlay=true` in `[game]` keeps the game's files as they
+were installed. New, imported and unpacked profiles have it. What the game
+writes on its own drives (the host directories in its `[drives]`, but not
+CD-ROMs or `-ro` drives) goes to `saves/<profile>/<drive letter>` beside
+the `games` folder instead: saved games, setup changes, patches. Files the
+game deletes are hidden, and listed in that folder's `.rust-dos-deleted`.
+That folder holds everything the game changed, so it is the one to back up
+or sync, and **R** on the Games page deletes it, taking the game back to
+how it was installed. A drive with its own `-overlay` keeps it. In the
+libretro core, `saves` is in the core's folder in the frontend's save
+directory.
+
 ## RetroAchievements
 
 [RetroAchievements](https://retroachievements.org) has achievements,
@@ -798,8 +810,7 @@ mounts the files that match as a list, in natural order (`DISK2` before
 directory, or with `-pr` to the configuration file's folder. `-ide 1m`
 to `2s` puts the image on an IDE channel of a booted system (see [Booting
 a disk image](#booting-a-disk-image)). DOSBox's `-freesize` and CD-ROM
-access options are taken and ignored;
-overlays (`-t overlay`) aren't supported. A drive number instead of a
+access options are taken and ignored. A drive number instead of a
 letter (`MOUNT 2 hdd.img`) mounts an image for the BIOS alone, as in
 DOSBox (see [Booting a disk image](#booting-a-disk-image)). `MOUNT /?`
 lists the options. Each drive keeps its own current directory, as in DOS.
@@ -823,6 +834,17 @@ the prompt:
 | `cdrom` or `iso` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. From a CD image it is a whole disc: raw and cooked sector reads, the volume descriptors, the table of contents, and audio tracks that play through the Sound Blaster mixer's CD volume. From a directory, only its files are available. |
 
 `-ro` makes any drive read-only.
+
+`-overlay DIR` leaves a host directory as it is: what DOS writes, creates,
+renames or deletes on the drive goes to `DIR` (made if it isn't there),
+and the drive shows the directory with those changes. A file is copied to
+`DIR` when it is first written, and one deleted from the directory is
+listed in `DIR/.rust-dos-deleted`. Deleting `DIR` takes the drive back to
+the directory as it is. DOSBox's `MOUNT C DIR -t overlay` gives the
+directory mounted as C: the overlay `DIR`, and an imported DOSBox
+configuration keeps it. A booted system's [shared
+disks](#booting-a-disk-image) write their changes to the overlay too.
+`MOUNT` lists where each drive's changes go.
 
 A: and B: are always floppy drives, whatever type the mount gives, and
 can't hold a CD or a partitioned hard disk image. Programs see them the way
