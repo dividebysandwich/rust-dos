@@ -44,6 +44,12 @@ struct Args {
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..=16))]
     scale: Option<u32>,
 
+    /// Show each frame when the machine's display draws it, for a display
+    /// with a variable refresh rate (G-Sync, FreeSync) [default: the
+    /// config file's vrr]
+    #[arg(long)]
+    vrr: bool,
+
     /// Root directory for Drive C: [default: the config file's C:, or "."]
     #[arg(short, long)]
     dir: Option<String>,
@@ -153,6 +159,9 @@ fn main() -> Result<(), String> {
     let mut settings = Settings::from_config(&config);
     if let Some(scale) = args.scale {
         settings.scale = scale;
+    }
+    if args.vrr {
+        settings.vrr = true;
     }
     if let Some(cycles) = args.cycles {
         settings.cycles = cycles;
@@ -1086,8 +1095,17 @@ fn main() -> Result<(), String> {
             let pad = controllers.get(slot).map(|pad| if waiting { joystick::PadState::default() } else { pad_state(pad) });
             cpu.bus.joystick.set_pad(slot, pad);
         }
+        // With a variable refresh rate, each frame runs to a vertical
+        // retrace of the machine's display and is shown when it is due,
+        // so the window refreshes at the machine's rate, where the host's
+        // display goes that fast.
+        let refresh = (settings.vrr && !waiting)
+            .then(|| cpu.bus.refresh_timing())
+            .filter(|timing| display.shows_hz(timing.hz()));
         let batch_end = if waiting {
             cpu.bus.clock.icount
+        } else if let Some(refresh) = &refresh {
+            pacer.retrace_batch_end(&cpu.bus.clock, refresh, batch_start)
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
         };
@@ -1390,6 +1408,7 @@ fn main() -> Result<(), String> {
                 }
             }
         }
+        pacer.wait_to_present(&cpu.bus.clock);
         display.present(&mut screen, voodoo_gl.then_some(&cached_frame), ui.layer())?;
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time);

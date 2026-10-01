@@ -113,6 +113,9 @@ pub struct Config {
     pub fullscreen: Option<bool>,
     /// Stretch the picture to 4:3 (`aspect`).
     pub aspect: Option<bool>,
+    /// Show each of the machine's frames when it is due, for a display
+    /// with a variable refresh rate (`vrr`).
+    pub vrr: Option<bool>,
     /// How the picture is scaled to the window (`filter`).
     pub filter: Option<Filter>,
     /// The CRT look (`shader`), how far its tube bends (`crt_curvature`)
@@ -704,6 +707,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.aspect = Some(on),
                             None => warn(format!("invalid {} '{}' (true or false)", key, value)),
                         },
+                        "vrr" => match parse_bool(value) {
+                            Some(on) => config.vrr = Some(on),
+                            None => warn(format!("invalid vrr '{}' (true or false)", value)),
+                        },
                         "filter" => match Filter::parse(value) {
                             Some(filter) => config.filter = Some(filter),
                             None => warn(format!("invalid filter '{}' (nearest or linear)", value)),
@@ -1066,6 +1073,7 @@ pub struct Settings {
     pub scale: u32,
     pub fullscreen: bool,
     pub aspect: bool,
+    pub vrr: bool,
     pub filter: Filter,
     pub shader: Shader,
     /// The CRT look's own settings.
@@ -1135,6 +1143,7 @@ impl Default for Settings {
             scale: 1,
             fullscreen: false,
             aspect: false,
+            vrr: false,
             filter: Filter::Nearest,
             shader: Shader::None,
             crt: CrtSettings::default(),
@@ -1192,6 +1201,7 @@ impl Settings {
             scale: config.scale.unwrap_or(default.scale),
             fullscreen: config.fullscreen.unwrap_or(default.fullscreen),
             aspect: config.aspect.unwrap_or(default.aspect),
+            vrr: config.vrr.unwrap_or(default.vrr),
             filter: config.filter.unwrap_or(default.filter),
             shader: config.shader.unwrap_or(default.shader),
             crt: CrtSettings {
@@ -1254,6 +1264,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "scale", Some(settings.scale.to_string())),
         (Emulator, "fullscreen", yes_no(settings.fullscreen)),
         (Emulator, "aspect", yes_no(settings.aspect)),
+        (Emulator, "vrr", yes_no(settings.vrr)),
         (Emulator, "filter", Some(settings.filter.name().to_string())),
         (Emulator, "shader", Some(settings.shader.name().to_string())),
         (Emulator, "crt_curvature", Some(settings.crt.curvature.to_string())),
@@ -2111,6 +2122,7 @@ mod tests {
         assert_eq!((config.cycles, config.core), (None, None));
         assert_eq!((config.ems, config.umb), (None, None));
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
+        assert_eq!(config.vrr, None);
         assert_eq!((config.shader, config.monochrome, config.machine), (None, None, None));
         assert_eq!(config.sound, SoundConfig::default());
         assert_eq!(config.mixer, MixerSettings::default());
@@ -2119,16 +2131,18 @@ mod tests {
 
     #[test]
     fn display_settings() {
-        let text = "[emulator]\nfullscreen=yes\naspect=off\nfilter=Linear\nshader=CRT\nmonochrome=Amber\ncrt_curvature=0\nCRT_Glow=45%\n";
+        let text = "[emulator]\nfullscreen=yes\naspect=off\nvrr=on\nfilter=Linear\nshader=CRT\nmonochrome=Amber\ncrt_curvature=0\nCRT_Glow=45%\n";
         let config = parse(text, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!((config.fullscreen, config.aspect, config.filter), (Some(true), Some(false), Some(Filter::Linear)));
+        assert_eq!(config.vrr, Some(true));
         assert_eq!((config.shader, config.monochrome), (Some(Shader::Crt), Some(Monochrome::Amber)));
         assert_eq!(Settings::from_config(&config).crt, CrtSettings { curvature: 0, glow: 45 });
-        let text = "[emulator]\nfullscreen=maybe\nfilter=blur\nshader=bent\nmonochrome=blue\ncrt_curvature=200\ncrt_glow=lots\n";
+        let text = "[emulator]\nfullscreen=maybe\nvrr=sometimes\nfilter=blur\nshader=bent\nmonochrome=blue\ncrt_curvature=200\ncrt_glow=lots\n";
         let config = parse(text, Path::new("/cfg"), None);
-        assert_eq!(config.warnings.len(), 6, "{:?}", config.warnings);
-        assert!(config.warnings[5].contains("invalid crt_glow 'lots' (0 to 100)"), "{:?}", config.warnings);
+        assert_eq!(config.warnings.len(), 7, "{:?}", config.warnings);
+        assert!(config.warnings[1].contains("invalid vrr 'sometimes'"), "{:?}", config.warnings);
+        assert!(config.warnings[6].contains("invalid crt_glow 'lots' (0 to 100)"), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings::default());
     }
 
@@ -2226,6 +2240,7 @@ mod tests {
             scale: 3,
             fullscreen: true,
             aspect: true,
+            vrr: true,
             filter: Filter::Linear,
             shader: Shader::Crt,
             crt: CrtSettings { curvature: 70, glow: 90 },

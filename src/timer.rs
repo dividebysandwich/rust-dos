@@ -12,6 +12,7 @@
 
 use crate::autospeed::AutoSpeed;
 use crate::bus::Bus;
+use crate::video::crt::CrtTiming;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -49,6 +50,30 @@ pub const IO_WRITE_NS: u64 = 750;
 
 fn duration_to_ticks(d: Duration) -> u64 {
     (d.as_nanos() * PIT_HZ as u128 / 1_000_000_000) as u64
+}
+
+fn ticks_to_duration(ticks: u64) -> Duration {
+    Duration::from_nanos((ticks as u128 * 1_000_000_000 / PIT_HZ as u128) as u64)
+}
+
+/// How far past the start of a retrace a batch that runs to it ends, so
+/// that the display sees it began whatever the rounding between
+/// instructions, ticks and nanoseconds.
+const RETRACE_MARGIN_NS: u64 = 1000;
+
+/// How long before a frame is due `sleep_until` stops sleeping and spins:
+/// a sleep can overshoot by about that much.
+const SPIN: Duration = Duration::from_millis(1);
+
+/// Wait until `at`, closer than a sleep alone would.
+fn sleep_until(at: Instant) {
+    let now = Instant::now();
+    if at > now + SPIN {
+        std::thread::sleep(at - now - SPIN);
+    }
+    while Instant::now() < at {
+        std::thread::yield_now();
+    }
 }
 
 /// A video frame (1/60 s) in PIT ticks.
@@ -406,6 +431,13 @@ pub struct Pacer {
     /// Fast forward (held Alt+F12): emulated time runs ahead of the wall
     /// clock.
     fast_forward: bool,
+    /// When the frame the batch runs to is due on the wall clock, and the
+    /// emulated time it ends at (`retrace_batch_end`).
+    deadline: Option<(Instant, u64)>,
+    /// Whether this frame was shown at its deadline (`wait_to_present`).
+    presented: bool,
+    /// The emulated time the batch covers, a frame's.
+    period: Duration,
 }
 
 impl Pacer {
@@ -419,6 +451,9 @@ impl Pacer {
             anchor_ticks: 0,
             next_frame: now,
             fast_forward: false,
+            deadline: None,
+            presented: false,
+            period: FRAME,
         }
     }
 
@@ -441,6 +476,7 @@ impl Pacer {
         self.anchor_wall = now;
         self.anchor_ticks = clock.now_ticks();
         self.next_frame = now;
+        self.deadline = None;
     }
 
     pub fn fast_forward(&self) -> bool {
@@ -461,6 +497,8 @@ impl Pacer {
     /// behind (slow host, debugger pause), the backlog is dropped and only
     /// one frame's worth is scheduled.
     pub fn batch_end(&mut self, clock: &Clock, now: Instant) -> u64 {
+        self.deadline = None;
+        self.period = FRAME;
         let emulated = clock.now_ticks();
         if self.fast_forward {
             return clock.icount_at(emulated + duration_to_ticks(FRAME) * FAST_FORWARD_FRAMES as u64);
@@ -475,6 +513,48 @@ impl Pacer {
             wall.max(emulated)
         };
         clock.icount_at(target)
+    }
+
+    /// Like `batch_end`, but on to the start of the display's next vertical
+    /// retrace (`refresh`'s) after the wall clock, noting when that is due
+    /// on the wall clock, which `wait_to_present` waits for: a frame shown
+    /// for each retrace when it begins, a display with a variable refresh
+    /// rate refreshes at the emulated one, 70 Hz or whatever the CRTC's
+    /// registers make it, rather than the host's frames'. A host that
+    /// falls behind skips retraces rather than slowing the machine down.
+    pub fn retrace_batch_end(&mut self, clock: &Clock, refresh: &CrtTiming, now: Instant) -> u64 {
+        if self.fast_forward {
+            return self.batch_end(clock, now);
+        }
+        let emulated = clock.now_ticks();
+        let mut wall =
+            self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
+        if wall > emulated + duration_to_ticks(MAX_LAG) {
+            self.anchor_wall = now;
+            self.anchor_ticks = emulated;
+            wall = emulated;
+        }
+        // The retrace in the display's nanoseconds, which count from where
+        // the clock's ticks do.
+        let from_ns = clock.now_ns() + ticks_to_duration(wall.saturating_sub(emulated)).as_nanos() as u64;
+        let retrace_ns = refresh.next_retrace(from_ns) + RETRACE_MARGIN_NS;
+        let ahead = (((retrace_ns - clock.now_ns()) as u128 * PIT_HZ as u128).div_ceil(1_000_000_000)) as u64;
+        let target = emulated + ahead;
+        self.deadline = Some((self.anchor_wall + ticks_to_duration(target - self.anchor_ticks), target));
+        self.period = Duration::from_nanos(refresh.frame_ns());
+        clock.icount_at(target)
+    }
+
+    /// Wait for the frame's deadline (`retrace_batch_end`), if the batch
+    /// got to it, so it is shown then.
+    pub fn wait_to_present(&mut self, clock: &Clock) {
+        if let Some((at, ticks)) = self.deadline.take()
+            && clock.now_ticks() >= ticks
+        {
+            sleep_until(at);
+            self.next_frame = at;
+            self.presented = true;
+        }
     }
 
     /// Frame bookkeeping after a batch, on `bus` as it is after it. At max,
@@ -498,7 +578,7 @@ impl Pacer {
         let current = bus.clock.cycles_per_ms();
         let ideal = (executed >= 10_000).then(|| {
             let ns_per_instr = exec.as_nanos() as f64 / executed as f64;
-            let frame_ns = FRAME.as_nanos() as f64;
+            let frame_ns = self.period.as_nanos() as f64;
             let budget_ns =
                 (frame_ns * MAX_BUSY_SHARE - overhead.as_nanos() as f64).max(frame_ns * 0.1);
             budget_ns / ns_per_instr / (frame_ns / 1_000_000.0)
@@ -538,8 +618,12 @@ impl Pacer {
         }
     }
 
-    /// Sleep until the next video frame is due; fast forwarding, not at all.
+    /// Sleep until the next video frame is due; fast forwarding, or once
+    /// the frame was shown at its deadline (`wait_to_present`), not at all.
     pub fn wait_for_next_frame(&mut self) {
+        if std::mem::take(&mut self.presented) {
+            return;
+        }
         if self.fast_forward {
             self.next_frame = Instant::now();
             return;
@@ -590,6 +674,71 @@ mod tests {
         let end = pacer.batch_end(&clock, now + FRAME);
         let ran = clock.icount_at(ahead + frame_ticks).abs_diff(end);
         assert!(ran <= 1, "{} instructions off a frame", ran);
+    }
+
+    #[test]
+    fn retrace_pacing_runs_each_batch_to_a_retrace_due_a_frame_apart() {
+        let start = Instant::now();
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let refresh = CrtTiming::VGA_400;
+        let frame = refresh.frame_ns();
+        let mut now = start;
+        let mut last: Option<(Instant, u64)> = None;
+        for _ in 0..20 {
+            let end = pacer.retrace_batch_end(&clock, &refresh, now);
+            clock.icount = end;
+            let retraces = refresh.retraces(clock.now_ns());
+            let (at, _) = pacer.deadline.expect("a deadline");
+            if let Some((last_at, last_retraces)) = last {
+                // One retrace per batch, each due a 70 Hz frame after the last.
+                assert_eq!(retraces, last_retraces + 1);
+                let apart = (at - last_at).as_nanos() as i64;
+                assert!((apart - frame as i64).abs() < 2000, "{} ns apart", apart);
+            }
+            // The batch ends just past the retrace's start.
+            assert!(clock.now_ns() - (refresh.next_retrace(clock.now_ns()) - frame) < 3000);
+            assert_eq!(pacer.period, Duration::from_nanos(frame));
+            last = Some((at, retraces));
+            // The frame is shown at its deadline; the next starts then.
+            now = at + Duration::from_micros(300);
+        }
+    }
+
+    #[test]
+    fn retrace_pacing_skips_retraces_a_slow_host_missed() {
+        let start = Instant::now();
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let refresh = CrtTiming::VGA_400;
+        clock.icount = pacer.retrace_batch_end(&clock, &refresh, start);
+        let first = refresh.retraces(clock.now_ns());
+        let (at, _) = pacer.deadline.unwrap();
+        // The host took two and a half frames more: the batch runs to the
+        // retrace after the wall clock, not the next one.
+        let late = at + Duration::from_nanos(refresh.frame_ns() * 5 / 2);
+        clock.icount = pacer.retrace_batch_end(&clock, &refresh, late);
+        assert_eq!(refresh.retraces(clock.now_ns()), first + 3);
+        let (next, _) = pacer.deadline.unwrap();
+        assert!(next >= late);
+    }
+
+    #[test]
+    fn retrace_pacing_waits_only_for_a_batch_that_got_there() {
+        let start = Instant::now();
+        let clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        let refresh = CrtTiming::VGA_400;
+        // Stopped short (a breakpoint): no waiting, and the next frame
+        // comes at the usual pace.
+        pacer.retrace_batch_end(&clock, &refresh, start);
+        pacer.wait_to_present(&clock);
+        assert!(!pacer.presented);
+        // Fast forwarding: no deadline at all.
+        pacer.set_fast_forward(true, &clock, start);
+        pacer.retrace_batch_end(&clock, &refresh, start);
+        assert!(pacer.deadline.is_none());
+        assert_eq!(pacer.period, FRAME);
     }
 
     #[test]

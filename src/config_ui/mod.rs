@@ -354,7 +354,7 @@ impl Page {
         match self {
             Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
             Page::Display => {
-                &[Scale, Fullscreen, Aspect, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
+                &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, DosHigh, Dpmi,
@@ -457,6 +457,9 @@ enum Item {
     Scale,
     Fullscreen,
     Aspect,
+    /// Frames shown when the machine's are due, for a display with a
+    /// variable refresh rate.
+    Vrr,
     Filter,
     Shader,
     /// How far the CRT look's tube bends and how much it glows, shown
@@ -723,6 +726,7 @@ impl Item {
             Scale => "Window scale",
             Fullscreen => "Fullscreen",
             Aspect => "4:3 aspect correction",
+            Vrr => "Variable refresh rate (VRR)",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
@@ -824,7 +828,7 @@ impl Item {
     /// Whether the frontend has what the setting needs.
     fn available(self, frontend: Frontend) -> bool {
         match self {
-            Item::Scale | Item::Fullscreen => frontend.window,
+            Item::Scale | Item::Fullscreen | Item::Vrr => frontend.window,
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
             // The ROM is a host file; the program downloads it.
@@ -883,7 +887,7 @@ impl Item {
     fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
+            Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
             Cycles | Core | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | Rewind | RewindMemory
@@ -921,6 +925,7 @@ impl Item {
             Scale => format!("{}x", s.scale),
             Fullscreen => on_off(s.fullscreen),
             Aspect => on_off(s.aspect),
+            Vrr => on_off(s.vrr),
             Filter => match s.filter {
                 crate::config::Filter::Nearest => "nearest (sharp)",
                 crate::config::Filter::Linear => "linear (smooth)",
@@ -1112,6 +1117,7 @@ impl Item {
             Scale => each(s, 1..=16, |s, scale| s.scale = scale),
             Fullscreen => on_off(|s, on| s.fullscreen = on),
             Aspect => on_off(|s, on| s.aspect = on),
+            Vrr => on_off(|s, on| s.vrr = on),
             Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),

@@ -82,6 +82,9 @@ pub struct Display<'a> {
     /// The layer over the picture last shown (a manual's page), by its
     /// generation.
     layer_shown: Option<u64>,
+    /// The refresh rate of the display the window is on, where SDL knows
+    /// it.
+    refresh_hz: Option<f64>,
 }
 
 /// What draws the picture.
@@ -179,12 +182,14 @@ impl<'a> Display<'a> {
             voodoo_said: false,
             voodoo_shown: false,
             layer_shown: None,
+            refresh_hz: None,
         };
         // For the window managers and taskbars that take the icon from the
         // window rather than from rust-dos.desktop. The test below keeps
         // the icon decoding, so there is nothing to report.
         let _ = set_icon(display.out.window_mut());
         display.set_fullscreen(settings.fullscreen)?;
+        display.update_refresh_rate();
         Ok(display)
     }
 
@@ -202,6 +207,24 @@ impl<'a> Display<'a> {
     /// was resized or uncovered.
     pub fn redraw(&mut self) {
         self.redraw = true;
+        // The window may have moved to another display.
+        self.update_refresh_rate();
+    }
+
+    fn update_refresh_rate(&mut self) {
+        let index = self.out.window_mut().display_index();
+        self.refresh_hz = index
+            .and_then(|i| self.video.current_display_mode(i))
+            .ok()
+            .map(|mode| mode.refresh_rate as f64)
+            .filter(|&hz| hz > 0.0);
+    }
+
+    /// Whether the display shows frames at `hz`, as far as SDL knows: a
+    /// display with a variable refresh rate goes up to its own, and no
+    /// faster. SDL rounds the rate down to whole hertz.
+    pub fn shows_hz(&self, hz: f64) -> bool {
+        self.refresh_hz.is_none_or(|max| hz < max + 1.0)
     }
 
     /// Follow the picture's size, which the video mode sets.

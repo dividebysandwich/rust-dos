@@ -804,6 +804,11 @@ impl Voodoo {
         self.timing.hz()
     }
 
+    /// The video timing of its picture.
+    pub fn timing(&self) -> CrtTiming {
+        self.timing
+    }
+
     /// Get the picture ready to be drawn (the gamma table's colours), and
     /// say whether the screen changed: the picture shown did, or the card
     /// took or gave back the monitor.

@@ -23,6 +23,17 @@ shape: circles come out round, as the artists drew them.
 
 Leave it **off** for perfectly square, sharp pixels.
 
+# Variable refresh rate (VRR) {#vrr}
+
+VGA games run at **70 Hz**, and some modes at 60 Hz or other rates. A
+60 Hz display drops one frame in seven of 70, which makes scrolling
+judder. Turn this **on** with a G-Sync or FreeSync display, and each
+frame shows when it is due: the display runs at the game's own rate.
+
+VRR must be on for the display and for windows: in the graphics
+driver's settings, or with *adaptive sync* on in the desktop. Leave this
+**off** with a fixed-rate display.
+
 # Scaling filter {#filter}
 
 How the picture is blown up to the window's size:

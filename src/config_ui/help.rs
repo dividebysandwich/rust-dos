@@ -272,6 +272,7 @@ impl Item {
             Scale => "scale",
             Fullscreen => "fullscreen",
             Aspect => "aspect",
+            Vrr => "vrr",
             Filter => "filter",
             Shader => "shader",
             CrtCurvature => "crt-curvature",

@@ -825,6 +825,17 @@ fn long_pages_have_a_scroll_bar() {
 }
 
 #[test]
+fn vrr_turns_on_at_once() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Display);
+    ui.row = ui.items().iter().position(|&i| i == Item::Vrr).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("off"));
+    pick(&mut ui, &mut host, "on");
+    assert!(host.applied.last().unwrap().vrr);
+}
+
+#[test]
 fn the_crt_shader_steps_through_the_looks() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);

@@ -2719,6 +2719,15 @@ impl Bus {
         }
     }
 
+    /// The video timing of the picture the monitor shows: the 3dfx card's
+    /// while it drives the monitor, the display's otherwise.
+    pub fn refresh_timing(&mut self) -> crate::video::crt::CrtTiming {
+        match &self.voodoo {
+            Some(v) if v.output() => v.timing(),
+            _ => self.vga.timing(),
+        }
+    }
+
     /// Latch the display Start Address if emulated time has passed the
     /// start of a vertical retrace since it was last latched, as the CRTC
     /// does at every retrace.
