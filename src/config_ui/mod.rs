@@ -3060,10 +3060,10 @@ impl ConfigUi {
         }
         let buttons = dialog.fields();
         if buttons.contains(&Field::Overlay) {
-            put(g, Field::Overlay, top + 7, "Changes to", &text_field(&dialog.overlay, top + 7, cols));
+            put(g, Field::Overlay, top + 7, "Write to", &text_field(&dialog.overlay, top + 7, cols));
             put(g, Field::OverlayBrowse, top + 8, "", &button("[ Browse... ]", top + 8, value_col));
             if top + 8 < bottom {
-                let hint = "(empty: written in place; an archive read-only)";
+                let hint = "(empty = write to mounted image)";
                 g.text_to(value_col + 15, top + 8, &fit(hint, end.saturating_sub(value_col + 15)), draw::DIM, end);
             }
         }
