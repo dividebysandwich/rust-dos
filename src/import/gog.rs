@@ -67,9 +67,13 @@ pub fn with_base(conf: &Path) -> Vec<PathBuf> {
 }
 
 /// Where DOSBox may have run for a folder's configuration: GOG's DOSBOX
-/// folder in it, or the folder itself.
+/// folder in it, the folder itself, or one up to four levels above it, as
+/// collections such as eXoDOS keep each game's configuration in a folder
+/// of its own and run DOSBox from their root.
 fn bases(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.join("DOSBOX"), dir.to_path_buf()]
+    let mut bases = vec![dir.join("DOSBOX"), dir.to_path_buf()];
+    bases.extend(dir.ancestors().skip(1).take(4).map(Path::to_path_buf));
+    bases
 }
 
 /// Import the game in `dir`: a GOG install, or a folder with DOSBox
@@ -83,7 +87,7 @@ pub fn import(dir: &Path, home: Option<&Path>) -> Result<Imported, String> {
                 return Err(format!("{}: no GOG game or DOSBox configuration to start it with", dir.display()));
             }
             let name = dir.file_name().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
-            import_confs(&confs, &bases(dir), &name, &[], home)
+            import_confs(&confs, &bases(dir), &name, &[], home, dir)
         }
     }
 }
@@ -116,7 +120,7 @@ fn import_info(info: &Path, home: Option<&Path>) -> Result<Imported, String> {
     if confs.is_empty() {
         confs = conf_files(install);
     }
-    import_confs(&confs, &[working_dir, install.to_path_buf()], &name, &commands, home)
+    import_confs(&confs, &[working_dir, install.to_path_buf()], &name, &commands, home, install)
 }
 
 /// Import a DOSBox configuration file (with the settings of the file it
@@ -128,16 +132,24 @@ pub fn import_conf(conf: &Path, home: Option<&Path>) -> Result<Imported, String>
         Some(_) => dir.file_name().map_or(stem.clone(), |n| n.to_string_lossy().into_owned()),
         None => stem,
     };
-    import_confs(&with_base(conf), &bases(dir), &name, &[], home)
+    import_confs(&with_base(conf), &bases(dir), &name, &[], home, dir)
 }
 
-fn import_confs(confs: &[PathBuf], bases: &[PathBuf], name: &str, commands: &[String], home: Option<&Path>) -> Result<Imported, String> {
+/// The game's folder `c_root` is C: if the files mount none.
+fn import_confs(
+    confs: &[PathBuf],
+    bases: &[PathBuf],
+    name: &str,
+    commands: &[String],
+    home: Option<&Path>,
+    c_root: &Path,
+) -> Result<Imported, String> {
     let texts = confs
         .iter()
         .map(|p| fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| format!("{}: {}", p.display(), e)))
         .collect::<Result<Vec<String>, String>>()?;
     let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let mut imported = dosbox::import(&texts, bases, name, home);
+    let mut imported = dosbox::import_in(&texts, bases, name, home, Some(c_root));
     imported.autoexec.extend(commands.iter().cloned());
     if imported.autoexec.is_empty() {
         return Err(format!("{}: the configuration starts no program", name));

@@ -3363,6 +3363,10 @@ mod tests {
         let h = disk.open_file(r"D:\DATA.DAT", 0, PSP).unwrap();
         assert_eq!(disk.read_file(h, 16).unwrap(), b"cd data");
         assert!(disk.list_directory(r"D:\GAME.EXE", 0).unwrap().is_empty(), "only the folder");
+        // In any case, as DOSBox configurations name them.
+        disk.mount(5, &base.join("game.zip/cd"), MountOptions::default(), false).unwrap();
+        let h = disk.open_file(r"F:\DATA.DAT", 0, PSP).unwrap();
+        assert_eq!(disk.read_file(h, 16).unwrap(), b"cd data");
         let list = MountOptions { more_images: vec![base.join("game.zip/DISKS/disk2.img")], ..MountOptions::default() };
         disk.mount(numbered_drive(0), &base.join("game.zip/DISKS/DISK1.IMG"), list, false).unwrap();
         let archive = fs::canonicalize(base.join("game.zip")).unwrap();

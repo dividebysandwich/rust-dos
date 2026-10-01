@@ -735,7 +735,17 @@ configuration files (GOG's older `dosboxGame.conf` and
 `dosboxGame_single.conf`), or one such file. The profile gets the CPU,
 memory, video, sound, joystick and keyboard settings the configuration has,
 the drives its `[autoexec]` mounts (CD images included), and its commands
-but EXIT; what doesn't come across goes to the log.
+but EXIT; what doesn't come across goes to the log. DOSBox Staging's
+`cpu_cycles` and `cpu_cycles_protected` become `cycles` (a real-mode speed
+with a faster protected mode is `auto` with that speed), `CONFIG -SET`
+lines become the profile's settings, and `LOADFIX` runs the program it
+names (programs load above 64 KB anyway). A value rust-dos can't have,
+such as a Sound Blaster on IRQ 4, is left out for the default. A
+configuration that mounts no C: gets its own folder as C:, and paths it
+doesn't find from its folder are looked for in the folders up to four
+levels above, as collections such as eXoDOS run DOSBox from their root.
+[Packages](GAME-PACKAGES.md#packages-made-for-dosbox) made for DOSBox
+are imported the same way.
 
 The settings window's **Games** page lists the profiles. Enter launches a
 game at the DOS prompt: its settings apply on top of the configuration's,

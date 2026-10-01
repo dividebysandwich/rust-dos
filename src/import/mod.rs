@@ -35,14 +35,7 @@ impl Imported {
     /// ones it was set up with.
     pub fn profile_text(&self, home: Option<&Path>) -> String {
         let mut text = format!("[game]\nname={}\noverlay=true\n", self.name);
-        for section in ["emulator", "sound", "joystick", "network"] {
-            let lines: Vec<String> =
-                self.settings.iter().filter(|(s, _, _)| *s == section).map(|(_, k, v)| format!("{}={}\n", k, v)).collect();
-            if !lines.is_empty() {
-                text.push_str(&format!("\n[{}]\n", section));
-                text.extend(lines);
-            }
-        }
+        text.push_str(&self.settings_text());
         if !self.drives.is_empty() {
             text.push_str("\n[drives]\n");
             for spec in &self.drives {
@@ -56,6 +49,39 @@ impl Imported {
             text.push('\n');
         }
         text
+    }
+}
+
+impl Imported {
+    /// The settings as a profile's sections, each after a blank line.
+    pub fn settings_text(&self) -> String {
+        let mut text = String::new();
+        for section in ["emulator", "sound", "mixer", "joystick", "network", "serial", "printer"] {
+            let lines: Vec<String> =
+                self.settings.iter().filter(|(s, _, _)| *s == section).map(|(_, k, v)| format!("{}={}\n", k, v)).collect();
+            if !lines.is_empty() {
+                text.push_str(&format!("\n[{}]\n", section));
+                text.extend(lines);
+            }
+        }
+        text
+    }
+
+    /// Leave out the settings rust-dos wouldn't take (an IRQ its card
+    /// can't have, say), with a warning, so the profile has none.
+    fn drop_invalid(&mut self) {
+        let mut warnings = Vec::new();
+        self.settings.retain(|(section, key, value)| {
+            let text = format!("[{}]\n{}={}\n", section, key, value);
+            // The line's own errors, not those between it and the defaults.
+            let config = crate::config::parse(&text, Path::new("/"), None);
+            let errors: Vec<&str> = config.warnings.iter().filter_map(|w| w.strip_prefix("line 2: ")).collect();
+            for error in &errors {
+                warnings.push(format!("{}={} isn't imported: {}", key, value, error));
+            }
+            errors.is_empty()
+        });
+        self.warnings.extend(warnings);
     }
 }
 

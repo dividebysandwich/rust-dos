@@ -160,14 +160,6 @@ pub fn overlay_drives(overlay: &Overlay) -> Vec<MountSpec> {
     config::parse(&overlay.text, &overlay.dir, home().as_deref()).drives
 }
 
-/// Whether `text` is a DOSBox configuration rather than rust-dos's.
-fn is_dosbox_conf(text: &str) -> bool {
-    text.lines().map(str::trim).any(|line| {
-        let line = line.to_ascii_lowercase();
-        ["[dosbox]", "[cpu]", "[sdl]", "[render]", "[sblaster]", "[dos]", "[speaker]", "[midi]"].contains(&line.as_str())
-    })
-}
-
 /// Whether configuration text has commands to start a game.
 fn has_autoexec(text: &str) -> bool {
     !config::autoexec_lines(text).iter().all(|l| l.trim().is_empty() || l.trim().starts_with('#'))
@@ -258,7 +250,7 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, Str
     }
     if ext == "conf" {
         let text = fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        if is_dosbox_conf(&text) {
+        if rust_dos::import::dosbox::is_dosbox_conf(&text) {
             plan.profile = Some(imported(dirs, &path)?);
             return Ok(plan);
         }
@@ -340,8 +332,8 @@ mod tests {
 
     #[test]
     fn dosbox_and_rust_dos_configurations_are_told_apart() {
-        assert!(is_dosbox_conf("[sdl]\nfullscreen=false\n[cpu]\ncycles=max\n"));
-        assert!(!is_dosbox_conf("[emulator]\ncycles=max\n[mixer]\nopl=80\n[autoexec]\nC:\n"));
+        assert!(rust_dos::import::dosbox::is_dosbox_conf("[sdl]\nfullscreen=false\n[cpu]\ncycles=max\n"));
+        assert!(!rust_dos::import::dosbox::is_dosbox_conf("[emulator]\ncycles=max\n[mixer]\nopl=80\n[autoexec]\nC:\n"));
         assert!(has_autoexec("[autoexec]\nC:\nGAME\n"));
         assert!(!has_autoexec("[emulator]\ncycles=max\n"));
     }

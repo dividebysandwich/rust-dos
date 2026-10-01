@@ -41,17 +41,57 @@ fn parse(text: &str) -> Conf {
     conf
 }
 
+/// Whether `text` is a DOSBox configuration rather than rust-dos's: it has
+/// one of DOSBox's own sections.
+pub fn is_dosbox_conf(text: &str) -> bool {
+    text.lines().map(str::trim).any(|line| {
+        let line = line.to_ascii_lowercase();
+        ["[dosbox]", "[cpu]", "[sdl]", "[render]", "[sblaster]", "[dos]", "[speaker]", "[midi]"].contains(&line.as_str())
+    })
+}
+
 /// A game whose DOSBox configuration is `texts` (in the order DOSBox reads
 /// them), called `name`. Paths in them are relative to the directory DOSBox
 /// runs in, the first of `bases` where they are (the files may have moved
 /// since they were set up).
 pub fn import(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>) -> Imported {
+    import_in(texts, bases, name, home, None)
+}
+
+/// `import`, with `c_root` as C: if the configuration mounts no C: of its
+/// own, as DOSBox Pure has a game's zip or folder, and the commands run on
+/// it rather than on Z:.
+pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>, c_root: Option<&Path>) -> Imported {
+    let imported = import_from(texts, bases, name, home, true);
+    match c_root {
+        Some(root) if !imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) => {
+            let mut imported = import_from(texts, bases, name, home, false);
+            let opts = Default::default();
+            imported.drives.insert(0, crate::mount::MountSpec { drive: crate::disk::DRIVE_C, path: root.to_path_buf(), opts });
+            imported.autoexec.insert(0, "C:".to_string());
+            imported
+        }
+        _ => imported,
+    }
+}
+
+fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>, mut on_z: bool) -> Imported {
     let mut imported = Imported { name: name.to_string(), ..Default::default() };
     let confs: Vec<Conf> = texts.iter().map(|t| parse(t)).collect();
     let mut gus_set = false;
+    // DOSBox Staging's cycles, which the old `cycles` overrides, and the
+    // palette of a monochrome machine.
+    let (mut legacy_cycles, mut cpu_cycles, mut cpu_cycles_protected, mut palette) = (false, None, None, None);
     for conf in &confs {
         for (section, key, value) in &conf.values {
             gus_set |= section == "gus" && key == "gus";
+            match (section.as_str(), key.as_str()) {
+                ("cpu", "cycles") => legacy_cycles |= !value.is_empty(),
+                ("cpu", "cpu_cycles") => cpu_cycles = Some(value.to_ascii_lowercase()),
+                ("cpu", "cpu_cycles_protected") => cpu_cycles_protected = Some(value.to_ascii_lowercase()),
+                ("render", "monochrome_palette") => palette = Some(value.to_ascii_lowercase()),
+                _ => {}
+            }
             setting(&mut imported, section, key, value);
         }
     }
@@ -59,10 +99,45 @@ pub fn import(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>
     if !gus_set {
         imported.set("sound", "gus", "false");
     }
+    if !legacy_cycles && let Some(real) = cpu_cycles {
+        let protected = cpu_cycles_protected.unwrap_or_else(|| "60000".to_string());
+        let fixed = |n: &str| n.parse::<u32>().ok().map(|n| n.clamp(100, 2_000_000));
+        // A real-mode speed and a faster one for protected mode is what
+        // rust-dos's `auto N` does.
+        let speed = match (real.as_str(), protected.as_str()) {
+            ("max", _) => Some("max".to_string()),
+            (n, "auto") => fixed(n).map(|n| n.to_string()),
+            (n, _) => fixed(n).map(|n| format!("auto {}", n)),
+        };
+        match speed {
+            Some(speed) => imported.set("emulator", "cycles", speed),
+            None => imported.warnings.push(format!("[cpu] cpu_cycles={} isn't imported", real)),
+        }
+    }
+    let machine = imported.settings.iter().find(|(_, k, _)| *k == "machine").map(|(_, _, v)| v.clone());
+    let mono = imported.settings.iter().any(|(_, k, _)| *k == "monochrome");
+    if let Some(palette) = palette
+        && (mono || machine.as_deref() == Some("hercules"))
+    {
+        match palette.as_str() {
+            "white" | "paperwhite" => imported.set("emulator", "monochrome", "white"),
+            "amber" | "green" => imported.set("emulator", "monochrome", palette),
+            _ => {}
+        }
+    }
+    // A SoundFont of the game's, found where its other files are.
+    if let Some(i) = imported.settings.iter().position(|(_, k, _)| *k == "soundfont") {
+        let font = resolve(bases, &imported.settings[i].2);
+        if crate::hostfs::is_file(&font) {
+            imported.settings[i].2 = font.display().to_string();
+        } else {
+            let (_, _, name) = imported.settings.remove(i);
+            imported.warnings.push(format!("[fluidsynth] soundfont={} isn't there; rust-dos's own is used", name));
+        }
+    }
     let mut roots: Vec<(u8, PathBuf)> = Vec::new();
     // DOSBox starts on Z:, where GOG's lines "cd .." (and the like) go
     // nowhere; here they would be C:'s.
-    let mut on_z = true;
     for line in confs.iter().flat_map(|c| &c.autoexec) {
         let command = line.trim_start_matches('@').trim();
         let verb = command.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
@@ -73,6 +148,7 @@ pub fn import(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>
         }
         autoexec_line(&mut imported, line, bases, home, &mut roots);
     }
+    imported.drop_invalid();
     imported
 }
 
@@ -88,6 +164,8 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
     let unknown = |imported: &mut Imported| {
         imported.warnings.push(format!("[{}] {}={} isn't imported", section, key, value));
     };
+    // A port, in hex with or without 0x.
+    let port = || first.trim_start_matches("0x").to_ascii_uppercase();
     match (section, key) {
         ("cpu", "cycles") => {
             let words: Vec<&str> = lower.split_whitespace().collect();
@@ -100,6 +178,8 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
                 ["auto", n, ..] if cycles(n).is_some() => cycles(n).map(|n| format!("auto {}", n)),
                 ["auto", ..] => Some("auto".to_string()),
                 ["max", ..] => Some("max".to_string()),
+                // DOSBox Staging leaves it empty for its cpu_cycles.
+                [] => return,
                 _ => None,
             };
             match speed {
@@ -128,7 +208,33 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("dosbox", "machine") => match crate::video::adapter::Adapter::parse(first) {
             Some(crate::video::adapter::Adapter::S3) => imported.set("emulator", "machine", "svga"),
             Some(adapter) => imported.set("emulator", "machine", adapter.name()),
-            None => unknown(imported),
+            // DOSBox-X's other S3 chips and the like, as svga_s3.
+            None if first.starts_with("svga_") || first.starts_with("vesa_") => imported.set("emulator", "machine", "svga"),
+            None => match first {
+                "cga_mono" => {
+                    imported.set("emulator", "machine", "cga");
+                    imported.set("emulator", "monochrome", "white");
+                }
+                "cga_composite" | "cga_composite2" | "pcjr_composite" => {
+                    imported.set("emulator", "machine", &first[..first.find('_').unwrap_or(first.len())]);
+                    imported.set("emulator", "composite", "on");
+                }
+                "cga_rgb" => imported.set("emulator", "machine", "cga"),
+                "mda" => imported.set("emulator", "machine", "hercules"),
+                "mcga" => imported.set("emulator", "machine", "vga"),
+                "jega" => imported.set("emulator", "machine", "ega"),
+                _ => unknown(imported),
+            },
+        },
+        // DOSBox Staging's composite output of a CGA or PCjr.
+        ("composite", "composite") => match first {
+            "auto" | "on" | "off" => imported.set("emulator", "composite", first),
+            _ => unknown(imported),
+        },
+        ("composite", "era") => match first {
+            "old" | "new" => imported.set("emulator", "composite_era", first),
+            "auto" => {}
+            _ => unknown(imported),
         },
         ("dosbox", "memsize") => match first.parse::<usize>() {
             Ok(mb) => imported.set("emulator", "memsize", mb.clamp(crate::config::MIN_MEMSIZE, crate::config::MAX_MEMSIZE).to_string()),
@@ -153,24 +259,31 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             None if matches!(first, "auto" | "none" | "") => {}
             None => unknown(imported),
         },
-        ("render", "aspect") => match bool_value() {
-            Some(b) => imported.set("emulator", "aspect", b),
-            None => unknown(imported),
+        // DOSBox Staging's: auto, on, square-pixels or stretch.
+        ("render", "aspect") => match (bool_value(), first) {
+            (Some(b), _) => imported.set("emulator", "aspect", b),
+            (None, "auto") => imported.set("emulator", "aspect", "true"),
+            (None, "square-pixels" | "stretch") => imported.set("emulator", "aspect", "false"),
+            _ => unknown(imported),
         },
         ("sblaster", "sbtype") => match first {
             "sb1" | "sb2" => imported.set("sound", "sbtype", "sb2"),
-            "sbpro1" | "sbpro2" => imported.set("sound", "sbtype", "sbpro2"),
+            // DOSBox Staging's ESS AudioDrive, a Sound Blaster Pro to games.
+            "sbpro1" | "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
             "sb16" | "sb16vibra" => imported.set("sound", "sbtype", "sb16"),
             "none" => imported.set("sound", "sbtype", "none"),
             _ => unknown(imported),
         },
-        ("sblaster", "sbbase") => imported.set("sound", "sbbase", first.to_ascii_uppercase()),
+        ("sblaster", "sbbase") => imported.set("sound", "sbbase", port()),
         ("sblaster", "irq") => imported.set("sound", "irq", first),
         ("sblaster", "dma") => imported.set("sound", "dma", first),
+        // An SB16's 16-bit sound on its 8-bit channel, as DOSBox has it
+        // with an hdma below 4, isn't; the card's own channel serves.
+        ("sblaster", "hdma") if first.parse::<u8>().is_ok_and(|d| d < 4) => {}
         ("sblaster", "hdma") => imported.set("sound", "hdma", first),
         ("sblaster", "oplmode") => match first {
             "opl2" | "cms" => imported.set("sound", "opl", "opl2"),
-            "dualopl2" | "opl3" | "opl3gold" => imported.set("sound", "opl", "opl3"),
+            "dualopl2" | "opl3" | "opl3gold" | "esfm" => imported.set("sound", "opl", "opl3"),
             "auto" => {}
             _ => unknown(imported),
         },
@@ -178,7 +291,7 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             Some(b) => imported.set("sound", "gus", b),
             None => unknown(imported),
         },
-        ("gus", "gusbase") => imported.set("sound", "gusbase", first.to_ascii_uppercase()),
+        ("gus", "gusbase") => imported.set("sound", "gusbase", port()),
         ("gus", "gusirq") => imported.set("sound", "gusirq", first),
         ("gus", "gusdma") => imported.set("sound", "gusdma", first),
         // DOSBox's own default is no directory of the game's: rust-dos's
@@ -190,8 +303,21 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("midi", "mididevice") => match first {
             "mt32" => imported.set("sound", "midisynth", "mt32"),
             "soundcanvas" => imported.set("sound", "midisynth", "sc55"),
+            "fluidsynth" => imported.set("sound", "midisynth", "soundfont"),
             "none" => imported.set("sound", "midisynth", "none"),
             _ => {}
+        },
+        // DOSBox Staging's FluidSynth and Munt: a game's own SoundFont (DOSBox
+        // looks for it in its soundfonts folder too, which rust-dos doesn't).
+        ("fluidsynth", "soundfont") if !value.trim().is_empty() && !lower.starts_with("default") => {
+            let font = value.split_whitespace().next().unwrap_or(value);
+            imported.set("sound", "soundfont", font.to_string())
+        }
+        ("mt32", "model") => match first {
+            "cm32l" | "cm32ln" | "cm32l_100" | "cm32l_101" | "cm32l_102" | "cm32ln_100" => imported.set("sound", "mt32model", "cm32l"),
+            f if f.starts_with("mt32") => imported.set("sound", "mt32model", "mt32"),
+            "auto" => {}
+            _ => unknown(imported),
         },
         // DOSBox Staging's names for the Sound Canvas models.
         ("soundcanvas", "soundcanvas_model") => match first {
@@ -236,7 +362,7 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             Some(b) => imported.set("network", "ne2000", b),
             None => unknown(imported),
         },
-        ("ne2000" | "ethernet", "nicbase") => imported.set("network", "nicbase", first.to_ascii_uppercase()),
+        ("ne2000" | "ethernet", "nicbase") => imported.set("network", "nicbase", port()),
         ("ne2000" | "ethernet", "nicirq") => imported.set("network", "nicirq", first),
         // DOSBox's default address would be every imported game's.
         ("ne2000" | "ethernet", "macaddr") if !first.eq_ignore_ascii_case("ac:de:48:88:99:aa") => {
@@ -254,11 +380,16 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("joystick", "joysticktype") => match first {
             "auto" | "2axis" | "4axis" | "none" => imported.set("joystick", "joysticktype", first),
             "4axis_2" | "fcs" | "ch" => imported.set("joystick", "joysticktype", "4axis"),
+            "hidden" | "disabled" => imported.set("joystick", "joysticktype", "none"),
             _ => unknown(imported),
         },
         _ => {}
     }
 }
+
+/// The sections of DOSBox's settings that are imported, for CONFIG -SET
+/// with a setting's name alone.
+const SECTIONS: [&str; 8] = ["cpu", "dosbox", "dos", "render", "sblaster", "gus", "midi", "speaker"];
 
 /// A line of `[autoexec]`: MOUNT and IMGMOUNT become the profile's drives,
 /// with their host paths made absolute (a game's drives are mounted as it
@@ -322,7 +453,42 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
         "ipxnet" => imported
             .warnings
             .push(format!("[autoexec] {} isn't imported: rust-dos joins a LAN with LAN HOST and LAN JOIN", line)),
-        "exit" | "rescan" | "config" | "mixer" | "loadfix" | "serial" | "intro" => {
+        // Programs load from 64 KB on, where LOADFIX would put them: the
+        // program it names runs as it is.
+        "loadfix" => {
+            let mut args = tokens[1..].iter().skip_while(|t| t.starts_with(['-', '/']));
+            if let Some(program) = args.next() {
+                let rest: Vec<&str> = std::iter::once(program.as_str()).chain(args.map(String::as_str)).collect();
+                let at = command.find(rest[0]).unwrap_or(0);
+                imported.autoexec.push(command[at..].to_string());
+            }
+        }
+        // CONFIG -SET "section key=value", as the game's setting.
+        "config" => {
+            let args: Vec<&str> = tokens[1..].iter().map(String::as_str).collect();
+            match args.split_first() {
+                Some((flag, rest)) if flag.eq_ignore_ascii_case("-set") && !rest.is_empty() => {
+                    let joined = rest.join(" ");
+                    let (head, value) = joined.split_once('=').unwrap_or((joined.as_str(), ""));
+                    let words: Vec<&str> = head.split_whitespace().collect();
+                    let (before, warnings) = (imported.settings.clone(), imported.warnings.len());
+                    match words.as_slice() {
+                        [section, key] => setting(imported, &section.to_ascii_lowercase(), &key.to_ascii_lowercase(), value.trim()),
+                        [key] => {
+                            for section in SECTIONS {
+                                setting(imported, section, &key.to_ascii_lowercase(), value.trim());
+                            }
+                        }
+                        _ => {}
+                    }
+                    if imported.settings == before && imported.warnings.len() == warnings {
+                        imported.warnings.push(format!("[autoexec] {} isn't imported", line));
+                    }
+                }
+                _ => imported.warnings.push(format!("[autoexec] {} isn't imported", line)),
+            }
+        }
+        "exit" | "rescan" | "serial" | "intro" => {
             if !matches!(verb.as_str(), "exit" | "rescan") {
                 imported.warnings.push(format!("[autoexec] {} isn't imported", line));
             }
@@ -528,5 +694,95 @@ mod tests {
         assert_eq!(imported.drives[2].opts.kind, DriveKind::CdRom);
         assert!(imported.settings.iter().any(|(_, k, v)| *k == "keyboard_layout" && v == "fr"));
         assert!(imported.autoexec.is_empty());
+    }
+
+    fn get(imported: &Imported, key: &str) -> Option<String> {
+        imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.clone())
+    }
+
+    #[test]
+    fn dosbox_staging_s_cpu_cycles_are_ours() {
+        let cycles = |conf: &str| get(&import(&[conf], &[PathBuf::from("/")], "x", None), "cycles");
+        assert_eq!(cycles("[cpu]\ncpu_cycles=3000\ncpu_cycles_protected=60000\n").as_deref(), Some("auto 3000"));
+        assert_eq!(cycles("[cpu]\ncpu_cycles=12000\ncpu_cycles_protected=auto\n").as_deref(), Some("12000"));
+        assert_eq!(cycles("[cpu]\ncpu_cycles=8000\ncpu_cycles_protected=max\n").as_deref(), Some("auto 8000"));
+        assert_eq!(cycles("[cpu]\ncpu_cycles=max\n").as_deref(), Some("max"));
+        // The old setting, which DOSBox Staging leaves empty, wins if set.
+        assert_eq!(cycles("[cpu]\ncycles=\ncpu_cycles=5000\ncpu_cycles_protected=auto\n").as_deref(), Some("5000"));
+        assert_eq!(cycles("[cpu]\ncycles=fixed 20000\ncpu_cycles=5000\n").as_deref(), Some("20000"));
+        assert!(import(&["[cpu]\ncycles=\n"], &[PathBuf::from("/")], "x", None).warnings.is_empty());
+    }
+
+    #[test]
+    fn other_machines_are_the_nearest_there_is() {
+        let imported = |conf: &str| import(&[conf], &[PathBuf::from("/")], "x", None);
+        for (machine, ours) in [("svga_s3trio64", "svga"), ("vesa_nolfb", "svga"), ("mcga", "vga"), ("mda", "hercules"), ("cga_rgb", "cga")] {
+            assert_eq!(get(&imported(&format!("[dosbox]\nmachine={}\n", machine)), "machine").as_deref(), Some(ours), "{}", machine);
+        }
+        let mono = imported("[dosbox]\nmachine=cga_mono\n[render]\nmonochrome_palette=amber\n");
+        assert_eq!((get(&mono, "machine").as_deref(), get(&mono, "monochrome").as_deref()), (Some("cga"), Some("amber")));
+        let composite = imported("[dosbox]\nmachine=pcjr_composite\n[composite]\nera=old\n");
+        assert_eq!(get(&composite, "machine").as_deref(), Some("pcjr"));
+        assert_eq!(get(&composite, "composite").as_deref(), Some("on"));
+        assert_eq!(get(&composite, "composite_era").as_deref(), Some("old"));
+        // A colour machine stays in colour.
+        assert_eq!(get(&imported("[render]\nmonochrome_palette=green\n"), "monochrome"), None);
+        assert_eq!(get(&imported("[render]\naspect=auto\n"), "aspect").as_deref(), Some("true"));
+        assert_eq!(get(&imported("[render]\naspect=square-pixels\n"), "aspect").as_deref(), Some("false"));
+        let config = crate::config::parse(&composite.profile_text(None), Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn sound_settings_rust_dos_can_t_have_are_left_out() {
+        let conf = "[sblaster]\nsbtype=ess\nsbbase=0x240\nirq=4\ndma=1\nhdma=1\noplmode=esfm\n[gus]\ngus=true\ngusbase=0x260\n[midi]\nmididevice=fluidsynth\n[fluidsynth]\nsoundfont=missing.sf2\n[mt32]\nmodel=cm32ln_100\n";
+        let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "sbtype").as_deref(), Some("sbpro2"));
+        assert_eq!(get(&imported, "sbbase").as_deref(), Some("240"), "{:?}", imported.warnings);
+        assert_eq!(get(&imported, "gusbase").as_deref(), Some("260"));
+        assert_eq!(get(&imported, "opl").as_deref(), Some("opl3"));
+        assert_eq!(get(&imported, "midisynth").as_deref(), Some("soundfont"));
+        assert_eq!(get(&imported, "mt32model").as_deref(), Some("cm32l"));
+        assert_eq!(get(&imported, "irq"), None, "an SB can't have IRQ 4");
+        assert_eq!(get(&imported, "hdma"), None);
+        assert_eq!(get(&imported, "soundfont"), None);
+        assert!(imported.warnings.iter().any(|w| w.starts_with("irq=4")), "{:?}", imported.warnings);
+        assert!(imported.warnings.iter().any(|w| w.contains("missing.sf2")), "{:?}", imported.warnings);
+        let config = crate::config::parse(&imported.profile_text(None), Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+
+        let dir = scratch("soundfont");
+        fs::write(dir.join("GM.SF2"), "").unwrap();
+        let imported = import(&["[fluidsynth]\nsoundfont=gm.sf2 70\n"], std::slice::from_ref(&dir), "x", None);
+        assert_eq!(get(&imported, "soundfont"), Some(dir.join("GM.SF2").display().to_string()));
+    }
+
+    #[test]
+    fn dosbox_s_commands_become_rust_dos_s() {
+        let conf = "[autoexec]\nmount c .\nc:\nconfig -set cpu cycles=9000\nconfig -set \"sblaster irq=5\"\nconfig -set memsize=32\nconfig -get cpu\nmixer sb 50:50 /noshow\nloadfix -64 game.exe -nosound\nloadfix\n";
+        let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "cycles").as_deref(), Some("9000"));
+        assert_eq!(get(&imported, "irq").as_deref(), Some("5"), "{:?}", imported.warnings);
+        assert_eq!(get(&imported, "memsize").as_deref(), Some("32"));
+        assert_eq!(imported.autoexec, ["c:", "mixer sb 50:50 /noshow", "game.exe -nosound"]);
+        assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+        assert!(imported.warnings[0].contains("config -get"));
+    }
+
+    /// DOSBox Pure's configuration, in a game's zip or folder, which is
+    /// its C: already.
+    #[test]
+    fn a_configuration_without_c_gets_the_game_s_folder() {
+        let dir = scratch("pure");
+        let conf = "[cpu]\ncycles=10000\n[autoexec]\ncd game\ngame.exe\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&dir));
+        assert_eq!(imported.drives[0].drive, crate::disk::DRIVE_C);
+        assert_eq!(imported.drives[0].path, dir);
+        assert_eq!(imported.autoexec, ["C:", "cd game", "game.exe"], "on C:, so its CD stays");
+        // One that mounts its own C: keeps it.
+        let imported = import_in(&["[autoexec]\nmount c sub\nc:\ngame\n"], std::slice::from_ref(&dir), "x", None, Some(&dir));
+        assert_eq!(imported.drives.len(), 1);
+        assert_eq!(imported.drives[0].path, dir.join("sub"));
+        assert_eq!(imported.autoexec, ["c:", "game"]);
     }
 }

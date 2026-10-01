@@ -1731,7 +1731,10 @@ impl MainHost<'_, '_> {
             DropAction::Package(package) => (|| {
                 let dir = games_dir(self.saved.file.as_deref())
                     .ok_or("Packages become games in the games folder beside the configuration file, and there is none (--no-config)")?;
-                let (id, game) = games::add_package(&dir, &package)?;
+                let (id, game, warnings) = games::add_package(&dir, &package)?;
+                for warning in &warnings {
+                    self.cpu.bus.log_string(&format!("[CONFIG] Import of {}: {}", game, warning));
+                }
                 Ok(self.launch_game(&id).unwrap_or_else(|e| format!("{} is a game on the Games page: {}", game, e)))
             })(),
             DropAction::Nothing(e) => Err(e),

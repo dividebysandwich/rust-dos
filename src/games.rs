@@ -355,8 +355,7 @@ pub fn prompt_directory(cpu: &Cpu) -> String {
 pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String, String, Vec<String>), String> {
     // A game's package: its profile, as dropping it makes it.
     if is_package(source) || (crate::archive::is_archive_name(source) && hostfs::is_file(source)) {
-        let (id, name) = add_package(dir, source)?;
-        return Ok((id, name, Vec::new()));
+        return add_package(dir, source);
     }
     // The profile's paths are absolute: it lives in another folder.
     let source = hostfs::canonicalize(source).map_err(|e| format!("{}: {}", source.display(), e))?;
@@ -406,6 +405,25 @@ fn read_package_file(path: &Path) -> Result<String, String> {
         Err(e) => crate::archive::read_member(path).unwrap_or_else(|| Err(format!("{}: {}", path.display(), e)))?,
     };
     Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+/// The DOSBox configuration that goes with the package `package`, which
+/// has no `rust-dos.conf`: its `dosbox.conf` at its root, or a file named
+/// as it is beside it (`GAME.conf` for `GAME.zip`), as DOSBox Pure loads
+/// them.
+fn package_dosbox_conf(package: &Path) -> Option<String> {
+    if let Some(name) = package_entry(package, "dosbox.conf") {
+        return read_package_file(&package.join(name)).ok();
+    }
+    let stem = package.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    let dir = package.parent()?;
+    let beside = hostfs::read_dir(dir).ok()?.into_iter().find(|e| {
+        let name = e.name.to_string_lossy().to_ascii_lowercase();
+        !e.is_dir && name.strip_suffix(".conf") == Some(stem.as_str())
+    })?;
+    // Not a profile of rust-dos's that happens to be there.
+    let text = read_package_file(&beside.path).ok()?;
+    crate::import::dosbox::is_dosbox_conf(&text).then_some(text)
 }
 
 /// The manuals and extras in the package `root` (a folder, or a zip or
@@ -472,16 +490,19 @@ fn game_value(text: &str, key: &str) -> Option<String> {
 /// configuration's settings, drives, manuals and commands go in the
 /// profile, its paths taken from the package's root; without commands, the
 /// one program there is to start the game (`archive::start_program`)
-/// starts, or the prompt is left on C:. A profile made for it before is
-/// the one. Returns the profile's id and name.
-pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String), String> {
+/// starts, or the prompt is left on C:. Without a `rust-dos.conf`, a
+/// DOSBox configuration of the package's (`package_dosbox_conf`) is
+/// imported into the profile instead. A profile made for it before is
+/// the one. Returns the profile's id and name, and what of a DOSBox
+/// configuration didn't come across.
+pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<String>), String> {
     let package = hostfs::canonicalize(package).map_err(|e| format!("{}: {}", package.display(), e))?;
     let profiles = list(dir);
     let made_before = profiles.iter().find(|(_, text)| {
         config::parse(text, dir, None).drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path.starts_with(&package))
     });
     if let Some((entry, _)) = made_before {
-        return Ok((entry.id.clone(), entry.name.clone()));
+        return Ok((entry.id.clone(), entry.name.clone(), Vec::new()));
     }
     let is_archive = !hostfs::is_dir(&package);
     let files: Vec<String> = if is_archive {
@@ -499,9 +520,19 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String), Strin
         None => String::new(),
     };
     // Its paths are from the package's root.
-    let conf = config::parse(&own, &package, None);
+    let mut conf = config::parse(&own, &package, None);
     let stem = package.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
     let name = conf.game_name.clone().unwrap_or(stem);
+    // A package made for DOSBox: its settings, drives and commands.
+    let dosbox = if own.is_empty() { package_dosbox_conf(&package) } else { None }
+        .map(|text| crate::import::dosbox::import_in(&[&text], std::slice::from_ref(&package), &name, None, Some(&package)));
+    if let Some(imported) = &dosbox {
+        conf.drives = imported.drives.clone();
+        // Only C: from DOSBox Pure's, which runs nothing itself.
+        if imported.autoexec.iter().any(|l| !l.eq_ignore_ascii_case("C:")) {
+            conf.autoexec = imported.autoexec.clone();
+        }
+    }
     let mut text = format!("[game]\nname={}\n", name);
     text.push_str(&format!("overlay={}\n", game_value(&own, "overlay").unwrap_or_else(|| "true".to_string())));
     // RetroAchievements knows the game by its archive's hash.
@@ -518,7 +549,10 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String), Strin
         let manual = crate::manuals::Manual::parse(value, &package, None);
         text.push_str(&format!("manual={}|{}\n", manual.path.display(), manual.title));
     }
-    let settings = without_sections(&own, &["game", "drives", "autoexec"]);
+    let settings = match &dosbox {
+        Some(imported) => imported.settings_text(),
+        None => without_sections(&own, &["game", "drives", "autoexec"]),
+    };
     if !settings.trim().is_empty() {
         text.push('\n');
         text.push_str(settings.trim_end());
@@ -553,7 +587,7 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String), Strin
     hostfs::create_dir_all(dir)
         .and_then(|()| hostfs::write(&path, text))
         .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-    Ok((id, name))
+    Ok((id, name, dosbox.map(|d| d.warnings).unwrap_or_default()))
 }
 
 /// Whether `path` is a game's package with its own configuration: a
@@ -662,7 +696,7 @@ mod tests {
         let data = crate::archive::zip::tests::zip(&[("KEEN/KEEN4E.EXE", b"MZ", true), ("KEEN/SETUP.EXE", b"MZ", false)]);
         std::fs::write(&archive, data).unwrap();
         let games = dir.join("games");
-        let (id, name) = add_package(&games, &archive).unwrap();
+        let (id, name, _) = add_package(&games, &archive).unwrap();
         assert_eq!((id.as_str(), name.as_str()), ("commander-keen", "Commander Keen"));
         let text = std::fs::read_to_string(games.join("commander-keen.conf")).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
@@ -688,6 +722,41 @@ mod tests {
         // Again: the same profile.
         assert_eq!(add_package(&games, &dir.join("Commander Keen.zip")).unwrap().0, "commander-keen");
         assert_eq!(list(&games).len(), 1);
+    }
+
+    #[test]
+    fn a_package_made_for_dosbox_gets_its_settings_and_commands() {
+        let dir = std::path::PathBuf::from("target/test_games_dosbox_package");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf: &[u8] = b"[sdl]\nfullscreen=true\n[cpu]\ncycles=fixed 8000\n[sblaster]\nsbtype=sbpro1\nirq=4\n[autoexec]\nmount c game\nc:\nloadfix game.exe\nexit\n";
+        let data = crate::archive::zip::tests::zip(&[("DOSBOX.CONF", conf, false), ("GAME/GAME.EXE", b"MZ", false), ("GAME/SETUP.EXE", b"MZ", false)]);
+        std::fs::write(dir.join("Game.zip"), data).unwrap();
+        let games = dir.join("games");
+        let (id, name, warnings) = add_package(&games, &dir.join("Game.zip")).unwrap();
+        assert_eq!(name, "Game");
+        assert!(warnings.iter().any(|w| w.starts_with("irq=4")), "{:?}", warnings);
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert!(prepared.warnings.is_empty(), "{:?}\n{}", prepared.warnings, text);
+        assert_eq!(prepared.settings.cycles, crate::timer::CpuSpeed::Fixed(8000));
+        assert_eq!(prepared.settings.sound.sb.model, crate::sb::SbModel::SbPro2);
+        let archive = std::fs::canonicalize(dir.join("Game.zip")).unwrap();
+        assert_eq!(prepared.drives.len(), 1);
+        assert_eq!(prepared.drives[0].path, archive.join("game"));
+        assert_eq!(prepared.autoexec, ["c:", "game.exe"]);
+        assert!(prepared.overlay);
+
+        // DOSBox Pure's GAME.conf beside GAME.zip, with C: the zip.
+        let data = crate::archive::zip::tests::zip(&[("RUN.BAT", b"", false), ("PLAY.EXE", b"MZ", false)]);
+        std::fs::write(dir.join("Other.zip"), data).unwrap();
+        std::fs::write(dir.join("other.conf"), "[dosbox]\nmachine=ega\n[autoexec]\nrun.bat\n").unwrap();
+        let (id, _, _) = add_package(&games, &dir.join("Other.zip")).unwrap();
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert_eq!(prepared.drives[0].path, std::fs::canonicalize(dir.join("Other.zip")).unwrap());
+        assert_eq!(prepared.autoexec, ["C:", "run.bat"]);
+        assert!(text.contains("machine=ega"), "{}", text);
     }
 
     #[test]
@@ -729,7 +798,7 @@ mod tests {
         let package = dir.join("pool.zip");
         std::fs::write(&package, data).unwrap();
         let games = dir.join("games");
-        let (id, name) = add_package(&games, &package).unwrap();
+        let (id, name, _) = add_package(&games, &package).unwrap();
         assert_eq!((id.as_str(), name.as_str()), ("pool-of-radiance", "Pool of Radiance"));
         let text = std::fs::read_to_string(games.join("pool-of-radiance.conf")).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
@@ -757,7 +826,7 @@ mod tests {
         std::fs::write(folder.join("KEEN4E.EXE"), b"MZ").unwrap();
         std::fs::write(folder.join("extras/Hint Book.pdf"), b"%PDF").unwrap();
         assert!(is_package(&folder) && !is_package(&dir.join("games")));
-        let (id, _) = add_package(&games, &folder).unwrap();
+        let (id, _, _) = add_package(&games, &folder).unwrap();
         let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
         assert_eq!((prepared.overlay, prepared.autoexec.clone()), (false, vec!["C:".to_string(), "KEEN4E.EXE".to_string()]));

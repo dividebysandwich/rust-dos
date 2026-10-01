@@ -219,6 +219,19 @@ and its single program starts, with the default settings. A folder needs
 the `rust-dos.conf` to count as a package; without it, a dropped folder is
 just mounted as a drive.
 
+### Packages made for DOSBox
+
+A package made for DOSBox works as it is. Without a `rust-dos.conf`, its
+DOSBox configuration is imported instead, as DOSBox Pure finds it:
+`dosbox.conf` at the package's root, or a `.conf` file named as the
+package beside it (`Pool of Radiance.conf` next to `Pool of
+Radiance.zip`). The profile gets the settings rust-dos has an
+equivalent for (CPU speed, memory, video card, sound cards, MIDI,
+joystick, network), the drives its `[autoexec]` mounts, with paths taken
+from the package's root, and its commands. If the configuration mounts
+no C:, the package is C:, as in DOSBox Pure. What doesn't come across
+goes to the log. A folder with a `dosbox.conf` is imported the same way.
+
 ### Saves and the write overlay
 
 The package is never written to. Anything the game writes, renames or
