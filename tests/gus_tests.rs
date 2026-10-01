@@ -476,12 +476,13 @@ fn an_idle_card_needs_no_events() {
     let mut bus = bus();
     let gus = bus.gus.as_ref().unwrap();
     assert_eq!(gus.next_event(&bus.dma), None);
-    // After an interrupt the next event is in the future.
+    // After an interrupt the next event is in the future, or none while
+    // the IRQ waits to be acknowledged.
     play(&mut bus, 0, 0, 20, 0x28);
     wait_ms(&mut bus, 1.0);
     let now = bus.clock.now_ticks();
-    let next = bus.gus.as_ref().unwrap().next_event(&bus.dma).unwrap();
-    assert!(next > now);
+    let next = bus.gus.as_ref().unwrap().next_event(&bus.dma);
+    assert!(next.is_none_or(|next| next > now));
 }
 
 #[test]

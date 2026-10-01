@@ -85,6 +85,12 @@ impl Voice {
         self.ramp_ctrl & (STOPPED | STOP) == 0
     }
 
+    /// Whether the voice plays on past its end: rollover, unless the loop
+    /// bit, which takes precedence, is set.
+    fn rolls_over(&self) -> bool {
+        self.ramp_ctrl & ROLLOVER != 0 && self.wave_ctrl & LOOP == 0
+    }
+
     /// Whether the voice contributes nothing: wave and ramp both stopped.
     pub fn silent(&self) -> bool {
         !self.wave_running() && !self.ramp_running()
@@ -124,22 +130,25 @@ impl Voice {
         let inc = self.inc() as i64;
         let (pos, start, end) = (self.pos as i64, self.start as i64, self.end as i64);
         let decreasing = self.wave_ctrl & DECREASING != 0;
-        let (next, left, crossed) = if decreasing {
+        let (next, left) = if decreasing {
             let next = pos - inc;
-            (next, start - next, pos > start)
+            (next, start - next)
         } else {
             let next = pos + inc;
-            (next, next - end, pos < end)
+            (next, next - end)
         };
         if left < 0 {
             self.pos = next as u32 & POS_MASK;
             return false;
         }
         let irq = self.wave_ctrl & IRQ_ENABLE != 0;
-        if self.ramp_ctrl & ROLLOVER != 0 {
-            // Play on past the end, raising the IRQ when crossing it.
+        if self.rolls_over() {
+            // Play on past the end, raising the IRQ on every frame there:
+            // a driver that set the end behind the position, with its
+            // interrupt held off, still hears of it (Duke Nukem 3D's
+            // stream, which otherwise plays on through all of DRAM).
             self.pos = next.rem_euclid(POS_MASK as i64 + 1) as u32;
-            return irq && crossed;
+            return irq;
         }
         if self.wave_ctrl & LOOP != 0 {
             if self.wave_ctrl & BIDIRECTIONAL != 0 {
@@ -187,10 +196,12 @@ impl Voice {
     }
 
     /// Frames until the voice next raises an IRQ, if it will on its own.
-    pub fn frames_to_irq(&self) -> Option<u64> {
+    /// An IRQ already pending (`wave_pending`, `ramp_pending`) can't be
+    /// raised again.
+    pub fn frames_to_irq(&self, wave_pending: bool, ramp_pending: bool) -> Option<u64> {
         let mut best: Option<u64> = None;
         let mut consider = |k: u64| best = Some(best.map_or(k, |b| b.min(k)));
-        if self.wave_running() && self.wave_ctrl & IRQ_ENABLE != 0 && self.inc() > 0 {
+        if !wave_pending && self.wave_running() && self.wave_ctrl & IRQ_ENABLE != 0 && self.inc() > 0 {
             let inc = self.inc() as u64;
             let distance = if self.wave_ctrl & DECREASING != 0 {
                 (self.pos > self.start).then(|| (self.pos - self.start) as u64)
@@ -199,14 +210,12 @@ impl Voice {
             };
             match distance {
                 Some(d) => consider(d.div_ceil(inc)),
-                // Already at or past the boundary: the next frame loops or
-                // stops, unless the voice rolls over, which never comes
-                // back to it.
-                None if self.ramp_ctrl & ROLLOVER == 0 => consider(1),
-                None => {}
+                // Already at or past the boundary: the next frame loops,
+                // stops or rolls over, raising it.
+                None => consider(1),
             }
         }
-        if self.ramp_running() && self.ramp_ctrl & IRQ_ENABLE != 0 {
+        if !ramp_pending && self.ramp_running() && self.ramp_ctrl & IRQ_ENABLE != 0 {
             let inc = self.ramp_inc() as u64;
             let (start, end) = self.ramp_bounds();
             let distance = if self.ramp_ctrl & DECREASING != 0 {
@@ -271,7 +280,7 @@ mod tests {
     #[test]
     fn one_shot_stops_at_the_end() {
         let mut v = voice(0, 5, 2 << 10, IRQ_ENABLE);
-        assert_eq!(v.frames_to_irq(), Some(3));
+        assert_eq!(v.frames_to_irq(false, false), Some(3));
         assert_eq!(v.step(), 0);
         assert_eq!(v.step(), 0);
         assert_eq!(v.step(), WAVE_IRQ);
@@ -291,20 +300,30 @@ mod tests {
     }
 
     #[test]
-    fn rollover_raises_once_and_plays_on() {
+    fn rollover_plays_on_raising_the_irq_past_the_end() {
         let mut v = voice(0, 2, 1 << 10, IRQ_ENABLE);
         v.ramp_ctrl = ROLLOVER | STOPPED;
         let events: Vec<u8> = (0..4).map(|_| v.step()).collect();
-        assert_eq!(events, [0, WAVE_IRQ, 0, 0]);
+        assert_eq!(events, [0, WAVE_IRQ, WAVE_IRQ, WAVE_IRQ]);
         assert_eq!(v.pos >> WAVE_FRAC, 4);
-        assert_eq!(v.frames_to_irq(), None);
+        assert_eq!(v.frames_to_irq(false, false), Some(1));
+        assert_eq!(v.frames_to_irq(true, false), None);
+    }
+
+    #[test]
+    fn loop_takes_precedence_over_rollover() {
+        let mut v = voice(10, 20, 3 << 10, LOOP | IRQ_ENABLE);
+        v.ramp_ctrl = ROLLOVER | STOPPED;
+        let events: Vec<u8> = (0..4).map(|_| v.step()).collect();
+        assert_eq!(events, [0, 0, 0, WAVE_IRQ]);
+        assert_eq!(v.pos >> WAVE_FRAC, 12);
     }
 
     #[test]
     fn ramp_stops_at_its_end() {
         let mut v = Voice { ramp_ctrl: IRQ_ENABLE, ramp_rate: 0x3F, ramp_start: 0, ramp_end: 0x10, ..Voice::default() };
         // 0x100 volume steps at 63 a frame.
-        assert_eq!(v.frames_to_irq(), Some(5));
+        assert_eq!(v.frames_to_irq(false, false), Some(5));
         let events: Vec<u8> = (0..5).map(|_| v.step()).collect();
         assert_eq!(events, [0, 0, 0, 0, RAMP_IRQ]);
         assert_eq!(v.vol >> RAMP_FRAC, 0x100);

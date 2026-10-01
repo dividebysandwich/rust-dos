@@ -754,7 +754,7 @@ impl Gus {
             self.mix_buf.clear();
             self.mix_buf.resize(frames, (0.0, 0.0));
             let dram = &self.dram;
-            let mut raised = false;
+            let pending = (self.wave_irq, self.ramp_irq);
             for (i, v) in self.voices[..self.active as usize].iter_mut().enumerate() {
                 if v.silent() {
                     continue;
@@ -772,11 +772,12 @@ impl Gus {
                         if events & voice::RAMP_IRQ != 0 {
                             self.ramp_irq |= 1 << i;
                         }
-                        raised = true;
                     }
                 }
             }
-            if raised {
+            // Only a newly pending IRQ asks for an interrupt: a rollover
+            // voice raises its IRQ again on every frame past its end.
+            if (self.wave_irq, self.ramp_irq) != pending {
                 self.update_voice_irq();
             }
             let dac = self.reset_reg & 0x02 != 0;
@@ -813,7 +814,11 @@ impl Gus {
             consider(self.last_ticks + need.div_ceil(self.dma_rate() as u128) as u64);
         }
         if self.reset_reg & 0x01 != 0 {
-            let frames = self.voices[..self.active as usize].iter().filter_map(|v| v.frames_to_irq()).min();
+            let frames = self.voices[..self.active as usize]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| v.frames_to_irq(self.wave_irq & (1 << i) != 0, self.ramp_irq & (1 << i) != 0))
+                .min();
             if let Some(k) = frames {
                 let need = (k as u128 * PIT_HZ as u128 * 1000).saturating_sub(self.frame_frac as u128);
                 consider(self.last_ticks + need.div_ceil(self.frame_rate_milli() as u128).max(1) as u64);
