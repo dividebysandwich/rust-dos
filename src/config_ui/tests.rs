@@ -1886,7 +1886,7 @@ fn every_setting_page_and_dialog_has_help() {
             used.extend(item.fields(&Settings::default()).into_iter().map(Item::help));
         }
     }
-    for pick in [Pick::MountPath, Pick::SoundFont, Pick::Mt32Roms, Pick::ImportGame, Pick::ImagePath, Pick::AchievementsArchive, Pick::Manual] {
+    for pick in [Pick::MountPath, Pick::SoundFont, Pick::Mt32Roms, Pick::ImportGame, Pick::ImagePath, Pick::AchievementsArchive, Pick::Manual, Pick::OverlayPath] {
         used.push(pick.help());
     }
     for id in &used {

@@ -589,7 +589,8 @@ open, except on the Mixer page, where it plays on so you hear the volumes
 as you set them, and the Stats page, which shows it running. Ctrl+F12 or
 Esc closes it.
 
-* **Drives:** mount a host directory or a disk or CD image (Ins), change or
+* **Drives:** mount a host directory, a zip or 7z archive, or a disk or
+  CD image (Ins), change or
   swap the one a drive shows (Enter; this is how to change discs in the
   middle of a game), or unmount it (Del). **Browse...** picks directories
   and images from the host. **Create a disk image...** makes a new, empty
@@ -597,7 +598,9 @@ Esc closes it.
   mounts it on the drive picked (a floppy on A: or B:, where free). B (or
   the mount dialog's **Boot**) [boots](#booting-a-disk-image) the disk
   image of the selected drive now, and the dialog's **Auto-boot** has it
-  boot whenever Rust-DOS starts, once saved (F2).
+  boot whenever Rust-DOS starts, once saved (F2). Its **Changes to** is a
+  folder for a directory's or archive's changes, which leave it as it is
+  ([`-overlay`](#mounting-drives)); such a drive is marked *ovl*.
 * **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
   filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory

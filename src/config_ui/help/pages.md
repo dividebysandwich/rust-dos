@@ -12,7 +12,9 @@ mounted as **C:**, with the game in it.
   Windows 95, 3.1 or a game on its own boot disk.
 
 A drive marked *boot* boots when Rust-DOS starts, in place of DOS: set
-it with *Auto-boot* under **Enter**.
+it with *Auto-boot* under **Enter**. One marked *ovl* keeps its folder or
+archive as it is, its changes in the folder *Changes to* under **Enter**
+names.
 
 A system booted from an image, such as Windows 95, sees disks, not your
 folders. A folder on D: or later marked *share* becomes one of its hard
@@ -33,13 +35,17 @@ several images.
 
 - **Drive**: the letter DOS sees it as. **C:** for the game's folder,
   **D:** for its CD, **A:** for floppies.
-- **Path**: a folder, or an image file: a CD (`.cue`, `.iso`, `.bin`), a
-  floppy or a hard disk image (`.img`). *Browse...* picks one.
+- **Path**: a folder, a zip or 7z archive, or an image file: a CD
+  (`.cue`, `.iso`, `.bin`), a floppy or a hard disk image (`.img`).
+  *Browse...* picks one.
 - **Type**: **cdrom** for a game CD, so the game finds its disc;
   **floppy** for floppy disks; **hdd** for the rest.
 - **Label**: the volume name. Some games check their CD's label; leave it
   empty to use the image's own.
 - **Read-only**: keeps programs from changing the files.
+- **Changes to**: a folder for what programs write to a folder or
+  archive, which stays as it is; delete the folder to undo it all. Empty:
+  a folder is written to, an archive is read-only.
 - **Auto-boot**: for a floppy or hard disk image, boot from it when
   Rust-DOS starts instead of starting DOS. Only one drive boots; **F2**
   saves it.

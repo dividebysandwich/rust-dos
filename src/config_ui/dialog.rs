@@ -68,6 +68,10 @@ pub enum Field {
     Kind,
     Label,
     ReadOnly,
+    /// The folder the drive's changes go to (`-overlay`), and the button
+    /// that picks it.
+    Overlay,
+    OverlayBrowse,
     /// Whether the image boots when Rust-DOS starts.
     BootFlag,
     Mount,
@@ -85,6 +89,8 @@ pub enum Event {
     None,
     Cancel,
     Browse,
+    /// Pick the folder for the drive's changes.
+    BrowseOverlay,
     Submit,
     Boot,
     Unmount,
@@ -101,6 +107,9 @@ pub struct MountDialog {
     pub kind: DriveKind,
     pub label: TextField,
     pub read_only: bool,
+    /// The folder the drive's changes go to, which leave a directory or
+    /// archive as it is: empty for none.
+    pub overlay: TextField,
     pub boot: bool,
     pub focus: Field,
     /// What the dialog doesn't show of the mount it changes, kept while
@@ -109,8 +118,6 @@ pub struct MountDialog {
     original: String,
     more_images: Vec<PathBuf>,
     geometry: Option<Chs>,
-    /// Where the drive's changes go, which it keeps with its path.
-    overlay: Option<PathBuf>,
     /// Its IDE slot for a booted system, and whether a host directory is
     /// shared with one, which stay too.
     ide: Option<crate::ide::IdeSlot>,
@@ -134,12 +141,12 @@ impl MountDialog {
             kind: Self::default_kind(drive),
             label: TextField::default(),
             read_only: false,
+            overlay: TextField::default(),
             boot: false,
             focus: Field::Path,
             original: String::new(),
             more_images: Vec::new(),
             geometry: None,
-            overlay: None,
             ide: None,
             share: None,
             current: None,
@@ -164,12 +171,12 @@ impl MountDialog {
             kind: info.kind,
             label: TextField::new(opts.label.as_deref().unwrap_or("")),
             read_only: opts.read_only,
+            overlay: TextField::new(&opts.overlay.as_deref().map(|p| contract_home(p, home)).unwrap_or_default()),
             boot: opts.boot,
             focus: Field::Path,
             original: path,
             more_images: opts.more_images,
             geometry: opts.geometry,
-            overlay: opts.overlay,
             ide: opts.ide,
             share: opts.share,
             current: info.mount.clone(),
@@ -183,6 +190,11 @@ impl MountDialog {
     /// A: and B: are always floppies.
     pub fn kind_fixed(&self) -> bool {
         self.drive < FLOPPY_DRIVES
+    }
+
+    /// A CD-ROM drive has nothing written to it to keep apart.
+    pub fn can_overlay(&self) -> bool {
+        self.kind != DriveKind::CdRom
     }
 
     /// Only disk images boot, and a CD image doesn't.
@@ -210,6 +222,9 @@ impl MountDialog {
             fields.push(Kind);
         }
         fields.extend([Label, ReadOnly]);
+        if self.can_overlay() {
+            fields.extend([Overlay, OverlayBrowse]);
+        }
         if self.can_boot() {
             fields.push(BootFlag);
         }
@@ -231,7 +246,7 @@ impl MountDialog {
     }
 
     fn is_button(field: Field) -> bool {
-        matches!(field, Field::Browse | Field::Mount | Field::Boot | Field::Unmount | Field::Cancel)
+        matches!(field, Field::Browse | Field::OverlayBrowse | Field::Mount | Field::Boot | Field::Unmount | Field::Cancel)
     }
 
     /// Step a choice (drive letter, type, read-only) left or right.
@@ -259,6 +274,7 @@ impl MountDialog {
         let text = match self.focus {
             Field::Path => Some(&mut self.path),
             Field::Label => Some(&mut self.label),
+            Field::Overlay => Some(&mut self.overlay),
             _ => None,
         };
         if let Some(field) = text
@@ -271,6 +287,7 @@ impl MountDialog {
             UiKey::Enter => {
                 return match self.focus {
                     Field::Browse => Event::Browse,
+                    Field::OverlayBrowse => Event::BrowseOverlay,
                     Field::Boot => Event::Boot,
                     Field::Unmount => Event::Unmount,
                     Field::Cancel => Event::Cancel,
@@ -303,6 +320,12 @@ impl MountDialog {
         self.focus = Field::Mount;
     }
 
+    /// Take a folder picked in the browser for the drive's changes.
+    pub fn picked_overlay(&mut self, path: &Path, home: Option<&Path>) {
+        self.overlay = TextField::new(&contract_home(path, home));
+        self.focus = Field::Mount;
+    }
+
     /// The mount the dialog asks for. Relative paths are taken from `cwd`,
     /// as MOUNT does.
     pub fn spec(&self, cwd: &Path, home: Option<&Path>) -> Result<MountSpec, String> {
@@ -312,13 +335,26 @@ impl MountDialog {
             return Err("Enter a host directory or a disk or CD image".to_string());
         }
         let label = self.label.text().trim().to_string();
-        if raw.contains('"') || label.contains('"') {
+        let overlay = self.overlay.text().trim().to_string();
+        if raw.contains('"') || label.contains('"') || overlay.contains('"') {
             return Err("The configuration file can't hold a '\"'".to_string());
         }
         let path = expand_host_path(raw, cwd, home);
         let boot = self.boot && self.can_boot();
         if boot && path.is_dir() {
             return Err("Only a disk image can boot".to_string());
+        }
+        let overlay = (!overlay.is_empty() && self.can_overlay()).then(|| expand_host_path(&overlay, cwd, home));
+        if overlay.is_some() {
+            if self.read_only {
+                return Err("A read-only drive has no changes to keep apart: leave \"Changes to\" empty".to_string());
+            }
+            if path.is_file() && !crate::archive::is_archive_name(&path) {
+                return Err("Only a directory or a zip or 7z archive keeps its changes apart".to_string());
+            }
+            if overlay.as_deref() == Some(path.as_path()) {
+                return Err("The changes need a folder of their own".to_string());
+            }
         }
         let unchanged = raw == self.original;
         Ok(MountSpec {
@@ -330,7 +366,7 @@ impl MountDialog {
                 read_only: self.read_only,
                 more_images: if unchanged { self.more_images.clone() } else { Vec::new() },
                 geometry: if unchanged { self.geometry } else { None },
-                overlay: if unchanged { self.overlay.clone() } else { None },
+                overlay,
                 ide: self.ide,
                 boot,
                 share: self.share,
@@ -456,6 +492,8 @@ mod tests {
                 Field::Kind,
                 Field::Label,
                 Field::ReadOnly,
+                Field::Overlay,
+                Field::OverlayBrowse,
                 Field::BootFlag,
                 Field::Mount,
                 Field::Boot,
@@ -477,6 +515,38 @@ mod tests {
         assert!(!MountDialog::change(&drive(2, DriveKind::HardDisk), None).fields().contains(&Field::Unmount));
         d.path = TextField::default();
         assert!(d.spec(Path::new("/"), None).is_err());
+    }
+
+    #[test]
+    fn a_drive_keeps_its_changes_in_the_folder_given() {
+        let mut info = drive(3, DriveKind::HardDisk);
+        info.mount.as_mut().unwrap().opts.overlay = Some("/home/u/saves/d".into());
+        let mut d = MountDialog::change(&info, Some(Path::new("/home/u")));
+        assert_eq!(d.overlay.text(), "~/saves/d");
+        let spec = d.spec(Path::new("/"), Some(Path::new("/home/u"))).unwrap();
+        assert_eq!(spec.opts.overlay, Some(PathBuf::from("/home/u/saves/d")));
+        // Typed, relative to where MOUNT takes them from.
+        d.focus = Field::Overlay;
+        for _ in 0..9 {
+            d.key(UiKey::Backspace);
+        }
+        for c in "changes".chars() {
+            d.key(UiKey::Char(c));
+        }
+        assert_eq!(d.spec(Path::new("/w"), None).unwrap().opts.overlay, Some(PathBuf::from("/w/changes")));
+        // Not on a read-only drive, nor on a CD-ROM, which has none.
+        d.read_only = true;
+        assert!(d.spec(Path::new("/w"), None).is_err());
+        d.read_only = false;
+        d.kind = DriveKind::CdRom;
+        assert!(!d.fields().contains(&Field::Overlay));
+        assert_eq!(d.spec(Path::new("/w"), None).unwrap().opts.overlay, None);
+        // Emptied: written in place.
+        d.kind = DriveKind::HardDisk;
+        d.overlay = TextField::default();
+        assert_eq!(d.spec(Path::new("/w"), None).unwrap().opts.overlay, None);
+        d.focus = Field::OverlayBrowse;
+        assert_eq!(d.key(UiKey::Enter), Event::BrowseOverlay);
     }
 
     #[test]

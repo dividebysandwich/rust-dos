@@ -390,6 +390,7 @@ impl Pick {
             Pick::ImagePath => "new-image",
             Pick::AchievementsArchive => "achievements-archive",
             Pick::Manual => "manuals",
+            Pick::OverlayPath => "mount",
         }
     }
 }

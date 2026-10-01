@@ -1435,6 +1435,8 @@ pub(super) enum Pick {
     AchievementsArchive,
     /// A document or picture, one of a game's manuals.
     Manual,
+    /// The folder a mounted drive's changes go to.
+    OverlayPath,
 }
 
 struct Status {
@@ -2267,6 +2269,8 @@ impl ConfigUi {
         }
         if info.read_only && info.kind != DriveKind::Virtual && flags.len() < 2 {
             flags.push("ro".to_string());
+        } else if info.overlay.is_some() && flags.len() < 2 {
+            flags.push("ovl".to_string());
         }
         flags.join(" ")
     }
@@ -2361,6 +2365,7 @@ impl ConfigUi {
                 self.status = None;
             }
             Event::Browse => self.open_browser(Pick::MountPath),
+            Event::BrowseOverlay => self.open_browser(Pick::OverlayPath),
             Event::Unmount => {
                 let drive = dialog.drive;
                 self.unmount(drive, host);
@@ -2422,6 +2427,12 @@ impl ConfigUi {
                 self.dialog.as_ref().map(|d| d.path.text()).unwrap_or_default(),
                 true,
                 IMAGES,
+            ),
+            Pick::OverlayPath => (
+                "Pick the folder for the drive's changes",
+                self.dialog.as_ref().map(|d| d.overlay.text()).unwrap_or_default(),
+                true,
+                &[][..],
             ),
             Pick::SoundFont => (
                 "Pick a SoundFont (.sf2)",
@@ -2488,6 +2499,11 @@ impl ConfigUi {
                     Pick::MountPath => {
                         if let Some(dialog) = &mut self.dialog {
                             dialog.picked(&path, self.home.as_deref());
+                        }
+                    }
+                    Pick::OverlayPath => {
+                        if let Some(dialog) = &mut self.dialog {
+                            dialog.picked_overlay(&path, self.home.as_deref());
                         }
                     }
                     Pick::ImagePath => {
@@ -3043,11 +3059,19 @@ impl ConfigUi {
             g.text(value_col + 14, top + 5, "(default empty)", draw::DIM);
         }
         let buttons = dialog.fields();
+        if buttons.contains(&Field::Overlay) {
+            put(g, Field::Overlay, top + 7, "Changes to", &text_field(&dialog.overlay, top + 7, cols));
+            put(g, Field::OverlayBrowse, top + 8, "", &button("[ Browse... ]", top + 8, value_col));
+            if top + 8 < bottom {
+                let hint = "(empty: written in place; an archive read-only)";
+                g.text_to(value_col + 15, top + 8, &fit(hint, end.saturating_sub(value_col + 15)), draw::DIM, end);
+            }
+        }
         if buttons.contains(&Field::BootFlag) {
             let boot = if dialog.boot { "yes" } else { "no" }.to_string();
-            put(g, Field::BootFlag, top + 7, "Auto-boot", &choice(boot, top + 7, true));
-            if top + 7 < bottom {
-                g.text(value_col + 10, top + 7, "(disk images only)", draw::DIM);
+            put(g, Field::BootFlag, top + 9, "Auto-boot", &choice(boot, top + 9, true));
+            if top + 9 < bottom {
+                g.text(value_col + 10, top + 9, "(disk images only)", draw::DIM);
             }
         }
         let mut col = value_col;
@@ -3058,7 +3082,7 @@ impl ConfigUi {
             (Field::Cancel, "[ Cancel ]"),
         ] {
             if buttons.contains(&field) {
-                put(g, field, top + 9, "", &button(text, top + 9, col));
+                put(g, field, top + 11, "", &button(text, top + 11, col));
                 col += text.len() + 2;
             }
         }
