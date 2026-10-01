@@ -406,6 +406,8 @@ fn host_directories_are_hard_disks_of_a_booted_system() {
 #[test]
 fn a_booted_systems_state_takes_its_shared_disk_back() {
     use rust_dos::savestate::{disks, machine as states};
+    // Made here: this test may run before any other has made it.
+    std::fs::create_dir_all("target/test_boot").unwrap();
     let folder = std::fs::canonicalize("target/test_boot").unwrap().join("shared_state_folder");
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir_all(&folder).unwrap();
