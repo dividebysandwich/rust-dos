@@ -301,7 +301,13 @@ impl<'a> Display<'a> {
                     let Some(recording) = card.take_mirror() else { return false };
                     let shown = recording.output && recording.front.is_some();
                     match gl.run_voodoo(recording, settings.scale) {
-                        Ok(()) => return shown,
+                        Ok(changed) => {
+                            // The frame `present` gets does not change with
+                            // the card's picture, which the software
+                            // renderer no longer draws into it.
+                            self.redraw |= changed;
+                            return shown;
+                        }
                         Err(e) => {
                             card.set_mirror(false);
                             Some(e)

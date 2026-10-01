@@ -204,8 +204,9 @@ impl VoodooGl {
         }
     }
 
-    /// Draw what the card recorded.
-    pub fn run(&mut self, gl: &glow::Context, recording: Recording) {
+    /// Draw `recording`; whether the picture may have changed with it.
+    pub fn run(&mut self, gl: &glow::Context, recording: Recording) -> bool {
+        let changed = !recording.commands.is_empty() || self.front != recording.front || self.clut != recording.clut;
         for command in &recording.commands {
             match command {
                 Command::Resync(snapshot) => self.resync(gl, snapshot),
@@ -236,6 +237,7 @@ impl VoodooGl {
         self.front = recording.front;
         self.clut = recording.clut;
         restore(gl);
+        changed
     }
 
     /// The buffers as they are in the card's memory, in its layout.

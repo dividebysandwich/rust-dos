@@ -300,8 +300,8 @@ impl GlScreen {
     }
 
     /// Draw what the 3dfx card recorded, at `scale` times its size. The
-    /// error says why OpenGL can't.
-    pub fn run_voodoo(&mut self, recording: rust_dos::voodoo::mirror::Frame, scale: u32) -> Result<(), String> {
+    /// error says why OpenGL can't; whether the picture may have changed.
+    pub fn run_voodoo(&mut self, recording: rust_dos::voodoo::mirror::Frame, scale: u32) -> Result<bool, String> {
         if self.voodoo.as_ref().is_some_and(|v| v.scale() != scale) {
             self.drop_voodoo();
         }
@@ -318,10 +318,7 @@ impl GlScreen {
                 }
             }
         }
-        if let Some(voodoo) = &mut self.voodoo {
-            voodoo.run(&self.gl, recording);
-        }
-        Ok(())
+        Ok(self.voodoo.as_mut().is_some_and(|voodoo| voodoo.run(&self.gl, recording)))
     }
 
     /// Show the 3dfx card's picture, with what `screen` has over `base`
