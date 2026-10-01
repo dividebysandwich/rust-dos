@@ -92,13 +92,13 @@ pub fn asm16(addr: u32, f: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedErr
 }
 
 pub struct Rig {
-    pub cpu: Cpu,
+    pub cpu: Box<Cpu>,
 }
 
 impl Rig {
     /// A machine in real mode with the tables in memory.
     pub fn new() -> Self {
-        let mut cpu = Cpu::new(PathBuf::from("."));
+        let mut cpu = Box::new(Cpu::new(PathBuf::from(".")));
         cpu.bus.set_a20(true);
         // Nothing may interrupt the tests unless they ask for it.
         cpu.bus.io_write(0x21, 0xFF);
