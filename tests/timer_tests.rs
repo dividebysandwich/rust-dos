@@ -440,15 +440,15 @@ fn max_speed_tracks_host_throughput() {
     let start = Instant::now();
     let bus = bus_at(20_000);
     let mut pacer = Pacer::new(CpuSpeed::Max, start);
-    // Plenty of headroom: speed goes up, by at most 10% per frame.
-    let up = pacer.end_frame(
-        &bus,
-        false,
-        333_000,
-        Duration::from_millis(2),
-        Duration::from_millis(1),
-    );
-    assert_eq!(up, Some(22_000));
+    // Plenty of headroom: speed goes up, by at most 10% per frame, once
+    // frames took long enough to time.
+    let fast = |pacer: &mut Pacer| {
+        pacer.end_frame(&bus, false, 333_000, Duration::from_millis(2), Duration::from_millis(1))
+    };
+    for _ in 0..4 {
+        assert_eq!(fast(&mut pacer), None);
+    }
+    assert_eq!(fast(&mut pacer), Some(22_000));
     // Slower than real time: speed goes down.
     let down = pacer.end_frame(
         &bus,

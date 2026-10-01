@@ -41,6 +41,11 @@ pub const AUTO_REAL_MODE_CYCLES: u32 = 3000;
 /// Share of each frame that `CpuSpeed::Max` gives to instruction execution.
 /// The rest is left for rendering, audio and the host.
 const MAX_BUSY_SHARE: f64 = 0.85;
+/// Host time the instructions of a measurement of the host's speed take
+/// at least. A browser's clock counts in steps of up to a millisecond, in
+/// which a whole batch can fit: a batch measured to have taken no time
+/// would make the host infinitely fast.
+const HOST_SAMPLE: Duration = Duration::from_millis(10);
 
 /// Emulated time an I/O port access takes on the ISA bus, as in DOSBox.
 /// Delay loops made of port reads (AdLib detection polls the status port
@@ -424,6 +429,9 @@ pub struct Pacer {
     protected: bool,
     /// As fast as the host keeps up with, averaged over frames.
     host_max: Option<f64>,
+    /// The frames measured for the host's speed so far: the instructions
+    /// they ran, the time those took and the rest of their work.
+    sample: HostSample,
     /// Wall-clock instant that corresponds to emulated time `anchor_ticks`.
     anchor_wall: Instant,
     anchor_ticks: u64,
@@ -447,6 +455,7 @@ impl Pacer {
             auto: AutoSpeed::new(speed.initial_cycles()),
             protected: false,
             host_max: None,
+            sample: HostSample::default(),
             anchor_wall: now,
             anchor_ticks: 0,
             next_frame: now,
@@ -579,11 +588,9 @@ impl Pacer {
         overhead: Duration,
     ) -> Option<u32> {
         let current = bus.clock.cycles_per_ms();
-        let ideal = (executed >= 10_000).then(|| {
-            let ns_per_instr = exec.as_nanos() as f64 / executed as f64;
+        let ideal = self.sample.add(executed, exec, overhead).map(|(ns_per_instr, overhead_ns)| {
             let frame_ns = self.period.as_nanos() as f64;
-            let budget_ns =
-                (frame_ns * MAX_BUSY_SHARE - overhead.as_nanos() as f64).max(frame_ns * 0.1);
+            let budget_ns = (frame_ns * MAX_BUSY_SHARE - overhead_ns).max(frame_ns * 0.1);
             budget_ns / ns_per_instr / (frame_ns / 1_000_000.0)
         });
         match self.speed {
@@ -642,12 +649,65 @@ impl Pacer {
     }
 }
 
+/// Frames summed up until their instructions took long enough to time
+/// (`HOST_SAMPLE`).
+#[derive(Default)]
+struct HostSample {
+    executed: u64,
+    exec: Duration,
+    overhead: Duration,
+    frames: u32,
+}
+
+impl HostSample {
+    /// Add a frame that ran `executed` instructions in `exec`, with
+    /// `overhead` of other work. Once there are enough, the nanoseconds an
+    /// instruction took and a frame's other work, and start over. Frames
+    /// that hardly ran anything (waiting for an interrupt) don't count.
+    fn add(&mut self, executed: u64, exec: Duration, overhead: Duration) -> Option<(f64, f64)> {
+        if executed < 10_000 {
+            return None;
+        }
+        self.executed += executed;
+        self.exec += exec;
+        self.overhead += overhead;
+        self.frames += 1;
+        if self.exec < HOST_SAMPLE {
+            return None;
+        }
+        let sample = std::mem::take(self);
+        Some((
+            sample.exec.as_nanos() as f64 / sample.executed as f64,
+            sample.overhead.as_nanos() as f64 / sample.frames as f64,
+        ))
+    }
+}
+
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns });
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_coarse_clock_never_makes_the_host_infinitely_fast() {
+        // In a browser, a short batch can measure as having taken no time:
+        // the host's speed comes from enough frames to time.
+        let mut sample = HostSample::default();
+        let ms = Duration::from_millis;
+        assert_eq!(sample.add(50_000, Duration::ZERO, Duration::ZERO), None);
+        assert_eq!(sample.add(50_000, ms(1), Duration::ZERO), None);
+        assert_eq!(sample.add(100, ms(5), Duration::ZERO), None);
+        for _ in 0..7 {
+            assert_eq!(sample.add(50_000, Duration::ZERO, ms(1)), None);
+        }
+        let (ns_per_instr, overhead_ns) = sample.add(50_000, ms(9), ms(1)).unwrap();
+        assert_eq!(ns_per_instr, 10_000_000.0 / 500_000.0);
+        assert_eq!(overhead_ns, 800_000.0);
+        // And starts over.
+        assert_eq!(sample.add(50_000, ms(1), Duration::ZERO), None);
+    }
 
     #[test]
     fn fast_forward_runs_ahead_and_goes_on_from_there() {
