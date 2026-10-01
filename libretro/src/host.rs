@@ -319,6 +319,19 @@ impl Host for Machine {
         fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {}", path.display(), e))
     }
 
+    fn manuals(&self, id: &str) -> Vec<rust_dos::manuals::Manual> {
+        let file = self.profile_file(id);
+        let text = fs::read_to_string(&file).unwrap_or_default();
+        let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        games::manuals(&dir, id, &text, content::home().as_deref())
+    }
+
+    fn add_manual(&mut self, id: &str, path: &Path) -> Result<(), String> {
+        let file = self.profile_file(id);
+        let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        games::add_manual_file(&dir, id, path, content::home().as_deref())
+    }
+
     fn reset_game(&mut self, id: &str) -> Result<(), String> {
         if self.game.as_ref().is_some_and(|g| g.id == id) {
             return Err("The game is running: reset it once it has ended".to_string());

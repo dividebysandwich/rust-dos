@@ -127,7 +127,7 @@ impl Document {
                 let pixmap = hayro::render(p, &cache, &Default::default(), &settings);
                 let mut frame = Frame::new(pixmap.width() as u32, pixmap.height() as u32);
                 // On white: opaque, so premultiplied is as it is.
-                for (rgb, rgba) in frame.rgb.chunks_exact_mut(3).zip(pixmap.data_as_u8_slice().chunks_exact(4)) {
+                for (rgb, rgba) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(pixmap.data_as_u8_slice().as_chunks::<4>().0.iter()) {
                     rgb.copy_from_slice(&rgba[..3]);
                 }
                 frame
@@ -139,7 +139,7 @@ impl Document {
 /// Pixels with an alpha channel, on white.
 fn on_white(width: u32, height: u32, rgba: &[u8]) -> Frame {
     let mut frame = Frame::new(width, height);
-    for (rgb, p) in frame.rgb.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
+    for (rgb, p) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(rgba.as_chunks::<4>().0.iter()) {
         let a = p[3] as u32;
         for i in 0..3 {
             rgb[i] = ((p[i] as u32 * a + 255 * (255 - a)) / 255) as u8;
@@ -157,8 +157,8 @@ fn decode_png(data: &[u8]) -> Result<Frame, String> {
     let (width, height) = (info.width, info.height);
     let rgba: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => pixels[..info.buffer_size()].to_vec(),
-        png::ColorType::Rgb => pixels[..info.buffer_size()].chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => pixels[..info.buffer_size()].chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Rgb => pixels[..info.buffer_size()].as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => pixels[..info.buffer_size()].as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
         png::ColorType::Grayscale => pixels[..info.buffer_size()].iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return Err("an indexed picture that wasn't expanded".to_string()),
     };
@@ -199,17 +199,17 @@ fn decode_jpeg(data: &[u8]) -> Result<Frame, String> {
             frame.rgb.copy_from_slice(&pixels[..len]);
         }
         PixelFormat::L8 => {
-            for (rgb, &g) in frame.rgb.chunks_exact_mut(3).zip(&pixels) {
+            for (rgb, &g) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(&pixels) {
                 rgb.fill(g);
             }
         }
         PixelFormat::L16 => {
-            for (rgb, g) in frame.rgb.chunks_exact_mut(3).zip(pixels.chunks_exact(2)) {
+            for (rgb, g) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(pixels.as_chunks::<2>().0.iter()) {
                 rgb.fill(g[0]);
             }
         }
         PixelFormat::CMYK32 => {
-            for (rgb, p) in frame.rgb.chunks_exact_mut(3).zip(pixels.chunks_exact(4)) {
+            for (rgb, p) in frame.rgb.as_chunks_mut::<3>().0.iter_mut().zip(pixels.as_chunks::<4>().0.iter()) {
                 let k = 255 - p[3] as u32;
                 for i in 0..3 {
                     rgb[i] = ((255 - p[i] as u32) * k / 255) as u8;

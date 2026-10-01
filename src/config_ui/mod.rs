@@ -15,6 +15,7 @@ mod draw;
 mod games;
 mod help;
 mod image;
+mod manual;
 pub mod osd;
 mod perf;
 mod rooms;
@@ -28,6 +29,7 @@ pub use draw::cp437;
 use games::{GameDialog, GameField};
 use image::{ImageDialog, ImageField};
 use rooms::{RoomBrowser, RoomButton, RoomField};
+pub use manual::Layer;
 pub use states::SlotView;
 
 use crate::games::{GameEntry, NewGame};
@@ -220,6 +222,16 @@ pub trait Host {
     fn identify_game(&mut self, archive: &Path) -> Result<String, String> {
         let _ = archive;
         Err("There is no RetroAchievements here".to_string())
+    }
+    /// The manuals and extras of the game `id` (games.rs's `manuals`).
+    fn manuals(&self, id: &str) -> Vec<crate::manuals::Manual> {
+        let _ = id;
+        Vec::new()
+    }
+    /// Make the document or picture `path` one of the game `id`'s manuals.
+    fn add_manual(&mut self, id: &str, path: &Path) -> Result<(), String> {
+        let _ = (id, path);
+        Err("There are no game profiles here".to_string())
     }
     /// Whether save states can be kept (there is somewhere to keep them).
     fn states_available(&self) -> bool {
@@ -1421,6 +1433,8 @@ pub(super) enum Pick {
     ImagePath,
     /// The archive a game came in, for RetroAchievements.
     AchievementsArchive,
+    /// A document or picture, one of a game's manuals.
+    Manual,
 }
 
 struct Status {
@@ -1524,6 +1538,13 @@ pub struct ConfigUi {
     confirm_reset: bool,
     /// What to tell the user once the window has closed (a game launched).
     notice: Option<String>,
+    /// A game's manuals, the one open shown over the picture
+    /// (manual.rs), and the layer its page is drawn in where the frontend
+    /// has one.
+    manual: Option<manual::ManualView>,
+    layer_scale: Option<f64>,
+    layer: Option<Layer>,
+    layer_generation: u64,
     /// The Cheats page's search.
     cheats: cheats::Cheats,
     /// The Achievements page.
@@ -1600,6 +1621,10 @@ impl ConfigUi {
             confirm_delete: None,
             confirm_reset: false,
             notice: None,
+            manual: None,
+            layer_scale: None,
+            layer: None,
+            layer_generation: 0,
             cheats: cheats::Cheats::default(),
             achievements: achievements::Achievements::default(),
             stats: None,
@@ -1621,9 +1646,10 @@ impl ConfigUi {
 
     /// Whether the machine waits while the window is open: it does,
     /// except on the Mixer page, where it plays on to be heard, and the
-    /// Stats page, which shows it running.
+    /// Stats page, which shows it running, unless a manual is open over
+    /// them.
     pub fn pauses_machine(&self) -> bool {
-        self.open && !matches!(self.page, Page::Mixer | Page::Stats)
+        self.open && (self.manual.is_some() || !matches!(self.page, Page::Mixer | Page::Stats))
     }
 
     /// What the window keeps up to date while it is open, for the frontend
@@ -1733,6 +1759,7 @@ impl ConfigUi {
         self.autoexec = None;
         self.rooms = None;
         self.help = None;
+        self.manual = None;
         self.confirm_delete = None;
         self.cheats.edit = None;
         self.achievements.edit = None;
@@ -1753,6 +1780,8 @@ impl ConfigUi {
         self.open = false;
         self.layout = None;
         self.hits.clear();
+        self.manual = None;
+        self.layer = None;
     }
 
     fn row_count(&self) -> usize {
@@ -1807,6 +1836,8 @@ impl ConfigUi {
             self.help_key(key);
         } else if self.browser.is_some() {
             self.browser_key(key, host);
+        } else if self.manual.is_some() {
+            self.manual_key(key, host);
         } else if self.dialog.is_some() {
             self.dialog_key(key, host);
         } else if self.image_dialog.is_some() {
@@ -1832,6 +1863,9 @@ impl ConfigUi {
 
     /// Mouse wheel: `dy` > 0 is up.
     pub fn wheel(&mut self, dy: i32, host: &mut dyn Host) {
+        if self.manual_page_shown() && self.manual_wheel(dy) {
+            return;
+        }
         let key = if dy > 0 { UiKey::Up } else { UiKey::Down };
         for _ in 0..dy.unsigned_abs().min(5) {
             self.key(key, host);
@@ -1858,9 +1892,19 @@ impl ConfigUi {
             return;
         }
         let Some((target, into)) = hit else { return };
+        // The list of manuals' rows.
+        if let (Some(view), Target::Row(i)) = (&mut self.manual, target)
+            && self.browser.is_none()
+        {
+            if view.select(i) {
+                self.key(UiKey::Enter, host);
+            }
+            return;
+        }
         match target {
             Target::Tab(page) => {
-                if self.dialog.is_none()
+                if self.manual.is_none()
+                    && self.dialog.is_none()
                     && self.image_dialog.is_none()
                     && self.browser.is_none()
                     && self.game_dialog.is_none()
@@ -2397,6 +2441,7 @@ impl ConfigUi {
             ),
             Pick::ImportGame => ("Pick a GOG game's folder or a DOSBox .conf", String::new(), true, &["conf"][..]),
             Pick::AchievementsArchive => ("Pick the zip or .dosz the game came in", String::new(), false, &["zip", "dosz"][..]),
+            Pick::Manual => ("Pick a manual: a PDF or a picture", String::new(), false, &["pdf", "png", "jpg", "jpeg", "gif"][..]),
             Pick::ImagePath => (
                 "Pick the directory for the new image",
                 self.image_dialog.as_ref().map(|d| d.path.text()).unwrap_or_default(),
@@ -2459,6 +2504,7 @@ impl ConfigUi {
                         }
                         Err(e) => self.error(e),
                     },
+                    Pick::Manual => self.add_manual(&path, host),
                     Pick::AchievementsArchive => match host.identify_game(&path) {
                         Ok(message) => {
                             self.info(message);
@@ -2496,6 +2542,10 @@ impl ConfigUi {
         if !self.open {
             return;
         }
+        if self.manual_page_shown() {
+            return self.draw_manual_page(frame);
+        }
+        self.layer = None;
         let layout = Layout::for_frame(frame.width as usize, frame.height as usize);
         let (cols, rows) = (layout.cols, layout.rows);
         if cols < 20 || rows < 8 {
@@ -2522,6 +2572,8 @@ impl ConfigUi {
         self.visible = content.len();
         if self.browser.is_some() {
             self.draw_browser(&mut g, content.clone());
+        } else if self.manual.is_some() {
+            self.draw_manual_list(&mut g, content.clone());
         } else if self.dialog.is_some() {
             self.draw_dialog(&mut g, content.clone());
         } else if self.image_dialog.is_some() {
@@ -3044,7 +3096,9 @@ impl ConfigUi {
         if let Some((_, pick)) = &self.browser {
             return Some(pick.help());
         }
-        if self.dialog.is_some() {
+        if self.manual.is_some() {
+            Some("manuals")
+        } else if self.dialog.is_some() {
             Some("mount")
         } else if self.image_dialog.is_some() {
             Some("new-image")
@@ -3147,6 +3201,8 @@ impl ConfigUi {
             vec![("\u{2191}\u{2193}", "Scroll", Down), ("Esc", "Close", Esc)]
         } else if self.browser.is_some() {
             vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace), ("Esc", "Cancel", Esc)]
+        } else if self.manual.is_some() {
+            vec![("Enter", "Open", Enter), ("Ins", "Add", Insert), ("F1", "Help", Help), ("Esc", "Back", Esc)]
         } else if self.dialog.is_some() {
             let boot = self.dialog.as_ref().is_some_and(|d| d.focus == Field::Boot);
             vec![("Tab", "Next", Tab), ("Enter", if boot { "Boot" } else { "Mount" }, Enter), ("Esc", "Cancel", Esc)]
@@ -3186,6 +3242,7 @@ impl ConfigUi {
                 ("Enter", "Launch", Enter),
                 ("Ins", "New", Insert),
                 ("Del", "Delete", Delete),
+                ("M", "Manuals", Char('m')),
                 ("R", "Reset", Char('r')),
                 ("Tab", "Page", Tab),
                 ("F2", "Save", Save),

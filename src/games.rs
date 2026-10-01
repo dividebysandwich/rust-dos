@@ -251,6 +251,19 @@ fn set_game_key(text: &str, key: &str, value: &str, add: bool) -> String {
     out
 }
 
+/// Make `path` one of the manuals of the game `id`, whose profile is in
+/// the games folder `dir`: a `manual=` line in it, relative to the folder
+/// where it is in it.
+pub fn add_manual_file(dir: &Path, id: &str, path: &Path, home: Option<&Path>) -> Result<(), String> {
+    let file = dir.join(format!("{}.conf", id));
+    let text = hostfs::read_to_string(&file).map_err(|e| format!("{}: {}", file.display(), e))?;
+    let value = match path.strip_prefix(dir) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => crate::mount::contract_home(path, home),
+    };
+    hostfs::write(&file, add_manual(&text, &value)).map_err(|e| format!("{}: {}", file.display(), e))
+}
+
 /// The folder of the game `id`'s extras, beside its profile in the games
 /// folder `dir`: the documents and pictures in it are its manuals.
 pub fn extras_dir(dir: &Path, id: &str) -> PathBuf {

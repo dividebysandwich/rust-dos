@@ -1,6 +1,7 @@
 //! The settings window's Games page: the game profiles, launched with
-//! Enter, made from the current settings with Ins, deleted with Del, and
-//! taken back to how they were installed with R.
+//! Enter, made from the current settings with Ins, deleted with Del,
+//! their manuals shown with M (manual.rs), and taken back to how they
+//! were installed with R.
 
 use super::dialog::TextField;
 use super::draw::{self, Grid};
@@ -115,6 +116,7 @@ impl ConfigUi {
                 self.confirm_reset = false;
                 self.error(format!("Delete {}? Enter deletes it, Esc keeps it", game.name));
             }
+            (UiKey::Char('m' | 'M'), Some(game)) => self.open_manuals(&game.id, &game.name, host, false),
             (UiKey::Char('r' | 'R'), Some(game)) => {
                 if self.active_game.as_deref() == Some(game.id.as_str()) {
                     self.error(format!("{} is running: reset it once it has ended", game.name));

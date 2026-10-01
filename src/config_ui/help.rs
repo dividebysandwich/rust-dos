@@ -389,6 +389,7 @@ impl Pick {
             Pick::ImportGame => "import",
             Pick::ImagePath => "new-image",
             Pick::AchievementsArchive => "achievements-archive",
+            Pick::Manual => "manuals",
         }
     }
 }

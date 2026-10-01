@@ -36,6 +36,8 @@ struct FakeHost {
     games: Vec<GameEntry>,
     launched: Vec<String>,
     reset: Vec<String>,
+    /// The games' manuals.
+    manuals: Vec<crate::manuals::Manual>,
     created: Vec<NewGame>,
     /// The machine's memory for the Cheats page, and its frozen values.
     ram: Vec<u8>,
@@ -79,6 +81,7 @@ impl FakeHost {
             games: vec![],
             launched: vec![],
             reset: vec![],
+            manuals: vec![],
             created: vec![],
             ram: vec![],
             frozen: vec![],
@@ -192,6 +195,15 @@ impl Host for FakeHost {
 
     fn delete_game(&mut self, id: &str) -> Result<(), String> {
         self.games.retain(|g| g.id != id);
+        Ok(())
+    }
+
+    fn manuals(&self, _id: &str) -> Vec<crate::manuals::Manual> {
+        self.manuals.clone()
+    }
+
+    fn add_manual(&mut self, _id: &str, path: &Path) -> Result<(), String> {
+        self.manuals.push(crate::manuals::Manual { path: path.to_path_buf(), title: crate::manuals::title_of(path) });
         Ok(())
     }
 
@@ -1372,6 +1384,76 @@ fn the_games_page_launches_makes_and_deletes_games() {
     ui.draw(&mut Frame::new(640, 400));
 }
 
+/// A PNG `width` x `height` big, all `color`.
+fn png_file(name: &str, width: u32, height: u32, color: [u8; 3]) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-config-ui-manuals");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    let mut data = Vec::new();
+    let mut encoder = png::Encoder::new(&mut data, width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&color.repeat((width * height) as usize)).unwrap();
+    writer.finish().unwrap();
+    std::fs::write(&path, data).unwrap();
+    path
+}
+
+#[test]
+fn a_games_manuals_open_over_the_picture() {
+    use crate::manuals::Manual;
+    let mut host = FakeHost::new();
+    host.games.push(GameEntry { id: "keen".into(), name: "Keen".into(), command: "KEEN".into() });
+    let wheel = png_file("wheel.png", 50, 100, [200, 0, 0]);
+    host.manuals = vec![
+        Manual { path: wheel.clone(), title: "Code wheel".into() },
+        Manual { path: "/nowhere/manual.pdf".into(), title: "Manual".into() },
+    ];
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Games);
+    // M: the list of them, which pauses the machine.
+    keys(&mut ui, &mut host, &[Char('m')]);
+    assert!(ui.manual.is_some() && ui.pauses_machine());
+    ui.draw(&mut Frame::new(640, 400));
+    // One that isn't there says so, and stays in the list.
+    keys(&mut ui, &mut host, &[Down, Enter]);
+    assert!(status(&ui).1 && !ui.manual_page_shown(), "{:?}", status(&ui));
+    // The picture, over the whole frame, fit to it.
+    keys(&mut ui, &mut host, &[Up, Enter]);
+    assert!(ui.manual_page_shown());
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    let pixel = |frame: &Frame, x: usize, y: usize| frame.rgb[(y * 640 + x) * 3..][..3].to_vec();
+    assert_eq!(pixel(&frame, 320, 200), [200, 0, 0], "the page in the middle");
+    assert_eq!(pixel(&frame, 20, 200), [0x18, 0x1C, 0x24], "around it");
+    assert!(ui.layer().is_none());
+    // Where the frontend has more pixels, the page is a layer of its own.
+    ui.set_layer_scale(Some(2.0));
+    ui.draw(&mut frame);
+    let layer = ui.layer().expect("a layer");
+    assert_eq!((layer.picture.width, layer.picture.height), (368, 736), "twice the pixels");
+    let (x, _, w, h) = layer.rect;
+    assert!((x - 228.0).abs() < 1.0 && (w - 184.0).abs() < 1.0 && (h - 368.0).abs() < 1.0, "{:?}", layer.rect);
+    // A picture has one page; zoom goes as far as it goes.
+    keys(&mut ui, &mut host, &[PageDown, Char('+'), Char('+'), Char('+'), Char('+')]);
+    ui.draw(&mut frame);
+    // Esc: back to the list, then to the Games page.
+    keys(&mut ui, &mut host, &[Esc]);
+    assert!(!ui.manual_page_shown() && ui.layer().is_none());
+    keys(&mut ui, &mut host, &[Esc]);
+    assert!(ui.manual.is_none() && ui.is_open());
+
+    // Ctrl+Shift+M: the running game's, its one opened at once.
+    host.manuals.truncate(1);
+    assert!(ui.show_manuals(&host).is_err(), "no game playing");
+    host.launched.push("keen".into());
+    ui.show_manuals(&host).unwrap();
+    assert!(ui.manual_page_shown());
+    keys(&mut ui, &mut host, &[Esc]);
+    assert!(!ui.is_open(), "Esc closes the window opened for it");
+}
+
 #[test]
 fn the_tabs_fit_or_scroll() {
     let host = FakeHost::new();
@@ -1790,7 +1872,7 @@ fn the_room_this_instance_hosts_shows_who_is_in_it() {
 
 #[test]
 fn every_setting_page_and_dialog_has_help() {
-    let mut used = vec!["mount", "new-image", "new-game", "autoexec", "rooms"];
+    let mut used = vec!["mount", "new-image", "new-game", "autoexec", "rooms", "manuals"];
     for page in PAGES {
         used.extend(page.help());
         for &item in page.items() {
@@ -1798,7 +1880,7 @@ fn every_setting_page_and_dialog_has_help() {
             used.extend(item.fields(&Settings::default()).into_iter().map(Item::help));
         }
     }
-    for pick in [Pick::MountPath, Pick::SoundFont, Pick::Mt32Roms, Pick::ImportGame, Pick::ImagePath, Pick::AchievementsArchive] {
+    for pick in [Pick::MountPath, Pick::SoundFont, Pick::Mt32Roms, Pick::ImportGame, Pick::ImagePath, Pick::AchievementsArchive, Pick::Manual] {
         used.push(pick.help());
     }
     for id in &used {

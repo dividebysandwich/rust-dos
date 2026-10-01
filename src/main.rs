@@ -2085,6 +2085,17 @@ impl Host for MainHost<'_, '_> {
         Ok(format!("{} is known by {} now (hash {})", name, archive.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), hash))
     }
 
+    fn manuals(&self, id: &str) -> Vec<rust_dos::manuals::Manual> {
+        let Some(dir) = games_dir(self.saved.file.as_deref()) else { return Vec::new() };
+        let text = std::fs::read_to_string(dir.join(format!("{}.conf", id))).unwrap_or_default();
+        games::manuals(&dir, id, &text, rust_dos::hostdirs::home_dir().as_deref())
+    }
+
+    fn add_manual(&mut self, id: &str, path: &std::path::Path) -> Result<(), String> {
+        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
+        games::add_manual_file(&dir, id, path, rust_dos::hostdirs::home_dir().as_deref())
+    }
+
     fn poke(&mut self, addr: usize, bytes: &[u8]) {
         for (i, &byte) in bytes.iter().enumerate() {
             self.cpu.bus.write_8(addr + i, byte);

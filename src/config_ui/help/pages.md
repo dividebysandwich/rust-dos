@@ -71,9 +71,22 @@ launched with **Enter**.
 While a game plays, **F2** saves changed settings to its profile only.
 **Del** deletes a profile (not the game's files).
 
+**M** shows the game's manuals.
+
 A game's own drives keep its files as installed: what it writes, such
 as saved games, goes to `saves` beside the games folder. **R** deletes
 that, taking the game back to how it was installed.
+
+# Manuals {#manuals}
+
+A game's manuals and extras: its manual, code wheel, maps and reference
+cards, as PDF documents or PNG, JPEG or GIF pictures, for the copy
+protection's questions. **Ctrl+Shift+M** shows the running game's.
+
+- **Enter** opens one; **Ins** adds one, which goes in the profile.
+- The files in `games/<game>.extras` are listed too.
+- **PgUp**/**PgDn** turn the pages, **Up**/**Down** scroll, **+**/**-**
+  zoom, **[** and **]** scroll sideways.
 
 # New game {#new-game}
 
