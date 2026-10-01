@@ -66,6 +66,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   picture's proportions.
 * `aspect=true` stretches the picture to 4:3, the shape a monitor gave
   320x200 and 640x400.
+* `vrr=true` is for a display with a variable refresh rate (G-Sync,
+  FreeSync). Each of the machine's frames is shown when its display
+  draws it, so the window refreshes at the machine's own rate: 70 Hz for
+  VGA's text and 320x200 modes, 60 Hz for 640x480. Without it, frames
+  come at a steady 60 Hz, which judders at 70 Hz. VRR must also be on
+  for the display, and for windows, in the graphics driver or the
+  desktop (sway's `adaptive_sync on`, for example). Where the display
+  is slower than the machine's rate, frames come at 60 Hz as without
+  it. `--vrr` turns it on.
 * `filter` is how the picture is scaled up: `nearest` (the default, sharp
   pixels) or `linear` (smooth). It applies without a CRT shader.
 * `shader` gives the picture a CRT look: `none` (the default),
@@ -601,8 +610,8 @@ Esc closes it.
   boot whenever Rust-DOS starts, once saved (F2). Its **Changes to** is a
   folder for a directory's or archive's changes, which leave it as it is
   ([`-overlay`](#mounting-drives)); such a drive is marked *ovl*.
-* **Display:** the scale, fullscreen, 4:3 aspect correction, the scaling
-  filter, the CRT shader and the monochrome monitor.
+* **Display:** the scale, fullscreen, 4:3 aspect correction, variable
+  refresh rate (VRR), the scaling filter, the CRT shader and the monochrome monitor.
 * **Emulator:** the CPU speed, the processor, the video card, the memory
   size, expanded and upper memory, the disk speeds, the joystick, rewind,
   the capture folder and whether recordings show the settings window and
@@ -1492,6 +1501,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--no-config` | Read and create no configuration file |
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
+| `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
 | `--cycles N\|max\|auto` | The CPU speed (`cycles`) |
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |
