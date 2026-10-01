@@ -49,6 +49,7 @@ pub mod kbc;
 pub mod keyboard;
 pub mod keylayout;
 pub mod log;
+pub mod manuals;
 #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
 pub mod midiout;
 pub mod lpt_dac;
