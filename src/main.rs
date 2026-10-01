@@ -1410,14 +1410,16 @@ fn main() -> Result<(), String> {
                 }
             }
         }
-        pacer.wait_to_present(&cpu.bus.clock);
+        // Waiting for the deadline of a frame paced to the retrace is
+        // neither the frame's work nor time the CPU could have had.
+        let waited = pacer.wait_to_present(&cpu.bus.clock);
         display.present(&mut screen, voodoo_gl.then_some(&cached_frame), ui.layer())?;
 
-        let overhead = frame_start.elapsed().saturating_sub(exec_time);
+        let overhead = frame_start.elapsed().saturating_sub(exec_time + waited);
         if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {
             cpu.bus.set_cycles_per_ms(cycles);
         }
-        let busy = frame_start.elapsed();
+        let busy = frame_start.elapsed().saturating_sub(waited);
         let code = cpu.dynrec.counts();
         last_frame = Some((
             frame_start,

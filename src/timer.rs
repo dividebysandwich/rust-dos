@@ -546,8 +546,10 @@ impl Pacer {
     }
 
     /// Wait for the frame's deadline (`retrace_batch_end`), if the batch
-    /// got to it, so it is shown then.
-    pub fn wait_to_present(&mut self, clock: &Clock) {
+    /// got to it, so it is shown then. Returns how long it waited, which
+    /// isn't the emulator's work.
+    pub fn wait_to_present(&mut self, clock: &Clock) -> Duration {
+        let start = Instant::now();
         if let Some((at, ticks)) = self.deadline.take()
             && clock.now_ticks() >= ticks
         {
@@ -555,6 +557,7 @@ impl Pacer {
             self.next_frame = at;
             self.presented = true;
         }
+        start.elapsed()
     }
 
     /// Frame bookkeeping after a batch, on `bus` as it is after it. At max,
@@ -724,6 +727,20 @@ mod tests {
     }
 
     #[test]
+    fn the_wait_for_a_deadline_is_reported() {
+        // The frontend leaves it out of the frame's work.
+        let start = Instant::now();
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), start);
+        clock.icount = pacer.retrace_batch_end(&clock, &CrtTiming::VGA_400, start);
+        let (at, _) = pacer.deadline.unwrap();
+        let waited = pacer.wait_to_present(&clock);
+        assert!(pacer.presented && Instant::now() >= at);
+        // About a 70 Hz frame.
+        assert!(waited > Duration::from_millis(5), "{:?}", waited);
+    }
+
+    #[test]
     fn retrace_pacing_waits_only_for_a_batch_that_got_there() {
         let start = Instant::now();
         let clock = Clock::new(1000);
@@ -732,7 +749,7 @@ mod tests {
         // Stopped short (a breakpoint): no waiting, and the next frame
         // comes at the usual pace.
         pacer.retrace_batch_end(&clock, &refresh, start);
-        pacer.wait_to_present(&clock);
+        assert!(pacer.wait_to_present(&clock) < Duration::from_millis(5));
         assert!(!pacer.presented);
         // Fast forwarding: no deadline at all.
         pacer.set_fast_forward(true, &clock, start);
