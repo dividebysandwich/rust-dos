@@ -306,31 +306,45 @@ pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String,
     Ok((id, imported.name, imported.warnings))
 }
 
-/// A zip archive of a game, unpacked into a folder of its own in the games
-/// folder `dir`. With the one program there is to start it
-/// (`import::zip::start_program`) it gets a profile with the folder as C:,
-/// whose id and name come back; the folder comes back either way.
-pub fn unpack(dir: &Path, archive: &Path) -> Result<(std::path::PathBuf, Option<(String, String)>), String> {
-    let data = hostfs::read(archive).map_err(|e| format!("{}: {}", archive.display(), e))?;
+/// A zip or 7z archive of a game as a profile in the games folder `dir`,
+/// with the archive as C: and its changes kept apart (`overlay=true`):
+/// the profile made for it before, or a new one. A new one starts the
+/// one program there is to start the game (`archive::start_program`), or
+/// leaves the prompt on C:. Returns the profile's id and name.
+pub fn add_archive(dir: &Path, archive: &Path) -> Result<(String, String), String> {
+    let archive = hostfs::canonicalize(archive).map_err(|e| format!("{}: {}", archive.display(), e))?;
+    let profiles = list(dir);
+    let made_before = profiles.iter().find(|(_, text)| {
+        config::parse(text, dir, None).drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path == archive)
+    });
+    if let Some((entry, _)) = made_before {
+        return Ok((entry.id.clone(), entry.name.clone()));
+    }
+    let files = crate::archive::open(&archive)?.files();
     let name = archive.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
     // Neither a profile nor a folder there already.
-    let taken: Vec<String> = list(dir)
+    let taken: Vec<String> = profiles
         .into_iter()
         .map(|(e, _)| e.id)
         .chain(hostfs::read_dir(dir).into_iter().flatten().map(|e| e.name.to_string_lossy().to_lowercase()))
         .collect();
     let id = slug(&name, &taken);
-    let folder = dir.join(&id);
-    let files = crate::import::zip::extract(&data, &folder).map_err(|e| format!("{}: {}", archive.display(), e))?;
-    let Some(program) = crate::import::zip::start_program(&files) else {
-        return Ok((folder, None));
-    };
+    let mut text = format!("[game]\nname={}\noverlay=true\n", name);
     // RetroAchievements knows the game by its archive's hash.
-    let hash = crate::achievements::hash::hash_archive(archive).map(|h| format!("achievements={}\n", h)).unwrap_or_default();
-    let text = format!("[game]\nname={}\noverlay=true\n{}\n[drives]\nC={}\n\n[autoexec]\nC:\n{}\n", name, hash, id, program);
+    if let Ok(hash) = crate::achievements::hash::hash_archive(&archive) {
+        text.push_str(&format!("achievements={}\n", hash));
+    }
+    let c = MountSpec { drive: crate::disk::DRIVE_C, path: archive, opts: Default::default() };
+    text.push_str(&format!("\n[drives]\nC={}\n\n[autoexec]\nC:\n", crate::mount::mount_spec_value(&c, None)));
+    if let Some(program) = crate::archive::start_program(&files) {
+        text.push_str(&program);
+        text.push('\n');
+    }
     let path = dir.join(format!("{}.conf", id));
-    hostfs::write(&path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-    Ok((folder, Some((id, name))))
+    hostfs::create_dir_all(dir)
+        .and_then(|()| hostfs::write(&path, text))
+        .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+    Ok((id, name))
 }
 
 /// A game that was launched and hasn't ended.
@@ -423,19 +437,15 @@ mod tests {
     }
 
     #[test]
-    fn a_zipped_game_is_unpacked_with_a_profile() {
-        let dir = std::path::PathBuf::from("target/test_games_unpack");
+    fn a_zipped_game_gets_a_profile_with_the_archive_as_c() {
+        let dir = std::path::PathBuf::from("target/test_games_archive");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let archive = dir.join("Commander Keen.zip");
-        let data = crate::import::zip::tests::zip(&[("KEEN4E.EXE", b"MZ", true), ("SETUP.EXE", b"MZ", false)]);
+        let data = crate::archive::zip::tests::zip(&[("KEEN/KEEN4E.EXE", b"MZ", true), ("KEEN/SETUP.EXE", b"MZ", false)]);
         std::fs::write(&archive, data).unwrap();
         let games = dir.join("games");
-        std::fs::create_dir_all(&games).unwrap();
-        let (folder, profile) = unpack(&games, &archive).unwrap();
-        assert_eq!(folder, games.join("commander-keen"));
-        assert!(folder.join("KEEN4E.EXE").is_file());
-        let (id, name) = profile.unwrap();
+        let (id, name) = add_archive(&games, &archive).unwrap();
         assert_eq!((id.as_str(), name.as_str()), ("commander-keen", "Commander Keen"));
         let text = std::fs::read_to_string(games.join("commander-keen.conf")).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
@@ -445,7 +455,8 @@ mod tests {
         assert_eq!(achievements_hash(&hash.to_uppercase(), &games, None).unwrap(), hash);
         assert_eq!(achievements_hash("../Commander Keen.zip", &games, None).unwrap(), hash);
         assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
-        assert_eq!(prepared.drives[0].path, folder, "C: is the folder, next to the profile");
+        let archive = std::fs::canonicalize(&archive).unwrap();
+        assert_eq!(prepared.drives[0].path, archive, "C: is the archive");
         assert_eq!(prepared.autoexec, ["C:", "KEEN4E.EXE"]);
         // Its changes go to its saves.
         let mut prepared = prepared;
@@ -457,9 +468,9 @@ mod tests {
         reset(&saves_dir(&games), &id).unwrap();
         assert!(!saves.exists());
         reset(&saves_dir(&games), &id).unwrap();
-        // Again: a folder and profile of its own.
-        let (again, _) = unpack(&games, &archive).unwrap();
-        assert_eq!(again, games.join("commander-keen-2"));
+        // Again: the same profile.
+        assert_eq!(add_archive(&games, &dir.join("Commander Keen.zip")).unwrap().0, "commander-keen");
+        assert_eq!(list(&games).len(), 1);
     }
 
     #[test]

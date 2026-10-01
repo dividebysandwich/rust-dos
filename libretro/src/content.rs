@@ -291,7 +291,7 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, Str
             let name = program.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
             plan.commands.extend(["C:".to_string(), "CD \\".to_string(), name]);
         }
-        DropAction::Zip(archive) => unpacked(dirs, &archive, &mut plan)?,
+        DropAction::Archive(archive) => archived(dirs, &archive, &mut plan)?,
         DropAction::Disc(image) | DropAction::Floppy(image) | DropAction::HardDisk(image) => {
             images(vec![image], boot, dirs, &mut plan)?;
         }
@@ -300,23 +300,19 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, Str
     Ok(plan)
 }
 
-/// A zip or .dosz archive: unpacked into the games folder the first time,
-/// and found there after. With a profile (a program to start), launched.
-fn unpacked(dirs: &Dirs, archive: &Path, plan: &mut Plan) -> Result<(), String> {
+/// A zip, .dosz or 7z archive: a game with the archive as C:, its profile
+/// made the first time and found after. One unpacked into the games
+/// folder before is played from there.
+fn archived(dirs: &Dirs, archive: &Path, plan: &mut Plan) -> Result<(), String> {
     let games_dir = dirs.games();
     let stem = archive.file_stem().map_or("Game".into(), |n| n.to_string_lossy().into_owned());
-    let mut id = games::slug(&stem, &[]);
-    let mut folder = games_dir.join(&id);
-    if !fs::is_dir(&folder) {
-        let (unpacked, profile) = games::unpack(&games_dir, archive)?;
-        plan.notes.push(format!("Unpacked {} into {}", archive.display(), unpacked.display()));
-        folder = unpacked;
-        id = match profile {
-            Some((id, _)) => id,
-            None => folder.file_name().map_or(id, |n| n.to_string_lossy().into_owned()),
-        };
-    }
-    plan.c_root = folder;
+    let unpacked = games_dir.join(games::slug(&stem, &[]));
+    let id = if fs::is_dir(&unpacked) {
+        plan.c_root = unpacked.clone();
+        unpacked.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    } else {
+        games::add_archive(&games_dir, archive)?.0
+    };
     let file = games_dir.join(format!("{}.conf", id));
     if let Ok(text) = fs::read_to_string(&file) {
         plan.profile = Some(Profile { id, text, dir: games_dir, file });

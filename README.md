@@ -94,7 +94,8 @@ cargo build --release
 
 `-d` makes a host directory drive C:; without it, C: is the configuration
 file's, or the current directory. Drop a game's folder, a GOG install, a zip
-archive, or a CD or disk image onto the window to mount, import or run it.
+or 7z archive, or a CD or disk image onto the window to mount, import or run
+it.
 `rust-dos --help` lists the other options.
 
 ## Configuration
@@ -279,7 +280,7 @@ cd libretro && cargo build --release
 retroarch -L target/release/librust_dos_libretro.so ~/games/keen.zip
 ```
 
-It takes a game's folder, a program, a zip archive, a
+It takes a game's folder, a program, a zip or 7z archive, a
 [game profile](CONFIGURATION.md#game-profiles) or DOSBox configuration, and
 floppy, hard disk and CD images (an `.m3u` list of them for the frontend's
 disk control), or starts at the prompt without content. The core options set

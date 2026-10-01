@@ -527,7 +527,7 @@ fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
 }
 
 #[test]
-fn an_archive_is_unpacked_once_and_its_game_launched() {
+fn an_archive_is_a_game_made_once_and_launched() {
     let dir = scratch("zip");
     fs::write(dir.join("Marker Game.zip"), zip(&[("MARKER.COM", MARKER), ("README.TXT", b"hello")])).unwrap();
     for _ in 0..2 {
@@ -541,7 +541,7 @@ fn an_archive_is_unpacked_once_and_its_game_launched() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(games.len(), 2, "one folder and its profile: {:?}", games);
+    assert_eq!(games, ["marker-game.conf"], "its profile, and no folder");
 }
 
 #[test]
@@ -658,7 +658,7 @@ fn a_disk_image_the_frontend_keeps_is_read_and_written() {
 }
 
 #[test]
-fn an_archive_the_frontend_keeps_is_unpacked() {
+fn an_archive_the_frontend_keeps_is_read_where_it_is() {
     let dir = scratch("vfs-zip");
     let root = with_vfs(&dir);
     fs::write(root.join("Marker Game.zip"), zip(&[("MARKER.COM", MARKER)])).unwrap();
@@ -666,6 +666,8 @@ fn an_archive_the_frontend_keeps_is_unpacked() {
     assert!(load(Some(Path::new("test://Marker Game.zip"))));
     run(180);
     assert_eq!(map_word(0x320), Some(0xBEEF), "the game runs");
-    assert!(dir.join("saves/rust-dos/games/marker-game/MARKER.COM").is_file());
+    assert!(!dir.join("saves/rust-dos/games/marker-game").exists(), "not unpacked");
+    let profile = fs::read_to_string(dir.join("saves/rust-dos/games/marker-game.conf")).unwrap();
+    assert!(profile.contains("C=\"test://Marker Game.zip\""), "{}", profile);
     stop();
 }

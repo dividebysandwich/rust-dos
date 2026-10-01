@@ -719,7 +719,7 @@ its profile. `--game NAME` launches a game at startup, by its file name
 (`keen4`) or its name, and so does `?game=NAME` in the browser.
 
 A profile with `overlay=true` in `[game]` keeps the game's files as they
-were installed. New, imported and unpacked profiles have it. What the game
+were installed. New and imported profiles, and those of archives, have it. What the game
 writes on its own drives (the host directories in its `[drives]`, but not
 CD-ROMs or `-ro` drives) goes to `saves/<profile>/<drive letter>` beside
 the `games` folder instead: saved games, setup changes, patches. Files the
@@ -754,8 +754,8 @@ achievements=~/dos/archives/keen4.zip
 ```
 
 `achievements` is the archive, relative to the `games` folder, or its hash
-(32 hex digits). A zip dropped onto the window is unpacked with a profile
-that has its hash already; for other games, the Achievements page's
+(32 hex digits). A zip dropped onto the window becomes a profile that
+has its hash already; for other games, the Achievements page's
 **Game's archive** row picks the archive and puts its hash in the profile.
 The sets are made with DOSBox Pure, and Rust-DOS lays out the memory they
 read as DOSBox Pure does: the game's memory from 120h bytes below the
@@ -776,11 +776,12 @@ Dropping something onto the window uses it: a GOG game's folder or a DOSBox
 configuration file is [imported](#game-profiles) as a game and launched, a
 folder or hard disk image is mounted on the first free drive from D:, a CD
 image goes into the CD-ROM drive (or a new one), a floppy image into A:,
-and a program or batch file is started from its folder. A zip archive is
-unpacked into a folder of its own in the games folder; with a single
-program to start the game (setup and install programs aside) it becomes a
-game profile with that folder as C: and is launched, else the folder is
-mounted to make a profile from.
+and a program or batch file is started from its folder. A zip or 7z
+archive (or DOSBox Pure `.dosz`) becomes a game profile with the archive as
+C:, read where it is, its changes in the game's saves (see [Game
+profiles](#game-profiles)), and is launched: with a single program to
+start the game (setup and install programs aside), that program, else the
+prompt on C:. Dropping it again launches the same profile.
 
 C: and the built-in Z: always exist, and so does X: with the Ultrasound
 patches unless the configuration moves or removes it. Mount more drives at
@@ -834,6 +835,18 @@ the prompt:
 | `cdrom` or `iso` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. From a CD image it is a whole disc: raw and cooked sector reads, the volume descriptors, the table of contents, and audio tracks that play through the Sound Blaster mixer's CD volume. From a directory, only its files are available. |
 
 `-ro` makes any drive read-only.
+
+A zip, 7z or DOSBox Pure `.dosz` archive is a drive with its files, read
+from the archive where it is: a stored file as it is wanted, a compressed
+one decompressed in memory the first time it is opened (a 7z file with
+the others of its solid block). An archive whose files are all in one
+folder has that folder as the drive's root, and a `.dosz` with a
+`<parent>.parent` file in it has the parent archive's files under its own.
+An archive of a disk or CD image (its one CUE sheet or image, and no
+programs) mounts the image instead. An archive can't be written: without
+`-overlay` the drive is read-only, and with it the changes go to its
+folder, a disk image too, copied there when it is mounted. A game
+profile's archives always get one (see [Game profiles](#game-profiles)).
 
 `-overlay DIR` leaves a host directory as it is: what DOS writes, creates,
 renames or deletes on the drive goes to `DIR` (made if it isn't there),

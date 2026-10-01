@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Without the window (the `sdl` feature), which the frontend has, and
 # without the host's MIDI ports (`hostmidi`), which would need ALSA.
-rust-dos = { path = "..", default-features = false, features = ["midi", "cdaudio"] }
+rust-dos = { path = "..", default-features = false, features = ["midi", "cdaudio", "sevenz"] }
 
 # A workspace of its own, for a release profile that doesn't change the
 # rust-dos program's builds.

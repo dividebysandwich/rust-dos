@@ -299,7 +299,7 @@ pub extern "C" fn retro_deinit() {
 }
 
 /// The extensions of the content the core takes.
-const EXTENSIONS: &CStr = c"exe|com|bat|zip|dosz|conf|img|ima|vfd|flp|dsk|vhd|hdd|iso|cue|ins|m3u|m3u8";
+const EXTENSIONS: &CStr = c"exe|com|bat|zip|dosz|7z|conf|img|ima|vfd|flp|dsk|vhd|hdd|iso|cue|ins|m3u|m3u8";
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
@@ -313,8 +313,8 @@ pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
             library_name: c"rust-dos".as_ptr(),
             library_version: VERSION.as_ptr(),
             valid_extensions: EXTENSIONS.as_ptr(),
-            // Drives are the host's folders and images, and archives are
-            // unpacked into folders of their own.
+            // Drives are the host's folders, archives and images, read
+            // where they are.
             need_fullpath: true,
             block_extract: true,
         };

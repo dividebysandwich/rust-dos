@@ -1685,17 +1685,11 @@ impl MainHost<'_, '_> {
                     format!("Starting {} from {}:", name(&program), letter)
                 })
             }
-            DropAction::Zip(archive) => (|| {
+            DropAction::Archive(archive) => (|| {
                 let dir = games_dir(self.saved.file.as_deref())
-                    .ok_or("Archives are unpacked into the games folder beside the configuration file, and there is none (--no-config)")?;
-                let (folder, profile) = games::unpack(&dir, &archive)?;
-                self.cpu.bus.log_string(&format!("[CONFIG] Unpacked {} into {}", archive.display(), folder.display()));
-                match profile {
-                    Some((id, name)) => Ok(self.launch_game(&id).unwrap_or_else(|_| format!("{} is unpacked, with a profile", name))),
-                    None => mount(self, free(self.cpu), &folder, DriveKind::HardDisk).map(|d| {
-                        format!("{} is unpacked into {}, which is {}:; make it a profile on the Games page", name(&archive), name(&folder), disk::drive_letter(d))
-                    }),
-                }
+                    .ok_or("Archives become games in the games folder beside the configuration file, and there is none (--no-config)")?;
+                let (id, game) = games::add_archive(&dir, &archive)?;
+                Ok(self.launch_game(&id).unwrap_or_else(|e| format!("{} is a game on the Games page: {}", game, e)))
             })(),
             DropAction::Nothing(e) => Err(e),
         };

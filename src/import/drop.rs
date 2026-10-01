@@ -20,8 +20,9 @@ pub enum DropAction {
     HardDisk(PathBuf),
     /// A program or batch file: its folder mounted and it run.
     Run(PathBuf),
-    /// A zip archive: unpacked into a game's folder (see zip.rs).
-    Zip(PathBuf),
+    /// A zip or 7z archive: a game with the archive as C:
+    /// (`games::add_archive`).
+    Archive(PathBuf),
     /// Nothing rust-dos can use.
     Nothing(String),
 }
@@ -44,7 +45,7 @@ pub fn drop_action(path: &Path) -> DropAction {
     match ext.as_str() {
         "conf" => return DropAction::ImportGame(path),
         "exe" | "com" | "bat" => return DropAction::Run(path),
-        "zip" | "dosz" => return DropAction::Zip(path),
+        "zip" | "dosz" | "7z" => return DropAction::Archive(path),
         _ => {}
     }
     match diskimage::detect(&path, DriveKind::HardDisk) {
@@ -77,7 +78,7 @@ mod tests {
         assert_eq!(drop_action(&dir.join("game.cue")), DropAction::Disc(dir.join("game.cue")));
         assert_eq!(drop_action(&dir.join("disk.img")), DropAction::Floppy(dir.join("disk.img")));
         assert_eq!(drop_action(&dir.join("GAME.EXE")), DropAction::Run(dir.join("GAME.EXE")));
-        assert_eq!(drop_action(&dir.join("x.zip")), DropAction::Zip(dir.join("x.zip")));
+        assert_eq!(drop_action(&dir.join("x.zip")), DropAction::Archive(dir.join("x.zip")));
         assert!(matches!(drop_action(&dir.join("readme.txt")), DropAction::Nothing(_)));
     }
 }

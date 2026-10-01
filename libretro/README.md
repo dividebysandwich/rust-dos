@@ -37,7 +37,7 @@ starts.
 | none (*Start Core*) | starts at the prompt; C: is an empty folder, `saves/rust-dos/drive_c` |
 | a folder | C: is the folder. With a `rust-dos.conf` in it, its settings apply, and its `[autoexec]` starts the game. A GOG install or a folder of DOSBox configurations is imported as a game profile |
 | `.exe`, `.com`, `.bat` | C: is the program's folder, and the program runs |
-| `.zip`, `.dosz` | unpacked into `saves/rust-dos/games/<name>` the first time, and found there after; with one program to start, it gets a profile and starts |
+| `.zip`, `.dosz`, `.7z` | C:, read from the archive where it is, with a profile in `saves/rust-dos/games` made the first time and found after; it starts its one program, if it has one. What the game writes goes to `saves/rust-dos/saves/<name>` |
 | `.conf` | a [game profile](../CONFIGURATION.md#game-profiles), launched; a DOSBox configuration is imported as one first |
 | floppy image (`.img`, `.ima`, `.vfd`, …) | A:, with the prompt at A: |
 | CD image (`.iso`, `.cue`) | D:, with the prompt at D: |
