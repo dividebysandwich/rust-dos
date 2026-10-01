@@ -494,6 +494,15 @@ impl Drive {
         }
     }
 
+    /// The host directory as people know it: under an overlay, the one
+    /// below.
+    fn shown_root(&self) -> Option<&Path> {
+        match &self.storage {
+            Storage::Host(_, Some(overlaid)) => Some(&overlaid.lower),
+            _ => self.host_root(),
+        }
+    }
+
     /// The drive's files, if they are held in memory.
     fn tree(&self) -> Option<&MemFs> {
         match &self.storage {
@@ -1377,9 +1386,10 @@ impl DiskController {
             }
             let d = self.drives[drive as usize].as_mut().expect("a shareable drive");
             let root = d.host_root().expect("a host directory").to_path_buf();
-            match crate::shared_disk::SharedDisk::build(&root) {
+            let shown = d.shown_root().expect("a host directory").to_path_buf();
+            match crate::shared_disk::SharedDisk::build_named(&root, &shown) {
                 Ok((shared, skipped)) => {
-                    lines.push(format!("Drive {}: is a hard disk made from {}", drive_letter(drive), root.display()));
+                    lines.push(format!("Drive {}: is a hard disk made from {}", drive_letter(drive), shown.display()));
                     lines.extend(skipped.into_iter().map(|s| format!("Drive {}: left off the disk: {}", drive_letter(drive), s)));
                     d.shared = Some(shared);
                 }
@@ -1403,9 +1413,15 @@ impl DiskController {
                 lines.push(format!("Drive {}: is read-only: what the system wrote stays on its disk", drive_letter(d)));
                 continue;
             }
+            // Under an overlay, the changes go to its folder.
+            let target = match &drive.storage {
+                Storage::Host(_, Some(overlaid)) => overlaid.upper.clone(),
+                _ => None,
+            };
             let shared = drive.shared.as_mut().expect("a shared disk");
             let report = shared.sync(last);
-            lines.push(format!("Drive {}: {} copied to {}: {}", drive_letter(d), if last { "was" } else { "is" }, shared.root.display(), report.summary()));
+            let target = target.unwrap_or_else(|| shared.root.clone());
+            lines.push(format!("Drive {}: {} copied to {}: {}", drive_letter(d), if last { "was" } else { "is" }, target.display(), report.summary()));
             lines.extend(report.conflicts.iter().map(|c| format!("Drive {}: {} changed on both sides", drive_letter(d), c)));
             lines.extend(report.errors.iter().map(|e| format!("Drive {}: {}", drive_letter(d), e)));
         }
@@ -1513,10 +1529,7 @@ impl DiskController {
         self.drive(drive).map(|d| DriveInfo {
             drive,
             kind: d.kind,
-            root: match &d.storage {
-                Storage::Host(_, Some(overlaid)) => Some(overlaid.lower.clone()),
-                _ => d.host_root().map(Path::to_path_buf),
-            },
+            root: d.shown_root().map(Path::to_path_buf),
             overlay: match &d.storage {
                 Storage::Host(_, Some(overlaid)) => overlaid.upper.clone(),
                 _ => None,

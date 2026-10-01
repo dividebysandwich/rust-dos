@@ -209,18 +209,25 @@ impl SharedDisk {
     /// Make the disk of the folder `root`. Returns it with what the log
     /// should say about files left off it.
     pub fn build(root: &Path) -> Result<(SharedDisk, Vec<String>), String> {
+        Self::build_named(root, root)
+    }
+
+    /// Make the disk of the folder `root`, which people know as `shown`
+    /// (the folder below a drive's overlay): its name and label are
+    /// `shown`'s.
+    pub fn build_named(root: &Path, shown: &Path) -> Result<(SharedDisk, Vec<String>), String> {
         let tree = host_tree(root);
         let contents: u64 = tree.values().map(|(_, stamp)| stamp.size).sum();
         if contents > MAX_CONTENTS {
             return Err(format!(
                 "{} holds {} MB, more than the {} MB a shared disk takes",
-                root.display(),
+                shown.display(),
                 contents >> 20,
                 MAX_CONTENTS >> 20
             ));
         }
-        let name = root.display().to_string();
-        let disk = Rc::new(DiskImage::blank_hard_disk_chs(&name, GEOMETRY, Some(&label_for(root)))?);
+        let name = shown.display().to_string();
+        let disk = Rc::new(DiskImage::blank_hard_disk_chs(&name, GEOMETRY, Some(&label_for(shown)))?);
         let volume = open_volume(&disk)?;
         let mut manifest = Manifest::default();
         let mut skipped = Vec::new();
@@ -536,6 +543,26 @@ mod tests {
         let mut shared = shared;
         let report = shared.sync(true);
         assert_eq!((report.written, report.deleted, report.errors.len()), (0, 0, 0), "{:?}", report);
+    }
+
+    #[test]
+    fn under_an_overlay_the_changes_go_to_its_folder() {
+        let lower = folder("overlay");
+        let upper = scratch("overlay-upper");
+        let overlay = crate::overlay::Overlay::new(Box::new(crate::overlay::Folder(lower.clone())), Some(upper.clone()));
+        let layer = crate::hostfs::add_layer(std::sync::Arc::new(overlay.unwrap()));
+        let (mut shared, _) = SharedDisk::build_named(layer.root(), &lower).unwrap();
+        let volume = open_volume(&shared.disk).unwrap();
+        assert_eq!(volume.label().as_deref(), Some("OVERLAY"));
+        let notes = volume.find(&["NOTES.TXT"]).unwrap();
+        volume.write(notes.at.unwrap(), 0, b"NOTES, longer now").unwrap();
+        volume.remove(&["README~1.TXT"]).unwrap();
+        let report = shared.sync(true);
+        assert_eq!((report.written, report.deleted, report.errors.len()), (1, 1, 0), "{:?}", report);
+        assert_eq!(std::fs::read(upper.join("NOTES.TXT")).unwrap(), b"NOTES, longer now");
+        assert_eq!(std::fs::read(lower.join("NOTES.TXT")).unwrap(), b"notes");
+        assert!(lower.join("Read Me First.txt").is_file());
+        assert!(!crate::hostfs::exists(layer.root().join("Read Me First.txt")));
     }
 
     #[test]
