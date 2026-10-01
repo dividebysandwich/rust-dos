@@ -153,8 +153,8 @@ impl ConfigUi {
                 UiKey::Char('-') => open.zoom = open.zoom.saturating_sub(1),
                 UiKey::Char('[') => open.at.0 = (open.at.0 - step).max(0.0),
                 UiKey::Char(']') => open.at.0 = (open.at.0 + step).min(1.0),
-                UiKey::Esc | UiKey::Backspace | UiKey::Enter if view.manuals.len() > 1 || !view.alone => view.open = None,
-                UiKey::Esc | UiKey::Backspace | UiKey::Enter => self.close(),
+                UiKey::Esc | UiKey::Backspace if view.manuals.len() > 1 || !view.alone => view.open = None,
+                UiKey::Esc | UiKey::Backspace => self.close(),
                 _ => {}
             }
             return;
