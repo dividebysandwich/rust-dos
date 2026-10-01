@@ -271,3 +271,32 @@ fn a_loaded_et4000_shows_the_same() {
     assert!(rust_dos::savestate::machine::save(&b) == state);
     assert!(picture(&mut b) == before);
 }
+
+#[test]
+fn tseng_s_text_modes_are_wider_and_taller() {
+    for (mode, cols, rows, cell) in [(0x22u8, 132u32, 44u32, 8u32), (0x23, 132, 25, 14), (0x24, 132, 28, 13), (0x26, 80, 60, 8), (0x2A, 100, 40, 15)] {
+        let mut cpu = machine();
+        int10(&mut cpu, mode as u16, 0, 0, 0);
+        assert_eq!(cpu.bus.read_8(0x0449), mode);
+        assert_eq!(cpu.bus.read_16(0x044A) as u32, cols, "mode {:02X}", mode);
+        assert_eq!(cpu.bus.read_8(0x0484) as u32 + 1, rows, "mode {:02X}", mode);
+        let geometry = video::text::geometry(&cpu.bus).unwrap();
+        assert_eq!((geometry.cols as u32, geometry.rows as u32, geometry.cell_h() as u32), (cols, rows, cell), "mode {:02X}", mode);
+        assert_eq!(video::frame_size(&cpu.bus), (cols * 8, rows * cell), "mode {:02X}", mode);
+        // The teletype fills the last column of a row and goes on in the
+        // next one, and scrolls at the bottom.
+        int10(&mut cpu, 0x0200, 0, 0, (cols as u16 - 1) | (rows as u16 - 1) << 8);
+        int10(&mut cpu, 0x0E41, 0, 0, 0);
+        int10(&mut cpu, 0x0E42, 0, 0, 0);
+        let at = |cpu: &Cpu, col: u32, row: u32| cpu.bus.read_8(0xB8000 + ((row * cols + col) * 2) as usize);
+        assert_eq!(at(&cpu, cols - 1, rows - 2), b'A', "mode {:02X}", mode);
+        assert_eq!(at(&cpu, 0, rows - 1), b'B', "mode {:02X}", mode);
+        let timing = cpu.bus.vga.peek_timing();
+        assert!((55.0..75.0).contains(&timing.hz()), "mode {:02X}: {} Hz", mode, timing.hz());
+    }
+    // Back to 80 columns.
+    let mut cpu = machine();
+    int10(&mut cpu, 0x0022, 0, 0, 0);
+    int10(&mut cpu, 0x0003, 0, 0, 0);
+    assert_eq!(video::text::geometry(&cpu.bus).unwrap().cols, 80);
+}

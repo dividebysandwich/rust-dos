@@ -893,12 +893,18 @@ impl Bus {
         }
     }
 
+    /// The characters in a row of an 80-column text mode: 80, or what an
+    /// ET4000's CRTC shows (132 in Tseng's wide modes).
+    pub fn text_cols(&self) -> usize {
+        if self.et4000() { (self.vga.crtc_regs[0x01] as usize + 1).clamp(1, 160) } else { 80 }
+    }
+
     // Helper: Scroll the text screen up by 1 line
     pub fn scroll_up(&mut self) {
         // Read the current row count from BDA so 80x43 / 80x50 modes scroll
         // their whole visible area, not just the first 25 rows.
         let rows = self.text_rows();
-        let row_size = 160; // 80 chars * 2 bytes
+        let row_size = self.text_cols() * 2;
         let screen_size = rows * row_size;
         let text = self.text_mem_mut();
         if screen_size > text.len() {

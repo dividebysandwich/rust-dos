@@ -275,15 +275,27 @@ impl Et4000 {
     }
 }
 
-/// A mode of Tseng's BIOS past the VGA's: 16 colours in planes or 256 in
-/// chained memory, with its character cell, and its timing as the
+/// How a Tseng mode keeps its picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Characters and attributes, `width / 8` across.
+    Text,
+    /// 16 colours, a bit a pixel in each of the four planes.
+    Planar,
+    /// 256 colours (or HiColor), chained bytes.
+    Packed,
+}
+
+/// A mode of Tseng's BIOS past the VGA's: text, 16 colours in planes or
+/// 256 in chained memory, `width` dots across and `height` lines down,
+/// with its character cell, and its timing as the
 /// characters across (total, display, sync start, sync end), the lines
 /// down (the same) and the clock (`Et4000::clock_hz`'s index), and the
 /// doubled clock of its HiColor variant, if it has one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TsengMode {
     pub number: u8,
-    pub planar: bool,
+    pub kind: Kind,
     pub width: u16,
     pub height: u16,
     pub char_height: u8,
@@ -298,16 +310,26 @@ pub struct TsengMode {
 const H_640: [u16; 4] = [100, 80, 82, 94];
 const H_800: [u16; 4] = [132, 100, 105, 121];
 const H_1024: [u16; 4] = [168, 128, 131, 148];
+/// 132 characters of 8 dots at 40 MHz.
+const H_132: [u16; 4] = [160, 132, 135, 147];
 
 #[rustfmt::skip]
-pub static TSENG_MODES: [TsengMode; 7] = [
-    TsengMode { number: 0x29, planar: true, width: 800, height: 600, char_height: 16, h: H_800, v: [628, 600, 601, 605], clock: 3, hicolor_clock: None },
-    TsengMode { number: 0x2D, planar: false, width: 640, height: 350, char_height: 14, h: H_640, v: [449, 350, 387, 389], clock: 0, hicolor_clock: Some(8) },
-    TsengMode { number: 0x2E, planar: false, width: 640, height: 480, char_height: 16, h: H_640, v: [525, 480, 490, 492], clock: 0, hicolor_clock: Some(8) },
-    TsengMode { number: 0x2F, planar: false, width: 640, height: 400, char_height: 16, h: H_640, v: [449, 400, 412, 414], clock: 0, hicolor_clock: Some(8) },
-    TsengMode { number: 0x30, planar: false, width: 800, height: 600, char_height: 16, h: H_800, v: [628, 600, 601, 605], clock: 3, hicolor_clock: Some(12) },
-    TsengMode { number: 0x37, planar: true, width: 1024, height: 768, char_height: 16, h: H_1024, v: [806, 768, 771, 777], clock: 10, hicolor_clock: None },
-    TsengMode { number: 0x38, planar: false, width: 1024, height: 768, char_height: 16, h: H_1024, v: [806, 768, 771, 777], clock: 10, hicolor_clock: None },
+pub static TSENG_MODES: [TsengMode; 12] = [
+    // 132 columns at 40 MHz, 31.25 kHz and 70 Hz: 44 rows of 8x8, 25 of
+    // 8x14 and 28 of 8x13 (Ralf Brown's list).
+    TsengMode { number: 0x22, kind: Kind::Text, width: 1056, height: 352, char_height: 8, h: H_132, v: [449, 352, 387, 389], clock: 3, hicolor_clock: None },
+    TsengMode { number: 0x23, kind: Kind::Text, width: 1056, height: 350, char_height: 14, h: H_132, v: [449, 350, 387, 389], clock: 3, hicolor_clock: None },
+    TsengMode { number: 0x24, kind: Kind::Text, width: 1056, height: 364, char_height: 13, h: H_132, v: [449, 364, 387, 389], clock: 3, hicolor_clock: None },
+    // 80x60 of 8x8 at 640x480, 100x40 of 8x15 at 800x600.
+    TsengMode { number: 0x26, kind: Kind::Text, width: 640, height: 480, char_height: 8, h: H_640, v: [525, 480, 490, 492], clock: 0, hicolor_clock: None },
+    TsengMode { number: 0x2A, kind: Kind::Text, width: 800, height: 600, char_height: 15, h: H_800, v: [628, 600, 601, 605], clock: 3, hicolor_clock: None },
+    TsengMode { number: 0x29, kind: Kind::Planar, width: 800, height: 600, char_height: 16, h: H_800, v: [628, 600, 601, 605], clock: 3, hicolor_clock: None },
+    TsengMode { number: 0x2D, kind: Kind::Packed, width: 640, height: 350, char_height: 14, h: H_640, v: [449, 350, 387, 389], clock: 0, hicolor_clock: Some(8) },
+    TsengMode { number: 0x2E, kind: Kind::Packed, width: 640, height: 480, char_height: 16, h: H_640, v: [525, 480, 490, 492], clock: 0, hicolor_clock: Some(8) },
+    TsengMode { number: 0x2F, kind: Kind::Packed, width: 640, height: 400, char_height: 16, h: H_640, v: [449, 400, 412, 414], clock: 0, hicolor_clock: Some(8) },
+    TsengMode { number: 0x30, kind: Kind::Packed, width: 800, height: 600, char_height: 16, h: H_800, v: [628, 600, 601, 605], clock: 3, hicolor_clock: Some(12) },
+    TsengMode { number: 0x37, kind: Kind::Planar, width: 1024, height: 768, char_height: 16, h: H_1024, v: [806, 768, 771, 777], clock: 10, hicolor_clock: None },
+    TsengMode { number: 0x38, kind: Kind::Packed, width: 1024, height: 768, char_height: 16, h: H_1024, v: [806, 768, 771, 777], clock: 10, hicolor_clock: None },
 ];
 
 /// Tseng's mode `number`, if it is one of its graphics modes.
@@ -361,10 +383,15 @@ impl TsengMode {
         };
         // The words from row to row: a plane's bytes a row over two, or a
         // chained mode's bytes over eight.
-        let offset = match (self.planar, hicolor) {
-            (true, _) => self.width as u32 / 16,
-            (false, false) => self.width as u32 / 8,
-            (false, true) => self.width as u32 / 4,
+        let offset = match (self.kind, hicolor) {
+            (Kind::Text | Kind::Planar, _) => self.width as u32 / 16,
+            (Kind::Packed, false) => self.width as u32 / 8,
+            (Kind::Packed, true) => self.width as u32 / 4,
+        };
+        // A text mode's character rows and its cursor at their bottom.
+        let (max_scan, cursor) = match self.kind {
+            Kind::Text => (self.char_height - 1, [self.char_height - 3, self.char_height - 2]),
+            _ => (0, [0, 0]),
         };
         let bit = |v: u32, n: u32| ((v >> n) & 1) as u8;
         let (htotal, hblank_end) = (ht - 5, ht - 1);
@@ -386,9 +413,9 @@ impl TsengMode {
                 | bit(vdisplay, 9) << 6
                 | bit(vs, 9) << 7,
             0x00,
-            0x40 | bit(vblank_start, 9) << 5,
-            0x00,
-            0x00,
+            0x40 | bit(vblank_start, 9) << 5 | max_scan,
+            cursor[0],
+            cursor[1],
             0x00,
             0x00,
             0x00,
@@ -397,10 +424,14 @@ impl TsengMode {
             0x80 | (ve & 0x0F) as u8,
             vdisplay as u8,
             offset as u8,
-            if self.planar { 0x00 } else { 0x40 },
+            match self.kind {
+                Kind::Text => 0x1F,
+                Kind::Planar => 0x00,
+                Kind::Packed => 0x40,
+            },
             vblank_start as u8,
             vblank_end as u8,
-            if self.planar { 0xE3 } else { 0xA3 },
+            if self.kind == Kind::Planar { 0xE3 } else { 0xA3 },
             0xFF,
         ];
         TsengRegs {

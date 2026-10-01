@@ -3,7 +3,7 @@ use crate::cpu::Cpu;
 use crate::video::adapter::Adapter;
 use crate::video::bios::{self as video_bios, rom_pointer};
 use crate::video::et4000;
-use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode, pixels};
+use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, VideoMode, pixels};
 use iced_x86::Register;
 
 /// Current number of text rows on the screen, read from BDA 0x0484.
@@ -50,7 +50,7 @@ fn text_cols(cpu: &Cpu) -> usize {
     match cpu.bus.video_mode {
         VideoMode::Text40x25 | VideoMode::Text40x25Color => 40,
         _ if pixels::graphics_mode(&cpu.bus) => pixels::cells(&cpu.bus).0,
-        _ => 80,
+        _ => cpu.bus.text_cols(),
     }
 }
 
@@ -147,13 +147,19 @@ fn active_page(cpu: &mut Cpu) -> u8 {
 /// or 16) if given: its registers, the chip's and the DAC's, cleared
 /// memory unless `keep`, and the BIOS data, as for a standard mode.
 pub fn set_tseng_mode(cpu: &mut Cpu, mode: &et4000::TsengMode, keep: bool, hicolor: Option<u8>) {
-    let video_mode = if mode.planar { VideoMode::Vga640x480 } else { VideoMode::Graphics320x200 };
-    let colours = match (mode.planar, hicolor) {
-        (true, _) => "16 colours".to_string(),
-        (false, None) => "256 colours".to_string(),
-        (false, Some(bits)) => format!("{} bits a pixel", bits),
+    use et4000::Kind;
+    let video_mode = match mode.kind {
+        Kind::Text => VideoMode::Text80x25Color,
+        Kind::Planar => VideoMode::Vga640x480,
+        Kind::Packed => VideoMode::Graphics320x200,
     };
-    cpu.bus.log_string(&format!("[BIOS] Switch to Tseng mode {:02X}h ({}x{}, {})", mode.number, mode.width, mode.height, colours));
+    let what = match (mode.kind, hicolor) {
+        (Kind::Text, _) => format!("{}x{} text", mode.width / 8, mode.height / mode.char_height as u16),
+        (Kind::Planar, _) => format!("{}x{}, 16 colours", mode.width, mode.height),
+        (Kind::Packed, None) => format!("{}x{}, 256 colours", mode.width, mode.height),
+        (Kind::Packed, Some(bits)) => format!("{}x{}, {} bits a pixel", mode.width, mode.height, bits),
+    };
+    cpu.bus.log_string(&format!("[BIOS] Switch to Tseng mode {:02X}h ({})", mode.number, what));
     cpu.bus.vbe.reset();
     cpu.bus.video_mode = video_mode;
     let vga = &mut cpu.bus.vga;
@@ -161,17 +167,34 @@ pub fn set_tseng_mode(cpu: &mut Cpu, mode: &et4000::TsengMode, keep: bool, hicol
     let regs = mode.registers(hicolor.is_some());
     vga.misc_output_reg = regs.misc;
     vga.crtc_regs = regs.crtc;
-    if !mode.planar {
+    match mode.kind {
+        // Characters 8 dots wide.
+        Kind::Text => vga.sequencer_regs[0x01] = 0x01,
+        Kind::Planar => {}
         // A pixel a dot (Attribute Mode Control bit 6 off).
-        vga.attribute_regs[0x10] = 0x01;
+        Kind::Packed => vga.attribute_regs[0x10] = 0x01,
     }
     vga.et4000.program(&regs, hicolor.map_or(0, et4000::hicolor_command));
     vga.invalidate_timing();
+    let (cols, rows) = (mode.width as usize / 8, (mode.height / mode.char_height as u16) as usize);
     if !keep {
-        vga.vram_graphics.fill(0);
+        match mode.kind {
+            Kind::Text => {
+                for cell in vga.vram_text[..cols * rows * 2].chunks_mut(2) {
+                    cell.copy_from_slice(&[0x20, 0x07]);
+                }
+            }
+            _ => vga.vram_graphics.fill(0),
+        }
     }
     vga.mark_dirty_full();
     tseng_bios_data(cpu, mode.number, mode.width, mode.height, mode.char_height);
+    if mode.kind == Kind::Text {
+        // Pages of the screen's size, rounded to 256 bytes.
+        cpu.bus.guest_write_16(0x044C, ((cols * rows * 2).next_multiple_of(256)) as u16);
+        let cursor = video_bios::cursor_shape(Adapter::Et4000, mode.char_height as u16);
+        cpu.bus.guest_write_16(0x0460, cursor);
+    }
 }
 
 /// Mode 13h in HiColor at `bits` (15 or 16): 320x200 at two bytes a pixel,
@@ -1346,7 +1369,8 @@ pub fn handle(cpu: &mut Cpu) {
                 }
 
                 // Handle Line Wrapping
-                if curr_col >= MAX_COLS {
+                let cols = text_cols(cpu) as u8;
+                if curr_col >= cols {
                     curr_col = 0;
                     curr_row += 1;
                 }
@@ -1355,7 +1379,7 @@ pub fn handle(cpu: &mut Cpu) {
                 let rows = active_rows(cpu);
                 if curr_row >= rows {
                     // Scroll active area up
-                    scroll_area(cpu, true, 1, 0x07, 0, 0, rows - 1, MAX_COLS - 1);
+                    scroll_area(cpu, true, 1, 0x07, 0, 0, rows - 1, cols - 1);
                     curr_row = rows - 1;
                 }
             }

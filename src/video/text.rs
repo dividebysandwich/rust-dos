@@ -85,20 +85,21 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
     };
     match bus.video_mode {
         VideoMode::Text80x25 | VideoMode::Text80x25Color => {
-            let (font, font_h) = font_of_height(bus);
+            let (font, stride) = font_of_height(bus);
+            let cols = bus.text_cols();
             Some(TextGeometry {
-                cols: 80,
+                cols,
                 rows,
                 font,
-                stride: font_h,
-                font_h,
+                stride,
+                font_h: cell_height(bus, stride),
                 x_scale: 1,
                 y_scale: 1,
                 dots: 8,
                 alternate: &[],
                 mono: false,
                 underline: 0,
-                row_bytes: 160,
+                row_bytes: cols * 2,
                 start,
                 wrap,
             })
@@ -170,6 +171,20 @@ fn font_of_height(bus: &Bus) -> (&'static [u8], usize) {
         11..=14 => (FONT_8X14, 14),
         _ => (FONT_8X16, 16),
     }
+}
+
+/// The scanlines of a character row with a font of `stride`: the font's,
+/// or on an ET4000 the character height (BDA 0485h) that Tseng's 8x13 and
+/// 8x15 modes have, of the next larger font.
+fn cell_height(bus: &Bus, stride: usize) -> usize {
+    if !bus.vga.adapter.is_et4000() {
+        return stride;
+    }
+    let height = match crtc_shape(bus) {
+        Some((_, height)) => height,
+        None => bus.read_16(0x0485) as usize,
+    };
+    if (8..=stride).contains(&height) { height } else { stride }
 }
 
 /// The rows and the character height of an EGA's or VGA's text screen as
