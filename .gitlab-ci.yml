@@ -87,12 +87,20 @@ stages:
     - mv target/${CARGO_TARGET}/release/lib${LIB}.so ${LIBNAME}
     - if [ $STRIP_CORE_LIB -eq 1 ]; then $STRIP --strip-unneeded ${LIBNAME}; fi
 
-# Windows 64-bit
+# Windows 64-bit. The image's MinGW-w64 (Ubuntu 18.04's) predates
+# GetHostNameW, which Rust's standard library imports from ws2_32.dll: an
+# import library of its own supplies it.
 libretro-build-windows-x64:
   extends:
     - .libretro-rust-windows-x64-default
     - .core-defs
     - .core-build
+  script:
+    - mkdir -p target/mingw-compat
+    - printf 'LIBRARY ws2_32.dll\nEXPORTS\nGetHostNameW\n' > target/mingw-compat/ws2_32_compat.def
+    - x86_64-w64-mingw32-dlltool -d target/mingw-compat/ws2_32_compat.def -l target/mingw-compat/libws2_32_compat.a
+    - export RUSTFLAGS="-L ${CI_PROJECT_DIR}/target/mingw-compat -C link-arg=-lws2_32_compat"
+    - !reference [.core-build, script]
 
 # Linux 64-bit
 libretro-build-linux-x64:
