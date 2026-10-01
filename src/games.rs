@@ -497,6 +497,8 @@ fn game_value(text: &str, key: &str) -> Option<String> {
 /// configuration didn't come across.
 pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<String>), String> {
     let package = hostfs::canonicalize(package).map_err(|e| format!("{}: {}", package.display(), e))?;
+    // Without Windows' `\\?\`, as the profile has it, or it isn't found again.
+    let package = PathBuf::from(crate::mount::display_host_path(&package));
     let profiles = list(dir);
     let made_before = profiles.iter().find(|(_, text)| {
         config::parse(text, dir, None).drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path.starts_with(&package))
