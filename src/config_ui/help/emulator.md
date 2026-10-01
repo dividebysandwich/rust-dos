@@ -197,19 +197,20 @@ it too.
 
 # Mouse auto capture {#mouse-autocapture}
 
-When **on**, the mouse goes to the game as soon as you move it over the
-window, if the game uses the mouse, and comes back to your desktop when
-the game's own cursor reaches the edge of the screen and you keep going.
-Games that steer with the mouse keep it until you press **Ctrl+Alt**.
+When **on**, the mouse cursor is captured by the DOS window as soon as 
+it moves over the window, provided the current DOS program uses the mouse.
+The capture is released the moment the DOS cursor travels past the edge
+of the screen.
+Games that steer with the mouse retain it until **Ctrl+Alt** is pressed.
 
-Turn it **off** to capture the mouse only with a click, **Ctrl+Alt** or
-**Ctrl+F10**.
+When **off**, the mouse is captured by clicking in the window, or by
+pressing **Ctrl+Alt** or **Ctrl+F10**.
 
 # Mouse capture messages {#mouse-capture-messages}
 
-When **on**, a short message over the picture says when the mouse is
-captured, and that **Ctrl+Alt** lets it go, or when it is let go. Turn it
-**off** to capture and let go of the mouse quietly.
+When **on**, each mouse capture/release action will show a notification
+message on the top of the screen. While helpful for new users, turning it
+**off** can help reduce notification noise.
 
 # Rewind (Alt+F11) {#rewind}
 
