@@ -777,7 +777,8 @@ profile, as PDF documents or PNG, JPEG or GIF pictures, and show over the
 game without leaving it: what the copy protection asks is looked up there.
 **Ctrl+Shift+M** shows the running game's, and **M** on the Games page any
 game's: a list of them, then the one picked over the whole picture, the
-game paused. PgUp and PgDn turn the pages, Up and Down scroll, `+` and `-`
+game paused. Opened again, they open on the manual that was open, at the
+page it was left on. PgUp and PgDn turn the pages, Up and Down scroll, `+` and `-`
 zoom (the whole page, its width, 150% and 200%), `[` and `]` scroll
 sideways, and Esc goes back. In the window the page is drawn at the
 window's own pixels, sharper than the game's picture; in the libretro core

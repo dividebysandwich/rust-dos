@@ -1614,6 +1614,8 @@ pub struct ConfigUi {
     /// (manual.rs), and the layer its page is drawn in where the frontend
     /// has one.
     manual: Option<manual::ManualView>,
+    /// Where the manuals were left, for opening them there again.
+    manual_places: manual::Places,
     pixel_scale: (f32, f32),
     layered: bool,
     layer: Option<Layer>,
@@ -1695,6 +1697,7 @@ impl ConfigUi {
             confirm_reset: false,
             notice: None,
             manual: None,
+            manual_places: manual::Places::default(),
             pixel_scale: (1.0, 1.0),
             layered: false,
             layer: None,
@@ -1836,6 +1839,7 @@ impl ConfigUi {
         self.autoexec = None;
         self.rooms = None;
         self.help = None;
+        self.put_away_manual();
         self.manual = None;
         self.confirm_delete = None;
         self.confirm_sc55 = None;
@@ -1858,6 +1862,7 @@ impl ConfigUi {
         self.open = false;
         self.layout = None;
         self.hits.clear();
+        self.put_away_manual();
         self.manual = None;
         self.layer = None;
     }

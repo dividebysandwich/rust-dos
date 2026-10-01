@@ -1471,6 +1471,83 @@ fn a_games_manuals_open_over_the_picture() {
     assert!(!ui.is_open(), "Esc closes the window opened for it");
 }
 
+/// A PDF of `pages` empty letter pages.
+#[cfg(feature = "manuals")]
+fn pdf_file(name: &str, pages: usize) -> PathBuf {
+    let mut objects = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string(), String::new()];
+    let mut kids = Vec::new();
+    for _ in 0..pages {
+        kids.push(format!("{} 0 R", objects.len() + 1));
+        objects.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string());
+    }
+    objects[1] = format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages);
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} 0 obj\n{}\nendobj\n", i + 1, object).bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+    for offset in offsets {
+        pdf.extend(format!("{:010} 00000 n \n", offset).bytes());
+    }
+    pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", objects.len() + 1, xref).bytes());
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-config-ui-manuals");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, pdf).unwrap();
+    path
+}
+
+#[cfg(feature = "manuals")]
+#[test]
+fn manuals_open_where_they_were_left() {
+    use crate::manuals::Manual;
+    let mut host = FakeHost::new();
+    host.games.push(GameEntry { id: "keen".into(), name: "Keen".into(), command: "KEEN".into() });
+    host.manuals = vec![
+        Manual { path: pdf_file("rules.pdf", 3), title: "Rules".into() },
+        Manual { path: png_file("map.png", 20, 20, [0, 0, 200]), title: "Map".into() },
+    ];
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.show_page(Page::Games);
+    // The first time, the list; the rules turned to their third page.
+    keys(&mut ui, &mut host, &[Char('m')]);
+    assert_eq!(ui.manual_page(), None);
+    keys(&mut ui, &mut host, &[Enter, PageDown, PageDown, PageDown]);
+    assert_eq!(ui.manual_page(), Some(("Rules".to_string(), 2, 0)));
+    // The map, zoomed, and back to the rules: on their page.
+    keys(&mut ui, &mut host, &[Esc, Down, Enter, Char('+')]);
+    assert_eq!(ui.manual_page(), Some(("Map".to_string(), 0, 1)));
+    keys(&mut ui, &mut host, &[Esc, Up, Enter]);
+    assert_eq!(ui.manual_page(), Some(("Rules".to_string(), 2, 0)));
+    keys(&mut ui, &mut host, &[Esc, Down, Enter]);
+    assert_eq!(ui.manual_page(), Some(("Map".to_string(), 0, 1)));
+    // Closed and opened again (M, Ctrl+Shift+M): the one open last, where
+    // it was.
+    keys(&mut ui, &mut host, &[PageUp]);
+    ui.close();
+    ui.open(&Settings::default(), None, &host);
+    ui.show_page(Page::Games);
+    keys(&mut ui, &mut host, &[Char('m')]);
+    assert_eq!(ui.manual_page(), Some(("Map".to_string(), 0, 1)));
+    keys(&mut ui, &mut host, &[Esc, Up, Enter, Esc, Esc]);
+    host.launched.push("keen".into());
+    ui.close();
+    ui.open(&Settings::default(), None, &host);
+    ui.show_manuals(&host).unwrap();
+    assert_eq!(ui.manual_page(), Some(("Rules".to_string(), 2, 0)));
+    // Esc, then Ctrl+Shift+M: the same page.
+    keys(&mut ui, &mut host, &[PageUp]);
+    assert_eq!(ui.manual_page(), Some(("Rules".to_string(), 1, 0)));
+    ui.close();
+    ui.open(&Settings::default(), None, &host);
+    ui.show_manuals(&host).unwrap();
+    assert_eq!(ui.manual_page(), Some(("Rules".to_string(), 1, 0)));
+}
+
 #[test]
 fn the_tabs_fit_or_scroll() {
     let host = FakeHost::new();

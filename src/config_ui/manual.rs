@@ -4,6 +4,10 @@
 //! rest. Ctrl+Shift+M opens the running game's; M on the Games page the
 //! selected game's.
 //!
+//! Each manual keeps its place (page, zoom and scroll) while Rust-DOS
+//! runs, and each game the manual it had open: opened again, the game's
+//! manuals open on it, where it was left (`Places`).
+//!
 //! The page is drawn into the picture, as the rest of the window is, or,
 //! where the frontend can (`set_display`), handed to it as a layer of its
 //! own (`ConfigUi::layer`), sharp at the window's size. Either way it is
@@ -14,6 +18,8 @@ use super::draw::{self, Grid, Layout};
 use super::{ConfigUi, Hit, Host, Pick, Target, UiKey, fit};
 use crate::manuals::{self, Document, Manual};
 use crate::video::Frame;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// How far a page is zoomed: the whole page, as wide as the picture, and
 /// half as wide again and twice as wide.
@@ -41,7 +47,25 @@ pub struct ManualView {
     alone: bool,
 }
 
-struct OpenManual {
+/// A manual's place: its page, zoom, and how far down and right.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Place {
+    page: usize,
+    zoom: usize,
+    at: (f32, f32),
+}
+
+/// Where the manuals were left: each one's place, the one each game had
+/// open, and the last one open, kept as it was so it opens again at once.
+#[derive(Default)]
+pub(super) struct Places {
+    places: HashMap<PathBuf, Place>,
+    last: HashMap<String, PathBuf>,
+    kept: Option<OpenManual>,
+}
+
+pub(super) struct OpenManual {
+    path: PathBuf,
     doc: Document,
     title: String,
     page: usize,
@@ -73,12 +97,27 @@ impl ConfigUi {
     /// Open the manuals of the game `id` (named `name`): in the list, or
     /// the one there is, open. `alone` when the window opened for them.
     pub(super) fn open_manuals(&mut self, id: &str, name: &str, host: &dyn Host, alone: bool) {
+        self.put_away_manual();
         let manuals = host.manuals(id);
-        self.manual = Some(ManualView { id: id.to_string(), name: name.to_string(), manuals, row: 0, scroll: 0, open: None, alone });
+        // The one the game had open, else the first.
+        let last = self.manual_places.last.get(id).and_then(|path| manuals.iter().position(|m| m.path == *path));
+        let row = last.unwrap_or(0);
+        self.manual = Some(ManualView { id: id.to_string(), name: name.to_string(), manuals, row, scroll: 0, open: None, alone });
         self.status = None;
-        if self.manual.as_ref().is_some_and(|m| m.manuals.len() == 1) {
+        if last.is_some() || self.manual.as_ref().is_some_and(|m| m.manuals.len() == 1) {
             self.open_manual();
         }
+    }
+
+    /// The manual open closed: where it was left is kept, and it too.
+    pub(super) fn put_away_manual(&mut self) {
+        let Some(view) = &mut self.manual else { return };
+        let Some(mut open) = view.open.take() else { return };
+        let place = Place { page: open.page, zoom: open.zoom, at: open.at };
+        self.manual_places.places.insert(open.path.clone(), place);
+        self.manual_places.last.insert(view.id.clone(), open.path.clone());
+        open.shown = None;
+        self.manual_places.kept = Some(open);
     }
 
     /// Open the running game's manuals (Ctrl+Shift+M), with the window
@@ -114,17 +153,29 @@ impl ConfigUi {
     fn open_manual(&mut self) {
         let Some(view) = &mut self.manual else { return };
         let Some(manual) = view.manual().cloned() else { return };
-        match Document::open(&manual.path) {
-            Ok(doc) => {
-                view.open = Some(OpenManual {
-                    doc,
-                    title: manual.title,
-                    page: 0,
-                    zoom: 0,
-                    at: (0.0, 0.0),
-                    rendered: None,
-                    shown: None,
-                });
+        let place = self.manual_places.places.get(&manual.path).copied().unwrap_or_default();
+        // The last one open is as it was; others are opened again.
+        let kept = self.manual_places.kept.take_if(|kept| kept.path == manual.path);
+        let doc = match kept {
+            Some(kept) => Ok(kept),
+            None => Document::open(&manual.path).map(|doc| OpenManual {
+                path: manual.path.clone(),
+                doc,
+                title: manual.title.clone(),
+                page: 0,
+                zoom: 0,
+                at: (0.0, 0.0),
+                rendered: None,
+                shown: None,
+            }),
+        };
+        match doc {
+            Ok(mut open) => {
+                open.title = manual.title;
+                // A document that got shorter opens on its last page.
+                open.page = place.page.min(open.doc.pages().saturating_sub(1));
+                (open.zoom, open.at) = (place.zoom.min(ZOOMS.len() - 1), place.at);
+                view.open = Some(open);
                 self.status = None;
             }
             Err(e) => self.error(e),
@@ -153,7 +204,7 @@ impl ConfigUi {
                 UiKey::Char('-') => open.zoom = open.zoom.saturating_sub(1),
                 UiKey::Char('[') => open.at.0 = (open.at.0 - step).max(0.0),
                 UiKey::Char(']') => open.at.0 = (open.at.0 + step).min(1.0),
-                UiKey::Esc | UiKey::Backspace if view.manuals.len() > 1 || !view.alone => view.open = None,
+                UiKey::Esc | UiKey::Backspace if view.manuals.len() > 1 || !view.alone => self.put_away_manual(),
                 UiKey::Esc | UiKey::Backspace => self.close(),
                 _ => {}
             }
@@ -170,6 +221,7 @@ impl ConfigUi {
             UiKey::Enter | UiKey::Insert => self.open_browser(Pick::Manual),
             UiKey::Esc if view.alone => self.close(),
             UiKey::Esc => {
+                self.put_away_manual();
                 self.manual = None;
                 self.status = None;
                 self.refresh_games(host);
@@ -329,6 +381,13 @@ impl ConfigUi {
         let layout = Layout { x: 0, y: 0, cell_h, cols, rows };
         draw::render_area(&g, &layout, frame, draw::OPAQUE, (0..cols, 0..1));
         draw::render_area(&g, &layout, frame, draw::OPAQUE, (0..cols, rows - 1..rows));
+    }
+
+    /// The manual open: its title, page and zoom.
+    #[cfg(test)]
+    pub(super) fn manual_page(&self) -> Option<(String, usize, usize)> {
+        let open = self.manual.as_ref()?.open.as_ref()?;
+        Some((open.title.clone(), open.page, open.zoom))
     }
 
     /// The mouse wheel over a page scrolls it.

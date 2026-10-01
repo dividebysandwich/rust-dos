@@ -29,6 +29,12 @@ the games listed on the settings window's **Games** page.
 If a game has one manual, it opens straight away. If it has more, you get a
 list: Enter opens one, Ins adds a file, Esc goes back.
 
+Each manual stays where you left it: its page, zoom and scroll. The next
+time you open the game's manuals, the one you had open comes back on that
+page, so Ctrl+Shift+M flips between the game and the manual without
+losing your place. Esc in it goes to the list of the game's other
+manuals, if it has more. Rust-DOS remembers this until it quits.
+
 While a manual is open the game is paused, and these keys turn and move
 the pages:
 

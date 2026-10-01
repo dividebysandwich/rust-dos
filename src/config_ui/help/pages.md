@@ -90,6 +90,7 @@ cards, as PDF documents or PNG, JPEG or GIF pictures, for the copy
 protection's questions. **Ctrl+Shift+M** shows the running game's.
 
 - **Enter** opens one; **Ins** adds one, which goes in the profile.
+- Opened again, the manual open last comes back on its page.
 - The files in `games/<game>.extras` are listed too.
 - **PgUp**/**PgDn** turn the pages, **Up**/**Down** scroll, **+**/**-**
   zoom, **[** and **]** scroll sideways.
