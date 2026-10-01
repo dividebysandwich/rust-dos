@@ -726,7 +726,7 @@ impl Item {
             Scale => "Window scale",
             Fullscreen => "Fullscreen",
             Aspect => "4:3 aspect correction",
-            Vrr => "Variable refresh rate (VRR)",
+            Vrr => "Variable refresh rate",
             Filter => "Scaling filter",
             Shader => "CRT shader",
             CrtCurvature => "  Curvature",
