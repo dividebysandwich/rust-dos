@@ -63,6 +63,7 @@ pub mod mixer;
 pub mod mixer_command;
 pub mod mount;
 pub mod mouse;
+pub mod mouse_capture;
 pub mod midi_shadow;
 pub mod mpu401;
 pub mod net;

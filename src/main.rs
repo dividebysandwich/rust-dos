@@ -309,11 +309,13 @@ fn main() -> Result<(), String> {
     let mut paused = false;
     // The game launched from its profile and not ended yet.
     let mut game: Option<ActiveGame> = None;
-    // The mouse captured for a program (Ctrl+F10, or a click once it has
-    // the mouse driver): SDL's relative mode, whose motion keeps coming at
-    // the window's edges.
+    // The mouse captured for a program (Ctrl+Alt, Ctrl+F10, or a click once
+    // it has the mouse driver): SDL's relative mode, whose motion keeps
+    // coming at the window's edges.
     let sdl_mouse = sdl_context.mouse();
     let mut mouse_captured = false;
+    // Ctrl+Alt on their own capture the mouse and let it go, as in VMware.
+    let mut ctrl_alt = rust_dos::mouse_capture::CtrlAlt::default();
     // The button whose click captured the mouse, whose release the program
     // doesn't see either.
     let mut capturing_click: Option<MouseButton> = None;
@@ -433,6 +435,7 @@ fn main() -> Result<(), String> {
                 } => display.redraw(),
                 Event::Window { win_event: WindowEvent::FocusLost, .. } => {
                     release_input(&mut cpu, &mut held);
+                    ctrl_alt.reset();
                     capture_mouse!(false);
                     if pacer.fast_forward() {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
@@ -458,6 +461,9 @@ fn main() -> Result<(), String> {
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                    if !repeat {
+                        ctrl_alt.key_down(chord_key(scancode));
+                    }
                     if keycode == Keycode::F12 && ctrl && shift && !alt {
                         if !repeat && let Some(message) = ui.overlay_key() {
                             osd.show(message);
@@ -613,12 +619,12 @@ fn main() -> Result<(), String> {
                         }
                         continue;
                     }
-                    // Ctrl+F10 captures the mouse and lets it go, as in
+                    // Ctrl+F10 captures the mouse and lets it go too, as in
                     // DOSBox.
                     if keycode == Keycode::F10 && ctrl && !alt {
                         if !repeat && !ui.is_open() && !paused {
                             capture_mouse!(!mouse_captured);
-                            osd.show(if mouse_captured { "Mouse captured (Ctrl+F10 releases)" } else { "Mouse released" });
+                            osd.show(if mouse_captured { CAPTURED } else { "Mouse released" });
                         }
                         continue;
                     }
@@ -752,6 +758,12 @@ fn main() -> Result<(), String> {
                     scancode,
                     ..
                 } => {
+                    // Ctrl+Alt: their keys still come up for the machine,
+                    // which saw them go down.
+                    if ctrl_alt.key_up(chord_key(scancode)) && !ui.is_open() && !paused {
+                        capture_mouse!(!mouse_captured);
+                        osd.show(if mouse_captured { CAPTURED } else { "Mouse released (Ctrl+Alt captures it)" });
+                    }
                     if keycode == Keycode::F12 && pacer.fast_forward() {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
                         cpu.bus.mixer.fast_forward = false;
@@ -833,7 +845,7 @@ fn main() -> Result<(), String> {
                     } else if !ui.is_open() && !paused {
                         if cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use() {
                             capture_mouse!(true);
-                            osd.show("Mouse captured (Ctrl+F10 releases)");
+                            osd.show(CAPTURED);
                         } else {
                             let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
                             cpu.bus.mouse.set_position(vx, vy);
@@ -870,7 +882,7 @@ fn main() -> Result<(), String> {
                     if !mouse_captured && (cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use()) {
                         capture_mouse!(true);
                         capturing_click = Some(mouse_btn);
-                        osd.show("Mouse captured (Ctrl+F10 releases)");
+                        osd.show(CAPTURED);
                         continue;
                     }
                     if !mouse_captured {
@@ -2315,5 +2327,20 @@ fn sdl_button_to_index(button: MouseButton) -> Option<usize> {
         MouseButton::Right => Some(1),
         MouseButton::Middle => Some(2),
         _ => None,
+    }
+}
+
+/// What the mouse captured says, with how to let it go.
+const CAPTURED: &str = "Mouse captured (Ctrl+Alt releases)";
+
+/// The host's key as Ctrl+Alt sees it.
+fn chord_key(scancode: Option<Scancode>) -> rust_dos::mouse_capture::ChordKey {
+    use rust_dos::mouse_capture::ChordKey;
+    match scancode {
+        Some(Scancode::LCtrl) => ChordKey::LeftCtrl,
+        Some(Scancode::RCtrl) => ChordKey::RightCtrl,
+        Some(Scancode::LAlt) => ChordKey::LeftAlt,
+        Some(Scancode::RAlt) => ChordKey::RightAlt,
+        _ => ChordKey::Other,
     }
 }
