@@ -296,6 +296,7 @@ impl Item {
             IdeHardDisks => "ide-hard-disks",
             BootCdrom => "boot-cdrom",
             KeyboardLayout => "keyboard-layout",
+            MouseAutocapture => "mouse-autocapture",
             Rewind => "rewind",
             RewindMemory => "rewind-memory",
             SbType => "sb-type",

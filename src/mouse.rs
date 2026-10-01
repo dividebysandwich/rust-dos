@@ -144,6 +144,12 @@ pub struct MouseState {
     /// positive).
     pub serial_dx: i32,
     pub serial_dy: i32,
+    /// When, in emulated nanoseconds, a program last called the driver
+    /// (INT 33h), and last asked it for motion rather than where the
+    /// cursor is (AX=000Bh): whether a program follows the cursor, for
+    /// capturing the host's mouse by itself (`mouse_capture`).
+    pub last_call_ns: Option<u64>,
+    pub last_relative_ns: Option<u64>,
 }
 
 impl MouseState {
@@ -179,7 +185,22 @@ impl MouseState {
             ps2: Ps2Mouse::default(),
             serial_dx: 0,
             serial_dy: 0,
+            last_call_ns: None,
+            last_relative_ns: None,
         }
+    }
+
+    /// Whether a program uses the driver at `now_ns`: it has an event
+    /// handler, or called the driver in the last two seconds.
+    pub fn in_use(&self, now_ns: u64) -> bool {
+        self.installed && (self.callback_mask != 0 || recent(self.last_call_ns, now_ns, 2_000_000_000))
+    }
+
+    /// Whether the program reads the mouse's motion (AX=000Bh), as games
+    /// steering with the mouse do: the cursor at the edge of the screen
+    /// then doesn't mean it left.
+    pub fn moves_by_motion(&self, now_ns: u64) -> bool {
+        recent(self.last_relative_ns, now_ns, 1_000_000_000)
     }
 
     /// Size of the virtual screen the host pointer spans: 640 wide in the
@@ -669,7 +690,13 @@ crate::state_fields!(MouseState {
     mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
     callback_mask, callback_cs, callback_ip, pending_callback_events,
     last_callback_mickey_x, last_callback_mickey_y, rest_x, rest_y, ps2,
-} skip { serial_dx, serial_dy });
+} skip { serial_dx, serial_dy, last_call_ns, last_relative_ns });
+
+/// Whether `at` is no longer than `window` nanoseconds before `now`, or
+/// after it (a state loaded from earlier).
+fn recent(at: Option<u64>, now: u64, window: u64) -> bool {
+    at.is_some_and(|at| now.saturating_sub(at) < window)
+}
 
 
 #[cfg(test)]

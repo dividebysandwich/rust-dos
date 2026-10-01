@@ -90,6 +90,15 @@ pub fn frame_to_mouse(bus: &Bus, frame: &Frame, (x, y): (i32, i32)) -> (i32, i32
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
 }
 
+/// Where the driver's virtual pixel (`x`, `y`) is on the picture, in
+/// frame pixels: the middle of it (see `frame_to_mouse`).
+pub fn mouse_to_frame(bus: &Bus, frame: &Frame, (x, y): (i32, i32)) -> (f64, f64) {
+    let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
+    let fx = (x as f64 + 0.5) * frame.width as f64 / virt_w.max(1) as f64;
+    let fy = (y as f64 + 0.5) * frame.height as f64 / virt_h.max(1) as f64;
+    (fx.clamp(0.0, frame.width as f64 - 0.5), fy.clamp(0.0, frame.height as f64 - 0.5))
+}
+
 /// A motion of (`dx`, `dy`) frame pixels in the mouse driver's virtual
 /// pixels (see `frame_to_mouse`).
 pub fn frame_motion_to_mouse(bus: &Bus, frame: &Frame, (dx, dy): (f64, f64)) -> (f64, f64) {

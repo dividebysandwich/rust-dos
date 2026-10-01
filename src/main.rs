@@ -316,6 +316,10 @@ fn main() -> Result<(), String> {
     let mut mouse_captured = false;
     // Ctrl+Alt on their own capture the mouse and let it go, as in VMware.
     let mut ctrl_alt = rust_dos::mouse_capture::CtrlAlt::default();
+    // With `mouse_autocapture`, the mouse captured as it moves over the
+    // window and let go where the program's cursor leaves the screen.
+    let mut auto_capture = rust_dos::mouse_capture::AutoCapture::default();
+    let mut focused = true;
     // The button whose click captured the mouse, whose release the program
     // doesn't see either.
     let mut capturing_click: Option<MouseButton> = None;
@@ -353,7 +357,30 @@ fn main() -> Result<(), String> {
                 sdl_mouse.set_relative_mouse_mode(on);
                 mouse_captured = on;
             }
+            auto_capture.captured &= on;
         }};
+    }
+    // Let the mouse go with the host's pointer over the program's cursor,
+    // put there while the pointer is still locked so that Wayland takes
+    // it as where to leave it.
+    macro_rules! release_mouse_at_cursor {
+        () => {{
+            let cursor = (cpu.bus.mouse.x, cpu.bus.mouse.y);
+            display.warp_mouse(&sdl_mouse, video::overlay::mouse_to_frame(&cpu.bus, &cached_frame, cursor));
+            capture_mouse!(false);
+            auto_capture.released();
+        }};
+    }
+    // Whether the program follows the mouse driver's cursor, which then
+    // decides where the mouse leaves: not with the PS/2 or a serial mouse
+    // read by the program itself.
+    macro_rules! follows_cursor {
+        () => {
+            settings.mouse_autocapture
+                && cpu.bus.mouse.in_use(cpu.bus.clock.now_ns())
+                && !cpu.bus.mouse.ps2.enabled
+                && !cpu.bus.serial.mouse_in_use()
+        };
     }
 
     // What the settings window changes: the machine, the display and the
@@ -419,7 +446,12 @@ fn main() -> Result<(), String> {
                 Event::Window { win_event: WindowEvent::FocusGained, .. } => {
                     sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
                     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
+                    focused = true;
+                    auto_capture.armed = true;
                 }
+                // The pointer left the window: coming back, it captures
+                // the mouse again.
+                Event::Window { win_event: WindowEvent::Leave, .. } if !mouse_captured => auto_capture.armed = true,
                 // Uncovered, resized or moved to another display: the
                 // picture is drawn again.
                 Event::Window {
@@ -436,6 +468,7 @@ fn main() -> Result<(), String> {
                 Event::Window { win_event: WindowEvent::FocusLost, .. } => {
                     release_input(&mut cpu, &mut held);
                     ctrl_alt.reset();
+                    focused = false;
                     capture_mouse!(false);
                     if pacer.fast_forward() {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
@@ -624,6 +657,9 @@ fn main() -> Result<(), String> {
                     if keycode == Keycode::F10 && ctrl && !alt {
                         if !repeat && !ui.is_open() && !paused {
                             capture_mouse!(!mouse_captured);
+                            if !mouse_captured {
+                                auto_capture.released();
+                            }
                             osd.show(if mouse_captured { CAPTURED } else { "Mouse released" });
                         }
                         continue;
@@ -762,6 +798,9 @@ fn main() -> Result<(), String> {
                     // which saw them go down.
                     if ctrl_alt.key_up(chord_key(scancode)) && !ui.is_open() && !paused {
                         capture_mouse!(!mouse_captured);
+                        if !mouse_captured {
+                            auto_capture.released();
+                        }
                         osd.show(if mouse_captured { CAPTURED } else { "Mouse released (Ctrl+Alt captures it)" });
                     }
                     if keycode == Keycode::F12 && pacer.fast_forward() {
@@ -867,10 +906,35 @@ fn main() -> Result<(), String> {
                         let (sx, sy) = display.frame_scale();
                         let frame_motion = (xrel as f64 * sx, yrel as f64 * sy);
                         let (dx, dy) = video::overlay::frame_motion_to_mouse(&cpu.bus, &cached_frame, frame_motion);
+                        // The program's cursor pushed out of the screen
+                        // takes the host's pointer out with it, unless the
+                        // program steers with the mouse's motion or the
+                        // window fills the screen.
+                        if follows_cursor!() && !settings.fullscreen && !cpu.bus.mouse.moves_by_motion(cpu.bus.clock.now_ns()) {
+                            let (screen, cursor) = (cpu.bus.mouse.virtual_screen(&cpu.bus), (cpu.bus.mouse.x, cpu.bus.mouse.y));
+                            if auto_capture.motion(cursor, screen, (dx, dy)).is_some() {
+                                cpu.bus.mouse.move_by(dx, dy);
+                                release_mouse_at_cursor!();
+                                continue;
+                            }
+                        }
                         cpu.bus.mouse.move_by(dx, dy);
+                        // Captured by itself, the mouse goes once the
+                        // program no longer uses it.
+                        if auto_capture.captured && !follows_cursor!() {
+                            release_mouse_at_cursor!();
+                        }
                     } else {
                         let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
                         cpu.bus.mouse.set_position(vx, vy);
+                        // Moving over the window captures it for a program
+                        // that uses the mouse, with its cursor where the
+                        // host's pointer came in.
+                        if auto_capture.armed && focused && follows_cursor!() {
+                            capture_mouse!(true);
+                            auto_capture.captured = true;
+                            osd.show(CAPTURED);
+                        }
                     }
                 }
 

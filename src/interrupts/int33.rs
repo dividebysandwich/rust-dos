@@ -21,6 +21,11 @@ const STATE_SIZE: usize = 12;
 pub fn handle(cpu: &mut Cpu) {
     let ax = cpu.ax();
     let func = ax & 0xFFFF;
+    let now = cpu.bus.clock.now_ns();
+    cpu.bus.mouse.last_call_ns = Some(now);
+    if func == 0x000B {
+        cpu.bus.mouse.last_relative_ns = Some(now);
+    }
 
     match func {
         0x0000 => {

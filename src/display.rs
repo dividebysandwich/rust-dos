@@ -428,6 +428,36 @@ impl<'a> Display<'a> {
     }
 }
 
+impl Display<'_> {
+    /// Put the host's pointer over the frame's point (`fx`, `fy`), on the
+    /// picture as it is drawn (but for the CRT shader's curve).
+    pub fn warp_mouse(&self, mouse: &sdl2::mouse::MouseUtil, (fx, fy): (f64, f64)) {
+        let display = display_size(self.frame.0, self.frame.1, self.aspect);
+        let window = match &self.out {
+            Output::Gl(gl) => gl.window(),
+            Output::Sdl { canvas, .. } => canvas.window(),
+        };
+        // SDL's renderer scales its logical size to the window itself.
+        let drawable = match &self.out {
+            Output::Gl(_) => window.drawable_size(),
+            Output::Sdl { .. } => window.size(),
+        };
+        let (x, y) = frame_to_window((fx, fy), window.size(), drawable, display, self.frame);
+        mouse.warp_mouse_in_window(window, x, y);
+    }
+}
+
+/// The window's pixel showing the frame's point (`fx`, `fy`): the reverse
+/// of `window_to_frame`, without a shader's curve.
+fn frame_to_window((fx, fy): (f64, f64), window: Size, drawable: Size, display: Size, frame: Size) -> (i32, i32) {
+    let (vx, vy, vw, vh) = letterbox(drawable, display);
+    let px = vx as f64 + fx / frame.0.max(1) as f64 * vw as f64;
+    let py = vy as f64 + fy / frame.1.max(1) as f64 * vh as f64;
+    let x = px * window.0 as f64 / drawable.0.max(1) as f64;
+    let y = py * window.1 as f64 / drawable.1.max(1) as f64;
+    (x as i32, y as i32)
+}
+
 /// Where a picture of `inner` proportions goes in `outer` pixels, as big as
 /// fits: x, y (from the top), width and height. The same as SDL's renderer
 /// makes of a logical size.
@@ -646,5 +676,20 @@ mod tests {
         let flat = window_to_frame((0, 0), twice.0, twice.1, twice.2, twice.3, (Shader::Crt, CrtSettings { curvature: 0, ..CrtSettings::default() }));
         assert!(flat.0 > x && flat.0 < 0 && flat.1 > y && flat.1 < 0, "{:?}", flat);
         assert_eq!(at((0, 0), twice, Shader::Aperture), (0, 0));
+    }
+
+    #[test]
+    fn frame_points_map_back_to_the_window() {
+        for (window, drawable, display, frame) in [
+            ((1280, 800), (1280, 800), (640, 400), (640, 400)),
+            ((1920, 1080), (1920, 1080), (640, 480), (320, 200)),
+            ((640, 400), (1280, 800), (640, 400), (640, 400)),
+        ] {
+            for point in [(0.5, 0.5), (160.5, 100.5), (319.5, 199.5)] {
+                let pos = frame_to_window(point, window, drawable, display, frame);
+                let back = window_to_frame(pos, window, drawable, display, frame, (Shader::None, CrtSettings::default()));
+                assert_eq!(back, (point.0 as i32, point.1 as i32), "{:?} in {:?}", point, (window, frame));
+            }
+        }
     }
 }

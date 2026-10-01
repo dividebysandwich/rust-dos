@@ -248,6 +248,17 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   characters of the keys, and dead keys put their accents on the next
   letter. Characters code page 437 doesn't have (€, ø) type nothing.
   `KEYB` at the prompt changes it too.
+* `mouse_autocapture` captures the mouse as it moves over the focused
+  window while a program uses the mouse driver (INT 33h), and lets it go
+  as the program's cursor reaches the edge of the screen and the mouse
+  keeps going, with the host's pointer where that cursor was: `true` (the
+  default) or `false`. Where the program's cursor is decides it, not
+  where the host's pointer would be, since a game's cursor can move
+  slower or faster than the host's. A cursor kept inside a window of the
+  screen, and a game steering with the mouse's motion (AX=000Bh), keep
+  the mouse until **Ctrl+Alt** lets it go; it goes too once the program
+  stops using the mouse. Programs that read the PS/2 or a serial mouse
+  themselves, such as Windows, still take it with a click.
 * `rewind=true` keeps the machine's states of the last minutes, a state
   for every half second it runs, and holding **Alt+F11** goes back
   through them. `rewind_memory` is the memory they may take in MB (256

@@ -193,7 +193,7 @@ and Ctrl+C gives up the line being typed.
 | Ctrl+F11 | Slow the CPU down by a tenth (from `max`, from the speed it reached) |
 | Ctrl+Shift+F11 | Speed the CPU up by a tenth |
 | Ctrl+F8 | Turn the sound off and on (in the browser, the page's Sound button) |
-| Ctrl+Alt | Capture the mouse for the program, and let it go, as in VMware (pressed on their own and released); a click captures it too once a program uses the mouse |
+| Ctrl+Alt | Capture the mouse for the program, and let it go, as in VMware (pressed on their own and released). Moving the mouse over the window captures it by itself once a program uses the mouse driver, and the program's cursor leaving the screen lets it go (`mouse_autocapture`); a click captures it too |
 | Ctrl+F10 | Capture the mouse and let it go, as in DOSBox |
 | Ctrl+Shift+C | Copy the text selected by dragging with the right mouse button (while the mouse isn't captured), or the whole text screen, to the clipboard |
 | Ctrl+Shift+V | Type the clipboard's text on the machine's keyboard (a key stops it) |

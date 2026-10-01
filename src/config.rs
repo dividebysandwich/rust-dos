@@ -163,6 +163,8 @@ pub struct Config {
     pub boot_cdrom: Option<bool>,
     /// The keyboard layout (`keyboard_layout`).
     pub keyboard_layout: Option<LayoutSetting>,
+    /// The mouse captured by itself (`mouse_autocapture`).
+    pub mouse_autocapture: Option<bool>,
     /// Rewind (`rewind`), and the memory its states may take in MB
     /// (`rewind_memory`).
     pub rewind: Option<bool>,
@@ -778,6 +780,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(core) => config.core = Some(core),
                             Err(e) => warn(e),
                         },
+                        "mouse_autocapture" => match parse_bool(value) {
+                            Some(on) => config.mouse_autocapture = Some(on),
+                            None => warn(format!("invalid mouse_autocapture '{}' (true or false)", value)),
+                        },
                         "rewind" => match parse_bool(value) {
                             Some(on) => config.rewind = Some(on),
                             None => warn(format!("invalid rewind '{}' (true or false)", value)),
@@ -1081,6 +1087,10 @@ pub struct Settings {
     /// A booted system has a CD-ROM drive even with no CD mounted.
     pub boot_cdrom: bool,
     pub keyboard_layout: LayoutSetting,
+    /// The mouse captured as it moves over the window while a program
+    /// uses the mouse driver, and let go as the program's cursor leaves
+    /// the screen.
+    pub mouse_autocapture: bool,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
     pub rewind_memory: usize,
@@ -1126,6 +1136,7 @@ impl Default for Settings {
             ide_hard_disks: true,
             boot_cdrom: true,
             keyboard_layout: LayoutSetting::Auto,
+            mouse_autocapture: true,
             rewind: false,
             rewind_memory: 256,
             sound: SoundConfig::default(),
@@ -1191,6 +1202,7 @@ impl Settings {
             dos_version: config.dos_version.unwrap_or(default.dos_version),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             boot_cdrom: config.boot_cdrom.unwrap_or(default.boot_cdrom),
+            mouse_autocapture: config.mouse_autocapture.unwrap_or(default.mouse_autocapture),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
@@ -1260,6 +1272,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
+        (Emulator, "mouse_autocapture", yes_no(settings.mouse_autocapture)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
@@ -2208,6 +2221,7 @@ mod tests {
             ide_hard_disks: false,
             boot_cdrom: false,
             keyboard_layout: LayoutSetting::Named("gr"),
+            mouse_autocapture: false,
             rewind: true,
             rewind_memory: 512,
             sound,

@@ -195,6 +195,16 @@ The keyboard layout DOS types in. **auto** takes your computer's layout.
 Pick one if the characters come out wrong. `KEYB` at the prompt changes
 it too.
 
+# Capture the mouse by itself {#mouse-autocapture}
+
+When **on**, the mouse goes to the game as soon as you move it over the
+window, if the game uses the mouse, and comes back to your desktop when
+the game's own cursor reaches the edge of the screen and you keep going.
+Games that steer with the mouse keep it until you press **Ctrl+Alt**.
+
+Turn it **off** to capture the mouse only with a click, **Ctrl+Alt** or
+**Ctrl+F10**.
+
 # Rewind (Alt+F11) {#rewind}
 
 When **on**, Rust-DOS keeps the last minutes of play: hold **Alt+F11** to

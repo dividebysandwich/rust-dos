@@ -341,7 +341,7 @@ impl Page {
             Page::Emulator => &[
                 Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
+                Deadzone, MouseAutocapture, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
             ],
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
@@ -475,6 +475,8 @@ enum Item {
     /// A booted system's CD-ROM drive, with or without a CD.
     BootCdrom,
     KeyboardLayout,
+    /// The mouse captured and let go by itself.
+    MouseAutocapture,
     /// Rewind (held Alt+F11) and the memory it takes.
     Rewind,
     RewindMemory,
@@ -725,6 +727,7 @@ impl Item {
             IdeHardDisks => "IDE hard disks (BOOT)",
             BootCdrom => "CD-ROM drive (BOOT)",
             KeyboardLayout => "Keyboard layout",
+            MouseAutocapture => "Capture the mouse by itself",
             Rewind => "Rewind (Alt+F11)",
             RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
@@ -862,7 +865,8 @@ impl Item {
             Scale | Fullscreen | Aspect | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | Rewind | RewindMemory | VoodooRenderer | VoodooScale => Applies::Now,
+            Cycles | Core | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | Rewind | RewindMemory
+            | VoodooRenderer | VoodooScale => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
@@ -940,6 +944,7 @@ impl Item {
             IdeHardDisks => on_off(s.ide_hard_disks),
             BootCdrom => if s.boot_cdrom { "always" } else { "with a CD" }.to_string(),
             KeyboardLayout => s.keyboard_layout.describe(),
+            MouseAutocapture => on_off(s.mouse_autocapture),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
             SbType if !s.sound.sb_installed => "none".to_string(),
@@ -1119,6 +1124,7 @@ impl Item {
                 each(s, versions, |s, version| s.dos_version = version)
             }
             KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
+            MouseAutocapture => on_off(|s, on| s.mouse_autocapture = on),
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),
