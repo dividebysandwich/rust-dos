@@ -192,6 +192,16 @@ impl Et4000 {
         (self.crtc[3] & 0x03) as usize
     }
 
+    /// Set the display start's bits 16-17 (CR33 bits 0-1).
+    pub fn set_start_high(&mut self, bits: usize) {
+        self.crtc[3] = (self.crtc[3] & !0x03) | (bits & 0x03) as u8;
+    }
+
+    /// Set bit 8 of the CRTC Offset register (CR3F bit 7).
+    pub fn set_offset_high(&mut self, on: bool) {
+        self.crtc[0x0F] = (self.crtc[0x0F] & 0x7F) | if on { 0x80 } else { 0 };
+    }
+
     /// Bit 8 of the CRTC Offset register (CR3F bit 7).
     pub fn offset_high(&self) -> usize {
         (self.crtc[0x0F] as usize & 0x80) << 1

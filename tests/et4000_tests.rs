@@ -300,3 +300,107 @@ fn tseng_s_text_modes_are_wider_and_taller() {
     int10(&mut cpu, 0x0003, 0, 0, 0);
     assert_eq!(video::text::geometry(&cpu.bus).unwrap().cols, 80);
 }
+
+const BUF: usize = 0x30000; // 3000:0000
+
+/// The modes of the VBE mode list, through its far pointer.
+fn mode_list(cpu: &Cpu) -> Vec<u16> {
+    let ptr = cpu.bus.read_32(BUF + 14);
+    let at = ((ptr >> 16) as usize) * 16 + (ptr & 0xFFFF) as usize;
+    (0..).map(|i| cpu.bus.read_16(at + i * 2)).take_while(|&m| m != 0xFFFF).collect()
+}
+
+#[test]
+fn vbe_1_2_without_a_linear_frame_buffer() {
+    let mut cpu = machine();
+    // VBE 1.2, 1 MB, Tseng's name, even to a caller asking for VBE 2.0.
+    for (i, &b) in b"VBE2".iter().enumerate() {
+        cpu.bus.write_8(BUF + i, b);
+    }
+    cpu.bus.write_8(BUF + 256, 0xAA);
+    assert_eq!(int10(&mut cpu, 0x4F00, 0, 0, 0), 0x004F);
+    assert_eq!(cpu.bus.read_32(BUF), u32::from_le_bytes(*b"VESA"));
+    assert_eq!(cpu.bus.read_16(BUF + 4), 0x0102);
+    assert_eq!(cpu.bus.read_16(BUF + 18), 16);
+    assert_eq!(cpu.bus.read_8(BUF + 256), 0xAA);
+    let oem = cpu.bus.read_32(BUF + 6);
+    let oem: Vec<u8> = (0..5).map(|i| cpu.bus.read_8(((oem >> 16) as usize) * 16 + (oem & 0xFFFF) as usize + i)).collect();
+    assert_eq!(&oem, b"Tseng");
+    let modes = mode_list(&cpu);
+    assert!(modes.contains(&0x101) && modes.contains(&0x105) && modes.contains(&0x114));
+    assert!(!modes.contains(&0x112) && !modes.contains(&0x116), "no truecolour, nothing past 1 MB");
+
+    // 101h: banked, read and write window A of 64 KB at A000h, no LFB.
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x101, 0), 0x004F);
+    assert_eq!(cpu.bus.read_16(BUF) & 0x80, 0);
+    assert_eq!(cpu.bus.read_8(BUF + 2), 0x07);
+    assert_eq!(cpu.bus.read_16(BUF + 4), 64);
+    assert_eq!(cpu.bus.read_16(BUF + 8), 0xA000);
+    assert_eq!((cpu.bus.read_16(BUF + 16), cpu.bus.read_16(BUF + 18), cpu.bus.read_16(BUF + 20)), (640, 640, 480));
+    assert_eq!(cpu.bus.read_32(BUF + 40), 0, "no linear frame buffer");
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x116, 0), 0x014F);
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x104, 0), 0x004F);
+    assert_eq!((cpu.bus.read_8(BUF + 24), cpu.bus.read_8(BUF + 25), cpu.bus.read_8(BUF + 27)), (4, 4, 3));
+
+    // There is none to set.
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x4101, 0, 0), 0x014F);
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x101, 0, 0), 0x004F);
+    assert_eq!(int10(&mut cpu, 0x4F03, 0, 0, 0), 0x004F);
+    assert_eq!(cpu.bx(), 0x101);
+    assert_eq!(cpu.bus.read_8(0x0449), 0x2E);
+    assert_eq!(picture(&mut cpu).0, 640);
+
+    // Bank 4 through function 05h, and through the window function.
+    assert_eq!(int10(&mut cpu, 0x4F05, 0, 0, 4), 0x004F);
+    assert_eq!(cpu.bus.io_read(0x3CD), 0x44);
+    cpu.bus.write_8(0xA0000 + 0x10, 9);
+    assert_eq!(int10(&mut cpu, 0x4F05, 0x0100, 0, 0), 0x004F);
+    assert_eq!(cpu.dx(), 4);
+    let (x, y) = ((0x4_0010 % 640) as usize, (0x4_0010 / 640) as usize);
+    let (r, g, b) = cpu.bus.vga.get_rgb(9);
+    assert_eq!(pixel(&mut cpu, x, y), [r, g, b]);
+    assert_eq!(int10(&mut cpu, 0x4F05, 0, 0, 16), 0x014F);
+    assert_eq!(int10(&mut cpu, 0x4F05, 1, 0, 0), 0x014F, "no window B");
+
+    // The display start: line 500, past 64K CRTC addresses.
+    assert_eq!(int10(&mut cpu, 0x4F07, 0, 8, 500), 0x004F);
+    let start = 500 * 640 + 8;
+    assert_eq!(cpu.bus.vga.et4000.start_high(), (start / 4) >> 16);
+    assert_eq!(int10(&mut cpu, 0x4F07, 1, 0, 0), 0x004F);
+    assert_eq!((cpu.cx(), cpu.dx()), (8, 500));
+    cpu.bus.vga.latch_start_address();
+    assert_eq!(cpu.bus.vga.latched_start_addr, start / 4);
+
+    // A longer scan line: 1024 pixels.
+    assert_eq!(int10(&mut cpu, 0x4F06, 0, 1024, 0), 0x004F);
+    assert_eq!((cpu.bx(), cpu.cx(), cpu.dx()), (1024, 1024, 1024));
+    assert_eq!(cpu.bus.vga.offset_words(), 128);
+
+    // VBE 2.0's functions aren't there.
+    assert_eq!(int10(&mut cpu, 0x4F08, 0x0800, 0, 0), 0x014F);
+    assert_eq!(int10(&mut cpu, 0x4F0A, 0, 0, 0), 0x014F);
+}
+
+#[test]
+fn vbe_hicolor_and_planar_modes() {
+    let mut cpu = machine();
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x111, 0, 0), 0x004F);
+    assert_eq!(cpu.bus.vga.et4000.hicolor(), Some(16));
+    assert_eq!(picture(&mut cpu).0, 640);
+    assert_eq!(int10(&mut cpu, 0x4F06, 1, 0, 0), 0x004F);
+    assert_eq!((cpu.bx(), cpu.cx()), (1280, 640));
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x10D, 0, 0), 0x004F);
+    assert_eq!(cpu.bus.vga.et4000.hicolor(), Some(15));
+    assert_eq!(cpu.bus.vga.graphics_size(), (320, 200));
+    assert_eq!(int10(&mut cpu, 0x4F06, 1, 0, 0), 0x004F);
+    assert_eq!(cpu.bx(), 640);
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x104, 0, 0), 0x004F);
+    assert_eq!(cpu.bus.vga.et4000.hicolor(), None);
+    assert_eq!(picture(&mut cpu).0, 1024);
+    assert_eq!(int10(&mut cpu, 0x4F06, 1, 0, 0), 0x004F);
+    assert_eq!((cpu.bx(), cpu.cx()), (128, 1024));
+    // Back to text.
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x03, 0, 0), 0x004F);
+    assert_eq!(int10(&mut cpu, 0x4F03, 0, 0, 0), 0x004F);
+    assert_eq!(cpu.bx(), 0x03);
+}

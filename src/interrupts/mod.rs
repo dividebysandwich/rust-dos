@@ -20,6 +20,7 @@ pub mod int33;
 pub mod fcb;
 pub mod mscdex;
 pub mod vbe;
+pub mod vbe_tseng;
 pub mod utils;
 
 /// Enter an HLE handler with the CF and ZF its caller's INT pushed, so a

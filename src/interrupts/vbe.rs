@@ -32,9 +32,9 @@ const REVISION: &[u8] = b"2.0\0";
 
 /// VBE status in AX: supported (4Fh) and successful (AH=0), failed, or
 /// not possible in the current mode.
-const SUCCESS: u16 = 0x004F;
-const FAILED: u16 = 0x014F;
-const INVALID_NOW: u16 = 0x024F;
+pub(super) const SUCCESS: u16 = 0x004F;
+pub(super) const FAILED: u16 = 0x014F;
+pub(super) const INVALID_NOW: u16 = 0x024F;
 
 fn rom(offset: u16) -> usize {
     ((ROM_SEGMENT as usize) << 4) + offset as usize
@@ -56,6 +56,7 @@ pub fn install_rom(bus: &mut Bus) {
     bus.write_rom(rom(MODE_LIST), &list);
     bus.write_rom(rom(WINDOW_FUNCTION), &[0xFE, 0x39, crate::bios::SERVICE_VBE_WINDOW, 0xCB]);
     bus.write_rom(rom(PM_TABLE), &pm_table());
+    super::vbe_tseng::install_rom(bus);
 }
 
 /// Set Window in protected mode: bank DX of window BL (only A exists)
@@ -165,6 +166,10 @@ fn write_bytes(bus: &mut Bus, addr: usize, bytes: &[u8]) {
 
 /// INT 10h AH=4Fh.
 pub fn handle(cpu: &mut Cpu) {
+    // The ET4000's BIOS has VBE 1.2 of its own.
+    if cpu.bus.vga.adapter.is_et4000() {
+        return super::vbe_tseng::handle(cpu);
+    }
     let es_di = cpu.get_physical_addr(cpu.es(), cpu.di());
     let status = match cpu.get_al() {
         // Waiting for the retrace: the call runs again, registers intact.
@@ -240,7 +245,7 @@ fn controller_info(cpu: &mut Cpu, addr: usize) -> u16 {
 
 /// The color masks of a direct color mode: size and position of red,
 /// green, blue and the reserved bits.
-fn color_masks(bpp: u8) -> [u8; 8] {
+pub(super) fn color_masks(bpp: u8) -> [u8; 8] {
     match bpp {
         15 => [5, 10, 5, 5, 5, 0, 1, 15],
         16 => [5, 11, 6, 5, 5, 0, 0, 0],
@@ -383,7 +388,7 @@ fn window(cpu: &mut Cpu) -> u16 {
 
 /// The window function modes point at, called with a far call.
 pub fn window_call(cpu: &mut Cpu) {
-    let status = window(cpu);
+    let status = if cpu.bus.vga.adapter.is_et4000() { super::vbe_tseng::window(cpu) } else { window(cpu) };
     cpu.set_ax(status);
 }
 
@@ -461,7 +466,7 @@ fn display_start(cpu: &mut Cpu) -> Option<u16> {
 
 /// Wait in emulated time for the next vertical retrace to begin: true once
 /// it has; until then the call is retried, as the BIOS's waits are.
-fn wait_for_retrace(cpu: &mut Cpu) -> bool {
+pub(super) fn wait_for_retrace(cpu: &mut Cpu) -> bool {
     let now = cpu.bus.clock.now_ticks();
     let until = *cpu.bios_wait_until.get_or_insert_with(|| {
         let now_ns = cpu.bus.clock.now_ns();
