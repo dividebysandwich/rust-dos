@@ -1343,15 +1343,22 @@ fn main() -> Result<(), String> {
         // the recording indicator. Animations stay plain: a GIF's 256
         // colours can't hold the shader's, and quantizing a picture the
         // window's size would hold up the machine.
+        // A manual's page is captured as the game is, with or without the
+        // rest of the window.
+        let record_ui = settings.record_ui || ui.manual_shown();
         macro_rules! capture {
             () => {
                 // Drawing the shader's picture again and reading it back
                 // takes time, so only when a capture wants it.
+                // A manual's page, which the window draws over the
+                // picture, with the settings window.
+                let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
+                let base = paged.as_ref().unwrap_or(&screen);
                 let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
-                    .then(|| display.shaded(&screen))
+                    .then(|| display.shaded(base))
                     .flatten();
-                let picture = shaded.as_ref().unwrap_or(&screen);
-                recorder.capture(&screen);
+                let picture = shaded.as_ref().unwrap_or(base);
+                recorder.capture(base);
                 if let Some(video) = &mut video_recording {
                     if !video.record(picture, samples.clone(), cpu.bus.clock.now_ns()) {
                         if let Some(video) = video_recording.take() {
@@ -1363,6 +1370,11 @@ fn main() -> Result<(), String> {
                     }
                 }
                 if std::mem::take(&mut screenshot) {
+                    // The page as sharp as the window shows it.
+                    let sharp = (record_ui && shaded.is_none())
+                        .then(|| ui.with_layer(&screen, display.output_scale()))
+                        .flatten();
+                    let picture = sharp.as_ref().unwrap_or(picture);
                     let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
                         .and_then(|path| capture::png::save(picture, &path).map(|()| path));
                     match saved {
@@ -1373,7 +1385,7 @@ fn main() -> Result<(), String> {
             };
         }
         let capturing = screenshot || recorder.is_active() || video_recording.is_some();
-        if capturing && !settings.record_ui {
+        if capturing && !record_ui {
             capture!();
         }
         if ui.is_open() {
@@ -1386,11 +1398,14 @@ fn main() -> Result<(), String> {
         ui.set_display(display.output_scale(), true);
         ui.draw(&mut screen);
         ui.draw_overlay(&mut screen);
-        if capturing && settings.record_ui {
+        if capturing && record_ui {
             capture!();
         }
         osd.draw(&mut screen);
-        dbg.capture_frame(&screen);
+        match ui.with_layer(&screen, (1.0, 1.0)) {
+            Some(paged) => dbg.capture_frame(&paged),
+            None => dbg.capture_frame(&screen),
+        }
 
         // Draw Recording Indicator
         if recorder.is_active() || sound_recording.is_some() || video_recording.is_some() {

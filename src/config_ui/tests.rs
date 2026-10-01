@@ -1446,6 +1446,14 @@ fn a_games_manuals_open_over_the_picture() {
     assert_eq!((layer.picture.width, layer.picture.height), (368, 736), "twice the pixels");
     let (x, _, w, h) = layer.rect;
     assert!((x - 228.0).abs() < 1.0 && (w - 184.0).abs() < 1.0 && (h - 368.0).abs() < 1.0, "{:?}", layer.rect);
+    // Screenshots have it: at the picture's size, and at the window's.
+    assert_eq!(pixel(&frame, 320, 200), [0x18, 0x1C, 0x24], "the picture has the bars alone");
+    let shot = ui.with_layer(&frame, (1.0, 1.0)).expect("the page");
+    assert_eq!(pixel(&shot, 320, 200), [200, 0, 0]);
+    assert_eq!(pixel(&shot, 20, 200), [0x18, 0x1C, 0x24]);
+    let sharp = ui.with_layer(&frame, (2.0, 2.0)).expect("the page");
+    assert_eq!((sharp.width, sharp.height), (1280, 800));
+    assert_eq!(sharp.rgb[(400 * 1280 + 640) * 3..][..3], [200, 0, 0]);
     // Taller pixels: the page is as tall as it should be still.
     ui.set_display((1.0, 1.2), false);
     ui.draw(&mut frame);

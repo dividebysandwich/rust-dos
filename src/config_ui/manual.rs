@@ -131,6 +131,12 @@ impl ConfigUi {
         Ok(())
     }
 
+    /// Whether a manual's page is shown over the whole picture, which
+    /// screenshots and recordings show as they show the game.
+    pub fn manual_shown(&self) -> bool {
+        self.open && self.manual_page_shown()
+    }
+
     /// Whether a page is shown over the whole picture.
     pub(super) fn manual_page_shown(&self) -> bool {
         self.help.is_none() && self.browser.is_none() && self.manual.as_ref().is_some_and(|m| m.open.is_some())
@@ -148,6 +154,40 @@ impl ConfigUi {
     /// The page shown over the picture, for the frontend to draw sharp.
     pub fn layer(&self) -> Option<&Layer> {
         self.layer.as_ref().filter(|_| self.open && self.manual_page_shown())
+    }
+
+    /// The picture `screen` with the page over it as the frontend shows
+    /// it, for screenshots and recordings: `scale` times its size (a pixel
+    /// of `screen` is `scale` of the result's, across and down), the page
+    /// at that size. None when no page is shown as a layer.
+    pub fn with_layer(&mut self, screen: &Frame, scale: (f64, f64)) -> Option<Frame> {
+        let (rect, generation) = self.layer().map(|l| (l.rect, l.generation))?;
+        let (sx, sy) = (scale.0.max(0.01), scale.1.max(0.01));
+        let size = (((screen.width as f64 * sx).round() as u32).max(1), ((screen.height as f64 * sy).round() as u32).max(1));
+        let mut out = if size == (screen.width, screen.height) { screen.clone() } else { manuals::scale(screen, size.0, size.1) };
+        let (x, y, w, h) = rect;
+        let x0 = ((x as f64 * sx).round() as u32).min(size.0);
+        let y0 = ((y as f64 * sy).round() as u32).min(size.1);
+        let x1 = (((x + w) as f64 * sx).round() as u32).clamp(x0, size.0);
+        let y1 = (((y + h) as f64 * sy).round() as u32).clamp(y0, size.1);
+        let page = (x1 - x0, y1 - y0);
+        if page.0 == 0 || page.1 == 0 {
+            return Some(out);
+        }
+        // Scaled once for each layer and size.
+        let key = (generation, page);
+        if self.layer_scaled.as_ref().is_none_or(|(k, _)| *k != key) {
+            let picture = &self.layer.as_ref()?.picture;
+            let scaled = if (picture.width, picture.height) == page { picture.clone() } else { manuals::scale(picture, page.0, page.1) };
+            self.layer_scaled = Some((key, scaled));
+        }
+        let scaled = &self.layer_scaled.as_ref().expect("the page scaled").1;
+        let row = page.0 as usize * 3;
+        for r in 0..page.1 as usize {
+            let to = ((y0 as usize + r) * size.0 as usize + x0 as usize) * 3;
+            out.rgb[to..to + row].copy_from_slice(&scaled.rgb[r * row..(r + 1) * row]);
+        }
+        Some(out)
     }
 
     fn open_manual(&mut self) {

@@ -1620,6 +1620,9 @@ pub struct ConfigUi {
     layered: bool,
     layer: Option<Layer>,
     layer_generation: u64,
+    /// The layer scaled for a screenshot or recording (`with_layer`): by
+    /// its generation and size.
+    layer_scaled: Option<((u64, (u32, u32)), Frame)>,
     /// The Cheats page's search.
     cheats: cheats::Cheats,
     /// The Achievements page.
@@ -1702,6 +1705,7 @@ impl ConfigUi {
             layered: false,
             layer: None,
             layer_generation: 0,
+            layer_scaled: None,
             cheats: cheats::Cheats::default(),
             achievements: achievements::Achievements::default(),
             stats: None,

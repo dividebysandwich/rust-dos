@@ -199,7 +199,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   and recordings show the picture with the monochrome look but without
   the messages at the top. With `record_ui=true` they show the settings
   window and the performance overlay (Ctrl+Shift+F12) as well while they
-  are open; `false`, the default, shows the picture alone.
+  are open; `false`, the default, shows the picture alone. A [manual's
+  page](#manuals-and-extras) shows either way, a screenshot of it as sharp
+  as the window shows it.
   `record_shader=true` has screenshots and video recordings show the
   picture through the CRT shader, as the window does and at the size it
   shows it (without the black bars around it); `false`, the default,
