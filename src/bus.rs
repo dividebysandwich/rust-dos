@@ -1024,7 +1024,7 @@ impl Bus {
         if !self.plain_vga_run(dst, len) {
             return false;
         }
-        let offset = dst - ADDR_VGA_GRAPHICS;
+        let offset = self.vga_window(dst, true);
         self.note_video_write(len as u64);
         for i in 0..len {
             self.vga.write_graphics(offset + i, self.ram[src + i]);
@@ -1040,12 +1040,20 @@ impl Bus {
             return false;
         }
         let bytes = value.to_le_bytes();
-        let offset = dst - ADDR_VGA_GRAPHICS;
+        let offset = self.vga_window(dst, true);
         self.note_video_write((count * size) as u64);
         for i in 0..count * size {
             self.vga.write_graphics(offset + i, bytes[i % size]);
         }
         true
+    }
+
+    /// Where the byte at `addr` in the graphics window at A0000h is for
+    /// the VGA's memory logic: its offset in the window, for a write or a
+    /// read.
+    #[inline]
+    fn vga_window(&self, addr: usize, _write: bool) -> usize {
+        addr - ADDR_VGA_GRAPHICS
     }
 
     /// Whether writes of `len` bytes at `dst` all go to the VGA's planes,
@@ -1182,7 +1190,7 @@ impl Bus {
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
             // for planar read-modify-write sequences.
-            return self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
+            return self.vga.read_graphics(self.vga_window(addr, false));
         }
         if let Some(ram) = self.vga.cpu_window(addr) {
             return self.ram[ram];
@@ -1218,7 +1226,7 @@ impl Bus {
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
             let saved = self.vga.latches.get();
-            let v = self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
+            let v = self.vga.read_graphics(self.vga_window(addr, false));
             self.vga.latches.set(saved);
             return v;
         }
@@ -1256,7 +1264,7 @@ impl Bus {
             // Return value only matters to callers that care whether the
             // write hit the active display plane, but rendering is gated
             // off vga.dirty directly, so we simplify here.
-            self.vga.write_graphics(addr - ADDR_VGA_GRAPHICS, value);
+            self.vga.write_graphics(self.vga_window(addr, true), value);
             return matches!(
                 self.video_mode,
                 VideoMode::Graphics320x200

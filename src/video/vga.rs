@@ -188,6 +188,19 @@ impl VgaCard {
         vga
     }
 
+    /// The size of each of the four planes: 64 KB on a VGA, 256 KB on a
+    /// card with 1 MB.
+    #[inline]
+    pub fn plane_size(&self) -> usize {
+        self.vram_graphics.len() / 4
+    }
+
+    /// Give the card four planes of `plane_size` bytes (a power of two),
+    /// cleared.
+    pub fn set_memory(&mut self, plane_size: usize) {
+        self.vram_graphics = vec![0; plane_size * 4];
+    }
+
     /// Mark the entire screen as needing re-rendering. Use for state changes
     /// (palette, mode, attribute regs, latched start address) where computing
     /// an affected row range would be more work than just repainting.
@@ -464,8 +477,8 @@ impl VgaCard {
         if plane < 2 && offset < TEXT_PLANE_SIZE && self.text_in_planes() {
             return Some((true, offset * 2 + plane));
         }
-        let index = plane * 65536 + offset;
-        (index < self.vram_graphics.len()).then_some((false, index))
+        let size = self.plane_size();
+        Some((false, plane * size + (offset & (size - 1))))
     }
 
     fn plane_byte(&self, plane: usize, offset: usize) -> Option<u8> {
@@ -496,7 +509,7 @@ impl VgaCard {
         }
         for offset in 0..TEXT_PLANE_SIZE {
             for plane in 0..2 {
-                let (text, graphics) = (offset * 2 + plane, plane * 65536 + offset);
+                let (text, graphics) = (offset * 2 + plane, plane * self.plane_size() + offset);
                 if to_text {
                     self.vram_text[text] = self.vram_graphics[graphics];
                 } else {

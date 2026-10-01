@@ -528,13 +528,15 @@ fn planar_base_offset(bus: &Bus) -> usize {
 
 /// The 4-bit value of pixel (`x`, `y`): a bit from each plane.
 fn planar_pixel(vram: &[u8], bytes_per_row: usize, x: usize, y: usize, base: usize) -> u8 {
-    // Plane space wraps at 64 KiB; games with smaller back buffers rely on
-    // that so page flips near the top of VRAM don't walk into garbage.
-    let byte_offset = (base + y * bytes_per_row + (x / 8)) & 0xFFFF;
+    // Plane space wraps at the plane's size (64 KiB on a VGA); games with
+    // smaller back buffers rely on that so page flips near the top of VRAM
+    // don't walk into garbage.
+    let plane_size = vram.len() / 4;
+    let byte_offset = (base + y * bytes_per_row + (x / 8)) & (plane_size - 1);
     let bit_pos = 7 - (x % 8) as u8;
     let mut pixel: u8 = 0;
     for plane in 0..4 {
-        let bit = (vram[plane * 65536 + byte_offset] >> bit_pos) & 1;
+        let bit = (vram[plane * plane_size + byte_offset] >> bit_pos) & 1;
         pixel |= bit << plane;
     }
     pixel
@@ -583,6 +585,7 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
 
     // The source pixel of each column of the canvas.
     let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
+    let plane_size = vram.len() / 4;
     let mut line = vec![0u8; width];
     for y in 0..rows {
         // The canvas rows showing row y.
@@ -593,7 +596,7 @@ fn render_graphics_mode(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &B
         let (row, pan) = if y >= split { ((y - split) * stride, split_pan) } else { (start + y * stride, pan) };
         for (x, index) in line.iter_mut().enumerate() {
             let px = x + pan;
-            *index = vram[(px & 3) * 65536 + ((row + (px >> 2)) & 0xFFFF)];
+            *index = vram[(px & 3) * plane_size + ((row + (px >> 2)) & (plane_size - 1))];
         }
         let drawn = &mut drawn_from.rows[y * width..(y + 1) * width];
         if known && *drawn == line[..] {

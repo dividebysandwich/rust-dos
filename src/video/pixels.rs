@@ -111,18 +111,18 @@ pub fn get_pixel(bus: &Bus, x: usize, y: usize) -> u8 {
         }
         Layout::Planar => {
             let offset = planar_offset(bus, x, y, width);
-            (0..4).map(|p| (vga.vram_graphics[p * 0x10000 + offset] >> (7 - x % 8) & 1) << p).sum()
+            (0..4).map(|p| (vga.vram_graphics[p * vga.plane_size() + offset] >> (7 - x % 8) & 1) << p).sum()
         }
         Layout::Linear => {
             let offset = y * width + x;
-            vga.vram_graphics[(offset & 3) * 0x10000 + (offset >> 2)]
+            vga.vram_graphics[(offset & 3) * vga.plane_size() + (offset >> 2)]
         }
     }
 }
 
 fn planar_offset(bus: &Bus, x: usize, y: usize, width: usize) -> usize {
     // The active page's (AH=05h) offset.
-    (bus.read_16(0x044E) as usize + y * width / 8 + x / 8) & 0xFFFF
+    (bus.read_16(0x044E) as usize + y * width / 8 + x / 8) & (bus.vga.plane_size() - 1)
 }
 
 /// Whether `color` with bit 7 set is XORed onto the screen: in all but
@@ -174,13 +174,15 @@ pub fn put_pixel(bus: &mut Bus, x: usize, y: usize, color: u8) {
             let mask = 0x80u8 >> (x % 8);
             for plane in 0..4 {
                 let bits = if color >> plane & 1 != 0 { 0xFF } else { 0 };
-                let byte = &mut bus.vga.vram_graphics[plane * 0x10000 + offset];
+                let at = plane * bus.vga.plane_size() + offset;
+                let byte = &mut bus.vga.vram_graphics[at];
                 *byte = merge(*byte, mask, bits);
             }
         }
         Layout::Linear => {
             let offset = y * width + x;
-            bus.vga.vram_graphics[(offset & 3) * 0x10000 + (offset >> 2)] = color;
+            let at = (offset & 3) * bus.vga.plane_size() + (offset >> 2);
+            bus.vga.vram_graphics[at] = color;
         }
     }
     bus.vga.mark_dirty_full();
