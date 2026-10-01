@@ -46,6 +46,15 @@ fn layout(bus: &Bus) -> Option<(Layout, usize, usize)> {
         VideoMode::Tandy640x200x4 => Layout::Tandy4High,
         _ => return None,
     };
+    // An ET4000's modes at the size its registers give them; its HiColor
+    // ones have no BIOS pixels.
+    if bus.vga.adapter.is_et4000() && matches!(layout, Layout::Planar | Layout::Linear) {
+        if bus.vga.et4000.hicolor().is_some() {
+            return None;
+        }
+        let (width, height) = bus.vga.graphics_size();
+        return Some((layout, width, height));
+    }
     Some((layout, width, height))
 }
 

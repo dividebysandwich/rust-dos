@@ -168,6 +168,9 @@ impl Adapter {
             Adapter::Cga => mode <= 0x06,
             Adapter::Tandy | Adapter::Pcjr => matches!(mode, 0x00..=0x06 | 0x08..=0x0A),
             Adapter::Ega => matches!(mode, 0x00..=0x06 | 0x0D | 0x0E | 0x10),
+            // Tseng's 800x600 and 1024x768 in 16 colours, and 640x350 to
+            // 1024x768 in 256.
+            Adapter::Et4000 => matches!(mode, 0x00..=0x07 | 0x0D..=0x13 | 0x29 | 0x2D..=0x30 | 0x37 | 0x38),
             _ => matches!(mode, 0x00..=0x07 | 0x0D..=0x13),
         }
     }

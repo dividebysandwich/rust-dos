@@ -126,3 +126,148 @@ fn the_sierra_dac_s_command_register_turns_on_hicolor() {
     int10::set_mode(&mut cpu, 0x13);
     assert_eq!(cpu.bus.vga.et4000.hicolor(), None);
 }
+
+/// INT 10h with AX, BX, CX, DX; returns AX.
+fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) -> u16 {
+    cpu.set_ax(ax);
+    cpu.set_bx(bx);
+    cpu.set_cx(cx);
+    cpu.set_dx(dx);
+    int10::handle(cpu);
+    cpu.ax()
+}
+
+/// The rendered picture: its size, and its pixel at (x, y).
+fn picture(cpu: &mut Cpu) -> (u32, u32, Vec<u8>) {
+    let (width, height) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(width, height);
+    cpu.bus.vga.mark_dirty_full();
+    video::render_screen(&mut frame, &cpu.bus);
+    (width, height, frame.rgb)
+}
+
+fn pixel(cpu: &mut Cpu, x: usize, y: usize) -> [u8; 3] {
+    let (width, _, rgb) = picture(cpu);
+    let i = (y * width as usize + x) * 3;
+    [rgb[i], rgb[i + 1], rgb[i + 2]]
+}
+
+/// Write `value` to linear byte `at` of a chained mode, through the bank
+/// it is in.
+fn poke_linear(cpu: &mut Cpu, at: usize, value: u8) {
+    let bank = (at >> 16) as u8;
+    cpu.bus.io_write(0x3CD, bank | bank << 4);
+    cpu.bus.write_8(0xA0000 + (at & 0xFFFF), value);
+}
+
+#[test]
+fn tseng_s_256_colour_modes_show_banked_memory() {
+    for (mode, width, height) in [(0x2Du8, 640u32, 350u32), (0x2E, 640, 480), (0x2F, 640, 400), (0x30, 800, 600), (0x38, 1024, 768)] {
+        let mut cpu = machine();
+        int10(&mut cpu, mode as u16, 0, 0, 0);
+        assert_eq!(cpu.bus.read_8(0x0449), mode);
+        assert_eq!(cpu.bus.read_16(0x044A), width as u16 / 8);
+        let (w, h, _) = picture(&mut cpu);
+        assert_eq!((w, h), (width, height), "mode {:02X}", mode);
+        assert_eq!(cpu.bus.display_size(), (width as usize, height as usize));
+        // A pixel near the bottom right, in a bank of its own: colour 15
+        // of the default palette is white.
+        let (x, y) = (width as usize - 3, height as usize - 2);
+        poke_linear(&mut cpu, y * width as usize + x, 15);
+        let (r, g, b) = cpu.bus.vga.get_rgb(15);
+        assert_eq!(pixel(&mut cpu, x, y), [r, g, b], "mode {:02X}", mode);
+        assert!(r > 200);
+        assert_eq!(pixel(&mut cpu, x - 1, y), [0, 0, 0]);
+        // The BIOS's own pixels there.
+        int10(&mut cpu, 0x0C04, 0, 5, height as u16 - 1);
+        assert_eq!(int10(&mut cpu, 0x0D00, 0, 5, height as u16 - 1) & 0xFF, 4);
+        assert_eq!(int10(&mut cpu, 0x0D00, 0, x as u16, y as u16) & 0xFF, 15);
+    }
+}
+
+#[test]
+fn tseng_s_16_colour_modes_are_planar_past_64_kb() {
+    for (mode, width, height) in [(0x29u8, 800u32, 600u32), (0x37, 1024, 768)] {
+        let mut cpu = machine();
+        int10(&mut cpu, mode as u16, 0, 0, 0);
+        let (w, h, _) = picture(&mut cpu);
+        assert_eq!((w, h), (width, height), "mode {:02X}", mode);
+        // The last row's first byte: past 64 KB of each plane in 37h.
+        let offset = (height as usize - 1) * width as usize / 8;
+        let bank = (offset >> 16) as u8;
+        cpu.bus.io_write(0x3CD, bank | bank << 4);
+        cpu.bus.write_8(0xA0000 + (offset & 0xFFFF), 0x80);
+        let (r, g, b) = cpu.bus.vga.attribute_rgb(15);
+        assert_eq!(pixel(&mut cpu, 0, height as usize - 1), [r, g, b], "mode {:02X}", mode);
+        assert!(r > 200);
+        assert_eq!(pixel(&mut cpu, 1, height as usize - 1), [0, 0, 0]);
+        // AH=0Ch draws there too, red (4).
+        int10(&mut cpu, 0x0C04, 0, width as u16 - 1, height as u16 - 1);
+        assert_eq!(int10(&mut cpu, 0x0D00, 0, width as u16 - 1, height as u16 - 1) & 0xFF, 4);
+    }
+}
+
+#[test]
+fn the_hicolor_bios_sets_32k_and_64k_colours() {
+    let mut cpu = machine();
+    // The DAC is a Sierra HiColor one.
+    assert_eq!(int10(&mut cpu, 0x10F1, 0, 0, 0), 0x0010);
+    assert_eq!(cpu.get_reg8(iced_x86::Register::BL), 1);
+    assert_eq!(int10(&mut cpu, 0x10F0, 0x2E, 0, 0), 0x0010);
+    assert_eq!(cpu.bus.read_8(0x0449), 0x2E);
+    let (w, h, _) = picture(&mut cpu);
+    assert_eq!((w, h), (640, 480));
+    // Pixel (639, 479): two bytes, red in 5:5:5.
+    let at = (479 * 640 + 639) * 2;
+    poke_linear(&mut cpu, at, 0x00);
+    poke_linear(&mut cpu, at + 1, 0x7C);
+    assert_eq!(pixel(&mut cpu, 639, 479), [255, 0, 0]);
+    int10(&mut cpu, 0x10F2, 0, 0, 0);
+    assert_eq!(cpu.get_reg8(iced_x86::Register::BL), 1);
+    // 64K colours: the same bytes are red and some green in 5:6:5.
+    assert_eq!(int10(&mut cpu, 0x10F2, 2, 0, 0), 0x0010);
+    assert_eq!(pixel(&mut cpu, 639, 479), [123, 130, 0]);
+    // 800x600 and 320x200 too; not 1024x768.
+    assert_eq!(int10(&mut cpu, 0x10F0, 0x30, 0, 0), 0x0010);
+    assert_eq!(picture(&mut cpu).0, 800);
+    assert_eq!(int10(&mut cpu, 0x10F0, 0x13, 0, 0), 0x0010);
+    let (w, h, _) = picture(&mut cpu);
+    assert_eq!((w, h, cpu.bus.vga.graphics_size()), (640, 400, (320, 200)));
+    assert_eq!(int10(&mut cpu, 0x10F0, 0x38, 0, 0), 0x10F0);
+    // The timings are a monitor's.
+    let timing = cpu.bus.vga.peek_timing();
+    assert!((60.0..75.0).contains(&timing.hz()), "{} Hz", timing.hz());
+}
+
+#[test]
+fn a_standard_mode_after_a_tseng_mode_is_the_vga_s() {
+    let mut cpu = machine();
+    int10(&mut cpu, 0x0030, 0, 0, 0);
+    cpu.bus.io_write(0x3CD, 0x55);
+    int10(&mut cpu, 0x0013, 0, 0, 0);
+    assert_eq!(cpu.bus.io_read(0x3CD), 0);
+    assert_eq!(cpu.bus.vga.graphics_size(), (320, 200));
+    assert_eq!(picture(&mut cpu).0, 640);
+    int10(&mut cpu, 0x0003, 0, 0, 0);
+    assert_eq!(video::frame_size(&cpu.bus).1, 400);
+    assert_eq!(cpu.bus.vga.et4000.hicolor(), None);
+}
+
+#[test]
+fn a_loaded_et4000_shows_the_same() {
+    let mut a = machine();
+    int10(&mut a, 0x10F0, 0x2E, 0, 0);
+    for i in 0..640 * 480 * 2 {
+        if i % 0x10000 == 0 {
+            let bank = (i >> 16) as u8;
+            a.bus.io_write(0x3CD, bank | bank << 4);
+        }
+        a.bus.write_8(0xA0000 + (i & 0xFFFF), (i * 7 / 3) as u8);
+    }
+    let before = picture(&mut a);
+    let state = rust_dos::savestate::machine::save(&a);
+    let mut b = machine();
+    rust_dos::savestate::machine::load(&mut b, &state).unwrap();
+    assert!(rust_dos::savestate::machine::save(&b) == state);
+    assert!(picture(&mut b) == before);
+}

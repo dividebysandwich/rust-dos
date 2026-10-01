@@ -2,6 +2,7 @@ use crate::audio::play_sdl_beep;
 use crate::cpu::Cpu;
 use crate::video::adapter::Adapter;
 use crate::video::bios::{self as video_bios, rom_pointer};
+use crate::video::et4000;
 use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, MAX_COLS, VideoMode, pixels};
 use iced_x86::Register;
 
@@ -142,6 +143,129 @@ fn active_page(cpu: &mut Cpu) -> u8 {
     cpu.bus.guest_read_8(0x0462)
 }
 
+/// Set Tseng's mode `mode` on an ET4000, in HiColor at `hicolor` bits (15
+/// or 16) if given: its registers, the chip's and the DAC's, cleared
+/// memory unless `keep`, and the BIOS data, as for a standard mode.
+pub fn set_tseng_mode(cpu: &mut Cpu, mode: &et4000::TsengMode, keep: bool, hicolor: Option<u8>) {
+    let video_mode = if mode.planar { VideoMode::Vga640x480 } else { VideoMode::Graphics320x200 };
+    let colours = match (mode.planar, hicolor) {
+        (true, _) => "16 colours".to_string(),
+        (false, None) => "256 colours".to_string(),
+        (false, Some(bits)) => format!("{} bits a pixel", bits),
+    };
+    cpu.bus.log_string(&format!("[BIOS] Switch to Tseng mode {:02X}h ({}x{}, {})", mode.number, mode.width, mode.height, colours));
+    cpu.bus.vbe.reset();
+    cpu.bus.video_mode = video_mode;
+    let vga = &mut cpu.bus.vga;
+    vga.set_video_mode(video_mode);
+    let regs = mode.registers(hicolor.is_some());
+    vga.misc_output_reg = regs.misc;
+    vga.crtc_regs = regs.crtc;
+    if !mode.planar {
+        // A pixel a dot (Attribute Mode Control bit 6 off).
+        vga.attribute_regs[0x10] = 0x01;
+    }
+    vga.et4000.program(&regs, hicolor.map_or(0, et4000::hicolor_command));
+    vga.invalidate_timing();
+    if !keep {
+        vga.vram_graphics.fill(0);
+    }
+    vga.mark_dirty_full();
+    tseng_bios_data(cpu, mode.number, mode.width, mode.height, mode.char_height);
+}
+
+/// Mode 13h in HiColor at `bits` (15 or 16): 320x200 at two bytes a pixel,
+/// through 16-dot characters at twice the clock.
+fn set_hicolor_13h(cpu: &mut Cpu, keep: bool, bits: u8) {
+    set_mode(cpu, 0x13 | if keep { 0x80 } else { 0 });
+    let vga = &mut cpu.bus.vga;
+    // The 50 MHz clock (8): CR31 bit 6.
+    let regs = et4000::TsengRegs {
+        misc: vga.misc_output_reg,
+        crtc: vga.crtc_regs,
+        cr31: 0x40,
+        cr34: 0x00,
+        cr35: 0x00,
+        cr3f: 0x00,
+        atc16: 0x20,
+    };
+    vga.crtc_regs[0x13] = 0x50;
+    vga.et4000.program(&regs, et4000::hicolor_command(bits));
+    vga.invalidate_timing();
+    vga.mark_dirty_full();
+}
+
+/// Set Tseng's mode `mode` in HiColor at `bits`; false if it has none.
+pub fn set_hicolor_mode(cpu: &mut Cpu, mode: u8, bits: u8) -> bool {
+    let keep = mode & 0x80 != 0;
+    match mode & 0x7F {
+        0x13 => set_hicolor_13h(cpu, keep, bits),
+        number => match et4000::tseng_mode(number).filter(|m| m.has_hicolor()) {
+            Some(tseng) => {
+                cpu.bus.et4000_program_standard();
+                set_cursor(cpu, 0, 0, 0);
+                set_tseng_mode(cpu, tseng, keep, Some(bits));
+            }
+            None => return false,
+        },
+    }
+    true
+}
+
+/// The BIOS data of a Tseng graphics mode: its number, the characters
+/// across and the rows of `char_height` down, the font INT 43h points to.
+fn tseng_bios_data(cpu: &mut Cpu, number: u8, width: u16, height: u16, char_height: u8) {
+    cpu.bus.guest_write_8(0x0449, number);
+    cpu.bus.guest_write_16(0x044A, width / 8);
+    cpu.bus.guest_write_16(0x044C, 0);
+    cpu.bus.guest_write_16(0x044E, 0);
+    cpu.bus.guest_write_8(0x0462, 0);
+    cpu.bus.guest_write_8(0x0484, (height / char_height as u16 - 1) as u8);
+    cpu.bus.guest_write_16(0x0485, char_height as u16);
+    let font = if char_height == 14 { video_bios::FONT_8X14 } else { video_bios::FONT_8X16 };
+    set_vector(cpu, 0x43, rom_pointer(font));
+}
+
+/// INT 10h AX=10F0h-10F2h, Tseng's HiColor BIOS: AL=F0h sets mode BL in
+/// 32K colours; F1h says which DAC there is (BL=1: a Sierra HiColor DAC);
+/// F2h with BL=0 reads which HiColor (BL=0 none, 1 32K, 2 64K), and with
+/// BL=1 or 2 switches the HiColor mode it is in to 32K or 64K colours.
+/// AX=0010h on success.
+fn tseng_hicolor(cpu: &mut Cpu) {
+    let bl = cpu.get_reg8(Register::BL);
+    match cpu.get_al() {
+        0xF0 => {
+            if set_hicolor_mode(cpu, bl, 15) {
+                cpu.set_ax(0x0010);
+            }
+        }
+        0xF1 => {
+            cpu.set_ax(0x0010);
+            cpu.set_reg8(Register::BL, 0x01);
+        }
+        0xF2 => {
+            let chip = &mut cpu.bus.vga.et4000;
+            match (bl, chip.hicolor()) {
+                (1 | 2, Some(_)) => {
+                    chip.dac_command = et4000::hicolor_command(if bl == 2 { 16 } else { 15 });
+                    cpu.bus.vga.mark_dirty_full();
+                }
+                (0, _) => {
+                    let current = match chip.hicolor() {
+                        Some(16) => 2,
+                        Some(_) => 1,
+                        None => 0,
+                    };
+                    cpu.set_reg8(Register::BL, current);
+                }
+                _ => {}
+            }
+            cpu.set_ax(0x0010);
+        }
+        _ => {}
+    }
+}
+
 /// A standard mode by its number, and its name.
 fn standard_mode(mode: u8) -> Option<(VideoMode, &'static str)> {
     match mode {
@@ -263,6 +387,12 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
 
     // Reset Cursor
     set_cursor(cpu, 0, 0, 0);
+
+    if adapter.is_et4000()
+        && let Some(tseng) = et4000::tseng_mode(mode)
+    {
+        return set_tseng_mode(cpu, tseng, keep, None);
+    }
 
     let new_mode = standard_mode(mode);
     match new_mode {
@@ -802,6 +932,7 @@ pub fn handle(cpu: &mut Cpu) {
 
         // AH = 10h: Palette / Color Registers
         0x10 if adapter.gate_array() => gate_array_palette_function(cpu),
+        0x10 if adapter.is_et4000() && cpu.get_al() >= 0xF0 => tseng_hicolor(cpu),
         0x10 => {
             let al = cpu.get_al();
             match al {
