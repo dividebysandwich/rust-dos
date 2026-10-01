@@ -1266,10 +1266,11 @@ fn main() -> Result<(), String> {
             osd.show(format!("The sound recording failed: {}", e));
             sound_recording = None;
         }
-        // What a game shows on the MT-32's display.
+        // What a game shows on the MT-32's or Sound Canvas's display.
         if let Some(message) = cpu.bus.mpu.take_lcd_message() {
-            cpu.bus.log_string(&format!("[MIDI] MT-32 display: {}", message));
-            osd.show(format!("MT-32: {}", message));
+            let module = if cpu.bus.mpu.synth_name() == "sc55" { "Sound Canvas" } else { "MT-32" };
+            cpu.bus.log_string(&format!("[MIDI] {} display: {}", module, message));
+            osd.show(format!("{}: {}", module, message));
         }
         cpu.bus.flush_log();
 

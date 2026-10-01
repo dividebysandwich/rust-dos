@@ -337,8 +337,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `gusdrive=none` and put them in `ultradir`.
 * `midisynth` picks what plays the MPU-401's MIDI: `auto` (the default:
   the SoundFont if `soundfont` is set, else the Ultrasound patches listed
-  in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, `mt32`, `host`, or
-  `none`. The built-in patches play even without the Ultrasound
+  in `ULTRASND.INI` in `ultradir`), `soundfont`, `gus`, `mt32`, `sc55`,
+  `host`, or `none`. The built-in patches play even without the Ultrasound
   (`gus=false`) unless `gusdrive` is `none`.
 * `mt32` plays a Roland MT-32 or CM-32L, emulated by
   [munt](https://github.com/munt/munt). rust-dos loads munt's library
@@ -354,6 +354,24 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `mt32model` picks the ROMs to play with: `auto` (the CM-32L's if they
   are there, else the MT-32's), `mt32` or `cm32l`. What a game shows on
   the MT-32's display appears over the picture.
+* `sc55` plays a Roland Sound Canvas: the SC-55, SC-55mkII, SC-55ST,
+  SC-155 (mkII), CM-300/SCC-1, SCB-55 or RLP-3237, built into rust-dos as
+  a port of [Nuked-SC55](https://github.com/jcmoyer/Nuked-SC55), which
+  emulates the module's chips and runs Roland's own firmware. The
+  firmware and sounds are Roland's ROMs, which don't come with rust-dos.
+  rust-dos finds them by their contents, whatever the files are called,
+  in subfolders and in zip archives too: in `sc55roms`, or without it in
+  `sc55-roms` in its configuration directory and in DOSBox Staging's
+  `soundcanvas-roms`. The settings window's Sound page can download them
+  from the Internet Archive once you agree to it (*Download the Sound
+  Canvas ROMs...*), checks every file against the known dumps, and puts
+  them in `sc55-roms`. `sc55model` picks the module: `auto` (the default:
+  the SC-55 v1.21, which most games were written for, if its ROMs are
+  there, else the SC-55mkII, else any other found), a model (`mk1`, `mk2`,
+  `st`, `sc155`, `sc155mk2`, `cm300`, `scb55`, `rlp3237`) or a version of
+  one (`mk1-v1.21`, `mk2-v1.01`, ...). The module needs a moment when it
+  is switched on and after a GS reset (the mkII 1.6 s), as the real one
+  does. Text a game puts on the display appears over the picture.
 * `host` sends the MIDI out of a MIDI port of the computer (ALSA,
   CoreMIDI or Windows MIDI): to a real MT-32 or Sound Canvas, or to a
   software synthesizer such as FluidSynth or munt's. `midiport` is a part

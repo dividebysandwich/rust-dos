@@ -363,6 +363,9 @@ pub enum MidiSynth {
     Gus,
     /// The Roland MT-32 (or CM-32L), played by munt.
     Mt32,
+    /// The Roland Sound Canvas SC-55 family, played by the port of
+    /// Nuked-SC55 (`sc55`).
+    Sc55,
     /// A MIDI port of the host (`midiport`).
     Host,
     None,
@@ -431,6 +434,12 @@ pub struct SoundConfig {
     pub mt32model: Mt32Model,
     /// munt's library, where the system doesn't find it (`mt32lib`).
     pub mt32lib: Option<PathBuf>,
+    /// The directory with the Sound Canvas's ROMs (`sc55roms`); without it,
+    /// the usual places (`sc55::rom::default_dirs`).
+    pub sc55roms: Option<PathBuf>,
+    /// Which Sound Canvas (`sc55model`): `auto`, a family such as `mk2`
+    /// or a version such as `mk1-v1.21` (`sc55::rom`).
+    pub sc55model: String,
     /// The host's MIDI port for `midisynth=host`: a part of its name or its
     /// number; empty for the first.
     pub midiport: String,
@@ -447,6 +456,7 @@ impl MidiSynth {
             MidiSynth::SoundFont => "soundfont",
             MidiSynth::Gus => "gus",
             MidiSynth::Mt32 => "mt32",
+            MidiSynth::Sc55 => "sc55",
             MidiSynth::Host => "host",
             MidiSynth::None => "none",
         }
@@ -467,6 +477,8 @@ impl Default for SoundConfig {
             mt32roms: None,
             mt32model: Mt32Model::Auto,
             mt32lib: None,
+            sc55roms: None,
+            sc55model: "auto".to_string(),
             midiport: String::new(),
             lpt_dac: LptDacType::None,
             tandy: crate::sn76489::TandySound::Auto,
@@ -570,6 +582,16 @@ impl SoundConfig {
                 self.mt32model = Mt32Model::parse(value)
                     .ok_or_else(|| format!("invalid mt32model '{}' (auto, mt32 or cm32l)", value))?;
             }
+            "sc55roms" => self.sc55roms = Some(expand_host_path(value, base_dir, home)),
+            "sc55model" => {
+                if !crate::sc55::rom::valid_model(value) {
+                    return Err(format!(
+                        "invalid sc55model '{}' (auto, a model such as mk1, mk2 or cm300, or a version such as mk1-v1.21)",
+                        value
+                    ));
+                }
+                self.sc55model = value.to_ascii_lowercase();
+            }
             "midiport" => self.midiport = value.to_string(),
             "gus" => {
                 self.gus.enabled =
@@ -618,10 +640,14 @@ impl SoundConfig {
                     "soundfont" => MidiSynth::SoundFont,
                     "gus" => MidiSynth::Gus,
                     "mt32" | "mt-32" | "munt" => MidiSynth::Mt32,
+                    "sc55" | "sc-55" | "soundcanvas" => MidiSynth::Sc55,
                     "host" | "hostmidi" | "external" => MidiSynth::Host,
                     "none" => MidiSynth::None,
                     _ => {
-                        return Err(format!("invalid midisynth '{}' (auto, soundfont, gus, mt32, host or none)", value));
+                        return Err(format!(
+                            "invalid midisynth '{}' (auto, soundfont, gus, mt32, sc55, host or none)",
+                            value
+                        ));
                     }
                 }
             }
@@ -1335,6 +1361,8 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Sound, "mt32roms", sound.mt32roms.as_deref().map(|p| contract_home(p, home))),
         (Sound, "mt32model", Some(sound.mt32model.name().to_string())),
         (Sound, "mt32lib", sound.mt32lib.as_deref().map(|p| contract_home(p, home))),
+        (Sound, "sc55roms", sound.sc55roms.as_deref().map(|p| contract_home(p, home))),
+        (Sound, "sc55model", Some(sound.sc55model.clone())),
         (Sound, "midiport", (!sound.midiport.is_empty()).then(|| sound.midiport.clone())),
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "tandy", Some(sound.tandy.name().to_string())),
@@ -1971,6 +1999,21 @@ mod tests {
     }
 
     #[test]
+    fn sound_canvas_settings() {
+        let text = "[sound]\nmidisynth=SoundCanvas\nsc55roms=~/sc55\nsc55model=MK1-v1.21\n";
+        let config = parse(text, Path::new("/cfg"), Some(Path::new("/home/u")));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let sound = &config.sound;
+        assert_eq!(sound.midisynth, MidiSynth::Sc55);
+        assert_eq!(sound.sc55roms.as_deref(), Some(Path::new("/home/u/sc55")));
+        assert_eq!(sound.sc55model, "mk1-v1.21");
+
+        let config = parse("[sound]\nsc55model=jv880\n", Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+        assert_eq!(config.sound.sc55model, "auto");
+    }
+
+    #[test]
     fn the_builtin_ultrasound_drive() {
         // X:, where ULTRADIR points unless it is set.
         let gus = parse("", Path::new("/cfg"), None).sound.gus;
@@ -2232,6 +2275,8 @@ mod tests {
             mt32roms: Some(PathBuf::from("/home/u/roms")),
             mt32model: Mt32Model::Cm32l,
             mt32lib: Some(PathBuf::from("/opt/munt/libmt32emu.so")),
+            sc55roms: Some(PathBuf::from("/home/u/sc55")),
+            sc55model: "mk2".to_string(),
             midiport: "FLUID".to_string(),
             lpt_dac: LptDacType::Disney,
             tandy: crate::sn76489::TandySound::On,
@@ -2481,12 +2526,12 @@ mod tests {
         // Every setting has a line, the lines that were there stay as they
         // were written, and the command line's speed isn't kept.
         for (section, key, _) in entries(&settings, Some(home)) {
-            // (The file's SoundFont; no Ultrasound directory, MT-32, LAN
-            // password, RetroAchievements account or printer paths and
-            // programs of its own.)
+            // (The file's SoundFont; no Ultrasound directory, MT-32 or
+            // Sound Canvas, LAN password, RetroAchievements account or
+            // printer paths and programs of its own.)
             let wanted = !matches!(
                 key,
-                "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "midiport" | "password" | "username" | "token"
+                "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
                     | "docpath" | "fontpath" | "device" | "print_command" | "open_with"
             );
             assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);

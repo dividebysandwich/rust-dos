@@ -1897,7 +1897,7 @@ fn every_setting_page_and_dialog_has_help() {
             used.extend(item.fields(&Settings::default()).into_iter().map(Item::help));
         }
     }
-    for pick in [Pick::MountPath, Pick::SoundFont, Pick::Mt32Roms, Pick::ImportGame, Pick::ImagePath, Pick::AchievementsArchive, Pick::Manual, Pick::OverlayPath] {
+    for pick in [Pick::MountPath, Pick::SoundFont, Pick::Mt32Roms, Pick::Sc55Roms, Pick::ImportGame, Pick::ImagePath, Pick::AchievementsArchive, Pick::Manual, Pick::OverlayPath] {
         used.push(pick.help());
     }
     for id in &used {
@@ -1997,4 +1997,37 @@ fn the_help_covers_the_pictures_and_graphs_drawn_in_pixels() {
     assert_eq!(&frame.rgb[white * 3..][..3], [draw::FIELD.0, draw::FIELD.1, draw::FIELD.2], "the help's background");
     // Below the help, the picture shows.
     assert!(frame.rgb.chunks(3).skip(white).any(|px| px == [0xFF; 3]));
+}
+
+#[test]
+fn the_sound_canvas_download_asks_first() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    // A folder without ROMs, so the download is offered.
+    let empty = std::env::temp_dir().join(format!("rust-dos-sc55-ui-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+    ui.settings.sound.midisynth = MidiSynth::Sc55;
+    ui.settings.sound.sc55roms = Some(empty.clone());
+    ui.show_page(Page::Sound);
+    let Some(row) = ui.items().iter().position(|&i| i == Item::Sc55Download) else {
+        // A frontend without a window downloads nothing.
+        assert!(!ui.frontend.window);
+        return;
+    };
+    ui.row = row;
+
+    // Enter asks; the question takes the page, and nothing downloads yet.
+    ui.key(Enter, &mut host);
+    assert!(ui.confirm_sc55.is_some() && ui.sc55_download.is_none());
+    let mut frame = Frame::new(1024, 768);
+    ui.draw(&mut frame);
+    assert!(ui.hits.is_empty() || ui.confirm_sc55.is_some());
+    // Esc (or any key but Enter) says no.
+    ui.key(Esc, &mut host);
+    assert!(ui.confirm_sc55.is_none() && ui.sc55_download.is_none());
+    assert_eq!(status(&ui), ("Nothing was downloaded", false));
+    // The window is still open.
+    assert!(ui.open);
+    let _ = std::fs::remove_dir_all(&empty);
 }

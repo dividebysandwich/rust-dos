@@ -1,8 +1,9 @@
 //! The Roland MPU-401 MIDI interface at 330h/331h, in UART mode: MIDI bytes
 //! a program writes go to a synthesizer. That is `rustysynth` playing a
 //! SoundFont (with the `midi` feature), the Gravis Ultrasound patch set
-//! played by `gus::synth`, a Roland MT-32 played by munt (`mt32`), or a MIDI
-//! port of the host (`midiout`, with the `hostmidi` feature). Without one
+//! played by `gus::synth`, a Roland MT-32 played by munt (`mt32`), a Roland
+//! Sound Canvas (`sc55`), or a MIDI port of the host (`midiout`, with the
+//! `hostmidi` feature). Without one
 //! the interface is still there, so programs that detect it work, but it
 //! plays nothing.
 
@@ -33,6 +34,7 @@ enum Synth {
     Gus(Box<GusSynth>),
     #[cfg(not(target_arch = "wasm32"))]
     Mt32(Box<crate::mt32::Mt32>),
+    Sc55(Box<crate::sc55::Sc55>),
     #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
     Host(Box<crate::midiout::HostMidi>),
 }
@@ -51,6 +53,7 @@ impl Synth {
             Synth::Gus(synth) => synth.reset(),
             #[cfg(not(target_arch = "wasm32"))]
             Synth::Mt32(synth) => synth.notes_off(),
+            Synth::Sc55(synth) => synth.notes_off(),
             #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
             Synth::Host(port) => port.notes_off(),
         }
@@ -66,6 +69,7 @@ impl Synth {
             Synth::Gus(synth) => synth.message(status, d1, d2),
             #[cfg(not(target_arch = "wasm32"))]
             Synth::Mt32(synth) => synth.message(status, d1, d2),
+            Synth::Sc55(synth) => synth.message(status, d1, d2),
             #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
             Synth::Host(port) => port.message(status, d1, d2),
         }
@@ -77,6 +81,7 @@ impl Synth {
             Synth::Gus(synth) => synth.sysex(body),
             #[cfg(not(target_arch = "wasm32"))]
             Synth::Mt32(synth) => synth.sysex(body),
+            Synth::Sc55(synth) => synth.sysex(body),
             #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
             Synth::Host(port) => port.sysex(body),
             _ => {}
@@ -127,8 +132,8 @@ impl Mpu401 {
         self.synth = Synth::None;
     }
 
-    /// Which synthesizer plays: "soundfont", "gus", "mt32", "host" or
-    /// "none".
+    /// Which synthesizer plays: "soundfont", "gus", "mt32", "sc55", "host"
+    /// or "none".
     pub fn synth_name(&self) -> &'static str {
         match self.synth {
             Synth::None => "none",
@@ -137,6 +142,7 @@ impl Mpu401 {
             Synth::Gus(_) => "gus",
             #[cfg(not(target_arch = "wasm32"))]
             Synth::Mt32(_) => "mt32",
+            Synth::Sc55(_) => "sc55",
             #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
             Synth::Host(_) => "host",
         }
@@ -150,6 +156,13 @@ impl Mpu401 {
         description
     }
 
+    /// Play a Sound Canvas. Returns what plays, for the log.
+    pub fn load_sc55(&mut self, synth: crate::sc55::Sc55) -> String {
+        let description = synth.description().to_string();
+        self.synth = Synth::Sc55(Box::new(synth));
+        description
+    }
+
     /// Send the MIDI out of a port of the host. Returns the port's name.
     #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
     pub fn open_host(&mut self, port: crate::midiout::HostMidi) -> String {
@@ -158,11 +171,13 @@ impl Mpu401 {
         name
     }
 
-    /// What the MT-32's display shows, once, when a program changed it.
+    /// What the MT-32's or Sound Canvas's display shows, once, when a
+    /// program changed it.
     pub fn take_lcd_message(&mut self) -> Option<String> {
         match &mut self.synth {
             #[cfg(not(target_arch = "wasm32"))]
             Synth::Mt32(synth) => synth.take_lcd_message(),
+            Synth::Sc55(synth) => synth.take_lcd_message(),
             _ => None,
         }
     }
@@ -312,6 +327,7 @@ impl Mpu401 {
             Synth::Gus(synth) => synth.render(),
             #[cfg(not(target_arch = "wasm32"))]
             Synth::Mt32(synth) => synth.render(),
+            Synth::Sc55(synth) => synth.render(),
             #[cfg(all(feature = "hostmidi", not(target_arch = "wasm32")))]
             Synth::Host(_) => (0.0, 0.0),
         }

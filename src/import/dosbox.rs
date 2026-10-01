@@ -189,8 +189,21 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("midi", "mpu401") if first == "none" => imported.set("sound", "midisynth", "none"),
         ("midi", "mididevice") => match first {
             "mt32" => imported.set("sound", "midisynth", "mt32"),
+            "soundcanvas" => imported.set("sound", "midisynth", "sc55"),
             "none" => imported.set("sound", "midisynth", "none"),
             _ => {}
+        },
+        // DOSBox Staging's names for the Sound Canvas models.
+        ("soundcanvas", "soundcanvas_model") => match first {
+            "sc55" => imported.set("sound", "sc55model", "mk1"),
+            "sc55mk2" | "sc55mk2_100" => imported.set("sound", "sc55model", "mk2"),
+            "sc55mk2_101" => imported.set("sound", "sc55model", "mk2-v1.01"),
+            "sc55_100" | "sc55_110" | "sc55_120" | "sc55_121" | "sc55_200" => {
+                let version = &first["sc55_".len()..];
+                imported.set("sound", "sc55model", format!("mk1-v{}.{}", &version[..1], &version[1..]))
+            }
+            "auto" => {}
+            _ => unknown(imported),
         },
         ("speaker", "tandy") => match first {
             "auto" | "on" | "off" => imported.set("sound", "tandy", first),
@@ -378,6 +391,17 @@ mod tests {
         assert_eq!(config.drives.len(), 2);
         let prepared = crate::games::prepare("the-game", &crate::config::Settings::default(), &text, Path::new("/"), None).unwrap();
         assert_eq!(prepared.settings.cycles, crate::timer::CpuSpeed::Fixed(12000));
+    }
+
+    #[test]
+    fn dosbox_staging_s_sound_canvas_is_ours() {
+        let imported = import(&["[midi]\nmididevice=soundcanvas\n[soundcanvas]\nsoundcanvas_model=sc55_121\n"], &[PathBuf::from("/")], "x", None);
+        let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
+        assert_eq!(get("midisynth"), Some("sc55"));
+        assert_eq!(get("sc55model"), Some("mk1-v1.21"));
+        let config = crate::config::parse(&imported.profile_text(None), Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.sound.sc55model, "mk1-v1.21");
     }
 
     #[test]

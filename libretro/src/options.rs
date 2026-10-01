@@ -219,7 +219,8 @@ fn definitions() -> Vec<Definition> {
             key: "midisynth",
             desc: "MIDI synthesizer",
             info: "What plays the music sent to the MPU-401. A SoundFont and MT-32 ROMs are set in rust-dos.conf, \
-                   in the rust-dos folder of the frontend's system directory.",
+                   in the rust-dos folder of the frontend's system directory. The Sound Canvas's ROMs go in a \
+                   sc55-roms folder there.",
             category: "audio",
             target: config("sound", "midisynth"),
             values: configured(&[
@@ -227,6 +228,7 @@ fn definitions() -> Vec<Definition> {
                 ("soundfont", "SoundFont"),
                 ("gus", "Ultrasound patches"),
                 ("mt32", "Roland MT-32 (munt)"),
+                ("sc55", "Roland Sound Canvas SC-55"),
                 ("none", "None"),
             ]),
         },

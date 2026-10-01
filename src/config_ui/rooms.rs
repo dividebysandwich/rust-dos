@@ -189,7 +189,7 @@ impl RoomBrowser {
 
 /// `text` in at most `lines` lines of `width` columns, broken at spaces,
 /// the last one shortened if it all doesn't fit.
-fn wrap(text: &str, width: usize, lines: usize) -> Vec<String> {
+pub(super) fn wrap(text: &str, width: usize, lines: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut rest = text.trim();
     while !rest.is_empty() && out.len() + 1 < lines && rest.chars().count() > width {

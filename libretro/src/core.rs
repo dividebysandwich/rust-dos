@@ -141,6 +141,10 @@ impl Core {
         // The AWE32's ROM, as frontends keep BIOS files.
         rust_dos::awe32::rom::add_search_dir(dirs.sys.clone());
         rust_dos::awe32::rom::add_search_dir(dirs.system.clone());
+        // The Sound Canvas's, in a sc55-roms (or DOSBox's soundcanvas-roms)
+        // folder of either.
+        rust_dos::sc55::rom::add_search_dir(dirs.sys.clone());
+        rust_dos::sc55::rom::add_search_dir(dirs.system.clone());
         if let Err(e) = fs::create_dir_all(dirs.drive_c()) {
             cb.log(RETRO_LOG_WARN, &format!("{}: {}", dirs.drive_c().display(), e));
         }

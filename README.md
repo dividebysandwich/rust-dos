@@ -33,8 +33,8 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   OpenGL at up to four times its resolution
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
-  the Ultrasound patches, a Roland MT-32 (via munt) or the host's MIDI
-  ports, Covox and Disney Sound Source, the Tandy/PCjr sound chip, and CD
+  the Ultrasound patches, a Roland MT-32 (via munt), a Roland Sound Canvas
+  SC-55 (a port of Nuked-SC55) or the host's MIDI ports, Covox and Disney Sound Source, the Tandy/PCjr sound chip, and CD
   audio
 * **Drives:** host directories as floppy, hard disk and CD-ROM drives, CD
   images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO) and FAT12, FAT16

@@ -81,13 +81,17 @@ What plays the music of games set up for *General MIDI*, *Roland* or
   General MIDI sound.
 - **MT-32 (munt)**: an emulated Roland MT-32, for Sierra, LucasArts and
   Origin games of 1988-1992, which sound best on one. Needs the MT-32 ROMs.
+- **Sound Canvas**: an emulated Roland SC-55, the General MIDI module
+  many games of 1991-1997 (Doom, Descent, Duke Nukem 3D) were composed
+  on. Needs the Sound Canvas ROMs, which this page can download.
 - **Ultrasound patches**: the built-in Ultrasound instruments, even
   with a SoundFont picked.
 - **host MIDI port**: a synthesizer or MIDI device of your computer.
 - **none**: no MIDI music.
 
 In the game's setup, pick *General MIDI* (or *Roland MT-32* with the
-MT-32) at port **330**.
+MT-32, *Roland Sound Canvas* where a game offers it with the Sound
+Canvas) at port **330**.
 
 # SoundFont {#soundfont}
 
@@ -106,6 +110,26 @@ DOSBox's `mt32-roms`.
 
 Which ROMs to play with. **auto** takes the CM-32L's if there, else the
 MT-32's. A few early games only sound right on the **MT-32**.
+
+# Sound Canvas ROMs {#sc55-roms}
+
+The folder with the Roland Sound Canvas's ROM files, which the Sound
+Canvas needs and which don't come with Rust-DOS. Any file names work, in
+subfolders or zip archives too. Enter picks the folder; **default** looks
+in Rust-DOS's configuration directory and in DOSBox Staging's
+`soundcanvas-roms`.
+
+The firmware is Roland's. *Download the Sound Canvas ROMs...* asks
+first, then fetches the model's ROMs from the copy the Internet Archive
+keeps, checks each file against the known dumps, and puts them in the
+configuration directory. Only download them if you have the right to use
+them.
+
+# Sound Canvas model {#sc55-model}
+
+Which Sound Canvas plays. **auto** takes the **SC-55** v1.21 if its ROMs
+are there, which most games were written for, else the **SC-55mkII**,
+else any other there is. The list has the models whose ROMs were found.
 
 # MIDI port {#midi-port}
 

@@ -19,6 +19,7 @@ mod manual;
 pub mod osd;
 mod perf;
 mod rooms;
+mod sc55;
 mod states;
 
 use autoexec::AutoexecEditor;
@@ -363,7 +364,8 @@ impl Page {
             ],
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
-                SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound, HardDiskNoise, FloppyDiskNoise,
+                Sc55Roms, Sc55Model, Sc55Download, SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound,
+                HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),
@@ -529,6 +531,11 @@ enum Item {
     /// munt's MT-32: the directory with its ROMs and the model.
     Mt32Roms,
     Mt32Model,
+    /// The Sound Canvas: the directory with its ROMs, the model, and the
+    /// ROMs' download.
+    Sc55Roms,
+    Sc55Model,
+    Sc55Download,
     /// The host's MIDI port for `midisynth=host`.
     MidiPort,
     HardDiskSpeed,
@@ -706,6 +713,30 @@ fn mt32(frontend: Frontend) -> bool {
     cfg!(not(target_arch = "wasm32")) && frontend.host_files
 }
 
+/// The Sound Canvas ROMs the settings `s` would play with.
+fn sc55_found(s: &Settings) -> Option<crate::sc55::rom::Found> {
+    crate::sc55::rom::find_cached(s.sound.sc55roms.as_deref(), &s.sound.sc55model)
+}
+
+/// The Sound Canvas models to pick from: auto, the sets there are, and
+/// the one set.
+fn sc55_models(s: &Settings) -> Vec<String> {
+    let mut models = vec!["auto".to_string()];
+    let dirs = match &s.sound.sc55roms {
+        Some(dir) => vec![dir.clone()],
+        None => crate::sc55::rom::default_dirs(),
+    };
+    for found in crate::sc55::rom::scan(&dirs, "auto") {
+        if !models.iter().any(|m| m == found.romset.name) {
+            models.push(found.romset.name.to_string());
+        }
+    }
+    if !models.contains(&s.sound.sc55model) {
+        models.push(s.sound.sc55model.clone());
+    }
+    models
+}
+
 /// Whether MIDI can go out of the host's MIDI ports.
 fn host_midi(frontend: Frontend) -> bool {
     cfg!(all(feature = "hostmidi", not(target_arch = "wasm32"))) && frontend.host_files
@@ -774,6 +805,9 @@ impl Item {
             SoundFont => "SoundFont",
             Mt32Roms => "MT-32 ROMs",
             Mt32Model => "MT-32 model",
+            Sc55Roms => "  Sound Canvas ROMs",
+            Sc55Model => "  Sound Canvas model",
+            Sc55Download => "  Download the Sound Canvas ROMs...",
             MidiPort => "MIDI port",
             HardDiskSpeed => "Hard disk speed",
             FloppyDiskSpeed => "Floppy disk speed",
@@ -831,6 +865,8 @@ impl Item {
             Item::Scale | Item::Fullscreen | Item::Vrr => frontend.window,
             Item::SoundFont => soundfonts(frontend),
             Item::Mt32Roms | Item::Mt32Model => mt32(frontend),
+            Item::Sc55Roms | Item::Sc55Model => frontend.host_files,
+            Item::Sc55Download => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
             // The ROM is a host file; the program downloads it.
             Item::Awe32Rom => frontend.host_files,
             Item::Awe32Download => frontend.window && cfg!(all(feature = "sdl", not(target_arch = "wasm32"))),
@@ -868,6 +904,9 @@ impl Item {
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
             // Until there is a ROM.
             Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
+            Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
+            // Until there are ROMs.
+            Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
             Item::VoodooScale => s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl,
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
@@ -912,8 +951,8 @@ impl Item {
                 Input::Text
             }
             Item::ModemListen => Input::Text,
-            Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom => Input::File,
-            Item::Autoexec | Item::Rooms | Item::Awe32Download => Input::Link,
+            Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms => Input::File,
+            Item::Autoexec | Item::Rooms | Item::Awe32Download | Item::Sc55Download => Input::Link,
             _ => Input::Choice,
         }
     }
@@ -1015,6 +1054,7 @@ impl Item {
                 MidiSynth::SoundFont => "SoundFont",
                 MidiSynth::Gus => "Ultrasound patches",
                 MidiSynth::Mt32 => "MT-32 (munt)",
+                MidiSynth::Sc55 => "Sound Canvas",
                 MidiSynth::Host => "host MIDI port",
                 MidiSynth::None => "none",
             }
@@ -1022,6 +1062,19 @@ impl Item {
             SoundFont => s.sound.soundfont.as_deref().map_or("none".to_string(), |p| contract_home(p, home)),
             Mt32Roms => s.sound.mt32roms.as_deref().map_or("default".to_string(), |p| contract_home(p, home)),
             Mt32Model => s.sound.mt32model.describe().to_string(),
+            Sc55Roms => {
+                let found = sc55_found(s).map_or("none found".to_string(), |f| f.romset.display_name());
+                match &s.sound.sc55roms {
+                    Some(dir) => format!("{} ({})", contract_home(dir, home), found),
+                    None => format!("default ({})", found),
+                }
+            }
+            Sc55Model => match (s.sound.sc55model.as_str(), sc55_found(s)) {
+                ("auto", Some(found)) => format!("auto ({})", found.romset.display_name()),
+                ("auto", None) => "auto".to_string(),
+                (model, _) => crate::sc55::rom::Romset::by_name(model).map_or(model.to_string(), |r| r.display_name()),
+            },
+            Sc55Download => String::new(),
             MidiPort if s.sound.midiport.is_empty() => "the first".to_string(),
             MidiPort => s.sound.midiport.clone(),
             HardDiskSpeed => s.disk.hard_disk_speed.describe(DiskClass::HardDisk),
@@ -1197,6 +1250,9 @@ impl Item {
                 if mt32(frontend) {
                     synths.push(MidiSynth::Mt32);
                 }
+                if frontend.host_files {
+                    synths.push(MidiSynth::Sc55);
+                }
                 if host_midi(frontend) {
                     synths.push(MidiSynth::Host);
                 }
@@ -1204,6 +1260,7 @@ impl Item {
                 each(s, synths, |s, synth| s.sound.midisynth = synth)
             }
             Mt32Model => each(s, crate::config::Mt32Model::ALL, |s, model| s.sound.mt32model = model),
+            Sc55Model => each(s, sc55_models(s), |s, model| s.sound.sc55model = model),
             // The ports there are now, and the first of them (empty).
             MidiPort => each(s, std::iter::once(String::new()).chain(midi_ports()), |s, port| s.sound.midiport = port),
             HardDiskSpeed => each(s, DiskSpeed::ALL, |s, speed| s.disk.hard_disk_speed = speed),
@@ -1249,7 +1306,7 @@ impl Item {
             // Slid, typed, picked from the host's files or edited, and a
             // row of several, whose fields have their own.
             Cycles | CrtCurvature | CrtGlow | Memsize | Volume(_) | ReverbMix | ChorusMix | Deadzone | UltraDir
-            | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
+            | SoundFont | Mt32Roms | Awe32Rom | Awe32Download | Sc55Roms | Sc55Download | CaptureDir | Autoexec | SbPorts | GusPorts | MacAddr
             | Rooms | Relay | Player
             | Lan | LanHost | Room | Password | ModemListen => Vec::new(),
         }
@@ -1382,6 +1439,7 @@ impl Item {
             Item::UltraDir => s.sound.gus.ultradir.take().is_some(),
             Item::SoundFont => s.sound.soundfont.take().is_some(),
             Item::Mt32Roms => s.sound.mt32roms.take().is_some(),
+            Item::Sc55Roms => s.sound.sc55roms.take().is_some(),
             Item::Awe32Rom => s.sound.awe32rom.take().is_some(),
             Item::MidiPort => !std::mem::take(&mut s.sound.midiport).is_empty(),
             Item::CaptureDir => {
@@ -1433,6 +1491,8 @@ pub(super) enum Pick {
     Mt32Roms,
     /// The AWE32's ROM file.
     Awe32Rom,
+    /// The directory with the Sound Canvas's ROMs.
+    Sc55Roms,
     /// A game set up for DOSBox, to import.
     ImportGame,
     /// Where a new disk image goes.
@@ -1520,6 +1580,10 @@ pub struct ConfigUi {
     status: Option<Status>,
     /// The AWE32 ROM's download under way.
     awe32_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    /// The Sound Canvas ROMs' download: the set asked about, and the
+    /// download once the user agreed to it.
+    confirm_sc55: Option<&'static crate::sc55::rom::Romset>,
+    sc55_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// The selected setting's value being typed, or picked from a list.
     edit: Option<TextField>,
     popup: Option<Popup>,
@@ -1647,6 +1711,8 @@ impl ConfigUi {
             rooms: None,
             help: None,
             awe32_download: None,
+            confirm_sc55: None,
+            sc55_download: None,
         }
     }
 
@@ -1668,6 +1734,7 @@ impl ConfigUi {
         self.poll_rooms(host);
         self.poll_achievements(host);
         self.poll_awe32_download(host);
+        self.poll_sc55_download(host);
     }
 
     /// Download the AWE32's ROM on a thread of its own, into rust-dos's
@@ -1771,6 +1838,7 @@ impl ConfigUi {
         self.help = None;
         self.manual = None;
         self.confirm_delete = None;
+        self.confirm_sc55 = None;
         self.cheats.edit = None;
         self.achievements.edit = None;
         self.cheats.refresh(host);
@@ -1996,6 +2064,7 @@ impl ConfigUi {
             self.select(0);
             self.scroll = 0;
             self.confirm_delete = None;
+            self.confirm_sc55 = None;
         }
     }
 
@@ -2027,6 +2096,9 @@ impl ConfigUi {
         }
         if self.confirm_delete.is_some() {
             return self.games_key(key, host);
+        }
+        if self.confirm_sc55.is_some() {
+            return self.sc55_confirm_key(key);
         }
         if let Some(row) = Self::navigate(key, self.row, self.row_count(), self.visible) {
             self.select(row);
@@ -2086,9 +2158,11 @@ impl ConfigUi {
             }
             (UiKey::Enter, Input::File) if item == Item::Mt32Roms => self.open_browser(Pick::Mt32Roms),
             (UiKey::Enter, Input::File) if item == Item::Awe32Rom => self.open_browser(Pick::Awe32Rom),
+            (UiKey::Enter, Input::File) if item == Item::Sc55Roms => self.open_browser(Pick::Sc55Roms),
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
             (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
             (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
+            (UiKey::Enter, Input::Link) if item == Item::Sc55Download => self.ask_sc55_download(),
             (UiKey::Enter, Input::Link) => self.open_autoexec(host),
             (UiKey::Delete | UiKey::Backspace, _) if item.clear(&mut self.settings) => self.changed(item, host),
             _ => {}
@@ -2452,6 +2526,12 @@ impl ConfigUi {
                 true,
                 MT32_ROMS,
             ),
+            Pick::Sc55Roms => (
+                "Pick the directory with the Sound Canvas's ROMs",
+                self.settings.sound.sc55roms.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                true,
+                &["bin", "rom", "zip"][..],
+            ),
             Pick::Awe32Rom => (
                 "Pick the AWE32's ROM (awe32.raw)",
                 self.settings.sound.awe32rom.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
@@ -2557,6 +2637,11 @@ impl ConfigUi {
                         self.settings.sound.mt32roms = Some(dir);
                         self.changed(Item::Mt32Roms, host);
                     }
+                    Pick::Sc55Roms => {
+                        let dir = if path.is_dir() { path } else { path.parent().map(Path::to_path_buf).unwrap_or(path) };
+                        self.settings.sound.sc55roms = Some(dir);
+                        self.changed(Item::Sc55Roms, host);
+                    }
                 }
             }
             Ok(None) => self.status = None,
@@ -2613,6 +2698,8 @@ impl ConfigUi {
             self.draw_autoexec(&mut g, content.clone());
         } else if self.rooms.is_some() {
             self.draw_rooms(&mut g, content.clone());
+        } else if self.confirm_sc55.is_some() {
+            self.draw_sc55_question(&mut g, content.clone());
         } else if self.page == Page::Drives {
             self.draw_drives(&mut g, content.clone());
         } else if self.page == Page::Games {
@@ -3251,6 +3338,8 @@ impl ConfigUi {
             self.room_hints()
         } else if self.confirm_delete.is_some() {
             vec![("Enter", if self.confirm_reset { "Reset" } else { "Delete" }, Enter), ("Esc", "Keep", Esc)]
+        } else if self.confirm_sc55.is_some() {
+            vec![("Enter", "Download", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::States {
             vec![
                 ("Enter", "Load", Enter),

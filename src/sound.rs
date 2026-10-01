@@ -69,7 +69,7 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
 
     let midi = |s: &SoundConfig| {
         format!(
-            "{:?} {:?} {} {} {:?} {:?} {:?} {}",
+            "{:?} {:?} {} {} {:?} {:?} {:?} {:?} {} {}",
             s.midisynth,
             s.soundfont,
             s.gus.builtin(),
@@ -77,6 +77,8 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
             s.mt32roms,
             s.mt32model,
             s.mt32lib,
+            s.sc55roms,
+            s.sc55model,
             s.midiport
         )
     };
@@ -87,12 +89,20 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     let soundfont = match sound.midisynth {
         MidiSynth::SoundFont => true,
         MidiSynth::Auto => sound.soundfont.is_some(),
-        MidiSynth::Gus | MidiSynth::Mt32 | MidiSynth::Host | MidiSynth::None => false,
+        MidiSynth::Gus | MidiSynth::Mt32 | MidiSynth::Sc55 | MidiSynth::Host | MidiSynth::None => false,
     };
     if sound.midisynth == MidiSynth::Mt32 {
         match start_mt32(cpu, &sound) {
             Ok(what) => cpu.bus.log_string(&format!("[CONFIG] MIDI on the {}", what)),
             Err(e) => warnings.push(format!("midisynth=mt32: {}", e)),
+        }
+    } else if sound.midisynth == MidiSynth::Sc55 {
+        match crate::sc55::Sc55::open(sound.sc55roms.as_deref(), &sound.sc55model, crate::opl::RATE) {
+            Ok(synth) => {
+                let what = cpu.bus.mpu.load_sc55(synth);
+                cpu.bus.log_string(&format!("[CONFIG] MIDI on the Sound Canvas {}", what));
+            }
+            Err(e) => warnings.push(format!("midisynth=sc55: {}", e)),
         }
     } else if sound.midisynth == MidiSynth::Host {
         match start_host(cpu, &sound) {
@@ -139,7 +149,7 @@ fn load_awe32_rom(sound: &SoundConfig) -> Result<(std::sync::Arc<[i16]>, std::pa
     let path = rom::find(sound.awe32rom.as_deref()).ok_or_else(|| match &sound.awe32rom {
         Some(path) => format!("no {} at {}; the ROM's General MIDI sounds are silent", rom::FILE_NAME, path.display()),
         None => format!(
-            "no {} found; the ROM's General MIDI sounds are silent (the settings window's Sound page can download it)",
+            "no {} found; General MIDI sounds are silent",
             rom::FILE_NAME
         ),
     })?;

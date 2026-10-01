@@ -225,8 +225,9 @@
 #ultradir=X:\ULTRASND
 # What plays the MIDI sent to the MPU-401: auto (the SoundFont if one is
 # set, else the Ultrasound patches in ultradir), soundfont, gus, mt32 (a
-# Roland MT-32 or CM-32L, played by munt), host (out of a MIDI port of
-# this computer, to a synthesizer there or a real module), or none.
+# Roland MT-32 or CM-32L, played by munt), sc55 (a Roland Sound Canvas,
+# built in), host (out of a MIDI port of this computer, to a synthesizer
+# there or a real module), or none.
 #midisynth=auto
 # The MT-32's ROMs for midisynth=mt32: a directory with a control ROM and a
 # PCM ROM of the same model, whatever the files are called. Without it
@@ -239,6 +240,16 @@
 # MT-32's), mt32 or cm32l.
 #mt32model=auto
 #mt32lib=/usr/lib/libmt32emu.so.2
+# The Sound Canvas's ROMs for midisynth=sc55: a directory with them (in
+# subfolders or zip archives too), whatever the files are called. Without
+# it rust-dos looks in sc55-roms beside this file's default location and
+# in DOSBox Staging's soundcanvas-roms. The settings window can download
+# them; they are Roland's and don't come with rust-dos.
+#sc55roms=~/sc55-roms
+# Which Sound Canvas: auto (the SC-55 v1.21 if there, else the SC-55mkII,
+# else any found), a model (mk1, mk2, st, sc155, sc155mk2, cm300, scb55,
+# rlp3237) or a version (mk1-v1.21, mk2-v1.01, ...).
+#sc55model=auto
 # The MIDI port for midisynth=host: a part of its name or its number. The
 # default is the first port (on Linux, the first other than Midi Through).
 #midiport=FLUID

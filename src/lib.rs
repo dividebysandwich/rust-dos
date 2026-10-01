@@ -81,6 +81,7 @@ pub mod printer;
 pub mod recorder;
 pub mod savestate;
 pub mod sb;
+pub mod sc55;
 pub mod serial;
 pub mod shell;
 pub mod shared_disk;

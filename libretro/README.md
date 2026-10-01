@@ -69,6 +69,9 @@ Settings come in layers, each over the one before:
 A SoundFont (`soundfont=`) and MT-32 ROMs (`mt32roms=`) are set in
 `rust-dos.conf`; relative paths are relative to its folder, so they can be put
 beside it. The MT-32 also needs munt's library (`libmt32emu`) on the system.
+The Roland Sound Canvas (`midisynth=sc55`) finds its ROMs in a `sc55-roms`
+folder of the system directory or of its `rust-dos` folder, by their contents
+(zip archives too); the core doesn't download them.
 
 The settings window (**Ctrl+F12**, `DOSCONFIG` at the prompt, or **L3+R3** on
 the gamepad) is there too: F2 saves into `rust-dos.conf`, or into the game's
