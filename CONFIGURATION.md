@@ -767,8 +767,11 @@ manual=pool/Manual.pdf|Rule book
 manual=~/scans/pool-codewheel.png|Code wheel
 ```
 
-Relative paths are from the `games` folder. **Ins** in the list adds a file
-to the profile.
+Relative paths are from the `games` folder, and a path can go into a zip
+or 7z archive (`pool.zip/EXTRAS/Rules.pdf`). **Ins** in the list adds a
+file to the profile. A game played from a [package](GAME-PACKAGES.md) has
+the files in the package's `EXTRAS` folder too.
+[GAME-PACKAGES.md](GAME-PACKAGES.md) is a guide to manuals and packages.
 
 ## RetroAchievements
 
@@ -816,12 +819,16 @@ Dropping something onto the window uses it: a GOG game's folder or a DOSBox
 configuration file is [imported](#game-profiles) as a game and launched, a
 folder or hard disk image is mounted on the first free drive from D:, a CD
 image goes into the CD-ROM drive (or a new one), a floppy image into A:,
-and a program or batch file is started from its folder. A zip or 7z
-archive (or DOSBox Pure `.dosz`) becomes a game profile with the archive as
-C:, read where it is, its changes in the game's saves (see [Game
-profiles](#game-profiles)), and is launched: with a single program to
-start the game (setup and install programs aside), that program, else the
-prompt on C:. Dropping it again launches the same profile.
+and a program or batch file is started from its folder. A game's
+[package](GAME-PACKAGES.md), a zip or 7z archive (or DOSBox Pure `.dosz`)
+or a folder with a `rust-dos.conf` at its root, becomes a game profile
+with the package as C:, read where it is, its changes in the game's saves
+(see [Game profiles](#game-profiles)), and is launched. The package's
+`rust-dos.conf` gives the profile its settings, drives, manuals and
+commands, its paths from the package's root; without commands, a single
+program to start the game (setup and install programs aside) starts, else
+the prompt is left on C:. Dropping it again launches the same profile, and
+`--import` and the Games page's Import row take packages too.
 
 C: and the built-in Z: always exist, and so does X: with the Ultrasound
 patches unless the configuration moves or removes it. Mount more drives at
@@ -883,7 +890,9 @@ the others of its solid block). An archive whose files are all in one
 folder has that folder as the drive's root, and a `.dosz` with a
 `<parent>.parent` file in it has the parent archive's files under its own.
 An archive of a disk or CD image (its one CUE sheet or image, and no
-programs) mounts the image instead. An archive can't be written: without
+programs) mounts the image instead. A path into an archive
+(`game.zip/CD/GAME.CUE`, `game.zip/CD`) mounts the image or folder there,
+and a list of images can be in one archive. An archive can't be written: without
 `-overlay` the drive is read-only, and with it the changes go to its
 folder, a disk image too, copied there when it is mounted. A game
 profile's archives always get one (see [Game profiles](#game-profiles)).

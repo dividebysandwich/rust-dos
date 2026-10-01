@@ -56,7 +56,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   import of GOG and DOSBox games; a game's files stay as installed, its
   saves and changes in a folder of their own, and a reset takes it back
 * **Manuals and extras:** a game's PDF manual, code wheel and maps shown
-  over the picture (Ctrl+Shift+M), for its copy protection
+  over the picture (Ctrl+Shift+M), for its copy protection, and game
+  packages: one zip with the game, its CD, settings and manuals
+  ([GAME-PACKAGES.md](GAME-PACKAGES.md))
 * **[Save states](#save-states)** (nine slots per game) and rewind
 * **Cheats:** find a game's values in memory, and change or freeze them
 * **[RetroAchievements](CONFIGURATION.md#retroachievements):**
