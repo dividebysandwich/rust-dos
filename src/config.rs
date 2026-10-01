@@ -165,6 +165,9 @@ pub struct Config {
     pub keyboard_layout: Option<LayoutSetting>,
     /// The mouse captured by itself (`mouse_autocapture`).
     pub mouse_autocapture: Option<bool>,
+    /// The messages that say the mouse was captured or let go
+    /// (`mouse_capture_messages`).
+    pub mouse_capture_messages: Option<bool>,
     /// Rewind (`rewind`), and the memory its states may take in MB
     /// (`rewind_memory`).
     pub rewind: Option<bool>,
@@ -780,6 +783,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(core) => config.core = Some(core),
                             Err(e) => warn(e),
                         },
+                        "mouse_capture_messages" => match parse_bool(value) {
+                            Some(on) => config.mouse_capture_messages = Some(on),
+                            None => warn(format!("invalid mouse_capture_messages '{}' (true or false)", value)),
+                        },
                         "mouse_autocapture" => match parse_bool(value) {
                             Some(on) => config.mouse_autocapture = Some(on),
                             None => warn(format!("invalid mouse_autocapture '{}' (true or false)", value)),
@@ -1091,6 +1098,8 @@ pub struct Settings {
     /// uses the mouse driver, and let go as the program's cursor leaves
     /// the screen.
     pub mouse_autocapture: bool,
+    /// Say over the picture when the mouse is captured or let go.
+    pub mouse_capture_messages: bool,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
     pub rewind_memory: usize,
@@ -1137,6 +1146,7 @@ impl Default for Settings {
             boot_cdrom: true,
             keyboard_layout: LayoutSetting::Auto,
             mouse_autocapture: true,
+            mouse_capture_messages: true,
             rewind: false,
             rewind_memory: 256,
             sound: SoundConfig::default(),
@@ -1203,6 +1213,7 @@ impl Settings {
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             boot_cdrom: config.boot_cdrom.unwrap_or(default.boot_cdrom),
             mouse_autocapture: config.mouse_autocapture.unwrap_or(default.mouse_autocapture),
+            mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
@@ -1273,6 +1284,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
         (Emulator, "mouse_autocapture", yes_no(settings.mouse_autocapture)),
+        (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
@@ -2223,6 +2235,7 @@ mod tests {
             boot_cdrom: false,
             keyboard_layout: LayoutSetting::Named("gr"),
             mouse_autocapture: false,
+            mouse_capture_messages: false,
             rewind: true,
             rewind_memory: 512,
             sound,

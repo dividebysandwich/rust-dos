@@ -360,6 +360,15 @@ fn main() -> Result<(), String> {
             auto_capture.captured &= on;
         }};
     }
+    // What says the mouse was captured or let go, unless the settings
+    // turn it off.
+    macro_rules! capture_message {
+        ($text:expr) => {
+            if settings.mouse_capture_messages {
+                osd.show($text);
+            }
+        };
+    }
     // Let the mouse go with the host's pointer over the program's cursor,
     // put there while the pointer is still locked so that Wayland takes
     // it as where to leave it.
@@ -660,7 +669,7 @@ fn main() -> Result<(), String> {
                             if !mouse_captured {
                                 auto_capture.released();
                             }
-                            osd.show(if mouse_captured { CAPTURED } else { "Mouse released" });
+                            capture_message!(if mouse_captured { CAPTURED } else { "Mouse released" });
                         }
                         continue;
                     }
@@ -801,7 +810,7 @@ fn main() -> Result<(), String> {
                         if !mouse_captured {
                             auto_capture.released();
                         }
-                        osd.show(if mouse_captured { CAPTURED } else { "Mouse released (Ctrl+Alt captures it)" });
+                        capture_message!(if mouse_captured { CAPTURED } else { "Mouse released (Ctrl+Alt captures it)" });
                     }
                     if keycode == Keycode::F12 && pacer.fast_forward() {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
@@ -884,7 +893,7 @@ fn main() -> Result<(), String> {
                     } else if !ui.is_open() && !paused {
                         if cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use() {
                             capture_mouse!(true);
-                            osd.show(CAPTURED);
+                            capture_message!(CAPTURED);
                         } else {
                             let (vx, vy) = video::overlay::frame_to_mouse(&cpu.bus, &cached_frame, display.to_frame(x, y));
                             cpu.bus.mouse.set_position(vx, vy);
@@ -933,7 +942,7 @@ fn main() -> Result<(), String> {
                         if auto_capture.armed && focused && follows_cursor!() {
                             capture_mouse!(true);
                             auto_capture.captured = true;
-                            osd.show(CAPTURED);
+                            capture_message!(CAPTURED);
                         }
                     }
                 }
@@ -946,7 +955,7 @@ fn main() -> Result<(), String> {
                     if !mouse_captured && (cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use()) {
                         capture_mouse!(true);
                         capturing_click = Some(mouse_btn);
-                        osd.show(CAPTURED);
+                        capture_message!(CAPTURED);
                         continue;
                     }
                     if !mouse_captured {

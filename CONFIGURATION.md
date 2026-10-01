@@ -265,6 +265,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   characters of the keys, and dead keys put their accents on the next
   letter. Characters code page 437 doesn't have (€, ø) type nothing.
   `KEYB` at the prompt changes it too.
+* `mouse_capture_messages` says over the picture when the mouse is
+  captured (and that Ctrl+Alt lets it go) or let go: `true` (the default)
+  or `false`.
 * `mouse_autocapture` captures the mouse as it moves over the focused
   window while a program uses the mouse driver (INT 33h), and lets it go
   as the program's cursor reaches the edge of the screen and the mouse

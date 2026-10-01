@@ -158,6 +158,9 @@
 # be. Without it a click, Ctrl+Alt or Ctrl+F10 captures the mouse. true
 # (the default) or false.
 #mouse_autocapture=true
+# Say over the picture when the mouse is captured or let go: true (the
+# default) or false.
+#mouse_capture_messages=true
 # Rewind: holding Alt+F11 goes back in time, half a second a step. It keeps
 # the machine's states of the last minutes, which take memory and a little
 # of the host's time: true or false (the default).

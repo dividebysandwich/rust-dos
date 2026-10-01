@@ -297,6 +297,7 @@ impl Item {
             BootCdrom => "boot-cdrom",
             KeyboardLayout => "keyboard-layout",
             MouseAutocapture => "mouse-autocapture",
+            MouseCaptureMessages => "mouse-capture-messages",
             Rewind => "rewind",
             RewindMemory => "rewind-memory",
             SbType => "sb-type",

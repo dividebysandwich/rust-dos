@@ -195,7 +195,7 @@ The keyboard layout DOS types in. **auto** takes your computer's layout.
 Pick one if the characters come out wrong. `KEYB` at the prompt changes
 it too.
 
-# Capture the mouse by itself {#mouse-autocapture}
+# Mouse auto capture {#mouse-autocapture}
 
 When **on**, the mouse goes to the game as soon as you move it over the
 window, if the game uses the mouse, and comes back to your desktop when
@@ -204,6 +204,12 @@ Games that steer with the mouse keep it until you press **Ctrl+Alt**.
 
 Turn it **off** to capture the mouse only with a click, **Ctrl+Alt** or
 **Ctrl+F10**.
+
+# Mouse capture messages {#mouse-capture-messages}
+
+When **on**, a short message over the picture says when the mouse is
+captured, and that **Ctrl+Alt** lets it go, or when it is let go. Turn it
+**off** to capture and let go of the mouse quietly.
 
 # Rewind (Alt+F11) {#rewind}
 
