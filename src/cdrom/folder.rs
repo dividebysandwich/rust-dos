@@ -12,6 +12,7 @@
 
 use super::DATA_SECTOR;
 use crate::diskimage::MemoryImage;
+use crate::hostfs;
 use chrono::{DateTime, Datelike, Local, Offset, Timelike};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -80,14 +81,14 @@ enum Tree {
 
 /// Make the disc for the folder `root`, labelled `label`.
 pub fn build(root: &Path, label: &str) -> Result<FolderImage, String> {
-    let meta = std::fs::metadata(root).map_err(|e| format!("{}: {}", root.display(), e))?;
-    if !meta.is_dir() {
+    let meta = hostfs::metadata(root).map_err(|e| format!("{}: {}", root.display(), e))?;
+    if !meta.is_dir {
         return Err(format!("{} is not a folder", root.display()));
     }
     let mut dirs = vec![Dir {
         primary: String::new(),
         joliet: Vec::new(),
-        time: record_time(meta.modified().ok()),
+        time: record_time(meta.modified),
         parent: 0,
         dirs: Vec::new(),
         files: Vec::new(),
@@ -96,7 +97,7 @@ pub fn build(root: &Path, label: &str) -> Result<FolderImage, String> {
     }];
     let mut skipped = Vec::new();
     let mut seen = HashSet::new();
-    if let Ok(canonical) = root.canonicalize() {
+    if let Ok(canonical) = hostfs::canonicalize(root) {
         seen.insert(canonical);
     }
     read_folder(&mut dirs, 0, root, 0, &mut seen, &mut skipped);
@@ -180,27 +181,27 @@ pub fn build(root: &Path, label: &str) -> Result<FolderImage, String> {
 
 /// Add the contents of the host folder `path` to directory `d`.
 fn read_folder(dirs: &mut Vec<Dir>, d: usize, path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, skipped: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(path) else {
+    let Ok(entries) = hostfs::read_dir(path) else {
         skipped.push(format!("{}: can't be read", path.display()));
         return;
     };
-    let mut entries: Vec<(String, PathBuf, std::fs::Metadata)> = entries
-        .flatten()
+    let mut entries: Vec<(String, PathBuf, hostfs::Meta)> = entries
+        .into_iter()
         .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
+            let name = e.name.to_string_lossy().into_owned();
             // Follows symbolic links.
-            let meta = std::fs::metadata(e.path()).ok()?;
-            Some((name, e.path(), meta))
+            let meta = e.metadata().ok()?;
+            Some((name, e.path, meta))
         })
         .filter(|(name, _, _)| name != "." && name != "..")
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries.retain(|(_, path, meta)| {
-        if meta.is_file() && meta.len() > MAX_FILE {
+        if meta.is_file() && meta.len > MAX_FILE {
             skipped.push(format!("{}: 4 GB or more doesn't fit a CD file", path.display()));
             return false;
         }
-        meta.is_file() || meta.is_dir()
+        meta.is_file() || meta.is_dir
     });
     // The names are unique among the files and directories together.
     let hosts: Vec<&str> = entries.iter().map(|(name, _, _)| name.as_str()).collect();
@@ -208,14 +209,14 @@ fn read_folder(dirs: &mut Vec<Dir>, d: usize, path: &Path, depth: usize, seen: &
     let joliets = joliet_names(&hosts);
     let mut subdirs = Vec::new();
     for (((_, path, meta), primary), joliet) in entries.into_iter().zip(primaries).zip(joliets) {
-        let time = record_time(meta.modified().ok());
-        if meta.is_dir() {
+        let time = record_time(meta.modified);
+        if meta.is_dir {
             if depth + 1 >= MAX_DEPTH {
                 skipped.push(format!("{}: too deep", path.display()));
                 continue;
             }
             // A link back up would go on forever.
-            if let Ok(canonical) = path.canonicalize()
+            if let Ok(canonical) = hostfs::canonicalize(&path)
                 && !seen.insert(canonical)
             {
                 skipped.push(format!("{}: a folder already on the disc", path.display()));
@@ -227,7 +228,7 @@ fn read_folder(dirs: &mut Vec<Dir>, d: usize, path: &Path, depth: usize, seen: &
             subdirs.push((child, path));
         } else {
             let primary = if primary.contains('.') { format!("{};1", primary) } else { format!("{}.;1", primary) };
-            dirs[d].files.push(File { primary, joliet, len: meta.len(), time, path, lba: 0 });
+            dirs[d].files.push(File { primary, joliet, len: meta.len, time, path, lba: 0 });
         }
     }
     for (child, path) in subdirs {
@@ -546,7 +547,7 @@ impl FolderImage {
 /// The host files a folder's disc read last, kept open.
 #[derive(Default)]
 pub struct OpenFiles {
-    files: Vec<(PathBuf, std::fs::File)>,
+    files: Vec<(PathBuf, hostfs::File)>,
 }
 
 impl OpenFiles {
@@ -557,7 +558,7 @@ impl OpenFiles {
         let index = match self.files.iter().position(|(p, _)| p == path) {
             Some(i) => i,
             None => {
-                let Ok(file) = std::fs::File::open(path) else { return };
+                let Ok(file) = hostfs::File::open(path) else { return };
                 if self.files.len() >= Self::KEEP {
                     self.files.remove(0);
                 }

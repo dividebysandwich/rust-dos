@@ -3,7 +3,7 @@
 //! frontend's keyboard, mouse and gamepads fed in.
 
 use std::collections::HashMap;
-use std::fs;
+use rust_dos::hostfs as fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -258,7 +258,7 @@ impl Core {
             None => "none".to_string(),
         };
         let mut notes = vec![format!("Content: {}", content)];
-        if m.base.file.is_file() {
+        if fs::is_file(&m.base.file) {
             notes.push(format!("Config file: {}", rust_dos::mount::display_host_path(&m.base.file)));
         }
         video::print_banner(&mut m.cpu, &notes);

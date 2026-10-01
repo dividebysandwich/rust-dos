@@ -267,7 +267,7 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
             let paths = PathContext { base: working_dir, config_dir: None, home, locate: &locate };
             match parse_mount_tokens(&tokens[1..], &paths) {
                 Ok(MountCmd::Mount(spec)) => {
-                    if !spec.path.is_file() {
+                    if !crate::hostfs::is_file(&spec.path) {
                         roots.push((spec.drive, spec.path.clone()));
                     }
                     imported.drives.retain(|d| d.drive != spec.drive);
@@ -328,7 +328,7 @@ fn image_path(token: &str, bases: &[PathBuf], roots: &[(u8, PathBuf)]) -> PathBu
 /// first.
 fn resolve(bases: &[PathBuf], rel: &str) -> PathBuf {
     let candidates = bases.iter().map(|base| host_path(base, rel));
-    candidates.clone().find(|p| p.exists()).or_else(|| candidates.clone().next()).unwrap_or_else(|| PathBuf::from(rel))
+    candidates.clone().find(|p| crate::hostfs::exists(p)).or_else(|| candidates.clone().next()).unwrap_or_else(|| PathBuf::from(rel))
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 //! disk's from the mount options, its partition table or boot sector.
 
 use std::cell::{Cell, Ref, RefCell};
-use std::fs::{File, OpenOptions};
+use crate::hostfs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -107,7 +107,7 @@ pub fn detect(path: &Path, requested: DriveKind) -> Result<ImageKind, String> {
         return Ok(kind);
     }
     let mut file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    let len = file.len().map_err(|e| e.to_string())?;
     let mut boot = [0u8; SECTOR_SIZE];
     let boot = file.read_exact(&mut boot).is_ok().then_some(&boot[..]);
     if let Some(kind) = kind_by_contents(len, boot) {
@@ -437,7 +437,7 @@ impl DiskImage {
                 Err(_) => (File::open(path).map_err(error)?, false),
             }
         };
-        let len = file.metadata().map_err(error)?.len();
+        let len = file.len().map_err(error)?;
         Self::new(path, Backing::File(file), len, floppy, geometry, writable)
     }
 
@@ -714,7 +714,7 @@ impl DiskImage {
         let partial = dest.with_extension("partial");
         match &self.backing {
             Backing::File(_) => {
-                std::fs::copy(&self.path, &partial).map_err(error)?;
+                hostfs::copy(&self.path, &partial).map_err(error)?;
             }
             Backing::Memory { data, .. } => {
                 // Pieces of zeros are holes in the file where it can have
@@ -737,7 +737,7 @@ impl DiskImage {
     fn replace_from(&self, copy: &Path) -> Result<(), String> {
         let error = |e: std::io::Error| format!("{}: {}", copy.display(), e);
         let mut source = File::open(copy).map_err(error)?;
-        let len = source.metadata().map_err(error)?.len();
+        let len = source.len().map_err(error)?;
         if len.div_ceil(SECTOR_SIZE as u64) != self.sectors {
             return Err(format!("{} isn't the size of the disk", copy.display()));
         }

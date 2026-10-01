@@ -4,7 +4,7 @@
 
 use super::{Imported, dosbox, host_path};
 use serde_json::Value;
-use std::fs;
+use crate::hostfs as fs;
 use std::path::{Path, PathBuf};
 
 /// The `goggame-*.info` of the install in `dir`: there, in its `app`
@@ -15,12 +15,12 @@ pub fn find_info(dir: &Path) -> Option<PathBuf> {
         let mut next = Vec::new();
         for d in &level {
             let Ok(entries) = fs::read_dir(d) else { continue };
-            let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            let mut entries: Vec<_> = entries.into_iter().map(|e| e.path).collect();
             entries.sort();
             if let Some(info) = entries.iter().find(|p| is_info(p)) {
                 return Some(info.clone());
             }
-            next.extend(entries.into_iter().filter(|p| p.is_dir()));
+            next.extend(entries.into_iter().filter(|p| fs::is_dir(p)));
         }
         level = next;
     }
@@ -29,7 +29,7 @@ pub fn find_info(dir: &Path) -> Option<PathBuf> {
 
 fn is_info(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    name.starts_with("goggame-") && name.ends_with(".info") && path.is_file()
+    name.starts_with("goggame-") && name.ends_with(".info") && fs::is_file(path)
 }
 
 /// The DOSBox configuration files of a folder without a GOG info file, in
@@ -41,8 +41,7 @@ fn conf_files(dir: &Path) -> Vec<PathBuf> {
     let confs: Vec<PathBuf> = fs::read_dir(dir)
         .into_iter()
         .flatten()
-        .flatten()
-        .map(|e| e.path())
+        .map(|e| e.path)
         .filter(|p| {
             let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             name.starts_with("dosbox") && name.ends_with(".conf")
@@ -61,7 +60,7 @@ fn conf_files(dir: &Path) -> Vec<PathBuf> {
 pub fn with_base(conf: &Path) -> Vec<PathBuf> {
     let name = conf.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let base = name.rsplit_once('_').map(|(stem, _)| conf.with_file_name(format!("{}.conf", stem)));
-    match base.filter(|b| b.is_file() && b.as_path() != conf) {
+    match base.filter(|b| fs::is_file(b) && b.as_path() != conf) {
         Some(base) => vec![base, conf.to_path_buf()],
         None => vec![conf.to_path_buf()],
     }
@@ -149,6 +148,7 @@ fn import_confs(confs: &[PathBuf], bases: &[PathBuf], name: &str, commands: &[St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from("target/test_import_gog").join(name);

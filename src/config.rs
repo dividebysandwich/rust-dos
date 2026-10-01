@@ -1610,7 +1610,7 @@ pub fn save(
     let original = read_or_template(path)?;
     let text = match saving {
         Saving::All => {
-            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            let absolute = crate::hostfs::absolute(path).unwrap_or_else(|_| path.to_path_buf());
             let base_dir = absolute.parent().unwrap_or(Path::new(""));
             complete_text(&original, base_dir, baseline, settings, drives, home)
         }
@@ -1692,7 +1692,7 @@ pub fn save_autoexec(path: &Path, autoexec: &[String]) -> Result<(), String> {
 /// The text of the configuration file at `path`, or the template's if it
 /// isn't there yet.
 fn read_or_template(path: &Path) -> Result<String, String> {
-    match fs::read_to_string(path) {
+    match crate::hostfs::read_to_string(path) {
         Ok(text) => Ok(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TEMPLATE.to_string()),
         Err(e) => Err(format!("cannot read {}: {}", path.display(), e)),
@@ -1700,8 +1700,12 @@ fn read_or_template(path: &Path) -> Result<String, String> {
 }
 
 /// Replace the file at `path` with `text` in one step, so a failed write
-/// leaves the old one.
+/// leaves the old one. Where the frontend keeps the files (`hostfs`), it
+/// is written as it is.
 fn replace_file(path: &Path, text: &str) -> Result<(), String> {
+    if crate::hostfs::is_foreign(path) {
+        return crate::hostfs::write(path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e));
+    }
     // Write through a symbolic link rather than replacing it, and keep the
     // file's permissions.
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

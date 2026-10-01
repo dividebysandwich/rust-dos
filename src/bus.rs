@@ -555,7 +555,7 @@ impl Bus {
         // A folder mounted on the letter of a booted system's CD-ROM drive
         // goes in as a disc made from it.
         let mut opts = opts;
-        if self.boot.is_some() && path.is_dir() && self.booted_cd_drive() == Some(drive) {
+        if self.boot.is_some() && crate::hostfs::is_dir(path) && self.booted_cd_drive() == Some(drive) {
             opts.kind = DriveKind::CdRom;
         }
         let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace))?;

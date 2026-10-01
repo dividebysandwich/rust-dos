@@ -28,6 +28,7 @@
 
 use crate::config::{self, DriveChange, Settings};
 use crate::cpu::Cpu;
+use crate::hostfs;
 use crate::mount::MountSpec;
 use std::path::Path;
 
@@ -210,14 +211,14 @@ pub fn achievements_hash(value: &str, dir: &Path, home: Option<&Path>) -> Result
 /// The profiles in the directory `dir`: each one's entry and text, by
 /// name.
 pub fn list(dir: &Path) -> Vec<(GameEntry, String)> {
-    let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(read) = hostfs::read_dir(dir) else { return Vec::new() };
     let mut games: Vec<(GameEntry, String)> = read
-        .flatten()
+        .into_iter()
         .filter_map(|e| {
-            let path = e.path();
+            let path = e.path;
             let is_conf = path.extension().is_some_and(|x| x.eq_ignore_ascii_case("conf"));
             let id = path.file_stem()?.to_str()?.to_string();
-            let text = if is_conf { std::fs::read_to_string(&path).ok()? } else { return None };
+            let text = if is_conf { hostfs::read_to_string(&path).ok()? } else { return None };
             Some((entry(&id, &text), text))
         })
         .collect();
@@ -247,9 +248,9 @@ pub fn prompt_directory(cpu: &Cpu) -> String {
 /// and what of the configuration didn't come across.
 pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String, String, Vec<String>), String> {
     // The profile's paths are absolute: it lives in another folder.
-    let source = std::fs::canonicalize(source).map_err(|e| format!("{}: {}", source.display(), e))?;
+    let source = hostfs::canonicalize(source).map_err(|e| format!("{}: {}", source.display(), e))?;
     let source = source.as_path();
-    let imported = if source.is_dir() {
+    let imported = if hostfs::is_dir(source) {
         crate::import::gog::import(source, home)?
     } else {
         crate::import::gog::import_conf(source, home)?
@@ -257,8 +258,8 @@ pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String,
     let taken: Vec<String> = list(dir).into_iter().map(|(e, _)| e.id).collect();
     let id = slug(&imported.name, &taken);
     let path = dir.join(format!("{}.conf", id));
-    std::fs::create_dir_all(dir)
-        .and_then(|()| std::fs::write(&path, imported.profile_text(home)))
+    hostfs::create_dir_all(dir)
+        .and_then(|()| hostfs::write(&path, imported.profile_text(home)))
         .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
     Ok((id, imported.name, imported.warnings))
 }
@@ -268,13 +269,13 @@ pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String,
 /// (`import::zip::start_program`) it gets a profile with the folder as C:,
 /// whose id and name come back; the folder comes back either way.
 pub fn unpack(dir: &Path, archive: &Path) -> Result<(std::path::PathBuf, Option<(String, String)>), String> {
-    let data = std::fs::read(archive).map_err(|e| format!("{}: {}", archive.display(), e))?;
+    let data = hostfs::read(archive).map_err(|e| format!("{}: {}", archive.display(), e))?;
     let name = archive.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
     // Neither a profile nor a folder there already.
     let taken: Vec<String> = list(dir)
         .into_iter()
         .map(|(e, _)| e.id)
-        .chain(std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()))
+        .chain(hostfs::read_dir(dir).into_iter().flatten().map(|e| e.name.to_string_lossy().to_lowercase()))
         .collect();
     let id = slug(&name, &taken);
     let folder = dir.join(&id);
@@ -286,7 +287,7 @@ pub fn unpack(dir: &Path, archive: &Path) -> Result<(std::path::PathBuf, Option<
     let hash = crate::achievements::hash::hash_archive(archive).map(|h| format!("achievements={}\n", h)).unwrap_or_default();
     let text = format!("[game]\nname={}\n{}\n[drives]\nC={}\n\n[autoexec]\nC:\n{}\n", name, hash, id, program);
     let path = dir.join(format!("{}.conf", id));
-    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+    hostfs::write(&path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
     Ok((folder, Some((id, name))))
 }
 

@@ -44,6 +44,12 @@ starts.
 | hard disk image (`.img`, `.vhd`, `.hdd`) | C: |
 | `.m3u` | a list of disk images for one drive: the first goes in, the frontend's *Disc Control* changes them |
 
+On Android, content from folders RetroArch reaches through the system's file
+picker (Storage Access Framework, `saf://` and `content://` paths) works
+through the frontend's file access (VFS): folders as C:, disk and CD images,
+archives and `rust-dos.conf` files. DOS sees the files there without their
+dates, and renaming a file there copies it.
+
 With the core option **Boot disk images**, floppy and hard disk images start
 from their boot sector (`BOOT`) instead, for systems such as Windows 95 and
 self-booting games.

@@ -5,7 +5,7 @@ use super::cue::{parse_cue, FileFormat, TrackMode};
 use super::{Extent, DATA_SECTOR, RAW_SECTOR};
 use crate::diskimage::MemoryImage;
 use std::cell::RefCell;
-use std::fs::{self, File};
+use crate::hostfs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -82,7 +82,7 @@ impl CdImage {
     }
 
     fn open_cue(path: &Path) -> Result<Self, String> {
-        let text = fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let text = hostfs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
         let sheet = parse_cue(&String::from_utf8_lossy(&text))?;
         let dir = path.parent().unwrap_or(Path::new("."));
 
@@ -301,7 +301,7 @@ impl Backing {
     fn open(path: &Path, format: FileFormat) -> Result<Self, String> {
         let error = |e: io::Error| format!("{}: {}", path.display(), e);
         let mut file = File::open(path).map_err(error)?;
-        let total = file.metadata().map_err(error)?.len();
+        let total = file.len().map_err(error)?;
         let (data_offset, len) = match format {
             // A WAVE file of CD audio is read as it is; any other (another
             // rate, or a compressed file the sheet calls WAVE, as many do)
@@ -421,14 +421,13 @@ fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     // made them.
     let name = name.rsplit(['\\', '/']).next().unwrap_or(name);
     let path = dir.join(name);
-    if path.is_file() {
+    if hostfs::is_file(&path) {
         return Ok(path);
     }
-    fs::read_dir(dir)
+    hostfs::read_dir(dir)
         .into_iter()
         .flatten()
-        .flatten()
-        .map(|entry| entry.path())
+        .map(|entry| entry.path)
         .find(|p| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name)))
         .ok_or_else(|| format!("{} not found", path.display()))
 }
@@ -436,6 +435,7 @@ fn find_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from("target/test_cdimage").join(name);

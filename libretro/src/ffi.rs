@@ -37,6 +37,7 @@ pub const RETRO_ENVIRONMENT_SET_CONTROLLER_INFO: u32 = 35;
 pub const RETRO_ENVIRONMENT_SET_MEMORY_MAPS: u32 = 36 | RETRO_ENVIRONMENT_EXPERIMENTAL;
 pub const RETRO_ENVIRONMENT_SET_GEOMETRY: u32 = 37;
 pub const RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS: u32 = 42 | RETRO_ENVIRONMENT_EXPERIMENTAL;
+pub const RETRO_ENVIRONMENT_GET_VFS_INTERFACE: u32 = 45 | RETRO_ENVIRONMENT_EXPERIMENTAL;
 pub const RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION: u32 = 52;
 pub const RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION: u32 = 57;
 pub const RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE: u32 = 58;
@@ -331,4 +332,62 @@ pub struct retro_disk_control_ext_callback {
     pub set_initial_image: unsafe extern "C" fn(index: u32, path: *const c_char) -> bool,
     pub get_image_path: unsafe extern "C" fn(index: u32, s: *mut c_char, len: usize) -> bool,
     pub get_image_label: unsafe extern "C" fn(index: u32, s: *mut c_char, len: usize) -> bool,
+}
+
+// The frontend's files (VFS), version 3.
+pub const RETRO_VFS_FILE_ACCESS_READ: u32 = 1 << 0;
+pub const RETRO_VFS_FILE_ACCESS_WRITE: u32 = 1 << 1;
+pub const RETRO_VFS_FILE_ACCESS_READ_WRITE: u32 = RETRO_VFS_FILE_ACCESS_READ | RETRO_VFS_FILE_ACCESS_WRITE;
+pub const RETRO_VFS_FILE_ACCESS_UPDATE_EXISTING: u32 = 1 << 2;
+pub const RETRO_VFS_FILE_ACCESS_HINT_NONE: u32 = 0;
+pub const RETRO_VFS_SEEK_POSITION_START: i32 = 0;
+pub const RETRO_VFS_SEEK_POSITION_CURRENT: i32 = 1;
+pub const RETRO_VFS_SEEK_POSITION_END: i32 = 2;
+pub const RETRO_VFS_STAT_IS_VALID: i32 = 1 << 0;
+pub const RETRO_VFS_STAT_IS_DIRECTORY: i32 = 1 << 1;
+pub const RETRO_VFS_STAT_IS_CHARACTER_SPECIAL: i32 = 1 << 2;
+
+#[repr(C)]
+pub struct retro_vfs_file_handle {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct retro_vfs_dir_handle {
+    _private: [u8; 0],
+}
+
+/// The functions of each version, those of the versions after it None (or
+/// garbage, so look at the version the frontend gave first).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct retro_vfs_interface {
+    // Version 1.
+    pub get_path: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle) -> *const c_char>,
+    pub open: Option<unsafe extern "C" fn(path: *const c_char, mode: u32, hints: u32) -> *mut retro_vfs_file_handle>,
+    pub close: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle) -> i32>,
+    pub size: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle) -> i64>,
+    pub tell: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle) -> i64>,
+    pub seek: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle, offset: i64, seek_position: i32) -> i64>,
+    pub read: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle, s: *mut c_void, len: u64) -> i64>,
+    pub write: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle, s: *const c_void, len: u64) -> i64>,
+    pub flush: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle) -> i32>,
+    pub remove: Option<unsafe extern "C" fn(path: *const c_char) -> i32>,
+    pub rename: Option<unsafe extern "C" fn(old_path: *const c_char, new_path: *const c_char) -> i32>,
+    // Version 2.
+    pub truncate: Option<unsafe extern "C" fn(stream: *mut retro_vfs_file_handle, length: i64) -> i64>,
+    // Version 3.
+    pub stat: Option<unsafe extern "C" fn(path: *const c_char, size: *mut i32) -> i32>,
+    pub mkdir: Option<unsafe extern "C" fn(dir: *const c_char) -> i32>,
+    pub opendir: Option<unsafe extern "C" fn(dir: *const c_char, include_hidden: bool) -> *mut retro_vfs_dir_handle>,
+    pub readdir: Option<unsafe extern "C" fn(dirstream: *mut retro_vfs_dir_handle) -> bool>,
+    pub dirent_get_name: Option<unsafe extern "C" fn(dirstream: *mut retro_vfs_dir_handle) -> *const c_char>,
+    pub dirent_is_dir: Option<unsafe extern "C" fn(dirstream: *mut retro_vfs_dir_handle) -> bool>,
+    pub closedir: Option<unsafe extern "C" fn(dirstream: *mut retro_vfs_dir_handle) -> i32>,
+}
+
+#[repr(C)]
+pub struct retro_vfs_interface_info {
+    pub required_interface_version: u32,
+    pub iface: *mut retro_vfs_interface,
 }

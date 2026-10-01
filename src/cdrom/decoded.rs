@@ -8,7 +8,7 @@
 //! read further back, or far ahead, seeks in the file first.
 
 use std::collections::VecDeque;
-use std::fs::File;
+use crate::hostfs::File;
 use std::path::{Path, PathBuf};
 
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -59,10 +59,35 @@ struct Opened {
     num_frames: Option<u64>,
 }
 
+/// A file, as symphonia reads it.
+struct Source(File);
+
+impl std::io::Read for Source {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Seek for Source {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl symphonia::core::io::MediaSource for Source {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.0.len().ok()
+    }
+}
+
 fn open_file(path: &Path) -> Result<Opened, String> {
     let error = |e: Error| format!("{}: {}", path.display(), e);
     let file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    let stream = MediaSourceStream::new(Box::new(Source(file)), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);

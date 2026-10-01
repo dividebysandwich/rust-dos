@@ -9,7 +9,6 @@ pub mod gog;
 pub mod zip;
 
 use crate::mount::{MountSpec, mount_spec_value};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A game as an imported configuration has it, for a profile.
@@ -68,7 +67,7 @@ pub fn host_path(base: &Path, rel: &str) -> PathBuf {
     let rel = rel.trim().trim_matches('"');
     let normalized = rel.replace('\\', "/");
     let path = Path::new(&normalized);
-    if path.is_absolute() {
+    if path.is_absolute() || crate::hostfs::has_scheme(path) {
         return path.to_path_buf();
     }
     let mut out = base.to_path_buf();
@@ -78,16 +77,15 @@ pub fn host_path(base: &Path, rel: &str) -> PathBuf {
             continue;
         }
         let exact = out.join(part);
-        if exact.exists() {
+        if crate::hostfs::exists(&exact) {
             out = exact;
             continue;
         }
-        let found = fs::read_dir(&out)
+        let found = crate::hostfs::read_dir(&out)
             .into_iter()
             .flatten()
-            .flatten()
-            .find(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(part))
-            .map(|entry| entry.path());
+            .find(|entry| entry.name.to_string_lossy().eq_ignore_ascii_case(part))
+            .map(|entry| entry.path);
         out = found.unwrap_or(exact);
     }
     out

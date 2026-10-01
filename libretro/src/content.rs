@@ -3,7 +3,7 @@
 //! at the prompt. And the settings themselves, in layers: the built-in
 //! defaults, rust-dos.conf, the core options, then the content's own.
 
-use std::fs;
+use rust_dos::hostfs as fs;
 use std::path::{Path, PathBuf};
 
 use rust_dos::config::{self, Settings};
@@ -244,7 +244,7 @@ fn images(images: Vec<PathBuf>, boot: bool, dirs: &Dirs, plan: &mut Plan) -> Res
 pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, String> {
     let mut plan = Plan { c_root: dirs.drive_c(), ..Plan::default() };
     let Some(path) = content else { return Ok(plan) };
-    let path = std::path::absolute(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let path = fs::absolute(path).map_err(|e| format!("{}: {}", path.display(), e))?;
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if ext == "m3u" || ext == "m3u8" {
         images(playlist(&path)?, boot, dirs, &mut plan)?;
@@ -266,7 +266,7 @@ pub fn plan(content: Option<&Path>, dirs: &Dirs, boot: bool) -> Result<Plan, Str
         return Ok(plan);
     }
     match drop_action(&path) {
-        DropAction::ImportGame(source) if path.is_dir() && !path.join("rust-dos.conf").is_file() => {
+        DropAction::ImportGame(source) if fs::is_dir(&path) && !fs::is_file(path.join("rust-dos.conf")) => {
             plan.profile = Some(imported(dirs, &source)?);
         }
         DropAction::ImportGame(_) | DropAction::MountFolder(_) => {
@@ -301,7 +301,7 @@ fn unpacked(dirs: &Dirs, archive: &Path, plan: &mut Plan) -> Result<(), String> 
     let stem = archive.file_stem().map_or("Game".into(), |n| n.to_string_lossy().into_owned());
     let mut id = games::slug(&stem, &[]);
     let mut folder = games_dir.join(&id);
-    if !folder.is_dir() {
+    if !fs::is_dir(&folder) {
         let (unpacked, profile) = games::unpack(&games_dir, archive)?;
         plan.notes.push(format!("Unpacked {} into {}", archive.display(), unpacked.display()));
         folder = unpacked;
@@ -326,6 +326,7 @@ fn without_autoexec(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-content").join(name);

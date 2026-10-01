@@ -1,7 +1,6 @@
 use chrono::{DateTime, Datelike, Local, Timelike};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -10,6 +9,7 @@ use crate::cdrom::image::CdImage;
 use crate::cdrom::Extent;
 use crate::diskimage::{self, Chs, DiskImage, ImageKind, MemoryImage};
 use crate::fat::{self, EntryRef, FatVolume};
+use crate::hostfs::{self, File, OpenOptions};
 use crate::memfs::{Bytes, MemFs, Node};
 use crate::mount::MountSpec;
 
@@ -585,7 +585,7 @@ impl FileData {
     /// The whole file.
     pub fn read(&self) -> std::io::Result<Bytes> {
         match self {
-            FileData::Host(path) => fs::read(path).map(Bytes::Owned),
+            FileData::Host(path) => hostfs::read(path).map(Bytes::Owned),
             FileData::Memory(data) => Ok(data.clone()),
             FileData::Image(image, extent) => {
                 let mut data = vec![0u8; extent.size as usize];
@@ -707,15 +707,15 @@ impl DiskController {
     /// Z: drive. C: and Z: are always present; everything else is mounted.
     pub fn new(root_path: PathBuf) -> Self {
         // Ensure root path exists
-        if !root_path.exists() {
+        if !hostfs::exists(&root_path) {
             println!(
                 "[DISK] Warning: Root path {:?} does not exist. Creating it.",
                 root_path
             );
-            let _ = fs::create_dir_all(&root_path);
+            let _ = hostfs::create_dir_all(&root_path);
         }
 
-        let canonical = fs::canonicalize(&root_path).unwrap_or_else(|_| root_path.clone());
+        let canonical = hostfs::canonicalize(&root_path).unwrap_or_else(|_| root_path.clone());
 
         // COMMAND.COM on Z:, which programs run to shell out.
         let mut z_files = MemFs::new();
@@ -833,13 +833,13 @@ impl DiskController {
             return Err(format!("Drive {} is a floppy drive and can't be a CD-ROM", name));
         }
         let spec = MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() };
-        if path.is_file() {
+        if hostfs::is_file(path) {
             let mut images = Vec::new();
             for image in std::iter::once(path).chain(opts.more_images.iter().map(PathBuf::as_path)) {
-                if !image.is_file() {
+                if !hostfs::is_file(image) {
                     return Err(format!("{} is not a disk or CD image", image.display()));
                 }
-                let canonical = fs::canonicalize(image).map_err(|e| e.to_string())?;
+                let canonical = hostfs::canonicalize(image).map_err(|e| e.to_string())?;
                 // Two drives on one image would each think they know
                 // what's on it.
                 let elsewhere = (0..DRIVE_SLOTS)
@@ -872,11 +872,11 @@ impl DiskController {
         if drive_number(drive).is_some() {
             return Err(format!("{} is not a disk image", path.display()));
         }
-        if !path.is_dir() {
+        if !hostfs::is_dir(path) {
             return Err(format!("{} is not a directory or a disk or CD image", path.display()));
         }
         let kind = if floppy_drive { DriveKind::Floppy } else { opts.kind };
-        let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        let canonical = hostfs::canonicalize(path).map_err(|e| e.to_string())?;
 
         self.close_drive_files(drive);
         self.drives[drive as usize] = Some(Drive {
@@ -1117,10 +1117,10 @@ impl DiskController {
     /// Add `path` to the end of the images of a drive mounted from images,
     /// for `select_image` or Ctrl+F4 to put in later.
     pub fn add_image(&mut self, drive: u8, path: &Path) -> Result<(), String> {
-        if !path.is_file() {
+        if !hostfs::is_file(path) {
             return Err(format!("{} is not a disk or CD image", path.display()));
         }
-        let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        let canonical = hostfs::canonicalize(path).map_err(|e| e.to_string())?;
         let elsewhere = (0..DRIVE_SLOTS).find(|&d| self.drive(d).is_some_and(|other| other.images.contains(&canonical)));
         if let Some(other) = elsewhere {
             return Err(format!("{} is already mounted as {}", path.display(), drive_name(other)));
@@ -1579,7 +1579,7 @@ impl DiskController {
     pub fn sft_entry(&self, sft: u16) -> Option<SftEntry> {
         let open = self.open_files.get(&sft)?;
         let size = match &open.data {
-            OpenData::Host(file) => file.metadata().map_or(0, |m| m.len()),
+            OpenData::Host(file) => file.len().unwrap_or(0),
             OpenData::Memory(data, _) => data.len() as u64,
             OpenData::Image(_, extent, _) => extent.size as u64,
             OpenData::Fat { volume, at, .. } => volume.reload(*at).map_or(0, |entry| entry.size as u64),
@@ -1807,7 +1807,7 @@ impl DiskController {
         if let Some(found) = self.find_fat(dos_path) {
             return found.is_ok_and(|e| !e.is_dir());
         }
-        self.is_virtual_file(dos_path) || self.resolve_path(dos_path).is_some_and(|p| p.is_file())
+        self.is_virtual_file(dos_path) || self.resolve_path(dos_path).is_some_and(|p| hostfs::is_file(&p))
     }
 
     /// Whether a DOS path names an existing directory, on any drive.
@@ -1817,7 +1817,7 @@ impl DiskController {
         }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => drive.tree().is_some_and(|files| files.is_dir(&path)),
-            None => self.resolve_path(dos_path).is_some_and(|p| p.is_dir()),
+            None => self.resolve_path(dos_path).is_some_and(|p| hostfs::is_dir(&p)),
         }
     }
 
@@ -1835,16 +1835,15 @@ impl DiskController {
         }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => FileData::of(drive.tree()?.file(&path)?, drive.image()),
-            None => self.resolve_path(dos_path).filter(|p| p.is_file()).map(FileData::Host),
+            None => self.resolve_path(dos_path).filter(|p| hostfs::is_file(p)).map(FileData::Host),
         }
     }
 
     /// The entries of a host directory with their DOS names (see
     /// `short_names`), in sorted order. Hidden (dot) files are left out.
     fn host_entries(dir: &Path) -> Vec<(String, String)> {
-        let mut names: Vec<String> = fs::read_dir(dir)
+        let mut names: Vec<String> = hostfs::read_dir(dir)
             .into_iter()
-            .flatten()
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| !name.starts_with('.'))
@@ -1907,7 +1906,7 @@ impl DiskController {
         // Resolve the new path to check existence, and keep it in short
         // names, as programs see it.
         match self.resolve_names_on(drive_num, rest) {
-            Some((host_path, dos_dir)) if host_path.is_dir() => {
+            Some((host_path, dos_dir)) if hostfs::is_dir(&host_path) => {
                 if let Some(d) = self.drives[drive_num as usize].as_mut() {
                     d.current_dir = dos_dir;
                 }
@@ -2063,7 +2062,7 @@ impl DiskController {
 
         let (drive, path) = self.locate(filename).ok_or(0x03)?; // Path not found
         // A directory (or a bare "D:") isn't a file: access denied.
-        if path.is_dir() {
+        if hostfs::is_dir(&path) {
             return Err(0x05);
         }
         let writable = self.is_writable(drive);
@@ -2151,15 +2150,15 @@ impl DiskController {
         }
         let (drive, path) = self.locate(dos_path).ok_or(0x03)?;
         self.check_writable(drive)?;
-        if path.is_dir() {
+        if hostfs::is_dir(&path) {
             return Err(0x05);
         }
-        if !path.parent().is_some_and(Path::is_dir) {
+        if !path.parent().is_some_and(hostfs::is_dir) {
             return Err(0x03);
         }
-        fs::write(&path, data).map_err(|_| 0x05)?;
+        hostfs::write(&path, data).map_err(|_| 0x05)?;
         if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
-            let _ = fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(when));
+            let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_modified(when));
         }
         Ok(())
     }
@@ -2179,11 +2178,11 @@ impl DiskController {
             return volume.remove(&parts);
         }
         let (drive, path) = self.locate(filename).ok_or(0x03)?;
-        if !path.is_file() {
+        if !hostfs::is_file(&path) {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;
-        fs::remove_file(path).map_err(|_| 0x05)
+        hostfs::remove_file(path).map_err(|_| 0x05)
     }
 
     /// INT 21h, AH=56h: rename or move a file within a drive.
@@ -2207,7 +2206,7 @@ impl DiskController {
             return volume.rename(&from_parts, &to_parts);
         }
         let (drive, source) = self.locate(from).ok_or(0x03)?;
-        if !source.exists() {
+        if !hostfs::exists(&source) {
             return Err(0x02);
         }
         self.check_writable(drive)?;
@@ -2222,20 +2221,20 @@ impl DiskController {
             None => (".", rest),
         };
         let parent = self.resolve_on(to_drive, parent_dos).ok_or(0x03)?;
-        if leaf.is_empty() || !parent.is_dir() {
+        if leaf.is_empty() || !hostfs::is_dir(&parent) {
             return Err(0x03);
         }
         if self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05); // Destination exists
         }
-        fs::rename(source, parent.join(leaf.to_uppercase())).map_err(|_| 0x05)
+        hostfs::rename(source, parent.join(leaf.to_uppercase())).map_err(|_| 0x05)
     }
 
     /// INT 21h, AX=5700h: the DOS time and date of a file's last change.
     pub fn file_time(&self, handle: u16) -> Result<(u16, u16), u8> {
         let open = self.open_files.get(&handle).ok_or(0x06)?;
         let modified = match &open.data {
-            OpenData::Host(f) => f.metadata().ok().and_then(|m| m.modified().ok()),
+            OpenData::Host(f) => f.modified(),
             OpenData::Memory(..) => return Ok((MEMORY_TIME, MEMORY_DATE)),
             OpenData::Image(_, extent, _) => return Ok((extent.time, extent.date)),
             OpenData::Fat { volume, at, .. } => {
@@ -2524,21 +2523,18 @@ impl DiskController {
         let mut used = 0u64;
         let mut pending = vec![root.to_path_buf()];
         while let Some(dir) = pending.pop() {
-            let Ok(read_dir) = fs::read_dir(&dir) else {
+            let Ok(read_dir) = hostfs::read_dir(&dir) else {
                 continue;
             };
-            for entry in read_dir.flatten() {
-                if entry.file_name().to_string_lossy().starts_with('.') {
+            for entry in read_dir {
+                if entry.name.to_string_lossy().starts_with('.') {
                     continue;
                 }
-                let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-                    continue;
-                };
-                if meta.is_dir() {
+                if entry.is_dir {
                     used += 1;
-                    pending.push(entry.path());
-                } else if meta.is_file() {
-                    used += meta.len().div_ceil(cluster_bytes);
+                    pending.push(entry.path);
+                } else if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
+                    used += meta.len.div_ceil(cluster_bytes);
                 }
                 if used >= cap {
                     return cap;
@@ -2564,12 +2560,12 @@ impl DiskController {
             return found.map(|e| e.attr as u16);
         }
         let (drive, path) = self.locate(filename).ok_or(0x03)?;
-        if !path.exists() {
+        if !hostfs::exists(&path) {
             return Err(0x02); // File Not Found
         }
 
         let mut attr: u16 = 0;
-        if path.is_dir() {
+        if hostfs::is_dir(&path) {
             attr |= 0x10; // Directory
         } else {
             attr |= 0x20; // Archive (standard file)
@@ -2577,7 +2573,7 @@ impl DiskController {
         // Reflect host read-only state into DOS R/O bit. On Unix, read-only means
         // no user-write permission. On Windows, the readonly flag. Everything
         // on read-only media is R/O too.
-        let host_ro = fs::metadata(&path).is_ok_and(|m| m.permissions().readonly());
+        let host_ro = hostfs::metadata(&path).is_ok_and(|m| m.readonly);
         if host_ro || !self.is_writable(drive) {
             attr |= 0x01;
         }
@@ -2596,17 +2592,15 @@ impl DiskController {
             return volume.set_attr(&parts, attr as u8);
         }
         let (drive, path) = self.locate(filename).ok_or(0x03)?;
-        if !path.exists() {
+        if !hostfs::exists(&path) {
             return Err(0x02);
         }
         self.check_writable(drive)?;
-        if let Ok(meta) = fs::metadata(&path) {
-            let mut perms = meta.permissions();
+        if let Ok(meta) = hostfs::metadata(&path) {
             let want_ro = (attr & 0x01) != 0;
-            if perms.readonly() != want_ro {
-                perms.set_readonly(want_ro);
+            if meta.readonly != want_ro {
                 // Ignore permission-set errors on systems where it's not supported.
-                let _ = fs::set_permissions(&path, perms);
+                let _ = hostfs::set_readonly(&path, want_ro);
             }
         }
         Ok(())
@@ -2635,18 +2629,18 @@ impl DiskController {
             return Err(0x03); // Path not found / invalid
         }
         let parent_path = self.resolve_on(drive, parent_dos).ok_or(0x03)?;
-        if !parent_path.is_dir() {
+        if !hostfs::is_dir(&parent_path) {
             return Err(0x03);
         }
         // Case-insensitive: MKDIR "Foo" should collide with existing "FOO".
         if let Some(existing) = self.find_existing_child(&parent_path, leaf) {
             let full = parent_path.join(existing);
-            if full.exists() {
+            if hostfs::exists(&full) {
                 return Err(0x05); // Access denied / already exists
             }
         }
         let target = parent_path.join(leaf.to_uppercase());
-        fs::create_dir(&target).map_err(|_| 0x05)
+        hostfs::create_dir(&target).map_err(|_| 0x05)
     }
 
     /// DOS AH=3Ah: Remove an empty directory.
@@ -2665,7 +2659,7 @@ impl DiskController {
             return volume.rmdir(&parts);
         }
         let (host_path, dos_form) = self.resolve_names_on(drive_num, rest).ok_or(0x03)?;
-        if !host_path.is_dir() {
+        if !hostfs::is_dir(&host_path) {
             return Err(0x03);
         }
         self.check_writable(drive_num)?;
@@ -2673,7 +2667,7 @@ impl DiskController {
         if self.drive(drive_num).is_some_and(|d| dos_form.eq_ignore_ascii_case(&d.current_dir)) {
             return Err(0x10);
         }
-        fs::remove_dir(&host_path).map_err(|e| match e.kind() {
+        hostfs::remove_dir(&host_path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
             _ => 0x05, // Access denied (e.g. not empty)
         })
@@ -2682,8 +2676,8 @@ impl DiskController {
     /// Case-insensitive lookup of a child by name in a host directory.
     fn find_existing_child(&self, parent: &Path, name: &str) -> Option<std::ffi::OsString> {
         let upper = name.to_uppercase();
-        if let Ok(entries) = fs::read_dir(parent) {
-            for e in entries.flatten() {
+        if let Ok(entries) = hostfs::read_dir(parent) {
+            for e in entries {
                 let fname = e.file_name();
                 if fname.to_string_lossy().to_uppercase() == upper {
                     return Some(fname);
@@ -2907,7 +2901,7 @@ impl DiskController {
         // Host Filesystem Listing
         let host_dir = self.resolve_on(drive_num, search_dir_str).ok_or(0x03)?;
 
-        if !host_dir.is_dir() {
+        if !hostfs::is_dir(&host_dir) {
             return Err(0x03);
         }
         let is_host_root = drive.host_root() == Some(host_dir.as_path());
@@ -2918,12 +2912,12 @@ impl DiskController {
         }
 
         for (original_name, final_name) in Self::host_entries(&host_dir) {
-            let Ok(metadata) = fs::metadata(host_dir.join(&original_name)) else {
+            let Ok(metadata) = hostfs::metadata(host_dir.join(&original_name)) else {
                 continue;
             };
 
-            let is_dir = metadata.is_dir();
-            let is_readonly = media_ro || metadata.permissions().readonly();
+            let is_dir = metadata.is_dir;
+            let is_readonly = media_ro || metadata.readonly;
             let mut file_attr: u8 = if is_dir { 0x10 } else { 0x20 };
             if is_readonly {
                 file_attr |= 0x01;
@@ -2937,11 +2931,11 @@ impl DiskController {
                 continue;
             }
 
-            let (dos_time, dos_date) = system_time_to_dos(metadata.modified().unwrap_or(std::time::SystemTime::now()));
+            let (dos_time, dos_date) = system_time_to_dos(metadata.modified.unwrap_or(std::time::SystemTime::now()));
 
             valid_entries.push(DosDirEntry {
                 filename: final_name,
-                size: metadata.len() as u32,
+                size: metadata.len as u32,
                 is_dir,
                 is_readonly,
                 dos_time,
@@ -2980,6 +2974,7 @@ pub fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// PSP that owns the files the tests open.
     const PSP: u16 = 0x1000;

@@ -17,6 +17,7 @@ mod keys;
 mod memmap;
 mod options;
 mod state;
+mod vfs;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -287,12 +288,14 @@ pub extern "C" fn retro_init() {
     if unsafe { cb.env(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &mut log as *mut _ as *mut c_void) } {
         set_callbacks(|cb| cb.log = log.log);
     }
+    vfs::install(&callbacks());
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_deinit() {
     CORE.with(|cell| cell.borrow_mut().take());
     KEYS.with(|keys| keys.borrow_mut().clear());
+    rust_dos::hostfs::set_backend(None);
 }
 
 /// The extensions of the content the core takes.

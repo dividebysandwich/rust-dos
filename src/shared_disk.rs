@@ -13,7 +13,7 @@
 use crate::diskimage::{Chs, DiskImage};
 use crate::fat::{Entry, FatVolume};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use crate::hostfs::{self as fs, Meta};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -97,9 +97,9 @@ impl SyncReport {
     }
 }
 
-fn host_stamp(meta: &fs::Metadata) -> HostStamp {
-    let modified = meta.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i128);
-    HostStamp { size: if meta.is_dir() { 0 } else { meta.len() }, modified }
+fn host_stamp(meta: &Meta) -> HostStamp {
+    let modified = meta.modified.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i128);
+    HostStamp { size: if meta.is_dir { 0 } else { meta.len }, modified }
 }
 
 fn fat_stamp(entry: &Entry) -> FatStamp {
@@ -122,12 +122,12 @@ fn host_path(root: &Path, key: &str) -> PathBuf {
 fn host_tree(root: &Path) -> BTreeMap<String, (bool, HostStamp)> {
     fn walk(dir: &Path, key: &str, depth: usize, out: &mut BTreeMap<String, (bool, HostStamp)>) {
         let Ok(entries) = fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        for entry in entries {
+            let Some(name) = entry.name.to_str().map(str::to_string) else { continue };
             // Follows symbolic links.
-            let Ok(meta) = fs::metadata(entry.path()) else { continue };
+            let Ok(meta) = entry.metadata() else { continue };
             let child = join(key, &name);
-            if meta.is_dir() {
+            if meta.is_dir {
                 out.insert(child.clone(), (true, host_stamp(&meta)));
                 if depth < MAX_DEPTH {
                     walk(&entry.path(), &child, depth + 1, out);
@@ -408,15 +408,17 @@ fn copy_in(volume: &FatVolume, at: crate::fat::EntryRef, path: &Path) -> Result<
 
 /// Write the disk's file `entry` to the host file `target`, through a
 /// file beside it that takes its place when it's whole, dated as on the
-/// disk.
+/// disk. Where the frontend keeps the files (`hostfs`), which may not
+/// rename, straight into `target`.
 fn copy_out(volume: &FatVolume, entry: &Entry, target: &Path) -> Result<(), String> {
     if let Some(dir) = target.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let partial = target.with_file_name(format!(
+    let direct = fs::is_foreign(target);
+    let partial = if direct { target.to_path_buf() } else { target.with_file_name(format!(
         ".{}.rust-dos-partial",
         target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-    ));
+    )) };
     let result = (|| {
         let mut out = fs::File::create(&partial).map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; COPY_CHUNK];
@@ -433,9 +435,9 @@ fn copy_out(volume: &FatVolume, entry: &Entry, target: &Path) -> Result<(), Stri
             let _ = out.set_modified(time);
         }
         drop(out);
-        fs::rename(&partial, target).map_err(|e| e.to_string())
+        if direct { Ok(()) } else { fs::rename(&partial, target).map_err(|e| e.to_string()) }
     })();
-    if result.is_err() {
+    if result.is_err() && !direct {
         let _ = fs::remove_file(&partial);
     }
     result
@@ -486,6 +488,7 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::current_dir().unwrap().join("target/test_shared_disk").join(name);

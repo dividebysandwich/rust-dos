@@ -33,6 +33,10 @@ struct Frontend {
     pixels: Vec<u32>,
     audio_frames: usize,
     input: HashMap<(u32, u32, u32, u32), i16>,
+    /// The folder `test://` paths are in, for a frontend with a VFS, and
+    /// the calls made to it.
+    vfs_root: Option<PathBuf>,
+    vfs_calls: usize,
 }
 
 thread_local! {
@@ -113,6 +117,14 @@ unsafe extern "C" fn environment(cmd: u32, data: *mut c_void) -> bool {
                 with(|fe| fe.messages.push(text));
                 true
             }
+            RETRO_ENVIRONMENT_GET_VFS_INTERFACE => {
+                let info = &mut *(data as *mut retro_vfs_interface_info);
+                if with(|fe| fe.vfs_root.is_none()) || info.required_interface_version > 3 {
+                    return false;
+                }
+                info.iface = &raw const vfs::INTERFACE as *mut retro_vfs_interface;
+                true
+            }
             RETRO_ENVIRONMENT_GET_LOG_INTERFACE => false,
             _ => true,
         }
@@ -140,6 +152,175 @@ unsafe extern "C" fn input_poll() {}
 
 unsafe extern "C" fn input_state(port: u32, device: u32, index: u32, id: u32) -> i16 {
     with(|fe| fe.input.get(&(port, device, index, id)).copied().unwrap_or(0))
+}
+
+/// A frontend's VFS over a folder: `test://a/b` is `<vfs_root>/a/b`. As
+/// Android's SAF, it can't rename, and its seek answers 0.
+mod vfs {
+    use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    pub static INTERFACE: retro_vfs_interface = retro_vfs_interface {
+        get_path: Some(get_path),
+        open: Some(open),
+        close: Some(close),
+        size: Some(size),
+        tell: Some(tell),
+        seek: Some(seek),
+        read: Some(read),
+        write: Some(write),
+        flush: Some(flush),
+        remove: Some(remove),
+        rename: Some(rename),
+        truncate: Some(truncate),
+        stat: Some(stat),
+        mkdir: Some(mkdir),
+        opendir: Some(opendir),
+        readdir: Some(readdir),
+        dirent_get_name: Some(dirent_get_name),
+        dirent_is_dir: Some(dirent_is_dir),
+        closedir: Some(closedir),
+    };
+
+    struct Dir {
+        entries: Vec<(CString, bool)>,
+        /// The entry readdir is at, plus one.
+        at: usize,
+    }
+
+    /// The host path of a `test://` path.
+    unsafe fn host(path: *const c_char) -> PathBuf {
+        let path = unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned();
+        let rest = path.strip_prefix("test://").unwrap_or_else(|| panic!("{} isn't a test:// path", path));
+        with(|fe| {
+            fe.vfs_calls += 1;
+            fe.vfs_root.clone().unwrap().join(rest)
+        })
+    }
+
+    unsafe fn file<'a>(stream: *mut retro_vfs_file_handle) -> &'a mut fs::File {
+        unsafe { &mut *(stream as *mut fs::File) }
+    }
+
+    unsafe extern "C" fn get_path(_stream: *mut retro_vfs_file_handle) -> *const c_char {
+        ptr::null()
+    }
+
+    unsafe extern "C" fn open(path: *const c_char, mode: u32, _hints: u32) -> *mut retro_vfs_file_handle {
+        let path = unsafe { host(path) };
+        let mut options = fs::OpenOptions::new();
+        match mode {
+            RETRO_VFS_FILE_ACCESS_READ => options.read(true),
+            RETRO_VFS_FILE_ACCESS_WRITE => options.write(true).create(true).truncate(true),
+            m if m == RETRO_VFS_FILE_ACCESS_READ_WRITE | RETRO_VFS_FILE_ACCESS_UPDATE_EXISTING => options.read(true).write(true),
+            RETRO_VFS_FILE_ACCESS_READ_WRITE => options.read(true).write(true).create(true).truncate(true),
+            m => panic!("access {}", m),
+        };
+        match options.open(path) {
+            Ok(file) => Box::into_raw(Box::new(file)) as *mut retro_vfs_file_handle,
+            Err(_) => ptr::null_mut(),
+        }
+    }
+
+    unsafe extern "C" fn close(stream: *mut retro_vfs_file_handle) -> i32 {
+        drop(unsafe { Box::from_raw(stream as *mut fs::File) });
+        0
+    }
+
+    unsafe extern "C" fn size(stream: *mut retro_vfs_file_handle) -> i64 {
+        unsafe { file(stream) }.metadata().map_or(-1, |m| m.len() as i64)
+    }
+
+    unsafe extern "C" fn tell(stream: *mut retro_vfs_file_handle) -> i64 {
+        unsafe { file(stream) }.stream_position().map_or(-1, |p| p as i64)
+    }
+
+    unsafe extern "C" fn seek(stream: *mut retro_vfs_file_handle, offset: i64, whence: i32) -> i64 {
+        let to = match whence {
+            RETRO_VFS_SEEK_POSITION_START => SeekFrom::Start(offset as u64),
+            RETRO_VFS_SEEK_POSITION_CURRENT => SeekFrom::Current(offset),
+            _ => SeekFrom::End(offset),
+        };
+        unsafe { file(stream) }.seek(to).map_or(-1, |_| 0)
+    }
+
+    unsafe extern "C" fn read(stream: *mut retro_vfs_file_handle, s: *mut c_void, len: u64) -> i64 {
+        let buf = unsafe { std::slice::from_raw_parts_mut(s as *mut u8, len as usize) };
+        unsafe { file(stream) }.read(buf).map_or(-1, |n| n as i64)
+    }
+
+    unsafe extern "C" fn write(stream: *mut retro_vfs_file_handle, s: *const c_void, len: u64) -> i64 {
+        let buf = unsafe { std::slice::from_raw_parts(s as *const u8, len as usize) };
+        unsafe { file(stream) }.write(buf).map_or(-1, |n| n as i64)
+    }
+
+    unsafe extern "C" fn flush(stream: *mut retro_vfs_file_handle) -> i32 {
+        unsafe { file(stream) }.flush().map_or(-1, |_| 0)
+    }
+
+    unsafe extern "C" fn remove(path: *const c_char) -> i32 {
+        let path = unsafe { host(path) };
+        let done = if path.is_dir() { fs::remove_dir(path) } else { fs::remove_file(path) };
+        done.map_or(-1, |_| 0)
+    }
+
+    unsafe extern "C" fn rename(_old: *const c_char, _new: *const c_char) -> i32 {
+        -1
+    }
+
+    unsafe extern "C" fn truncate(stream: *mut retro_vfs_file_handle, length: i64) -> i64 {
+        unsafe { file(stream) }.set_len(length as u64).map_or(-1, |_| 0)
+    }
+
+    unsafe extern "C" fn stat(path: *const c_char, size: *mut i32) -> i32 {
+        let Ok(meta) = fs::metadata(unsafe { host(path) }) else { return 0 };
+        if !size.is_null() {
+            unsafe { *size = meta.len() as i32 };
+        }
+        RETRO_VFS_STAT_IS_VALID | if meta.is_dir() { RETRO_VFS_STAT_IS_DIRECTORY } else { 0 }
+    }
+
+    unsafe extern "C" fn mkdir(dir: *const c_char) -> i32 {
+        let path = unsafe { host(dir) };
+        if path.exists() {
+            return -2;
+        }
+        fs::create_dir(path).map_or(-1, |_| 0)
+    }
+
+    unsafe extern "C" fn opendir(dir: *const c_char, _hidden: bool) -> *mut retro_vfs_dir_handle {
+        let Ok(read) = fs::read_dir(unsafe { host(dir) }) else { return ptr::null_mut() };
+        let entries = read
+            .flatten()
+            .map(|e| (CString::new(e.file_name().to_string_lossy().as_bytes()).unwrap(), e.path().is_dir()))
+            .collect();
+        Box::into_raw(Box::new(Dir { entries, at: 0 })) as *mut retro_vfs_dir_handle
+    }
+
+    unsafe fn dir<'a>(dirstream: *mut retro_vfs_dir_handle) -> &'a mut Dir {
+        unsafe { &mut *(dirstream as *mut Dir) }
+    }
+
+    unsafe extern "C" fn readdir(dirstream: *mut retro_vfs_dir_handle) -> bool {
+        let dir = unsafe { dir(dirstream) };
+        dir.at += 1;
+        dir.at <= dir.entries.len()
+    }
+
+    unsafe extern "C" fn dirent_get_name(dirstream: *mut retro_vfs_dir_handle) -> *const c_char {
+        let dir = unsafe { dir(dirstream) };
+        dir.entries[dir.at - 1].0.as_ptr()
+    }
+
+    unsafe extern "C" fn dirent_is_dir(dirstream: *mut retro_vfs_dir_handle) -> bool {
+        let dir = unsafe { dir(dirstream) };
+        dir.entries[dir.at - 1].1
+    }
+
+    unsafe extern "C" fn closedir(dirstream: *mut retro_vfs_dir_handle) -> i32 {
+        drop(unsafe { Box::from_raw(dirstream as *mut Dir) });
+        0
+    }
 }
 
 /// A folder for a test, on disk (the build's target folder).
@@ -422,3 +603,69 @@ fn exit_at_the_prompt_ends_the_content() {
     stop();
 }
 
+
+/// A test frontend with a VFS over `dir/vfs`, where `test://` paths are.
+fn with_vfs(dir: &Path) -> PathBuf {
+    let root = dir.join("vfs");
+    fs::create_dir_all(&root).unwrap();
+    with(|fe| fe.vfs_root = Some(root.clone()));
+    root
+}
+
+#[test]
+fn a_folder_the_frontend_keeps_is_c() {
+    let dir = scratch("vfs-folder");
+    let root = with_vfs(&dir);
+    fs::create_dir_all(root.join("Game")).unwrap();
+    fs::write(root.join("Game/MARKER.COM"), MARKER).unwrap();
+    fs::write(root.join("Game/README.TXT"), "read me").unwrap();
+    fs::write(
+        root.join("Game/rust-dos.conf"),
+        "[autoexec]\nECHO hello>NEW.TXT\nREN NEW.TXT DONE.TXT\nMD SUB\nCOPY DONE.TXT SUB\\COPY.TXT\nDEL README.TXT\nMARKER\n",
+    )
+    .unwrap();
+    start(&dir, &[]);
+    assert!(load(Some(Path::new("test://Game"))));
+    run(600);
+    assert_eq!(map_word(0x320), Some(0xBEEF), "the game runs");
+    let game = root.join("Game");
+    assert_eq!(fs::read_to_string(game.join("DONE.TXT")).unwrap().trim(), "hello");
+    assert!(!game.join("NEW.TXT").exists(), "renamed by copying");
+    assert_eq!(fs::read_to_string(game.join("SUB/COPY.TXT")).unwrap().trim(), "hello");
+    assert!(!game.join("README.TXT").exists());
+    assert!(with(|fe| fe.vfs_calls) > 0);
+    stop();
+}
+
+#[test]
+fn a_disk_image_the_frontend_keeps_is_read_and_written() {
+    let dir = scratch("vfs-image");
+    let root = with_vfs(&dir);
+    let spec = rust_dos::makeimg::ImageSpec { preset: rust_dos::makeimg::preset("fd_1440kb"), ..Default::default() };
+    let floppy = rust_dos::makeimg::plan(&spec).unwrap();
+    rust_dos::makeimg::write(&root.join("disk.img"), &floppy, true).unwrap();
+    let before = fs::read(root.join("disk.img")).unwrap();
+    fs::create_dir_all(dir.join("system/rust-dos")).unwrap();
+    fs::write(dir.join("system/rust-dos/rust-dos.conf"), "[autoexec]\nECHO X>A:\\T.TXT\n").unwrap();
+    start(&dir, &[]);
+    assert!(load(Some(Path::new("test://disk.img"))));
+    run(300);
+    assert!(with(|fe| fe.vfs_calls) > 0);
+    stop();
+    let after = fs::read(root.join("disk.img")).unwrap();
+    assert_eq!(after.len(), before.len());
+    assert!(after != before, "the file is on the disk");
+}
+
+#[test]
+fn an_archive_the_frontend_keeps_is_unpacked() {
+    let dir = scratch("vfs-zip");
+    let root = with_vfs(&dir);
+    fs::write(root.join("Marker Game.zip"), zip(&[("MARKER.COM", MARKER)])).unwrap();
+    start(&dir, &[]);
+    assert!(load(Some(Path::new("test://Marker Game.zip"))));
+    run(180);
+    assert_eq!(map_word(0x320), Some(0xBEEF), "the game runs");
+    assert!(dir.join("saves/rust-dos/games/marker-game/MARKER.COM").is_file());
+    stop();
+}

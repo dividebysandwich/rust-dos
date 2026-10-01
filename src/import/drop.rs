@@ -29,9 +29,9 @@ pub enum DropAction {
 /// What dropping `path` does.
 pub fn drop_action(path: &Path) -> DropAction {
     let path = path.to_path_buf();
-    if path.is_dir() {
-        let has_confs = std::fs::read_dir(&path).into_iter().flatten().flatten().any(|e| {
-            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+    if crate::hostfs::is_dir(&path) {
+        let has_confs = crate::hostfs::read_dir(&path).into_iter().flatten().any(|e| {
+            let name = e.name.to_string_lossy().to_ascii_lowercase();
             name.starts_with("dosbox") && name.ends_with(".conf")
         });
         return if has_confs || super::gog::find_info(&path).is_some_and(|info| info.parent() == Some(path.as_path())) {

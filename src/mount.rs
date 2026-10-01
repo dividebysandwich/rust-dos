@@ -24,6 +24,7 @@
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions, NUMBERED_DRIVES, drive_number, numbered_drive};
 use crate::diskimage::Chs;
+use crate::hostfs;
 use std::cmp::Ordering;
 use std::path::{Component, Path, PathBuf};
 
@@ -299,7 +300,7 @@ pub fn expand_host_path(raw: &str, base: &Path, home: Option<&Path>) -> PathBuf 
         }
     }
     let path = Path::new(raw);
-    if path.is_absolute() {
+    if path.is_absolute() || crate::hostfs::has_scheme(path) {
         return path.to_path_buf();
     }
     let mut joined = base.to_path_buf();
@@ -377,7 +378,7 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
     let (first, rest) = words.split_first().ok_or("Missing host directory or disk image")?;
     let mut images = find_paths(first, base, paths)?;
     // The words after an image are more images, or its type.
-    let image = images[0].is_file() || is_image_name(&images[0]);
+    let image = hostfs::is_file(&images[0]) || is_image_name(&images[0]);
     for word in rest {
         match parse_kind(word) {
             Some(kind) => opts.kind = kind,
@@ -397,11 +398,11 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
 /// names the files that match.
 fn find_paths(word: &str, base: &Path, paths: &PathContext) -> Result<Vec<PathBuf>, String> {
     let host = expand_host_path(word, base, paths.home);
-    let dos = (paths.locate)(word).filter(|p| p.exists());
+    let dos = (paths.locate)(word).filter(|p| hostfs::exists(p));
     let found = match dos {
-        _ if host.is_dir() => host,
-        Some(dos) if dos.is_file() || !host.exists() => dos,
-        _ if host.exists() || !word.contains(['*', '?']) => host,
+        _ if hostfs::is_dir(&host) => host,
+        Some(dos) if hostfs::is_file(&dos) || !hostfs::exists(&host) => dos,
+        _ if hostfs::exists(&host) || !word.contains(['*', '?']) => host,
         _ => return matching_files(word, base, paths),
     };
     Ok(vec![found])
@@ -420,13 +421,12 @@ fn matching_files(word: &str, base: &Path, paths: &PathContext) -> Result<Vec<Pa
     let (dir, pattern) = word.split_at(split);
     let name = |path: &PathBuf| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     for dir in [(paths.locate)(dir), Some(expand_host_path(dir, base, paths.home))].into_iter().flatten() {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        let mut files: Vec<PathBuf> = hostfs::read_dir(&dir)
             .into_iter()
             .flatten()
-            .flatten()
-            .filter(|entry| matches_wildcard(&entry.file_name().to_string_lossy(), pattern))
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
+            .filter(|entry| matches_wildcard(&entry.name.to_string_lossy(), pattern))
+            .map(|entry| entry.path)
+            .filter(|path| hostfs::is_file(path))
             .collect();
         if !files.is_empty() {
             files.sort_by(|a, b| natural_cmp(&name(a), &name(b)));

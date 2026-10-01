@@ -38,6 +38,7 @@ pub mod filter_commands;
 pub mod games;
 pub mod hardware;
 pub mod hostdirs;
+pub mod hostfs;
 pub mod hosttime;
 pub mod ide;
 pub mod import;

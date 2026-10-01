@@ -108,7 +108,7 @@ unsafe extern "C" fn replace_image_index(index: u32, info: *const retro_game_inf
             }),
             // An image in the list can't change places.
             (Some(path), true) => {
-                let same = core.disk_images().0.get(index).cloned() == std::fs::canonicalize(&path).ok();
+                let same = core.disk_images().0.get(index).cloned() == rust_dos::hostfs::canonicalize(&path).ok();
                 if same { Ok(()) } else { Err("A disk of the list can't be replaced".to_string()) }
             }
         };

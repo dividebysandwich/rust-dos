@@ -2,7 +2,7 @@
 //! core keeps: rust-dos.conf and the game profiles.
 
 use std::collections::BTreeMap;
-use std::fs;
+use rust_dos::hostfs as fs;
 use std::path::{Path, PathBuf};
 
 use rust_dos::config::{self, Settings};
@@ -106,7 +106,7 @@ impl Machine {
                 Err(e) => self.warn(&format!("{}.conf: drive {}: {}", id, disk::drive_key(spec.drive), e)),
             }
         }
-        self.cpu.bus.config_dir = std::path::absolute(dir).ok();
+        self.cpu.bus.config_dir = fs::absolute(dir).ok();
         self.cpu.queue_batch_lines(&prepared.autoexec);
         self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} ({}.conf)", prepared.name, id));
         let message = format!("Starting {}", prepared.name);
@@ -265,7 +265,7 @@ impl Host for Machine {
 
     fn autoexec(&self) -> Result<Vec<String>, String> {
         let path = self.config_path();
-        if !path.exists() {
+        if !fs::exists(&path) {
             return Ok(Vec::new());
         }
         config::load_autoexec(&path)
