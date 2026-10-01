@@ -2027,6 +2027,14 @@ impl Host for MainHost<'_, '_> {
         std::fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {}", path.display(), e))
     }
 
+    fn reset_game(&mut self, id: &str) -> Result<(), String> {
+        if self.game.as_ref().is_some_and(|g| g.id == id) {
+            return Err("The game is running: reset it once it has ended".to_string());
+        }
+        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no games folder")?;
+        games::reset(&games::saves_dir(&dir), id)
+    }
+
     fn import_game(&mut self, source: &std::path::Path) -> Result<(String, String), String> {
         let dir = games_dir(self.saved.file.as_deref())
             .ok_or("Game profiles go beside the configuration file, and there is none (--no-config)")?;

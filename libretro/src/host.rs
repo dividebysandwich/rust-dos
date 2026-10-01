@@ -319,6 +319,13 @@ impl Host for Machine {
         fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {}", path.display(), e))
     }
 
+    fn reset_game(&mut self, id: &str) -> Result<(), String> {
+        if self.game.as_ref().is_some_and(|g| g.id == id) {
+            return Err("The game is running: reset it once it has ended".to_string());
+        }
+        games::reset(&self.dirs.saves(), id)
+    }
+
     fn import_game(&mut self, source: &Path) -> Result<(String, String), String> {
         let (id, name, warnings) = games::import(&self.dirs.games(), source, content::home().as_deref())?;
         for warning in &warnings {

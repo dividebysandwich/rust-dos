@@ -167,6 +167,12 @@ pub trait Host {
         let _ = id;
         Err("There are no game profiles here".to_string())
     }
+    /// Take the game `id` back to how it was installed: the changes its
+    /// drives keep apart (games.rs's `reset`) go.
+    fn reset_game(&mut self, id: &str) -> Result<(), String> {
+        let _ = id;
+        Err("There are no game profiles here".to_string())
+    }
     /// Make a profile of the game set up for DOSBox at `source` (games.rs's
     /// `import`). Returns its id, and what to tell the user.
     fn import_game(&mut self, source: &Path) -> Result<(String, String), String> {
@@ -1510,11 +1516,12 @@ pub struct ConfigUi {
     levels: [f32; CHANNELS],
     muted: bool,
     /// The Games page: the profiles, the one running, a new one being
-    /// made, and one asked to be deleted.
+    /// made, and one asked to be deleted, or reset (`confirm_reset`).
     games: Vec<GameEntry>,
     active_game: Option<String>,
     game_dialog: Option<GameDialog>,
     confirm_delete: Option<usize>,
+    confirm_reset: bool,
     /// What to tell the user once the window has closed (a game launched).
     notice: Option<String>,
     /// The Cheats page's search.
@@ -1591,6 +1598,7 @@ impl ConfigUi {
             active_game: None,
             game_dialog: None,
             confirm_delete: None,
+            confirm_reset: false,
             notice: None,
             cheats: cheats::Cheats::default(),
             achievements: achievements::Achievements::default(),
@@ -3149,7 +3157,7 @@ impl ConfigUi {
         } else if self.rooms.is_some() {
             self.room_hints()
         } else if self.confirm_delete.is_some() {
-            vec![("Enter", "Delete", Enter), ("Esc", "Keep", Esc)]
+            vec![("Enter", if self.confirm_reset { "Reset" } else { "Delete" }, Enter), ("Esc", "Keep", Esc)]
         } else if self.page == Page::States {
             vec![
                 ("Enter", "Load", Enter),
@@ -3178,6 +3186,7 @@ impl ConfigUi {
                 ("Enter", "Launch", Enter),
                 ("Ins", "New", Insert),
                 ("Del", "Delete", Delete),
+                ("R", "Reset", Char('r')),
                 ("Tab", "Page", Tab),
                 ("F2", "Save", Save),
                 ("Esc", "Close", Esc),

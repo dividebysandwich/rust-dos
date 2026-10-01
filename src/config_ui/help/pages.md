@@ -71,6 +71,10 @@ launched with **Enter**.
 While a game plays, **F2** saves changed settings to its profile only.
 **Del** deletes a profile (not the game's files).
 
+A game's own drives keep its files as installed: what it writes, such
+as saved games, goes to `saves` beside the games folder. **R** deletes
+that, taking the game back to how it was installed.
+
 # New game {#new-game}
 
 Makes a profile of the settings as they are now, and the drives you

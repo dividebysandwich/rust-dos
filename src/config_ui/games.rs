@@ -1,5 +1,6 @@
 //! The settings window's Games page: the game profiles, launched with
-//! Enter, made from the current settings with Ins, deleted with Del.
+//! Enter, made from the current settings with Ins, deleted with Del, and
+//! taken back to how they were installed with R.
 
 use super::dialog::TextField;
 use super::draw::{self, Grid};
@@ -65,9 +66,18 @@ impl ConfigUi {
     }
 
     pub(super) fn games_key(&mut self, key: UiKey, host: &mut dyn Host) {
-        // Del asked first; Enter deletes, anything else keeps the game.
+        // Del and R asked first; Enter deletes or resets, anything else
+        // keeps the game.
         if let Some(i) = self.confirm_delete.take() {
             if key == UiKey::Enter
+                && let Some(game) = self.games.get(i).cloned()
+                && std::mem::take(&mut self.confirm_reset)
+            {
+                match host.reset_game(&game.id) {
+                    Ok(()) => self.info(format!("{} is as it was installed", game.name)),
+                    Err(e) => self.error(e),
+                }
+            } else if key == UiKey::Enter
                 && let Some(game) = self.games.get(i).cloned()
             {
                 match host.delete_game(&game.id) {
@@ -102,7 +112,17 @@ impl ConfigUi {
             },
             (UiKey::Delete, Some(game)) => {
                 self.confirm_delete = Some(self.row);
+                self.confirm_reset = false;
                 self.error(format!("Delete {}? Enter deletes it, Esc keeps it", game.name));
+            }
+            (UiKey::Char('r' | 'R'), Some(game)) => {
+                if self.active_game.as_deref() == Some(game.id.as_str()) {
+                    self.error(format!("{} is running: reset it once it has ended", game.name));
+                    return;
+                }
+                self.confirm_delete = Some(self.row);
+                self.confirm_reset = true;
+                self.error(format!("Reset {}, deleting its saves and changes? Enter resets it, Esc keeps them", game.name));
             }
             _ => {}
         }

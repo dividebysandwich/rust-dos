@@ -35,6 +35,7 @@ struct FakeHost {
     /// The game profiles, and the games launched and made.
     games: Vec<GameEntry>,
     launched: Vec<String>,
+    reset: Vec<String>,
     created: Vec<NewGame>,
     /// The machine's memory for the Cheats page, and its frozen values.
     ram: Vec<u8>,
@@ -77,6 +78,7 @@ impl FakeHost {
             no_shaders: false,
             games: vec![],
             launched: vec![],
+            reset: vec![],
             created: vec![],
             ram: vec![],
             frozen: vec![],
@@ -190,6 +192,11 @@ impl Host for FakeHost {
 
     fn delete_game(&mut self, id: &str) -> Result<(), String> {
         self.games.retain(|g| g.id != id);
+        Ok(())
+    }
+
+    fn reset_game(&mut self, id: &str) -> Result<(), String> {
+        self.reset.push(id.to_string());
         Ok(())
     }
 
@@ -1347,6 +1354,12 @@ fn the_games_page_launches_makes_and_deletes_games() {
     assert!(ui.is_open());
     keys(&mut ui, &mut host, &[Delete, Enter]);
     assert_eq!(ui.games.len(), 1);
+
+    // R asks too; Enter takes the game back to how it was installed.
+    keys(&mut ui, &mut host, &[Home, Char('r')]);
+    assert!(status(&ui).0.starts_with("Reset Stunts"));
+    keys(&mut ui, &mut host, &[Esc, Char('r'), Enter]);
+    assert_eq!((host.reset.as_slice(), ui.games.len()), (["stunts".to_string()].as_slice(), 1));
 
     // Enter launches the game and closes the window, with a notice.
     keys(&mut ui, &mut host, &[Home, Enter]);
