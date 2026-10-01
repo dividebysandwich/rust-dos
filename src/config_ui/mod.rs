@@ -2458,7 +2458,12 @@ impl ConfigUi {
                 false,
                 &["raw", "rom", "bin"][..],
             ),
-            Pick::ImportGame => ("Pick a GOG game's folder or a DOSBox .conf", String::new(), true, &["conf"][..]),
+            Pick::ImportGame => (
+                "Pick a game's package, a GOG game's folder or a DOSBox .conf",
+                String::new(),
+                true,
+                &["conf", "zip", "7z", "dosz"][..],
+            ),
             Pick::AchievementsArchive => ("Pick the zip or .dosz the game came in", String::new(), false, &["zip", "dosz"][..]),
             Pick::Manual => ("Pick a manual: a PDF or a picture", String::new(), false, &["pdf", "png", "jpg", "jpeg", "gif"][..]),
             Pick::ImagePath => (

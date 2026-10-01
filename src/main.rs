@@ -96,9 +96,10 @@ struct Args {
     #[arg(long, value_name = "NAME", conflicts_with = "import")]
     game: Option<String>,
 
-    /// Import a game set up for DOSBox (a GOG install's folder, a folder
-    /// with DOSBox configuration files, or one of them) as a game profile,
-    /// and launch it
+    /// Import a game as a game profile, and launch it: its package (a zip
+    /// or 7z archive, or a folder with a rust-dos.conf), or a game set up
+    /// for DOSBox (a GOG install's folder, a folder with DOSBox
+    /// configuration files, or one of them)
     #[arg(long, value_name = "PATH")]
     import: Option<std::path::PathBuf>,
 

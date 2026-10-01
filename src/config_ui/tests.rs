@@ -1348,7 +1348,7 @@ fn the_games_page_launches_makes_and_deletes_games() {
     // files.
     keys(&mut ui, &mut host, &[End, Enter]);
     let (browser, _) = ui.browser.as_ref().expect("the file picker is open");
-    assert_eq!(browser.title, "Pick a GOG game's folder or a DOSBox .conf");
+    assert_eq!(browser.title, "Pick a game's package, a GOG game's folder or a DOSBox .conf");
     assert!(browser.pick_dirs);
     keys(&mut ui, &mut host, &[Esc, Home]);
 

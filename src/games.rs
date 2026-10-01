@@ -350,9 +350,14 @@ pub fn prompt_directory(cpu: &Cpu) -> String {
 
 /// A game set up for DOSBox, made into a profile in the games folder `dir`:
 /// a GOG install or a folder with DOSBox configuration files (`source` a
-/// directory), or such a file. Returns the profile's id and the game's name
+/// directory), or such a file; or a game's package (`add_package`). Returns the profile's id and the game's name
 /// and what of the configuration didn't come across.
 pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String, String, Vec<String>), String> {
+    // A game's package: its profile, as dropping it makes it.
+    if is_package(source) || (crate::archive::is_archive_name(source) && hostfs::is_file(source)) {
+        let (id, name) = add_package(dir, source)?;
+        return Ok((id, name, Vec::new()));
+    }
     // The profile's paths are absolute: it lives in another folder.
     let source = hostfs::canonicalize(source).map_err(|e| format!("{}: {}", source.display(), e))?;
     let source = source.as_path();

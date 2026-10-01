@@ -177,7 +177,7 @@ impl ConfigUi {
             }
             self.hits.push(Hit { row, col: 1, width: cols - 2, target: Target::Row(i) });
             let Some(game) = self.games.get(i) else {
-                let text = if i == self.games.len() { "+ New game from the current settings..." } else { "+ Import a GOG game or DOSBox .conf..." };
+                let text = if i == self.games.len() { "+ New game from the current settings..." } else { "+ Import a game's package, a GOG game or DOSBox .conf..." };
                 g.text(2, row, text, draw::KEY);
                 continue;
             };

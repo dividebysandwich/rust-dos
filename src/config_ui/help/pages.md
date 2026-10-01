@@ -70,8 +70,9 @@ launched with **Enter**.
 
 - *+ New game from the current settings*: mount the game's folder first,
   get it running, then make a profile of it: it keeps what you changed.
-- *+ Import a GOG game or DOSBox .conf*: turns a game bought on GOG, or
-  set up for DOSBox, into a profile with its settings and CD.
+- *+ Import a game's package, a GOG game or DOSBox .conf*: turns a
+  game's package, a game bought on GOG or one set up for DOSBox into a
+  profile with its settings, CD and manuals.
 
 While a game plays, **F2** saves changed settings to its profile only.
 **Del** deletes a profile (not the game's files).
@@ -104,9 +105,11 @@ mounted:
 
 # Import a game {#import}
 
-Pick the folder of a GOG game (the one with a `goggame-*.info` file), or
-a DOSBox `.conf` file. The game becomes a profile with its settings,
-drives and CD images, and **Enter** on the Games page launches it.
+Pick a game's package (a zip or 7z archive, or a folder with a
+`rust-dos.conf`), the folder of a GOG game (the one with a
+`goggame-*.info` file), or a DOSBox `.conf` file. The game becomes a
+profile with its settings, drives, CD images and manuals, and **Enter**
+on the Games page launches it.
 
 # States {#states}
 
