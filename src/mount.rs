@@ -3,7 +3,8 @@
 //!
 //! `MOUNT` takes DOSBox Staging's syntax, in which MOUNT took in IMGMOUNT:
 //! `MOUNT drive path [path ...] [options]`, with the options anywhere on
-//! the line. The path is a host directory, or a disk or CD image (.img,
+//! the line. The path is a host directory, a zip or 7z archive (`archive`),
+//! or a disk or CD image (.img,
 //! .ima, .vfd, .flp, .dsk, .360, .720, .1200, .1440, .iso, .cue, .bin,
 //! .gog, .ins) on the host or on a mounted drive (C:\GAME\CD.CUE), whose
 //! type is found from the image unless `-t` gives it. Several images, or a
@@ -33,7 +34,7 @@ use std::cmp::Ordering;
 use std::path::{Component, Path, PathBuf};
 
 pub const MOUNT_USAGE: &str = "\
-Usage: MOUNT drive directory [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
+Usage: MOUNT drive directory|archive [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                              [-share|-noshare] [-overlay DIR]\r
        MOUNT drive DIR -t overlay\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
@@ -52,7 +53,8 @@ starts, once the drives are saved. A booted system has a directory on D:\r
 and up as a hard disk (-noshare: not; -share: C: too), and its changes go\r
 back into it when it shuts down; a directory as a CD-ROM drive is a disc.\r
 -overlay DIR leaves the directory as it is: the drive's changes go to DIR\r
-(-t overlay: to the drive mounted already).\r
+(-t overlay: to the drive mounted already). A zip or 7z archive is a drive\r
+with its files, or the disk or CD image in it; without -overlay, read-only.\r
 IMGMOUNT is the same command.\r
 ";
 
@@ -61,7 +63,7 @@ const IMAGE_EXTENSIONS: &[&str] =
     &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "iso", "cue", "bin", "gog", "ins"];
 
 /// Whether a path is a disk or CD image's, by its extension.
-fn is_image_name(path: &Path) -> bool {
+pub(crate) fn is_image_name(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| IMAGE_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }

@@ -80,6 +80,25 @@ pub fn drive_number(drive: u8) -> Option<u8> {
 
 /// A drive as MOUNT and `[drives]` name it: "C", or "2" for a disk
 /// mounted by number.
+/// The disk or CD image an archive holds, of its files (paths from its
+/// root), to mount instead of the files: its one CUE sheet, or its one
+/// image. None if there are programs beside it.
+fn archive_image(files: &[String]) -> Option<String> {
+    let extension = |f: &str| f.rsplit_once('.').map(|(_, x)| x.to_ascii_lowercase()).unwrap_or_default();
+    if files.iter().any(|f| matches!(extension(f).as_str(), "exe" | "com" | "bat")) {
+        return None;
+    }
+    let one = |wanted: &dyn Fn(&str) -> bool| -> Option<String> {
+        let found: Vec<&String> = files.iter().filter(|f| wanted(f)).collect();
+        match found.as_slice() {
+            [one] => Some((*one).clone()),
+            _ => None,
+        }
+    };
+    one(&|f| matches!(extension(f).as_str(), "cue" | "ins"))
+        .or_else(|| one(&|f| crate::mount::is_image_name(Path::new(f))))
+}
+
 pub fn drive_key(drive: u8) -> String {
     match drive_number(drive) {
         Some(number) => number.to_string(),
@@ -440,8 +459,8 @@ impl DriveInfo {
 /// What holds a drive's files.
 enum Storage {
     /// A host directory, acting as the drive's root: the directory itself,
-    /// or an overlay's root (`layerN:/`), with the overlay.
-    Host(PathBuf, Option<Overlaid>),
+    /// or the root of the drive's overlay (`layerN:/`).
+    Host(PathBuf),
     /// A tree held in memory, whose files are either in memory too or on
     /// the CD image.
     Tree { files: MemFs, image: Option<Rc<CdImage>> },
@@ -452,12 +471,20 @@ enum Storage {
 }
 
 /// A drive's write overlay (`overlay::Overlay`), as long as the drive has
-/// it.
+/// it: over a host directory, or an archive.
 struct Overlaid {
     layer: hostfs::Layer,
-    /// The directory below, and where the changes go.
+    /// The directory or archive below, and where the changes go.
     lower: PathBuf,
     upper: Option<PathBuf>,
+}
+
+impl Overlaid {
+    /// A path under the overlay's root as people know it: under the
+    /// directory or archive below.
+    fn shown(&self, path: &Path) -> Option<PathBuf> {
+        path.starts_with(self.layer.root()).then(|| self.lower.join(hostfs::layer_path(path)))
+    }
 }
 
 struct Drive {
@@ -479,6 +506,9 @@ struct Drive {
     /// For a host directory shared with a booted system, the disk made of
     /// it (`prepare_shared_disks`).
     shared: Option<crate::shared_disk::SharedDisk>,
+    /// The overlay the drive's files are in: a host directory's with
+    /// `-overlay`, or an archive's.
+    overlay: Option<Overlaid>,
 }
 
 impl Drive {
@@ -489,7 +519,7 @@ impl Drive {
     /// The host directory behind the drive, if there is one.
     fn host_root(&self) -> Option<&Path> {
         match &self.storage {
-            Storage::Host(root, _) => Some(root),
+            Storage::Host(root) => Some(root),
             _ => None,
         }
     }
@@ -497,10 +527,16 @@ impl Drive {
     /// The host directory as people know it: under an overlay, the one
     /// below.
     fn shown_root(&self) -> Option<&Path> {
-        match &self.storage {
-            Storage::Host(_, Some(overlaid)) => Some(&overlaid.lower),
+        match &self.overlay {
+            Some(overlaid) if self.host_root().is_some() => Some(&overlaid.lower),
             _ => self.host_root(),
         }
+    }
+
+    /// A path under the drive's overlay as people know it, in the
+    /// directory or archive below; others as they are.
+    fn shown(&self, path: PathBuf) -> PathBuf {
+        self.overlay.as_ref().and_then(|o| o.shown(&path)).unwrap_or(path)
     }
 
     /// The drive's files, if they are held in memory.
@@ -750,7 +786,7 @@ impl DiskController {
         let mut drives: [Option<Drive>; DRIVE_SLOTS as usize] = std::array::from_fn(|_| None);
         drives[DRIVE_C as usize] = Some(Drive {
             kind: DriveKind::HardDisk,
-            storage: Storage::Host(canonical, None),
+            storage: Storage::Host(canonical),
             current_dir: String::new(),
             label: DEFAULT_LABEL.to_string(),
             read_only: false,
@@ -760,6 +796,7 @@ impl DiskController {
             media_changed: false,
             boot_cd: None,
             shared: None,
+            overlay: None,
         });
         drives[DRIVE_Z as usize] = Some(Self::memory_drive(z_files, DEFAULT_LABEL));
 
@@ -813,6 +850,7 @@ impl DiskController {
             media_changed: false,
             boot_cd: None,
             shared: None,
+            overlay: None,
         }
     }
 
@@ -859,6 +897,24 @@ impl DiskController {
             return Err(format!("Drive {} is a floppy drive and can't be a CD-ROM", name));
         }
         let spec = MountSpec { drive, path: path.to_path_buf(), opts: opts.clone() };
+        // An archive: its files, or the disk or CD image in it, through an
+        // overlay; the changes go to `-overlay`'s folder.
+        let mut overlaid = None;
+        let archive_path;
+        let mut path = path;
+        if hostfs::is_file(path) && crate::archive::is_archive_name(path) && opts.more_images.is_empty() {
+            let canonical = hostfs::canonicalize(path).map_err(|e| e.to_string())?;
+            let stack = crate::archive::open(&canonical)?;
+            let image = archive_image(&stack.files());
+            let upper = opts.overlay.clone().filter(|_| !opts.read_only && (image.is_some() || opts.kind != DriveKind::CdRom));
+            let o = Self::overlaid(Box::new(stack), canonical, upper)?;
+            archive_path = match image {
+                Some(image) => o.layer.root().join(image),
+                None => o.layer.root().to_path_buf(),
+            };
+            path = &archive_path;
+            overlaid = Some(o);
+        }
         if hostfs::is_file(path) {
             let mut images = Vec::new();
             for image in std::iter::once(path).chain(opts.more_images.iter().map(PathBuf::as_path)) {
@@ -877,6 +933,7 @@ impl DiskController {
             }
             let (kind, storage, volume_label, writable) = Self::open_image(drive, &images[0], &opts)?;
             self.close_drive_files(drive);
+            let shown = overlaid.as_ref().and_then(|o| o.shown(&images[0])).unwrap_or_else(|| images[0].clone());
             self.drives[drive as usize] = Some(Drive {
                 kind,
                 storage,
@@ -884,13 +941,14 @@ impl DiskController {
                 label: Self::label_for(&opts, &volume_label),
                 read_only: opts.read_only || !writable,
                 mount: Some(spec),
-                images: images.clone(),
+                images,
                 image: 0,
                 media_changed: true,
                 boot_cd: None,
                 shared: None,
+                overlay: overlaid,
             });
-            return Ok(images.swap_remove(0));
+            return Ok(shown);
         }
         if !opts.more_images.is_empty() {
             return Err("Only disk and CD images can be mounted as a list".to_string());
@@ -902,35 +960,40 @@ impl DiskController {
             return Err(format!("{} is not a directory or a disk or CD image", path.display()));
         }
         let kind = if floppy_drive { DriveKind::Floppy } else { opts.kind };
-        let canonical = hostfs::canonicalize(path).map_err(|e| e.to_string())?;
-        let overlaid = match &opts.overlay {
-            Some(upper) if kind != DriveKind::CdRom && !opts.read_only => {
-                let lower = Box::new(crate::overlay::Folder(canonical.clone()));
-                Some(Self::overlaid(lower, canonical.clone(), Some(upper.clone()))?)
-            }
-            _ => None,
+        let canonical = match &overlaid {
+            Some(o) => o.lower.clone(),
+            None => hostfs::canonicalize(path).map_err(|e| e.to_string())?,
         };
+        if overlaid.is_none()
+            && let Some(upper) = opts.overlay.as_ref().filter(|_| kind != DriveKind::CdRom && !opts.read_only)
+        {
+            let lower = Box::new(crate::overlay::Folder(canonical.clone()));
+            overlaid = Some(Self::overlaid(lower, canonical.clone(), Some(upper.clone()))?);
+        }
         let root = overlaid.as_ref().map_or_else(|| canonical.clone(), |o| o.layer.root().to_path_buf());
+        // An archive without the folder for its changes can't be written.
+        let unwritable = overlaid.as_ref().is_some_and(|o| o.upper.is_none());
 
         self.close_drive_files(drive);
         self.drives[drive as usize] = Some(Drive {
             kind,
-            storage: Storage::Host(root, overlaid),
+            storage: Storage::Host(root),
             current_dir: String::new(),
             label: Self::label_for(&opts, DEFAULT_LABEL),
-            read_only: opts.read_only || kind == DriveKind::CdRom,
+            read_only: opts.read_only || kind == DriveKind::CdRom || unwritable,
             mount: Some(spec),
             images: Vec::new(),
             image: 0,
             media_changed: floppy_drive,
             boot_cd: None,
             shared: None,
+            overlay: overlaid,
         });
         Ok(canonical)
     }
 
-    /// The overlay of `lower` (`display` to show) with the changes in
-    /// `upper`, as a layer.
+    /// The overlay of `lower` (`display` to show, the directory or archive)
+    /// with the changes in `upper`, as a layer.
     fn overlaid(lower: Box<dyn crate::overlay::Lower>, display: PathBuf, upper: Option<PathBuf>) -> Result<Overlaid, String> {
         let overlay = crate::overlay::Overlay::new(lower, upper.clone())
             .map_err(|e| format!("{}: {}", upper.as_deref().unwrap_or(Path::new("")).display(), e))?;
@@ -1103,6 +1166,7 @@ impl DiskController {
             media_changed: true,
             boot_cd: None,
             shared: None,
+            overlay: None,
         });
     }
 
@@ -1414,10 +1478,7 @@ impl DiskController {
                 continue;
             }
             // Under an overlay, the changes go to its folder.
-            let target = match &drive.storage {
-                Storage::Host(_, Some(overlaid)) => overlaid.upper.clone(),
-                _ => None,
-            };
+            let target = drive.overlay.as_ref().and_then(|o| o.upper.clone());
             let shared = drive.shared.as_mut().expect("a shared disk");
             let report = shared.sync(last);
             let target = target.unwrap_or_else(|| shared.root.clone());
@@ -1530,15 +1591,13 @@ impl DiskController {
             drive,
             kind: d.kind,
             root: d.shown_root().map(Path::to_path_buf),
-            overlay: match &d.storage {
-                Storage::Host(_, Some(overlaid)) => overlaid.upper.clone(),
-                _ => None,
-            },
+            overlay: d.overlay.as_ref().and_then(|o| o.upper.clone()),
             image: d
                 .image()
                 .map(|image| image.path().to_path_buf())
-                .or_else(|| d.mounted_disk().map(|disk| disk.path().to_path_buf())),
-            images: d.images.clone(),
+                .or_else(|| d.mounted_disk().map(|disk| disk.path().to_path_buf()))
+                .map(|path| d.shown(path)),
+            images: d.images.iter().map(|path| d.shown(path.clone())).collect(),
             image_index: d.image,
             label: d.label.clone(),
             read_only: !d.writable(),
@@ -3230,6 +3289,57 @@ mod tests {
         assert_eq!(fs::read_dir(base.join("game")).unwrap().count(), 2);
         assert_eq!(fs::read(base.join("upper/GAME.CFG")).unwrap(), b"new");
         assert_eq!(fs::read(base.join("upper/NEW/SLOT2.SAV")).unwrap(), b"two");
+    }
+
+    #[test]
+    fn an_archive_is_a_drive_with_its_changes_beside_it() {
+        let base = scratch("archive");
+        fs::create_dir_all(base.join("c")).unwrap();
+        let zip = crate::archive::zip::tests::zip(&[
+            ("Game/GAME.EXE", b"MZ game", true),
+            ("Game/SAVES/SLOT1.SAV", b"one", false),
+        ]);
+        fs::write(base.join("game.zip"), &zip).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+
+        // Without a folder for its changes, it is read-only.
+        disk.mount(3, &base.join("game.zip"), MountOptions::default(), false).unwrap();
+        assert!(disk.drive_info(3).unwrap().read_only);
+        assert_eq!(disk.create_file(r"D:\NEW.TXT", PSP), Err(0x05));
+
+        let opts = MountOptions { overlay: Some(base.join("saves")), ..MountOptions::default() };
+        disk.mount(3, &base.join("game.zip"), opts, true).unwrap();
+        let info = disk.drive_info(3).unwrap();
+        assert!(!info.read_only);
+        assert_eq!(info.root.as_deref(), Some(fs::canonicalize(base.join("game.zip")).unwrap().as_path()));
+        let h = disk.open_file(r"D:\GAME.EXE", 0, PSP).unwrap();
+        assert_eq!(disk.read_file(h, 16).unwrap(), b"MZ game");
+        disk.close_file(h);
+        let h = disk.open_file(r"D:\SAVES\SLOT1.SAV", 2, PSP).unwrap();
+        disk.write_file(h, b"ONE").unwrap();
+        disk.close_file(h);
+        disk.delete_file(r"D:\GAME.EXE").unwrap();
+        let names: Vec<String> = disk.list_directory(r"D:\*.*", 0x10).unwrap().into_iter().map(|e| e.filename).collect();
+        assert_eq!(names, ["SAVES"]);
+        assert_eq!(fs::read(base.join("saves/SAVES/SLOT1.SAV")).unwrap(), b"ONE");
+        assert_eq!(fs::read(base.join("game.zip")).unwrap(), zip, "the archive as it was");
+    }
+
+    #[test]
+    fn an_archive_of_a_disk_image_mounts_the_image() {
+        let base = scratch("archive_image");
+        fs::create_dir_all(base.join("c")).unwrap();
+        let zip = crate::archive::zip::tests::zip(&[("booter.img", &vec![0u8; 368_640], true), ("README.TXT", b"hi", false)]);
+        fs::write(base.join("booter.zip"), &zip).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        let opts = MountOptions { overlay: Some(base.join("saves")), ..MountOptions::default() };
+        disk.mount(numbered_drive(0), &base.join("booter.zip"), opts, false).unwrap();
+        let info = disk.drive_info(numbered_drive(0)).unwrap();
+        let archive = fs::canonicalize(base.join("booter.zip")).unwrap();
+        assert_eq!(info.image, Some(archive.join("booter.img")));
+        assert!(!info.read_only);
+        // Written to in the folder for the changes.
+        assert_eq!(fs::metadata(base.join("saves/booter.img")).unwrap().len(), 368_640);
     }
 
     #[test]

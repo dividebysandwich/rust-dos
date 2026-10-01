@@ -189,17 +189,16 @@ pub fn saves_dir(games: &Path) -> PathBuf {
     games.parent().unwrap_or(games).join("saves")
 }
 
-/// With `overlay=`, each of the profile's own drives that is a host
-/// directory gets the folder for its changes in the game's saves
-/// (`saves`/`id`), unless it has one or is read-only.
+/// The folder for its changes in the game's saves (`saves`/`id`) for each
+/// of the profile's own drives that is an archive, and with `overlay=`
+/// each that is a host directory, unless it has one or is read-only.
 pub fn overlay_drives(prepared: &mut Prepared, id: &str, saves: &Path) {
-    if !prepared.overlay {
-        return;
-    }
     let saves = saves.join(id);
     for spec in &mut prepared.drives {
         let opts = &mut spec.opts;
-        if opts.overlay.is_some() || opts.read_only || opts.kind == crate::disk::DriveKind::CdRom || !hostfs::is_dir(&spec.path) {
+        let archive = crate::archive::is_archive_name(&spec.path) && hostfs::is_file(&spec.path);
+        let folder = prepared.overlay && hostfs::is_dir(&spec.path);
+        if opts.overlay.is_some() || opts.read_only || opts.kind == crate::disk::DriveKind::CdRom || !(archive || folder) {
             continue;
         }
         opts.overlay = Some(saves.join(crate::disk::drive_key(spec.drive)));
