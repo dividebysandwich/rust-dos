@@ -21,7 +21,11 @@
 //! protected-mode program gets all the host has while it reads and writes
 //! (loading, compiling, Windows), and otherwise goes down to a 486's
 //! speed: it spins in a loop, as game menus do. (It was written for a 386
-//! or better, and paces itself.)
+//! or better, and paces itself.) Once it stops reading and writing, it goes
+//! back to the speed it had at once, not a measurement later: programs
+//! time their delay loops right after loading, and a loop timed at all the
+//! host has waits for ever (Sam & Max's General MIDI driver counts to a
+//! million in a timer tick, and hangs if it gets there first).
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -79,6 +83,10 @@ const PROTECTED_LEAST: u32 = 20_000;
 /// Bytes a second written to video memory and moved on drives above which
 /// a program without frames is at work.
 const WORKING: f64 = 32768.0;
+/// Emulated time without reads and writes after which a program that got
+/// all the host has for them goes back to the speed it had: less than the
+/// four timer ticks a delay loop's timing waits for.
+const WORK_DONE_NS: u64 = 100_000_000;
 /// What a read of the input status register (3DAh) in a retrace-polling
 /// loop takes, the I/O's time and the loop's.
 const STATUS_READ_NS: f64 = 1200.0;
@@ -266,11 +274,16 @@ pub struct AutoSpeed {
     /// didn't agree yet, and how many.
     unsettled: Option<(f64, u32)>,
     step: Step,
+    /// While a protected-mode program gets all the host has for its reads
+    /// and writes, the speed it had before.
+    working: Option<u32>,
+    /// The bytes it had read and written, and when that last changed.
+    output: (u64, u64),
 }
 
 impl AutoSpeed {
     pub fn new(base: u32) -> Self {
-        Self { base, mark: None, settle_until: 0, unsettled: None, step: Step::Start }
+        Self { base, mark: None, settle_until: 0, unsettled: None, step: Step::Start, working: None, output: (0, 0) }
     }
 
     pub fn base(&self) -> u32 {
@@ -284,6 +297,7 @@ impl AutoSpeed {
         self.settle_until = 0;
         self.unsettled = None;
         self.step = Step::Start;
+        self.working = None;
     }
 
     /// After a frame: once a measurement is complete, the speed it asks
@@ -292,6 +306,19 @@ impl AutoSpeed {
     /// as the host keeps up with.
     pub fn update(&mut self, bus: &Bus, protected: bool, host_max: u32) -> Option<u32> {
         let now = Mark::of(bus);
+        if now.output != self.output.0 {
+            self.output = (now.output, now.ns);
+        }
+        if let Some(before) = self.working
+            && now.ns.saturating_sub(self.output.1) >= WORK_DONE_NS
+        {
+            if trace() {
+                eprintln!("[auto] work done: back to {}", before);
+            }
+            self.reset();
+            self.settle_until = now.ns + SETTLE_NS;
+            return (before != bus.clock.cycles_per_ms()).then_some(before);
+        }
         let Some(mark) = self.mark else {
             if now.ns >= self.settle_until {
                 self.mark = Some(now);
@@ -331,7 +358,11 @@ impl AutoSpeed {
             refresh,
         };
         let current = bus.clock.cycles_per_ms();
+        let working = self.working.take();
         let next = self.decide(current, &measured, protected, host_max);
+        if self.working.is_some() {
+            self.working = working.or(self.working);
+        }
         if trace() {
             eprintln!("[auto] {} -> {} (host {}): {:?} {:?}", current, next, host_max, measured, self.step);
         }
@@ -370,6 +401,7 @@ impl AutoSpeed {
             } else if m.halted >= 0.5 {
                 clamp(c)
             } else if m.output >= WORKING {
+                self.working = Some(clamp(c));
                 top
             } else {
                 clamp(c * WAITING_STEP)
@@ -554,6 +586,19 @@ mod tests {
         // Spinning without doing anything, it gets less.
         let mut auto = AutoSpeed::new(3000);
         assert_eq!(auto.decide(100_000, &nothing(0.0, 100.0)(0), true, HOST), 80_000);
+    }
+
+    #[test]
+    fn a_program_at_work_keeps_the_speed_to_go_back_to() {
+        let mut auto = AutoSpeed::new(3000);
+        let loading = Measurement { fps: None, polling: 0.0, halted: 0.0, output: 1e6, refresh: 70.0 };
+        assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
+        assert_eq!(auto.working, Some(PROTECTED_LEAST), "where it goes back to");
+        // Anything else isn't work.
+        let spinning = Measurement { output: 0.0, ..loading };
+        auto.working = None;
+        auto.decide(HOST, &spinning, true, HOST);
+        assert_eq!(auto.working, None);
     }
 
     #[test]

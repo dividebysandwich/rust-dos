@@ -414,6 +414,11 @@ fn auto_speed_follows_the_program() {
     // A protected-mode one at work (loading) gets what the host has.
     run(&mut bus, &mut pacer, true, 10_000, 2000);
     assert!(bus.clock.cycles_per_ms() > 100_000, "{}", bus.clock.cycles_per_ms());
+    // Done, it goes back at once, before a delay loop it times next can
+    // run at that speed.
+    assert_eq!(run(&mut bus, &mut pacer, true, 0, 160), Some(20_000));
+    run(&mut bus, &mut pacer, true, 10_000, 2000);
+    assert!(bus.clock.cycles_per_ms() > 100_000, "{}", bus.clock.cycles_per_ms());
     // One that does nothing goes down to a 486's speed.
     run(&mut bus, &mut pacer, true, 0, 20_000);
     assert_eq!(bus.clock.cycles_per_ms(), 20_000);
