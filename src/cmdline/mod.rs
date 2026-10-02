@@ -38,6 +38,10 @@ pub struct LineEditor {
     cursor_shape: Option<u16>,
     /// Ctrl+R or Ctrl+S searching the history.
     search: Option<search::Search>,
+    /// The rest of the line suggested after its end (`suggest`).
+    suggestion: Vec<u8>,
+    /// The attribute the suggestion shows in.
+    suggestion_attr: u8,
 }
 
 /// In the shell's segment after the line's buffer: how many characters of
@@ -58,6 +62,7 @@ impl LineEditor {
         }
         let cursor = cells.len() + self.line.cursor;
         cells.extend(self.line.text.iter().map(|&b| (b, self.attr)));
+        cells.extend(self.suggestion.iter().map(|&b| (b, self.suggestion_attr)));
         (cells, cursor)
     }
 
@@ -74,6 +79,7 @@ impl LineEditor {
             line: Line::new(text, cursor),
             anchor: render::cursor_cell(cpu).saturating_sub(cursor),
             attr: 0x07,
+            suggestion_attr: suggestion_attr(cpu, 0x07),
             // Written again whole.
             shown: vec![(0, 0); shown],
             plain: matches!(cpu.shell_wait, Some(ShellWait::Line(_))),
@@ -111,9 +117,11 @@ pub fn configure(cpu: &mut Cpu, settings: &settings::ShellSettings) {
 /// begins at the cursor.
 pub fn start(cpu: &mut Cpu) {
     let saved = (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx());
+    let attr = render::attribute_at_cursor(cpu);
     let ed = LineEditor {
         anchor: render::cursor_cell(cpu),
-        attr: render::attribute_at_cursor(cpu),
+        attr,
+        suggestion_attr: suggestion_attr(cpu, attr),
         plain: matches!(cpu.shell_wait, Some(ShellWait::Line(_))),
         ..Default::default()
     };
@@ -162,6 +170,10 @@ pub fn key(cpu: &mut Cpu) {
         None => LineEditor::recover(cpu),
     };
     let done = edit(cpu, &mut ed, key);
+    ed.suggestion = match done {
+        Done::No => suggest(cpu, &ed),
+        _ => Vec::new(),
+    };
     if !matches!(done, Done::No) {
         // The cursor after the line, which goes on in the rows below.
         ed.line.end();
@@ -210,6 +222,16 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
         Key::Ctrl(b'W') => line.delete_blank_word_back(),
         Key::Del => line.delete(),
         Key::CtrlDel => line.delete_word(),
+        // At the end Right and End take the suggestion, and Ctrl+Right its
+        // next word.
+        Key::Right | Key::End if line.cursor == line.text.len() && !ed.suggestion.is_empty() => {
+            line.insert_all(&ed.suggestion);
+        }
+        Key::CtrlRight if line.cursor == line.text.len() && !ed.suggestion.is_empty() => {
+            let blanks = ed.suggestion.iter().take_while(|&&b| b == b' ').count();
+            let word = ed.suggestion[blanks..].iter().take_while(|&&b| b != b' ').count();
+            line.insert_all(&ed.suggestion[..blanks + word]);
+        }
         Key::Left => line.left(),
         Key::Right => line.right(),
         Key::Home => line.home(),
@@ -286,6 +308,46 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
     Done::No
 }
 
+/// The attribute a suggestion shows in on a screen of attribute `attr`:
+/// the palette's colour, or underlined on a monochrome adapter's screen,
+/// whose dark grey doesn't show.
+fn suggestion_attr(cpu: &Cpu, attr: u8) -> u8 {
+    if cpu.bus.read_8(0x0449) == 7 {
+        return (attr & 0x80) | 0x01;
+    }
+    cpu.shell_settings.palette.suggestion.on(attr)
+}
+
+/// What clink's autosuggest shows after the end of the line: the rest of
+/// the newest line in the history that begins as this one does, or else
+/// of the first name Tab completes the last word to.
+fn suggest(cpu: &Cpu, ed: &LineEditor) -> Vec<u8> {
+    let line = &ed.line;
+    if ed.plain || ed.search.is_some() || !cpu.shell_settings.autosuggest || line.text.is_empty() || line.cursor < line.text.len() {
+        return Vec::new();
+    }
+    let typed = dosstr::from_bytes(&line.text);
+    if let Some(entry) = cpu.shell_history.suggest(&typed) {
+        return dosstr::to_bytes(entry).split_off(line.text.len());
+    }
+    if line.text.ends_with(b" ") {
+        return Vec::new();
+    }
+    let (start, names) = complete::candidates(cpu, &line.text);
+    let word = &line.text[start..];
+    let Some(name) = names.first().map(|n| dosstr::to_bytes(n)) else { return Vec::new() };
+    if name.len() <= word.len() || !name[..word.len()].eq_ignore_ascii_case(word) {
+        return Vec::new();
+    }
+    let mut rest = name[word.len()..].to_vec();
+    // In the case of what was typed.
+    if word.iter().any(u8::is_ascii_lowercase) && !word.iter().any(u8::is_ascii_uppercase) {
+        rest.make_ascii_lowercase();
+    }
+    rest.truncate(crate::shell::MAX_LINE - line.text.len());
+    rest
+}
+
 /// Ctrl+Space or Alt+=, as clink's possible-completions: the names Tab
 /// goes through listed in columns under the line, then the prompt and the
 /// line again.
@@ -294,6 +356,9 @@ fn list_completions(cpu: &mut Cpu, ed: &mut LineEditor) {
     if names.is_empty() {
         return;
     }
+    // Without the suggestion, which would stay on the screen above.
+    ed.suggestion.clear();
+    render::draw(cpu, ed);
     let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
     let width = names.iter().map(|n| n.len()).max().unwrap_or(0) + 2;
     let across = (cols.saturating_sub(1) / width).max(1);

@@ -707,10 +707,54 @@ fn ctrl_space_lists_the_names_that_fit() {
     cpu.bus.write_8(0x0417, flags);
     let text = screen_text(&cpu);
     let rows: Vec<&str> = text.as_bytes().chunks(80).map(|r| std::str::from_utf8(r).unwrap().trim_end()).collect();
-    assert_eq!(&rows[..3], ["C:\\>g", "GOTO    GO.EXE  GAMES", "C:\\>g"], "{}", text);
+    // The line again, with the suggestion.
+    assert_eq!(&rows[..3], ["C:\\>g", "GOTO    GO.EXE  GAMES", "C:\\>goto"], "{}", text);
     assert_eq!(cursor_at(&cpu), (5, 2));
     // Alt+= as well; the line goes on.
     cpu.bus.keyboard_buffer.push_back(0x8300);
     type_keys(&mut cpu, "o\r");
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("go"));
+}
+
+/// The attribute of the cell at (column, row).
+fn attr_at(cpu: &Cpu, col: usize, row: usize) -> u8 {
+    cpu.bus.vga.vram_text[(row * 80 + col) * 2 + 1]
+}
+
+#[test]
+fn the_rest_of_a_line_from_the_history_is_suggested() {
+    let base = scratch("suggest", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    for line in ["echo first", "echo second"] {
+        type_keys(&mut cpu, &format!("{}\r", line));
+        assert_eq!(run_until_command(&mut cpu).as_deref(), Some(line));
+    }
+    type_keys(&mut cpu, "echo f");
+    run_keys(&mut cpu);
+    let row = cursor_at(&cpu).1 as usize;
+    assert_eq!(last_row_with(&cpu, "C:\\>echo").as_deref(), Some("C:\\>echo first"));
+    // In dark grey, after the cursor; Enter runs what was typed.
+    assert_eq!(cursor_at(&cpu).0, 10);
+    assert_eq!((attr_at(&cpu, 9, row), attr_at(&cpu, 10, row)), (0x07, 0x08));
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo f"));
+    assert_eq!(last_row_with(&cpu, "C:\\>echo f").as_deref(), Some("C:\\>echo f"));
+
+    // Right takes it, Ctrl+Right a word of it.
+    type_keys(&mut cpu, "echo s");
+    extended_key(&mut cpu, RIGHT);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo second"));
+    type_keys(&mut cpu, "ec");
+    extended_key(&mut cpu, CTRL_RIGHT);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo"));
+
+    // Turned off, none.
+    cpu.shell_settings.autosuggest = false;
+    type_keys(&mut cpu, "echo s");
+    extended_key(&mut cpu, RIGHT);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo s"));
 }
