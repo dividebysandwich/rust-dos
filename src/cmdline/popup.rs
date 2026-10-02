@@ -89,7 +89,7 @@ impl Popup {
         }
         let entries = cpu.shell_history.entries();
         let longest = self.shown.iter().map(|&i| entries[i].chars().count()).max().unwrap_or(0);
-        let width = (longest + 4).clamp(36, cols.saturating_sub(4).max(10));
+        let width = (longest + 4).clamp(38, cols.saturating_sub(2));
         let height = self.height().min(self.shown.len().max(1)) + 2;
         let (left, top) = ((cols - width) / 2, (rows.saturating_sub(height)) / 2);
         s.fill(top, left, width, height, b' ', WINDOW);
