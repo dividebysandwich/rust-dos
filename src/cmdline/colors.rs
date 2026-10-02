@@ -71,9 +71,7 @@ pub fn classify(line: &[u8], is_builtin: impl Fn(&str) -> bool, mut is_program: 
             } else if short > i && is_builtin(&dosstr::from_bytes(&line[i..short])) {
                 end = short;
                 Kind::Command
-            } else if name.len() == 2 && name.ends_with(':') && name.as_bytes()[0].is_ascii_alphabetic() {
-                Kind::Executable
-            } else if is_program(&name) {
+            } else if (name.len() == 2 && name.ends_with(':') && name.as_bytes()[0].is_ascii_alphabetic()) || is_program(&name) {
                 Kind::Executable
             } else {
                 Kind::Unrecognized
