@@ -217,7 +217,7 @@ pub fn render_prompt(cpu: &Cpu) -> Vec<u8> {
 /// Print code page 437 text with INT 10h's teletype, at the cursor of the
 /// page shown, as the shell's own code prints; the registers stay as they
 /// were.
-fn teletype(cpu: &mut Cpu, text: &[u8]) {
+pub(crate) fn teletype(cpu: &mut Cpu, text: &[u8]) {
     // In a Windows virtual machine, on the machine's own screen.
     if cpu.v86() && cpu.bus.guest_paging.is_some() {
         crate::interrupts::teletype(cpu, text);

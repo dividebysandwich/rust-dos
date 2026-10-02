@@ -317,10 +317,10 @@ fn control_keys_are_not_typed() {
     let mut cpu = Cpu::new(base.join("c"));
     cpu.load_shell();
     // Tab and Ctrl+A used to show as a circle and a face.
-    type_keys(&mut cpu, "a\tb\x01c\r");
-    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("abc"));
+    type_keys(&mut cpu, "q\tb\x01c\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("qbc"));
     let text = screen_text(&cpu);
-    assert_eq!(text.trim_end(), "C:\\>abc", "{}", text);
+    assert_eq!(text.trim_end(), "C:\\>qbc", "{}", text);
 }
 
 const SHIFT_TAB: u8 = 0x0F;
@@ -345,8 +345,9 @@ fn tab_completes_file_and_directory_names() {
     let mut cpu = Cpu::new(base.join("c"));
     cpu.load_shell();
 
-    // The programs first, then the others by name, and round again.
-    for (tabs, line) in [(1, "GO.EXE"), (2, "GAMES"), (3, "GRAPHICS"), (4, "GO.EXE")] {
+    // The built-ins, the programs, then the others by name, and round
+    // again.
+    for (tabs, line) in [(1, "GOTO"), (2, "GO.EXE"), (3, "GAMES"), (4, "GRAPHICS"), (5, "GOTO")] {
         type_keys(&mut cpu, "g");
         type_keys(&mut cpu, &"\t".repeat(tabs));
         type_keys(&mut cpu, "\r");
@@ -361,6 +362,12 @@ fn tab_completes_file_and_directory_names() {
     extended_key(&mut cpu, SHIFT_TAB);
     type_keys(&mut cpu, "\r");
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("GAMES"));
+    // The word before the cursor, the rest of the line staying.
+    type_keys(&mut cpu, "type g\\x");
+    extended_key(&mut cpu, LEFT);
+    extended_key(&mut cpu, LEFT);
+    type_keys(&mut cpu, "\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("type GO.EXE\\x"));
 
     // The last word, in the directory it names; typing more starts over.
     type_keys(&mut cpu, "type ga\t\\d\t\t\r");
@@ -653,4 +660,57 @@ fn ctrl_r_searches_the_history_as_text_is_typed() {
     extended_key(&mut cpu, END);
     type_keys(&mut cpu, "2\r");
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("copy a.txt b.bak2"));
+}
+
+#[test]
+fn tab_completes_commands_programs_on_the_path_and_variables() {
+    let base = scratch("tab_commands", &["c/BIN", "c/MEDIA"]);
+    fs::write(base.join("c/BIN/MEDIAPLR.EXE"), b"").unwrap();
+    fs::write(base.join("c/BIN/README.TXT"), b"").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.environment.retain(|(n, _)| n != "PATH");
+    cpu.environment.push(("PATH".into(), "C:\\BIN".into()));
+    cpu.environment.push(("BLASTER".into(), "A220".into()));
+    cpu.load_shell();
+    type_keys(&mut cpu, "di\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("DIR"));
+    // A program on the PATH, without its extension, before a directory.
+    type_keys(&mut cpu, "me\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("MEM"));
+    type_keys(&mut cpu, "me\t\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("MEDIAPLR"));
+    type_keys(&mut cpu, "me\t\t\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("MEDIA"));
+    // After SET the variables, and after a '%' anywhere.
+    type_keys(&mut cpu, "set b\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("set BLASTER"));
+    type_keys(&mut cpu, "echo %bl\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo %BLASTER%"));
+    // After a pipe, a command again.
+    type_keys(&mut cpu, "dir | so\t\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("dir | SORT"));
+}
+
+#[test]
+fn ctrl_space_lists_the_names_that_fit() {
+    let base = scratch("tab_list", &["c/GAMES"]);
+    fs::write(base.join("c/GO.EXE"), b"").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, "g");
+    run_keys(&mut cpu);
+    // Ctrl held: the BIOS's shift flags.
+    let flags = cpu.bus.read_8(0x0417);
+    cpu.bus.write_8(0x0417, flags | 0x04);
+    cpu.bus.keyboard_buffer.push_back(0x3920);
+    run_keys(&mut cpu);
+    cpu.bus.write_8(0x0417, flags);
+    let text = screen_text(&cpu);
+    let rows: Vec<&str> = text.as_bytes().chunks(80).map(|r| std::str::from_utf8(r).unwrap().trim_end()).collect();
+    assert_eq!(&rows[..3], ["C:\\>g", "GOTO    GO.EXE  GAMES", "C:\\>g"], "{}", text);
+    assert_eq!(cursor_at(&cpu), (5, 2));
+    // Alt+= as well; the line goes on.
+    cpu.bus.keyboard_buffer.push_back(0x8300);
+    type_keys(&mut cpu, "o\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("go"));
 }

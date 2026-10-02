@@ -200,6 +200,7 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
     match keys::decode(key) {
         Key::Enter => return Done::Enter,
         Key::Ctrl(b'C') => return Done::Break,
+        Key::Char(b' ') if !ed.plain && cpu.bus.read_8(0x0417) & 0x04 != 0 => list_completions(cpu, ed),
         Key::Char(c) => {
             line.insert(c);
         }
@@ -267,6 +268,7 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
                 }
             }
         }
+        Key::AltEquals => list_completions(cpu, ed),
         Key::Tab | Key::BackTab => {
             let forward = keys::decode(key) == Key::Tab;
             let (before, after) = line.text.split_at(line.cursor);
@@ -282,4 +284,41 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
         _ => {}
     }
     Done::No
+}
+
+/// Ctrl+Space or Alt+=, as clink's possible-completions: the names Tab
+/// goes through listed in columns under the line, then the prompt and the
+/// line again.
+fn list_completions(cpu: &mut Cpu, ed: &mut LineEditor) {
+    let (_, names) = complete::candidates(cpu, &ed.line.text[..ed.line.cursor]);
+    if names.is_empty() {
+        return;
+    }
+    let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
+    let width = names.iter().map(|n| n.len()).max().unwrap_or(0) + 2;
+    let across = (cols.saturating_sub(1) / width).max(1);
+    // As many rows as leave the prompt on the screen.
+    let rows = names.len().div_ceil(across).min(cpu.bus.text_rows().saturating_sub(4).max(1));
+    let mut text = b"\r\n".to_vec();
+    for row in names.chunks(across).take(rows) {
+        for name in row {
+            text.extend(dosstr::to_bytes(&format!("{:width$}", name, width = width)));
+        }
+        text.extend(b"\r\n");
+    }
+    let shown = rows * across;
+    if names.len() > shown {
+        text.extend(format!("...and {} more\r\n", names.len() - shown).bytes());
+    }
+    let saved = (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx());
+    render::set_cursor(cpu, ed.anchor + ed.shown.len());
+    crate::shell::teletype(cpu, &text);
+    if cpu.batch.echo {
+        let (col, row) = (render::cursor_cell(cpu) % cols, render::cursor_cell(cpu) / cols);
+        cpu.shell_prompt_at = Some((col as u8, row as u8));
+        crate::shell::show_prompt(cpu);
+    }
+    restore(cpu, saved);
+    ed.anchor = render::cursor_cell(cpu);
+    ed.shown.clear();
 }
