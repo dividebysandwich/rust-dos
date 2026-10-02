@@ -90,10 +90,14 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["sdl", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
+default = ["sdl", "gl", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
-sdl = ["dep:sdl2", "dep:glow", "dep:axum", "dep:ureq"]
+sdl = ["dep:sdl2", "dep:axum", "dep:ureq"]
+# The window drawn with OpenGL 3: the CRT shaders, and the 3dfx card at
+# higher resolutions. Without it (as on Redox), SDL's renderer draws the
+# picture, without them.
+gl = ["sdl", "dep:glow"]
 midi = ["dep:rustysynth"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]

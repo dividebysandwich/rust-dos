@@ -2,9 +2,15 @@
 //! fullscreen, 4:3 aspect correction, the scaling filter and the CRT
 //! shader. OpenGL 3 draws it (gl.rs), or where there is none SDL's own
 //! renderer, without the shaders. With OpenGL, the 3dfx card's picture
-//! can be drawn at a higher resolution (voodoo_gl.rs).
+//! can be drawn at a higher resolution (voodoo_gl.rs). Built without the
+//! `gl` feature, there is only SDL's renderer (nogl.rs).
 
+#[cfg(feature = "gl")]
 mod gl;
+#[cfg(not(feature = "gl"))]
+#[path = "display/nogl.rs"]
+mod gl;
+#[cfg(feature = "gl")]
 mod voodoo_gl;
 
 use crate::config::{Filter, Settings};

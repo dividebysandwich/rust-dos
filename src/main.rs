@@ -117,6 +117,19 @@ struct Args {
 /// The SDL sound device, where the mixed output goes.
 struct SdlAudio(sdl2::audio::AudioQueue<i16>);
 
+/// The sound device, playing.
+fn open_audio(sdl_context: &sdl2::Sdl) -> Result<sdl2::audio::AudioQueue<i16>, String> {
+    let desired_spec = sdl2::audio::AudioSpecDesired {
+        freq: Some(44100),
+        channels: Some(2),
+        // SDL's default is 2048 frames, 46 ms of latency.
+        samples: Some(512),
+    };
+    let device = sdl_context.audio()?.open_queue::<i16, _>(None, &desired_spec)?;
+    device.resume();
+    Ok(device)
+}
+
 impl audio::AudioOutput for SdlAudio {
     fn queued_frames(&self) -> usize {
         self.0.size() as usize / 4
@@ -207,17 +220,9 @@ fn main() -> Result<(), String> {
     // SDL2 Setup
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
-    let audio_subsystem = sdl_context.audio()?;
-    let desired_spec = sdl2::audio::AudioSpecDesired {
-        freq: Some(44100),
-        channels: Some(2),
-        // SDL's default is 2048 frames, 46 ms of latency.
-        samples: Some(512),
-    };
-    let audio_device = audio_subsystem
-        .open_queue::<i16, _>(None, &desired_spec)
-        .map_err(|e| e.to_string())?;
-    audio_device.resume();
+    // Without a sound device (as in a virtual machine without a sound
+    // card) the emulator runs silent.
+    let audio_device = open_audio(&sdl_context);
     // Game controllers for the game port; the emulator does without them.
     let controller_subsystem = match sdl_context.game_controller() {
         Ok(subsystem) => Some(subsystem),
@@ -248,7 +253,13 @@ fn main() -> Result<(), String> {
     for warning in cpu.bus.start_lan() {
         config_warning(&mut cpu, &warning);
     }
-    cpu.bus.audio_device = Some(Box::new(SdlAudio(audio_device)));
+    match audio_device {
+        Ok(device) => cpu.bus.audio_device = Some(Box::new(SdlAudio(device))),
+        Err(e) => {
+            eprintln!("[AUDIO] No sound device, so no sound: {}", e);
+            cpu.bus.log_string(&format!("[AUDIO] No sound device, so no sound: {}", e));
+        }
+    }
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
