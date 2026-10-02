@@ -56,7 +56,7 @@ pub struct Palette {
 impl Default for Palette {
     fn default() -> Self {
         Palette {
-            prompt: DosColor(Some(10)),
+            prompt: DosColor(Some(7)),
             command: DosColor(Some(15)),
             executable: DosColor(Some(11)),
             unrecognized: DosColor(Some(12)),

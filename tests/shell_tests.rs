@@ -768,10 +768,10 @@ fn the_prompt_and_the_line_are_coloured() {
     type_keys(&mut cpu, "dir /w x | game | nope");
     run_keys(&mut cpu);
     let attrs: Vec<u8> = (0..26).map(|col| attr_at(&cpu, col, 0)).collect();
-    // C:\> light green; DIR white, /W yellow, x and the pipes as the
+    // C:\> light grey; DIR white, /W yellow, x and the pipes as the
     // screen is, GAME light cyan, NOPE light red.
     let expected = [
-        [0x0A; 4].as_slice(),
+        [0x07; 4].as_slice(),
         &[0x0F; 3],
         &[0x07],
         &[0x0E; 2],
@@ -792,7 +792,7 @@ fn the_prompt_and_the_line_are_coloured() {
     // The row before the one Enter went on to.
     let row = cursor_at(&cpu).1 as usize - 1;
     assert_eq!(last_row_with(&cpu, "C:\\").as_deref(), Some("C:\\>x"));
-    assert_eq!((0..5).map(|col| attr_at(&cpu, col, row)).collect::<Vec<_>>(), [0x0E, 0x0E, 0x0E, 0x0A, 0x0C]);
+    assert_eq!((0..5).map(|col| attr_at(&cpu, col, row)).collect::<Vec<_>>(), [0x0E, 0x0E, 0x0E, 0x07, 0x0C]);
     cpu.shell_settings.colors = false;
     type_keys(&mut cpu, "dir\r");
     run_until_command(&mut cpu);

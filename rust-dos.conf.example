@@ -454,7 +454,7 @@
 # The colors: black, blue, green, cyan, red, magenta, brown, lightgray,
 # darkgray, lightblue, lightgreen, lightcyan, lightred, lightmagenta,
 # yellow, white, or default (the screen's).
-#prompt_color=lightgreen
+#prompt_color=lightgray
 #command_color=white
 #executable_color=lightcyan
 #unrecognized_color=lightred
