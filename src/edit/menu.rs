@@ -16,7 +16,7 @@ pub enum Action {
     Clear,
     Find,
     RepeatFind,
-    Change,
+    Replace,
     Keyboard,
     About,
 }
@@ -67,7 +67,7 @@ pub const MENUS: [Menu; 4] = [
         items: &[
             item("&Find...", "", Action::Find, "Finds specified text"),
             item("&Repeat Last Find", "F3", Action::RepeatFind, "Finds next occurrence of text specified in previous search"),
-            item("&Change...", "", Action::Change, "Finds and changes specified text"),
+            item("Re&place...", "", Action::Replace, "Finds and replaces specified text"),
         ],
     },
     Menu {

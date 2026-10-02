@@ -1,6 +1,6 @@
 //! EDIT: a full-screen text editor in the style of MS-DOS EDIT.COM, built
 //! into the shell. A menu bar (File, Edit, Search, Help), dialogs to open
-//! and save files, cut, copy and paste, Find and Change.
+//! and save files, cut, copy and paste, Find and Replace.
 //!
 //! It runs as one of the shell's waits (`ShellWait::Edit`): the shell's
 //! code reads the keys and hands each one over (`key`), and on every tick
@@ -78,7 +78,7 @@ enum Kind {
     Open { dir: String, filter: String },
     SaveAs { dir: String, filter: String, then: Then },
     Find,
-    Change,
+    Replace,
     /// Find and Verify, at a match: where it started and whether it went
     /// round to the top.
     Verify { origin: Pos, wrapped: bool },
@@ -87,13 +87,13 @@ enum Kind {
     Info,
 }
 
-/// The controls of the file dialogs and of Find and Change, by position.
+/// The controls of the file dialogs and of Find and Replace, by position.
 mod at {
     pub const NAME: usize = 0;
     pub const FILES: usize = 1;
     pub const DIRS: usize = 2;
     pub const FIND: usize = 0;
-    pub const CHANGE_TO: usize = 1;
+    pub const REPLACE_WITH: usize = 1;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,7 +132,7 @@ pub struct Editor {
     /// The file, as a full DOS path; None for an untitled text.
     path: Option<String>,
     search: Search,
-    change_to: Vec<u8>,
+    replace_with: Vec<u8>,
     saved: Saved,
     mode: Mode,
     alt_held: bool,
@@ -153,7 +153,7 @@ impl Default for Editor {
             buf: Buffer::default(),
             path: None,
             search: Search::default(),
-            change_to: Vec::new(),
+            replace_with: Vec::new(),
             saved: Saved::default(),
             mode: Mode::Edit,
             alt_held: false,
@@ -172,7 +172,7 @@ crate::state_fields!(Search { text, case, whole_word });
 crate::state_fields!(Buffer { lines, cursor, anchor, top, left, dirty, overwrite });
 crate::state_fields!(Saved { cells, cursor, shape, mouse_installed, mouse_hidden });
 crate::state_fields!(Editor {
-    buf, path, search, change_to, saved,
+    buf, path, search, replace_with, saved,
 } skip {
     // A dialog or menu open goes; the screen is drawn again.
     mode, alt_held, alt_armed, mouse, quit, redraw, cols, rows,
@@ -520,7 +520,7 @@ impl Editor {
                     self.find_next();
                 }
             }
-            Action::Change => self.change_dialog(),
+            Action::Replace => self.replace_dialog(),
             Action::Keyboard => self.keyboard_help(),
             Action::About => {
                 let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
@@ -777,7 +777,7 @@ impl Editor {
         }
     }
 
-    // ----- Find and Change -----
+    // ----- Find and Replace -----
 
     /// The text Find starts with: the selection on one line, the word at
     /// the cursor, or the last search.
@@ -799,17 +799,17 @@ impl Editor {
         self.mode = Mode::Dialog(Box::new(dialog));
     }
 
-    fn change_dialog(&mut self) {
-        let mut dialog = Dialog::new(Kind::Change, "Change", 64, 12)
+    fn replace_dialog(&mut self) {
+        let mut dialog = Dialog::new(Kind::Replace, "Replace", 64, 12)
             .label(2, 3, "Find What:")
-            .label(4, 3, "Change To:")
-            .control(Control::field(2, 14, 46, &self.find_text()))
-            .control(Control::field(4, 14, 46, &self.change_to))
+            .label(4, 3, "Replace With:")
+            .control(Control::field(2, 17, 43, &self.find_text()))
+            .control(Control::field(4, 17, 43, &self.replace_with))
             .control(Control::check(6, 3, "Match Upper/Lowercase", self.search.case))
             .control(Control::check(6, 36, "Whole Word", self.search.whole_word))
             .buttons(
                 9,
-                &[("Find and Verify", Button::FindVerify), ("Change All", Button::ChangeAll), ("Cancel", Button::Cancel)],
+                &[("Find and Verify", Button::FindVerify), ("Replace All", Button::ReplaceAll), ("Cancel", Button::Cancel)],
             );
         dialog.default = Button::FindVerify;
         self.mode = Mode::Dialog(Box::new(dialog));
@@ -824,7 +824,7 @@ impl Editor {
 
     /// The match after `from` that Find and Verify goes to next, going round
     /// to the top once, and not past where it started.
-    fn next_change(&mut self, from: Pos, origin: Pos, wrapped: bool) {
+    fn next_replace(&mut self, from: Pos, origin: Pos, wrapped: bool) {
         let mut wrapped = wrapped;
         let mut found = self.buf.find_forward(from, &self.search);
         if found.is_none() && !wrapped {
@@ -838,9 +838,9 @@ impl Editor {
                 self.buf.scroll_to_cursor(width, height);
                 let mut dialog = Dialog::message(
                     Kind::Verify { origin, wrapped },
-                    "Change",
-                    &["Change this occurrence?"],
-                    &[("Change", Button::Change), ("Skip", Button::Skip), ("Cancel", Button::Cancel)],
+                    "Replace",
+                    &["Replace this occurrence?"],
+                    &[("Replace", Button::Replace), ("Skip", Button::Skip), ("Cancel", Button::Cancel)],
                 );
                 // Out of the way of the match.
                 let row = TEXT_TOP + at.line - self.buf.top;
@@ -849,12 +849,12 @@ impl Editor {
             }
             None => {
                 self.buf.anchor = None;
-                self.info(&["Change complete."]);
+                self.info(&["Replace complete."]);
             }
         }
     }
 
-    /// The search a Find or Change dialog sets.
+    /// The search a Find or Replace dialog sets.
     fn take_search(&mut self, dialog: &Dialog<Kind>, case: usize) {
         self.search = Search { text: dialog.text(at::FIND), case: dialog.checked(case), whole_word: dialog.checked(case + 1) };
     }
@@ -908,29 +908,29 @@ impl Editor {
                         self.find_next();
                     }
                 }
-                (Kind::Change, Button::FindVerify | Button::ChangeAll) => {
+                (Kind::Replace, Button::FindVerify | Button::ReplaceAll) => {
                     self.take_search(&dialog, 2);
-                    self.change_to = dialog.text(at::CHANGE_TO);
+                    self.replace_with = dialog.text(at::REPLACE_WITH);
                     if self.search.text.is_empty() {
                         return;
                     }
-                    if button == Button::ChangeAll {
-                        let count = self.buf.replace_all(&self.search, &self.change_to.clone());
-                        self.info(&[if count > 0 { "Change complete." } else { "Match not found." }]);
+                    if button == Button::ReplaceAll {
+                        let count = self.buf.replace_all(&self.search, &self.replace_with.clone());
+                        self.info(&[if count > 0 { "Replace complete." } else { "Match not found." }]);
                     } else {
                         let origin = self.buf.cursor;
                         match self.buf.find_forward(origin, &self.search).or_else(|| self.buf.find_forward(Pos::default(), &self.search)) {
-                            Some(_) => self.next_change(origin, origin, false),
+                            Some(_) => self.next_replace(origin, origin, false),
                             None => self.info(&["Match not found."]),
                         }
                     }
                 }
-                (Kind::Verify { mut origin, wrapped }, Button::Change | Button::Skip) => {
+                (Kind::Verify { mut origin, wrapped }, Button::Replace | Button::Skip) => {
                     let Some((at, _)) = self.buf.selection() else { return };
                     let len = self.search.text.len();
                     let mut next = Pos::new(at.line, at.col + 1);
-                    if button == Button::Change {
-                        let with = self.change_to.clone();
+                    if button == Button::Replace {
+                        let with = self.replace_with.clone();
                         self.buf.replace_at(at, len, &with);
                         // Where it started moves with the text before it.
                         if at.line == origin.line && at.col < origin.col {
@@ -940,7 +940,7 @@ impl Editor {
                     }
                     self.buf.anchor = None;
                     self.buf.cursor = next;
-                    self.next_change(next, origin, wrapped);
+                    self.next_replace(next, origin, wrapped);
                 }
                 (Kind::SaveChanges(then), Button::Yes) => self.save(cpu, then),
                 (Kind::SaveChanges(then), Button::No) => self.proceed(cpu, then),

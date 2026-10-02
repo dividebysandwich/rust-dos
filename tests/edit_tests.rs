@@ -1,5 +1,5 @@
 //! EDIT, the built-in text editor: opening and saving files through its
-//! menus and dialogs, selecting, copying and pasting, Find and Change,
+//! menus and dialogs, selecting, copying and pasting, Find and Replace,
 //! and a save state taken while it runs.
 
 use rust_dos::cpu::Cpu;
@@ -212,21 +212,21 @@ fn finds_and_repeats() {
 }
 
 #[test]
-fn changes_all_and_verifies() {
-    let dir = scratch("change", &[("A.TXT", b"a-b-a\r\nb a")]);
+fn replaces_all_and_verifies() {
+    let dir = scratch("replace", &[("A.TXT", b"a-b-a\r\nb a")]);
     let mut cpu = machine(&dir);
     edit(&mut cpu, "A.TXT");
-    keys(&mut cpu, &[ALT_S, b'c' as u16]);
-    assert!(screen(&cpu).contains("Change To:"), "{}", screen(&cpu));
+    keys(&mut cpu, &[ALT_S, b'p' as u16]);
+    assert!(screen(&cpu).contains("Replace With:"), "{}", screen(&cpu));
     keys(&mut cpu, &[TAB]);
     text(&mut cpu, "XY");
-    // Tab to Change All.
+    // Tab to Replace All.
     keys(&mut cpu, &[TAB, TAB, TAB, TAB, ENTER]);
-    assert!(screen(&cpu).contains("Change complete."), "{}", screen(&cpu));
+    assert!(screen(&cpu).contains("Replace complete."), "{}", screen(&cpu));
     keys(&mut cpu, &[ENTER]);
 
-    // Find and Verify: change the first, skip the second.
-    keys(&mut cpu, &[0x7700, ALT_S, b'c' as u16]);
+    // Find and Verify: replace the first, skip the second.
+    keys(&mut cpu, &[0x7700, ALT_S, b'p' as u16]);
     for _ in 0..2 {
         keys(&mut cpu, &[0x0E08]);
     }
@@ -236,11 +236,11 @@ fn changes_all_and_verifies() {
         keys(&mut cpu, &[0x0E08]);
     }
     text(&mut cpu, "BB\r");
-    assert!(screen(&cpu).contains("Change this occurrence?"), "{}", screen(&cpu));
-    keys(&mut cpu, &[b'c' as u16]);
-    assert!(screen(&cpu).contains("Change this occurrence?"), "{}", screen(&cpu));
+    assert!(screen(&cpu).contains("Replace this occurrence?"), "{}", screen(&cpu));
+    keys(&mut cpu, &[b'r' as u16]);
+    assert!(screen(&cpu).contains("Replace this occurrence?"), "{}", screen(&cpu));
     keys(&mut cpu, &[b's' as u16]);
-    assert!(screen(&cpu).contains("Change complete."), "{}", screen(&cpu));
+    assert!(screen(&cpu).contains("Replace complete."), "{}", screen(&cpu));
     keys(&mut cpu, &[ENTER]);
     save_and_exit(&mut cpu);
     assert_eq!(fs::read(dir.join("A.TXT")).unwrap(), b"XY-BB-XY\r\nb XY");

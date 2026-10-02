@@ -463,7 +463,7 @@ impl Buffer {
         self.dirty = true;
     }
 
-    /// Change All: every match, from the top; how many there were.
+    /// Replace All: every match, from the top; how many there were.
     pub fn replace_all(&mut self, search: &Search, with: &[u8]) -> usize {
         let mut count = 0;
         let mut at = Pos::default();

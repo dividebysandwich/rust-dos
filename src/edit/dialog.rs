@@ -12,8 +12,8 @@ pub enum Button {
     Yes,
     No,
     FindVerify,
-    ChangeAll,
-    Change,
+    ReplaceAll,
+    Replace,
     Skip,
 }
 
