@@ -106,11 +106,13 @@ const BASE_BITS: u64 = 0xFF00_00FF_FFFF_0000;
 /// A descriptor's limit bits and G.
 const LIMIT_BITS: u64 = 0x008F_0000_0000_FFFF;
 
-/// Whether a client may put `desc` in its LDT: a code or data segment at
-/// its level (present or not).
-fn allowed(desc: u64) -> bool {
+/// `desc` as a client may put it in its LDT: a code or data segment
+/// (present or not), at its level. One at another level is moved to it,
+/// as other hosts do: an extender's own host runs its clients at level 0,
+/// and their sound drivers ask for that (Sam & Max's iMUSE, CL=93h).
+fn at_client_level(desc: u64) -> Option<u64> {
     let access = (desc >> 40) as u8;
-    access & 0x10 != 0 && access & 0x60 == 0x60
+    (access & 0x10 != 0).then_some(desc | 0x60 << 40)
 }
 
 fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
@@ -160,9 +162,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
         0x0009 => {
             let (cl, ch) = (ctx.reg16(ECX) as u8, (ctx.reg16(ECX) >> 8) as u8);
             let rights = (cl as u64) << 40 | ((ch & 0xD0) as u64) << 48;
-            if !allowed(rights) || ch & 0x20 != 0 {
-                return Err(INVALID_VALUE);
-            }
+            let rights = at_client_level(rights).filter(|_| ch & 0x20 == 0).ok_or(INVALID_VALUE)?;
             with_desc(cpu, ctx.reg16(EBX), |d| (d & !0x00D0_FF00_0000_0000) | rights)?;
         }
         // A data descriptor for the segment BX: for code, a writable one;
@@ -192,10 +192,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             for (i, byte) in bytes.iter_mut().enumerate() {
                 *byte = cpu.read_u8(Seg::ES, at.wrapping_add(i as u32)).map_err(|_| INVALID_VALUE)?;
             }
-            let desc = u64::from_le_bytes(bytes);
-            if !allowed(desc) {
-                return Err(INVALID_VALUE);
-            }
+            let desc = at_client_level(u64::from_le_bytes(bytes)).ok_or(INVALID_VALUE)?;
             let ldt = client(cpu).block;
             write_desc(&mut cpu.bus, ldt, index, desc);
         }

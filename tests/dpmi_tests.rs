@@ -172,6 +172,12 @@ fn services_program(bits32: bool) -> Vec<u8> {
         a.mov(dx, 0xFFFF)?;
         a.int(0x31)?;
         a.jc(fail)?;
+        // Access rights for level 0, as for an extender's own host, which
+        // the client gets at its level.
+        a.mov(ax, 0x0009)?;
+        a.mov(cx, 0x0093)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
         a.mov(es, word_ptr(R + 18))?;
         a.mov(ax, word_ptr(MAGIC as u32).es())?;
         a.mov(word_ptr(R + 20), ax)?;
