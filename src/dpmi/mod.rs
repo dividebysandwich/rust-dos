@@ -1000,6 +1000,17 @@ fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
 /// Interrupt `vector` in the client's context `ctx`: to its handler, or
 /// the default one's.
 fn interrupt(cpu: &mut Cpu, vector: u8, ctx: Context) {
+    // A hardware interrupt the host is reflecting to real mode that comes
+    // back up, as DOS/4GW's real-mode stubs send it (INT n in protected
+    // mode from a callback): on to the real-mode handler the vector had
+    // before the client's, rather than round its handlers again until the
+    // stack runs out. HMI's IRQ detection chains its handler down so.
+    let reflecting = cpu.bus.dpmi.frames.iter().any(|f| f.kind == F_REFLECT && f.vector == vector);
+    if reflecting && is_irq(cpu, vector) {
+        let original = cpu.bus.dpmi.hooks.iter().find(|&&(v, _)| v == vector).map(|&(_, original)| original);
+        reflect_to(cpu, vector, ctx, original.unwrap_or(0));
+        return;
+    }
     match client(cpu).handler(vector) {
         Some(handler) => call_handler(cpu, ctx, handler),
         None => default_interrupt(cpu, vector, ctx),
@@ -1136,6 +1147,11 @@ fn keep_lpms(client: &mut Client, ctx: &Context) {
 /// for a hardware interrupt, whose code the interrupt stopped anywhere.
 fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
     let target = real_mode_handler(cpu, vector);
+    reflect_to(cpu, vector, ctx, target);
+}
+
+/// Reflect interrupt `vector` to the real-mode handler at `target`.
+fn reflect_to(cpu: &mut Cpu, vector: u8, ctx: Context, target: u32) {
     if target == 0 {
         // No handler: nothing happens, as for a real-mode INT.
         cpu.note_null_interrupt(vector);
