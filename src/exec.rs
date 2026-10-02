@@ -415,6 +415,10 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
         return Shell::Handled;
     }
 
+    if cpu.state == CpuState::RebootShell && std::mem::take(&mut cpu.reboot) {
+        crate::boot::reboot_dos(cpu);
+        return Shell::Reloaded;
+    }
     if cpu.state == CpuState::RebootShell {
         cpu.load_shell();
         cpu.state = CpuState::Running;

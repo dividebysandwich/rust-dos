@@ -501,9 +501,10 @@ async fn control(State(s): State<AppState>, Path(action): Path<String>, body: By
         "step" => s.call_json(Cmd::Step { count: b.count.unwrap_or(1) }, timeout).await,
         "step_over" => s.call_json(Cmd::StepOver, timeout).await,
         "reboot_shell" => s.call_json(Cmd::RebootShell, DEFAULT_TIMEOUT).await,
+        "reboot" => s.call_json(Cmd::Reboot, DEFAULT_TIMEOUT).await,
         _ => Err(ApiError(
             StatusCode::NOT_FOUND,
-            format!("unknown action '{}' (pause, resume, step, step_over, reboot_shell)", action),
+            format!("unknown action '{}' (pause, resume, step, step_over, reboot_shell, reboot)", action),
         )),
     }
 }
@@ -952,6 +953,7 @@ EXECUTION CONTROL
   POST /api/control/step_over                        step, but run a CALL, INT, LOOP or
                                                      REP string instruction to the next one
   POST /api/control/reboot_shell                     kill the running program
+  POST /api/control/reboot                           reset the machine, as Ctrl+Alt+Del
   GET  /api/control/wait?timeout_ms=30000            block until the emulator pauses
   GET  /api/registers        PUT /api/registers {"ax":"1234","flags":"0202"}
   GET  /api/memory?addr=DS:SI&len=256[&format=hex|base64|raw]

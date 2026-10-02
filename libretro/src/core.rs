@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rust_dos::audio;
+use rust_dos::boot::{Startup, StartupItem};
 use rust_dos::config_ui::{ConfigUi, Frontend, UiKey};
 use rust_dos::cpu::Cpu;
 use rust_dos::disk::{DRIVE_C, DriveKind, MountOptions};
@@ -256,26 +257,29 @@ impl Core {
     /// asks for.
     fn boot(&mut self, plan: &content::Plan) {
         let m = &mut self.m;
-        m.cpu.load_shell();
         let content = match &self.content {
             Some(path) => path.file_name().map_or(path.display().to_string(), |n| n.to_string_lossy().into_owned()),
             None => "none".to_string(),
         };
-        let mut notes = vec![format!("Content: {}", content)];
+        let mut notes = vec![("Content: ".to_string(), content)];
         if fs::is_file(&m.base.file) {
-            notes.push(format!("Config file: {}", rust_dos::mount::display_host_path(&m.base.file)));
+            notes.push(("Config file: ".to_string(), rust_dos::mount::display_host_path(&m.base.file)));
         }
-        video::print_banner(&mut m.cpu, &notes);
-        m.cpu.queue_batch_lines(&m.base.config().autoexec);
-        m.cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
-        match &plan.profile {
-            Some(profile) => {
-                if let Err(e) = m.start_game(&profile.id, &profile.text, &profile.dir) {
-                    m.warn(&e);
-                    m.notices.push(e);
-                }
+        // A reboot runs the commands again, the game a profile starts not.
+        let mut commands = vec![
+            StartupItem::Lines(m.base.config().autoexec.clone()),
+            StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
+        ];
+        if plan.profile.is_none() {
+            commands.push(StartupItem::Lines(plan.commands.clone()));
+        }
+        m.cpu.startup = Startup { notes, commands };
+        m.cpu.start_dos();
+        if let Some(profile) = &plan.profile {
+            if let Err(e) = m.start_game(&profile.id, &profile.text, &profile.dir) {
+                m.warn(&e);
+                m.notices.push(e);
             }
-            None => m.cpu.queue_batch_lines(&plan.commands),
         }
         self.target_ticks = m.cpu.bus.clock.now_ticks();
     }

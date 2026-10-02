@@ -211,6 +211,11 @@ pub fn bios_took_scan(bus: &mut Bus, scan: u8) {
     if bios_keystrokes(bus) || scan == 0 || scan >= 0x80 {
         return;
     }
+    if scan == 0x53 && bus.read_8(FLAGS) & 0x0C == 0x0C {
+        // Ctrl+Alt+Del: a warm boot, as `bios_key` has it.
+        bus.guest_write_16(RESET_FLAG, 0x1234);
+        bus.reset_requested = true;
+    }
     let Some(count) = bus.kbd.made.pop_front() else { return };
     for _ in 0..count {
         let Some(&key) = bus.keyboard_buffer.front() else { break };

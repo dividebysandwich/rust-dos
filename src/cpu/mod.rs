@@ -314,6 +314,12 @@ pub struct Cpu {
     /// Where the prompt was printed, (column, row), while a line is typed
     /// after it.
     pub shell_prompt_at: Option<(u8, u8)>,
+    /// How the session started, for a reboot to start it again.
+    pub startup: crate::boot::Startup,
+    /// Set by a reset of the built-in DOS (`bios::post`) with the state
+    /// RebootShell: the machine reboots instead of only the shell
+    /// starting again.
+    pub reboot: bool,
     /// The secondary COMMAND.COMs running, the innermost last.
     pub secondary_shells: Vec<crate::command_com::SecondaryShell>,
     /// Set while a command line of a secondary COMMAND.COM runs: what it
@@ -503,6 +509,8 @@ impl Cpu {
             shell_completion: None,
             shell_wait: None,
             shell_prompt_at: None,
+            startup: crate::boot::Startup::default(),
+            reboot: false,
             secondary_shells: Vec::new(),
             secondary: None,
             stdout_capture: None,
@@ -1311,6 +1319,22 @@ impl Cpu {
             self.bus.drive_activity(drive, crate::diskio::OPEN_BYTES + bytes.len() as u32, access);
         }
         Some(bytes)
+    }
+
+    /// Start the built-in DOS as the session does (`startup`): the shell,
+    /// the box above its first prompt, then the startup's command lines
+    /// and batch files.
+    pub fn start_dos(&mut self) {
+        self.load_shell();
+        crate::video::print_banner(self, &self.startup.notes.clone());
+        for item in self.startup.commands.clone() {
+            match item {
+                crate::boot::StartupItem::Lines(lines) => self.queue_batch_lines(&lines),
+                crate::boot::StartupItem::BatchFile(file) => {
+                    self.queue_batch_file(&file);
+                }
+            }
+        }
     }
 
     /// Run a .BAT file from the virtual disk once the batch lines queued

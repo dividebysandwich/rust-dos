@@ -67,7 +67,9 @@ crate::state_fields!(Cpu {
     tlb, decode_cache, dynrec, seg_loads,
     // The host's: the lines typed at the prompt stay the user's, and the
     // counts and logs are the debugger's.
-    shell_history, shell_completion, null_interrupts, mode_switches, exceptions, exception_log,
+    shell_history, shell_completion, null_interrupts,
+    // The session's, and set only from a reset to the shell handling it.
+    startup, reboot, mode_switches, exceptions, exception_log,
     // Only set while a command runs, never between the batches a state
     // is saved in.
     secondary, stdout_capture, stdin_redirect,

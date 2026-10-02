@@ -33,6 +33,7 @@ use rust_dos::{
     video,
 };
 use rust_dos::achievements::{Achievements, http::HttpTransport};
+use rust_dos::boot::{Startup, StartupItem};
 use rust_dos::games::{ActiveGame, GameEntry, NewGame};
 use rust_dos::hardware::Hardware;
 use rust_dos::savestate::{self, slots};
@@ -271,24 +272,21 @@ fn main() -> Result<(), String> {
     achievements.hardcore_allowed = args.debug_server.is_none();
     let mut next_check = 0u64;
 
-    // Load Shell Code into Memory
-    cpu.load_shell();
-    print_banner(&mut cpu, &config, args.no_config);
-
     // Startup commands: the config's [autoexec] lines, then AUTOEXEC.BAT
     // from the C: root if there is one, like the startup sequence a real PC
-    // would run. Each line runs as if typed at the prompt.
+    // would run. Each line runs as if typed at the prompt. A reboot runs
+    // them again.
     cpu.bus.config_dir = config_dir(config.source.as_deref());
-    cpu.queue_batch_lines(&config.autoexec);
+    let mut commands = vec![StartupItem::Lines(config.autoexec.clone())];
     // A disk image that boots at startup boots after the [autoexec] lines,
     // which may mount more for it, in place of AUTOEXEC.BAT: the system on
     // the disk has its own.
-    match startup_boot(&mut cpu, args.no_boot || startup_game.is_some()) {
-        Some(drive) => cpu.queue_batch_lines(&[format!("BOOT -l {}", disk::drive_key(drive))]),
-        None => {
-            cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
-        }
-    }
+    commands.push(match startup_boot(&mut cpu, args.no_boot || startup_game.is_some()) {
+        Some(drive) => StartupItem::Lines(vec![format!("BOOT -l {}", disk::drive_key(drive))]),
+        None => StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
+    });
+    cpu.startup = Startup { notes: banner_notes(&config, args.no_config), commands };
+    cpu.start_dos();
 
     // Cached render target. We re-render the full VGA surface only when
     // `cpu.bus.vga.dirty` is set — everything else (cursor blink, mouse
@@ -2286,17 +2284,9 @@ fn config_warning(cpu: &mut Cpu, msg: &str) {
     cpu.bus.log_string(&format!("[CONFIG] Warning: {}", msg));
 }
 
-/// The box above the first DOS prompt: the emulator and its version, the
-/// configuration file in use and the way to the settings window.
-fn print_banner(cpu: &mut Cpu, config: &config::Config, no_config: bool) {
-    // Bright cyan, white and yellow on blue.
-    const FRAME: u8 = 0x1B;
-    const TEXT: u8 = 0x1F;
-    const HIGHLIGHT: u8 = 0x1E;
-    // The widest text inside the frame: a line of 80 would wrap.
-    const MAX_WIDTH: usize = 74;
-
-    let label = "Config file: ";
+/// The note in the box above the first DOS prompt: the configuration
+/// file in use.
+fn banner_notes(config: &config::Config, no_config: bool) -> Vec<(String, String)> {
     let file = match &config.source {
         Some(path) => {
             let path = mount::display_host_path(&std::path::absolute(path).unwrap_or_else(|_| path.clone()));
@@ -2305,47 +2295,7 @@ fn print_banner(cpu: &mut Cpu, config: &config::Config, no_config: bool) {
         None if no_config => "none (--no-config)".to_string(),
         None => "none".to_string(),
     };
-    // A path too long for the box keeps its end.
-    let room = MAX_WIDTH - label.len();
-    let file = match file.chars().count() {
-        n if n > room => format!("...{}", file.chars().skip(n - room + 3).collect::<String>()),
-        _ => file,
-    };
-    let lines: [&[(&str, u8)]; 4] = [
-        &[
-            (&format!("Rust-DOS v{}", env!("CARGO_PKG_VERSION")), HIGHLIGHT),
-            (&format!(" - {}", env!("CARGO_PKG_DESCRIPTION")), TEXT),
-        ],
-        &[],
-        &[(label, TEXT), (&file, HIGHLIGHT)],
-        &[
-            ("Press ", TEXT),
-            ("Ctrl+F12", HIGHLIGHT),
-            (" or type ", TEXT),
-            ("DOSCONFIG", HIGHLIGHT),
-            (" to open the settings.", TEXT),
-        ],
-    ];
-    let len = |line: &[(&str, u8)]| line.iter().map(|(text, _)| text.chars().count()).sum::<usize>();
-    let width = lines.iter().map(|line| len(line)).max().unwrap_or(0);
-
-    fn put(cpu: &mut Cpu, text: &str, attr: u8) {
-        let cells: Vec<u8> = text.chars().map(config_ui::cp437).collect();
-        video::print_cp437(cpu, &cells, attr);
-    }
-    put(cpu, &format!("╔{}╗", "═".repeat(width + 2)), FRAME);
-    video::print_string(cpu, "\r\n");
-    for line in lines {
-        put(cpu, "║ ", FRAME);
-        for (text, attr) in line {
-            put(cpu, text, *attr);
-        }
-        put(cpu, &" ".repeat(width - len(line)), TEXT);
-        put(cpu, " ║", FRAME);
-        video::print_string(cpu, "\r\n");
-    }
-    put(cpu, &format!("╚{}╝", "═".repeat(width + 2)), FRAME);
-    video::print_string(cpu, "\r\n\r\n");
+    vec![("Config file: ".to_string(), file)]
 }
 
 /// Find and parse the configuration file (see config.rs for the lookup

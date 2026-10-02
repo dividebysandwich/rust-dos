@@ -536,7 +536,8 @@ pub fn restore_ivt(bus: &mut Bus, keep: &[std::ops::Range<usize>]) {
 /// keyboard controller, port 92h, or a triple fault. Like an AT BIOS, check
 /// the CMOS shutdown status: codes 05h and 0Ah resume a program through the
 /// far pointer at 40:67, which is how 286-era protected mode code gets back
-/// to real mode. Anything else is a cold boot, which ends the program.
+/// to real mode. Anything else boots again: a system booted from a disk
+/// starts over from it, the built-in DOS reboots (`boot::reboot_dos`).
 pub fn post(cpu: &mut Cpu) {
     let status = cpu.bus.cmos.get(crate::cmos::SHUTDOWN_STATUS);
     cpu.bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
@@ -560,10 +561,11 @@ pub fn post(cpu: &mut Cpu) {
         _ if cpu.bus.boot.is_some() => crate::boot::restart(cpu),
         _ => {
             cpu.bus.log_string(&format!(
-                "[BIOS] CPU reset (shutdown code {:02X}h): ending the program",
+                "[BIOS] CPU reset (shutdown code {:02X}h): rebooting",
                 status
             ));
             cpu.state = crate::cpu::CpuState::RebootShell;
+            cpu.reboot = true;
         }
     }
 }

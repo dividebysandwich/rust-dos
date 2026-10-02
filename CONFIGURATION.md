@@ -610,6 +610,11 @@ as a [batch file](README.md#batch-files). A program started here delays the
 following lines until it exits. The settings window's Emulator page edits
 them.
 
+A reboot runs them again, with `C:\AUTOEXEC.BAT`. Ctrl+Alt+Del reboots, as
+does a program that resets the machine (through the keyboard controller,
+port 92h or CF9h, INT 19h or a jump to the reset vector). Memory, the
+devices and the resident programs start over, and the screen is cleared.
+
 ## Settings window
 
 Press **Ctrl+F12**, or type `DOSCONFIG` at the DOS prompt, to open the

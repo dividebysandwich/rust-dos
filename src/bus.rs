@@ -2254,6 +2254,14 @@ impl Bus {
                 }
             }
 
+            // The chipset's reset control register: bit 2 resets the CPU
+            // (bit 1 makes it a hard reset).
+            0xCF9 => {
+                if value & 0x04 != 0 {
+                    self.reset_requested = true;
+                }
+            }
+
             // POST code ports (80h on a PC, 190h for test ROMs).
             0x80 | 0x190 => self.post_code = value,
             0xE9 => {

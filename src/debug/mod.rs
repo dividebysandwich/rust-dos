@@ -125,6 +125,7 @@ pub enum Cmd {
     StepOver,
     WaitPause,
     RebootShell,
+    Reboot,
     GetRegs,
     SetRegs(Map<String, Value>),
     ReadMem { addr: String, len: usize },
@@ -1253,6 +1254,11 @@ impl DebugHub {
             }
             Cmd::RebootShell => {
                 cpu.state = CpuState::RebootShell;
+                self.resume();
+                Reply::Json(json!({"ok": true}))
+            }
+            Cmd::Reboot => {
+                cpu.bus.reset_requested = true;
                 self.resume();
                 Reply::Json(json!({"ok": true}))
             }

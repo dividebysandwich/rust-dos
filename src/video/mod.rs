@@ -873,8 +873,9 @@ pub fn print_char(bus: &mut Bus, ascii: u8) {
 }
 
 /// The box above the first DOS prompt: the emulator and its version, then
-/// `notes`, then the way to the settings.
-pub fn print_banner(cpu: &mut Cpu, notes: &[String]) {
+/// `notes`, (label, value) with the value standing out, then the way to
+/// the settings.
+pub fn print_banner(cpu: &mut Cpu, notes: &[(String, String)]) {
     // Bright cyan, white and yellow on blue, as the rust-dos program has it.
     const FRAME: u8 = 0x1B;
     const TEXT: u8 = 0x1F;
@@ -883,9 +884,17 @@ pub fn print_banner(cpu: &mut Cpu, notes: &[String]) {
     const MAX_WIDTH: usize = 74;
 
     let title = format!("Rust-DOS v{}", env!("CARGO_PKG_VERSION"));
-    let description = " - An x86 DOS emulator written in Rust";
-    let mut lines: Vec<Vec<(String, u8)>> = vec![vec![(title, HIGHLIGHT), (description.to_string(), TEXT)], vec![]];
-    lines.extend(notes.iter().map(|note| vec![(note.chars().take(MAX_WIDTH).collect(), TEXT)]));
+    let description = format!(" - {}", env!("CARGO_PKG_DESCRIPTION"));
+    let mut lines: Vec<Vec<(String, u8)>> = vec![vec![(title, HIGHLIGHT), (description, TEXT)], vec![]];
+    lines.extend(notes.iter().map(|(label, value)| {
+        // A value too long for the box keeps its end.
+        let room = MAX_WIDTH.saturating_sub(label.chars().count());
+        let value = match value.chars().count() {
+            n if n > room => format!("...{}", value.chars().skip(n - room + 3).collect::<String>()),
+            _ => value.clone(),
+        };
+        vec![(label.chars().take(MAX_WIDTH).collect(), TEXT), (value, HIGHLIGHT)]
+    }));
     lines.push(vec![
         ("Press ".to_string(), TEXT),
         ("Ctrl+F12".to_string(), HIGHLIGHT),

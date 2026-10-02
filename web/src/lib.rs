@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use rust_dos::audio::{self, AudioOutput};
+use rust_dos::boot::{Startup, StartupItem};
 use rust_dos::config::{self, Filter, Settings};
 use rust_dos::config_ui::osd::Osd;
 use rust_dos::config_ui::{ConfigUi, Frontend, Host, UiKey};
@@ -310,11 +311,16 @@ impl Machine {
     /// `[autoexec]` lines, C:\AUTOEXEC.BAT and the command lines
     /// `commands`.
     pub fn boot(&mut self, notes: Vec<String>, commands: Vec<String>) {
-        self.cpu.load_shell();
-        video::print_banner(&mut self.cpu, &notes);
-        self.cpu.queue_batch_lines(&self.autoexec);
-        self.cpu.queue_batch_file("C:\\AUTOEXEC.BAT");
-        self.cpu.queue_batch_lines(&commands);
+        let notes = notes.into_iter().map(|note| (note, String::new())).collect();
+        self.cpu.startup = Startup {
+            notes,
+            commands: vec![
+                StartupItem::Lines(self.autoexec.clone()),
+                StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
+                StartupItem::Lines(commands),
+            ],
+        };
+        self.cpu.start_dos();
         self.pacer = Pacer::new(self.settings.cycles, Instant::now());
     }
 

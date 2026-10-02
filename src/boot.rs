@@ -154,7 +154,42 @@ pub fn power_off(cpu: &mut Cpu, why: &str) {
 /// BIOS's vector table and data area, the devices reset and the screen in
 /// text mode.
 pub fn power_on(cpu: &mut Cpu, unit: u8) {
-    // No program, batch file or prompt of the built-in DOS goes on.
+    reset_machine(cpu);
+    let name = unit_drive(&cpu.bus, unit).map_or("?".to_string(), drive_name);
+    cpu.program = format!("BOOT {}", name);
+    // Host directories shared with the system become hard disks, before
+    // the journals start: what goes on them isn't the system's writing.
+    for line in cpu.bus.disk.prepare_shared_disks() {
+        cpu.bus.log_string(&format!("[BOOT] {}", line));
+    }
+    cpu.bus.boot = Some(BootState { unit, ..Default::default() });
+    // Its states and rewind take its disks back with its memory.
+    cpu.bus.disk.keep_journals(true);
+
+    // The BIOS's vector table and data area.
+    let bus = &mut cpu.bus;
+    let hard_disks: Vec<_> = hard_disk_drives(bus)
+        .into_iter()
+        .filter_map(|drive| bus.disk.bios_image(drive).map(|image| image.geometry()))
+        .collect();
+    crate::bios::install_for_boot(bus, &hard_disks);
+    bus.cmos.set_hard_disks(&hard_disks);
+    // The hard disks and a CD image reach the system on the IDE channels
+    // too.
+    bus.attach_ide();
+    bus.refresh_irq();
+
+    // The processor as after a reset, and the screen in text mode.
+    cpu.reset_to_real_mode();
+    crate::instructions::fpu::control::fninit(cpu);
+    crate::interrupts::int10::set_mode(cpu, 0x03);
+}
+
+/// What a reset does to the machine, for a system booted from a disk and
+/// the built-in DOS alike: no program, batch file or prompt of the
+/// built-in DOS goes on, memory is cleared as the power-on self test
+/// leaves it, and the devices come up again.
+fn reset_machine(cpu: &mut Cpu) {
     cpu.batch.clear();
     cpu.pending_command = None;
     cpu.shell_wait = None;
@@ -174,27 +209,15 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     cpu.idle = false;
     cpu.pm_latched = false;
     cpu.dynrec.flush();
-    let name = unit_drive(&cpu.bus, unit).map_or("?".to_string(), drive_name);
-    cpu.program = format!("BOOT {}", name);
     cpu.bus.disk.close_all_files();
-    // Host directories shared with the system become hard disks, before
-    // the journals start: what goes on them isn't the system's writing.
-    for line in cpu.bus.disk.prepare_shared_disks() {
-        cpu.bus.log_string(&format!("[BOOT] {}", line));
-    }
-    cpu.bus.boot = Some(BootState { unit, ..Default::default() });
-    // Its states and rewind take its disks back with its memory.
-    cpu.bus.disk.keep_journals(true);
 
     let bus = &mut cpu.bus;
-    // All of memory cleared, as the power-on self test leaves it.
     let len = bus.ram().len();
     bus.fill_ram(0..crate::video::ADDR_VGA_GRAPHICS, 0);
     bus.fill_ram(0xC8000..0xF0000, 0);
     bus.fill_ram(0x10_0000..len, 0);
     bus.freezes.clear();
 
-    // The devices as they come up.
     bus.pic = crate::pic::Pic::new();
     bus.dma = crate::dma::Dma::new();
     bus.kbc = crate::kbc::Kbc::new();
@@ -214,23 +237,54 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
     bus.xms = crate::xms::Xms::new();
     crate::ems::hide_device(bus);
     bus.cmos.set(crate::cmos::SHUTDOWN_STATUS, 0);
+}
 
-    // The BIOS's vector table and data area.
-    let hard_disks: Vec<_> = hard_disk_drives(bus)
-        .into_iter()
-        .filter_map(|drive| bus.disk.bios_image(drive).map(|image| image.geometry()))
-        .collect();
-    crate::bios::install_for_boot(bus, &hard_disks);
-    bus.cmos.set_hard_disks(&hard_disks);
-    // The hard disks and a CD image reach the system on the IDE channels
-    // too.
-    bus.attach_ide();
-    bus.refresh_irq();
-
-    // The processor as after a reset, and the screen in text mode.
+/// Restart the built-in DOS, as a PC reboots after a reset (the keyboard
+/// controller's reset line, port 92h or CF9h, a triple fault, INT 19h,
+/// Ctrl+Alt+Del): memory, the devices and the resident programs gone, the
+/// screen cleared, and the startup of the session (`Cpu::startup`) run
+/// again.
+pub fn reboot_dos(cpu: &mut Cpu) {
+    cpu.bus.log_string("[BIOS] Rebooting DOS");
+    reset_machine(cpu);
+    cpu.bus.restore_dos_machine();
+    cpu.resident_end = crate::mcb::first_free(&cpu.bus);
+    cpu.resident_upper.clear();
+    cpu.program.clear();
+    cpu.errorlevel = 0;
+    // DOS starts on C:\, in the root of every drive.
+    for drive in 0..crate::disk::LASTDRIVE {
+        if cpu.bus.disk.is_mounted(drive) {
+            cpu.bus.disk.set_current_directory(&format!("{}:\\", crate::disk::drive_letter(drive)));
+        }
+    }
+    cpu.bus.disk.set_current_drive(DRIVE_C);
     cpu.reset_to_real_mode();
     crate::instructions::fpu::control::fninit(cpu);
-    crate::interrupts::int10::set_mode(cpu, 0x03);
+    let mode = if cpu.bus.vga.setup().mono() { 0x07 } else { 0x03 };
+    crate::interrupts::int10::set_mode(cpu, mode);
+    cpu.state = CpuState::Running;
+    cpu.start_dos();
+}
+
+/// How a session of the built-in DOS starts, and starts again after a
+/// reboot: the notes in the box above the first prompt, then the command
+/// lines and batch files to run.
+#[derive(Clone, Debug, Default)]
+pub struct Startup {
+    /// (label, value) lines under the emulator's name; the value stands
+    /// out.
+    pub notes: Vec<(String, String)>,
+    pub commands: Vec<StartupItem>,
+}
+
+/// What a session runs at its start.
+#[derive(Clone, Debug)]
+pub enum StartupItem {
+    /// Command lines, as if typed at the prompt: the config's [autoexec].
+    Lines(Vec<String>),
+    /// A batch file, if it's there: C:\AUTOEXEC.BAT.
+    BatchFile(String),
 }
 
 /// Run the boot sector `sector` of `unit`: at 0000:7C00 with the unit in
