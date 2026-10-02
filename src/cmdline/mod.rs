@@ -7,6 +7,7 @@
 pub mod colors;
 pub mod complete;
 pub mod editor;
+pub mod popup;
 pub mod history;
 pub mod render;
 pub mod search;
@@ -48,6 +49,8 @@ pub struct LineEditor {
     colors: Vec<u8>,
     /// Whether the commands looked for are programs there to run.
     known: std::collections::HashMap<String, bool>,
+    /// F7's window of the history.
+    popup: Option<popup::Popup>,
 }
 
 /// In the shell's segment after the line's buffer: how many characters of
@@ -142,6 +145,9 @@ pub fn start(cpu: &mut Cpu) {
 pub fn finish(cpu: &mut Cpu) {
     let Some(mut ed) = cpu.line_editor.take() else { return };
     let saved = (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx());
+    if let Some(popup) = ed.popup.take() {
+        popup.close(cpu);
+    }
     render::restore_cursor_shape(cpu, &mut ed);
     render::set_cursor(cpu, ed.anchor + ed.shown.len());
     restore(cpu, saved);
@@ -176,6 +182,14 @@ pub fn key(cpu: &mut Cpu) {
         None => LineEditor::recover(cpu),
     };
     let done = edit(cpu, &mut ed, key);
+    // F7's window is over the line.
+    if ed.popup.is_some() {
+        ed.store(cpu);
+        restore(cpu, saved);
+        cpu.line_editor = Some(ed);
+        cpu.set_ax(0);
+        return;
+    }
     ed.suggestion = match done {
         Done::No => suggest(cpu, &ed),
         _ => Vec::new(),
@@ -215,6 +229,9 @@ pub fn key(cpu: &mut Cpu) {
 
 /// Edit the line for `key`.
 fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
+    if let Some(done) = popup::key(cpu, ed, key) {
+        return done;
+    }
     if let Some(done) = search::key(cpu, ed, key) {
         return done;
     }
@@ -256,6 +273,7 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
         }
         _ if ed.plain => {}
         Key::Ctrl(c @ (b'R' | b'S')) => ed.search = Some(search::Search::new(&ed.line, c == b'R')),
+        Key::F(7) => popup::open(cpu, ed),
         Key::Up | Key::F(5) => {
             if cpu.shell_history.at_newest() {
                 ed.draft = Some(ed.line.text.clone());

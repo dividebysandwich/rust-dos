@@ -799,3 +799,48 @@ fn the_prompt_and_the_line_are_coloured() {
     let row = cursor_at(&cpu).1 as usize - 1;
     assert_eq!((0..7).map(|col| attr_at(&cpu, col, row)).collect::<Vec<_>>(), [0x07; 7]);
 }
+
+const F7: u8 = 0x41;
+
+#[test]
+fn f7_lists_the_history_in_a_window() {
+    let base = scratch("popup", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    for line in ["echo alpha", "ver", "echo beta"] {
+        type_keys(&mut cpu, &format!("{}\r", line));
+        assert_eq!(run_until_command(&mut cpu).as_deref(), Some(line));
+    }
+    let before = screen_text(&cpu);
+    extended_key(&mut cpu, F7);
+    run_keys(&mut cpu);
+    let text = screen_text(&cpu);
+    assert!(text.contains(" History "), "{}", text);
+    assert!(text.contains("echo alpha") && text.contains("ver"), "{}", text);
+    // The newest is selected: Up, Enter runs the one before.
+    extended_key(&mut cpu, UP);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+    // The screen as it was, with the line run on it.
+    let after = screen_text(&cpu);
+    assert!(!after.contains(" History "), "{}", after);
+    assert_eq!(&after[..before.trim_end().len()], before.trim_end());
+
+    // Typing narrows the lines; Tab puts it on the line to edit; Esc
+    // leaves the line as it was.
+    extended_key(&mut cpu, F7);
+    type_keys(&mut cpu, "alp\t!\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo alpha!"));
+    type_keys(&mut cpu, "x");
+    extended_key(&mut cpu, F7);
+    type_keys(&mut cpu, "\x1b\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("x"));
+
+    // Del forgets a line.
+    extended_key(&mut cpu, F7);
+    extended_key(&mut cpu, HOME);
+    extended_key(&mut cpu, DEL);
+    type_keys(&mut cpu, "\x1b\r");
+    run_until_command(&mut cpu);
+    assert!(!cpu.shell_history.entries().iter().any(|e| e == "echo alpha"));
+}
