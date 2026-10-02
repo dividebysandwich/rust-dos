@@ -126,7 +126,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_CD_INTERRUPT => mscdex::interrupt(cpu),
         crate::bios::SERVICE_VBE_WINDOW => vbe::window_call(cpu),
         crate::bios::SERVICE_IO_WAIT => crate::diskio::wait(cpu),
-        crate::bios::SERVICE_SHELL_KEY => crate::shell::edit_key(cpu),
+        crate::bios::SERVICE_SHELL_KEY => crate::cmdline::key(cpu),
         crate::bios::SERVICE_SHELL_PROMPT => crate::shell::prompt(cpu),
         crate::bios::SERVICE_SHELL_KEY_READY => crate::shell::key_ready(cpu),
         crate::bios::SERVICE_SHELL_TICK => crate::shell::tick(cpu),

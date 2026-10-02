@@ -227,7 +227,7 @@ impl<K> Dialog<K> {
                 Key::Right => *cursor = (*cursor + 1).min(text.len()),
                 Key::Home => *cursor = 0,
                 Key::End => *cursor = text.len(),
-                Key::Backspace if *cursor > 0 => {
+                Key::Backspace | Key::CtrlBackspace if *cursor > 0 => {
                     *cursor -= 1;
                     text.remove(*cursor);
                 }

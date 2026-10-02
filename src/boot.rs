@@ -195,6 +195,7 @@ fn reset_machine(cpu: &mut Cpu) {
     cpu.shell_wait = None;
     cpu.shell_prompt_at = None;
     cpu.shell_completion = None;
+    cpu.line_editor = None;
     cpu.secondary_shells.clear();
     cpu.secondary = None;
     cpu.stdout_capture = None;

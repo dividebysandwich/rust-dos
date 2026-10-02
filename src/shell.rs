@@ -35,10 +35,9 @@ pub struct ShellLabels {
 }
 
 /// A Tiny "OS" written in Machine Code, and its labels. Asks the emulator
-/// for the prompt, reads keys into a buffer at offset 0x0200, and on Enter
-/// hands the line to the Rust shell via the SHELL_COMMAND_BOP trap.
-/// Handles backspace visually and in buffer, and hands the other control
-/// keys and the extended keys (Esc, Tab, Up and Down) to `edit_key`.
+/// for the prompt, hands it the keys, which it edits the line in the
+/// buffer at offset 0x0200 with, and on Enter hands the line to the Rust
+/// shell via the SHELL_COMMAND_BOP trap.
 fn assemble() -> (Vec<u8>, ShellLabels) {
     use crate::bios::{SERVICE_SHELL_KEY, SERVICE_SHELL_KEY_READY, SERVICE_SHELL_PROMPT, SERVICE_SHELL_TICK};
     let mut a = Asm::new(ORIGIN);
@@ -53,35 +52,14 @@ fn assemble() -> (Vec<u8>, ShellLabels) {
     a.label("PROMPT_START");
     a.op(&[0xFE, 0x39, SERVICE_SHELL_PROMPT]); // `prompt`: print it, SI = 0200h
 
-    // Read keys: Enter hands the line over, Backspace takes a character
-    // back, control and extended keys (AL below 20h) go to `edit_key`.
+    // Read keys and hand each to `cmdline::key`, which edits the line
+    // and hands it over (AL 0Dh) on Enter.
     a.label("WAIT_KEY");
-    a.op(&[0xB4, 0x00, 0xCD, 0x16]); // MOV AH, 00h; INT 16h
+    a.op(&[0xB4, 0x10, 0xCD, 0x16]); // MOV AH, 10h; INT 16h
     a.label("KEY_READ");
-    a.op(&[0x3C, 0x0D]); // CMP AL, 0Dh
-    a.jump(0x74, "EXECUTE"); // JE
-    a.op(&[0x3C, 0x08]); // CMP AL, 08h
-    a.jump(0x74, "BACKSPACE"); // JE
-    a.op(&[0x3C, 0x20]); // CMP AL, 20h
-    a.jump(0x72, "EDIT_KEY"); // JB
-    // A full buffer takes no more (MAX_LINE characters)
-    a.op(&[0x81, 0xFE, 0x7F, 0x02]); // CMP SI, 027Fh
-    a.jump(0x73, "WAIT_KEY"); // JAE
-    a.op(&[0xB4, 0x0E, 0xCD, 0x10]); // MOV AH, 0Eh; INT 10h: echo it
-    a.op(&[0x88, 0x04, 0x46]); // MOV [SI], AL; INC SI
-    a.jump(0xEB, "WAIT_KEY");
-
-    a.label("BACKSPACE");
-    a.op(&[0x81, 0xFE, 0x00, 0x02]); // CMP SI, 0200h
-    a.jump(0x74, "WAIT_KEY"); // JE: nothing to take back
-    a.op(&[0x4E, 0xB4, 0x0E]); // DEC SI; MOV AH, 0Eh
-    a.op(&[0xB0, 0x08, 0xCD, 0x10, 0xB0, 0x20, 0xCD, 0x10, 0xB0, 0x08, 0xCD, 0x10]); // BS, space, BS
-    a.jump(0xEB, "WAIT_KEY");
-
-    // Esc, Tab or the history replace the line (SI).
-    a.label("EDIT_KEY");
     a.op(&[0xFE, 0x39, SERVICE_SHELL_KEY]);
-    a.jump(0xEB, "WAIT_KEY");
+    a.op(&[0x3C, 0x0D]); // CMP AL, 0Dh
+    a.jump(0x75, "WAIT_KEY"); // JNE
 
     a.label("EXECUTE");
     a.op(&[0xC6, 0x04, 0x00]); // MOV BYTE PTR [SI], 0
@@ -130,192 +108,6 @@ pub fn get_shell_code() -> Vec<u8> {
 /// Where the parts of the shell's code are.
 pub fn labels() -> ShellLabels {
     SHELL.get_or_init(assemble).1
-}
-
-/// The lines typed at the prompt, oldest first, for Up and Down.
-#[derive(Clone, Debug, Default)]
-pub struct ShellHistory {
-    entries: Vec<String>,
-    /// The entry Up and Down are at: `entries.len()` is the new line
-    /// below the newest.
-    pos: usize,
-}
-
-impl ShellHistory {
-    /// The lines kept.
-    const MAX: usize = 100;
-
-    /// A line was entered: keep it, unless it is empty or the one before
-    /// again, and start again from below the newest.
-    pub fn push(&mut self, line: &str) {
-        if !line.is_empty() && self.entries.last().map(String::as_str) != Some(line) {
-            self.entries.push(line.to_string());
-            if self.entries.len() > Self::MAX {
-                self.entries.remove(0);
-            }
-        }
-        self.pos = self.entries.len();
-    }
-
-    /// Up: the entry before, if there is one.
-    pub fn older(&mut self) -> Option<&str> {
-        self.pos = self.pos.checked_sub(1)?;
-        self.entries.get(self.pos).map(String::as_str)
-    }
-
-    /// Down: the entry after, or the empty new line after the newest; None
-    /// when already there.
-    pub fn newer(&mut self) -> Option<&str> {
-        if self.pos >= self.entries.len() {
-            return None;
-        }
-        self.pos += 1;
-        Some(self.entries.get(self.pos).map_or("", String::as_str))
-    }
-
-    pub fn entries(&self) -> &[String] {
-        &self.entries
-    }
-}
-
-/// Where Tab left the line at the prompt.
-#[derive(Clone, Debug)]
-pub struct Completion {
-    /// The line as Tab left it: Tab again on it goes on to the next name,
-    /// on any other line it starts over.
-    line: Vec<u8>,
-    /// Where the name being completed begins in it.
-    start: usize,
-    /// The names that fit, and the one in the line.
-    names: Vec<String>,
-    index: usize,
-}
-
-/// A control or extended key at the prompt (the shell code's EDIT_KEY, AL
-/// its character, 00h or E0h for an extended key, AH its scan code):
-/// Ctrl+C starts again at a new prompt, Esc blanks the line being typed, Tab and Shift+Tab complete the name being
-/// typed in it (`complete`), and Up and Down put the line before or after
-/// in the command history in its place, on the screen and in the buffer at
-/// DS:0200h, and leave SI after it. The other keys do nothing.
-pub fn edit_key(cpu: &mut Cpu) {
-    // Ctrl+C gives up the line (and DATE's or TIME's question, and the
-    // batch files waiting) and starts again at a new prompt.
-    if cpu.get_al() == 0x03 {
-        video::print_string(cpu, "^C\r\n");
-        cpu.shell_wait = None;
-        cpu.batch.clear();
-        cpu.set_ip(labels().prompt_start);
-        return;
-    }
-    let line = match (cpu.get_al(), cpu.get_ah()) {
-        (0x09, _) => complete(cpu, true),
-        (0x00, 0x0F) => complete(cpu, false),
-        (al, ah) => match (al, ah) {
-            (0x1B, _) => Some(""),
-            (0x00 | 0xE0, 0x48) => cpu.shell_history.older(),
-            (0x00 | 0xE0, 0x50) => cpu.shell_history.newer(),
-            _ => None,
-        }
-        .map(dosstr::to_bytes),
-    };
-    let Some(mut line) = line else { return };
-    line.truncate(MAX_LINE);
-    let saved = (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx());
-
-    // Back to where the line began, over as many cells as it had
-    // characters (it may have wrapped onto the next row).
-    let typed = (cpu.si() as usize).saturating_sub(0x0200).min(MAX_LINE);
-    let page = cpu.bus.read_8(0x0462);
-    let cols = (cpu.bus.read_16(0x044A) as usize).max(1);
-    let (col, row) = (cpu.bus.read_8(0x0450 + page as usize * 2), cpu.bus.read_8(0x0451 + page as usize * 2));
-    let start = (row as usize * cols + col as usize).saturating_sub(typed);
-    let set_cursor = |cpu: &mut Cpu| video_call(cpu, 0x0200, (page as u16) << 8, 0, ((start / cols) as u16) << 8 | (start % cols) as u16);
-    // Blank it, and write the new line from its start.
-    set_cursor(cpu);
-    for _ in 0..typed {
-        video_call(cpu, 0x0E20, (page as u16) << 8, 0, 0);
-    }
-    set_cursor(cpu);
-    for &b in &line {
-        video_call(cpu, 0x0E00 | b as u16, (page as u16) << 8, 0, 0);
-    }
-
-    let buffer = cpu.get_physical_addr(cpu.ds(), 0x0200);
-    for (i, &b) in line.iter().enumerate() {
-        cpu.bus.write_8(buffer + i, b);
-    }
-    cpu.set_si(0x0200 + line.len() as u16);
-    let (ax, bx, cx, dx) = saved;
-    cpu.set_ax(ax);
-    cpu.set_reg16(iced_x86::Register::BX, bx);
-    cpu.set_cx(cx);
-    cpu.set_dx(dx);
-}
-
-/// The line being typed at the prompt: the buffer at DS:0200h up to SI.
-fn typed_line(cpu: &Cpu) -> Vec<u8> {
-    let buffer = cpu.get_physical_addr(cpu.ds(), 0x0200);
-    let len = (cpu.si() as usize).saturating_sub(0x0200).min(MAX_LINE);
-    (0..len).map(|i| cpu.bus.read_8(buffer + i)).collect()
-}
-
-/// Tab (`forward`) or Shift+Tab at the prompt, as in DOSBox: the line with
-/// the name being typed, the last word after its last '\', '/' or ':',
-/// completed to the first (Shift+Tab: last) file or directory beginning
-/// with it. Tab again goes on to the next one, Shift+Tab back to the one
-/// before. None when no name fits.
-fn complete(cpu: &mut Cpu, forward: bool) -> Option<Vec<u8>> {
-    let typed = typed_line(cpu);
-    let mut completion = match cpu.shell_completion.take() {
-        Some(mut completion) if completion.line == typed => {
-            let count = completion.names.len();
-            completion.index = (if forward { completion.index + 1 } else { completion.index + count - 1 }) % count;
-            completion
-        }
-        _ => {
-            let word = typed.iter().rposition(|&b| b == b' ').map_or(0, |i| i + 1);
-            let start = typed[word..].iter().rposition(|&b| matches!(b, b'\\' | b'/' | b':')).map_or(word, |i| word + i + 1);
-            let names = completion_names(cpu, &typed, word);
-            let index = if forward { 0 } else { names.len().checked_sub(1)? };
-            Completion { line: Vec::new(), start, names, index }
-        }
-    };
-    let mut line = typed[..completion.start].to_vec();
-    line.extend(dosstr::to_bytes(completion.names.get(completion.index)?));
-    line.truncate(MAX_LINE);
-    completion.line = line.clone();
-    cpu.shell_completion = Some(completion);
-    Some(line)
-}
-
-/// The names Tab goes through for the word at `word` in the line `typed`:
-/// the files and directories beginning with it, the programs (.BAT, .COM,
-/// .EXE) first, then the others, each in order of name. After CD only the
-/// directories.
-fn completion_names(cpu: &Cpu, typed: &[u8], word: usize) -> Vec<String> {
-    let command = typed.split(|&b| b == b' ').find(|w| !w.is_empty()).unwrap_or_default();
-    let cd = word > 0 && (command.eq_ignore_ascii_case(b"CD") || command.eq_ignore_ascii_case(b"CHDIR"));
-    // "GA" looks for "GA*.*", "GAME.E" for "GAME.E*".
-    let name = dosstr::from_bytes(&typed[word..]);
-    let mask = if name.rsplit(['\\', '/', ':']).next().is_some_and(|n| n.contains('.')) {
-        format!("{}*", name)
-    } else {
-        format!("{}*.*", name)
-    };
-    let Ok(entries) = cpu.bus.disk.list_directory(&mask, 0x16) else {
-        return Vec::new();
-    };
-    let mut names: Vec<(bool, String)> = entries
-        .into_iter()
-        .filter(|e| e.filename != "." && e.filename != ".." && (e.is_dir || !cd))
-        .map(|e| {
-            let upper = e.filename.to_ascii_uppercase();
-            let program = !e.is_dir && [".BAT", ".COM", ".EXE"].iter().any(|ext| upper.ends_with(ext));
-            (!program, e.filename)
-        })
-        .collect();
-    names.sort_by_cached_key(|(other, name)| (*other, name.to_ascii_uppercase()));
-    names.into_iter().map(|(_, name)| name).collect()
 }
 
 /// INT 10h with these registers.
@@ -461,6 +253,7 @@ pub fn prompt(cpu: &mut Cpu) {
         cpu.shell_prompt_at = Some(cursor(cpu));
         show_prompt(cpu);
     }
+    crate::cmdline::start(cpu);
 }
 
 /// What the shell waits for, outside of a typed line.
@@ -686,6 +479,7 @@ pub fn abandon_input(cpu: &mut Cpu) -> bool {
     if cpu.bus.read_16(frame + 2) != SHELL_SEGMENT || cpu.bus.read_16(frame) != labels().key_read {
         return false;
     }
+    crate::cmdline::finish(cpu);
     if let Some((col, row)) = cpu.shell_prompt_at.take() {
         let (end_col, end_row) = cursor(cpu);
         let cols = (cpu.bus.read_16(0x044A) as usize).max(1);

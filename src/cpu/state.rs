@@ -68,6 +68,8 @@ crate::state_fields!(Cpu {
     // The host's: the lines typed at the prompt stay the user's, and the
     // counts and logs are the debugger's.
     shell_history, shell_completion, null_interrupts,
+    // Found again from the shell's buffer (cmdline::LineEditor::recover).
+    line_editor,
     // The session's, and set only from a reset to the shell handling it.
     startup, reboot,
     // The host's, as the history.

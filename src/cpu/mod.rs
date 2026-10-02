@@ -306,9 +306,11 @@ pub struct Cpu {
     pub pending_command: Option<String>,
     /// The lines typed at the prompt, for Up and Down. They stay while
     /// programs run and the shell is loaded again.
-    pub shell_history: crate::shell::ShellHistory,
+    pub shell_history: crate::cmdline::history::ShellHistory,
     /// Where Tab left the line at the prompt, for Tab again.
-    pub shell_completion: Option<crate::shell::Completion>,
+    pub shell_completion: Option<crate::cmdline::complete::Completion>,
+    /// The line being typed at the prompt.
+    pub line_editor: Option<crate::cmdline::LineEditor>,
     /// What PAUSE or CHOICE waits for; batch lines wait with it.
     pub shell_wait: Option<crate::shell::ShellWait>,
     /// Where the prompt was printed, (column, row), while a line is typed
@@ -507,8 +509,9 @@ impl Cpu {
             flags: CpuFlags::from_bits_truncate(0x0202), // Default Flag State: bit 1 reserved, IF=1
             state: CpuState::Running,
             pending_command: None,
-            shell_history: crate::shell::ShellHistory::default(),
+            shell_history: Default::default(),
             shell_completion: None,
+            line_editor: None,
             shell_wait: None,
             shell_prompt_at: None,
             edit_clipboard: Vec::new(),

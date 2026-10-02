@@ -13,6 +13,7 @@ pub mod bus;
 pub mod capture;
 pub mod cheats;
 pub mod cdrom;
+pub mod cmdline;
 pub mod cmos;
 pub mod command;
 pub mod command_com;

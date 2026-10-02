@@ -27,6 +27,12 @@ pub enum Key {
     CtrlUp,
     CtrlDown,
     CtrlIns,
+    CtrlDel,
+    CtrlBackspace,
+    CtrlPgUp,
+    CtrlPgDn,
+    /// Alt+=.
+    AltEquals,
     /// Ctrl and a letter, 'A' to 'Z'.
     Ctrl(u8),
     /// F1 to F12.
@@ -59,7 +65,7 @@ pub fn decode(key: u16) -> Key {
         (0x1B, _) => Key::Esc,
         (0x09, 0x0F) | (0x09, 0) => Key::Tab,
         (0x08, 0x0E) | (0x08, 0) => Key::Backspace,
-        (0x7F, 0x0E) => Key::Backspace,
+        (0x7F, 0x0E) => Key::CtrlBackspace,
         (1..=0x1A, _) => Key::Ctrl(b'A' + ascii - 1),
         (0, _) => match scan {
             0x0F => Key::BackTab,
@@ -80,6 +86,10 @@ pub fn decode(key: u16) -> Key {
             0x8D => Key::CtrlUp,
             0x91 => Key::CtrlDown,
             0x92 => Key::CtrlIns,
+            0x93 => Key::CtrlDel,
+            0x84 => Key::CtrlPgUp,
+            0x76 => Key::CtrlPgDn,
+            0x83 => Key::AltEquals,
             0x3B..=0x44 => Key::F(scan - 0x3A),
             0x85 | 0x86 => Key::F(scan - 0x85 + 11),
             _ => match letter(scan) {
@@ -108,5 +118,8 @@ mod tests {
         assert_eq!(decode(0x3D00), Key::F(3));
         assert_eq!(decode(0x9200), Key::CtrlIns);
         assert_eq!(decode(0x1C0D), Key::Enter);
+        assert_eq!(decode(0x0E7F), Key::CtrlBackspace);
+        assert_eq!(decode(0x93E0), Key::CtrlDel);
+        assert_eq!(decode(0x8300), Key::AltEquals);
     }
 }

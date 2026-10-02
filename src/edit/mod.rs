@@ -10,9 +10,9 @@
 
 mod buffer;
 mod dialog;
-mod keys;
+pub(crate) mod keys;
 mod menu;
-mod screen;
+pub(crate) mod screen;
 
 pub use buffer::{Buffer, Pos, Search};
 
@@ -357,7 +357,7 @@ impl Editor {
         match key {
             Key::Char(c) => buf.type_char(c),
             Key::Enter => buf.newline(),
-            Key::Backspace => buf.backspace(),
+            Key::Backspace | Key::CtrlBackspace => buf.backspace(),
             Key::Tab => buf.tab(),
             Key::Del if shift => self.run(cpu, Action::Cut),
             Key::Del => buf.delete(),

@@ -426,3 +426,168 @@ fn code_page_437_characters_reach_the_command_line() {
     }
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo \u{84}"));
 }
+
+/// Step the shell until it has taken every key typed.
+fn run_keys(cpu: &mut Cpu) {
+    for _ in 0..200_000 {
+        cpu.step();
+        if cpu.bus.keyboard_buffer.is_empty() {
+            // And the last one edited.
+            for _ in 0..100 {
+                cpu.step();
+            }
+            return;
+        }
+    }
+    panic!("the keys weren't taken");
+}
+
+const LEFT: u8 = 0x4B;
+const RIGHT: u8 = 0x4D;
+const HOME: u8 = 0x47;
+const END: u8 = 0x4F;
+const DEL: u8 = 0x53;
+const INS: u8 = 0x52;
+const CTRL_LEFT: u8 = 0x73;
+const CTRL_RIGHT: u8 = 0x74;
+
+/// The cursor of page 0: (column, row).
+fn cursor_at(cpu: &Cpu) -> (u8, u8) {
+    (cpu.bus.read_8(0x0450), cpu.bus.read_8(0x0451))
+}
+
+#[test]
+fn the_line_is_edited_anywhere_in_it() {
+    let base = scratch("mid_line", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    let shape = cpu.bus.read_16(0x0460);
+    // Typed in the middle, and Del and Backspace there.
+    type_keys(&mut cpu, "ech hello");
+    for _ in 0..6 {
+        extended_key(&mut cpu, LEFT);
+    }
+    type_keys(&mut cpu, "o");
+    run_keys(&mut cpu);
+    assert_eq!(last_row_with(&cpu, "C:\\>").as_deref(), Some("C:\\>echo hello"));
+    assert_eq!(cursor_at(&cpu), (8, 0));
+    extended_key(&mut cpu, END);
+    extended_key(&mut cpu, LEFT);
+    extended_key(&mut cpu, DEL);
+    type_keys(&mut cpu, "\x08p!\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo help!"));
+
+    // Home, words and overwriting.
+    type_keys(&mut cpu, "copy a.txt b.txt");
+    extended_key(&mut cpu, CTRL_LEFT);
+    extended_key(&mut cpu, CTRL_LEFT);
+    extended_key(&mut cpu, INS);
+    type_keys(&mut cpu, "x");
+    extended_key(&mut cpu, INS);
+    extended_key(&mut cpu, CTRL_RIGHT);
+    type_keys(&mut cpu, "c");
+    extended_key(&mut cpu, HOME);
+    extended_key(&mut cpu, DEL);
+    type_keys(&mut cpu, "C\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("Copy x.txt cb.txt"));
+    // The cursor shape is as it was.
+    assert_eq!(cpu.bus.read_16(0x0460), shape);
+}
+
+#[test]
+fn deleting_by_word_and_undo() {
+    let base = scratch("words", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    // Ctrl+Backspace stops at a path's separator, Ctrl+W at a blank.
+    type_keys(&mut cpu, "dir c:\\games\\doom");
+    cpu.bus.keyboard_buffer.push_back(0x0E7F);
+    type_keys(&mut cpu, "\x17x\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("dir x"));
+    // Ctrl+Z takes the edits back.
+    type_keys(&mut cpu, "echo one two\x17\x1a\x1a\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo one"));
+    // Ctrl+Del and Ctrl+End (and Ctrl+K) delete after the cursor.
+    type_keys(&mut cpu, "type a b c");
+    extended_key(&mut cpu, HOME);
+    cpu.bus.keyboard_buffer.push_back(0x9300);
+    extended_key(&mut cpu, CTRL_RIGHT);
+    type_keys(&mut cpu, "\x0b\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("a "));
+}
+
+#[test]
+fn f1_and_f3_copy_from_the_last_command() {
+    let base = scratch("f3", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, "echo abc\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo abc"));
+    extended_key(&mut cpu, 0x3B);
+    extended_key(&mut cpu, 0x3B);
+    type_keys(&mut cpu, "x");
+    extended_key(&mut cpu, 0x3D);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ecxo abc"));
+}
+
+#[test]
+fn up_keeps_the_line_being_typed_for_down() {
+    let base = scratch("draft", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, "ver\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+    type_keys(&mut cpu, "half");
+    extended_key(&mut cpu, UP);
+    extended_key(&mut cpu, DOWN);
+    type_keys(&mut cpu, "way\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("halfway"));
+}
+
+#[test]
+fn a_long_line_on_the_last_row_scrolls_the_screen() {
+    let base = scratch("bottom", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    // Empty lines down to the last row (an entered line takes the keys
+    // typed after it away).
+    for _ in 0..24 {
+        type_keys(&mut cpu, "\r");
+        run_keys(&mut cpu);
+    }
+    assert_eq!(cursor_at(&cpu), (4, 24));
+    type_keys(&mut cpu, &"z".repeat(90));
+    run_keys(&mut cpu);
+    let rows: Vec<String> = screen_text(&cpu).as_bytes().chunks(80).map(|r| String::from_utf8_lossy(r).to_string()).collect();
+    assert_eq!(rows[23], format!("C:\\>{}", "z".repeat(76)));
+    assert_eq!(rows[24].trim_end(), "z".repeat(14));
+    assert_eq!(cursor_at(&cpu), (14, 24));
+    // Back over the end of the row.
+    for _ in 0..20 {
+        extended_key(&mut cpu, LEFT);
+    }
+    run_keys(&mut cpu);
+    assert_eq!(cursor_at(&cpu), (74, 23));
+    extended_key(&mut cpu, RIGHT);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).map(|l| l.len()), Some(90));
+}
+
+#[test]
+fn a_state_saved_while_typing_keeps_the_line() {
+    let base = scratch("state_line", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, "dir");
+    extended_key(&mut cpu, LEFT);
+    run_keys(&mut cpu);
+    let state = rust_dos::savestate::machine::save(&cpu);
+
+    let mut cpu = Cpu::new(base.join("c"));
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(cpu.line_editor.is_none());
+    type_keys(&mut cpu, "x\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("dixr"));
+    assert_eq!(last_row_with(&cpu, "C:\\>").as_deref(), Some("C:\\>dixr"));
+}
