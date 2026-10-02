@@ -37,7 +37,8 @@ several images.
   **D:** for its CD, **A:** for floppies.
 - **Path**: a folder, a zip or 7z archive, or an image file: a CD
   (`.cue`, `.iso`, `.bin`), a floppy or a hard disk image (`.img`).
-  *Browse...* picks one.
+  *Browse...* picks one. On Windows the buttons over its list, or
+  **Left** and **Right**, go to the other drives.
 - **Type**: **cdrom** for a game CD, so the game finds its disc;
   **floppy** for floppy disks; **hdd** for the rest.
 - **Label**: the volume name. Some games check their CD's label; leave it

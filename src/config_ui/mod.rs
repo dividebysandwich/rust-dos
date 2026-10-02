@@ -1539,6 +1539,8 @@ enum Target {
     GameField(GameField),
     ImageField(ImageField),
     BrowserRow(usize),
+    /// A drive's button over the listing (Windows).
+    BrowserDrive(usize),
     /// A line of the `[autoexec]` editor.
     EditorLine(usize),
     /// A row of the room browser, a control of its prompt, and a button of
@@ -2050,6 +2052,14 @@ impl ConfigUi {
                         self.key(UiKey::Enter, host);
                     } else {
                         browser.select(i);
+                    }
+                }
+            }
+            Target::BrowserDrive(i) => {
+                if let Some((browser, _)) = &mut self.browser {
+                    match browser.open_drive(i) {
+                        Ok(()) => self.status = None,
+                        Err(e) => self.error(e),
                     }
                 }
             }
@@ -2586,6 +2596,8 @@ impl ConfigUi {
             }
             UiKey::Enter => browser.activate(),
             UiKey::Backspace => browser.parent().map(|()| None),
+            UiKey::Left => browser.step_drive(-1).map(|()| None),
+            UiKey::Right => browser.step_drive(1).map(|()| None),
             UiKey::Char(c) => {
                 browser.jump(c);
                 Ok(None)
@@ -3200,9 +3212,27 @@ impl ConfigUi {
         let Some((browser, _)) = &self.browser else { return };
         let cols = g.cols;
         g.text(2, content.start, browser.title, draw::BRIGHT);
+        let mut top = content.start + 1;
+        if !browser.drives.is_empty() {
+            let (current, mut col) = (browser.drive(), 2);
+            for (i, root) in browser.drives.iter().enumerate() {
+                let text = format!("[{}]", Browser::drive_name(root));
+                let width = text.chars().count();
+                if col + width > cols - 2 {
+                    break;
+                }
+                if current == Some(i) {
+                    g.background(col, top, width, draw::SELECT);
+                }
+                g.text(col, top, &text, if current == Some(i) { draw::BRIGHT } else { draw::KEY });
+                self.hits.push(Hit { row: top, col, width, target: Target::BrowserDrive(i) });
+                col += width + 1;
+            }
+            top += 1;
+        }
         let dir = contract_home(&browser.dir, self.home.as_deref());
-        g.text_to(2, content.start + 1, &fit(&dir, cols - 4), draw::DIM, cols - 2);
-        let list = content.start + 2..content.end;
+        g.text_to(2, top, &fit(&dir, cols - 4), draw::DIM, cols - 2);
+        let list = top + 1..content.end;
         Self::keep_visible(&mut self.browser_scroll, browser.selected, list.len());
         let (scroll, total) = (self.browser_scroll, browser.rows());
         let separator = std::path::MAIN_SEPARATOR;
@@ -3332,8 +3362,13 @@ impl ConfigUi {
         use UiKey::*;
         let mut hints: Vec<(&str, &str, UiKey)> = if self.help.is_some() {
             vec![("\u{2191}\u{2193}", "Scroll", Down), ("Esc", "Close", Esc)]
-        } else if self.browser.is_some() {
-            vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace), ("Esc", "Cancel", Esc)]
+        } else if let Some((browser, _)) = &self.browser {
+            let mut hints = vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace)];
+            if !browser.drives.is_empty() {
+                hints.push(("\u{2190}\u{2192}", "Drive", Right));
+            }
+            hints.push(("Esc", "Cancel", Esc));
+            hints
         } else if self.manual.is_some() {
             vec![("Enter", "Open", Enter), ("Ins", "Add", Insert), ("F1", "Help", Help), ("Esc", "Back", Esc)]
         } else if self.dialog.is_some() {

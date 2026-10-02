@@ -612,6 +612,78 @@ fn drives_mount_and_unmount() {
 }
 
 #[test]
+fn the_file_picker_has_a_button_for_each_drive() {
+    let dir = std::path::absolute("target/test_config_ui/drive_buttons").unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["C:/GAMES", "D:"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    use UiKey::*;
+    ui.key(Insert, &mut host);
+    ui.text(&dir.join("C:/GAMES").display().to_string(), &mut host);
+    ui.open_browser(Pick::MountPath);
+    let (browser, _) = ui.browser.as_mut().unwrap();
+    // As Windows has them, which the picker only lists there.
+    browser.drives = vec![dir.join("C:"), dir.join("D:"), dir.join("E:")];
+    assert_eq!(browser.drive(), Some(0));
+
+    // A click on D: lists its root, and Left goes back to C:.
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    let button = ui.hits.iter().find(|h| matches!(h.target, Target::BrowserDrive(1))).unwrap();
+    let layout = ui.layout.unwrap();
+    let (x, y) = ((layout.x + button.col * 8 + 4) as i32, (layout.y + button.row * layout.cell_h + 4) as i32);
+    ui.click(x, y, &mut host);
+    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("D:"));
+    // Right skips E:, which can't be listed (a CD drive without a disc).
+    ui.key(Right, &mut host);
+    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("C:"));
+    ui.key(Left, &mut host);
+    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("D:"));
+    ui.draw(&mut frame);
+    let row = |g: &Grid, r: usize| (0..g.cols).map(|c| g.cell(c, r) as char).collect::<String>();
+    let mut g = Grid::new(76, 23);
+    ui.draw_browser(&mut g, 3..19);
+    assert!(row(&g, 4).contains("[C:] [D:] [E:]"), "{}", row(&g, 4));
+
+    // Elsewhere there are no drive letters, and no buttons.
+    ui.browser.as_mut().unwrap().0.drives.clear();
+    let mut g = Grid::new(76, 23);
+    ui.draw_browser(&mut g, 3..19);
+    assert!(!row(&g, 4).contains("[C:]"));
+    ui.key(Esc, &mut host);
+    assert!(ui.browser.is_none() && ui.dialog.is_some());
+
+    if let Ok(shots) = std::env::var("RUST_DOS_UI_SHOTS") {
+        // As on Windows, for the documentation.
+        let save = |ui: &mut ConfigUi, name: &str| {
+            for (width, height) in [(640, 400), (1280, 800)] {
+                let mut frame = Frame::new(width, height);
+                ui.draw(&mut frame);
+                let path = format!("{}/{}_{}x{}.png", shots, name, width, height);
+                crate::capture::png::save(&frame, Path::new(&path)).unwrap();
+            }
+        };
+        ui.config_file = Some(PathBuf::from("C:\\RUST-DOS\\rust-dos.conf"));
+        ui.dialog.as_mut().unwrap().path = dialog::TextField::new("C:\\GAMES\\SAMNMAX");
+        ui.dialog.as_mut().unwrap().focus = Field::Browse;
+        save(&mut ui, "mount_dialog");
+        ui.open_browser(Pick::MountPath);
+        let (browser, _) = ui.browser.as_mut().unwrap();
+        browser.drives = ["A:\\", "C:\\", "D:\\", "E:\\", "G:\\"].map(PathBuf::from).to_vec();
+        browser.dir = PathBuf::from("C:\\GAMES");
+        browser.entries = ["..", "DOOM", "KEEN", "SAMNMAX", "TIE", "dott.iso", "win95.img"]
+            .map(|name| browser::Entry { name: name.to_string(), is_dir: !name.contains('.') || name == ".." })
+            .into_iter()
+            .collect();
+        browser.select(4);
+        save(&mut ui, "file_picker_drives");
+    }
+}
+
+#[test]
 fn drives_boot_now_or_at_startup() {
     let dir = std::path::absolute("target/test_config_ui/boot").unwrap();
     std::fs::create_dir_all(&dir).unwrap();

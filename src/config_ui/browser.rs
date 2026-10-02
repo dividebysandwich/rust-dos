@@ -24,6 +24,9 @@ pub struct Browser {
     pub pick_dirs: bool,
     extensions: &'static [&'static str],
     pub selected: usize,
+    /// The roots of the host's drives (`C:\`), on Windows: each a button
+    /// over the listing. Elsewhere none.
+    pub drives: Vec<PathBuf>,
 }
 
 /// A row of the listing.
@@ -37,7 +40,7 @@ impl Browser {
     /// listed.
     pub fn new(title: &'static str, start: &Path, pick_dirs: bool, extensions: &'static [&'static str]) -> Self {
         let mut browser =
-            Self { title, dir: PathBuf::new(), entries: Vec::new(), pick_dirs, extensions, selected: 0 };
+            Self { title, dir: PathBuf::new(), entries: Vec::new(), pick_dirs, extensions, selected: 0, drives: host_drives() };
         for dir in start.ancestors() {
             if browser.load(dir).is_ok() {
                 break;
@@ -127,6 +130,44 @@ impl Browser {
         Ok(())
     }
 
+    /// The drive the listing is on, of `drives`: the one whose root its
+    /// path starts with, as Windows compares them, whatever the case.
+    pub fn drive(&self) -> Option<usize> {
+        let dir = self.dir.to_string_lossy().to_lowercase();
+        self.drives.iter().position(|root| dir.starts_with(&root.to_string_lossy().to_lowercase()))
+    }
+
+    /// The name of a drive's button: `C:`.
+    pub fn drive_name(root: &Path) -> String {
+        let root = root.to_string_lossy();
+        root.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or_default().to_string()
+    }
+
+    /// List the root of drive `index` of `drives`.
+    pub fn open_drive(&mut self, index: usize) -> Result<(), String> {
+        let Some(root) = self.drives.get(index).cloned() else { return Ok(()) };
+        self.load(&root)
+    }
+
+    /// Go to the root of the drive before (-1) or after (1) this one, past
+    /// those that can't be listed (a CD drive without a disc).
+    pub fn step_drive(&mut self, step: isize) -> Result<(), String> {
+        let count = self.drives.len() as isize;
+        if count == 0 {
+            return Ok(());
+        }
+        let from = self.drive().map_or(if step < 0 { 0 } else { -1 }, |i| i as isize);
+        let mut error = None;
+        for n in 1..=count {
+            let i = (from + step * n).rem_euclid(count) as usize;
+            match self.open_drive(i) {
+                Ok(()) => return Ok(()),
+                Err(e) => error = error.or(Some(e)),
+            }
+        }
+        Err(error.unwrap_or_default())
+    }
+
     /// Select the next entry after the selected one whose name starts with
     /// `c`.
     pub fn jump(&mut self, c: char) {
@@ -142,6 +183,23 @@ impl Browser {
             }
         }
     }
+}
+
+/// The roots of the host's drives, `A:\` to `Z:\`, where it has drive
+/// letters.
+#[cfg(windows)]
+fn host_drives() -> Vec<PathBuf> {
+    unsafe extern "system" {
+        fn GetLogicalDrives() -> u32;
+    }
+    // SAFETY: GetLogicalDrives takes nothing and only returns a mask.
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u8).filter(|i| mask & (1 << i) != 0).map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char))).collect()
+}
+
+#[cfg(not(windows))]
+fn host_drives() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -194,5 +252,27 @@ mod tests {
         assert_eq!(b.dir, dir.join("games/doom"));
         // Without directory picking the entries start at row 0.
         assert!(matches!(b.row(0), Some(Row::Entry(e)) if e.name == ".."));
+    }
+
+    #[test]
+    fn drives_are_stepped_through_past_those_that_cant_be_listed() {
+        let dir = scratch("drives");
+        let mut b = Browser::new("t", &dir, true, IMAGES);
+        b.drives = vec![dir.join("games"), dir.join("missing"), dir.join("Images")];
+        assert_eq!(b.drive(), None);
+        b.step_drive(1).unwrap();
+        assert_eq!(b.dir, dir.join("games"));
+        b.select(2);
+        b.activate().unwrap();
+        assert_eq!(b.dir, dir.join("games/doom"));
+        assert_eq!(b.drive(), Some(0), "a folder of a drive is on it");
+        b.step_drive(1).unwrap();
+        assert_eq!(b.dir, dir.join("Images"));
+        b.step_drive(1).unwrap();
+        assert_eq!(b.dir, dir.join("games"));
+        b.step_drive(-1).unwrap();
+        assert_eq!(b.dir, dir.join("Images"));
+        assert!(b.open_drive(1).is_err());
+        assert_eq!(b.dir, dir.join("Images"));
     }
 }
