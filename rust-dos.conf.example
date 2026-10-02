@@ -441,6 +441,27 @@
 #username=
 #token=
 
+[shell]
+# The DOS prompt, after clink. Suggest the rest of the line from the
+# history (Right or End takes it).
+#autosuggest=true
+# Color the prompt and the line typed at it.
+#colors=true
+# Keep the lines typed in shell_history.txt beside this file's default
+# location, and how many.
+#save_history=true
+#history_size=1000
+# The colors: black, blue, green, cyan, red, magenta, brown, lightgray,
+# darkgray, lightblue, lightgreen, lightcyan, lightred, lightmagenta,
+# yellow, white, or default (the screen's).
+#prompt_color=lightgreen
+#command_color=white
+#executable_color=lightcyan
+#unrecognized_color=lightred
+#argument_color=default
+#flag_color=yellow
+#suggestion_color=darkgray
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

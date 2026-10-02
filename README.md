@@ -150,6 +150,7 @@ programs, the prompt has these commands:
 | `CD [path]`, `D:` | change the directory, or the drive |
 | `TYPE file` | show a text file |
 | `MORE [file]` | show text a screenful at a time |
+| `HISTORY [n] \| DELETE n \| CLEAR` | list the lines typed at the prompt, or forget them; see [The prompt](#the-prompt) |
 | `EDIT [file]` | edit a text file full-screen, as MS-DOS's EDIT: menus (Alt or F10), Open and Save As dialogs, cut, copy and paste (Shift+Del, Ctrl+Ins, Shift+Ins, or Ctrl+X, C, V), Find (F3 repeats it) and Replace; F1 lists the keys |
 | `FIND [/V] [/C] [/N] [/I] "text" [file ...]` | the lines with the text in them (`/V` without it), numbered with `/N`, counted with `/C`, in any case with `/I`; `ERRORLEVEL` 0 if one was found, 1 if none |
 | `SORT [/R] [/+n] [file]` | lines in order, from their n-th column, backwards with `/R` |
@@ -179,8 +180,38 @@ or the current drive's root, deleted once the line has run. `MORE`, `FIND`
 and `SORT` read a pipe, `<file` or the file they are given; `PAUSE`,
 `CHOICE`, `DATE` and `TIME` take their keys or lines from a pipe too
 (`ECHO Y | CHOICE`). `PROMPT` takes DOS's `$` codes (`$P$G` is the
-default). At the prompt, Up and Down step through the last 100 lines typed,
-and Ctrl+C gives up the line being typed.
+default), and ANSI colors after `$E` (`$E[1;33m`).
+
+### The prompt
+
+The prompt edits its line as [clink](https://chrisant996.github.io/clink/)
+does for `cmd.exe`. It colors the commands it knows, the programs it finds,
+switches and arguments, and it suggests the rest of the line in dark grey
+from the history. The history is kept between sessions. The
+[`[shell]`](CONFIGURATION.md#shell) section has the settings and colors.
+
+| Key | Action |
+|---|---|
+| Left, Right, Home, End | move the cursor; Right or End at the end takes the suggestion |
+| Ctrl+Left, Ctrl+Right | move a word; Ctrl+Right at the end takes a word of the suggestion |
+| Backspace, Del | delete a character anywhere in the line |
+| Ctrl+Backspace, Ctrl+W | delete the word before the cursor (Ctrl+Backspace stops at a `\`) |
+| Ctrl+Del | delete the word after the cursor |
+| Ctrl+Home, Ctrl+U / Ctrl+End, Ctrl+K | delete up to the cursor / from the cursor on |
+| Ins | overwrite or insert |
+| Ctrl+Z | undo |
+| Esc | clear the line |
+| Up, Down (F5) | the lines typed before |
+| PgUp, PgDn (F8) | the lines typed before that begin as the line does up to the cursor |
+| Ctrl+R, Ctrl+S | search the history as you type; Ctrl+R again for an older match, Enter runs it, Esc gives up |
+| F7 | the history in a window: type to narrow it, Enter runs a line, Tab edits it, Del forgets it |
+| F1, F3 | copy a character / the rest of the previous line, as in COMMAND.COM |
+| Tab, Shift+Tab | complete a command, program, file, directory (after `CD`) or variable (after `SET` or `%`), and go through the others |
+| Ctrl+Space, Alt+= | list what Tab would complete to |
+| Ctrl+C | give up the line |
+
+`HISTORY` lists the lines, `HISTORY CLEAR` forgets them all and
+`HISTORY DELETE n` forgets one. A line that begins with a space isn't kept.
 
 ## Keyboard shortcuts
 

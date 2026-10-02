@@ -589,6 +589,35 @@ message and the log say where it went.
   Achievements page fills in when you log in. The token is what the site
   gives for your password, which isn't kept.
 
+### `[shell]`
+
+The DOS prompt's line editor (see [the prompt](README.md#the-prompt)).
+
+* `autosuggest` shows the rest of the line in dark grey, from the newest
+  matching line in the history or else the first name Tab would complete:
+  `true` (the default) or `false`.
+* `colors` colors the prompt and the line typed at it: `true` (the
+  default) or `false`.
+* `save_history` keeps the history in `shell_history.txt` in the per-user
+  folder (the libretro core: in its save folder), so it is there after a
+  restart: `true` (the default) or `false`. A line that begins with a
+  space is never kept.
+* `history_size` is how many lines are kept, 1 to 100000 (1000 by
+  default).
+* `prompt_color`, `command_color` (built-in commands), `executable_color`
+  (programs found, drive letters), `unrecognized_color` (anything else
+  where a command goes), `argument_color`, `flag_color` (`/X` switches)
+  and `suggestion_color` are the colors, each one of `black`, `blue`,
+  `green`, `cyan`, `red`, `magenta`, `brown`, `lightgray`, `darkgray`,
+  `lightblue`, `lightgreen`, `lightcyan`, `lightred`, `lightmagenta`,
+  `yellow`, `white`, or `default` for the screen's own. They are set only
+  here; the settings window turns them on and off.
+
+`PROMPT` may color itself with ANSI sequences after `$E`, as with clink:
+`PROMPT $E[1;33m$P$E[0m$G` shows the directory in yellow. Codes 0
+(reset), 1 and 22 (bright), 30 to 37 and 90 to 97 (text), 40 to 47 and
+100 to 107 (background), and 39 and 49 (back to the default) work.
+
 ### `[drives]`
 
 Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot] [-overlay DIR]`,
