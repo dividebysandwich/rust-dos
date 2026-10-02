@@ -1945,6 +1945,9 @@ impl Host for MainHost<'_, '_> {
         if new.achievements != old.achievements {
             self.achievements.apply(&new.achievements);
         }
+        if new.shell != old.shell {
+            rust_dos::cmdline::configure(self.cpu, &new.shell);
+        }
         if !self.machine.differs(new) {
             return Ok(None);
         }
@@ -2372,6 +2375,8 @@ fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Cpu {
 
     let mut cpu = Cpu::with_memory(root_path.clone(), memory_mb);
     cpu.bus.log_file = open_log_file();
+    cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
+    rust_dos::cmdline::configure(&mut cpu, &config.shell);
     if let Some(spec) = c_spec {
         // Remount C: to apply the config's drive type, label and -ro, or
         // with its disk image.

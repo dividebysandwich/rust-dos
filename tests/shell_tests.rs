@@ -591,3 +591,32 @@ fn a_state_saved_while_typing_keeps_the_line() {
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("dixr"));
     assert_eq!(last_row_with(&cpu, "C:\\>").as_deref(), Some("C:\\>dixr"));
 }
+
+const PGUP: u8 = 0x49;
+const PGDN: u8 = 0x51;
+
+#[test]
+fn pgup_and_pgdn_find_the_lines_beginning_as_this_one() {
+    let base = scratch("prefix_search", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    for line in ["dir a", "ver", "dir b", "echo"] {
+        type_keys(&mut cpu, &format!("{}\r", line));
+        assert_eq!(run_until_command(&mut cpu).as_deref(), Some(line));
+    }
+    // From the newest back, the cursor staying after "di".
+    type_keys(&mut cpu, "di");
+    extended_key(&mut cpu, PGUP);
+    extended_key(&mut cpu, PGUP);
+    run_keys(&mut cpu);
+    assert_eq!(cursor_at(&cpu).0, 6);
+    extended_key(&mut cpu, PGDN);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("dir b"));
+    // F8 as PgUp; a line entered again goes last, once.
+    type_keys(&mut cpu, "v");
+    extended_key(&mut cpu, 0x42);
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
+    assert_eq!(cpu.shell_history.entries(), ["dir a", "echo", "dir b", "ver"]);
+}

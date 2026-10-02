@@ -193,6 +193,8 @@ pub struct Config {
     pub printer: crate::printer::PrinterSettings,
     /// `[achievements]`: RetroAchievements.
     pub achievements: crate::achievements::AchievementSettings,
+    /// `[shell]`: the prompt's suggestions, colours and history.
+    pub shell: crate::cmdline::settings::ShellSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -229,6 +231,7 @@ enum Section {
     Serial,
     Printer,
     Achievements,
+    Shell,
     Drives,
     Autoexec,
     /// A game profile's (games.rs).
@@ -247,6 +250,7 @@ impl Section {
             "serial" => Section::Serial,
             "printer" => Section::Printer,
             "achievements" => Section::Achievements,
+            "shell" => Section::Shell,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
@@ -264,6 +268,7 @@ impl Section {
             Section::Serial => "serial",
             Section::Printer => "printer",
             Section::Achievements => "achievements",
+            Section::Shell => "shell",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",
@@ -715,6 +720,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Serial
             | Section::Printer
             | Section::Achievements
+            | Section::Shell
             | Section::Game => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
@@ -964,6 +970,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Shell {
+                    if let Err(e) = config.shell.set(key, value) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
                 if section == Section::Sound {
                     let lower = key.to_ascii_lowercase();
                     if matches!(lower.as_str(), "hard_disk_noise" | "floppy_disk_noise") {
@@ -1161,6 +1174,8 @@ pub struct Settings {
     pub printer: crate::printer::PrinterSettings,
     /// `[achievements]`: RetroAchievements.
     pub achievements: crate::achievements::AchievementSettings,
+    /// `[shell]`: the prompt's suggestions, colours and history.
+    pub shell: crate::cmdline::settings::ShellSettings,
 }
 
 impl Default for Settings {
@@ -1204,6 +1219,7 @@ impl Default for Settings {
             serial: crate::serial::SerialSettings::default(),
             printer: crate::printer::PrinterSettings::default(),
             achievements: Default::default(),
+            shell: Default::default(),
         }
     }
 }
@@ -1273,6 +1289,7 @@ impl Settings {
             serial: config.serial.clone(),
             printer: config.printer.clone(),
             achievements: config.achievements.clone(),
+            shell: config.shell,
         }
     }
 }
@@ -1387,6 +1404,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
     entries.extend(settings.serial.entries().into_iter().map(|(key, value)| (Section::Serial, key, value)));
     entries.extend(settings.printer.entries(home).into_iter().map(|(key, value)| (Section::Printer, key, value)));
     entries.extend(settings.achievements.entries().into_iter().map(|(key, value)| (Section::Achievements, key, value)));
+    entries.extend(settings.shell.entries().into_iter().map(|(key, value)| (Section::Shell, key, value)));
     entries
 }
 
@@ -1427,6 +1445,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Serial
                 | Section::Printer
                 | Section::Achievements
+                | Section::Shell
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(comment.trim_start_matches(['#', ';']).trim_start())
@@ -2366,6 +2385,15 @@ mod tests {
                 token: "abc123".to_string(),
                 hardcore: true,
             },
+            shell: crate::cmdline::settings::ShellSettings {
+                autosuggest: false,
+                history_size: 500,
+                palette: crate::cmdline::settings::Palette {
+                    prompt: crate::cmdline::settings::DosColor(Some(14)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         }
     }
 
@@ -2542,7 +2570,8 @@ mod tests {
         assert!(saved.contains("\n[joystick]\njoysticktype=auto\ndeadzone=10\n\n[network]\nipx=auto\n"), "{}", saved);
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
         assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
-        assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
+        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

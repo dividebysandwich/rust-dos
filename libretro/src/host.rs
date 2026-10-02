@@ -199,6 +199,9 @@ impl Host for Machine {
         if new.joystick != old.joystick {
             self.cpu.bus.set_joystick(new.joystick);
         }
+        if new.shell != old.shell {
+            rust_dos::cmdline::configure(&mut self.cpu, &new.shell);
+        }
         if new.composite != old.composite {
             self.cpu.bus.vga.set_composite(new.composite);
         }

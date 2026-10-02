@@ -8,6 +8,9 @@ pub mod complete;
 pub mod editor;
 pub mod history;
 pub mod render;
+pub mod settings;
+
+use std::path::PathBuf;
 
 use crate::cpu::Cpu;
 use crate::dosstr;
@@ -80,6 +83,19 @@ impl LineEditor {
     }
 }
 
+/// Where the history is kept on a desktop: `shell_history.txt` in the
+/// per-user directory.
+pub fn default_history_file() -> Option<PathBuf> {
+    crate::config::user_dir().map(|d| d.join("shell_history.txt"))
+}
+
+/// Take the `[shell]` settings: the history is kept in the file the host
+/// gave (`ShellHistory::set_home`) when they say to keep it.
+pub fn configure(cpu: &mut Cpu, settings: &settings::ShellSettings) {
+    cpu.shell_settings = *settings;
+    cpu.shell_history.configure(settings.save_history, settings.history_size);
+}
+
 /// The prompt is on the screen (or isn't, with ECHO off): a new line
 /// begins at the cursor.
 pub fn start(cpu: &mut Cpu) {
@@ -92,6 +108,7 @@ pub fn start(cpu: &mut Cpu) {
     };
     ed.store(cpu);
     cpu.line_editor = Some(ed);
+    cpu.shell_history.reset();
     restore(cpu, saved);
 }
 
@@ -197,6 +214,22 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
             }
             if let Some(entry) = cpu.shell_history.older() {
                 ed.line.replace(&dosstr::to_bytes(entry));
+            }
+        }
+        // As clink's history-search-backward and -forward: the entries
+        // beginning with the line before the cursor, which stays where it
+        // is.
+        Key::PgUp | Key::PgDn | Key::F(8) => {
+            if cpu.shell_history.at_newest() {
+                ed.draft = Some(ed.line.text.clone());
+            }
+            let prefix = dosstr::from_bytes(&ed.line.text[..ed.line.cursor]);
+            let current = dosstr::from_bytes(&ed.line.text);
+            let older = keys::decode(key) != Key::PgDn;
+            if let Some(entry) = cpu.shell_history.search_prefix(&prefix, &current, older).map(dosstr::to_bytes) {
+                let cursor = ed.line.cursor;
+                ed.line.replace(&entry);
+                ed.line.cursor = cursor;
             }
         }
         Key::Down => {

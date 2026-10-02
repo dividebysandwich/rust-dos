@@ -69,7 +69,7 @@ crate::state_fields!(Cpu {
     // counts and logs are the debugger's.
     shell_history, shell_completion, null_interrupts,
     // Found again from the shell's buffer (cmdline::LineEditor::recover).
-    line_editor,
+    line_editor, shell_settings,
     // The session's, and set only from a reset to the shell handling it.
     startup, reboot,
     // The host's, as the history.

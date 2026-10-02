@@ -167,6 +167,9 @@ impl Core {
         // Printouts go in the core's folder in the save directory.
         cpu.bus.printer_dir = Some(dirs.data.join("printouts"));
         warnings.extend(hardware::configure(&mut cpu, &settings, Layout::us()));
+        // The prompt's history, beside the printouts.
+        cpu.shell_history.set_home(Some(dirs.data.join("shell_history.txt")));
+        rust_dos::cmdline::configure(&mut cpu, &settings.shell);
 
         // rust-dos.conf's drives, those of the configuration beside the
         // content, then the content's own.

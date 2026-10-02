@@ -19,6 +19,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("TYPE", &TypeCommand),
     ("CLS", &ClsCommand),
     ("EXIT", &ExitCommand),
+    ("HISTORY", &crate::cmdline::history::HistoryCommand),
     ("CD", &CdCommand),
     ("CHDIR", &CdCommand),
     ("ECHO", &EchoCommand),
@@ -62,6 +63,11 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("SORT", &crate::filter_commands::SortCommand),
     ("AWEUTIL", &crate::awe32::aweutil::AweUtilCommand),
 ];
+
+/// The names of the built-in commands.
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|&(name, _)| name)
+}
 
 /// The built-in command called `name`, in any case.
 fn builtin(name: &str) -> Option<&'static (dyn ShellCommand + Sync)> {

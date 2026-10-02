@@ -439,3 +439,19 @@ fn keyb_changes_the_keyboard_layout() {
     assert_eq!(run(&mut cpu, "KEYB XX"), "Invalid keyboard code specified");
     assert_eq!((cpu.errorlevel, cpu.bus.kbd.layout.code), (1, "gr"));
 }
+
+#[test]
+fn history_lists_and_forgets_lines() {
+    let base = scratch("history", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    for line in ["dir", "ver", "echo hi"] {
+        cpu.shell_history.push(line);
+    }
+    assert_eq!(run(&mut cpu, "history"), "1  dir\n2  ver\n3  echo hi");
+    assert_eq!(run(&mut cpu, "history 2"), "2  ver\n3  echo hi");
+    assert_eq!(run(&mut cpu, "history delete 2"), "");
+    assert_eq!(run(&mut cpu, "history"), "1  dir\n2  echo hi");
+    assert_eq!(run(&mut cpu, "history delete 9"), "Invalid history line number");
+    assert_eq!(run(&mut cpu, "history clear"), "");
+    assert!(cpu.shell_history.entries().is_empty());
+}

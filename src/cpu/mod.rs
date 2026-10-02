@@ -311,6 +311,8 @@ pub struct Cpu {
     pub shell_completion: Option<crate::cmdline::complete::Completion>,
     /// The line being typed at the prompt.
     pub line_editor: Option<crate::cmdline::LineEditor>,
+    /// How the prompt suggests, colours and keeps its history.
+    pub shell_settings: crate::cmdline::settings::ShellSettings,
     /// What PAUSE or CHOICE waits for; batch lines wait with it.
     pub shell_wait: Option<crate::shell::ShellWait>,
     /// Where the prompt was printed, (column, row), while a line is typed
@@ -512,6 +514,7 @@ impl Cpu {
             shell_history: Default::default(),
             shell_completion: None,
             line_editor: None,
+            shell_settings: Default::default(),
             shell_wait: None,
             shell_prompt_at: None,
             edit_clipboard: Vec::new(),

@@ -203,6 +203,8 @@ impl Machine {
         // (The browser has no recompiler: every core is the interpreter.)
         // With auto the page hands over what the browser's layout types.
         warnings.extend(rust_dos::hardware::configure(&mut cpu, &settings, Layout::us()));
+        // The history stays in the page: there is nowhere to keep it.
+        rust_dos::cmdline::configure(&mut cpu, &settings.shell);
         for warning in &warnings {
             cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
         }
@@ -1192,6 +1194,9 @@ impl Host for PageHost<'_> {
         }
         if new.joystick != old.joystick {
             self.cpu.bus.set_joystick(new.joystick);
+        }
+        if new.shell != old.shell {
+            rust_dos::cmdline::configure(self.cpu, &new.shell);
         }
         if new.composite != old.composite {
             self.cpu.bus.vga.set_composite(new.composite);
