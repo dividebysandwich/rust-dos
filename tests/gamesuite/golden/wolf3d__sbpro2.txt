@@ -1,0 +1,7 @@
+signon f6d3b06436a030ec0c07eca5
+title cb1e68513ad44cbd7069fe43
+menu 061bcc684448ff781123cefe
+new-game bafc7bb3f4f1a3c211ebd93c
+e1m1 d500897e74e5da63f6fc7085
+walked 0138cfa04639ffcb11256445
+shot 3a1afeee66982b6f870313c3

@@ -10,6 +10,8 @@ switches. The regular test suite covers protected mode as well, in
 All of them run on the dynamic recompiler as well (see
 [On the dynamic recompiler](#on-the-dynamic-recompiler)).
 
+Real games are played by the opt-in [game regression suite](game-suite.md).
+
 ## SingleStepTests/80386
 
 `tests/sst386.rs` runs the [SingleStepTests/80386](https://github.com/SingleStepTests/80386)
