@@ -15,6 +15,12 @@ use crate::video::console_write;
 const CASE_MAP_ROUTINE: usize = 0xFF0FF;
 /// Volume serial number of drive A:; each drive's is its number more.
 pub const VOLUME_SERIAL: u32 = 0x1234_0000;
+/// The emulated time AH=2Ch takes, as DOS asking its CLOCK$ driver and
+/// working the time out of the tick count does on a 486. Programs count
+/// calls to it to time themselves: Duke Nukem 3D's SETUP counts them for a
+/// second, and its delay loop's 32-bit arithmetic overflows past about two
+/// million, which a call costing nothing reaches at 50000 cycles.
+const GET_TIME_NS: u64 = 10_000;
 
 /// What DOS does on entry to INT 21h: save the caller's registers on its
 /// stack (AX, BX, CX, DX, SI, DI, BP, DS, ES, below the interrupt's return
@@ -934,6 +940,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 2Ch: Get System Time
         // Returns: CH=Hour, CL=Minute, DH=Second, DL=1/100s
         0x2C => {
+            cpu.bus.clock.stall(GET_TIME_NS);
             let now = cpu.bus.cmos.now();
 
             let hour = now.hour() as u8;
