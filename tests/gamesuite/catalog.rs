@@ -385,10 +385,6 @@ fn wolf3d() -> Vec<Scenario> {
     all
 }
 
-/// DSP commands only an SB16 takes parameters for (41h, 0Eh) panic on an
-/// SB Pro 2 or SB 2.0, which run them without their parameters.
-const SB_SHORT_PARAMS: &str = "SB16-only DSP commands run without their parameters on older cards (src/sb.rs index panic)";
-
 /// Doom's settings with these music and sound effects devices (setup's
 /// numbers) on the card at `port`.
 fn doom_cfg(template: &str, music: u32, sfx: u32, port: u32, irq: u32, dma: u32, mport: i32) -> Vec<u8> {
@@ -455,11 +451,7 @@ fn doom() -> Vec<Scenario> {
     for name in ["none", "speaker", "adlib", "sb16", "sbpro2", "sb2", "gus", "gm"] {
         let (card, _) = id_sound(name);
         let hw = Hw::new("486", 50000).with(&card);
-        let mut scenario = one("doom", &format!("timedemo-{}", name), &hw, run, timedemo(name != "none")).file("DOOMS\\DEFAULT.CFG", cfg(name));
-        if name == "sbpro2" {
-            scenario = scenario.expect_fail(SB_SHORT_PARAMS);
-        }
-        all.push(scenario);
+        all.push(one("doom", &format!("timedemo-{}", name), &hw, run, timedemo(name != "none")).file("DOOMS\\DEFAULT.CFG", cfg(name)));
     }
     for cpu in ["386", "pentium"] {
         let hw = Hw::new(cpu, 50000).with(&sound("speaker"));
@@ -781,10 +773,7 @@ fn duke3d() -> Vec<Scenario> {
     all.push(one("duke3d", "sb16-gm", &base.clone().with(&sound("sb16")), run, duke3d_play(2, 8, true)));
     all.push(one("duke3d", "disney", &base.clone().with(&sound("disney")), run, duke3d_play(7, 0, true)));
     all.push(one("duke3d", "silent-pentium", &Hw::new("pentium", 20000).with(&sound("speaker")), run, duke3d_play(0, 0, false)));
-    all.push(
-        one("duke3d", "setup-50000", &Hw::new("486", 50000).with(&sound("sb16")), "cd duke3d\nsetup", vec![WaitFor(Cond::Text("Main Menu"), 30000)])
-            .expect_fail("setup calibrates a delay loop around INT 21h AH=2Ch, which costs next to nothing here; at 50000 the loop runs for hours"),
-    );
+    all.push(one("duke3d", "setup-50000", &Hw::new("486", 50000).with(&sound("sb16")), "cd duke3d\nsetup", vec![WaitFor(Cond::Text("Main Menu"), 30000), Shot("main-menu")]));
     all
 }
 
@@ -823,7 +812,7 @@ fn raptor() -> Vec<Scenario> {
     for card in ["sb16", "speaker"] {
         all.push(one("raptor", card, &base.clone().with(&sound(card)), run, raptor_play(card != "speaker")));
     }
-    all.push(one("raptor", "sbpro2", &base.clone().with(&sound("sbpro2")), run, raptor_play(true)).expect_fail(SB_SHORT_PARAMS));
+    all.push(one("raptor", "sbpro2", &base.clone().with(&sound("sbpro2")), run, raptor_play(true)));
     all
 }
 
@@ -889,11 +878,8 @@ fn descent() -> Vec<Scenario> {
     let base = Hw::new("486", 20000);
     all.extend(both_cores("descent", "gus", &base.clone().with(&sound("sb16+gus")), run, descent_play(true)));
     all.push(one("descent", "sb16", &base.clone().with(&sound("sb16")), run, descent_play(true)));
-    all.push(one("descent", "sbpro2", &base.clone().with(&sound("sbpro2")), run, descent_play(true)).expect_fail(SB_SHORT_PARAMS));
-    all.push(
-        one("descent", "sb2", &base.clone().with(&sound("sb2")), run, descent_play(true))
-            .expect_fail("setup ends (exit code D2h) while detecting an SB 2.0, after DSP command E7h"),
-    );
+    all.push(one("descent", "sbpro2", &base.clone().with(&sound("sbpro2")), run, descent_play(true)));
+    all.push(one("descent", "sb2", &base.clone().with(&sound("sb2")), run, descent_play(true)));
     all.push(one("descent", "pentium-speaker", &Hw::new("pentium", 20000).with(&sound("speaker")), run, descent_play(false)));
     all
 }

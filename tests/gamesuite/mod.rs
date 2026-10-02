@@ -91,6 +91,8 @@ impl Scenario {
         self
     }
 
+    /// No scenario is known to fail at present; kept for the next one.
+    #[allow(dead_code)]
     pub fn expect_fail(mut self, why: &'static str) -> Self {
         self.expect_fail = Some(why);
         self

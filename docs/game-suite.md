@@ -90,11 +90,7 @@ A scenario marked `expect_fail` stays in the suite and is reported as
 `known-fail`. If it starts passing, the run fails with "unexpected pass", so
 that someone removes the mark.
 
-| Scenario | Why |
-|---|---|
-| `doom/timedemo-sbpro2`, `raptor/sbpro2`, `descent/sbpro2` | On an SB Pro 2 or SB 2.0, DSP commands that only the SB16 takes parameters for (41h, 0Eh) run without them. `src/sb.rs` panics on an index out of bounds. |
-| `descent/sb2` | Descent's setup exits (code D2h) while detecting an SB 2.0, after DSP command E7h. |
-| `duke3d/setup-50000` | Duke Nukem 3D's setup calibrates a delay loop around INT 21h AH=2Ch. That call costs next to nothing here, so at 50000 cycles the loop runs for hours. The other Duke scenarios run the setup at 20000. |
+No scenario is marked at present.
 
 ## Adding a game
 

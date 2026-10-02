@@ -4,4 +4,4 @@ menu 061bcc684448ff781123cefe
 new-game bafc7bb3f4f1a3c211ebd93c
 e1m1 d500897e74e5da63f6fc7085
 walked 0138cfa04639ffcb11256445
-shot 98bdff67b2a593939b852d51
+shot 425df380e24d9d3db2c02ffa
