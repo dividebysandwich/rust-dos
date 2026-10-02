@@ -908,6 +908,21 @@ fn vrr_turns_on_at_once() {
 }
 
 #[test]
+fn the_shell_s_suggestions_colors_and_history_turn_off_at_once() {
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Emulator);
+    for item in [Item::ShellSuggestions, Item::ShellColors, Item::SaveShellHistory] {
+        ui.row = ui.items().iter().position(|&i| i == item).unwrap();
+        assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("on"));
+        pick(&mut ui, &mut host, "off");
+        assert_eq!(item.applies(), Applies::Now);
+    }
+    let shell = host.applied.last().unwrap().shell;
+    assert!(!shell.autosuggest && !shell.colors && !shell.save_history);
+}
+
+#[test]
 fn the_crt_shader_steps_through_the_looks() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);

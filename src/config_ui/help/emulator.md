@@ -251,3 +251,27 @@ GAME.EXE
 
 **F2** saves them, **Esc** leaves them as they were. They run at the next
 start. While a game profile plays, this edits that game's commands.
+
+# Shell suggestions {#shell-suggestions}
+
+When **on**, the DOS prompt suggests the rest of the line you are typing
+in dark grey, from the newest matching line in the history or else from the
+first name **Tab** would complete. **Right** or **End** takes the
+suggestion, **Ctrl+Right** takes its next word, and **Enter** runs only
+what you typed.
+
+# Shell colors {#shell-colors}
+
+When **on**, the prompt and the line typed at it are colored: built-in
+commands, programs, unknown commands, switches and arguments each have
+their own color. The colors are set in the `[shell]` section of the
+configuration file (`prompt_color`, `command_color` and so on).
+**off** keeps the screen's own color.
+
+# Save shell history {#save-shell-history}
+
+When **on**, the lines typed at the DOS prompt are kept in
+`shell_history.txt` in the Rust-DOS settings folder, so **Up**, **Ctrl+R**
+and **F7** find them again after a restart. When **off**, the history lasts
+only until Rust-DOS quits. A line that begins with a space is never kept.
+The `HISTORY` command lists the lines, and `HISTORY CLEAR` forgets them.

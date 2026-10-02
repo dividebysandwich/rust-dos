@@ -361,6 +361,7 @@ impl Page {
                 Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
+                ShellSuggestions, ShellColors, SaveShellHistory,
             ],
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
@@ -502,6 +503,9 @@ enum Item {
     MouseAutocapture,
     /// The messages that say the mouse was captured or let go.
     MouseCaptureMessages,
+    ShellSuggestions,
+    ShellColors,
+    SaveShellHistory,
     /// Rewind (held Alt+F11) and the memory it takes.
     Rewind,
     RewindMemory,
@@ -784,6 +788,9 @@ impl Item {
             KeyboardLayout => "Keyboard layout",
             MouseAutocapture => "Mouse auto capture",
             MouseCaptureMessages => "Mouse capture messages",
+            ShellSuggestions => "Shell suggestions",
+            ShellColors => "Shell colors",
+            SaveShellHistory => "Save shell history",
             Rewind => "Rewind (Alt+F11)",
             RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
@@ -929,7 +936,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | Rewind | RewindMemory
+            Cycles | Core | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
@@ -1011,6 +1018,9 @@ impl Item {
             KeyboardLayout => s.keyboard_layout.describe(),
             MouseAutocapture => on_off(s.mouse_autocapture),
             MouseCaptureMessages => on_off(s.mouse_capture_messages),
+            ShellSuggestions => on_off(s.shell.autosuggest),
+            ShellColors => on_off(s.shell.colors),
+            SaveShellHistory => on_off(s.shell.save_history),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
             SbType if !s.sound.sb_installed => "none".to_string(),
@@ -1207,6 +1217,9 @@ impl Item {
             KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
             MouseAutocapture => on_off(|s, on| s.mouse_autocapture = on),
             MouseCaptureMessages => on_off(|s, on| s.mouse_capture_messages = on),
+            ShellSuggestions => on_off(|s, on| s.shell.autosuggest = on),
+            ShellColors => on_off(|s, on| s.shell.colors = on),
+            SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),
