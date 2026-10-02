@@ -27,8 +27,9 @@
 //! DOSBox Pure .dosz, relative to the games folder).
 //!
 //! `[game]`'s `overlay=true`, which new profiles have, leaves the game's
-//! own drives (its `[drives]`' host directories) as they are: what the
-//! game changes on them goes to `saves/<id>/<drive letter>` beside the
+//! own drives (its `[drives]`' host directories and disk images) as they
+//! are: what the game changes on them goes to `saves/<id>/<drive letter>`
+//! (a disk image's to a delta file there, `diskdelta`) beside the
 //! games folder (`saves_dir`, `overlay_drives`), and deleting that
 //! (`reset`) takes the game back to how it was installed.
 
@@ -191,14 +192,17 @@ pub fn saves_dir(games: &Path) -> PathBuf {
 
 /// The folder for its changes in the game's saves (`saves`/`id`) for each
 /// of the profile's own drives that is an archive, and with `overlay=`
-/// each that is a host directory, unless it has one or is read-only.
+/// each that is a host directory or disk image, unless it has one or is
+/// read-only.
 pub fn overlay_drives(prepared: &mut Prepared, id: &str, saves: &Path) {
     let saves = saves.join(id);
     for spec in &mut prepared.drives {
         let opts = &mut spec.opts;
         let archive = crate::archive::is_archive_name(&spec.path) && hostfs::is_file(&spec.path);
         let folder = prepared.overlay && hostfs::is_dir(&spec.path);
-        if opts.overlay.is_some() || opts.read_only || opts.kind == crate::disk::DriveKind::CdRom || !(archive || folder) {
+        // A disk image's changes go to a delta file there (`diskdelta`).
+        let image = prepared.overlay && !archive && hostfs::is_file(&spec.path);
+        if opts.overlay.is_some() || opts.read_only || opts.kind == crate::disk::DriveKind::CdRom || !(archive || folder || image) {
             continue;
         }
         opts.overlay = Some(saves.join(crate::disk::drive_key(spec.drive)));

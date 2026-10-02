@@ -24,7 +24,8 @@
 //! `fdd`), `hdd` (alias `dir`) or `cdrom` (alias `iso`).
 //!
 //! `-overlay DIR` leaves a host directory as it is: what DOS changes on
-//! the drive goes to DIR (`overlay`). DOSBox's `MOUNT C DIR -t overlay`
+//! the drive goes to DIR (`overlay`). A disk image's changes go to a delta
+//! file in DIR (`diskdelta`), one image under many. DOSBox's `MOUNT C DIR -t overlay`
 //! gives the drive mounted as C: one.
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions, NUMBERED_DRIVES, drive_number, numbered_drive};
@@ -38,8 +39,8 @@ Usage: MOUNT drive directory|archive [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                              [-share|-noshare] [-overlay DIR]\r
        MOUNT drive DIR -t overlay\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
-                         [-chs C,H,S] [-size 512,S,H,C]\r
-       MOUNT number image [image ...] [-chs C,H,S] [-ro]\r
+                         [-chs C,H,S] [-size 512,S,H,C] [-overlay DIR]\r
+       MOUNT number image [image ...] [-chs C,H,S] [-ro] [-overlay DIR]\r
        MOUNT -u drive\r
        MOUNT             lists the drives\r
 An image can be on a mounted drive (C:\\GAME\\CD.CUE), and a wildcard\r
@@ -52,9 +53,9 @@ on a booted system's IDE channel. -boot has the image boot when Rust-DOS\r
 starts, once the drives are saved. A booted system has a directory on D:\r
 and up as a hard disk (-noshare: not; -share: C: too), and its changes go\r
 back into it when it shuts down; a directory as a CD-ROM drive is a disc.\r
--overlay DIR leaves the directory as it is: the drive's changes go to DIR\r
-(-t overlay: to the drive mounted already). A zip or 7z archive is a drive\r
-with its files, or the disk or CD image in it; without -overlay, read-only.\r
+-overlay DIR leaves the directory or image as it is: changes go to DIR, an\r
+image's to IMAGE.rdelta (-t overlay: to the drive mounted). A zip or 7z is a\r
+drive of its files or the disk or CD image in it; without -overlay, read-only.\r
 IMGMOUNT is the same command.\r
 ";
 

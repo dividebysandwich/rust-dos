@@ -247,6 +247,9 @@ the game's saved games and setup changes, so it's the one to back up or
 sync between computers. R on the Games page deletes it, putting the game
 back to how the package has it.
 
+A disk image in the package isn't copied out when the game writes to it:
+its changes go to `<image name>.rdelta` in that folder, a block at a time.
+
 For a folder package, `overlay=false` in `[game]` lets the game write into
 the folder itself. An archive can't be written to, so its changes always go
 to the saves folder.

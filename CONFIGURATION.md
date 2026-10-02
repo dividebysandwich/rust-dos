@@ -762,8 +762,8 @@ its profile. `--game NAME` launches a game at startup, by its file name
 
 A profile with `overlay=true` in `[game]` keeps the game's files as they
 were installed. New and imported profiles, and those of archives, have it. What the game
-writes on its own drives (the host directories in its `[drives]`, but not
-CD-ROMs or `-ro` drives) goes to `saves/<profile>/<drive letter>` beside
+writes on its own drives (the host directories and disk images in its
+`[drives]`, but not CD-ROMs or `-ro` drives) goes to `saves/<profile>/<drive letter>` beside
 the `games` folder instead: saved games, setup changes, patches. Files the
 game deletes are hidden, and listed in that folder's `.rust-dos-deleted`.
 That folder holds everything the game changed, so it is the one to back up
@@ -925,7 +925,7 @@ programs) mounts the image instead. A path into an archive
 (`game.zip/CD/GAME.CUE`, `game.zip/CD`) mounts the image or folder there,
 and a list of images can be in one archive. An archive can't be written: without
 `-overlay` the drive is read-only, and with it the changes go to its
-folder, a disk image too, copied there when it is mounted. A game
+folder, a disk image's to a delta file there. A game
 profile's archives always get one (see [Game profiles](#game-profiles)).
 
 `-overlay DIR` leaves a host directory as it is: what DOS writes, creates,
@@ -938,6 +938,23 @@ directory mounted as C: the overlay `DIR`, and an imported DOSBox
 configuration keeps it. A booted system's [shared
 disks](#booting-a-disk-image) write their changes to the overlay too.
 `MOUNT` lists where each drive's changes go.
+
+A floppy or hard disk image with `-overlay DIR` is left as it is too: what
+is written to it goes to `DIR/<image name>.rdelta`, 64 KB at a time, and the
+rest is read from the image. That makes one image the base of many
+setups, a Windows 95 install with each game's changes in its own folder:
+
+```
+MOUNT 2 win95.img -overlay saves/carmageddon
+MOUNT 2 win95.img -overlay saves/fury3
+```
+
+Deleting the `.rdelta` file takes the disk back to the image. The delta
+file is made for its image: if the image changes after, the delta file is
+refused. An image in an archive gets a delta file in the overlay folder in
+the same way (one copied there whole by an older Rust-DOS is still used).
+State files of a system booted from such a disk keep a copy of the whole
+disk, as they do of any other.
 
 A: and B: are always floppy drives, whatever type the mount gives, and
 can't hold a CD or a partitioned hard disk image. Programs see them the way

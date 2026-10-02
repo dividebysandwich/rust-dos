@@ -399,7 +399,8 @@ pub struct MountOptions {
     /// (`-share`). None goes by the letter.
     pub share: Option<bool>,
     /// The folder a host directory's changes go to, which leave the
-    /// directory as it is (`-overlay`, `overlay`).
+    /// directory as it is (`-overlay`, `overlay`); a disk image's go to a
+    /// delta file in it (`diskdelta`).
     pub overlay: Option<PathBuf>,
 }
 
@@ -427,7 +428,8 @@ pub struct DriveInfo {
     /// Host directory; `None` for the drives held in memory and images.
     /// Under an overlay, the directory below it.
     pub root: Option<PathBuf>,
-    /// The folder a host directory's changes go to, under an overlay.
+    /// The folder a host directory's changes go to, under an overlay, or
+    /// the delta file a disk image's do.
     pub overlay: Option<PathBuf>,
     /// The disk or CD image the drive shows.
     pub image: Option<PathBuf>,
@@ -1046,7 +1048,32 @@ impl DiskController {
         // floppy of its size.
         let floppy = found == ImageKind::Floppy || drive < FLOPPY_DRIVES;
         let name = path.display().to_string();
-        Self::fat_storage(drive, found, &name, || DiskImage::open(path, floppy, opts.geometry, opts.read_only))
+        Self::fat_storage(drive, found, &name, || Self::open_disk(path, floppy, opts))
+    }
+
+    /// The floppy or hard disk image at `path`, its changes in a delta
+    /// file in the mount's overlay folder if it has one (`diskdelta`).
+    fn open_disk(path: &Path, floppy: bool, opts: &MountOptions) -> Result<DiskImage, String> {
+        match Self::delta_for(path, opts) {
+            Some(delta) => DiskImage::open_delta(path, &delta, floppy, opts.geometry, opts.read_only),
+            None => DiskImage::open(path, floppy, opts.geometry, opts.read_only),
+        }
+    }
+
+    /// Where the changes of the disk image at `path` go, under the mount's
+    /// overlay folder: `<image>.rdelta`, beside where the image would be
+    /// copied up to. An image in an archive that was copied up whole
+    /// before deltas is written to as it is.
+    fn delta_for(path: &Path, opts: &MountOptions) -> Option<PathBuf> {
+        let upper = opts.overlay.as_ref()?;
+        let name = match hostfs::is_layer(path) {
+            true => hostfs::layer_path(path),
+            false => path.file_name()?.to_string_lossy().into_owned(),
+        };
+        if hostfs::is_layer(path) && hostfs::is_file(upper.join(&name)) {
+            return None;
+        }
+        Some(upper.join(format!("{}.rdelta", name)))
     }
 
     /// The type, storage, volume label and writability of the disk mounted
@@ -1058,7 +1085,7 @@ impl DiskController {
             return Err(format!("{} is a CD image, which can't be mounted by number", path.display()));
         }
         let floppy = number < FLOPPY_DRIVES;
-        let disk = DiskImage::open(path, floppy, opts.geometry, opts.read_only)?;
+        let disk = Self::open_disk(path, floppy, opts)?;
         let kind = if floppy { DriveKind::Floppy } else { DriveKind::HardDisk };
         let writable = disk.writable();
         Ok((kind, Storage::Raw(Rc::new(disk)), String::new(), writable))
@@ -1613,7 +1640,10 @@ impl DiskController {
             drive,
             kind: d.kind,
             root: d.shown_root().map(Path::to_path_buf),
-            overlay: d.overlay.as_ref().and_then(|o| o.upper.clone()),
+            overlay: d
+                .disk()
+                .and_then(|disk| disk.delta_path().map(Path::to_path_buf))
+                .or_else(|| d.overlay.as_ref().and_then(|o| o.upper.clone())),
             image: d
                 .image()
                 .map(|image| image.path().to_path_buf())
@@ -3415,8 +3445,70 @@ mod tests {
         let archive = fs::canonicalize(base.join("booter.zip")).unwrap();
         assert_eq!(info.image, Some(archive.join("booter.img")));
         assert!(!info.read_only);
-        // Written to in the folder for the changes.
-        assert_eq!(fs::metadata(base.join("saves/booter.img")).unwrap().len(), 368_640);
+        // Its changes go to a delta file in the folder for them, made at
+        // the first write; the image isn't copied out.
+        assert_eq!(info.overlay, Some(base.join("saves/booter.img.rdelta")));
+        assert!(!base.join("saves/booter.img.rdelta").exists());
+        let image = disk.bios_image(numbered_drive(0)).unwrap();
+        image.write(10, &[0xAB; 512]).unwrap();
+        assert!(base.join("saves/booter.img.rdelta").exists());
+        assert!(!base.join("saves/booter.img").exists());
+        assert_eq!(fs::read(base.join("booter.zip")).unwrap(), zip);
+        // Mounted again, the change is there.
+        let opts = MountOptions { overlay: Some(base.join("saves")), ..MountOptions::default() };
+        disk.mount(numbered_drive(0), &base.join("booter.zip"), opts, true).unwrap();
+        let mut sector = [0u8; 512];
+        disk.bios_image(numbered_drive(0)).unwrap().read(10, &mut sector).unwrap();
+        assert_eq!(sector, [0xAB; 512]);
+    }
+
+    /// An image copied out whole into the folder for an archive's changes,
+    /// as before delta files, is the one written to.
+    #[test]
+    fn an_image_copied_out_before_stays_the_one() {
+        let base = scratch("archive_image_copied");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir_all(base.join("saves")).unwrap();
+        let zip = crate::archive::zip::tests::zip(&[("booter.img", &vec![0u8; 368_640], true)]);
+        fs::write(base.join("booter.zip"), &zip).unwrap();
+        fs::write(base.join("saves/booter.img"), vec![0x11u8; 368_640]).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        let opts = MountOptions { overlay: Some(base.join("saves")), ..MountOptions::default() };
+        disk.mount(numbered_drive(0), &base.join("booter.zip"), opts, false).unwrap();
+        let image = disk.bios_image(numbered_drive(0)).unwrap();
+        assert_eq!(image.delta_path(), None);
+        image.write(0, &[0x22; 512]).unwrap();
+        assert_eq!(fs::read(base.join("saves/booter.img")).unwrap()[..2], [0x22, 0x22]);
+    }
+
+    /// With -overlay, a hard disk image is left as it is: one image is
+    /// under each game's changes.
+    #[test]
+    fn an_image_under_an_overlay_keeps_as_it_is() {
+        let base = scratch("image_overlay");
+        fs::create_dir_all(base.join("c")).unwrap();
+        let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+        blank.copy_to(&base.join("base.img")).unwrap();
+        let before = fs::read(base.join("base.img")).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        for (game, text) in [("one", b"first game".as_slice()), ("two", b"second game")] {
+            let opts = MountOptions { overlay: Some(base.join(game)), ..MountOptions::default() };
+            disk.mount(3, &base.join("base.img"), opts, true).unwrap();
+            let h = disk.create_file(r"D:\GAME.TXT", PSP).unwrap();
+            disk.write_file(h, text).unwrap();
+            disk.close_file(h);
+            assert!(base.join(game).join("base.img.rdelta").exists());
+        }
+        assert_eq!(fs::read(base.join("base.img")).unwrap(), before, "the image as it was");
+        for (game, text) in [("one", b"first game".as_slice()), ("two", b"second game")] {
+            let opts = MountOptions { overlay: Some(base.join(game)), ..MountOptions::default() };
+            disk.mount(3, &base.join("base.img"), opts, true).unwrap();
+            let h = disk.open_file(r"D:\GAME.TXT", 0, PSP).unwrap();
+            assert_eq!(disk.read_file(h, 32).unwrap(), text);
+            disk.close_file(h);
+        }
+        disk.mount(3, &base.join("base.img"), MountOptions::default(), true).unwrap();
+        assert!(disk.open_file(r"D:\GAME.TXT", 0, PSP).is_err());
     }
 
     #[test]

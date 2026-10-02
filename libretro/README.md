@@ -41,7 +41,7 @@ starts.
 | `.conf` | a [game profile](../CONFIGURATION.md#game-profiles), launched; a DOSBox configuration is imported as one first |
 | floppy image (`.img`, `.ima`, `.vfd`, …) | A:, with the prompt at A: |
 | CD image (`.iso`, `.cue`) | D:, with the prompt at D: |
-| hard disk image (`.img`, `.vhd`, `.hdd`) | C: |
+| hard disk image (`.img`, `.vhd`, `.hdd`) | C:. The image is left as it is: its changes go to a delta file in `saves/rust-dos/saves/<name>`, so one Windows install can be the base of many games (see [`-overlay`](../CONFIGURATION.md#mounting-drives)) |
 | `.m3u` | a list of disk images for one drive: the first goes in, the frontend's *Disc Control* changes them |
 
 On Android, content from folders RetroArch reaches through the system's file

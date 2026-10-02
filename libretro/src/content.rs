@@ -7,7 +7,7 @@ use rust_dos::hostfs as fs;
 use std::path::{Path, PathBuf};
 
 use rust_dos::config::{self, Settings};
-use rust_dos::disk::{DRIVE_C, DriveKind, MountOptions, numbered_drive};
+use rust_dos::disk::{DRIVE_C, DriveKind, MountOptions, drive_key, numbered_drive};
 use rust_dos::diskimage::{self, ImageKind};
 use rust_dos::games;
 use rust_dos::import::drop::{DropAction, drop_action};
@@ -218,6 +218,9 @@ fn playlist(path: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Disk images as content: the first in its drive, the rest to change to.
+/// A hard disk image is left as it is, its changes in a delta file in the
+/// saves folder (`diskdelta`), so one Windows install is under each
+/// game's.
 fn images(images: Vec<PathBuf>, boot: bool, dirs: &Dirs, plan: &mut Plan) -> Result<(), String> {
     let first = images[0].clone();
     let more_images = images[1..].to_vec();
@@ -232,7 +235,11 @@ fn images(images: Vec<PathBuf>, boot: bool, dirs: &Dirs, plan: &mut Plan) -> Res
         ImageKind::HardDisk if boot => (numbered_drive(2), DriveKind::HardDisk, "BOOT -l C".to_string()),
         ImageKind::HardDisk => (DRIVE_C, DriveKind::HardDisk, "C:".to_string()),
     };
-    plan.mounts.push(MountSpec { drive, path: first, opts: MountOptions { kind, more_images, ..MountOptions::default() } });
+    let overlay = (kind == DriveKind::HardDisk).then(|| {
+        let stem = first.file_stem().map_or("disk".into(), |n| n.to_string_lossy().into_owned());
+        dirs.saves().join(games::slug(&stem, &[])).join(drive_key(drive))
+    });
+    plan.mounts.push(MountSpec { drive, path: first, opts: MountOptions { kind, more_images, overlay, ..MountOptions::default() } });
     plan.commands.push(command);
     plan.disk_drive = Some(drive);
     Ok(())
@@ -370,6 +377,18 @@ mod tests {
         assert_eq!(plan.commands, ["A:"]);
         let booted = super::plan(Some(&dir.join("game.m3u")), &dirs, true).unwrap();
         assert_eq!(booted.commands, ["BOOT -l A"]);
+        assert_eq!(booted.mounts[0].opts.overlay, None, "a floppy is written to");
+    }
+
+    #[test]
+    fn a_hard_disk_image_keeps_its_changes_in_the_saves() {
+        let dir = scratch("hdd");
+        let dirs = Dirs::new(dir.join("system"), dir.join("saves"));
+        let disk = rust_dos::diskimage::DiskImage::blank_hard_disk("Win95.img", 8 << 20, None).unwrap();
+        disk.copy_to(&dir.join("Win95.img")).unwrap();
+        let plan = plan(Some(&dir.join("Win95.img")), &dirs, true).unwrap();
+        let slug = games::slug("Win95", &[]);
+        assert_eq!(plan.mounts[0].opts.overlay, Some(dirs.saves().join(slug).join("2")));
     }
 
     #[test]

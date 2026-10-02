@@ -194,6 +194,11 @@ fn backend(path: &Path) -> Option<Arc<dyn Backend>> {
     BACKEND.with(|b| b.borrow().clone())
 }
 
+/// Whether `path` is under a layer's root (`layerN:/`).
+pub fn is_layer(path: &Path) -> bool {
+    has_scheme(path) && path.as_os_str().as_encoded_bytes().starts_with(b"layer")
+}
+
 /// Whether `path` is the backend's.
 pub fn is_foreign(path: &Path) -> bool {
     backend(path).is_some()

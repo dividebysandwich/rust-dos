@@ -11,6 +11,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::disk::DriveKind;
+use crate::diskdelta::Delta;
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -368,6 +369,9 @@ enum Backing {
     /// In memory, and which `CHUNK`s were written since `take_written`
     /// last looked.
     Memory { data: RefCell<MemoryImage>, written: RefCell<Vec<bool>> },
+    /// A file left as it is, with the changes in a delta file of their
+    /// own.
+    Delta(Delta),
 }
 
 /// A disk image: a file, or held in memory.
@@ -439,6 +443,22 @@ impl DiskImage {
         };
         let len = file.len().map_err(error)?;
         Self::new(path, Backing::File(file), len, floppy, geometry, writable)
+    }
+
+    /// Open `path` as `open` does, with the changes going to the delta
+    /// file `delta` (`diskdelta`) and the image left as it is.
+    pub fn open_delta(path: &Path, delta: &Path, floppy: bool, geometry: Option<Chs>, read_only: bool) -> Result<Self, String> {
+        let delta = Delta::open(path, delta, read_only)?;
+        let (len, writable) = (delta.len(), delta.writable());
+        Self::new(path, Backing::Delta(delta), len, floppy, geometry, writable)
+    }
+
+    /// The delta file the disk's changes go to, if they go to one.
+    pub fn delta_path(&self) -> Option<&Path> {
+        match &self.backing {
+            Backing::Delta(delta) => Some(delta.path()),
+            _ => None,
+        }
     }
 
     /// A disk image held in memory, which `name` names in messages, as
@@ -575,7 +595,7 @@ impl DiskImage {
     pub fn memory(&self) -> Option<Ref<'_, MemoryImage>> {
         match &self.backing {
             Backing::Memory { data, .. } => Some(data.borrow()),
-            Backing::File(_) => None,
+            Backing::File(_) | Backing::Delta(_) => None,
         }
     }
 
@@ -589,7 +609,7 @@ impl DiskImage {
                 .enumerate()
                 .filter_map(|(i, w)| std::mem::take(w).then_some(i))
                 .collect(),
-            Backing::File(_) => Vec::new(),
+            Backing::File(_) | Backing::Delta(_) => Vec::new(),
         }
     }
 
@@ -628,6 +648,7 @@ impl DiskImage {
                 true => Ok(()),
                 false => Err(std::io::ErrorKind::UnexpectedEof.into()),
             },
+            Backing::Delta(delta) => delta.read_at(at, buf),
         }
     }
 
@@ -729,6 +750,22 @@ impl DiskImage {
                 }
                 out.set_len(data.len()).map_err(error)?;
             }
+            Backing::Delta(delta) => {
+                // The disk as the machine sees it, holes for zeros.
+                let mut out = File::create(&partial).map_err(error)?;
+                let mut buf = vec![0u8; CHUNK];
+                let mut at = 0;
+                while at < delta.len() {
+                    let n = (delta.len() - at).min(CHUNK as u64) as usize;
+                    delta.read_at(at, &mut buf[..n]).map_err(error)?;
+                    if buf[..n].iter().any(|&b| b != 0) {
+                        out.seek(SeekFrom::Start(at)).map_err(error)?;
+                        out.write_all(&buf[..n]).map_err(error)?;
+                    }
+                    at += n as u64;
+                }
+                out.set_len(delta.len()).map_err(error)?;
+            }
         }
         std::fs::rename(&partial, dest).map_err(error)
     }
@@ -748,13 +785,21 @@ impl DiskImage {
                 file.seek(SeekFrom::Start(0)).map_err(error)?;
                 std::io::copy(&mut source, &mut file).map_err(error)?;
             }
-            Backing::Memory { .. } => {
+            Backing::Memory { .. } | Backing::Delta(_) => {
+                // Into a delta only what differs, or it would get all of
+                // the disk.
+                let delta = matches!(self.backing, Backing::Delta(_));
                 let mut buf = vec![0u8; CHUNK];
+                let mut now = vec![0u8; CHUNK];
                 let mut at = 0u64;
                 loop {
                     let n = source.read(&mut buf).map_err(error)?;
                     if n == 0 {
                         break;
+                    }
+                    if delta && self.read_at(at, &mut now[..n]).is_ok() && now[..n] == buf[..n] {
+                        at += n as u64;
+                        continue;
                     }
                     self.write_at(at, &buf[..n]).map_err(|_| format!("{}: can't be written", self.path.display()))?;
                     at += n as u64;
@@ -809,6 +854,7 @@ impl DiskImage {
                 }
                 Ok(())
             }
+            Backing::Delta(delta) => delta.write_at(at, data).map_err(|_| STATUS_CONTROLLER_FAILURE),
         }
     }
 
@@ -907,6 +953,39 @@ mod tests {
         disk.revert_to(first).unwrap();
         assert_eq!(read(5), 0xAA);
         assert!(disk.revert_to(second).is_err());
+    }
+
+    /// Over a delta file, a state's checkpoints and copies of the disk
+    /// take it back as over the image itself, and the image stays.
+    #[test]
+    fn states_over_a_delta() {
+        let floppy: Vec<u8> = boot_sector(2880, 18, 2).into_iter().chain(vec![0u8; 2879 * SECTOR_SIZE]).collect();
+        let path = scratch("delta-base.img", &floppy);
+        let delta = path.with_extension("rdelta");
+        let _ = std::fs::remove_file(&delta);
+        let disk = DiskImage::open_delta(&path, &delta, true, None, false).unwrap();
+        let read = |disk: &DiskImage, lba: u64| {
+            let mut buf = vec![0u8; SECTOR_SIZE];
+            disk.read(lba, &mut buf).unwrap();
+            buf[0]
+        };
+        disk.keep_journal(true);
+        disk.write(5, &[0xAA; SECTOR_SIZE]).unwrap();
+        let first = disk.checkpoint().unwrap();
+        let copy = path.with_extension("copy");
+        disk.copy_to(&copy).unwrap();
+        disk.write(5, &[0xBB; SECTOR_SIZE]).unwrap();
+        disk.write(2000, &[0xCC; SECTOR_SIZE]).unwrap();
+        disk.revert_to(first).unwrap();
+        assert_eq!((read(&disk, 5), read(&disk, 2000)), (0xAA, 0));
+        // Further back than the journal: from the copy.
+        disk.write(7, &[0xDD; SECTOR_SIZE]).unwrap();
+        disk.keep_journal(false);
+        disk.offer_replacement(Some(copy.clone()));
+        disk.revert_to(first).unwrap();
+        assert_eq!((read(&disk, 5), read(&disk, 7)), (0xAA, 0));
+        assert_eq!(std::fs::read(&path).unwrap(), floppy, "the image as it was");
+        assert_eq!(std::fs::read(&copy).unwrap()[5 * SECTOR_SIZE], 0xAA);
     }
 
     #[test]

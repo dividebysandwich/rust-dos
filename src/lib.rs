@@ -20,6 +20,7 @@ pub mod config;
 pub mod config_ui;
 pub mod cpu;
 pub mod disk;
+pub mod diskdelta;
 pub mod diskimage;
 pub mod diskio;
 pub mod disknoise;
