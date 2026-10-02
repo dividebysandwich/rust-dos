@@ -8,6 +8,7 @@ pub mod complete;
 pub mod editor;
 pub mod history;
 pub mod render;
+pub mod search;
 pub mod settings;
 
 use std::path::PathBuf;
@@ -35,6 +36,8 @@ pub struct LineEditor {
     draft: Option<Vec<u8>>,
     /// The cursor's shape before a block one showed overwriting.
     cursor_shape: Option<u16>,
+    /// Ctrl+R or Ctrl+S searching the history.
+    search: Option<search::Search>,
 }
 
 /// In the shell's segment after the line's buffer: how many characters of
@@ -45,9 +48,17 @@ const AFTER_CURSOR: u16 = 0x0280;
 const SHOWN: u16 = 0x0281;
 
 impl LineEditor {
-    /// The cells of the line: its characters in the screen's attribute.
-    fn cells(&self) -> Vec<(u8, u8)> {
-        self.line.text.iter().map(|&b| (b, self.attr)).collect()
+    /// The cells the line shows in, and the one the cursor is on: its
+    /// characters in the screen's attribute, after what a search looks
+    /// for.
+    fn view(&self) -> (Vec<(u8, u8)>, usize) {
+        let mut cells = Vec::new();
+        if let Some(search) = &self.search {
+            cells.extend(search.label().into_iter().map(|b| (b, self.attr)));
+        }
+        let cursor = cells.len() + self.line.cursor;
+        cells.extend(self.line.text.iter().map(|&b| (b, self.attr)));
+        (cells, cursor)
     }
 
     /// The editor for the line in the shell's buffer, as a state saved
@@ -182,6 +193,9 @@ pub fn key(cpu: &mut Cpu) {
 
 /// Edit the line for `key`.
 fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
+    if let Some(done) = search::key(cpu, ed, key) {
+        return done;
+    }
     let line = &mut ed.line;
     match keys::decode(key) {
         Key::Enter => return Done::Enter,
@@ -208,6 +222,7 @@ fn edit(cpu: &mut Cpu, ed: &mut LineEditor, key: u16) -> Done {
             line.undo();
         }
         _ if ed.plain => {}
+        Key::Ctrl(c @ (b'R' | b'S')) => ed.search = Some(search::Search::new(&ed.line, c == b'R')),
         Key::Up | Key::F(5) => {
             if cpu.shell_history.at_newest() {
                 ed.draft = Some(ed.line.text.clone());

@@ -620,3 +620,37 @@ fn pgup_and_pgdn_find_the_lines_beginning_as_this_one() {
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("ver"));
     assert_eq!(cpu.shell_history.entries(), ["dir a", "echo", "dir b", "ver"]);
 }
+
+#[test]
+fn ctrl_r_searches_the_history_as_text_is_typed() {
+    let base = scratch("isearch", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    for line in ["type readme.txt", "ver", "copy a.txt b.bak", "dir"] {
+        type_keys(&mut cpu, &format!("{}\r", line));
+        assert_eq!(run_until_command(&mut cpu).as_deref(), Some(line));
+    }
+    type_keys(&mut cpu, "\x12txt");
+    run_keys(&mut cpu);
+    assert_eq!(last_row_with(&cpu, "C:\\>").as_deref(), Some("C:\\>(reverse-i-search)`txt': copy a.txt b.bak"));
+    // On the text found.
+    assert_eq!(cursor_at(&cpu).0 as usize, "C:\\>(reverse-i-search)`txt': copy a.".len());
+    // Ctrl+R again: the one before.
+    type_keys(&mut cpu, "\x12");
+    run_keys(&mut cpu);
+    assert_eq!(last_row_with(&cpu, "C:\\>").as_deref(), Some("C:\\>(reverse-i-search)`txt': type readme.txt"));
+    type_keys(&mut cpu, "\x12");
+    run_keys(&mut cpu);
+    assert_eq!(last_row_with(&cpu, "C:\\>").as_deref(), Some("C:\\>(failed reverse-i-search)`txt': type readme.txt"));
+    type_keys(&mut cpu, "\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("type readme.txt"));
+    assert_eq!(last_row_with(&cpu, "C:\\>t").as_deref(), Some("C:\\>type readme.txt"));
+
+    // Esc puts the line back; another key edits the line found.
+    type_keys(&mut cpu, "x\x12ver\x1b\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("x"));
+    type_keys(&mut cpu, "\x12bak");
+    extended_key(&mut cpu, END);
+    type_keys(&mut cpu, "2\r");
+    assert_eq!(run_until_command(&mut cpu).as_deref(), Some("copy a.txt b.bak2"));
+}

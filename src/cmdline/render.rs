@@ -46,10 +46,10 @@ pub fn attribute_at_cursor(cpu: &mut Cpu) -> u8 {
 /// what is left of a longer line before, and put the cursor in its place.
 pub fn draw(cpu: &mut Cpu, ed: &mut LineEditor) {
     let (page, cols, rows) = geometry(cpu);
-    let cells = ed.cells();
+    let (cells, cursor) = ed.view();
     let mut start = ed.anchor;
     // The cell the cursor is on must be on the screen too.
-    let last = start + cells.len().saturating_sub(1).max(ed.line.cursor);
+    let last = start + cells.len().saturating_sub(1).max(cursor);
     let below = (last / cols + 1).saturating_sub(rows);
     if below > 0 {
         let bottom = ((rows - 1) as u16) << 8 | (cols - 1) as u16;
@@ -74,7 +74,7 @@ pub fn draw(cpu: &mut Cpu, ed: &mut LineEditor) {
         video_call(cpu, 0x0900 | cell.0 as u16, (page as u16) << 8 | attr as u16, 1, 0);
     }
     ed.shown = cells;
-    set_cursor(cpu, start + ed.line.cursor);
+    set_cursor(cpu, start + cursor);
     cursor_shape(cpu, ed);
 }
 
