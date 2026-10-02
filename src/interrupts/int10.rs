@@ -91,6 +91,9 @@ fn text_font(cpu: &mut Cpu, height: u16) {
         _ => 0x0D0E,
     };
     cpu.bus.guest_write_16(0x0460, cursor);
+    // The CRTC's cursor in the new font's lines too.
+    cpu.bus.vga.crtc_regs[0x0A] = (cursor >> 8) as u8;
+    cpu.bus.vga.crtc_regs[0x0B] = cursor as u8;
     cpu.bus.vga.crtc_regs[0x09] = (cpu.bus.vga.crtc_regs[0x09] & 0xE0) | (height - 1) as u8;
     cpu.bus.vga.mark_dirty_full();
 }

@@ -18,14 +18,18 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
     let frame_w = width as usize;
 
     // The text mode cursor, at the active page's cursor position (BDA
-    // 0450h, two bytes a page) and with the shape in BDA 0460h, whose
-    // scanlines count in the font's rows.
+    // 0450h, two bytes a page). Its shape is the CRTC's on an EGA or VGA
+    // (Cursor Start and End, 0Ah and 0Bh), in the font's lines: BDA 0460h
+    // keeps the shape a program asked for, which the BIOS turns from a
+    // CGA's 8 lines into the font's (0607h is 0D0Eh in a 16-line font).
+    // The CGA's is in its 8 lines.
     if let Some(geometry) = super::text::geometry(bus) {
         let (cursor_col, cursor_row, cursor_shape) = if bus.boot.is_some() && bus.vga.adapter.ega_bios() {
             crtc_cursor(bus, geometry.cols)
         } else {
             let page = bus.read_8(0x0462).min(7) as usize;
-            (bus.read_8(0x0450 + page * 2) as usize, bus.read_8(0x0451 + page * 2) as usize, bus.read_16(0x0460))
+            let shape = if bus.vga.adapter.ega_bios() { crtc_shape(bus) } else { bus.read_16(0x0460) };
+            (bus.read_8(0x0450 + page * 2) as usize, bus.read_8(0x0451 + page * 2) as usize, shape)
         };
         let start_scan = (cursor_shape >> 8) as u8;
         let end_scan = (cursor_shape & 0xFF) as u8;
@@ -72,7 +76,14 @@ fn crtc_cursor(bus: &Bus, cols: usize) -> (usize, usize, u16) {
     let start = (crtc[0x0C] as usize) << 8 | crtc[0x0D] as usize;
     let offset = location.wrapping_sub(start) & 0x3FFF;
     let cols = cols.max(1);
-    (offset % cols, offset / cols, (crtc[0x0A] as u16) << 8 | (crtc[0x0B] & 0x1F) as u16)
+    (offset % cols, offset / cols, crtc_shape(bus))
+}
+
+/// The cursor's shape in the CRTC's Cursor Start and End (0Ah, 0Bh), as BDA
+/// 0460h keeps one.
+fn crtc_shape(bus: &Bus) -> u16 {
+    let crtc = &bus.vga.crtc_regs;
+    (crtc[0x0A] as u16) << 8 | (crtc[0x0B] & 0x1F) as u16
 }
 
 /// Convert mouse coordinates in the picture's pixels (`frame`'s, as the
