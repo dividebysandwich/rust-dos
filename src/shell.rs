@@ -169,13 +169,22 @@ pub fn prompt_string(disk: &DiskController) -> String {
 /// were.
 pub fn show_prompt(cpu: &mut Cpu) {
     let text = render_prompt(cpu);
-    teletype(cpu, &text);
+    // In a Windows virtual machine, on the machine's own screen, without
+    // colours.
+    if cpu.v86() && cpu.bus.guest_paging.is_some() {
+        let plain: Vec<u8> = crate::cmdline::colors::prompt_runs(&text, 0x07, false).into_iter().flat_map(|(t, _)| t).collect();
+        teletype(cpu, &plain);
+        return;
+    }
+    crate::cmdline::colors::print_prompt(cpu, &text);
 }
 
 /// The prompt as the PROMPT variable has it ($P$G if it isn't set), with
 /// its codes put in: $P the current drive and directory, $N the drive,
 /// $G > $L < $B | $Q = $A & $C ( $F ), $D the date, $T the time, $V the
 /// version, $_ a new line, $E Escape, $H a backspace and $$ a dollar sign.
+/// An ANSI colour sequence after $E ($E[1;33m) colours what follows as
+/// clink's prompts are coloured (`colors::print_prompt`).
 pub fn render_prompt(cpu: &Cpu) -> Vec<u8> {
     let spec = dosstr::to_bytes(cpu.get_env("PROMPT").unwrap_or("$P$G"));
     let now = cpu.bus.cmos.now();

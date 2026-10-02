@@ -4,6 +4,7 @@
 //! (SERVICE_SHELL_KEY), and it keeps the line on the screen and in the
 //! shell's buffer at DS:0200h.
 
+pub mod colors;
 pub mod complete;
 pub mod editor;
 pub mod history;
@@ -42,6 +43,11 @@ pub struct LineEditor {
     suggestion: Vec<u8>,
     /// The attribute the suggestion shows in.
     suggestion_attr: u8,
+    /// The attributes of the line's characters, by what its words are
+    /// (`colors::highlight`); none without colours.
+    colors: Vec<u8>,
+    /// Whether the commands looked for are programs there to run.
+    known: std::collections::HashMap<String, bool>,
 }
 
 /// In the shell's segment after the line's buffer: how many characters of
@@ -61,7 +67,7 @@ impl LineEditor {
             cells.extend(search.label().into_iter().map(|b| (b, self.attr)));
         }
         let cursor = cells.len() + self.line.cursor;
-        cells.extend(self.line.text.iter().map(|&b| (b, self.attr)));
+        cells.extend(self.line.text.iter().enumerate().map(|(i, &b)| (b, self.colors.get(i).copied().unwrap_or(self.attr))));
         cells.extend(self.suggestion.iter().map(|&b| (b, self.suggestion_attr)));
         (cells, cursor)
     }
@@ -173,6 +179,10 @@ pub fn key(cpu: &mut Cpu) {
     ed.suggestion = match done {
         Done::No => suggest(cpu, &ed),
         _ => Vec::new(),
+    };
+    ed.colors = match cpu.shell_settings.colors && !ed.plain {
+        true => colors::highlight(cpu, &ed.line.text, ed.attr, &mut ed.known),
+        false => Vec::new(),
     };
     if !matches!(done, Done::No) {
         // The cursor after the line, which goes on in the rows below.

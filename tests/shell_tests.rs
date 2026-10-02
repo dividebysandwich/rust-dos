@@ -758,3 +758,44 @@ fn the_rest_of_a_line_from_the_history_is_suggested() {
     type_keys(&mut cpu, "\r");
     assert_eq!(run_until_command(&mut cpu).as_deref(), Some("echo s"));
 }
+
+#[test]
+fn the_prompt_and_the_line_are_coloured() {
+    let base = scratch("colors", &["c"]);
+    fs::write(base.join("c/GAME.EXE"), b"").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    type_keys(&mut cpu, "dir /w x | game | nope");
+    run_keys(&mut cpu);
+    let attrs: Vec<u8> = (0..26).map(|col| attr_at(&cpu, col, 0)).collect();
+    // C:\> light green; DIR white, /W yellow, x and the pipes as the
+    // screen is, GAME light cyan, NOPE light red.
+    let expected = [
+        [0x0A; 4].as_slice(),
+        &[0x0F; 3],
+        &[0x07],
+        &[0x0E; 2],
+        &[0x07; 5],
+        &[0x0B; 4],
+        &[0x07; 3],
+        &[0x0C; 4],
+    ]
+    .concat();
+    assert_eq!(attrs, expected);
+    type_keys(&mut cpu, "\r");
+    run_until_command(&mut cpu);
+
+    // PROMPT's ANSI sequences; turned off, none of it.
+    cpu.environment.push(("PROMPT".into(), "$E[1;33m$P$E[0m$G".into()));
+    type_keys(&mut cpu, "x\r");
+    run_until_command(&mut cpu);
+    // The row before the one Enter went on to.
+    let row = cursor_at(&cpu).1 as usize - 1;
+    assert_eq!(last_row_with(&cpu, "C:\\").as_deref(), Some("C:\\>x"));
+    assert_eq!((0..5).map(|col| attr_at(&cpu, col, row)).collect::<Vec<_>>(), [0x0E, 0x0E, 0x0E, 0x0A, 0x0C]);
+    cpu.shell_settings.colors = false;
+    type_keys(&mut cpu, "dir\r");
+    run_until_command(&mut cpu);
+    let row = cursor_at(&cpu).1 as usize - 1;
+    assert_eq!((0..7).map(|col| attr_at(&cpu, col, row)).collect::<Vec<_>>(), [0x07; 7]);
+}
