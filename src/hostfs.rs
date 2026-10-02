@@ -156,14 +156,14 @@ pub fn set_backend(backend: Option<Arc<dyn Backend>>) {
 
 /// Whether `path` starts with a scheme: two or more letters, then `:/`
 /// (Windows' `C:\` is one letter). Path handling makes `//` one `/`, so
-/// `saf:/x` is one too.
+/// `saf:/x` is one too, and the parent of `saf://x` is `saf:`, the root.
 pub fn has_scheme(path: &Path) -> bool {
     let s = path.as_os_str().as_encoded_bytes();
     let Some(colon) = s.iter().position(|&c| c == b':') else { return false };
     colon >= 2
         && s[0].is_ascii_alphabetic()
         && s[..colon].iter().all(|&c| c.is_ascii_alphanumeric() || b"+.-".contains(&c))
-        && s.get(colon + 1) == Some(&b'/')
+        && matches!(s.get(colon + 1), Some(b'/') | None)
 }
 
 /// The path as the backend takes it: `scheme://rest`, whatever became of
@@ -662,6 +662,8 @@ pub mod tests {
         assert!(!has_scheme(Path::new("C:\\games")));
         assert!(!has_scheme(Path::new("/home/user/games")));
         assert!(!has_scheme(Path::new("games/a:b")));
+        assert!(has_scheme(Path::new("layer1:/GAME").parent().unwrap()));
+        assert!(!has_scheme(Path::new("C:")));
         assert_eq!(backend_path(Path::new("saf://t%2Fx").join("GAME").as_path()), "saf://t%2Fx/GAME");
         let collapsed: PathBuf = Path::new("saf://t/GAME").components().collect();
         assert_eq!(backend_path(&collapsed), "saf://t/GAME");
@@ -689,6 +691,10 @@ pub mod tests {
         assert_eq!(canonicalize("mem://a/b").unwrap(), PathBuf::from("mem://a/b"));
         assert_eq!(absolute("mem://a/b").unwrap(), PathBuf::from("mem://a/b"));
         assert!(set_readonly("mem://a/b/FILE.TXT", true).is_err());
+
+        // The parent of a file at the root is the root, not a folder
+        // `mem:` here.
+        assert!(is_dir(Path::new("mem://FILE.TXT").parent().unwrap()));
 
         // Other paths are std::fs's.
         assert!(is_dir(&dir));
