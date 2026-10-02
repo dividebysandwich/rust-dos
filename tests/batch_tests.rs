@@ -182,6 +182,20 @@ fn if_errorlevel_tests_the_last_program_s_exit_code() {
 }
 
 #[test]
+fn if_errorlevel_takes_equals_signs_as_separators() {
+    let dir = scratch(
+        "errorlevel-eq",
+        &[("T.BAT", b"@echo off\r\nEXIT3\r\nIF ERRORLEVEL == 1 GOTO END\r\necho below\r\n:END\r\nif errorlevel=4 echo four\r\nif errorlevel,3 echo three\r\n"), ("EXIT3.COM", &exits_with(3))],
+    );
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    let screen = screen(&cpu);
+    assert!(screen.contains("three") && !screen.contains("four") && !screen.contains("below"), "{}", screen);
+    assert!(!screen.contains("Syntax error"), "{}", screen);
+}
+
+#[test]
 fn if_compares_strings_and_finds_files() {
     let dir = scratch(
         "if",

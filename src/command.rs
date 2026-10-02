@@ -611,7 +611,9 @@ impl ShellCommand for ShiftCommand {
 /// IF [NOT] ERRORLEVEL n command, IF [NOT] EXIST file command, IF [NOT]
 /// string1==string2 command: run the command if the condition holds (or,
 /// with NOT, doesn't). ERRORLEVEL n holds for an exit code of n or more,
-/// and strings compare in their case.
+/// and strings compare in their case. As in COMMAND.COM, commas,
+/// semicolons and equals signs separate the words of ERRORLEVEL and EXIST
+/// as spaces do: id's installers test `IF ERRORLEVEL == 1`.
 struct IfCommand;
 impl ShellCommand for IfCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
@@ -619,11 +621,11 @@ impl ShellCommand for IfCommand {
             Some(rest) => (true, rest),
             None => (false, args),
         };
-        let condition = if let Some(rest) = keyword(rest, "ERRORLEVEL") {
-            let (number, command) = first_word(rest);
+        let condition = if let Some(rest) = keyword_in(rest, "ERRORLEVEL", IF_DELIMITERS) {
+            let (number, command) = first_word_in(rest, IF_DELIMITERS);
             number.parse::<u16>().ok().map(|n| (cpu.errorlevel as u16 >= n, command))
-        } else if let Some(rest) = keyword(rest, "EXIST") {
-            let (name, command) = first_word(rest);
+        } else if let Some(rest) = keyword_in(rest, "EXIST", IF_DELIMITERS) {
+            let (name, command) = first_word_in(rest, IF_DELIMITERS);
             Some((file_exists(cpu, name), command))
         } else if let Some((left, right)) = rest.split_once("==") {
             let (right, command) = first_word(right);
@@ -642,18 +644,34 @@ impl ShellCommand for IfCommand {
     }
 }
 
+/// What separates words on a command line.
+const WHITESPACE: &[char] = &[' ', '\t'];
+/// What separates the words of IF ERRORLEVEL and IF EXIST.
+const IF_DELIMITERS: &[char] = &[' ', '\t', ',', ';', '='];
+
 /// The rest of `text` after the word `word` (in any case) and the
 /// whitespace after it, if it begins with them.
 fn keyword<'a>(text: &'a str, word: &str) -> Option<&'a str> {
-    let text = text.trim_start();
+    keyword_in(text, word, WHITESPACE)
+}
+
+/// `keyword`, with words separated by any of `delimiters`.
+fn keyword_in<'a>(text: &'a str, word: &str, delimiters: &[char]) -> Option<&'a str> {
+    let text = text.trim_start_matches(delimiters);
     let rest = text.get(word.len()..)?;
-    (text[..word.len()].eq_ignore_ascii_case(word) && rest.starts_with([' ', '\t'])).then(|| rest.trim_start())
+    (text[..word.len()].eq_ignore_ascii_case(word) && rest.starts_with(delimiters))
+        .then(|| rest.trim_start_matches(delimiters))
 }
 
 /// The first word of `text` and the rest after it.
 fn first_word(text: &str) -> (&str, &str) {
-    let text = text.trim_start();
-    text.split_once([' ', '\t']).unwrap_or((text, ""))
+    first_word_in(text, WHITESPACE)
+}
+
+/// `first_word`, with words separated by any of `delimiters`.
+fn first_word_in<'a>(text: &'a str, delimiters: &[char]) -> (&'a str, &'a str) {
+    let text = text.trim_start_matches(delimiters);
+    text.split_once(delimiters).unwrap_or((text, ""))
 }
 
 /// Whether IF EXIST finds `name`: a file, or one matching its wildcards.
