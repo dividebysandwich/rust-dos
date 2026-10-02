@@ -150,6 +150,7 @@ programs, the prompt has these commands:
 | `CD [path]`, `D:` | change the directory, or the drive |
 | `TYPE file` | show a text file |
 | `MORE [file]` | show text a screenful at a time |
+| `EDIT [file]` | edit a text file full-screen, as MS-DOS's EDIT: menus (Alt or F10), Open and Save As dialogs, cut, copy and paste (Shift+Del, Ctrl+Ins, Shift+Ins, or Ctrl+X, C, V), Find (F3 repeats it) and Change; F1 lists the keys |
 | `FIND [/V] [/C] [/N] [/I] "text" [file ...]` | the lines with the text in them (`/V` without it), numbered with `/N`, counted with `/C`, in any case with `/I`; `ERRORLEVEL` 0 if one was found, 1 if none |
 | `SORT [/R] [/+n] [file]` | lines in order, from their n-th column, backwards with `/R` |
 | `COPY source[+source...] [destination] [/A\|/B]` | copy files, with wildcards, or join them into one |

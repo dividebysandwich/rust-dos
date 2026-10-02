@@ -62,9 +62,9 @@ pub fn stub_code() -> Vec<u8> {
 
     // A key, or AX=0 after a tick without one.
     a.label("KEY");
-    a.op(&[0xB4, 0x01, 0xCD, 0x16]); // MOV AH, 01h; INT 16h
+    a.op(&[0xB4, 0x11, 0xCD, 0x16]); // MOV AH, 11h; INT 16h
     a.jump(0x74, "NO_KEY"); // JZ
-    a.op(&[0xB4, 0x00, 0xCD, 0x16]); // MOV AH, 00h; INT 16h
+    a.op(&[0xB4, 0x10, 0xCD, 0x16]); // MOV AH, 10h; INT 16h
     a.jump(0xEB, "LOOP");
     a.label("NO_KEY");
     a.op(&[0xF4, 0x31, 0xC0]); // HLT; XOR AX, AX
@@ -223,11 +223,13 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
             }
         }
         Asked::Key => {
-            let key = match cpu.ax() as u8 {
-                0 if cpu.ax() == 0 => crate::shell::timed_out_key(cpu),
-                key => Some(key),
+            // AX 0: no key came before the tick.
+            let done = match cpu.ax() {
+                0 if matches!(cpu.shell_wait, Some(ShellWait::Edit(_))) => !crate::edit::tick(cpu),
+                0 => crate::shell::timed_out_key(cpu).is_some_and(|key| crate::shell::take_key(cpu, key as u16)),
+                key => crate::shell::take_key(cpu, key),
             };
-            if !key.is_some_and(|key| crate::shell::take_key(cpu, key)) {
+            if !done {
                 shell.asked = Asked::Key;
                 return Ok(KEY);
             }

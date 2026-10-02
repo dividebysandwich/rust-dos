@@ -314,6 +314,8 @@ pub struct Cpu {
     /// Where the prompt was printed, (column, row), while a line is typed
     /// after it.
     pub shell_prompt_at: Option<(u8, u8)>,
+    /// What EDIT cut or copied, for pasting in this EDIT or the next.
+    pub edit_clipboard: Vec<u8>,
     /// How the session started, for a reboot to start it again.
     pub startup: crate::boot::Startup,
     /// Set by a reset of the built-in DOS (`bios::post`) with the state
@@ -509,6 +511,7 @@ impl Cpu {
             shell_completion: None,
             shell_wait: None,
             shell_prompt_at: None,
+            edit_clipboard: Vec::new(),
             startup: crate::boot::Startup::default(),
             reboot: false,
             secondary_shells: Vec::new(),

@@ -98,7 +98,7 @@ pub fn handle(cpu: &mut Cpu) {
 /// a keystroke: those of F11 and F12 and of the combinations the older
 /// keyboards had no code for (Ctrl+Up, Alt+Tab and the like), whose codes
 /// are above 84h. The older functions skip them, as an AT BIOS does.
-fn is_enhanced(key: u16) -> bool {
+pub(crate) fn is_enhanced(key: u16) -> bool {
     key >> 8 > 0x84 || (key & 0xFF == 0xF0 && key >> 8 != 0)
 }
 

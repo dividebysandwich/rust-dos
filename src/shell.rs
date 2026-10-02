@@ -99,13 +99,13 @@ fn assemble() -> (Vec<u8>, ShellLabels) {
     // PAUSE and CHOICE: wait for a key with the timers running (a CHOICE
     // with a timeout looks at the time on every tick), then hand it over.
     a.label("SHELL_WAIT");
-    a.op(&[0xB4, 0x01, 0xCD, 0x16]); // MOV AH, 01h; INT 16h
+    a.op(&[0xB4, 0x11, 0xCD, 0x16]); // MOV AH, 11h; INT 16h
     a.jump(0x75, "GOT_KEY"); // JNZ
     a.op(&[0xFE, 0x39, SERVICE_SHELL_TICK]); // may hand over the default
     a.op(&[0xF4]); // HLT until the next tick
     a.jump(0xEB, "SHELL_WAIT");
     a.label("GOT_KEY");
-    a.op(&[0xB4, 0x00, 0xCD, 0x16]); // MOV AH, 00h; INT 16h
+    a.op(&[0xB4, 0x10, 0xCD, 0x16]); // MOV AH, 10h; INT 16h
     a.label("KEY_READY");
     a.op(&[0xFE, 0x39, SERVICE_SHELL_KEY_READY]); // `key_ready`
     a.jump(0xEB, "PROMPT_START");
@@ -319,7 +319,7 @@ fn completion_names(cpu: &Cpu, typed: &[u8], word: usize) -> Vec<String> {
 }
 
 /// INT 10h with these registers.
-fn video_call(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
+pub(crate) fn video_call(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
     cpu.set_ax(ax);
     cpu.set_reg16(iced_x86::Register::BX, bx);
     cpu.set_cx(cx);
@@ -483,6 +483,8 @@ pub enum ShellWait {
     LanList { until: u64 },
     /// MORE: any key, for the lines after a screenful.
     More(Vec<Vec<u8>>),
+    /// EDIT: every key, until it ends.
+    Edit(Box<crate::edit::Editor>),
 }
 
 /// A CHOICE waiting for a key.
@@ -528,9 +530,26 @@ pub fn enter_wait(cpu: &mut Cpu, wait: ShellWait) {
 
 /// A key for what PAUSE, CHOICE or MAKEIMG waits for: Ctrl+C ends the
 /// batch files, a key CHOICE doesn't take beeps and it waits on, and
-/// MAKEIMG waits on for Y or N. Whether the wait is over.
-pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
+/// MAKEIMG waits on for Y or N. EDIT takes every key, the scan code with
+/// it (INT 16h AH=10h's). Whether the wait is over.
+pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
     let Some(wait) = cpu.shell_wait.take() else { return true };
+    if let ShellWait::Edit(editor) = wait {
+        return match crate::edit::key(cpu, editor, key) {
+            Some(editor) => {
+                cpu.shell_wait = Some(ShellWait::Edit(editor));
+                false
+            }
+            None => true,
+        };
+    }
+    // The others take the keys of the older keyboards (INT 16h AH=00h's),
+    // as a character.
+    if crate::interrupts::int16::is_enhanced(key) {
+        cpu.shell_wait = Some(wait);
+        return false;
+    }
+    let key = if key & 0xFF == 0xE0 && key >> 8 != 0 { 0 } else { key as u8 };
     if key == 0x03 {
         video::print_string(cpu, "^C\r\n");
         cpu.batch.clear();
@@ -553,6 +572,7 @@ pub fn take_key(cpu: &mut Cpu, key: u8) -> bool {
                 return false;
             }
         }
+        ShellWait::Edit(_) => {}
         ShellWait::Choice(choice) => match choice.index(key) {
             Some(i) => {
                 video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));
@@ -580,7 +600,7 @@ pub fn feed_wait(cpu: &mut Cpu, input: &[u8]) {
             Some(ShellWait::Pause | ShellWait::Choice(_) | ShellWait::MakeImg(_)) => {
                 let Some((&key, after)) = rest.split_first() else { break };
                 rest = after;
-                take_key(cpu, key);
+                take_key(cpu, key as u16);
             }
             Some(ShellWait::Line(purpose)) => {
                 if rest.is_empty() {
@@ -629,7 +649,7 @@ pub fn key_ready(cpu: &mut Cpu) {
         let key = cpu.ax();
         crate::keyboard::unget_keystroke(&mut cpu.bus, key);
     }
-    if !take_key(cpu, cpu.ax() as u8) {
+    if !take_key(cpu, cpu.ax()) {
         cpu.set_ip(labels().shell_wait);
     }
 }
@@ -638,6 +658,13 @@ pub fn key_ready(cpu: &mut Cpu) {
 /// (SERVICE_SHELL_TICK): once a CHOICE's time is up, its default key is
 /// handed over as if pressed.
 pub fn tick(cpu: &mut Cpu) {
+    // EDIT looks at the mouse, and may end on a click.
+    if matches!(cpu.shell_wait, Some(ShellWait::Edit(_))) {
+        if !crate::edit::tick(cpu) {
+            cpu.set_ip(labels().prompt_start);
+        }
+        return;
+    }
     if let Some(key) = timed_out_key(cpu) {
         cpu.set_ax(key as u16);
         cpu.set_ip(labels().key_ready);
@@ -708,6 +735,10 @@ impl crate::savestate::State for ShellWait {
                 6u8.save(w);
                 lines.save(w);
             }
+            ShellWait::Edit(editor) => {
+                7u8.save(w);
+                (**editor).save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -739,6 +770,11 @@ impl crate::savestate::State for ShellWait {
                 let mut lines = Vec::new();
                 lines.load(r)?;
                 ShellWait::More(lines)
+            }
+            7 => {
+                let mut editor = Box::<crate::edit::Editor>::default();
+                (*editor).load(r)?;
+                ShellWait::Edit(editor)
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

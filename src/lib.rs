@@ -30,6 +30,7 @@ pub mod dosstr;
 pub mod dpmi;
 pub mod dma;
 pub mod dsp;
+pub mod edit;
 pub mod dynrec;
 pub mod ems;
 pub mod exec;

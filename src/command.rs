@@ -57,6 +57,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("BOOT", &crate::boot_command::BootCommand),
     ("LAN", &crate::lan_command::LanCommand),
     ("MORE", &crate::filter_commands::MoreCommand),
+    ("EDIT", &crate::edit::EditCommand),
     ("FIND", &crate::filter_commands::FindCommand),
     ("SORT", &crate::filter_commands::SortCommand),
     ("AWEUTIL", &crate::awe32::aweutil::AweUtilCommand),
