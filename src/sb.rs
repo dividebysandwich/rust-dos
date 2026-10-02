@@ -139,6 +139,9 @@ const CD_L: u8 = 0x36;
 const CD_R: u8 = 0x37;
 /// The SB Pro's CD volume, a nibble per side.
 const PRO_CD: u8 = 0x28;
+/// The SB Pro's mixer registers: voice, mic, input, output, master, FM,
+/// CD and line.
+const PRO_REGS: [u8; 9] = [0x00, 0x04, 0x0A, 0x0C, 0x0E, 0x22, 0x26, PRO_CD, 0x2E];
 
 pub struct SoundBlaster {
     pub config: SbConfig,
@@ -306,15 +309,20 @@ impl SoundBlaster {
         let mut buf = [0u8; 4096];
         while units > 0 {
             let Some(mut t) = self.transfer else { break };
-            let k = (units.min(t.remaining as u64) as usize).min(buf.len() / unit_bytes);
+            // The DSP waits while its DMA channel is masked, as a real one
+            // waits for its request to be answered: no data, no IRQ. HMI's
+            // setup finds the card's channel by trying each one.
+            if !dma.ready(ch) {
+                self.frac = 0;
+                break;
+            }
+            let mut k = (units.min(t.remaining as u64) as usize).min(buf.len() / unit_bytes);
             if t.input {
                 dma.transfer_skip(ch, k);
             } else {
-                let bytes = k * unit_bytes;
-                let (moved, _) = dma.transfer_read(ch, ram, &mut buf[..bytes]);
-                // A channel masked mid-block plays silence for the rest.
-                buf[moved..bytes].fill(if t.bits16 || t.signed { 0 } else { 0x80 });
-                self.play(&t, &buf[..bytes]);
+                let (moved, _) = dma.transfer_read(ch, ram, &mut buf[..k * unit_bytes]);
+                k = moved / unit_bytes;
+                self.play(&t, &buf[..k * unit_bytes]);
             }
             units -= k as u64;
             t.remaining -= k as u32;
@@ -423,6 +431,11 @@ impl SoundBlaster {
         if self.config.model == SbModel::Sb2 {
             return;
         }
+        // The SB Pro's mixer has only its own registers; the SB16's
+        // (30h-47h) are where this keeps the levels.
+        if !self.config.model.is_sb16() && !PRO_REGS.contains(&reg) {
+            return;
+        }
         match reg {
             0x00 => self.reset_mixer(),
             // SB Pro registers: a nibble per side, mirrored into the SB16's.
@@ -448,6 +461,11 @@ impl SoundBlaster {
         let reg = self.mixer_index;
         match (self.config.model, reg) {
             (SbModel::Sb2, _) => 0xFF,
+            // Registers an SB Pro lacks, as DOSBox answers them: programs
+            // that write and read back 3Fh or read 80h/81h take a card that
+            // keeps them for an SB16.
+            (_, 0x00) => 0x00,
+            (m, _) if !m.is_sb16() && !PRO_REGS.contains(&reg) => 0x0A,
             (m, 0x80) if m.is_sb16() => match self.config.irq {
                 2 | 9 => 1,
                 5 => 2,
@@ -539,6 +557,9 @@ impl SoundBlaster {
 
     fn execute(&mut self, cmd: u8, log: &mut Vec<String>) {
         let stereo8 = self.sbpro_stereo();
+        // Commands only the SB16 takes parameters for arrive here without
+        // them on older cards, which don't know them either.
+        let sb16 = self.config.model.is_sb16();
         match cmd {
             // Direct DAC: one unsigned 8-bit sample.
             0x10 => self.dac = (self.params[0] as i16 - 128) << 8,
@@ -567,7 +588,7 @@ impl SoundBlaster {
                 self.tc_rate = 1_000_000 / (256 - tc).max(1);
                 self.sb16_rate = None;
             }
-            0x41 | 0x42 => self.sb16_rate = Some(u16::from_be_bytes([self.params[0], self.params[1]]) as u32),
+            0x41 | 0x42 if sb16 => self.sb16_rate = Some(u16::from_be_bytes([self.params[0], self.params[1]]) as u32),
             0x48 => self.block_size = self.param16(0) + 1,
             // ADPCM single-cycle output, as 8-bit.
             0x74..=0x77 => {
@@ -581,7 +602,7 @@ impl SoundBlaster {
             0xA0 | 0xA8 => {}
             // SB16: B0h-BFh 16-bit and C0h-CFh 8-bit transfers. Bit 3 input,
             // bit 2 auto-init; the mode byte has bit 4 signed, bit 5 stereo.
-            0xB0..=0xCF => {
+            0xB0..=0xCF if sb16 => {
                 let mode = self.params[0];
                 let len = u16::from_le_bytes([self.params[1], self.params[2]]) as u32 + 1;
                 self.start(cmd < 0xC0, mode & 0x20 != 0, mode & 0x10 != 0, cmd & 0x04 != 0, cmd & 0x08 != 0, len);
@@ -616,27 +637,30 @@ impl SoundBlaster {
             0xE3 => self.read_buf.extend(b"COPYRIGHT (C) CREATIVE TECHNOLOGY LTD, 1992.\0"),
             0xE4 => self.test_reg = self.params[0],
             0xE8 => self.read_buf.push_back(self.test_reg),
+            // ESS's "identify chip": Creative's cards don't answer it.
+            // Setup programs (HMI's) send it to tell an ESS AudioDrive apart.
+            0xE7 => {}
             // Raise the 8-bit (F2h) or 16-bit (F3h) interrupt.
             0xF2 => self.irq8 = true,
-            0xF3 if self.config.model.is_sb16() => self.irq16 = true,
+            0xF3 if sb16 => self.irq16 = true,
             0xF8 => self.read_buf.push_back(0),
             // The SB16's ASP socket, empty, as Windows' driver probes it:
             // the mode (04h), a codec parameter (05h), the chip's version
             // (08h 03h: none, FFh as a card without one says) and its
             // registers (0Eh, 0Fh). DOSBox-X's sblaster.cpp answers the same.
-            0x04 if self.config.model.is_sb16() => self.asp_mode = self.params[0],
+            0x04 if sb16 => self.asp_mode = self.params[0],
             0x04 => self.read_buf.push_back(if self.config.model == SbModel::Sb2 { 0x88 } else { 0x7B }),
-            0x05 => {}
-            0x08 => {
+            0x05 if sb16 => {}
+            0x08 if sb16 => {
                 if self.params[0] == 0x03 {
                     self.read_buf.push_back(0xFF);
                 }
             }
-            0x0E => self.asp_regs[self.params[0] as usize] = self.params[1],
-            0x0F => self.read_buf.push_back(self.asp_regs[self.params[0] as usize]),
+            0x0E if sb16 => self.asp_regs[self.params[0] as usize] = self.params[1],
+            0x0F if sb16 => self.read_buf.push_back(self.asp_regs[self.params[0] as usize]),
             // The 8051's memory.
-            0xF9 => self.read_buf.push_back(self.mem8051[self.params[0] as usize]),
-            0xFA => self.mem8051[self.params[0] as usize] = self.params[1],
+            0xF9 if sb16 => self.read_buf.push_back(self.mem8051[self.params[0] as usize]),
+            0xFA if sb16 => self.mem8051[self.params[0] as usize] = self.params[1],
             _ => log.push(format!("[SB] Unhandled DSP command {:02X}h", cmd)),
         }
     }

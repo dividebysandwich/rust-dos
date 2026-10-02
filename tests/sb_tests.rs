@@ -174,6 +174,52 @@ fn mixer_reports_the_configured_resources() {
 }
 
 #[test]
+fn older_cards_take_sb16_only_commands_without_parameters() {
+    for (model, major) in [(SbModel::Sb2, 2), (SbModel::SbPro2, 3)] {
+        let mut bus = bus_with(SbConfig { model, ..SbConfig::default() });
+        reset_dsp(&mut bus);
+        for cmd in [0x41, 0x42, 0x05, 0x08, 0x0E, 0x0F, 0xF9, 0xFA, 0xB6, 0xC6, 0xE7] {
+            dsp_write(&mut bus, cmd);
+        }
+        // None waited for parameters: E1h answers straight away.
+        dsp_write(&mut bus, 0xE1);
+        assert_eq!(dsp_read(&mut bus), major, "{:?}", model);
+    }
+}
+
+#[test]
+fn sb_pro_mixer_lacks_the_sb16_registers() {
+    let mut bus = bus_with(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() });
+    // HMI's setup writes and reads back 3Fh, then reads 80h and 81h.
+    bus.io_write(0x224, 0x3F);
+    bus.io_write(0x225, 0xC0);
+    assert_eq!(bus.io_read(0x225), 0x0A);
+    bus.io_write(0x224, 0x80);
+    assert_eq!(bus.io_read(0x225), 0x0A);
+    bus.io_write(0x224, 0x22);
+    bus.io_write(0x225, 0x99);
+    assert_eq!(bus.io_read(0x225), 0x99);
+}
+
+#[test]
+fn transfer_waits_while_its_dma_channel_is_masked() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    program_dma1(&mut bus, 0x20000, 100, false);
+    bus.io_write(0x0A, 0x05);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 156);
+    dsp_write(&mut bus, 0x14);
+    dsp_write(&mut bus, 99);
+    dsp_write(&mut bus, 0);
+    wait_ms(&mut bus, 30.0);
+    assert_eq!(bus.pic_pending_irq(), None, "no data, no interrupt");
+    bus.io_write(0x0A, 0x01);
+    wait_ms(&mut bus, 11.0);
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+}
+
+#[test]
 fn force_irq_is_level_triggered_until_acknowledged() {
     let mut bus = sb16();
     reset_dsp(&mut bus);
