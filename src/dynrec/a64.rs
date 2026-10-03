@@ -629,6 +629,9 @@ impl Gen<'_> {
     fn check_watched(&mut self) {
         let data = self.data;
         let mut changed = None;
+        if data.live_imm(self.ix) {
+            return;
+        }
         for w in data.watched_in(self.ix) {
             let at = *changed.get_or_insert_with(|| self.fault_exit(EXIT_WATCHED));
             self.mov32(0, data.phys + w as u32);
@@ -673,6 +676,17 @@ impl Gen<'_> {
             }
             Uop::Set { r: g, t } => self.set_gpr(g, r(t)),
             Uop::Const { t, v } => self.mov32(r(t), v),
+            Uop::LoadCode { t, phys, size, signed } => {
+                let t = r(t);
+                self.mov32(t, phys);
+                match (size, signed) {
+                    (1, false) => dynasm!(self.ops ; .arch aarch64 ; ldrb W(t), [x21, X(t)]),
+                    (1, true) => dynasm!(self.ops ; .arch aarch64 ; ldrsb W(t), [x21, X(t)]),
+                    (2, false) => dynasm!(self.ops ; .arch aarch64 ; ldrh W(t), [x21, X(t)]),
+                    (2, true) => dynasm!(self.ops ; .arch aarch64 ; ldrsh W(t), [x21, X(t)]),
+                    _ => dynasm!(self.ops ; .arch aarch64 ; ldr W(t), [x21, X(t)]),
+                }
+            }
             Uop::Copy { dst, src } => dynasm!(self.ops ; .arch aarch64 ; mov W(r(dst)), W(r(src))),
             Uop::AddConst { t, v, size } => {
                 let t = r(t);

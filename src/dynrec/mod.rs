@@ -529,12 +529,37 @@ mod engine {
                 BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK }, pokes, backend::TAIL)?;
             cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
             let stack32 = key.mode & 4 != 0;
-            let items: Vec<_> = (0..data.count())
+            let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
                     super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM)
                 })
                 .collect();
+            // Instructions whose only watched bytes are their immediate (a
+            // constant the program pokes before each loop) read it instead.
+            let mut data = data;
+            if !data.watched.is_empty() {
+                let live: Vec<bool> = items
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(ix, item)| {
+                        let off = data.offset(ix);
+                        let watched: Vec<usize> = data.watched_in(ix).map(|w| w - off).collect();
+                        match item {
+                            Some(uops) if !watched.is_empty() => super::translate::live_immediate(
+                                &data.instrs[ix],
+                                data.phys + off as u32,
+                                &watched,
+                                uops,
+                            ),
+                            _ => false,
+                        }
+                    })
+                    .collect();
+                if live.contains(&true) {
+                    data.live_imms = live.into_boxed_slice();
+                }
+            }
             let native = items.iter().filter(|i| i.is_some()).count() as u64;
             let mut data = NonNull::from(Box::leak(Box::new(data)));
             // SAFETY: just made, and owned by the block from here on.

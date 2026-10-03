@@ -1600,6 +1600,73 @@ fn a_ret_poked_into_an_unrolled_loop_is_run_where_it_is_not_translated_again() {
 }
 
 #[test]
+fn an_immediate_poked_before_each_loop_is_read_where_it_is() {
+    // The Doom engine's columns: the step poked into the immediate of the
+    // loop's ADD before each run of it; and likewise a MOV's, an AND's on
+    // memory and a sign-extended one's. Blocks translated once those bytes
+    // are watched read them, and run without leaving at them.
+    let fns = [CODE + 0x1000, CODE + 0x1100, CODE + 0x1200, CODE + 0x1300];
+    let top = CODE + 0x40;
+    let data = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(fns[0], &asm32(fns[0], |a| {
+            let mut again = a.create_label();
+            a.mov(ecx, 16u32)?;
+            a.set_label(&mut again)?;
+            a.add(ebp, 0x1234_5678)?; // 81 C5 imm32, at + 5
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.ret()
+        }));
+        rig.load(fns[1], &asm32(fns[1], |a| {
+            a.mov(edx, 0x0BAD_F00Du32)?; // BA imm32
+            a.add(edi, edx)?;
+            a.ret()
+        }));
+        rig.load(fns[2], &asm32(fns[2], |a| {
+            a.and(dword_ptr(data), 0x7FFF_FFFF)?; // 81 25 disp32 imm32
+            a.ret()
+        }));
+        rig.load(fns[3], &asm32(fns[3], |a| {
+            a.sub(esi, 0x12)?; // 83 EE imm8
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebp, ebp)?;
+            a.xor(edi, edi)?;
+            a.xor(esi, esi)?;
+            a.mov(dword_ptr(data), 0xFFFF_FFFFu32 as i32)?;
+            a.mov(ebx, 200u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.imul_3(eax, ebx, 0x0101_0101)?;
+            a.mov(dword_ptr(fns[0] + 7), eax)?;
+            a.mov(dword_ptr(fns[1] + 1), eax)?;
+            a.mov(dword_ptr(fns[2] + 6), eax)?;
+            a.mov(byte_ptr(fns[3] + 2), al)?;
+            for f in fns {
+                a.call(f as u64)?;
+            }
+            a.dec(ebx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    let steps = (1..=200u32).map(|n| n.wrapping_mul(0x0101_0101));
+    let sum = steps.clone().fold(0u32, |s, v| s.wrapping_add(v));
+    assert_eq!((b.cpu.ebp(), b.cpu.edi()), (sum.wrapping_mul(16), sum));
+    let bytes = steps.clone().fold(0u32, |s, v| s.wrapping_sub(v as u8 as i8 as u32));
+    assert_eq!(b.cpu.esi(), bytes);
+    assert_eq!(b.cpu.bus.read_32(data as usize), steps.fold(!0, |s, v| s & v));
+    if AVAILABLE {
+        assert!(stats.watched < 20, "left at the poked immediates: {:?}", stats);
+        assert!(stats.blocks < 100, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
 fn a_smaller_cs_limit_stops_a_linked_block() {
     // A loop of two linked blocks runs under a flat code segment, then
     // the same code under one whose limit ends inside the JNZ: #GP(0)

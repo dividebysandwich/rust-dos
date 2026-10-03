@@ -93,6 +93,10 @@ pub enum Uop {
     /// The register = the low bytes of t (the rest of its slot stays).
     Set { r: Gpr, t: T },
     Const { t: T, v: u32 },
+    /// t = the `size` bytes of RAM at physical address `phys`, zero- or
+    /// sign-extended: an immediate read from the instruction's own bytes,
+    /// which the program changes (see `translate::live_immediate`).
+    LoadCode { t: T, phys: u32, size: u8, signed: bool },
     Copy { dst: T, src: T },
     /// t += v, wrapped to `size` bytes (2 or 4), without flags.
     AddConst { t: T, v: u32, size: u8 },

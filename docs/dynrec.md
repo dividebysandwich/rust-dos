@@ -186,6 +186,11 @@ new code), the engine counts those bytes, per physical page
   translated from before it runs. If they differ, the block leaves before
   the instruction (`EXIT_WATCHED`), with the instructions before it done,
   and the interpreter runs whatever is there now.
+- Where the watched bytes are all in the immediate of a MOV or an ALU
+  operation (the Doom engine also pokes each column's and span's step
+  into the `ADD EBP, imm32` of its drawing loops), the instruction reads
+  the immediate from RAM instead (`translate::live_immediate`,
+  `Uop::LoadCode`), and never leaves the block for it.
 - The block's own checks leave the watched bytes out, so it stays valid
   while only they change.
 - A watched instruction that ends the block where it is now (the poked

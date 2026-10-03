@@ -117,6 +117,10 @@ pub struct BlockData {
     /// they are in check them before they run, and the block stays valid
     /// while only they change.
     pub watched: Box<[u16]>,
+    /// Per instruction (empty if none), whether its watched bytes are all
+    /// in its immediate, which its translated code reads from RAM rather
+    /// than checks (see `translate::live_immediate`).
+    pub live_imms: Box<[bool]>,
     /// The CS limit the block needs: the interpreter fetches every one of
     /// its instructions through the code window only if the limit is at
     /// least this.
@@ -206,6 +210,7 @@ impl BlockData {
             writes: writes.into_boxed_slice(),
             bytes: ram[phys as usize..(phys + len) as usize].into(),
             watched: watched.into_boxed_slice(),
+            live_imms: Box::new([]),
         };
         data.gen_sum = data.gens_now(page_gen);
         Some(data)
@@ -273,6 +278,11 @@ impl BlockData {
             }
         }
         now[from..] == self.bytes[from..]
+    }
+
+    /// Whether instruction `ix` reads its watched immediate from RAM.
+    pub fn live_imm(&self, ix: usize) -> bool {
+        self.live_imms.get(ix).copied().unwrap_or(false)
     }
 
     /// Offsets in `bytes` of the watched bytes of instruction `ix`.

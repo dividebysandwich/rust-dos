@@ -1171,3 +1171,63 @@ fn ret(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::Exit { eip: Src::T(T0) });
     true
 }
+
+/// Make the operations of `instr`, whose bytes at physical address `phys`
+/// the program changes at offsets `watched`, read its immediate from those
+/// bytes rather than use the constant it was decoded with, if only the
+/// immediate changes: Doom-engine games poke each column's and span's step
+/// into the `ADD r32, imm32` of their drawing loops. The translated code
+/// then needn't leave the block whenever the bytes differ from what was
+/// translated. False, with nothing changed, for forms other than MOV and
+/// the ALU operations with an immediate, and where the watched bytes take
+/// in more than the immediate.
+pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
+    let last = match instr.op_count() {
+        2 => 1,
+        _ => return false,
+    };
+    let (size, signed) = match instr.op_kind(last) {
+        OpKind::Immediate8 => (1, false),
+        OpKind::Immediate16 => (2, false),
+        OpKind::Immediate32 => (4, false),
+        // (Sign-extended to 32 bits, as the other operand's size is.)
+        OpKind::Immediate8to32 => (1, true),
+        _ => return false,
+    };
+    // The immediate is the last bytes of these forms.
+    let start = instr.len() - size as usize;
+    if watched.iter().any(|&w| w < start) {
+        return false;
+    }
+    let mut used = 0u8;
+    let mut site = None;
+    for (k, uop) in u.iter().enumerate() {
+        let (a, b) = match *uop {
+            Uop::Get { t, .. } | Uop::Set { t, .. } | Uop::Ea { t, .. } | Uop::MemRef { t, .. } => (t, None),
+            Uop::Load { dst, m, .. } => (dst, Some(m)),
+            Uop::Store { m, src, .. } => (m, Some(src)),
+            Uop::Alu { a, b: Src::T(b), .. } => (a, Some(b)),
+            Uop::Const { t, .. } | Uop::Alu { a: t, b: Src::Imm(_), .. } => {
+                if site.replace(k).is_some() {
+                    return false;
+                }
+                (t, None)
+            }
+            _ => return false,
+        };
+        used |= 1 << a.0 | b.map_or(0, |b| 1 << b.0);
+    }
+    let Some(site) = site else { return false };
+    let load = |t| Uop::LoadCode { t, phys: phys + start as u32, size, signed };
+    match u[site] {
+        Uop::Const { t, .. } => u[site] = load(t),
+        Uop::Alu { op, size: alu_size, a, .. } => {
+            let Some(free) = [T0, T1, T2].into_iter().find(|t| used & 1 << t.0 == 0) else { return false };
+            u[site] = Uop::Alu { op, size: alu_size, a, b: Src::T(free) };
+            // The load neither faults nor changes anything, so it may go first.
+            u.insert(0, load(free));
+        }
+        _ => unreachable!(),
+    }
+    true
+}

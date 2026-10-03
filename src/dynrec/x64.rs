@@ -487,6 +487,9 @@ impl Gen<'_> {
     fn check_watched(&mut self) {
         let data = self.data;
         let mut changed = None;
+        if data.live_imm(self.ix) {
+            return;
+        }
         for w in data.watched_in(self.ix) {
             let at = *changed.get_or_insert_with(|| self.fault_exit(EXIT_WATCHED));
             let phys = (data.phys as usize + w) as i32;
@@ -808,6 +811,16 @@ impl Gen<'_> {
             Uop::Get { t, r: g } => self.get_into(r(t), g),
             Uop::Set { r: g, t } => self.set_from(g, r(t), RAX),
             Uop::Const { t, v } => dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), v as i32),
+            Uop::LoadCode { t, phys, size, signed } => {
+                let (t, at) = (r(t), phys as i32);
+                match (size, signed) {
+                    (1, false) => dynasm!(self.ops ; .arch x64 ; movzx Rd(t), BYTE [r13 + at]),
+                    (1, true) => dynasm!(self.ops ; .arch x64 ; movsx Rd(t), BYTE [r13 + at]),
+                    (2, false) => dynasm!(self.ops ; .arch x64 ; movzx Rd(t), WORD [r13 + at]),
+                    (2, true) => dynasm!(self.ops ; .arch x64 ; movsx Rd(t), WORD [r13 + at]),
+                    _ => dynasm!(self.ops ; .arch x64 ; mov Rd(t), DWORD [r13 + at]),
+                }
+            }
             Uop::Copy { dst, src } => dynasm!(self.ops ; .arch x64 ; mov Rd(r(dst)), Rd(r(src))),
             Uop::AddConst { t, v, size } => {
                 let t = r(t);
