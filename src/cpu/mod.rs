@@ -384,6 +384,9 @@ pub struct Cpu {
     pub fpu_tags: [u8; 8],
 
     pub process_stack: Vec<ProcessContext>,
+    /// How many programs have been loaded, for telling whether a game's
+    /// commands started one (`games::ActiveGame::done`).
+    pub programs_loaded: u64,
     /// Set by STI, MOV SS and POP SS: hardware interrupts wait until the
     /// next instruction has run.
     pub irq_shadow: bool,
@@ -545,6 +548,7 @@ impl Cpu {
             alloc_strategy: 0,
             bios_wait_until: None,
             process_stack: Vec::new(),
+            programs_loaded: 0,
             irq_shadow: false,
             // 64K direct-mapped slots (~3.5 MB): comfortably large for any
             // DOS program's hot working set.
@@ -1419,6 +1423,7 @@ impl Cpu {
     }
 
     fn load_program_bytes(&mut self, filename: &str, bytes: &[u8], placement: Placement) -> bool {
+        self.programs_loaded += 1;
         self.bus.log_string(&format!(
             "[DOS] Loading {} ({} bytes)",
             filename,

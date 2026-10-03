@@ -37,7 +37,8 @@ starts.
 | none (*Start Core*) | starts at the prompt; C: is an empty folder, `saves/rust-dos/drive_c` |
 | a folder | C: is the folder. With a `rust-dos.conf` in it, it is a [game package](../GAME-PACKAGES.md): a profile is made of it in `saves/rust-dos/games` the first time, with its settings, drives, manuals and `[autoexec]`, and what the game writes goes to `saves/rust-dos/saves/<name>` (unless its `[game]` has `overlay=false`). A GOG install or a folder of DOSBox configurations is imported as a game profile |
 | `.exe`, `.com`, `.bat` | C: is the program's folder, and the program runs |
-| `.zip`, `.dosz`, `.7z` | a [game package](../GAME-PACKAGES.md): C:, read from the archive where it is, with a profile in `saves/rust-dos/games` made the first time and found after, from its `rust-dos.conf` if it has one; else it starts its one program, if it has one. What the game writes goes to `saves/rust-dos/saves/<name>` |
+| `.dosc` | its game's `.dosz` (or `.zip`) beside it, with the `.dosc` over it (see [Packages made for DOSBox](../GAME-PACKAGES.md#packages-made-for-dosbox)) |
+| `.zip`, `.dosz`, `.7z` | a [game package](../GAME-PACKAGES.md): C:, read from the archive where it is, with a profile in `saves/rust-dos/games` made the first time and found after (made again when its configuration changes), from its `rust-dos.conf` if it has one; else it starts its one program, if it has one. What the game writes goes to `saves/rust-dos/saves/<name>` |
 | `.conf` | a [game profile](../CONFIGURATION.md#game-profiles), launched; a DOSBox configuration is imported as one first |
 | floppy image (`.img`, `.ima`, `.vfd`, …) | A:, with the prompt at A: |
 | CD image (`.iso`, `.cue`) | D:, with the prompt at D: |
@@ -53,6 +54,25 @@ dates, and renaming a file there copies it.
 With the core option **Boot disk images**, floppy and hard disk images start
 from their boot sector (`BOOT`) instead, for systems such as Windows 95 and
 self-booting games.
+
+A DOSBox `GAME.conf` beside `GAME.zip` or `GAME.dosz`, even one with only
+an `[autoexec]`, is imported into the game's profile with the archive as C:
+before its commands: `REMOUNT C D` moves the game to D:,
+`SUBST` makes one of its folders a drive, and an `IMGMOUNT C` or `BOOT` of an
+operating system's image beside it, or named from the OS images folder, takes
+C:. `[rust-dos] os=win98se` in it starts the game in that system, as the
+**Boot OS** option does. A `GAME.dosc` and the `DOS.YML` in either are used too
+(see [Packages made for DOSBox](../GAME-PACKAGES.md#packages-made-for-dosbox)).
+
+**OS images.** Hard disk images of installed operating systems go in
+`system/rust-dos/os/`. The core
+option **Boot OS** (*System*) lists them: with one chosen, a zip, `.dosz` or
+folder without a configuration of its own starts that system from its image
+(`BOOT -l C`), with the game as its second disk, D:. Each game keeps the
+image's changes in its own delta file in `saves/rust-dos/saves/<name>`, so the
+image stays as it was installed and one install serves every game. At the
+prompt, `REMOUNT WIN98SE C` (or `IMGMOUNT C WIN98SE`) mounts an image by its
+name.
 
 ## Settings
 
@@ -109,8 +129,7 @@ keeps them; rewind works through them. Files on the host and in disk images
 aren't part of a state.
 
 RetroAchievements are the frontend's: the core gives it the MS-DOS memory
-map DOSBox Pure does, with the game's memory at address 0, so the DOS
-achievement sets made for DOSBox Pure work. The frontend knows DOS games by
+map the DOS achievement sets read, with the game's memory at address 0. The frontend knows DOS games by
 their `.zip` or `.dosz` archive, so load them that way for their
 achievements. The Rust-DOS program's own RetroAchievements client isn't in
 the core.

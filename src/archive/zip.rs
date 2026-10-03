@@ -1,192 +1,101 @@
-//! Zip archives, read from their central directory without loading the
-//! whole archive: Zip64 included, stored or deflated files. Encrypted
-//! files can't be read.
+//! Zip archives: their directory as the `zip` crate reads it (Zip64
+//! included), and their stored or deflated files, read where they are.
+//! Encrypted files can't be read.
 
 use std::io::{Read, Seek, SeekFrom};
 
-/// A file or folder in a zip archive's central directory.
+/// A file or folder in a zip archive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZipEntry {
-    /// Its name as the archive has it: code page 437, or UTF-8 when
-    /// `flags` says so (`name` decodes it).
+    /// Its name's bytes as the archive has them, which achievement hashes
+    /// are made of.
     pub raw_name: Vec<u8>,
-    pub flags: u16,
+    /// Its path, with '/' between the parts and none at the end.
+    pub path: String,
+    pub dir: bool,
+    pub encrypted: bool,
+    /// 0 stored, 8 deflated.
     pub method: u16,
     pub crc: u32,
     pub compressed: u64,
     pub size: u64,
-    /// Where its local header is.
-    pub local_at: u64,
+    /// Where its data starts, after its local header.
+    pub data_at: u64,
     /// Its DOS time and date.
     pub time: u16,
     pub date: u16,
-    /// The low word of its external attributes: 10h for a folder.
-    pub external: u16,
 }
 
 impl ZipEntry {
     pub fn is_dir(&self) -> bool {
-        matches!(self.raw_name.last(), None | Some(b'/' | b'\\')) || self.external & 0x10 != 0
+        self.dir
     }
 
     pub fn encrypted(&self) -> bool {
-        self.flags & 0x0001 != 0
+        self.encrypted
     }
 
-    /// Its path, with '/' between the parts and none at the end.
     pub fn name(&self) -> String {
-        let name = if self.flags & 0x0800 != 0 {
-            String::from_utf8_lossy(&self.raw_name).into_owned()
-        } else {
-            self.raw_name.iter().map(|&b| crate::video::CP437[b as usize]).collect()
-        };
-        name.replace('\\', "/").trim_end_matches('/').to_string()
+        self.path.clone()
     }
 }
 
-fn le16(b: &[u8]) -> u64 {
-    u16::from_le_bytes([b[0], b[1]]) as u64
-}
+/// A folder's file type in a Unix mode, which the crate gives DOS's folder
+/// attribute too. Only the whole type field counts: DOS zip programs left
+/// junk in the attributes' high word, where Unix ones put the mode.
+const FILE_TYPE: u32 = 0o170000;
+const FOLDER: u32 = 0o040000;
 
-fn le32(b: &[u8]) -> u64 {
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64
-}
-
-fn le64(b: &[u8]) -> u64 {
-    u64::from_le_bytes(b[..8].try_into().unwrap())
-}
-
-fn read_at<F: Read + Seek>(file: &mut F, at: u64, len: usize) -> Result<Vec<u8>, String> {
-    let mut buf = vec![0; len];
-    file.seek(SeekFrom::Start(at))
-        .and_then(|_| file.read_exact(&mut buf))
-        .map_err(|_| "a ZIP read error".to_string())?;
-    Ok(buf)
-}
-
-/// The files and folders of the archive's central directory.
+/// The files and folders of the archive.
 pub fn central_directory<F: Read + Seek>(file: &mut F) -> Result<Vec<ZipEntry>, String> {
-    let archive_size = file.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
-    if archive_size < 22 {
-        return Err("the ZIP is too small".to_string());
-    }
-    // The end of central directory record, searched for from the end.
-    let tail_len = archive_size.min(0xFFFF + 22 + 2048);
-    let tail = read_at(file, archive_size - tail_len, tail_len as usize)?;
-    let eocd = (0..=tail.len() - 4)
-        .rev()
-        .find(|&i| le32(&tail[i..]) == 0x0605_4b50 && i + 22 <= tail.len())
-        .ok_or("no ZIP central directory")?;
-    let eocd_at = archive_size - tail_len + eocd as u64;
-    let record = &tail[eocd..eocd + 22];
-    let (mut total, mut cdir_size, mut cdir_at) = (le16(&record[0x0A..]), le32(&record[0x0C..]), le32(&record[0x10..]));
-    if (cdir_at == 0xFFFF_FFFF || cdir_size == 0xFFFF_FFFF || total == 0xFFFF) && eocd_at >= 20 + 56 {
-        // Zip64: its locator, then its own end record.
-        let locator = read_at(file, eocd_at - 20, 20)?;
-        if le32(&locator) == 0x0706_4b50 {
-            let at = le64(&locator[8..]);
-            if at <= archive_size - 56 {
-                let record = read_at(file, at, 56)?;
-                if le32(&record) == 0x0606_4b50 {
-                    total = le64(&record[0x20..]);
-                    cdir_size = le64(&record[0x28..]);
-                    cdir_at = le64(&record[0x30..]);
-                }
-            }
-        }
-    }
-    if cdir_size >= 0x1000_0000 || cdir_size < total * 46 || cdir_at + cdir_size > archive_size {
-        return Err("the ZIP's central directory is invalid".to_string());
-    }
-    let cdir = read_at(file, cdir_at, cdir_size as usize)?;
-    let mut entries = Vec::new();
-    let mut at = 0usize;
-    for _ in 0..total {
-        if at + 46 > cdir.len() {
-            break;
-        }
-        let h = &cdir[at..];
-        if le32(h) != 0x0201_4b50 {
-            break;
-        }
-        let flags = le16(&h[0x08..]) as u16;
-        let method = le16(&h[0x0A..]) as u16;
-        let (time, date) = (le16(&h[0x0C..]) as u16, le16(&h[0x0E..]) as u16);
-        let crc = le32(&h[0x10..]) as u32;
-        let mut compressed = le32(&h[0x14..]);
-        let mut size = le32(&h[0x18..]);
-        let name_len = le16(&h[0x1C..]) as usize;
-        let extra_len = le16(&h[0x1E..]) as usize;
-        let comment_len = le16(&h[0x20..]) as usize;
-        let external = le16(&h[0x26..]) as u16;
-        let mut local_at = le32(&h[0x2A..]);
-        if at + 46 + name_len + extra_len > cdir.len() {
-            return Err("the ZIP's central directory is invalid".to_string());
-        }
-        let raw_name = h[46..46 + name_len].to_vec();
-        let extra = &h[46 + name_len..46 + name_len + extra_len];
-        at += 46 + name_len + extra_len + comment_len;
-        if size == 0xFFFF_FFFF || compressed == 0xFFFF_FFFF || local_at == 0xFFFF_FFFF {
-            let mut x = extra;
-            while x.len() > 4 {
-                let (id, len) = (le16(x), le16(&x[2..]) as usize);
-                let Some(field) = x.get(4..4 + len) else {
-                    break;
-                };
-                if id == 0x0001 {
-                    let mut f = field;
-                    for value in [&mut size, &mut compressed, &mut local_at] {
-                        if *value == 0xFFFF_FFFF {
-                            if f.len() < 8 {
-                                return Err("an invalid Zip64 file".to_string());
-                            }
-                            *value = le64(f);
-                            f = &f[8..];
-                        }
-                    }
-                    break;
-                }
-                x = &x[4 + len..];
-            }
-        }
-        let entry = ZipEntry { raw_name, flags, method, crc, compressed, size, local_at, time, date, external };
-        if !entry.is_dir()
-            && ((method == 0 && size != compressed) || (size != 0 && compressed == 0) || local_at + 30 + compressed > archive_size)
-        {
-            return Err("an invalid entry in the ZIP's central directory".to_string());
-        }
-        entries.push(entry);
-    }
-    Ok(entries)
-}
-
-/// Where the file's data starts, after its local header.
-pub fn data_at<F: Read + Seek>(file: &mut F, entry: &ZipEntry) -> Result<u64, String> {
-    let bad = || format!("{}: damaged", entry.name());
-    let header = read_at(file, entry.local_at, 30).map_err(|_| bad())?;
-    if le32(&header) != 0x0403_4b50 {
-        return Err(bad());
-    }
-    Ok(entry.local_at + 30 + le16(&header[26..]) + le16(&header[28..]))
+    let mut archive = ::zip::ZipArchive::new(file).map_err(|e| format!("not a readable ZIP: {}", e))?;
+    (0..archive.len())
+        .map(|i| {
+            let file = archive.by_index_raw(i).map_err(|e| format!("a damaged ZIP entry: {}", e))?;
+            let raw_name = file.name_raw().to_vec();
+            let path = file.name().replace('\\', "/").trim_end_matches('/').to_string();
+            let dir = file.is_dir() || raw_name.last() == Some(&b'\\') || file.unix_mode().is_some_and(|m| m & FILE_TYPE == FOLDER);
+            let (date, time) = file.last_modified().map_or((0, 0), |t| (t.datepart(), t.timepart()));
+            // The method's number, whichever of the crate's own features
+            // are on: flate2 here inflates what it can't.
+            #[allow(deprecated)]
+            let method = file.compression().to_u16();
+            Ok(ZipEntry {
+                path,
+                dir,
+                encrypted: file.encrypted(),
+                method,
+                crc: file.crc32(),
+                compressed: file.compressed_size(),
+                size: file.size(),
+                data_at: file.data_start().ok_or_else(|| format!("{}: damaged", file.name()))?,
+                time,
+                date,
+                raw_name,
+            })
+        })
+        .collect()
 }
 
 /// The contents of a file in the archive.
 pub fn read<F: Read + Seek>(file: &mut F, entry: &ZipEntry) -> Result<Vec<u8>, String> {
-    if entry.encrypted() {
-        return Err(format!("{}: encrypted files can't be read", entry.name()));
+    if entry.encrypted {
+        return Err(format!("{}: encrypted files can't be read", entry.path));
     }
-    let start = data_at(file, entry)?;
-    let stored = read_at(file, start, entry.compressed as usize).map_err(|_| format!("{}: damaged", entry.name()))?;
+    let mut packed = vec![0; entry.compressed as usize];
+    file.seek(SeekFrom::Start(entry.data_at))
+        .and_then(|_| file.read_exact(&mut packed))
+        .map_err(|_| format!("{}: damaged", entry.path))?;
     match entry.method {
-        0 => Ok(stored),
+        0 => Ok(packed),
         8 => {
             let mut out = Vec::with_capacity(entry.size as usize);
-            flate2::read::DeflateDecoder::new(stored.as_slice())
+            flate2::read::DeflateDecoder::new(packed.as_slice())
                 .read_to_end(&mut out)
-                .map_err(|e| format!("{}: {}", entry.name(), e))?;
+                .map_err(|e| format!("{}: {}", entry.path, e))?;
             Ok(out)
         }
-        method => Err(format!("{}: compression method {} isn't supported", entry.name(), method)),
+        method => Err(format!("{}: compression method {} isn't supported", entry.path, method)),
     }
 }
 
@@ -242,6 +151,20 @@ pub(crate) mod tests {
         data.extend(at.to_le_bytes());
         data.extend([0, 0]);
         data
+    }
+
+    #[test]
+    fn junk_in_the_attributes_is_no_folder() {
+        let mut data = zip(&[("INSTALL.EXE", b"MZ", false), ("SUB/", b"", false)]);
+        // The central directory's external attributes: DOS's archive bit,
+        // with junk over it (keen1.zip's D440h), and the folder bit alone.
+        let central = data.windows(4).position(|w| w == [0x50, 0x4B, 0x01, 0x02]).unwrap();
+        data[central + 38..central + 42].copy_from_slice(&0x00D4_4020u32.to_le_bytes());
+        let second = central + 46 + "INSTALL.EXE".len();
+        data[second + 38..second + 42].copy_from_slice(&0x10u32.to_le_bytes());
+        let entries = central_directory(&mut std::io::Cursor::new(data)).unwrap();
+        assert!(!entries[0].is_dir());
+        assert!(entries[1].is_dir());
     }
 
     #[test]

@@ -430,6 +430,12 @@ fn find_paths(word: &str, base: &Path, paths: &PathContext) -> Result<Vec<PathBu
         _ if hostfs::exists(&host) || !word.contains(['*', '?']) => host,
         _ => return matching_files(word, base, paths),
     };
+    // An operating system's image, by its name alone.
+    if !hostfs::exists(&found)
+        && let Some(os) = crate::os_images::find(word)
+    {
+        return Ok(vec![os]);
+    }
     Ok(vec![found])
 }
 

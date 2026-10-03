@@ -30,6 +30,8 @@ png = "0.18"
 ab_glyph = "0.2"
 # zlib for the ZMBV video codec of the AVI recordings.
 flate2 = "1"
+# Zip archives' directories (src/archive/zip.rs); flate2 inflates their files.
+zip = { version = "8.6", default-features = false }
 base64 = "0.23.1"
 # FM synthesis for the AdLib and Sound Blaster (OPL2/OPL3).
 nuked-opl3 = "0.1"

@@ -47,6 +47,8 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("TIME", &crate::time_commands::TimeCommand),
     ("MOUNT", &MountCommand),
     ("IMGMOUNT", &MountCommand),
+    ("REMOUNT", &RemountCommand),
+    ("SUBST", &SubstCommand),
     ("MAKEIMG", &crate::makeimg_command::MakeImgCommand),
     ("SET", &SetCommand),
     ("PATH", &PathCommand),
@@ -935,14 +937,132 @@ impl ShellCommand for MountCommand {
     }
 }
 
+pub const REMOUNT_USAGE: &str = concat!(
+    "Moves a mounted drive to another letter, or\r\n",
+    "mounts an operating system's hard disk image by its name.\r\n",
+    "\r\n",
+    "REMOUNT from to\r\n",
+    "REMOUNT os-name to\r\n",
+    "\r\n",
+    "  REMOUNT C D        the game on C: becomes D:, and C: is left empty\r\n",
+    "  REMOUNT WIN98SE C  C: is WIN98SE.IMG (or .VHD) from the OS images\r\n",
+    "                     folder; BOOT -l C starts it\r\n",
+);
+
+/// REMOUNT from to, or REMOUNT os-name to
+struct RemountCommand;
+impl ShellCommand for RemountCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let words: Vec<&str> = args.split_whitespace().collect();
+        let [from, to] = words.as_slice() else {
+            print_string(cpu, REMOUNT_USAGE);
+            print_os_images(cpu);
+            return;
+        };
+        let Some(to) = crate::mount::parse_drive_letter(to) else {
+            print_string(cpu, REMOUNT_USAGE);
+            return;
+        };
+        let Some(from) = crate::mount::parse_drive_letter(from) else {
+            match crate::os_images::find(from) {
+                Some(path) => mount(cpu, MountSpec { drive: to, path, opts: Default::default() }),
+                None => {
+                    print_string(cpu, &format!("There is no operating system called {}\r\n", from));
+                    print_os_images(cpu);
+                }
+            }
+            return;
+        };
+        match cpu.bus.remount_drive(from, to) {
+            Ok(path) => print_string(
+                cpu,
+                &format!("Drive {} is now {}, from {}\r\n", drive_name(from), drive_name(to), display_host_path(&path)),
+            ),
+            Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+        }
+    }
+}
+
+pub const SUBST_USAGE: &str = concat!(
+    "Makes a directory a drive of its own.\r\n",
+    "\r\n",
+    "SUBST drive: path\r\n",
+    "SUBST drive: /D\r\n",
+    "\r\n",
+    "  SUBST E: C:\\GAMES\\KEEN   E:\\ is C:\\GAMES\\KEEN\r\n",
+    "  REMOUNT C X\r\n",
+    "  SUBST C: X:\\GAME       C:\\ is the game's folder\r\n",
+);
+
+/// SUBST drive: path, or SUBST drive: /D
+struct SubstCommand;
+impl ShellCommand for SubstCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        let words: Vec<&str> = args.split_whitespace().collect();
+        let (Some(drive), Some(target)) = (words.first().and_then(|w| crate::mount::parse_drive_letter(w)), words.get(1)) else {
+            print_string(cpu, SUBST_USAGE);
+            return;
+        };
+        if target.eq_ignore_ascii_case("/D") {
+            match drive {
+                DRIVE_C => {
+                    cpu.bus.disk.empty_drive_c();
+                    cpu.bus.sync_drive_bda();
+                    print_string(cpu, "Drive C: is empty\r\n");
+                }
+                _ => unmount(cpu, drive),
+            }
+            return;
+        }
+        // The folder as the drive it is on has it: under its changes, if
+        // it keeps them apart.
+        let found = cpu.bus.disk.locate(target).filter(|(_, path)| crate::hostfs::is_dir(path));
+        let Some((source, path)) = found else {
+            print_string(cpu, &format!("Path not found - {}\r\n", target));
+            return;
+        };
+        let Some(info) = cpu.bus.disk.drive_info(source) else { return };
+        // C: is always there, and can be another folder; another letter
+        // must be free, as in DOS.
+        if drive != DRIVE_C && cpu.bus.disk.is_mounted(drive) {
+            print_string(cpu, &format!("Drive {} is already in use\r\n", drive_name(drive)));
+            return;
+        }
+        let kind = if info.kind == DriveKind::CdRom { DriveKind::CdRom } else { DriveKind::HardDisk };
+        let opts = crate::disk::MountOptions { kind, read_only: info.read_only, ..Default::default() };
+        match cpu.bus.mount_drive(drive, &path, opts, drive == DRIVE_C) {
+            Ok(_) => print_string(cpu, &format!("Drive {} is {}\r\n", drive_name(drive), target.to_ascii_uppercase())),
+            Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+        }
+    }
+}
+
+/// The OS images there are, and where they are looked for.
+fn print_os_images(cpu: &mut Cpu) {
+    let images = crate::os_images::list();
+    if images.is_empty() {
+        print_string(cpu, "\r\nNo OS images are in:\r\n");
+        for dir in crate::os_images::dirs() {
+            print_string(cpu, &format!("  {}\r\n", display_host_path(&dir)));
+        }
+        return;
+    }
+    print_string(cpu, "\r\nOS images:\r\n");
+    for (name, path) in images {
+        print_string(cpu, &format!("  {:<12} {}\r\n", name.to_ascii_uppercase(), display_host_path(&path)));
+    }
+}
+
 /// " (disk 2 of 3)" for a drive mounted from a list of images.
 fn disk_number(index: usize, count: usize) -> String {
     if count > 1 { format!(" (disk {} of {})", index + 1, count) } else { String::new() }
 }
 
 fn mount(cpu: &mut Cpu, spec: MountSpec) {
-    // C: is always there; a disk image can take the host directory's place.
-    let replace = spec.drive == DRIVE_C && spec.path.is_file();
+    // C: is always there; a disk image can take the host directory's place,
+    // and anything the empty C: REMOUNT leaves.
+    let replace = spec.drive == DRIVE_C
+        && (spec.path.is_file() || cpu.bus.disk.drive_kind(DRIVE_C) == Some(DriveKind::Virtual));
     match cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts, replace) {
         Ok(path) => {
             let kind = cpu.bus.disk.drive_kind(spec.drive).map_or("", DriveKind::name);

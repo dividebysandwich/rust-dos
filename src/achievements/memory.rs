@@ -1,5 +1,5 @@
 //! The machine's memory as the MS-DOS achievement sets address it.
-//! rcheevos's MS-DOS map, as DOSBox Pure fills it:
+//! rcheevos's MS-DOS map, as the sets expect it filled:
 //!
 //! ```text
 //! 000000-09FFFF  the conventional memory the game has, from where
@@ -10,7 +10,7 @@
 //! 200000-41FFFF  the memory from A0000h on: upper and extended memory
 //! ```
 //!
-//! DOSBox Pure's programs start at segment 186h, where a program run from
+//! The sets expect programs to start at segment 186h, where a program run from
 //! the prompt has its environment (a 256-byte block at least) and its
 //! PSP at 198h, 120h bytes in. Here programs start elsewhere, so the
 //! game's memory is from 120h bytes below the first program's PSP: the
@@ -31,7 +31,7 @@ fn first_mcb(ram: &[u8]) -> u16 {
     }
 }
 
-/// Where DOSBox Pure's first program has its PSP, from the start of the
+/// Where the sets expect the first program's PSP, from the start of the
 /// game's memory.
 pub const PSP_OFFSET: usize = 0x120;
 /// The end of conventional memory.
@@ -59,8 +59,8 @@ impl MemoryMap {
         }
         let game_start = match first_program(ram) {
             Some(psp) => (psp as usize * 16).saturating_sub(PSP_OFFSET),
-            // No program: where one would go, with the environment DOSBox
-            // Pure gives it.
+            // No program: where one would go, with the environment the
+            // sets expect before it.
             None => first_mcb(ram) as usize * 16,
         };
         Self {
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn the_game_is_where_dosbox_pure_has_it() {
+    fn the_game_is_where_the_sets_expect_it() {
         let mut ram = vec![0u8; 0x20_0000];
         // An environment of 10 paragraphs, then the program's block.
         let psp = LOW.first_mcb + 1 + 10 + 1;
@@ -144,7 +144,7 @@ mod tests {
         ram[0xA_0000 + 0x6_0000] = 0x77;
         let map = MemoryMap::of(&ram, false);
         assert_eq!(map.game_start, psp as usize * 16 - 0x120);
-        // The PSP at 120h, as in DOSBox Pure.
+        // The PSP at 120h, as the sets expect it.
         assert_eq!(map.peek(&ram, 0x120 + 0x80), 0x42);
         // DOS's memory at 100000h, and the memory above A0000h at 200000h.
         assert_eq!(map.peek(&ram, 0x10_0400), 0x11);

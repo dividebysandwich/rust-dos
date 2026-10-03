@@ -163,6 +163,8 @@ programs, the prompt has these commands:
 | `DATE [mm-dd-yy]`, `TIME [hh:mm[:ss]]` | set the machine's date or time, or show it |
 | `CLS`, `VER`, `ECHO`, `SET`, `PATH`, `PROMPT` | as in DOS |
 | `MOUNT`, `IMGMOUNT` | see [Mounting drives](CONFIGURATION.md#mounting-drives) |
+| `REMOUNT from to` | move a mounted drive to another letter |
+| `SUBST drive: path` | make a folder a drive of its own (`/D` removes it) |
 | `MAKEIMG` | make a new floppy or hard disk image, as in DOSBox Staging; see [New disk images](CONFIGURATION.md#new-disk-images) |
 | `BOOT [image ...] [-l drive]` | start a system from a disk image; see [Booting a disk image](CONFIGURATION.md#booting-a-disk-image) |
 | `MIXER` | see [`[mixer]`](CONFIGURATION.md#mixer) |
@@ -323,7 +325,7 @@ floppy, hard disk and CD images (an `.m3u` list of them for the frontend's
 disk control), or starts at the prompt without content. The core options set
 the machine, `system/rust-dos/rust-dos.conf` the rest, and the settings
 window (Ctrl+F12) is there too. Save states, rewind and
-RetroAchievements (DOSBox Pure's DOS sets) are the frontend's.
+RetroAchievements are the frontend's.
 **[libretro/README.md](libretro/README.md)** has the details.
 
 ## Debug & remote-control server

@@ -3,6 +3,7 @@
 //! the commands that start the game (dosbox.rs), and GOG's installs, which
 //! run DOSBox with such files (gog.rs).
 
+pub mod dos_yml;
 pub mod dosbox;
 pub mod drop;
 pub mod gog;
@@ -53,6 +54,23 @@ impl Imported {
 }
 
 impl Imported {
+    /// `over`'s settings over these, its drives in place of these on the
+    /// same letters, and its commands if it has any but C: (which a
+    /// configuration without commands comes to).
+    pub fn merge(&mut self, over: Imported) {
+        for (section, key, value) in over.settings {
+            self.set(section, key, value);
+        }
+        for spec in over.drives {
+            self.drives.retain(|d| d.drive != spec.drive);
+            self.drives.push(spec);
+        }
+        if over.autoexec.iter().any(|l| !l.eq_ignore_ascii_case("C:")) || self.autoexec.is_empty() {
+            self.autoexec = over.autoexec;
+        }
+        self.warnings.extend(over.warnings);
+    }
+
     /// The settings as a profile's sections, each after a blank line.
     pub fn settings_text(&self) -> String {
         let mut text = String::new();

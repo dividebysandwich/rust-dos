@@ -24,7 +24,7 @@
 //!
 //! `[game]`'s `achievements=` says which version of the game it is for
 //! RetroAchievements: the hash of its archive, or the archive (a zip or a
-//! DOSBox Pure .dosz, relative to the games folder).
+//! .dosz, relative to the games folder).
 //!
 //! `[game]`'s `overlay=true`, which new profiles have, leaves the game's
 //! own drives (its `[drives]`' host directories and disk images) as they
@@ -357,6 +357,12 @@ pub fn prompt_directory(cpu: &Cpu) -> String {
 /// directory), or such a file; or a game's package (`add_package`). Returns the profile's id and the game's name
 /// and what of the configuration didn't come across.
 pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String, String, Vec<String>), String> {
+    // A .dosc: the game it goes with.
+    if source.extension().is_some_and(|e| e.eq_ignore_ascii_case("dosc")) {
+        let package = crate::archive::dosz_of(source)
+            .ok_or_else(|| format!("{}: the game it goes with isn't beside it", source.display()))?;
+        return add_package(dir, &package);
+    }
     // A game's package: its profile, as dropping it makes it.
     if is_package(source) || (crate::archive::is_archive_name(source) && hostfs::is_file(source)) {
         return add_package(dir, source);
@@ -413,7 +419,7 @@ fn read_package_file(path: &Path) -> Result<String, String> {
 
 /// The DOSBox configuration that goes with the package `package`, which
 /// has no `rust-dos.conf`: its `dosbox.conf` at its root, or a file named
-/// as it is beside it (`GAME.conf` for `GAME.zip`), as DOSBox Pure loads
+/// as it is beside it (`GAME.conf` for `GAME.zip`), as .dosz packages load
 /// them.
 fn package_dosbox_conf(package: &Path) -> Option<String> {
     if let Some(name) = package_entry(package, "dosbox.conf") {
@@ -425,9 +431,11 @@ fn package_dosbox_conf(package: &Path) -> Option<String> {
         let name = e.name.to_string_lossy().to_ascii_lowercase();
         !e.is_dir && name.strip_suffix(".conf") == Some(stem.as_str())
     })?;
-    // Not a profile of rust-dos's that happens to be there.
+    // Not a profile of rust-dos's that happens to be there. Those beside
+    // .dosz packages often have only an [autoexec], which runs on the
+    // package as C:.
     let text = read_package_file(&beside.path).ok()?;
-    crate::import::dosbox::is_dosbox_conf(&text).then_some(text)
+    (crate::import::dosbox::is_dosbox_conf(&text) || !config::has_own_sections(&text)).then_some(text)
 }
 
 /// The manuals and extras in the package `root` (a folder, or a zip or
@@ -504,13 +512,21 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
     // Without Windows' `\\?\`, as the profile has it, or it isn't found again.
     let package = PathBuf::from(crate::mount::display_host_path(&package));
     let profiles = list(dir);
-    let made_before = profiles.iter().find(|(_, text)| {
-        config::parse(text, dir, None).drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path.starts_with(&package))
-    });
-    if let Some((entry, _)) = made_before {
-        return Ok((entry.id.clone(), entry.name.clone(), Vec::new()));
-    }
     let is_archive = !hostfs::is_dir(&package);
+    let source = package_source(&package, is_archive);
+    let made_before = profiles.iter().find(|(_, text)| {
+        // On C:, or where its configuration's REMOUNT moved it.
+        config::parse(text, dir, None).drives.iter().any(|d| d.path.starts_with(&package))
+    });
+    // Made again when what it was made from has changed: a configuration
+    // edited, or a .dosc put beside it, since.
+    let remade = match made_before {
+        Some((entry, text)) if config::parse(text, dir, None).game_source.as_deref() == Some(source.as_str()) => {
+            return Ok((entry.id.clone(), entry.name.clone(), Vec::new()));
+        }
+        Some((entry, _)) => Some(entry.id.clone()),
+        None => None,
+    };
     let files: Vec<String> = if is_archive {
         crate::archive::open(&package)?.files()
     } else {
@@ -529,17 +545,31 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
     let mut conf = config::parse(&own, &package, None);
     let stem = package.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
     let name = conf.game_name.clone().unwrap_or(stem);
-    // A package made for DOSBox: its settings, drives and commands.
-    let dosbox = if own.is_empty() { package_dosbox_conf(&package) } else { None }
-        .map(|text| crate::import::dosbox::import_in(&[&text], std::slice::from_ref(&package), &name, None, Some(&package)));
+    // Its paths are from the package, or from the folder beside it, where
+    // a .conf of its name is.
+    let bases: Vec<PathBuf> = std::iter::once(package.clone()).chain(package.parent().map(Path::to_path_buf)).collect();
+    // A package made for DOSBox, or a .dosz: its DOS.YML (in it
+    // or its .dosc), then its DOSBox configuration's settings, drives and
+    // commands over those.
+    let yml = if own.is_empty() && is_archive { crate::archive::dos_yml(&package) } else { Vec::new() };
+    let yml = (!yml.is_empty()).then(|| crate::import::dos_yml::import(&yml, &package, &name));
+    let dosbox_conf = if own.is_empty() { package_dosbox_conf(&package) } else { None }
+        .map(|text| crate::import::dosbox::import_in(&[&text], &bases, &name, None, Some(&package)));
+    let dosbox = match (yml, dosbox_conf) {
+        (Some(mut yml), Some(over)) => {
+            yml.merge(over);
+            Some(yml)
+        }
+        (yml, over) => over.or(yml),
+    };
     if let Some(imported) = &dosbox {
         conf.drives = imported.drives.clone();
-        // Only C: from DOSBox Pure's, which runs nothing itself.
+        // Only C: from a configuration that runs nothing itself.
         if imported.autoexec.iter().any(|l| !l.eq_ignore_ascii_case("C:")) {
             conf.autoexec = imported.autoexec.clone();
         }
     }
-    let mut text = format!("[game]\nname={}\n", name);
+    let mut text = format!("[game]\nname={}\nsource={}\n", name, source);
     text.push_str(&format!("overlay={}\n", game_value(&own, "overlay").unwrap_or_else(|| "true".to_string())));
     // RetroAchievements knows the game by its archive's hash.
     match game_value(&own, "achievements") {
@@ -565,7 +595,7 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
         text.push('\n');
     }
     let mut drives = conf.drives.clone();
-    if !drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) {
+    if !drives.iter().any(|d| d.drive == crate::disk::DRIVE_C || d.path == package) {
         drives.insert(0, MountSpec { drive: crate::disk::DRIVE_C, path: package.clone(), opts: Default::default() });
     }
     text.push_str("\n[drives]\n");
@@ -582,13 +612,16 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
         text.push_str(&line);
         text.push('\n');
     }
-    // Neither a profile nor a folder there already.
-    let taken: Vec<String> = profiles
-        .into_iter()
-        .map(|(e, _)| e.id)
-        .chain(hostfs::read_dir(dir).into_iter().flatten().map(|e| e.name.to_string_lossy().to_lowercase()))
-        .collect();
-    let id = slug(&name, &taken);
+    // Its profile made before, or neither a profile nor a folder there
+    // already.
+    let id = remade.unwrap_or_else(|| {
+        let taken: Vec<String> = profiles
+            .into_iter()
+            .map(|(e, _)| e.id)
+            .chain(hostfs::read_dir(dir).into_iter().flatten().map(|e| e.name.to_string_lossy().to_lowercase()))
+            .collect();
+        slug(&name, &taken)
+    });
     let path = dir.join(format!("{}.conf", id));
     hostfs::create_dir_all(dir)
         .and_then(|()| hostfs::write(&path, text))
@@ -596,10 +629,39 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
     Ok((id, name, dosbox.map(|d| d.warnings).unwrap_or_default()))
 }
 
+/// What a package's profile is made from, fingerprinted: its own
+/// rust-dos.conf, a DOSBox configuration in it or beside it, and its
+/// DOS.YML files (its .dosc's too). A profile with another `source` is
+/// made again.
+fn package_source(package: &Path, is_archive: bool) -> String {
+    use sha2::{Digest, Sha256};
+    let own = package_entry(package, PACKAGE_CONF).and_then(|name| read_package_file(&package.join(name)).ok());
+    let mut hasher = Sha256::new();
+    for part in [own.clone(), package_dosbox_conf(package)] {
+        hasher.update(part.unwrap_or_default().as_bytes());
+        hasher.update([0]);
+    }
+    if own.is_none() && is_archive {
+        // A .dosc keeps the archive's root, DOS.YML or not.
+        hasher.update([crate::archive::dosc_of(package).is_some() as u8]);
+        for yml in crate::archive::dos_yml(package) {
+            hasher.update(yml.as_bytes());
+            hasher.update([0]);
+        }
+    }
+    hasher.finalize()[..12].iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// Whether `path` is a game's package with its own configuration: a
 /// folder or an archive with a `rust-dos.conf` at its root.
 pub fn is_package(path: &Path) -> bool {
     package_entry(path, PACKAGE_CONF).is_some()
+}
+
+/// Whether the package says how it runs: its rust-dos.conf, or a DOSBox
+/// configuration in it or beside it.
+pub fn package_has_conf(package: &Path) -> bool {
+    is_package(package) || package_dosbox_conf(package).is_some()
 }
 
 /// A game that was launched and hasn't ended.
@@ -611,15 +673,54 @@ pub struct ActiveGame {
     pub base: Settings,
     /// Its settings as its profile has them, which saving compares against.
     pub saved: Settings,
-    /// The drives it mounted over, and what they had before (None: no
-    /// drive).
+    /// What each drive had before it (`drives_before`), to put back what
+    /// it, its commands or its player changed: SUBST and REMOUNT too.
     pub replaced: Vec<(u8, Option<MountSpec>)>,
+    /// `Cpu::programs_loaded` as it was launched.
+    pub programs_before: u64,
+}
+
+/// What each drive has mounted (None: nothing, or a drive held in
+/// memory), as a game starts.
+pub fn drives_before(cpu: &Cpu) -> Vec<(u8, Option<MountSpec>)> {
+    (0..crate::disk::DRIVE_SLOTS).map(|d| (d, cpu.bus.disk.drive_info(d).and_then(|i| i.mount))).collect()
+}
+
+/// The drives as they were (`drives_before`) again, where they changed.
+/// Returns what couldn't be put back.
+pub fn restore_drives(cpu: &mut Cpu, before: Vec<(u8, Option<MountSpec>)>) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (drive, spec) in before.into_iter().rev() {
+        let info = cpu.bus.disk.drive_info(drive);
+        let now = info.as_ref().and_then(|i| i.mount.clone());
+        if now == spec {
+            continue;
+        }
+        let result = match spec {
+            Some(spec) => cpu.bus.mount_drive(drive, &spec.path, spec.opts, true).map(|_| ()),
+            // Drives held in memory (the Ultrasound's patches) are the
+            // settings', which are back already.
+            None if info.is_some_and(|i| i.kind == crate::disk::DriveKind::Virtual) => continue,
+            None => cpu.bus.unmount_drive(drive),
+        };
+        if let Err(e) = result {
+            errors.push(format!("drive {}: {}", crate::disk::drive_key(drive), e));
+        }
+    }
+    errors
 }
 
 impl ActiveGame {
-    /// Whether the game's commands have run and the prompt is back.
+    /// Whether the game's commands have run, a program among them, and the
+    /// prompt is back. A game whose commands only leave it at the prompt
+    /// (no program to start) stays with its drives until another is
+    /// launched.
     pub fn done(&self, cpu: &Cpu) -> bool {
-        !cpu.batch.is_active() && cpu.pending_command.is_none() && cpu.shell_wait.is_none() && cpu.shell_idle()
+        cpu.programs_loaded > self.programs_before
+            && !cpu.batch.is_active()
+            && cpu.pending_command.is_none()
+            && cpu.shell_wait.is_none()
+            && cpu.shell_idle()
     }
 }
 
@@ -753,7 +854,7 @@ mod tests {
         assert_eq!(prepared.autoexec, ["c:", "game.exe"]);
         assert!(prepared.overlay);
 
-        // DOSBox Pure's GAME.conf beside GAME.zip, with C: the zip.
+        // GAME.conf beside GAME.zip, with C: the zip.
         let data = crate::archive::zip::tests::zip(&[("RUN.BAT", b"", false), ("PLAY.EXE", b"MZ", false)]);
         std::fs::write(dir.join("Other.zip"), data).unwrap();
         std::fs::write(dir.join("other.conf"), "[dosbox]\nmachine=ega\n[autoexec]\nrun.bat\n").unwrap();
@@ -763,6 +864,51 @@ mod tests {
         assert_eq!(prepared.drives[0].path, std::fs::canonicalize(dir.join("Other.zip")).unwrap());
         assert_eq!(prepared.autoexec, ["C:", "run.bat"]);
         assert!(text.contains("machine=ega"), "{}", text);
+
+        // One with only an [autoexec].
+        std::fs::write(dir.join("Plain.zip"), crate::archive::zip::tests::zip(&[("A.EXE", b"MZ", false), ("B.EXE", b"MZ", false)])).unwrap();
+        std::fs::write(dir.join("Plain.conf"), "[autoexec]\n@echo off\nb.exe\n").unwrap();
+        let (id, _, _) = add_package(&games, &dir.join("Plain.zip")).unwrap();
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        assert_eq!(prepared.autoexec, ["C:", "@echo off", "b.exe"], "{}", text);
+        // Not a rust-dos profile that happens to have the name.
+        std::fs::write(dir.join("Mine.zip"), crate::archive::zip::tests::zip(&[("A.EXE", b"MZ", false), ("B.EXE", b"MZ", false)])).unwrap();
+        std::fs::write(dir.join("Mine.conf"), "[game]\nname=Mine\n[autoexec]\nb.exe\n").unwrap();
+        assert!(!package_has_conf(&dir.join("Mine.zip")));
+
+        // Edited, it is made again under its id; left alone, it stays as
+        // the player changed it.
+        let plain = games.join(format!("{}.conf", id));
+        std::fs::write(dir.join("Plain.conf"), "[autoexec]\na.exe\n").unwrap();
+        assert_eq!(add_package(&games, &dir.join("Plain.zip")).unwrap().0, id);
+        let text = std::fs::read_to_string(&plain).unwrap();
+        assert!(text.contains("\na.exe\n") && !text.contains("b.exe"), "{}", text);
+        std::fs::write(&plain, text.replace("[game]\n", "[game]\n\n[emulator]\ncycles=1234\n\n[game]\n")).unwrap();
+        assert_eq!(add_package(&games, &dir.join("Plain.zip")).unwrap().0, id);
+        assert!(std::fs::read_to_string(&plain).unwrap().contains("cycles=1234"));
+        // One made before profiles said what they were made from is made again.
+        let text = std::fs::read_to_string(&plain).unwrap();
+        let old: String = text.lines().filter(|l| !l.starts_with("source=")).map(|l| format!("{}\n", l)).collect();
+        std::fs::write(&plain, old).unwrap();
+        add_package(&games, &dir.join("Plain.zip")).unwrap();
+        assert!(!std::fs::read_to_string(&plain).unwrap().contains("cycles=1234"));
+        assert_eq!(list(&games).iter().filter(|(e, _)| e.name == "Plain").count(), 1);
+
+        // One that moves the zip to D: and boots Windows from an image beside it.
+        std::fs::write(dir.join("Win.dosz"), crate::archive::zip::tests::zip(&[("GAME.EXE", b"MZ", false)])).unwrap();
+        std::fs::write(dir.join("win98.img"), b"").unwrap();
+        std::fs::write(dir.join("Win.conf"), "[dosbox]\nmachine=svga_s3\n[autoexec]\nremount c d\nimgmount c win98.img\nboot c:\n").unwrap();
+        let (id, _, warnings) = add_package(&games, &dir.join("Win.dosz")).unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
+        let drive = |letter| prepared.drives.iter().find(|d| d.drive == letter).map(|d| d.path.clone());
+        assert_eq!(drive(3), Some(std::fs::canonicalize(dir.join("Win.dosz")).unwrap()), "{}", text);
+        assert_eq!(drive(crate::disk::DRIVE_C), Some(std::fs::canonicalize(dir.join("win98.img")).unwrap()), "{}", text);
+        assert_eq!(prepared.autoexec, ["boot -l C"]);
+        // Found again on D:.
+        assert_eq!(add_package(&games, &dir.join("Win.dosz")).unwrap().0, id);
     }
 
     #[test]
@@ -850,10 +996,13 @@ mod tests {
             base: Settings::default(),
             saved: Settings::default(),
             replaced: Vec::new(),
+            programs_before: cpu.programs_loaded,
         };
         cpu.queue_batch_lines(["X"]);
         assert!(!game.done(&cpu));
         cpu.batch.clear();
+        assert!(!game.done(&cpu), "it ran no program: it stays at the prompt");
+        cpu.programs_loaded += 1;
         assert!(game.done(&cpu));
     }
 }

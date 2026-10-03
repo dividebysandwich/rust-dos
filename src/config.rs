@@ -210,6 +210,9 @@ pub struct Config {
     /// A game profile's manuals and extras, as `[game]`'s `manual=` lines
     /// have them (`manuals::Manual::parse`).
     pub game_manuals: Vec<String>,
+    /// What a profile made from a package was made from, fingerprinted
+    /// (`[game]`'s `source`, see `games::add_package`).
+    pub game_source: Option<String>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -237,6 +240,18 @@ enum Section {
     /// A game profile's (games.rs).
     Game,
     Unknown,
+}
+
+/// Whether configuration text has sections of rust-dos's own, which
+/// DOSBox's files don't: `[emulator]`, `[sound]`, `[drives]` and the like.
+/// One with only `[autoexec]` (or DOSBox's sections) could be either's.
+pub fn has_own_sections(text: &str) -> bool {
+    text.lines().filter_map(|l| l.trim().strip_prefix('[')?.strip_suffix(']')).any(|name| {
+        matches!(
+            Section::parse(name),
+            Section::Emulator | Section::Sound | Section::Network | Section::Achievements | Section::Shell | Section::Drives | Section::Game
+        )
+    })
 }
 
 impl Section {
@@ -918,6 +933,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "achievements" => {}
                         "manual" if !value.is_empty() => config.game_manuals.push(value.to_string()),
                         "manual" => {}
+                        "source" if !value.is_empty() => config.game_source = Some(value.to_string()),
+                        "source" => {}
                         "overlay" => match parse_bool(value) {
                             Some(on) => config.game_overlay = on,
                             None => warn(format!("invalid overlay '{}' (true or false)", value)),

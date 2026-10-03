@@ -842,6 +842,37 @@ impl Bus {
         result
     }
 
+    /// The drive `from` as `to` (REMOUNT): the same
+    /// folder or images, with their changes where they went. C:, which
+    /// stays, is left empty.
+    pub fn remount_drive(&mut self, from: u8, to: u8) -> Result<std::path::PathBuf, String> {
+        if from == to {
+            return Err("The drives are the same".to_string());
+        }
+        if self.disk.is_mounted(to) {
+            return Err(format!("Drive {}: is already mounted", crate::disk::drive_letter(to)));
+        }
+        let spec = self.disk.drive_info(from).and_then(|info| info.mount).ok_or("Drive not mounted, or not from the host")?;
+        self.shared_in_use(from)?;
+        let current = self.disk.get_current_drive() == from;
+        if from == crate::disk::DRIVE_C {
+            self.disk.empty_drive_c();
+        } else {
+            self.disk.unmount(from)?;
+        }
+        let mounted = self.mount_drive(to, &spec.path, spec.opts.clone(), false);
+        if mounted.is_err() {
+            // Back where it was.
+            let _ = self.mount_drive(from, &spec.path, spec.opts, from == crate::disk::DRIVE_C);
+        } else if current {
+            self.disk.set_current_drive(to);
+        }
+        self.cdaudio.stop_drive(from);
+        self.ide_media_changed(from);
+        self.sync_drive_bda();
+        mounted
+    }
+
     /// Mirror the mounted drives into the BIOS data area and DOS's data
     /// segment (`dos_data`). Must run whenever the drive set changes.
     pub fn sync_drive_bda(&mut self) {

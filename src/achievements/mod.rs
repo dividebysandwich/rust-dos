@@ -5,7 +5,7 @@
 //!
 //! - `runtime`: the logic, a port of rcheevos's runtime.
 //! - `memory`: the machine's memory as the MS-DOS sets address it, laid
-//!   out as DOSBox Pure lays it out, which the sets are made with.
+//!   out as the sets expect it.
 //! - `hash`: the game's hash, of its zip (or DOSZ) archive.
 //! - `client`: the session with the site, through a `Transport`: HTTPS
 //!   (`http`) on the desktop.

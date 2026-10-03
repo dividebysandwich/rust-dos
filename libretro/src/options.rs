@@ -51,6 +51,18 @@ fn configured(list: &[(&str, &str)]) -> Vec<(String, String)> {
     all
 }
 
+/// The OS images the Boot OS option offers, found as the options are
+/// declared (`declare`).
+static OS_IMAGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Off, then the OS images by name, as many as the frontend shows.
+fn os_values() -> Vec<(String, String)> {
+    let mut all = values(&[("none", "Off")]);
+    let names = OS_IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    all.extend(names.iter().take(RETRO_NUM_CORE_OPTION_VALUES_MAX - 2).map(|n| (n.clone(), n.to_ascii_uppercase())));
+    all
+}
+
 const ON_OFF: [(&str, &str); 2] = [("true", "On"), ("false", "Off")];
 
 fn definitions() -> Vec<Definition> {
@@ -292,6 +304,16 @@ fn definitions() -> Vec<Definition> {
             ]),
         },
         Definition {
+            key: "boot_os",
+            desc: "Boot OS",
+            info: "Start a game's zip, .dosz or folder in an operating system installed on a hard disk image \
+                   in the system folder's rust-dos/os folder: the image as C:, its changes kept \
+                   for each game apart, and the game as D:. A game with a configuration of its own runs as that says.",
+            category: "system",
+            target: Target::Core,
+            values: os_values(),
+        },
+        Definition {
             key: "boot",
             desc: "Boot disk images",
             info: "Start a floppy or hard disk image given as content from its boot sector (BOOT) \
@@ -340,6 +362,11 @@ impl Values {
 
     pub fn analog_mouse(&self) -> bool {
         self.get("analog_mouse") == Some("true")
+    }
+
+    /// The OS image to start games in.
+    pub fn boot_os(&self) -> Option<&str> {
+        self.get("boot_os").filter(|v| !v.is_empty() && *v != "none")
     }
 
     pub fn boot(&self) -> bool {
@@ -414,6 +441,19 @@ fn declared() -> Declared {
 /// Tell the frontend the options: version 2 with categories where it has
 /// them, else the plain variables.
 pub fn declare(env: retro_environment_t) {
+    let mut dir: *const c_char = ptr::null();
+    // SAFETY: GET_SYSTEM_DIRECTORY takes a `const char **`.
+    if unsafe { env(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &mut dir as *mut _ as *mut c_void) } && !dir.is_null() {
+        let system = unsafe { std::ffi::CStr::from_ptr(dir) }.to_string_lossy().into_owned();
+        crate::content::add_os_dirs(std::path::Path::new(&system));
+        let mut names: Vec<String> = Vec::new();
+        for (name, _) in rust_dos::os_images::list() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        *OS_IMAGES.lock().unwrap_or_else(|e| e.into_inner()) = names;
+    }
     DECLARED.with(|cell| {
         let declared = cell.get_or_init(declared);
         let mut version = 0u32;

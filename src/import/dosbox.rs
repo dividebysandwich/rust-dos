@@ -59,24 +59,37 @@ pub fn import(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>
 }
 
 /// `import`, with `c_root` as C: if the configuration mounts no C: of its
-/// own, as DOSBox Pure has a game's zip or folder, and the commands run on
-/// it rather than on Z:.
+/// own or moves it with REMOUNT, as a game's .dosz, zip or folder has it
+/// as C: before its commands: they start on it rather than on Z:, and may
+/// move it (REMOUNT C D) and mount another C: in its place.
 pub fn import_in(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>, c_root: Option<&Path>) -> Imported {
-    let imported = import_from(texts, bases, name, home, true);
+    let imported = import_from(texts, bases, name, home, None);
+    let remounts = || {
+        texts.iter().flat_map(|t| parse(t).autoexec).any(|line| {
+            let verb = line.trim_start_matches('@').split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+            verb == "remount"
+        })
+    };
     match c_root {
-        Some(root) if !imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) => {
-            let mut imported = import_from(texts, bases, name, home, false);
-            let opts = Default::default();
-            imported.drives.insert(0, crate::mount::MountSpec { drive: crate::disk::DRIVE_C, path: root.to_path_buf(), opts });
-            imported.autoexec.insert(0, "C:".to_string());
+        Some(root) if !imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C) || remounts() => {
+            let mut imported = import_from(texts, bases, name, home, Some(root));
+            if imported.drives.iter().any(|d| d.drive == crate::disk::DRIVE_C && d.path == root) {
+                imported.autoexec.insert(0, "C:".to_string());
+            }
             imported
         }
         _ => imported,
     }
 }
 
-fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>, mut on_z: bool) -> Imported {
+fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path>, c_root: Option<&Path>) -> Imported {
     let mut imported = Imported { name: name.to_string(), ..Default::default() };
+    let mut on_z = c_root.is_none();
+    let mut roots: Vec<(u8, PathBuf)> = Vec::new();
+    if let Some(root) = c_root {
+        imported.drives.push(crate::mount::MountSpec { drive: crate::disk::DRIVE_C, path: root.to_path_buf(), opts: Default::default() });
+        roots.push((crate::disk::DRIVE_C, root.to_path_buf()));
+    }
     let confs: Vec<Conf> = texts.iter().map(|t| parse(t)).collect();
     let mut gus_set = false;
     // DOSBox Staging's cycles, which the old `cycles` overrides, and the
@@ -135,7 +148,6 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
             imported.warnings.push(format!("[fluidsynth] soundfont={} isn't there; rust-dos's own is used", name));
         }
     }
-    let mut roots: Vec<(u8, PathBuf)> = Vec::new();
     // DOSBox starts on Z:, where GOG's lines "cd .." (and the like) go
     // nowhere; here they would be C:'s.
     for line in confs.iter().flat_map(|c| &c.autoexec) {
@@ -148,8 +160,40 @@ fn import_from(texts: &[&str], bases: &[PathBuf], name: &str, home: Option<&Path
         }
         autoexec_line(&mut imported, line, bases, home, &mut roots);
     }
+    // rust-dos's own section, which DOSBox leaves alone: the operating
+    // system to start the game in.
+    let os = confs.iter().flat_map(|c| &c.values).rfind(|(s, k, _)| s == "rust-dos" && k == "os");
+    if let Some((_, _, name)) = os {
+        boot_os(&mut imported, name, c_root);
+    }
     imported.drop_invalid();
     imported
+}
+
+/// The game in the operating system `name` (`os_images`), as the Boot OS
+/// core option has it: the system's image as the first hard disk, booted,
+/// and the game on D: (a disk of the booted system), unless the commands
+/// moved it. The commands before the boot would run in no system: the
+/// image's drives stay, the rest goes.
+fn boot_os(imported: &mut Imported, name: &str, c_root: Option<&Path>) {
+    let Some(image) = crate::os_images::find(name) else {
+        imported.warnings.push(format!("[rust-dos] os={}: there is no OS image called that", name));
+        return;
+    };
+    if let Some(root) = c_root
+        && !imported.drives.iter().any(|d| d.drive == 3)
+        && let Some(game) = imported.drives.iter_mut().find(|d| d.drive == crate::disk::DRIVE_C && d.path == root)
+    {
+        game.drive = 3;
+    }
+    let disk = crate::disk::numbered_drive(2);
+    imported.drives.retain(|d| d.drive != disk);
+    imported.drives.push(crate::mount::MountSpec { drive: disk, path: image, opts: Default::default() });
+    let dropped: Vec<String> = imported.autoexec.drain(..).filter(|l| !l.trim_start_matches('@').to_ascii_lowercase().starts_with("boot")).collect();
+    if !dropped.is_empty() {
+        imported.warnings.push(format!("[rust-dos] os={}: these commands don't run in it: {}", name, dropped.join("; ")));
+    }
+    imported.autoexec.push("BOOT -l C".to_string());
 }
 
 /// One of DOSBox's settings, as rust-dos's.
@@ -426,6 +470,32 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
                 Err(e) => imported.warnings.push(format!("[autoexec] {}: {}", line, e)),
             }
         }
+        // The drive, and the files on it, under another letter.
+        "remount" => {
+            let letters: Vec<Option<u8>> = tokens[1..].iter().map(|t| parse_drive_letter(t)).collect();
+            // rust-dos's REMOUNT os-name to.
+            let os = tokens.get(1).filter(|_| letters.len() == 2 && letters[0].is_none()).and_then(|t| crate::os_images::find(t));
+            match letters.as_slice() {
+                [None, Some(to)] if let Some(path) = os => {
+                    roots.retain(|(d, _)| d != to);
+                    imported.drives.retain(|d| d.drive != *to);
+                    imported.drives.push(crate::mount::MountSpec { drive: *to, path, opts: Default::default() });
+                }
+                [Some(from), Some(to)] if from == to => {}
+                [Some(from), Some(to)] if imported.drives.iter().any(|d| d.drive == *from) => {
+                    imported.drives.retain(|d| d.drive != *to);
+                    roots.retain(|(d, _)| d != to);
+                    for spec in imported.drives.iter_mut().filter(|d| d.drive == *from) {
+                        spec.drive = *to;
+                    }
+                    for (drive, _) in roots.iter_mut().filter(|(d, _)| d == from) {
+                        *drive = *to;
+                    }
+                }
+                [Some(_), Some(_)] => imported.warnings.push(format!("[autoexec] {}: no drive to move", line)),
+                _ => imported.warnings.push(format!("[autoexec] {} isn't imported", line)),
+            }
+        }
         "keyb" => match tokens.get(1).and_then(|t| LayoutSetting::parse(t.split(',').next().unwrap_or(t))) {
             Some(layout) => imported.set("emulator", "keyboard_layout", layout.name()),
             None => imported.warnings.push(format!("[autoexec] {} isn't imported", line)),
@@ -442,8 +512,16 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
                     {
                         line.push(drive.clone());
                     }
+                } else if let Some(drive) = parse_drive_letter(arg) {
+                    // DOSBox's BOOT C: boots the drive mounted there.
+                    line.extend(["-l".to_string(), crate::disk::drive_key(drive)]);
                 } else {
-                    let path = image_path(arg, bases, roots).display().to_string();
+                    let path = image_path(arg, bases, roots);
+                    let path = match crate::os_images::find(arg) {
+                        Some(os) if !crate::hostfs::exists(&path) => os,
+                        _ => path,
+                    };
+                    let path = path.display().to_string();
                     line.push(if path.contains(' ') { format!("\"{}\"", path) } else { path });
                 }
             }
@@ -769,11 +847,11 @@ mod tests {
         assert!(imported.warnings[0].contains("config -get"));
     }
 
-    /// DOSBox Pure's configuration, in a game's zip or folder, which is
+    /// A configuration in a game's zip or folder, which is
     /// its C: already.
     #[test]
     fn a_configuration_without_c_gets_the_game_s_folder() {
-        let dir = scratch("pure");
+        let dir = scratch("in-package");
         let conf = "[cpu]\ncycles=10000\n[autoexec]\ncd game\ngame.exe\n";
         let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&dir));
         assert_eq!(imported.drives[0].drive, crate::disk::DRIVE_C);
@@ -784,5 +862,47 @@ mod tests {
         assert_eq!(imported.drives.len(), 1);
         assert_eq!(imported.drives[0].path, dir.join("sub"));
         assert_eq!(imported.autoexec, ["c:", "game"]);
+    }
+
+    /// rust-dos's [rust-dos] os=, which DOSBox leaves alone.
+    #[test]
+    fn a_game_can_ask_for_an_operating_system() {
+        let dir = scratch("package-os");
+        let os = dir.join("os");
+        fs::create_dir_all(&os).unwrap();
+        fs::write(os.join("Win98Test.img"), "").unwrap();
+        crate::os_images::add_search_dir(os.clone());
+        let game = dir.join("game.dosz");
+        let conf = "[cpu]\ncycles=max\n[rust-dos]\nos=win98test\n[autoexec]\ncd game\ngame.exe\n";
+        let imported = import_in(&[conf], std::slice::from_ref(&dir), "x", None, Some(&game));
+        let drive = |d| imported.drives.iter().find(|s| s.drive == d).map(|s| s.path.clone());
+        assert_eq!(drive(3), Some(game.clone()), "the game is D:");
+        assert_eq!(drive(crate::disk::numbered_drive(2)), Some(os.join("Win98Test.img")));
+        assert_eq!(imported.autoexec, ["BOOT -l C"]);
+        assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+        let imported = import_in(&["[rust-dos]\nos=nothing\n"], std::slice::from_ref(&dir), "x", None, Some(&game));
+        assert!(imported.warnings[0].contains("nothing"), "{:?}", imported.warnings);
+    }
+
+    /// REMOUNT C D, with an operating system booted from C:.
+    #[test]
+    fn remount_moves_the_game_s_drive() {
+        let dir = scratch("package-remount");
+        let game = dir.join("game.zip");
+        fs::write(&game, "").unwrap();
+        fs::write(dir.join("win98.img"), "").unwrap();
+        let bases = [game.clone(), dir.clone()];
+        let conf = "[autoexec]\nremount c d\nimgmount c win98.img\nboot c:\n";
+        let imported = import_in(&[conf], &bases, "x", None, Some(&game));
+        let drive = |letter| imported.drives.iter().find(|d| d.drive == letter).map(|d| d.path.clone());
+        assert_eq!(drive(3), Some(game.clone()), "{:?}", imported.drives);
+        assert_eq!(drive(crate::disk::DRIVE_C), Some(dir.join("win98.img")), "beside the archive");
+        assert_eq!(imported.autoexec, ["boot -l C"]);
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        let imported = import_in(&["[autoexec]\nremount c e\nd:\n"], &bases, "x", None, Some(&game));
+        assert!(imported.drives.iter().any(|d| d.drive == 4 && d.path == game), "{:?}", imported.drives);
+        // A drive that isn't there.
+        let imported = import_in(&["[autoexec]\nremount f g\n"], &bases, "x", None, Some(&game));
+        assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
     }
 }

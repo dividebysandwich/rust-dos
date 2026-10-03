@@ -1681,11 +1681,11 @@ impl MainHost<'_, '_> {
         if let Err(e) = self.apply(&prepared.settings) {
             config_warning(self.cpu, &e);
         }
-        let mut replaced = Vec::new();
+        let programs_before = self.cpu.programs_loaded;
+        let replaced = games::drives_before(self.cpu);
         for spec in &prepared.drives {
-            let before = self.cpu.bus.disk.drive_info(spec.drive).and_then(|d| d.mount);
             match self.cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), true) {
-                Ok(_) => replaced.push((spec.drive, before)),
+                Ok(_) => {}
                 Err(e) => config_warning(self.cpu, &format!("games/{}.conf: drive {}: {}", id, disk::drive_key(spec.drive), e)),
             }
         }
@@ -1704,7 +1704,7 @@ impl MainHost<'_, '_> {
         });
         self.achievements.game_started(hash, &prepared.name);
         let message = format!("Starting {}", prepared.name);
-        *self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced });
+        *self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced, programs_before });
         Ok(message)
     }
 
@@ -1890,14 +1890,8 @@ impl MainHost<'_, '_> {
         if let Err(e) = self.apply(&game.base) {
             config_warning(self.cpu, &e);
         }
-        for (drive, before) in game.replaced.into_iter().rev() {
-            let result = match before {
-                Some(spec) => self.cpu.bus.mount_drive(drive, &spec.path, spec.opts, true).map(|_| ()),
-                None => self.cpu.bus.unmount_drive(drive),
-            };
-            if let Err(e) = result {
-                config_warning(self.cpu, &format!("drive {}: {}", disk::drive_key(drive), e));
-            }
+        for e in games::restore_drives(self.cpu, game.replaced) {
+            config_warning(self.cpu, &e);
         }
     }
 }

@@ -1327,6 +1327,13 @@ impl DiskController {
         Ok(())
     }
 
+    /// C: empty and read-only in place of what was there, which is mounted
+    /// elsewhere now (REMOUNT): C: is always there.
+    pub fn empty_drive_c(&mut self) {
+        self.close_drive_files(DRIVE_C);
+        self.drives[DRIVE_C as usize] = Some(Self::memory_drive(MemFs::new(), ""));
+    }
+
     /// Unmount `drive`, closing its open files. C: and Z: cannot be removed.
     /// If it was the current drive, C: becomes current.
     pub fn unmount(&mut self, drive: u8) -> Result<(), String> {
@@ -1854,7 +1861,7 @@ impl DiskController {
     }
 
     /// Like `resolve_path`, but also returns the drive the path is on.
-    fn locate(&self, dos_path: &str) -> Option<(u8, PathBuf)> {
+    pub(crate) fn locate(&self, dos_path: &str) -> Option<(u8, PathBuf)> {
         let path_str = dos_path.replace('/', "\\");
         let (drive, rest) = self.split_drive(&path_str)?;
         self.resolve_on(drive, rest).map(|p| (drive, p))

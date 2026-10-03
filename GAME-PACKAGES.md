@@ -168,7 +168,9 @@ case in the names `rust-dos.conf`, `EXTRAS` and the files the game opens.
 **One folder inside.** If everything in an archive is inside one folder
 (`Pool of Radiance/START.EXE`, `Pool of Radiance/rust-dos.conf`, and so
 on), that folder is the package's root, and C:. This is how most zip
-programs pack a folder, so either way works.
+programs pack a folder, so either way works. A `.dosz` package, or an
+archive with a `.conf` or `.dosc` of its name beside it, keeps its root
+as C:, so the commands written for it find their folders.
 
 ### The package's `rust-dos.conf`
 
@@ -228,15 +230,50 @@ just mounted as a drive.
 ### Packages made for DOSBox
 
 A package made for DOSBox works as it is. Without a `rust-dos.conf`, its
-DOSBox configuration is imported instead, as DOSBox Pure finds it:
-`dosbox.conf` at the package's root, or a `.conf` file named as the
+DOSBox configuration is imported instead: `dosbox.conf` at the
+package's root, or a `.conf` file named as the
 package beside it (`Pool of Radiance.conf` next to `Pool of
 Radiance.zip`). The profile gets the settings rust-dos has an
 equivalent for (CPU speed, memory, video card, sound cards, MIDI,
 joystick, network), the drives its `[autoexec]` mounts, with paths taken
-from the package's root, and its commands. If the configuration mounts
-no C:, the package is C:, as in DOSBox Pure. What doesn't come across
+from the package's root, and its commands. A configuration beside the
+package can be only an `[autoexec]` section. The package is C: before
+the commands run, so they can move it (`REMOUNT C D`), make one of its folders C: (`REMOUNT C X`,
+then `SUBST C: X:\GAME`) or mount another C:. What doesn't come across
 goes to the log. A folder with a `dosbox.conf` is imported the same way.
+
+A game whose commands leave it at the prompt without starting a program
+keeps its drives until another game is launched, so its files are there
+to start by hand.
+
+**`.dosc` and DOS.YML.** A `.dosc` beside the package with its name
+(`Liero.dosc` next to `Liero.dosz`) goes over the package's files: the game's settings files from its setup
+program take the place of the package's. Its launch configurations (the
+`[Setup Program]` folders and the like) aren't used; the default is. A
+`DOS.YML` in the package or the `.dosc` gives the profile its CPU speed
+(`cpu_year`, `cpu_cycles` and their `max` forms, held at that speed),
+CPU, memory, video card, sound card and synthesizer, the program to
+start (`run_path`), an image to mount (`run_mount`) or boot (`run_boot`).
+`run_input` key sequences and gamepad mappings aren't used. Loading or
+importing the `.dosc` itself loads its game.
+
+**An operating system.** A `[rust-dos]` section, which other emulators
+leave alone, can name an installed operating system for the game:
+
+```
+[rust-dos]
+os=win98se
+
+[autoexec]
+...
+```
+
+The system's hard disk image (`win98se.img` or `.vhd` from the OS images
+folder, see [Operating systems by name](CONFIGURATION.md#operating-systems-by-name))
+is booted as the first hard disk and the package is its D:. The image is
+left as it is: what the system writes, the game's install included, goes
+to a delta file in the game's saves folder. Commands that would run
+before the boot are left out (the log says which).
 
 ### Saves and the write overlay
 
@@ -317,9 +354,13 @@ If you move the package, delete its profile (Del on the Games page) and
 open it again; the saves stay, as long as the profile's name doesn't
 change.
 
-The profile is made once from the package's `rust-dos.conf`. If you change
-the package's `rust-dos.conf` later, delete the profile and open the
-package again to pick up the changes. The `EXTRAS` folder is read every
+The profile remembers what it was made from: the package's
+`rust-dos.conf`, or its DOSBox configuration, `.dosc` and `DOS.YML`. When
+you open the package again after changing one of them, the profile is made
+again under the same name, and its saves stay; settings you changed in the
+profile itself are then replaced. RetroArch opens the package each time
+it loads it; in the Rust-DOS program, drop or import the package again
+(launching the profile from the Games page uses it as it is). The `EXTRAS` folder is read every
 time the manuals are shown, so new files there show up straight away.
 
 You can also mount a package, or a folder or image inside one, by hand:

@@ -850,7 +850,7 @@ Unlocks, leaderboards started and entries submitted show at the bottom of
 the picture, and the value of a leaderboard being attempted in the
 corner.
 
-The site knows a game by the files of the zip (or DOSBox Pure `.dosz`)
+The site knows a game by the files of the zip (or `.dosz`)
 it came in, so achievements are for games launched from their
 [profiles](#game-profiles), and the profile says which version of the game
 it is, in `[game]`:
@@ -865,8 +865,8 @@ achievements=~/dos/archives/keen4.zip
 (32 hex digits). A zip dropped onto the window becomes a profile that
 has its hash already; for other games, the Achievements page's
 **Game's archive** row picks the archive and puts its hash in the profile.
-The sets are made with DOSBox Pure, and Rust-DOS lays out the memory they
-read as DOSBox Pure does: the game's memory from 120h bytes below the
+Rust-DOS lays out the memory the MS-DOS sets read as they expect it:
+the game's memory from 120h bytes below the
 first program's PSP, so a game run from the prompt is where the sets
 expect it. A game that isn't the first program (a TSR loaded before it)
 may not be.
@@ -885,7 +885,7 @@ configuration file is [imported](#game-profiles) as a game and launched, a
 folder or hard disk image is mounted on the first free drive from D:, a CD
 image goes into the CD-ROM drive (or a new one), a floppy image into A:,
 and a program or batch file is started from its folder. A game's
-[package](GAME-PACKAGES.md), a zip or 7z archive (or DOSBox Pure `.dosz`)
+[package](GAME-PACKAGES.md), a zip or 7z archive (or `.dosz`)
 or a folder with a `rust-dos.conf` at its root, becomes a game profile
 with the package as C:, read where it is, its changes in the game's saves
 (see [Game profiles](#game-profiles)), and is launched. The package's
@@ -948,7 +948,7 @@ the prompt:
 
 `-ro` makes any drive read-only.
 
-A zip, 7z or DOSBox Pure `.dosz` archive is a drive with its files, read
+A zip, 7z or `.dosz` archive is a drive with its files, read
 from the archive where it is: a stored file as it is wanted, a compressed
 one decompressed in memory the first time it is opened (a 7z file with
 the others of its solid block). An archive whose files are all in one
@@ -1154,6 +1154,27 @@ such a BIOS does, which Windows for Workgroups' 32-bit disk access checks.
 The first start of a Windows installed without the IDE controller finds it
 as new hardware and asks to restart; after that, **System Properties** →
 **Performance** shows the hard disk without "MS-DOS compatibility mode".
+
+### Operating systems by name
+
+Hard disk images of installed systems in the `os` folder of rust-dos's
+configuration folder (`~/.config/rust-dos/os` on Linux; the libretro core's
+`system/rust-dos/os`) can be named
+without their path or extension: `IMGMOUNT C WIN98SE` mounts `win98se.img`
+(or `.vhd`) where no file of that name is in the folder MOUNT starts from,
+and so does `REMOUNT WIN98SE C`. `REMOUNT` alone lists them. In a game
+profile, whose drives keep their changes apart (`overlay=true`), each game
+gets the image's changes in its own delta file, and the image stays as it
+was installed.
+
+`REMOUNT C D` moves a drive to another letter: the game on C: becomes D:, the shared disk of a system booted from an
+image then mounted on C: (see below). C: is left empty in its place.
+
+`SUBST E: C:\GAMES\KEEN` makes a folder a drive of its own, with what is
+written there going where the folder's drive puts it (a game's changes
+folder, for an archive). `SUBST C: X:\GAME` after `REMOUNT C X` makes a
+game's folder C:, for a game packed in a folder. `SUBST E: /D` takes the drive away again (C: is left empty).
+When a game ends, the drives it changed this way are as they were.
 
 ### Host folders in a booted system
 

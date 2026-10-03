@@ -1,5 +1,5 @@
 //! A game's hash, which RetroAchievements knows it by. MS-DOS games are
-//! zip archives (DOSBox Pure's .zip or .dosz), hashed as rcheevos does:
+//! zip archives (.zip or .dosz), hashed as rcheevos does:
 //! the MD5 of each file's name (in lower case, with forward slashes), CRC
 //! and size from the central directory, sorted, so repacking the same
 //! files keeps the hash. A .dosz may name a parent archive it goes over

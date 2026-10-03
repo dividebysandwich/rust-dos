@@ -544,6 +544,23 @@ fn an_archive_is_a_game_made_once_and_launched() {
     assert_eq!(games, ["marker-game.conf"], "its profile, and no folder");
 }
 
+/// GAME.conf beside GAME.dosz, which has the archive as C:
+/// before its commands, and moves it to D:.
+#[test]
+fn a_configuration_beside_a_dosz_can_remount_the_archive() {
+    let dir = scratch("dosz-remount");
+    fs::write(dir.join("Marker.dosz"), zip(&[("MARKER.COM", MARKER)])).unwrap();
+    fs::write(dir.join("Marker.conf"), "[dosbox]\nmachine=vga\n[autoexec]\nremount c d\nd:\nmarker\n").unwrap();
+    start(&dir, &[]);
+    assert!(load(Some(&dir.join("Marker.dosz"))));
+    run(180);
+    assert_eq!(map_word(0x320), Some(0xBEEF), "the game runs from D:");
+    stop();
+    let profile = fs::read_to_string(dir.join("saves/rust-dos/games/marker.conf")).unwrap();
+    assert!(profile.contains("\nD="), "{}", profile);
+    assert!(!profile.contains("\nC="), "{}", profile);
+}
+
 #[test]
 fn the_disks_of_a_playlist_change_through_disk_control() {
     let dir = scratch("disks");

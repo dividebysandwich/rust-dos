@@ -1,5 +1,5 @@
 //! The machine's memory as RetroAchievements addresses it, for the
-//! frontend's rcheevos: the MS-DOS map DOSBox Pure publishes, with the
+//! frontend's rcheevos: the MS-DOS map the sets read, with the
 //! game's conventional memory at 0 (see achievements/memory.rs). It moves
 //! with the first program, so it is published again whenever it does.
 

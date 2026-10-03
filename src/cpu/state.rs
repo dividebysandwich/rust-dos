@@ -77,6 +77,8 @@ crate::state_fields!(Cpu {
     // Only set while a command runs, never between the batches a state
     // is saved in.
     secondary, stdout_capture, stdin_redirect,
+    // The session's, as the launched game it is compared with.
+    programs_loaded,
 });
 
 impl Cpu {

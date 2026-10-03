@@ -50,6 +50,13 @@ pub fn drop_action(path: &Path) -> DropAction {
         "conf" => return DropAction::ImportGame(path),
         "exe" | "com" | "bat" => return DropAction::Run(path),
         "zip" | "dosz" | "7z" => return DropAction::Package(path),
+        // A .dosc's changes go over its game's package, beside it.
+        "dosc" => {
+            return match crate::archive::dosz_of(&path) {
+                Some(package) => DropAction::Package(package),
+                None => DropAction::Nothing(format!("{}: the game it goes with isn't beside it", path.display())),
+            };
+        }
         _ => {}
     }
     match diskimage::detect(&path, DriveKind::HardDisk) {
