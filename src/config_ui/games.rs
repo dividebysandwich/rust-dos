@@ -104,6 +104,7 @@ impl ConfigUi {
                 self.status = None;
                 self.game_dialog = Some(GameDialog::new(&host.current_directory()));
             }
+            (UiKey::Enter, Some(game)) if self.show_launch(&game.id, host) => {}
             (UiKey::Enter, Some(game)) => match host.launch_game(&game.id) {
                 Ok(message) => {
                     self.close();
@@ -117,6 +118,15 @@ impl ConfigUi {
                 self.error(format!("Delete {}? Enter deletes it, Esc keeps it", game.name));
             }
             (UiKey::Char('m' | 'M'), Some(game)) => self.open_manuals(&game.id, &game.name, host, false),
+            (UiKey::Char('p' | 'P'), Some(game)) => {
+                let labels = host.game_pad(&game.id);
+                if labels.is_empty() {
+                    self.error(format!("{} has no gamepad mapping", game.name));
+                } else {
+                    let body: String = labels.iter().map(|(input, text)| format!("- {}: {}\n", input, text)).collect();
+                    self.help = Some(super::help::HelpView::of_text(format!("{}'s gamepad", game.name), body));
+                }
+            }
             (UiKey::Char('r' | 'R'), Some(game)) => {
                 if self.active_game.as_deref() == Some(game.id.as_str()) {
                     self.error(format!("{} is running: reset it once it has ended", game.name));

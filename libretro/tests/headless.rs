@@ -561,6 +561,56 @@ fn a_configuration_beside_a_dosz_can_remount_the_archive() {
     assert!(!profile.contains("\nC="), "{}", profile);
 }
 
+/// A program that keeps reading keys (INT 16h), putting the last at
+/// offset 200h of its segment.
+const KEY_READER: &[u8] = &[0xB4, 0x00, 0xCD, 0x16, 0xA3, 0x00, 0x02, 0xEB, 0xF7];
+
+/// Run frames until the program has read `key` (scan code and character).
+fn read_key(key: u16) -> bool {
+    for _ in 0..600 {
+        run(1);
+        if map_word(0x320) == Some(key) {
+            return true;
+        }
+    }
+    false
+}
+
+fn set_input(port: u32, device: u32, index: u32, id: u32, value: i16) {
+    with(|fe| fe.input.insert((port, device, index, id), value));
+}
+
+/// A .dosz's DOS.YML: keys typed as it starts, and a gamepad mapping with
+/// an action wheel, on the port played as keyboard.
+#[test]
+fn a_package_s_keys_and_gamepad_mapping_play() {
+    let dir = scratch("dos-yml-input");
+    let yml = b"run_path: C:\\KEYS.COM\r\nrun_input: (WAIT:100)b\r\ninput_pad_x: space Jump\r\ninput_pad_l: wheel\r\ninput_wheel_1: a Ay\r\ninput_wheel_2: c Cee\r\n";
+    fs::write(dir.join("Keys.dosz"), zip(&[("KEYS.COM", KEY_READER), ("DOS.YML", yml)])).unwrap();
+    start(&dir, &[]);
+    assert!(load(Some(&dir.join("Keys.dosz"))));
+    assert!(read_key(0x3062), "the package's b is typed");
+    let keys = retro_device_subclass(RETRO_DEVICE_JOYPAD, 0);
+    retro_set_controller_port_device(0, keys);
+    set_input(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X, 1);
+    assert!(read_key(0x3920), "X is the space bar");
+    set_input(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X, 0);
+    // The wheel, opened with L and pointed at its second item (right).
+    set_input(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, 1);
+    set_input(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, 32767);
+    run(10);
+    let picture = with(|fe| (fe.width, fe.height, fe.pixels.clone()));
+    let mut ppm = format!("P6 {} {} 255\n", picture.0, picture.1).into_bytes();
+    for p in &picture.2 {
+        ppm.extend([(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+    }
+    fs::write(dir.join("wheel.ppm"), ppm).unwrap();
+    set_input(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, 0);
+    set_input(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, 0);
+    assert!(read_key(0x2E63), "the wheel's second item, c");
+    stop();
+}
+
 #[test]
 fn the_disks_of_a_playlist_change_through_disk_control() {
     let dir = scratch("disks");

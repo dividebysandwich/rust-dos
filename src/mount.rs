@@ -100,7 +100,7 @@ fn parse_size(value: &str) -> Result<Chs, String> {
 
 /// The options that take a value, and those that don't. A value can start
 /// with a dash (`-label -DISK-`), but can't be one of these.
-const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-overlay", "-freesize", "-usecd"];
+const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-overlay", "-variant", "-freesize", "-usecd"];
 const FLAGS: &[&str] =
     &["-u", "-ro", "-pr", "-boot", "-share", "-noshare", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
 
@@ -172,6 +172,7 @@ fn missing_value(option: &str) -> String {
         "-label" => "a name",
         "-chs" | "-size" => "a geometry",
         "-overlay" => "a directory",
+        "-variant" => "a launch configuration's name",
         _ => "a number",
     };
     format!("{} needs {}", option, value)
@@ -190,6 +191,7 @@ fn option_value(option: &str, value: &str, args: &mut Arguments) -> Result<(), S
             other => return Err(format!("Unknown file system '{}'", other)),
         },
         "-label" => opts.label = Some(value.to_string()),
+        "-variant" => opts.variant = Some(value.to_string()),
         "-chs" => opts.geometry = Some(parse_chs(value)?),
         "-size" => opts.geometry = Some(parse_size(value)?),
         // DOSBox's free space reports and CD-ROM access: taken and ignored.
@@ -591,6 +593,10 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
     if let Some(dir) = &spec.opts.overlay {
         value.push_str(" -overlay ");
         value.push_str(&quote(&contract_home(dir, home)));
+    }
+    if let Some(variant) = &spec.opts.variant {
+        value.push_str(" -variant ");
+        value.push_str(&quote(variant));
     }
     value
 }

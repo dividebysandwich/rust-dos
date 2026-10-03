@@ -370,6 +370,7 @@ impl MountDialog {
                 ide: self.ide,
                 boot,
                 share: self.share,
+                variant: None,
             },
         })
     }
@@ -481,6 +482,7 @@ mod tests {
             ide: None,
             boot: false,
             share: None,
+            variant: None,
         };
         let mut d = MountDialog::change(&info, None);
         assert_eq!((d.path.text(), d.label.text(), d.read_only, d.kind), ("/x".into(), "D1".into(), true, DriveKind::Floppy));

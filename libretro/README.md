@@ -63,6 +63,10 @@ operating system's image beside it, or named from the OS images folder, takes
 C:. `[rust-dos] os=win98se` in it starts the game in that system, as the
 **Boot OS** option does. A `GAME.dosc` and the `DOS.YML` in either are used too
 (see [Packages made for DOSBox](../GAME-PACKAGES.md#packages-made-for-dosbox)).
+A package with launch configurations opens the settings window on the ways to
+start it (pick with the D-pad, A to start). A game's gamepad mapping plays on
+the first port set to **Gamepad as keyboard** in *Controls → Port 1 Controls*,
+its action wheel included.
 
 **OS images.** Hard disk images of installed operating systems go in
 `system/rust-dos/os/`. The core

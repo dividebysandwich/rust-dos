@@ -213,6 +213,15 @@ pub struct Config {
     /// What a profile made from a package was made from, fingerprinted
     /// (`[game]`'s `source`, see `games::add_package`).
     pub game_source: Option<String>,
+    /// The keys a game's profile presses as it starts (`[game]`'s `input`,
+    /// autoinput.rs).
+    pub game_input: Option<String>,
+    /// Whether the game's package has launch configurations to choose
+    /// from as it starts (`[game]`'s `variants`).
+    pub game_variants: bool,
+    /// A game profile's `[gamepad]` lines, as written (padmap.rs reads
+    /// them).
+    pub game_pad: Vec<(String, String)>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
 }
@@ -239,6 +248,8 @@ enum Section {
     Autoexec,
     /// A game profile's (games.rs).
     Game,
+    /// A game profile's gamepad mapping (padmap.rs).
+    Gamepad,
     Unknown,
 }
 
@@ -249,7 +260,14 @@ pub fn has_own_sections(text: &str) -> bool {
     text.lines().filter_map(|l| l.trim().strip_prefix('[')?.strip_suffix(']')).any(|name| {
         matches!(
             Section::parse(name),
-            Section::Emulator | Section::Sound | Section::Network | Section::Achievements | Section::Shell | Section::Drives | Section::Game
+            Section::Emulator
+                | Section::Sound
+                | Section::Network
+                | Section::Achievements
+                | Section::Shell
+                | Section::Drives
+                | Section::Game
+                | Section::Gamepad
         )
     })
 }
@@ -269,6 +287,7 @@ impl Section {
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
+            "gamepad" => Section::Gamepad,
             _ => Section::Unknown,
         }
     }
@@ -287,6 +306,7 @@ impl Section {
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",
+            Section::Gamepad => "gamepad",
             Section::None | Section::Unknown => "",
         }
     }
@@ -736,7 +756,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Printer
             | Section::Achievements
             | Section::Shell
-            | Section::Game => {
+            | Section::Game
+            | Section::Gamepad => {
                 let Some((key, value)) = line.split_once('=') else {
                     warn(format!("expected key=value, got '{}'", line));
                     continue;
@@ -925,6 +946,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Gamepad {
+                    config.game_pad.push((key.to_ascii_lowercase(), value.to_string()));
+                    continue;
+                }
+
                 if section == Section::Game {
                     match key.to_ascii_lowercase().as_str() {
                         "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
@@ -934,6 +960,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "manual" if !value.is_empty() => config.game_manuals.push(value.to_string()),
                         "manual" => {}
                         "source" if !value.is_empty() => config.game_source = Some(value.to_string()),
+                        "input" if !value.is_empty() => config.game_input = Some(value.to_string()),
+                        "input" => {}
+                        "variants" => match parse_bool(value) {
+                            Some(on) => config.game_variants = on,
+                            None => warn(format!("invalid variants '{}' (true or false)", value)),
+                        },
                         "source" => {}
                         "overlay" => match parse_bool(value) {
                             Some(on) => config.game_overlay = on,

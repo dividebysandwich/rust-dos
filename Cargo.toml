@@ -30,6 +30,8 @@ png = "0.18"
 ab_glyph = "0.2"
 # zlib for the ZMBV video codec of the AVI recordings.
 flate2 = "1"
+# Checksums of BPS patches (src/archive/patch.rs).
+crc32fast = "1"
 # Zip archives' directories (src/archive/zip.rs); flate2 inflates their files.
 zip = { version = "8.6", default-features = false }
 base64 = "0.23.1"

@@ -402,6 +402,9 @@ pub struct MountOptions {
     /// directory as it is (`-overlay`, `overlay`); a disk image's go to a
     /// delta file in it (`diskdelta`).
     pub overlay: Option<PathBuf>,
+    /// The launch configuration of an archive's .dosc (its `[variant]`
+    /// folder) over the archive (`-variant`).
+    pub variant: Option<String>,
 }
 
 impl Default for MountOptions {
@@ -416,6 +419,7 @@ impl Default for MountOptions {
             boot: false,
             share: None,
             overlay: None,
+            variant: None,
         }
     }
 }
@@ -764,6 +768,9 @@ pub struct DiskController {
     /// has, with their manifests, for once the drives are mounted as it
     /// has them (`restore_shared`).
     pub(crate) shared_from_state: Option<Vec<(u8, String)>>,
+    /// What mounting found to tell the user (a .dosc's patch that can't
+    /// be used), for the bus's log (`Bus::mount_drive`).
+    pub notes: Vec<String>,
 }
 
 impl DiskController {
@@ -812,6 +819,7 @@ impl DiskController {
             reverts: Vec::new(),
             copies_from: None,
             shared_from_state: None,
+            notes: Vec::new(),
         };
         disk.open_standard_devices();
         disk
@@ -910,9 +918,12 @@ impl DiskController {
         let whole = hostfs::is_file(path) && crate::archive::is_archive_name(path);
         let mut more_images = opts.more_images.clone();
         if (whole && more_images.is_empty()) || inside.is_some() {
+            let whole_archive = inside.is_none();
             let (archive, inner) = inside.unwrap_or_else(|| (path.to_path_buf(), String::new()));
             let canonical = hostfs::canonicalize(&archive).map_err(|e| e.to_string())?;
-            let stack = crate::archive::open(&canonical)?;
+            let variant = opts.variant.as_deref().filter(|_| whole_archive);
+            let stack = crate::archive::open_variant(&canonical, variant)?;
+            self.notes.extend(stack.notes.take());
             let image = if inner.is_empty() { archive_image(&stack.files()) } else { Some(inner) };
             let upper = opts.overlay.clone().filter(|_| !opts.read_only && (image.is_some() || opts.kind != DriveKind::CdRom));
             // A list of images in it: all of them in it.
@@ -3382,6 +3393,29 @@ mod tests {
         assert_eq!(names, ["SAVES"]);
         assert_eq!(fs::read(base.join("saves/SAVES/SLOT1.SAV")).unwrap(), b"ONE");
         assert_eq!(fs::read(base.join("game.zip")).unwrap(), zip, "the archive as it was");
+    }
+
+    #[test]
+    fn a_patched_file_is_what_dos_reads_and_writes() {
+        let base = scratch("archive_patch");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::write(base.join("game.dosz"), crate::archive::zip::tests::zip(&[("GAME.EXE", b"MZ protected", false)])).unwrap();
+        let mut patch = b"PATCH".to_vec();
+        patch.extend([0, 0, 3, 0, 9]);
+        patch.extend(b"cracked!!");
+        patch.extend(b"EOF");
+        fs::write(base.join("game.dosc"), crate::archive::zip::tests::zip(&[("GAME.EXE", &patch, false)])).unwrap();
+        let mut disk = DiskController::new(base.join("c"));
+        let opts = MountOptions { overlay: Some(base.join("saves")), ..MountOptions::default() };
+        disk.mount(3, &base.join("game.dosz"), opts, false).unwrap();
+        let h = disk.open_file(r"D:\GAME.EXE", 0, PSP).unwrap();
+        assert_eq!(disk.read_file(h, 32).unwrap(), b"MZ cracked!!");
+        disk.close_file(h);
+        // Written to, it goes to the saves as it reads.
+        let h = disk.open_file(r"D:\GAME.EXE", 2, PSP).unwrap();
+        disk.write_file(h, b"MZ").unwrap();
+        disk.close_file(h);
+        assert_eq!(fs::read(base.join("saves/GAME.EXE")).unwrap(), b"MZ cracked!!");
     }
 
     #[test]

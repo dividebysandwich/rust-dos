@@ -324,50 +324,16 @@ fn ascii_for(key: PcKey, mods: u8) -> u8 {
     if mods & (keys::MOD_LSHIFT | keys::MOD_RSHIFT) != 0 { key.shifted } else { key.ascii }
 }
 
-/// The keys that type `c` in `layout`: its key with Shift and AltGr as it
-/// needs them. A character the
-/// layout has on no key (or only as a dead key's accent) is typed as the
-/// US keyboard types it, or else as Alt and the keypad type any.
+/// The keys that type `c` in `layout` (`keyboard::keys_for_char`), as
+/// queued input.
 pub(crate) fn keys_for_char(c: char, layout: &Layout, out: &mut Vec<LowInput>) -> Result<(), String> {
-    let special = match c {
-        '\n' | '\r' => Some("enter"),
-        '\t' => Some("tab"),
-        '\x08' => Some("backspace"),
-        '\x1b' => Some("escape"),
-        _ => None,
-    };
-    if let Some(name) = special {
-        let key = keys::lookup(name).unwrap();
-        out.push(LowInput::KeyDown { key, ascii: 0 });
-        out.push(LowInput::KeyUp { key });
-        return Ok(());
-    }
-    let byte = rust_dos::keylayout::cp437(c).ok_or_else(|| format!("cannot type character {:?}", c))?;
-    let (key, shift, altgr, ascii) = match layout.reverse(byte) {
-        Some((scan, shift, altgr)) => {
-            (PcKey { scan, ascii: byte, shifted: byte, modifier: 0, extended: false }, shift, altgr, byte)
-        }
-        None => match keys::char_to_key(c) {
-            Some((key, shift)) => (key, shift, false, if shift { key.shifted } else { key.ascii }),
-            None => {
-                out.push(LowInput::Char(byte));
-                return Ok(());
-            }
-        },
-    };
-    let modifiers: Vec<PcKey> = [(shift, "lshift"), (altgr, "ralt")]
-        .into_iter()
-        .filter(|&(on, _)| on)
-        .map(|(_, name)| keys::lookup(name).unwrap())
-        .collect();
-    for &m in &modifiers {
-        out.push(LowInput::KeyDown { key: m, ascii: 0 });
-    }
-    out.push(LowInput::KeyDown { key, ascii });
-    out.push(LowInput::KeyUp { key });
-    for &m in modifiers.iter().rev() {
-        out.push(LowInput::KeyUp { key: m });
-    }
+    let mut typed = Vec::new();
+    keyboard::keys_for_char(c, layout, &mut typed)?;
+    out.extend(typed.into_iter().map(|t| match t {
+        keyboard::TypeStep::Down { key, ascii } => LowInput::KeyDown { key, ascii },
+        keyboard::TypeStep::Up { key } => LowInput::KeyUp { key },
+        keyboard::TypeStep::Char(byte) => LowInput::Char(byte),
+    }));
     Ok(())
 }
 

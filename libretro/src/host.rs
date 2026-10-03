@@ -34,6 +34,8 @@ pub struct Machine {
     pub profile: Option<Profile>,
     /// The game launched and not ended yet.
     pub game: Option<ActiveGame>,
+    /// A game whose ways to start the settings window is to offer.
+    pub choose: Option<String>,
     /// The settings and drives as rust-dos.conf has them, which saving
     /// writes the changes from.
     pub saved: Settings,
@@ -111,8 +113,21 @@ impl Machine {
         self.cpu.queue_batch_lines(&prepared.autoexec);
         self.cpu.bus.log_string(&format!("[CONFIG] Launching the game {} ({}.conf)", prepared.name, id));
         let message = format!("Starting {}", prepared.name);
-        self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: settings, replaced, programs_before });
+        let (pad, pad_warnings) = rust_dos::padmap::PadMapping::parse(&prepared.pad);
+        let (input, warnings) = ActiveGame::input_steps(prepared.input.as_deref());
+        let warnings: Vec<String> = warnings.into_iter().chain(pad_warnings).collect();
+        for warning in warnings {
+            self.warn(&format!("{}.conf: {}", id, warning));
+        }
+        self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: settings, replaced, programs_before, input, pad, choose_after: false });
         Ok(message)
+    }
+
+    /// The profile of the game `id`, and its folder.
+    fn game_profile(&self, id: &str) -> Result<(String, PathBuf), String> {
+        let path = self.profile_file(id);
+        let text = fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+        Ok((text, path.parent().unwrap_or(Path::new(".")).to_path_buf()))
     }
 
     /// A game has ended: the settings and drives from before it.
@@ -291,10 +306,40 @@ impl Host for Machine {
         if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
             return Err("A program is running: quit it to launch a game".to_string());
         }
-        let path = self.profile_file(id);
-        let text = fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
-        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let (text, dir) = self.game_profile(id)?;
+        // One with launch configurations: the window offers them.
+        if let Some(choices) = games::launch_choices(&dir, &text) {
+            self.choose = Some(id.to_string());
+            return Ok(format!("Choose how to start {}", choices.name));
+        }
         self.start_game(id, &text, &dir)
+    }
+
+    fn game_pad(&self, id: &str) -> Vec<(String, String)> {
+        let Ok((text, dir)) = self.game_profile(id) else { return Vec::new() };
+        let lines = rust_dos::config::parse(&text, &dir, None).game_pad;
+        rust_dos::padmap::PadMapping::parse(&lines).0.map(|m| m.labels()).unwrap_or_default()
+    }
+
+    fn launch_choices(&self, id: &str) -> Option<games::LaunchChoices> {
+        let (text, dir) = self.game_profile(id).ok()?;
+        games::launch_choices(&dir, &text)
+    }
+
+    fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
+        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
+            return Err("A program is running: quit it to launch a game".to_string());
+        }
+        let (text, dir) = self.game_profile(id)?;
+        let text = match variant {
+            Some(variant) => games::variant_profile(&dir, &text, variant)?,
+            None => text,
+        };
+        let message = self.start_game(id, &text, &dir)?;
+        if let Some(game) = self.game.as_mut() {
+            game.choose_after = tool;
+        }
+        Ok(message)
     }
 
     fn create_game(&mut self, new: &NewGame, settings: &Settings) -> Result<String, String> {

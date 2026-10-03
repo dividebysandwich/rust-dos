@@ -19,6 +19,10 @@ pub struct Imported {
     pub settings: Vec<(&'static str, &'static str, String)>,
     pub drives: Vec<MountSpec>,
     pub autoexec: Vec<String>,
+    /// The keys pressed as the game starts (`[game]`'s `input`).
+    pub input: Option<String>,
+    /// Its gamepad mapping (`[gamepad]`), as key and value.
+    pub pad: Vec<(String, String)>,
     /// What didn't come across, to tell the user.
     pub warnings: Vec<String>,
 }
@@ -67,6 +71,13 @@ impl Imported {
         }
         if over.autoexec.iter().any(|l| !l.eq_ignore_ascii_case("C:")) || self.autoexec.is_empty() {
             self.autoexec = over.autoexec;
+        }
+        if over.input.is_some() {
+            self.input = over.input;
+        }
+        for (key, value) in over.pad {
+            self.pad.retain(|(k, _)| *k != key);
+            self.pad.push((key, value));
         }
         self.warnings.extend(over.warnings);
     }

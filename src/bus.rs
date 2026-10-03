@@ -558,7 +558,11 @@ impl Bus {
         if self.boot.is_some() && crate::hostfs::is_dir(path) && self.booted_cd_drive() == Some(drive) {
             opts.kind = DriveKind::CdRom;
         }
-        let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace))?;
+        let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace));
+        for note in std::mem::take(&mut self.disk.notes) {
+            self.log_string(&format!("[DISK] {}", note));
+        }
+        let mounted = mounted?;
         // One drive boots at startup.
         if boot {
             self.disk.set_boot_drive(Some(drive));

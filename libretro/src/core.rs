@@ -41,6 +41,9 @@ const LIBRETRO: Frontend = Frontend { window: false, host_files: true };
 const BLINK_FRAMES: u64 = 30;
 
 /// The devices the gamepad ports can have.
+/// How many frames' time a frame runs through the waits of a game's keys.
+const AUTOINPUT_FAST_FRAMES: u64 = 8;
+
 pub const DEVICE_GAMEPORT: u32 = RETRO_DEVICE_JOYPAD;
 pub const DEVICE_KEYS: u32 = retro_device_subclass(RETRO_DEVICE_JOYPAD, 0);
 
@@ -101,6 +104,12 @@ pub struct Core {
     /// the sixtieths of a tick left over.
     target_ticks: u64,
     tick_rem: u64,
+    /// The keys the game's profile presses as it starts (autoinput.rs).
+    autoinput: Option<rust_dos::autoinput::AutoInput>,
+    /// The game's gamepad mapping at work on the first port as keyboard,
+    /// and its action wheel while it is open.
+    padmap: Option<rust_dos::padmap::PadMapper>,
+    wheel_view: Option<rust_dos::padmap::WheelView>,
     frames: u64,
     cursor_visible: bool,
     /// Keys the machine has down, by the frontend's key code.
@@ -219,6 +228,7 @@ impl Core {
                 overlay: plan.overlay.clone(),
                 profile: plan.profile.clone(),
                 game: None,
+                choose: None,
                 saved_drives,
                 notices: Vec::new(),
             },
@@ -236,6 +246,9 @@ impl Core {
             max_size: MAX_SIZE,
             target_ticks: 0,
             tick_rem: 0,
+            autoinput: None,
+            padmap: None,
+            wheel_view: None,
             frames: 0,
             cursor_visible: true,
             held: HashMap::new(),
@@ -280,7 +293,10 @@ impl Core {
         m.cpu.startup = Startup { notes, commands };
         m.cpu.start_dos();
         if let Some(profile) = &plan.profile {
-            if let Err(e) = m.start_game(&profile.id, &profile.text, &profile.dir) {
+            // One with launch configurations offers them first.
+            if rust_dos::games::launch_choices(&profile.dir, &profile.text).is_some() {
+                m.choose = Some(profile.id.clone());
+            } else if let Err(e) = m.start_game(&profile.id, &profile.text, &profile.dir) {
                 m.warn(&e);
                 m.notices.push(e);
             }
@@ -307,6 +323,7 @@ impl Core {
         // frame runs to the next sixtieth of a second. The machine waits
         // while the settings window is open, but for its Mixer page.
         let waiting = self.ui.pauses_machine();
+        let fast = !waiting && !self.ui.is_open() && self.autoinput_step();
         let m = &mut self.m;
         m.cpu.bus.apply_freezes();
         let batch_end = if m.cpu.bus.exit_requested || waiting {
@@ -314,7 +331,8 @@ impl Core {
             self.tick_rem = 0;
             m.cpu.bus.clock.icount
         } else {
-            self.tick_rem += PIT_HZ;
+            // Through the waits of the game's keys, several frames' time.
+            self.tick_rem += PIT_HZ * if fast { AUTOINPUT_FAST_FRAMES } else { 1 };
             self.target_ticks += self.tick_rem / FPS as u64;
             self.tick_rem %= FPS as u64;
             m.cpu.bus.clock.icount_at(self.target_ticks)
@@ -335,7 +353,7 @@ impl Core {
         // frontend to go on at its pace.
         let m = &mut self.m;
         let mut samples = audio::pump_audio(&mut m.cpu.bus, waiting);
-        if waiting {
+        if waiting || fast {
             samples = vec![0; (rust_dos::opl::RATE as f64 / FPS) as usize * 2];
         } else if m.cpu.bus.mixer.muted {
             samples.fill(0);
@@ -368,6 +386,25 @@ impl Core {
         self.last_frame = Some((frame_start, times));
     }
 
+    /// Press the game's next key, once its program has started: whether
+    /// the machine may run fast through a wait.
+    fn autoinput_step(&mut self) -> bool {
+        let m = &mut self.m;
+        if self.autoinput.is_none()
+            && let Some(started) = m.game.as_mut().and_then(|g| g.take_input(&m.cpu))
+        {
+            self.autoinput = Some(started);
+        }
+        let Some(input) = &mut self.autoinput else { return false };
+        match input.step(&mut m.cpu) {
+            rust_dos::autoinput::Status::Done => {
+                self.autoinput = None;
+                false
+            }
+            rust_dos::autoinput::Status::Busy { fast_forward } => fast_forward,
+        }
+    }
+
     /// What the machine asked for while it ran: the settings window, a
     /// changed mixer, a game ended, changed hardware, and turning off.
     fn after_batch(&mut self, cb: &Callbacks) {
@@ -388,9 +425,26 @@ impl Core {
             && let Some(ended) = m.game.take_if(|g| g.done(&m.cpu))
         {
             let name = ended.name.clone();
+            if let Some(mut input) = self.autoinput.take() {
+                input.stop(&mut m.cpu);
+            }
+            // After a tool of the game's, the ways to start it again.
+            if ended.choose_after {
+                m.choose = Some(ended.id.clone());
+            }
             m.end_game(ended);
             m.notices.push(format!("{} has ended", name));
         }
+        // A game launched with ways to start it: the window offers them.
+        if let Some(id) = m.choose.take() {
+            if !self.ui.is_open() {
+                self.toggle_settings();
+            }
+            if !self.ui.show_launch(&id, &self.m) {
+                self.ui.close();
+            }
+        }
+        let m = &mut self.m;
         if let Some(notice) = self.ui.take_notice() {
             m.notices.push(notice);
         }
@@ -449,6 +503,9 @@ impl Core {
         self.ui.set_display((1.0, tall), false);
         self.ui.draw(&mut self.screen);
         self.ui.draw_overlay(&mut self.screen);
+        if let Some(view) = &self.wheel_view {
+            rust_dos::config_ui::wheel::draw(&mut self.screen, view);
+        }
 
         self.xrgb.clear();
         self.xrgb.extend(
@@ -586,6 +643,12 @@ impl Core {
             }
             return;
         }
+        if e.down
+            && let Some(mut input) = self.autoinput.take()
+        {
+            // The player takes over from the game's keys.
+            input.stop(&mut self.m.cpu);
+        }
         let bus = &mut self.m.cpu.bus;
         if e.down {
             if let Some((scan, extended)) = keys::pc_scan(e.keycode) {
@@ -618,12 +681,26 @@ impl Core {
             }
         }
         self.mouse_buttons = 0;
+        if let Some(mapper) = &mut self.padmap {
+            mapper.release(&mut self.m.cpu.bus);
+        }
+        self.wheel_view = None;
     }
 
     /// The gamepads: the game port's joysticks, or keys, and the settings
     /// window's keys while it is open.
     fn pads(&mut self, cb: &Callbacks) {
         const L3_R3: u16 = 1 << RETRO_DEVICE_ID_JOYPAD_L3 | 1 << RETRO_DEVICE_ID_JOYPAD_R3;
+        // A game with a gamepad mapping plays the first port as keyboard
+        // with it.
+        let mapping = self.m.game.as_ref().and_then(|g| g.pad.clone());
+        if mapping.as_ref() != self.padmap.as_ref().map(|m| m.mapping()) {
+            if let Some(mut old) = self.padmap.take() {
+                old.release(&mut self.m.cpu.bus);
+            }
+            self.padmap = mapping.map(rust_dos::padmap::PadMapper::new);
+        }
+        self.wheel_view = None;
         for port in 0..2 {
             let device = self.ports[port];
             let buttons = (0..16).filter(|&id| cb.input(port as u32, RETRO_DEVICE_JOYPAD, 0, id) != 0).fold(0u16, |b, id| b | 1 << id);
@@ -663,6 +740,37 @@ impl Core {
                     ];
                     let pad_buttons = map.iter().filter(|(id, _)| buttons & (1 << id) != 0).fold(0, |b, (_, bit)| b | bit);
                     self.m.cpu.bus.joystick.set_pad(port, Some(PadState { axes, buttons: pad_buttons }));
+                }
+                DEVICE_KEYS if port == 0 && self.padmap.is_some() => {
+                    // The frontend's buttons in the mapping's order.
+                    const ORDER: [u32; 16] = [
+                        RETRO_DEVICE_ID_JOYPAD_UP,
+                        RETRO_DEVICE_ID_JOYPAD_DOWN,
+                        RETRO_DEVICE_ID_JOYPAD_LEFT,
+                        RETRO_DEVICE_ID_JOYPAD_RIGHT,
+                        RETRO_DEVICE_ID_JOYPAD_B,
+                        RETRO_DEVICE_ID_JOYPAD_A,
+                        RETRO_DEVICE_ID_JOYPAD_X,
+                        RETRO_DEVICE_ID_JOYPAD_Y,
+                        RETRO_DEVICE_ID_JOYPAD_L,
+                        RETRO_DEVICE_ID_JOYPAD_R,
+                        RETRO_DEVICE_ID_JOYPAD_L2,
+                        RETRO_DEVICE_ID_JOYPAD_R2,
+                        RETRO_DEVICE_ID_JOYPAD_L3,
+                        RETRO_DEVICE_ID_JOYPAD_R3,
+                        RETRO_DEVICE_ID_JOYPAD_SELECT,
+                        RETRO_DEVICE_ID_JOYPAD_START,
+                    ];
+                    let mapped = ORDER.iter().enumerate().filter(|(_, id)| buttons & (1 << **id) != 0).fold(0u32, |b, (i, _)| b | 1 << i);
+                    let snapshot = rust_dos::padmap::PadSnapshot { buttons: mapped, axes, triggers: [0.0; 2] };
+                    if snapshot.inputs() != 0
+                        && let Some(mut input) = self.autoinput.take()
+                    {
+                        input.stop(&mut self.m.cpu);
+                    }
+                    let mapper = self.padmap.as_mut().expect("a mapping");
+                    self.wheel_view = mapper.update(&mut self.m.cpu.bus, snapshot.inputs(), snapshot.pointer());
+                    self.m.cpu.bus.joystick.set_pad(port, mapper.joystick());
                 }
                 DEVICE_KEYS => {
                     self.m.cpu.bus.joystick.set_pad(port, None);

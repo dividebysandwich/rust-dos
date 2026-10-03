@@ -64,6 +64,9 @@ fn a_game_runs_its_commands_and_ends_at_the_prompt() {
         saved: prepared.settings,
         replaced: Vec::new(),
         programs_before: cpu.programs_loaded,
+        input: None,
+        pad: None,
+        choose_after: false,
     };
     assert!(!game.done(&cpu), "its commands are waiting");
 
@@ -104,7 +107,7 @@ fn an_imported_dosbox_game_runs_and_its_drives_come_back() {
         cpu.bus.mount_drive(spec.drive, &spec.path, spec.opts.clone(), true).unwrap();
     }
     cpu.queue_batch_lines(&prepared.autoexec);
-    let game = ActiveGame { id, name, base, saved: prepared.settings, replaced, programs_before };
+    let game = ActiveGame { id, name, base, saved: prepared.settings, replaced, programs_before, input: None, pad: None, choose_after: false };
     assert!(run_until(&mut cpu, 1000, |cpu| !cpu.shell_idle()), "the game starts");
     assert!(run_until(&mut cpu, 5000, |cpu| game.done(cpu)), "the game ends");
     assert_eq!(cpu.bus.disk.get_current_drive(), 3, "on D:, as DOSBox had it");

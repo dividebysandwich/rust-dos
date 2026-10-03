@@ -247,15 +247,27 @@ keeps its drives until another game is launched, so its files are there
 to start by hand.
 
 **`.dosc` and DOS.YML.** A `.dosc` beside the package with its name
-(`Liero.dosc` next to `Liero.dosz`) goes over the package's files: the game's settings files from its setup
-program take the place of the package's. Its launch configurations (the
-`[Setup Program]` folders and the like) aren't used; the default is. A
-`DOS.YML` in the package or the `.dosc` gives the profile its CPU speed
-(`cpu_year`, `cpu_cycles` and their `max` forms, held at that speed),
-CPU, memory, video card, sound card and synthesizer, the program to
-start (`run_path`), an image to mount (`run_mount`) or boot (`run_boot`).
-`run_input` key sequences and gamepad mappings aren't used. Loading or
-importing the `.dosc` itself loads its game.
+(`Liero.dosc` next to `Liero.dosz`) goes over the package's files: the
+game's settings files from its setup program take the place of the
+package's. Its IPS, BPS and VCDIFF (xdelta) patches, by the name of the
+file they patch or as `GAME.EXE.ips`, are applied to the package's files
+(XOR patches aren't; the log says so). A `DOS.YML` in the package or the
+`.dosc` gives the profile its CPU speed (`cpu_year`, `cpu_cycles` and their
+`max` forms, held at that speed), CPU, memory, video card, sound card and
+synthesizer, the program to start (`run_path`), an image to mount
+(`run_mount`) or boot (`run_boot`), the keys pressed as it starts
+(`run_input`, see [Keys at the start](CONFIGURATION.md#keys-at-the-start))
+and its gamepad mapping (`input_pad_*`, `input_wheel_*`, see [Gamepad
+mappings](CONFIGURATION.md#gamepad-mappings)). Loading or importing the
+`.dosc` itself loads its game.
+
+**Ways to start it.** A `.dosc`'s launch configurations, its `[Setup
+Program]`, `[Ship Editor]` or `[General MIDI Music]` folders, are offered
+as the game is launched: the window lists the game and the other ways to
+start it, tools such as the setup program marked. Folders named for a
+combination (`[MIDI + German]`) are options to choose with Left and Right
+on the game's row. A tool's end offers the choice again, its changes kept
+with the game's.
 
 **An operating system.** A `[rust-dos]` section, which other emulators
 leave alone, can name an installed operating system for the game:

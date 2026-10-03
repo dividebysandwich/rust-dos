@@ -15,12 +15,14 @@ mod draw;
 mod games;
 mod help;
 mod image;
+mod launch;
 mod manual;
 pub mod osd;
 mod perf;
 mod rooms;
 mod sc55;
 mod states;
+pub mod wheel;
 
 use autoexec::AutoexecEditor;
 use browser::{Browser, IMAGES, MT32_ROMS, Row, SOUNDFONTS};
@@ -160,6 +162,24 @@ pub trait Host {
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
         let _ = id;
         Err("There are no game profiles here".to_string())
+    }
+    /// The ways the game `id` can start, if its package has launch
+    /// configurations to choose from.
+    fn launch_choices(&self, id: &str) -> Option<crate::games::LaunchChoices> {
+        let _ = id;
+        None
+    }
+    /// Launch the game `id` with its launch configuration `variant` (None:
+    /// the default); a `tool`'s end offers the choice again.
+    fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
+        let _ = (variant, tool);
+        self.launch_game(id)
+    }
+    /// The game `id`'s gamepad mapping, for the player: each input, and
+    /// what it does.
+    fn game_pad(&self, id: &str) -> Vec<(String, String)> {
+        let _ = id;
+        Vec::new()
     }
     /// Make a profile of `game` with `settings`. Returns its id.
     fn create_game(&mut self, game: &NewGame, settings: &Settings) -> Result<String, String> {
@@ -1629,6 +1649,8 @@ pub struct ConfigUi {
     /// (manual.rs), and the layer its page is drawn in where the frontend
     /// has one.
     manual: Option<manual::ManualView>,
+    /// The ways to start a game being launched (launch.rs).
+    chooser: Option<launch::Chooser>,
     /// Where the manuals were left, for opening them there again.
     manual_places: manual::Places,
     pixel_scale: (f32, f32),
@@ -1715,6 +1737,7 @@ impl ConfigUi {
             confirm_reset: false,
             notice: None,
             manual: None,
+            chooser: None,
             manual_places: manual::Places::default(),
             pixel_scale: (1.0, 1.0),
             layered: false,
@@ -1747,7 +1770,7 @@ impl ConfigUi {
     /// Stats page, which shows it running, unless a manual is open over
     /// them.
     pub fn pauses_machine(&self) -> bool {
-        self.open && (self.manual.is_some() || !matches!(self.page, Page::Mixer | Page::Stats))
+        self.open && (self.manual.is_some() || self.chooser.is_some() || !matches!(self.page, Page::Mixer | Page::Stats))
     }
 
     /// What the window keeps up to date while it is open, for the frontend
@@ -1860,6 +1883,7 @@ impl ConfigUi {
         self.help = None;
         self.put_away_manual();
         self.manual = None;
+        self.chooser = None;
         self.confirm_delete = None;
         self.confirm_sc55 = None;
         self.cheats.edit = None;
@@ -1883,6 +1907,7 @@ impl ConfigUi {
         self.hits.clear();
         self.put_away_manual();
         self.manual = None;
+        self.chooser = None;
         self.layer = None;
     }
 
@@ -1936,6 +1961,8 @@ impl ConfigUi {
             self.toggle_help();
         } else if self.help.is_some() {
             self.help_key(key);
+        } else if self.chooser.is_some() {
+            self.chooser_key(key, host);
         } else if self.browser.is_some() {
             self.browser_key(key, host);
         } else if self.manual.is_some() {
@@ -1994,6 +2021,10 @@ impl ConfigUi {
             return;
         }
         let Some((target, into)) = hit else { return };
+        if self.chooser.is_some() {
+            self.chooser_clicked(target, host);
+            return;
+        }
         // The list of manuals' rows.
         if let (Some(view), Target::Row(i)) = (&mut self.manual, target)
             && self.browser.is_none()
@@ -2717,8 +2748,11 @@ impl ConfigUi {
 
         // The page, or what is open over it.
         let content = 3..rows - 4;
+        let chooser = self.chooser.is_some();
         self.visible = content.len();
-        if self.browser.is_some() {
+        if chooser {
+            self.draw_chooser(&mut g, content.clone());
+        } else if self.browser.is_some() {
             self.draw_browser(&mut g, content.clone());
         } else if self.manual.is_some() {
             self.draw_manual_list(&mut g, content.clone());
@@ -3329,7 +3363,7 @@ impl ConfigUi {
         let left = (g.cols - width) / 2;
         let right = left + width - 1;
         // As high as its text, up to the page's rows.
-        let lines = help::layout(help.topic.body, width - 4);
+        let lines = help::layout(help.body(), width - 4);
         let top = content.start;
         let bottom = (top + lines.len() + 1).min(content.end - 1);
         for r in top..=bottom {
@@ -3347,7 +3381,7 @@ impl ConfigUi {
         g.char(right, top, 0xBF, draw::BORDER);
         g.char(left, bottom, 0xC0, draw::BORDER);
         g.char(right, bottom, 0xD9, draw::BORDER);
-        let title = fit(&format!(" {} ", help.topic.title), width.saturating_sub(8));
+        let title = fit(&format!(" {} ", help.title()), width.saturating_sub(8));
         g.text(left + 2, top, &title, draw::BRIGHT);
 
         help.lines = lines.len();
@@ -3375,6 +3409,12 @@ impl ConfigUi {
         use UiKey::*;
         let mut hints: Vec<(&str, &str, UiKey)> = if self.help.is_some() {
             vec![("\u{2191}\u{2193}", "Scroll", Down), ("Esc", "Close", Esc)]
+        } else if let Some(chooser) = &self.chooser {
+            if chooser.has_categories() {
+                vec![("Enter", "Start", Enter), ("\u{2190}\u{2192}", "Option", Right), ("Esc", "Cancel", Esc)]
+            } else {
+                vec![("Enter", "Start", Enter), ("Esc", "Cancel", Esc)]
+            }
         } else if let Some((browser, _)) = &self.browser {
             let mut hints = vec![("Enter", "Open", Enter), ("Bksp", "Up", Backspace)];
             if !browser.drives.is_empty() {
@@ -3426,6 +3466,7 @@ impl ConfigUi {
                 ("Ins", "New", Insert),
                 ("Del", "Delete", Delete),
                 ("M", "Manuals", Char('m')),
+                ("P", "Pad", Char('p')),
                 ("R", "Reset", Char('r')),
                 ("Tab", "Page", Tab),
                 ("F2", "Save", Save),

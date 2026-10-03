@@ -786,8 +786,10 @@ are imported the same way.
 The settings window's **Games** page lists the profiles. Enter launches a
 game at the DOS prompt: its settings apply on top of the configuration's,
 its drives are mounted, and its commands run. When they have run and the
-game has returned to the prompt, the settings and drives are back as they
-were. **Ins** makes a profile from the settings as they are now: only
+program they started has returned to the prompt, the settings and drives
+(those its commands changed too) are back as they were; a game whose
+commands start no program stays, with its drives, until another is
+launched. **Ins** makes a profile from the settings as they are now: only
 those that differ from the configuration file's, and the drives mounted
 since, go in it, with the game's name, its directory and the command that
 starts it. While a game plays, F2 saves the settings window's changes to
@@ -805,6 +807,58 @@ or sync, and **R** on the Games page deletes it, taking the game back to
 how it was installed. A drive with its own `-overlay` keeps it. In the
 libretro core, `saves` is in the core's folder in the frontend's save
 directory.
+
+### Keys at the start
+
+`input=` in `[game]` presses keys once the game's program has started:
+characters typed as they are, keys in parentheses (`(ENTER)`, `(F1)`,
+`(SPACE)`), a key held and let go (`(leftctrl:DOWN)c(leftctrl:UP)`), and
+waits: `(WAIT:500)` for that many milliseconds of the machine's time,
+`(WAITMODECHANGE)` until the game changes the video mode, and `(DELAY:15)`
+for the time between keys (70 ms at first). The machine runs fast through
+the waits. A key or a gamepad button the player presses stops the rest.
+
+```ini
+[game]
+name=Liero
+input=(WAIT:200)(ENTER)(WAITMODECHANGE)
+```
+
+### Gamepad mappings
+
+A `[gamepad]` section makes the first gamepad press the PC's keys, the
+mouse and the joystick for the game, as it was made to be played with
+them: each of the pad's inputs (`up`, `down`, `left`, `right`, the face
+buttons `a`, `b`, `x`, `y` by where they are, `l`, `r`, `l2`, `r2`, `l3`,
+`r3`, `select`, `start`, and the sticks' directions `lstick_left` to
+`rstick_down`) is up to four of the PC's keys (by name: `space`,
+`leftctrl`, `f10`, `kp5`...), `mouse_move_up` (`_down`, `_left`, `_right`),
+`mouse_left_click` (`_right`, `_middle`), `mouse_speed_up` (`_down`), or
+`joy_up` (`_down`, `_left`, `_right`), `joy_button1` to `4`, `joy_2_up`
+and the like for the second stick (`joy_hat_up`, too), joined by `+`, then
+what it does in words:
+
+```ini
+[gamepad]
+x=space Jump
+start=leftctrl+f10 Open Menu
+rstick_up=mouse_move_up
+l=wheel
+wheel_1=1 Fists
+wheel_2=2 Pistol
+padmousespeed=150
+```
+
+An input bound to `wheel` shows the action wheel while it is held: the
+`wheel_1`, `wheel_2`... items in a ring over the picture, from the top
+clockwise. The left stick (or the D-pad) points at one, and letting go of
+the button presses it. `padmousespeed`, `mousespeed` and `mousexfactor`
+are the mouse's speed by the pad, by any means, and across, in percent;
+`mousewheelup` and `mousewheeldown` bind the mouse's wheel. While a game
+with a mapping plays, the first pad is its, not the game port's joystick
+(but for what it maps to `joy_` actions); in the libretro core, it is the
+first port played as **Gamepad as keyboard**. **P** on the Games page
+lists a game's mapping.
 
 ### Manuals and extras
 

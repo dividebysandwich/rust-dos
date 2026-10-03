@@ -158,6 +158,13 @@ pub struct Prepared {
     /// Its drives' changes go to its saves folder (`overlay=`,
     /// `overlay_drives`).
     pub overlay: bool,
+    /// The keys pressed as it starts (`input=`, autoinput.rs).
+    pub input: Option<String>,
+    /// Its gamepad mapping's lines (`[gamepad]`, padmap.rs).
+    pub pad: Vec<(String, String)>,
+    /// Whether its package has launch configurations to choose from
+    /// (`variants=`).
+    pub variants: bool,
     /// Problems in the profile.
     pub warnings: Vec<String>,
 }
@@ -180,6 +187,9 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
         autoexec: own.autoexec,
         achievements: own.game_achievements,
         overlay: own.game_overlay,
+        input: own.game_input,
+        pad: own.game_pad,
+        variants: own.game_variants,
         warnings: own.warnings,
     })
 }
@@ -527,8 +537,34 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
         Some((entry, _)) => Some(entry.id.clone()),
         None => None,
     };
+    let (text, name, warnings) = package_profile(&package, &source, None)?;
+    // Its profile made before, or neither a profile nor a folder there
+    // already.
+    let id = remade.unwrap_or_else(|| {
+        let taken: Vec<String> = profiles
+            .into_iter()
+            .map(|(e, _)| e.id)
+            .chain(hostfs::read_dir(dir).into_iter().flatten().map(|e| e.name.to_string_lossy().to_lowercase()))
+            .collect();
+        slug(&name, &taken)
+    });
+    let path = dir.join(format!("{}.conf", id));
+    hostfs::create_dir_all(dir)
+        .and_then(|()| hostfs::write(&path, text))
+        .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+    Ok((id, name, warnings))
+}
+
+/// The profile of the package at `package` (its path as the profiles
+/// have it), made from `source` (`package_source`), with its .dosc's
+/// launch configuration `variant` over it, or the default: its text, the
+/// game's name, and what of its configuration didn't come across.
+fn package_profile(package: &Path, source: &str, variant: Option<&str>) -> Result<(String, String, Vec<String>), String> {
+    let package = package.to_path_buf();
+    let is_archive = !hostfs::is_dir(&package);
+    let variants = if is_archive { crate::archive::variants(&package) } else { Vec::new() };
     let files: Vec<String> = if is_archive {
-        crate::archive::open(&package)?.files()
+        crate::archive::open_variant(&package, variant)?.files()
     } else {
         hostfs::read_dir(&package)
             .map_err(|e| format!("{}: {}", package.display(), e))?
@@ -545,13 +581,17 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
     let mut conf = config::parse(&own, &package, None);
     let stem = package.file_stem().map_or("Game".to_string(), |n| n.to_string_lossy().into_owned());
     let name = conf.game_name.clone().unwrap_or(stem);
+    let name = match variant {
+        Some(v) => format!("{} ({})", name, crate::archive::Variants::shown(v)),
+        None => name,
+    };
     // Its paths are from the package, or from the folder beside it, where
     // a .conf of its name is.
     let bases: Vec<PathBuf> = std::iter::once(package.clone()).chain(package.parent().map(Path::to_path_buf)).collect();
     // A package made for DOSBox, or a .dosz: its DOS.YML (in it
     // or its .dosc), then its DOSBox configuration's settings, drives and
     // commands over those.
-    let yml = if own.is_empty() && is_archive { crate::archive::dos_yml(&package) } else { Vec::new() };
+    let yml = if own.is_empty() && is_archive { crate::archive::dos_yml(&package, variant) } else { Vec::new() };
     let yml = (!yml.is_empty()).then(|| crate::import::dos_yml::import(&yml, &package, &name));
     let dosbox_conf = if own.is_empty() { package_dosbox_conf(&package) } else { None }
         .map(|text| crate::import::dosbox::import_in(&[&text], &bases, &name, None, Some(&package)));
@@ -581,13 +621,19 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
         }
         None => {}
     }
+    if !variants.is_empty() && variant.is_none() {
+        text.push_str("variants=true\n");
+    }
+    if let Some(input) = dosbox.as_ref().and_then(|d| d.input.as_ref()).or(conf.game_input.as_ref()) {
+        text.push_str(&format!("input={}\n", input));
+    }
     for value in &conf.game_manuals {
         let manual = crate::manuals::Manual::parse(value, &package, None);
         text.push_str(&format!("manual={}|{}\n", manual.path.display(), manual.title));
     }
     let settings = match &dosbox {
         Some(imported) => imported.settings_text(),
-        None => without_sections(&own, &["game", "drives", "autoexec"]),
+        None => without_sections(&own, &["game", "gamepad", "drives", "autoexec"]),
     };
     if !settings.trim().is_empty() {
         text.push('\n');
@@ -597,6 +643,17 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
     let mut drives = conf.drives.clone();
     if !drives.iter().any(|d| d.drive == crate::disk::DRIVE_C || d.path == package) {
         drives.insert(0, MountSpec { drive: crate::disk::DRIVE_C, path: package.clone(), opts: Default::default() });
+    }
+    // The package's drive with the launch configuration's files over it.
+    for spec in drives.iter_mut().filter(|d| d.path == package) {
+        spec.opts.variant = variant.map(str::to_string);
+    }
+    let pad = dosbox.as_ref().map(|d| d.pad.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| conf.game_pad.clone());
+    if !pad.is_empty() {
+        text.push_str("\n[gamepad]\n");
+        for (key, value) in &pad {
+            text.push_str(&format!("{}={}\n", key, value));
+        }
     }
     text.push_str("\n[drives]\n");
     for spec in &drives {
@@ -612,22 +669,69 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
         text.push_str(&line);
         text.push('\n');
     }
-    // Its profile made before, or neither a profile nor a folder there
-    // already.
-    let id = remade.unwrap_or_else(|| {
-        let taken: Vec<String> = profiles
-            .into_iter()
-            .map(|(e, _)| e.id)
-            .chain(hostfs::read_dir(dir).into_iter().flatten().map(|e| e.name.to_string_lossy().to_lowercase()))
-            .collect();
-        slug(&name, &taken)
-    });
-    let path = dir.join(format!("{}.conf", id));
-    hostfs::create_dir_all(dir)
-        .and_then(|()| hostfs::write(&path, text))
-        .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-    Ok((id, name, dosbox.map(|d| d.warnings).unwrap_or_default()))
+    Ok((text, name, dosbox.map(|d| d.warnings).unwrap_or_default()))
 }
+
+/// The ways a game can start, from its package's launch configurations.
+#[derive(Clone, Debug)]
+pub struct LaunchChoices {
+    /// The game's name.
+    pub name: String,
+    pub variants: crate::archive::Variants,
+    /// The launch configurations that are tools (`run_utility`), after
+    /// which the choice is offered again.
+    pub tools: Vec<String>,
+}
+
+/// The package of a game's profile (in the games folder `dir`) that has
+/// launch configurations.
+fn variant_package(own: &config::Config) -> Option<&Path> {
+    own.drives
+        .iter()
+        .map(|d| d.path.as_path())
+        .find(|p| crate::archive::is_archive_name(p) && hostfs::is_file(p) && !crate::archive::variants(p).is_empty())
+}
+
+/// The ways the game of the profile `text` can start, if its package has
+/// launch configurations (`variants=`).
+pub fn launch_choices(dir: &Path, text: &str) -> Option<LaunchChoices> {
+    let own = config::parse(text, dir, None);
+    if !own.game_variants {
+        return None;
+    }
+    let package = variant_package(&own)?;
+    let dirs = crate::archive::variants(package);
+    let tools = dirs
+        .iter()
+        .filter(|v| {
+            let yml = crate::archive::dos_yml(package, Some(v));
+            let utility = |text: &String| {
+                text.lines().any(|l| {
+                    let (k, v) = l.split_once(':').unwrap_or((l, ""));
+                    k.trim().eq_ignore_ascii_case("run_utility") && v.trim().eq_ignore_ascii_case("true")
+                })
+            };
+            yml.last().is_some_and(utility)
+        })
+        .cloned()
+        .collect();
+    let name = own.game_name.clone().unwrap_or_default();
+    Some(LaunchChoices { name, variants: crate::archive::Variants::new(&dirs), tools })
+}
+
+/// The profile `text` of a package's game (made by `add_package`, in the
+/// games folder `dir`) with its .dosc's launch configuration `variant`
+/// over it, or None when its package has no such thing.
+pub fn variant_profile(dir: &Path, text: &str, variant: &str) -> Result<String, String> {
+    let own = config::parse(text, dir, None);
+    let package = variant_package(&own).ok_or("the game's package has no launch configurations")?;
+    let source = own.game_source.clone().unwrap_or_default();
+    Ok(package_profile(package, &source, Some(variant))?.0)
+}
+
+/// How packages are imported: a profile made by an older import is made
+/// again, with what the newer one reads (DOS.YML's keys, say).
+const IMPORT_VERSION: u32 = 2;
 
 /// What a package's profile is made from, fingerprinted: its own
 /// rust-dos.conf, a DOSBox configuration in it or beside it, and its
@@ -637,6 +741,7 @@ fn package_source(package: &Path, is_archive: bool) -> String {
     use sha2::{Digest, Sha256};
     let own = package_entry(package, PACKAGE_CONF).and_then(|name| read_package_file(&package.join(name)).ok());
     let mut hasher = Sha256::new();
+    hasher.update(IMPORT_VERSION.to_le_bytes());
     for part in [own.clone(), package_dosbox_conf(package)] {
         hasher.update(part.unwrap_or_default().as_bytes());
         hasher.update([0]);
@@ -644,9 +749,14 @@ fn package_source(package: &Path, is_archive: bool) -> String {
     if own.is_none() && is_archive {
         // A .dosc keeps the archive's root, DOS.YML or not.
         hasher.update([crate::archive::dosc_of(package).is_some() as u8]);
-        for yml in crate::archive::dos_yml(package) {
-            hasher.update(yml.as_bytes());
-            hasher.update([0]);
+        // Its launch configurations, with theirs.
+        let variants = crate::archive::variants(package);
+        for variant in std::iter::once(None).chain(variants.iter().map(|v| Some(v.as_str()))) {
+            hasher.update(variant.unwrap_or("").as_bytes());
+            for yml in crate::archive::dos_yml(package, variant) {
+                hasher.update(yml.as_bytes());
+                hasher.update([0]);
+            }
         }
     }
     hasher.finalize()[..12].iter().map(|b| format!("{:02x}", b)).collect()
@@ -678,6 +788,14 @@ pub struct ActiveGame {
     pub replaced: Vec<(u8, Option<MountSpec>)>,
     /// `Cpu::programs_loaded` as it was launched.
     pub programs_before: u64,
+    /// The keys it presses once its program has started (`input=`), until
+    /// the front end takes them (`take_input`).
+    pub input: Option<Vec<crate::autoinput::Step>>,
+    /// Its gamepad mapping (`[gamepad]`), which the first pad plays with.
+    pub pad: Option<crate::padmap::PadMapping>,
+    /// It is a tool of the game's (its setup program, say): when it ends,
+    /// the ways to start the game are offered again.
+    pub choose_after: bool,
 }
 
 /// What each drive has mounted (None: nothing, or a drive held in
@@ -711,6 +829,23 @@ pub fn restore_drives(cpu: &mut Cpu, before: Vec<(u8, Option<MountSpec>)>) -> Ve
 }
 
 impl ActiveGame {
+    /// The keys to press, once the game's program has started.
+    pub fn take_input(&mut self, cpu: &Cpu) -> Option<crate::autoinput::AutoInput> {
+        if cpu.programs_loaded > self.programs_before { self.input.take().map(crate::autoinput::AutoInput::new) } else { None }
+    }
+
+    /// The keys a profile presses (`Prepared::input`), and what in them
+    /// couldn't be read.
+    pub fn input_steps(input: Option<&str>) -> (Option<Vec<crate::autoinput::Step>>, Vec<String>) {
+        match input {
+            Some(text) => {
+                let (steps, warnings) = crate::autoinput::parse(text);
+                ((!steps.is_empty()).then_some(steps), warnings)
+            }
+            None => (None, Vec::new()),
+        }
+    }
+
     /// Whether the game's commands have run, a program among them, and the
     /// prompt is back. A game whose commands only leave it at the prompt
     /// (no program to start) stays with its drives until another is
@@ -895,6 +1030,28 @@ mod tests {
         assert!(!std::fs::read_to_string(&plain).unwrap().contains("cycles=1234"));
         assert_eq!(list(&games).iter().filter(|(e, _)| e.name == "Plain").count(), 1);
 
+        // One with launch configurations: the default's profile says so, and
+        // each is made from it on its own.
+        std::fs::write(dir.join("Tyr.dosz"), crate::archive::zip::tests::zip(&[("TYR.EXE", b"MZ", false)])).unwrap();
+        let changes = crate::archive::zip::tests::zip(&[
+            ("DOS.YML", b"run_path: C:\\TYR.EXE\r\n", false),
+            ("[Setup Program]/DOS.YML", b"run_path: C:\\SETUP.EXE\r\nrun_utility: true\r\n", false),
+            ("[Setup Program]/SETUP.EXE", b"MZ", false),
+        ]);
+        std::fs::write(dir.join("Tyr.dosc"), changes).unwrap();
+        let (id, _, _) = add_package(&games, &dir.join("Tyr.dosz")).unwrap();
+        let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
+        assert!(prepare(&id, &Settings::default(), &text, &games, None).unwrap().variants, "{}", text);
+        let setup = variant_profile(&games, &text, "Setup Program").unwrap();
+        let prepared = prepare(&id, &Settings::default(), &setup, &games, None).unwrap();
+        assert_eq!(prepared.name, "Tyr (Setup Program)");
+        assert_eq!(prepared.autoexec, ["C:", "CD \\", "SETUP.EXE"]);
+        assert_eq!(prepared.drives[0].opts.variant.as_deref(), Some("Setup Program"));
+        assert!(!prepared.variants);
+        let choices = launch_choices(&games, &text).unwrap();
+        assert_eq!(choices.tools, ["Setup Program"]);
+        assert_eq!(choices.variants.entries.len(), 1);
+
         // One that moves the zip to D: and boots Windows from an image beside it.
         std::fs::write(dir.join("Win.dosz"), crate::archive::zip::tests::zip(&[("GAME.EXE", b"MZ", false)])).unwrap();
         std::fs::write(dir.join("win98.img"), b"").unwrap();
@@ -997,6 +1154,9 @@ mod tests {
             saved: Settings::default(),
             replaced: Vec::new(),
             programs_before: cpu.programs_loaded,
+            input: None,
+            pad: None,
+            choose_after: false,
         };
         cpu.queue_batch_lines(["X"]);
         assert!(!game.done(&cpu));

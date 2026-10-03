@@ -53,6 +53,8 @@ impl DiskController {
             reverts: _,
             copies_from: _,
             shared_from_state: _,
+            // Told as the drive was mounted.
+            notes: _,
         } = self;
         current_drive.save(w);
         for drive in &drives[..LASTDRIVE as usize] {

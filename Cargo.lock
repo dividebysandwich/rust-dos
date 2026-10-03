@@ -1809,6 +1809,7 @@ dependencies = [
  "bitflags 2.13.2",
  "chrono",
  "clap",
+ "crc32fast",
  "dirs",
  "dynasm",
  "dynasmrt",

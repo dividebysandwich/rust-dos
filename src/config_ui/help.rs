@@ -247,6 +247,8 @@ fn wrap(block: &Block, width: usize) -> Vec<Line> {
 /// The help open over the window: the topic, and how far it is scrolled.
 pub struct HelpView {
     pub topic: Topic,
+    /// A text of its own instead of the topic's: a title and a body.
+    pub text: Option<(String, String)>,
     pub scroll: usize,
     /// The lines the text took and how many showed, in the last frame.
     pub lines: usize,
@@ -255,7 +257,20 @@ pub struct HelpView {
 
 impl HelpView {
     pub fn new(topic: Topic) -> Self {
-        Self { topic, scroll: 0, lines: 0, visible: 0 }
+        Self { topic, text: None, scroll: 0, lines: 0, visible: 0 }
+    }
+
+    /// Help made of `body`, under `title`, rather than a topic's.
+    pub fn of_text(title: String, body: String) -> Self {
+        Self { text: Some((title, body)), ..Self::new(Topic { id: "", title: "", body: "" }) }
+    }
+
+    pub fn title(&self) -> &str {
+        self.text.as_ref().map_or(self.topic.title, |(t, _)| t)
+    }
+
+    pub fn body(&self) -> &str {
+        self.text.as_ref().map_or(self.topic.body, |(_, b)| b)
     }
 
     /// The furthest it scrolls.

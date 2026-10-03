@@ -492,6 +492,14 @@ pub struct PcKey {
     pub extended: bool,
 }
 
+/// The same key: its scan code, extended or not.
+impl PartialEq for PcKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.scan == other.scan && self.extended == other.extended
+    }
+}
+impl Eq for PcKey {}
+
 pub const MOD_RSHIFT: u8 = 0x01;
 pub const MOD_LSHIFT: u8 = 0x02;
 pub const MOD_CTRL: u8 = 0x04;
@@ -618,6 +626,21 @@ const KEYS: &[(&str, PcKey)] = &[
     ("alt", m(0x38, MOD_ALT)),
     ("lalt", m(0x38, MOD_ALT)),
     ("ralt", mx(0x38, MOD_ALT)),
+    // The names .dosz packages' DOS.YML files use.
+    ("leftshift", m(0x2A, MOD_LSHIFT)),
+    ("rightshift", m(0x36, MOD_RSHIFT)),
+    ("leftctrl", m(0x1D, MOD_CTRL)),
+    ("rightctrl", mx(0x1D, MOD_CTRL)),
+    ("leftalt", m(0x38, MOD_ALT)),
+    ("rightalt", mx(0x38, MOD_ALT)),
+    ("grave", k(0x29, b'`', b'~')),
+    ("capslock", k(0x3A, 0, 0)),
+    ("numlock", k(0x45, 0, 0)),
+    ("scrolllock", k(0x46, 0, 0)),
+    ("printscreen", x(0x37, 0)),
+    // The 102nd key, beside left Shift on keyboards outside the US. Last,
+    // so that typing a backslash uses the main one.
+    ("extra_lt_gt", k(0x56, b'\\', b'|')),
 ];
 
 pub fn lookup(name: &str) -> Option<PcKey> {
@@ -651,6 +674,63 @@ pub fn char_to_key(c: char) -> Option<(PcKey, bool)> {
                 None
             }
         })
+}
+
+/// A step of typing a character (`keys_for_char`).
+#[derive(Clone, Copy, Debug)]
+pub enum TypeStep {
+    Down { key: PcKey, ascii: u8 },
+    Up { key: PcKey },
+    /// A character no key types, as Alt and the keypad type it: a
+    /// keystroke with no scan code (`queue_keystroke`).
+    Char(u8),
+}
+
+/// The keys that type `c` in `layout`: its key with Shift and AltGr as it
+/// needs them. A character the layout has on no key (or only as a dead
+/// key's accent) is typed as the US keyboard types it, or else as Alt and
+/// the keypad type any.
+pub fn keys_for_char(c: char, layout: &crate::keylayout::Layout, out: &mut Vec<TypeStep>) -> Result<(), String> {
+    let special = match c {
+        '\n' | '\r' => Some("enter"),
+        '\t' => Some("tab"),
+        '\x08' => Some("backspace"),
+        '\x1b' => Some("escape"),
+        _ => None,
+    };
+    if let Some(name) = special {
+        let key = lookup(name).expect("a key in the table");
+        out.push(TypeStep::Down { key, ascii: 0 });
+        out.push(TypeStep::Up { key });
+        return Ok(());
+    }
+    let byte = crate::keylayout::cp437(c).ok_or_else(|| format!("cannot type character {:?}", c))?;
+    let (key, shift, altgr, ascii) = match layout.reverse(byte) {
+        Some((scan, shift, altgr)) => {
+            (PcKey { scan, ascii: byte, shifted: byte, modifier: 0, extended: false }, shift, altgr, byte)
+        }
+        None => match char_to_key(c) {
+            Some((key, shift)) => (key, shift, false, if shift { key.shifted } else { key.ascii }),
+            None => {
+                out.push(TypeStep::Char(byte));
+                return Ok(());
+            }
+        },
+    };
+    let modifiers: Vec<PcKey> = [(shift, "lshift"), (altgr, "ralt")]
+        .into_iter()
+        .filter(|&(on, _)| on)
+        .map(|(_, name)| lookup(name).expect("a key in the table"))
+        .collect();
+    for &m in &modifiers {
+        out.push(TypeStep::Down { key: m, ascii: 0 });
+    }
+    out.push(TypeStep::Down { key, ascii });
+    out.push(TypeStep::Up { key });
+    for &m in modifiers.iter().rev() {
+        out.push(TypeStep::Up { key: m });
+    }
+    Ok(())
 }
 
 pub fn names() -> Vec<&'static str> {

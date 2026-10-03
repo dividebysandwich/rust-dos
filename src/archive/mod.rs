@@ -13,6 +13,9 @@
 //! A .dosz can name the archive it goes over with an empty
 //! `<parent>.parent` file: the drive has the parent's files under its own.
 
+pub mod patch;
+mod variants;
+pub use variants::{Entry as VariantEntry, Variants};
 pub mod zip;
 #[cfg(feature = "sevenz")]
 pub mod sevenz;
@@ -118,6 +121,13 @@ impl Archive {
     /// The archive at `path`: zip or 7z, whatever its extension says. A
     /// folder all the files are in is the root, unless `keep_root`.
     pub fn open(path: &Path, keep_root: bool) -> Result<Archive, String> {
+        Self::open_part(path, keep_root, None)
+    }
+
+    /// The archive at `path`, or with `only`, the files of a .dosc's
+    /// launch configuration of that name (its `[only]` folder) from its
+    /// root.
+    fn open_part(path: &Path, keep_root: bool, only: Option<&str>) -> Result<Archive, String> {
         let error = |e: String| format!("{}: {}", path.display(), e);
         let mut file = hostfs::File::open(path).map_err(|e| error(e.to_string()))?;
         let mut magic = [0u8; 6];
@@ -138,7 +148,7 @@ impl Archive {
             (Format::Zip(entries), listed)
         };
         let mut archive = Archive { path: path.to_path_buf(), format, entries: BTreeMap::new(), cache: RefCell::default() };
-        archive.list(listed, keep_root);
+        archive.list(listed, keep_root, only);
         Ok(archive)
     }
 
@@ -168,14 +178,23 @@ impl Archive {
     /// The entries by their paths, with the folders they are in, which
     /// archives needn't list; the folder all are in left out, unless
     /// `keep_root`. Unsafe paths and `.parent` markers aren't listed.
-    fn list(&mut self, listed: Vec<Listed>, keep_root: bool) {
+    fn list(&mut self, listed: Vec<Listed>, keep_root: bool, only: Option<&str>) {
         let safe = |name: &str| !name.is_empty() && name.split('/').all(|p| !p.is_empty() && p != "." && p != "..");
         // A .dosc's launch configurations ([Setup Program]/...) are other
-        // ways to start the game, not its files.
+        // ways to start the game, not its files, but for the one asked for.
         let changes = is_dosc(&self.path);
+        let folder = only.map(|name| format!("[{}]/", name.to_lowercase()));
         let listed: Vec<Listed> = listed
             .into_iter()
-            .filter(|l| safe(&l.0) && parent_marker(&l.0).is_none() && !(changes && l.0.starts_with('[')))
+            .filter_map(|mut l| match &folder {
+                Some(folder) => {
+                    let inner = l.0.get(folder.len()..).filter(|_| l.0.to_lowercase().starts_with(folder.as_str()))?;
+                    l.0 = inner.to_string();
+                    Some(l)
+                }
+                None => (!(changes && l.0.starts_with('['))).then_some(l),
+            })
+            .filter(|l| safe(&l.0) && parent_marker(&l.0).is_none())
             .collect();
         let top = listed.first().and_then(|l| l.0.split('/').next()).map(str::to_string);
         let strip = top.filter(|top| {
@@ -435,22 +454,132 @@ impl Handle for Slice {
 }
 
 /// Archives over each other, the first over the rest: a .dosz and its
-/// parents.
-pub struct Stack(Vec<Archive>);
+/// parents, each with its .dosc over it, and the files the .dosc patches.
+pub struct Stack {
+    layers: Vec<Archive>,
+    /// Files a .dosc patches, by their paths in lower case.
+    patched: BTreeMap<String, Patched>,
+    /// The patches named after their files (`GAME.EXE.ips`), which aren't
+    /// shown, in lower case.
+    hidden: Vec<String>,
+    /// What to tell the user: patches that can't be used.
+    pub notes: RefCell<Vec<String>>,
+}
+
+/// A patched file's contents and the archive of its base; or, the patch
+/// having failed, the base's archive, which has the file as it is.
+type Patching<'a> = Result<(Arc<Vec<u8>>, &'a Archive), &'a Archive>;
+
+/// A file a .dosc patches: the layer of its base, and the patch's layer,
+/// path and kind; patched the first time it is wanted.
+struct Patched {
+    base: usize,
+    patch: usize,
+    patch_path: String,
+    kind: patch::Kind,
+    /// The patched contents (None: the patch failed, and the file is the
+    /// base's).
+    result: RefCell<Option<Option<Arc<Vec<u8>>>>>,
+}
+
+impl Stack {
+    /// The topmost layer with `path`.
+    fn layer_of(&self, path: &str) -> Option<usize> {
+        self.layers.iter().position(|a| a.entry(path).is_ok())
+    }
+
+    /// The file at `path` as its patch makes it, if a patch is what the
+    /// layers have there; Err for the base's when the patch fails.
+    fn patched(&self, path: &str) -> Option<Patching<'_>> {
+        let patched = self.patched.get(&key(path))?;
+        let top = self.layer_of(path)?;
+        if top != patched.patch && top != patched.base {
+            return None;
+        }
+        let base = &self.layers[patched.base];
+        let mut result = patched.result.borrow_mut();
+        if result.is_none() {
+            let read = |archive: &Archive, path: &str| -> io::Result<Vec<u8>> {
+                let mut data = Vec::new();
+                archive.open(path)?.read_to_end(&mut data)?;
+                Ok(data)
+            };
+            let made = read(base, path)
+                .and_then(|b| Ok((b, read(&self.layers[patched.patch], &patched.patch_path)?)))
+                .map_err(|e| e.to_string())
+                .and_then(|(b, p)| patch::apply(patched.kind, &b, &p));
+            *result = Some(match made {
+                Ok(data) => Some(Arc::new(data)),
+                Err(e) => {
+                    self.notes.borrow_mut().push(format!("{}: {}", patched.patch_path, e));
+                    None
+                }
+            });
+        }
+        Some(result.clone().flatten().map(|data| (data, base)).ok_or(base))
+    }
+
+    /// The patches the .dosc at `patch` (a layer) has for its game at
+    /// `base`: files of the game's name that are patches by their first
+    /// bytes, and patches named after a file of the game.
+    fn find_patches(&mut self, patch: usize, base: usize) {
+        for file in self.layers[patch].files() {
+            let lower = key(&file);
+            let named = patch::EXTENSIONS.iter().find_map(|(ext, kind)| {
+                let target = lower.strip_suffix(ext)?.strip_suffix('.')?;
+                Some((target.to_string(), *kind))
+            });
+            let found = match named {
+                Some((target, kind)) if self.layers[base].entry(&target).is_ok_and(|e| !e.is_dir) => {
+                    self.hidden.push(lower.clone());
+                    Some((target, kind))
+                }
+                _ if self.layers[base].entry(&file).is_ok_and(|e| !e.is_dir) => {
+                    let mut magic = [0u8; 5];
+                    let read = self.layers[patch].open(&file).and_then(|mut h| h.read(&mut magic));
+                    read.ok().and_then(|n| patch::kind(&magic[..n])).map(|kind| (lower.clone(), kind))
+                }
+                _ => None,
+            };
+            match found {
+                Some((_, patch::Kind::Xor)) => {
+                    self.notes.borrow_mut().push(format!("{}: XOR patches aren't supported; the file is as the game has it", file))
+                }
+                Some((target, kind)) => {
+                    let patched = Patched { base, patch, patch_path: file, kind, result: RefCell::new(None) };
+                    self.patched.insert(target, patched);
+                }
+                None => {}
+            }
+        }
+    }
+}
 
 impl Lower for Stack {
     fn metadata(&self, path: &str) -> io::Result<Meta> {
-        self.0.iter().find_map(|a| a.metadata(path).ok()).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        match self.patched(path) {
+            Some(Ok((data, base))) => Ok(Meta { len: data.len() as u64, ..base.metadata(path)? }),
+            Some(Err(base)) => base.metadata(path),
+            None => self
+                .layers
+                .iter()
+                .find_map(|a| a.metadata(path).ok())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound)),
+        }
     }
 
     fn read_dir(&self, path: &str) -> io::Result<Vec<(OsString, bool)>> {
         let mut names: Vec<(OsString, bool)> = Vec::new();
         let mut found = false;
-        for archive in &self.0 {
+        let prefix = if path.is_empty() { String::new() } else { format!("{}/", key(path)) };
+        for archive in &self.layers {
             let Ok(more) = archive.read_dir(path) else { continue };
             found = true;
             for (name, is_dir) in more {
                 let lower = name.to_string_lossy().to_lowercase();
+                if self.hidden.contains(&format!("{}{}", prefix, lower)) {
+                    continue;
+                }
                 if !names.iter().any(|(n, _)| n.to_string_lossy().to_lowercase() == lower) {
                     names.push((name, is_dir));
                 }
@@ -460,8 +589,17 @@ impl Lower for Stack {
     }
 
     fn open(&self, path: &str) -> io::Result<Box<dyn Handle>> {
-        let archive = self.0.iter().find(|a| a.entry(path).is_ok()).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        archive.open(path)
+        match self.patched(path) {
+            Some(Ok((data, base))) => {
+                let modified = base.metadata(path)?.modified;
+                Ok(Box::new(Bytes { data, pos: 0, modified }))
+            }
+            Some(Err(base)) => base.open(path),
+            None => {
+                let at = self.layer_of(path).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+                self.layers[at].open(path)
+            }
+        }
     }
 }
 
@@ -469,9 +607,9 @@ impl Stack {
     /// The paths of the files, from the root.
     pub fn files(&self) -> Vec<String> {
         let mut files: Vec<String> = Vec::new();
-        for archive in &self.0 {
+        for archive in &self.layers {
             for file in archive.files() {
-                if !files.iter().any(|f| f.eq_ignore_ascii_case(&file)) {
+                if !self.hidden.contains(&key(&file)) && !files.iter().any(|f| f.eq_ignore_ascii_case(&file)) {
                     files.push(file);
                 }
             }
@@ -481,8 +619,15 @@ impl Stack {
 }
 
 /// The archive at `path` as a drive's files: with the parents a .dosz
-/// names under it.
+/// names under it, each with its .dosc.
 pub fn open(path: &Path) -> Result<Stack, String> {
+    open_variant(path, None)
+}
+
+/// `open`, with the launch configuration `variant` of the .dosc files
+/// (their `[variant]` folders) over all of it: the parents' under the
+/// child's, as the format orders them.
+pub fn open_variant(path: &Path, variant: Option<&str>) -> Result<Stack, String> {
     let mut chain = vec![path.to_path_buf()];
     loop {
         let last = chain.last().expect("an archive");
@@ -500,14 +645,41 @@ pub fn open(path: &Path) -> Result<Stack, String> {
     let keep_root = chain.len() > 1 || keeps_its_root(path);
     // Each with its .dosc over it: the changes made to it for running it
     // (its setup's configuration files, DOS.YML).
-    let mut archives = Vec::new();
-    for archive in &chain {
-        if let Some(changes) = dosc_of(archive) {
-            archives.push(Archive::open(&changes, true)?);
-        }
-        archives.push(Archive::open(archive, keep_root)?);
+    let mut stack = Stack { layers: Vec::new(), patched: BTreeMap::new(), hidden: Vec::new(), notes: RefCell::default() };
+    let mut pairs = Vec::new();
+    let doscs: Vec<Option<PathBuf>> = chain.iter().map(|archive| dosc_of(archive)).collect();
+    // The launch configuration's folders on top, each patching its own
+    // game; they are layers numbered from the archives' after them.
+    let variant_layers: Vec<(PathBuf, usize)> = match variant {
+        Some(_) => doscs.iter().enumerate().filter_map(|(i, d)| Some((d.clone()?, i))).collect(),
+        None => Vec::new(),
+    };
+    for (dosc, _) in &variant_layers {
+        stack.layers.push(Archive::open_part(dosc, true, variant)?);
     }
-    Ok(Stack(archives))
+    let mut base_of = Vec::new();
+    for (archive, dosc) in chain.iter().zip(&doscs) {
+        if let Some(changes) = dosc {
+            stack.layers.push(Archive::open(changes, true)?);
+            pairs.push((stack.layers.len() - 1, stack.layers.len()));
+        }
+        stack.layers.push(Archive::open(archive, keep_root)?);
+        base_of.push(stack.layers.len() - 1);
+    }
+    for (layer, (_, archive)) in variant_layers.iter().enumerate() {
+        pairs.insert(0, (layer, base_of[*archive]));
+    }
+    // A .dosc patches its own game's files only; the parents' first, so a
+    // child's patch of the same file wins.
+    for (patch, base) in pairs.into_iter().rev() {
+        stack.find_patches(patch, base);
+    }
+    // Patched now, so the sizes are known and what fails is told.
+    let targets: Vec<String> = stack.patched.keys().cloned().collect();
+    for target in targets {
+        stack.patched(&target);
+    }
+    Ok(stack)
 }
 
 fn is_dosc(path: &Path) -> bool {
@@ -539,10 +711,10 @@ pub fn dosz_of(dosc: &Path) -> Option<PathBuf> {
 /// The DOS.YML files of the archive at `path` and of what goes with it
 /// (its parents, its .dosc), in the order they apply: each one's keys over
 /// the ones before.
-pub fn dos_yml(path: &Path) -> Vec<String> {
-    let Ok(stack) = open(path) else { return Vec::new() };
+pub fn dos_yml(path: &Path, variant: Option<&str>) -> Vec<String> {
+    let Ok(stack) = open_variant(path, variant) else { return Vec::new() };
     stack
-        .0
+        .layers
         .iter()
         .rev()
         .filter_map(|archive| {
@@ -551,6 +723,34 @@ pub fn dos_yml(path: &Path) -> Vec<String> {
             Some(String::from_utf8_lossy(&text).into_owned())
         })
         .collect()
+}
+
+/// The launch configurations the .dosc files of the archive at `path`
+/// (and of its parents) have: their `[...]` folders' names, the child's
+/// first.
+pub fn variants(path: &Path) -> Vec<String> {
+    let mut chain = vec![path.to_path_buf()];
+    while let Ok(Some(parent)) = parent_of(chain.last().expect("an archive")) {
+        if chain.contains(&parent) || !hostfs::is_file(&parent) {
+            break;
+        }
+        chain.push(parent);
+    }
+    let mut names: Vec<String> = Vec::new();
+    for dosc in chain.iter().filter_map(|a| dosc_of(a)) {
+        let Ok(mut file) = hostfs::File::open(&dosc) else { continue };
+        let Ok(entries) = zip::central_directory(&mut file) else { continue };
+        for entry in entries {
+            let name = entry.name();
+            let top = name.split('/').next().unwrap_or("");
+            if let Some(inner) = top.strip_prefix('[').and_then(|t| t.strip_suffix(']'))
+                && !names.iter().any(|n| n.eq_ignore_ascii_case(inner))
+            {
+                names.push(inner.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Whether the archive at `path` is packaged as a .dosz is: a .dosz, or
@@ -708,8 +908,65 @@ mod tests {
         let stack = open(&path).unwrap();
         assert_eq!(read(&stack, "GAME.CFG"), b"set up");
         assert_eq!(names(&stack, ""), ["DOS.YML", "GAME.CFG", "GAME.EXE"], "no launch configurations");
-        assert_eq!(dos_yml(&path), ["cpu_year: 1990\r\n", "run_path: C:\\GAME.EXE\r\n"]);
+        assert_eq!(dos_yml(&path, None), ["cpu_year: 1990\r\n", "run_path: C:\\GAME.EXE\r\n"]);
         assert_eq!(dosz_of(&path.with_extension("dosc")), Some(path.clone()));
+    }
+
+    #[test]
+    fn a_dosc_patches_its_game_s_files() {
+        let ips = |offset: u8, bytes: &[u8]| {
+            let mut patch = b"PATCH".to_vec();
+            patch.extend([0, 0, offset, 0, bytes.len() as u8]);
+            patch.extend(bytes);
+            patch.extend(b"EOF");
+            patch
+        };
+        let game = zip::tests::zip(&[
+            ("GAME.EXE", b"MZ protected", false),
+            ("DATA/LEVEL.DAT", b"level one", false),
+            ("SOUND.DAT", b"noise", false),
+        ]);
+        let path = scratch("dosc-patch", "Game.dosz", &game);
+        let changes = zip::tests::zip(&[
+            // A patch with the file's name, and one named after its file.
+            ("GAME.EXE", &ips(3, b"cracked!!"), false),
+            ("DATA/LEVEL.DAT.ips", &ips(6, b"two"), false),
+            ("SOUND.DAT.xor", b"whatever", false),
+        ]);
+        std::fs::write(path.with_extension("dosc"), &changes).unwrap();
+        let stack = open(&path).unwrap();
+        assert_eq!(read(&stack, "GAME.EXE"), b"MZ cracked!!");
+        assert_eq!(stack.metadata("GAME.EXE").unwrap().len, 12);
+        assert_eq!(read(&stack, "data/level.dat"), b"level two");
+        assert_eq!(names(&stack, "DATA"), ["LEVEL.DAT"], "the patch isn't shown");
+        assert_eq!(read(&stack, "SOUND.DAT"), b"noise");
+        let notes = stack.notes.take();
+        assert_eq!(notes.len(), 1, "{:?}", notes);
+        assert!(notes[0].contains("XOR"));
+        assert!(!stack.files().iter().any(|f| f.ends_with(".ips")));
+    }
+
+    #[test]
+    fn a_launch_configuration_goes_over_the_rest() {
+        let game = zip::tests::zip(&[("GAME.EXE", b"MZ", false), ("GAME.CFG", b"defaults", false)]);
+        let path = scratch("dosc-variant", "Game.dosz", &game);
+        let changes = zip::tests::zip(&[
+            ("GAME.CFG", b"set up", false),
+            ("DOS.YML", b"run_path: C:\\GAME.EXE\r\n", false),
+            ("[2#Setup Program]/DOS.YML", b"run_path: C:\\SETUP.EXE\r\nrun_utility: true\r\n", false),
+            ("[2#Setup Program]/SETUP.EXE", b"MZ setup", false),
+            ("[MIDI]/GAME.CFG", b"midi", false),
+        ]);
+        std::fs::write(path.with_extension("dosc"), &changes).unwrap();
+        assert_eq!(variants(&path), ["2#Setup Program", "MIDI"]);
+        let midi = open_variant(&path, Some("midi")).unwrap();
+        assert_eq!(read(&midi, "GAME.CFG"), b"midi");
+        let setup = open_variant(&path, Some("2#Setup Program")).unwrap();
+        assert_eq!(read(&setup, "GAME.CFG"), b"set up");
+        assert_eq!(names(&setup, ""), ["DOS.YML", "GAME.CFG", "GAME.EXE", "SETUP.EXE"]);
+        let yml = dos_yml(&path, Some("2#Setup Program"));
+        assert_eq!(yml.len(), 2);
+        assert!(yml[1].contains("SETUP.EXE"), "the launch configuration's last: {:?}", yml);
     }
 
     #[test]

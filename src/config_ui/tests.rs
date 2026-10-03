@@ -35,6 +35,9 @@ struct FakeHost {
     /// The game profiles, and the games launched and made.
     games: Vec<GameEntry>,
     launched: Vec<String>,
+    /// The game with launch configurations, and those launched.
+    choices: Option<crate::games::LaunchChoices>,
+    variants: Vec<(String, Option<String>, bool)>,
     reset: Vec<String>,
     /// The games' manuals.
     manuals: Vec<crate::manuals::Manual>,
@@ -80,6 +83,8 @@ impl FakeHost {
             no_shaders: false,
             games: vec![],
             launched: vec![],
+            choices: None,
+            variants: vec![],
             reset: vec![],
             manuals: vec![],
             created: vec![],
@@ -180,6 +185,15 @@ impl Host for FakeHost {
 
     fn launch_game(&mut self, id: &str) -> Result<String, String> {
         self.launched.push(id.to_string());
+        Ok(format!("Starting {}", id))
+    }
+
+    fn launch_choices(&self, _id: &str) -> Option<crate::games::LaunchChoices> {
+        self.choices.clone()
+    }
+
+    fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
+        self.variants.push((id.to_string(), variant.map(str::to_string), tool));
         Ok(format!("Starting {}", id))
     }
 
@@ -2202,4 +2216,37 @@ fn the_sound_canvas_download_asks_first() {
     // The window is still open.
     assert!(ui.open);
     let _ = std::fs::remove_dir_all(&empty);
+}
+
+#[test]
+fn a_game_with_launch_configurations_is_started_as_chosen() {
+    let mut host = FakeHost::new();
+    let dirs: Vec<String> = ["Adlib + German", "MIDI + English", "MIDI + German", "Setup"].iter().map(|s| s.to_string()).collect();
+    host.choices = Some(crate::games::LaunchChoices {
+        name: "Game".into(),
+        variants: crate::archive::Variants::new(&dirs),
+        tools: vec!["Setup".into()],
+    });
+    let mut ui = opened(&host);
+    assert!(ui.show_launch("game", &host));
+    assert!(ui.pauses_machine());
+    // The default: the first row, the categories as they are.
+    ui.key(UiKey::Enter, &mut host);
+    assert_eq!(host.variants.pop(), Some(("game".into(), None, false)));
+    assert!(!ui.is_open());
+    // MIDI and English.
+    let mut ui = opened(&host);
+    ui.show_launch("game", &host);
+    keys(&mut ui, &mut host, &[UiKey::Down, UiKey::Right, UiKey::Enter]);
+    assert_eq!(host.variants.pop(), Some(("game".into(), Some("MIDI + English".into()), false)));
+    // The setup program, a tool.
+    let mut ui = opened(&host);
+    ui.show_launch("game", &host);
+    keys(&mut ui, &mut host, &[UiKey::End, UiKey::Enter]);
+    assert_eq!(host.variants.pop(), Some(("game".into(), Some("Setup".into()), true)));
+    // Esc launches nothing.
+    let mut ui = opened(&host);
+    ui.show_launch("game", &host);
+    ui.key(UiKey::Esc, &mut host);
+    assert!(host.variants.is_empty() && !ui.is_open());
 }

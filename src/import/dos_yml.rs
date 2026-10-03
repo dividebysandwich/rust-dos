@@ -185,8 +185,16 @@ fn apply(imported: &mut Imported, key: &str, value: &str, package: &Path) {
         // The root's configuration starts on its own; only other ones can
         // be utilities.
         "run_utility" => {}
-        "run_input" => imported.warnings.push(format!("DOS.YML run_input: {} isn't typed: start the game's own way", value)),
-        k if k.starts_with("input_") => {}
+        "run_input" => imported.input = Some(value.to_string()),
+        "input_directmouse" if flag != Some(true) => {}
+        "input_directmouse" => skipped(imported),
+        // The gamepad's buttons and the action wheel, and the mouse's
+        // speeds and wheel (padmap.rs).
+        k if k.starts_with("input_") => {
+            let key = k.trim_start_matches("input_").trim_start_matches("pad_").to_string();
+            imported.pad.retain(|(k, _)| *k != key);
+            imported.pad.push((key, value.to_string()));
+        }
         _ => skipped(imported),
     }
 }
@@ -209,8 +217,9 @@ mod tests {
         assert_eq!(get(&imported, "sbtype"), Some("sbpro2"));
         assert_eq!(get(&imported, "memsize"), Some("4"));
         assert_eq!(imported.autoexec, ["C:", "CD \\GAMES", "LIERO.EXE"]);
-        assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
-        assert!(imported.warnings[0].contains("run_input"));
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        assert_eq!(imported.input.as_deref(), Some("(WAIT:200)(ENTER)"));
+        assert_eq!(imported.pad, [("x".to_string(), "space Fire".to_string())]);
     }
 
     #[test]

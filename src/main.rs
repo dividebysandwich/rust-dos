@@ -328,6 +328,15 @@ fn main() -> Result<(), String> {
     let mut paused = false;
     // The game launched from its profile and not ended yet.
     let mut game: Option<ActiveGame> = None;
+    // A game whose ways to start are to be offered (launch.rs).
+    let mut choose: Option<String> = None;
+    // The keys the game's profile presses as it starts, and whether they
+    // turned on fast forward to get through a wait.
+    let mut autoinput: Option<rust_dos::autoinput::AutoInput> = None;
+    let mut autoinput_fast = false;
+    // The game's gamepad mapping at work on the first pad, and its action
+    // wheel while it is open.
+    let mut padmap: Option<rust_dos::padmap::PadMapper> = None;
     // The mouse captured for a program (Ctrl+Alt, Ctrl+F10, or a click once
     // it has the mouse driver): SDL's relative mode, whose motion keeps
     // coming at the window's edges.
@@ -423,6 +432,7 @@ fn main() -> Result<(), String> {
                 machine: &mut machine,
                 saved: &mut saved,
                 game: &mut game,
+                choose: &mut choose,
                 states: &states_root,
                 picture: &cached_frame,
                 state_done: &state_done,
@@ -448,9 +458,14 @@ fn main() -> Result<(), String> {
         };
     }
     if let Some((entry, text, dir)) = &startup_game {
-        match host!().start_game(&entry.id, text, dir) {
-            Ok(message) => osd.show(message),
-            Err(e) => config_warning(&mut cpu, &e),
+        // One with launch configurations offers them first.
+        if games::launch_choices(dir, text).is_some() {
+            choose = Some(entry.id.clone());
+        } else {
+            match host!().start_game(&entry.id, text, dir) {
+                Ok(message) => osd.show(message),
+                Err(e) => config_warning(&mut cpu, &e),
+            }
         }
     }
 
@@ -829,6 +844,10 @@ fn main() -> Result<(), String> {
                     // for programs that read the keyboard themselves, and
                     // what the keyboard layout types with it for the BIOS.
                     if let Some((scan, extended)) = sdl_keys::pc_scan(scancode) {
+                        // The player takes over from the game's keys.
+                        if let Some(mut input) = autoinput.take() {
+                            input.stop(&mut cpu);
+                        }
                         keyboard::key_event(&mut cpu.bus, scan, extended, true, None);
                         held.insert(scancode, (scan, extended));
                     }
@@ -915,6 +934,13 @@ fn main() -> Result<(), String> {
                     let dy = if matches!(direction, MouseWheelDirection::Flipped) { -y } else { y };
                     ui.wheel(dy, &mut host!());
                 }
+                // The game's mapping can bind the mouse's wheel.
+                Event::MouseWheel { y, direction, .. }
+                    if y != 0
+                        && padmap.as_mut().is_some_and(|m| {
+                            let up = (y > 0) != matches!(direction, MouseWheelDirection::Flipped);
+                            m.mouse_wheel(&mut cpu.bus, up)
+                        }) => {}
 
                 // The right button dragged over a text screen while the
                 // mouse isn't captured selects text; a click without a
@@ -1101,10 +1127,61 @@ fn main() -> Result<(), String> {
         if !waiting && !ui.is_open() && held.is_empty() {
             clipboard.feed(&mut cpu);
         }
+        // The keys the game's profile presses, once its program has
+        // started, run fast through their waits unless the player already
+        // runs it fast.
+        if !waiting && !ui.is_open() {
+            if autoinput.is_none()
+                && let Some(started) = game.as_mut().and_then(|g| g.take_input(&cpu))
+            {
+                autoinput = Some(started);
+            }
+            let status = autoinput.as_mut().map(|input| input.step(&mut cpu));
+            if status == Some(rust_dos::autoinput::Status::Done) {
+                autoinput = None;
+            }
+            let fast = status == Some(rust_dos::autoinput::Status::Busy { fast_forward: true });
+            if fast && !cpu.bus.mixer.fast_forward {
+                pacer.set_fast_forward(true, &cpu.bus.clock, std::time::Instant::now());
+                cpu.bus.mixer.fast_forward = true;
+                autoinput_fast = true;
+            } else if !fast && autoinput_fast {
+                pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
+                cpu.bus.mixer.fast_forward = false;
+                autoinput_fast = false;
+            }
+        }
         // The values frozen on the Cheats page, as the program left them.
         cpu.bus.apply_freezes();
         // The controllers as they are now; at rest while the machine waits.
+        // A game with a gamepad mapping plays the first pad with it.
+        let mapping = game.as_ref().and_then(|g| g.pad.clone());
+        if mapping.as_ref() != padmap.as_ref().map(|m| m.mapping()) {
+            if let Some(mut old) = padmap.take() {
+                old.release(&mut cpu.bus);
+            }
+            padmap = mapping.map(rust_dos::padmap::PadMapper::new);
+        }
+        let mut wheel_view: Option<rust_dos::padmap::WheelView> = None;
         for slot in 0..2 {
+            if slot == 0
+                && let Some(mapper) = &mut padmap
+            {
+                match controllers.first() {
+                    Some(pad) if !waiting && !ui.is_open() => {
+                        let snapshot = pad_snapshot(pad);
+                        if snapshot.inputs() != 0
+                            && let Some(mut input) = autoinput.take()
+                        {
+                            input.stop(&mut cpu);
+                        }
+                        wheel_view = mapper.update(&mut cpu.bus, snapshot.inputs(), snapshot.pointer());
+                    }
+                    _ => mapper.release(&mut cpu.bus),
+                }
+                cpu.bus.joystick.set_pad(0, mapper.joystick());
+                continue;
+            }
             let pad = controllers.get(slot).map(|pad| if waiting { joystick::PadState::default() } else { pad_state(pad) });
             cpu.bus.joystick.set_pad(slot, pad);
         }
@@ -1223,8 +1300,24 @@ fn main() -> Result<(), String> {
             && let Some(ended) = game.take_if(|g| g.done(&cpu))
         {
             let name = ended.name.clone();
+            if let Some(mut input) = autoinput.take() {
+                input.stop(&mut cpu);
+            }
+            // After a tool of the game's, the ways to start it again.
+            if ended.choose_after {
+                choose = Some(ended.id.clone());
+            }
             host!().end_game(ended);
             osd.show(format!("{} has ended: your settings are back", name));
+        }
+        // A game launched with ways to start it: the window offers them.
+        if let Some(id) = choose.take() {
+            if !ui.is_open() {
+                toggle_ui!();
+            }
+            if !ui.show_launch(&id, &host!()) {
+                ui.close();
+            }
         }
         if let Some(notice) = ui.take_notice() {
             osd.show(notice);
@@ -1407,6 +1500,9 @@ fn main() -> Result<(), String> {
         ui.set_display(display.output_scale(), true);
         ui.draw(&mut screen);
         ui.draw_overlay(&mut screen);
+        if let Some(view) = &wheel_view {
+            rust_dos::config_ui::wheel::draw(&mut screen, view);
+        }
         if capturing && record_ui {
             capture!();
         }
@@ -1640,6 +1736,8 @@ struct MainHost<'m, 'd> {
     saved: &'m mut Saved,
     /// The game launched and not ended yet.
     game: &'m mut Option<ActiveGame>,
+    /// A game whose ways to start the window is to offer.
+    choose: &'m mut Option<String>,
     /// The save states: their folder, the picture the machine shows, for
     /// theirs, and where the thread writing one says it is done.
     states: &'m Option<PathBuf>,
@@ -1653,6 +1751,14 @@ struct MainHost<'m, 'd> {
 }
 
 impl MainHost<'_, '_> {
+    /// The profile of the game `id`, and the games folder.
+    fn game_profile(&self, id: &str) -> Result<(String, PathBuf), String> {
+        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no configuration file for the games folder")?;
+        let path = dir.join(format!("{}.conf", id));
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+        Ok((text, dir))
+    }
+
     /// The file the settings window saves to: the game's profile while one
     /// plays, else the configuration file.
     fn config_path(&self) -> Result<PathBuf, String> {
@@ -1704,7 +1810,14 @@ impl MainHost<'_, '_> {
         });
         self.achievements.game_started(hash, &prepared.name);
         let message = format!("Starting {}", prepared.name);
-        *self.game = Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced, programs_before });
+        let (pad, pad_warnings) = rust_dos::padmap::PadMapping::parse(&prepared.pad);
+        let (input, warnings) = ActiveGame::input_steps(prepared.input.as_deref());
+        let warnings: Vec<String> = warnings.into_iter().chain(pad_warnings).collect();
+        for warning in warnings {
+            config_warning(self.cpu, &format!("games/{}.conf: {}", id, warning));
+        }
+        *self.game =
+            Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced, programs_before, input, pad, choose_after: false });
         Ok(message)
     }
 
@@ -2060,10 +2173,40 @@ impl Host for MainHost<'_, '_> {
         if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
             return Err("A program is running: quit it to launch a game".to_string());
         }
-        let dir = games_dir(self.saved.file.as_deref()).ok_or("There is no configuration file for the games folder")?;
-        let path = dir.join(format!("{}.conf", id));
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+        let (text, dir) = self.game_profile(id)?;
+        // One with launch configurations: the window offers them.
+        if let Some(choices) = games::launch_choices(&dir, &text) {
+            *self.choose = Some(id.to_string());
+            return Ok(format!("Choose how to start {}", choices.name));
+        }
         self.start_game(id, &text, &dir)
+    }
+
+    fn game_pad(&self, id: &str) -> Vec<(String, String)> {
+        let Ok((text, dir)) = self.game_profile(id) else { return Vec::new() };
+        let lines = rust_dos::config::parse(&text, &dir, None).game_pad;
+        rust_dos::padmap::PadMapping::parse(&lines).0.map(|m| m.labels()).unwrap_or_default()
+    }
+
+    fn launch_choices(&self, id: &str) -> Option<games::LaunchChoices> {
+        let (text, dir) = self.game_profile(id).ok()?;
+        games::launch_choices(&dir, &text)
+    }
+
+    fn launch_variant(&mut self, id: &str, variant: Option<&str>, tool: bool) -> Result<String, String> {
+        if !self.cpu.shell_idle() || self.cpu.batch.is_active() || self.cpu.shell_wait.is_some() {
+            return Err("A program is running: quit it to launch a game".to_string());
+        }
+        let (text, dir) = self.game_profile(id)?;
+        let text = match variant {
+            Some(variant) => games::variant_profile(&dir, &text, variant)?,
+            None => text,
+        };
+        let message = self.start_game(id, &text, &dir)?;
+        if let Some(game) = self.game.as_mut() {
+            game.choose_after = tool;
+        }
+        Ok(message)
     }
 
     fn create_game(&mut self, new: &NewGame, settings: &Settings) -> Result<String, String> {
@@ -2409,6 +2552,37 @@ fn open_log_file() -> Option<rust_dos::log::LogFile> {
 }
 
 /// A game controller's sticks and buttons, as the game port takes them.
+/// All of a controller's inputs, for a game's gamepad mapping (padmap.rs).
+fn pad_snapshot(pad: &sdl2::controller::GameController) -> rust_dos::padmap::PadSnapshot {
+    use sdl2::controller::{Axis, Button};
+    let axis = |axis| pad.axis(axis) as f32 / 32767.0;
+    // In the order of padmap::INPUTS.
+    let order = [
+        Button::DPadUp,
+        Button::DPadDown,
+        Button::DPadLeft,
+        Button::DPadRight,
+        Button::A,
+        Button::B,
+        Button::X,
+        Button::Y,
+        Button::LeftShoulder,
+        Button::RightShoulder,
+    ];
+    let mut buttons = order.iter().enumerate().filter(|(_, b)| pad.button(**b)).fold(0u32, |bits, (i, _)| bits | 1 << i);
+    // L2 and R2 are axes here; L3, R3, Select and Start after them.
+    for (i, button) in [(12, Button::LeftStick), (13, Button::RightStick), (14, Button::Back), (15, Button::Start)] {
+        if pad.button(button) {
+            buttons |= 1 << i;
+        }
+    }
+    rust_dos::padmap::PadSnapshot {
+        buttons,
+        axes: [axis(Axis::LeftX), axis(Axis::LeftY), axis(Axis::RightX), axis(Axis::RightY)],
+        triggers: [axis(Axis::TriggerLeft), axis(Axis::TriggerRight)],
+    }
+}
+
 fn pad_state(pad: &sdl2::controller::GameController) -> joystick::PadState {
     use sdl2::controller::{Axis, Button};
     let axis = |axis| pad.axis(axis) as f32 / 32767.0;
