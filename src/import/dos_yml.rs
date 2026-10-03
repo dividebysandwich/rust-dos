@@ -177,7 +177,7 @@ fn apply(imported: &mut Imported, key: &str, value: &str, package: &Path) {
         }
         "run_mount" => {
             let path = super::host_path(package, value);
-            let cd = ["iso", "cue", "chd", "ins"].iter().any(|e| lower.ends_with(&format!(".{}", e)));
+            let cd = ["iso", "cue", "chd", "ins", "inst"].iter().any(|e| lower.ends_with(&format!(".{}", e)));
             let (drive, kind) = if cd { (3, DriveKind::CdRom) } else { (0, DriveKind::Floppy) };
             imported.drives.retain(|d| d.drive != drive);
             imported.drives.push(MountSpec { drive, path, opts: MountOptions { kind, ..MountOptions::default() } });

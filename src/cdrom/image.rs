@@ -72,8 +72,8 @@ impl CdImage {
     /// (.iso, .bin, .img), whose sector format is found from where the
     /// ISO 9660 volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        // GOG's CUE sheets are .ins files.
-        let is_cue = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("ins"));
+        // GOG's CUE sheets are .ins files, .inst in Steam's copies.
+        let is_cue = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue") || e.eq_ignore_ascii_case("ins") || e.eq_ignore_ascii_case("inst"));
         if is_cue {
             Self::open_cue(path)
         } else {
