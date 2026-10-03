@@ -228,7 +228,8 @@ enum Slow {
     /// with the flags in EBP there (`dirty`), and goes on at `end`.
     /// The cached guest registers in `wb` go back into the CPU before the
     /// handler runs, and those in `reload` are loaded again after.
-    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, wb: u8, reload: u8 },
+    /// With `leave`, the block stops after it (an `FpuGuard`'s).
+    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, wb: u8, reload: u8, leave: bool },
 }
 
 struct Gen<'a> {
@@ -286,6 +287,13 @@ struct Gen<'a> {
     /// links are only taken where the segments are flat as the block's
     /// environment has them.
     loaded_segs: u8,
+    /// Whether an FPU instruction of the block has checked CR0's EM and TS,
+    /// which don't change within it, and the registers ST(i) (bit i) known
+    /// not to be empty where the code being generated runs: those an
+    /// `FpuGuard` checked or the block pushed. A handler's call forgets
+    /// them (it may be an FPU instruction's).
+    fpu_cr0_checked: bool,
+    fpu_known: u8,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -350,6 +358,8 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         cache: Cache { host: choose_cached(items), ..Cache::default() },
         wb_at: vec![0; n],
         loaded_segs: 0,
+        fpu_cr0_checked: false,
+        fpu_known: 0,
     };
     g.prologue();
     let mut synced = 0;
@@ -371,6 +381,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.check_watched();
                 g.check_next_page();
                 g.fallback(ix as i32);
+                g.fpu_known = 0;
                 g.cache.loaded = 0;
                 if let Some(seg) = super::block::loaded_segment(&data.instrs[ix]) {
                     g.loaded_segs |= 1 << seg as u8;
@@ -756,7 +767,7 @@ impl Gen<'_> {
                         ; jmp =>fail
                     );
                 }
-                Slow::Bail { at, end, ix, dirty, wb, reload } => {
+                Slow::Bail { at, end, ix, dirty, wb, reload, leave } => {
                     // As a handler's call in the block, but with the
                     // instruction count put back after it, as the code on
                     // from `end` has it. A stop leaves the flags and
@@ -781,6 +792,10 @@ impl Gen<'_> {
                         dynasm!(self.ops ; .arch x64 ; sub QWORD [rbx + ICOUNT], lag);
                     }
                     dynasm!(self.ops ; .arch x64 ; test eax, eax ; jnz >stop);
+                    if leave {
+                        // The instruction is done: the execution loop goes on.
+                        dynasm!(self.ops ; .arch x64 ; mov eax, EXIT_AFTER as i32 ; jmp >stop);
+                    }
                     if self.end_dirty[ix] {
                         dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
                     }
@@ -1014,7 +1029,7 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), mask as i32 ; jnz =>at);
                 let end = self.end();
                 let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::Imul { size, a, b } => {
                 let a = r(a);
@@ -1125,7 +1140,7 @@ impl Gen<'_> {
                 );
                 let end = self.end();
                 let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
                 let top = self.ops.new_dynamic_label();
                 dynasm!(self.ops
                     ; .arch x64
@@ -1145,7 +1160,7 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + FLAGS], DF ; jnz =>at);
                 let end = self.end();
                 let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
             Uop::FGet { x, i } => {
@@ -1164,6 +1179,7 @@ impl Gen<'_> {
                 );
             }
             Uop::FPush { x, canon } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
                 if canon {
                     self.fpu_canon(x.0);
                 }
@@ -1179,6 +1195,7 @@ impl Gen<'_> {
                 );
             }
             Uop::FPop { n } => {
+                self.fpu_known >>= n;
                 dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
                 for _ in 0..n {
                     dynasm!(self.ops
@@ -1198,6 +1215,9 @@ impl Gen<'_> {
                     ; lea ecx, [rax + src as i32]
                     ; and ecx, 7
                 );
+                if dst.is_none() {
+                    self.fpu_known = self.fpu_known << 1 | 1;
+                }
                 match dst {
                     Some(dst) => dynasm!(self.ops ; .arch x64 ; lea edx, [rax + dst as i32] ; and edx, 7),
                     None => dynasm!(self.ops
@@ -1390,12 +1410,20 @@ impl Gen<'_> {
     /// CR0 has EM or TS set, or one of the registers in `valid` is empty.
     fn fpu_guard(&mut self, valid: u8) {
         const EM_TS: i8 = 0x0C;
+        // CR0 doesn't change within a block, and the registers the block
+        // found or made valid stay so (`fpu_known`): checked once.
+        let tags = valid & !self.fpu_known;
+        if self.fpu_cr0_checked && tags == 0 {
+            return;
+        }
         let at = self.ops.new_dynamic_label();
-        dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + CR0], EM_TS ; jnz =>at);
-        if valid != 0 {
+        if !self.fpu_cr0_checked {
+            dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + CR0], EM_TS ; jnz =>at);
+        }
+        if tags != 0 {
             dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
         }
-        for i in (0..8).filter(|i| valid >> i & 1 != 0) {
+        for i in (0..8).filter(|i| tags >> i & 1 != 0) {
             if i == 0 {
                 dynasm!(self.ops ; .arch x64 ; cmp BYTE [rbx + rax + FPU_TAGS], FPU_EMPTY ; je =>at);
             } else {
@@ -1408,9 +1436,14 @@ impl Gen<'_> {
                 );
             }
         }
+        self.fpu_cr0_checked = true;
+        self.fpu_known |= valid;
+        // The handler runs the instruction then, and the block stops after
+        // it: what the code after it knows of the registers holds only
+        // where this one's operations ran.
         let end = self.end();
         let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
     }
 
     /// Make the double in XMM register `x` what an FPU register holds
