@@ -7,7 +7,9 @@ pub fn fninit(cpu: &mut Cpu) {
     // Initialize FPU
     cpu.fpu_top = 0;
     // Clear stack for debug clarity
-    cpu.fpu_stack = [F80::new(); 8];
+    for i in 0..8 {
+        cpu.fpu_set_reg(i, F80::new());
+    }
     cpu.fpu_control = 0x037F;
     // Reset FPU status registers here.
     cpu.set_fpu_flags(FpuFlags::empty());
@@ -90,7 +92,7 @@ fn tag_word(cpu: &Cpu) -> u16 {
         let tag = if cpu.fpu_tags[i] == FPU_TAG_EMPTY {
             0b11
         } else {
-            let val = cpu.fpu_stack[i];
+            let val = cpu.fpu_reg(i);
             if val.is_zero() {
                 0b01
             } else if val.is_nan() || val.is_infinite() {
@@ -167,7 +169,7 @@ pub fn fnsave(cpu: &mut Cpu, instr: &Instruction) {
     let size = env_size(instr);
     store_env(cpu, addr, size);
     for i in 0..8 {
-        let bytes = cpu.fpu_stack[cpu.fpu_get_phys_index(i)].get_bytes();
+        let bytes = cpu.fpu_reg(cpu.fpu_get_phys_index(i)).get_bytes();
         for (b, &byte) in bytes.iter().enumerate() {
             cpu.lin_write_8(addr + size + 10 * i + b, byte);
         }
@@ -186,6 +188,8 @@ pub fn frstor(cpu: &mut Cpu, instr: &Instruction) {
             *byte = cpu.lin_read_8(addr + size + 10 * i + b);
         }
         let phys = cpu.fpu_get_phys_index(i);
-        cpu.fpu_stack[phys].set_bytes(&bytes);
+        let mut value = F80::new();
+        value.set_bytes(&bytes);
+        cpu.fpu_set_reg(phys, value);
     }
 }

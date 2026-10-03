@@ -156,11 +156,11 @@ fn is_mm(reg: Register) -> bool {
 
 /// MMn: the significand of physical FPU register n.
 fn mm(cpu: &Cpu, reg: Register) -> u64 {
-    cpu.fpu_stack[reg as usize - Register::MM0 as usize].st as u64
+    cpu.fpu_reg(reg as usize - Register::MM0 as usize).st as u64
 }
 
 fn set_mm(cpu: &mut Cpu, reg: Register, value: u64) {
-    cpu.fpu_stack[reg as usize - Register::MM0 as usize].st = MMX_EXPONENT | value as u128;
+    cpu.fpu_set_reg(reg as usize - Register::MM0 as usize, crate::f80::F80 { st: MMX_EXPONENT | value as u128 });
 }
 
 /// What every MMX instruction but EMMS does to the FPU: top of stack 0,

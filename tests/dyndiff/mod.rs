@@ -25,6 +25,9 @@ pub struct State {
     pub icount: u64,
     pub executed: u64,
     pub exceptions: u64,
+    /// The FPU: the registers' 80 bits, their tags, the stack top, and the
+    /// status and control words.
+    pub fpu: ([u128; 8], [u8; 8], usize, u16, u16),
 }
 
 impl State {
@@ -41,6 +44,13 @@ impl State {
             icount: bus.clock.icount,
             executed: cpu.executed,
             exceptions: cpu.exceptions,
+            fpu: (
+                std::array::from_fn(|i| cpu.fpu_reg(i).st),
+                cpu.fpu_tags,
+                cpu.fpu_top,
+                cpu.get_fpu_flags().bits(),
+                cpu.fpu_control,
+            ),
         }
     }
 

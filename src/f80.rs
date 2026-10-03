@@ -496,3 +496,181 @@ impl F80 {
 }
 
 crate::state_fields!(F80 { st });
+
+/// What a double is after it went into an FPU register and came back
+/// (`F80::set_f64`, then `get_f64`): a denormal is 0, and a NaN quiet.
+#[inline]
+pub fn canon_f64(value: f64) -> f64 {
+    let bits = value.to_bits();
+    let exp = bits >> 52 & 0x7FF;
+    let canon = if exp == 0 {
+        bits & 1 << 63
+    } else if exp == 0x7FF && bits << 12 != 0 {
+        bits | 1 << 51
+    } else {
+        bits
+    };
+    f64::from_bits(canon)
+}
+
+/// The FPU's eight registers, by their physical numbers. Each holds its
+/// 80 bits, and next to them the double they come to (`F80::get_f64`),
+/// which most instructions compute with. A register an instruction gave
+/// a double (`set_f64`) keeps only that until something asks for its 80
+/// bits (`stale`): they are the double's (`F80::set_f64`), made then.
+/// The dynamic recompiler's code reads and writes the three arrays where
+/// they are (`cpu::layout`).
+#[derive(Clone)]
+#[repr(C)]
+pub struct FpuRegs {
+    x80: [F80; 8],
+    f64s: [f64; 8],
+    stale: [u8; 8],
+}
+
+impl Default for FpuRegs {
+    fn default() -> Self {
+        FpuRegs { x80: [F80::new(); 8], f64s: [0.0; 8], stale: [0; 8] }
+    }
+}
+
+impl FpuRegs {
+    pub const X80_OFFSET: usize = std::mem::offset_of!(FpuRegs, x80);
+    pub const F64_OFFSET: usize = std::mem::offset_of!(FpuRegs, f64s);
+    pub const STALE_OFFSET: usize = std::mem::offset_of!(FpuRegs, stale);
+
+    /// Register `i`'s 80 bits.
+    #[inline]
+    pub fn get(&self, i: usize) -> F80 {
+        if self.stale[i] != 0 {
+            let mut f = F80::new();
+            f.set_f64(self.f64s[i]);
+            f
+        } else {
+            self.x80[i]
+        }
+    }
+
+    #[inline]
+    pub fn set(&mut self, i: usize, value: F80) {
+        self.x80[i] = value;
+        self.f64s[i] = value.get_f64();
+        self.stale[i] = 0;
+    }
+
+    /// Register `i` as a double.
+    #[inline]
+    pub fn get_f64(&self, i: usize) -> f64 {
+        self.f64s[i]
+    }
+
+    /// Give register `i` a double: what `set` of an `F80` set to it
+    /// (`F80::set_f64`) leaves.
+    #[inline]
+    pub fn set_f64(&mut self, i: usize, value: f64) {
+        self.f64s[i] = canon_f64(value);
+        self.stale[i] = 1;
+    }
+}
+
+impl crate::savestate::State for FpuRegs {
+    /// As the eight registers' 80 bits.
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        let x80: [F80; 8] = std::array::from_fn(|i| self.get(i));
+        crate::savestate::State::save(&x80, w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let mut x80 = [F80::new(); 8];
+        crate::savestate::State::load(&mut x80, r)?;
+        for (i, value) in x80.into_iter().enumerate() {
+            self.set(i, value);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Doubles of every kind: zeros, denormals, normals, infinities, NaNs.
+    fn samples() -> Vec<f64> {
+        let mut bits: Vec<u64> = vec![0, 1, 0xF_FFFF_FFFF_FFFF, 0x10_0000_0000_0000, 0x3FF0_0000_0000_0000];
+        bits.extend([0x7FEF_FFFF_FFFF_FFFF, 0x7FF0_0000_0000_0000, 0x7FF0_0000_0000_0001, 0x7FF8_0000_0000_0000]);
+        bits.extend([0x7FF4_0000_1234_5678, 0x4009_21FB_5444_2D18, 0x0008_0000_0000_0000]);
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..10_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            bits.push(x);
+        }
+        bits.iter().flat_map(|&b| [f64::from_bits(b), f64::from_bits(b | 1 << 63)]).collect()
+    }
+
+    #[test]
+    fn canon_is_a_double_through_a_register() {
+        for v in samples() {
+            let mut f = F80::new();
+            f.set_f64(v);
+            assert_eq!(canon_f64(v).to_bits(), f.get_f64().to_bits(), "{:016X}", v.to_bits());
+            // And a register given it holds the same 80 bits either way.
+            let mut g = F80::new();
+            g.set_f64(canon_f64(v));
+            assert_eq!(f.st, g.st, "{:016X}", v.to_bits());
+            assert_eq!(canon_f64(canon_f64(v)).to_bits(), canon_f64(v).to_bits());
+        }
+    }
+
+    #[test]
+    fn a_single_as_a_double_is_canonical() {
+        let mut x = 0x2545_F491u32;
+        let mut bits = vec![0u32, 1, 0x7F_FFFF, 0x80_0000, 0x7F80_0000, 0x7F80_0001, 0x7FC0_0000, 0x3F80_0000];
+        for _ in 0..10_000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            bits.push(x);
+        }
+        for b in bits.into_iter().flat_map(|b| [b, b | 1 << 31]) {
+            let v = f32::from_bits(b) as f64;
+            assert_eq!(canon_f64(v).to_bits(), v.to_bits(), "{:08X}", b);
+        }
+    }
+
+    #[test]
+    fn an_integer_as_a_double_has_the_integers_80_bits() {
+        let mut values: Vec<i32> = vec![0, 1, -1, 2, -2, 255, 32767, -32768, i32::MAX, i32::MIN, 0x1234_5678];
+        let mut x = 0x2545_F491u32;
+        for _ in 0..10_000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            values.push(x as i32);
+        }
+        for v in values {
+            let mut f = F80::new();
+            f.set_f64(v as f64);
+            assert_eq!(f.st, F80::encode_from_u128(v.unsigned_abs() as u128, v < 0), "{}", v);
+            assert_eq!(canon_f64(v as f64).to_bits(), (v as f64).to_bits());
+        }
+    }
+
+    #[test]
+    fn registers_keep_a_double_as_its_80_bits() {
+        let mut regs = FpuRegs::default();
+        for (i, v) in samples().into_iter().enumerate() {
+            let i = i & 7;
+            regs.set_f64(i, v);
+            let mut f = F80::new();
+            f.set_f64(v);
+            assert_eq!(regs.get(i).st, f.st);
+            assert_eq!(regs.get_f64(i).to_bits(), f.get_f64().to_bits());
+            let got = regs.get(i);
+            regs.set(i, got);
+            assert_eq!(regs.get(i).st, f.st);
+            assert_eq!(regs.get_f64(i).to_bits(), f.get_f64().to_bits());
+        }
+    }
+}

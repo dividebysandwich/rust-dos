@@ -207,6 +207,9 @@ pub const CR4_PSE: u32 = 0x0000_0010;
 // FPU Tag Word Values
 pub const FPU_TAG_EMPTY: u8 = 1;
 pub const FPU_TAG_VALID: u8 = 0;
+/// The real indefinite as a double (`F80::get_f64` of it): what an empty
+/// register reads as.
+pub const FPU_INDEFINITE_F64: f64 = f64::from_bits(0xFFF8_0000_0000_0000);
 
 // Constants for Flag Bits
 bitflags! {
@@ -377,7 +380,7 @@ pub struct Cpu {
     pub bios_wait_until: Option<u64>,
 
     // FPU State
-    pub fpu_stack: [F80; 8],
+    fpu_stack: crate::f80::FpuRegs,
     pub fpu_top: usize,
     fpu_flags: FpuFlags,
     pub fpu_control: u16,
@@ -529,7 +532,7 @@ impl Cpu {
             stdin_redirect: None,
             batch: crate::batch::Batch::default(),
             environment: default_environment(),
-            fpu_stack: [F80::new(); 8],
+            fpu_stack: crate::f80::FpuRegs::default(),
             fpu_top: 0,
             fpu_flags: FpuFlags::from_bits_truncate(0x0000),
             fpu_control: 0x037F, // Default Control Word
@@ -992,36 +995,72 @@ impl Cpu {
         // Decrement top pointer (wrapping)
         self.fpu_top = (self.fpu_top.wrapping_sub(1)) & 7;
         // Write Value
-        self.fpu_stack[self.fpu_top as usize] = val;
+        self.fpu_stack.set(self.fpu_top, val);
         // Mark as VALID
-        self.fpu_tags[self.fpu_top as usize] = FPU_TAG_VALID;
+        self.fpu_tags[self.fpu_top] = FPU_TAG_VALID;
+    }
+
+    /// Push a double: `fpu_push` of an `F80` set to it.
+    pub fn fpu_push_f64(&mut self, val: f64) {
+        self.fpu_top = (self.fpu_top.wrapping_sub(1)) & 7;
+        self.fpu_stack.set_f64(self.fpu_top, val);
+        self.fpu_tags[self.fpu_top] = FPU_TAG_VALID;
     }
 
     // Pop value from FPU Stack
     pub fn fpu_pop(&mut self) -> F80 {
-        let val = self.fpu_stack[self.fpu_top as usize];
+        let val = self.fpu_stack.get(self.fpu_top);
+        self.fpu_drop();
+        val
+    }
+
+    /// Pop, for nothing.
+    pub fn fpu_drop(&mut self) {
         // Mark current top as EMPTY before moving on
-        self.fpu_tags[self.fpu_top as usize] = FPU_TAG_EMPTY;
+        self.fpu_tags[self.fpu_top] = FPU_TAG_EMPTY;
         // Increment top pointer (wrapping)
         self.fpu_top = (self.fpu_top + 1) & 7;
-        val
     }
 
     // Access ST(i) relative to Top
     pub fn fpu_get(&self, index: usize) -> F80 {
         let actual_idx = (self.fpu_top.wrapping_add(index)) & 7;
-        if self.fpu_tags[actual_idx as usize] == crate::cpu::FPU_TAG_EMPTY {
+        if self.fpu_tags[actual_idx] == crate::cpu::FPU_TAG_EMPTY {
             let mut ind = F80::new();
             ind.set_real_indefinite();
             return ind;
         }
-        self.fpu_stack[actual_idx as usize]
+        self.fpu_stack.get(actual_idx)
+    }
+
+    /// ST(i) as a double: `fpu_get(i).get_f64()`.
+    pub fn fpu_get_f64(&self, index: usize) -> f64 {
+        let actual_idx = (self.fpu_top.wrapping_add(index)) & 7;
+        if self.fpu_tags[actual_idx] == crate::cpu::FPU_TAG_EMPTY {
+            return FPU_INDEFINITE_F64;
+        }
+        self.fpu_stack.get_f64(actual_idx)
     }
 
     // Set ST(i) relative to Top
     pub fn fpu_set(&mut self, index: usize, val: F80) {
         let actual_idx = (self.fpu_top + index) & 7;
-        self.fpu_stack[actual_idx] = val;
+        self.fpu_stack.set(actual_idx, val);
+    }
+
+    /// Set ST(i) to a double: `fpu_set` of an `F80` set to it.
+    pub fn fpu_set_f64(&mut self, index: usize, val: f64) {
+        let actual_idx = (self.fpu_top + index) & 7;
+        self.fpu_stack.set_f64(actual_idx, val);
+    }
+
+    /// Physical register `i`'s 80 bits, whatever its tag, and setting them.
+    pub fn fpu_reg(&self, i: usize) -> F80 {
+        self.fpu_stack.get(i)
+    }
+
+    pub fn fpu_set_reg(&mut self, i: usize, val: F80) {
+        self.fpu_stack.set(i, val);
     }
 
     // Get physical index for ST(i)

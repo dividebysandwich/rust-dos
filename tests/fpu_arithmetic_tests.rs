@@ -264,7 +264,7 @@ fn test_fadd_diagnostic() {
         cpu.fpu_top, cpu.fpu_get(0).get_f64(), cpu.fpu_get(1).get_f64());
     
     for i in 0..8 {
-        println!("Phys Reg {}: {:?} (Tag: {})", i, cpu.fpu_stack[i].get_f64(), cpu.fpu_tags[i]);
+        println!("Phys Reg {}: {:?} (Tag: {})", i, cpu.fpu_reg(i).get_f64(), cpu.fpu_tags[i]);
     }
 
     assert_eq!(cpu.fpu_get(1).get_f64(), 13.0);

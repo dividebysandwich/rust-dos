@@ -107,7 +107,7 @@ pub fn fxam(cpu: &mut Cpu) {
     cpu.set_fpu_flag(FpuFlags::C3 | FpuFlags::C2 | FpuFlags::C1 | FpuFlags::C0, false);
 
     let tag = cpu.fpu_tags[cpu.fpu_top as usize];
-    let st0 = cpu.fpu_stack[cpu.fpu_top as usize]; // Access raw stack to avoid fpu_get logic
+    let st0 = cpu.fpu_reg(cpu.fpu_top); // Access raw stack to avoid fpu_get logic
 
     // Set C1 to the Sign Bit
     if st0.get_sign() {

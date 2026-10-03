@@ -178,7 +178,7 @@ fn test_fsave_frstor_full_cycle() {
     // We modify the physical array directly to ensure raw state preservation.
     let mut val = rust_dos::f80::F80::new();
     val.set_f64(123.456);
-    cpu.fpu_stack[3] = val; // CORRECTION: Use fpu_stack
+    cpu.fpu_set_reg(3, val); // CORRECTION: Use fpu_stack
     cpu.fpu_tags[3] = FPU_TAG_VALID;
 
     // 2. Execute FSAVE [1000] (9B DD 36 00 10)
@@ -192,7 +192,7 @@ fn test_fsave_frstor_full_cycle() {
     
     // 3. Scramble the state to prove FRSTOR actually overwrites it
     cpu.fpu_control = 0xFFFF;
-    cpu.fpu_stack[3].set_f64(0.0); // CORRECTION: Use fpu_stack
+    cpu.fpu_set_reg(3, rust_dos::f80::F80::new()); // CORRECTION: Use fpu_stack
 
     // 4. Execute FRSTOR [1000] (DD 26 00 10)
     testrunners::run_cpu_code(&mut cpu, &[0xDD, 0x26, 0x00, 0x10]);
@@ -203,7 +203,7 @@ fn test_fsave_frstor_full_cycle() {
     assert!(cpu.get_fpu_flags().contains(FpuFlags::C2), "Status Flags not restored");
     
     // Verify the value came back
-    let restored_val = cpu.fpu_stack[3].get_f64(); // CORRECTION: Use fpu_stack
+    let restored_val = cpu.fpu_reg(3).get_f64(); // CORRECTION: Use fpu_stack
     assert!((restored_val - 123.456).abs() < 0.001, "Register value lost during Save/Restore");
     assert_eq!(cpu.fpu_tags[3], FPU_TAG_VALID, "Tag Word not restored correctly");
 }
