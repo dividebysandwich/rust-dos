@@ -52,4 +52,24 @@ pub const TLB_SET: usize = super::paging::TLB_SET;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const TLB: usize = offset_of!(Cpu, tlb) + super::paging::TLB_ENTRIES_AT;
 
+/// The FPU: the stack top (a usize, 0 to 7), the tags (a byte each, by
+/// physical register), the status flags and the control word (u16s), and
+/// the registers' doubles, 80 bits (16 bytes each) and which of those are
+/// stale (a byte each), see `f80::FpuRegs`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub mod fpu {
+    use super::super::{Cpu, FpuFlags};
+    use crate::f80::FpuRegs;
+    use std::mem::{offset_of, size_of};
+
+    pub const TOP: usize = offset_of!(Cpu, fpu_top);
+    pub const TAGS: usize = offset_of!(Cpu, fpu_tags);
+    pub const FLAGS: usize = offset_of!(Cpu, fpu_flags);
+    pub const CONTROL: usize = offset_of!(Cpu, fpu_control);
+    pub const F64: usize = offset_of!(Cpu, fpu_stack) + FpuRegs::F64_OFFSET;
+    pub const X80: usize = offset_of!(Cpu, fpu_stack) + FpuRegs::X80_OFFSET;
+    pub const STALE: usize = offset_of!(Cpu, fpu_stack) + FpuRegs::STALE_OFFSET;
+    const _: () = assert!(size_of::<FpuFlags>() == 2 && size_of::<crate::f80::F80>() == 16);
+}
+
 const _: () = assert!(size_of::<CpuFlags>() == 4);

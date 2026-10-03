@@ -222,7 +222,9 @@ Each instruction becomes one of two things:
     and fill in small pieces often, and the handler does more at once, see
     `instructions::string`);
   - near JMP and CALL (of a register or memory too), RET, Jcc, LOOPcc and
-    JCXZ.
+    JCXZ;
+  - on x86-64 hosts, the FPU instructions programs run all the time (see
+    [The FPU](#the-fpu)).
 
   Each does what the instruction's interpreter handler does, in the same
   order, flags included. Where a form has rare cases the operations don't
@@ -233,6 +235,46 @@ Each instruction becomes one of two things:
   `jit_fallback`, which does what `exec::execute_at` does. Every
   instruction works in a block from the start; translating more forms only
   makes them faster.
+
+### The FPU
+
+The interpreter computes products, quotients, loads, stores and
+comparisons with doubles, and sums and differences on the registers' 80
+bits (`F80::add`). So each FPU register keeps the double it comes to
+beside its 80 bits (`f80::FpuRegs`): an instruction that gives a register
+a double stores only that, and the 80 bits are made from it when
+something asks for them (a sum, FSTP of 10 bytes, FSAVE, a saved state).
+The double is always what the 80 bits would come to (`f80::canon_f64`: a
+denormal is 0 and a NaN quiet, as a double that went through 80 bits
+always was).
+
+On x86-64 hosts `dynrec/fpu.rs` translates these forms, which then run on
+the doubles with SSE2, as their handlers do:
+
+- FLD, FST and FSTP of a single and of ST(i), FLD1, FLDZ, FXCH;
+- FILD, FIST and FISTP of a word and a dword (converted inline where the
+  control word rounds to nearest or chops and the result fits, else by
+  the handler's own `fpu::data::to_int`);
+- FMUL, FDIV, FDIVR and their popping forms, with a single or ST(i) (a
+  division by 0 through `fpu::arithmetic::divided_by_zero`);
+- FADD, FSUB, FSUBR and their popping forms: calls of the handlers' own
+  `fpu::arithmetic::addsub_st` and `addsub_value`, on the 80 bits;
+- FCOM, FCOMP, FCOMPP and the FUCOMs with a single or ST(i), FNSTSW AX,
+  FLDCW and FNSTCW.
+
+Each starts with an `FpuGuard` operation, which runs the instruction
+through its handler instead where CR0 has EM or TS set (#NM), or a
+register it reads is empty (it then reads as the real indefinite).
+Memory operands are checked as the handlers check them, before anything
+changes. Operands of 8 and 10 bytes, the other instructions and ARM64
+hosts go through the handlers.
+
+Two NaNs with different payloads meeting in one multiplication or
+division may come out as either one, depending on which operand the
+compiler made the destination in the handler; nothing else differs.
+
+The lockstep tests compare the FPU's registers (their 80 bits), tags,
+stack top, status and control words after every batch.
 
 Both code generators keep the guest's registers in the `Cpu`, and its
 arithmetic flags (CF, PF, AF, ZF, SF, OF) in a host register from the
@@ -444,6 +486,7 @@ recompiled or interpreted.
 and compares them after each:
 
 - the registers, CR0, CR2, CR3 and CPL;
+- the FPU's registers, tags, stack top, status and control words;
 - the instruction counts and exceptions;
 - RAM, video memory, the palette and the debug console.
 
@@ -452,7 +495,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

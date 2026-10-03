@@ -1981,3 +1981,303 @@ fn a_stack_switch_to_another_width_stops_the_block_after_it() {
     // SS:SP.
     assert_eq!(b.read32(0x7FFC), (DATA16 as u32) << 16 | 1);
 }
+
+/// Singles of every kind for the FPU tests: ordinary ones, zeros, a
+/// denormal, infinities, a quiet and a signalling NaN, and ones that don't
+/// fit a dword.
+const SINGLES: [u32; 20] = [
+    0x3FC0_0000, // 1.5
+    0xC010_0000, // -2.25
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_1234, // a denormal
+    0x7F80_0000,
+    0xFF80_0000,
+    0x7FC0_0000,
+    0x7F80_0001,
+    0x7F7F_FFFF,
+    0x0DA2_4260, // 1e-30
+    0x4B80_0001, // 16777218
+    0x3F00_0000, // 0.5
+    0x4020_0000, // 2.5
+    0xBF00_0000, // -0.5
+    0x501502F9, // 1e10
+    0x4F00_0000, // 2^31
+    0xCF00_0000, // -2^31
+    0x46FF_FE00, // 32767
+    0x4700_0000, // 32768
+];
+const INTS: [u32; 8] = [0, 1, 0xFFFF_FFFF, 0x7FFF, 0x8000, 0x1234_5678, 0x8000_0000, 0x7FFF_FFFF];
+
+/// Run `body` once for every pair of `SINGLES` and control word (rounding
+/// to nearest, down, up and chopping): ESI points at the two singles, a
+/// dword and the control word; EDI at 64 bytes for results; EBX is the
+/// body's to sum status words in. After FNINIT the stack holds what the
+/// iteration before left.
+fn fpu_loop(body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> (Rig, Rig, DynStats) {
+    let (input, output) = (DATA, DATA + 0x10000);
+    let n = SINGLES.len() as u32;
+    let count = n * n * 4;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..count {
+            let (i, j, rc) = (k % n, k / n % n, k / (n * n));
+            let at = input + 16 * k;
+            rig.write32(at, SINGLES[i as usize]);
+            rig.write32(at + 4, SINGLES[j as usize]);
+            rig.write32(at + 8, INTS[(k % 8) as usize]);
+            rig.write32(at + 12, 0x037F | rc << 10);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, count)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            let mut again = a.create_label();
+            a.set_label(&mut again)?;
+            a.fldcw(word_ptr(esi + 12))?;
+            body(a)?;
+            a.add(esi, 16)?;
+            a.add(edi, 64)?;
+            a.and(edi, (output | 0xFFFF) as i32)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    (a, b, stats)
+}
+
+#[test]
+fn fpu_loads_stores_and_products_run_as_their_handlers() {
+    let (_, b, stats) = fpu_loop(|a| {
+        a.fld(dword_ptr(esi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fld(st1)?;
+        a.fmul_2(st0, st1)?;
+        a.fst(dword_ptr(edi))?;
+        a.fmulp(st2, st0)?;
+        // (FXAM sets C1 for a negative ST(0), FXCH clears it.)
+        a.fxam()?;
+        a.fxch(st0, st1)?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fmul(dword_ptr(esi))?;
+        a.fmul_2(st1, st0)?;
+        a.fild(dword_ptr(esi + 8))?;
+        a.fild(word_ptr(esi + 8))?;
+        a.fmul_2(st0, st1)?;
+        a.fst(st3)?;
+        a.fstp(dword_ptr(edi + 4))?;
+        a.fistp(dword_ptr(edi + 8))?;
+        a.fist(dword_ptr(edi + 12))?;
+        a.fist(word_ptr(edi + 16))?;
+        a.fld1()?;
+        a.fldz()?;
+        a.fxch(st0, st2)?;
+        a.fistp(word_ptr(edi + 20))?;
+        a.fstp(st1)?;
+        a.fstp(dword_ptr(edi + 24))?;
+        a.fnstcw(word_ptr(edi + 28))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fstp(dword_ptr(edi + 32))?;
+        a.fstp(st0)
+    });
+    assert_ne!(b.read32(DATA + 0x10000), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn fpu_quotients_sums_and_comparisons_run_as_their_handlers() {
+    let (_, b, _) = fpu_loop(|a| {
+        a.fnclex()?;
+        a.fld(dword_ptr(esi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fild(dword_ptr(esi + 8))?;
+        // Quotients, by 0 too.
+        a.fld(st1)?;
+        a.fdiv(dword_ptr(esi))?;
+        a.fdivr(dword_ptr(esi + 4))?;
+        a.fdiv_2(st0, st2)?;
+        a.fdiv_2(st2, st0)?;
+        a.fdivr_2(st0, st3)?;
+        a.fdivr_2(st3, st0)?;
+        a.fst(dword_ptr(edi))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fld(st1)?;
+        a.fdivp(st2, st0)?;
+        a.fld(st2)?;
+        a.fdivrp(st1, st0)?;
+        a.fstp(dword_ptr(edi + 4))?;
+        // Sums and differences, on the registers' 80 bits.
+        a.fld(dword_ptr(esi))?;
+        a.fadd(dword_ptr(esi + 4))?;
+        a.fsub(dword_ptr(esi))?;
+        a.fsubr(dword_ptr(esi + 4))?;
+        a.fadd_2(st0, st1)?;
+        a.fadd_2(st1, st0)?;
+        a.fsub_2(st0, st2)?;
+        a.fsub_2(st2, st0)?;
+        a.fsubr_2(st0, st1)?;
+        a.fsubr_2(st1, st0)?;
+        a.fst(dword_ptr(edi + 8))?;
+        a.fld(st0)?;
+        a.faddp(st2, st0)?;
+        a.fld(st1)?;
+        a.fsubp(st3, st0)?;
+        a.fld(st2)?;
+        a.fsubrp(st1, st0)?;
+        a.fstp(dword_ptr(edi + 12))?;
+        // Comparisons.
+        a.fcom(dword_ptr(esi))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fcom_2(st0, st1)?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fucom(st0, st2)?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fcomp(dword_ptr(esi + 4))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fcomp_2(st0, st1)?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fcompp()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.mov(dword_ptr(edi + 16), ebx)
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+}
+
+#[test]
+fn fpu_instructions_on_empty_registers_run_as_their_handlers() {
+    // Pops from an empty stack and pushes onto a full one: the registers
+    // read as the real indefinite, which the handlers see to.
+    let (_, _, _) = fpu_loop(|a| {
+        a.fmul_2(st0, st1)?;
+        a.fxch(st0, st3)?;
+        a.fstp(dword_ptr(edi))?;
+        a.fistp(dword_ptr(edi + 4))?;
+        a.fcompp()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        for _ in 0..5 {
+            a.fld(dword_ptr(esi))?;
+            a.fld(st0)?;
+        }
+        a.fdivp(st1, st0)?;
+        a.fld(st7)?;
+        a.fst(dword_ptr(edi + 8))?;
+        a.fninit()?;
+        a.fld(dword_ptr(esi + 4))
+    });
+}
+
+#[test]
+fn an_fpu_instruction_without_the_coprocessor_faults_in_its_block() {
+    const NM: u8 = 7;
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(NM);
+        rig.write32(DATA, 0x3FC0_0000);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.fld(dword_ptr(DATA))?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 8)?; // TS
+            a.mov(cr0, eax)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            a.mov(ebx, 1u32)?;
+            a.fmul(dword_ptr(DATA))?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0], b.cpu.ebx()), (NM as u32, CODE + 0x105, 1));
+}
+
+#[test]
+fn an_fpu_store_past_its_segments_limit_changes_nothing() {
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        // A data segment of 256 bytes at 40000h.
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFF, DATA_R0, 0x4));
+        rig.write32(DATA + 0x80, 0x3FC0_0000);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.mov(ax, FREE as u32)?;
+            a.mov(fs, ax)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            a.fld(dword_ptr(0x80).fs())?;
+            a.fld1()?;
+            a.mov(ebx, 1u32)?;
+            a.fstp(dword_ptr(0xFD).fs())?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (GP as u32, 1));
+    assert_eq!(b.cpu.fpu_top, 6, "the FSTP didn't pop");
+}
+
+#[test]
+fn fpu_products_and_quotients_too_small_for_a_double_are_zero() {
+    // 1e-30 ten times over is 1e-300; times 2^-31, and divided by 2^31
+    // again, it is a denormal double, which a register doesn't hold: it
+    // is 0, and stays 0 when multiplied up again.
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(DATA, 0x0DA2_4260); // 1e-30
+        rig.write32(DATA + 4, 0x3000_0000); // 2^-31
+        rig.write32(DATA + 8, 0x4F00_0000); // 2^31
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.fld1()?;
+            for _ in 0..10 {
+                a.fmul(dword_ptr(DATA))?;
+            }
+            a.fld(st0)?;
+            a.fld(st0)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            // ST(0) by FMUL with memory, ST(1) by FDIV, ST(2) by FMULP.
+            a.fmul(dword_ptr(DATA + 4))?;
+            a.fxch(st0, st1)?;
+            a.fdiv(dword_ptr(DATA + 8))?;
+            a.fld(dword_ptr(DATA + 4))?;
+            a.fmulp(st3, st0)?;
+            for _ in 0..3 {
+                for _ in 0..4 {
+                    a.fmul(dword_ptr(DATA + 8))?;
+                }
+                a.fstp(dword_ptr(edi))?;
+                a.add(edi, 4)?;
+            }
+            a.hlt()
+        }));
+    });
+    a.cpu.set_edi(DATA + 0x100);
+    b.cpu.set_edi(DATA + 0x100);
+    run_both(&mut a, &mut b);
+    for i in 0..3 {
+        assert_eq!(b.read32(DATA + 0x100 + 4 * i), 0, "result {}", i);
+    }
+}

@@ -32,6 +32,15 @@ const EIP: i32 = layout::EIP as i32;
 const FLAGS: i32 = layout::FLAGS as i32;
 const CR0: i32 = layout::CR0 as i32;
 const CPL: i32 = layout::CPL as i32;
+const FPU_TOP: i32 = layout::fpu::TOP as i32;
+const FPU_TAGS: i32 = layout::fpu::TAGS as i32;
+const FPU_FLAGS: i32 = layout::fpu::FLAGS as i32;
+const FPU_CONTROL: i32 = layout::fpu::CONTROL as i32;
+const FPU_F64: i32 = layout::fpu::F64 as i32;
+const FPU_X80: i32 = layout::fpu::X80 as i32;
+const FPU_STALE: i32 = layout::fpu::STALE as i32;
+const FPU_EMPTY: i8 = crate::cpu::FPU_TAG_EMPTY as i8;
+const FPU_VALID: i8 = crate::cpu::FPU_TAG_VALID as i8;
 
 /// Flag bits.
 const CF: u32 = 0x001;
@@ -291,6 +300,8 @@ pub struct Code {
 pub const TAIL: bool = true;
 /// It has the operations of segment loads, port I/O and STI.
 pub const SYSTEM: bool = true;
+/// And those of FPU instructions.
+pub const FPU: bool = true;
 
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
@@ -1060,6 +1071,208 @@ impl Gen<'_> {
                 let (wb, reload) = (self.cache.dirty, self.cache.loaded);
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
             }
+            Uop::FpuGuard { valid } => self.fpu_guard(valid),
+            Uop::FGet { x, i } => {
+                self.fpu_phys(RAX, i);
+                dynasm!(self.ops ; .arch x64 ; movsd Rx(x.0), QWORD [rbx + rax * 8 + FPU_F64]);
+            }
+            Uop::FSet { i, x, canon } => {
+                if canon {
+                    self.fpu_canon(x.0);
+                }
+                self.fpu_phys(RAX, i);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsd QWORD [rbx + rax * 8 + FPU_F64], Rx(x.0)
+                    ; mov BYTE [rbx + rax + FPU_STALE], 1
+                );
+            }
+            Uop::FPush { x, canon } => {
+                if canon {
+                    self.fpu_canon(x.0);
+                }
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FPU_TOP]
+                    ; dec eax
+                    ; and eax, 7
+                    ; mov QWORD [rbx + FPU_TOP], rax
+                    ; movsd QWORD [rbx + rax * 8 + FPU_F64], Rx(x.0)
+                    ; mov BYTE [rbx + rax + FPU_STALE], 1
+                    ; mov BYTE [rbx + rax + FPU_TAGS], FPU_VALID
+                );
+            }
+            Uop::FPop { n } => {
+                dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
+                for _ in 0..n {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov BYTE [rbx + rax + FPU_TAGS], FPU_EMPTY
+                        ; inc eax
+                        ; and eax, 7
+                    );
+                }
+                dynasm!(self.ops ; .arch x64 ; mov QWORD [rbx + FPU_TOP], rax);
+            }
+            Uop::FCopy { dst, src } => {
+                // RCX the source's physical number, RDX the destination's.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FPU_TOP]
+                    ; lea ecx, [rax + src as i32]
+                    ; and ecx, 7
+                );
+                match dst {
+                    Some(dst) => dynasm!(self.ops ; .arch x64 ; lea edx, [rax + dst as i32] ; and edx, 7),
+                    None => dynasm!(self.ops
+                        ; .arch x64
+                        ; lea edx, [rax - 1]
+                        ; and edx, 7
+                        ; mov QWORD [rbx + FPU_TOP], rdx
+                        ; mov BYTE [rbx + rdx + FPU_TAGS], FPU_VALID
+                    ),
+                }
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsd xmm2, QWORD [rbx + rcx * 8 + FPU_F64]
+                    ; movsd QWORD [rbx + rdx * 8 + FPU_F64], xmm2
+                    ; movzx eax, BYTE [rbx + rcx + FPU_STALE]
+                    ; mov BYTE [rbx + rdx + FPU_STALE], al
+                    ; shl ecx, 4
+                    ; shl edx, 4
+                    ; movdqu xmm2, OWORD [rbx + rcx + FPU_X80]
+                    ; movdqu OWORD [rbx + rdx + FPU_X80], xmm2
+                );
+            }
+            Uop::FXch { i } => {
+                const C1: i16 = 0x200;
+                // RAX ST(0)'s physical number, RCX ST(i)'s.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FPU_TOP]
+                    ; lea ecx, [rax + i as i32]
+                    ; and ecx, 7
+                    ; movsd xmm2, QWORD [rbx + rax * 8 + FPU_F64]
+                    ; movsd xmm3, QWORD [rbx + rcx * 8 + FPU_F64]
+                    ; movsd QWORD [rbx + rax * 8 + FPU_F64], xmm3
+                    ; movsd QWORD [rbx + rcx * 8 + FPU_F64], xmm2
+                    ; movzx edx, BYTE [rbx + rax + FPU_STALE]
+                    ; shl edx, 8
+                    ; mov dl, BYTE [rbx + rcx + FPU_STALE]
+                    ; mov BYTE [rbx + rax + FPU_STALE], dl
+                    ; mov BYTE [rbx + rcx + FPU_STALE], dh
+                    ; shl eax, 4
+                    ; shl ecx, 4
+                    ; movdqu xmm2, OWORD [rbx + rax + FPU_X80]
+                    ; movdqu xmm3, OWORD [rbx + rcx + FPU_X80]
+                    ; movdqu OWORD [rbx + rax + FPU_X80], xmm3
+                    ; movdqu OWORD [rbx + rcx + FPU_X80], xmm2
+                    ; and WORD [rbx + FPU_FLAGS], !C1
+                );
+            }
+            Uop::FFromT { x, t, kind } => match kind {
+                FKind::Single => dynasm!(self.ops ; .arch x64 ; movd Rx(x.0), Rd(r(t)) ; cvtss2sd Rx(x.0), Rx(x.0)),
+                FKind::Int => dynasm!(self.ops ; .arch x64 ; pxor Rx(x.0), Rx(x.0) ; cvtsi2sd Rx(x.0), Rd(r(t))),
+            },
+            Uop::FToSingle { t, x } => {
+                dynasm!(self.ops ; .arch x64 ; cvtsd2ss xmm2, Rx(x.0) ; movd Rd(r(t)), xmm2);
+            }
+            Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
+            Uop::FMul { a, b } => dynasm!(self.ops ; .arch x64 ; mulsd Rx(a.0), Rx(b.0)),
+            Uop::FDiv { i, num, den, ze } => {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; xorpd xmm2, xmm2
+                    ; ucomisd Rx(den.0), xmm2
+                    ; jne >fdiv_go
+                    ; jp >fdiv_go
+                );
+                self.save_for_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov edx, i as i32 | (ze as i32) << 8
+                    ; mov rsi, r12
+                    ; mov rdi, rbx
+                    ; call QWORD [r12 + CTX_FPU + 24]
+                );
+                self.restore_after_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; jmp >fdiv_done
+                    ; fdiv_go:
+                    ; movsd xmm2, Rx(num.0)
+                    ; divsd xmm2, Rx(den.0)
+                );
+                self.fpu_canon(2);
+                self.fpu_phys(RAX, i);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movsd QWORD [rbx + rax * 8 + FPU_F64], xmm2
+                    ; mov BYTE [rbx + rax + FPU_STALE], 1
+                    ; fdiv_done:
+                );
+            }
+            Uop::FAddSt { dst, a, b, sub } => {
+                let desc = dst as i32 | (a as i32) << 4 | (b as i32) << 8 | (sub as i32) << 12;
+                self.save_for_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov edx, desc
+                    ; mov rsi, r12
+                    ; mov rdi, rbx
+                    ; call QWORD [r12 + CTX_FPU]
+                );
+                self.restore_after_call();
+            }
+            Uop::FAddValue { kind, x } => {
+                self.save_for_call();
+                if x.0 != 0 {
+                    dynasm!(self.ops ; .arch x64 ; movsd xmm0, Rx(x.0));
+                }
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov edx, kind as i32
+                    ; mov rsi, r12
+                    ; mov rdi, rbx
+                    ; call QWORD [r12 + CTX_FPU + 8]
+                );
+                self.restore_after_call();
+            }
+            Uop::FCom { a, b } => {
+                // C0, C2 and C3 are where CF, PF and ZF are in AH's flags.
+                const C0_C2_C3: i16 = 0x4500;
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; and WORD [rbx + FPU_FLAGS], !C0_C2_C3
+                    ; ucomisd Rx(a.0), Rx(b.0)
+                    ; mov eax, 0
+                    ; mov ecx, 0
+                    ; mov edx, 0
+                    ; setb al
+                    ; setp cl
+                    ; sete dl
+                    ; shl eax, 8
+                    ; shl ecx, 10
+                    ; shl edx, 14
+                    ; or eax, ecx
+                    ; or eax, edx
+                    ; or WORD [rbx + FPU_FLAGS], ax
+                );
+            }
+            Uop::FStatus { t } => {
+                let t = r(t);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movzx Rd(t), WORD [rbx + FPU_FLAGS]
+                    ; and Rd(t), !0x3800
+                    ; mov eax, DWORD [rbx + FPU_TOP]
+                    ; and eax, 7
+                    ; shl eax, 11
+                    ; or Rd(t), eax
+                );
+            }
+            Uop::FGetControl { t } => dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + FPU_CONTROL]),
+            Uop::FSetControl { t } => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + FPU_CONTROL], Rw(r(t))),
             Uop::Sti => {
                 const IF: i32 = 0x200;
                 let data = self.data;
@@ -1087,6 +1300,108 @@ impl Gen<'_> {
                 }
             }
         }
+    }
+
+    /// `reg` (RAX or RCX) = ST(i)'s physical number.
+    fn fpu_phys(&mut self, reg: u8, i: u8) {
+        dynasm!(self.ops ; .arch x64 ; mov Rd(reg), DWORD [rbx + FPU_TOP]);
+        if i != 0 {
+            dynasm!(self.ops ; .arch x64 ; add Rd(reg), i as i32 ; and Rd(reg), 7);
+        }
+    }
+
+    /// `Uop::FpuGuard`: the instruction's handler runs it after all where
+    /// CR0 has EM or TS set, or one of the registers in `valid` is empty.
+    fn fpu_guard(&mut self, valid: u8) {
+        const EM_TS: i8 = 0x0C;
+        let at = self.ops.new_dynamic_label();
+        dynasm!(self.ops ; .arch x64 ; test BYTE [rbx + CR0], EM_TS ; jnz =>at);
+        if valid != 0 {
+            dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
+        }
+        for i in (0..8).filter(|i| valid >> i & 1 != 0) {
+            if i == 0 {
+                dynasm!(self.ops ; .arch x64 ; cmp BYTE [rbx + rax + FPU_TAGS], FPU_EMPTY ; je =>at);
+            } else {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; lea ecx, [rax + i]
+                    ; and ecx, 7
+                    ; cmp BYTE [rbx + rcx + FPU_TAGS], FPU_EMPTY
+                    ; je =>at
+                );
+            }
+        }
+        let end = self.end();
+        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload });
+    }
+
+    /// Make the double in XMM register `x` what an FPU register holds
+    /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
+    fn fpu_canon(&mut self, x: u8) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; movq rcx, Rx(x)
+            ; mov rdx, rcx
+            ; shr rdx, 52
+            ; and edx, 0x7FF
+            ; dec edx
+            ; cmp edx, 0x7FE
+            ; jb >canon_done
+            ; inc edx
+            ; jnz >canon_nan
+            // A zero or a denormal: the sign alone.
+            ; shr rcx, 63
+            ; shl rcx, 63
+            ; jmp >canon_fix
+            ; canon_nan:
+            ; mov rdx, rcx
+            ; shl rdx, 12
+            ; jz >canon_done
+            ; bts rcx, 51
+            ; canon_fix:
+            ; movq Rx(x), rcx
+            ; canon_done:
+        );
+    }
+
+    /// `Uop::FToInt`: the conversion inline where the control word rounds
+    /// to nearest or chops and the result fits, else through `jit_fpu_to_int`.
+    fn fpu_to_int(&mut self, t: T, x: X, size: u8) {
+        let t_ = r(t);
+        dynasm!(self.ops
+            ; .arch x64
+            ; movzx eax, WORD [rbx + FPU_CONTROL]
+            ; and eax, 0xC00
+            ; jnz >toint_other
+            ; cvtsd2si Rd(t_), Rx(x.0)
+            ; jmp >toint_check
+            ; toint_other:
+            ; cmp eax, 0xC00
+            ; jne >toint_slow
+            ; cvttsd2si Rd(t_), Rx(x.0)
+            ; toint_check:
+        );
+        if size == 2 {
+            dynasm!(self.ops ; .arch x64 ; movsx eax, Rw(t_) ; cmp eax, Rd(t_) ; je >toint_done);
+        } else {
+            dynasm!(self.ops ; .arch x64 ; cmp Rd(t_), i32::MIN ; jne >toint_done);
+        }
+        dynasm!(self.ops ; .arch x64 ; toint_slow:);
+        self.save_for_call();
+        if x.0 != 0 {
+            dynasm!(self.ops ; .arch x64 ; movsd xmm0, Rx(x.0));
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov edx, size as i32
+            ; mov rsi, r12
+            ; mov rdi, rbx
+            ; call QWORD [r12 + CTX_FPU + 16]
+        );
+        self.restore_after_call();
+        dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax ; toint_done:);
     }
 
     /// Keep the temporaries and the cached guest registers around a call

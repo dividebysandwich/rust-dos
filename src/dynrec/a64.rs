@@ -228,6 +228,8 @@ pub const TAIL: bool = false;
 /// Whether it has the operations of segment loads, port I/O and STI: no,
 /// their handlers run them.
 pub const SYSTEM: bool = false;
+/// Nor those of FPU instructions.
+pub const FPU: bool = false;
 
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
@@ -875,6 +877,24 @@ impl Gen<'_> {
             | Uop::Forward => {
                 unreachable!("not translated for this host (SYSTEM)")
             }
+            Uop::FpuGuard { .. }
+            | Uop::FGet { .. }
+            | Uop::FSet { .. }
+            | Uop::FPush { .. }
+            | Uop::FPop { .. }
+            | Uop::FCopy { .. }
+            | Uop::FXch { .. }
+            | Uop::FFromT { .. }
+            | Uop::FToSingle { .. }
+            | Uop::FToInt { .. }
+            | Uop::FMul { .. }
+            | Uop::FDiv { .. }
+            | Uop::FAddSt { .. }
+            | Uop::FAddValue { .. }
+            | Uop::FCom { .. }
+            | Uop::FStatus { .. }
+            | Uop::FGetControl { .. }
+            | Uop::FSetControl { .. } => unreachable!("not translated for this host (FPU)"),
         }
     }
 

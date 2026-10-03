@@ -12,11 +12,13 @@ pub fn fld(cpu: &mut Cpu, instr: &Instruction) {
         match instr.memory_size() {
             MemorySize::Float32 => {
                 let bits = cpu.lin_read_32(addr);
-                f.set_f64(f32::from_bits(bits) as f64);
+                cpu.fpu_push_f64(f32::from_bits(bits) as f64);
+                return;
             }
             MemorySize::Float64 => {
                 let bits = cpu.lin_read_64(addr);
-                f.set_f64(f64::from_bits(bits));
+                cpu.fpu_push_f64(f64::from_bits(bits));
+                return;
             }
             MemorySize::Float80 => {
                 // Load 10 bytes directly from memory without lossy conversion
@@ -45,8 +47,22 @@ pub fn fld(cpu: &mut Cpu, instr: &Instruction) {
 // FILD: Load Integer (Convert to Float and Push)
 pub fn fild(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
-    let f = cpu.load_int_to_f80(addr, instr.memory_size());
-    cpu.fpu_push(f);
+    // (A word or a dword as a double has the 80 bits `load_int_to_f80`
+    // gives it.)
+    match instr.memory_size() {
+        MemorySize::Int16 => {
+            let v = cpu.lin_read_16(addr) as i16;
+            cpu.fpu_push_f64(v as f64);
+        }
+        MemorySize::Int32 => {
+            let v = cpu.lin_read_32(addr) as i32;
+            cpu.fpu_push_f64(v as f64);
+        }
+        size => {
+            let f = cpu.load_int_to_f80(addr, size);
+            cpu.fpu_push(f);
+        }
+    }
 }
 
 // FBLD: Load BCD Integer (Convert to Float and Push)
@@ -59,6 +75,14 @@ pub fn fbld(cpu: &mut Cpu, instr: &Instruction) {
     let mut f = F80::new();
     f.from_bcd_packed(&bcd);
     cpu.fpu_push(f);
+}
+
+/// A double as the word or dword (`size` 2 or 4) FIST and FISTP store,
+/// rounded as the control word says. The dynamic recompiler's code calls
+/// it for what its own conversion doesn't cover.
+pub fn to_int(value: f64, control: u16, size: u8) -> u32 {
+    let rounded = x87_round(value, (control >> 10) & 0x03);
+    if size == 2 { rounded as i16 as u16 as u32 } else { rounded as i32 as u32 }
 }
 
 fn x87_round(f_val: f64, rc: u16) -> f64 {
@@ -89,19 +113,21 @@ fn x87_round(f_val: f64, rc: u16) -> f64 {
 
 // FISTP: Store Integer and Pop
 pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
-    let val = cpu.fpu_pop();
+    // (The register's value whatever its tag.)
+    let val = cpu.fpu_reg_f64(cpu.fpu_top);
+    cpu.fpu_drop();
     let addr = calculate_addr(cpu, instr);
 
     // Use the custom rounding logic
     let rc = (cpu.fpu_control >> 10) & 0x03;
-    let rounded = x87_round(val.get_f64(), rc);
+    let rounded = x87_round(val, rc);
 
     match instr.memory_size() {
         MemorySize::Int16 => {
-            cpu.lin_write_16(addr, rounded as i16 as u16);
+            cpu.lin_write_16(addr, to_int(val, cpu.fpu_control, 2) as u16);
         }
         MemorySize::Int32 => {
-            cpu.lin_write_32(addr, rounded as i32 as u32);
+            cpu.lin_write_32(addr, to_int(val, cpu.fpu_control, 4));
         }
         MemorySize::Int64 => {
             cpu.lin_write_64(addr, rounded as i64 as u64);
@@ -114,8 +140,20 @@ pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
 // FSTP: Store Float and Pop
 pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
-        let val: F80 = cpu.fpu_pop();
         let addr = calculate_addr(cpu, instr);
+        // (The register's value whatever its tag.)
+        let double = cpu.fpu_reg_f64(cpu.fpu_top);
+        if instr.memory_size() == MemorySize::Float32 {
+            cpu.fpu_drop();
+            cpu.lin_write_32(addr, (double as f32).to_bits());
+            return;
+        }
+        if instr.memory_size() == MemorySize::Float64 {
+            cpu.fpu_drop();
+            cpu.lin_write_64(addr, double.to_bits());
+            return;
+        }
+        let val: F80 = cpu.fpu_pop();
 
         match instr.memory_size() {
             MemorySize::Float32 => {
@@ -197,19 +235,22 @@ pub fn fst(cpu: &mut Cpu, instr: &Instruction) {
     }
 }
 
-// FXCH: Exchange Register Contents
-pub fn fxch(cpu: &mut Cpu, instr: &Instruction) {
-    let mut idx: usize = 1; // Default to ST(1) if implicit
-
-    // Scan operands to find the one that isn't ST(0)
+/// The register FXCH exchanges ST(0) with.
+pub fn fxch_index(instr: &Instruction) -> usize {
+    // Scan operands to find the one that isn't ST(0); ST(1) if implicit.
     for i in 0..instr.op_count() {
         let reg = instr.op_register(i);
         // Check if register is in range ST(1)..ST(7)
         if reg >= Register::ST1 && reg <= Register::ST7 {
-            idx = (reg.number() - Register::ST0.number()) as usize;
-            break;
+            return (reg.number() - Register::ST0.number()) as usize;
         }
     }
+    1
+}
+
+// FXCH: Exchange Register Contents
+pub fn fxch(cpu: &mut Cpu, instr: &Instruction) {
+    let idx = fxch_index(instr);
 
     // Optimization: Swapping ST(0) with ST(0) is a NOP
     if idx == 0 {
@@ -281,14 +322,14 @@ pub fn fist(cpu: &mut Cpu, instr: &Instruction) {
 
     // Use the x87-compliant rounding helper
     let f_val = val.get_f64();
-    let i_val = x87_round(f_val, rc);
+    let _ = rc;
 
     match instr.memory_size() {
         MemorySize::Int16 => {
-            cpu.lin_write_16(addr, i_val as i16 as u16);
+            cpu.lin_write_16(addr, to_int(f_val, cpu.fpu_control, 2) as u16);
         }
         MemorySize::Int32 => {
-            cpu.lin_write_32(addr, i_val as i32 as u32);
+            cpu.lin_write_32(addr, to_int(f_val, cpu.fpu_control, 4));
         }
         _ => {
             cpu.bus.log_string(&format!(

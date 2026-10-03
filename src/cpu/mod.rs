@@ -1059,6 +1059,11 @@ impl Cpu {
         self.fpu_stack.get(i)
     }
 
+    /// Physical register `i` as a double, whatever its tag.
+    pub fn fpu_reg_f64(&self, i: usize) -> f64 {
+        self.fpu_stack.get_f64(i)
+    }
+
     pub fn fpu_set_reg(&mut self, i: usize, val: F80) {
         self.fpu_stack.set(i, val);
     }

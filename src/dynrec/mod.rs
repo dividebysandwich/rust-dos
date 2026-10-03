@@ -23,6 +23,8 @@ mod codemem;
 #[cfg(dynrec)]
 mod flags;
 #[cfg(dynrec)]
+mod fpu;
+#[cfg(dynrec)]
 mod helpers;
 #[cfg(dynrec)]
 mod translate;
@@ -532,7 +534,7 @@ mod engine {
             let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM)
+                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::FPU)
                 })
                 .collect();
             // Instructions whose only watched bytes are their immediate (a

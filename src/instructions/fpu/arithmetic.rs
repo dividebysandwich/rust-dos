@@ -1,15 +1,80 @@
 use crate::cpu::{Cpu, FpuFlags};
-use crate::f80::F80;
+use crate::f80::{F80, canon_f64};
 use crate::instructions::utils::calculate_addr;
 use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
 // Get the destination index for Pop instructions (e.g., FADDP ST(i), ST(0))
-fn get_pop_dst_index(instr: &Instruction) -> usize {
+pub fn get_pop_dst_index(instr: &Instruction) -> usize {
     let reg = instr.op0_register();
     if reg == Register::None || reg == Register::ST1 {
         1
     } else {
         (reg.number() - Register::ST0.number()) as usize
+    }
+}
+
+/// ST(dst) = ST(a) + ST(b), or - with `sub`, as the registers' 80 bits add
+/// (`F80::add`). The dynamic recompiler's code calls it too.
+pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
+    let mut x = cpu.fpu_get(a);
+    let y = cpu.fpu_get(b);
+    if sub {
+        x.sub(y);
+    } else {
+        x.add(y);
+    }
+    cpu.fpu_set(dst, x);
+}
+
+/// What `addsub_value` does with ST(0) and the value.
+pub const ADD_VALUE: u32 = 0;
+pub const SUB_VALUE: u32 = 1;
+pub const SUBR_VALUE: u32 = 2;
+
+/// ST(0) += a memory operand's value, or -=, or the value - ST(0).
+pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
+    let mut val = F80::new();
+    val.set_f64(value);
+    let mut st0 = cpu.fpu_get(0);
+    match kind {
+        ADD_VALUE => st0.add(val),
+        SUB_VALUE => st0.sub(val),
+        _ => {
+            val.sub(st0);
+            st0 = val;
+        }
+    }
+    cpu.fpu_set(0, st0);
+}
+
+/// A real memory operand as a double.
+fn real_operand(cpu: &mut Cpu, instr: &Instruction) -> Option<f64> {
+    let addr = calculate_addr(cpu, instr);
+    match instr.memory_size() {
+        MemorySize::Float32 => Some(f32::from_bits(cpu.lin_read_32(addr)) as f64),
+        MemorySize::Float64 => Some(f64::from_bits(cpu.lin_read_64(addr))),
+        _ => None,
+    }
+}
+
+/// ST(i) = dividend / divisor as doubles, or what a division by 0 leaves
+/// (`divided_by_zero`, with ZE for the reversed divisions).
+fn divide(cpu: &mut Cpu, i: usize, dividend: f64, divisor: f64, reversed: bool) {
+    if divisor != 0.0 {
+        cpu.fpu_set_f64(i, dividend / divisor);
+    } else {
+        divided_by_zero(cpu, i, reversed);
+    }
+}
+
+/// The quotient of a division by 0: ST(i) is the real indefinite, and
+/// the reversed divisions set ZE as well.
+pub fn divided_by_zero(cpu: &mut Cpu, i: usize, ze: bool) {
+    let mut v = F80::new();
+    v.set_real_indefinite();
+    cpu.fpu_set(i, v);
+    if ze {
+        cpu.set_fpu_flag(FpuFlags::ZE, true);
     }
 }
 
@@ -87,26 +152,14 @@ pub fn fidivr(cpu: &mut Cpu, instr: &Instruction) {
 // FADD: Add Real
 pub fn fadd(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        let mut val = F80::new();
-        match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
-            _ => {}
-        }
-        let mut st0 = cpu.fpu_get(0);
-        st0.add(val);
-        cpu.fpu_set(0, st0);
+        let val = real_operand(cpu, instr).unwrap_or(0.0);
+        addsub_value(cpu, ADD_VALUE, val);
     } else {
         let dst_reg = instr.op0_register();
         let src_reg = instr.op1_register();
         let idx_src = (src_reg.number() - Register::ST0.number()) as usize;
         let idx_dst = (dst_reg.number() - Register::ST0.number()) as usize;
-
-        let mut dest = cpu.fpu_get(idx_dst);
-        let src = cpu.fpu_get(idx_src);
-        dest.add(src);
-        cpu.fpu_set(idx_dst, dest);
+        addsub_st(cpu, idx_dst, idx_dst, idx_src, false);
     }
 }
 
@@ -119,34 +172,20 @@ pub fn faddp(cpu: &mut Cpu, instr: &Instruction) {
         (dst_reg.number() - Register::ST0.number()) as usize
     };
 
-    let mut sti = cpu.fpu_get(idx);
-    let st0 = cpu.fpu_get(0);
-    sti.add(st0);
-    cpu.fpu_set(idx, sti);
-    cpu.fpu_pop();
+    addsub_st(cpu, idx, idx, 0, false);
+    cpu.fpu_drop();
 }
 
 // FSUB: Subtract Real
 // ST(0) = ST(0) - Src  OR  Dest = Dest - ST(0)
 pub fn fsub(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        let mut val = F80::new();
-        match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
-            _ => {}
-        }
-        let mut st0 = cpu.fpu_get(0);
-        st0.sub(val);
-        cpu.fpu_set(0, st0);
+        let val = real_operand(cpu, instr).unwrap_or(0.0);
+        addsub_value(cpu, SUB_VALUE, val);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-        let mut dst = cpu.fpu_get(dst_idx);
-        let src = cpu.fpu_get(src_idx);
-        dst.sub(src);
-        cpu.fpu_set(dst_idx, dst);
+        addsub_st(cpu, dst_idx, dst_idx, src_idx, true);
     }
 }
 
@@ -155,34 +194,20 @@ pub fn fsub(cpu: &mut Cpu, instr: &Instruction) {
 pub fn fsubp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
 
-    let st0 = cpu.fpu_get(0);
-    let mut sti = cpu.fpu_get(idx);
-    sti.sub(st0);
-    cpu.fpu_set(idx, sti);
-    cpu.fpu_pop();
+    addsub_st(cpu, idx, idx, 0, true);
+    cpu.fpu_drop();
 }
 
 // FSUBR: Reverse Subtract
 // ST(0) = Src - ST(0)  OR  Dest = ST(0) - Dest
 pub fn fsubr(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        let mut val = F80::new();
-        match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
-            _ => {}
-        }
-        let st0 = cpu.fpu_get(0);
-        val.sub(st0);
-        cpu.fpu_set(0, val);
+        let val = real_operand(cpu, instr).unwrap_or(0.0);
+        addsub_value(cpu, SUBR_VALUE, val);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-        let dst = cpu.fpu_get(dst_idx);
-        let mut src = cpu.fpu_get(src_idx);
-        src.sub(dst);
-        cpu.fpu_set(dst_idx, src);
+        addsub_st(cpu, dst_idx, src_idx, dst_idx, true);
     }
 }
 
@@ -191,143 +216,63 @@ pub fn fsubr(cpu: &mut Cpu, instr: &Instruction) {
 pub fn fsubrp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
 
-    let mut st0 = cpu.fpu_get(0);
-    let sti = cpu.fpu_get(idx);
-    st0.sub(sti); // Result is in st0 (local var)
-    cpu.fpu_set(idx, st0); // Write result to ST(i)
-    cpu.fpu_pop();
+    addsub_st(cpu, idx, 0, idx, true);
+    cpu.fpu_drop();
 }
 
 // FMUL: Multiply Real
 pub fn fmul(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        let mut val = F80::new();
-        match instr.memory_size() {
-            MemorySize::Float32 => val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
-            MemorySize::Float64 => val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
-            _ => {}
-        }
-        let mut st0 = cpu.fpu_get(0);
-        st0.set_f64(st0.get_f64() * val.get_f64());
-        cpu.fpu_set(0, st0);
+        let val = canon_f64(real_operand(cpu, instr).unwrap_or(0.0));
+        let product = cpu.fpu_get_f64(0) * val;
+        cpu.fpu_set_f64(0, product);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-        let mut dst = cpu.fpu_get(dst_idx);
-        let src = cpu.fpu_get(src_idx);
-        dst.set_f64(dst.get_f64() * src.get_f64());
-        cpu.fpu_set(dst_idx, dst);
+        let product = cpu.fpu_get_f64(dst_idx) * cpu.fpu_get_f64(src_idx);
+        cpu.fpu_set_f64(dst_idx, product);
     }
 }
 
 // FMULP: Multiply and Pop
 pub fn fmulp(cpu: &mut Cpu, instr: &Instruction) {
-    let dst_reg = instr.op0_register();
-    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 {
-        1
-    } else {
-        (dst_reg.number() - Register::ST0.number()) as usize
-    };
-    let mut sti = cpu.fpu_get(idx);
-    let st0 = cpu.fpu_get(0);
-    sti.set_f64(sti.get_f64() * st0.get_f64());
-    cpu.fpu_set(idx, sti);
-    cpu.fpu_pop();
+    let idx = get_pop_dst_index(instr);
+    let product = cpu.fpu_get_f64(idx) * cpu.fpu_get_f64(0);
+    cpu.fpu_set_f64(idx, product);
+    cpu.fpu_drop();
 }
 
 // FDIV: Floating Point Divide
 pub fn fdiv(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
-        let addr = calculate_addr(cpu, instr);
-        let mut divisor = F80::new();
-        match instr.memory_size() {
-            MemorySize::Float32 => divisor.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
-            MemorySize::Float64 => divisor.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
-            _ => {}
-        }
-        let mut st0 = cpu.fpu_get(0);
-        let div_f = divisor.get_f64();
-        if div_f != 0.0 {
-            st0.set_f64(st0.get_f64() / div_f);
-        } else {
-            st0.set_real_indefinite();
-        }
-        cpu.fpu_set(0, st0);
+        let divisor = canon_f64(real_operand(cpu, instr).unwrap_or(0.0));
+        divide(cpu, 0, cpu.fpu_get_f64(0), divisor, false);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-        let mut dst = cpu.fpu_get(dst_idx);
-        let src = cpu.fpu_get(src_idx);
-        let src_f = src.get_f64();
-        if src_f != 0.0 {
-            dst.set_f64(dst.get_f64() / src_f);
-        } else {
-            dst.set_real_indefinite();
-        }
-        cpu.fpu_set(dst_idx, dst);
+        divide(cpu, dst_idx, cpu.fpu_get_f64(dst_idx), cpu.fpu_get_f64(src_idx), false);
     }
 }
 
 // FDIVP: Divide and Pop
 pub fn fdivp(cpu: &mut Cpu, instr: &Instruction) {
-    let dst_reg = instr.op0_register();
-    let idx = if dst_reg == Register::None || dst_reg == Register::ST1 {
-        1
-    } else {
-        (dst_reg.number() - Register::ST0.number()) as usize
-    };
-    let mut sti = cpu.fpu_get(idx);
-    let st0 = cpu.fpu_get(0).get_f64();
-    if st0 != 0.0 {
-        sti.set_f64(sti.get_f64() / st0);
-    } else {
-        sti.set_real_indefinite();
-    }
-    cpu.fpu_set(idx, sti);
-    cpu.fpu_pop();
+    let idx = get_pop_dst_index(instr);
+    divide(cpu, idx, cpu.fpu_get_f64(idx), cpu.fpu_get_f64(0), false);
+    cpu.fpu_drop();
 }
 
 // FDIVR: Reverse Divide
 pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
         // FDIVR [mem] -> ST(0) = [mem] / ST(0)
-        let addr = calculate_addr(cpu, instr);
-        let mut mem_val = F80::new();
-        match instr.memory_size() {
-            MemorySize::Float32 => mem_val.set_f64(f32::from_bits(cpu.lin_read_32(addr)) as f64),
-            MemorySize::Float64 => mem_val.set_f64(f64::from_bits(cpu.lin_read_64(addr))),
-            _ => mem_val.set_f64(1.0),
-        }
-
-        let mut st0 = cpu.fpu_get(0);
-        let st0_f = st0.get_f64();
-
-        if st0_f != 0.0 {
-            st0.set_f64(mem_val.get_f64() / st0_f);
-        } else {
-            st0.set_real_indefinite(); // Handle division by zero
-            cpu.set_fpu_flag(FpuFlags::ZE, true);
-        }
-        cpu.fpu_set(0, st0);
+        let val = canon_f64(real_operand(cpu, instr).unwrap_or(1.0));
+        divide(cpu, 0, val, cpu.fpu_get_f64(0), true);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-
-        let mut dst = cpu.fpu_get(dst_idx);
-        let src = cpu.fpu_get(src_idx);
-
         // FDIVR ST(0), ST(i) -> ST(0) = ST(i) / ST(0)
         // FDIVR ST(i), ST(0) -> ST(i) = ST(0) / ST(i)
-        // In both cases, we divide the "Source" by the "Destination"
-        let dst_f = dst.get_f64();
-        if dst_f != 0.0 {
-            dst.set_f64(src.get_f64() / dst_f);
-        } else {
-            dst.set_real_indefinite();
-            cpu.set_fpu_flag(FpuFlags::ZE, true);
-        }
-        cpu.fpu_set(dst_idx, dst);
+        divide(cpu, dst_idx, cpu.fpu_get_f64(src_idx), cpu.fpu_get_f64(dst_idx), true);
     }
 }
 
@@ -335,20 +280,8 @@ pub fn fdivr(cpu: &mut Cpu, instr: &Instruction) {
 // ST(i) = ST(0) / ST(i); Pop ST(0)
 pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
-
-    let st0_val = cpu.fpu_get(0).get_f64();
-    let mut sti = cpu.fpu_get(idx);
-    let sti_val = sti.get_f64();
-
-    if sti_val != 0.0 {
-        sti.set_f64(st0_val / sti_val);
-    } else {
-        sti.set_real_indefinite(); // Zero divide
-        cpu.set_fpu_flag(FpuFlags::ZE, true);
-    }
-
-    cpu.fpu_set(idx, sti);
-    cpu.fpu_pop();
+    divide(cpu, idx, cpu.fpu_get_f64(0), cpu.fpu_get_f64(idx), true);
+    cpu.fpu_drop();
 }
 
 // --- ADVANCED ARITHMETIC ---

@@ -36,6 +36,22 @@ impl Gpr {
     }
 }
 
+/// A host register holding a double while an FPU instruction runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct X(pub u8);
+
+pub const X0: X = X(0);
+pub const X1: X = X(1);
+
+/// What `Uop::FFromT` makes a double of, and `Uop::FToT` of a double.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FKind {
+    /// A single's bits.
+    Single,
+    /// A signed dword.
+    Int,
+}
+
 pub const ECX: u8 = 1;
 pub const ESP: u8 = 4;
 
@@ -183,4 +199,48 @@ pub enum Uop {
     /// MOVS or STOS without REP: where DF is set, the instruction's handler
     /// runs it instead of the operations after this one.
     Forward,
+    /// The start of an FPU instruction: its handler runs it instead of the
+    /// operations after this one where CR0's EM or TS is set (#NM), or one
+    /// of the registers ST(i) with bit i set in `valid` is empty (it then
+    /// reads as the real indefinite). The operations below read and write
+    /// the registers as doubles (`f80::FpuRegs`), as the handlers do.
+    FpuGuard { valid: u8 },
+    /// x = ST(i).
+    FGet { x: X, i: u8 },
+    /// ST(i) = x; with `canon`, x may be a denormal or a signalling NaN
+    /// (`f80::canon_f64` makes it what a register holds).
+    FSet { i: u8, x: X, canon: bool },
+    /// Push x, as `FSet` has it.
+    FPush { x: X, canon: bool },
+    /// Pop `n` (1 or 2) registers.
+    FPop { n: u8 },
+    /// ST(dst) = ST(src), or with no `dst` push ST(src): all a register
+    /// holds.
+    FCopy { dst: Option<u8>, src: u8 },
+    /// Exchange ST(0) and ST(i), and clear C1.
+    FXch { i: u8 },
+    /// x = the single or the signed dword in t.
+    FFromT { x: X, t: T, kind: FKind },
+    /// t = x as a single's bits.
+    FToSingle { t: T, x: X },
+    /// t = x as a word or dword (`size` 2 or 4), rounded as the control
+    /// word says (`fpu::data::to_int`).
+    FToInt { t: T, x: X, size: u8 },
+    /// a *= b.
+    FMul { a: X, b: X },
+    /// ST(i) = num / den, or with a divisor of 0 the real indefinite, and
+    /// ZE set with `ze` (`fpu::arithmetic::divided_by_zero`).
+    FDiv { i: u8, num: X, den: X, ze: bool },
+    /// ST(dst) = ST(a) + ST(b), or - with `sub`, as their 80 bits add
+    /// (`fpu::arithmetic::addsub_st`).
+    FAddSt { dst: u8, a: u8, b: u8, sub: bool },
+    /// ST(0) and x: `fpu::arithmetic::addsub_value` of `kind`.
+    FAddValue { kind: u32, x: X },
+    /// Compare a with b into C0, C2 and C3.
+    FCom { a: X, b: X },
+    /// t = the status word.
+    FStatus { t: T },
+    /// t = the control word, and the control word = t's low word.
+    FGetControl { t: T },
+    FSetControl { t: T },
 }

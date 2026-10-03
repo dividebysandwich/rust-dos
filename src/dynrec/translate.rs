@@ -19,7 +19,7 @@ const DF: u32 = 0x0400;
 /// wrap in 16-bit code), and `stack32` the stack's width (SS's B flag),
 /// which blocks are translated for. With `system`, the code generator has
 /// the operations of segment loads, port I/O, STI and REP string loops.
-pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool) -> Option<Vec<Uop>> {
+pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fpu: bool) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
     let ok = match instr.mnemonic() {
@@ -98,7 +98,7 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool) ->
         Jcxz | Jecxz => jcxz(instr, next, &mut u),
         Call => call(instr, next, stack32, &mut u),
         Ret => ret(instr, stack32, &mut u),
-        _ => false,
+        _ => fpu && super::fpu::translate(instr, &mut u),
     };
     ok.then_some(u)
 }
@@ -157,7 +157,7 @@ fn ea(instr: &Instruction, t: T, u: &mut Vec<Uop>) -> Option<Seg> {
 
 /// Check the memory operand for an access of `size` bytes: `t` then
 /// refers to it.
-fn mem(instr: &Instruction, t: T, size: u8, write: bool, u: &mut Vec<Uop>) -> Option<()> {
+pub(super) fn mem(instr: &Instruction, t: T, size: u8, write: bool, u: &mut Vec<Uop>) -> Option<()> {
     let seg = ea(instr, t, u)?;
     u.push(Uop::MemRef { t, seg, size, write, slot: 0 });
     Some(())

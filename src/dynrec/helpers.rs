@@ -113,6 +113,9 @@ pub struct JitCtx {
     pub refs: [MemRef; 4],
     /// PF (04h or 0) of every byte value, for hosts without a parity flag.
     pub parity: [u8; 256],
+    /// `jit_fpu_addsub_st`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
+    /// `jit_fpu_div_zero` (x86-64).
+    pub fpu: [usize; 4],
 }
 
 pub const CTX_FALLBACK: i32 = offset_of!(JitCtx, fallback) as i32;
@@ -145,6 +148,8 @@ pub const CTX_PARITY: i32 = offset_of!(JitCtx, parity) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const CTX_FLAGS: i32 = offset_of!(JitCtx, flags) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_FPU: i32 = offset_of!(JitCtx, fpu) as i32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
 pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
 pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
@@ -193,6 +198,15 @@ impl JitCtx {
             panic: None,
             refs: [MemRef { lin: 0, phys: 0, phys2: 0, size: 1 }; 4],
             parity: std::array::from_fn(|b| if (b as u8).count_ones().is_multiple_of(2) { 0x04 } else { 0 }),
+            #[cfg(target_arch = "x86_64")]
+            fpu: [
+                jit_fpu_addsub_st as *const () as usize,
+                jit_fpu_addsub_value as *const () as usize,
+                jit_fpu_to_int as *const () as usize,
+                jit_fpu_div_zero as *const () as usize,
+            ],
+            #[cfg(not(target_arch = "x86_64"))]
+            fpu: [0; 4],
         }
     }
 }
@@ -501,5 +515,59 @@ jit_fn! {
             (ctx.smc_lo..ctx.smc_hi).contains(&p)
         });
         hit as u32
+    }
+}
+
+/// Run a piece of an FPU instruction's handler for translated code: a
+/// panic in it resumes in the execution loop, as `jit_fallback`'s does.
+#[cfg(target_arch = "x86_64")]
+fn fpu_helper<R: Default>(cpu: *mut Cpu, ctx: *mut JitCtx, f: impl FnOnce(&mut Cpu) -> R) -> R {
+    // SAFETY: as in `jit_fallback`.
+    let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+    match catch_unwind(AssertUnwindSafe(|| f(cpu))) {
+        Ok(value) => value,
+        Err(payload) => {
+            ctx.panic = Some(payload);
+            R::default()
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+jit_fn! {
+    /// `Uop::FAddSt`: `desc` is dst, a << 4, b << 8 and sub << 12.
+    fn jit_fpu_addsub_st(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32) -> u32 {
+        let (dst, a, b) = ((desc & 7) as usize, (desc >> 4 & 7) as usize, (desc >> 8 & 7) as usize);
+        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::arithmetic::addsub_st(cpu, dst, a, b, desc >> 12 & 1 != 0));
+        0
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+jit_fn! {
+    /// `Uop::FAddValue`.
+    fn jit_fpu_addsub_value(cpu: *mut Cpu, ctx: *mut JitCtx, kind: u32, value: f64) -> u32 {
+        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::arithmetic::addsub_value(cpu, kind, value));
+        0
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+jit_fn! {
+    /// `Uop::FToInt`, for what the code's own conversion doesn't cover:
+    /// rounding up or down, and values that don't fit.
+    fn jit_fpu_to_int(cpu: *mut Cpu, ctx: *mut JitCtx, size: u32, value: f64) -> u32 {
+        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::data::to_int(value, cpu.fpu_control, size as u8))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+jit_fn! {
+    /// `Uop::FDiv` by 0: `desc` is the register, and ze << 8.
+    fn jit_fpu_div_zero(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32) -> u32 {
+        fpu_helper(cpu, ctx, |cpu| {
+            crate::instructions::fpu::arithmetic::divided_by_zero(cpu, (desc & 7) as usize, desc >> 8 & 1 != 0)
+        });
+        0
     }
 }
