@@ -47,6 +47,7 @@ const ZA_COLOR: u32 = 0x130;
 const CHROMA_KEY: u32 = 0x134;
 const COLOR0: u32 = 0x144;
 const COLOR1: u32 = 0x148;
+const FBI_PIXELS_IN: u32 = 0x14C;
 const FBI_PIXELS_OUT: u32 = 0x15C;
 const FOG_TABLE: u32 = 0x160;
 const BACK_PORCH: u32 = 0x208;
@@ -829,6 +830,49 @@ fn scene(bus: &mut Bus) {
     triangle(bus, [(300.0, 300.0), (400.0, 310.0), (320.0, 420.0)]);
     w(bus, FBZ_MODE, RGB_WRITE | 1 << 2 | 1 << 12);
     triangle(bus, [(100.0, 300.0), (200.0, 310.0), (120.0, 420.0)]);
+}
+
+#[test]
+fn triangles_past_the_screens_edges_draw_the_same_on_any_number_of_workers() {
+    // With the Y origin at the bottom and a clip rectangle of the screen,
+    // as Glide programs set them: triangles over each edge, whose rows
+    // past the origin wrap around to rows the clip rectangle drops, go to
+    // the workers like any other; those far off, and those without
+    // clipping, are drawn whole.
+    let pictures: Vec<(Vec<u8>, u32, u32)> = [0, 1, 4]
+        .into_iter()
+        .map(|workers| {
+            let mut bus = bus(Board::Max);
+            bus.voodoo = Some(rust_dos::voodoo::Voodoo::with_workers(Board::Max, workers));
+            init(&mut bus);
+            cfg_write(&mut bus, 0, 0x40, 1);
+            w(&mut bus, FBI_INIT3, 479 << 22);
+            w(&mut bus, CLIP_LEFT_RIGHT, 640);
+            w(&mut bus, CLIP_LOW_Y_HIGH_Y, 480);
+            for i in 0..120u32 {
+                let clipped = i % 5 != 4;
+                w(&mut bus, FBZ_MODE, RGB_WRITE | Y_ORIGIN | if clipped { CLIPPING } else { 0 });
+                flat(&mut bus, i * 9 % 256, 255 - i * 7 % 256, i * 31 % 256, 0);
+                let f = i as f32;
+                let (x, y) = match i % 6 {
+                    0 => (f * 5.0, -40.0 + f),
+                    1 => (f * 5.0, 440.0 + f / 2.0),
+                    2 => (-60.0 + f, f * 4.0),
+                    3 => (590.0 + f / 2.0, f * 4.0),
+                    4 => (f * 4.0, 900.0 + f * 9.0),
+                    _ => (f * 4.0, -700.0 - f * 3.0),
+                };
+                triangle(&mut bus, [(x, y), (x + 110.0, y + 23.0), (x + 35.0, y + 95.0)]);
+            }
+            let v = bus.voodoo.as_ref().unwrap();
+            (v.frame_buffer().to_bytes(), r(&bus, FBI_PIXELS_OUT), r(&bus, FBI_PIXELS_IN))
+        })
+        .collect();
+    assert!(pictures[0].1 > 10_000, "the scene draws ({} pixels)", pictures[0].1);
+    for (i, p) in pictures.iter().enumerate().skip(1) {
+        assert_eq!((p.1, p.2), (pictures[0].1, pictures[0].2), "pixel counts, {} workers", [0, 1, 4][i]);
+        assert!(p.0 == pictures[0].0, "frame buffer differs with {} workers", [0, 1, 4][i]);
+    }
 }
 
 #[test]

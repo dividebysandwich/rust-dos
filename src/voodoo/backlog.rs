@@ -160,10 +160,19 @@ pub fn spills(st: &RasterState, verts: &[(f32, f32); 3], height: u32) -> bool {
     let mut reach = maxx.ceil().min(8192.0) as i32 + 2;
     let y0 = (miny.floor().max(-8192.0) as i32 - 1).max(-2048);
     let y1 = (maxy.ceil().min(8192.0) as i32 + 2).min(4096);
-    let Some((r0, mut r1)) = buffer_rows(st, y0, y1) else { return true };
+    let clip_bottom = (st.clip_low_y_high_y & 0x3FF) as i32;
     if st.fbz_mode & 1 != 0 {
         reach = reach.min((st.clip_left_right & 0x3FF) as i32);
-        r1 = r1.min((st.clip_low_y_high_y & 0x3FF) as i32);
+        if clip_bottom <= height as i32 {
+            // No row below the clip rectangle is drawn, wherever the Y
+            // origin takes the triangle's (one that reaches past the origin
+            // wraps around to rows far below, as most at a screen's edge do).
+            return reach > st.rowpixels as i32;
+        }
+    }
+    let Some((r0, mut r1)) = buffer_rows(st, y0, y1) else { return true };
+    if st.fbz_mode & 1 != 0 {
+        r1 = r1.min(clip_bottom);
     }
     reach > st.rowpixels as i32 || (r1 > height as i32 && r1 > r0.max(0))
 }
