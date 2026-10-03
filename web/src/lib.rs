@@ -1142,10 +1142,21 @@ impl PageHost<'_> {
         if let Err(e) = self.apply(&prepared.settings) {
             self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", e));
         }
+        let programs_before = self.cpu.programs_loaded;
         self.cpu.queue_batch_lines(&prepared.autoexec);
         let message = format!("Starting {}", prepared.name);
-        *self.game =
-            Some(ActiveGame { id: id.to_string(), name: prepared.name, base, saved: prepared.settings, replaced: Vec::new() });
+        // The page presses no keys for a game and maps no gamepad.
+        *self.game = Some(ActiveGame {
+            id: id.to_string(),
+            name: prepared.name,
+            base,
+            saved: prepared.settings,
+            replaced: Vec::new(),
+            programs_before,
+            input: None,
+            pad: None,
+            choose_after: false,
+        });
         Ok(message)
     }
 
