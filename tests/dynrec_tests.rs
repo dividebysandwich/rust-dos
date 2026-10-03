@@ -2281,3 +2281,119 @@ fn fpu_products_and_quotients_too_small_for_a_double_are_zero() {
         assert_eq!(b.read32(DATA + 0x100 + 4 * i), 0, "result {}", i);
     }
 }
+
+/// Writes and reads of video memory, the ROMs and addresses past the end
+/// of RAM, which translated code hands to the bus by their physical
+/// addresses: the VGA's planes through every map mask as mode X programs
+/// write them (a byte at a time, plainly), words and dwords, operands that
+/// reach into the next page, a write mode with a bit mask, and chain 4.
+/// With `paging`, through page tables that map the first 4 MB as they are
+/// but put the window at A0000h at linear 300000h too, its pages swapped
+/// in pairs.
+fn video_memory_program(paging: bool) -> (Rig, Rig) {
+    let window = if paging { 0x30_0000u32 } else { 0xA_0000 };
+    let (mut a, mut b) = twins(|rig| {
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            // (Its pages in pairs the other way round, so that an operand
+            // in two of them is in two places.)
+            let page = if (0x300..0x310).contains(&i) { 0xA0 + ((i - 0x300) ^ 1) } else { i };
+            rig.write32(table + 4 * i, (page << 12) | 3);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            if paging {
+                a.mov(eax, dir)?;
+                a.mov(cr3, eax)?;
+                a.mov(eax, cr0)?;
+                a.or(eax, 0x8000_0000u32)?;
+                a.mov(cr0, eax)?;
+            }
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            let port = |a: &mut CodeAssembler, port: u32, index: u32, value: u32| {
+                a.mov(edx, port)?;
+                a.mov(eax, index | value << 8)?;
+                a.out(dx, ax)
+            };
+            // The planes one after the other, write mode 0, all bits.
+            port(a, 0x3C4, 4, 0x06)?;
+            for (index, value) in [(0, 0), (1, 0), (3, 0), (5, 0), (6, 0x05), (8, 0xFF)] {
+                port(a, 0x3CE, index, value)?;
+            }
+            a.xor(ebx, ebx)?;
+            for (round, mask) in [1u32, 2, 4, 8, 0x0F, 0x05, 0].into_iter().enumerate() {
+                let mut pixels = a.create_label();
+                port(a, 0x3C4, 2, mask)?;
+                a.mov(esi, window + 0x10 * round as u32)?;
+                a.mov(ecx, 0x1200u32)?;
+                a.set_label(&mut pixels)?;
+                a.mov(eax, ecx)?;
+                a.imul_3(eax, eax, 0x0101_0301)?;
+                a.mov(byte_ptr(esi), al)?;
+                a.mov(byte_ptr(esi + 0x4000), ah)?;
+                a.mov(word_ptr(esi + 0x8001), ax)?;
+                a.mov(dword_ptr(esi + 0xC003), eax)?;
+                // (0FFEh and on reach into the next page.)
+                a.add(byte_ptr(esi + 0x100), cl)?;
+                a.movzx(eax, byte_ptr(esi + 0x4000))?;
+                a.add(ebx, eax)?;
+                a.add(ebx, dword_ptr(esi + 0x7FFD))?;
+                a.add(bx, word_ptr(esi + 0x2001))?;
+                a.add(esi, 3)?;
+                a.dec(ecx)?;
+                a.jnz(pixels)?;
+            }
+            // Write mode 2 with a bit mask, then chain 4.
+            port(a, 0x3C4, 2, 0x0F)?;
+            port(a, 0x3CE, 5, 0x02)?;
+            port(a, 0x3CE, 8, 0x3C)?;
+            let mut masked = a.create_label();
+            a.mov(ecx, 0x400u32)?;
+            a.set_label(&mut masked)?;
+            a.mov(al, byte_ptr(ecx + window))?;
+            a.mov(byte_ptr(ecx + window), cl)?;
+            a.mov(word_ptr(ecx + window + 0x2000), cx)?;
+            a.dec(ecx)?;
+            a.jnz(masked)?;
+            port(a, 0x3CE, 5, 0x40)?;
+            port(a, 0x3CE, 8, 0xFF)?;
+            port(a, 0x3C4, 4, 0x0E)?;
+            let mut chained = a.create_label();
+            a.mov(ecx, 0x400u32)?;
+            a.set_label(&mut chained)?;
+            a.mov(byte_ptr(ecx + window + 0x3000), cl)?;
+            a.mov(dword_ptr(ecx * 4 + window + 0x5000), ecx)?;
+            a.add(bl, byte_ptr(ecx + window + 0x3000))?;
+            a.dec(ecx)?;
+            a.jnz(chained)?;
+            // The ROMs, and nothing at all.
+            a.mov(dword_ptr(0xC_8000), ebx)?;
+            a.add(ebx, dword_ptr(0xC_8000))?;
+            a.add(ebx, dword_ptr(0xF_FFF0))?;
+            if !paging {
+                a.mov(dword_ptr(0x7000_0000), ebx)?;
+                a.add(ebx, dword_ptr(0x7000_0000))?;
+                a.add(bl, byte_ptr(0xE000_0123u32))?;
+            }
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    (a, b)
+}
+
+#[test]
+fn video_memory_is_written_and_read_by_its_physical_address() {
+    let (_, b) = video_memory_program(false);
+    assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
+    assert_ne!(b.cpu.ebx(), 0);
+}
+
+#[test]
+fn video_memory_is_written_and_read_through_the_tlb() {
+    let (_, b) = video_memory_program(true);
+    assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
+    assert_ne!(b.cpu.ebx(), 0);
+}

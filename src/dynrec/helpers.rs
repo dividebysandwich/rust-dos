@@ -116,6 +116,8 @@ pub struct JitCtx {
     /// `jit_fpu_addsub_st`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
     /// `jit_fpu_div_zero` (x86-64).
     pub fpu: [usize; 4],
+    /// `jit_dev_read` and `jit_dev_write` (x86-64).
+    pub dev: [usize; 2],
 }
 
 pub const CTX_FALLBACK: i32 = offset_of!(JitCtx, fallback) as i32;
@@ -150,6 +152,14 @@ pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const CTX_FLAGS: i32 = offset_of!(JitCtx, flags) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_FPU: i32 = offset_of!(JitCtx, fpu) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_DEV: i32 = offset_of!(JitCtx, dev) as i32;
+/// On x86-64, a memory operand handle with this bit set is the physical
+/// address (its low dword) of an operand within one page that isn't plain
+/// RAM (video memory, a frame buffer, a card's registers): loads and
+/// stores go through `jit_dev_read` and `jit_dev_write`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const DEV_BIT: u8 = 32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
 pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
 pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
@@ -207,6 +217,10 @@ impl JitCtx {
             ],
             #[cfg(not(target_arch = "x86_64"))]
             fpu: [0; 4],
+            #[cfg(target_arch = "x86_64")]
+            dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
+            #[cfg(not(target_arch = "x86_64"))]
+            dev: [0; 2],
         }
     }
 }
@@ -465,8 +479,10 @@ pub fn memref_desc(seg: Seg, size: u8, write: bool, slot: u8) -> u32 {
 jit_fn! {
     /// Check a memory operand at seg:off as `Cpu::mem_ref` does. Returns
     /// its physical address if it is plain RAM within a page, which the
-    /// code then accesses itself, else `SLOW + slot` (the checked operand
-    /// kept in the slot), or MEMREF_FAULT with the fault in the context.
+    /// code then accesses itself; on x86-64, that address with `DEV_BIT`
+    /// if it is something else within a page; else `SLOW + slot` (the
+    /// checked operand kept in the slot), or MEMREF_FAULT with the fault
+    /// in the context.
     fn jit_memref(cpu: *mut Cpu, ctx: *mut JitCtx, off: u32, desc: u32) -> u64 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
@@ -474,19 +490,36 @@ jit_fn! {
         let size = (desc >> 4 & 7) as u8;
         let access = if desc & 0x80 != 0 { Access::Write } else { Access::Read };
         let slot = (desc >> 8 & 3) as usize;
-        match guard(ctx, Err(Fault::UD), || cpu.mem_ref(seg, off, size, access)) {
+        // (The operand goes straight into its slot: handed back through
+        // the guard, its two dwords would be stored apart and loaded as
+        // one, which the host can't forward.)
+        let refs = &mut ctx.refs[slot];
+        let fault = match catch_unwind(AssertUnwindSafe(|| match cpu.mem_ref(seg, off, size, access) {
             Ok(r) => {
-                if r.phys & 0xFFF <= 0x1000 - size as u32 && cpu.bus.is_plain_ram(r.phys as usize, size as usize) {
-                    r.phys as u64
-                } else {
-                    ctx.refs[slot] = r;
-                    (SLOW + slot as u32) as u64
-                }
+                *refs = r;
+                None
             }
-            Err(fault) => {
-                ctx.fault = fault;
-                MEMREF_FAULT
+            Err(fault) => Some(fault),
+        })) {
+            Ok(fault) => fault,
+            Err(payload) => {
+                ctx.panic.get_or_insert(payload);
+                Some(Fault::UD)
             }
+        };
+        if let Some(fault) = fault {
+            ctx.fault = fault;
+            return MEMREF_FAULT;
+        }
+        let phys = ctx.refs[slot].phys;
+        if phys & 0xFFF > 0x1000 - size as u32 {
+            (SLOW + slot as u32) as u64
+        } else if cpu.bus.is_plain_ram(phys as usize, size as usize) {
+            phys as u64
+        } else if cfg!(target_arch = "x86_64") {
+            1 << DEV_BIT | phys as u64
+        } else {
+            (SLOW + slot as u32) as u64
         }
     }
 }
@@ -570,4 +603,50 @@ jit_fn! {
         });
         0
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+jit_fn! {
+    /// Read `size` bytes at physical address `phys`, an operand within one
+    /// page that isn't plain RAM (`DEV_BIT`), as `Cpu::mem_read` reads it.
+    fn jit_dev_read(cpu: *mut Cpu, ctx: *mut JitCtx, phys: u32, size: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        let p = phys as usize;
+        guard(ctx, 0, || match size {
+            1 => cpu.bus.read_8(p) as u32,
+            2 => cpu.bus.read_16(p) as u32,
+            _ => cpu.bus.read_32(p),
+        })
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+jit_fn! {
+    /// Write such an operand, as `Cpu::mem_write` writes it. Returns 1 if
+    /// the write hit the running block's later bytes (`smc_lo..smc_hi`),
+    /// else 0.
+    fn jit_dev_write(cpu: *mut Cpu, ctx: *mut JitCtx, phys: u32, value: u32, size: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        // A pixel into the VGA's planes, which mode X programs write one by
+        // one. (It can't be in the block's bytes, which are in RAM.)
+        if size == 1 && cpu.bus.write_planes_plainly(phys as usize, value as u8) {
+            return 0;
+        }
+        dev_write(cpu, ctx, phys, value, size)
+    }
+}
+
+/// `jit_dev_write` but for a pixel into the VGA's planes.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+fn dev_write(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32, value: u32, size: u32) -> u32 {
+    let p = phys as usize;
+    guard(ctx, (), || match size {
+        1 => _ = cpu.bus.write_8(p, value as u8),
+        2 => _ = cpu.bus.write_16(p, value as u16),
+        _ => _ = cpu.bus.write_32(p, value),
+    });
+    (phys < ctx.smc_hi && phys.wrapping_add(size) > ctx.smc_lo) as u32
 }

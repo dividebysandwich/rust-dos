@@ -60,6 +60,11 @@ const TLB: i32 = layout::TLB as i32;
 const _: () = assert!(1 << TLB_ENTRY_SHIFT == TLB_ENTRY);
 
 /// Where the RAM below the video memory ends, and extended memory starts.
+/// Handles up to this are addresses in RAM (which is far smaller): above
+/// it are `SLOW`'s, and those with `DEV_BIT`.
+const RAM_HANDLES: i32 = 0x7FFF_FFFF;
+const _: () = assert!(crate::config::MAX_MEMSIZE << 20 <= RAM_HANDLES as usize && SLOW > RAM_HANDLES as u32);
+const _: () = assert!(DEV_BIT == 32);
 const VIDEO: u32 = 0xA0000;
 const EXTENDED: u32 = 0x10_0000;
 
@@ -203,8 +208,14 @@ fn seg_field(seg: Seg, field: usize) -> i32 {
 enum Slow {
     /// A memory operand the inline checks didn't take.
     MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
-    Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T },
-    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, lo: u32, hi: u32 },
+    Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T, size: u8 },
+    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
+    /// A memory operand that isn't plain RAM, with its physical address
+    /// in `addr`, or with `tlb` (the TLB's set, and the tag's offset in
+    /// an entry) its linear address in EAX: if it is within one page (one
+    /// the TLB holds), its handle is that address with `DEV_BIT`; else it
+    /// goes on to `slow`, the `MemRef` above.
+    Dev { at: DynamicLabel, back: DynamicLabel, slow: DynamicLabel, t: T, addr: u8, size: u8, tlb: Option<(i32, i32)> },
     /// A store into a block of RAM with code (`Bus::code_blocks`): its
     /// generations bumped, and a store into the rest of the block noted.
     CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
@@ -640,17 +651,73 @@ impl Gen<'_> {
                         ; pop r8
                         ; test rax, rax
                         ; js >fault
-                        ; mov Rd(r(t)), eax
+                        ; mov Rq(r(t)), rax
                         ; jmp =>back
                         ; fault:
                         ; mov eax, EXIT_FAULT as i32
                         ; jmp =>fail
                     );
                 }
-                Slow::Load { at, back, dst, m } => {
+                Slow::Dev { at, back, slow, t, addr, size, tlb } => {
+                    dynasm!(self.ops ; .arch x64 ; =>at);
+                    if size > 1 {
+                        dynasm!(self.ops
+                            ; .arch x64
+                            ; mov ecx, Rd(addr)
+                            ; and ecx, 0xFFF
+                            ; cmp ecx, 0x1000 - size as i32
+                            ; ja =>slow
+                        );
+                    }
+                    if let Some((entry, tag)) = tlb {
+                        // The page's entry, whose tag must be the page + 1.
+                        dynasm!(self.ops
+                            ; .arch x64
+                            ; mov edx, eax
+                            ; shr edx, 12 - TLB_ENTRY_SHIFT
+                            ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
+                            ; mov ecx, eax
+                            ; shr ecx, 12
+                            ; inc ecx
+                            ; cmp ecx, DWORD [rbx + rdx + TLB + entry + tag]
+                            ; jne =>slow
+                            ; and eax, 0xFFF
+                            ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_PHYS as i32]
+                        );
+                    }
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov Rd(r(t)), Rd(addr)
+                        ; bts Rq(r(t)), 32
+                        ; jmp =>back
+                    );
+                }
+                Slow::Load { at, back, dst, m, size } => {
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
+                        ; bt Rq(r(m)), 32
+                        ; jnc >generic
+                        ; push r8
+                        ; push r9
+                        ; push r10
+                        ; push r11
+                        ; push rsi
+                        ; push rdi
+                        ; mov rdi, rbx
+                        ; mov rsi, r12
+                        ; mov edx, Rd(r(m))
+                        ; mov ecx, size as i32
+                        ; call QWORD [r12 + CTX_DEV]
+                        ; pop rdi
+                        ; pop rsi
+                        ; pop r11
+                        ; pop r10
+                        ; pop r9
+                        ; pop r8
+                        ; mov Rd(r(dst)), eax
+                        ; jmp =>back
+                        ; generic:
                         ; push r8
                         ; push r9
                         ; push r10
@@ -765,7 +832,7 @@ impl Gen<'_> {
                     }
                     dynasm!(self.ops ; .arch x64 ; jmp =>back);
                 }
-                Slow::Store { at, back, m, src, lo, hi } => {
+                Slow::Store { at, back, m, src, size, lo, hi } => {
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
@@ -779,10 +846,17 @@ impl Gen<'_> {
                         ; mov DWORD [r12 + CTX_SMC_HI], hi as i32
                         ; mov ecx, Rd(r(src))
                         ; mov edx, Rd(r(m))
-                        ; and edx, 3
                         ; mov rdi, rbx
                         ; mov rsi, r12
+                        ; bt Rq(r(m)), 32
+                        ; jnc >generic
+                        ; mov r8d, size as i32
+                        ; call QWORD [r12 + CTX_DEV + 8]
+                        ; jmp >called
+                        ; generic:
+                        ; and edx, 3
                         ; call QWORD [r12 + CTX_WRITE]
+                        ; called:
                         ; pop rdi
                         ; pop rsi
                         ; pop r11
@@ -890,14 +964,16 @@ impl Gen<'_> {
             Uop::Load { dst, m, size } => {
                 let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
                 let (d, m_) = (r(dst), r(m));
-                dynasm!(self.ops ; .arch x64 ; cmp Rd(m_), SLOW as i32 ; jae =>at);
+                // (A handle that isn't RAM's has a high bit set, see `SLOW`
+                // and `DEV_BIT`.)
+                dynasm!(self.ops ; .arch x64 ; cmp Rq(m_), RAM_HANDLES ; ja =>at);
                 match size {
                     1 => dynasm!(self.ops ; .arch x64 ; movzx Rd(d), BYTE [r13 + Rq(m_)]),
                     2 => dynasm!(self.ops ; .arch x64 ; movzx Rd(d), WORD [r13 + Rq(m_)]),
                     _ => dynasm!(self.ops ; .arch x64 ; mov Rd(d), DWORD [r13 + Rq(m_)]),
                 }
                 dynasm!(self.ops ; .arch x64 ; =>back);
-                self.slow.push(Slow::Load { at, back, dst, m });
+                self.slow.push(Slow::Load { at, back, dst, m, size });
             }
             Uop::Store { m, src, size } => {
                 let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
@@ -908,8 +984,8 @@ impl Gen<'_> {
                 let code = self.ops.new_dynamic_label();
                 dynasm!(self.ops
                     ; .arch x64
-                    ; cmp Rd(m_), SLOW as i32
-                    ; jae =>at
+                    ; cmp Rq(m_), RAM_HANDLES
+                    ; ja =>at
                     ; mov ecx, Rd(m_)
                     ; shr ecx, crate::bus::GEN_SHIFT as i8
                     ; cmp BYTE [r14 + rcx], 0
@@ -918,7 +994,7 @@ impl Gen<'_> {
                 self.store_ram(m, src, size);
                 dynasm!(self.ops ; .arch x64 ; =>back);
                 let (lo, hi) = self.rest();
-                self.slow.push(Slow::Store { at, back, m, src, lo, hi });
+                self.slow.push(Slow::Store { at, back, m, src, size, lo, hi });
                 self.slow.push(Slow::CodeStore { at: code, back, m, src, size, lo, hi });
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
@@ -1586,6 +1662,8 @@ impl Gen<'_> {
     /// segments as the block's `Env` has them.
     fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8) {
         let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+        // Where an operand that isn't plain RAM goes (`Slow::Dev`).
+        let dev = self.ops.new_dynamic_label();
         let t_ = r(t);
         let bits = self.env.bits;
         let (paging, a20) = (bits & super::ENV_PAGING != 0, bits & super::ENV_A20 != 0);
@@ -1662,13 +1740,14 @@ impl Gen<'_> {
                 ; shr edx, 12 - TLB_ENTRY_SHIFT
                 ; and edx, ((layout::TLB_SET - 1) << TLB_ENTRY_SHIFT) as i32
                 ; cmp ecx, DWORD [rbx + rdx + TLB + entry + jit_tag]
-                ; jne =>at
+                ; jne =>dev
                 ; add eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_JIT_DELTA as i32]
                 ; mov Rd(t_), eax
                 ; =>back
             );
             let desc = memref_desc(seg, size, write, slot);
             let fail = self.fail();
+            self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr: RAX, size, tlb: Some((entry, tag)) });
             self.slow.push(Slow::MemRef { at, back, t, desc, fail });
             return;
         }
@@ -1713,9 +1792,9 @@ impl Gen<'_> {
             ; .arch x64
             ; lea ecx, [Rq(addr) + last - VIDEO as i32]
             ; cmp ecx, (EXTENDED - VIDEO) as i32 + last
-            ; jb =>at
+            ; jb =>dev
             ; cmp Rd(addr), self.env.ram_len.wrapping_sub(size as u32) as i32
-            ; ja =>at
+            ; ja =>dev
         );
         if addr != t_ {
             dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax);
@@ -1723,6 +1802,7 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch x64 ; =>back);
         let desc = memref_desc(seg, size, write, slot);
         let fail = self.fail();
+        self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr, size, tlb: None });
         self.slow.push(Slow::MemRef { at, back, t, desc, fail });
     }
 

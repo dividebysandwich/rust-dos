@@ -1276,6 +1276,25 @@ impl Bus {
         self.read_8(addr)
     }
 
+    /// `write_8` at `addr` where it is a plain write into the VGA's planes
+    /// through the window at A0000h (`VgaCard::write_planes_plainly`), for
+    /// the dynamic recompiler's code. False, with nothing done, where it
+    /// isn't: `write_8` then writes it.
+    #[inline]
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    pub(crate) fn write_planes_plainly(&mut self, addr: usize, value: u8) -> bool {
+        if !(ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr)
+            || self.video_mode == VideoMode::Vesa
+            || self.et4000()
+            || (self.s3() && self.vga.s3.mmio())
+            || !self.vga.write_planes_plainly(addr - ADDR_VGA_GRAPHICS, value)
+        {
+            return false;
+        }
+        self.note_video_write(1);
+        true
+    }
+
     // Returns true if a write occurred to the *active* video memory
     #[inline(always)]
     pub fn write_8(&mut self, addr: usize, value: u8) -> bool {

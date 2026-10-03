@@ -531,6 +531,33 @@ impl VgaCard {
         g[0x05] & 0x03 == 0 && g[0x01] & 0x0F == 0 && g[0x03] == 0 && g[0x08] == 0xFF
     }
 
+    /// `write_graphics` of a byte where it is the plain write into the
+    /// planes the map mask selects, each at `offset`: the memory in planes
+    /// one after the other (not chain 4, not odd/even), write mode 0
+    /// without set/reset, rotation, a logical operation or a bit mask, as
+    /// mode X programs draw (Doom writes every pixel so). False, with
+    /// nothing written, where it isn't.
+    #[inline]
+    pub fn write_planes_plainly(&mut self, offset: usize, value: u8) -> bool {
+        // Chain 4 off and odd/even off (sequencer memory mode bits 3, 2).
+        if self.sequencer_regs[0x04] & 0x0C != 0x04 || !self.plain_writes() {
+            return false;
+        }
+        let planes = self.sequencer_regs[0x02] & 0x0F;
+        if offset < TEXT_PLANE_SIZE && planes & 0x03 != 0 && self.text_in_planes() {
+            return false;
+        }
+        let size = self.plane_size();
+        let at = offset & (size - 1);
+        for p in 0..4 {
+            if planes & 1 << p != 0 {
+                self.vram_graphics[p * size + at] = value;
+            }
+        }
+        self.mark_dirty_full();
+        true
+    }
+
     pub fn write_graphics(&mut self, offset: usize, value: u8) {
         let seq_mem_mode = self.sequencer_regs[0x04];
         let chain4 = (seq_mem_mode & 0x08) != 0;

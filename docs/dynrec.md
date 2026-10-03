@@ -317,10 +317,19 @@ first instruction in a block that changes them:
   off and the A20 gate open, an operand is plain RAM if none of its bytes
   is in the video memory or ROMs and it ends before the end of RAM, two
   compares with constants.
-- Anything else (a TLB miss, video memory, page-crossing operands, a
-  fault) goes through `jit_memref`, which runs the real `Cpu::mem_ref`. It
-  returns the physical address when the operand turns out to be plain
-  RAM, so the loads and stores after it are direct as well.
+- Anything else (a TLB miss, page-crossing operands, a fault) goes
+  through `jit_memref`, which runs the real `Cpu::mem_ref`. It returns
+  the physical address when the operand turns out to be plain RAM, so the
+  loads and stores after it are direct as well.
+- On x86-64, an operand within one page that isn't plain RAM (video
+  memory, a frame buffer, a card's registers, the ROMs, nothing at all)
+  is its physical address too, marked as one the bus must access
+  (`helpers::DEV_BIT`): the code finds it without a call, looking up a
+  page the TLB holds as `Cpu::lin_to_phys` does, and its loads and stores
+  each call `jit_dev_read` or `jit_dev_write`, which read and write it as
+  `Cpu::mem_read` and `mem_write` do. A byte written plainly into the
+  VGA's planes, as mode X programs write every pixel (Doom's columns and
+  spans), takes a short way there (`Bus::write_planes_plainly`).
 
 On x86-64, the four guest registers a block's operations use most (twice
 or more) stay in host registers within it (`x64::Cache`). An instruction
@@ -495,7 +504,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:
