@@ -40,41 +40,63 @@ impl ZipEntry {
     }
 }
 
-/// A folder's file type in a Unix mode, which the crate gives DOS's folder
-/// attribute too. Only the whole type field counts: DOS zip programs left
-/// junk in the attributes' high word, where Unix ones put the mode.
+/// A folder's file type in a Unix mode.
 const FILE_TYPE: u32 = 0o170000;
 const FOLDER: u32 = 0o040000;
 
+/// Whether an entry is a folder, by its central directory header: DOS's
+/// folder attribute, or the Unix mode in the attributes' high word when the
+/// archive was made on Unix. DOS zip programs left junk in that high word,
+/// which the crate's `unix_mode` takes for a mode (1rap12.zip's INSTALL.EXE
+/// has 4978h there: a folder's type).
+fn folder_header(header: &[u8; 46]) -> bool {
+    let external = u32::from_le_bytes([header[38], header[39], header[40], header[41]]);
+    // Made by: 3 Unix, 19 OS X.
+    let unix = matches!(header[5], 3 | 19);
+    external & 0x10 != 0 || (unix && (external >> 16) & FILE_TYPE == FOLDER)
+}
+
 /// The files and folders of the archive.
 pub fn central_directory<F: Read + Seek>(file: &mut F) -> Result<Vec<ZipEntry>, String> {
-    let mut archive = ::zip::ZipArchive::new(file).map_err(|e| format!("not a readable ZIP: {}", e))?;
-    (0..archive.len())
-        .map(|i| {
-            let file = archive.by_index_raw(i).map_err(|e| format!("a damaged ZIP entry: {}", e))?;
-            let raw_name = file.name_raw().to_vec();
-            let path = file.name().replace('\\', "/").trim_end_matches('/').to_string();
-            let dir = file.is_dir() || raw_name.last() == Some(&b'\\') || file.unix_mode().is_some_and(|m| m & FILE_TYPE == FOLDER);
-            let (date, time) = file.last_modified().map_or((0, 0), |t| (t.datepart(), t.timepart()));
-            // The method's number, whichever of the crate's own features
-            // are on: flate2 here inflates what it can't.
-            #[allow(deprecated)]
-            let method = file.compression().to_u16();
-            Ok(ZipEntry {
-                path,
-                dir,
-                encrypted: file.encrypted(),
-                method,
-                crc: file.crc32(),
-                compressed: file.compressed_size(),
-                size: file.size(),
-                data_at: file.data_start().ok_or_else(|| format!("{}: damaged", file.name()))?,
-                time,
-                date,
-                raw_name,
+    let mut headers = Vec::new();
+    let mut entries = {
+        let mut archive = ::zip::ZipArchive::new(&mut *file).map_err(|e| format!("not a readable ZIP: {}", e))?;
+        (0..archive.len())
+            .map(|i| {
+                let file = archive.by_index_raw(i).map_err(|e| format!("a damaged ZIP entry: {}", e))?;
+                let raw_name = file.name_raw().to_vec();
+                let path = file.name().replace('\\', "/").trim_end_matches('/').to_string();
+                let dir = file.is_dir() || raw_name.last() == Some(&b'\\');
+                headers.push(file.central_header_start());
+                let (date, time) = file.last_modified().map_or((0, 0), |t| (t.datepart(), t.timepart()));
+                // The method's number, whichever of the crate's own features
+                // are on: flate2 here inflates what it can't.
+                #[allow(deprecated)]
+                let method = file.compression().to_u16();
+                Ok(ZipEntry {
+                    path,
+                    dir,
+                    encrypted: file.encrypted(),
+                    method,
+                    crc: file.crc32(),
+                    compressed: file.compressed_size(),
+                    size: file.size(),
+                    data_at: file.data_start().ok_or_else(|| format!("{}: damaged", file.name()))?,
+                    time,
+                    date,
+                    raw_name,
+                })
             })
-        })
-        .collect()
+            .collect::<Result<Vec<_>, String>>()?
+    };
+    for (entry, at) in entries.iter_mut().zip(headers) {
+        let mut header = [0; 46];
+        file.seek(SeekFrom::Start(at))
+            .and_then(|_| file.read_exact(&mut header))
+            .map_err(|_| format!("{}: damaged", entry.path))?;
+        entry.dir |= folder_header(&header);
+    }
+    Ok(entries)
 }
 
 /// The contents of a file in the archive.
@@ -155,16 +177,20 @@ pub(crate) mod tests {
 
     #[test]
     fn junk_in_the_attributes_is_no_folder() {
-        let mut data = zip(&[("INSTALL.EXE", b"MZ", false), ("SUB/", b"", false)]);
+        let mut data = zip(&[("INSTALL.EXE", b"MZ", false), ("SUB/", b"", false), ("WOLF.DAT", b"", false)]);
         // The central directory's external attributes: DOS's archive bit,
-        // with junk over it (keen1.zip's D440h), and the folder bit alone.
+        // with junk over it (keen1.zip's D440h, 1rap12.zip's 4978h, which
+        // looks like a Unix folder), and the folder bit alone.
         let central = data.windows(4).position(|w| w == [0x50, 0x4B, 0x01, 0x02]).unwrap();
         data[central + 38..central + 42].copy_from_slice(&0x00D4_4020u32.to_le_bytes());
         let second = central + 46 + "INSTALL.EXE".len();
         data[second + 38..second + 42].copy_from_slice(&0x10u32.to_le_bytes());
+        let third = second + 46 + "SUB/".len();
+        data[third + 38..third + 42].copy_from_slice(&0x4978_C920u32.to_le_bytes());
         let entries = central_directory(&mut std::io::Cursor::new(data)).unwrap();
         assert!(!entries[0].is_dir());
         assert!(entries[1].is_dir());
+        assert!(!entries[2].is_dir());
     }
 
     #[test]
