@@ -175,150 +175,56 @@ impl F80 {
         (mantissa as u64) | (int_bit << 63)
     }
 
-    fn normalize_add(&self, mantissa: u64, exponent: u16) -> (u64, u16) {
-        let mut man = mantissa;
-        let mut exp = exponent;
-        if man == 0 {
-            return (0, 0);
-        }
-        while (man & INT_BIT_MASK64) == 0 {
-            man <<= 1;
-            exp -= 1;
-        }
-        (man, exp)
-    }
-
+    /// Add `b`, as 80-bit numbers: the smaller's significand shifted down
+    /// to the larger's exponent (its low bits dropped), the significands
+    /// added or subtracted, and the result brought back to 64 bits.
     pub fn add(&mut self, b: F80) {
-        let a_sign = self.get_sign();
-        let b_sign = b.get_sign();
-
-        let mut a_exp = self.get_exponent();
-        let b_exp = b.get_exponent();
-
-        let mut a_man = self.get_mantissa() as u128;
-        let mut b_man = b.get_mantissa() as u128;
-
-        // Clamp the shift amount. 
-        // Shifting a u128 by >= 128 causes a Rust panic.
-        if a_exp > b_exp {
-            let shift = (a_exp - b_exp) as u32;
-            if shift >= 128 {
-                b_man = 0; // Underflow: b is negligible compared to a
-            } else {
-                b_man >>= shift;
-            }
-        } else if b_exp > a_exp {
-            let shift = (b_exp - a_exp) as u32;
-            if shift >= 128 {
-                a_man = 0; // Underflow: a is negligible compared to b
-            } else {
-                a_man >>= shift;
-            }
-            a_exp = b_exp;
-        }
-
-        let mut result_sign;
-        let mut result_exp = a_exp;
-        let mut result_man: u128;
-
-        if a_sign == b_sign {
-            result_man = a_man + b_man;
-            if (result_man & (1u128 << 64)) != 0 {
-                result_man >>= 1;
-                result_exp += 1;
-            }
-            result_sign = a_sign;
-        } else {
-            if a_man >= b_man {
-                result_man = a_man - b_man;
-                result_sign = a_sign;
-            } else {
-                result_man = b_man - a_man;
-                result_sign = b_sign;
-            }
-            let (norm_man, norm_exp) = self.normalize_add(result_man as u64, result_exp);
-            result_man = norm_man as u128;
-            result_exp = norm_exp;
-
-            if result_man == 0 {
-                result_sign = false;
-                result_exp = 0;
-            }
-        }
-
-        self.set_sign(result_sign);
-        self.set_exponent(result_exp);
-        self.set_mantissa(result_man as u64);
+        self.add_signed(b, b.get_sign());
     }
 
+    /// Subtract `b`: add it with its sign turned.
     pub fn sub(&mut self, b: F80) {
-        let a_sign = self.get_sign();
-        let b_sign = b.get_sign();
-
-        let mut a_exp = self.get_exponent();
-        let b_exp = b.get_exponent();
-
-        let mut a_man = self.get_mantissa() as u128;
-        let mut b_man = b.get_mantissa() as u128;
-
-        // Clamp the shift amount.
-        if a_exp > b_exp {
-            let shift = (a_exp - b_exp) as u32;
-            if shift >= 128 {
-                b_man = 0;
-            } else {
-                b_man >>= shift;
-            }
-        } else if b_exp > a_exp {
-            let shift = (b_exp - a_exp) as u32;
-            if shift >= 128 {
-                a_man = 0;
-            } else {
-                a_man >>= shift;
-            }
-            a_exp = b_exp;
-        }
-
-        let mut result_sign;
-        let mut result_exp = a_exp;
-        let mut result_man: u128;
-
-        if a_sign != b_sign {
-            result_man = a_man + b_man;
-            if (result_man & (1u128 << 64)) != 0 {
-                result_man >>= 1;
-                result_exp += 1;
-            }
-            result_sign = a_sign;
-        } else {
-            if a_man >= b_man {
-                result_man = a_man - b_man;
-                result_sign = a_sign;
-            } else {
-                result_man = b_man - a_man;
-                result_sign = !a_sign;
-            }
-            let (norm_man, norm_exp) = self.normalize_sub(result_man as u64, result_exp);
-            result_man = norm_man as u128;
-            result_exp = norm_exp;
-
-            if result_man == 0 {
-                result_sign = false; // +0
-                result_exp = 0;
-            }
-        }
-
-        self.set_sign(result_sign);
-        self.set_exponent(result_exp);
-        self.set_mantissa(result_man as u64);
+        self.add_signed(b, !b.get_sign());
     }
 
-    fn normalize_sub(&self, mut mant: u64, mut exp: u16) -> (u64, u16) {
-        while mant != 0 && (mant & (1 << 63)) == 0 {
-            mant <<= 1;
-            exp -= 1;
+    #[inline]
+    fn add_signed(&mut self, b: F80, b_sign: bool) {
+        let a_sign = self.get_sign();
+        let (mut exp, b_exp) = (self.get_exponent(), b.get_exponent());
+        let (mut a_man, mut b_man) = (self.st as u64, b.st as u64);
+        let shifted = |man: u64, by: u16| if by >= 64 { 0 } else { man >> by };
+        if exp > b_exp {
+            b_man = shifted(b_man, exp - b_exp);
+        } else if b_exp > exp {
+            a_man = shifted(a_man, b_exp - exp);
+            exp = b_exp;
         }
-        (mant, exp)
+        let (sign, man);
+        if a_sign == b_sign {
+            let (sum, carry) = a_man.overflowing_add(b_man);
+            if carry {
+                man = sum >> 1 | INT_BIT_MASK64;
+                exp = exp.wrapping_add(1);
+            } else {
+                man = sum;
+            }
+            sign = a_sign;
+        } else {
+            let difference = if a_man >= b_man { a_man - b_man } else { b_man - a_man };
+            if difference == 0 {
+                (sign, man, exp) = (false, 0, 0);
+            } else {
+                let up = difference.leading_zeros();
+                man = difference << up;
+                exp = exp.wrapping_sub(up as u16);
+                sign = if a_man >= b_man { a_sign } else { b_sign };
+            }
+        }
+        // (An exponent that wrapped around reaches into the sign, as it
+        // always did.)
+        let st = (self.st & !SIGN_MASK) | (sign as u128) << SIGN_SHIFT;
+        let st = (st & !EXP_MASK2) | (exp as u128) << EXP_SHIFT;
+        self.st = (st & !MANTISSA_MASK) | man as u128;
     }
 
     #[allow(dead_code)]
@@ -590,6 +496,159 @@ impl crate::savestate::State for FpuRegs {
     }
 }
 
+
+/// `F80::add` and `F80::sub` as they were first written, a bit at a time,
+/// for the tests to compare with.
+#[cfg(test)]
+impl F80 {
+    fn normalize_add(&self, mantissa: u64, exponent: u16) -> (u64, u16) {
+        let mut man = mantissa;
+        let mut exp = exponent;
+        if man == 0 {
+            return (0, 0);
+        }
+        while (man & INT_BIT_MASK64) == 0 {
+            man <<= 1;
+            exp = exp.wrapping_sub(1);
+        }
+        (man, exp)
+    }
+
+    fn add_reference(&mut self, b: F80) {
+        let a_sign = self.get_sign();
+        let b_sign = b.get_sign();
+
+        let mut a_exp = self.get_exponent();
+        let b_exp = b.get_exponent();
+
+        let mut a_man = self.get_mantissa() as u128;
+        let mut b_man = b.get_mantissa() as u128;
+
+        // Clamp the shift amount. 
+        // Shifting a u128 by >= 128 causes a Rust panic.
+        if a_exp > b_exp {
+            let shift = (a_exp - b_exp) as u32;
+            if shift >= 128 {
+                b_man = 0; // Underflow: b is negligible compared to a
+            } else {
+                b_man >>= shift;
+            }
+        } else if b_exp > a_exp {
+            let shift = (b_exp - a_exp) as u32;
+            if shift >= 128 {
+                a_man = 0; // Underflow: a is negligible compared to b
+            } else {
+                a_man >>= shift;
+            }
+            a_exp = b_exp;
+        }
+
+        let mut result_sign;
+        let mut result_exp = a_exp;
+        let mut result_man: u128;
+
+        if a_sign == b_sign {
+            result_man = a_man + b_man;
+            if (result_man & (1u128 << 64)) != 0 {
+                result_man >>= 1;
+                result_exp = result_exp.wrapping_add(1);
+            }
+            result_sign = a_sign;
+        } else {
+            if a_man >= b_man {
+                result_man = a_man - b_man;
+                result_sign = a_sign;
+            } else {
+                result_man = b_man - a_man;
+                result_sign = b_sign;
+            }
+            let (norm_man, norm_exp) = self.normalize_add(result_man as u64, result_exp);
+            result_man = norm_man as u128;
+            result_exp = norm_exp;
+
+            if result_man == 0 {
+                result_sign = false;
+                result_exp = 0;
+            }
+        }
+
+        self.set_sign(result_sign);
+        self.set_exponent(result_exp);
+        self.set_mantissa(result_man as u64);
+    }
+
+    fn sub_reference(&mut self, b: F80) {
+        let a_sign = self.get_sign();
+        let b_sign = b.get_sign();
+
+        let mut a_exp = self.get_exponent();
+        let b_exp = b.get_exponent();
+
+        let mut a_man = self.get_mantissa() as u128;
+        let mut b_man = b.get_mantissa() as u128;
+
+        // Clamp the shift amount.
+        if a_exp > b_exp {
+            let shift = (a_exp - b_exp) as u32;
+            if shift >= 128 {
+                b_man = 0;
+            } else {
+                b_man >>= shift;
+            }
+        } else if b_exp > a_exp {
+            let shift = (b_exp - a_exp) as u32;
+            if shift >= 128 {
+                a_man = 0;
+            } else {
+                a_man >>= shift;
+            }
+            a_exp = b_exp;
+        }
+
+        let mut result_sign;
+        let mut result_exp = a_exp;
+        let mut result_man: u128;
+
+        if a_sign != b_sign {
+            result_man = a_man + b_man;
+            if (result_man & (1u128 << 64)) != 0 {
+                result_man >>= 1;
+                result_exp = result_exp.wrapping_add(1);
+            }
+            result_sign = a_sign;
+        } else {
+            if a_man >= b_man {
+                result_man = a_man - b_man;
+                result_sign = a_sign;
+            } else {
+                result_man = b_man - a_man;
+                result_sign = !a_sign;
+            }
+            let (norm_man, norm_exp) = self.normalize_sub(result_man as u64, result_exp);
+            result_man = norm_man as u128;
+            result_exp = norm_exp;
+
+            if result_man == 0 {
+                result_sign = false; // +0
+                result_exp = 0;
+            }
+        }
+
+        self.set_sign(result_sign);
+        self.set_exponent(result_exp);
+        self.set_mantissa(result_man as u64);
+    }
+
+    fn normalize_sub(&self, mut mant: u64, mut exp: u16) -> (u64, u16) {
+        while mant != 0 && (mant & (1 << 63)) == 0 {
+            mant <<= 1;
+            exp = exp.wrapping_sub(1);
+        }
+        (mant, exp)
+    }
+
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +713,59 @@ mod tests {
             f.set_f64(v as f64);
             assert_eq!(f.st, F80::encode_from_u128(v.unsigned_abs() as u128, v < 0), "{}", v);
             assert_eq!(canon_f64(v as f64).to_bits(), (v as f64).to_bits());
+        }
+    }
+
+    #[test]
+    fn sums_and_differences_are_what_they_always_were() {
+        // 80 bits of every kind: random ones, doubles in a register,
+        // zeros, denormals, exponents at both ends, equal and near-equal
+        // pairs.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut values: Vec<F80> = Vec::new();
+        for v in samples().into_iter().take(400) {
+            let mut f = F80::new();
+            f.set_f64(v);
+            values.push(f);
+        }
+        for i in 0..600 {
+            let (hi, lo) = (next(), next());
+            let exp = match i % 6 {
+                0 => 0,
+                1 => 0x7FFF,
+                2 => 0x7FFE,
+                3 => 1 + hi % 70,
+                4 => 0x3FFF + hi % 70,
+                _ => hi >> 3 & 0x7FFF,
+            };
+            let man = match i % 5 {
+                0 => lo | 1 << 63,
+                1 => lo >> (hi % 64),
+                2 => 0,
+                3 => 1 << 63,
+                _ => lo,
+            };
+            values.push(F80 { st: (hi as u128 & 1) << 79 | (exp as u128) << 64 | man as u128 });
+        }
+        for (i, &a) in values.iter().enumerate() {
+            for &b in values.iter().skip(i % 7).step_by(7) {
+                for (a, b) in [(a, b), (b, a), (a, a), (a, F80 { st: a.st ^ SIGN_MASK }), (a, F80 { st: a.st ^ 1 })] {
+                    let (mut sum, mut reference) = (a, a);
+                    sum.add(b);
+                    reference.add_reference(b);
+                    assert_eq!(sum.st, reference.st, "{:020X} + {:020X}", a.st, b.st);
+                    let (mut difference, mut reference) = (a, a);
+                    difference.sub(b);
+                    reference.sub_reference(b);
+                    assert_eq!(difference.st, reference.st, "{:020X} - {:020X}", a.st, b.st);
+                }
+            }
         }
     }
 
