@@ -130,7 +130,19 @@ fn copy_dir(src: &Path, dest: &Path) {
             copy_dir(&path, &dest.join(name));
         } else if !name.to_string_lossy().to_ascii_uppercase().ends_with(".SWP") {
             fs::copy(&path, dest.join(name)).unwrap();
+            keep_time(&path, &dest.join(name));
         }
+    }
+    keep_time(src, dest);
+}
+
+/// Give the copy `dest` the time `src` was last changed: DOS reads the
+/// times into its buffers, and two machines' copies made a moment apart
+/// would differ there (as would one run's from the next).
+fn keep_time(src: &Path, dest: &Path) {
+    let changed = fs::metadata(src).and_then(|m| m.modified());
+    if let (Ok(changed), Ok(file)) = (changed, fs::File::open(dest)) {
+        let _ = file.set_modified(changed);
     }
 }
 
