@@ -264,7 +264,11 @@ the doubles with SSE2, as their handlers do:
 
 Each starts with an `FpuGuard` operation, which runs the instruction
 through its handler instead where CR0 has EM or TS set (#NM), or a
-register it reads is empty (it then reads as the real indefinite).
+register it reads is empty (it then reads as the real indefinite), and
+stops the block after it. So the code of a block checks CR0 once, and a
+register's tag once, or not at all where the block pushed it
+(`x64::Gen::fpu_known`): what one instruction found holds for those
+after it, until a handler's call.
 Memory operands are checked as the handlers check them, before anything
 changes. Operands of 8 and 10 bytes, the other instructions and ARM64
 hosts go through the handlers.
