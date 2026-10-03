@@ -289,16 +289,22 @@ impl SoundBlaster {
         self.last_ticks = now;
         let Some(t) = self.transfer.filter(|t| !t.paused) else {
             if let Some(left) = self.silence {
-                // Command 80h: count silent units at the time-constant rate.
-                let units = (elapsed as u128 * self.tc_rate as u128 / PIT_HZ as u128) as u32;
-                if units >= left {
+                // Command 80h: count silent units at the time-constant rate,
+                // keeping the part of a unit that has passed, as a driver
+                // polling the DSP while it waits advances it a tick at a time.
+                let total = elapsed as u128 * self.tc_rate as u128 + self.frac as u128;
+                let units = total / PIT_HZ as u128;
+                if units >= left as u128 {
                     self.silence = None;
                     self.irq8 = true;
+                    self.frac = 0;
                 } else {
-                    self.silence = Some(left - units);
+                    self.silence = Some(left - units as u32);
+                    self.frac = (total % PIT_HZ as u128) as u64;
                 }
+            } else {
+                self.frac = 0;
             }
-            self.frac = 0;
             return;
         };
         let total = elapsed as u128 * t.rate as u128 + self.frac as u128;
@@ -380,7 +386,8 @@ impl SoundBlaster {
             return Some(self.last_ticks + need.div_ceil(t.rate as u128) as u64);
         }
         self.silence.map(|left| {
-            self.last_ticks + (left as u128 * PIT_HZ as u128).div_ceil(self.tc_rate.max(1) as u128) as u64
+            let need = (left as u128 * PIT_HZ as u128).saturating_sub(self.frac as u128);
+            self.last_ticks + need.div_ceil(self.tc_rate.max(1) as u128) as u64
         })
     }
 
@@ -597,7 +604,10 @@ impl SoundBlaster {
             }
             0x7D | 0x7F => self.start(false, false, false, true, false, self.block_size),
             // Silence for n+1 samples, then an IRQ.
-            0x80 => self.silence = Some(self.param16(0) + 1),
+            0x80 => {
+                self.silence = Some(self.param16(0) + 1);
+                self.frac = 0;
+            }
             // SB Pro input mode (mono / stereo): nothing to record.
             0xA0 | 0xA8 => {}
             // SB16: B0h-BFh 16-bit and C0h-CFh 8-bit transfers. Bit 3 input,

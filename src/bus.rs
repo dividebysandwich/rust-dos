@@ -2040,6 +2040,9 @@ impl Bus {
             0x3 if fm_ports => self.opl_data(1, value),
             _ => {
                 self.audio_catch_up();
+                // The DSP's time up to the command, so what it starts counts
+                // from now.
+                self.sb_advance();
                 let mut log = Vec::new();
                 if let Some(sb) = &mut self.sb {
                     sb.write(offset, value, &mut log);

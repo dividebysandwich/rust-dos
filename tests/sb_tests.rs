@@ -292,3 +292,28 @@ fn no_card_means_nothing_at_its_ports() {
     assert_eq!(bus.io_read(0x22E), 0xFF);
     assert_eq!(bus.io_read(0x22A), 0xFF);
 }
+
+#[test]
+fn silence_interrupts_while_the_driver_polls_the_dsp() {
+    // Tyrian 2000's setup sends 80h for 17 units at 16.7 kHz (about 1 ms)
+    // and reads the write status in a tight loop until its IRQ handler
+    // runs: each read brings the DSP up to date a fraction of a unit on.
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 0xC4);
+    dsp_write(&mut bus, 0x80);
+    dsp_write(&mut bus, 0x10);
+    dsp_write(&mut bus, 0x00);
+    let start = bus.clock.icount;
+    while bus.pic_pending_irq().is_none() && bus.clock.icount - start < 5000 {
+        bus.clock.icount += 1;
+        if bus.clock.icount >= bus.clock.deadline {
+            bus.service_timers();
+        }
+        bus.io_read(0x22C);
+    }
+    let elapsed = bus.clock.icount - start;
+    assert_eq!(bus.pic_pending_irq(), Some(7), "silence ends with IRQ 7");
+    assert!((950..=1100).contains(&elapsed), "after {} instructions (1 ms is 1000)", elapsed);
+}
