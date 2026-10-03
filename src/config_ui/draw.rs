@@ -22,13 +22,13 @@ pub const SELECT: Rgb = Rgb(0x1C, 0x78, 0xA8);
 /// Background of text fields.
 pub const FIELD: Rgb = Rgb(0x08, 0x10, 0x2C);
 /// The panel, blended over the picture at `PANEL_ALPHA`/256.
-const PANEL: Rgb = Rgb(0x10, 0x20, 0x50);
+pub(super) const PANEL: Rgb = Rgb(0x10, 0x20, 0x50);
 pub const PANEL_ALPHA: u32 = 216;
 /// How opaque something drawn over the picture is, of 256: wholly.
 pub const OPAQUE: u32 = 256;
 
 /// `over` over `under`, `alpha`/256 opaque.
-fn blend(under: [u8; 3], over: Rgb, alpha: u32) -> [u8; 3] {
+pub(super) fn blend(under: [u8; 3], over: Rgb, alpha: u32) -> [u8; 3] {
     let mix = |d: u8, c: u8| ((d as u32 * (256 - alpha) + c as u32 * alpha) >> 8) as u8;
     [mix(under[0], over.0), mix(under[1], over.1), mix(under[2], over.2)]
 }
