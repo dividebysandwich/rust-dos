@@ -629,16 +629,17 @@ jit_fn! {
     fn jit_dev_write(cpu: *mut Cpu, ctx: *mut JitCtx, phys: u32, value: u32, size: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
-        // A pixel into the VGA's planes, which mode X programs write one by
-        // one. (It can't be in the block's bytes, which are in RAM.)
-        if size == 1 && cpu.bus.write_planes_plainly(phys as usize, value as u8) {
+        // Pixels into the VGA's planes, which mode X programs write one or
+        // two at a time. (They can't be in the block's bytes, which are in
+        // RAM.)
+        if cpu.bus.write_planes_plainly(phys as usize, value, size as usize) {
             return 0;
         }
         dev_write(cpu, ctx, phys, value, size)
     }
 }
 
-/// `jit_dev_write` but for a pixel into the VGA's planes.
+/// `jit_dev_write` but for pixels into the VGA's planes.
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn dev_write(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32, value: u32, size: u32) -> u32 {

@@ -531,14 +531,14 @@ impl VgaCard {
         g[0x05] & 0x03 == 0 && g[0x01] & 0x0F == 0 && g[0x03] == 0 && g[0x08] == 0xFF
     }
 
-    /// `write_graphics` of a byte where it is the plain write into the
-    /// planes the map mask selects, each at `offset`: the memory in planes
-    /// one after the other (not chain 4, not odd/even), write mode 0
-    /// without set/reset, rotation, a logical operation or a bit mask, as
-    /// mode X programs draw (Doom writes every pixel so). False, with
-    /// nothing written, where it isn't.
+    /// `write_graphics` of the low `size` bytes of `value` at `offset` and
+    /// on, where it is the plain write of each into the planes the map
+    /// mask selects: the memory in planes one after the other (not chain
+    /// 4, not odd/even), write mode 0 without set/reset, rotation, a
+    /// logical operation or a bit mask, as mode X programs draw (Doom
+    /// writes every pixel so). False, with nothing written, where it isn't.
     #[inline]
-    pub fn write_planes_plainly(&mut self, offset: usize, value: u8) -> bool {
+    pub fn write_planes_plainly(&mut self, offset: usize, value: u32, size: usize) -> bool {
         // Chain 4 off and odd/even off (sequencer memory mode bits 3, 2).
         if self.sequencer_regs[0x04] & 0x0C != 0x04 || !self.plain_writes() {
             return false;
@@ -547,11 +547,14 @@ impl VgaCard {
         if offset < TEXT_PLANE_SIZE && planes & 0x03 != 0 && self.text_in_planes() {
             return false;
         }
-        let size = self.plane_size();
-        let at = offset & (size - 1);
-        for p in 0..4 {
-            if planes & 1 << p != 0 {
-                self.vram_graphics[p * size + at] = value;
+        let plane_size = self.plane_size();
+        for i in 0..size {
+            let at = (offset + i) & (plane_size - 1);
+            let byte = (value >> (8 * i)) as u8;
+            for p in 0..4 {
+                if planes & 1 << p != 0 {
+                    self.vram_graphics[p * plane_size + at] = byte;
+                }
             }
         }
         self.mark_dirty_full();
