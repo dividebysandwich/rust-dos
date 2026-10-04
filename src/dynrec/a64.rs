@@ -191,6 +191,10 @@ enum Slow {
     /// with the flags in W28 there (`dirty`), and goes on at `end`.
     /// With `leave`, the block stops after it (`Uop::FpuGuard`).
     Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, leave: bool },
+    /// A store hit the rest of the block: it leaves after the instruction,
+    /// at `next`, with the flags in W28 (`dirty`) or a recorded
+    /// operation's (`lazy`), through `join`.
+    Smc { at: DynamicLabel, next: u32, dirty: bool, lazy: bool, join: DynamicLabel },
     /// Link `slot`'s guard (at `g` in the block) didn't find its page in the
     /// TLB: if the link is made, `jit_fetch` looks the page up and the
     /// guard checks again from `back`, else the link's `stub`. X1 is the
@@ -411,21 +415,9 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
                     g.fail();
                     let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
-                    let skip = g.ops.new_dynamic_label();
-                    dynasm!(g.ops ; .arch aarch64 ; cbz w23, =>skip);
-                    g.mov32(0, next);
-                    g.field(Access::Str32, 0, layout::EIP);
-                    g.mov32(0, EXIT_SMC | if g.dirty { EXIT_FLAGS } else { 0 });
-                    if g.lazy_end[ix] {
-                        // The flags after the instruction are a recorded
-                        // operation's.
-                        g.lazy_flags();
-                    }
-                    dynasm!(g.ops
-                        ; .arch aarch64
-                        ; b =>join
-                        ; =>skip
-                    );
+                    let at = g.ops.new_dynamic_label();
+                    dynasm!(g.ops ; .arch aarch64 ; cbnz w23, =>at);
+                    g.slow.push(Slow::Smc { at, next, dirty: g.dirty, lazy: g.lazy_end[ix], join });
                 }
             }
         }
@@ -988,6 +980,18 @@ impl Gen<'_> {
                 }
                 Slow::Fault { at, code, fail } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at ; movz w0, code ; b =>fail);
+                }
+                Slow::Smc { at, next, dirty, lazy, join } => {
+                    dynasm!(self.ops ; .arch aarch64 ; =>at);
+                    self.mov32(0, next);
+                    self.field(Access::Str32, 0, layout::EIP);
+                    self.mov32(0, EXIT_SMC | if dirty { EXIT_FLAGS } else { 0 });
+                    if lazy {
+                        // The flags after the instruction are a recorded
+                        // operation's.
+                        self.lazy_flags();
+                    }
+                    dynasm!(self.ops ; .arch aarch64 ; b =>join);
                 }
                 Slow::Fetch { at, back, stub, slot, g } => {
                     let off = slot as u32 * 8;
@@ -2054,6 +2058,40 @@ impl Gen<'_> {
 
     fn alu(&mut self, op: AluOp, size: u8, a: T, b: Src) {
         let need = ARITH & self.live_after;
+        if need == 0 && !self.record_now && !matches!(op, AluOp::Adc | AluOp::Sbb) {
+            // No flags wanted: the operation alone, on the temporary.
+            if !op.writes() {
+                return;
+            }
+            let a_ = r(a);
+            match (op, b) {
+                (AluOp::Add, Src::Imm(v)) if v < 4096 => dynasm!(self.ops ; .arch aarch64 ; add WSP(a_), WSP(a_), v),
+                (AluOp::Sub, Src::Imm(v)) if v < 4096 => dynasm!(self.ops ; .arch aarch64 ; sub WSP(a_), WSP(a_), v),
+                _ => {
+                    let b_ = match b {
+                        Src::T(b) => r(b),
+                        Src::Imm(v) => {
+                            self.mov32(11, v);
+                            11
+                        }
+                    };
+                    match op {
+                        AluOp::Add => dynasm!(self.ops ; .arch aarch64 ; add W(a_), W(a_), W(b_)),
+                        AluOp::Sub => dynasm!(self.ops ; .arch aarch64 ; sub W(a_), W(a_), W(b_)),
+                        AluOp::And => dynasm!(self.ops ; .arch aarch64 ; and W(a_), W(a_), W(b_)),
+                        AluOp::Or => dynasm!(self.ops ; .arch aarch64 ; orr W(a_), W(a_), W(b_)),
+                        _ => dynasm!(self.ops ; .arch aarch64 ; eor W(a_), W(a_), W(b_)),
+                    }
+                }
+            }
+            // (Zero-extended, as `cut` leaves results.)
+            match size {
+                1 => dynasm!(self.ops ; .arch aarch64 ; and WSP(a_), W(a_), 0xFF),
+                2 => dynasm!(self.ops ; .arch aarch64 ; and WSP(a_), W(a_), 0xFFFF),
+                _ => {}
+            }
+            return;
+        }
         self.operands(a, b);
         if self.record_now {
             let kind = Uop::Alu { op, size, a, b }.lazy_kind().expect("a recorded operation");
@@ -2105,6 +2143,21 @@ impl Gen<'_> {
             UnOp::Not => {
                 dynasm!(self.ops ; .arch aarch64 ; mvn w0, W(r(t)));
                 self.cut(size);
+            }
+            UnOp::Inc | UnOp::Dec if ARITH & !CF & self.live_after == 0 => {
+                // No flags wanted: the operation alone, zero-extended.
+                let t_ = r(t);
+                if op == UnOp::Inc {
+                    dynasm!(self.ops ; .arch aarch64 ; add WSP(t_), WSP(t_), 1);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; sub WSP(t_), WSP(t_), 1);
+                }
+                match size {
+                    1 => dynasm!(self.ops ; .arch aarch64 ; and WSP(t_), W(t_), 0xFF),
+                    2 => dynasm!(self.ops ; .arch aarch64 ; and WSP(t_), W(t_), 0xFFFF),
+                    _ => {}
+                }
+                return;
             }
             UnOp::Inc | UnOp::Dec => {
                 // As ADD or SUB 1, leaving CF.

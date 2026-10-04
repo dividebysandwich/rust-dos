@@ -221,6 +221,10 @@ enum Slow {
     CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
+    /// A store hit the rest of the block: it leaves after the instruction,
+    /// at `next`, with the flags in EBP (`dirty`) or a recorded
+    /// operation's (`lazy`), through `join`.
+    Smc { at: DynamicLabel, next: u32, dirty: bool, lazy: bool, join: DynamicLabel },
     /// Link `slot`'s guard (at `g` in the block) didn't find its page in the
     /// TLB: if the link is made, `jit_fetch` looks the page up and the
     /// guard checks again from `back`, else the link's `stub`. RDX is the
@@ -506,26 +510,12 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
                     // A store hit the rest of the block: leave after this
                     // instruction.
-                    let smc = g.ops.new_dynamic_label();
-                    let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32) as i32;
+                    let at = g.ops.new_dynamic_label();
+                    let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
                     g.fail();
                     let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
-                    let skip = g.ops.new_dynamic_label();
-                    dynasm!(g.ops
-                        ; .arch x64
-                        ; cmp BYTE [r12 + CTX_SMC], 0
-                        ; je =>skip
-                        ; =>smc
-                        ; mov BYTE [r12 + CTX_SMC], 0
-                        ; mov DWORD [rbx + EIP], next
-                        ; mov eax, (EXIT_SMC | if g.dirty { EXIT_FLAGS } else { 0 }) as i32
-                    );
-                    if g.lazy_end[ix] {
-                        // The flags after the instruction are a recorded
-                        // operation's.
-                        g.lazy_flags();
-                    }
-                    dynasm!(g.ops ; .arch x64 ; jmp =>join ; =>skip);
+                    dynasm!(g.ops ; .arch x64 ; cmp BYTE [r12 + CTX_SMC], 0 ; jne =>at);
+                    g.slow.push(Slow::Smc { at, next, dirty: g.dirty, lazy: g.lazy_end[ix], join });
                 }
             }
         }
@@ -883,6 +873,21 @@ impl Gen<'_> {
                         ; jz =>stub
                         ; jmp =>back
                     );
+                }
+                Slow::Smc { at, next, dirty, lazy, join } => {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                        ; mov BYTE [r12 + CTX_SMC], 0
+                        ; mov DWORD [rbx + EIP], next as i32
+                        ; mov eax, (EXIT_SMC | if dirty { EXIT_FLAGS } else { 0 }) as i32
+                    );
+                    if lazy {
+                        // The flags after the instruction are a recorded
+                        // operation's.
+                        self.lazy_flags();
+                    }
+                    dynasm!(self.ops ; .arch x64 ; jmp =>join);
                 }
                 Slow::Fault { at, code, fail } => {
                     dynasm!(self.ops
