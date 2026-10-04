@@ -1319,7 +1319,7 @@ fn guest_page_fault(cpu: &mut Cpu, before: &(crate::cpu::CpuSnapshot, usize)) ->
 
 /// Whether the page after the one `lin_ip` is in maps to the physical page
 /// after `phys_ip`'s, so an instruction can run on into it.
-fn next_page_follows(cpu: &mut Cpu, lin_ip: u32, phys_ip: usize) -> bool {
+pub(crate) fn next_page_follows(cpu: &mut Cpu, lin_ip: u32, phys_ip: usize) -> bool {
     let next = (lin_ip | 0xFFF).wrapping_add(1);
     let user = cpu.cpl == 3;
     // A page that isn't there faults only if the instruction needs bytes

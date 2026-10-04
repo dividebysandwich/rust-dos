@@ -132,6 +132,8 @@ pub struct JitCtx {
     pub fpu: [usize; 4],
     /// `jit_dev_read` and `jit_dev_write` (x86-64).
     pub dev: [usize; 2],
+    /// `jit_fetch`.
+    pub fetch: usize,
     /// `jit_lazy_flags`, and the operation it works the flags out from (see
     /// `flags::Plan::record`): its kind and size (`kind | size << 8`), and
     /// its operands. With the exit code a way out keeps there while it
@@ -211,6 +213,7 @@ pub const CTX_FLAGS: i32 = offset_of!(JitCtx, flags) as i32;
 pub const CTX_FPU: i32 = offset_of!(JitCtx, fpu) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_DEV: i32 = offset_of!(JitCtx, dev) as i32;
+pub const CTX_FETCH: i32 = offset_of!(JitCtx, fetch) as i32;
 /// On x86-64, a memory operand handle with this bit set is the physical
 /// address (its low dword) of an operand within one page that isn't plain
 /// RAM (video memory, a frame buffer, a card's registers): loads and
@@ -219,6 +222,7 @@ pub const CTX_DEV: i32 = offset_of!(JitCtx, dev) as i32;
 pub const DEV_BIT: u8 = 32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
 pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
+pub const DATA_STUBS: i32 = offset_of!(BlockData, stubs) as i32;
 pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
 pub const GUARD_SIZE: i32 = std::mem::size_of::<Guard>() as i32;
 pub const GUARD_EIP: i32 = offset_of!(Guard, eip) as i32;
@@ -283,6 +287,7 @@ impl JitCtx {
                 jit_fpu_div_zero as *const () as usize,
             ],
             dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
+            fetch: jit_fetch as *const () as usize,
             lazy_fn: jit_lazy_flags as *const () as usize,
             lazy: [0; 3],
             lazy_code: 0,
@@ -526,6 +531,41 @@ fn far_goes_on(cpu: &Cpu, ctx: &JitCtx, pm: bool, tr: u16) -> bool {
     let cs_bits = (super::ENV_FLAT | super::ENV_PLAIN) << Seg::CS as u32 | 1;
     (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
         && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits
+}
+
+jit_fn! {
+    /// A link to another page whose guard found its page not in the TLB
+    /// (the page tables were loaded again since, as a task switch does):
+    /// look the page of the target, at linear address `lin` and EIP `eip`,
+    /// up as the interpreter's instruction fetch there does (`exec::locate`,
+    /// with paging), which it would do next, as nothing comes before it
+    /// (no timer event yet, no interrupt within translated code). 1 where
+    /// that put it in the TLB, for the guard to check again; 0, with
+    /// nothing changed, where the fetch would fault (its #GP or #PF are for
+    /// the interpreter to raise, the execution loop going on there).
+    fn jit_fetch(cpu: *mut Cpu, ctx: *mut JitCtx, lin: u32, eip: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.fetch += 1;
+        if cpu.bus.clock.icount >= cpu.bus.clock.deadline || eip > cpu.seg_cache(Seg::CS).limit {
+            return 0;
+        }
+        let cr2 = cpu.cr2;
+        match cpu.lin_to_phys(lin, false, cpu.cpl == 3) {
+            Ok(phys) => {
+                // (As the fetch of an instruction that may run on into
+                // the next page looks that up.)
+                if lin & 0xFFF > 0xFF0 {
+                    crate::exec::next_page_follows(cpu, lin, phys as usize);
+                }
+                1
+            }
+            Err(_) => {
+                cpu.cr2 = cr2;
+                0
+            }
+        }
+    }
 }
 
 /// Whether port I/O (or a long string instruction) changed what the

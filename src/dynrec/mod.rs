@@ -75,6 +75,8 @@ pub struct Calls {
     pub dev: u64,
     pub port: u64,
     pub load_seg: u64,
+    /// `jit_fetch`.
+    pub fetch: u64,
 }
 
 /// Counts for the statistics.

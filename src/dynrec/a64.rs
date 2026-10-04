@@ -191,6 +191,11 @@ enum Slow {
     /// with the flags in W28 there (`dirty`), and goes on at `end`.
     /// With `leave`, the block stops after it (`Uop::FpuGuard`).
     Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, leave: bool },
+    /// Link `slot`'s guard (at `g` in the block) didn't find its page in the
+    /// TLB: if the link is made, `jit_fetch` looks the page up and the
+    /// guard checks again from `back`, else the link's `stub`. X1 is the
+    /// block.
+    Fetch { at: DynamicLabel, back: DynamicLabel, stub: DynamicLabel, slot: usize, g: u32 },
     /// A memory operand of `size` bytes at physical address `addr` (a
     /// register) that isn't plain RAM: within a page, its handle is that
     /// address with `DEV_BIT`; else it goes on to `slow`, the `MemRef`.
@@ -983,6 +988,31 @@ impl Gen<'_> {
                 }
                 Slow::Fault { at, code, fail } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at ; movz w0, code ; b =>fail);
+                }
+                Slow::Fetch { at, back, stub, slot, g } => {
+                    let off = slot as u32 * 8;
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; =>at
+                        ; ldr x0, [x1, DATA_LINKS as u32 + off]
+                        ; ldr x2, [x1, DATA_STUBS as u32 + off]
+                        ; cmp x0, x2
+                        ; b.eq =>stub
+                        ; ldr w3, [x1, g + GUARD_EIP as u32]
+                        ; and w2, w3, 0xFFF
+                        ; ldr w4, [x1, g + GUARD_PAGE as u32]
+                        ; orr w2, w2, w4, lsl 12
+                        ; mov x0, x19
+                        ; mov x1, x20
+                        ; ldr x16, [x20, CTX_FETCH as u32]
+                        ; blr x16
+                    );
+                    self.data_x1();
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; cbz w0, =>stub
+                        ; b =>back
+                    );
                 }
                 Slow::Dev { at, back, slow, t, addr, size } => {
                     dynasm!(self.ops
@@ -2810,6 +2840,12 @@ impl Gen<'_> {
             ; cmp w2, w3
             ; b.ne =>stub
             ; cbz w2, >go
+        );
+        let (fetch, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+        self.slow.push(Slow::Fetch { at: fetch, back, stub, slot, g });
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; =>back
             // The TLB entry of the page in the set of the privilege level.
             ; ldr w4, [x1, g_page]
             ; and w3, w4, (layout::TLB_SET - 1) as u32
@@ -2831,7 +2867,7 @@ impl Gen<'_> {
             ; add w4, w4, 1
             ; ldr w5, [x6, layout::TLB_READ_TAG as u32]
             ; cmp w4, w5
-            ; b.ne =>stub
+            ; b.ne =>fetch
             ; ldr w5, [x6, layout::TLB_PHYS as u32]
             ; ldr w3, [x1, g_phys]
             ; cmp w5, w3

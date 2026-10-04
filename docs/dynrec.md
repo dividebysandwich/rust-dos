@@ -501,6 +501,11 @@ takes more care:
   - The execution loop makes these links when the block it runs next is
     at the stub's target (`Pending`): its own fetch just found the target,
     under the translation the guard records.
+  - A guard that finds its page not in the TLB (the page tables were
+    loaded again since, as Windows does between virtual machines) looks it
+    up as the interpreter's fetch of the target would (`jit_fetch`), which
+    comes next where the timer deadline isn't reached yet, and checks
+    again; a lookup that would fault is left to the interpreter.
   - A return, indirect call or jump to none of the EIPs its links were made to
     looks in the engine's table of places returns went to (`Return`, by
     the EIP's low bits), made as its links are, in the block's mode, and
@@ -601,7 +606,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, and segment loads in big real mode |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, and a link to a page the TLB lost |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

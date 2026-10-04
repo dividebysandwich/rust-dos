@@ -221,6 +221,11 @@ enum Slow {
     CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
+    /// Link `slot`'s guard (at `g` in the block) didn't find its page in the
+    /// TLB: if the link is made, `jit_fetch` looks the page up and the
+    /// guard checks again from `back`, else the link's `stub`. RDX is the
+    /// block.
+    Fetch { at: DynamicLabel, back: DynamicLabel, stub: DynamicLabel, slot: usize, g: i32 },
     /// The instruction is done and stops the block after it with `code`:
     /// EIP on `next`.
     After { at: DynamicLabel, next: u32, code: u32, fail: DynamicLabel },
@@ -844,6 +849,38 @@ impl Gen<'_> {
                         ; pop r9
                         ; pop r8
                         ; mov Rd(r(dst)), eax
+                        ; jmp =>back
+                    );
+                }
+                Slow::Fetch { at, back, stub, slot, g } => {
+                    let off = slot as i32 * 8;
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                        ; mov rax, QWORD [rdx + DATA_LINKS + off]
+                        ; cmp rax, QWORD [rdx + DATA_STUBS + off]
+                        ; je =>stub
+                        ; push rdx
+                    );
+                    self.save_for_call();
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov ecx, DWORD [rdx + g + GUARD_EIP]
+                        ; mov eax, ecx
+                        ; and eax, 0xFFF
+                        ; mov edx, DWORD [rdx + g + GUARD_PAGE]
+                        ; shl edx, 12
+                        ; or edx, eax
+                        ; mov rdi, rbx
+                        ; mov rsi, r12
+                        ; call QWORD [r12 + CTX_FETCH]
+                    );
+                    self.restore_after_call();
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; pop rdx
+                        ; test eax, eax
+                        ; jz =>stub
                         ; jmp =>back
                     );
                 }
@@ -2967,15 +3004,18 @@ impl Gen<'_> {
             // The TLB entry of the page in the set of the privilege level.
             let set = if self.env.bits & super::ENV_USER != 0 { layout::TLB_SET as i32 } else { 0 };
             let entry = set * TLB_ENTRY;
+            let (fetch, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+            self.slow.push(Slow::Fetch { at: fetch, back, stub, slot, g });
             dynasm!(self.ops
                 ; .arch x64
+                ; =>back
                 ; mov ecx, DWORD [rdx + g + GUARD_PAGE]
                 ; mov eax, ecx
                 ; and ecx, (layout::TLB_SET - 1) as i32
                 ; shl ecx, TLB_ENTRY_SHIFT
                 ; inc eax
                 ; cmp eax, DWORD [rbx + rcx + TLB + entry + layout::TLB_READ_TAG as i32]
-                ; jne =>stub
+                ; jne =>fetch
                 ; mov eax, DWORD [rbx + rcx + TLB + entry + layout::TLB_PHYS as i32]
                 ; cmp eax, DWORD [rdx + g + GUARD_PHYS]
                 ; jne =>stub

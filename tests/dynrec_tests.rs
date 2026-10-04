@@ -2169,6 +2169,64 @@ fn remapped_callee(flush: bool) -> u32 {
 }
 
 #[test]
+fn a_link_to_a_page_the_tlb_lost_looks_it_up_as_the_fetch_would() {
+    // Each time around, the loop clears the Accessed bit of the callee's
+    // page and loads CR3 again (the TLB forgets it), then calls the
+    // function there: the link's guard looks the page up as the
+    // interpreter's fetch of the call's target does, setting the bit. The
+    // timer interrupts all of it.
+    let (dir, table) = (0x80000u32, 0x81000u32);
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        // IRQ 0's handler counts in EDI, and sums the Accessed bit as it
+        // finds it in EBP.
+        rig.handler(0x08, 0, |a| {
+            a.push(eax)?;
+            a.inc(edi)?;
+            a.mov(eax, dword_ptr(table + 0x31 * 4))?;
+            a.and(eax, 0x20)?;
+            a.add(ebp, eax)?;
+            a.mov(al, 0x20)?;
+            a.out(0x20, al)?;
+            a.pop(eax)?;
+            a.iretd()
+        });
+        rig.load(0x31000, &asm32(0x31000, |a| {
+            a.add(ebx, esi)?;
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            start_timer(a)?;
+            a.mov(ecx, 20000u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.and(dword_ptr(table + 0x31 * 4), !0x20u32 as i32)?;
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.inc(esi)?;
+            a.call(0x31000u64)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.cli()?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+    if AVAILABLE {
+        assert!(b.cpu.dynrec.calls().unwrap().fetch > 100, "{:?}", stats);
+    }
+}
+
+#[test]
 fn links_to_another_page_follow_its_remapping() {
     assert_eq!(remapped_callee(true), 50 + 5000);
     assert_eq!(remapped_callee(false), 100, "the TLB keeps the old translation");
