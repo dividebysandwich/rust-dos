@@ -776,10 +776,23 @@ fn fpu_helper<R: Default>(cpu: *mut Cpu, ctx: *mut JitCtx, f: impl FnOnce(&mut C
 }
 
 jit_fn! {
-    /// `Uop::FAddSt`: `desc` is dst, a << 4, b << 8 and sub << 12.
-    fn jit_fpu_addsub_st(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32) -> u32 {
+    /// The register operations `desc >> 13` says: `Uop::FAddSt` (0, `desc`
+    /// is dst, a << 4, b << 8 and sub << 12), `Uop::FChs` (1) and
+    /// `Uop::FLoad80` (2, from RAM at `arg`).
+    fn jit_fpu_addsub_st(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32, arg: u32) -> u32 {
+        use crate::instructions::fpu::arithmetic;
         let (dst, a, b) = ((desc & 7) as usize, (desc >> 4 & 7) as usize, (desc >> 8 & 7) as usize);
-        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::arithmetic::addsub_st(cpu, dst, a, b, desc >> 12 & 1 != 0));
+        fpu_helper(cpu, ctx, |cpu| match desc >> 13 {
+            0 => arithmetic::addsub_st(cpu, dst, a, b, desc >> 12 & 1 != 0),
+            1 => arithmetic::fchs(cpu),
+            _ => {
+                let at = arg as usize;
+                let bytes: [u8; 10] = cpu.bus.ram()[at..at + 10].try_into().unwrap();
+                let mut f = crate::f80::F80::new();
+                f.set_bytes(&bytes);
+                cpu.fpu_push(f);
+            }
+        });
         0
     }
 }

@@ -672,6 +672,16 @@ impl Gen<'_> {
 
     /// Make the double in D`x` what an FPU register holds
     /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
+    /// Call `jit_fpu_addsub_st` with `desc` and the handle in `arg`.
+    fn fpu_op(&mut self, desc: u32, arg: Option<T>) {
+        if let Some(t) = arg {
+            dynasm!(self.ops ; .arch aarch64 ; mov w3, W(r(t)));
+        }
+        dynasm!(self.ops ; .arch aarch64 ; mov x0, x19 ; mov x1, x20);
+        self.mov32(2, desc);
+        dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x20, CTX_FPU as u32] ; blr x16);
+    }
+
     fn fpu_canon(&mut self, x: u8) {
         dynasm!(self.ops
             ; .arch aarch64
@@ -1643,10 +1653,10 @@ impl Gen<'_> {
             }
             Uop::FAddSt { dst, a, b, sub } => {
                 let desc = dst as u32 | (a as u32) << 4 | (b as u32) << 8 | (sub as u32) << 12;
-                dynasm!(self.ops ; .arch aarch64 ; mov x0, x19 ; mov x1, x20);
-                self.mov32(2, desc);
-                dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x20, CTX_FPU as u32] ; blr x16);
+                self.fpu_op(desc, None);
             }
+            Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
             Uop::FAddValue { kind, x } => {
                 dynasm!(self.ops ; .arch aarch64 ; fmov d0, D(d(x)) ; mov x0, x19 ; mov x1, x20);
                 self.mov32(2, kind);

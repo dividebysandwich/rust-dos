@@ -1687,16 +1687,10 @@ impl Gen<'_> {
             }
             Uop::FAddSt { dst, a, b, sub } => {
                 let desc = dst as i32 | (a as i32) << 4 | (b as i32) << 8 | (sub as i32) << 12;
-                self.save_for_call();
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; mov edx, desc
-                    ; mov rsi, r12
-                    ; mov rdi, rbx
-                    ; call QWORD [r12 + CTX_FPU]
-                );
-                self.restore_after_call();
+                self.fpu_op(desc, None);
             }
+            Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
             Uop::FAddValue { kind, x } => {
                 self.save_for_call();
                 if x.0 != 0 {
@@ -1850,6 +1844,22 @@ impl Gen<'_> {
             ; movq Rx(x), rcx
             ; canon_done:
         );
+    }
+
+    /// Call `jit_fpu_addsub_st` with `desc` and the handle in `arg`.
+    fn fpu_op(&mut self, desc: i32, arg: Option<T>) {
+        self.save_for_call();
+        if let Some(t) = arg {
+            dynasm!(self.ops ; .arch x64 ; mov ecx, Rd(r(t)));
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov edx, desc
+            ; mov rsi, r12
+            ; mov rdi, rbx
+            ; call QWORD [r12 + CTX_FPU]
+        );
+        self.restore_after_call();
     }
 
     /// `Uop::FToInt`: the conversion inline where the control word rounds

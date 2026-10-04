@@ -278,6 +278,11 @@ pub enum Uop {
     FAddSt { dst: u8, a: u8, b: u8, sub: bool },
     /// ST(0) and x: `fpu::arithmetic::addsub_value` of `kind`.
     FAddValue { kind: u32, x: X },
+    /// FCHS: `fpu::arithmetic::fchs`.
+    FChs,
+    /// Push the 80 bits at handle m, which is RAM's (`BailUnlessRam`), as
+    /// FLD's handler does.
+    FLoad80 { m: T },
     /// Compare a with b into C0, C2 and C3.
     FCom { a: X, b: X },
     /// t = the status word.

@@ -63,6 +63,18 @@ pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
         true
     };
     match instr.code() {
+        Fld_m80fp => {
+            guard(u, 0);
+            if mem(instr, T1, 10, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::BailUnlessRam { t: T1 });
+            u.push(Uop::FLoad80 { m: T1 });
+        }
+        Fchs => {
+            guard(u, 0);
+            u.push(Uop::FChs);
+        }
         Fld_m64fp => {
             guard(u, 0);
             if !double(u, false) {

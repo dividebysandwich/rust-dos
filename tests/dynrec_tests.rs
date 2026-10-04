@@ -2857,6 +2857,15 @@ fn fpu_doubles_in_memory_run_as_their_handlers() {
             a.fnstsw(ax)?;
             a.add(ebx, eax)?;
             a.fstp(qword_ptr(edi + 32))?;
+            // 80 bits out and in, and the sign changed.
+            a.fld(qword_ptr(esi))?;
+            a.fchs()?;
+            a.fstp(tword_ptr(DATA + 0x7000))?;
+            a.fld(tword_ptr(DATA + 0x7000))?;
+            a.fchs()?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            a.fstp(qword_ptr(edi + 32))?;
             a.add(esi, 16)?;
             a.add(edi, 40)?;
             a.dec(ecx)?;
@@ -2867,14 +2876,22 @@ fn fpu_doubles_in_memory_run_as_their_handlers() {
             a.fstp(qword_ptr(0xA0010u64))?;
             a.fld(qword_ptr(0xA0010u64))?;
             a.fstp(qword_ptr(DATA + 0x6000))?;
+            // 80 bits across a page, and FCHS of an empty register.
+            a.fld(tword_ptr(DATA + 0x7FFA))?;
+            a.fstp(tword_ptr(DATA + 0x6010))?;
+            a.fninit()?;
+            a.fchs()?;
+            a.fnstsw(ax)?;
+            a.mov(dword_ptr(DATA + 0x6020), eax)?;
             a.hlt()
         }));
     });
     let stats = run_both(&mut a, &mut b);
     // 1.5 * 1.5 = 2.25.
     assert_eq!(b.read32(output + 4), 0x4002_0000);
+    // (FSTP of 80 bits runs as its handler.)
     if AVAILABLE && cfg!(target_arch = "x86_64") {
-        assert!(stats.native + 10 > stats.instructions, "handlers ran them: {:?}", stats);
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
 }
 
