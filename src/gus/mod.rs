@@ -784,9 +784,11 @@ impl Gus {
             for &frame in &self.mix_buf {
                 self.out.push_back(if dac { frame } else { (0.0, 0.0) });
             }
-        } else {
+        } else if !self.is_idle() {
             self.out.extend(std::iter::repeat_n((0.0, 0.0), frames));
         }
+        // (A card that has gone quiet adds no silence of its own:
+        // `pop_frame` holds its last frame, which is silent.)
         let max = (self.frame_rate_milli() / 2000) as usize;
         if self.out.len() > max {
             let extra = self.out.len() - max;
@@ -832,6 +834,12 @@ impl Gus {
     /// One stereo frame for a mixer running at `rate` frames a second,
     /// interpolated from the card's output.
     #[inline]
+    /// Whether `pop_frame` gives silence: nothing waiting, and the frame it
+    /// holds is silent.
+    pub fn is_idle(&self) -> bool {
+        self.out.is_empty() && self.cur == (0.0, 0.0) && self.prev == (0.0, 0.0)
+    }
+
     pub fn pop_frame(&mut self, rate: u32) -> (f32, f32) {
         self.phase += self.frame_rate() / rate as f64;
         while self.phase >= 1.0 {

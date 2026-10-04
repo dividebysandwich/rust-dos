@@ -134,6 +134,11 @@ impl CdPlayer {
     }
 
     /// The next sample pair, as the mixer adds them up (16-bit scale).
+    /// Whether nothing plays.
+    pub fn is_idle(&self) -> bool {
+        self.state != PlayState::Playing
+    }
+
     pub fn render(&mut self) -> (f32, f32) {
         if self.state != PlayState::Playing {
             return (0.0, 0.0);

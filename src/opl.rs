@@ -32,6 +32,12 @@ pub struct Opl {
 }
 
 impl Opl {
+    /// Whether the chip has made no sound since it was reset (`render`
+    /// then gives silence without running it).
+    pub fn is_idle(&self) -> bool {
+        !self.active
+    }
+
     pub fn new(opl3: bool) -> Self {
         Self {
             chip: Opl3Chip::new(RATE),

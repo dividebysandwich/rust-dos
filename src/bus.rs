@@ -263,6 +263,8 @@ pub struct Bus {
     /// `audio_frames` frames of emulated time, waiting for `pump_audio`.
     pub audio_out: VecDeque<i16>,
     audio_frames: u64,
+    /// The last frames mixed came to exact zeros (see `audio_catch_up`).
+    audio_settled: bool,
     /// How `pump_audio` holds the output device's queue at its target.
     pub audio_feed: crate::audio::Feed,
     /// Resampling position and last frame of the Sound Blaster's output.
@@ -430,6 +432,7 @@ impl Bus {
             audio_out: VecDeque::new(),
             audio_feed: crate::audio::Feed::default(),
             audio_frames: 0,
+            audio_settled: false,
             sb_phase: 0.0,
             sb_frame: (0, 0),
             beep_frames: 0,
@@ -1823,6 +1826,16 @@ impl Bus {
             return;
         }
         self.audio_frames = target;
+        // Silence from every source, with the filters and effects run out
+        // to exact zeros (the last frames mixed were): the frames are those
+        // zeros, without mixing them one by one.
+        let quiet = self.audio_quiet();
+        if quiet && self.audio_settled {
+            self.audio_out.extend(std::iter::repeat_n(0, 2 * frames));
+            self.trim_audio();
+            return;
+        }
+        let mut settled = quiet;
 
         let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
         let speaker_step = crate::timer::PIT_HZ as f32 / divisor / rate as f32;
@@ -1928,10 +1941,39 @@ impl Bus {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Tandy, (s, s));
             }
             let (l, r) = self.mixer.finish(mix, &mut peaks);
+            settled &= l == 0.0 && r == 0.0;
             self.audio_out.push_back(l.clamp(-32768.0, 32767.0) as i16);
             self.audio_out.push_back(r.clamp(-32768.0, 32767.0) as i16);
         }
+        self.audio_settled = settled;
         self.mixer.add_peaks(peaks);
+        self.trim_audio();
+    }
+
+    /// Whether no source makes a sound, or would move on in a way the
+    /// sound coming later depends on, as the frames to mix start (see
+    /// `audio_settled`).
+    fn audio_quiet(&mut self) -> bool {
+        let speaker = self.speaker_on && {
+            let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
+            crate::timer::PIT_HZ as f32 / divisor > 20.0
+        };
+        !speaker
+            && self.beep_frames == 0
+            && self.opl.is_idle()
+            && self.sb.as_ref().is_none_or(|sb| sb.out.is_empty() && sb.dac == 0)
+            && self.mpu.is_idle()
+            && self.cdaudio.is_idle()
+            && self.disknoise.is_silent()
+            && self.gus.as_ref().is_none_or(|g| g.is_idle())
+            && self.awe.is_none()
+            && self.lpt_dac.is_none()
+            && !self.tandy_sound_enabled()
+    }
+
+    /// Keep the queues of output in bounds.
+    fn trim_audio(&mut self) {
+        let rate = crate::opl::RATE as u64;
         // Nobody drains it without an audio device: keep a second.
         let max = 2 * rate as usize;
         if self.audio_out.len() > max {

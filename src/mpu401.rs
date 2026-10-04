@@ -311,6 +311,18 @@ impl Mpu401 {
 
     /// One stereo frame of synthesizer output at the mixer's rate.
     #[inline]
+    /// Whether `render` gives silence and nothing in the synthesizer moves
+    /// on: no synthesizer, or the Ultrasound patches' with no voice
+    /// sounding (others run on their own).
+    pub fn is_idle(&self) -> bool {
+        match &self.synth {
+            Synth::None => true,
+            Synth::Gus(synth) => synth.active_voices() == 0,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
     pub fn render(&mut self) -> (f32, f32) {
         match &mut self.synth {
             Synth::None => (0.0, 0.0),
