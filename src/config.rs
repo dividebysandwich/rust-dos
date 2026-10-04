@@ -175,8 +175,10 @@ pub struct Config {
     /// (`rewind_memory`).
     pub rewind: Option<bool>,
     pub rewind_memory: Option<usize>,
-    /// Busy-wait loops skipped (`idle_skip`).
+    /// Busy-wait loops skipped (`idle_skip`), and Windows' idle calls
+    /// waiting for the next event (`idle_hint`).
     pub idle_skip: Option<bool>,
+    pub idle_hint: Option<bool>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
     /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,
@@ -882,6 +884,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.idle_skip = Some(on),
                             None => warn(format!("invalid idle_skip '{}' (true or false)", value)),
                         },
+                        "idle_hint" => match parse_bool(value) {
+                            Some(on) => config.idle_hint = Some(on),
+                            None => warn(format!("invalid idle_hint '{}' (true or false)", value)),
+                        },
                         "record_ui" => match parse_bool(value) {
                             Some(on) => config.record_ui = Some(on),
                             None => warn(format!("invalid record_ui '{}' (true or false)", value)),
@@ -1219,6 +1225,8 @@ pub struct Settings {
     pub rewind_memory: usize,
     /// Skip the passes of busy-wait loops that change nothing (`idle`).
     pub idle_skip: bool,
+    /// Let Windows' idle calls wait for the next event (not exact).
+    pub idle_hint: bool,
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
@@ -1269,6 +1277,7 @@ impl Default for Settings {
             rewind: false,
             rewind_memory: 256,
             idle_skip: true,
+            idle_hint: false,
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
@@ -1339,6 +1348,7 @@ impl Settings {
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             idle_skip: config.idle_skip.unwrap_or(default.idle_skip),
+            idle_hint: config.idle_hint.unwrap_or(default.idle_hint),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
             sound: config.sound.clone(),
             disk: config.disk,
@@ -1413,6 +1423,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
         (Emulator, "idle_skip", yes_no(settings.idle_skip)),
+        (Emulator, "idle_hint", yes_no(settings.idle_hint)),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
         (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
         (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
@@ -2397,6 +2408,7 @@ mod tests {
             rewind: true,
             rewind_memory: 512,
             idle_skip: false,
+            idle_hint: true,
             sound,
             disk: DiskSettings {
                 hard_disk_speed: DiskSpeed::Medium,

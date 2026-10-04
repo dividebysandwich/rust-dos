@@ -307,6 +307,13 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   device but the video card's status, whose bits it looks at only
   through a mask), so programs see the same as without it. `false` runs
   every pass.
+* `idle_hint=true` lets Windows' own idle calls wait for the next timer
+  event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
+  mode (its VMPOLL device calling out, and the kernel's idle call), which
+  reads the timer in every pass, so `idle_skip` can't skip it. Unlike
+  `idle_skip` this isn't exact: the loop runs fewer passes than on a real
+  machine, which Windows doesn't notice, but timing-sensitive programs
+  might. Off by default.
 * `hard_disk_speed` and `floppy_disk_speed` slow the disks down to those
   of the time; see [Disk speed and noises](#disk-speed-and-noises).
 

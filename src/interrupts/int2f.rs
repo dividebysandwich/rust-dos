@@ -40,6 +40,13 @@ pub fn handle(cpu: &mut Cpu) {
         // Windows' DOS manager asking about DOS's data, which the DOS 5
         // kernel answers itself.
         0x1607 if cpu.bx() == 0x0015 => dosmgr(cpu),
+        // With `idle_hint`, Windows saying it is idle waits for the next
+        // event, as HLT does: 3.1's VMPOLL device calling out from the
+        // idle loop of a virtual machine, and its kernel's idle call
+        // (AX=1689h). Not exact: the loop runs fewer passes than it would.
+        // The registers come back as they were.
+        0x1607 if cpu.bx() == 0x0018 && cpu.bus.idle_hint => cpu.bus.idle_until_event(),
+        0x1689 if cpu.bus.idle_hint => cpu.bus.idle_until_event(),
         // Windows' 386 enhanced mode (DX bit 0 clear) starts: the keys
         // reach its virtual machines through their BIOS. The registers
         // come back as they were.

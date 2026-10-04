@@ -455,7 +455,10 @@ impl Observe {
 ///   the mouse driver's position, which moves between batches. The time is
 ///   the host's: the loop is only proven where it read the same time in the
 ///   passes compared, and skipping them is running them on a host fast
-///   enough to read that time in all of them.
+///   enough to read that time in all of them;
+/// - Windows' device call-outs (INT 2Fh AX=1607h), which only DOS's
+///   DOSMGR interface answers, in registers: Windows 3.1's VMPOLL makes
+///   one in each pass of its idle loop.
 pub fn pure_service(kind: u8, vector: u8, ax: u16) -> bool {
     let ah = (ax >> 8) as u8;
     kind == 0x38
@@ -463,6 +466,7 @@ pub fn pure_service(kind: u8, vector: u8, ax: u16) -> bool {
             0x16 => matches!(ah, 0x01 | 0x02 | 0x11 | 0x12),
             0x1A => ah == 0x00,
             0x21 => matches!(ah, 0x2A | 0x2C),
+            0x2F => ax == 0x1607,
             0x33 => ax == 0x0003,
             _ => false,
         }

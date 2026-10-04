@@ -176,6 +176,10 @@
 # timer event (a program waiting for a key, the retrace or the timer), so
 # the emulator sleeps instead. Exact: programs see nothing of it.
 #idle_skip=true
+# Let Windows' idle calls (Windows 3.1's idle loop) wait for the next timer
+# event, as HLT does. Saves host CPU on an idle Windows desktop, but isn't
+# exact: the idle loop runs fewer passes than it would.
+#idle_hint=false
 # How fast hard disks are, as DOSBox Staging has it:
 #   maximum  as fast as possible, no slowdown (the default)
 #   fast     a mid-1990s hard disk (~15 MB/s)

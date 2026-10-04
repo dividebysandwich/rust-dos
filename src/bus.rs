@@ -107,6 +107,8 @@ pub struct Bus {
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,
+    /// Windows' idle call-outs wait for the next event (`idle_hint`).
+    pub idle_hint: bool,
     /// What the user should hear of the host folders shared with a booted
     /// system (`shared_disk`): copies back and failures, for the screen.
     pub disk_notices: Vec<String>,
@@ -359,6 +361,7 @@ impl Bus {
             dos_version: crate::config::DosVersion::default(),
             ide_hard_disks: true,
             boot_cdrom: true,
+            idle_hint: false,
             disk_notices: Vec::new(),
             umb: None,
             dos_high: true,
@@ -2291,6 +2294,14 @@ impl Bus {
     /// not in the code it runs between its calls. HX's Win32 console takes
     /// a keystroke twice when the keyboard interrupt lands between its
     /// check of its own queue and of the BIOS's buffer.
+    /// A guest that said it is idle waits until the next device event, as
+    /// a halted CPU does (or `IDLE_SLICE_TICKS` with none due).
+    pub fn idle_until_event(&mut self) {
+        let now = self.clock.now_ticks();
+        let until = self.next_event().unwrap_or(now + IDLE_SLICE_TICKS).max(now);
+        self.clock.stall_to(until);
+    }
+
     pub fn release_time_slice(&mut self) {
         let now = self.clock.now_ticks();
         let until = self.next_event().map_or(now + IDLE_SLICE_TICKS, |t| t.min(now + IDLE_SLICE_TICKS));
