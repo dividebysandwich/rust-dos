@@ -984,6 +984,29 @@ impl Gen<'_> {
         }
     }
 
+    /// In real mode, unless loading segment register `seg` changes only its
+    /// selector and base (`Cpu::load_seg_real` once it is a data-like
+    /// segment that isn't flat, which a load could make it), run the
+    /// instruction through its handler (and with `leave`, stop the block
+    /// after it).
+    fn real_load(&mut self, seg: Seg, leave: bool) {
+        let at = self.ops.new_dynamic_label();
+        dynasm!(self.ops
+            ; .arch x64
+            ; cmp BYTE [rbx + seg_field(seg, layout::SEG_ATTR)], layout::AR_DATA_RW as i8
+            ; jne =>at
+            ; cmp BYTE [rbx + seg_field(seg, layout::SEG_RIGHTS)], (layout::RIGHT_READ | layout::RIGHT_WRITE) as i8
+            ; jne =>at
+            ; cmp DWORD [rbx + seg_field(seg, layout::SEG_LO)], 0
+            ; jne =>at
+            ; cmp DWORD [rbx + seg_field(seg, layout::SEG_HI)], -1
+            ; je =>at
+        );
+        let end = self.end();
+        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave });
+    }
+
     /// A store of `src` through handle `m` that isn't to plain RAM: if it is
     /// to the VGA's graphics window, with writes there plain ones into the
     /// planes (`JitCtx::vga_ok`), write each plane the map mask selects
@@ -1222,23 +1245,7 @@ impl Gen<'_> {
             Uop::GetSeg { t, seg } => {
                 dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + seg_field(seg, layout::SEG_SELECTOR)]);
             }
-            Uop::CsReal => {
-                let at = self.ops.new_dynamic_label();
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; cmp BYTE [rbx + seg_field(Seg::CS, layout::SEG_ATTR)], layout::AR_DATA_RW as i8
-                    ; jne =>at
-                    ; cmp BYTE [rbx + seg_field(Seg::CS, layout::SEG_RIGHTS)], (layout::RIGHT_READ | layout::RIGHT_WRITE) as i8
-                    ; jne =>at
-                    ; cmp DWORD [rbx + seg_field(Seg::CS, layout::SEG_LO)], 0
-                    ; jne =>at
-                    ; cmp DWORD [rbx + seg_field(Seg::CS, layout::SEG_HI)], -1
-                    ; je =>at
-                );
-                let end = self.end();
-                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
-            }
+            Uop::CsReal => self.real_load(Seg::CS, false),
             Uop::LoadCsReal { t } => {
                 let data_ptr = self.data_ptr;
                 dynasm!(self.ops
@@ -1282,6 +1289,19 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
+            Uop::LoadSeg { seg, t } if self.env.bits & super::ENV_REAL != 0 => {
+                // As `Cpu::load_seg_real` loads it once it is a plain
+                // segment (which it stays): its handler runs the
+                // instruction otherwise, and the block stops after it.
+                self.real_load(seg, true);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; movzx eax, Rw(r(t))
+                    ; mov WORD [rbx + seg_field(seg, layout::SEG_SELECTOR)], ax
+                    ; shl eax, 4
+                    ; mov DWORD [rbx + seg_field(seg, layout::SEG_BASE)], eax
+                );
+            }
             Uop::LoadSeg { seg, t } => {
                 let fail = self.fail();
                 self.save_for_call();

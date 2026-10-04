@@ -24,12 +24,13 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fp
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
     let ok = match instr.mnemonic() {
-        Mov if system && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+        Mov if (system || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
             mov_to_seg(instr, &mut u)
         }
-        Pop if system && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+        Pop if (system || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
             pop_seg(instr, stack32, &mut u)
         }
+        Les | Lds | Lfs | Lgs if system || real => far_pointer(instr, &mut u),
         In if system => port_in(instr, &mut u),
         Out if system => port_out(instr, &mut u),
         Sti if system => {
@@ -1173,6 +1174,33 @@ fn ret(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     }
     u.push(Uop::Set { r: sp, t: T1 });
     u.push(Uop::Exit { eip: Src::T(T0) });
+    true
+}
+
+/// LES, LDS, LFS or LGS, as `transfer::load_far_pointer`: the offset's and
+/// selector's accesses checked, both read, the segment loaded, then the
+/// register set.
+fn far_pointer(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let seg = match instr.mnemonic() {
+        Mnemonic::Les => Seg::ES,
+        Mnemonic::Lds => Seg::DS,
+        Mnemonic::Lfs => Seg::FS,
+        Mnemonic::Lgs => Seg::GS,
+        _ => return false,
+    };
+    let Some(r) = gpr(instr.op0_register()).filter(|r| r.size > 1) else { return false };
+    if instr.op1_kind() != OpKind::Memory {
+        return false;
+    }
+    let Some(mseg) = ea(instr, T2, u) else { return false };
+    let Some(Uop::Ea { base, index, scale, disp, a32, .. }) = u.last().copied() else { return false };
+    u.push(Uop::MemRef { t: T2, seg: mseg, size: r.size, write: false, slot: 0 });
+    u.push(Uop::Ea { t: T1, base, index, scale, disp: disp.wrapping_add(r.size as u32), a32 });
+    u.push(Uop::MemRef { t: T1, seg: mseg, size: 2, write: false, slot: 1 });
+    u.push(Uop::Load { dst: T0, m: T2, size: r.size });
+    u.push(Uop::Load { dst: T1, m: T1, size: 2 });
+    u.push(Uop::LoadSeg { seg, t: T1 });
+    u.push(Uop::Set { r, t: T0 });
     true
 }
 

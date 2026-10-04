@@ -516,6 +516,10 @@ and RETF are translated: once CS is a plain data-like segment, as a load
 in real mode leaves it, loading it changes only its selector and base
 (`Uop::CsReal`, `LoadCsReal`; elsewhere the handler runs the instruction),
 and the block leaves for the target through the links a return takes.
+Loads of DS, ES, FS and GS in real mode (MOV, POP, LES, LDS, LFS, LGS)
+are translated the same way on both hosts, and a load that would change
+more than the selector and base runs through its handler and stops the
+block after it.
 INT and IRET, and far transfers in virtual-8086 mode, run through their
 handlers and end their block, but where that
 leaves translated code nothing to check (`helpers::far_goes_on`: still in
