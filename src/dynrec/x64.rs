@@ -209,6 +209,10 @@ enum Slow {
     /// A memory operand the inline checks didn't take.
     MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
     Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T, size: u8 },
+    /// Where a memory reference's slow paths come back to before a load or
+    /// store that takes its handle as RAM's (`Gen::ram_back`): to `slow`
+    /// with one that isn't, else to the RAM access at `ram`.
+    Recheck { at: DynamicLabel, m: T, slow: DynamicLabel, ram: DynamicLabel },
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// A memory operand that isn't plain RAM, with its physical address
     /// in `addr`, or with `tlb` (the TLB's set, and the tag's offset in
@@ -299,6 +303,11 @@ struct Gen<'a> {
     limit: DynamicLabel,
     body: DynamicLabel,
     slow: Vec<Slow>,
+    /// After a memory reference: its handle, and where its slow paths come
+    /// back to, with a handle that may not be RAM's. A load or store of it
+    /// right after uses the fast path's RAM address without checking it
+    /// (see `Slow::Recheck`); anything else places the label first.
+    ram_back: Option<(T, DynamicLabel)>,
     sides: Vec<Side>,
     merges: Vec<Merge>,
     /// Whether exits to a known EIP in the page may be linked, the stubs
@@ -411,6 +420,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         limit,
         body,
         slow: Vec::new(),
+        ram_back: None,
         sides: Vec::new(),
         merges: Vec::new(),
         link,
@@ -481,11 +491,30 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.wb_at[ix] = g.cache.loaded;
                 g.check_watched();
                 g.check_next_page();
-                for (k, uop) in uops.iter().enumerate() {
+                // A register or constant a store takes goes before its
+                // memory reference (neither has an effect it could see), so
+                // that the store comes right after it (see `Gen::ram_back`).
+                let mut order: Vec<usize> = (0..uops.len()).collect();
+                for k in 0..uops.len().saturating_sub(2) {
+                    if let (Uop::MemRef { t, .. }, Uop::Get { t: v, .. } | Uop::Const { t: v, .. }, Uop::Store { m, src, .. }) =
+                        (uops[k], uops[k + 1], uops[k + 2])
+                        && m == t
+                        && src == v
+                        && v != t
+                    {
+                        order.swap(k, k + 1);
+                    }
+                }
+                for k in order {
+                    let uop = &uops[k];
                     g.live_after = g.live[ix][k];
                     g.record_now = g.record[ix][k];
+                    if !matches!(*uop, Uop::Load { m, .. } | Uop::Store { m, .. } if g.ram_back.is_some_and(|(t, _)| t == m)) {
+                        g.settle_ram();
+                    }
                     g.uop(uop);
                 }
+                g.settle_ram();
                 g.end_dirty[ix] = g.dirty;
                 if let Some(end) = g.end.take() {
                     dynasm!(g.ops ; .arch x64 ; =>end);
@@ -793,6 +822,15 @@ impl Gen<'_> {
                         ; mov Rd(r(t)), Rd(addr)
                         ; bts Rq(r(t)), 32
                         ; jmp =>back
+                    );
+                }
+                Slow::Recheck { at, m, slow, ram } => {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; =>at
+                        ; cmp Rq(r(m)), RAM_HANDLES
+                        ; ja =>slow
+                        ; jmp =>ram
                     );
                 }
                 Slow::Load { at, back, dst, m, size } => {
@@ -1196,7 +1234,7 @@ impl Gen<'_> {
                 let (d, m_) = (r(dst), r(m));
                 // (A handle that isn't RAM's has a high bit set, see `SLOW`
                 // and `DEV_BIT`.)
-                dynasm!(self.ops ; .arch x64 ; cmp Rq(m_), RAM_HANDLES ; ja =>at);
+                self.ram_or(m, at);
                 match size {
                     1 => dynasm!(self.ops ; .arch x64 ; movzx Rd(d), BYTE [r13 + Rq(m_)]),
                     2 => dynasm!(self.ops ; .arch x64 ; movzx Rd(d), WORD [r13 + Rq(m_)]),
@@ -1212,10 +1250,9 @@ impl Gen<'_> {
                 // bumping its generation, which nothing reads (see
                 // `Bus::code_blocks`).
                 let code = self.ops.new_dynamic_label();
+                self.ram_or(m, at);
                 dynasm!(self.ops
                     ; .arch x64
-                    ; cmp Rq(m_), RAM_HANDLES
-                    ; ja =>at
                     ; mov ecx, Rd(m_)
                     ; shr ecx, crate::bus::GEN_SHIFT as i8
                     ; cmp BYTE [r14 + rcx], 0
@@ -2096,8 +2133,8 @@ impl Gen<'_> {
                 ; jne =>dev
                 ; add eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_JIT_DELTA as i32]
                 ; mov Rd(t_), eax
-                ; =>back
             );
+            self.ram_back = Some((t, back));
             let desc = memref_desc(seg, size, write, slot);
             let fail = self.fail();
             self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr: RAX, size, tlb: Some((entry, tag)) });
@@ -2152,11 +2189,36 @@ impl Gen<'_> {
         if addr != t_ {
             dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax);
         }
-        dynasm!(self.ops ; .arch x64 ; =>back);
+        self.ram_back = Some((t, back));
         let desc = memref_desc(seg, size, write, slot);
         let fail = self.fail();
         self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr, size, tlb: None });
         self.slow.push(Slow::MemRef { at, back, t, desc, fail });
+    }
+
+    /// Where a memory reference's slow paths come back to, if it is still
+    /// pending (`ram_back`).
+    fn settle_ram(&mut self) {
+        if let Some((_, back)) = self.ram_back.take() {
+            dynasm!(self.ops ; .arch x64 ; =>back);
+        }
+    }
+
+    /// Go to `slow` unless handle `m` is RAM's: right after the memory
+    /// reference that made it, only where its slow paths made it.
+    fn ram_or(&mut self, m: T, slow: DynamicLabel) {
+        match self.ram_back.take() {
+            Some((t, back)) if t == m => {
+                let ram = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch x64 ; =>ram);
+                self.slow.push(Slow::Recheck { at: back, m, slow, ram });
+            }
+            pending => {
+                self.ram_back = pending;
+                self.settle_ram();
+                dynasm!(self.ops ; .arch x64 ; cmp Rq(r(m)), RAM_HANDLES ; ja =>slow);
+            }
+        }
     }
 
     /// Record an operation (`flags::LAZY_*`) on host register `a` and `b`
