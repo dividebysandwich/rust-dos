@@ -768,36 +768,32 @@ fn render_cga_mode4(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
         _ => std::array::from_fn(|pixel| bus.vga.attribute_rgb(pixel as u8)),
     };
 
+    // Each line's 320 pixels doubled to 640, on two rows.
+    let mut line = [0u8; SCREEN_WIDTH as usize * 3];
     for y in 0..200 {
         // Determine memory offset based on interleave
         let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
         let line_offset = bank_offset + ((y / 2) * 80);
 
-        for byte_idx in 0..80 {
+        for (byte_idx, out) in line.as_chunks_mut::<24>().0.iter_mut().enumerate().take(80) {
             let byte = vram[bank_offset + ((line_offset - bank_offset + start + byte_idx) & 0x1FFF)];
-
-            // 4 pixels per byte (2 bits each)
-            for p in 0..4 {
-                // High bits are leftmost pixel
-                let shift = 6 - (p * 2);
-                let rgb = colors[((byte >> shift) & 0x03) as usize];
-
-                let x = (byte_idx * 4) + p;
-
-                // Scale 2x2
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let target_x = x * 2 + dx;
-                        let target_y = y * 2 + dy;
-                        let idx = (target_y * SCREEN_WIDTH as usize + target_x) * 3;
-                        if idx + 2 < canvas.len() {
-                            canvas[idx] = rgb.0;
-                            canvas[idx + 1] = rgb.1;
-                            canvas[idx + 2] = rgb.2;
-                        }
-                    }
-                }
+            // 4 pixels per byte (2 bits each), the high bits leftmost.
+            for (p, px) in out.as_chunks_mut::<6>().0.iter_mut().enumerate() {
+                let (r, g, b) = colors[((byte >> (6 - p * 2)) & 0x03) as usize];
+                *px = [r, g, b, r, g, b];
             }
+        }
+        cga_rows(canvas, &line, y);
+    }
+}
+
+/// Line `y` of a CGA graphics mode, 640 pixels, on its two rows of the
+/// canvas, those of it that fit.
+fn cga_rows(canvas: &mut [u8], line: &[u8], y: usize) {
+    let row_bytes = SCREEN_WIDTH as usize * 3;
+    for target_y in [y * 2, y * 2 + 1] {
+        if let Some(row) = canvas.get_mut(target_y * row_bytes..(target_y + 1) * row_bytes) {
+            row.copy_from_slice(line);
         }
     }
 }
@@ -824,33 +820,20 @@ fn render_cga_mode6(canvas: &mut [u8], vram: &[u8], bus: &Bus) {
         _ => [bus.vga.attribute_rgb(0), bus.vga.attribute_rgb(1)],
     };
 
+    let mut line = [0u8; SCREEN_WIDTH as usize * 3];
     for y in 0..200 {
         let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
         let line_offset = bank_offset + ((y / 2) * 80);
 
-        for byte_idx in 0..80 {
+        for (byte_idx, out) in line.as_chunks_mut::<24>().0.iter_mut().enumerate().take(80) {
             let byte = vram[bank_offset + ((line_offset - bank_offset + start + byte_idx) & 0x1FFF)];
-
-            // 8 pixels per byte (1 bit each)
-            for p in 0..8 {
-                let shift = 7 - p;
-                let on = (byte >> shift) & 0x01 == 1;
-                let rgb = if on { fg } else { bg };
-
-                let x = (byte_idx * 8) + p;
-
-                // Scale 1x horizontal, 2x vertical (to get 640x400)
-                for dy in 0..2 {
-                    let target_y = y * 2 + dy;
-                    let idx = (target_y * SCREEN_WIDTH as usize + x) * 3;
-                    if idx + 2 < canvas.len() {
-                        canvas[idx] = rgb.0;
-                        canvas[idx + 1] = rgb.1;
-                        canvas[idx + 2] = rgb.2;
-                    }
-                }
+            // 8 pixels per byte (1 bit each), on two rows (640x400).
+            for (p, px) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let (r, g, b) = if (byte >> (7 - p)) & 0x01 == 1 { fg } else { bg };
+                *px = [r, g, b];
             }
         }
+        cga_rows(canvas, &line, y);
     }
 }
 
@@ -1153,6 +1136,65 @@ impl crate::savestate::State for VideoMode {
 #[cfg(test)]
 mod planar_tests {
     use super::*;
+
+    /// Modes 4 and 6 drawn as they were, pixel by pixel.
+    fn cga_reference(canvas: &mut [u8], vram: &[u8], start: usize, colors: &[(u8, u8, u8)], bits: usize) {
+        let per_byte = 8 / bits;
+        for y in 0..200 {
+            let bank_offset = if y % 2 == 0 { 0 } else { 0x2000 };
+            let line_offset = bank_offset + ((y / 2) * 80);
+            for byte_idx in 0..80 {
+                let byte = vram[bank_offset + ((line_offset - bank_offset + start + byte_idx) & 0x1FFF)];
+                for p in 0..per_byte {
+                    let shift = 8 - bits * (p + 1);
+                    let rgb = colors[((byte >> shift) as usize) & ((1 << bits) - 1)];
+                    let x = byte_idx * per_byte + p;
+                    for dy in 0..2 {
+                        // Mode 4's pixels are two wide.
+                        for dx in 0..bits {
+                            let idx = ((y * 2 + dy) * SCREEN_WIDTH as usize + x * bits + dx) * 3;
+                            if idx + 2 < canvas.len() {
+                                canvas[idx..idx + 3].copy_from_slice(&[rgb.0, rgb.1, rgb.2]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cga_lines_are_drawn_as_pixel_by_pixel() {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        let mut seed = 0x9E37_79B9u32;
+        for b in bus.vga.vram_text.iter_mut() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *b = seed as u8;
+        }
+        let Some(start) = cga_start(&bus) else { return };
+        for (mode, bits) in [(4u8, 2usize), (6, 1)] {
+            for rows in [400usize, 350] {
+                let mut new = vec![0u8; 640 * rows * 3];
+                let mut old = new.clone();
+                let vram = bus.vga.vram_text.clone();
+                let colors: Vec<(u8, u8, u8)> = if mode == 4 {
+                    std::array::from_fn::<_, 4, _>(|pixel| bus.vga.attribute_rgb(pixel as u8)).to_vec()
+                } else {
+                    vec![bus.vga.attribute_rgb(0), bus.vga.attribute_rgb(1)]
+                };
+                if mode == 4 {
+                    render_cga_mode4(&mut new, &vram, &bus);
+                } else {
+                    render_cga_mode6(&mut new, &vram, &bus);
+                }
+                cga_reference(&mut old, &vram, start, &colors, bits);
+                let first = new.iter().zip(&old).position(|(a, b)| a != b);
+                assert!(new == old, "mode {} rows {} first {:?} adapter {:?} composite {}", mode, rows, first, bus.vga.adapter, bus.vga.composite_decoder().is_some());
+            }
+        }
+    }
 
     #[test]
     fn planar_rows_decode_as_pixel_by_pixel() {
