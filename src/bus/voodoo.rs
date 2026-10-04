@@ -14,6 +14,12 @@ impl Bus {
             return;
         }
         self.voodoo = board.map(Voodoo::new);
+        // The accesses of a session, for `tests/voodoo_tests.rs` to replay.
+        if let (Some(v), Ok(path)) = (&mut self.voodoo, std::env::var("RUST_DOS_VOODOO_RECORD"))
+            && let Err(e) = v.record_into(std::path::Path::new(&path))
+        {
+            self.log_string(&format!("[3DFX] Can't record into {}: {}", path, e));
+        }
         self.vga.mark_dirty_full();
         self.clock.schedule(self.next_event());
     }

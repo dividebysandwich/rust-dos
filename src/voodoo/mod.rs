@@ -382,6 +382,9 @@ pub struct Voodoo {
     mirror: Option<Box<mirror::Mirror>>,
     /// Messages already logged once.
     logged: u32,
+    /// Where the card's accesses are recorded (`RUST_DOS_VOODOO_RECORD`),
+    /// for `tests/voodoo_tests.rs` to replay and compare.
+    recorder: std::cell::RefCell<Option<std::io::BufWriter<std::fs::File>>>,
     /// Lines for the log, which the bus writes out.
     pub log: Vec<String>,
 }
@@ -436,6 +439,7 @@ impl Voodoo {
             software_picture: true,
             mirror: None,
             logged: 0,
+            recorder: std::cell::RefCell::new(None),
             log: Vec::new(),
         };
         v.reset();
@@ -502,6 +506,7 @@ impl Voodoo {
     /// A byte of the configuration space written. True if the card's
     /// window or its video clock changed.
     pub fn config_write(&mut self, reg: u8, value: u8) -> bool {
+        self.record(b'P', [reg as u32, value as u32, 0]);
         match reg {
             0x04 => self.pci.command = (self.pci.command & 0xFF00) | (value & 0x23) as u16,
             0x05 => self.pci.command = (self.pci.command & 0x00FF) | ((value & 0x01) as u16) << 8,
@@ -545,16 +550,40 @@ impl Voodoo {
         if index & (0xC0_0000 / 4) == 0 {
             self.register_read(index, now)
         } else if index & (0x80_0000 / 4) == 0 {
-            self.lfb_read(index)
+            let value = self.lfb_read(index);
+            self.record(b'R', [index, value, 0]);
+            value
         } else {
             0xFFFF_FFFF
         }
+    }
+
+    /// Record an access as `tests/voodoo_tests.rs` replays it: a kind and
+    /// three words, little-endian.
+    fn record(&self, kind: u8, words: [u32; 3]) {
+        use std::io::Write;
+        let mut recorder = self.recorder.borrow_mut();
+        let Some(out) = recorder.as_mut() else { return };
+        let mut bytes = [kind; 13];
+        for (i, w) in words.iter().enumerate() {
+            bytes[1 + 4 * i..5 + 4 * i].copy_from_slice(&w.to_le_bytes());
+        }
+        let _ = out.write_all(&bytes);
+    }
+
+    /// Start recording the card's accesses into `path`, beginning with the
+    /// board.
+    pub fn record_into(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        *self.recorder.borrow_mut() = Some(std::io::BufWriter::new(std::fs::File::create(path)?));
+        self.record(b'B', [(self.board == Board::Max) as u32, 0, 0]);
+        Ok(())
     }
 
     /// A dword of the window written, or the half `mask` selects
     /// (`voodoo_w`).
     pub fn write(&mut self, offset: u32, data: u32, mask: u32, now: Now) -> Effect {
         let index = (offset >> 2) & 0x3F_FFFF;
+        self.record(b'W', [index, data, mask]);
         let mut effect = Effect::default();
         let fifo = if index & (0xC0_0000 / 4) == 0 {
             self.register_write(index, data, now, &mut effect)
@@ -567,6 +596,12 @@ impl Voodoo {
         };
         if fifo {
             self.fifo_write(now, &mut effect);
+        }
+        if index == regs::SWAPBUFFER_CMD as u32 && self.recorder.borrow().is_some() {
+            // What the frame buffer holds at each swap, to compare.
+            let bytes = self.frame_buffer().to_bytes();
+            let hash = bytes.iter().fold(2166136261u32, |h, &b| (h ^ b as u32).wrapping_mul(16777619));
+            self.record(b'S', [0, hash, 0]);
         }
         effect
     }

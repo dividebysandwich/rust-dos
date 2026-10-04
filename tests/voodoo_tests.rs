@@ -942,7 +942,10 @@ fn benchmark_rasterizer() {
 /// a `VOODOO_TRACE` hook (13-byte records: kind, then three
 /// little-endian dwords; `P` a PCI configuration byte written, `W` a
 /// dword written with its mask, `R` a dword read, `S` a swap with the
-/// FNV-1a hash of the frame buffer after it) replayed here. Local only:
+/// FNV-1a hash of the frame buffer after it) replayed here. rust-dos
+/// records its own with `RUST_DOS_VOODOO_RECORD=path` (with a `B` record
+/// first, the board), which checks that a change to the rasterizer draws
+/// the same, and times it (`RUST_DOS_VOODOO_WORKERS` threads). Local only:
 /// `RUST_DOS_VOODOO_TRACE=path cargo test --release --test voodoo_tests
 /// dosbox_x -- --ignored --nocapture`.
 #[test]
@@ -950,13 +953,20 @@ fn benchmark_rasterizer() {
 fn replays_a_dosbox_x_trace() {
     let Ok(path) = std::env::var("RUST_DOS_VOODOO_TRACE") else { return };
     let data = std::fs::read(path).unwrap();
-    let mut v = rust_dos::voodoo::Voodoo::with_workers(Board::Max, 4);
+    let workers = std::env::var("RUST_DOS_VOODOO_WORKERS").map_or(4, |w| w.parse().unwrap());
+    let mut v = rust_dos::voodoo::Voodoo::with_workers(Board::Max, workers);
+    let started = std::time::Instant::now();
     let now = rust_dos::voodoo::Now::default();
     let fnv = |bytes: &[u8]| bytes.iter().fold(2166136261u32, |h, &b| (h ^ b as u32).wrapping_mul(16777619));
     let (mut swaps, mut bad_swaps, mut reads, mut bad_reads) = (0, 0, 0, 0);
     for (i, record) in data.chunks_exact(13).enumerate() {
         let word = |n: usize| u32::from_le_bytes(record[1 + 4 * n..5 + 4 * n].try_into().unwrap());
         match record[0] {
+            // A recording of rust-dos's own starts with the board.
+            b'B' => {
+                let board = if word(0) == 1 { Board::Max } else { Board::Standard };
+                v = rust_dos::voodoo::Voodoo::with_workers(board, workers);
+            }
             b'P' => {
                 v.config_write(word(0) as u8, word(1) as u8);
             }
@@ -987,7 +997,14 @@ fn replays_a_dosbox_x_trace() {
             _ => {}
         }
     }
-    println!("{} swaps, {} differ; {} LFB reads, {} differ", swaps, bad_swaps, reads, bad_reads);
+    println!(
+        "{} swaps, {} differ; {} LFB reads, {} differ; {:.2}s",
+        swaps,
+        bad_swaps,
+        reads,
+        bad_reads,
+        started.elapsed().as_secs_f64()
+    );
     assert_eq!((bad_swaps, bad_reads), (0, 0));
 }
 
