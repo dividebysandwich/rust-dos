@@ -894,8 +894,11 @@ mod engine {
                     // (the interpreter counts it before running it) but not in
                     // the instruction count, which this adds once it has dealt
                     // with it. One whose watched bytes changed didn't run.
-                    cpu.bus.clock.icount += data.lag[ix] as u64;
-                    cpu.executed += ix as u64 + !matches!(kind, EXIT_WATCHED | EXIT_NEXT_PAGE) as u64;
+                    // (The translated code's counts may be short of what it
+                    // ran by the instructions of a block it jumped into:
+                    // they wrap here.)
+                    cpu.bus.clock.icount = cpu.bus.clock.icount.wrapping_add(data.lag[ix] as u64);
+                    cpu.executed = cpu.executed.wrapping_add(ix as u64 + !matches!(kind, EXIT_WATCHED | EXIT_NEXT_PAGE) as u64);
                 }
                 let exited = data.id;
                 let none_ran = cpu.bus.clock.icount == start;
