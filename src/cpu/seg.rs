@@ -133,17 +133,19 @@ impl Descriptor {
 }
 
 /// How many protected-mode data segment loads `Cpu::seg_loads` keeps, by
-/// the selector's index.
-pub(crate) const SEG_LOADS: usize = 16;
+/// the selector's table and index.
+pub(crate) const SEG_LOADS: usize = 64;
 
 /// A protected-mode load of a data segment register that went through:
-/// the selector, whether into SS (whose checks differ) and at which CPL,
+/// the selector, whether into SS or another register (whose checks
+/// differ: `LOAD_DATA`, `LOAD_SS`, both where both went through) and at
+/// which CPL,
 /// its descriptor table's base and limit, the descriptor's linear and
 /// physical address and bytes, and the cache it gave.
 #[derive(Clone, Copy)]
 pub(crate) struct SegLoad {
     selector: u16,
-    ss: bool,
+    kinds: u8,
     cpl: u8,
     table: (u32, u32),
     lin: u32,
@@ -156,7 +158,7 @@ impl SegLoad {
     /// None: a null selector, which isn't kept.
     pub(crate) const NONE: SegLoad = SegLoad {
         selector: 0,
-        ss: false,
+        kinds: 0,
         cpl: 0,
         table: (0, 0),
         lin: 0,
@@ -167,9 +169,17 @@ impl SegLoad {
 
     #[inline(always)]
     fn slot(selector: u16) -> usize {
-        (selector >> 3) as usize % SEG_LOADS
+        (selector >> 2) as usize % SEG_LOADS
+    }
+
+    #[inline(always)]
+    fn kind(seg: Seg) -> u8 {
+        if seg == Seg::SS { LOAD_SS } else { LOAD_DATA }
     }
 }
+
+const LOAD_DATA: u8 = 1;
+const LOAD_SS: u8 = 2;
 
 impl Cpu {
     /// True in protected mode (CR0.PE), including virtual-8086 mode.
@@ -288,7 +298,7 @@ impl Cpu {
     #[inline(always)]
     fn loaded_again(&self, seg: Seg, selector: u16) -> Option<SegCache> {
         let e = &self.seg_loads[SegLoad::slot(selector)];
-        if e.selector != selector || e.ss != (seg == Seg::SS) || e.cpl != self.cpl || self.table_of(selector) != Some(e.table) {
+        if e.selector != selector || e.kinds & SegLoad::kind(seg) == 0 || e.cpl != self.cpl || self.table_of(selector) != Some(e.table) {
             return None;
         }
         let phys = self.translated(e.lin, false)?;
@@ -316,8 +326,16 @@ impl Cpu {
             return;
         }
         let bytes: [u8; 8] = self.bus.ram()[phys as usize..phys as usize + 8].try_into().unwrap();
-        self.seg_loads[SegLoad::slot(selector)] =
-            SegLoad { selector, ss: seg == Seg::SS, cpl: self.cpl, table, lin, phys, desc: u64::from_le_bytes(bytes), cache };
+        let (cpl, desc) = (self.cpl, u64::from_le_bytes(bytes));
+        let e = &mut self.seg_loads[SegLoad::slot(selector)];
+        // (A load into the other kind of register of what is still there
+        // went through its checks too.)
+        let kinds = if (e.selector, e.cpl, e.table, e.lin, e.phys, e.desc) == (selector, cpl, table, lin, phys, desc) {
+            e.kinds
+        } else {
+            0
+        };
+        *e = SegLoad { selector, kinds: kinds | SegLoad::kind(seg), cpl, table, lin, phys, desc, cache };
     }
 
     /// Protected mode: check a selector for `seg` and return the cache to
