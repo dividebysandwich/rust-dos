@@ -149,9 +149,12 @@ impl Uop {
     }
 
     /// Whether the operation sets all the arithmetic flags, whatever its
-    /// operands.
+    /// operands: a shift's count is at least 1 (by CL it may be 0).
     fn sets_all(&self) -> bool {
-        matches!(self, Uop::Alu { .. } | Uop::Unary { op: UnOp::Neg, .. })
+        matches!(
+            self,
+            Uop::Alu { .. } | Uop::Unary { op: UnOp::Neg, .. } | Uop::Shift { op: ShiftOp::Shl | ShiftOp::Shr, .. }
+        )
     }
 }
 
@@ -307,5 +310,17 @@ mod tests {
         assert!(!p.record[4][0]);
         assert_eq!(p.live[4][0] & CF, CF);
         assert!(!p.lazy_start[5]);
+    }
+
+    #[test]
+    fn a_shift_by_a_constant_sets_them_all_again() {
+        let memref = Uop::MemRef { t: T2, seg: Seg::DS, size: 4, write: false, slot: 0 };
+        let shr = Uop::Shift { op: ShiftOp::Shr, size: 4, t: T0, count: 25 };
+        let sar = Uop::Shift { op: ShiftOp::Sar, size: 4, t: T0, count: 25 };
+        let p = plan(&[Some(vec![alu(AluOp::Add)]), Some(vec![memref]), Some(vec![shr])], &[false; 3]);
+        assert!(p.record[0][0]);
+        // SAR leaves AF.
+        let p = plan(&[Some(vec![alu(AluOp::Add)]), Some(vec![memref]), Some(vec![sar])], &[false; 3]);
+        assert!(!p.record[0][0]);
     }
 }

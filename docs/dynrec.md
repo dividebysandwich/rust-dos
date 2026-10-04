@@ -456,6 +456,10 @@ and linear page to the address. A link to another page checks the TLB's
 translation of its target, but not the A20 gate and paging, which are as
 when the link was made. The ARM64 one looks the page up in the TLB with
 its tag for the page + 1, and checks links' guards at run time.
+Last, both check that the operand is in plain RAM with two range checks,
+extended memory first in 32-bit code and conventional memory first in
+16-bit code, and make the handle of one that isn't (`DEV_BIT`) out of
+line.
 
 ### Linking
 
@@ -545,6 +549,12 @@ now) and `dynrec`:
 
 The settings window's Stats page says whether the instructions are
 recompiled or interpreted.
+
+For profiling, `RUST_DOS_PERF_MAP=1` writes where each block's code is to
+`/tmp/perf-PID.map`, which Linux `perf report` reads, naming blocks
+`block_PHYS_EIP_COUNT`; with `RUST_DOS_JIT_DUMP=DIR` as well, each block's
+guest bytes and host code go to `DIR/block_PHYS_EIP.guest` and `.host`,
+for `objdump -D -b binary -m i386` (or `i386:x86-64`, `aarch64`).
 
 ## Testing
 

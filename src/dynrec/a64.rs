@@ -191,6 +191,10 @@ enum Slow {
     /// with the flags in W28 there (`dirty`), and goes on at `end`.
     /// With `leave`, the block stops after it (`Uop::FpuGuard`).
     Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, leave: bool },
+    /// A memory operand of `size` bytes at physical address `addr` (a
+    /// register) that isn't plain RAM: within a page, its handle is that
+    /// address with `DEV_BIT`; else it goes on to `slow`, the `MemRef`.
+    Dev { at: DynamicLabel, back: DynamicLabel, slow: DynamicLabel, t: T, addr: u8, size: u8 },
 }
 
 /// A conditional jump the block goes on after (`block::SIDE_EXITS`): its
@@ -943,6 +947,17 @@ impl Gen<'_> {
                 Slow::Fault { at, code, fail } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at ; movz w0, code ; b =>fail);
                 }
+                Slow::Dev { at, back, slow, t, addr, size } => {
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; =>at
+                        ; and w1, W(addr), 0xFFF
+                        ; cmp w1, 0x1000 - size as u32
+                        ; b.hi =>slow
+                        ; orr XSP(r(t)), X(addr), 1u64 << DEV_BIT
+                        ; b =>back
+                    );
+                }
                 Slow::Bail { at, end, ix, dirty, leave } => {
                     // As a handler's call in the block, but with the
                     // instruction count put back after it, as the code on
@@ -1505,11 +1520,15 @@ impl Gen<'_> {
         let size32 = size as u32;
         let last = size32 - 1;
         // W0 = the linear address: a flat segment's is the offset (a wrap
-        // past 4 GB goes past the end of RAM below), else the segment's
-        // limit and type are checked as `seg_linear` does, and its base
-        // added.
+        // past 4 GB goes past the end of RAM below; with paging off and the
+        // A20 gate open, it is the physical address in T itself), else the
+        // segment's limit and type are checked as `seg_linear` does, and
+        // its base added.
+        let addr = if flat && !paging && a20 { t_ } else { 0 };
         if flat {
-            dynasm!(self.ops ; .arch aarch64 ; mov w0, W(t_));
+            if addr == 0 {
+                dynasm!(self.ops ; .arch aarch64 ; mov w0, W(t_));
+            }
         } else {
             let need = if write { layout::RIGHT_WRITE } else { layout::RIGHT_READ } as u32;
             if size > 1 {
@@ -1574,32 +1593,52 @@ impl Gen<'_> {
             dynasm!(self.ops ; .arch aarch64 ; and w0, w0, !0x10_0000u32);
         }
         // In plain RAM: none of its bytes in the video memory and ROMs from
-        // A0000h to FFFFFh, and not past the end of RAM. (With paging off
-        // and the A20 gate open, an operand in two pages of RAM is too: they
-        // are next to each other.) Elsewhere within a page, the bus reaches
-        // it by its physical address.
-        self.mov32(2, self.env.ram_len);
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; add x1, x0, size32
-            ; cmp x1, VIDEO >> 12, lsl 12
-            ; b.ls >ram
-            ; cmp w0, EXTENDED >> 12, lsl 12
-            ; b.lo >device
-            ; cmp x1, x2
-            ; b.ls >ram
-            ; device:
-            ; and w1, w0, 0xFFF
-            ; cmp w1, 0x1000 - size32
-            ; b.hi =>at
-            ; orr XSP(t_), x0, 1u64 << DEV_BIT
-            ; b =>back
-            ; ram:
-            ; mov W(t_), w0
-            ; =>back
-        );
+        // A0000h to FFFFFh, and not past the end of RAM: in extended memory
+        // (looked at first in 32-bit code) or below the video memory. (With
+        // paging off and the A20 gate open, an operand in two pages of RAM
+        // is too: they are next to each other.) Elsewhere within a page,
+        // the bus reaches it by its physical address (`Slow::Dev`).
+        let dev = self.ops.new_dynamic_label();
+        let ram = self.ops.new_dynamic_label();
+        let extended = self.env.ram_len.checked_sub(EXTENDED + size32);
+        let below = |g: &mut Self| {
+            dynasm!(g.ops
+                ; .arch aarch64
+                ; add x1, XSP(addr), last
+                ; cmp x1, VIDEO >> 12, lsl 12
+            );
+        };
+        let above = |g: &mut Self, limit: u32| {
+            dynasm!(g.ops ; .arch aarch64 ; sub w1, WSP(addr), EXTENDED >> 12, lsl 12);
+            g.mov32(2, limit);
+            dynasm!(g.ops ; .arch aarch64 ; cmp w1, w2);
+        };
+        match extended {
+            Some(limit) if self.env.bits & 1 != 0 => {
+                above(self, limit);
+                dynasm!(self.ops ; .arch aarch64 ; b.ls =>ram);
+                below(self);
+                dynasm!(self.ops ; .arch aarch64 ; b.hs =>dev);
+            }
+            Some(limit) => {
+                below(self);
+                dynasm!(self.ops ; .arch aarch64 ; b.lo =>ram);
+                above(self, limit);
+                dynasm!(self.ops ; .arch aarch64 ; b.hi =>dev);
+            }
+            None => {
+                below(self);
+                dynasm!(self.ops ; .arch aarch64 ; b.hs =>dev);
+            }
+        }
+        dynasm!(self.ops ; .arch aarch64 ; =>ram);
+        if addr != t_ {
+            dynasm!(self.ops ; .arch aarch64 ; mov W(t_), w0);
+        }
+        dynasm!(self.ops ; .arch aarch64 ; =>back);
         let desc = memref_desc(seg, size, write, slot);
         let fail = self.fail();
+        self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr, size });
         self.slow.push(Slow::MemRef { at, back, t, desc, fail });
     }
 

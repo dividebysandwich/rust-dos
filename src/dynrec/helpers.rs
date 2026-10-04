@@ -145,7 +145,7 @@ pub struct JitCtx {
 /// Find out whether writes to the VGA's graphics window are plain ones
 /// into its planes, for the code (`JitCtx::vga_ok`): where translated code
 /// is entered, and after anything in it that may change the VGA's
-/// registers (port I/O, handlers, writes to devices).
+/// registers (port writes, handlers, writes to devices).
 pub fn vga_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
     match cpu.bus.plain_planes() {
         Some((planes, base, plane_size)) => {
@@ -448,7 +448,9 @@ jit_fn! {
         };
         match catch_unwind(AssertUnwindSafe(access)) {
             Ok(Ok(read)) => {
-                vga_state(cpu, ctx);
+                if out {
+                    vga_state(cpu, ctx);
+                }
                 if data.gens_now(&cpu.bus.page_gen) != before && written(cpu, data, ix) != 0 {
                     ctx.after = EXIT_SMC as u8;
                 } else if loop_would_act(cpu, time, (data.count() - ix) as u64) {

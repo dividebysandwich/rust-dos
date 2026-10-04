@@ -474,6 +474,9 @@ mod engine {
         /// of the RAM their code was translated for.
         model: CpuModel,
         ram_len: u32,
+        /// With `RUST_DOS_PERF_MAP` set, where each block's code is, for
+        /// profilers (`/tmp/perf-PID.map`, as Linux perf reads it).
+        perf_map: Option<std::fs::File>,
     }
 
     impl Engine {
@@ -504,6 +507,9 @@ mod engine {
                 stepping_to: None,
                 model,
                 ram_len,
+                perf_map: std::env::var_os("RUST_DOS_PERF_MAP").and_then(|_| {
+                    std::fs::File::create(format!("/tmp/perf-{}.map", std::process::id())).ok()
+                }),
             })
         }
 
@@ -634,6 +640,19 @@ mod engine {
                 }
             };
             let index = self.free.pop().unwrap_or(self.blocks.len() as u32);
+            if let Some(map) = &mut self.perf_map {
+                use std::io::Write;
+                // SAFETY: just made.
+                let d = unsafe { data.as_ref() };
+                let _ = writeln!(map, "{:x} {:x} block_{:05X}_{:X}_{}", base as usize, code.bytes.len(), d.phys, d.eip, d.count());
+                // With `RUST_DOS_JIT_DUMP` a directory, the block's guest
+                // and host code too, to disassemble.
+                if let Some(dir) = std::env::var_os("RUST_DOS_JIT_DUMP") {
+                    let name = std::path::Path::new(&dir).join(format!("block_{:05X}_{:X}", d.phys, d.eip));
+                    let _ = std::fs::write(name.with_extension("guest"), &d.bytes);
+                    let _ = std::fs::write(name.with_extension("host"), &code.bytes);
+                }
+            }
             {
                 // SAFETY: owned by the block, and not in use.
                 let data = unsafe { data.as_mut() };

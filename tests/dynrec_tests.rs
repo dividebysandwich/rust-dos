@@ -298,6 +298,29 @@ fn flags_recorded_for_a_fault_reach_its_handler() {
 }
 
 #[test]
+fn flags_recorded_before_a_shift_reach_a_faults_handler() {
+    // As above, with a shift by a constant setting the flags again.
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFF, DATA_R0, 0x4));
+        let code = asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(ds, ax)?;
+            a.mov(ebx, 0x1234_5690u32)?;
+            a.add(bl, 0x90)?;
+            a.mov(eax, dword_ptr(0x200))?;
+            a.shr(ecx, 25)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!(vector, GP as u32);
+    assert_eq!(stack[3] & ARITH, 0x801, "EFLAGS {:08X}", stack[3]);
+}
+
+#[test]
 fn flags_recorded_for_a_store_into_the_block_reach_the_code_after_it() {
     // The ADD's flags die at the XOR, but the store turns the XOR into
     // NOPs: the block leaves after the store, with the ADD's flags.
