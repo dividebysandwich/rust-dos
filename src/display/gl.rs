@@ -249,17 +249,34 @@ impl GlScreen {
     /// changed since the last.
     pub fn present(&mut self, frame: &Frame, rows: std::ops::Range<usize>, display: (u32, u32), layer: Option<&Layer>) {
         let gl = &self.gl;
-        let size = (frame.width, frame.height);
-        let (width, height) = (frame.width as i32, frame.height as i32);
-        let rows = if size != self.texture_size { 0..frame.height as usize } else { rows };
+        // A picture of 2x2 blocks goes up at half the size where the look
+        // scales it without filtering (and no layer is drawn over it, in
+        // the frame's coordinates): nearest-neighbour scaling shows the
+        // same pixels, from a quarter of the bytes to convert and upload.
+        let half = frame.doubled && layer.is_none() && self.active == Shader::None && self.filter == Filter::Nearest;
+        let (scale, rows) = if half { (2, rows.start / 2..rows.end.div_ceil(2)) } else { (1, rows) };
+        let size = (frame.width / scale, frame.height / scale);
+        let (width, height) = (size.0 as i32, size.1 as i32);
+        let rows = if size != self.texture_size { 0..size.1 as usize } else { rows };
         // Four bytes a pixel, which the texture has: drivers convert three
         // byte pixels one by one, which takes longer than the rest of a
         // frame.
         let row_bytes = frame.width as usize * 3;
-        let rgb = frame.rgb[rows.start * row_bytes..rows.end * row_bytes].as_chunks::<3>().0;
-        self.rgba.resize(rgb.len() * 4, 0);
-        for (rgba, &[r, g, b]) in self.rgba.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
-            *rgba = [r, g, b, 0xFF];
+        if half {
+            let w = size.0 as usize;
+            self.rgba.resize(rows.len() * w * 4, 0);
+            for (y, out) in rows.clone().zip(self.rgba.chunks_exact_mut(w * 4)) {
+                let src = frame.rgb[2 * y * row_bytes..(2 * y + 1) * row_bytes].as_chunks::<6>().0;
+                for (rgba, &[r, g, b, ..]) in out.as_chunks_mut::<4>().0.iter_mut().zip(src) {
+                    *rgba = [r, g, b, 0xFF];
+                }
+            }
+        } else {
+            let rgb = frame.rgb[rows.start * row_bytes..rows.end * row_bytes].as_chunks::<3>().0;
+            self.rgba.resize(rgb.len() * 4, 0);
+            for (rgba, &[r, g, b]) in self.rgba.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
+                *rgba = [r, g, b, 0xFF];
+            }
         }
         // SAFETY: see `GlScreen`.
         unsafe {

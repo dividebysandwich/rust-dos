@@ -1461,6 +1461,17 @@ fn main() -> Result<(), String> {
             // monochrome monitor shows them in its phosphor's colour, but not
             // the settings window.
             screen.clone_from(&cached_frame);
+            // (The picture stays all there at half the size, which the
+            // window may show instead, only where nothing goes over it.)
+            screen.doubled &= !video::overlay::draws_cursors(&cpu.bus)
+                && !clipboard.draws(&cpu.bus)
+                && !ui.is_open()
+                && !ui.overlay_shown()
+                && wheel_view.is_none()
+                && osd.is_empty()
+                && !recorder.is_active()
+                && sound_recording.is_none()
+                && video_recording.is_none();
             video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
             video::mono::apply(&mut screen, settings.monochrome);
             clipboard.draw(&mut screen, &cpu.bus);

@@ -65,6 +65,11 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
     }
 }
 
+/// Whether `draw_cursors` may draw anything (a text cursor, the mouse's).
+pub fn draws_cursors(bus: &Bus) -> bool {
+    !bus.voodoo_output() && (super::text::geometry(bus).is_some() || (bus.mouse.installed && bus.mouse.hide_counter <= 0))
+}
+
 /// What `draw_cursors` draws from, as one number: where it would draw the
 /// same, the number is the same.
 pub fn cursors_key(bus: &Bus, cursor_visible: bool) -> u64 {

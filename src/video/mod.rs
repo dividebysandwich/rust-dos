@@ -168,6 +168,10 @@ pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+    /// Every pixel of the picture is one of a block of 2x2 the same, as
+    /// the 256-color renderer draws 320x200: the picture is all there at
+    /// half the size (which the window may show instead, `display`).
+    pub doubled: bool,
     /// What the rows were drawn from, where the renderer keeps it (see
     /// `DrawnFrom`).
     drawn_from: DrawnFrom,
@@ -177,11 +181,11 @@ pub struct Frame {
 /// frame the renderer draws into, as anything may be drawn over a copy.
 impl Clone for Frame {
     fn clone(&self) -> Self {
-        Self::from_rgb(self.width, self.height, self.rgb.clone())
+        Self { doubled: self.doubled, ..Self::from_rgb(self.width, self.height, self.rgb.clone()) }
     }
 
     fn clone_from(&mut self, source: &Self) {
-        (self.width, self.height) = (source.width, source.height);
+        (self.width, self.height, self.doubled) = (source.width, source.height, source.doubled);
         self.rgb.clone_from(&source.rgb);
         self.drawn_from = DrawnFrom::default();
     }
@@ -210,12 +214,12 @@ struct DrawnFrom {
 
 impl Frame {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height, rgb: vec![0; (width * height * 3) as usize], drawn_from: DrawnFrom::default() }
+        Self { width, height, rgb: vec![0; (width * height * 3) as usize], doubled: false, drawn_from: DrawnFrom::default() }
     }
 
     /// A frame of `width` x `height` pixels `rgb`.
     pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>) -> Self {
-        Self { width, height, rgb, drawn_from: DrawnFrom::default() }
+        Self { width, height, rgb, doubled: false, drawn_from: DrawnFrom::default() }
     }
 
     /// Make the frame `width` x `height`. True if that changed its size;
@@ -279,6 +283,7 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         // Unless the OpenGL renderer draws it.
         if v.picture_wanted() {
             frame.drawn_from = DrawnFrom::default();
+            frame.doubled = false;
             v.render(&mut frame.rgb, frame.width as usize);
         }
         return;
@@ -300,14 +305,18 @@ pub fn render_screen(frame: &mut Frame, bus: &Bus) {
         && let Some(bpp) = bus.vga.et4000.hicolor().filter(|_| bus.vga.adapter.is_et4000())
     {
         frame.drawn_from = DrawnFrom::default();
+        frame.doubled = false;
         render_hicolor(&mut frame.rgb, width, &bus.vga.vram_graphics, bus, bpp);
         return;
     }
     if bus.video_mode == VideoMode::Graphics320x200 && !bus.vga.adapter.gate_array() {
+        let (w, rows) = bus.vga.graphics_size();
         render_graphics_mode(&mut frame.rgb, width, &bus.vga.vram_graphics, bus, &mut frame.drawn_from);
+        frame.doubled = (frame.width as usize, frame.height as usize) == (2 * w, 2 * rows);
         return;
     }
     frame.drawn_from = DrawnFrom::default();
+    frame.doubled = false;
 
     // Black-fill just the dirty band. Renderers either fully cover this band
     // or leave a sub-row gap that we want to appear black.
