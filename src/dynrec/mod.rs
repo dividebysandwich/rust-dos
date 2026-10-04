@@ -886,7 +886,10 @@ mod engine {
                 if ret as u32 & EXIT_FLAGS != 0 {
                     cpu.set_flag_bits(crate::cpu::alu::ARITH, self.ctx.flags);
                 }
-                if matches!(kind, EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED | EXIT_AFTER | EXIT_NEXT_PAGE) {
+                if matches!(
+                    kind,
+                    EXIT_FAULT | EXIT_GP0 | EXIT_DE | EXIT_SMC | EXIT_WATCHED | EXIT_AFTER | EXIT_FAR_ENV | EXIT_NEXT_PAGE
+                ) {
                     // Instruction ix stopped the block: it counts as executed
                     // (the interpreter counts it before running it) but not in
                     // the instruction count, which this adds once it has dealt
@@ -1007,6 +1010,7 @@ mod engine {
                             eip: target,
                             lin_ip: cs.base.wrapping_add(target),
                             cs_limit: cs.limit,
+                            code32: mode & 1 != 0,
                             phys_ip: data.phys_in_page(target) as usize,
                             ..*at
                         };
@@ -1044,6 +1048,23 @@ mod engine {
                         cpu.bus.clock.icount += 1;
                         Run::Ran { page }
                     }
+                    EXIT_FAR_ENV => {
+                        // The far transfer is done: on in the block for the
+                        // code and segments as they are now, where the
+                        // execution loop would find it without a page walk.
+                        cpu.bus.clock.icount += 1;
+                        let Some(t_at) = Self::here(cpu) else { return Run::Ran { page } };
+                        let t_mode = t_at.code32 as u32 | mode & 2 | (cpu.stack32() as u32) << 2 | env_bits(cpu);
+                        let t_key = Key { phys: t_at.phys_ip as u32, eip: t_at.eip, mode: t_mode };
+                        let Some((_, t_code)) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran { page } };
+                        mode = t_mode;
+                        self.ctx.flat = mode & ENV_FLAT_ALL;
+                        self.ctx.mode = mode & !2;
+                        self.ctx.stack32 = mode & 4 != 0;
+                        self.ctx.far_block = std::ptr::null();
+                        code = t_code;
+                        continue;
+                    }
                     EXIT_WATCHED | EXIT_NEXT_PAGE => {
                         // The interpreter runs whatever is there now (the
                         // block stays for when the bytes are back), or looks
@@ -1058,5 +1079,26 @@ mod engine {
                 };
             }
         }
+
+    /// Where the instruction at CS:EIP is, as the execution loop would find
+    /// it in a code window for its page (`exec::fetch_location`) and leave
+    /// it to translated code, where that takes no page walk (the TLB has
+    /// the page): None where the loop has to look.
+    fn here(cpu: &Cpu) -> Option<At> {
+        const PAGE_TAIL: u32 = 15;
+        let eip = cpu.eip();
+        let cs = cpu.seg_cache(Seg::CS);
+        let lin_ip = cs.base.wrapping_add(eip);
+        if eip as u64 + PAGE_TAIL as u64 - 1 > cs.limit as u64 || lin_ip < 0x1000 || lin_ip & 0xFFF >= 0x1000 - PAGE_TAIL {
+            return None;
+        }
+        let phys_ip = cpu.translated(lin_ip, cpu.cpl == 3)? as usize;
+        let translatable = (phys_ip & !0xFFF) + 0x1000 <= cpu.bus.ram().len()
+            && phys_ip >> 12 != crate::mouse::CALLBACK_STUB >> 12
+            && !cpu.in_shell_code()
+            && !crate::exec::is_service_trap(cpu.bus.ram(), phys_ip);
+        let code32 = cs.attr & crate::cpu::ATTR_DB != 0;
+        translatable.then_some(At { eip, lin_ip, cs_limit: cs.limit, code32, phys_ip, cacheable: true, in_window: true })
+    }
     }
 }

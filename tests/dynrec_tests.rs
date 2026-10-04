@@ -964,6 +964,60 @@ fn far_calls_between_code_segments_in_protected_mode_go_on_in_translated_code() 
 }
 
 #[test]
+fn far_calls_into_16_bit_code_that_loads_es_go_on_in_the_blocks_for_them() {
+    // The loop calls a function in a 16-bit code segment, which leaves ES
+    // not flat every other time, and back, with the timer interrupting:
+    // each far transfer changes the code size, some the segments too.
+    const FUNC: u32 = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.set_gdt(FREE, seg_desc(FUNC & !0xFFF, 0x1FFF, CODE_R0, 0x0));
+        rig.set_gdt(FREE + 8, seg_desc(0x40000, 0xFFFF, DATA_R0, 0x4));
+        with_timer(rig, |a| {
+            a.mov(ebx, ecx)?;
+            a.db(&[0x9A])?;
+            a.dd(&[FUNC & 0xFFF])?;
+            a.dw(&[FREE])?;
+            a.add(esi, eax)?;
+            // ES: ADD [100h], ESI
+            a.db(&[0x26])?;
+            a.add(dword_ptr(0x100), esi)?;
+            let mut keep = a.create_label();
+            a.test(ecx, 2)?;
+            a.jz(keep)?;
+            a.mov(dx, DATA32 as u32)?;
+            a.mov(es, dx)?;
+            a.set_label(&mut keep)?;
+            Ok(())
+        });
+        rig.load(FUNC, &asm16(FUNC & 0xFFF, |a| {
+            let (mut skip, mut sum) = (a.create_label(), a.create_label());
+            a.mov(ax, bx)?;
+            a.imul_3(ax, ax, 13)?;
+            a.xor(ax, di)?;
+            // A loop: its block is linked to in the page, from code whose
+            // size the engine went on with.
+            a.mov(dx, 3u32)?;
+            a.set_label(&mut sum)?;
+            a.add(ax, dx)?;
+            a.dec(dx)?;
+            a.jnz(sum)?;
+            a.test(cx, 1)?;
+            a.jz(skip)?;
+            a.mov(dx, (FREE + 8) as u32)?;
+            a.mov(es, dx)?;
+            a.set_label(&mut skip)?;
+            // O32 RETF
+            a.db(&[0x66, 0xCB])
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+    if AVAILABLE {
+        assert!(stats.exits[15] > 1000, "{:?}", stats);
+    }
+}
+
+#[test]
 fn bit_tests_set_cf_and_of_as_the_interpreter_does() {
     // BT, BTS, BTR and BTC of registers and memory, by registers and
     // immediates, 16 and 32 bits wide, with every bit offset (and past

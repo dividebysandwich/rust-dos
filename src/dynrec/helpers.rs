@@ -48,6 +48,12 @@ pub const EXIT_NEXT_PAGE: u32 = 13;
 /// (`check_flat`): the engine goes on in the block for the segments as
 /// they are.
 pub const EXIT_ENV: u32 = 14;
+/// Like EXIT_AFTER, after a far transfer in protected mode to code at the
+/// same privilege level in the same task whose size, stack width or
+/// segments differ from what the blocks linked to were translated for
+/// (`far_goes_on`): the engine goes on in the block for them where it can
+/// find it without the execution loop's fetch.
+pub const EXIT_FAR_ENV: u32 = 15;
 /// With EXIT_FAULT, EXIT_GP0, EXIT_DE, EXIT_SMC and EXIT_WATCHED: the
 /// guest's arithmetic flags are in the context's `flags`, not yet in the
 /// CPU.
@@ -345,7 +351,7 @@ jit_fn! {
         let popf = matches!(instr.mnemonic(), iced_x86::Mnemonic::Popf | iced_x86::Mnemonic::Popfd);
         let seg_load = super::block::loaded_segment(instr);
         // (What a far transfer may change, for `far_goes_on`.)
-        let far = super::block::far_transfer(instr).then(|| (cpu.pm(), cpu.tr.selector));
+        let far = super::block::far_transfer(instr).then(|| (cpu.pm(), cpu.tr.selector, cpu.cpl));
         let cs_base = cpu.seg_cache(Seg::CS).base;
         // A device may write RAM (by DMA) as well.
         let writes = data.writes[ix] || port;
@@ -393,10 +399,11 @@ jit_fn! {
                         cpu.irq_shadow = false;
                     }
                 }
-                if let Some((pm, tr)) = far {
+                if let Some((pm, tr, cpl)) = far {
                     (ctx.far_block, ctx.far_base) = (data as *const BlockData, cs_base);
-                    if !far_goes_on(cpu, ctx, pm, tr) {
-                        return EXIT_AFTER;
+                    let code = far_goes_on(cpu, ctx, pm, tr, cpl);
+                    if code != 0 {
+                        return code;
                     }
                 }
                 if sti {
@@ -512,7 +519,7 @@ jit_fn! {
     }
 }
 
-/// Whether translated code can go on after a far transfer through the
+/// How translated code goes on after a far transfer through the
 /// links a return takes (see `block::far_transfer`), from protected mode
 /// (`pm`, with task register `tr`) or not: it stayed in that mode, IRET set
 /// neither TF nor IF with an interrupt waiting (INT clears both), and the
@@ -521,21 +528,33 @@ jit_fn! {
 /// an emulator service trap in real mode (an INT of the BIOS's or DOS's),
 /// where no block starts. In protected mode everything a gate or another
 /// task could change: no task switch, and CPL and all segments' bits. (The
-/// CS base and EIP are the links' guards.)
-fn far_goes_on(cpu: &Cpu, ctx: &JitCtx, pm: bool, tr: u16) -> bool {
+/// CS base and EIP are the links' guards.) 0 where it goes on through the
+/// links, else EXIT_AFTER, or EXIT_FAR_ENV where in protected mode only the
+/// code size, the stack width and the segments' bits changed (`cpl`: the
+/// privilege level before).
+fn far_goes_on(cpu: &Cpu, ctx: &JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
     use crate::cpu::CpuFlags;
     if cpu.get_cpu_flag(CpuFlags::TF) || (cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF)) || cpu.pm() != pm {
-        return false;
+        return EXIT_AFTER;
     }
     let cs = cpu.seg_cache(Seg::CS);
     let code32 = (cs.attr & crate::cpu::ATTR_DB != 0) as u32;
     if pm {
-        return cpu.tr.selector == tr && code32 | (cpu.stack32() as u32) << 2 | super::env_bits(cpu) == ctx.mode;
+        if cpu.tr.selector != tr || cpu.cpl != cpl {
+            return EXIT_AFTER;
+        }
+        let changed = (code32 | (cpu.stack32() as u32) << 2 | super::env_bits(cpu)) ^ ctx.mode;
+        return match changed {
+            0 => 0,
+            _ if changed & !(1 | 4 | super::ENV_FLAT_ALL) == 0 => EXIT_FAR_ENV,
+            _ => EXIT_AFTER,
+        };
     }
     let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
     let cs_bits = (super::ENV_FLAT | super::ENV_PLAIN) << Seg::CS as u32 | 1;
-    (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
-        && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits
+    let goes_on = (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
+        && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits;
+    if goes_on { 0 } else { EXIT_AFTER }
 }
 
 jit_fn! {
