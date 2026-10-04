@@ -820,7 +820,8 @@ fn dynamic<const HOT: bool>(
     }
     let translatable = fetch.window.phys(cpu, at.eip, at.lin_ip, at.cs_limit).is_some()
         && at.phys_ip >> 12 != crate::mouse::CALLBACK_STUB >> 12
-        && !cpu.in_shell_code();
+        && !cpu.in_shell_code()
+        && !is_service_trap(fetch.ram, at.phys_ip);
     if !translatable {
         return execute_at::<false, false>(cpu, fetch, hook, at);
     }
@@ -1150,6 +1151,14 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
     // mostly does, its bytes lie together in RAM like any other's.
     let contiguous = !paging || lin_ip & 0xFFF <= 0xFF0 || next_page_follows(cpu, lin_ip, phys_ip);
     Some((phys_ip, contiguous && phys_ip + 16 <= fetch.ram.len()))
+}
+
+/// Whether the bytes at `phys_ip` are those of an emulator service trap
+/// (FE /7 with a register operand), which no block starts with: programs
+/// that poll the keyboard through the BIOS get here millions of times.
+#[inline(always)]
+fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
+    matches!(ram.get(phys_ip..phys_ip + 2), Some(&[0xFE, 0x38..=0x3B]))
 }
 
 /// Run the emulator service ("BOP") at `phys_ip`, if there is one. BOPs use
