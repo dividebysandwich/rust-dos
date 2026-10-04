@@ -311,9 +311,13 @@ first instruction in a block that changes them:
   The multiplications' CF and OF are both the host's OF. INC and DEC get
   the guest's CF into the host's first.
 - **On ARM64**, which has neither a parity nor an auxiliary carry flag,
-  they are computed as `cpu::alu` defines them, one by one: the carry
-  from a 64-bit sum or difference of the operands, PF from a table in the
-  `JitCtx`.
+  they are computed as `cpu::alu` defines them. For additions and
+  subtractions (ADD, SUB, CMP, INC, DEC, NEG), ADDS or SUBS of the operands
+  shifted to the top of the register give SF, ZF, CF and OF for the
+  operand's size, which a table in the `JitCtx` turns from the host's NZCV
+  into the guest's (a borrow clears AArch64's carry); PF comes from a
+  parity table and AF from the operands' bit 4. The other operations
+  compute theirs one by one.
 - Memory operands are checked inline against the segment's precomputed
   limits and rights. With paging on, the code looks the page up in the
   TLB as `Cpu::lin_to_phys` does. Plain RAM within a page is then read and

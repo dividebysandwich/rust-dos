@@ -139,6 +139,9 @@ fn mov32(ops: &mut Asm, reg: u8, v: u32) {
     }
 }
 
+/// The system register NZCV's encoding, for MRS.
+const NZCV: u32 = 0x5A10;
+
 /// FPU register tags.
 const FPU_EMPTY: u32 = crate::cpu::FPU_TAG_EMPTY as u32;
 const FPU_VALID: u32 = crate::cpu::FPU_TAG_VALID as u32;
@@ -1600,6 +1603,75 @@ impl Gen<'_> {
         }
     }
 
+    /// W0 = W10 + W11, or W10 - W11 (`sub`), cut to the size, and its flags
+    /// `need` merged into W28. SF, ZF, CF and OF come from the NZCV flags of
+    /// ADDS or SUBS of the operands shifted to the top of the register
+    /// (where the size's carry and overflow are the register's), through
+    /// `JitCtx::szco`; PF from the parity table and AF from the operands'
+    /// bit 4, where they are live.
+    fn add_sub_flags(&mut self, size: u8, sub: bool, need: u32) {
+        let shift = 32 - size as u32 * 8;
+        if need == 0 {
+            if sub {
+                dynasm!(self.ops ; .arch aarch64 ; sub w0, w10, w11);
+            } else {
+                dynasm!(self.ops ; .arch aarch64 ; add w0, w10, w11);
+            }
+            self.cut(size);
+            return;
+        }
+        match (shift, sub) {
+            (0, false) => dynasm!(self.ops ; .arch aarch64 ; adds w0, w10, w11),
+            (0, true) => dynasm!(self.ops ; .arch aarch64 ; subs w0, w10, w11),
+            (_, false) => dynasm!(self.ops
+                ; .arch aarch64
+                ; lsl w12, w10, shift
+                ; lsl w13, w11, shift
+                ; adds w0, w12, w13
+            ),
+            (_, true) => dynasm!(self.ops
+                ; .arch aarch64
+                ; lsl w12, w10, shift
+                ; lsl w13, w11, shift
+                ; subs w0, w12, w13
+            ),
+        }
+        let table = CTX_SZCO as u32 + if sub { 32 } else { 0 };
+        if need & (SF | ZF | CF | OF) != 0 {
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; mrs x5, NZCV
+                ; lsr w5, w5, 28
+                ; add x6, x20, table
+                ; ldrh w5, [x6, x5, lsl 1]
+            );
+        } else {
+            dynasm!(self.ops ; .arch aarch64 ; movz w5, 0);
+        }
+        if shift != 0 {
+            dynasm!(self.ops ; .arch aarch64 ; lsr w0, w0, shift);
+        }
+        if need & PF != 0 {
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; and w6, w0, 0xFF
+                ; add x6, x20, x6
+                ; ldrb w6, [x6, CTX_PARITY as u32]
+                ; orr w5, w5, w6
+            );
+        }
+        if need & AF != 0 {
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; eor w6, w10, w11
+                ; eor w6, w6, w0
+                ; and w6, w6, AF
+                ; orr w5, w5, w6
+            );
+        }
+        self.merge(need);
+    }
+
     /// W10 = a, W11 = b.
     fn operands(&mut self, a: T, b: Src) {
         dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(a)));
@@ -1623,7 +1695,9 @@ impl Gen<'_> {
         let need = ARITH & self.live_after;
         self.operands(a, b);
         match op {
-            AluOp::Add | AluOp::Adc => {
+            AluOp::Add => self.add_sub_flags(size, false, need),
+            AluOp::Sub | AluOp::Cmp => self.add_sub_flags(size, true, need),
+            AluOp::Adc => {
                 if op == AluOp::Adc {
                     self.carry_in();
                 }
@@ -1633,7 +1707,7 @@ impl Gen<'_> {
                 }
                 self.arith_flags(size, false, need);
             }
-            AluOp::Sub | AluOp::Sbb | AluOp::Cmp => {
+            AluOp::Sbb => {
                 if op == AluOp::Sbb {
                     self.carry_in();
                 }
@@ -1670,17 +1744,12 @@ impl Gen<'_> {
             UnOp::Inc | UnOp::Dec => {
                 // As ADD or SUB 1, leaving CF.
                 self.operands(t, Src::Imm(1));
-                if op == UnOp::Inc {
-                    dynasm!(self.ops ; .arch aarch64 ; add x0, x10, x11);
-                } else {
-                    dynasm!(self.ops ; .arch aarch64 ; sub x0, x10, x11);
-                }
-                self.arith_flags(size, op == UnOp::Dec, ARITH & !CF & self.live_after);
+                self.add_sub_flags(size, op == UnOp::Dec, ARITH & !CF & self.live_after);
             }
             UnOp::Neg => {
                 // 0 - t.
-                dynasm!(self.ops ; .arch aarch64 ; mov w11, W(r(t)) ; movz w10, 0 ; sub x0, x10, x11);
-                self.arith_flags(size, true, ARITH & self.live_after);
+                dynasm!(self.ops ; .arch aarch64 ; mov w11, W(r(t)) ; movz w10, 0);
+                self.add_sub_flags(size, true, ARITH & self.live_after);
             }
         }
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);

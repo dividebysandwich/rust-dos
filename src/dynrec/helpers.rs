@@ -113,6 +113,10 @@ pub struct JitCtx {
     pub refs: [MemRef; 4],
     /// PF (04h or 0) of every byte value, for hosts without a parity flag.
     pub parity: [u8; 256],
+    /// The guest's SF, ZF, CF and OF of an addition ([0]) or subtraction
+    /// ([1]) by the NZCV flags AArch64's ADDS or SUBS left (bits 3-0):
+    /// a subtraction's carry is set where nothing was borrowed.
+    pub szco: [[u16; 16]; 2],
     /// `jit_fpu_addsub_st`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
     /// `jit_fpu_div_zero`.
     pub fpu: [usize; 4],
@@ -145,6 +149,8 @@ pub const CTX_AFTER: i32 = offset_of!(JitCtx, after) as i32;
 pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_PARITY: i32 = offset_of!(JitCtx, parity) as i32;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub const CTX_SZCO: i32 = offset_of!(JitCtx, szco) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const CTX_FLAGS: i32 = offset_of!(JitCtx, flags) as i32;
@@ -205,6 +211,13 @@ impl JitCtx {
             panic: None,
             refs: [MemRef { lin: 0, phys: 0, phys2: 0, size: 1 }; 4],
             parity: std::array::from_fn(|b| if (b as u8).count_ones().is_multiple_of(2) { 0x04 } else { 0 }),
+            szco: std::array::from_fn(|sub| {
+                std::array::from_fn(|nzcv| {
+                    let bit = |k: usize, flag: u16| if nzcv >> k & 1 != 0 { flag } else { 0 };
+                    let carry = (nzcv >> 1 & 1 != 0) != (sub == 1);
+                    bit(3, 0x80) | bit(2, 0x40) | bit(0, 0x800) | carry as u16
+                })
+            }),
             fpu: [
                 jit_fpu_addsub_st as *const () as usize,
                 jit_fpu_addsub_value as *const () as usize,
