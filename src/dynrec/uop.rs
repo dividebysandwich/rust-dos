@@ -170,6 +170,20 @@ pub enum Uop {
     CheckIopl,
     /// t = the segment register's selector.
     GetSeg { t: T, seg: Seg },
+    /// In real mode, before a far transfer: the instruction's handler runs
+    /// it instead unless loading CS changes only its selector and base, as
+    /// `Cpu::load_seg_real` does once CS is a plain data-like segment
+    /// (that isn't flat, which a load could make it, changing the block's
+    /// environment).
+    CsReal,
+    /// Load CS with the selector in t as `Cpu::load_seg_real` does, after
+    /// `CsReal`, noting the block and the CS base it ran under for the
+    /// engine (`JitCtx::far_block`).
+    LoadCsReal { t: T },
+    /// Keep t in the context's `slot` (0 or 1), and get it back: a value
+    /// an instruction needs past operations that use all temporaries.
+    Spill { t: T, slot: u8 },
+    Unspill { t: T, slot: u8 },
     /// Leave the block with EIP = the value.
     Exit { eip: Src },
     /// Load segment register `seg` (not CS or SS) with the selector in t,

@@ -19,7 +19,8 @@ const DF: u32 = 0x0400;
 /// wrap in 16-bit code), and `stack32` the stack's width (SS's B flag),
 /// which blocks are translated for. With `system`, the code generator has
 /// the operations of segment loads, port I/O, STI and REP string loops.
-pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fpu: bool) -> Option<Vec<Uop>> {
+/// `real`: the block runs in real mode, where far transfers are translated.
+pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fpu: bool, real: bool) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
     let ok = match instr.mnemonic() {
@@ -90,6 +91,9 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fp
         Pop => pop(instr, stack32, &mut u),
         Pusha | Pushad => pusha(instr, stack32, &mut u),
         Popa | Popad => popa(instr, stack32, &mut u),
+        Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => real && far_jump(instr, next, stack32, false, &mut u),
+        Call if instr.is_call_far() || instr.is_call_far_indirect() => real && far_jump(instr, next, stack32, true, &mut u),
+        Retf => real && far_ret(instr, stack32, &mut u),
         Jmp => jmp(instr, &mut u),
         Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge | Jle | Jg => jcc(instr, next, &mut u),
         Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
@@ -1168,6 +1172,83 @@ fn ret(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
         u.push(Uop::AddConst { t: T1, v: release, size: sp.size });
     }
     u.push(Uop::Set { r: sp, t: T1 });
+    u.push(Uop::Exit { eip: Src::T(T0) });
+    true
+}
+
+/// A far JMP or CALL (`call`) in real mode, as `control::jmp` and `call`
+/// with `jump_far_real`: the target from the instruction or memory (its
+/// offset's and selector's accesses checked first, as `read_far_pointer`
+/// does), for a CALL the pushes of CS and the return address, then the
+/// target's offset checked against the CS limit, the stack pointer set,
+/// CS loaded, and the block left for the target through the links a
+/// return takes (their guards hold the CS base).
+fn far_jump(instr: &Instruction, next: u32, stack32: bool, call: bool, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.code() {
+        Code::Jmp_ptr1616 | Code::Call_ptr1616 | Code::Jmp_m1616 | Code::Call_m1616 => 2,
+        Code::Jmp_ptr1632 | Code::Call_ptr1632 | Code::Jmp_m1632 | Code::Call_m1632 => 4,
+        _ => return false,
+    };
+    u.push(Uop::CsReal);
+    // The target: offset in slot 0 and selector in slot 1 of the context.
+    if instr.op0_kind() == OpKind::Memory {
+        let Some(seg) = ea(instr, T2, u) else { return false };
+        let Some(Uop::Ea { base, index, scale, disp, a32, .. }) = u.last().copied() else { return false };
+        u.push(Uop::MemRef { t: T2, seg, size, write: false, slot: 0 });
+        u.push(Uop::Ea { t: T1, base, index, scale, disp: disp.wrapping_add(size as u32), a32 });
+        u.push(Uop::MemRef { t: T1, seg, size: 2, write: false, slot: 1 });
+        u.push(Uop::Load { dst: T0, m: T2, size });
+        u.push(Uop::Load { dst: T1, m: T1, size: 2 });
+    } else {
+        let offset = if size == 2 { instr.far_branch16() as u32 } else { instr.far_branch32() };
+        u.push(Uop::Const { t: T0, v: offset });
+        u.push(Uop::Const { t: T1, v: instr.far_branch_selector() as u32 });
+    }
+    u.push(Uop::Spill { t: T0, slot: 0 });
+    u.push(Uop::Spill { t: T1, slot: 1 });
+    let sp = sp(stack32);
+    if call {
+        u.push(Uop::GetSeg { t: T0, seg: Seg::CS });
+        push_t0(size, stack32, u);
+        u.push(Uop::Const { t: T0, v: next });
+        u.push(Uop::AddConst { t: T1, v: (size as u32).wrapping_neg(), size: sp.size });
+        u.push(Uop::Copy { dst: T2, src: T1 });
+        u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: true, slot: 2 });
+        u.push(Uop::Store { m: T2, src: T0, size });
+    }
+    u.push(Uop::Unspill { t: T0, slot: 0 });
+    u.push(Uop::CheckLimit { src: Src::T(T0) });
+    if call {
+        u.push(Uop::Set { r: sp, t: T1 });
+    }
+    u.push(Uop::Unspill { t: T1, slot: 1 });
+    u.push(Uop::LoadCsReal { t: T1 });
+    u.push(Uop::Exit { eip: Src::T(T0) });
+    true
+}
+
+/// RETF in real mode, as `control::ret_far`: the offset and selector read
+/// (the selector's whole slot), the offset checked against the CS limit,
+/// CS loaded, the stack pointer moved past them and any bytes released,
+/// and the block left through the links a return takes.
+fn far_ret(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let (size, release) = match instr.code() {
+        Code::Retfw => (2, 0),
+        Code::Retfd => (4, 0),
+        Code::Retfw_imm16 => (2, instr.immediate16() as u32),
+        Code::Retfd_imm16 => (4, instr.immediate16() as u32),
+        _ => return false,
+    };
+    let sp = sp(stack32);
+    u.push(Uop::CsReal);
+    pop_t0(size, stack32, u);
+    u.push(Uop::Copy { dst: T2, src: T1 });
+    u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: false, slot: 1 });
+    u.push(Uop::Load { dst: T2, m: T2, size });
+    u.push(Uop::CheckLimit { src: Src::T(T0) });
+    u.push(Uop::AddConst { t: T1, v: size as u32 + release, size: sp.size });
+    u.push(Uop::Set { r: sp, t: T1 });
+    u.push(Uop::LoadCsReal { t: T2 });
     u.push(Uop::Exit { eip: Src::T(T0) });
     true
 }

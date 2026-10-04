@@ -1266,6 +1266,40 @@ impl Gen<'_> {
                 );
             }
             Uop::GetSeg { t, seg } => self.field(Access::Ldr16, r(t), seg_field(seg, layout::SEG_SELECTOR)),
+            Uop::CsReal => {
+                let at = self.ops.new_dynamic_label();
+                self.field(Access::Ldr8, 0, seg_field(Seg::CS, layout::SEG_ATTR));
+                dynasm!(self.ops ; .arch aarch64 ; cmp w0, layout::AR_DATA_RW as u32 & 0xFF ; b.ne =>at);
+                self.field(Access::Ldr8, 0, seg_field(Seg::CS, layout::SEG_RIGHTS));
+                dynasm!(self.ops ; .arch aarch64 ; cmp w0, (layout::RIGHT_READ | layout::RIGHT_WRITE) as u32 ; b.ne =>at);
+                self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_LO));
+                dynasm!(self.ops ; .arch aarch64 ; cbnz w0, =>at);
+                self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_HI));
+                dynasm!(self.ops ; .arch aarch64 ; cmn w0, 1 ; b.eq =>at);
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+            }
+            Uop::LoadCsReal { t } => {
+                self.data_x1();
+                dynasm!(self.ops ; .arch aarch64 ; str x1, [x20, CTX_FAR_BLOCK as u32]);
+                self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_BASE));
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; str w0, [x20, CTX_FAR_BASE as u32]
+                    ; and w0, W(r(t)), 0xFFFF
+                );
+                self.field(Access::Str16, 0, seg_field(Seg::CS, layout::SEG_SELECTOR));
+                dynasm!(self.ops ; .arch aarch64 ; lsl w0, w0, 4);
+                self.field(Access::Str32, 0, seg_field(Seg::CS, layout::SEG_BASE));
+            }
+            Uop::Spill { t, slot } => {
+                let at = CTX_SCRATCH as u32 + slot as u32 * 4;
+                dynasm!(self.ops ; .arch aarch64 ; str W(r(t)), [x20, at]);
+            }
+            Uop::Unspill { t, slot } => {
+                let at = CTX_SCRATCH as u32 + slot as u32 * 4;
+                dynasm!(self.ops ; .arch aarch64 ; ldr W(r(t)), [x20, at]);
+            }
             Uop::CheckLimit { src } => {
                 self.value_w0(src);
                 let gp = self.fault_exit(EXIT_GP0);

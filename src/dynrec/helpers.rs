@@ -88,6 +88,8 @@ pub struct JitCtx {
     pub cs_limit: u32,
     pub far_block: *const BlockData,
     pub far_base: u32,
+    /// Values kept for `Uop::Spill`.
+    pub scratch: [u32; 2],
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
     /// `jit_memref`, `jit_read` and `jit_write`.
@@ -171,6 +173,9 @@ pub fn vga_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
 
 pub const CTX_FALLBACK: i32 = offset_of!(JitCtx, fallback) as i32;
 pub const CTX_VGA_OK: i32 = offset_of!(JitCtx, vga_ok) as i32;
+pub const CTX_FAR_BLOCK: i32 = offset_of!(JitCtx, far_block) as i32;
+pub const CTX_FAR_BASE: i32 = offset_of!(JitCtx, far_base) as i32;
+pub const CTX_SCRATCH: i32 = offset_of!(JitCtx, scratch) as i32;
 pub const CTX_VGA_WROTE: i32 = offset_of!(JitCtx, vga_wrote) as i32;
 pub const CTX_VGA_PLANES: i32 = offset_of!(JitCtx, vga_planes) as i32;
 pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
@@ -246,6 +251,7 @@ impl JitCtx {
             cs_limit: 0,
             far_block: std::ptr::null(),
             far_base: 0,
+            scratch: [0; 2],
             stack32: false,
             exit_data: std::ptr::null_mut(),
             memref: jit_memref as *const () as usize,
@@ -496,23 +502,24 @@ jit_fn! {
 
 /// Whether translated code can go on after a far transfer in real mode or
 /// virtual-8086 mode through the links a return takes (see
-/// `block::far_transfer`): it stayed in one of them, CS and the rest of
-/// the mode are as the blocks were translated for (the code size, the
-/// stack's, the segments' environment bits), and IRET set neither TF nor
-/// IF with an interrupt waiting. (INT clears both; the CS base and EIP
+/// `block::far_transfer`): it stayed in one of them, CS is as the blocks
+/// were translated for (the code size, its environment bits: the far
+/// transfer changed no other segment register), and IRET set neither TF
+/// nor IF with an interrupt waiting. (INT clears both; the CS base and EIP
 /// are the links' guards.) Not into an emulator service trap in real mode
 /// (an INT of the BIOS's or DOS's), where no block starts.
 fn far_goes_on(cpu: &Cpu, ctx: &JitCtx) -> bool {
     use crate::cpu::CpuFlags;
     let cs = cpu.seg_cache(Seg::CS);
     let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
-    let mode = || (cs.attr & crate::cpu::ATTR_DB != 0) as u32 | (cpu.stack32() as u32) << 2 | super::env_bits(cpu);
+    let cs_bits = (super::ENV_FLAT | super::ENV_PLAIN) << Seg::CS as u32 | 1;
+    let mode = || (cs.attr & crate::cpu::ATTR_DB != 0) as u32 | super::flat_bit(cpu, Seg::CS);
     !cpu.pm()
         && (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
         && !cpu.get_cpu_flag(CpuFlags::TF)
         && !(cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF))
         && cs.limit == ctx.cs_limit
-        && mode() == ctx.mode
+        && mode() == ctx.mode & cs_bits
 }
 
 /// Whether port I/O (or a long string instruction) changed what the

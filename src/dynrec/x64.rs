@@ -1222,6 +1222,43 @@ impl Gen<'_> {
             Uop::GetSeg { t, seg } => {
                 dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + seg_field(seg, layout::SEG_SELECTOR)]);
             }
+            Uop::CsReal => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; cmp BYTE [rbx + seg_field(Seg::CS, layout::SEG_ATTR)], layout::AR_DATA_RW as i8
+                    ; jne =>at
+                    ; cmp BYTE [rbx + seg_field(Seg::CS, layout::SEG_RIGHTS)], (layout::RIGHT_READ | layout::RIGHT_WRITE) as i8
+                    ; jne =>at
+                    ; cmp DWORD [rbx + seg_field(Seg::CS, layout::SEG_LO)], 0
+                    ; jne =>at
+                    ; cmp DWORD [rbx + seg_field(Seg::CS, layout::SEG_HI)], -1
+                    ; je =>at
+                );
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+            }
+            Uop::LoadCsReal { t } => {
+                let data_ptr = self.data_ptr;
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov rax, QWORD data_ptr
+                    ; mov QWORD [r12 + CTX_FAR_BLOCK], rax
+                    ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
+                    ; mov DWORD [r12 + CTX_FAR_BASE], eax
+                    ; movzx eax, Rw(r(t))
+                    ; mov WORD [rbx + seg_field(Seg::CS, layout::SEG_SELECTOR)], ax
+                    ; shl eax, 4
+                    ; mov DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)], eax
+                );
+            }
+            Uop::Spill { t, slot } => {
+                dynasm!(self.ops ; .arch x64 ; mov DWORD [r12 + CTX_SCRATCH + slot as i32 * 4], Rd(r(t)));
+            }
+            Uop::Unspill { t, slot } => {
+                dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), DWORD [r12 + CTX_SCRATCH + slot as i32 * 4]);
+            }
             Uop::CheckLimit { src } => {
                 self.value_eax(src);
                 let gp = self.fault_exit(EXIT_GP0);

@@ -136,6 +136,9 @@ pub const ENV_A20: u32 = 1 << 4;
 /// CPL is 3 (the TLB's user entries).
 #[cfg(dynrec)]
 pub const ENV_USER: u32 = 1 << 5;
+/// Real mode (CR0.PE clear): far transfers are translated.
+#[cfg(dynrec)]
+pub const ENV_REAL: u32 = 1 << 6;
 /// Segment register `seg` is flat (bit 8 + `seg as u32`): base 0, every
 /// offset in its limits, readable and writable.
 #[cfg(dynrec)]
@@ -160,6 +163,9 @@ pub fn env_bits(cpu: &Cpu) -> u32 {
     }
     if cpu.cpl == 3 {
         bits |= ENV_USER;
+    }
+    if !cpu.pe() {
+        bits |= ENV_REAL;
     }
     bits
 }
@@ -581,9 +587,10 @@ mod engine {
             let single = key.mode & 2 != 0;
             let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
             let stack32 = key.mode & 4 != 0;
+            let real = key.mode & ENV_REAL != 0;
             // The block goes on after a conditional jump its code takes.
             let side = |instr: &iced_x86::Instruction| {
-                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::FPU).is_some()
+                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::FPU, real).is_some()
             };
             let max = if single { 1 } else { MAX_BLOCK };
             let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max, pokes, backend::TAIL, side)?;
@@ -591,7 +598,7 @@ mod engine {
             let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::FPU)
+                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::FPU, real)
                 })
                 .collect();
             // Instructions whose only watched bytes are their immediate (a

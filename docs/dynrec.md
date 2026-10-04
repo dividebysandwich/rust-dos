@@ -510,8 +510,14 @@ takes more care:
     moved to the page the last instruction was in, as the interpreter's
     would have been (`CodeWindow::moved`).
 
-**Far transfers in real and virtual-8086 mode.** A far CALL or JMP, RETF,
-INT or IRET runs through its handler and ends its block, but where it
+**Far transfers in real and virtual-8086 mode.** In real mode (the
+environment's `ENV_REAL`), far CALL and JMP, direct and through memory,
+and RETF are translated: once CS is a plain data-like segment, as a load
+in real mode leaves it, loading it changes only its selector and base
+(`Uop::CsReal`, `LoadCsReal`; elsewhere the handler runs the instruction),
+and the block leaves for the target through the links a return takes.
+INT and IRET, and far transfers in virtual-8086 mode, run through their
+handlers and end their block, but where that
 leaves translated code nothing to check (`helpers::far_goes_on`: still in
 real or virtual-8086 mode, the mode and CS's limit as the chain was
 entered with, TF clear, no interrupt that IRET let through, and not into

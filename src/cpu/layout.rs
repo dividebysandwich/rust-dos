@@ -20,6 +20,9 @@ pub const SEG_LO: usize = offset_of!(SegCache, lo);
 pub const SEG_HI: usize = offset_of!(SegCache, hi);
 pub const SEG_RIGHTS: usize = offset_of!(SegCache, rights);
 pub const SEG_ATTR: usize = offset_of!(SegCache, attr);
+/// The access byte of a real-mode segment (`Cpu::load_seg_real`).
+#[cfg_attr(not(dynrec), allow(dead_code))]
+pub const AR_DATA_RW: u16 = super::regs::AR_DATA_RW;
 /// `SegCache::rights` bits.
 pub const RIGHT_READ: u8 = super::regs::RIGHT_READ;
 pub const RIGHT_WRITE: u8 = super::regs::RIGHT_WRITE;
