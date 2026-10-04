@@ -2027,6 +2027,7 @@ impl Host for MainHost<'_, '_> {
         if new.core != old.core {
             self.cpu.core = new.core;
         }
+        self.cpu.bus.observe.enabled = new.idle_skip;
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;

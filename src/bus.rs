@@ -297,6 +297,9 @@ pub struct Bus {
     /// face of self-modifying code (LZEXE, packers, etc.) without paying the
     /// cost of verifying cached bytes on every fetch.
     pub page_gen: Vec<u32>,
+    /// What the CPU touches while `idle` proves a loop changes nothing:
+    /// the blocks of RAM it writes, and whether it did anything else.
+    pub observe: crate::idle::Observe,
     /// Per block of RAM (`GEN_SHIFT`), 1 if it or the next block holds code
     /// that was decoded (by the decoded-instruction cache) or translated (by
     /// the dynamic recompiler). A block stays marked, and every write to it
@@ -437,6 +440,7 @@ impl Bus {
             audio_underruns: 0,
             unhandled_writes: vec![0; 0x10000],
             page_gen: vec![0; ram_len >> GEN_SHIFT],
+            observe: crate::idle::Observe::default(),
             code_blocks: vec![0; ram_len >> GEN_SHIFT],
             log_hook: None,
             audio_hook: None,
@@ -1139,6 +1143,9 @@ impl Bus {
 
     /// Invalidate cached decodes of the pages covering `start..end`.
     fn bump_page_gens(&mut self, start: usize, end: usize) {
+        if self.observe.on {
+            self.observe.wrote(start >> GEN_SHIFT, (end - 1) >> GEN_SHIFT);
+        }
         for page in (start >> GEN_SHIFT)..=((end - 1) >> GEN_SHIFT) {
             let g = &mut self.page_gen[page];
             *g = g.wrapping_add(1);
@@ -1206,6 +1213,9 @@ impl Bus {
                 *g = g.wrapping_add(1);
             }
         }
+        if self.observe.on {
+            self.observe.wrote(addr >> GEN_SHIFT, (addr + S as usize - 1) >> GEN_SHIFT);
+        }
     }
 
     #[inline(always)]
@@ -1222,6 +1232,9 @@ impl Bus {
 
     /// Reads of the video memory, the ROM area and past the end of RAM.
     fn read_8_mapped(&self, addr: usize) -> u8 {
+        if self.observe.on {
+            self.observe.mapped(addr, self.ram.len());
+        }
         if let Some(port) = self.s3_mmio(addr) {
             return self.mmio_peek(port, 1) as u8;
         }
@@ -1310,7 +1323,13 @@ impl Bus {
                 let g = self.page_gen.get_unchecked_mut(addr >> GEN_SHIFT);
                 *g = g.wrapping_add(1);
             }
+            if self.observe.on {
+                self.observe.wrote(addr >> GEN_SHIFT, addr >> GEN_SHIFT);
+            }
             return false;
+        }
+        if self.observe.on {
+            self.observe.mapped_write(addr, self.ram.len());
         }
         if let Some(port) = self.s3_mmio(addr) {
             self.mmio_write(port, value as u32, 1);
@@ -1455,7 +1474,13 @@ impl Bus {
                 let g = self.page_gen.get_unchecked_mut((addr + 1) >> GEN_SHIFT);
                 *g = g.wrapping_add(1);
             }
+            if self.observe.on {
+                self.observe.wrote(addr >> GEN_SHIFT, (addr + 1) >> GEN_SHIFT);
+            }
             return false;
+        }
+        if self.observe.on {
+            self.observe.mapped_write(addr, self.ram.len());
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 2) {
             self.write_vram(offset, &value.to_le_bytes());
@@ -1488,6 +1513,9 @@ impl Bus {
                 ])
             };
         }
+        if self.observe.on {
+            self.observe.mapped(addr, self.ram.len());
+        }
         if let Some(offset) = self.vbe.lfb_offset(addr, 2) {
             return u16::from_le_bytes([self.vbe.vram[offset], self.vbe.vram[offset + 1]]);
         }
@@ -1515,6 +1543,9 @@ impl Bus {
                 ])
             };
         }
+        if self.observe.on {
+            self.observe.mapped(addr, self.ram.len());
+        }
         if let Some(offset) = self.vbe.lfb_offset(addr, 4) {
             let v = &self.vbe.vram[offset..offset + 4];
             return u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
@@ -1537,7 +1568,13 @@ impl Bus {
             self.page_gen[addr >> GEN_SHIFT] = self.page_gen[addr >> GEN_SHIFT].wrapping_add(1);
             let last = (addr + 3) >> GEN_SHIFT;
             self.page_gen[last] = self.page_gen[last].wrapping_add(1);
+            if self.observe.on {
+                self.observe.wrote(addr >> GEN_SHIFT, last);
+            }
             return;
+        }
+        if self.observe.on {
+            self.observe.mapped_write(addr, self.ram.len());
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 4) {
             self.write_vram(offset, &value.to_le_bytes());
@@ -2255,6 +2292,7 @@ impl Bus {
 
     /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
+        self.observe.port_write();
         self.clock.stall(crate::timer::IO_WRITE_NS);
         self.log_port(port, value as u32, 1, true);
         self.write_port(port, value);
@@ -2606,6 +2644,7 @@ impl Bus {
     // Read from an I/O Port
     /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
+        self.observe.port_read(port);
         self.clock.stall(crate::timer::IO_READ_NS);
         let value = self.read_port(port);
         self.log_port(port, value as u32, 1, false);
@@ -3000,6 +3039,37 @@ impl Bus {
     /// Input Status 1 (port 3DAh): bit 3 in the vertical retrace, bit 0
     /// while display enable is off, from the CRT timing and emulated time.
     /// Reading it also resets the attribute controller's flip-flop.
+    /// For `idle`: until which instruction count the bits `mask` of port
+    /// `port` read as at instruction count `from`, if reading it changes
+    /// nothing a program could see the next time but those bits. Only the
+    /// VGA's Input Status 1, whose bits follow the time.
+    pub fn idle_port(&mut self, port: u16, mask: u8, from: u64) -> Option<u64> {
+        let vga = matches!(
+            self.vga.adapter,
+            video::adapter::Adapter::Svga
+                | video::adapter::Adapter::Vga
+                | video::adapter::Adapter::Ega
+                | video::adapter::Adapter::S3
+                | video::adapter::Adapter::S3Virge
+                | video::adapter::Adapter::S3VirgeVx
+                | video::adapter::Adapter::Et4000
+        );
+        if !(vga && matches!(port, 0x3DA | 0x3BA) && self.vga.decodes(port)) {
+            return None;
+        }
+        let timing = self.vga.timing();
+        let until = timing.next_status_change(self.clock.ns_at(from), mask);
+        Some(self.clock.icount_at_ns(until))
+    }
+
+    /// For `idle`: what an IN of port `port` (one `idle_port` knows) that
+    /// starts at instruction count `at` reads, without reading it.
+    pub fn idle_port_value(&mut self, port: u16, at: u64) -> u8 {
+        debug_assert!(matches!(port, 0x3DA | 0x3BA));
+        let sample = at + self.clock.stall_count(crate::timer::IO_READ_NS);
+        self.vga.timing().status(self.clock.ns_at(sample))
+    }
+
     fn input_status_1(&mut self) -> u8 {
         self.activity.status_reads += 1;
         self.sync_display();

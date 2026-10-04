@@ -201,6 +201,7 @@ pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReaso
 fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook: &mut dyn ExecHook) -> StopReason {
     loop {
         if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
+            crate::idle::at_event(cpu);
             if cpu.bus.clock.icount >= cpu.bus.clock.batch_end() {
                 return StopReason::BatchEnd;
             }
@@ -208,6 +209,9 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         }
 
         if deliver_interrupts(cpu) {
+            if cpu.bus.observe.watching() {
+                crate::idle::interrupted(cpu);
+            }
             continue;
         }
 
@@ -234,7 +238,16 @@ fn run<const HOT: bool, const DYN: bool>(cpu: &mut Cpu, fetch: &mut Fetch, hook:
         // on the interpreter, which raises the single-step traps. (IRET,
         // which can set TF, ends translated blocks, and POPF stops one
         // where it sets TF.)
-        let stop = if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
+        let stop = if !HOT && cpu.bus.observe.watching() {
+            // A busy-wait loop is looked for or proven (`idle`): one
+            // instruction at a time, on the interpreter.
+            crate::idle::before_instruction(cpu);
+            if cpu.bus.clock.icount >= cpu.bus.clock.deadline {
+                // Passes were skipped up to the next timer event.
+                continue;
+            }
+            instruction::<false, false>(cpu, fetch, hook)
+        } else if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
             dynamic::<HOT>(cpu, fetch, hook, false)
         } else if !HOT && !DYN {
             instruction::<HOT, true>(cpu, fetch, hook)
@@ -1190,6 +1203,13 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if !allowed {
         return false;
     }
+    // A loop being proven to change nothing (`idle`) may only use services
+    // that work on RAM alone: the others keep state of their own, or reach
+    // devices.
+    if cpu.bus.observe.on && !crate::idle::pure_service(kind, vector, cpu.ax()) {
+        cpu.bus.observe.opaque();
+    }
+    let trap = (cpu.cs(), cpu.eip());
     // With paging on (under Windows, whose virtual machines have memory of
     // their own), the service reaches memory through the page tables, and
     // runs again once the system has put a page it found missing there.
@@ -1252,6 +1272,9 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         }
     }
     cpu.bus.guest_paging = None;
+    if std::mem::take(&mut cpu.bus.observe.polled) {
+        crate::idle::keyboard_poll(cpu, trap.0, trap.1);
+    }
     if cpu.idle {
         // A BIOS service is waiting for input: skip ahead to the next
         // timer event instead of spinning on the retry.

@@ -250,6 +250,42 @@ impl CrtTiming {
             < self.retrace_end - self.retrace_start
     }
 
+    /// When the bits `mask` of `status` next change after `t_ns`, or the
+    /// next vertical retrace begins if that is sooner (a program polling
+    /// the status can only tell times apart by those bits).
+    pub fn next_status_change(&self, t_ns: u64, mask: u8) -> u64 {
+        let frame = self.frame_ns();
+        let line_ns = self.line_ns as u64;
+        let start = t_ns - t_ns % frame;
+        let pos = t_ns % frame;
+        let line = (pos / line_ns) as u32;
+        let column = pos % line_ns;
+        let mut next = self.next_retrace(t_ns + 1);
+        if mask & 0x08 != 0 {
+            // The retrace's other end: the first line from the next on
+            // whose retrace state differs.
+            let now = self.in_retrace(line);
+            if let Some(l) = (line + 1..line + 1 + self.total).find(|&l| self.in_retrace(l % self.total) != now) {
+                next = next.min(start + l as u64 * line_ns);
+            }
+        }
+        if mask & 0x01 != 0 {
+            let edge = if line >= self.display {
+                // Blanked to the end of the frame.
+                start + frame
+            } else if column < self.hdisplay_ns as u64 {
+                start + line as u64 * line_ns + self.hdisplay_ns as u64
+            } else if line + 1 >= self.display {
+                // The last line shown: blanked to the end of the frame.
+                start + frame
+            } else {
+                start + (line as u64 + 1) * line_ns
+            };
+            next = next.min(edge);
+        }
+        next
+    }
+
     fn retrace_ns(&self) -> u64 {
         self.retrace_start as u64 * self.line_ns as u64
     }

@@ -172,6 +172,10 @@
 # The memory rewind's states may take, in MB (16 to 4096); the oldest go
 # when they need more.
 #rewind_memory=256
+# Skip the passes of busy-wait loops that change nothing until the next
+# timer event (a program waiting for a key, the retrace or the timer), so
+# the emulator sleeps instead. Exact: programs see nothing of it.
+#idle_skip=true
 # How fast hard disks are, as DOSBox Staging has it:
 #   maximum  as fast as possible, no slowdown (the default)
 #   fast     a mid-1990s hard disk (~15 MB/s)

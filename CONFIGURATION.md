@@ -297,6 +297,16 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   one after it, so a game that changes little goes back a long way. The
   states start over when a game starts or ends, the hardware changes or
   a [save state](README.md#save-states) is loaded. Off by default.
+* `idle_skip=true` (the default) lets the emulator skip the passes of a
+  program's busy-wait loops up to the next timer event, and sleep
+  instead of running them: a program polling the keyboard through the
+  BIOS, waiting for the vertical retrace, or for the timer's tick count
+  to change. A loop is skipped only after the emulator has seen one of
+  its passes come back with the registers and the memory it wrote as
+  they were, and with nothing else to tell the passes apart (it reads no
+  device but the video card's status, whose bits it looks at only
+  through a mask), so programs see the same as without it. `false` runs
+  every pass.
 * `hard_disk_speed` and `floppy_disk_speed` slow the disks down to those
   of the time; see [Disk speed and noises](#disk-speed-and-noises).
 

@@ -33,6 +33,7 @@ pub struct Hardware {
 pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate::keylayout::Layout) -> Vec<String> {
     cpu.model = settings.cpu;
     cpu.core = settings.core;
+    cpu.bus.observe.enabled = settings.idle_skip;
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.configure_voodoo(settings.voodoo.board());
     cpu.bus.set_disk_settings(settings.disk);

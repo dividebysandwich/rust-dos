@@ -434,6 +434,14 @@ pub struct FpuRegs {
     stale: [u8; 8],
 }
 
+/// `FpuRegs` as bits, which compare as stored.
+#[derive(Clone, PartialEq)]
+pub struct FpuBits {
+    x80: [u128; 8],
+    f64s: [u64; 8],
+    stale: [u8; 8],
+}
+
 impl Default for FpuRegs {
     fn default() -> Self {
         FpuRegs { x80: [F80::new(); 8], f64s: [0.0; 8], stale: [0; 8] }
@@ -444,6 +452,11 @@ impl FpuRegs {
     pub const X80_OFFSET: usize = std::mem::offset_of!(FpuRegs, x80);
     pub const F64_OFFSET: usize = std::mem::offset_of!(FpuRegs, f64s);
     pub const STALE_OFFSET: usize = std::mem::offset_of!(FpuRegs, stale);
+
+    /// The registers' bits, as stored (for comparing states).
+    pub fn bits(&self) -> FpuBits {
+        FpuBits { x80: self.x80.map(|f| f.st), f64s: self.f64s.map(f64::to_bits), stale: self.stale }
+    }
 
     /// Register `i`'s 80 bits.
     #[inline]

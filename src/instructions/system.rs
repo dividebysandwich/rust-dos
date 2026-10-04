@@ -273,6 +273,8 @@ pub fn cpuid(cpu: &mut Cpu) -> CpuResult {
 /// RDTSC (Pentium): the time stamp counter into EDX:EAX. CR4.TSD keeps it
 /// to level 0.
 pub fn rdtsc(cpu: &mut Cpu) -> CpuResult {
+    // The time: a loop that reads it isn't the same pass again (`idle`).
+    cpu.bus.observe.time_read();
     require_pentium(cpu)?;
     if cpu.cr4 & CR4_TSD != 0 {
         require_cpl0(cpu)?;

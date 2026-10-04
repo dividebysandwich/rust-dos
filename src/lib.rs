@@ -46,6 +46,7 @@ pub mod hostdirs;
 pub mod hostfs;
 pub mod hosttime;
 pub mod ide;
+pub mod idle;
 pub mod import;
 pub mod gus;
 pub mod instr_cache;

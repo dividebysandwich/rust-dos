@@ -34,6 +34,7 @@ pub fn handle(cpu: &mut Cpu) {
             } else {
                 cpu.set_cpu_flag(CpuFlags::ZF, true);
                 cpu.bus.activity.poll();
+                cpu.bus.observe.polled = true;
             }
         }
         0x11 => {
@@ -43,6 +44,7 @@ pub fn handle(cpu: &mut Cpu) {
             } else {
                 cpu.set_cpu_flag(CpuFlags::ZF, true); // No key
                 cpu.bus.activity.poll();
+                cpu.bus.observe.polled = true;
             }
         }
 
@@ -142,6 +144,7 @@ fn booted(cpu: &mut Cpu, ah: u8) {
             }
             None => {
                 cpu.bus.activity.poll();
+                cpu.bus.observe.polled = true;
                 cpu.set_cpu_flag(CpuFlags::ZF, true);
             }
         },

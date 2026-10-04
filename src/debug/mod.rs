@@ -895,6 +895,14 @@ impl DebugHub {
                 "return_misses": d.return_misses,
                 "calls": dynrec_calls(cpu.dynrec.calls()),
             },
+            // Busy-wait loops proven to change nothing, proofs that failed,
+            // and the instructions skipped (`idle`).
+            "idle_skip": {
+                "proofs": cpu.bus.observe.stats.proofs,
+                "failures": cpu.bus.observe.stats.failures,
+                "skipped": cpu.bus.observe.stats.skipped,
+                "failure": cpu.bus.observe.stats.failure,
+            },
             // Host speed while executing guest code, excluding idle skips,
             // rendering and frame pacing.
             "mips": (st.mips * 100.0).round() / 100.0,

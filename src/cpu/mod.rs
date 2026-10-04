@@ -447,6 +447,16 @@ pub struct CpuSnapshot {
     pub seg: [SegCache; 6],
 }
 
+/// The FPU's state as `Cpu::idle_key` compares it: the registers' bits.
+#[derive(Clone, PartialEq)]
+pub struct FpuKey {
+    pub regs: crate::f80::FpuBits,
+    pub top: usize,
+    pub control: u16,
+    pub status: u16,
+    pub tags: [u8; 8],
+}
+
 /// A parent process's state while its child runs (INT 21h AH=4Bh).
 #[derive(Debug, Clone)]
 pub struct ProcessContext {
@@ -676,6 +686,29 @@ impl Cpu {
             eip: self.eip,
             flags: self.flags,
             seg: self.seg,
+        }
+    }
+
+    /// Everything of the CPU's an instruction can see, which `idle`
+    /// compares between passes of a loop.
+    pub fn idle_key(&self) -> crate::idle::CpuKey {
+        crate::idle::CpuKey {
+            regs: self.snapshot(),
+            cr: [self.cr0, self.cr2, self.cr3, self.cr4],
+            dr: self.dr,
+            cpl: self.cpl,
+            a20: self.bus.a20_mask(),
+            tables: [self.gdtr, self.idtr],
+            system: [self.ldtr, self.tr],
+            fpu: FpuKey {
+                regs: self.fpu_stack.bits(),
+                top: self.fpu_top,
+                control: self.fpu_control,
+                status: self.fpu_flags.bits(),
+                tags: self.fpu_tags,
+            },
+            shadow: self.irq_shadow,
+            tainted: false,
         }
     }
 

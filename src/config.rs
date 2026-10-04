@@ -175,6 +175,8 @@ pub struct Config {
     /// (`rewind_memory`).
     pub rewind: Option<bool>,
     pub rewind_memory: Option<usize>,
+    /// Busy-wait loops skipped (`idle_skip`).
+    pub idle_skip: Option<bool>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
     /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,
@@ -876,6 +878,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.rewind = Some(on),
                             None => warn(format!("invalid rewind '{}' (true or false)", value)),
                         },
+                        "idle_skip" => match parse_bool(value) {
+                            Some(on) => config.idle_skip = Some(on),
+                            None => warn(format!("invalid idle_skip '{}' (true or false)", value)),
+                        },
                         "record_ui" => match parse_bool(value) {
                             Some(on) => config.record_ui = Some(on),
                             None => warn(format!("invalid record_ui '{}' (true or false)", value)),
@@ -1211,6 +1217,8 @@ pub struct Settings {
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
     pub rewind_memory: usize,
+    /// Skip the passes of busy-wait loops that change nothing (`idle`).
+    pub idle_skip: bool,
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
@@ -1260,6 +1268,7 @@ impl Default for Settings {
             mouse_capture_messages: true,
             rewind: false,
             rewind_memory: 256,
+            idle_skip: true,
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
@@ -1329,6 +1338,7 @@ impl Settings {
             mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
+            idle_skip: config.idle_skip.unwrap_or(default.idle_skip),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
             sound: config.sound.clone(),
             disk: config.disk,
@@ -1402,6 +1412,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
+        (Emulator, "idle_skip", yes_no(settings.idle_skip)),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
         (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
         (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
@@ -2385,6 +2396,7 @@ mod tests {
             mouse_capture_messages: false,
             rewind: true,
             rewind_memory: 512,
+            idle_skip: false,
             sound,
             disk: DiskSettings {
                 hard_disk_speed: DiskSpeed::Medium,

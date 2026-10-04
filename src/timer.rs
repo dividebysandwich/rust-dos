@@ -144,6 +144,19 @@ impl Clock {
         self.base_ns + (delta * 1_000_000 / self.cycles_per_ms as u128) as u64
     }
 
+    /// The emulated time in nanoseconds at instruction count `icount`.
+    pub fn ns_at(&self, icount: u64) -> u64 {
+        let delta = icount.saturating_sub(self.base_icount) as u128;
+        self.base_ns + (delta * 1_000_000 / self.cycles_per_ms as u128) as u64
+    }
+
+    /// The first instruction count at which `now_ns() >= ns`.
+    pub fn icount_at_ns(&self, ns: u64) -> u64 {
+        let delta = ns.saturating_sub(self.base_ns) as u128;
+        let n = (delta * self.cycles_per_ms as u128).div_ceil(1_000_000);
+        self.base_icount.saturating_add(n.min(u64::MAX as u128) as u64)
+    }
+
     /// Current emulated time in microseconds.
     pub fn now_micros(&self) -> u64 {
         (self.now_ticks() as u128 * 1_000_000 / PIT_HZ as u128) as u64
@@ -183,9 +196,14 @@ impl Clock {
     /// Let `ns` nanoseconds of emulated time pass without executing
     /// anything, for an I/O port access.
     pub fn stall(&mut self, ns: u64) {
-        let n = self.cycles_per_ms as u64 * ns / 1_000_000;
+        let n = self.stall_count(ns);
         self.icount += n;
         self.stalled += n;
+    }
+
+    /// The instruction count `stall` adds for `ns` nanoseconds.
+    pub fn stall_count(&self, ns: u64) -> u64 {
+        self.cycles_per_ms as u64 * ns / 1_000_000
     }
 
     /// Let emulated time pass without executing anything until PIT tick

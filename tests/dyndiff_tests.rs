@@ -197,10 +197,14 @@ fn local_programs_in_lockstep() {
         let (dir, command) = entry.split_once(':').expect("DIR:COMMAND");
         let mut a = program_machine(dir, "a", command, CoreMode::Normal);
         let mut b = program_machine(dir, "b", command, second_core());
+        // The reference runs every pass of the busy-wait loops the other
+        // skips (`idle`).
+        a.bus.observe.enabled = false;
+        b.bus.observe.enabled = std::env::var("DYNDIFF_IDLE").map_or(true, |v| v != "0");
         match lockstep(&mut a, &mut b, batches, len, |n, cpu| press_keys(&keys, n, cpu)) {
             Ok(run) => println!(
                 "{}: {} batches, {} instructions, equal (mode switches {}, exceptions {})\n  \
-                 normal {:.2}s ({:.0} MIPS), {} {:.2}s ({:.0} MIPS)\n  {:?}",
+                 normal {:.2}s ({:.0} MIPS), {} {:.2}s ({:.0} MIPS)\n  {:?}\n  idle skip: {:?}",
                 entry,
                 run.batches,
                 a.executed,
@@ -211,9 +215,11 @@ fn local_programs_in_lockstep() {
                 second_core().name(),
                 run.b_time.as_secs_f64(),
                 b.executed as f64 / run.b_time.as_secs_f64() / 1e6,
-                b.dynrec.stats()
+                b.dynrec.stats(),
+                b.bus.observe.stats
             ),
             Err(e) => {
+                println!("  idle skip: {:?}", b.bus.observe.stats);
                 println!("{}: {}", entry, e);
                 failures.push(entry.to_string());
             }
@@ -285,6 +291,7 @@ fn local_program_alone() {
             top.join(", ")
         );
     }
+    println!("  idle skip: {:?}", cpu.bus.observe.stats);
 }
 
 /// Save the screen as a PNG file.
