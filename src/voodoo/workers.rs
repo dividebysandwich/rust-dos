@@ -56,15 +56,12 @@ impl Job {
         match self {
             Job::Triangle { st, p, verts, texcount } => {
                 let flip = st.fbz_mode & (1 << 17) != 0;
+                let variant = raster::variant(st, *texcount);
                 let mut row = |y: i32, x0: i32, x1: i32| {
                     if !owns(raster::screen_y(st, y, flip)) {
                         return;
                     }
-                    match texcount {
-                        0 => raster::scanline::<0>(st, p, y, x0, x1, stipple, stats),
-                        1 => raster::scanline::<1>(st, p, y, x0, x1, stipple, stats),
-                        _ => raster::scanline::<2>(st, p, y, x0, x1, stipple, stats),
-                    }
+                    raster::scanline_as(variant, *texcount, st, p, y, x0, x1, stipple, stats);
                 };
                 render_triangle(*verts, &mut row);
             }

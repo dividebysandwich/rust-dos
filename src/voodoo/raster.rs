@@ -217,10 +217,42 @@ fn wfloat(iterw: i64) -> i32 {
     if w < 0xFFFF { w + 1 } else { w }
 }
 
+/// The mode registers the pixel pipeline follows: fbzMode,
+/// fbzColorPath, alphaMode, fogMode and the texture units' textureMode.
+/// `scanline` may have some of their bits fixed when it is compiled (see
+/// `Spec`), which leaves out the code for the others.
+#[derive(Clone, Copy)]
+pub(crate) struct Modes {
+    fbz: u32,
+    cp: u32,
+    am: u32,
+    fog: u32,
+    tex: [u32; 2],
+}
+
+impl Modes {
+    /// The registers as `st` has them, with the bits `S` fixes as it has
+    /// them (the triangle's are those, see `Spec::matches`).
+    #[inline(always)]
+    fn of<S: Spec>(st: &RasterState) -> Self {
+        let fix = |reg: u32, (known, value): (u32, u32)| (reg & !known) | value;
+        let f = S::FIXED;
+        let tex = |i: usize| st.tmu[i].as_ref().map_or(0, |t| t.mode);
+        Modes {
+            fbz: fix(st.fbz_mode, f[0]),
+            cp: fix(st.fbz_color_path, f[1]),
+            am: fix(st.alpha_mode, f[2]),
+            fog: fix(st.fog_mode, f[3]),
+            tex: [fix(tex(0), f[4]), fix(tex(1), f[5])],
+        }
+    }
+}
+
 /// Where the pixels of one scanline go: the rows of the colour and
 /// auxiliary buffers, and the dither rows for the scanline's Y.
 struct Row<'a> {
     st: &'a RasterState,
+    m: Modes,
     dest: usize,
     depth: Option<usize>,
     /// The matrix row for dither subtraction, the 4x4 row for LOD and fog
@@ -232,8 +264,8 @@ struct Row<'a> {
 }
 
 impl<'a> Row<'a> {
-    fn new(st: &'a RasterState, y: i32, scry: i32) -> Self {
-        let fbz = st.fbz_mode;
+    fn new(st: &'a RasterState, m: Modes, y: i32, scry: i32) -> Self {
+        let fbz = m.fbz;
         let (mut dither, mut dither4, mut dither_lookup) = (None, None, None);
         if bit(fbz, 8) {
             let y3 = (y & 3) as usize;
@@ -249,6 +281,7 @@ impl<'a> Row<'a> {
         let row = scry as usize * st.rowpixels;
         Self {
             st,
+            m,
             dest: st.dest + row,
             depth: st.aux.map(|aux| aux + row),
             dither,
@@ -277,7 +310,7 @@ impl<'a> Row<'a> {
     #[inline(always)]
     fn begin(&self, x: i32, y: i32, iterz: i32, iterw: i64, stipple: &mut u32, stats: &mut Stats) -> Option<i32> {
         let st = self.st;
-        let fbz = st.fbz_mode;
+        let fbz = self.m.fbz;
         stats.pixels_in += 1;
         if bit(fbz, 2) {
             if !bit(fbz, 12) {
@@ -295,7 +328,7 @@ impl<'a> Row<'a> {
         }
 
         let mut depthval = if !bit(fbz, 3) {
-            clamped_z(iterz, st.fbz_color_path)
+            clamped_z(iterz, self.m.cp)
         } else if !bit(fbz, 21) {
             wfloat(iterw)
         } else if iterz as u32 & 0xF000_0000 != 0 {
@@ -344,18 +377,18 @@ impl<'a> Row<'a> {
     /// skip the pixel. The chroma test is on `color`, the others on its
     /// alpha.
     fn tests(&self, color: u32, alpha: i32, stats: &mut Stats) -> bool {
-        let st = self.st;
-        if bit(st.fbz_mode, 1) && ((color ^ st.chroma_key) & 0xFF_FFFF) == 0 {
+        let (st, m) = (self.st, self.m);
+        if bit(m.fbz, 1) && ((color ^ st.chroma_key) & 0xFF_FFFF) == 0 {
             stats.chroma_fail += 1;
             return false;
         }
-        if bit(st.fbz_mode, 13) && alpha & 1 == 0 {
+        if bit(m.fbz, 13) && alpha & 1 == 0 {
             stats.afunc_fail += 1;
             return false;
         }
-        if bit(st.alpha_mode, 0) {
-            let reference = (st.alpha_mode >> 24) as i32;
-            let pass = match (st.alpha_mode >> 1) & 7 {
+        if bit(m.am, 0) {
+            let reference = (m.am >> 24) as i32;
+            let pass = match (m.am >> 1) & 7 {
                 0 => false,
                 1 => alpha < reference,
                 2 => alpha == reference,
@@ -380,12 +413,12 @@ impl<'a> Row<'a> {
     #[allow(clippy::too_many_arguments)]
     fn finish(&self, x: i32, color: (i32, i32, i32, i32), depthval: i32, iterz: i32, iterw: i64, iter_a: i32, stats: &mut Stats) {
         let st = self.st;
-        let fbz = st.fbz_mode;
+        let fbz = self.m.fbz;
         let (mut r, mut g, mut b, mut a) = color;
         let (prefogr, prefogg, prefogb) = (r, g, b);
 
         // Fog.
-        let fog = st.fog_mode;
+        let fog = self.m.fog;
         if bit(fog, 0) {
             let fc = st.fog_color;
             let (fr, fg, fb);
@@ -416,8 +449,8 @@ impl<'a> Row<'a> {
                         st.fogblend[(w >> 10) as usize] as i32 + deltaval
                     }
                     1 => iter_a,
-                    2 => clamped_z(iterz, st.fbz_color_path) >> 8,
-                    _ => clamped_w(iterw, st.fbz_color_path),
+                    2 => clamped_z(iterz, self.m.cp) >> 8,
+                    _ => clamped_w(iterw, self.m.cp),
                 };
                 blend += 1;
                 (fr, fg, fb) = ((tr * blend) >> 8, (tg * blend) >> 8, (tb * blend) >> 8);
@@ -433,7 +466,7 @@ impl<'a> Row<'a> {
         }
 
         // Alpha blending with the colour and alpha already there.
-        let am = st.alpha_mode;
+        let am = self.m.am;
         if bit(am, 4) {
             let dpix = self.get(self.dest + x as usize) as i32;
             let (mut dr, mut dg, mut db) = ((dpix >> 8) & 0xF8, (dpix >> 3) & 0xFC, (dpix << 3) & 0xF8);
@@ -517,7 +550,13 @@ impl<'a> Row<'a> {
 /// `smax + 1` texels wide.
 #[inline(always)]
 pub(crate) fn fetch_texel(t: &TmuRaster, texbase: u32, smax: i32, s: i32, tc: i32) -> u32 {
-    let format = (t.mode >> 8) & 0xF;
+    fetch_texel_in(t, t.mode, texbase, smax, s, tc)
+}
+
+/// `fetch_texel` with the textureMode `mode` (see `Modes`).
+#[inline(always)]
+fn fetch_texel_in(t: &TmuRaster, mode: u32, texbase: u32, smax: i32, s: i32, tc: i32) -> u32 {
+    let format = (mode >> 8) & 0xF;
     let index = (tc as u32).wrapping_mul(smax as u32 + 1).wrapping_add(s as u32);
     // The addresses are masked to the memory's size (a power of two), and
     // the tables have an entry for every byte, or for every word of the
@@ -549,8 +588,7 @@ pub(crate) fn fetch_texel(t: &TmuRaster, texbase: u32, smax: i32, s: i32, tc: i3
 /// colour of the unit before it (`TEXTURE_PIPELINE`).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn texture(t: &TmuRaster, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: i32, iters: i64, itert: i64, iterw: i64) -> u32 {
-    let mode = t.mode;
+fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: i32, iters: i64, itert: i64, iterw: i64) -> u32 {
     let (mut s, mut tc, mut lod);
     if bit(mode, 0) {
         let (oow, log) = tables().reciplog(iterw);
@@ -588,7 +626,7 @@ fn texture(t: &TmuRaster, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: 
     let texbase = t.lodoffset[ilod as usize];
     let smax = t.wmask >> ilod;
     let tmax = t.hmask >> ilod;
-    let fetch = |s: i32, tc: i32| fetch_texel(t, texbase, smax, s, tc);
+    let fetch = |s: i32, tc: i32| fetch_texel_in(t, mode, texbase, smax, s, tc);
 
     let point = (lod == t.lodmin && !bit(mode, 2)) || (lod != t.lodmin && !bit(mode, 1));
     let c_local = if point {
@@ -705,7 +743,7 @@ fn texture(t: &TmuRaster, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: 
 #[allow(clippy::too_many_arguments)]
 fn color_combine(row: &Row, iterargb: u32, texel: u32, iterz: i32, iterw: i64, stats: &mut Stats) -> Option<(i32, i32, i32, i32)> {
     let st = row.st;
-    let cp = st.fbz_color_path;
+    let cp = row.m.cp;
     let mut c_other = match cp & 3 {
         0 => iterargb,
         1 => texel,
@@ -713,7 +751,7 @@ fn color_combine(row: &Row, iterargb: u32, texel: u32, iterz: i32, iterw: i64, s
         _ => 0,
     };
     // The chroma key tests c_other before its alpha is chosen.
-    if bit(st.fbz_mode, 1) && ((c_other ^ st.chroma_key) & 0xFF_FFFF) == 0 {
+    if bit(row.m.fbz, 1) && ((c_other ^ st.chroma_key) & 0xFF_FFFF) == 0 {
         stats.chroma_fail += 1;
         return None;
     }
@@ -724,7 +762,7 @@ fn color_combine(row: &Row, iterargb: u32, texel: u32, iterz: i32, iterw: i64, s
         _ => 0,
     };
     c_other = (c_other & 0xFF_FFFF) | (a_other as u32) << 24;
-    if bit(st.fbz_mode, 13) && a_other & 1 == 0 {
+    if bit(row.m.fbz, 13) && a_other & 1 == 0 {
         stats.afunc_fail += 1;
         return None;
     }
@@ -815,7 +853,7 @@ fn combine(cp: u32, c_other: u32, c_local: u32, texel: u32) -> (i32, i32, i32, i
 
 impl Row<'_> {
     fn alpha_test(&self, alpha: i32, stats: &mut Stats) -> bool {
-        let am = self.st.alpha_mode;
+        let am = self.m.am;
         if !bit(am, 0) {
             return true;
         }
@@ -837,6 +875,97 @@ impl Row<'_> {
     }
 }
 
+/// Bits of the mode registers a `scanline` is compiled for (`Modes`): per
+/// register (fbzMode, fbzColorPath, alphaMode, fogMode, and textureMode of
+/// TMU 0 and 1), the bits fixed and their values. The compiler leaves out
+/// the stages and choices those bits rule out, as MAME's rasterizer cache
+/// does for the modes games use; any triangle whose registers have those
+/// bits as fixed may be drawn with it (`variant`), the others by the
+/// `Generic` one, which fixes none.
+pub trait Spec {
+    const FIXED: [(u32, u32); 6];
+}
+
+/// No bits fixed: every stage as the registers say.
+pub struct Generic;
+
+impl Spec for Generic {
+    const FIXED: [(u32, u32); 6] = [(0, 0); 6];
+}
+
+/// The bits of fbzMode a variant fixes: those that choose the stages and
+/// sources (stipple, depth from W and as floating point, the depth test
+/// on, dithering and its kind, depth bias, the alpha planes, dither
+/// subtraction, the depth source), not the depth function, writes,
+/// clipping, chroma key or alpha mask, which stay as the triangle has
+/// them. alphaMode's: all but the reference value of the alpha test.
+const FBZ_FIXED: u32 = 1 << 2 | 1 << 3 | 1 << 4 | 1 << 8 | 1 << 11 | 1 << 12 | 1 << 16 | 1 << 18 | 1 << 19 | 1 << 20 | 1 << 21;
+const AM_FIXED: u32 = 0x00FF_FFFF;
+
+/// The variants: textures used, and fbzMode, fbzColorPath, alphaMode,
+/// fogMode and the units' textureMode as the fixed bits have them. These
+/// are the pipelines of Quake's 3dfx renderers (lightmapped textures in two
+/// units, blended or not, and the untextured ones), which other Glide
+/// games share.
+macro_rules! variants {
+    ($($name:ident: $tmus:literal, [$fbz:expr, $cp:expr, $am:expr, $fog:expr, $t0:expr, $t1:expr];)*) => {
+        $(
+            struct $name;
+            impl Spec for $name {
+                const FIXED: [(u32, u32); 6] = [
+                    (FBZ_FIXED, $fbz & FBZ_FIXED),
+                    (u32::MAX, $cp),
+                    (AM_FIXED, $am & AM_FIXED),
+                    (u32::MAX, $fog),
+                    (if $tmus >= 1 { u32::MAX } else { 0 }, $t0),
+                    (if $tmus >= 2 { u32::MAX } else { 0 }, $t1),
+                ];
+            }
+        )*
+        const VARIANTS: &[(usize, [(u32, u32); 6])] = &[$(($tmus, $name::FIXED)),*];
+
+        /// Draw a scanline with variant `variant` (from `variant`), or the
+        /// generic code for `texcount` units.
+        #[allow(clippy::too_many_arguments)]
+        pub fn scanline_as(variant: Option<usize>, texcount: usize, st: &RasterState, p: &TriParams, y: i32, startx: i32, stopx: i32, stipple: &mut u32, stats: &mut Stats) {
+            let mut k = 0usize;
+            $(
+                if variant == Some(k) {
+                    return scanline::<$tmus, $name>(st, p, y, startx, stopx, stipple, stats);
+                }
+                k += 1;
+            )*
+            let _ = k;
+            match texcount {
+                0 => scanline::<0, Generic>(st, p, y, startx, stopx, stipple, stats),
+                1 => scanline::<1, Generic>(st, p, y, startx, stopx, stipple, stats),
+                _ => scanline::<2, Generic>(st, p, y, startx, stopx, stipple, stats),
+            }
+        }
+    };
+}
+
+variants! {
+    V0: 2, [0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
+    V1: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
+    V2: 2, [0x90110, 0x0D42_0009, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1A0F];
+    V3: 0, [0x90110, 0x0542_610A, 0x0004_5110, 0, 0, 0];
+    V4: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1A0F];
+    V5: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8844_230F, 0x8C26_130F];
+    V6: 2, [0x90110, 0x0C00_0005, 0x0004_0409, 0, 0x8844_2A0F, 0x8C26_1C0F];
+    V7: 2, [0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
+}
+
+/// The variant a triangle with `texcount` units and `st`'s registers can be
+/// drawn with: one whose fixed bits the registers have.
+pub fn variant(st: &RasterState, texcount: usize) -> Option<usize> {
+    let tex = |i: usize| st.tmu[i].as_ref().map_or(0, |t| t.mode);
+    let regs = [st.fbz_mode, st.fbz_color_path, st.alpha_mode, st.fog_mode, tex(0), tex(1)];
+    VARIANTS.iter().position(|(tmus, fixed)| {
+        *tmus == texcount.min(2) && regs.iter().zip(fixed).all(|(r, (known, value))| r & known == *value)
+    })
+}
+
 /// The screen row scanline `y` draws into: flipped with the Y origin at
 /// the bottom (fbzMode bit 17).
 pub(crate) fn screen_y(st: &RasterState, y: i32, flip: bool) -> i32 {
@@ -845,7 +974,7 @@ pub(crate) fn screen_y(st: &RasterState, y: i32, flip: bool) -> i32 {
 
 /// Draw pixels `startx..stopx` of scanline `y` of a triangle with `TMUS`
 /// texture units (`raster_generic`).
-pub fn scanline<const TMUS: usize>(st: &RasterState, p: &TriParams, y: i32, startx: i32, stopx: i32, stipple: &mut u32, stats: &mut Stats) {
+pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: i32, startx: i32, stopx: i32, stipple: &mut u32, stats: &mut Stats) {
     let (mut startx, mut stopx) = (startx, stopx);
     let scry = screen_y(st, y, bit(st.fbz_mode, 17));
     if bit(st.fbz_mode, 0) {
@@ -871,7 +1000,8 @@ pub fn scanline<const TMUS: usize>(st: &RasterState, p: &TriParams, y: i32, star
         return;
     }
     let startx = startx.max(0);
-    let row = Row::new(st, y, scry);
+    let m = Modes::of::<S>(st);
+    let row = Row::new(st, m, y, scry);
 
     let dx = startx - (p.ax >> 4) as i32;
     let dy = y - (p.ay >> 4) as i32;
@@ -900,7 +1030,7 @@ pub fn scanline<const TMUS: usize>(st: &RasterState, p: &TriParams, y: i32, star
                 && t.lodmin < 8 << 8
             {
                 let (s, tc, w) = tex[1];
-                texel = texture(t, x, row.dither4, texel, p.tmu[1].lodbase, s, tc, w);
+                texel = texture(t, m.tex[1], x, row.dither4, texel, p.tmu[1].lodbase, s, tc, w);
             }
             if TMUS >= 1
                 && let Some(t) = &st.tmu[0]
@@ -910,11 +1040,11 @@ pub fn scanline<const TMUS: usize>(st: &RasterState, p: &TriParams, y: i32, star
                     Some(config) => config,
                     None => {
                         let (s, tc, w) = tex[0];
-                        texture(t, x, row.dither4, texel, p.tmu[0].lodbase, s, tc, w)
+                        texture(t, m.tex[0], x, row.dither4, texel, p.tmu[0].lodbase, s, tc, w)
                     }
                 };
             }
-            let iterargb = clamped_argb(iterr, iterg, iterb, itera, st.fbz_color_path);
+            let iterargb = clamped_argb(iterr, iterg, iterb, itera, m.cp);
             if let Some(color) = color_combine(&row, iterargb, texel, iterz, iterw, stats) {
                 row.finish(x, color, depthval, iterz, iterw, a_of(iterargb), stats);
             }
@@ -949,7 +1079,7 @@ pub fn lfb_pixel(st: &RasterState, x: i32, y: i32, color: u32, depth: i32, stipp
         stats.clip_fail += 1;
         return;
     }
-    let row = Row::new(st, y, scry);
+    let row = Row::new(st, Modes::of::<Generic>(st), y, scry);
     let iterw = (depth as i64) << (30 - 16);
     let iterz = depth << 12;
     let Some(depthval) = row.begin(x, y, iterz, iterw, stipple, stats) else { return };
