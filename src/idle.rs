@@ -723,7 +723,7 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
 /// SUB and CMP with a constant may reach them (which `count` follows);
 /// anything else ends the proof.
 fn record(cpu: &mut Cpu) {
-    use iced_x86::{Decoder, DecoderOptions, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register};
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpAccess, OpKind, Register};
     use crate::cpu::alu::ARITH;
     if cpu.cr0 & crate::cpu::CR0_PG != 0 {
         return cpu.bus.observe.fail("paging");
@@ -732,10 +732,7 @@ fn record(cpu: &mut Cpu) {
     let bitness = if cs.attr & crate::cpu::ATTR_DB != 0 { 32 } else { 16 };
     let a20 = cpu.bus.a20_mask() as usize;
     let lin = cs.base.wrapping_add(cpu.eip()) as usize & a20;
-    let mut bytes = [0u8; 15];
-    for (i, b) in bytes.iter_mut().enumerate() {
-        *b = cpu.bus.peek_8((lin + i) & a20);
-    }
+    let bytes = code_at(cpu, lin);
     let instr = Decoder::with_ip(bitness, &bytes, cpu.eip() as u64, DecoderOptions::NONE).decode();
     let mnemonic = instr.mnemonic();
     // An emulator service trap (which decodes as nothing), and what pushes
@@ -770,10 +767,9 @@ fn record(cpu: &mut Cpu) {
         (read & ARITH, kill & ARITH)
     };
     // The RAM it reaches.
-    let mut factory = InstructionInfoFactory::new();
-    let info = factory.info(&instr);
-    let mut accesses: Vec<(Access, bool, bool)> = Vec::new();
-    for m in info.used_memory() {
+    let mut accesses: Vec<(Access, bool, bool)> = Vec::with_capacity(4);
+    let used = FACTORY.with_borrow_mut(|f| f.info(&instr).used_memory().to_vec());
+    for m in &used {
         let write = matches!(m.access(), OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite);
         let seg_base = |r: Register| crate::cpu::Seg::from_register(r).map(|s| cpu.seg_cache(s).base as u64);
         let Some(addr) = m.virtual_address(0, |r, _, _| seg_base(r).or(Some(cpu.reg(r) as u64))) else {
@@ -846,6 +842,26 @@ fn record(cpu: &mut Cpu) {
     if failed {
         o.fail("counter");
     }
+}
+
+thread_local! {
+    static FACTORY: std::cell::RefCell<iced_x86::InstructionInfoFactory> =
+        std::cell::RefCell::new(iced_x86::InstructionInfoFactory::new());
+}
+
+/// The 15 bytes an instruction at linear address `lin` may have, with
+/// paging off.
+fn code_at(cpu: &Cpu, lin: usize) -> [u8; 15] {
+    let mut bytes = [0u8; 15];
+    if cpu.bus.is_plain_ram(lin, 15) {
+        bytes.copy_from_slice(&cpu.bus.ram()[lin..lin + 15]);
+    } else {
+        let a20 = cpu.bus.a20_mask() as usize;
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = cpu.bus.peek_8((lin + i) & a20);
+        }
+    }
+    bytes
 }
 
 /// The arithmetic flags of iced's `RflagsBits`.
@@ -1003,10 +1019,7 @@ fn inspect(cpu: &mut Cpu, now: u64) {
             return;
         }
     }
-    let mut bytes = [0u8; 15];
-    for (i, b) in bytes.iter_mut().enumerate() {
-        *b = cpu.bus.peek_8(lin as usize + i);
-    }
+    let bytes = code_at(cpu, lin as usize);
     let instr = Decoder::with_ip(bitness, &bytes, cpu.eip() as u64, DecoderOptions::NONE).decode();
     let o = &mut cpu.bus.observe;
     if instr.mnemonic() == Mnemonic::In && instr.op0_register() == Register::AL {
