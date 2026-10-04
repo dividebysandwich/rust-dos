@@ -513,6 +513,11 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
 
     let canvas_h = canvas.len() / (canvas_w * 3);
     let row_bytes = canvas_w * 3;
+    let plane_size = vram.len() / 4;
+    // The source pixel of each canvas column, and a row's pixels as
+    // values.
+    let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
+    let mut line = vec![0u8; width + 16];
     let mut last_y = usize::MAX;
     for ty in 0..canvas_h {
         let y = ty * rows / canvas_h;
@@ -524,13 +529,62 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus) {
         last_y = y;
         // Rows past the split screen's start show VRAM from address 0.
         let (row_base, row, pan) = if y >= split { (0, y - split, split_pan) } else { (base, y, pan) };
-        for tx in 0..canvas_w {
-            let x = tx * width / canvas_w;
-            let rgb = colors[planar_pixel(vram, bytes_per_row, x + pan, row, row_base) as usize];
-            let idx = dst + tx * 3;
-            canvas[idx] = rgb.0;
-            canvas[idx + 1] = rgb.1;
-            canvas[idx + 2] = rgb.2;
+        planar_row(vram, plane_size, row_base.wrapping_add(row.wrapping_mul(bytes_per_row)), pan, width, &mut line);
+        let out = &mut canvas[dst..dst + row_bytes];
+        if canvas_w == 2 * width {
+            for (px, &v) in out.as_chunks_mut::<6>().0.iter_mut().zip(&line[..width]) {
+                let (r, g, b) = colors[v as usize];
+                *px = [r, g, b, r, g, b];
+            }
+        } else {
+            for (px, &x) in out.as_chunks_mut::<3>().0.iter_mut().zip(&columns) {
+                let (r, g, b) = colors[line[x] as usize];
+                *px = [r, g, b];
+            }
+        }
+    }
+}
+
+/// Each byte's 8 bits as 8 bytes of 0 or 1, the leftmost pixel (bit 7)
+/// first.
+const PLANAR_EXPAND: [u64; 256] = {
+    let mut table = [0u64; 256];
+    let mut b = 0;
+    while b < 256 {
+        let mut j = 0;
+        while j < 8 {
+            table[b] |= (((b >> (7 - j)) & 1) as u64) << (8 * j);
+            j += 1;
+        }
+        b += 1;
+    }
+    table
+};
+
+/// The 4-bit values of pixels `pan..pan + width` of the row whose bytes
+/// start at `start` in each plane (`planar_pixel`'s), into `line`, which
+/// has room for 16 more: 8 pixels from each byte of the four planes.
+fn planar_row(vram: &[u8], plane_size: usize, start: usize, pan: usize, width: usize, line: &mut [u8]) {
+    // Plane space wraps at the plane's size (64 KiB on a VGA); games with
+    // smaller back buffers rely on that so page flips near the top of VRAM
+    // don't walk into garbage.
+    let mask = plane_size - 1;
+    let (first, skip) = (pan / 8, pan % 8);
+    let bytes = (skip + width).div_ceil(8);
+    let mut decoded = [0u8; 8];
+    for k in 0..bytes {
+        let at = start.wrapping_add(first + k) & mask;
+        let p = |plane: usize| PLANAR_EXPAND[vram[plane * plane_size + at] as usize];
+        let eight = p(0) | p(1) << 1 | p(2) << 2 | p(3) << 3;
+        decoded.copy_from_slice(&eight.to_le_bytes());
+        // Pixel 8k + j of the decoded span is pixel 8k + j - skip of the
+        // row.
+        for (j, &v) in decoded.iter().enumerate() {
+            if let Some(x) = (8 * k + j).checked_sub(skip)
+                && x < width
+            {
+                line[x] = v;
+            }
         }
     }
 }
@@ -583,6 +637,7 @@ fn planar_base_offset(bus: &Bus) -> usize {
 }
 
 /// The 4-bit value of pixel (`x`, `y`): a bit from each plane.
+#[cfg(test)]
 fn planar_pixel(vram: &[u8], bytes_per_row: usize, x: usize, y: usize, base: usize) -> u8 {
     // Plane space wraps at the plane's size (64 KiB on a VGA); games with
     // smaller back buffers rely on that so page flips near the top of VRAM
@@ -1092,5 +1147,38 @@ impl crate::savestate::State for VideoMode {
             .find(|&m| m as u8 == number)
             .ok_or_else(|| crate::savestate::StateError::Invalid(format!("video mode {:X}h", number)))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod planar_tests {
+    use super::*;
+
+    #[test]
+    fn planar_rows_decode_as_pixel_by_pixel() {
+        // Pseudo-random planes, rows at any start, pan and width.
+        let plane_size = 0x1_0000;
+        let mut seed = 0x1234_5678u32;
+        let vram: Vec<u8> = (0..4 * plane_size)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u8
+            })
+            .collect();
+        for &(width, bpr) in &[(320usize, 40usize), (640, 80), (640, 82), (360, 46)] {
+            for pan in 0..16 {
+                for &base in &[0usize, 7, 0xFFF0, 0x8001] {
+                    for row in [0usize, 1, 199, 479] {
+                        let mut line = vec![0u8; width + 16];
+                        planar_row(&vram, plane_size, base + row * bpr, pan, width, &mut line);
+                        for x in 0..width {
+                            assert_eq!(line[x], planar_pixel(&vram, bpr, x + pan, row, base), "w {} pan {} base {:X} row {} x {}", width, pan, base, row, x);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
