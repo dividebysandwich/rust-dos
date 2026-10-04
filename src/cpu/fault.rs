@@ -359,7 +359,8 @@ impl Cpu {
     ) -> CpuResult<u32> {
         let stack32 = cache.attr & super::ATTR_DB != 0;
         let mask = if stack32 { 0xFFFF_FFFF } else { 0xFFFF };
-        let mut refs = [None; 36];
+        // (Not cleared for each call: a far call pushes two of the 36.)
+        let mut refs = [const { std::mem::MaybeUninit::<super::MemRef>::uninit() }; 36];
         let mut at = sp;
         for (i, _) in values.iter().enumerate() {
             at = at.wrapping_sub(size as u32) & mask;
@@ -368,12 +369,11 @@ impl Cpu {
                 return Err(fault);
             }
             let lin = cache.base.wrapping_add(at);
-            refs[i] = Some(self.lin_ref(lin, size, super::Access::Write, user)?);
+            refs[i].write(self.lin_ref(lin, size, super::Access::Write, user)?);
         }
         for (i, &value) in values.iter().enumerate() {
-            if let Some(r) = refs[i] {
-                self.mem_write(r, value);
-            }
+            // SAFETY: the loop above wrote refs[i] for each value.
+            self.mem_write(unsafe { refs[i].assume_init() }, value);
         }
         Ok(at)
     }

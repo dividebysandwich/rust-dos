@@ -857,7 +857,6 @@ mod engine {
             // segments are flat as when it started.)
             self.ctx.flat = mode & ENV_FLAT_ALL;
             self.ctx.mode = mode & !2;
-            self.ctx.cs_limit = at.cs_limit;
             self.ctx.far_block = std::ptr::null();
             self.ctx.stack32 = mode & 4 != 0;
             vga_state(cpu, &mut self.ctx);
@@ -971,8 +970,17 @@ mod engine {
                         // the block there and go on in that one. Nothing a
                         // block can change stops the next from being entered
                         // as the execution loop would (see `block`).
+                        // (Under CS as it is now: a far transfer may have
+                        // changed it.)
                         let target = cpu.eip();
-                        let t_at = At { eip: target, phys_ip: data.phys_in_page(target) as usize, ..*at };
+                        let cs = cpu.seg_cache(Seg::CS);
+                        let t_at = At {
+                            eip: target,
+                            lin_ip: cs.base.wrapping_add(target),
+                            cs_limit: cs.limit,
+                            phys_ip: data.phys_in_page(target) as usize,
+                            ..*at
+                        };
                         let t_key = Key { phys: t_at.phys_ip as u32, eip: target, mode };
                         let flushes = stats.flushes;
                         let Some((t, t_code)) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran { page } };

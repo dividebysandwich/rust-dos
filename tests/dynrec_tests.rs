@@ -936,6 +936,34 @@ fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
 }
 
 #[test]
+fn far_calls_between_code_segments_in_protected_mode_go_on_in_translated_code() {
+    // The loop calls a function in a code segment of its own (another
+    // base and limit) and back, with the timer interrupting all of it.
+    const FUNC: u32 = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.set_gdt(FREE, seg_desc(FUNC & !0xFFF, 0x1FFF, CODE_R0, 0x4));
+        with_timer(rig, |a| {
+            a.mov(ebx, ecx)?;
+            a.db(&[0x9A])?;
+            a.dd(&[FUNC & 0xFFF])?;
+            a.dw(&[FREE])?;
+            a.add(esi, eax)
+        });
+        rig.load(FUNC, &asm32(FUNC & 0xFFF, |a| {
+            a.mov(eax, ebx)?;
+            a.imul_3(eax, eax, 13)?;
+            a.xor(eax, edi)?;
+            a.retf()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+    if AVAILABLE {
+        assert!(stats.runs < 3000, "{:?}", stats);
+    }
+}
+
+#[test]
 fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
     // Blocks go on past IN, OUT and STI where they change nothing the
     // execution loop checks. Here the loop masks IRQ 0 and unmasks it in

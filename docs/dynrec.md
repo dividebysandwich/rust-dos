@@ -522,13 +522,16 @@ are translated the same way on both hosts, segments with a 4 GB limit
 would make the segment flat or not (base 0), and a load that would change
 more than the selector and base runs through its handler and stops the
 block after it.
-INT and IRET, and far transfers in virtual-8086 mode, run through their
-handlers and end their block, but where that
-leaves translated code nothing to check (`helpers::far_goes_on`: still in
-real or virtual-8086 mode, the mode and CS's limit as the chain was
-entered with, TF clear, no interrupt that IRET let through, and not into
-an emulator service trap), the block goes on to where it went through the
-links a return takes, whose guards hold the CS base. The engine then
+INT and IRET, and far transfers in virtual-8086 and protected mode, run
+through their handlers and end their block, but where that leaves
+translated code nothing to check (`helpers::far_goes_on`: still in the
+same mode, TF clear, no interrupt that IRET let through; in real and
+virtual-8086 mode CS's environment bits and code size as the chain was
+entered with, and not into an emulator service trap; in protected mode no
+task switch and the whole environment as it was, CPL and every segment),
+the block goes on to where it went through the links a return takes,
+whose guards hold the CS base. Blocks the engine then links within a page
+are translated under CS as it is (its limit and base). The engine then
 works out the page each block ran in from the CS base it ran under: the
 one the code was entered with or went to (`JitCtx::far_block`).
 
@@ -593,7 +596,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real mode going on in translated code, and segment loads in big real mode |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, and segment loads in big real mode |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

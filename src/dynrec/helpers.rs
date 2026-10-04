@@ -80,12 +80,11 @@ pub struct JitCtx {
     /// `block::loaded_segment`).
     pub flat: u32,
     /// The mode the running blocks were translated for (`Key::mode` but
-    /// for its bit for blocks of one instruction), and CS's limit, which a
-    /// far transfer must leave as they were for the code to go on after
-    /// it; and the last block that ran one, with the CS base it ran under
-    /// (blocks run under the CS they are entered with).
+    /// for its bit for blocks of one instruction), which a far transfer
+    /// must leave as it was for the code to go on after it; and the last
+    /// block that ran one, with the CS base it ran under (blocks run under
+    /// the CS they are entered with).
     pub mode: u32,
-    pub cs_limit: u32,
     pub far_block: *const BlockData,
     pub far_base: u32,
     /// Values kept for `Uop::Spill`.
@@ -248,7 +247,6 @@ impl JitCtx {
             smc: 0,
             flat: 0,
             mode: 0,
-            cs_limit: 0,
             far_block: std::ptr::null(),
             far_base: 0,
             scratch: [0; 2],
@@ -335,9 +333,8 @@ jit_fn! {
         let sti = instr.mnemonic() == iced_x86::Mnemonic::Sti;
         let popf = matches!(instr.mnemonic(), iced_x86::Mnemonic::Popf | iced_x86::Mnemonic::Popfd);
         let seg_load = super::block::loaded_segment(instr);
-        // (A far transfer goes on in translated code only from real or
-        // virtual-8086 mode.)
-        let far = super::block::far_transfer(instr).then(|| !cpu.pm());
+        // (What a far transfer may change, for `far_goes_on`.)
+        let far = super::block::far_transfer(instr).then(|| (cpu.pm(), cpu.tr.selector));
         let cs_base = cpu.seg_cache(Seg::CS).base;
         // A device may write RAM (by DMA) as well.
         let writes = data.writes[ix] || port;
@@ -381,9 +378,9 @@ jit_fn! {
                         cpu.irq_shadow = false;
                     }
                 }
-                if let Some(from) = far {
+                if let Some((pm, tr)) = far {
                     (ctx.far_block, ctx.far_base) = (data as *const BlockData, cs_base);
-                    if !(from && far_goes_on(cpu, ctx)) {
+                    if !far_goes_on(cpu, ctx, pm, tr) {
                         return EXIT_AFTER;
                     }
                 }
@@ -500,26 +497,30 @@ jit_fn! {
     }
 }
 
-/// Whether translated code can go on after a far transfer in real mode or
-/// virtual-8086 mode through the links a return takes (see
-/// `block::far_transfer`): it stayed in one of them, CS is as the blocks
-/// were translated for (the code size, its environment bits: the far
-/// transfer changed no other segment register), and IRET set neither TF
-/// nor IF with an interrupt waiting. (INT clears both; the CS base and EIP
-/// are the links' guards.) Not into an emulator service trap in real mode
-/// (an INT of the BIOS's or DOS's), where no block starts.
-fn far_goes_on(cpu: &Cpu, ctx: &JitCtx) -> bool {
+/// Whether translated code can go on after a far transfer through the
+/// links a return takes (see `block::far_transfer`), from protected mode
+/// (`pm`, with task register `tr`) or not: it stayed in that mode, IRET set
+/// neither TF nor IF with an interrupt waiting (INT clears both), and the
+/// mode is as the blocks were translated for. In real and virtual-8086
+/// mode only CS changed: its environment bits and the code size; not into
+/// an emulator service trap in real mode (an INT of the BIOS's or DOS's),
+/// where no block starts. In protected mode everything a gate or another
+/// task could change: no task switch, and CPL and all segments' bits. (The
+/// CS base and EIP are the links' guards.)
+fn far_goes_on(cpu: &Cpu, ctx: &JitCtx, pm: bool, tr: u16) -> bool {
     use crate::cpu::CpuFlags;
+    if cpu.get_cpu_flag(CpuFlags::TF) || (cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF)) || cpu.pm() != pm {
+        return false;
+    }
     let cs = cpu.seg_cache(Seg::CS);
+    let code32 = (cs.attr & crate::cpu::ATTR_DB != 0) as u32;
+    if pm {
+        return cpu.tr.selector == tr && code32 | (cpu.stack32() as u32) << 2 | super::env_bits(cpu) == ctx.mode;
+    }
     let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
     let cs_bits = (super::ENV_FLAT | super::ENV_PLAIN) << Seg::CS as u32 | 1;
-    let mode = || (cs.attr & crate::cpu::ATTR_DB != 0) as u32 | super::flat_bit(cpu, Seg::CS);
-    !cpu.pm()
-        && (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
-        && !cpu.get_cpu_flag(CpuFlags::TF)
-        && !(cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF))
-        && cs.limit == ctx.cs_limit
-        && mode() == ctx.mode & cs_bits
+    (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
+        && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits
 }
 
 /// Whether port I/O (or a long string instruction) changed what the
