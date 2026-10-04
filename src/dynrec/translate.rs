@@ -20,17 +20,19 @@ const DF: u32 = 0x0400;
 /// which blocks are translated for. With `system`, the code generator has
 /// the operations of segment loads, port I/O, STI and REP string loops.
 /// `real`: the block runs in real mode, where far transfers are translated.
-pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fpu: bool, real: bool) -> Option<Vec<Uop>> {
+/// With `segments`, the code generator has the loads of data segment
+/// registers in protected mode too (in real mode it always has them).
+pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, segments: bool, fpu: bool, real: bool) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
     let ok = match instr.mnemonic() {
-        Mov if (system || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+        Mov if (segments || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
             mov_to_seg(instr, &mut u)
         }
-        Pop if (system || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+        Pop if (segments || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
             pop_seg(instr, stack32, &mut u)
         }
-        Les | Lds | Lfs | Lgs if system || real => far_pointer(instr, &mut u),
+        Les | Lds | Lfs | Lgs if segments || real => far_pointer(instr, &mut u),
         In if system => port_in(instr, &mut u),
         Out if system => port_out(instr, &mut u),
         Sti if system => {

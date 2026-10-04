@@ -333,9 +333,12 @@ pub fn patch_link(mem: &mut super::codemem::CodeMemory, site: *const u8, to: *co
 /// Whether blocks go on into the last 15 bytes of their page (see
 /// `BlockData::in_tail`): not in this code generator's.
 pub const TAIL: bool = false;
-/// Whether it has the operations of segment loads, port I/O and STI: no,
+/// Whether it has the operations of port I/O, STI and string loops: no,
 /// their handlers run them.
 pub const SYSTEM: bool = false;
+/// Whether it has the loads of data segment registers in protected mode
+/// (through `jit_load_seg`; in real mode it always has them).
+pub const SEGMENTS: bool = true;
 /// Whether it has those of FPU instructions.
 pub const FPU: bool = true;
 
@@ -1506,8 +1509,21 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
-            Uop::LoadSeg { .. }
-            | Uop::In { .. }
+            Uop::LoadSeg { seg, t } => {
+                // As x86-64's: `jit_load_seg`, and the segment's accesses
+                // from here on as if it weren't flat.
+                let fail = self.fail();
+                dynasm!(self.ops ; .arch aarch64 ; mov w3, W(r(t)) ; mov x0, x19 ; mov x1, x20);
+                self.mov32(2, seg as u32);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ldr x16, [x20, CTX_LOAD_SEG as u32]
+                    ; blr x16
+                    ; cbnz w0, =>fail
+                );
+                self.loaded_segs |= 1 << seg as u8;
+            }
+            Uop::In { .. }
             | Uop::Out { .. }
             | Uop::Sti
             | Uop::RepStart { .. }

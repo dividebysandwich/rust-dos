@@ -389,6 +389,8 @@ pub struct Code {
 pub const TAIL: bool = true;
 /// It has the operations of segment loads, port I/O and STI.
 pub const SYSTEM: bool = true;
+/// Whether it has the loads of data segment registers in protected mode.
+pub const SEGMENTS: bool = true;
 /// And those of FPU instructions.
 pub const FPU: bool = true;
 
