@@ -580,6 +580,24 @@ fn inspect(cpu: &mut Cpu, now: u64) {
     let cs = cpu.seg_cache(crate::cpu::Seg::CS);
     let bitness = if cs.attr & crate::cpu::ATTR_DB != 0 { 32 } else { 16 };
     let lin = cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask();
+    if !cpu.bus.observe.tainted {
+        // Only an IN AL matters while AL holds no port's value: past the
+        // prefixes, E4h or ECh (or E5h and EDh, which the decoder then
+        // turns away). Decoding every instruction would cost more than
+        // the loops it looks at.
+        let mut at = lin as usize;
+        let mut opcode = cpu.bus.peek_8(at);
+        for _ in 0..4 {
+            if !matches!(opcode, 0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3) {
+                break;
+            }
+            at += 1;
+            opcode = cpu.bus.peek_8(at);
+        }
+        if !matches!(opcode, 0xE4 | 0xE5 | 0xEC | 0xED) {
+            return;
+        }
+    }
     let mut bytes = [0u8; 15];
     for (i, b) in bytes.iter_mut().enumerate() {
         *b = cpu.bus.peek_8(lin as usize + i);
