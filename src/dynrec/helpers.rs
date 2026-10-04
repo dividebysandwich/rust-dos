@@ -122,6 +122,13 @@ pub struct JitCtx {
     pub fpu: [usize; 4],
     /// `jit_dev_read` and `jit_dev_write` (x86-64).
     pub dev: [usize; 2],
+    /// `jit_lazy_flags`, and the operation it works the flags out from (see
+    /// `flags::Plan::record`): its kind and size (`kind | size << 8`), and
+    /// its operands. With the exit code a way out keeps there while it
+    /// calls it.
+    pub lazy_fn: usize,
+    pub lazy: [u32; 3],
+    pub lazy_code: u32,
     /// Calls of the functions above, for the statistics.
     pub calls: super::Calls,
 }
@@ -152,6 +159,9 @@ pub const CTX_PARITY: i32 = offset_of!(JitCtx, parity) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_SZCO: i32 = offset_of!(JitCtx, szco) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
+pub const CTX_LAZY_FN: i32 = offset_of!(JitCtx, lazy_fn) as i32;
+pub const CTX_LAZY: i32 = offset_of!(JitCtx, lazy) as i32;
+pub const CTX_LAZY_CODE: i32 = offset_of!(JitCtx, lazy_code) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const CTX_FLAGS: i32 = offset_of!(JitCtx, flags) as i32;
 pub const CTX_FPU: i32 = offset_of!(JitCtx, fpu) as i32;
@@ -225,6 +235,9 @@ impl JitCtx {
                 jit_fpu_div_zero as *const () as usize,
             ],
             dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
+            lazy_fn: jit_lazy_flags as *const () as usize,
+            lazy: [0; 3],
+            lazy_code: 0,
             calls: super::Calls { fallback: vec![0; iced_x86::Mnemonic::values().len()], ..super::Calls::default() },
         }
     }
@@ -464,6 +477,32 @@ jit_fn! {
         } else {
             1
         }
+    }
+}
+
+jit_fn! {
+    /// The arithmetic flags of the operation the code recorded (`JitCtx::lazy`,
+    /// see `flags::Plan::record`), as the interpreter's `cpu::alu` sets them.
+    fn jit_lazy_flags(cpu: *mut Cpu, ctx: *mut JitCtx) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        let [desc, a, b] = ctx.lazy;
+        let size = (desc >> 8) as u8;
+        let mask = crate::cpu::alu::size_mask(size);
+        let (a, b) = (a & mask, b & mask);
+        // (The operations change the arithmetic flags alone.)
+        let saved = cpu.get_cpu_flags().bits() & crate::cpu::alu::ARITH;
+        match desc & 0xFF {
+            super::flags::LAZY_ADD => _ = cpu.alu_add(size, a, b, false),
+            super::flags::LAZY_SUB => _ = cpu.alu_sub(size, a, b, false),
+            super::flags::LAZY_AND => _ = cpu.alu_logic(size, a & b),
+            super::flags::LAZY_OR => _ = cpu.alu_logic(size, a | b),
+            super::flags::LAZY_XOR => _ = cpu.alu_logic(size, a ^ b),
+            _ => _ = cpu.alu_neg(size, a),
+        }
+        let flags = cpu.get_cpu_flags().bits() & crate::cpu::alu::ARITH;
+        cpu.set_flag_bits(crate::cpu::alu::ARITH, saved);
+        flags
     }
 }
 

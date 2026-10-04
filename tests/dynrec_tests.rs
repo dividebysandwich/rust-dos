@@ -272,6 +272,62 @@ fn flags_the_code_keeps_in_a_register_survive_a_store_into_the_block() {
 }
 
 #[test]
+fn flags_recorded_for_a_fault_reach_its_handler() {
+    // The ADD's flags matter only if the load faults (the SUB sets them
+    // all again): the code records the ADD, and the fault works its flags
+    // out from that.
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFF, DATA_R0, 0x4));
+        let code = asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(ds, ax)?;
+            a.mov(ebx, 0x1234_5690u32)?;
+            a.add(bl, 0x90)?;
+            a.mov(eax, dword_ptr(0x200))?;
+            a.sub(ecx, ecx)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!(vector, GP as u32);
+    // 90h + 90h = 120h: CF, OF; 20h has one bit set: PF clear.
+    assert_eq!(stack[3] & ARITH, 0x801, "EFLAGS {:08X}", stack[3]);
+}
+
+#[test]
+fn flags_recorded_for_a_store_into_the_block_reach_the_code_after_it() {
+    // The ADD's flags die at the XOR, but the store turns the XOR into
+    // NOPs: the block leaves after the store, with the ADD's flags.
+    let prefix = |a: &mut CodeAssembler| {
+        a.mov(ebx, 0x1234_5690u32)?;
+        a.add(bl, 0x90)?;
+        a.mov(word_ptr(0), 0x9090)
+    };
+    // The MOV's displacement is where the XOR is.
+    let xor_at = CODE + asm32(CODE, prefix).len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        let code = asm32(CODE, |a| {
+            a.mov(ebx, 0x1234_5690u32)?;
+            a.add(bl, 0x90)?;
+            a.mov(word_ptr(xor_at as u64), 0x9090)?;
+            a.xor(eax, eax)?;
+            a.pushfd()?;
+            a.pop(esi)?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.esi() & ARITH, 0x801, "EFLAGS {:08X}", b.cpu.esi());
+    if AVAILABLE {
+        assert!(stats.smc > 0, "the store stopped the block: {:?}", stats);
+    }
+}
+
+#[test]
 fn flags_are_exact_where_handlers_read_them_and_after_flags_nothing_reads() {
     let (mut a, mut b) = twins(|rig| {
         with_timer(rig, |a| {

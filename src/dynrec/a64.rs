@@ -229,6 +229,14 @@ struct Gen<'a> {
     /// were where each instruction may stop (see `x64::Gen`).
     live: Vec<Vec<u32>>,
     live_after: u32,
+    /// As `x64::Gen` has them: the operations that record their operands
+    /// for the flags only a fault or a store into the block needs, and
+    /// where the flags are a recorded operation's.
+    record: Vec<Vec<bool>>,
+    record_now: bool,
+    lazy_start: Vec<bool>,
+    lazy_end: Vec<bool>,
+    join: Vec<Option<DynamicLabel>>,
     dirty: bool,
     dirty_at: Vec<bool>,
     /// What the code is translated for.
@@ -269,6 +277,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     let mut labels = || ops.new_dynamic_label();
     let (data_lit, tail, deadline, revalidate, limit, body) = (labels(), labels(), labels(), labels(), labels(), labels());
     let fail_tail = labels();
+    let plan = super::flags::plan(items);
     let mut g = Gen {
         ops,
         data,
@@ -288,8 +297,13 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         stubs: [None; LINKS],
         return_miss: None,
         ix: 0,
-        live: super::flags::live(items),
+        live: plan.live,
         live_after: 0,
+        record: plan.record,
+        record_now: false,
+        lazy_start: plan.lazy_start,
+        lazy_end: plan.lazy_end,
+        join: vec![None; n],
         dirty: false,
         dirty_at: vec![false; n],
         env,
@@ -323,6 +337,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.check_watched();
                 for (k, uop) in uops.iter().enumerate() {
                     g.live_after = g.live[ix][k];
+                    g.record_now = g.record[ix][k];
                     g.uop(uop);
                 }
                 g.end_dirty[ix] = g.dirty;
@@ -333,14 +348,21 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                     // A store hit the rest of the block: leave after this
                     // instruction.
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    let (fail, skip) = (g.fail(), g.ops.new_dynamic_label());
+                    g.fail();
+                    let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
+                    let skip = g.ops.new_dynamic_label();
                     dynasm!(g.ops ; .arch aarch64 ; cbz w23, =>skip);
                     g.mov32(0, next);
                     g.field(Access::Str32, 0, layout::EIP);
                     g.mov32(0, EXIT_SMC | if g.dirty { EXIT_FLAGS } else { 0 });
+                    if g.lazy_end[ix] {
+                        // The flags after the instruction are a recorded
+                        // operation's.
+                        g.lazy_flags();
+                    }
                     dynasm!(g.ops
                         ; .arch aarch64
-                        ; b =>fail
+                        ; b =>join
                         ; =>skip
                     );
                 }
@@ -721,6 +743,14 @@ impl Gen<'_> {
         for (ix, label) in self.fail.clone().into_iter().enumerate() {
             if let Some(label) = label {
                 dynasm!(self.ops ; .arch aarch64 ; =>label);
+                if self.lazy_start[ix] {
+                    // The flags as the instruction starts are a recorded
+                    // operation's.
+                    self.lazy_flags();
+                }
+                if let Some(join) = self.join[ix] {
+                    dynasm!(self.ops ; .arch aarch64 ; =>join);
+                }
                 let bits = (ix as u32) << 8 | if self.dirty_at[ix] { EXIT_FLAGS } else { 0 };
                 if bits != 0 {
                     self.mov32(9, bits);
@@ -1672,6 +1702,34 @@ impl Gen<'_> {
         self.merge(need);
     }
 
+    /// Record operation `kind` (`flags::LAZY_*`) on W10 and W11 for
+    /// `jit_lazy_flags`. W9 and W12 are changed.
+    fn record_lazy(&mut self, kind: u32, size: u8) {
+        dynasm!(self.ops ; .arch aarch64 ; add x9, x20, CTX_LAZY as u32);
+        self.mov32(12, kind | (size as u32) << 8);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; stp w12, w10, [x9]
+            ; str w11, [x9, 8]
+        );
+    }
+
+    /// W28 = the flags of the recorded operation, from `jit_lazy_flags`,
+    /// keeping the exit code in W0, with `EXIT_FLAGS` set.
+    fn lazy_flags(&mut self) {
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; str w0, [x20, CTX_LAZY_CODE as u32]
+            ; mov x0, x19
+            ; mov x1, x20
+            ; ldr x16, [x20, CTX_LAZY_FN as u32]
+            ; blr x16
+            ; mov w28, w0
+            ; ldr w0, [x20, CTX_LAZY_CODE as u32]
+            ; orr w0, w0, EXIT_FLAGS
+        );
+    }
+
     /// W10 = a, W11 = b.
     fn operands(&mut self, a: T, b: Src) {
         dynasm!(self.ops ; .arch aarch64 ; mov w10, W(r(a)));
@@ -1694,6 +1752,10 @@ impl Gen<'_> {
     fn alu(&mut self, op: AluOp, size: u8, a: T, b: Src) {
         let need = ARITH & self.live_after;
         self.operands(a, b);
+        if self.record_now {
+            let kind = Uop::Alu { op, size, a, b }.lazy_kind().expect("a recorded operation");
+            self.record_lazy(kind, size);
+        }
         match op {
             AluOp::Add => self.add_sub_flags(size, false, need),
             AluOp::Sub | AluOp::Cmp => self.add_sub_flags(size, true, need),
@@ -1749,6 +1811,12 @@ impl Gen<'_> {
             UnOp::Neg => {
                 // 0 - t.
                 dynasm!(self.ops ; .arch aarch64 ; mov w11, W(r(t)) ; movz w10, 0);
+                if self.record_now {
+                    // NEG's operand is the first.
+                    dynasm!(self.ops ; .arch aarch64 ; mov w10, w11);
+                    self.record_lazy(super::flags::LAZY_NEG, size);
+                    dynasm!(self.ops ; .arch aarch64 ; movz w10, 0);
+                }
                 self.add_sub_flags(size, true, ARITH & self.live_after);
             }
         }

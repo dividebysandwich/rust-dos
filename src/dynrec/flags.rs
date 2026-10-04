@@ -105,6 +105,126 @@ pub fn live(items: &[Option<Vec<Uop>>]) -> Vec<Vec<u32>> {
     out
 }
 
+/// Which flags translated code computes, and where it records an
+/// operation's operands instead (see `Plan::record`).
+pub struct Plan {
+    /// The flags live after each operation (`items[ix][k]`).
+    pub live: Vec<Vec<u32>>,
+    /// Operations that compute only the flags something in the block
+    /// reads, and record their operands (`JitCtx::lazy`) for the ways out
+    /// that see all the flags: a fault, and a store into the block's later
+    /// bytes. The flags come from the record there (`jit_lazy_flags`).
+    pub record: Vec<Vec<bool>>,
+    /// Per instruction, whether the flags as it starts are a recorded
+    /// operation's (for its faults), and as it ends (for a store into the
+    /// block's later bytes).
+    pub lazy_start: Vec<bool>,
+    pub lazy_end: Vec<bool>,
+}
+
+/// What `jit_lazy_flags` works the flags out from: the operation.
+pub const LAZY_ADD: u32 = 0;
+pub const LAZY_SUB: u32 = 1;
+pub const LAZY_AND: u32 = 2;
+pub const LAZY_OR: u32 = 3;
+pub const LAZY_XOR: u32 = 4;
+pub const LAZY_NEG: u32 = 5;
+
+impl Uop {
+    /// The operation `jit_lazy_flags` can work the flags of out from its
+    /// operands, if it is one.
+    pub fn lazy_kind(&self) -> Option<u32> {
+        match *self {
+            Uop::Alu { op, .. } => match op {
+                AluOp::Add => Some(LAZY_ADD),
+                AluOp::Sub | AluOp::Cmp => Some(LAZY_SUB),
+                AluOp::And | AluOp::Test => Some(LAZY_AND),
+                AluOp::Or => Some(LAZY_OR),
+                AluOp::Xor => Some(LAZY_XOR),
+                AluOp::Adc | AluOp::Sbb => None,
+            },
+            Uop::Unary { op: UnOp::Neg, .. } => Some(LAZY_NEG),
+            _ => None,
+        }
+    }
+
+    /// Whether the operation sets all the arithmetic flags, whatever its
+    /// operands.
+    fn sets_all(&self) -> bool {
+        matches!(self, Uop::Alu { .. } | Uop::Unary { op: UnOp::Neg, .. })
+    }
+}
+
+/// The flags plan of a block: `live`, but where an operation's flags are
+/// live only for a fault or a store into the block's later bytes (before
+/// an operation that sets them all again), recorded instead of computed.
+pub fn plan(items: &[Option<Vec<Uop>>]) -> Plan {
+    let mut out = live(items);
+    // The flags something reads after each operation, not counting the
+    // ways out that see them all.
+    let mut real: Vec<Vec<u32>> = items.iter().map(|i| vec![0; i.as_ref().map_or(0, |u| u.len())]).collect();
+    let mut live_now = ARITH;
+    for (ix, item) in items.iter().enumerate().rev() {
+        let Some(uops) = item else {
+            live_now = ARITH;
+            continue;
+        };
+        for (k, uop) in uops.iter().enumerate().rev() {
+            real[ix][k] = live_now;
+            let used = match uop {
+                Uop::MemRef { .. } | Uop::CheckLimit { .. } => 0,
+                _ => uop.flags_used(),
+            };
+            live_now = (live_now & !uop.flags_set()) | used;
+        }
+    }
+    // The operations, in order, and whether the next one that sets flags
+    // sets them all (a handler's call counts as one that doesn't).
+    let positions: Vec<(usize, usize)> = items
+        .iter()
+        .enumerate()
+        .flat_map(|(ix, item)| match item {
+            Some(uops) => (0..uops.len()).map(|k| (ix, k)).collect::<Vec<_>>(),
+            None => vec![(ix, usize::MAX)],
+        })
+        .collect();
+    let uop = |(ix, k): (usize, usize)| items[ix].as_ref().filter(|_| k != usize::MAX).map(|u| &u[k]);
+    let mut record: Vec<Vec<bool>> = items.iter().map(|i| vec![false; i.as_ref().map_or(0, |u| u.len())]).collect();
+    for (n, &(ix, k)) in positions.iter().enumerate() {
+        let Some(u) = uop((ix, k)) else { continue };
+        if u.lazy_kind().is_none() || out[ix][k] & ARITH == real[ix][k] & ARITH {
+            continue;
+        }
+        let next = positions[n + 1..].iter().find_map(|&p| match uop(p) {
+            None => Some(false),
+            Some(u) if u.flags_set() != 0 => Some(u.sets_all()),
+            Some(_) => None,
+        });
+        if next == Some(true) {
+            record[ix][k] = true;
+            out[ix][k] = real[ix][k];
+        }
+    }
+    // Where the flags are a recorded operation's.
+    let (mut lazy_start, mut lazy_end) = (vec![false; items.len()], vec![false; items.len()]);
+    let mut pending = false;
+    for (ix, item) in items.iter().enumerate() {
+        lazy_start[ix] = pending;
+        match item {
+            None => pending = false,
+            Some(uops) => {
+                for (k, u) in uops.iter().enumerate() {
+                    if u.flags_set() != 0 {
+                        pending = record[ix][k];
+                    }
+                }
+            }
+        }
+        lazy_end[ix] = pending;
+    }
+    Plan { live: out, record, lazy_start, lazy_end }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +270,37 @@ mod tests {
         assert_eq!(live[2], vec![ARITH], "a store into the block");
         assert_eq!(live[4], vec![ARITH], "a handler");
         assert_eq!(live[6], vec![ARITH], "the end");
+    }
+
+    #[test]
+    fn flags_live_only_for_a_fault_are_recorded() {
+        let memref = Uop::MemRef { t: T2, seg: Seg::DS, size: 4, write: false, slot: 0 };
+        let store = Uop::Store { m: T2, src: T0, size: 4 };
+        let inc = Uop::Unary { op: UnOp::Inc, size: 4, t: T0 };
+        let items = vec![
+            Some(vec![alu(AluOp::Add)]),
+            Some(vec![memref]),
+            Some(vec![alu(AluOp::Sub), store]),
+            Some(vec![alu(AluOp::Xor)]),
+            Some(vec![alu(AluOp::Cmp)]),
+            Some(vec![memref]),
+            Some(vec![inc]),
+        ];
+        let p = plan(&items);
+        // The ADD's flags matter only for the MemRef's fault, until the
+        // SUB sets them all again: recorded, none computed.
+        assert!(p.record[0][0]);
+        assert_eq!(p.live[0], vec![0]);
+        assert!(p.lazy_start[1] && p.lazy_end[1]);
+        // The SUB's for the store into the block, until the XOR; its
+        // instruction starts with the ADD's.
+        assert!(p.record[2][0] && p.lazy_start[2] && p.lazy_end[2]);
+        // The XOR's flags die at the CMP, which no one reads: nothing to
+        // record.
+        assert!(!p.record[3][0]);
+        // The CMP's go on past the INC, which leaves CF: computed.
+        assert!(!p.record[4][0]);
+        assert_eq!(p.live[4][0] & CF, CF);
+        assert!(!p.lazy_start[5]);
     }
 }

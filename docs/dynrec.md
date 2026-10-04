@@ -301,6 +301,14 @@ first instruction in a block that changes them:
   by a condition, a carry in, or anything outside the block, which sees
   all of them wherever the block may leave, a fault included. The
   others aren't computed.
+- **Recorded for the rare ways out.** Where an addition, subtraction,
+  logic operation or NEG has flags that only a fault, or a store into the
+  block's later bytes, could see before an operation that sets them all
+  again (`flags::plan`), it computes only the flags something reads, and
+  stores its kind, size and operands in the `JitCtx` (`JitCtx::lazy`).
+  Those ways out work the flags out from the record with the
+  interpreter's own `cpu::alu` (`jit_lazy_flags`). Memory operands, which
+  may fault, then no longer keep every flag before them alive.
 - **On x86-64** they come from the host's own flags, from host
   instructions of the operand's size, where they match the interpreter's
   (`cpu::alu`): LAHF takes SF, ZF, AF, PF and CF, and SETO OF where it is

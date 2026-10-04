@@ -264,10 +264,20 @@ struct Gen<'a> {
     rep_top: Option<DynamicLabel>,
     /// The instruction being translated.
     ix: usize,
-    /// The flags live after each operation (`flags::live`), and after the
-    /// one being translated.
+    /// The flags live after each operation (`flags::plan`), and after the
+    /// one being translated; the operations that record their operands
+    /// instead of computing the flags only a fault or a store into the
+    /// block needs (and whether the one being translated does), and per
+    /// instruction whether the flags as it starts or ends are a recorded
+    /// operation's, which the ways out there work out (`lazy_flags`). The
+    /// instructions' ways out after that (see `fail`).
     live: Vec<Vec<u32>>,
     live_after: u32,
+    record: Vec<Vec<bool>>,
+    record_now: bool,
+    lazy_start: Vec<bool>,
+    lazy_end: Vec<bool>,
+    join: Vec<Option<DynamicLabel>>,
     /// What the code is translated for.
     env: super::Env,
     /// The guest's arithmetic flags are in EBP, not yet in the CPU (whose
@@ -328,6 +338,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     let (tail, deadline, revalidate, body) =
         (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
     let (limit, fail_tail) = (ops.new_dynamic_label(), ops.new_dynamic_label());
+    let plan = super::flags::plan(items);
     let mut g = Gen {
         ops,
         data,
@@ -348,8 +359,13 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         return_miss: None,
         rep_top: None,
         ix: 0,
-        live: super::flags::live(items),
+        live: plan.live,
         live_after: 0,
+        record: plan.record,
+        record_now: false,
+        lazy_start: plan.lazy_start,
+        lazy_end: plan.lazy_end,
+        join: vec![None; n],
         env,
         // Blocks start with the flags in EBP, from the trampoline or the
         // block before.
@@ -406,6 +422,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.check_next_page();
                 for (k, uop) in uops.iter().enumerate() {
                     g.live_after = g.live[ix][k];
+                    g.record_now = g.record[ix][k];
                     g.uop(uop);
                 }
                 g.end_dirty[ix] = g.dirty;
@@ -434,7 +451,8 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                     // instruction.
                     let smc = g.ops.new_dynamic_label();
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32) as i32;
-                    let fail = g.fail();
+                    g.fail();
+                    let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
                     let skip = g.ops.new_dynamic_label();
                     dynasm!(g.ops
                         ; .arch x64
@@ -444,9 +462,13 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                         ; mov BYTE [r12 + CTX_SMC], 0
                         ; mov DWORD [rbx + EIP], next
                         ; mov eax, (EXIT_SMC | if g.dirty { EXIT_FLAGS } else { 0 }) as i32
-                        ; jmp =>fail
-                        ; =>skip
                     );
+                    if g.lazy_end[ix] {
+                        // The flags after the instruction are a recorded
+                        // operation's.
+                        g.lazy_flags();
+                    }
+                    dynasm!(g.ops ; .arch x64 ; jmp =>join ; =>skip);
                 }
             }
         }
@@ -619,6 +641,14 @@ impl Gen<'_> {
         for (ix, label) in self.fail.clone().into_iter().enumerate() {
             if let Some(label) = label {
                 dynasm!(self.ops ; .arch x64 ; =>label);
+                if self.lazy_start[ix] {
+                    // The flags as the instruction starts are a recorded
+                    // operation's.
+                    self.lazy_flags();
+                }
+                if let Some(join) = self.join[ix] {
+                    dynasm!(self.ops ; .arch x64 ; =>join);
+                }
                 // The cached registers as the instruction left them: it
                 // changes none before it may fault.
                 self.writeback(self.wb_at[ix]);
@@ -1839,6 +1869,40 @@ impl Gen<'_> {
         self.slow.push(Slow::MemRef { at, back, t, desc, fail });
     }
 
+    /// Record an operation (`flags::LAZY_*`) on host register `a` and `b`
+    /// for `jit_lazy_flags`, before it changes them.
+    fn record_lazy(&mut self, kind: u32, size: u8, a: u8, b: Src) {
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov DWORD [r12 + CTX_LAZY], (kind | (size as u32) << 8) as i32
+            ; mov DWORD [r12 + CTX_LAZY + 4], Rd(a)
+        );
+        match b {
+            Src::T(b) => dynasm!(self.ops ; .arch x64 ; mov DWORD [r12 + CTX_LAZY + 8], Rd(r(b))),
+            Src::Imm(v) => dynasm!(self.ops ; .arch x64 ; mov DWORD [r12 + CTX_LAZY + 8], v as i32),
+        }
+    }
+
+    /// EBP = the flags of the recorded operation, from `jit_lazy_flags`,
+    /// keeping the exit code in EAX, with `EXIT_FLAGS` set.
+    fn lazy_flags(&mut self) {
+        dynasm!(self.ops ; .arch x64 ; mov DWORD [r12 + CTX_LAZY_CODE], eax);
+        self.save_for_call();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rdi, rbx
+            ; mov rsi, r12
+            ; call QWORD [r12 + CTX_LAZY_FN]
+        );
+        self.restore_after_call();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov ebp, eax
+            ; mov eax, DWORD [r12 + CTX_LAZY_CODE]
+            ; or eax, EXIT_FLAGS as i32
+        );
+    }
+
     /// Whether any of the flags `set` that the operation sets are live.
     fn wanted(&self, set: u32) -> bool {
         set & self.live_after != 0
@@ -1962,6 +2026,10 @@ impl Gen<'_> {
 
     fn alu(&mut self, op: AluOp, size: u8, a: T, b: Src) {
         let a = r(a);
+        if self.record_now {
+            let kind = Uop::Alu { op, size, a: T0, b }.lazy_kind().expect("a recorded operation");
+            self.record_lazy(kind, size, a, b);
+        }
         if matches!(op, AluOp::Adc | AluOp::Sbb) {
             self.carry_in();
         }
@@ -2008,6 +2076,9 @@ impl Gen<'_> {
                     _ => dynasm!(self.ops ; .arch x64 ; $m Rd(t)),
                 }
             };
+        }
+        if self.record_now {
+            self.record_lazy(super::flags::LAZY_NEG, size, t, Src::Imm(0));
         }
         let wanted = op != UnOp::Not && self.wanted(ARITH);
         if wanted && matches!(op, UnOp::Inc | UnOp::Dec) && self.live_after & CF != 0 {
