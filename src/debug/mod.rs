@@ -914,6 +914,17 @@ impl DebugHub {
         })
     }
 
+    /// Count a frame of the window's for `fps`, shown anew or not.
+    pub fn count_frame(&mut self) {
+        self.frames += 1;
+        let (mark_t, mark_n) = self.fps_mark;
+        let dt = mark_t.elapsed().as_secs_f64();
+        if dt >= 1.0 {
+            self.fps = (self.frames - mark_n) as f64 / dt;
+            self.fps_mark = (Instant::now(), self.frames);
+        }
+    }
+
     /// Whether `capture_frame` wants to see the composited frame this frame.
     pub fn wants_frame(&self) -> bool {
         !self.frame_waiters.is_empty()
@@ -923,14 +934,7 @@ impl DebugHub {
     /// Hand the composited frame (cached VGA render + cursor overlays) to
     /// screenshot requests and the screen stream.
     pub fn capture_frame(&mut self, screen: &video::Frame) {
-        self.frames += 1;
-        let (mark_t, mark_n) = self.fps_mark;
-        let dt = mark_t.elapsed().as_secs_f64();
-        if dt >= 1.0 {
-            self.fps = (self.frames - mark_n) as f64 / dt;
-            self.fps_mark = (Instant::now(), self.frames);
-        }
-
+        self.count_frame();
         if !self.wants_frame() {
             return;
         }

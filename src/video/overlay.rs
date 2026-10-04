@@ -65,6 +65,29 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
     }
 }
 
+/// What `draw_cursors` draws from, as one number: where it would draw the
+/// same, the number is the same.
+pub fn cursors_key(bus: &Bus, cursor_visible: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bus.voodoo_output().hash(&mut h);
+    if let Some(g) = super::text::geometry(bus) {
+        (g.cols, g.rows, g.font_h, g.x_scale, g.y_scale, g.cell_w(), g.cell_h()).hash(&mut h);
+        if bus.boot.is_some() && bus.vga.adapter.ega_bios() {
+            crtc_cursor(bus, g.cols).hash(&mut h);
+        } else {
+            let page = bus.read_8(0x0462).min(7) as usize;
+            let shape = if bus.vga.adapter.ega_bios() { crtc_shape(bus) } else { bus.read_16(0x0460) };
+            (bus.read_8(0x0450 + page * 2), bus.read_8(0x0451 + page * 2), shape).hash(&mut h);
+        }
+        cursor_visible.hash(&mut h);
+    }
+    if bus.mouse.installed && bus.mouse.hide_counter <= 0 {
+        (bus.mouse.virtual_screen(bus), bus.mouse.x, bus.mouse.y).hash(&mut h);
+    }
+    h.finish()
+}
+
 /// The cursor as the CRTC has it on a booted machine, whose BIOS data area
 /// may not be the one the machine on the screen has (a DOS box's under
 /// Windows): its column and row from the Cursor Location registers (0Eh,

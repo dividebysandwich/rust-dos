@@ -306,6 +306,8 @@ fn main() -> Result<(), String> {
     // frame cost drops from "640×400×3 zero fill + per-pixel palette/planar
     // lookup" to "one memcpy of the cached buffer + a tiny overlay pass".
     let mut cached_frame = video::Frame::new(video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
+    // What the picture shown last was composed from (see `still` below).
+    let mut last_screen_key = None;
     // Whether the OpenGL renderer drew the 3dfx card's picture last frame.
     let mut voodoo_gl_shown = false;
     // The cached render with the cursors on top, as the screen shows it.
@@ -1423,111 +1425,137 @@ fn main() -> Result<(), String> {
             display.set_frame_size(width, height)?;
         }
         let render_start = std::time::Instant::now();
+        let rendered = cpu.bus.vga.dirty;
         if cpu.bus.vga.dirty {
             video::render_screen(&mut cached_frame, &cpu.bus);
             cpu.bus.vga.clear_dirty();
         }
         let render_time = render_start.elapsed();
 
-        // Start from the cached render; the overlays go on top. A
-        // monochrome monitor shows them in its phosphor's colour, but not
-        // the settings window.
-        screen.clone_from(&cached_frame);
-        video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
-        video::mono::apply(&mut screen, settings.monochrome);
-        clipboard.draw(&mut screen, &cpu.bus);
-        let frame_w = width as usize;
+        // The picture shown already, where nothing in it changed: neither
+        // the machine's nor anything drawn over it. Composing it, comparing
+        // it with the one shown and drawing it again would cost a weak
+        // host's memory bandwidth every frame for nothing.
+        let screen_key = (
+            video::overlay::cursors_key(&cpu.bus, cursor_visible),
+            settings.monochrome,
+            clipboard.draws(&cpu.bus),
+            osd.is_empty(),
+        );
+        let still = !rendered
+            && last_screen_key == Some(screen_key)
+            && !voodoo_gl
+            && !ui.is_open()
+            && !ui.overlay_shown()
+            && wheel_view.is_none()
+            && osd.is_empty()
+            && !screenshot
+            && !recorder.is_active()
+            && sound_recording.is_none()
+            && video_recording.is_none()
+            && !dbg.wants_frame()
+            && !display.wants_redraw();
+        ui.set_display(display.output_scale(), true);
+        if !still {
+            // Start from the cached render; the overlays go on top. A
+            // monochrome monitor shows them in its phosphor's colour, but not
+            // the settings window.
+            screen.clone_from(&cached_frame);
+            video::overlay::draw_cursors(&mut screen, &cpu.bus, cursor_visible);
+            video::mono::apply(&mut screen, settings.monochrome);
+            clipboard.draw(&mut screen, &cpu.bus);
+            let frame_w = width as usize;
 
-        // Screenshots and recordings show the machine alone, or with the
-        // settings window and the performance overlay (`record_ui`), and
-        // plain or through the CRT shader (`record_shader`). None shows the
-        // messages at the top; debug clients see those as well, but not
-        // the recording indicator. Animations stay plain: a GIF's 256
-        // colours can't hold the shader's, and quantizing a picture the
-        // window's size would hold up the machine.
-        // A manual's page is captured as the game is, with or without the
-        // rest of the window.
-        let record_ui = settings.record_ui || ui.manual_shown();
-        macro_rules! capture {
-            () => {
-                // Drawing the shader's picture again and reading it back
-                // takes time, so only when a capture wants it.
-                // A manual's page, which the window draws over the
-                // picture, with the settings window.
-                let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
-                let base = paged.as_ref().unwrap_or(&screen);
-                let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
-                    .then(|| display.shaded(base))
-                    .flatten();
-                let picture = shaded.as_ref().unwrap_or(base);
-                recorder.capture(base);
-                if let Some(video) = &mut video_recording {
-                    if !video.record(picture, samples.clone(), cpu.bus.clock.now_ns()) {
-                        if let Some(video) = video_recording.take() {
-                            match video.stop() {
-                                Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
-                                Err(e) => osd.show(format!("The video recording failed: {}", e)),
+            // Screenshots and recordings show the machine alone, or with the
+            // settings window and the performance overlay (`record_ui`), and
+            // plain or through the CRT shader (`record_shader`). None shows the
+            // messages at the top; debug clients see those as well, but not
+            // the recording indicator. Animations stay plain: a GIF's 256
+            // colours can't hold the shader's, and quantizing a picture the
+            // window's size would hold up the machine.
+            // A manual's page is captured as the game is, with or without the
+            // rest of the window.
+            let record_ui = settings.record_ui || ui.manual_shown();
+            macro_rules! capture {
+                () => {
+                    // Drawing the shader's picture again and reading it back
+                    // takes time, so only when a capture wants it.
+                    // A manual's page, which the window draws over the
+                    // picture, with the settings window.
+                    let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
+                    let base = paged.as_ref().unwrap_or(&screen);
+                    let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
+                        .then(|| display.shaded(base))
+                        .flatten();
+                    let picture = shaded.as_ref().unwrap_or(base);
+                    recorder.capture(base);
+                    if let Some(video) = &mut video_recording {
+                        if !video.record(picture, samples.clone(), cpu.bus.clock.now_ns()) {
+                            if let Some(video) = video_recording.take() {
+                                match video.stop() {
+                                    Ok(frames) => osd.show(format!("Video recording stopped: the file is full ({} frames)", frames)),
+                                    Err(e) => osd.show(format!("The video recording failed: {}", e)),
+                                }
                             }
                         }
                     }
-                }
-                if std::mem::take(&mut screenshot) {
-                    // The page as sharp as the window shows it.
-                    let sharp = (record_ui && shaded.is_none())
-                        .then(|| ui.with_layer(&screen, display.output_scale()))
-                        .flatten();
-                    let picture = sharp.as_ref().unwrap_or(picture);
-                    let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
-                        .and_then(|path| capture::png::save(picture, &path).map(|()| path));
-                    match saved {
-                        Ok(path) => osd.show(format!("Screenshot saved to {}", path.display())),
-                        Err(e) => osd.show(e),
+                    if std::mem::take(&mut screenshot) {
+                        // The page as sharp as the window shows it.
+                        let sharp = (record_ui && shaded.is_none())
+                            .then(|| ui.with_layer(&screen, display.output_scale()))
+                            .flatten();
+                        let picture = sharp.as_ref().unwrap_or(picture);
+                        let saved = capture::capture_path(&settings.capture_dir, "screenshot", "png")
+                            .and_then(|path| capture::png::save(picture, &path).map(|()| path));
+                        match saved {
+                            Ok(path) => osd.show(format!("Screenshot saved to {}", path.display())),
+                            Err(e) => osd.show(e),
+                        }
                     }
-                }
-            };
-        }
-        let capturing = screenshot || recorder.is_active() || video_recording.is_some();
-        if capturing && !record_ui {
-            capture!();
-        }
-        if ui.is_open() {
-            ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
-            ui.poll(&mut host!());
-        }
-        if ui.is_open() || ui.overlay_shown() {
-            ui.set_stats(stats.view());
-        }
-        ui.set_display(display.output_scale(), true);
-        ui.draw(&mut screen);
-        ui.draw_overlay(&mut screen);
-        if let Some(view) = &wheel_view {
-            rust_dos::config_ui::wheel::draw(&mut screen, view);
-        }
-        if capturing && record_ui {
-            capture!();
-        }
-        osd.draw(&mut screen);
-        match ui.with_layer(&screen, (1.0, 1.0)) {
-            Some(paged) => dbg.capture_frame(&paged),
-            None => dbg.capture_frame(&screen),
-        }
+                };
+            }
+            let capturing = screenshot || recorder.is_active() || video_recording.is_some();
+            if capturing && !record_ui {
+                capture!();
+            }
+            if ui.is_open() {
+                ui.set_mixer_status(cpu.bus.mixer.muted, cpu.bus.mixer.take_peaks());
+                ui.poll(&mut host!());
+            }
+            if ui.is_open() || ui.overlay_shown() {
+                ui.set_stats(stats.view());
+            }
+            ui.draw(&mut screen);
+            ui.draw_overlay(&mut screen);
+            if let Some(view) = &wheel_view {
+                rust_dos::config_ui::wheel::draw(&mut screen, view);
+            }
+            if capturing && record_ui {
+                capture!();
+            }
+            osd.draw(&mut screen);
+            match ui.with_layer(&screen, (1.0, 1.0)) {
+                Some(paged) => dbg.capture_frame(&paged),
+                None => dbg.capture_frame(&screen),
+            }
 
-        // Draw Recording Indicator
-        if recorder.is_active() || sound_recording.is_some() || video_recording.is_some() {
-            let radius = 5;
-            let center_x = frame_w - 15;
-            let center_y = 15;
+            // Draw Recording Indicator
+            if recorder.is_active() || sound_recording.is_some() || video_recording.is_some() {
+                let radius = 5;
+                let center_x = frame_w - 15;
+                let center_y = 15;
 
-            for y in (center_y - radius)..=(center_y + radius) {
-                for x in (center_x - radius)..=(center_x + radius) {
-                    let dx = x as isize - center_x as isize;
-                    let dy = y as isize - center_y as isize;
-                    if dx * dx + dy * dy <= (radius * radius) as isize {
-                        let idx = (y * frame_w + x) * 3;
-                        if idx + 2 < screen.rgb.len() {
-                            screen.rgb[idx] = 0xFF; // R
-                            screen.rgb[idx + 1] = 0x00; // G
-                            screen.rgb[idx + 2] = 0x00; // B
+                for y in (center_y - radius)..=(center_y + radius) {
+                    for x in (center_x - radius)..=(center_x + radius) {
+                        let dx = x as isize - center_x as isize;
+                        let dy = y as isize - center_y as isize;
+                        if dx * dx + dy * dy <= (radius * radius) as isize {
+                            let idx = (y * frame_w + x) * 3;
+                            if idx + 2 < screen.rgb.len() {
+                                screen.rgb[idx] = 0xFF; // R
+                                screen.rgb[idx + 1] = 0x00; // G
+                                screen.rgb[idx + 2] = 0x00; // B
+                            }
                         }
                     }
                 }
@@ -1536,7 +1564,12 @@ fn main() -> Result<(), String> {
         // Waiting for the deadline of a frame paced to the retrace is
         // neither the frame's work nor time the CPU could have had.
         let waited = pacer.wait_to_present(&cpu.bus.clock);
-        display.present(&mut screen, voodoo_gl.then_some(&cached_frame), ui.layer())?;
+        if still {
+            dbg.count_frame();
+        } else {
+            display.present(&mut screen, voodoo_gl.then_some(&cached_frame), ui.layer())?;
+            last_screen_key = Some(screen_key);
+        }
 
         let overhead = frame_start.elapsed().saturating_sub(exec_time + waited);
         if let Some(cycles) = pacer.end_frame(&cpu.bus, cpu.pm_latched, executed, exec_time, overhead) {

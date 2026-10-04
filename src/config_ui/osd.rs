@@ -36,6 +36,11 @@ impl Osd {
         Self::default()
     }
 
+    /// Whether nothing shows (or is about to).
+    pub fn is_empty(&self) -> bool {
+        self.lasting.is_none() && self.passing.is_none() && self.queued.is_empty() && self.notice.is_none() && self.corner.is_empty()
+    }
+
     /// Show `text` for a moment.
     pub fn show(&mut self, text: impl Into<String>) {
         self.show_at(text, Instant::now());

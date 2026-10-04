@@ -211,6 +211,11 @@ impl<'a> Display<'a> {
 
     /// Draw the window again at the next frame, whatever the picture: it
     /// was resized or uncovered.
+    /// Whether the window must be drawn anew at the next `present`.
+    pub fn wants_redraw(&self) -> bool {
+        self.redraw
+    }
+
     pub fn redraw(&mut self) {
         self.redraw = true;
         // The window may have moved to another display.

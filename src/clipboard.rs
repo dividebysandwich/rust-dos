@@ -115,6 +115,11 @@ impl Clipboard {
     }
 
     /// The selection, while the screen still has its shape.
+    /// Whether `draw` would draw anything.
+    pub fn draws(&self, bus: &Bus) -> bool {
+        self.current(bus).is_some()
+    }
+
     fn current(&self, bus: &Bus) -> Option<(&Selection, video::text::TextGeometry)> {
         let sel = self.selection.as_ref().filter(|s| s.moved)?;
         let g = text_geometry(bus).filter(|g| (g.cols, g.rows) == sel.size)?;
