@@ -505,10 +505,12 @@ impl Gen<'_> {
 
     /// In real mode, unless loading segment register `seg` changes only its
     /// selector and base (`Cpu::load_seg_real` once it is a data-like
-    /// segment that isn't flat, which a load could make it), run the
-    /// instruction through its handler (and with `leave`, stop the block
-    /// after it).
-    fn real_load(&mut self, seg: Seg, leave: bool) {
+    /// segment) and not whether it is flat (a segment with a 4 GB limit,
+    /// as HIMEM leaves them, with base 0: the block's environment has
+    /// that), run the instruction through its handler (and with `leave`,
+    /// stop the block after it). The selector is in `sel` (or not known
+    /// yet: then no segment with a 4 GB limit).
+    fn real_load(&mut self, seg: Seg, sel: Option<T>, leave: bool) {
         let at = self.ops.new_dynamic_label();
         self.field(Access::Ldr8, 0, seg_field(seg, layout::SEG_ATTR));
         dynasm!(self.ops ; .arch aarch64 ; cmp w0, layout::AR_DATA_RW as u32 & 0xFF ; b.ne =>at);
@@ -517,7 +519,22 @@ impl Gen<'_> {
         self.field(Access::Ldr32, 0, seg_field(seg, layout::SEG_LO));
         dynasm!(self.ops ; .arch aarch64 ; cbnz w0, =>at);
         self.field(Access::Ldr32, 0, seg_field(seg, layout::SEG_HI));
-        dynasm!(self.ops ; .arch aarch64 ; cmn w0, 1 ; b.eq =>at);
+        dynasm!(self.ops ; .arch aarch64 ; cmn w0, 1);
+        match sel {
+            None => dynasm!(self.ops ; .arch aarch64 ; b.eq =>at),
+            Some(t) => {
+                let plain = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch aarch64 ; b.ne =>plain);
+                self.field(Access::Ldr32, 0, seg_field(seg, layout::SEG_BASE));
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; cbz w0, =>at
+                    ; tst W(r(t)), 0xFFFF
+                    ; b.eq =>at
+                    ; =>plain
+                );
+            }
+        }
         let end = self.end();
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave });
     }
@@ -1285,12 +1302,12 @@ impl Gen<'_> {
                 );
             }
             Uop::GetSeg { t, seg } => self.field(Access::Ldr16, r(t), seg_field(seg, layout::SEG_SELECTOR)),
-            Uop::CsReal => self.real_load(Seg::CS, false),
+            Uop::CsReal => self.real_load(Seg::CS, None, false),
             Uop::LoadSeg { seg, t } if self.env.bits & super::ENV_REAL != 0 => {
                 // As `Cpu::load_seg_real` loads it once it is a plain
                 // segment (which it stays): its handler runs the
                 // instruction otherwise, and the block stops after it.
-                self.real_load(seg, true);
+                self.real_load(seg, Some(t), true);
                 dynasm!(self.ops ; .arch aarch64 ; and w0, W(r(t)), 0xFFFF);
                 self.field(Access::Str16, 0, seg_field(seg, layout::SEG_SELECTOR));
                 dynasm!(self.ops ; .arch aarch64 ; lsl w0, w0, 4);

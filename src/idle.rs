@@ -330,7 +330,9 @@ impl Observe {
         self.stop();
         self.stats.failures += 1;
         self.stats.failure = why;
-        self.failures_in_row = (self.failures_in_row + 1).min(12);
+        // (A loop that changes something every pass, as DOS 7's keyboard
+        // poll counts down, is looked at about once in 64K arms.)
+        self.failures_in_row = (self.failures_in_row + 1).min(16);
         self.backoff = 1 << self.failures_in_row;
     }
 

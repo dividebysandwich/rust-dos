@@ -893,6 +893,49 @@ fn far_calls_returns_and_interrupts_in_real_mode_go_on_in_translated_code() {
 }
 
 #[test]
+fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
+    // Back in real mode from protected mode, the data segments keep their
+    // 4 GB limit ("big real mode", as HIMEM leaves them). A loop loads DS
+    // with selectors 0 to 3000h in turn, making it flat (base 0) and not,
+    // and reads and writes through it above 1 MB.
+    const PM16: u32 = 0x8000;
+    const REAL: u32 = 0x9000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.db(&[0xEA])?;
+            a.dd(&[PM16])?;
+            a.dw(&[CODE16])
+        }));
+        rig.load(PM16, &asm16(PM16, |a| {
+            a.mov(eax, cr0)?;
+            a.and(eax, 0xFFFF_FFFEu32 as i32)?;
+            a.mov(cr0, eax)?;
+            a.db(&[0xEA])?;
+            a.dw(&[0, (REAL >> 4) as u16])
+        }));
+        rig.load(REAL, &asm16(0, |a| {
+            let mut top = a.create_label();
+            a.mov(cx, 3000)?;
+            a.xor(si, si)?;
+            a.set_label(&mut top)?;
+            a.mov(ax, cx)?;
+            a.and(ax, 3)?;
+            a.shl(ax, 12)?;
+            a.mov(ds, ax)?;
+            a.mov(ebx, 0x20_0000u32)?;
+            a.add(word_ptr(ebx), cx)?;
+            a.mov(dx, ds)?;
+            a.add(si, dx)?;
+            a.add(si, word_ptr(ebx))?;
+            a.loop_(top)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_ne!(b.cpu.esi() & 0xFFFF, 0);
+}
+
+#[test]
 fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
     // Blocks go on past IN, OUT and STI where they change nothing the
     // execution loop checks. Here the loop masks IRQ 0 and unmasks it in

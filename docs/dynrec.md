@@ -517,7 +517,9 @@ in real mode leaves it, loading it changes only its selector and base
 (`Uop::CsReal`, `LoadCsReal`; elsewhere the handler runs the instruction),
 and the block leaves for the target through the links a return takes.
 Loads of DS, ES, FS and GS in real mode (MOV, POP, LES, LDS, LFS, LGS)
-are translated the same way on both hosts, and a load that would change
+are translated the same way on both hosts, segments with a 4 GB limit
+("big real mode", as HIMEM leaves them) included but where the load
+would make the segment flat or not (base 0), and a load that would change
 more than the selector and base runs through its handler and stops the
 block after it.
 INT and IRET, and far transfers in virtual-8086 mode, run through their
@@ -591,7 +593,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, and far calls, returns and interrupts in real mode going on in translated code |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real mode going on in translated code, and segment loads in big real mode |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:
