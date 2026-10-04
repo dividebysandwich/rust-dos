@@ -82,6 +82,15 @@ impl AluOp {
     }
 }
 
+/// What BT, BTS, BTR and BTC do with the bit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BitKind {
+    Test,
+    Set,
+    Reset,
+    Complement,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UnOp {
     Inc,
@@ -164,6 +173,11 @@ pub enum Uop {
     Flag { mask: u32, set: Option<bool> },
     /// t = 1 if condition `cc` holds on the flags, else 0 (SETcc).
     SetCond { t: T, cc: ConditionCode },
+    /// BT, BTS, BTR or BTC of bit `bit` (modulo size * 8) of t, a `size`
+    /// byte value: CF the bit and OF as `logic::bit_test` sets them (the
+    /// others stay), and t the value with the bit set, cleared or
+    /// complemented.
+    BitOp { op: BitKind, size: u8, t: T, bit: Src },
     /// #GP(0) if the value is past the CS limit (a near jump's target).
     CheckLimit { src: Src },
     /// #GP(0) in protected mode if CPL is above IOPL (CLI).

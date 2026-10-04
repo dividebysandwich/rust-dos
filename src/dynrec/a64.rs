@@ -1267,6 +1267,42 @@ impl Gen<'_> {
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::Imul { size, a, b } => self.imul(size, a, b),
+            Uop::BitOp { op, size, t, bit } => {
+                let bits = size as u32 * 8;
+                match bit {
+                    Src::Imm(v) => self.mov32(1, v),
+                    Src::T(b) => dynasm!(self.ops ; .arch aarch64 ; and w1, W(r(b)), bits - 1),
+                }
+                if self.live_after & (CF | OF) != 0 {
+                    // CF is bit 0 of the value rotated right by the bit, OF
+                    // whether its top two bits differ (0 or 3 plus 1 has
+                    // bit 1 clear, 1 or 2 plus 1 set). A word is rotated
+                    // in both halves of W2.
+                    if size == 2 {
+                        dynasm!(self.ops ; .arch aarch64 ; orr w2, W(r(t)), W(r(t)), lsl 16 ; ror w2, w2, w1);
+                    } else {
+                        dynasm!(self.ops ; .arch aarch64 ; ror w2, W(r(t)), w1);
+                    }
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; lsr w4, w2, bits - 2
+                        ; and w4, w4, 3
+                        ; add w4, w4, 1
+                        ; and w4, w4, 2
+                        ; and w5, w2, 1
+                        ; orr w5, w5, w4, lsl 10
+                    );
+                    self.merge(CF | OF);
+                }
+                if op != BitKind::Test {
+                    dynasm!(self.ops ; .arch aarch64 ; movz w3, 1 ; lsl w3, w3, w1);
+                    match op {
+                        BitKind::Set => dynasm!(self.ops ; .arch aarch64 ; orr W(r(t)), W(r(t)), w3),
+                        BitKind::Reset => dynasm!(self.ops ; .arch aarch64 ; bic W(r(t)), W(r(t)), w3),
+                        _ => dynasm!(self.ops ; .arch aarch64 ; eor W(r(t)), W(r(t)), w3),
+                    }
+                }
+            }
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
             Uop::DivWide { signed, size, t } => self.div_wide(signed, size, t),
             Uop::SetCond { t, cc } => {

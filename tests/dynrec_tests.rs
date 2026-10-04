@@ -964,6 +964,53 @@ fn far_calls_between_code_segments_in_protected_mode_go_on_in_translated_code() 
 }
 
 #[test]
+fn bit_tests_set_cf_and_of_as_the_interpreter_does() {
+    // BT, BTS, BTR and BTC of registers and memory, by registers and
+    // immediates, 16 and 32 bits wide, with every bit offset (and past
+    // the operand's width): the flags after each go into a checksum.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut top = a.create_label();
+            let flags = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+                a.pushfd()?;
+                a.pop(edx)?;
+                a.and(edx, 0x8D5)?;
+                a.add(edi, edx)?;
+                a.rol(edi, 5)
+            };
+            a.mov(ecx, 300u32)?;
+            a.mov(esi, 0x8001_7F35u32)?;
+            a.mov(dword_ptr(DATA), 0x4000_C001u32)?;
+            a.set_label(&mut top)?;
+            a.bt(esi, ecx)?;
+            flags(a)?;
+            a.bts(esi, ecx)?;
+            flags(a)?;
+            a.btr(si, cx)?;
+            flags(a)?;
+            a.btc(esi, 31)?;
+            flags(a)?;
+            a.bt(si, 14)?;
+            flags(a)?;
+            a.bts(dword_ptr(DATA), 7)?;
+            flags(a)?;
+            a.btr(word_ptr(DATA), 15)?;
+            flags(a)?;
+            a.btc(dword_ptr(DATA), 30)?;
+            flags(a)?;
+            a.add(esi, ecx)?;
+            a.ror(esi, 3)?;
+            a.add(dword_ptr(DATA), esi)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(a.cpu.edi(), b.cpu.edi());
+}
+
+#[test]
 fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
     // Blocks go on past IN, OUT and STI where they change nothing the
     // execution loop checks. Here the loop masks IRQ 0 and unmasks it in

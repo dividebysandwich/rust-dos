@@ -1220,6 +1220,46 @@ impl Gen<'_> {
             }
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
             Uop::DivWide { signed, size, t } => self.div_wide(signed, size, t),
+            Uop::BitOp { op, size, t, bit } => {
+                let bits = size as i32 * 8;
+                match bit {
+                    Src::Imm(v) => dynasm!(self.ops ; .arch x64 ; mov ecx, v as i32),
+                    Src::T(b) => dynasm!(self.ops ; .arch x64 ; mov ecx, Rd(r(b)) ; and ecx, bits - 1),
+                }
+                if self.wanted(CF | OF) {
+                    // CF is bit 0 of the value rotated right by the bit, OF
+                    // whether its top two bits differ (0 or 3 plus 1 has
+                    // bit 1 clear, 1 or 2 plus 1 set).
+                    dynasm!(self.ops ; .arch x64 ; mov eax, Rd(r(t)));
+                    if size == 2 {
+                        dynasm!(self.ops ; .arch x64 ; ror ax, cl);
+                    } else {
+                        dynasm!(self.ops ; .arch x64 ; ror eax, cl);
+                    }
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov edx, eax
+                        ; shr edx, (bits - 2) as i8
+                        ; and edx, 3
+                        ; inc edx
+                        ; and edx, 2
+                        ; shl edx, 10
+                        ; and eax, 1
+                        ; or eax, edx
+                    );
+                    self.merge(CF | OF, CF | OF);
+                }
+                let t = r(t);
+                match (op, size) {
+                    (BitKind::Test, _) => {}
+                    (BitKind::Set, 2) => dynasm!(self.ops ; .arch x64 ; bts Rw(t), cx),
+                    (BitKind::Set, _) => dynasm!(self.ops ; .arch x64 ; bts Rd(t), ecx),
+                    (BitKind::Reset, 2) => dynasm!(self.ops ; .arch x64 ; btr Rw(t), cx),
+                    (BitKind::Reset, _) => dynasm!(self.ops ; .arch x64 ; btr Rd(t), ecx),
+                    (BitKind::Complement, 2) => dynasm!(self.ops ; .arch x64 ; btc Rw(t), cx),
+                    (BitKind::Complement, _) => dynasm!(self.ops ; .arch x64 ; btc Rd(t), ecx),
+                }
+            }
             Uop::SetCond { t, cc } => {
                 let t = r(t);
                 if self.test_condition(cc, self.dirty) {

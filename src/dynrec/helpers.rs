@@ -155,7 +155,8 @@ pub struct JitCtx {
 /// Find out whether writes to the VGA's graphics window are plain ones
 /// into its planes, for the code (`JitCtx::vga_ok`): where translated code
 /// is entered, and after anything in it that may change the VGA's
-/// registers (port writes, handlers, writes to devices).
+/// registers (port writes, translated or by handlers, and writes to
+/// devices).
 pub fn vga_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
     match cpu.bus.plain_planes() {
         Some((planes, base, plane_size)) => {
@@ -342,7 +343,11 @@ jit_fn! {
         let time = (cpu.bus.clock.deadline, cpu.bus.a20_mask());
         match catch_unwind(AssertUnwindSafe(|| handler(cpu, instr))) {
             Ok(Ok(())) => {
-                vga_state(cpu, ctx);
+                // Only port writes change the VGA's registers, and writes
+                // to memory (where a card mirrors them).
+                if writes || matches!(instr.mnemonic(), iced_x86::Mnemonic::Outsb | iced_x86::Mnemonic::Outsw | iced_x86::Mnemonic::Outsd) {
+                    vga_state(cpu, ctx);
+                }
                 if writes && data.gens_now(&cpu.bus.page_gen) != before {
                     let code = written(cpu, data, ix);
                     if code != 0 {

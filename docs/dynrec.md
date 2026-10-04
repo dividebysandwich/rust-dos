@@ -86,7 +86,7 @@ between instructions:
 | Control transfers: jumps, calls, returns, INT, IRET, LOOP, JCXZ (but see below for conditional ones) | Where execution goes |
 | String port I/O (INS, OUTS) | Devices, their interrupts, the timer deadline, the A20 gate, the reset line |
 | IRET | IF and the interrupt shadow |
-| Writes to CR0, CR3, DRn, TRn, LMSW, CLTS, INVLPG, LGDT, LIDT, LLDT, LTR | The mode, paging, the TLB, the descriptor tables |
+| Writes to CR0, CR3, DRn, TRn, LMSW, CLTS, INVLPG, LTR | The mode, paging, the TLB, the task register |
 
 IN, OUT, STI, POPF, MOV SS, POP SS and LSS can change the same, but
 programs run them so often (a timer read, a sound driver's status, a CLI
@@ -114,7 +114,10 @@ handlers and `jit_fallback`), which stops after the instruction
 Because of this, whether an interrupt can be delivered never changes
 inside a block, or in a chain of linked blocks: the execution loop has
 just found none deliverable, and only these instructions could change
-that. So blocks need no interrupt checks. A block that ends with STI or a
+that. So blocks need no interrupt checks. (LGDT, LIDT and LLDT don't stop
+a block: the descriptor tables matter only to segment loads, which read
+them as they run, and to interrupts and faults, which the execution loop
+delivers after the block.) A block that ends with STI or a
 load of SS, whose interrupt shadow covers the next instruction, goes back
 to the execution loop rather than through a link: the loop runs that
 instruction, which ends the shadow.
@@ -249,6 +252,8 @@ Each instruction becomes one of two things:
     `instructions::string`);
   - near JMP and CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ;
+  - BT, BTS, BTR and BTC of a register, or of memory with an immediate bit
+    offset (CF, and OF as a 386 leaves it);
   - the FPU instructions programs run all the time (see
     [The FPU](#the-fpu)).
 

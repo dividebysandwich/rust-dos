@@ -408,9 +408,12 @@ pub fn ends_block(instr: &Instruction) -> bool {
         // (POPF, and MOV, POP and LSS into SS, stop the block after them
         // only where they set IF with an interrupt waiting, set TF, or
         // change the stack's width, see `helpers::jit_fallback`.)
-        // CR0 and the TLB, the descriptor tables and the task register.
+        // CR0 and the TLB, and the task register. (The descriptor tables
+        // matter only to what reads them: segment loads, which do so as
+        // they run, and interrupts and faults, which the execution loop
+        // delivers after the block.)
         Mov if instr.op0_register().is_cr() || instr.op0_register().is_dr() || instr.op0_register().is_tr() => true,
-        Lmsw | Clts | Invlpg | Lgdt | Lidt | Lldt | Ltr => true,
+        Lmsw | Clts | Invlpg | Ltr => true,
         _ => false,
     }
 }

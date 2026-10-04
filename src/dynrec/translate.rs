@@ -92,6 +92,10 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fp
         Pop => pop(instr, stack32, &mut u),
         Pusha | Pushad => pusha(instr, stack32, &mut u),
         Popa | Popad => popa(instr, stack32, &mut u),
+        Bt => bit_op(instr, BitKind::Test, &mut u),
+        Bts => bit_op(instr, BitKind::Set, &mut u),
+        Btr => bit_op(instr, BitKind::Reset, &mut u),
+        Btc => bit_op(instr, BitKind::Complement, &mut u),
         Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => real && far_jump(instr, next, stack32, false, &mut u),
         Call if instr.is_call_far() || instr.is_call_far_indirect() => real && far_jump(instr, next, stack32, true, &mut u),
         Retf => real && far_ret(instr, stack32, &mut u),
@@ -1174,6 +1178,52 @@ fn ret(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     }
     u.push(Uop::Set { r: sp, t: T1 });
     u.push(Uop::Exit { eip: Src::T(T0) });
+    true
+}
+
+/// BT, BTS, BTR or BTC of a register, or of memory with an immediate bit
+/// offset, as `logic::bit_test`: the offset first, then the operand's
+/// access checked (for writing but for BT), read, and written back. (With
+/// a register offset, a memory operand is found from the offset too: its
+/// handler runs it.)
+fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.op0_kind() {
+        OpKind::Register => match gpr(instr.op0_register()) {
+            Some(r) if r.size > 1 => r.size,
+            _ => return false,
+        },
+        OpKind::Memory if instr.op1_kind() == OpKind::Immediate8 => instr.memory_size().size() as u8,
+        _ => return false,
+    };
+    if size != 2 && size != 4 {
+        return false;
+    }
+    let bit = match instr.op1_kind() {
+        OpKind::Immediate8 => Src::Imm(instr.immediate8() as u32 & (size as u32 * 8 - 1)),
+        OpKind::Register => {
+            let Some(b) = gpr(instr.op1_register()) else { return false };
+            u.push(Uop::Get { t: T1, r: b });
+            Src::T(T1)
+        }
+        _ => return false,
+    };
+    if instr.op0_kind() == OpKind::Register {
+        let r = gpr(instr.op0_register()).unwrap();
+        u.push(Uop::Get { t: T0, r });
+        u.push(Uop::BitOp { op, size, t: T0, bit });
+        if op != BitKind::Test {
+            u.push(Uop::Set { r, t: T0 });
+        }
+    } else {
+        if mem(instr, T2, size, op != BitKind::Test, u).is_none() {
+            return false;
+        }
+        u.push(Uop::Load { dst: T0, m: T2, size });
+        u.push(Uop::BitOp { op, size, t: T0, bit });
+        if op != BitKind::Test {
+            u.push(Uop::Store { m: T2, src: T0, size });
+        }
+    }
     true
 }
 
