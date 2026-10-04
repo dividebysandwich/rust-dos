@@ -161,8 +161,8 @@ a chunk stays marked. The chunk before one with code is marked as well:
 a write of up to 4 bytes that reaches into a chunk with code starts in it
 or in the chunk before.
 
-The bus bumps the generations of every chunk it writes. The x86-64 code
-generator's stores check the mark of the chunk their first byte is in,
+The bus bumps the generations of every chunk it writes. The code
+generators' stores check the mark of the chunk their first byte is in,
 and write a chunk without code directly, without bumping its generation:
 the stores of programs that keep their data apart from their code (the
 pixels a texture mapper draws, the stack) cost one byte's test. A store
@@ -223,7 +223,7 @@ Each instruction becomes one of two things:
     `instructions::string`);
   - near JMP and CALL (of a register or memory too), RET, Jcc, LOOPcc and
     JCXZ;
-  - on x86-64 hosts, the FPU instructions programs run all the time (see
+  - the FPU instructions programs run all the time (see
     [The FPU](#the-fpu)).
 
   Each does what the instruction's interpreter handler does, in the same
@@ -248,8 +248,9 @@ The double is always what the 80 bits would come to (`f80::canon_f64`: a
 denormal is 0 and a NaN quiet, as a double that went through 80 bits
 always was).
 
-On x86-64 hosts `dynrec/fpu.rs` translates these forms, which then run on
-the doubles with SSE2, as their handlers do:
+`dynrec/fpu.rs` translates these forms, which then run on the doubles
+with SSE2 on x86-64 hosts and the FP instructions on ARM64 hosts (which
+compute what the handlers' own doubles do there), as their handlers do:
 
 - FLD, FST and FSTP of a single and of ST(i), FLD1, FLDZ, FXCH;
 - FILD, FIST and FISTP of a word and a dword (converted inline where the
@@ -270,8 +271,10 @@ register's tag once, or not at all where the block pushed it
 (`x64::Gen::fpu_known`): what one instruction found holds for those
 after it, until a handler's call.
 Memory operands are checked as the handlers check them, before anything
-changes. Operands of 8 and 10 bytes, the other instructions and ARM64
-hosts go through the handlers.
+changes. Operands of 8 and 10 bytes and the other instructions go
+through the handlers. ARM64's conversions to integers saturate and make a
+NaN 0 where the FPU stores the integer indefinite, so a NaN and either
+limit go through the handler's conversion there.
 
 Two NaNs with different payloads meeting in one multiplication or
 division may come out as either one, depending on which operand the
@@ -316,7 +319,7 @@ first instruction in a block that changes them:
   TLB as `Cpu::lin_to_phys` does. Plain RAM within a page is then read and
   written directly, with the code generations bumped as the bus bumps
   them where the chunk holds code (see [Code chunks](#code-chunks)). The
-  x86-64 code is translated for what the block runs under (see
+  code is translated for what the block runs under (see
   [Environments](#environments)): through a flat segment, with paging
   off and the A20 gate open, an operand is plain RAM if none of its bytes
   is in the video memory or ROMs and it ends before the end of RAM, two
@@ -325,11 +328,12 @@ first instruction in a block that changes them:
   through `jit_memref`, which runs the real `Cpu::mem_ref`. It returns
   the physical address when the operand turns out to be plain RAM, so the
   loads and stores after it are direct as well.
-- On x86-64, an operand within one page that isn't plain RAM (video
-  memory, a frame buffer, a card's registers, the ROMs, nothing at all)
-  is its physical address too, marked as one the bus must access
-  (`helpers::DEV_BIT`): the code finds it without a call, looking up a
-  page the TLB holds as `Cpu::lin_to_phys` does, and its loads and stores
+- An operand within one page that isn't plain RAM (video memory, a
+  frame buffer, a card's registers, the ROMs, nothing at all) is its
+  physical address too, marked as one the bus must access
+  (`helpers::DEV_BIT`): the code finds it without a call with paging off
+  (and on x86-64 hosts, looking up a page the TLB holds as
+  `Cpu::lin_to_phys` does, with paging on), and its loads and stores
   each call `jit_dev_read` or `jit_dev_write`, which read and write it as
   `Cpu::mem_read` and `mem_write` do. A byte written plainly into the
   VGA's planes, as mode X programs write every pixel (Doom's columns and
@@ -352,11 +356,12 @@ Registers while translated code runs:
 | the `JitCtx` | R12 | X20 |
 | RAM | R13 | X21 |
 | the code generations | | X22 |
-| which chunks hold code (`Bus::code_blocks`) | R14 | |
+| which chunks hold code (`Bus::code_blocks`) | R14 | in the `JitCtx`, from X20 |
 | set when a store hit the block's later bytes | `JitCtx::smc` | W23 |
 | the TLB's entries | in the `Cpu`, from RBX | |
 | the guest's arithmetic flags | EBP | W28 |
 | the operations' temporaries | R8–R10 (saved around calls) | W24–W26 (kept by calls) |
+| an FPU instruction's doubles | XMM0, XMM1 | D8, D9 (kept by calls) |
 | the guest registers the block uses most | R11, RSI, RDI (saved around calls), R15 (kept by calls) | |
 
 On x86-64, calls into Rust use the System V convention, which Rust offers
@@ -392,10 +397,10 @@ the segments are flat as the block's environment has them; elsewhere it
 returns to the execution loop. Code that loads a data segment and puts
 it back within a block or chain (as 16-bit drivers do) goes on in
 translated code.
-The x86-64 code generator leaves out what the environment makes
-unnecessary: the limit checks and base of flat segments, the TLB lookup
-with paging off, the A20 mask with the gate open, and then the check
-for an operand in two pages, whose RAM is contiguous. With paging on, it
+The code generators leave out what the environment makes unnecessary:
+the limit checks and base of flat segments, the TLB lookup with paging
+off, the A20 mask with the gate open, and then the check for an operand
+in two pages, whose RAM is contiguous. With paging on, the x86-64 one
 looks the page up in the TLB's set for the CPL, whose 32-byte entries (in
 the `Cpu`) it indexes with the linear address shifted and masked. It
 compares the entry's tag for its code with the page of the operand's last
@@ -404,7 +409,8 @@ in two pages, nor one of a page that isn't plain RAM (`TlbEntry::jit_read`
 and `jit_write`), and adds the entry's difference between the physical
 and linear page to the address. A link to another page checks the TLB's
 translation of its target, but not the A20 gate and paging, which are as
-when the link was made. The ARM64 one checks everything at run time.
+when the link was made. The ARM64 one looks the page up in the TLB with
+its tag for the page + 1, and checks links' guards at run time.
 
 ### Linking
 

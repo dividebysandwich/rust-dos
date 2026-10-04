@@ -5,8 +5,9 @@
 //! the block's later bytes, X27 the CPU plus `HI` (the CPU's fields past
 //! X19's offsets' reach), W28 the guest's arithmetic flags where the code
 //! has changed them (see `Gen::dirty`); W24-W26 hold the operations'
-//! temporaries (`uop::T`), which calls keep, and X0-X17 are scratch (X18,
-//! the platform's register, is never touched). The guest's registers stay
+//! temporaries (`uop::T`), which calls keep, D8 and D9 the FPU
+//! instructions' doubles (`uop::X`), which calls keep too, and X0-X17 and
+//! D16-D17 are scratch (X18, the platform's register, is never touched). The guest's registers stay
 //! in the CPU. AArch64 has neither the parity nor the auxiliary carry flag,
 //! so the code computes the guest's flags the way `cpu::alu` defines them,
 //! with a parity table in the context, and only those that are live (see
@@ -39,6 +40,11 @@ const SF: u32 = 0x080;
 const OF: u32 = 0x800;
 const ARITH: u32 = CF | PF | AF | ZF | SF | OF;
 const SZP: u32 = SF | ZF | PF;
+
+/// The bits of a memory operand's handle that aren't those of an address in
+/// RAM (see `x64::RAM_HANDLES`).
+const NOT_RAM: u64 = 0xFFFF_FFFF_8000_0000;
+const _: () = assert!(crate::config::MAX_MEMSIZE << 20 <= 0x8000_0000 && SLOW as u64 & NOT_RAM != 0);
 
 /// Where the RAM below the video memory ends, and extended memory starts
 /// (both multiples of 4 KB, so they fit a compare's shifted immediate).
@@ -89,13 +95,14 @@ pub fn trampoline() -> Trampoline {
     let enter = ops.offset().0;
     dynasm!(ops
         ; .arch aarch64
-        ; stp x29, x30, [sp, -96]!
+        ; stp x29, x30, [sp, -112]!
         ; mov x29, sp
         ; stp x19, x20, [sp, 16]
         ; stp x21, x22, [sp, 32]
         ; stp x23, x24, [sp, 48]
         ; stp x25, x26, [sp, 64]
         ; stp x27, x28, [sp, 80]
+        ; stp d8, d9, [sp, 96]
         ; mov x19, x0
         ; mov x20, x1
         ; ldr x21, [x20, CTX_RAM as u32]
@@ -112,12 +119,13 @@ pub fn trampoline() -> Trampoline {
         ; .arch aarch64
         ; str x1, [x20, CTX_EXIT_DATA as u32]
         ; str w28, [x20, CTX_FLAGS as u32]
+        ; ldp d8, d9, [sp, 96]
         ; ldp x27, x28, [sp, 80]
         ; ldp x25, x26, [sp, 64]
         ; ldp x23, x24, [sp, 48]
         ; ldp x21, x22, [sp, 32]
         ; ldp x19, x20, [sp, 16]
-        ; ldp x29, x30, [sp], 96
+        ; ldp x29, x30, [sp], 112
         ; ret
     );
     Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit }
@@ -129,6 +137,15 @@ fn mov32(ops: &mut Asm, reg: u8, v: u32) {
     if v >> 16 != 0 {
         dynasm!(ops ; .arch aarch64 ; movk W(reg), v >> 16, lsl 16);
     }
+}
+
+/// FPU register tags.
+const FPU_EMPTY: u32 = crate::cpu::FPU_TAG_EMPTY as u32;
+const FPU_VALID: u32 = crate::cpu::FPU_TAG_VALID as u32;
+
+/// Host register (D8 on) of an FPU instruction's double.
+fn d(x: X) -> u8 {
+    8 + x.0
 }
 
 /// Host register of a temporary.
@@ -151,6 +168,7 @@ enum Access {
     Ldr16,
     Ldr32,
     Ldr64,
+    Str16,
     Str32,
     Str64,
 }
@@ -159,13 +177,17 @@ enum Access {
 enum Slow {
     /// A memory operand the inline checks didn't take.
     MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
-    Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T },
-    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, lo: u32, hi: u32 },
+    Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T, size: u8 },
+    Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
+    /// A store into a block of RAM with code: the code generations bumped
+    /// and a store into the block's later bytes (`lo..hi`) noted.
+    CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
     /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
     /// with the flags in W28 there (`dirty`), and goes on at `end`.
-    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool },
+    /// With `leave`, the block stops after it (`Uop::FpuGuard`).
+    Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, leave: bool },
 }
 
 struct Gen<'a> {
@@ -208,6 +230,13 @@ struct Gen<'a> {
     dirty_at: Vec<bool>,
     /// What the code is translated for.
     env: super::Env,
+    /// Whether CR0 was checked for FPU instructions, and the registers
+    /// (ST(i) bit i) known not to be empty, see `x64::Gen::fpu_known`.
+    fpu_cr0_checked: bool,
+    fpu_known: u8,
+    /// The segment registers (bit `Seg`) instructions in the block loaded
+    /// so far: their accesses are checked as if they weren't flat.
+    loaded_segs: u8,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -228,8 +257,8 @@ pub const TAIL: bool = false;
 /// Whether it has the operations of segment loads, port I/O and STI: no,
 /// their handlers run them.
 pub const SYSTEM: bool = false;
-/// Nor those of FPU instructions.
-pub const FPU: bool = false;
+/// Whether it has those of FPU instructions.
+pub const FPU: bool = true;
 
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
@@ -261,6 +290,9 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         dirty: false,
         dirty_at: vec![false; n],
         env,
+        fpu_cr0_checked: false,
+        fpu_known: 0,
+        loaded_segs: 0,
     };
     g.prologue(items);
     let mut synced = 0;
@@ -277,6 +309,10 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.dirty = false;
                 g.check_watched();
                 g.fallback(ix as u32);
+                g.fpu_known = 0;
+                if let Some(seg) = super::block::loaded_segment(&data.instrs[ix]) {
+                    g.loaded_segs |= 1 << seg as u8;
+                }
             }
             Some(uops) => {
                 g.synced[ix] = synced;
@@ -354,6 +390,7 @@ impl Gen<'_> {
                 Access::Ldr16 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(reg), [x19, x9]),
                 Access::Ldr32 => dynasm!(self.ops ; .arch aarch64 ; ldr W(reg), [x19, x9]),
                 Access::Ldr64 => dynasm!(self.ops ; .arch aarch64 ; ldr X(reg), [x19, x9]),
+                Access::Str16 => dynasm!(self.ops ; .arch aarch64 ; strh W(reg), [x19, x9]),
                 Access::Str32 => dynasm!(self.ops ; .arch aarch64 ; str W(reg), [x19, x9]),
                 Access::Str64 => dynasm!(self.ops ; .arch aarch64 ; str X(reg), [x19, x9]),
             }
@@ -364,9 +401,176 @@ impl Gen<'_> {
             Access::Ldr16 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(reg), [X(base), rel]),
             Access::Ldr32 => dynasm!(self.ops ; .arch aarch64 ; ldr W(reg), [X(base), rel]),
             Access::Ldr64 => dynasm!(self.ops ; .arch aarch64 ; ldr X(reg), [X(base), rel]),
+            Access::Str16 => dynasm!(self.ops ; .arch aarch64 ; strh W(reg), [X(base), rel]),
             Access::Str32 => dynasm!(self.ops ; .arch aarch64 ; str W(reg), [X(base), rel]),
             Access::Str64 => dynasm!(self.ops ; .arch aarch64 ; str X(reg), [X(base), rel]),
         }
+    }
+
+    /// Store the `size` bytes of `src` into RAM at handle `m`.
+    fn store_ram(&mut self, m: T, src: T, size: u8) {
+        let (m_, s) = (r(m), r(src));
+        match size {
+            1 => dynasm!(self.ops ; .arch aarch64 ; strb W(s), [x21, X(m_)]),
+            2 => dynasm!(self.ops ; .arch aarch64 ; strh W(s), [x21, X(m_)]),
+            _ => dynasm!(self.ops ; .arch aarch64 ; str W(s), [x21, X(m_)]),
+        }
+    }
+
+    /// X`reg` = the address of the CPU's field at `off`.
+    fn cpu_addr(&mut self, reg: u8, off: usize) {
+        if off < 4096 {
+            dynasm!(self.ops ; .arch aarch64 ; add XSP(reg), x19, off as u32);
+        } else {
+            self.mov32(reg, off as u32);
+            dynasm!(self.ops ; .arch aarch64 ; add X(reg), x19, X(reg));
+        }
+    }
+
+    /// W`reg` = ST(i)'s physical number.
+    fn fpu_phys(&mut self, reg: u8, i: u8) {
+        self.field(Access::Ldr64, reg, layout::fpu::TOP);
+        if i != 0 {
+            dynasm!(self.ops ; .arch aarch64 ; add WSP(reg), WSP(reg), i as u32 ; and WSP(reg), W(reg), 7);
+        }
+    }
+
+    /// Give FPU register W`phys` (a physical number) the double in D`x`,
+    /// its 80 bits to be made from it (`f80::FpuRegs`). X2 is changed.
+    fn fpu_store(&mut self, phys: u8, x: u8) {
+        self.cpu_addr(2, layout::fpu::F64);
+        dynasm!(self.ops ; .arch aarch64 ; str D(x), [x2, X(phys), lsl 3]);
+        self.cpu_addr(2, layout::fpu::STALE);
+        dynasm!(self.ops ; .arch aarch64 ; movz w4, 1 ; strb w4, [x2, X(phys)]);
+    }
+
+    /// Tag FPU register W`phys` `tag`. X2 and W4 are changed.
+    fn fpu_tag(&mut self, phys: u8, tag: u32) {
+        self.cpu_addr(2, layout::fpu::TAGS);
+        dynasm!(self.ops ; .arch aarch64 ; movz w4, tag ; strb w4, [x2, X(phys)]);
+    }
+
+    /// Copy FPU register W`src` into W`dst` (physical numbers): the double,
+    /// whether its 80 bits are stale, and the 80 bits.
+    fn fpu_move(&mut self, src: u8, dst: u8) {
+        self.cpu_addr(2, layout::fpu::F64);
+        dynasm!(self.ops ; .arch aarch64 ; ldr d16, [x2, X(src), lsl 3] ; str d16, [x2, X(dst), lsl 3]);
+        self.cpu_addr(2, layout::fpu::STALE);
+        dynasm!(self.ops ; .arch aarch64 ; ldrb w4, [x2, X(src)] ; strb w4, [x2, X(dst)]);
+        self.cpu_addr(2, layout::fpu::X80);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; lsl w4, W(src), 4
+            ; lsl w5, W(dst), 4
+            ; ldr q16, [x2, x4]
+            ; str q16, [x2, x5]
+        );
+    }
+
+    /// Make the double in D`x` what an FPU register holds
+    /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
+    fn fpu_canon(&mut self, x: u8) {
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; fmov x1, D(x)
+            ; ubfx x2, x1, 52, 11
+            ; sub w2, w2, 1
+            ; cmp w2, 0x7FE
+            ; b.lo >canon_done
+            ; cmn w2, 1
+            ; b.ne >canon_nan
+            // A zero or a denormal: the sign alone.
+            ; and x1, x1, 0x8000_0000_0000_0000
+            ; b >canon_fix
+            ; canon_nan:
+            ; lsl x2, x1, 12
+            ; cbz x2, >canon_done
+            ; orr x1, x1, 1 << 51
+            ; canon_fix:
+            ; fmov D(x), x1
+            ; canon_done:
+        );
+    }
+
+    /// `Uop::FpuGuard`: the instruction's handler runs it after all where
+    /// CR0 has EM or TS set, or one of the registers in `valid` is empty
+    /// (see `x64::Gen::fpu_guard`).
+    fn fpu_guard(&mut self, valid: u8) {
+        const EM_TS: u32 = 0x0C;
+        let tags = valid & !self.fpu_known;
+        if self.fpu_cr0_checked && tags == 0 {
+            return;
+        }
+        let at = self.ops.new_dynamic_label();
+        if !self.fpu_cr0_checked {
+            self.field(Access::Ldr32, 0, layout::CR0);
+            dynasm!(self.ops ; .arch aarch64 ; tst w0, EM_TS ; b.ne =>at);
+        }
+        if tags != 0 {
+            self.field(Access::Ldr64, 1, layout::fpu::TOP);
+            self.cpu_addr(2, layout::fpu::TAGS);
+        }
+        for i in (0..8).filter(|i| tags >> i & 1 != 0) {
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; add w3, w1, i
+                ; and w3, w3, 7
+                ; ldrb w3, [x2, x3]
+                ; cmp w3, FPU_EMPTY
+                ; b.eq =>at
+            );
+        }
+        self.fpu_cr0_checked = true;
+        self.fpu_known |= valid;
+        let end = self.end();
+        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: true });
+    }
+
+    /// `Uop::FToInt`: the conversion inline where the control word rounds
+    /// to nearest or chops and the result fits, else through
+    /// `jit_fpu_to_int`. (AArch64's conversions saturate and make a NaN 0,
+    /// where the FPU stores the integer indefinite: those go the slow way.)
+    fn fpu_to_int(&mut self, t: T, x: X, size: u8) {
+        let (t_, x_) = (r(t), d(x));
+        self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; fcmp D(x_), D(x_)
+            ; b.vs >toint_slow
+            ; and w0, w0, 0xC00
+            ; cbnz w0, >toint_other
+            ; fcvtns W(t_), D(x_)
+            ; b >toint_check
+            ; toint_other:
+            ; cmp w0, 0xC00
+            ; b.ne >toint_slow
+            ; fcvtzs W(t_), D(x_)
+            ; toint_check:
+        );
+        if size == 2 {
+            dynasm!(self.ops ; .arch aarch64 ; cmp WSP(t_), W(t_), sxth ; b.eq >toint_done);
+        } else {
+            // Saturated (or exactly the limits, which the handler gets right
+            // too).
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; movz w1, 0x8000, lsl 16
+                ; cmp W(t_), w1
+                ; b.eq >toint_slow
+                ; sub w1, w1, 1
+                ; cmp W(t_), w1
+                ; b.ne >toint_done
+            );
+        }
+        dynasm!(self.ops ; .arch aarch64 ; toint_slow: ; fmov d0, D(x_) ; mov x0, x19 ; mov x1, x20);
+        self.mov32(2, size as u32);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; ldr x16, [x20, (CTX_FPU + 16) as u32]
+            ; blr x16
+            ; mov W(t_), w0
+            ; toint_done:
+        );
     }
 
     /// Add `v` to the u64 CPU field at `off`.
@@ -543,17 +747,29 @@ impl Gen<'_> {
                         ; ldr x16, [x20, CTX_MEMREF as u32]
                         ; blr x16
                         ; tbnz x0, 63, >fault
-                        ; mov W(r(t)), w0
+                        ; mov X(r(t)), x0
                         ; b =>back
                         ; fault:
                         ; movz w0, EXIT_FAULT
                         ; b =>fail
                     );
                 }
-                Slow::Load { at, back, dst, m } => {
+                Slow::Load { at, back, dst, m, size } => {
+                    // Memory that isn't plain RAM, by its physical address
+                    // (`DEV_BIT`), or else the operand checked into a slot.
                     dynasm!(self.ops
                         ; .arch aarch64
                         ; =>at
+                        ; tbz X(r(m)), DEV_BIT as u32, >generic
+                        ; mov x0, x19
+                        ; mov x1, x20
+                        ; mov w2, W(r(m))
+                        ; movz w3, size as u32
+                        ; ldr x16, [x20, CTX_DEV as u32]
+                        ; blr x16
+                        ; mov W(r(dst)), w0
+                        ; b =>back
+                        ; generic:
                         ; mov x0, x19
                         ; mov x1, x20
                         ; and w2, W(r(m)), 3
@@ -566,7 +782,7 @@ impl Gen<'_> {
                 Slow::Fault { at, code, fail } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at ; movz w0, code ; b =>fail);
                 }
-                Slow::Bail { at, end, ix, dirty } => {
+                Slow::Bail { at, end, ix, dirty, leave } => {
                     // As a handler's call in the block, but with the
                     // instruction count put back after it, as the code on
                     // from `end` has it. A stop leaves the flags the handler
@@ -596,6 +812,10 @@ impl Gen<'_> {
                         self.field(Access::Str64, 0, layout::ICOUNT);
                     }
                     dynasm!(self.ops ; .arch aarch64 ; cbnz w8, >stop);
+                    if leave {
+                        // The instruction is done: the execution loop goes on.
+                        dynasm!(self.ops ; .arch aarch64 ; movz w8, EXIT_AFTER ; b >stop);
+                    }
                     if self.end_dirty[ix] {
                         self.field(Access::Ldr32, 28, layout::FLAGS);
                     }
@@ -604,7 +824,43 @@ impl Gen<'_> {
                     self.mov32(9, (ix as u32) << 8);
                     dynasm!(self.ops ; .arch aarch64 ; orr w0, w8, w9 ; b =>fail_tail);
                 }
-                Slow::Store { at, back, m, src, lo, hi } => {
+                Slow::CodeStore { at, back, m, src, size, lo, hi } => {
+                    let m_ = r(m);
+                    let (last, width, shift) = (size as u32 - 1, size as u32, crate::bus::GEN_SHIFT as u32);
+                    dynasm!(self.ops ; .arch aarch64 ; =>at);
+                    self.store_ram(m, src, size);
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; lsr w1, W(m_), shift
+                        ; ldr w2, [x22, x1, lsl 2]
+                        ; add w2, w2, 1
+                        ; str w2, [x22, x1, lsl 2]
+                    );
+                    if size > 1 {
+                        dynasm!(self.ops
+                            ; .arch aarch64
+                            ; add w1, WSP(m_), last
+                            ; lsr w1, w1, shift
+                            ; ldr w2, [x22, x1, lsl 2]
+                            ; add w2, w2, 1
+                            ; str w2, [x22, x1, lsl 2]
+                        );
+                    }
+                    if lo < hi {
+                        self.mov32(3, hi);
+                        dynasm!(self.ops ; .arch aarch64 ; cmp W(m_), w3 ; b.hs =>back);
+                        self.mov32(3, lo);
+                        dynasm!(self.ops
+                            ; .arch aarch64
+                            ; add w1, WSP(m_), width
+                            ; cmp w1, w3
+                            ; b.ls =>back
+                            ; movz w23, 1
+                        );
+                    }
+                    dynasm!(self.ops ; .arch aarch64 ; b =>back);
+                }
+                Slow::Store { at, back, m, src, size, lo, hi } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at);
                     self.mov32(9, lo);
                     dynasm!(self.ops ; .arch aarch64 ; str w9, [x20, CTX_SMC_LO as u32]);
@@ -612,6 +868,17 @@ impl Gen<'_> {
                     dynasm!(self.ops
                         ; .arch aarch64
                         ; str w9, [x20, CTX_SMC_HI as u32]
+                        ; tbz X(r(m)), DEV_BIT as u32, >generic
+                        ; mov x0, x19
+                        ; mov x1, x20
+                        ; mov w2, W(r(m))
+                        ; mov w3, W(r(src))
+                        ; movz w4, size as u32
+                        ; ldr x16, [x20, (CTX_DEV + 8) as u32]
+                        ; blr x16
+                        ; orr w23, w23, w0
+                        ; b =>back
+                        ; generic:
                         ; mov x0, x19
                         ; mov x1, x20
                         ; and w2, W(r(m)), 3
@@ -734,64 +1001,38 @@ impl Gen<'_> {
             Uop::MemRef { t, seg, size, write, slot } => self.memref(t, seg, size, write, slot),
             Uop::Load { dst, m, size } => {
                 let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
-                let slow = SLOW.wrapping_neg();
                 let (d, m_) = (r(dst), r(m));
-                // A handle at or above SLOW (-256) isn't an address.
-                dynasm!(self.ops ; .arch aarch64 ; cmn WSP(m_), slow ; b.hs =>at);
+                // A handle with bits from 31 up (SLOW and up, `DEV_BIT`) isn't
+                // an address in RAM.
+                dynasm!(self.ops ; .arch aarch64 ; tst X(m_), NOT_RAM ; b.ne =>at);
                 match size {
                     1 => dynasm!(self.ops ; .arch aarch64 ; ldrb W(d), [x21, X(m_)]),
                     2 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(d), [x21, X(m_)]),
                     _ => dynasm!(self.ops ; .arch aarch64 ; ldr W(d), [x21, X(m_)]),
                 }
                 dynasm!(self.ops ; .arch aarch64 ; =>back);
-                self.slow.push(Slow::Load { at, back, dst, m });
+                self.slow.push(Slow::Load { at, back, dst, m, size });
             }
             Uop::Store { m, src, size } => {
-                let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
-                let slow = SLOW.wrapping_neg();
-                let (last, width) = (size as u32 - 1, size as u32);
-                let (m_, s) = (r(m), r(src));
-                dynasm!(self.ops ; .arch aarch64 ; cmn WSP(m_), slow ; b.hs =>at);
-                match size {
-                    1 => dynasm!(self.ops ; .arch aarch64 ; strb W(s), [x21, X(m_)]),
-                    2 => dynasm!(self.ops ; .arch aarch64 ; strh W(s), [x21, X(m_)]),
-                    _ => dynasm!(self.ops ; .arch aarch64 ; str W(s), [x21, X(m_)]),
-                }
-                // The code generations of the first and last byte's chunks,
-                // as the bus's writes bump them.
-                let shift = crate::bus::GEN_SHIFT as u32;
+                let (at, back, code) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
+                let m_ = r(m);
+                // RAM of a block without code is written as it is, without
+                // bumping its generation, which nothing reads (see
+                // `Bus::code_blocks`).
                 dynasm!(self.ops
                     ; .arch aarch64
-                    ; lsr w1, W(m_), shift
-                    ; ldr w2, [x22, x1, lsl 2]
-                    ; add w2, w2, 1
-                    ; str w2, [x22, x1, lsl 2]
+                    ; tst X(m_), NOT_RAM
+                    ; b.ne =>at
+                    ; ldr x3, [x20, CTX_CODE_BLOCKS as u32]
+                    ; lsr w1, W(m_), crate::bus::GEN_SHIFT as u32
+                    ; ldrb w2, [x3, x1]
+                    ; cbnz w2, =>code
                 );
-                if size > 1 {
-                    dynasm!(self.ops
-                        ; .arch aarch64
-                        ; add w1, WSP(m_), last
-                        ; lsr w1, w1, shift
-                        ; ldr w2, [x22, x1, lsl 2]
-                        ; add w2, w2, 1
-                        ; str w2, [x22, x1, lsl 2]
-                    );
-                }
-                let (lo, hi) = self.rest();
-                if lo < hi {
-                    self.mov32(3, hi);
-                    dynasm!(self.ops ; .arch aarch64 ; cmp W(m_), w3 ; b.hs =>back);
-                    self.mov32(3, lo);
-                    dynasm!(self.ops
-                        ; .arch aarch64
-                        ; add w1, WSP(m_), width
-                        ; cmp w1, w3
-                        ; b.ls =>back
-                        ; movz w23, 1
-                    );
-                }
+                self.store_ram(m, src, size);
                 dynasm!(self.ops ; .arch aarch64 ; =>back);
-                self.slow.push(Slow::Store { at, back, m, src, lo, hi });
+                let (lo, hi) = self.rest();
+                self.slow.push(Slow::Store { at, back, m, src, size, lo, hi });
+                self.slow.push(Slow::CodeStore { at: code, back, m, size, src, lo, hi });
             }
             Uop::Alu { op, size, a, b } => self.alu(op, size, a, b),
             Uop::Unary { op, size, t } => self.unary(op, size, t),
@@ -809,7 +1050,7 @@ impl Gen<'_> {
                 let at = self.ops.new_dynamic_label();
                 dynasm!(self.ops ; .arch aarch64 ; tst W(r(t)), mask ; b.ne =>at);
                 let end = self.end();
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty });
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::Imul { size, a, b } => self.imul(size, a, b),
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
@@ -861,6 +1102,7 @@ impl Gen<'_> {
                     // A return or indirect call: through its link to
                     // where it goes, if it has one.
                     self.counts();
+                    self.check_flat();
                     self.returned(t);
                 } else {
                     let tail = self.tail;
@@ -877,24 +1119,178 @@ impl Gen<'_> {
             | Uop::Forward => {
                 unreachable!("not translated for this host (SYSTEM)")
             }
-            Uop::FpuGuard { .. }
-            | Uop::FGet { .. }
-            | Uop::FSet { .. }
-            | Uop::FPush { .. }
-            | Uop::FPop { .. }
-            | Uop::FCopy { .. }
-            | Uop::FXch { .. }
-            | Uop::FFromT { .. }
-            | Uop::FToSingle { .. }
-            | Uop::FToInt { .. }
-            | Uop::FMul { .. }
-            | Uop::FDiv { .. }
-            | Uop::FAddSt { .. }
-            | Uop::FAddValue { .. }
-            | Uop::FCom { .. }
-            | Uop::FStatus { .. }
-            | Uop::FGetControl { .. }
-            | Uop::FSetControl { .. } => unreachable!("not translated for this host (FPU)"),
+            Uop::FpuGuard { valid } => self.fpu_guard(valid),
+            Uop::FGet { x, i } => {
+                self.fpu_phys(1, i);
+                self.cpu_addr(2, layout::fpu::F64);
+                dynasm!(self.ops ; .arch aarch64 ; ldr D(d(x)), [x2, x1, lsl 3]);
+            }
+            Uop::FSet { i, x, canon } => {
+                if canon {
+                    self.fpu_canon(d(x));
+                }
+                self.fpu_phys(1, i);
+                self.fpu_store(1, d(x));
+            }
+            Uop::FPush { x, canon } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
+                if canon {
+                    self.fpu_canon(d(x));
+                }
+                self.field(Access::Ldr64, 1, layout::fpu::TOP);
+                dynasm!(self.ops ; .arch aarch64 ; sub w1, w1, 1 ; and w1, w1, 7);
+                self.field(Access::Str64, 1, layout::fpu::TOP);
+                self.fpu_store(1, d(x));
+                self.fpu_tag(1, FPU_VALID);
+            }
+            Uop::FPop { n } => {
+                self.fpu_known >>= n;
+                self.field(Access::Ldr64, 1, layout::fpu::TOP);
+                for _ in 0..n {
+                    self.fpu_tag(1, FPU_EMPTY);
+                    dynasm!(self.ops ; .arch aarch64 ; add w1, w1, 1 ; and w1, w1, 7);
+                }
+                self.field(Access::Str64, 1, layout::fpu::TOP);
+            }
+            Uop::FCopy { dst, src } => {
+                // W1 the source's physical number, W3 the destination's.
+                self.field(Access::Ldr64, 0, layout::fpu::TOP);
+                dynasm!(self.ops ; .arch aarch64 ; add w1, w0, src as u32 ; and w1, w1, 7);
+                match dst {
+                    Some(dst) => dynasm!(self.ops ; .arch aarch64 ; add w3, w0, dst as u32 ; and w3, w3, 7),
+                    None => {
+                        self.fpu_known = self.fpu_known << 1 | 1;
+                        dynasm!(self.ops ; .arch aarch64 ; sub w3, w0, 1 ; and w3, w3, 7);
+                        self.field(Access::Str64, 3, layout::fpu::TOP);
+                        self.fpu_tag(3, FPU_VALID);
+                    }
+                }
+                self.fpu_move(1, 3);
+            }
+            Uop::FXch { i } => {
+                const C1: u32 = 0x200;
+                // W1 ST(0)'s physical number, W3 ST(i)'s: the registers
+                // swap through the scratch ones.
+                self.field(Access::Ldr64, 1, layout::fpu::TOP);
+                dynasm!(self.ops ; .arch aarch64 ; add w3, w1, i as u32 ; and w3, w3, 7);
+                self.cpu_addr(2, layout::fpu::F64);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ldr d16, [x2, x1, lsl 3]
+                    ; ldr d17, [x2, x3, lsl 3]
+                    ; str d17, [x2, x1, lsl 3]
+                    ; str d16, [x2, x3, lsl 3]
+                );
+                self.cpu_addr(2, layout::fpu::STALE);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ldrb w4, [x2, x1]
+                    ; ldrb w5, [x2, x3]
+                    ; strb w5, [x2, x1]
+                    ; strb w4, [x2, x3]
+                );
+                self.cpu_addr(2, layout::fpu::X80);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; lsl w4, w1, 4
+                    ; lsl w5, w3, 4
+                    ; ldr q16, [x2, x4]
+                    ; ldr q17, [x2, x5]
+                    ; str q17, [x2, x4]
+                    ; str q16, [x2, x5]
+                );
+                self.cpu_addr(2, layout::fpu::FLAGS);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ldrh w4, [x2]
+                    ; movz w5, C1
+                    ; bic w4, w4, w5
+                    ; strh w4, [x2]
+                );
+            }
+            Uop::FFromT { x, t, kind } => match kind {
+                FKind::Single => dynasm!(self.ops ; .arch aarch64 ; fmov s16, W(r(t)) ; fcvt D(d(x)), s16),
+                FKind::Int => dynasm!(self.ops ; .arch aarch64 ; scvtf D(d(x)), W(r(t))),
+            },
+            Uop::FToSingle { t, x } => {
+                dynasm!(self.ops ; .arch aarch64 ; fcvt s16, D(d(x)) ; fmov W(r(t)), s16);
+            }
+            Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
+            Uop::FMul { a, b } => dynasm!(self.ops ; .arch aarch64 ; fmul D(d(a)), D(d(a)), D(d(b))),
+            Uop::FDiv { i, num, den, ze } => {
+                // A division by 0 (not a NaN, which compares unordered) is
+                // the handler's.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; fcmp D(d(den)), 0.0
+                    ; b.ne >fdiv_go
+                    ; mov x0, x19
+                    ; mov x1, x20
+                );
+                self.mov32(2, i as u32 | (ze as u32) << 8);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ldr x16, [x20, (CTX_FPU + 24) as u32]
+                    ; blr x16
+                    ; b >fdiv_done
+                    ; fdiv_go:
+                    ; fdiv d16, D(d(num)), D(d(den))
+                );
+                self.fpu_canon(16);
+                self.fpu_phys(1, i);
+                self.fpu_store(1, 16);
+                dynasm!(self.ops ; .arch aarch64 ; fdiv_done:);
+            }
+            Uop::FAddSt { dst, a, b, sub } => {
+                let desc = dst as u32 | (a as u32) << 4 | (b as u32) << 8 | (sub as u32) << 12;
+                dynasm!(self.ops ; .arch aarch64 ; mov x0, x19 ; mov x1, x20);
+                self.mov32(2, desc);
+                dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x20, CTX_FPU as u32] ; blr x16);
+            }
+            Uop::FAddValue { kind, x } => {
+                dynasm!(self.ops ; .arch aarch64 ; fmov d0, D(d(x)) ; mov x0, x19 ; mov x1, x20);
+                self.mov32(2, kind);
+                dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x20, (CTX_FPU + 8) as u32] ; blr x16);
+            }
+            Uop::FCom { a, b } => {
+                // C0 where less or unordered, C2 where unordered, C3 where
+                // equal or unordered (an unordered FCMP sets C and V).
+                const C0_C2_C3: u32 = 0x4500;
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; fcmp D(d(a)), D(d(b))
+                    ; cset w1, lt
+                    ; cset w2, vs
+                    ; cset w3, eq
+                    ; orr w3, w3, w2
+                    ; lsl w1, w1, 8
+                    ; orr w1, w1, w2, lsl 10
+                    ; orr w1, w1, w3, lsl 14
+                );
+                self.cpu_addr(2, layout::fpu::FLAGS);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; ldrh w4, [x2]
+                    ; movz w5, C0_C2_C3
+                    ; bic w4, w4, w5
+                    ; orr w4, w4, w1
+                    ; strh w4, [x2]
+                );
+            }
+            Uop::FStatus { t } => {
+                let t = r(t);
+                self.field(Access::Ldr16, t, layout::fpu::FLAGS);
+                self.field(Access::Ldr64, 1, layout::fpu::TOP);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; movz w2, 0x3800
+                    ; bic W(t), W(t), w2
+                    ; and w1, w1, 7
+                    ; orr W(t), W(t), w1, lsl 11
+                );
+            }
+            Uop::FGetControl { t } => self.field(Access::Ldr16, r(t), layout::fpu::CONTROL),
+            Uop::FSetControl { t } => self.field(Access::Str16, r(t), layout::fpu::CONTROL),
         }
     }
 
@@ -930,83 +1326,112 @@ impl Gen<'_> {
         }
     }
 
-    /// Check the operand at seg:t as `Cpu::mem_ref` does, inline for plain
-    /// RAM in one page (through the TLB with paging on), and leave its
-    /// handle in t.
+    /// Check the operand at seg:t as `Cpu::mem_ref` does, inline within a
+    /// page (through the TLB with paging on), and leave its handle in t:
+    /// the address in RAM, or the physical address of memory that isn't
+    /// plain RAM (`DEV_BIT`). What the block's environment says (flat and
+    /// plain segments, paging, CPL, the A20 gate) isn't checked again, as
+    /// `x64::Gen::memref` has it.
     fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8) {
         let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         let t_ = r(t);
-        let need = if write { layout::RIGHT_WRITE } else { layout::RIGHT_READ } as u32;
-        let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as u32;
+        let bits = self.env.bits;
+        let (paging, a20) = (bits & super::ENV_PAGING != 0, bits & super::ENV_A20 != 0);
+        let unloaded = self.loaded_segs >> seg as u8 & 1 == 0;
+        let flat = bits & super::ENV_FLAT << seg as u32 != 0 && unloaded;
+        let plain = bits & super::ENV_PLAIN << seg as u32 != 0 && unloaded;
         let size32 = size as u32;
         let last = size32 - 1;
-        // The segment's limit and type, as `seg_linear` checks them.
+        // W0 = the linear address: a flat segment's is the offset (a wrap
+        // past 4 GB goes past the end of RAM below), else the segment's
+        // limit and type are checked as `seg_linear` does, and its base
+        // added.
+        if flat {
+            dynasm!(self.ops ; .arch aarch64 ; mov w0, W(t_));
+        } else {
+            let need = if write { layout::RIGHT_WRITE } else { layout::RIGHT_READ } as u32;
+            if size > 1 {
+                dynasm!(self.ops ; .arch aarch64 ; add w1, WSP(t_), last ; cmp w1, W(t_) ; b.lo =>at);
+            } else {
+                dynasm!(self.ops ; .arch aarch64 ; mov w1, W(t_));
+            }
+            if !plain {
+                self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_LO));
+                dynasm!(self.ops ; .arch aarch64 ; cmp W(t_), w2 ; b.lo =>at);
+            }
+            self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_HI));
+            dynasm!(self.ops ; .arch aarch64 ; cmp w1, w2 ; b.hi =>at);
+            if !plain {
+                self.field(Access::Ldr8, 2, seg_field(seg, layout::SEG_RIGHTS));
+                dynasm!(self.ops ; .arch aarch64 ; tst w2, need ; b.eq =>at);
+            }
+            self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_BASE));
+            dynasm!(self.ops ; .arch aarch64 ; add w0, W(t_), w2);
+        }
+        if paging || !a20 {
+            // An operand in two pages takes two translations (or with the
+            // A20 gate closed, may wrap around at a megabyte).
+            if size > 1 {
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; and w1, w0, 0xFFF
+                    ; cmp w1, 0x1000 - size32
+                    ; b.hi =>at
+                );
+            }
+        }
+        if paging {
+            // The page's entry (linear address >> 12) in the TLB's set of
+            // the privilege level, whose tag must be the page + 1.
+            let tag = (if write { layout::TLB_WRITE_TAG } else { layout::TLB_READ_TAG }) as u32;
+            let set = if bits & super::ENV_USER != 0 { layout::TLB_SET as u32 } else { 0 };
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; lsr w1, w0, 12
+                ; and w3, w1, (layout::TLB_SET - 1) as u32
+            );
+            if set != 0 {
+                dynasm!(self.ops ; .arch aarch64 ; add w3, w3, set);
+            }
+            self.mov32(4, layout::TLB_ENTRY_SIZE as u32);
+            dynasm!(self.ops
+                ; .arch aarch64
+                ; umull x3, w3, w4
+                ; ldr x6, [x20, CTX_TLB as u32]
+                ; add x6, x6, x3
+                ; ldr w5, [x6, tag]
+                ; add w1, w1, 1
+                ; cmp w5, w1
+                ; b.ne =>at
+                ; ldr w5, [x6, layout::TLB_PHYS as u32]
+                ; and w0, w0, 0xFFF
+                ; orr w0, w0, w5
+            );
+        }
+        if !a20 {
+            dynasm!(self.ops ; .arch aarch64 ; and w0, w0, !0x10_0000u32);
+        }
+        // In plain RAM: none of its bytes in the video memory and ROMs from
+        // A0000h to FFFFFh, and not past the end of RAM. (With paging off
+        // and the A20 gate open, an operand in two pages of RAM is too: they
+        // are next to each other.) Elsewhere within a page, the bus reaches
+        // it by its physical address.
+        self.mov32(2, self.env.ram_len);
         dynasm!(self.ops
             ; .arch aarch64
-            ; add w1, WSP(t_), last
-            ; cmp w1, W(t_)
-            ; b.lo =>at
-        );
-        self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_LO));
-        dynasm!(self.ops ; .arch aarch64 ; cmp W(t_), w2 ; b.lo =>at);
-        self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_HI));
-        dynasm!(self.ops ; .arch aarch64 ; cmp w1, w2 ; b.hi =>at);
-        self.field(Access::Ldr8, 2, seg_field(seg, layout::SEG_RIGHTS));
-        dynasm!(self.ops ; .arch aarch64 ; tst w2, need ; b.eq =>at);
-        self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_BASE));
-        dynasm!(self.ops ; .arch aarch64 ; add w0, W(t_), w2);
-        self.field(Access::Ldr32, 2, layout::CR0);
-        dynasm!(self.ops ; .arch aarch64 ; tbnz w2, 31, >paging);
-        self.field(Access::Ldr32, 2, layout::A20_MASK);
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; and w0, w0, w2
-            ; b >physical
-            // The entry of the page (linear address >> 12) in the set of
-            // the privilege level: its tag must be the page + 1.
-            ; paging:
-            ; lsr w1, w0, 12
-            ; and w3, w1, (layout::TLB_SET - 1) as u32
-        );
-        self.field(Access::Ldr8, 2, layout::CPL);
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; cmp w2, 3
-            ; b.ne >supervisor
-            ; add w3, w3, layout::TLB_SET as u32
-            ; supervisor:
-        );
-        self.mov32(4, layout::TLB_ENTRY_SIZE as u32);
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; umull x3, w3, w4
-            ; ldr x6, [x20, CTX_TLB as u32]
-            ; add x6, x6, x3
-            ; ldr w5, [x6, tag]
-            ; add w1, w1, 1
-            ; cmp w5, w1
-            ; b.ne =>at
-            ; ldr w5, [x6, layout::TLB_PHYS as u32]
-            ; and w0, w0, 0xFFF
-            ; orr w0, w0, w5
-        );
-        self.field(Access::Ldr32, 2, layout::A20_MASK);
-        dynasm!(self.ops
-            ; .arch aarch64
-            ; and w0, w0, w2
-            // Within a page, in plain RAM.
-            ; physical:
-            ; and w1, w0, 0xFFF
-            ; cmp w1, 0x1000 - size32
-            ; b.hi =>at
             ; add x1, x0, size32
             ; cmp x1, VIDEO >> 12, lsl 12
             ; b.ls >ram
             ; cmp w0, EXTENDED >> 12, lsl 12
-            ; b.lo =>at
-            ; ldr x2, [x20, CTX_RAM_LEN as u32]
+            ; b.lo >device
             ; cmp x1, x2
+            ; b.ls >ram
+            ; device:
+            ; and w1, w0, 0xFFF
+            ; cmp w1, 0x1000 - size32
             ; b.hi =>at
+            ; orr XSP(t_), x0, 1u64 << DEV_BIT
+            ; b =>back
             ; ram:
             ; mov W(t_), w0
             ; =>back
@@ -1761,6 +2186,9 @@ impl Gen<'_> {
         }
         self.flags_back();
         self.counts();
+        if self.link && eip.is_some() {
+            self.check_flat();
+        }
         match eip {
             Some(eip) if self.link && self.data.in_page(eip) => {
                 self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
@@ -1773,6 +2201,26 @@ impl Gen<'_> {
                 self.exit();
             }
         }
+    }
+
+    /// After a segment load in the block, go back to the execution loop
+    /// instead of taking a link where the segments aren't flat as the
+    /// block's environment has them: the blocks it leads to were translated
+    /// for it. X1 is the block.
+    fn check_flat(&mut self) {
+        if self.loaded_segs == 0 {
+            return;
+        }
+        self.mov32(2, self.env.bits & super::ENV_FLAT_ALL);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; ldr w0, [x20, CTX_FLAT as u32]
+            ; cmp w0, w2
+            ; b.eq >same
+            ; movz w0, EXIT_NEXT
+        );
+        self.exit();
+        dynasm!(self.ops ; .arch aarch64 ; same:);
     }
 
     /// Bring the counts up to date for leaving the block after its last

@@ -114,7 +114,7 @@ pub struct JitCtx {
     /// PF (04h or 0) of every byte value, for hosts without a parity flag.
     pub parity: [u8; 256],
     /// `jit_fpu_addsub_st`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
-    /// `jit_fpu_div_zero` (x86-64).
+    /// `jit_fpu_div_zero`.
     pub fpu: [usize; 4],
     /// `jit_dev_read` and `jit_dev_write` (x86-64).
     pub dev: [usize; 2],
@@ -127,11 +127,9 @@ pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
 pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
 pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_CODE_BLOCKS: i32 = offset_of!(JitCtx, code_blocks) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_SMC: i32 = offset_of!(JitCtx, smc) as i32;
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_FLAT: i32 = offset_of!(JitCtx, flat) as i32;
 pub const CTX_EXIT_DATA: i32 = offset_of!(JitCtx, exit_data) as i32;
 pub const CTX_MEMREF: i32 = offset_of!(JitCtx, memref) as i32;
@@ -144,15 +142,12 @@ pub const CTX_PORT: i32 = offset_of!(JitCtx, port) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_AFTER: i32 = offset_of!(JitCtx, after) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
-pub const CTX_RAM_LEN: i32 = offset_of!(JitCtx, ram_len) as i32;
-#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_TLB: i32 = offset_of!(JitCtx, tlb) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub const CTX_PARITY: i32 = offset_of!(JitCtx, parity) as i32;
 pub const CTX_SMC_LO: i32 = offset_of!(JitCtx, smc_lo) as i32;
 pub const CTX_SMC_HI: i32 = offset_of!(JitCtx, smc_hi) as i32;
 pub const CTX_FLAGS: i32 = offset_of!(JitCtx, flags) as i32;
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_FPU: i32 = offset_of!(JitCtx, fpu) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_DEV: i32 = offset_of!(JitCtx, dev) as i32;
@@ -210,19 +205,13 @@ impl JitCtx {
             panic: None,
             refs: [MemRef { lin: 0, phys: 0, phys2: 0, size: 1 }; 4],
             parity: std::array::from_fn(|b| if (b as u8).count_ones().is_multiple_of(2) { 0x04 } else { 0 }),
-            #[cfg(target_arch = "x86_64")]
             fpu: [
                 jit_fpu_addsub_st as *const () as usize,
                 jit_fpu_addsub_value as *const () as usize,
                 jit_fpu_to_int as *const () as usize,
                 jit_fpu_div_zero as *const () as usize,
             ],
-            #[cfg(not(target_arch = "x86_64"))]
-            fpu: [0; 4],
-            #[cfg(target_arch = "x86_64")]
             dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
-            #[cfg(not(target_arch = "x86_64"))]
-            dev: [0; 2],
             calls: super::Calls { fallback: vec![0; iced_x86::Mnemonic::values().len()], ..super::Calls::default() },
         }
     }
@@ -524,10 +513,8 @@ jit_fn! {
             (SLOW + slot as u32) as u64
         } else if cpu.bus.is_plain_ram(phys as usize, size as usize) {
             phys as u64
-        } else if cfg!(target_arch = "x86_64") {
-            1 << DEV_BIT | phys as u64
         } else {
-            (SLOW + slot as u32) as u64
+            1 << DEV_BIT | phys as u64
         }
     }
 }
@@ -563,7 +550,6 @@ jit_fn! {
 
 /// Run a piece of an FPU instruction's handler for translated code: a
 /// panic in it resumes in the execution loop, as `jit_fallback`'s does.
-#[cfg(target_arch = "x86_64")]
 fn fpu_helper<R: Default>(cpu: *mut Cpu, ctx: *mut JitCtx, f: impl FnOnce(&mut Cpu) -> R) -> R {
     // SAFETY: as in `jit_fallback`.
     let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
@@ -576,7 +562,6 @@ fn fpu_helper<R: Default>(cpu: *mut Cpu, ctx: *mut JitCtx, f: impl FnOnce(&mut C
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 jit_fn! {
     /// `Uop::FAddSt`: `desc` is dst, a << 4, b << 8 and sub << 12.
     fn jit_fpu_addsub_st(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32) -> u32 {
@@ -586,7 +571,6 @@ jit_fn! {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 jit_fn! {
     /// `Uop::FAddValue`.
     fn jit_fpu_addsub_value(cpu: *mut Cpu, ctx: *mut JitCtx, kind: u32, value: f64) -> u32 {
@@ -595,7 +579,6 @@ jit_fn! {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 jit_fn! {
     /// `Uop::FToInt`, for what the code's own conversion doesn't cover:
     /// rounding up or down, and values that don't fit.
@@ -604,7 +587,6 @@ jit_fn! {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 jit_fn! {
     /// `Uop::FDiv` by 0: `desc` is the register, and ze << 8.
     fn jit_fpu_div_zero(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32) -> u32 {
@@ -615,7 +597,6 @@ jit_fn! {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 jit_fn! {
     /// Read `size` bytes at physical address `phys`, an operand within one
     /// page that isn't plain RAM (`DEV_BIT`), as `Cpu::mem_read` reads it.
@@ -632,7 +613,6 @@ jit_fn! {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 jit_fn! {
     /// Write such an operand, as `Cpu::mem_write` writes it. Returns 1 if
     /// the write hit the running block's later bytes (`smc_lo..smc_hi`),
@@ -652,7 +632,6 @@ jit_fn! {
 }
 
 /// `jit_dev_write` but for pixels into the VGA's planes.
-#[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn dev_write(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32, value: u32, size: u32) -> u32 {
     let p = phys as usize;
