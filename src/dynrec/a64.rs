@@ -181,6 +181,10 @@ enum Slow {
     /// A memory operand the inline checks didn't take.
     MemRef { at: DynamicLabel, back: DynamicLabel, t: T, desc: u32, fail: DynamicLabel },
     Load { at: DynamicLabel, back: DynamicLabel, dst: T, m: T, size: u8 },
+    /// Where a memory reference's slow paths come back to before a load or
+    /// store that takes its handle as RAM's: to `slow` with one that isn't,
+    /// else to the RAM access at `ram`.
+    Recheck { at: DynamicLabel, m: T, slow: DynamicLabel, ram: DynamicLabel },
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// A store into a block of RAM with code: the code generations bumped
     /// and a store into the block's later bytes (`lo..hi`) noted.
@@ -262,6 +266,9 @@ struct Gen<'a> {
     limit: DynamicLabel,
     body: DynamicLabel,
     slow: Vec<Slow>,
+    /// After a memory reference: its handle, and where its slow paths come
+    /// back to, with a handle that may not be RAM's (see `x64::Gen`).
+    ram_back: Option<(T, DynamicLabel)>,
     sides: Vec<Side>,
     merges: Vec<Merge>,
     /// Whether exits to a known EIP in the page may be linked, the stubs
@@ -354,6 +361,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         limit,
         body,
         slow: Vec::new(),
+        ram_back: None,
         sides: Vec::new(),
         merges: Vec::new(),
         link,
@@ -400,11 +408,29 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.synced[ix] = synced;
                 g.dirty_at[ix] = g.dirty;
                 g.check_watched();
-                for (k, uop) in uops.iter().enumerate() {
+                // A register or constant a store takes goes before its
+                // memory reference, as on x86-64.
+                let mut order: Vec<usize> = (0..uops.len()).collect();
+                for k in 0..uops.len().saturating_sub(2) {
+                    if let (Uop::MemRef { t, .. }, Uop::Get { t: v, .. } | Uop::Const { t: v, .. }, Uop::Store { m, src, .. }) =
+                        (uops[k], uops[k + 1], uops[k + 2])
+                        && m == t
+                        && src == v
+                        && v != t
+                    {
+                        order.swap(k, k + 1);
+                    }
+                }
+                for k in order {
+                    let uop = &uops[k];
                     g.live_after = g.live[ix][k];
                     g.record_now = g.record[ix][k];
+                    if !matches!(*uop, Uop::Load { m, .. } | Uop::Store { m, .. } if g.ram_back.is_some_and(|(t, _)| t == m)) {
+                        g.settle_ram();
+                    }
                     g.uop(uop);
                 }
+                g.settle_ram();
                 g.end_dirty[ix] = g.dirty;
                 if let Some(end) = g.end.take() {
                     dynasm!(g.ops ; .arch aarch64 ; =>end);
@@ -953,6 +979,15 @@ impl Gen<'_> {
                         ; b =>fail
                     );
                 }
+                Slow::Recheck { at, m, slow, ram } => {
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; =>at
+                        ; tst X(r(m)), NOT_RAM
+                        ; b.ne =>slow
+                        ; b =>ram
+                    );
+                }
                 Slow::Load { at, back, dst, m, size } => {
                     // Memory that isn't plain RAM, by its physical address
                     // (`DEV_BIT`), or else the operand checked into a slot.
@@ -1252,7 +1287,7 @@ impl Gen<'_> {
                 let (d, m_) = (r(dst), r(m));
                 // A handle with bits from 31 up (SLOW and up, `DEV_BIT`) isn't
                 // an address in RAM.
-                dynasm!(self.ops ; .arch aarch64 ; tst X(m_), NOT_RAM ; b.ne =>at);
+                self.ram_or(m, at);
                 match size {
                     1 => dynasm!(self.ops ; .arch aarch64 ; ldrb W(d), [x21, X(m_)]),
                     2 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(d), [x21, X(m_)]),
@@ -1267,10 +1302,9 @@ impl Gen<'_> {
                 // RAM of a block without code is written as it is, without
                 // bumping its generation, which nothing reads (see
                 // `Bus::code_blocks`).
+                self.ram_or(m, at);
                 dynasm!(self.ops
                     ; .arch aarch64
-                    ; tst X(m_), NOT_RAM
-                    ; b.ne =>at
                     ; ldr x3, [x20, CTX_CODE_BLOCKS as u32]
                     ; lsr w1, W(m_), crate::bus::GEN_SHIFT as u32
                     ; ldrb w2, [x3, x1]
@@ -1678,6 +1712,31 @@ impl Gen<'_> {
     /// plain RAM (`DEV_BIT`). What the block's environment says (flat and
     /// plain segments, paging, CPL, the A20 gate) isn't checked again, as
     /// `x64::Gen::memref` has it.
+    /// Where a memory reference's slow paths come back to, if it is still
+    /// pending (`ram_back`).
+    fn settle_ram(&mut self) {
+        if let Some((_, back)) = self.ram_back.take() {
+            dynasm!(self.ops ; .arch aarch64 ; =>back);
+        }
+    }
+
+    /// Go to `slow` unless handle `m` is RAM's: right after the memory
+    /// reference that made it, only where its slow paths made it.
+    fn ram_or(&mut self, m: T, slow: DynamicLabel) {
+        match self.ram_back.take() {
+            Some((t, back)) if t == m => {
+                let ram = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch aarch64 ; =>ram);
+                self.slow.push(Slow::Recheck { at: back, m, slow, ram });
+            }
+            pending => {
+                self.ram_back = pending;
+                self.settle_ram();
+                dynasm!(self.ops ; .arch aarch64 ; tst X(r(m)), NOT_RAM ; b.ne =>slow);
+            }
+        }
+    }
+
     fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8) {
         let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         let t_ = r(t);
@@ -1804,7 +1863,7 @@ impl Gen<'_> {
         if addr != t_ {
             dynasm!(self.ops ; .arch aarch64 ; mov W(t_), w0);
         }
-        dynasm!(self.ops ; .arch aarch64 ; =>back);
+        self.ram_back = Some((t, back));
         let desc = memref_desc(seg, size, write, slot);
         let fail = self.fail();
         self.slow.push(Slow::Dev { at: dev, back, slow: at, t, addr, size });
