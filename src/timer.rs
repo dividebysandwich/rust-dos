@@ -57,6 +57,27 @@ fn duration_to_ticks(d: Duration) -> u64 {
     (d.as_nanos() * PIT_HZ as u128 / 1_000_000_000) as u64
 }
 
+/// `a * b / c`, as with 128-bit numbers (the quotient cut to 64 bits), but
+/// in 64 where the product fits: a 128-bit division is a call of a
+/// library function on 64-bit hosts, and the clock works these out at
+/// every port access.
+#[inline]
+pub fn mul_div(a: u64, b: u64, c: u64) -> u64 {
+    match a.checked_mul(b) {
+        Some(p) => p / c,
+        None => (a as u128 * b as u128 / c as u128) as u64,
+    }
+}
+
+/// `a * b / c` rounded up, as `mul_div`, saturating at `u64::MAX`.
+#[inline]
+pub fn mul_div_ceil(a: u64, b: u64, c: u64) -> u64 {
+    match a.checked_mul(b) {
+        Some(p) => p.div_ceil(c),
+        None => (a as u128 * b as u128).div_ceil(c as u128).min(u64::MAX as u128) as u64,
+    }
+}
+
 fn ticks_to_duration(ticks: u64) -> Duration {
     Duration::from_nanos((ticks as u128 * 1_000_000_000 / PIT_HZ as u128) as u64)
 }
@@ -67,8 +88,12 @@ fn ticks_to_duration(ticks: u64) -> Duration {
 const RETRACE_MARGIN_NS: u64 = 1000;
 
 /// How long before a frame is due `sleep_until` stops sleeping and spins:
-/// a sleep can overshoot by about that much.
+/// a sleep can overshoot by about that much, a millisecond with Windows'
+/// timer, a tenth of that elsewhere. (Spinning takes the host's time.)
+#[cfg(windows)]
 const SPIN: Duration = Duration::from_millis(1);
+#[cfg(not(windows))]
+const SPIN: Duration = Duration::from_micros(200);
 
 /// Wait until `at`, closer than a sleep alone would.
 fn sleep_until(at: Instant) {
@@ -128,46 +153,43 @@ impl Clock {
         self.cycles_per_ms
     }
 
-    fn instructions_per_second(&self) -> u128 {
-        self.cycles_per_ms as u128 * 1000
+    fn instructions_per_second(&self) -> u64 {
+        self.cycles_per_ms as u64 * 1000
     }
 
     /// Current emulated time in PIT ticks.
     pub fn now_ticks(&self) -> u64 {
-        let delta = self.icount.saturating_sub(self.base_icount) as u128;
-        self.base_ticks + (delta * PIT_HZ as u128 / self.instructions_per_second()) as u64
+        let delta = self.icount.saturating_sub(self.base_icount);
+        self.base_ticks + mul_div(delta, PIT_HZ, self.instructions_per_second())
     }
 
     /// Current emulated time in nanoseconds.
     pub fn now_ns(&self) -> u64 {
-        let delta = self.icount.saturating_sub(self.base_icount) as u128;
-        self.base_ns + (delta * 1_000_000 / self.cycles_per_ms as u128) as u64
+        let delta = self.icount.saturating_sub(self.base_icount);
+        self.base_ns + mul_div(delta, 1_000_000, self.cycles_per_ms as u64)
     }
 
     /// The emulated time in nanoseconds at instruction count `icount`.
     pub fn ns_at(&self, icount: u64) -> u64 {
-        let delta = icount.saturating_sub(self.base_icount) as u128;
-        self.base_ns + (delta * 1_000_000 / self.cycles_per_ms as u128) as u64
+        let delta = icount.saturating_sub(self.base_icount);
+        self.base_ns + mul_div(delta, 1_000_000, self.cycles_per_ms as u64)
     }
 
     /// The first instruction count at which `now_ns() >= ns`.
     pub fn icount_at_ns(&self, ns: u64) -> u64 {
-        let delta = ns.saturating_sub(self.base_ns) as u128;
-        let n = (delta * self.cycles_per_ms as u128).div_ceil(1_000_000);
-        self.base_icount.saturating_add(n.min(u64::MAX as u128) as u64)
+        let delta = ns.saturating_sub(self.base_ns);
+        self.base_icount.saturating_add(mul_div_ceil(delta, self.cycles_per_ms as u64, 1_000_000))
     }
 
     /// Current emulated time in microseconds.
     pub fn now_micros(&self) -> u64 {
-        (self.now_ticks() as u128 * 1_000_000 / PIT_HZ as u128) as u64
+        mul_div(self.now_ticks(), 1_000_000, PIT_HZ)
     }
 
     /// The first instruction count at which `now_ticks() >= ticks`.
     pub fn icount_at(&self, ticks: u64) -> u64 {
-        let delta = ticks.saturating_sub(self.base_ticks) as u128;
-        let n = (delta * self.instructions_per_second()).div_ceil(PIT_HZ as u128);
-        self.base_icount
-            .saturating_add(n.min(u64::MAX as u128) as u64)
+        let delta = ticks.saturating_sub(self.base_ticks);
+        self.base_icount.saturating_add(mul_div_ceil(delta, self.instructions_per_second(), PIT_HZ))
     }
 
     /// Change the speed from the current instruction onwards. Callers on the
@@ -849,5 +871,37 @@ mod tests {
         // No slower than the slowest.
         assert_eq!(CpuSpeed::Fixed(150).stepped(150, false), CpuSpeed::Fixed(MIN_CYCLES));
         assert_eq!(CpuSpeed::Fixed(MIN_CYCLES).stepped(MIN_CYCLES, false), CpuSpeed::Fixed(MIN_CYCLES));
+    }
+}
+
+#[cfg(test)]
+mod mul_div_tests {
+    use super::{mul_div, mul_div_ceil};
+
+    #[test]
+    fn mul_div_is_the_128_bit_quotient() {
+        let values = [
+            0u64,
+            1,
+            999,
+            1_000_000,
+            1_193_182,
+            (u64::MAX / 1_000_000) - 1,
+            u64::MAX / 1_000_000,
+            u64::MAX / 1_000_000 + 1,
+            u64::MAX / 3,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for &a in &values {
+            for &b in &[1u64, 1000, 1_000_000, 1_193_182, 2_000_000_000, u64::MAX] {
+                for &c in &[1u64, 7, 1000, 1_193_182, 3_000_000, u64::MAX] {
+                    let wide = a as u128 * b as u128;
+                    assert_eq!(mul_div(a, b, c), (wide / c as u128) as u64, "{a} * {b} / {c}");
+                    let up = wide.div_ceil(c as u128).min(u64::MAX as u128) as u64;
+                    assert_eq!(mul_div_ceil(a, b, c), up, "{a} * {b} / {c} up");
+                }
+            }
+        }
     }
 }

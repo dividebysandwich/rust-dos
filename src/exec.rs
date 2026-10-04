@@ -831,7 +831,8 @@ fn dynamic<const HOT: bool>(
     if HOT && hook.before_exec(cpu, at.phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
-    let translatable = fetch.window.phys(cpu, at.eip, at.lin_ip, at.cs_limit).is_some()
+    // (Outside the code window `locate` just opened one there.)
+    let translatable = (at.in_window || fetch.window.phys(cpu, at.eip, at.lin_ip, at.cs_limit).is_some())
         && at.phys_ip >> 12 != crate::mouse::CALLBACK_STUB >> 12
         && !cpu.in_shell_code()
         && !is_service_trap(fetch.ram, at.phys_ip);
@@ -841,6 +842,10 @@ fn dynamic<const HOT: bool>(
     // What the code window depends on, before the blocks run.
     let window = (cpu.tlb.epoch, cpu.cpl, cpu.bus.a20_mask());
     match fetch.dynrec.run(cpu, &at, single) {
+        // No block runs here (or none fits before the timer event, which
+        // the interpreter then runs up to): the interpreter goes on through
+        // the simple instructions after this one, as on its own.
+        Run::Interpret if !single => execute_at::<false, true>(cpu, fetch, hook, at),
         Run::Interpret => execute_at::<false, false>(cpu, fetch, hook, at),
         Run::Ran { page } => {
             fetch.window.moved(page, window);

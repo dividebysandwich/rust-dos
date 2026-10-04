@@ -733,7 +733,7 @@ impl Bus {
     pub fn disk_noise(&mut self, class: crate::diskio::DiskClass, access: crate::disknoise::Access, ns: u64) {
         if self.disknoise.enabled(class) {
             self.audio_catch_up();
-            let frames = (ns as u128 * crate::opl::RATE as u128 / 1_000_000_000) as u64;
+            let frames = crate::timer::mul_div(ns, crate::opl::RATE as u64, 1_000_000_000);
             self.disknoise.io(class, access, frames);
         }
     }
@@ -1809,7 +1809,7 @@ impl Bus {
         self.sb_advance();
         self.gus_advance();
         let rate = crate::opl::RATE as u64;
-        let target = (self.clock.now_ticks() as u128 * rate as u128 / crate::timer::PIT_HZ as u128) as u64;
+        let target = crate::timer::mul_div(self.clock.now_ticks(), rate as u64, crate::timer::PIT_HZ);
         // After a long pause (a debugger stop, a slow host) start afresh
         // rather than render seconds of catch-up.
         if target.saturating_sub(self.audio_frames) > rate / 2 {
@@ -2041,7 +2041,7 @@ impl Bus {
 
     /// Emulated time in the EMU8000's 44.1 kHz frames.
     fn awe_frames(&self) -> u64 {
-        (self.clock.now_ticks() as u128 * 44_100 / crate::timer::PIT_HZ as u128) as u64
+        crate::timer::mul_div(self.clock.now_ticks(), 44_100, crate::timer::PIT_HZ)
     }
 
     /// Whether `port` belongs to the AWE32's EMU8000.
@@ -2194,17 +2194,17 @@ impl Bus {
         self.pic.pending()
     }
 
-    /// Whether any device requests an interrupt on a line its PIC doesn't
-    /// mask, or a mouse event handler call waits: the cheap test the CPU
-    /// makes before each instruction, ahead of the PIC's priority logic.
-    /// Masked requests stay out of it: a driver that polls its card with the
-    /// card's IRQ masked (HMI's Ultrasound driver) leaves the request
-    /// latched for as long as it runs.
+    /// Whether the PICs would let an interrupt through (a request on a line
+    /// they don't mask, of a higher priority than those in service), or a
+    /// mouse event handler call waits. Masked requests stay out of it: a
+    /// driver that polls its card with the card's IRQ masked (HMI's
+    /// Ultrasound driver) leaves the request latched for as long as it
+    /// runs; so do requests an interrupt handler in service holds back,
+    /// which would otherwise send the CPU to the PICs before every
+    /// instruction of the handler.
     #[inline(always)]
     pub fn interrupt_requested(&self) -> bool {
-        let master = self.pic.master.irr & !self.pic.master.imr;
-        let slave = self.pic.slave.irr & !self.pic.slave.imr;
-        master | slave != 0 || self.mouse.pending_callback_events & self.mouse.callback_mask != 0
+        self.pic.pending().is_some() || self.mouse.pending_callback_events & self.mouse.callback_mask != 0
     }
 
     /// Work out `irq_ready` again.
