@@ -541,6 +541,33 @@ impl VgaCard {
         let chain4 = (seq_mem_mode & 0x08) != 0;
         let odd_even = (seq_mem_mode & 0x04) == 0;
         let map_mask = self.sequencer_regs[0x02] & 0x0F;
+        if !self.text_in_planes() && (chain4 || !odd_even) {
+            // The graphics planes alone (see `plane_index`): chain 4's byte
+            // o into plane o & 3 at o >> 2, else each byte into the planes
+            // of the map mask.
+            let size = self.plane_size();
+            let mask = size - 1;
+            let planes = &mut self.vram_graphics;
+            if chain4 {
+                for i in 0..len {
+                    let at = offset + i;
+                    planes[(at & 3) * size + ((at >> 2) & mask)] = byte(i);
+                }
+            } else {
+                for i in 0..len {
+                    let (at, value) = ((offset + i) & mask, byte(i));
+                    for p in 0..4 {
+                        if map_mask & (1 << p) != 0 {
+                            planes[p * size + at] = value;
+                        }
+                    }
+                }
+            }
+            if len > 0 {
+                self.mark_dirty_full();
+            }
+            return;
+        }
         for i in 0..len {
             let at = offset + i;
             let (plane_offset, planes) = if chain4 {
