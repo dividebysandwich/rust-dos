@@ -2770,6 +2770,115 @@ fn fpu_quotients_sums_and_comparisons_run_as_their_handlers() {
 }
 
 #[test]
+fn fpu_integer_operands_run_as_their_handlers() {
+    let (_, b, stats) = fpu_loop(|a| {
+        a.fld(dword_ptr(esi))?;
+        a.fimul(dword_ptr(esi + 8))?;
+        a.fst(dword_ptr(edi))?;
+        a.fimul(word_ptr(esi + 8))?;
+        a.fst(dword_ptr(edi + 4))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fiadd(dword_ptr(esi + 8))?;
+        a.fst(dword_ptr(edi + 8))?;
+        a.fisub(word_ptr(esi + 8))?;
+        a.fst(dword_ptr(edi + 12))?;
+        a.fisubr(dword_ptr(esi + 8))?;
+        a.fst(dword_ptr(edi + 16))?;
+        a.fiadd(word_ptr(esi + 8))?;
+        a.fisub(dword_ptr(esi + 8))?;
+        a.fisubr(word_ptr(esi + 8))?;
+        a.fstp(dword_ptr(edi + 20))?;
+        a.fstp(dword_ptr(edi + 24))
+    });
+    let _ = b;
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
+    }
+}
+
+const DOUBLES: [u64; 12] = [
+    0x3FF8_0000_0000_0000, // 1.5
+    0xC002_0000_0000_0000, // -2.25
+    0x0000_0000_0000_0000,
+    0x8000_0000_0000_0000,
+    0x0000_0000_0000_1234, // a denormal
+    0x7FF0_0000_0000_0000,
+    0xFFF0_0000_0000_0000,
+    0x7FF8_0000_0000_0000,
+    0x7FF0_0000_0000_0001, // a signalling NaN
+    0x7FEF_FFFF_FFFF_FFFF,
+    0x01A5_6E1F_C2F8_F359, // 1e-300
+    0x3FB9_9999_9999_999A, // 0.1
+];
+
+#[test]
+fn fpu_doubles_in_memory_run_as_their_handlers() {
+    // Every pair of `DOUBLES` through the m64 forms, then operands the
+    // handlers take: one across a page, one in the video memory.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = DOUBLES.len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..n * n {
+            let at = input + 16 * k;
+            for (o, d) in [(0, DOUBLES[(k % n) as usize]), (8, DOUBLES[(k / n) as usize])] {
+                rig.write32(at + o, d as u32);
+                rig.write32(at + o + 4, (d >> 32) as u32);
+            }
+        }
+        rig.write32(DATA + 0x7FFC, 0x1234_5678);
+        rig.write32(DATA + 0x8000 - 0x10000 + 0x10000, 0x3FF0_0000);
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, n * n)?;
+            a.set_label(&mut again)?;
+            a.fld(qword_ptr(esi))?;
+            a.fmul(qword_ptr(esi + 8))?;
+            a.fstp(qword_ptr(edi))?;
+            a.fld(qword_ptr(esi))?;
+            a.fdiv(qword_ptr(esi + 8))?;
+            a.fstp(qword_ptr(edi + 8))?;
+            a.fld(qword_ptr(esi))?;
+            a.fdivr(qword_ptr(esi + 8))?;
+            a.fst(qword_ptr(edi + 16))?;
+            a.fadd(qword_ptr(esi + 8))?;
+            a.fsub(qword_ptr(esi))?;
+            a.fsubr(qword_ptr(esi + 8))?;
+            a.fstp(qword_ptr(edi + 24))?;
+            a.fld(qword_ptr(esi))?;
+            a.fcomp(qword_ptr(esi + 8))?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            a.fld(qword_ptr(esi))?;
+            a.fcom(qword_ptr(esi + 8))?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            a.fstp(qword_ptr(edi + 32))?;
+            a.add(esi, 16)?;
+            a.add(edi, 40)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.fld(qword_ptr(DATA + 0x7FFC))?;
+            a.fstp(qword_ptr(DATA + 0x6FFC))?;
+            a.fld(qword_ptr(0xA0000u64))?;
+            a.fstp(qword_ptr(0xA0010u64))?;
+            a.fld(qword_ptr(0xA0010u64))?;
+            a.fstp(qword_ptr(DATA + 0x6000))?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    // 1.5 * 1.5 = 2.25.
+    assert_eq!(b.read32(output + 4), 0x4002_0000);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 10 > stats.instructions, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
 fn fpu_instructions_on_empty_registers_run_as_their_handlers() {
     // Pops from an empty stack and pushes onto a full one: the registers
     // read as the real indefinite, which the handlers see to.

@@ -1283,6 +1283,13 @@ impl Gen<'_> {
                 let (wb, reload) = (self.cache.dirty, self.cache.loaded);
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
+            Uop::BailUnlessRam { t } => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch x64 ; cmp Rq(r(t)), RAM_HANDLES ; ja =>at);
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+            }
             Uop::Imul { size, a, b } => {
                 let a = r(a);
                 match (size, b) {
@@ -1629,6 +1636,19 @@ impl Gen<'_> {
             },
             Uop::FToSingle { t, x } => {
                 dynasm!(self.ops ; .arch x64 ; cvtsd2ss xmm2, Rx(x.0) ; movd Rd(r(t)), xmm2);
+            }
+            Uop::FLoad64 { x, m, canon } => {
+                dynasm!(self.ops ; .arch x64 ; movsd Rx(x.0), QWORD [r13 + Rq(r(m))]);
+                if canon {
+                    self.fpu_canon(x.0);
+                }
+            }
+            Uop::FToHalf { t, x, high } => {
+                dynasm!(self.ops ; .arch x64 ; movq rax, Rx(x.0));
+                if high {
+                    dynasm!(self.ops ; .arch x64 ; shr rax, 32);
+                }
+                dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), eax);
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch x64 ; mulsd Rx(a.0), Rx(b.0)),

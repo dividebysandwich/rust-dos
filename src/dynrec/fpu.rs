@@ -37,7 +37,120 @@ pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
         u.push(Uop::FFromT { x: X0, t: T0, kind: FKind::Single });
         true
     };
+    // A word or dword integer in memory, into X0.
+    let int = |u: &mut Vec<Uop>| -> bool {
+        let size = if instr.memory_size() == iced_x86::MemorySize::Int16 { 2 } else { 4 };
+        if mem(instr, T1, size, false, u).is_none() {
+            return false;
+        }
+        u.push(Uop::Load { dst: T0, m: T1, size });
+        if size == 2 {
+            u.push(Uop::Extend { t: T0, from: 2, signed: true });
+        }
+        u.push(Uop::FFromT { x: X0, t: T0, kind: FKind::Int });
+        true
+    };
+    // A double in memory, into X0, where it is plain RAM (else the handler
+    // runs the instruction, which checks the operand as a whole as well).
+    // (`canon` as the handler makes the operand: multiplications and
+    // divisions do.)
+    let double = |u: &mut Vec<Uop>, canon: bool| -> bool {
+        if mem(instr, T1, 8, false, u).is_none() {
+            return false;
+        }
+        u.push(Uop::BailUnlessRam { t: T1 });
+        u.push(Uop::FLoad64 { x: X0, m: T1, canon });
+        true
+    };
     match instr.code() {
+        Fld_m64fp => {
+            guard(u, 0);
+            if !double(u, false) {
+                return false;
+            }
+            u.push(Uop::FPush { x: X0, canon: true });
+        }
+        Fst_m64fp | Fstp_m64fp => {
+            guard(u, 1);
+            if mem(instr, T1, 8, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::BailUnlessRam { t: T1 });
+            u.push(Uop::FGet { x: X0, i: 0 });
+            if instr.code() == Fstp_m64fp {
+                u.push(Uop::FPop { n: 1 });
+            }
+            // As the handler writes it: the low dword, then the high one.
+            u.push(Uop::FToHalf { t: T0, x: X0, high: false });
+            u.push(Uop::Store { m: T1, src: T0, size: 4 });
+            u.push(Uop::FToHalf { t: T0, x: X0, high: true });
+            u.push(Uop::AddConst { t: T1, v: 4, size: 4 });
+            u.push(Uop::Store { m: T1, src: T0, size: 4 });
+        }
+        Fmul_m64fp => {
+            guard(u, 1);
+            if !double(u, true) {
+                return false;
+            }
+            u.push(Uop::FGet { x: X1, i: 0 });
+            u.push(Uop::FMul { a: X1, b: X0 });
+            u.push(Uop::FSet { i: 0, x: X1, canon: true });
+        }
+        Fdiv_m64fp | Fdivr_m64fp => {
+            let reversed = instr.code() == Fdivr_m64fp;
+            guard(u, 1);
+            if !double(u, true) {
+                return false;
+            }
+            u.push(Uop::FGet { x: X1, i: 0 });
+            let (num, den) = if reversed { (X0, X1) } else { (X1, X0) };
+            u.push(Uop::FDiv { i: 0, num, den, ze: reversed });
+        }
+        Fadd_m64fp | Fsub_m64fp | Fsubr_m64fp => {
+            let kind = match instr.code() {
+                Fadd_m64fp => ADD_VALUE,
+                Fsub_m64fp => SUB_VALUE,
+                _ => SUBR_VALUE,
+            };
+            guard(u, 0);
+            if !double(u, false) {
+                return false;
+            }
+            u.push(Uop::FAddValue { kind, x: X0 });
+        }
+        Fcom_m64fp | Fcomp_m64fp => {
+            guard(u, 1);
+            if !double(u, false) {
+                return false;
+            }
+            u.push(Uop::FGet { x: X1, i: 0 });
+            u.push(Uop::FCom { a: X1, b: X0 });
+            if instr.code() == Fcomp_m64fp {
+                u.push(Uop::FPop { n: 1 });
+            }
+        }
+        Fimul_m16int | Fimul_m32int => {
+            guard(u, 1);
+            if !int(u) {
+                return false;
+            }
+            u.push(Uop::FGet { x: X1, i: 0 });
+            u.push(Uop::FMul { a: X1, b: X0 });
+            u.push(Uop::FSet { i: 0, x: X1, canon: true });
+        }
+        // (The integer comes to the same 80 bits as the double of it.)
+        Fiadd_m16int | Fiadd_m32int | Fisub_m16int | Fisub_m32int | Fisubr_m16int | Fisubr_m32int => {
+            let kind = match instr.code() {
+                Fiadd_m16int | Fiadd_m32int => ADD_VALUE,
+                Fisub_m16int | Fisub_m32int => SUB_VALUE,
+                _ => SUBR_VALUE,
+            };
+            guard(u, 0);
+            if !int(u) {
+                return false;
+            }
+            u.push(Uop::FAddValue { kind, x: X0 });
+        }
         Fld_m32fp => {
             guard(u, 0);
             if !single(u) {

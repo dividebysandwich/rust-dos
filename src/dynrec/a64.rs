@@ -1334,6 +1334,12 @@ impl Gen<'_> {
                 let end = self.end();
                 self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
+            Uop::BailUnlessRam { t } => {
+                let at = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch aarch64 ; tst X(r(t)), NOT_RAM ; b.ne =>at);
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+            }
             Uop::Imul { size, a, b } => self.imul(size, a, b),
             Uop::BitOp { op, size, t, bit } => {
                 let bits = size as u32 * 8;
@@ -1594,6 +1600,20 @@ impl Gen<'_> {
             },
             Uop::FToSingle { t, x } => {
                 dynasm!(self.ops ; .arch aarch64 ; fcvt s16, D(d(x)) ; fmov W(r(t)), s16);
+            }
+            Uop::FLoad64 { x, m, canon } => {
+                dynasm!(self.ops ; .arch aarch64 ; ldr D(d(x)), [x21, X(r(m))]);
+                if canon {
+                    self.fpu_canon(d(x));
+                }
+            }
+            Uop::FToHalf { t, x, high } => {
+                dynasm!(self.ops ; .arch aarch64 ; fmov X(r(t)), D(d(x)));
+                if high {
+                    dynasm!(self.ops ; .arch aarch64 ; lsr X(r(t)), X(r(t)), 32);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), W(r(t)));
+                }
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch aarch64 ; fmul D(d(a)), D(d(a)), D(d(b))),

@@ -158,6 +158,10 @@ pub enum Uop {
     /// the operations after this one (a case they don't cover). Nothing
     /// before it may change anything, or fault.
     Bail { t: T, mask: u32 },
+    /// The instruction's handler runs it instead of the operations after
+    /// this one unless handle t (a `MemRef`'s) is RAM's: an operand of
+    /// plain RAM within a page. Nothing before it may change anything.
+    BailUnlessRam { t: T },
     /// a = a * b, signed, cut to `size` (2 or 4) bytes: the two- and
     /// three-operand IMUL. Only CF and OF change.
     Imul { size: u8, a: T, b: Src },
@@ -254,6 +258,11 @@ pub enum Uop {
     FXch { i: u8 },
     /// x = the single or the signed dword in t.
     FFromT { x: X, t: T, kind: FKind },
+    /// x = the double at handle m, which is RAM's (`BailUnlessRam`); with
+    /// `canon` as `FSet` makes one (the handlers' `canon_f64` of an operand).
+    FLoad64 { x: X, m: T, canon: bool },
+    /// t = the low dword of x's bits, or the high one with `high`.
+    FToHalf { t: T, x: X, high: bool },
     /// t = x as a single's bits.
     FToSingle { t: T, x: X },
     /// t = x as a word or dword (`size` 2 or 4), rounded as the control

@@ -113,11 +113,9 @@ pub fn fisubr(cpu: &mut Cpu, instr: &Instruction) {
 pub fn fimul(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
     let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-    let mut st0 = cpu.fpu_get(0);
-    // Note: If F80 doesn't have mul yet, use f64 as intermediary
-    let res_f = st0.get_f64() * val;
-    st0.set_f64(res_f);
-    cpu.fpu_set(0, st0);
+    // As a double, as FMUL's (which an F80 set to it comes to).
+    let st0 = cpu.fpu_get(0).get_f64();
+    cpu.fpu_set_f64(0, product(st0, val));
 }
 
 // FIDIV: Divide Integer
@@ -220,16 +218,31 @@ pub fn fsubrp(cpu: &mut Cpu, instr: &Instruction) {
     cpu.fpu_drop();
 }
 
+/// a * b, with a NaN of a's where both are NaNs, as SSE2's MULSD and
+/// ARM64's FMUL give it with a as the first operand, which the dynamic
+/// recompiler's code has it. (The compiler takes `*` as commutative and
+/// may swap them, which would make the NaN b's.)
+#[inline]
+pub fn product(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a * b
+    }
+}
+
 // FMUL: Multiply Real
 pub fn fmul(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
         let val = canon_f64(real_operand(cpu, instr).unwrap_or(0.0));
-        let product = cpu.fpu_get_f64(0) * val;
+        let product = product(cpu.fpu_get_f64(0), val);
         cpu.fpu_set_f64(0, product);
     } else {
         let dst_idx = (instr.op0_register().number() - Register::ST0.number()) as usize;
         let src_idx = (instr.op1_register().number() - Register::ST0.number()) as usize;
-        let product = cpu.fpu_get_f64(dst_idx) * cpu.fpu_get_f64(src_idx);
+        let product = product(cpu.fpu_get_f64(dst_idx), cpu.fpu_get_f64(src_idx));
         cpu.fpu_set_f64(dst_idx, product);
     }
 }
@@ -237,7 +250,7 @@ pub fn fmul(cpu: &mut Cpu, instr: &Instruction) {
 // FMULP: Multiply and Pop
 pub fn fmulp(cpu: &mut Cpu, instr: &Instruction) {
     let idx = get_pop_dst_index(instr);
-    let product = cpu.fpu_get_f64(idx) * cpu.fpu_get_f64(0);
+    let product = product(cpu.fpu_get_f64(idx), cpu.fpu_get_f64(0));
     cpu.fpu_set_f64(idx, product);
     cpu.fpu_drop();
 }

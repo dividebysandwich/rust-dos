@@ -681,7 +681,8 @@ fn guard<R>(ctx: &mut JitCtx, fallback: R, f: impl FnOnce() -> R) -> R {
 /// How a MemRef's operand is described to `jit_memref`: the segment, the
 /// size, whether it is written, and the slot.
 pub fn memref_desc(seg: Seg, size: u8, write: bool, slot: u8) -> u32 {
-    seg as u32 | (size as u32) << 4 | (write as u32) << 7 | (slot as u32) << 8
+    debug_assert!(size <= 8);
+    seg as u32 | (size as u32) << 4 | (write as u32) << 8 | (slot as u32) << 9
 }
 
 jit_fn! {
@@ -696,9 +697,9 @@ jit_fn! {
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.memref += 1;
         let seg = Seg::ALL[(desc & 7) as usize];
-        let size = (desc >> 4 & 7) as u8;
-        let access = if desc & 0x80 != 0 { Access::Write } else { Access::Read };
-        let slot = (desc >> 8 & 3) as usize;
+        let size = (desc >> 4 & 15) as u8;
+        let access = if desc & 0x100 != 0 { Access::Write } else { Access::Read };
+        let slot = (desc >> 9 & 3) as usize;
         // (The operand goes straight into its slot: handed back through
         // the guard, its two dwords would be stored apart and loaded as
         // one, which the host can't forward.)
