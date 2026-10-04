@@ -588,10 +588,12 @@ fn fetch_texel_in(t: &TmuRaster, mode: u32, texbase: u32, smax: i32, s: i32, tc:
 /// colour of the unit before it (`TEXTURE_PIPELINE`).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: i32, iters: i64, itert: i64, iterw: i64) -> u32 {
+fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: i32, iters: i64, itert: i64, iterw: i64, rl: Option<(i64, i32)>) -> u32 {
     let (mut s, mut tc, mut lod);
     if bit(mode, 0) {
-        let (oow, log) = tables().reciplog(iterw);
+        // (`rl`: the reciprocal and log of `iterw`, where the other unit
+        // worked them out for the same W.)
+        let (oow, log) = rl.unwrap_or_else(|| tables().reciplog(iterw));
         s = (oow.wrapping_mul(iters) >> 29) as i32;
         tc = (oow.wrapping_mul(itert) >> 29) as i32;
         lod = log + lodbase;
@@ -1020,17 +1022,26 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         let q = &p.tmu[i];
         *t = (at64(q.starts, q.dsdy, q.dsdx), at64(q.startt, q.dtdy, q.dtdx), at64(q.startw, q.dwdy, q.dwdx));
     }
+    // Both units iterating the same W (as Glide sets them up) divide by it
+    // once.
+    let (w0, w1) = (&p.tmu[0], &p.tmu[1]);
+    let same_w = TMUS >= 2
+        && (w0.startw, w0.dwdx, w0.dwdy) == (w1.startw, w1.dwdx, w1.dwdy)
+        && st.tmu[0].as_ref().is_some_and(|t| bit(m.tex[0], 0) && t.lodmin < 8 << 8)
+        && st.tmu[1].as_ref().is_some_and(|t| bit(m.tex[1], 0) && t.lodmin < 8 << 8)
+        && st.send_config.is_none();
 
     for x in startx..stopx {
         if let Some(depthval) = row.begin(x, y, iterz, iterw, stipple, stats) {
             // TMU 1 first, whose output TMU 0 combines with.
             let mut texel = 0u32;
+            let rl = same_w.then(|| tables().reciplog(tex[1].2));
             if TMUS >= 2
                 && let Some(t) = &st.tmu[1]
                 && t.lodmin < 8 << 8
             {
                 let (s, tc, w) = tex[1];
-                texel = texture(t, m.tex[1], x, row.dither4, texel, p.tmu[1].lodbase, s, tc, w);
+                texel = texture(t, m.tex[1], x, row.dither4, texel, p.tmu[1].lodbase, s, tc, w, rl);
             }
             if TMUS >= 1
                 && let Some(t) = &st.tmu[0]
@@ -1040,7 +1051,7 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
                     Some(config) => config,
                     None => {
                         let (s, tc, w) = tex[0];
-                        texture(t, m.tex[0], x, row.dither4, texel, p.tmu[0].lodbase, s, tc, w)
+                        texture(t, m.tex[0], x, row.dither4, texel, p.tmu[0].lodbase, s, tc, w, rl)
                     }
                 };
             }
