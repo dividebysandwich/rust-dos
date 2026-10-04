@@ -519,14 +519,28 @@ impl<'a> Row<'a> {
 pub(crate) fn fetch_texel(t: &TmuRaster, texbase: u32, smax: i32, s: i32, tc: i32) -> u32 {
     let format = (t.mode >> 8) & 0xF;
     let index = (tc as u32).wrapping_mul(smax as u32 + 1).wrapping_add(s as u32);
+    // The addresses are masked to the memory's size (a power of two), and
+    // the tables have an entry for every byte, or for every word of the
+    // 16-bit formats that look a word up (`Tmu::lookup`).
+    debug_assert!(t.mask as usize + 1 == t.ram.bytes() && t.lookup.len() >= 256);
+    let lookup = |i: usize| {
+        debug_assert!(i < t.lookup.len());
+        // SAFETY: see above.
+        unsafe { *t.lookup.get_unchecked(i) }
+    };
     if format < 8 {
-        t.lookup[t.ram.byte((texbase.wrapping_add(index) & t.mask) as usize) as usize]
+        let a = (texbase.wrapping_add(index) & t.mask) as usize;
+        // SAFETY: a byte address within the memory.
+        let word = unsafe { t.ram.get_unchecked(a >> 1) };
+        lookup((word >> ((a & 1) * 8)) as u8 as usize)
     } else {
-        let texel = t.ram.get(((texbase.wrapping_add(index.wrapping_mul(2)) & t.mask) >> 1) as usize) as u32;
+        // SAFETY: a word within the memory.
+        let texel = unsafe { t.ram.get_unchecked(((texbase.wrapping_add(index.wrapping_mul(2)) & t.mask) >> 1) as usize) } as u32;
         if (10..=12).contains(&format) {
-            t.lookup[texel as usize]
+            debug_assert!(t.lookup.len() == 0x10000);
+            lookup(texel as usize)
         } else {
-            (t.lookup[(texel & 0xFF) as usize] & 0xFF_FFFF) | ((texel & 0xFF00) << 16)
+            (lookup((texel & 0xFF) as usize) & 0xFF_FFFF) | ((texel & 0xFF00) << 16)
         }
     }
 }

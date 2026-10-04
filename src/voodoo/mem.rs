@@ -40,6 +40,18 @@ impl Vram {
         self.words[i].load(Relaxed)
     }
 
+    /// The word at index `i`, which is within the memory.
+    ///
+    /// # Safety
+    ///
+    /// `i < self.len()`.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, i: usize) -> u16 {
+        debug_assert!(i < self.words.len());
+        // SAFETY: the caller keeps `i` within the words.
+        unsafe { self.words.get_unchecked(i).load(Relaxed) }
+    }
+
     #[inline]
     pub fn set(&self, i: usize, value: u16) {
         self.words[i].store(value, Relaxed)
