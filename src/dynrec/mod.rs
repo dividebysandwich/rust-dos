@@ -62,6 +62,21 @@ const MAX_BLOCK: usize = 64;
 #[cfg(dynrec)]
 const CODE_SIZE: usize = 128 << 20;
 
+/// How often translated code called into Rust, for the statistics.
+#[derive(Clone, Debug, Default)]
+pub struct Calls {
+    /// `jit_fallback`, by the instruction's mnemonic.
+    pub fallback: Vec<u64>,
+    pub revalidate: u64,
+    pub memref: u64,
+    /// `jit_read` and `jit_write`.
+    pub slow: u64,
+    /// `jit_dev_read` and `jit_dev_write`.
+    pub dev: u64,
+    pub port: u64,
+    pub load_seg: u64,
+}
+
 /// Counts for the statistics.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DynStats {
@@ -89,6 +104,11 @@ pub struct DynStats {
     /// Blocks that stopped at an instruction whose watched bytes had
     /// changed.
     pub watched: u64,
+    /// Exits of translated code, by their code (`helpers::EXIT_*`), and
+    /// the returns among them that went to a place none of their links
+    /// had (`RETURN_MISS`).
+    pub exits: [u64; 16],
+    pub return_misses: u64,
 }
 
 /// What a block's code is translated for besides its instructions, which
@@ -215,6 +235,17 @@ impl DynState {
             return DynStats { links: engine.links(), ..self.stats };
         }
         self.stats
+    }
+
+    /// How often translated code called into Rust.
+    #[cfg(dynrec)]
+    pub fn calls(&self) -> Option<&Calls> {
+        self.engine.as_ref().map(|e| e.calls())
+    }
+
+    #[cfg(not(dynrec))]
+    pub fn calls(&self) -> Option<&Calls> {
+        None
     }
 
     /// The counts but for the links, which take counting: for every
@@ -478,6 +509,11 @@ mod engine {
             stats.flushes += 1;
             stats.live_blocks = 0;
             stats.code_bytes = 0;
+        }
+
+        /// Calls of Rust from translated code.
+        pub fn calls(&self) -> &super::Calls {
+            &self.ctx.calls
         }
 
         /// Links between blocks now.
@@ -786,6 +822,8 @@ mod engine {
                     return Run::Panic(payload);
                 }
                 let (kind, ix) = (ret as u32 & 0xFF, (ret as u32 >> 8 & 0xFF) as usize);
+                stats.exits[kind as usize & 15] += 1;
+                stats.return_misses += (kind == EXIT_UNLINKED && ix == RETURN_MISS) as u64;
                 // SAFETY: the block the code returned from (the one entered,
                 // or one linked from it) is still alive: nothing retires
                 // blocks while code runs.

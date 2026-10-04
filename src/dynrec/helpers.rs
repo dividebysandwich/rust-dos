@@ -118,6 +118,8 @@ pub struct JitCtx {
     pub fpu: [usize; 4],
     /// `jit_dev_read` and `jit_dev_write` (x86-64).
     pub dev: [usize; 2],
+    /// Calls of the functions above, for the statistics.
+    pub calls: super::Calls,
 }
 
 pub const CTX_FALLBACK: i32 = offset_of!(JitCtx, fallback) as i32;
@@ -221,6 +223,7 @@ impl JitCtx {
             dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
             #[cfg(not(target_arch = "x86_64"))]
             dev: [0; 2],
+            calls: super::Calls { fallback: vec![0; iced_x86::Mnemonic::values().len()], ..super::Calls::default() },
         }
     }
 }
@@ -254,6 +257,7 @@ jit_fn! {
         let ix = ix as usize;
         let instr = &data.instrs[ix];
         let handler = data.handlers[ix];
+        ctx.calls.fallback[instr.mnemonic() as usize] += 1;
         let start_esp = cpu.esp();
         cpu.set_eip(data.eips[ix].wrapping_add(instr.len() as u32));
         let port = super::block::port_io(instr);
@@ -339,6 +343,7 @@ jit_fn! {
     fn jit_load_seg(cpu: *mut Cpu, ctx: *mut JitCtx, seg: u32, selector: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.load_seg += 1;
         let seg = Seg::ALL[seg as usize];
         match catch_unwind(AssertUnwindSafe(|| cpu.load_segment(seg, selector as u16))) {
             Ok(Ok(())) => {
@@ -369,6 +374,7 @@ jit_fn! {
     fn jit_port(cpu: *mut Cpu, ctx: *mut JitCtx, data: *mut BlockData, desc: u32, port: u32, value: u32) -> u64 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx, data) = unsafe { (&mut *cpu, &mut *ctx, &mut *data) };
+        ctx.calls.port += 1;
         let (out, size, ix) = (desc & 1 != 0, (desc >> 1 & 7) as u8, (desc >> 8 & 0xFF) as usize);
         let port = port as u16;
         cpu.set_eip(data.eips[ix].wrapping_add(data.instrs[ix].len() as u32));
@@ -446,9 +452,10 @@ jit_fn! {
     /// The generations of the block's chunks changed: if its bytes are
     /// still as translated (something else in the chunks was written),
     /// note the new generations and return 0 to run it, else 1.
-    fn jit_revalidate(cpu: *mut Cpu, _ctx: *mut JitCtx, data: *mut BlockData) -> u32 {
+    fn jit_revalidate(cpu: *mut Cpu, ctx: *mut JitCtx, data: *mut BlockData) -> u32 {
         // SAFETY: as in `jit_fallback`.
-        let (cpu, data) = unsafe { (&*cpu, &mut *data) };
+        let (cpu, ctx, data) = unsafe { (&*cpu, &mut *ctx, &mut *data) };
+        ctx.calls.revalidate += 1;
         if data.unchanged_from(cpu.bus.ram(), 0) {
             data.gen_sum = data.gens_now(&cpu.bus.page_gen);
             0
@@ -486,6 +493,7 @@ jit_fn! {
     fn jit_memref(cpu: *mut Cpu, ctx: *mut JitCtx, off: u32, desc: u32) -> u64 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.memref += 1;
         let seg = Seg::ALL[(desc & 7) as usize];
         let size = (desc >> 4 & 7) as u8;
         let access = if desc & 0x80 != 0 { Access::Write } else { Access::Read };
@@ -529,6 +537,7 @@ jit_fn! {
     fn jit_read(cpu: *mut Cpu, ctx: *mut JitCtx, slot: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.slow += 1;
         let r = ctx.refs[slot as usize & 3];
         guard(ctx, 0, || cpu.mem_read(r))
     }
@@ -540,6 +549,7 @@ jit_fn! {
     fn jit_write(cpu: *mut Cpu, ctx: *mut JitCtx, slot: u32, value: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.slow += 1;
         let r = ctx.refs[slot as usize & 3];
         guard(ctx, (), || cpu.mem_write(r, value));
         let in_first = 0x1000 - (r.phys & 0xFFF);
@@ -612,6 +622,7 @@ jit_fn! {
     fn jit_dev_read(cpu: *mut Cpu, ctx: *mut JitCtx, phys: u32, size: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.dev += 1;
         let p = phys as usize;
         guard(ctx, 0, || match size {
             1 => cpu.bus.read_8(p) as u32,
@@ -629,6 +640,7 @@ jit_fn! {
     fn jit_dev_write(cpu: *mut Cpu, ctx: *mut JitCtx, phys: u32, value: u32, size: u32) -> u32 {
         // SAFETY: as in `jit_fallback`.
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        ctx.calls.dev += 1;
         // Pixels into the VGA's planes, which mode X programs write one or
         // two at a time. (They can't be in the block's bytes, which are in
         // RAM.)

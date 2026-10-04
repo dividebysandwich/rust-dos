@@ -828,6 +828,37 @@ impl DebugHub {
     }
 
     fn stats_json(&self, cpu: &Cpu) -> Value {
+        fn dynrec_exits(d: &rust_dos::dynrec::DynStats) -> Value {
+            const NAMES: [&str; 14] = [
+                "", "fault", "smc", "panic", "next", "deadline", "stale", "gp0", "limit", "unlinked", "de", "watched",
+                "after", "next_page",
+            ];
+            let mut map = serde_json::Map::new();
+            for (k, name) in NAMES.iter().enumerate().skip(1) {
+                if d.exits[k] != 0 {
+                    map.insert(name.to_string(), json!(d.exits[k]));
+                }
+            }
+            Value::Object(map)
+        }
+        fn dynrec_calls(calls: Option<&rust_dos::dynrec::Calls>) -> Value {
+            let Some(c) = calls else { return Value::Null };
+            let mut top: Vec<(usize, u64)> = c.fallback.iter().copied().enumerate().filter(|&(_, n)| n != 0).collect();
+            top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+            let names: Vec<_> = iced_x86::Mnemonic::values().collect();
+            let fallback: Vec<Value> =
+                top.iter().take(30).map(|&(m, n)| json!([format!("{:?}", names[m]), n])).collect();
+            json!({
+                "fallback": c.fallback.iter().sum::<u64>(),
+                "fallback_top": fallback,
+                "revalidate": c.revalidate,
+                "memref": c.memref,
+                "slow": c.slow,
+                "dev": c.dev,
+                "port": c.port,
+                "load_seg": c.load_seg,
+            })
+        }
         let st = &self.stats;
         let d = cpu.dynrec.stats();
         json!({
@@ -857,6 +888,12 @@ impl DebugHub {
                 "stale": d.stale,
                 "smc": d.smc,
                 "watched": d.watched,
+                // Exits of translated code by their kind, and the calls it
+                // made into Rust, with the instructions that went through
+                // their handlers most (for profiling).
+                "exits": dynrec_exits(&d),
+                "return_misses": d.return_misses,
+                "calls": dynrec_calls(cpu.dynrec.calls()),
             },
             // Host speed while executing guest code, excluding idle skips,
             // rendering and frame pacing.

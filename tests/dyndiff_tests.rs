@@ -268,6 +268,23 @@ fn local_program_alone() {
         timed as f64 / secs / 1e6,
         cpu.dynrec.stats()
     );
+    if let Some(calls) = cpu.dynrec.calls() {
+        let names: Vec<_> = iced_x86::Mnemonic::values().collect();
+        let mut top: Vec<(usize, u64)> = calls.fallback.iter().copied().enumerate().filter(|&(_, n)| n != 0).collect();
+        top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        let top: Vec<String> = top.iter().take(20).map(|&(m, n)| format!("{:?} {}", names[m], n)).collect();
+        println!(
+            "  calls: memref {} slow {} dev {} port {} load_seg {} revalidate {}\n  fallbacks {}: {}",
+            calls.memref,
+            calls.slow,
+            calls.dev,
+            calls.port,
+            calls.load_seg,
+            calls.revalidate,
+            calls.fallback.iter().sum::<u64>(),
+            top.join(", ")
+        );
+    }
 }
 
 /// Save the screen as a PNG file.
