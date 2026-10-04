@@ -1,4 +1,5 @@
-//! The game port at 201h: the mouse as joystick A without a controller,
+//! The game port at 201h: nothing plugged in without a controller, the
+//! mouse as joystick A,
 //! game controllers as one or two joysticks, the deadzone, and the BIOS's
 //! INT 15h AH=84h.
 
@@ -41,8 +42,21 @@ fn pad(axes: [f32; 4], buttons: u16) -> Option<PadState> {
 }
 
 #[test]
-fn the_mouse_drives_stick_a_without_a_gamepad() {
+fn nothing_is_plugged_in_without_a_gamepad() {
+    // The one-shots never trip and no button is down, as a port without a
+    // joystick reads: a program finds none (Quake would ask to centre it).
     let mut bus = bus_with(JoystickType::Auto);
+    bus.mouse.set_position(320, 100);
+    bus.mouse.button_down(0);
+    assert_eq!(poll(&mut bus), ([1000; 4], 0xF));
+    // Until a controller is.
+    bus.joystick.set_pad(1, pad([0.0; 4], 0));
+    assert_eq!(poll(&mut bus).0, [230; 4]);
+}
+
+#[test]
+fn the_mouse_drives_stick_a_when_asked() {
+    let mut bus = bus_with(JoystickType::Mouse);
     bus.mouse.set_position(0, 0);
     // At the top left, each axis is high for the first 10 reads; stick B
     // isn't there.

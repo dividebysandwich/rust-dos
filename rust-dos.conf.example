@@ -314,7 +314,7 @@
 [joystick]
 # What the game port has plugged in: auto (the default: one game controller
 # is both joysticks and all four buttons, two are a joystick each, and
-# without any the mouse is joystick A), 4axis (one controller: the left
+# without any nothing is plugged in), 4axis (one controller: the left
 # stick is joystick A, the right stick joystick B, A, B, X and Y the four
 # buttons), 2axis (two controllers, each a joystick with two buttons),
 # mouse, or none (no game port).

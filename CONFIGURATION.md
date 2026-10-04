@@ -443,7 +443,8 @@ The game port, which programs read joysticks from.
   * `auto` depends on the game controllers connected (Xbox or
     PlayStation style, through SDL or the browser's Gamepad API). One
     controller is both joysticks and all four buttons, two controllers
-    are a joystick each, and with none the mouse is joystick A.
+    are a joystick each, and with none nothing is plugged into the port
+    (programs that find a joystick would ask to calibrate it).
   * `4axis` is one controller: the left stick is joystick A and the
     right stick joystick B (a flight simulator's rudder and throttle),
     and A, B, X and Y are buttons 1 to 4.

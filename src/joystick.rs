@@ -1,5 +1,5 @@
 //! The game port at 201h and what is plugged into it (`[joystick]`): the
-//! host's game controllers, or the mouse as joystick A.
+//! host's game controllers, or the mouse as joystick A where asked for.
 //!
 //! A write to 201h fires four one-shots, one per axis, each of which stays
 //! high for a time that grows with its stick's position; games write the
@@ -51,7 +51,7 @@ impl JoystickType {
     /// As the settings window shows it.
     pub fn describe(self) -> &'static str {
         match self {
-            JoystickType::Auto => "auto (controller / mouse)",
+            JoystickType::Auto => "auto (controllers)",
             JoystickType::FourAxis => "one controller, 4 axes",
             JoystickType::TwoAxis => "two controllers",
             JoystickType::Mouse => "the mouse",
@@ -188,8 +188,10 @@ impl GamePort {
 
     fn layout(&self) -> Layout {
         match self.settings.kind {
+            // (Without a controller nothing is plugged in: programs that
+            // find a joystick, as Quake does, wait for it to be centred.)
             JoystickType::Auto => match self.pads.iter().flatten().count() {
-                0 => Layout::Mouse,
+                0 => Layout::None,
                 1 => Layout::FourAxis,
                 _ => Layout::TwoAxis,
             },
@@ -261,7 +263,8 @@ impl GamePort {
     /// A read of 201h: an axis bit is high until its one-shot trips, and
     /// one that isn't there has tripped; a button bit is low while pressed.
     pub fn read(&mut self, mouse: &MouseState) -> u8 {
-        if !self.present() {
+        // (With nothing plugged in the one-shots never trip.)
+        if !self.present() || self.layout() == Layout::None {
             return 0xFF;
         }
         let count = self.read_count;
