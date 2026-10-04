@@ -498,6 +498,54 @@ impl Gen<'_> {
         }
     }
 
+    /// A store of `src` through handle `m` that isn't to plain RAM: if it is
+    /// to the VGA's graphics window, with writes there plain ones into the
+    /// planes (`JitCtx::vga_ok`), write each plane the map mask selects
+    /// and count it in the bus's activity as `Activity::video_write` does,
+    /// and go on at `back`; else (and where the write would start a burst
+    /// of its own) fall through, to `jit_dev_write`.
+    fn vga_store(&mut self, back: DynamicLabel, m: T, src: T, size: u8) {
+        let s = size as u32;
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; tbz X(r(m)), DEV_BIT as u32, >slow
+            ; ldrb w0, [x20, CTX_VGA_OK as u32]
+            ; cbz w0, >slow
+            ; movz w2, 0xA, lsl 16
+            ; sub w1, W(r(m)), w2
+            ; movz w2, 0x10000 - s
+            ; cmp w1, w2
+            ; b.hi >slow
+        );
+        self.field(Access::Ldr64, 3, layout::ICOUNT);
+        self.field(Access::Ldr64, 4, layout::LAST_WRITE);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; sub x5, x3, x4
+            ; movz w6, layout::BURST_GAP as u32
+            ; cmp x5, x6
+            ; b.hi >slow
+        );
+        self.field(Access::Ldr64, 5, layout::VIDEO_BYTES);
+        dynasm!(self.ops ; .arch aarch64 ; add x5, x5, s);
+        self.field(Access::Str64, 5, layout::VIDEO_BYTES);
+        self.field(Access::Ldr64, 5, layout::BURST);
+        dynasm!(self.ops ; .arch aarch64 ; add x5, x5, s);
+        self.field(Access::Str64, 5, layout::BURST);
+        self.field(Access::Str64, 3, layout::LAST_WRITE);
+        dynasm!(self.ops ; .arch aarch64 ; movz w6, 1 ; strb w6, [x20, CTX_VGA_WROTE as u32]);
+        for p in 0..4u32 {
+            let at = CTX_VGA_PLANES as u32 + p * 8;
+            dynasm!(self.ops ; .arch aarch64 ; ldr x7, [x20, at]);
+            match size {
+                1 => dynasm!(self.ops ; .arch aarch64 ; strb W(r(src)), [x7, x1]),
+                2 => dynasm!(self.ops ; .arch aarch64 ; strh W(r(src)), [x7, x1]),
+                _ => dynasm!(self.ops ; .arch aarch64 ; str W(r(src)), [x7, x1]),
+            }
+        }
+        dynasm!(self.ops ; .arch aarch64 ; b =>back ; slow:);
+    }
+
     /// Store the `size` bytes of `src` into RAM at handle `m`.
     fn store_ram(&mut self, m: T, src: T, size: u8) {
         let (m_, s) = (r(m), r(src));
@@ -975,6 +1023,7 @@ impl Gen<'_> {
                 }
                 Slow::Store { at, back, m, src, size, lo, hi } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at);
+                    self.vga_store(back, m, src, size);
                     self.mov32(9, lo);
                     dynasm!(self.ops ; .arch aarch64 ; str w9, [x20, CTX_SMC_LO as u32]);
                     self.mov32(9, hi);

@@ -292,6 +292,7 @@ fn local_program_alone() {
         );
     }
     println!("  idle skip: {:?}", cpu.bus.observe.stats);
+    println!("  activity: {:?}", cpu.bus.activity);
 }
 
 /// Save the screen as a PNG file.

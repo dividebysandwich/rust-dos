@@ -1299,6 +1299,16 @@ impl Bus {
     /// then write it.
     #[inline]
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    /// `VgaCard::plain_planes`, where writes to the graphics window go to
+    /// the VGA's planes as `write_planes_plainly` has them.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
+        if self.video_mode == VideoMode::Vesa || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
+            return None;
+        }
+        self.vga.plain_planes()
+    }
+
     pub(crate) fn write_planes_plainly(&mut self, addr: usize, value: u32, size: usize) -> bool {
         if !(ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - size).contains(&addr)
             || self.video_mode == VideoMode::Vesa

@@ -832,11 +832,16 @@ mod engine {
             // segments are flat as when it started.)
             self.ctx.flat = mode & ENV_FLAT_ALL;
             self.ctx.stack32 = mode & 4 != 0;
+            vga_state(cpu, &mut self.ctx);
             loop {
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and
                 // gets the CPU and context it expects.
                 let ret = unsafe { (self.enter)(cpu, &mut *self.ctx, code) };
+                if std::mem::take(&mut self.ctx.vga_wrote) != 0 {
+                    // The code wrote the VGA's planes itself.
+                    cpu.bus.vga.mark_dirty_full();
+                }
                 if let Some(payload) = self.ctx.panic.take() {
                     // Rust code the block called panicked (it went on with
                     // made-up values): nothing it did counts.

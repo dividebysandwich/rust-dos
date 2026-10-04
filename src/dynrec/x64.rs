@@ -944,9 +944,10 @@ impl Gen<'_> {
                     dynasm!(self.ops ; .arch x64 ; jmp =>back);
                 }
                 Slow::Store { at, back, m, src, size, lo, hi } => {
+                    dynasm!(self.ops ; .arch x64 ; =>at);
+                    self.vga_store(back, m, src, size);
                     dynasm!(self.ops
                         ; .arch x64
-                        ; =>at
                         ; push r8
                         ; push r9
                         ; push r10
@@ -980,6 +981,45 @@ impl Gen<'_> {
                 }
             }
         }
+    }
+
+    /// A store of `src` through handle `m` that isn't to plain RAM: if it is
+    /// to the VGA's graphics window, with writes there plain ones into the
+    /// planes (`JitCtx::vga_ok`), write each plane the map mask selects
+    /// and count it in the bus's activity as `Activity::video_write` does,
+    /// and go on at `back`; else (and where the write would start a burst
+    /// of its own) fall through, to `jit_dev_write`.
+    fn vga_store(&mut self, back: DynamicLabel, m: T, src: T, size: u8) {
+        let s = size as i32;
+        dynasm!(self.ops
+            ; .arch x64
+            ; bt Rq(r(m)), DEV_BIT as i8
+            ; jnc >slow
+            ; cmp BYTE [r12 + CTX_VGA_OK], 0
+            ; je >slow
+            ; mov eax, Rd(r(m))
+            ; sub eax, 0xA0000
+            ; cmp eax, 0x10000 - s
+            ; ja >slow
+            ; mov rcx, QWORD [rbx + layout::ICOUNT as i32]
+            ; mov rdx, rcx
+            ; sub rdx, QWORD [rbx + layout::LAST_WRITE as i32]
+            ; cmp rdx, layout::BURST_GAP as i32
+            ; ja >slow
+            ; add QWORD [rbx + layout::VIDEO_BYTES as i32], s
+            ; add QWORD [rbx + layout::BURST as i32], s
+            ; mov QWORD [rbx + layout::LAST_WRITE as i32], rcx
+            ; mov BYTE [r12 + CTX_VGA_WROTE], 1
+        );
+        for p in 0..4 {
+            dynasm!(self.ops ; .arch x64 ; mov rdx, QWORD [r12 + CTX_VGA_PLANES + p * 8]);
+            match size {
+                1 => dynasm!(self.ops ; .arch x64 ; mov BYTE [rdx + rax], Rb(r(src))),
+                2 => dynasm!(self.ops ; .arch x64 ; mov WORD [rdx + rax], Rw(r(src))),
+                _ => dynasm!(self.ops ; .arch x64 ; mov DWORD [rdx + rax], Rd(r(src))),
+            }
+        }
+        dynasm!(self.ops ; .arch x64 ; jmp =>back ; slow:);
     }
 
     /// Where the instruction being translated raises a fault that has an

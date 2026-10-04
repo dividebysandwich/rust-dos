@@ -538,6 +538,23 @@ impl VgaCard {
     /// logical operation or a bit mask, as mode X programs draw (Doom
     /// writes every pixel so). False, with nothing written, where it isn't.
     #[inline]
+    /// Where every write in the graphics window is a plain one into the
+    /// planes (see `write_planes_plainly`) wherever it falls: the planes
+    /// the map mask selects, the planes' memory and a plane's size, which
+    /// is at least the window's 64 KB. None where not.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
+        if self.sequencer_regs[0x04] & 0x0C != 0x04 || !self.plain_writes() {
+            return None;
+        }
+        let planes = self.sequencer_regs[0x02] & 0x0F;
+        let plane_size = self.plane_size();
+        if plane_size < 0x10000 || (planes & 0x03 != 0 && self.text_in_planes()) {
+            return None;
+        }
+        Some((planes, self.vram_graphics.as_mut_ptr(), plane_size))
+    }
+
     pub fn write_planes_plainly(&mut self, offset: usize, value: u32, size: usize) -> bool {
         // Chain 4 off and odd/even off (sequencer memory mode bits 3, 2).
         if self.sequencer_regs[0x04] & 0x0C != 0x04 || !self.plain_writes() {

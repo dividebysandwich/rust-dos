@@ -95,7 +95,7 @@ const STATUS_READ_NS: f64 = 1200.0;
 /// more than an interrupt handler that runs in the middle of a copy takes.
 /// Counted in instructions, not time, so that a program draws the same
 /// bursts at any speed.
-const BURST_GAP: u64 = 5000;
+pub(crate) const BURST_GAP: u64 = 5000;
 /// Changes of the display start this close together are one flip (the
 /// program writes the start address a byte at a time).
 const FLIP_GAP_INSTRUCTIONS: u64 = 1000;
@@ -126,6 +126,12 @@ pub struct Activity {
     start: u32,
     last_flip: u64,
 }
+
+/// Where translated code finds `video_write`'s counts (`Activity`'s
+/// `video_bytes`, `burst` and `last_write`).
+pub(crate) const VIDEO_BYTES_AT: usize = std::mem::offset_of!(Activity, video_bytes);
+pub(crate) const BURST_AT: usize = std::mem::offset_of!(Activity, burst);
+pub(crate) const LAST_WRITE_AT: usize = std::mem::offset_of!(Activity, last_write);
 
 impl Activity {
     pub fn new() -> Self {

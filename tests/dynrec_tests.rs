@@ -2556,6 +2556,79 @@ fn video_memory_program(paging: bool) -> (Rig, Rig) {
 }
 
 #[test]
+fn plain_plane_writes_in_translated_code_are_the_interpreters() {
+    // Mode X: the planes one after the other, in a graphics mode. The map
+    // mask changes every time around, and where it is 5 write mode 1
+    // copies the latches instead; every 64th the loop waits long enough
+    // that the next write starts a burst of its own (`Activity`).
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            let port = |a: &mut CodeAssembler, port: u32, index: u32, value: u32| {
+                a.mov(edx, port)?;
+                a.mov(eax, index | value << 8)?;
+                a.out(dx, ax)
+            };
+            port(a, 0x3C4, 4, 0x06)?;
+            for (index, value) in [(0, 0), (1, 0), (3, 0), (5, 0), (6, 0x05), (8, 0xFF)] {
+                port(a, 0x3CE, index, value)?;
+            }
+            // The attribute controller's mode: graphics.
+            a.mov(edx, 0x3DAu32)?;
+            a.in_(al, dx)?;
+            a.mov(edx, 0x3C0u32)?;
+            a.mov(al, 0x30)?;
+            a.out(dx, al)?;
+            a.mov(al, 0x41)?;
+            a.out(dx, al)?;
+            let mut top = a.create_label();
+            let mut plain = a.create_label();
+            let mut no_wait = a.create_label();
+            let mut wait = a.create_label();
+            a.mov(ecx, 3000u32)?;
+            a.set_label(&mut top)?;
+            a.mov(edx, 0x3C4u32)?;
+            a.mov(al, 2)?;
+            a.mov(ah, cl)?;
+            a.and(ah, 0x0F)?;
+            a.out(dx, ax)?;
+            a.mov(edx, 0x3CEu32)?;
+            a.mov(eax, 0x0005u32)?;
+            a.mov(esi, ecx)?;
+            a.and(esi, 0x0F)?;
+            a.cmp(esi, 5)?;
+            a.jne(plain)?;
+            a.mov(ah, 1)?;
+            a.set_label(&mut plain)?;
+            a.out(dx, ax)?;
+            a.mov(edi, ecx)?;
+            a.imul_3(edi, edi, 37)?;
+            a.and(edi, 0x3FFF)?;
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x0103_0507)?;
+            a.mov(byte_ptr(edi + 0xA0000), al)?;
+            a.mov(word_ptr(edi + 0xA4001), ax)?;
+            a.mov(dword_ptr(edi + 0xA8003), eax)?;
+            a.add(ebx, dword_ptr(edi + 0xAC000))?;
+            a.test(cl, 0x3F)?;
+            a.jnz(no_wait)?;
+            a.mov(esi, 3000u32)?;
+            a.set_label(&mut wait)?;
+            a.dec(esi)?;
+            a.jnz(wait)?;
+            a.set_label(&mut no_wait)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));
+    assert_eq!(a.cpu.bus.vga.vram_graphics, b.cpu.bus.vga.vram_graphics);
+    let video = |c: &rust_dos::cpu::Cpu| (c.bus.activity.video_bytes, c.bus.activity.bursts);
+    assert_eq!(video(&a.cpu).0, video(&b.cpu).0);
+}
+
+#[test]
 fn video_memory_is_written_and_read_by_its_physical_address() {
     let (_, b) = video_memory_program(false);
     assert!(b.cpu.bus.vga.vram_graphics.iter().any(|&p| p != 0));

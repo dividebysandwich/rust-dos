@@ -34,6 +34,16 @@ pub const A20_MASK: usize = offset_of!(Cpu, bus) + crate::bus::A20_MASK_OFFSET;
 pub const IRQ_READY: usize = offset_of!(Cpu, bus) + crate::bus::IRQ_READY_OFFSET;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const IRQ_SHADOW: usize = offset_of!(Cpu, irq_shadow);
+/// The counts of `Activity::video_write`, and the gap after which a write
+/// starts a burst of its own (which translated code leaves to it).
+#[cfg_attr(not(dynrec), allow(dead_code))]
+pub const VIDEO_BYTES: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::VIDEO_BYTES_AT;
+#[cfg_attr(not(dynrec), allow(dead_code))]
+pub const BURST: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::BURST_AT;
+#[cfg_attr(not(dynrec), allow(dead_code))]
+pub const LAST_WRITE: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::LAST_WRITE_AT;
+#[cfg_attr(not(dynrec), allow(dead_code))]
+pub const BURST_GAP: u64 = crate::autospeed::BURST_GAP;
 /// A TLB entry (`Tlb::entries_ptr`): its tags and physical page, its size,
 /// and the entries of each set (supervisor, then user), which a page
 /// number modulo it indexes.

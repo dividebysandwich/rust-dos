@@ -373,9 +373,16 @@ first instruction in a block that changes them:
   (and on x86-64 hosts, looking up a page the TLB holds as
   `Cpu::lin_to_phys` does, with paging on), and its loads and stores
   each call `jit_dev_read` or `jit_dev_write`, which read and write it as
-  `Cpu::mem_read` and `mem_write` do. A byte written plainly into the
-  VGA's planes, as mode X programs write every pixel (Doom's columns and
-  spans), takes a short way there (`Bus::write_planes_plainly`).
+  `Cpu::mem_read` and `mem_write` do. Where writes to the VGA's
+  graphics window are plain ones into its planes, as mode X programs
+  write every pixel (Doom's columns and spans), the code writes them
+  itself: the context has the planes the map mask selects
+  (`helpers::vga_state`, `Bus::plain_planes`), found where the code is
+  entered and again after each port access, handler and device write in
+  it, and the code counts the write in the bus's `Activity` as
+  `video_write` does (leaving a write that starts a burst of its own to
+  `jit_dev_write`). The execution loop marks the picture changed after
+  code that wrote there (`JitCtx::vga_wrote`).
 
 On x86-64, the four guest registers a block's operations use most (twice
 or more) stay in host registers within it (`x64::Cache`). An instruction
@@ -554,7 +561,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), and STI ending a full block |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

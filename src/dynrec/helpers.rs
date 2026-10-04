@@ -131,9 +131,39 @@ pub struct JitCtx {
     pub lazy_code: u32,
     /// Calls of the functions above, for the statistics.
     pub calls: super::Calls,
+    /// Whether writes to the VGA's graphics window are plain ones into its
+    /// planes (`Bus::plain_planes`, see `vga_state`): then the code writes
+    /// them itself, into each plane in `vga_planes` (those the map mask
+    /// leaves out are `vga_sink`), and notes it in `vga_wrote` for the
+    /// execution loop to mark the picture changed.
+    pub vga_ok: u8,
+    pub vga_wrote: u8,
+    pub vga_planes: [*mut u8; 4],
+    pub vga_sink: Box<[u8]>,
+}
+
+/// Find out whether writes to the VGA's graphics window are plain ones
+/// into its planes, for the code (`JitCtx::vga_ok`): where translated code
+/// is entered, and after anything in it that may change the VGA's
+/// registers (port I/O, handlers, writes to devices).
+pub fn vga_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
+    match cpu.bus.plain_planes() {
+        Some((planes, base, plane_size)) => {
+            let sink = ctx.vga_sink.as_mut_ptr();
+            for (p, at) in ctx.vga_planes.iter_mut().enumerate() {
+                // SAFETY: plane p is in the planes' memory.
+                *at = if planes >> p & 1 != 0 { unsafe { base.add(p * plane_size) } } else { sink };
+            }
+            ctx.vga_ok = 1;
+        }
+        None => ctx.vga_ok = 0,
+    }
 }
 
 pub const CTX_FALLBACK: i32 = offset_of!(JitCtx, fallback) as i32;
+pub const CTX_VGA_OK: i32 = offset_of!(JitCtx, vga_ok) as i32;
+pub const CTX_VGA_WROTE: i32 = offset_of!(JitCtx, vga_wrote) as i32;
+pub const CTX_VGA_PLANES: i32 = offset_of!(JitCtx, vga_planes) as i32;
 pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
 pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
@@ -238,6 +268,11 @@ impl JitCtx {
             lazy: [0; 3],
             lazy_code: 0,
             calls: super::Calls { fallback: vec![0; iced_x86::Mnemonic::values().len()], ..super::Calls::default() },
+            vga_ok: 0,
+            vga_wrote: 0,
+            vga_planes: [std::ptr::null_mut(); 4],
+            // The window and a dword past its end.
+            vga_sink: vec![0; 0x10004].into_boxed_slice(),
         }
     }
 }
@@ -286,6 +321,7 @@ jit_fn! {
         let time = (cpu.bus.clock.deadline, cpu.bus.a20_mask());
         match catch_unwind(AssertUnwindSafe(|| handler(cpu, instr))) {
             Ok(Ok(())) => {
+                vga_state(cpu, ctx);
                 if writes && data.gens_now(&cpu.bus.page_gen) != before {
                     let code = written(cpu, data, ix);
                     if code != 0 {
@@ -412,6 +448,7 @@ jit_fn! {
         };
         match catch_unwind(AssertUnwindSafe(access)) {
             Ok(Ok(read)) => {
+                vga_state(cpu, ctx);
                 if data.gens_now(&cpu.bus.page_gen) != before && written(cpu, data, ix) != 0 {
                     ctx.after = EXIT_SMC as u8;
                 } else if loop_would_act(cpu, time, (data.count() - ix) as u64) {
@@ -691,5 +728,6 @@ fn dev_write(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32, value: u32, size: u32) 
         2 => _ = cpu.bus.write_16(p, value as u16),
         _ => _ = cpu.bus.write_32(p, value),
     });
+    vga_state(cpu, ctx);
     (phys < ctx.smc_hi && phys.wrapping_add(size) > ctx.smc_lo) as u32
 }
