@@ -448,6 +448,20 @@ pub fn loaded_segment(instr: &Instruction) -> Option<crate::cpu::Seg> {
     }
 }
 
+/// Whether `instr` is a far transfer that its handler runs: a far CALL or
+/// JMP, RETF, INT or IRET. In real mode and virtual-8086 mode the block
+/// goes on through the links a return takes after it (see
+/// `helpers::jit_fallback`).
+pub fn far_transfer(instr: &Instruction) -> bool {
+    use Mnemonic::*;
+    match instr.mnemonic() {
+        Retf | Int | Int3 | Into | Iret | Iretd => true,
+        Call => instr.is_call_far() || instr.is_call_far_indirect(),
+        Jmp => instr.is_jmp_far() || instr.is_jmp_far_indirect(),
+        _ => false,
+    }
+}
+
 /// Whether `instr` may leave an interrupt shadow (STI, a load of SS): the
 /// instruction after it ends that.
 pub fn shadows(instr: &Instruction) -> bool {

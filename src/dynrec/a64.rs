@@ -435,6 +435,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     match &items[last] {
         Some(u) if !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. })) => g.leave(Some(next), 0, true),
         None if !super::block::ends_block(&data.instrs[last]) => g.leave(Some(next), 0, false),
+        None if g.link && super::block::far_transfer(&data.instrs[last]) => g.far_returned(),
         _ => {}
     }
     g.link = link;
@@ -2600,6 +2601,15 @@ impl Gen<'_> {
         self.data_x1();
     }
 
+    /// After a far transfer its handler ran (`block::far_transfer`), where
+    /// it went: through the links a return takes. (`jit_fallback` stopped
+    /// the block where the code can't go on.)
+    fn far_returned(&mut self) {
+        self.field(Access::Ldr32, r(T0), layout::EIP);
+        self.counts();
+        self.returned(T0);
+    }
+
     /// Leave through the return (or indirect call) link to EIP `t`, if
     /// there is one (see `guarded`), else to the execution loop, to be
     /// linked. X1 is the block.
@@ -2728,9 +2738,16 @@ impl Gen<'_> {
     }
 
     /// The jump of link `slot`: to its stub, until the engine makes it a
-    /// link (`patch_link`).
+    /// link (`patch_link`). A return's links are made again for each place
+    /// it goes to in turn: they jump where the block's `links` says (X1 is
+    /// the block), as rewriting code that just ran is slow.
     fn link_jump(&mut self, slot: usize) {
         let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
+        if slot >= RETURN_LINK {
+            let at = DATA_LINKS as u32 + slot as u32 * 8;
+            dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x1, at] ; br x16);
+            return;
+        }
         dynasm!(self.ops ; .arch aarch64 ; b =>stub);
         self.sites.push((slot as u8, self.ops.offset().0 as u32 - 4));
     }

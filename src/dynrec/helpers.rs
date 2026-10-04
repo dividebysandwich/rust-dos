@@ -79,6 +79,15 @@ pub struct JitCtx {
     /// them, and a segment load in a block changes them (see
     /// `block::loaded_segment`).
     pub flat: u32,
+    /// The mode the running blocks were translated for (`Key::mode` but
+    /// for its bit for blocks of one instruction), and CS's limit, which a
+    /// far transfer must leave as they were for the code to go on after
+    /// it; and the last block that ran one, with the CS base it ran under
+    /// (blocks run under the CS they are entered with).
+    pub mode: u32,
+    pub cs_limit: u32,
+    pub far_block: *const BlockData,
+    pub far_base: u32,
     /// The block the code returned from.
     pub exit_data: *mut BlockData,
     /// `jit_memref`, `jit_read` and `jit_write`.
@@ -204,6 +213,7 @@ pub const CTX_DEV: i32 = offset_of!(JitCtx, dev) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const DEV_BIT: u8 = 32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
+pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
 pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
 pub const GUARD_SIZE: i32 = std::mem::size_of::<Guard>() as i32;
 pub const GUARD_EIP: i32 = offset_of!(Guard, eip) as i32;
@@ -232,6 +242,10 @@ impl JitCtx {
             code_blocks: std::ptr::null(),
             smc: 0,
             flat: 0,
+            mode: 0,
+            cs_limit: 0,
+            far_block: std::ptr::null(),
+            far_base: 0,
             stack32: false,
             exit_data: std::ptr::null_mut(),
             memref: jit_memref as *const () as usize,
@@ -315,6 +329,10 @@ jit_fn! {
         let sti = instr.mnemonic() == iced_x86::Mnemonic::Sti;
         let popf = matches!(instr.mnemonic(), iced_x86::Mnemonic::Popf | iced_x86::Mnemonic::Popfd);
         let seg_load = super::block::loaded_segment(instr);
+        // (A far transfer goes on in translated code only from real or
+        // virtual-8086 mode.)
+        let far = super::block::far_transfer(instr).then(|| !cpu.pm());
+        let cs_base = cpu.seg_cache(Seg::CS).base;
         // A device may write RAM (by DMA) as well.
         let writes = data.writes[ix] || port;
         let before = if writes { data.gens_now(&cpu.bus.page_gen) } else { 0 };
@@ -355,6 +373,12 @@ jit_fn! {
                     // switch, which runs in the block (as after STI).
                     if ix + 1 < data.count() {
                         cpu.irq_shadow = false;
+                    }
+                }
+                if let Some(from) = far {
+                    (ctx.far_block, ctx.far_base) = (data as *const BlockData, cs_base);
+                    if !(from && far_goes_on(cpu, ctx)) {
+                        return EXIT_AFTER;
                     }
                 }
                 if sti {
@@ -468,6 +492,27 @@ jit_fn! {
             }
         }
     }
+}
+
+/// Whether translated code can go on after a far transfer in real mode or
+/// virtual-8086 mode through the links a return takes (see
+/// `block::far_transfer`): it stayed in one of them, CS and the rest of
+/// the mode are as the blocks were translated for (the code size, the
+/// stack's, the segments' environment bits), and IRET set neither TF nor
+/// IF with an interrupt waiting. (INT clears both; the CS base and EIP
+/// are the links' guards.) Not into an emulator service trap in real mode
+/// (an INT of the BIOS's or DOS's), where no block starts.
+fn far_goes_on(cpu: &Cpu, ctx: &JitCtx) -> bool {
+    use crate::cpu::CpuFlags;
+    let cs = cpu.seg_cache(Seg::CS);
+    let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
+    let mode = || (cs.attr & crate::cpu::ATTR_DB != 0) as u32 | (cpu.stack32() as u32) << 2 | super::env_bits(cpu);
+    !cpu.pm()
+        && (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
+        && !cpu.get_cpu_flag(CpuFlags::TF)
+        && !(cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF))
+        && cs.limit == ctx.cs_limit
+        && mode() == ctx.mode
 }
 
 /// Whether port I/O (or a long string instruction) changed what the

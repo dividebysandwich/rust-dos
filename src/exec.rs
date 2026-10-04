@@ -1175,7 +1175,7 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
 /// (FE /7 with a register operand), which no block starts with: programs
 /// that poll the keyboard through the BIOS get here millions of times.
 #[inline(always)]
-fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
+pub(crate) fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
     matches!(ram.get(phys_ip..phys_ip + 2), Some(&[0xFE, 0x38..=0x3B]))
 }
 

@@ -834,8 +834,7 @@ mod engine {
             {
                 self.link_guarded(p, index, cpu, at);
             }
-            // The CS base: blocks linked to each other run under one.
-            let cs_base = at.lin_ip.wrapping_sub(at.eip);
+
             // A block that stops before its first instruction (the timer
             // deadline, the CS limit, changed bytes) leaves the instruction
             // at EIP to the interpreter if nothing ran before it, else to
@@ -850,6 +849,9 @@ mod engine {
             // (A chain goes on through the execution loop only as the
             // segments are flat as when it started.)
             self.ctx.flat = mode & ENV_FLAT_ALL;
+            self.ctx.mode = mode & !2;
+            self.ctx.cs_limit = at.cs_limit;
+            self.ctx.far_block = std::ptr::null();
             self.ctx.stack32 = mode & 4 != 0;
             vga_state(cpu, &mut self.ctx);
             loop {
@@ -886,6 +888,15 @@ mod engine {
                 }
                 let exited = data.id;
                 let none_ran = cpu.bus.clock.icount == start;
+                // The CS base the block ran under: the one the code was
+                // entered with, or that a far transfer in a block linked
+                // after it went to; the old one for the block that ran the
+                // far transfer.
+                let cs_base = if std::ptr::eq(data, self.ctx.far_block) {
+                    self.ctx.far_base
+                } else {
+                    cpu.seg_cache(Seg::CS).base
+                };
                 let page = Page { lin: cs_base.wrapping_add(data.eip) & !0xFFF, phys: data.phys as usize & !0xFFF };
                 return match kind {
                     EXIT_NEXT => Run::Ran { page },

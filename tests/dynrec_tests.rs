@@ -791,6 +791,107 @@ fn sti_at_the_end_of_a_full_block_holds_interrupts_for_one_instruction() {
     assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
 }
 
+/// A DOS program (`T.COM`, in real mode) on the interpreter and on the
+/// recompiler, from directories of their own, run in lockstep to its end.
+/// Returns the recompiler's counts.
+fn com_in_lockstep(test: &str, code: &[u8]) -> (Cpu, Cpu) {
+    rust_dos::hosttime::fix(NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56));
+    let machine = |name: &str, core: CoreMode| {
+        let dir = std::path::Path::new("target/dynrec_tests").join(test).join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("T.COM"), code).unwrap();
+        let mut cpu = Cpu::new(dir);
+        cpu.core = core;
+        cpu.load_shell();
+        cpu.pending_command = Some("T".to_string());
+        cpu
+    };
+    let (mut a, mut b) = (machine("a", CoreMode::Normal), machine("b", CoreMode::Dynamic));
+    lockstep_with(&mut a, &mut b, 400, 997, false, |_, _| {}).unwrap();
+    (a, b)
+}
+
+#[test]
+fn far_calls_returns_and_interrupts_in_real_mode_go_on_in_translated_code() {
+    // A loop far-calls a function in the next 4 KB (as a segment of its
+    // own) through a pointer, which calls INT 60h, a handler of the
+    // program's, and returns; the timer, at a high rate, interrupts all of
+    // it. Then the program ends and leaves the sum in the PSP's command
+    // line.
+    const FAR_AT: usize = 0xF00;
+    const HANDLER: u32 = 0x0C00;
+    const PTR: u64 = 0x0E00;
+    let main = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        let mut top = a.create_label();
+        let mut done = a.create_label();
+        a.mov(ax, cs).unwrap();
+        a.add(ax, 0x100).unwrap();
+        a.mov(word_ptr(PTR), 0).unwrap();
+        a.mov(word_ptr(PTR + 2), ax).unwrap();
+        a.xor(ax, ax).unwrap();
+        a.mov(es, ax).unwrap();
+        a.mov(word_ptr(0x180).es(), HANDLER).unwrap();
+        a.mov(word_ptr(0x182).es(), cs).unwrap();
+        // The timer at about 8 kHz.
+        a.mov(al, 0x36).unwrap();
+        a.out(0x43, al).unwrap();
+        a.mov(al, 150).unwrap();
+        a.out(0x40, al).unwrap();
+        a.xor(al, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.xor(si, si).unwrap();
+        a.xor(di, di).unwrap();
+        a.mov(cx, 20000).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.mov(bx, cx).unwrap();
+        a.call(dword_ptr(PTR)).unwrap();
+        a.add(si, ax).unwrap();
+        a.loop_(top).unwrap();
+        a.jmp(done).unwrap();
+        a.set_label(&mut done).unwrap();
+        a.mov(al, 0x36).unwrap();
+        a.out(0x43, al).unwrap();
+        a.xor(al, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.mov(word_ptr(0x80), si).unwrap();
+        a.mov(word_ptr(0x82), di).unwrap();
+        a.mov(ax, 0x4C00).unwrap();
+        a.int(0x21).unwrap();
+        a.assemble(0x100).unwrap()
+    };
+    let far = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        a.mov(ax, bx).unwrap();
+        a.imul_3(ax, ax, 7).unwrap();
+        a.int(0x60).unwrap();
+        a.xor(ax, di).unwrap();
+        a.retf().unwrap();
+        a.assemble(0).unwrap()
+    };
+    let handler = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        a.add(di, bx).unwrap();
+        a.rol(di, 3).unwrap();
+        a.iret().unwrap();
+        a.assemble(HANDLER as u64).unwrap()
+    };
+    assert!(main.len() < HANDLER as usize - 0x100);
+    let mut code = main;
+    code.resize(HANDLER as usize - 0x100, 0x90);
+    code.extend(&handler);
+    code.resize(FAR_AT, 0x90);
+    code.extend(&far);
+    let (_, b) = com_in_lockstep("far", &code);
+    let stats = b.dynrec.stats();
+    if AVAILABLE {
+        // Far transfers went on through the links, not the execution loop.
+        assert!(stats.runs < 20000, "{:?}", stats);
+    }
+}
+
 #[test]
 fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
     // Blocks go on past IN, OUT and STI where they change nothing the
