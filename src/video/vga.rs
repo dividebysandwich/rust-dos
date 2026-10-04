@@ -531,6 +531,37 @@ impl VgaCard {
         g[0x05] & 0x03 == 0 && g[0x01] & 0x0F == 0 && g[0x03] == 0 && g[0x08] == 0xFF
     }
 
+    /// `write_graphics` of `len` bytes from `offset` on, byte `i` being
+    /// `byte(i)`, where the writes are plain (`plain_writes`): each into
+    /// the planes the sequencer maps it to, with the registers looked at
+    /// once.
+    pub fn write_plain_run(&mut self, offset: usize, len: usize, byte: impl Fn(usize) -> u8) {
+        debug_assert!(self.plain_writes());
+        let seq_mem_mode = self.sequencer_regs[0x04];
+        let chain4 = (seq_mem_mode & 0x08) != 0;
+        let odd_even = (seq_mem_mode & 0x04) == 0;
+        let map_mask = self.sequencer_regs[0x02] & 0x0F;
+        for i in 0..len {
+            let at = offset + i;
+            let (plane_offset, planes) = if chain4 {
+                (at >> 2, 1u8 << (at & 3))
+            } else if odd_even {
+                (at >> 1, map_mask & if at & 1 == 0 { 0x05 } else { 0x0A })
+            } else {
+                (at, map_mask)
+            };
+            let value = byte(i);
+            for p in 0..4 {
+                if planes & (1 << p) != 0 {
+                    self.set_plane_byte(p, plane_offset, value);
+                }
+            }
+        }
+        if len > 0 {
+            self.mark_dirty_full();
+        }
+    }
+
     /// `write_graphics` of the low `size` bytes of `value` at `offset` and
     /// on, where it is the plain write of each into the planes the map
     /// mask selects: the memory in planes one after the other (not chain
@@ -1183,6 +1214,31 @@ impl VgaCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run of plain writes leaves the planes as the writes one by one.
+    #[test]
+    fn plain_runs_write_as_bytes_do() {
+        for mem_mode in [0x0E, 0x06, 0x02] {
+            for map_mask in [0x0F, 0x01, 0x0A, 0x06] {
+                let card = || {
+                    let mut v = VgaCard::new();
+                    v.sequencer_regs[0x04] = mem_mode;
+                    v.sequencer_regs[0x02] = map_mask;
+                    v.attribute_regs[0x10] = 0x01;
+                    v
+                };
+                let (mut a, mut b) = (card(), card());
+                assert!(a.plain_writes());
+                let data: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+                for (i, &v) in data.iter().enumerate() {
+                    a.write_graphics(0x1234 + i, v);
+                }
+                b.write_plain_run(0x1234, data.len(), |i| data[i]);
+                assert!(a.vram_graphics == b.vram_graphics && a.vram_text == b.vram_text, "mode {:02X} mask {:X}", mem_mode, map_mask);
+                assert_eq!((a.dirty, a.dirty_y_min, a.dirty_y_max), (b.dirty, b.dirty_y_min, b.dirty_y_max));
+            }
+        }
+    }
 
     /// Leaving 256 colours through the Graphics Mode register, as Windows'
     /// VDD passes on a mode set from mode 13h to 12h, is a change of mode

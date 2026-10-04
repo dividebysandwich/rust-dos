@@ -1078,9 +1078,8 @@ impl Bus {
         }
         let offset = self.vga_window(dst, true);
         self.note_video_write(len as u64);
-        for i in 0..len {
-            self.vga.write_graphics(offset + i, self.ram[src + i]);
-        }
+        let ram = &self.ram[src..src + len];
+        self.vga.write_plain_run(offset, len, |i| ram[i]);
         true
     }
 
@@ -1094,9 +1093,7 @@ impl Bus {
         let bytes = value.to_le_bytes();
         let offset = self.vga_window(dst, true);
         self.note_video_write((count * size) as u64);
-        for i in 0..count * size {
-            self.vga.write_graphics(offset + i, bytes[i % size]);
-        }
+        self.vga.write_plain_run(offset, count * size, |i| bytes[i % size]);
         true
     }
 
