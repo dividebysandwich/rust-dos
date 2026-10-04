@@ -73,6 +73,8 @@ impl Uop {
             | Uop::Sti
             | Uop::CheckLimit { .. }
             | Uop::CheckIopl
+            | Uop::CheckV86Iopl
+            | Uop::GetFlags { .. }
             | Uop::DivWide { .. }
             | Uop::Exit { .. }
             | Uop::ExitIf { .. } => ARITH,

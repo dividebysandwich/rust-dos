@@ -829,9 +829,9 @@ impl DebugHub {
 
     fn stats_json(&self, cpu: &Cpu) -> Value {
         fn dynrec_exits(d: &rust_dos::dynrec::DynStats) -> Value {
-            const NAMES: [&str; 14] = [
+            const NAMES: [&str; 15] = [
                 "", "fault", "smc", "panic", "next", "deadline", "stale", "gp0", "limit", "unlinked", "de", "watched",
-                "after", "next_page",
+                "after", "next_page", "env",
             ];
             let mut map = serde_json::Map::new();
             for (k, name) in NAMES.iter().enumerate().skip(1) {

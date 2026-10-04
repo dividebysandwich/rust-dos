@@ -182,6 +182,11 @@ pub enum Uop {
     CheckLimit { src: Src },
     /// #GP(0) in protected mode if CPL is above IOPL (CLI).
     CheckIopl,
+    /// #GP(0) in virtual-8086 mode if IOPL is below 3 (PUSHF, POPF).
+    CheckV86Iopl,
+    /// t = the flags as PUSHF pushes them: their low word (`size` 2), or
+    /// all but VM and RF.
+    GetFlags { t: T, size: u8 },
     /// t = the segment register's selector.
     GetSeg { t: T, seg: Seg },
     /// In real mode, before a far transfer: the instruction's handler runs

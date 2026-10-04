@@ -92,6 +92,7 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, fp
         Pop => pop(instr, stack32, &mut u),
         Pusha | Pushad => pusha(instr, stack32, &mut u),
         Popa | Popad => popa(instr, stack32, &mut u),
+        Pushf | Pushfd => pushf(instr, stack32, &mut u),
         Bt => bit_op(instr, BitKind::Test, &mut u),
         Bts => bit_op(instr, BitKind::Set, &mut u),
         Btr => bit_op(instr, BitKind::Reset, &mut u),
@@ -1178,6 +1179,20 @@ fn ret(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     }
     u.push(Uop::Set { r: sp, t: T1 });
     u.push(Uop::Exit { eip: Src::T(T0) });
+    true
+}
+
+/// PUSHF or PUSHFD, as `transfer::pushf`.
+fn pushf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.stack_pointer_increment() {
+        -2 => 2,
+        -4 => 4,
+        _ => return false,
+    };
+    u.push(Uop::CheckV86Iopl);
+    u.push(Uop::GetFlags { t: T0, size });
+    push_t0(size, stack32, u);
+    u.push(Uop::Set { r: sp(stack32), t: T1 });
     true
 }
 

@@ -1010,6 +1010,45 @@ fn bit_tests_set_cf_and_of_as_the_interpreter_does() {
     assert_eq!(a.cpu.edi(), b.cpu.edi());
 }
 
+/// Virtual-8086 code at 3000:0000 that pushes the flags after an ADD,
+/// 500 times, then enters ring 0 through INT 40h; entered with IOPL
+/// `iopl`. Returns the recompiler's machine.
+fn pushf_in_v86(iopl: u32) -> Rig {
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.handler(0x40, 3, |a| record_code(a, 0x40));
+        rig.load(0x30000, &asm16(0x30000, |a| {
+            let mut top = a.create_label();
+            a.mov(cx, 500)?;
+            a.set_label(&mut top)?;
+            a.add(bx, cx)?;
+            a.pushf()?;
+            a.pop(dx)?;
+            a.add(si, dx)?;
+            a.loop_(top)?;
+            a.int(0x40)
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_0002 | iopl << 12, 0x3000, 0] {
+                a.push(v)?;
+            }
+            a.iretd()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    b
+}
+
+#[test]
+fn pushf_in_virtual_8086_mode_faults_below_iopl_3() {
+    let b = pushf_in_v86(3);
+    assert_eq!(b.recorded().0, 0x40);
+    assert_ne!(b.cpu.esi() & 0xFFFF, 0);
+    let b = pushf_in_v86(0);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[2]), (GP as u32, 0x3000));
+}
+
 #[test]
 fn port_io_that_lets_an_interrupt_through_stops_the_block_after_it() {
     // Blocks go on past IN, OUT and STI where they change nothing the
@@ -2338,6 +2377,50 @@ fn a_segment_load_that_changes_which_segments_are_flat_goes_on_in_its_block() {
     // An iteration after an odd one runs with DS at 40000h.
     assert_eq!(b.read32(0x43F00), (1..50).filter(|n| n % 2 == 0).sum::<u32>());
     assert_eq!(b.read32(0x3F00), 50 + (1..50).filter(|n| n % 2 == 1).sum::<u32>());
+}
+
+#[test]
+fn a_block_whose_segment_load_changes_the_environment_goes_on_in_the_block_for_it() {
+    let (mut a, mut b) = twins(|rig| {
+        // DS read-only at 40000h every other pass, flat between, with a call
+        // in the page after each load and the timer interrupting.
+        rig.set_gdt(FREE, seg_desc(0x40000, 0xFFFF, 0x90, 0x4));
+        rig.write32(0x10, 1);
+        rig.write32(0x40010, 2);
+        timer_handler(rig);
+        let code = asm32(CODE, |a| {
+            let (mut top, mut even, mut set, mut func) =
+                (a.create_label(), a.create_label(), a.create_label(), a.create_label());
+            start_timer(a)?;
+            a.xor(ebx, ebx)?;
+            a.set_label(&mut top)?;
+            a.test(ecx, 1)?;
+            a.jz(even)?;
+            a.mov(ax, FREE as u32)?;
+            a.jmp(set)?;
+            a.set_label(&mut even)?;
+            a.mov(ax, DATA32 as u32)?;
+            a.set_label(&mut set)?;
+            a.mov(ds, ax)?;
+            a.call(func)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.cli()?;
+            a.mov(ax, DATA32 as u32)?;
+            a.mov(ds, ax)?;
+            a.mov(dword_ptr(0x50000), ebx)?;
+            a.hlt()?;
+            a.set_label(&mut func)?;
+            a.add(ebx, dword_ptr(0x10))?;
+            a.ret()
+        });
+        rig.load(CODE, &code);
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.read32(0x50000), 1500 * 2 + 1500);
+    if AVAILABLE {
+        assert!(stats.exits[14] > 0, "no block went on for the new segments: {:?}", stats);
+    }
 }
 
 #[test]

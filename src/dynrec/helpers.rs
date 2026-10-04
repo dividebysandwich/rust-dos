@@ -43,6 +43,11 @@ pub const EXIT_AFTER: u32 = 12;
 /// (and may walk the page tables for): the instruction didn't run (see
 /// `BlockData::in_tail`).
 pub const EXIT_NEXT_PAGE: u32 = 13;
+/// Done, EIP set, but the block loaded a segment register that is no
+/// longer flat or plain as the blocks it links to were translated for
+/// (`check_flat`): the engine goes on in the block for the segments as
+/// they are.
+pub const EXIT_ENV: u32 = 14;
 /// With EXIT_FAULT, EXIT_GP0, EXIT_DE, EXIT_SMC and EXIT_WATCHED: the
 /// guest's arithmetic flags are in the context's `flags`, not yet in the
 /// CPU.

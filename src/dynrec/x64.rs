@@ -1340,6 +1340,37 @@ impl Gen<'_> {
             Uop::GetSeg { t, seg } => {
                 dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + seg_field(seg, layout::SEG_SELECTOR)]);
             }
+            Uop::CheckV86Iopl => {
+                let gp = self.fault_exit(EXIT_GP0);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FLAGS]
+                    ; test eax, 0x2_0000
+                    ; jz >ok
+                    ; and eax, 0x3000
+                    ; cmp eax, 0x3000
+                    ; jne =>gp
+                    ; ok:
+                );
+            }
+            Uop::GetFlags { t, size } => {
+                let t = r(t);
+                dynasm!(self.ops ; .arch x64 ; mov Rd(t), DWORD [rbx + FLAGS]);
+                if self.dirty {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; and Rd(t), !ARITH as i32
+                        ; mov eax, ebp
+                        ; and eax, ARITH as i32
+                        ; or Rd(t), eax
+                    );
+                }
+                if size == 2 {
+                    dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rw(t));
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; and Rd(t), !0x3_0000);
+                }
+            }
             Uop::CsReal => self.real_load(Seg::CS, None, false),
             Uop::LoadCsReal { t } => {
                 let data_ptr = self.data_ptr;
@@ -2901,7 +2932,7 @@ impl Gen<'_> {
             ; .arch x64
             ; cmp DWORD [r12 + CTX_FLAT], (self.env.bits & super::ENV_FLAT_ALL) as i32
             ; je >same
-            ; mov eax, (EXIT_NEXT | EXIT_FLAGS) as i32
+            ; mov eax, (EXIT_ENV | EXIT_FLAGS) as i32
             ; jmp QWORD [r12 + CTX_EXIT]
             ; same:
         );

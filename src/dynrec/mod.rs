@@ -833,7 +833,7 @@ mod engine {
                 self.model = cpu.model;
                 self.ram_len = cpu.bus.ram().len() as u32;
             }
-            let mode = at.code32 as u32 | (single as u32) << 1 | (cpu.stack32() as u32) << 2 | env_bits(cpu);
+            let mut mode = at.code32 as u32 | (single as u32) << 1 | (cpu.stack32() as u32) << 2 | env_bits(cpu);
             let key = Key { phys: at.phys_ip as u32, eip: at.eip, mode };
             let pending = self.pending.take();
             let Some((index, mut code)) = self.find(cpu, at, key, stats) else { return Run::Interpret };
@@ -908,6 +908,33 @@ mod engine {
                 let page = Page { lin: cs_base.wrapping_add(data.eip) & !0xFFF, phys: data.phys as usize & !0xFFF };
                 return match kind {
                     EXIT_NEXT => Run::Ran { page },
+                    EXIT_ENV if data.in_page(cpu.eip()) && cs_base == cpu.seg_cache(Seg::CS).base => {
+                        // The block for the next EIP, in the block's page,
+                        // under the segments as they are now: what the
+                        // execution loop would run next (nothing else it
+                        // checks changed).
+                        let target = cpu.eip();
+                        let cs = cpu.seg_cache(Seg::CS);
+                        let code32 = cs.attr & crate::cpu::ATTR_DB != 0;
+                        let t_mode = code32 as u32 | mode & 2 | (cpu.stack32() as u32) << 2 | env_bits(cpu);
+                        let t_at = At {
+                            eip: target,
+                            lin_ip: cs.base.wrapping_add(target),
+                            cs_limit: cs.limit,
+                            code32,
+                            phys_ip: data.phys_in_page(target) as usize,
+                            ..*at
+                        };
+                        let t_key = Key { phys: t_at.phys_ip as u32, eip: target, mode: t_mode };
+                        let Some((_, t_code)) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran { page } };
+                        mode = t_mode;
+                        self.ctx.flat = mode & ENV_FLAT_ALL;
+                        self.ctx.mode = mode & !2;
+                        self.ctx.stack32 = mode & 4 != 0;
+                        code = t_code;
+                        continue;
+                    }
+                    EXIT_ENV => Run::Ran { page },
                     EXIT_DEADLINE | EXIT_LIMIT => {
                         if kind == EXIT_DEADLINE {
                             stats.deadline += 1;

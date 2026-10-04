@@ -1372,6 +1372,36 @@ impl Gen<'_> {
                 );
             }
             Uop::GetSeg { t, seg } => self.field(Access::Ldr16, r(t), seg_field(seg, layout::SEG_SELECTOR)),
+            Uop::CheckV86Iopl => {
+                let (gp, ok) = (self.fault_exit(EXIT_GP0), self.ops.new_dynamic_label());
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; tbz w0, 17, =>ok
+                    ; ubfx w0, w0, 12, 2
+                    ; cmp w0, 3
+                    ; b.ne =>gp
+                    ; =>ok
+                );
+            }
+            Uop::GetFlags { t, size } => {
+                let t_ = r(t);
+                self.field(Access::Ldr32, t_, layout::FLAGS);
+                if self.dirty {
+                    self.mov32(9, ARITH);
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; bic W(t_), W(t_), w9
+                        ; and w0, w28, w9
+                        ; orr W(t_), W(t_), w0
+                    );
+                }
+                if size == 2 {
+                    dynasm!(self.ops ; .arch aarch64 ; and WSP(t_), W(t_), 0xFFFF);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; and WSP(t_), W(t_), !0x3_0000u32);
+                }
+            }
             Uop::CsReal => self.real_load(Seg::CS, None, false),
             Uop::LoadSeg { seg, t } if self.env.bits & super::ENV_REAL != 0 => {
                 // As `Cpu::load_seg_real` loads it once it is a plain
@@ -2772,7 +2802,7 @@ impl Gen<'_> {
             ; ldr w0, [x20, CTX_FLAT as u32]
             ; cmp w0, w2
             ; b.eq >same
-            ; movz w0, EXIT_NEXT
+            ; movz w0, EXIT_ENV
         );
         self.exit();
         dynasm!(self.ops ; .arch aarch64 ; same:);
