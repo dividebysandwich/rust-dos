@@ -430,17 +430,41 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
             let six_bit = mode.bpp == 8 && !bus.vga.dac_8bit;
             o.draw_row(overlay_rows[(my - o.y) as usize], vram, &mut line, mode.width as u32, six_bit);
         }
-        for x in 0..mode.width as usize {
-            let rgb = if over.is_some() {
-                (line[x * 3], line[x * 3 + 1], line[x * 3 + 2])
-            } else {
-                pixel(row + x * bytes)
-            };
-            for dx in 0..scale {
-                let i = dst + (x * scale + dx) * 3;
-                canvas[i] = rgb.0;
-                canvas[i + 1] = rgb.1;
-                canvas[i + 2] = rgb.2;
+        let src_len = mode.width as usize * bytes;
+        let out_len = mode.width as usize * scale * 3;
+        if over.is_none() && row + src_len <= wrap + 1 && wrap < vram.len() && dst + out_len <= canvas.len() {
+            // A row that doesn't wrap around the memory, its pixels
+            // converted a depth at a time.
+            let (src, out) = (&vram[row..row + src_len], &mut canvas[dst..dst + out_len]);
+            match mode.bpp {
+                8 => vbe_row::<1>(src, out, scale, |p| colors[p[0] as usize]),
+                15 => vbe_row::<2>(src, out, scale, |p| {
+                    let v = u16::from_le_bytes([p[0], p[1]]);
+                    let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
+                    (five(v >> 10 & 31), five(v >> 5 & 31), five(v & 31))
+                }),
+                16 => vbe_row::<2>(src, out, scale, |p| {
+                    let v = u16::from_le_bytes([p[0], p[1]]);
+                    let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
+                    let g = v >> 5 & 63;
+                    (five(v >> 11), ((g << 2) | (g >> 4)) as u8, five(v & 31))
+                }),
+                _ if bytes == 4 => vbe_row::<4>(src, out, scale, |p| (p[2], p[1], p[0])),
+                _ => vbe_row::<3>(src, out, scale, |p| (p[2], p[1], p[0])),
+            }
+        } else {
+            for x in 0..mode.width as usize {
+                let rgb = if over.is_some() {
+                    (line[x * 3], line[x * 3 + 1], line[x * 3 + 2])
+                } else {
+                    pixel(row + x * bytes)
+                };
+                for dx in 0..scale {
+                    let i = dst + (x * scale + dx) * 3;
+                    canvas[i] = rgb.0;
+                    canvas[i + 1] = rgb.1;
+                    canvas[i + 2] = rgb.2;
+                }
             }
         }
         // An S3's hardware cursor over the row.
@@ -484,6 +508,26 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
                 canvas[i] = rgb.0;
                 canvas[i + 1] = rgb.1;
                 canvas[i + 2] = rgb.2;
+            }
+        }
+    }
+}
+
+/// A row of `B`-byte VBE pixels in `src` as RGB into `out`, each `scale`
+/// times, by `rgb`.
+#[inline(always)]
+fn vbe_row<const B: usize>(src: &[u8], out: &mut [u8], scale: usize, rgb: impl Fn(&[u8; B]) -> (u8, u8, u8)) {
+    let pixels = src.as_chunks::<B>().0;
+    if scale == 1 {
+        for (o, p) in out.as_chunks_mut::<3>().0.iter_mut().zip(pixels) {
+            let (r, g, b) = rgb(p);
+            *o = [r, g, b];
+        }
+    } else {
+        for (o, p) in out.chunks_exact_mut(3 * scale).zip(pixels) {
+            let (r, g, b) = rgb(p);
+            for px in o.as_chunks_mut::<3>().0 {
+                *px = [r, g, b];
             }
         }
     }

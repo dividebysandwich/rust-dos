@@ -225,6 +225,49 @@ fn direct_color_pixels() {
 }
 
 #[test]
+fn every_depth_is_drawn_pixel_for_pixel() {
+    // Random video memory in each depth, at 1x and 2x, against the
+    // conversion of each pixel.
+    let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
+    for (mode, width, height, bpp) in
+        [(0x101u16, 640usize, 480usize, 8u8), (0x10D, 320, 200, 15), (0x10E, 320, 200, 16), (0x10F, 320, 200, 32), (0x110, 640, 480, 15), (0x111, 640, 480, 16), (0x112, 640, 480, 32)]
+    {
+        let mut cpu = machine();
+        set_mode(&mut cpu, mode | 0x4000);
+        let bytes = if bpp == 32 { 4 } else { bpp.div_ceil(8) as usize };
+        let mut seed = 0x2545_F491u32 ^ mode as u32;
+        let mut mem = vec![0u8; width * height * bytes];
+        for (i, b) in mem.iter_mut().enumerate() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *b = seed as u8;
+            cpu.bus.write_8(LFB_BASE + i, *b);
+        }
+        let (fw, fh) = video::frame_size(&cpu.bus);
+        let mut frame = Frame::new(fw, fh);
+        cpu.bus.vga.mark_dirty_full();
+        video::render_screen(&mut frame, &cpu.bus);
+        let scale = fw as usize / width;
+        for y in 0..height * scale {
+            for x in 0..width * scale {
+                let at = (y / scale * width + x / scale) * bytes;
+                let p = &mem[at..at + bytes];
+                let v = u16::from_le_bytes([p[0], *p.get(1).unwrap_or(&0)]);
+                let want = match bpp {
+                    8 => cpu.bus.vga.get_rgb(p[0] & cpu.bus.vga.dac_mask),
+                    15 => (five(v >> 10 & 31), five(v >> 5 & 31), five(v & 31)),
+                    16 => (five(v >> 11), (((v >> 5 & 63) << 2) | ((v >> 5 & 63) >> 4)) as u8, five(v & 31)),
+                    _ => (p[2], p[1], p[0]),
+                };
+                let i = (y * fw as usize + x) * 3;
+                assert_eq!((frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2]), want, "mode {:X} at {}, {}", mode, x, y);
+            }
+        }
+    }
+}
+
+#[test]
 fn eight_bit_dac_and_palette_data() {
     let mut cpu = machine();
     set_mode(&mut cpu, 0x101);
