@@ -68,6 +68,44 @@ pub enum ShiftOp {
     Sar,
 }
 
+/// ADD (ADC with `carry_in`) of `size` bytes: the result and the
+/// arithmetic flags.
+#[inline(always)]
+pub fn add(size: u8, a: u32, b: u32, carry_in: bool) -> (u32, u32) {
+    let mask = size_mask(size);
+    let wide = a as u64 + b as u64 + carry_in as u64;
+    let r = wide as u32 & mask;
+    let mut f = szp(size, r);
+    if wide > mask as u64 {
+        f |= CF;
+    }
+    if (a ^ r) & (b ^ r) & sign_bit(size) != 0 {
+        f |= OF;
+    }
+    if (a ^ b ^ r) & 0x10 != 0 {
+        f |= AF;
+    }
+    (r, f)
+}
+
+/// SUB and CMP (SBB with `borrow_in`) of `size` bytes: the result and the
+/// arithmetic flags.
+#[inline(always)]
+pub fn sub(size: u8, a: u32, b: u32, borrow_in: bool) -> (u32, u32) {
+    let r = a.wrapping_sub(b).wrapping_sub(borrow_in as u32) & size_mask(size);
+    let mut f = szp(size, r);
+    if (a as u64) < b as u64 + borrow_in as u64 {
+        f |= CF;
+    }
+    if (a ^ b) & (a ^ r) & sign_bit(size) != 0 {
+        f |= OF;
+    }
+    if (a ^ b ^ r) & 0x10 != 0 {
+        f |= AF;
+    }
+    (r, f)
+}
+
 impl Cpu {
     /// Replace the flags in `mask` with `bits`.
     #[inline(always)]
@@ -99,19 +137,7 @@ impl Cpu {
     /// ADD, and ADC with `carry_in`.
     #[inline(always)]
     pub fn alu_add(&mut self, size: u8, a: u32, b: u32, carry_in: bool) -> u32 {
-        let mask = size_mask(size);
-        let wide = a as u64 + b as u64 + carry_in as u64;
-        let r = wide as u32 & mask;
-        let mut f = szp(size, r);
-        if wide > mask as u64 {
-            f |= CF;
-        }
-        if (a ^ r) & (b ^ r) & sign_bit(size) != 0 {
-            f |= OF;
-        }
-        if (a ^ b ^ r) & 0x10 != 0 {
-            f |= AF;
-        }
+        let (r, f) = add(size, a, b, carry_in);
         self.set_flag_bits(ARITH, f);
         r
     }
@@ -119,17 +145,7 @@ impl Cpu {
     /// SUB and CMP, and SBB with `borrow_in`.
     #[inline(always)]
     pub fn alu_sub(&mut self, size: u8, a: u32, b: u32, borrow_in: bool) -> u32 {
-        let r = a.wrapping_sub(b).wrapping_sub(borrow_in as u32) & size_mask(size);
-        let mut f = szp(size, r);
-        if (a as u64) < b as u64 + borrow_in as u64 {
-            f |= CF;
-        }
-        if (a ^ b) & (a ^ r) & sign_bit(size) != 0 {
-            f |= OF;
-        }
-        if (a ^ b ^ r) & 0x10 != 0 {
-            f |= AF;
-        }
+        let (r, f) = sub(size, a, b, borrow_in);
         self.set_flag_bits(ARITH, f);
         r
     }

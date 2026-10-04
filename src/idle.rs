@@ -52,6 +52,13 @@ const CHUNKS: usize = 256;
 const POLLS: u32 = 8;
 /// Reads of the VGA's status in a row before the loop is armed.
 const STATUS_POLLS: u32 = 64;
+/// Bytes of RAM a pass may change and still be skipped, as counters (see
+/// `Phase::Count`).
+const COUNTER_BYTES: usize = 16;
+/// Instructions of a pass `Phase::Count` records.
+const PASS_LIMIT: usize = 20_000;
+/// Passes skipped at most over counters at once.
+const COUNTED_PASSES: u64 = 1 << 20;
 
 /// An instruction's place: its CS selector and EIP, and the mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +108,99 @@ enum Phase {
     /// Running on from `base` (a visit whose registers came round), until
     /// a visit with its registers and the blocks in `copies` as they were.
     Verify { head: Head, base: Box<Visit>, copies: Vec<(usize, [u8; CHUNK])>, until: u64 },
+    /// The registers came round, and the blocks but for a few bytes
+    /// (`counters`): one pass from `base` is recorded, with what each of
+    /// its instructions does to the flags (`Pass`), to find out whether the
+    /// passes after it run the same until their counters reach where one
+    /// of them would take another way (see `count`).
+    Count { head: Head, base: Box<Visit>, copies: Vec<(usize, [u8; CHUNK])>, pass: Box<Pass>, until: u64 },
+}
+
+/// The pass `Phase::Count` records.
+#[derive(Default)]
+struct Pass {
+    /// The bytes that changed, sorted.
+    counters: Vec<usize>,
+    /// The instructions that read or change them, in order.
+    ops: Vec<Counting>,
+    /// The arithmetic flags each instruction reads, and those it sets
+    /// whatever they were.
+    flags: Vec<(u32, u32)>,
+    /// What the other instructions wrote.
+    writes: Vec<Access>,
+}
+
+/// An instruction of the pass that reads or changes counters: INC, DEC,
+/// ADD, SUB or CMP of an operand of `size` bytes at `addr` with a constant,
+/// the `at`th of the pass, which found `before` there.
+#[derive(Clone, Copy)]
+struct Counting {
+    op: CountOp,
+    addr: usize,
+    size: u8,
+    at: usize,
+    before: u32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CountOp {
+    Inc,
+    Dec,
+    Add(u32),
+    Sub(u32),
+    Cmp(u32),
+}
+
+impl CountOp {
+    /// The operand's new value (for CMP the same) and the flags, of those
+    /// it sets: INC and DEC leave CF.
+    fn run(self, size: u8, value: u32) -> (u32, u32) {
+        use crate::cpu::alu;
+        let m = alu::size_mask(size);
+        match self {
+            CountOp::Inc => (alu::add(size, value, 1, false).0, alu::add(size, value, 1, false).1 & !alu::CF),
+            CountOp::Dec => (alu::sub(size, value, 1, false).0, alu::sub(size, value, 1, false).1 & !alu::CF),
+            CountOp::Add(imm) => alu::add(size, value, imm & m, false),
+            CountOp::Sub(imm) => alu::sub(size, value, imm & m, false),
+            CountOp::Cmp(imm) => (value, alu::sub(size, value, imm & m, false).1),
+        }
+    }
+
+    /// The flags it sets.
+    fn sets(self) -> u32 {
+        use crate::cpu::alu;
+        match self {
+            CountOp::Inc | CountOp::Dec => alu::ARITH & !alu::CF,
+            _ => alu::ARITH,
+        }
+    }
+}
+
+/// Bytes of RAM an instruction reached: `len` from `start`, or an element
+/// of `size` bytes at offset `off` from `base` and the `count - 1` after it
+/// (before it, `down`), as a REP string instruction reaches them, the
+/// offset wrapping at 64K.
+#[derive(Clone, Copy)]
+enum Access {
+    Range { start: usize, len: usize },
+    Rep { base: usize, off: u32, size: u32, count: u32, down: bool },
+}
+
+impl Access {
+    fn covers(self, addr: usize) -> bool {
+        match self {
+            Access::Range { start, len } => addr.wrapping_sub(start) < len,
+            Access::Rep { base, off, size, count, down } => {
+                let at = addr.wrapping_sub(base);
+                if at >= 0x1_0000 {
+                    return false;
+                }
+                let span = count as u64 * size as u64;
+                let from = if down { (off + size - 1).wrapping_sub(at as u32) } else { (at as u32).wrapping_sub(off) } & 0xFFFF;
+                span >= 0x1_0000 || (from as u64) < span
+            }
+        }
+    }
 }
 
 /// Counts for the statistics.
@@ -428,6 +528,7 @@ enum Step {
     Remember,
     Copy,
     Compare,
+    Count,
 }
 
 /// Before the instruction at CS:EIP runs while `watching`: start a proof at
@@ -437,6 +538,9 @@ pub fn before_instruction(cpu: &mut Cpu) {
     let now = cpu.bus.clock.icount;
     visit(cpu, now);
     if cpu.bus.observe.on {
+        if matches!(cpu.bus.observe.phase, Phase::Count { .. }) {
+            record(cpu);
+        }
         inspect(cpu, now);
     }
 }
@@ -453,7 +557,9 @@ fn visit(cpu: &mut Cpu, now: u64) {
     let (head, until) = match &o.phase {
         Phase::Off | Phase::ArmHere => return,
         Phase::Armed { head, until } => (*head, *until),
-        Phase::Learn { head, until, .. } | Phase::Verify { head, until, .. } => (*head, *until),
+        Phase::Learn { head, until, .. } | Phase::Verify { head, until, .. } | Phase::Count { head, until, .. } => {
+            (*head, *until)
+        }
     };
     if now > until {
         return if o.on { o.fail("limit") } else { o.stop() };
@@ -475,7 +581,8 @@ fn visit(cpu: &mut Cpu, now: u64) {
         Phase::Learn { visits, .. } if visits.len() < VISITS => Step::Remember,
         Phase::Learn { .. } => return o.fail("visits"),
         Phase::Verify { base, .. } if base.key == visit.key => Step::Compare,
-        Phase::Verify { .. } => return,
+        Phase::Count { base, .. } if base.key == visit.key => Step::Count,
+        Phase::Verify { .. } | Phase::Count { .. } => return,
     };
     match step {
         Step::Start => {
@@ -500,6 +607,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
             cpu.bus.observe.phase = Phase::Verify { head, base: Box::new(visit), copies, until };
         }
         Step::Compare => compare(cpu, visit),
+        Step::Count => count(cpu, visit),
     }
 }
 
@@ -508,6 +616,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
 fn compare(cpu: &mut Cpu, visit: Visit) {
     let chunks = cpu.bus.observe.take_chunks();
     let Phase::Verify { base, copies, .. } = &cpu.bus.observe.phase else { return };
+    let (base_icount, base_executed) = (base.icount, base.executed);
     let ram = cpu.bus.ram();
     let mut same = true;
     let mut known = true;
@@ -536,12 +645,42 @@ fn compare(cpu: &mut Cpu, visit: Visit) {
     }
     if !same {
         // Not the base's state yet: the blocks written since it are
-        // compared again at the next visits.
+        // compared again at the next visits. Where only a few bytes differ
+        // (counters), the passes may differ in those alone: the next one is
+        // recorded from here, to see.
+        let counters: Vec<usize> = chunks
+            .iter()
+            .filter_map(|&c| copies.binary_search_by_key(&(c as usize), |(k, _)| *k).ok())
+            .flat_map(|i| {
+                let (c, copy) = &copies[i];
+                let start = c * CHUNK;
+                (0..CHUNK).filter(move |&b| ram[start + b] != copy[b]).map(move |b| start + b)
+            })
+            .take(COUNTER_BYTES + 1)
+            .collect();
+        if counters.len() <= COUNTER_BYTES && cpu.cr0 & crate::cpu::CR0_PG == 0 {
+            let blocks: Vec<usize> = copies.iter().map(|(k, _)| *k).collect();
+            let copies = copy_blocks(ram, blocks);
+            let o = &mut cpu.bus.observe;
+            o.restart_ports();
+            let Phase::Verify { head, until, .. } = o.phase else { return };
+            let pass = Box::new(Pass { counters, ..Pass::default() });
+            o.phase = Phase::Count { head, base: Box::new(visit), copies, pass, until };
+            return;
+        }
         cpu.bus.observe.chunks.extend(chunks);
         return;
     }
-    let period = visit.icount - base.icount;
-    let executed = visit.executed - base.executed;
+    finish(cpu, &visit, base_icount, base_executed, None);
+}
+
+/// A loop is proven from the visit before `visit` at `base` instructions
+/// (`executed` executed): skip passes up to the next event, or the time a
+/// port it read changes, and with `counted` as long as the passes' counters
+/// let them run the same (see `count`).
+fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Option<Box<Pass>>) {
+    let period = visit.icount - base;
+    let executed = visit.executed - executed;
     // The passes read the ports' bits as they were since the first read
     // after the base, until the time they change.
     let mut limit = cpu.bus.clock.deadline;
@@ -560,7 +699,16 @@ fn compare(cpu: &mut Cpu, visit: Visit) {
     o.stop();
     o.failures_in_row = 0;
     if period > 0 && limit > visit.icount {
-        let skipped = skip(cpu, period, executed, limit);
+        let mut passes = u64::MAX;
+        if let Some(pass) = counted {
+            let most = ((limit.min(cpu.bus.clock.deadline) - visit.icount) / period).min(COUNTED_PASSES);
+            let (same, values) = counted_passes(cpu, &pass, most);
+            for (addr, value) in values {
+                cpu.bus.write_8(addr, value);
+            }
+            passes = same;
+        }
+        let skipped = skip(cpu, period, executed, limit, passes);
         if let Some((port, read)) = held
             && skipped > 0
         {
@@ -568,6 +716,261 @@ fn compare(cpu: &mut Cpu, visit: Visit) {
             cpu.set_reg8(iced_x86::Register::AL, value);
         }
     }
+}
+
+/// During `Phase::Count`, the instruction about to run: what it does to
+/// the flags, and the RAM it reaches. Of the counters only INC, DEC, ADD,
+/// SUB and CMP with a constant may reach them (which `count` follows);
+/// anything else ends the proof.
+fn record(cpu: &mut Cpu) {
+    use iced_x86::{Decoder, DecoderOptions, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register};
+    use crate::cpu::alu::ARITH;
+    if cpu.cr0 & crate::cpu::CR0_PG != 0 {
+        return cpu.bus.observe.fail("paging");
+    }
+    let cs = cpu.seg_cache(crate::cpu::Seg::CS);
+    let bitness = if cs.attr & crate::cpu::ATTR_DB != 0 { 32 } else { 16 };
+    let a20 = cpu.bus.a20_mask() as usize;
+    let lin = cs.base.wrapping_add(cpu.eip()) as usize & a20;
+    let mut bytes = [0u8; 15];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = cpu.bus.peek_8((lin + i) & a20);
+    }
+    let instr = Decoder::with_ip(bitness, &bytes, cpu.eip() as u64, DecoderOptions::NONE).decode();
+    let mnemonic = instr.mnemonic();
+    // An emulator service trap (which decodes as nothing), and what pushes
+    // the flags or goes through the interrupt table: all the flags may be
+    // read, and RAM near the stack and the table reached.
+    let opaque = instr.is_invalid()
+        || matches!(
+            mnemonic,
+            Mnemonic::Int | Mnemonic::Int1 | Mnemonic::Int3 | Mnemonic::Into | Mnemonic::Iret | Mnemonic::Iretd | Mnemonic::Pushf | Mnemonic::Pushfd
+        );
+    // (The count is in CX or ECX by the address size.)
+    let addr32 = instr.op_kinds().any(|k| matches!(k, OpKind::MemorySegESI | OpKind::MemorySegEDI | OpKind::MemoryESEDI));
+    let rep_count = |cpu: &Cpu| if addr32 { cpu.ecx() } else { cpu.cx() as u32 };
+    let repeated = instr.is_string_instruction() && (instr.has_rep_prefix() || instr.has_repne_prefix());
+    let flags = if opaque {
+        (u32::MAX, 0)
+    } else {
+        let read = rflags(instr.rflags_read());
+        let mut kill = rflags(instr.rflags_written() | instr.rflags_cleared() | instr.rflags_set());
+        // A shift by a count of 0 and a REP of none leave the flags.
+        let shift = matches!(
+            mnemonic,
+            Mnemonic::Rol | Mnemonic::Ror | Mnemonic::Rcl | Mnemonic::Rcr | Mnemonic::Shl | Mnemonic::Sal | Mnemonic::Shr | Mnemonic::Sar | Mnemonic::Shld | Mnemonic::Shrd
+        );
+        let count = match instr.op_kinds().last() {
+            Some(OpKind::Immediate8) => instr.immediate8() as u32,
+            _ => cpu.cx() as u32 & 0xFF,
+        };
+        if shift && count & 0x1F == 0 || repeated && rep_count(cpu) == 0 {
+            kill = 0;
+        }
+        (read & ARITH, kill & ARITH)
+    };
+    // The RAM it reaches.
+    let mut factory = InstructionInfoFactory::new();
+    let info = factory.info(&instr);
+    let mut accesses: Vec<(Access, bool, bool)> = Vec::new();
+    for m in info.used_memory() {
+        let write = matches!(m.access(), OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite);
+        let seg_base = |r: Register| crate::cpu::Seg::from_register(r).map(|s| cpu.seg_cache(s).base as u64);
+        let Some(addr) = m.virtual_address(0, |r, _, _| seg_base(r).or(Some(cpu.reg(r) as u64))) else {
+            return cpu.bus.observe.fail("count");
+        };
+        let size = m.memory_size().size().max(1);
+        let operand = !repeated && instr.op_count() > 0 && instr.op0_kind() == OpKind::Memory && m.base() == instr.memory_base() && m.displacement() == instr.memory_displacement64();
+        let access = if repeated {
+            if m.address_size() != iced_x86::CodeSize::Code16 {
+                return cpu.bus.observe.fail("count");
+            }
+            let base = seg_base(m.segment()).unwrap_or(0) as usize;
+            let off = addr.wrapping_sub(base as u64) as u32 & 0xFFFF;
+            let down = cpu.get_cpu_flag(crate::cpu::CpuFlags::DF);
+            Access::Rep { base, off, size: size as u32, count: rep_count(cpu), down }
+        } else {
+            Access::Range { start: addr as usize & a20, len: size }
+        };
+        accesses.push((access, write, operand));
+    }
+    if opaque {
+        let ss = cpu.seg_cache(crate::cpu::Seg::SS).base as usize;
+        let off = (cpu.sp() as u32).wrapping_sub(64) & 0xFFFF;
+        accesses.push((Access::Rep { base: ss, off, size: 1, count: 128, down: false }, true, false));
+        accesses.push((Access::Range { start: 0, len: 0x400 }, false, false));
+    }
+    let op = match (mnemonic, instr.op_count()) {
+        (Mnemonic::Inc, 1) => Some(CountOp::Inc),
+        (Mnemonic::Dec, 1) => Some(CountOp::Dec),
+        (Mnemonic::Add | Mnemonic::Sub | Mnemonic::Cmp, 2) if matches!(instr.op1_kind(), OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate8to16 | OpKind::Immediate8to32) => {
+            let imm = instr.immediate(1) as u32;
+            Some(match mnemonic {
+                Mnemonic::Add => CountOp::Add(imm),
+                Mnemonic::Sub => CountOp::Sub(imm),
+                _ => CountOp::Cmp(imm),
+            })
+        }
+        _ => None,
+    }
+    .filter(|_| instr.op0_kind() == OpKind::Memory && !instr.has_lock_prefix());
+    // What each operand held before it ran.
+    let befores: Vec<u32> = accesses
+        .iter()
+        .map(|&(access, _, _)| match access {
+            Access::Range { start, len } if len <= 4 => {
+                (0..len).fold(0u32, |v, i| v | (cpu.bus.peek_8((start + i) & a20) as u32) << (8 * i))
+            }
+            _ => 0,
+        })
+        .collect();
+    let o = &mut cpu.bus.observe;
+    let Phase::Count { pass, .. } = &mut o.phase else { return };
+    if pass.flags.len() >= PASS_LIMIT {
+        return o.fail("pass");
+    }
+    let at = pass.flags.len();
+    pass.flags.push(flags);
+    let mut failed = false;
+    for ((access, write, operand), before) in accesses.into_iter().zip(befores) {
+        let reaches = pass.counters.iter().any(|&c| access.covers(c));
+        match (op, access) {
+            (Some(op), Access::Range { start, len }) if operand && reaches && len <= 4 => {
+                pass.ops.push(Counting { op, addr: start, size: len as u8, at, before });
+            }
+            _ if reaches => failed = true,
+            _ if write => pass.writes.push(access),
+            _ => {}
+        }
+    }
+    if failed {
+        o.fail("counter");
+    }
+}
+
+/// The arithmetic flags of iced's `RflagsBits`.
+fn rflags(bits: u32) -> u32 {
+    use crate::cpu::alu::{AF, CF, OF, PF, SF, ZF};
+    use iced_x86::RflagsBits as R;
+    [(R::OF, OF), (R::SF, SF), (R::ZF, ZF), (R::AF, AF), (R::CF, CF), (R::PF, PF)]
+        .iter()
+        .fold(0, |f, &(r, x)| if bits & r != 0 { f | x } else { f })
+}
+
+/// At the visit after the pass `Phase::Count` recorded, with the
+/// registers of its base: the blocks written must be as at the base but
+/// for the counters, which only the pass's counting instructions reached
+/// (`record`), and which come out as those instructions make them. The
+/// passes after it then run the same as long as each counting instruction
+/// sets the flags anything after it reads as it did in the recorded pass.
+fn count(cpu: &mut Cpu, visit: Visit) {
+    let chunks = cpu.bus.observe.take_chunks();
+    let o = &mut cpu.bus.observe;
+    let Phase::Count { base, copies, pass, .. } = std::mem::take(&mut o.phase) else { return };
+    o.phase = Phase::Off;
+    let ram = cpu.bus.ram();
+    let fail = |cpu: &mut Cpu, why| {
+        cpu.bus.observe.on = true;
+        cpu.bus.observe.fail(why)
+    };
+    let counter = |a: usize| pass.counters.binary_search(&a).is_ok();
+    for &c in &chunks {
+        let Ok(i) = copies.binary_search_by_key(&(c as usize), |(k, _)| *k) else { return fail(cpu, "count blocks") };
+        let start = c as usize * CHUNK;
+        if (0..CHUNK).any(|b| ram[start + b] != copies[i].1[b] && !counter(start + b)) {
+            return fail(cpu, "count blocks");
+        }
+    }
+    // The bytes the counting instructions reach: only they write them, and
+    // they change all the counters.
+    let mut reached: Vec<usize> = pass.ops.iter().flat_map(|op| op.addr..op.addr + op.size as usize).collect();
+    reached.sort_unstable();
+    reached.dedup();
+    if !pass.counters.iter().all(|c| reached.binary_search(c).is_ok())
+        || pass.writes.iter().any(|w| reached.iter().any(|&a| w.covers(a)))
+    {
+        return fail(cpu, "count writes");
+    }
+    // The pass as the counting instructions make it, from the bytes at the
+    // base: what each found must be what it did find, and the bytes must
+    // come out as they are now.
+    let at_base = |a: usize| match copies.binary_search_by_key(&(a / CHUNK), |(k, _)| *k) {
+        Ok(i) => copies[i].1[a % CHUNK],
+        Err(_) => ram[a],
+    };
+    let mut values: Vec<(usize, u8)> = reached.iter().map(|&a| (a, at_base(a))).collect();
+    let mut seen = Vec::with_capacity(pass.ops.len());
+    for op in &pass.ops {
+        let (before, flags) = run_op(&mut values, op);
+        if before != op.before {
+            return fail(cpu, "count model");
+        }
+        seen.push(flags);
+    }
+    if values.iter().any(|&(a, v)| ram[a] != v) {
+        return fail(cpu, "count model");
+    }
+    // The flags of each that something reads before they are set again (or
+    // at the head, whose flags the passes compare).
+    let live: Vec<u32> = pass
+        .ops
+        .iter()
+        .map(|op| {
+            let mut left = op.op.sets();
+            let mut live = 0;
+            for &(read, kill) in &pass.flags[op.at + 1..] {
+                live |= read & left;
+                left &= !kill;
+                if left == 0 {
+                    break;
+                }
+            }
+            live | left
+        })
+        .collect();
+    let pass = Box::new(Pass { flags: live.iter().zip(&seen).map(|(&l, &f)| (l, f & l)).collect(), ..*pass });
+    cpu.bus.observe.on = true;
+    finish(cpu, &visit, base.icount, base.executed, Some(pass));
+}
+
+/// Run counting instruction `op` on the counters' bytes `values`: the
+/// value it found and the flags it set.
+fn run_op(values: &mut [(usize, u8)], op: &Counting) -> (u32, u32) {
+    let byte = |values: &[(usize, u8)], a: usize| values.iter().find(|&&(b, _)| b == a).map_or(0, |&(_, v)| v);
+    let before = (0..op.size as usize).fold(0u32, |v, i| v | (byte(values, op.addr + i) as u32) << (8 * i));
+    let (after, flags) = op.op.run(op.size, before);
+    if after != before {
+        for i in 0..op.size as usize {
+            if let Some(slot) = values.iter_mut().find(|(b, _)| *b == op.addr + i) {
+                slot.1 = (after >> (8 * i)) as u8;
+            }
+        }
+    }
+    (before, flags)
+}
+
+/// How many of the next passes, up to `most`, run as the recorded one
+/// (`count`): those whose counting instructions set the flags read after
+/// them (`Pass::flags`, live and as seen) as it did. Also the counters'
+/// bytes after them.
+fn counted_passes(cpu: &Cpu, pass: &Pass, most: u64) -> (u64, Vec<(usize, u8)>) {
+    let mut reached: Vec<usize> = pass.ops.iter().flat_map(|op| op.addr..op.addr + op.size as usize).collect();
+    reached.sort_unstable();
+    reached.dedup();
+    let mut values: Vec<(usize, u8)> = reached.iter().map(|&a| (a, cpu.bus.ram()[a])).collect();
+    let mut done = values.clone();
+    let mut passes = 0;
+    'passes: while passes < most {
+        for (op, &(live, seen)) in pass.ops.iter().zip(&pass.flags) {
+            let (_, flags) = run_op(&mut values, op);
+            if flags & live != seen {
+                break 'passes;
+            }
+        }
+        passes += 1;
+        done.clone_from(&values);
+    }
+    (passes, done)
 }
 
 /// During a proof, the instruction about to run: an IN AL of a port whose
@@ -671,11 +1074,11 @@ fn copy_blocks(ram: &[u8], mut blocks: Vec<usize>) -> Vec<(usize, [u8; CHUNK])> 
 
 /// Move the clock on by whole passes of `period` instructions (`executed`
 /// of them executed), up to `limit`: the next timer event, or when a port
-/// the loop reads changes.
+/// the loop reads changes; `most` passes at most.
 /// Returns the instruction count skipped.
-fn skip(cpu: &mut Cpu, period: u64, executed: u64, limit: u64) -> u64 {
+fn skip(cpu: &mut Cpu, period: u64, executed: u64, limit: u64, most: u64) -> u64 {
     let clock = &mut cpu.bus.clock;
-    let passes = limit.min(clock.deadline).saturating_sub(clock.icount) / period;
+    let passes = (limit.min(clock.deadline).saturating_sub(clock.icount) / period).min(most);
     if passes == 0 {
         return 0;
     }

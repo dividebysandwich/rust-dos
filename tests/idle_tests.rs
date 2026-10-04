@@ -142,6 +142,67 @@ fn a_loop_that_counts_is_not_skipped() {
 }
 
 #[test]
+fn a_loop_that_counts_down_is_skipped_until_its_count_runs_out() {
+    // As MS-DOS 7's IO.SYS polls the keyboard: a count down each pass,
+    // whose flags POPF puts back, with something done where it reaches 0.
+    let stats = compare("count_down", |a| {
+        let (mut wait, mut left) = (a.create_label(), a.create_label());
+        a.mov(word_ptr(DATA + 2), 3000u32)?;
+        a.set_label(&mut wait)?;
+        a.pushf()?;
+        a.dec(word_ptr(DATA + 2))?;
+        a.jnz(left)?;
+        a.inc(word_ptr(DATA + 4))?;
+        a.mov(word_ptr(DATA + 2), 3000u32)?;
+        a.set_label(&mut left)?;
+        a.popf()?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_count_compared_each_pass_is_skipped_until_it_reaches_the_value() {
+    // As MS-DOS 7 does between keyboard polls: a byte compared with FFh,
+    // then counted up, with flags that a CMP sets again after it.
+    let stats = compare("count_up", |a| {
+        let (mut wait, mut below) = (a.create_label(), a.create_label());
+        a.set_label(&mut wait)?;
+        a.cmp(byte_ptr(DATA + 6), 0xFF)?;
+        a.jne(below)?;
+        a.inc(word_ptr(DATA + 8))?;
+        a.set_label(&mut below)?;
+        a.inc(word_ptr(DATA + 6))?;
+        a.mov(al, 0)?;
+        a.cmp(al, 2)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_count_read_into_a_register_is_not_skipped() {
+    let stats = compare("count_read", |a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.inc(word_ptr(DATA + 2))?;
+        a.mov(bx, word_ptr(DATA + 2))?;
+        a.and(bx, 0)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    assert_eq!(stats.proofs, 0, "{:?}", stats);
+}
+
+#[test]
 fn a_loop_that_reads_a_port_is_not_skipped() {
     let stats = compare("port", |a| {
         let mut wait = a.create_label();
