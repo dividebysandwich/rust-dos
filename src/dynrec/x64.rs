@@ -16,7 +16,7 @@ use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler, dynasm};
 use iced_x86::ConditionCode;
 
-use super::block::{BlockData, LINKS, RETURN_LINK, RETURN_MISS};
+use super::block::{BlockData, LINKS, RETURN_LINK, RETURN_MISS, SIDE_LINK};
 use super::helpers::*;
 use super::uop::*;
 use crate::cpu::Seg;
@@ -232,6 +232,42 @@ enum Slow {
     Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, wb: u8, reload: u8, leave: bool },
 }
 
+/// A conditional jump the block goes on after (`block::SIDE_EXITS`): its
+/// way out where it is taken, at `at`, made after the block's code from
+/// what was known at the jump: instruction `ix`, the commit of its
+/// counter, the cached registers, where the flags are and the segments
+/// loaded.
+struct Side {
+    at: DynamicLabel,
+    ix: usize,
+    taken: u32,
+    commit: Option<(Gpr, T)>,
+    cache: Cache,
+    dirty: bool,
+    loaded_segs: u8,
+}
+
+/// A conditional jump to instruction `to` later in the block
+/// (`BlockData::target`), where taken: at `at`, made after the block's
+/// code, the counts are brought to where they are at `to` but for the
+/// instructions it skips, and the cached registers and flags to how the
+/// code at `to` has them (`fall`, known once it is translated); then on at
+/// `entry`. With what was known at the jump, as for a `Side`.
+struct Merge {
+    at: DynamicLabel,
+    ix: usize,
+    to: usize,
+    commit: Option<(Gpr, T)>,
+    cache: Cache,
+    dirty: bool,
+    synced: i32,
+    fpu_cr0_checked: bool,
+    fpu_known: u8,
+    /// Set where `to` is translated: where its code starts, and the
+    /// counts, cached registers and flags there.
+    entry: Option<(DynamicLabel, i32, Cache, bool)>,
+}
+
 struct Gen<'a> {
     ops: Asm,
     data: &'a BlockData,
@@ -254,10 +290,13 @@ struct Gen<'a> {
     limit: DynamicLabel,
     body: DynamicLabel,
     slow: Vec<Slow>,
-    /// Whether exits to a known EIP in the page may be linked, and the
-    /// stubs of the links used.
+    sides: Vec<Side>,
+    merges: Vec<Merge>,
+    /// Whether exits to a known EIP in the page may be linked, the stubs
+    /// of the links used, and their jumps (`Code::sites`).
     link: bool,
     stubs: [Option<DynamicLabel>; LINKS],
+    sites: Vec<(u8, u32)>,
     /// The way out of a return to none of the places its links lead to.
     return_miss: Option<DynamicLabel>,
     /// Where the iteration of a REP string instruction starts.
@@ -311,6 +350,9 @@ struct Gen<'a> {
 pub struct Code {
     pub bytes: Vec<u8>,
     pub stubs: [Option<usize>; LINKS],
+    /// The links' jumps, which go to their stubs: the link, and the jump's
+    /// offset in the code (see `patch_link`).
+    pub sites: Vec<(u8, u32)>,
     pub lag: Box<[u8]>,
 }
 
@@ -332,13 +374,19 @@ pub const SYSTEM: bool = true;
 /// And those of FPU instructions.
 pub const FPU: bool = true;
 
+/// Point the link jump at `site` (`Code::sites`) at `to`.
+pub fn patch_link(mem: &mut super::codemem::CodeMemory, site: *const u8, to: *const u8) {
+    let rel = (to as isize - (site as isize + 4)) as i32;
+    mem.patch(site, &rel.to_le_bytes());
+}
+
 pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: super::Env) -> Code {
     let mut ops = Asm::new(0);
     let n = data.count();
     let (tail, deadline, revalidate, body) =
         (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
     let (limit, fail_tail) = (ops.new_dynamic_label(), ops.new_dynamic_label());
-    let plan = super::flags::plan(items);
+    let plan = super::flags::plan(items, &data.targets());
     let mut g = Gen {
         ops,
         data,
@@ -354,8 +402,11 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         limit,
         body,
         slow: Vec::new(),
+        sides: Vec::new(),
+        merges: Vec::new(),
         link,
         stubs: [None; LINKS],
+        sites: Vec::new(),
         return_miss: None,
         rep_top: None,
         ix: 0,
@@ -381,6 +432,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     let mut synced = 0;
     for (ix, item) in items.iter().enumerate() {
         g.ix = ix;
+        g.merge_here(synced);
         match item {
             None => {
                 if ix as i32 > synced {
@@ -477,21 +529,35 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     // handler sets EIP itself).
     let last = n - 1;
     let next = data.eips[last].wrapping_add(data.instrs[last].len() as u32);
+    // After one that leaves an interrupt shadow, the execution loop runs
+    // the next instruction, which ends it.
+    g.link = link && !super::block::shadows(&data.instrs[last]);
     match &items[last] {
         Some(u) if !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. })) => g.leave(Some(next), 0, true),
         None if !super::block::ends_block(&data.instrs[last]) => g.leave(Some(next), 0, false),
         _ => {}
     }
+    g.link = link;
     // The end: the counts, and back to the execution loop. The code that
     // jumps here has put the flags back.
     dynasm!(g.ops ; .arch x64 ; =>tail);
     g.dirty = false;
     g.cache.dirty = 0;
     g.leave(None, 0, false);
+    // The conditional jumps the block went on after, where taken.
+    for (k, side) in std::mem::take(&mut g.sides).into_iter().enumerate() {
+        dynasm!(g.ops ; .arch x64 ; =>side.at);
+        (g.ix, g.cache, g.dirty, g.loaded_segs) = (side.ix, side.cache, side.dirty, side.loaded_segs);
+        g.taken(side.taken, side.commit, SIDE_LINK + k);
+    }
+    for merge in std::mem::take(&mut g.merges) {
+        g.jump_in(merge);
+    }
     g.epilogue();
     let stubs = g.stubs.map(|s| s.map(|l| g.ops.labels().resolve_dynamic(l).expect("stub").0));
     let lag = g.synced.iter().enumerate().map(|(ix, &synced)| (ix as i32 - synced) as u8).collect();
-    Code { bytes: g.ops.finalize().expect("block"), stubs, lag }
+    let sites = std::mem::take(&mut g.sites);
+    Code { bytes: g.ops.finalize().expect("block"), stubs, sites, lag }
 }
 
 impl Gen<'_> {
@@ -2493,6 +2559,33 @@ impl Gen<'_> {
         let yes = self.ops.new_dynamic_label();
         // The condition reads the flags where they are.
         let ebp = self.dirty;
+        // A jump the block goes on after leaves where taken, after the
+        // block's code.
+        let side = self.ix + 1 < self.data.count();
+        if let Some(to) = self.data.target(self.ix) {
+            self.merges.push(Merge {
+                at: yes,
+                ix: self.ix,
+                to,
+                commit,
+                cache: self.cache,
+                dirty: self.dirty,
+                synced: self.synced[self.ix],
+                fpu_cr0_checked: self.fpu_cr0_checked,
+                fpu_known: self.fpu_known,
+                entry: None,
+            });
+        } else if side {
+            self.sides.push(Side {
+                at: yes,
+                ix: self.ix,
+                taken,
+                commit,
+                cache: self.cache,
+                dirty: self.dirty,
+                loaded_segs: self.loaded_segs,
+            });
+        }
         match cond {
             Cond::Flags(cc) => self.condition(cc, yes, ebp),
             Cond::Zero(t) => dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jz =>yes),
@@ -2511,12 +2604,62 @@ impl Gen<'_> {
             }
         }
         // Not taken.
+        if side {
+            self.commit(commit);
+            return;
+        }
         let (cache, dirty) = (self.cache, self.dirty);
         self.commit(commit);
         self.leave(Some(next), 1, true);
         (self.cache, self.dirty) = (cache, dirty);
         dynasm!(self.ops ; .arch x64 ; =>yes);
-        // Taken: the target must be within the CS limit.
+        self.taken(taken, commit, 0);
+    }
+
+    /// Where instruction `ix` starts, which jumps in the block may go to:
+    /// note how the code has the counts (`synced`), the cached registers
+    /// and the flags there for them, and know only what holds both ways.
+    fn merge_here(&mut self, synced: i32) {
+        let ix = self.ix;
+        if !self.merges.iter().any(|m| m.to == ix) {
+            return;
+        }
+        let entry = self.ops.new_dynamic_label();
+        dynasm!(self.ops ; .arch x64 ; =>entry);
+        for m in self.merges.iter_mut().filter(|m| m.to == ix) {
+            m.entry = Some((entry, synced, self.cache, self.dirty));
+            self.fpu_cr0_checked &= m.fpu_cr0_checked;
+            self.fpu_known &= m.fpu_known;
+        }
+    }
+
+    /// A taken jump to an instruction later in the block (see `Merge`).
+    fn jump_in(&mut self, m: Merge) {
+        let (entry, synced, fall, fall_dirty) = m.entry.expect("jump target translated");
+        dynasm!(self.ops ; .arch x64 ; =>m.at);
+        (self.ix, self.cache, self.dirty) = (m.ix, m.cache, m.dirty);
+        self.commit(m.commit);
+        let skipped = (m.to - m.ix - 1) as i32;
+        let behind = synced - m.synced - skipped;
+        if behind != 0 {
+            dynasm!(self.ops ; .arch x64 ; add QWORD [rbx + ICOUNT], behind);
+        }
+        if skipped != 0 {
+            dynasm!(self.ops ; .arch x64 ; sub QWORD [rbx + EXECUTED], skipped);
+        }
+        self.writeback(self.cache.dirty & !fall.dirty);
+        self.load_cached(fall.loaded & !self.cache.loaded);
+        match (self.dirty, fall_dirty) {
+            (true, false) => self.flags_back(),
+            (false, true) => dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]),
+            _ => {}
+        }
+        dynasm!(self.ops ; .arch x64 ; jmp =>entry);
+    }
+
+    /// Leave for the target `taken` of a conditional jump through link
+    /// `slot`, after `commit`: the target must be within the CS limit.
+    fn taken(&mut self, taken: u32, commit: Option<(Gpr, T)>, slot: usize) {
         let gp = self.fault_exit(EXIT_GP0);
         dynasm!(self.ops
             ; .arch x64
@@ -2525,7 +2668,7 @@ impl Gen<'_> {
             ; ja =>gp
         );
         self.commit(commit);
-        self.leave(Some(taken), 0, true);
+        self.leave(Some(taken), slot, true);
     }
 
     /// Leave the block after its last instruction, at `eip` if the code
@@ -2547,10 +2690,7 @@ impl Gen<'_> {
             self.check_flat();
         }
         match eip {
-            Some(eip) if self.link && self.data.in_page(eip) => {
-                self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
-                dynasm!(self.ops ; .arch x64 ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]);
-            }
+            Some(eip) if self.link && self.data.in_page(eip) => self.link_jump(slot),
             Some(_) if self.link => self.guarded(slot),
             _ => dynasm!(self.ops ; .arch x64 ; mov eax, EXIT_NEXT as i32 ; jmp QWORD [r12 + CTX_EXIT]),
         }
@@ -2574,11 +2714,11 @@ impl Gen<'_> {
         );
     }
 
-    /// Bring the counts up to date for leaving the block after its last
-    /// instruction, and RDX = the block.
+    /// Bring the counts up to date for leaving the block after the
+    /// instruction being translated (the last but at a conditional jump the
+    /// block goes on after), and RDX = the block.
     fn counts(&mut self) {
-        let data = self.data;
-        let (n, synced) = (data.count() as i32, self.synced[data.count() - 1]);
+        let (n, synced) = (self.ix as i32 + 1, self.synced[self.ix]);
         let data_ptr = self.data_ptr;
         dynasm!(self.ops
             ; .arch x64
@@ -2680,10 +2820,15 @@ impl Gen<'_> {
                 ; jne =>stub
             );
         }
-        dynasm!(self.ops
-            ; .arch x64
-            ; jmp QWORD [rdx + DATA_LINKS + slot as i32 * 8]
-        );
+        self.link_jump(slot);
+    }
+
+    /// The jump of link `slot`: to its stub, until the engine makes it a
+    /// link (`patch_link`).
+    fn link_jump(&mut self, slot: usize) {
+        let stub = *self.stubs[slot].get_or_insert_with(|| self.ops.new_dynamic_label());
+        dynasm!(self.ops ; .arch x64 ; jmp =>stub);
+        self.sites.push((slot as u8, self.ops.offset().0 as u32 - 4));
     }
 
     fn commit(&mut self, commit: Option<(Gpr, T)>) {

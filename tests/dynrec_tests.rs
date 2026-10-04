@@ -554,8 +554,8 @@ fn a_shift_by_a_cl_of_0_still_checks_its_operand_for_writing() {
     assert_ne!(b.cpu.edx(), 3);
 }
 
-/// A program with IRQ 0 firing often, running `body` in a loop.
-fn with_timer(rig: &mut Rig, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) {
+/// IRQ 0's handler, which counts the interrupts in EDI.
+fn timer_handler(rig: &mut Rig) {
     rig.handler(0x08, 0, |a| {
         a.push(eax)?;
         a.inc(edi)?;
@@ -564,18 +564,29 @@ fn with_timer(rig: &mut Rig, body: impl Fn(&mut CodeAssembler) -> Result<(), Ice
         a.pop(eax)?;
         a.iretd()
     });
+}
+
+/// Unmask IRQ 0, start the timer with a short period, and STI; EDI = 0 and
+/// ECX = 3000 for the loop after it.
+fn start_timer(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.mov(al, 0xFE)?;
+    a.out(0x21, al)?;
+    a.mov(al, 0x34)?;
+    a.out(0x43, al)?;
+    a.mov(al, 0x61)?;
+    a.out(0x40, al)?;
+    a.mov(al, 0x00)?;
+    a.out(0x40, al)?;
+    a.xor(edi, edi)?;
+    a.mov(ecx, 3000u32)?;
+    a.sti()
+}
+
+/// A program with IRQ 0 firing often, running `body` in a loop.
+fn with_timer(rig: &mut Rig, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) {
+    timer_handler(rig);
     let code = asm32(CODE, |a| {
-        a.mov(al, 0xFE)?;
-        a.out(0x21, al)?;
-        a.mov(al, 0x34)?;
-        a.out(0x43, al)?;
-        a.mov(al, 0x61)?;
-        a.out(0x40, al)?;
-        a.mov(al, 0x00)?;
-        a.out(0x40, al)?;
-        a.xor(edi, edi)?;
-        a.mov(ecx, 3000u32)?;
-        a.sti()?;
+        start_timer(a)?;
         let mut top = a.create_label();
         a.set_label(&mut top)?;
         body(a)?;
@@ -651,6 +662,110 @@ fn code_traced_with_tf_takes_a_single_step_trap_after_every_instruction() {
     run_both(&mut a, &mut b);
     // Per pass: the MOV, 50 times around the loop, and PUSHFD, AND, POPFD.
     assert_eq!(b.cpu.esi(), 2 * (1 + 150 + 3));
+}
+
+#[test]
+fn jumps_within_a_block_and_out_of_it_keep_the_counts() {
+    // The block from LOOP goes on after its conditional jumps: one to a
+    // later instruction in it (past two), every other time around, and one
+    // out of it, to code that comes back to BACK. The timer interrupts the
+    // loop all over it, and the interrupts read the counts.
+    let (top, back, out) = (CODE + 0x100, CODE + 0x180, CODE + 0x800);
+    let (mut a, mut b) = twins(|rig| {
+        timer_handler(rig);
+        rig.load(CODE, &asm32(CODE, |a| {
+            start_timer(a)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            let mut skip = a.create_label();
+            a.inc(esi)?;
+            a.add(ebx, 1)?;
+            a.test(esi, 1)?;
+            a.jz(skip)?;
+            a.add(ebp, esi)?;
+            // (Run by its handler, with the registers in the CPU.)
+            a.bsf(edx, esi)?;
+            a.imul_3(edx, edx, 7)?;
+            a.set_label(&mut skip)?;
+            a.add(ebx, ebp)?;
+            a.test(esi, 6)?;
+            a.jnz(out as u64)?;
+            a.sub(eax, 3)?;
+            a.jmp(back as u64)
+        }));
+        rig.load(back, &asm32(back, |a| {
+            a.xor(ebx, edx)?;
+            a.add(eax, ebx)?;
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            a.cli()?;
+            a.hlt()
+        }));
+        rig.load(out, &asm32(out, |a| {
+            a.add(eax, 5)?;
+            a.jmp(back as u64)
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+}
+
+#[test]
+fn a_fault_after_a_jump_within_the_block_counts_what_ran() {
+    // Every other time around, a jump in the block skips two of its
+    // instructions; the load after them faults the 256th time (even).
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(DATA, 0xFFF, DATA_R0, 0x4));
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut top = a.create_label();
+            let mut skip = a.create_label();
+            a.mov(ax, FREE as u32)?;
+            a.mov(ds, ax)?;
+            a.xor(ecx, ecx)?;
+            a.xor(ebx, ebx)?;
+            a.set_label(&mut top)?;
+            a.inc(ecx)?;
+            a.test(cl, 1)?;
+            a.jz(skip)?;
+            a.add(ebx, 3)?;
+            a.add(ebx, ecx)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, ecx)?;
+            a.shl(eax, 4)?;
+            a.add(ebx, 1)?;
+            a.mov(edx, dword_ptr(eax))?;
+            a.add(esi, edx)?;
+            a.cmp(ecx, 1000)?;
+            a.jne(top)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.recorded().0, GP as u32);
+    // 3 + i for odd i up to 255, and 1 for each i up to 256.
+    assert_eq!(b.cpu.ebx(), 128 * 3 + 128 * 128 + 256);
+}
+
+#[test]
+fn sti_at_the_end_of_a_full_block_holds_interrupts_for_one_instruction() {
+    // The loop's first block is 64 instructions long and ends with STI
+    // (IF was clear): the shadow covers the next instruction only, in the
+    // block linked after it as anywhere.
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            a.cli()?;
+            for _ in 0..62 {
+                a.inc(esi)?;
+            }
+            a.sti()?;
+            a.inc(ebp)?;
+            a.add(ebx, ebp)
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
 }
 
 #[test]

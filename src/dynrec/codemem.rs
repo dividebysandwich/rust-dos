@@ -81,6 +81,20 @@ impl CodeMemory {
         Some(unsafe { self.base.add(at) as *const u8 })
     }
 
+    /// Write `bytes` over code at `at`, which `add` placed (a link's jump).
+    pub fn patch(&mut self, at: *const u8, bytes: &[u8]) {
+        debug_assert!(at as usize >= self.base as usize && at as usize + bytes.len() <= self.base as usize + self.top);
+        // SAFETY: inside code `add` placed, and no translated code runs
+        // while we write.
+        unsafe {
+            let dest = at as *mut u8;
+            self.writable(dest, bytes.len(), true);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest, bytes.len());
+            self.writable(dest, bytes.len(), false);
+            dynasmrt::cache_control::synchronize_icache(std::slice::from_raw_parts(dest, bytes.len()));
+        }
+    }
+
     /// Give back the space of `len` bytes that `add` placed at `code`, for
     /// code added later. Nothing may run them any more.
     pub fn remove(&mut self, code: *const u8, len: usize) {

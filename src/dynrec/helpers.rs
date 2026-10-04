@@ -174,7 +174,6 @@ pub const CTX_DEV: i32 = offset_of!(JitCtx, dev) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const DEV_BIT: u8 = 32;
 pub const DATA_GEN_SUM: i32 = offset_of!(BlockData, gen_sum) as i32;
-pub const DATA_LINKS: i32 = offset_of!(BlockData, links) as i32;
 pub const DATA_GUARDS: i32 = offset_of!(BlockData, guards) as i32;
 pub const GUARD_SIZE: i32 = std::mem::size_of::<Guard>() as i32;
 pub const GUARD_EIP: i32 = offset_of!(Guard, eip) as i32;

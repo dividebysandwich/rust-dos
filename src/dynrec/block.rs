@@ -22,14 +22,21 @@ use crate::instructions::{Handler, handler};
 const PAGE_TAIL: u32 = 15;
 
 /// Links a block's exits can have: 0 and 1 to a known EIP (a jump's
-/// target, a conditional one's next instruction), and from `RETURN_LINK`
-/// on those of an exit to an EIP it only knows as it runs (a return's, an
-/// indirect call's), to the last places it went to.
+/// target, a conditional one's next instruction), from `SIDE_LINK` on
+/// those of the conditional jumps the block goes on after (`SIDE_EXITS`)
+/// to their targets, and from `RETURN_LINK` on those of an exit to an EIP
+/// it only knows as it runs (a return's, an indirect call's), to the last
+/// places it went to.
 pub const LINKS: usize = RETURN_LINK + RETURN_LINKS;
+/// The first link of a conditional jump in the block to a place outside
+/// it, and how many a block has: it ends at the jump after them. (One to
+/// an instruction later in the block goes there, see `BlockData::target`.)
+pub const SIDE_LINK: usize = 2;
+pub const SIDE_EXITS: usize = 6;
 /// The first link of a return or indirect call, and how many it has: a
 /// function called from two places in turn returns to each, and more
 /// rarely from more.
-pub const RETURN_LINK: usize = 2;
+pub const RETURN_LINK: usize = SIDE_LINK + SIDE_EXITS;
 pub const RETURN_LINKS: usize = 4;
 /// The index a return or indirect call leaves with that goes to none of
 /// the places its links lead to.
@@ -128,10 +135,13 @@ pub struct BlockData {
     /// Where the block's linkable exits jump: the translated code of the
     /// block their EIP leads to, or else the exit's stub in `stubs`, which
     /// returns to the execution loop to have it linked; and for links to
-    /// another page, what they were made under.
+    /// another page, what they were made under. The jumps are direct ones
+    /// in the code (`sites`: the link, and the jump's offset in the
+    /// code), which the engine points where `links` says.
     pub links: [usize; LINKS],
     pub stubs: [usize; LINKS],
     pub guards: [Guard; LINKS],
+    pub sites: Box<[(u8, u32)]>,
     /// Per instruction, how many instructions the instruction count is
     /// behind while it runs: the translated code brings it up to date
     /// only before handlers and where the block ends.
@@ -143,9 +153,53 @@ impl BlockData {
     /// window, with at most `max` instructions, and `watch` the changes of
     /// its page's bytes (see `WATCH_AFTER`). With `tail`, the block may go
     /// on into the page's last 15 bytes, with instructions that end in the
-    /// page (see `in_tail`). None if no block can start there: the
-    /// interpreter runs that instruction itself.
-    pub fn build(at: &At, ram: &[u8], page_gen: &[u32], max: usize, watch: Option<&[u8]>, tail: bool) -> Option<BlockData> {
+    /// page (see `in_tail`). The block goes on after the conditional jumps
+    /// that `side` says its code takes, up to `SIDE_EXITS` of them that
+    /// leave it. None if no block can start there: the interpreter runs
+    /// that instruction itself.
+    pub fn build(
+        at: &At,
+        ram: &[u8],
+        page_gen: &[u32],
+        max: usize,
+        watch: Option<&[u8]>,
+        tail: bool,
+        side: impl Fn(&Instruction) -> bool,
+    ) -> Option<BlockData> {
+        // Jumps forward in the page may stay in the block; where too many
+        // leave it after all, it ends at the first that is one too many
+        // (which may make more of those before it leave). A loop's start
+        // starts a block of its own: the block stops before it.
+        let mut max = max;
+        loop {
+            let data = Self::build_up_to(at, ram, page_gen, max, watch, tail, &side)?;
+            let n = data.count();
+            let back = (0..n).filter_map(|ix| {
+                let t = jump_target(&data.instrs[ix])?;
+                (1..=ix).find(|&j| data.eips[j] == t)
+            });
+            if let Some(head) = back.min() {
+                max = head;
+                continue;
+            }
+            let outside: Vec<usize> =
+                (0..n - 1).filter(|&ix| side_exit(&data.instrs[ix]) && data.target(ix).is_none()).collect();
+            if outside.len() <= SIDE_EXITS {
+                return Some(data);
+            }
+            max = outside[SIDE_EXITS] + 1;
+        }
+    }
+
+    fn build_up_to(
+        at: &At,
+        ram: &[u8],
+        page_gen: &[u32],
+        max: usize,
+        watch: Option<&[u8]>,
+        tail: bool,
+        side: &impl Fn(&Instruction) -> bool,
+    ) -> Option<BlockData> {
         // Linear and physical addresses are the same within a page.
         let page_off = at.phys_ip as u32 & 0xFFF;
         let page_phys = at.phys_ip - page_off as usize;
@@ -153,7 +207,7 @@ impl BlockData {
         let mut decoder = Decoder::new(if at.code32 { 32 } else { 16 }, page, DecoderOptions::NONE);
         let mut info = InstructionInfoFactory::new();
         let (mut instrs, mut eips, mut writes, mut watched) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let (mut off, mut eip) = (page_off, at.eip);
+        let (mut off, mut eip, mut sides) = (page_off, at.eip, 0);
         let end = if tail { 0x1000 } else { 0x1000 - PAGE_TAIL };
         while off < end && eip as u64 + PAGE_TAIL as u64 - 1 <= at.cs_limit as u64 {
             decoder.set_position(off as usize).unwrap();
@@ -180,7 +234,13 @@ impl BlockData {
             eips.push(eip);
             off += instr.len() as u32;
             eip = eip.wrapping_add(instr.len() as u32);
-            if ends || instrs.len() >= max {
+            // (A loop's end ends it.)
+            let forward = jump_target(&instr).is_some_and(|t| t > eip);
+            let goes_on = ends && forward && sides < SIDE_EXITS && side_exit(&instr) && side(&instr);
+            if goes_on && !jump_target(&instr).is_some_and(|t| t - eip < 0x1000) {
+                sides += 1;
+            }
+            if (ends && !goes_on) || instrs.len() >= max {
                 break;
             }
         }
@@ -203,6 +263,7 @@ impl BlockData {
             links: [0; LINKS],
             stubs: [0; LINKS],
             guards: [Guard::default(); LINKS],
+            sites: Box::new([]),
             id: 0,
             lag: Box::new([]),
             instrs: instrs.into_boxed_slice(),
@@ -223,6 +284,29 @@ impl BlockData {
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     pub fn in_tail(&self, ix: usize) -> bool {
         self.phys_of(ix) & 0xFFF >= 0x1000 - PAGE_TAIL as usize
+    }
+
+    /// Where conditional jump `ix` goes in the block, if it isn't its last
+    /// instruction and its target is the start of a later one: the code
+    /// jumps there, without the instructions in between.
+    pub fn target(&self, ix: usize) -> Option<usize> {
+        if ix + 1 >= self.count() || !side_exit(&self.instrs[ix]) {
+            return None;
+        }
+        let t = jump_target(&self.instrs[ix])?;
+        (ix + 1..self.count()).find(|&j| self.eips[j] == t)
+    }
+
+    /// Per instruction, whether a conditional jump in the block goes there
+    /// (`target`).
+    pub fn targets(&self) -> Vec<bool> {
+        let mut to = vec![false; self.count()];
+        for ix in 0..self.count() {
+            if let Some(j) = self.target(ix) {
+                to[j] = true;
+            }
+        }
+        to
     }
 
     /// Instructions in the block.
@@ -331,6 +415,22 @@ pub fn ends_block(instr: &Instruction) -> bool {
     }
 }
 
+/// Whether the block can go on after `instr`, which ends it, if its code
+/// leaves only where the jump is taken (`SIDE_EXITS`): a conditional jump.
+/// (The engine checks that it translates it.)
+pub fn side_exit(instr: &Instruction) -> bool {
+    instr.flow_control() == FlowControl::ConditionalBranch
+}
+
+/// The target of a near jump, as its code has it.
+fn jump_target(instr: &Instruction) -> Option<u32> {
+    match instr.op0_kind() {
+        iced_x86::OpKind::NearBranch16 => Some(instr.near_branch16() as u32),
+        iced_x86::OpKind::NearBranch32 => Some(instr.near_branch32()),
+        _ => None,
+    }
+}
+
 /// The segment register `instr` loads without ending the block, if any:
 /// MOV, POP, LDS, LES, LFS, LGS and LSS. (Far transfers end the block.)
 pub fn loaded_segment(instr: &Instruction) -> Option<crate::cpu::Seg> {
@@ -346,6 +446,12 @@ pub fn loaded_segment(instr: &Instruction) -> Option<crate::cpu::Seg> {
         Mnemonic::Lgs => Some(Seg::GS),
         _ => None,
     }
+}
+
+/// Whether `instr` may leave an interrupt shadow (STI, a load of SS): the
+/// instruction after it ends that.
+pub fn shadows(instr: &Instruction) -> bool {
+    instr.mnemonic() == Mnemonic::Sti || loaded_segment(instr) == Some(crate::cpu::Seg::SS)
 }
 
 /// Whether `instr` is IN or OUT, which may change the devices, their

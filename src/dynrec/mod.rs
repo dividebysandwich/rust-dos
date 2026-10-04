@@ -410,6 +410,17 @@ mod engine {
     const FRONT_BITS: u32 = 14;
     const NONE_BITS: u32 = 12;
 
+    /// Point the jumps of link `slot` of a block (whose code is at `code`)
+    /// where its `links` says.
+    fn patch_links(mem: &mut CodeMemory, code: *const u8, data: &BlockData, slot: usize) {
+        for &(k, off) in data.sites.iter() {
+            if k as usize == slot {
+                // SAFETY: the site is in the block's code.
+                backend::patch_link(mem, unsafe { code.add(off as usize) }, data.links[slot] as *const u8);
+            }
+        }
+    }
+
     /// The code generations of the chunks an instruction at `phys` can be
     /// in (it is at most 15 bytes long).
     fn instr_gens(page_gen: &[u32], phys: u32) -> u32 {
@@ -563,10 +574,14 @@ mod engine {
         fn translate(&mut self, cpu: &mut Cpu, at: &At, key: Key, stats: &mut DynStats) -> Option<u32> {
             let single = key.mode & 2 != 0;
             let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
-            let data =
-                BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, if single { 1 } else { MAX_BLOCK }, pokes, backend::TAIL)?;
-            cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
             let stack32 = key.mode & 4 != 0;
+            // The block goes on after a conditional jump its code takes.
+            let side = |instr: &iced_x86::Instruction| {
+                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::FPU).is_some()
+            };
+            let max = if single { 1 } else { MAX_BLOCK };
+            let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max, pokes, backend::TAIL, side)?;
+            cpu.bus.mark_code(data.phys as usize, (data.phys + data.len) as usize);
             let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
@@ -628,6 +643,7 @@ mod engine {
                         data.links[k] = data.stubs[k];
                     }
                 }
+                data.sites = code.sites.into_boxed_slice();
                 data.id = index;
                 data.lag = code.lag;
                 stats.blocks += 1;
@@ -702,7 +718,11 @@ mod engine {
             let to_code = self.blocks[to as usize].as_ref().unwrap().code;
             let source = self.blocks[from as usize].as_mut().unwrap();
             // SAFETY: owned by the block, and not in use.
-            unsafe { source.data.as_mut() }.links[slot] = to_code as usize;
+            let data = unsafe { source.data.as_mut() };
+            if data.links[slot] != to_code as usize {
+                data.links[slot] = to_code as usize;
+                patch_links(&mut self.mem, source.code, data, slot);
+            }
             let old = source.targets[slot].replace(to);
             if old == Some(to) {
                 return;
@@ -755,6 +775,7 @@ mod engine {
                     let data = unsafe { source.data.as_mut() };
                     if data.links[k as usize] == block.code as usize {
                         data.links[k as usize] = data.stubs[k as usize];
+                        patch_links(&mut self.mem, source.code, data, k as usize);
                         source.targets[k as usize] = None;
                     }
                 }

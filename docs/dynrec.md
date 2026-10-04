@@ -83,7 +83,7 @@ between instructions:
 
 | Instructions | What they can change |
 |---|---|
-| Control transfers: jumps, calls, returns, INT, IRET, LOOP, JCXZ | Where execution goes |
+| Control transfers: jumps, calls, returns, INT, IRET, LOOP, JCXZ (but see below for conditional ones) | Where execution goes |
 | String port I/O (INS, OUTS) | Devices, their interrupts, the timer deadline, the A20 gate, the reset line |
 | IRET | IF and the interrupt shadow |
 | Writes to CR0, CR3, DRn, TRn, LMSW, CLTS, INVLPG, LGDT, LIDT, LLDT, LTR | The mode, paging, the TLB, the descriptor tables |
@@ -114,7 +114,33 @@ handlers and `jit_fallback`), which stops after the instruction
 Because of this, whether an interrupt can be delivered never changes
 inside a block, or in a chain of linked blocks: the execution loop has
 just found none deliverable, and only these instructions could change
-that. So blocks need no interrupt checks.
+that. So blocks need no interrupt checks. A block that ends with STI or a
+load of SS, whose interrupt shadow covers the next instruction, goes back
+to the execution loop rather than through a link: the loop runs that
+instruction, which ends the shadow.
+
+**Conditional jumps.** A block goes on after a conditional jump forward
+(Jcc, LOOPcc, JCXZ) that its code translates (`BlockData::build`), so
+that code with `if`s runs in fewer, longer blocks:
+
+- A jump to an instruction later in the block (`BlockData::target`) goes
+  there in the code. Where taken, the code brings the counts to where they
+  are at the target but for the instructions it skipped (the instruction
+  count and `executed` are counted per position in the block, so it takes
+  the skipped ones off), and the cached registers and flags to where the
+  code at the target has them; that code knows only what holds both ways
+  (an FPU guard's checks). The flags plan computes the flags at the
+  target (`flags::plan`).
+- A jump out of the block leaves through a link of its own where taken
+  (`SIDE_LINK`, up to `SIDE_EXITS` of them), with the counts of the
+  instructions up to it. The block ends at the one after them.
+- A jump backward ends the block, and a block stops before an instruction
+  a jump in it goes back to (a loop's start), which starts a block of its
+  own: otherwise each loop's code would be translated again in the block
+  that leads into it.
+
+The prologue checks that the whole block fits before the timer deadline,
+however many of its instructions run.
 
 ### Exactness at run time
 
@@ -428,11 +454,12 @@ its tag for the page + 1, and checks links' guards at run time.
 
 A block leaves to another block without the execution loop through its
 links (`BlockData::links`): two for exits to a known EIP (a jump's target,
-a conditional jump's next instruction), and four for a return or a call
-or jump through a register or memory, to the last places it went to: a
-function called from two places in turn returns to each through its own
-link.
-Links are data, not code:
+a conditional jump's next instruction), six for the conditional jumps out
+of the block it goes on after, and four for a return or a call or jump
+through a register or memory, to the last places it went to: a function
+called from two places in turn returns to each through its own link.
+A link is a direct jump in the code (JMP rel32, B), which the engine
+points where `links` says (`BlockData::sites`, `patch_link`):
 
 - A link starts at a stub that returns to the execution loop.
 - The execution loop then finds or translates the block at the target and
@@ -485,7 +512,8 @@ the next timer event.
 
 Blocks are assembled with dynasm-rs into a buffer and copied in, into
 the smallest space a thrown-away block left that they fit, else after
-everything. A block whose bytes changed gives its space back: code that
+everything; links are patched in place (`CodeMemory::patch`), which the
+128 MB keeps within an ARM64 B's reach. A block whose bytes changed gives its space back: code that
 is rewritten with new code over and over would otherwise fill the memory.
 When nothing fits, everything is thrown away (with the counts of poked
 bytes) and translation starts over. So it is at the shell prompt
@@ -526,7 +554,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, and a smaller CS limit under a link |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), and STI ending a full block |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

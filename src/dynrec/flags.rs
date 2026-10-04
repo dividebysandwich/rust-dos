@@ -158,7 +158,9 @@ impl Uop {
 /// The flags plan of a block: `live`, but where an operation's flags are
 /// live only for a fault or a store into the block's later bytes (before
 /// an operation that sets them all again), recorded instead of computed.
-pub fn plan(items: &[Option<Vec<Uop>>]) -> Plan {
+/// Instructions a jump in the block goes to (`targets`) start with the
+/// flags computed: the jump's are.
+pub fn plan(items: &[Option<Vec<Uop>>], targets: &[bool]) -> Plan {
     let mut out = live(items);
     // The flags something reads after each operation, not counting the
     // ways out that see them all.
@@ -176,6 +178,9 @@ pub fn plan(items: &[Option<Vec<Uop>>]) -> Plan {
                 _ => uop.flags_used(),
             };
             live_now = (live_now & !uop.flags_set()) | used;
+        }
+        if targets[ix] {
+            live_now = ARITH;
         }
     }
     // The operations, in order, and whether the next one that sets flags
@@ -286,7 +291,7 @@ mod tests {
             Some(vec![memref]),
             Some(vec![inc]),
         ];
-        let p = plan(&items);
+        let p = plan(&items, &[false; 7]);
         // The ADD's flags matter only for the MemRef's fault, until the
         // SUB sets them all again: recorded, none computed.
         assert!(p.record[0][0]);
