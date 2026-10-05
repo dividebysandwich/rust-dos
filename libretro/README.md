@@ -15,6 +15,12 @@ copy:
   the frontend's cores folder (in RetroArch, *Settings → Directory → Cores*);
 * `rust_dos_libretro.info` into its info folder (*Core Info*).
 
+On Android, take the `-libretro-android-<abi>.zip` for the device
+(`arm64-v8a` on most phones and tablets, `armeabi-v7a` on 32-bit ones,
+`x86_64` for emulators and Chromebooks), copy `rust_dos_libretro_android.so`
+to the device and install it in RetroArch with *Load Core → Install or
+Restore a Core*.
+
 To build it yourself you need Rust only (no SDL):
 
 ```sh

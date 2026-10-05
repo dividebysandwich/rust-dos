@@ -431,10 +431,76 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  # The libretro core for RetroArch on Android, cross-built with the
+  # runner's NDK for the ABIs the libretro buildbot builds (.gitlab-ci.yml).
+  # Cross-built, so its tests run in the libretro job above instead.
+  libretro-android:
+    name: libretro (android-${{ matrix.abi }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            target: aarch64-linux-android
+          - abi: armeabi-v7a
+            target: armv7-linux-androideabi
+          - abi: x86_64
+            target: x86_64-linux-android
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: libretro-android-${{ matrix.abi }}
+          workspaces: libretro
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build
+        run: cd libretro && cargo ndk -t ${{ matrix.abi }} build --release --locked
+
+      # The core must load in RetroArch, which has no SDL or ALSA on Android.
+      - name: Check the libraries it needs
+        run: |
+          LIB="libretro/target/${{ matrix.target }}/release/librust_dos_libretro.so"
+          READELF="$(ls "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-readelf)"
+          "$READELF" -d "$LIB" | grep NEEDED
+          if "$READELF" -d "$LIB" | grep NEEDED | grep -Ei 'sdl|asound'; then
+            echo "The core links SDL or ALSA" >&2
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            RELEASE_VERSION="$GITHUB_REF_NAME"
+          else
+            RELEASE_VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          PKG="rust-dos-$RELEASE_VERSION-libretro-android-${{ matrix.abi }}"
+          mkdir -p "$PKG" out
+          # The name RetroArch's cores have on Android.
+          cp "libretro/target/${{ matrix.target }}/release/librust_dos_libretro.so" \
+            "$PKG/rust_dos_libretro_android.so"
+          cp libretro/rust_dos_libretro.info libretro/README.md LICENSE "$PKG/"
+          zip -r -q "out/$PKG.zip" "$PKG"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-libretro-android-${{ matrix.abi }}
+          path: out/*
+          if-no-files-found: error
+
   release:
     name: create release
     if: github.ref_type == 'tag'
-    needs: [build, web, libretro]
+    needs: [build, web, libretro, libretro-android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -479,6 +545,11 @@ jobs:
             for your system has the core (`rust_dos_libretro.so`, `.dll` or
             `.dylib`) for the frontend's cores folder, and
             `rust_dos_libretro.info` for its info folder. See its README.
+            For RetroArch on Android, take the `-libretro-android-` `.zip`
+            for the device's ABI (`arm64-v8a` on most phones and tablets,
+            `armeabi-v7a` on older and 32-bit ones, `x86_64` for emulators
+            and Chromebooks) and install `rust_dos_libretro_android.so` with
+            *Load Core → Install or Restore a Core*.
           - **A LAN relay of your own**: every package but the browser's has
             `rust-dos-relay` beside rust-dos (in `/usr/bin` with the `.deb`),
             which relays LAN rooms on a server without a display and needs
