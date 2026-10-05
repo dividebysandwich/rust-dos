@@ -372,6 +372,14 @@ impl Gus {
         (a << 4) & DRAM_MASK
     }
 
+    /// The DMA address register's value for DRAM byte address `pos` (the
+    /// 16 bytes it falls in).
+    fn dma_addr_of(&self, pos: u32) -> u16 {
+        let a = pos >> 4;
+        let a = if self.dma_ctrl & 0x04 != 0 { (a & 0xC000) | ((a & 0x3FFE) >> 1) } else { a };
+        a as u16
+    }
+
     /// DMA bytes a second at the rate set in register 41h.
     fn dma_rate(&self) -> u64 {
         DMA_RATE / (1 + ((self.dma_ctrl >> 3) & 3) as u64)
@@ -553,11 +561,24 @@ impl Gus {
                     self.dma_active = false;
                 } else if !self.dma_active {
                     self.dma_active = true;
-                    self.dma_pos = self.dma_start();
+                    // The address register moves on with a transfer, so a
+                    // driver that starts the next block without setting it
+                    // goes on where the last one ended, to the byte (HMI's
+                    // uploads a patch in blocks that way, in Descent).
+                    if self.dma_addr_of(self.dma_pos) != self.dma_addr {
+                        self.dma_pos = self.dma_start();
+                    }
                     self.dma_frac = 0;
                 }
             }
-            0x42 => self.dma_addr = data,
+            0x42 => {
+                self.dma_addr = data;
+                // A transfer starts from the address written, at its first
+                // byte; one not written goes on (see 41h).
+                if !self.dma_active {
+                    self.dma_pos = self.dma_start();
+                }
+            }
             0x43 => self.dram_addr = (self.dram_addr & 0xF_0000) | data as u32,
             0x44 => self.dram_addr = (self.dram_addr & 0xFFFF) | ((hi as u32 & 0x0F) << 16),
             0x45 => {
@@ -734,6 +755,7 @@ impl Gus {
                 (moved, tc)
             };
             self.dma_pos = (self.dma_pos + moved as u32) & DRAM_MASK;
+            self.dma_addr = self.dma_addr_of(self.dma_pos);
             bytes -= n as u64;
             if tc {
                 self.dma_active = false;

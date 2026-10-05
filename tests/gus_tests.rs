@@ -368,9 +368,31 @@ fn dma_converts_unsigned_samples() {
     assert_eq!([peek(&mut bus, 0), peek(&mut bus, 1), peek(&mut bus, 2), peek(&mut bus, 3)], [0x80, 0x00, 0x7F, 0xFF]);
 
     program_dma3(&mut bus, 0x2_0000, 4, false, false);
+    reg16(&mut bus, 0x42, 0);
     reg8(&mut bus, 0x41, 0xC1); // 16-bit data: only the high bytes
     wait_ms(&mut bus, 0.1);
     assert_eq!([peek(&mut bus, 0), peek(&mut bus, 1), peek(&mut bus, 2), peek(&mut bus, 3)], [0x00, 0x00, 0xFF, 0xFF]);
+}
+
+#[test]
+fn dma_blocks_go_on_where_the_last_ended() {
+    // HMI's driver (Descent) uploads a patch in blocks, setting the
+    // address register for the first only: the register moves on with
+    // the transfer.
+    let mut bus = bus();
+    let data: Vec<u8> = (0..64).collect();
+    bus.load_bytes(0x2_0000, &data);
+    program_dma3(&mut bus, 0x2_0000, 32, false, false);
+    reg16(&mut bus, 0x42, 0x1000 >> 4);
+    reg8(&mut bus, 0x41, 0x01);
+    wait_ms(&mut bus, 0.2);
+    assert_eq!(read16(&mut bus, 0x42), 0x1020 >> 4);
+    program_dma3(&mut bus, 0x2_0020, 32, false, false);
+    reg8(&mut bus, 0x41, 0x01);
+    wait_ms(&mut bus, 0.2);
+    for a in [0u32, 31, 32, 63] {
+        assert_eq!(peek(&mut bus, 0x1000 + a), a as u8);
+    }
 }
 
 #[test]
