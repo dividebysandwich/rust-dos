@@ -38,12 +38,23 @@ game misbehaves.
 
 # FPU arithmetic {#fpu}
 
-How the floating-point unit adds and subtracts:
+How the floating-point unit (the 387 maths coprocessor) adds and
+subtracts:
 
-- **exact**: as a real 387 does, on 80 bits. The default.
-- **fast**: on the host's 64-bit doubles, which is faster in games that
-  compute a lot with it (Quake). Results can differ from a real
-  machine's in the last digits; most games never notice.
+- **exact**: on 80 bits, as a real 387 does. Every game computes exactly
+  what it would on a real PC. The default.
+- **fast**: on the host's 64-bit doubles, as multiplications and
+  divisions always are. Games that compute a lot with the FPU (Quake,
+  flight simulators, 3D benchmarks) need noticeably less host CPU, which
+  helps on slow hosts such as a Raspberry Pi.
+
+Fast results can differ from a real machine's in their last digits, and
+always round to nearest. Most games never notice. Pick **exact** if a
+game draws or behaves oddly in fast mode, or for benchmarks that check
+the FPU's precision.
+
+Takes effect at once, on both CPU cores. Saved states load in either
+mode.
 
 # Processor {#cpu}
 

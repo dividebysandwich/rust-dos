@@ -393,6 +393,15 @@ fn settings_change_live() {
     assert_eq!(host.applied.last().unwrap().core, crate::cpu::CoreMode::Dynamic);
     assert!(!status(&ui).0.contains("prompt"), "{:?}", status(&ui));
 
+    // So does the FPU's arithmetic, exact or fast.
+    ui.row = Page::Emulator.items().iter().position(|&i| i == Item::Fpu).unwrap();
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("exact"));
+    pick(&mut ui, &mut host, "fast (not exact)");
+    assert!(host.applied.last().unwrap().fpu_fast);
+    assert!(!status(&ui).0.contains("prompt"), "{:?}", status(&ui));
+    pick(&mut ui, &mut host, "exact");
+    assert!(!host.applied.last().unwrap().fpu_fast);
+
     // Memory steps up to what the 486 takes and waits for the next start.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■·······"));
