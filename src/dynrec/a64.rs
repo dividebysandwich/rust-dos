@@ -2050,19 +2050,16 @@ impl Gen<'_> {
         }
     }
 
-    /// The register = the low bytes of W`reg`. The register's whole word
-    /// is written, so that later loads of it are forwarded from one store
-    /// (see `x64::Gen::set_ecx`). W7 is changed.
+    /// The register = the low bytes of W`reg`, stored as wide as it is (a
+    /// Cortex-A76 runs that faster than merging the bytes into the whole
+    /// dword).
     fn set_gpr(&mut self, g: Gpr, reg: u8) {
-        let off = gpr_offset(Gpr::dword(g.index));
-        if g.size == 4 {
-            self.field(Access::Str32, reg, off);
-            return;
-        }
-        let (lsb, width) = (g.high as u32 * 8, g.size as u32 * 8);
-        self.field(Access::Ldr32, 7, off);
-        dynasm!(self.ops ; .arch aarch64 ; bfi w7, W(reg), lsb, width);
-        self.field(Access::Str32, 7, off);
+        let access = match g.size {
+            4 => Access::Str32,
+            2 => Access::Str16,
+            _ => Access::Str8,
+        };
+        self.field(access, reg, gpr_offset(g));
     }
 
     /// W9 = the register, zero-extended.

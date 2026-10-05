@@ -2262,9 +2262,9 @@ impl Gen<'_> {
 
     /// Guest register `g` = the low bytes of host register `src` (the rest
     /// of its slot stays), with `scratch` (another register) changed. In
-    /// the CPU, the register's whole dword is written, so that later loads
-    /// of it are forwarded from one store: a load of a dword written in
-    /// bytes waits for the stores to finish.
+    /// the CPU, a word or low byte is stored as wide as it is (faster than
+    /// merging it into the dword, though a dword load of it then waits for
+    /// the store: measured).
     fn set_from(&mut self, g: Gpr, src: u8, scratch: u8) {
         if let Some(h) = self.cached(g.index) {
             debug_assert!(self.cache.loaded >> g.index & 1 != 0);
@@ -2280,18 +2280,8 @@ impl Gen<'_> {
         let off = gpr_offset(Gpr::dword(g.index));
         match (g.size, g.high) {
             (4, _) => dynasm!(self.ops ; .arch x64 ; mov DWORD [rbx + off], Rd(src)),
-            (2, _) => dynasm!(self.ops
-                ; .arch x64
-                ; mov Rd(scratch), DWORD [rbx + off]
-                ; mov Rw(scratch), Rw(src)
-                ; mov DWORD [rbx + off], Rd(scratch)
-            ),
-            (_, false) => dynasm!(self.ops
-                ; .arch x64
-                ; mov Rd(scratch), DWORD [rbx + off]
-                ; mov Rb(scratch), Rb(src)
-                ; mov DWORD [rbx + off], Rd(scratch)
-            ),
+            (2, _) => dynasm!(self.ops ; .arch x64 ; mov WORD [rbx + off], Rw(src)),
+            (_, false) => dynasm!(self.ops ; .arch x64 ; mov BYTE [rbx + off], Rb(src)),
             (_, true) => dynasm!(self.ops
                 ; .arch x64
                 ; mov Rd(scratch), DWORD [rbx + off]
