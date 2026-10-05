@@ -100,8 +100,10 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, se
         Btr => bit_op(instr, BitKind::Reset, &mut u),
         Btc => bit_op(instr, BitKind::Complement, &mut u),
         Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => real && far_jump(instr, next, stack32, false, &mut u),
-        Call if instr.is_call_far() || instr.is_call_far_indirect() => real && far_jump(instr, next, stack32, true, &mut u),
-        Retf => real && far_ret(instr, stack32, &mut u),
+        Call if (instr.is_call_far() || instr.is_call_far_indirect()) && real => far_jump(instr, next, stack32, true, &mut u),
+        Call if instr.is_call_far() || instr.is_call_far_indirect() => system && far_call_pm(instr, next, stack32, &mut u),
+        Retf if real => far_ret(instr, stack32, &mut u),
+        Retf => system && far_ret_pm(instr, stack32, &mut u),
         Jmp => jmp(instr, &mut u),
         Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge | Jle | Jg => jcc(instr, next, &mut u),
         Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge
@@ -1345,6 +1347,75 @@ fn far_ret(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::Set { r: sp, t: T1 });
     u.push(Uop::LoadCsReal { t: T2 });
     u.push(Uop::Exit { eip: Src::T(T0) });
+    true
+}
+
+/// A far CALL in protected mode, as `control::call` with `call_far_pm`:
+/// the target from the instruction or memory (as `far_jump` reads it), its
+/// checks (`FarCallCheck`), then the pushes of CS and the return address,
+/// both slots checked before either is written (`Cpu::push_frame`), CS and
+/// EIP loaded, the stack pointer set and the block left.
+fn far_call_pm(instr: &Instruction, next: u32, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let size = match instr.code() {
+        Code::Call_ptr1616 | Code::Call_m1616 => 2,
+        Code::Call_ptr1632 | Code::Call_m1632 => 4,
+        _ => return false,
+    };
+    if instr.op0_kind() == OpKind::Memory {
+        let Some(seg) = ea(instr, T2, u) else { return false };
+        let Some(Uop::Ea { base, index, scale, disp, a32, .. }) = u.last().copied() else { return false };
+        u.push(Uop::MemRef { t: T2, seg, size, write: false, slot: 0 });
+        u.push(Uop::Ea { t: T1, base, index, scale, disp: disp.wrapping_add(size as u32), a32 });
+        u.push(Uop::MemRef { t: T1, seg, size: 2, write: false, slot: 1 });
+        u.push(Uop::Load { dst: T0, m: T2, size });
+        u.push(Uop::Load { dst: T1, m: T1, size: 2 });
+    } else {
+        let offset = if size == 2 { instr.far_branch16() as u32 } else { instr.far_branch32() };
+        u.push(Uop::Const { t: T0, v: offset });
+        u.push(Uop::Const { t: T1, v: instr.far_branch_selector() as u32 });
+    }
+    u.push(Uop::FarCallCheck { sel: T1, off: T0 });
+    let sp = sp(stack32);
+    let down = (size as u32).wrapping_neg();
+    u.push(Uop::Get { t: T1, r: sp });
+    u.push(Uop::AddConst { t: T1, v: down, size: sp.size });
+    u.push(Uop::Copy { dst: T2, src: T1 });
+    u.push(Uop::MemRef { t: T2, seg: Seg::SS, size, write: true, slot: 2 });
+    u.push(Uop::AddConst { t: T1, v: down, size: sp.size });
+    u.push(Uop::Copy { dst: T0, src: T1 });
+    u.push(Uop::MemRef { t: T0, seg: Seg::SS, size, write: true, slot: 3 });
+    u.push(Uop::Spill { t: T1, slot: 0 });
+    u.push(Uop::GetSeg { t: T1, seg: Seg::CS });
+    u.push(Uop::Store { m: T2, src: T1, size });
+    u.push(Uop::Const { t: T1, v: next });
+    u.push(Uop::Store { m: T0, src: T1, size });
+    u.push(Uop::Unspill { t: T1, slot: 0 });
+    u.push(Uop::FarCallLoad);
+    u.push(Uop::Set { r: sp, t: T1 });
+    u.push(Uop::FarExit);
+    true
+}
+
+/// RETF in protected mode (`FarRetPm`): the offset and the selector read
+/// as `Cpu::ret_far_pm` reads them, CS:EIP loaded, then the stack pointer
+/// moved past them and any bytes released.
+fn far_ret_pm(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let (size, release) = match instr.code() {
+        Code::Retfw => (2, 0),
+        Code::Retfd => (4, 0),
+        Code::Retfw_imm16 => (2, instr.immediate16() as u32),
+        Code::Retfd_imm16 => (4, instr.immediate16() as u32),
+        _ => return false,
+    };
+    let sp = sp(stack32);
+    pop_t0(size, stack32, u);
+    u.push(Uop::Copy { dst: T2, src: T1 });
+    u.push(Uop::MemRef { t: T2, seg: Seg::SS, size: 2, write: false, slot: 1 });
+    u.push(Uop::Load { dst: T2, m: T2, size: 2 });
+    u.push(Uop::FarRetPm { sel: T2, off: T0 });
+    u.push(Uop::AddConst { t: T1, v: size as u32 + release, size: sp.size });
+    u.push(Uop::Set { r: sp, t: T1 });
+    u.push(Uop::FarExit);
     true
 }
 

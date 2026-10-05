@@ -648,7 +648,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     // the next instruction, which ends it.
     g.link = link && !super::block::shadows(&data.instrs[last]);
     match &items[last] {
-        Some(u) if !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. })) => g.leave(Some(next), 0, true),
+        Some(u) if !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. } | Uop::FarExit)) => g.leave(Some(next), 0, true),
         None if !super::block::ends_block(&data.instrs[last]) => g.leave(Some(next), 0, false),
         None if g.link && super::block::far_transfer(&data.instrs[last]) => g.far_returned(),
         _ => {}
@@ -916,6 +916,17 @@ impl Gen<'_> {
             ; .arch aarch64
             ; movz w3, sub as u32
             ; ldr x16, [x20, (CTX_FPU + 32) as u32]
+            ; blr x16
+        );
+    }
+
+    /// Call `jit_far_call` with its arguments in W2-W4.
+    fn far_call(&mut self) {
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; mov x0, x19
+            ; mov x1, x20
+            ; ldr x16, [x20, CTX_FAR_CALL as u32]
             ; blr x16
         );
     }
@@ -1744,6 +1755,72 @@ impl Gen<'_> {
                 self.field(Access::Str16, 0, seg_field(Seg::CS, layout::SEG_SELECTOR));
                 dynasm!(self.ops ; .arch aarch64 ; lsl w0, w0, 4);
                 self.field(Access::Str32, 0, seg_field(Seg::CS, layout::SEG_BASE));
+            }
+            Uop::FarRetPm { sel, off } => {
+                // As x86-64's: the block and CS base noted, `jit_far_ret`.
+                let (bail, fail) = (self.ops.new_dynamic_label(), self.fail());
+                self.data_x1();
+                dynasm!(self.ops ; .arch aarch64 ; str x1, [x20, CTX_FAR_BLOCK as u32]);
+                self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_BASE));
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; str w0, [x20, CTX_FAR_BASE as u32]
+                    ; mov x0, x19
+                    ; mov x1, x20
+                    ; mov w2, W(r(off))
+                    ; mov w3, W(r(sel))
+                    ; ldr x16, [x20, CTX_FAR_RET as u32]
+                    ; blr x16
+                    ; cbz w0, >far_done
+                    ; cmp w0, FAR_BAIL
+                    ; b.eq =>bail
+                    ; b =>fail
+                    ; far_done:
+                );
+                let end = self.end();
+                self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, leave: true });
+            }
+            Uop::FarCallCheck { sel, off } => {
+                let (bail, fail) = (self.ops.new_dynamic_label(), self.fail());
+                dynasm!(self.ops ; .arch aarch64 ; mov w2, W(r(off)) ; mov w3, W(r(sel)) ; movz w4, 0);
+                self.far_call();
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; cbz w0, >far_done
+                    ; cmp w0, FAR_BAIL
+                    ; b.eq =>bail
+                    ; b =>fail
+                    ; far_done:
+                );
+                let end = self.end();
+                self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, leave: true });
+            }
+            Uop::FarCallLoad => {
+                let fail = self.fail();
+                self.data_x1();
+                dynasm!(self.ops ; .arch aarch64 ; str x1, [x20, CTX_FAR_BLOCK as u32]);
+                self.field(Access::Ldr32, 0, seg_field(Seg::CS, layout::SEG_BASE));
+                dynasm!(self.ops ; .arch aarch64 ; str w0, [x20, CTX_FAR_BASE as u32] ; movz w4, 1);
+                self.far_call();
+                dynasm!(self.ops ; .arch aarch64 ; cbnz w0, =>fail);
+            }
+            Uop::FarExit => {
+                let (stop, fail) = (self.ops.new_dynamic_label(), self.fail());
+                self.flags_back();
+                dynasm!(self.ops ; .arch aarch64 ; ldrb w0, [x20, CTX_AFTER as u32] ; cbnz w0, =>stop);
+                if self.link {
+                    self.far_returned();
+                } else {
+                    let tail = self.tail;
+                    dynasm!(self.ops ; .arch aarch64 ; b =>tail);
+                }
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; =>stop
+                    ; strb wzr, [x20, CTX_AFTER as u32]
+                    ; movz w0, EXIT_AFTER
+                    ; b =>fail
+                );
             }
             Uop::Spill { t, slot } => {
                 let at = CTX_SCRATCH as u32 + slot as u32 * 4;

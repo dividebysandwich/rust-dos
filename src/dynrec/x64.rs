@@ -743,7 +743,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     // the next instruction, which ends it.
     g.link = link && !super::block::shadows(&data.instrs[last]);
     match &items[last] {
-        Some(u) if !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. })) => g.leave(Some(next), 0, true),
+        Some(u) if !u.iter().any(|u| matches!(u, Uop::Exit { .. } | Uop::ExitIf { .. } | Uop::FarExit)) => g.leave(Some(next), 0, true),
         None if !super::block::ends_block(&data.instrs[last]) => g.leave(Some(next), 0, false),
         None if g.link && super::block::far_transfer(&data.instrs[last]) => g.far_returned(),
         _ => {}
@@ -1630,6 +1630,90 @@ impl Gen<'_> {
                     ; mov DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)], eax
                 );
             }
+            Uop::FarRetPm { sel, off } => {
+                // The block and CS base it ran under, as `jit_fallback`
+                // notes them for a far transfer.
+                let data_ptr = self.data_ptr;
+                let (bail, fail) = (self.ops.new_dynamic_label(), self.fail());
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov rax, QWORD data_ptr
+                    ; mov QWORD [r12 + CTX_FAR_BLOCK], rax
+                    ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
+                    ; mov DWORD [r12 + CTX_FAR_BASE], eax
+                );
+                self.save_for_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov edx, Rd(r(off))
+                    ; mov ecx, Rd(r(sel))
+                    ; mov rdi, rbx
+                    ; mov rsi, r12
+                    ; call QWORD [r12 + CTX_FAR_RET]
+                );
+                self.restore_after_call();
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test eax, eax
+                    ; jz >far_done
+                    ; cmp eax, FAR_BAIL as i32
+                    ; je =>bail
+                    ; jmp =>fail
+                    ; far_done:
+                );
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
+            }
+            Uop::FarCallCheck { sel, off } => {
+                let (bail, fail) = (self.ops.new_dynamic_label(), self.fail());
+                self.far_call(Some((sel, off)));
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test eax, eax
+                    ; jz >far_done
+                    ; cmp eax, FAR_BAIL as i32
+                    ; je =>bail
+                    ; jmp =>fail
+                    ; far_done:
+                );
+                let end = self.end();
+                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
+                self.slow.push(Slow::Bail { at: bail, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: true });
+            }
+            Uop::FarCallLoad => {
+                let fail = self.fail();
+                let data_ptr = self.data_ptr;
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov rax, QWORD data_ptr
+                    ; mov QWORD [r12 + CTX_FAR_BLOCK], rax
+                    ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
+                    ; mov DWORD [r12 + CTX_FAR_BASE], eax
+                );
+                self.far_call(None);
+                dynasm!(self.ops ; .arch x64 ; test eax, eax ; jnz =>fail);
+            }
+            Uop::FarExit => {
+                // (EIP is the one `jit_far_ret` loaded.)
+                let (stop, fail) = (self.ops.new_dynamic_label(), self.fail());
+                self.writeback(self.cache.dirty);
+                dynasm!(self.ops ; .arch x64 ; cmp BYTE [r12 + CTX_AFTER], 0 ; jne =>stop);
+                if self.link {
+                    self.far_returned();
+                } else {
+                    self.flags_back();
+                    let tail = self.tail;
+                    dynasm!(self.ops ; .arch x64 ; jmp =>tail);
+                }
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; =>stop
+                    ; mov BYTE [r12 + CTX_AFTER], 0
+                    ; mov eax, EXIT_AFTER as i32
+                    ; jmp =>fail
+                );
+            }
             Uop::Spill { t, slot } => {
                 dynasm!(self.ops ; .arch x64 ; mov DWORD [r12 + CTX_SCRATCH + slot as i32 * 4], Rd(r(t)));
             }
@@ -2076,6 +2160,27 @@ impl Gen<'_> {
             ; movq Rx(x), rcx
             ; canon_done:
         );
+    }
+
+    /// Call `jit_far_call`: its checks of `sel:off`, or (None) its load.
+    fn far_call(&mut self, target: Option<(T, T)>) {
+        self.save_for_call();
+        match target {
+            Some((sel, off)) => dynasm!(self.ops
+                ; .arch x64
+                ; mov edx, Rd(r(off))
+                ; mov ecx, Rd(r(sel))
+                ; xor r8d, r8d
+            ),
+            None => dynasm!(self.ops ; .arch x64 ; mov r8d, 1),
+        }
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rdi, rbx
+            ; mov rsi, r12
+            ; call QWORD [r12 + CTX_FAR_CALL]
+        );
+        self.restore_after_call();
     }
 
     /// Call the trampoline's `fpu_addsub` for ST(dst) = ST(a) + ST(b) (or

@@ -963,6 +963,163 @@ fn far_calls_between_code_segments_in_protected_mode_go_on_in_translated_code() 
     }
 }
 
+/// RETFs in protected mode in a loop, to the same code segment (with bytes
+/// released), into 16-bit code and back, then `tail`; #GP and #NP
+/// recorded.
+fn retf_twins(tail: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> (Rig, Rig) {
+    const FUNC: u32 = CODE + 0x3000;
+    twins(|rig| {
+        rig.record(GP);
+        rig.record(11);
+        rig.set_gdt(FREE, seg_desc(FUNC & !0xFFF, 0x1FFF, CODE_R0, 0x0));
+        rig.set_gdt(FREE + 8, seg_desc(0x40000, 0xFFFF, DATA_R0, 0x4));
+        rig.set_gdt(FREE + 16, seg_desc(FUNC & !0xFFF, 0x1FFF, CODE_R0 & !0x80, 0x0));
+        let (top, t1, t2, back3) = (CODE + 0x100, CODE + 0x1000, CODE + 0x1800, CODE + 0x2000);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ecx, 50u32)?;
+            a.xor(esi, esi)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.mov(ebx, ecx)?;
+            a.push(CODE32 as u32)?;
+            a.push(t1)?;
+            a.retf()
+        }));
+        rig.load(t1, &asm32(t1, |a| {
+            a.push(0x5555u32)?;
+            a.push(CODE32 as u32)?;
+            a.push(t2)?;
+            a.retf_1(4)
+        }));
+        rig.load(t2, &asm32(t2, |a| {
+            a.push(FREE as u32)?;
+            a.push(FUNC & 0xFFF)?;
+            a.retf()
+        }));
+        rig.load(back3, &asm32(back3, |a| {
+            a.add(esi, ebx)?;
+            a.dec(ecx)?;
+            a.jnz(top as u64)?;
+            tail(a)?;
+            a.mov(ebx, 0xDEADu32)?;
+            a.hlt()
+        }));
+        // 16-bit code: O32 PUSH CODE32, O32 PUSH back3, O32 RETF.
+        let mut f = vec![0x66, 0x68];
+        f.extend_from_slice(&(CODE32 as u32).to_le_bytes());
+        f.extend_from_slice(&[0x66, 0x68]);
+        f.extend_from_slice(&back3.to_le_bytes());
+        f.extend_from_slice(&[0x66, 0xCB]);
+        rig.load(FUNC, &f);
+    })
+}
+
+#[test]
+fn retf_in_protected_mode_runs_as_its_handler() {
+    let (mut a, mut b) = retf_twins(|_| Ok(()));
+    run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.esi(), b.cpu.ebx()), ((1..=50).sum::<u32>(), 0xDEAD));
+    // A data segment (#GP), a segment not present (#NP), an offset past the
+    // limit (#GP(0)).
+    for (sel, offset, vector) in [(FREE + 8, 0, GP), (FREE + 16, 0, 11), (FREE, 0x5000, GP)] {
+        let (mut a, mut b) = retf_twins(move |a| {
+            a.mov(ebx, 1u32)?;
+            a.push(sel as u32)?;
+            a.push(offset)?;
+            a.retf()?;
+            a.mov(ebx, 2u32)
+        });
+        run_both(&mut a, &mut b);
+        assert_eq!((b.recorded().0, b.cpu.ebx()), (vector as u32, 1));
+    }
+    // To ring 3: its handler's.
+    let (mut a, mut b) = retf_twins(|a| {
+        a.push(DATA32_R3 as u32)?;
+        a.push(STACK3_TOP)?;
+        a.push(CODE32_R3 as u32)?;
+        a.push(RING3)?;
+        a.retf()
+    });
+    a.ring3(|a| {
+        a.mov(ebx, 7u32)?;
+        a.hlt()
+    });
+    b.ring3(|a| {
+        a.mov(ebx, 7u32)?;
+        a.hlt()
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.ebx(), b.cpu.cpl), (7, 3));
+}
+
+/// Far CALLs in protected mode in a loop: direct and through memory to a
+/// 32-bit function, and into 16-bit code, then `tail`; #GP and #NP
+/// recorded.
+fn far_call_twins(tail: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> (Rig, Rig) {
+    const FUNC: u32 = CODE + 0x3000;
+    const FUNC32: u32 = CODE + 0x2800;
+    twins(|rig| {
+        rig.record(GP);
+        rig.record(11);
+        rig.set_gdt(FREE, seg_desc(FUNC & !0xFFF, 0x1FFF, CODE_R0, 0x0));
+        rig.set_gdt(FREE + 8, seg_desc(0x40000, 0xFFFF, DATA_R0, 0x4));
+        rig.set_gdt(FREE + 16, seg_desc(FUNC & !0xFFF, 0x1FFF, CODE_R0 & !0x80, 0x0));
+        rig.set_gdt(FREE + 24, gate_desc(CODE32, FUNC32, CALL_GATE32, 0, 0));
+        rig.write32(DATA + 0x100, FUNC32);
+        rig.write32(DATA + 0x104, CODE32 as u32);
+        rig.load(FUNC32, &asm32(FUNC32, |a| {
+            a.add(edi, ebx)?;
+            a.retf()
+        }));
+        // 16-bit: ADD DI, 3 and O32 RETF.
+        rig.load(FUNC, &[0x83, 0xC7, 0x03, 0x66, 0xCB]);
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut top = a.create_label();
+            a.mov(ecx, 40u32)?;
+            a.xor(edi, edi)?;
+            a.set_label(&mut top)?;
+            a.mov(ebx, ecx)?;
+            a.db(&[0x9A])?;
+            a.dd(&[FUNC32])?;
+            a.dw(&[CODE32])?;
+            a.call(fword_ptr(DATA + 0x100))?;
+            a.db(&[0x9A])?;
+            a.dd(&[FUNC & 0xFFF])?;
+            a.dw(&[FREE])?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            tail(a)?;
+            a.mov(ebx, 0xDEADu32)?;
+            a.hlt()
+        }));
+    })
+}
+
+#[test]
+fn far_calls_in_protected_mode_run_as_their_handler() {
+    let (mut a, mut b) = far_call_twins(|_| Ok(()));
+    run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.edi(), b.cpu.ebx()), (2 * (1..=40).sum::<u32>() + 3 * 40, 0xDEAD));
+    // A data segment (#GP), a segment not present (#NP), an offset past the
+    // limit (#GP(0)), and through a call gate (its handler's).
+    for (sel, offset, vector) in [(FREE + 8, 0, GP as u32), (FREE + 16, 0, 11), (FREE, 0x5000, GP as u32), (FREE + 24, 0, 0)] {
+        let (mut a, mut b) = far_call_twins(move |a| {
+            a.mov(ebx, 1u32)?;
+            a.db(&[0x9A])?;
+            a.dd(&[offset])?;
+            a.dw(&[sel])?;
+            a.mov(ebx, 2u32)
+        });
+        run_both(&mut a, &mut b);
+        if vector != 0 {
+            assert_eq!((b.recorded().0, b.cpu.ebx()), (vector, 1));
+        } else {
+            assert_eq!(b.cpu.ebx(), 0xDEAD);
+        }
+    }
+}
+
 #[test]
 fn far_calls_into_16_bit_code_that_loads_es_go_on_in_the_blocks_for_them() {
     // The loop calls a function in a 16-bit code segment, which leaves ES

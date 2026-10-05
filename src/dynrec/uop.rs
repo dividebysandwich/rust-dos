@@ -203,6 +203,21 @@ pub enum Uop {
     /// `CsReal`, noting the block and the CS base it ran under for the
     /// engine (`JitCtx::far_block`).
     LoadCsReal { t: T },
+    /// RETF in protected mode to CS:EIP `sel:off`, read from the stack
+    /// (their accesses checked), through `helpers::jit_far_ret`, which
+    /// loads CS and EIP; the handler's after all where that can't (the
+    /// block stops after it). The stack pointer is the code's to set, then
+    /// `FarExit` leaves the block.
+    FarRetPm { sel: T, off: T },
+    /// A far CALL in protected mode to `sel:off`: its checks before the
+    /// pushes (`helpers::jit_far_call`), the handler's after all where it
+    /// isn't a direct call (the block stops after it); then CS and EIP
+    /// loaded after the pushes.
+    FarCallCheck { sel: T, off: T },
+    FarCallLoad,
+    /// Leave the block after `FarRetPm` or `FarCallLoad`: through the links a return takes,
+    /// or back to the execution loop where `jit_far_ret` said so.
+    FarExit,
     /// Keep t in the context's `slot` (0 or 1), and get it back: a value
     /// an instruction needs past operations that use all temporaries.
     Spill { t: T, slot: u8 },

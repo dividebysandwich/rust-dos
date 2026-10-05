@@ -77,7 +77,11 @@ impl Uop {
             | Uop::GetFlags { .. }
             | Uop::DivWide { .. }
             | Uop::Exit { .. }
-            | Uop::ExitIf { .. } => ARITH,
+            | Uop::ExitIf { .. }
+            | Uop::FarRetPm { .. }
+            | Uop::FarCallCheck { .. }
+            | Uop::FarCallLoad
+            | Uop::FarExit => ARITH,
             _ => 0,
         }
     }

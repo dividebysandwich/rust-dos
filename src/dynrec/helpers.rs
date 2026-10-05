@@ -109,6 +109,12 @@ pub struct JitCtx {
     /// `jit_load_seg` and `jit_port`.
     pub load_seg: usize,
     pub port: usize,
+    /// `jit_far_ret` and `jit_far_call`.
+    pub far_ret: usize,
+    pub far_call: usize,
+    /// A far CALL's target and its code segment's descriptor, between
+    /// `jit_far_call`'s checks and its load of CS.
+    pub far_target: (u16, u32, u64),
     /// Where `jit_port` asks for the block to stop after the instruction:
     /// EXIT_AFTER, or EXIT_SMC where a device wrote its later bytes.
     pub after: u8,
@@ -208,6 +214,8 @@ pub const CTX_WRITE: i32 = offset_of!(JitCtx, write) as i32;
 pub const CTX_LOAD_SEG: i32 = offset_of!(JitCtx, load_seg) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_PORT: i32 = offset_of!(JitCtx, port) as i32;
+pub const CTX_FAR_RET: i32 = offset_of!(JitCtx, far_ret) as i32;
+pub const CTX_FAR_CALL: i32 = offset_of!(JitCtx, far_call) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_AFTER: i32 = offset_of!(JitCtx, after) as i32;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
@@ -276,6 +284,9 @@ impl JitCtx {
             write: jit_write as *const () as usize,
             load_seg: jit_load_seg as *const () as usize,
             port: jit_port as *const () as usize,
+            far_ret: jit_far_ret as *const () as usize,
+            far_call: jit_far_call as *const () as usize,
+            far_target: (0, 0, 0),
             after: 0,
             ram_len: 0,
             tlb: std::ptr::null(),
@@ -427,6 +438,80 @@ jit_fn! {
             }
             Ok(Err(fault)) => {
                 cpu.set_esp(start_esp);
+                ctx.fault = fault;
+                EXIT_FAULT
+            }
+            Err(payload) => {
+                ctx.panic = Some(payload);
+                EXIT_PANIC
+            }
+        }
+    }
+}
+
+/// `jit_far_ret`'s result where the instruction's handler runs it.
+pub const FAR_BAIL: u32 = 0xFF;
+
+jit_fn! {
+    /// `Uop::FarRetPm`: a RETF in protected mode to `selector:offset`
+    /// (`Cpu::ret_far_same_level`). Returns 0, with `JitCtx::after` set to
+    /// EXIT_AFTER where the block must stop after it (`far_goes_on`), or
+    /// FAR_BAIL where the handler runs it (virtual-8086 mode, a return to
+    /// an outer level), EXIT_FAULT with the fault in the context, or
+    /// EXIT_PANIC.
+    fn jit_far_ret(cpu: *mut Cpu, ctx: *mut JitCtx, offset: u32, selector: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        if !cpu.pm() {
+            return FAR_BAIL;
+        }
+        let (tr, cpl) = (cpu.tr.selector, cpu.cpl);
+        match catch_unwind(AssertUnwindSafe(|| cpu.ret_far_same_level(selector as u16, offset))) {
+            Ok(Ok(true)) => {
+                ctx.after = far_goes_on(cpu, ctx, true, tr, cpl) as u8;
+                0
+            }
+            Ok(Ok(false)) => FAR_BAIL,
+            Ok(Err(fault)) => {
+                ctx.fault = fault;
+                EXIT_FAULT
+            }
+            Err(payload) => {
+                ctx.panic = Some(payload);
+                EXIT_PANIC
+            }
+        }
+    }
+}
+
+jit_fn! {
+    /// `Uop::FarCallCheck` (`load` 0) and `Uop::FarCallLoad` (1): a far
+    /// CALL in protected mode to `selector:offset`, checked as
+    /// `Cpu::call_far_pm` does before its pushes, then CS and EIP loaded
+    /// after them. Returns as `jit_far_ret`.
+    fn jit_far_call(cpu: *mut Cpu, ctx: *mut JitCtx, offset: u32, selector: u32, load: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+        let result = catch_unwind(AssertUnwindSafe(|| -> crate::cpu::fault::CpuResult<bool> {
+            if load == 0 {
+                if !cpu.pm() {
+                    return Ok(false);
+                }
+                let Some(desc) = cpu.far_call_target(selector as u16, offset)? else { return Ok(false) };
+                ctx.far_target = (selector as u16, offset, desc.0);
+                return Ok(true);
+            }
+            let (selector, offset, desc) = ctx.far_target;
+            let (tr, cpl) = (cpu.tr.selector, cpu.cpl);
+            cpu.load_cs_pm(selector, &mut crate::cpu::seg::Descriptor(desc), cpl)?;
+            cpu.set_eip(offset);
+            ctx.after = far_goes_on(cpu, ctx, true, tr, cpl) as u8;
+            Ok(true)
+        }));
+        match result {
+            Ok(Ok(true)) => 0,
+            Ok(Ok(false)) => FAR_BAIL,
+            Ok(Err(fault)) => {
                 ctx.fault = fault;
                 EXIT_FAULT
             }

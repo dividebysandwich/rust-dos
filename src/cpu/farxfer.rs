@@ -13,7 +13,7 @@ impl Cpu {
     /// Check a code segment a JMP or CALL goes to directly: a conforming
     /// segment at the CPL or more privileged, or a non-conforming one at
     /// the CPL with RPL <= CPL.
-    fn check_direct_code(&self, selector: u16, desc: &Descriptor) -> CpuResult {
+    pub(crate) fn check_direct_code(&self, selector: u16, desc: &Descriptor) -> CpuResult {
         let err = sel_error(selector);
         let ok = if desc.conforming() {
             desc.dpl() <= self.cpl
@@ -93,6 +93,25 @@ impl Cpu {
             TASK_GATE | TSS16_AVAILABLE | TSS32_AVAILABLE => self.far_to_task(selector, desc, Switch::Jmp),
             _ => Err(Fault::gp(err)),
         }
+    }
+
+    /// The checks of a far CALL to `selector:offset` in protected mode
+    /// before its pushes (`call_far_pm`), for translated code: the code
+    /// segment's descriptor where it is a direct call, else None with
+    /// nothing done (a gate's or a task's, or a fault the handler raises).
+    pub fn far_call_target(&mut self, selector: u16, offset: u32) -> CpuResult<Option<Descriptor>> {
+        if is_null(selector) {
+            return Err(Fault::gp(0));
+        }
+        let desc = self.fetch_descriptor(selector, 0)?;
+        if !desc.is_code() {
+            return Ok(None);
+        }
+        self.check_direct_code(selector, &desc)?;
+        if offset > desc.limit() {
+            return Err(Fault::gp(0));
+        }
+        Ok(Some(desc))
     }
 
     /// CALL to `selector:offset` in protected mode; a direct call pushes
@@ -189,18 +208,9 @@ impl Cpu {
         self.return_far_pm(selector, offset, size, 3 * size as u32, 0, Some(flags))
     }
 
-    /// The part of RETF and IRET after popping CS:EIP (and EFLAGS):
-    /// `popped` bytes. A return to an outer level pops that level's SS:ESP
-    /// too.
-    fn return_far_pm(
-        &mut self,
-        selector: u16,
-        offset: u32,
-        size: u8,
-        popped: u32,
-        release: u32,
-        flags: Option<u32>,
-    ) -> CpuResult {
+    /// The checks of the code segment a RETF or IRET returns to, at
+    /// `selector:offset`: its descriptor, and the privilege level it is at.
+    fn return_code(&mut self, selector: u16, offset: u32) -> CpuResult<(Descriptor, u8)> {
         if is_null(selector) {
             return Err(Fault::gp(0));
         }
@@ -209,7 +219,7 @@ impl Cpu {
         if new_cpl < self.cpl {
             return Err(Fault::gp(err));
         }
-        let mut desc = self.fetch_descriptor(selector, 0)?;
+        let desc = self.fetch_descriptor(selector, 0)?;
         if !desc.is_code()
             || (desc.conforming() && desc.dpl() > new_cpl)
             || (!desc.conforming() && desc.dpl() != new_cpl)
@@ -222,7 +232,36 @@ impl Cpu {
         if offset > desc.limit() {
             return Err(Fault::gp(0));
         }
+        Ok((desc, new_cpl))
+    }
 
+    /// RETF in protected mode to `selector:offset`, popped by translated
+    /// code, as `ret_far_pm` but for the stack pointer, which the code
+    /// moves: true where it went to the same privilege level, false with
+    /// nothing done where it would go to an outer one (the handler's).
+    pub fn ret_far_same_level(&mut self, selector: u16, offset: u32) -> CpuResult<bool> {
+        if rpl(selector) > self.cpl && !is_null(selector) {
+            return Ok(false);
+        }
+        let (mut desc, new_cpl) = self.return_code(selector, offset)?;
+        self.load_cs_pm(selector, &mut desc, new_cpl)?;
+        self.eip = offset;
+        Ok(true)
+    }
+
+    /// The part of RETF and IRET after popping CS:EIP (and EFLAGS):
+    /// `popped` bytes. A return to an outer level pops that level's SS:ESP
+    /// too.
+    fn return_far_pm(
+        &mut self,
+        selector: u16,
+        offset: u32,
+        size: u8,
+        popped: u32,
+        release: u32,
+        flags: Option<u32>,
+    ) -> CpuResult {
+        let (mut desc, new_cpl) = self.return_code(selector, offset)?;
         if new_cpl == self.cpl {
             let sp = self.stack_ptr().wrapping_add(popped + release);
             self.load_cs_pm(selector, &mut desc, new_cpl)?;
