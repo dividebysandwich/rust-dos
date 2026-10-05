@@ -323,6 +323,8 @@ pub trait Host {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
+    Games,
+    States,
     Drives,
     Display,
     Emulator,
@@ -330,14 +332,14 @@ enum Page {
     Mixer,
     Network,
     Serial,
-    Games,
-    States,
     Cheats,
     Achievements,
     Stats,
 }
 
 const PAGES: [Page; 12] = [
+    Page::Games,
+    Page::States,
     Page::Drives,
     Page::Display,
     Page::Emulator,
@@ -345,8 +347,6 @@ const PAGES: [Page; 12] = [
     Page::Mixer,
     Page::Network,
     Page::Serial,
-    Page::Games,
-    Page::States,
     Page::Cheats,
     Page::Achievements,
     Page::Stats,
@@ -1714,7 +1714,7 @@ impl ConfigUi {
         Self {
             frontend,
             open: false,
-            page: Page::Drives,
+            page: Page::Games,
             row: 0,
             scroll: 0,
             field: 0,

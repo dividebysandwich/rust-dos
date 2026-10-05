@@ -358,6 +358,7 @@ fn status(ui: &ConfigUi) -> (&str, bool) {
 fn settings_change_live() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     use UiKey::*;
     // Display: scale up twice with Right, and fullscreen on from its list.
     keys(&mut ui, &mut host, &[Tab, Right, Right, Down]);
@@ -600,6 +601,7 @@ fn drives_mount_and_unmount() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     use UiKey::*;
 
     // Ins opens the dialog on D:, the path is typed and mounted.
@@ -643,6 +645,7 @@ fn the_file_picker_has_a_button_for_each_drive() {
     }
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     use UiKey::*;
     ui.key(Insert, &mut host);
     ui.text(&dir.join("C:/GAMES").display().to_string(), &mut host);
@@ -715,6 +718,7 @@ fn drives_boot_now_or_at_startup() {
     let mut host = FakeHost::new();
     host.mount(MountSpec { drive: 3, path: image.clone(), opts: MountOptions::default() }, false).unwrap();
     let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     use UiKey::*;
 
     // C: is a directory, which doesn't boot.
@@ -739,6 +743,7 @@ fn drives_boot_now_or_at_startup() {
 
     // So does the dialog's Boot.
     let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     keys(&mut ui, &mut host, &[Down, Enter]);
     ui.dialog.as_mut().unwrap().focus = Field::Boot;
     ui.key(Enter, &mut host);
@@ -759,12 +764,14 @@ fn a_booted_systems_drives() {
     let f = MountSpec { drive: 5, path: "/mine".into(), opts: MountOptions { share: Some(false), ..Default::default() } };
     host.drives.extend([drive_info(&d), drive_info(&e), drive_info(&f)]);
     host.drives.sort_by_key(|d| d.drive);
-    let ui = opened(&host);
+    let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     let flags: Vec<String> = ui.drives.iter().map(|d| ui.drive_flags(d)).collect();
     assert_eq!(flags, ["", "share", "ro", "", ""]);
 
     host.boot_view = Some(BootView { cd_drive: Some(4), shared: vec![(3, 0x81)] });
     let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     let flags: Vec<String> = ui.drives.iter().map(|d| ui.drive_flags(d)).collect();
     assert_eq!(flags, ["", "81h", "CD ro", "", ""]);
     keys(&mut ui, &mut host, &[Down, Char('s')]);
@@ -778,6 +785,7 @@ fn a_booted_systems_drives() {
 fn save_and_close() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
+    assert_eq!(ui.page, Page::Games, "the window first opens on the games");
     ui.key(UiKey::Save, &mut host);
     assert_eq!(host.saved.len(), 1);
     assert_eq!(status(&ui), ("Saved to /cfg/rust-dos.conf", false));
@@ -793,7 +801,11 @@ fn save_and_close() {
     let saved = host.saved.last().unwrap();
     assert_eq!((saved.scale, saved.sound.sb.model), (2, SbModel::SbPro2));
 
+    // Opened again, it is on the page it was left on.
+    ui.show_page(Page::Sound);
+    ui.close();
     ui.open(&Settings::default(), None, &host);
+    assert_eq!(ui.page, Page::Sound);
     ui.key(UiKey::Save, &mut host);
     assert_eq!(host.saved.len(), 2);
     assert!(status(&ui).1);
@@ -1390,6 +1402,7 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
+    ui.show_page(Page::Drives);
     use UiKey::*;
     // The last row, after "+ Mount a drive...".
     assert_eq!(ui.row_count(), 4);
@@ -1434,6 +1447,7 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     // The browser doesn't offer it: it has no host files.
     let mut browser = ConfigUi::for_frontend(Frontend { window: false, host_files: false });
     browser.open(&Settings::default(), None, &host);
+    browser.show_page(Page::Drives);
     assert_eq!(browser.row_count(), browser.drives.len() + 1);
 }
 
