@@ -375,6 +375,41 @@ fn dma_converts_unsigned_samples() {
 }
 
 #[test]
+fn a_ramp_started_moves_from_the_frame_after_next() {
+    // HMI's driver (the Descent games) starts volume ramps that end at once
+    // and reads the IRQ source register right after: within a frame of the
+    // write the ramp hasn't moved, so its IRQ isn't there yet.
+    let mut bus = bus();
+    bus.io_write(VOICE, 0);
+    reg16(&mut bus, 0x09, 0x5000);
+    reg8(&mut bus, 0x07, 0x50);
+    reg8(&mut bus, 0x08, 0xF0);
+    reg8(&mut bus, 0x06, 0x3F);
+    // Frames (14 voices) end at 22.7 us, 45.4 us, ... from the start.
+    wait_ms(&mut bus, 0.01);
+    reg8(&mut bus, 0x0D, 0x60); // decreasing to where it is, with its IRQ
+    wait_ms(&mut bus, 0.022); // past the end of one frame, not two
+    assert_eq!(read8(&mut bus, 0x8F) & 0xC0, 0xC0, "no IRQ yet");
+    bus.io_write(VOICE, 0);
+    wait_ms(&mut bus, 0.1);
+    assert_eq!(read8(&mut bus, 0x8F) & 0x40, 0x00, "the ramp's IRQ");
+}
+
+#[test]
+fn the_volume_reads_the_step_a_ramp_has_not_left() {
+    let mut bus = bus();
+    bus.io_write(VOICE, 0);
+    reg16(&mut bus, 0x09, 0x8000);
+    reg8(&mut bus, 0x07, 0x10);
+    reg8(&mut bus, 0x06, 0xC1); // a step every 512 frames
+    reg8(&mut bus, 0x0D, 0x40);
+    wait_ms(&mut bus, 2.0); // 88 frames
+    assert_eq!(read16(&mut bus, 0x89), 0x8000);
+    wait_ms(&mut bus, 10.0); // past the first step
+    assert_eq!(read16(&mut bus, 0x89), 0x7FF0);
+}
+
+#[test]
 fn dma_blocks_go_on_where_the_last_ended() {
     // HMI's driver (Descent) uploads a patch in blocks, setting the
     // address register for the first only: the register moves on with

@@ -517,6 +517,7 @@ impl Gus {
         match self.reg_sel {
             0x00 => {
                 v.wave_ctrl = hi & 0x7F;
+                v.written = true;
                 let old = self.wave_irq;
                 if hi & 0xA0 == 0xA0 {
                     self.wave_irq |= mask;
@@ -541,6 +542,7 @@ impl Gus {
             0x0C => v.pan = hi & 0x0F,
             0x0D => {
                 v.ramp_ctrl = hi & 0x7F;
+                v.written = true;
                 let old = self.ramp_irq;
                 if hi & 0xA0 == 0xA0 {
                     self.ramp_irq |= mask;
@@ -622,7 +624,10 @@ impl Gus {
             0x86 => hi(v.ramp_rate),
             0x87 => hi(v.ramp_start),
             0x88 => hi(v.ramp_end),
-            0x89 => ((v.vol >> tables::RAMP_FRAC) << 4) as u16,
+            // A ramp part way to its next whole step reads the step it
+            // has not left yet, rounded up as DOSBox does; HMI's driver
+            // builds its tremolo and envelope stages on this value.
+            0x89 => ((v.vol.div_ceil(1 << tables::RAMP_FRAC)).min(tables::VOLUME_MAX) << 4) as u16,
             0x8A => (v.pos >> 16) as u16 & 0x1FFF,
             0x8B => v.pos as u16,
             0x8C => hi(v.pan),

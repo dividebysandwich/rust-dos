@@ -44,6 +44,13 @@ pub struct Voice {
     /// Current volume, 12 bits with `RAMP_FRAC` fraction bits.
     pub vol: u32,
     pub pan: u8,
+    /// Its voice or volume control was written since the last frame. The
+    /// GF1 serves each voice once a frame, in its slot, so a write takes
+    /// effect there and the voice moves on from the frame after next.
+    /// (HMI's driver, in the Descent games, starts volume ramps that end
+    /// at once and reads the IRQ source register right after; heard of in
+    /// that same pass, such an IRQ is dropped, and the envelope stalls.)
+    pub written: bool,
 }
 
 impl Default for Voice {
@@ -60,6 +67,7 @@ impl Default for Voice {
             ramp_end: 0,
             vol: 0,
             pan: 7,
+            written: false,
         }
     }
 }
@@ -116,6 +124,9 @@ impl Voice {
     /// the voice raised (`WAVE_IRQ`, `RAMP_IRQ`).
     #[inline]
     pub fn step(&mut self) -> u8 {
+        if std::mem::take(&mut self.written) {
+            return 0;
+        }
         let mut events = 0;
         if self.wave_running() && self.step_wave() {
             events |= WAVE_IRQ;
@@ -229,7 +240,8 @@ impl Voice {
                 consider(distance.div_ceil(inc));
             }
         }
-        best
+        // A voice just written skips its next frame (`written`).
+        best.map(|k| k + self.written as u64)
     }
 
     /// Output gains of the voice: volume and pan.
@@ -249,7 +261,41 @@ fn sample16(dram: &[u8], addr: u32) -> f32 {
     i16::from_le_bytes([dram[byte], dram[(byte + 1) & DRAM_MASK as usize]]) as f32
 }
 
-crate::state_fields!(Voice { wave_ctrl, freq, start, end, pos, ramp_ctrl, ramp_rate, ramp_start, ramp_end, vol, pan });
+// `written` goes in bit 7 of the voice control, which holds no IRQ bit
+// here: states from before it load with it clear.
+impl crate::savestate::State for Voice {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        let Voice { wave_ctrl, freq, start, end, pos, ramp_ctrl, ramp_rate, ramp_start, ramp_end, vol, pan, written } = self;
+        (wave_ctrl | (*written as u8) << 7).save(w);
+        freq.save(w);
+        start.save(w);
+        end.save(w);
+        pos.save(w);
+        ramp_ctrl.save(w);
+        ramp_rate.save(w);
+        ramp_start.save(w);
+        ramp_end.save(w);
+        vol.save(w);
+        pan.save(w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let Voice { wave_ctrl, freq, start, end, pos, ramp_ctrl, ramp_rate, ramp_start, ramp_end, vol, pan, written } = self;
+        wave_ctrl.load(r)?;
+        *written = *wave_ctrl & 0x80 != 0;
+        *wave_ctrl &= 0x7F;
+        freq.load(r)?;
+        start.load(r)?;
+        end.load(r)?;
+        pos.load(r)?;
+        ramp_ctrl.load(r)?;
+        ramp_rate.load(r)?;
+        ramp_start.load(r)?;
+        ramp_end.load(r)?;
+        vol.load(r)?;
+        pan.load(r)
+    }
+}
 
 
 #[cfg(test)]
