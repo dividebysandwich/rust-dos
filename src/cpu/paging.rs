@@ -66,7 +66,13 @@ pub(crate) const TLB_ENTRIES_AT: usize = std::mem::offset_of!(Tlb, entries);
 /// hardware's, it is only flushed by a CR3 load, a change of CR0.PG or WP,
 /// INVLPG and task switches, so a program must flush it after changing
 /// page tables, as on a real 386.
+// The entries start halfway into a cache line: wherever the compiler put
+// the TLB in the CPU, a Zen 5 ran Windows 95's translated code 30-40 %
+// slower (8x the branch mispredictions, at the TLB tag compares) where
+// they started on one. Measured, not understood.
+#[repr(C, align(64))]
 pub struct Tlb {
+    _align: [u8; 32],
     /// In the CPU itself: the x86-64 recompiler's code reaches them from
     /// its address (`layout::TLB`).
     entries: [TlbEntry; 2 * TLB_ENTRIES],
@@ -80,7 +86,7 @@ pub struct Tlb {
 
 impl Default for Tlb {
     fn default() -> Self {
-        Self { entries: [EMPTY; 2 * TLB_ENTRIES], epoch: 0, large: false }
+        Self { _align: [0; 32], entries: [EMPTY; 2 * TLB_ENTRIES], epoch: 0, large: false }
     }
 }
 
