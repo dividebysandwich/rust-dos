@@ -1120,8 +1120,13 @@ impl Bus {
     /// The range is in plain RAM.
     pub(crate) fn fill_elements(&mut self, dst: usize, count: usize, size: usize, value: u32) {
         let bytes = value.to_le_bytes();
-        for element in self.ram[dst..dst + count * size].chunks_exact_mut(size) {
-            element.copy_from_slice(&bytes[..size]);
+        let range = &mut self.ram[dst..dst + count * size];
+        // (By the element's size: a copy of a size known only at run time
+        // is a call per element.)
+        match size {
+            1 => range.fill(bytes[0]),
+            2 => range.as_chunks_mut::<2>().0.fill([bytes[0], bytes[1]]),
+            _ => range.as_chunks_mut::<4>().0.fill(bytes),
         }
         self.bump_page_gens(dst, dst + count * size);
     }
