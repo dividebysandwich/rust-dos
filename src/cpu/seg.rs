@@ -134,7 +134,7 @@ impl Descriptor {
 
 /// How many protected-mode data segment loads `Cpu::seg_loads` keeps, by
 /// the selector's table and index.
-pub(crate) const SEG_LOADS: usize = 64;
+pub(crate) const SEG_LOADS: usize = 256;
 
 /// A protected-mode load of a data segment register that went through:
 /// the selector, whether into SS or another register (whose checks
