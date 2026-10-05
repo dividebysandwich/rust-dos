@@ -171,6 +171,7 @@ enum Access {
     Ldr16,
     Ldr32,
     Ldr64,
+    Str8,
     Str16,
     Str32,
     Str64,
@@ -191,6 +192,9 @@ enum Slow {
     CodeStore { at: DynamicLabel, back: DynamicLabel, m: T, src: T, size: u8, lo: u32, hi: u32 },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
+    /// The instruction is done, and the block stops after it, at `next`,
+    /// with exit `code` (STI letting an interrupt through).
+    After { at: DynamicLabel, next: u32, code: u32, fail: DynamicLabel },
     /// Instruction `ix` runs through its handler after all (`Uop::Bail`),
     /// with the flags in W28 there (`dirty`), and goes on at `end`.
     /// With `leave`, the block stops after it (`Uop::FpuGuard`).
@@ -304,6 +308,8 @@ struct Gen<'a> {
     /// The segment registers (bit `Seg`) instructions in the block loaded
     /// so far: their accesses are checked as if they weren't flat.
     loaded_segs: u8,
+    /// The top of the REP loop being translated (`Uop::RepStart`).
+    rep_top: Option<DynamicLabel>,
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -333,9 +339,9 @@ pub fn patch_link(mem: &mut super::codemem::CodeMemory, site: *const u8, to: *co
 /// Whether blocks go on into the last 15 bytes of their page (see
 /// `BlockData::in_tail`): not in this code generator's.
 pub const TAIL: bool = false;
-/// Whether it has the operations of port I/O, STI and string loops: no,
-/// their handlers run them.
-pub const SYSTEM: bool = false;
+/// Whether it has the operations of port I/O, STI, RCL/RCR by 1 and
+/// string loops.
+pub const SYSTEM: bool = true;
 /// Whether it has the loads of data segment registers in protected mode
 /// (through `jit_load_seg`; in real mode it always has them).
 pub const SEGMENTS: bool = true;
@@ -385,6 +391,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         fpu_cr0_checked: false,
         fpu_known: 0,
         loaded_segs: 0,
+        rep_top: None,
     };
     g.prologue(items);
     let mut synced = 0;
@@ -408,6 +415,12 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 }
             }
             Some(uops) => {
+                let port = uops.iter().any(|u| matches!(u, Uop::In { .. } | Uop::Out { .. }));
+                if port && ix as i32 > synced {
+                    // Devices read the time from the instruction count.
+                    g.add_field64(layout::ICOUNT, (ix as i32 - synced) as u32);
+                    synced = ix as i32;
+                }
                 g.synced[ix] = synced;
                 g.dirty_at[ix] = g.dirty;
                 g.check_watched();
@@ -437,6 +450,21 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 g.end_dirty[ix] = g.dirty;
                 if let Some(end) = g.end.take() {
                     dynasm!(g.ops ; .arch aarch64 ; =>end);
+                }
+                if port {
+                    // The port access asked for the block to stop after it.
+                    let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
+                    let fail = g.fail();
+                    let flags = if g.dirty { EXIT_FLAGS } else { 0 };
+                    let go_on = g.ops.new_dynamic_label();
+                    dynasm!(g.ops ; .arch aarch64 ; ldrb w0, [x20, CTX_AFTER as u32] ; cbz w0, =>go_on ; strb wzr, [x20, CTX_AFTER as u32]);
+                    g.mov32(1, next);
+                    g.field(Access::Str32, 1, layout::EIP);
+                    if flags != 0 {
+                        g.mov32(1, flags);
+                        dynasm!(g.ops ; .arch aarch64 ; orr w0, w0, w1);
+                    }
+                    dynasm!(g.ops ; .arch aarch64 ; b =>fail ; =>go_on);
                 }
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
                     // A store hit the rest of the block: leave after this
@@ -512,6 +540,7 @@ impl Gen<'_> {
                 Access::Ldr16 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(reg), [x19, x9]),
                 Access::Ldr32 => dynasm!(self.ops ; .arch aarch64 ; ldr W(reg), [x19, x9]),
                 Access::Ldr64 => dynasm!(self.ops ; .arch aarch64 ; ldr X(reg), [x19, x9]),
+                Access::Str8 => dynasm!(self.ops ; .arch aarch64 ; strb W(reg), [x19, x9]),
                 Access::Str16 => dynasm!(self.ops ; .arch aarch64 ; strh W(reg), [x19, x9]),
                 Access::Str32 => dynasm!(self.ops ; .arch aarch64 ; str W(reg), [x19, x9]),
                 Access::Str64 => dynasm!(self.ops ; .arch aarch64 ; str X(reg), [x19, x9]),
@@ -523,6 +552,7 @@ impl Gen<'_> {
             Access::Ldr16 => dynasm!(self.ops ; .arch aarch64 ; ldrh W(reg), [X(base), rel]),
             Access::Ldr32 => dynasm!(self.ops ; .arch aarch64 ; ldr W(reg), [X(base), rel]),
             Access::Ldr64 => dynasm!(self.ops ; .arch aarch64 ; ldr X(reg), [X(base), rel]),
+            Access::Str8 => dynasm!(self.ops ; .arch aarch64 ; strb W(reg), [X(base), rel]),
             Access::Str16 => dynasm!(self.ops ; .arch aarch64 ; strh W(reg), [X(base), rel]),
             Access::Str32 => dynasm!(self.ops ; .arch aarch64 ; str W(reg), [X(base), rel]),
             Access::Str64 => dynasm!(self.ops ; .arch aarch64 ; str X(reg), [X(base), rel]),
@@ -675,6 +705,36 @@ impl Gen<'_> {
 
     /// Make the double in D`x` what an FPU register holds
     /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
+    /// IN or OUT of `size` bytes at port `port` through `jit_port`, as
+    /// x86-64's: its value into (or from) t; a fault or panic leaves.
+    fn port_io(&mut self, out: bool, size: u8, port: Src, t: T) {
+        let fail = self.fail();
+        let desc = out as u32 | (size as u32) << 1 | (self.ix as u32) << 8;
+        let lit = self.data_lit;
+        match port {
+            Src::Imm(p) => self.mov32(4, p),
+            Src::T(p) => dynasm!(self.ops ; .arch aarch64 ; mov w4, W(r(p))),
+        }
+        if out {
+            dynasm!(self.ops ; .arch aarch64 ; mov w5, W(r(t)));
+        }
+        dynasm!(self.ops ; .arch aarch64 ; mov x0, x19 ; mov x1, x20 ; ldr x2, =>lit);
+        self.mov32(3, desc);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; ldr x16, [x20, CTX_PORT as u32]
+            ; blr x16
+            ; lsr x9, x0, 32
+            ; cbz x9, >done
+            ; mov w0, w9
+            ; b =>fail
+            ; done:
+        );
+        if !out {
+            dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
+        }
+    }
+
     /// Call `jit_fpu_addsub_st` with `desc` and the handle in `arg`.
     fn fpu_op(&mut self, desc: u32, arg: Option<T>) {
         if let Some(t) = arg {
@@ -1028,6 +1088,13 @@ impl Gen<'_> {
                 }
                 Slow::Fault { at, code, fail } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at ; movz w0, code ; b =>fail);
+                }
+                Slow::After { at, next, code, fail } => {
+                    dynasm!(self.ops ; .arch aarch64 ; =>at);
+                    self.mov32(1, next);
+                    self.field(Access::Str32, 1, layout::EIP);
+                    self.mov32(0, code);
+                    dynasm!(self.ops ; .arch aarch64 ; b =>fail);
                 }
                 Slow::Smc { at, next, dirty, lazy, join } => {
                     dynasm!(self.ops ; .arch aarch64 ; =>at);
@@ -1523,13 +1590,66 @@ impl Gen<'_> {
                 );
                 self.loaded_segs |= 1 << seg as u8;
             }
-            Uop::In { .. }
-            | Uop::Out { .. }
-            | Uop::Sti
-            | Uop::RepStart { .. }
-            | Uop::RepEnd { .. }
-            | Uop::Forward => {
-                unreachable!("not translated for this host (SYSTEM)")
+            Uop::In { size, port, t } => self.port_io(false, size, port, t),
+            Uop::Out { size, port, t } => self.port_io(true, size, port, t),
+            Uop::Sti => {
+                // As x86-64's: interrupts are recognized after the next
+                // instruction; with one waiting the execution loop runs
+                // that, else the shadow ends where the next instruction
+                // runs, in the block.
+                let data = self.data;
+                let next = data.eips[self.ix].wrapping_add(data.instrs[self.ix].len() as u32);
+                let at = self.ops.new_dynamic_label();
+                let fail = self.fail();
+                let code = EXIT_AFTER | if self.dirty { EXIT_FLAGS } else { 0 };
+                self.slow.push(Slow::After { at, next, code, fail });
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                dynasm!(self.ops ; .arch aarch64 ; orr w1, w0, 0x200);
+                self.field(Access::Str32, 1, layout::FLAGS);
+                let was_set = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch aarch64 ; tbnz w0, 9, =>was_set ; movz w2, 1);
+                self.field(Access::Str8, 2, layout::IRQ_SHADOW);
+                dynasm!(self.ops ; .arch aarch64 ; =>was_set);
+                self.field(Access::Ldr8, 2, layout::IRQ_READY);
+                dynasm!(self.ops ; .arch aarch64 ; cbnz w2, =>at);
+                if self.ix + 1 < data.count() {
+                    dynasm!(self.ops ; .arch aarch64 ; movz w2, 0);
+                    self.field(Access::Str8, 2, layout::IRQ_SHADOW);
+                }
+            }
+            Uop::RepStart { t, count, max } => {
+                // As x86-64's: a count up to `max`, forward and not traced,
+                // runs here; else the handler.
+                let access = if count.size == 4 { Access::Ldr32 } else { Access::Ldr16 };
+                self.field(access, r(t), gpr_offset(count));
+                let at = self.ops.new_dynamic_label();
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                self.mov32(1, max);
+                // TF or DF.
+                self.mov32(2, 0x500);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; tst w0, w2
+                    ; b.ne =>at
+                    ; cmp W(r(t)), w1
+                    ; b.hi =>at
+                );
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
+                let top = self.ops.new_dynamic_label();
+                dynasm!(self.ops ; .arch aarch64 ; cbz W(r(t)), =>end ; =>top);
+                self.rep_top = Some(top);
+            }
+            Uop::RepEnd { t } => {
+                let top = self.rep_top.take().expect("RepStart before RepEnd");
+                dynasm!(self.ops ; .arch aarch64 ; cbnz W(r(t)), =>top);
+            }
+            Uop::Forward => {
+                let at = self.ops.new_dynamic_label();
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                dynasm!(self.ops ; .arch aarch64 ; tbnz w0, 10, =>at);
+                let end = self.end();
+                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
             Uop::FGet { x, i } => {
@@ -2470,7 +2590,35 @@ impl Gen<'_> {
                 }
                 self.flags_w5(bits, need, CF | OF, 0);
             }
-            ShiftOp::Rcl | ShiftOp::Rcr => unreachable!("not translated"),
+            ShiftOp::Rcl | ShiftOp::Rcr => {
+                // By 1 (`translate::rotate_carry`): CF in at the far end,
+                // the bit out in CF.
+                debug_assert!(count == Some(1));
+                self.carry_in();
+                if op == ShiftOp::Rcl {
+                    // OF = the result's top bit ^ CF.
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; ubfx w1, w10, sign, 1
+                        ; lsl w0, w10, 1
+                        ; orr w0, w0, w12
+                    );
+                    self.cut(size);
+                    dynasm!(self.ops ; .arch aarch64 ; ubfx w2, w0, sign, 1 ; eor w2, w2, w1);
+                } else {
+                    // OF = the result's top two bits differ.
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; and w1, w10, 1
+                        ; lsr w0, w10, 1
+                        ; orr w0, w0, w12, lsl sign
+                        ; ubfx w2, w0, sign, 1
+                        ; ubfx w3, w0, below, 1
+                        ; eor w2, w2, w3
+                    );
+                }
+                self.flags_w5(bits, need, CF | OF, 0);
+            }
         }
         if need != 0 {
             self.merge(need);
