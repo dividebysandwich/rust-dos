@@ -86,6 +86,8 @@ pub struct Trampoline {
     pub bytes: Vec<u8>,
     pub enter: usize,
     pub exit: usize,
+    /// `fpu_addsub`.
+    pub addsub: usize,
 }
 
 pub type Enter = unsafe extern "C" fn(*mut crate::cpu::Cpu, *mut JitCtx, *const u8) -> u64;
@@ -128,7 +130,148 @@ pub fn trampoline() -> Trampoline {
         ; ldp x29, x30, [sp], 112
         ; ret
     );
-    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit }
+    let addsub = ops.offset().0;
+    fpu_addsub(&mut ops);
+    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub }
+}
+
+/// ST(dst) = a + b, or a - b with W3 set, as `F80::add` and `F80::sub`
+/// add their 80 bits, where x86-64's `Gen::fpu_addsub` does; a routine of
+/// the trampoline's that translated code calls with the physical registers
+/// a, b and dst in W0-W2 (8 for the double in D16), which returns W0 = 0,
+/// or 1 with nothing changed for the handler's code. X0-X15 are changed.
+fn fpu_addsub(ops: &mut Asm) {
+    let slow = ops.new_dynamic_label();
+    dynasm!(ops ; .arch aarch64 ; mov w8, w0 ; mov w9, w1 ; mov w15, w2 ; mov w17, w3);
+    for (reg, off) in [(11, layout::fpu::X80), (12, layout::fpu::F64), (13, layout::fpu::STALE), (14, layout::fpu::TAGS)] {
+        mov32(ops, reg, off as u32);
+        dynasm!(ops ; .arch aarch64 ; add X(reg), x19, X(reg));
+    }
+    // Operand into (sign << 15 | exponent) and the 64-bit mantissa.
+    f80_operand(ops, 8, 0, 2, slow);
+    f80_operand(ops, 9, 1, 3, slow);
+    dynasm!(ops
+        ; .arch aarch64
+        ; cbz w17, >signed
+        ; eor w1, w1, 0x8000
+        ; signed:
+        // Exponents aligned: the smaller operand's mantissa shifted
+        // right (to 0 by 64 or more); W10 the larger exponent.
+        ; and w4, w0, 0x7FFF
+        ; and w10, w1, 0x7FFF
+        ; subs w5, w4, w10
+        ; csel w10, w4, w10, hs
+        ; cneg w5, w5, lo
+        ; csel w6, w5, wzr, lo
+        ; csel w7, w5, wzr, hs
+        ; lsr x2, x2, x6
+        ; cmp w6, 64
+        ; csel x2, xzr, x2, hs
+        ; lsr x3, x3, x7
+        ; cmp w7, 64
+        ; csel x3, xzr, x3, hs
+        // Same signs: the sum, a carry shifted in from the top.
+        ; eor w5, w0, w1
+        ; tbnz w5, 15, >differ
+        ; adds x2, x2, x3
+        ; lsr x6, x2, 1
+        ; orr x6, x6, 1 << 63
+        ; csel x2, x6, x2, hs
+        ; cinc w10, w10, hs
+        ; and w0, w0, 0x8000
+        ; b >result
+        // Different signs: the difference, normalized, with the larger
+        // one's sign; 0 for none.
+        ; differ:
+        ; subs x5, x2, x3
+        ; sub x6, x3, x2
+        ; csel x2, x5, x6, hs
+        ; csel w0, w0, w1, hs
+        ; cbz x2, >nothing
+        ; clz x5, x2
+        ; lsl x2, x2, x5
+        ; sub w10, w10, w5
+        ; and w0, w0, 0x8000
+        ; b >result
+        ; nothing:
+        ; mov w0, wzr
+        ; mov w10, wzr
+        // The double `F80::get_f64` makes of it into X7: 0 for exponent
+        // 0; outside a double's range (or an exponent that wrapped) the
+        // handlers'.
+        ; result:
+        ; cbz w10, >zero
+        ; sub w5, w10, (16383 - 1023) >> 12, lsl 12
+        ; sub w5, w5, (16383 - 1023) & 0xFFF
+        ; sub w6, w5, 1
+        ; cmp w6, 0x7FD
+        ; b.hi =>slow
+        ; ubfx x7, x2, 11, 52
+        ; orr x7, x7, x5, lsl 52
+        ; orr x7, x7, x0, lsl 48
+        ; b >store
+        ; zero:
+        ; lsl x7, x0, 48
+        // ST(dst): the 80 bits, their double, and not stale.
+        ; store:
+        ; orr w0, w0, w10
+        ; add x6, x11, x15, lsl 4
+        ; str x2, [x6]
+        ; str x0, [x6, 8]
+        ; str x7, [x12, x15, lsl 3]
+        ; strb wzr, [x13, x15]
+        ; mov w0, wzr
+        ; ret
+        ; =>slow
+        ; movz w0, 1
+        ; ret
+    );
+}
+
+/// Operand W`idx` of `fpu_addsub` (a physical register, or 8 for D16) into
+/// W`hi` (sign << 15 | exponent) and X`man`, as `FpuRegs::get` and
+/// `F80::set_f64` make its 80 bits; to `slow` for an empty register or a
+/// double that is an infinity or a NaN. X6 and X7 are changed.
+fn f80_operand(ops: &mut Asm, idx: u8, hi: u8, man: u8, slow: DynamicLabel) {
+    let (value, stale, loaded, zero) =
+        (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
+    dynasm!(ops
+        ; .arch aarch64
+        ; cmp WSP(idx), 8
+        ; b.eq =>value
+        ; ldrb w6, [x14, X(idx)]
+        ; cmp w6, FPU_EMPTY
+        ; b.eq =>slow
+        ; ldrb w6, [x13, X(idx)]
+        ; cbnz w6, =>stale
+        ; add x6, x11, X(idx), lsl 4
+        ; ldr X(man), [x6]
+        ; ldrh W(hi), [x6, 8]
+        ; b =>loaded
+        ; =>stale
+        ; ldr x7, [x12, X(idx), lsl 3]
+        ; b >double
+        ; =>value
+        ; fmov x7, d16
+        // The double's bits in X7.
+        ; double:
+        ; ubfx X(hi), x7, 52, 11
+        ; cbz W(hi), =>zero
+        ; cmp WSP(hi), 0x7FF
+        ; b.eq =>slow
+        ; add WSP(hi), WSP(hi), (16383 - 1023) >> 12, lsl 12
+        ; add WSP(hi), WSP(hi), (16383 - 1023) & 0xFFF
+        ; lsr x6, x7, 63
+        ; orr W(hi), W(hi), w6, lsl 15
+        ; lsl X(man), x7, 11
+        ; orr XSP(man), X(man), 1 << 63
+        ; b =>loaded
+        ; =>zero
+        ; lsr X(hi), x7, 63
+        ; lsl W(hi), W(hi), 15
+        ; mov X(man), xzr
+        ; =>loaded
+    );
 }
 
 /// W`reg` = `v`.
@@ -733,6 +876,26 @@ impl Gen<'_> {
         if !out {
             dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
         }
+    }
+
+    /// Call the trampoline's `fpu_addsub` for ST(dst) = ST(a) + ST(b) (or
+    /// minus, with `sub`), of `regs` = [a, b, dst] (8 for the double in D16):
+    /// W0 is 0 where it did, else the handler's call is to follow.
+    fn fpu_addsub(&mut self, regs: [u8; 3], sub: bool) {
+        self.field(Access::Ldr64, 4, layout::fpu::TOP);
+        for (reg, i) in regs.into_iter().enumerate() {
+            match i {
+                8 => dynasm!(self.ops ; .arch aarch64 ; movz W(reg as u8), 8),
+                0 => dynasm!(self.ops ; .arch aarch64 ; mov W(reg as u8), w4),
+                _ => dynasm!(self.ops ; .arch aarch64 ; add WSP(reg as u8), w4, i as u32 ; and WSP(reg as u8), W(reg as u8), 7),
+            }
+        }
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; movz w3, sub as u32
+            ; ldr x16, [x20, (CTX_FPU + 32) as u32]
+            ; blr x16
+        );
     }
 
     /// Call `jit_fpu_addsub_st` with `desc` and the handle in `arg`.
@@ -1788,15 +1951,28 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch aarch64 ; fdiv_done:);
             }
             Uop::FAddSt { dst, a, b, sub } => {
+                self.fpu_addsub([a, b, dst], sub);
+                dynasm!(self.ops ; .arch aarch64 ; cbz w0, >addsub_done);
                 let desc = dst as u32 | (a as u32) << 4 | (b as u32) << 8 | (sub as u32) << 12;
                 self.fpu_op(desc, None);
+                dynasm!(self.ops ; .arch aarch64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
             Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
             Uop::FAddValue { kind, x } => {
+                use crate::instructions::fpu::arithmetic::{ADD_VALUE, SUB_VALUE};
+                // 8: the double in D16.
+                let (a, b, sub) = match kind {
+                    ADD_VALUE => (0, 8, false),
+                    SUB_VALUE => (0, 8, true),
+                    _ => (8, 0, true),
+                };
+                dynasm!(self.ops ; .arch aarch64 ; fmov d16, D(d(x)));
+                self.fpu_addsub([a, b, 0], sub);
+                dynasm!(self.ops ; .arch aarch64 ; cbz w0, >addsub_done);
                 dynasm!(self.ops ; .arch aarch64 ; fmov d0, D(d(x)) ; mov x0, x19 ; mov x1, x20);
                 self.mov32(2, kind);
-                dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x20, (CTX_FPU + 8) as u32] ; blr x16);
+                dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x20, (CTX_FPU + 8) as u32] ; blr x16 ; addsub_done:);
             }
             Uop::FCom { a, b } => {
                 // C0 where less or unordered, C2 where unordered, C3 where

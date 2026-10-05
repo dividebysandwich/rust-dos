@@ -77,6 +77,8 @@ pub struct Trampoline {
     pub bytes: Vec<u8>,
     pub enter: usize,
     pub exit: usize,
+    /// `fpu_addsub`.
+    pub addsub: usize,
 }
 
 pub type Enter = unsafe extern "sysv64" fn(*mut crate::cpu::Cpu, *mut JitCtx, *const u8) -> u64;
@@ -116,7 +118,184 @@ pub fn trampoline() -> Trampoline {
         ; pop rbx
         ; ret
     );
-    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit }
+    let addsub = ops.offset().0;
+    fpu_addsub(&mut ops);
+    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub }
+}
+
+/// ST(dst) = a + b, or a - b, as `F80::add` and `F80::sub` add their 80
+/// bits (`fpu::arithmetic::addsub_st` and `addsub_value`): where both are
+/// registers that aren't empty or doubles, not an infinity or a NaN held as
+/// a double, and the sum comes to a double's range; a routine of the
+/// trampoline's that translated code calls with the physical registers a
+/// and b in R8D and R9D (8 for the double in XMM15) and dst | sub << 8 in
+/// R10D, which returns EAX = 0, or 1 with nothing changed for the handler's
+/// code. RCX, RDX and R8-R10 are changed.
+fn fpu_addsub(ops: &mut Asm) {
+    let slow = ops.new_dynamic_label();
+    dynasm!(ops ; .arch x64 ; push r11 ; push rsi ; mov r11d, r10d);
+    // Operand into (sign << 15 | exponent) and the 64-bit mantissa.
+    f80_operand(ops, 0, 8, slow);
+    f80_operand(ops, 2, 9, slow);
+    dynasm!(ops
+        ; .arch x64
+        ; mov ecx, r11d
+        ; and ecx, 0x100
+        ; shl ecx, 7
+        ; xor edx, ecx
+        // Exponents aligned: the smaller operand's mantissa shifted
+        // right (to 0 by 64 or more); R10D the larger exponent.
+        ; movzx ecx, ax
+        ; and ecx, 0x7FFF
+        ; movzx esi, dx
+        ; and esi, 0x7FFF
+        ; mov r10d, esi
+        ; cmp ecx, esi
+        ; cmova r10d, ecx
+        ; neg ecx
+        ; add ecx, r10d
+        ; neg esi
+        ; add esi, r10d
+        ; shr r8, cl
+        ; cmp ecx, 64
+        ; sbb rcx, rcx
+        ; and r8, rcx
+        ; mov ecx, esi
+        ; shr r9, cl
+        ; cmp esi, 64
+        ; sbb rsi, rsi
+        ; and r9, rsi
+        // Same signs: the sum, a carry shifted in from the top.
+        ; mov ecx, eax
+        ; xor ecx, edx
+        ; test ecx, 0x8000
+        ; jnz >differ
+        ; add r8, r9
+        ; setc cl
+        ; mov rsi, r8
+        ; rcr rsi, 1
+        ; test cl, cl
+        ; cmovnz r8, rsi
+        ; movzx ecx, cl
+        ; add r10d, ecx
+        ; and eax, 0x8000
+        ; jmp >result
+        // Different signs: the difference, normalized, with the larger
+        // one's sign; 0 for none.
+        ; differ:
+        ; mov rsi, r9
+        ; sub rsi, r8
+        ; mov rcx, r8
+        ; sub rcx, r9
+        ; cmovb rcx, rsi
+        ; cmovb eax, edx
+        ; mov r8, rcx
+        ; test r8, r8
+        ; jz >nothing
+        ; normalize:
+        ; bsr rcx, r8
+        ; xor ecx, 63
+        ; shl r8, cl
+        ; sub r10d, ecx
+        ; and eax, 0x8000
+        ; jmp >result
+        ; nothing:
+        ; xor eax, eax
+        ; xor r8d, r8d
+        ; xor r10d, r10d
+        // The double `F80::get_f64` makes of it into R9: 0 for exponent
+        // 0; outside a double's range (or an exponent that wrapped) the
+        // handlers'.
+        ; result:
+        ; test r10d, r10d
+        ; jz >zero
+        ; mov ecx, r10d
+        ; sub ecx, 16383 - 1023
+        ; lea edx, [rcx - 1]
+        ; cmp edx, 0x7FD
+        ; ja =>slow
+        ; mov r9, r8
+        ; shr r9, 11
+        ; btr r9, 52
+        ; shl rcx, 52
+        ; or r9, rcx
+        ; mov rdx, rax
+        ; shl rdx, 48
+        ; or r9, rdx
+        ; jmp >store
+        ; zero:
+        ; mov r9, rax
+        ; shl r9, 48
+        // ST(dst): the 80 bits, their double, and not stale.
+        ; store:
+        ; or eax, r10d
+        ; mov ecx, r11d
+        ; and ecx, 7
+        ; mov edx, ecx
+        ; shl edx, 4
+        ; mov QWORD [rbx + rdx + FPU_X80], r8
+        ; mov QWORD [rbx + rdx + FPU_X80 + 8], rax
+        ; mov QWORD [rbx + rcx * 8 + FPU_F64], r9
+        ; mov BYTE [rbx + rcx + FPU_STALE], 0
+        ; xor eax, eax
+        ; pop rsi
+        ; pop r11
+        ; ret
+        ; =>slow
+        ; mov eax, 1
+        ; pop rsi
+        ; pop r11
+        ; ret
+    );
+}
+
+/// Operand `fpu_addsub` has in R`man`D (a physical register, or 8 for the
+/// double in XMM15) into `hi` (sign << 15 | exponent, of RAX or RDX) and
+/// R`man` (R8 or R9), as `FpuRegs::get` and `F80::set_f64` make its 80
+/// bits; to `slow` for an empty register or a double that is an infinity
+/// or a NaN. RCX is changed.
+fn f80_operand(ops: &mut Asm, hi: u8, man: u8, slow: DynamicLabel) {
+    let (value, stale, loaded, zero) =
+        (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
+    dynasm!(ops
+        ; .arch x64
+        ; cmp Rd(man), 8
+        ; je =>value
+        ; cmp BYTE [rbx + Rq(man) + FPU_TAGS], FPU_EMPTY
+        ; je =>slow
+        ; cmp BYTE [rbx + Rq(man) + FPU_STALE], 0
+        ; jne =>stale
+        ; mov Rd(hi), Rd(man)
+        ; shl Rd(hi), 4
+        ; mov Rq(man), QWORD [rbx + Rq(hi) + FPU_X80]
+        ; movzx Rd(hi), WORD [rbx + Rq(hi) + FPU_X80 + 8]
+        ; jmp =>loaded
+        ; =>stale
+        ; mov rcx, QWORD [rbx + Rq(man) * 8 + FPU_F64]
+        ; jmp >double
+        ; =>value
+        ; movq rcx, xmm15
+        // The double's bits in RCX.
+        ; double:
+        ; mov Rq(man), rcx
+        ; shl Rq(man), 11
+        ; bts Rq(man), 63
+        ; mov Rq(hi), rcx
+        ; shr Rq(hi), 52
+        ; mov ecx, Rd(hi)
+        ; and ecx, 0x7FF
+        ; jz =>zero
+        ; cmp ecx, 0x7FF
+        ; je =>slow
+        ; and Rd(hi), 0x800
+        ; shl Rd(hi), 4
+        ; lea Rd(hi), [Rq(hi) + rcx + 16383 - 1023]
+        ; jmp =>loaded
+        ; =>zero
+        ; shl Rd(hi), 4
+        ; xor Rd(man), Rd(man)
+        ; =>loaded
+    );
 }
 
 /// Whether the host has LAHF in 64-bit mode.
@@ -130,13 +309,6 @@ fn has_lahf() -> bool {
 /// Host register of a temporary.
 fn r(t: T) -> u8 {
     8 + t.0
-}
-
-/// An operand of `Gen::fpu_addsub`: a register ST(i), or a double in X.
-#[derive(Clone, Copy)]
-enum FOperand {
-    St(u8),
-    Value(X),
 }
 
 fn gpr_offset(g: Gpr) -> i32 {
@@ -1695,25 +1867,24 @@ impl Gen<'_> {
                 );
             }
             Uop::FAddSt { dst, a, b, sub } => {
-                let (slow, done) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
-                self.fpu_addsub(dst, FOperand::St(a), FOperand::St(b), sub, slow);
-                dynasm!(self.ops ; .arch x64 ; jmp =>done ; =>slow);
+                self.fpu_addsub([a, b, dst], sub, None);
+                dynasm!(self.ops ; .arch x64 ; test eax, eax ; jz >addsub_done);
                 let desc = dst as i32 | (a as i32) << 4 | (b as i32) << 8 | (sub as i32) << 12;
                 self.fpu_op(desc, None);
-                dynasm!(self.ops ; .arch x64 ; =>done);
+                dynasm!(self.ops ; .arch x64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
             Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
             Uop::FAddValue { kind, x } => {
-                let (slow, done) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
                 use crate::instructions::fpu::arithmetic::{ADD_VALUE, SUB_VALUE};
+                // 8: the double in X.
                 let (a, b, sub) = match kind {
-                    ADD_VALUE => (FOperand::St(0), FOperand::Value(x), false),
-                    SUB_VALUE => (FOperand::St(0), FOperand::Value(x), true),
-                    _ => (FOperand::Value(x), FOperand::St(0), true),
+                    ADD_VALUE => (0, 8, false),
+                    SUB_VALUE => (0, 8, true),
+                    _ => (8, 0, true),
                 };
-                self.fpu_addsub(0, a, b, sub, slow);
-                dynasm!(self.ops ; .arch x64 ; jmp =>done ; =>slow);
+                self.fpu_addsub([a, b, 0], sub, Some(x));
+                dynasm!(self.ops ; .arch x64 ; test eax, eax ; jz >addsub_done);
                 self.save_for_call();
                 if x.0 != 0 {
                     dynasm!(self.ops ; .arch x64 ; movsd xmm0, Rx(x.0));
@@ -1726,7 +1897,7 @@ impl Gen<'_> {
                     ; call QWORD [r12 + CTX_FPU + 8]
                 );
                 self.restore_after_call();
-                dynasm!(self.ops ; .arch x64 ; =>done);
+                dynasm!(self.ops ; .arch x64 ; addsub_done:);
             }
             Uop::FCom { a, b } => {
                 // C0, C2 and C3 are where CF, PF and ZF are in AH's flags.
@@ -1869,182 +2040,25 @@ impl Gen<'_> {
         );
     }
 
-    /// ST(dst) = a + b, or a - b with `sub`, as `F80::add` and `F80::sub`
-    /// add their 80 bits (`fpu::arithmetic::addsub_st` and
-    /// `addsub_value`): where both are registers that aren't empty or
-    /// doubles, not an infinity or a NaN held as a double, and the sum
-    /// comes to a double's range, without touching anything else; else to
-    /// `slow`, with nothing changed, for the handlers' code. Uses R8-R10.
-    fn fpu_addsub(&mut self, dst: u8, a: FOperand, b: FOperand, sub: bool, slow: DynamicLabel) {
-        // Operand into (sign << 15 | exponent) and the 64-bit mantissa.
-        self.f80_operand(a, 0, 8, slow);
-        self.f80_operand(b, 2, 9, slow);
-        if sub {
-            dynasm!(self.ops ; .arch x64 ; xor edx, 0x8000);
+    /// Call the trampoline's `fpu_addsub` for ST(dst) = ST(a) + ST(b) (or
+    /// minus, with `sub`), of `regs` = [a, b, dst] (8 for the double in X):
+    /// EAX is 0 where it did, else the handler's call is to follow.
+    fn fpu_addsub(&mut self, regs: [u8; 3], sub: bool, x: Option<X>) {
+        if let Some(x) = x {
+            dynasm!(self.ops ; .arch x64 ; movq xmm15, Rx(x.0));
         }
-        dynasm!(self.ops
-            ; .arch x64
-            // Exponents aligned: the smaller operand's mantissa shifted
-            // right (to 0 by 64 or more); R10D the larger exponent.
-            ; movzx ecx, ax
-            ; and ecx, 0x7FFF
-            ; movzx r10d, dx
-            ; and r10d, 0x7FFF
-            ; cmp ecx, r10d
-            ; je >same_exp
-            ; jb >b_bigger
-            ; xchg ecx, r10d
-            ; neg ecx
-            ; add ecx, r10d
-            ; cmp ecx, 64
-            ; jae >b_gone
-            ; shr r9, cl
-            ; jmp >aligned
-            ; b_gone:
-            ; xor r9d, r9d
-            ; jmp >aligned
-            ; b_bigger:
-            ; neg ecx
-            ; add ecx, r10d
-            ; cmp ecx, 64
-            ; jae >a_gone
-            ; shr r8, cl
-            ; jmp >aligned
-            ; a_gone:
-            ; xor r8d, r8d
-            ; jmp >aligned
-            ; same_exp:
-            ; mov r10d, ecx
-            ; aligned:
-            // Same signs: the sum, a carry shifted in from the top.
-            ; mov ecx, eax
-            ; xor ecx, edx
-            ; test ecx, 0x8000
-            ; jnz >differ
-            ; add r8, r9
-            ; jnc >summed
-            ; rcr r8, 1
-            ; inc r10d
-            ; summed:
-            ; and eax, 0x8000
-            ; jmp >result
-            // Different signs: the difference, normalized, with the larger
-            // one's sign; 0 for none.
-            ; differ:
-            ; cmp r8, r9
-            ; jae >a_larger
-            ; sub r9, r8
-            ; mov r8, r9
-            ; mov eax, edx
-            ; jmp >normalize
-            ; a_larger:
-            ; sub r8, r9
-            ; jz >nothing
-            ; normalize:
-            ; bsr rcx, r8
-            ; xor ecx, 63
-            ; shl r8, cl
-            ; sub r10d, ecx
-            ; and eax, 0x8000
-            ; jmp >result
-            ; nothing:
-            ; xor eax, eax
-            ; xor r8d, r8d
-            ; xor r10d, r10d
-            // The double `F80::get_f64` makes of it into R9: 0 for exponent
-            // 0; outside a double's range (or an exponent that wrapped) the
-            // handlers'.
-            ; result:
-            ; test r10d, r10d
-            ; jz >zero
-            ; mov ecx, r10d
-            ; sub ecx, 16383 - 1023
-            ; lea edx, [rcx - 1]
-            ; cmp edx, 0x7FD
-            ; ja =>slow
-            ; mov r9, r8
-            ; shr r9, 11
-            ; btr r9, 52
-            ; shl rcx, 52
-            ; or r9, rcx
-            ; mov rdx, rax
-            ; shl rdx, 48
-            ; or r9, rdx
-            ; jmp >store
-            ; zero:
-            ; mov r9, rax
-            ; shl r9, 48
-            // ST(dst): the 80 bits, their double, and not stale.
-            ; store:
-            ; or eax, r10d
-            ; mov ecx, DWORD [rbx + FPU_TOP]
-        );
-        if dst != 0 {
-            dynasm!(self.ops ; .arch x64 ; add ecx, dst as i32 ; and ecx, 7);
-        }
-        dynasm!(self.ops
-            ; .arch x64
-            ; mov edx, ecx
-            ; shl edx, 4
-            ; mov QWORD [rbx + rdx + FPU_X80], r8
-            ; mov QWORD [rbx + rdx + FPU_X80 + 8], rax
-            ; mov QWORD [rbx + rcx * 8 + FPU_F64], r9
-            ; mov BYTE [rbx + rcx + FPU_STALE], 0
-        );
-    }
-
-    /// Operand `op` of `fpu_addsub` into register `hi` (sign << 15 |
-    /// exponent, of RAX or RDX) and `man` (R8 or R9), as `FpuRegs::get`
-    /// and `F80::set_f64` make its 80 bits; to `slow` for an empty register
-    /// or a double that is an infinity or a NaN. Uses RCX and R10.
-    fn f80_operand(&mut self, op: FOperand, hi: u8, man: u8, slow: DynamicLabel) {
-        let (stale, loaded) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
-        match op {
-            FOperand::St(i) => {
-                self.fpu_phys(RCX, i);
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; cmp BYTE [rbx + rcx + FPU_TAGS], FPU_EMPTY
-                    ; je =>slow
-                    ; cmp BYTE [rbx + rcx + FPU_STALE], 0
-                    ; jne =>stale
-                    ; mov Rd(hi), ecx
-                    ; shl Rd(hi), 4
-                    ; mov Rq(man), QWORD [rbx + Rq(hi) + FPU_X80]
-                    ; movzx Rd(hi), WORD [rbx + Rq(hi) + FPU_X80 + 8]
-                    ; jmp =>loaded
-                    ; =>stale
-                    ; mov rcx, QWORD [rbx + rcx * 8 + FPU_F64]
-                );
+        dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
+        for (reg, i) in [8u8, 9, 10].into_iter().zip(regs) {
+            match i {
+                8 => dynasm!(self.ops ; .arch x64 ; mov Rd(reg), 8),
+                0 => dynasm!(self.ops ; .arch x64 ; mov Rd(reg), eax),
+                _ => dynasm!(self.ops ; .arch x64 ; lea Rd(reg), [rax + i as i32] ; and Rd(reg), 7),
             }
-            FOperand::Value(x) => dynasm!(self.ops ; .arch x64 ; movq rcx, Rx(x.0)),
         }
-        // The double's bits in RCX.
-        let zero = self.ops.new_dynamic_label();
-        dynasm!(self.ops
-            ; .arch x64
-            ; mov Rq(hi), rcx
-            ; shr Rq(hi), 52
-            ; and Rd(hi), 0x7FF
-            ; jz =>zero
-            ; cmp Rd(hi), 0x7FF
-            ; je =>slow
-            ; add Rd(hi), 16383 - 1023
-            ; mov r10, rcx
-            ; shr r10, 63
-            ; shl r10d, 15
-            ; or Rd(hi), r10d
-            ; mov Rq(man), rcx
-            ; shl Rq(man), 11
-            ; bts Rq(man), 63
-            ; jmp =>loaded
-            ; =>zero
-            ; mov Rq(hi), rcx
-            ; shr Rq(hi), 63
-            ; shl Rd(hi), 15
-            ; xor Rd(man), Rd(man)
-            ; =>loaded
-        );
+        if sub {
+            dynasm!(self.ops ; .arch x64 ; or r10d, 0x100);
+        }
+        dynasm!(self.ops ; .arch x64 ; call QWORD [r12 + CTX_FPU + 32]);
     }
 
     /// Call `jit_fpu_addsub_st` with `desc` and the handle in `arg`.

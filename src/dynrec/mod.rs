@@ -498,6 +498,7 @@ mod engine {
             let enter = unsafe { std::mem::transmute::<usize, backend::Enter>(base + tramp.enter) };
             let returns = vec![Return::NONE; 1 << RETURN_BITS].into_boxed_slice();
             let mut ctx = Box::new(JitCtx::new(base + tramp.exit));
+            ctx.fpu[4] = base + tramp.addsub;
             ctx.returns = returns.as_ptr();
             Ok(Engine {
                 mem,

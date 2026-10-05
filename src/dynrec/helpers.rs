@@ -139,8 +139,9 @@ pub struct JitCtx {
     /// a subtraction's carry is set where nothing was borrowed.
     pub szco: [[u16; 16]; 2],
     /// `jit_fpu_addsub_st`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
-    /// `jit_fpu_div_zero`.
-    pub fpu: [usize; 4],
+    /// `jit_fpu_div_zero`; and the trampoline's own exact 80-bit sum
+    /// (AArch64's `fpu_addsub`).
+    pub fpu: [usize; 5],
     /// `jit_dev_read` and `jit_dev_write` (x86-64).
     pub dev: [usize; 2],
     /// `jit_fetch`.
@@ -296,6 +297,7 @@ impl JitCtx {
                 jit_fpu_addsub_value as *const () as usize,
                 jit_fpu_to_int as *const () as usize,
                 jit_fpu_div_zero as *const () as usize,
+                0,
             ],
             dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
             fetch: jit_fetch as *const () as usize,
