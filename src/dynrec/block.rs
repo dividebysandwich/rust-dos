@@ -65,6 +65,9 @@ pub struct Guard {
     pub paging: u32,
     pub page: u32,
     pub phys: u32,
+    /// The target's mode (`Key::mode`), which a return after a far
+    /// transfer must be in (`helpers::far_goes_on`).
+    pub mode: u32,
 }
 
 /// log2 of the places returns and indirect calls went to that the
@@ -87,7 +90,7 @@ pub struct Return {
 
 impl Return {
     pub const NONE: Return = Return {
-        guard: Guard { eip: 0, cs_base: 0, a20: 0, paging: 0, page: 0, phys: 0 },
+        guard: Guard { eip: 0, cs_base: 0, a20: 0, paging: 0, page: 0, phys: 0, mode: u32::MAX },
         mode: u32::MAX,
         code: 0,
     };

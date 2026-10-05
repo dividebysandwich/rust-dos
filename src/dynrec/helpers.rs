@@ -245,6 +245,8 @@ pub const GUARD_A20: i32 = offset_of!(Guard, a20) as i32;
 pub const GUARD_PAGING: i32 = offset_of!(Guard, paging) as i32;
 pub const GUARD_PAGE: i32 = offset_of!(Guard, page) as i32;
 pub const GUARD_PHYS: i32 = offset_of!(Guard, phys) as i32;
+pub const GUARD_MODE: i32 = offset_of!(Guard, mode) as i32;
+pub const CTX_MODE: i32 = offset_of!(JitCtx, mode) as i32;
 pub const CTX_RETURNS: i32 = offset_of!(JitCtx, returns) as i32;
 pub const RETURN_GUARD: i32 = offset_of!(Return, guard) as i32;
 pub const RETURN_MODE: i32 = offset_of!(Return, mode) as i32;
@@ -531,10 +533,11 @@ jit_fn! {
 /// where no block starts. In protected mode everything a gate or another
 /// task could change: no task switch, and CPL and all segments' bits. (The
 /// CS base and EIP are the links' guards.) 0 where it goes on through the
-/// links, else EXIT_AFTER, or EXIT_FAR_ENV where in protected mode only the
-/// code size, the stack width and the segments' bits changed (`cpl`: the
-/// privilege level before).
-fn far_goes_on(cpu: &Cpu, ctx: &JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
+/// links, else EXIT_AFTER (`cpl`: the privilege level before). Where in
+/// protected mode only the code size, the stack width and the segments'
+/// bits changed, the context takes the mode the blocks after it must be
+/// in, which the return links check (`Guard::mode`).
+fn far_goes_on(cpu: &Cpu, ctx: &mut JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
     use crate::cpu::CpuFlags;
     if cpu.get_cpu_flag(CpuFlags::TF) || (cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF)) || cpu.pm() != pm {
         return EXIT_AFTER;
@@ -545,12 +548,15 @@ fn far_goes_on(cpu: &Cpu, ctx: &JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
         if cpu.tr.selector != tr || cpu.cpl != cpl {
             return EXIT_AFTER;
         }
-        let changed = (code32 | (cpu.stack32() as u32) << 2 | super::env_bits(cpu)) ^ ctx.mode;
-        return match changed {
-            0 => 0,
-            _ if changed & !(1 | 4 | super::ENV_FLAT_ALL) == 0 => EXIT_FAR_ENV,
-            _ => EXIT_AFTER,
-        };
+        let mode = code32 | (cpu.stack32() as u32) << 2 | super::env_bits(cpu);
+        let changed = mode ^ ctx.mode;
+        if changed & !(1 | 4 | super::ENV_FLAT_ALL) != 0 {
+            return EXIT_AFTER;
+        }
+        ctx.mode = mode;
+        ctx.flat = mode & super::ENV_FLAT_ALL;
+        ctx.stack32 = mode & 4 != 0;
+        return 0;
     }
     let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
     let cs_bits = super::seg_env_mask(Seg::CS) | 1;

@@ -1013,7 +1013,9 @@ fn far_calls_into_16_bit_code_that_loads_es_go_on_in_the_blocks_for_them() {
     let stats = run_both(&mut a, &mut b);
     assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
     if AVAILABLE {
-        assert!(stats.exits[15] > 1000, "{:?}", stats);
+        // (The far transfers went on through the return links, to the
+        // blocks of the mode they went to.)
+        assert!(stats.exits[15] == 0 && stats.return_misses < 100, "{:?}", stats);
     }
 }
 
@@ -2533,7 +2535,9 @@ fn a_block_whose_segment_load_changes_the_environment_goes_on_in_the_block_for_i
     let stats = run_both(&mut a, &mut b);
     assert_eq!(b.read32(0x50000), 1500 * 2 + 1500);
     if AVAILABLE {
-        assert!(stats.exits[14] > 0, "no block went on for the new segments: {:?}", stats);
+        // (Through the links a return takes, to the blocks for the
+        // segments as they are.)
+        assert!(stats.exits[14] == 0 && stats.return_misses < 100, "{:?}", stats);
     }
 }
 

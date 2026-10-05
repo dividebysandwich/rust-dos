@@ -1650,8 +1650,8 @@ impl Gen<'_> {
                     // where it goes, if it has one.
                     self.flags_ebp();
                     self.counts();
-                    self.check_flat();
-                    self.returned(t);
+                    self.check_flat(t);
+                    self.returned(t, false);
                 } else {
                     self.flags_back();
                     let tail = self.tail;
@@ -3281,8 +3281,9 @@ impl Gen<'_> {
             self.flags_back();
         }
         self.counts();
-        if linked {
-            self.check_flat();
+        if let (true, Some(eip)) = (linked, eip) {
+            dynasm!(self.ops ; .arch x64 ; mov Rd(r(T0)), eip as i32);
+            self.check_flat(T0);
         }
         match eip {
             Some(eip) if self.link && self.data.in_page(eip) => self.link_jump(slot),
@@ -3291,22 +3292,28 @@ impl Gen<'_> {
         }
     }
 
-    /// After a segment load in the block, go back to the execution loop
-    /// instead of taking a link where the segments aren't flat as the
-    /// block's environment has them: the blocks it leads to were translated
-    /// for it. RDX is the block.
-    fn check_flat(&mut self) {
+    /// After a segment load in the block, where the segments aren't flat
+    /// as the block's environment has them, don't take the link to EIP
+    /// `t`, whose blocks were translated for it, but those a return takes
+    /// in the mode the segments are in now (`returned` after a far
+    /// transfer). RDX is the block.
+    fn check_flat(&mut self, t: T) {
         if self.loaded_segs == 0 {
             return;
         }
+        let same = self.ops.new_dynamic_label();
         dynasm!(self.ops
             ; .arch x64
-            ; cmp DWORD [r12 + CTX_FLAT], (self.env.bits & super::ENV_FLAT_ALL) as i32
-            ; je >same
-            ; mov eax, (EXIT_ENV | EXIT_FLAGS) as i32
-            ; jmp QWORD [r12 + CTX_EXIT]
-            ; same:
+            ; mov eax, DWORD [r12 + CTX_FLAT]
+            ; cmp eax, (self.env.bits & super::ENV_FLAT_ALL) as i32
+            ; je =>same
+            ; mov ecx, DWORD [r12 + CTX_MODE]
+            ; and ecx, !super::ENV_FLAT_ALL as i32
+            ; or ecx, eax
+            ; mov DWORD [r12 + CTX_MODE], ecx
         );
+        self.returned(t, true);
+        dynasm!(self.ops ; .arch x64 ; =>same);
     }
 
     /// Bring the counts up to date for leaving the block after the
@@ -3330,18 +3337,27 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch x64 ; mov Rd(r(T0)), DWORD [rbx + EIP]);
         self.flags_ebp();
         self.counts();
-        self.returned(T0);
+        self.returned(T0, true);
     }
 
     /// Leave through the return (or indirect call) link to EIP `t`, if
     /// there is one (see `guarded`), else to the execution loop, to be
-    /// linked. RDX is the block.
-    fn returned(&mut self, t: T) {
+    /// linked. RDX is the block. After a far transfer (`far`) the blocks
+    /// may be another mode's, which the context has (`far_goes_on`).
+    fn returned(&mut self, t: T, far: bool) {
         let miss = *self.return_miss.get_or_insert_with(|| self.ops.new_dynamic_label());
         for slot in RETURN_LINK..LINKS {
             let next = self.ops.new_dynamic_label();
             let g = DATA_GUARDS + slot as i32 * GUARD_SIZE;
             dynasm!(self.ops ; .arch x64 ; cmp Rd(r(t)), DWORD [rdx + g + GUARD_EIP] ; jne =>next);
+            if far {
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov ecx, DWORD [r12 + CTX_MODE]
+                    ; cmp ecx, DWORD [rdx + g + GUARD_MODE]
+                    ; jne =>next
+                );
+            }
             self.guarded(slot);
             dynasm!(self.ops ; .arch x64 ; =>next);
         }
@@ -3357,8 +3373,19 @@ impl Gen<'_> {
             ; lea rcx, [rax + rcx * 8]
             ; cmp Rd(r(t)), DWORD [rcx + g + GUARD_EIP]
             ; jne =>miss
-            ; cmp DWORD [rcx + RETURN_MODE], self.env.bits as i32
-            ; jne =>miss
+        );
+        if far {
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov eax, DWORD [r12 + CTX_MODE]
+                ; cmp DWORD [rcx + RETURN_MODE], eax
+                ; jne =>miss
+            );
+        } else {
+            dynasm!(self.ops ; .arch x64 ; cmp DWORD [rcx + RETURN_MODE], self.env.bits as i32 ; jne =>miss);
+        }
+        dynasm!(self.ops
+            ; .arch x64
             ; mov eax, DWORD [rbx + seg_field(Seg::CS, layout::SEG_BASE)]
             ; cmp eax, DWORD [rcx + g + GUARD_CS_BASE]
             ; jne =>miss

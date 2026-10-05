@@ -737,6 +737,7 @@ mod engine {
                 paging: paging as u32,
                 page,
                 phys,
+                mode: p.mode,
             };
             let Some(source) = self.blocks[p.from as usize].as_mut().filter(|b| b.serial == p.serial) else { return };
             // SAFETY: owned by the block, and not in use.
@@ -892,6 +893,9 @@ mod engine {
                     return Run::Panic(payload);
                 }
                 let (kind, ix) = (ret as u32 & 0xFF, (ret as u32 >> 8 & 0xFF) as usize);
+                // (A far transfer may have gone on in blocks of another
+                // mode: the context has theirs.)
+                mode = self.ctx.mode | mode & 2;
                 stats.exits[kind as usize & 15] += 1;
                 stats.return_misses += (kind == EXIT_UNLINKED && ix == RETURN_MISS) as u64;
                 // SAFETY: the block the code returned from (the one entered,
