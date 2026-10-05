@@ -81,6 +81,22 @@ smoltcp = { version = "0.14", default-features = false, features = ["std", "medi
 # libretro core leaves to the frontend.
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 
+# The 3D view of the picture (src/display/stage): Blender scenes exported
+# as glTF, and the math to draw them.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.gltf]
+version = "1.4"
+default-features = false
+features = ["names", "utils", "extras", "KHR_lights_punctual", "KHR_materials_unlit"]
+optional = true
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.glam]
+version = "0.30"
+optional = true
+
+# VR headsets through OpenXR (SteamVR, Monado), whose loader is loaded when
+# --vr asks for it.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+openxr = { version = "0.22", default-features = false, features = ["loaded"], optional = true }
+
 # The dynamic recompiler's code generator and its executable memory
 # (src/dynrec).
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
@@ -94,7 +110,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [features]
-default = ["sdl", "gl", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
+default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
 sdl = ["dep:sdl2", "dep:axum", "dep:ureq"]
@@ -102,6 +118,10 @@ sdl = ["dep:sdl2", "dep:axum", "dep:ureq"]
 # higher resolutions. Without it (as on Redox), SDL's renderer draws the
 # picture, without them.
 gl = ["sdl", "dep:glow"]
+# The picture on a screen in a 3D scene: in a window with a camera to fly
+# (--vr-desktop), or in a VR headset through OpenXR (--vr, on Linux and
+# Windows).
+vr = ["gl", "dep:gltf", "dep:glam", "dep:openxr", "dep:jpeg-decoder"]
 midi = ["dep:rustysynth"]
 # CD audio tracks in Ogg Vorbis, FLAC or MP3 files.
 cdaudio = ["dep:symphonia"]

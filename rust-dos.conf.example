@@ -475,6 +475,16 @@
 #flag_color=yellow
 #suggestion_color=darkgray
 
+[vr]
+# The picture on a screen in a 3D scene. off, headset (a VR headset
+# through OpenXR, such as SteamVR or Monado; --vr) or desktop (the scene in
+# the window, with a camera moved with the mouse while Ctrl+Shift is held;
+# --vr-desktop).
+#mode=off
+# The scene: a glTF file (.glb or .gltf) exported from Blender, with the
+# mesh the picture goes on named "screen". Empty for the built-in room.
+#scene=
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

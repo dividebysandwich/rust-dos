@@ -49,6 +49,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   as hard disks whose changes come back, or as CDs
 * **Display:** CRT shaders (scanlines, aperture grille, curved shadow mask)
   and monochrome monitors (white, amber, green)
+* **3D scene and VR:** the picture on a screen in a scene made in Blender,
+  in the window with a camera to fly or in a VR headset through OpenXR
+  (SteamVR, Monado) ([more](CONFIGURATION.md#3d-scene-and-vr))
 * **Settings window** (Ctrl+F12) that changes most settings without a
   restart, the display adapter included, and saves them to the configuration
   file
@@ -244,6 +247,7 @@ from the history. The history is kept between sessions. The
 | Ctrl+F6 | Start and stop recording the sound (WAV) |
 | Ctrl+F7 | Start and stop recording video with sound (AVI) |
 | PrintScreen | Start and stop recording an animation (GIF) |
+| Ctrl+Shift + mouse, Q, E, Home | In the [3D scene](CONFIGURATION.md#3d-scene-and-vr): fly its camera, and centre a VR headset's view |
 
 Screenshots and recordings go in `capture_dir` (`capture` in the directory
 Rust-DOS started in).

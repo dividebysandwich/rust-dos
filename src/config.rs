@@ -201,6 +201,8 @@ pub struct Config {
     pub achievements: crate::achievements::AchievementSettings,
     /// `[shell]`: the prompt's suggestions, colours and history.
     pub shell: crate::cmdline::settings::ShellSettings,
+    /// `[vr]`: the picture in a 3D scene.
+    pub vr: crate::vr::VrSettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -250,6 +252,7 @@ enum Section {
     Printer,
     Achievements,
     Shell,
+    Vr,
     Drives,
     Autoexec,
     /// A game profile's (games.rs).
@@ -271,6 +274,7 @@ pub fn has_own_sections(text: &str) -> bool {
                 | Section::Network
                 | Section::Achievements
                 | Section::Shell
+                | Section::Vr
                 | Section::Drives
                 | Section::Game
                 | Section::Gamepad
@@ -290,6 +294,7 @@ impl Section {
             "printer" => Section::Printer,
             "achievements" => Section::Achievements,
             "shell" => Section::Shell,
+            "vr" => Section::Vr,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
@@ -309,6 +314,7 @@ impl Section {
             Section::Printer => "printer",
             Section::Achievements => "achievements",
             Section::Shell => "shell",
+            Section::Vr => "vr",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",
@@ -762,6 +768,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Printer
             | Section::Achievements
             | Section::Shell
+            | Section::Vr
             | Section::Game
             | Section::Gamepad => {
                 let Some((key, value)) = line.split_once('=') else {
@@ -1045,6 +1052,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Vr {
+                    if let Err(e) = config.vr.set(key, value, base_dir) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
                 if section == Section::Sound {
                     let lower = key.to_ascii_lowercase();
                     if matches!(lower.as_str(), "hard_disk_noise" | "floppy_disk_noise") {
@@ -1251,6 +1265,8 @@ pub struct Settings {
     pub achievements: crate::achievements::AchievementSettings,
     /// `[shell]`: the prompt's suggestions, colours and history.
     pub shell: crate::cmdline::settings::ShellSettings,
+    /// `[vr]`: the picture in a 3D scene.
+    pub vr: crate::vr::VrSettings,
 }
 
 impl Default for Settings {
@@ -1298,6 +1314,7 @@ impl Default for Settings {
             printer: crate::printer::PrinterSettings::default(),
             achievements: Default::default(),
             shell: Default::default(),
+            vr: Default::default(),
         }
     }
 }
@@ -1371,6 +1388,7 @@ impl Settings {
             printer: config.printer.clone(),
             achievements: config.achievements.clone(),
             shell: config.shell,
+            vr: config.vr.clone(),
         }
     }
 }
@@ -1489,6 +1507,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
     entries.extend(settings.printer.entries(home).into_iter().map(|(key, value)| (Section::Printer, key, value)));
     entries.extend(settings.achievements.entries().into_iter().map(|(key, value)| (Section::Achievements, key, value)));
     entries.extend(settings.shell.entries().into_iter().map(|(key, value)| (Section::Shell, key, value)));
+    entries.extend(settings.vr.entries().into_iter().map(|(key, value)| (Section::Vr, key, value)));
     entries
 }
 
@@ -1530,6 +1549,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Printer
                 | Section::Achievements
                 | Section::Shell
+                | Section::Vr
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(comment.trim_start_matches(['#', ';']).trim_start())
@@ -2493,6 +2513,10 @@ mod tests {
                 },
                 ..Default::default()
             },
+            vr: crate::vr::VrSettings {
+                mode: crate::vr::VrMode::Desktop,
+                scene: Some(PathBuf::from("/home/u/rooms/den.glb")),
+            },
         }
     }
 
@@ -2659,7 +2683,7 @@ mod tests {
             let wanted = !matches!(
                 key,
                 "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
-                    | "docpath" | "fontpath" | "device" | "print_command" | "open_with"
+                    | "docpath" | "fontpath" | "device" | "print_command" | "open_with" | "scene"
             );
             assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);
         }
@@ -2670,7 +2694,7 @@ mod tests {
         assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
         assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
         assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[autoexec]\nDIR\n"), "{}", saved);
+        assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\n\n[autoexec]\nDIR\n"), "{}", saved);
         let config = parse(&saved, Path::new("/cfg"), Some(home));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

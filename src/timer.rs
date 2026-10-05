@@ -564,6 +564,12 @@ impl Pacer {
         clock.icount_at(target)
     }
 
+    /// The wall time a frame takes where something else paces the frames
+    /// (a VR headset, after `batch_end`): what the speed is tuned to fit.
+    pub fn set_frame_period(&mut self, period: Duration) {
+        self.period = period;
+    }
+
     /// Like `batch_end`, but on to the start of the display's next vertical
     /// retrace (`refresh`'s) after the wall clock, noting when that is due
     /// on the wall clock, which `wait_to_present` waits for: a frame shown

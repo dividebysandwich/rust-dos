@@ -10,6 +10,8 @@ mod gl;
 #[cfg(not(feature = "gl"))]
 #[path = "display/nogl.rs"]
 mod gl;
+#[cfg(feature = "vr")]
+mod stage;
 #[cfg(feature = "gl")]
 mod voodoo_gl;
 
@@ -91,6 +93,10 @@ pub struct Display<'a> {
     /// The refresh rate of the display the window is on, where SDL knows
     /// it.
     refresh_hz: Option<f64>,
+    /// The frame pixel the mouse was last over on the 3D scene's screen,
+    /// where it stays while the mouse is off the screen.
+    #[cfg(feature = "vr")]
+    picked: std::cell::Cell<(i32, i32)>,
 }
 
 /// What draws the picture.
@@ -189,6 +195,8 @@ impl<'a> Display<'a> {
             voodoo_shown: false,
             layer_shown: None,
             refresh_hz: None,
+            #[cfg(feature = "vr")]
+            picked: std::cell::Cell::new((0, 0)),
         };
         // For the window managers and taskbars that take the icon from the
         // window rather than from rust-dos.desktop. The test below keeps
@@ -394,7 +402,14 @@ impl<'a> Display<'a> {
         } else {
             match changed_rows(&self.shown, &frame.rgb, row_bytes) {
                 Some(rows) => rows,
-                None => return Ok(()),
+                None => {
+                    // The 3D scene is drawn every frame all the same.
+                    #[cfg(feature = "vr")]
+                    if let Output::Gl(gl) = &mut self.out {
+                        gl.render_stage();
+                    }
+                    return Ok(());
+                }
             }
         };
         self.redraw = false;
@@ -503,6 +518,19 @@ impl<'a> Display<'a> {
     pub fn to_frame(&self, x: i32, y: i32) -> (i32, i32) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
         match &self.out {
+            #[cfg(feature = "vr")]
+            Output::Gl(gl) if let Some(stage) = gl.stage() => {
+                let window = gl.window();
+                let (ws, ds) = (window.size(), window.drawable_size());
+                let px = (x as f32 + 0.5) * ds.0 as f32 / ws.0.max(1) as f32;
+                let py = (y as f32 + 0.5) * ds.1 as f32 / ws.1.max(1) as f32;
+                if let Some(uv) = stage.pick((px, py)) {
+                    let texture = stage.screen_size(display);
+                    let flat = CrtSettings { curvature: 0, ..self.crt };
+                    self.picked.set(screen_to_frame((uv.x, uv.y), texture, display, self.frame, (gl.active(), flat)));
+                }
+                self.picked.get()
+            }
             Output::Gl(gl) => {
                 let window = gl.window();
                 let look = (gl.active(), self.crt);
@@ -513,6 +541,127 @@ impl<'a> Display<'a> {
             }
         }
     }
+}
+
+/// The 3D scene (`[vr]`).
+#[cfg(feature = "vr")]
+impl Display<'_> {
+    /// Show the picture in the 3D scene of `settings`; what is worth
+    /// saying about it.
+    pub fn open_stage(&mut self, settings: &rust_dos::vr::VrSettings) -> Vec<String> {
+        self.redraw = true;
+        match &mut self.out {
+            Output::Gl(gl) => gl.open_stage(settings).unwrap_or_else(|e| vec![format!("[VR] No 3D scene: {}", e)]),
+            Output::Sdl { .. } => vec!["[VR] The 3D scene needs OpenGL 3, which isn't available here".to_string()],
+        }
+    }
+
+    fn stage_mut(&mut self) -> Option<&mut stage::Stage> {
+        match &mut self.out {
+            Output::Gl(gl) => gl.stage_mut(),
+            Output::Sdl { .. } => None,
+        }
+    }
+
+    /// Whether the picture is shown in the 3D scene, which is drawn every
+    /// frame, changed or not.
+    pub fn every_frame(&self) -> bool {
+        matches!(&self.out, Output::Gl(gl) if gl.stage().is_some())
+    }
+
+    /// Whether a VR headset shows the scene, or could.
+    pub fn has_headset(&self) -> bool {
+        matches!(&self.out, Output::Gl(gl) if gl.stage().is_some_and(|s| s.has_headset()))
+    }
+
+    /// Turn the window's camera by mouse motion.
+    pub fn camera_look(&mut self, dx: f32, dy: f32) {
+        if let Some(stage) = self.stage_mut() {
+            stage.camera_mut().look(dx, dy);
+        }
+    }
+
+    /// Slide the window's camera sideways and up by mouse motion.
+    pub fn camera_pan(&mut self, dx: f32, dy: f32) {
+        if let Some(stage) = self.stage_mut() {
+            stage.camera_mut().pan(dx, dy);
+        }
+    }
+
+    /// Move the window's camera ahead (back, below 0) by mouse motion.
+    pub fn camera_dolly(&mut self, d: f32) {
+        if let Some(stage) = self.stage_mut() {
+            stage.camera_mut().dolly(d);
+        }
+    }
+
+    /// Move the window's camera up (down, below 0) by `metres`.
+    pub fn camera_rise(&mut self, metres: f32) {
+        if let Some(stage) = self.stage_mut() {
+            stage.camera_mut().rise(metres);
+        }
+    }
+
+    /// The camera back where the scene starts, and the headset centred.
+    pub fn recenter(&mut self) {
+        if let Some(stage) = self.stage_mut() {
+            stage.recenter();
+        }
+    }
+
+    /// The headset's events; what is worth saying.
+    pub fn poll_headset(&mut self) -> Vec<String> {
+        self.stage_mut().map(|stage| stage.poll()).unwrap_or_default()
+    }
+
+    /// Wait for the headset's next frame, if it shows the scene: then it
+    /// paces the frames, each the period returned.
+    pub fn wait_headset(&mut self) -> Option<std::time::Duration> {
+        self.stage_mut().and_then(|stage| stage.wait_frame())
+    }
+
+    /// Draw the 3D scene again with the picture as it was: the viewer may
+    /// have moved.
+    pub fn refresh_stage(&mut self) {
+        if let Output::Gl(gl) = &mut self.out {
+            gl.render_stage();
+        }
+    }
+}
+
+#[cfg(not(feature = "vr"))]
+impl Display<'_> {
+    pub fn open_stage(&mut self, _settings: &rust_dos::vr::VrSettings) -> Vec<String> {
+        vec!["[VR] This build has no 3D scene (the vr feature)".to_string()]
+    }
+
+    pub fn every_frame(&self) -> bool {
+        false
+    }
+
+    pub fn has_headset(&self) -> bool {
+        false
+    }
+
+    pub fn camera_look(&mut self, _dx: f32, _dy: f32) {}
+
+    pub fn camera_pan(&mut self, _dx: f32, _dy: f32) {}
+
+    pub fn camera_dolly(&mut self, _d: f32) {}
+
+    pub fn camera_rise(&mut self, _metres: f32) {}
+
+    pub fn recenter(&mut self) {}
+
+    pub fn poll_headset(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn wait_headset(&mut self) -> Option<std::time::Duration> {
+        None
+    }
+
+    pub fn refresh_stage(&mut self) {}
 }
 
 impl Display<'_> {
@@ -584,6 +733,25 @@ fn window_to_frame(
     let py = (y as f32 + 0.5) * drawable.1 as f32 / window.1.max(1) as f32;
     let u = (px - vx as f32) / vw.max(1) as f32;
     let v = (py - vy as f32) / vh.max(1) as f32;
+    let (u, v) = shader.warp(crt, u, v);
+    ((u * frame.0 as f32).floor() as i32, (v * frame.1 as f32).floor() as i32)
+}
+
+/// A point of the 3D scene's screen (`uv`, 0 to 1 across and down its
+/// texture of `texture` pixels) as the frame pixel there: through the
+/// letterbox of the `frame` shown at `display` proportions, and the look's
+/// overscan.
+#[cfg_attr(not(feature = "vr"), allow(dead_code))]
+fn screen_to_frame(
+    (u, v): (f32, f32),
+    texture: Size,
+    display: Size,
+    frame: Size,
+    (shader, crt): (Shader, CrtSettings),
+) -> (i32, i32) {
+    let (x, y, w, h) = letterbox(texture, display);
+    let u = (u * texture.0 as f32 - x as f32) / w.max(1) as f32;
+    let v = (v * texture.1 as f32 - y as f32) / h.max(1) as f32;
     let (u, v) = shader.warp(crt, u, v);
     ((u * frame.0 as f32).floor() as i32, (v * frame.1 as f32).floor() as i32)
 }

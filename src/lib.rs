@@ -99,4 +99,5 @@ pub mod time_commands;
 pub mod timer;
 pub mod video;
 pub mod voodoo;
+pub mod vr;
 pub mod xms;

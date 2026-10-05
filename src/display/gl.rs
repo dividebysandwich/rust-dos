@@ -65,6 +65,12 @@ pub struct GlScreen {
     /// the first time there is one, and the layer in it.
     layer: Option<glow::Texture>,
     layer_generation: Option<u64>,
+    /// The 3D scene the picture is shown in, with `[vr]`.
+    #[cfg(feature = "vr")]
+    stage: Option<Box<super::stage::Stage>>,
+    /// The look drawn without the tube's curve: the scene's screen has
+    /// its own shape.
+    flat: bool,
 }
 
 /// A picture to draw through the look away from the window, and the
@@ -175,6 +181,9 @@ impl GlScreen {
             capture: None,
             layer: None,
             layer_generation: None,
+            #[cfg(feature = "vr")]
+            stage: None,
+            flat: false,
         })
     }
 
@@ -364,10 +373,34 @@ impl GlScreen {
     }
 
     /// Draw `texture`, a picture of `size` pixels, into the window with the
-    /// look, letterboxed at `display` proportions, and show it.
+    /// look, letterboxed at `display` proportions, and show it. With the 3D
+    /// scene, it goes on the scene's screen instead.
     fn draw(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32), layer: Option<&Layer>) {
+        #[cfg(feature = "vr")]
+        if let Some(stage) = &mut self.stage {
+            let target = stage.screen_size(display);
+            if stage.begin_screen(&self.gl, target) {
+                self.flat = true;
+                self.compose(texture, size, display, layer, target);
+                self.flat = false;
+                if let Some(stage) = &mut self.stage {
+                    stage.end_screen(&self.gl);
+                }
+            }
+            // SAFETY: see `GlScreen`.
+            unsafe { self.gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
+            self.render_stage();
+            return;
+        }
+        let drawable = self.window.drawable_size();
+        self.compose(texture, size, display, layer, drawable);
+        self.window.gl_swap_window();
+    }
+
+    /// Draw `texture` as `draw` does into the framebuffer bound, of
+    /// `(dw, dh)` pixels.
+    fn compose(&mut self, texture: glow::Texture, size: (u32, u32), display: (u32, u32), layer: Option<&Layer>, (dw, dh): (u32, u32)) {
         let gl = &self.gl;
-        let (dw, dh) = self.window.drawable_size();
         // SAFETY: see `GlScreen`.
         unsafe {
             gl.viewport(0, 0, dw as i32, dh as i32);
@@ -386,7 +419,6 @@ impl GlScreen {
                 self.draw_layer(layer, (at.0, at.1, (lw * sx) as u32, (lh * sy) as u32));
             }
         }
-        self.window.gl_swap_window();
     }
 
     /// Draw `layer` as it is, smoothly scaled, into the `x, y, width,
@@ -453,13 +485,43 @@ impl GlScreen {
             gl.uniform_2_f32(program.source.as_ref(), size.0 as f32, size.1 as f32);
             gl.uniform_2_f32(program.output.as_ref(), w as f32, h as f32);
             gl.uniform_1_f32(program.mask.as_ref(), self.mask);
-            let [cx, cy] = self.active.curvature(self.crt);
+            let [cx, cy] = if self.flat { [0.0, 0.0] } else { self.active.curvature(self.crt) };
             gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
             gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        }
+    }
+
+    /// Show the picture in the 3D scene of `settings`, from now on. What is
+    /// worth saying about it: the scene or headset that can't be had.
+    #[cfg(feature = "vr")]
+    pub fn open_stage(&mut self, settings: &rust_dos::vr::VrSettings) -> Result<Vec<String>, String> {
+        let (stage, notes) = super::stage::Stage::new(&self.gl, self.glsl, settings)?;
+        self.stage = Some(Box::new(stage));
+        Ok(notes)
+    }
+
+    #[cfg(feature = "vr")]
+    pub fn stage(&self) -> Option<&super::stage::Stage> {
+        self.stage.as_deref()
+    }
+
+    #[cfg(feature = "vr")]
+    pub fn stage_mut(&mut self) -> Option<&mut super::stage::Stage> {
+        self.stage.as_deref_mut()
+    }
+
+    /// Draw the 3D scene again, with the picture its screen has, and show
+    /// it: the viewer may have moved.
+    #[cfg(feature = "vr")]
+    pub fn render_stage(&mut self) {
+        let drawable = self.window.drawable_size();
+        if let Some(stage) = &mut self.stage {
+            stage.render(&self.gl, drawable);
+            self.window.gl_swap_window();
         }
     }
 

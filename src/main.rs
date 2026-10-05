@@ -51,6 +51,22 @@ struct Args {
     #[arg(long)]
     vrr: bool,
 
+    /// Show the picture on a screen in a 3D scene in a VR headset, through
+    /// OpenXR (SteamVR, Monado) [default: the config file's [vr] mode]
+    #[arg(long, conflicts_with = "vr_desktop")]
+    vr: bool,
+
+    /// Show the picture on a screen in a 3D scene in the window, with a
+    /// camera moved with the mouse while Ctrl+Shift is held
+    #[arg(long)]
+    vr_desktop: bool,
+
+    /// The 3D scene: a glTF file (.glb or .gltf) exported from Blender, with
+    /// the mesh the picture goes on named "screen" [default: the config
+    /// file's, or the built-in room]
+    #[arg(long, value_name = "FILE")]
+    vr_scene: Option<std::path::PathBuf>,
+
     /// Root directory for Drive C: [default: the config file's C:, or "."]
     #[arg(short, long)]
     dir: Option<String>,
@@ -178,6 +194,17 @@ fn main() -> Result<(), String> {
     if args.vrr {
         settings.vrr = true;
     }
+    if args.vr {
+        settings.vr.mode = rust_dos::vr::VrMode::Headset;
+    } else if args.vr_desktop {
+        settings.vr.mode = rust_dos::vr::VrMode::Desktop;
+    }
+    if let Some(scene) = &args.vr_scene {
+        settings.vr.scene = Some(scene.clone());
+        if settings.vr.mode == rust_dos::vr::VrMode::Off {
+            settings.vr.mode = rust_dos::vr::VrMode::Desktop;
+        }
+    }
     if let Some(cycles) = args.cycles {
         settings.cycles = cycles;
     }
@@ -218,6 +245,11 @@ fn main() -> Result<(), String> {
     let mut recorder = ScreenRecorder::new(15);
 
     // SDL2 Setup
+    // OpenXR's runtimes take an OpenGL context of GLX's, which SDL makes
+    // under X11 (XWayland on a Wayland desktop) and not under Wayland.
+    if cfg!(target_os = "linux") && settings.vr.mode == rust_dos::vr::VrMode::Headset {
+        sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
+    }
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     // Without a sound device (as in a virtual machine without a sound
@@ -239,6 +271,12 @@ fn main() -> Result<(), String> {
     // where there is no OpenGL 3.
     let textures = std::cell::OnceCell::new();
     let mut display = Display::open(&video_subsystem, "Rust DOS Emulator", &settings, &textures)?;
+    // The picture on a screen in a 3D scene, in a headset or the window.
+    let stage_notes = if settings.vr.mode == rust_dos::vr::VrMode::Off {
+        Vec::new()
+    } else {
+        display.open_stage(&settings.vr)
+    };
     // Typed text is only wanted in the settings window.
     let text_input = video_subsystem.text_input();
     text_input.stop();
@@ -263,6 +301,10 @@ fn main() -> Result<(), String> {
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
+    }
+    for note in &stage_notes {
+        eprintln!("{}", note);
+        cpu.bus.log_string(note);
     }
     let mut machine = Hardware::of(&settings);
     let mut saved = Saved {
@@ -476,8 +518,33 @@ fn main() -> Result<(), String> {
     let mut stats = rust_dos::stats::Stats::new();
     let mut last_frame: Option<(std::time::Instant, rust_dos::stats::FrameTimes)> = None;
 
+    // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
+    // scene's camera, and the start of the last frame's flight.
+    let mut steering_mouse = false;
+    let mut last_steer = std::time::Instant::now();
+    // Ctrl+Shift held over the 3D scene: the mouse and Q, E and Home fly
+    // its camera, and the machine doesn't see them.
+    macro_rules! steering {
+        () => {
+            display.every_frame() && {
+                let keys = sdl_context.keyboard().mod_state();
+                keys.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) && keys.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD)
+            }
+        };
+    }
+    for note in stage_notes.iter().filter(|n| n.contains("No headset") || n.contains("can't")) {
+        osd.show(note.trim_start_matches("[VR] ").to_string());
+    }
+
     // Main Loop
     'running: loop {
+        // A VR headset showing the scene paces the frames: its runtime says
+        // when to start the next.
+        for note in display.poll_headset() {
+            cpu.bus.log_string(&format!("[VR] {}", note));
+            osd.show(note);
+        }
+        let headset_frame = display.wait_headset();
         let frame_start = std::time::Instant::now();
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
@@ -485,6 +552,33 @@ fn main() -> Result<(), String> {
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => break 'running,
+                // Ctrl+Shift and the mouse fly the 3D scene's camera: look
+                // around, drag (left button) to slide, right button or the
+                // wheel to move ahead and back; Home goes back to the start.
+                Event::MouseMotion { xrel, yrel, mousestate, .. } if steering!() => {
+                    if mousestate.left() {
+                        display.camera_pan(xrel as f32, yrel as f32);
+                    } else if mousestate.right() {
+                        display.camera_dolly(-yrel as f32);
+                    } else {
+                        display.camera_look(xrel as f32, yrel as f32);
+                    }
+                }
+                Event::MouseButtonDown { .. } | Event::MouseButtonUp { .. } if steering!() => {}
+                Event::MouseWheel { y, direction, .. } if steering!() => {
+                    let dy = if matches!(direction, MouseWheelDirection::Flipped) { -y } else { y };
+                    display.camera_dolly(dy as f32 * 20.0);
+                }
+                Event::KeyDown { keycode: Some(keycode @ (Keycode::Home | Keycode::Q | Keycode::E)), keymod, repeat, .. }
+                    if display.every_frame()
+                        && keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD)
+                        && keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) =>
+                {
+                    if keycode == Keycode::Home && !repeat {
+                        display.recenter();
+                        osd.show(if display.has_headset() { "View centred" } else { "Camera back at the start" });
+                    }
+                }
                 // Losing the keyboard lets go of what it held.
                 // Coming back, the host's keyboard may have another
                 // layout and other locks.
@@ -1048,6 +1142,28 @@ fn main() -> Result<(), String> {
             }
         }
 
+        // The mouse in relative mode while flying, so that it doesn't stop
+        // at the window's edges; Q and E move the camera down and up while
+        // held.
+        let steer = steering!();
+        if steer != steering_mouse {
+            if !mouse_captured {
+                sdl_mouse.set_relative_mouse_mode(steer);
+            }
+            steering_mouse = steer;
+        }
+        if steer {
+            let keys = event_pump.keyboard_state();
+            let metres = last_steer.elapsed().as_secs_f32().min(0.1) * 1.5;
+            if keys.is_scancode_pressed(Scancode::E) {
+                display.camera_rise(metres);
+            }
+            if keys.is_scancode_pressed(Scancode::Q) {
+                display.camera_rise(-metres);
+            }
+        }
+        last_steer = std::time::Instant::now();
+
         // Remote debug requests and queued remote input, which goes to the
         // settings window while it is open.
         dbg.divert = ui.is_open();
@@ -1191,7 +1307,7 @@ fn main() -> Result<(), String> {
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's
         // display goes that fast.
-        let refresh = (settings.vrr && !waiting)
+        let refresh = (settings.vrr && !waiting && headset_frame.is_none())
             .then(|| cpu.bus.refresh_timing())
             .filter(|timing| display.shows_hz(timing.hz()));
         let batch_end = if waiting {
@@ -1201,6 +1317,9 @@ fn main() -> Result<(), String> {
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
         };
+        if let Some(period) = headset_frame {
+            pacer.set_frame_period(period);
+        }
         cpu.bus.start_batch(batch_end);
         let batch_icount = cpu.bus.clock.icount;
         let batch_stalled = cpu.bus.clock.stalled;
@@ -1574,9 +1693,11 @@ fn main() -> Result<(), String> {
         }
         // Waiting for the deadline of a frame paced to the retrace is
         // neither the frame's work nor time the CPU could have had.
-        let waited = pacer.wait_to_present(&cpu.bus.clock);
+        let waited = if headset_frame.is_some() { Duration::ZERO } else { pacer.wait_to_present(&cpu.bus.clock) };
         if still {
             dbg.count_frame();
+            // The 3D scene is drawn every frame: the viewer moves.
+            display.refresh_stage();
         } else {
             display.present(&mut screen, voodoo_gl.then_some(&cached_frame), ui.layer())?;
             last_screen_key = Some(screen_key);
@@ -1601,7 +1722,9 @@ fn main() -> Result<(), String> {
                 code_bytes: code.code_bytes,
             },
         ));
-        pacer.wait_for_next_frame();
+        if headset_frame.is_none() {
+            pacer.wait_for_next_frame();
+        }
     }
 
     // The page in the printer comes out, and the job's files are written.

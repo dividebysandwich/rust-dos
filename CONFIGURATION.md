@@ -17,6 +17,8 @@ of their own. See the [README](README.md) for everything else.
   games](#serial-and-modem-games) and [a relay on a
   server](#a-relay-on-a-server)
 * [CRT shaders](#crt-shaders)
+* [3D scene and VR](#3d-scene-and-vr): the picture on a screen in a Blender
+  scene, in the window or in a VR headset
 * [Command-line options](#command-line-options)
 
 ## Configuration file
@@ -643,6 +645,17 @@ The DOS prompt's line editor (see [the prompt](README.md#the-prompt)).
 `PROMPT $E[1;33m$P$E[0m$G` shows the directory in yellow. Codes 0
 (reset), 1 and 22 (bright), 30 to 37 and 90 to 97 (text), 40 to 47 and
 100 to 107 (background), and 39 and 49 (back to the default) work.
+
+### `[vr]`
+
+The picture on a screen in a 3D scene (see [3D scene and VR](#3d-scene-and-vr)).
+
+* `mode`: `off` (the default), `desktop` (the scene in the window, with a
+  camera to fly around) or `headset` (a VR headset through OpenXR, and the
+  left eye's view in the window). It takes effect at the next start.
+* `scene`: the scene, a glTF file (`.glb`, or `.gltf` with its files)
+  exported from Blender, relative to the configuration file's folder.
+  Empty for the built-in room.
 
 ### `[drives]`
 
@@ -1680,6 +1693,90 @@ Screenshots and video recordings show the shader with `record_shader=true`
 (see `capture_dir` in [`[emulator]`](#emulator)); animations and
 debug-server screenshots always show the plain picture.
 
+## 3D scene and VR
+
+With `[vr] mode=desktop` (or `--vr-desktop`), the window shows the picture
+on a screen in a 3D scene instead of filling it. With `mode=headset` (or
+`--vr`), a VR headset shows the scene through OpenXR (SteamVR, Monado), and
+the window shows the left eye's view. With no `scene`, the scene is a room
+with the screen floating ahead, a dark floor and a dark blue sky with an
+orange sunset.
+
+The picture goes on the screen through the [CRT shader](#crt-shaders), but
+flat: the screen has its own shape. It is drawn at twice its size (1024 to
+2048 pixels across) with smaller copies for the distance, so that scanlines
+and masks don't shimmer as the view moves, and its average colour lights
+what is in front of it. 3dfx pictures drawn with OpenGL go on it too.
+
+The keyboard and the mouse work as without the scene. The mouse points at
+the screen through the camera: where the pointer is over the screen is
+where the program's cursor goes, and off the screen it stays where it was.
+A captured mouse (Ctrl+F10, Ctrl+Alt, a click) moves it as always.
+
+While **Ctrl+Shift** is held, the mouse flies the window's camera instead,
+and the machine sees neither it nor these keys:
+
+| Input (with Ctrl+Shift held) | What it does |
+|---|---|
+| Moving the mouse | Look around |
+| Dragging with the left button | Slide sideways and up and down |
+| Dragging with the right button, or the wheel | Move ahead and back |
+| Q / E (held) | Move down / up |
+| Home | Back to where the scene starts; with a headset, centre its view where you look |
+
+### Scenes from Blender
+
+A scene is a glTF 2.0 file. In Blender, File > Export > glTF 2.0:
+
+* Format **glTF Binary (.glb)**, or glTF Separate with its files beside it.
+* Include: tick **Custom Properties** if the screen is marked with one.
+  Transform: **+Y Up** (the default). Mesh: **Apply Modifiers**.
+* Lighting mode **Unitless** keeps lights about as bright as Blender's
+  numbers; a scene's custom property `rustdos_exposure` scales all lit
+  colours (1 by default).
+
+The **screen** is the mesh whose object (or mesh) is named `screen`, or that
+has the custom property `rustdos_screen` set to true or 1. Its UV map is
+where the picture goes: unwrap it to fill 0 to 1 with the picture upright,
+as an image texture would show it. Any shape works, flat or curved. The
+picture keeps its proportions and is letterboxed in the screen's shape.
+
+Optionally:
+
+* An empty named `spawn` is where the eyes start, looking along the
+  empty's front (Blender's +Y with no rotation). Without it, the first
+  camera is, else a point 1.2 m above the origin looking along Blender's
+  +Y.
+* Lights (point, spot and sun, at most 8) light the scene; without any it
+  is lit by the sunset. Materials take their base colour and emissive
+  colour and textures (PNG or JPEG), alpha blend and clip, and double
+  sidedness. An unlit material (Blender's "Background" shader exported as
+  KHR_materials_unlit) shows its colour as it is, for baked lighting.
+* The scene's custom property `rustdos_sky` set to false leaves out the
+  sunset sky and its haze, for a closed room.
+
+A scene that can't be read, or has no screen, gives the test room
+instead, and the log says why.
+
+### VR headsets
+
+The headset is driven through OpenXR, which needs the OpenXR loader: on
+Linux, your distribution's `openxr` package (`libopenxr_loader.so.1`); on
+Windows, `openxr_loader.dll` beside `rust-dos.exe` (from the Khronos
+OpenXR SDK's releases). The active runtime (SteamVR, Monado, ...) draws
+with the window's OpenGL context. On Linux that has to be X11's (GLX), so
+with `--vr` rust-dos opens its window through X11, under XWayland on a
+Wayland desktop. Without a loader, runtime or headset, the scene is shown
+in the window and the log says why.
+
+The headset's own seated space is used: the eyes are where the scene's
+`spawn` is when the runtime last centred its view. Ctrl+Shift+Home centres
+it again where you are and look. The headset paces the frames (90 Hz and
+the like) while it shows the scene; the machine still runs at its own
+speed, so its own frame rate, 70 Hz for VGA, judders a little against
+the headset's. Keyboard and mouse input go to the window, which has to keep
+the focus.
+
 ## Command-line options
 
 Options on the command line override the configuration file's settings for
@@ -1694,6 +1791,9 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
+| `--vr` | Show the picture in a 3D scene in a VR headset ([`[vr]`](#vr) `mode=headset`) |
+| `--vr-desktop` | Show the picture in a 3D scene in the window (`mode=desktop`) |
+| `--vr-scene FILE` | The 3D scene, a glTF file from Blender (`scene`); on its own it means `--vr-desktop` |
 | `--cycles N\|max\|auto` | The CPU speed (`cycles`) |
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |
