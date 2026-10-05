@@ -379,7 +379,7 @@ jit_fn! {
                     // The rest of the block checks the segment's accesses as
                     // it does a segment's that isn't flat, and follows its
                     // links only where the segments are flat as they were.
-                    ctx.flat = ctx.flat & !((super::ENV_FLAT | super::ENV_PLAIN) << seg as u32) | super::flat_bit(cpu, seg);
+                    ctx.flat = ctx.flat & !super::seg_env_mask(seg) | super::flat_bit(cpu, seg);
                 }
                 if popf
                     && (cpu.get_cpu_flag(crate::cpu::CpuFlags::TF)
@@ -448,7 +448,7 @@ jit_fn! {
         let seg = Seg::ALL[seg as usize];
         match catch_unwind(AssertUnwindSafe(|| cpu.load_segment(seg, selector as u16))) {
             Ok(Ok(())) => {
-                ctx.flat = ctx.flat & !((super::ENV_FLAT | super::ENV_PLAIN) << seg as u32) | super::flat_bit(cpu, seg);
+                ctx.flat = ctx.flat & !super::seg_env_mask(seg) | super::flat_bit(cpu, seg);
                 0
             }
             Ok(Err(fault)) => {
@@ -553,7 +553,7 @@ fn far_goes_on(cpu: &Cpu, ctx: &JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
         };
     }
     let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
-    let cs_bits = (super::ENV_FLAT | super::ENV_PLAIN) << Seg::CS as u32 | 1;
+    let cs_bits = super::seg_env_mask(Seg::CS) | 1;
     let goes_on = (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
         && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits;
     if goes_on { 0 } else { EXIT_AFTER }

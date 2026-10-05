@@ -498,6 +498,9 @@ struct Gen<'a> {
     return_miss: Option<DynamicLabel>,
     /// Where the iteration of a REP string instruction starts.
     rep_top: Option<DynamicLabel>,
+    /// The offsets temporaries hold where the operations before made
+    /// them constants (`Uop::Const`, or `Uop::Ea` of a displacement).
+    known: [Option<u32>; 8],
     /// The instruction being translated.
     ix: usize,
     /// The flags live after each operation (`flags::plan`), and after the
@@ -609,6 +612,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         sites: Vec::new(),
         return_miss: None,
         rep_top: None,
+        known: [None; 8],
         ix: 0,
         live: plan.live,
         live_after: 0,
@@ -633,6 +637,7 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
     for (ix, item) in items.iter().enumerate() {
         g.ix = ix;
         g.merge_here(synced);
+        g.known = [None; 8];
         match item {
             None => {
                 if ix as i32 > synced {
@@ -1341,6 +1346,20 @@ impl Gen<'_> {
     }
 
     fn uop(&mut self, uop: &Uop) {
+        // What is known to be constant survives only the operations that
+        // can't change it.
+        let known = std::mem::take(&mut self.known);
+        match *uop {
+            Uop::Get { t, .. } | Uop::Const { t, .. } | Uop::Ea { t, .. } => {
+                self.known = known;
+                self.known[t.0 as usize] = match *uop {
+                    Uop::Const { v, .. } => Some(v),
+                    Uop::Ea { base: None, index: None, disp, a32, .. } => Some(if a32 { disp } else { disp & 0xFFFF }),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
         match *uop {
             Uop::Get { t, r: g } => self.get_into(r(t), g),
             Uop::Set { r: g, t } => self.set_from(g, r(t), RAX),
@@ -1409,7 +1428,7 @@ impl Gen<'_> {
                     dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rw(t));
                 }
             }
-            Uop::MemRef { t, seg, size, write, slot } => self.memref(t, seg, size, write, slot),
+            Uop::MemRef { t, seg, size, write, slot } => self.memref(t, seg, size, write, slot, known[t.0 as usize]),
             Uop::Load { dst, m, size } => {
                 let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
                 let (d, m_) = (r(dst), r(m));
@@ -2304,7 +2323,7 @@ impl Gen<'_> {
     /// RAM, through the TLB with paging on, and leave its handle in t. The
     /// code is translated for paging, the A20 gate, CPL and the flat
     /// segments as the block's `Env` has them.
-    fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8) {
+    fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8, known: Option<u32>) {
         let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         // Where an operand that isn't plain RAM goes (`Slow::Dev`).
         let dev = self.ops.new_dynamic_label();
@@ -2314,6 +2333,7 @@ impl Gen<'_> {
         let unloaded = self.loaded_segs >> seg as u8 & 1 == 0;
         let flat = bits & super::ENV_FLAT << seg as u32 != 0 && unloaded;
         let plain = bits & super::ENV_PLAIN << seg as u32 != 0 && unloaded;
+        let big = bits & super::ENV_BIG << seg as u32 != 0 && unloaded;
         let last = size as i32 - 1;
         // The linear address: a flat segment's is the offset, whose wrapping
         // around past a dword the check for the end of RAM below catches (it
@@ -2334,7 +2354,16 @@ impl Gen<'_> {
                     seg_field(seg, layout::SEG_RIGHTS),
                     seg_field(seg, layout::SEG_BASE),
                 );
-                if size > 1 {
+                // (A constant offset's last byte, where it doesn't wrap.)
+                let end = known.and_then(|v| v.checked_add(last as u32));
+                if let (true, Some(end)) = (size > 1, end) {
+                    if !plain {
+                        dynasm!(self.ops ; .arch x64 ; cmp Rd(t_), DWORD [rbx + lo] ; jb =>at);
+                    }
+                    if !big {
+                        dynasm!(self.ops ; .arch x64 ; cmp DWORD [rbx + hi], end as i32 ; jb =>at);
+                    }
+                } else if size > 1 {
                     dynasm!(self.ops
                         ; .arch x64
                         ; lea ecx, [Rq(t_) + last]
@@ -2344,8 +2373,11 @@ impl Gen<'_> {
                     if !plain {
                         dynasm!(self.ops ; .arch x64 ; cmp Rd(t_), DWORD [rbx + lo] ; jb =>at);
                     }
-                    dynasm!(self.ops ; .arch x64 ; cmp ecx, DWORD [rbx + hi] ; ja =>at);
-                } else {
+                    if !big {
+                        dynasm!(self.ops ; .arch x64 ; cmp ecx, DWORD [rbx + hi] ; ja =>at);
+                    }
+                } else if !big {
+                    // (Every offset is in a big segment's limits.)
                     if !plain {
                         dynasm!(self.ops ; .arch x64 ; cmp Rd(t_), DWORD [rbx + lo] ; jb =>at);
                     }
@@ -2431,15 +2463,22 @@ impl Gen<'_> {
         // In plain RAM: none of its bytes in the video memory and ROMs from
         // A0000h to FFFFFh, and not past the end of RAM. (With paging off
         // and the A20 gate open, an operand in two pages of RAM is too: they
-        // are next to each other.)
-        dynasm!(self.ops
-            ; .arch x64
-            ; lea ecx, [Rq(addr) + last - VIDEO as i32]
-            ; cmp ecx, (EXTENDED - VIDEO) as i32 + last
-            ; jb =>dev
-            ; cmp Rd(addr), self.env.ram_len.wrapping_sub(size as u32) as i32
-            ; ja =>dev
-        );
+        // are next to each other.) A flat segment's constant offset is known
+        // to be.
+        let in_ram = |v: u32| {
+            let end = v as u64 + last as u64;
+            (end < VIDEO as u64 || v >= EXTENDED) && v <= self.env.ram_len.wrapping_sub(size as u32) && size as u32 <= self.env.ram_len
+        };
+        if !(addr == t_ && known.is_some_and(in_ram)) {
+            dynasm!(self.ops
+                ; .arch x64
+                ; lea ecx, [Rq(addr) + last - VIDEO as i32]
+                ; cmp ecx, (EXTENDED - VIDEO) as i32 + last
+                ; jb =>dev
+                ; cmp Rd(addr), self.env.ram_len.wrapping_sub(size as u32) as i32
+                ; ja =>dev
+            );
+        }
         if addr != t_ {
             dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax);
         }

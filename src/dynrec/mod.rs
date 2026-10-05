@@ -149,9 +149,20 @@ pub const ENV_FLAT: u32 = 1 << 8;
 /// readable and writable, with any base and limit (a flat one is too).
 #[cfg(dynrec)]
 pub const ENV_PLAIN: u32 = 1 << 16;
-/// The `ENV_FLAT` and `ENV_PLAIN` bits.
+/// Segment register `seg` is big (bit 24 + `seg as u32`): plain, with
+/// every offset in its limits (any base).
 #[cfg(dynrec)]
-pub const ENV_FLAT_ALL: u32 = 0x3F << 8 | 0x3F << 16;
+pub const ENV_BIG: u32 = 1 << 24;
+/// The `ENV_FLAT`, `ENV_PLAIN` and `ENV_BIG` bits.
+#[cfg(dynrec)]
+pub const ENV_FLAT_ALL: u32 = 0x3F << 8 | 0x3F << 16 | 0x3F << 24;
+
+/// The `ENV_FLAT`, `ENV_PLAIN` and `ENV_BIG` bits of segment register
+/// `seg`.
+#[cfg(dynrec)]
+pub const fn seg_env_mask(seg: crate::cpu::Seg) -> u32 {
+    (ENV_FLAT | ENV_PLAIN | ENV_BIG) << seg as u32
+}
 
 /// The `ENV_*` bits of the CPU now.
 #[cfg(dynrec)]
@@ -172,21 +183,24 @@ pub fn env_bits(cpu: &Cpu) -> u32 {
     bits
 }
 
-/// The `ENV_FLAT` and `ENV_PLAIN` bits of the segment registers now.
+/// The `ENV_FLAT`, `ENV_PLAIN` and `ENV_BIG` bits of the segment registers
+/// now.
 #[cfg(dynrec)]
 pub fn flat_bits(cpu: &Cpu) -> u32 {
     crate::cpu::Seg::ALL.iter().fold(0, |bits, &seg| bits | flat_bit(cpu, seg))
 }
 
-/// The `ENV_FLAT` and `ENV_PLAIN` bits of segment register `seg` now.
+/// The `ENV_FLAT`, `ENV_PLAIN` and `ENV_BIG` bits of segment register
+/// `seg` now.
 #[cfg(dynrec)]
 #[inline]
 pub fn flat_bit(cpu: &Cpu, seg: crate::cpu::Seg) -> u32 {
     use crate::cpu::layout::{RIGHT_READ, RIGHT_WRITE};
     let c = cpu.seg_cache(seg);
     let plain = c.lo == 0 && c.rights & (RIGHT_READ | RIGHT_WRITE) == RIGHT_READ | RIGHT_WRITE;
-    let flat = plain && c.base == 0 && c.hi == u32::MAX;
-    ((flat as u32) << 8 | (plain as u32) << 16) << seg as u32
+    let big = plain && c.hi == u32::MAX;
+    let flat = big && c.base == 0;
+    ((flat as u32) << 8 | (plain as u32) << 16 | (big as u32) << 24) << seg as u32
 }
 
 /// What `DynState::run` did.

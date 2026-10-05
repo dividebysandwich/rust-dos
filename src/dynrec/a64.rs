@@ -466,6 +466,9 @@ struct Gen<'a> {
     loaded_segs: u8,
     /// The top of the REP loop being translated (`Uop::RepStart`).
     rep_top: Option<DynamicLabel>,
+    /// The offsets temporaries hold where the operations before made
+    /// them constants (`Uop::Const`, or `Uop::Ea` of a displacement).
+    known: [Option<u32>; 8],
 }
 
 /// A translated block's code, where its links' stubs are in it, and how
@@ -548,12 +551,14 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
         fpu_known: 0,
         loaded_segs: 0,
         rep_top: None,
+        known: [None; 8],
     };
     g.prologue(items);
     let mut synced = 0;
     for (ix, item) in items.iter().enumerate() {
         g.ix = ix;
         g.merge_here(synced);
+        g.known = [None; 8];
         match item {
             None => {
                 if ix as i32 > synced {
@@ -1477,6 +1482,20 @@ impl Gen<'_> {
     }
 
     fn uop(&mut self, uop: &Uop) {
+        // What is known to be constant survives only the operations that
+        // can't change it.
+        let known = std::mem::take(&mut self.known);
+        match *uop {
+            Uop::Get { t, .. } | Uop::Const { t, .. } | Uop::Ea { t, .. } => {
+                self.known = known;
+                self.known[t.0 as usize] = match *uop {
+                    Uop::Const { v, .. } => Some(v),
+                    Uop::Ea { base: None, index: None, disp, a32, .. } => Some(if a32 { disp } else { disp & 0xFFFF }),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
         match *uop {
             Uop::Get { t, r: g } => {
                 let access = match g.size {
@@ -1541,7 +1560,7 @@ impl Gen<'_> {
                     dynasm!(self.ops ; .arch aarch64 ; uxth W(t), W(t));
                 }
             }
-            Uop::MemRef { t, seg, size, write, slot } => self.memref(t, seg, size, write, slot),
+            Uop::MemRef { t, seg, size, write, slot } => self.memref(t, seg, size, write, slot, known[t.0 as usize]),
             Uop::Load { dst, m, size } => {
                 let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
                 let (d, m_) = (r(dst), r(m));
@@ -2110,7 +2129,7 @@ impl Gen<'_> {
         }
     }
 
-    fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8) {
+    fn memref(&mut self, t: T, seg: Seg, size: u8, write: bool, slot: u8, known: Option<u32>) {
         let (at, back) = (self.ops.new_dynamic_label(), self.ops.new_dynamic_label());
         let t_ = r(t);
         let bits = self.env.bits;
@@ -2118,6 +2137,7 @@ impl Gen<'_> {
         let unloaded = self.loaded_segs >> seg as u8 & 1 == 0;
         let flat = bits & super::ENV_FLAT << seg as u32 != 0 && unloaded;
         let plain = bits & super::ENV_PLAIN << seg as u32 != 0 && unloaded;
+        let big = bits & super::ENV_BIG << seg as u32 != 0 && unloaded;
         let size32 = size as u32;
         let last = size32 - 1;
         // W0 = the linear address: a flat segment's is the offset (a wrap
@@ -2132,17 +2152,26 @@ impl Gen<'_> {
             }
         } else {
             let need = if write { layout::RIGHT_WRITE } else { layout::RIGHT_READ } as u32;
-            if size > 1 {
-                dynasm!(self.ops ; .arch aarch64 ; add w1, WSP(t_), last ; cmp w1, W(t_) ; b.lo =>at);
-            } else {
-                dynasm!(self.ops ; .arch aarch64 ; mov w1, W(t_));
+            // W1 the last byte's offset (a constant offset's where it
+            // doesn't wrap: known).
+            match known.and_then(|v| v.checked_add(last)) {
+                Some(end) if !big => self.mov32(1, end),
+                Some(_) => {}
+                None if size > 1 => {
+                    dynasm!(self.ops ; .arch aarch64 ; add w1, WSP(t_), last ; cmp w1, W(t_) ; b.lo =>at);
+                }
+                None if !big => dynasm!(self.ops ; .arch aarch64 ; mov w1, W(t_)),
+                None => {}
             }
             if !plain {
                 self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_LO));
                 dynasm!(self.ops ; .arch aarch64 ; cmp W(t_), w2 ; b.lo =>at);
             }
-            self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_HI));
-            dynasm!(self.ops ; .arch aarch64 ; cmp w1, w2 ; b.hi =>at);
+            // (Every offset is in a big segment's limits.)
+            if !big {
+                self.field(Access::Ldr32, 2, seg_field(seg, layout::SEG_HI));
+                dynasm!(self.ops ; .arch aarch64 ; cmp w1, w2 ; b.hi =>at);
+            }
             if !plain {
                 self.field(Access::Ldr8, 2, seg_field(seg, layout::SEG_RIGHTS));
                 dynasm!(self.ops ; .arch aarch64 ; tst w2, need ; b.eq =>at);
@@ -2214,22 +2243,29 @@ impl Gen<'_> {
             g.mov32(2, limit);
             dynasm!(g.ops ; .arch aarch64 ; cmp w1, w2);
         };
-        match extended {
-            Some(limit) if self.env.bits & 1 != 0 => {
-                above(self, limit);
-                dynasm!(self.ops ; .arch aarch64 ; b.ls =>ram);
-                below(self);
-                dynasm!(self.ops ; .arch aarch64 ; b.hs =>dev);
-            }
-            Some(limit) => {
-                below(self);
-                dynasm!(self.ops ; .arch aarch64 ; b.lo =>ram);
-                above(self, limit);
-                dynasm!(self.ops ; .arch aarch64 ; b.hi =>dev);
-            }
-            None => {
-                below(self);
-                dynasm!(self.ops ; .arch aarch64 ; b.hs =>dev);
+        // (A flat segment's constant offset is known to be.)
+        let in_ram = |v: u32| {
+            let end = v as u64 + last as u64;
+            (end < VIDEO as u64 || v >= EXTENDED) && v <= self.env.ram_len.wrapping_sub(size32) && size32 <= self.env.ram_len
+        };
+        if !(addr == t_ && known.is_some_and(in_ram)) {
+            match extended {
+                Some(limit) if self.env.bits & 1 != 0 => {
+                    above(self, limit);
+                    dynasm!(self.ops ; .arch aarch64 ; b.ls =>ram);
+                    below(self);
+                    dynasm!(self.ops ; .arch aarch64 ; b.hs =>dev);
+                }
+                Some(limit) => {
+                    below(self);
+                    dynasm!(self.ops ; .arch aarch64 ; b.lo =>ram);
+                    above(self, limit);
+                    dynasm!(self.ops ; .arch aarch64 ; b.hi =>dev);
+                }
+                None => {
+                    below(self);
+                    dynasm!(self.ops ; .arch aarch64 ; b.hs =>dev);
+                }
             }
         }
         dynasm!(self.ops ; .arch aarch64 ; =>ram);
@@ -2337,6 +2373,8 @@ impl Gen<'_> {
         let ones = need & ones;
         if first {
             self.mov32(5, ones);
+        } else if ones == AF {
+            dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, AF);
         } else if ones != 0 {
             self.mov32(6, ones);
             dynasm!(self.ops ; .arch aarch64 ; orr w5, w5, w6);
@@ -3458,12 +3496,37 @@ impl Gen<'_> {
     /// CPU: it holds if the host's Z is clear (true) or set (false).
     fn test_condition(&mut self, cc: ConditionCode, in_w28: bool) -> bool {
         use ConditionCode as C;
+        // One flag: tested where the flags are.
+        let one = |cc| match cc {
+            C::o | C::no => Some(OF),
+            C::b | C::ae => Some(CF),
+            C::e | C::ne => Some(ZF),
+            C::s | C::ns => Some(SF),
+            C::p | C::np => Some(PF),
+            _ => None,
+        };
+        if let Some(flag) = one(cc) {
+            let src = if in_w28 {
+                28
+            } else {
+                self.load_flags_w0(false);
+                0
+            };
+            match flag {
+                OF => dynasm!(self.ops ; .arch aarch64 ; tst W(src), OF),
+                CF => dynasm!(self.ops ; .arch aarch64 ; tst W(src), CF),
+                ZF => dynasm!(self.ops ; .arch aarch64 ; tst W(src), ZF),
+                SF => dynasm!(self.ops ; .arch aarch64 ; tst W(src), SF),
+                _ => dynasm!(self.ops ; .arch aarch64 ; tst W(src), PF),
+            }
+            return matches!(cc, C::o | C::b | C::e | C::s | C::p);
+        }
         self.load_flags_w0(in_w28);
         match cc {
-            C::o | C::b | C::e | C::be | C::s | C::p | C::no | C::ae | C::ne | C::a | C::ns | C::np => {
+            C::be | C::a => {
                 self.mov32(1, super::flags::cond_flags(cc));
                 dynasm!(self.ops ; .arch aarch64 ; tst w0, w1);
-                matches!(cc, C::o | C::b | C::e | C::be | C::s | C::p)
+                cc == C::be
             }
             C::l | C::ge => {
                 // SF != OF: OF moved down to SF's bit.

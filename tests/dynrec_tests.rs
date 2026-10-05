@@ -2433,6 +2433,66 @@ fn a_segment_load_that_changes_which_segments_are_flat_goes_on_in_its_block() {
     assert_eq!(b.read32(0x3F00), 50 + (1..50).filter(|n| n % 2 == 1).sum::<u32>());
 }
 
+/// FS 4 GB from 50000h (big), GS 256 bytes at 58000h, then `tail`.
+fn big_and_small(tail: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> (Rig, Rig) {
+    twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(0x50000, 0xF_FFFF, DATA_R0, 0xC));
+        rig.set_gdt(FREE + 8, seg_desc(0x58000, 0xFF, DATA_R0, 0x4));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(fs, ax)?;
+            a.mov(ax, (FREE + 8) as u32)?;
+            a.mov(gs, ax)?;
+            a.mov(ecx, 40u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            // Constant offsets and others, in a big segment, a small one and
+            // the flat DS: in RAM, in the video memory and across its start.
+            a.add(dword_ptr(0x10).fs(), ecx)?;
+            a.mov(eax, dword_ptr(0x10).fs())?;
+            a.mov(dword_ptr(ecx * 4 + 0x100).fs(), eax)?;
+            a.mov(word_ptr(0xFE).gs(), cx)?;
+            a.add(dword_ptr(0xFC).gs(), eax)?;
+            a.mov(byte_ptr(0xFF).gs(), cl)?;
+            a.mov(dword_ptr(0xA0000 + 0x40), eax)?;
+            a.add(eax, dword_ptr(0xA0000 + 0x40))?;
+            a.mov(dword_ptr(0x9FFFE), eax)?;
+            a.add(dword_ptr(0x5FFF0), eax)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            tail(a)?;
+            a.hlt()
+        }));
+    })
+}
+
+#[test]
+fn big_segments_and_constant_offsets_are_checked_as_the_interpreter_does() {
+    // A dword at the small segment's end, then past it.
+    let (mut a, mut b) = big_and_small(|a| {
+        a.mov(ebx, 1u32)?;
+        a.mov(dword_ptr(0xFC).gs(), ebx)?;
+        a.mov(ebx, 2u32)?;
+        a.mov(dword_ptr(0xFD).gs(), ebx)?;
+        a.mov(ebx, 3u32)
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (GP as u32, 2));
+    assert_eq!(b.read32(0x50010), (1..=40).sum::<u32>());
+    // A dword whose last byte is past 4 GB in the big segment, and one that
+    // ends there.
+    let (mut a, mut b) = big_and_small(|a| {
+        a.mov(ebx, 1u32)?;
+        a.mov(eax, dword_ptr(0xFFFF_FFF0u64).fs())?;
+        a.mov(ebx, 2u32)?;
+        a.mov(eax, dword_ptr(0xFFFF_FFFEu64).fs())?;
+        a.mov(ebx, 3u32)
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (GP as u32, 2));
+}
+
 #[test]
 fn a_block_whose_segment_load_changes_the_environment_goes_on_in_the_block_for_it() {
     let (mut a, mut b) = twins(|rig| {
