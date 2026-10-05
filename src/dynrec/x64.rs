@@ -1815,6 +1815,25 @@ impl Gen<'_> {
                 FKind::Single => dynasm!(self.ops ; .arch x64 ; movd Rx(x.0), Rd(r(t)) ; cvtss2sd Rx(x.0), Rx(x.0)),
                 FKind::Int => dynasm!(self.ops ; .arch x64 ; pxor Rx(x.0), Rx(x.0) ; cvtsi2sd Rx(x.0), Rd(r(t))),
             },
+            Uop::FToX80 { t, part } => {
+                // From the 80 bits where they aren't stale, else the
+                // handlers'.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, DWORD [rbx + FPU_TOP]
+                    ; cmp BYTE [rbx + rax + FPU_STALE], 0
+                    ; jne >x80_stale
+                    ; shl eax, 4
+                );
+                if part == 2 {
+                    dynasm!(self.ops ; .arch x64 ; movzx Rd(r(t)), WORD [rbx + rax + FPU_X80 + 8]);
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), DWORD [rbx + rax + FPU_X80 + part as i32 * 4]);
+                }
+                dynasm!(self.ops ; .arch x64 ; jmp >x80_done ; x80_stale:);
+                self.fpu_op(3 << 13 | part as i32, None);
+                dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), eax ; x80_done:);
+            }
             Uop::FToSingle { t, x } => {
                 dynasm!(self.ops ; .arch x64 ; cvtsd2ss xmm2, Rx(x.0) ; movd Rd(r(t)), xmm2);
             }

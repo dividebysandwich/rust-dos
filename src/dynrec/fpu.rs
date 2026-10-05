@@ -75,6 +75,21 @@ pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
             guard(u, 0);
             u.push(Uop::FChs);
         }
+        Fstp_m80fp => {
+            guard(u, 1);
+            if mem(instr, T1, 10, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::BailUnlessRam { t: T1 });
+            for part in 0..3 {
+                u.push(Uop::FToX80 { t: T0, part });
+                if part != 0 {
+                    u.push(Uop::AddConst { t: T1, v: 4, size: 4 });
+                }
+                u.push(Uop::Store { m: T1, src: T0, size: if part == 2 { 2 } else { 4 } });
+            }
+            u.push(Uop::FPop { n: 1 });
+        }
         Fld_m64fp => {
             guard(u, 0);
             if !double(u, false) {

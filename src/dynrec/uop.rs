@@ -265,6 +265,9 @@ pub enum Uop {
     FToHalf { t: T, x: X, high: bool },
     /// t = x as a single's bits.
     FToSingle { t: T, x: X },
+    /// t = dword `part` (0 or 1) of ST(0)'s 80 bits, or (2) its sign and
+    /// exponent, as `FpuRegs::get` makes them.
+    FToX80 { t: T, part: u8 },
     /// t = x as a word or dword (`size` 2 or 4), rounded as the control
     /// word says (`fpu::data::to_int`).
     FToInt { t: T, x: X, size: u8 },

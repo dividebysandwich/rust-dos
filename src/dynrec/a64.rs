@@ -1907,6 +1907,23 @@ impl Gen<'_> {
                 FKind::Single => dynasm!(self.ops ; .arch aarch64 ; fmov s16, W(r(t)) ; fcvt D(d(x)), s16),
                 FKind::Int => dynasm!(self.ops ; .arch aarch64 ; scvtf D(d(x)), W(r(t))),
             },
+            Uop::FToX80 { t, part } => {
+                // From the 80 bits where they aren't stale, else the
+                // handlers'.
+                self.fpu_phys(1, 0);
+                self.cpu_addr(2, layout::fpu::STALE);
+                dynasm!(self.ops ; .arch aarch64 ; ldrb w3, [x2, x1] ; cbnz w3, >x80_stale);
+                self.cpu_addr(2, layout::fpu::X80);
+                dynasm!(self.ops ; .arch aarch64 ; add x2, x2, x1, lsl 4);
+                if part == 2 {
+                    dynasm!(self.ops ; .arch aarch64 ; ldrh W(r(t)), [x2, 8]);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; ldr W(r(t)), [x2, part as u32 * 4]);
+                }
+                dynasm!(self.ops ; .arch aarch64 ; b >x80_done ; x80_stale:);
+                self.fpu_op(3 << 13 | part as u32, None);
+                dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0 ; x80_done:);
+            }
             Uop::FToSingle { t, x } => {
                 dynasm!(self.ops ; .arch aarch64 ; fcvt s16, D(d(x)) ; fmov W(r(t)), s16);
             }

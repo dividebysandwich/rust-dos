@@ -2868,6 +2868,67 @@ fn fpu_sums_of_80_bit_values_run_as_their_handlers() {
     run_both(&mut a, &mut b);
 }
 
+#[test]
+fn fpu_stores_of_80_bits_run_as_their_handlers() {
+    // Every one of `DOUBLES` stored as 80 bits from a register that holds
+    // a double (stale 80 bits) and from one that holds 80 bits, then
+    // stores across a page, into the video memory and into the code.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = DOUBLES.len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for (k, d) in DOUBLES.iter().enumerate() {
+            rig.write32(input + 8 * k as u32, *d as u32);
+            rig.write32(input + 8 * k as u32 + 4, (*d >> 32) as u32);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, n)?;
+            a.set_label(&mut again)?;
+            a.fld(qword_ptr(esi))?;
+            a.fld1()?;
+            a.fmul_2(st0, st1)?;
+            a.fstp(tword_ptr(edi))?;
+            a.fstp(tword_ptr(edi + 10))?;
+            a.fld(tword_ptr(edi))?;
+            a.fstp(tword_ptr(edi + 20))?;
+            a.fnstsw(ax)?;
+            a.mov(word_ptr(edi + 30), ax)?;
+            a.add(esi, 8)?;
+            a.add(edi, 32)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.fld(qword_ptr(input + 8))?;
+            a.fstp(tword_ptr(DATA + 0x7FFA))?;
+            a.fld(qword_ptr(input))?;
+            a.fstp(tword_ptr(0xA0010u64))?;
+            a.fld(tword_ptr(0xA0010u64))?;
+            a.fstp(tword_ptr(DATA + 0x6000))?;
+            // Over the bytes of the instructions that follow: ten NOPs,
+            // made a store of EAX and NOPs.
+            let to = DATA + 0x6040;
+            a.mov(dword_ptr(DATA + 0x6020), (0xA3 | to << 8) as i32)?;
+            a.mov(dword_ptr(DATA + 0x6024), (to >> 24 | 0x90_9090 << 8) as i32)?;
+            a.mov(dword_ptr(DATA + 0x6028), 0x9090_9090u32 as i32)?;
+            // (EBX the POP's address: POP 1 byte, MOV 5, FLD 6, FSTP 3.)
+            let mut here = a.create_label();
+            a.call(here)?;
+            a.set_label(&mut here)?;
+            a.pop(ebx)?;
+            a.mov(eax, 0x1234_5678)?;
+            a.fld(tword_ptr(DATA + 0x6020))?;
+            a.fstp(tword_ptr(ebx + 15))?;
+            for _ in 0..10 {
+                a.nop()?;
+            }
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+}
+
 const DOUBLES: [u64; 12] = [
     0x3FF8_0000_0000_0000, // 1.5
     0xC002_0000_0000_0000, // -2.25
