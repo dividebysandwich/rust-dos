@@ -2,8 +2,8 @@
 //!
 //! Registers while translated code runs: X19 the CPU, X20 the context
 //! (`JitCtx`), X21 RAM, X22 RAM's code generations, W23 set when a store hit
-//! the block's later bytes, X27 the CPU plus `HI` (the CPU's fields past
-//! X19's offsets' reach), W28 the guest's arithmetic flags where the code
+//! the block's later bytes, X27 the CPU plus `HI` and X29 the CPU plus
+//! `REGS` (the CPU's fields past X19's offsets' reach), W28 the guest's arithmetic flags where the code
 //! has changed them (see `Gen::dirty`); W24-W26 hold the operations'
 //! temporaries (`uop::T`), which calls keep, D8 and D9 the FPU
 //! instructions' doubles (`uop::X`), which calls keep too, and X0-X17 and
@@ -51,18 +51,8 @@ const _: () = assert!(crate::config::MAX_MEMSIZE << 20 <= 0x8000_0000 && SLOW as
 const VIDEO: u32 = 0xA0000;
 const EXTENDED: u32 = 0x10_0000;
 
-/// The CPU's fields X27 reaches: those from `HI` on.
-const HI: usize = {
-    let fields = [
-        layout::ICOUNT,
-        layout::DEADLINE,
-        layout::EXECUTED,
-        layout::EIP,
-        layout::FLAGS,
-        layout::CR0,
-        layout::CPL,
-        layout::A20_MASK,
-    ];
+/// The lowest of `fields`, rounded down to 16 bytes.
+const fn lowest(fields: &[usize]) -> usize {
     let mut min = usize::MAX;
     let mut i = 0;
     while i < fields.len() {
@@ -72,10 +62,32 @@ const HI: usize = {
         i += 1;
     }
     min & !0xF
-};
+}
+
+/// The CPU's fields X27 reaches: those of the bus from `HI` on.
+const HI: usize = lowest(&[layout::ICOUNT, layout::DEADLINE, layout::A20_MASK]);
+
+/// And those X29 reaches, from `REGS` on: the CPU's own registers (the bus
+/// is between them and `HI`, too far for one).
+const REGS: usize = lowest(&[
+    layout::GPR,
+    layout::SEG,
+    layout::EXECUTED,
+    layout::EIP,
+    layout::FLAGS,
+    layout::CR0,
+    layout::CPL,
+    layout::fpu::TOP,
+    layout::fpu::TAGS,
+    layout::fpu::F64,
+    layout::fpu::X80,
+    layout::fpu::STALE,
+]);
 
 const CPU: u8 = 19;
 const HIB: u8 = 27;
+const REGSB: u8 = 29;
+const _: () = assert!(layout::fpu::X80 + 128 - REGS < 4096 && layout::fpu::TAGS - REGS < 4096);
 
 /// The way in from Rust: `enter(cpu, ctx, code)` saves the registers Rust
 /// expects kept, sets up the fixed ones and branches to `code`; translated
@@ -111,9 +123,11 @@ pub fn trampoline() -> Trampoline {
         ; ldr x22, [x20, CTX_PAGE_GEN as u32]
     );
     mov32(&mut ops, 9, HI as u32);
+    dynasm!(ops ; .arch aarch64 ; add x27, x19, x9);
+    mov32(&mut ops, 9, REGS as u32);
     dynasm!(ops
         ; .arch aarch64
-        ; add x27, x19, x9
+        ; add x29, x19, x9
         ; br x2
     );
     let exit = ops.offset().0;
@@ -144,8 +158,7 @@ fn fpu_addsub(ops: &mut Asm) {
     let slow = ops.new_dynamic_label();
     dynasm!(ops ; .arch aarch64 ; mov w8, w0 ; mov w9, w1 ; mov w15, w2 ; mov w17, w3);
     for (reg, off) in [(11, layout::fpu::X80), (12, layout::fpu::F64), (13, layout::fpu::STALE), (14, layout::fpu::TAGS)] {
-        mov32(ops, reg, off as u32);
-        dynasm!(ops ; .arch aarch64 ; add X(reg), x19, X(reg));
+        dynasm!(ops ; .arch aarch64 ; add XSP(reg), x29, (off - REGS) as u32);
     }
     // Operand into (sign << 15 | exponent) and the 64-bit mantissa.
     f80_operand(ops, 8, 0, 2, slow);
@@ -676,6 +689,8 @@ impl Gen<'_> {
             (CPU, off as u32)
         } else if off >= HI && off - HI < 4096 {
             (HIB, (off - HI) as u32)
+        } else if off >= REGS && off - REGS < 4096 {
+            (REGSB, (off - REGS) as u32)
         } else {
             self.mov32(9, off as u32);
             match access {
@@ -800,6 +815,8 @@ impl Gen<'_> {
     fn cpu_addr(&mut self, reg: u8, off: usize) {
         if off < 4096 {
             dynasm!(self.ops ; .arch aarch64 ; add XSP(reg), x19, off as u32);
+        } else if off >= REGS && off - REGS < 4096 {
+            dynasm!(self.ops ; .arch aarch64 ; add XSP(reg), x29, (off - REGS) as u32);
         } else {
             self.mov32(reg, off as u32);
             dynasm!(self.ops ; .arch aarch64 ; add X(reg), x19, X(reg));
