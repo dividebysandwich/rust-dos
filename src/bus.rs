@@ -1846,6 +1846,9 @@ impl Bus {
         // zeros, without mixing them one by one.
         let quiet = self.audio_quiet();
         if quiet && self.audio_settled {
+            if let Some(gus) = &mut self.gus {
+                gus.skip_idle(frames, crate::opl::RATE);
+            }
             self.audio_out.extend(std::iter::repeat_n(0, 2 * frames));
             self.trim_audio();
             return;

@@ -481,6 +481,9 @@ impl Bus {
         self.after_reload();
         self.opl.after_load();
         self.mpu.after_load();
+        if let Some(gus) = &mut self.gus {
+            gus.after_load();
+        }
         self.mixer.clear_tails();
         self.audio_out.clear();
         // The frames that came for the machine before the load are gone,

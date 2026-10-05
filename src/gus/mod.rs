@@ -166,6 +166,10 @@ pub struct Gus {
     frame_frac: u64,
     /// Stereo frames at the playback rate, waiting for the mixer.
     out: VecDeque<(f32, f32)>,
+    /// Silent frames played while the card was quiet, ahead of `out`:
+    /// counted rather than queued, but taken in their place so what the
+    /// card plays next comes at its time.
+    gap: usize,
     mix_buf: Vec<(f32, f32)>,
     /// Resampling position between `prev` and `cur` for the mixer.
     phase: f64,
@@ -214,6 +218,7 @@ impl Gus {
             last_ticks: now,
             frame_frac: 0,
             out: VecDeque::new(),
+            gap: 0,
             mix_buf: Vec::new(),
             phase: 0.0,
             prev: (0.0, 0.0),
@@ -240,6 +245,7 @@ impl Gus {
         self.data = 0;
         self.dram_addr = 0;
         self.out.clear();
+        self.gap = 0;
         self.phase = 0.0;
         self.prev = (0.0, 0.0);
         self.cur = (0.0, 0.0);
@@ -784,16 +790,21 @@ impl Gus {
             for &frame in &self.mix_buf {
                 self.out.push_back(if dac { frame } else { (0.0, 0.0) });
             }
-        } else if !self.is_idle() {
+        } else if self.is_idle() {
+            self.gap += frames;
+        } else {
             self.out.extend(std::iter::repeat_n((0.0, 0.0), frames));
         }
-        // (A card that has gone quiet adds no silence of its own:
-        // `pop_frame` holds its last frame, which is silent.)
-        let max = (self.frame_rate_milli() / 2000) as usize;
-        if self.out.len() > max {
-            let extra = self.out.len() - max;
-            self.out.drain(..extra);
-        }
+        self.keep_output((self.frame_rate_milli() / 2000) as usize);
+    }
+
+    /// Drop the oldest output beyond `max` frames.
+    fn keep_output(&mut self, max: usize) {
+        let mut extra = (self.gap + self.out.len()).saturating_sub(max);
+        let silent = extra.min(self.gap);
+        self.gap -= silent;
+        extra -= silent;
+        self.out.drain(..extra);
     }
 
     /// When the card next needs attention without a port access: a timer
@@ -831,18 +842,40 @@ impl Gus {
 
     // ---- Output ----
 
-    /// One stereo frame for a mixer running at `rate` frames a second,
-    /// interpolated from the card's output.
-    #[inline]
-    /// Whether `pop_frame` gives silence: nothing waiting, and the frame it
-    /// holds is silent.
+    /// Whether `pop_frame` gives silence: nothing but the gap waiting, and
+    /// the frame it holds is silent.
     pub fn is_idle(&self) -> bool {
         self.out.is_empty() && self.cur == (0.0, 0.0) && self.prev == (0.0, 0.0)
     }
 
+    /// Take the frames `frames` calls of `pop_frame` would while the card
+    /// is idle (every one of them silent).
+    pub fn skip_idle(&mut self, frames: usize, rate: u32) {
+        debug_assert!(self.is_idle());
+        self.phase += frames as f64 * self.frame_rate() / rate as f64;
+        let due = self.phase.floor();
+        if due as usize <= self.gap {
+            self.gap -= due as usize;
+            self.phase -= due;
+        } else {
+            self.gap = 0;
+            self.phase = 1.0;
+        }
+    }
+
+    /// One stereo frame for a mixer running at `rate` frames a second,
+    /// interpolated from the card's output.
+    #[inline]
     pub fn pop_frame(&mut self, rate: u32) -> (f32, f32) {
         self.phase += self.frame_rate() / rate as f64;
         while self.phase >= 1.0 {
+            if self.gap > 0 {
+                self.gap -= 1;
+                self.prev = self.cur;
+                self.cur = (0.0, 0.0);
+                self.phase -= 1.0;
+                continue;
+            }
             match self.out.pop_front() {
                 Some(frame) => {
                     self.prev = self.cur;
@@ -869,13 +902,14 @@ impl Gus {
         out
     }
 
+    /// The silence counted before a state was loaded is not the state's.
+    pub fn after_load(&mut self) {
+        self.gap = 0;
+    }
+
     /// Drop output beyond a tenth of a second that nobody took.
     pub fn trim_output(&mut self) {
-        let keep = (self.frame_rate_milli() / 10_000) as usize;
-        if self.out.len() > keep {
-            let extra = self.out.len() - keep;
-            self.out.drain(..extra);
-        }
+        self.keep_output((self.frame_rate_milli() / 10_000) as usize);
     }
 
     /// A DRAM byte, for tests and the debugger.
@@ -927,7 +961,7 @@ impl Gus {
             "dma_active": self.dma_active,
             "dma_pos": format!("{:05X}", self.dma_pos),
             "dram_addr": format!("{:05X}", self.dram_addr),
-            "queued_frames": self.out.len(),
+            "queued_frames": self.gap + self.out.len(),
             "output_gain": self.gain,
             "voices": voices,
         })
@@ -943,4 +977,34 @@ crate::state_fields!(Gus {
 } skip {
     // The configuration's, and a buffer each mix starts afresh.
     config, mix_buf,
+    // A few milliseconds of silence at most.
+    gap,
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How many frames the mixer takes before the first sound.
+    fn frames_to_sound(gus: &mut Gus, rate: u32) -> usize {
+        (0..1000).position(|_| gus.pop_frame(rate).0 != 0.0).unwrap()
+    }
+
+    #[test]
+    fn sound_after_quiet_comes_at_its_time() {
+        let mut gus = Gus::new(GusConfig::default(), 0);
+        let rate = gus.frame_rate().round() as u32;
+        gus.render(200);
+        gus.out.push_back((1000.0, 1000.0));
+        let n = frames_to_sound(&mut gus, rate);
+        assert!((198..=202).contains(&n), "sound after {n} frames");
+
+        // The mixer skipping silence takes the gap along.
+        let mut gus = Gus::new(GusConfig::default(), 0);
+        gus.render(200);
+        gus.skip_idle(150, rate);
+        gus.out.push_back((1000.0, 1000.0));
+        let n = frames_to_sound(&mut gus, rate);
+        assert!((48..=52).contains(&n), "sound after {n} frames");
+    }
+}
