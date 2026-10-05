@@ -257,11 +257,18 @@ pub fn fxch(cpu: &mut Cpu, instr: &Instruction) {
         return;
     }
 
-    let st0 = cpu.fpu_get(0);
-    let sti = cpu.fpu_get(idx);
-
-    cpu.fpu_set(0, sti);
-    cpu.fpu_set(idx, st0);
+    if cpu.fpu_fast {
+        // Only the doubles: the 80 bits become theirs.
+        let st0 = cpu.fpu_get_f64(0);
+        let sti = cpu.fpu_get_f64(idx);
+        cpu.fpu_set_f64(0, sti);
+        cpu.fpu_set_f64(idx, st0);
+    } else {
+        let st0 = cpu.fpu_get(0);
+        let sti = cpu.fpu_get(idx);
+        cpu.fpu_set(0, sti);
+        cpu.fpu_set(idx, st0);
+    }
 
     // C1 is usually cleared by FXCH on modern processors
     cpu.set_fpu_flag(crate::cpu::FpuFlags::C1, false);

@@ -81,6 +81,11 @@
 # or ARM64 host; on others the interpreter runs everything. --core
 # overrides it.
 #core=auto
+# How the FPU adds and subtracts:
+#   exact  on 80 bits, as a real 387 does (the default)
+#   fast   on the host's 64-bit doubles: less host CPU in FPU-heavy games
+#          such as Quake, but results can differ in the last bits
+#fpu=exact
 # The display adapter, which programs look for to pick their graphics:
 #   svga  a VGA with VESA modes up to 1024x768 (the default)
 #   svga_s3  an S3 Trio64 on the PCI bus, for booted systems' drivers

@@ -422,6 +422,9 @@ pub struct Cpu {
     /// (`instructions::string`). Off, they go one at a time, which tests
     /// compare them with.
     pub string_bulk: bool,
+    /// The FPU adds and subtracts doubles as the host does, not 80 bits
+    /// (`fpu=fast`, not exact); set with `set_fpu_fast`.
+    pub fpu_fast: bool,
     /// Data segment loads in protected mode that went through, to load the
     /// same selectors again quickly (see `seg::SegLoad`).
     pub(crate) seg_loads: [seg::SegLoad; seg::SEG_LOADS],
@@ -576,6 +579,9 @@ impl Cpu {
             core: CoreMode::initial(),
             pm_latched: false,
             string_bulk: true,
+            // (`RUST_DOS_FPU=fast` from the environment, as `RUST_DOS_CORE`:
+            // the front ends set the configured one.)
+            fpu_fast: std::env::var("RUST_DOS_FPU").is_ok_and(|v| v.eq_ignore_ascii_case("fast")),
             seg_loads: [seg::SegLoad::NONE; seg::SEG_LOADS],
             dynrec: crate::dynrec::DynState::default(),
         }
@@ -593,6 +599,15 @@ impl Cpu {
                 CoreMode::Auto => self.pm_latched,
                 CoreMode::Normal => false,
             }
+    }
+
+    /// Switch the FPU between exact and fast arithmetic (`fpu_fast`). The
+    /// recompiler's code was translated for one of them, so it goes.
+    pub fn set_fpu_fast(&mut self, fast: bool) {
+        if fast != self.fpu_fast {
+            self.fpu_fast = fast;
+            self.dynrec.flush();
+        }
     }
 
     /// A software interrupt found its vector at 0000:0000 and was skipped.

@@ -280,13 +280,14 @@ fn local_program_alone() {
         top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
         let top: Vec<String> = top.iter().take(20).map(|&(m, n)| format!("{:?} {}", names[m], n)).collect();
         println!(
-            "  calls: memref {} slow {} dev {} port {} load_seg {} revalidate {}\n  fallbacks {}: {}",
+            "  calls: memref {} slow {} dev {} port {} load_seg {} revalidate {} fpu {}\n  fallbacks {}: {}",
             calls.memref,
             calls.slow,
             calls.dev,
             calls.port,
             calls.load_seg,
             calls.revalidate,
+            calls.fpu,
             calls.fallback.iter().sum::<u64>(),
             top.join(", ")
         );

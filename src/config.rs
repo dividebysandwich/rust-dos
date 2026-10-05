@@ -148,6 +148,8 @@ pub struct Config {
     pub cpu: Option<CpuModel>,
     /// What runs the programs' instructions (`core`).
     pub core: Option<CoreMode>,
+    /// The FPU's adds and subtracts on doubles (`fpu=fast`), not exact.
+    pub fpu_fast: Option<bool>,
     /// RAM in MB (`memsize`).
     pub memsize: Option<usize>,
     /// Expanded memory (`ems`).
@@ -868,6 +870,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(core) => config.core = Some(core),
                             Err(e) => warn(e),
                         },
+                        "fpu" => match value.to_ascii_lowercase().as_str() {
+                            "exact" => config.fpu_fast = Some(false),
+                            "fast" => config.fpu_fast = Some(true),
+                            _ => warn(format!("invalid fpu '{}' (exact or fast)", value)),
+                        },
                         "mouse_capture_messages" => match parse_bool(value) {
                             Some(on) => config.mouse_capture_messages = Some(on),
                             None => warn(format!("invalid mouse_capture_messages '{}' (true or false)", value)),
@@ -1196,6 +1203,9 @@ pub struct Settings {
     pub cycles: CpuSpeed,
     pub cpu: CpuModel,
     pub core: CoreMode,
+    /// The FPU adds and subtracts as the host does (`fpu=fast`): faster,
+    /// not exact (`Cpu::fpu_fast`).
+    pub fpu_fast: bool,
     /// RAM in MB.
     pub memsize: usize,
     /// Expanded memory (EMS).
@@ -1263,6 +1273,7 @@ impl Default for Settings {
             cycles: CpuSpeed::default(),
             cpu: CpuModel::I486,
             core: CoreMode::Auto,
+            fpu_fast: false,
             memsize: crate::bus::DEFAULT_MEMORY_MB,
             ems: true,
             umb: true,
@@ -1335,6 +1346,7 @@ impl Settings {
             cycles: config.cycles.unwrap_or(default.cycles),
             cpu: config.cpu.unwrap_or(default.cpu),
             core: config.core.unwrap_or(default.core),
+            fpu_fast: config.fpu_fast.unwrap_or(default.fpu_fast),
             memsize: config.memsize.unwrap_or(default.memsize).min(config.cpu.unwrap_or(default.cpu).max_memsize()),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
@@ -1409,6 +1421,7 @@ fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static s
             .to_string()),
         ),
         (Emulator, "core", Some(settings.core.name().to_string())),
+        (Emulator, "fpu", Some(if settings.fpu_fast { "fast" } else { "exact" }.to_string())),
         (Emulator, "memsize", Some(settings.memsize.to_string())),
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
@@ -2246,13 +2259,25 @@ mod tests {
     }
 
     #[test]
+    fn fpu_takes_exact_or_fast() {
+        let config = parse("[emulator]\nfpu=Fast\n", Path::new("/cfg"), None);
+        assert_eq!(config.fpu_fast, Some(true));
+        assert!(Settings::from_config(&config).fpu_fast);
+        assert!(!Settings::default().fpu_fast);
+
+        let config = parse("[emulator]\nfpu=sloppy\n", Path::new("/cfg"), None);
+        assert_eq!(config.fpu_fast, None);
+        assert!(config.warnings[0].starts_with("line 2: invalid fpu 'sloppy'"), "{:?}", config.warnings);
+    }
+
+    #[test]
     fn template_is_all_comments() {
         let config = parse(TEMPLATE, Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert!(config.drives.is_empty());
         assert!(config.autoexec.is_empty());
         assert_eq!(config.scale, None);
-        assert_eq!((config.cycles, config.core), (None, None));
+        assert_eq!((config.cycles, config.core, config.fpu_fast), (None, None, None));
         assert_eq!((config.ems, config.umb), (None, None));
         assert_eq!((config.fullscreen, config.aspect, config.filter), (None, None, None));
         assert_eq!(config.vrr, None);
@@ -2394,6 +2419,7 @@ mod tests {
             cycles: CpuSpeed::Fixed(3000),
             cpu: CpuModel::I386,
             core: CoreMode::Dynamic,
+            fpu_fast: true,
             memsize: 32,
             ems: false,
             umb: false,

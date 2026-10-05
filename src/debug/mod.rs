@@ -857,6 +857,7 @@ impl DebugHub {
                 "dev": c.dev,
                 "port": c.port,
                 "load_seg": c.load_seg,
+                "fpu": c.fpu,
             })
         }
         let st = &self.stats;

@@ -1888,7 +1888,7 @@ impl Gen<'_> {
                     ; movdqu OWORD [rbx + rdx + FPU_X80], xmm2
                 );
             }
-            Uop::FXch { i } => {
+            Uop::FXch { i, fast } => {
                 const C1: i16 = 0x200;
                 // RAX ST(0)'s physical number, RCX ST(i)'s.
                 dynasm!(self.ops
@@ -1900,19 +1900,30 @@ impl Gen<'_> {
                     ; movsd xmm3, QWORD [rbx + rcx * 8 + FPU_F64]
                     ; movsd QWORD [rbx + rax * 8 + FPU_F64], xmm3
                     ; movsd QWORD [rbx + rcx * 8 + FPU_F64], xmm2
-                    ; movzx edx, BYTE [rbx + rax + FPU_STALE]
-                    ; shl edx, 8
-                    ; mov dl, BYTE [rbx + rcx + FPU_STALE]
-                    ; mov BYTE [rbx + rax + FPU_STALE], dl
-                    ; mov BYTE [rbx + rcx + FPU_STALE], dh
-                    ; shl eax, 4
-                    ; shl ecx, 4
-                    ; movdqu xmm2, OWORD [rbx + rax + FPU_X80]
-                    ; movdqu xmm3, OWORD [rbx + rcx + FPU_X80]
-                    ; movdqu OWORD [rbx + rax + FPU_X80], xmm3
-                    ; movdqu OWORD [rbx + rcx + FPU_X80], xmm2
-                    ; and WORD [rbx + FPU_FLAGS], !C1
                 );
+                if fast {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; mov BYTE [rbx + rax + FPU_STALE], 1
+                        ; mov BYTE [rbx + rcx + FPU_STALE], 1
+                    );
+                } else {
+                    dynasm!(self.ops
+                        ; .arch x64
+                        ; movzx edx, BYTE [rbx + rax + FPU_STALE]
+                        ; shl edx, 8
+                        ; mov dl, BYTE [rbx + rcx + FPU_STALE]
+                        ; mov BYTE [rbx + rax + FPU_STALE], dl
+                        ; mov BYTE [rbx + rcx + FPU_STALE], dh
+                        ; shl eax, 4
+                        ; shl ecx, 4
+                        ; movdqu xmm2, OWORD [rbx + rax + FPU_X80]
+                        ; movdqu xmm3, OWORD [rbx + rcx + FPU_X80]
+                        ; movdqu OWORD [rbx + rax + FPU_X80], xmm3
+                        ; movdqu OWORD [rbx + rcx + FPU_X80], xmm2
+                    );
+                }
+                dynasm!(self.ops ; .arch x64 ; and WORD [rbx + FPU_FLAGS], !C1);
             }
             Uop::FFromT { x, t, kind } => match kind {
                 FKind::Single => dynasm!(self.ops ; .arch x64 ; movd Rx(x.0), Rd(r(t)) ; cvtss2sd Rx(x.0), Rx(x.0)),
@@ -1955,6 +1966,8 @@ impl Gen<'_> {
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch x64 ; mulsd Rx(a.0), Rx(b.0)),
+            Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch x64 ; addsd Rx(a.0), Rx(b.0)),
+            Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch x64 ; subsd Rx(a.0), Rx(b.0)),
             Uop::FDiv { i, num, den, ze } => {
                 dynasm!(self.ops
                     ; .arch x64

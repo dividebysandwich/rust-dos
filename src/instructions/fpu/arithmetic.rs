@@ -14,8 +14,14 @@ pub fn get_pop_dst_index(instr: &Instruction) -> usize {
 }
 
 /// ST(dst) = ST(a) + ST(b), or - with `sub`, as the registers' 80 bits add
-/// (`F80::add`). The dynamic recompiler's code calls it too.
+/// (`F80::add`), or with `fpu_fast` as their doubles do (`sum`). The
+/// dynamic recompiler's code calls it too.
 pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
+    if cpu.fpu_fast {
+        let sum = sum(cpu.fpu_get_f64(a), cpu.fpu_get_f64(b), sub);
+        cpu.fpu_set_f64(dst, sum);
+        return;
+    }
     let mut x = cpu.fpu_get(a);
     let y = cpu.fpu_get(b);
     if sub {
@@ -33,6 +39,17 @@ pub const SUBR_VALUE: u32 = 2;
 
 /// ST(0) += a memory operand's value, or -=, or the value - ST(0).
 pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
+    if cpu.fpu_fast {
+        // (The value as a register would have it, as FMUL's.)
+        let (value, st0) = (canon_f64(value), cpu.fpu_get_f64(0));
+        let sum = match kind {
+            ADD_VALUE => sum(st0, value, false),
+            SUB_VALUE => sum(st0, value, true),
+            _ => sum(value, st0, true),
+        };
+        cpu.fpu_set_f64(0, sum);
+        return;
+    }
     let mut val = F80::new();
     val.set_f64(value);
     let mut st0 = cpu.fpu_get(0);
@@ -82,6 +99,11 @@ pub fn divided_by_zero(cpu: &mut Cpu, i: usize, ze: bool) {
 // ST(0) = ST(0) + [mem_int]
 pub fn fiadd(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
+    if cpu.fpu_fast {
+        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
+        addsub_value(cpu, ADD_VALUE, val);
+        return;
+    }
     let val = cpu.load_int_to_f80(addr, instr.memory_size());
     let mut st0 = cpu.fpu_get(0);
     st0.add(val);
@@ -92,6 +114,11 @@ pub fn fiadd(cpu: &mut Cpu, instr: &Instruction) {
 // ST(0) = ST(0) - [mem_int]
 pub fn fisub(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
+    if cpu.fpu_fast {
+        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
+        addsub_value(cpu, SUB_VALUE, val);
+        return;
+    }
     let val = cpu.load_int_to_f80(addr, instr.memory_size());
     let mut st0 = cpu.fpu_get(0);
     st0.sub(val);
@@ -102,6 +129,11 @@ pub fn fisub(cpu: &mut Cpu, instr: &Instruction) {
 // ST(0) = [mem_int] - ST(0)
 pub fn fisubr(cpu: &mut Cpu, instr: &Instruction) {
     let addr = calculate_addr(cpu, instr);
+    if cpu.fpu_fast {
+        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
+        addsub_value(cpu, SUBR_VALUE, val);
+        return;
+    }
     let mut val = cpu.load_int_to_f80(addr, instr.memory_size());
     let st0 = cpu.fpu_get(0);
     val.sub(st0);
@@ -230,6 +262,24 @@ pub fn product(a: f64, b: f64) -> f64 {
         b
     } else {
         a * b
+    }
+}
+
+/// a + b, or a - b with `sub`, in fast mode (`fpu_fast`): rounded to
+/// nearest, whatever the control word says, as the multiplications and
+/// divisions are. Where both are NaNs, a's, as SSE2's ADDSD and SUBSD and
+/// ARM64's FADD and FSUB give it with a as the first operand (as
+/// `product`).
+#[inline]
+pub fn sum(a: f64, b: f64, sub: bool) -> f64 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else if sub {
+        a - b
+    } else {
+        a + b
     }
 }
 

@@ -36,6 +36,15 @@ What runs the games' code:
 Both run games the same way, so there is no need to change this when a
 game misbehaves.
 
+# FPU arithmetic {#fpu}
+
+How the floating-point unit adds and subtracts:
+
+- **exact**: as a real 387 does, on 80 bits. The default.
+- **fast**: on the host's 64-bit doubles, which is faster in games that
+  compute a lot with it (Quake). Results can differ from a real
+  machine's in the last digits; most games never notice.
+
 # Processor {#cpu}
 
 The processor games find: **386**, **486**, **Pentium** or **Pentium

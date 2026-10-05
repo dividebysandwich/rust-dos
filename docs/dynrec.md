@@ -33,7 +33,8 @@ include every HLT.
 
 `RUST_DOS_CORE=dynamic|normal|auto` in the environment sets the core
 `Cpu::new` starts with. That is how the whole test suite runs on the
-recompiler; the front ends set the configured core.
+recompiler; the front ends set the configured core. `RUST_DOS_FPU=fast`
+does the same for fast FPU arithmetic (see [Fast mode](#fast-mode)).
 
 ## How it runs
 
@@ -313,6 +314,19 @@ compiler made the destination in the handler; nothing else differs.
 
 The lockstep tests compare the FPU's registers (their 80 bits), tags,
 stack top, status and control words after every batch.
+
+#### Fast mode
+
+`fpu=fast` (`Cpu::fpu_fast`, off by default; `RUST_DOS_FPU=fast` sets it
+for the tests) is the one setting that isn't exact. Sums and differences
+are then the doubles' too (`fpu::arithmetic::sum`, rounded to nearest
+whatever the control word says, as products and quotients always are),
+and FXCH swaps only the doubles, leaving both registers' 80 bits stale.
+The interpreter does the same, so the two cores still agree and lockstep
+runs compare them in fast mode as well. Blocks are translated for one
+mode (`translate`'s `fast_fpu`): `Cpu::set_fpu_fast` flushes them when
+it changes. Saved states hold the registers' 80 bits, which load in
+either mode.
 
 Both code generators keep the guest's registers in the `Cpu`, and its
 arithmetic flags (CF, PF, AF, ZF, SF, OF) in a host register from the

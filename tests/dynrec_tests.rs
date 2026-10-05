@@ -2844,11 +2844,17 @@ const INTS: [u32; 8] = [0, 1, 0xFFFF_FFFF, 0x7FFF, 0x8000, 0x1234_5678, 0x8000_0
 /// body's to sum status words in. After FNINIT the stack holds what the
 /// iteration before left.
 fn fpu_loop(body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> (Rig, Rig, DynStats) {
+    fpu_loop_in(false, body)
+}
+
+/// `fpu_loop` with the FPU in fast mode (`Cpu::fpu_fast`) or not.
+fn fpu_loop_in(fast: bool, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy) -> (Rig, Rig, DynStats) {
     let (input, output) = (DATA, DATA + 0x10000);
     let n = SINGLES.len() as u32;
     let count = n * n * 4;
     let top = CODE + 0x40;
     let (mut a, mut b) = twins(|rig| {
+        rig.cpu.set_fpu_fast(fast);
         for k in 0..count {
             let (i, j, rc) = (k % n, k / n % n, k / (n * n));
             let at = input + 16 * k;
@@ -3037,11 +3043,65 @@ const EXTENDED: [(u16, u64); 14] = [
 
 #[test]
 fn fpu_sums_of_80_bit_values_run_as_their_handlers() {
-    // Every pair of `EXTENDED` added and subtracted both ways, in registers
-    // and with a double, the results stored as they are.
+    sums_of_80_bit_values(false);
+}
+
+#[test]
+fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
+    // The same sums come out otherwise (1 and a bit a double hasn't, ...),
+    // and the cores agree on them.
+    let exact = sums_of_80_bit_values(false);
+    let fast = sums_of_80_bit_values(true);
+    let n = EXTENDED.len() * EXTENDED.len() * 60;
+    let out = |rig: &Rig| (0..n as u32).map(|i| rig.cpu.bus.read_8((DATA + 0x8000 + i) as usize)).collect::<Vec<_>>();
+    assert_ne!(out(&exact), out(&fast));
+}
+
+#[test]
+fn fpu_sums_in_fast_mode_run_without_the_handlers() {
+    let (_, b, stats) = fpu_loop_in(true, |a| {
+        a.fld(dword_ptr(esi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fadd(dword_ptr(esi + 4))?;
+        a.fsub(dword_ptr(esi))?;
+        a.fsubr(dword_ptr(esi + 4))?;
+        a.fiadd(dword_ptr(esi + 8))?;
+        a.fisub(word_ptr(esi + 8))?;
+        a.fisubr(dword_ptr(esi + 8))?;
+        a.fadd_2(st0, st1)?;
+        a.fadd_2(st1, st0)?;
+        a.fsub_2(st0, st1)?;
+        a.fsub_2(st1, st0)?;
+        a.fsubr_2(st0, st1)?;
+        a.fsubr_2(st1, st0)?;
+        a.fxch(st0, st1)?;
+        a.fst(dword_ptr(edi))?;
+        a.fld(st0)?;
+        a.faddp(st2, st0)?;
+        a.fld(st1)?;
+        a.fsubp(st2, st0)?;
+        a.fld(st1)?;
+        a.fsubrp(st1, st0)?;
+        a.fxch(st0, st1)?;
+        a.fstp(dword_ptr(edi + 4))?;
+        a.fstp(dword_ptr(edi + 8))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)
+    });
+    if AVAILABLE {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
+        assert_eq!(b.cpu.dynrec.calls().unwrap().fpu, 0, "the handlers' code ran: {:?}", stats);
+    }
+}
+
+/// Every pair of `EXTENDED` added and subtracted both ways, in registers
+/// and with a double, the results stored as they are; in fast mode with
+/// `fast`. The recompiler's machine.
+fn sums_of_80_bit_values(fast: bool) -> Rig {
     let (input, output) = (DATA, DATA + 0x8000);
     let n = EXTENDED.len() as u32;
     let (mut a, mut b) = twins(|rig| {
+        rig.cpu.set_fpu_fast(fast);
         for k in 0..n * n {
             let at = input + 32 * k;
             for (o, (se, man)) in [(0, EXTENDED[(k % n) as usize]), (16, EXTENDED[(k / n) as usize])] {
@@ -3061,6 +3121,11 @@ fn fpu_sums_of_80_bit_values_run_as_their_handlers() {
             a.set_label(&mut again)?;
             a.fld(tword_ptr(esi + 16))?;
             a.fld(tword_ptr(esi))?;
+            // (Which in fast mode keeps their doubles alone.)
+            a.fxch(st0, st1)?;
+            a.fxch(st0, st1)?;
+            a.fld(st1)?;
+            a.fstp(tword_ptr(edi + 50))?;
             a.fld(st0)?;
             a.fadd_2(st0, st2)?;
             a.fstp(tword_ptr(edi))?;
@@ -3080,13 +3145,14 @@ fn fpu_sums_of_80_bit_values_run_as_their_handlers() {
             a.faddp(st1, st0)?;
             a.fstp(tword_ptr(edi + 40))?;
             a.add(esi, 32)?;
-            a.add(edi, 50)?;
+            a.add(edi, 60)?;
             a.dec(ecx)?;
             a.jnz(again)?;
             a.hlt()
         }));
     });
     run_both(&mut a, &mut b);
+    b
 }
 
 #[test]

@@ -297,6 +297,7 @@ impl Item {
             CompositeEra => "composite-era",
             Cycles => "cycles",
             Core => "core",
+            Fpu => "fpu",
             Cpu => "cpu",
             Machine => "machine",
             Voodoo => "voodoo",

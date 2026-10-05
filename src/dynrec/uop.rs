@@ -269,8 +269,9 @@ pub enum Uop {
     /// ST(dst) = ST(src), or with no `dst` push ST(src): all a register
     /// holds.
     FCopy { dst: Option<u8>, src: u8 },
-    /// Exchange ST(0) and ST(i), and clear C1.
-    FXch { i: u8 },
+    /// Exchange ST(0) and ST(i), and clear C1; with `fast`, only their
+    /// doubles, which leaves both stale (fast mode's FXCH).
+    FXch { i: u8, fast: bool },
     /// x = the single or the signed dword in t.
     FFromT { x: X, t: T, kind: FKind },
     /// x = the double at handle m, which is RAM's (`BailUnlessRam`); with
@@ -288,6 +289,8 @@ pub enum Uop {
     FToInt { t: T, x: X, size: u8 },
     /// a *= b.
     FMul { a: X, b: X },
+    /// a += b, or -= with `sub` (fast mode's `arithmetic::sum`).
+    FAdd { a: X, b: X, sub: bool },
     /// ST(i) = num / den, or with a divisor of 0 the real indefinite, and
     /// ZE set with `ze` (`fpu::arithmetic::divided_by_zero`).
     FDiv { i: u8, num: X, den: X, ze: bool },

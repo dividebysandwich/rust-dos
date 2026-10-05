@@ -22,7 +22,19 @@ const DF: u32 = 0x0400;
 /// `real`: the block runs in real mode, where far transfers are translated.
 /// With `segments`, the code generator has the loads of data segment
 /// registers in protected mode too (in real mode it always has them).
-pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, segments: bool, fpu: bool, real: bool) -> Option<Vec<Uop>> {
+/// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
+/// (`Cpu::fpu_fast`) if set.
+#[allow(clippy::too_many_arguments)]
+pub fn translate(
+    instr: &Instruction,
+    next: u32,
+    stack32: bool,
+    system: bool,
+    segments: bool,
+    fpu: bool,
+    fast_fpu: bool,
+    real: bool,
+) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
     let ok = match instr.mnemonic() {
@@ -112,7 +124,7 @@ pub fn translate(instr: &Instruction, next: u32, stack32: bool, system: bool, se
         Jcxz | Jecxz => jcxz(instr, next, &mut u),
         Call => call(instr, next, stack32, &mut u),
         Ret => ret(instr, stack32, &mut u),
-        _ => fpu && super::fpu::translate(instr, &mut u),
+        _ => fpu && super::fpu::translate(instr, fast_fpu, &mut u),
     };
     ok.then_some(u)
 }

@@ -859,6 +859,7 @@ jit_fn! {
 fn fpu_helper<R: Default>(cpu: *mut Cpu, ctx: *mut JitCtx, f: impl FnOnce(&mut Cpu) -> R) -> R {
     // SAFETY: as in `jit_fallback`.
     let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
+    ctx.calls.fpu += 1;
     match catch_unwind(AssertUnwindSafe(|| f(cpu))) {
         Ok(value) => value,
         Err(payload) => {

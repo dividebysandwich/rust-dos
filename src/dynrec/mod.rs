@@ -77,6 +77,8 @@ pub struct Calls {
     pub load_seg: u64,
     /// `jit_fetch`.
     pub fetch: u64,
+    /// The FPU handlers' code (`helpers::fpu_helper`).
+    pub fpu: u64,
 }
 
 /// Counts for the statistics.
@@ -605,9 +607,10 @@ mod engine {
             let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
             let stack32 = key.mode & 4 != 0;
             let real = key.mode & ENV_REAL != 0;
+            let fast_fpu = cpu.fpu_fast;
             // The block goes on after a conditional jump its code takes.
             let side = |instr: &iced_x86::Instruction| {
-                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, real).is_some()
+                super::translate::translate(instr, instr.next_ip32(), stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real).is_some()
             };
             let max = if single { 1 } else { MAX_BLOCK };
             let data = BlockData::build(at, cpu.bus.ram(), &cpu.bus.page_gen, max, pokes, backend::TAIL, side)?;
@@ -615,7 +618,7 @@ mod engine {
             let mut items: Vec<_> = (0..data.count())
                 .map(|ix| {
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
-                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, real)
+                    super::translate::translate(&data.instrs[ix], next, stack32, backend::SYSTEM, backend::SEGMENTS, backend::FPU, fast_fpu, real)
                 })
                 .collect();
             // Instructions whose only watched bytes are their immediate (a

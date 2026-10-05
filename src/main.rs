@@ -2071,6 +2071,7 @@ impl Host for MainHost<'_, '_> {
         if new.core != old.core {
             self.cpu.core = new.core;
         }
+        self.cpu.set_fpu_fast(new.fpu_fast);
         self.cpu.bus.observe.enabled = new.idle_skip;
         self.cpu.bus.idle_hint = new.idle_hint;
         // Programs look for the host as they start.

@@ -1,7 +1,8 @@
 //! FPU instructions as operations: the forms programs run all the time
 //! (Quake's inner loops are little else), on the registers' doubles
 //! (`f80::FpuRegs`) as their handlers have them. Sums and differences,
-//! which the handlers compute on the 80 bits, call the handlers' own code.
+//! which the handlers compute on the 80 bits, call the handlers' own code,
+//! except in fast mode (`Cpu::fpu_fast`), where they are the doubles' too.
 //! Every instruction starts with a `FpuGuard`, which leaves the rare cases
 //! (no coprocessor, an empty register) to the handler.
 
@@ -23,9 +24,32 @@ fn st_pair(instr: &Instruction) -> Option<(u8, u8)> {
     Some((st(instr, 0)?, st(instr, 1)?))
 }
 
+/// ST(dst) = ST(a) + ST(b), or - with `sub`, on the doubles (fast mode's
+/// `arithmetic::addsub_st`).
+fn fast_addsub_st(u: &mut Vec<Uop>, dst: u8, a: u8, b: u8, sub: bool) {
+    u.push(Uop::FpuGuard { valid: 1 << a | 1 << b });
+    u.push(Uop::FGet { x: X0, i: a });
+    u.push(Uop::FGet { x: X1, i: b });
+    u.push(Uop::FAdd { a: X0, b: X1, sub });
+    u.push(Uop::FSet { i: dst, x: X0, canon: true });
+}
+
+/// ST(0) and the value in X0 as `kind` says, on the doubles (fast mode's
+/// `arithmetic::addsub_value`).
+fn fast_addsub_value(u: &mut Vec<Uop>, kind: u32) {
+    u.push(Uop::FGet { x: X1, i: 0 });
+    let (a, b, sub) = match kind {
+        ADD_VALUE => (X1, X0, false),
+        SUB_VALUE => (X1, X0, true),
+        _ => (X0, X1, true),
+    };
+    u.push(Uop::FAdd { a, b, sub });
+    u.push(Uop::FSet { i: 0, x: a, canon: true });
+}
+
 /// The operations of FPU instruction `instr`, or false if its handler
-/// runs it.
-pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+/// runs it. `fast`: for fast mode's arithmetic (`Cpu::fpu_fast`).
+pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
     use Code::*;
     let guard = |u: &mut Vec<Uop>, valid: u8| u.push(Uop::FpuGuard { valid });
     // A single in memory, into X0.
@@ -139,11 +163,15 @@ pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
                 Fsub_m64fp => SUB_VALUE,
                 _ => SUBR_VALUE,
             };
-            guard(u, 0);
-            if !double(u, false) {
+            guard(u, fast as u8);
+            if !double(u, fast) {
                 return false;
             }
-            u.push(Uop::FAddValue { kind, x: X0 });
+            if fast {
+                fast_addsub_value(u, kind);
+            } else {
+                u.push(Uop::FAddValue { kind, x: X0 });
+            }
         }
         Fcom_m64fp | Fcomp_m64fp => {
             guard(u, 1);
@@ -172,11 +200,15 @@ pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
                 Fisub_m16int | Fisub_m32int => SUB_VALUE,
                 _ => SUBR_VALUE,
             };
-            guard(u, 0);
+            guard(u, fast as u8);
             if !int(u) {
                 return false;
             }
-            u.push(Uop::FAddValue { kind, x: X0 });
+            if fast {
+                fast_addsub_value(u, kind);
+            } else {
+                u.push(Uop::FAddValue { kind, x: X0 });
+            }
         }
         Fld_m32fp => {
             guard(u, 0);
@@ -254,7 +286,7 @@ pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
                 guard(u, 0);
             } else {
                 guard(u, 1 | 1 << i);
-                u.push(Uop::FXch { i });
+                u.push(Uop::FXch { i, fast });
             }
         }
         Fmul_m32fp => {
@@ -311,28 +343,46 @@ pub fn translate(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
                 Fsub_m32fp => SUB_VALUE,
                 _ => SUBR_VALUE,
             };
-            guard(u, 0);
+            guard(u, fast as u8);
             if !single(u) {
                 return false;
             }
-            u.push(Uop::FAddValue { kind, x: X0 });
+            if fast {
+                fast_addsub_value(u, kind);
+            } else {
+                u.push(Uop::FAddValue { kind, x: X0 });
+            }
         }
         Fadd_st0_sti | Fadd_sti_st0 | Fsub_st0_sti | Fsub_sti_st0 => {
             let Some((dst, src)) = st_pair(instr) else { return false };
-            guard(u, 0);
-            u.push(Uop::FAddSt { dst, a: dst, b: src, sub: !matches!(instr.code(), Fadd_st0_sti | Fadd_sti_st0) });
+            let sub = !matches!(instr.code(), Fadd_st0_sti | Fadd_sti_st0);
+            if fast {
+                fast_addsub_st(u, dst, dst, src, sub);
+            } else {
+                guard(u, 0);
+                u.push(Uop::FAddSt { dst, a: dst, b: src, sub });
+            }
         }
         Fsubr_st0_sti | Fsubr_sti_st0 => {
             let Some((dst, src)) = st_pair(instr) else { return false };
-            guard(u, 0);
-            u.push(Uop::FAddSt { dst, a: src, b: dst, sub: true });
+            if fast {
+                fast_addsub_st(u, dst, src, dst, true);
+            } else {
+                guard(u, 0);
+                u.push(Uop::FAddSt { dst, a: src, b: dst, sub: true });
+            }
         }
         Faddp_sti_st0 | Fsubp_sti_st0 | Fsubrp_sti_st0 => {
             // (FADDP reads its register as FSUBP's and FSUBRP's handlers do.)
             let i = get_pop_dst_index(instr) as u8;
-            guard(u, 0);
             let (a, b) = if instr.code() == Fsubrp_sti_st0 { (0, i) } else { (i, 0) };
-            u.push(Uop::FAddSt { dst: i, a, b, sub: instr.code() != Faddp_sti_st0 });
+            let sub = instr.code() != Faddp_sti_st0;
+            if fast {
+                fast_addsub_st(u, i, a, b, sub);
+            } else {
+                guard(u, 0);
+                u.push(Uop::FAddSt { dst: i, a, b, sub });
+            }
             u.push(Uop::FPop { n: 1 });
         }
         Fcom_m32fp | Fcomp_m32fp => {

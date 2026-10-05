@@ -138,6 +138,14 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   recompiler needs an x86-64 or ARM64 host; on others and in the browser
   the interpreter runs everything. `--core` overrides it. See
   [docs/dynrec.md](docs/dynrec.md).
+* `fpu` is how the FPU adds and subtracts: `exact` (the default) on 80
+  bits, as a real 387 does, or `fast` on the host's 64-bit doubles, as
+  it multiplies and divides anyway. `fast` saves host CPU in programs that
+  compute a lot with the FPU (Quake), on both cores, but isn't exact:
+  sums can differ from a real machine's in the last bits, they are always
+  rounded to nearest whatever the control word says, and FXCH keeps only
+  the doubles of the registers it exchanges (a value loaded as 80 bits
+  loses its last bits there). Saved states load in either mode.
 * `machine` is the display adapter programs find when they look for
   one, and so the graphics they choose: `svga` (the default, a VGA with
   VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,

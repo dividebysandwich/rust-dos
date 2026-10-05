@@ -378,7 +378,7 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, Core, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, DosHigh, Dpmi,
+                Cycles, Core, Fpu, Cpu, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseAutocapture, MouseCaptureMessages, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory,
@@ -496,6 +496,8 @@ enum Item {
     Cycles,
     /// What runs the instructions: interpreter or dynamic recompiler.
     Core,
+    /// Exact or fast FPU arithmetic.
+    Fpu,
     Cpu,
     /// The display adapter.
     Machine,
@@ -791,6 +793,7 @@ impl Item {
             CompositeEra => "  CGA revision",
             Cycles => "CPU speed (cycles)",
             Core => "CPU core",
+            Fpu => "FPU arithmetic",
             Cpu => "Processor",
             Machine => "Video card",
             Memsize => "Memory",
@@ -956,7 +959,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | Core | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | VoodooRenderer | VoodooScale => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
@@ -1015,6 +1018,7 @@ impl Item {
                 CoreMode::Normal => "normal (interpreter)",
             }
             .to_string(),
+            Fpu => if s.fpu_fast { "fast (not exact)" } else { "exact" }.to_string(),
             Cpu => s.cpu.describe().to_string(),
             Machine => s.machine.describe().to_string(),
             Memsize => memsize_bar(s.memsize, s.cpu),
@@ -1207,6 +1211,7 @@ impl Item {
             Composite => each(s, crate::video::composite::CompositeMode::ALL, |s, mode| s.composite.mode = mode),
             CompositeEra => each(s, crate::video::composite::CompositeEra::ALL, |s, era| s.composite.era = era),
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
+            Fpu => on_off(|s, on| s.fpu_fast = on),
             Cpu => each(s, [CpuModel::I386, CpuModel::I486, CpuModel::Pentium, CpuModel::PentiumMmx], |s, cpu| {
                 s.cpu = cpu;
                 s.memsize = s.memsize.min(cpu.max_memsize());

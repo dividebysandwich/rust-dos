@@ -1975,7 +1975,7 @@ impl Gen<'_> {
                 }
                 self.fpu_move(1, 3);
             }
-            Uop::FXch { i } => {
+            Uop::FXch { i, fast } => {
                 const C1: u32 = 0x200;
                 // W1 ST(0)'s physical number, W3 ST(i)'s: the registers
                 // swap through the scratch ones.
@@ -1990,23 +1990,32 @@ impl Gen<'_> {
                     ; str d16, [x2, x3, lsl 3]
                 );
                 self.cpu_addr(2, layout::fpu::STALE);
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; ldrb w4, [x2, x1]
-                    ; ldrb w5, [x2, x3]
-                    ; strb w5, [x2, x1]
-                    ; strb w4, [x2, x3]
-                );
-                self.cpu_addr(2, layout::fpu::X80);
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; lsl w4, w1, 4
-                    ; lsl w5, w3, 4
-                    ; ldr q16, [x2, x4]
-                    ; ldr q17, [x2, x5]
-                    ; str q17, [x2, x4]
-                    ; str q16, [x2, x5]
-                );
+                if fast {
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; movz w4, 1
+                        ; strb w4, [x2, x1]
+                        ; strb w4, [x2, x3]
+                    );
+                } else {
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; ldrb w4, [x2, x1]
+                        ; ldrb w5, [x2, x3]
+                        ; strb w5, [x2, x1]
+                        ; strb w4, [x2, x3]
+                    );
+                    self.cpu_addr(2, layout::fpu::X80);
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; lsl w4, w1, 4
+                        ; lsl w5, w3, 4
+                        ; ldr q16, [x2, x4]
+                        ; ldr q17, [x2, x5]
+                        ; str q17, [x2, x4]
+                        ; str q16, [x2, x5]
+                    );
+                }
                 self.cpu_addr(2, layout::fpu::FLAGS);
                 dynasm!(self.ops
                     ; .arch aarch64
@@ -2056,6 +2065,8 @@ impl Gen<'_> {
             }
             Uop::FToInt { t, x, size } => self.fpu_to_int(t, x, size),
             Uop::FMul { a, b } => dynasm!(self.ops ; .arch aarch64 ; fmul D(d(a)), D(d(a)), D(d(b))),
+            Uop::FAdd { a, b, sub: false } => dynasm!(self.ops ; .arch aarch64 ; fadd D(d(a)), D(d(a)), D(d(b))),
+            Uop::FAdd { a, b, sub: true } => dynasm!(self.ops ; .arch aarch64 ; fsub D(d(a)), D(d(a)), D(d(b))),
             Uop::FDiv { i, num, den, ze } => {
                 // A division by 0 (not a NaN, which compares unordered) is
                 // the handler's.
