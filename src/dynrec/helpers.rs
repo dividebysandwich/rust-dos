@@ -683,7 +683,7 @@ fn guard<R>(ctx: &mut JitCtx, fallback: R, f: impl FnOnce() -> R) -> R {
 /// How a MemRef's operand is described to `jit_memref`: the segment, the
 /// size, whether it is written, and the slot.
 pub fn memref_desc(seg: Seg, size: u8, write: bool, slot: u8) -> u32 {
-    debug_assert!(size <= 8);
+    debug_assert!(size < 16);
     seg as u32 | (size as u32) << 4 | (write as u32) << 8 | (slot as u32) << 9
 }
 
