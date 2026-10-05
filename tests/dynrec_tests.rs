@@ -2796,6 +2796,78 @@ fn fpu_integer_operands_run_as_their_handlers() {
     }
 }
 
+/// 80-bit values for the sums: (sign << 15 | exponent, mantissa).
+const EXTENDED: [(u16, u64); 14] = [
+    (0x3FFF, 0x8000_0000_0000_0001), // 1 and a bit a double hasn't
+    (0x3FFF, 0xFFFF_FFFF_FFFF_FFFF), // just under 2
+    (0xBFFF, 0x8000_0000_0000_0000), // -1
+    (0x4040, 0x8000_0000_0000_0000), // 2^65: anything small is gone
+    (0x3FBF, 0xC000_0000_0000_0000), // 2^-64 * 1.5
+    (0x0000, 0x0000_0000_0000_0000), // 0
+    (0x8000, 0x0000_0000_0000_0000), // -0
+    (0x0000, 0x0000_0000_1234_5678), // a denormal
+    (0x7FFE, 0xFFFF_FFFF_FFFF_FFFF), // the largest
+    (0x43FE, 0x8000_0000_0000_0000), // past a double's range
+    (0x3C00, 0x8000_0000_0000_0000), // below a double's normals
+    (0x7FFF, 0x8000_0000_0000_0000), // infinity
+    (0x3FFF, 0x4000_0000_0000_0000), // an unnormal
+    (0xC005, 0xA5A5_A5A5_A5A5_A5A5), // -41.29...
+];
+
+#[test]
+fn fpu_sums_of_80_bit_values_run_as_their_handlers() {
+    // Every pair of `EXTENDED` added and subtracted both ways, in registers
+    // and with a double, the results stored as they are.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = EXTENDED.len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..n * n {
+            let at = input + 32 * k;
+            for (o, (se, man)) in [(0, EXTENDED[(k % n) as usize]), (16, EXTENDED[(k / n) as usize])] {
+                rig.write32(at + o, man as u32);
+                rig.write32(at + o + 4, (man >> 32) as u32);
+                rig.write32(at + o + 8, se as u32);
+            }
+        }
+        rig.write32(DATA + 0x7F00, 0x0000_0001);
+        rig.write32(DATA + 0x7F04, 0x3FF0_0000); // 1 + 2^-52
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, n * n)?;
+            a.set_label(&mut again)?;
+            a.fld(tword_ptr(esi + 16))?;
+            a.fld(tword_ptr(esi))?;
+            a.fld(st0)?;
+            a.fadd_2(st0, st2)?;
+            a.fstp(tword_ptr(edi))?;
+            a.fld(st0)?;
+            a.fsub_2(st0, st2)?;
+            a.fstp(tword_ptr(edi + 10))?;
+            a.fld(st0)?;
+            a.fsubr_2(st0, st2)?;
+            a.fstp(tword_ptr(edi + 20))?;
+            a.fld(st1)?;
+            a.fsub_2(st1, st0)?;
+            a.fstp(st0)?;
+            a.fld(st0)?;
+            a.fstp(tword_ptr(edi + 30))?;
+            a.fadd(qword_ptr(DATA + 0x7F00))?;
+            a.fsubr(qword_ptr(DATA + 0x7F00))?;
+            a.faddp(st1, st0)?;
+            a.fstp(tword_ptr(edi + 40))?;
+            a.add(esi, 32)?;
+            a.add(edi, 50)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+}
+
 const DOUBLES: [u64; 12] = [
     0x3FF8_0000_0000_0000, // 1.5
     0xC002_0000_0000_0000, // -2.25
