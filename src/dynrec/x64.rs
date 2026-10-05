@@ -2469,7 +2469,23 @@ impl Gen<'_> {
             let end = v as u64 + last as u64;
             (end < VIDEO as u64 || v >= EXTENDED) && v <= self.env.ram_len.wrapping_sub(size as u32) && size as u32 <= self.env.ram_len
         };
-        if !(addr == t_ && known.is_some_and(in_ram)) {
+        let extended = self.env.ram_len.checked_sub(EXTENDED + size as u32);
+        if addr == t_ && known.is_some_and(in_ram) {
+        } else if let (Some(limit), true) = (extended, bits & 1 != 0) {
+            // 32-bit code's data is mostly in extended memory: looked at
+            // first (the address's last byte below the video memory, in 64
+            // bits, the other way into RAM).
+            dynasm!(self.ops
+                ; .arch x64
+                ; lea ecx, [Rq(addr) - EXTENDED as i32]
+                ; cmp ecx, limit as i32
+                ; jbe >in_ram
+                ; lea rcx, [Rq(addr) + last]
+                ; cmp rcx, VIDEO as i32
+                ; jae =>dev
+                ; in_ram:
+            );
+        } else {
             dynasm!(self.ops
                 ; .arch x64
                 ; lea ecx, [Rq(addr) + last - VIDEO as i32]
