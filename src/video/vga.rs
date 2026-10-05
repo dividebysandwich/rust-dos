@@ -549,9 +549,30 @@ impl VgaCard {
             let mask = size - 1;
             let planes = &mut self.vram_graphics;
             if chain4 {
-                for i in 0..len {
+                // Whole groups of four (from a multiple of 4) at one index
+                // of each plane, the bytes before and after one by one.
+                let one = |planes: &mut [u8], i: usize| {
                     let at = offset + i;
                     planes[(at & 3) * size + ((at >> 2) & mask)] = byte(i);
+                };
+                let head = ((4 - offset % 4) % 4).min(len);
+                for i in 0..head {
+                    one(planes, i);
+                }
+                let groups = (len - head) / 4;
+                let first = (offset + head) >> 2;
+                let (p0, rest) = planes.split_at_mut(size);
+                let (p1, rest) = rest.split_at_mut(size);
+                let (p2, p3) = rest.split_at_mut(size);
+                for g in 0..groups {
+                    let (idx, i) = ((first + g) & mask, head + 4 * g);
+                    p0[idx] = byte(i);
+                    p1[idx] = byte(i + 1);
+                    p2[idx] = byte(i + 2);
+                    p3[idx] = byte(i + 3);
+                }
+                for i in head + 4 * groups..len {
+                    one(planes, i);
                 }
             } else {
                 for i in 0..len {
@@ -1254,15 +1275,17 @@ mod tests {
                     v.attribute_regs[0x10] = 0x01;
                     v
                 };
-                let (mut a, mut b) = (card(), card());
-                assert!(a.plain_writes());
-                let data: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
-                for (i, &v) in data.iter().enumerate() {
-                    a.write_graphics(0x1234 + i, v);
+                for (start, n) in [(0x1234usize, 3000u32), (0x1235, 3001), (0x1237, 2), (0xFFFE, 9)] {
+                    let (mut a, mut b) = (card(), card());
+                    assert!(a.plain_writes());
+                    let data: Vec<u8> = (0..n).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+                    for (i, &v) in data.iter().enumerate() {
+                        a.write_graphics(start + i, v);
+                    }
+                    b.write_plain_run(start, data.len(), |i| data[i]);
+                    assert!(a.vram_graphics == b.vram_graphics && a.vram_text == b.vram_text, "mode {:02X} mask {:X} at {:X}", mem_mode, map_mask, start);
+                    assert_eq!((a.dirty, a.dirty_y_min, a.dirty_y_max), (b.dirty, b.dirty_y_min, b.dirty_y_max));
                 }
-                b.write_plain_run(0x1234, data.len(), |i| data[i]);
-                assert!(a.vram_graphics == b.vram_graphics && a.vram_text == b.vram_text, "mode {:02X} mask {:X}", mem_mode, map_mask);
-                assert_eq!((a.dirty, a.dirty_y_min, a.dirty_y_max), (b.dirty, b.dirty_y_min, b.dirty_y_max));
             }
         }
     }
