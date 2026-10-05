@@ -557,6 +557,58 @@ fn shifts_by_cl_and_of_memory_are_the_interpreters() {
 }
 
 #[test]
+fn shifts_and_rotates_by_1_set_the_interpreters_flags() {
+    // By 1 the host's OF is used: every shift and rotate of every width,
+    // with all flags read (PUSHFD), then a 32-bit shift through a carry
+    // chain as 16-bit code does it, its flags read by the next block.
+    let (mut a, mut b) = twins(|rig| {
+        with_timer(rig, |a| {
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x9E37_79B1u32 as i32)?;
+            a.mov(ebx, eax)?;
+            a.ror(ebx, 9)?;
+            a.mov(edx, ebx)?;
+            a.not(edx)?;
+            macro_rules! all {
+                ($m:ident) => {
+                    a.$m(eax, 1)?;
+                    a.pushfd()?;
+                    a.pop(esi)?;
+                    a.xor(ebp, esi)?;
+                    a.$m(bx, 1)?;
+                    a.pushfd()?;
+                    a.pop(esi)?;
+                    a.add(ebp, esi)?;
+                    a.$m(dh, 1)?;
+                    a.pushfd()?;
+                    a.pop(esi)?;
+                    a.xor(ebp, esi)?;
+                    a.$m(dl, 1)?;
+                    a.adc(ebp, eax)?;
+                    a.$m(byte_ptr(DATA + 9), 1)?;
+                    a.pushfd()?;
+                    a.pop(esi)?;
+                    a.sub(ebp, esi)?;
+                };
+            }
+            all!(shl);
+            all!(shr);
+            all!(rol);
+            all!(ror);
+            all!(rcl);
+            all!(rcr);
+            a.shl(ax, 1)?;
+            a.rcl(dx, 1)?;
+            a.rcl(bx, 1)?;
+            a.adc(ebp, edx)?;
+            a.add(ebp, ebx)?;
+            a.add(ebp, eax)
+        });
+    });
+    run_both(&mut a, &mut b);
+}
+
+#[test]
 fn a_shift_by_a_cl_of_0_still_checks_its_operand_for_writing() {
     let (mut a, mut b) = twins(|rig| {
         rig.record(GP);

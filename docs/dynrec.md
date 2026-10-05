@@ -360,7 +360,9 @@ first instruction in a block that changes them:
   live (PUSHF takes several times as long, and only hosts without LAHF in
   64-bit mode use it). They are fixed up where the interpreter defines
   what the host leaves undefined: AF of the logic operations, OF of
-  shifts (worked out from the result), and the 386's AF of SHL and SHR.
+  shifts by more than 1 (worked out from the result; by 1 the host's OF
+  is defined and the guest's, and rotates by 1 take only SETC and SETO),
+  and the 386's AF of SHL and SHR.
   The multiplications' CF and OF are both the host's OF. INC and DEC get
   the guest's CF into the host's first.
 - **On ARM64**, which has neither a parity nor an auxiliary carry flag,

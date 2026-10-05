@@ -323,6 +323,8 @@ const CACHE_HOSTS: [u8; 4] = [11, 6, 7, 15];
 const RAX: u8 = 0;
 const RCX: u8 = 1;
 const RDX: u8 = 2;
+/// The guest's arithmetic flags within a block (`Gen::dirty`).
+const RBP: u8 = 5;
 
 /// The guest registers a block keeps in host registers: the ones its
 /// operations use most. An instruction loads those it uses from the CPU as
@@ -2788,14 +2790,14 @@ impl Gen<'_> {
         if !has_lahf() {
             dynasm!(self.ops ; .arch x64 ; pushfq ; pop rbp);
         } else if self.wanted(OF) {
+            // AL = OF, moved to bit 11 under LAHF's byte.
             dynasm!(self.ops
                 ; .arch x64
                 ; lahf
-                ; seto cl
-                ; movzx ebp, ah
-                ; movzx ecx, cl
-                ; shl ecx, 11
-                ; or ebp, ecx
+                ; seto al
+                ; shl al, 3
+                ; ror ax, 8
+                ; movzx ebp, ax
             );
         } else {
             dynasm!(self.ops ; .arch x64 ; lahf ; movzx ebp, ah);
@@ -2921,6 +2923,10 @@ impl Gen<'_> {
         if !self.wanted(super::flags::shift_flags(op)) {
             return;
         }
+        if count == Some(1) && op != ShiftOp::Sar {
+            self.shift_by_1_flags(op);
+            return;
+        }
         self.host_flags();
         let top = size as i8 * 8 - 1;
         match op {
@@ -3004,6 +3010,41 @@ impl Gen<'_> {
                     ; or eax, ecx
                 );
                 self.merge(CF | OF, CF | OF);
+            }
+        }
+    }
+
+    /// The flags of a shift or rotate by 1 (not SAR's, which `shift` takes
+    /// as they are), where the host's OF is defined and the guest's: the
+    /// result's top bit ^ CF to the left, the operand's top bit for SHR,
+    /// and the result's top two bits differing for ROR and RCR. AF is set
+    /// for SHL and SHR (`alu_shift`). RAX is changed.
+    fn shift_by_1_flags(&mut self, op: ShiftOp) {
+        if matches!(op, ShiftOp::Shl | ShiftOp::Shr) {
+            if !has_lahf() {
+                dynasm!(self.ops ; .arch x64 ; pushfq ; pop rax);
+            } else if self.wanted(OF) {
+                // AL = OF, moved to bit 11 under LAHF's byte.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; lahf
+                    ; seto al
+                    ; shl al, 3
+                    ; ror ax, 8
+                );
+            } else {
+                dynasm!(self.ops ; .arch x64 ; lahf ; movzx eax, ah);
+            }
+            dynasm!(self.ops ; .arch x64 ; or eax, AF as i32);
+            self.merge(ARITH, ARITH);
+        } else {
+            // Rotates set only CF and OF.
+            dynasm!(self.ops ; .arch x64 ; setc al);
+            if self.wanted(OF) {
+                dynasm!(self.ops ; .arch x64 ; seto ah ; shl ah, 3);
+                self.merge(CF | OF, CF | OF);
+            } else {
+                self.merge(CF, CF);
             }
         }
     }
@@ -3596,6 +3637,17 @@ impl Gen<'_> {
         }
     }
 
+    /// The host register with the guest's flags: EBP (`ebp`), or EAX with
+    /// them from the CPU.
+    fn flags_reg(&mut self, ebp: bool) -> u8 {
+        if ebp {
+            RBP
+        } else {
+            self.load_flags_eax(false);
+            RAX
+        }
+    }
+
     /// EAX = the guest's flags, from EBP (`ebp`) or the CPU.
     fn load_flags_eax(&mut self, ebp: bool) {
         if ebp {
@@ -3631,27 +3683,27 @@ impl Gen<'_> {
             }
             C::l | C::ge => {
                 // SF != OF: OF moved down to SF's bit.
-                self.load_flags_eax(ebp);
+                let f = self.flags_reg(ebp);
                 dynasm!(self.ops
                     ; .arch x64
-                    ; mov ecx, eax
+                    ; mov ecx, Rd(f)
                     ; shr ecx, 4
-                    ; xor ecx, eax
+                    ; xor ecx, Rd(f)
                     ; test ecx, SF as i32
                 );
                 cc == C::l
             }
             _ => {
-                // LE: ZF or SF != OF; G: neither.
-                self.load_flags_eax(ebp);
+                // LE: ZF or SF != OF; G: neither. OF alone moved down to
+                // SF's bit, then SF and ZF in.
+                let f = self.flags_reg(ebp);
                 dynasm!(self.ops
                     ; .arch x64
-                    ; mov ecx, eax
+                    ; mov ecx, Rd(f)
                     ; shr ecx, 4
-                    ; xor ecx, eax
                     ; and ecx, SF as i32
-                    ; and eax, ZF as i32
-                    ; or eax, ecx
+                    ; xor ecx, Rd(f)
+                    ; test ecx, (SF | ZF) as i32
                 );
                 cc == C::le
             }
