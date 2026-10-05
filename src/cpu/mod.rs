@@ -270,12 +270,31 @@ bitflags! {
     }
 }
 
+/// In declared order (`repr(C)`), so that the fields translated code uses
+/// most come first, together: the AArch64 recompiler reaches them with one
+/// base register and a 12-bit offset (`dynrec::a64`), which the compiler's
+/// own order of the fields didn't keep on every target.
+#[repr(C)]
 pub struct Cpu {
     /// EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI (see `regs.rs` accessors).
     gpr: [u32; 8],
     eip: u32,
+    flags: CpuFlags,
     /// ES, CS, SS, DS, FS, GS.
     seg: [SegCache; 6],
+    /// Current privilege level: 0 in real mode, 3 in virtual-8086 mode,
+    /// in protected mode that of the code segment.
+    pub cpl: u8,
+    /// Instructions (including emulator service traps) run since start, not
+    /// counting interrupt entries or time skipped while halted.
+    pub executed: u64,
+    // FPU State
+    fpu_stack: crate::f80::FpuRegs,
+    pub fpu_top: usize,
+    fpu_flags: FpuFlags,
+    pub fpu_control: u16,
+    pub fpu_tags: [u8; 8],
+
     pub model: CpuModel,
     pub cr0: u32,
     pub cr2: u32,
@@ -297,14 +316,10 @@ pub struct Cpu {
     /// descriptor cache.
     pub ldtr: SegCache,
     pub tr: SegCache,
-    /// Current privilege level: 0 in real mode, 3 in virtual-8086 mode,
-    /// in protected mode that of the code segment.
-    pub cpl: u8,
     /// Page translations, see `paging.rs`.
     pub tlb: paging::Tlb,
 
     pub bus: Bus,
-    flags: CpuFlags,
     pub state: CpuState,
     pub pending_command: Option<String>,
     /// The lines typed at the prompt, for Up and Down. They stay while
@@ -379,13 +394,6 @@ pub struct Cpu {
     /// End of an INT 15h AH=86h wait in progress, in PIT ticks.
     pub bios_wait_until: Option<u64>,
 
-    // FPU State
-    fpu_stack: crate::f80::FpuRegs,
-    pub fpu_top: usize,
-    fpu_flags: FpuFlags,
-    pub fpu_control: u16,
-    pub fpu_tags: [u8; 8],
-
     pub process_stack: Vec<ProcessContext>,
     /// How many programs have been loaded, for telling whether a game's
     /// commands started one (`games::ActiveGame::done`).
@@ -395,9 +403,6 @@ pub struct Cpu {
     pub irq_shadow: bool,
     /// Decoded instructions, see `instr_cache.rs`.
     pub decode_cache: InstrCache,
-    /// Instructions (including emulator service traps) run since start, not
-    /// counting interrupt entries or time skipped while halted.
-    pub executed: u64,
     /// Vectors that software interrupts found at 0000:0000, logged once each.
     null_interrupts: [u64; 4],
     /// Switches between real and protected mode (CR0.PE changes).

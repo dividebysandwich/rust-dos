@@ -86,3 +86,8 @@ pub mod fpu {
 }
 
 const _: () = assert!(size_of::<CpuFlags>() == 4);
+// The fields translated code uses most lie within reach of a 12-bit offset
+// from the CPU (`Cpu` is `repr(C)` for it, see `dynrec::a64`), on every
+// target, so a field moved out of reach shows here too.
+const _: () = assert!(fpu::X80 + 128 < 4096 && fpu::TAGS < 4096 && EXECUTED < 4096 && CPL < 4096 && FLAGS < 4096);
+
