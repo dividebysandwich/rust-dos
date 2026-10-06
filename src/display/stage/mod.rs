@@ -150,7 +150,7 @@ impl Stage {
     /// neither the newest nor the headset's. False if it can't be.
     pub fn begin_screen(&mut self, gl: &glow::Context, size: Size) -> bool {
         #[cfg(xr)]
-        let in_use = self.headset.as_ref().and_then(|h| h.screen_in_use());
+        let in_use = self.headset.as_ref().and_then(|h| h.screen_in_use(gl));
         #[cfg(not(xr))]
         let in_use: Option<usize> = None;
         self.drawing = (0..self.screens.len()).find(|&i| Some(i) != self.latest && Some(i) != in_use).unwrap_or(0);

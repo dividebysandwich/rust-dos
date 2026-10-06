@@ -1,7 +1,10 @@
 //! The VR headset on a thread of its own, so that a long batch of the
 //! machine's (a recompile, a disk load) never makes the headset miss a
 //! frame. The thread has an OpenGL context of its own, sharing textures
-//! with the window's, and owns the OpenXR session: it waits for each of the
+//! with the window's, on a hidden window of its own (so that neither the
+//! context nor the device context OpenXR is given is the one the main
+//! thread swaps), and owns the OpenXR session from its start to its end:
+//! it waits for each of the
 //! headset's frames, reads the controllers, draws the eyes with the newest
 //! picture the main thread finished, and leaves the left eye's view for
 //! the window.
@@ -9,7 +12,10 @@
 //! Pictures go between the threads in rings of three textures: the drawing
 //! side draws into one that is neither the newest nor the one the other
 //! side reads, then publishes it with a fence the reading side waits for on
-//! the GPU before it reads.
+//! the GPU before it reads. Moving on to a newer one, the reading side
+//! leaves a fence after its reads of the old one, which the drawing side
+//! waits for on the GPU before it draws again. Neither side deletes or
+//! reallocates a texture the other could be using.
 
 use super::controls::{Controllers, VrInput};
 use super::render::{Format, Gpu};
@@ -54,11 +60,14 @@ pub struct Ring<F, M> {
     /// taken it, and what goes with it.
     latest: Option<(usize, Option<F>, M)>,
     in_use: Option<usize>,
+    /// The reader's fence after its reads of the texture it read before,
+    /// while the writer hasn't waited for it.
+    released: Option<F>,
 }
 
 impl<F, M> Default for Ring<F, M> {
     fn default() -> Self {
-        Ring { latest: None, in_use: None }
+        Ring { latest: None, in_use: None, released: None }
     }
 }
 
@@ -76,11 +85,26 @@ impl<F, M: Copy> Ring<F, M> {
     }
 
     /// The newest, to read from now on: its index, its fence if it is new
-    /// to the reader, and what goes with it.
-    pub fn take(&mut self) -> Option<(usize, Option<F>, M)> {
-        let (index, fence, meta) = self.latest.as_mut()?;
+    /// to the reader, and what goes with it. Leaving another texture for
+    /// it, the reader's `release` makes a fence after its reads of that
+    /// one, for the writer (`released`); then the fence that replaces is
+    /// returned too, to delete.
+    pub fn take(&mut self, release: impl FnOnce() -> Option<F>) -> (Option<(usize, Option<F>, M)>, Option<F>) {
+        let Some((index, fence, meta)) = self.latest.as_mut() else { return (None, None) };
+        let mut stale = None;
+        if self.in_use.is_some_and(|old| old != *index)
+            && let Some(fence) = release()
+        {
+            stale = self.released.replace(fence);
+        }
         self.in_use = Some(*index);
-        Some((*index, fence.take(), *meta))
+        (Some((*index, fence.take(), *meta)), stale)
+    }
+
+    /// The fence the writer waits for before it draws into a free texture
+    /// again, then deletes, if the reader left one since.
+    pub fn released(&mut self) -> Option<F> {
+        self.released.take()
     }
 
     pub fn in_use(&self) -> Option<usize> {
@@ -125,12 +149,12 @@ impl Shared {
     }
 }
 
-/// A pointer for the thread: the window or its context, which SDL makes
-/// current there.
+/// A pointer for the thread: its hidden window or its context, which SDL
+/// makes current there.
 struct Raw(*mut std::ffi::c_void);
 
 // SAFETY: SDL makes a context current on any one thread at a time; the
-// window outlives the thread (`Headset` is dropped first).
+// hidden window and the context outlive the thread (`Headset::drop`).
 unsafe impl Send for Raw {}
 
 /// The main thread's side of the headset's thread.
@@ -139,6 +163,9 @@ pub struct Headset {
     thread: Option<JoinHandle<()>>,
     /// The thread's context, deleted once the thread is over.
     context: Option<sdl2::video::GLContext>,
+    /// The hidden window the thread's context draws with, closed after
+    /// the context is deleted.
+    window: Option<sdl2::video::Window>,
     /// The main thread's framebuffers of the mirror's textures.
     mirror_framebuffers: Vec<glow::Framebuffer>,
 }
@@ -155,26 +182,51 @@ impl Headset {
         settings: &VrSettings,
     ) -> Result<Self, String> {
         let (controllers, quality, glow) = (settings.controllers, settings.quality, settings.screen_glow as f32 / 100.0);
-        let attr = window.subsystem().gl_attr();
-        attr.set_share_with_current_context(true);
-        let context = window.gl_create_context();
-        attr.set_share_with_current_context(false);
-        let context = context?;
+        // A window of its own, with the same pixel format as the main
+        // window's (the same attributes), never shown.
+        let video = window.subsystem();
+        let hidden = video.window("Rust-DOS headset", 64, 64).opengl().hidden().build().map_err(|e| e.to_string())?;
+        let attr = video.gl_attr();
         window.gl_make_current(main)?;
+        attr.set_share_with_current_context(true);
+        let context = hidden.gl_create_context();
+        attr.set_share_with_current_context(false);
+        // (Making it made it current here.)
+        window.gl_make_current(main)?;
+        let context = context?;
         let shared = Arc::new(Shared { state: Mutex::new(State { controllers, glow, ..State::default() }), stop: AtomicBool::new(false) });
         // SAFETY: the context outlives the thread (`Headset::drop`).
-        let (raw_window, raw_context) = (Raw(window.raw().cast()), Raw(unsafe { context.raw() }));
+        let (raw_window, raw_context) = (Raw(hidden.raw().cast()), Raw(unsafe { context.raw() }));
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
             .spawn(move || run(thread_shared, raw_window, raw_context, glsl, scene, screens, quality))
             .map_err(|e| e.to_string())?;
-        Ok(Headset { shared, thread: Some(thread), context: Some(context), mirror_framebuffers: Vec::new() })
+        Ok(Headset {
+            shared,
+            thread: Some(thread),
+            context: Some(context),
+            window: Some(hidden),
+            mirror_framebuffers: Vec::new(),
+        })
     }
 
-    /// The screen's texture the headset reads, not to be drawn into.
-    pub fn screen_in_use(&self) -> Option<usize> {
-        self.shared.lock().screen.in_use()
+    /// The screen's texture the headset reads, not to be drawn into; and,
+    /// before this returns, `gl` waits on the GPU until the headset's reads
+    /// of the ones it read before are done.
+    pub fn screen_in_use(&self, gl: &glow::Context) -> Option<usize> {
+        let (in_use, released) = {
+            let mut state = self.shared.lock();
+            (state.screen.in_use(), state.screen.released())
+        };
+        if let Some(Fence(fence)) = released {
+            // SAFETY: see `GlScreen`.
+            unsafe {
+                gl.wait_sync(fence, 0, glow::TIMEOUT_IGNORED);
+                gl.delete_sync(fence);
+            }
+        }
+        in_use
     }
 
     /// The screen's texture `index` is finished, by the commands sent so
@@ -235,7 +287,12 @@ impl Headset {
             if !state.running {
                 return None;
             }
-            (state.mirror.take(), state.mirror_textures.clone(), state.mirror_size)
+            let (taken, stale) = state.mirror.take(|| release(gl));
+            if let Some(Fence(stale)) = stale {
+                // SAFETY: see `GlScreen`.
+                unsafe { gl.delete_sync(stale) };
+            }
+            (taken, state.mirror_textures.clone(), state.mirror_size)
         };
         let (index, fence, view_projection) = taken?;
         // SAFETY: see `GlScreen`.
@@ -267,14 +324,28 @@ impl Headset {
     }
 }
 
+/// A fence after the commands `gl` sent so far, sent on so that the other
+/// thread's context can wait for it.
+fn release(gl: &glow::Context) -> Option<Fence> {
+    // SAFETY: see `GlScreen`.
+    unsafe {
+        let fence = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok()?;
+        gl.flush();
+        Some(Fence(fence))
+    }
+}
+
+/// The thread ends the session and lets go of its context itself, before
+/// the context and then its window go; all before the main window and its
+/// context, which `GlScreen` drops after the scene.
 impl Drop for Headset {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        // The thread let go of it.
         drop(self.context.take());
+        drop(self.window.take());
     }
 }
 
@@ -369,11 +440,24 @@ fn session(
             std::thread::sleep(std::time::Duration::from_millis(20));
             continue;
         }
-        let (taken, leds, mode, recenter, mirror_index, glow) = {
+        let (taken, leds, mode, recenter, mirror_index, mirror_released, glow) = {
             let mut state = shared.lock();
-            let taken = state.screen.take();
-            (taken, state.leds, state.controllers, std::mem::take(&mut state.recenter), state.mirror.free(), state.glow)
+            let (taken, stale) = state.screen.take(|| release(gl));
+            if let Some(Fence(stale)) = stale {
+                // SAFETY: see `GlScreen`.
+                unsafe { gl.delete_sync(stale) };
+            }
+            let (mirror_index, mirror_released) = (state.mirror.free(), state.mirror.released());
+            (taken, state.leds, state.controllers, std::mem::take(&mut state.recenter), mirror_index, mirror_released, state.glow)
         };
+        if let Some(Fence(fence)) = mirror_released {
+            // SAFETY: see `GlScreen`: the window's reads of the mirror's
+            // textures before are done before one is drawn again.
+            unsafe {
+                gl.wait_sync(fence, 0, glow::TIMEOUT_IGNORED);
+                gl.delete_sync(fence);
+            }
+        }
         gpu.set_glow(glow);
         if let Some((index, fence, ())) = taken {
             if let Some(Fence(fence)) = fence {
@@ -390,6 +474,7 @@ fn session(
             xr.recenter();
         }
         if let Err(e) = xr.begin() {
+            // (A failure the session can't go on from ends it at `poll`.)
             eprintln!("[VR] {}", e);
             continue;
         }
@@ -446,14 +531,25 @@ mod tests {
         assert_eq!(ring.free(), 1);
         // A newer one before the reader looked: the old fence goes.
         assert_eq!(ring.publish(1, 11, ()), Some(10));
-        // The reader takes the newest and its fence, once.
-        assert_eq!(ring.take(), Some((1, Some(11), ())));
-        assert_eq!(ring.take(), Some((1, None, ())));
+        // The reader takes the newest and its fence, once; reading nothing
+        // before, it releases nothing.
+        assert_eq!(ring.take(|| Some(90)), (Some((1, Some(11), ())), None));
+        assert_eq!(ring.take(|| panic!("the same texture")), (Some((1, None, ())), None));
+        assert_eq!(ring.released(), None);
         let next = ring.free();
         assert!(next != 1);
         assert_eq!(ring.publish(next, 12, ()), None);
         // Neither the newest nor the one being read.
         let free = ring.free();
         assert!(free != next && free != 1);
+        // Moving on, the reader leaves a fence for the writer.
+        assert_eq!(ring.take(|| Some(91)), (Some((next, Some(12), ())), None));
+        let after = ring.free();
+        assert_eq!(ring.publish(after, 13, ()), None);
+        // Moving on again before the writer waited: the newer fence covers
+        // the older, which goes.
+        assert_eq!(ring.take(|| Some(92)), (Some((after, Some(13), ())), Some(91)));
+        assert_eq!(ring.released(), Some(92));
+        assert_eq!(ring.released(), None);
     }
 }

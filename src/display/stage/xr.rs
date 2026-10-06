@@ -61,11 +61,20 @@ pub struct Xr {
     recenter: bool,
     events: xr::EventDataBuffer,
     description: String,
+    /// Why the session can't go on, after a call failed in a way that
+    /// ends it (`poll` says so).
+    failed: Option<String>,
 }
 
 /// An OpenXR error as text.
 fn err(what: &str) -> impl Fn(xr::sys::Result) -> String + '_ {
     move |e| format!("{}: {}", what, e)
+}
+
+/// Whether the session can't go on after a call failed with `e`: calling
+/// on into a runtime that failed or lost the session is what crashes.
+fn ends_session(e: xr::sys::Result) -> bool {
+    matches!(e, xr::sys::Result::ERROR_RUNTIME_FAILURE | xr::sys::Result::ERROR_SESSION_LOST | xr::sys::Result::ERROR_INSTANCE_LOST)
 }
 
 impl Xr {
@@ -194,6 +203,7 @@ impl Xr {
             recenter: false,
             events: xr::EventDataBuffer::new(),
             description,
+            failed: None,
         })
     }
 
@@ -205,6 +215,11 @@ impl Xr {
     /// session is over for good.
     pub fn poll(&mut self) -> (Vec<String>, bool) {
         let mut notes = Vec::new();
+        if let Some(why) = self.failed.take() {
+            self.running = false;
+            notes.push(format!("The headset failed ({}); the window shows the scene", why));
+            return (notes, true);
+        }
         let mut lost = false;
         loop {
             let event = match self.instance.poll_event(&mut self.events) {
@@ -267,7 +282,7 @@ impl Xr {
                 true
             }
             Err(e) => {
-                eprintln!("[VR] Waiting for the headset: {}", e);
+                self.fail("waiting for the headset", e);
                 false
             }
         }
@@ -278,10 +293,24 @@ impl Xr {
         self.recenter = true;
     }
 
+    /// Note a failure: what it is as text, and whether it ends the
+    /// session.
+    fn fail(&mut self, what: &str, e: xr::sys::Result) -> String {
+        let text = format!("{}: {}", what, e);
+        if ends_session(e) && self.failed.is_none() {
+            self.failed = Some(text.clone());
+        }
+        text
+    }
+
     /// Start the frame waited for.
     pub fn begin(&mut self) -> Result<(), String> {
         let Some(state) = self.pending else { return Err("no frame waited for".into()) };
-        self.stream.begin().map_err(err("the headset's frame"))?;
+        if let Err(e) = self.stream.begin() {
+            // (Not begun, it isn't to be drawn or ended.)
+            self.pending = None;
+            return Err(self.fail("beginning the headset's frame", e));
+        }
         if std::mem::take(&mut self.recenter) {
             self.center(state.predicted_display_time);
         }
@@ -339,47 +368,74 @@ impl Xr {
 
     /// Draw the frame begun: `draw` gets each eye's number, view, size,
     /// whether its images are sRGB, and the framebuffer to draw it into.
-    /// The scene's `spawn` is where the space's origin is.
+    /// The scene's `spawn` is where the space's origin is. The frame is
+    /// ended whatever fails, with nothing in it if the eyes aren't drawn.
     pub fn draw(
         &mut self,
         spawn: Spawn,
-        mut draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
+        draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
     ) -> Result<(), String> {
         let Some(state) = self.pending.take() else { return Ok(()) };
         let time = state.predicted_display_time;
-        if !state.should_render {
-            self.stream.end(time, self.blend, &[]).map_err(err("the headset's frame"))?;
-            return Ok(());
+        let drawn = if state.should_render { self.draw_eyes(time, spawn, draw).map(Some) } else { Ok(None) };
+        let failed = drawn.as_ref().err().map(|&(what, e)| self.fail(what, e));
+        let ended = match drawn.ok().flatten() {
+            Some(views) => {
+                let projection_views: Vec<_> = views
+                    .iter()
+                    .zip(&self.eyes)
+                    .map(|(view, eye)| {
+                        let rect = xr::Rect2Di {
+                            offset: xr::Offset2Di { x: 0, y: 0 },
+                            extent: xr::Extent2Di { width: eye.size.0 as i32, height: eye.size.1 as i32 },
+                        };
+                        xr::CompositionLayerProjectionView::new().pose(view.pose).fov(view.fov).sub_image(
+                            xr::SwapchainSubImage::new().swapchain(&eye.swapchain).image_array_index(0).image_rect(rect),
+                        )
+                    })
+                    .collect();
+                let layer = xr::CompositionLayerProjection::new().space(&self.space).views(&projection_views);
+                self.stream.end(time, self.blend, &[&layer])
+            }
+            None => self.stream.end(time, self.blend, &[]),
+        };
+        if let Err(e) = ended {
+            let text = self.fail("ending the headset's frame", e);
+            return Err(failed.unwrap_or(text));
         }
-        let (_, views) = self.session.locate_views(VIEW, time, &self.space).map_err(err("the headset's views"))?;
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Draw each eye into an image of its swapchain: the views drawn, or
+    /// what failed. An image acquired is released whatever fails after.
+    fn draw_eyes(
+        &mut self,
+        time: xr::Time,
+        spawn: Spawn,
+        mut draw: impl FnMut(usize, View, (u32, u32), bool, glow::Framebuffer),
+    ) -> Result<Vec<xr::View>, (&'static str, xr::sys::Result)> {
+        let (_, views) = self.session.locate_views(VIEW, time, &self.space).map_err(|e| ("the headset's views", e))?;
+        if views.len() < self.eyes.len() {
+            return Err(("the headset's views", xr::sys::Result::ERROR_VALIDATION_FAILURE));
+        }
         let world = Self::world(spawn);
         for (index, (view, eye)) in views.iter().zip(&mut self.eyes).enumerate() {
-            let image = eye.swapchain.acquire_image().map_err(err("the headset's image"))?;
-            eye.swapchain.wait_image(xr::Duration::INFINITE).map_err(err("the headset's image"))?;
+            let image = eye.swapchain.acquire_image().map_err(|e| ("acquiring the headset's image", e))?;
+            if let Err(e) = eye.swapchain.wait_image(xr::Duration::INFINITE) {
+                let _ = eye.swapchain.release_image();
+                return Err(("waiting for the headset's image", e));
+            }
             let fov = view.fov;
             let eye_view = View {
                 view: (world * pose_matrix(view.pose)).inverse(),
                 projection: fov_projection(fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down),
             };
-            draw(index, eye_view, eye.size, self.srgb, eye.framebuffers[image as usize]);
-            eye.swapchain.release_image().map_err(err("the headset's image"))?;
+            if let Some(&framebuffer) = eye.framebuffers.get(image as usize) {
+                draw(index, eye_view, eye.size, self.srgb, framebuffer);
+            }
+            eye.swapchain.release_image().map_err(|e| ("releasing the headset's image", e))?;
         }
-        let projection_views: Vec<_> = views
-            .iter()
-            .zip(&self.eyes)
-            .map(|(view, eye)| {
-                let rect = xr::Rect2Di {
-                    offset: xr::Offset2Di { x: 0, y: 0 },
-                    extent: xr::Extent2Di { width: eye.size.0 as i32, height: eye.size.1 as i32 },
-                };
-                xr::CompositionLayerProjectionView::new().pose(view.pose).fov(view.fov).sub_image(
-                    xr::SwapchainSubImage::new().swapchain(&eye.swapchain).image_array_index(0).image_rect(rect),
-                )
-            })
-            .collect();
-        let layer = xr::CompositionLayerProjection::new().space(&self.space).views(&projection_views);
-        self.stream.end(time, self.blend, &[&layer]).map_err(err("the headset's frame"))?;
-        Ok(())
+        Ok(views)
     }
 
     /// Move the space so that its origin is where the head is at `time`,
